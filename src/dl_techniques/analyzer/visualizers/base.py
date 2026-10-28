@@ -23,6 +23,12 @@ from dl_techniques.utils.logger import logger
 # constants
 # ---------------------------------------------------------------------
 
+# A saved figure may not grow past this many pixels on a side. The largest figure
+# the package makes is about 4,200 x 3,000 px; a tight bounding box beyond this means
+# an artist sits far outside its axes (one such label produced a 4,215 x 18,346,848 px
+# canvas and a 37 GB allocation).
+MAX_FIGURE_SIDE_PIXELS = 30_000
+
 # Legend styling constants
 LEGEND_FONT_SIZE = 9
 LEGEND_TITLE_FONT_SIZE = 11
@@ -209,6 +215,15 @@ class BaseVisualizer(ABC):
         """Save figure with configured settings."""
         try:
             filepath = self.output_dir / f"{name}.{self.config.save_format}"
+            tight = fig.get_tightbbox()
+            width_px = tight.width * self.config.dpi
+            height_px = tight.height * self.config.dpi
+            if max(width_px, height_px) > MAX_FIGURE_SIDE_PIXELS:
+                raise ValueError(
+                    f"figure {name!r} would be {width_px:.0f} x {height_px:.0f} px at "
+                    f"dpi {self.config.dpi}, past the {MAX_FIGURE_SIDE_PIXELS} px limit; "
+                    f"an artist lies far outside its axes"
+                )
             fig.savefig(filepath, dpi=self.config.dpi, bbox_inches='tight',
                         facecolor='white', edgecolor='none', pad_inches=0.1)
             logger.info(f"Saved plot: {filepath}")

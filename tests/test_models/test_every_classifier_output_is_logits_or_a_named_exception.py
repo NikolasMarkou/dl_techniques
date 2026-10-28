@@ -189,7 +189,6 @@ RANGE_MAPS: Dict[Key, str] = {
     ("vision/detr/model.py", "DETR.call", "sigmoid()"): "normalized box coordinates (reference DETR)",
     ("vision/mambalct/model.py", "MambaLCT.call", "sigmoid()"): "normalized box coordinates",
     ("vision/topographic_vae/model.py", "TopographicVAE.__init__", "'sigmoid'"): "Bernoulli pixel decoder",
-    ("vision/vae/model.py", "VAE", "'sigmoid'"): "pixel decoder default",
     ("vision/vae/model.py", "VAE.__init__", "'sigmoid'"): "pixel decoder default",
     ("vision/vq_vae_rotation/model.py", "_build_auto_decoder", "activation=sigmoid"): "pixel decoder",
     ("vision_language/sam/sam2/mask_decoder.py", "SAM2MaskDecoder.predict_masks", "sigmoid()"):

@@ -16,6 +16,7 @@ from typing import Tuple, Dict, Any
 
 from dl_techniques.models.vision.squeezenet.squeezenet_v1 import SqueezeNetV1, FireModule, create_squeezenet_v1
 from tests.optimizer_state import build_optimizer_state
+from tests.test_models.initializer_replay_oracle import replayed_pairs
 
 
 class TestSqueezeNetV1:
@@ -92,8 +93,7 @@ class TestSqueezeNetV1:
         assert model.use_bypass == "simple"
         assert model.dropout_rate == 0.2
         assert model.kernel_regularizer == regularizer
-        # Note: Keras might serialize/deserialize initializers, so direct object comparison may fail
-        assert isinstance(model.kernel_initializer, type(initializer))
+        assert model.kernel_initializer == keras.initializers.serialize(initializer)
         assert model.include_top is False
 
     def test_invalid_initialization(self):
@@ -104,6 +104,22 @@ class TestSqueezeNetV1:
             SqueezeNetV1(dropout_rate=1.1)
         with pytest.raises(ValueError, match="dropout_rate must be in range"):
             SqueezeNetV1(dropout_rate=-0.1)
+
+    def test_an_unknown_variant_is_refused_by_the_constructor(self):
+        with pytest.raises(ValueError, match=r"Unknown variant 'nope'. Available variants: \['1.0', '1.1', '1.0_bypass'\]"):
+            SqueezeNetV1(variant="nope")
+
+    @pytest.mark.parametrize("bad", ["bogus", True, 1, "Simple", ["simple"]])
+    def test_a_use_bypass_that_is_not_a_bypass_mode_is_refused_by_value(self, bad):
+        """``True`` and a misspelling used to build a plain model that reported the value."""
+        with pytest.raises(ValueError, match="use_bypass") as caught:
+            SqueezeNetV1(use_bypass=bad, input_shape=(64, 64, 3))
+        assert repr(bad) in str(caught.value)
+
+    @pytest.mark.parametrize("mode, adds", [(None, 0), (False, 0), ("simple", 4), ("complex", 8)])
+    def test_every_bypass_mode_builds_its_own_wiring(self, mode, adds):
+        model = SqueezeNetV1(use_bypass=mode, input_shape=(64, 64, 3))
+        assert len([l for l in model.layers if isinstance(l, keras.layers.Add)]) == adds
 
     @pytest.mark.parametrize(
         "variant, expected_conv1_filters, expected_bypass, expected_pool_indices",
@@ -118,6 +134,7 @@ class TestSqueezeNetV1:
         model = SqueezeNetV1.from_variant(variant, num_classes=num_classes)
 
         assert model.num_classes == num_classes
+        assert model.variant == variant
         assert model.conv1_filters == expected_conv1_filters
         assert model.use_bypass == expected_bypass
         assert model.pool_indices == expected_pool_indices
@@ -205,7 +222,7 @@ class TestSqueezeNetV1:
 
     def test_model_compilation(self, num_classes, cifar_input_shape):
         """Test model compilation with different optimizers and losses."""
-        model = SqueezeNetV1(num_classes=num_classes, input_shape=cifar_input_shape, variant_config=SqueezeNetV1.MODEL_VARIANTS["1.1"])
+        model = SqueezeNetV1(num_classes=num_classes, input_shape=cifar_input_shape, variant="1.1")
 
         optimizers = [keras.optimizers.Adam(), keras.optimizers.SGD()]
         for optimizer in optimizers:
@@ -234,6 +251,20 @@ class TestSqueezeNetV1:
         assert recreated_model.dropout_rate == original_model.dropout_rate
         assert recreated_model.get_config()['kernel_regularizer']['config'] == \
                original_model.get_config()['kernel_regularizer']['config']
+        assert config['variant'] == '1.0_bypass'
+        assert recreated_model.variant == original_model.variant
+
+    def test_get_config_is_json_safe_with_an_initializer_instance_and_from_config_leaves_the_dict_alone(
+            self, num_classes):
+        import copy
+        import json
+        model = SqueezeNetV1(num_classes=num_classes, input_shape=(64, 64, 3),
+                             kernel_initializer=keras.initializers.HeNormal())
+        config = model.get_config()
+        json.dumps(config)
+        given = copy.deepcopy(config)
+        SqueezeNetV1.from_config(given)
+        assert given == config
 
     def test_model_save_load(self, num_classes, cifar_input_shape, cifar_sample_data):
         """Test saving and loading a SqueezeNet model."""
@@ -241,7 +272,7 @@ class TestSqueezeNetV1:
             num_classes=num_classes,
             input_shape=cifar_input_shape,
             name="test_squeezenet",
-            variant_config=SqueezeNetV1.MODEL_VARIANTS["1.1"]
+            variant="1.1"
         )
         model.compile(
             optimizer="adam",
@@ -321,17 +352,16 @@ class TestSqueezeNetV1:
         assert model.conv1_filters == SqueezeNetV1.MODEL_VARIANTS["1.1"]["conv1_filters"]
         assert model.dropout_rate == 0.4
 
-    def test_factory_with_weights_raises(self, num_classes):
-        """A non-None `weights` must RAISE, not log and return random weights.
-
-        The previous behaviour logged "Pretrained weights are not yet
-        implemented" and returned a randomly-initialized model, so a caller
-        asking for ImageNet weights silently trained from scratch.
-        """
-        with pytest.raises(NotImplementedError, match="No pretrained SqueezeNet weights"):
+    def test_a_weights_keyword_is_refused_by_name(self, num_classes):
+        """``weights=`` is not an argument: it must not be swallowed into a random model."""
+        with pytest.raises(ValueError, match="Unrecognized keyword arguments.*weights"):
             create_squeezenet_v1(
                 variant="1.0", num_classes=num_classes, weights="imagenet"
             )
+
+    def test_pretrained_true_raises_naming_the_variant(self, num_classes):
+        with pytest.raises(NotImplementedError, match="SqueezeNetV1 variant '1.0'"):
+            create_squeezenet_v1(variant="1.0", num_classes=num_classes, pretrained=True)
 
     def test_numerical_stability(self, num_classes, small_input_shape):
         """Test model stability with extreme input values."""
@@ -353,21 +383,13 @@ class TestSqueezeNetV1:
     def test_batch_size_independence(self, num_classes, cifar_input_shape):
         """Test that model works with different batch sizes."""
         # Using the less aggressive v1.1 since the input is small
-        model = SqueezeNetV1(num_classes=num_classes, input_shape=cifar_input_shape, variant_config=SqueezeNetV1.MODEL_VARIANTS["1.1"])
+        model = SqueezeNetV1(num_classes=num_classes, input_shape=cifar_input_shape, variant="1.1")
 
         batch_sizes = [1, 4, 8]
         for batch_size in batch_sizes:
             test_data = tf.random.uniform((batch_size,) + cifar_input_shape, 0, 1)
             outputs = model(test_data)
             assert outputs.shape == (batch_size, num_classes)
-
-    def test_model_summary_with_details(self, capsys):
-        """Test that model summary provides useful information."""
-        model = SqueezeNetV1(num_classes=10)
-        try:
-            model.summary_with_details()
-        except Exception as e:
-            pytest.fail(f"summary_with_details() raised an exception: {e}")
 
 
 # Tests for the FireModule itself
@@ -407,6 +429,23 @@ class TestFireModule:
         expected_shape = (input_shape[0], input_shape[1], input_shape[2], expected_channels)
 
         assert outputs.shape == expected_shape
+
+    def test_the_concatenation_layer_is_named(self, fire_module_config):
+        """An unnamed layer takes the process-global auto-name counter (``concatenate_7``)."""
+        module = FireModule(**fire_module_config)
+        assert module.concat.name == "concat"
+        assert sorted(l.name for l in module._flatten_layers(include_self=False)) == [
+            "concat", "expand_1x1", "expand_3x3", "squeeze"]
+
+    def test_an_initializer_instance_is_stored_as_its_spec_and_no_two_convs_replay_a_draw(
+            self, fire_module_config):
+        initializer = keras.initializers.HeNormal()
+        module = FireModule(**fire_module_config, kernel_initializer=initializer)
+        assert module.kernel_initializer == keras.initializers.serialize(initializer)
+        keras.utils.set_random_seed(0)
+        module.build((None, 8, 8, 128))
+        pairs, compared = replayed_pairs(module)
+        assert compared > 0 and pairs == [], pairs
 
     def test_serialization(self, fire_module_config):
         """Test serialization and deserialization of the FireModule."""

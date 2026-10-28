@@ -587,8 +587,8 @@ _sub("trm", _b_trm, _trm_batch, call_fn=_trm_call)
 # ---------------------------------------------------------------------------
 
 def _b_vae():
-    from dl_techniques.models.vision.vae import create_vae
-    return create_vae(input_shape=(32, 32, 1), latent_dim=8, variant="small")
+    from dl_techniques.models.vision.vae import compile_vae, create_vae
+    return compile_vae(create_vae(input_shape=(32, 32, 1), latent_dim=8, variant="small"))
 
 
 _sub("vae", _b_vae, lambda: _f32(1, 32, 32, 1))

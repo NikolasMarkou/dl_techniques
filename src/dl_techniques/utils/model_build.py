@@ -82,15 +82,33 @@ while a subclassed ``keras.Model`` refuses the same keyword with
 argument is then silently ignored. :func:`refuse_unknown_model_kwargs` restores
 the subclassed models' refusal for such a class, called on its ``**kwargs``
 before ``super().__init__``.
+
+Head overrides that ``get_config`` can write
+--------------------------------------------
+A model keeps the caller's ``head_config_overrides`` and returns them from
+``get_config``. A live Keras object in them (``{"kernel_regularizer": L2(1e-4)}``)
+saves in a ``.keras`` archive, because Keras serializes nested objects, but
+``json.dumps(model.get_config())`` then raises ``TypeError`` long after the
+mistake. :func:`plain_head_config_overrides` refuses it at construction, naming
+the key.
 """
 
-from typing import Any, Mapping
+import json
+from typing import Any, Dict, Mapping, Optional
 
 import keras
+import numpy as np
 
 # ---------------------------------------------------------------------
 
-__all__ = ["concretize_axes", "materialize_sublayers", "refuse_unknown_model_kwargs"]
+__all__ = [
+    "coerce_include_top",
+    "concretize_axes",
+    "materialize_sublayers",
+    "plain_head_config_overrides",
+    "refuse_unknown_model_kwargs",
+    "validate_rates",
+]
 
 #: The keywords a functional ``keras.Model`` subclass may forward to
 #: ``super().__init__``: ``name`` and ``trainable``, which Keras applies, and
@@ -238,5 +256,115 @@ def refuse_unknown_model_kwargs(kwargs: Mapping[str, Any], class_name: str) -> N
         raise ValueError(
             f"Unrecognized keyword arguments passed to {class_name}: {unknown}"
         )
+
+# ---------------------------------------------------------------------
+
+
+def plain_head_config_overrides(
+    head_config_overrides: Optional[Mapping[str, Any]], class_name: str
+) -> Optional[Dict[str, Any]]:
+    """Return a copy of a model's ``head_config_overrides`` that ``get_config`` can write.
+
+    Interface contract (call sites: the ``__init__`` of the vision classifiers that
+    take ``head_config_overrides``, which store the result and return it from
+    ``get_config``): the argument is inspected, never mutated. ``None`` or an empty
+    mapping returns ``None``. Otherwise every value must be JSON data (a string, a
+    number, a bool, ``None``, a list or dict of those, a tuple counting as a list):
+    a regularizer or initializer is passed as its name or as the dict
+    ``keras.regularizers.serialize(...)`` returns, never as the live object.
+
+    :param head_config_overrides: The constructor argument.
+    :param class_name: The model class name, quoted in the message.
+    :return: ``dict(head_config_overrides)``, or ``None`` when it is empty.
+    :raises ValueError: If a value is not JSON data; the message names the key, the
+        value's type and the serialized form to pass instead.
+    """
+    if not head_config_overrides:
+        return None
+    for key, value in head_config_overrides.items():
+        try:
+            json.dumps(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"{class_name}: head_config_overrides[{key!r}] is a "
+                f"{type(value).__name__}, which get_config cannot write as JSON. "
+                "Pass a name or a serialized dict instead, for example "
+                "keras.regularizers.serialize(...)."
+            ) from error
+    return dict(head_config_overrides)
+
+# ---------------------------------------------------------------------
+
+
+def coerce_include_top(include_top: Any) -> bool:
+    """Return ``include_top`` as a Python ``bool``, refusing anything else.
+
+    Interface contract (call sites: the ``__init__`` of every vision classifier that
+    takes ``include_top``, as its first statement): ``bool`` and ``numpy.bool_`` (the
+    type every comparison on an array yields) are accepted and coerced, so
+    ``get_config`` stays JSON-serializable. Everything else is refused, including
+    ``0``/``1``, a 0-d array, ``None`` and a string: ``bool("no")`` is ``True`` and
+    would silently build the head, and ``include_top`` was once the second
+    positional parameter of CliffordNet, where ``bool(...)`` would have let a
+    misbound ``CliffordNet(10, 64)`` through. The message prints the repr and the
+    module-qualified type, because ``type(np.False_).__name__`` is ``"bool"`` under
+    numpy 2 and a bare name would contradict the refusal.
+
+    :param include_top: The value passed as ``include_top``.
+    :return: ``bool(include_top)``.
+    :raises TypeError: If ``include_top`` is not a ``bool`` or ``numpy.bool_``.
+    """
+    if not isinstance(include_top, (bool, np.bool_)):
+        kind = type(include_top)
+        raise TypeError(
+            f"include_top must be a bool or numpy.bool_, got {include_top!r} "
+            f"of type {kind.__module__}.{kind.__qualname__}"
+        )
+    return bool(include_top)
+
+
+def validate_rates(**rates: float) -> None:
+    """Refuse a dropout or drop-path rate outside ``[0, 1)``, naming the argument.
+
+    Interface contract (call sites: the ``__init__`` of the vision classifiers, before
+    any sub-layer is built): pass each rate under the name of the constructor argument
+    it came from, ``validate_rates(dropout_rate=dropout_rate, drop_path_rate=...)``.
+    Rates are checked in call order and the first bad one raises. Without this check
+    the sub-layer that first meets the value raises with its own argument name and
+    value (a ramped ``drop_path_rate`` of 2.0 reads "got 1.333333" from
+    ``StochasticDepth``), and a negative ``drop_path_rate`` disables the layer
+    silently, because every ramped rate is then negative.
+
+    :param rates: ``argument name -> value`` for each rate to check.
+    :raises ValueError: If a rate is outside ``[0, 1)`` (``nan`` included); the
+        message names the argument and the value.
+    """
+    for name, value in rates.items():
+        if not 0.0 <= value < 1.0:
+            raise ValueError(f"{name} must be in [0, 1), got {value}")
+
+
+def require_channel_count(input_shape: Any) -> None:
+    """Refuse an ``input_shape`` whose last axis is unknown, naming the argument and the value.
+
+    Interface contract (call sites: ``load_pretrained_checkpoint``, before it builds an
+    unbuilt model, and the ``from_variant`` of the Clifford pair, which builds whenever
+    it is given a shape): ``input_shape`` is the unbatched shape a channels-last model is
+    built at. The spatial axes may be ``None``; the last axis may not, because the first
+    convolution derives its kernel from it (``None % groups``, reported by Keras as
+    "unsupported operand type(s) for %" with no mention of the shape). An empty shape is
+    refused too. Raises nothing for a shape with a known channel count.
+
+    :param input_shape: The shape without the batch axis.
+    :raises ValueError: If the shape is empty or its last axis is ``None``; the message
+        carries ``input_shape`` and the tuple.
+    """
+    shape = tuple(input_shape)
+    if not shape or shape[-1] is None:
+        raise ValueError(
+            f"input_shape must give the channel count, its last axis, to build the model; "
+            f"got input_shape={shape} (for example (None, None, 3))"
+        )
+
 
 # ---------------------------------------------------------------------

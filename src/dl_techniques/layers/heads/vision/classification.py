@@ -151,7 +151,9 @@ class ClassificationHead(BaseVisionHead):
     :type block_use_bias: bool
     :param kernel_initializer: Initializer for every ``Dense`` kernel in the
         head, the classifier included. Each ``Dense`` gets its own
-        ``clone_initializer`` copy, so no two kernels replay one draw.
+        ``clone_initializer`` copy, so a seedless initializer draws afresh at
+        every kernel. An initializer that carries an explicit ``seed`` reuses
+        that seed at every kernel, by contract.
     :type kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer]
     :param bias_initializer: Initializer for every ``Dense`` bias in the head.
         When no ``Dense`` has a bias (``classifier_use_bias=False`` and no

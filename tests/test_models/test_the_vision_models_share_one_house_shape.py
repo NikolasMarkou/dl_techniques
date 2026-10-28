@@ -157,11 +157,12 @@ EXEMPTIONS: Dict[str, str] = {
         "no default, and ``save_model`` / ``load_model`` stay."
     ),
     "D-039": (
-        "MobileNetV3 keeps the caller's ``Initializer`` and hands each site a clone "
-        "(``clone_initializer``); it computes ``initializer_spec`` once, only to refuse "
-        "a bad initializer at construction and to feed ``get_config``. A stored spec "
-        "would re-draw every seeded kernel (0 of 54 small and 0 of 64 large kernels "
-        "would stay equal to the base revision's)."
+        "MobileNetV1, V2 and V3 keep the caller's ``Initializer`` and hand each site a "
+        "clone (``clone_initializer``); each computes ``initializer_spec`` once, only to "
+        "refuse a bad initializer at construction and to feed ``get_config``. A stored "
+        "spec would re-draw every seeded kernel (V1: 0 of 28 small kernels; V2: 0 of 53 "
+        "small; V3: 0 of 54 small and 0 of 64 large would stay equal to the base "
+        "revision's)."
     ),
     "not-a-traced-model": (
         "Rule h5 describes a subclassed model whose ``call`` is traced by "
@@ -188,6 +189,9 @@ class Module:
     factory_signature: Optional[Tuple[str, ...]] = None  # rule h9; None = no factory rule
     factory_exact: bool = True
     waived: Dict[str, str] = field(default_factory=dict)
+    #: ``(path, class)`` of the base class that holds ``from_variant`` when the module's own
+    #: classes do not, so rule h9 can check a positional factory call against its slots.
+    base: Optional[Tuple[str, str]] = None
 
 
 @dataclass(frozen=True)
@@ -230,6 +234,7 @@ _ALL = frozenset(CLASS_RULES)
 _NO_HEAD_ATTRIBUTE = _ALL - {"h3_headless_attribute"}
 
 _MOBILENET = "models/vision/mobilenet"
+_CONVNEXT_BASE = (CONVNEXT_COMMON, "_ConvNeXtBase")
 _E4_FACTORY = {"h9_factory_is_one_delegating_return": "E-4"}
 _E7_FACTORY = {"h9_factory_is_one_delegating_return": "E-7"}
 
@@ -250,9 +255,9 @@ MODULES: Tuple[Module, ...] = (
            factory_signature=CANONICAL_FACTORY),
     Module("mobilenet_common", f"{_MOBILENET}/common.py", model_module=False),
     Module("convnext_v1", f"{VISION}/convnext/convnext_v1.py", ("ConvNeXtV1",),
-           factory_signature=CANONICAL_FACTORY),
+           factory_signature=CANONICAL_FACTORY, base=_CONVNEXT_BASE),
     Module("convnext_v2", f"{VISION}/convnext/convnext_v2.py", ("ConvNeXtV2",),
-           factory_signature=CANONICAL_FACTORY),
+           factory_signature=CANONICAL_FACTORY, base=_CONVNEXT_BASE),
     Module("convnext_common", CONVNEXT_COMMON, model_module=False),
     Module("rad_convnet", f"{VISION}/rad_convnet/model.py", ("RADConvNet",),
            factory_signature=CANONICAL_FACTORY),
@@ -276,7 +281,6 @@ _INIT_AND_REG = ("kernel_initializer", "kernel_regularizer")
 _E2 = {"h3_builders_assign": "E-2", "h3_headless_attribute": "E-2",
        "h5_build_materializes": "E-2"}
 _NOT_TRACED = {"h5_build_materializes": "not-a-traced-model"}
-_CONVNEXT_BASE = (CONVNEXT_COMMON, "_ConvNeXtBase")
 
 
 def _subject(key, module, cls, rules=_ALL, **kw) -> Subject:
@@ -292,9 +296,13 @@ SUBJECTS: Tuple[Subject, ...] = (
              head_attribute=_HEAD, classifier=True, include_top_last=True,
              required_params=_INIT_AND_REG),
     _subject("mobilenet_v1", "mobilenet_v1", "MobileNetV1", head_attribute=_HEAD,
-             classifier=True, required_params=_INIT_AND_REG),
+             classifier=True, required_params=_INIT_AND_REG,
+             waived={"h15_initializer_storage": "D-039"},
+             rules=_ALL - {"h15_initializer_storage"}),
     _subject("mobilenet_v2", "mobilenet_v2", "MobileNetV2", head_attribute=_HEAD,
-             classifier=True, required_params=_INIT_AND_REG),
+             classifier=True, required_params=_INIT_AND_REG,
+             waived={"h15_initializer_storage": "D-039"},
+             rules=_ALL - {"h15_initializer_storage"}),
     _subject("mobilenet_v3", "mobilenet_v3", "MobileNetV3", head_attribute=_HEAD,
              classifier=True, required_params=_INIT_AND_REG,
              waived={"h15_initializer_storage": "D-039"},
@@ -306,7 +314,7 @@ SUBJECTS: Tuple[Subject, ...] = (
     _subject("convnext_v2", "convnext_v2", "ConvNeXtV2", head_attribute=_HEAD,
              classifier=True, required_params=("kernel_regularizer",), base=_CONVNEXT_BASE),
     _subject("rad_convnet", "rad_convnet", "RADConvNet", head_attribute=_HEAD,
-             classifier=True),
+             classifier=True, required_params=("kernel_regularizer",)),
     _subject("squeezenet_v1", "squeezenet_v1", "SqueezeNetV1", classifier=True,
              required_params=_INIT_AND_REG, waived=_E2, rules=_ALL - set(_E2)),
     _subject("squeezenet_v2", "squeezenet_v2", "SqueezeNoduleNetV2", classifier=True,
@@ -491,6 +499,52 @@ def _is_delegating_return(fn: ast.FunctionDef, classes: Sequence[str]) -> bool:
             and call.func.value.id in classes and any(k.arg is None for k in call.keywords))
 
 
+def _from_variant_slots(tree: ast.Module, classes: Sequence[str]) -> Optional[List[str]]:
+    """The positional parameter names of ``from_variant`` after ``cls`` in ``classes`` of ``tree``,
+    or ``None`` when they define none (the method lives in a base class)."""
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name in classes:
+            for member in node.body:
+                if isinstance(member, ast.FunctionDef) and member.name == "from_variant":
+                    return [a.arg for a in member.args.args[1:]]
+    return None
+
+
+def _routes_to_its_own_slot(call: ast.Call, name: str, slots: Optional[List[str]]) -> bool:
+    """True when ``name`` reaches the SAME-NAMED keyword, or the positional slot of that name."""
+    by_keyword = any(k.arg == name and isinstance(k.value, ast.Name) and k.value.id == name
+                     for k in call.keywords)
+    by_position = slots is not None and any(
+        isinstance(arg, ast.Name) and arg.id == name and i < len(slots) and slots[i] == name
+        for i, arg in enumerate(call.args))
+    return by_keyword or by_position
+
+
+def _forwards_only_its_own_arguments(fn: ast.FunctionDef, call: ast.Call,
+                                     names: Sequence[str]) -> Violations:
+    """The ways ``call`` can send ``from_variant`` something other than what the caller gave.
+
+    The splat must be the bare ``**<kwargs name>``: ``**{**kwargs, "include_top": True}`` or
+    ``**dict(kwargs, ...)`` returns a model the caller did not ask for, and a name-only scan
+    of the call cannot tell it from a forward. Every other argument must be one of the
+    factory's own parameters passed on by its own name.
+    """
+    out = []
+    bare = fn.args.kwarg.arg if fn.args.kwarg else None
+    splats = [k for k in call.keywords if k.arg is None]
+    if not (len(splats) == 1 and isinstance(splats[0].value, ast.Name) and splats[0].value.id == bare):
+        out.append(f"{fn.name} does not forward its extras as the bare `**{bare}`")
+    own = [k.arg for k in call.keywords if k.arg is not None
+           and not (isinstance(k.value, ast.Name) and k.value.id == k.arg and k.arg in names)]
+    if own:
+        out.append(f"{fn.name} passes {own} that are not its own parameters forwarded by name")
+    positional = [i for i, arg in enumerate(call.args)
+                  if not (isinstance(arg, ast.Name) and arg.id in names)]
+    if positional:
+        out.append(f"{fn.name} passes positional argument(s) {positional} that are not its own parameters")
+    return out
+
+
 def h9_factory_is_one_delegating_return(source: str, module: Module) -> Violations:
     factories = [n for n in ast.parse(source).body
                  if isinstance(n, ast.FunctionDef) and n.name.startswith("create_")]
@@ -516,12 +570,22 @@ def h9_factory_is_one_delegating_return(source: str, module: Module) -> Violatio
         if not _is_delegating_return(fn, module.classes):
             out.append(f"{fn.name} is not one `return Class.from_variant(..., **kwargs)`")
         else:
-            forwarded = {n.id for n in ast.walk(_body_without_docstring(fn)[0].value)
-                         if isinstance(n, ast.Name)}
+            call = _body_without_docstring(fn)[0].value
+            out += _forwards_only_its_own_arguments(fn, call, names)
+            forwarded = {n.id for n in ast.walk(call) if isinstance(n, ast.Name)}
             taken = names + ([fn.args.kwarg.arg] if fn.args.kwarg else [])
             unsent = [p for p in taken if p not in forwarded]
             if unsent:
                 out.append(f"{fn.name} does not forward {unsent} to `from_variant`")
+            slots = _from_variant_slots(ast.parse(source), module.classes)
+            if slots is None and module.base is not None:
+                base_text = _read(module.base[0])
+                if base_text is not None:
+                    slots = _from_variant_slots(ast.parse(base_text), (module.base[1],))
+            misrouted = [p for p in names if p in forwarded
+                         and not _routes_to_its_own_slot(_body_without_docstring(fn)[0].value, p, slots)]
+            if misrouted:
+                out.append(f"{fn.name} sends {misrouted} to a `from_variant` slot of another name")
     return out
 
 
@@ -1072,6 +1136,7 @@ ANCHOR_TOKENS: Dict[str, Dict[str, int]] = {
         "plan-2026-10-26T125959-7af851e5/D-007": 1,
         "plan-2026-10-26T125959-7af851e5/D-023": 3,
         "plan-2026-10-26T125959-7af851e5/D-031": 1,
+        "plan-2026-10-26T125959-7af851e5/D-041": 1,
         "plan_2026-05-11_0090b0b8/D-001": 2,
     },
     "src/dl_techniques/models/vision/convnext/convnext_v1.py": {
@@ -1126,11 +1191,13 @@ ANCHOR_TOKENS: Dict[str, Dict[str, int]] = {
         "plan-2026-08-14T233721-d4f9beb2/D-065": 1,
         "plan-2026-08-14T233721-d4f9beb2/D-069": 1,
         "plan-2026-08-22T035419-a11304c8/D-203": 1,
+        "plan-2026-10-26T125959-7af851e5/D-039": 1,
     },
     "src/dl_techniques/models/vision/mobilenet/mobilenet_v2.py": {
         "plan-2026-08-14T233721-d4f9beb2/D-065": 1,
         "plan-2026-08-14T233721-d4f9beb2/D-069": 1,
         "plan-2026-08-22T035419-a11304c8/D-203": 1,
+        "plan-2026-10-26T125959-7af851e5/D-039": 1,
     },
     "src/dl_techniques/models/vision/mobilenet/mobilenet_v3.py": {
         "plan-2026-08-14T233721-d4f9beb2/D-065": 1,
@@ -1167,6 +1234,8 @@ ANCHOR_TOKENS: Dict[str, Dict[str, int]] = {
         "plan-2026-08-19T163559-499b6f0e/D-129": 1,
         "plan-2026-08-23T091307-9a110062/D-481": 1,
         "plan-2026-10-14T062616-81938e81/D-017": 1,
+        "plan-2026-10-26T125959-7af851e5/D-033": 1,
+        "plan-2026-10-26T125959-7af851e5/D-047": 1,
     },
     "src/dl_techniques/models/vision/squeezenet/squeezenet_v2.py": {
         "plan-2026-08-17T183311-79c63e38/D-020": 1,
@@ -1174,6 +1243,8 @@ ANCHOR_TOKENS: Dict[str, Dict[str, int]] = {
         "plan-2026-08-23T091307-9a110062/D-481": 1,
         "plan-2026-10-14T062616-81938e81/D-017": 1,
         "plan-2026-10-26T125959-7af851e5/D-004": 1,
+        "plan-2026-10-26T125959-7af851e5/D-030": 1,
+        "plan-2026-10-26T125959-7af851e5/D-033": 1,
     },
     "src/dl_techniques/models/vision/vae/model.py": {
         "plan-2026-08-18T140459-7991552f/D-028": 1,
@@ -1181,6 +1252,8 @@ ANCHOR_TOKENS: Dict[str, Dict[str, int]] = {
         "plan-2026-08-19T163559-499b6f0e/D-078": 1,
         "plan-2026-08-19T163559-499b6f0e/D-089": 2,
         "plan-2026-08-22T035419-a11304c8/D-014": 1,
+        "plan-2026-10-26T125959-7af851e5/D-033": 1,
+        "plan-2026-10-26T125959-7af851e5/D-048": 1,
         "plan_2026-06-04_6196678d/D-003": 1,
         "plan_2026-06-04_6196678d/D-005": 1,
         "plan_2026-06-04_6196678d/D-007": 1,
@@ -1221,6 +1294,8 @@ ANCHOR_TOKENS: Dict[str, Dict[str, int]] = {
         "plan-2026-10-11T170958-dc4d2202/D-015": 1,
         "plan-2026-10-13T035756-5dd4d94d/D-007": 1,
         "plan-2026-10-26T125959-7af851e5/D-023": 1,
+        "plan-2026-10-26T125959-7af851e5/D-040": 1,
+        "plan-2026-10-26T125959-7af851e5/D-041": 2,
     },
 }
 
@@ -1246,113 +1321,6 @@ class Open:
 
 #: Every row that fails today, keyed ``(rule, subject-or-module key)``.
 LEDGER: Dict[Tuple[str, str], Open] = {
-    ("h9_factory_is_one_delegating_return", "mobilenet_v1"): Open(
-        "the MobileNet V1 and V2 migration",
-        "2 violation(s): create_mobilenetv1('variant', 'num_classes', 'input_shape', "
-        "'width_multiplier', 'pretrained', 'head_config_overrides') is not ('variant', "
-        "'num_classes', 'input_shape', 'pretrained'); create_mobilenetv1 is not one `return "
-        'Class.from_variant(..., **kwargs)`',
-        ("create_mobilenetv1('variant', 'num_classes', 'input_shape', "
-         "'width_multiplier', 'pretrained', "
-         "'head_config_overrides') is not ('variant', 'num_classes', "
-         "'input_shape', 'pretrained')",
-         'create_mobilenetv1 is not one `return Class.from_variant(..., '
-         '**kwargs)`')),
-    ("h9_factory_is_one_delegating_return", "mobilenet_v2"): Open(
-        "the MobileNet V1 and V2 migration",
-        "2 violation(s): create_mobilenetv2('variant', 'num_classes', 'input_shape', "
-        "'width_multiplier', 'pretrained', 'head_config_overrides') is not ('variant', "
-        "'num_classes', 'input_shape', 'pretrained'); create_mobilenetv2 is not one `return "
-        'Class.from_variant(..., **kwargs)`',
-        ("create_mobilenetv2('variant', 'num_classes', 'input_shape', "
-         "'width_multiplier', 'pretrained', "
-         "'head_config_overrides') is not ('variant', 'num_classes', "
-         "'input_shape', 'pretrained')",
-         'create_mobilenetv2 is not one `return Class.from_variant(..., '
-         '**kwargs)`')),
-    ("h9_factory_is_one_delegating_return", "convnext_v1"): Open(
-        "the ConvNeXt migration",
-        "3 violation(s): create_convnext_v1('variant', 'num_classes', 'input_shape', "
-        "'pretrained', 'weights_dataset', 'weights_input_shape', 'cache_dir', "
-        "'head_config_overrides') is not ('variant', 'num_classes', 'input_shape', 'pretrained');"
-        ' create_convnext_v1: `input_shape` does not default to None; create_convnext_v1 is not '
-        'one `return Class.from_variant(..., **kwargs)`',
-        ("create_convnext_v1('variant', 'num_classes', 'input_shape', "
-         "'pretrained', 'weights_dataset', 'weights_input_shape', "
-         "'cache_dir', 'head_config_overrides') is not ('variant', "
-         "'num_classes', 'input_shape', 'pretrained')",
-         'create_convnext_v1: `input_shape` does not default to None',
-         'create_convnext_v1 is not one `return Class.from_variant(..., '
-         '**kwargs)`')),
-    ("h9_factory_is_one_delegating_return", "convnext_v2"): Open(
-        "the ConvNeXt migration",
-        "3 violation(s): create_convnext_v2('variant', 'num_classes', 'input_shape', "
-        "'pretrained', 'weights_dataset', 'weights_input_shape', 'cache_dir', "
-        "'head_config_overrides') is not ('variant', 'num_classes', 'input_shape', 'pretrained');"
-        ' create_convnext_v2: `input_shape` does not default to None; create_convnext_v2 is not '
-        'one `return Class.from_variant(..., **kwargs)`',
-        ("create_convnext_v2('variant', 'num_classes', 'input_shape', "
-         "'pretrained', 'weights_dataset', 'weights_input_shape', "
-         "'cache_dir', 'head_config_overrides') is not ('variant', "
-         "'num_classes', 'input_shape', 'pretrained')",
-         'create_convnext_v2: `input_shape` does not default to None',
-         'create_convnext_v2 is not one `return Class.from_variant(..., '
-         '**kwargs)`')),
-    ("h1_module_header", "convnext_common"): Open(
-        "the ConvNeXt migration",
-        '1 violation(s): models/vision/convnext/common.py does not exist yet',
-        ('models/vision/convnext/common.py does not exist yet',)),
-    ("no_from_keras_import", "convnext_common"): Open(
-        "the ConvNeXt migration",
-        '1 violation(s): models/vision/convnext/common.py does not exist yet',
-        ('models/vision/convnext/common.py does not exist yet',)),
-    ("h9_factory_is_one_delegating_return", "rad_convnet"): Open(
-        "the RADConvNet migration",
-        "3 violation(s): create_rad_convnet('variant', 'num_classes', 'input_shape') is not "
-        "('variant', 'num_classes', 'input_shape', 'pretrained'); create_rad_convnet: "
-        '`input_shape` does not default to None; create_rad_convnet: `pretrained` does not '
-        'default to False',
-        ("create_rad_convnet('variant', 'num_classes', "
-         "'input_shape') is not ('variant', 'num_classes', 'input_shape', "
-         "'pretrained')",
-         'create_rad_convnet: `input_shape` does not default to None',
-         'create_rad_convnet: `pretrained` does not default to False')),
-    ("h9_factory_is_one_delegating_return", "squeezenet_v1"): Open(
-        "the SqueezeNet migration",
-        "3 violation(s): create_squeezenet_v1('variant', 'num_classes', 'input_shape', 'weights')"
-        " is not ('variant', 'num_classes', 'input_shape', 'pretrained'); create_squeezenet_v1: "
-        '`input_shape` does not default to None; create_squeezenet_v1: `pretrained` does not '
-        'default to False',
-        ("create_squeezenet_v1('variant', 'num_classes', 'input_shape', "
-         "'weights') is not ('variant', 'num_classes', 'input_shape', "
-         "'pretrained')",
-         'create_squeezenet_v1: `input_shape` does not default to None',
-         'create_squeezenet_v1: `pretrained` does not default to False')),
-    ("h9_factory_is_one_delegating_return", "squeezenet_v2"): Open(
-        "the SqueezeNet migration",
-        "3 violation(s): create_squeezenodule_net_v2('variant', 'num_classes', 'input_shape', "
-        "'weights') is not ('variant', 'num_classes', 'input_shape', 'pretrained'); "
-        'create_squeezenodule_net_v2: `input_shape` does not default to None; '
-        'create_squeezenodule_net_v2: `pretrained` does not default to False',
-        ("create_squeezenodule_net_v2('variant', 'num_classes', "
-         "'input_shape', 'weights') is not ('variant', 'num_classes', "
-         "'input_shape', 'pretrained')",
-         'create_squeezenodule_net_v2: `input_shape` does not default to None',
-         'create_squeezenodule_net_v2: `pretrained` does not default to False')),
-    ("h9_factory_is_one_delegating_return", "vae"): Open(
-        "the ConvUNext and VAE migration",
-        '6 violation(s): create_vae has no `pretrained` parameter; create_vae is not one `return '
-        'Class.from_variant(..., **kwargs)`; create_vae_from_config has no `input_shape` '
-        'parameter; create_vae_from_config has no `pretrained` parameter; create_vae_from_config '
-        'does not end in **kwargs; create_vae_from_config is not one `return '
-        'Class.from_variant(..., **kwargs)`',
-        ('create_vae has no `pretrained` parameter',
-         'create_vae is not one `return Class.from_variant(..., **kwargs)`',
-         'create_vae_from_config has no `input_shape` parameter',
-         'create_vae_from_config has no `pretrained` parameter',
-         'create_vae_from_config does not end in **kwargs',
-         'create_vae_from_config is not one `return Class.from_variant(..., '
-         '**kwargs)`')),
     ("h1_factories_follow_the_classes", "rbf_protonet"): Open(
         "the RBFProtoNet and UcaEncoder migration",
         '1 violation(s): `def create_rbf_protonet` (line 487) sits between classes',
@@ -1365,201 +1333,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the CapsNet migration",
         '1 violation(s): line 25: from keras import ...',
         ('from keras import ...',)),
-    ("h2_member_order", "mobilenet_v1"): Open(
-        "the MobileNet V1 and V2 migration",
-        '1 violation(s): `compute_output_shape` comes after `get_config`',
-        ('`compute_output_shape` comes after `get_config`',)),
-    ("h3_one_init_log", "mobilenet_v1"): Open(
-        "the MobileNet V1 and V2 migration",
-        '1 violation(s): __init__ writes 0 logger.info calls, expected 1',
-        ('__init__ writes 0 logger.info calls, expected 1',)),
-    ("h3_headless_attribute", "mobilenet_v1"): Open(
-        "the MobileNet V1 and V2 migration",
-        '1 violation(s): __init__ never assigns `self.classification_head = None`, so a headless '
-        'model has no such attribute',
-        ('__init__ never assigns `self.classification_head = None`',)),
-    ("h4_no_logging_outside_init", "mobilenet_v1"): Open(
-        "the MobileNet V1 and V2 migration",
-        '1 violation(s): `summary` writes 9 logger call(s)',
-        ('`summary` writes',)),
-    ("h5_build_materializes", "mobilenet_v1"): Open(
-        "the MobileNet V1 and V2 migration",
-        '1 violation(s): the class defines no `build`',
-        ('the class defines no `build`',)),
-    ("h10_stored_attribute_names", "mobilenet_v1"): Open(
-        "the MobileNet V1 and V2 migration",
-        '1 violation(s): argument `input_shape` is stored as `self._input_shape`, expected '
-        '`self.input_shape_config`',
-        ('argument `input_shape` is stored as `self._input_shape`',)),
-    ("h10_one_name_per_concept", "mobilenet_v1"): Open(
-        "the MobileNet kernel_regularizer rename",
-        '2 violation(s): constructor argument `weight_decay` should be `kernel_regularizer`; '
-        'constructor has no `kernel_regularizer` argument',
-        ('constructor argument `weight_decay` should be `kernel_regularizer`',
-         'constructor has no `kernel_regularizer` argument')),
-    ("h2_member_order", "mobilenet_v2"): Open(
-        "the MobileNet V1 and V2 migration",
-        '1 violation(s): `compute_output_shape` comes after `get_config`',
-        ('`compute_output_shape` comes after `get_config`',)),
-    ("h3_one_init_log", "mobilenet_v2"): Open(
-        "the MobileNet V1 and V2 migration",
-        '1 violation(s): __init__ writes 0 logger.info calls, expected 1',
-        ('__init__ writes 0 logger.info calls, expected 1',)),
-    ("h3_headless_attribute", "mobilenet_v2"): Open(
-        "the MobileNet V1 and V2 migration",
-        '1 violation(s): __init__ never assigns `self.classification_head = None`, so a headless '
-        'model has no such attribute',
-        ('__init__ never assigns `self.classification_head = None`',)),
-    ("h4_no_logging_outside_init", "mobilenet_v2"): Open(
-        "the MobileNet V1 and V2 migration",
-        '1 violation(s): `summary` writes 9 logger call(s)',
-        ('`summary` writes',)),
-    ("h10_one_name_per_concept", "mobilenet_v2"): Open(
-        "the MobileNet kernel_regularizer rename",
-        '2 violation(s): constructor argument `weight_decay` should be `kernel_regularizer`; '
-        'constructor has no `kernel_regularizer` argument',
-        ('constructor argument `weight_decay` should be `kernel_regularizer`',
-         'constructor has no `kernel_regularizer` argument')),
-    ("h10_one_name_per_concept", "mobilenet_v3"): Open(
-        "the MobileNet kernel_regularizer rename",
-        '2 violation(s): constructor argument `weight_decay` should be `kernel_regularizer`; '
-        'constructor has no `kernel_regularizer` argument',
-        ('constructor argument `weight_decay` should be `kernel_regularizer`',
-         'constructor has no `kernel_regularizer` argument')),
-    ("h10_one_name_per_concept", "mobilenet_v4"): Open(
-        "the MobileNet kernel_regularizer rename",
-        '2 violation(s): constructor argument `weight_decay` should be `kernel_regularizer`; '
-        'constructor has no `kernel_regularizer` argument',
-        ('constructor argument `weight_decay` should be `kernel_regularizer`',
-         'constructor has no `kernel_regularizer` argument')),
-    ("h2_member_order", "convnext_v1"): Open(
-        "the ConvNeXt migration",
-        "2 violation(s): class constants after the first method: ['PRETRAINED_BUILD_SPATIAL']; "
-        '`compute_output_shape` comes after `from_variant`',
-        ("class constants after the first method: ['PRETRAINED_BUILD_SPATIAL']",
-         '`compute_output_shape` comes after `from_variant`')),
-    ("h3_one_init_log", "convnext_v1"): Open(
-        "the ConvNeXt migration",
-        '1 violation(s): __init__ writes 2 logger.info calls, expected 1',
-        ('__init__ writes 2 logger.info calls, expected 1',)),
-    ("h3_headless_attribute", "convnext_v1"): Open(
-        "the ConvNeXt migration",
-        '1 violation(s): __init__ never assigns `self.classification_head = None`, so a headless '
-        'model has no such attribute',
-        ('__init__ never assigns `self.classification_head = None`',)),
-    ("h4_no_logging_outside_init", "convnext_v1"): Open(
-        "the ConvNeXt migration",
-        '1 violation(s): `summary` writes 10 logger call(s)',
-        ('`summary` writes',)),
-    ("h5_build_materializes", "convnext_v1"): Open(
-        "the ConvNeXt migration",
-        '2 violation(s): `build` lacks `if self.built: return`; `build` does not call '
-        '`materialize_sublayers(self, input_shape)`',
-        ('`build` lacks `if self.built: return`',
-         '`build` does not call `materialize_sublayers(self, input_shape)`')),
-    ("h10_stored_attribute_names", "convnext_v1"): Open(
-        "the ConvNeXt migration",
-        '1 violation(s): argument `input_shape` is stored as `self.input_shape`, expected '
-        '`self.input_shape_config`',
-        ('argument `input_shape` is stored as `self.input_shape`',)),
-    ("h2_member_order", "convnext_v2"): Open(
-        "the ConvNeXt migration",
-        "2 violation(s): class constants after the first method: ['PRETRAINED_BUILD_SPATIAL']; "
-        '`compute_output_shape` comes after `from_variant`',
-        ("class constants after the first method: ['PRETRAINED_BUILD_SPATIAL']",
-         '`compute_output_shape` comes after `from_variant`')),
-    ("h3_one_init_log", "convnext_v2"): Open(
-        "the ConvNeXt migration",
-        '1 violation(s): __init__ writes 2 logger.info calls, expected 1',
-        ('__init__ writes 2 logger.info calls, expected 1',)),
-    ("h3_headless_attribute", "convnext_v2"): Open(
-        "the ConvNeXt migration",
-        '1 violation(s): __init__ never assigns `self.classification_head = None`, so a headless '
-        'model has no such attribute',
-        ('__init__ never assigns `self.classification_head = None`',)),
-    ("h4_no_logging_outside_init", "convnext_v2"): Open(
-        "the ConvNeXt migration",
-        '1 violation(s): `summary` writes 10 logger call(s)',
-        ('`summary` writes',)),
-    ("h5_build_materializes", "convnext_v2"): Open(
-        "the ConvNeXt migration",
-        '2 violation(s): `build` lacks `if self.built: return`; `build` does not call '
-        '`materialize_sublayers(self, input_shape)`',
-        ('`build` lacks `if self.built: return`',
-         '`build` does not call `materialize_sublayers(self, input_shape)`')),
-    ("h10_stored_attribute_names", "convnext_v2"): Open(
-        "the ConvNeXt migration",
-        '1 violation(s): argument `input_shape` is stored as `self.input_shape`, expected '
-        '`self.input_shape_config`',
-        ('argument `input_shape` is stored as `self.input_shape`',)),
-    ("h2_member_order", "rad_convnet"): Open(
-        "the RADConvNet migration",
-        '1 violation(s): `from_variant` comes after `from_config`',
-        ('`from_variant` comes after `from_config`',)),
-    ("h3_headless_attribute", "rad_convnet"): Open(
-        "the RADConvNet migration",
-        '1 violation(s): __init__ never assigns `self.classification_head = None`, so a headless '
-        'model has no such attribute',
-        ('__init__ never assigns `self.classification_head = None`',)),
-    ("h5_build_materializes", "rad_convnet"): Open(
-        "the RADConvNet migration",
-        '2 violation(s): `build` lacks `if self.built: return`; `build` does not call '
-        '`materialize_sublayers(self, input_shape)`',
-        ('`build` lacks `if self.built: return`',
-         '`build` does not call `materialize_sublayers(self, input_shape)`')),
-    ("h10_stored_attribute_names", "rad_convnet"): Open(
-        "the RADConvNet migration",
-        '1 violation(s): argument `activation` is stored as `self.activation_name`, expected '
-        '`self.activation`',
-        ('argument `activation` is stored as `self.activation_name`',)),
-    ("h11_from_config_does_real_work", "rad_convnet"): Open(
-        "the RADConvNet migration",
-        '1 violation(s): `from_config` only copies the dict and calls `cls(**config)`; delete it',
-        ('`from_config` only copies the dict and calls `cls(**config)`; delete it',)),
-    ("h3_one_init_log", "squeezenet_v1"): Open(
-        "the SqueezeNet migration",
-        '1 violation(s): __init__ writes 0 logger.info calls, expected 1',
-        ('__init__ writes 0 logger.info calls, expected 1',)),
-    ("h10_stored_attribute_names", "squeezenet_v1"): Open(
-        "the SqueezeNet migration",
-        '1 violation(s): argument `input_shape` is stored as `self._input_shape`, expected '
-        '`self.input_shape_config`',
-        ('argument `input_shape` is stored as `self._input_shape`',)),
-    ("h10_one_name_per_concept", "squeezenet_v1"): Open(
-        "the SqueezeNet migration",
-        '1 violation(s): constructor argument `variant_config` should be `variant`',
-        ('constructor argument `variant_config` should be `variant`',)),
-    ("h3_one_init_log", "squeezenet_v2"): Open(
-        "the SqueezeNet migration",
-        '1 violation(s): __init__ writes 0 logger.info calls, expected 1',
-        ('__init__ writes 0 logger.info calls, expected 1',)),
-    ("h10_stored_attribute_names", "squeezenet_v2"): Open(
-        "the SqueezeNet migration",
-        '1 violation(s): argument `input_shape` is stored as `self._input_shape`, expected '
-        '`self.input_shape_config`',
-        ('argument `input_shape` is stored as `self._input_shape`',)),
-    ("h10_one_name_per_concept", "squeezenet_v2"): Open(
-        "the SqueezeNet migration",
-        '1 violation(s): constructor argument `variant_config` should be `variant`',
-        ('constructor argument `variant_config` should be `variant`',)),
-    ("h10_stored_attribute_names", "convunext_stem"): Open(
-        "the ConvUNext and VAE migration",
-        '1 violation(s): argument `activation` is stored as `self.activation_name`, expected '
-        '`self.activation`',
-        ('argument `activation` is stored as `self.activation_name`',)),
-    ("h11_from_config_does_real_work", "convunext_stem"): Open(
-        "the ConvUNext and VAE migration",
-        '1 violation(s): `from_config` only copies the dict and calls `cls(**config)`; delete it',
-        ('`from_config` only copies the dict and calls `cls(**config)`; delete it',)),
-    ("h4_no_logging_outside_init", "vae"): Open(
-        "the ConvUNext and VAE migration",
-        '1 violation(s): `summary` writes 9 logger call(s)',
-        ('`summary` writes',)),
-    ("h10_stored_attribute_names", "vae"): Open(
-        "the ConvUNext and VAE migration",
-        '1 violation(s): argument `input_shape` is stored as `self._input_shape`, expected '
-        '`self.input_shape_config`',
-        ('argument `input_shape` is stored as `self._input_shape`',)),
     ("h10_num_classes_first_kwargs_last", "rbf_protonet"): Open(
         "the RBFProtoNet and UcaEncoder migration",
         '1 violation(s): `num_classes` is parameter 10, not the first',
@@ -1609,97 +1382,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the CapsNet migration",
         '1 violation(s): constructor argument `stem` should be `stem_type`',
         ('constructor argument `stem` should be `stem_type`',)),
-    ('h10_block_container_names', 'mobilenet_v1'): Open(
-        'the MobileNet V1 and V2 migration',
-        '1 violation(s): the block container `self.depthwise_blocks` should be '
-        '`self.blocks`',
-        ('the block container `self.depthwise_blocks` should be `self.blocks`',)),
-    ('h15_initializer_storage', 'mobilenet_v1'): Open(
-        'the MobileNet V1 and V2 migration',
-        '1 violation(s): `self.kernel_initializer` stores '
-        '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',
-        ('`self.kernel_initializer` stores '
-         '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',)),
-    ('h11_get_config_has_the_reference_form', 'mobilenet_v2'): Open(
-        'the MobileNet V1 and V2 migration',
-        '2 violation(s): `get_config` does not bind `base_config = '
-        'super().get_config()`; `get_config` does not end in `return {**base_config, '
-        '**config}`',
-        ('`get_config` does not bind `base_config = super().get_config()`',
-         '`get_config` does not end in `return {**base_config, **config}`')),
-    ('h15_initializer_storage', 'mobilenet_v2'): Open(
-        'the MobileNet V1 and V2 migration',
-        '1 violation(s): `self.kernel_initializer` stores '
-        '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',
-        ('`self.kernel_initializer` stores '
-         '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',)),
-    ('h10_block_container_names', 'convnext_v1'): Open(
-        'the ConvNeXt migration',
-        '1 violation(s): the stage container `self.stages_list` should be '
-        '`self.stages`',
-        ('the stage container `self.stages_list` should be `self.stages`',)),
-    ('h10_block_container_names', 'convnext_v2'): Open(
-        'the ConvNeXt migration',
-        '1 violation(s): the stage container `self.stages_list` should be '
-        '`self.stages`',
-        ('the stage container `self.stages_list` should be `self.stages`',)),
-    ('h10_block_container_names', 'rad_convnet'): Open(
-        'the RADConvNet migration',
-        '1 violation(s): the stage container `self.stages_list` should be '
-        '`self.stages`',
-        ('the stage container `self.stages_list` should be `self.stages`',)),
-    ('h11_get_config_has_the_reference_form', 'squeezenet_v1'): Open(
-        'the SqueezeNet migration',
-        '2 violation(s): `get_config` does not bind `base_config = '
-        'super().get_config()`; `get_config` does not end in `return {**base_config, '
-        '**config}`',
-        ('`get_config` does not bind `base_config = super().get_config()`',
-         '`get_config` does not end in `return {**base_config, **config}`')),
-    ('h15_initializer_storage', 'squeezenet_v1'): Open(
-        'the SqueezeNet migration',
-        '1 violation(s): `self.kernel_initializer` stores `kernel_initializer`, not '
-        'an `initializer_spec(...)`',
-        ('`self.kernel_initializer` stores `kernel_initializer`, not an '
-         '`initializer_spec(...)`',)),
-    ('h11_get_config_has_the_reference_form', 'squeezenet_v2'): Open(
-        'the SqueezeNet migration',
-        '2 violation(s): `get_config` does not bind `base_config = '
-        'super().get_config()`; `get_config` does not end in `return {**base_config, '
-        '**config}`',
-        ('`get_config` does not bind `base_config = super().get_config()`',
-         '`get_config` does not end in `return {**base_config, **config}`')),
-    ('h15_initializer_storage', 'squeezenet_v2'): Open(
-        'the SqueezeNet migration',
-        '1 violation(s): `self.kernel_initializer` stores `kernel_initializer`, not '
-        'an `initializer_spec(...)`',
-        ('`self.kernel_initializer` stores `kernel_initializer`, not an '
-         '`initializer_spec(...)`',)),
-    ('h11_get_config_has_the_reference_form', 'convunext_stem'): Open(
-        'the ConvUNext and VAE migration',
-        '2 violation(s): `get_config` does not bind `base_config = '
-        'super().get_config()`; `get_config` does not end in `return {**base_config, '
-        '**config}`',
-        ('`get_config` does not bind `base_config = super().get_config()`',
-         '`get_config` does not end in `return {**base_config, **config}`')),
-    ('h15_initializer_storage', 'convunext_stem'): Open(
-        'the ConvUNext and VAE migration',
-        '1 violation(s): `self.kernel_initializer` stores '
-        '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',
-        ('`self.kernel_initializer` stores '
-         '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',)),
-    ('h11_get_config_has_the_reference_form', 'vae'): Open(
-        'the ConvUNext and VAE migration',
-        '2 violation(s): `get_config` does not bind `base_config = '
-        'super().get_config()`; `get_config` does not end in `return {**base_config, '
-        '**config}`',
-        ('`get_config` does not bind `base_config = super().get_config()`',
-         '`get_config` does not end in `return {**base_config, **config}`')),
-    ('h15_initializer_storage', 'vae'): Open(
-        'the ConvUNext and VAE migration',
-        '1 violation(s): `self.kernel_initializer` stores `kernel_initializer`, not '
-        'an `initializer_spec(...)`',
-        ('`self.kernel_initializer` stores `kernel_initializer`, not an '
-         '`initializer_spec(...)`',)),
     ('h11_get_config_has_the_reference_form', 'uca_encoder'): Open(
         'the RBFProtoNet and UcaEncoder migration',
         '2 violation(s): `get_config` does not bind `base_config = '
@@ -2035,6 +1717,26 @@ PLANTED: Dict[str, Dict[str, str]] = {
             "    return Toy.from_variant(variant,", "    model = Toy.from_variant(variant,").replace(
             "pretrained=pretrained, **kwargs)\n", "pretrained=pretrained, **kwargs)\n    return model\n"),
         "an input_shape default": _plant("input_shape=None, pretrained", "input_shape=(8, 8, 3), pretrained"),
+        "a factory that swaps num_classes and input_shape": _plant(
+            "num_classes=num_classes, input_shape=input_shape,",
+            "num_classes=input_shape, input_shape=num_classes,"),
+        "a factory that swaps two positional slots": _plant(
+            "Toy.from_variant(variant, num_classes=num_classes, input_shape=input_shape,\n"
+            "                            pretrained=pretrained, **kwargs)",
+            "Toy.from_variant(variant, num_classes, input_shape=input_shape,\n"
+            "                            pretrained=pretrained, **kwargs)"),
+        "a factory that overrides its caller through the splat": _plant(
+            "pretrained=pretrained, **kwargs)\n",
+            'pretrained=pretrained, **{**kwargs, "include_top": True})\n'),
+        "a factory that rebuilds the splat from a call": _plant(
+            "pretrained=pretrained, **kwargs)\n",
+            "pretrained=pretrained, **dict(kwargs, include_top=True))\n"),
+        "a factory that forces a keyword beside the splat": _plant(
+            "pretrained=pretrained, **kwargs)\n",
+            "pretrained=pretrained, include_top=True, **kwargs)\n"),
+        "a factory that passes a positional literal": _plant(
+            "Toy.from_variant(variant, num_classes=num_classes,",
+            "Toy.from_variant(variant, 7, num_classes=num_classes,"),
         "a factory that ignores its arguments": _plant(
             "    return Toy.from_variant(variant, num_classes=num_classes, input_shape=input_shape,\n"
             "                            pretrained=pretrained, **kwargs)\n",
@@ -2210,6 +1912,31 @@ def test_the_rows_read_the_base_file_through_one_accessor(tmp_path: Path, monkey
     (tmp_path / "toy_base.py").write_text(_plant("class Toy(keras.Model):", "class Renamed(keras.Model):"))
     with pytest.raises(AssertionError, match="_Base is not in toy_base.py"):
         base_source(subject)
+
+
+def test_the_factory_rule_reads_from_variant_in_the_base_class(tmp_path: Path, monkeypatch) -> None:
+    """A leaf module whose ``from_variant`` lives in its base is checked against the base's slots."""
+    this = sys.modules[__name__]
+    monkeypatch.setattr(this, "SRC", tmp_path)
+    (tmp_path / "toy_base.py").write_text(
+        "class _Base:\n"
+        "    @classmethod\n"
+        "    def from_variant(cls, variant, num_classes=1000, input_shape=None, pretrained=False, **kwargs):\n"
+        "        pass\n")
+    module = Module("toy_leaf", "toy_leaf.py", ("Leaf",), factory_signature=CANONICAL_FACTORY,
+                    base=("toy_base.py", "_Base"))
+    clean = (
+        "class Leaf(_Base):\n    pass\n\n\n"
+        "def create_leaf(variant='a', num_classes=1000, input_shape=None, pretrained=False, **kwargs):\n"
+        "    return Leaf.from_variant(variant, num_classes, input_shape, pretrained, **kwargs)\n")
+    assert h9_factory_is_one_delegating_return(clean, module) == []
+    swapped = clean.replace("variant, num_classes, input_shape,", "variant, input_shape, num_classes,")
+    assert swapped != clean
+    found = h9_factory_is_one_delegating_return(swapped, module)
+    assert any("another name" in v for v in found), found
+    # Without a base the same positional call cannot be checked, and says so.
+    alone = Module("toy_leaf", "toy_leaf.py", ("Leaf",), factory_signature=CANONICAL_FACTORY)
+    assert h9_factory_is_one_delegating_return(clean, alone), "a positional call needs the method's own signature"
 
 
 def test_a_subject_without_a_base_has_no_base_source() -> None:
@@ -2420,7 +2147,8 @@ VACUOUS: Dict[Tuple[str, str], str] = {
         "capsnet", "capsnet_v2")},
     **{("h11_from_config_does_real_work", key): _NO_FROM_CONFIG for key in (
         "resnet", "cliffordnet", "hierarchical", "mobilenet_v1", "mobilenet_v2", "mobilenet_v3",
-        "mobilenet_v4", "uca_encoder")},
+        "mobilenet_v4", "convnext_v1", "convnext_v2", "rad_convnet", "convunext_stem", "vae",
+        "uca_encoder")},
     **{("h3_builders_assign", key): _NO_BUILDERS for key in ("convunext_stem", "uca_encoder")},
     **{("h2_call_takes_inputs", key): _NO_CALL for key in ("squeezenet_v1", "squeezenet_v2", "vae")},
     **{("h10_block_container_names", key): _NO_CONTAINER for key in ("convunext_stem", "vae")},
@@ -2473,3 +2201,20 @@ def test_every_pinned_vacuous_row_is_a_row_that_exists() -> None:
     rows = {(rule, s.key) for s in SUBJECTS for rule in CLASS_RULES if rule in s.rules}
     assert set(VACUOUS) <= rows, sorted(set(VACUOUS) - rows)
 
+
+
+def test_a_factory_argument_must_reach_the_slot_of_its_own_name() -> None:
+    def route(call: str, slots: Optional[List[str]]) -> List[str]:
+        node = ast.parse(call).body[0].value
+        return [p for p in ("variant", "num_classes", "input_shape")
+                if not _routes_to_its_own_slot(node, p, slots)]
+
+    slots = ["variant", "num_classes", "input_shape", "pretrained"]
+    assert route("C.from_variant(variant, num_classes=num_classes, input_shape=input_shape)", slots) == []
+    assert route("C.from_variant(variant, num_classes, input_shape)", slots) == []
+    assert route("C.from_variant(variant, num_classes, input_shape)", None) == [
+        "variant", "num_classes", "input_shape"], "a positional slot needs the method's own signature"
+    assert route("C.from_variant(variant, num_classes=num_classes, input_shape=num_classes)", slots) == [
+        "input_shape"]
+    assert route("C.from_variant(input_shape, num_classes, variant)", slots) == [
+        "variant", "input_shape"]

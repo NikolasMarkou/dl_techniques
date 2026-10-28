@@ -66,7 +66,7 @@ class TestLocalPathLoadAtTheDefaultShape:
         """The failing call: default input_shape, local weights path."""
         ckpt, expected = _write_checkpoint(tmp_path, cls, name)
         model = cls(**TINY_KW)  # default input_shape == (None, None, 3)
-        assert model.input_shape == (None, None, 3)
+        assert model.input_shape_config == (None, None, 3)
         model.load_pretrained_weights(ckpt, skip_mismatch=True)
         assert model.built
         _assert_reproduces_donor(model, expected)

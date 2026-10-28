@@ -127,7 +127,7 @@ class TestTheHeadEmitsLogits:
             assert activation not in (
                 keras.activations.softmax, keras.activations.sigmoid
             ), (case, layer.name)
-        assert model.layers[-1].name in ("avgpool", "globalpool"), (
+        assert model.layers[-1].name == "avgpool", (
             f"{case}: the model's last layer is {model.layers[-1].name}, "
             f"not the global pool"
         )

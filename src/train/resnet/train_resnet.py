@@ -22,12 +22,15 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-from train.common import setup_gpu, set_seeds, create_callbacks as create_common_callbacks, convert_keras_history_to_training_history, make_imagenet_filesystem_dataset, EpochMetricsPlotCallback
+from train.common import setup_gpu, set_seeds, create_callbacks as create_common_callbacks, convert_keras_history_to_training_history, EpochMetricsPlotCallback
+from train.common.conformal import DEFAULT_ALPHA, add_conformal_arguments, run_conformal
+from train.common.imagenet import add_imagenet_arguments, load_imagenet_splits, require_imagenet_root
 from train.common.run_io import prepare_run_dir, save_training_history_json
 from dl_techniques.metrics.primary_output_metrics import (
     PrimaryOutputAccuracy, PrimaryOutputTopKAccuracy,
 )
 from dl_techniques.utils.logger import logger
+from dl_techniques.datasets.vision.imagenet2012 import IMAGENET2012_DEFAULT_ROOT
 from dl_techniques.optimization import (
     optimizer_builder,
     learning_rate_schedule_builder,
@@ -51,8 +54,8 @@ class TrainingConfig:
     """Configuration for ResNet ImageNet training."""
 
     # Data
-    train_data_dir: str = "/path/to/imagenet/train"
-    val_data_dir: str = "/path/to/imagenet/val"
+    imagenet_root: str = IMAGENET2012_DEFAULT_ROOT
+    devkit_dir: Optional[str] = None  # default: <imagenet_root>/devkit (val labels)
     image_size: int = 224
     batch_size: int = 256
 
@@ -86,9 +89,10 @@ class TrainingConfig:
     validation_steps: Optional[int] = None
 
     # Data Pipeline
-    cache_dataset: bool = False
-    prefetch_buffer: int = tf.data.AUTOTUNE
     num_parallel_calls: int = tf.data.AUTOTUNE
+
+    # Conformal prediction sets fitted on val after training (None = off)
+    conformal_alpha: Optional[float] = DEFAULT_ALPHA
 
     # Output
     output_dir: str = 'results'
@@ -105,21 +109,17 @@ class TrainingConfig:
             raise ValueError("Invalid image_size: must be positive")
         if self.num_classes <= 0:
             raise ValueError("Invalid num_classes: must be positive")
-        if not Path(self.train_data_dir).exists():
-            raise ValueError(f"Training directory does not exist: {self.train_data_dir}")
-        if not Path(self.val_data_dir).exists():
-            raise ValueError(f"Validation directory does not exist: {self.val_data_dir}")
+        require_imagenet_root(self.imagenet_root)
 
 
 # =============================================================================
 # IMAGENET DATA PIPELINE
 # =============================================================================
 
-# The ImageNet class-subdir tf.data pipeline (decode/resize/augment/normalize)
-# now lives in train.common.make_imagenet_filesystem_dataset. ResNet opts into
-# the 4 colour augmentations via augment_color=True; the IMAGENET_MEAN/STD
-# normalization and the unconditional clip_by_value(0,255) are applied inside
-# the helper. See plan_2026-06-02_35651564/D-001.
+# The ImageNet tf.data pipeline (decode/crop/augment/normalize) lives in
+# dl_techniques.datasets.vision.imagenet2012.load_imagenet2012. ResNet opts
+# into the 4 colour augmentations via augment_color=True; ImageNet mean/std
+# normalization is applied inside the loader.
 
 
 # =============================================================================
@@ -337,35 +337,19 @@ def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) 
 
     # Datasets
     logger.info("Creating ImageNet datasets...")
-    train_dataset = make_imagenet_filesystem_dataset(
-        config.train_data_dir,
-        config.image_size,
-        config.batch_size,
-        is_training=True,
+    train_data, val_data = load_imagenet_splits(
+        root=config.imagenet_root,
+        devkit_dir=config.devkit_dir,
+        image_size=config.image_size,
+        batch_size=config.batch_size,
+        seed=config.seed,
+        num_parallel_calls=config.num_parallel_calls,
         augment=config.augment_data,
         augment_color=True,
-        num_parallel_calls=config.num_parallel_calls,
-        cache_val=config.cache_dataset,
-        prefetch_buffer=config.prefetch_buffer,
+        num_classes=config.num_classes,
     )
-    val_dataset = make_imagenet_filesystem_dataset(
-        config.val_data_dir,
-        config.image_size,
-        config.batch_size,
-        is_training=False,
-        augment=config.augment_data,
-        augment_color=True,
-        num_parallel_calls=config.num_parallel_calls,
-        cache_val=config.cache_dataset,
-        prefetch_buffer=config.prefetch_buffer,
-    )
-
-    train_dir = Path(config.train_data_dir)
-    num_train_images = sum(
-        len(list((train_dir / cd).glob("*.JPEG")))
-        for cd in train_dir.iterdir() if cd.is_dir()
-    )
-    steps_per_epoch = num_train_images // config.batch_size
+    train_dataset, val_dataset = train_data.dataset, val_data.dataset
+    steps_per_epoch = train_data.steps_per_epoch
     logger.info(f"Steps per epoch: {steps_per_epoch}")
 
     # Model
@@ -412,30 +396,34 @@ def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) 
         config, num_outputs, loss_weight_vars=compile_spec['loss_weights']
     )
 
-    val_steps = config.validation_steps
-    if val_steps is None:
-        val_dir = Path(config.val_data_dir)
-        num_val_images = sum(
-            len(list((val_dir / cd).glob("*.JPEG")))
-            for cd in val_dir.iterdir() if cd.is_dir()
-        )
-        val_steps = num_val_images // config.batch_size
-
     start_time = time.time()
     history = model.fit(
         train_dataset, epochs=config.epochs, steps_per_epoch=steps_per_epoch,
-        validation_data=val_dataset, validation_steps=val_steps,
+        validation_data=val_dataset, validation_steps=config.validation_steps,
         callbacks=callbacks, verbose=1
     )
     logger.info(f"Training completed in {(time.time() - start_time) / 3600:.2f} hours")
 
     # Save inference model
+    inference_model = model
     if config.enable_deep_supervision and has_multiple_outputs:
         inference_model = create_inference_model_from_training_model(
             model, input_shape=input_shape
         )
         inference_model.save(output_dir / "inference_model.keras")
         logger.info("Inference model saved")
+
+    # Conformal prediction sets on the primary output, over ALL of val. The
+    # deep-supervised val_dataset above carries tuple labels, so use the loader's.
+    if config.conformal_alpha is not None:
+        run_conformal(
+            inference_model, val_data.dataset, alpha=config.conformal_alpha,
+            seed=config.seed, out_dir=output_dir, input_shape=input_shape,
+            model_name=f"resnet_{config.model_variant}",
+            weights="last epoch, or the best val_loss epoch when early stopping "
+                    "fired (selected on this same validation set)",
+            selection_overlaps_calibration=True,
+        )
 
     # Save history
     save_training_history_json(history, output_dir)
@@ -454,8 +442,8 @@ def parse_arguments() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
-    parser.add_argument('--train-data-dir', type=str, required=True)
-    parser.add_argument('--val-data-dir', type=str, required=True)
+    add_imagenet_arguments(parser)
+    add_conformal_arguments(parser)
     parser.add_argument('--image-size', type=int, default=224)
 
     parser.add_argument('--variant', type=str, default='resnet50',
@@ -502,7 +490,7 @@ def main() -> None:
     args = parse_arguments()
 
     config = TrainingConfig(
-        train_data_dir=args.train_data_dir, val_data_dir=args.val_data_dir,
+        imagenet_root=args.imagenet_root, devkit_dir=args.devkit_dir,
         image_size=args.image_size, batch_size=args.batch_size,
         model_variant=args.variant, num_classes=args.num_classes,
         pretrained=args.pretrained,
@@ -514,6 +502,7 @@ def main() -> None:
         augment_data=args.augment_data, label_smoothing=args.label_smoothing,
         monitor_every_n_epochs=args.monitor_every,
         early_stopping_patience=args.early_stopping_patience,
+        conformal_alpha=None if args.no_conformal else args.conformal_alpha,
         output_dir=args.output_dir, experiment_name=args.experiment_name,
         seed=args.seed,
     )

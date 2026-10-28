@@ -36,6 +36,7 @@ import pytest
 from dl_techniques.models.vision.resnet.model import ResNet, create_resnet
 from dl_techniques.layers.conv_blocks.basic_block import BasicBlock
 from dl_techniques.layers.conv_blocks.bottleneck_block import BottleneckBlock
+from dl_techniques.utils.weight_transfer import load_pretrained_checkpoint
 
 from ..initializer_replay_oracle import replayed_pairs
 
@@ -356,6 +357,14 @@ class TestResNetFromVariant:
         assert not hasattr(ResNet, "_download_weights")
 
 
+def _load_by_layers_only(model, path):
+    """The shared loader with the configuration comparison switched off: the layer rule alone."""
+    return load_pretrained_checkpoint(
+        model, path, model.input_shape_config,
+        ignore_config_keys=tuple(model.get_config()),
+    )
+
+
 class TestResNetPretrainedLoad:
     def test_a_checkpoint_of_the_same_architecture_loads_its_tensors(self, tmp_path):
         donor = _tiny()
@@ -378,8 +387,10 @@ class TestResNetPretrainedLoad:
         donor.save(path)
 
         receiver = _tiny(filters_per_stage=[16, 32], num_classes=7)
-        with pytest.raises(ValueError, match="stage1_block1"):
+        with pytest.raises(ValueError, match="filters_per_stage"):
             receiver.load_pretrained_weights(path)
+        with pytest.raises(ValueError, match="stage1_block1"):
+            _load_by_layers_only(receiver, path)
 
     @staticmethod
     def _saved(tmp_path, **overrides):
@@ -402,6 +413,14 @@ class TestResNetPretrainedLoad:
             )
 
         message = str(caught.value)
+        assert "block_type: checkpoint 'bottleneck', model 'basic'" in message, message
+        assert "blocks_per_stage: checkpoint [3, 4, 6, 3], model [2, 2, 2, 2]" in message, message
+
+        # With the configuration comparison off, the layer rule refuses it by itself.
+        receiver = ResNet.from_variant("resnet18", num_classes=10, input_shape=(32, 32, 3))
+        with pytest.raises(ValueError) as by_layers:
+            _load_by_layers_only(receiver, path)
+        message = str(by_layers.value)
         assert "stage1_block1" in message, message
         assert "shape_mismatch" in message and "missing_in_source" in message, message
 
@@ -410,8 +429,10 @@ class TestResNetPretrainedLoad:
         receiver = _tiny()
         before = [np.asarray(w).copy() for w in receiver.weights]
 
-        with pytest.raises(ValueError, match="stage1_block1"):
+        with pytest.raises(ValueError, match="block_type"):
             receiver.load_pretrained_weights(path)
+        with pytest.raises(ValueError, match="stage1_block1"):
+            _load_by_layers_only(receiver, path)
 
         for a, b in zip(before, receiver.weights):
             np.testing.assert_array_equal(a, np.asarray(b))
@@ -434,6 +455,27 @@ class TestResNetPretrainedLoad:
             )
         head = [w for w in receiver.weights if "classification_head" in w.path]
         assert head and all(w.shape[-1] == 5 or w.shape == (5,) for w in head)
+
+    def test_the_inference_model_the_trainer_saves_is_compared_by_its_inner_config(self, tmp_path):
+        """``train_resnet`` saves a functional wrapper around the deep-supervised ResNet."""
+        from dl_techniques.utils.deep_supervision import create_inference_model_from_training_model
+
+        training = _tiny(enable_deep_supervision=True)
+        training.build((None, 32, 32, 3))
+        inference = create_inference_model_from_training_model(training, input_shape=(32, 32, 3))
+        assert [type(layer).__name__ for layer in inference.layers] == ["InputLayer", "ResNet"], (
+            "control: this is not the wrapper the trainer saves")
+        path = os.path.join(tmp_path, "inference_model.keras")
+        inference.save(path)
+
+        with pytest.raises(ValueError, match="activation_type: checkpoint 'relu', model 'gelu'"):
+            _tiny(activation_type="gelu", enable_deep_supervision=True).load_pretrained_weights(path)
+
+        receiver = _tiny(enable_deep_supervision=True)
+        receiver.load_pretrained_weights(path)
+        inner = {w.path.split("/", 1)[1]: np.asarray(w) for w in training.weights}
+        for w in receiver.weights:
+            np.testing.assert_array_equal(np.asarray(w), inner[w.path.split("/", 1)[1]], err_msg=w.path)
 
     def test_a_headless_model_loads_the_trunk_of_a_headed_checkpoint(self, tmp_path):
         donor, path = self._saved(tmp_path)

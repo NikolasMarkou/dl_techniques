@@ -588,8 +588,12 @@ class OverfittingAnalysis(VisualizationPlugin):
                 overfit_epoch = self._detect_overfitting(hist.val_loss, patience)
                 if overfit_epoch:
                     ax.axvline(x=overfit_epoch, color=color, alpha=0.5, linestyle=':')
-                    ax.text(overfit_epoch, ax.get_ylim()[1] * 0.9,
+                    # y as a fraction of the axes height, x in epochs: a data-range
+                    # label would leave the axes (and blow up a tight bbox) when the
+                    # loss is nearly constant.
+                    ax.text(overfit_epoch, 0.9,
                             f'Overfit @ {overfit_epoch}',
+                            transform=ax.get_xaxis_transform(),
                             rotation=90, fontsize=8, color=color)
 
         ax.set_title('Loss Curves with Overfitting Detection')

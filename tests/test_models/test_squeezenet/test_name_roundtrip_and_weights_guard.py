@@ -29,9 +29,9 @@ the real source by restoring the ``'name'`` pop -- it then reads
 
 The third guard covers the sibling gap found while re-deriving this pair:
 ``from_variant(weights=...)`` swallowed ``weights`` into ``**kwargs`` and
-returned a randomly-initialised model with no error at all. The
-``NotImplementedError`` lived ONLY in the module-level ``create_squeezenet_*``
-factories; it now lives in ``from_variant``, the chokepoint both reach.
+returned a randomly-initialised model with no error at all. ``weights`` is no
+argument now: the constructor refuses it by name, and ``pretrained=True``
+raises ``NotImplementedError`` naming the variant.
 """
 
 import os
@@ -115,7 +115,12 @@ class TestNameSurvivesRoundTrip:
 
 
 class TestFromVariantRefusesWeights:
-    """``weights=`` must raise, not be swallowed into a random model."""
+    """``weights=`` must raise, not be swallowed into a random model.
+
+    It is not an argument any more (``pretrained`` is the one spelling): the functional
+    constructor refuses an unknown keyword by name, and ``pretrained=True`` names the
+    variant.
+    """
 
     @pytest.mark.parametrize(
         "cls,variant",
@@ -123,9 +128,20 @@ class TestFromVariantRefusesWeights:
         ids=["v1", "v2"],
     )
     def test_from_variant_raises(self, cls, variant):
-        with pytest.raises(NotImplementedError, match="No pretrained"):
+        with pytest.raises(ValueError, match="Unrecognized keyword arguments.*'weights'"):
             cls.from_variant(
                 variant, num_classes=10, input_shape=(64, 64, 3), weights="imagenet"
+            )
+
+    @pytest.mark.parametrize(
+        "cls,variant",
+        [(SqueezeNetV1, "1.1"), (SqueezeNoduleNetV2, "v2")],
+        ids=["v1", "v2"],
+    )
+    def test_pretrained_true_names_the_variant(self, cls, variant):
+        with pytest.raises(NotImplementedError, match=f"{cls.__name__} variant '{variant}'"):
+            cls.from_variant(
+                variant, num_classes=10, input_shape=(64, 64, 3), pretrained=True
             )
 
 

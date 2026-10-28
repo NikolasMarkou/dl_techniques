@@ -1,17 +1,17 @@
 """
 Forecasting layers based on Valeriy Manokhin's forecasting framework.
 
-Three layers and one builder. Each layer puts a forecasting principle into the
+Two layers and one builder. Each layer puts a forecasting principle into the
 architecture instead of leaving it to the loss function.
 
 1. ``NaiveResidual`` adds the network output on top of a random-walk baseline.
 2. ``ForecastabilityGate`` mixes a deep forecast with a naive one, using a
    learned weight.
-3. ``ConformalQuantileHead`` emits three quantiles and carries a conformal
-   offset for calibrated intervals.
 
-``create_manokhin_compliant_model`` wires all three into one model with two
-outputs.
+``create_manokhin_compliant_model`` wires both, plus
+:class:`~dl_techniques.layers.statistics.conformal.quantile_head.ConformalQuantileHead`
+(which emits three quantiles and carries a conformal offset for calibrated
+intervals), into one model with two outputs.
 
 Section numbers below refer to the forecasting science guide: forecastability
 assessment (Section 2), conformalized quantile regression (Section 5),
@@ -19,7 +19,6 @@ validity-first hierarchy (Section 6), naive benchmark principle (Section 8).
 """
 
 import keras
-import numpy as np
 from keras import ops, layers, initializers, regularizers
 from typing import Optional, Union, Tuple, Dict, Any
 
@@ -27,6 +26,7 @@ from typing import Optional, Union, Tuple, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.statistics.conformal import ConformalQuantileHead
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
@@ -460,299 +460,6 @@ class ForecastabilityGate(layers.Layer):
             "kernel_initializer": initializers.serialize(self.kernel_initializer),
             "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
             "forecast_length": self.forecast_length,
-        })
-        return config
-
-# ---------------------------------------------------------------------
-
-@register_dl_technique("dl_techniques.layers.time_series.forecasting_layers")
-class ConformalQuantileHead(layers.Layer):
-    """
-    Quantile output layer for Conformalized Quantile Regression (CQR).
-
-    The layer projects encoded features to three quantiles per time step and
-    feature: a lower quantile (typically ``alpha/2``, e.g. 0.05 for a 90%
-    interval), the median (0.50), and an upper quantile (typically
-    ``1 - alpha/2``, e.g. 0.95).
-
-    It also carries a non-trainable scalar ``q_hat``, the conformal offset.
-    ``call()`` never applies it. Only ``predict_intervals()`` does, and only
-    after ``calibrate()`` has set it from a held-out set. Until then ``q_hat``
-    is 0 and the intervals are the raw learned quantiles.
-
-    Reference: Section 5 - Conformalized Quantile Regression (CQR),
-    Section 6 - Validity-First Hierarchy
-
-    **Architecture Overview:**
-
-    .. code-block:: text
-
-        This is the call() path. No conformal offset here.
-
-        input: encoded features (B, input_dim)
-                           │
-                           ▼
-        ┌─────────────────────────────────────┐
-        │  Dense(Tf * output_dim * 3)         │
-        └──────────────────┬──────────────────┘
-                           ▼
-        ┌─────────────────────────────────────┐
-        │  reshape to (B, Tf, output_dim, 3)  │
-        └──────────────────┬──────────────────┘
-                           ▼
-             output (B, Tf, output_dim, 3)
-
-        B = batch, Tf = forecast_length. On the last axis,
-        0 = lower, 1 = median, 2 = upper.
-
-    **Calibration path:**
-
-    .. code-block:: text
-
-        calibrate() writes the non-trainable weight q_hat:
-
-            q_hat = quantile(scores, clip(p, 0, 1))
-            p     = (1 - alpha) * (1 + 1/n)
-
-        predict_intervals() then forks the three channels:
-
-                      preds (B, Tf, out, 3)
-                                │
-                ┌───────────────┴───────────────┐
-                ▼               ▼               ▼
-           preds[..., 0]   preds[..., 1]   preds[..., 2]
-                │               │               │
-                ▼               │               ▼
-        ┌───────────────┐       │       ┌───────────────┐
-        │ lower - q_hat │       │       │ upper + q_hat │
-        └───────┬───────┘       │       └───────┬───────┘
-                ▼               ▼               ▼
-              lower          median           upper
-
-        The returned tuple is (median, lower, upper), in that
-        order. Each element has shape (B, Tf, output_dim).
-
-    :param forecast_length: Number of time steps to forecast.
-    :type forecast_length: int
-    :param output_dim: Number of features to predict.
-    :type output_dim: int
-    :param kernel_initializer: Initializer for projection layer weights.
-        Defaults to ``'glorot_uniform'``.
-    :type kernel_initializer: str or keras.initializers.Initializer
-    :param kernel_regularizer: Regularizer for projection layer weights.
-    :type kernel_regularizer: keras.regularizers.Regularizer or None
-    :param name: Layer name.
-    :type name: str or None
-    :param kwargs: Additional keyword arguments passed to the base Layer.
-    """
-
-    def __init__(
-            self,
-            forecast_length: int,
-            output_dim: int,
-            kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
-            name: Optional[str] = None,
-            **kwargs
-    ):
-        """
-        Initialize the ConformalQuantileHead.
-
-        :param forecast_length: Number of time steps to forecast.
-        :type forecast_length: int
-        :param output_dim: Number of features to predict.
-        :type output_dim: int
-        :param kernel_initializer: Initializer for projection layer weights.
-        :type kernel_initializer: str or keras.initializers.Initializer
-        :param kernel_regularizer: Regularizer for projection layer weights.
-        :type kernel_regularizer: keras.regularizers.Regularizer or None
-        :param name: Layer name.
-        :type name: str or None
-        :param kwargs: Additional keyword arguments for the base Layer.
-        """
-        super().__init__(name=name, **kwargs)
-        self.forecast_length = forecast_length
-        self.output_dim = output_dim
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-
-        # Projection layer will be built in build()
-        self.projection = None
-
-        # Non-trainable conformal calibration score Q
-        # Initialized to zero, set via calibrate() method
-        self.q_hat = None
-
-    def build(self, input_shape: Tuple):
-        """
-        Build the projection layer and the calibration weight.
-
-        The projection is one ``Dense`` of width
-        ``forecast_length * output_dim * 3``. The calibration weight ``q_hat``
-        has shape ``(1,)``, starts at zero and is not trainable; ``calibrate()``
-        writes it.
-
-        :param input_shape: Shape of input tensor ``(batch_size, input_dim)``.
-        :type input_shape: tuple
-        """
-        # Output 3 quantiles per (time_step, feature)
-        total_outputs = self.forecast_length * self.output_dim * 3
-
-        self.projection = layers.Dense(
-            total_outputs,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name='quantile_projection'
-        )
-        self.projection.build(input_shape)
-
-        # Initialize conformal calibration score
-        self.q_hat = self.add_weight(
-            name="conformal_q",
-            shape=(1,),
-            initializer=initializers.Zeros(),
-            trainable=False,
-            dtype=self.dtype
-        )
-
-        super().build(input_shape)
-
-    def call(
-            self,
-            inputs: keras.KerasTensor,
-            training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """
-        Project inputs to quantile predictions.
-
-        :param inputs: Encoded features with shape ``(batch, input_dim)``.
-        :type inputs: keras.KerasTensor
-        :param training: Whether in training mode.
-        :type training: bool or None
-        :return: Quantile predictions with shape
-            ``(batch, forecast_len, output_dim, 3)`` where the last dimension
-            contains ``[lower_quantile, median, upper_quantile]``.
-        :rtype: keras.KerasTensor
-        """
-        # Project to all quantile outputs
-        # Shape: (batch, forecast_len * output_dim * 3)
-        x = self.projection(inputs, training=training)
-
-        # Reshape to separate time, features, and quantiles
-        # Shape: (batch, forecast_len, output_dim, 3)
-        # 3 channels: 0=lower(alpha/2), 1=median(0.5), 2=upper(1-alpha/2)
-        x = ops.reshape(
-            x,
-            (-1, self.forecast_length, self.output_dim, 3)
-        )
-
-        return x
-
-    def calibrate(
-            self,
-            calibration_scores: np.ndarray,
-            alpha: float = 0.1
-    ) -> None:
-        """
-        Set the conformal offset ``q_hat`` from calibration data.
-
-        Call this after training, on a held-out calibration set. Each score is
-        a nonconformity score, ``max(q_low - y_true, y_true - q_high)``.
-
-        The quantile taken is ``(1 - alpha) * (1 + 1/n)``, clipped to
-        ``[0, 1]``. The ``1 + 1/n`` term is the finite-sample correction from
-        Section 7 of the forecasting science guide. This runs in NumPy and
-        writes a Keras weight, so it is not part of a traced graph.
-
-        :param calibration_scores: Nonconformity scores from the calibration
-            set, with shape ``(n_calibration_samples,)``.
-        :type calibration_scores: numpy.ndarray
-        :param alpha: Significance level. Defaults to 0.1 for 90% coverage.
-        :type alpha: float
-        :return: Nothing; ``q_hat`` is updated in place.
-        :rtype: None
-        """
-        n = len(calibration_scores)
-        # Compute adjusted quantile for finite-sample coverage
-        # Formula from Section 7: (1-alpha)(1 + 1/n)
-        adjusted_quantile = (1.0 - alpha) * (1.0 + 1.0 / n)
-
-        # Clip to [0, 1] to handle edge cases
-        adjusted_quantile = np.clip(adjusted_quantile, 0.0, 1.0)
-
-        # Compute the calibration threshold
-        q_value = np.quantile(calibration_scores, adjusted_quantile)
-
-        # Update the non-trainable weight
-        self.q_hat.assign([q_value])
-
-    def predict_intervals(
-            self,
-            inputs: Union[keras.KerasTensor, np.ndarray]
-    ) -> Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]:
-        """
-        Compute calibrated prediction intervals at inference time.
-
-        Runs ``call()`` with ``training=False``, then widens the interval by the
-        conformal offset::
-
-            calibrated_lower = model_lower - q_hat
-            calibrated_upper = model_upper + q_hat
-
-        The median is returned unchanged. Note the return order: the median
-        comes first, not the lower bound. If ``calibrate()`` has not run,
-        ``q_hat`` is 0 and the bounds are the raw learned quantiles.
-
-        :param inputs: Encoded features with shape ``(batch, input_dim)``.
-        :type inputs: keras.KerasTensor or numpy.ndarray
-        :return: Tuple of (median, lower, upper) predictions, each with shape
-            ``(batch, forecast_len, output_dim)``.
-        :rtype: tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]
-        """
-        # Get uncalibrated quantile predictions
-        # Shape: (batch, forecast_len, output_dim, 3)
-        preds = self.call(inputs, training=False)
-
-        # Extract quantiles
-        # Each has shape (batch, forecast_len, output_dim)
-        lower_pred = preds[..., 0]
-        median_pred = preds[..., 1]
-        upper_pred = preds[..., 2]
-
-        # Apply conformal adjustment
-        q = self.q_hat
-        lower_calibrated = lower_pred - q
-        upper_calibrated = upper_pred + q
-
-        return median_pred, lower_calibrated, upper_calibrated
-
-    def compute_output_shape(self, input_shape):
-        """
-        Compute the output shape.
-
-        Only the batch axis is read from ``input_shape``; the rest comes from
-        the constructor arguments.
-
-        :param input_shape: Shape of the input tensor ``(batch, input_dim)``.
-        :type input_shape: tuple
-        :return: ``(batch, forecast_length, output_dim, 3)``.
-        :rtype: tuple
-        """
-        return (input_shape[0], self.forecast_length, self.output_dim, 3)
-
-    def get_config(self) -> Dict[str, Any]:
-        """
-        Return the layer configuration for serialization.
-
-        :return: Dictionary containing the layer configuration.
-        :rtype: dict[str, Any]
-        """
-        config = super().get_config()
-        config.update({
-            "forecast_length": self.forecast_length,
-            "output_dim": self.output_dim,
-            "kernel_initializer": initializers.serialize(self.kernel_initializer),
-            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
         })
         return config
 

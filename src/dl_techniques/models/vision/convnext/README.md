@@ -184,12 +184,22 @@ print(f"Predictions shape: {predictions.shape}")  # (16, 10)
 
 All four names are exported from `dl_techniques.models.vision.convnext`.
 
+`ConvNeXtV1` and `ConvNeXtV2` are two leaves over one private base class, `_ConvNeXtBase`
+(`convnext/common.py`). The two models differ in one layer, the block (`ConvNextV2Block` adds
+GRN), and in their variant tables, so the constructor, the builders, `call`, `build`,
+`compute_output_shape`, the pretrained loader, `from_variant`, `get_config` and `summary` are
+written once, in the base. A leaf file keeps its registration key, its class docstring,
+`MODEL_VARIANTS`, `BLOCK_CLASS` (the block layer class) and its `create_*` factory;
+`tests/test_models/test_convnext/test_the_two_convnext_models_share_one_base.py` fails when a
+leaf defines a method of its own. The base is not exported and is not instantiated: a new
+ConvNeXt variant of the architecture is a third leaf that sets those two attributes.
+
 ### 6.2 Core building blocks
 
 | Layer | Location | Purpose |
 | :--- | :--- | :--- |
-| **`ConvNextV1Block`** | `dl_techniques.layers.convnext_v1_block` | The core block of the V1 architecture. |
-| **`ConvNextV2Block`** | `dl_techniques.layers.convnext_v2_block` | The V1 block plus GRN. |
+| **`ConvNextV1Block`** | `dl_techniques.layers.conv_blocks.convnext_v1_block` | The core block of the V1 architecture. |
+| **`ConvNextV2Block`** | `dl_techniques.layers.conv_blocks.convnext_v2_block` | The V1 block plus GRN. |
 
 ### 6.3 Factory signature
 
@@ -197,19 +207,23 @@ All four names are exported from `dl_techniques.models.vision.convnext`.
 create_convnext_v1(  # identical signature for create_convnext_v2
     variant="tiny",
     num_classes=1000,
-    input_shape=(None, None, 3),
-    pretrained=False,
-    weights_dataset="imagenet",
-    weights_input_shape=None,
-    cache_dir=None,
-    **kwargs,          # forwarded to the model, e.g. include_top, drop_path_rate
+    input_shape=None,  # None resolves to (None, None, 3)
+    pretrained=False,  # a local .keras path; True raises NotImplementedError
+    **kwargs,          # forwarded to ConvNeXtV1.from_variant, e.g. include_top, drop_path_rate
 )
 ```
 
+`ConvNeXtV1.from_variant(variant, num_classes=1000, input_shape=None, pretrained=False, **kwargs)`
+takes the same arguments. A keyword in `**kwargs` replaces the variant's own value, so
+`from_variant("tiny", depths=[1, 1, 1, 1], dims=[8, 16, 32, 64])` builds a small four-stage model.
 Constructor arguments reachable through `**kwargs` include `depths`, `dims`, `drop_path_rate`,
 `stochastic_mode`, `kernel_size`, `activation`, `use_bias`, `kernel_regularizer`, `dropout_rate`,
-`spatial_dropout_rate`, `strides`, `use_gamma`, `use_softorthonormal_regularizer` and
-`include_top`.
+`spatial_dropout_rate`, `strides`, `use_gamma`, `use_softorthonormal_regularizer`, `include_top` and
+`head_config_overrides`. With `include_top=False` the `classification_head` attribute is `None`.
+`include_top` must be a `bool` or `numpy.bool_` (`include_top="no"` raises `TypeError` naming the
+value; every other vision classifier checks it the same way), and `drop_path_rate`, `dropout_rate`
+and `spatial_dropout_rate` must lie in `[0, 1)`: a value outside raises `ValueError` naming the
+argument and the value.
 
 ---
 
@@ -294,8 +308,32 @@ print(f"Pico model params: {pico_model.count_params():,}")
 
 No pretrained weights are distributed with this package, and none are downloadable. Setting the
 `pretrained` argument to `True` raises `NotImplementedError` rather than silently returning random
-weights; pass a path to a local `.keras` checkpoint instead. The loader tolerates a different classifier width and a different
-input resolution: mismatching weights are skipped and reported.
+weights; pass a path to a local `.keras` checkpoint instead. The loader (`load_pretrained_checkpoint`) takes
+a different classifier width (`num_classes`), a headless target, and a different input resolution
+(the model is fully convolutional): only the `classification_head` layers may differ in shape or be
+absent, a head left at its initialization is named in a warning, and every other layer must be
+restored. A checkpoint written by this class whose configuration differs in an argument that is not
+listed below raises `ValueError` naming the argument and both values (measured for `depths`/`dims`,
+`kernel_size`, `strides`, `activation`, `stochastic_mode`, `use_gamma` and `use_bias`), even when every
+weight shape would fit (`activation`, `stochastic_mode`). A checkpoint written by other code is
+checked by its layers alone: a layer outside the head that cannot be restored raises, naming it.
+`kernel_regularizer`, `dropout_rate`, `spatial_dropout_rate`, `drop_path_rate`,
+`use_softorthonormal_regularizer`, `input_shape` and `num_classes` may differ (measured).
+`head_config_overrides` is compared exactly (leaving out dropout, initializer and regularizer keys)
+whenever the head would be copied, that is when every one of its weight shapes fits: a checkpoint
+saved with `head_config_overrides={"pooling_type": "max"}` is refused by a model with the default
+average-pool head, naming the key and both values (before this check it loaded, with outputs 0.15
+apart on the contract's tiny configuration). A head the shapes exclude (another `num_classes`),
+`include_top=False` and a headless checkpoint are not compared, so fine-tuning with a new head still
+loads the trunk; spell the head the way it was saved, since a default written out on one side only
+is a difference, and name `head_config_overrides` in `ignore_config_keys` of
+`load_pretrained_checkpoint` to accept another head on purpose. A functional wrapper around one
+model of this class (`keras.Model(inputs, model(inputs))`, what the trainers save) is compared by
+the wrapped model's configuration; when no single model of the class can be found in the archive,
+the load logs a warning and checks the layers only. An integer and its pair are one value
+(`kernel_size=7` and `(7, 7)`). A load that
+restores no layer at all also raises. A refused load copies no weight (an unbuilt model refused by
+the layer or head check is left built, at its own initialization).
 
 ```python
 from dl_techniques.models.vision.convnext.convnext_v2 import create_convnext_v2
@@ -308,12 +346,29 @@ fine_tune_model = create_convnext_v2(
 )
 ```
 
-`input_shape` may be left at its default `(None, None, 3)`; the pre-load build then materializes
-weights at `PRETRAINED_BUILD_SPATIAL` (224) and the model stays fully convolutional.
+`input_shape` may be left at its default `(None, None, 3)`; the pre-load build then runs at that
+shape, spatial dims `None` included, and the model stays fully convolutional (measured for V1, V2
+and RADConvNet, headed and headless: `scratch_iter2/step13_3/probe_d067.txt`).
 
 A `.keras` file saved before 2026-10-26, when the stem moved onto one `ConvStem` named `stem`
 (its weights were `stem_conv/...` and `stem_norm/...`), does not load: `keras.models.load_model`
 raises `ValueError`, and no legacy shim exists.
+
+An archive saved at the revision before the layer names moved (2026-10-27, `be92a74eb`) still
+loads: `keras.models.load_model`, `load_weights` and `from_variant(pretrained=<path>)` restore every
+tensor for V1 `tiny` and `cifar10` and V2 `tiny`, headed and headless (6 of 6 subjects), and the
+output is equal at `atol=0` in both `training=False` and `training=True` (measured). Only the
+`w.path` strings change, because archives load by tracked-layer order: `stage_{s}_block_{b}` is
+now `stage{S}_block{B}` (S and B count from 1, the drop path of a block is
+`stage{S}_block{B}_drop_path`), and `downsample_norm_{k}` and `downsample_conv_{k}` are
+`downsample_{k}_norm` and `downsample_{k}_conv` (k stays 0-based). 174 of the 182 weights of V1
+`tiny` move (the stem and the head do not), for example
+`stage_0_block_0/depthwise_conv/kernel` is `stage1_block1/depthwise_conv/kernel` and
+`downsample_conv_0/kernel` is `downsample_0_conv/kernel`. Code that selects weights by path must
+follow. The Python attributes `stages_list` and `downsample_layers_list` are now `stages` and
+`downsamplers` (a downsampler is a `{"norm", "conv"}` pair), `input_shape` is read from
+`input_shape_config`, and `weights_dataset`, `weights_input_shape` and `cache_dir` are gone from
+`from_variant` and the factories.
 
 ---
 

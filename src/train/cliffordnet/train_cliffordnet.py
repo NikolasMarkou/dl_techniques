@@ -10,6 +10,12 @@ random erasing 0.25. Remaining differences from the authors' run: the cosine her
 decays per step and ends at 1e-5 (alpha 0.01), theirs per epoch to 0.
 
 Label smoothing is opt-in (``--label-smoothing``, off in the paper recipe).
+
+``--dataset imagenet`` trains on the extracted ImageNet-1k (``--imagenet-root``,
+``--devkit-dir``) through ``train.common.imagenet``: random-resized-crop and flip,
+ImageNet mean/std, no AutoAugment and no random erasing. The end-of-run figures,
+model analysis and save/reload check use the first ``--eval-samples`` val images;
+training-time validation and the final evaluation use all 50,000.
 """
 
 import os
@@ -26,6 +32,7 @@ from PIL import Image, ImageOps, ImageEnhance
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.datasets.vision.imagenet2012 import IMAGENET_MEAN, IMAGENET_STD
 from dl_techniques.models.vision.cliffordnet import CliffordNet, HierarchicalCliffordNet
 from dl_techniques.optimization import (
     optimizer_builder,
@@ -37,6 +44,10 @@ from train.common import (
     set_seeds,
     create_base_argument_parser,
     load_dataset,
+    add_imagenet_arguments,
+    eval_head,
+    load_imagenet_splits,
+    require_imagenet_root,
     create_callbacks,
     validate_model_loading,
     run_model_analysis,
@@ -49,6 +60,7 @@ from train.common import (
 from train.common import run_summary
 from train.common.callbacks import LearningRateLogger
 from train.common.classification_viz import TrainingDashboardCallback
+from train.common.conformal import add_conformal_arguments, run_conformal
 from train.common.datasets import get_class_names
 from train.common.run_io import save_training_history_json
 from train.convnext.common import build_loss
@@ -485,16 +497,41 @@ def train_model(args) -> None:
     set_seeds(args.seed)
 
     # ---- Data --------------------------------------------------------
-    (x_train, y_train), (x_test, y_test), input_shape, num_classes = load_dataset(
-        args.dataset, batch_size=args.batch_size
-    )
-
-    train_ds = build_train_dataset(
-        x_train, y_train, args.batch_size, args.dataset,
-        random_erasing_prob=args.random_erasing_prob,
-    )
-    val_ds = build_eval_dataset(x_test, y_test, args.batch_size, args.dataset)
-    steps_per_epoch = len(x_train) // args.batch_size
+    # x_eval / y_eval are the in-memory images the end-of-run figures, the model
+    # analysis and the save/reload check read; the datasets feed fit and evaluate.
+    figure_kwargs: Dict[str, Any] = {}
+    if args.dataset == "imagenet":
+        require_imagenet_root(args.imagenet_root)
+        train_data, val_data = load_imagenet_splits(
+            root=args.imagenet_root, devkit_dir=args.devkit_dir,
+            image_size=args.image_size, batch_size=args.batch_size,
+            seed=args.seed, augment=True,
+        )
+        train_ds, val_ds = train_data.dataset, val_data.dataset
+        steps_per_epoch = train_data.steps_per_epoch
+        num_classes = train_data.num_classes
+        input_shape = (args.image_size, args.image_size, 3)
+        class_names = train_data.class_names
+        x_eval, y_eval = eval_head(val_data, args.eval_samples)
+        # The images are standardized, so the figures un-standardize them.
+        figure_kwargs = dict(
+            mean=np.array(IMAGENET_MEAN, dtype=np.float32),
+            std=np.array(IMAGENET_STD, dtype=np.float32),
+        )
+        # fit and the final evaluate see all of val; the figures see the head.
+        figure_ds = tf.data.Dataset.from_tensor_slices(x_eval).batch(args.batch_size)
+    else:
+        (x_train, y_train), (x_eval, y_eval), input_shape, num_classes = load_dataset(
+            args.dataset
+        )
+        train_ds = build_train_dataset(
+            x_train, y_train, args.batch_size, args.dataset,
+            random_erasing_prob=args.random_erasing_prob,
+        )
+        val_ds = build_eval_dataset(x_eval, y_eval, args.batch_size, args.dataset)
+        steps_per_epoch = len(x_train) // args.batch_size
+        class_names = get_class_names(args.dataset, num_classes)
+        figure_ds = val_ds
 
     # ---- Shifts and stage lists parsing ------------------------------
     shifts: List[int] = _parse_int_list(args.shifts, "--shifts") or [1, 2]
@@ -628,6 +665,10 @@ def train_model(args) -> None:
         "epoch_analysis_every": args.epoch_analysis_every,
         "input_shape": list(input_shape),
         "num_classes": num_classes,
+        **({"imagenet_root": args.imagenet_root, "devkit_dir": args.devkit_dir,
+            "eval_samples": args.eval_samples,
+            "conformal_alpha": None if args.no_conformal else args.conformal_alpha}
+           if args.dataset == "imagenet" else {}),
     }, results_dir)
 
     logger.info(
@@ -645,7 +686,7 @@ def train_model(args) -> None:
     )
 
     # ---- Save final model & validate ---------------------------------
-    test_sample = x_test[:4]
+    test_sample = x_eval[:4]
     pre_save_output = model.predict(test_sample, verbose=0)
 
     final_path = os.path.join(
@@ -672,21 +713,34 @@ def train_model(args) -> None:
     test_results = best_model.evaluate(val_ds, verbose=1, return_dict=True)
     logger.info(f"Test results: {test_results}")
 
+    # ---- Conformal prediction sets (ImageNet), over ALL of val ----------
+    # Before the figures and the model analysis, which are the heavy steps.
+    conformal: Optional[Dict[str, Any]] = None
+    if args.dataset == "imagenet" and not args.no_conformal:
+        conformal = run_conformal(
+            best_model, val_ds, alpha=args.conformal_alpha, seed=args.seed,
+            out_dir=Path(results_dir), input_shape=input_shape,
+            model_name=f"cliffordnet_{args.variant}_imagenet",
+            weights="best checkpoint, selected on this same validation set's "
+                    "val_accuracy" if os.path.exists(best_path) else "last epoch",
+            selection_overlaps_calibration=True,
+        )
+
     # ---- Classification figures --------------------------------------
     # The model emits logits; every probability consumer gets a softmax. The eval
-    # dataset is ordered, so the predictions line up with y_test. x_test is in
-    # [0, 1] (normalisation happens inside the dataset), so no mean/std is given.
-    logits = best_model.predict(val_ds, verbose=0)
+    # data is ordered, so the predictions line up with y_eval. For CIFAR x_eval is
+    # in [0, 1] (normalisation happens inside the dataset), so no mean/std is
+    # given; the ImageNet head is already standardized and comes with its own.
+    logits = best_model.predict(figure_ds, verbose=0)
     probs = keras.ops.convert_to_numpy(keras.ops.softmax(logits, axis=-1))
     run_summary.write_classification_figures(
-        Path(vis_dir), x_test, y_test, probs,
-        get_class_names(args.dataset, num_classes),
+        Path(vis_dir), x_eval, y_eval, probs, class_names, **figure_kwargs,
     )
 
     # ---- Post-training analysis --------------------------------------
     run_model_analysis(
         model=best_model,
-        test_data=(x_test, y_test),
+        test_data=(x_eval, y_eval),
         training_history=history,
         model_name=f"cliffordnet_{args.variant}_{args.dataset}",
         results_dir=results_dir,
@@ -705,6 +759,9 @@ def train_model(args) -> None:
         f.write(f"Variant: {args.variant}\n")
         f.write(f"Input shape: {input_shape}\n")
         f.write(f"Num classes: {num_classes}\n")
+        if args.dataset == "imagenet":
+            f.write(f"ImageNet root: {args.imagenet_root}\n")
+            f.write(f"Figures and analysis on the first {len(x_eval)} val images\n")
         f.write(f"Parameters: {model.count_params():,}\n\n")
         f.write(f"Epochs: {trained_epochs}, Batch: {args.batch_size}\n")
         f.write(f"LR: {args.learning_rate}, Weight decay: {args.weight_decay}\n")
@@ -713,6 +770,14 @@ def train_model(args) -> None:
         f.write("Test Results:\n")
         for key, val in test_results.items():
             f.write(f"  {key}: {val:.4f}\n")
+        if conformal is not None:
+            splits = conformal["repeated_splits"]
+            f.write(
+                f"\nConformal sets (alpha {conformal['alpha']}, tau {conformal['tau']}): "
+                f"coverage {splits['coverage_mean']:.4f} on random half splits "
+                f"(min {splits['coverage_min']:.4f}), mean set size "
+                f"{splits['mean_size']:.2f}\n"
+            )
         f.write(f"\nBest val_accuracy: {best_val_acc:.4f}\n")
 
     logger.info(f"Summary written to: {summary_path}")
@@ -729,8 +794,15 @@ def main() -> None:
     parser = create_base_argument_parser(
         description="Train CliffordNet (geometric-algebra vision backbone)",
         default_dataset="cifar100",
-        dataset_choices=["cifar10", "cifar100"],
+        dataset_choices=["cifar10", "cifar100", "imagenet"],
     )
+    add_imagenet_arguments(parser, note="Used only when --dataset imagenet: ")
+    add_conformal_arguments(parser, note="Used only when --dataset imagenet: ")
+    parser.add_argument('--eval-samples', type=int, default=None, dest='eval_samples',
+                        help='Only with --dataset imagenet: how many val images the '
+                             'end-of-run figures, model analysis and save/reload '
+                             'check use (default 2000). Training-time validation '
+                             'and the final evaluation use all of val.')
 
     # Model variant
     parser.add_argument('--variant', type=str, default='nano',
@@ -782,8 +854,10 @@ def main() -> None:
                              'and are not comparable with unsmoothed runs.')
 
     # Augmentation
-    parser.add_argument('--random-erasing-prob', type=float, default=0.25,
-                        dest='random_erasing_prob')
+    parser.add_argument('--random-erasing-prob', type=float, default=None,
+                        dest='random_erasing_prob',
+                        help='CIFAR only (default 0.25). ImageNet uses '
+                             'random-resized-crop and flip, so the flag is refused there.')
 
     # Analysis
     parser.add_argument('--epoch-analysis-every', type=int, default=0,
@@ -814,6 +888,19 @@ def main() -> None:
     args = parser.parse_args()
     if not 0.0 <= args.label_smoothing < 1.0:
         parser.error(f"--label-smoothing must be in [0, 1), got {args.label_smoothing}")
+    # A flag that does not apply to the chosen dataset is refused, never ignored.
+    if args.dataset == "imagenet":
+        if args.random_erasing_prob is not None:
+            parser.error("--random-erasing-prob only applies to the CIFAR datasets")
+        args.random_erasing_prob = 0.0  # none is applied; config.json records that
+        args.eval_samples = 2000 if args.eval_samples is None else args.eval_samples
+        if args.eval_samples <= 0:
+            parser.error(f"--eval-samples must be positive, got {args.eval_samples}")
+    else:
+        if args.eval_samples is not None:
+            parser.error("--eval-samples only applies with --dataset imagenet")
+        if args.random_erasing_prob is None:
+            args.random_erasing_prob = 0.25
     # DECISION plan-2026-10-23T100412-e7eaaa02/D-009
     # Flags the user did not pass take the PRESET's value. Do NOT give these
     # three flags their own defaults again: always passing cli_mode='full' and

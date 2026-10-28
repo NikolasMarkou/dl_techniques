@@ -293,6 +293,10 @@ def create_base_argument_parser(
         description: str = "Train model",
         default_dataset: str = "cifar10",
         dataset_choices: Optional[List[str]] = None,
+        default_image_size: int = 224,
+        default_batch_size: Optional[int] = 64,
+        image_size_help: Optional[str] = None,
+        batch_size_help: str = 'Training batch size',
 ) -> argparse.ArgumentParser:
     """Create argument parser with standard training arguments.
 
@@ -306,27 +310,32 @@ def create_base_argument_parser(
         description: Help text for the parser.
         default_dataset: Default dataset name.
         dataset_choices: Valid dataset names. Defaults to
-            ['mnist', 'cifar10', 'cifar100', 'imagenet'].
+            ['mnist', 'cifar10', 'cifar100'].
+        default_image_size: Default ``--image-size``.
+        default_batch_size: Default ``--batch-size``; ``None`` leaves it for the
+            caller to resolve after parsing (e.g. per dataset).
+        image_size_help: Help text of ``--image-size`` (default: names 224).
+        batch_size_help: Help text of ``--batch-size``.
 
     Returns:
         ArgumentParser with common training arguments.
     """
     if dataset_choices is None:
-        dataset_choices = ['mnist', 'cifar10', 'cifar100', 'imagenet']
+        dataset_choices = ['mnist', 'cifar10', 'cifar100']
 
     parser = argparse.ArgumentParser(description=description)
 
     # Data
     parser.add_argument('--dataset', type=str, default=default_dataset,
                         choices=dataset_choices, help='Dataset to use')
-    parser.add_argument('--image-size', type=int, default=224,
-                        help='Image size (for ImageNet, default: 224)')
+    parser.add_argument('--image-size', type=int, default=default_image_size,
+                        help=image_size_help or 'Image size (for ImageNet, default: 224)')
 
     # Training
     parser.add_argument('--epochs', type=int, default=100,
                         help='Number of training epochs')
-    parser.add_argument('--batch-size', type=int, default=64,
-                        help='Training batch size')
+    parser.add_argument('--batch-size', type=int, default=default_batch_size,
+                        help=batch_size_help)
 
     # Optimization
     parser.add_argument('--learning-rate', type=float, default=1e-3,

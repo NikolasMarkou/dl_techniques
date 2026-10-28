@@ -1,5 +1,4 @@
-"""
-Residual convolutional variational autoencoder with selectable Gaussian,
+"""Residual convolutional variational autoencoder with selectable Gaussian,
 hypersphere or von Mises-Fisher latent geometry.
 
 `VAE` optimizes the evidence lower bound
@@ -17,8 +16,10 @@ Reconstruction is binary crossentropy on `[0, 1]`-range inputs, reduced by a
 mean over pixels, while the Gaussian KL is a sum over latents. This means
 `kl_loss_weight` is not the literature's `beta` — the actual value optimized
 is `beta = kl_loss_weight * prod(input_shape)`, exposed as `effective_kl_beta`.
-The vmf mode disables XLA on every compile path (direct `compile()`, the
-factories, and reload) because its sampler is not XLA-compatible.
+The vmf mode disables XLA on every compile path (direct `compile()`,
+`compile_vae`, and reload) because its sampler is not XLA-compatible.
+`create_vae` builds a variant and compiles nothing; `compile_vae` sets the
+optimizer and the XLA choice on a model that is already built.
 
 References:
     - Kingma & Welling, 2013. Auto-Encoding Variational Bayes.
@@ -45,6 +46,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from dl_techniques.layers.activations.exact_activations import substitute_exact
 from dl_techniques.layers.conv_blocks.stem import ConvStem
+from dl_techniques.initializers.clone import initializer_spec
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.generative.sampling import create_sampling_layer, vmf_kl_divergence
 from dl_techniques.utils.activation_serialization import (
@@ -53,6 +55,11 @@ from dl_techniques.utils.activation_serialization import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.model_build import refuse_unknown_model_kwargs
+from dl_techniques.utils.weight_transfer import (
+    DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
+    load_pretrained_checkpoint,
+    pretrained_path_or_raise,
+)
 
 # ---------------------------------------------------------------------
 # Supported VAE sampling modes
@@ -63,6 +70,28 @@ VALID_SAMPLING_TYPES = (
     "hypersphere",
     "vmf",
 )
+
+# DECISION plan-2026-10-26T125959-7af851e5/D-048: a checkpoint's configuration is
+# compared on every constructor key but the four below. `kl_loss_weight` is left out on
+# purpose: a checkpoint trained at another beta is the same network (the usual warm
+# start), and refusing it would make the loss weight structural. Do NOT leave
+# `activation` or `final_activation` out: ReLU against leaky ReLU keeps every weight
+# shape and computes another function, so only this comparison sees it. Do NOT give the
+# loader a head pattern other than `_NO_HEAD_PATTERN`: a VAE has no head, every layer
+# must load.
+#: Constructor-config keys that leave the weight layout and the function a checkpoint's
+#: weights compute alone: the loss weight acts on the objective only, the initializer and
+#: regularizer on the starting weights and the loss, dropout in training only.
+_NON_STRUCTURAL_CONFIG_KEYS = (
+    *DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
+    "kl_loss_weight",
+    "kernel_initializer",
+    "kernel_regularizer",
+    "dropout_rate",
+)
+
+#: A VAE has no task head: every layer of a checkpoint must load, so no layer name is a head.
+_NO_HEAD_PATTERN = r"(?!)"
 
 # ---------------------------------------------------------------------
 
@@ -145,8 +174,11 @@ class VAE(keras.Model):
         ``"hypersphere_faithful"`` is a deprecated alias of ``"hypersphere"``;
         ``"hypersphere_controlled"`` was removed and now raises ``ValueError``.
     :type sampling_type: str
-    :param kernel_initializer: Weight initializer for convolutional layers.
-    :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param kernel_initializer: Weight initializer for the convolutional and dense
+        kernels, a name, a config dict or an ``Initializer`` instance. It is stored as a
+        string or a serialized dict (an instance is serialized once), and every layer
+        resolves its own initializer from that spec, so no two kernels replay one draw.
+    :type kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer]
     :param kernel_regularizer: Regularizer for convolutional weights.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param use_batch_norm: Whether to use batch normalization.
@@ -214,11 +246,6 @@ class VAE(keras.Model):
         },
     }
 
-    # Architecture constants
-    DEFAULT_ACTIVATION = "leaky_relu"
-    DEFAULT_FINAL_ACTIVATION = "sigmoid"
-    DEFAULT_INITIALIZER = "he_normal"
-
     def __init__(
         self,
         latent_dim: int,
@@ -229,7 +256,7 @@ class VAE(keras.Model):
         kl_loss_weight: float = 0.01,
         sampling_type: str = "gaussian",
         kernel_initializer: Union[
-            str, keras.initializers.Initializer
+            str, Dict[str, Any], keras.initializers.Initializer
         ] = "he_normal",
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         use_batch_norm: bool = True,
@@ -289,14 +316,19 @@ class VAE(keras.Model):
 
         # Store configuration
         self.latent_dim = latent_dim
-        self._input_shape = input_shape
+        self.input_shape_config = tuple(input_shape)
         self.depths = depths
         self.steps_per_depth = steps_per_depth
         self.filters = filters
         self.kl_loss_weight = kl_loss_weight
         self.sampling_type = sampling_type
-        self.kernel_initializer = kernel_initializer
-        self.kernel_regularizer = kernel_regularizer
+        # DECISION plan-2026-10-26T125959-7af851e5/D-033: store the initializer as a
+        # spec and hand that spec to every site below. Do NOT keep the caller's
+        # instance and pass it on: one seedless instance given to the stem, both
+        # residual convs and the decoder replays one draw at every site (91 of 136
+        # kernel pairs at `small`), and an instance is not JSON data.
+        self.kernel_initializer = initializer_spec(kernel_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.use_batch_norm = use_batch_norm
         self.use_bias = use_bias
         self.dropout_rate = dropout_rate
@@ -304,7 +336,7 @@ class VAE(keras.Model):
         self.final_activation = deserialize_activation(final_activation)
 
         # Validate input dimensions
-        height, width, channels = input_shape
+        height, width, channels = self.input_shape_config
         if height < 8 or width < 8:
             raise ValueError(
                 f"Input dimensions must be at least 8x8, got {height}x{width}"
@@ -318,7 +350,7 @@ class VAE(keras.Model):
         )
 
         # Build the model using functional API
-        inputs = keras.Input(shape=input_shape, name="input")
+        inputs = keras.Input(shape=self.input_shape_config, name="input")
         outputs = self._build_model(inputs)
 
         # Initialize the Model
@@ -611,7 +643,7 @@ class VAE(keras.Model):
     def _build_decoder(self, z: keras.KerasTensor) -> keras.KerasTensor:
         """Build the decoder network with ResNet blocks."""
         # Feature map size after all downsampling.
-        height, width, channels = self._input_shape
+        height, width, channels = self.input_shape_config
         feature_height = height // (2**self.depths)
         feature_width = width // (2**self.depths)
 
@@ -651,9 +683,9 @@ class VAE(keras.Model):
         )(x)
 
         # Ensure exact shape matching
-        if x.shape[1:] != self._input_shape:
+        if x.shape[1:] != self.input_shape_config:
             # Resize to exact input shape if needed
-            target_height, target_width = self._input_shape[:2]
+            target_height, target_width = self.input_shape_config[:2]
             x = keras.layers.Resizing(
                 height=target_height,
                 width=target_width,
@@ -703,13 +735,44 @@ class VAE(keras.Model):
 
         return x
 
+    def load_pretrained_weights(
+        self,
+        weights_path: str,
+        skip_mismatch: bool = True,
+    ) -> None:
+        """Load a local ``.keras`` checkpoint into this model, layer by layer.
+
+        The transfer is ``load_pretrained_checkpoint``. The model is built at
+        construction, so its variables are kept and the checkpoint's are copied in.
+        A VAE has no task head, so every layer must be restored: a checkpoint of
+        another ``latent_dim``, width, ``sampling_type``, activation or bias setting
+        raises and copies no weight. The archive's own configuration is compared too,
+        leaving out ``kl_loss_weight`` (it acts on the objective only), the
+        initializer, the regularizer and the dropout rate.
+
+        :param weights_path: Path to a ``.keras`` checkpoint.
+        :type weights_path: str
+        :param skip_mismatch: Passed to the transfer; a VAE has no layer that is
+            allowed to differ, so ``True`` and ``False`` behave alike.
+        :type skip_mismatch: bool
+        :raises FileNotFoundError: If ``weights_path`` does not exist.
+        :raises ValueError: If the checkpoint is of another architecture or a layer
+            is not restored.
+        """
+        load_pretrained_checkpoint(
+            self, weights_path, self.input_shape_config, skip_mismatch,
+            head_pattern=_NO_HEAD_PATTERN,
+            ignore_config_keys=_NON_STRUCTURAL_CONFIG_KEYS,
+        )
+
     @classmethod
     def from_variant(
         cls,
         variant: str,
         input_shape: Tuple[int, int, int],
         latent_dim: Optional[int] = None,
-        **kwargs,
+        pretrained: Union[bool, str] = False,
+        **kwargs: Any,
     ) -> "VAE":
         """Create a VAE model from a predefined variant.
 
@@ -720,10 +783,17 @@ class VAE(keras.Model):
         :type input_shape: Tuple[int, int, int]
         :param latent_dim: Latent dimension. Uses the variant default if ``None``.
         :type latent_dim: Optional[int]
+        :param pretrained: A path to a local ``.keras`` checkpoint, ``True`` (raises
+            ``NotImplementedError``, since no VAE weights ship with
+            ``dl_techniques``) or ``False`` (default, random init).
+        :type pretrained: Union[bool, str]
         :param kwargs: Overrides passed to the constructor.
         :return: A configured model.
         :rtype: VAE
-        :raises ValueError: If ``variant`` is not recognized.
+        :raises ValueError: If ``variant`` is not recognized, or a checkpoint is of
+            another architecture.
+        :raises NotImplementedError: If ``pretrained`` is ``True``.
+        :raises FileNotFoundError: If ``pretrained`` is a path that does not exist.
 
         :Example:
 
@@ -737,14 +807,15 @@ class VAE(keras.Model):
                 f"{list(cls.MODEL_VARIANTS.keys())}"
             )
 
+        weights_path = pretrained_path_or_raise(
+            pretrained, f"{cls.__name__} variant '{variant}'"
+        )
+
         config = cls.MODEL_VARIANTS[variant]
 
         # Use provided latent_dim or variant default
         if latent_dim is None:
             latent_dim = config["default_latent_dim"]
-
-        logger.info(f"Creating VAE-{variant.upper()} model")
-        logger.info(f"Input shape: {input_shape}, Latent dim: {latent_dim}")
 
         # DECISION plan_2026-06-05_56b39171/D-004: depths and filters move together
         # since filters length must equal depths; fall back to the variant pair only
@@ -757,11 +828,16 @@ class VAE(keras.Model):
         elif "filters" in kwargs and "depths" not in kwargs:
             kwargs["depths"] = len(kwargs["filters"])
 
-        return cls(
+        model = cls(
             latent_dim=latent_dim,
             input_shape=input_shape,
             **kwargs,
         )
+
+        if weights_path:
+            model.load_pretrained_weights(weights_path)
+
+        return model
 
     @property
     def effective_kl_beta(self) -> float:
@@ -781,7 +857,7 @@ class VAE(keras.Model):
         :rtype: float
         """
         pixels = 1
-        for dim in self._input_shape:
+        for dim in self.input_shape_config:
             pixels *= int(dim)
         return float(self.kl_loss_weight) * pixels
 
@@ -881,9 +957,9 @@ class VAE(keras.Model):
             x = data
 
         # Validate input shape
-        if x.shape[1:] != self._input_shape:
+        if x.shape[1:] != self.input_shape_config:
             logger.warning(
-                f"Input shape {x.shape} doesn't match expected {self._input_shape}"
+                f"Input shape {x.shape} doesn't match expected {self.input_shape_config}"
             )
 
         with tf.GradientTape() as tape:
@@ -1080,69 +1156,24 @@ class VAE(keras.Model):
         :return: Configuration dictionary.
         :rtype: Dict[str, Any]
         """
-        config = super().get_config()
-        config.update({
+        base_config = super().get_config()
+        config = {
             "latent_dim": self.latent_dim,
-            "input_shape": self._input_shape,
+            "input_shape": self.input_shape_config,
             "depths": self.depths,
             "steps_per_depth": self.steps_per_depth,
             "filters": self.filters,
             "kl_loss_weight": self.kl_loss_weight,
             "sampling_type": self.sampling_type,
-            "kernel_initializer": keras.initializers.serialize(
-                keras.initializers.get(self.kernel_initializer)
-            ),
+            "kernel_initializer": self.kernel_initializer,
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "use_batch_norm": self.use_batch_norm,
             "use_bias": self.use_bias,
             "dropout_rate": self.dropout_rate,
             "activation": serialize_activation(self.activation),
             "final_activation": serialize_activation(self.final_activation),
-        })
-        return config
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "VAE":
-        """Create model from configuration.
-
-        :param config: Configuration dictionary.
-        :type config: Dict[str, Any]
-        :return: A new model instance.
-        :rtype: VAE
-        """
-        # Deserialize complex objects
-        if config.get("kernel_initializer"):
-            config["kernel_initializer"] = keras.initializers.deserialize(
-                config["kernel_initializer"]
-            )
-        if config.get("kernel_regularizer"):
-            config["kernel_regularizer"] = keras.regularizers.deserialize(
-                config["kernel_regularizer"]
-            )
-
-        # Convert input_shape from list back to tuple
-        if "input_shape" in config and isinstance(config["input_shape"], list):
-            config["input_shape"] = tuple(config["input_shape"])
-
-        return cls(**config)
-
-    def summary(self, **kwargs):
-        """Print model summary with additional information."""
-        super().summary(**kwargs)
-
-        # Print additional model information
-        logger.info("VAE configuration:")
-        logger.info(f"  - Input shape: {self._input_shape}")
-        logger.info(f"  - Latent dimension: {self.latent_dim}")
-        logger.info(f"  - Depths: {self.depths}")
-        logger.info(f"  - Steps per depth: {self.steps_per_depth}")
-        logger.info(f"  - Filters: {self.filters}")
-        logger.info(f"  - KL loss weight: {self.kl_loss_weight}")
-        logger.info(
-            f"  - Effective beta (sum-over-pixels ELBO): "
-            f"{self.effective_kl_beta:.4g}"
-        )
-        logger.info(f"  - Total parameters: {self.count_params():,}")
+        }
+        return {**base_config, **config}
 
 
 # ---------------------------------------------------------------------
@@ -1150,42 +1181,71 @@ class VAE(keras.Model):
 
 def create_vae(
     input_shape: Tuple[int, int, int],
-    latent_dim: int,
+    latent_dim: Optional[int] = None,
     variant: str = "small",
-    optimizer: Union[str, keras.optimizers.Optimizer] = "adam",
-    learning_rate: float = 0.001,
-    **kwargs,
+    pretrained: Union[bool, str] = False,
+    **kwargs: Any,
 ) -> VAE:
-    """Create and compile a VAE model.
+    """Create a VAE from a variant; the model is not compiled.
+
+    This is ``VAE.from_variant``; call :func:`compile_vae` to set the optimizer.
 
     :param input_shape: Input shape ``(height, width, channels)``.
     :type input_shape: Tuple[int, int, int]
-    :param latent_dim: Dimensionality of the latent space.
-    :type latent_dim: int
+    :param latent_dim: Dimensionality of the latent space; ``None`` takes the
+        variant's default.
+    :type latent_dim: Optional[int]
     :param variant: One of ``"micro"``, ``"small"``, ``"medium"``, ``"large"``,
         ``"xlarge"``.
     :type variant: str
-    :param optimizer: Optimizer name or instance.
-    :type optimizer: Union[str, keras.optimizers.Optimizer]
-    :param learning_rate: Learning rate applied to the optimizer.
-    :type learning_rate: float
+    :param pretrained: A path to a local ``.keras`` checkpoint, ``True`` (raises
+        ``NotImplementedError``) or ``False``.
+    :type pretrained: Union[bool, str]
     :param kwargs: Forwarded to the model constructor.
-    :return: A compiled model, ready for training.
+    :return: An uncompiled model.
     :rtype: VAE
 
     :Example:
 
-    >>> model = create_vae(input_shape=(28, 28, 1), latent_dim=64, variant="small")
+    >>> model = compile_vae(
+    ...     create_vae(input_shape=(28, 28, 1), latent_dim=64, variant="small"))
     >>> model = create_vae(input_shape=(32, 32, 3), latent_dim=128, variant="medium")
-    >>> model = create_vae(
-    ...     input_shape=(64, 64, 3), latent_dim=256, variant="large", learning_rate=0.0005
-    ... )
     """
-    # Create the model
-    model = VAE.from_variant(
-        variant=variant, input_shape=input_shape, latent_dim=latent_dim, **kwargs
+    # DECISION plan-2026-08-19T163559-499b6f0e/D-078: this factory does not
+    # self-test with a forward pass on every construction. The check now lives in
+    # tests/test_models/test_vae/test_model.py::TestCreateVaeOutputShapes. See decisions.md.
+    return VAE.from_variant(
+        variant=variant,
+        input_shape=input_shape,
+        latent_dim=latent_dim,
+        pretrained=pretrained,
+        **kwargs,
     )
 
+
+def compile_vae(
+    model: VAE,
+    optimizer: Union[str, keras.optimizers.Optimizer] = "adam",
+    learning_rate: float = 0.001,
+) -> VAE:
+    """Compile a VAE with the optimizer and the XLA choice its sampler needs.
+
+    :param model: A built model, from :func:`create_vae` or ``VAE(...)``.
+    :type model: VAE
+    :param optimizer: Optimizer name or instance. An instance is used as it is.
+    :type optimizer: Union[str, keras.optimizers.Optimizer]
+    :param learning_rate: Learning rate set on an optimizer given by name; ignored
+        for an instance.
+    :type learning_rate: float
+    :return: ``model``, compiled; ``jit_compile`` is ``"auto"`` except for
+        ``sampling_type="vmf"``, which opts out of XLA.
+    :rtype: VAE
+
+    :Example:
+
+    >>> model = compile_vae(VAE.from_variant("small", input_shape=(28, 28, 1)))
+    >>> model = compile_vae(model, optimizer=keras.optimizers.AdamW(1e-3))
+    """
     # Set up optimizer
     if isinstance(optimizer, str):
         optimizer_instance = keras.optimizers.get(optimizer)
@@ -1198,58 +1258,5 @@ def create_vae(
     # lowers to an op with no XLA_GPU_JIT kernel in TF 2.18; gaussian/hypersphere keep XLA. See decisions.md.
     jit_compile = False if getattr(model, "sampling_type", None) == "vmf" else "auto"
     model.compile(optimizer=optimizer_instance, jit_compile=jit_compile)
-
-    # DECISION plan-2026-08-19T163559-499b6f0e/D-078: this factory does not
-    # self-test with a forward pass on every construction. The check now lives in
-    # tests/test_models/test_vae/test_model.py::TestCreateVaeOutputShapes. See decisions.md.
-    logger.info(f"Created VAE-{variant.upper()} for input shape {input_shape}")
-    logger.info(f"Latent dim: {latent_dim}, Parameters: {model.count_params():,}")
-
-    return model
-
-
-def create_vae_from_config(
-    config: Dict[str, Any],
-    optimizer: Union[str, keras.optimizers.Optimizer] = "adam",
-    learning_rate: float = 0.001,
-) -> VAE:
-    """Create a VAE from a configuration dictionary.
-
-    :param config: Configuration dictionary of VAE constructor arguments.
-    :type config: Dict[str, Any]
-    :param optimizer: Optimizer name or instance.
-    :type optimizer: Union[str, keras.optimizers.Optimizer]
-    :param learning_rate: Learning rate applied to the optimizer.
-    :type learning_rate: float
-    :return: A compiled model.
-    :rtype: VAE
-
-    :Example:
-
-    >>> config = {
-    ...     "latent_dim": 128,
-    ...     "input_shape": (64, 64, 3),
-    ...     "depths": 3,
-    ...     "filters": [32, 64, 128],
-    ...     "kl_loss_weight": 0.01,
-    ... }
-    >>> model = create_vae_from_config(config)
-    """
-    # Create the model
-    model = VAE(**config)
-
-    # Set up optimizer
-    if isinstance(optimizer, str):
-        optimizer_instance = keras.optimizers.get(optimizer)
-        if hasattr(optimizer_instance, "learning_rate"):
-            optimizer_instance.learning_rate = learning_rate
-    else:
-        optimizer_instance = optimizer
-
-    # Compile the model (vmf opts out of XLA jit; see D-005 in create_vae).
-    jit_compile = False if getattr(model, "sampling_type", None) == "vmf" else "auto"
-    model.compile(optimizer=optimizer_instance, jit_compile=jit_compile)
-
-    logger.info(f"Created VAE from config with latent_dim={config['latent_dim']}")
 
     return model

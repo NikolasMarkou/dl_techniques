@@ -103,6 +103,8 @@ import keras
 import numpy as np
 import pytest
 
+from dl_techniques.utils.weight_transfer import load_pretrained_checkpoint
+
 from .initializer_replay_oracle import replayed_pairs
 from .roundtrip_instrument_oracle import relative_path, weight_map
 from tests.layer_naming import PublicAutoName
@@ -204,14 +206,16 @@ CLASSIFIERS: Tuple[Classifier, ...] = (
         "mobilenet_v1", f"{_VISION}.mobilenet.mobilenet_v1", "MobileNetV1", "small", (32, 48, 3),
         _ctor(f"{_VISION}.mobilenet.mobilenet_v1", "MobileNetV1", width_multiplier=0.25,
               input_shape=(32, 48, 3)),
-        tiny={}, override={"width_multiplier": 0.25}, head_markers=("classification_head",),
+        tiny={"width_multiplier": 0.25}, override={"width_multiplier": 0.25},
+        head_markers=("classification_head",),
         invalid=(({"dropout_rate": 2.0}, "dropout_rate", 2.0), ({"num_classes": 0}, "num_classes", 0)),
         sizes=_DEFAULT_SIZES),
     Classifier(
         "mobilenet_v2", f"{_VISION}.mobilenet.mobilenet_v2", "MobileNetV2", "small", (32, 48, 3),
         _ctor(f"{_VISION}.mobilenet.mobilenet_v2", "MobileNetV2", width_multiplier=0.35,
               input_shape=(32, 48, 3)),
-        tiny={}, override={"width_multiplier": 0.25}, head_markers=("classification_head",),
+        tiny={"width_multiplier": 0.35}, override={"width_multiplier": 0.25},
+        head_markers=("classification_head",),
         invalid=(({"dropout_rate": 2.0}, "dropout_rate", 2.0), ({"num_classes": 0}, "num_classes", 0)),
         sizes=_DEFAULT_SIZES),
     Classifier(
@@ -234,28 +238,41 @@ CLASSIFIERS: Tuple[Classifier, ...] = (
         _ctor(f"{_VISION}.convnext.convnext_v1", "ConvNeXtV1", depths=[1, 1], dims=[8, 16],
               input_shape=(32, 48, 3)),
         tiny={"depths": [1, 1], "dims": [8, 16]}, override={"depths": [1, 1], "dims": [8, 16]},
-        head_markers=("classification_head",), knob=False, sizes=_DEFAULT_SIZES),
+        head_markers=("classification_head",), knob=False,
+        invalid=(({"drop_path_rate": -1.0}, "drop_path_rate", -1.0),
+                 ({"drop_path_rate": 2.0}, "drop_path_rate", 2.0),
+                 ({"dropout_rate": 1.0}, "dropout_rate", 1.0),
+                 ({"spatial_dropout_rate": 1.0}, "spatial_dropout_rate", 1.0)),
+        sizes=_DEFAULT_SIZES),
     Classifier(
         "convnext_v2", f"{_VISION}.convnext.convnext_v2", "ConvNeXtV2", "tiny", (32, 48, 3),
         _ctor(f"{_VISION}.convnext.convnext_v2", "ConvNeXtV2", depths=[1, 1], dims=[8, 16],
               input_shape=(32, 48, 3)),
         tiny={"depths": [1, 1], "dims": [8, 16]}, override={"depths": [1, 1], "dims": [8, 16]},
-        head_markers=("classification_head",), knob=False, sizes=_DEFAULT_SIZES),
+        head_markers=("classification_head",), knob=False,
+        invalid=(({"drop_path_rate": -1.0}, "drop_path_rate", -1.0),
+                 ({"drop_path_rate": 2.0}, "drop_path_rate", 2.0),
+                 ({"dropout_rate": 1.0}, "dropout_rate", 1.0),
+                 ({"spatial_dropout_rate": 1.0}, "spatial_dropout_rate", 1.0)),
+        sizes=_DEFAULT_SIZES),
     Classifier(
         "rad_convnet", f"{_VISION}.rad_convnet.model", "RADConvNet", "tiny", (32, 48, 3),
         _ctor(f"{_VISION}.rad_convnet.model", "RADConvNet", depths=[1, 1], dims=[8, 16],
               strides=2, input_shape=(32, 48, 3)),
         tiny={"depths": [1, 1], "dims": [8, 16], "strides": 2},
         override={"depths": [1, 1], "dims": [8, 16], "strides": 2},
-        head_markers=("classification_head", "head_norm", "classifier"), knob=False,
-        invalid=(({"num_classes": 0}, "num_classes", 0),), sizes=_DEFAULT_SIZES),
+        head_markers=("classification_head",), knob=False,
+        invalid=(({"num_classes": 0}, "num_classes", 0),
+                 ({"dropout_rate": 2.0}, "dropout_rate", 2.0)),
+        sizes=_DEFAULT_SIZES),
     Classifier(
         "squeezenet_v1", f"{_VISION}.squeezenet.squeezenet_v1", "SqueezeNetV1", "1.1",
         (48, 64, 3),
         _variant(f"{_VISION}.squeezenet.squeezenet_v1", "SqueezeNetV1", "1.1", input_shape=(48, 64, 3)),
         tiny={}, override={"dropout_rate": 0.25}, head_markers=("conv10",),
         head_attribute=False, functional=True,
-        invalid=(({"use_bypass": "bogus"}, "use_bypass", "bogus"),),
+        invalid=(({"use_bypass": "bogus"}, "use_bypass", "bogus"),
+                 ({"use_bypass": True}, "use_bypass", True)),
         sizes={_NON_SQUARE: (48, 64)}),
     Classifier(
         "squeezenet_v2", f"{_VISION}.squeezenet.squeezenet_v2", "SqueezeNoduleNetV2", "v2",
@@ -263,7 +280,9 @@ CLASSIFIERS: Tuple[Classifier, ...] = (
         _variant(f"{_VISION}.squeezenet.squeezenet_v2", "SqueezeNoduleNetV2", "v2",
                  input_shape=(48, 64, 3)),
         tiny={}, override={"dropout_rate": 0.25}, head_markers=("conv10",),
-        head_attribute=False, functional=True, sizes={_NON_SQUARE: (48, 64)}),
+        head_attribute=False, functional=True,
+        invalid=(({"input_shape": (36, 36, 36, 1)}, "input_shape", (36, 36, 36, 1)),),
+        sizes={_NON_SQUARE: (48, 64)}),
 )
 CLASSIFIER_KEYS = tuple(c.key for c in CLASSIFIERS)
 #: SqueezeNet is a functional model, built in ``__init__`` (the census's E-2 exemption): it has no unbuilt
@@ -294,11 +313,6 @@ def _bias_init() -> keras.initializers.Initializer:
     return keras.initializers.RandomNormal(stddev=0.01, seed=4)
 
 
-def _squeezenet_table(module: str, name: str, variant: str) -> Dict[str, Any]:
-    cls = getattr(importlib.import_module(module), name)
-    return copy.deepcopy(cls.MODEL_VARIANTS[variant])
-
-
 _NO_BIAS_HEAD = {"classifier_use_bias": False}
 
 #: ``key -> builder of the constructor keywords`` the fidelity row builds the model with.
@@ -326,21 +340,21 @@ PROBES: Dict[str, Callable[[], Dict[str, Any]]] = {
         bias_initializer=_bias_init(), kernel_regularizer=_l2(),
         bias_regularizer=keras.regularizers.L1(1e-4), head_config_overrides=dict(_NO_BIAS_HEAD)),
     "mobilenet_v1": lambda: dict(
-        num_classes=7, width_multiplier=0.25, dropout_rate=0.3, weight_decay=1e-4,
+        num_classes=7, width_multiplier=0.25, dropout_rate=0.3, kernel_regularizer=_l2(),
         kernel_initializer=_he(3), input_shape=(32, 48, 3),
         head_config_overrides=dict(_NO_BIAS_HEAD)),
     "mobilenet_v2": lambda: dict(
-        num_classes=7, width_multiplier=0.35, dropout_rate=0.3, weight_decay=1e-4,
+        num_classes=7, width_multiplier=0.35, dropout_rate=0.3, kernel_regularizer=_l2(),
         kernel_initializer=_he(3), input_shape=(32, 48, 3),
         head_config_overrides=dict(_NO_BIAS_HEAD)),
     "mobilenet_v3": lambda: dict(
         num_classes=7, variant="small", width_multiplier=0.5, dropout_rate=0.35,
-        weight_decay=1e-4, kernel_initializer=_he(3), input_shape=(32, 48, 3),
+        kernel_regularizer=_l2(), kernel_initializer=_he(3), input_shape=(32, 48, 3),
         head_config_overrides=dict(_NO_BIAS_HEAD)),
     "mobilenet_v4": lambda: dict(
         num_classes=7, depths=[1, 1], dims=[16, 32], block_types=["IB", "ExtraDW"],
         strides=[1, 2], width_multiplier=0.5, use_attention=True, attention_stages=[1],
-        dropout_rate=0.35, weight_decay=1e-4, kernel_initializer=_he(3),
+        dropout_rate=0.35, kernel_regularizer=_l2(), kernel_initializer=_he(3),
         input_shape=(64, 96, 3), head_config_overrides=dict(_NO_BIAS_HEAD)),
     "convnext_v1": lambda: dict(
         num_classes=7, depths=[1, 1], dims=[8, 16], drop_path_rate=0.2,
@@ -356,18 +370,15 @@ PROBES: Dict[str, Callable[[], Dict[str, Any]]] = {
         head_config_overrides=dict(_NO_BIAS_HEAD)),
     "rad_convnet": lambda: dict(
         num_classes=7, depths=[1, 1], dims=[8, 16], rad_kernel_size=5, rad_groups=2,
-        mlp_ratio=2, activation="relu", use_bias=False, dropout_rate=0.1, strides=2,
-        input_shape=(32, 48, 3)),
+        mlp_ratio=2, activation="relu", use_bias=False, kernel_regularizer=_l2(),
+        dropout_rate=0.1, strides=2, input_shape=(32, 48, 3),
+        head_config_overrides={"classifier_dropout_rate": 0.1}),
     "squeezenet_v1": lambda: dict(
-        num_classes=7,
-        variant_config=_squeezenet_table(f"{_VISION}.squeezenet.squeezenet_v1", "SqueezeNetV1", "1.0"),
-        use_bypass="simple", dropout_rate=0.25, kernel_regularizer=_l2(),
-        kernel_initializer=_he(3), input_shape=(48, 64, 3)),
+        num_classes=7, variant="1.1", use_bypass="simple", dropout_rate=0.25,
+        kernel_regularizer=_l2(), kernel_initializer=_he(3), input_shape=(48, 64, 3)),
     "squeezenet_v2": lambda: dict(
-        num_classes=7,
-        variant_config=_squeezenet_table(f"{_VISION}.squeezenet.squeezenet_v2", "SqueezeNoduleNetV2", "v2"),
-        dropout_rate=0.25, kernel_regularizer=_l2(), kernel_initializer=_he(3),
-        input_shape=(48, 64, 3)),
+        num_classes=7, variant="v1", dropout_rate=0.25, kernel_regularizer=_l2(),
+        kernel_initializer=_he(3), input_shape=(48, 64, 3)),
 }
 #: A second probe for an argument the first cannot carry (SqueezeNet V2's 3-D model needs
 #: a volume of at least 35 voxels per axis).
@@ -422,272 +433,6 @@ class Open:
 
 #: Every row that fails today, keyed ``(rule, subject)``.
 LEDGER: Dict[Tuple[str, str], Open] = {
-    ("unknown_variant_lists_the_keys", "mobilenet_v2"): Open(
-        AssertionError,
-        "the MobileNet V1 and V2 migration",
-        "the message reads \"Unknown variant 'nope'. Available: [...]\", not \"Available "
-        'variants: [...]"',
-        'Available: ['),
-    ("documented_override_is_accepted", "mobilenet_v1"): Open(
-        AssertionError,
-        "the MobileNet V1 and V2 migration",
-        "width_multiplier=0.25 gives 0.125: the variant's own value is multiplied, not "
-        'overridden',
-        "{'width_multiplier': 0.125}"),
-    ("documented_override_is_accepted", "mobilenet_v2"): Open(
-        AssertionError,
-        "the MobileNet V1 and V2 migration",
-        "width_multiplier=0.25 gives 0.1875: the variant's own value is multiplied, not "
-        'overridden',
-        "{'width_multiplier': 0.1875}"),
-    ("documented_override_is_accepted", "convnext_v1"): Open(
-        TypeError,
-        "the ConvNeXt migration",
-        "TypeError: got multiple values for keyword argument 'depths'",
-        "got multiple values for keyword argument 'depths'"),
-    ("documented_override_is_accepted", "convnext_v2"): Open(
-        TypeError,
-        "the ConvNeXt migration",
-        "TypeError: got multiple values for keyword argument 'depths'",
-        "got multiple values for keyword argument 'depths'"),
-    ("pretrained_true_names_the_variant", "mobilenet_v1"): Open(
-        ValueError,
-        "the MobileNet V1 and V2 migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': True}, no "
-        'NotImplementedError',
-        "Unrecognized keyword arguments passed to MobileNetV1: {'pretrained'"),
-    ("pretrained_true_names_the_variant", "mobilenet_v2"): Open(
-        ValueError,
-        "the MobileNet V1 and V2 migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': True}, no "
-        'NotImplementedError',
-        "Unrecognized keyword arguments passed to MobileNetV2: {'pretrained'"),
-    ("pretrained_true_names_the_variant", "rad_convnet"): Open(
-        ValueError,
-        "the RADConvNet migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': True}, no "
-        'NotImplementedError',
-        "Unrecognized keyword arguments passed to RADConvNet: {'pretrained'"),
-    ("pretrained_true_names_the_variant", "squeezenet_v1"): Open(
-        ValueError,
-        "the SqueezeNet migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': True}, no "
-        'NotImplementedError',
-        "Unrecognized keyword arguments passed to SqueezeNetV1: {'pretrained'"),
-    ("pretrained_true_names_the_variant", "squeezenet_v2"): Open(
-        ValueError,
-        "the SqueezeNet migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': True}, no "
-        'NotImplementedError',
-        "Unrecognized keyword arguments passed to SqueezeNoduleNetV2: {'pretrained'"),
-    ("missing_path_raises_file_not_found", "mobilenet_v1"): Open(
-        ValueError,
-        "the MobileNet V1 and V2 migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to MobileNetV1: {'pretrained'"),
-    ("missing_path_raises_file_not_found", "mobilenet_v2"): Open(
-        ValueError,
-        "the MobileNet V1 and V2 migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to MobileNetV2: {'pretrained'"),
-    ("missing_path_raises_file_not_found", "convnext_v1"): Open(
-        TypeError,
-        "the ConvNeXt migration",
-        "TypeError: got multiple values for keyword argument 'depths' (a tiny from_variant "
-        'cannot be built)',
-        "got multiple values for keyword argument 'depths'"),
-    ("missing_path_raises_file_not_found", "convnext_v2"): Open(
-        TypeError,
-        "the ConvNeXt migration",
-        "TypeError: got multiple values for keyword argument 'depths' (a tiny from_variant "
-        'cannot be built)',
-        "got multiple values for keyword argument 'depths'"),
-    ("missing_path_raises_file_not_found", "rad_convnet"): Open(
-        ValueError,
-        "the RADConvNet migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to RADConvNet: {'pretrained'"),
-    ("missing_path_raises_file_not_found", "squeezenet_v1"): Open(
-        ValueError,
-        "the SqueezeNet migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to SqueezeNetV1: {'pretrained'"),
-    ("missing_path_raises_file_not_found", "squeezenet_v2"): Open(
-        ValueError,
-        "the SqueezeNet migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to SqueezeNoduleNetV2: {'pretrained'"),
-    ("local_path_round_trip_headed", "mobilenet_v1"): Open(
-        ValueError,
-        "the MobileNet V1 and V2 migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to MobileNetV1: {'pretrained'"),
-    ("local_path_round_trip_headed", "mobilenet_v2"): Open(
-        ValueError,
-        "the MobileNet V1 and V2 migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to MobileNetV2: {'pretrained'"),
-    ("local_path_round_trip_headed", "convnext_v1"): Open(
-        TypeError,
-        "the ConvNeXt migration",
-        "TypeError: got multiple values for keyword argument 'depths' (a tiny from_variant "
-        'cannot be built)',
-        "got multiple values for keyword argument 'depths'"),
-    ("local_path_round_trip_headed", "convnext_v2"): Open(
-        TypeError,
-        "the ConvNeXt migration",
-        "TypeError: got multiple values for keyword argument 'depths' (a tiny from_variant "
-        'cannot be built)',
-        "got multiple values for keyword argument 'depths'"),
-    ("local_path_round_trip_headed", "rad_convnet"): Open(
-        ValueError,
-        "the RADConvNet migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to RADConvNet: {'pretrained'"),
-    ("local_path_round_trip_headed", "squeezenet_v1"): Open(
-        ValueError,
-        "the SqueezeNet migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to SqueezeNetV1: {'pretrained'"),
-    ("local_path_round_trip_headed", "squeezenet_v2"): Open(
-        ValueError,
-        "the SqueezeNet migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to SqueezeNoduleNetV2: {'pretrained'"),
-    ("local_path_round_trip_headless", "mobilenet_v1"): Open(
-        ValueError,
-        "the MobileNet V1 and V2 migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to MobileNetV1: {'pretrained'"),
-    ("local_path_round_trip_headless", "mobilenet_v2"): Open(
-        ValueError,
-        "the MobileNet V1 and V2 migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to MobileNetV2: {'pretrained'"),
-    ("local_path_round_trip_headless", "convnext_v1"): Open(
-        TypeError,
-        "the ConvNeXt migration",
-        "TypeError: got multiple values for keyword argument 'depths' (a tiny from_variant "
-        'cannot be built)',
-        "got multiple values for keyword argument 'depths'"),
-    ("local_path_round_trip_headless", "convnext_v2"): Open(
-        TypeError,
-        "the ConvNeXt migration",
-        "TypeError: got multiple values for keyword argument 'depths' (a tiny from_variant "
-        'cannot be built)',
-        "got multiple values for keyword argument 'depths'"),
-    ("local_path_round_trip_headless", "rad_convnet"): Open(
-        ValueError,
-        "the RADConvNet migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to RADConvNet: {'pretrained'"),
-    ("local_path_round_trip_headless", "squeezenet_v1"): Open(
-        ValueError,
-        "the SqueezeNet migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to SqueezeNetV1: {'pretrained'"),
-    ("local_path_round_trip_headless", "squeezenet_v2"): Open(
-        ValueError,
-        "the SqueezeNet migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to SqueezeNoduleNetV2: {'pretrained'"),
-    ("headless_attribute_is_none", "convnext_v1"): Open(
-        AssertionError,
-        "the ConvNeXt migration",
-        'include_top=False leaves no classification_head attribute (hasattr is False)',
-        'include_top=False leaves no attribute'),
-    ("headless_attribute_is_none", "convnext_v2"): Open(
-        AssertionError,
-        "the ConvNeXt migration",
-        'include_top=False leaves no classification_head attribute (hasattr is False)',
-        'include_top=False leaves no attribute'),
-    ("headless_attribute_is_none", "rad_convnet"): Open(
-        AssertionError,
-        "the RADConvNet migration",
-        'include_top=False leaves no classification_head attribute (hasattr is False)',
-        'include_top=False leaves no attribute'),
-    ("explicit_build_equals_lazy", "mobilenet_v1"): Open(
-        UserWarning,
-        "the MobileNet V1 and V2 migration",
-        'UserWarning: build() on a layer with no build() method leaves count_params() at 0',
-        'does not have a `build()` method implemented'),
-    ("explicit_build_equals_lazy_headless", "mobilenet_v1"): Open(
-        UserWarning,
-        "the MobileNet V1 and V2 migration",
-        'UserWarning: build() on a layer with no build() method leaves count_params() at 0',
-        'does not have a `build()` method implemented'),
-    ("invalid_values_name_the_value::dropout_rate=2.0", "mobilenet_v1"): Open(
-        AssertionError,
-        "the MobileNet V1 and V2 migration",
-        'the message reads "classifier_dropout_rate must be in [0, 1), got 2.0" (a sub-'
-        "layer's argument, not the model's)",
-        'classifier_dropout_rate must be in [0, 1)'),
-    ("invalid_values_name_the_value::dropout_rate=2.0", "mobilenet_v2"): Open(
-        AssertionError,
-        "the MobileNet V1 and V2 migration",
-        'the message reads "classifier_dropout_rate must be in [0, 1), got 2.0" (a sub-'
-        "layer's argument, not the model's)",
-        'classifier_dropout_rate must be in [0, 1)'),
-    ("invalid_values_name_the_value::num_classes=0", "rad_convnet"): Open(
-        AssertionError,
-        "the RADConvNet migration",
-        'num_classes=0 was accepted',
-        'num_classes=0 was accepted'),
-    ("invalid_values_name_the_value::use_bypass=bogus", "squeezenet_v1"): Open(
-        AssertionError,
-        "the SqueezeNet migration",
-        "use_bypass='bogus' was accepted",
-        "use_bypass='bogus' was accepted"),
-    ("mobilenet_default_has_no_l2_losses", "mobilenet_v1"): Open(
-        AssertionError,
-        "the MobileNet V1 and V2 migration",
-        '28 regularization losses by default',
-        'regularization losses by default'),
-    ("mobilenet_default_has_no_l2_losses", "mobilenet_v2"): Open(
-        AssertionError,
-        "the MobileNet V1 and V2 migration",
-        '36 regularization losses by default',
-        'regularization losses by default'),
-    ("mobilenet_default_has_no_l2_losses", "mobilenet_v3"): Open(
-        AssertionError,
-        "the MobileNet V3 and V4 migration",
-        '43 regularization losses by default',
-        'regularization losses by default'),
-    ("mobilenet_default_has_no_l2_losses", "mobilenet_v4"): Open(
-        AssertionError,
-        "the MobileNet V3 and V4 migration",
-        '27 regularization losses by default',
-        'regularization losses by default'),
-    ("no_replayed_draw::instance", "squeezenet_v1"): Open(
-        AssertionError,
-        "the SqueezeNet migration",
-        '276 of 325 kernel pairs replay one draw',
-        'kernel pairs replay one draw'),
-    ("no_replayed_draw::instance", "squeezenet_v2"): Open(
-        AssertionError,
-        "the SqueezeNet migration",
-        '120 of 153 kernel pairs replay one draw',
-        'kernel pairs replay one draw'),
-    ("no_replayed_draw::instance", "vae"): Open(
-        AssertionError,
-        "the ConvUNext and VAE migration",
-        '91 of 136 kernel pairs replay one draw',
-        'kernel pairs replay one draw'),
     ("no_replayed_draw::default", "uca_encoder"): Open(
         AssertionError,
         "the RBFProtoNet and UcaEncoder migration",
@@ -748,34 +493,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the CliffordCLIP stem migration",
         '776 of 9316 kernel pairs replay one draw',
         'kernel pairs replay one draw'),
-    ("layer_names_follow_the_table", "mobilenet_v1"): Open(
-        AssertionError,
-        "the MobileNet V1 and V2 migration",
-        '1 violation(s): no layer is named `stem`',
-        'no layer is named `stem`'),
-    ("layer_names_follow_the_table", "mobilenet_v2"): Open(
-        AssertionError,
-        "the MobileNet V1 and V2 migration",
-        '1 violation(s): no layer is named `stem`',
-        'no layer is named `stem`'),
-    ("layer_names_follow_the_table", "convnext_v1"): Open(
-        AssertionError,
-        "the ConvNeXt migration",
-        '4 violation(s): stage_0_block_0, downsample_norm_0, downsample_conv_0, '
-        'stage_1_block_0',
-        'is not a table spelling'),
-    ("layer_names_follow_the_table", "convnext_v2"): Open(
-        AssertionError,
-        "the ConvNeXt migration",
-        '4 violation(s): stage_0_block_0, downsample_norm_0, downsample_conv_0, '
-        'stage_1_block_0',
-        'is not a table spelling'),
-    ("layer_names_follow_the_table", "rad_convnet"): Open(
-        AssertionError,
-        "the RADConvNet migration",
-        '13 violation(s): stage0_block0_rad_conv, stage0_block0_norm, stage0_block0_expand, '
-        'stage0_block0_reduce, ...',
-        'is not a table spelling'),
     ("layer_names_follow_the_table", "clifford_rbf_protonet"): Open(
         AssertionError,
         "the RBFProtoNet and UcaEncoder migration",
@@ -796,28 +513,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the CapsNet migration",
         '7 violation(s): legacy_conv_1, legacy_bn_1, legacy_relu_1, legacy_conv_2, ...',
         'is not a table spelling'),
-    ("config_fidelity", "convnext_v1"): Open(
-        AssertionError,
-        "the ConvNeXt migration",
-        "from_config rewrote the dict it was given",
-        'from_config rewrote the dict it was given'),
-    ("config_fidelity", "convnext_v2"): Open(
-        AssertionError,
-        "the ConvNeXt migration",
-        "from_config rewrote the dict it was given",
-        'from_config rewrote the dict it was given'),
-    ("config_fidelity", "squeezenet_v1"): Open(
-        AssertionError,
-        "the SqueezeNet migration",
-        "from_config rewrote the dict it was given, and the rebuilt model reports "
-        "another kernel_initializer",
-        'from_config rewrote the dict it was given'),
-    ("config_fidelity", "squeezenet_v2"): Open(
-        AssertionError,
-        "the SqueezeNet migration",
-        "from_config rewrote the dict it was given, and the rebuilt model reports "
-        "another kernel_initializer",
-        'from_config rewrote the dict it was given'),
 }
 
 
@@ -996,10 +691,40 @@ MIGRATED_LOADER_DONORS: Dict[str, Tuple[str, Dict[str, Any]]] = {
     "resnet": ("resnet18", {"block_type": "bottleneck"}),
     "cliffordnet": ("nano", {"patch_size": 1}),
     "hierarchical": ("hier_345", {"patch_size": 1}),
+    "mobilenet_v1": ("small", {"width_multiplier": 0.5}),
+    "mobilenet_v2": ("small", {"width_multiplier": 0.5}),
     "mobilenet_v3": ("large", {}),
     "mobilenet_v4": ("hybrid_medium", {}),
+    "convnext_v1": ("tiny", {"depths": [1], "dims": [16]}),
+    "convnext_v2": ("tiny", {"depths": [1], "dims": [16]}),
+    "rad_convnet": ("tiny", {"depths": [1], "dims": [16]}),
+    # Another variant: its stem and first Fire module have other shapes, while every later
+    # layer has the same name and shape, so SOME layers fit by name.
+    "squeezenet_v1": ("1.0", {}),
+    "squeezenet_v2": ("v1", {}),
 }
 MIGRATED_LOADER_KEYS = tuple(MIGRATED_LOADER_DONORS)
+#: The loader families that take ``head_config_overrides``. SqueezeNet's head is its own ``conv10``
+#: (no shared ``ClassificationHead`` to configure), so it has no such argument.
+HEAD_OVERRIDE_KEYS = tuple(
+    key for key in MIGRATED_LOADER_KEYS
+    if "head_config_overrides" in inspect.signature(classifier(key).cls.__init__).parameters)
+
+
+def test_only_the_conv10_models_take_no_head_override() -> None:
+    assert set(MIGRATED_LOADER_KEYS) - set(HEAD_OVERRIDE_KEYS) == {"squeezenet_v1", "squeezenet_v2"}
+
+#: What the layer check must name when a donor's trunk does not fit. A donor of another
+#: depth or block type misses layers the receiver has; MobileNet V1 and V2 have one fixed
+#: layer list, so a donor of another width has every layer and no shape that fits.
+TRUNK_MISMATCH_REPORT: Dict[str, Tuple[str, ...]] = {
+    "mobilenet_v1": ("shape_mismatch",),
+    "mobilenet_v2": ("shape_mismatch",),
+    # A donor of another variant has the same layers, in other widths.
+    "squeezenet_v1": ("shape_mismatch",),
+    "squeezenet_v2": ("shape_mismatch",),
+}
+_DEFAULT_TRUNK_MISMATCH_REPORT = ("shape_mismatch", "missing_in_source")
 
 
 @pytest.mark.parametrize(
@@ -1019,10 +744,218 @@ def test_a_checkpoint_whose_trunk_does_not_fit_is_refused(key, tmp_path) -> None
     own.build((None, *c.input_shape))
     assert donor_layers & {layer.name for layer in own.layers if layer.weights} - {
         "classification_head"}, "control: no trunk layer is shared by name, the old load restored nothing"
-    with pytest.raises(ValueError) as caught:
+    with pytest.raises(ValueError):
         c.from_variant(pretrained=str(path))
+    # The configuration check refuses these donors first (they differ in a structural argument);
+    # with it switched off the layer check is what refuses them, which this row is about.
+    with pytest.raises(ValueError) as caught:
+        load_pretrained_checkpoint(own, str(path), c.input_shape,
+                                   ignore_config_keys=tuple(own.get_config()))
     message = str(caught.value)
-    assert "shape_mismatch" in message and "missing_in_source" in message, message
+    named = TRUNK_MISMATCH_REPORT.get(key, _DEFAULT_TRUNK_MISMATCH_REPORT)
+    assert all(word in message for word in named), message
+
+
+#: The same classifiers, with a donor that differs by ONE constructor argument that moves
+#: no weight shape: ``(from_variant keywords, the config key that differs)``. The layer
+#: check restores every layer of such a donor, so only the archive's own config can tell
+#: the architectures apart.
+SAME_SHAPE_DONORS: Dict[str, Tuple[Dict[str, Any], str]] = {
+    "resnet": ({"activation_type": "gelu"}, "activation_type"),
+    "cliffordnet": ({"ctx_mode": "abs"}, "ctx_mode"),
+    "hierarchical": ({"ctx_mode": "abs"}, "ctx_mode"),
+    "mobilenet_v1": ({"width_multiplier": 0.2501}, "width_multiplier"),
+    "mobilenet_v2": ({"width_multiplier": 0.36}, "width_multiplier"),
+    "mobilenet_v3": ({"width_multiplier": 0.51}, "width_multiplier"),
+    "mobilenet_v4": ({"strides": [1, 1, 2, 2, 1, 2, 1]}, "strides"),
+    "convnext_v1": ({"activation": "relu"}, "activation"),
+    "convnext_v2": ({"activation": "relu"}, "activation"),
+    "rad_convnet": ({"activation": "relu"}, "activation"),
+    # A simple bypass adds an Add layer and no weight: the same tensors compute another function.
+    "squeezenet_v1": ({"use_bypass": "simple"}, "use_bypass"),
+}
+SAME_SHAPE_KEYS = tuple(SAME_SHAPE_DONORS)
+
+#: Loader families with no architecture argument that moves no weight shape, and why.
+NO_SAME_SHAPE_ARGUMENT: Dict[str, str] = {
+    "squeezenet_v2": "its only architecture arguments are `variant` and `use_3d`, and each moves a "
+                     "kernel shape (another squeeze width, a rank-5 kernel)",
+}
+
+
+def test_the_same_shape_donors_cover_every_loader_family() -> None:
+    assert set(SAME_SHAPE_KEYS) | set(NO_SAME_SHAPE_ARGUMENT) == set(MIGRATED_LOADER_KEYS)
+    assert not set(SAME_SHAPE_KEYS) & set(NO_SAME_SHAPE_ARGUMENT)
+
+
+def test_squeezenodule_net_has_no_architecture_argument_that_keeps_every_weight_shape() -> None:
+    """The exemption above is a measurement: both of its architecture arguments move a shape."""
+    c = classifier("squeezenet_v2")
+    base = _weight_layout(c.from_variant())
+    another_variant = c.cls.from_variant("v1", num_classes=NUM_CLASSES, input_shape=c.input_shape)
+    three_d = c.cls.from_variant("v2", num_classes=NUM_CLASSES, use_3d=True,
+                                 input_shape=(36, 36, 36, 1))
+    assert _weight_layout(another_variant) != base, "`variant` moves no weight shape"
+    assert _weight_layout(three_d) != base, "`use_3d` moves no weight shape"
+
+
+@pytest.mark.parametrize(
+    "key", _rows("local_path_refuses_another_architecture_of_equal_shape", SAME_SHAPE_KEYS))
+@ledgered("local_path_refuses_another_architecture_of_equal_shape")
+def test_a_checkpoint_of_another_architecture_with_every_shape_equal_is_refused(
+        key, tmp_path) -> None:
+    c = classifier(key)
+    change, config_key = SAME_SHAPE_DONORS[key]
+    donor = c.from_variant(**change)
+    donor.build((None, *c.input_shape))
+    path = tmp_path / "donor.keras"
+    donor.save(path)
+    own = c.from_variant()
+    own.build((None, *c.input_shape))
+    assert _weight_layout(own) == _weight_layout(donor), (
+        "control: the donor must differ in no weight shape, or the layer check would refuse it")
+    before = [keras.ops.convert_to_numpy(w) for w in own.weights]
+    with pytest.raises(ValueError) as caught:
+        own.load_pretrained_weights(str(path))
+    assert f"{config_key}: checkpoint" in str(caught.value), str(caught.value)
+    assert all(np.array_equal(b, keras.ops.convert_to_numpy(w))
+               for b, w in zip(before, own.weights)), "a refused load wrote a weight"
+    c.from_variant(**change, pretrained=str(path))  # the donor's own architecture loads
+
+
+#: A head override that computes another function and moves no weight shape.
+_HEAD_MAX = {"pooling_type": "max"}
+
+
+def _saved(model: keras.Model, c: Classifier, path: Path) -> str:
+    model.build((None, *c.input_shape))
+    model.save(path)
+    return str(path)
+
+
+@pytest.mark.parametrize(
+    "key", _rows("local_path_refuses_a_head_that_computes_another_function", HEAD_OVERRIDE_KEYS))
+@ledgered("local_path_refuses_a_head_that_computes_another_function")
+def test_a_head_that_computes_another_function_is_refused_unless_it_is_a_new_head(
+        key, tmp_path) -> None:
+    """The head layer is copied when its shapes fit, so then its configuration must be the same."""
+    c = classifier(key)
+    donor = c.from_variant(head_config_overrides=_HEAD_MAX)
+    path = _saved(donor, c, tmp_path / "donor.keras")
+    own = c.from_variant()
+    own.build((None, *c.input_shape))
+    assert _weight_layout(own) == _weight_layout(donor), (
+        "control: the donor must differ in no weight shape, or the layer check would decide")
+    before = [keras.ops.convert_to_numpy(w) for w in own.weights]
+    with pytest.raises(ValueError) as caught:
+        own.load_pretrained_weights(path)
+    assert "head_config_overrides['pooling_type']: checkpoint 'max'" in str(caught.value), (
+        str(caught.value))
+    assert all(np.array_equal(b, keras.ops.convert_to_numpy(w))
+               for b, w in zip(before, own.weights)), "a refused load wrote a weight"
+    c.from_variant(head_config_overrides=_HEAD_MAX, pretrained=path)  # the same head loads
+    c.from_variant(num_classes=NUM_CLASSES + 2, pretrained=path)  # a new head is not compared
+    c.from_variant(include_top=False, pretrained=path)  # and neither is no head
+
+
+@pytest.mark.parametrize(
+    "key", _rows("local_path_reads_the_config_of_a_wrapped_checkpoint", SAME_SHAPE_KEYS))
+@ledgered("local_path_reads_the_config_of_a_wrapped_checkpoint")
+def test_a_functional_wrapper_is_compared_by_the_config_of_the_model_it_wraps(
+        key, tmp_path) -> None:
+    """The trainers save ``keras.Model(inp, model(inp))``; its archive holds the model's config."""
+    c = classifier(key)
+    change, config_key = SAME_SHAPE_DONORS[key]
+    inner = c.from_variant(**change)
+    inner.build((None, *c.input_shape))
+    inp = keras.Input(c.input_shape)
+    path = str(tmp_path / "wrapped.keras")
+    keras.Model(inp, inner(inp)).save(path)
+    own = c.from_variant()
+    own.build((None, *c.input_shape))
+    before = [keras.ops.convert_to_numpy(w) for w in own.weights]
+    with pytest.raises(ValueError) as caught:
+        own.load_pretrained_weights(path)
+    assert f"{config_key}: checkpoint" in str(caught.value), str(caught.value)
+    assert all(np.array_equal(b, keras.ops.convert_to_numpy(w))
+               for b, w in zip(before, own.weights)), "a refused load wrote a weight"
+    loaded = c.from_variant(**change, pretrained=path)  # the wrapped model's own architecture loads
+    donor_weights = dict(weight_map(inner))
+    assert any(np.array_equal(v, donor_weights[p]) for p, v in weight_map(loaded)
+               if p in donor_weights), "the load restored no tensor"
+
+
+#: The classifiers with an int-or-pair kernel argument: ``(argument, integer, same pair)``.
+PAIR_SPELLED_KERNELS: Dict[str, Tuple[str, int, Tuple[int, int]]] = {
+    "convnext_v1": ("kernel_size", 7, (7, 7)),
+    "convnext_v2": ("kernel_size", 7, (7, 7)),
+    "rad_convnet": ("rad_kernel_size", 3, (3, 3)),
+}
+
+
+@pytest.mark.parametrize(
+    "key", _rows("local_path_reads_an_integer_and_its_pair_as_one_kernel",
+                 tuple(PAIR_SPELLED_KERNELS)))
+@ledgered("local_path_reads_an_integer_and_its_pair_as_one_kernel")
+def test_an_integer_kernel_and_its_pair_are_one_architecture(key, tmp_path) -> None:
+    c = classifier(key)
+    argument, size, pair = PAIR_SPELLED_KERNELS[key]
+    path = _saved(c.from_variant(**{argument: size}), c, tmp_path / "donor.keras")
+    c.from_variant(**{argument: pair}, pretrained=path)  # the same kernel, spelled as a pair
+    with pytest.raises(ValueError, match=argument):  # a pair of two sizes is another kernel
+        c.from_variant(**{argument: (size, size + 2)}, pretrained=path)
+
+
+@pytest.mark.parametrize(
+    "key", _rows("head_config_overrides_are_json", HEAD_OVERRIDE_KEYS))
+@ledgered("head_config_overrides_are_json")
+def test_a_live_object_in_head_config_overrides_is_refused_by_name(key) -> None:
+    c = classifier(key)
+    with pytest.raises(ValueError, match=r"head_config_overrides\['kernel_regularizer'\]"):
+        c.make(head_config_overrides={"kernel_regularizer": keras.regularizers.L2(1e-4)})
+    serialized = {"kernel_regularizer": keras.regularizers.serialize(keras.regularizers.L2(1e-4))}
+    model = c.make(head_config_overrides=serialized)
+    assert json.loads(json.dumps(model.get_config()))["head_config_overrides"] == serialized
+
+
+#: Shapes with no channel count: the first convolution would meet ``None % groups``.
+_CHANNELLESS_SHAPES = [(None, None, None), (32, 48, None)]
+
+
+@pytest.mark.parametrize("shape", _CHANNELLESS_SHAPES, ids=str)
+@pytest.mark.parametrize("key", MIGRATED_LOADER_KEYS)
+def test_a_pretrained_load_without_a_channel_count_is_refused_naming_input_shape(
+        key, shape, tmp_path) -> None:
+    """``from_variant(pretrained=path, input_shape=(None, None, None))`` cannot build the model.
+
+    It failed as "unsupported operand type(s) for %" (wrapped in a load error for most
+    families, bare for the Clifford pair), which names neither the argument nor its value.
+    """
+    c = classifier(key)
+    path = _saved(c.make(), c, tmp_path / "donor.keras")
+    with pytest.raises(ValueError, match="input_shape") as caught:
+        c.from_variant(pretrained=path, input_shape=shape)
+    assert str(shape) in str(caught.value), str(caught.value)
+
+
+#: The classifiers that build in ``from_variant`` or the constructor whenever they have a shape
+#: (the others store ``input_shape`` and build at the first call or at a pretrained load).
+_BUILD_AT_CONSTRUCTION = ("cliffordnet", "hierarchical", "squeezenet_v1", "squeezenet_v2")
+
+
+@pytest.mark.parametrize("key", _BUILD_AT_CONSTRUCTION)
+def test_a_model_that_builds_at_construction_refuses_a_channelless_input_shape_by_name(key) -> None:
+    """Without a checkpoint too: the build is the constructor's (SqueezeNet) or ``from_variant``'s."""
+    with pytest.raises(ValueError, match="input_shape") as caught:
+        classifier(key).from_variant(input_shape=(None, None, None))
+    assert "(None, None, None)" in str(caught.value)
+
+
+@pytest.mark.parametrize("key", [k for k in CLASSIFIER_KEYS if k not in _BUILD_AT_CONSTRUCTION])
+def test_a_model_that_builds_later_stores_a_channelless_input_shape_unbuilt(key) -> None:
+    """The control of the row above: these classifiers have nothing to refuse until they build."""
+    model = classifier(key).from_variant(input_shape=(None, None, None))
+    assert not model.built
 
 
 def _built(c: Classifier, **knobs: Any) -> keras.Model:
@@ -1038,6 +971,71 @@ def test_a_headless_model_still_defines_its_head_attribute(key: str) -> None:
     model = c.make(include_top=False)
     assert hasattr(model, "classification_head"), "include_top=False leaves no attribute"
     assert model.classification_head is None
+
+
+@pytest.mark.parametrize("key", CLASSIFIER_KEYS)
+def test_include_top_is_a_real_bool(key: str) -> None:
+    """A string, an int or ``None`` is refused by value and type; ``numpy.bool_`` is a bool.
+
+    ``bool("no")`` is ``True``: an accepted string built a headed model for a caller who
+    wrote ``include_top="no"``. A ``numpy.bool_`` (what a comparison on an array yields)
+    is coerced, so ``get_config`` stays JSON-safe and the stored attribute is a ``bool``.
+    """
+    c = classifier(key)
+    for value in ("no", 0, 1, None):
+        with pytest.raises(TypeError, match=r"include_top must be a bool or numpy\.bool_") as caught:
+            c.make(include_top=value)
+        assert repr(value) in str(caught.value)
+    model = c.make(include_top=np.False_)
+    assert model.include_top is False
+    assert json.loads(json.dumps(model.get_config()))["include_top"] is False
+    if c.head_attribute:
+        assert model.classification_head is None
+
+
+#: ``key -> the module-level factory`` of each classifier (house shape H9).
+FACTORY_NAMES: Dict[str, str] = {
+    "resnet": "create_resnet", "cliffordnet": "create_cliffordnet",
+    "hierarchical": "create_hierarchical_cliffordnet",
+    "mobilenet_v1": "create_mobilenetv1", "mobilenet_v2": "create_mobilenetv2",
+    "mobilenet_v3": "create_mobilenetv3", "mobilenet_v4": "create_mobilenetv4",
+    "convnext_v1": "create_convnext_v1", "convnext_v2": "create_convnext_v2",
+    "rad_convnet": "create_rad_convnet",
+    "squeezenet_v1": "create_squeezenet_v1", "squeezenet_v2": "create_squeezenodule_net_v2",
+}
+
+
+def test_every_classifier_module_defines_exactly_the_factories_this_file_calls() -> None:
+    assert set(FACTORY_NAMES) == set(CLASSIFIER_KEYS)
+    for module in {c.module for c in CLASSIFIERS}:
+        defined = {name for name, obj in vars(importlib.import_module(module)).items()
+                   if name.startswith("create_") and inspect.isfunction(obj)
+                   and obj.__module__ == module}
+        called = {FACTORY_NAMES[c.key] for c in CLASSIFIERS if c.module == module}
+        assert defined == called, (module, defined, called)
+
+
+@pytest.mark.parametrize("key", CLASSIFIER_KEYS)
+def test_a_factory_gives_its_caller_the_include_top_the_caller_asked_for(key: str) -> None:
+    """``create_*(include_top=False)`` is headless, and ``include_top=True`` is headed.
+
+    The factory forwards the caller's extras to ``from_variant``; a factory that forces the
+    argument (``**{**kwargs, "include_top": True}``) hands a headed model to every caller that
+    asked for a backbone, and only a trainer that happened to call it caught that before.
+    """
+    c = classifier(key)
+    factory = getattr(importlib.import_module(c.module), FACTORY_NAMES[key])
+    for requested in (False, True):
+        model = factory(c.variant, num_classes=NUM_CLASSES, input_shape=c.input_shape,
+                        include_top=requested, **c.tiny)
+        if c.head_attribute:
+            assert (model.classification_head is not None) is requested, (
+                f"{FACTORY_NAMES[key]}(include_top={requested}) gave include_top="
+                f"{model.include_top}")
+        model(_images(*c.input_shape))
+        assert bool(_head_paths(c.head_markers, model)) is requested, (
+            f"{FACTORY_NAMES[key]}(include_top={requested}) built "
+            f"{'a head' if requested is False else 'no head'}")
 
 
 def _head_paths(markers: Sequence[str], model: keras.Model) -> List[str]:
@@ -1425,6 +1423,18 @@ def _build_rad(init):
                     _images(32, 32, 3))
 
 
+def _build_rad_hidden_head(init):
+    """The advertised ``block_dims`` override: three head kernels, none of them the default head's.
+
+    One explicit seed handed to the default head's classifier is fine; handed to every Dense of
+    a head with hidden blocks it replays one draw three times (measured r = 1.000000).
+    """
+    from dl_techniques.models.vision.rad_convnet.model import RADConvNet
+    return _forward(RADConvNet.from_variant(
+        "tiny", num_classes=10, input_shape=(32, 32, 3),
+        head_config_overrides={"block_dims": [64, 64]}), _images(32, 32, 3))
+
+
 def _build_squeezenet_v1(init):
     from dl_techniques.models.vision.squeezenet.squeezenet_v1 import SqueezeNetV1
     return _forward(SqueezeNetV1.from_variant("1.0", num_classes=4, input_shape=(64, 64, 3),
@@ -1559,6 +1569,7 @@ REPLAY_SUBJECTS: Dict[str, Tuple[Callable, bool]] = {
     "convnext_v1": (_convnext("convnext_v1", "ConvNeXtV1"), False),
     "convnext_v2": (_convnext("convnext_v2", "ConvNeXtV2"), False),
     "rad_convnet": (_build_rad, False),
+    "rad_convnet_hidden_head": (_build_rad_hidden_head, False),
     "squeezenet_v1": (_build_squeezenet_v1, True),
     "squeezenet_v2": (_build_squeezenet_v2, True),
     "vae": (_build_vae, True),
@@ -1730,28 +1741,47 @@ def test_the_layer_names_follow_the_naming_table(key: str) -> None:
 
 
 #: The finished families, each with the one pattern every layer the model OWNS (a direct
-#: child that holds a weight, at any depth below it) must match. The deny-list above only
-#: reads names it has heard of; this table is positive, so a spelling nobody anticipated
-#: (``uib1_1`` for a MobileNetV4 block) fails here. Deeper names belong to the layers
-#: themselves (``stem_conv1``, ``dw_conv``, ``classifier``) and are not read.
+#: sublayer, weighted or not: a drop path, an activation, a pooling, a flatten) must match.
+#: The deny-list above only reads names it has heard of; this table is positive, so a
+#: spelling nobody anticipated (``uib1_1`` for a MobileNetV4 block, ``dp0`` for a drop path)
+#: fails here. Deeper names belong to the layers themselves (``stem_conv1``, ``dw_conv``,
+#: ``classifier``) and are not read.
+_CONVNEXT_CHILDREN = (r"stem|stage[1-9]\d*_block[1-9]\d*(?:_drop_path)?"
+                      r"|downsample_\d+_(?:norm|conv)|classification_head")
 FAMILY_CHILD_NAMES: Dict[str, str] = {
     "resnet": r"stem|stage[1-9]\d*_block[1-9]\d*|classification_head|supervision_head_\d+",
-    "cliffordnet": r"stem|block_\d+|classification_head",
-    "hierarchical": (r"stem|stage[1-9]\d*_block[1-9]\d*|downsample_\d+_(?:depthwise|norm|pointwise)"
-                     r"|classification_head"),
-    "mobilenet_v3": r"stem|block_\d+|last_conv|last_bn|classification_head",
+    "cliffordnet": r"stem|block_\d+(?:_drop_path)?|classification_head",
+    "hierarchical": (r"stem|stage[1-9]\d*_block[1-9]\d*(?:_drop_path)?"
+                     r"|downsample_\d+_(?:depthwise|norm|pointwise)|classification_head"),
+    "mobilenet_v1": r"stem|block_\d+|classification_head",
+    "mobilenet_v2": r"stem|block_\d+|conv_last|conv_last_bn|conv_last_relu6|classification_head",
+    "mobilenet_v3": r"stem|block_\d+|last_conv|last_bn|last_hard_swish|classification_head",
     "mobilenet_v4": r"stem|stage[1-9]\d*_(?:block[1-9]\d*|mqa)|classification_head",
+    "convnext_v1": _CONVNEXT_CHILDREN,
+    "convnext_v2": _CONVNEXT_CHILDREN,
+    "rad_convnet": (r"stem|mlp_activation|stage[1-9]\d*_block[1-9]\d*_"
+                    r"(?:rad_conv|norm|expand|reduce|dropout)"
+                    r"|downsample_\d+_(?:norm|conv)|classification_head"),
+    # SqueezeNet is a functional model: its head is the paper's ``conv10`` and a pool, and its
+    # Fire modules, pools and bypass layers are named by the paper's fire numbers (2 to 9).
+    "squeezenet_v1": (r"stem|fire[2-9]|maxpool[2-9]|add_fire[2-9]|bypass_conv_fire[2-9]"
+                      r"|dropout|conv10|avgpool"),
+    "squeezenet_v2": r"stem|simpfire[2-9]|maxpool[2-9]|dropout|conv10|avgpool",
 }
 
 
-def weighted_children(model: keras.Model) -> List[str]:
-    """The names of the layers ``model`` owns directly that hold at least one weight.
+def direct_children(model: keras.Model) -> List[str]:
+    """The names of the layers ``model`` owns directly, whether or not they hold a weight.
 
-    Interface contract: a weight path reads ``<model>/<child>/.../<variable>``; the
-    child is its second segment. A weight sitting on the model itself has no child and
-    is skipped. Returns the distinct names, sorted.
+    Interface contract: ``model.layers`` is the model's direct sublayers (Keras tracks
+    the ones kept in a list or a dict attribute too). Returns the distinct names, sorted.
+    A weightless child (a drop path, an activation, a pooling) is therefore read, which
+    the weight paths of a built model cannot show. The ``InputLayer`` a functional model
+    holds is not read: it is not a layer the model chose, and its name is a process-wide
+    counter (``input_layer_7``).
     """
-    return sorted({parts[1] for w in model.weights if len(parts := w.path.split("/")) > 2})
+    return sorted({layer.name for layer in model.layers
+                   if not isinstance(layer, keras.layers.InputLayer)})
 
 
 def child_name_violations(key: str, children: Sequence[str]) -> List[str]:
@@ -1768,6 +1798,16 @@ def _hybrid_v4() -> keras.Model:
     return model
 
 
+_VOLUME = (36, 36, 36, 1)  # the smallest cube SqueezeNodule-Net accepts: 35 voxels per axis
+
+
+def _volume_v2(**knobs) -> keras.Model:
+    """The 3D SqueezeNodule-Net, built and run once."""
+    model = classifier("squeezenet_v2").make(use_3d=True, input_shape=_VOLUME, **knobs)
+    model(_images(*_VOLUME))
+    return model
+
+
 #: The builds that between them create every kind of direct child a family has: the head and
 #: the headless build, the deep-supervision heads, the attention stages, a second stem.
 FAMILY_BUILDS: Dict[str, Tuple[Callable[[], keras.Model], ...]] = {
@@ -1778,8 +1818,29 @@ FAMILY_BUILDS: Dict[str, Tuple[Callable[[], keras.Model], ...]] = {
                     lambda: _built(classifier("cliffordnet"), patch_size=1)),
     "hierarchical": (lambda: _built(classifier("hierarchical")),
                      lambda: _built(classifier("hierarchical"), include_top=False)),
+    "mobilenet_v1": (lambda: _built(classifier("mobilenet_v1")),
+                     lambda: _built(classifier("mobilenet_v1"), include_top=False)),
+    "mobilenet_v2": (lambda: _built(classifier("mobilenet_v2")),
+                     lambda: _built(classifier("mobilenet_v2"), include_top=False)),
     "mobilenet_v3": (lambda: _built(classifier("mobilenet_v3")),),
     "mobilenet_v4": (lambda: _built(classifier("mobilenet_v4")), _hybrid_v4),
+    # A drop path exists only for a block with a non-zero rate, so one build has them.
+    "convnext_v1": (lambda: _built(classifier("convnext_v1"), drop_path_rate=0.2),
+                    lambda: _built(classifier("convnext_v1"), drop_path_rate=0.2,
+                                   stochastic_mode="gradient", include_top=False)),
+    "convnext_v2": (lambda: _built(classifier("convnext_v2"), drop_path_rate=0.2),
+                    lambda: _built(classifier("convnext_v2"), drop_path_rate=0.2,
+                                   stochastic_mode="gradient", include_top=False)),
+    # A dropout layer per block exists only with a non-zero rate.
+    "rad_convnet": (lambda: _built(classifier("rad_convnet"), dropout_rate=0.1),
+                    lambda: _built(classifier("rad_convnet"), include_top=False)),
+    # The plain, the simple-bypass and the complex-bypass graph, and the 3D model.
+    "squeezenet_v1": (lambda: _built(classifier("squeezenet_v1")),
+                      lambda: _built(classifier("squeezenet_v1"), use_bypass="simple"),
+                      lambda: _built(classifier("squeezenet_v1"), use_bypass="complex",
+                                     include_top=False)),
+    "squeezenet_v2": (lambda: _built(classifier("squeezenet_v2")),
+                      _volume_v2),
 }
 
 
@@ -1790,8 +1851,8 @@ def test_every_finished_family_has_a_name_table_and_builds() -> None:
 @pytest.mark.parametrize("key", sorted(FAMILY_CHILD_NAMES))
 def test_a_finished_family_owns_only_the_layer_names_of_its_table(key: str) -> None:
     for build in FAMILY_BUILDS[key]:
-        children = weighted_children(build())
-        assert children, "control: the model owns no weighted layer"
+        children = direct_children(build())
+        assert children, "control: the model owns no layer"
         assert child_name_violations(key, children) == []
 
 
@@ -1806,10 +1867,189 @@ def test_the_positive_name_rule_sees_a_spelling_the_deny_list_does_not_know() ->
     assert child_name_violations("resnet", ["stem", "supervision_head_0", "block_0"])
 
 
-def test_weighted_children_reads_the_second_path_segment() -> None:
+def test_the_positive_name_rule_reads_a_weightless_layer() -> None:
+    clean = ["stem", "block_0", "block_0_drop_path", "classification_head"]
+    assert child_name_violations("cliffordnet", clean) == []
+    for planted in ("dp0", "drop_path_0", "block_0_dp", "gap", "flatten", "activation"):
+        assert child_name_violations("cliffordnet", [*clean, planted]), planted
+    assert child_name_violations("mobilenet_v3", ["stem", "last_hard_swish"]) == []
+    assert child_name_violations("mobilenet_v3", ["stem", "last_swish"])
+
+
+def test_direct_children_lists_every_direct_sublayer_weighted_or_not() -> None:
     model = _ToyHeaded(head_name="classification_head")
+    model.drop = keras.layers.Dropout(0.1, name="dropout_0")
     model(np.ones((2, 5), dtype="float32"))
-    assert weighted_children(model) == ["body", "classification_head"]
+    assert direct_children(model) == ["body", "classification_head", "dropout_0"]
+
+
+# ---------------------------------------------------------------------------
+# The numbered names are exactly the names the model's own depths give
+# ---------------------------------------------------------------------------
+
+#: Three stages of three different depths, so a stage index swapped with a block index
+#: (``stage{B}_block{S}``) names a block that does not exist. The patterns above accept
+#: ANY index (``stage[1-9]\d*_block[1-9]\d*``), so a block counted from 2 or a
+#: downsampler counted from 1 passed them; the sets below do not.
+_DEPTHS = [2, 1, 3]
+_DIMS = [8, 16, 16]
+
+
+def _staged_blocks(depths: Sequence[int]) -> set:
+    """``stage{S}_block{B}`` with S and B counted from 1 (N-3), one per block of ``depths``."""
+    return {f"stage{s}_block{b}" for s, depth in enumerate(depths, 1) for b in range(1, depth + 1)}
+
+
+def _flat_blocks(count: int) -> set:
+    """``block_{i}`` counted from 0 (N-2)."""
+    return {f"block_{i}" for i in range(count)}
+
+
+def _downsamplers(stages: int, roles: Sequence[str]) -> set:
+    """``downsample_{i}_<role>`` for i from 0: ``stages - 1`` downsamplers sit between the stages (N-4)."""
+    return {f"downsample_{i}_{role}" for i in range(stages - 1) for role in roles}
+
+
+def _with_drop_paths(blocks: Sequence[str], rates: Sequence[float]) -> set:
+    """Each block's ``<block>_drop_path``, for the blocks whose rate is above 0.
+
+    ConvNeXt creates the layer only for a non-zero rate, and the ramp starts at 0.
+    """
+    return {f"{name}_drop_path" for name, rate in zip(blocks, rates) if rate > 0}
+
+
+def _ordered_staged_blocks(depths: Sequence[int]) -> List[str]:
+    return [f"stage{s}_block{b}" for s, depth in enumerate(depths, 1) for b in range(1, depth + 1)]
+
+
+def _head(headed: bool) -> set:
+    return {"classification_head"} if headed else set()
+
+
+_CONVNEXT_RATE = 0.2
+_V4_DEPTHS = [2, 1, 3, 1, 2, 1, 2]
+_V4_ATTENTION_STAGES = [5, 6]  # 0-based indices into the stages, named stage6_mqa and stage7_mqa
+_V4_INPUT = (128, 128, 3)  # attention needs a feature map large enough to pool at stage 6
+
+
+def _convnext_owned(headed: bool) -> set:
+    blocks = _ordered_staged_blocks(_DEPTHS)
+    ramp = np.linspace(0.0, _CONVNEXT_RATE, sum(_DEPTHS))
+    return ({"stem"} | set(blocks) | _with_drop_paths(blocks, ramp)
+            | _downsamplers(len(_DEPTHS), ("norm", "conv")) | _head(headed))
+
+
+def _hierarchical_owned(headed: bool) -> set:
+    # A pointwise convolution exists only where the width changes between two stages.
+    pointwise = {f"downsample_{i}_pointwise" for i in range(len(_DIMS) - 1)
+                 if _DIMS[i] != _DIMS[i + 1]}
+    blocks = _staged_blocks(_DEPTHS)
+    return ({"stem"} | blocks | {f"{b}_drop_path" for b in blocks}
+            | _downsamplers(len(_DEPTHS), ("depthwise", "norm")) | pointwise | _head(headed))
+
+
+def _rad_owned(headed: bool) -> set:
+    roles = ("rad_conv", "norm", "expand", "reduce", "dropout")
+    return ({"stem", "mlp_activation"}
+            | {f"{b}_{role}" for b in _staged_blocks(_DEPTHS) for role in roles}
+            | _downsamplers(len(_DEPTHS), ("norm", "conv")) | _head(headed))
+
+
+#: ``key -> (constructor knobs, headed -> the exact set of layers the model owns directly)``.
+#: MobileNet V1 to V3 have a fixed block list, so their counts are the architectures' own:
+#: 13 depthwise-separable blocks (Howard 2017, Table 1), 17 inverted residuals (Sandler 2018,
+#: Table 2) and 11 bottlenecks for V3 small (Howard 2019, Table 2).
+NUMBERED_FAMILIES: Dict[str, Tuple[Dict[str, Any], Callable[[bool], set]]] = {
+    "resnet": (dict(blocks_per_stage=_DEPTHS, filters_per_stage=_DIMS),
+               lambda headed: {"stem"} | _staged_blocks(_DEPTHS) | _head(headed)),
+    "cliffordnet": (dict(depth=3),
+                    lambda headed: {"stem"} | _flat_blocks(3)
+                    | {f"block_{i}_drop_path" for i in range(3)} | _head(headed)),
+    "hierarchical": (dict(stage_depths=_DEPTHS, stage_dims=_DIMS), _hierarchical_owned),
+    "mobilenet_v1": ({}, lambda headed: {"stem"} | _flat_blocks(13) | _head(headed)),
+    "mobilenet_v2": ({}, lambda headed: {"stem", "conv_last", "conv_last_bn", "conv_last_relu6"}
+                     | _flat_blocks(17) | _head(headed)),
+    "mobilenet_v3": ({}, lambda headed: {"stem", "last_conv", "last_bn", "last_hard_swish"}
+                     | _flat_blocks(11) | _head(headed)),
+    "mobilenet_v4": (dict(depths=_V4_DEPTHS, use_attention=True,
+                          attention_stages=_V4_ATTENTION_STAGES, input_shape=_V4_INPUT),
+                     lambda headed: {"stem"} | _staged_blocks(_V4_DEPTHS)
+                     | {f"stage{s + 1}_mqa" for s in _V4_ATTENTION_STAGES} | _head(headed)),
+    "convnext_v1": (dict(depths=_DEPTHS, dims=_DIMS, drop_path_rate=_CONVNEXT_RATE, strides=2),
+                    _convnext_owned),
+    "convnext_v2": (dict(depths=_DEPTHS, dims=_DIMS, drop_path_rate=_CONVNEXT_RATE, strides=2),
+                    _convnext_owned),
+    "rad_convnet": (dict(depths=_DEPTHS, dims=_DIMS, strides=2, dropout_rate=0.1), _rad_owned),
+    # The paper's numbering: fire2 to fire9, the stem's pool inside the stem, the other pools
+    # after the fire module they follow. Variant 1.1 pools after fire3 and fire5; the complex
+    # bypass adds every fire module and a 1x1 projection where the width changes (64 to 128 at
+    # fire2, 128 to 256 at fire4, 256 to 384 at fire6, 384 to 512 at fire8).
+    "squeezenet_v1": (dict(use_bypass="complex", input_shape=(64, 64, 3)),
+                      lambda headed: {"stem", "maxpool3", "maxpool5", "dropout"}
+                      | {f"fire{n}" for n in range(2, 10)}
+                      | {f"add_fire{n}" for n in range(2, 10)}
+                      | {f"bypass_conv_fire{n}" for n in (2, 4, 6, 8)}
+                      | ({"conv10", "avgpool"} if headed else set())),
+    # Variant v2 pools after fire4 and fire8; there is no bypass.
+    "squeezenet_v2": (dict(input_shape=(64, 64, 1)),
+                      lambda headed: {"stem", "maxpool4", "maxpool8", "dropout"}
+                      | {f"simpfire{n}" for n in range(2, 10)}
+                      | ({"conv10", "avgpool"} if headed else set())),
+}
+
+
+def numbering_problems(owned: Sequence[str], expected: set) -> List[str]:
+    """How the layers a model owns differ from the exact set its depths give.
+
+    Interface contract: ``owned`` is :func:`direct_children` of a built model; ``expected``
+    the set derived from the arguments the test built it with. Returns one message per name
+    that is missing or unexpected, empty when the two sets are equal. Raises nothing.
+    """
+    return ([f"missing `{name}`" for name in sorted(expected - set(owned))]
+            + [f"unexpected `{name}`" for name in sorted(set(owned) - expected)])
+
+
+def test_every_finished_family_has_an_exact_numbered_name_set() -> None:
+    assert set(NUMBERED_FAMILIES) == set(FAMILY_CHILD_NAMES)
+
+
+@pytest.mark.parametrize("headed", [True, False], ids=["headed", "headless"])
+@pytest.mark.parametrize("key", sorted(NUMBERED_FAMILIES))
+def test_a_family_numbers_its_layers_exactly_as_its_depths_say(key: str, headed: bool) -> None:
+    """Stages and blocks from 1, flat blocks and downsamplers from 0, nothing else owned."""
+    knobs, owned = NUMBERED_FAMILIES[key]
+    c = classifier(key)
+    model = c.make(include_top=headed, **knobs)
+    model(_images(*knobs.get("input_shape", c.input_shape)))
+    assert numbering_problems(direct_children(model), owned(headed)) == []
+
+
+@pytest.mark.parametrize("headed", [True, False], ids=["headed", "headless"])
+def test_the_3d_squeezenodule_net_owns_the_layers_of_the_2d_one(headed: bool) -> None:
+    """The volume model is the same graph of names: a Conv3D stem, 3D pools and a 3D head."""
+    _, owned = NUMBERED_FAMILIES["squeezenet_v2"]
+    model = _volume_v2(include_top=headed)
+    assert numbering_problems(direct_children(model), owned(headed)) == []
+
+
+def test_the_numbering_rule_sees_a_block_counted_from_two_and_a_downsampler_counted_from_one() -> None:
+    expected = _staged_blocks([2, 1]) | _downsamplers(2, ("norm", "conv"))
+    clean = sorted(expected)
+    assert numbering_problems(clean, expected) == []
+    plants = {
+        "a block counted from 2": ["stage2_block2" if n == "stage2_block1" else n for n in clean],
+        "a downsampler counted from 1": [n.replace("downsample_0", "downsample_1") for n in clean],
+        "a stage and a block swapped": ["stage1_block1", "stage2_block1", "stage2_block2",
+                                        *[n for n in clean if n.startswith("downsample")]],
+        "a missing block": [n for n in clean if n != "stage1_block2"],
+        "an extra block": [*clean, "stage3_block1"],
+    }
+    for why, owned in plants.items():
+        assert numbering_problems(owned, expected), f"{why} passed the numbering rule"
+    # The pattern table above is why this rule exists: it reads every one of these as a
+    # well-formed ConvNeXt name.
+    assert child_name_violations("convnext_v1", plants["a block counted from 2"]) == []
+    assert child_name_violations("convnext_v1", plants["a downsampler counted from 1"]) == []
 
 
 # ---------------------------------------------------------------------------

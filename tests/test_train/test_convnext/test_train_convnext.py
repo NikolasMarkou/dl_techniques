@@ -925,14 +925,3 @@ def test_the_default_strides_never_degenerates_a_stage_on_any_dataset(
 )
 def test_stage_feature_map_sizes_worked_examples(hw, depths, strides, expected) -> None:
     assert common.stage_feature_map_sizes(hw, depths, strides) == expected
-
-
-# ---------------------------------------------------------------------
-# imagenet
-# ---------------------------------------------------------------------
-
-
-def test_imagenet_raises_the_explicit_error_and_no_run_directory(monkeypatch, tmp_path) -> None:
-    with pytest.raises(ValueError, match="imagenet2012"):
-        common.TrainingConfig(dataset="imagenet", output_dir=str(tmp_path), experiment_name="x")
-    assert list(tmp_path.iterdir()) == []

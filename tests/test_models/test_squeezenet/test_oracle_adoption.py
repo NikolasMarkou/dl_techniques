@@ -366,20 +366,25 @@ class TestSqueezeNetSmokeContract:
         _v1(variant="1.1", input_shape=(32, 32, 3))  # must NOT raise
 
     def test_pretrained_weights_are_refused_rather_than_silently_ignored(self):
-        """Both factories refuse ``weights``; the check lives in ``from_variant``.
+        """Both factories refuse ``pretrained=True``; ``weights`` is no argument.
 
-        ``from_variant`` pops ``weights`` and raises ``NotImplementedError`` for
-        any non-``None`` value, and the factories delegate to it. (This
-        docstring used to say ``from_variant`` let ``weights`` through to
-        ``keras.Model``; that predates the guard's move into ``from_variant``.
-        A ``weights=`` passed to the CONSTRUCTOR itself now raises ``ValueError``
-        too, because the functional constructor refuses unknown keywords since
-        plan-2026-10-14T062616-81938e81 step 4.)
+        ``from_variant`` raises ``NotImplementedError`` naming the variant for
+        ``pretrained=True``, and the factories delegate to it. A ``weights=``
+        passed anywhere raises ``ValueError`` naming the keyword, because the
+        functional constructor refuses unknown keywords since
+        plan-2026-10-14T062616-81938e81 step 4.
         """
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(NotImplementedError, match="variant '1.1'"):
+            create_squeezenet_v1("1.1", num_classes=NUM_CLASSES,
+                                 input_shape=V1_SHAPE, pretrained=True)
+        with pytest.raises(NotImplementedError, match="variant 'v2'"):
+            create_squeezenodule_net_v2("v2", num_classes=NUM_CLASSES,
+                                        input_shape=V2_SHAPE,
+                                        pretrained=True)
+        with pytest.raises(ValueError, match="weights"):
             create_squeezenet_v1("1.1", num_classes=NUM_CLASSES,
                                  input_shape=V1_SHAPE, weights="imagenet")
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(ValueError, match="weights"):
             create_squeezenodule_net_v2("v2", num_classes=NUM_CLASSES,
                                         input_shape=V2_SHAPE,
                                         weights="imagenet")

@@ -14,9 +14,16 @@ out for early stopping and checkpoint selection, the TEST set is used only for t
 final report, per-channel mean / std are computed on the train split and applied to
 all three, and the train pipeline (tf.data) applies a pad-4 random crop (plus a
 horizontal flip for the CIFAR datasets, never for MNIST). ``--max-samples`` caps the
-train pool and the test set (smoke runs and tests). ``imagenet`` is refused with an
-explicit error: ``tfds`` ``imagenet2012`` is not available here and the full-test-set
-figures cannot be built for it.
+train pool and the test set (smoke runs and tests).
+
+``imagenet`` reads the extracted ILSVRC2012 tree through
+``train.common.imagenet.load_imagenet_selection_splits`` and keeps the same protocol:
+``--holdout-per-class`` images per class are taken out of train for early stopping and
+checkpoint selection (``--validation-split`` does not apply and is refused), and the
+official 50k val split is the TEST set, evaluated whole. The 50k images are never held
+in memory: the figures, ``ece`` and ``model_analysis/`` use the first ``--eval-samples``
+test images. ``variant`` and ``strides`` default per dataset (``cifar10`` / 2 for
+MNIST and CIFAR, ``tiny`` / 4 for ImageNet).
 
 Optimization: ONE optimizer, ``AdamW(learning_rate=<schedule>, weight_decay=wd,
 clipnorm=1.0)``, identical for V1 and V2 and never combined with an L2 regularizer
@@ -54,6 +61,12 @@ import keras
 import numpy as np
 import tensorflow as tf
 
+from dl_techniques.datasets.vision.imagenet2012 import (
+    IMAGENET2012_DEFAULT_ROOT,
+    IMAGENET2012_NUM_CLASSES,
+    IMAGENET_MEAN,
+    IMAGENET_STD,
+)
 from dl_techniques.models.vision.convnext.convnext_v1 import ConvNeXtV1, create_convnext_v1
 from dl_techniques.models.vision.convnext.convnext_v2 import ConvNeXtV2, create_convnext_v2
 from dl_techniques.utils.logger import logger
@@ -62,12 +75,18 @@ from train.common import (
     attach_run_log,
     create_callbacks,
     create_learning_rate_schedule,
+    DEFAULT_HOLDOUT_PER_CLASS,
+    add_holdout_argument,
+    add_imagenet_arguments,
     default_experiment_name,
+    eval_head,
     get_class_names,
     load_dataset,
+    load_imagenet_selection_splits,
     log_gpu_peak_memory,
     prepare_run_dir,
     refuse_existing_run,
+    require_imagenet_root,
     resolved_run_dir,
     run_model_analysis,
     save_training_history_json,
@@ -79,6 +98,7 @@ from train.common import (
 from train.common import run_summary
 from train.common.callbacks import EpochLogLine, LearningRateLogger
 from train.common.classification_viz import TrainingDashboardCallback
+from train.common.conformal import add_conformal_arguments, run_conformal
 
 
 # ---------------------------------------------------------------------
@@ -91,17 +111,23 @@ from train.common.classification_viz import TrainingDashboardCallback
 # but never the split. It is also the ONE list of supported datasets: :data:`DATASETS` is
 # derived from its keys, so adding a dataset here cannot leave ``__post_init__`` indexing
 # a missing size (review iteration 3, N5).
-DATASET_TRAIN_SIZES: Dict[str, int] = {"mnist": 60000, "cifar10": 50000, "cifar100": 50000}
+DATASET_TRAIN_SIZES: Dict[str, int] = {
+    "mnist": 60000, "cifar10": 50000, "cifar100": 50000, "imagenet": 1281167,
+}
+IMAGENET = "imagenet"
 DATASETS: Tuple[str, ...] = tuple(DATASET_TRAIN_SIZES)
 LR_SCHEDULES: Tuple[str, ...] = ("cosine", "exponential", "constant")
 STOCHASTIC_MODES: Tuple[str, ...] = ("depth", "gradient")
 
-IMAGENET_REFUSAL = (
-    "dataset 'imagenet' is not supported by the normalized ConvNeXt trainers: the tfds "
-    "'imagenet2012' data is not available here and the full-test-set figures (confusion "
-    "matrix, calibration, confident errors) cannot be built for a streaming dataset. "
-    f"Choose one of {DATASETS}."
-)
+# Resolved in ``TrainingConfig.__post_init__`` for a ``variant`` / ``strides`` /
+# ``validation_split`` left at ``None``. ImageNet is not in the validation-split table:
+# it has no ``validation_split`` (see ``holdout_per_class``).
+DEFAULT_VARIANTS: Dict[str, str] = {"mnist": "cifar10", "cifar10": "cifar10",
+                                    "cifar100": "cifar10", "imagenet": "tiny"}
+DEFAULT_STRIDES: Dict[str, int] = {"mnist": 2, "cifar10": 2, "cifar100": 2, "imagenet": 4}
+DEFAULT_VALIDATION_SPLIT = 0.1
+DEFAULT_IMAGE_SIZE = 224
+DEFAULT_EVAL_SAMPLES = 2000
 
 # Inherited from the pre-normalization CLI (the old scripts' per-dataset table), NOT
 # measured here. Filled into ``TrainingConfig`` fields left at ``None``.
@@ -109,6 +135,8 @@ REGULARIZATION_DEFAULTS: Dict[str, Dict[str, float]] = {
     "mnist": {"drop_path_rate": 0.1, "dropout_rate": 0.1},
     "cifar10": {"drop_path_rate": 0.1, "dropout_rate": 0.1},
     "cifar100": {"drop_path_rate": 0.2, "dropout_rate": 0.2},
+    # The ConvNeXt-T values of the paper (drop path 0.1, no dropout), not measured here.
+    "imagenet": {"drop_path_rate": 0.1, "dropout_rate": 0.0},
 }
 
 # The datasets whose train pipeline also flips horizontally (a flipped digit is a
@@ -208,12 +236,14 @@ class TrainingConfig:
 
     # Model
     model_family: str = "v1"
-    variant: str = "cifar10"
+    variant: Optional[str] = None
     kernel_size: int = 7
-    # DECISION plan-2026-09-19T040641-db6932ec/D-033: the trainer default is 2. Do NOT
-    # restore 4 to match the model classes: measured +10.6 points test accuracy at strides
-    # 2 vs 4 (findings/iter2-audit.md), and 4 collapses the 4-stage variants to 1x1 maps.
-    strides: int = 2
+    # DECISION plan-2026-09-19T040641-db6932ec/D-033: the trainer default for MNIST and
+    # CIFAR is 2. Do NOT restore 4 to match the model classes: measured +10.6 points test
+    # accuracy at strides 2 vs 4 (findings/iter2-audit.md), and 4 collapses the 4-stage
+    # variants to 1x1 maps on 32x32 inputs. That measurement does not transfer to 224x224
+    # ImageNet, where 4 is the standard stem and 2 would run 112/56/28/14 maps.
+    strides: Optional[int] = None
     drop_path_rate: Optional[float] = None
     stochastic_mode: str = "depth"
     dropout_rate: Optional[float] = None
@@ -221,8 +251,21 @@ class TrainingConfig:
 
     # Data
     dataset: str = "cifar10"
-    validation_split: float = 0.1
+    # MNIST / CIFAR only (None -> 0.1); ImageNet selects on ``holdout_per_class`` instead.
+    validation_split: Optional[float] = None
     max_samples: Optional[int] = None
+    # ImageNet only: where the tree is, and the selection images taken out of train.
+    imagenet_root: str = IMAGENET2012_DEFAULT_ROOT
+    devkit_dir: Optional[str] = None
+    holdout_per_class: int = DEFAULT_HOLDOUT_PER_CLASS
+    image_size: int = DEFAULT_IMAGE_SIZE
+    # Test images kept in memory for the figures, ``ece`` and the analyzer (ImageNet only;
+    # MNIST and CIFAR use their whole test set).
+    eval_samples: int = DEFAULT_EVAL_SAMPLES
+
+    # Conformal prediction sets fitted on the whole test split with the best weights.
+    # Off unless asked for (``--conformal-alpha``).
+    conformal_alpha: Optional[float] = None
 
     # Training (defaults are the pre-normalization CLI's values, not measured here)
     epochs: int = 100
@@ -252,10 +295,21 @@ class TrainingConfig:
                 f"model_family must be one of {tuple(MODEL_FAMILIES)}, got {self.model_family!r}"
             )
         family = MODEL_FAMILIES[self.model_family]
-        if self.dataset == "imagenet":
-            raise ValueError(IMAGENET_REFUSAL)
         if self.dataset not in DATASETS:
             raise ValueError(f"dataset must be one of {DATASETS}, got {self.dataset!r}")
+        if self.variant is None:
+            self.variant = DEFAULT_VARIANTS[self.dataset]
+        if self.strides is None:
+            self.strides = DEFAULT_STRIDES[self.dataset]
+        if self.dataset == IMAGENET:
+            if self.validation_split is not None:
+                raise ValueError(
+                    f"validation_split={self.validation_split} does not apply to ImageNet, "
+                    "which selects on holdout_per_class images per class taken out of "
+                    "train; leave validation_split unset"
+                )
+        elif self.validation_split is None:
+            self.validation_split = DEFAULT_VALIDATION_SPLIT
         if self.variant not in family.variants:
             raise ValueError(
                 f"variant must be one of {family.variants} for {family.label}, got {self.variant!r}"
@@ -291,11 +345,17 @@ class TrainingConfig:
             raise ValueError(f"label_smoothing must be in [0, 1), got {self.label_smoothing}")
         if self.patience < 1:
             raise ValueError(f"patience must be >= 1, got {self.patience}")
-        if not 0.0 < self.validation_split < 1.0:
+        if self.validation_split is not None and not 0.0 < self.validation_split < 1.0:
             raise ValueError(
                 f"validation_split must be strictly inside (0, 1), got {self.validation_split}. "
                 "0 would silently validate on the test set."
             )
+        if self.holdout_per_class < 1:
+            raise ValueError(f"holdout_per_class must be >= 1, got {self.holdout_per_class}")
+        if self.image_size < 1:
+            raise ValueError(f"image_size must be >= 1, got {self.image_size}")
+        if self.eval_samples < 1:
+            raise ValueError(f"eval_samples must be >= 1, got {self.eval_samples}")
         if self.max_samples is not None and self.max_samples < 2:
             raise ValueError(f"max_samples must be >= 2 (or None), got {self.max_samples}")
         if self.warmup_epochs < 0:
@@ -316,8 +376,12 @@ class TrainingConfig:
         # batch, and that is refused HERE. Do NOT move it back into ``train``: there it
         # ran after ``prepare_run_dir``, so a rejected ``--max-samples 64`` left a run
         # directory behind and burned the experiment name (review iteration 2, W1).
-        n_fit, _ = split_sizes(DATASET_TRAIN_SIZES[self.dataset], self.max_samples,
-                               self.validation_split)
+        if self.dataset == IMAGENET:
+            pool = DATASET_TRAIN_SIZES[IMAGENET] - IMAGENET2012_NUM_CLASSES * self.holdout_per_class
+            n_fit = pool if self.max_samples is None else min(self.max_samples, pool)
+        else:
+            n_fit, _ = split_sizes(DATASET_TRAIN_SIZES[self.dataset], self.max_samples,
+                                   self.validation_split)
         steps_per_epoch_for(n_fit, self.batch_size)
         if self.experiment_name is None:
             self.experiment_name = default_experiment_name(
@@ -328,13 +392,6 @@ class TrainingConfig:
 # ---------------------------------------------------------------------
 # Command line
 # ---------------------------------------------------------------------
-
-def _dataset_arg(value: str) -> str:
-    """argparse ``type`` for ``--dataset``: turn ``imagenet`` into the explicit refusal."""
-    if value == "imagenet":
-        raise argparse.ArgumentTypeError(IMAGENET_REFUSAL)
-    return value
-
 
 def _build_parser(model_family: str) -> argparse.ArgumentParser:
     """Build the unparsed trainer parser of one model family.
@@ -356,40 +413,51 @@ def _build_parser(model_family: str) -> argparse.ArgumentParser:
     family = MODEL_FAMILIES[model_family]
     defaults = TrainingConfig(model_family=model_family)
     parser = argparse.ArgumentParser(
-        description=f"Train {family.label} on MNIST, CIFAR-10 or CIFAR-100.",
+        description=f"Train {family.label} on MNIST, CIFAR-10, CIFAR-100 or ImageNet.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
     data = parser.add_argument_group("data")
-    data.add_argument("--dataset", type=_dataset_arg, default=defaults.dataset, choices=DATASETS,
-                      help="Dataset to train on ('imagenet' is refused).")
-    data.add_argument("--validation-split", type=float, default=defaults.validation_split,
-                      help="Fraction of the train set held out (seeded shuffle) for early "
-                           "stopping and checkpoint selection, strictly inside (0, 1); the "
-                           "test set is only used for the final report.")
+    data.add_argument("--dataset", type=str, default=defaults.dataset, choices=DATASETS,
+                      help="Dataset to train on.")
+    data.add_argument("--validation-split", type=float, default=None,
+                      help="MNIST and CIFAR: fraction of the train set held out (seeded "
+                           f"shuffle) for early stopping and checkpoint selection, strictly "
+                           f"inside (0, 1), default {DEFAULT_VALIDATION_SPLIT}; the test set "
+                           "is only used for the final report. Refused with ImageNet "
+                           "(use --holdout-per-class).")
     data.add_argument("--max-samples", type=int, default=defaults.max_samples,
                       help="Cap the train pool and the test set at this many samples "
                            "(smoke runs); default: everything.")
+    add_imagenet_arguments(data, note="Used only when --dataset imagenet: ")
+    add_holdout_argument(data)
+    data.add_argument("--image-size", type=int, default=defaults.image_size,
+                      help="Used only when --dataset imagenet: square input side.")
+    data.add_argument("--eval-samples", type=int, default=defaults.eval_samples,
+                      help="Used only when --dataset imagenet: test images kept in memory "
+                           "for the figures, ece and model_analysis/ (the test metrics always "
+                           "use all of them).")
 
     model = parser.add_argument_group("model")
-    model.add_argument("--variant", type=str, default=defaults.variant, choices=family.variants,
-                       help="Model variant (sets depths and dims).")
+    model.add_argument("--variant", type=str, default=None, choices=family.variants,
+                       help="Model variant (sets depths and dims). Default per dataset: "
+                            "'cifar10' for MNIST and CIFAR, 'tiny' for ImageNet.")
     model.add_argument("--kernel-size", type=int, default=defaults.kernel_size,
                        help="Depthwise convolution kernel size.")
-    model.add_argument("--strides", type=int, default=defaults.strides,
-                       help="Stem patch size and downsampling stride. The default 2 gives 16,8 "
-                            "(cifar10 variant) or 16,8,4,2 (4-stage variants) feature maps on 32x32 "
-                            "inputs; 4 gives 8,2 or 8,2,1,1 (see stage_feature_map_sizes in the "
-                            "summary).")
+    model.add_argument("--strides", type=int, default=None,
+                       help="Stem patch size and downsampling stride. Default per dataset: 2 for "
+                            "MNIST and CIFAR, 4 for ImageNet. On 32x32 inputs 2 gives 16,8 "
+                            "(cifar10 variant) or 16,8,4,2 (4-stage variants) feature maps and 4 "
+                            "gives 8,2 or 8,2,1,1 (see stage_feature_map_sizes in the summary).")
     model.add_argument("--drop-path-rate", type=float, default=None,
-                       help="Maximum stochastic-depth rate (default per dataset: 0.1 for mnist "
-                            "and cifar10, 0.2 for cifar100).")
+                       help="Maximum stochastic-depth rate (default per dataset: 0.1 for mnist, "
+                            "cifar10 and imagenet, 0.2 for cifar100).")
     model.add_argument("--stochastic-mode", type=str, default=defaults.stochastic_mode,
                        choices=STOCHASTIC_MODES,
                        help="depth = StochasticDepth, gradient = StochasticGradient.")
     model.add_argument("--dropout-rate", type=float, default=None,
                        help="Dropout rate inside each block (default per dataset: 0.1 for mnist "
-                            "and cifar10, 0.2 for cifar100).")
+                            "and cifar10, 0.2 for cifar100, 0 for imagenet).")
     model.add_argument("--use-gamma", action=argparse.BooleanOptionalAction,
                        default=defaults.use_gamma,
                        help="Learnable per-channel layer scale in each block.")
@@ -427,6 +495,9 @@ def _build_parser(model_family: str) -> argparse.ArgumentParser:
                        help="Run the end-of-run ModelAnalyzer into model_analysis/ (about 24 s "
                             "of a 198 s CIFAR-10 5-epoch run; its spectral verdicts are "
                             "heuristics, see the README). --no-model-analysis skips it.")
+
+    add_conformal_arguments(parser.add_argument_group("conformal prediction sets"),
+                           on_by_default=False)
 
     out = parser.add_argument_group("output")
     out.add_argument("--output-dir", type=str, default=defaults.output_dir,
@@ -671,6 +742,112 @@ def make_eval_dataset(x: np.ndarray, y: np.ndarray) -> "tf.data.Dataset":
     return tf.data.Dataset.from_tensor_slices((x, y)).batch(EVAL_BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
 
 
+@dataclass(frozen=True)
+class RunData:
+    """What :func:`train` consumes, whatever the dataset.
+
+    MNIST and CIFAR hold every array in memory; ImageNet cannot (50k test images at
+    224x224 are 30 GB), so the three splits are ``tf.data`` datasets and the figures use
+    a small array subset. Both are described by this one record.
+
+    Attributes:
+        train_ds: Augmented, shuffled, batched train pipeline (drops the last batch).
+        val_ds: The selection split: drives early stopping, the best checkpoint and the
+            epoch-0 baseline. A held-out slice of train; never the test set.
+        test_ds: The test split, evaluated whole for ``test_metrics_*``.
+        steps_per_epoch: Batches in one epoch of ``train_ds``.
+        n_train, n_val, n_test: Sample counts of the three splits.
+        x_fig, y_fig: Test images and labels kept in memory for the figures, ``ece``,
+            the analyzer and the checkpoint round-trip check: the whole test set for
+            MNIST and CIFAR, the first ``eval_samples`` for ImageNet.
+        mean, std: Per-channel statistics used to standardize the inputs (for un-standardizing
+            the misclassification grid).
+        input_shape: ``(H, W, C)``.
+        num_classes: Number of classes.
+        class_names: One name per class.
+        selection_split, test_split: Plain-language provenance of ``val_ds`` and ``test_ds``.
+    """
+
+    train_ds: "tf.data.Dataset"
+    val_ds: "tf.data.Dataset"
+    test_ds: "tf.data.Dataset"
+    steps_per_epoch: int
+    n_train: int
+    n_val: int
+    n_test: int
+    x_fig: np.ndarray
+    y_fig: np.ndarray
+    mean: np.ndarray
+    std: np.ndarray
+    input_shape: Tuple[int, int, int]
+    num_classes: int
+    class_names: List[str]
+    selection_split: str
+    test_split: str
+
+
+def _prepare_array_data(config: TrainingConfig) -> RunData:
+    """MNIST / CIFAR: :func:`prepare_data` arrays wrapped as the three pipelines."""
+    data = prepare_data(config)
+    return RunData(
+        train_ds=make_train_dataset(
+            data.x_train, data.y_train, config.batch_size, config.seed,
+            flip=config.dataset in FLIP_DATASETS,
+        ),
+        val_ds=make_eval_dataset(data.x_val, data.y_val),
+        test_ds=make_eval_dataset(data.x_test, data.y_test),
+        steps_per_epoch=steps_per_epoch_for(len(data.x_train), config.batch_size),
+        n_train=int(len(data.x_train)), n_val=int(len(data.x_val)), n_test=int(len(data.x_test)),
+        x_fig=data.x_test, y_fig=data.y_test, mean=data.mean, std=data.std,
+        input_shape=data.input_shape, num_classes=data.num_classes,
+        class_names=get_class_names(config.dataset, data.num_classes),
+        selection_split=f"validation_split={config.validation_split} of the train set "
+                        "(seeded permutation)",
+        test_split="the dataset's test set",
+    )
+
+
+def _prepare_imagenet_data(config: TrainingConfig) -> RunData:
+    """ImageNet: train minus the holdout, the holdout as selection set, official val as test."""
+    train, select, test = load_imagenet_selection_splits(
+        config.imagenet_root, config.devkit_dir, config.image_size, config.batch_size,
+        config.seed, augment=True, holdout_per_class=config.holdout_per_class,
+        max_images=config.max_samples,
+    )
+    x_fig, y_fig = eval_head(test, config.eval_samples)
+    return RunData(
+        train_ds=train.dataset, val_ds=select.dataset, test_ds=test.dataset,
+        steps_per_epoch=steps_per_epoch_for(train.num_samples, config.batch_size),
+        n_train=train.num_samples, n_val=select.num_samples, n_test=test.num_samples,
+        x_fig=x_fig, y_fig=y_fig,
+        mean=np.asarray(IMAGENET_MEAN, dtype=np.float32),
+        std=np.asarray(IMAGENET_STD, dtype=np.float32),
+        input_shape=(config.image_size, config.image_size, 3), num_classes=train.num_classes,
+        class_names=train.class_names,
+        selection_split=f"{config.holdout_per_class} images per class held out of train "
+                        f"({select.num_samples} images)",
+        test_split="the official val split",
+    )
+
+
+def prepare_run_data(config: TrainingConfig) -> RunData:
+    """The :class:`RunData` of ``config.dataset``: arrays for MNIST / CIFAR, a tree for ImageNet.
+
+    Args:
+        config: A validated :class:`TrainingConfig`.
+
+    Returns:
+        The three pipelines and everything the figures need.
+
+    Raises:
+        ValueError: A split too small for ``batch_size``.
+        FileNotFoundError: The ImageNet tree or its devkit is missing.
+    """
+    if config.dataset == IMAGENET:
+        return _prepare_imagenet_data(config)
+    return _prepare_array_data(config)
+
+
 # ---------------------------------------------------------------------
 # Optimization
 # ---------------------------------------------------------------------
@@ -821,14 +998,14 @@ class _EpochLogLine(EpochLogLine):
 # Evaluation helpers
 # ---------------------------------------------------------------------
 
-def _evaluate(model: keras.Model, x: np.ndarray, y: np.ndarray) -> Dict[str, float]:
-    """``model.evaluate`` as a plain ``{metric: float}`` dict."""
-    metrics = model.evaluate(x, y, batch_size=EVAL_BATCH_SIZE, verbose=0, return_dict=True)
+def _evaluate(model: keras.Model, dataset: "tf.data.Dataset") -> Dict[str, float]:
+    """``model.evaluate`` over a batched dataset as a plain ``{metric: float}`` dict."""
+    metrics = model.evaluate(dataset, verbose=0, return_dict=True)
     return {k: float(v) for k, v in metrics.items()}
 
 
-def _check_initial_loss(model: keras.Model, x: np.ndarray, y: np.ndarray, num_classes: int
-                        ) -> Tuple[Dict[str, float], float, bool]:
+def _check_initial_loss(model: keras.Model, dataset: "tf.data.Dataset", n_samples: int,
+                        num_classes: int) -> Tuple[Dict[str, float], float, bool]:
     """Evaluate the untrained model; refuse a non-finite loss, warn on a huge one.
 
     The single epoch-0 measurement: both the summary's initial-loss ratio and the
@@ -838,8 +1015,8 @@ def _check_initial_loss(model: keras.Model, x: np.ndarray, y: np.ndarray, num_cl
 
     Args:
         model: Built and compiled model.
-        x: Validation inputs.
-        y: Validation labels.
+        dataset: The batched validation (selection) split.
+        n_samples: Its sample count (for the log line).
         num_classes: Class count; the uniform-prediction loss is ``ln(num_classes)``.
 
     Returns:
@@ -850,11 +1027,11 @@ def _check_initial_loss(model: keras.Model, x: np.ndarray, y: np.ndarray, num_cl
         RuntimeError: If the loss is NaN or infinite (raising, not returning, so no
             empty run directory is left behind as a "finished" run).
     """
-    metrics = _evaluate(model, x, y)
+    metrics = _evaluate(model, dataset)
     loss = metrics["loss"]
     uniform_loss = float(np.log(num_classes))
     logger.info(
-        f"Untrained evaluate BEFORE fit: val loss {loss:.4f} on {len(x)} samples "
+        f"Untrained evaluate BEFORE fit: val loss {loss:.4f} on {n_samples} samples "
         f"(uniform-prediction loss would be {uniform_loss:.4f})"
     )
     if not np.isfinite(loss):
@@ -874,7 +1051,7 @@ def _check_initial_loss(model: keras.Model, x: np.ndarray, y: np.ndarray, num_cl
 
 
 def _check_best_checkpoint(
-        model: keras.Model, run_dir: Path, data: SplitData
+        model: keras.Model, run_dir: Path, test_ds: "tf.data.Dataset"
 ) -> Tuple[Optional[Dict[str, float]], Optional[str], Optional[float]]:
     """Test metrics of the reloaded ``best_model.keras`` and its gap to ``model``.
 
@@ -887,11 +1064,11 @@ def _check_best_checkpoint(
         ``None`` when the checkpoint is missing or does not load.
     """
     reloaded, load_error = run_summary.load_best_metrics(
-        run_dir, lambda m: _evaluate(m, data.x_test, data.y_test))
+        run_dir, lambda m: _evaluate(m, test_ds))
     if reloaded is None:
         return None, load_error, None
     logger.info(f"Test results (best_model.keras): {reloaded}")
-    in_memory = _evaluate(model, data.x_test, data.y_test)
+    in_memory = _evaluate(model, test_ds)
     gap = max(abs(in_memory[k] - reloaded[k]) for k in in_memory if k in reloaded)
     if gap > WEIGHT_MISMATCH_TOLERANCE:
         logger.warning(
@@ -917,6 +1094,32 @@ def _label_smoothing_notes(label_smoothing: float) -> List[str]:
         "comparable with unsmoothed runs; accuracy, top-5 accuracy and ECE keep their "
         "definitions; the initial-loss ratio is unchanged in meaning (uniform logits give "
         "ln(C) for any smoothing)"
+    ]
+
+
+def _figure_subset_notes(n_figure: int, n_test: int) -> List[str]:
+    """The ``notes`` line about a figure subset (empty when the figures use the whole test set)."""
+    if n_figure >= n_test:
+        return []
+    return [
+        f"the figures, `ece` and model_analysis/ use the first {n_figure} of the {n_test} test "
+        "images (--eval-samples); `test_metrics_*` always use all of them"
+    ]
+
+
+def _conformal_notes(alpha: Optional[float]) -> List[str]:
+    """Plain-language lines for ``results_summary.json``'s ``notes``.
+
+    Args:
+        alpha: The configured miscoverage level, or ``None`` when the step is off.
+    """
+    if alpha is None:
+        return ["conformal prediction sets not requested (--conformal-alpha); `conformal` is null"]
+    return [
+        f"`conformal` is the record of conformal.json: APS prediction sets at alpha {alpha:g} "
+        "calibrated on the WHOLE test split with the best weights; the model was selected on "
+        "a separate split, so the calibration data did not choose it. Coverage is marginal, "
+        "not per image or per class"
     ]
 
 
@@ -953,7 +1156,7 @@ def _analyzer_notes(ran: bool) -> List[str]:
 # ---------------------------------------------------------------------
 
 def _summary_head(
-        config: TrainingConfig, run_dir: Path, data: SplitData, model: keras.Model,
+        config: TrainingConfig, run_dir: Path, data: RunData, model: keras.Model,
         geometry: List[Tuple[int, int]], steps_per_epoch: int, params: int,
         baseline: Dict[str, float], initial_loss_ratio: float, init_scale_warning: bool,
         devices: Dict[str, Any],
@@ -988,15 +1191,19 @@ def _summary_head(
         "batch_size": config.batch_size,
         "seed": config.seed,
         "validation_split": config.validation_split,
+        "holdout_per_class": config.holdout_per_class if config.dataset == IMAGENET else None,
+        "selection_split": data.selection_split,
+        "test_split": data.test_split,
         "max_samples": config.max_samples,
-        "n_train": int(len(data.x_train)),
-        "n_val": int(len(data.x_val)),
-        "n_test": int(len(data.x_test)),
+        "n_train": data.n_train,
+        "n_val": data.n_val,
+        "n_test": data.n_test,
+        "figure_samples": int(len(data.x_fig)),
         "input_normalization": {"mean": data.mean, "std": data.std},
         "epochs_requested": config.epochs,
         "monitor": MONITOR,
         "initial_loss_sanity_eval": {
-            "loss": baseline["loss"], "n_samples": int(len(data.x_val)),
+            "loss": baseline["loss"], "n_samples": data.n_val,
             "split": "val", "before_fit": True,
         },
         "initial_loss_ratio": initial_loss_ratio,
@@ -1036,6 +1243,9 @@ def train(config: TrainingConfig) -> Dict[str, Any]:
     family = MODEL_FAMILIES[config.model_family]
     logger.info(f"Starting {family.label} training")
     resolved = Path(resolved_run_dir(config))
+    if config.dataset == IMAGENET:
+        # Before the run directory exists, so a wrong path leaves nothing behind.
+        require_imagenet_root(config.imagenet_root)
     refuse_existing_run(resolved)
     set_seeds(config.seed)
     run_dir = Path(prepare_run_dir(config, output_dir=resolved)).resolve()
@@ -1049,13 +1259,8 @@ def train(config: TrainingConfig) -> Dict[str, Any]:
             f"TensorFlow sees {devices['tf_visible_devices']} ({devices['gpu_names']})"
         )
 
-        data = prepare_data(config)
-        steps_per_epoch = steps_per_epoch_for(len(data.x_train), config.batch_size)
-        train_ds = make_train_dataset(
-            data.x_train, data.y_train, config.batch_size, config.seed,
-            flip=config.dataset in FLIP_DATASETS,
-        )
-        val_ds = make_eval_dataset(data.x_val, data.y_val)
+        data = prepare_run_data(config)
+        steps_per_epoch = data.steps_per_epoch
 
         # ``kernel_regularizer`` is never passed: weight decay lives in the optimizer.
         model = family.factory(
@@ -1099,7 +1304,7 @@ def train(config: TrainingConfig) -> Dict[str, Any]:
         # "because it is simpler": it would measure twice and the two numbers could
         # disagree.
         baseline, initial_loss_ratio, init_scale_warning = _check_initial_loss(
-            model, data.x_val, data.y_val, data.num_classes
+            model, data.val_ds, data.n_val, data.num_classes
         )
         summary_head = _summary_head(
             config, run_dir, data, model, geometry, steps_per_epoch, params,
@@ -1138,8 +1343,8 @@ def train(config: TrainingConfig) -> Dict[str, Any]:
 
         fit_started = time.perf_counter()
         history = model.fit(
-            train_ds,
-            validation_data=val_ds,
+            data.train_ds,
+            validation_data=data.val_ds,
             epochs=config.epochs,
             callbacks=callbacks,
             verbose=1,
@@ -1207,21 +1412,33 @@ def train(config: TrainingConfig) -> Dict[str, Any]:
 
         # The in-memory model holds the BEST weights here (EarlyStopping restored them).
         test_metrics_best, best_load_error, checkpoint_max_diff = _check_best_checkpoint(
-            model, run_dir, data
+            model, run_dir, data.test_ds
         )
+
+        # Conformal sets: the model still holds the best weights (the last epoch's are
+        # restored further down). The calibration set is the whole TEST split, which never
+        # chose the model, not the selection split and not the figure subset.
+        conformal: Optional[Dict[str, Any]] = None
+        if config.conformal_alpha is not None:
+            conformal = run_conformal(
+                model, data.test_ds, alpha=config.conformal_alpha, seed=config.seed,
+                out_dir=run_dir, input_shape=data.input_shape,
+                model_name=config.experiment_name,
+                weights=f"best checkpoint, selected on {data.selection_split}",
+                selection_overlaps_calibration=False,
+            )
 
         # Figures and the analyzer describe the best (selected) weights. The model emits
         # LOGITS, so every probability consumer gets a softmax first.
-        logits = model.predict(data.x_test, batch_size=EVAL_BATCH_SIZE, verbose=0)
+        logits = model.predict(data.x_fig, batch_size=EVAL_BATCH_SIZE, verbose=0)
         probs = keras.ops.convert_to_numpy(keras.ops.softmax(logits, axis=-1))
         visualizations = run_summary.write_classification_figures(
-            vis_dir, data.x_test, data.y_test, probs,
-            get_class_names(config.dataset, data.num_classes),
+            vis_dir, data.x_fig, data.y_fig, probs, data.class_names,
             mean=data.mean, std=data.std,
         )
         if config.model_analysis:
             run_model_analysis(
-                model, (data.x_test, data.y_test), history, config.experiment_name, str(run_dir)
+                model, (data.x_fig, data.y_fig), history, config.experiment_name, str(run_dir)
             )
             analysis = run_summary.read_analysis_status(run_dir, config.experiment_name)
             logger.info(f"Analyzer status (read back from disk): {analysis['status']}")
@@ -1236,7 +1453,7 @@ def train(config: TrainingConfig) -> Dict[str, Any]:
         # the best model and ``test_metrics_final`` would equal ``test_metrics_best`` by
         # construction, hiding any best-versus-final difference.
         model.set_weights(last_weights.weights)
-        test_metrics_final = _evaluate(model, data.x_test, data.y_test)
+        test_metrics_final = _evaluate(model, data.test_ds)
         logger.info(f"Test results (final weights, epoch {epochs_run}): {test_metrics_final}")
         final_path = run_dir / "final_model.keras"
         model.save(final_path)
@@ -1244,7 +1461,7 @@ def train(config: TrainingConfig) -> Dict[str, Any]:
         # weights (D-174). The diverged branch above writes it before raising.
         save_training_history_json(history, str(run_dir))
         # A reload error surfaces (D-085); a value mismatch is the recorded False.
-        sample = data.x_val[:LOAD_CHECK_SAMPLES]
+        sample = data.x_fig[:LOAD_CHECK_SAMPLES]
         load_check: Optional[bool] = bool(validate_model_loading(
             str(final_path), sample, model.predict(sample, verbose=0)
         ))
@@ -1272,6 +1489,7 @@ def train(config: TrainingConfig) -> Dict[str, Any]:
             "ece": visualizations["ece"],
             "visualizations": visualizations,
             "model_loading_validated": load_check,
+            "conformal": conformal,
             "analyzer": analysis,
             "notes": [
                 f"initial loss {baseline['loss']:.4f} vs ln(C)={np.log(data.num_classes):.4f} "
@@ -1284,6 +1502,8 @@ def train(config: TrainingConfig) -> Dict[str, Any]:
                 "`test_metrics_best` is the reloaded best_model.keras, `test_metrics_final` the "
                 "last epoch's weights (final_model.keras); figures and model_analysis/ use the "
                 "best weights; the test set never influenced selection",
+                *_figure_subset_notes(len(data.x_fig), data.n_test),
+                *_conformal_notes(config.conformal_alpha),
                 *_label_smoothing_notes(config.label_smoothing),
                 *_analyzer_notes(config.model_analysis),
                 "`fit_wall_seconds` minus the sum of `epoch_times` is time outside the epoch "

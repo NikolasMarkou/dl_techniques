@@ -4,10 +4,10 @@
 `vmf` (a true von Mises-Fisher spherical VAE with the closed-form
 vMF-to-uniform-sphere KL).
 """
-from .model import VAE, create_vae, create_vae_from_config
+from .model import VAE, compile_vae, create_vae
 
 __all__ = [
     "VAE",
+    "compile_vae",
     "create_vae",
-    "create_vae_from_config",
 ]

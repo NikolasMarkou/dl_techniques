@@ -49,8 +49,13 @@ from typing import Tuple, Optional, Dict, Any, Sequence, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.model_build import (
+    coerce_include_top,
+    materialize_sublayers,
+    plain_head_config_overrides,
+)
 from dl_techniques.utils.weight_transfer import (
+    DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
     load_pretrained_checkpoint,
     pretrained_path_or_raise,
 )
@@ -65,6 +70,19 @@ from dl_techniques.models.vision.mobilenet.common import (
 from dl_techniques.layers.heads.vision import VisionTaskType
 from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+# Constructor-config keys a checkpoint may differ on without being another architecture:
+# they leave the weight layout and the computed function alone (the initializer, the
+# dropout rate, the regularizer, the input size). `load_pretrained_checkpoint` compares
+# every other key the checkpoint and the model both hold, so a changed stage depth,
+# width, block type or stride is refused even when every weight shape still fits.
+_NON_STRUCTURAL_CONFIG_KEYS = (
+    *DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
+    "input_shape",
+    "kernel_initializer",
+    "dropout_rate",
+    "kernel_regularizer",
+)
 
 # ---------------------------------------------------------------------
 
@@ -95,35 +113,52 @@ class MobileNetV4(keras.Model):
 
     :param num_classes: Number of output classes; used only if `include_top=True`,
         where it must be positive.
+    :type num_classes: int
     :param depths: UIB block count per stage.
+    :type depths: Sequence[int]
     :param dims: Channel count per stage.
+    :type dims: Sequence[int]
     :param block_types: UIB structure per stage: `"IB"`, `"ConvNext"`, `"ExtraDW"`, `"FFN"`.
+    :type block_types: Sequence[str]
     :param strides: Stride for the first block of each stage.
+    :type strides: Sequence[int]
     :param width_multiplier: Channel-count multiplier, applied by truncation. Must be positive.
+    :type width_multiplier: float
     :param use_attention: Add Mobile MQA to `attention_stages`.
+    :type use_attention: bool
     :param attention_stages: Stage indices to add attention to, when `use_attention=True`.
+    :type attention_stages: Sequence[int]
     :param dropout_rate: Dropout rate in the classifier head, in `[0, 1)`.
-    :param weight_decay: L2 regularization factor for all layers, the head's
-        included.
+    :type dropout_rate: float
+    :param kernel_regularizer: Optional regularizer applied to the standard
+        convolution kernels and the head's kernels (the depthwise kernels carry
+        none): a regularizer, its serialized config or a name. `None` (the
+        default) adds no loss, so the optimizer's decoupled weight decay is the
+        only decay.
+    :type kernel_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]]
     :param kernel_initializer: Weight initialization strategy, the head's
         included: a name, a serialized config dict, or an `Initializer`
         instance. It is stored as its serialized spec and every layer draws
         from its own copy of it, so each kernel has its own draw unless the spec
         carries an explicit `seed`, which every site then reuses by contract.
-    :param include_top: Whether to include the classification head.
+    :type kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer]
+    :param include_top: Whether to include the classification head. A `bool` or `numpy.bool_`; anything else, a string included, raises `TypeError`.
+    :type include_top: bool
     :param input_shape: Input shape `(height, width, channels)`; `None` means
         `(224, 224, 3)`.
+    :type input_shape: Optional[Tuple[int, ...]]
     :param head_config_overrides: Optional dict merged into the head
         configuration. `name`, `num_classes` and `task_type` raise
         `ValueError`.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Passthrough to `keras.Model`.
     :raises ValueError: If `depths`, `dims`, `block_types`, or `strides` have
         different lengths, an invalid block type is given, an attention
         stage index is out of range, `num_classes` is not positive with a
         head, `width_multiplier` is not positive or truncates a stage width to
         0, `dropout_rate` is outside `[0, 1)`, or `input_shape` is not 3-D.
-    :raises TypeError: If `kernel_initializer` is not a string, a dict or an
-        `Initializer` instance.
+    :raises TypeError: If `include_top` is not a `bool` or `numpy.bool_`, or if
+        `kernel_initializer` is not a string, a dict or an `Initializer` instance.
 
     Input shape:
         4-D tensor `(batch_size, height, width, channels)`.
@@ -195,7 +230,7 @@ class MobileNetV4(keras.Model):
         use_attention: bool = False,
         attention_stages: Sequence[int] = (5, 6),
         dropout_rate: float = 0.2,
-        weight_decay: float = 1e-5,
+        kernel_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]] = None,
         kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = "he_normal",
         include_top: bool = True,
         input_shape: Optional[Tuple[int, ...]] = (224, 224, 3),
@@ -204,6 +239,7 @@ class MobileNetV4(keras.Model):
     ):
         super().__init__(**kwargs)
 
+        include_top = coerce_include_top(include_top)
         if include_top and num_classes <= 0:
             raise ValueError(
                 f"num_classes must be positive when include_top=True, got {num_classes}"
@@ -269,18 +305,19 @@ class MobileNetV4(keras.Model):
         self.use_attention = use_attention
         self.attention_stages = list(attention_stages)
         self.dropout_rate = dropout_rate
-        self.weight_decay = weight_decay
         # DECISION plan-2026-10-26T125959-7af851e5/D-033: store the initializer as a spec and hand that spec to the stem, every block, every Mobile MQA and the head; never keep the caller's Initializer instance.
         # A seedless instance given to two layers replays one draw at both (the stem and the Mobile MQA downsample did, 3 of 2701 kernel pairs at hybrid_medium), and an instance in get_config is not JSON-safe. See decisions.md.
         self.kernel_initializer = initializer_spec(kernel_initializer)
         self.include_top = include_top
         self.input_shape_config = input_shape
 
-        self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
+        self._head_config_overrides = plain_head_config_overrides(
+            head_config_overrides, "MobileNetV4"
+        )
 
         self.actual_dims = [int(dim * width_multiplier) for dim in dims]
 
-        self.kernel_regularizer = keras.regularizers.L2(weight_decay) if weight_decay > 0 else None
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         self._build_stem()
 
@@ -471,9 +508,19 @@ class MobileNetV4(keras.Model):
         `input_shape` if it is unbuilt and takes a headed checkpoint into a
         headless model. Every layer outside the classification head must be
         restored, so a checkpoint of another variant, block type, width or stem
-        raises and leaves the model untouched. Only a head of another
-        `num_classes` is skipped: it keeps its initialization and a warning
-        names it.
+        raises and copies no weight. Only a head of another `num_classes` is
+        skipped: it keeps its initialization and a warning names it. The
+        skipped head is the whole `classification_head`, so its pretrained
+        hidden layer (V4 `small`: 209,920 parameters, `medium`: 414,720) is
+        discarded with the classifier. The archive's own config is compared
+        too: a constructor argument that both hold and that is not in
+        `_NON_STRUCTURAL_CONFIG_KEYS` must be equal, so a checkpoint of another
+        `width_multiplier` or stride pattern is refused even when every weight
+        shape fits. An argument only one side holds is not compared, and an
+        archive in which no single model of this class can be found is checked
+        by layers only (the load warns). Where the head is copied, its
+        `head_config_overrides` must be equal too (dropout, initializers and
+        regularizers aside).
 
         :param weights_path: Path to the weights file (`.keras` format).
         :param skip_mismatch: `True` (default) lets the head layers differ;
@@ -484,7 +531,8 @@ class MobileNetV4(keras.Model):
             the weights cannot be loaded.
         """
         load_pretrained_checkpoint(
-            self, weights_path, self.input_shape_config, skip_mismatch
+            self, weights_path, self.input_shape_config, skip_mismatch,
+            ignore_config_keys=_NON_STRUCTURAL_CONFIG_KEYS,
         )
 
     @classmethod
@@ -552,7 +600,7 @@ class MobileNetV4(keras.Model):
             "use_attention": self.use_attention,
             "attention_stages": self.attention_stages,
             "dropout_rate": self.dropout_rate,
-            "weight_decay": self.weight_decay,
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "kernel_initializer": self.kernel_initializer,
             "include_top": self.include_top,
             "input_shape": self.input_shape_config,

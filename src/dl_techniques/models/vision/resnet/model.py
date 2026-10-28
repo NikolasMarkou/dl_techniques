@@ -58,6 +58,7 @@ from typing import List, Optional, Union, Tuple, Dict, Any, Literal
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import (
+    DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
     load_pretrained_checkpoint,
     pretrained_path_or_raise,
 )
@@ -67,8 +68,26 @@ from dl_techniques.layers.conv_blocks.bottleneck_block import BottleneckBlock
 from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.heads.vision import VisionTaskType
 from dl_techniques.layers.heads.vision.factory import build_model_vision_head
-from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.model_build import (
+    coerce_include_top,
+    materialize_sublayers,
+    plain_head_config_overrides,
+)
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+# Constructor-config keys a checkpoint may differ on without being another architecture:
+# they leave the weight layout and the computed function alone (the initializer and the
+# regularizer, the training-only deep-supervision heads, the input size).
+# `load_pretrained_checkpoint` compares every other key the checkpoint and the model
+# both hold, so a changed block type, width, stem or activation is refused even when
+# every weight shape still fits.
+_NON_STRUCTURAL_CONFIG_KEYS = (
+    *DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
+    "enable_deep_supervision",
+    "input_shape",
+    "kernel_initializer",
+    "kernel_regularizer",
+)
 
 # ---------------------------------------------------------------------
 
@@ -162,7 +181,7 @@ class ResNet(keras.Model):
         kernel of the stem and the blocks, and to the classifier kernel of the
         main and every supervision head. A regularizer, its serialized config or
         a name.
-    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :type kernel_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]]
     :param kernel_initializer: Initializer of every convolution kernel in the stem
         and the blocks (the classifier heads keep the head's own initializer). A
         name or a serialized config is handed to each convolution, which draws
@@ -188,7 +207,9 @@ class ResNet(keras.Model):
         ``create_activation_layer``. Defaults to ``'relu'``.
     :type activation_type: str
     :param include_top: Whether to include the classification head. When False
-        the final stage's feature maps are returned. Defaults to True.
+        the final stage's feature maps are returned. A ``bool`` or
+        ``numpy.bool_``; anything else, a string included, raises ``TypeError``.
+        Defaults to True.
     :type include_top: bool
     :param enable_deep_supervision: Whether to attach auxiliary classification
         heads. Requires ``include_top=True``. One head per stage except the last,
@@ -197,7 +218,7 @@ class ResNet(keras.Model):
     :type enable_deep_supervision: bool
     :param input_shape: Input shape ``(height, width, channels)`` excluding the
         batch dimension. Defaults to ``(224, 224, 3)``.
-    :type input_shape: Tuple[int, ...]
+    :type input_shape: Optional[Tuple[int, ...]]
     :param stem_type: Which input stem to build. ``'imagenet'`` (default) is the
         published 7x7 stride-2 convolution followed by a 3x3 stride-2 max pool,
         downsampling by 4x before stage 1; it is bit-identical to the model
@@ -217,6 +238,7 @@ class ResNet(keras.Model):
     :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the ``keras.Model`` base class.
 
+    :raises TypeError: If ``include_top`` is not a ``bool`` or ``numpy.bool_``.
     :raises ValueError: If ``include_top`` is True and ``num_classes`` is not
         positive, if ``blocks_per_stage`` and ``filters_per_stage`` differ
         in length, if ``block_type`` is not ``'basic'`` or ``'bottleneck'``, if
@@ -290,20 +312,21 @@ class ResNet(keras.Model):
             blocks_per_stage: Optional[List[int]] = None,
             filters_per_stage: Optional[List[int]] = None,
             block_type: Literal["basic", "bottleneck"] = "bottleneck",
-            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            kernel_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]] = None,
             kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = "he_normal",
             normalization_type: str = "batch_norm",
             normalization_kwargs: Optional[Dict[str, Any]] = None,
             activation_type: str = "relu",
             include_top: bool = True,
             enable_deep_supervision: bool = False,
-            input_shape: Tuple[int, ...] = (224, 224, 3),
+            input_shape: Optional[Tuple[int, ...]] = (224, 224, 3),
             stem_type: Literal["imagenet", "cifar"] = "imagenet",
             head_config_overrides: Optional[Dict[str, Any]] = None,
             **kwargs
     ):
         super().__init__(**kwargs)
 
+        include_top = coerce_include_top(include_top)
         if include_top and num_classes <= 0:
             raise ValueError(
                 f"num_classes must be positive when include_top=True, got {num_classes}"
@@ -357,7 +380,9 @@ class ResNet(keras.Model):
         self.enable_deep_supervision = enable_deep_supervision
         self.input_shape_config = input_shape
 
-        self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
+        self._head_config_overrides = plain_head_config_overrides(
+            head_config_overrides, "ResNet"
+        )
 
         self._build_stem()
 
@@ -606,11 +631,19 @@ class ResNet(keras.Model):
 
         The transfer is `load_pretrained_checkpoint`: it builds the model at
         `input_shape` if it is unbuilt and takes a headed checkpoint into a
-        headless model. Every layer outside the classification head (and the deep-supervision heads) must be
-        restored, so a checkpoint of another variant, block type, width or stem
-        raises and leaves the model untouched. Only a head of another
-        `num_classes` is skipped: it keeps its initialization and a warning
-        names it.
+        headless model. Every layer outside the classification head (and the
+        deep-supervision heads) must be restored, so a checkpoint of another
+        variant, block type, width or stem raises and copies no weight. Only a
+        head of another `num_classes` is skipped: it keeps its initialization
+        and a warning names it. The archive's own config is compared too: a
+        constructor argument that both hold and that is not in
+        `_NON_STRUCTURAL_CONFIG_KEYS` must be equal, so a checkpoint of another
+        `activation_type` or `stem_type` is refused even when every weight
+        shape fits. An argument only one side holds is not compared, and an
+        archive in which no single model of this class can be found is checked
+        by layers only (the load warns). Where the head is copied, its
+        `head_config_overrides` must be equal too (dropout, initializers and
+        regularizers aside).
 
         :param weights_path: Path to the weights file (`.keras` format).
         :param skip_mismatch: `True` (default) lets the head layers differ;
@@ -621,7 +654,8 @@ class ResNet(keras.Model):
             the weights cannot be loaded.
         """
         load_pretrained_checkpoint(
-            self, weights_path, self.input_shape_config, skip_mismatch
+            self, weights_path, self.input_shape_config, skip_mismatch,
+            ignore_config_keys=_NON_STRUCTURAL_CONFIG_KEYS,
         )
 
     @classmethod

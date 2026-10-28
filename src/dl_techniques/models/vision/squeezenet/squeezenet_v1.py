@@ -12,8 +12,9 @@ logits, the paper's ReLU'd `conv10` averaged over space with no softmax
 downsampling stage uses `padding='valid'` and so
 each variant has a minimum input extent (35 for the 1.0 stem family, 31 for
 1.1) checked in the constructor, that no pretrained weights ship with this
-port, and that the kernel initializers are transcribed from the official
-Caffe prototxts rather than taken from Keras defaults.
+port (``pretrained=<path>`` loads a local checkpoint), and that the kernel
+initializers are transcribed from the official Caffe prototxts rather than
+taken from Keras defaults.
 
 References:
     -   Iandola et al., "SqueezeNet: AlexNet-level accuracy with 50x fewer
@@ -39,6 +40,7 @@ from typing import Optional, Tuple, Dict, Any, Union
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers.clone import initializer_spec
 from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.utils.logger import logger
 from .spatial_guard import validate_spatial_extent
@@ -47,7 +49,36 @@ from .caffe_reference_init import (
     CAFFE_XAVIER_INITIALIZER,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
-from dl_techniques.utils.model_build import refuse_unknown_model_kwargs
+from dl_techniques.utils.model_build import (
+    coerce_include_top,
+    refuse_unknown_model_kwargs,
+    require_channel_count,
+)
+from dl_techniques.utils.weight_transfer import (
+    DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
+    load_pretrained_checkpoint,
+    pretrained_path_or_raise,
+)
+
+# Constructor-config keys a checkpoint may differ on without being another architecture:
+# they leave the weight layout and the computed function alone (initializers and the
+# regularizer act on the starting weights and the loss, dropout in training only, the input
+# size is no weight shape). `load_pretrained_checkpoint` compares every other key the
+# checkpoint and the model both hold, so another `variant` or `use_bypass` is refused even when
+# every weight shape still fits (a simple bypass adds no weight).
+_NON_STRUCTURAL_CONFIG_KEYS = (
+    *DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
+    "input_shape",
+    "kernel_initializer",
+    "kernel_regularizer",
+    "dropout_rate",
+)
+
+# The one weighted layer of the head is ``conv10``; the pool after it holds no weight.
+_HEAD_PATTERN = "conv10"
+
+# `use_bypass` modes besides None (which defers to the variant): False, or one of these.
+_BYPASS_MODES = ("simple", "complex")
 
 # ---------------------------------------------------------------------
 
@@ -103,8 +134,9 @@ class FireModule(keras.layers.Layer):
     :param kernel_regularizer: Regularizer for convolution kernels.
     :type kernel_regularizer: keras.regularizers.Regularizer or None
     :param kernel_initializer: Initializer for all three convolution kernels.
-        Defaults to the Caffe ``xavier`` transcription.
-    :type kernel_initializer: str or keras.initializers.Initializer
+        Defaults to the Caffe ``xavier`` transcription. An ``Initializer`` instance
+        is stored as its serialized spec, so each convolution draws its own kernel.
+    :type kernel_initializer: str or dict or keras.initializers.Initializer
     :param kwargs: Passthrough to `keras.layers.Layer`.
     :raises ValueError: If any of ``s1x1``, ``e1x1`` or ``e3x3`` is not positive.
     """
@@ -115,7 +147,7 @@ class FireModule(keras.layers.Layer):
             e1x1: int,
             e3x3: int,
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = CAFFE_XAVIER_INITIALIZER,
+            kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = CAFFE_XAVIER_INITIALIZER,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -127,14 +159,14 @@ class FireModule(keras.layers.Layer):
         self.e1x1 = e1x1
         self.e3x3 = e3x3
         self.kernel_regularizer = kernel_regularizer
-        self.kernel_initializer = kernel_initializer
+        self.kernel_initializer = initializer_spec(kernel_initializer)
 
         self.squeeze = keras.layers.Conv2D(
             filters=s1x1,
             kernel_size=1,
             activation='relu',
             kernel_regularizer=kernel_regularizer,
-            kernel_initializer=kernel_initializer,
+            kernel_initializer=self.kernel_initializer,
             name='squeeze'
         )
 
@@ -143,7 +175,7 @@ class FireModule(keras.layers.Layer):
             kernel_size=1,
             activation='relu',
             kernel_regularizer=kernel_regularizer,
-            kernel_initializer=kernel_initializer,
+            kernel_initializer=self.kernel_initializer,
             name='expand_1x1'
         )
 
@@ -153,11 +185,11 @@ class FireModule(keras.layers.Layer):
             padding='same',
             activation='relu',
             kernel_regularizer=kernel_regularizer,
-            kernel_initializer=kernel_initializer,
+            kernel_initializer=self.kernel_initializer,
             name='expand_3x3'
         )
 
-        self.concat = keras.layers.Concatenate(axis=-1)
+        self.concat = keras.layers.Concatenate(axis=-1, name='concat')
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the squeeze, expand, and concatenate sub-layers.
@@ -226,7 +258,7 @@ class FireModule(keras.layers.Layer):
             'e1x1': self.e1x1,
             'e3x3': self.e3x3,
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
-            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer)
+            'kernel_initializer': self.kernel_initializer
         })
         return config
 
@@ -324,13 +356,13 @@ class SqueezeNetV1(keras.Model):
 
     :param num_classes: Number of output classes. Must be positive.
     :type num_classes: int
-    :param variant_config: A `MODEL_VARIANTS` entry defining the Fire module
-        configs, stem and pooling. Defaults to the `"1.0"` entry.
-    :type variant_config: dict or None
+    :param variant: A key of `MODEL_VARIANTS` (`"1.0"`, `"1.1"` or
+        `"1.0_bypass"`) defining the Fire module configs, stem and pooling.
+    :type variant: str
     :param use_bypass: `'simple'`, `'complex'`, `False`, or `None` to defer to
         the variant's own setting. An explicit `False` disables bypass even for a
-        bypass variant. Only the two strings add connections; any other truthy
-        value leaves the graph unchanged.
+        bypass variant. Nothing else is accepted: `True` and a misspelled mode
+        used to build a plain model that reported the value.
     :type use_bypass: bool or str or None
     :param dropout_rate: Dropout rate after the final Fire module. Must be in
         `[0, 1)`.
@@ -339,23 +371,31 @@ class SqueezeNetV1(keras.Model):
         ``conv10``'s included.
     :type kernel_regularizer: keras.regularizers.Regularizer or None
     :param kernel_initializer: Initializer for the Fire module and bypass
-        convolutions. The stem and head use `STEM_INITIALIZER` and
+        convolutions, stored as a string or a serialized spec (an ``Initializer``
+        instance is serialized once) and handed to every convolution, so no two
+        of them replay one draw. The stem and head use `STEM_INITIALIZER` and
         `HEAD_INITIALIZER` instead.
-    :type kernel_initializer: str or keras.initializers.Initializer
+    :type kernel_initializer: str or dict or keras.initializers.Initializer
     :param include_top: Whether to include the classification head
-        (``conv10`` and the global pool).
+        (``conv10`` and the global pool). A ``bool`` or ``numpy.bool_``; anything
+        else, a string included, raises ``TypeError``.
     :type include_top: bool
-    :param input_shape: Input shape `(height, width, channels)`.
-    :type input_shape: tuple of 3 ints
+    :param input_shape: Input shape `(height, width, channels)`; `None` is
+        `(224, 224, 3)`.
+    :type input_shape: tuple of 3 ints or None
     :param kwargs: `name`, `trainable` or `dtype`, passed to `keras.Model`.
         Anything else raises `ValueError`, because Keras' functional
         constructor would drop it silently.
-    :raises ValueError: If `num_classes` is not positive, `dropout_rate` is
-        outside `[0, 1)`, or the input's spatial extent is below the variant's
-        minimum (35 for the "1.0" stem family, 31 for "1.1", computed from the
-        variant rather than hard-coded). Every downsampling stage uses
-        `padding='valid'`, so a collapsed axis would otherwise yield an all-NaN
-        output of the correct shape.
+    :raises TypeError: If `include_top` is not a `bool` or `numpy.bool_`.
+    :raises ValueError: If `variant` is not a key of `MODEL_VARIANTS`,
+        `use_bypass` is not `None`, `False`, `'simple'` or `'complex'`,
+        `input_shape` has not three entries or no channel count, `num_classes`
+        is not positive, `dropout_rate` is outside `[0, 1)`, or the input's
+        spatial extent is below the variant's minimum (35 for the "1.0" stem
+        family, 31 for "1.1", computed from the variant rather than
+        hard-coded). Every downsampling stage uses `padding='valid'`, so a
+        collapsed axis would otherwise yield an all-NaN output of the correct
+        shape.
 
     Example::
 
@@ -426,40 +466,64 @@ class SqueezeNetV1(keras.Model):
     def __init__(
             self,
             num_classes: int = 1000,
-            variant_config: Optional[Dict[str, Any]] = None,
+            variant: str = "1.0",
             use_bypass: Optional[Union[bool, str]] = None,
             dropout_rate: float = 0.5,
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = CAFFE_XAVIER_INITIALIZER,
+            kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = CAFFE_XAVIER_INITIALIZER,
             include_top: bool = True,
-            input_shape: Tuple[int, int, int] = (224, 224, 3),
+            input_shape: Optional[Tuple[int, int, int]] = None,
             **kwargs: Any
     ) -> None:
         refuse_unknown_model_kwargs(kwargs, type(self).__name__)
-        if variant_config is None:
-            variant_config = self.MODEL_VARIANTS["1.0"]
+        include_top = coerce_include_top(include_top)
+        if variant not in self.MODEL_VARIANTS:
+            raise ValueError(
+                f"Unknown variant '{variant}'. Available variants: "
+                f"{list(self.MODEL_VARIANTS.keys())}"
+            )
+        variant_config = self.MODEL_VARIANTS[variant]
 
         if num_classes <= 0:
-            raise ValueError("num_classes must be a positive integer")
+            raise ValueError(f"num_classes must be a positive integer, got {num_classes}")
         if not 0 <= dropout_rate < 1:
-            raise ValueError("dropout_rate must be in range [0, 1)")
+            raise ValueError(f"dropout_rate must be in range [0, 1), got {dropout_rate}")
+        # DECISION plan-2026-10-26T125959-7af851e5/D-047: accept exactly None, False, "simple" and
+        # "complex". Do NOT read any other truthy value as a bypass or as "no bypass": True and
+        # "bogus" built a plain model that reported the value (the Add layers are made only for the
+        # two strings), so the caller believed in connections that were not there. See decisions.md.
+        if use_bypass is not None and use_bypass is not False and use_bypass not in _BYPASS_MODES:
+            raise ValueError(
+                f"use_bypass must be None, False, 'simple' or 'complex', got {use_bypass!r}"
+            )
+
+        if input_shape is None:
+            input_shape = (224, 224, 3)
+        input_shape = tuple(input_shape)
+        if len(input_shape) != 3:
+            raise ValueError(
+                f"input_shape must be (height, width, channels), got {input_shape}"
+            )
+        require_channel_count(input_shape)
 
         # DECISION plan-2026-08-17T183311-79c63e38/D-020: validate here, not in
         # build(); by then the all-NaN graph is already assembled. See decisions.md.
         validate_spatial_extent(input_shape[:-1], variant_config, type(self).__name__)
 
         self.num_classes = num_classes
-        self.variant_config = variant_config
+        self.variant = variant
         # DECISION plan-2026-08-17T183311-79c63e38/D-020: test `is None`, not
         # truthiness; truthiness ignores an explicit False. See decisions.md.
         self.use_bypass = (
             variant_config.get("use_bypass", False) if use_bypass is None else use_bypass
         )
         self.dropout_rate = dropout_rate
-        self.kernel_regularizer = kernel_regularizer
-        self.kernel_initializer = kernel_initializer
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        # DECISION plan-2026-10-26T125959-7af851e5/D-033: store the initializer as a spec and hand that spec to every Fire module and bypass convolution; never keep the caller's Initializer instance.
+        # One seedless instance given to all of them replayed a single draw across 276 of 325 kernel pairs (SqueezeNet 1.0), and an instance in get_config is not JSON-safe. See decisions.md.
+        self.kernel_initializer = initializer_spec(kernel_initializer)
         self.include_top = include_top
-        self._input_shape = input_shape
+        self.input_shape_config = input_shape
 
         self.fire_configs = variant_config["fire_configs"]
         self.conv1_filters = variant_config["conv1_filters"]
@@ -477,6 +541,11 @@ class SqueezeNetV1(keras.Model):
         outputs = self._build_model(inputs)
 
         super().__init__(inputs=inputs, outputs=outputs, **kwargs)
+
+        logger.info(
+            f"Created SqueezeNetV1 '{variant}' for input {self.input_shape_config} "
+            f"with {len(self.fire_configs)} Fire modules"
+        )
 
     def _build_model(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """Build the stem, the Fire stack and, if requested, the head.
@@ -645,33 +714,74 @@ class SqueezeNetV1(keras.Model):
 
         return x
 
+    def load_pretrained_weights(
+            self,
+            weights_path: str,
+            skip_mismatch: bool = True
+    ) -> None:
+        """Load a local `.keras` checkpoint into the model, layer by layer.
+
+        The transfer is `load_pretrained_checkpoint`: the model is built at
+        construction, so its variables are kept and the checkpoint's are copied
+        in, a headed checkpoint into a headless model included. Every layer
+        outside ``conv10`` must be restored, so a checkpoint of another variant
+        raises and copies no weight. Only a ``conv10`` of another `num_classes`
+        is skipped: it keeps its initialization and a warning names it. The
+        archive's own config is compared too: a constructor argument that both
+        hold and that is not in `_NON_STRUCTURAL_CONFIG_KEYS` must be equal, so a
+        checkpoint of another `use_bypass` is refused even though a simple bypass
+        adds no weight. An argument only one side holds is not compared, and an
+        archive in which no single model of this class can be found is checked
+        by layers only (the load warns).
+
+        :param weights_path: Path to the weights file (`.keras` format).
+        :type weights_path: str
+        :param skip_mismatch: `True` (default) lets ``conv10`` differ; `False`
+            allows no difference anywhere. The inverse of the transfer helper's
+            `strict`.
+        :type skip_mismatch: bool
+        :raises FileNotFoundError: If `weights_path` doesn't exist.
+        :raises ValueError: If a layer outside the head is not restored, or the
+            weights cannot be loaded.
+        """
+        load_pretrained_checkpoint(
+            self, weights_path, self.input_shape_config, skip_mismatch,
+            head_pattern=_HEAD_PATTERN,
+            ignore_config_keys=_NON_STRUCTURAL_CONFIG_KEYS,
+        )
+
     @classmethod
     def from_variant(
             cls,
             variant: str,
             num_classes: int = 1000,
-            input_shape: Tuple[int, int, int] = (224, 224, 3),
+            input_shape: Optional[Tuple[int, int, int]] = None,
+            pretrained: Union[bool, str] = False,
             **kwargs: Any
     ) -> "SqueezeNetV1":
         """Create a SqueezeNet model from a predefined variant.
-
-        The chokepoint both public entry points reach, so the ``weights`` guard
-        lives here.
 
         :param variant: One of `"1.0"`, `"1.1"`, `"1.0_bypass"`.
         :type variant: str
         :param num_classes: Number of output classes.
         :type num_classes: int
-        :param input_shape: Input shape `(height, width, channels)`.
-        :type input_shape: tuple of 3 ints
-        :param kwargs: Passthrough to the constructor. A non-`None` `weights`
-            here raises `NotImplementedError`.
+        :param input_shape: Input shape `(height, width, channels)`; `None` is
+            `(224, 224, 3)`.
+        :type input_shape: tuple of 3 ints or None
+        :param pretrained: A path to a local weights file, `True` (raises
+            `NotImplementedError`, since no SqueezeNet weights ship with
+            `dl_techniques`), or `False` (default, random init).
+        :type pretrained: bool or str
+        :param kwargs: Passthrough to the constructor (`use_bypass`,
+            `dropout_rate`, `kernel_regularizer`, ...). `weights` is no argument
+            and is refused by name.
         :return: A configured `SqueezeNetV1` instance.
         :rtype: SqueezeNetV1
-        :raises NotImplementedError: If a non-`None` `weights` is passed.
-        :raises ValueError: If `variant` is not recognized, or `input_shape`'s
+        :raises ValueError: If `variant` is not recognized, `input_shape`'s
             spatial extent is below the variant's computed minimum (35 for
-            "1.0"/"1.0_bypass", 31 for "1.1").
+            "1.0"/"1.0_bypass", 31 for "1.1"), or a keyword is not an argument.
+        :raises NotImplementedError: If `pretrained` is `True`.
+        :raises FileNotFoundError: If `pretrained` is a path that doesn't exist.
 
         Example::
 
@@ -685,23 +795,21 @@ class SqueezeNetV1(keras.Model):
                 f"{list(cls.MODEL_VARIANTS.keys())}"
             )
 
-        if kwargs.pop("weights", None) is not None:
-            # Without the pop, `**kwargs` swallows `weights` and returns a random
-            # model.
-            raise NotImplementedError(
-                "No pretrained SqueezeNet weights are distributed with dl_techniques. "
-                "Train from scratch, or load a local checkpoint with "
-                "keras.models.load_model()."
-            )
+        weights_path = pretrained_path_or_raise(
+            pretrained, f"{cls.__name__} variant '{variant}'"
+        )
 
-        variant_config = cls.MODEL_VARIANTS[variant]
-
-        return cls(
+        model = cls(
             num_classes=num_classes,
-            variant_config=variant_config,
+            variant=variant,
             input_shape=input_shape,
             **kwargs
         )
+
+        if weights_path:
+            model.load_pretrained_weights(weights_path)
+
+        return model
 
     def get_config(self) -> Dict[str, Any]:
         """Return the model configuration for serialization.
@@ -709,78 +817,46 @@ class SqueezeNetV1(keras.Model):
         :return: Configuration dictionary containing every constructor parameter.
         :rtype: dict
         """
-        config = super().get_config()
-        config.update({
+        config = {
             'num_classes': self.num_classes,
-            'variant_config': self.variant_config,
+            'variant': self.variant,
             'use_bypass': self.use_bypass,
             'dropout_rate': self.dropout_rate,
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
-            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'kernel_initializer': self.kernel_initializer,
             'include_top': self.include_top,
-            'input_shape': self._input_shape,
-        })
-        return config
+            'input_shape': self.input_shape_config,
+        }
+        base_config = super().get_config()
+        return {**base_config, **config}
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "SqueezeNetV1":
         """Rebuild the model from a configuration dictionary.
 
-        :param config: Configuration dictionary produced by ``get_config``.
+        :param config: Configuration dictionary produced by ``get_config``; it
+            is not modified.
         :type config: dict
         :return: Reconstructed model instance.
         :rtype: SqueezeNetV1
         """
-        if config.get('kernel_regularizer'):
-            config['kernel_regularizer'] = keras.regularizers.deserialize(
-                config['kernel_regularizer']
-            )
-        if config.get('kernel_initializer'):
-            config['kernel_initializer'] = keras.initializers.deserialize(
-                config['kernel_initializer']
-            )
-
         # DECISION plan-2026-08-19T163559-499b6f0e/D-129: drop only the Functional
         # keys __init__ rebuilds; adding 'name' renames a nested backbone on reload
         # and weight_transfer.py's name-keyed map then misses it. See decisions.md.
-        for key in ('layers', 'input_layers', 'output_layers'):
-            config.pop(key, None)
+        config = {
+            key: value for key, value in config.items()
+            if key not in ('layers', 'input_layers', 'output_layers')
+        }
 
         return cls(**config)
-
-    def summary_with_details(self) -> None:
-        """Print the Keras summary, then log the resolved configuration.
-
-        The parameter-reduction line is the paper's headline figure, not a value
-        derived from this configuration.
-
-        :return: None.
-        :rtype: None
-        """
-        self.summary()
-
-        logger.info("SqueezeNet V1 Configuration:")
-        logger.info(f"  - Input shape: {self._input_shape}")
-        logger.info(f"  - Number of Fire modules: {len(self.fire_configs)}")
-        logger.info(f"  - Use bypass: {self.use_bypass}")
-        logger.info(f"  - Conv1 filters: {self.conv1_filters}")
-        logger.info(f"  - Conv1 kernel: {self.conv1_kernel}")
-        logger.info(f"  - Conv1 stride: {self.conv1_stride}")
-        logger.info(f"  - Pooling after modules: {self.pool_indices}")
-        logger.info(f"  - Dropout rate: {self.dropout_rate}")
-        logger.info(f"  - Include top: {self.include_top}")
-        if self.include_top:
-            logger.info(f"  - Number of classes: {self.num_classes}")
-
-        logger.info("  - Estimated parameter reduction: ~50x vs AlexNet")
 
 # ---------------------------------------------------------------------
 
 def create_squeezenet_v1(
         variant: str = "1.0",
         num_classes: int = 1000,
-        input_shape: Tuple[int, int, int] = (224, 224, 3),
-        weights: Optional[str] = None,
+        input_shape: Optional[Tuple[int, int, int]] = None,
+        pretrained: Union[bool, str] = False,
         **kwargs: Any
 ) -> SqueezeNetV1:
     """Create a SqueezeNet V1 model from a variant name.
@@ -789,17 +865,20 @@ def create_squeezenet_v1(
     :type variant: str
     :param num_classes: Number of output classes.
     :type num_classes: int
-    :param input_shape: Input shape `(height, width, channels)`.
-    :type input_shape: tuple of 3 ints
-    :param weights: Unsupported; any non-`None` value raises `NotImplementedError`.
-    :type weights: str or None
+    :param input_shape: Input shape `(height, width, channels)`; `None` is
+        `(224, 224, 3)`.
+    :type input_shape: tuple of 3 ints or None
+    :param pretrained: A path to a local weights file, `True` (raises
+        `NotImplementedError`), or `False` (default, random init).
+    :type pretrained: bool or str
     :param kwargs: Passthrough to the model constructor.
     :return: A configured `SqueezeNetV1` instance.
     :rtype: SqueezeNetV1
-    :raises NotImplementedError: If `weights` is not `None`.
     :raises ValueError: If `variant` is not recognized, or `input_shape`'s
         spatial extent is below the variant's computed minimum (35 for
         "1.0"/"1.0_bypass", 31 for "1.1").
+    :raises NotImplementedError: If `pretrained` is `True`.
+    :raises FileNotFoundError: If `pretrained` is a path that doesn't exist.
 
     Example::
 
@@ -811,7 +890,7 @@ def create_squeezenet_v1(
         variant=variant,
         num_classes=num_classes,
         input_shape=input_shape,
-        weights=weights,
+        pretrained=pretrained,
         **kwargs
     )
 

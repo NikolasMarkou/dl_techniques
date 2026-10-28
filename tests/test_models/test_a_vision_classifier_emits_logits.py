@@ -100,6 +100,12 @@ def _convnext_v2(**knobs) -> keras.Model:
                       input_shape=(32, 48, 3), **knobs)
 
 
+def _rad_convnet(**knobs) -> keras.Model:
+    from dl_techniques.models.vision.rad_convnet import RADConvNet
+    return RADConvNet(num_classes=NUM_CLASSES, depths=[1, 1], dims=[8, 16], strides=2,
+                      input_shape=(32, 48, 3), **knobs)
+
+
 def _alexnet(**knobs) -> keras.Model:
     # Square: AlexNet's flatten width is 256 * extent ** 2 for ONE extent.
     # 67 is the smallest input above MIN_SPATIAL_EXTENT (55) that keeps the
@@ -231,6 +237,7 @@ SUBJECTS: Dict[str, Tuple[Callable[..., keras.Model], Tuple[int, int, int]]] = {
     "ResNet": (_resnet, (32, 48, 3)),
     "ConvNeXtV1": (_convnext_v1, (32, 48, 3)),
     "ConvNeXtV2": (_convnext_v2, (32, 48, 3)),
+    "RADConvNet": (_rad_convnet, (32, 48, 3)),
     "AlexNet": (_alexnet, (67, 67, 3)),
     "CBAMNet": (_cbam, (32, 48, 3)),
     "MobileNetV1": (_mobilenet_v1, (32, 48, 3)),
@@ -434,6 +441,9 @@ REFERENCE_HEAD_OWNERS: Dict[str, set] = {
     "CBAMNet": {"classifier"},
     "ConvNeXtV1": {"pooled_norm", "classifier"},
     "ConvNeXtV2": {"pooled_norm", "classifier"},
+    # RADConvNet: a ConvNeXt-shaped model with the same head, self.head(self.norm(x.mean([-2, -1]))),
+    # as GAP + LayerNorm + FC (bias-free when the model is).
+    "RADConvNet": {"pooled_norm", "classifier"},
     "AlexNet": {"dense_block", "dense_block_1", "classifier"},
     # MobileNetV1: Howard et al. 2017 Table 1 (Avg Pool, FC, Softmax) as Keras
     # Applications builds it (dropout 1e-3, then the classifier).
@@ -543,7 +553,7 @@ def test_the_head_has_the_reference_shape(subject: str) -> None:
         # Small's last point is 1024; width_multiplier <= 1 does not narrow it.
         assert block.units == 1024
         assert block.activation_type == "hard_swish"
-    if subject.startswith("ConvNeXt"):
+    if subject.startswith("ConvNeXt") or subject == "RADConvNet":
         assert isinstance(head.pooled_norm, keras.layers.LayerNormalization)
         assert head.pooled_norm.epsilon == pytest.approx(1e-6)
     if subject == "AlexNet":
@@ -586,20 +596,22 @@ KNOBS: Dict[str, Dict[str, object]] = {
     "ResNet": {"kernel_regularizer": keras.regularizers.L2(_L2)},
     "ConvNeXtV1": {"kernel_regularizer": keras.regularizers.L2(_L2)},
     "ConvNeXtV2": {"kernel_regularizer": keras.regularizers.L2(_L2)},
+    # RADConvNet takes neither knob; its head draws from the "truncated_normal" string.
+    "RADConvNet": {},
     "CBAMNet": {"kernel_regularizer": keras.regularizers.L2(_L2),
                 "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123)},
     "AlexNet": {"kernel_initializer": keras.initializers.RandomNormal(stddev=0.123),
                 "bias_initializer": keras.initializers.Constant(0.5)},
-    # MobileNet: ``weight_decay`` is the family's L2 knob; ``dropout_rate`` is
+    # MobileNet: ``kernel_regularizer`` is the family's L2 knob; ``dropout_rate`` is
     # the dropout before the classifier (V1/V2) or after the hidden block
     # (V3/V4).
-    "MobileNetV1": {"weight_decay": _L2, "dropout_rate": 0.3,
+    "MobileNetV1": {"kernel_regularizer": keras.regularizers.L2(_L2), "dropout_rate": 0.3,
                     "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123)},
-    "MobileNetV2": {"weight_decay": _L2, "dropout_rate": 0.3,
+    "MobileNetV2": {"kernel_regularizer": keras.regularizers.L2(_L2), "dropout_rate": 0.3,
                     "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123)},
-    "MobileNetV3": {"weight_decay": _L2, "dropout_rate": 0.3,
+    "MobileNetV3": {"kernel_regularizer": keras.regularizers.L2(_L2), "dropout_rate": 0.3,
                     "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123)},
-    "MobileNetV4": {"weight_decay": _L2, "dropout_rate": 0.3,
+    "MobileNetV4": {"kernel_regularizer": keras.regularizers.L2(_L2), "dropout_rate": 0.3,
                     "kernel_initializer": keras.initializers.RandomNormal(stddev=0.123)},
     "ViT": {"kernel_regularizer": keras.regularizers.L2(_L2),
             "bias_regularizer": keras.regularizers.L2(_L2), "dropout_rate": 0.3,
@@ -666,7 +678,7 @@ def test_the_model_knobs_reach_the_classifier(subject: str) -> None:
     head = _head_layer(model)
     classifier = _classifier(model)
     knobs = KNOBS[subject]
-    if "kernel_regularizer" in knobs or "weight_decay" in knobs:
+    if "kernel_regularizer" in knobs:
         assert isinstance(classifier.kernel_regularizer, keras.regularizers.L2), (
             f"{subject}: the model's kernel L2 did not reach the classifier"
         )
@@ -712,6 +724,12 @@ def test_the_model_knobs_reach_the_classifier(subject: str) -> None:
         assert config["class_name"] == "TruncatedNormal", (subject, config)
         assert config["config"]["stddev"] == pytest.approx(0.02), (
             f"{subject}: the reference head draws at trunc_normal_(std=.02)"
+        )
+    if subject == "RADConvNet":
+        config = keras.initializers.serialize(classifier.kernel_initializer)
+        assert config["class_name"] == "TruncatedNormal", (subject, config)
+        assert config["config"]["stddev"] == pytest.approx(0.05), (
+            f"{subject}: the head keeps Keras' truncated_normal default, as it did before the shared head"
         )
     if subject == "FFTNet":
         config = keras.initializers.serialize(classifier.kernel_initializer)
@@ -1013,12 +1031,56 @@ def test_the_owner_scan_sees_a_planted_classifier_and_skips_other_tasks() -> Non
         _classifier_owners("x = build_model_vision_head(task, {})\n")
 
 
+def _leaf_owners(owners: set, sources: list) -> set:
+    """``owners`` with each private base replaced by the classes that inherit from it.
+
+    Interface contract: ``owners`` are the names :func:`_classifier_owners` found, and
+    ``sources`` the text of every module that may hold a subclass. A name that starts with
+    ``_`` is an abstract body that is never built (``_ConvNeXtBase`` builds the head for
+    ``ConvNeXtV1`` and ``ConvNeXtV2``); the classes listing it as a base, to a fixed point,
+    take its place, because those are what a caller builds and what the logits arms must
+    reach. A private owner with no subclass stays in the set, so it still needs a row.
+    """
+    inheriting: dict = {}
+    for source in sources:
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.ClassDef):
+                for base in node.bases:
+                    inheriting.setdefault(getattr(base, "id", None) or getattr(base, "attr", ""), set()).add(node.name)
+    resolved = set()
+    pending = list(owners)
+    while pending:
+        name = pending.pop()
+        leaves = inheriting.get(name, set()) if name.startswith("_") else set()
+        if leaves:
+            pending.extend(leaves)
+        else:
+            resolved.add(name)
+    return resolved
+
+
+def test_a_private_base_that_owns_the_head_is_replaced_by_its_leaves() -> None:
+    base = ("class _Base(keras.Model):\n"
+            "    def _build_head(self):\n"
+            "        self.h = build_model_vision_head(VisionTaskType.CLASSIFICATION, {})\n")
+    leaves = ("class LeafA(_Base):\n    pass\n"
+              "class LeafB(common._Base):\n    pass\n"
+              "class Other(keras.Model):\n    pass\n")
+    assert _classifier_owners(base) == {"_Base"}
+    assert _leaf_owners({"_Base"}, [base, leaves]) == {"LeafA", "LeafB"}
+    assert _leaf_owners({"_Base"}, [base]) == {"_Base"}, "an orphan private owner still needs a row"
+    assert _leaf_owners({"Plain"}, [base, leaves]) == {"Plain"}
+
+
 def test_every_classification_head_owner_has_a_census_row() -> None:
     owners = set()
+    sources = []
     for path in sorted(_MODELS_DIR.rglob("*.py")):
         source = path.read_text(encoding="utf-8")
+        sources.append(source)
         if any(name in source for name in _HEAD_BUILDERS):
             owners |= _classifier_owners(source)
+    owners = _leaf_owners(owners, sources)
     # Anti-vacuity: 16 classification-head owners (17 calls; ResNet makes two)
     # at 3a89046f8.
     assert len(owners) >= 16, sorted(owners)

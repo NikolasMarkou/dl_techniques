@@ -166,11 +166,8 @@ def test_resnet_callbacks_write_into_its_run_dir(monkeypatch, tmp_path):
     from train.resnet import train_resnet as module
 
     seen = _capture_common_callbacks(monkeypatch, module)
-    for name in ("train", "val"):
-        (tmp_path / name).mkdir()
     config = module.TrainingConfig(
-        train_data_dir=str(tmp_path / "train"),
-        val_data_dir=str(tmp_path / "val"),
+        imagenet_root=str(tmp_path),
         output_dir=str(tmp_path / "out"),
         experiment_name="run",
     )

@@ -34,7 +34,19 @@ Data loading, generation, and preprocessing utilities for various domains.
   - `arc_converters.py`, `arc_keras.py`, `arc_utilities.py`
 - `vision/` — Computer vision dataset loaders:
   - `coco.py` — COCO dataset, `coco_multitask_local.py` — local multi-task COCO
-    variant, `imagenet.py` — ImageNet
+    variant, `imagenet.py` — ImageNet via TFDS (needs the original tars)
+  - `imagenet2012.py` — ImageNet-1k read straight from the extracted
+    `train/<wnid>/` + flat `val/` layout (:func:`load_imagenet2012`, returns
+    batched `(image, label)` plus counts and wnid class names). Class index =
+    sorted train wnids; val labels come from the ILSVRC2012 devkit
+    (`meta.mat` + `ILSVRC2012_validation_ground_truth.txt`, translated
+    `ILSVRC id -> wnid -> index`, the ids are NOT sorted-wnid order) and raise
+    `FileNotFoundError` when the devkit is absent; train never needs it. The
+    file list is cached under `<root>/.index/`. Finite dataset, no `repeat()`.
+    `augment_color` adds brightness/contrast/saturation/hue on [0, 1] pixels.
+    Used through `train.common.imagenet` by `train_resnet`, `train_vit` and `train_cliffordnet`.
+    Tested by `tests/test_datasets/test_imagenet2012.py`. TensorFlow and
+    SciPy at module scope.
   - `tracking.py` — Siamese-tracker pair pipeline over COCO boxes
     (:func:`coco_tracking_generator`) or seeded synthetic targets
     (:func:`synthetic_tracking_generator`): context-square exemplar/search

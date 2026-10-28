@@ -356,6 +356,29 @@ module path — `@register_dl_technique("dl_techniques.models.convunext.model")`
 `dl_techniques.models.convunext.model>SpatialLinearAttention`, so the two classes in this one
 file sit under the **same** package string, as the rule requires.
 
+**`ConvUNextStem` arguments.** The stem keeps its activation under `stem.activation` (the argument's own
+name) and its `kernel_initializer` as a string or a serialized spec: an `Initializer` instance is
+serialized once in the constructor, so `get_config()` is JSON data and the inner `ConvStem` builds its
+own initializer from it. The layer has no `from_config` of its own; the Keras one rebuilds it from
+`get_config()`.
+
+**Archive break (2026-10-28).** The stem used to be built lazily in `build()` as `self._conv_stem`; it is
+`self.stem`, a `ConvStem` created in `__init__`. Measured by saving the tiny variant
+(`create_convunext_variant("tiny", (32, 32, 3))`, 172 weights) in a separate process from the old
+revision and restoring it with the current code (`git archive`, `python -I`):
+
+- From `be92a74eb` (the stem already `self.stem`): `keras.models.load_model` and `model.load_weights`
+  both restore it, with the same `w.path` strings (172 of 172 equal by path) and outputs equal at
+  `atol=0` for `training=False` and `training=True`. Nothing moves in this step's weights.
+- From `20b48aba6^` (the lazy `_conv_stem`; stem weights at `encoder_level_0_stem/stem_conv/*` and
+  `encoder_level_0_stem/stem_norm/*`): neither method restores anything (`Layer 'stem_conv1' expected 2
+  variables, but received 0 variables during loading`). The weights transplant by `w.path` with two
+  renames, `encoder_level_0_stem/stem_conv/*` to `encoder_level_0_stem/stem/stem_conv1/*` and
+  `encoder_level_0_stem/stem_norm/*` to `encoder_level_0_stem/stem/stem_norm1/*`: all 172 tensors are
+  assigned and the output is equal at `atol=0`.
+- Transcripts: `plans/plan-2026-10-26T125959-7af851e5/scratch_iter2/step15/archive_convunext_values.txt`
+  and `scratch_iter2/archive/transcripts.txt`.
+
 ## 9. Package surface
 
 ```python

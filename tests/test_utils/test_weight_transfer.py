@@ -25,13 +25,19 @@ then does a whole-layer ``set_weights`` (``utils/weight_transfer.py:148-149,
 below restores it without re-coupling to any model package.
 """
 
+import contextlib
+import json
 import os
+import zipfile
 
 import keras
 import numpy as np
 import pytest
 
+from dl_techniques.utils import weight_transfer
 from dl_techniques.utils.weight_transfer import (
+    DEFAULT_HEAD_PATTERN,
+    DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
     TransferReport,
     VocabChange,
     load_pretrained_checkpoint,
@@ -866,16 +872,26 @@ class TinyCheckpointClassifier(keras.Model):
         block_width: int = None,
         num_classes: int = 3,
         extra_block: bool = False,
+        activation: str = "relu",
+        shifts=(1, 2),
+        dropout_rate: float = 0.0,
+        kernel_size=3,
+        head_config_overrides: dict = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
+        self.kernel_size = kernel_size
+        self.head_config_overrides = head_config_overrides
+        self.activation = activation
+        self.shifts = tuple(shifts)
+        self.dropout_rate = dropout_rate
         self.include_top = include_top
         self.width = width
         self.block_width = width if block_width is None else block_width
         self.num_classes = num_classes
         self.extra_block = extra_block
         self.build_shapes = []
-        self.stem = keras.layers.Dense(width, activation="relu", name="stem")
+        self.stem = keras.layers.Dense(width, activation=activation, name="stem")
         self.block_0 = keras.layers.Dense(
             self.block_width, activation="relu", name="block_0"
         )
@@ -914,16 +930,32 @@ class TinyCheckpointClassifier(keras.Model):
                 "block_width": self.block_width,
                 "num_classes": self.num_classes,
                 "extra_block": self.extra_block,
+                "activation": self.activation,
+                "shifts": self.shifts,
+                "dropout_rate": self.dropout_rate,
+                "kernel_size": self.kernel_size,
+                "head_config_overrides": self.head_config_overrides,
             }
         )
         return config
 
 
+#: The fixture's config keys that change a layer shape or the layer set: the tests of
+#: the LAYER rule pass them as ``ignore_config_keys`` so the layer check is the one
+#: that fires. The tests of the config rule leave the default.
+_LAYER_RULE_ONLY = (
+    *DEFAULT_NON_STRUCTURAL_CONFIG_KEYS, "width", "block_width", "extra_block",
+)
+
+
 def _tiny(include_top=True, width=6, block_width=None, built=True,
-          num_classes=3, extra_block=False):
+          num_classes=3, extra_block=False, activation="relu", shifts=(1, 2),
+          dropout_rate=0.0, kernel_size=3, head_config_overrides=None):
     model = TinyCheckpointClassifier(
         include_top=include_top, width=width, block_width=block_width,
-        num_classes=num_classes, extra_block=extra_block,
+        num_classes=num_classes, extra_block=extra_block, activation=activation,
+        shifts=shifts, dropout_rate=dropout_rate, kernel_size=kernel_size,
+        head_config_overrides=head_config_overrides,
     )
     if built:
         model.build((1, *_BUILD_SHAPE))
@@ -1020,6 +1052,26 @@ class TestLoadPretrainedCheckpoint:
             load_pretrained_checkpoint(tgt, missing, _BUILD_SHAPE)
         assert not tgt.built, "a missing file is refused before any build"
 
+    @pytest.mark.parametrize("shape", [(None,), (4, None), ()])
+    def test_an_unbuilt_model_without_a_channel_count_is_refused_by_name(self, tmp_path, shape):
+        """The build needs a known last axis; the failure used to be the model's own ``%``-on-``None``.
+
+        A channel-less ``input_shape`` reached the first convolution as ``None % groups`` and
+        came back as "unsupported operand type(s) for %" wrapped in a load error that named
+        neither the argument nor the value.
+        """
+        ckpt = _save(_tiny(), tmp_path)
+        tgt = _tiny(built=False)
+        with pytest.raises(ValueError, match="input_shape") as caught:
+            load_pretrained_checkpoint(tgt, ckpt, shape)
+        assert str(shape) in str(caught.value)
+        assert not tgt.built, "the check comes before the build"
+
+    def test_a_built_model_needs_no_channel_count_because_it_is_not_built(self, tmp_path):
+        ckpt = _save(_tiny(), tmp_path)
+        report = load_pretrained_checkpoint(_tiny(), ckpt, (None,))
+        assert report.num_loaded == 3
+
     def test_a_load_that_restores_nothing_raises_and_names_the_path(self, tmp_path):
         """No layer restored, none of them a head the caller expects to differ."""
         ckpt = _save(_tiny(width=6), tmp_path)
@@ -1053,7 +1105,8 @@ class TestLoadPretrainedCheckpoint:
 
         with pytest.raises(ValueError, match="Failed to load weights") as caught:
             load_pretrained_checkpoint(
-                tgt, ckpt, _BUILD_SHAPE, skip_mismatch=False
+                tgt, ckpt, _BUILD_SHAPE, skip_mismatch=False,
+                ignore_config_keys=_LAYER_RULE_ONLY,
             )
 
         cause = caught.value.__cause__
@@ -1078,7 +1131,7 @@ class TestAPretrainedLoadRestoresEveryLayerOutsideTheHead:
 
     ``resnet50`` into ``resnet18`` restored one layer, reported nine shape
     mismatches and nine missing layers, and returned normally. Only the head
-    layers (``head_prefixes``) may differ.
+    layers (``head_pattern``) may differ.
     """
 
     def test_a_trunk_layer_of_another_width_raises_and_leaves_the_model_alone(
@@ -1089,7 +1142,9 @@ class TestAPretrainedLoadRestoresEveryLayerOutsideTheHead:
         before = _by_layer_name(tgt)
 
         with pytest.raises(ValueError) as caught:
-            load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE)
+            load_pretrained_checkpoint(
+                tgt, ckpt, _BUILD_SHAPE, ignore_config_keys=_LAYER_RULE_ONLY
+            )
 
         message = str(caught.value)
         assert "source.keras" in message
@@ -1102,7 +1157,9 @@ class TestAPretrainedLoadRestoresEveryLayerOutsideTheHead:
         tgt = _tiny(block_width=5)
 
         with pytest.raises(ValueError) as caught:
-            load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE)
+            load_pretrained_checkpoint(
+                tgt, ckpt, _BUILD_SHAPE, ignore_config_keys=_LAYER_RULE_ONLY
+            )
 
         message = str(caught.value)
         # stem fits; block_0 and the head it feeds do not.
@@ -1136,7 +1193,9 @@ class TestAPretrainedLoadRestoresEveryLayerOutsideTheHead:
         tgt = _tiny()
 
         with pytest.raises(ValueError, match="block_1"):
-            load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE)
+            load_pretrained_checkpoint(
+                tgt, ckpt, _BUILD_SHAPE, ignore_config_keys=_LAYER_RULE_ONLY
+            )
 
     def test_a_shallower_checkpoint_raises_instead_of_leaving_a_layer_random(
         self, tmp_path
@@ -1145,7 +1204,9 @@ class TestAPretrainedLoadRestoresEveryLayerOutsideTheHead:
         tgt = _tiny(extra_block=True)
 
         with pytest.raises(ValueError, match="block_1"):
-            load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE)
+            load_pretrained_checkpoint(
+                tgt, ckpt, _BUILD_SHAPE, ignore_config_keys=_LAYER_RULE_ONLY
+            )
 
     def test_another_class_count_loads_the_trunk_and_skips_the_head(self, tmp_path):
         src = _tiny(num_classes=3)
@@ -1175,18 +1236,64 @@ class TestAPretrainedLoadRestoresEveryLayerOutsideTheHead:
         assert report.missing_in_source == ["classification_head"]
         assert _weights_equal(head_before, _by_layer_name(tgt)["classification_head"])
 
-    def test_head_prefixes_name_the_layers_that_may_differ(self, tmp_path):
+    def test_head_pattern_names_the_layers_that_may_differ(self, tmp_path):
         ckpt = _save(_tiny(num_classes=3), tmp_path)
 
         tgt = _tiny(num_classes=5)
         with pytest.raises(ValueError, match="classification_head"):
-            load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE, head_prefixes=())
+            load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE, head_pattern=r"(?!)")
 
         tgt = _tiny(block_width=5)
         report = load_pretrained_checkpoint(
-            tgt, ckpt, _BUILD_SHAPE, head_prefixes=("block_0", "classification_head")
+            tgt, ckpt, _BUILD_SHAPE, head_pattern=r"block_0|classification_head",
+            ignore_config_keys=_LAYER_RULE_ONLY,
         )
         assert report.loaded == ["stem"]
+
+    def test_the_default_pattern_reads_the_deep_supervision_heads_by_index(self):
+        import re
+
+        head = re.compile(DEFAULT_HEAD_PATTERN)
+        for name in ("classification_head", "supervision_head_0", "supervision_head_12"):
+            assert head.fullmatch(name), name
+        for name in ("classification_head_proj", "supervision_head", "supervision_head_x",
+                     "my_classification_head", "stem", "supervision_head_0_norm"):
+            assert not head.fullmatch(name), name
+
+    def test_a_trunk_layer_that_only_starts_like_a_head_must_still_load(self, tmp_path):
+        """A name PREFIX is not a head: ``classification_head_proj`` is trunk."""
+        def stack(width):
+            return keras.Sequential([
+                keras.Input((_INPUT_DIM,)),
+                keras.layers.Dense(4, name="stem"),
+                keras.layers.Dense(width, name="classification_head_proj"),
+                keras.layers.Dense(3, name="classification_head"),
+            ])
+
+        ckpt = _save(stack(8), tmp_path)
+        tgt = stack(9)
+        before = _by_layer_name(tgt)
+
+        with pytest.raises(ValueError, match="classification_head_proj"):
+            load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE)
+
+        for name, weights in _by_layer_name(tgt).items():
+            assert _weights_equal(before[name], weights), f"{name} was written"
+
+    def test_a_supervision_head_of_another_width_is_a_head(self, tmp_path):
+        def stack(width):
+            return keras.Sequential([
+                keras.Input((_INPUT_DIM,)),
+                keras.layers.Dense(4, name="stem"),
+                keras.layers.Dense(width, name="supervision_head_2"),
+            ])
+
+        report = load_pretrained_checkpoint(
+            stack(5), _save(stack(3), tmp_path), _BUILD_SHAPE
+        )
+
+        assert report.loaded == ["stem"]
+        assert [n for n, _, _ in report.shape_mismatch] == ["supervision_head_2"]
 
     def test_a_head_kept_at_its_initialization_is_named_in_a_warning(
         self, tmp_path, caplog
@@ -1217,3 +1324,422 @@ class TestAPretrainedLoadRestoresEveryLayerOutsideTheHead:
         assert isinstance(caught.value.__cause__, ValueError)
         for name, weights in _by_layer_name(tgt).items():
             assert _weights_equal(before[name], weights)
+
+
+def _rewrite_archive_config(ckpt, edit):
+    """Rewrite ``config.json`` of a ``.keras`` archive in place: ``edit(config)``."""
+    with zipfile.ZipFile(ckpt) as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+    config = json.loads(members["config.json"])
+    edit(config)
+    members["config.json"] = json.dumps(config).encode()
+    with zipfile.ZipFile(ckpt, "w") as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+
+
+class TestAPretrainedLoadRefusesAnotherArchitecture:
+    """D-041: equal weight shapes do not make equal architectures.
+
+    The fixture's ``activation`` and ``shifts`` change what the model computes and
+    no weight shape, so the layer check alone restores every layer and reports
+    success. The archive's own config is the only witness.
+    """
+
+    def test_the_layer_check_alone_accepts_another_activation(self, tmp_path):
+        """Control: this is the hole, shown with the config keys ignored."""
+        ckpt = _save(_tiny(activation="relu"), tmp_path)
+        tgt = _tiny(activation="gelu")
+
+        report = load_pretrained_checkpoint(
+            tgt, ckpt, _BUILD_SHAPE, ignore_config_keys=(*DEFAULT_NON_STRUCTURAL_CONFIG_KEYS, "activation")
+        )
+
+        assert sorted(report.loaded) == ["block_0", "classification_head", "stem"]
+
+    def test_another_activation_with_every_shape_equal_is_refused(self, tmp_path):
+        ckpt = _save(_tiny(activation="relu"), tmp_path)
+        tgt = _tiny(activation="gelu")
+        before = _by_layer_name(tgt)
+
+        with pytest.raises(ValueError) as caught:
+            load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE)
+
+        message = str(caught.value)
+        assert "source.keras" in message
+        assert "activation: checkpoint 'relu', model 'gelu'" in message, message
+        for name, weights in _by_layer_name(tgt).items():
+            assert _weights_equal(before[name], weights), f"{name} was written"
+
+    def test_every_differing_key_is_named_with_both_values(self, tmp_path):
+        ckpt = _save(_tiny(activation="relu", shifts=(1, 2)), tmp_path)
+
+        with pytest.raises(ValueError) as caught:
+            load_pretrained_checkpoint(
+                _tiny(activation="gelu", shifts=(1, 3)), ckpt, _BUILD_SHAPE
+            )
+
+        message = str(caught.value)
+        assert "2 key(s)" in message, message
+        assert "activation: checkpoint 'relu', model 'gelu'" in message, message
+        assert "shifts: checkpoint [1, 2], model [1, 3]" in message, message
+
+    def test_equal_tuples_are_equal(self, tmp_path):
+        """A tuple is a tuple on the model side and a list in ``config.json``; both read as one list."""
+        ckpt = _save(_tiny(shifts=(1, 2)), tmp_path)
+
+        report = load_pretrained_checkpoint(_tiny(shifts=(1, 2)), ckpt, _BUILD_SHAPE)
+
+        assert report.num_loaded == 3
+
+    def test_a_key_the_caller_ignores_may_differ(self, tmp_path):
+        ckpt = _save(_tiny(activation="relu"), tmp_path)
+        tgt = _tiny(activation="gelu")
+
+        report = load_pretrained_checkpoint(
+            tgt, ckpt, _BUILD_SHAPE, ignore_config_keys=("activation", "name", "dtype", "trainable")
+        )
+
+        assert report.num_loaded == 3
+
+    def test_the_default_keys_may_differ_without_a_refusal(self, tmp_path):
+        """Another class count and a headless target are not another architecture."""
+        ckpt = _save(_tiny(num_classes=3, include_top=True), tmp_path)
+
+        report = load_pretrained_checkpoint(
+            _tiny(num_classes=5, include_top=False), ckpt, _BUILD_SHAPE
+        )
+
+        assert sorted(report.loaded) == ["block_0", "stem"]
+
+    def test_a_key_missing_from_the_archive_is_unknown_not_different(self, tmp_path):
+        """A checkpoint of an older revision lacks arguments added since."""
+        ckpt = _save(_tiny(activation="relu"), tmp_path)
+        _rewrite_archive_config(ckpt, lambda c: c["config"].pop("activation"))
+        assert "activation" not in read_checkpoint_config(ckpt)["config"], "precondition"
+
+        report = load_pretrained_checkpoint(_tiny(activation="gelu"), ckpt, _BUILD_SHAPE)
+
+        assert report.num_loaded == 3
+
+    def test_a_key_missing_from_the_model_is_unknown_not_different(
+        self, tmp_path, monkeypatch
+    ):
+        """The comparison skips a recorded key the model has no argument for.
+
+        The recorded config is replaced here, so Keras still rebuilds the archived
+        model from the real one; the next test writes the key into the archive.
+        """
+        ckpt = _save(_tiny(), tmp_path)
+        recorded = read_checkpoint_config(ckpt)
+        recorded["config"]["argument_removed_since"] = "x"
+        monkeypatch.setattr(weight_transfer, "read_checkpoint_config", lambda path: recorded)
+
+        report = load_pretrained_checkpoint(_tiny(), ckpt, _BUILD_SHAPE)
+
+        assert report.num_loaded == 3
+
+    def test_an_argument_the_class_no_longer_takes_fails_the_load_naming_it(self, tmp_path):
+        """A real archive that records a removed argument never reaches the comparison.
+
+        Keras rebuilds the archived model from its own config first, so the load
+        raises ``ValueError`` naming the argument (MobileNet's ``weight_decay``
+        became ``kernel_regularizer``). The control is the same archive without it.
+        """
+        ckpt = _save(_tiny(), tmp_path)
+        assert load_pretrained_checkpoint(_tiny(), ckpt, _BUILD_SHAPE).num_loaded == 3, "control"
+
+        _rewrite_archive_config(ckpt, lambda c: c["config"].update(argument_removed_since="x"))
+        target = _tiny()
+
+        with pytest.raises(ValueError, match="argument_removed_since"):
+            load_pretrained_checkpoint(target, ckpt, _BUILD_SHAPE)
+
+    def test_a_graph_model_is_checked_by_layers_only(self, tmp_path):
+        """A Sequential config lists its layers, whose generated names differ per build."""
+        def stack():
+            return keras.Sequential([
+                keras.Input((_INPUT_DIM,)),
+                keras.layers.Dense(4, name="stem"),
+                keras.layers.Dense(3, name="classification_head"),
+            ])
+
+        report = load_pretrained_checkpoint(stack(), _save(stack(), tmp_path), _BUILD_SHAPE)
+
+        assert report.num_loaded == 2
+
+    def test_a_config_of_another_class_that_holds_no_such_model_is_checked_by_layers_only(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """No model of the target's class can be located in the archive's config.
+
+        The recorded config is edited to a class that has none of the model's
+        constructor keys and no layer list, so nothing can be compared. The load
+        still goes by layers, and says so in a warning rather than skipping silently.
+        """
+        ckpt = _save(_tiny(activation="relu"), tmp_path)
+        recorded = read_checkpoint_config(ckpt)
+        recorded["class_name"] = "Functional"
+        monkeypatch.setattr(weight_transfer, "read_checkpoint_config", lambda path: recorded)
+
+        with _warnings_logged(caplog) as warned:
+            report = load_pretrained_checkpoint(_tiny(activation="gelu"), ckpt, _BUILD_SHAPE)
+
+        assert report.num_loaded == 3
+        assert any("configuration was not compared" in m and "Functional" in m for m in warned), warned
+
+
+@contextlib.contextmanager
+def _warnings_logged(caplog):
+    """The WARNING messages the library logger emits inside the block (a list)."""
+    from dl_techniques.utils.logger import logger as dl_logger
+
+    dl_logger.addHandler(caplog.handler)
+    messages = []
+    try:
+        with caplog.at_level("WARNING", logger=dl_logger.name):
+            yield messages
+    finally:
+        dl_logger.removeHandler(caplog.handler)
+        messages.extend(r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+
+
+def _wrap(model):
+    """The shape the repo's trainers save: ``keras.Model(inp, model(inp))``."""
+    inp = keras.Input(shape=_BUILD_SHAPE, name="input")
+    return keras.Model(inp, model(inp), name="wrapper")
+
+
+class TestAPretrainedLoadReadsTheConfigOfAWrappedModel:
+    """A functional wrapper keeps the wrapped model's config in its archive."""
+
+    def test_a_wrapped_checkpoint_of_another_activation_is_refused(self, tmp_path):
+        ckpt = _save(_wrap(_tiny(activation="relu")), tmp_path)
+        tgt = _tiny(activation="gelu")
+        before = _by_layer_name(tgt)
+
+        with pytest.raises(ValueError) as caught:
+            load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE)
+
+        assert "activation: checkpoint 'relu', model 'gelu'" in str(caught.value), caught.value
+        for name, weights in _by_layer_name(tgt).items():
+            assert _weights_equal(before[name], weights), f"{name} was written"
+
+    def test_a_wrapped_checkpoint_of_the_same_architecture_loads(self, tmp_path):
+        src = _tiny(activation="gelu")
+        ckpt = _save(_wrap(src), tmp_path)
+
+        report = load_pretrained_checkpoint(_tiny(activation="gelu"), ckpt, _BUILD_SHAPE)
+
+        assert report.num_loaded == 3
+
+    def test_a_wrapper_holding_two_models_of_the_class_cannot_be_compared(
+        self, tmp_path, caplog
+    ):
+        """Which of the two is meant is unknown: layers only, and the load says so."""
+        first, second = _tiny(activation="relu"), _tiny(activation="relu")
+        inp = keras.Input(shape=_BUILD_SHAPE, name="input")
+        wrapper = keras.Model(inp, keras.layers.Add()([first(inp), second(inp)]), name="wrapper")
+        ckpt = _save(wrapper, tmp_path)
+
+        with _warnings_logged(caplog) as warned:
+            with pytest.raises(ValueError) as caught:
+                load_pretrained_checkpoint(_tiny(activation="gelu"), ckpt, _BUILD_SHAPE)
+
+        assert "activation: checkpoint" not in str(caught.value), caught.value
+        assert any("configuration was not compared" in m for m in warned), warned
+
+    def test_a_wrapper_around_another_class_is_not_read_as_the_models_config(
+        self, tmp_path, caplog
+    ):
+        inp = keras.Input(shape=(_INPUT_DIM,), name="input")
+        plain = keras.Model(inp, keras.layers.Dense(4, name="stem")(inp), name="plain")
+
+        with _warnings_logged(caplog) as warned:
+            with pytest.raises(ValueError):
+                load_pretrained_checkpoint(_tiny(), _save(plain, tmp_path), _BUILD_SHAPE)
+
+        assert any("configuration was not compared" in m for m in warned), warned
+
+
+class TestAPretrainedLoadComparesAHeadThatWouldBeCopied:
+    """``head_config_overrides`` changes what the head computes and no weight shape.
+
+    The head layer is copied only when every one of its weight shapes fits. The
+    configuration is compared exactly then; a head the shapes already exclude
+    (another ``num_classes``) is a new head and may be configured as the caller likes.
+    """
+
+    MAX = {"pooling_type": "max"}
+
+    def test_a_head_that_computes_another_function_with_equal_shapes_is_refused(self, tmp_path):
+        ckpt = _save(_tiny(head_config_overrides=self.MAX), tmp_path)
+        tgt = _tiny()
+        before = _by_layer_name(tgt)
+
+        with pytest.raises(ValueError) as caught:
+            load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE)
+
+        message = str(caught.value)
+        assert "head_config_overrides['pooling_type']: checkpoint 'max', model <default>" in message, message
+        assert "classification_head" in message, message
+        for name, weights in _by_layer_name(tgt).items():
+            assert _weights_equal(before[name], weights), f"{name} was written"
+
+    def test_a_layer_is_a_head_only_when_the_whole_name_matches_the_head_pattern(self, tmp_path):
+        """A trunk layer called ``classification_head_proj`` is not a head (the layer rule says so).
+
+        The head comparison reads ``head_pattern`` the same way: a prefix match would take
+        every layer whose name merely starts like the head's for the head, and refuse a load
+        over a configuration that no head holds.
+        """
+        ckpt = _save(_tiny(head_config_overrides=self.MAX), tmp_path)
+
+        report = load_pretrained_checkpoint(
+            _tiny(), ckpt, _BUILD_SHAPE, head_pattern=r"classification"
+        )
+        assert sorted(report.loaded) == ["block_0", "classification_head", "stem"]
+
+        with pytest.raises(ValueError, match="head_config_overrides"):
+            load_pretrained_checkpoint(
+                _tiny(), ckpt, _BUILD_SHAPE, head_pattern=r"classification_head"
+            )
+
+    def test_the_same_overrides_on_both_sides_load(self, tmp_path):
+        ckpt = _save(_tiny(head_config_overrides=self.MAX), tmp_path)
+
+        report = load_pretrained_checkpoint(
+            _tiny(head_config_overrides=dict(self.MAX)), ckpt, _BUILD_SHAPE
+        )
+
+        assert sorted(report.loaded) == ["block_0", "classification_head", "stem"]
+
+    def test_another_class_count_makes_a_new_head_that_may_be_configured_freely(self, tmp_path):
+        ckpt = _save(_tiny(num_classes=3, head_config_overrides=self.MAX), tmp_path)
+
+        report = load_pretrained_checkpoint(
+            _tiny(num_classes=5, head_config_overrides={"pooling_type": "avg"}), ckpt, _BUILD_SHAPE
+        )
+
+        assert sorted(report.loaded) == ["block_0", "stem"]
+
+    def test_a_headless_target_has_no_head_to_compare(self, tmp_path):
+        ckpt = _save(_tiny(head_config_overrides=self.MAX), tmp_path)
+
+        report = load_pretrained_checkpoint(_tiny(include_top=False), ckpt, _BUILD_SHAPE)
+
+        assert sorted(report.loaded) == ["block_0", "stem"]
+
+    def test_a_headless_checkpoint_has_no_head_to_compare(self, tmp_path):
+        ckpt = _save(_tiny(include_top=False), tmp_path)
+
+        report = load_pretrained_checkpoint(
+            _tiny(head_config_overrides=self.MAX), ckpt, _BUILD_SHAPE
+        )
+
+        assert sorted(report.loaded) == ["block_0", "stem"]
+
+    def test_the_training_only_head_keys_may_differ(self, tmp_path):
+        ckpt = _save(
+            _tiny(head_config_overrides={"dropout_rate": 0.3, "kernel_initializer": "he_normal"}),
+            tmp_path,
+        )
+
+        report = load_pretrained_checkpoint(
+            _tiny(head_config_overrides={"classifier_dropout_rate": 0.1,
+                                         "kernel_regularizer": "l2"}),
+            ckpt, _BUILD_SHAPE,
+        )
+
+        assert "classification_head" in report.loaded
+
+    def test_the_caller_may_accept_the_other_head_by_ignoring_the_key(self, tmp_path):
+        ckpt = _save(_tiny(head_config_overrides=self.MAX), tmp_path)
+
+        report = load_pretrained_checkpoint(
+            _tiny(), ckpt, _BUILD_SHAPE,
+            ignore_config_keys=(*DEFAULT_NON_STRUCTURAL_CONFIG_KEYS, "head_config_overrides"),
+        )
+
+        assert "classification_head" in report.loaded
+
+    def test_the_default_ignore_set_no_longer_holds_the_key(self):
+        assert "head_config_overrides" not in DEFAULT_NON_STRUCTURAL_CONFIG_KEYS
+
+    def test_a_key_missing_from_the_archive_is_unknown_not_different(self, tmp_path):
+        ckpt = _save(_tiny(head_config_overrides=self.MAX), tmp_path)
+        _rewrite_archive_config(ckpt, lambda c: c["config"].pop("head_config_overrides"))
+        assert "head_config_overrides" not in read_checkpoint_config(ckpt)["config"], "precondition"
+
+        report = load_pretrained_checkpoint(
+            _tiny(head_config_overrides={"pooling_type": "avg"}), ckpt, _BUILD_SHAPE
+        )
+
+        assert "classification_head" in report.loaded
+
+
+class TestAnIntegerAndItsPairAreOneKernel:
+    """``kernel_size=7`` and ``kernel_size=(7, 7)`` build the same layers."""
+
+    def test_an_integer_checkpoint_loads_into_the_pair_spelling(self, tmp_path):
+        ckpt = _save(_tiny(kernel_size=7), tmp_path)
+
+        assert load_pretrained_checkpoint(_tiny(kernel_size=(7, 7)), ckpt, _BUILD_SHAPE).num_loaded == 3
+
+    def test_a_pair_checkpoint_loads_into_the_integer_spelling(self, tmp_path):
+        ckpt = _save(_tiny(kernel_size=(7, 7)), tmp_path)
+
+        assert load_pretrained_checkpoint(_tiny(kernel_size=7), ckpt, _BUILD_SHAPE).num_loaded == 3
+
+    def test_a_pair_of_two_different_sizes_is_another_kernel(self, tmp_path):
+        ckpt = _save(_tiny(kernel_size=7), tmp_path)
+
+        with pytest.raises(ValueError, match=r"kernel_size: checkpoint 7, model \[7, 5\]"):
+            load_pretrained_checkpoint(_tiny(kernel_size=(7, 5)), ckpt, _BUILD_SHAPE)
+
+    def test_another_integer_is_another_kernel(self, tmp_path):
+        ckpt = _save(_tiny(kernel_size=7), tmp_path)
+
+        with pytest.raises(ValueError, match="kernel_size"):
+            load_pretrained_checkpoint(_tiny(kernel_size=(5, 5)), ckpt, _BUILD_SHAPE)
+
+    def test_a_bool_is_not_an_integer_spelling(self, tmp_path):
+        ckpt = _save(_tiny(kernel_size=True), tmp_path)
+
+        with pytest.raises(ValueError, match="kernel_size"):
+            load_pretrained_checkpoint(_tiny(kernel_size=(1, 1)), ckpt, _BUILD_SHAPE)
+
+
+class TestARefusedLoadCopiesNothing:
+    """What "a refused load leaves the model untouched" means for an unbuilt model.
+
+    The configuration is compared before the build; the layer rule needs the built
+    layers, so an unbuilt model that fails it has been built (at its own
+    initialization) and nothing was copied into it.
+    """
+
+    def test_a_configuration_refusal_leaves_an_unbuilt_model_unbuilt(self, tmp_path):
+        ckpt = _save(_tiny(activation="relu"), tmp_path)
+        tgt = _tiny(activation="gelu", built=False)
+
+        with pytest.raises(ValueError, match="another architecture"):
+            load_pretrained_checkpoint(tgt, ckpt, _BUILD_SHAPE)
+
+        assert not tgt.built
+        assert tgt.build_shapes == []
+
+    def test_a_layer_refusal_builds_an_unbuilt_model_and_copies_nothing(self, tmp_path):
+        src = _tiny()
+        ckpt = _save(src, tmp_path)
+        tgt = _tiny(extra_block=True, built=False)
+
+        with pytest.raises(ValueError, match="block_1"):
+            load_pretrained_checkpoint(
+                tgt, ckpt, _BUILD_SHAPE, ignore_config_keys=_LAYER_RULE_ONLY
+            )
+
+        assert tgt.built and tgt.build_shapes == [(1, *_BUILD_SHAPE)]
+        # `stem` fits the checkpoint's by shape, so a load that went on would have copied it.
+        assert not _weights_equal(
+            tgt.get_layer("stem").get_weights(), src.get_layer("stem").get_weights()
+        )

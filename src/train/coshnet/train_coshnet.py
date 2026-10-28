@@ -80,7 +80,7 @@ def train_model(args) -> None:
 
     # Load dataset
     (x_train, y_train), (x_test, y_test), input_shape, num_classes = load_dataset(
-        args.dataset, batch_size=args.batch_size
+        args.dataset
     )
 
     # Create model

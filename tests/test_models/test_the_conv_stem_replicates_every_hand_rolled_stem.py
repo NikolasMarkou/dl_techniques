@@ -80,8 +80,9 @@ Four guards cover what the weight transplant cannot see (D-014, D-020):
 
 import contextlib
 import inspect
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Dict, Iterator, Optional, Tuple
+from unittest import mock
 
 import keras
 import numpy as np
@@ -103,6 +104,8 @@ from dl_techniques.models.vision.cliffordnet.hierarchical import (
 )
 from dl_techniques.models.vision.cliffordnet.model import CliffordNet
 from dl_techniques.models.vision.mambalct.uca_encoder import UcaEncoder
+from dl_techniques.models.vision.mobilenet.mobilenet_v1 import MobileNetV1
+from dl_techniques.models.vision.mobilenet.mobilenet_v2 import MobileNetV2
 from dl_techniques.models.vision.mobilenet.mobilenet_v3 import MobileNetV3
 from dl_techniques.models.vision.mobilenet.mobilenet_v4 import MobileNetV4
 from dl_techniques.models.vision.rad_convnet.model import RADConvNet
@@ -162,6 +165,10 @@ class StemCase:
     :param input_shape: ``(H, W, C)`` fed to the stem.
     :param expected_output_shape: ``(H', W', C')`` the ORIGINAL stem yields, so
         a geometry defect is named by its shape, not only by its values.
+    :param input_scale: Factor on the standard-normal input. A case whose
+        activation is clipped needs inputs large enough to reach the clip: with
+        the randomized weights below the activation input is about 0.3 standard
+        deviations wide, so a ReLU6 never clips and a plain ReLU passes for it.
     """
 
     case_id: str
@@ -170,6 +177,7 @@ class StemCase:
     input_shape: Tuple[int, int, int]
     expected_output_shape: Tuple[int, int, int]
     stem_of: Callable[[keras.Model], ConvStem] = lambda model: model.stem
+    input_scale: float = 1.0
 
 
 def _np(tensor) -> np.ndarray:
@@ -237,7 +245,9 @@ def assert_stem_matches_original(
         neither ``False`` nor ``True`` can see it.
     """
     rng = np.random.default_rng(seed)
-    x = rng.standard_normal((BATCH,) + tuple(case.input_shape)).astype("float32")
+    x = (
+        rng.standard_normal((BATCH,) + tuple(case.input_shape)) * case.input_scale
+    ).astype("float32")
 
     original = case.make_original()
     original.forward(x, False)  # builds the original sub-layers
@@ -331,7 +341,10 @@ def _initializer_signature(initializer) -> dict:
     return {**serialized, "config": config}
 
 
-def _conv_settings(conv: keras.layers.Conv2D) -> dict:
+_CONVOLUTIONS = (keras.layers.Conv2D, keras.layers.Conv3D)
+
+
+def _conv_settings(conv: keras.layers.Layer) -> dict:
     """Kernel/bias initializer (seed-free) and regularizer of one conv."""
     return {
         "kernel_initializer": _initializer_signature(conv.kernel_initializer),
@@ -361,12 +374,12 @@ def assert_stem_settings_match_original(case: StemCase, stem: ConvStem) -> None:
     stem_layers = _stem_sublayers(stem)
     compared = 0
     for role, source in original.sublayers.items():
-        if not isinstance(source, keras.layers.Conv2D):
+        if not isinstance(source, _CONVOLUTIONS):
             continue
         target = stem_layers[role]
-        assert isinstance(target, keras.layers.Conv2D), (
+        assert isinstance(target, type(source)), (
             f"{case.case_id}: {role} is a {type(target).__name__}, "
-            f"the original a Conv2D"
+            f"the original a {type(source).__name__}"
         )
         want, got = _conv_settings(source), _conv_settings(target)
         for setting in want:
@@ -375,7 +388,7 @@ def assert_stem_settings_match_original(case: StemCase, stem: ConvStem) -> None:
                 f"the original used {want[setting]}"
             )
         compared += 1
-    assert compared >= 1, f"{case.case_id}: the original has no Conv2D to compare"
+    assert compared >= 1, f"{case.case_id}: the original has no Conv2D or Conv3D to compare"
 
 
 # ---------------------------------------------------------------------
@@ -830,8 +843,10 @@ CONVUNEXT_BATCH_NORM = _convunext_case(
 # ``"valid"`` above it, the D-125 rule) followed by a ``LayerNormalization``
 # with epsilon 1e-6, ``center=use_bias``, ``scale=True``. No activation, no
 # pool. The ConvNeXt convs also took the model's ``kernel_regularizer``; RAD's
-# took none. LayerNormalization ignores ``training``, so the original calling
-# it without one is not a difference.
+# took none because RADConvNet had no such argument. It has one now, so the
+# hand-rolled original of all three carries the regularizer.
+# LayerNormalization ignores ``training``, so the original calling it without
+# one is not a difference.
 
 _CONVNEXT_DIMS = [8, 16]
 _CONVNEXT_KERNEL_REG = 1e-4
@@ -848,7 +863,7 @@ _RAD_STEM_INITIALIZER = "truncated_normal"
 
 
 def _convnext_family_original(
-    strides: int, use_bias: bool, regularized: bool, kernel_initializer
+    strides: int, use_bias: bool, kernel_initializer
 ) -> Original:
     """The pre-migration ConvNeXt / RAD patchify stem, as literals."""
     conv = keras.layers.Conv2D(
@@ -858,9 +873,7 @@ def _convnext_family_original(
         padding="same" if strides == 1 else "valid",
         use_bias=use_bias,
         kernel_initializer=kernel_initializer,
-        kernel_regularizer=(
-            keras.regularizers.L2(_CONVNEXT_KERNEL_REG) if regularized else None
-        ),
+        kernel_regularizer=keras.regularizers.L2(_CONVNEXT_KERNEL_REG),
         name="stem_conv",
     )
     norm = keras.layers.LayerNormalization(
@@ -884,8 +897,7 @@ def _convnext_family_model(
         strides=strides,
         use_bias=use_bias,
     )
-    if model_class is not RADConvNet:
-        kwargs["kernel_regularizer"] = keras.regularizers.L2(_CONVNEXT_KERNEL_REG)
+    kwargs["kernel_regularizer"] = keras.regularizers.L2(_CONVNEXT_KERNEL_REG)
     return model_class(**kwargs)
 
 
@@ -897,15 +909,13 @@ def _convnext_family_case(
     spatial: int,
     output_spatial: int,
 ) -> StemCase:
-    regularized = model_class is not RADConvNet
     return StemCase(
         case_id=case_id,
         make_model=lambda: _convnext_family_model(model_class, strides, use_bias),
         make_original=lambda: _convnext_family_original(
             strides,
             use_bias,
-            regularized,
-            _CONVNEXT_STEM_INITIALIZER if regularized else _RAD_STEM_INITIALIZER,
+            _RAD_STEM_INITIALIZER if model_class is RADConvNet else _CONVNEXT_STEM_INITIALIZER,
         ),
         input_shape=(spatial, spatial, 3),
         expected_output_shape=(output_spatial, output_spatial, _CONVNEXT_DIMS[0]),
@@ -938,19 +948,23 @@ RAD_VALID_NONDIVISIBLE_NOBIAS = _convnext_family_case(
 RAD_SAME = _convnext_family_case("rad-stride1-same", RADConvNet, 1, True, 8, 8)
 
 # ---------------------------------------------------------------------
-# MobileNetV3 and MobileNetV4
+# MobileNet V1 to V4
 # ---------------------------------------------------------------------
 
 # Original: ``git show 20b48aba6^:src/dl_techniques/models/vision/mobilenet/mobilenet_v3.py``
-# (``__init__``) and ``mobilenet_v4.py`` (``_build_stem``). A 3x3 stride-2
+# (``__init__``) and ``mobilenet_v4.py`` (``_build_stem``); V1 and V2 are
+# ``git show 0a908d16e:src/dl_techniques/models/vision/mobilenet/mobilenet_v1.py``
+# (``_build_layers``) and ``mobilenet_v2.py`` (``_build_model_layers``). A 3x3 stride-2
 # ``same`` bias-free Conv2D with the model's L2 kernel regularizer, then
 # ``BatchNormalization(momentum=0.99, epsilon=1e-3)`` (TF Model Garden's
 # MobileNet backbone, D-111 of plan-2026-08-22T035419-a11304c8), then
-# ``HardSwish`` (V3) or ``ReLU`` (V4); no pool. The momentum and epsilon are
-# written as literals here, not read from ``mobilenet.common``. The V3 stem is
-# 16 channels at every width; the V4 stem is ``dims[0]``. Each activation was a
-# separate layer in the original, and is one in ``ConvStem``, so the op
-# sequence is identical and the comparison stays at ``rtol=0, atol=0``.
+# ``HardSwish`` (V3), ``ReLU`` (V1, V4) or ``ReLU(max_value=6)`` (V2); no pool.
+# The momentum and epsilon are written as literals here, not read from
+# ``mobilenet.common``. The V3 stem is 16 channels at every width, the V4 stem
+# is ``dims[0]``, the V1 stem is ``int(32 * alpha)`` and the V2 stem
+# ``make_divisible(32 * alpha)``. Each activation was a separate layer in the
+# original, and is one in ``ConvStem``, so the op sequence is identical and
+# the comparison stays at ``rtol=0, atol=0``.
 
 _MOBILENET_KERNEL_REG = 1e-4
 _MOBILENET_V4_STEM_FILTERS = 24
@@ -961,12 +975,24 @@ _MOBILENET_V4_STEM_FILTERS = 24
 #: (pass-2 WARNING 1, reproduced with a real mutation).
 _MOBILENET_V3_KERNEL_INIT = "he_uniform"
 _MOBILENET_V4_KERNEL_INIT = "lecun_normal"
+#: V1 and V2 default to ``he_normal``; these differ from it and from ConvStem's.
+_MOBILENET_V1_KERNEL_INIT = "he_uniform"
+_MOBILENET_V2_KERNEL_INIT = "lecun_normal"
+#: A width at which the two width rules disagree: V1 truncates ``32 * 0.6 = 19.2``
+#: to 19, V2 rounds it to a multiple of 8 (24), so a stem using the other model's
+#: rule is seen.
+_MOBILENET_ALPHA = 0.6
+_MOBILENET_V1_STEM_FILTERS = 19
+_MOBILENET_V2_STEM_FILTERS = 24
+#: V2's stem is clipped at 6; the activation input must reach it for the clip to
+#: be tested (see ``StemCase.input_scale``).
+_MOBILENET_V2_INPUT_SCALE = 50.0
 
 
 def _mobilenet_original(
     filters: int, kernel_initializer, activation_layer
 ) -> Original:
-    """The pre-migration MobileNetV3 / V4 stem, as literals."""
+    """The pre-migration MobileNet stem (V1 to V4), as literals."""
     conv = keras.layers.Conv2D(
         filters,
         kernel_size=3,
@@ -992,13 +1018,35 @@ def _mobilenet_original(
     )
 
 
+def _mobilenet_v1_model() -> MobileNetV1:
+    return MobileNetV1(
+        num_classes=4,
+        width_multiplier=_MOBILENET_ALPHA,
+        include_top=False,
+        input_shape=(32, 32, 3),
+        kernel_regularizer=keras.regularizers.L2(_MOBILENET_KERNEL_REG),
+        kernel_initializer=_MOBILENET_V1_KERNEL_INIT,
+    )
+
+
+def _mobilenet_v2_model() -> MobileNetV2:
+    return MobileNetV2(
+        num_classes=4,
+        width_multiplier=_MOBILENET_ALPHA,
+        include_top=False,
+        input_shape=(32, 32, 3),
+        kernel_regularizer=keras.regularizers.L2(_MOBILENET_KERNEL_REG),
+        kernel_initializer=_MOBILENET_V2_KERNEL_INIT,
+    )
+
+
 def _mobilenet_v3_model() -> MobileNetV3:
     return MobileNetV3(
         variant="small",
         num_classes=4,
         include_top=False,
         input_shape=(32, 32, 3),
-        weight_decay=_MOBILENET_KERNEL_REG,
+        kernel_regularizer=keras.regularizers.L2(_MOBILENET_KERNEL_REG),
         kernel_initializer=_MOBILENET_V3_KERNEL_INIT,
     )
 
@@ -1012,11 +1060,34 @@ def _mobilenet_v4_model() -> MobileNetV4:
         strides=[1, 2],
         include_top=False,
         input_shape=(32, 32, 3),
-        weight_decay=_MOBILENET_KERNEL_REG,
+        kernel_regularizer=keras.regularizers.L2(_MOBILENET_KERNEL_REG),
         kernel_initializer=_MOBILENET_V4_KERNEL_INIT,
     )
 
 
+MOBILENET_V1 = StemCase(
+    case_id="mobilenet-v1-relu",
+    make_model=_mobilenet_v1_model,
+    make_original=lambda: _mobilenet_original(
+        _MOBILENET_V1_STEM_FILTERS,
+        _MOBILENET_V1_KERNEL_INIT,
+        keras.layers.ReLU(name="conv1_relu"),
+    ),
+    input_shape=(32, 32, 3),
+    expected_output_shape=(16, 16, _MOBILENET_V1_STEM_FILTERS),
+)
+MOBILENET_V2 = StemCase(
+    case_id="mobilenet-v2-relu6",
+    make_model=_mobilenet_v2_model,
+    make_original=lambda: _mobilenet_original(
+        _MOBILENET_V2_STEM_FILTERS,
+        _MOBILENET_V2_KERNEL_INIT,
+        keras.layers.ReLU(max_value=6, name="conv1_relu6"),
+    ),
+    input_shape=(32, 32, 3),
+    expected_output_shape=(16, 16, _MOBILENET_V2_STEM_FILTERS),
+    input_scale=_MOBILENET_V2_INPUT_SCALE,
+)
 MOBILENET_V3 = StemCase(
     case_id="mobilenet-v3-hard-swish",
     make_model=_mobilenet_v3_model,
@@ -1039,7 +1110,7 @@ MOBILENET_V4 = StemCase(
 )
 
 # ---------------------------------------------------------------------
-# SqueezeNet V1 and SqueezeNoduleNet V2 (2D path)
+# SqueezeNet V1 and SqueezeNoduleNet V2 (2D path, and the 3D path of V2)
 # ---------------------------------------------------------------------
 
 # Original: the files before they were migrated (``git show 7cea79771^:<path>``;
@@ -1052,6 +1123,11 @@ MOBILENET_V4 = StemCase(
 # ``Original.fused``); ``ConvStem`` runs the same ReLU as a layer of its own
 # after the same conv, so the values are identical and the comparison stays at
 # ``rtol=0, atol=0``.
+#
+# The 3D stem of ``SqueezeNoduleNetV2`` (``_build_stem_3d`` of the same revision,
+# before it moved onto ``ConvStem(rank=3)``) is the same list with ``Conv3D`` and
+# ``MaxPooling3D`` (``name="conv1"`` and ``"maxpool1"``), compared at the same
+# ``rtol=0, atol=0``.
 
 _SQUEEZE_KERNEL_REG = 1e-4
 #: The models' ``kernel_initializer`` knob initializes the Fire blocks only; the
@@ -1062,10 +1138,12 @@ _SQUEEZE_BLOCK_KERNEL_INIT = "he_uniform"
 
 
 def _squeezenet_original(
-    filters: int, kernel: int, stride: int, pool: bool
+    filters: int, kernel: int, stride: int, pool: bool, rank: int = 2
 ) -> Original:
-    """The pre-migration SqueezeNet V1 / V2 (2D) stem, as literals."""
-    conv = keras.layers.Conv2D(
+    """The pre-migration SqueezeNet V1 / V2 stem, as literals (``rank`` 3: the 3D stem)."""
+    conv_class = {2: keras.layers.Conv2D, 3: keras.layers.Conv3D}[rank]
+    pool_class = {2: keras.layers.MaxPooling2D, 3: keras.layers.MaxPooling3D}[rank]
+    conv = conv_class(
         filters=filters,
         kernel_size=kernel,
         strides=stride,
@@ -1076,9 +1154,7 @@ def _squeezenet_original(
         name="conv1",
     )
     maxpool = (
-        keras.layers.MaxPooling2D(
-            pool_size=3, strides=2, padding="valid", name="maxpool1"
-        )
+        pool_class(pool_size=3, strides=2, padding="valid", name="maxpool1")
         if pool
         else None
     )
@@ -1093,32 +1169,40 @@ def _squeezenet_original(
     return Original(sublayers=sublayers, forward=forward, fused=("act1",))
 
 
-def _squeezenet_v1_model(variant: str, pool_indices=None) -> SqueezeNetV1:
-    config = dict(SqueezeNetV1.MODEL_VARIANTS[variant])
-    if pool_indices is not None:
-        config["pool_indices"] = pool_indices
-    return SqueezeNetV1(
+def _squeezenet_model(cls, variant: str, input_shape, **changes):
+    """``cls`` built headless on ``variant``, with ``changes`` applied to the variant's table.
+
+    The shipped variants have one pool schedule and one stride each, and the models take a
+    variant by NAME. A case that needs another schedule (no stem pool) or stride (the ``same``
+    branch) registers a copy of the variant under a temporary key, builds on it and removes it.
+    """
+    knobs = dict(
         num_classes=4,
-        variant_config=config,
         include_top=False,
-        input_shape=(64, 64, 3),
+        input_shape=input_shape,
         kernel_initializer=_SQUEEZE_BLOCK_KERNEL_INIT,
         kernel_regularizer=keras.regularizers.L2(_SQUEEZE_KERNEL_REG),
     )
+    if not changes:
+        return cls(variant=variant, **knobs)
+    entry = {**cls.MODEL_VARIANTS[variant], **changes}
+    with mock.patch.dict(cls.MODEL_VARIANTS, {"eq_case": entry}):
+        return cls(variant="eq_case", **knobs)
+
+
+def _squeezenet_v1_model(variant: str, pool_indices=None, **changes) -> SqueezeNetV1:
+    if pool_indices is not None:
+        changes["pool_indices"] = pool_indices
+    return _squeezenet_model(SqueezeNetV1, variant, (64, 64, 3), **changes)
 
 
 def _squeezenet_v2_model(variant: str, pool_indices=None) -> SqueezeNoduleNetV2:
-    config = dict(SqueezeNoduleNetV2.MODEL_VARIANTS[variant])
-    if pool_indices is not None:
-        config["pool_indices"] = pool_indices
-    return SqueezeNoduleNetV2(
-        num_classes=4,
-        variant_config=config,
-        include_top=False,
-        input_shape=(64, 64, 1),
-        kernel_initializer=_SQUEEZE_BLOCK_KERNEL_INIT,
-        kernel_regularizer=keras.regularizers.L2(_SQUEEZE_KERNEL_REG),
-    )
+    changes = {} if pool_indices is None else {"pool_indices": pool_indices}
+    return _squeezenet_model(SqueezeNoduleNetV2, variant, (64, 64, 1), **changes)
+
+
+def _squeezenet_v2_3d_model(**changes) -> SqueezeNoduleNetV2:
+    return _squeezenet_model(SqueezeNoduleNetV2, "v2_3d", (36, 36, 36, 1), **changes)
 
 
 # 64 px: V1.0 conv k7/s2 valid -> 29, pool -> 14; V1.1 conv k3/s2 valid -> 31,
@@ -1154,18 +1238,7 @@ SQUEEZENET_V1_1_NOPOOL = StemCase(
 # Stride 1 takes the ``same`` branch, which no shipped variant does.
 SQUEEZENET_V1_STRIDE1_SAME = StemCase(
     case_id="squeezenet-v1-stride1-same-pool",
-    make_model=lambda: SqueezeNetV1(
-        num_classes=4,
-        variant_config={
-            **SqueezeNetV1.MODEL_VARIANTS["1.1"],
-            "conv1_stride": 1,
-            "pool_indices": [1, 3, 5],
-        },
-        include_top=False,
-        input_shape=(64, 64, 3),
-        kernel_initializer=_SQUEEZE_BLOCK_KERNEL_INIT,
-        kernel_regularizer=keras.regularizers.L2(_SQUEEZE_KERNEL_REG),
-    ),
+    make_model=lambda: _squeezenet_v1_model("1.1", conv1_stride=1),
     make_original=lambda: _squeezenet_original(64, 3, 1, True),
     input_shape=(64, 64, 3),
     expected_output_shape=(31, 31, 64),
@@ -1183,6 +1256,29 @@ SQUEEZENET_V2_NOPOOL = StemCase(
     make_original=lambda: _squeezenet_original(96, 7, 2, False),
     input_shape=(64, 64, 1),
     expected_output_shape=(29, 29, 96),
+)
+# 36 voxels, the smallest legal extent: conv k7/s2 valid -> 15, pool -> 7; no pool keeps 15;
+# stride 1 takes the ``same`` branch (36) and the pool gives 17.
+SQUEEZENET_V2_3D = StemCase(
+    case_id="squeezenodule-v2-3d-pool",
+    make_model=lambda: _squeezenet_v2_3d_model(),
+    make_original=lambda: _squeezenet_original(96, 7, 2, True, rank=3),
+    input_shape=(36, 36, 36, 1),
+    expected_output_shape=(7, 7, 7, 96),
+)
+SQUEEZENET_V2_3D_NOPOOL = StemCase(
+    case_id="squeezenodule-v2-3d-no-pool",
+    make_model=lambda: _squeezenet_v2_3d_model(pool_indices=[4, 8]),
+    make_original=lambda: _squeezenet_original(96, 7, 2, False, rank=3),
+    input_shape=(36, 36, 36, 1),
+    expected_output_shape=(15, 15, 15, 96),
+)
+SQUEEZENET_V2_3D_STRIDE1_SAME = StemCase(
+    case_id="squeezenodule-v2-3d-stride1-same-pool",
+    make_model=lambda: _squeezenet_v2_3d_model(conv1_stride=1),
+    make_original=lambda: _squeezenet_original(96, 7, 1, True, rank=3),
+    input_shape=(36, 36, 36, 1),
+    expected_output_shape=(17, 17, 17, 96),
 )
 
 # ---------------------------------------------------------------------
@@ -1414,6 +1510,8 @@ CASES = [
     RAD_VALID,
     RAD_VALID_NONDIVISIBLE_NOBIAS,
     RAD_SAME,
+    MOBILENET_V1,
+    MOBILENET_V2,
     MOBILENET_V3,
     MOBILENET_V4,
     SQUEEZENET_V1_0,
@@ -1423,6 +1521,9 @@ CASES = [
     SQUEEZENET_V1_STRIDE1_SAME,
     SQUEEZENET_V2,
     SQUEEZENET_V2_NOPOOL,
+    SQUEEZENET_V2_3D,
+    SQUEEZENET_V2_3D_NOPOOL,
+    SQUEEZENET_V2_3D_STRIDE1_SAME,
     VAE_BN_BIAS,
     VAE_BN_NOBIAS,
     VAE_NOBN_BIAS,
@@ -1465,10 +1566,13 @@ BUILT_STEM_ROWS = [
         (32, 32, 3),
     ),
     ("rad-convnet", lambda: _convnext_family_model(RADConvNet, 4, True), (32, 32, 3)),
+    ("mobilenet-v1", _mobilenet_v1_model, (32, 32, 3)),
+    ("mobilenet-v2", _mobilenet_v2_model, (32, 32, 3)),
     ("mobilenet-v3", _mobilenet_v3_model, (32, 32, 3)),
     ("mobilenet-v4", _mobilenet_v4_model, (32, 32, 3)),
     ("squeezenet-v1", lambda: _squeezenet_v1_model("1.0"), (64, 64, 3)),
     ("squeezenodule-v2", lambda: _squeezenet_v2_model("v2"), (64, 64, 1)),
+    ("squeezenodule-v2-3d", lambda: _squeezenet_v2_3d_model(), (36, 36, 36, 1)),
     (
         "vae-encoder",
         lambda: _vae_model(True, True, "leaky_relu"),
@@ -1525,6 +1629,8 @@ INITIALIZER_AUDIT = {
     "ConvNeXtV1": ("hardcoded", "STEM_INITIALIZER TruncatedNormal(0.02)"),
     "ConvNeXtV2": ("hardcoded", "STEM_INITIALIZER TruncatedNormal(0.02)"),
     "RADConvNet": ("hardcoded", "STEM_INITIALIZER 'truncated_normal'"),
+    "MobileNetV1": ("knob", "he_uniform (default he_normal)"),
+    "MobileNetV2": ("knob", "lecun_normal (default he_normal)"),
     "MobileNetV3": ("knob", "he_uniform (default glorot_uniform = ConvStem's)"),
     "MobileNetV4": ("knob", "lecun_normal (default he_normal)"),
     "SqueezeNetV1": (
@@ -1544,7 +1650,7 @@ INITIALIZER_AUDIT = {
 }
 
 _REGULARIZER_KNOBS = {
-    "kernel_regularizer": ("kernel_regularizer", "weight_decay"),
+    "kernel_regularizer": ("kernel_regularizer",),
     "bias_regularizer": ("bias_regularizer",),
 }
 
@@ -1832,6 +1938,32 @@ def test_the_guard_the_harness_sees_a_norm_applied_twice():
         )
 
 
+def test_the_guard_the_harness_sees_the_other_models_width_rule():
+    """V1 truncates ``32 * 0.6`` to 19; a stem rounded to a multiple of 8 (24) must fail.
+
+    The transplant of the original's 19-wide kernel into a 24-wide conv is refused by Keras
+    before any output is compared.
+    """
+    stem = _stem_from_config(MOBILENET_V1, filters=_MOBILENET_V2_STEM_FILTERS)
+    with pytest.raises(ValueError, match="not compatible with provided weight shape"):
+        assert_stem_matches_original(MOBILENET_V1, stem)
+
+
+def test_the_guard_the_harness_sees_a_dropped_relu6_clip():
+    """ReLU with no ``max_value=6`` against V2's clipped stem must fail the comparison."""
+    stem = _stem_from_config(MOBILENET_V2, activation_kwargs={})
+    assert stem.act1.max_value is None
+    with pytest.raises(AssertionError, match="differs from the original"):
+        assert_stem_matches_original(MOBILENET_V2, stem)
+
+
+def test_the_guard_the_relu6_case_needs_inputs_that_reach_the_clip():
+    """At unit-scale inputs the activation input never reaches 6, so the same plain
+    ReLU stem passes: the case's ``input_scale`` is what makes the clip visible."""
+    stem = _stem_from_config(MOBILENET_V2, activation_kwargs={})
+    assert_stem_matches_original(replace(MOBILENET_V2, input_scale=1.0), stem)
+
+
 @pytest.mark.parametrize(
     "case,override,setting",
     [
@@ -1856,6 +1988,8 @@ def test_the_guard_the_harness_sees_a_norm_applied_twice():
         # The pass-2 mutant: MobileNetV3's stem call without kernel_initializer
         # falls back to ConvStem's glorot_uniform. At the model's own default
         # (also glorot_uniform) this was indistinguishable.
+        (MOBILENET_V1, {"kernel_initializer": "glorot_uniform"}, "kernel_initializer"),
+        (MOBILENET_V2, {"kernel_initializer": "glorot_uniform"}, "kernel_initializer"),
         (MOBILENET_V3, {"kernel_initializer": "glorot_uniform"}, "kernel_initializer"),
         (MOBILENET_V4, {"kernel_initializer": "glorot_uniform"}, "kernel_initializer"),
         (VAE_BN_BIAS, {"kernel_initializer": "glorot_uniform"}, "kernel_initializer"),
@@ -1866,6 +2000,8 @@ def test_the_guard_the_harness_sees_a_norm_applied_twice():
         "bias-initializer",
         "kernel-regularizer-strength",
         "kernel-regularizer-dropped",
+        "mobilenet-v1-initializer-dropped",
+        "mobilenet-v2-initializer-dropped",
         "mobilenet-v3-initializer-dropped",
         "mobilenet-v4-initializer-dropped",
         "vae-initializer-dropped",
@@ -1893,7 +2029,7 @@ def _mobilenet_v3_at_its_default_initializer() -> MobileNetV3:
         num_classes=4,
         include_top=False,
         input_shape=(32, 32, 3),
-        weight_decay=_MOBILENET_KERNEL_REG,
+        kernel_regularizer=keras.regularizers.L2(_MOBILENET_KERNEL_REG),
     )
 
 

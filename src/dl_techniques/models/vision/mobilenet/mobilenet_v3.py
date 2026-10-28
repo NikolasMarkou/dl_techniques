@@ -49,9 +49,14 @@ from typing import Tuple, Optional, Dict, Any, Literal, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.model_build import (
+    coerce_include_top,
+    materialize_sublayers,
+    plain_head_config_overrides,
+)
 from dl_techniques.utils.tensors import make_divisible
 from dl_techniques.utils.weight_transfer import (
+    DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
     load_pretrained_checkpoint,
     pretrained_path_or_raise,
 )
@@ -66,6 +71,19 @@ from dl_techniques.layers.heads.vision import VisionTaskType
 from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.initializers.clone import clone_initializer, initializer_spec
+
+# Constructor-config keys a checkpoint may differ on without being another architecture:
+# they leave the weight layout and the computed function alone (the initializer, the
+# dropout rate, the regularizer, the input size). `load_pretrained_checkpoint` compares
+# every other key the checkpoint and the model both hold, so a changed variant or width
+# multiplier is refused even when every weight shape still fits.
+_NON_STRUCTURAL_CONFIG_KEYS = (
+    *DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
+    "input_shape",
+    "kernel_initializer",
+    "dropout_rate",
+    "kernel_regularizer",
+)
 
 # ---------------------------------------------------------------------
 
@@ -101,10 +119,19 @@ class MobileNetV3(keras.Model):
 
     :param num_classes: Number of output classes; used only if `include_top=True`,
         where it must be positive.
+    :type num_classes: int
     :param variant: `"large"` or `"small"`.
+    :type variant: Literal['large', 'small']
     :param width_multiplier: Channel-count multiplier. Must be positive.
+    :type width_multiplier: float
     :param dropout_rate: Dropout rate before the classifier, in `[0, 1)`.
-    :param weight_decay: L2 regularization factor, the head's included.
+    :type dropout_rate: float
+    :param kernel_regularizer: Optional regularizer applied to the standard
+        convolution kernels and the head's kernels (the depthwise kernels carry
+        none): a regularizer, its serialized config or a name. `None` (the
+        default) adds no loss, so the optimizer's decoupled weight decay is the
+        only decay.
+    :type kernel_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]]
     :param kernel_initializer: Weight initialization strategy, the head's
         included: a name, a serialized config dict or an `Initializer` instance.
         Each site draws from its own clone of it, so a name, a dict or a seedless
@@ -112,19 +139,23 @@ class MobileNetV3(keras.Model):
         an explicit `seed` reuses that seed at every site by contract, so
         same-shaped kernels start equal (`HeNormal(seed=7)` ties 903 of 1431
         kernel pairs at `small`). `get_config` reports its serialized spec.
-    :param include_top: Whether to include the classification head.
+    :type kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer]
+    :param include_top: Whether to include the classification head. A `bool` or `numpy.bool_`; anything else, a string included, raises `TypeError`.
+    :type include_top: bool
     :param input_shape: Input shape `(height, width, channels)`; `None` means
         `(224, 224, 3)`.
+    :type input_shape: Optional[Tuple[int, ...]]
     :param head_config_overrides: Optional dict merged into the head
         configuration. `name`, `num_classes` and `task_type` raise
         `ValueError`.
+    :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Passthrough to `keras.Model`.
     :raises ValueError: If `variant` is not `"large"` or `"small"`,
         `num_classes` is not positive with a head, `width_multiplier` is not
         positive, `dropout_rate` is outside `[0, 1)`, or `input_shape` is not
         3-D.
-    :raises TypeError: If `kernel_initializer` is not a string, a dict or an
-        `Initializer` instance.
+    :raises TypeError: If `include_top` is not a `bool` or `numpy.bool_`, or if
+        `kernel_initializer` is not a string, a dict or an `Initializer` instance.
     :raises NotImplementedError: If `kernel_initializer` is an `Initializer`
         instance that cannot serialize itself.
 
@@ -147,7 +178,6 @@ class MobileNetV3(keras.Model):
         "small": {"variant": "small"},
     }
 
-    # Model configurations from the paper
     LARGE_CONFIG = [
         # exp_size, out_channels, kernel_size, stride, use_se, activation
         # Stage 1
@@ -200,10 +230,10 @@ class MobileNetV3(keras.Model):
             variant: Literal["large", "small"] = "large",
             width_multiplier: float = 1.0,
             dropout_rate: float = 0.2,
-            weight_decay: float = 1e-5,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+            kernel_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]] = None,
+            kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = "glorot_uniform",
             include_top: bool = True,
-            input_shape: Optional[Tuple[int, int, int]] = None,
+            input_shape: Optional[Tuple[int, ...]] = (224, 224, 3),
             head_config_overrides: Optional[Dict[str, Any]] = None,
             **kwargs
     ):
@@ -215,6 +245,7 @@ class MobileNetV3(keras.Model):
                 f"{list(self.MODEL_VARIANTS.keys())}"
             )
 
+        include_top = coerce_include_top(include_top)
         if include_top and num_classes <= 0:
             raise ValueError(
                 f"num_classes must be positive when include_top=True, got {num_classes}"
@@ -239,7 +270,6 @@ class MobileNetV3(keras.Model):
         self.variant = variant
         self.width_multiplier = width_multiplier
         self.dropout_rate = dropout_rate
-        self.weight_decay = weight_decay
         # DECISION plan-2026-10-26T125959-7af851e5/D-039: keep the caller's Initializer and hand a clone of it to each site; compute the spec only to refuse a bad initializer here and to report it in get_config. Do NOT store the spec and hand it to the sites, as MobileNetV4 does.
         # A stored spec re-draws every kernel from a fresh default seed, so a seeded V3 kernel would no longer equal the base's (0 of 54 small and 0 of 64 large kernels stay equal); the clone keeps the seeded draw unchanged. See decisions.md.
         self._kernel_initializer_spec = initializer_spec(kernel_initializer)
@@ -247,7 +277,9 @@ class MobileNetV3(keras.Model):
         self.include_top = include_top
         self.input_shape_config = input_shape
 
-        self._head_config_overrides = dict(head_config_overrides) if head_config_overrides else None
+        self._head_config_overrides = plain_head_config_overrides(
+            head_config_overrides, "MobileNetV3"
+        )
 
         if variant == "large":
             self.block_configs = self.LARGE_CONFIG
@@ -256,7 +288,7 @@ class MobileNetV3(keras.Model):
             self.block_configs = self.SMALL_CONFIG
             last_point = 1024
 
-        self.kernel_regularizer = keras.regularizers.L2(weight_decay) if weight_decay > 0 else None
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         # The head's hidden width ("last point"): widened only above
         # width_multiplier 1.0, as Keras Applications MobileNetV3 does.
@@ -266,6 +298,8 @@ class MobileNetV3(keras.Model):
         )
 
         self._build_stem()
+
+        self.blocks = []
         self._build_blocks()
         self._build_last_block()
 
@@ -301,7 +335,6 @@ class MobileNetV3(keras.Model):
 
         The blocks are named ``block_{i}``, counted from 0.
         """
-        self.blocks = []
         in_channels = self.STEM_FILTERS
         # The table's input width at width_multiplier 1.0 (the stem's 16 for
         # the first row): exp_size / in_size is the row's expansion ratio.
@@ -478,9 +511,19 @@ class MobileNetV3(keras.Model):
         `input_shape` if it is unbuilt and takes a headed checkpoint into a
         headless model. Every layer outside the classification head must be
         restored, so a checkpoint of another variant, block type, width or stem
-        raises and leaves the model untouched. Only a head of another
-        `num_classes` is skipped: it keeps its initialization and a warning
-        names it.
+        raises and copies no weight. Only a head of another `num_classes` is
+        skipped: it keeps its initialization and a warning names it. The
+        skipped head is the whole `classification_head`, so its pretrained
+        hidden layer (V3 `small`: 590,848 parameters) is discarded with the
+        classifier. The archive's own config is compared too: a constructor
+        argument that both hold and that is not in
+        `_NON_STRUCTURAL_CONFIG_KEYS` must be equal, so a checkpoint of another
+        `width_multiplier` or stride pattern is refused even when every weight
+        shape fits. An argument only one side holds is not compared, and an
+        archive in which no single model of this class can be found is checked
+        by layers only (the load warns). Where the head is copied, its
+        `head_config_overrides` must be equal too (dropout, initializers and
+        regularizers aside).
 
         :param weights_path: Path to the weights file (`.keras` format).
         :param skip_mismatch: `True` (default) lets the head layers differ;
@@ -491,7 +534,8 @@ class MobileNetV3(keras.Model):
             the weights cannot be loaded.
         """
         load_pretrained_checkpoint(
-            self, weights_path, self.input_shape_config, skip_mismatch
+            self, weights_path, self.input_shape_config, skip_mismatch,
+            ignore_config_keys=_NON_STRUCTURAL_CONFIG_KEYS,
         )
 
     @classmethod
@@ -552,7 +596,7 @@ class MobileNetV3(keras.Model):
             "variant": self.variant,
             "width_multiplier": self.width_multiplier,
             "dropout_rate": self.dropout_rate,
-            "weight_decay": self.weight_decay,
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "kernel_initializer": self._kernel_initializer_spec,
             "include_top": self.include_top,
             "input_shape": self.input_shape_config,

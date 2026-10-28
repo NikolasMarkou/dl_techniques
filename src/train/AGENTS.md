@@ -331,13 +331,18 @@ Keep local: model creation and compilation, domain-specific losses, custom argpa
 
 ## Data loading
 
-`load_dataset()` covers mnist, cifar10, cifar100 and imagenet only, returning
-`(x_train, y_train), (x_test, y_test), input_shape, num_classes` for the numpy datasets and
-`train_ds, val_ds, input_shape, num_classes` for ImageNet (tf.data). For text use
+`load_dataset()` covers mnist, cifar10 and cifar100 only, returning
+`(x_train, y_train), (x_test, y_test), input_shape, num_classes` (numpy). For ImageNet-1k use
+`train.common.imagenet` (flags via `add_imagenet_arguments`, splits via `load_imagenet_splits`,
+an in-memory val head via `eval_head`). For text use
 `train.common.nlp`; for MegaDepth RGB+depth pairs `train.common.megadepth` (yielding
 `(rgb, y_true)` with `y_true = [disparity, mask]` on the last axis, the disparity per-map
 normalized to `[0, 1]`). For anything else write local
 loading — do NOT force it through `load_dataset()`.
+
+ImageNet-1k from the extracted `train/<wnid>/` + `val/` layout: `dl_techniques.datasets.vision.imagenet2012.load_imagenet2012`, wired through `train.common.imagenet` by `train_resnet`, `train_vit` and `train_cliffordnet` (`--imagenet-root` / `--devkit-dir`; val labels need the ILSVRC2012 devkit). `train.common.make_imagenet_filesystem_dataset` remains for `alexnet`.
+
+Conformal prediction sets for a trained classifier: `train.common.conformal` (`add_conformal_arguments`, `run_conformal`, `load_conformal_model`) runs one ordered pass over a labelled calibration set, checks coverage on random 50/50 splits, fits the exported threshold on all of it, and writes `conformal.json` plus `conformal_model.keras` (outputs `(logits, probs, in_set)`) into the run directory. `run_conformal` requires `selection_overlaps_calibration`: the ResNet, ViT and CliffordNet ImageNet runs calibrate on the val set that also picked their checkpoint (`True`, weakened guarantee); `train_convnext` and `train_capsnet` select on a held-out slice of train and calibrate on the test split (`False`), for every dataset; there the step is OFF unless `--conformal-alpha [ALPHA]` is given (`add_conformal_arguments(parser, on_by_default=False)`). CapsNet emits capsule lengths in [0, 1], so it exports a wrapper that applies `ProbabilityLogits` first. The math lives in `dl_techniques/utils/conformal_classification.py`; the deterministic APS rule it reports is the one `ConformalPredictionSet` (`layers/statistics/conformal/`) runs.
 
 ## Scripts that don't use `train.common` callbacks (and why)
 

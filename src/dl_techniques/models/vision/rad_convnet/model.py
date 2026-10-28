@@ -9,9 +9,10 @@ four boundary offsets that define an axis-aligned integration rectangle, so even
 ``rad_kernel_size=1`` block can aggregate over a receptive field spanning the whole
 feature map. Everything around it stays ConvNeXt-shaped: patchify stem, staged
 blocks, LayerNorm plus strided-conv downsampling, inverted-bottleneck MLP, and a
-GAP + Dense head. Each block is transform-only and returns ``F(x)``; the residual add
-belongs to :meth:`RADConvNet.call`. Because that integration costs more per channel
-than a depthwise convolution, the default widths are smaller than ConvNeXt's.
+GAP + LayerNorm + Dense head, which is the shared vision ``ClassificationHead``.
+Each block is transform-only and returns ``F(x)``; the residual add belongs to
+:meth:`RADConvNet.call`. Because that integration costs more per channel than a
+depthwise convolution, the default widths are smaller than ConvNeXt's.
 
 References:
     - Maleki & Imani, 2025. Region-Aware Deformable Convolutions.
@@ -19,6 +20,7 @@ References:
     - Liu et al., 2022. A ConvNet for the 2020s. (https://arxiv.org/abs/2201.03545)
 """
 
+import copy
 import keras
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -27,13 +29,39 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.model_build import (
+    coerce_include_top,
+    materialize_sublayers,
+    plain_head_config_overrides,
+    validate_rates,
+)
+from dl_techniques.utils.weight_transfer import (
+    DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
+    load_pretrained_checkpoint,
+    pretrained_path_or_raise,
+)
 from dl_techniques.layers.conv_blocks.rad_conv import RADConv2D
 from dl_techniques.layers.conv_blocks.stem import ConvStem
+from dl_techniques.layers.heads.vision import VisionTaskType
+from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+# Constructor-config keys a checkpoint may differ on without being another architecture:
+# they leave the weight layout and the computed function alone (the regularizer and the
+# dropout rate act in training only, the input size is not a weight shape). `load_pretrained_checkpoint`
+# compares every other key the checkpoint and the model both hold, so a changed
+# `activation`, `rad_kernel_size` or `strides` is refused even when every weight shape
+# still fits.
+_NON_STRUCTURAL_CONFIG_KEYS = (
+    *DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
+    "input_shape",
+    "kernel_regularizer",
+    "dropout_rate",
+)
 
 # ---------------------------------------------------------------------
 
@@ -65,22 +93,22 @@ class RADConvNet(keras.Model):
                  │  [B, H/S, W/S, dims[0]]
                  ▼
         ┌───────────────────────┐
-        │ stage 0  blocks       │  depths[0] blocks
+        │ stage1 blocks         │  depths[0] blocks
         └───────────────────────┘
                  │
                  ▼
         ┌───────────────────────┐
-        │ downsample_norm       │
+        │ downsample_{i}_norm   │
         └───────────────────────┘
                  │
                  ▼
         ┌───────────────────────┐
-        │ downsample_conv 2x2   │  stride 2, dims[i]
+        │ downsample_{i}_conv   │  2x2, stride 2, dims[i + 1]
         └───────────────────────┘
                  │
                  ▼
         ┌───────────────────────┐
-        │ stage i  blocks       │  depths[i] blocks
+        │ stage{S} blocks       │  depths[S - 1] blocks
         └───────────────────────┘
                  │  one downsample before every later stage
                  ▼
@@ -89,12 +117,13 @@ class RADConvNet(keras.Model):
         include_top        else
            │                │
            ▼                ▼
-        gap, head_norm      features [B, H', W', dims[-1]]
+        classification_head features [B, H', W', dims[-1]]
+        (pooled_norm, classifier)
            │
-           ├──► num_classes > 0  ──► logits [B, num_classes]
-           └──► num_classes == 0 ──► [B, dims[-1]]
+           ▼
+        logits [B, num_classes]
 
-    Block:
+    Block ``stage{S}_block{B}``, its layers named ``stage{S}_block{B}_<role>``:
 
     .. code-block:: text
 
@@ -131,22 +160,11 @@ class RADConvNet(keras.Model):
                  ▼
                F(x)
 
-    The block returns F(x) and ``call`` adds the residual.
+    The block returns F(x) and ``call`` adds the residual. The constructor's own
+    defaults match the ``tiny`` variant.
 
-    Variants:
-
-    .. code-block:: text
-
-        variant  depths        dims
-        tiny     [2, 2, 4, 2]  [32, 64, 128, 256]
-        small    [3, 3, 9, 3]  [48, 96, 192, 384]
-        base     [3, 3, 9, 3]  [64, 128, 256, 512]
-
-    The constructor's own defaults match tiny.
-
-    :param num_classes: Number of output classes; only used when
-        ``include_top=True``. ``0`` returns pooled, normalized features.
-        Defaults to ``1000``.
+    :param num_classes: Number of output classes. Only used when
+        ``include_top=True``, where it must be positive. Defaults to ``1000``.
     :type num_classes: int
     :param depths: Number of blocks per stage. ``None`` resolves to
         ``[2, 2, 4, 2]``. Must have the same length as ``dims``, which sets the
@@ -169,36 +187,74 @@ class RADConvNet(keras.Model):
     :param activation: Activation used inside each block's MLP. One shared
         ``Activation`` layer serves every block. Defaults to ``"gelu"``.
     :type activation: str
-    :param use_bias: Whether convolutions/dense layers use a bias and whether
-        LayerNormalization centers. Defaults to ``True``.
+    :param use_bias: Whether the stem, downsampling convolutions, each
+        RAD-Conv's output bias, the MLP dense layers and the head's
+        classifier use a bias, and whether every LayerNormalization centers.
+        Not switched off: the offset and weight predictors inside every
+        :class:`RADConv2D` keep their bias (two tensors per block,
+        ``<block>_rad_conv/offset_conv/bias`` and ``.../weight_conv/bias``),
+        because ``RADConv2D`` has no knob for them and the offset bias is what
+        sets the initial region size. Defaults to ``True``.
     :type use_bias: bool
+    :param kernel_regularizer: Optional regularizer applied to the stem, the
+        downsampling convolutions, each RAD-Conv's static mixing kernel, both
+        MLP dense layers of every block and the head's kernels. The offset and
+        weight predictors inside ``RADConv2D`` start at zero and take none. A
+        regularizer, its serialized config or a name. Defaults to ``None``.
+    :type kernel_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]]
     :param dropout_rate: Dropout rate applied after the MLP's expansion
-        activation. At ``0.0`` no Dropout layer is created. Defaults to ``0.0``.
+        activation, in ``[0, 1)``. At ``0.0`` no Dropout layer is created.
+        Defaults to ``0.0``.
     :type dropout_rate: float
     :param strides: Patchify factor, used as both kernel size and stride of
         the stem convolution. The inter-stage downsamples are always 2x2 with
         stride 2. Defaults to ``4``.
     :type strides: int
-    :param include_top: Whether to include the GAP + LayerNorm + Dense head.
-        Defaults to ``True``.
+    :param include_top: Whether to include the classification head. A ``bool``
+        or ``numpy.bool_``; anything else, a string included, raises
+        ``TypeError``. Defaults to ``True``.
     :type include_top: bool
     :param input_shape: ``(height, width, channels)``, excluding batch. Stored
         for serialization; the graph is built from the shape ``build`` receives.
         ``None`` resolves to ``(None, None, 3)``.
-    :type input_shape: Tuple[int, ...]
-    :param **kwargs: Additional keyword arguments for the ``keras.Model`` base
+    :type input_shape: Optional[Tuple[Optional[int], ...]]
+    :param head_config_overrides: Optional dict merged into the
+        ``ClassificationHead`` configuration (for example
+        ``{'classifier_dropout_rate': 0.2}``). ``name``, ``num_classes`` and
+        ``task_type`` are owned by the model and raise ``ValueError``. Every
+        value must be JSON data. Defaults to ``None``.
+    :type head_config_overrides: Optional[Dict[str, Any]]
+    :param kwargs: Additional keyword arguments for the ``keras.Model`` base
         class.
 
-    :raises ValueError: If ``depths``/``dims`` differ in length, ``strides``
-        is not positive, or ``input_shape`` is not 3D.
+    :raises TypeError: If ``include_top`` is not a ``bool`` or ``numpy.bool_``.
+    :raises ValueError: If ``include_top`` is true and ``num_classes`` is not
+        positive, ``depths`` and ``dims`` differ in length, ``strides`` is not
+        positive, ``dropout_rate`` is outside ``[0, 1)``, ``input_shape`` is
+        not 3D, or ``head_config_overrides`` names a reserved key or holds a
+        value that is not JSON data.
 
     Input shape:
         4D tensor ``(batch_size, height, width, channels)``.
 
     Output shape:
-        - ``include_top=True``: ``(batch_size, num_classes)``.
-        - ``include_top=True, num_classes=0``: ``(batch_size, dims[-1])``.
+        - ``include_top=True``: ``(batch_size, num_classes)`` logits.
         - ``include_top=False``: ``(batch_size, H', W', dims[-1])``.
+
+    Example::
+
+        model = RADConvNet.from_variant("tiny", num_classes=47, input_shape=(96, 96, 3))
+
+        backbone = RADConvNet.from_variant("small", include_top=False)
+
+        # Warm start from a local checkpoint
+        model = RADConvNet.from_variant("tiny", pretrained="/path/to.keras")
+
+    Note:
+        No pretrained RADConvNet weights are distributed with ``dl_techniques``.
+        ``pretrained=True`` raises ``NotImplementedError`` rather than returning a
+        randomly-initialized model; pass a local checkpoint via
+        ``pretrained='/path/to/weights.keras'`` instead.
     """
 
     MODEL_VARIANTS = {
@@ -221,13 +277,23 @@ class RADConvNet(keras.Model):
         mlp_ratio: int = 4,
         activation: str = "gelu",
         use_bias: bool = True,
+        kernel_regularizer: Optional[
+            Union[str, Dict[str, Any], keras.regularizers.Regularizer]
+        ] = None,
         dropout_rate: float = 0.0,
         strides: int = 4,
         include_top: bool = True,
-        input_shape: Tuple[Optional[int], ...] = (None, None, 3),
+        input_shape: Optional[Tuple[Optional[int], ...]] = (None, None, 3),
+        head_config_overrides: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
+
+        include_top = coerce_include_top(include_top)
+        if include_top and num_classes <= 0:
+            raise ValueError(
+                f"num_classes must be positive when include_top=True, got {num_classes}"
+            )
 
         depths = list(depths) if depths is not None else [2, 2, 4, 2]
         dims = list(dims) if dims is not None else [32, 64, 128, 256]
@@ -237,7 +303,8 @@ class RADConvNet(keras.Model):
                 f"Length of depths ({len(depths)}) must equal length of dims ({len(dims)})"
             )
         if strides <= 0:
-            raise ValueError(f"strides {strides} must be positive")
+            raise ValueError(f"strides must be positive, got {strides}")
+        validate_rates(dropout_rate=dropout_rate)
         if input_shape is None:
             input_shape = (None, None, 3)
         if len(input_shape) != 3:
@@ -249,23 +316,28 @@ class RADConvNet(keras.Model):
         self.rad_kernel_size = rad_kernel_size
         self.rad_groups = rad_groups
         self.mlp_ratio = mlp_ratio
-        self.activation_name = deserialize_activation(activation)
-        self.activation_layer = keras.layers.Activation(self.activation_name, name="mlp_activation")
+        self.activation = deserialize_activation(activation)
+        self.activation_layer = keras.layers.Activation(self.activation, name="mlp_activation")
         self.use_bias = use_bias
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.dropout_rate = dropout_rate
         self.strides = strides
         self.include_top = include_top
         self.input_shape_config = tuple(input_shape)
+        self._head_config_overrides = plain_head_config_overrides(
+            head_config_overrides, type(self).__name__
+        )
 
         self._build_stem()
 
-        self.downsample_layers_list: List[Tuple[keras.layers.Layer, keras.layers.Layer]] = []
-        self.stages_list: List[List[Dict[str, keras.layers.Layer]]] = []
+        self.downsamplers = []
+        self.stages = []
         for stage_idx in range(len(self.depths)):
             if stage_idx > 0:
-                self._build_downsample_layer(stage_idx)
+                self._build_downsampler(stage_idx)
             self._build_stage(stage_idx)
 
+        self.classification_head = None
         if self.include_top:
             self._build_head()
 
@@ -296,19 +368,22 @@ class RADConvNet(keras.Model):
             activation_type="linear",
             use_pooling=False,
             kernel_initializer=self.STEM_INITIALIZER,
+            kernel_regularizer=self.kernel_regularizer,
             name="stem",
         )
 
-    def _build_downsample_layer(self, stage_idx: int) -> None:
-        """Build the LayerNorm + strided-conv downsample feeding ``stage_idx``.
+    def _build_downsampler(self, stage_idx: int) -> None:
+        """Build the LayerNorm and strided convolution that feed a stage.
 
-        :param stage_idx: Index of the stage this downsample feeds, 1 or above.
+        :param stage_idx: Index of the stage the downsampler feeds; it must be
+            greater than 0. The pair is appended to ``downsamplers``, so it sits
+            at ``stage_idx - 1`` and is named ``downsample_{stage_idx - 1}_*``.
         """
         norm = keras.layers.LayerNormalization(
             epsilon=self.LAYERNORM_EPSILON,
             center=self.use_bias,
             scale=True,
-            name=f"downsample_norm_{stage_idx - 1}",
+            name=f"downsample_{stage_idx - 1}_norm",
         )
         conv = keras.layers.Conv2D(
             filters=self.dims[stage_idx],
@@ -316,29 +391,38 @@ class RADConvNet(keras.Model):
             strides=2,
             padding="same",
             use_bias=self.use_bias,
-            name=f"downsample_conv_{stage_idx - 1}",
+            kernel_regularizer=self.kernel_regularizer,
+            name=f"downsample_{stage_idx - 1}_conv",
         )
-        self.downsample_layers_list.append((norm, conv))
+        self.downsamplers.append({"norm": norm, "conv": conv})
 
     def _build_stage(self, stage_idx: int) -> None:
         """Build the blocks of stage ``stage_idx``.
 
         Each block is held as a role-keyed dict: ``rad_conv``, ``norm``,
         ``expand``, ``reduce`` and ``dropout``, which is ``None`` unless
-        ``dropout_rate`` is above 0.
+        ``dropout_rate`` is above 0. Layers are named
+        ``stage{S}_block{B}_<role>`` with S and B counted from 1.
 
         :param stage_idx: Index of the stage to build.
         """
         dim = self.dims[stage_idx]
         blocks = []
         for block_idx in range(self.depths[stage_idx]):
-            prefix = f"stage{stage_idx}_block{block_idx}"
+            prefix = f"stage{stage_idx + 1}_block{block_idx + 1}"
             block = {
+                # DECISION plan-2026-10-26T125959-7af851e5/D-045: `use_bias` reaches the RAD-Conv's
+                # output bias and no further. Its offset and weight predictors keep their bias
+                # whatever `use_bias` says: `RADConv2D` has no knob for them, and the offset bias
+                # is what sets the initial region size (`offset_bias_init`). Do NOT call the model
+                # bias-free under `use_bias=False`, and do NOT reach into the layer's inner convs
+                # from here. See decisions.md.
                 "rad_conv": RADConv2D(
                     filters=dim,
                     kernel_size=self.rad_kernel_size,
                     groups=self.rad_groups,
                     use_bias=self.use_bias,
+                    kernel_regularizer=self.kernel_regularizer,
                     name=f"{prefix}_rad_conv",
                 ),
                 "norm": keras.layers.LayerNormalization(
@@ -348,9 +432,17 @@ class RADConvNet(keras.Model):
                     name=f"{prefix}_norm",
                 ),
                 "expand": keras.layers.Dense(
-                    dim * self.mlp_ratio, use_bias=self.use_bias, name=f"{prefix}_expand"
+                    dim * self.mlp_ratio,
+                    use_bias=self.use_bias,
+                    kernel_regularizer=self.kernel_regularizer,
+                    name=f"{prefix}_expand",
                 ),
-                "reduce": keras.layers.Dense(dim, use_bias=self.use_bias, name=f"{prefix}_reduce"),
+                "reduce": keras.layers.Dense(
+                    dim,
+                    use_bias=self.use_bias,
+                    kernel_regularizer=self.kernel_regularizer,
+                    name=f"{prefix}_reduce",
+                ),
                 "dropout": (
                     keras.layers.Dropout(self.dropout_rate, name=f"{prefix}_dropout")
                     if self.dropout_rate > 0.0
@@ -358,41 +450,75 @@ class RADConvNet(keras.Model):
                 ),
             }
             blocks.append(block)
-        self.stages_list.append(blocks)
+        self.stages.append(blocks)
 
     def _build_head(self) -> None:
-        """Build the GAP + LayerNorm + Dense classification head.
+        """Build the classification head through the vision heads factory.
 
-        The Dense classifier exists only when ``num_classes`` is above 0.
+        The reference head, ConvNeXt's ``self.head(self.norm(x.mean([-2, -1])))``:
+        global average pooling, a LayerNorm at epsilon 1e-6 that centers only when
+        ``use_bias`` is set, and one linear layer that has a bias only when
+        ``use_bias`` is set; no hidden block.
         """
-        self.gap = keras.layers.GlobalAveragePooling2D(name="gap")
-        self.head_norm = keras.layers.LayerNormalization(
-            epsilon=self.LAYERNORM_EPSILON, center=self.use_bias, scale=True, name="head_norm"
-        )
-        self.classifier = (
-            keras.layers.Dense(
-                self.num_classes,
-                use_bias=self.use_bias,
-                kernel_initializer=self.HEAD_INITIALIZER,
-                name="classifier",
-            )
-            if self.num_classes > 0
-            else None
+        # DECISION plan-2026-10-26T125959-7af851e5/D-043: the head turns its initializer
+        # into an instance and then clones it for the
+        # classifier, and a seedless clone draws a second default seed. The classifier
+        # kernel was drawn from the FIRST default seed taken after the last block, so the
+        # seed is taken here and handed over explicitly (a clone keeps an explicit seed):
+        # the kernel of a seeded build stays what it was before the head moved. Only the
+        # default head (no hidden block) takes it: an explicit seed cloned into every Dense
+        # of a head with hidden blocks (`head_config_overrides={"block_dims": ...}`) gives
+        # each the same draw (three bit-identical kernels at `block_dims=[16, 16]`), so
+        # there the spec goes through seedless and each Dense draws its own (D-045).
+        # See decisions.md.
+        block_dims = (self._head_config_overrides or {}).get("block_dims") or ()
+        if len(block_dims) == 0:
+            head_initializer = keras.initializers.get(self.HEAD_INITIALIZER)
+            seed = getattr(head_initializer, "seed", None)
+            if seed is not None:  # a seedable initializer; Zeros and Constant have none
+                head_initializer = type(head_initializer).from_config(
+                    {**head_initializer.get_config(), "seed": seed}
+                )
+        else:
+            head_initializer = self.HEAD_INITIALIZER
+        self.classification_head = build_model_vision_head(
+            VisionTaskType.CLASSIFICATION,
+            {
+                "num_classes": self.num_classes,
+                "use_global_pooling": True,
+                "pooling_type": "avg",
+                "use_attention": False,
+                "block_dims": (),
+                "pooled_normalization_type": "layer_norm",
+                "normalization_kwargs": {
+                    "epsilon": self.LAYERNORM_EPSILON,
+                    "center": self.use_bias,
+                    "scale": True,
+                },
+                "classifier_use_bias": self.use_bias,
+                # No hidden block, so no block dropout either.
+                "dropout_rate": 0.0,
+                "kernel_initializer": head_initializer,
+                "kernel_regularizer": self.kernel_regularizer,
+                # Named, so a checkpoint written in one process lands on the same
+                # weight paths in another (an unnamed head is `classification_head_1`
+                # in the second).
+                "name": "classification_head",
+            },
+            self._head_config_overrides,
         )
 
     def build(self, input_shape: Any) -> None:
-        """Materialize every sub-layer by tracing ``call`` on a symbolic input.
+        """Materialize every sub-layer from `input_shape` by tracing `call`.
 
-        :param input_shape: Shape of the input to ``call``, with or without
-            the batch dimension.
-        :type input_shape: Any
+        `materialize_sublayers` traces `call` on symbolic inputs, so what gets
+        built cannot drift from what gets called.
+
+        :param input_shape: Shape (or nest of shapes) of the input to `call`.
         """
-        if len(input_shape) == 3:
-            build_shape = (None,) + tuple(input_shape)
-        else:
-            build_shape = input_shape
-        dummy_input = keras.KerasTensor(build_shape)
-        _ = self.call(dummy_input)
+        if self.built:
+            return
+        materialize_sublayers(self, input_shape)
         super().build(input_shape)
 
     def call(
@@ -400,23 +526,25 @@ class RADConvNet(keras.Model):
         inputs: "keras.KerasTensor",
         training: Optional[bool] = None,
     ) -> "keras.KerasTensor":
-        """Run the stem, the stages with their downsamples, and the optional head.
+        """Run the stem, the stages with their downsamplers, and the optional head.
 
         :param inputs: ``(batch_size, height, width, channels)`` input.
         :type inputs: keras.KerasTensor
         :param training: Whether the model is in training mode. Reaches the
-            block dropout and the stem, whose LayerNorm ignores it.
+            block dropout, the stem, whose LayerNorm ignores it, and the head.
         :type training: Optional[bool]
-        :return: Output tensor; shape per the class docstring.
+        :return: The logits ``(batch_size, num_classes)`` (``include_top=True``)
+            or the final stage's feature maps ``(batch_size, H', W', dims[-1])``
+            (``include_top=False``).
         :rtype: keras.KerasTensor
         """
         x = self.stem(inputs, training=training)
 
-        for stage_idx, stage_blocks in enumerate(self.stages_list):
+        for stage_idx, stage_blocks in enumerate(self.stages):
             if stage_idx > 0:
-                norm_layer, conv_layer = self.downsample_layers_list[stage_idx - 1]
-                x = norm_layer(x)
-                x = conv_layer(x)
+                downsampler = self.downsamplers[stage_idx - 1]
+                x = downsampler["norm"](x)
+                x = downsampler["conv"](x)
 
             for block in stage_blocks:
                 residual = x
@@ -430,15 +558,16 @@ class RADConvNet(keras.Model):
                 x = keras.layers.add([residual, y])
 
         if self.include_top:
-            x = self.gap(x)
-            x = self.head_norm(x)
-            if self.classifier is not None:
-                x = self.classifier(x)
+            return self.classification_head(x, training=training)["logits"]
 
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape by walking the stem, stages and head.
+        """Report the shape `call` returns, without building the model.
+
+        The RAD-Conv blocks are shape-preserving, so only the stem, the
+        downsamplers and the head move the shape (the stem and each
+        downsampling convolution already set the channel count).
 
         :param input_shape: Input shape, channels-last.
         :type input_shape: tuple
@@ -446,24 +575,100 @@ class RADConvNet(keras.Model):
             docstring's Output shape applies.
         :rtype: tuple
         """
-        current_shape = input_shape
-        current_shape = self.stem.compute_output_shape(current_shape)
+        shape = self.stem.compute_output_shape(input_shape)
 
-        for stage_idx in range(len(self.depths)):
-            if stage_idx > 0:
-                norm_layer, conv_layer = self.downsample_layers_list[stage_idx - 1]
-                current_shape = norm_layer.compute_output_shape(current_shape)
-                current_shape = conv_layer.compute_output_shape(current_shape)
-            # RAD-Conv blocks are shape-preserving (stride 1, "same"-style).
-            current_shape = current_shape[:-1] + (self.dims[stage_idx],)
+        for downsampler in self.downsamplers:
+            shape = downsampler["norm"].compute_output_shape(shape)
+            shape = downsampler["conv"].compute_output_shape(shape)
 
         if self.include_top:
-            current_shape = self.gap.compute_output_shape(current_shape)
-            current_shape = self.head_norm.compute_output_shape(current_shape)
-            if self.classifier is not None:
-                current_shape = self.classifier.compute_output_shape(current_shape)
+            # The head reports both keys; `call` returns the 'logits' one.
+            shape = self.classification_head.compute_output_shape(shape)["logits"]
 
-        return current_shape
+        return shape
+
+    def load_pretrained_weights(
+        self,
+        weights_path: str,
+        skip_mismatch: bool = True,
+    ) -> None:
+        """Load a local `.keras` checkpoint into the model, layer by layer.
+
+        The transfer is `load_pretrained_checkpoint`: it builds the model at
+        `input_shape` if it is unbuilt and takes a headed checkpoint into a
+        headless model. Every layer outside the classification head must be
+        restored, so a checkpoint of another variant, width or depth raises and
+        copies no weight. Only a head of another `num_classes` is skipped: it
+        keeps its initialization and a warning names it. The archive's own
+        config is compared too: a constructor argument that both hold and that
+        is not in `_NON_STRUCTURAL_CONFIG_KEYS` must be equal, so a checkpoint
+        of another `activation` is refused even when every weight shape fits.
+        An argument only one side holds is not compared, and an archive in
+        which no single model of this class can be found is checked by layers
+        only (the load warns). Where the head is copied, its
+        `head_config_overrides` must be equal too (dropout, initializers and
+        regularizers aside).
+
+        :param weights_path: Path to the weights file (`.keras` format).
+        :param skip_mismatch: `True` (default) lets the head layers differ;
+            `False` allows no difference anywhere. The inverse of the transfer
+            helper's `strict`.
+        :raises FileNotFoundError: If `weights_path` doesn't exist.
+        :raises ValueError: If a layer outside the head is not restored, or
+            the weights cannot be loaded.
+        """
+        load_pretrained_checkpoint(
+            self, weights_path, self.input_shape_config, skip_mismatch,
+            ignore_config_keys=_NON_STRUCTURAL_CONFIG_KEYS,
+        )
+
+    @classmethod
+    def from_variant(
+        cls,
+        variant: str,
+        num_classes: int = 1000,
+        input_shape: Optional[Tuple[Optional[int], ...]] = None,
+        pretrained: Union[bool, str] = False,
+        **kwargs: Any,
+    ) -> "RADConvNet":
+        """Create a RADConvNet model from a predefined variant.
+
+        :param variant: A key of ``MODEL_VARIANTS``: ``"tiny"``, ``"small"`` or
+            ``"base"``.
+        :param num_classes: Number of output classes. Defaults to ``1000``.
+        :param input_shape: ``(height, width, channels)``. ``None`` resolves to
+            ``(None, None, 3)``.
+        :param pretrained: A path to a local weights file, `True` (raises
+            `NotImplementedError`, since no public RADConvNet weights ship with
+            `dl_techniques`), or `False` (default, random init).
+        :param kwargs: Passthrough to the constructor; an architecture field of
+            the variant (for example `depths`, `dims`) is replaced by the value
+            given here.
+        :return: A configured ``RADConvNet``.
+        :raises ValueError: If ``variant`` is not recognized, or a resolved
+            argument fails the constructor's checks.
+        :raises NotImplementedError: If `pretrained` is `True`.
+        :raises FileNotFoundError: If `pretrained` is a path that doesn't exist.
+        """
+        if variant not in cls.MODEL_VARIANTS:
+            raise ValueError(
+                f"Unknown variant '{variant}'. Available variants: "
+                f"{list(cls.MODEL_VARIANTS.keys())}"
+            )
+
+        weights_path = pretrained_path_or_raise(
+            pretrained, f"{cls.__name__} variant '{variant}'"
+        )
+
+        config = copy.deepcopy(cls.MODEL_VARIANTS[variant])
+        config.update(kwargs)
+
+        model = cls(num_classes=num_classes, input_shape=input_shape, **config)
+
+        if weights_path:
+            model.load_pretrained_weights(weights_path)
+
+        return model
 
     def get_config(self) -> Dict[str, Any]:
         """Return the model configuration for serialization.
@@ -478,61 +683,17 @@ class RADConvNet(keras.Model):
             "rad_kernel_size": self.rad_kernel_size,
             "rad_groups": self.rad_groups,
             "mlp_ratio": self.mlp_ratio,
-            "activation": serialize_activation(self.activation_name),
+            "activation": serialize_activation(self.activation),
             "use_bias": self.use_bias,
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "dropout_rate": self.dropout_rate,
             "strides": self.strides,
             "include_top": self.include_top,
             "input_shape": self.input_shape_config,
+            "head_config_overrides": self._head_config_overrides,
         }
         base_config = super().get_config()
         return {**base_config, **config}
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "RADConvNet":
-        """Create a model instance from its configuration.
-
-        :param config: Configuration dictionary.
-        :type config: Dict[str, Any]
-        :return: RADConvNet model instance.
-        :rtype: RADConvNet
-        """
-        return cls(**config)
-
-    @classmethod
-    def from_variant(
-        cls,
-        variant: str,
-        num_classes: int = 1000,
-        input_shape: Tuple[Optional[int], ...] = (None, None, 3),
-        **kwargs: Any,
-    ) -> "RADConvNet":
-        """Create a RADConvNet model from a predefined variant.
-
-        :param variant: One of ``"tiny"``, ``"small"``, ``"base"``.
-        :type variant: str
-        :param num_classes: Number of output classes. Defaults to ``1000``.
-        :type num_classes: int
-        :param input_shape: ``(height, width, channels)``. Defaults to
-            ``(None, None, 3)``.
-        :type input_shape: Tuple[int, ...]
-        :param **kwargs: Additional keyword args forwarded to the constructor,
-            overriding any variant default they name.
-        :return: A configured ``RADConvNet``.
-        :rtype: RADConvNet
-        :raises ValueError: If ``variant`` is not recognized, or a resolved
-            argument fails the constructor's checks.
-        """
-        if variant not in cls.MODEL_VARIANTS:
-            raise ValueError(
-                f"Unknown variant '{variant}'. Available variants: "
-                f"{list(cls.MODEL_VARIANTS.keys())}"
-            )
-        config = cls.MODEL_VARIANTS[variant]
-        logger.info(f"Creating RADConvNet-{variant.upper()} model with input_shape {input_shape}")
-        merged = {**config, "num_classes": num_classes, "input_shape": input_shape}
-        merged.update(kwargs)
-        return cls(**merged)
 
 
 # ---------------------------------------------------------------------
@@ -540,7 +701,8 @@ class RADConvNet(keras.Model):
 def create_rad_convnet(
     variant: str = "tiny",
     num_classes: int = 1000,
-    input_shape: Optional[Tuple[Optional[int], ...]] = (None, None, 3),
+    input_shape: Optional[Tuple[Optional[int], ...]] = None,
+    pretrained: Union[bool, str] = False,
     **kwargs: Any,
 ) -> RADConvNet:
     """Thin factory wrapper around :meth:`RADConvNet.from_variant`.
@@ -550,17 +712,26 @@ def create_rad_convnet(
     :type variant: str
     :param num_classes: Number of output classes. Defaults to ``1000``.
     :type num_classes: int
-    :param input_shape: ``(height, width, channels)``. Defaults to
+    :param input_shape: ``(height, width, channels)``; ``None`` resolves to
         ``(None, None, 3)``.
     :type input_shape: Optional[Tuple[int, ...]]
-    :param **kwargs: Additional keyword arguments forwarded to the constructor.
+    :param pretrained: A path to a local weights file, `True` (raises
+        `NotImplementedError`), or `False` (default, random init).
+    :type pretrained: Union[bool, str]
+    :param kwargs: Additional keyword arguments forwarded to
+        :meth:`RADConvNet.from_variant`.
     :return: A configured ``RADConvNet``.
     :rtype: RADConvNet
     :raises ValueError: If ``variant`` is unknown, or a forwarded argument is
         invalid.
+    :raises NotImplementedError: If `pretrained` is `True`.
     """
     return RADConvNet.from_variant(
-        variant, num_classes=num_classes, input_shape=input_shape, **kwargs
+        variant,
+        num_classes=num_classes,
+        input_shape=input_shape,
+        pretrained=pretrained,
+        **kwargs,
     )
 
 # ---------------------------------------------------------------------

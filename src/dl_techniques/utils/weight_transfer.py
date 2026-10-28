@@ -36,7 +36,11 @@ Three loaders live here, and they are not interchangeable:
   builds the model if it is not built, transfers through
   :func:`load_weights_from_checkpoint` (a headless model takes a headed
   checkpoint) and raises unless every layer outside the classifier head is
-  restored (only ``head_prefixes`` may differ), or when no layer is restored.
+  restored (only the layers named by ``head_pattern`` may differ), when the
+  archive's own config (or the config of the one model inside a functional
+  wrapper) differs from the model's on a structural key, when a head that would be
+  copied was configured to compute another function, or when no layer is
+  restored. No weight is copied by a refused load.
 
 :func:`load_weights_from_checkpoint` reports by default; pass ``allow_unloaded``
 to make it complete-or-raise instead (every target layer loads and every
@@ -54,14 +58,16 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import zipfile
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
+from typing import Any, Callable, Collection, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import keras
 import numpy as np
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.model_build import require_channel_count
 
 
 # Layer-by-layer set_weights rather than load_weights(by_name=True).
@@ -353,6 +359,8 @@ def load_weights_from_checkpoint(
     custom_objects: Optional[dict] = None,
     allow_unloaded: Optional[Sequence[str]] = None,
     vocab_change: Optional[VocabChange] = None,
+    allow_unloaded_pattern: Optional[str] = None,
+    before_copy: Optional[Callable[[TransferReport], None]] = None,
 ) -> TransferReport:
     """Copy weights layer-by-layer from a saved ``.keras`` checkpoint into *target*.
 
@@ -395,6 +403,16 @@ def load_weights_from_checkpoint(
         ``report.vocab_fresh`` and logged), and any other difference makes the
         whole layer a shape mismatch. A variable counts as a vocabulary table
         only when its path ends with one of ``vocab_change.tables``.
+    :param allow_unloaded_pattern: ``None`` (default), or a regular expression
+        that a layer name must match IN FULL to be allowed like the
+        ``allow_unloaded`` prefixes (an exact-name rule: ``classification_head``
+        does not let ``classification_head_proj`` through). Giving it turns the
+        complete-or-raise check on, with ``allow_unloaded`` ``None`` read as
+        ``()``.
+    :param before_copy: ``None`` (default), or a callable the transfer calls with the
+        finished :class:`TransferReport` once every check has passed and before the
+        first weight is copied. It may raise to refuse the transfer, which then copies
+        nothing (a check that needs to know WHICH layers would load).
     :returns: :class:`TransferReport` describing what happened.
     :raises FileNotFoundError: *ckpt_path* does not exist.
     :raises ValueError: *ckpt_path* does not end in ``.keras``; all source
@@ -434,6 +452,15 @@ def load_weights_from_checkpoint(
 
     report = TransferReport()
     allowed = tuple(allow_unloaded or ())
+    allowed_pattern = (
+        None if allow_unloaded_pattern is None else re.compile(allow_unloaded_pattern)
+    )
+
+    def is_allowed(name: str) -> bool:
+        return _matches_any_prefix(name, allowed) or (
+            allowed_pattern is not None and allowed_pattern.fullmatch(name) is not None
+        )
+
     # A value of None in a pending list keeps that target variable's init.
     pending: List[Tuple[keras.layers.Layer, list]] = []
 
@@ -474,7 +501,7 @@ def load_weights_from_checkpoint(
                 continue
         if tgt_shapes != src_shapes:
             report.shape_mismatch.append((name, tgt_shapes, src_shapes))
-            if strict and not _matches_any_prefix(name, allowed):
+            if strict and not is_allowed(name):
                 raise ValueError(
                     f"Shape mismatch on layer {name!r}: target={tgt_shapes} "
                     f"source={src_shapes}"
@@ -510,28 +537,32 @@ def load_weights_from_checkpoint(
             f"{len(source_layers)}."
         )
 
-    if allow_unloaded is not None:
+    if allow_unloaded is not None or allowed_pattern is not None:
         # missing_in_source holds every weight-bearing target layer neither
         # loaded nor skipped by prefix: absent from the source OR mismatched.
         unloaded = [
             n for n in report.missing_in_source
-            if not _matches_any_prefix(n, allowed)
+            if not is_allowed(n)
         ]
         # DECISION plan-2026-10-11T004932-b83935e1/D-031: the source side too; do NOT
         # let a checkpoint layer without a target home pass -- a deeper checkpoint is
         # then truncated silently and a trained final norm runs after a block it never saw.
         unused = [
             n for n in report.unused_in_source
-            if not _matches_any_prefix(n, allowed)
+            if not is_allowed(n)
         ]
         if unloaded or unused:
             raise ValueError(
                 f"Checkpoint {ckpt_path!r} leaves {len(unloaded)} target "
                 f"layer(s) unloaded: {_listed(unloaded)}, and holds {len(unused)} "
                 f"layer(s) with no target layer: {_listed(unused)}. Only layers "
-                f"starting with {list(allowed)} may be left out on either "
-                f"side.\n{report.summary_string()}"
+                f"starting with {list(allowed)}"
+                + (f" or named in full by {allowed_pattern.pattern!r}" if allowed_pattern else "")
+                + f" may be left out on either side.\n{report.summary_string()}"
             )
+
+    if before_copy is not None:
+        before_copy(report)
 
     for tgt_layer, src_weights in pending:
         if all(value is not None for value in src_weights):
@@ -712,12 +743,196 @@ def load_backbone_from_checkpoint(
     )
 
 
-#: Layer-name prefixes of the classifier head(s) of the vision classifiers: the main
+#: Names of the classifier head(s) of the vision classifiers, matched IN FULL: the main
 #: ``classification_head`` and ResNet's deep-supervision ``supervision_head_{i}``.
 #: The names come from the naming table the house-shape guards enforce
 #: (``test_the_layer_names_follow_the_naming_table``), so a model that renames its
-#: head fails there before it can fail here.
-DEFAULT_HEAD_PREFIXES: Tuple[str, ...] = ("classification_head", "supervision_head")
+#: head fails there before it can fail here. A full match, not a prefix: a trunk
+#: layer named ``classification_head_proj`` is not a head and must load.
+DEFAULT_HEAD_PATTERN: str = r"classification_head|supervision_head_\d+"
+
+#: Constructor-config keys that never change what a checkpoint holds, for any model:
+#: the Keras bookkeeping (``name``, ``trainable``, ``dtype``) and the head's width
+#: ``num_classes`` and presence ``include_top`` (the head's own layer shapes are checked
+#: layer by layer). A model passes these plus the keys of its own that leave the weight
+#: layout and the computed function alone (initializers, regularizers, dropout rates)
+#: as ``ignore_config_keys``. ``head_config_overrides`` is deliberately NOT here: it can
+#: change what a head computes and no weight shape, and has its own rule
+#: (:data:`HEAD_CONFIG_KEY`).
+DEFAULT_NON_STRUCTURAL_CONFIG_KEYS: Tuple[str, ...] = (
+    "name", "trainable", "dtype", "num_classes", "include_top",
+)
+
+#: The constructor key that holds the head's configuration. Compared by its own rule,
+#: and only when the head layer would be copied (see :func:`load_pretrained_checkpoint`).
+HEAD_CONFIG_KEY: str = "head_config_overrides"
+
+#: Keys of a head configuration that leave the head's weight layout and its inference
+#: function alone (dropout acts in training only; initializers and regularizers act on
+#: the starting weights and the loss). Every other key of ``head_config_overrides``
+#: (``pooling_type``, ``block_dims``, ``normalization_kwargs``, the activation, ...)
+#: is compared.
+NON_STRUCTURAL_HEAD_CONFIG_KEYS: Tuple[str, ...] = (
+    "dropout_rate", "classifier_dropout_rate", "kernel_initializer", "bias_initializer",
+    "kernel_regularizer", "bias_regularizer", "trainable",
+)
+
+
+def _plain(value: Any) -> Any:
+    """``value`` as plain JSON data: a tuple becomes a list (``config.json`` holds lists)."""
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(v) for v in value]
+    return value
+
+
+def _short(value: Any, limit: int = 80) -> str:
+    """``repr(value)`` cut to *limit* characters, for an error message."""
+    text = repr(value)
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _is_size(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _same_value(theirs: Any, ours: Any) -> bool:
+    """Equal config values, an integer ``n`` and the pair ``[n, n]`` counting as equal.
+
+    ``kernel_size=7`` and ``kernel_size=(7, 7)`` build the same layers; a model that
+    takes an int-or-pair argument stores whichever the caller wrote. Only a pair of
+    two equal integers is read as the integer: ``[7, 5]`` is another kernel.
+    """
+    if theirs == ours:
+        return True
+    return any(
+        _is_size(size) and isinstance(pair, list) and pair == [size, size]
+        for size, pair in ((theirs, ours), (ours, theirs))
+    )
+
+
+def _located_config(recorded: Dict[str, Any], class_name: str) -> Optional[Dict[str, Any]]:
+    """The constructor config of the model of class *class_name* an archive holds.
+
+    The archive's own top-level config when it is of that class; else the config of
+    the ONE layer of that class inside a functional wrapper (what the trainers save:
+    ``keras.Model(inputs, model(inputs))``). ``None`` when there is no such layer or
+    there are two or more of them (which one is meant is unknown).
+    """
+    if recorded.get("class_name") == class_name:
+        return recorded.get("config") or {}
+    layers = (recorded.get("config") or {}).get("layers")
+    if not isinstance(layers, list):
+        return None
+    inner = [
+        layer for layer in layers
+        if isinstance(layer, dict) and layer.get("class_name") == class_name
+    ]
+    return (inner[0].get("config") or {}) if len(inner) == 1 else None
+
+
+def _config_pair(
+    model: keras.Model, weights_path: str
+) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    """``(checkpoint's, model's)`` constructor configs as plain JSON data, or ``None``.
+
+    Interface contract (used by :func:`load_pretrained_checkpoint`): the archive is
+    read with :func:`read_checkpoint_config` and the model's config is located in it
+    (:func:`_located_config`); the model is serialized the way ``model.save``
+    serializes it, so both sides carry the same encoding. ``None`` means the layer
+    check is the only one: the archive holds no config, the model is a graph of
+    layers (its config lists the layers, whose generated names differ at every build),
+    or no single model of the model's class can be found in the archive, which is
+    logged as a warning (an archive of other code, or a wrapper around two such
+    models).
+    """
+    # DECISION plan-2026-10-26T125959-7af851e5/D-044: compare the wrapped model's
+    # config when the archive is a functional wrapper around ONE model of the target's
+    # class (`train_resnet.py` saves `inference_model.keras` as exactly that). Do NOT
+    # skip the comparison because the archive's top-level class is not the model's:
+    # a relu ResNet wrapped that way loaded into a gelu one, outputs 1.457 apart. When
+    # no single model can be found, say so (warning); never skip silently.
+    recorded = read_checkpoint_config(weights_path)
+    theirs = _located_config(recorded, type(model).__name__)
+    if theirs is None:
+        if recorded:
+            logger.warning(
+                f"{weights_path}: the configuration was not compared: the archive "
+                f"records a {recorded.get('class_name')} with no single "
+                f"{type(model).__name__} in it, so only the layers were checked."
+            )
+        return None
+    ours = _plain(keras.saving.serialize_keras_object(model).get("config") or {})
+    if "layers" in ours:
+        return None
+    return _plain(theirs), ours
+
+
+def _architecture_differences(
+    configs: Optional[Tuple[Dict[str, Any], Dict[str, Any]]],
+    ignore_config_keys: Collection[str],
+) -> List[str]:
+    """The constructor-config keys on which the archive and the model disagree.
+
+    Interface contract (used by :func:`load_pretrained_checkpoint`): *configs* is
+    what :func:`_config_pair` returned. Only a key present on BOTH sides and outside
+    *ignore_config_keys* is compared (:func:`_same_value`), except
+    :data:`HEAD_CONFIG_KEY`, which :func:`_head_differences` compares. Returns one
+    ``"key: checkpoint <value>, model <value>"`` entry per difference, sorted by key,
+    values cut to 80 characters; ``[]`` when nothing differs or *configs* is ``None``.
+    """
+    if configs is None:
+        return []
+    theirs, ours = configs
+    skipped = {*ignore_config_keys, HEAD_CONFIG_KEY}
+    return [
+        f"{key}: checkpoint {_short(theirs[key])}, model {_short(ours[key])}"
+        for key in sorted(set(theirs) & set(ours) - skipped)
+        if not _same_value(theirs[key], ours[key])
+    ]
+
+
+def _head_differences(
+    configs: Optional[Tuple[Dict[str, Any], Dict[str, Any]]],
+    ignore_config_keys: Collection[str],
+) -> List[str]:
+    """The keys of ``head_config_overrides`` on which the archive and the model disagree.
+
+    Interface contract (used by :func:`load_pretrained_checkpoint`, which applies it
+    only when the head layer would be copied): *configs* is what :func:`_config_pair`
+    returned. ``[]`` when *configs* is ``None``, when :data:`HEAD_CONFIG_KEY` is in
+    *ignore_config_keys* or missing on either side (an argument added since the
+    archive was written is unknown, not different), or when the two agree once
+    :data:`NON_STRUCTURAL_HEAD_CONFIG_KEYS` are left out. An absent override reads as
+    the head's default and is shown as ``<default>``: a default spelled out on one
+    side is a difference, so spell the head the way it was saved. One
+    ``"head_config_overrides['key']: checkpoint <value>, model <value>"`` entry per
+    differing key, sorted.
+    """
+    if configs is None or HEAD_CONFIG_KEY in ignore_config_keys:
+        return []
+    theirs, ours = configs
+    if HEAD_CONFIG_KEY not in theirs or HEAD_CONFIG_KEY not in ours:
+        return []
+    saved, wanted = (
+        {
+            key: value for key, value in (config[HEAD_CONFIG_KEY] or {}).items()
+            if key not in NON_STRUCTURAL_HEAD_CONFIG_KEYS
+        }
+        for config in (theirs, ours)
+    )
+    return [
+        f"{HEAD_CONFIG_KEY}[{key!r}]: checkpoint "
+        f"{_short(saved[key]) if key in saved else '<default>'}, model "
+        f"{_short(wanted[key]) if key in wanted else '<default>'}"
+        for key in sorted({*saved, *wanted})
+        if key not in saved or key not in wanted or not _same_value(saved[key], wanted[key])
+    ]
+
+
+class _ArchitectureMismatch(ValueError):
+    """The checkpoint is of another architecture than the model (raised, never wrapped)."""
 
 
 def load_pretrained_checkpoint(
@@ -725,28 +940,62 @@ def load_pretrained_checkpoint(
     weights_path: str,
     build_shape: Sequence[Optional[int]],
     skip_mismatch: bool = True,
-    head_prefixes: Sequence[str] = DEFAULT_HEAD_PREFIXES,
+    head_pattern: str = DEFAULT_HEAD_PATTERN,
+    ignore_config_keys: Collection[str] = DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
 ) -> TransferReport:
-    """Load a local ``.keras`` checkpoint into *model*; every layer outside the head must load.
+    """Load a local ``.keras`` checkpoint into *model*; the architecture must be the same.
 
     Interface contract (the shared body for a model's
     ``load_pretrained_weights``): builds *model* at ``(1, *build_shape)`` only
     when it is not built yet, then transfers layer by layer through
-    :func:`load_weights_from_checkpoint` with no skipped prefix and
-    ``allow_unloaded=head_prefixes``. The model is never rebuilt: a built model
-    keeps its variables.
+    :func:`load_weights_from_checkpoint` with no skipped prefix and the layers
+    named by *head_pattern* allowed to differ. The model is never rebuilt: a
+    built model keeps its variables.
 
-    Only the head may differ. With ``skip_mismatch=True`` (default) a layer whose
-    name starts with one of *head_prefixes* may have another shape (another
-    ``num_classes``), be absent from the checkpoint (a headless checkpoint into a
-    headed model) or be absent from the model (a headed checkpoint into a
-    ``include_top=False`` model); a head left at its initialization is logged as
-    a warning. Every other layer must be present in both and fit: a checkpoint of
-    another architecture (a different variant, block type, width or stem), a
-    deeper one and a shallower one all raise, and the error names the first
-    offending layers and carries the report's counts (loaded, shape mismatch,
-    missing, unused). The check runs before the first weight is copied, so a
-    refused load leaves *model* untouched.
+    Three checks run before the first weight is copied, so a refused load copies
+    nothing into *model*. It does not always leave the model as it found it: the
+    configuration check runs before the build (an unbuilt model stays unbuilt), but
+    the layer and head checks need the built layers, so an unbuilt model they refuse
+    is left built, at its own initialization:
+
+    * **Layers.** Only the head may differ. With ``skip_mismatch=True`` (default)
+      a layer whose whole name matches *head_pattern* may have another shape
+      (another ``num_classes``), be absent from the checkpoint (a headless
+      checkpoint into a headed model) or be absent from the model (a headed
+      checkpoint into an ``include_top=False`` model); a head left at its
+      initialization is logged as a warning. Every other layer must be present
+      in both and fit: a checkpoint of another variant, block type, width or
+      stem, a deeper one and a shallower one all raise, and the error names the
+      first offending layers and carries the report's counts (loaded, shape
+      mismatch, missing, unused).
+    * **Configuration.** Equal shapes do not make equal architectures (ReLU
+      against GELU, another ``shifts`` or ``strides``, the same widths under a
+      different context mode). When the archive holds a config of *model*'s own
+      class, or a functional wrapper around exactly one model of that class (what
+      the trainers save: ``keras.Model(inputs, model(inputs))``), every
+      constructor-config key present on BOTH sides and outside *ignore_config_keys*
+      must be equal; an integer and the pair of it (``kernel_size=7``,
+      ``(7, 7)``) are equal. A key one side does not have is unknown, not a
+      difference: the comparison skips it, so an argument added since the archive
+      was written still loads. An argument the class has REMOVED or renamed fails
+      earlier, when Keras rebuilds the archive's model from its own config: the
+      load raises ``ValueError`` naming it before any comparison (MobileNet's
+      ``weight_decay``, now ``kernel_regularizer``). An archive in which no single
+      model of that class can be found (a checkpoint written by other code, a
+      wrapper around two such models) is checked by layers only, and the load logs
+      a warning saying the configuration was not compared.
+    * **Head.** ``head_config_overrides`` can change what the head computes and no
+      weight shape (``pooling_type="max"`` against ``"avg"``, another normalization
+      epsilon), so the layer check cannot see it. It is compared exactly (leaving out
+      :data:`NON_STRUCTURAL_HEAD_CONFIG_KEYS`: dropout, initializers, regularizers)
+      whenever the head layer would actually be copied, that is when every one of
+      its weight shapes fits. A head the shapes already exclude (another
+      ``num_classes``, another ``block_dims``) is a new head and may be configured as
+      the caller likes, and so may a headless target or a headless checkpoint. A
+      caller that wants to carry the weights into a head that computes another
+      function names ``head_config_overrides`` in *ignore_config_keys*; a default
+      spelled out on one side only (``{"pooling_type": "avg"}`` against none) is a
+      difference, so spell the head the way the checkpoint was saved.
 
     :param model: The receiving model, built or not.
     :param weights_path: Path to a ``.keras`` checkpoint.
@@ -755,18 +1004,70 @@ def load_pretrained_checkpoint(
     :param skip_mismatch: ``True`` (default) lets the head layers differ as above.
         ``False`` allows no difference anywhere: every layer of the model and of
         the checkpoint must load, so a classifier of another width raises too.
-    :param head_prefixes: Layer-name prefixes of the head layers allowed to
-        differ. Default :data:`DEFAULT_HEAD_PREFIXES`; pass ``()`` when the
-        caller expects no layer, the head included, to differ.
+    :param head_pattern: Regular expression a head layer's name must match in
+        full. Default :data:`DEFAULT_HEAD_PATTERN`; pass a pattern that matches
+        no layer name when no layer, the head included, may differ.
+    :param ignore_config_keys: Config keys not compared: those that leave the
+        weight layout and the computed function alone. Each model declares its
+        own set as a module constant (``num_classes``, ``include_top``,
+        initializers, regularizers and rates are typical); the default holds
+        only :data:`DEFAULT_NON_STRUCTURAL_CONFIG_KEYS`. A key that changes a
+        weight shape needs no entry: the layer check catches it anyway.
+        :data:`HEAD_CONFIG_KEY` is in no default; naming it switches the head
+        check off.
     :returns: The :class:`TransferReport` of the transfer, for a caller that
         wants to inspect what the head kept.
     :raises FileNotFoundError: *weights_path* does not exist.
-    :raises ValueError: the build or the transfer failed (chained to the
-        original error), a layer outside the head was not restored, or no layer
-        was restored at all.
+    :raises ValueError: *model* is not built and *build_shape* has no channel count (its
+        last axis is ``None``); the message names ``input_shape`` and the value. Also: the
+        archive's configuration differs from the model's
+        (the message names each key with both values), the head would be copied
+        but its configuration differs, the build or the transfer failed (chained
+        to the original error), a layer outside the head was not restored, or no
+        layer was restored at all.
     """
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"Weights file not found: {weights_path}")
+    if not model.built:
+        require_channel_count(build_shape)
+
+    # DECISION plan-2026-10-26T125959-7af851e5/D-041: compare the archive's own
+    # config before anything is built or copied. Do NOT rely on the layer check
+    # alone: ReLU to GELU, another `shifts`, `ctx_mode` or strides keep every
+    # weight shape, so the layers all load and the model computes another
+    # function than the one the checkpoint was trained as. Do NOT compare keys
+    # that exist on one side only: revisions add, remove and rename arguments.
+    configs = _config_pair(model, weights_path)
+    differences = _architecture_differences(configs, ignore_config_keys)
+    if differences:
+        raise _ArchitectureMismatch(
+            f"{weights_path} was saved from another architecture than this "
+            f"{type(model).__name__}; the configuration differs on "
+            f"{len(differences)} key(s): " + "; ".join(differences)
+        )
+
+    head = re.compile(head_pattern)
+    head_differences = _head_differences(configs, ignore_config_keys)
+
+    def refuse_a_head_that_computes_another_function(report: TransferReport) -> None:
+        # DECISION plan-2026-10-26T125959-7af851e5/D-044: compare `head_config_overrides`
+        # exactly, and only when the head layer is about to be copied (every weight
+        # shape fits). Do NOT put the key back into the default ignored keys: a max-pool
+        # head loaded silently into an avg-pool model (ConvNeXt outputs 0.118 apart, RAD
+        # 0.344) because pooling holds no weight. Do NOT compare it when the shapes
+        # already exclude the head (another `num_classes`): that is a new head, and
+        # refusing it would end head-swapping fine-tunes.
+        copied = [name for name in report.loaded if head.fullmatch(name)]
+        if head_differences and copied:
+            raise _ArchitectureMismatch(
+                f"{weights_path} was saved from another architecture than this "
+                f"{type(model).__name__}: its head {copied} would be copied, but "
+                f"the head configuration differs on {len(head_differences)} key(s): "
+                + "; ".join(head_differences)
+                + ". Load it with include_top=False or another num_classes to leave "
+                f"the head out, or put {HEAD_CONFIG_KEY!r} in ignore_config_keys to "
+                "accept the other head."
+            )
 
     try:
         if not model.built:
@@ -779,13 +1080,22 @@ def load_pretrained_checkpoint(
         # and returned, a model that looks pretrained and is mostly random. Do NOT
         # relax it to "at least N layers loaded" either: a count does not say
         # WHICH layers, and the zero-layer rule below is that same count at N=1.
+        # DECISION plan-2026-10-26T125959-7af851e5/D-041: (2026-10-27) the D-040 rule above
+        # now names its head by `head_pattern`, matched IN FULL (`allow_unloaded_pattern`),
+        # not by the `head_prefixes` it was written with: a trunk layer called
+        # `classification_head_proj` is not a head and must load. Do NOT go back to prefix
+        # matching. The config check above this block is D-041's too; this one is the layer rule.
         report = load_weights_from_checkpoint(
             target=model,
             ckpt_path=weights_path,
             skip_prefixes=(),
             strict=not skip_mismatch,
-            allow_unloaded=tuple(head_prefixes) if skip_mismatch else (),
+            allow_unloaded=(),
+            allow_unloaded_pattern=head_pattern if skip_mismatch else None,
+            before_copy=refuse_a_head_that_computes_another_function,
         )
+    except _ArchitectureMismatch:
+        raise
     except Exception as e:
         raise ValueError(
             f"Failed to load weights from {weights_path}: {e}"
@@ -804,8 +1114,7 @@ def load_pretrained_checkpoint(
             f"{report.summary_string()}"
         )
     kept = [
-        name for name in report.missing_in_source
-        if _matches_any_prefix(name, head_prefixes)
+        name for name in report.missing_in_source if head.fullmatch(name)
     ]
     if kept:
         logger.warning(

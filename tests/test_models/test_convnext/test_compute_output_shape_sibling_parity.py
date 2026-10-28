@@ -50,24 +50,41 @@ def test_the_declared_output_shape_matches_the_real_forward(cls, include_top):
         f"{cls.__name__} declared a concrete batch dimension {declared[0]!r}")
 
 
-def test_both_siblings_define_the_method_themselves():
-    """Parity, asserted structurally -- inheritance from Keras would raise."""
-    for cls in (ConvNeXtV1, ConvNeXtV2):
-        assert "compute_output_shape" in cls.__dict__, (
+def defining_class(cls: type):
+    """The class in ``cls``'s MRO that defines ``compute_output_shape``, ignoring Keras' own.
+
+    Interface contract: returns the first non-Keras class whose ``__dict__`` holds the
+    method, or ``None`` when only Keras' raising default is inherited.
+    """
+    return next((k for k in cls.__mro__
+                 if "compute_output_shape" in k.__dict__ and not k.__module__.startswith("keras")),
+                None)
+
+
+def test_both_siblings_use_one_definition_of_the_method():
+    """Parity, asserted structurally -- inheritance from Keras would raise.
+
+    The two siblings share ``_ConvNeXtBase``, so the method is defined once, there; a
+    sibling that stopped inheriting it would fall back to Keras' raising default.
+    """
+    owners = {cls: defining_class(cls) for cls in (ConvNeXtV1, ConvNeXtV2)}
+    for cls, owner in owners.items():
+        assert owner is not None, (
             f"{cls.__name__} does not define compute_output_shape; its sibling "
             "does, and the two are used interchangeably")
+    assert owners[ConvNeXtV1] is owners[ConvNeXtV2]
 
 
 def test_the_parity_check_can_see_a_missing_method():
     """Liveness: a class WITHOUT the method must fail the structural check.
 
-    Without this, ``'compute_output_shape' in cls.__dict__`` could silently
-    become true for every class (Keras' base defines one that raises) and the
-    test above would pass against the very defect it names.
+    Without this, the structural check could silently become true for every class
+    (Keras' base defines one that raises) and the test above would pass against the
+    very defect it names.
     """
     class _NoShape(PublicAutoName, keras.Model):
         pass
 
-    assert "compute_output_shape" not in _NoShape.__dict__
+    assert defining_class(_NoShape) is None
     with pytest.raises(NotImplementedError):
         _NoShape().compute_output_shape((None, 4))

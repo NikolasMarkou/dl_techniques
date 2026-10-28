@@ -113,6 +113,20 @@ class TestCliffordNetValidatesItsRates:
         assert (model.dropout_rate, model.stochastic_depth_rate) == (0.5, 0.9)
 
 
+class TestCliffordNetDropPathRamp:
+    """The drop-path rates ramp from 0 to ``stochastic_depth_rate`` over the ``depth`` blocks."""
+
+    @pytest.mark.parametrize("depth", [2, 5])
+    def test_block_i_has_the_rate_linspace_gives_it(self, depth):
+        rate = 0.3
+        model = CliffordNet(num_classes=3, channels=8, depth=depth, stochastic_depth_rate=rate)
+        seen = [entry["drop_path"].drop_path_rate for entry in model.blocks]
+        assert [entry["drop_path"].name for entry in model.blocks] == [
+            f"block_{i}_drop_path" for i in range(depth)]
+        np.testing.assert_allclose(seen, np.linspace(0.0, rate, depth), rtol=0, atol=1e-6)
+        assert seen[0] == 0.0 and seen[-1] == pytest.approx(rate)
+
+
 def _kernels(model):
     """The kernels of a built model keyed by their path below the instance name."""
     return {w.path.split("/", 1)[1]: keras.ops.convert_to_numpy(w)

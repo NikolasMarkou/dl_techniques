@@ -188,7 +188,7 @@ accept these.
 | `block_type` | `'bottleneck'` | `'basic'` or `'bottleneck'` |
 | `stem_type` | `'imagenet'` | `'imagenet'` or `'cifar'` — see § 4.3 |
 | `input_shape` | `(224, 224, 3)` | must be a 3-tuple |
-| `include_top` | `True` | `False` returns the `(B, H, W, C)` feature map |
+| `include_top` | `True` | `False` returns the `(B, H, W, C)` feature map; a `bool` or `numpy.bool_`, anything else raises `TypeError` |
 | `enable_deep_supervision` | `False` | adds per-stage auxiliary heads — § 7 |
 | `normalization_type` | `'batch_norm'` | any key of the normalization factory |
 | `normalization_kwargs` | `None` | forwarded to every norm; `batch_norm` gets `momentum=0.9` unless you override it |
@@ -343,9 +343,27 @@ backbone = ResNet.from_variant("resnet50", pretrained=CKPT, include_top=False)
 
 The loader restores every layer outside the classification head (and the deep-supervision heads) or
 raises `ValueError`, naming the first layers that did not load and the loaded, mismatched and
-missing counts, and leaving the model untouched: a `resnet50` checkpoint into
+missing counts, and copying no weight: a `resnet50` checkpoint into
 `ResNet.from_variant("resnet18", pretrained=path)` is refused (it used to restore the stem alone and
-return). Only a head of another `num_classes` is skipped, and a warning names it.
+return). Only a head of another `num_classes` is skipped, and a warning names it. The head is
+matched by its whole name (`classification_head`, `supervision_head_{i}`), so a trunk layer whose name
+merely starts with one of them is still required to load. The checkpoint's own configuration is
+compared too: when the archive records the same class, every constructor argument that both the
+archive and the model hold, except the ones that leave the weight layout and the computed function
+alone (`num_classes`, `include_top`, initializers, regularizers, dropout
+and stochastic-depth rates), must be equal. A `relu` checkpoint into `activation_type="gelu"`, or an
+`imagenet` stem into a `cifar` one, restores every shape and is refused, naming the argument and
+both values. An argument that only one side holds is not compared, so the comparison alone never refuses an archive written by an
+earlier revision (the archive still has to deserialize: a constructor that no longer accepts one of its recorded arguments refuses it before the loader runs).
+The head is compared too, but only where it is copied: `head_config_overrides` (leaving out dropout,
+initializer and regularizer keys) must be equal whenever every weight shape of `classification_head`
+fits, so a checkpoint saved with `{"pooling_type": "max"}` is refused by an average-pool model
+(before this check it loaded, with outputs 9.38 apart on the contract's tiny configuration). A head
+of another `num_classes`, `include_top=False` and a headless checkpoint are not compared; name
+`head_config_overrides` in `ignore_config_keys` of `load_pretrained_checkpoint` to accept another
+head on purpose. An archive that is a functional wrapper around one model of this class (what the
+trainers save) is compared by the wrapped model's configuration; when no single model of the class
+is found in the archive, the load logs a warning and checks the layers only.
 
 Once you have a checkpoint the three usual strategies apply: freeze everything and train a new
 head; freeze the stem and early stages and fine-tune the rest at `1e-4`; or unfreeze

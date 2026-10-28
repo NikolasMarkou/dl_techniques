@@ -393,3 +393,11 @@ Key dependencies:
 - NumPy/SciPy for computations
 - scikit-learn for base classifiers
 - PyTorch/TensorFlow for neural network classifiers
+
+---
+
+## 11. Implemented in this repository
+
+- `src/dl_techniques/utils/conformal_classification.py`: APS scores, split calibration, set prediction, coverage and set-size evaluation, and a repeated-split coverage check (numpy, takes logits).
+- `src/dl_techniques/layers/statistics/conformal/`: `ConformalLayer` (one frozen `q_hat`, `set_q_hat`, `calibrate`) and its three layers; `prediction_set.py` has `ConformalPredictionSet`, a frozen-threshold layer on classifier logits. It runs the deterministic `u = 1` form of the score, which is valid but slightly conservative; the randomized form (`randomized=True`) exists only in the numpy utility.
+- `src/train/common/conformal.py`: the post-training step used by `train_resnet`, `train_vit` (ImageNet) and `train_cliffordnet` (ImageNet).
