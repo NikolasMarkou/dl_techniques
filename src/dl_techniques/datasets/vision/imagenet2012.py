@@ -34,6 +34,15 @@ is done on the path list before any file is read.  Decoding uses
 a ``.JPEG`` name and the CMYK JPEGs decode (measured on the real files; in
 this TF build ``tf.io.decode_jpeg`` accepts the PNG too).
 
+Held-out slice of train
+-----------------------
+ImageNet has no public test labels, so a trainer that wants a test set which
+never influences model selection takes one from train.  With
+``holdout_per_class=k`` the ``holdout`` split is ``k`` images of every class
+(seeded, stratified, un-augmented) and ``train`` is everything else; the
+official ``val`` split is then free to serve as the test set.  The default
+``0`` leaves ``train`` whole.
+
 Training augmentation is a random-resized crop (area 0.08-1, aspect 3/4-4/3)
 plus a horizontal flip, and optionally (``augment_color``) random brightness,
 contrast, saturation and hue.  Evaluation resizes the shorter side to
@@ -62,7 +71,7 @@ IMAGENET2012_NUM_CLASSES: int = 1000
 IMAGENET_MEAN: Tuple[float, float, float] = (0.485, 0.456, 0.406)
 IMAGENET_STD: Tuple[float, float, float] = (0.229, 0.224, 0.225)
 
-_SPLITS = ("train", "val")
+_SPLITS = ("train", "val", "holdout")
 _NORMALIZE_MODES = ("imagenet", "unit", "none")
 _IMAGE_SUFFIXES = (".jpeg", ".jpg")
 _INDEX_DIRNAME = ".index"
@@ -102,6 +111,12 @@ class ImageNet2012Config:
     drop_remainder: bool = False
     num_parallel_calls: int = tf.data.AUTOTUNE
 
+    # A class-balanced slice of ``train`` for model selection.  With a positive
+    # count the ``holdout`` split holds that many images per class (a seeded
+    # draw, independent of ``seed``) and ``train`` holds every other image.
+    holdout_per_class: int = 0
+    holdout_seed: int = 0
+
     def __post_init__(self) -> None:
         if self.normalize not in _NORMALIZE_MODES:
             raise ValueError(
@@ -114,6 +129,10 @@ class ImageNet2012Config:
             )
         if self.max_images is not None and self.max_images <= 0:
             raise ValueError(f"max_images must be positive, got {self.max_images}")
+        if self.holdout_per_class < 0:
+            raise ValueError(
+                f"holdout_per_class must be >= 0, got {self.holdout_per_class}"
+            )
 
 
 class ImageNet2012Data(NamedTuple):
@@ -289,6 +308,24 @@ def _train_labels(files: List[str], classes: List[str]) -> np.ndarray:
     )
 
 
+def _holdout_mask(labels: np.ndarray, per_class: int, seed: int) -> np.ndarray:
+    """True for the ``per_class`` images of every class that form the holdout.
+
+    The draw for a class depends only on ``(seed, class index)`` and the
+    class's own image count, so it does not move when other classes change.
+    """
+    mask = np.zeros(len(labels), dtype=bool)
+    for cls in np.unique(labels):
+        members = np.flatnonzero(labels == cls)
+        if len(members) <= per_class:
+            raise ValueError(
+                f"holdout_per_class={per_class} leaves class {int(cls)} no train "
+                f"image: it has {len(members)}"
+            )
+        mask[np.random.default_rng([seed, int(cls)]).choice(members, per_class, replace=False)] = True
+    return mask
+
+
 # ---------------------------------------------------------------------------
 # tf.data
 # ---------------------------------------------------------------------------
@@ -391,7 +428,9 @@ def load_imagenet2012(
 ) -> ImageNet2012Data:
     """Build a batched ``(image, label)`` dataset for one ImageNet split.
 
-    :param split: ``"train"`` or ``"val"``.
+    :param split: ``"train"``, ``"val"`` or ``"holdout"``.  ``"holdout"`` is
+        the ``holdout_per_class`` images per class that ``"train"`` leaves out
+        (un-augmented, in file-name order); it needs ``holdout_per_class > 0``.
     :param config: Loader configuration; defaults to :class:`ImageNet2012Config`.
     :raises FileNotFoundError: Missing split folder, or ``split="val"`` without
         the devkit label files.
@@ -401,22 +440,31 @@ def load_imagenet2012(
         raise ValueError(f"split must be one of {_SPLITS}, got {split!r}")
     cfg = config if config is not None else ImageNet2012Config()
 
+    if split == "holdout" and cfg.holdout_per_class == 0:
+        raise ValueError("split 'holdout' needs holdout_per_class > 0, got 0")
+
     classes = _list_classes(os.path.join(cfg.root, "train"))
-    files = _load_or_build_index(cfg.root, split, classes)
-    if split == "train":
+    source = "val" if split == "val" else "train"
+    files = _load_or_build_index(cfg.root, source, classes)
+    if source == "train":
         labels = _train_labels(files, classes)
+        if cfg.holdout_per_class > 0:
+            held = _holdout_mask(labels, cfg.holdout_per_class, cfg.holdout_seed)
+            keep = held if split == "holdout" else ~held
+            files = [f for f, k in zip(files, keep) if k]
+            labels = labels[keep]
     else:
         devkit = cfg.devkit_dir or os.path.join(cfg.root, "devkit")
         labels = _read_val_labels(devkit, classes, files)
 
-    if cfg.max_images is not None and cfg.max_images < len(files):
+    if split != "holdout" and cfg.max_images is not None and cfg.max_images < len(files):
         keep = np.sort(
             np.random.default_rng(cfg.seed).choice(len(files), cfg.max_images, replace=False)
         )
         files = [files[i] for i in keep]
         labels = labels[keep]
 
-    split_dir = os.path.join(cfg.root, split)
+    split_dir = os.path.join(cfg.root, source)
     paths = np.array([os.path.join(split_dir, f) for f in files])
     n = len(paths)
     steps = n // cfg.batch_size if cfg.drop_remainder else math.ceil(n / cfg.batch_size)

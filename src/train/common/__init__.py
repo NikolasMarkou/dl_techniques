@@ -68,8 +68,11 @@ from train.common.conformal import (
     run_conformal,
 )
 from train.common.imagenet import (
+    DEFAULT_HOLDOUT_PER_CLASS,
+    add_holdout_argument,
     add_imagenet_arguments,
     eval_head,
+    load_imagenet_selection_splits,
     load_imagenet_splits,
     require_imagenet_root,
 )
@@ -159,6 +162,7 @@ from train.common.token_superposition import (
 # 'imported but unused' warning -- that is the intended enforcement, not noise.
 __all__ = [
     "add_conformal_arguments",
+    "add_holdout_argument",
     "add_imagenet_arguments",
     "apply_tst",
     "attach_run_log",
@@ -198,6 +202,7 @@ __all__ = [
     "DATASET_NUM_CLASSES",
     "decode_text",
     "default_experiment_name",
+    "DEFAULT_HOLDOUT_PER_CLASS",
     "DEFAULT_IMAGE_EXTENSIONS",
     "DEFAULT_SEED",
     "discover_megadepth_pairs",
@@ -235,6 +240,7 @@ __all__ = [
     "load_dataset",
     "load_hf_clm_datasets",
     "load_conformal_model",
+    "load_imagenet_selection_splits",
     "load_imagenet_splits",
     "load_megadepth_pair",
     "load_tfds_clm_datasets",

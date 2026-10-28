@@ -94,6 +94,80 @@ class TestTrain:
         assert load_imagenet2012("train", cfg).num_samples == 3 * PER_CLASS
 
 
+class TestHoldout:
+    """``holdout_per_class`` carves a class-balanced selection set out of train."""
+
+    PLAIN = dict(shuffle=False, augment=False, normalize="none")
+
+    def _split(self, root, split, **kw):
+        cfg = _cfg(root, holdout_per_class=1, **{**self.PLAIN, **kw})
+        return _all(load_imagenet2012(split, cfg))
+
+    @staticmethod
+    def _rows(x):
+        return {row.tobytes() for row in x}
+
+    def test_the_two_splits_are_disjoint_and_cover_train(self, root):
+        whole, _ = _all(load_imagenet2012("train", _cfg(root, **self.PLAIN)))
+        train, _ = self._split(root, "train")
+        held, _ = self._split(root, "holdout")
+        assert len(train) == 3 * (PER_CLASS - 1) and len(held) == 3
+        assert not self._rows(train) & self._rows(held), "an image is in both splits"
+        assert self._rows(train) | self._rows(held) == self._rows(whole)
+
+    def test_every_class_contributes_the_same_count_to_each_split(self, root):
+        _, y_train = self._split(root, "train")
+        _, y_held = self._split(root, "holdout")
+        assert np.bincount(y_held, minlength=3).tolist() == [1, 1, 1]
+        assert np.bincount(y_train, minlength=3).tolist() == [PER_CLASS - 1] * 3
+
+    def test_the_draw_is_reproducible_and_depends_on_the_holdout_seed(self, root):
+        a, _ = self._split(root, "holdout", holdout_seed=3)
+        b, _ = self._split(root, "holdout", holdout_seed=3)
+        np.testing.assert_array_equal(a, b)
+        others = [self._rows(self._split(root, "holdout", holdout_seed=s)[0]) for s in range(8)]
+        assert len({frozenset(o) for o in others}) > 1, "holdout_seed changed nothing"
+
+    def test_the_draw_ignores_the_shuffle_and_augmentation_seed(self, root):
+        a, _ = self._split(root, "holdout", seed=1)
+        b, _ = self._split(root, "holdout", seed=2)
+        np.testing.assert_array_equal(a, b)
+
+    def test_the_holdout_is_never_augmented(self, root):
+        a, _ = self._split(root, "holdout", augment=True, seed=1)
+        b, _ = self._split(root, "holdout", augment=True, seed=2)
+        np.testing.assert_array_equal(a, b)
+
+    def test_max_images_caps_train_but_not_the_holdout(self, root):
+        # A cap of 2 is below both the 9 train and the 3 holdout images, so it bites on each.
+        train = load_imagenet2012("train", _cfg(root, holdout_per_class=1, max_images=2))
+        held = load_imagenet2012("holdout", _cfg(root, holdout_per_class=1, max_images=2))
+        assert train.num_samples == 2 and held.num_samples == 3
+
+    def test_zero_leaves_train_whole(self, root):
+        a, ya = _all(load_imagenet2012("train", _cfg(root, **self.PLAIN)))
+        b, yb = _all(load_imagenet2012("train", _cfg(root, holdout_per_class=0, **self.PLAIN)))
+        np.testing.assert_array_equal(a, b)
+        np.testing.assert_array_equal(ya, yb)
+
+    def test_val_is_untouched_by_the_holdout(self, root):
+        a, _ = _all(load_imagenet2012("val", _cfg(root)))
+        b, _ = _all(load_imagenet2012("val", _cfg(root, holdout_per_class=2)))
+        np.testing.assert_array_equal(a, b)
+
+    def test_the_holdout_split_needs_a_positive_count(self, root):
+        with pytest.raises(ValueError, match="holdout_per_class > 0, got 0"):
+            load_imagenet2012("holdout", _cfg(root))
+
+    def test_a_negative_count_is_refused_naming_it(self):
+        with pytest.raises(ValueError, match="-1"):
+            ImageNet2012Config(holdout_per_class=-1)
+
+    def test_a_class_cannot_be_emptied_of_train(self, root):
+        with pytest.raises(ValueError, match=f"has {PER_CLASS}"):
+            load_imagenet2012("train", _cfg(root, holdout_per_class=PER_CLASS))
+
+
 class TestColorAugmentation:
     def test_color_changes_pixels_but_not_geometry_and_is_reproducible(self, root):
         base = dict(shuffle=False, augment=True, normalize="unit", seed=5)

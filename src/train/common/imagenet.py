@@ -5,7 +5,10 @@ pipeline (decode, crop, augment, normalize). This module owns what every
 trainer around it repeated: the ``--imagenet-root`` / ``--devkit-dir`` flags,
 the root-exists check, the train/val pair with the same loader settings, the
 class-count check, and a small in-memory head of val for the end-of-run
-figures. ``train_resnet``, ``train_vit`` and ``train_cliffordnet`` use it.
+figures. ``train_resnet``, ``train_vit`` and ``train_cliffordnet`` use
+:func:`load_imagenet_splits` (val doubles as the selection set); ``train_convnext``
+and ``train_capsnet`` use :func:`load_imagenet_selection_splits`, which takes
+the selection set from a class-balanced slice of train so val stays a clean test set.
 """
 from __future__ import annotations
 
@@ -23,6 +26,9 @@ from dl_techniques.datasets.vision.imagenet2012 import (
     load_imagenet2012,
 )
 from dl_techniques.utils.logger import logger
+
+#: Selection images per class held out of train (10,000 of 1,281,167).
+DEFAULT_HOLDOUT_PER_CLASS = 10
 
 
 def add_imagenet_arguments(parser: argparse.ArgumentParser, note: str = "") -> None:
@@ -49,6 +55,38 @@ def require_imagenet_root(root: str) -> None:
     """Raise ``ValueError`` when ``root`` is not an existing path."""
     if not Path(root).exists():
         raise ValueError(f"ImageNet root does not exist: {root}")
+
+
+def add_holdout_argument(parser: argparse.ArgumentParser) -> None:
+    """Add ``--holdout-per-class`` to ``parser`` (see :func:`load_imagenet_selection_splits`)."""
+    parser.add_argument(
+        "--holdout-per-class", type=int, default=DEFAULT_HOLDOUT_PER_CLASS,
+        help="ImageNet images per class taken out of train for early stopping and "
+             "checkpoint selection; the official val split is then used only as the "
+             f"test set (default: {DEFAULT_HOLDOUT_PER_CLASS}, i.e. "
+             f"{DEFAULT_HOLDOUT_PER_CLASS * 1000} images)",
+    )
+
+
+def _loader_kwargs(
+        root: str, devkit_dir: Optional[str], image_size: int, batch_size: int,
+        seed: int, augment: bool, augment_color: bool, num_parallel_calls: int,
+        normalize: str,
+) -> dict:
+    return dict(
+        root=root, devkit_dir=devkit_dir, image_size=image_size,
+        batch_size=batch_size, augment=augment, augment_color=augment_color,
+        seed=seed, num_parallel_calls=num_parallel_calls, normalize=normalize,
+    )
+
+
+def _check_num_classes(
+        data: ImageNet2012Data, num_classes: Optional[int], root: str
+) -> None:
+    if num_classes is not None and data.num_classes != num_classes:
+        raise ValueError(
+            f"num_classes={num_classes} but {root} has {data.num_classes} classes"
+        )
 
 
 def load_imagenet_splits(
@@ -82,22 +120,77 @@ def load_imagenet_splits(
     Raises:
         ValueError: ``num_classes`` differs from the number of class folders.
     """
-    kwargs = dict(
-        root=root, devkit_dir=devkit_dir, image_size=image_size,
-        batch_size=batch_size, augment=augment, augment_color=augment_color,
-        seed=seed, num_parallel_calls=num_parallel_calls,
-    )
+    kwargs = _loader_kwargs(root, devkit_dir, image_size, batch_size, seed, augment,
+                            augment_color, num_parallel_calls, "imagenet")
     train = load_imagenet2012("train", ImageNet2012Config(drop_remainder=True, **kwargs))
     val = load_imagenet2012("val", ImageNet2012Config(**kwargs))
-    if num_classes is not None and train.num_classes != num_classes:
-        raise ValueError(
-            f"num_classes={num_classes} but {root} has {train.num_classes} classes"
-        )
+    _check_num_classes(train, num_classes, root)
     logger.info(
         f"ImageNet: {train.num_samples} train ({train.steps_per_epoch} steps/epoch), "
         f"{val.num_samples} val, {train.num_classes} classes"
     )
     return train, val
+
+
+def load_imagenet_selection_splits(
+        root: str,
+        devkit_dir: Optional[str],
+        image_size: int,
+        batch_size: int,
+        seed: int,
+        augment: bool,
+        holdout_per_class: int = DEFAULT_HOLDOUT_PER_CLASS,
+        normalize: str = "imagenet",
+        augment_color: bool = False,
+        num_parallel_calls: int = tf.data.AUTOTUNE,
+        num_classes: Optional[int] = None,
+        max_images: Optional[int] = None,
+) -> Tuple[ImageNet2012Data, ImageNet2012Data, ImageNet2012Data]:
+    """Build ``(train, select, test)`` where ``test`` never influences selection.
+
+    ``select`` is ``holdout_per_class`` images per class taken out of train, for
+    early stopping and checkpoint selection; ``train`` is every other train
+    image; ``test`` is the official val split. As in :func:`load_imagenet_splits`
+    train drops its ragged last batch, and all three are finite.
+
+    Args:
+        root: ImageNet folder holding ``train/`` and ``val/``.
+        devkit_dir: Devkit folder; ``None`` means ``<root>/devkit``.
+        image_size: Square output side.
+        batch_size: Batch size of all three splits.
+        seed: Seed of the train shuffle and augmentation.
+        augment: Random-resized-crop and flip on train.
+        holdout_per_class: Selection images per class; must be positive.
+        normalize: ``"imagenet"`` (mean/std), ``"unit"`` ([0, 1]) or ``"none"``.
+        augment_color: Brightness, contrast, saturation and hue on train.
+        num_parallel_calls: Parallel decode calls (default: autotuned).
+        num_classes: When given, the number of class folders under ``train/``
+            must equal it.
+        max_images: Smoke-run cap on train and on test; ``select`` is never capped.
+
+    Raises:
+        ValueError: ``holdout_per_class`` is not positive, or ``num_classes``
+            differs from the number of class folders.
+    """
+    if holdout_per_class < 1:
+        raise ValueError(
+            f"holdout_per_class must be positive to take a selection set out of "
+            f"train, got {holdout_per_class}"
+        )
+    kwargs = _loader_kwargs(root, devkit_dir, image_size, batch_size, seed, augment,
+                            augment_color, num_parallel_calls, normalize)
+    kwargs["holdout_per_class"] = holdout_per_class
+    train = load_imagenet2012(
+        "train", ImageNet2012Config(drop_remainder=True, max_images=max_images, **kwargs))
+    select = load_imagenet2012("holdout", ImageNet2012Config(**kwargs))
+    test = load_imagenet2012("val", ImageNet2012Config(max_images=max_images, **kwargs))
+    _check_num_classes(train, num_classes, root)
+    logger.info(
+        f"ImageNet: {train.num_samples} train ({train.steps_per_epoch} steps/epoch), "
+        f"{select.num_samples} selection ({holdout_per_class} per class, held out of train), "
+        f"{test.num_samples} test (official val), {train.num_classes} classes"
+    )
+    return train, select, test
 
 
 def eval_head(val: ImageNet2012Data, n: int) -> Tuple[np.ndarray, np.ndarray]:
