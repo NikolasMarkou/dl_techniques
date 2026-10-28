@@ -23,9 +23,10 @@ import keras  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
+import train.common.classification_data as classification_data  # noqa: E402
 import train.convnext.common as common  # noqa: E402
 
-from .test_train_convnext import _config, _fake_loader, _strict  # noqa: E402
+from .test_train_convnext import _config, _data, _fake_loader, _strict  # noqa: E402
 
 SMOOTHED = common.SmoothedSparseCategoricalCrossentropy
 
@@ -196,7 +197,7 @@ def test_a_compiled_model_with_the_smoothed_loss_saves_and_reloads(tmp_path) -> 
 
 
 def _train(monkeypatch, tmp_path, name: str, **overrides):
-    monkeypatch.setattr(common, "load_dataset", _fake_loader(10))
+    monkeypatch.setattr(classification_data, "_load_raw", _fake_loader(10))
     monkeypatch.setattr(common, "run_model_analysis", lambda *a, **k: None)
     config = _config(tmp_path, name, epochs=1, max_samples=64, model_analysis=False, **overrides)
     return common.train(config), tmp_path / name
@@ -229,9 +230,9 @@ def test_a_run_with_smoothing_records_it_notes_the_loss_scale_and_reloads(monkey
     # penalty added the manual value matches the reported one to a relative 2e-8 (plain run
     # 4e-8), measured on GPU 1, so ``rel=1e-5`` keeps a 250x margin and the smoothed and
     # plain values (0.035 apart in that measurement) separate cleanly.
-    data = common.prepare_data(_config(tmp_path, "unused", epochs=1, max_samples=64))
-    logits = best.predict(data.x_test, batch_size=common.EVAL_BATCH_SIZE, verbose=0)
-    labels = np.asarray(data.y_test).reshape(-1)
+    data = _data(_config(tmp_path, "unused", epochs=1, max_samples=64))
+    logits = best.predict(data.x_fig, batch_size=common.EVAL_BATCH_SIZE, verbose=0)
+    labels = np.asarray(data.y_fig).reshape(-1)
     reported = summary["test_metrics_best"]["loss"]
     penalty = _penalty(best)
     smoothed = _manual(logits, labels, 0.5) + penalty
@@ -249,9 +250,9 @@ def test_a_run_without_smoothing_uses_the_stock_loss_and_has_no_note(monkeypatch
     assert not any("label_smoothing" in n for n in summary["notes"]), summary["notes"]
     best = keras.models.load_model(run_dir / "best_model.keras")
     assert type(best.loss) is keras.losses.SparseCategoricalCrossentropy
-    data = common.prepare_data(_config(tmp_path, "unused", epochs=1, max_samples=64))
-    logits = best.predict(data.x_test, batch_size=common.EVAL_BATCH_SIZE, verbose=0)
-    labels = np.asarray(data.y_test).reshape(-1)
+    data = _data(_config(tmp_path, "unused", epochs=1, max_samples=64))
+    logits = best.predict(data.x_fig, batch_size=common.EVAL_BATCH_SIZE, verbose=0)
+    labels = np.asarray(data.y_fig).reshape(-1)
     reported = summary["test_metrics_best"]["loss"]
     penalty = _penalty(best)
     plain = _manual(logits, labels, 0.0) + penalty

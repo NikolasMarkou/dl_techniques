@@ -3,9 +3,8 @@
 CapsNet emits capsule lengths in [0, 1], not logits, so the exported model wraps it with
 ``ProbabilityLogits`` before the set layer's softmax. One fake-ImageNet run (3 classes, 6
 test images) is checked for the files, the calibration set, the flag in the record and the
-exported model; ``fit_conformal_sets`` is called directly on a small model for the array
-datasets (MNIST/CIFAR path) and for ``--validation-split 0``, where the "validation" data is
-the test split and the record must say the model was chosen on the calibration data.
+exported model; ``fit_conformal_sets`` is called directly on a small model for a dataset
+that is not the fake tree.
 """
 
 from __future__ import annotations
@@ -20,13 +19,17 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 import keras  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
+import tensorflow as tf  # noqa: E402
 
 from dl_techniques.models.vision.capsnet import create_capsnet  # noqa: E402
-from tests.imagenet_fake_tree import VAL_CLASSES, build_fake_imagenet  # noqa: E402
+from tests.imagenet_fake_tree import (  # noqa: E402
+    VAL_CLASSES,
+    build_fake_imagenet,
+    use_the_fake_tree_class_count,
+)
 from train.capsnet import train_capsnet as module  # noqa: E402
 from train.common.conformal import (  # noqa: E402
     CAVEAT_NOT_SELECTED_ON_CALIBRATION,
-    CAVEAT_SELECTED_ON_CALIBRATION,
     CONFORMAL_JSON_NAME,
     CONFORMAL_MODEL_NAME,
     load_conformal_model,
@@ -45,7 +48,7 @@ def _argv(tree, *extra):
 def _run(tree, work, *extra):
     with pytest.MonkeyPatch.context() as mp:
         mp.chdir(work)
-        mp.setattr(module, "IMAGENET_NUM_CLASSES", N_CLASSES)
+        use_the_fake_tree_class_count(mp)
         mp.setattr(module, "setup_gpu", lambda *a, **k: None)
         mp.setattr(sys, "argv", _argv(tree, *extra))
         module.main()
@@ -92,7 +95,7 @@ def test_the_record_says_the_model_was_not_chosen_on_the_calibration_data(runs) 
     record = json.loads((runs.on / CONFORMAL_JSON_NAME).read_text())
     assert record["model_selected_on_calibration_set"] is False
     assert record["caveat"] == CAVEAT_NOT_SELECTED_ON_CALIBRATION
-    assert "held-out slice of train" in record["weights"]
+    assert "held out of train" in record["weights"]
 
 
 def test_the_exported_model_reloads_and_returns_logits_probs_and_a_mask(runs) -> None:
@@ -134,7 +137,7 @@ def test_the_step_is_off_by_default_and_one_flag_turns_it_on(monkeypatch) -> Non
 
 
 # ---------------------------------------------------------------------
-# The array datasets and the validation-split 0 case, on a small model
+# A dataset that is not the fake tree, on a small model
 # ---------------------------------------------------------------------
 
 
@@ -149,35 +152,17 @@ def _small_model():
     return model
 
 
-def _arrays(n=40):
+def test_the_exported_model_calibrates_on_all_of_the_one_hot_test_dataset(tmp_path) -> None:
     rng = np.random.default_rng(2)
-    x = rng.random((n, 32, 32, 3), dtype=np.float32)
-    y = keras.utils.to_categorical(rng.integers(0, 4, size=n), 4)
-    return x, y
-
-
-def _args(tmp_path, **overrides):
-    values = dict(dataset="cifar10", conformal_alpha=0.1, validation_split=0.1, seed=1,
-                  batch_size=8)
-    values.update(overrides)
-    return SimpleNamespace(**values)
-
-
-def test_an_array_dataset_calibrates_on_all_of_its_one_hot_test_labels(tmp_path) -> None:
-    x, y = _arrays()
+    x = rng.random((40, 32, 32, 3), dtype=np.float32)
+    y = keras.utils.to_categorical(rng.integers(0, 4, size=40), 4)
+    test_ds = tf.data.Dataset.from_tensor_slices((x, y)).batch(8)
+    args = SimpleNamespace(dataset="cifar10", conformal_alpha=0.1, seed=1)
     record = module.fit_conformal_sets(
-        _small_model(), _args(tmp_path), x, y, (32, 32, 3), str(tmp_path))
+        _small_model(), args, test_ds, "validation_split=0.1 of the train set",
+        (32, 32, 3), str(tmp_path))
     assert record["n_calibration"] == 40
     assert record["model_selected_on_calibration_set"] is False
     assert record["caveat"] == CAVEAT_NOT_SELECTED_ON_CALIBRATION
-    assert "validation_split=0.1" in record["weights"]
+    assert "validation_split=0.1 of the train set" in record["weights"]
     assert (tmp_path / CONFORMAL_MODEL_NAME).is_file()
-
-
-def test_a_validation_split_of_zero_is_recorded_as_selected_on_the_calibration_data(tmp_path) -> None:
-    x, y = _arrays()
-    record = module.fit_conformal_sets(
-        _small_model(), _args(tmp_path, validation_split=0.0), x, y, (32, 32, 3), str(tmp_path))
-    assert record["model_selected_on_calibration_set"] is True
-    assert record["caveat"] == CAVEAT_SELECTED_ON_CALIBRATION
-    assert "validation_split 0" in record["weights"]

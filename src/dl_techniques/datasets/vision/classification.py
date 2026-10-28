@@ -99,6 +99,7 @@ class DatasetSpec:
     :param class_names: One name per class, or ``None`` when they come from the data
         (ImageNet: the wnids of the extracted tree).
     :param in_memory: ``True`` when the dataset is read whole into arrays (MNIST, CIFAR).
+    :param train_size: Number of training images (before any held-out slice).
     """
 
     name: str
@@ -108,6 +109,7 @@ class DatasetSpec:
     std: Tuple[float, ...]
     class_names: Optional[Tuple[str, ...]]
     in_memory: bool
+    train_size: int
 
     def class_names_for(self, num_classes: int) -> List[str]:
         """The class names, or ``class_N`` placeholders when ``num_classes`` is not the
@@ -119,14 +121,14 @@ class DatasetSpec:
 
 CLASSIFICATION_DATASETS: Dict[str, DatasetSpec] = {
     "mnist": DatasetSpec(
-        "mnist", 10, (28, 28, 1), MNIST_MEAN, MNIST_STD, MNIST_CLASS_NAMES, True),
+        "mnist", 10, (28, 28, 1), MNIST_MEAN, MNIST_STD, MNIST_CLASS_NAMES, True, 60000),
     "cifar10": DatasetSpec(
-        "cifar10", 10, (32, 32, 3), CIFAR10_MEAN, CIFAR10_STD, CIFAR10_CLASS_NAMES, True),
+        "cifar10", 10, (32, 32, 3), CIFAR10_MEAN, CIFAR10_STD, CIFAR10_CLASS_NAMES, True, 50000),
     "cifar100": DatasetSpec(
-        "cifar100", 100, (32, 32, 3), CIFAR100_MEAN, CIFAR100_STD, CIFAR100_CLASS_NAMES, True),
+        "cifar100", 100, (32, 32, 3), CIFAR100_MEAN, CIFAR100_STD, CIFAR100_CLASS_NAMES, True, 50000),
     "imagenet": DatasetSpec(
         "imagenet", IMAGENET2012_NUM_CLASSES, (224, 224, 3), IMAGENET_MEAN, IMAGENET_STD,
-        None, False),
+        None, False, 1281167),
 }
 
 

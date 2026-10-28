@@ -6,16 +6,31 @@ are deliberately NOT in that order, so a loader that used the id as the class
 index would be wrong.
 """
 
+import dataclasses
 import os
 
 import numpy as np
 import tensorflow as tf
 from scipy.io import savemat
 
+import dl_techniques.datasets.vision.classification as classification
+
 WNIDS = ["n0000000a", "n0000000b", "n0000000c"]
 ILSVRC_ID = {"n0000000a": 3, "n0000000b": 1, "n0000000c": 2}
 PER_CLASS = 4
 VAL_CLASSES = [2, 0, 1, 1, 0, 2]  # sorted-wnid index of val image #1..#6
+
+
+def use_the_fake_tree_class_count(monkeypatch):
+    """Make the ``imagenet`` dataset spec say 3 classes, as the fake tree has.
+
+    ``train.common.classification_data`` checks the tree's class folders against the spec
+    (1000), so a trainer test that runs on this tree patches the spec for its duration.
+    ``monkeypatch`` is a ``pytest.MonkeyPatch`` (a fixture or ``MonkeyPatch.context()``).
+    """
+    spec = dataclasses.replace(
+        classification.CLASSIFICATION_DATASETS["imagenet"], num_classes=len(WNIDS))
+    monkeypatch.setitem(classification.CLASSIFICATION_DATASETS, "imagenet", spec)
 
 
 def jpeg(path, h, w, value):

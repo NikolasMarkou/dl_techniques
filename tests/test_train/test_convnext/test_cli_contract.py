@@ -210,7 +210,7 @@ def _forbid_expensive_calls(monkeypatch) -> list:
             raise _Probe(name)
         return _sentinel
 
-    for name in ("setup_gpu", "train", "prepare_data", "prepare_run_data"):
+    for name in ("setup_gpu", "train"):
         monkeypatch.setattr(common, name, _make(name))
     return touched
 

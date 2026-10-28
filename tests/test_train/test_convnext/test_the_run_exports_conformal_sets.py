@@ -21,8 +21,13 @@ import keras  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
+import train.common.classification_data as classification_data  # noqa: E402
 import train.convnext.common as common  # noqa: E402
-from tests.imagenet_fake_tree import VAL_CLASSES, build_fake_imagenet  # noqa: E402
+from tests.imagenet_fake_tree import (  # noqa: E402
+    VAL_CLASSES,
+    build_fake_imagenet,
+    use_the_fake_tree_class_count,
+)
 from tests.test_train.test_convnext.test_train_convnext import (  # noqa: E402
     N_TEST,
     _fake_loader,
@@ -62,6 +67,7 @@ def imagenet_runs(tmp_path_factory):
         return real(model, dataset, *args, **kwargs)
 
     with pytest.MonkeyPatch.context() as mp:
+        use_the_fake_tree_class_count(mp)
         mp.setattr(common, "run_conformal", spy)
         on = common.train(_imagenet_config(tree, out, "on"))
         off = common.train(_imagenet_config(tree, out, "off", conformal_alpha=None))
@@ -116,7 +122,7 @@ def test_a_run_without_conformal_alpha_leaves_no_files_and_a_null_summary_block(
 
 def test_an_array_dataset_calibrates_on_its_test_split_too(tmp_path) -> None:
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(common, "load_dataset", _fake_loader(10))
+        mp.setattr(classification_data, "_load_raw", _fake_loader(10))
         mp.setattr(common, "run_model_analysis", lambda *a, **k: None)
         config = common.TrainingConfig(
             variant="cifar10", epochs=1, batch_size=8, learning_rate=1e-3, max_samples=MAX_SAMPLES,

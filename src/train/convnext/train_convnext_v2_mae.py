@@ -13,9 +13,9 @@ from dl_techniques.models.vision.convnext.convnext_v2 import ConvNeXtV2, create_
 from dl_techniques.models.vision.masked_autoencoder import MaskedAutoencoder, visualize_reconstruction
 from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
 from train.common import (
-    setup_gpu, load_dataset, get_class_names,
-    create_base_argument_parser, create_callbacks, set_seeds,
+    setup_gpu, create_base_argument_parser, create_callbacks, set_seeds,
 )
+from train.common.classification_data import load_classification_data
 
 
 def create_convnext_encoder(
@@ -112,7 +112,7 @@ def visualize_mae_reconstructions(mae: MaskedAutoencoder, test_images: np.ndarra
 
 
 def pretrain_mae(
-        mae: MaskedAutoencoder, x_train: np.ndarray, x_test: np.ndarray,
+        mae: MaskedAutoencoder, x_train: np.ndarray, x_val: np.ndarray,
         epochs: int, batch_size: int, learning_rate: float,
         results_dir: str, patience: int = 10
 ) -> Tuple[MaskedAutoencoder, keras.callbacks.History]:
@@ -125,10 +125,10 @@ def pretrain_mae(
     logger.info(f"Training MAE: {len(x_train)} images, {epochs} epochs, batch_size={batch_size}, lr={learning_rate}")
     mae_history = mae.fit(
         x_train, batch_size=batch_size, epochs=epochs,
-        validation_data=(x_test, x_test), callbacks=callbacks, verbose=1
+        validation_data=(x_val, x_val), callbacks=callbacks, verbose=1
     )
 
-    visualize_mae_reconstructions(mae, x_test, results_dir, num_samples=8)
+    visualize_mae_reconstructions(mae, x_val, results_dir, num_samples=8)
     mae_dir = os.path.join(results_dir, "mae_pretraining")
     np.save(os.path.join(mae_dir, 'mae_history.npy'), mae_history.history)
 
@@ -164,7 +164,7 @@ def create_finetune_callbacks(results_dir: str, stage: str, patience: int = 10) 
 
 def finetune_classifier(
         classifier: keras.Model, x_train: np.ndarray, y_train: np.ndarray,
-        x_test: np.ndarray, y_test: np.ndarray, num_classes: int,
+        x_val: np.ndarray, y_val: np.ndarray, num_classes: int,
         epochs_stage1: int, epochs_stage2: int, batch_size: int,
         lr_stage1: float, lr_stage2: float, results_dir: str, patience: int = 10
 ) -> Tuple[keras.Model, keras.callbacks.History]:
@@ -193,7 +193,7 @@ def finetune_classifier(
 
     classifier.compile(optimizer=keras.optimizers.Adam(learning_rate=lr_stage1), loss='sparse_categorical_crossentropy', metrics=metrics)
     callbacks_stage1 = create_finetune_callbacks(results_dir, 'stage1_frozen', patience=patience)
-    history_stage1 = classifier.fit(x_train, y_train, batch_size=batch_size, epochs=epochs_stage1, validation_data=(x_test, y_test), callbacks=callbacks_stage1, verbose=1)
+    history_stage1 = classifier.fit(x_train, y_train, batch_size=batch_size, epochs=epochs_stage1, validation_data=(x_val, y_val), callbacks=callbacks_stage1, verbose=1)
     logger.info(f"Stage 2a best val accuracy: {max(history_stage1.history['val_accuracy']):.4f}")
 
     # Stage 2b: Unfreeze encoder, fine-tune all
@@ -203,7 +203,7 @@ def finetune_classifier(
 
     classifier.compile(optimizer=keras.optimizers.Adam(learning_rate=lr_stage2), loss='sparse_categorical_crossentropy', metrics=metrics)
     callbacks_stage2 = create_finetune_callbacks(results_dir, 'stage2_unfrozen', patience=patience)
-    history_stage2 = classifier.fit(x_train, y_train, batch_size=batch_size, epochs=epochs_stage2, validation_data=(x_test, y_test), callbacks=callbacks_stage2, verbose=1)
+    history_stage2 = classifier.fit(x_train, y_train, batch_size=batch_size, epochs=epochs_stage2, validation_data=(x_val, y_val), callbacks=callbacks_stage2, verbose=1)
     logger.info(f"Stage 2b best val accuracy: {max(history_stage2.history['val_accuracy']):.4f}")
 
     combined_history = keras.callbacks.History()
@@ -243,14 +243,23 @@ def train_with_mae_pretraining(args: argparse.Namespace):
     results_dir = os.path.join("results", f"mae_convnext_{args.dataset}_{args.variant}_{timestamp}")
     os.makedirs(results_dir, exist_ok=True)
 
-    (x_train, y_train), (x_test, y_test), input_shape, num_classes = load_dataset(args.dataset)
-    class_names = get_class_names(args.dataset, num_classes)
+    # Selection (the MAE validation loss, early stopping, checkpoints) runs on a held-out
+    # slice of train; the test set is used only for the final report. The images stay in
+    # [0, 1]: the MAE reconstructs them and the loss subtracts them.
+    data = load_classification_data(
+        args.dataset, batch_size=args.batch_size, seed=args.seed, normalize="unit",
+        channels=3 if args.dataset == "mnist" else None,
+    )
+    arrays, input_shape, num_classes = data.arrays, data.input_shape, data.num_classes
+    x_train, y_train = arrays.x_train, arrays.y_train
+    x_val, y_val = arrays.x_select, arrays.y_select
+    x_test, y_test = arrays.x_test, arrays.y_test
 
     convnext_encoder = create_convnext_encoder(variant=args.variant, input_shape=input_shape, strides=args.strides, kernel_size=args.kernel_size, stochastic_mode=args.stochastic_mode)
     mae = create_mae_with_convnext(encoder=convnext_encoder, input_shape=input_shape, patch_size=args.patch_size, mask_ratio=args.mask_ratio, decoder_depth=args.decoder_depth)
 
     mae, mae_history = pretrain_mae(
-        mae=mae, x_train=x_train, x_test=x_test, epochs=args.mae_epochs,
+        mae=mae, x_train=x_train, x_val=x_val, epochs=args.mae_epochs,
         batch_size=args.batch_size, learning_rate=args.mae_lr,
         results_dir=results_dir, patience=args.mae_patience
     )
@@ -263,7 +272,7 @@ def train_with_mae_pretraining(args: argparse.Namespace):
     classifier = build_classifier_from_mae(mae=mae, num_classes=num_classes, dropout_rate=args.dropout_rate)
     classifier, finetune_history = finetune_classifier(
         classifier=classifier, x_train=x_train, y_train=y_train,
-        x_test=x_test, y_test=y_test, num_classes=num_classes,
+        x_val=x_val, y_val=y_val, num_classes=num_classes,
         epochs_stage1=args.finetune_epochs_stage1, epochs_stage2=args.finetune_epochs_stage2,
         batch_size=args.batch_size, lr_stage1=args.finetune_lr_stage1,
         lr_stage2=args.finetune_lr_stage2, results_dir=results_dir, patience=args.finetune_patience

@@ -4,23 +4,25 @@ CapsNet training with comprehensive visualizations.
 Trains CapsNet on MNIST, CIFAR-10 or ImageNet-1k with per-epoch reconstruction
 visualizations, training curves, and metrics summaries.
 
+Data comes from ``train.common.classification_data.load_classification_data`` with
+one-hot labels and inputs scaled to [0, 1] (the decoder ends in a sigmoid and the
+reconstruction loss subtracts the input). Early stopping and the best checkpoint use a
+held-out slice of train (``--validation-split`` for MNIST and CIFAR-10,
+``--holdout-per-class`` for ImageNet); the test split never selects and is evaluated whole.
+The reconstruction callback and the final figures use the first ``--eval-samples`` images
+of the selection split and the test images the loader keeps in memory.
+
 ImageNet is trained at 32x32 (``--image-size``) with all 1000 classes. The routing
 layer holds ``primary_capsules x classes x 16 x 8`` weights and the CIFAR-10 capsule
 settings give 512 primary capsules at 32x32, so the model has about 65M routing
 weights; the same settings at 64x64 give 12,800 primary capsules and about 1.6e9
-weights, which does not fit. ``--holdout-per-class`` images per class are taken out of
-train for early stopping and checkpoint selection and the official val split is the
-test set, evaluated whole; the reconstruction callback and the final figures use the
-first ``--eval-samples`` images of those two splits. Inputs are scaled to [0, 1]
-because the decoder ends in a sigmoid and the reconstruction loss subtracts the input.
+weights, which does not fit.
 
 With ``--conformal-alpha [ALPHA]`` (off by default), conformal prediction sets are fitted on
 the whole test split with the best weights after training, for every dataset. The model emits
 capsule lengths in [0, 1], not logits, and the set layer applies a softmax, which over values
 that differ by at most 1 is nearly uniform; the exported ``conformal_model.keras`` therefore
 wraps the model with ``ProbabilityLogits`` (the log-odds of each length, same class order).
-The test split never chose the model when ``--validation-split`` is above 0 (ImageNet always),
-and the record says which case applies.
 """
 
 import os
@@ -35,21 +37,18 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from typing import Tuple, Dict, Any, Optional
 
+from dl_techniques.datasets.vision.classification import get_spec
 from dl_techniques.layers.statistics.probability_logits import ProbabilityLogits
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.vision.capsnet import create_capsnet
 from train.common import (
-    add_holdout_argument,
-    add_imagenet_arguments,
     create_base_argument_parser,
     create_callbacks,
-    eval_head,
-    load_imagenet_selection_splits,
-    require_imagenet_root,
     set_seeds,
     setup_gpu,
 )
 from train.common.callbacks import LearningRateLogger
+from train.common.classification_data import add_selection_arguments, load_classification_data
 from train.common.conformal import add_conformal_arguments, run_conformal
 
 plt.style.use('seaborn-v0_8')
@@ -60,7 +59,6 @@ sns.set_palette("husl")
 # Data loading (CapsNet-specific: uses one-hot labels)
 # ---------------------------------------------------------------------
 
-IMAGENET_NUM_CLASSES = 1000
 IMAGENET_IMAGE_SIZE = 32
 # The 1000-class model has 85.2M parameters (65.5M of them routing weights) and its routing
 # step grows with ``primary capsules x classes`` per sample. Measured on CPU, one train step
@@ -69,100 +67,7 @@ IMAGENET_IMAGE_SIZE = 32
 # was not measured.
 IMAGENET_BATCH_SIZE = 32
 DEFAULT_BATCH_SIZE = 64
-DEFAULT_EVAL_SAMPLES = 2000
 
-
-def load_imagenet_data(args) -> Tuple[Any, ...]:
-    """The ImageNet pipelines and the in-memory heads the callbacks and figures need.
-
-    Labels are one-hot, as ``CapsNet.train_step`` and the margin loss require. Nothing
-    holds a whole split in memory: ``select_head`` and ``test_head`` are the first
-    ``args.eval_samples`` images of the selection and test splits.
-
-    Returns:
-        ``(train_ds, select_ds, test_ds, select_head, test_head)``; the heads are
-        ``(images [0, 1], one-hot labels)`` numpy pairs.
-    """
-    require_imagenet_root(args.imagenet_root)
-    train, select, test = load_imagenet_selection_splits(
-        args.imagenet_root, args.devkit_dir, args.image_size, args.batch_size, args.seed,
-        augment=True, holdout_per_class=args.holdout_per_class, normalize="unit",
-        num_classes=IMAGENET_NUM_CLASSES, max_images=args.max_samples,
-    )
-
-    def one_hot(data):
-        return data.dataset.map(
-            lambda x, y: (x, tf.one_hot(y, IMAGENET_NUM_CLASSES)),
-            num_parallel_calls=tf.data.AUTOTUNE,
-        ).prefetch(tf.data.AUTOTUNE)
-
-    def head(data):
-        x, y = eval_head(data, args.eval_samples)
-        return x, keras.utils.to_categorical(y, IMAGENET_NUM_CLASSES)
-
-    return one_hot(train), one_hot(select), one_hot(test), head(select), head(test)
-
-
-def load_mnist_data(
-        validation_split: float = 0.1,
-        normalize: bool = True
-) -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]:
-    """Load and preprocess MNIST dataset with one-hot labels for CapsNet."""
-    logger.info("Loading MNIST dataset...")
-    (x_train, y_train), (x_test, y_test) = keras.datasets.mnist.load_data()
-
-    x_train = np.expand_dims(x_train, -1)
-    x_test = np.expand_dims(x_test, -1)
-
-    if normalize:
-        x_train = x_train.astype('float32') / 255.0
-        x_test = x_test.astype('float32') / 255.0
-
-    num_classes = 10
-    y_train = keras.utils.to_categorical(y_train, num_classes)
-    y_test = keras.utils.to_categorical(y_test, num_classes)
-
-    if validation_split > 0:
-        val_size = int(len(x_train) * validation_split)
-        x_val, y_val = x_train[:val_size], y_train[:val_size]
-        x_train, y_train = x_train[val_size:], y_train[val_size:]
-    else:
-        x_val, y_val = x_test, y_test
-
-    logger.info(f"Train: {x_train.shape}, Val: {x_val.shape}, Test: {x_test.shape}")
-    return (x_train, y_train), (x_val, y_val), (x_test, y_test)
-
-
-def load_cifar10_data(
-        validation_split: float = 0.1,
-        normalize: bool = True
-) -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]:
-    """Load and preprocess CIFAR-10 dataset with one-hot labels for CapsNet."""
-    logger.info("Loading CIFAR-10 dataset...")
-    (x_train, y_train), (x_test, y_test) = keras.datasets.cifar10.load_data()
-
-    if normalize:
-        x_train = x_train.astype('float32') / 255.0
-        x_test = x_test.astype('float32') / 255.0
-
-    num_classes = 10
-    y_train = keras.utils.to_categorical(y_train, num_classes)
-    y_test = keras.utils.to_categorical(y_test, num_classes)
-
-    if validation_split > 0:
-        val_size = int(len(x_train) * validation_split)
-        x_val, y_val = x_train[:val_size], y_train[:val_size]
-        x_train, y_train = x_train[val_size:], y_train[val_size:]
-    else:
-        x_val, y_val = x_test, y_test
-
-    logger.info(f"Train: {x_train.shape}, Val: {x_val.shape}, Test: {x_test.shape}")
-    return (x_train, y_train), (x_val, y_val), (x_test, y_test)
-
-
-# ---------------------------------------------------------------------
-# Model configuration
-# ---------------------------------------------------------------------
 
 def create_model_config(dataset: str, image_size: int = IMAGENET_IMAGE_SIZE) -> Dict[str, Any]:
     """Create CapsNet configuration based on dataset.
@@ -205,7 +110,7 @@ def create_model_config(dataset: str, image_size: int = IMAGENET_IMAGE_SIZE) -> 
         # The CIFAR-10 capsule settings: 512 primary capsules at 32x32 (see the module doc).
         return {
             **create_model_config('cifar10'),
-            'num_classes': IMAGENET_NUM_CLASSES,
+            'num_classes': get_spec('imagenet').num_classes,
             'input_shape': (image_size, image_size, 3),
         }
     else:
@@ -704,8 +609,8 @@ def _clean_test_results(test_results, model) -> Dict[str, float]:
 def fit_conformal_sets(
         model: keras.Model,
         args,
-        test_x: Any,
-        test_y: Optional[np.ndarray],
+        test_ds: Any,
+        selection_split: str,
         input_shape: Tuple[int, ...],
         results_dir: str,
 ) -> Dict[str, Any]:
@@ -715,15 +620,14 @@ def fit_conformal_sets(
     reduced to the capsule lengths and mapped to log-odds, so the exported model is a
     single-output classifier whose softmax is not flat. ``run_conformal`` needs integer
     labels, so the one-hot labels are argmaxed. The wrapper also runs the decoder on every
-    batch (its output is unused): one forward pass over the test split.
+    batch (its output is unused): one forward pass over the test split. The model was
+    selected on a held-out slice of train, never on the test split.
 
     Args:
         model: Trained CapsNet.
-        args: Parsed arguments (``dataset``, ``conformal_alpha``, ``validation_split``,
-            ``seed``, ``batch_size``).
-        test_x: Test images, or the batched ``(images, one-hot labels)`` dataset when
-            ``test_y`` is ``None`` (ImageNet).
-        test_y: One-hot test labels, or ``None`` for the dataset form.
+        args: Parsed arguments (``dataset``, ``conformal_alpha``, ``seed``).
+        test_ds: The batched ``(images, one-hot labels)`` test dataset.
+        selection_split: Provenance of the selection split, recorded with the weights.
         input_shape: Per-sample input shape.
         results_dir: Run directory for ``conformal.json`` and ``conformal_model.keras``.
 
@@ -735,24 +639,23 @@ def fit_conformal_sets(
     classifier = keras.Model(
         inputs, ProbabilityLogits(name="length_logits")(lengths), name="capsnet_length_logits"
     )
-    if test_y is None:
-        dataset = test_x.map(lambda x, y: (x, tf.argmax(y, axis=-1)))
-        selected_on = "the held-out slice of train"
-    else:
-        dataset = tf.data.Dataset.from_tensor_slices(
-            (test_x, np.argmax(test_y, axis=-1))).batch(args.batch_size)
-        selected_on = f"validation_split={args.validation_split} of the train set"
-    # With --validation-split 0 the "validation" data IS the test split, so the checkpoint
-    # was chosen on the calibration data.
-    overlaps = args.dataset != 'imagenet' and args.validation_split == 0
+    dataset = test_ds.map(lambda x, y: (x, tf.argmax(y, axis=-1)))
     return run_conformal(
         classifier, dataset, alpha=args.conformal_alpha, seed=args.seed,
         out_dir=Path(results_dir), input_shape=tuple(input_shape),
         model_name=f"capsnet_{args.dataset}",
-        weights="best val_loss epoch, selected on the test split itself (validation_split 0)"
-                if overlaps else f"best val_loss epoch, selected on {selected_on}",
-        selection_overlaps_calibration=overlaps,
+        weights=f"best val_loss epoch, selected on {selection_split}",
+        selection_overlaps_calibration=False,
     )
+
+
+def _head(dataset: Any, n: int) -> Tuple[np.ndarray, np.ndarray]:
+    """The first ``n`` ``(image, label)`` rows of a batched dataset as numpy arrays."""
+    xs, ys = [], []
+    for x, y in dataset.unbatch().take(n).batch(256):
+        xs.append(x.numpy())
+        ys.append(y.numpy())
+    return np.concatenate(xs), np.concatenate(ys)
 
 
 def train_model(args) -> None:
@@ -763,25 +666,20 @@ def train_model(args) -> None:
     logger.info("Starting CapsNet training")
     logger.info(f"Arguments: {vars(args)}")
 
-    # Load data (CapsNet needs one-hot labels). ``fit_x`` / ``fit_y`` and the validation and
-    # test inputs are arrays for MNIST and CIFAR-10 and batched datasets (``y`` None) for
-    # ImageNet, which cannot be held in memory; the ``*_head`` pairs are always arrays.
-    if args.dataset.lower() == 'imagenet':
-        fit_x, val_x, test_x, val_head, test_head = load_imagenet_data(args)
-        fit_y = val_y = test_y = None
-        fit_kwargs: Dict[str, Any] = {}
-        model_config = create_model_config(args.dataset, args.image_size)
-    else:
-        if args.dataset.lower() == 'mnist':
-            train_data, val_data, test_data = load_mnist_data(args.validation_split)
-        elif args.dataset.lower() == 'cifar10':
-            train_data, val_data, test_data = load_cifar10_data(args.validation_split)
-        else:
-            raise ValueError(f"Unsupported dataset: {args.dataset}")
-        (fit_x, fit_y), (val_x, val_y), (test_x, test_y) = train_data, val_data, test_data
-        val_head, test_head = (val_x, val_y), (test_x, test_y)
-        fit_kwargs = {'batch_size': args.batch_size}
-        model_config = create_model_config(args.dataset)
+    # One loader for every dataset (CapsNet needs one-hot labels and [0, 1] inputs: the
+    # decoder ends in a sigmoid and the reconstruction loss subtracts the input). Selection
+    # is a held-out slice of train, the test split is never used to pick the checkpoint.
+    data = load_classification_data(
+        args.dataset, batch_size=args.batch_size, seed=args.seed, normalize="unit",
+        labels="one_hot", validation_split=args.validation_split,
+        holdout_per_class=args.holdout_per_class,
+        augment=None, imagenet_augment=True, max_samples=args.max_samples,
+        eval_samples=args.eval_samples, imagenet_root=args.imagenet_root,
+        devkit_dir=args.devkit_dir, image_size=args.image_size,
+    )
+    model_config = create_model_config(args.dataset, args.image_size)
+    val_head = _head(data.select_ds, args.eval_samples)
+    test_head = (data.x_fig, data.y_fig)
 
     # Create and build model
     model = create_capsnet(
@@ -809,16 +707,15 @@ def train_model(args) -> None:
 
     # Train
     history = model.fit(
-        fit_x, fit_y,
-        validation_data=(val_x, val_y) if val_y is not None else val_x,
+        data.train_ds,
+        validation_data=data.select_ds,
         epochs=args.epochs,
         callbacks=callbacks,
         verbose=1,
-        **fit_kwargs
     )
 
     # Evaluate (the whole test split, not the head)
-    test_results = model.evaluate(test_x, test_y, verbose=1)
+    test_results = model.evaluate(data.test_ds, verbose=1)
     test_results_dict = _clean_test_results(test_results, model)
     logger.info("Test results:")
     for name, value in test_results_dict.items():
@@ -826,7 +723,8 @@ def train_model(args) -> None:
 
     # Conformal sets, over the whole test split with the best weights. Before the figures.
     if args.conformal_alpha is not None:
-        fit_conformal_sets(model, args, test_x, test_y, model_config['input_shape'], results_dir)
+        fit_conformal_sets(model, args, data.test_ds, data.selection_split,
+                           model_config['input_shape'], results_dir)
 
     # Visualizations
     x_test, y_test = test_head
@@ -873,8 +771,6 @@ def main():
     # CapsNet-specific arguments
     parser.add_argument('--optimizer', type=str, default='adam',
                         help='Optimizer to use (default: adam)')
-    parser.add_argument('--validation-split', type=float, default=0.1,
-                        help='Fraction of training data for validation (default: 0.1)')
     parser.add_argument('--no-reconstruction', action='store_true',
                         help='Disable reconstruction decoder')
     parser.add_argument('--reconstruction-weight', type=float, default=0.0005,
@@ -883,16 +779,8 @@ def main():
                         help='Reconstruction visualization frequency in epochs (default: 1)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
-    add_imagenet_arguments(parser, note='Used only when --dataset imagenet: ')
-    add_holdout_argument(parser)
-    parser.add_argument('--eval-samples', type=int, default=DEFAULT_EVAL_SAMPLES,
-                        help='Used only when --dataset imagenet: images of the selection and '
-                             'test splits kept in memory for the reconstruction figures '
-                             f'(default: {DEFAULT_EVAL_SAMPLES}); the test metrics use all of them')
+    add_selection_arguments(parser)
     add_conformal_arguments(parser, on_by_default=False)
-    parser.add_argument('--max-samples', type=int, default=None,
-                        help='Used only when --dataset imagenet: cap train and test at this '
-                             'many images (smoke runs); the selection split is not capped')
 
     args = parser.parse_args()
     if args.batch_size is None:

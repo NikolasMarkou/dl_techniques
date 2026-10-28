@@ -2,7 +2,7 @@
 
 The tree is a 3-class fake (``tests/imagenet_fake_tree.py``): 12 train images, 6 val.
 ``--holdout-per-class 1`` takes 3 train images out for selection, so the run has 9 train,
-3 selection and 6 test images. ``IMAGENET_NUM_CLASSES`` is patched to 3 for the run; the
+3 selection and 6 test images. The ImageNet dataset spec is patched to 3 classes for the run; the
 1000-class model is built once, separately, to pin the size the module docstring claims.
 What is under test is the data path (which datasets reach ``fit`` and ``evaluate``, what
 the callbacks and figures get, the label and pixel format CapsNet needs), the flags, and
@@ -28,7 +28,12 @@ from dl_techniques.datasets.vision.imagenet2012 import (  # noqa: E402
     load_imagenet2012,
 )
 from dl_techniques.models.vision.capsnet import create_capsnet  # noqa: E402
-from tests.imagenet_fake_tree import PER_CLASS, VAL_CLASSES, build_fake_imagenet  # noqa: E402
+from tests.imagenet_fake_tree import (  # noqa: E402
+    PER_CLASS,
+    VAL_CLASSES,
+    build_fake_imagenet,
+    use_the_fake_tree_class_count,
+)
 from train.capsnet import train_capsnet as module  # noqa: E402
 
 N_CLASSES = 3
@@ -87,7 +92,7 @@ def run(tree, tmp_path_factory):
 
     with pytest.MonkeyPatch.context() as mp:
         mp.chdir(work)
-        mp.setattr(module, "IMAGENET_NUM_CLASSES", N_CLASSES)
+        use_the_fake_tree_class_count(mp)
         mp.setattr(module, "setup_gpu", lambda *a, **k: None)
         mp.setattr(keras.Model, "fit", fit)
         mp.setattr(keras.Model, "evaluate", evaluate)
@@ -214,7 +219,7 @@ def test_the_imagenet_flags_reach_the_namespace(monkeypatch) -> None:
         "/a", "/b", 13, 777, 321, 48)
     monkeypatch.setattr(sys, "argv", ["prog", "--dataset", "imagenet"])
     module.main()
-    assert (seen["holdout_per_class"], seen["eval_samples"], seen["image_size"]) == (10, 2000, 32)
+    assert (seen["holdout_per_class"], seen["eval_samples"], seen["image_size"]) == (None, 2000, 32)
 
 
 def test_the_callbacks_monitor_a_metric_the_model_reports(tmp_path, monkeypatch) -> None:

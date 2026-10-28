@@ -19,7 +19,7 @@ to a file the trainer itself wrote.
 
 | File | Role |
 |------|------|
-| `common.py` | The orchestrator: `TrainingConfig`, `_build_parser`, `parse_arguments(argv, model_family)`, `prepare_data`, `make_train_dataset`, `build_lr_schedule`, the initial-loss guard, `train(config)` (the whole run) and `main(model_family, argv)`. Not run directly. |
+| `common.py` | The orchestrator: `TrainingConfig`, `_build_parser`, `parse_arguments(argv, model_family)`, `build_lr_schedule`, the initial-loss guard, `train(config)` (the whole run) and `main(model_family, argv)`. Not run directly. |
 | `train_convnext_v1.py` | ConvNeXt V1 wrapper: `main(argv)` calls `common.main("v1", argv)`. `--variant` offers exactly the keys of `ConvNeXtV1.MODEL_VARIANTS`. |
 | `train_convnext_v2.py` | ConvNeXt V2 wrapper (GRN blocks): `common.main("v2", argv)`. `--variant` offers exactly the keys of `ConvNeXtV2.MODEL_VARIANTS`. |
 | `run_stochastic_comparison.py` | Driver: trains one trainer twice (`depth`, then `gradient`, same seed) and emits a comparison report. |
@@ -74,7 +74,7 @@ MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m train.convnext.train_c
   `convnext_<v1|v2>_<dataset>_<variant>_<timestamp>`, so it never collides.
 - One GPU job at a time.
 - MNIST and CIFAR come from the local Keras cache (`~/.keras/datasets`, through
-  `train.common.load_dataset`). A missing file makes Keras try to download it and fail loudly;
+  `train.common.classification_data`). A missing file makes Keras try to download it and fail loudly;
   nothing here retries. ImageNet is read from the extracted tree (`--imagenet-root`, see "Data").
 
 ---
@@ -141,9 +141,10 @@ and were removed; the driver below is how to measure it again.
 
 ## Data
 
-- **Source**: `train.common.load_dataset` (`keras.datasets.{mnist,cifar10,cifar100}`), pixels
+- **Source**: `train.common.classification_data.load_classification_data`, the one ingestion
+  path of the labelled-image trainers (`keras.datasets.{mnist,cifar10,cifar100}`), pixels
   scaled to `[0, 1]`. MNIST comes as 28x28 with its single channel repeated into 3 (input shape
-  `28x28x3`).
+  `28x28x3`, `channels=3`).
 - **Validation split**: a seeded permutation of the train set; the first
   `int(n * validation_split)` samples are the validation set, the rest is the fit set. With
   `--max-samples`, the train pool and the test set are first cut to a seeded subset of that
@@ -151,16 +152,19 @@ and were removed; the driver below is how to measure it again.
 - **The test set is used only for reporting**, after training. It never drives early stopping,
   the best checkpoint or `best_epoch`. The old scripts passed the test set as
   `validation_data`, so the reported test number was selected on itself; that leak is gone.
-- **Normalization**: per-channel mean and std computed on the fit split only, applied to fit,
-  validation and test. Both statistics are recorded in the summary (`input_normalization`).
+- **Normalization**: the dataset's published per-channel mean and std
+  (`dl_techniques.datasets.vision.classification`: the training-set statistics of MNIST,
+  CIFAR-10 and CIFAR-100, ImageNet's own), applied to fit, validation and test. Both are
+  recorded in the summary (`input_normalization`). Runs before 2026-10-28 standardized with
+  statistics recomputed on the fit split; the two differ in the fourth decimal.
 - **Augmentation** (train pipeline only, tf.data, reshuffled every epoch): a pad-4 random crop
   back to the image size for every dataset, plus a random horizontal flip for CIFAR-10 and
-  CIFAR-100. **MNIST gets no flip** (a flipped digit is a different digit). The padding is
-  added after standardization, so the border is the per-channel mean colour, not black.
+  CIFAR-100. **MNIST gets no flip** (a flipped digit is a different digit). Augmentation runs
+  on the `[0, 1]` image BEFORE standardization, so the padded border is black.
   Validation and test are not augmented.
 - **ImageNet** (`--dataset imagenet`) is read from the extracted ILSVRC2012 tree through
-  `train.common.imagenet.load_imagenet_selection_splits` (the loader is
-  `dl_techniques.datasets.vision.imagenet2012`). The protocol is the same as for CIFAR:
+  the same loader (which calls `train.common.imagenet.load_imagenet_selection_splits`; the
+  pipeline is `dl_techniques.datasets.vision.imagenet2012`). The protocol is the same as for CIFAR:
   - **Selection set**: `--holdout-per-class` images per class (a seeded, class-balanced draw)
     are taken out of train. They drive early stopping, the best checkpoint and `best_epoch`
     and are not augmented. `--validation-split` does not apply and is refused.
@@ -512,7 +516,7 @@ training and checks the artifact set, the strict-JSON summary, that the CSV `lr`
 cosine, that the figures are fed softmax probabilities, that `final_model.keras` is the last
 epoch and differs from the best one, the reused-name refusal, the 100-class top-5 metric, the
 seeded disjoint validation split and the geometry helper. The tests write only under
-`tmp_path` and use synthetic data injected through `common.load_dataset`.
+`tmp_path` and use synthetic data injected through `train.common.classification_data._load_raw`.
 
 ---
 

@@ -28,7 +28,13 @@ from dl_techniques.datasets.vision.imagenet2012 import (  # noqa: E402
     ImageNet2012Config,
     load_imagenet2012,
 )
-from tests.imagenet_fake_tree import PER_CLASS, VAL_CLASSES, WNIDS, build_fake_imagenet  # noqa: E402
+from tests.imagenet_fake_tree import (  # noqa: E402
+    PER_CLASS,
+    VAL_CLASSES,
+    WNIDS,
+    build_fake_imagenet,
+    use_the_fake_tree_class_count,
+)
 from train.common import run_summary  # noqa: E402
 
 N_TRAIN_FILES = 3 * PER_CLASS
@@ -92,6 +98,7 @@ def run(tree, tmp_path_factory):
         seen.analysis = test_data
 
     with pytest.MonkeyPatch.context() as mp:
+        use_the_fake_tree_class_count(mp)
         mp.setattr(common, "_evaluate", evaluate)
         mp.setattr(keras.Model, "fit", fit)
         mp.setattr(run_summary, "write_classification_figures", figures)

@@ -64,4 +64,4 @@ def test_cifar100_is_normalised_with_cifar100_statistics(monkeypatch):
 
 
 # The re-derivation of CIFAR100_MEAN/STD from the data lives with their one
-# home's guard: tests/test_train/test_common_cifar100_statistics_have_one_home.py.
+# home's guard: tests/test_datasets/test_the_dataset_statistics_have_one_home.py.

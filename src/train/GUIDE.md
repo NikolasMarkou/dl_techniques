@@ -47,7 +47,7 @@ Moved from `models/GUIDE.md` § 10.3 (iteration 1 of that plan).
   *Example:* D-100, D-109.
 - **One fact in several places.** Three CIFAR-100 statistics pairs, three positive-int
   validators that refused different values. *Detected:* re-deriving the values. *Guard:*
-  `tests/test_train/test_common_cifar100_statistics_have_one_home.py`,
+  `tests/test_datasets/test_the_dataset_statistics_have_one_home.py`,
   `tests/test_utils/test_the_positive_int_rule_has_one_home.py`. *Example:* D-088, D-112.
 
 ## 2. Patterns from iteration 2

@@ -40,7 +40,9 @@ import keras  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
+import train.common.classification_data as classification_data  # noqa: E402
 import train.convnext.common as common  # noqa: E402
+from dl_techniques.datasets.vision.classification import get_spec  # noqa: E402
 from train.common import json_numpy_default, run_summary  # noqa: E402
 
 N_TRAIN, N_TEST, MAX_SAMPLES = 400, 400, 240
@@ -61,48 +63,32 @@ def _strict(text: str) -> Any:
 
 
 def _fake_loader(num_classes: int, n_train: int = N_TRAIN, n_test: int = N_TEST):
-    """A drop-in for ``train.common.load_dataset``: random 32x32x3 images and labels.
+    """A drop-in for ``classification_data._load_raw``: random uint8 images and labels.
 
-    Labels are ``(N, 1)`` uint8 like the real CIFAR loader; the images carry no class
-    signal, so an epoch-1 model is at chance and later epochs only overfit.
+    The images carry no class signal, so an epoch-1 model is at chance and later epochs
+    only overfit.
     """
 
-    def load(name, *args, **kwargs):
+    def load(name):
         rng = np.random.default_rng(3)
+        shape = get_spec(name).input_shape
+        shape = shape[:2] if name == "mnist" else shape
 
         def split(n):
-            x = rng.random((n, 32, 32, 3), dtype=np.float32)
-            y = rng.integers(0, num_classes, size=(n, 1)).astype(np.uint8)
-            return x, y
+            x = rng.integers(0, 256, size=(n, *shape), dtype=np.uint8)
+            return x, rng.integers(0, num_classes, size=n).astype(np.int64)
 
-        return split(n_train), split(n_test), (32, 32, 3), num_classes
+        return split(n_train), split(n_test)
 
     return load
 
 
-def _identity_loader(n_train: int, n_test: int):
-    """Every image is a constant equal to its identity, so a split can be audited.
-
-    Train images are ``i / T`` for ``i in [0, n_train)``, test images continue the count
-    (``(n_train + j) / T``), ``T = n_train + n_test``. Standardization is affine per
-    channel, so :func:`_ids` recovers the identity from a standardized array.
-    """
-    total = n_train + n_test
-
-    def load(name, *args, **kwargs):
-        def split(start, n):
-            ids = np.arange(start, start + n, dtype=np.float32)
-            x = np.broadcast_to((ids / total)[:, None, None, None], (n, 32, 32, 3)).copy()
-            return x, (np.arange(n) % 10).astype(np.uint8).reshape(-1, 1)
-
-        return split(0, n_train), split(n_train, n_test), (32, 32, 3), 10
-
-    return load, total
-
-
-def _ids(data: "common.SplitData", x: np.ndarray, total: int) -> np.ndarray:
-    raw = x[:, 0, 0, 0] * data.std[0] + data.mean[0]
-    return np.rint(raw * total).astype(int)
+def _data(config: "common.TrainingConfig"):
+    """The split the trainer itself loads for ``config`` (standardized, nothing augmented)."""
+    return classification_data.load_classification_data(
+        config.dataset, batch_size=config.batch_size, seed=config.seed,
+        validation_split=config.validation_split, normalize="standardize",
+        channels=3 if config.dataset == "mnist" else None, max_samples=config.max_samples)
 
 
 def _config(tmp_path: Path, name: str, **overrides) -> "common.TrainingConfig":
@@ -180,13 +166,13 @@ def e2e(tmp_path_factory):
         return real_grid(x, y_true, probs, out_path, image_shape, mean, std, *args, **kwargs)
 
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(common, "load_dataset", _fake_loader(10))
+        mp.setattr(classification_data, "_load_raw", _fake_loader(10))
         mp.setattr(keras.Model, "fit", fit)
         mp.setattr(run_summary, "plot_calibration", calibration)
         mp.setattr(run_summary, "plot_confident_errors", grid)
         config = _config(out, "e2e")
         summary = common.train(config)
-        data = common.prepare_data(config)
+        data = _data(config)
 
     run_dir = out / "e2e"
     best = keras.models.load_model(run_dir / "best_model.keras")
@@ -286,7 +272,7 @@ def test_the_summary_is_strict_json_with_every_promised_key(e2e) -> None:
 def test_no_model_analysis_skips_the_analyzer_and_records_it(monkeypatch, tmp_path) -> None:
     """``--no-model-analysis``: ModelAnalyzer is never called, no ``model_analysis/``
     directory appears, and the summary says so instead of reporting a missing analysis."""
-    monkeypatch.setattr(common, "load_dataset", _fake_loader(10))
+    monkeypatch.setattr(classification_data, "_load_raw", _fake_loader(10))
 
     def analyzer_must_not_run(*args, **kwargs):
         raise AssertionError("run_model_analysis was called under model_analysis=False")
@@ -311,7 +297,7 @@ def test_no_model_analysis_skips_the_analyzer_and_records_it(monkeypatch, tmp_pa
 def test_a_best_checkpoint_that_does_not_load_writes_the_summary_then_fails(
         monkeypatch, tmp_path) -> None:
     """D-186: the load error is in ``results_summary.json`` and the run raises after it."""
-    monkeypatch.setattr(common, "load_dataset", _fake_loader(10))
+    monkeypatch.setattr(classification_data, "_load_raw", _fake_loader(10))
     monkeypatch.setattr(run_summary, "load_best_metrics",
                         lambda run_dir, evaluate: (None, "OSError: planted unreadable checkpoint"))
     config = _config(tmp_path, "best_unreadable", epochs=1, max_samples=64, model_analysis=False)
@@ -334,7 +320,7 @@ def test_the_constant_schedule_branch_trains_and_records_the_plateau_reductions(
     improves on the initial ``inf``), because natural plateaus need more
     epochs than a test can afford. The summary must name the reduction epochs, the run log
     must say so, and every epoch line must carry the rate."""
-    monkeypatch.setattr(common, "load_dataset", _fake_loader(10))
+    monkeypatch.setattr(classification_data, "_load_raw", _fake_loader(10))
     real = keras.callbacks.ReduceLROnPlateau
     monkeypatch.setattr(
         keras.callbacks, "ReduceLROnPlateau",
@@ -361,7 +347,7 @@ def test_the_constant_schedule_branch_trains_and_records_the_plateau_reductions(
 def test_a_constant_schedule_without_a_plateau_records_an_empty_list(monkeypatch, tmp_path) -> None:
     """``[]`` (constant, no reduction) is distinct from ``null`` (a schedule that never installs
     ``ReduceLROnPlateau``)."""
-    monkeypatch.setattr(common, "load_dataset", _fake_loader(10))
+    monkeypatch.setattr(classification_data, "_load_raw", _fake_loader(10))
     config = _config(tmp_path, "flat", lr_schedule="constant", max_samples=64, batch_size=32,
                      epochs=2, model_analysis=False)
     summary = common.train(config)
@@ -377,31 +363,6 @@ def _schedule_values(config, steps_per_epoch):
     schedule = common.build_lr_schedule(config, steps_per_epoch)
     total = config.epochs * steps_per_epoch
     return steps_per_epoch, [float(schedule(step)) for step in range(total + 1)]
-
-
-def test_the_train_pipeline_yields_exactly_steps_per_epoch_full_batches() -> None:
-    """F1 / D-021: no incomplete last batch, and the schedule's step count is the real one.
-
-    An incomplete last batch is a second input shape, which made XLA recompile the whole
-    train step at the end of epoch 1 (20.7 s of an 80 s first epoch on the 4090). Every
-    batch must have the static batch dimension, and the number of batches must equal
-    ``steps_per_epoch_for`` (which the cosine's ``decay_steps`` is built from).
-    """
-    n, batch = 100, 32
-    x = np.zeros((n, 8, 8, 3), np.float32)
-    y = np.zeros((n,), np.int32)
-    ds = common.make_train_dataset(x, y, batch, seed=0, flip=True)
-    assert ds.element_spec[0].shape[0] == batch, "batch dimension must be static (no partial batch)"
-    for _ in range(2):  # a second pass: the reshuffled epoch yields the same count
-        sizes = [int(images.shape[0]) for images, _ in ds]
-        assert sizes == [batch] * common.steps_per_epoch_for(n, batch)
-    assert common.steps_per_epoch_for(n, batch) == 3
-    assert common.steps_per_epoch_for(64, 64) == 1
-
-
-def test_a_batch_larger_than_the_train_pool_is_refused() -> None:
-    with pytest.raises(ValueError, match="exceeds the 10 train samples"):
-        common.steps_per_epoch_for(10, 64)
 
 
 def test_the_cosine_spans_the_whole_run() -> None:
@@ -628,7 +589,7 @@ def test_the_calibration_figure_is_fed_softmax_probabilities(e2e) -> None:
     assert probs.shape == (240, 10)
     assert probs.min() >= 0.0 and probs.max() <= 1.0
     np.testing.assert_allclose(probs.sum(axis=-1), 1.0, atol=1e-4)
-    expected = _softmax(e2e.best.predict(e2e.data.x_test, batch_size=64, verbose=0))
+    expected = _softmax(e2e.best.predict(e2e.data.x_fig, batch_size=64, verbose=0))
     np.testing.assert_allclose(probs, expected, atol=1e-4)
 
 
@@ -656,8 +617,8 @@ def test_final_model_holds_the_last_epoch_weights_and_best_holds_the_best_epoch(
 
 def test_test_metrics_final_is_the_last_epoch_evaluated_on_the_test_set(e2e) -> None:
     data = e2e.data
-    final = e2e.final.evaluate(data.x_test, data.y_test, batch_size=64, verbose=0, return_dict=True)
-    best = e2e.best.evaluate(data.x_test, data.y_test, batch_size=64, verbose=0, return_dict=True)
+    final = e2e.final.evaluate(data.x_fig, data.y_fig, batch_size=64, verbose=0, return_dict=True)
+    best = e2e.best.evaluate(data.x_fig, data.y_fig, batch_size=64, verbose=0, return_dict=True)
     summary = e2e.summary
     assert summary["test_metrics_final"]["loss"] == pytest.approx(final["loss"], rel=1e-3)
     assert summary["test_metrics_best"]["loss"] == pytest.approx(best["loss"], rel=1e-3)
@@ -690,7 +651,7 @@ def test_last_epoch_weights_callback_keeps_a_copy_of_the_latest_epoch() -> None:
 def test_a_reused_experiment_name_is_refused_and_the_first_run_is_byte_identical(
         monkeypatch, e2e) -> None:
     """A second run under the same name used to merge into the first directory."""
-    monkeypatch.setattr(common, "load_dataset", _fake_loader(10))
+    monkeypatch.setattr(classification_data, "_load_raw", _fake_loader(10))
     monkeypatch.setattr(common, "run_model_analysis", lambda *a, **k: None)
     before = _snapshot(e2e.run_dir)
     assert "results_summary.json" in before and "run.log" in before
@@ -722,7 +683,7 @@ def test_the_top_5_metric_exists_only_above_ten_classes_and_is_an_object() -> No
 
 def test_a_100_class_run_reports_top_5_accuracy(monkeypatch, tmp_path) -> None:
     """The shipped V2 CIFAR-100 script crashed at ``compile`` on the string alias."""
-    monkeypatch.setattr(common, "load_dataset", _fake_loader(100))
+    monkeypatch.setattr(classification_data, "_load_raw", _fake_loader(100))
     monkeypatch.setattr(common, "run_model_analysis", lambda *a, **k: None)
     # A 100x100 confusion matrix costs ~30 s on CPU and is not what this guard is about.
     monkeypatch.setattr(
@@ -747,61 +708,18 @@ def test_a_100_class_run_reports_top_5_accuracy(monkeypatch, tmp_path) -> None:
 # ---------------------------------------------------------------------
 
 
-def _split_ids(monkeypatch, seed: int, validation_split: float = 0.1, max_samples=None):
-    loader, total = _identity_loader(n_train=200, n_test=100)
-    monkeypatch.setattr(common, "load_dataset", loader)
-    config = common.TrainingConfig(
-        seed=seed, validation_split=validation_split, max_samples=max_samples, batch_size=8)
-    data = common.prepare_data(config)
-    return data, {
-        "train": _ids(data, data.x_train, total),
-        "val": _ids(data, data.x_val, total),
-        "test": _ids(data, data.x_test, total),
-    }
-
-
-def test_the_validation_split_is_a_disjoint_cut_of_the_train_set(monkeypatch) -> None:
-    data, ids = _split_ids(monkeypatch, seed=7)
-    assert len(ids["val"]) == 20 and len(ids["train"]) == 180 and len(ids["test"]) == 100
-    train, val, test = (set(ids[k].tolist()) for k in ("train", "val", "test"))
-    assert len(train) == 180 and len(val) == 20, "no repeated sample inside a split"
-    assert train.isdisjoint(val), "validation leaks into the fit set"
-    assert val.isdisjoint(test) and train.isdisjoint(test), "the test set is not validation data"
-    assert train | val == set(range(200)), "train + val is exactly the train pool"
-    assert test == set(range(200, 300)), "the test set is the whole, untouched test pool"
-    assert data.num_classes == 10 and data.input_shape == (32, 32, 3)
-
-
-def test_the_split_is_seeded(monkeypatch) -> None:
-    _, first = _split_ids(monkeypatch, seed=7)
-    _, again = _split_ids(monkeypatch, seed=7)
-    _, other = _split_ids(monkeypatch, seed=8)
-    for part in ("train", "val", "test"):
-        np.testing.assert_array_equal(first[part], again[part])
-    assert not np.array_equal(first["val"], other["val"]), "a different seed must cut differently"
-    assert set(first["val"].tolist()) != set(other["val"].tolist())
-
-
-def test_max_samples_caps_the_train_pool_and_the_test_set(monkeypatch) -> None:
-    _, ids = _split_ids(monkeypatch, seed=7, max_samples=50)
-    assert (len(ids["train"]), len(ids["val"]), len(ids["test"])) == (45, 5, 50)
-    assert set(ids["val"].tolist()) | set(ids["train"].tolist()) <= set(range(200))
-    assert set(ids["test"].tolist()) <= set(range(200, 300))
-
-
 def test_a_split_that_holds_out_nothing_is_refused(monkeypatch, tmp_path) -> None:
-    """Refused when the config is built (no run directory), and again by ``prepare_data`` for a
+    """Refused when the config is built (no run directory), and again by the loader for a
     config edited after construction."""
     with pytest.raises(ValueError, match="holds out 0 of 5"):
         common.TrainingConfig(max_samples=5, validation_split=0.1, batch_size=1,
                               output_dir=str(tmp_path), experiment_name="nothing")
     assert list(tmp_path.iterdir()) == []
-    loader, _ = _identity_loader(n_train=200, n_test=100)
-    monkeypatch.setattr(common, "load_dataset", loader)
+    monkeypatch.setattr(classification_data, "_load_raw", _fake_loader(10))
     config = common.TrainingConfig(max_samples=50, validation_split=0.1, batch_size=8)
     config.max_samples = 5  # bypasses __post_init__
     with pytest.raises(ValueError, match="holds out 0"):
-        common.prepare_data(config)
+        _data(config)
 
 
 # ---------------------------------------------------------------------
@@ -814,7 +732,7 @@ def test_a_train_pool_smaller_than_one_batch_is_refused_before_any_run_directory
     """``--max-samples 64`` at the default batch 64 leaves 58 train samples (10% validation).
     That used to die inside ``train`` AFTER ``prepare_run_dir``, so the experiment name was
     burned by a directory holding only ``config.json`` and ``run.log``."""
-    monkeypatch.setattr(common, "load_dataset", _fake_loader(10))
+    monkeypatch.setattr(classification_data, "_load_raw", _fake_loader(10))
     with pytest.raises(ValueError, match="batch_size 64 exceeds the 58 train samples"):
         common.TrainingConfig(max_samples=64, output_dir=str(tmp_path), experiment_name="w1")
     assert list(tmp_path.iterdir()) == [], "the refusal must not leave a run directory behind"
@@ -838,9 +756,9 @@ def test_the_pool_check_uses_the_split_the_run_will_really_get() -> None:
     """The full dataset is checked too: a validation split of 0.99 leaves 500 of 50000."""
     with pytest.raises(ValueError, match="exceeds the 500 train samples"):
         common.TrainingConfig(dataset="cifar10", validation_split=0.99, batch_size=1000)
-    assert common.split_sizes(50000, None, 0.1) == (45000, 5000)
-    assert common.split_sizes(50000, 64, 0.1) == (58, 6)
-    assert common.split_sizes(100, 500, 0.1) == (90, 10), "a cap above the data changes nothing"
+    assert classification_data.split_sizes(50000, None, 0.1) == (45000, 5000)
+    assert classification_data.split_sizes(50000, 64, 0.1) == (58, 6)
+    assert classification_data.split_sizes(100, 500, 0.1) == (90, 10), "a cap above the data changes nothing"
 
 
 def test_every_per_dataset_table_covers_exactly_the_supported_datasets() -> None:

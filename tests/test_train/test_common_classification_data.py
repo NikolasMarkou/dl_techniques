@@ -8,7 +8,6 @@ ImageNet path runs on the 3-class fake tree of ``tests/imagenet_fake_tree.py``.
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import os
 
 os.environ.setdefault("MPLBACKEND", "Agg")
@@ -19,7 +18,12 @@ import tensorflow as tf  # noqa: E402
 
 import dl_techniques.datasets.vision.classification as classification  # noqa: E402
 import train.common.classification_data as cd  # noqa: E402
-from tests.imagenet_fake_tree import PER_CLASS, VAL_CLASSES, build_fake_imagenet  # noqa: E402
+from tests.imagenet_fake_tree import (  # noqa: E402
+    PER_CLASS,
+    VAL_CLASSES,
+    build_fake_imagenet,
+    use_the_fake_tree_class_count,
+)
 
 N_TRAIN, N_TEST = 200, 50  # identities (0..249) fit a uint8
 
@@ -231,8 +235,7 @@ def tree(tmp_path_factory):
 
 @pytest.fixture
 def three_class_imagenet(monkeypatch):
-    spec = dataclasses.replace(classification.CLASSIFICATION_DATASETS["imagenet"], num_classes=3)
-    monkeypatch.setitem(classification.CLASSIFICATION_DATASETS, "imagenet", spec)
+    use_the_fake_tree_class_count(monkeypatch)
 
 
 def _imagenet(tree, **kwargs):
