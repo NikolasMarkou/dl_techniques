@@ -64,16 +64,16 @@ from dl_techniques.models.vision.cliffordnet.model import (
     STEM_BN_MOMENTUM,
     build_clifford_stem,
     clifford_head_config,
-    coerce_include_top,
-    validate_rates,
 )
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.initializers.clone import initializer_spec
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.model_build import (
+    coerce_include_top,
     materialize_sublayers,
     plain_head_config_overrides,
+    validate_rates,
 )
 from dl_techniques.utils.weight_transfer import (
     DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
@@ -321,7 +321,7 @@ class HierarchicalCliffordNet(keras.Model):
                 f"patch_size=1 halves the first width for its first convolution, "
                 f"so stage_dims[0] must be at least 2, got {dims[0]}"
             )
-        validate_rates(dropout_rate, stochastic_depth_rate)
+        validate_rates(dropout_rate=dropout_rate, stochastic_depth_rate=stochastic_depth_rate)
 
         self.num_classes = num_classes
         self.include_top = include_top

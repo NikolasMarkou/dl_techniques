@@ -51,16 +51,34 @@ The head is the shared vision
 and one linear `classifier` (kernel drawn from `truncated_normal`), no hidden block. It is
 ConvNeXt's `self.head(self.norm(x.mean([-2, -1])))`. `call` returns the head's logits.
 
-- `use_bias=False` builds the whole model bias-free, the head included: the `pooled_norm` has no
-  `beta` and the `classifier` has no `bias` (the head's `classifier_use_bias` knob).
+- `use_bias=False` removes the bias of the stem, the downsampling convolutions, each RAD-Conv's
+  output, both MLP dense layers and the head (the `pooled_norm` has no `beta` and the `classifier`
+  has no `bias`, the head's `classifier_use_bias` knob), and every LayerNorm stops centering. It does
+  NOT make the model bias-free: the offset and weight predictors inside every
+  [`RADConv2D`](../../../layers/conv_blocks/rad_conv.py) keep their bias, two tensors per block
+  (`stage{S}_block{B}_rad_conv/offset_conv/bias` and `.../weight_conv/bias`), because the layer has
+  no knob for them and the offset bias is what sets the initial region size (`offset_bias_init`).
+  Measured on a three-block model: 6 bias tensors remain, 30 weights against 48 with `use_bias=True`.
+- `kernel_regularizer` (default `None`, a regularizer, its serialized config or a name) is applied
+  to the stem, the downsampling convolutions, each RAD-Conv's static mixing kernel, both MLP dense
+  layers of every block and the head's kernels (one loss per kernel: 12 for a headed three-block
+  model). The offset and weight predictors inside `RADConv2D` start at zero and take none. It leaves
+  the seeded draws alone.
 - `include_top=False` leaves `classification_head` defined as `None` and returns the final stage's
-  feature maps `(batch, H', W', dims[-1])`.
+  feature maps `(batch, H', W', dims[-1])`. `include_top` must be a `bool` or `numpy.bool_`; a
+  string, an int or `None` raises `TypeError` naming the value.
 - `num_classes` must be positive while `include_top=True`: `num_classes=0` raises `ValueError`
   naming the value. The earlier pooled-feature mode (`num_classes=0` returning the normalized pooled
   vector) is gone; build the model with `include_top=False` and pool the maps.
 - `head_config_overrides` is merged into the head configuration (for example
   `{"classifier_dropout_rate": 0.2}`); `name`, `num_classes` and `task_type` are owned by the model
-  and raise `ValueError`, and every value must be JSON data.
+  and raise `ValueError`, and every value must be JSON data. The default head draws its classifier
+  kernel from one explicit seed taken at the point the head is built, which keeps a seeded build equal
+  to the build before the head moved; with hidden blocks (`{"block_dims": [64]}`) the initializer goes
+  through seedless instead, so each dense layer draws its own kernel (one explicit seed would hand all
+  of them the same draw: three bit-identical kernels at `block_dims=[16, 16]`, measured).
+  `HEAD_INITIALIZER` (default `"truncated_normal"`) names the head's kernel initializer and is
+  honored as written by a subclass.
 - `dropout_rate` is the dropout inside each block's MLP and must lie in `[0, 1)`; at `0.0` no
   Dropout layer is created.
 
@@ -149,7 +167,10 @@ classification dataset.
 
 ## Known v1 limitations
 
-- `RADConv2D` supports `strides=1` only; downsampling is handled by the surrounding
-  ConvNeXt-style strided-conv layers between stages, exactly as in `ConvNeXtV1`/`ConvNeXtV2`.
+- `RADConv2D` supports `strides=1` only; downsampling is handled by the layers between stages, a
+  LayerNorm and a fixed 2x2 stride-2 convolution. That differs from `ConvNeXtV1`/`ConvNeXtV2` in this
+  library, whose downsampler is a `strides x strides` convolution at stride `strides` (4x4 stride 4 by
+  default, measured): at the defaults RADConvNet reduces resolution by `4 * 2 ** 3 = 32` over four
+  stages and ConvNeXt by `4 ** 4 = 256` (see the ConvNeXt README, section 3).
 - No stochastic-depth / drop-path (unlike `ConvNeXtV1`) — kept out to bound scope; can be added
   the same way `ConvNeXtV1` wires it, without changing `RADConv2D` itself.

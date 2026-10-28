@@ -30,8 +30,10 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.model_build import (
+    coerce_include_top,
     materialize_sublayers,
     plain_head_config_overrides,
+    validate_rates,
 )
 from dl_techniques.utils.weight_transfer import (
     DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
@@ -49,14 +51,15 @@ from dl_techniques.utils.activation_serialization import (
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # Constructor-config keys a checkpoint may differ on without being another architecture:
-# they leave the weight layout and the computed function alone (the dropout rate acts in
-# training only, the input size is not a weight shape). `load_pretrained_checkpoint`
+# they leave the weight layout and the computed function alone (the regularizer and the
+# dropout rate act in training only, the input size is not a weight shape). `load_pretrained_checkpoint`
 # compares every other key the checkpoint and the model both hold, so a changed
 # `activation`, `rad_kernel_size` or `strides` is refused even when every weight shape
 # still fits.
 _NON_STRUCTURAL_CONFIG_KEYS = (
     *DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
     "input_shape",
+    "kernel_regularizer",
     "dropout_rate",
 )
 
@@ -184,10 +187,21 @@ class RADConvNet(keras.Model):
     :param activation: Activation used inside each block's MLP. One shared
         ``Activation`` layer serves every block. Defaults to ``"gelu"``.
     :type activation: str
-    :param use_bias: Whether convolutions and dense layers, the head's
-        classifier included, use a bias, and whether every LayerNormalization
-        centers. Defaults to ``True``.
+    :param use_bias: Whether the stem, downsampling convolutions, each
+        RAD-Conv's output bias, the MLP dense layers and the head's
+        classifier use a bias, and whether every LayerNormalization centers.
+        Not switched off: the offset and weight predictors inside every
+        :class:`RADConv2D` keep their bias (two tensors per block,
+        ``<block>_rad_conv/offset_conv/bias`` and ``.../weight_conv/bias``),
+        because ``RADConv2D`` has no knob for them and the offset bias is what
+        sets the initial region size. Defaults to ``True``.
     :type use_bias: bool
+    :param kernel_regularizer: Optional regularizer applied to the stem, the
+        downsampling convolutions, each RAD-Conv's static mixing kernel, both
+        MLP dense layers of every block and the head's kernels. The offset and
+        weight predictors inside ``RADConv2D`` start at zero and take none. A
+        regularizer, its serialized config or a name. Defaults to ``None``.
+    :type kernel_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]]
     :param dropout_rate: Dropout rate applied after the MLP's expansion
         activation, in ``[0, 1)``. At ``0.0`` no Dropout layer is created.
         Defaults to ``0.0``.
@@ -196,8 +210,9 @@ class RADConvNet(keras.Model):
         the stem convolution. The inter-stage downsamples are always 2x2 with
         stride 2. Defaults to ``4``.
     :type strides: int
-    :param include_top: Whether to include the classification head. Defaults
-        to ``True``.
+    :param include_top: Whether to include the classification head. A ``bool``
+        or ``numpy.bool_``; anything else, a string included, raises
+        ``TypeError``. Defaults to ``True``.
     :type include_top: bool
     :param input_shape: ``(height, width, channels)``, excluding batch. Stored
         for serialization; the graph is built from the shape ``build`` receives.
@@ -212,6 +227,7 @@ class RADConvNet(keras.Model):
     :param kwargs: Additional keyword arguments for the ``keras.Model`` base
         class.
 
+    :raises TypeError: If ``include_top`` is not a ``bool`` or ``numpy.bool_``.
     :raises ValueError: If ``include_top`` is true and ``num_classes`` is not
         positive, ``depths`` and ``dims`` differ in length, ``strides`` is not
         positive, ``dropout_rate`` is outside ``[0, 1)``, ``input_shape`` is
@@ -261,6 +277,9 @@ class RADConvNet(keras.Model):
         mlp_ratio: int = 4,
         activation: str = "gelu",
         use_bias: bool = True,
+        kernel_regularizer: Optional[
+            Union[str, Dict[str, Any], keras.regularizers.Regularizer]
+        ] = None,
         dropout_rate: float = 0.0,
         strides: int = 4,
         include_top: bool = True,
@@ -270,6 +289,7 @@ class RADConvNet(keras.Model):
     ) -> None:
         super().__init__(**kwargs)
 
+        include_top = coerce_include_top(include_top)
         if include_top and num_classes <= 0:
             raise ValueError(
                 f"num_classes must be positive when include_top=True, got {num_classes}"
@@ -284,8 +304,7 @@ class RADConvNet(keras.Model):
             )
         if strides <= 0:
             raise ValueError(f"strides must be positive, got {strides}")
-        if not 0.0 <= dropout_rate < 1.0:
-            raise ValueError(f"dropout_rate must be in [0, 1), got {dropout_rate}")
+        validate_rates(dropout_rate=dropout_rate)
         if input_shape is None:
             input_shape = (None, None, 3)
         if len(input_shape) != 3:
@@ -300,6 +319,7 @@ class RADConvNet(keras.Model):
         self.activation = deserialize_activation(activation)
         self.activation_layer = keras.layers.Activation(self.activation, name="mlp_activation")
         self.use_bias = use_bias
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.dropout_rate = dropout_rate
         self.strides = strides
         self.include_top = include_top
@@ -348,6 +368,7 @@ class RADConvNet(keras.Model):
             activation_type="linear",
             use_pooling=False,
             kernel_initializer=self.STEM_INITIALIZER,
+            kernel_regularizer=self.kernel_regularizer,
             name="stem",
         )
 
@@ -370,6 +391,7 @@ class RADConvNet(keras.Model):
             strides=2,
             padding="same",
             use_bias=self.use_bias,
+            kernel_regularizer=self.kernel_regularizer,
             name=f"downsample_{stage_idx - 1}_conv",
         )
         self.downsamplers.append({"norm": norm, "conv": conv})
@@ -389,11 +411,18 @@ class RADConvNet(keras.Model):
         for block_idx in range(self.depths[stage_idx]):
             prefix = f"stage{stage_idx + 1}_block{block_idx + 1}"
             block = {
+                # DECISION plan-2026-10-26T125959-7af851e5/D-045: `use_bias` reaches the RAD-Conv's
+                # output bias and no further. Its offset and weight predictors keep their bias
+                # whatever `use_bias` says: `RADConv2D` has no knob for them, and the offset bias
+                # is what sets the initial region size (`offset_bias_init`). Do NOT call the model
+                # bias-free under `use_bias=False`, and do NOT reach into the layer's inner convs
+                # from here. See decisions.md.
                 "rad_conv": RADConv2D(
                     filters=dim,
                     kernel_size=self.rad_kernel_size,
                     groups=self.rad_groups,
                     use_bias=self.use_bias,
+                    kernel_regularizer=self.kernel_regularizer,
                     name=f"{prefix}_rad_conv",
                 ),
                 "norm": keras.layers.LayerNormalization(
@@ -403,9 +432,17 @@ class RADConvNet(keras.Model):
                     name=f"{prefix}_norm",
                 ),
                 "expand": keras.layers.Dense(
-                    dim * self.mlp_ratio, use_bias=self.use_bias, name=f"{prefix}_expand"
+                    dim * self.mlp_ratio,
+                    use_bias=self.use_bias,
+                    kernel_regularizer=self.kernel_regularizer,
+                    name=f"{prefix}_expand",
                 ),
-                "reduce": keras.layers.Dense(dim, use_bias=self.use_bias, name=f"{prefix}_reduce"),
+                "reduce": keras.layers.Dense(
+                    dim,
+                    use_bias=self.use_bias,
+                    kernel_regularizer=self.kernel_regularizer,
+                    name=f"{prefix}_reduce",
+                ),
                 "dropout": (
                     keras.layers.Dropout(self.dropout_rate, name=f"{prefix}_dropout")
                     if self.dropout_rate > 0.0
@@ -428,11 +465,22 @@ class RADConvNet(keras.Model):
         # classifier, and a seedless clone draws a second default seed. The classifier
         # kernel was drawn from the FIRST default seed taken after the last block, so the
         # seed is taken here and handed over explicitly (a clone keeps an explicit seed):
-        # the kernel of a seeded build stays what it was before the head moved.
+        # the kernel of a seeded build stays what it was before the head moved. Only the
+        # default head (no hidden block) takes it: an explicit seed cloned into every Dense
+        # of a head with hidden blocks (`head_config_overrides={"block_dims": ...}`) gives
+        # each the same draw (three bit-identical kernels at `block_dims=[16, 16]`), so
+        # there the spec goes through seedless and each Dense draws its own (D-045).
         # See decisions.md.
-        head_initializer = keras.initializers.TruncatedNormal(
-            seed=keras.initializers.get(self.HEAD_INITIALIZER).seed
-        )
+        block_dims = (self._head_config_overrides or {}).get("block_dims") or ()
+        if len(block_dims) == 0:
+            head_initializer = keras.initializers.get(self.HEAD_INITIALIZER)
+            seed = getattr(head_initializer, "seed", None)
+            if seed is not None:  # a seedable initializer; Zeros and Constant have none
+                head_initializer = type(head_initializer).from_config(
+                    {**head_initializer.get_config(), "seed": seed}
+                )
+        else:
+            head_initializer = self.HEAD_INITIALIZER
         self.classification_head = build_model_vision_head(
             VisionTaskType.CLASSIFICATION,
             {
@@ -451,6 +499,7 @@ class RADConvNet(keras.Model):
                 # No hidden block, so no block dropout either.
                 "dropout_rate": 0.0,
                 "kernel_initializer": head_initializer,
+                "kernel_regularizer": self.kernel_regularizer,
                 # Named, so a checkpoint written in one process lands on the same
                 # weight paths in another (an unnamed head is `classification_head_1`
                 # in the second).
@@ -517,7 +566,8 @@ class RADConvNet(keras.Model):
         """Report the shape `call` returns, without building the model.
 
         The RAD-Conv blocks are shape-preserving, so only the stem, the
-        downsamplers and the head move the shape.
+        downsamplers and the head move the shape (the stem and each
+        downsampling convolution already set the channel count).
 
         :param input_shape: Input shape, channels-last.
         :type input_shape: tuple
@@ -527,12 +577,9 @@ class RADConvNet(keras.Model):
         """
         shape = self.stem.compute_output_shape(input_shape)
 
-        for stage_idx in range(len(self.depths)):
-            if stage_idx > 0:
-                downsampler = self.downsamplers[stage_idx - 1]
-                shape = downsampler["norm"].compute_output_shape(shape)
-                shape = downsampler["conv"].compute_output_shape(shape)
-            shape = shape[:-1] + (self.dims[stage_idx],)
+        for downsampler in self.downsamplers:
+            shape = downsampler["norm"].compute_output_shape(shape)
+            shape = downsampler["conv"].compute_output_shape(shape)
 
         if self.include_top:
             # The head reports both keys; `call` returns the 'logits' one.
@@ -638,6 +685,7 @@ class RADConvNet(keras.Model):
             "mlp_ratio": self.mlp_ratio,
             "activation": serialize_activation(self.activation),
             "use_bias": self.use_bias,
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "dropout_rate": self.dropout_rate,
             "strides": self.strides,
             "include_top": self.include_top,

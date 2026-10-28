@@ -181,7 +181,7 @@ Constructor arguments reachable through `**kwargs`:
 
 | Argument | Default | Description |
 | :--- | :--- | :--- |
-| `include_top` | `True` | `False` returns the post-dropout feature map. |
+| `include_top` | `True` | `False` returns the post-dropout feature map. A `bool` or `numpy.bool_`; anything else raises `TypeError`. |
 | `dropout_rate` | `0.5` | Dropout after the last Fire module. |
 | `kernel_regularizer` | `None` | Applied to every convolution. |
 | `kernel_initializer` | Caffe xavier | Fire and bypass convolutions. |

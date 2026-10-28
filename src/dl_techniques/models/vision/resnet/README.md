@@ -188,7 +188,7 @@ accept these.
 | `block_type` | `'bottleneck'` | `'basic'` or `'bottleneck'` |
 | `stem_type` | `'imagenet'` | `'imagenet'` or `'cifar'` — see § 4.3 |
 | `input_shape` | `(224, 224, 3)` | must be a 3-tuple |
-| `include_top` | `True` | `False` returns the `(B, H, W, C)` feature map |
+| `include_top` | `True` | `False` returns the `(B, H, W, C)` feature map; a `bool` or `numpy.bool_`, anything else raises `TypeError` |
 | `enable_deep_supervision` | `False` | adds per-stage auxiliary heads — § 7 |
 | `normalization_type` | `'batch_norm'` | any key of the normalization factory |
 | `normalization_kwargs` | `None` | forwarded to every norm; `batch_norm` gets `momentum=0.9` unless you override it |

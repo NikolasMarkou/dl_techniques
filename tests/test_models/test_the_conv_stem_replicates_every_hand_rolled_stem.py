@@ -839,8 +839,10 @@ CONVUNEXT_BATCH_NORM = _convunext_case(
 # ``"valid"`` above it, the D-125 rule) followed by a ``LayerNormalization``
 # with epsilon 1e-6, ``center=use_bias``, ``scale=True``. No activation, no
 # pool. The ConvNeXt convs also took the model's ``kernel_regularizer``; RAD's
-# took none. LayerNormalization ignores ``training``, so the original calling
-# it without one is not a difference.
+# took none because RADConvNet had no such argument. It has one now, so the
+# hand-rolled original of all three carries the regularizer.
+# LayerNormalization ignores ``training``, so the original calling it without
+# one is not a difference.
 
 _CONVNEXT_DIMS = [8, 16]
 _CONVNEXT_KERNEL_REG = 1e-4
@@ -857,7 +859,7 @@ _RAD_STEM_INITIALIZER = "truncated_normal"
 
 
 def _convnext_family_original(
-    strides: int, use_bias: bool, regularized: bool, kernel_initializer
+    strides: int, use_bias: bool, kernel_initializer
 ) -> Original:
     """The pre-migration ConvNeXt / RAD patchify stem, as literals."""
     conv = keras.layers.Conv2D(
@@ -867,9 +869,7 @@ def _convnext_family_original(
         padding="same" if strides == 1 else "valid",
         use_bias=use_bias,
         kernel_initializer=kernel_initializer,
-        kernel_regularizer=(
-            keras.regularizers.L2(_CONVNEXT_KERNEL_REG) if regularized else None
-        ),
+        kernel_regularizer=keras.regularizers.L2(_CONVNEXT_KERNEL_REG),
         name="stem_conv",
     )
     norm = keras.layers.LayerNormalization(
@@ -893,8 +893,7 @@ def _convnext_family_model(
         strides=strides,
         use_bias=use_bias,
     )
-    if model_class is not RADConvNet:
-        kwargs["kernel_regularizer"] = keras.regularizers.L2(_CONVNEXT_KERNEL_REG)
+    kwargs["kernel_regularizer"] = keras.regularizers.L2(_CONVNEXT_KERNEL_REG)
     return model_class(**kwargs)
 
 
@@ -906,15 +905,13 @@ def _convnext_family_case(
     spatial: int,
     output_spatial: int,
 ) -> StemCase:
-    regularized = model_class is not RADConvNet
     return StemCase(
         case_id=case_id,
         make_model=lambda: _convnext_family_model(model_class, strides, use_bias),
         make_original=lambda: _convnext_family_original(
             strides,
             use_bias,
-            regularized,
-            _CONVNEXT_STEM_INITIALIZER if regularized else _RAD_STEM_INITIALIZER,
+            _RAD_STEM_INITIALIZER if model_class is RADConvNet else _CONVNEXT_STEM_INITIALIZER,
         ),
         input_shape=(spatial, spatial, 3),
         expected_output_shape=(output_spatial, output_spatial, _CONVNEXT_DIMS[0]),

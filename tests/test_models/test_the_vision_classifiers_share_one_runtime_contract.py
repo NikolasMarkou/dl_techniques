@@ -238,13 +238,23 @@ CLASSIFIERS: Tuple[Classifier, ...] = (
         _ctor(f"{_VISION}.convnext.convnext_v1", "ConvNeXtV1", depths=[1, 1], dims=[8, 16],
               input_shape=(32, 48, 3)),
         tiny={"depths": [1, 1], "dims": [8, 16]}, override={"depths": [1, 1], "dims": [8, 16]},
-        head_markers=("classification_head",), knob=False, sizes=_DEFAULT_SIZES),
+        head_markers=("classification_head",), knob=False,
+        invalid=(({"drop_path_rate": -1.0}, "drop_path_rate", -1.0),
+                 ({"drop_path_rate": 2.0}, "drop_path_rate", 2.0),
+                 ({"dropout_rate": 1.0}, "dropout_rate", 1.0),
+                 ({"spatial_dropout_rate": 1.0}, "spatial_dropout_rate", 1.0)),
+        sizes=_DEFAULT_SIZES),
     Classifier(
         "convnext_v2", f"{_VISION}.convnext.convnext_v2", "ConvNeXtV2", "tiny", (32, 48, 3),
         _ctor(f"{_VISION}.convnext.convnext_v2", "ConvNeXtV2", depths=[1, 1], dims=[8, 16],
               input_shape=(32, 48, 3)),
         tiny={"depths": [1, 1], "dims": [8, 16]}, override={"depths": [1, 1], "dims": [8, 16]},
-        head_markers=("classification_head",), knob=False, sizes=_DEFAULT_SIZES),
+        head_markers=("classification_head",), knob=False,
+        invalid=(({"drop_path_rate": -1.0}, "drop_path_rate", -1.0),
+                 ({"drop_path_rate": 2.0}, "drop_path_rate", 2.0),
+                 ({"dropout_rate": 1.0}, "dropout_rate", 1.0),
+                 ({"spatial_dropout_rate": 1.0}, "spatial_dropout_rate", 1.0)),
+        sizes=_DEFAULT_SIZES),
     Classifier(
         "rad_convnet", f"{_VISION}.rad_convnet.model", "RADConvNet", "tiny", (32, 48, 3),
         _ctor(f"{_VISION}.rad_convnet.model", "RADConvNet", depths=[1, 1], dims=[8, 16],
@@ -362,8 +372,9 @@ PROBES: Dict[str, Callable[[], Dict[str, Any]]] = {
         head_config_overrides=dict(_NO_BIAS_HEAD)),
     "rad_convnet": lambda: dict(
         num_classes=7, depths=[1, 1], dims=[8, 16], rad_kernel_size=5, rad_groups=2,
-        mlp_ratio=2, activation="relu", use_bias=False, dropout_rate=0.1, strides=2,
-        input_shape=(32, 48, 3), head_config_overrides={"classifier_dropout_rate": 0.1}),
+        mlp_ratio=2, activation="relu", use_bias=False, kernel_regularizer=_l2(),
+        dropout_rate=0.1, strides=2, input_shape=(32, 48, 3),
+        head_config_overrides={"classifier_dropout_rate": 0.1}),
     "squeezenet_v1": lambda: dict(
         num_classes=7,
         variant_config=_squeezenet_table(f"{_VISION}.squeezenet.squeezenet_v1", "SqueezeNetV1", "1.0"),
@@ -972,6 +983,26 @@ def test_a_headless_model_still_defines_its_head_attribute(key: str) -> None:
     assert model.classification_head is None
 
 
+@pytest.mark.parametrize("key", CLASSIFIER_KEYS)
+def test_include_top_is_a_real_bool(key: str) -> None:
+    """A string, an int or ``None`` is refused by value and type; ``numpy.bool_`` is a bool.
+
+    ``bool("no")`` is ``True``: an accepted string built a headed model for a caller who
+    wrote ``include_top="no"``. A ``numpy.bool_`` (what a comparison on an array yields)
+    is coerced, so ``get_config`` stays JSON-safe and the stored attribute is a ``bool``.
+    """
+    c = classifier(key)
+    for value in ("no", 0, 1, None):
+        with pytest.raises(TypeError, match=r"include_top must be a bool or numpy\.bool_") as caught:
+            c.make(include_top=value)
+        assert repr(value) in str(caught.value)
+    model = c.make(include_top=np.False_)
+    assert model.include_top is False
+    assert json.loads(json.dumps(model.get_config()))["include_top"] is False
+    if c.head_attribute:
+        assert model.classification_head is None
+
+
 def _head_paths(markers: Sequence[str], model: keras.Model) -> List[str]:
     return [w.path for w in model.weights if any(m in w.path for m in markers)]
 
@@ -1357,6 +1388,18 @@ def _build_rad(init):
                     _images(32, 32, 3))
 
 
+def _build_rad_hidden_head(init):
+    """The advertised ``block_dims`` override: three head kernels, none of them the default head's.
+
+    One explicit seed handed to the default head's classifier is fine; handed to every Dense of
+    a head with hidden blocks it replays one draw three times (measured r = 1.000000).
+    """
+    from dl_techniques.models.vision.rad_convnet.model import RADConvNet
+    return _forward(RADConvNet.from_variant(
+        "tiny", num_classes=10, input_shape=(32, 32, 3),
+        head_config_overrides={"block_dims": [64, 64]}), _images(32, 32, 3))
+
+
 def _build_squeezenet_v1(init):
     from dl_techniques.models.vision.squeezenet.squeezenet_v1 import SqueezeNetV1
     return _forward(SqueezeNetV1.from_variant("1.0", num_classes=4, input_shape=(64, 64, 3),
@@ -1491,6 +1534,7 @@ REPLAY_SUBJECTS: Dict[str, Tuple[Callable, bool]] = {
     "convnext_v1": (_convnext("convnext_v1", "ConvNeXtV1"), False),
     "convnext_v2": (_convnext("convnext_v2", "ConvNeXtV2"), False),
     "rad_convnet": (_build_rad, False),
+    "rad_convnet_hidden_head": (_build_rad_hidden_head, False),
     "squeezenet_v1": (_build_squeezenet_v1, True),
     "squeezenet_v2": (_build_squeezenet_v2, True),
     "vae": (_build_vae, True),

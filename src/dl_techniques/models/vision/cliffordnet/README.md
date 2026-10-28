@@ -31,10 +31,10 @@ This package holds `model.py`, `hierarchical.py` and `__init__.py`:
 | `HierarchicalCliffordNet` | Vision | `src/dl_techniques/models/vision/cliffordnet/hierarchical.py` | The same block in stages at falling resolution, a stride-2 downsampler between them |
 
 `model.py` also holds what the two models share and `hierarchical.py` imports: the stem
-(`build_clifford_stem`), the head configuration (`clifford_head_config`), the rate and
-`include_top` checks (`validate_rates`, `coerce_include_top`), and the constants
+(`build_clifford_stem`), the head configuration (`clifford_head_config`) and the constants
 `DEFAULT_KERNEL_INITIALIZER`, `LAYERNORM_EPSILON`, `STEM_BN_MOMENTUM`, `STEM_BN_EPSILON` and
-`DEFAULT_INPUT_SHAPE`.
+`DEFAULT_INPUT_SHAPE`. The rate and `include_top` checks (`validate_rates`, `coerce_include_top`)
+are shared with the other vision classifiers and live in `dl_techniques/utils/model_build.py`.
 
 A second family member lives in a sibling package and is documented here because it
 shares the same algebraic core:

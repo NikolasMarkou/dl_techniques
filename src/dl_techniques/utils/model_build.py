@@ -97,14 +97,17 @@ import json
 from typing import Any, Dict, Mapping, Optional
 
 import keras
+import numpy as np
 
 # ---------------------------------------------------------------------
 
 __all__ = [
+    "coerce_include_top",
     "concretize_axes",
     "materialize_sublayers",
     "plain_head_config_overrides",
     "refuse_unknown_model_kwargs",
+    "validate_rates",
 ]
 
 #: The keywords a functional ``keras.Model`` subclass may forward to
@@ -289,5 +292,55 @@ def plain_head_config_overrides(
                 "keras.regularizers.serialize(...)."
             ) from error
     return dict(head_config_overrides)
+
+# ---------------------------------------------------------------------
+
+
+def coerce_include_top(include_top: Any) -> bool:
+    """Return ``include_top`` as a Python ``bool``, refusing anything else.
+
+    Interface contract (call sites: the ``__init__`` of every vision classifier that
+    takes ``include_top``, as its first statement): ``bool`` and ``numpy.bool_`` (the
+    type every comparison on an array yields) are accepted and coerced, so
+    ``get_config`` stays JSON-serializable. Everything else is refused, including
+    ``0``/``1``, a 0-d array, ``None`` and a string: ``bool("no")`` is ``True`` and
+    would silently build the head, and ``include_top`` was once the second
+    positional parameter of CliffordNet, where ``bool(...)`` would have let a
+    misbound ``CliffordNet(10, 64)`` through. The message prints the repr and the
+    module-qualified type, because ``type(np.False_).__name__`` is ``"bool"`` under
+    numpy 2 and a bare name would contradict the refusal.
+
+    :param include_top: The value passed as ``include_top``.
+    :return: ``bool(include_top)``.
+    :raises TypeError: If ``include_top`` is not a ``bool`` or ``numpy.bool_``.
+    """
+    if not isinstance(include_top, (bool, np.bool_)):
+        kind = type(include_top)
+        raise TypeError(
+            f"include_top must be a bool or numpy.bool_, got {include_top!r} "
+            f"of type {kind.__module__}.{kind.__qualname__}"
+        )
+    return bool(include_top)
+
+
+def validate_rates(**rates: float) -> None:
+    """Refuse a dropout or drop-path rate outside ``[0, 1)``, naming the argument.
+
+    Interface contract (call sites: the ``__init__`` of the vision classifiers, before
+    any sub-layer is built): pass each rate under the name of the constructor argument
+    it came from, ``validate_rates(dropout_rate=dropout_rate, drop_path_rate=...)``.
+    Rates are checked in call order and the first bad one raises. Without this check
+    the sub-layer that first meets the value raises with its own argument name and
+    value (a ramped ``drop_path_rate`` of 2.0 reads "got 1.333333" from
+    ``StochasticDepth``), and a negative ``drop_path_rate`` disables the layer
+    silently, because every ramped rate is then negative.
+
+    :param rates: ``argument name -> value`` for each rate to check.
+    :raises ValueError: If a rate is outside ``[0, 1)`` (``nan`` included); the
+        message names the argument and the value.
+    """
+    for name, value in rates.items():
+        if not 0.0 <= value < 1.0:
+            raise ValueError(f"{name} must be in [0, 1), got {value}")
 
 # ---------------------------------------------------------------------

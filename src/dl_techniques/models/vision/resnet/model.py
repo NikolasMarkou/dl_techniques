@@ -69,6 +69,7 @@ from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.heads.vision import VisionTaskType
 from dl_techniques.layers.heads.vision.factory import build_model_vision_head
 from dl_techniques.utils.model_build import (
+    coerce_include_top,
     materialize_sublayers,
     plain_head_config_overrides,
 )
@@ -206,7 +207,9 @@ class ResNet(keras.Model):
         ``create_activation_layer``. Defaults to ``'relu'``.
     :type activation_type: str
     :param include_top: Whether to include the classification head. When False
-        the final stage's feature maps are returned. Defaults to True.
+        the final stage's feature maps are returned. A ``bool`` or
+        ``numpy.bool_``; anything else, a string included, raises ``TypeError``.
+        Defaults to True.
     :type include_top: bool
     :param enable_deep_supervision: Whether to attach auxiliary classification
         heads. Requires ``include_top=True``. One head per stage except the last,
@@ -235,6 +238,7 @@ class ResNet(keras.Model):
     :type head_config_overrides: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the ``keras.Model`` base class.
 
+    :raises TypeError: If ``include_top`` is not a ``bool`` or ``numpy.bool_``.
     :raises ValueError: If ``include_top`` is True and ``num_classes`` is not
         positive, if ``blocks_per_stage`` and ``filters_per_stage`` differ
         in length, if ``block_type`` is not ``'basic'`` or ``'bottleneck'``, if
@@ -322,6 +326,7 @@ class ResNet(keras.Model):
     ):
         super().__init__(**kwargs)
 
+        include_top = coerce_include_top(include_top)
         if include_top and num_classes <= 0:
             raise ValueError(
                 f"num_classes must be positive when include_top=True, got {num_classes}"

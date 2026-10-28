@@ -37,6 +37,7 @@ from typing import Tuple, Optional, Dict, Any, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.model_build import (
+    coerce_include_top,
     materialize_sublayers,
     plain_head_config_overrides,
 )
@@ -115,7 +116,7 @@ class MobileNetV1(keras.Model):
         instance or dict carrying an explicit `seed` reuses that seed at every
         site by contract, so same-shaped kernels start equal. `get_config`
         reports its serialized spec.
-    :param include_top: Whether to include the classification head.
+    :param include_top: Whether to include the classification head. A `bool` or `numpy.bool_`; anything else, a string included, raises `TypeError`.
     :param input_shape: Input shape `(height, width, channels)`; `None` means
         `(224, 224, 3)`.
     :param head_config_overrides: Optional dict merged into the head
@@ -125,8 +126,8 @@ class MobileNetV1(keras.Model):
     :raises ValueError: If `num_classes` is not positive with a head,
         `width_multiplier` is not positive, `dropout_rate` is outside `[0, 1)`,
         or `input_shape` is not 3-D.
-    :raises TypeError: If `kernel_initializer` is not a string, a dict or an
-        `Initializer` instance.
+    :raises TypeError: If `include_top` is not a `bool` or `numpy.bool_`, or if
+        `kernel_initializer` is not a string, a dict or an `Initializer` instance.
     :raises NotImplementedError: If `kernel_initializer` is an `Initializer`
         instance that cannot serialize itself.
 
@@ -185,6 +186,7 @@ class MobileNetV1(keras.Model):
     ) -> None:
         super().__init__(**kwargs)
 
+        include_top = coerce_include_top(include_top)
         if include_top and num_classes <= 0:
             raise ValueError(
                 f"num_classes must be positive when include_top=True, got {num_classes}"

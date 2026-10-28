@@ -8,6 +8,9 @@ tables. Everything else, the constructor, the builders, ``call``, ``build``,
 keeps its registration key, its class docstring, ``MODEL_VARIANTS``, ``BLOCK_CLASS`` and
 its ``create_*`` factory.
 
+The base also owns the argument checks the leaves share: a rate outside ``[0, 1)`` is refused
+by name there, once (the last two tests).
+
 The guard reads the leaf source: a method defined in a leaf would be a second copy of the
 base that the next edit fixes in one file only. It is a function of source text, so a
 planted leaf with a method proves it can fail.
@@ -15,6 +18,7 @@ planted leaf with a method proves it can fail.
 
 import ast
 import importlib
+import re
 from pathlib import Path
 
 import keras
@@ -138,3 +142,27 @@ def test_the_base_refuses_to_build_without_a_block_class() -> None:
 
     with pytest.raises(TypeError, match="BLOCK_CLASS"):
         NoBlock(**TINY)
+
+
+#: Four blocks, so a ramped drop-path rate differs from the terminal rate at every block but
+#: the last: the message of a sub-layer that meets the value first names the ramp, not the argument.
+RATE_TINY = dict(depths=[2, 2], dims=[8, 16], num_classes=4, input_shape=(32, 32, 3))
+RATES = ("drop_path_rate", "dropout_rate", "spatial_dropout_rate")
+
+
+@pytest.mark.parametrize(("cls", "filename", "block"), LEAVES)
+@pytest.mark.parametrize("name", RATES)
+@pytest.mark.parametrize("value", [-1.0, 1.0, 2.0, float("nan")])
+def test_a_rate_outside_zero_one_is_refused_naming_the_argument_and_its_value(
+        cls, filename, block, name, value) -> None:
+    """``drop_path_rate=-1.0`` once built a model with no drop path at all, ``2.0`` failed as
+    "got 1.333333" (a ramped value), and a ``dropout_rate`` of 1.0 failed at the first call."""
+    with pytest.raises(ValueError, match=re.escape(f"{name} must be in [0, 1), got {value}")):
+        cls(**RATE_TINY, **{name: value})
+
+
+@pytest.mark.parametrize(("cls", "filename", "block"), LEAVES)
+@pytest.mark.parametrize("name", RATES)
+def test_the_rate_zero_and_a_rate_just_below_one_are_accepted(cls, filename, block, name) -> None:
+    cls(**RATE_TINY, **{name: 0.0})
+    cls(**RATE_TINY, **{name: 0.999})

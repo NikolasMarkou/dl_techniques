@@ -44,7 +44,6 @@ References:
 
 import copy
 import keras
-import numpy as np
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -62,8 +61,10 @@ from dl_techniques.initializers.clone import initializer_spec
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.model_build import (
+    coerce_include_top,
     materialize_sublayers,
     plain_head_config_overrides,
+    validate_rates,
 )
 from dl_techniques.utils.weight_transfer import (
     DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
@@ -468,7 +469,7 @@ class CliffordNet(keras.Model):
             raise ValueError(f"depth must be positive, got {depth}")
         if patch_size <= 0:
             raise ValueError(f"patch_size must be positive, got {patch_size}")
-        validate_rates(dropout_rate, stochastic_depth_rate)
+        validate_rates(dropout_rate=dropout_rate, stochastic_depth_rate=stochastic_depth_rate)
 
         self.num_classes = num_classes
         self.include_top = include_top
@@ -785,57 +786,8 @@ class CliffordNet(keras.Model):
         return {**base_config, **config}
 
 
-# Helpers the stem, the head and the validation of CliffordNet and HierarchicalCliffordNet share;
+# Helpers the stem and the head of CliffordNet and HierarchicalCliffordNet share;
 # the Hierarchical module imports them from here.
-
-
-def coerce_include_top(include_top: Any) -> bool:
-    """Return ``include_top`` as a Python ``bool``, refusing anything else.
-
-    Shared by :class:`CliffordNet` and ``HierarchicalCliffordNet`` (which imports
-    it from here, like :data:`DEFAULT_INPUT_SHAPE`), so the two cannot drift.
-
-    Interface contract: ``bool`` and ``numpy.bool_`` are accepted (the type every
-    comparison on an array yields) and coerced, so ``get_config`` stays
-    JSON-serializable. Everything else is refused, including ``0``/``1``, a
-    0-d array and ``None``: ``include_top`` was once the second positional
-    parameter, and ``bool(...)`` would have let a misbound ``CliffordNet(10, 64)``
-    through. The message prints the repr and the module-qualified type, because
-    ``type(np.False_).__name__`` is ``"bool"`` under numpy 2 and a bare name
-    would contradict the refusal.
-
-    :param include_top: The value passed as ``include_top``.
-    :return: ``bool(include_top)``.
-    :raises TypeError: If ``include_top`` is not a ``bool`` or ``numpy.bool_``.
-    """
-    if not isinstance(include_top, (bool, np.bool_)):
-        kind = type(include_top)
-        raise TypeError(
-            f"include_top must be a bool or numpy.bool_, got {include_top!r} "
-            f"of type {kind.__module__}.{kind.__qualname__}"
-        )
-    return bool(include_top)
-
-
-def validate_rates(dropout_rate: float, stochastic_depth_rate: float) -> None:
-    """Refuse a head dropout or drop-path rate outside ``[0, 1)``.
-
-    Shared by :class:`CliffordNet` and ``HierarchicalCliffordNet``. Without it
-    the sub-layer that first meets the value raises with its own argument name
-    (``classifier_dropout_rate``, ``drop_path_rate``), which is not the name the
-    caller wrote.
-
-    :param dropout_rate: The model's ``dropout_rate``.
-    :param stochastic_depth_rate: The model's ``stochastic_depth_rate``.
-    :raises ValueError: If either rate is outside ``[0, 1)``; the message names
-        the model's argument and the value.
-    """
-    for name, value in (
-        ("dropout_rate", dropout_rate),
-        ("stochastic_depth_rate", stochastic_depth_rate),
-    ):
-        if not 0.0 <= value < 1.0:
-            raise ValueError(f"{name} must be in [0, 1), got {value}")
 
 
 def build_clifford_stem(

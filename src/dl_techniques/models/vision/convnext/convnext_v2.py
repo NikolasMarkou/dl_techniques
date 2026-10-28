@@ -11,8 +11,11 @@ signal. It is computed from a global statistic, so it costs almost nothing and a
 two learnable per-channel parameters. Everything else matches V1: a depthwise `KxK`
 convolution, a 1x1 expansion to `4F`, GELU, now GRN, a 1x1 reduction back to `F`, and a
 learnable `gamma` layer scale, with the block transform-only and the residual/drop-path
-wiring owned by `call`. The variant table spans a wider range than V1's, from Atto (3.7M
-parameters) to Huge (660M), since GRN's benefit is most visible at the small end. With
+wiring owned by `call`. The variant table spans a wider range than V1's, from Atto (4.5M
+parameters) to Huge (723M), since GRN's benefit is most visible at the small end. Those counts
+are `count_params()` at 224x224 with 1000 classes; the paper's 3.7M and 660M assume 2x2 stride-2
+downsamplers, while here every downsampler is `strides x strides` (4x4 stride 4 by default),
+which adds 806,400 parameters at Atto. With
 `include_top=True` the model returns the pre-softmax logits of the shared vision
 `ClassificationHead`; compile with `from_logits=True`. No pretrained weights are
 distributed: `pretrained=True` raises `NotImplementedError`.
@@ -135,7 +138,8 @@ class ConvNeXtV2(_ConvNeXtBase):
     :param drop_path_rate: Terminal stochastic-depth rate. The per-block rate
         ramps linearly from 0.0 at the first block of stage 0 to this value at
         the last block of the last stage, indexed globally over
-        ``sum(depths)`` blocks. Defaults to 0.0 (disabled).
+        ``sum(depths)`` blocks. Must lie in ``[0, 1)``. Defaults to 0.0
+        (disabled).
     :type drop_path_rate: float
     :param stochastic_mode: What the per-block regularizer does. ``'depth'``
         (default) is standard stochastic depth and drops the whole residual
@@ -156,10 +160,11 @@ class ConvNeXtV2(_ConvNeXtBase):
         downsampling layers, the blocks and the head's classifier kernel. A
         regularizer, its serialized config or a name.
     :type kernel_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]]
-    :param dropout_rate: Dropout rate applied within blocks. Defaults to 0.0.
-    :type dropout_rate: float
-    :param spatial_dropout_rate: Spatial dropout rate applied within blocks.
+    :param dropout_rate: Dropout rate applied within blocks, in ``[0, 1)``.
         Defaults to 0.0.
+    :type dropout_rate: float
+    :param spatial_dropout_rate: Spatial dropout rate applied within blocks,
+        in ``[0, 1)``. Defaults to 0.0.
     :type spatial_dropout_rate: float
     :param strides: Patchify factor. Used as BOTH the kernel size and the
         stride of the stem convolution and of every inter-stage downsample
@@ -173,14 +178,15 @@ class ConvNeXtV2(_ConvNeXtBase):
     :type use_softorthonormal_regularizer: bool
     :param include_top: Whether to include the GAP + LayerNorm + Dense
         classification head. When False the final stage's feature maps are
-        returned. Defaults to True.
+        returned. A ``bool`` or ``numpy.bool_``; anything else, a string
+        included, raises ``TypeError``. Defaults to True.
     :type include_top: bool
     :param input_shape: Input shape ``(height, width, channels)`` excluding the
         batch dimension. ``None`` resolves to ``(None, None, 3)`` -- the model
         is fully convolutional and global-pools before the head, so a concrete
         spatial size is optional. It is required only where a downstream
-        consumer needs static spatial dims; a checkpoint load with unspecified
-        spatial dims materializes weights at ``PRETRAINED_BUILD_SPATIAL`` (224).
+        consumer needs static spatial dims; a checkpoint load builds the model
+        at this shape, spatial dims left ``None`` included.
     :type input_shape: Optional[Tuple[int, ...]]
     :param head_config_overrides: Optional dict merged into the
         ``ClassificationHead`` configuration (e.g.,
@@ -192,8 +198,11 @@ class ConvNeXtV2(_ConvNeXtBase):
     :param kwargs: Additional keyword arguments for the ``keras.Model`` base
         class.
 
+    :raises TypeError: If ``include_top`` is not a ``bool`` or ``numpy.bool_``.
     :raises ValueError: If ``include_top`` is True and ``num_classes`` is not
-        positive, if ``depths`` and ``dims`` differ in length, if
+        positive, if ``drop_path_rate``, ``dropout_rate`` or
+        ``spatial_dropout_rate`` is outside ``[0, 1)`` (the message names the
+        argument and its value), if ``depths`` and ``dims`` differ in length, if
         ``strides`` is not positive, if ``stochastic_mode`` is not ``'depth'``
         or ``'gradient'``, if ``input_shape`` is not 3D, or if
         ``head_config_overrides`` names ``name``, ``num_classes`` or

@@ -47,7 +47,7 @@ from .caffe_reference_init import (
     CAFFE_XAVIER_INITIALIZER,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
-from dl_techniques.utils.model_build import refuse_unknown_model_kwargs
+from dl_techniques.utils.model_build import coerce_include_top, refuse_unknown_model_kwargs
 
 # ---------------------------------------------------------------------
 
@@ -343,13 +343,15 @@ class SqueezeNetV1(keras.Model):
         `HEAD_INITIALIZER` instead.
     :type kernel_initializer: str or keras.initializers.Initializer
     :param include_top: Whether to include the classification head
-        (``conv10`` and the global pool).
+        (``conv10`` and the global pool). A ``bool`` or ``numpy.bool_``; anything
+        else, a string included, raises ``TypeError``.
     :type include_top: bool
     :param input_shape: Input shape `(height, width, channels)`.
     :type input_shape: tuple of 3 ints
     :param kwargs: `name`, `trainable` or `dtype`, passed to `keras.Model`.
         Anything else raises `ValueError`, because Keras' functional
         constructor would drop it silently.
+    :raises TypeError: If `include_top` is not a `bool` or `numpy.bool_`.
     :raises ValueError: If `num_classes` is not positive, `dropout_rate` is
         outside `[0, 1)`, or the input's spatial extent is below the variant's
         minimum (35 for the "1.0" stem family, 31 for "1.1", computed from the
@@ -436,6 +438,7 @@ class SqueezeNetV1(keras.Model):
             **kwargs: Any
     ) -> None:
         refuse_unknown_model_kwargs(kwargs, type(self).__name__)
+        include_top = coerce_include_top(include_top)
         if variant_config is None:
             variant_config = self.MODEL_VARIANTS["1.0"]
 

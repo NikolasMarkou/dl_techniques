@@ -32,8 +32,10 @@ from typing import List, Optional, Union, Tuple, Dict, Any
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.model_build import (
+    coerce_include_top,
     materialize_sublayers,
     plain_head_config_overrides,
+    validate_rates,
 )
 from dl_techniques.utils.weight_transfer import (
     DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
@@ -105,11 +107,6 @@ class _ConvNeXtBase(keras.Model):
         "class_name": "TruncatedNormal",
         "config": {"mean": 0.0, "stddev": 0.02},
     }
-    # Spatial size used to materialize weights before a checkpoint load when the
-    # model was constructed with the default, fully-shape-agnostic
-    # `input_shape=(None, None, 3)`. 224 is the ImageNet size these checkpoints
-    # are trained at, and it is the size the factory docstrings already promise.
-    PRETRAINED_BUILD_SPATIAL = 224
 
     def __init__(
             self,
@@ -139,10 +136,16 @@ class _ConvNeXtBase(keras.Model):
                 f"{type(self).__name__} must set BLOCK_CLASS to its block layer class"
             )
 
+        include_top = coerce_include_top(include_top)
         if include_top and num_classes <= 0:
             raise ValueError(
                 f"num_classes must be positive when include_top=True, got {num_classes}"
             )
+        validate_rates(
+            drop_path_rate=drop_path_rate,
+            dropout_rate=dropout_rate,
+            spatial_dropout_rate=spatial_dropout_rate,
+        )
 
         depths = list(depths) if depths is not None else [3, 3, 9, 3]
         dims = list(dims) if dims is not None else [96, 192, 384, 768]
@@ -426,27 +429,6 @@ class _ConvNeXtBase(keras.Model):
 
         return shape
 
-    def _pretrained_build_shape(self) -> Tuple[int, ...]:
-        """Resolve a concrete `(H, W, C)` for the build that precedes a checkpoint load.
-
-        :return: `(height, width, channels)` with any `None` spatial dim replaced by
-            `PRETRAINED_BUILD_SPATIAL`.
-        :raises ValueError: If `input_shape` has no channel count.
-        """
-        # (The anchor below says `self.input_shape`; the attribute is `self.input_shape_config`.)
-        # DECISION plan-2026-08-14T233721-d4f9beb2/D-067: resolve None spatial dims
-        # here rather than pass self.input_shape through — the default (None, None, 3) built (1, None, None, 3) and broke pretrained=<path> loads. See decisions.md.
-        height, width, channels = self.input_shape_config
-        if channels is None:
-            raise ValueError(
-                "Cannot materialize weights for a checkpoint load: input_shape "
-                f"{self.input_shape_config} has no channel count. Pass a concrete "
-                "input_shape=(height, width, channels) to the constructor."
-            )
-        height = self.PRETRAINED_BUILD_SPATIAL if height is None else height
-        width = self.PRETRAINED_BUILD_SPATIAL if width is None else width
-        return (int(height), int(width), int(channels))
-
     def load_pretrained_weights(
             self,
             weights_path: str,
@@ -455,8 +437,8 @@ class _ConvNeXtBase(keras.Model):
         """Load a local `.keras` checkpoint into the model, layer by layer.
 
         The transfer is `load_pretrained_checkpoint`: it builds the model at
-        `input_shape` (a `None` spatial dim at `PRETRAINED_BUILD_SPATIAL`) if
-        it is unbuilt and takes a headed checkpoint into a headless model.
+        `input_shape` (spatial dims may be `None`) if it is unbuilt and takes a
+        headed checkpoint into a headless model.
         Every layer outside the classification head must be restored, so a
         checkpoint of another variant, depth, width or kernel size raises and
         copies no weight. Only a head of another `num_classes` is skipped: it
@@ -478,8 +460,19 @@ class _ConvNeXtBase(keras.Model):
         :raises ValueError: If a layer outside the head is not restored, or
             the weights cannot be loaded.
         """
+        # DECISION plan-2026-10-26T125959-7af851e5/D-045: the D-067 note below is superseded.
+        # The failure it describes no longer reproduces: `materialize_sublayers` traces `call` on
+        # symbolic inputs, and a build at (1, None, None, 3) and a checkpoint load at
+        # (None, None, 3) both succeed for V1, V2 and RADConvNet, headed and headless
+        # (scratch_iter2/step13_3/probe_d067.txt, 2026-10-28). The helper that resolved None to
+        # 224 and its constant are gone and `self.input_shape_config` is passed through, as
+        # RADConvNet does. (The D-067 text says `self.input_shape`; the attribute is
+        # `self.input_shape_config`.) Do not reinstate a helper without a reproduction of the
+        # failure. See decisions.md.
+        # DECISION plan-2026-08-14T233721-d4f9beb2/D-067: resolve None spatial dims
+        # here rather than pass self.input_shape through — the default (None, None, 3) built (1, None, None, 3) and broke pretrained=<path> loads. See decisions.md.
         load_pretrained_checkpoint(
-            self, weights_path, self._pretrained_build_shape(), skip_mismatch,
+            self, weights_path, self.input_shape_config, skip_mismatch,
             ignore_config_keys=_NON_STRUCTURAL_CONFIG_KEYS,
         )
 

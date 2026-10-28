@@ -194,7 +194,7 @@ Constructor arguments, in the order every version takes them (`num_classes` firs
 | `dropout_rate` | 0.001 | 0.2 | 0.2 | 0.2 | dropout before the classifier, in `[0, 1)` |
 | `kernel_regularizer` | `None` | `None` | `None` | `None` | regularizer of the convolution and head kernels (depthwise kernels: V1 only); replaces `weight_decay` |
 | `kernel_initializer` | `he_normal` | `he_normal` | `glorot_uniform` | `he_normal` | name, serialized dict or instance |
-| `include_top` | `True` | `True` | `True` | `True` | `False` returns the 4-D feature map |
+| `include_top` | `True` | `True` | `True` | `True` | `False` returns the 4-D feature map; a `bool` or `numpy.bool_`, anything else raises `TypeError` |
 | `input_shape` | `None` | `None` | `(224, 224, 3)` | `(224, 224, 3)` | `None` means `(224, 224, 3)` |
 | `head_config_overrides` | `None` | `None` | `None` | `None` | merged into the head config; `name`, `num_classes`, `task_type` raise |
 

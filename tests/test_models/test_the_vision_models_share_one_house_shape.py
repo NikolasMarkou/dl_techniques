@@ -314,7 +314,7 @@ SUBJECTS: Tuple[Subject, ...] = (
     _subject("convnext_v2", "convnext_v2", "ConvNeXtV2", head_attribute=_HEAD,
              classifier=True, required_params=("kernel_regularizer",), base=_CONVNEXT_BASE),
     _subject("rad_convnet", "rad_convnet", "RADConvNet", head_attribute=_HEAD,
-             classifier=True),
+             classifier=True, required_params=("kernel_regularizer",)),
     _subject("squeezenet_v1", "squeezenet_v1", "SqueezeNetV1", classifier=True,
              required_params=_INIT_AND_REG, waived=_E2, rules=_ALL - set(_E2)),
     _subject("squeezenet_v2", "squeezenet_v2", "SqueezeNoduleNetV2", classifier=True,

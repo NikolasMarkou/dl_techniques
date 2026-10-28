@@ -216,6 +216,10 @@ Constructor arguments reachable through `**kwargs` include `depths`, `dims`, `dr
 `stochastic_mode`, `kernel_size`, `activation`, `use_bias`, `kernel_regularizer`, `dropout_rate`,
 `spatial_dropout_rate`, `strides`, `use_gamma`, `use_softorthonormal_regularizer`, `include_top` and
 `head_config_overrides`. With `include_top=False` the `classification_head` attribute is `None`.
+`include_top` must be a `bool` or `numpy.bool_` (`include_top="no"` raises `TypeError` naming the
+value; every other vision classifier checks it the same way), and `drop_path_rate`, `dropout_rate`
+and `spatial_dropout_rate` must lie in `[0, 1)`: a value outside raises `ValueError` naming the
+argument and the value.
 
 ---
 
@@ -338,8 +342,9 @@ fine_tune_model = create_convnext_v2(
 )
 ```
 
-`input_shape` may be left at its default `(None, None, 3)`; the pre-load build then materializes
-weights at `PRETRAINED_BUILD_SPATIAL` (224) and the model stays fully convolutional.
+`input_shape` may be left at its default `(None, None, 3)`; the pre-load build then runs at that
+shape, spatial dims `None` included, and the model stays fully convolutional (measured for V1, V2
+and RADConvNet, headed and headless: `scratch_iter2/step13_3/probe_d067.txt`).
 
 A `.keras` file saved before 2026-10-26, when the stem moved onto one `ConvStem` named `stem`
 (its weights were `stem_conv/...` and `stem_norm/...`), does not load: `keras.models.load_model`
