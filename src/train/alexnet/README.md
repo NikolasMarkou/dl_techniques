@@ -34,14 +34,17 @@ root implicitly).
 ## Imagenette (the default dataset)
 
 AlexNet is an ImageNet architecture, and Imagenette (`imagenette/320px-v2`, 9,469
-train / 3,925 validation images, 10 ImageNet classes) is the ImageNet subset on disk.
+train / 3,925 labelled validation images, 10 ImageNet classes) is the ImageNet subset on disk.
 It is read from TFDS under `$TFDS_DATA_DIR` and never downloaded; an absent record set
-fails loudly. The pipeline is the shared `train.common.build_raw_image_dataset` with
-`crop_policy="random_resized_crop"`, at the model's own 227 input:
+fails loudly. The pipeline is `train.common.classification_data` with
+`crop_policy="random_resized_crop"`, at the model's own 227 input. A seeded
+`--validation-split` (default 0.1) of the train records is the selection set (early stopping,
+the best checkpoint): 8,523 train / 946 selection images; the 3,925 validation images are the
+test set and never select:
 
 - training: a random-resized crop (area 0.08 to 1, aspect 3/4 to 4/3) of the
   full-resolution image, resized to 227, plus a horizontal flip;
-- validation: the shorter side resized to 227 / 0.875 = 259, then the centre 227 crop;
+- selection and test: the shorter side resized to 227 / 0.875 = 259, then the centre 227 crop;
 - both normalised with the ImageNet mean/std, since Imagenette is ImageNet data.
 
 ```bash
@@ -53,7 +56,7 @@ CIFAR-10 and CIFAR-100 are each normalised with their own training-set mean/std
 (`CIFAR10_MEAN`/`STD`, `CIFAR100_MEAN`/`STD` in `dl_techniques/datasets/vision/classification.py`),
 loaded by `train.common.classification_data` (the pixels are upsampled to `--image-size` before
 standardizing). Selection is a held-out slice of train (`--validation-split`, default 0.1; ImageNet:
-`--holdout-per-class`), never the test set; Imagenette keeps its TFDS train/validation pair.
+`--holdout-per-class`), never the test set.
 
 ## Model analysis
 

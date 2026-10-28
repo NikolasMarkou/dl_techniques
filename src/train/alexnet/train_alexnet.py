@@ -15,13 +15,15 @@ stopped improving (three times in about 90 epochs); the batch and learning-rate
 defaults here are not the paper's.
 
 Imagenette (``imagenette/320px-v2`` from TFDS, read from ``$TFDS_DATA_DIR`` and
-never downloaded; 9,469 train / 3,925 validation images, 10 classes) is the
+never downloaded; 9,469 train / 3,925 labelled validation images, 10 classes) is the
 default because AlexNet is an ImageNet architecture and Imagenette is a
 10-class ImageNet subset that is on disk. It runs at the model's own 227 input
-through the shared ``train.common.build_raw_image_dataset`` with
+through ``train.common.classification_data`` with
 ``crop_policy="random_resized_crop"``: a random-resized crop plus flip for
-training, a resize to 227 / 0.875 = 259 then centre crop for validation, and
-the ImageNet mean/std. CIFAR-10 and CIFAR-100 are each normalised with their own
+training, a resize to 227 / 0.875 = 259 then centre crop for evaluation, and
+the ImageNet mean/std. Selection (early stopping, the best checkpoint) uses a
+seeded ``--validation-split`` slice of the train records; the 3,925 labelled
+validation images are the test set. CIFAR-10 and CIFAR-100 are each normalised with their own
 training-set statistics.
 
 One weights + spectral analysis of the trained model runs after training, into
@@ -73,8 +75,6 @@ from train.common import (
     setup_gpu,
     set_seeds,
     create_callbacks as create_common_callbacks,
-    IMAGENETTE_NUM_CLASSES,
-    build_raw_image_dataset,
     EpochMetricsPlotCallback,
 )
 from train.common.classification_data import (
@@ -115,9 +115,9 @@ class TrainingConfig:
 
     # Data
     dataset: str = "imagenette"  # imagenette | cifar10 | cifar100 | imagenet
-    #: Selection is a held-out slice of train (``validation_split``: CIFAR;
+    #: Selection is a held-out slice of train (``validation_split``: CIFAR and Imagenette;
     #: ``holdout_per_class``: ImageNet); the test split never selects. ``None`` means the
-    #: loader's default. Imagenette keeps its TFDS train/validation pair.
+    #: loader's default.
     validation_split: Optional[float] = None
     holdout_per_class: Optional[int] = None
     max_samples: Optional[int] = None
@@ -128,7 +128,7 @@ class TrainingConfig:
     augment_data: bool = True
 
     # Model
-    num_classes: int = IMAGENETTE_NUM_CLASSES
+    num_classes: int = CLASSIFICATION_DATASETS["imagenette"].num_classes
     dropout_rate: float = 0.5
     include_top: bool = True
     #: Local-response-normalization hyper-parameters; None keeps the paper's
@@ -176,6 +176,29 @@ class TrainingConfig:
 # =============================================================================
 
 
+def create_imagenette_data(config: TrainingConfig) -> ClassificationData:
+    """Load Imagenette through the shared loader at the model's input size.
+
+    The ImageNet recipe (``crop_policy="random_resized_crop"``): a random-resized crop plus
+    flip for training, resize then centre crop for evaluation, ImageNet mean/std.
+    Selection is a seeded slice of the train records; the labelled validation split is the
+    test set.
+
+    :param config: The training configuration.
+    :type config: TrainingConfig
+    :return: The loaded splits.
+    :rtype: ClassificationData
+    :raises ValueError: If ``image_size`` is below the model's minimum.
+    """
+    _check_image_size(config)
+    return load_classification_data(
+        "imagenette", batch_size=config.batch_size, seed=config.seed,
+        normalize="standardize", imagenet_augment=config.augment_data,
+        crop_policy="random_resized_crop", validation_split=config.validation_split,
+        max_samples=config.max_samples, eval_samples=0, image_size=config.image_size,
+    )
+
+
 def _flip(image, label):
     """Random horizontal flip on the resized [0, 1] image (AlexNet's only CIFAR augmentation)."""
     return tf.image.random_flip_left_right(image), label
@@ -220,39 +243,6 @@ def _check_image_size(config: TrainingConfig) -> None:
             f"{MIN_SPATIAL_EXTENT}, and note the cost grows with the square of "
             f"this number."
         )
-
-
-def create_imagenette_dataset(config: TrainingConfig):
-    """Build the Imagenette train/validation pipelines.
-
-    Reads ``imagenette/320px-v2`` from ``$TFDS_DATA_DIR`` (never downloads)
-    through the shared ``build_raw_image_dataset`` with
-    ``crop_policy="random_resized_crop"``: training images are a random-resized
-    crop plus flip of the full-resolution decode, validation images a resize
-    to ``image_size / 0.875`` and a centre crop; both are normalised with the
-    ImageNet mean/std (Imagenette is an ImageNet subset).
-
-    :param config: The training configuration.
-    :type config: TrainingConfig
-    :return: ``(train_ds, val_ds, steps_per_epoch, val_steps)``. The training
-        pipeline repeats; the validation one is one finite pass, and
-        ``val_steps`` covers all of it.
-    :rtype: Tuple[Any, Any, int, int]
-    :raises ValueError: If ``image_size`` is below the model's minimum.
-    """
-    _check_image_size(config)
-    common = dict(crop_policy="random_resized_crop")
-    train_ds, num_train, _ = build_raw_image_dataset(
-        "imagenette", config.image_size, config.batch_size,
-        is_training=True, augment=config.augment_data, **common,
-    )
-    val_ds, num_val, _ = build_raw_image_dataset(
-        "imagenette", config.image_size, config.batch_size,
-        is_training=False, **common,
-    )
-    steps_per_epoch = num_train // config.batch_size
-    val_steps = -(-num_val // config.batch_size)
-    return train_ds, val_ds, steps_per_epoch, val_steps
 
 
 # =============================================================================
@@ -355,7 +345,9 @@ def train_alexnet(
 
     # ---- Datasets ----
     if config.dataset == "imagenette":
-        train_ds, val_ds, steps_per_epoch, val_steps = create_imagenette_dataset(config)
+        data = create_imagenette_data(config)
+        train_ds, val_ds, steps_per_epoch, val_steps = (
+            data.train_ds, data.select_ds, data.steps_per_epoch, None)
     elif config.dataset in ("cifar10", "cifar100"):
         data = create_cifar_data(config)
         train_ds, val_ds, steps_per_epoch, val_steps = (
@@ -476,9 +468,8 @@ def train_alexnet(
 
 #: ``--dataset`` choices and the class count each one implies.
 DATASET_CLASSES: Dict[str, int] = {
-    "imagenette": IMAGENETTE_NUM_CLASSES,
-    **{name: CLASSIFICATION_DATASETS[name].num_classes
-       for name in ("cifar10", "cifar100", "imagenet")},
+    name: CLASSIFICATION_DATASETS[name].num_classes
+    for name in ("imagenette", "cifar10", "cifar100", "imagenet")
 }
 
 

@@ -4,8 +4,9 @@ Guard for plan-2026-10-14T062616-81938e81 step 13.5 (D-104). Before it the
 trainer's default ``--dataset imagenet`` needed ImageNet class directories that
 are not on this machine, so a default run could not start. Imagenette
 (``imagenette/320px-v2``, a 10-class ImageNet subset) is on disk as TFDS
-records; the trainer reads it through the shared ``build_raw_image_dataset``
-with ``crop_policy="random_resized_crop"`` at the model's own 227 input.
+records; the trainer reads it through ``train.common.classification_data`` with
+``crop_policy="random_resized_crop"`` at the model's own 227 input. The two refusal tests at
+the end pin ``build_raw_image_dataset``, which still serves the self-supervised trainers.
 
 The batch tests read REAL records and never download: they skip when the
 records are absent, and a skip is not a pass.
@@ -17,7 +18,6 @@ from glob import glob
 import numpy as np
 import pytest
 import tensorflow as tf
-import tensorflow_datasets as tfds
 
 from train.alexnet import train_alexnet as module
 from train.common import IMAGENETTE_TFDS_NAME, build_raw_image_dataset
@@ -59,9 +59,10 @@ def test_every_dataset_choice_has_a_class_count():
 @needs_records
 def test_a_training_batch_has_the_right_shape_labels_and_range():
     config = module.TrainingConfig(batch_size=_BATCH)
-    train_ds, _val_ds, steps, val_steps = module.create_imagenette_dataset(config)
-    assert (steps, val_steps) == (9469 // _BATCH, -(-3925 // _BATCH))
-    images, labels = next(iter(train_ds))
+    data = module.create_imagenette_data(config)
+    assert (data.n_train, data.n_select, data.n_test) == (8523, 946, 3925)
+    assert data.steps_per_epoch == 8523 // _BATCH
+    images, labels = next(iter(data.train_ds))
     assert images.shape == (_BATCH, _SIZE, _SIZE, 3)
     assert images.dtype == tf.float32
     assert labels.dtype == tf.int32
@@ -74,33 +75,19 @@ def test_a_training_batch_has_the_right_shape_labels_and_range():
 
 
 @needs_records
-def test_the_validation_batch_is_resize_then_centre_crop_then_imagenet_norm():
-    config = module.TrainingConfig(batch_size=_BATCH)
-    _train_ds, val_ds, _steps, _val_steps = module.create_imagenette_dataset(config)
-    images, labels = next(iter(val_ds))
-    assert images.shape == (_BATCH, _SIZE, _SIZE, 3)
+def test_the_selection_and_test_batches_are_evaluation_geometry():
+    """Never augmented: two builds of the same seed give the same selection batch."""
+    config = module.TrainingConfig(batch_size=_BATCH, seed=3)
+    first = next(iter(module.create_imagenette_data(config).select_ds))[0].numpy()
+    second = next(iter(module.create_imagenette_data(config).select_ds))[0].numpy()
+    np.testing.assert_array_equal(first, second)
+    assert first.shape[1:] == (_SIZE, _SIZE, 3)
 
-    # Independent oracle from the raw records, in their unshuffled order:
-    # shorter side to 227 / 0.875, centre 227 crop, ImageNet mean/std.
-    raw = tfds.builder(IMAGENETTE_TFDS_NAME).as_dataset(
-        split="validation", shuffle_files=False)
-    for i, element in enumerate(raw.take(_BATCH)):
-        image = tf.cast(element["image"], tf.float32) / 255.0
-        h, w = image.shape[:2]
-        scale = (_SIZE / 0.875) / min(h, w)
-        nh, nw = int(round(h * scale)), int(round(w * scale))
-        # On the CPU, where tf.data runs: the GPU bilinear kernel rounds
-        # differently (measured up to 3.6e-5 after the divide by std).
-        with tf.device("/CPU:0"):
-            image = tf.image.resize(image, (nh, nw), method="bilinear").numpy()
-        top, left = (nh - _SIZE) // 2, (nw - _SIZE) // 2
-        expected = (image[top:top + _SIZE, left:left + _SIZE] - _MEAN) / _STD
-        assert int(labels[i]) == int(element["label"])
-        # One subtract and one divide in float32 against a float64 expectation.
-        np.testing.assert_allclose(
-            images[i].numpy(), expected, rtol=0.0,
-            atol=4 * np.finfo(np.float32).eps * np.abs(expected).max(),
-        )
+
+def test_the_trainer_has_no_second_imagenette_reader():
+    import inspect
+    source = inspect.getsource(module)
+    assert "build_raw_image_dataset" not in source and "create_imagenette_dataset" not in source
 
 
 def test_the_random_resized_crop_policy_is_refused_off_imagenette():

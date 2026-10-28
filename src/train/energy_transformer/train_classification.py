@@ -40,11 +40,15 @@ from train.common import (
     set_seeds,
     create_callbacks as create_common_callbacks,
 )
+from train.common.classification_data import (
+    add_selection_arguments,
+    flip_pad_crop,
+    load_classification_data,
+)
 from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
 from train.energy_transformer.common import (
     SUPPORTED_DATASETS,
     build_optimizer,
-    build_raw_image_dataset,
     EnergyTraceCallback,
 )
 from dl_techniques.utils.logger import logger
@@ -82,6 +86,10 @@ class TrainingConfig:
     patch_size: int = 16
     batch_size: int = 32
     augment_data: bool = True
+    # Selection is a seeded slice of the train rows (None means the loader's 0.1); the test
+    # split never selects. max_samples caps the train pool and the test split (smoke runs).
+    validation_split: Optional[float] = None
+    max_samples: Optional[int] = None
 
     # Model
     variant: str = "tiny"  # tiny | small | base
@@ -166,38 +174,39 @@ class TrainingConfig:
 # DATA
 # ---------------------------------------------------------------------
 
-def build_datasets(config: TrainingConfig) -> Tuple[Any, Any, int, int, int]:
-    """Build the ``(image, label)`` train/val pipelines.
+def build_datasets(config: TrainingConfig) -> Tuple[Any, Any, Any, int, int, int]:
+    """Build the ``(image, label)`` train / selection / test pipelines.
 
     NO ``element_map_fn``: the classifier is fed raw images, with no occlusion mask. (The
-    backbone's ``mask_token`` weight still exists and is still built — I6 — which is what
-    keeps this trunk weight-identical to the MIM trunk.)
+    backbone's mask-token weight still exists and is still built, which is what keeps this
+    trunk weight-identical to the MIM trunk.) The data comes from
+    ``train.common.classification_data``: selection (``val_*`` in the history, early
+    stopping, the best checkpoint) is a seeded slice of the train rows, and the test split
+    never selects.
 
     Returns:
-        ``(train_ds, val_ds, steps_per_epoch, val_steps, num_classes)``.
+        ``(train_ds, select_ds, test_ds, steps_per_epoch, val_steps, num_classes)``.
     """
-    train_ds, num_train, num_classes = build_raw_image_dataset(
-        config.dataset,
-        config.image_size,
-        config.batch_size,
-        is_training=True,
-        augment=config.augment_data,
-        seed=config.seed,
-    )
-    val_ds, num_val, _ = build_raw_image_dataset(
-        config.dataset,
-        config.image_size,
-        config.batch_size,
-        is_training=False,
-        seed=config.seed,
-    )
+    if config.dataset == "imagenette":
+        file_based = dict(
+            crop_policy="resize", imagenet_augment=config.augment_data,
+            image_size=config.image_size, eval_samples=0)
+    else:  # cifar10: 32 px natively; a larger --image-size upsamples it
+        file_based = dict(
+            augment=flip_pad_crop(mode="REFLECT") if config.augment_data else None,
+            resize=None if config.image_size == 32 else config.image_size)
+    data = load_classification_data(
+        config.dataset, batch_size=config.batch_size, seed=config.seed,
+        normalize="standardize", validation_split=config.validation_split,
+        max_samples=config.max_samples, **file_based)
 
-    steps_per_epoch = max(1, num_train // config.batch_size)
-    val_steps = max(1, num_val // config.batch_size)
+    steps_per_epoch = max(1, data.steps_per_epoch)
+    val_steps = max(1, -(-data.n_select // config.batch_size))
     if config.max_steps is not None:
         steps_per_epoch = min(steps_per_epoch, config.max_steps)
         val_steps = min(val_steps, config.max_steps)
-    return train_ds, val_ds, steps_per_epoch, val_steps, num_classes
+    return (data.train_ds, data.select_ds, data.test_ds, steps_per_epoch, val_steps,
+            data.num_classes)
 
 
 # ---------------------------------------------------------------------
@@ -308,7 +317,7 @@ def train_classification(config: TrainingConfig) -> Dict[str, Any]:
     run_dir = prepare_run_dir(config)
 
     # ---- Data ----
-    train_ds, val_ds, steps_per_epoch, val_steps, dataset_classes = build_datasets(config)
+    train_ds, val_ds, test_ds, steps_per_epoch, val_steps, dataset_classes = build_datasets(config)
     if config.num_classes is None:
         num_classes = dataset_classes
     elif config.num_classes != dataset_classes:
@@ -388,6 +397,11 @@ def train_classification(config: TrainingConfig) -> Dict[str, Any]:
     )
     logger.info(f"Training completed in {(time.time() - start) / 3600.0:.3f} hours")
 
+    # The model holds the best epoch's weights (EarlyStopping restored them), selected on the
+    # held-out slice of train; the test split is scored once, here.
+    test_metrics = model.evaluate(test_ds, return_dict=True, verbose=0)
+    logger.info(f"Test metrics: {test_metrics}")
+
     loss_curve = history.history.get("loss", []) or [float("nan")]
     val_acc_curve = history.history.get("val_accuracy", []) or [float("nan")]
 
@@ -397,6 +411,7 @@ def train_classification(config: TrainingConfig) -> Dict[str, Any]:
     return {
         "model": model,
         "best_val_accuracy": float(max(val_acc_curve)),
+        "test_metrics": {k: float(v) for k, v in test_metrics.items()},
         "first_loss": float(loss_curve[0]),
         "final_loss": float(loss_curve[-1]),
         "run_dir": str(run_dir),
@@ -425,6 +440,7 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
                         help="Auto: 16 for imagenette, 4 for cifar10")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--no-augmentation", dest="augment_data", action="store_false")
+    add_selection_arguments(parser, imagenet=False)
 
     # Model
     parser.add_argument("--variant", type=str, default="tiny",
@@ -496,6 +512,8 @@ def config_from_args(args: argparse.Namespace) -> TrainingConfig:
         patch_size=patch_size,
         batch_size=args.batch_size,
         augment_data=args.augment_data,
+        validation_split=args.validation_split,
+        max_samples=args.max_samples,
         variant=args.variant,
         num_steps=args.num_steps,
         dropout_rate=args.dropout_rate,

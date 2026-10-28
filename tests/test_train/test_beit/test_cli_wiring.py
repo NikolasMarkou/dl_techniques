@@ -125,6 +125,8 @@ CLS_ONLY_SPEC: Dict[str, Tuple[str, Any]] = {
     "dropout_rate": ("--dropout-rate", 0.3),       # default: 0.0
     "num_classes": ("--num-classes", 10),          # default: None
     "epochs": ("--epochs", 3),                     # default: 100
+    "validation_split": ("--validation-split", 0.2),  # default: None
+    "max_samples": ("--max-samples", 123),         # default: None
     # `pretrained_encoder` is filled in per-test: __post_init__ requires a REAL .keras
     # file on disk (default: None -- warm start is OPTIONAL here, unlike the MIM
     # trainer's tokenizer).

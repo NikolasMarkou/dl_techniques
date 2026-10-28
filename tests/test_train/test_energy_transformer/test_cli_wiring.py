@@ -99,6 +99,8 @@ MIM_ONLY_SPEC: Dict[str, Tuple[str, Any]] = {
 CLS_ONLY_SPEC: Dict[str, Tuple[str, Any]] = {
     "dropout_rate": ("--dropout-rate", 0.3),       # default: 0.0
     "num_classes": ("--num-classes", 10),          # default: None
+    "validation_split": ("--validation-split", 0.2),  # default: None
+    "max_samples": ("--max-samples", 123),         # default: None
     # `pretrained_encoder` is filled in per-test: TrainingConfig.__post_init__ requires a REAL
     # .keras file on disk, so the fixture writes one (default: None).
 }
