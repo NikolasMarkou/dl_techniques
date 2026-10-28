@@ -36,12 +36,21 @@ Data loading, generation, and preprocessing utilities for various domains.
   - `coco.py` — COCO dataset, `coco_multitask_local.py` — local multi-task COCO
     variant
   - `classification.py` — the one home of the labelled-image datasets' constants: a
-    frozen `DatasetSpec` per dataset (`mnist`, `cifar10`, `cifar100`, `imagenet`: class count,
+    frozen `DatasetSpec` per dataset (`mnist`, `cifar10`, `cifar100`, `imagenette`, `imagenet`: class count,
     train size, native shape, per-channel mean/std of the [0, 1] training images, class names)
     in `CLASSIFICATION_DATASETS`, `get_spec`, and `CIFAR10_MEAN` / `CIFAR100_MEAN` / `MNIST_MEAN`
     (and `_STD`). ImageNet's pair is defined once in `imagenet2012.py` and referenced.
     A trainer imports the names; `tests/test_datasets/test_the_dataset_statistics_have_one_home.py`
     guards that and re-derives the values from the data.
+  - `imagenette.py` — Imagenette (10 ImageNet classes) from the prepared TFDS records
+    (`imagenette/320px-v2` under `$TFDS_DATA_DIR`, never downloaded): `load_imagenette(split,
+    ImagenetteConfig)` serves `"train"` (minus the selection rows), `"select"` (a seeded
+    `validation_split` slice of train, never augmented) and `"test"` (the labelled validation
+    split). The encoded jpegs are held in memory once; `crop_policy` is `"random_resized_crop"`
+    (the ImageNet recipe) or `"resize"`. `read_imagenette_records` is the only TFDS touch and the
+    test seam. The geometry helpers are shared with `train.common.datasets.build_raw_image_dataset`.
+  - `splits.py` — the seeded train / selection / test arithmetic (`split_sizes`,
+    `seeded_split_indices`) that MNIST, CIFAR and Imagenette share.
   - `imagenet2012.py` — ImageNet-1k read straight from the extracted
     `train/<wnid>/` + flat `val/` layout (:func:`load_imagenet2012`, returns
     batched `(image, label)` plus counts and wnid class names). Class index =

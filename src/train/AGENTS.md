@@ -332,7 +332,7 @@ Keep local: model creation and compilation, domain-specific losses, custom argpa
 ## Data loading
 
 **One ingestion path for labelled images.** `train.common.classification_data` serves MNIST,
-CIFAR-10, CIFAR-100 and ImageNet-1k to every classification trainer, with one protocol: the
+CIFAR-10, CIFAR-100, Imagenette and ImageNet-1k to every classification trainer, with one protocol: the
 SELECTION split (fit validation, early stopping, the best checkpoint) is a held-out slice of
 train, and the TEST split never selects.
 
@@ -340,8 +340,13 @@ train, and the TEST split never selects.
   batched `tf.data` pipelines (`train_ds` drops the remainder and reshuffles, `select_ds`,
   `test_ds`), the counts, `steps_per_epoch`, an in-memory test subset (`x_fig`, `y_fig`) for the
   figures and the analyzer, `mean`/`std`, `input_shape`, `num_classes`, `class_names` and the
-  provenance strings. MNIST and CIFAR hold out `validation_split` of train (seeded permutation);
-  ImageNet holds out `holdout_per_class` images per class (`train.common.imagenet`).
+  provenance strings. MNIST, CIFAR and Imagenette hold out `validation_split` of train (seeded
+  permutation, `dl_techniques.datasets.vision.splits`); ImageNet holds out `holdout_per_class`
+  images per class (`train.common.imagenet`). Imagenette is read from the prepared TFDS records
+  (`dl_techniques.datasets.vision.imagenette`, `$TFDS_DATA_DIR`, never downloaded): the 9,469
+  train records minus the selection slice are the fit set and the 3,925 labelled validation
+  records are the test set; `crop_policy="random_resized_crop"` is the ImageNet recipe (AlexNet),
+  `"resize"` resizes the whole image and flips + reflect-pad-crops (BEiT and ET classification).
 - `load_split_arrays(name, seed=, ...)` is the same split with no pipeline, for a numpy loop or a
   flattened-input model (PowerMLP, MothNet, SOM, VAE, the logic E1, the MAE script). `index_*`
   give each split's rows in the Keras arrays, to align a second label set.
@@ -359,9 +364,9 @@ train, and the TEST split never selects.
 - `classification_data._load_raw` is the ONE `keras.datasets` call under `src/train`; a trainer
   test replaces it (`tests/classification_fakes.py`). Exceptions are named, with reasons, in
   `tests/test_train/test_the_image_classification_trainers_share_one_ingestion_path.py`: the
-  self-supervised raw-image pipeline `build_raw_image_dataset` (dino, beit, energy_transformer,
-  alexnet's imagenette: TFDS records, test split as validation), CIFAR-100's coarse labels
-  (`head_comparison`).
+  self-supervised raw-image pipeline `build_raw_image_dataset` (dino, BEiT MIM and tokenizer, ET
+  masked completion: unlabelled images through element-map slots; it reads the Imagenette records
+  and CIFAR-10 itself), CIFAR-100's coarse labels (`head_comparison`).
 
 For text use `train.common.nlp`; for MegaDepth RGB+depth pairs `train.common.megadepth`
 (yielding `(rgb, y_true)` with `y_true = [disparity, mask]` on the last axis, the disparity

@@ -9,7 +9,10 @@ reported), and ImageNet's mean/std lived twice. This module holds the structure,
 * ``keras.datasets.<name>.load_data`` is called only by ``_load_raw`` (the seam every trainer
   test replaces) and by the named exceptions below, each with its reason;
 * ``train.common`` no longer offers ``load_dataset`` and nothing imports one from it;
-* no ``fit(...)`` is given a test split as ``validation_data``.
+* no ``fit(...)`` is given a test split as ``validation_data``;
+* Imagenette's TFDS records are named only by the self-supervised pipeline
+  (``build_raw_image_dataset``, which dino, BEiT MIM/tokenizer and ET masked completion
+  use) and the names it re-exports; the classifiers reach them through the loader.
 
 The constants' single home is guarded by ``tests/test_datasets/test_the_dataset_statistics_have_one_home.py``.
 """
@@ -37,6 +40,13 @@ TEST_AS_VALIDATION_EXCEPTIONS = {
     "logic/train_boolean_circuit.py": "a synthetic boolean-circuit task, not an image dataset",
     "logic/train_benchmark.py": "synthetic boolean tasks (parity, majority, multiplexer), "
                                 "not an image dataset",
+}
+
+#: Files under ``src/train`` that may name ``IMAGENETTE_TFDS_NAME``, each with its reason.
+IMAGENETTE_RECORD_USERS = {
+    "common/datasets.py": "build_raw_image_dataset, the self-supervised pipeline",
+    "common/__init__.py": "the export of that name",
+    "energy_transformer/common.py": "the re-export of that name",
 }
 
 TEST_NAMES = ("x_test", "y_test", "test_ds", "test_x", "X_test")
@@ -115,6 +125,28 @@ def test_every_validation_exception_still_applies() -> None:
     assert stale == [], f"exceptions that no longer need their entry: {stale}"
 
 
+def _names_imagenette_records(tree) -> bool:
+    return any(
+        (isinstance(node, ast.Name) and node.id == "IMAGENETTE_TFDS_NAME")
+        or (isinstance(node, ast.Attribute) and node.attr == "IMAGENETTE_TFDS_NAME")
+        or (isinstance(node, ast.alias) and node.name == "IMAGENETTE_TFDS_NAME")
+        for node in ast.walk(tree)
+    )
+
+
+def test_only_the_self_supervised_pipeline_names_the_imagenette_records() -> None:
+    offenders = [
+        name for name, tree in _trees()
+        if _names_imagenette_records(tree) and name not in IMAGENETTE_RECORD_USERS
+    ]
+    assert offenders == [], f"read the Imagenette records outside the loader: {offenders}"
+
+
+def test_every_imagenette_exception_still_names_the_records() -> None:
+    named = {name for name, tree in _trees() if _names_imagenette_records(tree)}
+    assert set(IMAGENETTE_RECORD_USERS) <= named
+
+
 @pytest.mark.parametrize("source, expected", [
     ("keras.datasets.mnist.load_data()", 1),
     ("x = keras.datasets.cifar10.load_data()", 1),
@@ -126,3 +158,5 @@ def test_the_census_detects_what_it_claims(source, expected) -> None:
         ast.parse("model.fit(x, y, validation_data=(x_test, y_test))"))) == 1
     assert _test_split_validation_calls(
         ast.parse("model.fit(x, y, validation_data=(x_val, y_val))")) == []
+    assert _names_imagenette_records(ast.parse("tfds.builder(IMAGENETTE_TFDS_NAME)"))
+    assert not _names_imagenette_records(ast.parse("tfds.builder('mnist')"))
