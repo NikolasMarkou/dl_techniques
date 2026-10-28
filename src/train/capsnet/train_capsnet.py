@@ -1,8 +1,18 @@
 """
 CapsNet training with comprehensive visualizations.
 
-Trains CapsNet on MNIST or CIFAR-10 with per-epoch reconstruction
+Trains CapsNet on MNIST, CIFAR-10 or ImageNet-1k with per-epoch reconstruction
 visualizations, training curves, and metrics summaries.
+
+ImageNet is trained at 32x32 (``--image-size``) with all 1000 classes. The routing
+layer holds ``primary_capsules x classes x 16 x 8`` weights and the CIFAR-10 capsule
+settings give 512 primary capsules at 32x32, so the model has about 65M routing
+weights; the same settings at 64x64 give 12,800 primary capsules and about 1.6e9
+weights, which does not fit. ``--holdout-per-class`` images per class are taken out of
+train for early stopping and checkpoint selection and the official val split is the
+test set, evaluated whole; the reconstruction callback and the final figures use the
+first ``--eval-samples`` images of those two splits. Inputs are scaled to [0, 1]
+because the decoder ends in a sigmoid and the reconstruction loss subtracts the input.
 """
 
 import os
@@ -18,7 +28,17 @@ from typing import Tuple, Dict, Any, Optional
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.vision.capsnet import create_capsnet
-from train.common import setup_gpu, set_seeds, create_base_argument_parser, create_callbacks
+from train.common import (
+    add_holdout_argument,
+    add_imagenet_arguments,
+    create_base_argument_parser,
+    create_callbacks,
+    eval_head,
+    load_imagenet_selection_splits,
+    require_imagenet_root,
+    set_seeds,
+    setup_gpu,
+)
 from train.common.callbacks import LearningRateLogger
 
 plt.style.use('seaborn-v0_8')
@@ -28,6 +48,49 @@ sns.set_palette("husl")
 # ---------------------------------------------------------------------
 # Data loading (CapsNet-specific: uses one-hot labels)
 # ---------------------------------------------------------------------
+
+IMAGENET_NUM_CLASSES = 1000
+IMAGENET_IMAGE_SIZE = 32
+# The 1000-class model has 85.2M parameters (65.5M of them routing weights) and its routing
+# step grows with ``primary capsules x classes`` per sample. Measured on CPU, one train step
+# of the full model peaked at 5.1 GB resident at batch 8, 12.9 GB at 32 and 23.6 GB at 64
+# (about 0.37 GB per sample); 32 is the default that leaves room on a 24 GB card. GPU memory
+# was not measured.
+IMAGENET_BATCH_SIZE = 32
+DEFAULT_BATCH_SIZE = 64
+DEFAULT_EVAL_SAMPLES = 2000
+
+
+def load_imagenet_data(args) -> Tuple[Any, ...]:
+    """The ImageNet pipelines and the in-memory heads the callbacks and figures need.
+
+    Labels are one-hot, as ``CapsNet.train_step`` and the margin loss require. Nothing
+    holds a whole split in memory: ``select_head`` and ``test_head`` are the first
+    ``args.eval_samples`` images of the selection and test splits.
+
+    Returns:
+        ``(train_ds, select_ds, test_ds, select_head, test_head)``; the heads are
+        ``(images [0, 1], one-hot labels)`` numpy pairs.
+    """
+    require_imagenet_root(args.imagenet_root)
+    train, select, test = load_imagenet_selection_splits(
+        args.imagenet_root, args.devkit_dir, args.image_size, args.batch_size, args.seed,
+        augment=True, holdout_per_class=args.holdout_per_class, normalize="unit",
+        num_classes=IMAGENET_NUM_CLASSES, max_images=args.max_samples,
+    )
+
+    def one_hot(data):
+        return data.dataset.map(
+            lambda x, y: (x, tf.one_hot(y, IMAGENET_NUM_CLASSES)),
+            num_parallel_calls=tf.data.AUTOTUNE,
+        ).prefetch(tf.data.AUTOTUNE)
+
+    def head(data):
+        x, y = eval_head(data, args.eval_samples)
+        return x, keras.utils.to_categorical(y, IMAGENET_NUM_CLASSES)
+
+    return one_hot(train), one_hot(select), one_hot(test), head(select), head(test)
+
 
 def load_mnist_data(
         validation_split: float = 0.1,
@@ -90,8 +153,11 @@ def load_cifar10_data(
 # Model configuration
 # ---------------------------------------------------------------------
 
-def create_model_config(dataset: str) -> Dict[str, Any]:
-    """Create CapsNet configuration based on dataset."""
+def create_model_config(dataset: str, image_size: int = IMAGENET_IMAGE_SIZE) -> Dict[str, Any]:
+    """Create CapsNet configuration based on dataset.
+
+    ``image_size`` is the input side and is used only for ``imagenet``.
+    """
     if dataset.lower() == 'mnist':
         return {
             'num_classes': 10,
@@ -123,6 +189,13 @@ def create_model_config(dataset: str) -> Dict[str, Any]:
             'downweight': 0.5,
             'reconstruction_weight': 0.1,
             'use_batch_norm': True
+        }
+    elif dataset.lower() == 'imagenet':
+        # The CIFAR-10 capsule settings: 512 primary capsules at 32x32 (see the module doc).
+        return {
+            **create_model_config('cifar10'),
+            'num_classes': IMAGENET_NUM_CLASSES,
+            'input_shape': (image_size, image_size, 3),
         }
     else:
         raise ValueError(f"Unsupported dataset: {dataset}")
@@ -427,7 +500,7 @@ class ReconstructionVisualizationCallback(keras.callbacks.Callback):
         os.makedirs(self.recon_dir, exist_ok=True)
 
         x_val, y_val = validation_data
-        indices = np.random.choice(len(x_val), size=n_samples, replace=False)
+        indices = np.random.choice(len(x_val), size=min(n_samples, len(x_val)), replace=False)
         self.sample_images = x_val[indices]
         self.sample_labels = y_val[indices]
         self.true_classes = np.argmax(self.sample_labels, axis=1)
@@ -472,12 +545,18 @@ def create_capsnet_callbacks(
         model_name: str,
         validation_data: Tuple[np.ndarray, np.ndarray],
         dataset: str,
-        monitor: str = 'val_accuracy',
+        monitor: str = 'val_loss',
         patience: int = 10,
         save_best_only: bool = True,
-        viz_frequency: int = 1
+        viz_frequency: int = 1,
+        include_analyzer: bool = True
 ) -> Tuple[list, str]:
     """Create training callbacks including CapsNet-specific visualization callback.
+
+    ``monitor`` is ``val_loss`` (margin plus weighted reconstruction loss): the model's
+    ``test_step`` returns its accuracy nested under ``compile_metrics``, so Keras logs no
+    ``val_capsule_accuracy``, and the former default ``val_accuracy`` is not a CapsNet
+    metric at all, which left early stopping and the best-model checkpoint inert.
 
     Returns:
         Tuple of (callbacks list, results directory path).
@@ -486,10 +565,11 @@ def create_capsnet_callbacks(
         model_name=model_name,
         results_dir_prefix="capsnet",
         monitor=monitor,
+        monitor_mode='min',
         patience=patience,
         use_lr_schedule=False,
         include_tensorboard=True,
-        include_analyzer=True,
+        include_analyzer=include_analyzer,
     )
 
     # CapsNet-specific callbacks
@@ -536,6 +616,7 @@ def generate_final_visualizations(
     plot_metrics_summary(history, test_results_dict, final_viz_dir)
 
     # Final reconstruction comparison
+    n_samples = min(n_samples, len(x_test))
     sample_indices = np.random.choice(len(x_test), size=n_samples, replace=False)
     sample_images = x_test[sample_indices]
     sample_labels = y_test[sample_indices]
@@ -617,20 +698,27 @@ def train_model(args) -> None:
     logger.info("Starting CapsNet training")
     logger.info(f"Arguments: {vars(args)}")
 
-    # Load data (CapsNet needs one-hot labels)
-    if args.dataset.lower() == 'mnist':
-        train_data, val_data, test_data = load_mnist_data(args.validation_split)
-    elif args.dataset.lower() == 'cifar10':
-        train_data, val_data, test_data = load_cifar10_data(args.validation_split)
+    # Load data (CapsNet needs one-hot labels). ``fit_x`` / ``fit_y`` and the validation and
+    # test inputs are arrays for MNIST and CIFAR-10 and batched datasets (``y`` None) for
+    # ImageNet, which cannot be held in memory; the ``*_head`` pairs are always arrays.
+    if args.dataset.lower() == 'imagenet':
+        fit_x, val_x, test_x, val_head, test_head = load_imagenet_data(args)
+        fit_y = val_y = test_y = None
+        fit_kwargs: Dict[str, Any] = {}
+        model_config = create_model_config(args.dataset, args.image_size)
     else:
-        raise ValueError(f"Unsupported dataset: {args.dataset}")
-
-    x_train, y_train = train_data
-    x_val, y_val = val_data
-    x_test, y_test = test_data
+        if args.dataset.lower() == 'mnist':
+            train_data, val_data, test_data = load_mnist_data(args.validation_split)
+        elif args.dataset.lower() == 'cifar10':
+            train_data, val_data, test_data = load_cifar10_data(args.validation_split)
+        else:
+            raise ValueError(f"Unsupported dataset: {args.dataset}")
+        (fit_x, fit_y), (val_x, val_y), (test_x, test_y) = train_data, val_data, test_data
+        val_head, test_head = (val_x, val_y), (test_x, test_y)
+        fit_kwargs = {'batch_size': args.batch_size}
+        model_config = create_model_config(args.dataset)
 
     # Create and build model
-    model_config = create_model_config(args.dataset)
     model = create_capsnet(
         optimizer=args.optimizer,
         learning_rate=args.learning_rate,
@@ -643,33 +731,38 @@ def train_model(args) -> None:
     # Callbacks
     callbacks, results_dir = create_capsnet_callbacks(
         model_name=args.dataset,
-        validation_data=(x_val, y_val),
+        validation_data=val_head,
         dataset=args.dataset,
         patience=args.patience,
         save_best_only=True,
-        viz_frequency=args.viz_frequency
+        viz_frequency=args.viz_frequency,
+        # The per-epoch weight/spectral analysis of the 1000-class model took about 2 of the
+        # 6.5 minutes of a 64-image CPU smoke run, twice (train start and epoch end), and
+        # that run peaked at 20 GB resident against 5 GB for the train step alone.
+        include_analyzer=args.dataset != 'imagenet',
     )
 
     # Train
     history = model.fit(
-        x_train, y_train,
-        validation_data=(x_val, y_val),
+        fit_x, fit_y,
+        validation_data=(val_x, val_y) if val_y is not None else val_x,
         epochs=args.epochs,
-        batch_size=args.batch_size,
         callbacks=callbacks,
-        verbose=1
+        verbose=1,
+        **fit_kwargs
     )
 
-    # Evaluate
-    test_results = model.evaluate(x_test, y_test, verbose=1)
+    # Evaluate (the whole test split, not the head)
+    test_results = model.evaluate(test_x, test_y, verbose=1)
     test_results_dict = _clean_test_results(test_results, model)
     logger.info("Test results:")
     for name, value in test_results_dict.items():
         logger.info(f"  {name}: {value:.4f}")
 
     # Visualizations
+    x_test, y_test = test_head
     generate_final_visualizations(
-        model=model, test_data=(x_test, y_test), history=history,
+        model=model, test_data=test_head, history=history,
         results_dir=results_dir, dataset=args.dataset,
         test_results_dict=test_results_dict, n_samples=16
     )
@@ -680,11 +773,12 @@ def train_model(args) -> None:
     logger.info(f"Final model saved: {final_model_path}")
 
     # Sample predictions
-    sample_images = x_test[np.random.choice(len(x_test), size=5, replace=False)]
-    predictions = model.predict(sample_images, verbose=0)
+    n_sample = min(5, len(x_test))
+    sample_idx = np.random.choice(len(x_test), size=n_sample, replace=False)
+    predictions = model.predict(x_test[sample_idx], verbose=0)
     pred_classes, confidences = _extract_predictions_with_confidence(predictions)
-    true_classes = np.argmax(y_test[:5], axis=1)
-    for i in range(5):
+    true_classes = np.argmax(y_test[sample_idx], axis=1)
+    for i in range(n_sample):
         logger.info(f"  Sample {i}: True={true_classes[i]}, Pred={pred_classes[i]}, Conf={confidences[i]:.4f}")
 
 
@@ -696,9 +790,17 @@ def main():
     parser = create_base_argument_parser(
         description='Train CapsNet on image classification datasets',
         default_dataset='mnist',
-        dataset_choices=['mnist', 'cifar10']
+        dataset_choices=['mnist', 'cifar10', 'imagenet'],
+        # The base defaults (224, 64) are not CapsNet's: 224x224 ImageNet has about 4e10
+        # routing weights, and the batch size that fits depends on the dataset (resolved
+        # after parsing).
+        default_image_size=IMAGENET_IMAGE_SIZE,
+        default_batch_size=None,
+        image_size_help=f'Used only when --dataset imagenet: square input side (default: '
+                        f'{IMAGENET_IMAGE_SIZE}; larger sides do not fit with 1000 classes)',
+        batch_size_help=f'Training batch size (default: {DEFAULT_BATCH_SIZE}, '
+                        f'{IMAGENET_BATCH_SIZE} for imagenet)',
     )
-
     # CapsNet-specific arguments
     parser.add_argument('--optimizer', type=str, default='adam',
                         help='Optimizer to use (default: adam)')
@@ -712,8 +814,19 @@ def main():
                         help='Reconstruction visualization frequency in epochs (default: 1)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
+    add_imagenet_arguments(parser, note='Used only when --dataset imagenet: ')
+    add_holdout_argument(parser)
+    parser.add_argument('--eval-samples', type=int, default=DEFAULT_EVAL_SAMPLES,
+                        help='Used only when --dataset imagenet: images of the selection and '
+                             'test splits kept in memory for the reconstruction figures '
+                             f'(default: {DEFAULT_EVAL_SAMPLES}); the test metrics use all of them')
+    parser.add_argument('--max-samples', type=int, default=None,
+                        help='Used only when --dataset imagenet: cap train and test at this '
+                             'many images (smoke runs); the selection split is not capped')
 
     args = parser.parse_args()
+    if args.batch_size is None:
+        args.batch_size = IMAGENET_BATCH_SIZE if args.dataset == 'imagenet' else DEFAULT_BATCH_SIZE
 
     try:
         train_model(args)
