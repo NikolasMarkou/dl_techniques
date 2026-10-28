@@ -2318,6 +2318,26 @@ def _vq_encoder_build() -> keras.Model:
         downsample_factor=4, num_res_blocks=1, norm_type="layer_norm").encoder
 
 
+def _sam1_prompt_encoder_owned() -> set:
+    """SAM1's prompt encoder: the random-Fourier position layer, the four point-type embeddings,
+    the padding-point and no-mask embeddings, and the mask stack (a Sequential, named inside)."""
+    return ({"pe_layer", "not_a_point_embed", "no_mask_embed", "mask_downscaling"}
+            | {f"point_embedding_{i}" for i in range(4)})
+
+
+def _sam1_mask_stack_owned() -> set:
+    """The mask stack: the two-convolution ``stem`` and the 1x1 ``conv3`` to the embedding size."""
+    return {"stem", "conv3"}
+
+
+def _sam1_prompt_encoder_build() -> keras.layers.Layer:
+    return REPLAY_SUBJECTS["sam1_prompt_encoder"][0](None)
+
+
+def _sam1_mask_stack_build() -> keras.Model:
+    return _sam1_prompt_encoder_build().mask_downscaling
+
+
 def _siamfc_build() -> keras.Model:
     from dl_techniques.models.vision.siamfc.model import SiamFC
     return SiamFC()
@@ -2348,6 +2368,7 @@ TRACKER_NUMBERED: Dict[str, Tuple[Callable[[], keras.Model], Callable[[], Any],
     "depth_anything_encoder": (_depth_anything_encoder_build, lambda: _images(64, 64, 3),
                                _depth_anything_encoder_owned),
     "vq_vae_rotation_encoder": (_vq_encoder_build, lambda: _images(32, 32, 3), _vq_encoder_owned),
+    "sam1_mask_stack": (_sam1_mask_stack_build, lambda: _images(32, 32, 1), _sam1_mask_stack_owned),
 }
 
 
@@ -2403,6 +2424,27 @@ def test_the_tracker_name_rule_sees_the_spellings_the_depth_anything_encoder_had
         "a missing pool": [n for n in clean if n != "pool_block_1"],
         "a stage of three convolutions": [*clean, "conv_block_0_3"],
         "a stage renamed": ["conv_block_4_1" if n == "conv_block_3_1" else n for n in clean],
+    }
+    for why, owned in plants.items():
+        assert numbering_problems(owned, expected), f"{why} passed the numbering rule"
+
+
+def test_the_sam1_prompt_encoder_owns_exactly_the_layers_its_architecture_names() -> None:
+    """``PromptEncoder.call`` takes points, boxes and masks, not one tensor, so it has its own row."""
+    assert numbering_problems(direct_children(_sam1_prompt_encoder_build()),
+                              _sam1_prompt_encoder_owned()) == []
+
+
+def test_the_tracker_name_rule_sees_the_spellings_the_sam1_mask_stack_had() -> None:
+    expected = _sam1_mask_stack_owned()
+    clean = sorted(expected)
+    assert numbering_problems(clean, expected) == []
+    plants = {
+        "the loose first conv": [*(n for n in clean if n != "stem"), "conv1"],
+        "the loose norms and activations": [*clean, "norm1", "act1", "conv2", "norm2", "act2"],
+        "the projection renamed": ["conv_3" if n == "conv3" else n for n in clean],
+        "a missing projection": [n for n in clean if n != "conv3"],
+        "a second stem": [*clean, "stem_1"],
     }
     for why, owned in plants.items():
         assert numbering_problems(owned, expected), f"{why} passed the numbering rule"
@@ -2538,6 +2580,18 @@ def _dasiamrpn_without_shape(**kw: Any) -> Any:
 def _siamrpn_backbone_without_shape(**kw: Any) -> Any:
     from dl_techniques.models.vision.dasiamrpn.model import SiamRPNBackbone
     return SiamRPNBackbone(**kw)
+
+
+@_no_shape("sam1_position_embedding_random")
+def _sam1_position_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision_language.sam.sam1.prompt_encoder import PositionEmbeddingRandom
+    return PositionEmbeddingRandom(**kw)
+
+
+@_no_shape("sam1_prompt_encoder")
+def _sam1_prompt_encoder_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision_language.sam.sam1.prompt_encoder import PromptEncoder
+    return PromptEncoder(embed_dim=32, image_embedding_size=(8, 8), input_image_size=(128, 128), **kw)
 
 
 @_no_shape("depth_anything")

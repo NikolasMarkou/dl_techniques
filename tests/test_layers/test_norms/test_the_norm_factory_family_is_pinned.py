@@ -25,6 +25,8 @@ stem's norms), so ``convunext`` and ``resnet`` lose their site and ``uca_encoder
 loses ``stem_norm``: **198 sites in 100 files, 153 dynamic, 45 literal.** The auto-built
 encoder of ``vq_vae_rotation`` builds its down-steps with ``ConvStem`` (plan-2026-10-26T125959-7af851e5
 step 19), so its ``(4, 0)`` became ``(3, 0)``: **197 sites in 101 files, 152 dynamic, 45 literal.**
+The mask stack of SAM1's ``PromptEncoder`` is built by ``ConvStem`` as well, which removes that
+file's ``(2, 0)`` entry: **195 sites in 100 files, 150 dynamic, 45 literal.**
 
 The population was first pinned by two ``<=`` ceilings (D-201 of
 ``plan-2026-08-22T035419-a11304c8``: 151 dynamic, 180 total, 2026-09-04). A
@@ -69,7 +71,9 @@ SRC_ROOT = os.path.join(os.path.dirname(_TESTS_DIR), "src")
 #: ``normalization_type`` knob): 200 sites, 101 files, 155 dynamic, 45 literal;
 #: then step 1 of plan-2026-10-26T125959-7af851e5 (``ConvStem``, the vision-head
 #: move): 198 sites, 100 files, 153 dynamic, 45 literal; then step 19 of the same plan
-#: (``vq_vae_rotation``'s down-steps are ``ConvStem``): 197 sites, 101 files, 152 dynamic, 45 literal.
+#: (``vq_vae_rotation``'s down-steps are ``ConvStem``): 197 sites, 101 files, 152 dynamic, 45 literal;
+#: then SAM1's mask stack (``sam1/prompt_encoder.py`` leaves the table): 195 sites, 100 files, 150
+#: dynamic, 45 literal.
 #: Edit it in the commit that adds or removes a site.
 NORM_CALL_SITES: Dict[str, Tuple[int, int]] = {
     "dl_techniques/layers/attention/area_attention.py": (2, 0),
@@ -162,7 +166,6 @@ NORM_CALL_SITES: Dict[str, Tuple[int, int]] = {
     "dl_techniques/models/vision/vq_vae_rotation/model.py": (3, 0),
     "dl_techniques/models/vision_language/sam/sam1/image_encoder.py": (4, 0),
     "dl_techniques/models/vision_language/sam/sam1/mask_decoder.py": (1, 0),
-    "dl_techniques/models/vision_language/sam/sam1/prompt_encoder.py": (2, 0),
     "dl_techniques/models/vision_language/sam/sam1/transformer.py": (5, 0),
     "dl_techniques/models/vision_language/sam/sam2/mask_decoder.py": (1, 0),
     "dl_techniques/models/vision_language/sam/sam3/decoder.py": (0, 6),
@@ -268,7 +271,7 @@ class TestTheNormFactoryCallSitePopulationIsPinned:
     def test_the_totals_match_the_census(self, norm_call_sites):
         dynamic = sum(pair[0] for pair in NORM_CALL_SITES.values())
         literal = sum(pair[1] for pair in NORM_CALL_SITES.values())
-        assert (dynamic, literal, len(NORM_CALL_SITES)) == (152, 45, 101), (
+        assert (dynamic, literal, len(NORM_CALL_SITES)) == (150, 45, 100), (
             "the census's own totals moved; re-derive the module docstring's numbers"
         )
 

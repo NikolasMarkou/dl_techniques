@@ -20,19 +20,20 @@ References:
 
 import keras
 import numpy as np
-from keras import layers, ops, initializers
 from typing import Optional, Tuple, Any, Dict, Literal
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.model_build import refuse_input_shape
+from dl_techniques.utils.validation import positive_int
 
 # ---------------------------------------------------------------------
 
@@ -74,6 +75,8 @@ class PositionEmbeddingRandom(keras.layers.Layer):
     :ivar positional_encoding_gaussian_matrix: Non-trainable weight of shape
         ``(2, num_pos_feats)``.
 
+    :raises ValueError: If ``input_shape`` or ``input_dim`` is passed.
+
     Input shape:
         - For `call()`: Tuple of two integers (height, width) representing the
           spatial dimensions.
@@ -91,6 +94,8 @@ class PositionEmbeddingRandom(keras.layers.Layer):
         scale: float = 1.0,
         **kwargs: Any
     ) -> None:
+        refuse_input_shape(
+            kwargs, "PositionEmbeddingRandom", "its input is a (height, width) pair given to call()")
         super().__init__(**kwargs)
         self.num_pos_feats = num_pos_feats
         self.scale = scale
@@ -107,7 +112,7 @@ class PositionEmbeddingRandom(keras.layers.Layer):
         self.positional_encoding_gaussian_matrix = self.add_weight(
             name="positional_encoding_gaussian_matrix",
             shape=(2, self.num_pos_feats),
-            initializer=initializers.RandomNormal(mean=0.0, stddev=self.scale),
+            initializer=keras.initializers.RandomNormal(mean=0.0, stddev=self.scale),
             trainable=False,
         )
         super().build(input_shape)
@@ -129,7 +134,7 @@ class PositionEmbeddingRandom(keras.layers.Layer):
         # Scale by 2π for sinusoidal encoding
         coords = 2 * np.pi * coords
         # Apply sin and cos to get final encoding
-        return ops.concatenate([ops.sin(coords), ops.cos(coords)], axis=-1)
+        return keras.ops.concatenate([keras.ops.sin(coords), keras.ops.cos(coords)], axis=-1)
 
     def call(self, size: Tuple[int, int]) -> keras.KerasTensor:
         """
@@ -143,7 +148,7 @@ class PositionEmbeddingRandom(keras.layers.Layer):
         h, w = size
         pe = self._pe_encoding(self._coord_grid(h, w))
         # (C, H, W), for compatibility with reference SAM.
-        return ops.transpose(pe, (2, 0, 1))
+        return keras.ops.transpose(pe, (2, 0, 1))
 
     def _coord_grid(self, h: int, w: int) -> keras.KerasTensor:
         """
@@ -163,13 +168,13 @@ class PositionEmbeddingRandom(keras.layers.Layer):
         # DECISION plan-2026-08-03T191222-1d751f81/D-025: do not memoize this
         # grid on the instance. A tensor built inside one trace's FuncGraph is
         # dead in every later call, raising "out of scope" under fit()/jit_compile. See decisions.md.
-        grid = ops.ones((h, w), dtype=self.compute_dtype)
-        y_embed = ops.cumsum(grid, axis=0) - 0.5
-        x_embed = ops.cumsum(grid, axis=1) - 0.5
+        grid = keras.ops.ones((h, w), dtype=self.compute_dtype)
+        y_embed = keras.ops.cumsum(grid, axis=0) - 0.5
+        x_embed = keras.ops.cumsum(grid, axis=1) - 0.5
         # Normalize to [0, 1]
-        y_embed = y_embed / ops.cast(h, dtype=self.compute_dtype)
-        x_embed = x_embed / ops.cast(w, dtype=self.compute_dtype)
-        return ops.stack([x_embed, y_embed], axis=-1)
+        y_embed = y_embed / keras.ops.cast(h, dtype=self.compute_dtype)
+        x_embed = x_embed / keras.ops.cast(w, dtype=self.compute_dtype)
+        return keras.ops.stack([x_embed, y_embed], axis=-1)
 
     def forward_with_coords(
         self,
@@ -187,12 +192,12 @@ class PositionEmbeddingRandom(keras.layers.Layer):
         :return: Positional encoding, shape ``(..., 2*num_pos_feats)``.
         :rtype: keras.KerasTensor
         """
-        coords = ops.copy(coords_input)
+        coords = keras.ops.copy(coords_input)
         # Normalize coordinates to [0, 1]
-        coords_x = coords[..., 0] / ops.cast(image_size[1], dtype=self.compute_dtype)
-        coords_y = coords[..., 1] / ops.cast(image_size[0], dtype=self.compute_dtype)
-        coords = ops.stack([coords_x, coords_y], axis=-1)
-        return self._pe_encoding(ops.cast(coords, dtype=self.compute_dtype))
+        coords_x = coords[..., 0] / keras.ops.cast(image_size[1], dtype=self.compute_dtype)
+        coords_y = coords[..., 1] / keras.ops.cast(image_size[0], dtype=self.compute_dtype)
+        coords = keras.ops.stack([coords_x, coords_y], axis=-1)
+        return self._pe_encoding(keras.ops.cast(coords, dtype=self.compute_dtype))
 
     def compute_output_shape(
         self,
@@ -228,7 +233,7 @@ class PositionEmbeddingRandom(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.sam1.prompt_encoder")
-class PromptEncoder(layers.Layer):
+class PromptEncoder(keras.layers.Layer):
     """
     Encode points, boxes and masks into the sparse and dense embeddings the
     mask decoder takes.
@@ -257,8 +262,8 @@ class PromptEncoder(layers.Layer):
     :param normalization_type: Normalization used in mask downscaling.
         Defaults to ``'layer_norm'``.
     :type normalization_type: str
-    :param activation: Activation used in mask downscaling. Defaults to
-        ``'gelu'``.
+    :param activation: Activation used in mask downscaling: any name Keras
+        resolves (``keras.activations.get``). Defaults to ``'gelu'``.
     :type activation: str
     :param kwargs: Additional arguments for the Layer base class.
     :ivar pe_layer: :class:`PositionEmbeddingRandom` positional encoder.
@@ -266,7 +271,15 @@ class PromptEncoder(layers.Layer):
         type.
     :ivar not_a_point_embed: Embedding for padding points.
     :ivar no_mask_embed: Embedding used when no mask is provided.
-    :ivar mask_downscaling: Sequential conv stack processing mask inputs.
+    :ivar mask_downscaling: Sequential holding one two-convolution
+        :class:`~dl_techniques.layers.conv_blocks.stem.ConvStem` named
+        ``stem`` (2x2 stride-2 convolutions, normalization and activation after
+        each) and the 1x1 ``conv3`` that projects to ``embed_dim``.
+
+    :raises ValueError: If ``embed_dim`` or ``mask_in_chans`` is not a positive
+        integer, if ``mask_in_chans`` is below 4, or if ``input_shape`` or
+        ``input_dim`` is passed (the sizes are ``image_embedding_size`` and
+        ``input_image_size``).
 
     Input shape (in call):
         - points: Optional tuple of (coords, labels) where:
@@ -315,7 +328,16 @@ class PromptEncoder(layers.Layer):
         activation: str = 'gelu',
         **kwargs: Any
     ) -> None:
+        refuse_input_shape(
+            kwargs, "PromptEncoder",
+            "the image sizes are image_embedding_size and input_image_size")
         super().__init__(**kwargs)
+        embed_dim = positive_int(embed_dim, "embed_dim", "PromptEncoder")
+        mask_in_chans = positive_int(mask_in_chans, "mask_in_chans", "PromptEncoder")
+        if mask_in_chans < 4:
+            raise ValueError(
+                "PromptEncoder: mask_in_chans must be at least 4 (the first mask convolution "
+                f"has mask_in_chans // 4 filters), got {mask_in_chans}")
         # Store all configuration parameters
         self.embed_dim = embed_dim
         self.image_embedding_size = image_embedding_size
@@ -330,32 +352,33 @@ class PromptEncoder(layers.Layer):
         # Point embeddings for different types:
         # 0: background point, 1: foreground point, 2: box top-left, 3: box bottom-right
         self.point_embeddings = [
-            layers.Embedding(1, embed_dim, name=f"point_embedding_{i}")
+            keras.layers.Embedding(1, embed_dim, name=f"point_embedding_{i}")
             for i in range(4)
         ]
-        self.not_a_point_embed = layers.Embedding(1, embed_dim, name="not_a_point_embed")
-        self.no_mask_embed = layers.Embedding(1, embed_dim, name="no_mask_embed")
+        self.not_a_point_embed = keras.layers.Embedding(1, embed_dim, name="not_a_point_embed")
+        self.no_mask_embed = keras.layers.Embedding(1, embed_dim, name="no_mask_embed")
 
-        # Mask downscaling network using factory for normalization
+        # Mask downscaling network: the two-convolution stem, then the 1x1 projection.
+        # DECISION plan-2026-10-26T125959-7af851e5/D-053: the stem is handed Keras' own activation
+        # FUNCTION, not the name. Do NOT pass `activation` as it came: ConvStem resolves a registry
+        # key to the registry's layer, and for `sparsemax` that is a different function from
+        # `keras.layers.Activation("sparsemax")` (max|delta| above 1 on a unit-scale input), while
+        # every other Keras name is bit-equal either way. The original stack accepted any Keras
+        # activation name; the function keeps all of them exactly.
         self.mask_downscaling = keras.Sequential(
             [
-                layers.Conv2D(
+                ConvStem(
                     mask_in_chans // 4,
                     kernel_size=2,
                     strides=2,
-                    name="conv1"
+                    padding="valid",
+                    num_convs=2,
+                    conv2_filters=mask_in_chans,
+                    normalization_type=normalization_type,
+                    activation_type=keras.activations.get(activation),
+                    name="stem"
                 ),
-                create_normalization_layer(normalization_type, name="norm1"),
-                layers.Activation(activation, name="act1"),
-                layers.Conv2D(
-                    mask_in_chans,
-                    kernel_size=2,
-                    strides=2,
-                    name="conv2"
-                ),
-                create_normalization_layer(normalization_type, name="norm2"),
-                layers.Activation(activation, name="act2"),
-                layers.Conv2D(
+                keras.layers.Conv2D(
                     embed_dim,
                     kernel_size=1,
                     name="conv3"
@@ -394,8 +417,8 @@ class PromptEncoder(layers.Layer):
         """
         # pe is (C, H, W); transpose to (H, W, C) then add the batch axis.
         pe = self.pe_layer(size=self.image_embedding_size)
-        pe = ops.transpose(pe, (1, 2, 0))
-        return ops.expand_dims(pe, axis=0)
+        pe = keras.ops.transpose(pe, (1, 2, 0))
+        return keras.ops.expand_dims(pe, axis=0)
 
     def _embed_points(
         self,
@@ -420,40 +443,40 @@ class PromptEncoder(layers.Layer):
 
         if pad:
             # Add a padding point for when no boxes are provided.
-            padding_point = ops.zeros((ops.shape(points)[0], 1, 2), dtype=points.dtype)
-            padding_label = -ops.ones((ops.shape(labels)[0], 1), dtype=labels.dtype)
-            points = ops.concatenate([points, padding_point], axis=1)
-            labels = ops.concatenate([labels, padding_label], axis=1)
+            padding_point = keras.ops.zeros((keras.ops.shape(points)[0], 1, 2), dtype=points.dtype)
+            padding_label = -keras.ops.ones((keras.ops.shape(labels)[0], 1), dtype=labels.dtype)
+            points = keras.ops.concatenate([points, padding_point], axis=1)
+            labels = keras.ops.concatenate([labels, padding_label], axis=1)
 
         point_embedding = self.pe_layer.forward_with_coords(points, self.input_image_size)
 
         # DECISION plan-2026-08-03T191222-1d751f81/D-013: zero the positional
         # encoding of label == -1 rows before adding any type embedding, matching
         # reference SAM. Skipping this leaves a padding point's embedding coordinate-dependent. See decisions.md.
-        point_embedding = ops.where(
-            ops.expand_dims(labels, -1) == -1,
-            ops.zeros_like(point_embedding),
+        point_embedding = keras.ops.where(
+            keras.ops.expand_dims(labels, -1) == -1,
+            keras.ops.zeros_like(point_embedding),
             point_embedding
         )
 
         # Add type embeddings based on labels using conditional operations
         # Label -1: not-a-point (padding)
-        point_embedding = point_embedding + ops.where(
-            ops.expand_dims(labels, -1) == -1,
+        point_embedding = point_embedding + keras.ops.where(
+            keras.ops.expand_dims(labels, -1) == -1,
             self.not_a_point_embed.weights[0],
-            ops.zeros_like(point_embedding)
+            keras.ops.zeros_like(point_embedding)
         )
         # Label 0: background point
-        point_embedding = point_embedding + ops.where(
-            ops.expand_dims(labels, -1) == 0,
+        point_embedding = point_embedding + keras.ops.where(
+            keras.ops.expand_dims(labels, -1) == 0,
             self.point_embeddings[0].weights[0],
-            ops.zeros_like(point_embedding)
+            keras.ops.zeros_like(point_embedding)
         )
         # Label 1: foreground point
-        point_embedding = point_embedding + ops.where(
-            ops.expand_dims(labels, -1) == 1,
+        point_embedding = point_embedding + keras.ops.where(
+            keras.ops.expand_dims(labels, -1) == 1,
             self.point_embeddings[1].weights[0],
-            ops.zeros_like(point_embedding)
+            keras.ops.zeros_like(point_embedding)
         )
         return point_embedding
 
@@ -471,21 +494,21 @@ class PromptEncoder(layers.Layer):
         # Reshape must preserve the batch axis: split each (x1,y1,x2,y2) box
         # into its two corners as (B, 2N, 2), order [tl0, br0, tl1, br1, ...],
         # not (B*N, 2, D) which crashes the axis-1 concat in call() for N>1.
-        batch_size = ops.shape(boxes)[0]
-        num_boxes = ops.shape(boxes)[1]
-        coords = ops.reshape(boxes, (batch_size, num_boxes * 2, 2))
+        batch_size = keras.ops.shape(boxes)[0]
+        num_boxes = keras.ops.shape(boxes)[1]
+        coords = keras.ops.reshape(boxes, (batch_size, num_boxes * 2, 2))
 
         # Get positional encoding for corner coordinates -> (B, 2N, D)
         corner_embedding = self.pe_layer.forward_with_coords(coords, self.input_image_size)
 
         # Alternating top-left/bottom-right type embeddings: [emb2, emb3,
         # emb2, emb3, ...] of length 2N, broadcast over the batch.
-        type_pair = ops.concatenate([
+        type_pair = keras.ops.concatenate([
             self.point_embeddings[2].weights[0],
             self.point_embeddings[3].weights[0],
         ], axis=0)
-        type_embeddings = ops.tile(type_pair, [num_boxes, 1])
-        corner_embedding = corner_embedding + ops.expand_dims(type_embeddings, 0)
+        type_embeddings = keras.ops.tile(type_pair, [num_boxes, 1])
+        corner_embedding = corner_embedding + keras.ops.expand_dims(type_embeddings, 0)
         return corner_embedding
 
     def _embed_masks(self, masks: keras.KerasTensor) -> keras.KerasTensor:
@@ -526,7 +549,7 @@ class PromptEncoder(layers.Layer):
 
         # Keras Conv2D expects channel-last format
         # Input is (B, 1, H, W), transpose to (B, H, W, 1)
-        masks_transposed = ops.transpose(masks, (0, 2, 3, 1))
+        masks_transposed = keras.ops.transpose(masks, (0, 2, 3, 1))
         return self.mask_downscaling(masks_transposed)
 
     def call(
@@ -554,23 +577,23 @@ class PromptEncoder(layers.Layer):
         :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
         """
         bs = self._get_batch_size(points, boxes, masks)
-        sparse_embeddings = ops.zeros((bs, 0, self.embed_dim), dtype=self.compute_dtype)
+        sparse_embeddings = keras.ops.zeros((bs, 0, self.embed_dim), dtype=self.compute_dtype)
 
         if points is not None:
             coords, labels = points
             point_embeddings = self._embed_points(coords, labels, pad=(boxes is None))
-            sparse_embeddings = ops.concatenate([sparse_embeddings, point_embeddings], axis=1)
+            sparse_embeddings = keras.ops.concatenate([sparse_embeddings, point_embeddings], axis=1)
 
         if boxes is not None:
             box_embeddings = self._embed_boxes(boxes)
-            sparse_embeddings = ops.concatenate([sparse_embeddings, box_embeddings], axis=1)
+            sparse_embeddings = keras.ops.concatenate([sparse_embeddings, box_embeddings], axis=1)
 
         if masks is not None:
             dense_embeddings = self._embed_masks(masks)
         else:
             dense_embeddings = self.no_mask_embed.weights[0]
-            dense_embeddings = ops.reshape(dense_embeddings, (1, 1, 1, self.embed_dim))
-            dense_embeddings = ops.broadcast_to(
+            dense_embeddings = keras.ops.reshape(dense_embeddings, (1, 1, 1, self.embed_dim))
+            dense_embeddings = keras.ops.broadcast_to(
                 dense_embeddings,
                 (bs, self.image_embedding_size[0], self.image_embedding_size[1], self.embed_dim)
             )
@@ -596,11 +619,11 @@ class PromptEncoder(layers.Layer):
         :rtype: int
         """
         if points is not None:
-            return ops.shape(points[0])[0]
+            return keras.ops.shape(points[0])[0]
         elif boxes is not None:
-            return ops.shape(boxes)[0]
+            return keras.ops.shape(boxes)[0]
         elif masks is not None:
-            return ops.shape(masks)[0]
+            return keras.ops.shape(masks)[0]
         else:
             return 1
 

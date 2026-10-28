@@ -164,6 +164,21 @@ anything; each is enforced by a `ValueError` and documented at its class:
 decoder are **variant-independent** — both run at `prompt_embed_dim=256` for
 every variant (§7).
 
+The prompt encoder's mask stack, `PromptEncoder.mask_downscaling`, is a
+`keras.Sequential` of a two-convolution `ConvStem` named `stem` (2x2 stride-2
+convolutions, each followed by the chosen normalization and activation) and the
+1x1 `conv3` to `embed_dim`. Its activation is any name Keras resolves
+(`keras.activations.get`), and the stem is handed Keras' own function for it, not
+the name: for every Keras name but `sparsemax` the name would give the same
+numbers, but the registry's `Sparsemax` layer is another function from Keras'
+`sparsemax`, and the stack computes exactly what it always did for all of them
+(`tests/test_models/test_sam/test_the_mask_prompt_embedder_is_a_conv_stem.py`
+compares each of ten names against a hand-built copy of the old stack, same
+weights, `atol=0`). `embed_dim` and `mask_in_chans` must be positive integers
+and `mask_in_chans` at least 4 (the first convolution has `mask_in_chans // 4`
+filters); `PromptEncoder` and `PositionEmbeddingRandom` take no `input_shape` or
+`input_dim` and raise `ValueError` when given one.
+
 ## 5. The Output Contract
 
 `SAM.call` returns three keys, and only two of them can be trained.
@@ -320,11 +335,39 @@ print(type(model).__name__, len(model.weights))
 # SAMTrainingModel 202
 ```
 
+(The `202` was read before the mask-prompt stem became a `ConvStem`. A checkpoint
+written by the earlier code no longer loads in the current code, whatever the import
+order; see the next subsection.)
+
 Note the import names the **module**, not the package. For SAM 1 the package
 import happens to be sufficient (`sam1/__init__.py` imports `training_model`),
 but that is not true of every sibling — SAM 2's `__init__` does not, so
 `import ...sam.sam2` alone still fails. Importing the defining module is the
 rule that holds for all three.
+
+### Archives written before the mask-prompt `ConvStem`
+
+The mask stack's first six layers used to be loose layers of the Sequential
+(`conv1`, `norm1`, `act1`, `conv2`, `norm2`, `act2`); they are now one tracked layer,
+`stem`. Measured with a whole small `SAM` model (an image encoder of 128 channels and 2 blocks,
+`prompt_embed_dim=64`, `mask_in_chans=8`) saved by `be92a74eb` and by `20b48aba6^`, each in
+its own process, with the mask prompt in the forward pass, and loaded by the current code: the
+two revisions give the same result. `keras.models.load_model` and `model.load_weights` into a
+freshly built current model both fail, with "A total of 5 objects could not be loaded ... Layer
+'stem_conv1' expected 2 variables, but received 0 variables during loading". The weights
+themselves are intact and move by path: copying the 17 weights of an earlier `PromptEncoder`
+(`embed_dim=32`, `mask_in_chans=8`) into a current one through the renames below gives outputs
+equal at `atol=0`, and a model built under the same seed holds the same tensors as the earlier
+one.
+
+| Earlier path | Current path |
+| :--- | :--- |
+| `mask_downscaling/conv1/{kernel,bias}` | `mask_downscaling/stem/stem_conv1/{kernel,bias}` |
+| `mask_downscaling/norm1/*` | `mask_downscaling/stem/stem_norm1/*` |
+| `mask_downscaling/conv2/{kernel,bias}` | `mask_downscaling/stem/stem_conv2/{kernel,bias}` |
+| `mask_downscaling/norm2/*` | `mask_downscaling/stem/stem_norm2/*` |
+
+`mask_downscaling/conv3` keeps its path. The stack still has 10 trainable variables.
 
 ### TensorFlow Serving
 

@@ -121,6 +121,7 @@ from dl_techniques.models.vision.squeezenet.squeezenet_v1 import SqueezeNetV1
 from dl_techniques.models.vision.squeezenet.squeezenet_v2 import SqueezeNoduleNetV2
 from dl_techniques.models.vision.vae.model import VAE
 from dl_techniques.models.vision.vq_vae_rotation.model import VQVAERotationTrick
+from dl_techniques.models.vision_language.sam.sam1.prompt_encoder import PromptEncoder
 from tests.layer_naming import PublicAutoName
 from tests.numerics import true_float32_matmul
 
@@ -1909,6 +1910,75 @@ VQ_BATCH_NORM_DOWN_1 = _vq_case("batch_norm", 1)
 VQ_RMS_NORM_DOWN_1 = _vq_case("rms_norm", 1)
 
 
+# ---------------------------------------------------------------------
+# SAM1: the mask-prompt embedder's two-convolution stack
+# ---------------------------------------------------------------------
+
+# Original: ``PromptEncoder.mask_downscaling`` before the migration (HEAD 747341a70), a
+# ``keras.Sequential`` of ``Conv2D(mask_in_chans // 4, 2, strides 2)`` (valid padding, bias, Keras'
+# defaults), a norm from the factory with its defaults only, ``keras.layers.Activation(activation)``,
+# ``Conv2D(mask_in_chans, 2, strides 2)``, a second norm, a second ``Activation(activation)`` and the
+# 1x1 ``conv3`` to ``embed_dim``. The first six layers are the stem; ``conv3`` is the projection that
+# stays in the Sequential. The model accepts any Keras activation name, so the cases cross the
+# default ``gelu`` with the other norms and activations, and ``sparsemax``, the one Keras name the
+# registry builds differently (see ``test_the_guard_the_string_route_is_not_exact_for_sparsemax``).
+_SAM_MASK_IN_CHANS = 8
+
+
+def _sam1_original(norm_type: str, activation: str) -> Original:
+    conv1 = keras.layers.Conv2D(_SAM_MASK_IN_CHANS // 4, kernel_size=2, strides=2, name="conv1")
+    norm1 = create_normalization_layer(norm_type, name="norm1")
+    act1 = keras.layers.Activation(activation, name="act1")
+    conv2 = keras.layers.Conv2D(_SAM_MASK_IN_CHANS, kernel_size=2, strides=2, name="conv2")
+    norm2 = create_normalization_layer(norm_type, name="norm2")
+    act2 = keras.layers.Activation(activation, name="act2")
+
+    def forward(x, training):
+        x = act1(norm1(conv1(x), training=training))
+        return act2(norm2(conv2(x), training=training))
+
+    return Original(
+        sublayers={"conv1": conv1, "norm1": norm1, "act1": act1,
+                   "conv2": conv2, "norm2": norm2, "act2": act2},
+        forward=forward,
+    )
+
+
+def _sam1_prompt_encoder(norm_type: str = "layer_norm", activation: str = "gelu") -> PromptEncoder:
+    encoder = PromptEncoder(
+        embed_dim=32,
+        image_embedding_size=(8, 8),
+        input_image_size=(128, 128),
+        mask_in_chans=_SAM_MASK_IN_CHANS,
+        normalization_type=norm_type,
+        activation=activation,
+    )
+    encoder.build()
+    return encoder
+
+
+def _sam1_stem_of(encoder: PromptEncoder) -> ConvStem:
+    return encoder.mask_downscaling.get_layer("stem")
+
+
+def _sam1_case(case_id: str, norm_type: str, activation: str) -> StemCase:
+    # 32 px = 4 * the 8 px embedding grid: two stride-2 valid 2x2 convolutions give 8.
+    return StemCase(
+        case_id=case_id,
+        make_model=lambda: _sam1_prompt_encoder(norm_type, activation),
+        make_original=lambda: _sam1_original(norm_type, activation),
+        input_shape=(32, 32, 1),
+        expected_output_shape=(8, 8, _SAM_MASK_IN_CHANS),
+        stem_of=_sam1_stem_of,
+    )
+
+
+SAM1_GELU_LAYER_NORM = _sam1_case("sam1-gelu-layer-norm", "layer_norm", "gelu")
+SAM1_RELU_RMS_NORM = _sam1_case("sam1-relu-rms-norm", "rms_norm", "relu")
+SAM1_SILU_BATCH_NORM = _sam1_case("sam1-silu-batch-norm", "batch_norm", "silu")
+SAM1_SPARSEMAX_LAYER_NORM = _sam1_case("sam1-sparsemax-layer-norm", "layer_norm", "sparsemax")
+
+
 #: One row per original variant. Later steps append here.
 CASES = [
     RESNET_IMAGENET,
@@ -1983,6 +2053,10 @@ CASES = [
     VQ_BATCH_NORM_DOWN_0,
     VQ_BATCH_NORM_DOWN_1,
     VQ_RMS_NORM_DOWN_1,
+    SAM1_GELU_LAYER_NORM,
+    SAM1_RELU_RMS_NORM,
+    SAM1_SILU_BATCH_NORM,
+    SAM1_SPARSEMAX_LAYER_NORM,
 ]
 
 #: ``(row id, make a model, a forward input shape)`` for the built-stem test.
@@ -2037,6 +2111,14 @@ BUILT_STEM_ROWS = [
     ("depth-anything-placeholder", _depth_anything_model, (64, 64, 3), _depth_anything_stem_of),
     ("vq-vae-rotation-down-0", lambda: _vq_model("layer_norm"), (32, 32, 3), _vq_stem_of(0)),
     ("vq-vae-rotation-down-1", lambda: _vq_model("batch_norm"), (32, 32, 3), _vq_stem_of(1)),
+    # The prompt encoder's call takes points, boxes and masks, so the row builds the stack it applies
+    # to a mask: the Sequential ``mask_downscaling``, which a mask prompt is passed through whole.
+    (
+        "sam1-mask-downscaling",
+        lambda: _sam1_prompt_encoder().mask_downscaling,
+        (32, 32, 1),
+        lambda stack: stack.get_layer("stem"),
+    ),
 ]
 
 
@@ -2110,6 +2192,11 @@ INITIALIZER_AUDIT = {
     "DaSiamRPN": ("knob", "lecun_normal (default glorot_uniform = ConvStem's)"),
     "SiamRPNBackbone": ("knob", "lecun_normal (default glorot_uniform = ConvStem's)"),
     "DepthAnything": ("knob", "lecun_normal (default he_normal)"),
+    "PromptEncoder": (
+        "default-no-knob",
+        "no initializer parameter; the original Conv2D took Keras' glorot_uniform / zeros, "
+        "which are ConvStem's defaults",
+    ),
     "VQVAERotationTrick": (
         "default-no-knob",
         "no initializer parameter (only the codebook's); the original Conv2D took Keras' "
@@ -2752,6 +2839,84 @@ def test_the_guard_the_harness_sees_a_vq_down_step_norm_applied_twice():
             VQ_LAYER_NORM_DOWN_0.stem_of(model),
             forward=_norm_applied_twice,
         )
+
+
+@pytest.mark.parametrize(
+    "case,override,match",
+    [
+        # No padding control: on an even side (the mask is 4 * the embedding grid) a 2x2 stride-2
+        # convolution reads the same cells with "valid" and with "same", so it is not observable.
+        (SAM1_GELU_LAYER_NORM, {"strides": 1}, "shape"),
+        (SAM1_GELU_LAYER_NORM, {"kernel_size": 3}, "not compatible"),
+        (SAM1_GELU_LAYER_NORM, {"use_bias": False}, "weights"),
+        # One convolution is a different stem: the second role set is missing.
+        (SAM1_GELU_LAYER_NORM, {"num_convs": 1}, "roles"),
+        # The last activation of the original runs after the second norm.
+        (SAM1_GELU_LAYER_NORM, {"final_activation": False}, "roles"),
+        (SAM1_GELU_LAYER_NORM, {"activation_type": "relu"}, "differs from the original"),
+        (SAM1_GELU_LAYER_NORM, {"normalization_type": "rms_norm"}, "weights"),
+        (SAM1_SILU_BATCH_NORM, {"normalization_kwargs": {"epsilon": 1e-3}}, "differs from the original"),
+        (SAM1_SILU_BATCH_NORM, {"normalization_kwargs": {"momentum": 0.9}}, "after a training=True pass"),
+        (SAM1_GELU_LAYER_NORM, {"use_pooling": True}, "roles"),
+    ],
+    ids=[
+        "stride-1",
+        "kernel-3",
+        "bias-dropped",
+        "one-conv",
+        "final-activation-dropped",
+        "relu-for-gelu",
+        "rms-norm-for-layer-norm",
+        "batch-norm-epsilon-1e-3",
+        "batch-norm-momentum-0.9",
+        "pool-added",
+    ],
+)
+def test_the_guard_the_harness_sees_a_sam1_mask_stem_with_one_wrong_setting(case, override, match):
+    """Each value of the mask-prompt stack is a defect when it is not kept; the stem rebuilt
+    from the model's own config passes the same comparison."""
+    stem = _stem_from_config(case, **override)
+    exception = ValueError if match == "not compatible" else AssertionError
+    with pytest.raises(exception, match=match):
+        assert_stem_matches_original(case, stem)
+    assert_stem_matches_original(case, _stem_from_config(case))
+
+
+def _two_conv_norm_applied_twice(stem: ConvStem, x, training):
+    """The Uca defect shape on a two-convolution stem: the first norm runs twice."""
+    x = stem.norm1(stem.norm1(stem.conv1(x), training=training), training=training)
+    x = stem.act1(x)
+    return stem.act2(stem.norm2(stem.conv2(x), training=training))
+
+
+def test_the_guard_the_harness_sees_a_sam1_norm_applied_twice():
+    """A second ``norm1`` in the forward changes the output."""
+    model = SAM1_GELU_LAYER_NORM.make_model()
+    with pytest.raises(AssertionError, match="differs from the original"):
+        assert_stem_matches_original(
+            SAM1_GELU_LAYER_NORM,
+            SAM1_GELU_LAYER_NORM.stem_of(model),
+            forward=_two_conv_norm_applied_twice,
+        )
+
+
+def test_the_guard_the_string_route_is_not_exact_for_sparsemax():
+    """Why the encoder hands the stem Keras' own function and not the name.
+
+    ``keras.layers.Activation("sparsemax")`` is Keras' sparsemax; ``ConvStem(activation_type=
+    "sparsemax")`` resolves the name to the registry's ``Sparsemax`` layer, which is another
+    function (it differs from the original by more than 1 on this input). The model's own stem
+    matches; a stem rebuilt from the NAME does not.
+    """
+    case = SAM1_SPARSEMAX_LAYER_NORM
+    assert_stem_matches_original(case, case.stem_of(case.make_model()))
+    by_name = ConvStem(
+        _SAM_MASK_IN_CHANS // 4, kernel_size=2, strides=2, padding="valid", num_convs=2,
+        conv2_filters=_SAM_MASK_IN_CHANS, normalization_type="layer_norm",
+        activation_type="sparsemax",
+    )
+    with pytest.raises(AssertionError, match="differs from the original"):
+        assert_stem_matches_original(case, by_name)
 
 
 def test_the_guard_a_correct_stem_survives_the_same_harness():

@@ -69,6 +69,7 @@ ROOTS = ("src", "tests")
 #: 423 / 404 after ``deepsort/appearance.py`` and its test moved to ``keras.ops`` (the same plan, step 18).
 #: 421 / 402 after ``siamfc/model.py`` and its test moved to ``keras.ops`` (the same plan, step 18).
 #: 419 / 400 after ``dasiamrpn/model.py`` and its test moved to ``keras.ops`` (the same plan, step 18).
+#: 418 / 399 after ``sam1/prompt_encoder.py`` moved to ``keras.ops`` and ``keras.layers`` (the same plan, step 19).
 #: Edit it in the commit that converts a file (delete its line) or, with a
 #: recorded reason, adds a statement.
 KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
@@ -233,7 +234,6 @@ KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
     "src/dl_techniques/models/vision_language/sam/sam1/image_encoder.py": 1,
     "src/dl_techniques/models/vision_language/sam/sam1/mask_decoder.py": 1,
     "src/dl_techniques/models/vision_language/sam/sam1/preprocessing.py": 1,
-    "src/dl_techniques/models/vision_language/sam/sam1/prompt_encoder.py": 1,
     "src/dl_techniques/models/vision_language/sam/sam1/training_model.py": 1,
     "src/dl_techniques/models/vision_language/sam/sam1/transformer.py": 1,
     "src/dl_techniques/models/vision_language/sam/sam2/hiera.py": 1,
@@ -535,7 +535,7 @@ def test_the_census_is_exact(census):
 
 
 def test_the_census_totals(census):
-    assert (sum(KERAS_SUBMODULE_IMPORTS.values()), len(KERAS_SUBMODULE_IMPORTS)) == (419, 400), (
+    assert (sum(KERAS_SUBMODULE_IMPORTS.values()), len(KERAS_SUBMODULE_IMPORTS)) == (418, 399), (
         "the census's own totals moved; re-derive the module docstring's numbers")
     for path in KERAS_SUBMODULE_IMPORTS:
         assert (REPO_ROOT / path).is_file(), f"census file moved or deleted: {path}"

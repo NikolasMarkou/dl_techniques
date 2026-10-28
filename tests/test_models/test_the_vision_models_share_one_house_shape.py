@@ -1298,6 +1298,7 @@ ANCHOR_TOKENS: Dict[str, Dict[str, int]] = {
         "plan-2026-08-03T191222-1d751f81/D-013": 1,
         "plan-2026-08-03T191222-1d751f81/D-016": 1,
         "plan-2026-08-03T191222-1d751f81/D-025": 1,
+        "plan-2026-10-26T125959-7af851e5/D-053": 1,
     },
     "src/dl_techniques/utils/weight_transfer.py": {
         "plan-2026-08-14T233721-d4f9beb2/D-070": 1,
