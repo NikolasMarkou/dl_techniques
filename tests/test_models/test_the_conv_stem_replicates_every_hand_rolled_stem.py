@@ -96,6 +96,8 @@ from dl_techniques.layers.activations.exact_activations import (
 )
 from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.models.vision.capsnet.model import CapsNet
+from dl_techniques.models.vision.capsnet.model_v2 import CapsNetV2
 from dl_techniques.models.vision.convnext.convnext_v1 import ConvNeXtV1
 from dl_techniques.models.vision.convnext.convnext_v2 import ConvNeXtV2
 from dl_techniques.models.vision.convunext.model import ConvUNextStem
@@ -1481,6 +1483,126 @@ RBF_CLIFFORD_P4 = _rbf_clifford_case(4, True)
 # 16 -> ceil(16 / 3) = 6 under ``same`` padding.
 RBF_CLIFFORD_P3 = _rbf_clifford_case(3, True)
 
+# ---------------------------------------------------------------------
+# CapsNet and CapsNetV2 convolution blocks
+# ---------------------------------------------------------------------
+
+# Original: ``src/dl_techniques/models/vision/capsnet/model.py`` and ``model_v2.py``
+# at ``be92a74eb`` (``_build_feature_extraction`` / the legacy branch of
+# ``_build_stem``): per ``conv_filters`` entry ``Conv2D(filters, 9 if i == 0 else 5,
+# strides=1, padding="valid", use_bias=True, kernel_initializer=<one shared
+# instance>, kernel_regularizer)``, a ``BatchNormalization()`` (Keras defaults:
+# momentum 0.99, epsilon 1e-3) only when ``use_batch_norm``, and a ``ReLU()``. The
+# paper has no batch normalization; 1e-3 is the pre-migration Keras default, not a
+# reference value, and the norm factory's own default is 1e-6, so a block that did
+# not pass its epsilon would differ with no shape symptom. A block is a feature
+# trunk stage, not a patch stem: the CapsNet trunk is a list of single-convolution
+# ConvStem blocks (``num_convs=2`` cannot reproduce it: one kernel size for both
+# convolutions).
+_CAPSNET_KERNEL_REG = 1e-4
+#: Neither the models' default (``he_normal``) nor ConvStem's (``glorot_uniform``).
+_CAPSNET_KERNEL_INIT = "lecun_normal"
+_CAPSNET_FILTERS = 8
+
+
+def _capsnet_block_original(kernel_size: int, batch_norm: bool) -> Original:
+    conv = keras.layers.Conv2D(
+        filters=_CAPSNET_FILTERS,
+        kernel_size=kernel_size,
+        strides=1,
+        padding="valid",
+        kernel_initializer=_CAPSNET_KERNEL_INIT,
+        kernel_regularizer=keras.regularizers.L2(_CAPSNET_KERNEL_REG),
+        name="conv",
+    )
+    norm = (
+        keras.layers.BatchNormalization(momentum=0.99, epsilon=1e-3, name="bn")
+        if batch_norm
+        else None
+    )
+    act = keras.layers.ReLU(name="relu")
+
+    def forward(x, training):
+        x = conv(x)
+        if norm is not None:
+            x = norm(x, training=training)
+        return act(x)
+
+    sublayers = {"conv1": conv, "act1": act}
+    if norm is not None:
+        sublayers["norm1"] = norm
+    return Original(sublayers=sublayers, forward=forward)
+
+
+def _capsnet_v1_model(filters=(_CAPSNET_FILTERS, _CAPSNET_FILTERS), batch_norm=True) -> CapsNet:
+    return CapsNet(
+        num_classes=4,
+        conv_filters=filters,
+        primary_capsules=4,
+        input_shape=(28, 28, 1),
+        reconstruction=False,
+        use_batch_norm=batch_norm,
+        kernel_initializer=_CAPSNET_KERNEL_INIT,
+        kernel_regularizer=keras.regularizers.L2(_CAPSNET_KERNEL_REG),
+    )
+
+
+def _capsnet_v2_model() -> CapsNetV2:
+    return CapsNetV2(
+        num_classes=4,
+        input_shape=(28, 28, 1),
+        **_capsnet_v2_selector("legacy"),
+        legacy_conv_filters=[_CAPSNET_FILTERS, _CAPSNET_FILTERS],
+        primary_capsules=4,
+        kernel_initializer=_CAPSNET_KERNEL_INIT,
+        kernel_regularizer=keras.regularizers.L2(_CAPSNET_KERNEL_REG),
+    )
+
+
+def _capsnet_v2_selector(value: str) -> dict:
+    """CapsNetV2's backbone selector under whichever spelling the constructor has."""
+    params = inspect.signature(CapsNetV2.__init__).parameters
+    return {next(name for name in ("stem_type", "stem") if name in params): value}
+
+
+def _capsnet_block(index: int):
+    return lambda model: model.conv_blocks[index]
+
+
+def _capsnet_case(
+    case_id: str, make_model, index: int, batch_norm: bool = True
+) -> StemCase:
+    kernel = 9 if index == 0 else 5
+    side = 28 if index == 0 else 28 - 8 - 4 * (index - 1)
+    out = side - kernel + 1
+    channels = 1 if index == 0 else _CAPSNET_FILTERS
+    return StemCase(
+        case_id=case_id,
+        make_model=make_model,
+        make_original=lambda: _capsnet_block_original(kernel, batch_norm),
+        input_shape=(side, side, channels),
+        expected_output_shape=(out, out, _CAPSNET_FILTERS),
+        stem_of=_capsnet_block(index),
+    )
+
+
+CAPSNET_V1_BLOCK1 = _capsnet_case("capsnet-v1-block1-k9", _capsnet_v1_model, 0)
+CAPSNET_V1_BLOCK2 = _capsnet_case("capsnet-v1-block2-k5", _capsnet_v1_model, 1)
+CAPSNET_V1_BLOCK3 = _capsnet_case(
+    "capsnet-v1-three-convs-block3-k5",
+    lambda: _capsnet_v1_model(filters=(_CAPSNET_FILTERS,) * 3),
+    2,
+)
+CAPSNET_V1_NOBN = _capsnet_case(
+    "capsnet-v1-no-bn-block2-k5",
+    lambda: _capsnet_v1_model(batch_norm=False),
+    1,
+    batch_norm=False,
+)
+CAPSNET_V2_BLOCK1 = _capsnet_case("capsnet-v2-legacy-block1-k9", _capsnet_v2_model, 0)
+CAPSNET_V2_BLOCK2 = _capsnet_case("capsnet-v2-legacy-block2-k5", _capsnet_v2_model, 1)
+
+
 #: One row per original variant. Later steps append here.
 CASES = [
     RESNET_IMAGENET,
@@ -1536,6 +1658,12 @@ CASES = [
     RBF_CLIFFORD_P2_NOREG,
     RBF_CLIFFORD_P4,
     RBF_CLIFFORD_P3,
+    CAPSNET_V1_BLOCK1,
+    CAPSNET_V1_BLOCK2,
+    CAPSNET_V1_BLOCK3,
+    CAPSNET_V1_NOBN,
+    CAPSNET_V2_BLOCK1,
+    CAPSNET_V2_BLOCK2,
 ]
 
 #: ``(row id, make a model, a forward input shape)`` for the built-stem test.
@@ -1579,6 +1707,10 @@ BUILT_STEM_ROWS = [
         _vae_stem_of,
     ),
     ("rbf-clifford-protonet", lambda: _rbf_clifford_model(2, True), (16, 16, 3)),
+    ("capsnet-v1-block1", _capsnet_v1_model, (28, 28, 1), _capsnet_block(0)),
+    ("capsnet-v1-block2", _capsnet_v1_model, (28, 28, 1), _capsnet_block(1)),
+    ("capsnet-v2-legacy-block1", _capsnet_v2_model, (28, 28, 1), _capsnet_block(0)),
+    ("capsnet-v2-legacy-block2", _capsnet_v2_model, (28, 28, 1), _capsnet_block(1)),
 ]
 
 
@@ -1641,6 +1773,8 @@ INITIALIZER_AUDIT = {
         "knob he_uniform reaches the Fire blocks; the stem keeps lecun_uniform",
     ),
     "VAE": ("knob", "lecun_normal (default he_normal)"),
+    "CapsNet": ("knob", "lecun_normal (default he_normal)"),
+    "CapsNetV2": ("knob", "lecun_normal (default he_normal)"),
     "CliffordRBFProtoNet": (
         "default-no-knob",
         "no initializer parameter; the original Conv2D took Keras' "
@@ -2065,6 +2199,19 @@ def test_the_guard_a_correct_stem_survives_the_settings_check():
     stem = CLIFFORD_P1.make_model().stem
     assert stem.conv1.kernel_initializer is not stem.conv2.kernel_initializer
     assert_stem_settings_match_original(CLIFFORD_P1, stem)
+
+
+def test_the_guard_the_harness_sees_a_capsnet_block_at_the_norm_factorys_epsilon():
+    """The paper has no batch norm and the blocks keep the Keras epsilon of 1e-3; the
+    norm factory's own default is 1e-6, so a block that did not pass its epsilon is
+    1000x off with no shape symptom. The harness must tell the two apart."""
+    stem = _stem_from_config(CAPSNET_V1_BLOCK1, normalization_kwargs={"epsilon": 1e-6})
+    assert stem.norm1.epsilon == pytest.approx(1e-6)
+    with pytest.raises(AssertionError, match="differs from the original"):
+        assert_stem_matches_original(CAPSNET_V1_BLOCK1, stem)
+    own = _stem_from_config(CAPSNET_V1_BLOCK1)
+    assert own.norm1.epsilon == pytest.approx(1e-3)
+    assert_stem_matches_original(CAPSNET_V1_BLOCK1, own)
 
 
 def test_the_guard_a_correct_stem_survives_the_same_harness():

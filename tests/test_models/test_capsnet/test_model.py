@@ -10,12 +10,14 @@ import pytest
 import numpy as np
 import tensorflow as tf
 import keras
+import json
 import tempfile
 import os
 from typing import Tuple
 
 from dl_techniques.models.vision.capsnet.model import CapsNet, CapsuleAccuracy, create_capsnet
 from dl_techniques.layers.capsules import PrimaryCapsule, RoutingCapsule
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.losses.capsule_margin_loss import capsule_margin_loss
 from dl_techniques.utils.tensors import length
 
@@ -74,7 +76,7 @@ class TestCapsuleAccuracy:
     def test_metric_reset(self, metric, sample_predictions, sample_labels):
         """Test metric reset functionality."""
         metric.update_state(sample_labels, sample_predictions)
-        initial_result = metric.result()
+        assert metric.count.numpy() > 0.0
 
         metric.reset_state()
         assert metric.total.numpy() == 0.0
@@ -157,7 +159,7 @@ class TestCapsNet:
         assert capsnet.negative_margin == 0.1
         assert capsnet.downweight == 0.5
         assert capsnet.reconstruction_weight == 0.01
-        assert capsnet._layers_built is False
+        assert capsnet.built is False
 
     def test_initialization_custom(self, num_classes, mnist_input_shape):
         """Test initialization with custom parameters."""
@@ -186,7 +188,7 @@ class TestCapsNet:
         assert capsnet.primary_capsule_dim == 4
         assert capsnet.digit_capsule_dim == 8
         assert capsnet.reconstruction is False
-        assert capsnet._input_shape == mnist_input_shape
+        assert capsnet.input_shape_config == mnist_input_shape
         assert capsnet.use_batch_norm is False
         assert capsnet.positive_margin == 0.95
         assert capsnet.negative_margin == 0.05
@@ -194,7 +196,7 @@ class TestCapsNet:
         assert capsnet.reconstruction_weight == 0.005
         assert capsnet.name == "custom_capsnet"
         # Model layers are built only when first called, not during initialization
-        assert capsnet._layers_built is False
+        assert capsnet.built is False
 
     def test_initialization_with_regularization(self, num_classes):
         """Test initialization with regularization."""
@@ -231,11 +233,10 @@ class TestCapsNet:
         capsnet = CapsNet(num_classes=num_classes)
 
         # Build by calling with data
-        outputs = capsnet(sample_mnist_data)
+        capsnet(sample_mnist_data)
 
-        assert capsnet._layers_built is True
         assert capsnet.built is True
-        assert len(capsnet.conv_layers) == len(capsnet.conv_filters)
+        assert len(capsnet.conv_blocks) == len(capsnet.conv_filters)
         assert capsnet.primary_caps is not None
         assert capsnet.digit_caps is not None
         assert isinstance(capsnet.primary_caps, PrimaryCapsule)
@@ -942,7 +943,7 @@ class TestCapsNet:
 
         assert isinstance(capsnet, CapsNet)
         assert capsnet.num_classes == num_classes
-        assert capsnet._input_shape == mnist_input_shape
+        assert capsnet.input_shape_config == mnist_input_shape
         # Build the model by calling it
         sample_data = tf.random.uniform([1] + list(mnist_input_shape), 0, 1)
         _ = capsnet(sample_data)
@@ -1138,6 +1139,224 @@ class TestCapsNet:
                     before, after, rtol=0, atol=0,
                     err_msg=f"weight array {index} changed across the round trip"
                 )
+
+
+class _MnistFixtures:
+    """The MNIST-shaped fixtures the classes below share."""
+
+    @pytest.fixture
+    def mnist_input_shape(self) -> Tuple[int, int, int]:
+        return (28, 28, 1)
+
+    @pytest.fixture
+    def num_classes(self) -> int:
+        return 10
+
+    @pytest.fixture
+    def sample_mnist_data(self, mnist_input_shape):
+        return tf.random.uniform([4] + list(mnist_input_shape), 0, 1)
+
+
+class TestCapsNetConvTrunk(_MnistFixtures):
+    """The convolution trunk is a list of single-convolution ``ConvStem`` blocks."""
+
+    def test_the_trunk_is_one_conv_stem_per_filter_entry(self):
+        capsnet = CapsNet(num_classes=10, conv_filters=[8, 16, 24], reconstruction=False)
+
+        assert [type(block) for block in capsnet.conv_blocks] == [ConvStem] * 3
+        assert [block.name for block in capsnet.conv_blocks] == [
+            "conv_block_0", "conv_block_1", "conv_block_2"
+        ]
+        assert [block.conv1.filters for block in capsnet.conv_blocks] == [8, 16, 24]
+
+    def test_the_first_block_is_9x9_and_later_blocks_are_5x5_valid_and_biased(self):
+        capsnet = CapsNet(num_classes=10, conv_filters=[8, 8, 8], reconstruction=False)
+
+        assert [block.conv1.kernel_size for block in capsnet.conv_blocks] == [
+            (9, 9), (5, 5), (5, 5)
+        ]
+        for block in capsnet.conv_blocks:
+            assert block.conv1.strides == (1, 1)
+            assert block.conv1.padding == "valid"
+            assert block.conv1.use_bias is True
+            assert block.conv2 is None and block.pool is None
+
+    def test_a_block_keeps_the_keras_batch_norm_epsilon_not_the_factorys(self):
+        """The factory default is 1e-6; the pre-migration layers used Keras' 1e-3."""
+        capsnet = CapsNet(num_classes=10, reconstruction=False)
+
+        for block in capsnet.conv_blocks:
+            assert block.norm1.epsilon == pytest.approx(1e-3)
+            assert block.norm1.momentum == pytest.approx(0.99)
+            assert isinstance(block.act1, keras.layers.ReLU)
+
+    def test_without_batch_norm_a_block_has_no_norm_layer(self):
+        capsnet = CapsNet(num_classes=10, use_batch_norm=False, reconstruction=False)
+
+        assert all(block.norm1 is None for block in capsnet.conv_blocks)
+
+    def test_the_weight_paths_name_each_block_and_its_parts(self, mnist_input_shape):
+        capsnet = CapsNet(
+            num_classes=10, input_shape=mnist_input_shape, reconstruction=False, name="capsnet"
+        )
+        capsnet.build((None, *mnist_input_shape))
+
+        assert [weight.path for weight in capsnet.weights] == [
+            "capsnet/conv_block_0/conv_block_0_conv1/kernel",
+            "capsnet/conv_block_0/conv_block_0_conv1/bias",
+            "capsnet/conv_block_0/conv_block_0_norm1/gamma",
+            "capsnet/conv_block_0/conv_block_0_norm1/beta",
+            "capsnet/conv_block_0/conv_block_0_norm1/moving_mean",
+            "capsnet/conv_block_0/conv_block_0_norm1/moving_variance",
+            "capsnet/conv_block_1/conv_block_1_conv1/kernel",
+            "capsnet/conv_block_1/conv_block_1_conv1/bias",
+            "capsnet/conv_block_1/conv_block_1_norm1/gamma",
+            "capsnet/conv_block_1/conv_block_1_norm1/beta",
+            "capsnet/conv_block_1/conv_block_1_norm1/moving_mean",
+            "capsnet/conv_block_1/conv_block_1_norm1/moving_variance",
+            "capsnet/primary_caps/primary_conv/kernel",
+            "capsnet/primary_caps/primary_conv/bias",
+            "capsnet/digit_caps/capsule_transformation_weights",
+            "capsnet/digit_caps/capsule_bias",
+        ]
+
+    def test_a_training_call_moves_the_block_batch_norm_statistics_and_an_inference_call_does_not(
+        self, mnist_input_shape
+    ):
+        """``training`` reaches every block's batch norm: the moving mean moves on a training
+        call and stays put on an inference call (and on ``training=None``)."""
+        capsnet = CapsNet(num_classes=10, input_shape=mnist_input_shape, reconstruction=False)
+        x = tf.random.uniform((4, *mnist_input_shape), 0, 1)
+        capsnet(x, training=False)
+        before = [keras.ops.convert_to_numpy(b.norm1.moving_mean) for b in capsnet.conv_blocks]
+
+        capsnet(x, training=False)
+        capsnet(x)
+        unchanged = [keras.ops.convert_to_numpy(b.norm1.moving_mean) for b in capsnet.conv_blocks]
+        capsnet(x, training=True)
+        moved = [keras.ops.convert_to_numpy(b.norm1.moving_mean) for b in capsnet.conv_blocks]
+
+        for was, same, now in zip(before, unchanged, moved):
+            np.testing.assert_array_equal(was, same)
+            assert float(np.max(np.abs(now - was))) > 1e-4
+
+    def test_the_old_parallel_lists_and_the_private_flags_are_gone(self):
+        capsnet = CapsNet(num_classes=10, reconstruction=False)
+
+        for gone in ("conv_layers", "batch_norm_layers", "activation_layers",
+                     "_layers_built", "_input_shape"):
+            assert not hasattr(capsnet, gone), gone
+
+    def test_input_shape_is_stored_as_input_shape_config_and_reported_when_resolved(
+        self, num_classes, sample_mnist_data
+    ):
+        """``get_config`` reports the shape resolved by ``build`` on purpose: a reload
+        of a model constructed without ``input_shape`` must rebuild the same decoder."""
+        given = CapsNet(num_classes=num_classes, input_shape=[28, 28, 1], reconstruction=True)
+        assert given.input_shape_config == (28, 28, 1)
+
+        lazy = CapsNet(num_classes=num_classes, reconstruction=True)
+        assert lazy.input_shape_config is None
+        lazy(sample_mnist_data)
+        assert lazy.input_shape_config == tuple(sample_mnist_data.shape[1:])
+        assert tuple(lazy.get_config()["input_shape"]) == lazy.input_shape_config
+
+
+class TestCapsNetBuildAndShapes(_MnistFixtures):
+    """``build`` materializes what ``call`` runs; ``compute_output_shape`` is the forward shape."""
+
+    @pytest.mark.parametrize("reconstruction", [True, False], ids=["decoder", "no-decoder"])
+    def test_explicit_build_equals_a_lazy_build(self, mnist_input_shape, reconstruction):
+        explicit = CapsNet(
+            num_classes=10, input_shape=mnist_input_shape, reconstruction=reconstruction
+        )
+        explicit.build((None, *mnist_input_shape))
+        lazy = CapsNet(
+            num_classes=10, input_shape=mnist_input_shape, reconstruction=reconstruction
+        )
+        lazy(tf.zeros((1, *mnist_input_shape)))
+
+        def relative(model):
+            return [weight.path.split("/", 1)[1] for weight in model.weights]
+
+        assert relative(explicit) == relative(lazy)
+        assert len(explicit.weights) == (22 if reconstruction else 16)
+        assert explicit.count_params() == lazy.count_params() > 0
+
+    def test_build_is_idempotent(self, mnist_input_shape):
+        capsnet = CapsNet(num_classes=10, input_shape=mnist_input_shape, reconstruction=False)
+        capsnet.build((None, *mnist_input_shape))
+        before = [weight.path for weight in capsnet.weights]
+        capsnet.build((None, *mnist_input_shape))
+        assert [weight.path for weight in capsnet.weights] == before
+
+    def test_build_refuses_a_non_4d_shape(self):
+        with pytest.raises(ValueError, match="Expected 4D input shape"):
+            CapsNet(num_classes=10, reconstruction=False).build((None, 28, 28))
+
+    @pytest.mark.parametrize("reconstruction", [True, False], ids=["decoder", "no-decoder"])
+    @pytest.mark.parametrize("batch", [None, 3])
+    def test_compute_output_shape_equals_the_forward_shape_and_builds_nothing(
+        self, mnist_input_shape, reconstruction, batch
+    ):
+        capsnet = CapsNet(
+            num_classes=10, input_shape=mnist_input_shape, reconstruction=reconstruction
+        )
+        shapes = capsnet.compute_output_shape((batch, *mnist_input_shape))
+        assert capsnet.built is False
+
+        outputs = capsnet(tf.zeros((batch or 2, *mnist_input_shape)))
+        assert set(shapes) == set(outputs)
+        for key, shape in shapes.items():
+            assert tuple(shape)[0] == batch
+            assert tuple(shape)[1:] == tuple(outputs[key].shape)[1:], key
+
+    def test_compute_output_shape_of_a_model_without_an_input_shape_reads_the_given_one(self):
+        capsnet = CapsNet(num_classes=10, reconstruction=True)
+        shapes = capsnet.compute_output_shape((None, 32, 32, 3))
+        assert tuple(shapes["reconstructed"]) == (None, 32, 32, 3)
+
+    def test_compute_output_shape_refuses_a_non_4d_shape(self):
+        with pytest.raises(ValueError, match="Expected 4D input shape"):
+            CapsNet(num_classes=10, reconstruction=False).compute_output_shape((None, 28, 28))
+
+    def test_a_symbolic_call_returns_the_dict_the_trainers_conformal_step_reads(
+        self, mnist_input_shape
+    ):
+        capsnet = CapsNet(num_classes=10, input_shape=mnist_input_shape, reconstruction=False)
+        outputs = capsnet(keras.Input(mnist_input_shape))
+        assert tuple(outputs["length"].shape) == (None, 10)
+        assert tuple(outputs["digit_caps"].shape) == (None, 10, 16)
+
+    def test_summary_logs_nothing_and_builds_nothing(self, mnist_input_shape, caplog):
+        capsnet = CapsNet(num_classes=10, input_shape=mnist_input_shape)
+        with caplog.at_level("INFO"):
+            capsnet.summary(print_fn=lambda *args, **kwargs: None)
+        assert not [r for r in caplog.records if "CapsNet Configuration" in r.getMessage()]
+
+
+class TestCapsNetConfig(_MnistFixtures):
+    """``get_config`` writes every constructor argument and is JSON-safe."""
+
+    def test_get_config_is_json_safe_with_an_initializer_instance(self, mnist_input_shape):
+        capsnet = CapsNet(
+            num_classes=10,
+            input_shape=mnist_input_shape,
+            kernel_initializer=keras.initializers.HeNormal(),
+            kernel_regularizer=keras.regularizers.L2(1e-4),
+        )
+        config = capsnet.get_config()
+        json.dumps(config)
+        rebuilt = CapsNet.from_config(json.loads(json.dumps(config)))
+        assert json.dumps(rebuilt.get_config(), sort_keys=True) == json.dumps(config, sort_keys=True)
+
+    def test_a_config_names_every_constructor_argument(self):
+        import inspect
+
+        capsnet = CapsNet(num_classes=10, reconstruction=False)
+        arguments = set(inspect.signature(CapsNet.__init__).parameters) - {"self", "kwargs"}
+        assert arguments <= set(capsnet.get_config())
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

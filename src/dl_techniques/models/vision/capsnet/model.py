@@ -22,7 +22,6 @@ References:
 
 import os
 import keras
-from keras import ops
 import tensorflow as tf
 from typing import Optional, Tuple, Union, Dict, Any, List, Sequence
 
@@ -32,10 +31,21 @@ from typing import Optional, Tuple, Union, Dict, Any, List, Sequence
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tensors import length
+from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.metrics.capsule_accuracy import CapsuleAccuracy
 from dl_techniques.losses.capsule_margin_loss import capsule_margin_loss
 from dl_techniques.layers.capsules import PrimaryCapsule, RoutingCapsule
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+# DECISION plan-2026-10-26T125959-7af851e5/D-007: the trunk's BatchNormalization
+# epsilon is 1e-3, the Keras default these layers had before the trunk moved onto
+# ConvStem. It is the PRE-MIGRATION value, not a published reference: the paper
+# has no batch normalization. The norm factory's own default is 1e-6, so leaving
+# it unstated moved every block's norm by 1000x with no shape symptom. Guard:
+# tests/test_models/test_the_conv_stem_replicates_every_hand_rolled_stem.py (the
+# CapsNet cases). See decisions.md.
+CONV_BN_EPSILON = 1e-3
 
 # ---------------------------------------------------------------------
 
@@ -59,7 +69,7 @@ class CapsNet(keras.Model):
                  │
                  ▼
         ┌─────────────────────┐
-        │ conv stack          │  one block per conv_filters
+        │ conv_blocks         │  one block per conv_filters
         └─────────────────────┘
                  │  [B, H', W', conv_filters[-1]]
                  ▼
@@ -96,21 +106,18 @@ class CapsNet(keras.Model):
         x
         │
         ▼
-        ┌────────────────────┐
-        │ conv_{i+1} 9x9/5x5 │
-        └────────────────────┘
-                 │
-                 ▼
-        ┌────────────────────┐
-        │ bn_{i+1}           │  (use_batch_norm only)
-        └────────────────────┘
-                 │
-                 ▼
-        ┌────────────────────┐
-        │ relu_{i+1}         │
-        └────────────────────┘
+        ┌──────────────────────────┐
+        │ conv_block_{i}           │  one ConvStem
+        │   conv 9x9 / 5x5, valid  │
+        │   batch norm             │  (use_batch_norm only)
+        │   relu                   │
+        └──────────────────────────┘
 
-    The first block uses a 9x9 kernel, later blocks 5x5.
+    The first block uses a 9x9 kernel, later blocks 5x5. Block ``i`` is a
+    single-convolution :class:`~dl_techniques.layers.conv_blocks.stem.ConvStem`
+    named ``conv_block_{i}`` (its layers ``conv_block_{i}_conv1``,
+    ``conv_block_{i}_norm1``, ``conv_block_{i}_act1``), kept in ``conv_blocks``.
+    The batch norm keeps Keras' epsilon of 1e-3, not the norm factory's 1e-6.
 
     Reconstruction mask:
 
@@ -185,7 +192,7 @@ class CapsNet(keras.Model):
     :type digit_capsule_dim: int
     :param reconstruction: Whether to build the reconstruction decoder.
     :type reconstruction: bool
-    :param input_shape: Shape of input images ``(height, width, channels)``. Sets the decoder's output size, so passing it here builds the decoder in `__init__` instead of in `build`, and it is also what `save_model` builds an unbuilt model from.
+    :param input_shape: Shape of input images ``(height, width, channels)``. Sets the decoder's output size, so passing it here builds the decoder in `__init__` instead of in `build`, and it is also what `save_model` builds an unbuilt model from. Stored as ``input_shape_config``; ``get_config`` reports the resolved shape, so a model constructed without it and built reports the shape ``build`` took.
     :type input_shape: Optional[Tuple[int, int, int]]
     :param decoder_architecture: Hidden layer sizes for the reconstruction decoder.
     :type decoder_architecture: Sequence[int]
@@ -246,7 +253,7 @@ class CapsNet(keras.Model):
         self.primary_capsule_dim = primary_capsule_dim
         self.digit_capsule_dim = digit_capsule_dim
         self.reconstruction = reconstruction
-        self._input_shape = input_shape
+        self.input_shape_config = tuple(input_shape) if input_shape is not None else None
         self.decoder_architecture = list(decoder_architecture)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = self._process_regularizer(kernel_regularizer)
@@ -260,23 +267,24 @@ class CapsNet(keras.Model):
         # Names already warned about, so one skipped metric cannot flood the log.
         self._skipped_metric_names = set()
 
-        self.conv_layers = []
-        self.batch_norm_layers = []
-        self.activation_layers = []
         self.primary_caps = None
         self.digit_caps = None
         self.decoder = None
 
-        self._layers_built = False
-
         # Both helpers run here because neither one reads input_shape.
-        self._build_feature_extraction()
+        self._build_conv_blocks()
         self._build_capsule_layers()
 
         # DECISION plan-2026-08-18T073231-52a93f8c/D-007: the decoder's Dense width needs
         # input_shape, so build() creates it when it is unknown here. See decisions.md.
-        if self.reconstruction and self._input_shape is not None:
+        if self.reconstruction and self.input_shape_config is not None:
             self._build_decoder()
+
+        logger.info(
+            f"Created CapsNet with {len(self.conv_blocks)} convolution blocks, "
+            f"{self.primary_capsules} primary capsules and {self.num_classes} digit capsules "
+            f"(reconstruction: {self.reconstruction})"
+        )
 
     def _validate_parameters(
         self,
@@ -336,99 +344,14 @@ class CapsNet(keras.Model):
                 return keras.regularizers.get(regularizer)
         return keras.regularizers.get(regularizer)
 
-    def build(self, input_shape: Tuple[Optional[int], int, int, int]) -> None:
-        """Validate the input shape, create the decoder if still needed, and build every sub-layer.
-
-        :param input_shape: 4D input shape ``(batch, height, width, channels)``.
-        :type input_shape: tuple
-        :raises ValueError: If `input_shape` is not 4D.
-        """
-        if self._layers_built:
-            return
-
-        if len(input_shape) != 4:
-            raise ValueError(
-                f"Expected 4D input shape [batch, height, width, channels], got {input_shape}"
-            )
-
-        logger.info(f"Building CapsNet with input shape: {input_shape}")
-
-        # The decoder's output size comes from this shape.
-        if self.reconstruction and self._input_shape is None:
-            self._input_shape = tuple(input_shape[1:])
-
-        # DECISION plan-2026-08-18T073231-52a93f8c/D-007: the None guard keeps this from
-        # replacing a decoder that __init__ already built. See decisions.md.
-        if self.reconstruction and self._input_shape is not None and self.decoder is None:
-            self._build_decoder()
-
-        self._build_sublayer_tree(input_shape)
-
-        self._layers_built = True
-        super().build(input_shape)
-
-    def _build_sublayer_tree(self, input_shape: Tuple[Optional[int], int, int, int]) -> None:
-        """Build every sub-layer explicitly, threading shapes in dependency order.
-
-        :param input_shape: 4D input shape ``(batch, height, width, channels)``.
-        :type input_shape: tuple
-        """
-        # DECISION plan-2026-08-18T073231-52a93f8c/D-006: build each sub-layer here;
-        # overriding build() disables build-by-run and a reload gave 0 weights. See decisions.md.
-        shape = tuple(input_shape)
-
-        for i in range(len(self.conv_layers)):
-            conv_layer = self.conv_layers[i]
-            conv_layer.build(shape)
-            shape = conv_layer.compute_output_shape(shape)
-
-            bn_layer = self.batch_norm_layers[i]
-            if bn_layer is not None:
-                bn_layer.build(shape)
-                shape = bn_layer.compute_output_shape(shape)
-
-            activation_layer = self.activation_layers[i]
-            activation_layer.build(shape)
-            shape = activation_layer.compute_output_shape(shape)
-
-        self.primary_caps.build(shape)
-        shape = self.primary_caps.compute_output_shape(shape)
-
-        self.digit_caps.build(shape)
-
-        if self.decoder is not None:
-            # `_reconstruct` flattens the masked capsules first, so the decoder
-            # never sees `digit_caps`' own output shape.
-            self.decoder.build(
-                (input_shape[0], self.num_classes * self.digit_capsule_dim)
-            )
-
-    def _build_feature_extraction(self) -> None:
-        """Create the convolutional stack, one block per ``conv_filters`` entry.
-
-        Each block is a convolution, an optional batch normalization, and a
-        ReLU. The first convolution uses a 9x9 kernel, later ones 5x5.
-        """
-        for i, filters in enumerate(self.conv_filters):
-            conv_layer = keras.layers.Conv2D(
-                filters=filters,
-                kernel_size=9 if i == 0 else 5,
-                strides=1,
-                padding="valid",
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer,
-                name=f"conv_{i+1}"
-            )
-            self.conv_layers.append(conv_layer)
-
-            if self.use_batch_norm:
-                bn_layer = keras.layers.BatchNormalization(name=f"bn_{i+1}")
-                self.batch_norm_layers.append(bn_layer)
-            else:
-                self.batch_norm_layers.append(None)
-
-            activation_layer = keras.layers.ReLU(name=f"relu_{i+1}")
-            self.activation_layers.append(activation_layer)
+    def _build_conv_blocks(self) -> None:
+        """Create the convolution trunk, one :class:`ConvStem` block per ``conv_filters`` entry."""
+        self.conv_blocks = build_capsule_conv_blocks(
+            self.conv_filters,
+            self.use_batch_norm,
+            self.kernel_initializer,
+            self.kernel_regularizer,
+        )
 
     def _build_capsule_layers(self) -> None:
         """Create the primary capsule layer and the routing capsule layer."""
@@ -458,9 +381,9 @@ class CapsNet(keras.Model):
         The final Dense layer has one sigmoid unit per input pixel, and a
         Reshape turns that vector back into an image.
 
-        :raises ValueError: If `_input_shape` is still None.
+        :raises ValueError: If `input_shape_config` is still None.
         """
-        if self._input_shape is None:
+        if self.input_shape_config is None:
             raise ValueError("Cannot build decoder without input_shape")
 
         decoder_layers = []
@@ -476,7 +399,9 @@ class CapsNet(keras.Model):
                 )
             )
 
-        flattened_size = int(self._input_shape[0] * self._input_shape[1] * self._input_shape[2])
+        flattened_size = int(
+            self.input_shape_config[0] * self.input_shape_config[1] * self.input_shape_config[2]
+        )
 
         decoder_layers.append(
             keras.layers.Dense(
@@ -490,12 +415,43 @@ class CapsNet(keras.Model):
 
         decoder_layers.append(
             keras.layers.Reshape(
-                target_shape=self._input_shape,
+                target_shape=self.input_shape_config,
                 name="decoder_reshape"
             )
         )
 
         self.decoder = keras.Sequential(decoder_layers, name="reconstruction_decoder")
+
+    def build(self, input_shape: Tuple[Optional[int], int, int, int]) -> None:
+        """Validate the input shape, create the decoder if still needed, and build every sub-layer.
+
+        :param input_shape: 4D input shape ``(batch, height, width, channels)``.
+        :type input_shape: tuple
+        :raises ValueError: If `input_shape` is not 4D.
+        """
+        if self.built:
+            return
+
+        if len(input_shape) != 4:
+            raise ValueError(
+                f"Expected 4D input shape [batch, height, width, channels], got {input_shape}"
+            )
+
+        # The decoder's output size comes from this shape.
+        if self.reconstruction and self.input_shape_config is None:
+            self.input_shape_config = tuple(input_shape[1:])
+
+        # DECISION plan-2026-08-18T073231-52a93f8c/D-007: the None guard keeps this from
+        # replacing a decoder that __init__ already built. See decisions.md.
+        if self.reconstruction and self.input_shape_config is not None and self.decoder is None:
+            self._build_decoder()
+
+        # `materialize_sublayers` traces `call`, so the decoder, which `call` runs when it
+        # exists, is built with the rest and cannot drift from what `call` runs.
+        # DECISION plan-2026-08-18T073231-52a93f8c/D-006: build each sub-layer here;
+        # overriding build() disables build-by-run and a reload gave 0 weights. See decisions.md.
+        materialize_sublayers(self, input_shape)
+        super().build(input_shape)
 
     def call(
         self,
@@ -519,11 +475,8 @@ class CapsNet(keras.Model):
             raise ValueError(f"Expected 4D input [batch, height, width, channels], got shape {inputs.shape}")
 
         x = inputs
-        for i in range(len(self.conv_layers)):
-            x = self.conv_layers[i](x)
-            if self.use_batch_norm and self.batch_norm_layers[i] is not None:
-                x = self.batch_norm_layers[i](x, training=training)
-            x = self.activation_layers[i](x)
+        for block in self.conv_blocks:
+            x = block(x, training=training)
 
         primary_caps_output = self.primary_caps(x)
 
@@ -542,6 +495,42 @@ class CapsNet(keras.Model):
 
         return results
 
+    def compute_output_shape(
+        self, input_shape: Tuple[Optional[int], int, int, int]
+    ) -> Dict[str, Tuple[Optional[int], ...]]:
+        """Return the shape of each entry ``call`` returns, without building anything.
+
+        Works on an unbuilt model and leaves it unbuilt. ``reconstructed`` is
+        present exactly when ``call`` returns it: reconstruction is on. Its
+        shape is the stored ``input_shape`` when one was given, else the given
+        input's own.
+
+        :param input_shape: 4D input shape ``(batch, height, width, channels)``.
+        :type input_shape: tuple
+        :return: ``{"digit_caps": (B, num_classes, digit_capsule_dim), "length": (B, num_classes)}`` plus ``"reconstructed": (B, H, W, C)`` with reconstruction on.
+        :rtype: Dict[str, Tuple[Optional[int], ...]]
+        :raises ValueError: If `input_shape` is not 4D.
+        """
+        if len(input_shape) != 4:
+            raise ValueError(
+                f"Expected 4D input shape [batch, height, width, channels], got {input_shape}"
+            )
+
+        shape = tuple(input_shape)
+        for block in self.conv_blocks:
+            shape = block.compute_output_shape(shape)
+        shape = self.primary_caps.compute_output_shape(shape)
+        digit_caps_shape = self.digit_caps.compute_output_shape(shape)
+
+        shapes = {
+            "digit_caps": digit_caps_shape,
+            "length": (input_shape[0], self.num_classes),
+        }
+        if self.reconstruction:
+            image_shape = self.input_shape_config or tuple(input_shape[1:])
+            shapes["reconstructed"] = (input_shape[0], *image_shape)
+        return shapes
+
     def _reconstruct(
         self,
         digit_caps: keras.KerasTensor,
@@ -556,7 +545,7 @@ class CapsNet(keras.Model):
         :type lengths: keras.KerasTensor
         :param mask: One-hot class mask to reconstruct from. Falls back to the predicted class when omitted.
         :type mask: Optional[keras.KerasTensor]
-        :return: Reconstructed image, shape ``[B, *_input_shape]``.
+        :return: Reconstructed image, shape ``[B, *input_shape_config]``.
         :rtype: keras.KerasTensor
         :raises ValueError: If `mask`'s last dimension does not equal `num_classes`.
         """
@@ -568,11 +557,11 @@ class CapsNet(keras.Model):
                 )
             reconstruction_mask = mask
         else:
-            reconstruction_mask = ops.one_hot(ops.argmax(lengths, axis=1), num_classes=self.num_classes)
+            reconstruction_mask = keras.ops.one_hot(keras.ops.argmax(lengths, axis=1), num_classes=self.num_classes)
 
-        masked_caps = ops.multiply(digit_caps, ops.expand_dims(reconstruction_mask, -1))
+        masked_caps = keras.ops.multiply(digit_caps, keras.ops.expand_dims(reconstruction_mask, -1))
 
-        decoder_input = ops.reshape(masked_caps, (-1, self.num_classes * self.digit_capsule_dim))
+        decoder_input = keras.ops.reshape(masked_caps, (-1, self.num_classes * self.digit_capsule_dim))
 
         return self.decoder(decoder_input)
 
@@ -636,7 +625,7 @@ class CapsNet(keras.Model):
         with tf.GradientTape() as tape:
             outputs = self(x, training=True, mask=y)
 
-            margin_loss_value = ops.mean(capsule_margin_loss(
+            margin_loss_value = keras.ops.mean(capsule_margin_loss(
                 outputs["length"],
                 y,
                 self.downweight,
@@ -645,15 +634,15 @@ class CapsNet(keras.Model):
             ))
 
             total_loss = margin_loss_value
-            reconstruction_loss_value = ops.convert_to_tensor(0.0, dtype=total_loss.dtype)
+            reconstruction_loss_value = keras.ops.convert_to_tensor(0.0, dtype=total_loss.dtype)
 
             if self.reconstruction and "reconstructed" in outputs:
                 # DECISION plan-2026-08-19T163559-499b6f0e/D-011: cast the prediction up to
                 # x's dtype; casting x down raised a Sub dtype error at float16. See decisions.md.
-                reconstruction_loss_value = ops.mean(ops.square(
-                    x - ops.cast(outputs["reconstructed"], x.dtype)
+                reconstruction_loss_value = keras.ops.mean(keras.ops.square(
+                    x - keras.ops.cast(outputs["reconstructed"], x.dtype)
                 ))
-                total_loss += ops.cast(
+                total_loss += keras.ops.cast(
                     self.reconstruction_weight * reconstruction_loss_value,
                     total_loss.dtype,
                 )
@@ -661,7 +650,7 @@ class CapsNet(keras.Model):
             # DECISION plan-2026-08-19T163559-499b6f0e/D-011: add_loss terms carry
             # compute_dtype, so cast the summed auxiliary losses up too. See decisions.md.
             if self.losses:
-                total_loss += ops.cast(ops.sum(self.losses), total_loss.dtype)
+                total_loss += keras.ops.cast(keras.ops.sum(self.losses), total_loss.dtype)
 
             # DECISION plan-2026-08-19T163559-499b6f0e/D-089: scale_loss stays inside the
             # tape; skipping it divides the update by ~2**15 at float16. See decisions.md.
@@ -707,7 +696,7 @@ class CapsNet(keras.Model):
         # made evaluate()'s reconstruction loss unreachable at inference. See decisions.md.
         outputs = self(x, training=False)
 
-        margin_loss_value = ops.mean(capsule_margin_loss(
+        margin_loss_value = keras.ops.mean(capsule_margin_loss(
             outputs["length"],
             y,
             self.downweight,
@@ -716,14 +705,14 @@ class CapsNet(keras.Model):
         ))
 
         total_loss = margin_loss_value
-        reconstruction_loss_value = ops.convert_to_tensor(0.0, dtype=total_loss.dtype)
+        reconstruction_loss_value = keras.ops.convert_to_tensor(0.0, dtype=total_loss.dtype)
 
         if self.reconstruction and "reconstructed" in outputs:
-            reconstruction_loss_value = ops.mean(ops.square(x - outputs["reconstructed"]))
+            reconstruction_loss_value = keras.ops.mean(keras.ops.square(x - outputs["reconstructed"]))
             total_loss += self.reconstruction_weight * reconstruction_loss_value
 
         if self.losses:
-            total_loss += ops.sum(self.losses)
+            total_loss += keras.ops.sum(self.losses)
 
         self._update_metrics(y, outputs)
         # _update_metrics skips this tracker, so feed it here.
@@ -746,11 +735,14 @@ class CapsNet(keras.Model):
     def get_config(self) -> Dict[str, Any]:
         """Return the model configuration for serialization.
 
+        ``input_shape`` is the resolved one: a model constructed without it that
+        has been built reports the shape ``build`` took, so a reload rebuilds the
+        same decoder.
+
         :return: Config dict with every constructor argument.
         :rtype: Dict[str, Any]
         """
-        config = super().get_config()
-        config.update({
+        config = {
             "num_classes": self.num_classes,
             "routing_iterations": self.routing_iterations,
             "conv_filters": self.conv_filters,
@@ -758,7 +750,7 @@ class CapsNet(keras.Model):
             "primary_capsule_dim": self.primary_capsule_dim,
             "digit_capsule_dim": self.digit_capsule_dim,
             "reconstruction": self.reconstruction,
-            "input_shape": self._input_shape,
+            "input_shape": self.input_shape_config,
             "decoder_architecture": self.decoder_architecture,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
@@ -767,28 +759,9 @@ class CapsNet(keras.Model):
             "negative_margin": self.negative_margin,
             "downweight": self.downweight,
             "reconstruction_weight": self.reconstruction_weight
-        })
-        return config
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "CapsNet":
-        """Build a model from a config dict, deserializing initializer and regularizer entries.
-
-        :param config: Config dict as returned by `get_config`.
-        :type config: Dict[str, Any]
-        :return: A new `CapsNet` instance.
-        :rtype: CapsNet
-        """
-        if "kernel_initializer" in config and isinstance(config["kernel_initializer"], dict):
-            config["kernel_initializer"] = keras.initializers.deserialize(
-                config["kernel_initializer"]
-            )
-        if "kernel_regularizer" in config and config["kernel_regularizer"]:
-            config["kernel_regularizer"] = keras.regularizers.deserialize(
-                config["kernel_regularizer"]
-            )
-
-        return cls(**config)
+        }
+        base_config = super().get_config()
+        return {**base_config, **config}
 
     def save_model(
         self,
@@ -815,14 +788,14 @@ class CapsNet(keras.Model):
         # DECISION plan-2026-08-22T035419-a11304c8/D-053: build before save; an unbuilt
         # save() writes a valid archive with 0 weights behind a UserWarning. See decisions.md.
         if not self.built:
-            if self._input_shape is None:
+            if self.input_shape_config is None:
                 raise ValueError(
                     "Cannot save an unbuilt CapsNet that was constructed "
                     "without `input_shape`: the archive would contain zero "
                     "weights. Call the model on a batch, or call "
                     "`model.build((None, height, width, channels))`, first."
                 )
-            self.build((None, *self._input_shape))
+            self.build((None, *self.input_shape_config))
 
         self.save(filepath, overwrite=overwrite)
         logger.info(f"Model saved to {filepath}")
@@ -849,23 +822,52 @@ class CapsNet(keras.Model):
         logger.info(f"Model loaded from {filepath}")
         return model
 
-    def summary(self, **kwargs: Any) -> None:
-        """Print the Keras summary, then log the capsule and loss settings.
 
-        :param **kwargs: Forwarded to `keras.Model.summary`.
-        """
-        super().summary(**kwargs)
-        logger.info(f"CapsNet Configuration:")
-        logger.info(f"  - Classes: {self.num_classes}")
-        logger.info(f"  - Routing iterations: {self.routing_iterations}")
-        logger.info(f"  - Conv filters: {self.conv_filters}")
-        logger.info(f"  - Primary capsules: {self.primary_capsules} x {self.primary_capsule_dim}D")
-        logger.info(f"  - Digit capsules: {self.num_classes} x {self.digit_capsule_dim}D")
-        logger.info(f"  - Reconstruction: {self.reconstruction}")
-        logger.info(f"  - Batch normalization: {self.use_batch_norm}")
-        logger.info(f"  - Margins: +{self.positive_margin}, -{self.negative_margin}")
-        logger.info(f"  - Downweight: {self.downweight}")
-        logger.info(f"  - Reconstruction weight: {self.reconstruction_weight}")
+# ---------------------------------------------------------------------
+
+
+def build_capsule_conv_blocks(
+    conv_filters: Sequence[int],
+    use_batch_norm: bool,
+    kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer],
+    kernel_regularizer: Optional[keras.regularizers.Regularizer],
+) -> List[ConvStem]:
+    """Build the convolution trunk shared by :class:`CapsNet` and ``CapsNetV2``.
+
+    Interface contract (callers: ``CapsNet._build_conv_blocks`` and the legacy
+    branch of ``CapsNetV2._build_stem``): one single-convolution
+    :class:`~dl_techniques.layers.conv_blocks.stem.ConvStem` per entry of
+    ``conv_filters``, named ``conv_block_{i}`` with ``i`` counted from 0. Block 0
+    convolves with a 9x9 kernel and later blocks with 5x5, all stride 1, ``valid``
+    padding and a bias. Each block is ``conv -> [batch norm] -> relu``: the batch
+    norm is present only when ``use_batch_norm`` is true and takes
+    :data:`CONV_BN_EPSILON`. ``kernel_initializer`` and ``kernel_regularizer`` go
+    to every convolution unchanged. An empty ``conv_filters`` returns an empty
+    list. Argument validation is the caller's: a non-positive filter count raises
+    ``ValueError`` from ``ConvStem``.
+
+    :param conv_filters: Filter count of each block.
+    :param use_batch_norm: Whether each block normalizes after its convolution.
+    :param kernel_initializer: Kernel initializer handed to every convolution.
+    :param kernel_regularizer: Kernel regularizer handed to every convolution.
+    :return: The blocks, in forward order.
+    """
+    return [
+        ConvStem(
+            filters=filters,
+            kernel_size=9 if i == 0 else 5,
+            strides=1,
+            padding="valid",
+            use_bias=True,
+            normalization_type="batch_norm" if use_batch_norm else None,
+            normalization_kwargs={"epsilon": CONV_BN_EPSILON} if use_batch_norm else None,
+            activation_type="relu",
+            kernel_initializer=kernel_initializer,
+            kernel_regularizer=kernel_regularizer,
+            name=f"conv_block_{i}",
+        )
+        for i, filters in enumerate(conv_filters)
+    ]
 
 
 # ---------------------------------------------------------------------

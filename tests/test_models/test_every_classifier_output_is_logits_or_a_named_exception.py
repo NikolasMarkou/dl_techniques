@@ -208,7 +208,7 @@ def _probe_capsnet():
 
 def _probe_capsnet_v2():
     from dl_techniques.models.vision.capsnet.model_v2 import CapsNetV2
-    model = CapsNetV2(num_classes=4, input_shape=(28, 28, 1), stem="legacy")
+    model = CapsNetV2(num_classes=4, input_shape=(28, 28, 1), stem_type="legacy")
     lengths = keras.ops.convert_to_numpy(model(_images((2, 28, 28, 1)), training=False))
     assert lengths.shape == (2, 4) and (lengths > 0).all() and (lengths < 1).all(), lengths
 

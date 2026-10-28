@@ -65,6 +65,7 @@ ROOTS = ("src", "tests")
 #: 428 / 409 after ``train_cliffordnet_nlp.py`` was edited for D-265 (step 12.10);
 #: 427 / 408 after ``convunext/model.py`` was edited for D-268 (step 14);
 #: 426 / 407 after ``mambalct/uca_encoder.py`` moved to ``keras.ops`` (plan-2026-10-26T125959-7af851e5 step 16).
+#: 425 / 406 after ``capsnet/model.py`` moved to ``keras.ops`` (plan-2026-10-26T125959-7af851e5 step 17).
 #: Edit it in the commit that converts a file (delete its line) or, with a
 #: recorded reason, adds a statement.
 KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
@@ -207,7 +208,6 @@ KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
     "src/dl_techniques/models/time_series/tirex/model_extended.py": 1,
     "src/dl_techniques/models/time_series/xlstm/forecaster.py": 1,
     "src/dl_techniques/models/time_series/xlstm/model.py": 1,
-    "src/dl_techniques/models/vision/capsnet/model.py": 1,
     "src/dl_techniques/models/vision/dasiamrpn/model.py": 1,
     "src/dl_techniques/models/vision/deepsort/appearance.py": 1,
     "src/dl_techniques/models/vision/detr/model.py": 1,
@@ -538,7 +538,7 @@ def test_the_census_is_exact(census):
 
 
 def test_the_census_totals(census):
-    assert (sum(KERAS_SUBMODULE_IMPORTS.values()), len(KERAS_SUBMODULE_IMPORTS)) == (426, 407), (
+    assert (sum(KERAS_SUBMODULE_IMPORTS.values()), len(KERAS_SUBMODULE_IMPORTS)) == (425, 406), (
         "the census's own totals moved; re-derive the module docstring's numbers")
     for path in KERAS_SUBMODULE_IMPORTS:
         assert (REPO_ROOT / path).is_file(), f"census file moved or deleted: {path}"

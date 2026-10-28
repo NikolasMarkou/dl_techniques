@@ -500,16 +500,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the CliffordCLIP stem migration",
         '776 of 9316 kernel pairs replay one draw',
         'kernel pairs replay one draw'),
-    ("layer_names_follow_the_table", "capsnet"): Open(
-        AssertionError,
-        "the CapsNet migration",
-        '7 violation(s): conv_1, bn_1, relu_1, conv_2, ...',
-        'is not a table spelling'),
-    ("layer_names_follow_the_table", "capsnet_v2_legacy"): Open(
-        AssertionError,
-        "the CapsNet migration",
-        '7 violation(s): legacy_conv_1, legacy_bn_1, legacy_relu_1, legacy_conv_2, ...',
-        'is not a table spelling'),
 }
 
 
@@ -2197,6 +2187,90 @@ def test_the_numbering_rule_sees_the_spellings_the_rbf_pair_and_uca_had() -> Non
     expected = _uca_owned()
     assert numbering_problems([*sorted(expected), "stage4_block1"], expected)
     assert numbering_problems(sorted(expected - {"stage3_block3"}), expected)
+
+
+# ---------------------------------------------------------------------------
+# CapsNet and CapsNetV2 number their layers exactly as their arguments say
+# ---------------------------------------------------------------------------
+
+_CAPS_TRUNK = [8, 8, 8]  # three blocks, so a block counted from 1 or swapped is seen
+_CAPS_IMAGE = (28, 28, 1)  # 28 -> 20 -> 16 -> 12 through the 9x9, 5x5, 5x5 valid blocks
+
+
+def _caps_trunk() -> set:
+    """``conv_block_{i}`` counted from 0, one per entry of the trunk's filter list (N-2)."""
+    return {f"conv_block_{i}" for i in range(len(_CAPS_TRUNK))}
+
+
+def _caps_v1_owned(reconstruction: bool) -> set:
+    """CapsNet: the trunk, the two capsule layers and, with reconstruction, the decoder."""
+    return (_caps_trunk() | {"primary_caps", "digit_caps"}
+            | ({"reconstruction_decoder"} if reconstruction else set()))
+
+
+def _caps_v2_owned(reconstruction: bool) -> set:
+    """CapsNetV2 with the legacy trunk: the same set. ``stem`` is None there, so it owns no stem."""
+    return _caps_v1_owned(reconstruction)
+
+
+def _caps_v1_build(reconstruction: bool) -> Callable[[], keras.Model]:
+    def build() -> keras.Model:
+        from dl_techniques.models.vision.capsnet.model import CapsNet
+        return CapsNet(num_classes=7, conv_filters=_CAPS_TRUNK, primary_capsules=4,
+                       input_shape=_CAPS_IMAGE, reconstruction=reconstruction)
+    return build
+
+
+def _caps_v2_build(reconstruction: bool) -> Callable[[], keras.Model]:
+    def build() -> keras.Model:
+        from dl_techniques.models.vision.capsnet.model_v2 import CapsNetV2
+        return CapsNetV2(num_classes=7, input_shape=_CAPS_IMAGE, legacy_conv_filters=_CAPS_TRUNK,
+                         primary_capsules=4, reconstruction=reconstruction,
+                         **_selector(CapsNetV2, "legacy"))
+    return build
+
+
+#: ``case id -> (build, the exact set of layers the build owns directly)``; the expected sets
+#: read the constants above, never the model.
+CAPSNET_NUMBERED: Dict[str, Tuple[Callable[[], keras.Model], Callable[[], set]]] = {
+    "capsnet": (_caps_v1_build(False), lambda: _caps_v1_owned(False)),
+    "capsnet_reconstruction": (_caps_v1_build(True), lambda: _caps_v1_owned(True)),
+    "capsnet_v2_legacy": (_caps_v2_build(False), lambda: _caps_v2_owned(False)),
+    "capsnet_v2_legacy_reconstruction": (_caps_v2_build(True), lambda: _caps_v2_owned(True)),
+}
+
+
+@pytest.mark.parametrize("case", sorted(CAPSNET_NUMBERED))
+def test_the_capsnet_pair_number_their_trunk_blocks_exactly_as_their_filter_lists_say(case: str) -> None:
+    build, owned = CAPSNET_NUMBERED[case]
+    model = build()
+    model(_images(*_CAPS_IMAGE))
+    assert numbering_problems(direct_children(model), owned()) == []
+
+
+def test_capsnet_v2_with_a_resnet_stem_owns_the_backbone_and_no_trunk() -> None:
+    from dl_techniques.models.vision.capsnet.model_v2 import CapsNetV2
+    model = CapsNetV2(num_classes=7, input_shape=(32, 32, 3), primary_capsules=4,
+                      **_selector(CapsNetV2, "resnet18"))
+    model(_images(32, 32, 3))
+    assert model.conv_blocks == []
+    assert numbering_problems(direct_children(model), {"stem", "primary_caps", "digit_caps"}) == []
+
+
+def test_the_numbering_rule_sees_the_spellings_the_capsnet_pair_had() -> None:
+    expected = _caps_v1_owned(True)
+    clean = sorted(expected)
+    assert numbering_problems(clean, expected) == []
+    plants = {
+        "the old conv_{i+1} spelling": ["conv_1" if n == "conv_block_0" else n for n in clean],
+        "the old legacy_conv spelling": ["legacy_conv_1" if n == "conv_block_0" else n for n in clean],
+        "a block counted from 1": [n.replace("conv_block_0", "conv_block_3") for n in clean],
+        "a missing block": [n for n in clean if n != "conv_block_2"],
+        "an extra block": [*clean, "conv_block_3"],
+        "the decoder gone": [n for n in clean if n != "reconstruction_decoder"],
+    }
+    for why, owned in plants.items():
+        assert numbering_problems(owned, expected), f"{why} passed the numbering rule"
 
 
 # ---------------------------------------------------------------------------

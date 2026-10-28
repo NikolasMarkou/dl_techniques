@@ -314,7 +314,10 @@ def _loop_carried_sites() -> List[Tuple[str, int, str, str, str]]:
 #: ``tests/test_layers/test_no_two_pooling_weights_replay_one_draw.py``). The
 #: ceiling was not raised in that step, so this census was red from 69b68fe5a
 #: until step 7.1 (D-219).
-_LOOP_CARRIED_SITE_CEILING = 97
+#: 96 since step 17 of plan-2026-10-26T125959-7af851e5 (re-derived from this test's own
+#: output, 96 sites in 38 files): CapsNet and CapsNetV2 build their convolution trunk through
+#: one helper, ``build_capsule_conv_blocks``, so their two loops became one comprehension.
+_LOOP_CARRIED_SITE_CEILING = 96
 
 
 @pytest.fixture(scope="module")

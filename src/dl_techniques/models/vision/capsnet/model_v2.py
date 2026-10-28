@@ -30,8 +30,10 @@ from typing import Optional, Tuple, Union, Dict, Any, List, Literal
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tensors import length
+from dl_techniques.utils.model_build import materialize_sublayers
 from dl_techniques.losses.capsule_margin_loss import CapsuleMarginLoss
 from dl_techniques.layers.capsules import PrimaryCapsule
+from dl_techniques.models.vision.capsnet.model import build_capsule_conv_blocks
 from dl_techniques.layers.attention.attention_routing_capsule import (
     CapsuleBlockV2,
 )
@@ -59,7 +61,7 @@ class CapsNetV2(keras.Model):
                  │
                  ▼
         ┌─────────────────────┐
-        │ stem                │  (legacy or resnet)
+        │ stem_type           │  (legacy or resnet)
         └─────────────────────┘
                  │  [B, H', W', C']
                  ▼
@@ -89,6 +91,7 @@ class CapsNetV2(keras.Model):
                  │                       │
                  ▼                       ▼
         ┌──────────────────┐  ┌────────────────────┐
+        │ conv_blocks      │  │ stem               │
         │ conv, bn, relu   │  │ resnet backbone    │
         │ one per filter   │  │ include_top off    │
         └──────────────────┘  └────────────────────┘
@@ -152,9 +155,12 @@ class CapsNetV2(keras.Model):
     :type num_classes: int
     :param input_shape: ``(H, W, C)`` shape of the input image, without batch. Also sets the decoder's output size.
     :type input_shape: Tuple[int, int, int]
-    :param stem: ``"legacy"`` for the two-conv stack from the original CapsNet paper, or a ResNet variant from
-        `create_resnet` (``"resnet18"``, ``"resnet34"``, ``"resnet50"``, ``"resnet101"``, ``"resnet152"``).
-    :type stem: str
+    :param stem_type: ``"legacy"`` for the two-conv stack from the original CapsNet paper (kept in ``conv_blocks``,
+        one single-convolution ``ConvStem`` named ``conv_block_{i}`` per entry of `legacy_conv_filters`), or a ResNet
+        variant from `create_resnet` (``"resnet18"``, ``"resnet34"``, ``"resnet50"``, ``"resnet101"``,
+        ``"resnet152"``), held as ``stem``. ``stem`` is None on the legacy path and ``conv_blocks`` is empty on a
+        ResNet path.
+    :type stem_type: str
     :param stem_pretrained: Pretrained-weight option for a ResNet stem. False means random init.
         True raises `NotImplementedError`, since no public ResNet weights ship with `dl_techniques`.
         A string is a local path to a ``.keras`` weights file.
@@ -208,7 +214,7 @@ class CapsNetV2(keras.Model):
     :param **kwargs: Additional keyword arguments passed to `keras.Model`.
 
     :raises ValueError: If `num_classes` is not positive, `input_shape` is not a 3-tuple,
-    `stem` is not ``"legacy"`` or a supported ResNet variant, or `loss_type`
+    `stem_type` is not ``"legacy"`` or a supported ResNet variant, or `loss_type`
     is neither ``"margin"`` nor ``"categorical_crossentropy"``.
 
     :note: `call` returns a single tensor of shape ``(batch, num_classes)``
@@ -223,7 +229,7 @@ class CapsNetV2(keras.Model):
         self,
         num_classes: int,
         input_shape: Tuple[int, int, int],
-        stem: Literal[
+        stem_type: Literal[
             "legacy", "resnet18", "resnet34", "resnet50", "resnet101", "resnet152"
         ] = "legacy",
         stem_pretrained: Union[bool, str] = False,
@@ -254,13 +260,13 @@ class CapsNetV2(keras.Model):
 
         if num_classes <= 0:
             raise ValueError(f"num_classes must be positive, got {num_classes}")
-        if not isinstance(input_shape, tuple) or len(input_shape) != 3:
+        if not isinstance(input_shape, (tuple, list)) or len(input_shape) != 3:
             raise ValueError(
                 f"input_shape must be a 3-tuple (H, W, C), got {input_shape}"
             )
-        if stem != self.LEGACY_STEM and stem not in self.RESNET_STEMS:
+        if stem_type != self.LEGACY_STEM and stem_type not in self.RESNET_STEMS:
             raise ValueError(
-                f"stem must be 'legacy' or one of {self.RESNET_STEMS}, got {stem!r}"
+                f"stem_type must be 'legacy' or one of {self.RESNET_STEMS}, got {stem_type!r}"
             )
         if loss_type not in ("margin", "categorical_crossentropy"):
             raise ValueError(
@@ -269,8 +275,8 @@ class CapsNetV2(keras.Model):
             )
 
         self.num_classes = num_classes
-        self._input_shape: Tuple[int, int, int] = tuple(input_shape)  # type: ignore[assignment]
-        self.stem = stem
+        self.input_shape_config: Tuple[int, int, int] = tuple(input_shape)
+        self.stem_type = stem_type
         self.stem_pretrained = stem_pretrained
         self.primary_capsules = primary_capsules
         self.primary_capsule_dim = primary_capsule_dim
@@ -293,7 +299,7 @@ class CapsNetV2(keras.Model):
         self.block_dropout_rate = float(block_dropout_rate)
         self.block_direction_only_norm = block_direction_only_norm
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.kernel_regularizer = kernel_regularizer
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         self._build_stem()
         self._build_capsule_head()
@@ -302,46 +308,41 @@ class CapsNetV2(keras.Model):
         else:
             self.decoder = None
 
+        logger.info(
+            f"Created CapsNetV2 with a {self.stem_type} stem for {self.num_classes} classes "
+            f"(reconstruction: {self.reconstruction})"
+        )
+
     # ------------------------------------------------------------------
     def _build_stem(self) -> None:
-        """Create either the legacy conv stack or a ResNet backbone.
+        """Create either the legacy convolution trunk or a ResNet backbone.
 
-        Exactly one of `stem_layers` and `resnet_stem` holds the stem; the
-        other is empty or None.
+        Exactly one of `conv_blocks` and `stem` holds the trunk; the other is
+        empty or None.
         """
-        if self.stem == self.LEGACY_STEM:
-            self.stem_layers: List[keras.layers.Layer] = []
-            for i, filters in enumerate(self.legacy_conv_filters):
-                self.stem_layers.append(
-                    keras.layers.Conv2D(
-                        filters=filters,
-                        kernel_size=9 if i == 0 else 5,
-                        strides=1,
-                        padding="valid",
-                        kernel_initializer=self.kernel_initializer,
-                        kernel_regularizer=self.kernel_regularizer,
-                        name=f"legacy_conv_{i + 1}",
-                    )
-                )
-                self.stem_layers.append(
-                    keras.layers.BatchNormalization(name=f"legacy_bn_{i + 1}")
-                )
-                self.stem_layers.append(keras.layers.ReLU(name=f"legacy_relu_{i + 1}"))
-            self.resnet_stem = None
+        if self.stem_type == self.LEGACY_STEM:
+            self.conv_blocks = build_capsule_conv_blocks(
+                self.legacy_conv_filters,
+                True,
+                self.kernel_initializer,
+                self.kernel_regularizer,
+            )
+            self.stem = None
         else:
             # Imported here so the resnet package is untouched on the legacy path.
             from dl_techniques.models.vision.resnet import create_resnet
 
-            self.resnet_stem = create_resnet(
-                variant=self.stem,
+            self.stem = create_resnet(
+                variant=self.stem_type,
                 # num_classes is ignored while include_top is False.
                 num_classes=0,
-                input_shape=self._input_shape,
+                input_shape=self.input_shape_config,
                 pretrained=self.stem_pretrained,
                 include_top=False,
                 kernel_regularizer=self.kernel_regularizer,
+                name="stem",
             )
-            self.stem_layers = []
+            self.conv_blocks = []
 
     def _build_capsule_head(self) -> None:
         """Create the primary capsule layer and the attention routing block.
@@ -351,7 +352,7 @@ class CapsNetV2(keras.Model):
         ResNet stem they are fixed to a 1x1 stride-1 conv that maps channel
         depth to ``primary_capsules * primary_capsule_dim``.
         """
-        if self.stem == self.LEGACY_STEM:
+        if self.stem_type == self.LEGACY_STEM:
             primary_ks = self.primary_kernel_size
             primary_strides = self.primary_strides
         else:
@@ -363,7 +364,7 @@ class CapsNetV2(keras.Model):
             dim_capsules=self.primary_capsule_dim,
             kernel_size=primary_ks,
             strides=primary_strides,
-            padding="valid" if self.stem == self.LEGACY_STEM else "same",
+            padding="valid" if self.stem_type == self.LEGACY_STEM else "same",
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name="primary_caps",
@@ -400,7 +401,9 @@ class CapsNetV2(keras.Model):
                     name=f"decoder_hidden_{i + 1}",
                 )
             )
-        flat_size = int(self._input_shape[0] * self._input_shape[1] * self._input_shape[2])
+        flat_size = int(
+            self.input_shape_config[0] * self.input_shape_config[1] * self.input_shape_config[2]
+        )
         decoder_layers.append(
             keras.layers.Dense(
                 units=flat_size,
@@ -411,21 +414,47 @@ class CapsNetV2(keras.Model):
             )
         )
         decoder_layers.append(
-            keras.layers.Reshape(target_shape=self._input_shape, name="decoder_reshape")
+            keras.layers.Reshape(target_shape=self.input_shape_config, name="decoder_reshape")
         )
         self.decoder = keras.Sequential(decoder_layers, name="reconstruction_decoder")
 
     # ------------------------------------------------------------------
+    def build(self, input_shape: Tuple[Optional[int], int, int, int]) -> None:
+        """Build every sub-layer `call` runs, and the decoder `reconstruct` runs.
+
+        `call` never touches the decoder, so tracing it does not build the
+        decoder; without the explicit build below a reloaded model would hold
+        none of its decoder weights.
+
+        :param input_shape: 4D input shape ``(batch, height, width, channels)``.
+        :type input_shape: tuple
+        :raises ValueError: If `input_shape` is not 4D.
+        """
+        if self.built:
+            return
+
+        if len(input_shape) != 4:
+            raise ValueError(
+                f"Expected 4D input [B, H, W, C], got shape {tuple(input_shape)}"
+            )
+
+        materialize_sublayers(self, input_shape)
+        if self.decoder is not None:
+            self.decoder.build(
+                (input_shape[0], self.num_classes * self.digit_capsule_dim)
+            )
+        super().build(input_shape)
+
     def _stem_forward(
         self,
         x: keras.KerasTensor,
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
         """Run whichever stem was built and return its feature map."""
-        if self.resnet_stem is not None:
-            return self.resnet_stem(x, training=training)
-        for layer in self.stem_layers:
-            x = layer(x, training=training)
+        if self.stem is not None:
+            return self.stem(x, training=training)
+        for block in self.conv_blocks:
+            x = block(x, training=training)
         return x
 
     def call(
@@ -453,6 +482,25 @@ class CapsNetV2(keras.Model):
         primary = self.primary_caps(features, training=training)
         digit = self.digit_caps(primary, training=training)
         return length(digit)
+
+    def compute_output_shape(
+        self, input_shape: Tuple[Optional[int], int, int, int]
+    ) -> Tuple[Optional[int], int]:
+        """Return ``(batch, num_classes)``, the shape of the capsule lengths `call` returns.
+
+        Works on an unbuilt model and leaves it unbuilt.
+
+        :param input_shape: 4D input shape ``(batch, height, width, channels)``.
+        :type input_shape: tuple
+        :return: ``(input_shape[0], num_classes)``.
+        :rtype: Tuple[Optional[int], int]
+        :raises ValueError: If `input_shape` is not 4D.
+        """
+        if len(input_shape) != 4:
+            raise ValueError(
+                f"Expected 4D input [B, H, W, C], got shape {tuple(input_shape)}"
+            )
+        return (input_shape[0], self.num_classes)
 
     # ------------------------------------------------------------------
     def get_capsules(
@@ -522,64 +570,53 @@ class CapsNetV2(keras.Model):
         :return: Config dict with every constructor argument.
         :rtype: Dict[str, Any]
         """
-        config = super().get_config()
-        config.update(
-            {
-                "num_classes": self.num_classes,
-                "input_shape": self._input_shape,
-                "stem": self.stem,
-                "stem_pretrained": (
-                    self.stem_pretrained
-                    if isinstance(self.stem_pretrained, (bool, str))
-                    else False
-                ),
-                "primary_capsules": self.primary_capsules,
-                "primary_capsule_dim": self.primary_capsule_dim,
-                "primary_kernel_size": self.primary_kernel_size,
-                "primary_strides": self.primary_strides,
-                "digit_capsule_dim": self.digit_capsule_dim,
-                "legacy_conv_filters": self.legacy_conv_filters,
-                "loss_type": self.loss_type,
-                "positive_margin": self.positive_margin,
-                "negative_margin": self.negative_margin,
-                "downweight": self.downweight,
-                "reconstruction": self.reconstruction,
-                "decoder_architecture": self.decoder_architecture,
-                "attention_softmax_axis": self.attention_softmax_axis,
-                "attention_top_k": self.attention_top_k,
-                "use_load_balancing": self.use_load_balancing,
-                "load_balancing_weight": self.load_balancing_weight,
-                "block_dropout_rate": self.block_dropout_rate,
-                "block_direction_only_norm": self.block_direction_only_norm,
-                "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
-                "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
-            }
-        )
-        return config
+        config = {
+            "num_classes": self.num_classes,
+            "input_shape": self.input_shape_config,
+            "stem_type": self.stem_type,
+            "stem_pretrained": (
+                self.stem_pretrained
+                if isinstance(self.stem_pretrained, (bool, str))
+                else False
+            ),
+            "primary_capsules": self.primary_capsules,
+            "primary_capsule_dim": self.primary_capsule_dim,
+            "primary_kernel_size": self.primary_kernel_size,
+            "primary_strides": self.primary_strides,
+            "digit_capsule_dim": self.digit_capsule_dim,
+            "legacy_conv_filters": self.legacy_conv_filters,
+            "loss_type": self.loss_type,
+            "positive_margin": self.positive_margin,
+            "negative_margin": self.negative_margin,
+            "downweight": self.downweight,
+            "reconstruction": self.reconstruction,
+            "decoder_architecture": self.decoder_architecture,
+            "attention_softmax_axis": self.attention_softmax_axis,
+            "attention_top_k": self.attention_top_k,
+            "use_load_balancing": self.use_load_balancing,
+            "load_balancing_weight": self.load_balancing_weight,
+            "block_dropout_rate": self.block_dropout_rate,
+            "block_direction_only_norm": self.block_direction_only_norm,
+            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
+        }
+        base_config = super().get_config()
+        return {**base_config, **config}
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "CapsNetV2":
-        """Build a model from a config dict, deserializing initializer and regularizer entries.
+        """Build a model from a config dict, never reading stem weights from elsewhere.
 
         `stem_pretrained` is forced to False, so loading never fetches or reads
-        stem weights from elsewhere.
+        stem weights from elsewhere: the archive already holds them. The given
+        dict is left alone.
 
         :param config: Config dict as returned by `get_config`.
         :type config: Dict[str, Any]
         :return: A new `CapsNetV2` instance.
         :rtype: CapsNetV2
         """
-        if "kernel_initializer" in config and isinstance(config["kernel_initializer"], dict):
-            config["kernel_initializer"] = keras.initializers.deserialize(
-                config["kernel_initializer"]
-            )
-        if "kernel_regularizer" in config and config["kernel_regularizer"]:
-            config["kernel_regularizer"] = keras.regularizers.deserialize(
-                config["kernel_regularizer"]
-            )
-        if "input_shape" in config and isinstance(config["input_shape"], list):
-            config["input_shape"] = tuple(config["input_shape"])
-        # The archive already holds the stem weights.
+        config = dict(config)
         config["stem_pretrained"] = False
         return cls(**config)
 
@@ -648,7 +685,7 @@ def _default_recipe(
 def create_capsnet_v2(
     num_classes: int,
     input_shape: Tuple[int, int, int],
-    stem: Literal[
+    stem_type: Literal[
         "legacy", "resnet18", "resnet34", "resnet50", "resnet101", "resnet152"
     ] = "legacy",
     stem_pretrained: Union[bool, str] = False,
@@ -679,8 +716,8 @@ def create_capsnet_v2(
     :type num_classes: int
     :param input_shape: ``(H, W, C)`` input shape.
     :type input_shape: Tuple[int, int, int]
-    :param stem: Stem variant. See `CapsNetV2`.
-    :type stem: str
+    :param stem_type: Stem variant. See `CapsNetV2`.
+    :type stem_type: str
     :param stem_pretrained: Pretrained-weight option for a ResNet stem.
     :type stem_pretrained: Union[bool, str]
     :param learning_rate: Peak learning rate after warmup.
@@ -719,7 +756,7 @@ def create_capsnet_v2(
     model = CapsNetV2(
         num_classes=num_classes,
         input_shape=input_shape,
-        stem=stem,
+        stem_type=stem_type,
         stem_pretrained=stem_pretrained,
         loss_type=loss_type,
         positive_margin=positive_margin,
@@ -761,7 +798,7 @@ def create_capsnet_v2(
     )
 
     logger.info(
-        f"create_capsnet_v2: stem={stem}, num_classes={num_classes}, "
+        f"create_capsnet_v2: stem_type={stem_type}, num_classes={num_classes}, "
         f"loss={loss_type}, optimizer={optimizer.__class__.__name__}"
     )
     return model
@@ -778,7 +815,7 @@ def create_capsnet_v2_pretrained(
     """Build a capsule head on a ResNet backbone loaded from a weights file.
 
     Equivalent to ``create_capsnet_v2(num_classes=num_classes, input_shape=input_shape,
-    stem=backbone, stem_pretrained=pretrained, ...)``. `pretrained` defaults to
+    stem_type=backbone, stem_pretrained=pretrained, ...)``. `pretrained` defaults to
     True, which raises `NotImplementedError`; pass a path to load weights.
 
     :param backbone: ResNet variant to use as the stem.
@@ -802,7 +839,7 @@ def create_capsnet_v2_pretrained(
     return create_capsnet_v2(
         num_classes=num_classes,
         input_shape=input_shape,
-        stem=backbone,
+        stem_type=backbone,
         stem_pretrained=pretrained,
         **kwargs,
     )

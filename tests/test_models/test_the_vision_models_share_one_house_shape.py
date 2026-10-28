@@ -164,6 +164,13 @@ EXEMPTIONS: Dict[str, str] = {
         "small; V3: 0 of 54 small and 0 of 64 large would stay equal to the base "
         "revision's)."
     ),
+    "D-035": (
+        "CapsNet and CapsNetV2 name their convolution trunk ``conv_blocks`` (call C-c of "
+        "D-035), not ``blocks``: it is a feature trunk of single-convolution ConvStem "
+        "blocks that feeds the capsule layers, not the model's stage list, and CapsNetV2 "
+        "keeps a ResNet backbone in ``stem`` beside it. Their layers are named "
+        "``conv_block_{i}`` (the naming table's N-2)."
+    ),
     "not-a-traced-model": (
         "Rule h5 describes a subclassed model whose ``call`` is traced by "
         "``materialize_sublayers``. ConvUNextStem builds its one ConvStem, "
@@ -333,10 +340,12 @@ SUBJECTS: Tuple[Subject, ...] = (
              rules=_NO_HEAD_ATTRIBUTE, required_params=("kernel_regularizer",)),
     _subject("uca_encoder", "uca_encoder", "UcaEncoder",
              rules=_NO_HEAD_ATTRIBUTE - {"h5_build_materializes"}, waived=_NOT_TRACED),
-    _subject("capsnet", "capsnet", "CapsNet", rules=_NO_HEAD_ATTRIBUTE,
-             required_params=_INIT_AND_REG),
-    _subject("capsnet_v2", "capsnet_v2", "CapsNetV2", rules=_NO_HEAD_ATTRIBUTE,
-             required_params=_INIT_AND_REG),
+    _subject("capsnet", "capsnet", "CapsNet",
+             rules=_NO_HEAD_ATTRIBUTE - {"h10_block_container_names"},
+             required_params=_INIT_AND_REG, waived={"h10_block_container_names": "D-035"}),
+    _subject("capsnet_v2", "capsnet_v2", "CapsNetV2",
+             rules=_NO_HEAD_ATTRIBUTE - {"h10_block_container_names"},
+             required_params=_INIT_AND_REG, waived={"h10_block_container_names": "D-035"}),
     _subject("stem", "stem", "ConvStem", rules=frozenset({"h4_no_logging_outside_init"})),
 )
 
@@ -1324,71 +1333,12 @@ class Open:
 
 #: Every row that fails today, keyed ``(rule, subject-or-module key)``.
 LEDGER: Dict[Tuple[str, str], Open] = {
-    ("no_from_keras_import", "capsnet"): Open(
-        "the CapsNet migration",
-        '1 violation(s): line 25: from keras import ...',
-        ('from keras import ...',)),
-    ("h2_member_order", "capsnet"): Open(
-        "the CapsNet migration",
-        '1 violation(s): `_build_sublayer_tree` comes after `build`',
-        ('`_build_sublayer_tree` comes after `build`',)),
-    ("h3_one_init_log", "capsnet"): Open(
-        "the CapsNet migration",
-        '1 violation(s): __init__ writes 0 logger.info calls, expected 1',
-        ('__init__ writes 0 logger.info calls, expected 1',)),
-    ("h4_no_logging_outside_init", "capsnet"): Open(
-        "the CapsNet migration",
-        '2 violation(s): `build` writes 1 logger call(s); `summary` writes 11 logger call(s)',
-        ('`build` writes',
-         '`summary` writes')),
-    ("h5_build_materializes", "capsnet"): Open(
-        "the CapsNet migration",
-        '2 violation(s): `build` lacks `if self.built: return`; `build` does not call '
-        '`materialize_sublayers(self, input_shape)`',
-        ('`build` lacks `if self.built: return`',
-         '`build` does not call `materialize_sublayers(self, input_shape)`')),
-    ("h10_stored_attribute_names", "capsnet"): Open(
-        "the CapsNet migration",
-        '1 violation(s): argument `input_shape` is stored as `self._input_shape`, expected '
-        '`self.input_shape_config`',
-        ('argument `input_shape` is stored as `self._input_shape`',)),
-    ("h3_one_init_log", "capsnet_v2"): Open(
-        "the CapsNet migration",
-        '1 violation(s): __init__ writes 0 logger.info calls, expected 1',
-        ('__init__ writes 0 logger.info calls, expected 1',)),
-    ("h5_build_materializes", "capsnet_v2"): Open(
-        "the CapsNet migration",
-        '1 violation(s): the class defines no `build`',
-        ('the class defines no `build`',)),
-    ("h10_stored_attribute_names", "capsnet_v2"): Open(
-        "the CapsNet migration",
-        '1 violation(s): argument `input_shape` is stored as `self._input_shape`, expected '
-        '`self.input_shape_config`',
-        ('argument `input_shape` is stored as `self._input_shape`',)),
-    ("h10_one_name_per_concept", "capsnet_v2"): Open(
-        "the CapsNet migration",
-        '1 violation(s): constructor argument `stem` should be `stem_type`',
-        ('constructor argument `stem` should be `stem_type`',)),
-    ('h11_get_config_has_the_reference_form', 'capsnet'): Open(
-        'the CapsNet migration',
-        '2 violation(s): `get_config` does not bind `base_config = '
-        'super().get_config()`; `get_config` does not end in `return {**base_config, '
-        '**config}`',
-        ('`get_config` does not bind `base_config = super().get_config()`',
-         '`get_config` does not end in `return {**base_config, **config}`')),
     ('h15_initializer_storage', 'capsnet'): Open(
         'the CapsNet migration',
         '1 violation(s): `self.kernel_initializer` stores '
         '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',
         ('`self.kernel_initializer` stores '
          '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',)),
-    ('h11_get_config_has_the_reference_form', 'capsnet_v2'): Open(
-        'the CapsNet migration',
-        '2 violation(s): `get_config` does not bind `base_config = '
-        'super().get_config()`; `get_config` does not end in `return {**base_config, '
-        '**config}`',
-        ('`get_config` does not bind `base_config = super().get_config()`',
-         '`get_config` does not end in `return {**base_config, **config}`')),
     ('h15_initializer_storage', 'capsnet_v2'): Open(
         'the CapsNet migration',
         '1 violation(s): `self.kernel_initializer` stores '
@@ -2128,7 +2078,7 @@ VACUOUS: Dict[Tuple[str, str], str] = {
     **{("h11_from_config_does_real_work", key): _NO_FROM_CONFIG for key in (
         "resnet", "cliffordnet", "hierarchical", "mobilenet_v1", "mobilenet_v2", "mobilenet_v3",
         "mobilenet_v4", "convnext_v1", "convnext_v2", "rad_convnet", "convunext_stem", "vae",
-        "rbf_protonet", "clifford_rbf_protonet", "uca_encoder")},
+        "rbf_protonet", "clifford_rbf_protonet", "uca_encoder", "capsnet")},
     **{("h3_builders_assign", key): _NO_BUILDERS for key in ("convunext_stem", "uca_encoder")},
     **{("h2_call_takes_inputs", key): _NO_CALL for key in ("squeezenet_v1", "squeezenet_v2", "vae")},
     **{("h10_block_container_names", key): _NO_CONTAINER for key in ("convunext_stem", "vae")},
