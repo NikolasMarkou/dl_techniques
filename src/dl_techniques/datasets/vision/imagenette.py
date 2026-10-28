@@ -9,9 +9,9 @@ datasets: ``"train"`` (the records minus the selection rows), ``"select"`` (a se
 ``validation_split`` slice of train, never augmented) and ``"test"`` (the labelled
 validation split, which never selects). The encoded jpeg bytes of a split are held in
 memory once (about 250 MB for train), so every pipeline has a known length and no decode is
-repeated off the disk. The geometry helpers :func:`random_resized_crop`,
-:func:`resize_and_centre_crop` and :func:`flip_and_reflect_crop` are shared with the
-self-supervised pipeline ``train.common.datasets.build_raw_image_dataset``.
+repeated off the disk. :func:`imagenette_examples` is the unbatched stage underneath it
+(rows, shuffle, decode, crop policy, normalize), which the self-supervised pipeline
+``train.common.image_streams`` also builds on, so there is one decode path.
 """
 
 from dataclasses import dataclass
@@ -216,14 +216,20 @@ def _check_config(config: ImagenetteConfig) -> None:
     check_validation_split(config.validation_split)
 
 
-def load_imagenette(split: str, config: ImagenetteConfig) -> ImagenetteData:
-    """Build the pipeline of one Imagenette split.
+def imagenette_examples(
+        split: str, config: ImagenetteConfig,
+) -> Tuple["tf.data.Dataset", int]:
+    """The unbatched, normalized ``(image, label)`` examples of one Imagenette split.
+
+    The rows come from the seeded permutation of the TRAIN records (selection first) and,
+    for ``"test"``, an independent seeded order of the validation records. ``"train"`` is
+    shuffled (the encoded rows, so the buffer holds bytes) and reshuffles on every pass;
+    nothing is batched or repeated, so a caller can map per example before it batches.
 
     :param split: ``"train"``, ``"select"`` or ``"test"``.
-    :param config: The pipeline settings.
-    :return: The batched ``(image, label)`` dataset (``float32`` images, ``int32`` labels)
-        and its counts. The train pipeline reshuffles every epoch and drops the ragged
-        last batch; the others keep every row. All three are finite and do not repeat.
+    :param config: The pipeline settings (``batch_size`` is not used here).
+    :return: ``(dataset, n)``: ``float32`` images normalized per ``config.normalize`` and
+        ``int32`` labels, and the number of examples.
     :raises ValueError: A bad ``split`` or setting, or a selection slice holding out zero rows.
     :raises FileNotFoundError: The TFDS records are not prepared.
     """
@@ -270,14 +276,29 @@ def load_imagenette(split: str, config: ImagenetteConfig) -> ImagenetteData:
         return (image - mean) / std, label
 
     dataset = dataset.map(decode, num_parallel_calls=config.num_parallel_calls)
+    logger.info(
+        f"imagenette [{split}]: {len(rows)} images, {size}x{size}, "
+        f"crop_policy={config.crop_policy}, augment={augment}"
+    )
+    return dataset, int(len(rows))
+
+
+def load_imagenette(split: str, config: ImagenetteConfig) -> ImagenetteData:
+    """Build the pipeline of one Imagenette split.
+
+    :param split: ``"train"``, ``"select"`` or ``"test"``.
+    :param config: The pipeline settings.
+    :return: The batched ``(image, label)`` dataset (``float32`` images, ``int32`` labels)
+        and its counts. The train pipeline reshuffles every epoch and drops the ragged
+        last batch; the others keep every row. All three are finite and do not repeat.
+    :raises ValueError: A bad ``split`` or setting, or a selection slice holding out zero rows.
+    :raises FileNotFoundError: The TFDS records are not prepared.
+    """
+    training = split == "train"
+    dataset, n = imagenette_examples(split, config)
     dataset = dataset.batch(config.batch_size, drop_remainder=training).prefetch(tf.data.AUTOTUNE)
 
-    n = int(len(rows))
     steps = n // config.batch_size if training else -(-n // config.batch_size)
-    logger.info(
-        f"imagenette [{split}]: {n} images, {size}x{size}, crop_policy={config.crop_policy}, "
-        f"augment={augment}"
-    )
     return ImagenetteData(
         dataset=dataset, num_samples=n, steps_per_epoch=steps,
         num_classes=IMAGENETTE_NUM_CLASSES, class_names=list(IMAGENETTE_CLASS_NAMES),

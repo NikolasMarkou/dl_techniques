@@ -103,3 +103,16 @@ def use_fake_imagenette(monkeypatch, n_train: int = IMAGENETTE_FAKE_TRAIN,
 
     monkeypatch.setattr(imagenette, "read_imagenette_records", read)
     return calls
+
+
+def row_identities(images: np.ndarray, dataset: str, offset: int = 0) -> np.ndarray:
+    """Read the row identity of normalized fake images back from their pixels.
+
+    The fakes give row ``i`` the mean colour ``4 * i + offset`` (plus a small ramp), so the
+    identity of any image that went through the pipeline unaugmented is recoverable:
+    un-normalize with the dataset's own statistics, average, and divide by the pitch.
+    """
+    spec = classification.get_spec(dataset)
+    pixels = (np.asarray(images) * np.asarray(spec.std) + np.asarray(spec.mean)) \
+        .mean(axis=(1, 2, 3)) * 255.0
+    return np.rint((pixels - offset) / 4.0).astype(int)
