@@ -44,7 +44,7 @@ from train.rms_variants_train.config import ExperimentConfig, NORM_VARIANTS
 from train.rms_variants_train.seed_utils import set_seeds
 
 
-def _load_cifar100(seed: int = 0) -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]:
+def _load_cifar100() -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]:
     (x_tr, y_tr), (x_val, y_val), _, _ = load_dataset("cifar100")
     y_tr = y_tr.astype(np.int64)
     y_val = y_val.astype(np.int64)
@@ -92,7 +92,7 @@ def run(cfg: ExperimentConfig, *, variant: str, warmup_epochs: int) -> dict:
     set_seeds(cfg.seed)
     os.makedirs(cfg.out_dir, exist_ok=True)
 
-    (x_tr, y_tr), (x_val, y_val) = _load_cifar100(cfg.seed)
+    (x_tr, y_tr), (x_val, y_val) = _load_cifar100()
     logger.info(f"[e2] CIFAR-100 train={x_tr.shape}, val={x_val.shape}")
 
     train_ds = _to_tf_dataset(x_tr, y_tr, batch_size=cfg.batch_size, shuffle=True, seed=cfg.seed)

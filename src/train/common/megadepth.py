@@ -56,18 +56,6 @@ logger = logging.getLogger(__name__)
 # =====================================================================
 
 
-def scene_of(path: str) -> str:
-    """The MegaDepth scene a pair belongs to: ``{root}/{scene}/dense{N}/{imgs,depths}/{file}``.
-
-    Args:
-        path: An RGB or depth path returned by the discovery functions.
-
-    Returns:
-        The scene directory name.
-    """
-    return Path(path).parts[-4]
-
-
 def discover_megadepth_scenes(
     root: str,
 ) -> List[Tuple[str, List[str], List[str]]]:

@@ -34,7 +34,7 @@ Data loading, generation, and preprocessing utilities for various domains.
   - `arc_converters.py`, `arc_keras.py`, `arc_utilities.py`
 - `vision/` — Computer vision dataset loaders:
   - `coco.py` — COCO dataset, `coco_multitask_local.py` — local multi-task COCO
-    variant, `imagenet.py` — ImageNet via TFDS (needs the original tars)
+    variant
   - `imagenet2012.py` — ImageNet-1k read straight from the extracted
     `train/<wnid>/` + flat `val/` layout (:func:`load_imagenet2012`, returns
     batched `(image, label)` plus counts and wnid class names). Class index =

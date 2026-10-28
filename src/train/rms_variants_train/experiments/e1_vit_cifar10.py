@@ -53,8 +53,8 @@ from train.rms_variants_train.seed_utils import set_seeds
 # ---------------------------------------------------------------------
 
 
-def _load_cifar10(seed: int = 0) -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]:
-    """Load CIFAR-10 as float32 in [0, 1], one-hot labels."""
+def _load_cifar10() -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]:
+    """Load CIFAR-10 as float32 in [0, 1], int64 sparse labels."""
     (x_tr, y_tr), (x_val, y_val), _, _ = load_dataset("cifar10")
     y_tr = y_tr.astype(np.int64)
     y_val = y_val.astype(np.int64)
@@ -135,7 +135,7 @@ def run(cfg: ExperimentConfig, *, variant: str, patch_size: int, dropout_rate: f
     set_seeds(cfg.seed)
     os.makedirs(cfg.out_dir, exist_ok=True)
 
-    (x_tr, y_tr), (x_val, y_val) = _load_cifar10(cfg.seed)
+    (x_tr, y_tr), (x_val, y_val) = _load_cifar10()
     logger.info(f"[e1] CIFAR-10 train={x_tr.shape}, val={x_val.shape}")
 
     train_ds = _to_tf_dataset(x_tr, y_tr, batch_size=cfg.batch_size, shuffle=True, seed=cfg.seed)

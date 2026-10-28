@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 import tensorflow as tf
 import keras
-from typing import Dict, Any, List, Literal, Tuple, Optional, Sequence
+from typing import Dict, Any, List, Tuple, Optional, Sequence
 from PIL import Image, ImageOps, ImageEnhance
 
 # ---------------------------------------------------------------------
@@ -68,7 +68,6 @@ from train.convnext.common import build_loss
 
 # ---------------------------------------------------------------------
 
-Dataset = Literal["cifar10", "cifar100"]
 Variant = str  # a key of CliffordNet.MODEL_VARIANTS, or "custom"
 
 # DropPath of the authors' networks.py: 0.4 for cliffordnet_64_5, 0.3 for the rest.

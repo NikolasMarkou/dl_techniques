@@ -95,7 +95,6 @@ class TrainingConfig:
     # Monitoring
     monitor_every_n_epochs: int = 5
     early_stopping_patience: int = 15
-    validation_steps: Optional[int] = None
 
     # Data pipeline
     prefetch_buffer: int = tf.data.AUTOTUNE
@@ -410,7 +409,7 @@ def train_vit(
         train_ds, val_ds = train_data.dataset, val_data.dataset
         conformal_ds = val_data.dataset
         steps_per_epoch = train_data.steps_per_epoch
-        val_steps = config.validation_steps
+        val_steps = None  # the ImageNet val dataset is finite: all of it, once
         input_shape = (config.image_size, config.image_size, 3)
     else:
         raise ValueError(f"Unsupported dataset: {config.dataset}")

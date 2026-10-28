@@ -3,7 +3,6 @@
 import os
 import keras
 import numpy as np
-from typing import Dict, Any
 
 # ---------------------------------------------------------------------
 # local imports
@@ -36,38 +35,6 @@ CUSTOM_OBJECTS = {
     "ComplexConv2D": ComplexConv2D,
     "ComplexReLU": ComplexReLU,
 }
-
-
-# ---------------------------------------------------------------------
-
-def create_model_config(dataset: str, variant: str, input_shape, num_classes: int) -> Dict[str, Any]:
-    """Create CoShNet model configuration based on dataset and variant."""
-    config = {
-        'input_shape': input_shape,
-        'num_classes': num_classes,
-        'kernel_regularizer': None,
-        'epsilon': 1e-7,
-    }
-
-    # Dataset-specific adjustments
-    if dataset.lower() == 'mnist':
-        config.update({'dropout_rate': 0.05, 'shearlet_scales': 3, 'shearlet_directions': 6})
-    elif dataset.lower() == 'cifar10':
-        config.update({'dropout_rate': 0.1, 'shearlet_scales': 4, 'shearlet_directions': 8})
-    elif dataset.lower() == 'cifar100':
-        config.update({'dropout_rate': 0.15, 'shearlet_scales': 4, 'shearlet_directions': 8,
-                       'kernel_regularizer': keras.regularizers.l2(1e-4)})
-
-    # Variant-specific adjustments
-    if variant == 'tiny':
-        config.update({'conv_filters': (16, 32), 'dense_units': (256, 128),
-                       'dropout_rate': config.get('dropout_rate', 0.1) + 0.05})
-    elif variant == 'large':
-        config.update({'conv_filters': (64, 128, 256), 'dense_units': (2048, 1024, 512),
-                       'dropout_rate': config.get('dropout_rate', 0.1) + 0.05,
-                       'shearlet_scales': 5, 'shearlet_directions': 12})
-
-    return config
 
 
 # ---------------------------------------------------------------------

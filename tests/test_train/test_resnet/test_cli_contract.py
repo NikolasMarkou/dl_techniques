@@ -123,7 +123,6 @@ UNMAPPED_DESTS: Dict[str, str] = {
 FIELDS_WITH_NO_FLAG: Tuple[str, ...] = (
     "gradient_clipping",
     "momentum",
-    "validation_steps",
 )
 
 # Every value differs from the dataclass default -- mechanically asserted below.

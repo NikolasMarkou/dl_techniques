@@ -86,7 +86,6 @@ class TrainingConfig:
     # Monitoring
     monitor_every_n_epochs: int = 5
     early_stopping_patience: int = 15
-    validation_steps: Optional[int] = None
 
     # Data Pipeline
     num_parallel_calls: int = tf.data.AUTOTUNE
@@ -399,7 +398,7 @@ def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) 
     start_time = time.time()
     history = model.fit(
         train_dataset, epochs=config.epochs, steps_per_epoch=steps_per_epoch,
-        validation_data=val_dataset, validation_steps=config.validation_steps,
+        validation_data=val_dataset,
         callbacks=callbacks, verbose=1
     )
     logger.info(f"Training completed in {(time.time() - start_time) / 3600:.2f} hours")
