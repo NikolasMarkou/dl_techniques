@@ -448,13 +448,10 @@ class Open:
 LEDGER: Dict[Tuple[str, str], Open] = {
     ("no_replayed_draw::default", "depth_anything_real"): Open(
         AssertionError,
-        "the depth_anything stem migration",
-        '12 of 3403 kernel pairs replay one draw',
-        'kernel pairs replay one draw'),
-    ("no_replayed_draw::default", "depth_anything_placeholder"): Open(
-        AssertionError,
-        "the depth_anything stem migration",
-        '45 of 861 kernel pairs replay one draw',
+        "a per-projection initializer in MultiHeadAttention (D-053, refused as D-050 refused it: "
+        "it moves the seeded weights of every attention user)",
+        '12 of 3403 kernel pairs replay one draw: block_N/attention/cross_attention/qkv ~ proj, '
+        'one pair per DINOv2 block, inside DINOv2Block and not in a layer DepthAnything builds',
         'kernel pairs replay one draw'),
     ("no_replayed_draw::default", "clifford_clip"): Open(
         AssertionError,
@@ -1492,7 +1489,8 @@ def _build_deepsort(init):
 def _depth_anything(kind: str, size: int):
     def build(init):
         from dl_techniques.models.vision.depth_anything.model import DepthAnything
-        model = DepthAnything(encoder_kind=kind, encoder_type="vit_s", image_shape=(size, size, 3))
+        model = DepthAnything(encoder_kind=kind, encoder_type="vit_s", image_shape=(size, size, 3),
+                              **_kw(init))
         return _forward(model, np.random.default_rng(0).uniform(
             size=(1, size, size, 3)).astype("float32"))
     return build
@@ -1569,7 +1567,9 @@ REPLAY_SUBJECTS: Dict[str, Tuple[Callable, bool]] = {
     "dasiamrpn": (_build_dasiamrpn, True),
     "deepsort": (_build_deepsort, False),
     "depth_anything_real": (_depth_anything("real", 56), False),
-    "depth_anything_placeholder": (_depth_anything("placeholder", 64), False),
+    # The real encoder takes no initializer (DINOv2VisionTransformer has no such knob), so the knob
+    # reaches only the head, which the placeholder subject measures with an instance as well.
+    "depth_anything_placeholder": (_depth_anything("placeholder", 64), True),
     "clifford_clip": (_build_clifford_clip, False),
     "vq_vae_rotation": (_build_vq_vae_rotation, False),
     "sam1_prompt_encoder": (_build_sam1_prompt_encoder, False),
@@ -2283,6 +2283,26 @@ def _siamrpn_backbone_build() -> keras.layers.Layer:
     return SiamRPNBackbone()
 
 
+def _depth_anything_encoder_owned() -> set:
+    """The placeholder encoder's graph: the stem, four two-convolution stages (the body keeps its
+    ``conv_block_{i}_{j}`` spelling; only stage one of the trunk is a stem), three pools between
+    them, and the projection to the ViT width."""
+    body = {f"{kind}_block_{i}_{j}" for kind in ("conv", "bn", "relu") for i in range(4) for j in (1, 2)}
+    return {"initial_stem", "feature_projection"} | body | {f"pool_block_{i}" for i in range(3)}
+
+
+def _depth_anything_build(teacher: bool = False) -> keras.Model:
+    from dl_techniques.models.vision.depth_anything.model import DepthAnything
+    model = DepthAnything(encoder_kind="placeholder", encoder_type="vit_s", image_shape=(64, 64, 3),
+                          use_feature_alignment=teacher, enable_semi_supervised=teacher)
+    model.build((None, 64, 64, 3))
+    return model
+
+
+def _depth_anything_encoder_build() -> keras.Model:
+    return _depth_anything_build().encoder
+
+
 def _siamfc_build() -> keras.Model:
     from dl_techniques.models.vision.siamfc.model import SiamFC
     return SiamFC()
@@ -2304,6 +2324,14 @@ TRACKER_NUMBERED: Dict[str, Tuple[Callable[[], keras.Model], Callable[[], Any],
     "dasiamrpn": (_dasiamrpn_build, _dasiamrpn_pair, _dasiamrpn_owned),
     "siamrpn_backbone": (_siamrpn_backbone_build, lambda: _images(127, 127, 3, batch=1),
                          _siam_backbone_owned),
+    # The student and its frozen teacher share the name ``encoder_vit_s`` (a clone keeps it), so the
+    # distinct-name set reads one encoder whether or not a teacher exists.
+    "depth_anything": (_depth_anything_build, lambda: _images(64, 64, 3),
+                       lambda: {"encoder_vit_s", "depth_head", "strong_augmentation"}),
+    "depth_anything_with_teacher": (lambda: _depth_anything_build(teacher=True), lambda: _images(64, 64, 3),
+                                    lambda: {"encoder_vit_s", "depth_head", "strong_augmentation"}),
+    "depth_anything_encoder": (_depth_anything_encoder_build, lambda: _images(64, 64, 3),
+                               _depth_anything_encoder_owned),
 }
 
 
@@ -2342,6 +2370,23 @@ def test_the_tracker_name_rule_sees_the_spellings_the_siamese_trunk_had() -> Non
         "the stem beside its three loose layers": [*clean, "conv1", "bn1", "pool1"],
         "a missing body norm": [n for n in clean if n != "bn3"],
         "a body stage renamed": ["conv_2" if n == "conv2" else n for n in clean],
+    }
+    for why, owned in plants.items():
+        assert numbering_problems(owned, expected), f"{why} passed the numbering rule"
+
+
+def test_the_tracker_name_rule_sees_the_spellings_the_depth_anything_encoder_had() -> None:
+    expected = _depth_anything_encoder_owned()
+    clean = sorted(expected)
+    assert numbering_problems(clean, expected) == []
+    plants = {
+        "the loose first conv": [*(n for n in clean if n != "initial_stem"), "initial_conv"],
+        "the loose first norm": [*clean, "initial_bn"],
+        "the loose first activation": [*clean, "initial_relu"],
+        "the stem beside its three loose layers": [*clean, "initial_conv", "initial_bn", "initial_relu"],
+        "a missing pool": [n for n in clean if n != "pool_block_1"],
+        "a stage of three convolutions": [*clean, "conv_block_0_3"],
+        "a stage renamed": ["conv_block_4_1" if n == "conv_block_3_1" else n for n in clean],
     }
     for why, owned in plants.items():
         assert numbering_problems(owned, expected), f"{why} passed the numbering rule"
@@ -2461,6 +2506,12 @@ def _dasiamrpn_without_shape(**kw: Any) -> Any:
 def _siamrpn_backbone_without_shape(**kw: Any) -> Any:
     from dl_techniques.models.vision.dasiamrpn.model import SiamRPNBackbone
     return SiamRPNBackbone(**kw)
+
+
+@_no_shape("depth_anything")
+def _depth_anything_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.depth_anything.model import DepthAnything
+    return DepthAnything(encoder_kind="placeholder", image_shape=(64, 64, 3), **kw)
 
 
 def swallowed_shape_keywords(build: Callable[..., Any]) -> List[str]:

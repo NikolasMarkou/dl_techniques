@@ -1192,6 +1192,7 @@ ANCHOR_TOKENS: Dict[str, Dict[str, int]] = {
         "plan-2026-10-14T062616-81938e81/D-128": 1,
         "plan-2026-10-14T062616-81938e81/D-131": 1,
         "plan-2026-10-14T062616-81938e81/D-136": 1,
+        "plan-2026-10-26T125959-7af851e5/D-053": 1,
     },
     "src/dl_techniques/models/vision/mobilenet/common.py": {
         "plan-2026-08-22T035419-a11304c8/D-111": 1,

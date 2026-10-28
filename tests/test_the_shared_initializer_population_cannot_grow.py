@@ -317,7 +317,11 @@ def _loop_carried_sites() -> List[Tuple[str, int, str, str, str]]:
 #: 96 since step 17 of plan-2026-10-26T125959-7af851e5 (re-derived from this test's own
 #: output, 96 sites in 38 files): CapsNet and CapsNetV2 build their convolution trunk through
 #: one helper, ``build_capsule_conv_blocks``, so their two loops became one comprehension.
-_LOOP_CARRIED_SITE_CEILING = 96
+#: 94 since step 19 of the same plan (re-derived from this test's own output, 94 sites in 37
+#: files): the depth_anything placeholder encoder hands each body convolution
+#: ``clone_initializer(self.kernel_initializer)`` instead of the shared instance, so
+#: ``depth_anything/model.py`` has no loop-carried site left.
+_LOOP_CARRIED_SITE_CEILING = 94
 
 
 @pytest.fixture(scope="module")

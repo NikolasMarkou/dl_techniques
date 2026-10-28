@@ -37,7 +37,8 @@ decay is provided by `TeacherEMACallback` with cosine/linear schedules, and
 checkpoint and re-syncs the teacher. `StrongAugmentation` supports any number of channels,
 applies per-sample brightness/contrast factors, and mixes the depth target by the same
 CutMix box as the image (the mixing happens in `train_step`, not in `call`). The legacy
-Conv-BN-ReLU encoder is preserved behind `encoder_kind='placeholder'` for back-compat.
+Conv-BN-ReLU encoder is preserved behind `encoder_kind='placeholder'` for back-compat; its first stage is
+one `ConvStem` named `initial_stem` (see "Placeholder encoder" below).
 
 ---
 
@@ -384,6 +385,42 @@ loaded = keras.models.load_model('depth_anything.keras')
 
 The round-trip is exact on CPU (max-abs-diff = 0.0).
 
+### Placeholder encoder
+
+`encoder_kind='placeholder'` builds a functional Conv-BN-ReLU encoder: one `ConvStem` named
+`initial_stem` (7x7 convolution, stride 2, no bias, `BatchNormalization` at epsilon 1e-5, ReLU), four
+two-convolution stages named `conv_block_{i}_{1,2}` (the encoder's body, not a stem) with
+`pool_block_{0..2}` between them, and the 1x1 `feature_projection` to the ViT width. At `vit_s` the
+encoder has 46 weights and 4,932,544 parameters. The stem took the place of the three layers
+`initial_conv`, `initial_bn` and `initial_relu`; its output is equal to theirs at `atol=0`, and so is its
+`training=True` output and its BatchNorm statistics after a training pass.
+
+The stem draws its kernel from the model's `kernel_initializer` object itself; each of the nine other
+convolutions draws from a `clone_initializer` copy of it. Before, all ten convolutions shared the one
+instance and replayed one sample (45 of 861 kernel pairs of the `vit_s` placeholder model at 64 px were
+the same draw). Storing the initializer as a spec instead would give each site a fresh initializer and
+also move every seeded tensor of the real DINOv2 model (104 of 410 at `vit_s`, 56 px), so the instance
+and the clones stay. The real DINOv2 encoder is unchanged tensor for tensor. Its attention layers still
+start `qkv` and `proj` from one shared sample, inside `MultiHeadAttention` (12 of 3,403 kernel pairs at
+56 px, one per block); `DepthAnything` builds no layer of those and the official weights replace them in
+the intended use.
+
+`frozen_encoder` for the placeholder is `keras.models.clone_model(encoder)`; the stem clones with it, and
+the teacher's output equals the student's at `atol=0` until the EMA moves it.
+
+**Archives written before the stem.** Measured with a `.keras` file saved by `be92a74eb` and by
+`20b48aba6^` (each in its own process, loaded by the current code; the two give the same results).
+`keras.models.load_model` restores it, with equal outputs for `training=False` and `True` at `atol=0`,
+because the archive carries the encoder's own serialized graph: what comes back is the old three-layer
+encoder, not a `ConvStem`. `model.load_weights` into a freshly built placeholder model fails: "A total of
+26 objects could not be loaded ... Layer 'initial_stem_conv1' expected 1 variables, but received 0",
+because the stem is one tracked layer where the archive holds three. The weights themselves move by path:
+copying the weights of an earlier `vit_s` placeholder model at 64 px (152 weights on 106 distinct paths:
+the frozen teacher shares every name) into a current one through
+`initial_conv/kernel` to `initial_stem/initial_stem_conv1/kernel` and `initial_bn/*` to
+`initial_stem/initial_stem_norm1/*` gives outputs equal at `atol=0`. Archives of the real DINOv2 model are
+unaffected: both loaders restore them with equal outputs (410 weights).
+
 ---
 
 ## Configuration
@@ -392,11 +429,11 @@ The round-trip is exact on CPU (max-abs-diff = 0.0).
 |--------------------------|----------------------------|----------------------------------------|-------|
 | `encoder_type`           | `str`                      | `'vit_l'`                              | One of `{vit_s, vit_b, vit_l}`: DINOv2 ViT-S/14, ViT-B/14, ViT-L/14. |
 | `encoder_kind`           | `str`                      | `'real'`                               | `'real'` builds the DINOv2 backbone; `'placeholder'` builds the legacy Conv-BN-ReLU. |
-| `image_shape`            | `Tuple[int,int,int]`       | `(518, 518, 3)`                        | Input image shape; sides multiples of 14 with the DINOv2 encoder. |
+| `image_shape`            | `Tuple[int,int,int]`       | `(518, 518, 3)`                        | Input image shape, three positive integers (`ValueError` otherwise); sides multiples of 14 with the DINOv2 encoder. The model takes no `input_shape` or `input_dim`: passing either raises `ValueError`. |
 | `dpt_features`           | `int` \| `None`            | `None` (64 / 128 / 256)                | `DPTHead` fusion width; `None` takes the published value for `encoder_type`. |
 | `dpt_out_channels`       | `List[int]` \| `None`      | `None` (see "DPT head")                | The head's four projection widths. |
 | `output_channels`        | `int`                      | `1`                                    | Final depth-map channel count. |
-| `kernel_initializer`     | `str` \| `Initializer`     | `'he_normal'`                          | Reaches every decoder conv (one clone per conv) and the placeholder encoder; the DINOv2 encoder uses its own initializers (or the official weights). |
+| `kernel_initializer`     | `str` \| `Initializer`     | `'he_normal'`                          | Reaches every decoder conv (one clone per conv) and the placeholder encoder (its stem takes the object, every other convolution a clone); the DINOv2 encoder uses its own initializers (or the official weights). |
 | `kernel_regularizer`     | `Regularizer` \| `None`    | `None`                                 | Reaches every decoder conv and the placeholder encoder, not the DINOv2 encoder. Do **not** combine with `AdamW(weight_decay=...)`. |
 | `loss_weights`           | `Dict[str,float]`          | `{labeled:1.0, unlabeled:0.5, feature:0.1}` | Consumed by the semi-sup `train_step` path. |
 | `cutmix_prob`            | `float`                    | `0.5`                                  | Forwarded to `StrongAugmentation`; unlabeled batches only. |

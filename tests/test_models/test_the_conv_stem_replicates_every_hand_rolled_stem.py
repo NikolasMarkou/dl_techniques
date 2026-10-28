@@ -103,6 +103,7 @@ from dl_techniques.models.vision.convnext.convnext_v2 import ConvNeXtV2
 from dl_techniques.models.vision.convunext.model import ConvUNextStem
 from dl_techniques.models.vision.dasiamrpn.model import DaSiamRPN, SiamRPNBackbone
 from dl_techniques.models.vision.deepsort.appearance import DeepSortAppearanceNet
+from dl_techniques.models.vision.depth_anything.model import DepthAnything
 from dl_techniques.models.vision.cliffordnet.hierarchical import (
     HierarchicalCliffordNet,
 )
@@ -1784,6 +1785,72 @@ DASIAMRPN_BACKBONE_MOMENTUM_EPSILON = _siam_case(
 )
 
 
+# ---------------------------------------------------------------------
+# depth_anything: the placeholder encoder's first stage
+# ---------------------------------------------------------------------
+
+# Original: ``DepthAnything._create_placeholder_encoder`` before the migration (HEAD
+# 747341a70): ``initial_conv`` = Conv2D(64, 7, strides 2, same, no bias) with the model's
+# ``kernel_initializer`` and ``kernel_regularizer``; ``initial_bn`` = BatchNormalization at
+# Keras' momentum (0.99) and the repo's torch-reference epsilon (1e-5); ``initial_relu`` = a
+# ReLU layer. The four conv-block stages that follow are the encoder's body, not a stem. The
+# encoder is a functional graph, so the stem is a layer of it, reached through
+# ``model.encoder.get_layer("initial_stem")``.
+_DEPTH_KERNEL_REG = 1e-4
+#: Not the model's default (``he_normal``) and not ConvStem's (``glorot_uniform``).
+_DEPTH_KERNEL_INIT = "lecun_normal"
+_DEPTH_FILTERS = 64
+
+
+def _depth_anything_original() -> Original:
+    conv = keras.layers.Conv2D(
+        filters=_DEPTH_FILTERS,
+        kernel_size=7,
+        strides=2,
+        padding="same",
+        use_bias=False,
+        kernel_initializer=_DEPTH_KERNEL_INIT,
+        kernel_regularizer=keras.regularizers.L2(_DEPTH_KERNEL_REG),
+        name="initial_conv",
+    )
+    norm = keras.layers.BatchNormalization(epsilon=1e-5, name="initial_bn")
+    act = keras.layers.ReLU(name="initial_relu")
+
+    def forward(x, training):
+        return act(norm(conv(x), training=training))
+
+    return Original(sublayers={"conv1": conv, "norm1": norm, "act1": act}, forward=forward)
+
+
+def _depth_anything_model(**changes) -> DepthAnything:
+    """A built placeholder-encoder model; the EQ cases need the encoder graph to exist."""
+    model = DepthAnything(
+        encoder_type="vit_s",
+        encoder_kind="placeholder",
+        image_shape=(64, 64, 3),
+        kernel_initializer=_DEPTH_KERNEL_INIT,
+        kernel_regularizer=keras.regularizers.L2(_DEPTH_KERNEL_REG),
+        use_feature_alignment=False,
+        **changes,
+    )
+    model.build((None, 64, 64, 3))
+    return model
+
+
+def _depth_anything_stem_of(model: DepthAnything) -> ConvStem:
+    return model.encoder.get_layer("initial_stem")
+
+
+DEPTH_ANYTHING_PLACEHOLDER = StemCase(
+    case_id="depth-anything-placeholder",
+    make_model=_depth_anything_model,
+    make_original=_depth_anything_original,
+    input_shape=(64, 64, 3),
+    expected_output_shape=(32, 32, _DEPTH_FILTERS),
+    stem_of=_depth_anything_stem_of,
+)
+
+
 #: One row per original variant. Later steps append here.
 CASES = [
     RESNET_IMAGENET,
@@ -1853,6 +1920,7 @@ CASES = [
     DASIAMRPN_WIDTH2,
     DASIAMRPN_NOBN,
     DASIAMRPN_BACKBONE_MOMENTUM_EPSILON,
+    DEPTH_ANYTHING_PLACEHOLDER,
 ]
 
 #: ``(row id, make a model, a forward input shape)`` for the built-stem test.
@@ -1904,6 +1972,7 @@ BUILT_STEM_ROWS = [
     # 91 px is the smallest side the trunk's five valid convolutions leave a feature map at.
     ("siamfc-backbone", lambda: _siamfc_model().backbone, (91, 91, 3)),
     ("dasiamrpn-backbone", lambda: _dasiamrpn_model().backbone, (91, 91, 3)),
+    ("depth-anything-placeholder", _depth_anything_model, (64, 64, 3), _depth_anything_stem_of),
 ]
 
 
@@ -1976,6 +2045,7 @@ INITIALIZER_AUDIT = {
     "SiamFCBackbone": ("knob", "lecun_normal (default glorot_uniform = ConvStem's)"),
     "DaSiamRPN": ("knob", "lecun_normal (default glorot_uniform = ConvStem's)"),
     "SiamRPNBackbone": ("knob", "lecun_normal (default glorot_uniform = ConvStem's)"),
+    "DepthAnything": ("knob", "lecun_normal (default he_normal)"),
     "CliffordRBFProtoNet": (
         "default-no-knob",
         "no initializer parameter; the original Conv2D took Keras' "
@@ -2516,6 +2586,56 @@ def test_the_guard_a_siamese_model_without_batch_norm_has_no_norm_in_its_stem():
     stem = _stem_from_config(SIAMFC_BN)  # BatchNorm built, against the original without one
     with pytest.raises(AssertionError, match="roles"):
         assert_stem_matches_original(SIAMFC_NOBN, stem)
+
+
+@pytest.mark.parametrize(
+    "override,match",
+    [
+        # Keras' own epsilon, and the factory's 1e-6: the encoder's value is the torch 1e-5.
+        ({"normalization_kwargs": {"epsilon": 1e-3}}, "differs from the original"),
+        ({"normalization_kwargs": {"epsilon": 1e-6}}, "differs from the original"),
+        # Keras' momentum is 0.99; it shows only in the moving statistics after a training=True pass.
+        ({"normalization_kwargs": {"momentum": 0.9}}, "after a training=True pass"),
+        # The original conv has no bias: one more weight in the stem's conv.
+        ({"use_bias": True}, "weights"),
+        # (64 - 7) // 2 + 1 = 29 with valid padding, 64 at stride 1: neither is 32.
+        ({"padding": "valid"}, "shape"),
+        ({"strides": 1}, "shape"),
+        ({"kernel_size": 3}, "not compatible"),
+        ({"activation_type": "gelu"}, "differs from the original"),
+    ],
+    ids=[
+        "keras-epsilon-1e-3",
+        "factory-epsilon-1e-6",
+        "momentum-0.9",
+        "bias-added",
+        "valid-padding",
+        "stride-1",
+        "kernel-3",
+        "gelu-for-relu",
+    ],
+)
+def test_the_guard_the_harness_sees_a_depth_anything_stem_with_one_wrong_setting(override, match):
+    """Each value the placeholder encoder's first stage fixes is a defect when it is not
+    kept; the stem rebuilt from the model's own config passes the same comparison."""
+    stem = _stem_from_config(DEPTH_ANYTHING_PLACEHOLDER, **override)
+    exception = ValueError if match == "not compatible" else AssertionError
+    with pytest.raises(exception, match=match):
+        assert_stem_matches_original(DEPTH_ANYTHING_PLACEHOLDER, stem)
+    assert_stem_matches_original(
+        DEPTH_ANYTHING_PLACEHOLDER, _stem_from_config(DEPTH_ANYTHING_PLACEHOLDER)
+    )
+
+
+def test_the_guard_the_harness_sees_a_depth_anything_norm_applied_twice():
+    """A second ``initial_bn`` in the forward changes the output."""
+    model = DEPTH_ANYTHING_PLACEHOLDER.make_model()
+    with pytest.raises(AssertionError, match="differs from the original"):
+        assert_stem_matches_original(
+            DEPTH_ANYTHING_PLACEHOLDER,
+            DEPTH_ANYTHING_PLACEHOLDER.stem_of(model),
+            forward=_norm_applied_twice,
+        )
 
 
 def test_the_guard_a_correct_stem_survives_the_same_harness():

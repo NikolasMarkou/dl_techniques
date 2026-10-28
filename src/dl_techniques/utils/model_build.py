@@ -304,9 +304,10 @@ def refuse_input_shape(kwargs: Mapping[str, Any], class_name: str, reason: str) 
     Interface contract (call sites, from ``grep -rn refuse_input_shape src``: ``RBFProtoNet``,
     ``CliffordRBFProtoNet``, ``UcaEncoder``, ``MambaLCT``, ``ConvUNextStem``, ``CliffordNet``,
     ``HierarchicalCliffordNet``, ``DeepSortAppearanceNet``, ``DeepSortResidualBlock``,
-    ``CosineClassifier``, ``SiamFC``, ``SiamFCBackbone``, ``DaSiamRPN`` and ``SiamRPNBackbone``,
-    each in its constructor, on its own keyword arguments and before the base class constructor
-    runs, in every layer or subclassed model that has no ``input_shape`` parameter): ``kwargs``
+    ``CosineClassifier``, ``SiamFC``, ``SiamFCBackbone``, ``DaSiamRPN``, ``SiamRPNBackbone``
+    and ``DepthAnything``, each in its constructor, on its own keyword arguments and before the
+    base class constructor runs, in every layer or subclassed model that has no ``input_shape``
+    parameter): ``kwargs``
     is inspected, never mutated. ``keras.layers.Layer.__init__`` pops both keywords for the sake
     of ``Sequential`` and only warns ("Do not pass an `input_shape`/`input_dim` argument to a
     layer"), so a caller written against an older signature that took an
@@ -331,7 +332,7 @@ def coerce_include_top(include_top: Any) -> bool:
     """Return ``include_top`` as a Python ``bool``, refusing anything else.
 
     Interface contract (call sites: the ``__init__`` of every vision classifier that
-    takes ``include_top``, as its first statement): ``bool`` and ``numpy.bool_`` (the
+    takes ``include_top``, as its first statement, and ``DepthAnything``'s): ``bool`` and ``numpy.bool_`` (the
     type every comparison on an array yields) are accepted and coerced, so
     ``get_config`` stays JSON-serializable. Everything else is refused, including
     ``0``/``1``, a 0-d array, ``None`` and a string: ``bool("no")`` is ``True`` and

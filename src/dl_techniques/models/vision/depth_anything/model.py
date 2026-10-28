@@ -78,6 +78,10 @@ from typing import Dict, Tuple, Optional, Union, Any, List
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
+from dl_techniques.utils.model_build import coerce_include_top, refuse_input_shape
+from dl_techniques.utils.validation import positive_int
+from dl_techniques.initializers.clone import clone_initializer
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.signal_processing.strong_augmentation import StrongAugmentation
 from dl_techniques.losses.affine_invariant_loss import AffineInvariantLoss
 from dl_techniques.losses.feature_alignment_loss import FeatureAlignmentLoss
@@ -107,6 +111,10 @@ _DINOV2_PATCH_SIZE: int = 14
 
 #: The placeholder Conv encoder's stride (a stride-2 conv and three stride-2 pools).
 _PLACEHOLDER_STRIDE: int = 16
+
+#: Width and kernel of the placeholder encoder's first stage (the stem).
+_PLACEHOLDER_STEM_FILTERS: int = 64
+_PLACEHOLDER_STEM_KERNEL: int = 7
 
 #: ``DPTHead`` widths ``(features, out_channels)`` per encoder size, from the
 #: ``config.json`` of the published checkpoints ``LiheYoung/depth_anything_vit{s,b,l}14``
@@ -178,7 +186,10 @@ class DepthAnything(keras.Model):
     :param output_channels: Number of channels in the predicted depth map.
     :type output_channels: int
     :param kernel_initializer: Initializer for the encoder's and the
-        decoder's kernels.
+        decoder's kernels. The placeholder encoder's stem draws from this
+        object itself; every other convolution of that encoder draws from a
+        clone of it, so no two of them start from the same sample. The real
+        DINOv2 encoder takes no initializer.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Optional regularizer for the encoder's and the
         decoder's kernels.
@@ -206,11 +217,18 @@ class DepthAnything(keras.Model):
         of its own, so setting this `True` with `enable_semi_supervised`
         `False` builds a teacher nothing reads, and `__init__` warns.
     :type use_feature_alignment: bool
+    :param include_top: Whether to build the depth head. ``False`` returns the
+        encoder's features. Must be a ``bool``.
+    :type include_top: bool
     :param kwargs: Additional keyword arguments for the ``Model`` base class.
 
     :raises ValueError: If `encoder_type` or `encoder_kind` is not recognized,
-        or if a side of `image_shape` is not a multiple of 14 with the DINOv2
-        encoder.
+        if `image_shape` is not three positive integers, if a side of
+        `image_shape` is not a multiple of 14 with the DINOv2 encoder, if
+        `output_channels`, `dpt_features` or an entry of `dpt_out_channels` is
+        not a positive integer, or if `input_shape` or `input_dim` is passed
+        (the input size is `image_shape`).
+    :raises TypeError: If `include_top` is not a ``bool``.
 
     Input shape:
         4D tensor ``(batch_size, height, width, 3)``, or a tuple of two such
@@ -262,6 +280,7 @@ class DepthAnything(keras.Model):
         include_top: bool = True,
         **kwargs: Any
     ) -> None:
+        refuse_input_shape(kwargs, "DepthAnything", "the input size is image_shape")
         super().__init__(**kwargs)
 
         # Validate encoder type
@@ -276,14 +295,26 @@ class DepthAnything(keras.Model):
                 f"Unsupported encoder_kind: {encoder_kind}. Choose 'real' or 'placeholder'."
             )
 
+        if len(image_shape) != 3:
+            raise ValueError(
+                f"image_shape must be (height, width, channels), got {tuple(image_shape)}")
+        # The encoder geometry below is integer arithmetic on all three sides, so a None is
+        # refused here, naming the argument, not by a TypeError from the arithmetic.
+        image_shape = tuple(
+            positive_int(side, f"image_shape[{axis}]", "DepthAnything")
+            for axis, side in enumerate(image_shape))
+
         # Store configuration parameters
         self.encoder_type = encoder_type
         self.image_shape = tuple(image_shape)
         default_features, default_out_channels = _DPT_HEAD_CONFIGS[encoder_type]
-        self.dpt_features = int(default_features if dpt_features is None else dpt_features)
-        self.dpt_out_channels = [int(c) for c in (
-            default_out_channels if dpt_out_channels is None else dpt_out_channels)]
-        self.output_channels = output_channels
+        self.dpt_features = positive_int(
+            default_features if dpt_features is None else dpt_features,
+            "dpt_features", "DepthAnything")
+        self.dpt_out_channels = [
+            positive_int(c, "dpt_out_channels", "DepthAnything") for c in (
+                default_out_channels if dpt_out_channels is None else dpt_out_channels)]
+        self.output_channels = positive_int(output_channels, "output_channels", "DepthAnything")
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.loss_weights = loss_weights if loss_weights is not None else {
@@ -297,7 +328,7 @@ class DepthAnything(keras.Model):
         self.use_feature_alignment = use_feature_alignment
         self.encoder_kind = encoder_kind
         self.enable_semi_supervised = bool(enable_semi_supervised)
-        self.include_top = include_top
+        self.include_top = coerce_include_top(include_top)
 
         if self.use_feature_alignment and not self.enable_semi_supervised:
             logger.warning(
@@ -610,23 +641,27 @@ class DepthAnything(keras.Model):
         """
         inputs = keras.layers.Input(shape=self.image_shape, name='encoder_input')
 
-        # Initial convolution with proper initialization and regularization
-        x = keras.layers.Conv2D(
-            filters=64,
-            kernel_size=7,
-            strides=2,
-            padding='same',
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            use_bias=False,
-            name='initial_conv'
-        )(inputs)
+        # DECISION plan-2026-10-26T125959-7af851e5/D-053: the stem takes the model's initializer
+        # instance, so its kernel is the draw this convolution always made; every other convolution
+        # of the encoder takes clone_initializer(self.kernel_initializer).
+        # Do NOT hand the instance to them: one seedless instance replays one sample at every site
+        # (45 of 861 kernel pairs of the placeholder model were the same draw). Do NOT store
+        # initializer_spec(...) instead: it consumes one default seed less in __init__, which moves
+        # every seeded tensor of the real DINOv2 model too (D-039 chose the same shape for MobileNet).
         # DECISION plan-2026-08-17T183311-79c63e38/D-028: pass epsilon explicitly on all three placeholder BatchNorms.
         # Justification is consistency with the repo's DPTDecoder BatchNorm 1e-5 (REFERENCE_BN_EPSILON; DPTHead has no BN since D-128 of plan-2026-10-14T062616-81938e81), not reference fidelity (this stack has no reference). See decisions.md.
-        x = keras.layers.BatchNormalization(
-            epsilon=REFERENCE_BN_EPSILON, name='initial_bn'
-        )(x)
-        x = keras.layers.ReLU(name='initial_relu')(x)
+        x = ConvStem(
+            filters=_PLACEHOLDER_STEM_FILTERS,
+            kernel_size=_PLACEHOLDER_STEM_KERNEL,
+            strides=2,
+            padding='same',
+            use_bias=False,
+            normalization_kwargs={'epsilon': REFERENCE_BN_EPSILON},
+            activation_type='relu',
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            name='initial_stem'
+        )(inputs)
         # Note: removed legacy stride-2 'initial_pool' to keep placeholder
         # encoder stride at 16 (DPTHead reads it as a patch-16 grid).
 
@@ -638,7 +673,7 @@ class DepthAnything(keras.Model):
                 filters=dim,
                 kernel_size=3,
                 padding='same',
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 use_bias=False,
                 name=f'conv_block_{i}_1'
@@ -653,7 +688,7 @@ class DepthAnything(keras.Model):
                 filters=dim,
                 kernel_size=3,
                 padding='same',
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 use_bias=False,
                 name=f'conv_block_{i}_2'
@@ -677,7 +712,7 @@ class DepthAnything(keras.Model):
             filters=self.encoder_embed_dim,
             kernel_size=1,
             padding='same',
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             use_bias=False,
             name='feature_projection'

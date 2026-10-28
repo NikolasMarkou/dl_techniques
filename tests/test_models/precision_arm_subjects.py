@@ -333,7 +333,16 @@ _sub("pft_sr", _b_pft_sr, lambda: _f32(1, 32, 32, 3))
 
 
 def _b_depth_anything():
+    import keras
+
     from dl_techniques.models.vision.depth_anything import create_depth_anything
+    # The head ends in a ReLU, so the share of exactly-zero output pixels at initialization
+    # depends on the draw (MEASURED over seeds 0 to 7 of this subject: 1.000 at seed 0, 0.022
+    # to 0.689 at the other seven). Seed 0 is the seed every arm applies, and at seed 0 the
+    # output is all zero, so each arm would compare zero with zero. The builder pins a seed
+    # whose output is live (test_the_placeholder_encoder_starts_with_a_conv_stem.py
+    # re-measures it).
+    keras.utils.set_random_seed(1)
     return create_depth_anything(encoder_type="vit_s", image_shape=(64, 64, 3),
                                  encoder_kind="placeholder",
                                  dpt_features=16, dpt_out_channels=[16, 16, 16, 16])
