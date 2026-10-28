@@ -9,8 +9,7 @@ Data contract
 -------------
 ``make_multi_crop_map_fn`` returns a function mappable over a ``tf.data``
 dataset of ``(image, label)`` pairs (the shape
-``src/train/energy_transformer/common.py``'s ``build_raw_image_dataset``
-produces), yielding the 2-tuple element::
+``train.common.image_streams.load_image_streams`` produces), yielding the 2-tuple element::
 
     (views, label)
 
@@ -50,10 +49,9 @@ positional-embedding interpolation, rather than silently mis-shaping a batch.
 
 "AREA of the source image" means the SOURCE THIS FUNCTION RECEIVES
 ------------------------------------------------------------------
-This transform runs as ``build_raw_image_dataset``'s ``element_map_fn``, and
-that pipeline resizes every record to ``(image_size, image_size)`` in its
-``_decode`` step BEFORE the map fn runs (order: ``_decode`` -> ``shuffle`` ->
-``_normalize`` -> ``element_map_fn`` -> ``batch``). The trainer passes
+This transform runs as ``load_image_streams``'s ``element_map_fn``, and
+that pipeline resizes every record to ``(image_size, image_size)`` BEFORE the map fn
+runs (order: shuffle -> resize -> normalize -> ``element_map_fn`` -> batch). The trainer passes
 ``image_size = global_crop_size``. So the "source image" cropped here is already
 a ``global_crop_size``-square, aspect-distorted thumbnail — NOT the original
 record — and a local crop is an UPSAMPLE of a small piece of it.
@@ -118,7 +116,7 @@ NOT implemented, deliberately, and named rather than quietly dropped:
 
 * **Saturation and hue jitter.** ``tf.image.adjust_saturation`` /
   ``adjust_hue`` go through an RGB<->HSV conversion that assumes values in
-  ``[0, 1]``. This transform runs AFTER ``build_raw_image_dataset``'s
+  ``[0, 1]``. This transform runs AFTER ``load_image_streams``'s
   per-channel mean/std normalization, so its input is not in ``[0, 1]`` and
   those two ops would produce meaningless colours rather than a jitter.
 * **Solarization.** Same reason: it inverts values above a threshold expressed
@@ -138,7 +136,7 @@ nobody reads the module name and infers the full recipe.
 ``seed`` seeds ONE module-level ``tf.random.Generator`` shared by every element,
 i.e. it seeds a STREAM, not each element independently. Under
 ``ds.map(fn, num_parallel_calls=...)`` — which is what the shipped trainer uses
-(``build_raw_image_dataset`` passes ``tf.data.AUTOTUNE``) — several elements read
+(``load_image_streams`` passes ``tf.data.AUTOTUNE``) — several elements read
 that one generator concurrently, so which element gets which slice of the stream
 varies run to run.
 
@@ -174,28 +172,27 @@ dataset. The index has to come from ``ds.enumerate()`` placed AFTER
 ``ds.repeat()`` — that ordering is what makes the same source image draw a
 DIFFERENT augmentation on each epoch, which is the whole point (freezing the
 augmentation per image is worse for SSL than a non-reproducible stream). That
-enumeration is supplied by ``build_raw_image_dataset``'s
-``indexed_element_map_fn`` parameter in
-``src/train/energy_transformer/common.py``. **``train_dino.py`` takes this path by
+enumeration is supplied by ``load_image_streams``'s ``indexed_element_map_fn`` parameter
+in ``src/train/common/image_streams.py``. **``train_dino.py`` takes this path by
 DEFAULT** -- ``--stateless-augmentation`` ships ON, so the indexed slot is the
 default branch of ``build_dataset``; ``--no-stateless-augmentation`` is the
 off-switch back to ``make_multi_crop_map_fn``.
 
-**MEASURED end-to-end, and it is NOT sufficient on its own.** Two separate
+**MEASURED end-to-end, under the pipeline that existed then.** Two separate
 PROCESSES building the real ``train_dino.build_dataset``, sha1 of the first 3
-batches::
+batches, when the TFDS file interleave was also unseeded and a second flag
+(``--seed-training-stream``, since retired) seeded it::
 
     --stateless-augmentation alone     e70e2ad2 vs 5f968198   DIFFER
     --seed-training-stream   alone     49bf308a vs 4fbd3a6e   DIFFER
     BOTH                               2ce84c18 vs 2ce84c18   BIT-IDENTICAL
 
-This transform is only ONE of the two unseeded sources; the other is the TFDS
-file interleave, which ``--seed-training-stream`` closes. A reproducible DINO
-run needs both flags. For the pipeline this probe measured, the bit-identity of
-the both-flags cell also rules out ``tf.data`` ``options.deterministic`` and the
-element ``.shuffle()`` as residual contributors; it says NOTHING about cuDNN
-kernel nondeterminism, because the probe was CPU-only, built no model and ran no
-GPU kernel.
+The transform was only ONE of the two unseeded sources; the other was the file
+interleave. The records are now a seeded permutation, so ``--seed`` pins the rows and
+``--stateless-augmentation`` is all that remains to pin. The bit-identity of the both-flags
+cell also ruled out ``tf.data`` ``options.deterministic`` and the element ``.shuffle()``
+as residual contributors; it says NOTHING about cuDNN kernel nondeterminism, because the
+probe was CPU-only, built no model and ran no GPU kernel.
 
 ``tests/test_datasets/test_multi_crop.py`` pins every half: the stateful
 serial guarantee that is real, the stream-not-per-element mechanism that scopes
@@ -795,7 +792,7 @@ def make_stateless_multi_crop_map_fn(
         A ``tf.data``-mappable callable ``(index, image, label) ->
         (views, label)``. **Note the leading index**: this must be mapped over
         an ENUMERATED dataset, which is what
-        ``build_raw_image_dataset(..., indexed_element_map_fn=...)`` builds. It
+        ``load_image_streams(..., indexed_element_map_fn=...)`` builds. It
         also accepts ``(index, image)``.
 
     Raises:
@@ -819,7 +816,7 @@ def make_stateless_multi_crop_map_fn(
             raise ValueError(
                 "make_stateless_multi_crop_map_fn's map fn was called without "
                 "an element index. It must be mapped over an ENUMERATED "
-                "dataset -- see build_raw_image_dataset's "
+                "dataset -- see load_image_streams's "
                 "`indexed_element_map_fn` parameter."
             )
         key_index = tf.cast(index, tf.int64)

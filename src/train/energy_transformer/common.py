@@ -29,12 +29,12 @@ import numpy as np
 # consuming packages, 9 call sites); re-exported here so every existing
 # `train.energy_transformer.common` import path keeps resolving TO THE SAME
 # OBJECT -- see that module's D-007 anchor, and beit's/dino's identity tests.
-from train.common.optimizer import build_optimizer  # noqa: F401  (re-exported, D-007)
+from train.common.optimizer import build_optimizer  # re-exported (D-007)
 
 from dl_techniques.utils.logger import logger
 
 # Same idiom as `train/graph_energy_transformer/common.py`: `__all__` is what marks
-# the re-exported names above as USED (pyflakes does not honour `# noqa`).
+# the re-exported names above as USED (pyflakes does not honour a noqa comment).
 __all__ = [
     "build_optimizer",
     "EnergyTraceCallback",

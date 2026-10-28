@@ -69,15 +69,21 @@ How big a `dino_knn_top1_*` difference is real (read before quoting one)
 -------------------------------------------------------------------------------
 **A k-NN top-1 delta below ~0.02 is inside this probe's own band and is evidence of
 nothing.** The number is a small-sample estimate and the memory bank's composition moves
-it. The bank is ``knn_bank_batches * batch_size`` images ``.take()``n off the train split
--- **512 at the ``--smoke`` defaults** (16 x 32) and **2048 at the 64/32 probe settings**
+it. The bank is ``knn_bank_batches * batch_size`` images ``.take()``n off the fit rows
+(the train split minus the selection slice) -- **512 at the ``--smoke`` defaults** (16 x 32) and **2048 at the 64/32 probe settings**
 every published figure was measured at (the record § 6 (ii) and § 5 confound 8).
+
+**Every figure and band in this section was measured BEFORE the data protocol moved to
+``train.common.image_streams``**: the bank was the full train split read in an unseeded TFDS
+file order and the queries were the test split. A run made now banks the fit rows (a seeded
+permutation), queries the selection slice each epoch and reads the test split once after
+training, so its numbers are comparable to each other and not to the figures below.
 
 The band comes from four ZERO-optimizer-step controls -- four readings of the SAME
 untrained network, at **``--seed 42``**, smoke scale, imagenette, bank 64 / query 32.
 ``dino_knn_top1_k20`` spanned 0.2754-0.2949 (range 0.0195) and ``dino_knn_top1_k10``
 spanned 0.2607-0.2793 (range 0.0186) across those four, while ``dino_feat_mean_cos`` was
-bit-identical, because the QUERY set comes from the unshuffled validation split and only
+bit-identical, because the QUERY set came from the unshuffled validation split and only
 the BANK moved. The four draws verbatim, and why they differ at one fixed seed, are in
 the record § 6 **(iv)**.
 
@@ -98,19 +104,18 @@ Reading rules that follow from that measurement:
   ``--knn-bank-batches 64 --knn-query-batches 32`` on any run whose number you intend to
   read against a historical figure; ``train_dino.py --smoke`` does NOT (see the paragraph
   above, and `dl_techniques.models.vision.dino`'s README § 6.3 trap 2).
-* **The BANK is seeded unconditionally.** `train_dino.build_knn_datasets` always passes
-  ``shuffle_files_seed=config.seed``, down to the TFDS file interleave, so two runs at
-  the same ``--seed`` share the same MEASURING INSTRUMENT. That buys reproducibility of
-  the instrument; it does NOT shrink the band above, which was itself measured at a
-  fixed seed.
-* **The TRAINING stream is seeded by default too, by TWO flags, and dropping either one
-  is enough to lose it.** ``--seed-training-stream`` and ``--stateless-augmentation``
-  both ship ON, so two no-flag runs at the same ``--seed`` are the same experiment and a
-  difference between them is attributable; ``--no-`` on EITHER makes such a difference a
-  difference in the DATA THEY TRAINED ON. Which unseeded source each closes, and the
-  CPU-only 2-process probe behind the claim, are in `train_dino`'s module docstring and
-  the record § 4. Two runs at DIFFERENT seeds share neither stream nor bank, and a ~0.02
-  gap between them is expected from the bank alone.
+* **The BANK is a function of ``--seed``.** `train_dino.build_knn_datasets` takes the
+  bank off the seeded, seeded-shuffled fit rows, so two runs at the same ``--seed`` share
+  the same MEASURING INSTRUMENT. That buys reproducibility of the instrument; it does NOT
+  shrink the band above, which was itself measured at a fixed seed.
+* **The TRAINING stream is a function of ``--seed`` too, and ``--stateless-augmentation``
+  (ON by default) pins the augmentation.** Two no-flag runs at the same ``--seed`` are
+  the same experiment and a difference between them is attributable; ``--no-
+  stateless-augmentation`` makes such a difference a difference in the DATA THEY TRAINED
+  ON. (When the TFDS file interleave was also unseeded a second flag was needed; the
+  CPU-only 2-process probe behind that claim is in the record § 4.) Two runs at DIFFERENT
+  seeds share neither stream nor bank, and a ~0.02 gap between them is expected from the
+  bank alone.
 * Every `dino_knn_top1_*` produced BEFORE the bank was seeded -- including the runs in
   ``results/dino_smoke_step12/`` and ``results/dino_step14_confirm/`` -- carries the full
   band, whatever the seed.
@@ -247,10 +252,10 @@ def knn_top1_accuracy(
 
     Interface contract:
         Parameters:
-            bank_features: ``(n_bank, d)`` memory-bank features (the TRAIN split).
+            bank_features: ``(n_bank, d)`` memory-bank features (the fit rows).
             bank_labels: ``(n_bank,)`` integer class labels for the bank.
-            query_features: ``(n_query, d)`` features to classify (the VALIDATION
-                split). Must come from samples DISJOINT from the bank -- see
+            query_features: ``(n_query, d)`` features to classify (the selection
+                slice, or the test split for the one post-training probe). Must come from samples DISJOINT from the bank -- see
                 ``check_overlap``.
             query_labels: ``(n_query,)`` integer ground-truth labels.
             k: Neighbours per query. Clipped to ``n_bank`` when the bank is smaller.
@@ -345,7 +350,7 @@ def knn_top1_accuracy(
                 f"{query_self_cosine:.4f}, below the {COLLAPSE_COSINE_THRESHOLD} "
                 f"collapse threshold). Every such query retrieves ITSELF, so the "
                 f"reported accuracy would be meaningless. Draw the bank from the "
-                f"TRAIN split and the queries from the VALIDATION split."
+                f"fit rows and the queries from the selection slice or the test split."
             )
 
     if num_classes is None:

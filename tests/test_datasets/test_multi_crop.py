@@ -89,7 +89,7 @@ def _run(map_fn, images, num_parallel_calls=None):
     `num_parallel_calls=None` is a SERIAL `.map()`. That is the ONLY
     configuration in which the `seed` argument reproduces anything -- see
     `TestRandomness`. Pass `tf.data.AUTOTUNE` to exercise the configuration the
-    shipped trainer actually uses (`build_raw_image_dataset` passes AUTOTUNE).
+    shipped trainer actually uses (`load_image_streams` passes AUTOTUNE).
     """
     ds = tf.data.Dataset.from_tensor_slices(
         (images, np.arange(len(images), dtype="int32"))
@@ -116,7 +116,7 @@ def _run_indexed(map_fn, images, indices=None, num_parallel_calls=None):
 
     The index is supplied explicitly rather than by `.enumerate()` so that the
     cross-epoch test can hand the SAME image two DIFFERENT indices, which is
-    what a second epoch does (`build_raw_image_dataset` enumerates AFTER
+    what a second epoch does (`load_image_streams` enumerates AFTER
     `repeat()`).
     """
     if indices is None:
@@ -521,7 +521,7 @@ class TestStatelessRandomness:
     def test_the_same_image_is_augmented_differently_at_a_different_index(self):
         """Cross-epoch variation: epoch 2's copy of image k has a NEW index.
 
-        `build_raw_image_dataset` enumerates AFTER `repeat()` precisely so that
+        `load_image_streams` enumerates AFTER `repeat()` precisely so that
         this holds. If the key ignored the index, every epoch would replay one
         frozen augmentation per image and the determinism test above would
         still be green.

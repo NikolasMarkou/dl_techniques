@@ -226,7 +226,7 @@ class TestDisjointnessGuard:
 
     def test_the_guard_names_the_fix(self) -> None:
         features, labels = _separable(n_per_class=20, seed=10)
-        with pytest.raises(ValueError, match="TRAIN split"):
+        with pytest.raises(ValueError, match="fit rows"):
             knn_top1_accuracy(features, labels, features, labels, k=10)
 
     def test_disjoint_sets_do_not_trip_the_guard(self) -> None:

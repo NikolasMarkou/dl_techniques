@@ -37,7 +37,7 @@ import tensorflow as tf
 # `train.energy_transformer.common` where it was originally written (four packages consume
 # it); `train.energy_transformer.common` re-exports it and both paths resolve to the SAME
 # OBJECT. See decisions.md D-008.
-from train.common.optimizer import build_optimizer  # noqa: F401  (re-exported)
+from train.common.optimizer import build_optimizer  # re-exported
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.vision.vq_vae_rotation.model import VQVAERotationTrick
 

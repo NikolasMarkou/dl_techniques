@@ -2,6 +2,15 @@
 
 *Date: 2026-08-02. Status: measurement record, git-tracked on purpose.*
 
+> **Update 2026-10-28.** Every number below was measured with the pipeline of that date:
+> `build_raw_image_dataset`, a train bank read in an unseeded TFDS file order (pinned by
+> `shuffle_files_seed` and the `--seed-training-stream` flag), and queries drawn from the
+> labelled test split. `train.common.image_streams.load_image_streams` replaced it (the bank is
+> the seeded fit rows, the per-epoch queries are a seeded selection slice of train, the test
+> split is probed once after training), and `--seed-training-stream` and `shuffle_files_seed`
+> were removed. The record is kept as it was measured and is NOT rewritten; a run made now
+> is not comparable to these figures.
+
 ---
 
 ## 0. What this file is
