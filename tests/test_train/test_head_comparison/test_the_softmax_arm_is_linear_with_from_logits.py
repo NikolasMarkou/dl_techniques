@@ -13,6 +13,7 @@ import pytest
 
 import keras
 
+import train.common.classification_data as classification_data
 import train.head_comparison.train_heads as heads
 
 
@@ -41,11 +42,12 @@ def test_the_logit_arms_are_the_ones_without_a_probability_layer():
 def test_train_heads_compiles_with_loss_for_head(tmp_path, monkeypatch):
     """``train_heads`` itself, up to ``compile``: the loss it passes is the
     from-logits cross-entropy for the softmax arm."""
-    fine = np.arange(200) % heads.NUM_FINE
-    images = np.zeros((200, 32, 32, 3), "float32")
+    # 10 images per class, so the 10% selection cut cannot empty a class of the fit split.
+    fine = np.arange(1000) % heads.NUM_FINE
+    images = np.zeros((1000, 32, 32, 3), "uint8")
     monkeypatch.setattr(heads, "setup_gpu", lambda gpu_id=None: None)
-    monkeypatch.setattr(heads, "load_dataset", lambda name: (
-        (images, fine), (images, fine), None, None))
+    monkeypatch.setattr(classification_data, "_load_raw", lambda name: (
+        (images, fine), (images, fine)))
     monkeypatch.setattr(keras.datasets.cifar100, "load_data", lambda label_mode: (
         (None, fine // 5), (None, fine // 5)))
     seen = []

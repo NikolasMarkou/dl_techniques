@@ -77,9 +77,9 @@ from train.cliffordnet.train_cliffordnet import (
     build_train_dataset,
 )
 from dl_techniques.datasets.vision.classification import CIFAR100_MEAN, CIFAR100_STD
+from train.common.classification_data import load_split_arrays
 from train.common import (
     create_callbacks,
-    load_dataset,
     set_seeds,
     setup_gpu,
     validate_model_loading,
@@ -457,8 +457,8 @@ def train_one_variant(
     run_root: str,
     x_train: np.ndarray,
     y_train: np.ndarray,
-    x_test: np.ndarray,
-    y_test: np.ndarray,
+    x_val: np.ndarray,
+    y_val: np.ndarray,
     num_classes: int,
     input_shape: Tuple[int, int, int],
 ) -> Optional[Dict[str, Any]]:
@@ -510,7 +510,7 @@ def train_one_variant(
         random_erasing_prob=0.0 if args.smoke_test else 0.25,
     )
     val_ds = build_eval_dataset(
-        x_test, y_test, batch_size, dataset_name="cifar100"
+        x_val, y_val, batch_size, dataset_name="cifar100"
     )
     steps_per_epoch = len(x_train) // batch_size
 
@@ -595,7 +595,7 @@ def train_one_variant(
     #      .keras + by_name=True bug; V0 round-trip is already covered by
     #      the existing CliffordNet test suite) ----
     if not args.skip_save and variant_name != "V0_baseline_isotropic":
-        test_sample = x_test[:4]
+        test_sample = x_val[:4]
         # A save or reload error surfaces (D-085); a value mismatch is logged
         # by validate_model_loading itself.
         # The statistics build_train_dataset / build_eval_dataset normalise
@@ -711,9 +711,12 @@ def train_all_variants(args: argparse.Namespace) -> None:
     os.makedirs(run_root, exist_ok=True)
     logger.info(f"Run root: {run_root}")
 
-    (x_train, y_train), (x_test, y_test), input_shape, num_classes = (
-        load_dataset("cifar100")
-    )
+    # Selection (the per-epoch val metrics the sweep ranks variants by) is a held-out
+    # slice of train; the test split is not used by the sweep.
+    arrays = load_split_arrays("cifar100", seed=args.seed)
+    x_train, y_train = arrays.x_train, arrays.y_train
+    x_val, y_val = arrays.x_select, arrays.y_select
+    input_shape, num_classes = arrays.input_shape, arrays.num_classes
 
     # ---- Determine variants to run ----
     if args.variant == "all":
@@ -735,7 +738,7 @@ def train_all_variants(args: argparse.Namespace) -> None:
                 args,
                 run_root,
                 x_train, y_train,
-                x_test, y_test,
+                x_val, y_val,
                 num_classes,
                 input_shape,
             )

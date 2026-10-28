@@ -41,8 +41,8 @@ import keras
 from train.common import (
     setup_gpu,
     create_callbacks as create_common_callbacks,
-    load_dataset,
 )
+from train.common.classification_data import load_split_arrays
 from train.common.run_io import prepare_run_dir, save_training_history_json
 from train.common.seed import DEFAULT_SEED, set_seeds
 from dl_techniques.utils.logger import logger
@@ -421,15 +421,18 @@ def train_heads(
     run_dir = prepare_run_dir(config)
 
     # ---- Data (fine via the shared loader, coarse alongside it) ----
-    (x_train, y_train), (x_test, y_test), _, _ = load_dataset("cifar100")
-    y_train = np.asarray(y_train).reshape(-1)
-    y_test = np.asarray(y_test).reshape(-1)
-    # Coarse (superclass) labels ride alongside the shared fine loader.
+    # Selection is a held-out slice of train; the test split only scores the finished model.
+    arrays = load_split_arrays("cifar100", seed=config.seed)
+    x_train, y_train = arrays.x_train, arrays.y_train
+    x_select, y_select = arrays.x_select, arrays.y_select
+    x_test, y_test = arrays.x_test, arrays.y_test
+    # Coarse (superclass) labels ride alongside the shared fine loader, aligned through the
+    # row indices each split took from the Keras arrays.
     (_, y_train_coarse), (_, y_test_coarse) = keras.datasets.cifar100.load_data(
         label_mode="coarse"
     )
-    y_train_coarse = np.asarray(y_train_coarse).reshape(-1)
-    y_test_coarse = np.asarray(y_test_coarse).reshape(-1)
+    y_train_coarse = np.asarray(y_train_coarse).reshape(-1)[arrays.index_train]
+    y_test_coarse = np.asarray(y_test_coarse).reshape(-1)[arrays.index_test]
     fine_to_coarse = derive_fine_to_coarse(y_train, y_train_coarse)
 
     # ---- Model ----
@@ -471,7 +474,7 @@ def train_heads(
         x_train, y_train,
         batch_size=config.batch_size,
         epochs=config.epochs,
-        validation_data=(x_test, y_test),
+        validation_data=(x_select, y_select),
         callbacks=callbacks,
         verbose=1,
     )

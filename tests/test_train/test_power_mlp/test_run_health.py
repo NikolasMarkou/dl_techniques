@@ -30,6 +30,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 import keras  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
+from tests.classification_fakes import use_raw_from_unit  # noqa: E402
 
 import train.common.run_artifacts as run_artifacts  # noqa: E402
 import train.power_mlp.train_power_mlp as tpm  # noqa: E402
@@ -106,7 +107,7 @@ def _file_handlers():
 
 
 def test_a_non_finite_history_writes_a_diverged_summary_then_raises(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(tpm, "load_dataset", _tiny_load_dataset)
+    use_raw_from_unit(monkeypatch, _tiny_load_dataset)
     nan = float("nan")
     _stub_fit(monkeypatch, _history(
         loss=[nan], val_loss=[nan], accuracy=[0.1], val_accuracy=[0.1], lr=[3e-4]))
@@ -137,7 +138,7 @@ def test_a_non_finite_history_writes_a_diverged_summary_then_raises(monkeypatch,
 def test_the_summary_records_the_batch_norm_sanity_mode_end_to_end(monkeypatch, tmp_path) -> None:
     """The mode ``_check_initial_loss`` returns reaches ``results_summary.json``
     (a batch-normalized run measures in training mode)."""
-    monkeypatch.setattr(tpm, "load_dataset", _tiny_load_dataset)
+    use_raw_from_unit(monkeypatch, _tiny_load_dataset)
     _stub_fit(monkeypatch, _history(loss=[float("nan")], val_loss=[float("nan")], lr=[3e-4]))
 
     with pytest.raises(RuntimeError):
@@ -150,7 +151,7 @@ def test_the_summary_records_the_batch_norm_sanity_mode_end_to_end(monkeypatch, 
 
 
 def test_a_diverged_run_still_leaves_its_run_log_and_no_handler(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(tpm, "load_dataset", _tiny_load_dataset)
+    use_raw_from_unit(monkeypatch, _tiny_load_dataset)
     _stub_fit(monkeypatch, _history(loss=[1.0, float("inf")], val_loss=[1.0, 1.0], lr=[3e-4, 3e-4]))
 
     with pytest.raises(RuntimeError):
@@ -173,7 +174,7 @@ def test_run_log_holds_the_derived_lr_and_early_stop_lines_and_the_summary_keys(
     """Keras prints the reduction / early-stop messages to stdout, never to the logger,
     so the trainer derives them from the history: 3 of 5 epochs run, the rate halves
     at epoch 3."""
-    monkeypatch.setattr(tpm, "load_dataset", _tiny_load_dataset)
+    use_raw_from_unit(monkeypatch, _tiny_load_dataset)
     _stub_fit(monkeypatch, _history(
         loss=[2.0, 1.0, 0.8], val_loss=[2.0, 1.0, 0.9],
         accuracy=[0.3, 0.6, 0.7], val_accuracy=[0.3, 0.6, 0.7],
@@ -197,7 +198,7 @@ def test_the_run_log_handler_is_removed_when_train_model_raises_midway(
         monkeypatch, tmp_path) -> None:
     """The ``finally``: a crash after the handler was attached must not leave it on the
     ``dl`` logger (a later run in this process would write into this run's file)."""
-    monkeypatch.setattr(tpm, "load_dataset", _tiny_load_dataset)
+    use_raw_from_unit(monkeypatch, _tiny_load_dataset)
 
     def boom(*args, **kwargs):
         raise KeyError("prepare_data exploded")
@@ -261,7 +262,7 @@ def test_a_run_without_a_loadable_best_checkpoint_writes_the_summary_then_fails(
         monkeypatch, tmp_path) -> None:
     """D-186: the stubbed fit writes no ``best_model.keras``; the run records the load
     error in ``results_summary.json`` and only then raises."""
-    monkeypatch.setattr(tpm, "load_dataset", _tiny_load_dataset)
+    use_raw_from_unit(monkeypatch, _tiny_load_dataset)
     monkeypatch.setattr(keras.Model, "fit", lambda self, *a, **k: _ok_history())
 
     with pytest.raises(RuntimeError, match="best_model.keras"):
@@ -280,7 +281,7 @@ def test_a_reused_experiment_name_is_refused_and_the_first_run_is_byte_identical
     """Before this guard a second run under the same name merged into the first
     directory: one run.log narrating two runs, a summary of only the second, stale
     figures of the first. Now the second raises before writing anything."""
-    monkeypatch.setattr(tpm, "load_dataset", _tiny_load_dataset)
+    use_raw_from_unit(monkeypatch, _tiny_load_dataset)
     _stub_fit(monkeypatch, _ok_history())
     tpm.train_model(_config(tmp_path, "reused", epochs=2))
     first = _snapshot(tmp_path / "reused")
@@ -297,7 +298,7 @@ def test_a_reused_experiment_name_is_refused_and_the_first_run_is_byte_identical
 
 def test_a_fresh_experiment_name_and_an_empty_existing_directory_still_work(
         monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(tpm, "load_dataset", _tiny_load_dataset)
+    use_raw_from_unit(monkeypatch, _tiny_load_dataset)
     _stub_fit(monkeypatch, _ok_history())
     (tmp_path / "prepared_but_empty").mkdir()
     (tmp_path / "prepared_but_unrelated").mkdir()
@@ -326,7 +327,7 @@ def test_any_single_run_artifact_is_enough_to_refuse(tmp_path, artifact) -> None
 
 def test_the_run_log_is_opened_in_write_mode(monkeypatch, tmp_path) -> None:
     """Belt and braces next to the refusal: a handler must never append to an old file."""
-    monkeypatch.setattr(tpm, "load_dataset", _tiny_load_dataset)
+    use_raw_from_unit(monkeypatch, _tiny_load_dataset)
     modes = []
 
     def fit(self, *args, **kwargs):

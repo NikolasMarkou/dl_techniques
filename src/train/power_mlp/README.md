@@ -16,7 +16,7 @@ of the repository).
 
 ## Data domain and input scaling
 
-`load_dataset` returns pixels scaled to `[0, 1]`. Two scalings are available:
+`train.common.classification_data.load_split_arrays` returns pixels scaled to `[0, 1]`. Two scalings are available:
 
 | `--input-scaling` | Input the model sees | Notes |
 |---|---|---|

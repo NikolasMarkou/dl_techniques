@@ -14,7 +14,7 @@ import keras
 import numpy as np
 import pytest
 
-from tests.imagenet_fake_tree import build_fake_imagenet
+from tests.imagenet_fake_tree import build_fake_imagenet, use_the_fake_tree_class_count
 from train.cliffordnet import train_cliffordnet as module
 
 VIS_FILES = [
@@ -51,6 +51,7 @@ def _analysis(*_a, **kwargs):
 
 def _patch(monkeypatch):
     _Seen.order = []
+    use_the_fake_tree_class_count(monkeypatch)
     real_conformal = module.run_conformal
 
     def conformal_spy(*args, **kwargs):
@@ -82,7 +83,7 @@ def run(tmp_path_factory):
     mp = pytest.MonkeyPatch()
     _patch(mp)
     _argv(mp, "--dataset", "imagenet", "--imagenet-root", root, "--image-size", "32",
-          "--batch-size", "4", "--epochs", "1", "--eval-samples", "5",
+          "--batch-size", "4", "--epochs", "1", "--eval-samples", "5", "--holdout-per-class", "1",
           "--conformal-alpha", "0.3", "--output-dir", str(out))
     try:
         module.main()
@@ -131,10 +132,11 @@ def test_the_summary_names_the_root_and_the_head(run):
     assert "first 5 val images" in text
 
 
-def test_the_conformal_step_sees_all_of_val_and_runs_before_the_analysis(run):
+def test_the_conformal_step_sees_all_of_the_official_val_and_runs_before_the_analysis(run):
     assert _Seen.conformal_record["n_calibration"] == 6  # not the 5-image head
     assert _Seen.order == ["conformal", "analysis"]
     assert _Seen.conformal_record["weights"].startswith("best checkpoint")
+    assert _Seen.conformal_record["model_selected_on_calibration_set"] is False
 
 
 def test_the_conformal_files_are_in_the_run_directory(run):
@@ -152,7 +154,7 @@ def test_no_conformal_skips_the_step(tmp_path, monkeypatch):
     root = build_fake_imagenet(tmp_path / "tree" / "imagenet2012")
     _patch(monkeypatch)
     _argv(monkeypatch, "--dataset", "imagenet", "--imagenet-root", root, "--image-size", "32",
-          "--batch-size", "4", "--epochs", "1", "--eval-samples", "5", "--no-conformal",
+          "--batch-size", "4", "--epochs", "1", "--eval-samples", "5", "--holdout-per-class", "1", "--no-conformal",
           "--output-dir", str(tmp_path / "out"))
     module.main()
     (run_dir,) = [p for p in (tmp_path / "out").iterdir() if p.is_dir()]

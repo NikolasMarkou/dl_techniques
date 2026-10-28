@@ -9,7 +9,8 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Tuple, Optional, Dict, Any, List
 
-from train.common import setup_gpu, set_seeds, create_base_argument_parser, create_callbacks, save_config_json, load_dataset
+from train.common import setup_gpu, set_seeds, create_base_argument_parser, create_callbacks, save_config_json
+from train.common.classification_data import SplitArrays, add_selection_arguments, load_split_arrays
 from train.common.run_io import default_experiment_name
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import optimizer_builder
@@ -56,6 +57,12 @@ class CIFARSOMConfig:
     num_reconstruction_samples: int = 16
     save_latent_projections: bool = True
 
+    # Selection (val_loss, early stopping) is a held-out slice of train; the test split
+    # only feeds the monitoring figures and the final loss.
+    validation_split: Optional[float] = None
+    max_samples: Optional[int] = None
+    seed: int = 42
+
     output_dir: str = 'results'
     experiment_name: Optional[str] = None
 
@@ -70,14 +77,13 @@ class CIFARSOMConfig:
 # DATA LOADING
 # =============================================================================
 
-def load_cifar_data(config: CIFARSOMConfig) -> Tuple[
-    Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]
-]:
-    """Load and preprocess CIFAR dataset, normalized to [0, 1]."""
+def load_cifar_data(config: CIFARSOMConfig) -> SplitArrays:
+    """Load CIFAR in [0, 1]: a held-out slice of train selects, the test split only reports."""
     logger.info(f"Loading {config.dataset_name}...")
-    (x_train, y_train), (x_test, y_test), _, _ = load_dataset(config.dataset_name)
-    logger.info(f"Train: {x_train.shape[0]}, Test: {x_test.shape[0]}, Shape: {x_train.shape[1:]}")
-    return (x_train, y_train), (x_test, y_test)
+    return load_split_arrays(
+        config.dataset_name, seed=config.seed, validation_split=config.validation_split,
+        max_samples=config.max_samples,
+    )
 
 
 def create_augmentation_layer(config: CIFARSOMConfig) -> keras.layers.Layer:
@@ -549,7 +555,9 @@ def train_cifar_som_autoencoder(config: CIFARSOMConfig) -> keras.Model:
     """Train CIFAR autoencoder with SoftSOM topological bottleneck."""
     logger.info(f"Starting training: {config.experiment_name}")
 
-    (x_train, y_train), (x_test, y_test) = load_cifar_data(config)
+    arrays = load_cifar_data(config)
+    x_train, x_select, x_test, y_test = arrays.x_train, arrays.x_select, arrays.x_test, arrays.y_test
+    logger.info(f"Train: {len(x_train)}, selection: {len(x_select)}, test: {len(x_test)}")
     x_train_aug = create_augmentation_layer(config)(x_train, training=True) \
         if config.use_data_augmentation else x_train
 
@@ -593,7 +601,7 @@ def train_cifar_som_autoencoder(config: CIFARSOMConfig) -> keras.Model:
 
     model.fit(
         x_train_aug, x_train, batch_size=config.batch_size,
-        epochs=config.epochs, validation_data=(x_test, x_test),
+        epochs=config.epochs, validation_data=(x_select, x_select),
         callbacks=callbacks, verbose=1
     )
 
@@ -611,10 +619,12 @@ def main() -> None:
         description='Train CIFAR autoencoder with SoftSOM bottleneck',
         default_dataset='cifar10',
         dataset_choices=['cifar10', 'cifar100'],
+        include_image_size=False,
     )
     parser.add_argument('--grid-size', type=int, default=16)
     parser.add_argument('--som-temperature', type=float, default=1.0)
     parser.add_argument('--no-augmentation', action='store_true')
+    add_selection_arguments(parser, imagenet=False)
     parser.add_argument('--seed', type=int, default=42, help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
     args = parser.parse_args()
 
@@ -630,6 +640,9 @@ def main() -> None:
         epochs=args.epochs,
         learning_rate=args.learning_rate,
         lr_schedule=args.lr_schedule,
+        validation_split=args.validation_split,
+        max_samples=args.max_samples,
+        seed=args.seed,
     )
 
     aug_status = 'on' if config.use_data_augmentation else 'off'

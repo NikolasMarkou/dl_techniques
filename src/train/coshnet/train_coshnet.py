@@ -19,12 +19,12 @@ from train.common import (
     setup_gpu,
     set_seeds,
     create_base_argument_parser,
-    load_dataset,
     create_callbacks,
     create_learning_rate_schedule,
     validate_model_loading,
     run_model_analysis,
 )
+from train.common.classification_data import add_selection_arguments, load_classification_data
 
 
 # Custom objects needed for model serialization
@@ -45,10 +45,14 @@ def train_model(args) -> None:
     setup_gpu(gpu_id=args.gpu)
     set_seeds(args.seed)
 
-    # Load dataset
-    (x_train, y_train), (x_test, y_test), input_shape, num_classes = load_dataset(
-        args.dataset
+    # Load dataset: [0, 1] inputs, selection on a held-out slice of train, the test split
+    # only for the final report.
+    data = load_classification_data(
+        args.dataset, batch_size=args.batch_size, seed=args.seed, normalize="unit",
+        channels=3 if args.dataset == "mnist" else None,
+        validation_split=args.validation_split, max_samples=args.max_samples,
     )
+    input_shape, num_classes = data.input_shape, data.num_classes
 
     # Create model
     logger.info(f"Creating CoShNet model (variant: {args.variant})...")
@@ -94,16 +98,15 @@ def train_model(args) -> None:
                 f"epochs={args.epochs}, batch={args.batch_size}, lr={args.learning_rate}")
 
     history = model.fit(
-        x_train, y_train,
-        batch_size=args.batch_size,
+        data.train_ds,
         epochs=args.epochs,
-        validation_data=(x_test, y_test),
+        validation_data=data.select_ds,
         callbacks=callbacks,
         verbose=1
     )
 
     # Save and validate
-    test_sample = x_test[:4]
+    test_sample = data.x_fig[:4]
     pre_save_output = model.predict(test_sample, verbose=0)
 
     final_path = os.path.join(results_dir, f"coshnet_{args.dataset}_{args.variant}_final.keras")
@@ -122,12 +125,12 @@ def train_model(args) -> None:
         best_model = keras.models.load_model(best_path, custom_objects=CUSTOM_OBJECTS)
         logger.info("Loaded best checkpoint")
 
-    test_results = best_model.evaluate(x_test, y_test, batch_size=args.batch_size, verbose=1, return_dict=True)
+    test_results = best_model.evaluate(data.test_ds, verbose=1, return_dict=True)
     logger.info(f"Test results: {test_results}")
 
     # Post-training analysis
     run_model_analysis(
-        model=best_model, test_data=(x_test, y_test), training_history=history,
+        model=best_model, test_data=(data.x_fig, data.y_fig), training_history=history,
         model_name=f"coshnet_{args.variant}_{args.dataset}", results_dir=results_dir,
     )
 
@@ -154,7 +157,9 @@ def main() -> None:
     parser = create_base_argument_parser(
         description='Train CoShNet (Complex Shearlet Network) model',
         dataset_choices=['mnist', 'cifar10', 'cifar100'],
+        include_image_size=False,
     )
+    add_selection_arguments(parser, imagenet=False)
     parser.add_argument('--variant', type=str, default='base',
                         choices=['tiny', 'base', 'large', 'cifar10', 'custom'],
                         help='CoShNet model variant')

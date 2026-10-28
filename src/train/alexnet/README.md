@@ -50,7 +50,10 @@ MPLBACKEND=Agg .venv/bin/python -m train.alexnet.train_alexnet \
 ```
 
 CIFAR-10 and CIFAR-100 are each normalised with their own training-set mean/std
-(`CIFAR10_MEAN`/`STD`, `CIFAR100_MEAN`/`STD` in `train/common/datasets.py`).
+(`CIFAR10_MEAN`/`STD`, `CIFAR100_MEAN`/`STD` in `dl_techniques/datasets/vision/classification.py`),
+loaded by `train.common.classification_data` (the pixels are upsampled to `--image-size` before
+standardizing). Selection is a held-out slice of train (`--validation-split`, default 0.1; ImageNet:
+`--holdout-per-class`), never the test set; Imagenette keeps its TFDS train/validation pair.
 
 ## Model analysis
 

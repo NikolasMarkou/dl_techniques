@@ -120,8 +120,11 @@ def test_the_synthetic_set_is_not_materialised(tmp_path):
         import json, resource, sys
         import numpy as np
         from train.darkir import train_darkir as module
-        images = np.random.default_rng(0).random((1000, 32, 32, 3)).astype(np.float32)
-        module.load_dataset = lambda name: ((images, None), (images[:100], None), None, None)
+        from train.common import classification_data
+        images = np.random.default_rng(0).integers(0, 256, (1000, 32, 32, 3), dtype=np.uint8)
+        labels = np.zeros(1000, dtype=np.int64)
+        classification_data._load_raw = lambda name: (
+            (images, labels), (images[:100], labels[:100]))
         before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         train_ds, val_ds, n = module._create_synthetic_dataset((256, 256), 8)
         after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss

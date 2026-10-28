@@ -41,9 +41,9 @@ Usage:
     python -m train.alexnet.train_alexnet --epochs 30 --batch-size 128 \\
         --learning-rate 0.01 --gpu 0
 
-    # ImageNet-scale run from a class-directory tree
+    # ImageNet-scale run from the extracted train/<wnid>/ + val/ tree (devkit for val labels)
     python -m train.alexnet.train_alexnet --dataset imagenet \\
-        --train-data-dir /data/imagenet/train --val-data-dir /data/imagenet/val \\
+        --imagenet-root /data/imagenet2012 \\
         --image-size 227 --epochs 90 --batch-size 256 \\
         --optimizer sgd --learning-rate 0.1 --lr-schedule exponential_decay \\
         --weight-decay 5e-4 --gpu 0
@@ -67,20 +67,20 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-from dl_techniques.datasets.vision.classification import (
-    CIFAR10_MEAN,
-    CIFAR10_STD,
-    CIFAR100_MEAN,
-    CIFAR100_STD,
-)
+from dl_techniques.datasets.vision.classification import CLASSIFICATION_DATASETS
+from dl_techniques.datasets.vision.imagenet2012 import IMAGENET2012_DEFAULT_ROOT
 from train.common import (
     setup_gpu,
     set_seeds,
     create_callbacks as create_common_callbacks,
     IMAGENETTE_NUM_CLASSES,
     build_raw_image_dataset,
-    make_imagenet_filesystem_dataset,
     EpochMetricsPlotCallback,
+)
+from train.common.classification_data import (
+    ClassificationData,
+    add_selection_arguments,
+    load_classification_data,
 )
 from train.common.run_io import (
     default_experiment_name,
@@ -115,8 +115,14 @@ class TrainingConfig:
 
     # Data
     dataset: str = "imagenette"  # imagenette | cifar10 | cifar100 | imagenet
-    train_data_dir: Optional[str] = None  # only used for imagenet
-    val_data_dir: Optional[str] = None  # only used for imagenet
+    #: Selection is a held-out slice of train (``validation_split``: CIFAR;
+    #: ``holdout_per_class``: ImageNet); the test split never selects. ``None`` means the
+    #: loader's default. Imagenette keeps its TFDS train/validation pair.
+    validation_split: Optional[float] = None
+    holdout_per_class: Optional[int] = None
+    max_samples: Optional[int] = None
+    imagenet_root: str = IMAGENET2012_DEFAULT_ROOT  # only used for imagenet
+    devkit_dir: Optional[str] = None  # only used for imagenet
     image_size: int = 227
     batch_size: int = 256
     augment_data: bool = True
@@ -170,54 +176,33 @@ class TrainingConfig:
 # =============================================================================
 
 
-def create_cifar_dataset(config: TrainingConfig):
-    """Build the CIFAR train/validation pipelines.
+def _flip(image, label):
+    """Random horizontal flip on the resized [0, 1] image (AlexNet's only CIFAR augmentation)."""
+    return tf.image.random_flip_left_right(image), label
+
+
+def create_cifar_data(config: TrainingConfig) -> ClassificationData:
+    """Load CIFAR through the shared loader, upsampled to the model's input.
+
+    Each pipeline resizes the 32x32 image to ``image_size`` (AlexNet was defined at 227;
+    on CIFAR a smaller legal size is a deliberate cost trade, not the paper's
+    configuration), flips the training images and standardizes with the dataset's own
+    training-set statistics (D-103 of plan-2026-10-14T062616-81938e81). Selection is a
+    held-out slice of train; the test split never selects.
 
     :param config: The training configuration.
     :type config: TrainingConfig
-    :return: ``(train_ds, val_ds, steps_per_epoch, val_steps)``.
-    :rtype: Tuple[Any, Any, int, int]
+    :return: The loaded splits.
+    :rtype: ClassificationData
     :raises ValueError: If ``image_size`` is below the model's minimum.
     """
     _check_image_size(config)
-    if config.dataset == "cifar10":
-        mean, std = CIFAR10_MEAN, CIFAR10_STD
-        (x_train, y_train), (x_test, y_test) = keras.datasets.cifar10.load_data()
-    else:
-        # Each CIFAR split with its own training-set statistics (D-103 of
-        # plan-2026-10-14T062616-81938e81).
-        mean, std = CIFAR100_MEAN, CIFAR100_STD
-        (x_train, y_train), (x_test, y_test) = keras.datasets.cifar100.load_data()
-
-    def prepare(images, labels, training):
-        # A tf.data map hands this function symbolic tensors, which have no
-        # NumPy ``astype``.
-        images = tf.cast(images, tf.float32) / 255.0
-        images = (images - mean) / std
-        # Upsample 32x32 to the model's input. AlexNet was defined at 227; on
-        # CIFAR a smaller legal size is a deliberate cost trade, not the paper's
-        # configuration.
-        images = tf.image.resize(images, (config.image_size, config.image_size))
-        if training and config.augment_data:
-            images = tf.image.random_flip_left_right(images)
-        return images, labels
-
-    x_train_ds = tf.data.Dataset.from_tensor_slices((x_train, y_train))
-    x_train_ds = x_train_ds.shuffle(len(x_train)).map(
-        lambda a, b: prepare(a, b, True),
-        num_parallel_calls=tf.data.AUTOTUNE,
+    return load_classification_data(
+        config.dataset, batch_size=config.batch_size, seed=config.seed,
+        normalize="standardize", resize=config.image_size,
+        augment=_flip if config.augment_data else None,
+        validation_split=config.validation_split, max_samples=config.max_samples,
     )
-    x_train_ds = x_train_ds.batch(config.batch_size).prefetch(tf.data.AUTOTUNE)
-
-    x_test_ds = tf.data.Dataset.from_tensor_slices((x_test, y_test))
-    x_test_ds = x_test_ds.map(
-        lambda a, b: prepare(a, b, False), num_parallel_calls=tf.data.AUTOTUNE
-    )
-    x_test_ds = x_test_ds.batch(config.batch_size).prefetch(tf.data.AUTOTUNE)
-
-    steps_per_epoch = len(x_train) // config.batch_size
-    val_steps = max(1, len(x_test) // config.batch_size)
-    return x_train_ds, x_test_ds, steps_per_epoch, val_steps
 
 
 def _check_image_size(config: TrainingConfig) -> None:
@@ -268,22 +253,6 @@ def create_imagenette_dataset(config: TrainingConfig):
     steps_per_epoch = num_train // config.batch_size
     val_steps = -(-num_val // config.batch_size)
     return train_ds, val_ds, steps_per_epoch, val_steps
-
-
-def _count_images(directory: str) -> int:
-    """Count images under an ImageNet-style class-directory tree.
-
-    :param directory: Root of a directory-per-class tree.
-    :type directory: str
-    :return: The number of image files found.
-    :rtype: int
-    """
-    root = Path(directory)
-    return sum(
-        1
-        for path in root.rglob("*")
-        if path.is_file() and path.suffix.lower() in {".jpeg", ".jpg", ".png"}
-    )
 
 
 # =============================================================================
@@ -388,23 +357,19 @@ def train_alexnet(
     if config.dataset == "imagenette":
         train_ds, val_ds, steps_per_epoch, val_steps = create_imagenette_dataset(config)
     elif config.dataset in ("cifar10", "cifar100"):
-        train_ds, val_ds, steps_per_epoch, val_steps = create_cifar_dataset(config)
+        data = create_cifar_data(config)
+        train_ds, val_ds, steps_per_epoch, val_steps = (
+            data.train_ds, data.select_ds, data.steps_per_epoch, None)
     elif config.dataset == "imagenet":
-        if not config.train_data_dir or not config.val_data_dir:
-            raise ValueError(
-                "--train-data-dir and --val-data-dir are required for "
-                "--dataset imagenet"
-            )
-        train_ds = make_imagenet_filesystem_dataset(
-            config.train_data_dir, config.image_size, config.batch_size,
-            is_training=True, augment=config.augment_data, augment_color=False,
+        data = load_classification_data(
+            "imagenet", batch_size=config.batch_size, seed=config.seed,
+            normalize="standardize", imagenet_augment=config.augment_data,
+            holdout_per_class=config.holdout_per_class, max_samples=config.max_samples,
+            imagenet_root=config.imagenet_root, devkit_dir=config.devkit_dir,
+            image_size=config.image_size,
         )
-        val_ds = make_imagenet_filesystem_dataset(
-            config.val_data_dir, config.image_size, config.batch_size,
-            is_training=False, augment=config.augment_data, augment_color=False,
-        )
-        steps_per_epoch = _count_images(config.train_data_dir) // config.batch_size
-        val_steps = max(1, _count_images(config.val_data_dir) // config.batch_size)
+        train_ds, val_ds, steps_per_epoch, val_steps = (
+            data.train_ds, data.select_ds, data.steps_per_epoch, None)
     else:
         raise ValueError(f"Unsupported dataset: {config.dataset}")
 
@@ -512,9 +477,8 @@ def train_alexnet(
 #: ``--dataset`` choices and the class count each one implies.
 DATASET_CLASSES: Dict[str, int] = {
     "imagenette": IMAGENETTE_NUM_CLASSES,
-    "cifar10": 10,
-    "cifar100": 100,
-    "imagenet": 1000,
+    **{name: CLASSIFICATION_DATASETS[name].num_classes
+       for name in ("cifar10", "cifar100", "imagenet")},
 }
 
 
@@ -534,10 +498,7 @@ def parse_arguments(argv: Optional[List[str]] = None) -> argparse.Namespace:
     # Data
     parser.add_argument("--dataset", type=str, default="imagenette",
                         choices=list(DATASET_CLASSES))
-    parser.add_argument("--train-data-dir", type=str, default=None,
-                        help="Required only when --dataset imagenet")
-    parser.add_argument("--val-data-dir", type=str, default=None,
-                        help="Required only when --dataset imagenet")
+    add_selection_arguments(parser)
     parser.add_argument("--image-size", type=int, default=227,
                         help=f"AlexNet's own extent; must be >= {MIN_SPATIAL_EXTENT}")
     parser.add_argument("--no-augmentation", dest="augment_data",
@@ -609,8 +570,11 @@ def main() -> None:
 
     config = TrainingConfig(
         dataset=ds,
-        train_data_dir=args.train_data_dir,
-        val_data_dir=args.val_data_dir,
+        validation_split=args.validation_split,
+        holdout_per_class=args.holdout_per_class,
+        max_samples=args.max_samples,
+        imagenet_root=args.imagenet_root,
+        devkit_dir=args.devkit_dir,
         image_size=args.image_size,
         batch_size=args.batch_size,
         augment_data=args.augment_data,

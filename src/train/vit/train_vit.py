@@ -32,10 +32,10 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-from dl_techniques.datasets.vision.classification import CIFAR10_MEAN, CIFAR10_STD
 from train.common import setup_gpu, set_seeds, create_callbacks as create_common_callbacks, EpochMetricsPlotCallback
+from train.common.classification_data import add_selection_arguments, load_classification_data
 from train.common.conformal import DEFAULT_ALPHA, add_conformal_arguments, run_conformal
-from train.common.imagenet import add_imagenet_arguments, load_imagenet_splits, require_imagenet_root
+from train.common.imagenet import require_imagenet_root
 from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
 from dl_techniques.utils.logger import logger
 from dl_techniques.datasets.vision.imagenet2012 import IMAGENET2012_DEFAULT_ROOT
@@ -65,6 +65,11 @@ class TrainingConfig:
     devkit_dir: Optional[str] = None  # default: <imagenet_root>/devkit (val labels)
     image_size: int = 32  # 32 for CIFAR, 224 for ImageNet
     batch_size: int = 128
+    # Selection is a held-out slice of train (validation_split: CIFAR; holdout_per_class:
+    # ImageNet); the test split never selects. None means the loader's default.
+    validation_split: Optional[float] = None
+    holdout_per_class: Optional[int] = None
+    max_samples: Optional[int] = None
 
     # Model
     model_variant: str = "vit_pico"
@@ -97,11 +102,7 @@ class TrainingConfig:
     monitor_every_n_epochs: int = 5
     early_stopping_patience: int = 15
 
-    # Data pipeline
-    prefetch_buffer: int = tf.data.AUTOTUNE
-    num_parallel_calls: int = tf.data.AUTOTUNE
-
-    # Conformal prediction sets fitted on val after training (None = off);
+    # Conformal prediction sets fitted on the official val split after training (None = off);
     # ImageNet only
     conformal_alpha: Optional[float] = DEFAULT_ALPHA
 
@@ -140,11 +141,6 @@ class TrainingConfig:
 # CIFAR DATA PIPELINE
 # =============================================================================
 
-def get_cifar_preprocessing() -> Tuple[List[float], List[float]]:
-    """Return CIFAR mean/std for normalization."""
-    return CIFAR10_MEAN, CIFAR10_STD
-
-
 def _cifar_augment(image: tf.Tensor, label: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
     """Standard CIFAR augmentation on [0,1]-valued float32 images.
 
@@ -169,143 +165,6 @@ def _cifar_augment(image: tf.Tensor, label: tf.Tensor) -> Tuple[tf.Tensor, tf.Te
     image = tf.image.random_brightness(image, max_delta=0.1)
     image = tf.image.random_contrast(image, lower=0.9, upper=1.1)
     return image, label
-
-
-def _cifar_normalize(image: tf.Tensor, label: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-    """Per-channel CIFAR mean/std normalization.
-
-    DECISION plan_2026-05-12_f2d29729/D-007: applied as a `.map` AFTER
-    `_cifar_augment` so that both train and val pipelines see the same
-    normalized distribution. Replaces the previous numpy-level
-    normalization that was applied before augmentation (which broke
-    train/val parity — see D-006).
-    """
-    mean_vals, std_vals = get_cifar_preprocessing()
-    mean = tf.constant(mean_vals, dtype=tf.float32, shape=(1, 1, 3))
-    std = tf.constant(std_vals, dtype=tf.float32, shape=(1, 1, 3))
-    image = (image - mean) / std
-    return image, label
-
-
-def _assert_train_val_distribution_match(
-        train_ds: tf.data.Dataset,
-        val_ds: tf.data.Dataset,
-        *,
-        mean_tol: float = 0.5,
-        std_ratio_tol: float = 0.5,
-) -> None:
-    """Pre-fit guard: train and val batches must agree on per-channel mean/std.
-
-    DECISION plan_2026-05-12_f2d29729/D-007: lock-in for the iter-1 cliff bug
-    (D-006). Pulls ONE batch from each dataset, computes per-channel mean/std,
-    logs both, and raises ``RuntimeError`` if either the mean offset or the std
-    ratio exceeds tolerance on any channel. Tolerances are loose by design --
-    the iter-1 bug produced ``|Δmean| ~ 2.0`` per channel; this catches
-    structural divergence, not numerical drift.
-
-    Args:
-        train_ds: training dataset (repeating; one batch consumed here is safe
-            since Keras builds its own iterator at fit time).
-        val_ds: validation dataset.
-        mean_tol: maximum allowed ``|mean_train_c - mean_val_c|`` per channel.
-        std_ratio_tol: maximum allowed ``|std_train_c / std_val_c - 1|`` per
-            channel.
-
-    Raises:
-        RuntimeError: when either tolerance is exceeded on any channel.
-    """
-    x_train_batch, _ = next(iter(train_ds))
-    x_val_batch, _ = next(iter(val_ds))
-
-    mean_train = tf.reduce_mean(x_train_batch, axis=[0, 1, 2])
-    mean_val = tf.reduce_mean(x_val_batch, axis=[0, 1, 2])
-    std_train = tf.math.reduce_std(x_train_batch, axis=[0, 1, 2])
-    std_val = tf.math.reduce_std(x_val_batch, axis=[0, 1, 2])
-
-    mean_train_np = mean_train.numpy()
-    mean_val_np = mean_val.numpy()
-    std_train_np = std_train.numpy()
-    std_val_np = std_val.numpy()
-
-    for c, (mt, mv) in enumerate(zip(mean_train_np, mean_val_np)):
-        logger.info(
-            f"distribution check: channel {c} train mean={float(mt):+.4f} "
-            f"val mean={float(mv):+.4f} |Δ|={abs(float(mt) - float(mv)):.4f}"
-        )
-    for c, (st, sv) in enumerate(zip(std_train_np, std_val_np)):
-        ratio = float(st) / float(sv) if float(sv) > 0.0 else float("inf")
-        logger.info(
-            f"distribution check: channel {c} train std={float(st):.4f} "
-            f"val std={float(sv):.4f} ratio={ratio:.4f}"
-        )
-
-    mean_diff = tf.reduce_max(tf.abs(mean_train - mean_val))
-    std_ratio_dev = tf.reduce_max(tf.abs(std_train / std_val - 1.0))
-    mean_diff_f = float(mean_diff.numpy())
-    std_ratio_dev_f = float(std_ratio_dev.numpy())
-
-    if mean_diff_f >= mean_tol or std_ratio_dev_f >= std_ratio_tol:
-        raise RuntimeError(
-            "Train/val distribution mismatch detected before fit. "
-            f"max|Δmean|={mean_diff_f:.4f} (tol={mean_tol}); "
-            f"max|std_ratio-1|={std_ratio_dev_f:.4f} (tol={std_ratio_tol}). "
-            f"Per-channel train mean={mean_train_np.tolist()} "
-            f"val mean={mean_val_np.tolist()} "
-            f"train std={std_train_np.tolist()} "
-            f"val std={std_val_np.tolist()}. "
-            "This is the fingerprint of D-006 (augment-then-normalize bug). "
-            "Inspect create_cifar_dataset pipeline ordering."
-        )
-
-
-def create_cifar_dataset(
-        config: TrainingConfig,
-) -> Tuple[tf.data.Dataset, tf.data.Dataset, int, int]:
-    """Build CIFAR-10 or CIFAR-100 in-memory datasets.
-
-    Returns:
-        train_ds, val_ds, steps_per_epoch, val_steps
-    """
-    ds_name = config.dataset.lower()
-    if ds_name == "cifar10":
-        (x_train, y_train), (x_test, y_test) = keras.datasets.cifar10.load_data()
-    elif ds_name == "cifar100":
-        (x_train, y_train), (x_test, y_test) = keras.datasets.cifar100.load_data()
-    else:
-        raise ValueError(f"create_cifar_dataset called with dataset={ds_name!r}")
-
-    y_train = y_train.flatten()
-    y_test = y_test.flatten()
-    x_train = x_train.astype("float32") / 255.0
-    x_test = x_test.astype("float32") / 255.0
-
-    # DECISION plan_2026-05-12_f2d29729/D-007: do NOT normalize here at the
-    # numpy level. Normalization runs as `_cifar_normalize` AFTER augmentation
-    # in the tf.data pipeline so that train and val see identical statistics.
-    # See D-006 for the iter-1 bug fingerprint.
-
-    logger.info(f"{ds_name.upper()}: {x_train.shape[0]} train, {x_test.shape[0]} test")
-
-    train_ds = tf.data.Dataset.from_tensor_slices((x_train, y_train)).shuffle(10000)
-    if config.augment_data:
-        train_ds = train_ds.map(_cifar_augment, num_parallel_calls=config.num_parallel_calls)
-    train_ds = train_ds.map(_cifar_normalize, num_parallel_calls=config.num_parallel_calls)
-    train_ds = (
-        train_ds.repeat()
-        .batch(config.batch_size, drop_remainder=True)
-        .prefetch(config.prefetch_buffer)
-    )
-
-    val_ds = (
-        tf.data.Dataset.from_tensor_slices((x_test, y_test))
-        .map(_cifar_normalize, num_parallel_calls=config.num_parallel_calls)
-        .batch(config.batch_size)
-        .prefetch(config.prefetch_buffer)
-    )
-
-    steps_per_epoch = len(x_train) // config.batch_size
-    val_steps = max(1, len(x_test) // config.batch_size)
-    return train_ds, val_ds, steps_per_epoch, val_steps
 
 
 # =============================================================================
@@ -386,36 +245,27 @@ def train_vit(
 
     output_dir = prepare_run_dir(config)
 
-    # ---- Datasets ----
-    conformal_ds = None  # the ImageNet val set, set below
-    if config.dataset in ("cifar10", "cifar100"):
-        train_ds, val_ds, steps_per_epoch, val_steps = create_cifar_dataset(config)
-        input_shape = (config.image_size, config.image_size, 3)
-        # DECISION plan_2026-05-12_f2d29729/D-007: distribution invariant guard.
-        # Catches the D-006 fingerprint (train/val pipeline divergence) BEFORE
-        # any compute is spent on fit. ImageNet path skipped — different
-        # invariants (file-based, no in-memory pre-normalization).
-        _assert_train_val_distribution_match(train_ds, val_ds)
-    elif config.dataset == "imagenet":
-        train_data, val_data = load_imagenet_splits(
-            root=config.imagenet_root,
-            devkit_dir=config.devkit_dir,
-            image_size=config.image_size,
-            batch_size=config.batch_size,
-            seed=config.seed,
-            num_parallel_calls=config.num_parallel_calls,
-            augment=config.augment_data,
-            num_classes=config.num_classes,
+    # ---- Data: one loader for every dataset (selection on a held-out slice of train) ----
+    data = load_classification_data(
+        config.dataset, batch_size=config.batch_size, seed=config.seed,
+        normalize="standardize",
+        augment=_cifar_augment if config.augment_data else None,
+        imagenet_augment=config.augment_data,
+        validation_split=config.validation_split,
+        holdout_per_class=config.holdout_per_class,
+        max_samples=config.max_samples, eval_samples=0, imagenet_root=config.imagenet_root,
+        devkit_dir=config.devkit_dir, image_size=config.image_size,
+    )
+    if data.num_classes != config.num_classes:
+        raise ValueError(
+            f"num_classes={config.num_classes} but {config.dataset} has {data.num_classes} classes"
         )
-        train_ds, val_ds = train_data.dataset, val_data.dataset
-        conformal_ds = val_data.dataset
-        steps_per_epoch = train_data.steps_per_epoch
-        val_steps = None  # the ImageNet val dataset is finite: all of it, once
-        input_shape = (config.image_size, config.image_size, 3)
-    else:
-        raise ValueError(f"Unsupported dataset: {config.dataset}")
-
-    logger.info(f"Steps per epoch: {steps_per_epoch}, Val steps: {val_steps}")
+    train_ds, val_ds, steps_per_epoch = data.train_ds, data.select_ds, data.steps_per_epoch
+    input_shape = (config.image_size, config.image_size, 3)
+    logger.info(
+        f"Steps per epoch: {steps_per_epoch}; {data.n_train} train, {data.n_select} "
+        f"selection ({data.selection_split}), {data.n_test} test"
+    )
 
     # ---- Model ----
     # LESSONS L72 (Double Weight Decay guard): when optimizer is AdamW, pass
@@ -484,7 +334,6 @@ def train_vit(
         epochs=config.epochs,
         steps_per_epoch=steps_per_epoch,
         validation_data=val_ds,
-        validation_steps=val_steps,
         callbacks=callbacks,
         verbose=1,
     )
@@ -494,15 +343,16 @@ def train_vit(
     # ---- Save history ----
     save_training_history_json(history, output_dir)
 
-    # ---- Conformal prediction sets (ImageNet), over ALL of val ----
-    if config.conformal_alpha is not None and conformal_ds is not None:
+    # ---- Conformal prediction sets (ImageNet), over ALL of the official val split ----
+    # The model holds the best epoch's weights (EarlyStopping restored them), which were
+    # selected on the held-out slice of train, not on this split.
+    if config.conformal_alpha is not None and config.dataset == "imagenet":
         run_conformal(
-            model, conformal_ds, alpha=config.conformal_alpha, seed=config.seed,
+            model, data.test_ds, alpha=config.conformal_alpha, seed=config.seed,
             out_dir=output_dir, input_shape=input_shape,
             model_name=f"vit_{config.model_variant}",
-            weights="last epoch, or the best val_loss epoch when early stopping "
-                    "fired (selected on this same validation set)",
-            selection_overlaps_calibration=True,
+            weights=f"best val_accuracy epoch, selected on {data.selection_split}",
+            selection_overlaps_calibration=False,
         )
 
     # Convergence accounting (DECISION plan_2026-05-12_f2d29729/D-007)
@@ -533,7 +383,7 @@ def parse_arguments() -> argparse.Namespace:
     # Data
     parser.add_argument("--dataset", type=str, default="cifar10",
                         choices=["cifar10", "cifar100", "imagenet"])
-    add_imagenet_arguments(parser, note="Used only when --dataset imagenet: ")
+    add_selection_arguments(parser, figures=False)
     add_conformal_arguments(parser, note="Used only when --dataset imagenet: ")
     parser.add_argument("--image-size", type=int, default=None,
                         help="Auto: 32 for CIFAR, 224 for ImageNet")
@@ -620,6 +470,9 @@ def main() -> None:
         devkit_dir=args.devkit_dir,
         image_size=image_size,
         batch_size=args.batch_size,
+        validation_split=args.validation_split,
+        holdout_per_class=args.holdout_per_class,
+        max_samples=args.max_samples,
         model_variant=args.variant,
         num_classes=num_classes,
         pretrained=pretrained_arg,

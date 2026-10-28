@@ -35,6 +35,7 @@ import matplotlib  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
+from tests.classification_fakes import use_raw_from_unit  # noqa: E402
 
 import train.common.classification_viz as shared_viz  # noqa: E402
 import train.common.run_artifacts as run_artifacts  # noqa: E402
@@ -82,7 +83,7 @@ def _fake_load_dataset(n_train: int = 640, n_test: int = 1200):
 
 @pytest.fixture
 def synthetic_mnist(monkeypatch):
-    monkeypatch.setattr(tpm, "load_dataset", _fake_load_dataset())
+    use_raw_from_unit(monkeypatch, _fake_load_dataset())
 
 
 # ---------------------------------------------------------------------
@@ -172,18 +173,21 @@ def test_prepare_data_shapes_dtypes_and_integer_labels(synthetic_mnist) -> None:
 
 def test_prepare_data_standardizes_with_the_mnist_constants(monkeypatch) -> None:
     """A constant image at the MNIST mean maps to 0, one std above maps to 1."""
+    dark, bright = 33, 64  # raw pixel values: 33/255 = 0.1294 (near the mean), 64/255 = 0.2510
+
     def load(name, *a, **k):
         x = np.zeros((20, 28, 28, 3), dtype=np.float32)
-        x[:10] = tpm.MNIST_MEAN[0]
-        x[10:] = tpm.MNIST_MEAN[0] + tpm.MNIST_STD[0]
+        x[:10] = dark / 255.0
+        x[10:] = bright / 255.0
         y = np.arange(20, dtype=np.uint8) % 10
         return (x, y), (x[:4].copy(), y[:4].copy()), (28, 28, 3), 10
 
-    monkeypatch.setattr(tpm, "load_dataset", load)
+    use_raw_from_unit(monkeypatch, load)
     (xt, _), (xv, _), (xs, _), info = tpm.prepare_data("mnist", 0.5, 0, "standardize")
     everything = np.concatenate([xt, xv])
-    values = np.unique(np.round(everything, 4))
-    assert set(values.tolist()) == {0.0, 1.0}
+    mean, std = tpm.MNIST_MEAN[0], tpm.MNIST_STD[0]
+    expected = sorted([(dark / 255.0 - mean) / std, (bright / 255.0 - mean) / std])
+    np.testing.assert_allclose(np.unique(np.round(everything, 4)), expected, rtol=0, atol=1e-4)
     assert xs.shape == (4, 784)
     np.testing.assert_allclose(info["mean"], [0.1307], rtol=1e-6)
     np.testing.assert_allclose(info["std"], [0.3081], rtol=1e-6)
@@ -232,25 +236,10 @@ def test_a_split_that_holds_out_zero_samples_raises(synthetic_mnist) -> None:
     not (Path.home() / ".keras" / "datasets" / "mnist.npz").exists(),
     reason="real MNIST is not cached; the suite never downloads",
 )
-def test_real_mnist_is_784_features_standardized_and_channels_are_identical(monkeypatch) -> None:
+def test_real_mnist_is_784_features_standardized() -> None:
     """Loads the cached real MNIST once (about a second) through the real loader."""
-    real = tpm.load_dataset
-    seen = {}
-
-    def spy(name, *a, **k):
-        out = real(name, *a, **k)
-        (x_train, _), _, shape, _ = out
-        seen["channels_equal"] = bool(
-            np.array_equal(x_train[:500, ..., 0], x_train[:500, ..., 1])
-            and np.array_equal(x_train[:500, ..., 0], x_train[:500, ..., 2])
-        )
-        seen["shape"] = tuple(shape)
-        return out
-
-    monkeypatch.setattr(tpm, "load_dataset", spy)
     (xt, yt), (xv, yv), (xs, ys), info = tpm.prepare_data("mnist", 0.1, 0, "standardize")
 
-    assert seen["channels_equal"], "loader no longer triplicates the channel: channel 0 is lossy"
     assert (len(xt), len(xv), len(xs)) == (54000, 6000, 10000)
     assert xt.shape[1] == xv.shape[1] == xs.shape[1] == 784
     assert abs(float(xt.mean())) < 0.01, float(xt.mean())
@@ -353,7 +342,7 @@ def smoke(tmp_path_factory):
     seen: dict = {}
     mp = pytest.MonkeyPatch()
     try:
-        mp.setattr(tpm, "load_dataset", _fake_load_dataset())
+        use_raw_from_unit(mp, _fake_load_dataset())
         # Patched on Keras' ``Trainer`` mixin, not on PowerMLP: Keras compares
         # ``model.__class__.compile`` with ``Trainer.compile`` and refuses to
         # call compile() while loading a model that differs (the trainer

@@ -53,6 +53,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 import keras  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
+from tests.classification_fakes import use_raw_from_unit  # noqa: E402
 
 import train.power_mlp.train_power_mlp as tpm  # noqa: E402
 import train.power_mlp.visualization as viz  # noqa: E402
@@ -115,7 +116,7 @@ def _guard_slice(regime: str, input_scaling: str) -> Tuple[np.ndarray, np.ndarra
     """The first ``GUARD_SAMPLES`` training rows of ``prepare_data`` for a regime."""
     with pytest.MonkeyPatch.context() as mp:
         if regime == "synthetic":
-            mp.setattr(tpm, "load_dataset", _synthetic_load_dataset())
+            use_raw_from_unit(mp, _synthetic_load_dataset())
         (x, y), _, _, _ = tpm.prepare_data("mnist", 0.1, 0, input_scaling)
     return x[:GUARD_SAMPLES], y[:GUARD_SAMPLES]
 
@@ -386,30 +387,31 @@ def _ramp_load_dataset(name, *args, **kwargs):
     """MNIST-shaped images whose pixels sweep the whole [0, 1] range (0 and 1 included)."""
     assert name == "mnist", name
     n = 20
-    ramp = np.linspace(0.0, 1.0, n * 28 * 28, dtype=np.float32).reshape(n, 28, 28, 1)
+    ramp = _ramp_pixels().reshape(n, 28, 28, 1)
     x = np.repeat(ramp, 3, axis=-1)
     y = (np.arange(n) % 10).astype(np.uint8)
     return (x, y), (x[:4].copy(), y[:4].copy()), (28, 28, 3), 10
 
 
 def _ramp_pixels() -> np.ndarray:
-    return np.linspace(0.0, 1.0, 20 * 28 * 28, dtype=np.float32)
+    """The ramp on the uint8 grid the raw loader delivers: k / 255, k = 0..255 swept evenly."""
+    return (np.rint(np.linspace(0.0, 255.0, 20 * 28 * 28)) / 255.0).astype(np.float32)
 
 
 def test_unit_scaling_returns_the_raw_pixels_and_an_identity_unscale(monkeypatch) -> None:
-    monkeypatch.setattr(tpm, "load_dataset", _ramp_load_dataset)
+    use_raw_from_unit(monkeypatch, _ramp_load_dataset, min_train=0)
     (xt, _), (xv, _), _, info = tpm.prepare_data("mnist", 0.5, 0, "unit")
 
     everything = np.sort(np.concatenate([xt, xv]).ravel())
     assert everything.min() >= 0.0 and everything.max() <= 1.0
-    np.testing.assert_array_equal(everything, np.sort(_ramp_pixels()))
+    np.testing.assert_allclose(everything, np.sort(_ramp_pixels()), rtol=0, atol=1e-7)
     np.testing.assert_array_equal(info["mean"], [0.0])
     np.testing.assert_array_equal(info["std"], [1.0])
     assert info["input_scaling"] == "unit"
 
 
 def test_standardize_scaling_subtracts_the_mnist_mean_and_divides_by_the_std(monkeypatch) -> None:
-    monkeypatch.setattr(tpm, "load_dataset", _ramp_load_dataset)
+    use_raw_from_unit(monkeypatch, _ramp_load_dataset, min_train=0)
     (xt, _), (xv, _), _, info = tpm.prepare_data("mnist", 0.5, 0, "standardize")
 
     everything = np.sort(np.concatenate([xt, xv]).ravel())
@@ -426,6 +428,7 @@ def _cifar_load_dataset(name, *args, **kwargs):
     n = 20
     base = np.linspace(0.0, 1.0, n * 32 * 32, dtype=np.float32).reshape(n, 32, 32, 1)
     x = np.concatenate([base, base ** 2, 1.0 - base], axis=-1)  # three different channels
+    x = (np.rint(x * 255.0) / 255.0).astype(np.float32)  # on the uint8 grid of the raw loader
     y = (np.arange(n) % 10).astype(np.uint8)
     return (x, y), (x[:4].copy(), y[:4].copy()), (32, 32, 3), 10
 
@@ -434,7 +437,7 @@ def _cifar_load_dataset(name, *args, **kwargs):
 def test_cifar10_scaling_is_per_channel_and_unit_is_the_identity(
         monkeypatch, input_scaling) -> None:
     """The never-run CIFAR-10 path: 3072 features, per-channel mean/std, RGB layout."""
-    monkeypatch.setattr(tpm, "load_dataset", _cifar_load_dataset)
+    use_raw_from_unit(monkeypatch, _cifar_load_dataset, min_train=0)
     (xt, _), (xv, _), (xs, _), info = tpm.prepare_data("cifar10", 0.5, 0, input_scaling)
     (raw, _), _, _, _ = _cifar_load_dataset("cifar10")
 
@@ -453,7 +456,7 @@ def test_cifar10_scaling_is_per_channel_and_unit_is_the_identity(
 
 
 def test_prepare_data_refuses_an_unknown_input_scaling(monkeypatch) -> None:
-    monkeypatch.setattr(tpm, "load_dataset", _ramp_load_dataset)
+    use_raw_from_unit(monkeypatch, _ramp_load_dataset, min_train=0)
     with pytest.raises(ValueError, match="input_scaling"):
         tpm.prepare_data("mnist", 0.1, 0, "whiten")
 
@@ -487,7 +490,7 @@ def _config(tmp_path: Path, **overrides: Any) -> tpm.TrainingConfig:
 @pytest.mark.parametrize("name", tpm.KERNEL_INITIALIZERS)
 def test_train_model_forwards_the_configured_kernel_initializer(
         monkeypatch, tmp_path, name) -> None:
-    monkeypatch.setattr(tpm, "load_dataset", _synthetic_load_dataset())
+    use_raw_from_unit(monkeypatch, _synthetic_load_dataset())
     seen: Dict[str, Any] = {}
 
     def sentinel(*args, **kwargs):
@@ -518,7 +521,7 @@ def test_train_model_forwards_the_configured_input_scaling(
 @pytest.mark.parametrize("epoch_analysis", [False, True])
 def test_train_model_forwards_epoch_analysis_into_create_callbacks(
         monkeypatch, tmp_path, epoch_analysis) -> None:
-    monkeypatch.setattr(tpm, "load_dataset", _synthetic_load_dataset())
+    use_raw_from_unit(monkeypatch, _synthetic_load_dataset())
     seen: Dict[str, Any] = {}
 
     def sentinel(*args, **kwargs):
@@ -547,7 +550,7 @@ def iteration_1_run(tmp_path_factory):
     seen = []
     mp = pytest.MonkeyPatch()
     try:
-        mp.setattr(tpm, "load_dataset", _synthetic_load_dataset())
+        use_raw_from_unit(mp, _synthetic_load_dataset())
         mp.setattr(tpm.logger, "warning", lambda msg, *a, **k: seen.append(str(msg)))
         config = tpm.config_from_args(tpm.parse_arguments([
             "--epochs", "1", "--batch-size", "64", "--seed", "3",
@@ -714,7 +717,7 @@ def test_the_real_trainer_hands_the_dashboard_the_guard_consistent_baseline(
     """End to end through ``train_model`` (real 1-epoch fit): a batch-normalized run
     on the pathological pair hands the renderer a finite, small baseline and the
     training-mode legend text; without BN the plain label and the huge value stay."""
-    monkeypatch.setattr(tpm, "load_dataset", _synthetic_load_dataset())
+    use_raw_from_unit(monkeypatch, _synthetic_load_dataset())
     drawn = []
 
     def spy(history, out_path, title="", epoch_times=None, baseline=None, **kwargs):

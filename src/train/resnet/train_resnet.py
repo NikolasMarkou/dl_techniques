@@ -24,7 +24,8 @@ from typing import Tuple, List, Optional, Dict, Any, Union
 
 from train.common import setup_gpu, set_seeds, create_callbacks as create_common_callbacks, convert_keras_history_to_training_history, EpochMetricsPlotCallback
 from train.common.conformal import DEFAULT_ALPHA, add_conformal_arguments, run_conformal
-from train.common.imagenet import add_imagenet_arguments, load_imagenet_splits, require_imagenet_root
+from train.common.classification_data import add_selection_arguments, load_classification_data
+from train.common.imagenet import require_imagenet_root
 from train.common.run_io import prepare_run_dir, save_training_history_json
 from dl_techniques.metrics.primary_output_metrics import (
     PrimaryOutputAccuracy, PrimaryOutputTopKAccuracy,
@@ -87,10 +88,12 @@ class TrainingConfig:
     monitor_every_n_epochs: int = 5
     early_stopping_patience: int = 15
 
-    # Data Pipeline
-    num_parallel_calls: int = tf.data.AUTOTUNE
+    # Selection is a held-out slice of train (None means the loader's default); the
+    # official val split is the test set.
+    holdout_per_class: Optional[int] = None
+    max_samples: Optional[int] = None
 
-    # Conformal prediction sets fitted on val after training (None = off)
+    # Conformal prediction sets fitted on the official val split after training (None = off)
     conformal_alpha: Optional[float] = DEFAULT_ALPHA
 
     # Output
@@ -336,19 +339,22 @@ def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) 
 
     # Datasets
     logger.info("Creating ImageNet datasets...")
-    train_data, val_data = load_imagenet_splits(
-        root=config.imagenet_root,
-        devkit_dir=config.devkit_dir,
-        image_size=config.image_size,
-        batch_size=config.batch_size,
-        seed=config.seed,
-        num_parallel_calls=config.num_parallel_calls,
-        augment=config.augment_data,
-        augment_color=True,
-        num_classes=config.num_classes,
+    # Selection (fit validation, the best epoch) is a held-out slice of train; the official
+    # val split is the test set and is used for the conformal sets only.
+    data = load_classification_data(
+        "imagenet", batch_size=config.batch_size, seed=config.seed,
+        normalize="standardize", imagenet_augment=config.augment_data,
+        imagenet_augment_color=True, holdout_per_class=config.holdout_per_class,
+        max_samples=config.max_samples, eval_samples=0, imagenet_root=config.imagenet_root,
+        devkit_dir=config.devkit_dir, image_size=config.image_size,
     )
-    train_dataset, val_dataset = train_data.dataset, val_data.dataset
-    steps_per_epoch = train_data.steps_per_epoch
+    if data.num_classes != config.num_classes:
+        raise ValueError(
+            f"num_classes={config.num_classes} but {config.imagenet_root} has "
+            f"{data.num_classes} classes"
+        )
+    train_dataset, val_dataset = data.train_ds, data.select_ds
+    steps_per_epoch = data.steps_per_epoch
     logger.info(f"Steps per epoch: {steps_per_epoch}")
 
     # Model
@@ -412,16 +418,16 @@ def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) 
         inference_model.save(output_dir / "inference_model.keras")
         logger.info("Inference model saved")
 
-    # Conformal prediction sets on the primary output, over ALL of val. The
-    # deep-supervised val_dataset above carries tuple labels, so use the loader's.
+    # Conformal prediction sets on the primary output, over ALL of the official val split.
+    # The deep-supervised val_dataset above carries tuple labels, so use the loader's test
+    # split; the model was selected on the held-out slice of train, not on it.
     if config.conformal_alpha is not None:
         run_conformal(
-            inference_model, val_data.dataset, alpha=config.conformal_alpha,
+            inference_model, data.test_ds, alpha=config.conformal_alpha,
             seed=config.seed, out_dir=output_dir, input_shape=input_shape,
             model_name=f"resnet_{config.model_variant}",
-            weights="last epoch, or the best val_loss epoch when early stopping "
-                    "fired (selected on this same validation set)",
-            selection_overlaps_calibration=True,
+            weights=f"best val_loss epoch, selected on {data.selection_split}",
+            selection_overlaps_calibration=False,
         )
 
     # Save history
@@ -441,7 +447,7 @@ def parse_arguments() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
-    add_imagenet_arguments(parser)
+    add_selection_arguments(parser, in_memory=False, figures=False)
     add_conformal_arguments(parser)
     parser.add_argument('--image-size', type=int, default=224)
 
@@ -490,6 +496,7 @@ def main() -> None:
 
     config = TrainingConfig(
         imagenet_root=args.imagenet_root, devkit_dir=args.devkit_dir,
+        holdout_per_class=args.holdout_per_class, max_samples=args.max_samples,
         image_size=args.image_size, batch_size=args.batch_size,
         model_variant=args.variant, num_classes=args.num_classes,
         pretrained=args.pretrained,

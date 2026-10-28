@@ -38,7 +38,13 @@ import tensorflow as tf
 from dataclasses import dataclass
 from typing import Tuple, List, Optional, Dict, Any
 
-from train.common import setup_gpu, set_seeds, load_dataset, create_callbacks as create_common_callbacks
+from train.common import setup_gpu, set_seeds, create_callbacks as create_common_callbacks
+from train.common.classification_data import (
+    ClassificationData,
+    add_selection_arguments,
+    flip_pad_crop,
+    load_classification_data,
+)
 from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
@@ -89,10 +95,13 @@ class TrainingConfig:
     # Augmentation
     augment_data: bool = True
 
+    # Data: selection is a held-out slice of train; the test split never selects.
+    validation_split: Optional[float] = None
+    max_samples: Optional[int] = None
+
     # Monitoring
     monitor_every_n_epochs: int = 5
     early_stopping_patience: int = 10
-    validation_steps: Optional[int] = None
 
     # Data pipeline
     prefetch_buffer: int = tf.data.AUTOTUNE
@@ -121,119 +130,26 @@ class TrainingConfig:
 # The RBF prototype head expects inputs on the SAME [0,1] scale RBFProtoNet
 # itself was trained/tested against (no normalization layer is built into
 # the model, per plan.md's invariant #1 and findings/cifar_training_pipeline.md's
-# explicit "do not reuse CIFAR10_MEAN/STD for CIFAR-100" constraint). This
-# pipeline therefore stays on [0,1] end to end -- no per-channel mean/std
-# normalization step, unlike train_vit.py's CIFAR pipeline.
+# explicit "do not reuse CIFAR10_MEAN/STD for CIFAR-100" constraint). The shared
+# loader is therefore asked for ``normalize="unit"``: [0,1] end to end, with the
+# flip + reflect-pad-crop augmentation applied to the training split only.
 
-def _cifar_augment(image: tf.Tensor, label: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-    """Flip + reflect-pad-crop augmentation on [0,1]-valued float32 images."""
-    image = tf.image.random_flip_left_right(image)
-    image = tf.image.random_crop(
-        tf.pad(image, [[4, 4], [4, 4], [0, 0]], mode="REFLECT"),
-        size=tf.shape(image),
-    )
-    return image, label
+def create_cifar100_data(config: TrainingConfig) -> ClassificationData:
+    """Load CIFAR-100 through the shared loader: selection on a held-out slice of train.
 
-
-def _assert_train_val_distribution_match(
-        train_ds: tf.data.Dataset,
-        val_ds: tf.data.Dataset,
-        *,
-        mean_tol: float = 0.5,
-        std_ratio_tol: float = 0.5,
-) -> None:
-    """Pre-fit guard: train and val batches must agree on per-channel mean/std.
-
-    Modeled on ``train_vit.py``'s ``_assert_train_val_distribution_match``
-    (DECISION plan_2026-05-12_f2d29729/D-007) -- catches a train/val tf.data
-    pipeline-ordering divergence (e.g. augmentation applied to one split but
-    not the other) before any compute is spent on ``fit``.
+    Raises:
+        ValueError: ``config.num_classes`` is not CIFAR-100's 100.
     """
-    x_train_batch, _ = next(iter(train_ds))
-    x_val_batch, _ = next(iter(val_ds))
-
-    mean_train = tf.reduce_mean(x_train_batch, axis=[0, 1, 2])
-    mean_val = tf.reduce_mean(x_val_batch, axis=[0, 1, 2])
-    std_train = tf.math.reduce_std(x_train_batch, axis=[0, 1, 2])
-    std_val = tf.math.reduce_std(x_val_batch, axis=[0, 1, 2])
-
-    mean_train_np = mean_train.numpy()
-    mean_val_np = mean_val.numpy()
-    std_train_np = std_train.numpy()
-    std_val_np = std_val.numpy()
-
-    for c, (mt, mv) in enumerate(zip(mean_train_np, mean_val_np)):
-        logger.info(
-            f"distribution check: channel {c} train mean={float(mt):+.4f} "
-            f"val mean={float(mv):+.4f} |Δ|={abs(float(mt) - float(mv)):.4f}"
-        )
-    for c, (st, sv) in enumerate(zip(std_train_np, std_val_np)):
-        ratio = float(st) / float(sv) if float(sv) > 0.0 else float("inf")
-        logger.info(
-            f"distribution check: channel {c} train std={float(st):.4f} "
-            f"val std={float(sv):.4f} ratio={ratio:.4f}"
-        )
-
-    mean_diff = tf.reduce_max(tf.abs(mean_train - mean_val))
-    std_ratio_dev = tf.reduce_max(tf.abs(std_train / std_val - 1.0))
-    mean_diff_f = float(mean_diff.numpy())
-    std_ratio_dev_f = float(std_ratio_dev.numpy())
-
-    if mean_diff_f >= mean_tol or std_ratio_dev_f >= std_ratio_tol:
-        raise RuntimeError(
-            "Train/val distribution mismatch detected before fit. "
-            f"max|Δmean|={mean_diff_f:.4f} (tol={mean_tol}); "
-            f"max|std_ratio-1|={std_ratio_dev_f:.4f} (tol={std_ratio_tol}). "
-            f"Per-channel train mean={mean_train_np.tolist()} "
-            f"val mean={mean_val_np.tolist()} "
-            f"train std={std_train_np.tolist()} "
-            f"val std={std_val_np.tolist()}. "
-            "Inspect create_cifar100_dataset pipeline ordering."
-        )
-
-
-def create_cifar100_dataset(
-        config: TrainingConfig,
-) -> Tuple[tf.data.Dataset, tf.data.Dataset, int, int]:
-    """Build the CIFAR-100 train/val ``tf.data`` pipelines.
-
-    Uses ``train.common.load_dataset('cifar100', ...)`` for the raw,
-    already-[0,1]-normalized numpy arrays (per findings/cifar_training_pipeline.md),
-    then applies flip/crop-with-reflect-pad augmentation to the training
-    split only.
-
-    Returns:
-        train_ds, val_ds, steps_per_epoch, val_steps
-    """
-    (x_train, y_train), (x_test, y_test), input_shape, num_classes = load_dataset(
-        "cifar100"
+    data = load_classification_data(
+        "cifar100", batch_size=config.batch_size, seed=config.seed, normalize="unit",
+        validation_split=config.validation_split, max_samples=config.max_samples,
+        augment=flip_pad_crop(mode="REFLECT") if config.augment_data else None,
     )
-    if num_classes != config.num_classes:
+    if data.num_classes != config.num_classes:
         raise ValueError(
-            f"load_dataset('cifar100', ...) returned num_classes={num_classes}, "
-            f"expected {config.num_classes}"
+            f"CIFAR-100 has num_classes={data.num_classes}, expected {config.num_classes}"
         )
-
-    logger.info(f"CIFAR100: {x_train.shape[0]} train, {x_test.shape[0]} test")
-
-    train_ds = tf.data.Dataset.from_tensor_slices((x_train, y_train)).shuffle(10000)
-    if config.augment_data:
-        train_ds = train_ds.map(_cifar_augment, num_parallel_calls=config.num_parallel_calls)
-    train_ds = (
-        train_ds.repeat()
-        .batch(config.batch_size, drop_remainder=True)
-        .prefetch(config.prefetch_buffer)
-    )
-
-    val_ds = (
-        tf.data.Dataset.from_tensor_slices((x_test, y_test))
-        .batch(config.batch_size)
-        .prefetch(config.prefetch_buffer)
-    )
-
-    steps_per_epoch = len(x_train) // config.batch_size
-    val_steps = max(1, len(x_test) // config.batch_size)
-    return train_ds, val_ds, steps_per_epoch, val_steps
+    return data
 
 
 # =============================================================================
@@ -290,10 +206,13 @@ def train_rbf_protonet(
 
     # ---- Dataset ----
     input_shape = (32, 32, 3)
-    train_ds, val_ds, steps_per_epoch, val_steps = create_cifar100_dataset(config)
-    _assert_train_val_distribution_match(train_ds, val_ds)
+    data = create_cifar100_data(config)
+    steps_per_epoch = data.steps_per_epoch
 
-    logger.info(f"Steps per epoch: {steps_per_epoch}, Val steps: {val_steps}")
+    logger.info(
+        f"CIFAR100: {data.n_train} train, {data.n_select} selection, {data.n_test} test; "
+        f"steps per epoch: {steps_per_epoch}"
+    )
 
     # ---- Model ----
     # LESSONS L72 (Double Weight Decay guard): when optimizer is AdamW, pass
@@ -371,11 +290,9 @@ def train_rbf_protonet(
 
     start_time = time.time()
     history = model.fit(
-        train_ds,
+        data.train_ds,
         epochs=config.epochs,
-        steps_per_epoch=steps_per_epoch,
-        validation_data=val_ds,
-        validation_steps=val_steps,
+        validation_data=data.select_ds,
         callbacks=callbacks,
         verbose=1,
     )
@@ -439,6 +356,7 @@ def parse_arguments() -> argparse.Namespace:
 
     # Augmentation
     parser.add_argument("--no-augmentation", dest="augment_data", action="store_false")
+    add_selection_arguments(parser, imagenet=False)
 
     # Output
     parser.add_argument("--output-dir", type=str, default="results")
@@ -473,6 +391,8 @@ def main() -> None:
         warmup_epochs=args.warmup_epochs,
         weight_decay=args.weight_decay,
         augment_data=args.augment_data,
+        validation_split=args.validation_split,
+        max_samples=args.max_samples,
         monitor_every_n_epochs=args.monitor_every,
         early_stopping_patience=args.early_stopping_patience,
         output_dir=args.output_dir,

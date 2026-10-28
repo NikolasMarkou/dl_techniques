@@ -15,6 +15,8 @@ import keras
 import numpy as np
 import pytest
 
+from tests.classification_fakes import use_raw_from_unit
+
 EXPECTED = [
     "training_dashboard.png",
     "confusion_matrix.png",
@@ -48,7 +50,7 @@ def run_dir(tmp_path_factory):
     out = tmp_path_factory.mktemp("cliffordnet_run")
     mp = pytest.MonkeyPatch()
     mp.setattr(module, "setup_gpu", lambda *a, **k: None)
-    mp.setattr(module, "load_dataset", _tiny_cifar)
+    use_raw_from_unit(mp, _tiny_cifar)
     mp.setattr(module, "build_model", _tiny_classifier)
     mp.setattr(module, "run_model_analysis", lambda *a, **k: None)
     mp.setattr(

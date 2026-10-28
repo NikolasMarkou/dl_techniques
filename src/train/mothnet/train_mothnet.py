@@ -50,6 +50,7 @@ from train.common import (
     default_experiment_name, prepare_run_dir, save_training_history_json, set_seeds,
     setup_gpu,
 )
+from train.common.classification_data import load_split_arrays
 from train.common.callbacks import best_checkpoint_path
 from train.common.gpu import VISIBLE_DEVICES, gpu_or_default
 
@@ -214,19 +215,20 @@ def _build_parser() -> argparse.ArgumentParser:
     # scale (`decisions.md` D-010) — do not raise these further, or lower them
     # back toward the toy scale, without re-reading D-010's disclosed cost.
     parser.add_argument(
-        "--num-train-samples", type=int, default=60000,
+        "--num-train-samples", type=int, default=54000,
         help=(
-            "Number of MNIST training samples to subsample (default: 60000, the "
-            "full MNIST train split size). Previously defaulted to 2000 as a "
+            "Number of MNIST training samples to subsample (default: 54000, the "
+            "MNIST train split after the 10% selection cut). Previously defaulted to 2000 as a "
             "fast-iteration toy subsample; pass a smaller value explicitly to "
             "restore that toy-scale behavior."
         ),
     )
     parser.add_argument(
-        "--num-val-samples", type=int, default=10000,
+        "--num-val-samples", type=int, default=6000,
         help=(
-            "Number of MNIST validation samples to subsample (default: 10000, "
-            "the full MNIST test split size). Previously defaulted to 500 as a "
+            "Number of MNIST validation samples to subsample (default: 6000, "
+            "the selection slice held out of the train split; the test split is not used). "
+            "Previously defaulted to 500 as a "
             "fast-iteration toy subsample; pass a smaller value explicitly to "
             "restore that toy-scale behavior."
         ),
@@ -315,9 +317,10 @@ def load_mnist_data(config: argparse.Namespace):
     Mirrors `src/train/som_nd_soft/train_mnist.py`'s `load_mnist_data` normalization
     pipeline exactly (`astype("float32")/255.0` -> `reshape(-1, 784)` ->
     `keras.utils.to_categorical(y, 10)`). The training subsample is drawn from MNIST's
-    own train split; the validation subsample is drawn from MNIST's own held-out test
-    split (never a further split of the training pool) — matching `train_kan.py`'s
-    train/val split pattern.
+    own train split MINUS the selection slice, and the validation subsample from that
+    selection slice (the seeded 10% of train that `train.common.classification_data`
+    holds out); the MNIST test split is never loaded into either, because the best
+    epoch is chosen on the validation accuracy.
 
     Both subsamples are drawn via a `config.seed`-seeded shuffle, applied BEFORE
     `train_hebbian`'s own internal unseeded shuffle ever runs (that internal shuffle is
@@ -329,14 +332,9 @@ def load_mnist_data(config: argparse.Namespace):
         `(N, 784)` float32 in `[0, 1]`, `y_*` shape `(N, 10)` one-hot float32.
     """
     logger.info("Loading MNIST dataset...")
-    (x_train, y_train), (x_test, y_test) = keras.datasets.mnist.load_data()
-
-    x_train = x_train.astype("float32") / 255.0
-    x_test = x_test.astype("float32") / 255.0
-    x_train = x_train.reshape(-1, 784)
-    x_test = x_test.reshape(-1, 784)
-    y_train = keras.utils.to_categorical(y_train, 10)
-    y_test = keras.utils.to_categorical(y_test, 10)
+    arrays = load_split_arrays("mnist", seed=config.seed, labels="one_hot")
+    x_train, y_train = arrays.x_train.reshape(-1, 784), arrays.y_train
+    x_test, y_test = arrays.x_select.reshape(-1, 784), arrays.y_select
 
     num_train_samples = config.num_train_samples
     if num_train_samples > x_train.shape[0]:
@@ -350,7 +348,7 @@ def load_mnist_data(config: argparse.Namespace):
     if num_val_samples > x_test.shape[0]:
         logger.warning(
             f"--num-val-samples {num_val_samples} exceeds the available MNIST "
-            f"test set size ({x_test.shape[0]}); clipping to {x_test.shape[0]}."
+            f"selection set size ({x_test.shape[0]}); clipping to {x_test.shape[0]}."
         )
         num_val_samples = x_test.shape[0]
 

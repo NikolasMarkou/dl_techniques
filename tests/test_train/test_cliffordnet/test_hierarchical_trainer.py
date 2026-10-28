@@ -18,6 +18,8 @@ import keras
 import numpy as np
 import pytest
 
+from tests.classification_fakes import use_raw_from_unit
+
 from dl_techniques.models.vision.cliffordnet import CliffordNet
 from dl_techniques.models.vision.cliffordnet.hierarchical import HierarchicalCliffordNet
 from train.cliffordnet import train_cliffordnet as module
@@ -170,7 +172,7 @@ def _run(tmp_path_factory, *extra):
     out = tmp_path_factory.mktemp("hier_run")
     mp = pytest.MonkeyPatch()
     mp.setattr(module, "setup_gpu", lambda *a, **k: None)
-    mp.setattr(module, "load_dataset", _tiny_cifar)
+    use_raw_from_unit(mp, _tiny_cifar)
     mp.setattr(module, "run_model_analysis", lambda *a, **k: None)
     mp.setattr(
         sys, "argv",

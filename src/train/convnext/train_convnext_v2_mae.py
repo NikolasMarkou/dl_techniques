@@ -15,7 +15,7 @@ from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
 from train.common import (
     setup_gpu, create_base_argument_parser, create_callbacks, set_seeds,
 )
-from train.common.classification_data import load_classification_data
+from train.common.classification_data import load_split_arrays
 
 
 def create_convnext_encoder(
@@ -246,11 +246,9 @@ def train_with_mae_pretraining(args: argparse.Namespace):
     # Selection (the MAE validation loss, early stopping, checkpoints) runs on a held-out
     # slice of train; the test set is used only for the final report. The images stay in
     # [0, 1]: the MAE reconstructs them and the loss subtracts them.
-    data = load_classification_data(
-        args.dataset, batch_size=args.batch_size, seed=args.seed, normalize="unit",
-        channels=3 if args.dataset == "mnist" else None,
-    )
-    arrays, input_shape, num_classes = data.arrays, data.input_shape, data.num_classes
+    arrays = load_split_arrays(
+        args.dataset, seed=args.seed, channels=3 if args.dataset == "mnist" else None)
+    input_shape, num_classes = arrays.input_shape, arrays.num_classes
     x_train, y_train = arrays.x_train, arrays.y_train
     x_val, y_val = arrays.x_select, arrays.y_select
     x_test, y_test = arrays.x_test, arrays.y_test

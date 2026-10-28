@@ -24,6 +24,8 @@ import sys
 import numpy as np
 import pytest
 
+from tests.classification_fakes import use_raw_from_unit
+
 
 def _tiny_cifar(*_args, **_kwargs):
     x = np.zeros((4, 32, 32, 3), dtype=np.float32)
@@ -53,7 +55,7 @@ def _sweep(monkeypatch, tmp_path, outcome):
         calls.append(variant_name)
         return outcome(variant_name, run_root)
 
-    monkeypatch.setattr(module, "load_dataset", _tiny_cifar)
+    use_raw_from_unit(monkeypatch, _tiny_cifar)
     monkeypatch.setattr(module, "train_one_variant", fake_train_one_variant)
     args = module._parse_args(["--output-dir", str(tmp_path / "out")])
     return module, args, calls

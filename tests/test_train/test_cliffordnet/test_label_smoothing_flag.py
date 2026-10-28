@@ -12,6 +12,8 @@ import keras
 import numpy as np
 import pytest
 
+from tests.classification_fakes import use_raw_from_unit
+
 from train.convnext.common import SmoothedSparseCategoricalCrossentropy
 
 
@@ -52,7 +54,7 @@ def _run_main(monkeypatch, tmp_path, extra_argv, stop_at):
         raise _Stop
 
     monkeypatch.setattr(module, "setup_gpu", lambda *a, **k: None)
-    monkeypatch.setattr(module, "load_dataset", _tiny_cifar)
+    use_raw_from_unit(monkeypatch, _tiny_cifar)
     monkeypatch.setattr(module, "build_model", fake_build_model)
     monkeypatch.setattr(module, "create_callbacks", fake_create_callbacks)
     monkeypatch.setattr(module, "save_config_json", fake_save_config_json)

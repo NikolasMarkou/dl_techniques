@@ -30,6 +30,8 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
+from tests.classification_fakes import use_raw_from_unit, use_tiny_raw
+
 
 class _Stop(Exception):
     """Raised by the stubbed ``create_callbacks`` once it has its arguments."""
@@ -70,7 +72,7 @@ def test_mobilenet_writes_under_its_output_dir(monkeypatch, tmp_path):
     from train.mobilenet import train_mobilenet as module
 
     seen = _capture_callbacks(monkeypatch, module)
-    monkeypatch.setattr(module, "load_dataset", _tiny_cifar)
+    use_tiny_raw(monkeypatch)
     monkeypatch.setattr(
         module, "create_model", lambda *a, **k: _tiny_classifier()
     )
@@ -86,7 +88,7 @@ def test_cliffordnet_writes_under_its_output_dir(monkeypatch, tmp_path):
     from train.cliffordnet import train_cliffordnet as module
 
     seen = _capture_callbacks(monkeypatch, module)
-    monkeypatch.setattr(module, "load_dataset", _tiny_cifar)
+    use_raw_from_unit(monkeypatch, _tiny_cifar)
     monkeypatch.setattr(
         module, "build_model", lambda **k: _tiny_classifier(num_classes=10)
     )
@@ -140,7 +142,7 @@ def test_the_downsampling_sweep_writes_under_its_output_dir(monkeypatch, tmp_pat
             "epochs_trained": 1, "results_dir": run_root,
         }
 
-    monkeypatch.setattr(module, "load_dataset", _tiny_cifar)
+    use_raw_from_unit(monkeypatch, _tiny_cifar)
     monkeypatch.setattr(module, "train_one_variant", fake_train_one_variant)
     args = module._parse_args(
         ["--variant", "V1_3stage_strided_conv", "--output-dir", str(out)]

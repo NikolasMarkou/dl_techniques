@@ -20,7 +20,8 @@ import tensorflow as tf
 from typing import Tuple, Dict, Any, Optional
 import matplotlib.pyplot as plt
 
-from train.common import setup_gpu, set_seeds, create_callbacks, load_dataset
+from train.common import setup_gpu, set_seeds, create_callbacks
+from train.common.classification_data import load_split_arrays
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.metrics.psnr_metric import PsnrMetric
@@ -132,17 +133,20 @@ def synthetic_low_light_pairs(
 
 def _create_synthetic_dataset(img_size, batch_size):
     """Create synthetic low-light data from CIFAR-10 for testing."""
-    (x_train, _), (x_test, _), _, _ = load_dataset("cifar10")
+    # The clean images are CIFAR-10's; the validation pairs come from the held-out slice of
+    # train, never from the test split.
+    arrays = load_split_arrays("cifar10", seed=0)
+    x_train, x_val = arrays.x_train, arrays.x_select
 
     train_ds = synthetic_low_light_pairs(x_train, img_size, noise_seed=0)
     train_ds = train_ds.shuffle(1000).batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
-    val_ds = synthetic_low_light_pairs(x_test, img_size, noise_seed=1)
+    val_ds = synthetic_low_light_pairs(x_val, img_size, noise_seed=1)
     val_ds = val_ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
-    logger.info(f"Synthetic dataset: {len(x_train)} train, {len(x_test)} val samples, "
+    logger.info(f"Synthetic dataset: {len(x_train)} train, {len(x_val)} val samples, "
                 f"resized to {img_size} per batch")
-    return train_ds, val_ds, len(x_test)
+    return train_ds, val_ds, len(x_val)
 
 
 # ---------------------------------------------------------------------

@@ -15,6 +15,8 @@ import keras
 import numpy as np
 import pytest
 
+from tests.classification_fakes import use_raw_from_unit
+
 from train.cliffordnet import train_cliffordnet as module
 
 
@@ -79,8 +81,7 @@ def test_the_schedule_starts_at_the_peak_rate_without_warm_up(monkeypatch, tmp_p
     x = rng.random((16, 32, 32, 3), dtype=np.float32)
     y = rng.integers(0, 10, size=(16,))
     monkeypatch.setattr(module, "setup_gpu", lambda *a, **k: None)
-    monkeypatch.setattr(module, "load_dataset", lambda *a, **k: (
-        (x, y), (x, y), (32, 32, 3), 10))
+    use_raw_from_unit(monkeypatch, lambda *a, **k: ((x, y), (x, y), (32, 32, 3), 10))
 
     def tiny(**_kwargs):
         inputs = keras.Input((32, 32, 3))

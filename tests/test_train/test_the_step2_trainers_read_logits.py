@@ -21,6 +21,8 @@ import keras
 import numpy as np
 import pytest
 
+from tests.classification_fakes import use_tiny_raw
+
 
 class _StopAfterCompile(Exception):
     pass
@@ -29,11 +31,8 @@ class _StopAfterCompile(Exception):
 def test_the_coshnet_trainer_compiles_from_logits(monkeypatch):
     from train.coshnet import train_coshnet as trainer
 
-    x = np.random.default_rng(0).random((4, 32, 32, 3)).astype("float32")
-    y = np.arange(4) % 10
     monkeypatch.setattr(trainer, "setup_gpu", lambda **kwargs: None)
-    monkeypatch.setattr(trainer, "load_dataset",
-                        lambda *a, **k: ((x, y), (x, y), (32, 32, 3), 10))
+    use_tiny_raw(monkeypatch)
     seen = {}
 
     def stop(*args, **kwargs):
@@ -49,7 +48,7 @@ def test_the_coshnet_trainer_compiles_from_logits(monkeypatch):
     monkeypatch.setattr(trainer, "create_callbacks", stop)
     args = argparse.Namespace(gpu=None, dataset="cifar10", batch_size=4, variant="tiny",
                               lr_schedule="constant", learning_rate=1e-3, epochs=1, patience=1,
-                              seed=42)
+                              seed=42, validation_split=None, max_samples=None)
     with pytest.raises(_StopAfterCompile):
         trainer.train_model(args)
     assert isinstance(seen["loss"], keras.losses.SparseCategoricalCrossentropy)

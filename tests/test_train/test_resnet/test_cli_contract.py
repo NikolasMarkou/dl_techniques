@@ -29,7 +29,7 @@ What each guard pins, and why it is not satisfied-by-construction:
 
 ``test_help_exits_zero_without_reaching_anything_expensive``
     ``--help`` must exit having called NOTHING expensive. Sentinels are
-    installed over ``setup_gpu``, ``create_resnet``, ``load_imagenet_splits``
+    installed over ``setup_gpu``, ``create_resnet``, ``load_classification_data``
     and ``train_resnet_imagenet``; each raises on contact and each is asserted to
     have been called ZERO times. Moving ``parse_arguments()`` below any of them
     fails by the named ``--help reached ...`` message, not by the exit code -- so
@@ -88,6 +88,8 @@ from train.resnet.train_resnet import TrainingConfig
 DEST_TO_FIELD: Dict[str, str] = {
     "imagenet_root": "imagenet_root",
     "devkit_dir": "devkit_dir",
+    "holdout_per_class": "holdout_per_class",
+    "max_samples": "max_samples",
     "image_size": "image_size",
     "variant": "model_variant",
     "num_classes": "num_classes",
@@ -128,6 +130,8 @@ FIELDS_WITH_NO_FLAG: Tuple[str, ...] = (
 # Every value differs from the dataclass default -- mechanically asserted below.
 EXPECTED: Dict[str, Any] = {
     "image_size": 96,
+    "holdout_per_class": 13,
+    "max_samples": 777,
     "model_variant": "resnet18",
     "num_classes": 7,
     "pretrained": True,
@@ -196,7 +200,7 @@ class _Sentinel:
 EXPENSIVE = (
     "setup_gpu",
     "create_resnet",
-    "load_imagenet_splits",
+    "load_classification_data",
     "train_resnet_imagenet",
 )
 
@@ -235,6 +239,8 @@ def _argv(tmp_path: Path) -> List[str]:
         "train_resnet.py",
         "--imagenet-root", str(root),
         "--devkit-dir", str(tmp_path / "devkit"),
+        "--holdout-per-class", str(EXPECTED["holdout_per_class"]),
+        "--max-samples", str(EXPECTED["max_samples"]),
         "--image-size", str(EXPECTED["image_size"]),
         "--variant", EXPECTED["model_variant"],
         "--num-classes", str(EXPECTED["num_classes"]),

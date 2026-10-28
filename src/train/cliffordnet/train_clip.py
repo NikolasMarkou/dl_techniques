@@ -800,7 +800,7 @@ def _run_pretrain_vision(
     or the budget, whichever is shorter, and the epoch count is the budget
     over that, rounded up.
     """
-    from train.common import load_dataset
+    from train.common.classification_data import load_split_arrays
 
     steps_budget = int(args.pretrain_vision_steps)
     batch_size = args.pretrain_vision_batch_size
@@ -813,9 +813,11 @@ def _run_pretrain_vision(
         x_test, y_test = _synthetic_cifar100(batch_size, seed=args.seed + 1)
         num_classes = _CIFAR100_CLASSES
     else:
-        (x_train, y_train), (x_test, y_test), _shape, num_classes = load_dataset(
-            "cifar100"
-        )
+        # Validation is a held-out slice of train; the test split is not used here.
+        arrays = load_split_arrays("cifar100", seed=args.seed)
+        x_train, y_train = arrays.x_train, arrays.y_train
+        x_test, y_test = arrays.x_select, arrays.y_select
+        num_classes = arrays.num_classes
     if num_classes != _CIFAR100_CLASSES:
         raise RuntimeError(
             f"Pretrain vision expected CIFAR-100 (100 classes); "

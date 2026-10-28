@@ -38,7 +38,6 @@ from dl_techniques.datasets.vision.classification import (
     CIFAR100_MEAN,
     CIFAR100_STD,
 )
-from dl_techniques.datasets.vision.imagenet2012 import IMAGENET_MEAN, IMAGENET_STD
 from dl_techniques.models.vision.cliffordnet import CliffordNet, HierarchicalCliffordNet
 from dl_techniques.optimization import (
     optimizer_builder,
@@ -49,10 +48,6 @@ from train.common import (
     setup_gpu,
     set_seeds,
     create_base_argument_parser,
-    load_dataset,
-    add_imagenet_arguments,
-    eval_head,
-    load_imagenet_splits,
     require_imagenet_root,
     create_callbacks,
     validate_model_loading,
@@ -63,7 +58,11 @@ from train.common import run_summary
 from train.common.callbacks import LearningRateLogger
 from train.common.classification_viz import TrainingDashboardCallback
 from train.common.conformal import add_conformal_arguments, run_conformal
-from train.common.datasets import get_class_names
+from train.common.classification_data import (
+    add_selection_arguments,
+    load_classification_data,
+    load_split_arrays,
+)
 from train.common.run_io import save_training_history_json
 from train.convnext.common import build_loss
 
@@ -503,36 +502,40 @@ def train_model(args) -> None:
     figure_kwargs: Dict[str, Any] = {}
     if args.dataset == "imagenet":
         require_imagenet_root(args.imagenet_root)
-        train_data, val_data = load_imagenet_splits(
-            root=args.imagenet_root, devkit_dir=args.devkit_dir,
-            image_size=args.image_size, batch_size=args.batch_size,
-            seed=args.seed, augment=True,
+        data = load_classification_data(
+            "imagenet", batch_size=args.batch_size, seed=args.seed, normalize="standardize",
+            imagenet_augment=True, holdout_per_class=args.holdout_per_class,
+            max_samples=args.max_samples, eval_samples=args.eval_samples,
+            imagenet_root=args.imagenet_root, devkit_dir=args.devkit_dir,
+            image_size=args.image_size,
         )
-        train_ds, val_ds = train_data.dataset, val_data.dataset
-        steps_per_epoch = train_data.steps_per_epoch
-        num_classes = train_data.num_classes
-        input_shape = (args.image_size, args.image_size, 3)
-        class_names = train_data.class_names
-        x_eval, y_eval = eval_head(val_data, args.eval_samples)
+        # Selection (fit validation, the best checkpoint) is a held-out slice of train;
+        # the official val split is the test set.
+        train_ds, val_ds, test_ds = data.train_ds, data.select_ds, data.test_ds
+        steps_per_epoch = data.steps_per_epoch
+        num_classes = data.num_classes
+        input_shape = data.input_shape
+        class_names = data.class_names
+        x_eval, y_eval = data.x_fig, data.y_fig
         # The images are standardized, so the figures un-standardize them.
-        figure_kwargs = dict(
-            mean=np.array(IMAGENET_MEAN, dtype=np.float32),
-            std=np.array(IMAGENET_STD, dtype=np.float32),
-        )
-        # fit and the final evaluate see all of val; the figures see the head.
+        figure_kwargs = dict(mean=data.mean, std=data.std)
+        # fit and the final evaluate see all of their split; the figures see the head.
         figure_ds = tf.data.Dataset.from_tensor_slices(x_eval).batch(args.batch_size)
     else:
-        (x_train, y_train), (x_eval, y_eval), input_shape, num_classes = load_dataset(
-            args.dataset
-        )
+        arrays = load_split_arrays(
+            args.dataset, seed=args.seed, validation_split=args.validation_split,
+            max_samples=args.max_samples)
+        input_shape, num_classes = arrays.input_shape, arrays.num_classes
         train_ds = build_train_dataset(
-            x_train, y_train, args.batch_size, args.dataset,
+            arrays.x_train, arrays.y_train, args.batch_size, args.dataset,
             random_erasing_prob=args.random_erasing_prob,
         )
-        val_ds = build_eval_dataset(x_eval, y_eval, args.batch_size, args.dataset)
-        steps_per_epoch = len(x_train) // args.batch_size
-        class_names = get_class_names(args.dataset, num_classes)
-        figure_ds = val_ds
+        val_ds = build_eval_dataset(arrays.x_select, arrays.y_select, args.batch_size, args.dataset)
+        test_ds = build_eval_dataset(arrays.x_test, arrays.y_test, args.batch_size, args.dataset)
+        x_eval, y_eval = arrays.x_test, arrays.y_test
+        steps_per_epoch = len(arrays.x_train) // args.batch_size
+        class_names = arrays.class_names
+        figure_ds = test_ds
 
     # ---- Shifts and stage lists parsing ------------------------------
     shifts: List[int] = _parse_int_list(args.shifts, "--shifts") or [1, 2]
@@ -711,20 +714,21 @@ def train_model(args) -> None:
         best_model = keras.models.load_model(best_path, custom_objects=custom_objects)
         logger.info("Loaded best checkpoint for final evaluation")
 
-    test_results = best_model.evaluate(val_ds, verbose=1, return_dict=True)
+    test_results = best_model.evaluate(test_ds, verbose=1, return_dict=True)
     logger.info(f"Test results: {test_results}")
 
-    # ---- Conformal prediction sets (ImageNet), over ALL of val ----------
-    # Before the figures and the model analysis, which are the heavy steps.
+    # ---- Conformal prediction sets (ImageNet), over ALL of the official val split ----
+    # Before the figures and the model analysis, which are the heavy steps. The checkpoint
+    # was selected on the held-out slice of train, not on this split.
     conformal: Optional[Dict[str, Any]] = None
     if args.dataset == "imagenet" and not args.no_conformal:
         conformal = run_conformal(
-            best_model, val_ds, alpha=args.conformal_alpha, seed=args.seed,
+            best_model, test_ds, alpha=args.conformal_alpha, seed=args.seed,
             out_dir=Path(results_dir), input_shape=input_shape,
             model_name=f"cliffordnet_{args.variant}_imagenet",
-            weights="best checkpoint, selected on this same validation set's "
-                    "val_accuracy" if os.path.exists(best_path) else "last epoch",
-            selection_overlaps_calibration=True,
+            weights="best checkpoint, selected on the held-out slice of train "
+                    "(val_accuracy)" if os.path.exists(best_path) else "last epoch",
+            selection_overlaps_calibration=False,
         )
 
     # ---- Classification figures --------------------------------------
@@ -797,13 +801,10 @@ def main() -> None:
         default_dataset="cifar100",
         dataset_choices=["cifar10", "cifar100", "imagenet"],
     )
-    add_imagenet_arguments(parser, note="Used only when --dataset imagenet: ")
+    add_selection_arguments(parser)
+    # None means "not given": --eval-samples is refused for the CIFAR datasets (below).
+    parser.set_defaults(eval_samples=None)
     add_conformal_arguments(parser, note="Used only when --dataset imagenet: ")
-    parser.add_argument('--eval-samples', type=int, default=None, dest='eval_samples',
-                        help='Only with --dataset imagenet: how many val images the '
-                             'end-of-run figures, model analysis and save/reload '
-                             'check use (default 2000). Training-time validation '
-                             'and the final evaluation use all of val.')
 
     # Model variant
     parser.add_argument('--variant', type=str, default='nano',

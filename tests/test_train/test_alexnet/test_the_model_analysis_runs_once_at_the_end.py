@@ -12,12 +12,12 @@ end-of-run analysis of the trained model runs through the shared
 the run (the D-102 / D-105 rule).
 """
 
-import keras
 import numpy as np
 import pytest
 
 from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
 
+import train.common.classification_data as classification_data
 from train.alexnet import train_alexnet as module
 
 
@@ -53,10 +53,11 @@ def test_the_flag_reaches_the_config(monkeypatch):
     assert module.parse_arguments([]).epoch_analysis_every == 0
 
 
-def _tiny_cifar():
+def _tiny_cifar(name="cifar10"):
+    """40 train images (the 10% selection cut leaves 4 out) and 4 test images."""
     rng = np.random.default_rng(0)
-    x = rng.integers(0, 256, (8, 32, 32, 3), dtype=np.uint8)
-    y = (np.arange(8) % 10).astype(np.uint8).reshape(8, 1)
+    x = rng.integers(0, 256, (40, 32, 32, 3), dtype=np.uint8)
+    y = (np.arange(40) % 10).astype(np.int64)
     return (x, y), (x[:4], y[:4])
 
 
@@ -87,7 +88,7 @@ def _spy_analysis(monkeypatch, status="ok"):
 
 
 def test_one_analysis_of_the_trained_model_runs_after_fit(monkeypatch, tmp_path):
-    monkeypatch.setattr(keras.datasets.cifar10, "load_data", _tiny_cifar)
+    monkeypatch.setattr(classification_data, "_load_raw", _tiny_cifar)
     calls = _spy_analysis(monkeypatch)
     result = module.train_alexnet(_tiny_config(tmp_path))
     (call,) = calls
@@ -99,7 +100,7 @@ def test_one_analysis_of_the_trained_model_runs_after_fit(monkeypatch, tmp_path)
 
 
 def test_a_failed_analysis_fails_the_run(monkeypatch, tmp_path):
-    monkeypatch.setattr(keras.datasets.cifar10, "load_data", _tiny_cifar)
+    monkeypatch.setattr(classification_data, "_load_raw", _tiny_cifar)
     _spy_analysis(monkeypatch, status="error")
     with pytest.raises(RuntimeError, match="analysis broke"):
         module.train_alexnet(_tiny_config(tmp_path))

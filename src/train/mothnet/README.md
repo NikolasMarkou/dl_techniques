@@ -26,7 +26,7 @@ implies for the periodic MB-sparsity plot.
 Always run with a non-interactive matplotlib backend and from the repo root:
 
 ```bash
-# Plain invocation — CLI defaults (3 epochs, full MNIST: 60000 train / 10000 val samples)
+# Plain invocation — CLI defaults (3 epochs, MNIST: 54000 train / 6000 val samples)
 MPLBACKEND=Agg .venv/bin/python -m train.mothnet.train_mothnet
 
 # Custom experiment name
@@ -66,8 +66,8 @@ optimizer/LR-schedule/patience/dataset-choice surface for that shared parser to 
 | `--output-dir` | `None` | Output directory for run artifacts; `None` means repo-root `results/`, resolved at run time |
 | `--experiment-name` | `None` | Experiment name; `None` means auto-generated via `default_experiment_name` |
 | `--seed` | `42` | Seed, routed through `train.common.set_seeds()` in `build_model()` and through `load_mnist_data`'s own `np.random.default_rng(config.seed)` — see "What `--seed` covers, and what it does not" below |
-| `--num-train-samples` | `60000` | Number of MNIST training samples to subsample (full MNIST train split size; previously defaulted to `2000` as a fast-iteration toy subsample). Validated `>= 1` at parse time |
-| `--num-val-samples` | `10000` | Number of MNIST validation samples to subsample (full MNIST test split size; previously defaulted to `500` as a fast-iteration toy subsample). Validated `>= 1` at parse time |
+| `--num-train-samples` | `54000` | Number of MNIST training samples to subsample (the MNIST train split after the 10% selection cut, via `train.common.classification_data`; previously defaulted to `2000` as a fast-iteration toy subsample). Validated `>= 1` at parse time |
+| `--num-val-samples` | `6000` | Number of MNIST validation samples to subsample (the selection slice held out of train, never the MNIST test split, because the best epoch is chosen on it; previously defaulted to `500` as a fast-iteration toy subsample). Validated `>= 1` at parse time |
 | `--eval-batch-size` | `5000` | Chunk size for the per-epoch accuracy computation's forward pass (`_predict_in_batches`), decoupled from `--batch-size` — a pure eval-chunking performance/memory knob with no effect on the computed accuracy value, since it does not change `train_hebbian`'s own training mini-batch |
 
 ---
@@ -210,6 +210,12 @@ each independently cleaned of stale files from a prior run at the same
 ---
 
 ## MothNet-specific caveats
+
+**The validation set changed on 2026-10-28.** `val_accuracy`, the best epoch and the best checkpoint
+used to be computed on a seeded subsample of the MNIST TEST split (default 10000 images). They now
+use a held-out slice of the TRAIN split (6000 images), and the test split is never read, so the
+number a run reports no longer selects itself. Every `val_accuracy` quoted below was measured with
+the old validation set and is not comparable with a run made after that date.
 
 **Known limitation: the Antennal Lobe and Mushroom Body layers are frozen for the
 entire run — but the previously-measured accuracy ceiling was NOT purely due to

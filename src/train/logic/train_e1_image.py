@@ -50,7 +50,8 @@ import numpy as np
 
 from dl_techniques.layers.logic import LearnableNeuralCircuit
 from dl_techniques.utils.logger import logger
-from train.common import setup_gpu, load_dataset, set_seeds
+from train.common import setup_gpu, set_seeds
+from train.common.classification_data import add_selection_arguments, load_split_arrays
 from train.logic.callbacks_band import StopOnAccuracyBand
 from train.logic.train_benchmark import (
     extract_hard_inplace,
@@ -360,6 +361,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out-dir", type=str, default=None,
                    help="Output directory. Defaults to results/logic_e1_<dataset>_<timestamp>/.")
     p.add_argument("--seed", type=int, default=42)
+    add_selection_arguments(p, imagenet=False)
     p.add_argument("--circuit-channels", type=int, default=32)
     return p.parse_args()
 
@@ -386,7 +388,13 @@ def main() -> None:
     os.makedirs(out_dir, exist_ok=True)
     logger.info(f"E1 run | dataset={args.dataset} | out_dir={out_dir}")
 
-    (x_train, y_train), (x_test, y_test), input_shape, num_classes = load_dataset(args.dataset)
+    # Training stops when the SELECTION accuracy enters the band; the hard-extraction check
+    # then runs on the test split, which never took part in that decision.
+    arrays = load_split_arrays(
+        args.dataset, seed=args.seed, channels=3 if args.dataset == "mnist" else None,
+        validation_split=args.validation_split, max_samples=args.max_samples,
+    )
+    input_shape, num_classes = arrays.input_shape, arrays.num_classes
 
     rows: List[Dict[str, Any]] = []
 
@@ -400,14 +408,14 @@ def main() -> None:
     circuit_params = circuit.count_params()
     logger.info(f"Circuit params: {circuit_params}")
     train_res = train_one_with_band_checkpoint(
-        circuit, x_train, y_train, x_test, y_test,
+        circuit, arrays.x_train, arrays.y_train, arrays.x_select, arrays.y_select,
         band_low=args.band_low, band_high=args.band_high,
         max_epochs=args.max_epochs, batch_size=args.batch_size,
         save_path=os.path.join(out_dir, "circuit_band.keras"),
     )
     logger.info(f"Circuit training done: {train_res}")
     hard_res = evaluate_hard_extraction(
-        circuit, x_test, y_test,
+        circuit, arrays.x_test, arrays.y_test,
         save_path=os.path.join(out_dir, "circuit_rt.keras"),
     )
     logger.info(f"Circuit hard-extraction: {hard_res}")
@@ -428,13 +436,13 @@ def main() -> None:
     cnn_params = cnn.count_params()
     logger.info(f"CNN baseline filters={filters}, params={cnn_params}")
     train_res_c = train_one_with_band_checkpoint(
-        cnn, x_train, y_train, x_test, y_test,
+        cnn, arrays.x_train, arrays.y_train, arrays.x_select, arrays.y_select,
         band_low=args.band_low, band_high=args.band_high,
         max_epochs=args.max_epochs, batch_size=args.batch_size,
         save_path=os.path.join(out_dir, "cnn_band.keras"),
     )
     hard_res_c = evaluate_hard_extraction(
-        cnn, x_test, y_test,
+        cnn, arrays.x_test, arrays.y_test,
         save_path=os.path.join(out_dir, "cnn_rt.keras"),
     )
     logger.info(f"CNN baseline: train={train_res_c}, hard={hard_res_c}")

@@ -29,7 +29,8 @@ import keras
 import numpy as np
 import tensorflow as tf
 
-from train.common import DEFAULT_SEED, load_dataset
+from train.common import DEFAULT_SEED
+from train.common.classification_data import load_classification_data
 from dl_techniques.models.vision.resnet.model import create_resnet
 from dl_techniques.utils.logger import logger
 
@@ -42,21 +43,6 @@ from train.rms_variants_train.callbacks import (
 )
 from train.rms_variants_train.config import ExperimentConfig, NORM_VARIANTS
 from train.rms_variants_train.seed_utils import set_seeds
-
-
-def _load_cifar100() -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]:
-    (x_tr, y_tr), (x_val, y_val), _, _ = load_dataset("cifar100")
-    y_tr = y_tr.astype(np.int64)
-    y_val = y_val.astype(np.int64)
-    return (x_tr, y_tr), (x_val, y_val)
-
-
-def _to_tf_dataset(x, y, *, batch_size, shuffle, seed) -> tf.data.Dataset:
-    ds = tf.data.Dataset.from_tensor_slices((x, y))
-    if shuffle:
-        ds = ds.shuffle(buffer_size=min(len(x), 10000), seed=seed, reshuffle_each_iteration=True)
-    ds = ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
-    return ds
 
 
 # Regime axis (Phase 3). E2 only accepts the ``default`` choice — it is NOT
@@ -92,11 +78,13 @@ def run(cfg: ExperimentConfig, *, variant: str, warmup_epochs: int) -> dict:
     set_seeds(cfg.seed)
     os.makedirs(cfg.out_dir, exist_ok=True)
 
-    (x_tr, y_tr), (x_val, y_val) = _load_cifar100()
-    logger.info(f"[e2] CIFAR-100 train={x_tr.shape}, val={x_val.shape}")
-
-    train_ds = _to_tf_dataset(x_tr, y_tr, batch_size=cfg.batch_size, shuffle=True, seed=cfg.seed)
-    val_ds = _to_tf_dataset(x_val, y_val, batch_size=cfg.batch_size, shuffle=False, seed=cfg.seed)
+    # [0, 1] images; selection on a held-out slice of train (the test split never selects).
+    data = load_classification_data(
+        "cifar100", batch_size=cfg.batch_size, seed=cfg.seed, normalize="unit")
+    logger.info(
+        f"[e2] CIFAR100 train={data.n_train}, selection={data.n_select}, "
+        f"test={data.n_test}")
+    train_ds, val_ds = data.train_ds, data.select_ds
 
     # DECISION plan_2026-05-18_6776f8ba/D-003 (Step 5)
     # `cfg.norm_kwargs()` resolves to `{'use_scale': False, ...}` only
@@ -109,7 +97,7 @@ def run(cfg: ExperimentConfig, *, variant: str, warmup_epochs: int) -> dict:
         normalization_kwargs=dict(cfg.norm_kwargs()),
     )
 
-    steps_per_epoch = max(1, len(x_tr) // cfg.batch_size)
+    steps_per_epoch = data.steps_per_epoch
     total_steps = steps_per_epoch * cfg.epochs
     warmup_steps = steps_per_epoch * warmup_epochs
     lr_schedule = keras.optimizers.schedules.CosineDecay(
@@ -131,8 +119,8 @@ def run(cfg: ExperimentConfig, *, variant: str, warmup_epochs: int) -> dict:
     n_params = int(sum(int(np.prod(w.shape)) for w in model.trainable_weights))
     logger.info(f"[e2] model: variant={variant}, norm={cfg.norm_type}, params={n_params}")
 
-    cal_x = tf.convert_to_tensor(x_val[:32])
-    cal_y = tf.convert_to_tensor(y_val[:32])
+    cal_x = tf.convert_to_tensor(data.arrays.x_select[:32])
+    cal_y = tf.convert_to_tensor(data.arrays.y_select[:32])
 
     # CIFAR-100 train pipeline normalizes images by /255.0 — apply the same
     # to the CIFAR-100-C tensors the probe will pull from TFDS so

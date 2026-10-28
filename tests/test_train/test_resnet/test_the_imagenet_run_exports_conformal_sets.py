@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 import train.resnet.train_resnet as train_resnet
-from tests.imagenet_fake_tree import build_fake_imagenet
+from tests.imagenet_fake_tree import build_fake_imagenet, use_the_fake_tree_class_count
 from train.common.conformal import CONFORMAL_JSON_NAME, CONFORMAL_MODEL_NAME, load_conformal_model
 
 
@@ -22,7 +22,7 @@ def _config(root, out, name, **kw):
         imagenet_root=root, image_size=32, batch_size=4, model_variant="resnet18",
         num_classes=3, enable_deep_supervision=True, epochs=1, warmup_epochs=0,
         augment_data=False, label_smoothing=0.0, output_dir=str(out),
-        experiment_name=name, num_parallel_calls=1, **kw,
+        experiment_name=name, holdout_per_class=1, **kw,
     )
 
 
@@ -31,6 +31,7 @@ def runs(tmp_path_factory):
     root = build_fake_imagenet(tmp_path_factory.mktemp("tree") / "imagenet2012")
     out = tmp_path_factory.mktemp("resnet_conformal")
     mp = pytest.MonkeyPatch()
+    use_the_fake_tree_class_count(mp)
     mp.setattr(train_resnet, "setup_gpu", lambda *a, **k: None)
     # The checkpoint, analyzer and plotting callbacks are not under test and cost minutes.
     mp.setattr(train_resnet, "create_callbacks", lambda *a, **k: ([], None))

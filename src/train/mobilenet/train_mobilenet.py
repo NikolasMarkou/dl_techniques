@@ -27,10 +27,9 @@ from train.common import (
     create_base_argument_parser,
     create_callbacks,
     create_learning_rate_schedule,
-    load_dataset,
-    get_class_names,
     run_model_analysis,
 )
+from train.common.classification_data import add_selection_arguments, load_classification_data
 
 
 # =============================================================================
@@ -66,20 +65,9 @@ VERSION_REGISTRY: Dict[str, Dict[str, Any]] = {
 }
 
 
-def get_input_shape(dataset: str) -> tuple:
-    """Get input shape for the given dataset."""
-    shapes = {
-        "mnist": (28, 28, 1),
-        "cifar10": (32, 32, 3),
-        "cifar100": (32, 32, 3),
-    }
-    return shapes[dataset]
-
-
-def create_model(version: str, variant: str, dataset: str, num_classes: int) -> keras.Model:
-    """Create a MobileNet model for the given version, variant, and dataset."""
+def create_model(version: str, variant: str, input_shape: tuple, num_classes: int) -> keras.Model:
+    """Create a MobileNet model for the given version, variant and input shape."""
     info = VERSION_REGISTRY[version]
-    input_shape = get_input_shape(dataset)
 
     model = info["factory"](
         variant=variant,
@@ -117,23 +105,24 @@ def train_model(args) -> None:
     logger.info(f"Dataset: {args.dataset}, Epochs: {args.epochs}, "
                 f"Batch size: {args.batch_size}, LR: {args.learning_rate}")
 
-    # Load dataset
-    (x_train, y_train), (x_test, y_test), input_shape, num_classes = load_dataset(
-        args.dataset
+    # Load dataset: [0, 1] inputs in the dataset's native shape, selection on a held-out
+    # slice of train, the test split only for the final analysis.
+    data = load_classification_data(
+        args.dataset, batch_size=args.batch_size, seed=args.seed, normalize="unit",
+        validation_split=args.validation_split, max_samples=args.max_samples,
     )
-    class_names = get_class_names(args.dataset, num_classes)
-    logger.info(f"Dataset loaded: {x_train.shape[0]} train, {x_test.shape[0]} test, "
-                f"{num_classes} classes")
+    logger.info(f"Dataset loaded: {data.n_train} train, {data.n_select} selection, "
+                f"{data.n_test} test, {data.num_classes} classes")
 
     # Create model
-    model = create_model(version, variant, args.dataset, num_classes)
+    model = create_model(version, variant, data.input_shape, data.num_classes)
     model.summary()
 
     # Register custom objects for serialization
     keras.saving.get_custom_objects().update(info["custom_objects"])
 
     # Learning rate schedule
-    steps_per_epoch = x_train.shape[0] // args.batch_size
+    steps_per_epoch = data.steps_per_epoch
     lr = create_learning_rate_schedule(
         initial_lr=args.learning_rate,
         schedule_type=args.lr_schedule,
@@ -165,10 +154,9 @@ def train_model(args) -> None:
 
     # Train
     history = model.fit(
-        x_train, y_train,
-        validation_data=(x_test, y_test),
+        data.train_ds,
+        validation_data=data.select_ds,
         epochs=args.epochs,
-        batch_size=args.batch_size,
         callbacks=callbacks,
         verbose=1,
     )
@@ -176,7 +164,7 @@ def train_model(args) -> None:
     # Post-training analysis
     run_model_analysis(
         model=model,
-        test_data=(x_test, y_test),
+        test_data=(data.x_fig, data.y_fig),
         training_history=history,
         model_name=model_name,
         results_dir=results_dir,
@@ -198,7 +186,9 @@ def main():
     parser = create_base_argument_parser(
         description="Train MobileNet on image classification datasets",
         default_dataset="cifar10",
+        include_image_size=False,
     )
+    add_selection_arguments(parser, imagenet=False)
 
     # MobileNet-specific arguments
     parser.add_argument(

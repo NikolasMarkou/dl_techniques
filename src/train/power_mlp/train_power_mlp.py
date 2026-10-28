@@ -11,9 +11,8 @@ count. Labels stay integer end to end (``SparseCategoricalCrossentropy``), which
 is also what ``ModelAnalyzer`` feeds ``model.evaluate``.
 
 Input scaling (``--input-scaling``): ``standardize`` subtracts a mean and divides
-by a std (MNIST: 0.1307 / 0.3081 on one channel, since ``load_dataset('mnist')``
-repeats it into 3 identical channels and channel 0 is lossless; CIFAR-10: per
-channel ``CIFAR10_MEAN`` / ``CIFAR10_STD``); ``unit`` keeps the loader's plain
+by a std (MNIST: 0.1307 / 0.3081 on its one channel; CIFAR-10: per channel
+``CIFAR10_MEAN`` / ``CIFAR10_STD``); ``unit`` keeps the loader's plain
 ``[0, 1]`` pixels (the default). Both are then flattened. The validation split is
 a seeded shuffle of the training set and is never the test set.
 
@@ -88,8 +87,6 @@ from train.common import (
     attach_run_log,
     create_callbacks,
     default_experiment_name,
-    get_class_names,
-    load_dataset,
     prepare_run_dir,
     refuse_existing_run,
     resolved_run_dir,
@@ -100,6 +97,7 @@ from train.common import (
     validate_model_loading,
     write_summary_json,
 )
+from train.common.classification_data import load_split_arrays
 from train.common import run_summary
 from train.common.callbacks import LearningRateLogger
 from train.common.classification_viz import TrainingDashboardCallback
@@ -504,11 +502,10 @@ def prepare_data(
         raise ValueError(
             f"input_scaling must be one of {INPUT_SCALINGS}, got {input_scaling!r}"
         )
-    (x_train, y_train), (x_test, y_test), _, num_classes = load_dataset(dataset)
+    arrays = load_split_arrays(dataset, seed=seed, validation_split=validation_split)
+    num_classes = arrays.num_classes
 
     if dataset == "mnist":
-        # load_dataset repeats the single MNIST channel 3x; channel 0 is lossless.
-        x_train, x_test = x_train[..., :1], x_test[..., :1]
         mean = np.asarray(MNIST_MEAN, dtype=np.float32)
         std = np.asarray(MNIST_STD, dtype=np.float32)
     else:
@@ -517,26 +514,20 @@ def prepare_data(
     if input_scaling == "unit":
         mean, std = np.zeros_like(mean), np.ones_like(std)
 
-    image_shape = tuple(int(d) for d in x_train.shape[1:])
-    x_train = ((x_train - mean) / std).astype(np.float32).reshape(len(x_train), -1)
-    x_test = ((x_test - mean) / std).astype(np.float32).reshape(len(x_test), -1)
-    y_train = np.asarray(y_train).reshape(-1).astype(np.int32)
-    y_test = np.asarray(y_test).reshape(-1).astype(np.int32)
+    image_shape = tuple(int(d) for d in arrays.x_train.shape[1:])
 
-    val_size = int(len(x_train) * validation_split)
-    if val_size == 0:
-        raise ValueError(
-            f"validation_split={validation_split} holds out 0 of {len(x_train)} samples"
-        )
-    order = np.random.default_rng(seed).permutation(len(x_train))
-    val_idx, train_idx = order[:val_size], order[val_size:]
-    x_val, y_val = x_train[val_idx], y_train[val_idx]
-    x_train, y_train = x_train[train_idx], y_train[train_idx]
+    def scale(x: np.ndarray) -> np.ndarray:
+        return ((x - mean) / std).astype(np.float32).reshape(len(x), -1)
+
+    x_train, y_train = scale(arrays.x_train), arrays.y_train
+    x_val, y_val = scale(arrays.x_select), arrays.y_select
+    x_test, y_test = scale(arrays.x_test), arrays.y_test
 
     info = {
         "image_shape": image_shape,
         "input_dim": int(x_train.shape[1]),
         "num_classes": int(num_classes),
+        "class_names": arrays.class_names,
         "input_scaling": input_scaling,
         "mean": mean,
         "std": std,
@@ -951,7 +942,7 @@ def train_model(config: TrainingConfig) -> Dict[str, Any]:
         probs = keras.ops.convert_to_numpy(keras.ops.softmax(logits, axis=-1))
         visualizations = run_summary.write_classification_figures(
             vis_dir, x_test, y_test, probs,
-            get_class_names(config.dataset, info["num_classes"]),
+            info["class_names"],
             info["image_shape"], info["mean"], info["std"],
         )
 

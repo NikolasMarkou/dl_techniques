@@ -13,6 +13,8 @@ import keras
 import numpy as np
 import pytest
 
+from tests.classification_fakes import use_raw_from_unit
+
 from dl_techniques.callbacks import analyzer_callback
 from train.common.callbacks import create_callbacks
 
@@ -45,7 +47,7 @@ def _callbacks_kwargs(monkeypatch, tmp_path, extra_argv):
 
     monkeypatch.setattr(module, "create_callbacks", fake_create_callbacks)
     monkeypatch.setattr(module, "setup_gpu", lambda *a, **k: None)
-    monkeypatch.setattr(module, "load_dataset", _tiny_cifar)
+    use_raw_from_unit(monkeypatch, _tiny_cifar)
     monkeypatch.setattr(module, "build_model", _tiny_classifier)
     monkeypatch.setattr(
         sys, "argv",

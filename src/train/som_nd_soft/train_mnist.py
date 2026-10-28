@@ -1,5 +1,6 @@
 """MNIST Classification with Soft Self-Organizing Map Features."""
 
+import dataclasses
 import gc
 import json
 import keras
@@ -11,6 +12,7 @@ from dataclasses import dataclass
 from typing import Tuple, Optional, Dict, Any, List
 
 from train.common import setup_gpu, set_seeds, create_callbacks, save_config_json
+from train.common.classification_data import SplitArrays, load_split_arrays
 from train.common.run_io import default_experiment_name, save_training_history_json
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.memory.som_nd_soft_layer import SoftSOMLayer
@@ -35,6 +37,7 @@ class MNISTSOMConfig:
     output_dir: str = 'results'
     experiment_name: Optional[str] = None
     monitor_every_n_epochs: int = 2
+    seed: int = 42  # seeds the held-out selection slice of train
 
     def __post_init__(self) -> None:
         if self.experiment_name is None:
@@ -45,22 +48,19 @@ class MNISTSOMConfig:
 # DATA LOADING
 # =============================================================================
 
-def load_mnist_data(config: MNISTSOMConfig) -> Tuple[
-    Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]
-]:
-    """Load and preprocess MNIST dataset (normalized, flattened, one-hot)."""
+def load_mnist_data(config: MNISTSOMConfig) -> SplitArrays:
+    """Load MNIST in [0, 1], flattened to 784 features, with one-hot labels.
+
+    Selection (``val_loss``, early stopping) is a held-out slice of train; the test split
+    only feeds the visualization and the final accuracy.
+    """
     logger.info("Loading MNIST dataset...")
-    (x_train, y_train), (x_test, y_test) = keras.datasets.mnist.load_data()
-
-    x_train = x_train.astype("float32") / 255.0
-    x_test = x_test.astype("float32") / 255.0
-    x_train = x_train.reshape(-1, 784)
-    x_test = x_test.reshape(-1, 784)
-    y_train = keras.utils.to_categorical(y_train, 10)
-    y_test = keras.utils.to_categorical(y_test, 10)
-
-    logger.info(f"Train: {x_train.shape[0]}, Test: {x_test.shape[0]}, Dim: {x_train.shape[1]}")
-    return (x_train, y_train), (x_test, y_test)
+    arrays = load_split_arrays("mnist", seed=config.seed, labels="one_hot")
+    flat = {name: getattr(arrays, name).reshape(-1, 784)
+            for name in ("x_train", "x_select", "x_test")}
+    logger.info(f"Train: {len(flat['x_train'])}, Selection: {len(flat['x_select'])}, "
+                f"Test: {len(flat['x_test'])}, Dim: 784")
+    return dataclasses.replace(arrays, **flat)
 
 
 # =============================================================================
@@ -440,7 +440,10 @@ def train_mnist_som_classifier(config: MNISTSOMConfig) -> keras.Model:
     """Train MNIST classifier with SoftSOM feature extraction."""
     logger.info(f"Starting training: {config.experiment_name}")
 
-    (x_train, y_train), (x_test, y_test) = load_mnist_data(config)
+    data = load_mnist_data(config)
+    x_train, y_train = data.x_train, data.y_train
+    x_select, y_select = data.x_select, data.y_select
+    x_test, y_test = data.x_test, data.y_test
     model = create_mnist_som_classifier(config)
 
     model.compile(
@@ -467,7 +470,7 @@ def train_mnist_som_classifier(config: MNISTSOMConfig) -> keras.Model:
 
     history = model.fit(
         x_train, y_train, batch_size=config.batch_size,
-        epochs=config.epochs, validation_data=(x_test, y_test),
+        epochs=config.epochs, validation_data=(x_select, y_select),
         callbacks=callbacks, verbose=1
     )
 
@@ -517,7 +520,8 @@ def main() -> None:
         batch_size=args.batch_size,
         epochs=args.epochs,
         learning_rate=args.learning_rate,
-        output_dir=args.output_dir
+        output_dir=args.output_dir,
+        seed=args.seed,
     )
 
     logger.info(f"MNIST + SoftSOM | Grid: {config.grid_shape} | "

@@ -33,7 +33,8 @@ import keras
 import numpy as np
 import tensorflow as tf
 
-from train.common import DEFAULT_SEED, load_dataset
+from train.common import DEFAULT_SEED
+from train.common.classification_data import load_classification_data
 from dl_techniques.models.vision.vit.model import create_vit
 from dl_techniques.utils.logger import logger
 
@@ -51,29 +52,6 @@ from train.rms_variants_train.seed_utils import set_seeds
 # ---------------------------------------------------------------------
 # Data
 # ---------------------------------------------------------------------
-
-
-def _load_cifar10() -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]:
-    """Load CIFAR-10 as float32 in [0, 1], int64 sparse labels."""
-    (x_tr, y_tr), (x_val, y_val), _, _ = load_dataset("cifar10")
-    y_tr = y_tr.astype(np.int64)
-    y_val = y_val.astype(np.int64)
-    return (x_tr, y_tr), (x_val, y_val)
-
-
-def _to_tf_dataset(
-    x: np.ndarray,
-    y: np.ndarray,
-    *,
-    batch_size: int,
-    shuffle: bool,
-    seed: int,
-) -> tf.data.Dataset:
-    ds = tf.data.Dataset.from_tensor_slices((x, y))
-    if shuffle:
-        ds = ds.shuffle(buffer_size=min(len(x), 10000), seed=seed, reshuffle_each_iteration=True)
-    ds = ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
-    return ds
 
 
 # ---------------------------------------------------------------------
@@ -135,11 +113,13 @@ def run(cfg: ExperimentConfig, *, variant: str, patch_size: int, dropout_rate: f
     set_seeds(cfg.seed)
     os.makedirs(cfg.out_dir, exist_ok=True)
 
-    (x_tr, y_tr), (x_val, y_val) = _load_cifar10()
-    logger.info(f"[e1] CIFAR-10 train={x_tr.shape}, val={x_val.shape}")
-
-    train_ds = _to_tf_dataset(x_tr, y_tr, batch_size=cfg.batch_size, shuffle=True, seed=cfg.seed)
-    val_ds = _to_tf_dataset(x_val, y_val, batch_size=cfg.batch_size, shuffle=False, seed=cfg.seed)
+    # [0, 1] images; selection on a held-out slice of train (the test split never selects).
+    data = load_classification_data(
+        "cifar10", batch_size=cfg.batch_size, seed=cfg.seed, normalize="unit")
+    logger.info(
+        f"[e1] CIFAR10 train={data.n_train}, selection={data.n_select}, "
+        f"test={data.n_test}")
+    train_ds, val_ds = data.train_ds, data.select_ds
 
     # DECISION plan_2026-05-18_6776f8ba/D-003 (Step 5)
     # `cfg.norm_kwargs()` resolves to `{'use_scale': False, ...}` only
@@ -168,7 +148,7 @@ def run(cfg: ExperimentConfig, *, variant: str, patch_size: int, dropout_rate: f
     )
 
     # AdamW with cosine LR schedule
-    steps_per_epoch = max(1, len(x_tr) // cfg.batch_size)
+    steps_per_epoch = data.steps_per_epoch
     total_steps = steps_per_epoch * cfg.epochs
     warmup_steps = steps_per_epoch * warmup_epochs
     lr_schedule = keras.optimizers.schedules.CosineDecay(
@@ -192,8 +172,8 @@ def run(cfg: ExperimentConfig, *, variant: str, patch_size: int, dropout_rate: f
     logger.info(f"[e1] model: variant={variant}, norm={cfg.norm_type}, params={n_params}")
 
     # Calibration batch (use first val batch deterministically)
-    cal_x = tf.convert_to_tensor(x_val[:32])
-    cal_y = tf.convert_to_tensor(y_val[:32])
+    cal_x = tf.convert_to_tensor(data.arrays.x_select[:32])
+    cal_y = tf.convert_to_tensor(data.arrays.y_select[:32])
 
     # CIFAR-10 train pipeline normalizes images by /255.0 — apply the same
     # to the CIFAR-10-C tensors the probe will pull from TFDS so model.predict

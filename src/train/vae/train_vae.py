@@ -30,6 +30,7 @@ from train.common import (
     set_seeds,
     save_config_json,
 )
+from train.common.classification_data import load_split_arrays
 
 plt.style.use('seaborn-v0_8-darkgrid')
 sns.set_palette("viridis")
@@ -269,26 +270,13 @@ def train_model(args):
     # comparison arms are reproducible (compare_runs reads per-run logs).
     set_seeds(args.seed)
 
-    # Load dataset — VAE keeps grayscale channel for MNIST
-    if args.dataset.lower() == 'mnist':
-        (x_train, y_train), (x_test, y_test) = keras.datasets.mnist.load_data()
-        x_train = np.expand_dims(x_train, -1).astype("float32") / 255.0
-        x_test = np.expand_dims(x_test, -1).astype("float32") / 255.0
-        input_shape = (28, 28, 1)
-    elif args.dataset.lower() == 'cifar10':
-        (x_train, y_train), (x_test, y_test) = keras.datasets.cifar10.load_data()
-        x_train = x_train.astype("float32") / 255.0
-        x_test = x_test.astype("float32") / 255.0
-        y_train, y_test = y_train.flatten(), y_test.flatten()
-        input_shape = (32, 32, 3)
-    elif args.dataset.lower() == 'cifar100':
-        (x_train, y_train), (x_test, y_test) = keras.datasets.cifar100.load_data()
-        x_train = x_train.astype("float32") / 255.0
-        x_test = x_test.astype("float32") / 255.0
-        y_train, y_test = y_train.flatten(), y_test.flatten()
-        input_shape = (32, 32, 3)
-    else:
-        raise ValueError(f"Unsupported dataset: {args.dataset}")
+    # Load dataset (MNIST keeps its grayscale channel). Selection (val_loss, early stopping,
+    # the best checkpoint) is a held-out slice of train; the test split only scores the
+    # finished model and feeds the figures.
+    arrays = load_split_arrays(args.dataset, seed=args.seed)
+    x_train, x_select = arrays.x_train, arrays.x_select
+    x_test, y_test = arrays.x_test, arrays.y_test
+    input_shape = arrays.input_shape
 
     # Smoke mode: subset the TRAIN set and force a single epoch so the full
     # path (train -> CSVLogger -> best_model.keras -> reload) runs in seconds.
@@ -399,7 +387,7 @@ def train_model(args):
 
     # Train
     history = model.fit(
-        x_train, validation_data=(x_test, None),
+        x_train, validation_data=(x_select, None),
         epochs=epochs, batch_size=args.batch_size,
         callbacks=callbacks, verbose=1,
     )

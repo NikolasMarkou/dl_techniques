@@ -84,6 +84,7 @@ from dl_techniques.models.vision.vae.model import VAE
 from dl_techniques.layers.generative.sampling import Sampling, HypersphereSampling
 
 from train.common import set_seeds
+from train.common.classification_data import load_split_arrays
 
 # Reuse the trainer's plot helpers + custom-objects so the eval stays in lockstep
 # with how the model was trained/serialized (DRY: do not redefine these).
@@ -104,16 +105,15 @@ MMD_SEEDS = 3  # average MMD over this many subsample seeds
 def load_mnist_test() -> Tuple[np.ndarray, np.ndarray]:
     """Load the MNIST test split with the EXACT trainer preprocessing.
 
-    Replicates ``train_vae.py``: ``float32`` / 255.0, channel-last shape
-    ``(N, 28, 28, 1)``.
+    The trainer's: ``float32`` / 255.0, channel-last shape ``(N, 28, 28, 1)``, through
+    ``train.common.classification_data``. The whole test split, in a seeded shuffled order.
 
     Returns:
         Tuple of (x_test, y_test). ``x_test`` is ``(10000, 28, 28, 1)`` float32
         in [0, 1]; ``y_test`` is ``(10000,)`` int labels.
     """
-    (_, _), (x_test, y_test) = keras.datasets.mnist.load_data()
-    x_test = np.expand_dims(x_test, -1).astype("float32") / 255.0
-    return x_test, y_test.flatten()
+    arrays = load_split_arrays("mnist", seed=0)
+    return arrays.x_test, arrays.y_test
 
 
 # --------------------------------------------------------------------------- #
