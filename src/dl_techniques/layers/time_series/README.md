@@ -7,15 +7,19 @@ utilities.
 
 ## Overview
 
-The package exports **33 names**, listed in `__all__` in `__init__.py`. Every
-one of them appears in the tables below.
+The package exports **32 names**, listed in `__all__` in `__init__.py`. Every
+one of them appears in the tables below. Contributors: `AGENTS.md` in this
+directory holds the conventions, the shared helpers and the decision anchors.
 
-Two things to know before you start:
+Three things to know before you start:
 
 - **There is no factory.** Unlike `layers/ffn/` and `layers/attention/`, this
   package has no `create_*_layer` dispatcher. Import the class you want by name.
 - **One export is not a layer.** `create_manokhin_compliant_model` is a builder
   that returns a full `keras.Model`. Everything else is a `keras.Layer`.
+- **Flat N-BEATS tensors are time-major.** A multivariate window enters an
+  N-BEATS block as `(batch, length * dim)`, where entry `t * dim + i` is step
+  `t` of channel `i`. Every block, `ExogenousBlock` included, keeps that order.
 
 ## Available Components
 
@@ -48,6 +52,11 @@ Two things to know before you start:
 ABC, so Python will still let you instantiate it. Use one of the four
 subclasses instead.
 
+`ExogenousBlock` does not take `thetas_dim`. Its theta width is the number of
+basis channels: `tcn_filters` when `use_tcn=True`, `exogenous_dim` otherwise.
+Passing `thetas_dim` raises `TypeError`. `theta_initializer` and
+`theta_regularizer` apply to it exactly as to the other blocks.
+
 ### 3. PRISM (multi-resolution decomposition)
 
 | Name | Description | Use case |
@@ -73,6 +82,16 @@ subclasses instead.
 
 `AdaptiveLagAttentionLayer` uses sigmoid rather than softmax, so the lag weights
 do not compete: several lags can be important at once.
+
+Both quantile heads take `enforce_monotonicity=True` to stop quantiles from
+crossing. The first quantile is kept and each later one adds a softplus delta,
+`Q_i = Q_0 + sum_{j<=i} softplus(r_j)`. The work is done by
+`layers.activations.MonotonicityLayer(method="cumulative_softplus")`.
+
+The two DeepAR heads return a tuple. `GaussianLikelihoodHead` gives
+`(mu, sigma)`, where `sigma` is a standard deviation.
+`NegativeBinomialLikelihoodHead` gives `(mu, alpha)`, a mean and a dispersion,
+with `Var = mu + mu^2 * alpha`. Every positive parameter is floored at `1e-6`.
 
 ### 5. Scientific forecasting and signal processing
 
@@ -135,6 +154,31 @@ print(model.output_shape)  # (None, 24)
 `TrendBlock` it is the number of powers of time. For `SeasonalityBlock` it is
 the number of basis rows, filled by `thetas_dim // 2` harmonics.
 
+### N-BEATSx exogenous block
+
+The basis comes from covariates that cover both the history and the horizon.
+They are passed as the `exogenous_inputs` call keyword.
+
+```python
+import keras
+from dl_techniques.layers.time_series import ExogenousBlock
+
+block = ExogenousBlock(
+    exogenous_dim=6,
+    tcn_filters=16,      # basis channel count, and so the theta width
+    use_tcn=True,        # False uses the raw covariates as the basis
+    units=64,
+    backcast_length=48,
+    forecast_length=12,
+)
+
+residual = keras.random.normal((8, 48))
+x_back = keras.random.normal((8, 48, 6))
+x_fore = keras.random.normal((8, 12, 6))
+backcast, forecast = block(residual, exogenous_inputs=(x_back, x_fore))
+print(backcast.shape, forecast.shape)  # (8, 48) (8, 12)
+```
+
 ### xLSTM stack
 
 ```python
@@ -176,9 +220,9 @@ scaled = ScaleLayer()(inputs)
 hidden = keras.layers.RNN(DeepARCell(units=64), return_sequences=True)(scaled)
 
 mu, sigma = GaussianLikelihoodHead(units=1)(hidden)
-total_count, probs = NegativeBinomialLikelihoodHead(units=1)(hidden)
+nb_mu, alpha = NegativeBinomialLikelihoodHead(units=1)(hidden)  # mean, dispersion
 
-model = keras.Model(inputs=inputs, outputs=[mu, sigma, total_count, probs])
+model = keras.Model(inputs=inputs, outputs=[mu, sigma, nb_mu, alpha])
 print([o.shape for o in model.outputs])
 # [(None, 48, 1), (None, 48, 1), (None, 48, 1), (None, 48, 1)]
 ```

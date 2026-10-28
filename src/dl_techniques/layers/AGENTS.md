@@ -166,7 +166,7 @@ public surface, 17 export nothing — so neither shape is the default and you ha
 
 | Shape | Subpackages | How to import |
 |---|---|---|
-| **Curated re-export with `__all__`** (19) | `activations` (38 names), `adapters` (13), `attention` (44), `conv_blocks` (1: `ConvStem` only), `dynamic_chunking` (3), `embedding` (11), `fastvit` (8), `ffn` (27), `heads` (42), `logic` (10), `memory` (25), `mixtures` (9), `moe` (5), `norms` (24), `sequence_pooling` (13), `ssm` (15), `time_series` (33), `tokenizers` (8), `transformers` (34) | `from dl_techniques.layers.attention import MultiHeadAttention, create_attention_layer` |
+| **Curated re-export with `__all__`** (19) | `activations` (38 names), `adapters` (13), `attention` (44), `conv_blocks` (1: `ConvStem` only), `dynamic_chunking` (3), `embedding` (11), `fastvit` (8), `ffn` (27), `heads` (42), `logic` (10), `memory` (25), `mixtures` (9), `moe` (5), `norms` (24), `sequence_pooling` (13), `ssm` (15), `time_series` (32), `tokenizers` (8), `transformers` (34) | `from dl_techniques.layers.attention import MultiHeadAttention, create_attention_layer` |
 | **Exports nothing** (17) | `acc_unet`, `blt`, `complex`, `fusion`, `generative`, `geometric`, `graphs`, `matching`, `physics`, `pooling`, `reasoning`, `regularization`, `signal_processing`, `statistics`, `structured_linear`, `tabular`, `yolo12`, and the top-level standalone modules | `from dl_techniques.layers.graphs.graph_neural_network import GraphNeuralNetwork` |
 
 All 36 subpackages have an `__init__.py`; every one is in exactly one of the two rows above.
