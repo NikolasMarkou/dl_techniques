@@ -6,8 +6,7 @@ softmax-of-logits classifier with one learned, inspectable prototype vector per 
 feature space: `model.rbf_head.centers[i]` IS the class-`i` prototype after training, not a
 distributed weight matrix.
 
-This is a small-scale demonstration of the mechanism, not a CIFAR-100 SOTA attempt — see
-`plans/plan-2026-09-16T052349-7dfede94/plan.md` Problem Statement for the full framing.
+This is a small-scale demonstration of the mechanism, not a CIFAR-100 SOTA attempt.
 
 ## Overview
 
@@ -19,8 +18,9 @@ configurable number of stride-2 `ConvBlock` downsampling stages, then global ave
 `RBFLayer` (`dl_techniques.layers.mixtures.radial_basis_function`) applied to the pooled
 feature vector |
 | Feature width | `feature_dim=128` (default) |
+| Input size | any: global average pooling ends the backbone, so the constructor takes no `input_shape` |
 | Registration | `dl_techniques.models.rbf_protonet.model` |
-| Pretrained weights | none — `pretrained=True` raises `NotImplementedError` |
+| Pretrained weights | none — `create_rbf_protonet(pretrained=...)` raises `NotImplementedError` for `True` or a path; the constructor takes no `pretrained` |
 
 ## Architecture
 
@@ -45,8 +45,7 @@ output already matches `feature_dim` and no projection `Dense` is created.
 **No `MODEL_VARIANTS` table** — this package intentionally ships without one. There is exactly
 one baseline architecture here; inventing named size multipliers (e.g. a fake `_small` /
 `_base` split) with no genuine use case would reproduce the "forcing an ill-fitting template"
-anti-pattern `models/AGENTS.md` § "When the shape does not apply" warns against, and the
-pre-mortem in this plan's `plan.md` names it as a STOP-IF condition. See `decisions.md` D-004.
+anti-pattern `models/AGENTS.md` § "When the shape does not apply" warns against.
 
 ## Math
 
@@ -59,7 +58,7 @@ phi_i(x) = exp(-gamma_i * ||x - c_i||^2)
 where `c_i` is prototype `i`'s learned center (`RBFLayer.centers`) and `gamma_i` is its
 learned, always-positive (softplus-parameterized) width (`RBFLayer.gamma_raw`), per
 `radial_basis_function.py`'s docstring. `RBFProtoNet` fixes `output_mode='normalized'`
-(never `'basis'` — see D-002 below), so the head's output is the **normalized RBF (NRBF)**
+(never `'basis'`: the comment above `_create_rbf_head` in `model.py` records why), so the head's output is the **normalized RBF (NRBF)**
 activation:
 
 ```
@@ -69,11 +68,10 @@ p_i(x) = phi_i(x) / sum_j phi_j(x)
 equivalently a softmax over the (unclipped) negative squared distances
 `-gamma_i * ||x - c_i||^2`. `p(x)` sums to 1.0 along the last axis by construction, which is
 why `SparseCategoricalCrossentropy(from_logits=False)` — not `from_logits=True` — is the
-correct loss against it (see the trainer, Step 6 of this plan, and `decisions.md` D-003).
+correct loss against it (see the trainer).
 
-`output_mode='normalized'` is the model's only supported mode (`# DECISION
-plan-2026-09-16-7dfede94/D-002` in `model.py`): the layer's own docstring documents
-`'basis'` (the raw, unnormalized `phi_i`) as barely-trainable at realistic feature
+`output_mode='normalized'` is the model's only supported mode: the layer's own docstring
+documents `'basis'` (the raw, unnormalized `phi_i`) as barely-trainable at realistic feature
 dimensions, a footgun this model does not expose as a togglable knob.
 
 An auxiliary center-repulsion loss (`RBFLayer`'s own `repulsion_strength`/`min_distance`
@@ -82,14 +80,14 @@ see Hyperparameters below for the measured numbers behind this model's defaults.
 
 ## Hyperparameters
 
-- **`feature_dim=128`** — `decisions.md` D-006 measured `RBFLayer(units=100,
+- **`feature_dim=128`** — a standalone smoke test measured `RBFLayer(units=100,
   output_mode='normalized')` gradients on `centers`/`gamma` at `feature_dim` in
-  `{128, 256, 512}`; `128` already fully passed the gradient-liveness bar
+  `{128, 256, 512}` (the comment beside `feature_dim` in `model.py` records it); `128` already fully passed the gradient-liveness bar
   (`MIN_USEFUL_GRADMAX = 1e-4`) with the *strongest* gradients of the three candidates —
   larger `feature_dim` bought nothing measurable, so the smallest passing value was kept for
   parameter/compute economy.
 - **`repulsion_strength=0.1`, `min_distance=1.0`** — the RBF factory's own stock defaults,
-  kept unchanged (`decisions.md` D-007) because D-006's smoke test already measured them at
+  kept unchanged because that smoke test already measured them at
   this exact configuration (`units=100, feature_dim=128`): the repulsion loss stayed at
   0.14%-1.14% of total loss, nowhere near a dominating share. Both are exposed as ordinary
   constructor kwargs, not hardcoded, so a caller can override them without a code change.
@@ -100,7 +98,7 @@ see Hyperparameters below for the measured numbers behind this model's defaults.
 import keras
 from dl_techniques.models.vision.rbf_protonet.model import create_rbf_protonet
 
-model = create_rbf_protonet(num_classes=100, input_shape=(32, 32, 3))
+model = create_rbf_protonet(num_classes=100)
 model.build((None, 32, 32, 3))
 
 x = keras.random.normal((4, 32, 32, 3))
@@ -108,20 +106,50 @@ probs = model(x, training=False)
 print(probs.shape)                       # (4, 100)
 print(keras.ops.sum(probs, axis=-1))     # [1.0, 1.0, 1.0, 1.0] (within float tolerance)
 
-# pretrained=True raises -- no weights are shipped by this package:
+# pretrained=True (or a path) raises -- no weights are shipped by this package:
 #   create_rbf_protonet(pretrained=True)  # NotImplementedError
 ```
 
-`get_config()` / `from_config()` round-trip every constructor argument, and a model reloaded
+`get_config()` / `from_config()` round-trip every constructor argument (`kernel_regularizer` goes
+in as an instance, a name or a config and is stored as the object), and a model reloaded
 from a saved `.keras` file reproduces the original's output within `atol=1e-5` on a fixed
-input — see `tests/test_models/test_rbf_protonet/test_round_trip.py`.
+input — see `tests/test_models/test_rbf_protonet/test_round_trip.py`. `num_classes` accepts any
+positive integer type (a numpy integer included) and `dropout_rate` must be in `[0, 1)`.
 
 ## Testing
 
 `pytest tests/test_models/test_rbf_protonet/ -vvv` — construction/forward-pass shape and
-softmax-sum-to-1 contract, `get_config`/`from_config` + `.keras` save/load round trip, and
-oracle adoption (`gradient_flow_oracle`, `smoke_contract_oracle`, `knob_sensitivity_oracle`)
-run after one real optimizer step.
+softmax-sum-to-1 contract, argument validation, the shared `pretrained` refusal,
+`get_config`/`from_config` + `.keras` save/load round trip, and oracle adoption
+(`gradient_flow_oracle`, `smoke_contract_oracle`, `knob_sensitivity_oracle`) run after one
+real optimizer step.
+
+## Archives
+
+**Archive break (2026-10-28).** Measured by saving the four roster subjects (`RBFProtoNet` with 20 and 22
+tensors, `CliffordRBFProtoNet` with 38 and 40) in a separate process from the old revision and
+restoring them with the current code (`git archive`, `python -I`); inference and `training=True`
+outputs are compared at `atol=0`:
+
+- `keras.models.load_model` refuses all four archives, from `be92a74eb` and from `20b48aba6^`:
+  `ValueError: Unrecognized keyword arguments passed to RBFProtoNet: {'pretrained': False}`. The saved
+  config carries the removed `pretrained` and `input_shape` keys, and nothing reads them.
+- `model.load_weights(path)` into a freshly built model: from `be92a74eb` all four restore, with equal
+  outputs in both modes. `CliffordRBFProtoNet`'s blocks changed spelling (`clifford_block_{i}` to
+  `block_{i}`: 30 of 38 and 30 of 40 `w.path` strings), which does not matter to the loader. From
+  `20b48aba6^` `RBFProtoNet` restores (equal outputs) and `CliffordRBFProtoNet` refuses:
+  `Layer 'stem_conv1' expected 2 variables, but received 0 variables during loading`, because its stem was
+  a `Conv2D` and a `BatchNormalization` as two tracked layers and is now one `ConvStem`
+  (`clifford_rbf_proto_net/stem/stem_conv1/kernel`).
+- Transplanting by `w.path`, with `stem_conv/*` to `stem/stem_conv1/*`, `stem_bn/*` to `stem/stem_norm1/*`
+  and `clifford_block_{i}/*` to `block_{i}/*`, restores every tensor of all four subjects from either
+  revision (20/20, 22/22, 38/38, 40/40) with equal outputs at `atol=0`.
+- A model built with a given seed has the same starting weights as before the change: the four
+  subjects are tensor-for-tensor equal to the `be92a74eb` build (after the `block_{i}` rename), outputs included.
+- Transcripts: `plans/plan-2026-10-26T125959-7af851e5/scratch_iter2/step16/archive_summary.txt`,
+  `scratch_iter2/step16/archive_rbf_values.txt` and `scratch_iter2/archive/transcripts.txt`.
+
+---
 
 ## References
 
@@ -139,25 +167,25 @@ An alternative backbone for the same RBF prototype head: instead of `RBFProtoNet
 multi-stage stride-2 CNN, `CliffordRBFProtoNet` pairs an isotropic stack of
 `CliffordNetBlock`s (`dl_techniques.layers.geometric.clifford_block`) with the identical
 `_create_rbf_head(...)` classification head. Both classes live in this package's `model.py`
-and share that one helper (see `decisions.md` D-002); the two backbones themselves have no
-shared code, mirroring `vision/dino/`'s own "no common trunk" precedent for architecturally
-distinct backbones (`decisions.md` D-001).
+and share that one helper; the two backbones themselves have no shared code, mirroring
+`vision/dino/`'s own "no common trunk" precedent for architecturally distinct backbones.
 
 ### Overview
 
 | | |
 |---|---|
-| Backbone | One strided patch-embedding stem (`Conv2D` + `BatchNormalization`), then `depth` identical `CliffordNetBlock`s at a fixed `channels` width -- isotropic, no per-stage downsampling |
+| Backbone | One strided patch-embedding stem (a `ConvStem` named `stem`: one `Conv2D`, then `BatchNormalization` with momentum 0.9 and epsilon 1e-3, no activation), then `depth` identical `CliffordNetBlock`s (`block_{i}`, each with a `block_{i}_drop_path`) at a fixed `channels` width -- isotropic, no per-stage downsampling |
 | Head | The same `_create_rbf_head(...)` / `RBFLayer(output_mode='normalized')` head as `RBFProtoNet` |
 | Feature width | `feature_dim=128` (default); a `Dense` projection is only created if `channels != feature_dim` |
 | Registration | `dl_techniques.models.rbf_protonet.model` (same module as `RBFProtoNet`) |
-| Pretrained weights | none -- `pretrained=True` raises `NotImplementedError` |
+| Input size | any: the pooling is global, so the constructor takes no `input_shape` |
+| Pretrained weights | none -- `create_clifford_rbf_protonet(pretrained=...)` raises `NotImplementedError` for `True` or a path; the constructor takes no `pretrained` |
 
 ### Architecture
 
 ```
 Input [B, 32, 32, 3]
-  stem      Conv2D 3x3 /patch_size + BatchNormalization    -> 32x32 -> 16x16 (patch_size=2)
+  stem      ConvStem: Conv2D 3x3 /patch_size + BatchNorm   -> 32x32 -> 16x16 (patch_size=2)
   blocks    depth x CliffordNetBlock(channels)              -> 16x16 -> 16x16 (isotropic)
             x = x + drop_path(block(x))
   head      GlobalAveragePooling2D (+ Dense projection      -> (feature_dim,)
@@ -168,8 +196,7 @@ Input [B, 32, 32, 3]
 
 Unlike `RBFProtoNet`'s three stride-2 `ConvBlock` stages (32x32 -> 16x16 -> 8x8 -> 4x4), the
 Clifford backbone downsamples exactly once, in the stem, and then runs every block at the same
-16x16 resolution and `channels` width -- see Hyperparameters below for why (`decisions.md`
-D-003).
+16x16 resolution and `channels` width -- see Hyperparameters below for why.
 
 ### Hyperparameters
 
@@ -179,20 +206,20 @@ drop_path_rate=0.1`.
 - **`channels=128`, `depth=12`, `shifts=(1, 2)`, `use_global_context=False`** -- the isotropic,
   no-downsampling backbone shape mirrors every existing `CliffordNetBlock` consumer in this
   repo (`CliffordNet`, `CliffordNetLM`, `CliffordCLIP`), none of which interleaves separate
-  stride-2 downsampling between blocks; see
-  `plans/plan-2026-09-16T064227-b83f88ad/decisions.md` D-003 for why no interleaved-downsampling
-  variant was attempted. The specific channel/depth/shift values are the `nano`-equivalent
+  stride-2 downsampling between blocks, so no interleaved-downsampling variant was attempted.
+  The specific channel/depth/shift values are the `nano`-equivalent
   configuration `CliffordNet` and `CliffordCLIP` both already ship (`cliffordnet/README.md`'s
   own `nano` row), chosen to keep this demonstration's parameter count in the same small/fast
   scale class as `RBFProtoNet`'s own ~255K-parameter baseline rather than introducing an
-  unvalidated new size; see `plans/plan-2026-09-16T064227-b83f88ad/decisions.md` D-004.
+  unvalidated new size.
 - **`patch_size=2`** -- a single stride-2 `Conv2D` stem, replicated from `CliffordNet`'s own
   patch-embedding stem construction, reducing resolution once before the isotropic block stack
-  runs at a fixed spatial size.
+  runs at a fixed spatial size. The BatchNorm values are the module constants `STEM_BN_MOMENTUM`
+  (0.9) and `STEM_BN_EPSILON` (1e-3, stated because the norm factory's own default is 1e-6): the
+  stem was validated at exactly these values (the comment above `_build_stem` in `model.py`).
 - **`drop_path_rate=0.1`** -- matches `CliffordNet`'s own recorded `nano`-variant training
   practice (`stochastic_depth_rate=0.1` in its `from_variant("nano", ...)` usage example), not
-  `CliffordNet`'s unused bare-constructor default of `0.0`; see
-  `plans/plan-2026-09-16T064227-b83f88ad/decisions.md` D-006. Per-block rates are ramped
+  `CliffordNet`'s unused bare-constructor default of `0.0`; it must be in `[0, 1)`. Per-block rates are ramped
   linearly from `0` to this value via `linear_drop_path_rates(depth, max_rate=drop_path_rate)`,
   the same schedule `CliffordNet.call()` uses.
 
@@ -211,8 +238,8 @@ The block's residual junction is a `GatedGeometricResidual`, an Euler-discretize
 a learned sigmoid gate mixes the geometric-product features into a `SiLU`-activated
 normalized hidden state, the result is scaled by a `LayerScale` `gamma` initialized near zero
 (`1e-5`), and optionally passed through stochastic depth (`StochasticDepth`,
-`drop_paths[i]`). The near-zero `gamma` init is why step 1's forward smoke test (this plan's
-`decisions.md` D-005) measured small-but-live gradients rather than dead ones at
+`drop_paths[i]`). The near-zero `gamma` init is why the stem's standing smoke test
+(`TestCliffordRBFProtoNetD005StandingSmoke`) measures small-but-live gradients rather than dead ones at
 initialization: every block starts close to an identity residual by design, which is what
 lets `depth=12` blocks stack stably from the first training step with no warmup. `call()`
 composes each block exactly as `CliffordNet.call()` does: `x = x + drop_path(block(x))`, an
@@ -234,7 +261,7 @@ citation set for these primitives, not re-derived independently here.
 import keras
 from dl_techniques.models.vision.rbf_protonet.model import create_clifford_rbf_protonet
 
-model = create_clifford_rbf_protonet(num_classes=100, input_shape=(32, 32, 3))
+model = create_clifford_rbf_protonet(num_classes=100)
 model.build((None, 32, 32, 3))
 
 x = keras.random.normal((4, 32, 32, 3))
@@ -242,7 +269,7 @@ probs = model(x, training=False)
 print(probs.shape)                       # (4, 100)
 print(keras.ops.sum(probs, axis=-1))     # [1.0, 1.0, 1.0, 1.0] (within float tolerance)
 
-# pretrained=True raises -- no weights are shipped by this package:
+# pretrained=True (or a path) raises -- no weights are shipped by this package:
 #   create_clifford_rbf_protonet(pretrained=True)  # NotImplementedError
 ```
 
@@ -252,8 +279,8 @@ from a saved `.keras` file reproduces the original's output within tolerance.
 ### Testing
 
 `pytest tests/test_models/test_rbf_protonet/test_clifford_model.py -vvv` -- construction,
-`pretrained=True` refusal, `get_config`/`from_config` round trip, and a gradient-flow oracle
-across the full block stack.
+argument validation, layer names, the shared `pretrained` refusal, `get_config`/`from_config`
+round trip, and a gradient-flow oracle across the full block stack.
 
 ### Authoring rules
 

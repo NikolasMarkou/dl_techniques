@@ -1213,6 +1213,9 @@ ANCHOR_TOKENS: Dict[str, Dict[str, int]] = {
         "plan-2026-08-19T163559-499b6f0e/D-085": 1,
         "plan-2026-08-22T035419-a11304c8/D-203": 1,
     },
+    "src/dl_techniques/models/vision/mambalct/uca_encoder.py": {
+        "plan-2026-10-26T125959-7af851e5/D-049": 2,
+    },
     "src/dl_techniques/models/vision/rbf_protonet/model.py": {
         "plan-2026-09-16T052349-7dfede94/D-002": 1,
         "plan-2026-09-16T052349-7dfede94/D-006": 1,
@@ -1321,26 +1324,10 @@ class Open:
 
 #: Every row that fails today, keyed ``(rule, subject-or-module key)``.
 LEDGER: Dict[Tuple[str, str], Open] = {
-    ("h1_factories_follow_the_classes", "rbf_protonet"): Open(
-        "the RBFProtoNet and UcaEncoder migration",
-        '1 violation(s): `def create_rbf_protonet` (line 487) sits between classes',
-        ('`def create_rbf_protonet`',)),
-    ("no_from_keras_import", "uca_encoder"): Open(
-        "the RBFProtoNet and UcaEncoder migration",
-        '1 violation(s): line 25: from keras import ...',
-        ('from keras import ...',)),
     ("no_from_keras_import", "capsnet"): Open(
         "the CapsNet migration",
         '1 violation(s): line 25: from keras import ...',
         ('from keras import ...',)),
-    ("h10_num_classes_first_kwargs_last", "rbf_protonet"): Open(
-        "the RBFProtoNet and UcaEncoder migration",
-        '1 violation(s): `num_classes` is parameter 10, not the first',
-        ('`num_classes` is parameter',)),
-    ("h10_num_classes_first_kwargs_last", "clifford_rbf_protonet"): Open(
-        "the RBFProtoNet and UcaEncoder migration",
-        '1 violation(s): `num_classes` is parameter 2, not the first',
-        ('`num_classes` is parameter',)),
     ("h2_member_order", "capsnet"): Open(
         "the CapsNet migration",
         '1 violation(s): `_build_sublayer_tree` comes after `build`',
@@ -1382,13 +1369,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the CapsNet migration",
         '1 violation(s): constructor argument `stem` should be `stem_type`',
         ('constructor argument `stem` should be `stem_type`',)),
-    ('h11_get_config_has_the_reference_form', 'uca_encoder'): Open(
-        'the RBFProtoNet and UcaEncoder migration',
-        '2 violation(s): `get_config` does not bind `base_config = '
-        'super().get_config()`; `get_config` does not end in `return {**base_config, '
-        '**config}`',
-        ('`get_config` does not bind `base_config = super().get_config()`',
-         '`get_config` does not end in `return {**base_config, **config}`')),
     ('h11_get_config_has_the_reference_form', 'capsnet'): Open(
         'the CapsNet migration',
         '2 violation(s): `get_config` does not bind `base_config = '
@@ -2148,7 +2128,7 @@ VACUOUS: Dict[Tuple[str, str], str] = {
     **{("h11_from_config_does_real_work", key): _NO_FROM_CONFIG for key in (
         "resnet", "cliffordnet", "hierarchical", "mobilenet_v1", "mobilenet_v2", "mobilenet_v3",
         "mobilenet_v4", "convnext_v1", "convnext_v2", "rad_convnet", "convunext_stem", "vae",
-        "uca_encoder")},
+        "rbf_protonet", "clifford_rbf_protonet", "uca_encoder")},
     **{("h3_builders_assign", key): _NO_BUILDERS for key in ("convunext_stem", "uca_encoder")},
     **{("h2_call_takes_inputs", key): _NO_CALL for key in ("squeezenet_v1", "squeezenet_v2", "vae")},
     **{("h10_block_container_names", key): _NO_CONTAINER for key in ("convunext_stem", "vae")},

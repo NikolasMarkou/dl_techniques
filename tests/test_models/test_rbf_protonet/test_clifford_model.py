@@ -1,17 +1,19 @@
 """
-Model-level tests for ``CliffordRBFProtoNet`` (construction, forward pass,
-``pretrained=True`` refusal, serialization round-trip, and gradient flow),
+Model-level tests for ``CliffordRBFProtoNet`` (construction, arguments, layer names,
+forward pass, ``pretrained`` refusal, serialization round-trip, and gradient flow),
 mirroring ``tests/test_models/test_rbf_protonet/test_model.py``'s conventions
 for the sibling ``RBFProtoNet`` class.
 
 ``CliffordRBFProtoNet`` composes an isotropic Clifford-algebra backbone
 (``CliffordNetBlock``) with the same RBF prototype-classification head design
-used by ``RBFProtoNet`` (``output_mode='normalized'``, see D-002 in this
-plan's ``decisions.md``). The head's defining contract is that its output is
-already a per-class probability vector -- each row sums to 1.0 -- so that is
-asserted here directly.
+used by ``RBFProtoNet`` (``output_mode='normalized'``). The head's defining
+contract is that its output is already a per-class probability vector -- each row
+sums to 1.0 -- so that is asserted here directly.
 """
 
+import inspect
+import json
+import re
 import math
 from unittest import mock
 
@@ -25,6 +27,8 @@ from dl_techniques.models.vision.rbf_protonet.model import (
     create_clifford_rbf_protonet,
 )
 
+from dl_techniques.utils.weight_transfer import refuse_pretrained
+
 from ..gradient_flow_oracle import (
     assert_gradients_reach_every_trainable_weight,
     gradient_report,
@@ -36,11 +40,13 @@ from ..gradient_flow_oracle import (
 # ---------------------------------------------------------------------
 
 
+_IMAGE_SIDE = 32
+
+
 def _small_clifford_rbf_protonet(**overrides):
-    """A CIFAR-shaped CliffordRBFProtoNet with small num_classes/depth for
-    fast CPU tests (depth reduced from the production default of 12 to 4)."""
+    """A CliffordRBFProtoNet with small num_classes/depth for fast CPU tests
+    (depth reduced from the production default of 12 to 4)."""
     cfg = dict(
-        input_shape=(32, 32, 3),
         num_classes=10,
         depth=4,
     )
@@ -48,8 +54,15 @@ def _small_clifford_rbf_protonet(**overrides):
     return CliffordRBFProtoNet(**cfg)
 
 
-def _images(batch: int = 4) -> np.ndarray:
-    return np.random.default_rng(0).random((batch, 32, 32, 3)).astype("float32")
+def _images(batch: int = 4, height: int = _IMAGE_SIDE, width: int = _IMAGE_SIDE) -> np.ndarray:
+    return np.random.default_rng(0).random((batch, height, width, 3)).astype("float32")
+
+
+def _refusal(label: str, pretrained) -> str:
+    """The message ``refuse_pretrained`` raises: the one message every refusal shares."""
+    with pytest.raises(NotImplementedError) as raised:
+        refuse_pretrained(pretrained, label)
+    return str(raised.value)
 
 
 # ---------------------------------------------------------------------
@@ -87,26 +100,119 @@ class TestCliffordRBFProtoNetConstruction:
         )
 
     def test_create_factory_matches_direct_construction(self):
-        model = create_clifford_rbf_protonet(num_classes=10, input_shape=(32, 32, 3), depth=4)
+        model = create_clifford_rbf_protonet(num_classes=10, depth=4)
         out = model(_images(2), training=False)
+        assert tuple(out.shape) == (2, 10)
+
+    @pytest.mark.parametrize("height, width", [(16, 16), (33, 20), (48, 64)])
+    def test_the_model_runs_at_any_spatial_size(self, height, width):
+        """The blocks are isotropic and the pooling is global, which is why the model
+        takes no ``input_shape``: nothing in it would read one."""
+        out = _small_clifford_rbf_protonet(depth=2)(_images(2, height, width), training=False)
         assert tuple(out.shape) == (2, 10)
 
 
 # ---------------------------------------------------------------------
-# pretrained=True refusal
+# Arguments
+# ---------------------------------------------------------------------
+
+
+class TestCliffordRBFProtoNetArguments:
+    def test_num_classes_is_the_first_parameter(self):
+        names = list(inspect.signature(CliffordRBFProtoNet.__init__).parameters)
+        assert names[1] == "num_classes"
+        assert names[-1] == "kwargs"
+
+    def test_the_constructor_has_no_pretrained_or_input_shape_knob(self):
+        names = inspect.signature(CliffordRBFProtoNet.__init__).parameters
+        assert "pretrained" not in names and "input_shape" not in names
+        config = _small_clifford_rbf_protonet().get_config()
+        assert "pretrained" not in config and "input_shape" not in config
+
+    def test_a_pretrained_keyword_on_the_class_is_refused_by_keras(self):
+        with pytest.raises(ValueError, match="pretrained"):
+            CliffordRBFProtoNet(num_classes=10, depth=4, pretrained=True)
+
+    @pytest.mark.parametrize("make", [np.int64, np.int32, np.uint8])
+    def test_a_numpy_integer_num_classes_is_accepted_and_stored_as_an_int(self, make):
+        model = _small_clifford_rbf_protonet(num_classes=make(10), depth=1)
+        assert type(model.num_classes) is int and model.num_classes == 10
+        assert tuple(model(_images(2), training=False).shape) == (2, 10)
+        json.dumps(model.get_config())  # an np.int64 in the config is not JSON-safe
+
+    @pytest.mark.parametrize("value", [0, -3, 2.5, True, "10", None])
+    def test_a_bad_num_classes_raises_naming_the_value(self, value):
+        with pytest.raises(ValueError, match=f"^num_classes must be a positive int, got {re.escape(repr(value))}$"):
+            _small_clifford_rbf_protonet(num_classes=value)
+
+    @pytest.mark.parametrize("rate", [1.0, 1.5, -0.1, float("nan")])
+    def test_a_drop_path_rate_outside_the_unit_interval_raises_naming_the_value(self, rate):
+        with pytest.raises(ValueError, match=f"^drop_path_rate must be in \\[0, 1\\), got {re.escape(repr(rate))}$"):
+            _small_clifford_rbf_protonet(drop_path_rate=rate)
+
+    def test_a_regularizer_given_by_name_is_resolved_serialized_and_rebuilt(self):
+        model = _small_clifford_rbf_protonet(depth=1, feature_dim=24, kernel_regularizer="l2")
+        assert isinstance(model.kernel_regularizer, keras.regularizers.L2)
+        config = model.get_config()
+        json.dumps(config)
+        rebuilt = CliffordRBFProtoNet.from_config(config)
+        assert isinstance(rebuilt.kernel_regularizer, keras.regularizers.L2)
+        assert rebuilt.get_config() == config
+        plain = _small_clifford_rbf_protonet(depth=1, feature_dim=24)
+        x = _images(2)
+        model(x)
+        rebuilt(x)
+        plain(x)
+        assert len(model.losses) == len(rebuilt.losses) > len(plain.losses)
+
+    def test_the_regularizer_reaches_the_stem_and_the_feature_projection(self):
+        """``feature_proj`` exists only when ``channels`` differs from ``feature_dim``."""
+        model = _small_clifford_rbf_protonet(depth=1, feature_dim=24, kernel_regularizer="l2")
+        assert model.feature_proj is not None
+        assert model.feature_proj.kernel_regularizer is not None
+        assert model.stem.conv1.kernel_regularizer is not None
+
+
+# ---------------------------------------------------------------------
+# Layer names
+# ---------------------------------------------------------------------
+
+
+class TestCliffordRBFProtoNetLayerNames:
+    def test_blocks_and_their_drop_paths_are_named_by_the_naming_table(self):
+        model = _small_clifford_rbf_protonet(depth=3)
+        assert [block.name for block in model.blocks] == ["block_0", "block_1", "block_2"]
+        assert [path.name for path in model.drop_paths] == [
+            "block_0_drop_path", "block_1_drop_path", "block_2_drop_path"]
+
+    def test_the_block_weights_sit_under_the_block_name(self):
+        model = _small_clifford_rbf_protonet(depth=2)
+        model(_images(2))
+        paths = [w.path for w in model.weights]
+        assert any("/block_1/" in p for p in paths)
+        assert not any("clifford_block_" in p for p in paths)
+
+
+# ---------------------------------------------------------------------
+# pretrained refusal
 # ---------------------------------------------------------------------
 
 
 class TestCliffordRBFProtoNetPretrainedRefusal:
-    def test_pretrained_true_raises_not_implemented_on_class(self):
-        with pytest.raises(NotImplementedError):
-            CliffordRBFProtoNet(input_shape=(32, 32, 3), num_classes=10, depth=4, pretrained=True)
+    @pytest.mark.parametrize("pretrained", [True, "weights.keras"])
+    def test_the_factory_refuses_with_the_one_shared_message(self, pretrained):
+        with pytest.raises(NotImplementedError) as raised:
+            create_clifford_rbf_protonet(num_classes=10, depth=4, pretrained=pretrained)
+        assert str(raised.value) == _refusal("CliffordRBFProtoNet", pretrained)
 
-    def test_pretrained_true_raises_not_implemented_on_factory(self):
+    def test_the_refusal_comes_before_anything_is_built(self):
+        """An invalid ``num_classes`` would raise ``ValueError`` if the model were built first."""
         with pytest.raises(NotImplementedError):
-            create_clifford_rbf_protonet(
-                num_classes=10, input_shape=(32, 32, 3), depth=4, pretrained=True,
-            )
+            create_clifford_rbf_protonet(num_classes=-1, pretrained=True)
+
+    def test_the_default_is_a_random_initialization(self):
+        model = create_clifford_rbf_protonet(num_classes=10, depth=1, pretrained=False)
+        assert isinstance(model, CliffordRBFProtoNet)
 
 
 # ---------------------------------------------------------------------
@@ -190,12 +296,12 @@ def _standalone_trainable_counts(model: CliffordRBFProtoNet) -> dict:
     """Trainable-weight counts of layers built STANDALONE from ``model``'s
     constructor arguments, so the expected total is not read back from the
     model's own sub-layers."""
-    side = -(-model.input_height // model.patch_size)
+    side = -(-_IMAGE_SIDE // model.patch_size)
     conv = keras.layers.Conv2D(
         model.channels, 3, strides=model.patch_size, padding="same", use_bias=True
     )
     norm = keras.layers.BatchNormalization(momentum=0.9)
-    feature_map = conv(np.zeros((1, model.input_height, model.input_width, 3), "float32"))
+    feature_map = conv(np.zeros((1, _IMAGE_SIDE, _IMAGE_SIDE, 3), "float32"))
     norm(feature_map)
     block = CliffordNetBlock(
         channels=model.channels,

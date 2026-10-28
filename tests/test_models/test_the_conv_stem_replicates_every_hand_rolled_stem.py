@@ -1452,7 +1452,6 @@ def _rbf_clifford_original(patch_size: int, regularized: bool) -> Original:
 
 def _rbf_clifford_model(patch_size: int, regularized: bool) -> CliffordRBFProtoNet:
     return CliffordRBFProtoNet(
-        input_shape=(16, 16, 3),
         num_classes=4,
         channels=_RBF_CHANNELS,
         depth=1,

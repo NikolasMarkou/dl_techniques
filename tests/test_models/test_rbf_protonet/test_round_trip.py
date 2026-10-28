@@ -19,7 +19,7 @@ from dl_techniques.models.vision.rbf_protonet.model import RBFProtoNet
 
 
 def _model(**overrides) -> RBFProtoNet:
-    cfg = dict(input_shape=(32, 32, 3), num_classes=10)
+    cfg = dict(num_classes=10)
     cfg.update(overrides)
     return RBFProtoNet(**cfg)
 
@@ -45,7 +45,6 @@ class TestRBFProtoNetConfigRoundTrip:
         assert cfg["num_classes"] == 10
         assert cfg["repulsion_strength"] == 0.2
         assert cfg["min_distance"] == 0.5
-        assert cfg["pretrained"] is False
 
     def test_from_config_rebuild_matches_original_output(self):
         """A model rebuilt from `get_config()` reproduces the original's output

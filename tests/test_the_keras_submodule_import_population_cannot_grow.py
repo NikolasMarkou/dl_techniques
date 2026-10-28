@@ -63,7 +63,8 @@ ROOTS = ("src", "tests")
 #: 430 / 411 after ``test_the_kan_actually_splines.py`` was edited for D-257;
 #: 429 / 410 after ``sam2/neck.py`` was edited for D-260 (step 12.8);
 #: 428 / 409 after ``train_cliffordnet_nlp.py`` was edited for D-265 (step 12.10);
-#: 427 / 408 after ``convunext/model.py`` was edited for D-268 (step 14).
+#: 427 / 408 after ``convunext/model.py`` was edited for D-268 (step 14);
+#: 426 / 407 after ``mambalct/uca_encoder.py`` moved to ``keras.ops`` (plan-2026-10-26T125959-7af851e5 step 16).
 #: Edit it in the commit that converts a file (delete its line) or, with a
 #: recorded reason, adds a statement.
 KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
@@ -216,7 +217,6 @@ KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
     "src/dl_techniques/models/world_models/lewm/model.py": 1,
     "src/dl_techniques/models/world_models/lewm/predictor.py": 1,
     "src/dl_techniques/models/vision/mambalct/model.py": 1,
-    "src/dl_techniques/models/vision/mambalct/uca_encoder.py": 1,
     "src/dl_techniques/models/vision/masked_autoencoder/patch_masking.py": 1,
     "src/dl_techniques/models/vision/siamfc/model.py": 1,
     "src/dl_techniques/models/vision/thera/hypernetwork.py": 1,
@@ -538,7 +538,7 @@ def test_the_census_is_exact(census):
 
 
 def test_the_census_totals(census):
-    assert (sum(KERAS_SUBMODULE_IMPORTS.values()), len(KERAS_SUBMODULE_IMPORTS)) == (427, 408), (
+    assert (sum(KERAS_SUBMODULE_IMPORTS.values()), len(KERAS_SUBMODULE_IMPORTS)) == (426, 407), (
         "the census's own totals moved; re-derive the module docstring's numbers")
     for path in KERAS_SUBMODULE_IMPORTS:
         assert (REPO_ROOT / path).is_file(), f"census file moved or deleted: {path}"

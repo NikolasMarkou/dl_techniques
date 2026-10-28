@@ -67,7 +67,9 @@ SqueezeNet V1 and V2) and asks each the same questions:
     For the finished families (:data:`FAMILY_CHILD_NAMES`) the rule is also
     positive: every layer the model owns directly and that holds a weight must
     match the family's own table, so a spelling the deny-list never heard of (a
-    block called ``uib1_1``) is caught too.
+    block called ``uib1_1``) is caught too. The two RBF models and UcaEncoder
+    (:data:`OTHER_NUMBERED`) have no table of that kind but an exact set: the
+    layers each owns directly are compared to the set its own arguments give.
 ``mobilenet_default_has_no_l2_losses``
     ``kernel_regularizer`` defaults to ``None``: ``model.losses == []``.
 
@@ -433,11 +435,6 @@ class Open:
 
 #: Every row that fails today, keyed ``(rule, subject)``.
 LEDGER: Dict[Tuple[str, str], Open] = {
-    ("no_replayed_draw::default", "uca_encoder"): Open(
-        AssertionError,
-        "the RBFProtoNet and UcaEncoder migration",
-        '3 of 120 kernel pairs replay one draw',
-        'kernel pairs replay one draw'),
     ("no_replayed_draw::default", "capsnet"): Open(
         AssertionError,
         "the CapsNet migration",
@@ -493,16 +490,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the CliffordCLIP stem migration",
         '776 of 9316 kernel pairs replay one draw',
         'kernel pairs replay one draw'),
-    ("layer_names_follow_the_table", "clifford_rbf_protonet"): Open(
-        AssertionError,
-        "the RBFProtoNet and UcaEncoder migration",
-        '4 violation(s): clifford_block_0, drop_path_0, clifford_block_1, drop_path_1',
-        'is not a table spelling'),
-    ("layer_names_follow_the_table", "uca_encoder"): Open(
-        AssertionError,
-        "the RBFProtoNet and UcaEncoder migration",
-        '7 violation(s): cpe_0, stage_0_block_0, merge_1, merge_norm_1, ...',
-        'is not a table spelling'),
     ("layer_names_follow_the_table", "capsnet"): Open(
         AssertionError,
         "the CapsNet migration",
@@ -1461,14 +1448,14 @@ def _build_convunext(init):
 
 def _build_rbf(init):
     from dl_techniques.models.vision.rbf_protonet.model import RBFProtoNet
-    return _forward(RBFProtoNet(input_shape=(32, 32, 3), num_classes=7, stem_filters=8,
-                                filters_per_stage=[8, 16], feature_dim=16), _images(32, 32, 3))
+    return _forward(RBFProtoNet(num_classes=7, stem_filters=8, filters_per_stage=[8, 16],
+                                feature_dim=16), _images(32, 32, 3))
 
 
 def _build_clifford_rbf(init):
     from dl_techniques.models.vision.rbf_protonet.model import CliffordRBFProtoNet
-    return _forward(CliffordRBFProtoNet(input_shape=(32, 32, 3), num_classes=7, channels=16,
-                                        depth=2, feature_dim=16), _images(32, 32, 3))
+    return _forward(CliffordRBFProtoNet(num_classes=7, channels=16, depth=2, feature_dim=16),
+                    _images(32, 32, 3))
 
 
 def _build_uca(init):
@@ -1721,9 +1708,9 @@ def _named_other(key: str, replay_key: str, required: Tuple[str, ...]) -> NamedS
 
 NAMED_SUBJECTS: Tuple[NamedSubject, ...] = (
     *(_named_classifier(c) for c in CLASSIFIERS),
-    _named_other("rbf_protonet", "rbf_protonet", ("stem",)),
-    _named_other("clifford_rbf_protonet", "clifford_rbf_protonet", ("stem",)),
-    _named_other("uca_encoder", "uca_encoder", ("stem",)),
+    _named_other("rbf_protonet", "rbf_protonet", ("stem", "stage1")),
+    _named_other("clifford_rbf_protonet", "clifford_rbf_protonet", ("stem", "block_0")),
+    _named_other("uca_encoder", "uca_encoder", ("stem", "stage1_cpe", "stage1_block1")),
     _named_other("capsnet", "capsnet", ("conv_block_0",)),
     _named_other("capsnet_v2_legacy", "capsnet_v2_legacy", ("conv_block_0",)),
 )
@@ -1770,17 +1757,18 @@ FAMILY_CHILD_NAMES: Dict[str, str] = {
 }
 
 
-def direct_children(model: keras.Model) -> List[str]:
+def direct_children(model: keras.layers.Layer) -> List[str]:
     """The names of the layers ``model`` owns directly, whether or not they hold a weight.
 
-    Interface contract: ``model.layers`` is the model's direct sublayers (Keras tracks
-    the ones kept in a list or a dict attribute too). Returns the distinct names, sorted.
-    A weightless child (a drop path, an activation, a pooling) is therefore read, which
-    the weight paths of a built model cannot show. The ``InputLayer`` a functional model
-    holds is not read: it is not a layer the model chose, and its name is a process-wide
-    counter (``input_layer_7``).
+    Interface contract: the direct sublayers of a model or of a plain layer (for a model
+    this is ``model.layers``; Keras tracks the ones kept in a list or a dict attribute
+    too). Returns the distinct names, sorted. A weightless child (a drop path, an
+    activation, a pooling) is therefore read, which the weight paths of a built model
+    cannot show. The ``InputLayer`` a functional model holds is not read: it is not a
+    layer the model chose, and its name is a process-wide counter (``input_layer_7``).
     """
-    return sorted({layer.name for layer in model.layers
+    return sorted({layer.name
+                   for layer in model._flatten_layers(include_self=False, recursive=False)
                    if not isinstance(layer, keras.layers.InputLayer)})
 
 
@@ -2050,6 +2038,114 @@ def test_the_numbering_rule_sees_a_block_counted_from_two_and_a_downsampler_coun
     # well-formed ConvNeXt name.
     assert child_name_violations("convnext_v1", plants["a block counted from 2"]) == []
     assert child_name_violations("convnext_v1", plants["a downsampler counted from 1"]) == []
+
+
+# ---------------------------------------------------------------------------
+# The two RBF models and UcaEncoder number their layers exactly as their arguments say
+# ---------------------------------------------------------------------------
+
+_RBF_STAGES = [8, 16, 16]  # three stages, so a stage counted from 0 or swapped is seen
+_RBF_FEATURE_DIM = _RBF_STAGES[-1]
+_RBF_PROJECTED_FEATURE_DIM = 24  # differs from the last stage: a projection Dense exists
+_CRP_DEPTH = 3
+_CRP_CHANNELS = 16
+_UCA_DEPTHS = [2, 1, 3]
+_UCA_DIMS = [16, 32, 32]
+_UCA_HEADS = [2, 4, 4]
+
+
+def _rbf_owned(feature_dim: int) -> set:
+    """RBFProtoNet: the stem, one ``stage{k}`` per entry of ``_RBF_STAGES`` counted from 1, the
+    pool, a projection only where the last stage is not ``feature_dim`` wide, and the head."""
+    projection = {"feature_proj"} if _RBF_STAGES[-1] != feature_dim else set()
+    return ({"stem", "global_avg_pool", "rbf_head"}
+            | {f"stage{k}" for k in range(1, len(_RBF_STAGES) + 1)} | projection)
+
+
+def _crp_owned(feature_dim: int) -> set:
+    """CliffordRBFProtoNet: the stem, ``block_{i}`` from 0 with each block's drop path, the pool,
+    a projection only where ``channels`` is not ``feature_dim``, and the head."""
+    projection = {"feature_proj"} if _CRP_CHANNELS != feature_dim else set()
+    return ({"stem", "global_avg_pool", "rbf_head"} | _flat_blocks(_CRP_DEPTH)
+            | {f"block_{i}_drop_path" for i in range(_CRP_DEPTH)} | projection)
+
+
+def _uca_owned() -> set:
+    """UcaEncoder: the stem, ``stage{S}_block{B}`` and ``stage{S}_cpe`` from 1, the
+    ``downsample_{i}_{conv,norm}`` between stages from 0, and ``final_norm``."""
+    return ({"stem", "final_norm"} | _staged_blocks(_UCA_DEPTHS)
+            | {f"stage{s}_cpe" for s in range(1, len(_UCA_DEPTHS) + 1)}
+            | _downsamplers(len(_UCA_DEPTHS), ("conv", "norm")))
+
+
+def _rbf_build(feature_dim: int) -> Callable[[], keras.layers.Layer]:
+    def build() -> keras.layers.Layer:
+        from dl_techniques.models.vision.rbf_protonet.model import RBFProtoNet
+        return RBFProtoNet(num_classes=7, stem_filters=8, filters_per_stage=_RBF_STAGES,
+                           feature_dim=feature_dim)
+    return build
+
+
+def _crp_build(feature_dim: int) -> Callable[[], keras.layers.Layer]:
+    def build() -> keras.layers.Layer:
+        from dl_techniques.models.vision.rbf_protonet.model import CliffordRBFProtoNet
+        return CliffordRBFProtoNet(num_classes=7, channels=_CRP_CHANNELS, depth=_CRP_DEPTH,
+                                   feature_dim=feature_dim)
+    return build
+
+
+def _uca_build() -> keras.layers.Layer:
+    from dl_techniques.models.vision.mambalct.uca_encoder import UcaEncoder
+    return UcaEncoder(stage_dims=_UCA_DIMS, stage_depths=_UCA_DEPTHS, num_heads=_UCA_HEADS)
+
+
+#: ``case id -> (build, the exact set of layers the build owns directly)``; the expected sets
+#: read the constants above, never the model.
+OTHER_NUMBERED: Dict[str, Tuple[Callable[[], keras.layers.Layer], Callable[[], set]]] = {
+    "rbf_protonet": (_rbf_build(_RBF_FEATURE_DIM), lambda: _rbf_owned(_RBF_FEATURE_DIM)),
+    "rbf_protonet_projected": (_rbf_build(_RBF_PROJECTED_FEATURE_DIM),
+                               lambda: _rbf_owned(_RBF_PROJECTED_FEATURE_DIM)),
+    "clifford_rbf_protonet": (_crp_build(_CRP_CHANNELS), lambda: _crp_owned(_CRP_CHANNELS)),
+    "clifford_rbf_protonet_projected": (_crp_build(24), lambda: _crp_owned(24)),
+    "uca_encoder": (_uca_build, _uca_owned),
+}
+
+
+@pytest.mark.parametrize("case", sorted(OTHER_NUMBERED))
+def test_the_rbf_pair_and_uca_number_their_layers_exactly_as_their_arguments_say(case: str) -> None:
+    build, owned = OTHER_NUMBERED[case]
+    layer = build()
+    layer(_images(32, 32, 3))
+    assert numbering_problems(direct_children(layer), owned()) == []
+
+
+def test_the_numbering_rule_sees_the_spellings_the_rbf_pair_and_uca_had() -> None:
+    cases = {
+        "clifford_rbf_protonet": [
+            ("a Clifford-spelled block", {"block_0": "clifford_block_0"}),
+            ("a drop path with no block", {"block_0_drop_path": "drop_path_0"}),
+            ("a block counted from 1", {"block_2": "block_3"}),
+        ],
+        "uca_encoder": [
+            ("a block counted from 0 with underscores", {"stage1_block1": "stage_0_block_0"}),
+            ("a block counted from 0", {"stage1_block1": "stage0_block0"}),
+            ("a merge instead of a downsample", {"downsample_0_conv": "merge_1"}),
+            ("a merge norm", {"downsample_0_norm": "merge_norm_1"}),
+            ("a downsampler counted from 1", {"downsample_0_conv": "downsample_1_conv"}),
+            ("a cpe counted from 0", {"stage1_cpe": "cpe_0"}),
+        ],
+    }
+    for key, plants in cases.items():
+        expected = OTHER_NUMBERED[key][1]()
+        clean = sorted(expected)
+        assert numbering_problems(clean, expected) == []
+        for why, rename in plants:
+            owned = [rename.get(name, name) for name in clean]
+            assert numbering_problems(owned, expected), f"{key}: {why} passed the numbering rule"
+    # an extra and a missing block, in the Uca set
+    expected = _uca_owned()
+    assert numbering_problems([*sorted(expected), "stage4_block1"], expected)
+    assert numbering_problems(sorted(expected - {"stage3_block3"}), expected)
 
 
 # ---------------------------------------------------------------------------

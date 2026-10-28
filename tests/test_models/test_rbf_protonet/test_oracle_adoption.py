@@ -9,7 +9,7 @@ All gradient-liveness assertions run AFTER one real optimizer step, never at
 init -- per ``plans/LESSONS.md``: a zero-init-gate suite must not assert
 gradient liveness at init. This matters even more here than for a plain conv
 net, because the RBF head's own center-repulsion auxiliary loss
-(``repulsion_strength``, D-002/D-006/D-007) only participates in the backward
+(``repulsion_strength``) only participates in the backward
 graph once at least one optimizer step has actually been taken through
 ``model.losses``.
 
@@ -50,10 +50,7 @@ def _images(batch: int = 4) -> np.ndarray:
 
 
 def _model(**overrides) -> RBFProtoNet:
-    kwargs = dict(
-        input_shape=INPUT_SHAPE,
-        num_classes=NUM_CLASSES,
-    )
+    kwargs = dict(num_classes=NUM_CLASSES)
     kwargs.update(overrides)
     model = RBFProtoNet(**kwargs)
     model(_images(1), training=False)

@@ -6,8 +6,8 @@ A CNN reduces a 32x32 RGB image to a flat feature vector; an ``RBFLayer``
 class-prototype classification head on top of that vector, so each class gets
 one learned, inspectable prototype in feature space instead of a distributed
 softmax-of-logits weight matrix. ``call()`` runs the backbone, then the head,
-and returns a per-class probability vector (``output_mode='normalized'``, see
-D-002) that sums to 1.0 along the last axis.
+and returns a per-class probability vector (``output_mode='normalized'``) that
+sums to 1.0 along the last axis.
 
 The backbone follows the ``stem_type='cifar'`` precedent from
 ``dl_techniques.models.vision.resnet.model.ResNet``: a single 3x3 stride-1 stem
@@ -20,6 +20,11 @@ the ``create_normalization_layer``/``resolve_activation_layer`` factories,
 rather than hand-rolling ``Conv2D`` + ``BatchNormalization`` + activation in
 this file.
 
+Neither model takes an ``input_shape``: both end in a global average pool, so
+they run at any spatial size and nothing in them would read one. Neither
+distributes pretrained weights, and the factories refuse ``pretrained``
+(``refuse_pretrained``); a warm start is ``model.load_weights(path)``.
+
 This package intentionally ships without a ``MODEL_VARIANTS`` table (see
 ``models/AGENTS.md`` Section "When the shape does not apply" / the guide's
 Section 5.6): there is exactly one baseline architecture here, and inventing
@@ -31,7 +36,7 @@ that swaps the CNN backbone above for an isotropic Clifford-algebra backbone
 (``CliffordNetBlock``, ``dl_techniques.layers.geometric.clifford_block``) while
 reusing the same RBF prototype-classification head design. Both classes
 register under the same module path (``dl_techniques.models.rbf_protonet.model``)
-since they are defined in this one file -- see decisions.md D-001.
+since they are defined in this one file.
 
 References:
     - He et al., 2016. Deep Residual Learning for Image Recognition
@@ -50,7 +55,8 @@ References:
 """
 
 import keras
-from typing import Any, Dict, List, Optional, Tuple
+import numbers
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
 # local imports
@@ -60,15 +66,54 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.conv_blocks.conv_block import ConvBlock
 from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.mixtures.factory import create_mixture_layer
-from dl_techniques.utils.model_build import materialize_sublayers
+from dl_techniques.utils.model_build import materialize_sublayers, validate_rates
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.weight_transfer import refuse_pretrained
 from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 
 # ---------------------------------------------------------------------
 
+#: BatchNormalization momentum and epsilon of the CliffordRBFProtoNet patch-embedding stem.
+#: The norm factory's own epsilon default is ``1e-6``, not the Keras ``1e-3`` the stem was
+#: measured with, so both values are stated. They are this model's own: the stem's
+#: composition was validated at exactly these values (anchor above ``_build_stem``).
+STEM_BN_MOMENTUM = 0.9
+STEM_BN_EPSILON = 1e-3
 
+# ---------------------------------------------------------------------
+
+
+def _validated_num_classes(num_classes: Any) -> int:
+    """Check ``num_classes`` and return it as a plain ``int``.
+
+    Interface contract (callers: ``RBFProtoNet.__init__`` and
+    ``CliffordRBFProtoNet.__init__``): any positive integer type is accepted, a numpy
+    integer included, and comes back as a Python ``int`` so ``get_config`` stays
+    JSON-safe. A ``bool``, a float, a string, ``None`` and a non-positive integer are
+    refused.
+
+    :param num_classes: The constructor argument.
+    :return: ``int(num_classes)``.
+    :raises ValueError: naming ``num_classes`` and the repr of the value.
+    """
+    if (
+            not isinstance(num_classes, numbers.Integral)
+            or isinstance(num_classes, bool)
+            or num_classes <= 0
+    ):
+        raise ValueError(f"num_classes must be a positive int, got {num_classes!r}")
+    return int(num_classes)
+
+
+# DECISION plan-2026-09-16T064227-b83f88ad/D-002: 'normalized' is the ONLY
+# supported output_mode for this head -- do not expose output_mode as a
+# parameter here defaulting to 'basis'. RBFLayer's own docstring and
+# decisions.md D-002 both document 'basis' as barely-trainable at this
+# scale; making it reachable here would reintroduce that footgun through
+# both models' config surfaces at once. See decisions.md D-002 for the
+# full trade-off.
 def _create_rbf_head(
         num_classes: int,
         repulsion_strength: float,
@@ -80,15 +125,7 @@ def _create_rbf_head(
     The ONE genuinely-reused piece of construction logic between
     :class:`RBFProtoNet` and :class:`CliffordRBFProtoNet` -- both call this
     function from their own ``_build_rbf_head`` rather than duplicating the
-    ``create_mixture_layer`` call inline. See decisions.md D-002.
-
-    # DECISION plan-2026-09-16T064227-b83f88ad/D-002: 'normalized' is the ONLY
-    # supported output_mode for this head -- do not expose output_mode as a
-    # parameter here defaulting to 'basis'. RBFLayer's own docstring and
-    # decisions.md D-002 both document 'basis' as barely-trainable at this
-    # scale; making it reachable here would reintroduce that footgun through
-    # both models' config surfaces at once. See decisions.md D-002 for the
-    # full trade-off.
+    ``create_mixture_layer`` call inline.
 
     :param num_classes: Number of RBF prototype units (= number of output
         classes).
@@ -177,15 +214,15 @@ class RBFProtoNet(keras.Model):
 
     Note:
         The RBF head is built via ``create_mixture_layer('rbf', units=
-        num_classes, output_mode='normalized', ...)`` (see D-002 in this
-        plan's ``decisions.md``: ``'normalized'`` is the ONLY supported
-        mode for this model -- ``'basis'`` is not exposed as a togglable
-        knob). ``call()`` runs the backbone and then the head, returning a
-        per-class probability vector.
+        num_classes, output_mode='normalized', ...)``: ``'normalized'`` is the
+        ONLY supported mode for this model -- ``'basis'`` is not exposed as a
+        togglable knob. ``call()`` runs the backbone and then the head,
+        returning a per-class probability vector.
 
-    :param input_shape: Input shape ``(height, width, channels)`` excluding
-        the batch dimension. Defaults to ``(32, 32, 3)`` (CIFAR).
-    :type input_shape: Tuple[int, int, int]
+    :param num_classes: Number of RBF prototype units (= number of output
+        classes) in the head. Must be a positive integer (a numpy integer is
+        accepted). Defaults to ``100`` (CIFAR-100).
+    :type num_classes: int
     :param stem_filters: Channel width of the single 3x3 stride-1 stem
         convolution. Defaults to ``32``.
     :type stem_filters: int
@@ -208,50 +245,42 @@ class RBFProtoNet(keras.Model):
         ``ConvBlock`` (see ``resolve_activation_layer``). Defaults to
         ``'relu'``.
     :type activation_type: str
-    :param kernel_regularizer: Optional regularizer applied to every
-        convolution kernel.
-    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
+    :param kernel_regularizer: Optional regularizer (instance, name or
+        serialized config) applied to every convolution kernel and to the
+        feature projection, when there is one.
+    :type kernel_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]]
     :param dropout_rate: Dropout rate applied inside every downsampling
         stage's ``ConvBlock`` (``0.0`` disables it). Not applied in the stem.
-        Defaults to ``0.0``.
+        Must be in ``[0, 1)``. Defaults to ``0.0``.
     :type dropout_rate: float
-    :param num_classes: Number of RBF prototype units (= number of output
-        classes) in the head. Must be a positive int. Defaults to ``100``
-        (CIFAR-100).
-    :type num_classes: int
     :param repulsion_strength: Strength of the RBF head's center-repulsion
         penalty, forwarded verbatim to ``create_mixture_layer('rbf', ...)``.
-        Defaults to ``0.1`` (the factory's own default), which is exactly
-        the value Step 1's smoke test measured at ``units=100, feature_dim=
-        128``: repulsion loss stayed at 0.14%-1.14% of total loss, nowhere
-        near the 50% dominance floor -- see decisions.md D-006. Not
-        re-tuned here since the measured default already passes.
+        Defaults to ``0.1`` (the factory's own default). Measured at
+        ``units=100, feature_dim=128`` the repulsion loss stayed at
+        0.14%-1.14% of the total loss, far from dominating it, so the
+        default was not re-tuned.
     :type repulsion_strength: float
     :param min_distance: Minimum desired distance between RBF centers,
         forwarded verbatim to ``create_mixture_layer('rbf', ...)``. Defaults
         to ``1.0`` (the factory's own default), for the same reason as
         ``repulsion_strength`` above.
     :type min_distance: float
-    :param pretrained: If ``True``, raises ``NotImplementedError`` --
-        this package distributes no pretrained weights. Defaults to
-        ``False``.
-    :type pretrained: bool
     :param kwargs: Additional keyword arguments for the ``keras.Model`` base
         class.
 
-    :raises ValueError: If ``input_shape`` is not 3D, if ``stem_filters``,
-        ``feature_dim`` or ``num_classes`` is not positive, or if
-        ``filters_per_stage`` is empty or contains a non-positive value.
-    :raises NotImplementedError: If ``pretrained=True``.
+    :raises ValueError: If ``num_classes``, ``stem_filters`` or ``feature_dim``
+        is not positive, if ``filters_per_stage`` is empty or contains a
+        non-positive value, or if ``dropout_rate`` is outside ``[0, 1)``.
 
     Input shape:
-        4D tensor with shape ``(batch_size, height, width, channels)``.
+        4D tensor with shape ``(batch_size, height, width, channels)``; any
+        height and width the strides allow.
 
     Output shape:
         2D tensor ``(batch_size, num_classes)``, rows summing to 1.0.
 
     Example:
-        >>> model = RBFProtoNet(input_shape=(32, 32, 3), num_classes=100)
+        >>> model = RBFProtoNet(num_classes=100)
         >>> probs = model(keras.random.normal((4, 32, 32, 3)))
         >>> probs.shape
         TensorShape([4, 100])
@@ -259,37 +288,28 @@ class RBFProtoNet(keras.Model):
 
     def __init__(
             self,
-            input_shape: Tuple[int, int, int] = (32, 32, 3),
+            num_classes: int = 100,
             stem_filters: int = 32,
             filters_per_stage: Optional[List[int]] = None,
             feature_dim: int = 128,
             normalization_type: str = "batch_norm",
             normalization_kwargs: Optional[Dict[str, Any]] = None,
             activation_type: str = "relu",
-            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            kernel_regularizer: Optional[
+                Union[str, Dict[str, Any], keras.regularizers.Regularizer]
+            ] = None,
             dropout_rate: float = 0.0,
-            num_classes: int = 100,
             repulsion_strength: float = 0.1,
             min_distance: float = 1.0,
-            pretrained: bool = False,
             **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
 
-        if pretrained:
-            raise NotImplementedError(
-                "RBFProtoNet ships no pretrained weights; pretrained=True is "
-                "not supported."
-            )
-
-        if input_shape is None or len(input_shape) != 3:
-            raise ValueError(f"input_shape must be 3D, got {input_shape}")
+        num_classes = _validated_num_classes(num_classes)
         if stem_filters <= 0:
             raise ValueError(f"stem_filters must be positive, got {stem_filters}")
         if feature_dim <= 0:
             raise ValueError(f"feature_dim must be positive, got {feature_dim}")
-        if not isinstance(num_classes, int) or isinstance(num_classes, bool) or num_classes <= 0:
-            raise ValueError(f"num_classes must be a positive int, got {num_classes}")
 
         filters_per_stage = (
             list(filters_per_stage) if filters_per_stage is not None else [64, 128, 128]
@@ -300,11 +320,9 @@ class RBFProtoNet(keras.Model):
             raise ValueError(
                 f"every entry of filters_per_stage must be positive, got {filters_per_stage}"
             )
-        if not (0.0 <= dropout_rate <= 1.0):
-            raise ValueError(f"dropout_rate must be in [0,1], got {dropout_rate}")
+        validate_rates(dropout_rate=dropout_rate)
 
-        self.input_shape_config = tuple(input_shape)
-        self.input_height, self.input_width, self.input_channels = input_shape
+        self.num_classes = num_classes
         self.stem_filters = stem_filters
         self.filters_per_stage = filters_per_stage
         # DECISION plan-2026-09-16T052349-7dfede94/D-006: default feature_dim=128, not
@@ -319,12 +337,10 @@ class RBFProtoNet(keras.Model):
         self.normalization_type = normalization_type
         self.normalization_kwargs = dict(normalization_kwargs) if normalization_kwargs else {}
         self.activation_type = activation_type
-        self.kernel_regularizer = kernel_regularizer
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.dropout_rate = dropout_rate
-        self.num_classes = num_classes
         self.repulsion_strength = repulsion_strength
         self.min_distance = min_distance
-        self.pretrained = pretrained
 
         self._build_stem()
 
@@ -337,8 +353,7 @@ class RBFProtoNet(keras.Model):
 
         logger.info(
             f"Created RBFProtoNet with {len(self.filters_per_stage)} "
-            f"downsampling stages for input {self.input_shape_config}, "
-            f"pooled feature_dim={self.feature_dim}, "
+            f"downsampling stages, pooled feature_dim={self.feature_dim}, "
             f"num_classes={self.num_classes}"
         )
 
@@ -394,22 +409,18 @@ class RBFProtoNet(keras.Model):
         else:
             self.feature_proj = None
 
+    # DECISION plan-2026-09-16T052349-7dfede94/D-002: 'normalized' is the ONLY
+    # supported output_mode for this model's head -- do not expose
+    # output_mode as a constructor knob defaulting to 'basis'. RBFLayer's
+    # own docstring and decisions.md D-002 both document 'basis' as
+    # barely-trainable at this scale; making it reachable here would
+    # reintroduce that footgun through this model's own config surface.
+    # See decisions.md D-002 for the full trade-off.
     def _build_rbf_head(self) -> None:
         """Build the RBF prototype-classification head.
 
-        # DECISION plan-2026-09-16T052349-7dfede94/D-002: 'normalized' is the ONLY
-        # supported output_mode for this model's head -- do not expose
-        # output_mode as a constructor knob defaulting to 'basis'. RBFLayer's
-        # own docstring and decisions.md D-002 both document 'basis' as
-        # barely-trainable at this scale; making it reachable here would
-        # reintroduce that footgun through this model's own config surface.
-        # See decisions.md D-002 for the full trade-off.
-
         Delegates to the module-level ``_create_rbf_head`` helper shared with
-        :class:`CliffordRBFProtoNet` -- see decisions.md D-002 (this plan's own
-        entry, which documents the extraction; the anchor comment above is the
-        UNCHANGED, preserved decision from the prior plan that originally
-        justified 'normalized'-only).
+        :class:`CliffordRBFProtoNet`.
         """
         self.rbf_head = _create_rbf_head(
             self.num_classes,
@@ -453,68 +464,21 @@ class RBFProtoNet(keras.Model):
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization."""
         config = {
-            "input_shape": self.input_shape_config,
+            "num_classes": self.num_classes,
             "stem_filters": self.stem_filters,
-            "filters_per_stage": self.filters_per_stage,
+            "filters_per_stage": list(self.filters_per_stage),
             "feature_dim": self.feature_dim,
             "normalization_type": self.normalization_type,
             "normalization_kwargs": dict(self.normalization_kwargs),
             "activation_type": self.activation_type,
-            "kernel_regularizer": keras.regularizers.serialize(
-                self.kernel_regularizer) if self.kernel_regularizer else None,
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "dropout_rate": self.dropout_rate,
-            "num_classes": self.num_classes,
             "repulsion_strength": self.repulsion_strength,
             "min_distance": self.min_distance,
-            "pretrained": self.pretrained,
         }
         base_config = super().get_config()
         return {**base_config, **config}
 
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "RBFProtoNet":
-        """Create a model from its `get_config()` output."""
-        if config.get("kernel_regularizer"):
-            config["kernel_regularizer"] = keras.regularizers.deserialize(
-                config["kernel_regularizer"]
-            )
-        return cls(**config)
-
-
-# ---------------------------------------------------------------------
-
-
-def create_rbf_protonet(
-        num_classes: int = 100,
-        input_shape: Tuple[int, int, int] = (32, 32, 3),
-        pretrained: bool = False,
-        **kwargs: Any,
-) -> RBFProtoNet:
-    """Create an :class:`RBFProtoNet` model.
-
-    Thin delegating factory, per the house model module shape -- no extra
-    logic beyond forwarding to the constructor.
-
-    :param num_classes: Number of RBF prototype units (= output classes).
-        Defaults to ``100`` (CIFAR-100).
-    :type num_classes: int
-    :param input_shape: Input shape ``(height, width, channels)`` excluding
-        the batch dimension. Defaults to ``(32, 32, 3)``.
-    :type input_shape: Tuple[int, int, int]
-    :param pretrained: If ``True``, raises ``NotImplementedError`` (no
-        pretrained weights are distributed). Defaults to ``False``.
-    :type pretrained: bool
-    :param kwargs: Additional keyword arguments forwarded to
-        :class:`RBFProtoNet`.
-    :return: A configured, uncompiled :class:`RBFProtoNet` model.
-    :rtype: RBFProtoNet
-    """
-    return RBFProtoNet(
-        input_shape=input_shape,
-        num_classes=num_classes,
-        pretrained=pretrained,
-        **kwargs,
-    )
 
 # ---------------------------------------------------------------------
 
@@ -524,15 +488,15 @@ class CliffordRBFProtoNet(keras.Model):
     """
     Isotropic Clifford-algebra backbone with an RBF prototype-classification head.
 
-    A single stride-``patch_size`` patch-embedding stem (``Conv2D`` + batch
-    normalization) reduces spatial resolution once, followed by ``depth``
-    identical ``CliffordNetBlock`` residual blocks at a fixed ``channels``
-    width (no per-stage downsampling -- every existing ``CliffordNetBlock``
-    consumer in this repo, e.g. ``CliffordNet``, is isotropic; see
-    decisions.md D-003). A global average pool collapses the final feature
-    map to a flat vector, optionally projected to ``feature_dim`` when
-    ``channels != feature_dim``, then fed into the same RBF prototype head
-    design used by :class:`RBFProtoNet`.
+    A single stride-``patch_size`` patch-embedding stem (a ``ConvStem`` of one
+    ``Conv2D`` and a batch normalization) reduces spatial resolution once,
+    followed by ``depth`` identical ``CliffordNetBlock`` residual blocks at a
+    fixed ``channels`` width (no per-stage downsampling -- every existing
+    ``CliffordNetBlock`` consumer in this repo, e.g. ``CliffordNet``, is
+    isotropic). A global average pool collapses the final feature map to a flat
+    vector, optionally projected to ``feature_dim`` when ``channels !=
+    feature_dim``, then fed into the same RBF prototype head design used by
+    :class:`RBFProtoNet`.
 
     Architecture:
 
@@ -570,22 +534,19 @@ class CliffordRBFProtoNet(keras.Model):
 
     Note:
         The RBF head is built via ``create_mixture_layer('rbf', units=
-        num_classes, output_mode='normalized', ...)`` (see decisions.md
-        D-002: ``'normalized'`` is the ONLY supported mode for this model --
-        ``'basis'`` is not exposed as a togglable knob). ``call()`` runs the
-        stem, the isotropic Clifford block stack, the pooling head and then
-        the RBF head, returning a per-class probability vector.
+        num_classes, output_mode='normalized', ...)``: ``'normalized'`` is the
+        ONLY supported mode for this model -- ``'basis'`` is not exposed as a
+        togglable knob. ``call()`` runs the stem, the isotropic Clifford block
+        stack, the pooling head and then the RBF head, returning a per-class
+        probability vector.
 
-    :param input_shape: Input shape ``(height, width, channels)`` excluding
-        the batch dimension. Defaults to ``(32, 32, 3)`` (CIFAR).
-    :type input_shape: Tuple[int, int, int]
     :param num_classes: Number of RBF prototype units (= number of output
-        classes) in the head. Must be a positive int. Defaults to ``100``
-        (CIFAR-100).
+        classes) in the head. Must be a positive integer (a numpy integer is
+        accepted). Defaults to ``100`` (CIFAR-100).
     :type num_classes: int
     :param channels: Fixed channel width of every ``CliffordNetBlock`` in the
         backbone (isotropic -- no per-stage widening). Defaults to ``128``
-        (the ``nano``-equivalent configuration, decisions.md D-004).
+        (the ``nano``-equivalent configuration).
     :type channels: int
     :param depth: Number of identical ``CliffordNetBlock`` residual blocks.
         Defaults to ``12``.
@@ -600,12 +561,12 @@ class CliffordRBFProtoNet(keras.Model):
         context. Defaults to ``False``.
     :type use_global_context: bool
     :param drop_path_rate: Maximum (last-block) stochastic-depth drop
-        probability; per-block rates are ramped linearly from ``0`` to this
-        value via ``linear_drop_path_rates(depth, max_rate=drop_path_rate)``.
-        Defaults to ``0.1`` (matching the ``stochastic_depth_rate=0.1`` value
-        ``CliffordNet``'s own ``nano`` variant example uses -- see
-        decisions.md D-006; ``CliffordNet``'s own constructor default is
-        ``0.0``, but the trained ``nano`` example uses ``0.1``).
+        probability, in ``[0, 1)``; per-block rates are ramped linearly from
+        ``0`` to this value via ``linear_drop_path_rates(depth,
+        max_rate=drop_path_rate)``. Defaults to ``0.1`` (the
+        ``stochastic_depth_rate=0.1`` value ``CliffordNet``'s own ``nano``
+        variant example uses; ``CliffordNet``'s own constructor default is
+        ``0.0``).
     :type drop_path_rate: float
     :param feature_dim: Width of the pooled feature vector fed to the RBF
         head. Defaults to ``128``.
@@ -618,30 +579,33 @@ class CliffordRBFProtoNet(keras.Model):
         forwarded verbatim to ``create_mixture_layer('rbf', ...)``. Defaults
         to ``1.0`` (the factory's own default).
     :type min_distance: float
-    :param kernel_regularizer: Optional regularizer applied to the stem's
-        convolution kernel.
-    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
-    :param pretrained: If ``True``, raises ``NotImplementedError`` -- this
-        package distributes no pretrained weights. Defaults to ``False``.
-    :type pretrained: bool
+    :param kernel_regularizer: Optional regularizer (instance, name or
+        serialized config) applied to the stem's convolution kernel and to the
+        feature projection, when there is one.
+    :type kernel_regularizer: Optional[Union[str, Dict[str, Any], keras.regularizers.Regularizer]]
     :param kwargs: Additional keyword arguments for the ``keras.Model`` base
         class.
 
-    :raises ValueError: If ``input_shape`` is not 3D, or if ``channels``,
-        ``depth``, ``patch_size``, ``feature_dim`` or ``num_classes`` is not
-        positive.
-    :raises NotImplementedError: If ``pretrained=True``.
+    :raises ValueError: If ``num_classes``, ``channels``, ``depth``,
+        ``patch_size`` or ``feature_dim`` is not positive, or if
+        ``drop_path_rate`` is outside ``[0, 1)``.
 
     Input shape:
-        4D tensor with shape ``(batch_size, height, width, channels)``.
+        4D tensor with shape ``(batch_size, height, width, channels)``; any
+        height and width.
 
     Output shape:
         2D tensor ``(batch_size, num_classes)``, rows summing to 1.0.
+
+    Example:
+        >>> model = CliffordRBFProtoNet(num_classes=100, depth=4)
+        >>> probs = model(keras.random.normal((4, 32, 32, 3)))
+        >>> probs.shape
+        TensorShape([4, 100])
     """
 
     def __init__(
             self,
-            input_shape: Tuple[int, int, int] = (32, 32, 3),
             num_classes: int = 100,
             channels: int = 128,
             depth: int = 12,
@@ -652,20 +616,14 @@ class CliffordRBFProtoNet(keras.Model):
             feature_dim: int = 128,
             repulsion_strength: float = 0.1,
             min_distance: float = 1.0,
-            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            pretrained: bool = False,
+            kernel_regularizer: Optional[
+                Union[str, Dict[str, Any], keras.regularizers.Regularizer]
+            ] = None,
             **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
 
-        if pretrained:
-            raise NotImplementedError(
-                "CliffordRBFProtoNet ships no pretrained weights; "
-                "pretrained=True is not supported."
-            )
-
-        if input_shape is None or len(input_shape) != 3:
-            raise ValueError(f"input_shape must be 3D, got {input_shape}")
+        num_classes = _validated_num_classes(num_classes)
         if channels <= 0:
             raise ValueError(f"channels must be positive, got {channels}")
         if depth <= 0:
@@ -674,11 +632,8 @@ class CliffordRBFProtoNet(keras.Model):
             raise ValueError(f"patch_size must be positive, got {patch_size}")
         if feature_dim <= 0:
             raise ValueError(f"feature_dim must be positive, got {feature_dim}")
-        if not isinstance(num_classes, int) or isinstance(num_classes, bool) or num_classes <= 0:
-            raise ValueError(f"num_classes must be a positive int, got {num_classes}")
+        validate_rates(drop_path_rate=drop_path_rate)
 
-        self.input_shape_config = tuple(input_shape)
-        self.input_height, self.input_width, self.input_channels = input_shape
         self.num_classes = num_classes
         self.channels = channels
         self.depth = depth
@@ -689,8 +644,7 @@ class CliffordRBFProtoNet(keras.Model):
         self.feature_dim = feature_dim
         self.repulsion_strength = repulsion_strength
         self.min_distance = min_distance
-        self.kernel_regularizer = kernel_regularizer
-        self.pretrained = pretrained
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         self._build_stem()
         self._build_blocks()
@@ -699,30 +653,28 @@ class CliffordRBFProtoNet(keras.Model):
 
         logger.info(
             f"Created CliffordRBFProtoNet with depth={self.depth} "
-            f"CliffordNetBlocks at channels={self.channels} for input "
-            f"{self.input_shape_config}, pooled feature_dim={self.feature_dim}, "
+            f"CliffordNetBlocks at channels={self.channels}, "
+            f"pooled feature_dim={self.feature_dim}, "
             f"num_classes={self.num_classes}"
         )
 
+    # DECISION plan-2026-09-16T064227-b83f88ad/D-005: this exact composition
+    # (Conv2D(strides=patch_size) -> BatchNormalization(momentum=0.9))
+    # was validated by step 1's standalone smoke test before being
+    # folded into this class. Do not swap in ConvBlock or a different
+    # normalization momentum without re-running that smoke test --
+    # this specific pairing is what was measured NaN/Inf-clean with
+    # live gradients across all 12 downstream blocks. See decisions.md
+    # D-005.
     def _build_stem(self) -> None:
         """Build the patch-embedding stem: a ``ConvStem`` of strided ``Conv2D`` + ``BatchNormalization``.
 
-        # DECISION plan-2026-09-16T064227-b83f88ad/D-005: this exact composition
-        # (Conv2D(strides=patch_size) -> BatchNormalization(momentum=0.9))
-        # was validated by step 1's standalone smoke test before being
-        # folded into this class. Do not swap in ConvBlock or a different
-        # normalization momentum without re-running that smoke test --
-        # this specific pairing is what was measured NaN/Inf-clean with
-        # live gradients across all 12 downstream blocks. See decisions.md
-        # D-005.
-
-        The composition is built by ``ConvStem``: Conv2D(strides=patch_size)
-        -> BatchNormalization(momentum=0.9, epsilon=1e-3), no activation, no
-        pool (``epsilon`` is stated because the norm factory's default is
-        ``1e-6``, not the Keras ``1e-3`` the smoke measured). The D-005
-        smoke is a standing test, ``TestCliffordRBFProtoNetD005StandingSmoke``
-        in ``tests/test_models/test_rbf_protonet/test_clifford_model.py``
-        (plan-2026-10-26-7af851e5 D-010).
+        The composition is ``Conv2D(strides=patch_size)`` ->
+        ``BatchNormalization(momentum=STEM_BN_MOMENTUM, epsilon=STEM_BN_EPSILON)``,
+        no activation, no pool. The standing test
+        ``TestCliffordRBFProtoNetD005StandingSmoke`` in
+        ``tests/test_models/test_rbf_protonet/test_clifford_model.py`` re-runs
+        the smoke the anchor above asks for.
         """
         self.stem = ConvStem(
             filters=self.channels,
@@ -731,7 +683,7 @@ class CliffordRBFProtoNet(keras.Model):
             padding="same",
             use_bias=True,
             normalization_type="batch_norm",
-            normalization_kwargs={"momentum": 0.9, "epsilon": 1e-3},
+            normalization_kwargs={"momentum": STEM_BN_MOMENTUM, "epsilon": STEM_BN_EPSILON},
             activation_type="linear",
             kernel_regularizer=self.kernel_regularizer,
             name="stem",
@@ -743,8 +695,9 @@ class CliffordRBFProtoNet(keras.Model):
         Per-block stochastic-depth rates are ramped linearly from ``0`` to
         ``drop_path_rate`` via ``linear_drop_path_rates`` -- the same
         schedule ``CliffordNet.call()`` uses. ``self.blocks`` and
-        ``self.drop_paths`` are stored as parallel lists for ``call()``
-        (step 4) to iterate: ``x = x + drop_paths[i](blocks[i](x))``.
+        ``self.drop_paths`` are parallel lists, named ``block_{i}`` and
+        ``block_{i}_drop_path``, that ``call()`` iterates:
+        ``x = x + drop_paths[i](blocks[i](x))``.
         """
         drop_rates = linear_drop_path_rates(self.depth, max_rate=self.drop_path_rate)
 
@@ -755,11 +708,11 @@ class CliffordRBFProtoNet(keras.Model):
                 channels=self.channels,
                 shifts=list(self.shifts),
                 use_global_context=self.use_global_context,
-                name=f"clifford_block_{i}",
+                name=f"block_{i}",
             )
             drop_path = StochasticDepth(
                 drop_path_rate=drop_rates[i],
-                name=f"drop_path_{i}",
+                name=f"block_{i}_drop_path",
             )
             self.blocks.append(block)
             self.drop_paths.append(drop_path)
@@ -787,7 +740,7 @@ class CliffordRBFProtoNet(keras.Model):
         """Build the RBF prototype-classification head.
 
         Delegates to the module-level ``_create_rbf_head`` helper shared with
-        :class:`RBFProtoNet` -- see decisions.md D-002.
+        :class:`RBFProtoNet`.
         """
         self.rbf_head = _create_rbf_head(
             self.num_classes,
@@ -831,73 +784,76 @@ class CliffordRBFProtoNet(keras.Model):
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration for serialization."""
         config = {
-            "input_shape": self.input_shape_config,
             "num_classes": self.num_classes,
             "channels": self.channels,
             "depth": self.depth,
-            "shifts": self.shifts,
+            "shifts": list(self.shifts),
             "patch_size": self.patch_size,
             "use_global_context": self.use_global_context,
             "drop_path_rate": self.drop_path_rate,
             "feature_dim": self.feature_dim,
             "repulsion_strength": self.repulsion_strength,
             "min_distance": self.min_distance,
-            "kernel_regularizer": keras.regularizers.serialize(
-                self.kernel_regularizer) if self.kernel_regularizer else None,
-            "pretrained": self.pretrained,
+            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
         }
         base_config = super().get_config()
         return {**base_config, **config}
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "CliffordRBFProtoNet":
-        """Create a model from its `get_config()` output."""
-        if config.get("kernel_regularizer"):
-            config["kernel_regularizer"] = keras.regularizers.deserialize(
-                config["kernel_regularizer"]
-            )
-        return cls(**config)
 
 
 # ---------------------------------------------------------------------
 
 
+def create_rbf_protonet(
+        num_classes: int = 100,
+        pretrained: Union[bool, str] = False,
+        **kwargs: Any,
+) -> RBFProtoNet:
+    """Create an :class:`RBFProtoNet` model.
+
+    Thin delegating factory, per the house model module shape -- no extra
+    logic beyond refusing ``pretrained`` and forwarding to the constructor.
+
+    :param num_classes: Number of RBF prototype units (= output classes).
+        Defaults to ``100`` (CIFAR-100).
+    :type num_classes: int
+    :param pretrained: Any truthy value, a path included, raises
+        ``NotImplementedError``: no pretrained weights are distributed and a
+        warm start is ``model.load_weights(path)``. Defaults to ``False``.
+    :type pretrained: Union[bool, str]
+    :param kwargs: Additional keyword arguments forwarded to
+        :class:`RBFProtoNet`.
+    :return: A configured, uncompiled :class:`RBFProtoNet` model.
+    :rtype: RBFProtoNet
+    :raises NotImplementedError: If ``pretrained`` is truthy.
+    """
+    refuse_pretrained(pretrained, "RBFProtoNet")
+    return RBFProtoNet(num_classes=num_classes, **kwargs)
+
+
 def create_clifford_rbf_protonet(
         num_classes: int = 100,
-        input_shape: Tuple[int, int, int] = (32, 32, 3),
-        pretrained: bool = False,
+        pretrained: Union[bool, str] = False,
         **kwargs: Any,
 ) -> CliffordRBFProtoNet:
     """Create a :class:`CliffordRBFProtoNet` model.
 
     Thin delegating factory, per the house model module shape -- no extra
-    logic beyond forwarding to the constructor.
+    logic beyond refusing ``pretrained`` and forwarding to the constructor.
 
     :param num_classes: Number of RBF prototype units (= output classes).
         Defaults to ``100`` (CIFAR-100).
     :type num_classes: int
-    :param input_shape: Input shape ``(height, width, channels)`` excluding
-        the batch dimension. Defaults to ``(32, 32, 3)``.
-    :type input_shape: Tuple[int, int, int]
-    :param pretrained: If ``True``, raises ``NotImplementedError`` (no
-        pretrained weights are distributed). Defaults to ``False``.
-    :type pretrained: bool
+    :param pretrained: Any truthy value, a path included, raises
+        ``NotImplementedError``: no pretrained weights are distributed and a
+        warm start is ``model.load_weights(path)``. Defaults to ``False``.
+    :type pretrained: Union[bool, str]
     :param kwargs: Additional keyword arguments forwarded to
         :class:`CliffordRBFProtoNet`.
     :return: A configured, uncompiled :class:`CliffordRBFProtoNet` model.
     :rtype: CliffordRBFProtoNet
+    :raises NotImplementedError: If ``pretrained`` is truthy.
     """
-    if pretrained:
-        raise NotImplementedError(
-            "CliffordRBFProtoNet has no pretrained weights; pass "
-            "pretrained=False and use model.load_weights(path) for warm starts."
-        )
-    return CliffordRBFProtoNet(
-        input_shape=input_shape,
-        num_classes=num_classes,
-        pretrained=pretrained,
-        **kwargs,
-    )
+    refuse_pretrained(pretrained, "CliffordRBFProtoNet")
+    return CliffordRBFProtoNet(num_classes=num_classes, **kwargs)
 
 # ---------------------------------------------------------------------
-

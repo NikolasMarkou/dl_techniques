@@ -29,16 +29,13 @@ Usage:
         --clifford-channels 128 --gpu 1
 """
 
-import os
 import sys
 import gc
 import time
 import keras
 import argparse
-import numpy as np
 import tensorflow as tf
-from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Tuple, List, Optional, Dict, Any
 
 from train.common import setup_gpu, set_seeds, load_dataset, create_callbacks as create_common_callbacks
@@ -312,7 +309,6 @@ def train_rbf_protonet(
     if config.model_variant == "rbf_protonet":
         model = create_rbf_protonet(
             num_classes=config.num_classes,
-            input_shape=input_shape,
             feature_dim=config.feature_dim,
             repulsion_strength=config.repulsion_strength,
             min_distance=config.min_distance,
@@ -321,7 +317,6 @@ def train_rbf_protonet(
     elif config.model_variant == "clifford_rbf_protonet":
         model = create_clifford_rbf_protonet(
             num_classes=config.num_classes,
-            input_shape=input_shape,
             feature_dim=config.feature_dim,
             repulsion_strength=config.repulsion_strength,
             min_distance=config.min_distance,

@@ -178,7 +178,8 @@ NORM_CALL_SITES: Dict[str, Tuple[int, int]] = {
 #: ``name`` parameter), and ``TopoLM.final_norm``; and ``ConvStem._make_norm`` of
 #: plan-2026-10-26T125959-7af851e5 step 1, which builds ``norm1`` and ``norm2`` in
 #: one call (the name it passes is built from the ``suffix`` parameter). The
-#: ``UcaEncoder`` ``stem_norm`` row is gone: that encoder's stem is now a ``ConvStem``.
+#: ``UcaEncoder`` ``stem_norm`` row is gone: that encoder's stem is now a ``ConvStem``. Its
+#: downsampler norms are named ``downsample_{i}_norm`` (they were ``merge_norm_{s}``).
 #: ``(file relative to src/, class, the attribute the norm is assigned to)``.
 #: Each class documents ``normalization_type`` (``:param``), takes it in
 #: ``__init__`` and returns it from ``get_config``; a literal type there would
@@ -190,7 +191,7 @@ RULED_DYNAMIC_KNOBS: Tuple[Tuple[str, str, str], ...] = (
     ("dl_techniques/models/probabilistic/neural_hmm/encoders.py",
      "NeuralHMMEncoder", "output_norm"),
     ("dl_techniques/models/vision/mambalct/uca_encoder.py", "UcaEncoder", "final_norm"),
-    ("dl_techniques/models/vision/mambalct/uca_encoder.py", "UcaEncoder", "merge_norm_"),
+    ("dl_techniques/models/vision/mambalct/uca_encoder.py", "UcaEncoder", "downsample_"),
     ("dl_techniques/models/language/topolm/components.py", "TopoLMBlock", "name"),
     ("dl_techniques/models/language/topolm/model.py", "TopoLM", "final_norm"),
     ("dl_techniques/layers/conv_blocks/stem.py", "ConvStem", "suffix"),

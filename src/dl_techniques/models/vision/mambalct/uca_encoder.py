@@ -2,7 +2,7 @@
 
 A hierarchical vision transformer in the HiViT lineage (Zhang et al., 2023)
 as used by MambaLCT (Li et al., 2024): a 4x4-stride-4 convolutional stem
-followed by two 2x2-stride-2 merging stages (total stride 16), with
+followed by two 2x2-stride-2 downsampling stages (total stride 16), with
 transformer blocks per stage and a size-agnostic depthwise-convolution
 conditional positional encoding (no fixed-length learned table, so template
 and search inputs of different resolutions share one weight set).
@@ -22,13 +22,13 @@ References:
 """
 
 import keras
-from keras import ops
 from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.attention.factory import ATTENTION_REGISTRY
 from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.norms.factory import create_normalization_layer
 from dl_techniques.layers.transformers.transformer import TransformerLayer
@@ -37,10 +37,25 @@ from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
+#: Initializer of every block's attention output projection. It is ``TransformerLayer``'s own
+#: ``kernel_initializer`` default, which the block's ``qkv`` projection and FFN take, so the
+#: projection draws from the same distribution as the rest of the block; a test compares the
+#: two initializers' classes, so a change of that default cannot go unnoticed.
+ATTENTION_OUTPUT_INITIALIZER = "glorot_uniform"
+
+# ---------------------------------------------------------------------
+
 
 @register_dl_technique("dl_techniques.models.mambalct.uca_encoder")
 class UcaEncoder(keras.layers.Layer):
     """Hierarchical ViT encoder with shared weights across resolutions.
+
+    A strided-patch stem, then one stage per entry of ``stage_dims``: each stage
+    adds a depthwise-convolution positional encoding (``stage{S}_cpe``) and runs
+    ``stage_depths[S - 1]`` transformer blocks (``stage{S}_block{B}``); a
+    2x2-stride-2 convolution with a normalization (``downsample_{i}_conv`` and
+    ``downsample_{i}_norm``) sits between two stages. The tokens are normalized
+    once more by ``final_norm``.
 
     :param stage_dims: Channel width per stage. Defaults to ``[128, 256, 512]``.
     :type stage_dims: List[int]
@@ -58,10 +73,17 @@ class UcaEncoder(keras.layers.Layer):
     :type normalization_type: str
     :param norm_epsilon: Epsilon for all normalization layers. Defaults to 1e-5.
     :type norm_epsilon: float
-    :param dropout_rate: Dropout rate. Defaults to 0.0.
+    :param dropout_rate: Dropout rate, in ``[0, 1)``. Defaults to 0.0.
     :type dropout_rate: float
     :param use_bias: Whether projections use bias. Defaults to True.
     :type use_bias: bool
+    :param kwargs: Additional keyword arguments for the ``keras.layers.Layer`` base class.
+
+    :raises ValueError: If ``stage_dims``, ``stage_depths`` and ``num_heads`` differ
+        in length or hold a non-positive entry, if a stage width is not divisible by
+        its head count, if ``mlp_ratio`` or ``norm_epsilon`` is not positive, or if
+        ``dropout_rate`` is outside ``[0, 1)``. ``build`` raises it too for an input
+        that is not a 4D image batch.
 
     Input shape:
         4D image tensor ``(batch, height, width, 3)``.
@@ -140,32 +162,54 @@ class UcaEncoder(keras.layers.Layer):
             name="stem",
         )
 
+        # DECISION plan-2026-10-26T125959-7af851e5/D-049: every block's attention
+        # output projection takes its own initializer. The attention layer hands ONE
+        # initializer instance to its `qkv` and `proj` Dense layers, and the smaller
+        # draw replays the larger one's stream (measured: the `proj` kernel of each
+        # block was a rescaled prefix of its `qkv` kernel). Do not drop `attention_args`
+        # to simplify: nothing but the replay oracle sees the difference. Only the
+        # attention types that declare `output_kernel_initializer` take it; the others
+        # keep their own construction.
+        takes_output_initializer = "output_kernel_initializer" in ATTENTION_REGISTRY.get(
+            attention_type, {}
+        ).get("optional_params", {})
+        attention_args = (
+            {"output_kernel_initializer": ATTENTION_OUTPUT_INITIALIZER}
+            if takes_output_initializer else None
+        )
+
+        # DECISION plan-2026-10-26T125959-7af851e5/D-049: these two lists keep the
+        # attribute names `merges` and `merge_norms` although their layers are named
+        # `downsample_{i}_conv` and `downsample_{i}_norm`. A `.keras` archive stores a
+        # layer under its ATTRIBUTE path, not its layer name: renaming the attribute
+        # makes every MambaLCT archive refuse to load ("expected 2 variables, but
+        # received 0"), renaming only the layer is free (measured). Do not rename them
+        # to match the layers.
         self.merges: List[keras.layers.Layer] = []
         self.merge_norms: List[keras.layers.Layer] = []
         self.cpe_convs: List[keras.layers.Layer] = []
-        # Flat block list (never a list of lists: Keras tracks one level of
-        # Layer containers, so nesting silently drops weights from `.keras`
-        # archives while forward still works). `stage_block_offsets` partitions
-        # it back into stages.
+        # One flat block list for the whole encoder, in creation order. `_run_stage` and
+        # `build` cut it into stages by `sum(self.stage_depths[:stage])`, so the partition
+        # is derived from `stage_depths` and is not a second container to keep in step.
         self.blocks: List[TransformerLayer] = []
         for s, (dim, depth, nhead) in enumerate(zip(dims, depths, heads)):
             if s > 0:
                 self.merges.append(
                     keras.layers.Conv2D(
                         filters=dim, kernel_size=2, strides=2, padding="valid",
-                        use_bias=use_bias, name=f"merge_{s}",
+                        use_bias=use_bias, name=f"downsample_{s - 1}_conv",
                     )
                 )
                 self.merge_norms.append(
                     create_normalization_layer(
                         normalization_type, epsilon=norm_epsilon,
-                        name=f"merge_norm_{s}",
+                        name=f"downsample_{s - 1}_norm",
                     )
                 )
             self.cpe_convs.append(
                 keras.layers.DepthwiseConv2D(
                     kernel_size=3, strides=1, padding="same", use_bias=False,
-                    name=f"cpe_{s}",
+                    name=f"stage{s + 1}_cpe",
                 )
             )
             for i in range(depth):
@@ -174,15 +218,16 @@ class UcaEncoder(keras.layers.Layer):
                         hidden_size=dim,
                         num_heads=nhead,
                         intermediate_size=int(dim * mlp_ratio),
-                        attention_type=attention_type,  # type: ignore[arg-type]
-                        normalization_type=normalization_type,  # type: ignore[arg-type]
+                        attention_type=attention_type,
+                        attention_args=attention_args,
+                        normalization_type=normalization_type,
                         attention_norm_args={"epsilon": norm_epsilon},
                         ffn_norm_args={"epsilon": norm_epsilon},
-                        ffn_type=ffn_type,  # type: ignore[arg-type]
+                        ffn_type=ffn_type,
                         dropout_rate=dropout_rate,
                         attention_dropout_rate=dropout_rate,
                         use_bias=use_bias,
-                        name=f"stage_{s}_block_{i}",
+                        name=f"stage{s + 1}_block{i + 1}",
                     )
                 )
 
@@ -209,20 +254,21 @@ class UcaEncoder(keras.layers.Layer):
         :return: Encoded feature map ``(B, H, W, C)``.
         """
         x = x + self.cpe_convs[stage](x, training=training)
-        batch = ops.shape(x)[0]
-        height = ops.shape(x)[1]
-        width = ops.shape(x)[2]
+        batch = keras.ops.shape(x)[0]
+        height = keras.ops.shape(x)[1]
+        width = keras.ops.shape(x)[2]
         dim = self.stage_dims[stage]
-        tokens = ops.reshape(x, (batch, height * width, dim))
+        tokens = keras.ops.reshape(x, (batch, height * width, dim))
         start = sum(self.stage_depths[:stage])
         for block in self.blocks[start:start + self.stage_depths[stage]]:
             tokens = block(tokens, training=training)
-        return ops.reshape(tokens, (batch, height, width, dim))
+        return keras.ops.reshape(tokens, (batch, height, width, dim))
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the stem, merges, CPE convs, blocks, and final norm.
+        """Build the stem, downsamplers, CPE convs, blocks, and final norm.
 
         :param input_shape: Shape ``(batch, height, width, channels)``.
+        :raises ValueError: If ``input_shape`` is not 4D.
         """
         if self.built:
             return
@@ -265,8 +311,8 @@ class UcaEncoder(keras.layers.Layer):
                 x = self.merges[s - 1](x, training=training)
                 x = self.merge_norms[s - 1](x, training=training)
             x = self._run_stage(x, s, training=training)
-        batch = ops.shape(x)[0]
-        tokens = ops.reshape(x, (batch, -1, self.stage_dims[-1]))
+        batch = keras.ops.shape(x)[0]
+        tokens = keras.ops.reshape(x, (batch, -1, self.stage_dims[-1]))
         return self.final_norm(tokens, training=training)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
@@ -282,8 +328,7 @@ class UcaEncoder(keras.layers.Layer):
 
         :return: Dictionary containing all constructor arguments.
         """
-        config = super().get_config()
-        config.update({
+        config = {
             "stage_dims": list(self.stage_dims),
             "stage_depths": list(self.stage_depths),
             "num_heads": list(self.num_heads),
@@ -294,5 +339,6 @@ class UcaEncoder(keras.layers.Layer):
             "norm_epsilon": self.norm_epsilon,
             "dropout_rate": self.dropout_rate,
             "use_bias": self.use_bias,
-        })
-        return config
+        }
+        base_config = super().get_config()
+        return {**base_config, **config}

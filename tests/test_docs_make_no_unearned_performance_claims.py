@@ -364,10 +364,14 @@ def test_the_population_the_rule_was_derived_from_is_still_the_population():
         # model.py:534 really does `raise NotImplementedError`. Both halves
         # checked (re-derived 2026-10-04; pre-existing drift, not a new port).
         "omnipoint",
-        # rbf_protonet: README:23/111/154/245 name `pretrained=True` only to
-        # say it raises; model.py:279/661/884 really do
-        # `raise NotImplementedError`. Both halves checked (re-derived
-        # 2026-10-04; pre-existing drift, not a new port).
+        # rbf_protonet: README:109-110/272-273 name `pretrained=True` only to
+        # say it raises; both factories really do, through `refuse_pretrained`
+        # (model.py `create_rbf_protonet` and `create_clifford_rbf_protonet`),
+        # verified by EXECUTING each with `pretrained=True` and with a path
+        # (tests/test_models/test_rbf_protonet/test_model.py and
+        # test_clifford_model.py compare the message with the one
+        # `refuse_pretrained` raises). Both halves checked (re-derived
+        # 2026-10-28).
         "rbf_protonet",
         "resnet",
         # clifford_clip, sam1, sam2, sam3: each README names `pretrained=True`

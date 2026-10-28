@@ -1,21 +1,25 @@
 """
-Model-level tests for ``RBFProtoNet`` (construction, forward pass, and the
-``pretrained=True`` refusal contract), following ``tests/test_models/test_resnet/``
+Model-level tests for ``RBFProtoNet`` (construction, arguments, forward pass, and
+the ``pretrained`` refusal contract), following ``tests/test_models/test_resnet/``
 conventions.
 
 ``RBFProtoNet`` composes a small CIFAR-style CNN backbone with an RBF
-prototype-classification head (``output_mode='normalized'``, see D-002/D-006/
-D-007 in this plan's ``decisions.md``). The head's defining contract is that
-its output is already a per-class probability vector -- each row sums to 1.0
--- not a logits vector, so that is asserted here directly rather than left to
-inference from the model's docstring.
+prototype-classification head (``output_mode='normalized'``). The head's defining
+contract is that its output is already a per-class probability vector -- each row
+sums to 1.0 -- not a logits vector, so that is asserted here directly rather than
+left to inference from the model's docstring.
 """
+
+import inspect
+import json
+import re
 
 import keras
 import numpy as np
 import pytest
 
 from dl_techniques.models.vision.rbf_protonet.model import RBFProtoNet, create_rbf_protonet
+from dl_techniques.utils.weight_transfer import refuse_pretrained
 
 
 # ---------------------------------------------------------------------
@@ -24,17 +28,21 @@ from dl_techniques.models.vision.rbf_protonet.model import RBFProtoNet, create_r
 
 
 def _small_rbf_protonet(**overrides):
-    """A CIFAR-shaped RBFProtoNet with a small num_classes for fast CPU tests."""
-    cfg = dict(
-        input_shape=(32, 32, 3),
-        num_classes=10,
-    )
+    """An RBFProtoNet with a small num_classes for fast CPU tests."""
+    cfg = dict(num_classes=10)
     cfg.update(overrides)
     return RBFProtoNet(**cfg)
 
 
-def _images(batch: int = 4) -> np.ndarray:
-    return np.random.default_rng(0).random((batch, 32, 32, 3)).astype("float32")
+def _images(batch: int = 4, height: int = 32, width: int = 32) -> np.ndarray:
+    return np.random.default_rng(0).random((batch, height, width, 3)).astype("float32")
+
+
+def _refusal(label: str, pretrained) -> str:
+    """The message ``refuse_pretrained`` raises: the one message every refusal shares."""
+    with pytest.raises(NotImplementedError) as raised:
+        refuse_pretrained(pretrained, label)
+    return str(raised.value)
 
 
 # ---------------------------------------------------------------------
@@ -72,24 +80,110 @@ class TestRBFProtoNetConstruction:
         )
 
     def test_create_factory_matches_direct_construction(self):
-        model = create_rbf_protonet(num_classes=10, input_shape=(32, 32, 3))
+        model = create_rbf_protonet(num_classes=10)
         out = model(_images(2), training=False)
+        assert tuple(out.shape) == (2, 10)
+
+    @pytest.mark.parametrize("height, width", [(16, 16), (33, 20), (48, 64)])
+    def test_the_model_runs_at_any_spatial_size(self, height, width):
+        """Global average pooling makes the model size-agnostic, which is why it
+        takes no ``input_shape``: nothing in it would read one."""
+        model = _small_rbf_protonet()
+        out = model(_images(2, height, width), training=False)
         assert tuple(out.shape) == (2, 10)
 
 
 # ---------------------------------------------------------------------
-# pretrained=True refusal
+# Arguments
+# ---------------------------------------------------------------------
+
+
+class TestRBFProtoNetArguments:
+    def test_num_classes_is_the_first_parameter(self):
+        names = list(inspect.signature(RBFProtoNet.__init__).parameters)
+        assert names[1] == "num_classes"
+        assert names[-1] == "kwargs"
+
+    def test_the_constructor_has_no_pretrained_or_input_shape_knob(self):
+        """Neither is read by any forward path: ``pretrained`` only ever raised and
+        ``input_shape`` only fed a log line and ``get_config``."""
+        names = inspect.signature(RBFProtoNet.__init__).parameters
+        assert "pretrained" not in names and "input_shape" not in names
+        config = _small_rbf_protonet().get_config()
+        assert "pretrained" not in config and "input_shape" not in config
+
+    def test_a_pretrained_keyword_on_the_class_is_refused_by_keras(self):
+        with pytest.raises(ValueError, match="pretrained"):
+            RBFProtoNet(num_classes=10, pretrained=True)
+
+    @pytest.mark.parametrize("make", [np.int64, np.int32, np.uint8])
+    def test_a_numpy_integer_num_classes_is_accepted_and_stored_as_an_int(self, make):
+        model = _small_rbf_protonet(num_classes=make(10))
+        assert type(model.num_classes) is int and model.num_classes == 10
+        assert tuple(model(_images(2), training=False).shape) == (2, 10)
+        json.dumps(model.get_config())  # an np.int64 in the config is not JSON-safe
+
+    @pytest.mark.parametrize("value", [0, -3, 2.5, True, "10", None])
+    def test_a_bad_num_classes_raises_naming_the_value(self, value):
+        with pytest.raises(ValueError, match=f"^num_classes must be a positive int, got {re.escape(repr(value))}$"):
+            _small_rbf_protonet(num_classes=value)
+
+    @pytest.mark.parametrize("rate", [1.0, 1.5, -0.1, float("nan")])
+    def test_a_dropout_rate_outside_the_unit_interval_raises_naming_the_value(self, rate):
+        with pytest.raises(ValueError, match=f"^dropout_rate must be in \\[0, 1\\), got {re.escape(repr(rate))}$"):
+            _small_rbf_protonet(dropout_rate=rate)
+
+    def test_a_dropout_rate_just_below_one_is_accepted(self):
+        assert _small_rbf_protonet(dropout_rate=0.99).dropout_rate == 0.99
+
+    def test_a_regularizer_given_by_name_is_resolved_serialized_and_rebuilt(self):
+        model = _small_rbf_protonet(
+            stem_filters=8, filters_per_stage=[8, 16], feature_dim=24, kernel_regularizer="l2")
+        assert isinstance(model.kernel_regularizer, keras.regularizers.L2)
+        config = model.get_config()
+        json.dumps(config)
+        rebuilt = RBFProtoNet.from_config(config)
+        assert isinstance(rebuilt.kernel_regularizer, keras.regularizers.L2)
+        assert rebuilt.get_config() == config
+        plain = _small_rbf_protonet(stem_filters=8, filters_per_stage=[8, 16], feature_dim=24)
+        x = _images(2)
+        model(x)
+        rebuilt(x)
+        plain(x)
+        assert len(model.losses) == len(rebuilt.losses) > len(plain.losses)
+
+    def test_the_regularizer_reaches_the_feature_projection_too(self):
+        """``feature_proj`` exists only when the last stage width differs from ``feature_dim``."""
+        model = _small_rbf_protonet(
+            stem_filters=8, filters_per_stage=[8, 16], feature_dim=24, kernel_regularizer="l2")
+        assert model.feature_proj is not None
+        assert model.feature_proj.kernel_regularizer is not None
+
+    def test_the_default_has_no_regularizer(self):
+        model = _small_rbf_protonet()
+        assert model.kernel_regularizer is None
+        assert model.get_config()["kernel_regularizer"] is None
+
+
+# ---------------------------------------------------------------------
+# pretrained refusal
 # ---------------------------------------------------------------------
 
 
 class TestRBFProtoNetPretrainedRefusal:
-    def test_pretrained_true_raises_not_implemented_on_class(self):
-        with pytest.raises(NotImplementedError):
-            RBFProtoNet(input_shape=(32, 32, 3), num_classes=10, pretrained=True)
+    @pytest.mark.parametrize("pretrained", [True, "weights.keras"])
+    def test_the_factory_refuses_with_the_one_shared_message(self, pretrained):
+        with pytest.raises(NotImplementedError) as raised:
+            create_rbf_protonet(num_classes=10, pretrained=pretrained)
+        assert str(raised.value) == _refusal("RBFProtoNet", pretrained)
 
-    def test_pretrained_true_raises_not_implemented_on_factory(self):
+    def test_the_refusal_comes_before_anything_is_built(self):
+        """An invalid ``num_classes`` would raise ``ValueError`` if the model were built first."""
         with pytest.raises(NotImplementedError):
-            create_rbf_protonet(num_classes=10, input_shape=(32, 32, 3), pretrained=True)
+            create_rbf_protonet(num_classes=-1, pretrained=True)
+
+    def test_the_default_is_a_random_initialization(self):
+        assert isinstance(create_rbf_protonet(num_classes=10, pretrained=False), RBFProtoNet)
 
 
 if __name__ == "__main__":

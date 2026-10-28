@@ -215,7 +215,7 @@ def _probe_capsnet_v2():
 
 def _probe_rbf_protonet():
     from dl_techniques.models.vision.rbf_protonet import create_rbf_protonet
-    model = create_rbf_protonet(num_classes=4, input_shape=(32, 32, 3), stem_filters=8,
+    model = create_rbf_protonet(num_classes=4, stem_filters=8,
                                 filters_per_stage=[8, 16], feature_dim=16)
     rows = keras.ops.convert_to_numpy(model(_images((2, 32, 32, 3)), training=False)).sum(-1)
     np.testing.assert_allclose(rows, 1.0, rtol=0, atol=1e-5)
@@ -223,7 +223,7 @@ def _probe_rbf_protonet():
 
 def _probe_clifford_rbf_protonet():
     from dl_techniques.models.vision.rbf_protonet.model import CliffordRBFProtoNet
-    model = CliffordRBFProtoNet(input_shape=(32, 32, 3), num_classes=4, depth=2)
+    model = CliffordRBFProtoNet(num_classes=4, depth=2)
     rows = keras.ops.convert_to_numpy(model(_images((2, 32, 32, 3)), training=False)).sum(-1)
     np.testing.assert_allclose(rows, 1.0, rtol=0, atol=1e-5)
 

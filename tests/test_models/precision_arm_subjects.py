@@ -1659,9 +1659,8 @@ _extra("rad_convnet", _b_rad_convnet, lambda: _u01(2, 32, 32, 3))
 
 def _b_rbf_protonet():
     from dl_techniques.models.vision.rbf_protonet import create_rbf_protonet
-    return create_rbf_protonet(num_classes=4, input_shape=(32, 32, 3),
-                               stem_filters=8, filters_per_stage=[8, 16],
-                               feature_dim=16)
+    return create_rbf_protonet(num_classes=4, stem_filters=8,
+                               filters_per_stage=[8, 16], feature_dim=16)
 
 
 _extra("rbf_protonet", _b_rbf_protonet, lambda: _u01(2, 32, 32, 3))

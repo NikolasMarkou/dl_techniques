@@ -1,14 +1,22 @@
 """Tests for the MambaLCT tracker: shapes, context sensitivity, serialization."""
 
+import io
+import json
 import os
+import re
 import tempfile
+import zipfile
 
+import h5py
 import keras
 import numpy as np
 import pytest
 
 from dl_techniques.models.vision.mambalct import MambaLCT, create_mambalct
 from dl_techniques.models.vision.mambalct.uca_encoder import UcaEncoder
+
+from ..gradient_flow_oracle import assert_gradients_reach_every_trainable_weight
+from ..initializer_replay_oracle import replayed_pairs
 
 
 def _tiny_model() -> MambaLCT:
@@ -268,3 +276,136 @@ def test_the_uca_encoder_has_no_stem_aliases() -> None:
     encoder = _tiny_uca_encoder()
     assert not hasattr(encoder, "stem_conv")
     assert not hasattr(encoder, "stem_norm")
+
+
+# ---------------------------------------------------------------------------
+# UcaEncoder: arguments, configuration, and the draws of its attention projections
+# ---------------------------------------------------------------------------
+
+
+def _images(height: int = 16, width: int = 16) -> np.ndarray:
+    return np.random.default_rng(0).uniform(0, 1, (1, height, width, 3)).astype("float32")
+
+
+def test_the_uca_encoder_config_is_json_safe_and_round_trips() -> None:
+    encoder = UcaEncoder(
+        stage_dims=[16, 32], stage_depths=[1, 2], num_heads=[2, 4], mlp_ratio=2.0,
+        norm_epsilon=1e-3, dropout_rate=0.1, use_bias=False, name="uca")
+    config = encoder.get_config()
+    json.dumps(config)
+    rebuilt = UcaEncoder.from_config(config)
+    assert rebuilt.get_config() == config
+    assert [b.name for b in rebuilt.blocks] == [b.name for b in encoder.blocks]
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        (dict(stage_dims=[16, 32], stage_depths=[1], num_heads=[2, 4]),
+         "stage_dims ([16, 32]), stage_depths ([1]) and num_heads ([2, 4]) must have equal length"),
+        (dict(stage_dims=[16, 0], stage_depths=[1, 1], num_heads=[2, 4]),
+         "stage_dims must be positive, got [16, 0]"),
+        (dict(stage_dims=[16, 32], stage_depths=[1, 0], num_heads=[2, 4]),
+         "stage_depths must be positive, got [1, 0]"),
+        (dict(stage_dims=[16, 32], stage_depths=[1, 1], num_heads=[2, 0]),
+         "num_heads must be positive, got [2, 0]"),
+        (dict(stage_dims=[16, 30], stage_depths=[1, 1], num_heads=[2, 4]),
+         "each stage_dim must be divisible by its num_heads, got [16, 30] / [2, 4]"),
+        (dict(mlp_ratio=0.0), "mlp_ratio must be positive, got 0.0"),
+        (dict(norm_epsilon=0.0), "norm_epsilon must be positive, got 0.0"),
+        (dict(dropout_rate=1.0), "dropout_rate must be in [0, 1), got 1.0"),
+    ],
+)
+def test_a_bad_uca_argument_raises_the_encoders_own_message_naming_the_value(kwargs, message) -> None:
+    """The message starts with the encoder's own sentence: a bad ``dropout_rate`` would also be
+    refused later by the transformer block, with that layer's wording, if the encoder let it by."""
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}"):
+        UcaEncoder(**kwargs)
+
+
+def test_the_uca_encoder_refuses_an_input_that_is_not_an_image_batch() -> None:
+    with pytest.raises(ValueError, match="4D"):
+        _tiny_uca_encoder().build((None, 16, 3))
+
+
+def test_the_uca_encoder_reduces_the_stride_by_sixteen_at_every_input_size() -> None:
+    encoder = UcaEncoder(stage_dims=[16, 32, 32], stage_depths=[1, 1, 1], num_heads=[2, 4, 4])
+    for height, width in ((32, 32), (32, 48)):
+        tokens = encoder(_images(height, width), training=False)
+        assert tuple(tokens.shape) == (1, (height // 16) * (width // 16), 32)
+
+
+def test_every_block_of_the_uca_encoder_draws_each_projection_independently() -> None:
+    """No two kernels of a built encoder carry one random draw, in particular a block's
+    ``qkv`` and ``proj`` (one initializer instance gave both the same stream) and the
+    ``proj`` kernels of two blocks of one width."""
+    keras.utils.set_random_seed(1234)
+    encoder = UcaEncoder(stage_dims=[16, 32], stage_depths=[2, 2], num_heads=[2, 4])
+    encoder(_images(), training=False)
+    pairs, compared = replayed_pairs(encoder)
+    assert compared > 0, "the encoder exposes fewer than two kernels: nothing was compared"
+    assert not pairs, f"{len(pairs)} of {compared} kernel pairs replay one draw: {pairs[:3]}"
+
+
+@pytest.mark.parametrize("attention_type", ["differential", "group_query"])
+def test_an_attention_type_without_an_output_initializer_still_builds(attention_type: str) -> None:
+    """Only the types that declare ``output_kernel_initializer`` are given one; a type that
+    does not keeps its own construction and the encoder still runs."""
+    encoder = UcaEncoder(
+        stage_dims=[16, 32], stage_depths=[1, 1], num_heads=[2, 4], attention_type=attention_type)
+    assert tuple(encoder(_images(), training=False).shape) == (1, 4, 32)
+    assert all(block.attention_args == {} for block in encoder.blocks)
+
+
+def test_the_multi_head_blocks_are_given_the_output_initializer() -> None:
+    encoder = _tiny_uca_encoder()
+    assert all(block.attention_args == {"output_kernel_initializer": "glorot_uniform"}
+               for block in encoder.blocks)
+
+
+def test_a_saved_mambalct_stores_the_encoder_under_the_attribute_names_old_archives_use() -> None:
+    """A ``.keras`` archive stores a layer under its ATTRIBUTE path, not its layer name, so
+    renaming ``merges``, ``merge_norms``, ``cpe_convs`` or ``blocks`` makes every archive
+    written before the rename refuse to load, while renaming a layer (``downsample_0_conv``
+    for ``merge_1``) does not. The names below are the ones the archives of the previous
+    revision carry."""
+    model = _tiny_model()
+    model.build([(None, 32, 32, 3), (None, 2, 64, 64, 3), (None, 1, 512)])
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, "mambalct_keys.keras")
+        model.save(path)
+        with zipfile.ZipFile(path) as archive:
+            store = h5py.File(io.BytesIO(archive.read("model.weights.h5")), "r")
+    assert set(store["encoder"]) == {
+        "blocks", "cpe_convs", "final_norm", "merge_norms", "merges", "stem", "vars"}
+
+
+def test_the_uca_encoder_layers_are_named_by_the_table_whatever_their_attribute() -> None:
+    encoder = UcaEncoder(stage_dims=[16, 32, 32], stage_depths=[2, 1, 1], num_heads=[2, 4, 4])
+    assert [layer.name for layer in encoder.merges] == ["downsample_0_conv", "downsample_1_conv"]
+    assert [layer.name for layer in encoder.merge_norms] == ["downsample_0_norm", "downsample_1_norm"]
+    assert [layer.name for layer in encoder.cpe_convs] == ["stage1_cpe", "stage2_cpe", "stage3_cpe"]
+    assert [layer.name for layer in encoder.blocks] == [
+        "stage1_block1", "stage1_block2", "stage2_block1", "stage3_block1"]
+
+
+def test_the_attention_output_projection_starts_from_the_same_distribution_as_qkv() -> None:
+    """The output projection is given ``ATTENTION_OUTPUT_INITIALIZER`` while ``qkv`` takes
+    ``TransformerLayer``'s own default; the two must be the same kind of initializer, or the
+    projection would start from a distribution the rest of the block does not use."""
+    encoder = _tiny_uca_encoder()
+    encoder(_images(), training=False)
+    for block in encoder.blocks:
+        engine = block.attention.cross_attention
+        assert type(engine.proj_dense.kernel_initializer) is type(engine.qkv_dense.kernel_initializer)
+        assert type(engine.proj_dense.kernel_initializer) is type(block.ffn_layer.fc1.kernel_initializer)
+
+
+def test_every_block_of_the_uca_encoder_is_on_the_forward_path() -> None:
+    """Each of the 48 trainable weights of a two-stage, three-block encoder receives a finite,
+    non-zero gradient: a stage that ran fewer blocks than it built would leave the others dead."""
+    encoder = UcaEncoder(stage_dims=[16, 32], stage_depths=[2, 1], num_heads=[2, 4])
+    x = np.random.default_rng(0).uniform(0, 1, (2, 16, 16, 3)).astype("float32")
+    encoder(x, training=False)
+    report = assert_gradients_reach_every_trainable_weight(encoder, x, training=False)
+    assert len(report) == len(encoder.trainable_weights) == 48
