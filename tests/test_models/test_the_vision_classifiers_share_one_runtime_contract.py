@@ -433,11 +433,6 @@ class Open:
 
 #: Every row that fails today, keyed ``(rule, subject)``.
 LEDGER: Dict[Tuple[str, str], Open] = {
-    ("no_replayed_draw::instance", "vae"): Open(
-        AssertionError,
-        "the ConvUNext and VAE migration",
-        '91 of 136 kernel pairs replay one draw',
-        'kernel pairs replay one draw'),
     ("no_replayed_draw::default", "uca_encoder"): Open(
         AssertionError,
         "the RBFProtoNet and UcaEncoder migration",

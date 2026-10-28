@@ -4412,12 +4412,13 @@ _CREATE_DELEGATION_WAIVERS = {
     # DELETED by plan-2026-10-13T035756-5dd4d94d D-015: the `variant=None`
     # constructor branch, the optimizer and the compile are gone; it delegates.
     # (f) SEVERE -- the factory compiled, ran, or asserted. DISPOSED at step 19
-    # (D-078). Three were repaired and one is refuted; all four still trip the
+    # (D-078). Three were repaired and one is refuted; all four tripped the
     # predicate because a compile call, a `build()` call and a derived log line
-    # are all "not delegation", which is why they stay waived rather than
-    # dropped. The reason text now records the RULING, not the charge.
+    # are all "not delegation", which is why they stayed waived rather than
+    # dropped. The reason text records the RULING, not the charge. `create_vae`
+    # has left the list: it is `VAE.from_variant` now and the compile lives in
+    # `compile_vae`, so three remain.
     ("models/vision/fractalnet/model.py", "create_fractal_net"): "step 19 CLOSED-as-refuted (D-078) -- the compile IS the documented contract ('create and compile', returns a compiled model); the from_logits=True loss default is a load-bearing anti-mistrain guard. No duplicated callee logic remains to remove",
-    ("models/vision/vae/model.py", "create_vae"): "step 19 REPAIRED (D-078) -- the random forward pass and its three `assert`s are gone (void under -O); they now run over all 3 sampling types at TestVAESamplingTypes::test_create_vae_output_shapes. The compile stays: documented contract",
     ("models/vision/vit/model.py", "create_vit"): "step 19 REPAIRED (D-078) -- all 8 duplicated `raise ValueError` branches deleted; ViT.__init__ was MEASURED to raise for every one. Only a derived log line remains",
     ("models/time_series/tirex/model.py", "create_tirex_by_variant"): "step 19 REPAIRED (D-078) -- the dummy numpy forward pass is now `model.build(...)`, measured byte-identical (same 47 weight paths, weight delta 0.0, forward delta 0.0). Both sites in the module",
     # (g) plan-2026-09-11T050223-1b47bcf6/D-027 -- MEASURED, not assumed: `model.build(input_shape)`
@@ -4487,6 +4488,11 @@ _CREATE_WITHOUT_FROM_VARIANT = {
 #: what this pin makes visible: the returned model carries an optimizer the
 #: caller did not choose, and a caller who then calls ``compile()`` again
 #: silently discards it. Growth is the risk being guarded, not these 8.
+#:
+#: **Re-derived 2026-10-28.** ``create_vae`` and ``create_vae_from_config`` left the
+#: set: the VAE factory is ``VAE.from_variant`` and the optimizer lives in
+#: ``compile_vae``, which is not a ``create_*`` function, so the set holds 5. The
+#: counts above are the 2026-08-22 census; the pinned set is the count.
 _CREATE_FACTORIES_THAT_COMPILE = {
     ("models/vision/capsnet/model.py", "create_capsnet"): "no `variant` param -- was invisible to R-051 until D-071. Docstring: 'Create and compile a CapsNet model'; compiles with loss=None because CapsNet owns its loss in train_step",
     ("models/vision/capsnet/model_v2.py", "create_capsnet_v2"): "no `variant` param (`stem`, not `variant`) -- was invisible until D-071. Docstring: 'Create and compile ... with the modern training recipe'; AdamW + cosine + EMA IS the product",
@@ -4496,8 +4502,6 @@ _CREATE_FACTORIES_THAT_COMPILE = {
     # compiles; callers that want `fit()` compile it themselves.
     ("models/common/lm_pretraining/utils.py", "create_mlm_training_model"): "no `variant` param -- was invisible until D-071. Docstring: 'A compiled MaskedLanguageModel ready for training'; the MLM head + optimizer pairing is the whole point of the helper",
     ("models/general_purpose/power_mlp/model.py", "create_power_mlp"): "no `variant` param -- was invisible until D-071. Docstring: 'Create and compile a PowerMLP model'; its compile DERIVES from_logits from output_activation (D-053), which is a guard, not incidental",
-    ("models/vision/vae/model.py", "create_vae"): "step 19 REPAIRED (D-078) -- the random forward pass and its asserts are gone; the compile stays as documented contract",
-    ("models/vision/vae/model.py", "create_vae_from_config"): "no `variant` param -- was invisible until D-071. Docstring: 'Compiled VAE model'; carries the same vmf jit_compile=False opt-out as create_vae (D-005), so it is the sibling of an already-ruled site",
 }
 
 
@@ -4776,11 +4780,11 @@ class TestFactoriesThatCompileAreAllVisible:
             f"(delete the pin entry in the same commit as the repair): {gone}"
         )
 
-    def test_all_eight_are_reachable_by_the_delegation_sweep(self):
+    def test_every_pinned_compiling_factory_is_reachable_by_the_delegation_sweep(self):
         """The visibility claim, asserted rather than asserted-about.
 
-        Before D-071 exactly 3 of these 8 appeared in ``sites``; the other 5 were
-        dropped by the ``variant`` gate before classification. This is the test
+        Before D-071 exactly 3 of the 8 then pinned appeared in ``sites``; the other 5
+        were dropped by the ``variant`` gate before classification. This is the test
         that goes RED if that gate is ever restored.
         """
         sites, _ = _sweep_create_delegation()
@@ -4791,10 +4795,10 @@ class TestFactoriesThatCompileAreAllVisible:
             f"assertion in this file can see them change: {missing}"
         )
 
-    def test_the_five_widened_in_are_out_of_r051_scope_not_offenders(self):
-        """The five newly-visible ones are ``no-variant``, not silent ``logic``.
+    def test_the_four_widened_in_are_out_of_r051_scope_not_offenders(self):
+        """The four newly-visible ones are ``no-variant``, not silent ``logic``.
 
-        Stated because the widening MUST NOT be read as "5 new R-051
+        Stated because the widening MUST NOT be read as "4 new R-051
         violations": a fixed-architecture builder has no ``from_variant`` call
         to make. If one of them ever grows a ``variant`` parameter, it becomes a
         real R-051 subject and this assertion is what says so.
@@ -4806,7 +4810,6 @@ class TestFactoriesThatCompileAreAllVisible:
             ("models/vision/capsnet/model_v2.py", "create_capsnet_v2"),
             ("models/common/lm_pretraining/utils.py", "create_mlm_training_model"),
             ("models/general_purpose/power_mlp/model.py", "create_power_mlp"),
-            ("models/vision/vae/model.py", "create_vae_from_config"),
         }
         assert {verdict_of[k] for k in widened_in} == {"no-variant"}, {
             k: verdict_of[k] for k in widened_in

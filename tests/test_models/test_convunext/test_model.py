@@ -23,20 +23,18 @@ Covers:
   ``ConvUNextModel`` (``downsample_pool_type='strided_conv'``, ``include_top``,
   ``output_channels``)
 
-Two conventions this file holds to, both of which cost a vacuous guard earlier in
-this plan:
+Two conventions this file holds to, both of which once cost a vacuous guard:
 
 1. Every ``.keras`` round trip is built at NON-DEFAULT parameter values. A round
    trip built at a parameter's default is NOT a ``get_config`` completeness
    instrument: the constructor default silently repairs the dropped key and the
-   trip still passes (measured, plan steps 2 and 3).
+   trip still passes (measured).
 2. Both forward calls around a round trip pass ``training=False`` EXPLICITLY.
    ``training=None`` is not inference mode and produces deltas that look like
-   reinitialized weights (``plans/SYSTEM.md`` framework-behaviour #3).
+   reinitialized weights.
 
-NOTE (plan steps 4/9): the ConvUNextModel-era classes were removed in step 4
-together with the subclassed ``ConvUNextModel`` they instantiated -- with it
-deleted they could not even import. Step 9 re-derives that coverage against
+The classes of the deleted subclassed ``ConvUNextModel`` are gone with it (they
+could not even import), and their coverage is re-derived against
 ``create_convunext``. Two things were DELIBERATELY not re-derived, and the reason
 is recorded at the class that replaced them: ``TestCreateInferenceModel`` (the
 bespoke helper is deleted; ``utils/deep_supervision`` owns the canonical one and
@@ -46,6 +44,7 @@ weight-compat contract is not reproducible in a functional graph -- see
 which pins the divergence we actually ship).
 """
 
+import json
 import os
 import logging
 import tempfile
@@ -311,10 +310,9 @@ class TestConvUNextStem:
         """``stem.stem`` is a ``ConvStem`` the moment the layer is constructed, is
         unbuilt until the layer is, and no alias of a sub-layer exists at any time.
 
-        An earlier version created the ConvStem inside ``build()`` and set
-        ``conv`` / ``norm`` / ``activation_layer`` aliases there, so before the
-        first call the stem had no sub-layers at all and the Keras layer tree
-        was empty.
+        Creating the ConvStem inside ``build()`` and setting ``conv`` / ``norm`` /
+        ``activation_layer`` aliases there would leave the stem with no sub-layers
+        before the first call and the Keras layer tree empty.
         """
         removed_aliases = ("_conv_stem", "conv", "norm", "activation_layer")
         layer = ConvUNextStem(
@@ -376,6 +374,66 @@ class TestConvUNextStemActivationArgument:
     def test_a_string_activation_is_accepted(self, activation: str) -> None:
         outer = ConvUNextStem(filters=4, activation=activation)
         assert tuple(outer(self._input(), training=False).shape) == (2, 8, 8, 4)
+
+    def test_the_activation_is_stored_under_the_arguments_name(self) -> None:
+        """``self.activation`` holds the argument, and nothing else holds it too."""
+        prelu = keras.layers.PReLU()
+
+        assert ConvUNextStem(filters=4, activation="relu").activation == "relu"
+        assert ConvUNextStem(filters=4, activation=prelu).activation is prelu
+        assert not hasattr(ConvUNextStem(filters=4), "activation_name")
+
+    def test_the_config_names_the_activation_the_attribute_holds(self) -> None:
+        outer = ConvUNextStem(filters=4, activation="relu")
+
+        assert outer.get_config()["activation"] == outer.activation == "relu"
+
+
+class TestConvUNextStemKernelInitializer:
+    """The initializer is stored as a spec: JSON data, never the caller's instance."""
+
+    def test_a_string_is_stored_unchanged(self) -> None:
+        stem = ConvUNextStem(filters=4, kernel_initializer="he_uniform")
+
+        assert stem.kernel_initializer == "he_uniform"
+        assert stem.get_config()["kernel_initializer"] == "he_uniform"
+
+    def test_an_instance_is_stored_as_its_serialized_spec(self) -> None:
+        init = keras.initializers.HeUniform(seed=5)
+
+        stem = ConvUNextStem(filters=4, kernel_initializer=init)
+
+        assert stem.kernel_initializer == keras.initializers.serialize(init)
+        assert stem.kernel_initializer is not init
+
+    def test_the_config_with_an_instance_is_json_safe_and_rebuilds_the_layer(self) -> None:
+        stem = ConvUNextStem(
+            filters=4,
+            activation=keras.layers.LeakyReLU(0.2),
+            kernel_initializer=keras.initializers.RandomNormal(stddev=0.3, seed=1),
+            kernel_regularizer=keras.regularizers.L2(1e-3),
+        )
+
+        config = json.loads(json.dumps(stem.get_config()))
+        rebuilt = ConvUNextStem.from_config(config)
+
+        assert rebuilt.kernel_initializer == stem.kernel_initializer
+        assert rebuilt.kernel_initializer["config"]["stddev"] == 0.3
+        assert isinstance(rebuilt.kernel_regularizer, keras.regularizers.L2)
+        assert rebuilt.get_config() == stem.get_config()
+
+    def test_the_spec_reaches_the_convolution(self) -> None:
+        stem = ConvUNextStem(
+            filters=4, kernel_initializer=keras.initializers.RandomNormal(stddev=0.3, seed=1))
+        stem(np.zeros((1, 8, 8, 3), "float32"))
+
+        conv_initializer = stem.stem.conv1.kernel_initializer
+        assert isinstance(conv_initializer, keras.initializers.RandomNormal)
+        assert conv_initializer.stddev == 0.3
+
+    def test_a_value_that_is_no_initializer_is_refused(self) -> None:
+        with pytest.raises(TypeError, match="initializer"):
+            ConvUNextStem(filters=4, kernel_initializer=3.5)
 
 
 class TestMergedConvUNextStemKnobs:
@@ -439,7 +497,7 @@ class TestMergedConvUNextStemKnobs:
 
         Built at the defaults, this test would be vacuous: dropping a key from
         `get_config` is silently repaired by the constructor default and the
-        round trip still passes (measured in step 2 of this plan). So the stem
+        round trip still passes (measured). So the stem
         here is `use_bias=False` (default True) and
         `stem_normalization='layer_norm'` (default 'global_response_norm').
         """
@@ -481,10 +539,10 @@ class TestMergedConvUNextStemKnobs:
 # ---------------------------------------------------------------------
 
 # The ONLY layers allowed to stay bias-free when create_convunext is called with
-# use_bias=True. Both are deliberate, documented hardcodes (decisions.md D-004):
+# use_bias=True. Both are deliberate, documented hardcodes:
 # the frozen Gabor bank (trainable=False -- a bias on it is meaningless) and
 # SpatialLinearAttention's internal LinearAttention + its four Dense projections
-# (a bias there breaks the Miyasawa property; plan_2026-07-11_bb4b38b5/D-001).
+# (a bias there breaks the Miyasawa property; the anchor in SpatialLinearAttention).
 _HARDCODED_BIAS_FREE_NAMES = frozenset({
     'gabor_stem',
     'query_proj', 'key_proj', 'value_proj', 'output_proj',
@@ -588,7 +646,7 @@ class TestCreateConvUNextUseBias:
 
 
 class TestCreateConvUNextBottleneckDropPath:
-    """The bottleneck drop-path RAMP (plan_2026-07-10_be906be8/D-001)."""
+    """The bottleneck drop-path RAMP."""
 
     def test_bottleneck_drop_path_ramps(self):
         """Bottleneck block i carries rate ``drop_path_rate * i / blocks``.
@@ -659,7 +717,7 @@ class TestCreateConvUNextLiveness:
 
 
 # ---------------------------------------------------------------------
-# Plan step 5: the three use_bias=False guardrails
+# The three use_bias=False guardrails
 # ---------------------------------------------------------------------
 
 def _guard_config(**overrides) -> Dict[str, Any]:
@@ -682,8 +740,7 @@ def _guard_config(**overrides) -> Dict[str, Any]:
 class TestBiasFreeGuardrails:
     """``_validate_bias_free_arguments`` fires on the bias-off arm only.
 
-    Plan invariant I-6 / decisions.md D-006, D-012. The guard is an ALLOWLIST of
-    positively homogeneous activations, deliberately narrow, deliberately silent
+    The guard is an ALLOWLIST of positively homogeneous activations, deliberately narrow, deliberately silent
     on the model's own non-homogeneous ``'gelu'`` defaults, and deliberately
     non-raising for ``block_normalization='layernorm'``.
     """
@@ -750,8 +807,7 @@ class TestBiasFreeGuardrails:
                 supervision_norm_center=True, **_guard_config())
 
     def test_supervision_norm_center_raises_even_without_deep_supervision(self):
-        """PINNED EDGE CASE (plan.md 'Edge cases'): the guard's predicate is a PURE
-        FUNCTION OF ITS ARGUMENTS.
+        """PINNED EDGE CASE: the guard's predicate is a PURE FUNCTION OF ITS ARGUMENTS.
 
         With ``enable_deep_supervision=False`` no supervision head is built and
         ``supervision_norm_center`` reaches nothing -- and it STILL raises, because
@@ -835,7 +891,7 @@ class TestBiasFreeGuardrails:
 
 
 # ---------------------------------------------------------------------
-# Step 6: the knobs absorbed from the deleted ConvUNextModel
+# The knobs absorbed from the deleted ConvUNextModel
 # ---------------------------------------------------------------------
 
 
@@ -882,7 +938,7 @@ class TestStridedConvDownsample:
             f"max={model_pool.count_params()}")
 
     def test_strided_conv_is_channel_preserving(self):
-        """decisions.md D-013: this junction does NOT widen channels.
+        """This junction does NOT widen channels.
 
         The deleted ``ConvUNextModel._downsample`` fused downsampling with the
         channel widening (``filters=next_level_filters``). Keeping channels is what
@@ -950,7 +1006,7 @@ class TestIncludeTop:
         assert model.get_layer(name='decoder_features') is not None
 
     def test_include_top_false_does_not_construct_the_final_projection(self):
-        """DIVERGENCE PIN (decisions.md D-013), not an oversight.
+        """DIVERGENCE PIN, not an oversight.
 
         ``ConvUNextModel`` CONSTRUCTED its final projection under
         ``include_top=False`` and merely skipped applying it, so its headless variant
@@ -999,7 +1055,7 @@ class TestIncludeTop:
         model = create_convunext(**_knob_config())
         assert model.output_shape[-1] == 3
         assert model.get_layer(name='final_output').filters == 3
-        # Step 9's dead-component probe: a lone `Conv2D(3, 1, name='final_output')`
+        # Dead-component probe: a lone `Conv2D(3, 1, name='final_output')`
         # satisfies both lines above, so the graph itself has to be asserted.
         _assert_is_a_convunext_graph(model)
 
@@ -1123,10 +1179,10 @@ class TestAbsorbedKnobsRoundTrip:
 
 
 # =====================================================================
-# Step 9: coverage re-derived against `create_convunext`
+# Coverage re-derived against `create_convunext`
 #
-# The classes below replace the ConvUNextModel-era classes step 4 had to
-# delete. Each names the class it re-derives. Two were deliberately NOT
+# The classes below replace the ConvUNextModel-era classes that went with the
+# deleted subclass. Each names the class it re-derives. Two were deliberately NOT
 # re-derived; both reasons are recorded in the module docstring.
 # =====================================================================
 
@@ -1154,7 +1210,7 @@ def _assert_is_a_convunext_graph(
         model: keras.Model, depth: int = 2, blocks_per_level: int = 1) -> None:
     """Assert ``model`` is the ConvUNext graph, not some smaller stand-in.
 
-    WHY THIS EXISTS (step 9's dead-component probe, measured): substituting a
+    WHY THIS EXISTS (a dead-component probe, measured): substituting a
     single ``Conv2D`` for the builder's whole return value left every
     forward-pass, gradient-flow, weight-transfer and training-integration test
     GREEN -- a 1x1 conv is finite, input-dependent, fits, round-trips and
@@ -1414,8 +1470,7 @@ class TestResidualAndDropPathWiring:
     """``ConvNextV1Block`` / ``ConvNextV2Block`` are the residual BRANCH only.
 
     The caller must supply ``x + StochasticDepth(rate)(block(x))``
-    (``convnext_v1_block.py:103-121``; anchors
-    ``plan-2026-08-11T201945-91938f65/D-002 + D-004`` on
+    (``convnext_v1_block.py:103-121``; the anchor on
     ``_apply_residual_convnext_block``). The deleted subclass pinned this by
     swapping ``model.encoder_stages[i][j]`` for a zero-output stand-in; a
     functional graph has no such list, so the equivalents below (a) zero the
@@ -1664,8 +1719,8 @@ class TestStructuralBranches:
     ``final_projection_groups``, ``use_laplacian_pyramid`` +
     ``high_freq_blocks``, ``bottleneck_attention_blocks``.
 
-    These are the branches step 4's numeric control exercised against the
-    pre-merge build, so each needs at least one guard on each arm -- a branch
+    These are the branches the numeric control against the pre-merge build
+    exercised, so each needs at least one guard on each arm -- a branch
     threaded on only one arm is exactly the defect this suite is for.
     """
 
@@ -1757,7 +1812,7 @@ class TestStructuralBranches:
     def test_bottleneck_attention_blocks(self, use_bias: bool) -> None:
         """The attention stack is built, is the right CLASS, and its internal
         projections stay bias-free on BOTH arms (a bias there breaks the
-        Miyasawa property -- ``plan_2026-07-11_bb4b38b5/D-001``).
+        Miyasawa property; the anchor in SpatialLinearAttention).
         """
         model = create_convunext(
             use_bias=use_bias, bottleneck_attention_blocks=2,
@@ -1807,7 +1862,7 @@ class TestSerialization:
     def test_round_trip_at_non_default_values(self, use_bias: bool) -> None:
         """Nine non-default arguments at once. Built at the DEFAULTS this test
         would be vacuous: a key dropped from a config is silently repaired by
-        the constructor default and the trip still passes (measured, step 2).
+        the constructor default and the trip still passes (measured).
         """
         model = create_convunext(
             use_bias=use_bias,
@@ -1909,7 +1964,7 @@ class TestVariants:
             assert {'depth', 'initial_filters', 'blocks_per_level',
                     'convnext_version', 'drop_path_rate',
                     'description'} <= set(cfg), name
-            # Plan invariant I-3: the SHARED dict must not carry this key, or
+            # The SHARED dict must not carry this key, or
             # the bias-on variants flip too. Only the bfconvunext wrapper sets it.
             assert 'block_normalization' not in cfg, name
 

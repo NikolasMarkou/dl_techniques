@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 
@@ -8,7 +9,11 @@ import tensorflow as tf
 
 from dl_techniques.layers.activations.exact_activations import exact_gelu, exact_leaky_relu
 from dl_techniques.layers.generative.sampling import Sampling, HypersphereSampling, VMFSampling
-from dl_techniques.models.vision.vae.model import VAE, create_vae, create_vae_from_config
+import dl_techniques.models.vision.vae.model as vae_module
+from dl_techniques.models.vision.vae.model import VAE, compile_vae, create_vae
+from dl_techniques.utils.weight_transfer import load_pretrained_checkpoint
+
+from ..initializer_replay_oracle import replayed_pairs
 
 SAMPLING_MODES = [
     "gaussian",
@@ -26,7 +31,7 @@ class TestVAEInitialization:
         vae = VAE(latent_dim=64, input_shape=input_shape)
 
         assert vae.latent_dim == 64
-        assert vae._input_shape == input_shape
+        assert vae.input_shape_config == input_shape
         assert vae.depths == 2
         assert vae.steps_per_depth == 1
         assert vae.filters == [32, 64]
@@ -54,7 +59,7 @@ class TestVAEInitialization:
         )
 
         assert vae.latent_dim == 128
-        assert vae._input_shape == input_shape
+        assert vae.input_shape_config == input_shape
         assert vae.depths == 4
         assert vae.steps_per_depth == 3
         assert vae.filters == custom_filters
@@ -110,10 +115,10 @@ class TestVAEInitialization:
         )
         assert vae1.kernel_initializer == "glorot_normal"
 
-        # Test with initializer object
+        # An initializer object is stored as its serialized spec, so no layer shares it
         init = keras.initializers.HeNormal()
         vae2 = VAE(latent_dim=64, input_shape=input_shape, kernel_initializer=init)
-        assert vae2.kernel_initializer is init
+        assert vae2.kernel_initializer == keras.initializers.serialize(init)
 
         # Test with regularizer object
         reg = keras.regularizers.L1(0.01)
@@ -158,7 +163,7 @@ class TestVAEVariants:
             vae = VAE.from_variant(variant, input_shape=input_shape)
 
             assert isinstance(vae, VAE)
-            assert vae._input_shape == input_shape
+            assert vae.input_shape_config == input_shape
 
             # Check that configuration matches variant
             variant_config = VAE.MODEL_VARIANTS[variant]
@@ -488,7 +493,7 @@ class TestVAESerialization:
         reconstructed_vae = VAE.from_config(config)
 
         assert reconstructed_vae.latent_dim == original_vae.latent_dim
-        assert reconstructed_vae._input_shape == original_vae._input_shape
+        assert reconstructed_vae.input_shape_config == original_vae.input_shape_config
         assert reconstructed_vae.depths == original_vae.depths
         assert reconstructed_vae.steps_per_depth == original_vae.steps_per_depth
         assert reconstructed_vae.filters == original_vae.filters
@@ -505,11 +510,29 @@ class TestVAESerialization:
         config = vae.get_config()
         reconstructed_vae = VAE.from_config(config)
 
-        # Check that objects were properly serialized/deserialized
-        assert isinstance(
-            reconstructed_vae.kernel_initializer, keras.initializers.HeNormal
-        )
+        # The initializer travels as its spec; the regularizer comes back as an object
+        assert reconstructed_vae.kernel_initializer == vae.kernel_initializer
+        assert reconstructed_vae.kernel_initializer["class_name"] == "HeNormal"
         assert isinstance(reconstructed_vae.kernel_regularizer, keras.regularizers.L2)
+
+    def test_a_json_round_tripped_config_rebuilds_the_model(self):
+        """A config that went through JSON holds lists and dicts, and rebuilds as objects."""
+        vae = VAE(
+            latent_dim=4,
+            input_shape=(16, 16, 1),
+            depths=1,
+            kernel_initializer=keras.initializers.HeNormal(),
+            kernel_regularizer=keras.regularizers.L2(0.01),
+            activation="relu",
+        )
+
+        rebuilt = VAE.from_config(json.loads(json.dumps(vae.get_config())))
+
+        assert rebuilt.input_shape_config == (16, 16, 1)
+        assert rebuilt.kernel_initializer == vae.kernel_initializer
+        assert isinstance(rebuilt.kernel_regularizer, keras.regularizers.L2)
+        assert rebuilt.activation == "relu"
+        assert rebuilt.get_config() == vae.get_config()
 
     def test_model_save_load(self):
         """Test saving and loading complete model deterministically."""
@@ -613,7 +636,7 @@ class TestVAEEdgeCases:
 
 
 class TestCreateVAEFactory:
-    """Test the create_vae factory function."""
+    """``create_vae`` builds a variant and compiles nothing; ``compile_vae`` compiles."""
 
     def test_create_vae_basic(self):
         """Test basic create_vae functionality."""
@@ -621,15 +644,20 @@ class TestCreateVAEFactory:
 
         assert isinstance(vae, VAE)
         assert vae.latent_dim == 64
-        assert vae._input_shape == (28, 28, 1)
-        assert vae.compiled_loss is not None  # Should be compiled
+        assert vae.input_shape_config == (28, 28, 1)
 
-    def test_create_vae_with_custom_optimizer(self):
-        """Test create_vae with custom optimizer."""
-        optimizer = keras.optimizers.Adam(learning_rate=0.001)
-        vae = create_vae(input_shape=(32, 32, 3), latent_dim=128, optimizer=optimizer)
+    def test_create_vae_returns_an_uncompiled_model(self):
+        """The factory is ``VAE.from_variant``: no optimizer, no loss, not compiled."""
+        vae = create_vae(input_shape=(28, 28, 1), latent_dim=64)
 
-        assert vae.optimizer is optimizer
+        assert not vae.compiled
+        assert getattr(vae, "optimizer", None) is None
+
+    def test_create_vae_latent_dim_defaults_to_the_variants(self):
+        """``latent_dim`` is optional, as it is for ``VAE.from_variant``."""
+        vae = create_vae(input_shape=(28, 28, 1), variant="micro")
+
+        assert vae.latent_dim == VAE.MODEL_VARIANTS["micro"]["default_latent_dim"]
 
     def test_create_vae_overrides_defaults(self):
         """Test that create_vae properly overrides default parameters."""
@@ -637,7 +665,6 @@ class TestCreateVAEFactory:
             input_shape=(64, 64, 3),
             latent_dim=256,
             variant="large",
-            learning_rate=0.0005,
         )
 
         assert vae.latent_dim == 256
@@ -645,6 +672,19 @@ class TestCreateVAEFactory:
         variant_config = VAE.MODEL_VARIANTS["large"]
         assert vae.depths == variant_config["depths"]
         assert vae.filters == variant_config["filters"]
+
+    def test_create_vae_forwards_the_constructor_overrides(self):
+        """Keyword arguments reach the constructor, ``sampling_type`` among them."""
+        vae = create_vae(
+            input_shape=(32, 32, 1),
+            latent_dim=8,
+            variant="micro",
+            sampling_type="vmf",
+            kl_loss_weight=0.5,
+        )
+
+        assert vae.sampling_type == "vmf"
+        assert vae.kl_loss_weight == 0.5
 
     def test_create_vae_functional_test(self):
         """Test that created VAE is functional."""
@@ -664,24 +704,100 @@ class TestCreateVAEFactory:
         samples = vae.sample(num_samples=3)
         assert samples.shape == (3, 32, 32, 1)
 
-    def test_create_vae_returns_a_compiled_model(self):
-        """``create_vae``'s remaining contract: it compiles. It no longer self-tests.
 
-        The self-test it used to run lives at
-        ``TestVAESamplingTypes::test_create_vae_output_shapes``.
+def _compiled_as_the_removed_factories_did(vae: VAE, optimizer, learning_rate: float) -> VAE:
+    """The compile block ``create_vae`` and ``create_vae_from_config`` each carried."""
+    if isinstance(optimizer, str):
+        optimizer_instance = keras.optimizers.get(optimizer)
+        if hasattr(optimizer_instance, "learning_rate"):
+            optimizer_instance.learning_rate = learning_rate
+    else:
+        optimizer_instance = optimizer
+    jit_compile = False if vae.sampling_type == "vmf" else "auto"
+    vae.compile(optimizer=optimizer_instance, jit_compile=jit_compile)
+    return vae
+
+
+class TestCompileVae:
+    """``compile_vae`` reproduces what both removed factories compiled."""
+
+    @pytest.fixture
+    def requested_jit_compile(self, monkeypatch):
+        """The ``jit_compile`` ``compile_vae`` hands to ``VAE.compile``.
+
+        On a CPU ``jit_compile="auto"`` resolves to ``False`` inside Keras, so the
+        resolved ``model.jit_compile`` cannot tell a model that asked for XLA from
+        one that opted out; and ``VAE.compile`` forces ``False`` for vmf itself, so
+        what reaches ``keras.Model.compile`` cannot tell ``compile_vae``'s own rule
+        from the override. What ``compile_vae`` passes can.
         """
-        vae = create_vae(
-            input_shape=(64, 64, 3),
-            latent_dim=128,
-            variant="medium",
-            learning_rate=0.001,
-        )
+        requested = []
+        original = VAE.compile
 
-        # Model should be ready for training
-        assert vae.compiled_loss is not None
+        def recording(self, *args, **kwargs):
+            requested.append(kwargs.get("jit_compile", "<not passed>"))
+            return original(self, *args, **kwargs)
 
-    def test_create_vae_from_config(self):
-        """Test create_vae_from_config function."""
+        monkeypatch.setattr(VAE, "compile", recording)
+        return requested
+
+    @staticmethod
+    def _vae(mode: str) -> VAE:
+        return VAE(latent_dim=8, input_shape=(16, 16, 1), depths=2, filters=[8, 16],
+                   sampling_type=mode)
+
+    @pytest.mark.parametrize("mode", SAMPLING_MODES)
+    @pytest.mark.parametrize(
+        ("optimizer", "learning_rate"),
+        [("adam", 0.001), ("adam", 0.0005), ("sgd", 0.05)],
+    )
+    def test_compile_config_equals_the_removed_factories(
+        self, mode, optimizer, learning_rate
+    ):
+        compiled = compile_vae(self._vae(mode), optimizer=optimizer,
+                               learning_rate=learning_rate)
+        expected = _compiled_as_the_removed_factories_did(
+            self._vae(mode), optimizer, learning_rate)
+
+        assert keras.saving.serialize_keras_object(compiled.get_compile_config()) == (
+            keras.saving.serialize_keras_object(expected.get_compile_config()))
+        assert float(keras.ops.convert_to_numpy(compiled.optimizer.learning_rate)) == (
+            pytest.approx(learning_rate))
+
+    @pytest.mark.parametrize("mode", SAMPLING_MODES)
+    def test_the_default_is_adam_at_one_thousandth(self, mode):
+        vae = compile_vae(self._vae(mode))
+
+        assert type(vae.optimizer) is keras.optimizers.Adam
+        assert float(keras.ops.convert_to_numpy(vae.optimizer.learning_rate)) == (
+            pytest.approx(0.001))
+
+    @pytest.mark.parametrize(
+        ("mode", "expected"),
+        [("gaussian", "auto"), ("hypersphere", "auto"), ("vmf", False)],
+    )
+    def test_only_vmf_opts_out_of_xla(self, mode, expected, requested_jit_compile):
+        compile_vae(self._vae(mode))
+
+        assert requested_jit_compile == [expected]
+
+    def test_an_optimizer_instance_is_used_as_it_is(self):
+        optimizer = keras.optimizers.AdamW(learning_rate=0.002)
+
+        vae = compile_vae(self._vae("gaussian"), optimizer=optimizer, learning_rate=0.5)
+
+        assert vae.optimizer is optimizer
+        assert float(keras.ops.convert_to_numpy(optimizer.learning_rate)) == (
+            pytest.approx(0.002)), "learning_rate applies to an optimizer named by string only"
+
+    def test_it_returns_the_model_it_compiled(self):
+        vae = self._vae("gaussian")
+
+        assert compile_vae(vae) is vae
+        assert vae.compiled
+
+    def test_a_model_from_a_config_compiles_like_one_from_the_constructor(self):
+        """``create_vae_from_config`` was ``VAE(**config)`` plus this compile."""
         config = {
             "latent_dim": 128,
             "input_shape": (64, 64, 3),
@@ -690,14 +806,188 @@ class TestCreateVAEFactory:
             "kl_loss_weight": 0.01,
         }
 
-        vae = create_vae_from_config(config)
+        vae = compile_vae(VAE.from_config(config))
 
         assert isinstance(vae, VAE)
         assert vae.latent_dim == 128
-        assert vae._input_shape == (64, 64, 3)
+        assert vae.input_shape_config == (64, 64, 3)
         assert vae.depths == 3
         assert vae.filters == [32, 64, 128]
-        assert vae.compiled_loss is not None
+        assert vae.compiled
+
+    def test_the_recompile_override_survives_a_reload(self, tmp_path):
+        """``compile_from_config`` stays overridden, so a reloaded vmf model keeps XLA off."""
+        vae = compile_vae(self._vae("vmf"))
+        vae.fit(np.random.default_rng(0).uniform(size=(4, 16, 16, 1)).astype("float32"),
+                epochs=1, verbose=0)
+        path = str(tmp_path / "vmf.keras")
+        vae.save(path)
+
+        reloaded = keras.models.load_model(path)
+
+        assert reloaded.compiled
+        assert reloaded.jit_compile is False
+        assert "compile_from_config" in VAE.__dict__
+
+
+class TestVAEPretrained:
+    """``pretrained`` is the library's: a path loads, ``True`` is refused by name."""
+
+    SHAPE = (16, 16, 1)
+
+    @staticmethod
+    def _weights(model: VAE) -> dict:
+        return {w.path: keras.ops.convert_to_numpy(w) for w in model.weights}
+
+    @pytest.fixture
+    def archive(self, tmp_path) -> tuple:
+        keras.utils.set_random_seed(7)
+        donor = VAE.from_variant("micro", input_shape=self.SHAPE, latent_dim=8)
+        path = str(tmp_path / "donor.keras")
+        donor.save(path)
+        return donor, path
+
+    def test_true_names_the_variant(self):
+        with pytest.raises(NotImplementedError, match="VAE variant 'small'"):
+            VAE.from_variant("small", input_shape=self.SHAPE, pretrained=True)
+
+    def test_create_vae_refuses_true_the_same_way(self):
+        with pytest.raises(NotImplementedError, match="VAE variant 'micro'"):
+            create_vae(input_shape=self.SHAPE, variant="micro", pretrained=True)
+
+    def test_a_missing_path_is_a_file_not_found(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            VAE.from_variant(
+                "micro", input_shape=self.SHAPE, pretrained=str(tmp_path / "none.keras"))
+
+    def test_an_unknown_variant_still_lists_the_keys(self):
+        with pytest.raises(ValueError, match="Available variants"):
+            VAE.from_variant("giant", input_shape=self.SHAPE, pretrained=True)
+
+    def test_a_local_path_restores_every_weight(self, archive):
+        donor, path = archive
+
+        receiver = VAE.from_variant(
+            "micro", input_shape=self.SHAPE, latent_dim=8, pretrained=path)
+
+        want, got = self._weights(donor), self._weights(receiver)
+        assert want.keys() == got.keys()
+        assert all(np.array_equal(want[k], got[k]) for k in want)
+        x = np.random.default_rng(0).uniform(size=(2, *self.SHAPE)).astype("float32")
+        np.testing.assert_array_equal(
+            keras.ops.convert_to_numpy(donor.encode(x)[0]),
+            keras.ops.convert_to_numpy(receiver.encode(x)[0]))
+
+    def test_the_factory_forwards_the_path(self, archive):
+        donor, path = archive
+
+        receiver = create_vae(
+            input_shape=self.SHAPE, latent_dim=8, variant="micro", pretrained=path)
+
+        want, got = self._weights(donor), self._weights(receiver)
+        assert all(np.array_equal(want[k], got[k]) for k in want)
+
+    def test_load_pretrained_weights_loads_into_an_existing_model(self, archive):
+        donor, path = archive
+        receiver = VAE.from_variant("micro", input_shape=self.SHAPE, latent_dim=8)
+        assert not np.array_equal(
+            self._weights(donor)["encoder_z_mean/kernel"],
+            self._weights(receiver)["encoder_z_mean/kernel"])
+
+        receiver.load_pretrained_weights(path)
+
+        assert np.array_equal(
+            self._weights(donor)["encoder_z_mean/kernel"],
+            self._weights(receiver)["encoder_z_mean/kernel"])
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [{"latent_dim": 4}, {"use_bias": False}, {"activation": "relu"},
+         {"sampling_type": "hypersphere"}],
+        ids=["latent_dim", "use_bias", "activation", "sampling_type"],
+    )
+    def test_a_checkpoint_of_another_architecture_is_refused_and_copies_nothing(
+        self, archive, overrides
+    ):
+        _, path = archive
+        kwargs = {"latent_dim": 8, **overrides}
+        receiver = VAE.from_variant("micro", input_shape=self.SHAPE, **kwargs)
+        before = self._weights(receiver)
+
+        with pytest.raises(ValueError):
+            receiver.load_pretrained_weights(path)
+
+        after = self._weights(receiver)
+        assert all(np.array_equal(before[k], after[k]) for k in before)
+
+    def test_the_layer_check_alone_refuses_another_latent_dim(self, archive):
+        """With the configuration comparison off, the layers still say no.
+
+        The comparison is the first line of defence and an archive without a readable
+        config skips it; the layer rule is the second, and a VAE has no layer that may
+        differ (``_NO_HEAD_PATTERN`` matches none).
+        """
+        _, path = archive
+        receiver = VAE.from_variant("micro", input_shape=self.SHAPE, latent_dim=4)
+
+        with pytest.raises(ValueError, match="encoder_z_mean"):
+            load_pretrained_checkpoint(
+                receiver, path, self.SHAPE,
+                head_pattern=vae_module._NO_HEAD_PATTERN,
+                ignore_config_keys=(*vae_module._NON_STRUCTURAL_CONFIG_KEYS, "latent_dim"),
+            )
+
+    def test_the_loss_weight_does_not_make_a_checkpoint_foreign(self, archive):
+        """``kl_loss_weight`` changes the objective, not the weights or the function."""
+        _, path = archive
+
+        receiver = VAE.from_variant(
+            "micro", input_shape=self.SHAPE, latent_dim=8, kl_loss_weight=0.5,
+            pretrained=path)
+
+        assert receiver.kl_loss_weight == 0.5
+
+
+class TestVAEKernelInitializer:
+    """The initializer is stored as a spec, so no two layers share one instance."""
+
+    def test_a_string_is_stored_unchanged(self):
+        vae = VAE(latent_dim=4, input_shape=(16, 16, 1), depths=1,
+                  kernel_initializer="glorot_normal")
+
+        assert vae.kernel_initializer == "glorot_normal"
+
+    def test_an_instance_is_stored_as_json_data(self):
+        vae = VAE(latent_dim=4, input_shape=(16, 16, 1), depths=1,
+                  kernel_initializer=keras.initializers.HeNormal())
+
+        assert isinstance(vae.kernel_initializer, dict)
+        assert json.loads(json.dumps(vae.get_config()))["kernel_initializer"] == (
+            vae.kernel_initializer)
+
+    def test_the_spec_round_trips_through_the_config(self):
+        vae = VAE(latent_dim=4, input_shape=(16, 16, 1), depths=1,
+                  kernel_initializer=keras.initializers.RandomNormal(stddev=0.3))
+
+        rebuilt = VAE.from_config(vae.get_config())
+
+        assert rebuilt.kernel_initializer == vae.kernel_initializer
+        assert rebuilt.kernel_initializer["config"]["stddev"] == 0.3
+
+    def test_no_two_sites_given_an_instance_replay_one_draw(self):
+        """A seedless instance handed to every conv would replay one sample at each."""
+        keras.utils.set_random_seed(3)
+        vae = VAE(latent_dim=8, input_shape=(32, 32, 3), depths=2, filters=[8, 16],
+                  steps_per_depth=2, kernel_initializer=keras.initializers.HeNormal())
+
+        pairs, compared = replayed_pairs(vae)
+
+        assert compared > 0, "the model exposes fewer than two kernels"
+        assert not pairs, f"{len(pairs)} of {compared} kernel pairs replay one draw: {pairs[:2]}"
+
+    def test_an_invalid_initializer_is_refused_at_construction(self):
+        with pytest.raises(TypeError, match="initializer"):
+            VAE(latent_dim=4, input_shape=(16, 16, 1), depths=1, kernel_initializer=3.5)
 
 
 class TestVAEIntegration:
@@ -706,7 +996,8 @@ class TestVAEIntegration:
     def test_end_to_end_training_workflow(self):
         """Test complete training workflow."""
         # Create model
-        vae = create_vae(input_shape=(28, 28, 1), latent_dim=64, variant="small")
+        vae = compile_vae(
+            create_vae(input_shape=(28, 28, 1), latent_dim=64, variant="small"))
 
         # Create synthetic dataset
         x_train = np.random.rand(100, 28, 28, 1).astype(np.float32)
@@ -762,7 +1053,8 @@ class TestVAEIntegration:
 
     def test_loss_components_integration(self):
         """Test that loss components integrate correctly during training."""
-        vae = create_vae(input_shape=(28, 28, 1), latent_dim=32, variant="micro")
+        vae = compile_vae(
+            create_vae(input_shape=(28, 28, 1), latent_dim=32, variant="micro"))
 
         # Test data
         test_data = np.random.rand(16, 28, 28, 1).astype(np.float32)
@@ -1110,7 +1402,7 @@ class TestVAESamplingTypes:
 
         assert calls == [], (
             f"create_vae invoked the model {len(calls)} time(s). The factory "
-            "builds and compiles; it does not run. Its old self-test forward "
+            "builds; it does not run. Its old self-test forward "
             "pass moved to test_create_vae_output_shapes."
         )
 

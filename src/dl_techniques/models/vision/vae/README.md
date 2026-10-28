@@ -216,7 +216,7 @@ tensor itself otherwise, so `validation_data=(x_test,)` is the right one-element
 | `filters` | `None` | One channel count per depth. `None` gives `[32, 64, ...]`. |
 | `kl_loss_weight` | `0.01` | The `beta` of beta-VAE. |
 | `sampling_type` | `"gaussian"` | `"gaussian"`, `"hypersphere"` or `"vmf"`. |
-| `kernel_initializer` | `"he_normal"` | Initializer for conv and dense kernels. |
+| `kernel_initializer` | `"he_normal"` | Initializer for conv and dense kernels. A name or a config dict is stored as it is and an `Initializer` instance is serialized once; every layer resolves its own initializer from that spec, so no two kernels replay one draw and `get_config()` is JSON data. |
 | `kernel_regularizer` | `None` | Optional regularizer. |
 | `use_batch_norm` | `True` | Batch normalization inside the residual blocks. |
 | `use_bias` | `True` | Bias terms in the convolutions. |
@@ -226,8 +226,10 @@ tensor itself otherwise, so `validation_data=(x_test,)` is the right one-element
 
 **Key methods**:
 
-- `VAE.from_variant(variant, input_shape, latent_dim=None, **kwargs)` — build a named size.
-  An explicit keyword argument always overrides the variant's value.
+- `VAE.from_variant(variant, input_shape, latent_dim=None, pretrained=False, **kwargs)` — build a
+  named size. An explicit keyword argument always overrides the variant's value. `pretrained` is a
+  local `.keras` path (§6.4); `True` raises `NotImplementedError` naming the variant.
+- `load_pretrained_weights(path)` — copy a local checkpoint into the built model (§6.4).
 - `encode(images)` — returns the `(z_mean, z_log_var)` pair.
 - `decode(z)` — decodes latent vectors to images.
 - `sample(num_samples)` — draws from *this mode's* true prior (`N(0, I)` for gaussian,
@@ -242,10 +244,12 @@ and `"z"`.
 
 | Function | Purpose |
 | :--- | :--- |
-| `create_vae(input_shape, latent_dim, variant="small", optimizer="adam", learning_rate=0.001, **kwargs)` | Build **and compile** a variant in one call. |
-| `create_vae_from_config(config)` | Build and compile from a configuration dictionary. |
+| `create_vae(input_shape, latent_dim=None, variant="small", pretrained=False, **kwargs)` | Build a variant. It is `VAE.from_variant` and compiles nothing; `latent_dim=None` takes the variant's default. |
+| `compile_vae(model, optimizer="adam", learning_rate=0.001)` | Compile a built `VAE` and return it. A string `optimizer` is built with `learning_rate`; an optimizer instance is used as it is. |
 
-Both disable `jit_compile` automatically when `sampling_type="vmf"` (see §10).
+`compile_vae` passes `jit_compile=False` when `sampling_type="vmf"` and `"auto"` otherwise (see §10).
+`create_vae` used to compile the model and `create_vae_from_config` to build one from a dictionary; the
+second is `VAE.from_config(config)` (or `VAE(**config)`) followed by `compile_vae`.
 
 ### 6.3 Sampling Layers
 
@@ -255,6 +259,34 @@ Both disable `jit_compile` automatically when `sampling_type="vmf"` (see §10).
 | `HypersphereSampling` | `dl_techniques.layers.generative.sampling.HypersphereSampling` |
 | `VMFSampling` | `dl_techniques.layers.generative.sampling.VMFSampling` |
 | `vmf_kl_divergence` | `dl_techniques.layers.generative.sampling.vmf_kl_divergence` |
+
+### 6.4 Pretrained weights
+
+None are distributed: `pretrained=True` raises `NotImplementedError` naming the variant
+(`VAE variant 'small'`) rather than returning a random model. `pretrained="<path>"` (or
+`model.load_pretrained_weights(path)`) copies a local `.keras` checkpoint into the built model through
+the shared `load_pretrained_checkpoint`. A VAE has no task head, so every layer must be restored: a
+checkpoint of another `latent_dim`, width, `depths`, `sampling_type`, activation or bias setting raises
+`ValueError` and copies no weight. The archive's own configuration is compared too; the loss weight
+`kl_loss_weight`, the initializer, the regularizer and `dropout_rate` are not, because none of them
+changes the weights or the function a checkpoint computes.
+
+**Archive break (2026-10-28).** Measured by saving every roster subject (`small`, `micro`, a two-step
+config, a no-BN no-bias config) in a separate process from the old revision and restoring it with the
+current code (`git archive`, `python -I`); the VAE samples on every call, so outputs are compared on the
+deterministic `z_mean`, `z_log_var` and `decode(z_mean)`, at `atol=0`:
+
+- From `be92a74eb` (the encoder stem already one `ConvStem` named `encoder_stem`): `keras.models.load_model`
+  restores all four, with every weight equal by `w.path` (87, 87, 135 and 26 tensors) and equal
+  deterministic outputs. The config key `input_shape` is unchanged; `kernel_initializer` is read as a spec.
+- From `20b48aba6^` (before the stem migration, `encoder_stem_conv` and `encoder_stem_bn` as two layers):
+  neither `load_model` nor `load_weights` restores anything (`Layer 'encoder_stem_conv1' expected 2
+  variables, but received 0 variables during loading`), because the stem is now one tracked layer. The
+  weights transplant by `w.path` with two renames, `encoder_stem_conv/*` to `encoder_stem/encoder_stem_conv1/*`
+  and `encoder_stem_bn/*` to `encoder_stem/encoder_stem_norm1/*`: all 87, 87, 135 and 26 tensors are
+  assigned and the deterministic outputs are equal.
+- Transcripts: `plans/plan-2026-10-26T125959-7af851e5/scratch_iter2/step15/archive_vae_values.txt` and
+  `scratch_iter2/archive/transcripts.txt`.
 
 ---
 
@@ -360,11 +392,11 @@ to `~0` (a uniform latent) and reconstruction stalls.
 
 ```python
 import keras
-from dl_techniques.models.vision.vae.model import VAE
+from dl_techniques.models.vision.vae.model import VAE, compile_vae
 
 keras.mixed_precision.set_global_policy("mixed_float16")
 model = VAE.from_variant("large", input_shape=(32, 32, 3), latent_dim=64)
-model.compile(optimizer="adam")
+compile_vae(model)
 ```
 
 The reconstruction term, the KL and the loss total are computed in float32 by design under
@@ -377,8 +409,9 @@ so a `LossScaleOptimizer` does not silently divide the whole weight update by th
 
 `jit_compile=True` works for `gaussian` and `hypersphere`. It does **not** work for `vmf`:
 the rejection sampler uses `keras.random.beta`, whose `StatelessRandomGammaV3` kernel has no
-XLA-GPU implementation in TF 2.18. `VAE.compile()` forces `jit_compile=False` for that mode,
-and vMF training runs roughly 5-10x slower per epoch as a result.
+XLA-GPU implementation in TF 2.18. `compile_vae` asks for `jit_compile=False` for that mode, and
+`VAE.compile()` forces it on every compile path, a reload included, so a direct `model.compile(...)`
+cannot turn XLA on; vMF training runs roughly 5-10x slower per epoch as a result.
 
 ---
 
@@ -453,6 +486,13 @@ MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_models/test_vae -q
   per depth; override both together or neither.
 - **`ValueError: Input dimensions must be at least 8x8`.** The encoder cannot downsample
   smaller inputs.
+- **`NotImplementedError: Pretrained VAE variant ...`.** `pretrained=True` raises `NotImplementedError`
+  because no VAE weights are distributed; pass the path of a local `.keras` checkpoint (§6.4).
+- **`ValueError: ... was saved from another architecture than this VAE`.** The checkpoint's
+  `latent_dim`, `depths`, `sampling_type`, activation or another structural key differs from the
+  model's; build the model with the checkpoint's configuration.
+- **`AttributeError: ... has no attribute 'optimizer'` / `fit` asks for a compiled model.** `create_vae`
+  returns an uncompiled model; call `compile_vae(model)`.
 - **vMF training is slow.** Expected: that mode cannot be XLA-compiled (§10).
 
 ---

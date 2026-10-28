@@ -1252,6 +1252,8 @@ ANCHOR_TOKENS: Dict[str, Dict[str, int]] = {
         "plan-2026-08-19T163559-499b6f0e/D-078": 1,
         "plan-2026-08-19T163559-499b6f0e/D-089": 2,
         "plan-2026-08-22T035419-a11304c8/D-014": 1,
+        "plan-2026-10-26T125959-7af851e5/D-033": 1,
+        "plan-2026-10-26T125959-7af851e5/D-048": 1,
         "plan_2026-06-04_6196678d/D-003": 1,
         "plan_2026-06-04_6196678d/D-005": 1,
         "plan_2026-06-04_6196678d/D-007": 1,
@@ -1319,20 +1321,6 @@ class Open:
 
 #: Every row that fails today, keyed ``(rule, subject-or-module key)``.
 LEDGER: Dict[Tuple[str, str], Open] = {
-    ("h9_factory_is_one_delegating_return", "vae"): Open(
-        "the ConvUNext and VAE migration",
-        '6 violation(s): create_vae has no `pretrained` parameter; create_vae is not one `return '
-        'Class.from_variant(..., **kwargs)`; create_vae_from_config has no `input_shape` '
-        'parameter; create_vae_from_config has no `pretrained` parameter; create_vae_from_config '
-        'does not end in **kwargs; create_vae_from_config is not one `return '
-        'Class.from_variant(..., **kwargs)`',
-        ('create_vae has no `pretrained` parameter',
-         'create_vae is not one `return Class.from_variant(..., **kwargs)`',
-         'create_vae_from_config has no `input_shape` parameter',
-         'create_vae_from_config has no `pretrained` parameter',
-         'create_vae_from_config does not end in **kwargs',
-         'create_vae_from_config is not one `return Class.from_variant(..., '
-         '**kwargs)`')),
     ("h1_factories_follow_the_classes", "rbf_protonet"): Open(
         "the RBFProtoNet and UcaEncoder migration",
         '1 violation(s): `def create_rbf_protonet` (line 487) sits between classes',
@@ -1345,24 +1333,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the CapsNet migration",
         '1 violation(s): line 25: from keras import ...',
         ('from keras import ...',)),
-    ("h10_stored_attribute_names", "convunext_stem"): Open(
-        "the ConvUNext and VAE migration",
-        '1 violation(s): argument `activation` is stored as `self.activation_name`, expected '
-        '`self.activation`',
-        ('argument `activation` is stored as `self.activation_name`',)),
-    ("h11_from_config_does_real_work", "convunext_stem"): Open(
-        "the ConvUNext and VAE migration",
-        '1 violation(s): `from_config` only copies the dict and calls `cls(**config)`; delete it',
-        ('`from_config` only copies the dict and calls `cls(**config)`; delete it',)),
-    ("h4_no_logging_outside_init", "vae"): Open(
-        "the ConvUNext and VAE migration",
-        '1 violation(s): `summary` writes 9 logger call(s)',
-        ('`summary` writes',)),
-    ("h10_stored_attribute_names", "vae"): Open(
-        "the ConvUNext and VAE migration",
-        '1 violation(s): argument `input_shape` is stored as `self._input_shape`, expected '
-        '`self.input_shape_config`',
-        ('argument `input_shape` is stored as `self._input_shape`',)),
     ("h10_num_classes_first_kwargs_last", "rbf_protonet"): Open(
         "the RBFProtoNet and UcaEncoder migration",
         '1 violation(s): `num_classes` is parameter 10, not the first',
@@ -1412,32 +1382,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the CapsNet migration",
         '1 violation(s): constructor argument `stem` should be `stem_type`',
         ('constructor argument `stem` should be `stem_type`',)),
-    ('h11_get_config_has_the_reference_form', 'convunext_stem'): Open(
-        'the ConvUNext and VAE migration',
-        '2 violation(s): `get_config` does not bind `base_config = '
-        'super().get_config()`; `get_config` does not end in `return {**base_config, '
-        '**config}`',
-        ('`get_config` does not bind `base_config = super().get_config()`',
-         '`get_config` does not end in `return {**base_config, **config}`')),
-    ('h15_initializer_storage', 'convunext_stem'): Open(
-        'the ConvUNext and VAE migration',
-        '1 violation(s): `self.kernel_initializer` stores '
-        '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',
-        ('`self.kernel_initializer` stores '
-         '`keras.initializers.get(kernel_initializer)`, not an `initializer_spec(...)`',)),
-    ('h11_get_config_has_the_reference_form', 'vae'): Open(
-        'the ConvUNext and VAE migration',
-        '2 violation(s): `get_config` does not bind `base_config = '
-        'super().get_config()`; `get_config` does not end in `return {**base_config, '
-        '**config}`',
-        ('`get_config` does not bind `base_config = super().get_config()`',
-         '`get_config` does not end in `return {**base_config, **config}`')),
-    ('h15_initializer_storage', 'vae'): Open(
-        'the ConvUNext and VAE migration',
-        '1 violation(s): `self.kernel_initializer` stores `kernel_initializer`, not '
-        'an `initializer_spec(...)`',
-        ('`self.kernel_initializer` stores `kernel_initializer`, not an '
-         '`initializer_spec(...)`',)),
     ('h11_get_config_has_the_reference_form', 'uca_encoder'): Open(
         'the RBFProtoNet and UcaEncoder migration',
         '2 violation(s): `get_config` does not bind `base_config = '
@@ -2203,7 +2147,8 @@ VACUOUS: Dict[Tuple[str, str], str] = {
         "capsnet", "capsnet_v2")},
     **{("h11_from_config_does_real_work", key): _NO_FROM_CONFIG for key in (
         "resnet", "cliffordnet", "hierarchical", "mobilenet_v1", "mobilenet_v2", "mobilenet_v3",
-        "mobilenet_v4", "convnext_v1", "convnext_v2", "rad_convnet", "uca_encoder")},
+        "mobilenet_v4", "convnext_v1", "convnext_v2", "rad_convnet", "convunext_stem", "vae",
+        "uca_encoder")},
     **{("h3_builders_assign", key): _NO_BUILDERS for key in ("convunext_stem", "uca_encoder")},
     **{("h2_call_takes_inputs", key): _NO_CALL for key in ("squeezenet_v1", "squeezenet_v2", "vae")},
     **{("h10_block_container_names", key): _NO_CONTAINER for key in ("convunext_stem", "vae")},

@@ -412,6 +412,15 @@ def test_the_population_the_rule_was_derived_from_is_still_the_population():
         # (test_the_vision_classifiers_share_one_runtime_contract.py). Both
         # halves checked.
         "squeezenet",
+        # vae: README section 6.4 and the troubleshooting list name
+        # `pretrained=True` only to say it raises `NotImplementedError` naming the
+        # variant, beside the working `pretrained="<path>.keras"` form;
+        # `VAE.from_variant` (and `create_vae`, which delegates) really do, through
+        # `pretrained_path_or_raise`, verified by EXECUTING both with
+        # `pretrained=True` (tests/test_models/test_vae/test_model.py::
+        # TestVAEPretrained) and by the behavioural arm of
+        # test_package_api_contract.py. Both halves checked.
+        "vae",
         # zamba2: README:9-10/170/175 name `pretrained=True` only to say it
         # raises; `pretrained_path_or_raise` (utils/weight_transfer.py, called
         # from model.py:932) really does `raise NotImplementedError`, verified

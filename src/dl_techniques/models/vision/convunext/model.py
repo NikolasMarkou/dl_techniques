@@ -54,6 +54,7 @@ from dl_techniques.initializers import (
     create_gabor_conv2d,
     create_gabor_depthwise_conv2d,
 )
+from dl_techniques.initializers.clone import initializer_spec
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
@@ -98,12 +99,6 @@ class ConvUNextStem(keras.layers.Layer):
 
     Stride is 1 and padding is ``'same'``, so the spatial dimensions are kept.
 
-    Input shape:
-        4D tensor ``(batch, height, width, channels)``.
-
-    Output shape:
-        4D tensor ``(batch, height, width, filters)``.
-
     :param filters: Number of output filters.
     :type filters: int
     :param kernel_size: Spatial size of the convolution kernel. Defaults to 7.
@@ -128,9 +123,11 @@ class ConvUNextStem(keras.layers.Layer):
         (the ConvNeXt-V2 / bias-free choice); ``'layer_norm'`` reproduces the
         standard ConvNeXt stem.
     :type stem_normalization: str
-    :param kernel_initializer: Initializer for the convolution kernel. Defaults to
-        ``'he_normal'``.
-    :type kernel_initializer: str or keras.initializers.Initializer
+    :param kernel_initializer: Initializer for the convolution kernel, a name, a
+        config dict or an ``Initializer`` instance. Defaults to ``'he_normal'``. It is
+        stored as a string or a serialized dict (an instance is serialized once), so
+        ``get_config()`` is JSON data.
+    :type kernel_initializer: str or dict or keras.initializers.Initializer
     :param kernel_regularizer: Optional regularizer for the convolution kernel.
     :type kernel_regularizer: str or keras.regularizers.Regularizer or None
     :param kwargs: Additional arguments forwarded to ``keras.layers.Layer``. A
@@ -138,6 +135,14 @@ class ConvUNextStem(keras.layers.Layer):
         so the convolution, normalization and activation compute in it too.
     :raises ValueError: If ``activation`` is a built Layer holding weights or a
         Layer whose class Keras cannot locate.
+    :raises TypeError: If ``kernel_initializer`` is not a string, a dict or an
+        ``Initializer`` instance.
+
+    Input shape:
+        4D tensor ``(batch, height, width, channels)``.
+
+    Output shape:
+        4D tensor ``(batch, height, width, filters)``.
     """
 
     def __init__(
@@ -147,17 +152,17 @@ class ConvUNextStem(keras.layers.Layer):
             activation: Union[str, keras.layers.Layer] = 'gelu',
             use_bias: bool = True,
             stem_normalization: str = 'global_response_norm',
-            kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
+            kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = 'he_normal',
             kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
         self.filters = filters
         self.kernel_size = kernel_size
-        self.activation_name = deserialize_activation(activation)
+        self.activation = deserialize_activation(activation)
         self.use_bias = use_bias
         self.stem_normalization = stem_normalization
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.kernel_initializer = initializer_spec(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         # D-277: the exact gelu / leaky_relu are bit-identical to stock at float32.
@@ -170,7 +175,7 @@ class ConvUNextStem(keras.layers.Layer):
             use_bias=self.use_bias,
             num_convs=1,
             normalization_type=self.stem_normalization,
-            activation_type=substitute_exact(self.activation_name),
+            activation_type=substitute_exact(self.activation),
             use_pooling=False,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
@@ -224,32 +229,20 @@ class ConvUNextStem(keras.layers.Layer):
         :return: Configuration dictionary containing every constructor parameter.
         :rtype: dict
         """
-        config = super().get_config()
-        config.update({
+        base_config = super().get_config()
+        config = {
             'filters': self.filters,
             'kernel_size': self.kernel_size,
             # DECISION plan_2026-06-21_eb7fd829/D-005: serialize a layer-instance stem
             # activation so LeakyReLU(alpha) round-trips. See decisions.md.
-            'activation': serialize_activation(self.activation_name),
+            'activation': serialize_activation(self.activation),
             'use_bias': self.use_bias,
             'stem_normalization': self.stem_normalization,
-            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'kernel_initializer': self.kernel_initializer,
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
-        })
-        return config
+        }
+        return {**base_config, **config}
 
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> 'ConvUNextStem':
-        """Rebuild the layer, reviving a layer-instance activation from its dict form.
-
-        :param config: Configuration dictionary produced by ``get_config``.
-        :type config: dict
-        :return: Reconstructed layer instance.
-        :rtype: ConvUNextStem
-        """
-        config = dict(config)
-        # keras.*.get(...) accepts a serialized dict in Keras 3, so these pass through.
-        return cls(**config)
 
 # ---------------------------------------------------------------------
 # Spatial wrapper around bias-free LinearAttention (4D <-> 3D)

@@ -8,10 +8,9 @@ per-epoch reconstructions and latent space visualizations.
 import os
 import math
 import keras
-import argparse
 import matplotlib
 import numpy as np
-from typing import Tuple, Dict, Any, Optional
+from typing import Optional
 
 matplotlib.use('Agg')
 import seaborn as sns
@@ -20,7 +19,7 @@ import matplotlib.pyplot as plt
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.vision.vae.model import VAE, create_vae
+from dl_techniques.models.vision.vae.model import VAE, compile_vae, create_vae
 from dl_techniques.layers.generative.sampling import Sampling, HypersphereSampling, VMFSampling
 
 from train.common import (
@@ -28,7 +27,6 @@ from train.common import (
     create_base_argument_parser,
     create_callbacks,
     generate_training_curves,
-    load_dataset,
     set_seeds,
     save_config_json,
 )
@@ -306,9 +304,9 @@ def train_model(args):
     logger.info(f"Data: {x_train.shape[0]} train, {x_test.shape[0]} test, shape={input_shape}")
 
     # Build a REAL LR schedule into the optimizer. Previously the saved config
-    # advertised lr_schedule/learning_rate but NEITHER was consumed: create_vae
-    # built a plain adam at constant LR and use_lr_schedule=False disabled the
-    # callback path, so the LR was FLAT for the whole run. We now bake the
+    # advertised lr_schedule/learning_rate but NEITHER was consumed: the model
+    # was compiled with a plain adam at constant LR and use_lr_schedule=False
+    # disabled the callback path, so the LR was FLAT for the whole run. We now bake the
     # schedule into the optimizer (NOT a callback -- see create_callbacks below).
     # Horizon uses the ACTUAL train length here (post smoke-subset) so smoke gets
     # the right total_steps; smoke forces epochs=1 which is fine.
@@ -342,8 +340,8 @@ def train_model(args):
         f"({epochs} epochs x {steps_per_epoch} steps/epoch)"
     )
 
-    # Create model. Pass the optimizer INSTANCE (with the schedule baked in) so
-    # create_vae uses it as-is instead of falling back to its constant-LR default.
+    # Create model, then compile it with the optimizer INSTANCE (schedule baked in)
+    # so compile_vae uses it as-is instead of falling back to its constant-LR default.
     arch_overrides = {}
     if args.depths is not None:
         arch_overrides['depths'] = args.depths
@@ -356,12 +354,13 @@ def train_model(args):
         input_shape=input_shape,
         latent_dim=args.latent_dim,
         variant=args.variant,
-        optimizer=opt,
         sampling_type=args.sampler,
         kl_loss_weight=args.kl_loss_weight,
         **arch_overrides,
     )
+    compile_vae(model, optimizer=opt)
     model.summary(print_fn=logger.info)
+    logger.info(f"Effective beta (sum-over-pixels ELBO): {model.effective_kl_beta:.4g}")
 
     # Callbacks — VAE monitors val_total_loss, not val_accuracy.
     # Include the sampler arm in model_name so the 3 comparison arms produce
