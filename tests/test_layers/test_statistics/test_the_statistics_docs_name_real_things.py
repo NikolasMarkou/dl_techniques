@@ -202,6 +202,7 @@ def test_the_stated_outside_importers_are_the_derived_ones():
         "src/dl_techniques/layers/adapters/gated_adapter.py",
         "src/dl_techniques/layers/time_series/forecasting_layers.py",
         "src/dl_techniques/models/time_series/mdn/model.py",
+        "src/train/capsnet/train_capsnet.py",
         "src/train/common/conformal.py",
         "src/train/time_series/mdn/export.py",
         "src/train/time_series/mdn/train_mdn.py",
@@ -230,12 +231,17 @@ def test_the_docstring_style_claim_is_true():
 
 
 def test_the_from_keras_import_claim_is_true():
-    top_level = [m for m in STATS.glob("*.py") if m.name != "__init__.py"]
+    # The eight older modules say `from keras import ops`; probability_logits.py (new code)
+    # says `import keras` only.
+    top_level = [m for m in STATS.glob("*.py")
+                 if m.name not in ("__init__.py", "probability_logits.py")]
     using = [m for m in top_level if re.search(r"^from keras import", m.read_text(), re.M)]
     assert len(using) == len(top_level), (
         f"{len(using)} of {len(top_level)} modules use `from keras import`; the AGENTS claim "
         f"says all of them do. Update it."
     )
-    assert f"All {NUMBER_WORDS[len(top_level)]} top-level" in _text("statistics/AGENTS.md")
+    assert f"All {NUMBER_WORDS[len(top_level)]} older top-level" in _text("statistics/AGENTS.md")
+    newer = (STATS / "probability_logits.py").read_text()
+    assert not re.search(r"^from keras import", newer, re.M)
     for module in CONF.glob("*.py"):
         assert not re.search(r"^from keras import", module.read_text(), re.M), module.name

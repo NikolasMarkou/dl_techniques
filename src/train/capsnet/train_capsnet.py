@@ -13,6 +13,14 @@ train for early stopping and checkpoint selection and the official val split is 
 test set, evaluated whole; the reconstruction callback and the final figures use the
 first ``--eval-samples`` images of those two splits. Inputs are scaled to [0, 1]
 because the decoder ends in a sigmoid and the reconstruction loss subtracts the input.
+
+After training, conformal prediction sets are fitted on the whole test split with the best
+weights (``--conformal-alpha``, ``--no-conformal``), for every dataset. The model emits
+capsule lengths in [0, 1], not logits, and the set layer applies a softmax, which over values
+that differ by at most 1 is nearly uniform; the exported ``conformal_model.keras`` therefore
+wraps the model with ``ProbabilityLogits`` (the log-odds of each length, same class order).
+The test split never chose the model when ``--validation-split`` is above 0 (ImageNet always),
+and the record says which case applies.
 """
 
 import os
@@ -24,8 +32,10 @@ matplotlib.use('Agg')
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
+from pathlib import Path
 from typing import Tuple, Dict, Any, Optional
 
+from dl_techniques.layers.statistics.probability_logits import ProbabilityLogits
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.vision.capsnet import create_capsnet
 from train.common import (
@@ -40,6 +50,7 @@ from train.common import (
     setup_gpu,
 )
 from train.common.callbacks import LearningRateLogger
+from train.common.conformal import add_conformal_arguments, run_conformal
 
 plt.style.use('seaborn-v0_8')
 sns.set_palette("husl")
@@ -690,6 +701,60 @@ def _clean_test_results(test_results, model) -> Dict[str, float]:
     return cleaned
 
 
+def fit_conformal_sets(
+        model: keras.Model,
+        args,
+        test_x: Any,
+        test_y: Optional[np.ndarray],
+        input_shape: Tuple[int, ...],
+        results_dir: str,
+) -> Dict[str, Any]:
+    """Fit conformal prediction sets on the whole test split and export them.
+
+    ``model`` holds the best weights (EarlyStopping restored them). Its dict output is
+    reduced to the capsule lengths and mapped to log-odds, so the exported model is a
+    single-output classifier whose softmax is not flat. ``run_conformal`` needs integer
+    labels, so the one-hot labels are argmaxed. The wrapper also runs the decoder on every
+    batch (its output is unused): one forward pass over the test split.
+
+    Args:
+        model: Trained CapsNet.
+        args: Parsed arguments (``dataset``, ``conformal_alpha``, ``validation_split``,
+            ``seed``, ``batch_size``).
+        test_x: Test images, or the batched ``(images, one-hot labels)`` dataset when
+            ``test_y`` is ``None`` (ImageNet).
+        test_y: One-hot test labels, or ``None`` for the dataset form.
+        input_shape: Per-sample input shape.
+        results_dir: Run directory for ``conformal.json`` and ``conformal_model.keras``.
+
+    Returns:
+        The record written to ``conformal.json``.
+    """
+    inputs = keras.Input(tuple(input_shape))
+    lengths = model(inputs)["length"]
+    classifier = keras.Model(
+        inputs, ProbabilityLogits(name="length_logits")(lengths), name="capsnet_length_logits"
+    )
+    if test_y is None:
+        dataset = test_x.map(lambda x, y: (x, tf.argmax(y, axis=-1)))
+        selected_on = "the held-out slice of train"
+    else:
+        dataset = tf.data.Dataset.from_tensor_slices(
+            (test_x, np.argmax(test_y, axis=-1))).batch(args.batch_size)
+        selected_on = f"validation_split={args.validation_split} of the train set"
+    # With --validation-split 0 the "validation" data IS the test split, so the checkpoint
+    # was chosen on the calibration data.
+    overlaps = args.dataset != 'imagenet' and args.validation_split == 0
+    return run_conformal(
+        classifier, dataset, alpha=args.conformal_alpha, seed=args.seed,
+        out_dir=Path(results_dir), input_shape=tuple(input_shape),
+        model_name=f"capsnet_{args.dataset}",
+        weights="best val_loss epoch, selected on the test split itself (validation_split 0)"
+                if overlaps else f"best val_loss epoch, selected on {selected_on}",
+        selection_overlaps_calibration=overlaps,
+    )
+
+
 def train_model(args) -> None:
     """Main CapsNet training function."""
     setup_gpu(gpu_id=args.gpu)
@@ -759,6 +824,10 @@ def train_model(args) -> None:
     for name, value in test_results_dict.items():
         logger.info(f"  {name}: {value:.4f}")
 
+    # Conformal sets, over the whole test split with the best weights. Before the figures.
+    if not args.no_conformal:
+        fit_conformal_sets(model, args, test_x, test_y, model_config['input_shape'], results_dir)
+
     # Visualizations
     x_test, y_test = test_head
     generate_final_visualizations(
@@ -820,6 +889,7 @@ def main():
                         help='Used only when --dataset imagenet: images of the selection and '
                              'test splits kept in memory for the reconstruction figures '
                              f'(default: {DEFAULT_EVAL_SAMPLES}); the test metrics use all of them')
+    add_conformal_arguments(parser)
     parser.add_argument('--max-samples', type=int, default=None,
                         help='Used only when --dataset imagenet: cap train and test at this '
                              'many images (smoke runs); the selection split is not capped')

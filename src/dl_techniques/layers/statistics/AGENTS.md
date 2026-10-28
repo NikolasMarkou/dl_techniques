@@ -3,7 +3,7 @@
 Probability and statistics layers for `dl_techniques`: distribution-valued outputs (MDN, conditional
 normalizing flow), eigendecomposition-fitted feature layers (deep kernel PCA, invertible kernel PCA and
 its denoiser), a reversible scaler, a moving standard deviation filter, a residual-ACF diagnostic, a
-per-token support gate, and the `conformal/` sub-package. The parent `../AGENTS.md` owns the cross-package
+per-token support gate, a probability-to-log-odds map, and the `conformal/` sub-package. The parent `../AGENTS.md` owns the cross-package
 rules; `README.md` is the user-facing tour; `conformal/AGENTS.md` covers the sub-package.
 
 **Registration.** Every class registers through
@@ -36,6 +36,7 @@ same-named classes claim one slot. The helper also binds `Custom>ClassName` as a
 | `invertible_kernel_pca.py` | `InvertibleKernelPCA`, `InvertibleKernelPCADenoiser` (both need `adapt`) |
 | `local_support_gate.py` | `LocalSupportGate` (EM-fitted, frozen; inert until fitted) |
 | `moving_std.py` | `MovingStd` |
+| `probability_logits.py` | `ProbabilityLogits` (weightless log-odds map; computes in float32 whatever the policy, because `1 - 1e-6` is exactly 1 in float16) |
 | `residual_acf.py` | `ResidualACFLayer`, `ACFMonitorCallback` (a `keras.callbacks.Callback`, not a layer) |
 | `conformal/` | `ConformalLayer` base and three layers, see `conformal/AGENTS.md` |
 
@@ -46,7 +47,7 @@ grep -hoP '^class \K\w+' src/dl_techniques/layers/statistics/*.py \
   src/dl_techniques/layers/statistics/conformal/*.py | sort
 ```
 
-That prints 15 names: the 10 layers of the top-level modules, `ACFMonitorCallback` (a callback, not a
+That prints 16 names: the 11 layers of the top-level modules, `ACFMonitorCallback` (a callback, not a
 layer) and the 4 conformal classes (`ConformalLayer` and three layers). Outside importers are a grep, not a claim:
 
 ```bash
@@ -54,7 +55,8 @@ grep -rnE "(layers\.statistics|\.\.statistics)[.a-z_]* import" src --include=*.p
   | grep -v "^src/dl_techniques/layers/statistics/"
 ```
 
-Today: `MDNLayer` (`models/time_series/mdn`, `train/time_series/mdn`), `LocalSupportGate`
+Today: `MDNLayer` (`models/time_series/mdn`, `train/time_series/mdn`), `ProbabilityLogits`
+(`train/capsnet/train_capsnet.py`), `LocalSupportGate`
 (`layers/adapters/gated_adapter.py`), `ConformalQuantileHead` (`layers/time_series/forecasting_layers.py`) and
 the conformal classes (`train/common/conformal.py`). The others have no importer outside tests.
 
@@ -63,8 +65,8 @@ the conformal classes (`train/common/conformal.py`). The others have no importer
 - **Docstrings are Sphinx/reST** (`:param:`, `:type:`, `:raises:`) in every module here. The row for this
   package in `../AGENTS.md` once said Google-style; that was wrong (`grep -c "Args:"` is 0 in all files). Match
   the file you edit; never convert a file wholesale.
-- **New code uses `import keras` only**, with `keras.ops.*` qualified at the call site. All eight top-level
-  modules still say `from keras import ops` (`grep -n "^from keras" src/dl_techniques/layers/statistics/*.py`);
+- **New code uses `import keras` only**, with `keras.ops.*` qualified at the call site. All eight older top-level
+  modules still say `from keras import ops`; `probability_logits.py` is the one that does not (`grep -n "^from keras" src/dl_techniques/layers/statistics/*.py`);
   do not copy that into new code, and do not rewrite a module just to remove it.
 - **Sub-layers are created in `__init__`; weights in `build()`; `super().build(input_shape)` last.**
   Pinned by `test_the_package_is_v2_compliant.py` (V2: no sub-layer created in `build`).

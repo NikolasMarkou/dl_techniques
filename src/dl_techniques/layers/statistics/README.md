@@ -4,7 +4,7 @@ Layers that bring probability and statistics into a network: output layers that 
 distribution instead of a point (mixture density network, conditional normalizing flow),
 feature layers fitted by an eigendecomposition (deep kernel PCA, a kernel PCA with a decoder
 and a denoiser built on it), a reversible scaler, a moving standard deviation filter, a
-residual autocorrelation diagnostic, a per-token support gate, and the split-conformal layers
+residual autocorrelation diagnostic, a per-token support gate, a probability-to-log-odds map, and the split-conformal layers
 that turn a model's output into an interval or a set with a coverage guarantee.
 
 Nothing here has been trained or benchmarked in this repository, so this file makes no claim
@@ -21,6 +21,7 @@ statistics/
 ├── invertible_kernel_pca.py   InvertibleKernelPCA, InvertibleKernelPCADenoiser
 ├── local_support_gate.py      LocalSupportGate
 ├── moving_std.py              MovingStd
+├── probability_logits.py      ProbabilityLogits
 ├── residual_acf.py            ResidualACFLayer, ACFMonitorCallback
 ├── conformal/                 split-conformal layers, see conformal/README.md
 └── __init__.py                empty: import from the modules
@@ -40,6 +41,7 @@ sub-package `conformal/` has a curated `__init__.py` of its own.
 | `invertible_kernel_pca.py` | `InvertibleKernelPCA`, `InvertibleKernelPCADenoiser` | Kernel PCA in a Random Fourier Feature space with a learned linear decoder, and a denoiser that projects through it and back | none |
 | `local_support_gate.py` | `LocalSupportGate` | A per-token 0/1 gate from the likelihood ratio of two Gaussian mixtures: one fitted to the current data, one to a generic sample | `layers/adapters/gated_adapter.py` (`GatedAdapter`) |
 | `moving_std.py` | `MovingStd` | The local standard deviation of an image over a sliding window, per channel, with pooling ops | none |
+| `probability_logits.py` | `ProbabilityLogits` | The log-odds `log(p) - log(1 - p)` of a tensor of probabilities, clipped away from 0 and 1. Turns a per-class probability that is not a softmax (CapsNet capsule lengths) into scores a softmax can separate; the class order is unchanged | `train/capsnet/train_capsnet.py` |
 | `residual_acf.py` | `ResidualACFLayer`, `ACFMonitorCallback` | The autocorrelation of forecast residuals up to `max_lag`, optionally penalized, with the predictions passed through unchanged | none (`layers/regularization/spatial_smoothness.py` only mentions it in a docstring) |
 | `conformal/` | `ConformalLayer`, `ConformalInterval`, `ConformalQuantileHead`, `ConformalPredictionSet`, `attach_conformal_sets` | One frozen calibrated quantile `q_hat`, applied to a point estimate, to learned quantiles, or to classifier logits | `layers/time_series/forecasting_layers.py`, `train/common/conformal.py` |
 
