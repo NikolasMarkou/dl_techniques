@@ -252,6 +252,15 @@ class TestSiamFCInitializer:
                  backbone.conv5]
         assert len({id(c.kernel_initializer) for c in convs}) == len(convs)
 
+    def test_a_backbone_given_an_instance_stores_a_spec_and_gives_each_convolution_a_copy(self):
+        """The backbone is public and takes the knob on its own, not only through the model."""
+        backbone = SiamFCBackbone(kernel_initializer=keras.initializers.HeNormal())
+        assert isinstance(backbone.kernel_initializer, dict)
+        json.dumps(backbone.get_config())
+        convs = [backbone.stem.conv1, backbone.conv2, backbone.conv3, backbone.conv4,
+                 backbone.conv5]
+        assert len({id(c.kernel_initializer) for c in convs}) == len(convs)
+
     def test_a_seedless_instance_draws_independent_kernels(self):
         keras.utils.set_random_seed(0)
         backbone = SiamFC(kernel_initializer=keras.initializers.HeNormal()).backbone
