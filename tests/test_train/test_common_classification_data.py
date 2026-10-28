@@ -1,0 +1,310 @@
+"""``train.common.classification_data``: the one ingestion path of the labelled-image trainers.
+
+``_load_raw`` (the only ``keras.datasets`` call under ``src/train``) is replaced by a fake whose
+pixel ``[0, 0, 0]`` is the sample's identity, so a split can be audited image by image; the
+ImageNet path runs on the 3-class fake tree of ``tests/imagenet_fake_tree.py``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import os
+
+os.environ.setdefault("MPLBACKEND", "Agg")
+
+import numpy as np  # noqa: E402
+import pytest  # noqa: E402
+import tensorflow as tf  # noqa: E402
+
+import dl_techniques.datasets.vision.classification as classification  # noqa: E402
+import train.common.classification_data as cd  # noqa: E402
+from tests.imagenet_fake_tree import PER_CLASS, VAL_CLASSES, build_fake_imagenet  # noqa: E402
+
+N_TRAIN, N_TEST = 200, 50  # identities (0..249) fit a uint8
+
+
+def _fake_raw(name):
+    """Samples carry their identity in pixel [0, 0, 0]; labels cycle through the classes."""
+    spec = classification.get_spec(name)
+    shape = spec.input_shape[:2] if name == "mnist" else spec.input_shape
+
+    def split(start, n):
+        x = np.zeros((n, *shape), np.uint8)
+        ids = np.arange(start, start + n, dtype=np.uint8)
+        x[(slice(None), *([0] * len(shape)))] = ids
+        return x, (np.arange(start, start + n) % spec.num_classes).astype(np.int64)
+
+    return split(0, N_TRAIN), split(N_TRAIN, N_TEST)
+
+
+@pytest.fixture(autouse=True)
+def fake_raw(monkeypatch):
+    calls = []
+
+    def load(name):
+        calls.append(name)
+        return _fake_raw(name)
+
+    monkeypatch.setattr(cd, "_load_raw", load)
+    return calls
+
+
+def _ids(x: np.ndarray, std=1.0, mean=0.0) -> np.ndarray:
+    """Identities back from pixel [0, 0, 0] of a (N, H, W, C) array in [0, 1] or normalized."""
+    return np.rint((x[:, 0, 0, 0] * std + mean) * 255).astype(int)
+
+
+def _collect(dataset):
+    xs, ys = zip(*[(x.numpy(), y.numpy()) for x, y in dataset])
+    return np.concatenate(xs), np.concatenate(ys)
+
+
+def _load(name="cifar10", **kwargs):
+    settings = dict(batch_size=8, seed=3, normalize="unit")
+    settings.update(kwargs)
+    return cd.load_classification_data(name, **settings)
+
+
+# ---------------------------------------------------------------------
+# Protocol
+# ---------------------------------------------------------------------
+
+
+def test_train_select_and_test_are_disjoint_and_cover_the_dataset() -> None:
+    data = _load()
+    a = data.arrays
+    train, select, test = _ids(a.x_train), _ids(a.x_select), _ids(a.x_test)
+    assert (data.n_train, data.n_select, data.n_test) == (len(train), len(select), len(test))
+    assert len(select) == int(N_TRAIN * 0.1) and len(train) == N_TRAIN - len(select)
+    assert not set(train) & set(select)
+    assert set(train) | set(select) == set(range(N_TRAIN))
+    assert sorted(test) == list(range(N_TRAIN, N_TRAIN + N_TEST))
+
+
+def test_the_test_split_is_never_the_selection_split() -> None:
+    data = _load()
+    assert not set(_ids(data.arrays.x_select)) & set(_ids(data.arrays.x_test))
+    _, y_sel = _collect(data.select_ds)
+    assert len(y_sel) == data.n_select
+
+
+def test_the_split_is_deterministic_in_the_seed() -> None:
+    a, b, c = _load(seed=1), _load(seed=1), _load(seed=2)
+    np.testing.assert_array_equal(a.arrays.x_select, b.arrays.x_select)
+    assert not np.array_equal(_ids(a.arrays.x_select), _ids(c.arrays.x_select))
+
+
+def test_max_samples_caps_the_train_pool_and_the_test_split() -> None:
+    data = _load(max_samples=40)
+    assert data.n_test == 40 < N_TEST
+    assert data.n_select + data.n_train == 40 and data.n_select == 4
+    assert _load(max_samples=500).n_test == N_TEST  # a cap above the size changes nothing
+
+
+def test_a_validation_split_is_honoured() -> None:
+    assert _load(validation_split=0.25).n_select == int(N_TRAIN * 0.25)
+
+
+@pytest.mark.parametrize("bad", [0.0, 1.0, -0.1, 1.5])
+def test_a_validation_split_outside_the_open_unit_interval_is_refused(bad) -> None:
+    with pytest.raises(ValueError, match="strictly inside"):
+        _load(validation_split=bad)
+
+
+def test_a_split_that_holds_out_zero_samples_is_refused() -> None:
+    with pytest.raises(ValueError, match="holds out 0 of"):
+        _load(validation_split=0.001, max_samples=50)
+
+
+def test_a_batch_larger_than_the_train_split_is_refused_naming_it() -> None:
+    with pytest.raises(ValueError, match="batch_size 500 exceeds the 180 train samples"):
+        _load(batch_size=500)
+
+
+def test_the_train_pipeline_yields_steps_per_epoch_full_batches() -> None:
+    data = _load(batch_size=16)
+    batches = [x.shape[0] for x, _ in data.train_ds]
+    assert data.steps_per_epoch == len(batches) == data.n_train // 16
+    assert set(batches) == {16}
+
+
+def test_the_only_raw_read_is_the_seam(fake_raw) -> None:
+    _load("cifar100")
+    assert fake_raw == ["cifar100"]
+
+
+# ---------------------------------------------------------------------
+# Normalization, channels, labels, augmentation order
+# ---------------------------------------------------------------------
+
+
+def test_standardize_uses_the_spec_constants() -> None:
+    data = _load(normalize="standardize")
+    spec = classification.get_spec("cifar10")
+    np.testing.assert_allclose(data.mean, spec.mean, rtol=1e-6)
+    np.testing.assert_allclose(data.std, spec.std, rtol=1e-6)
+    x, _ = _collect(data.test_ds)
+    want = (data.arrays.x_test - data.mean) / data.std
+    np.testing.assert_allclose(x, want, atol=1e-5)
+    np.testing.assert_allclose(data.x_fig, want, atol=1e-5)
+
+
+def test_unit_leaves_the_pixels_in_zero_one_and_reports_identity_statistics() -> None:
+    data = _load(normalize="unit")
+    x, _ = _collect(data.test_ds)
+    assert x.min() >= 0.0 and x.max() <= 1.0
+    np.testing.assert_array_equal(data.mean, np.zeros(3))
+    np.testing.assert_array_equal(data.std, np.ones(3))
+
+
+def test_mnist_is_native_one_channel_and_can_repeat_to_three() -> None:
+    one, three = _load("mnist"), _load("mnist", channels=3, normalize="standardize")
+    assert one.input_shape == (28, 28, 1) and one.arrays.x_train.shape[-1] == 1
+    assert three.input_shape == (28, 28, 3) and three.arrays.x_train.shape[-1] == 3
+    spec = classification.get_spec("mnist")
+    np.testing.assert_allclose(three.mean, [spec.mean[0]] * 3, rtol=1e-6)
+    x, _ = _collect(three.test_ds)
+    np.testing.assert_allclose(x[..., 0], x[..., 2])
+
+
+@pytest.mark.parametrize("name, channels", [("mnist", 2), ("cifar10", 1), ("cifar100", 4)])
+def test_a_channel_count_the_dataset_cannot_give_is_refused(name, channels) -> None:
+    with pytest.raises(ValueError, match="is not available"):
+        _load(name, channels=channels)
+
+
+def test_one_hot_labels_reach_the_arrays_and_the_pipelines() -> None:
+    data = _load(labels="one_hot")
+    assert data.arrays.y_train.shape == (data.n_train, 10)
+    assert (data.arrays.y_train.sum(axis=1) == 1).all()
+    _, y = _collect(data.train_ds)
+    assert y.shape[1] == 10 and (y.sum(axis=1) == 1).all()
+    assert data.y_fig.shape == (data.n_test, 10)
+
+
+def test_sparse_labels_are_int32_vectors() -> None:
+    data = _load()
+    assert data.arrays.y_train.dtype == np.int32 and data.arrays.y_train.ndim == 1
+    assert data.class_names == list(classification.CIFAR10_CLASS_NAMES)
+
+
+def test_the_augment_hook_sees_unit_pixels_before_normalization() -> None:
+    """The hook turns every pixel into 0.5; normalization must then give (0.5 - mean) / std."""
+    data = _load(normalize="standardize", augment=lambda image, label: (image * 0.0 + 0.5, label))
+    x, _ = next(iter(data.train_ds))
+    want = (0.5 - data.mean) / data.std
+    np.testing.assert_allclose(x.numpy()[:, 3, 3, :], np.tile(want, (x.shape[0], 1)), atol=1e-5)
+
+
+def test_flip_pad_crop_keeps_the_shape_and_only_moves_pixels() -> None:
+    image = tf.reshape(tf.range(1, 4 * 4 * 3 + 1, dtype=tf.float32), (4, 4, 3))
+    out, label = cd.flip_pad_crop(pad=2)(image, tf.constant(7))
+    assert out.shape == image.shape and int(label) == 7
+    assert set(np.unique(out.numpy())) <= set(np.unique(image.numpy())) | {0.0}
+
+
+@pytest.mark.parametrize("kwargs, message", [
+    (dict(normalize="whiten"), "normalize must be one of"),
+    (dict(labels="soft"), "labels must be one of"),
+    (dict(holdout_per_class=5), "holdout_per_class=5 does not apply"),
+])
+def test_an_option_that_does_not_apply_is_refused_naming_it(kwargs, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        _load(**kwargs)
+
+
+def test_an_unknown_dataset_is_refused() -> None:
+    with pytest.raises(ValueError, match="got 'svhn'"):
+        _load("svhn")
+
+
+# ---------------------------------------------------------------------
+# ImageNet, on the fake tree (3 classes, 12 train images, 6 val)
+# ---------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def tree(tmp_path_factory):
+    return build_fake_imagenet(tmp_path_factory.mktemp("tree") / "imagenet2012")
+
+
+@pytest.fixture
+def three_class_imagenet(monkeypatch):
+    spec = dataclasses.replace(classification.CLASSIFICATION_DATASETS["imagenet"], num_classes=3)
+    monkeypatch.setitem(classification.CLASSIFICATION_DATASETS, "imagenet", spec)
+
+
+def _imagenet(tree, **kwargs):
+    settings = dict(batch_size=4, seed=3, holdout_per_class=1, image_size=32,
+                    imagenet_root=tree, eval_samples=4)
+    settings.update(kwargs)
+    return cd.load_classification_data("imagenet", **settings)
+
+
+def test_imagenet_selects_on_a_holdout_and_tests_on_the_official_val(tree, three_class_imagenet):
+    data = _imagenet(tree)
+    assert (data.n_train, data.n_select, data.n_test) == (3 * PER_CLASS - 3, 3, len(VAL_CLASSES))
+    assert data.arrays is None and data.input_shape == (32, 32, 3) and data.num_classes == 3
+    assert data.selection_split == "1 images per class held out of train (3 images)"
+    assert data.test_split == "the official val split"
+    assert data.steps_per_epoch == data.n_train // 4
+    assert data.x_fig.shape == (4, 32, 32, 3) and data.y_fig.tolist() == VAL_CLASSES[:4]
+
+
+def test_imagenet_labels_and_unit_pixels(tree, three_class_imagenet):
+    data = _imagenet(tree, labels="one_hot", normalize="unit")
+    x, y = _collect(data.test_ds)
+    assert y.shape == (len(VAL_CLASSES), 3) and (y.sum(axis=1) == 1).all()
+    assert x.min() >= 0.0 and x.max() <= 1.0
+    assert data.y_fig.shape == (4, 3)
+    np.testing.assert_array_equal(data.mean, np.zeros(3))
+
+
+def test_imagenet_standardizes_with_the_spec_statistics(tree, three_class_imagenet):
+    data = _imagenet(tree)
+    spec = classification.get_spec("imagenet")
+    np.testing.assert_allclose(data.mean, spec.mean, rtol=1e-6)
+    np.testing.assert_allclose(data.std, spec.std, rtol=1e-6)
+
+
+def test_imagenet_refuses_a_validation_split_and_an_in_memory_augment(tree, three_class_imagenet):
+    with pytest.raises(ValueError, match="validation_split=0.1 does not apply to ImageNet"):
+        _imagenet(tree, validation_split=0.1)
+    with pytest.raises(ValueError, match="augment applies to in-memory datasets"):
+        _imagenet(tree, augment=cd.flip_pad_crop())
+    with pytest.raises(ValueError, match="channels=1 is not available for 'imagenet'"):
+        _imagenet(tree, channels=1)
+
+
+def test_a_missing_imagenet_root_is_refused_before_anything_loads(tmp_path, three_class_imagenet):
+    with pytest.raises(ValueError, match="ImageNet root does not exist"):
+        _imagenet(str(tmp_path / "nope"))
+
+
+def test_the_class_count_of_the_spec_is_checked_against_the_tree(tree):
+    with pytest.raises(ValueError, match="num_classes=1000 but"):
+        _imagenet(tree)
+
+
+# ---------------------------------------------------------------------
+# Command line
+# ---------------------------------------------------------------------
+
+
+def test_the_selection_flags_default_to_none_so_misuse_is_refused() -> None:
+    parser = argparse.ArgumentParser()
+    cd.add_selection_arguments(parser)
+    args = parser.parse_args([])
+    assert args.validation_split is None and args.holdout_per_class is None
+    assert args.max_samples is None and args.eval_samples == cd.DEFAULT_EVAL_SAMPLES
+    args = parser.parse_args(["--validation-split", "0.2", "--holdout-per-class", "4",
+                              "--max-samples", "9", "--imagenet-root", "/x"])
+    assert (args.validation_split, args.holdout_per_class, args.max_samples,
+            args.imagenet_root) == (0.2, 4, 9, "/x")
+
+
+def test_the_loader_seam_refuses_a_dataset_it_cannot_read(monkeypatch) -> None:
+    monkeypatch.undo()
+    with pytest.raises(ValueError, match="no in-memory loader for dataset 'imagenet'"):
+        cd._load_raw("imagenet")
