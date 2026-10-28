@@ -862,6 +862,89 @@ def test_a_checkpoint_of_another_architecture_with_every_shape_equal_is_refused(
     c.from_variant(**change, pretrained=str(path))  # the donor's own architecture loads
 
 
+#: A head override that computes another function and moves no weight shape.
+_HEAD_MAX = {"pooling_type": "max"}
+
+
+def _saved(model: keras.Model, c: Classifier, path: Path) -> str:
+    model.build((None, *c.input_shape))
+    model.save(path)
+    return str(path)
+
+
+@pytest.mark.parametrize(
+    "key", _rows("local_path_refuses_a_head_that_computes_another_function", MIGRATED_LOADER_KEYS))
+@ledgered("local_path_refuses_a_head_that_computes_another_function")
+def test_a_head_that_computes_another_function_is_refused_unless_it_is_a_new_head(
+        key, tmp_path) -> None:
+    """The head layer is copied when its shapes fit, so then its configuration must be the same."""
+    c = classifier(key)
+    donor = c.from_variant(head_config_overrides=_HEAD_MAX)
+    path = _saved(donor, c, tmp_path / "donor.keras")
+    own = c.from_variant()
+    own.build((None, *c.input_shape))
+    assert _weight_layout(own) == _weight_layout(donor), (
+        "control: the donor must differ in no weight shape, or the layer check would decide")
+    before = [keras.ops.convert_to_numpy(w) for w in own.weights]
+    with pytest.raises(ValueError) as caught:
+        own.load_pretrained_weights(path)
+    assert "head_config_overrides['pooling_type']: checkpoint 'max'" in str(caught.value), (
+        str(caught.value))
+    assert all(np.array_equal(b, keras.ops.convert_to_numpy(w))
+               for b, w in zip(before, own.weights)), "a refused load wrote a weight"
+    c.from_variant(head_config_overrides=_HEAD_MAX, pretrained=path)  # the same head loads
+    c.from_variant(num_classes=NUM_CLASSES + 2, pretrained=path)  # a new head is not compared
+    c.from_variant(include_top=False, pretrained=path)  # and neither is no head
+
+
+@pytest.mark.parametrize(
+    "key", _rows("local_path_reads_the_config_of_a_wrapped_checkpoint", SAME_SHAPE_KEYS))
+@ledgered("local_path_reads_the_config_of_a_wrapped_checkpoint")
+def test_a_functional_wrapper_is_compared_by_the_config_of_the_model_it_wraps(
+        key, tmp_path) -> None:
+    """The trainers save ``keras.Model(inp, model(inp))``; its archive holds the model's config."""
+    c = classifier(key)
+    change, config_key = SAME_SHAPE_DONORS[key]
+    inner = c.from_variant(**change)
+    inner.build((None, *c.input_shape))
+    inp = keras.Input(c.input_shape)
+    path = str(tmp_path / "wrapped.keras")
+    keras.Model(inp, inner(inp)).save(path)
+    own = c.from_variant()
+    own.build((None, *c.input_shape))
+    before = [keras.ops.convert_to_numpy(w) for w in own.weights]
+    with pytest.raises(ValueError) as caught:
+        own.load_pretrained_weights(path)
+    assert f"{config_key}: checkpoint" in str(caught.value), str(caught.value)
+    assert all(np.array_equal(b, keras.ops.convert_to_numpy(w))
+               for b, w in zip(before, own.weights)), "a refused load wrote a weight"
+    loaded = c.from_variant(**change, pretrained=path)  # the wrapped model's own architecture loads
+    donor_weights = dict(weight_map(inner))
+    assert any(np.array_equal(v, donor_weights[p]) for p, v in weight_map(loaded)
+               if p in donor_weights), "the load restored no tensor"
+
+
+#: The classifiers with an int-or-pair kernel argument: ``(argument, integer, same pair)``.
+PAIR_SPELLED_KERNELS: Dict[str, Tuple[str, int, Tuple[int, int]]] = {
+    "convnext_v1": ("kernel_size", 7, (7, 7)),
+    "convnext_v2": ("kernel_size", 7, (7, 7)),
+    "rad_convnet": ("rad_kernel_size", 3, (3, 3)),
+}
+
+
+@pytest.mark.parametrize(
+    "key", _rows("local_path_reads_an_integer_and_its_pair_as_one_kernel",
+                 tuple(PAIR_SPELLED_KERNELS)))
+@ledgered("local_path_reads_an_integer_and_its_pair_as_one_kernel")
+def test_an_integer_kernel_and_its_pair_are_one_architecture(key, tmp_path) -> None:
+    c = classifier(key)
+    argument, size, pair = PAIR_SPELLED_KERNELS[key]
+    path = _saved(c.from_variant(**{argument: size}), c, tmp_path / "donor.keras")
+    c.from_variant(**{argument: pair}, pretrained=path)  # the same kernel, spelled as a pair
+    with pytest.raises(ValueError, match=argument):  # a pair of two sizes is another kernel
+        c.from_variant(**{argument: (size, size + 2)}, pretrained=path)
+
+
 @pytest.mark.parametrize(
     "key", _rows("head_config_overrides_are_json", MIGRATED_LOADER_KEYS))
 @ledgered("head_config_overrides_are_json")

@@ -142,19 +142,27 @@ print(f"Predictions shape: {predictions.shape}")  # (16, 10)
 
 All four versions take the house signature; `pretrained` is a path to a local `.keras` checkpoint, `True`
 (raises `NotImplementedError`) or `False`. A path loads every layer outside `classification_head` or
-raises `ValueError` and leaves the model untouched (a checkpoint of another variant is refused; only a
+raises `ValueError` and copies no weight (a checkpoint of another variant is refused; only a
 head of another `num_classes` is skipped, with a warning). Loading with another `num_classes` discards the
 whole `classification_head`, so the head's pretrained hidden layer is skipped with the classifier and keeps
 its initialization (V1 and V2 have no hidden layer, so only the classifier is skipped; measured parameter counts of the hidden layer: V3 `small` 590,848, V3 `large`
 1,230,080, V4 `small` 209,920, V4 `medium` and `hybrid_medium` 414,720; V4's includes its BatchNorm).
 The checkpoint's own configuration is compared too: when the archive records the same class, every
 constructor argument that both the archive and the model hold, except the ones that leave the weight
-layout and the computed function alone (`num_classes`, `include_top`, `head_config_overrides`,
+layout and the computed function alone (`num_classes`, `include_top`,
 initializers, regularizers, dropout and stochastic-depth rates), must be equal. A V4 checkpoint into
 the same variant under other `strides`, or a V1, V2 or V3 checkpoint under another `width_multiplier`, is
 refused, naming the argument and both values. An argument that only one side holds is not compared
-(one added since the archive was written still loads), and an archive without a configuration of
-the model's class (a functional wrapper) is checked layer by layer only. An argument the class has
+(one added since the archive was written still loads).
+The head is compared too, but only where it is copied: `head_config_overrides` (leaving out dropout,
+initializer and regularizer keys) must be equal whenever every weight shape of `classification_head`
+fits, so a checkpoint saved with `{"pooling_type": "max"}` is refused by an average-pool model
+(before this check it loaded). A head of another `num_classes`, `include_top=False` and a headless
+checkpoint are not compared; name `head_config_overrides` in `ignore_config_keys` of
+`load_pretrained_checkpoint` to accept another head on purpose. An archive that is a functional
+wrapper around one model of this class (what the trainers save) is compared by the wrapped model's
+configuration; when no single model of the class is found in the archive, the load logs a warning
+and checks the layers only. An argument the class has
 removed fails earlier, when Keras rebuilds the archived model from its configuration: see the
 `weight_decay` note in section 9.
 

@@ -89,9 +89,23 @@ absent, a head left at its initialization is named in a warning, and every other
 restored. A checkpoint written by this class whose configuration differs in an argument that is not
 listed below raises `ValueError` naming the argument and both values (measured for `depths` and
 `dims`, `strides`, `activation`, `rad_kernel_size`, `rad_groups`, `mlp_ratio` and `use_bias`), even
-when every weight shape would fit (`activation`). `dropout_rate`, `input_shape`,
-`num_classes` and `head_config_overrides` may differ (measured). A load that restores no layer at all
-also raises. `input_shape` may stay at its default `(None, None, 3)`.
+when every weight shape would fit (`activation`). `dropout_rate`, `input_shape`
+and `num_classes` may differ (measured).
+`head_config_overrides` is compared exactly (leaving out dropout, initializer and regularizer keys)
+whenever the head would be copied, that is when every one of its weight shapes fits: a checkpoint
+saved with `head_config_overrides={"pooling_type": "max"}` is refused by a model with the default
+average-pool head, naming the key and both values (before this check it loaded, with outputs 0.30
+apart on the contract's tiny configuration). A head the shapes exclude (another `num_classes`),
+`include_top=False` and a headless checkpoint are not compared, so fine-tuning with a new head still
+loads the trunk; spell the head the way it was saved, since a default written out on one side only
+is a difference, and name `head_config_overrides` in `ignore_config_keys` of
+`load_pretrained_checkpoint` to accept another head on purpose. A functional wrapper around one
+model of this class (`keras.Model(inputs, model(inputs))`, what the trainers save) is compared by
+the wrapped model's configuration; when no single model of the class can be found in the archive,
+the load logs a warning and checks the layers only. An integer and its pair are one value
+(`rad_kernel_size=3` and `(3, 3)`). A load that restores no layer at all
+also raises. A refused load copies no weight (an unbuilt model refused by the layer or head check
+is left built, at its own initialization). `input_shape` may stay at its default `(None, None, 3)`.
 
 ## Archives written before the shared head
 

@@ -136,16 +136,24 @@ An unknown variant raises `ValueError` listing the variants; `pretrained=True` r
 `NotImplementedError` naming the variant (no weights are distributed); `pretrained=<path>`
 loads a local `.keras` file through the shared loader, which restores every layer outside
 `classification_head` or raises (a checkpoint of another width, depth or stem patch is refused and the
-model is left untouched; a checkpoint with another `num_classes` loads its trunk and leaves the new
+no weight is copied; a checkpoint with another `num_classes` loads its trunk and leaves the new
 head at its initialization, with a warning naming it). The checkpoint's own configuration is
 compared too: when the archive records the same class, every constructor argument that both the
 archive and the model hold, except the ones that leave the weight layout and the computed function
-alone (`num_classes`, `include_top`, `head_config_overrides`, initializers, regularizers, dropout
+alone (`num_classes`, `include_top`, initializers, regularizers, dropout
 and stochastic-depth rates), must be equal. A `ctx_mode="diff"` checkpoint into `ctx_mode="abs"`, or
 `shifts=[1, 2]` into `[1, 3]`, restores every shape and is refused, naming the argument and both
 values. An argument that only one side holds is not compared, so the comparison alone never refuses an archive written by an earlier
-revision (the archive still has to deserialize: a constructor that no longer accepts one of its recorded arguments refuses it before the loader runs), and an archive without a configuration of the model's class (a functional
-wrapper) is checked layer by layer only. There are no `nano()`, `lite()` or
+revision (the archive still has to deserialize: a constructor that no longer accepts one of its recorded arguments refuses it before the loader runs).
+The head is compared too, but only where it is copied: `head_config_overrides` (leaving out dropout,
+initializer and regularizer keys) must be equal whenever every weight shape of `classification_head`
+fits, so a checkpoint saved with `{"pooling_type": "max"}` is refused by an average-pool model
+(before this check it loaded, with outputs 0.17 apart on the contract's tiny configuration). A head
+of another `num_classes`, `include_top=False` and a headless checkpoint are not compared; name
+`head_config_overrides` in `ignore_config_keys` of `load_pretrained_checkpoint` to accept another
+head on purpose. An archive that is a functional wrapper around one model of this class (what the
+trainers save) is compared by the wrapped model's configuration; when no single model of the class
+is found in the archive, the load logs a warning and checks the layers only. There are no `nano()`, `lite()` or
 `lite_g()` shortcuts: use `from_variant("nano", ...)`.
 
 **`from_variant(..., input_shape=...)` builds the model.** The constructors take no

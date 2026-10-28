@@ -652,15 +652,17 @@ class CliffordNet(keras.Model):
         it builds the model at :data:`DEFAULT_INPUT_SHAPE` if it is unbuilt and
         takes a headed checkpoint into a headless model. Every layer outside
         ``classification_head`` must be restored, so a checkpoint of another
-        width, depth or stem raises and leaves the model untouched. Only a head
-        of another ``num_classes`` is skipped: it keeps its initialization and
-        a warning names it. The archive's own config is compared too: a
+        width, depth or stem raises and copies no weight. Only a head of
+        another ``num_classes`` is skipped: it keeps its initialization and a
+        warning names it. The archive's own config is compared too: a
         constructor argument that both hold and that is not in
         ``_NON_STRUCTURAL_CONFIG_KEYS`` must be equal, so a checkpoint of
         another ``ctx_mode``, ``cli_mode`` or ``shifts`` is refused even when
         every weight shape fits. An argument only one side holds is not
-        compared, and an archive without a config of this class is checked by
-        layers only.
+        compared, and an archive in which no single model of this class can be
+        found is checked by layers only (the load warns). Where the head is
+        copied, its `head_config_overrides` must be equal too (dropout,
+        initializers and regularizers aside).
 
         :param weights_path: Path to the ``.keras`` weights file.
         :param skip_mismatch: ``True`` (default) lets the head differ, which

@@ -455,17 +455,20 @@ class _ConvNeXtBase(keras.Model):
         """Load a local `.keras` checkpoint into the model, layer by layer.
 
         The transfer is `load_pretrained_checkpoint`: it builds the model at
-        `input_shape` (a `None` spatial dim at `PRETRAINED_BUILD_SPATIAL`) if it
-        is unbuilt and takes a headed checkpoint into a headless model. Every
-        layer outside the classification head must be restored, so a checkpoint
-        of another variant, depth, width or kernel size raises and leaves the
-        model untouched. Only a head of another `num_classes` is skipped: it
+        `input_shape` (a `None` spatial dim at `PRETRAINED_BUILD_SPATIAL`) if
+        it is unbuilt and takes a headed checkpoint into a headless model.
+        Every layer outside the classification head must be restored, so a
+        checkpoint of another variant, depth, width or kernel size raises and
+        copies no weight. Only a head of another `num_classes` is skipped: it
         keeps its initialization and a warning names it. The archive's own
         config is compared too: a constructor argument that both hold and that
         is not in `_NON_STRUCTURAL_CONFIG_KEYS` must be equal, so a checkpoint
         of another `activation` or `stochastic_mode` is refused even when every
         weight shape fits. An argument only one side holds is not compared, and
-        an archive without a config of this class is checked by layers only.
+        an archive in which no single model of this class can be found is
+        checked by layers only (the load warns). Where the head is copied, its
+        `head_config_overrides` must be equal too (dropout, initializers and
+        regularizers aside).
 
         :param weights_path: Path to the weights file (`.keras` format).
         :param skip_mismatch: `True` (default) lets the head layers differ;

@@ -456,6 +456,27 @@ class TestResNetPretrainedLoad:
         head = [w for w in receiver.weights if "classification_head" in w.path]
         assert head and all(w.shape[-1] == 5 or w.shape == (5,) for w in head)
 
+    def test_the_inference_model_the_trainer_saves_is_compared_by_its_inner_config(self, tmp_path):
+        """``train_resnet`` saves a functional wrapper around the deep-supervised ResNet."""
+        from dl_techniques.utils.deep_supervision import create_inference_model_from_training_model
+
+        training = _tiny(enable_deep_supervision=True)
+        training.build((None, 32, 32, 3))
+        inference = create_inference_model_from_training_model(training, input_shape=(32, 32, 3))
+        assert [type(layer).__name__ for layer in inference.layers] == ["InputLayer", "ResNet"], (
+            "control: this is not the wrapper the trainer saves")
+        path = os.path.join(tmp_path, "inference_model.keras")
+        inference.save(path)
+
+        with pytest.raises(ValueError, match="activation_type: checkpoint 'relu', model 'gelu'"):
+            _tiny(activation_type="gelu", enable_deep_supervision=True).load_pretrained_weights(path)
+
+        receiver = _tiny(enable_deep_supervision=True)
+        receiver.load_pretrained_weights(path)
+        inner = {w.path.split("/", 1)[1]: np.asarray(w) for w in training.weights}
+        for w in receiver.weights:
+            np.testing.assert_array_equal(np.asarray(w), inner[w.path.split("/", 1)[1]], err_msg=w.path)
+
     def test_a_headless_model_loads_the_trunk_of_a_headed_checkpoint(self, tmp_path):
         donor, path = self._saved(tmp_path)
 

@@ -310,8 +310,22 @@ listed below raises `ValueError` naming the argument and both values (measured f
 weight shape would fit (`activation`, `stochastic_mode`). A checkpoint written by other code is
 checked by its layers alone: a layer outside the head that cannot be restored raises, naming it.
 `kernel_regularizer`, `dropout_rate`, `spatial_dropout_rate`, `drop_path_rate`,
-`use_softorthonormal_regularizer`, `input_shape` and `num_classes` may differ (measured). A load that
-restores no layer at all also raises.
+`use_softorthonormal_regularizer`, `input_shape` and `num_classes` may differ (measured).
+`head_config_overrides` is compared exactly (leaving out dropout, initializer and regularizer keys)
+whenever the head would be copied, that is when every one of its weight shapes fits: a checkpoint
+saved with `head_config_overrides={"pooling_type": "max"}` is refused by a model with the default
+average-pool head, naming the key and both values (before this check it loaded, with outputs 0.15
+apart on the contract's tiny configuration). A head the shapes exclude (another `num_classes`),
+`include_top=False` and a headless checkpoint are not compared, so fine-tuning with a new head still
+loads the trunk; spell the head the way it was saved, since a default written out on one side only
+is a difference, and name `head_config_overrides` in `ignore_config_keys` of
+`load_pretrained_checkpoint` to accept another head on purpose. A functional wrapper around one
+model of this class (`keras.Model(inputs, model(inputs))`, what the trainers save) is compared by
+the wrapped model's configuration; when no single model of the class can be found in the archive,
+the load logs a warning and checks the layers only. An integer and its pair are one value
+(`kernel_size=7` and `(7, 7)`). A load that
+restores no layer at all also raises. A refused load copies no weight (an unbuilt model refused by
+the layer or head check is left built, at its own initialization).
 
 ```python
 from dl_techniques.models.vision.convnext.convnext_v2 import create_convnext_v2
