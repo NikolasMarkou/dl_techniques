@@ -13,7 +13,7 @@ with no softmax (compile with `SparseCategoricalCrossentropy(from_logits=True)`)
 that the `_3d` variants force `use_3d` on and
 need a four-element `input_shape`, that every downsampling stage uses
 `padding='valid'` and so all axes must be at least 35, and that no pretrained
-weights ship with this port.
+weights ship with this port (``pretrained=<path>`` loads a local checkpoint).
 
 References:
     -   Tsivgoulis et al., "An improved SqueezeNet model for the diagnosis
@@ -38,6 +38,7 @@ from typing import Optional, Tuple, Dict, Any, Union
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers.clone import initializer_spec
 from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.utils.logger import logger
 from .spatial_guard import validate_spatial_extent
@@ -51,6 +52,27 @@ from dl_techniques.utils.model_build import (
     refuse_unknown_model_kwargs,
     require_channel_count,
 )
+from dl_techniques.utils.weight_transfer import (
+    DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
+    load_pretrained_checkpoint,
+    pretrained_path_or_raise,
+)
+
+# Constructor-config keys a checkpoint may differ on without being another architecture:
+# they leave the weight layout and the computed function alone (initializers and the
+# regularizer act on the starting weights and the loss, dropout in training only, the input
+# size is no weight shape). `load_pretrained_checkpoint` compares every other key the
+# checkpoint and the model both hold, so another `variant` or `use_3d` is refused.
+_NON_STRUCTURAL_CONFIG_KEYS = (
+    *DEFAULT_NON_STRUCTURAL_CONFIG_KEYS,
+    "input_shape",
+    "kernel_initializer",
+    "kernel_regularizer",
+    "dropout_rate",
+)
+
+# The one weighted layer of the head is ``conv10``; the pool after it holds no weight.
+_HEAD_PATTERN = "conv10"
 
 # ---------------------------------------------------------------------
 
@@ -96,8 +118,9 @@ class SimplifiedFireModule(keras.layers.Layer):
     :param kernel_regularizer: Regularizer for both convolution kernels.
     :type kernel_regularizer: keras.regularizers.Regularizer or None
     :param kernel_initializer: Initializer for both convolution kernels. Defaults
-        to the Caffe ``xavier`` transcription.
-    :type kernel_initializer: str or keras.initializers.Initializer
+        to the Caffe ``xavier`` transcription. An ``Initializer`` instance is
+        stored as its serialized spec, so each convolution draws its own kernel.
+    :type kernel_initializer: str or dict or keras.initializers.Initializer
     :param kwargs: Passthrough to `keras.layers.Layer`.
     :raises ValueError: If ``s1x1`` or ``e3x3`` is not positive, or if ``s1x1`` is
         not smaller than ``e3x3``.
@@ -112,7 +135,7 @@ class SimplifiedFireModule(keras.layers.Layer):
             s1x1: int,
             e3x3: int,
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = CAFFE_XAVIER_INITIALIZER,
+            kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = CAFFE_XAVIER_INITIALIZER,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -125,14 +148,14 @@ class SimplifiedFireModule(keras.layers.Layer):
         self.s1x1 = s1x1
         self.e3x3 = e3x3
         self.kernel_regularizer = kernel_regularizer
-        self.kernel_initializer = kernel_initializer
+        self.kernel_initializer = initializer_spec(kernel_initializer)
 
         self.squeeze = keras.layers.Conv2D(
             filters=s1x1,
             kernel_size=1,
             activation='relu',
             kernel_regularizer=kernel_regularizer,
-            kernel_initializer=kernel_initializer,
+            kernel_initializer=self.kernel_initializer,
             name='squeeze'
         )
 
@@ -142,7 +165,7 @@ class SimplifiedFireModule(keras.layers.Layer):
             padding='same',
             activation='relu',
             kernel_regularizer=kernel_regularizer,
-            kernel_initializer=kernel_initializer,
+            kernel_initializer=self.kernel_initializer,
             name='expand_3x3'
         )
 
@@ -202,7 +225,7 @@ class SimplifiedFireModule(keras.layers.Layer):
             's1x1': self.s1x1,
             'e3x3': self.e3x3,
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
-            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer)
+            'kernel_initializer': self.kernel_initializer
         })
         return config
 
@@ -241,7 +264,7 @@ class SqueezeNoduleNetV2(keras.Model):
               │
               ▼
         ┌──────────────────────────────┐
-        │ dropout, drop9               │
+        │ dropout                      │
         └──────────────────────────────┘
               │ [B, (d,) h, w, 256]
               ├──► output [B, (d,) h, w, 256]   (include_top=False)
@@ -275,7 +298,8 @@ class SqueezeNoduleNetV2(keras.Model):
         use_3d = False               use_3d = True
 
         input [H, W, C]              input [D, H, W, C]
-        Conv2D, MaxPooling2D         Conv3D, MaxPooling3D
+        ConvStem, rank 2             ConvStem, rank 3
+        MaxPooling2D                 MaxPooling3D
         SimplifiedFireModule         Sequential of two Conv3D
         conv10 Conv2D                conv10 Conv3D
         GlobalAveragePooling2D       GlobalAveragePooling3D
@@ -299,18 +323,21 @@ class SqueezeNoduleNetV2(keras.Model):
 
     :param num_classes: Number of output classes. Must be positive.
     :type num_classes: int
-    :param variant_config: A `MODEL_VARIANTS` entry defining the Fire block
-        configs, stem and pooling. Defaults to the `"v2"` entry.
-    :type variant_config: dict or None
+    :param variant: A key of `MODEL_VARIANTS` (`"v1"`, `"v2"`, `"v1_3d"` or
+        `"v2_3d"`) defining the Fire block configs, stem and pooling.
+    :type variant: str
     :param dropout_rate: Dropout rate after the final Fire block. Must be in
         `[0, 1)`.
     :type dropout_rate: float
     :param kernel_regularizer: Regularizer for all convolution kernels,
         ``conv10``'s included.
     :type kernel_regularizer: keras.regularizers.Regularizer or None
-    :param kernel_initializer: Initializer for the Fire block convolutions. The
-        stem and head use `STEM_INITIALIZER` and `HEAD_INITIALIZER` instead.
-    :type kernel_initializer: str or keras.initializers.Initializer
+    :param kernel_initializer: Initializer for the Fire block convolutions,
+        stored as a string or a serialized spec (an ``Initializer`` instance is
+        serialized once) and handed to every convolution, so no two of them
+        replay one draw. The stem and head use `STEM_INITIALIZER` and
+        `HEAD_INITIALIZER` instead.
+    :type kernel_initializer: str or dict or keras.initializers.Initializer
     :param include_top: Whether to include the classification head
         (``conv10`` and the global pool). A ``bool`` or ``numpy.bool_``; anything
         else, a string included, raises ``TypeError``.
@@ -320,17 +347,19 @@ class SqueezeNoduleNetV2(keras.Model):
         when this is `False`.
     :type use_3d: bool
     :param input_shape: `(height, width, channels)`, or `(depth, height,
-        width, channels)` for 3D. The default is the 2D shape, so a 3D variant
-        needs an explicit four-element value.
-    :type input_shape: tuple of 3 or 4 ints
+        width, channels)` for 3D. `None` is the 2D shape `(224, 224, 3)`, so a
+        3D variant needs an explicit four-element value.
+    :type input_shape: tuple of 3 or 4 ints or None
     :param kwargs: `name`, `trainable` or `dtype`, passed to `keras.Model`.
         Anything else raises `ValueError`, because Keras' functional
         constructor would drop it silently.
     :raises TypeError: If `include_top` is not a `bool` or `numpy.bool_`.
-    :raises ValueError: If `num_classes` is not positive, `dropout_rate` is
-        outside `[0, 1)`, or the input's spatial extent is below the shared
-        minimum of 35 on every axis (2D and 3D alike, since all four variants
-        share one stem and pooling schedule). Every downsampling stage uses
+    :raises ValueError: If `variant` is not a key of `MODEL_VARIANTS`,
+        `input_shape` has not three entries (four for a 3D model) or no channel
+        count, `num_classes` is not positive, `dropout_rate` is outside
+        `[0, 1)`, or the input's spatial extent is below the shared minimum of
+        35 on every axis (2D and 3D alike, since all four variants share one
+        stem and pooling schedule). Every downsampling stage uses
         `padding='valid'`, so a collapsed axis would otherwise yield an all-NaN
         output of the correct shape.
 
@@ -418,25 +447,39 @@ class SqueezeNoduleNetV2(keras.Model):
     def __init__(
             self,
             num_classes: int = 1000,
-            variant_config: Optional[Dict[str, Any]] = None,
+            variant: str = "v2",
             dropout_rate: float = 0.5,
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = CAFFE_XAVIER_INITIALIZER,
+            kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = CAFFE_XAVIER_INITIALIZER,
             include_top: bool = True,
             use_3d: bool = False,
-            input_shape: Union[Tuple[int, int, int], Tuple[int, int, int, int]] = (224, 224, 3),
+            input_shape: Optional[Union[Tuple[int, int, int], Tuple[int, int, int, int]]] = None,
             **kwargs: Any
     ) -> None:
         refuse_unknown_model_kwargs(kwargs, type(self).__name__)
         include_top = coerce_include_top(include_top)
-        if variant_config is None:
-            variant_config = self.MODEL_VARIANTS["v2"]
+        if variant not in self.MODEL_VARIANTS:
+            raise ValueError(
+                f"Unknown variant '{variant}'. Available variants: "
+                f"{list(self.MODEL_VARIANTS.keys())}"
+            )
+        variant_config = self.MODEL_VARIANTS[variant]
 
         if num_classes <= 0:
-            raise ValueError("num_classes must be a positive integer")
+            raise ValueError(f"num_classes must be a positive integer, got {num_classes}")
         if not 0 <= dropout_rate < 1:
-            raise ValueError("dropout_rate must be in range [0, 1)")
+            raise ValueError(f"dropout_rate must be in range [0, 1), got {dropout_rate}")
 
+        # A `_3d` variant wins over use_3d=False; the argument can only turn 3D on.
+        use_3d = use_3d or variant_config.get("use_3d", False)
+        if input_shape is None:
+            input_shape = (224, 224, 3)
+        input_shape = tuple(input_shape)
+        if len(input_shape) != (4 if use_3d else 3):
+            raise ValueError(
+                "input_shape must be (depth, height, width, channels) for a 3D model and "
+                f"(height, width, channels) for a 2D one; use_3d={use_3d}, got {input_shape}"
+            )
         require_channel_count(input_shape)
 
         # DECISION plan-2026-08-17T183311-79c63e38/D-020: validate here, not in
@@ -444,14 +487,15 @@ class SqueezeNoduleNetV2(keras.Model):
         validate_spatial_extent(input_shape[:-1], variant_config, type(self).__name__)
 
         self.num_classes = num_classes
-        self.variant_config = variant_config
+        self.variant = variant
         self.dropout_rate = dropout_rate
-        self.kernel_regularizer = kernel_regularizer
-        self.kernel_initializer = kernel_initializer
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        # DECISION plan-2026-10-26T125959-7af851e5/D-033: store the initializer as a spec and hand that spec to every Fire block; never keep the caller's Initializer instance.
+        # One seedless instance given to all of them replayed a single draw across 120 of 153 kernel pairs (SqueezeNoduleNet v2), and an instance in get_config is not JSON-safe. See decisions.md.
+        self.kernel_initializer = initializer_spec(kernel_initializer)
         self.include_top = include_top
-        # A `_3d` variant wins over use_3d=False; the argument can only turn 3D on.
-        self.use_3d = use_3d or variant_config.get("use_3d", False)
-        self._input_shape = input_shape
+        self.use_3d = use_3d
+        self.input_shape_config = input_shape
 
         self.fire_configs = variant_config["fire_configs"]
         self.conv1_filters = variant_config["conv1_filters"]
@@ -459,7 +503,6 @@ class SqueezeNoduleNetV2(keras.Model):
         self.conv1_stride = variant_config["conv1_stride"]
         self.pool_indices = variant_config["pool_indices"]
 
-        # Set by _build_stem in 2D; stays None in 3D (D-004).
         self.stem: Optional[ConvStem] = None
         self.fire_modules = []
         self.pool_layers = []
@@ -469,6 +512,11 @@ class SqueezeNoduleNetV2(keras.Model):
         outputs = self._build_model(inputs)
 
         super().__init__(inputs=inputs, outputs=outputs, **kwargs)
+
+        logger.info(
+            f"Created SqueezeNoduleNetV2 '{variant}' ({'3D' if self.use_3d else '2D'}) "
+            f"for input {self.input_shape_config} with {len(self.fire_configs)} Fire blocks"
+        )
 
     def _build_model(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """Build the stem, the Fire stack and, if requested, the head.
@@ -490,22 +538,28 @@ class SqueezeNoduleNetV2(keras.Model):
         return x
 
     def _build_stem(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Build the initial convolution and its pooling.
+        """Build the initial convolution and its pooling as one ``ConvStem``.
 
-        In 2D the stem is one ``ConvStem`` named ``stem``: ``stem_conv1`` (ReLU
-        as the separate ``stem_act1`` layer, no normalization) and, when pool
-        index 1 is present, ``stem_pool``. In 3D it is a ``Conv3D`` named
-        ``conv1`` and a ``MaxPooling3D`` named ``maxpool1``, built inline. The
-        pool is also appended to ``pool_layers``.
+        The stem is ``ConvStem`` ``stem`` in 2D and 3D alike (``rank`` 2 or 3):
+        ``stem_conv1`` (a ``Conv2D`` or ``Conv3D``; ReLU as the separate
+        ``stem_act1`` layer, no normalization) and, when pool index 1 is
+        present, ``stem_pool``. The pool is also appended to ``pool_layers``.
 
         :param x: The model's input tensor.
         :type x: keras.KerasTensor
         :return: Tensor after conv1 and, when pool index 1 is present, the pool.
         :rtype: keras.KerasTensor
         """
-        if self.use_3d:
-            return self._build_stem_3d(x)
-
+        # DECISION plan-2026-10-26T125959-7af851e5/D-004: ConvStem is 2D only,
+        # so the 3D stem stays hand-rolled here. Do NOT add a `rank` option to
+        # ConvStem to absorb it: that buys 2 of this model's 5 rank-dependent
+        # sites (stem conv, stem pool, Fire-loop pool, 3D Fire, head GAP3D) for
+        # one caller. See decisions.md.
+        # DECISION plan-2026-10-26T125959-7af851e5/D-030: (2026-10-28) the D-004 text above
+        # is superseded. ConvStem takes `rank` (2 or 3), so this one call builds the 2D stem
+        # and the 3D stem; the Conv3D that was written out here is gone. Do NOT write the
+        # 3D stem by hand again: the EQ cases `squeezenodule-v2-3d-*` hold it to the old
+        # Conv3D at atol 0. See decisions.md.
         self.stem = ConvStem(
             filters=self.conv1_filters,
             kernel_size=self.conv1_kernel,
@@ -521,48 +575,13 @@ class SqueezeNoduleNetV2(keras.Model):
             pool_padding='valid',
             kernel_initializer=self.STEM_INITIALIZER,
             kernel_regularizer=self.kernel_regularizer,
+            rank=3 if self.use_3d else 2,
             name='stem'
         )
         x = self.stem(x)
 
         if self.stem.pool is not None:
             self.pool_layers.append(self.stem.pool)
-
-        return x
-
-    def _build_stem_3d(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Build the 3D stem: ``Conv3D`` with a fused ReLU, then ``MaxPooling3D``.
-
-        :param x: The model's input tensor.
-        :type x: keras.KerasTensor
-        :return: Tensor after conv1 and, when pool index 1 is present, the pool.
-        :rtype: keras.KerasTensor
-        """
-        # DECISION plan-2026-10-26T125959-7af851e5/D-004: ConvStem is 2D only,
-        # so the 3D stem stays hand-rolled here. Do NOT add a `rank` option to
-        # ConvStem to absorb it: that buys 2 of this model's 5 rank-dependent
-        # sites (stem conv, stem pool, Fire-loop pool, 3D Fire, head GAP3D) for
-        # one caller. See decisions.md.
-        x = keras.layers.Conv3D(
-            filters=self.conv1_filters,
-            kernel_size=self.conv1_kernel,
-            strides=self.conv1_stride,
-            activation='relu',
-            padding='same' if self.conv1_stride == 1 else 'valid',
-            kernel_regularizer=self.kernel_regularizer,
-            kernel_initializer=self.STEM_INITIALIZER,
-            name='conv1'
-        )(x)
-
-        if 1 in self.pool_indices:
-            maxpool1 = keras.layers.MaxPooling3D(
-                pool_size=3,
-                strides=2,
-                padding='valid',
-                name='maxpool1'
-            )
-            x = maxpool1(x)
-            self.pool_layers.append(maxpool1)
 
         return x
 
@@ -607,8 +626,7 @@ class SqueezeNoduleNetV2(keras.Model):
                     pool_size=3,
                     strides=2,
                     padding='valid',
-                    # Numbered by position in pool_layers, not by fire number.
-                    name=f'pool{len(self.pool_layers) + 1}'
+                    name=f'maxpool{fire_number}'
                 )
                 x = pool_layer(x)
                 self.pool_layers.append(pool_layer)
@@ -616,7 +634,7 @@ class SqueezeNoduleNetV2(keras.Model):
         # Outside the loop and before the head branch, so include_top=False keeps it.
         dropout = keras.layers.Dropout(
             rate=self.dropout_rate,
-            name='drop9'
+            name='dropout'
         )
         x = dropout(x)
         self.head_layers.append(dropout)
@@ -700,40 +718,80 @@ class SqueezeNoduleNetV2(keras.Model):
         x = conv10(x)
         self.head_layers.append(conv10)
 
-        globalpool = GlobalPool(name='globalpool')
-        x = globalpool(x)
-        self.head_layers.append(globalpool)
+        avgpool = GlobalPool(name='avgpool')
+        x = avgpool(x)
+        self.head_layers.append(avgpool)
 
         return x
+
+    def load_pretrained_weights(
+            self,
+            weights_path: str,
+            skip_mismatch: bool = True
+    ) -> None:
+        """Load a local `.keras` checkpoint into the model, layer by layer.
+
+        The transfer is `load_pretrained_checkpoint`: the model is built at
+        construction, so its variables are kept and the checkpoint's are copied
+        in, a headed checkpoint into a headless model included. Every layer
+        outside ``conv10`` must be restored, so a checkpoint of another variant
+        or of the other rank raises and copies no weight. Only a ``conv10`` of
+        another `num_classes` is skipped: it keeps its initialization and a
+        warning names it. The archive's own config is compared too: a
+        constructor argument that both hold and that is not in
+        `_NON_STRUCTURAL_CONFIG_KEYS` must be equal. An argument only one side
+        holds is not compared, and an archive in which no single model of this
+        class can be found is checked by layers only (the load warns).
+
+        :param weights_path: Path to the weights file (`.keras` format).
+        :type weights_path: str
+        :param skip_mismatch: `True` (default) lets ``conv10`` differ; `False`
+            allows no difference anywhere. The inverse of the transfer helper's
+            `strict`.
+        :type skip_mismatch: bool
+        :raises FileNotFoundError: If `weights_path` doesn't exist.
+        :raises ValueError: If a layer outside the head is not restored, or the
+            weights cannot be loaded.
+        """
+        load_pretrained_checkpoint(
+            self, weights_path, self.input_shape_config, skip_mismatch,
+            head_pattern=_HEAD_PATTERN,
+            ignore_config_keys=_NON_STRUCTURAL_CONFIG_KEYS,
+        )
 
     @classmethod
     def from_variant(
             cls,
             variant: str,
             num_classes: int = 1000,
-            input_shape: Union[Tuple[int, int, int], Tuple[int, int, int, int]] = (224, 224, 3),
+            input_shape: Optional[Union[Tuple[int, int, int], Tuple[int, int, int, int]]] = None,
+            pretrained: Union[bool, str] = False,
             **kwargs: Any
     ) -> "SqueezeNoduleNetV2":
         """Create a SqueezeNodule-Net model from a predefined variant.
-
-        The chokepoint both public entry points reach, so the ``weights`` guard
-        lives here.
 
         :param variant: One of `"v1"`, `"v2"`, `"v1_3d"`, `"v2_3d"`.
         :type variant: str
         :param num_classes: Number of output classes.
         :type num_classes: int
         :param input_shape: Input shape. The `_3d` variants need four elements;
-            the default is the 2D shape.
-        :type input_shape: tuple of 3 or 4 ints
-        :param kwargs: Passthrough to the constructor. A non-`None` `weights`
-            here raises `NotImplementedError`.
+            `None` is the 2D shape `(224, 224, 3)`.
+        :type input_shape: tuple of 3 or 4 ints or None
+        :param pretrained: A path to a local weights file, `True` (raises
+            `NotImplementedError`, since no SqueezeNodule-Net weights ship with
+            `dl_techniques`), or `False` (default, random init).
+        :type pretrained: bool or str
+        :param kwargs: Passthrough to the constructor (`dropout_rate`,
+            `kernel_regularizer`, ...). `weights` is no argument and is refused
+            by name.
         :return: A configured `SqueezeNoduleNetV2` instance.
         :rtype: SqueezeNoduleNetV2
-        :raises NotImplementedError: If a non-`None` `weights` is passed.
-        :raises ValueError: If `variant` is not recognized, or `input_shape`'s
+        :raises ValueError: If `variant` is not recognized, `input_shape`'s
             spatial extent is below the computed minimum of 35 (shared by
-            all four variants, which share one stem and pooling schedule).
+            all four variants, which share one stem and pooling schedule), or a
+            keyword is not an argument.
+        :raises NotImplementedError: If `pretrained` is `True`.
+        :raises FileNotFoundError: If `pretrained` is a path that doesn't exist.
 
         Example::
 
@@ -747,23 +805,21 @@ class SqueezeNoduleNetV2(keras.Model):
                 f"{list(cls.MODEL_VARIANTS.keys())}"
             )
 
-        if kwargs.pop("weights", None) is not None:
-            # Without the pop, `**kwargs` swallows `weights` and returns a random
-            # model.
-            raise NotImplementedError(
-                "No pretrained SqueezeNodule-Net weights are distributed with dl_techniques. "
-                "Train from scratch, or load a local checkpoint with "
-                "keras.models.load_model()."
-            )
+        weights_path = pretrained_path_or_raise(
+            pretrained, f"{cls.__name__} variant '{variant}'"
+        )
 
-        variant_config = cls.MODEL_VARIANTS[variant]
-
-        return cls(
+        model = cls(
             num_classes=num_classes,
-            variant_config=variant_config,
+            variant=variant,
             input_shape=input_shape,
             **kwargs
         )
+
+        if weights_path:
+            model.load_pretrained_weights(weights_path)
+
+        return model
 
     def get_config(self) -> Dict[str, Any]:
         """Return the model configuration for serialization.
@@ -771,93 +827,46 @@ class SqueezeNoduleNetV2(keras.Model):
         :return: Configuration dictionary containing every constructor parameter.
         :rtype: dict
         """
-        config = super().get_config()
-        config.update({
+        config = {
             'num_classes': self.num_classes,
-            'variant_config': self.variant_config,
+            'variant': self.variant,
             'dropout_rate': self.dropout_rate,
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
-            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'kernel_initializer': self.kernel_initializer,
             'include_top': self.include_top,
             'use_3d': self.use_3d,
-            'input_shape': self._input_shape
-        })
-        return config
+            'input_shape': self.input_shape_config,
+        }
+        base_config = super().get_config()
+        return {**base_config, **config}
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "SqueezeNoduleNetV2":
         """Rebuild the model from a configuration dictionary.
 
-        :param config: Configuration dictionary produced by ``get_config``.
+        :param config: Configuration dictionary produced by ``get_config``; it
+            is not modified.
         :type config: dict
         :return: Reconstructed model instance.
         :rtype: SqueezeNoduleNetV2
         """
-        if config.get('kernel_regularizer'):
-            config['kernel_regularizer'] = keras.regularizers.deserialize(
-                config['kernel_regularizer']
-            )
-        if config.get('kernel_initializer'):
-            config['kernel_initializer'] = keras.initializers.deserialize(
-                config['kernel_initializer']
-            )
-
         # DECISION plan-2026-08-19T163559-499b6f0e/D-129: drop only the Functional
         # keys __init__ rebuilds; adding 'name' renames a nested backbone on reload
         # and weight_transfer.py's name-keyed map then misses it. See decisions.md.
-        for key in ('layers', 'input_layers', 'output_layers'):
-            config.pop(key, None)
+        config = {
+            key: value for key, value in config.items()
+            if key not in ('layers', 'input_layers', 'output_layers')
+        }
 
         return cls(**config)
-
-    def summary_with_details(self) -> None:
-        """Print the Keras summary, then log the resolved configuration.
-
-        The reduction line compares against a fixed 1000-class SqueezeNet count,
-        so it is only a like-for-like comparison at ``num_classes=1000``.
-
-        :return: None.
-        :rtype: None
-        """
-        self.summary()
-
-        logger.info("\nSqueezeNodule-Net V2 Configuration:")
-        logger.info(f"  - Input shape: {self._input_shape}")
-        logger.info(f"  - 3D mode: {self.use_3d}")
-        logger.info(f"  - Number of Fire modules: {len(self.fire_configs)}")
-
-        logger.info("  - Squeeze Ratios:")
-        for i, config in enumerate(self.fire_configs):
-            sr = config['s1x1'] / config['e3x3']
-            logger.info(f"    - Fire{i + 2}: SR={sr:.2f} (s1x1={config['s1x1']}, e3x3={config['e3x3']})")
-
-        logger.info(f"  - Conv1 filters: {self.conv1_filters}")
-        logger.info(f"  - Conv1 kernel: {self.conv1_kernel}")
-        logger.info(f"  - Conv1 stride: {self.conv1_stride}")
-        logger.info(f"  - Pooling after modules: {self.pool_indices}")
-        logger.info(f"  - Dropout rate: {self.dropout_rate}")
-        logger.info(f"  - Include top: {self.include_top}")
-        if self.include_top:
-            logger.info(f"  - Number of classes: {self.num_classes}")
-
-        total_params = self.count_params()
-        logger.info(f"  - Total parameters: {total_params:,}")
-
-        # The published count for the 1000-class SqueezeNet.
-        squeezenet_params = 1_248_424
-        reduction = (squeezenet_params - total_params) / squeezenet_params * 100
-        if reduction > 0:
-            logger.info(f"  - Parameter reduction vs SqueezeNet: {reduction:.1f}%")
-        else:
-            logger.info(f"  - Parameter increase vs SqueezeNet: {-reduction:.1f}%")
 
 # ---------------------------------------------------------------------
 
 def create_squeezenodule_net_v2(
         variant: str = "v2",
         num_classes: int = 1000,
-        input_shape: Union[Tuple[int, int, int], Tuple[int, int, int, int]] = (224, 224, 3),
-        weights: Optional[str] = None,
+        input_shape: Optional[Union[Tuple[int, int, int], Tuple[int, int, int, int]]] = None,
+        pretrained: Union[bool, str] = False,
         **kwargs: Any
 ) -> SqueezeNoduleNetV2:
     """Create a SqueezeNodule-Net V2 model from a variant name.
@@ -866,17 +875,19 @@ def create_squeezenodule_net_v2(
     :type variant: str
     :param num_classes: Number of output classes.
     :type num_classes: int
-    :param input_shape: Input shape. The `_3d` variants need four elements; the
-        default is the 2D shape.
-    :type input_shape: tuple of 3 or 4 ints
-    :param weights: Unsupported; any non-`None` value raises `NotImplementedError`.
-    :type weights: str or None
+    :param input_shape: Input shape. The `_3d` variants need four elements;
+        `None` is the 2D shape `(224, 224, 3)`.
+    :type input_shape: tuple of 3 or 4 ints or None
+    :param pretrained: A path to a local weights file, `True` (raises
+        `NotImplementedError`), or `False` (default, random init).
+    :type pretrained: bool or str
     :param kwargs: Passthrough to the model constructor.
     :return: A configured `SqueezeNoduleNetV2` instance.
     :rtype: SqueezeNoduleNetV2
-    :raises NotImplementedError: If `weights` is not `None`.
     :raises ValueError: If `variant` is not recognized, or `input_shape`'s
         spatial extent is below 35 on any axis.
+    :raises NotImplementedError: If `pretrained` is `True`.
+    :raises FileNotFoundError: If `pretrained` is a path that doesn't exist.
 
     Example::
 
@@ -888,7 +899,7 @@ def create_squeezenodule_net_v2(
         variant=variant,
         num_classes=num_classes,
         input_shape=input_shape,
-        weights=weights,
+        pretrained=pretrained,
         **kwargs
     )
 

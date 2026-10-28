@@ -271,7 +271,8 @@ CLASSIFIERS: Tuple[Classifier, ...] = (
         _variant(f"{_VISION}.squeezenet.squeezenet_v1", "SqueezeNetV1", "1.1", input_shape=(48, 64, 3)),
         tiny={}, override={"dropout_rate": 0.25}, head_markers=("conv10",),
         head_attribute=False, functional=True,
-        invalid=(({"use_bypass": "bogus"}, "use_bypass", "bogus"),),
+        invalid=(({"use_bypass": "bogus"}, "use_bypass", "bogus"),
+                 ({"use_bypass": True}, "use_bypass", True)),
         sizes={_NON_SQUARE: (48, 64)}),
     Classifier(
         "squeezenet_v2", f"{_VISION}.squeezenet.squeezenet_v2", "SqueezeNoduleNetV2", "v2",
@@ -279,7 +280,9 @@ CLASSIFIERS: Tuple[Classifier, ...] = (
         _variant(f"{_VISION}.squeezenet.squeezenet_v2", "SqueezeNoduleNetV2", "v2",
                  input_shape=(48, 64, 3)),
         tiny={}, override={"dropout_rate": 0.25}, head_markers=("conv10",),
-        head_attribute=False, functional=True, sizes={_NON_SQUARE: (48, 64)}),
+        head_attribute=False, functional=True,
+        invalid=(({"input_shape": (36, 36, 36, 1)}, "input_shape", (36, 36, 36, 1)),),
+        sizes={_NON_SQUARE: (48, 64)}),
 )
 CLASSIFIER_KEYS = tuple(c.key for c in CLASSIFIERS)
 #: SqueezeNet is a functional model, built in ``__init__`` (the census's E-2 exemption): it has no unbuilt
@@ -308,11 +311,6 @@ def _l2() -> keras.regularizers.Regularizer:
 
 def _bias_init() -> keras.initializers.Initializer:
     return keras.initializers.RandomNormal(stddev=0.01, seed=4)
-
-
-def _squeezenet_table(module: str, name: str, variant: str) -> Dict[str, Any]:
-    cls = getattr(importlib.import_module(module), name)
-    return copy.deepcopy(cls.MODEL_VARIANTS[variant])
 
 
 _NO_BIAS_HEAD = {"classifier_use_bias": False}
@@ -376,15 +374,11 @@ PROBES: Dict[str, Callable[[], Dict[str, Any]]] = {
         dropout_rate=0.1, strides=2, input_shape=(32, 48, 3),
         head_config_overrides={"classifier_dropout_rate": 0.1}),
     "squeezenet_v1": lambda: dict(
-        num_classes=7,
-        variant_config=_squeezenet_table(f"{_VISION}.squeezenet.squeezenet_v1", "SqueezeNetV1", "1.0"),
-        use_bypass="simple", dropout_rate=0.25, kernel_regularizer=_l2(),
-        kernel_initializer=_he(3), input_shape=(48, 64, 3)),
+        num_classes=7, variant="1.1", use_bypass="simple", dropout_rate=0.25,
+        kernel_regularizer=_l2(), kernel_initializer=_he(3), input_shape=(48, 64, 3)),
     "squeezenet_v2": lambda: dict(
-        num_classes=7,
-        variant_config=_squeezenet_table(f"{_VISION}.squeezenet.squeezenet_v2", "SqueezeNoduleNetV2", "v2"),
-        dropout_rate=0.25, kernel_regularizer=_l2(), kernel_initializer=_he(3),
-        input_shape=(48, 64, 3)),
+        num_classes=7, variant="v1", dropout_rate=0.25, kernel_regularizer=_l2(),
+        kernel_initializer=_he(3), input_shape=(48, 64, 3)),
 }
 #: A second probe for an argument the first cannot carry (SqueezeNet V2's 3-D model needs
 #: a volume of at least 35 voxels per axis).
@@ -439,69 +433,6 @@ class Open:
 
 #: Every row that fails today, keyed ``(rule, subject)``.
 LEDGER: Dict[Tuple[str, str], Open] = {
-    ("pretrained_true_names_the_variant", "squeezenet_v1"): Open(
-        ValueError,
-        "the SqueezeNet migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': True}, no "
-        'NotImplementedError',
-        "Unrecognized keyword arguments passed to SqueezeNetV1: {'pretrained'"),
-    ("pretrained_true_names_the_variant", "squeezenet_v2"): Open(
-        ValueError,
-        "the SqueezeNet migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': True}, no "
-        'NotImplementedError',
-        "Unrecognized keyword arguments passed to SqueezeNoduleNetV2: {'pretrained'"),
-    ("missing_path_raises_file_not_found", "squeezenet_v1"): Open(
-        ValueError,
-        "the SqueezeNet migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to SqueezeNetV1: {'pretrained'"),
-    ("missing_path_raises_file_not_found", "squeezenet_v2"): Open(
-        ValueError,
-        "the SqueezeNet migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to SqueezeNoduleNetV2: {'pretrained'"),
-    ("local_path_round_trip_headed", "squeezenet_v1"): Open(
-        ValueError,
-        "the SqueezeNet migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to SqueezeNetV1: {'pretrained'"),
-    ("local_path_round_trip_headed", "squeezenet_v2"): Open(
-        ValueError,
-        "the SqueezeNet migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to SqueezeNoduleNetV2: {'pretrained'"),
-    ("local_path_round_trip_headless", "squeezenet_v1"): Open(
-        ValueError,
-        "the SqueezeNet migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to SqueezeNetV1: {'pretrained'"),
-    ("local_path_round_trip_headless", "squeezenet_v2"): Open(
-        ValueError,
-        "the SqueezeNet migration",
-        "ValueError: Unrecognized keyword arguments {'pretrained': <path>}, from_variant "
-        'takes no pretrained path',
-        "Unrecognized keyword arguments passed to SqueezeNoduleNetV2: {'pretrained'"),
-    ("invalid_values_name_the_value::use_bypass=bogus", "squeezenet_v1"): Open(
-        AssertionError,
-        "the SqueezeNet migration",
-        "use_bypass='bogus' was accepted",
-        "use_bypass='bogus' was accepted"),
-    ("no_replayed_draw::instance", "squeezenet_v1"): Open(
-        AssertionError,
-        "the SqueezeNet migration",
-        '276 of 325 kernel pairs replay one draw',
-        'kernel pairs replay one draw'),
-    ("no_replayed_draw::instance", "squeezenet_v2"): Open(
-        AssertionError,
-        "the SqueezeNet migration",
-        '120 of 153 kernel pairs replay one draw',
-        'kernel pairs replay one draw'),
     ("no_replayed_draw::instance", "vae"): Open(
         AssertionError,
         "the ConvUNext and VAE migration",
@@ -587,18 +518,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the CapsNet migration",
         '7 violation(s): legacy_conv_1, legacy_bn_1, legacy_relu_1, legacy_conv_2, ...',
         'is not a table spelling'),
-    ("config_fidelity", "squeezenet_v1"): Open(
-        AssertionError,
-        "the SqueezeNet migration",
-        "from_config rewrote the dict it was given, and the rebuilt model reports "
-        "another kernel_initializer",
-        'from_config rewrote the dict it was given'),
-    ("config_fidelity", "squeezenet_v2"): Open(
-        AssertionError,
-        "the SqueezeNet migration",
-        "from_config rewrote the dict it was given, and the rebuilt model reports "
-        "another kernel_initializer",
-        'from_config rewrote the dict it was given'),
 }
 
 
@@ -784,8 +703,21 @@ MIGRATED_LOADER_DONORS: Dict[str, Tuple[str, Dict[str, Any]]] = {
     "convnext_v1": ("tiny", {"depths": [1], "dims": [16]}),
     "convnext_v2": ("tiny", {"depths": [1], "dims": [16]}),
     "rad_convnet": ("tiny", {"depths": [1], "dims": [16]}),
+    # Another variant: its stem and first Fire module have other shapes, while every later
+    # layer has the same name and shape, so SOME layers fit by name.
+    "squeezenet_v1": ("1.0", {}),
+    "squeezenet_v2": ("v1", {}),
 }
 MIGRATED_LOADER_KEYS = tuple(MIGRATED_LOADER_DONORS)
+#: The loader families that take ``head_config_overrides``. SqueezeNet's head is its own ``conv10``
+#: (no shared ``ClassificationHead`` to configure), so it has no such argument.
+HEAD_OVERRIDE_KEYS = tuple(
+    key for key in MIGRATED_LOADER_KEYS
+    if "head_config_overrides" in inspect.signature(classifier(key).cls.__init__).parameters)
+
+
+def test_only_the_conv10_models_take_no_head_override() -> None:
+    assert set(MIGRATED_LOADER_KEYS) - set(HEAD_OVERRIDE_KEYS) == {"squeezenet_v1", "squeezenet_v2"}
 
 #: What the layer check must name when a donor's trunk does not fit. A donor of another
 #: depth or block type misses layers the receiver has; MobileNet V1 and V2 have one fixed
@@ -793,6 +725,9 @@ MIGRATED_LOADER_KEYS = tuple(MIGRATED_LOADER_DONORS)
 TRUNK_MISMATCH_REPORT: Dict[str, Tuple[str, ...]] = {
     "mobilenet_v1": ("shape_mismatch",),
     "mobilenet_v2": ("shape_mismatch",),
+    # A donor of another variant has the same layers, in other widths.
+    "squeezenet_v1": ("shape_mismatch",),
+    "squeezenet_v2": ("shape_mismatch",),
 }
 _DEFAULT_TRUNK_MISMATCH_REPORT = ("shape_mismatch", "missing_in_source")
 
@@ -841,12 +776,32 @@ SAME_SHAPE_DONORS: Dict[str, Tuple[Dict[str, Any], str]] = {
     "convnext_v1": ({"activation": "relu"}, "activation"),
     "convnext_v2": ({"activation": "relu"}, "activation"),
     "rad_convnet": ({"activation": "relu"}, "activation"),
+    # A simple bypass adds an Add layer and no weight: the same tensors compute another function.
+    "squeezenet_v1": ({"use_bypass": "simple"}, "use_bypass"),
 }
 SAME_SHAPE_KEYS = tuple(SAME_SHAPE_DONORS)
 
+#: Loader families with no architecture argument that moves no weight shape, and why.
+NO_SAME_SHAPE_ARGUMENT: Dict[str, str] = {
+    "squeezenet_v2": "its only architecture arguments are `variant` and `use_3d`, and each moves a "
+                     "kernel shape (another squeeze width, a rank-5 kernel)",
+}
+
 
 def test_the_same_shape_donors_cover_every_loader_family() -> None:
-    assert set(SAME_SHAPE_KEYS) == set(MIGRATED_LOADER_KEYS)
+    assert set(SAME_SHAPE_KEYS) | set(NO_SAME_SHAPE_ARGUMENT) == set(MIGRATED_LOADER_KEYS)
+    assert not set(SAME_SHAPE_KEYS) & set(NO_SAME_SHAPE_ARGUMENT)
+
+
+def test_squeezenodule_net_has_no_architecture_argument_that_keeps_every_weight_shape() -> None:
+    """The exemption above is a measurement: both of its architecture arguments move a shape."""
+    c = classifier("squeezenet_v2")
+    base = _weight_layout(c.from_variant())
+    another_variant = c.cls.from_variant("v1", num_classes=NUM_CLASSES, input_shape=c.input_shape)
+    three_d = c.cls.from_variant("v2", num_classes=NUM_CLASSES, use_3d=True,
+                                 input_shape=(36, 36, 36, 1))
+    assert _weight_layout(another_variant) != base, "`variant` moves no weight shape"
+    assert _weight_layout(three_d) != base, "`use_3d` moves no weight shape"
 
 
 @pytest.mark.parametrize(
@@ -884,7 +839,7 @@ def _saved(model: keras.Model, c: Classifier, path: Path) -> str:
 
 
 @pytest.mark.parametrize(
-    "key", _rows("local_path_refuses_a_head_that_computes_another_function", MIGRATED_LOADER_KEYS))
+    "key", _rows("local_path_refuses_a_head_that_computes_another_function", HEAD_OVERRIDE_KEYS))
 @ledgered("local_path_refuses_a_head_that_computes_another_function")
 def test_a_head_that_computes_another_function_is_refused_unless_it_is_a_new_head(
         key, tmp_path) -> None:
@@ -957,7 +912,7 @@ def test_an_integer_kernel_and_its_pair_are_one_architecture(key, tmp_path) -> N
 
 
 @pytest.mark.parametrize(
-    "key", _rows("head_config_overrides_are_json", MIGRATED_LOADER_KEYS))
+    "key", _rows("head_config_overrides_are_json", HEAD_OVERRIDE_KEYS))
 @ledgered("head_config_overrides_are_json")
 def test_a_live_object_in_head_config_overrides_is_refused_by_name(key) -> None:
     c = classifier(key)
@@ -1812,6 +1767,11 @@ FAMILY_CHILD_NAMES: Dict[str, str] = {
     "rad_convnet": (r"stem|mlp_activation|stage[1-9]\d*_block[1-9]\d*_"
                     r"(?:rad_conv|norm|expand|reduce|dropout)"
                     r"|downsample_\d+_(?:norm|conv)|classification_head"),
+    # SqueezeNet is a functional model: its head is the paper's ``conv10`` and a pool, and its
+    # Fire modules, pools and bypass layers are named by the paper's fire numbers (2 to 9).
+    "squeezenet_v1": (r"stem|fire[2-9]|maxpool[2-9]|add_fire[2-9]|bypass_conv_fire[2-9]"
+                      r"|dropout|conv10|avgpool"),
+    "squeezenet_v2": r"stem|simpfire[2-9]|maxpool[2-9]|dropout|conv10|avgpool",
 }
 
 
@@ -1821,9 +1781,12 @@ def direct_children(model: keras.Model) -> List[str]:
     Interface contract: ``model.layers`` is the model's direct sublayers (Keras tracks
     the ones kept in a list or a dict attribute too). Returns the distinct names, sorted.
     A weightless child (a drop path, an activation, a pooling) is therefore read, which
-    the weight paths of a built model cannot show.
+    the weight paths of a built model cannot show. The ``InputLayer`` a functional model
+    holds is not read: it is not a layer the model chose, and its name is a process-wide
+    counter (``input_layer_7``).
     """
-    return sorted({layer.name for layer in model.layers})
+    return sorted({layer.name for layer in model.layers
+                   if not isinstance(layer, keras.layers.InputLayer)})
 
 
 def child_name_violations(key: str, children: Sequence[str]) -> List[str]:
@@ -1837,6 +1800,16 @@ def _hybrid_v4() -> keras.Model:
     c = classifier("mobilenet_v4")
     model = c.cls.from_variant("hybrid_medium", num_classes=NUM_CLASSES, input_shape=(128, 128, 3))
     model(_images(128, 128, 3))
+    return model
+
+
+_VOLUME = (36, 36, 36, 1)  # the smallest cube SqueezeNodule-Net accepts: 35 voxels per axis
+
+
+def _volume_v2(**knobs) -> keras.Model:
+    """The 3D SqueezeNodule-Net, built and run once."""
+    model = classifier("squeezenet_v2").make(use_3d=True, input_shape=_VOLUME, **knobs)
+    model(_images(*_VOLUME))
     return model
 
 
@@ -1866,6 +1839,13 @@ FAMILY_BUILDS: Dict[str, Tuple[Callable[[], keras.Model], ...]] = {
     # A dropout layer per block exists only with a non-zero rate.
     "rad_convnet": (lambda: _built(classifier("rad_convnet"), dropout_rate=0.1),
                     lambda: _built(classifier("rad_convnet"), include_top=False)),
+    # The plain, the simple-bypass and the complex-bypass graph, and the 3D model.
+    "squeezenet_v1": (lambda: _built(classifier("squeezenet_v1")),
+                      lambda: _built(classifier("squeezenet_v1"), use_bypass="simple"),
+                      lambda: _built(classifier("squeezenet_v1"), use_bypass="complex",
+                                     include_top=False)),
+    "squeezenet_v2": (lambda: _built(classifier("squeezenet_v2")),
+                      _volume_v2),
 }
 
 
@@ -2005,6 +1985,21 @@ NUMBERED_FAMILIES: Dict[str, Tuple[Dict[str, Any], Callable[[bool], set]]] = {
     "convnext_v2": (dict(depths=_DEPTHS, dims=_DIMS, drop_path_rate=_CONVNEXT_RATE, strides=2),
                     _convnext_owned),
     "rad_convnet": (dict(depths=_DEPTHS, dims=_DIMS, strides=2, dropout_rate=0.1), _rad_owned),
+    # The paper's numbering: fire2 to fire9, the stem's pool inside the stem, the other pools
+    # after the fire module they follow. Variant 1.1 pools after fire3 and fire5; the complex
+    # bypass adds every fire module and a 1x1 projection where the width changes (64 to 128 at
+    # fire2, 128 to 256 at fire4, 256 to 384 at fire6, 384 to 512 at fire8).
+    "squeezenet_v1": (dict(use_bypass="complex", input_shape=(64, 64, 3)),
+                      lambda headed: {"stem", "maxpool3", "maxpool5", "dropout"}
+                      | {f"fire{n}" for n in range(2, 10)}
+                      | {f"add_fire{n}" for n in range(2, 10)}
+                      | {f"bypass_conv_fire{n}" for n in (2, 4, 6, 8)}
+                      | ({"conv10", "avgpool"} if headed else set())),
+    # Variant v2 pools after fire4 and fire8; there is no bypass.
+    "squeezenet_v2": (dict(input_shape=(64, 64, 1)),
+                      lambda headed: {"stem", "maxpool4", "maxpool8", "dropout"}
+                      | {f"simpfire{n}" for n in range(2, 10)}
+                      | ({"conv10", "avgpool"} if headed else set())),
 }
 
 
@@ -2031,6 +2026,14 @@ def test_a_family_numbers_its_layers_exactly_as_its_depths_say(key: str, headed:
     c = classifier(key)
     model = c.make(include_top=headed, **knobs)
     model(_images(*knobs.get("input_shape", c.input_shape)))
+    assert numbering_problems(direct_children(model), owned(headed)) == []
+
+
+@pytest.mark.parametrize("headed", [True, False], ids=["headed", "headless"])
+def test_the_3d_squeezenodule_net_owns_the_layers_of_the_2d_one(headed: bool) -> None:
+    """The volume model is the same graph of names: a Conv3D stem, 3D pools and a 3D head."""
+    _, owned = NUMBERED_FAMILIES["squeezenet_v2"]
+    model = _volume_v2(include_top=headed)
     assert numbering_problems(direct_children(model), owned(headed)) == []
 
 

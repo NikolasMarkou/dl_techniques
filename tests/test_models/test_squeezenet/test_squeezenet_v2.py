@@ -14,7 +14,9 @@ import tempfile
 import os
 from typing import Tuple, Dict, Any
 
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.models.vision.squeezenet.squeezenet_v2 import SqueezeNoduleNetV2, SimplifiedFireModule, create_squeezenodule_net_v2
+from tests.test_models.initializer_replay_oracle import replayed_pairs
 
 
 class TestSqueezeNoduleNetV2:
@@ -88,7 +90,7 @@ class TestSqueezeNoduleNetV2:
         assert model.num_classes == num_classes
         assert model.dropout_rate == 0.25
         assert model.kernel_regularizer == regularizer
-        assert isinstance(model.kernel_initializer, type(initializer))
+        assert model.kernel_initializer == keras.initializers.serialize(initializer)
         assert model.include_top is False
 
     @pytest.mark.parametrize(
@@ -113,6 +115,31 @@ class TestSqueezeNoduleNetV2:
         """Test invalid variant raises error."""
         with pytest.raises(ValueError, match="Unknown variant"):
             SqueezeNoduleNetV2.from_variant("invalid_variant", num_classes=num_classes)
+
+    def test_an_unknown_variant_is_refused_by_the_constructor(self):
+        with pytest.raises(ValueError, match=r"Unknown variant 'nope'. Available variants: \['v1', 'v2', 'v1_3d', 'v2_3d'\]"):
+            SqueezeNoduleNetV2(variant="nope")
+
+    def test_the_constructor_stores_the_variant_name(self):
+        assert SqueezeNoduleNetV2(input_shape=(64, 64, 1)).variant == "v2"
+        assert SqueezeNoduleNetV2(variant="v1", input_shape=(64, 64, 1)).variant == "v1"
+
+    @pytest.mark.parametrize("use_3d, shape", [(False, (36, 36, 36, 1)), (True, (64, 64, 1))])
+    def test_an_input_shape_of_the_wrong_rank_is_refused_naming_it(self, use_3d, shape):
+        """A 3D model fed ``(H, W, C)`` failed inside ``Conv3D``, naming no argument."""
+        with pytest.raises(ValueError, match="input_shape") as caught:
+            SqueezeNoduleNetV2(use_3d=use_3d, input_shape=shape)
+        assert str(shape) in str(caught.value)
+
+    def test_a_weights_keyword_is_refused_by_name(self, num_classes):
+        with pytest.raises(ValueError, match="Unrecognized keyword arguments.*weights"):
+            create_squeezenodule_net_v2("v2", num_classes=num_classes,
+                                        input_shape=(64, 64, 3), weights="imagenet")
+
+    def test_pretrained_true_raises_naming_the_variant(self, num_classes):
+        with pytest.raises(NotImplementedError, match="SqueezeNoduleNetV2 variant 'v2'"):
+            create_squeezenodule_net_v2("v2", num_classes=num_classes,
+                                        input_shape=(64, 64, 3), pretrained=True)
 
     def test_forward_pass_2d_with_top(self, num_classes, sample_data_2d):
         """Test 2D forward pass with classification head."""
@@ -178,7 +205,20 @@ class TestSqueezeNoduleNetV2:
 
         assert recreated_model.num_classes == original_model.num_classes
         assert recreated_model.use_3d == original_model.use_3d
-        assert recreated_model.get_config()['variant_config'] == original_model.get_config()['variant_config']
+        assert original_model.get_config()['variant'] == 'v2'
+        assert recreated_model.get_config()['variant'] == original_model.get_config()['variant']
+
+    def test_get_config_is_json_safe_with_an_initializer_instance_and_from_config_leaves_the_dict_alone(
+            self, num_classes, input_shape_2d):
+        import copy
+        import json
+        model = SqueezeNoduleNetV2(num_classes=num_classes, input_shape=input_shape_2d,
+                                   kernel_initializer=keras.initializers.HeNormal())
+        config = model.get_config()
+        json.dumps(config)
+        given = copy.deepcopy(config)
+        SqueezeNoduleNetV2.from_config(given)
+        assert given == config
 
     def test_model_save_load_2d(self, num_classes, sample_data_2d):
         """Test saving and loading a 2D SqueezeNodule-Net model."""
@@ -255,8 +295,53 @@ class TestSqueezeNoduleNetV2:
             assert not np.any(np.isnan(outputs.numpy())), f"NaN in outputs for test case {i}"
             assert not np.any(np.isinf(outputs.numpy())), f"Inf in outputs for test case {i}"
 
+class TestTheStemIsOneConvStemInBothRanks:
+    """The 3D stem is the same ``ConvStem`` the 2D one is, at ``rank=3``."""
+
+    @pytest.mark.parametrize("variant, shape, rank, conv", [
+        ("v2", (64, 64, 1), 2, keras.layers.Conv2D),
+        ("v2_3d", (64, 64, 64, 1), 3, keras.layers.Conv3D),
+    ])
+    def test_the_stem_is_a_convstem_named_stem(self, variant, shape, rank, conv):
+        model = SqueezeNoduleNetV2.from_variant(variant, num_classes=2, input_shape=shape)
+        assert isinstance(model.stem, ConvStem) and model.stem.name == "stem"
+        assert model.stem.rank == rank
+        assert type(model.stem.conv1) is conv
+        assert model.stem.pool is not None and model.stem.pool.name == "stem_pool"
+        assert model.get_layer("stem") is model.stem
+        assert [w.path for w in model.weights][:2] == [
+            "stem/stem_conv1/kernel", "stem/stem_conv1/bias"]
+
+    def test_the_weightless_layers_are_named_as_version_one_names_them(self):
+        """``drop9``, ``globalpool`` and ``pool{k}`` were this model's own spellings."""
+        model = SqueezeNoduleNetV2.from_variant("v2", num_classes=2, input_shape=(64, 64, 1))
+        names = [layer.name for layer in model.layers]
+        assert "dropout" in names and "avgpool" in names
+        assert [n for n in names if n.startswith("maxpool")] == ["maxpool4", "maxpool8"]
+        assert not {"drop9", "globalpool", "pool2", "pool3"} & set(names)
+
+    def test_a_3d_model_is_saved_and_loaded_without_custom_objects(self, tmp_path):
+        shape = (40, 40, 40, 1)
+        model = SqueezeNoduleNetV2.from_variant("v2_3d", num_classes=2, input_shape=shape)
+        x = np.random.default_rng(0).random((1, *shape)).astype("float32")
+        path = str(tmp_path / "m.keras")
+        model.save(path)
+        loaded = keras.models.load_model(path)
+        np.testing.assert_array_equal(model(x).numpy(), loaded(x).numpy())
+        assert isinstance(loaded.stem, ConvStem) and loaded.stem.rank == 3
+
+
 class TestSimplifiedFireModule:
     """Test suite for the SimplifiedFireModule layer."""
+
+    def test_an_initializer_instance_is_stored_as_its_spec_and_no_two_convs_replay_a_draw(self):
+        initializer = keras.initializers.HeNormal()
+        module = SimplifiedFireModule(s1x1=16, e3x3=64, kernel_initializer=initializer)
+        assert module.kernel_initializer == keras.initializers.serialize(initializer)
+        keras.utils.set_random_seed(0)
+        module.build((None, 8, 8, 128))
+        pairs, compared = replayed_pairs(module)
+        assert compared > 0 and pairs == [], pairs
 
     @pytest.fixture
     def fire_module_config(self) -> Dict[str, Any]:

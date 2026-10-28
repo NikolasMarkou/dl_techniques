@@ -66,8 +66,8 @@ The expensive `3x3` convolution sees only `s1x1` input channels. In `fire3` of t
 ```
 Input (B, H, W, 3)
     |
-    +-> conv1 (kernel/stride from the variant, ReLU, valid padding)
-    +-> maxpool 3x3 stride 2, valid
+    +-> stem (one ConvStem: conv1, kernel/stride from the variant, ReLU, valid padding,
+    |        then the first max-pool, 3x3 stride 2, valid)
     |
     +-> fire2 ... fire9, with maxpool 3x3/2 inserted at the variant's pool positions
     +-> dropout (after the last Fire module)
@@ -168,29 +168,38 @@ Everything below is importable straight from `dl_techniques.models.vision.squeez
 
 ### 6.2 Factory arguments
 
-Both factories take the same four named arguments and forward everything else to the constructor:
+Both factories and both `from_variant` class methods take the same four named arguments and forward everything else to the constructor:
 
 | Argument | Default | Description |
 | :--- | :--- | :--- |
-| `variant` | `"1.0"` / `"v2"` | Key into the class's `MODEL_VARIANTS`. |
+| `variant` | `"1.0"` / `"v2"` | Key into the class's `MODEL_VARIANTS`; an unknown key raises `ValueError` listing the keys. The constructors take the same string. |
 | `num_classes` | `1000` | Output classes. |
-| `input_shape` | `(224, 224, 3)` | Input shape; 4D `(D, H, W, C)` for the 3D variants. |
-| `weights` | `None` | Unsupported. Any non-`None` value raises `NotImplementedError`. |
+| `input_shape` | `None` | `None` is `(224, 224, 3)`. Four entries `(D, H, W, C)` for a 3D model; the channel count is required. |
+| `pretrained` | `False` | A path to a local `.keras` checkpoint, or `True`, which raises `NotImplementedError` naming the variant (section 6.3). |
 
 Constructor arguments reachable through `**kwargs`:
 
 | Argument | Default | Description |
 | :--- | :--- | :--- |
 | `include_top` | `True` | `False` returns the post-dropout feature map. A `bool` or `numpy.bool_`; anything else raises `TypeError`. |
-| `dropout_rate` | `0.5` | Dropout after the last Fire module. |
+| `dropout_rate` | `0.5` | Dropout after the last Fire module; in `[0, 1)`. |
 | `kernel_regularizer` | `None` | Applied to every convolution. |
-| `kernel_initializer` | Caffe xavier | Fire and bypass convolutions. |
-| `use_bypass` (V1 only) | from variant | `False`, `"simple"` or `"complex"`; an explicit value overrides the variant. |
-| `use_3d` (V2 only) | from variant | Switches Conv/MaxPool/GlobalAveragePooling to their 3D forms. |
+| `kernel_initializer` | Caffe xavier | Fire and bypass convolutions. Stored as a string or a serialized spec (an `Initializer` instance is serialized once), so `get_config()` is JSON-safe and no two convolutions replay one draw. |
+| `use_bypass` (V1 only) | from variant | `None` (the variant's own), `False`, `"simple"` or `"complex"`. Any other value, `True` included, raises `ValueError` naming it. |
+| `use_3d` (V2 only) | from variant | Switches Conv/MaxPool/GlobalAveragePooling to their 3D forms. A `_3d` variant stays 3D. |
+
+An argument outside the constructor's signature raises `ValueError` naming it (the functional constructor would otherwise drop it silently): `weights=`, `head_config_overrides=` and `head_config_preset=` are gone.
 
 ### 6.3 Pretrained weights
 
-None are distributed. Passing `weights=<anything>` to either factory (or to `from_variant`) raises `NotImplementedError` rather than quietly returning a random model. To reuse a local checkpoint, build the architecture and `keras.models.load_model()` the file. A `SqueezeNetV1` or `SqueezeNoduleNetV2` (2D) `.keras` file saved before 2026-10-26, when the stem moved onto one `ConvStem` named `stem` (its convolution was `conv1`), does not load: `keras.models.load_model` raises `ValueError`, and no legacy shim exists.
+None are distributed: `pretrained=True` raises `NotImplementedError` naming the variant (`SqueezeNetV1 variant '1.0'`) rather than quietly returning a random model. `pretrained="<path>"` loads a local `.keras` checkpoint through the shared `load_pretrained_checkpoint` (the model is built at construction, so nothing is rebuilt): every layer outside `conv10` must be restored, so a checkpoint of another variant raises and copies no weight; only a `conv10` of another `num_classes` is skipped (it keeps its initialization and a warning names it), and a headed checkpoint loads into an `include_top=False` model. The archive's own configuration is compared too: `variant`, `use_bypass` and `use_3d` must be equal when both sides hold them (a simple bypass adds no weight, so the layers alone cannot tell it from none); the initializer, regularizer, dropout rate, input size, `num_classes` and `include_top` are not compared. `model.load_pretrained_weights(path)` is the same load on an existing model.
+
+**Archive break (2026-10-28).** Measured by saving each family in a separate process from the old revision and restoring it with the current code (`git archive`, `python -I`; both models, all five roster subjects, outputs compared at `atol=0` in both `training` modes):
+
+- From `be92a74eb` (the stem already one `ConvStem`): `keras.models.load_model` fails for every archive, because the saved config carries `variant_config`, which is now `variant` (`ValueError: Unrecognized keyword arguments passed to SqueezeNetV1: {'variant_config': ...}`). `model.load_weights(path)` into a model built with the new code (restores by tracked-layer order) works for `SqueezeNetV1` (all three variants) and the 2D `SqueezeNoduleNetV2`, with the same `w.path` strings and equal outputs, but fails for the 3D model: its stem was a bare `Conv3D` named `conv1` (`conv1/kernel`, `conv1/bias`) and is now the `ConvStem` `stem` (`stem/stem_conv1/kernel`, `stem/stem_conv1/bias`), one more tracked layer (`Layer 'stem_conv1' expected 2 variables, but received 0 variables during loading`).
+- From `20b48aba6^` (before the stem migration, `conv1`/`conv1/kernel` in 2D as well): neither `load_model` nor `load_weights` restores anything.
+- The weights themselves transplant by path: assigning the old tensors by `w.path` (the 3D stem as `conv1/*` to `stem/stem_conv1/*`) into a freshly built current model reproduces the old output at `atol=0` for all five subjects.
+- The weightless layers were renamed (`SqueezeNoduleNetV2`: `drop9` to `dropout`, `globalpool` to `avgpool`, `pool2`/`pool3` to `maxpool4`/`maxpool8`; the Fire module's `Concatenate` is `concat`). They hold no weight, so no `w.path` moves.
 
 ---
 
@@ -290,7 +299,7 @@ plain = create_squeezenet_v1("1.0_bypass", num_classes=10,
 print([l.name for l in plain.layers if l.name.startswith("add")])  # []
 ```
 
-`"complex"` is also accepted: it bypasses every Fire module, inserting a `1x1` projection where the widths do not match.
+`"complex"` is also accepted: it bypasses every Fire module, inserting a `1x1` projection where the widths do not match. Nothing else is: `use_bypass=True` or `"simple "` raises `ValueError` (it used to build a plain model that reported the value).
 
 ### Mixed precision
 
@@ -325,7 +334,8 @@ The models and both Fire-module layers are registered, so no `custom_objects` ar
 ## 12. Troubleshooting
 
 - `ValueError: ... collapses to length 0 at stage ...` -- the input is smaller than the variant's minimum extent (4.3). Use `"1.1"` for 32-pixel inputs, or enlarge the input.
-- `NotImplementedError` from `weights=` -- expected; no checkpoints ship with this package.
+- `pretrained=True` raises `NotImplementedError` -- expected; no checkpoints ship with this package. Pass a path to load your own (6.3).
+- `ValueError: Unrecognized keyword arguments ... weights` -- `weights=` is not an argument; the spelling is `pretrained=`.
 - `ValueError: num_classes must be a positive integer` / `dropout_rate must be in range [0, 1)` -- constructor validation.
 - Accuracy stuck near chance -- the model returns logits; compile with `from_logits=True`, not the string `"sparse_categorical_crossentropy"` (which means `from_logits=False`).
 - A backbone output with an unexpected spatial size -- valid padding, not `same`. See Example 1.
@@ -336,9 +346,9 @@ The models and both Fire-module layers are registered, so no `custom_objects` ar
 
 **Head.** `conv10` is a `1x1` convolution with `num_classes` filters and a ReLU activation, followed by global average pooling, and nothing after it: the output is the logits at every `num_classes`, including 2 (there is no binary sigmoid), in 2D and 3D alike, so the output shape is always `(B, num_classes)`. `kernel_regularizer` reaches `conv10`; `kernel_initializer` does not, because `conv10` keeps the prototxt's `Normal(0, 0.01)` filler.
 
-**Initializers.** `STEM_INITIALIZER` and `HEAD_INITIALIZER` are different fillers on purpose. `HEAD_INITIALIZER` is stored as a serialized config dict and copied at each call site, because one shared seedless `Initializer` instance replays its draw.
+**Initializers.** `STEM_INITIALIZER` and `HEAD_INITIALIZER` are different fillers on purpose. `HEAD_INITIALIZER` is stored as a serialized config dict and copied at each call site, because one shared seedless `Initializer` instance replays its draw. The same holds for `kernel_initializer`: given an `Initializer` instance, the model stores its serialized spec and hands that spec to every Fire module and bypass convolution (the Fire layers store it the same way). Before this, one instance given to the model replayed one draw across 276 of 325 kernel pairs (`SqueezeNetV1`) and 120 of 153 (`SqueezeNoduleNetV2`); both are 0 now, and a string at the default draws the same seeded weights as before.
 
-**Fire numbering.** Modules are named `fire2` through `fire9`, matching the paper; the stem is one `ConvStem` named `stem` (convolution `stem_conv1`, ReLU `stem_act1`, no normalization, and the first max-pool `stem_pool` when the variant pools after conv1; the 3D stem of `SqueezeNoduleNetV2` stays an inline `Conv3D` named `conv1` and `MaxPooling3D` named `maxpool1`) and the head convolution is `conv10`.
+**Fire numbering.** Modules are named `fire2` through `fire9` (`simpfire2` through `simpfire9` in `SqueezeNoduleNetV2`), matching the paper; the stem is one `ConvStem` named `stem` in 2D and 3D alike (`rank` 2 or 3: convolution `stem_conv1`, a `Conv2D` or `Conv3D`, ReLU `stem_act1`, no normalization, and the first max-pool `stem_pool` when the variant pools after conv1); the other pools are `maxpool{n}` after fire module `n`, the dropout is `dropout`, the head convolution is `conv10` and its pool `avgpool`, in both models. The 3D stem is an exact replica of the `Conv3D` and `MaxPooling3D` it replaced (`rtol=0, atol=0` for inference, `training=True` and the regularization loss; `tests/test_models/test_the_conv_stem_replicates_every_hand_rolled_stem.py`, three cases).
 
 ---
 

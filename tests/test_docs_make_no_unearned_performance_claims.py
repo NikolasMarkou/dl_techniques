@@ -402,6 +402,16 @@ def test_the_population_the_rule_was_derived_from_is_still_the_population():
         # (tests/test_models/test_deepsort/test_deepsort.py). Both halves
         # checked.
         "deepsort",
+        # squeezenet: README sections 6.3 and 12 name `pretrained=True` only to
+        # say it raises `NotImplementedError` naming the variant, beside the working
+        # `pretrained="<path>.keras"` form; `SqueezeNetV1.from_variant` and
+        # `SqueezeNoduleNetV2.from_variant` really do, through
+        # `pretrained_path_or_raise`, verified by EXECUTING both with
+        # `pretrained=True` (tests/test_models/test_squeezenet/
+        # test_name_roundtrip_and_weights_guard.py) and by the runtime contract
+        # (test_the_vision_classifiers_share_one_runtime_contract.py). Both
+        # halves checked.
+        "squeezenet",
         # zamba2: README:9-10/170/175 name `pretrained=True` only to say it
         # raises; `pretrained_path_or_raise` (utils/weight_transfer.py, called
         # from model.py:932) really does `raise NotImplementedError`, verified

@@ -1234,6 +1234,8 @@ ANCHOR_TOKENS: Dict[str, Dict[str, int]] = {
         "plan-2026-08-19T163559-499b6f0e/D-129": 1,
         "plan-2026-08-23T091307-9a110062/D-481": 1,
         "plan-2026-10-14T062616-81938e81/D-017": 1,
+        "plan-2026-10-26T125959-7af851e5/D-033": 1,
+        "plan-2026-10-26T125959-7af851e5/D-047": 1,
     },
     "src/dl_techniques/models/vision/squeezenet/squeezenet_v2.py": {
         "plan-2026-08-17T183311-79c63e38/D-020": 1,
@@ -1241,6 +1243,8 @@ ANCHOR_TOKENS: Dict[str, Dict[str, int]] = {
         "plan-2026-08-23T091307-9a110062/D-481": 1,
         "plan-2026-10-14T062616-81938e81/D-017": 1,
         "plan-2026-10-26T125959-7af851e5/D-004": 1,
+        "plan-2026-10-26T125959-7af851e5/D-030": 1,
+        "plan-2026-10-26T125959-7af851e5/D-033": 1,
     },
     "src/dl_techniques/models/vision/vae/model.py": {
         "plan-2026-08-18T140459-7991552f/D-028": 1,
@@ -1315,28 +1319,6 @@ class Open:
 
 #: Every row that fails today, keyed ``(rule, subject-or-module key)``.
 LEDGER: Dict[Tuple[str, str], Open] = {
-    ("h9_factory_is_one_delegating_return", "squeezenet_v1"): Open(
-        "the SqueezeNet migration",
-        "3 violation(s): create_squeezenet_v1('variant', 'num_classes', 'input_shape', 'weights')"
-        " is not ('variant', 'num_classes', 'input_shape', 'pretrained'); create_squeezenet_v1: "
-        '`input_shape` does not default to None; create_squeezenet_v1: `pretrained` does not '
-        'default to False',
-        ("create_squeezenet_v1('variant', 'num_classes', 'input_shape', "
-         "'weights') is not ('variant', 'num_classes', 'input_shape', "
-         "'pretrained')",
-         'create_squeezenet_v1: `input_shape` does not default to None',
-         'create_squeezenet_v1: `pretrained` does not default to False')),
-    ("h9_factory_is_one_delegating_return", "squeezenet_v2"): Open(
-        "the SqueezeNet migration",
-        "3 violation(s): create_squeezenodule_net_v2('variant', 'num_classes', 'input_shape', "
-        "'weights') is not ('variant', 'num_classes', 'input_shape', 'pretrained'); "
-        'create_squeezenodule_net_v2: `input_shape` does not default to None; '
-        'create_squeezenodule_net_v2: `pretrained` does not default to False',
-        ("create_squeezenodule_net_v2('variant', 'num_classes', "
-         "'input_shape', 'weights') is not ('variant', 'num_classes', "
-         "'input_shape', 'pretrained')",
-         'create_squeezenodule_net_v2: `input_shape` does not default to None',
-         'create_squeezenodule_net_v2: `pretrained` does not default to False')),
     ("h9_factory_is_one_delegating_return", "vae"): Open(
         "the ConvUNext and VAE migration",
         '6 violation(s): create_vae has no `pretrained` parameter; create_vae is not one `return '
@@ -1363,32 +1345,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the CapsNet migration",
         '1 violation(s): line 25: from keras import ...',
         ('from keras import ...',)),
-    ("h3_one_init_log", "squeezenet_v1"): Open(
-        "the SqueezeNet migration",
-        '1 violation(s): __init__ writes 0 logger.info calls, expected 1',
-        ('__init__ writes 0 logger.info calls, expected 1',)),
-    ("h10_stored_attribute_names", "squeezenet_v1"): Open(
-        "the SqueezeNet migration",
-        '1 violation(s): argument `input_shape` is stored as `self._input_shape`, expected '
-        '`self.input_shape_config`',
-        ('argument `input_shape` is stored as `self._input_shape`',)),
-    ("h10_one_name_per_concept", "squeezenet_v1"): Open(
-        "the SqueezeNet migration",
-        '1 violation(s): constructor argument `variant_config` should be `variant`',
-        ('constructor argument `variant_config` should be `variant`',)),
-    ("h3_one_init_log", "squeezenet_v2"): Open(
-        "the SqueezeNet migration",
-        '1 violation(s): __init__ writes 0 logger.info calls, expected 1',
-        ('__init__ writes 0 logger.info calls, expected 1',)),
-    ("h10_stored_attribute_names", "squeezenet_v2"): Open(
-        "the SqueezeNet migration",
-        '1 violation(s): argument `input_shape` is stored as `self._input_shape`, expected '
-        '`self.input_shape_config`',
-        ('argument `input_shape` is stored as `self._input_shape`',)),
-    ("h10_one_name_per_concept", "squeezenet_v2"): Open(
-        "the SqueezeNet migration",
-        '1 violation(s): constructor argument `variant_config` should be `variant`',
-        ('constructor argument `variant_config` should be `variant`',)),
     ("h10_stored_attribute_names", "convunext_stem"): Open(
         "the ConvUNext and VAE migration",
         '1 violation(s): argument `activation` is stored as `self.activation_name`, expected '
@@ -1456,32 +1412,6 @@ LEDGER: Dict[Tuple[str, str], Open] = {
         "the CapsNet migration",
         '1 violation(s): constructor argument `stem` should be `stem_type`',
         ('constructor argument `stem` should be `stem_type`',)),
-    ('h11_get_config_has_the_reference_form', 'squeezenet_v1'): Open(
-        'the SqueezeNet migration',
-        '2 violation(s): `get_config` does not bind `base_config = '
-        'super().get_config()`; `get_config` does not end in `return {**base_config, '
-        '**config}`',
-        ('`get_config` does not bind `base_config = super().get_config()`',
-         '`get_config` does not end in `return {**base_config, **config}`')),
-    ('h15_initializer_storage', 'squeezenet_v1'): Open(
-        'the SqueezeNet migration',
-        '1 violation(s): `self.kernel_initializer` stores `kernel_initializer`, not '
-        'an `initializer_spec(...)`',
-        ('`self.kernel_initializer` stores `kernel_initializer`, not an '
-         '`initializer_spec(...)`',)),
-    ('h11_get_config_has_the_reference_form', 'squeezenet_v2'): Open(
-        'the SqueezeNet migration',
-        '2 violation(s): `get_config` does not bind `base_config = '
-        'super().get_config()`; `get_config` does not end in `return {**base_config, '
-        '**config}`',
-        ('`get_config` does not bind `base_config = super().get_config()`',
-         '`get_config` does not end in `return {**base_config, **config}`')),
-    ('h15_initializer_storage', 'squeezenet_v2'): Open(
-        'the SqueezeNet migration',
-        '1 violation(s): `self.kernel_initializer` stores `kernel_initializer`, not '
-        'an `initializer_spec(...)`',
-        ('`self.kernel_initializer` stores `kernel_initializer`, not an '
-         '`initializer_spec(...)`',)),
     ('h11_get_config_has_the_reference_form', 'convunext_stem'): Open(
         'the ConvUNext and VAE migration',
         '2 violation(s): `get_config` does not bind `base_config = '
