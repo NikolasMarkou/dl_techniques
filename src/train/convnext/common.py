@@ -117,8 +117,14 @@ from train.common.conformal import add_conformal_arguments, run_conformal
 # but never the split. It is also the ONE list of supported datasets: :data:`DATASETS` is
 # derived from its keys, so adding a dataset here cannot leave ``__post_init__`` indexing
 # a missing size (review iteration 3, N5).
+#
+# Imagenette is a loader dataset this trainer does not support: it has no entry in
+# :data:`DEFAULT_VARIANTS`, :data:`DEFAULT_STRIDES` or :data:`REGULARIZATION_DEFAULTS` and no
+# pipeline here, so listing it would offer ``--dataset imagenette`` and fail inside the run.
+UNSUPPORTED_DATASETS: Tuple[str, ...] = ("imagenette",)
 DATASET_TRAIN_SIZES: Dict[str, int] = {
     name: spec.train_size for name, spec in CLASSIFICATION_DATASETS.items()
+    if name not in UNSUPPORTED_DATASETS
 }
 IMAGENET = "imagenet"
 DATASETS: Tuple[str, ...] = tuple(DATASET_TRAIN_SIZES)
