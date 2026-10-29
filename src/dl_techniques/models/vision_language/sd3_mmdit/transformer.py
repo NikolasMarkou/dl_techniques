@@ -58,6 +58,9 @@ from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 from dl_techniques.layers.embedding.scalar_sinusoidal_embedding import (
     ScalarSinusoidalEmbedding,
 )
+from dl_techniques.layers.embedding.sincos_pos_embed_2d import (
+    get_1d_sincos_pos_embed_from_grid,
+)
 from dl_techniques.models.vision_language.sd3_mmdit.blocks import MMDiTBlock, MMDiTFinalLayer
 from dl_techniques.models.vision_language.sd3_mmdit.config import (
     SD3MMDiTConfig,
@@ -114,29 +117,10 @@ def _build_2d_sincos_pos_embed(
     pos_h = grid_h_m.reshape(-1)  # (grid_size**2,)
     pos_w = grid_w_m.reshape(-1)
 
-    emb_h = _1d_sincos(dim // 2, pos_h)  # (N, dim//2)
-    emb_w = _1d_sincos(dim // 2, pos_w)  # (N, dim//2)
+    emb_h = get_1d_sincos_pos_embed_from_grid(dim // 2, pos_h)  # (N, dim//2)
+    emb_w = get_1d_sincos_pos_embed_from_grid(dim // 2, pos_w)  # (N, dim//2)
     emb = np.concatenate([emb_h, emb_w], axis=1)  # (N, dim)
     return emb.astype("float32")
-
-
-def _1d_sincos(dim: int, pos: np.ndarray) -> np.ndarray:
-    """1D sin-cos embedding of a coordinate vector.
-
-    :param dim: Embedding width for this axis (must be even).
-    :type dim: int
-    :param pos: 1D array of coordinates, shape ``(M,)``.
-    :type pos: np.ndarray
-    :return: Array of shape ``(M, dim)`` (``[sin | cos]`` concatenation).
-    :rtype: np.ndarray
-    """
-    if dim % 2 != 0:
-        raise ValueError(f"per-axis dim must be even, got {dim}")
-    omega = np.arange(dim // 2, dtype="float64") / (dim / 2.0)
-    omega = 1.0 / (10000.0 ** omega)  # (dim//2,)
-    out = pos.reshape(-1).astype("float64")[:, None] * omega[None, :]  # (M, dim//2)
-    emb = np.concatenate([np.sin(out), np.cos(out)], axis=1)  # (M, dim)
-    return emb
 
 
 # ---------------------------------------------------------------------
