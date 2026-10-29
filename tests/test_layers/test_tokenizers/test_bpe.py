@@ -8,12 +8,14 @@ serialization round-trips.
 """
 
 import os
+import json
 import keras
 import numpy as np
 import pytest
 
 from dl_techniques.layers.tokenizers.bpe import (
     train_bpe,
+    create_bpe_pipeline,
     BPETokenizer,
     TokenEmbedding,
 )
@@ -107,6 +109,86 @@ class TestBPETokenizer:
         # Tokenization is deterministic across the config round-trip.
         assert (tok.tokenize_texts(["the quick fox"])
                 == rebuilt.tokenize_texts(["the quick fox"]))
+
+
+class TestBPETokenizerContracts:
+    """Behaviour the tokenizer, the trainer and the pipeline must agree on."""
+
+    CORPUS = ["hello, world", "hello, world", "hello there, world"]
+
+    def _trained(self, **kwargs):
+        vocab_dict, merges = train_bpe(
+            self.CORPUS, vocab_size=80, min_frequency=1, **kwargs
+        )
+        return vocab_dict, merges
+
+    def test_json_round_trip_keeps_merges_usable(self, trained_vocab):
+        vocab_dict, merges = trained_vocab
+        tok = BPETokenizer(vocab_dict=vocab_dict, merges=merges, max_length=16)
+        config = json.loads(json.dumps(tok.get_config()))
+        rebuilt = BPETokenizer.from_config(config)
+        assert all(isinstance(pair, tuple) for pair in rebuilt.merges)
+        assert (tok.tokenize_texts(["the quick fox"])
+                == rebuilt.tokenize_texts(["the quick fox"]))
+
+    def test_pipeline_embedding_covers_every_id_the_tokenizer_emits(self):
+        tok, emb = create_bpe_pipeline(
+            self.CORPUS, vocab_size=80, embedding_dim=8, max_length=12,
+            min_frequency=1,
+        )
+        ids = np.array(tok.tokenize_texts(["hello, world", "hello"]))
+        assert emb.vocab_size == tok.vocab_size
+        assert ids.max() < emb.vocab_size
+        out = keras.ops.convert_to_numpy(emb(ids))
+        assert out.shape == (2, 12, 8)
+
+    def test_encoding_splits_punctuation_the_way_training_did(self):
+        vocab_dict, merges = self._trained()
+        tok = BPETokenizer(vocab_dict=vocab_dict, merges=merges, max_length=16)
+        ids = tok.tokenize_texts(["hello, world"])[0]
+        # "hello" is trained as a word of its own, so "hello," must not
+        # absorb the comma into the word.
+        assert vocab_dict["hello</w>"] in ids
+        assert tok.vocab_dict[tok.unk_token] not in ids
+
+    def test_handle_punctuation_false_splits_on_whitespace_only(self):
+        vocab_dict, merges = self._trained(handle_punctuation=False)
+        tok = BPETokenizer(
+            vocab_dict=vocab_dict, merges=merges, max_length=16,
+            handle_punctuation=False,
+        )
+        ids = tok.tokenize_texts(["hello, world"])[0]
+        assert vocab_dict["hello,</w>"] in ids
+
+    def test_handle_punctuation_is_serialized(self):
+        tok = BPETokenizer(handle_punctuation=False)
+        assert tok.get_config()["handle_punctuation"] is False
+        assert BPETokenizer.from_config(tok.get_config()).handle_punctuation is False
+
+    def test_long_text_still_ends_in_eos(self, trained_vocab):
+        vocab_dict, merges = trained_vocab
+        tok = BPETokenizer(vocab_dict=vocab_dict, merges=merges, max_length=8)
+        eos = tok.vocab_dict[tok.eos_token]
+        ids = tok.tokenize_texts(["the quick brown fox " * 6])[0]
+        assert len(ids) == 8
+        assert ids[-1] == eos
+
+    def test_short_text_has_eos_then_padding(self, trained_vocab):
+        vocab_dict, merges = trained_vocab
+        tok = BPETokenizer(vocab_dict=vocab_dict, merges=merges, max_length=16)
+        eos = tok.vocab_dict[tok.eos_token]
+        pad = tok.vocab_dict[tok.pad_token]
+        ids = tok.tokenize_texts(["the fox"])[0]
+        first_pad = ids.index(pad)
+        assert ids[first_pad - 1] == eos
+        assert set(ids[first_pad:]) == {pad}
+
+    def test_max_length_one_keeps_only_eos(self, trained_vocab):
+        vocab_dict, merges = trained_vocab
+        tok = BPETokenizer(vocab_dict=vocab_dict, merges=merges, max_length=1)
+        assert tok.tokenize_texts(["the quick fox"])[0] == [
+            tok.vocab_dict[tok.eos_token]
+        ]
 
 
 # ---------------------------------------------------------------------

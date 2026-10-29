@@ -21,6 +21,25 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
+def _pre_tokenize(text: str, handle_punctuation: bool) -> List[str]:
+    """Split a text into the words BPE merges inside of.
+
+    Training and encoding both call this, so a word is cut the same way when
+    the merges are learned and when they are applied.
+
+    :param text: Input text, already lowercased if lowercasing is wanted.
+    :type text: str
+    :param handle_punctuation: ``True`` to make each run of punctuation its own
+        word (GPT-2 style), ``False`` to split on whitespace only.
+    :type handle_punctuation: bool
+    :return: The words of ``text``.
+    :rtype: list[str]
+    """
+    if handle_punctuation:
+        return re.findall(r'\w+|[^\s\w]+', text)
+    return text.split()
+
+
 def train_bpe(
         texts: List[str],
         vocab_size: int = 50000,
@@ -53,15 +72,7 @@ def train_bpe(
         if do_lower_case:
             text = text.lower()
 
-        # Enhanced word splitting: handle punctuation separately (GPT-2 style)
-        if handle_punctuation:
-            # Split on whitespace while preserving punctuation as separate tokens
-            words = re.findall(r'\w+|[^\s\w]+', text)
-        else:
-            # Simple whitespace splitting
-            words = text.split()
-
-        for word in words:
+        for word in _pre_tokenize(text, handle_punctuation):
             # Add end-of-word marker
             word_freqs[' '.join(list(word)) + ' </w>'] += 1
 
@@ -177,7 +188,17 @@ class BPETokenizer(keras.layers.Layer):
     :type eos_token: str
     :param do_lower_case: Whether to lowercase input. Defaults to ``True``.
     :type do_lower_case: bool
+    :param handle_punctuation: Whether each run of punctuation is its own word,
+        as in ``train_bpe``. Use the value the vocabulary was trained with.
+        Defaults to ``True``.
+    :type handle_punctuation: bool
     :param kwargs: Additional keyword arguments for the Layer base class.
+
+    A sequence always ends in ``eos_token`` before any padding, also when the
+    text is cut to ``max_length``. Characters absent from the training corpus
+    map to ``unk_token``; the base vocabulary is the characters seen in
+    training, with no byte-level fallback. ``pad_token`` takes the first id
+    after the trained vocabulary, not id 0.
     """
 
     def __init__(
@@ -189,6 +210,7 @@ class BPETokenizer(keras.layers.Layer):
             unk_token: str = "<unk>",
             eos_token: str = "<eos>",
             do_lower_case: bool = True,
+            handle_punctuation: bool = True,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -198,12 +220,14 @@ class BPETokenizer(keras.layers.Layer):
             raise ValueError(f"max_length must be positive, got {max_length}")
 
         self.vocab_dict = vocab_dict or {}
-        self.merges = merges or []
+        # A JSON round trip turns each pair into a list, which cannot be hashed.
+        self.merges = [tuple(pair) for pair in (merges or [])]
         self.max_length = max_length
         self.pad_token = pad_token
         self.unk_token = unk_token
         self.eos_token = eos_token
         self.do_lower_case = do_lower_case
+        self.handle_punctuation = handle_punctuation
 
         # Add special tokens to vocabulary if not present
         special_tokens = [self.pad_token, self.unk_token, self.eos_token]
@@ -293,8 +317,7 @@ class BPETokenizer(keras.layers.Layer):
         if self.do_lower_case:
             text = text.lower()
 
-        # Simple word splitting - could be enhanced with regex for punctuation
-        words = text.split()
+        words = _pre_tokenize(text, self.handle_punctuation)
         token_ids = []
 
         for word in words:
@@ -303,15 +326,12 @@ class BPETokenizer(keras.layers.Layer):
                 token_id = self.vocab_dict.get(token, self.vocab_dict[self.unk_token])
                 token_ids.append(token_id)
 
-        # Add EOS token
+        # Cut the content first so the EOS always fits, then pad.
+        token_ids = token_ids[:self.max_length - 1]
         token_ids.append(self.vocab_dict[self.eos_token])
 
-        # Truncate or pad to max_length
-        if len(token_ids) > self.max_length:
-            token_ids = token_ids[:self.max_length]
-        else:
-            pad_id = self.vocab_dict[self.pad_token]
-            token_ids.extend([pad_id] * (self.max_length - len(token_ids)))
+        pad_id = self.vocab_dict[self.pad_token]
+        token_ids.extend([pad_id] * (self.max_length - len(token_ids)))
 
         return token_ids
 
@@ -392,6 +412,7 @@ class BPETokenizer(keras.layers.Layer):
             "unk_token": self.unk_token,
             "eos_token": self.eos_token,
             "do_lower_case": self.do_lower_case,
+            "handle_punctuation": self.handle_punctuation,
         })
         return config
 
@@ -518,7 +539,8 @@ def create_bpe_pipeline(
         embedding_dim: int = 512,
         max_length: int = 512,
         do_lower_case: bool = True,
-        min_frequency: int = 2
+        min_frequency: int = 2,
+        handle_punctuation: bool = True
 ) -> Tuple[BPETokenizer, TokenEmbedding]:
     """Create a complete BPE tokenization and embedding pipeline.
 
@@ -534,7 +556,11 @@ def create_bpe_pipeline(
     :type do_lower_case: bool
     :param min_frequency: Minimum frequency for merges. Defaults to 2.
     :type min_frequency: int
-    :return: Tuple of ``(tokenizer, embedding_layer)``.
+    :param handle_punctuation: Whether punctuation is split off words, for
+        training and encoding alike. Defaults to ``True``.
+    :type handle_punctuation: bool
+    :return: Tuple of ``(tokenizer, embedding_layer)``. The embedding has a row
+        for every id the tokenizer can emit, special tokens included.
     :rtype: tuple[BPETokenizer, TokenEmbedding]
     """
     logger.info("Creating BPE pipeline")
@@ -544,7 +570,8 @@ def create_bpe_pipeline(
         texts,
         vocab_size=vocab_size,
         min_frequency=min_frequency,
-        do_lower_case=do_lower_case
+        do_lower_case=do_lower_case,
+        handle_punctuation=handle_punctuation
     )
 
     # Create tokenizer
@@ -552,12 +579,14 @@ def create_bpe_pipeline(
         vocab_dict=vocab_dict,
         merges=merges,
         max_length=max_length,
-        do_lower_case=do_lower_case
+        do_lower_case=do_lower_case,
+        handle_punctuation=handle_punctuation
     )
 
-    # Create embedding layer
+    # Create embedding layer. The tokenizer adds the special tokens to its own
+    # copy of the vocabulary, so size from the tokenizer, not from vocab_dict.
     embedding = TokenEmbedding(
-        vocab_size=len(vocab_dict),
+        vocab_size=tokenizer.vocab_size,
         embedding_dim=embedding_dim
     )
 
