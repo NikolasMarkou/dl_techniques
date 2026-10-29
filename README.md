@@ -79,7 +79,7 @@ This library is a comprehensive suite of tools organized into five key pillars, 
 </details>
 
 <details>
-<summary><b>4. Next-Generation Loss Functions & Optimization (55 Loss Modules, 17 Optimizers)</b></summary>
+<summary><b>4. Next-Generation Loss Functions & Optimization (56 Loss Modules, 17 Optimizers)</b></summary>
 <p>
 
 - **Optimize What Matters with `AnyLoss`**: A groundbreaking framework that transforms any confusion-matrix-based metric (e.g., F1-score, Balanced Accuracy, Matthews Correlation Coefficient) into a differentiable loss function for direct optimization on imbalanced data — **16 losses in `ANYLOSS_REGISTRY`** plus standalone losses.
@@ -407,7 +407,7 @@ dl_techniques/
 │   │   ├── statistics/        # Statistical and probabilistic layers (MDN, Flows)
 │   │   └── ...                # fusion, geometric, logic, mixtures, physics,
 │   │                          # reasoning, sequence_pooling, tokenizers, adapters
-│   ├── losses/                # 55 specialized loss modules (AnyLoss registry: 16 + standalone)
+│   ├── losses/                # 56 specialized loss modules (AnyLoss registry: 16 + standalone)
 │   ├── metrics/               # Custom Keras metrics (PSNR, SSIM, perplexity, Brier, depth, forecasting)
 │   ├── optimization/          # 17 optimizers (Muon, VSGD, SGLD, Gefen, WW-PGD), LR schedules
 │   ├── analyzer/              # Comprehensive model analysis toolkit and visualizers

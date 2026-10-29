@@ -12,6 +12,7 @@ The collection includes losses for:
     - Probabilistic Forecasting (MQLoss)
     - Imbalanced Classification (AnyLoss Framework, FocalUncertaintyLoss)
     - Self-Supervised Learning (CLIP, DINO, iBOT, SigLIP)
+    - Instance Embedding and Clustering (MeanShiftInstanceLoss)
     - Information-Theoretic Regularization (Goodhart, DecoupledInformationLoss)
     - Generative Adversarial Networks (WassersteinLoss, WGAN-GP)
     - Topographic Generative Models (TopographicVAELoss, the two-KL ELBO)
@@ -233,6 +234,9 @@ from .reid_cosine_loss import (
     magnet_loss_fn,
 )
 
+# from .mean_shift_instance_loss
+from .mean_shift_instance_loss import MeanShiftInstanceLoss
+
 # from .tabm_loss
 from .tabm_loss import TabMLoss
 
@@ -433,6 +437,8 @@ __all__ = [
     # reid_cosine_loss
     "SoftmarginTripletLoss",
     "magnet_loss_fn",
+    # mean_shift_instance_loss
+    "MeanShiftInstanceLoss",
     # tabm_loss
     "TabMLoss",
     # utilization_loss

@@ -61,6 +61,7 @@ from dl_techniques.losses import (
 - `lpips_loss.py` — LPIPS-flavored perceptual loss over a frozen ImageNet VGG16 backbone
 - `mambalct_loss.py` — `MambaLCTBoxLoss`: `l1_weight * L1 + giou_weight * (1 - GIoU)` over per-frame boxes, per-sample `(batch,)` semantics (averaged over the clip length inside each row)
 - `mase_loss.py` — Mean Absolute Scaled Error
+- `mean_shift_instance_loss.py` — `MeanShiftInstanceLoss`: per-row pull (mean squared distance over same-instance pairs) plus push (mean squared hinge to `margin`, default `2 * bandwidth`, over different-instance pairs) on `(B, N, D)` embeddings with ids `(B, N)`; `ignore_label=-1` points take no part, rows over `max_points` are subsampled at evenly spaced indices, and `call()` returns `(B,)` with no cross-row term. Imports `pairwise_sq_dist` from `layers/mixtures/mean_shift_ops.py`
 - `masked_causal_lm_loss.py` — Masked causal LM loss (skip ignore-tokens during NTP)
 - `multistep_loss.py` — ADAM h-steps-ahead losses (`mseh`/`tmse`/`gtmse`/`msce`) over the
   horizon axis. `gtmse` is the one non-decomposable member: its per-sample form is a
