@@ -46,7 +46,7 @@ Factory column: Y means the package has a `factory.py`.
 | `heads/` | Y | 24 task-head classes in `nlp/`, `vision/`, `vlm/`, with `create_head(domain, ...)` |
 | `logic/` | Y | Learnable fuzzy logic gates, arithmetic operators and circuits |
 | `memory/` | Y | Neural Turing Machine, self-organizing maps, NeuroGrid |
-| `mixtures/` | Y | `RBFLayer`, `KMeansLayer`, `GMMLayer` |
+| `mixtures/` | Y | `RBFLayer`, `KMeansLayer`, `GMMLayer`, `MeanShiftLayer` |
 | `norms/` | Y | RMS family, logit norms, dynamic tanh, GRN, LRN, bias-free batch norm, energy layer norm, `PolarWeightNorm`. 19 factory keys |
 | `sequence_pooling/` | Y | `(batch, seq, dim)` to `(batch, dim)` pooling with 18 strategies, plus attention, weighted and mode pooling |
 | `ssm/` | Y | Selective state space layers: Mamba v1, Mamba-2, a temporal context mixer, and residual wrappers (exported, but not factory keys). 4 factory keys |

@@ -13,6 +13,9 @@ Layers
   online centroid updates.
 - :class:`GMMLayer` — Differentiable Gaussian Mixture layer producing soft
   component responsibilities with an isometric regularizer.
+- :class:`MeanShiftLayer` — Differentiable mean shift that moves every point of a
+  set toward its density mode; :func:`assign_clusters` reads hard labels off the
+  converged points (eval-only, NumPy).
 
 Factory
 -------
@@ -32,6 +35,7 @@ Example
 from .radial_basis_function import RBFLayer
 from .kmeans import KMeansLayer
 from .gmm import GMMLayer
+from .mean_shift import MeanShiftLayer, assign_clusters
 from .factory import (
     MixtureType,
     MIXTURE_REGISTRY,
@@ -45,6 +49,8 @@ __all__ = [
     "RBFLayer",
     "KMeansLayer",
     "GMMLayer",
+    "MeanShiftLayer",
+    "assign_clusters",
     "MixtureType",
     "MIXTURE_REGISTRY",
     "create_mixture_layer",

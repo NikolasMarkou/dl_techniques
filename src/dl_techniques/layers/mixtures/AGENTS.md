@@ -1,16 +1,16 @@
 # mixtures
 
 Path: `src/dl_techniques/layers/mixtures/`
-Purpose: differentiable prototype layers (`RBFLayer`, `KMeansLayer`, `GMMLayer`), a shared cluster-axis base for two of them, and a registry factory.
+Purpose: differentiable prototype layers (`RBFLayer`, `KMeansLayer`, `GMMLayer`), a differentiable mean-shift layer (`MeanShiftLayer`) with its eval-only `assign_clusters` readout, a shared cluster-axis base for two of the prototype layers, and a registry factory.
 
 ## Scope
 
-Lives here: the three layers, `base.py` (shared cluster-axis and initializer machinery), `factory.py`, and the curated `__init__.py`.
+Lives here: the four layers, `mean_shift_ops.py` (their stateless core), `base.py` (shared cluster-axis and initializer machinery), `factory.py`, and the curated `__init__.py`.
 Does not live here: the MoE framework (`layers/moe/`), the memory/SOM layers (`layers/memory/`), or the GMM-based `LocalSupportGate` (`layers/statistics/local_support_gate.py`, which only refers to `GMMLayer` in its docstring).
 
 Known external consumers: `models/vision/rbf_protonet/model.py` imports `create_mixture_layer` from `mixtures.factory`.
 
-Tests: `tests/test_layers/test_mixtures/` (`test_factory.py`, `test_gmm.py`, `test_kmeans.py`, `test_radial_basis_function.py`, `cluster_axis_oracle.py`, `mean_shift_oracle.py`, `test_mean_shift_ops.py`, `test_the_dead_centroid_keeps_its_distinctiveness.py`, `test_the_dynamic_non_batch_axis_survives_a_concrete_call.py`) and the repo-wide `tests/test_layers/test_factory_registry_drift.py`.
+Tests: `tests/test_layers/test_mixtures/` (`test_factory.py`, `test_gmm.py`, `test_kmeans.py`, `test_radial_basis_function.py`, `cluster_axis_oracle.py`, `mean_shift_oracle.py`, `test_mean_shift_ops.py`, `test_mean_shift.py`, `test_the_dead_centroid_keeps_its_distinctiveness.py`, `test_the_dynamic_non_batch_axis_survives_a_concrete_call.py`) and the repo-wide `tests/test_layers/test_factory_registry_drift.py`.
 
 ## Architecture
 
@@ -21,13 +21,15 @@ classDiagram
     class KMeansLayer
     class GMMLayer
     class RBFLayer
+    class MeanShiftLayer
     _ClusterAxisMixin <|-- BaseMixtureLayer
     BaseMixtureLayer <|-- KMeansLayer
     BaseMixtureLayer <|-- GMMLayer
     RBFLayer --|> KerasLayer
+    MeanShiftLayer --|> KerasLayer
 ```
 
-`BaseMixtureLayer(_ClusterAxisMixin, keras.layers.Layer, ABC)`. The mixin comes first in the MRO so its `compute_output_shape` wins over `Layer`'s. `RBFLayer` subclasses `keras.layers.Layer` directly and is deliberately outside the hierarchy: it has no `cluster_axis` (always uses the last axis) and no `mixture` reconstruction mode, and its constructor shares no kwarg by name with the other two. A unified base was considered and rejected; do not re-open without new evidence.
+`BaseMixtureLayer(_ClusterAxisMixin, keras.layers.Layer, ABC)`. The mixin comes first in the MRO so its `compute_output_shape` wins over `Layer`'s. `RBFLayer` subclasses `keras.layers.Layer` directly and is deliberately outside the hierarchy: it has no `cluster_axis` (always uses the last axis) and no `mixture` reconstruction mode, and its constructor shares no kwarg by name with the other two. A unified base was considered and rejected; do not re-open without new evidence. `MeanShiftLayer` is outside the hierarchy for the same reason: no cluster axis, no prototypes, no `output_mode` (its `VALID_OUTPUT_MODES` is the empty frozenset, so the factory rejects every `output_mode` for `mean_shift`).
 
 Forward flow for K-means and GMM (`call`):
 
@@ -38,23 +40,26 @@ Forward flow for K-means and GMM (`call`):
 5. Output is `assignments` (rows x K) or `mixture` (`assignments @ prototypes`), computed from the pre-update centroids in K-means.
 6. `_reshape_output(output, leading)` inverts the transpose, then cast to `self.compute_dtype`.
 
+Mean-shift flow: optional bias-free `Dense(projection_dim)`, then `mean_shift_iterate` from `mean_shift_ops.py` for `num_steps` damped steps on `(B, N, D)` points with `h = clip(exp(log_bandwidth), 1e-2, 1e2)`; a keep mask `(B, N)` removes masked points as keys. `assign_clusters(shifted, merge_radius)` turns converged points into labels in NumPy, outside the graph.
+
 RBF flow: `pairwise_squared_distance(inputs, centers)`, times `softplus(gamma_raw)`, then `basis`: `exp(-min(x, 50.0))` or `normalized`: `softmax(-x)`. Repulsion loss added via `add_loss` when `units > 1 and repulsion_strength > 0` and training.
 
 ## Key files
 
 | File | Role | Notes |
 | --- | --- | --- |
-| `__init__.py` | Public surface | `__all__` has 9 names: `RBFLayer`, `KMeansLayer`, `GMMLayer`, `MixtureType`, `MIXTURE_REGISTRY`, `create_mixture_layer`, `create_mixture_from_config`, `get_mixture_info`, `validate_mixture_config`. Base classes are not exported. |
+| `__init__.py` | Public surface | `__all__` has 11 names: `RBFLayer`, `KMeansLayer`, `GMMLayer`, `MeanShiftLayer`, `assign_clusters`, `MixtureType`, `MIXTURE_REGISTRY`, `create_mixture_layer`, `create_mixture_from_config`, `get_mixture_info`, `validate_mixture_config`. Base classes are not exported. |
 | `base.py` | `_ClusterAxisMixin`, `BaseMixtureLayer`, `resolve_initializer_arg`, `resolve_prototype_initializer`, `OutputMode`, `Axis` | Holds the mixed-precision contract text. |
 | `kmeans.py` | `KMeansLayer` | EMA codebook, `trainable=False` centroids and momentum buffer. |
 | `gmm.py` | `GMMLayer` | Trainable means, log-variances, mixing logits, optional `covariance_factors`. |
 | `radial_basis_function.py` | `RBFLayer` | Trainable centers and `gamma_raw`. |
 | `mean_shift_ops.py` | Stateless mean-shift functions | Not exported from `__init__`, not registered; float64 oracle in `tests/test_layers/test_mixtures/mean_shift_oracle.py`. |
+| `mean_shift.py` | `MeanShiftLayer`, `assign_clusters` | Plain `keras.layers.Layer`; one scalar `log_bandwidth` weight when learnable; honours a `(B, N)` keep mask. |
 | `factory.py` | `MIXTURE_REGISTRY`, validation, creation | Non-strict on unknown kwargs (warns, drops). |
 
 ## Public interface
 
-Registration: `@register_dl_technique("dl_techniques.layers.mixtures.<module>")` on each concrete layer (`gmm`, `kmeans`, `radial_basis_function`). `BaseMixtureLayer` is not registered on purpose.
+Registration: `@register_dl_technique("dl_techniques.layers.mixtures.<module>")` on each concrete layer (`gmm`, `kmeans`, `radial_basis_function`). `BaseMixtureLayer` is not registered on purpose. `MeanShiftLayer` registers as `dl_techniques.layers.mixtures.mean_shift`.
 
 `RBFLayer(units, gamma_init=None, repulsion_strength=0.1, min_distance=1.0, center_initializer='uniform', center_constraint=None, trainable_gamma=True, safety_margin=0.2, center_regularizer=None, gamma_regularizer=None, output_mode='basis', **kwargs)`. Output `(batch, ..., units)`. `VALID_OUTPUT_MODES = {'basis','normalized'}`. Properties `gamma`, `center_positions`, `width_values`.
 
@@ -62,16 +67,18 @@ Registration: `@register_dl_technique("dl_techniques.layers.mixtures.<module>")`
 
 `GMMLayer(n_components, temperature=1.0, isometric_regularizer_strength=0.01, variance_floor=1e-3, output_mode='assignments', cluster_axis=-1, mean_initializer='orthonormal', log_variance_initializer='zeros', mean_regularizer=None, random_seed=None, covariance_type='diagonal', covariance_rank=1, factor_initializer='glorot_uniform', **kwargs)`. `VALID_OUTPUT_MODES = {'assignments','mixture'}`. Properties `component_means`, `component_variances`, `mixture_weights`. Method `reset_parameters(new_means=None)`.
 
-Constructor validation (raises `ValueError`): positive int for `units` / `n_clusters` / `n_components` (bool rejected; RBF only rejects bool and non-positive, so numpy ints pass); `temperature > 0`; K-means `momentum in [0,1)`, `centroid_lr in (0,1]`, `min_distance > 0`; GMM `variance_floor > 0`, `isometric_regularizer_strength >= 0`, `covariance_type in {'diagonal','low_rank'}`, `covariance_rank` positive int; RBF `gamma_init` (if given) `> 0`, `safety_margin >= 0`.
+`MeanShiftLayer(num_steps=5, bandwidth=1.0, learnable_bandwidth=True, blurring=True, step_size=1.0, kernel='gaussian', use_projection=False, projection_dim=None, return_affinity=False, **kwargs)`. Input `(B, N, D)` (`D` static), optional `mask=(B, N)` keep mask; output `(B, N, D')` with `D' = projection_dim` when `use_projection` else `D`, or `(shifted, affinity (B, N, N))` with `return_affinity` (last-step weights, rows sum to 1). `VALID_OUTPUT_MODES = frozenset()`. `assign_clusters(shifted, merge_radius)` is a NumPy function, eval-only and not differentiable: greedy radius merging in point-index order, the center of a cluster is the converged point that opened it; returns int labels `(N,)` or `(B, N)`.
+
+Constructor validation (raises `ValueError`): positive int for `units` / `n_clusters` / `n_components` / `num_steps` / `projection_dim` when used (bool rejected; RBF only rejects bool and non-positive, so numpy ints pass); `temperature > 0`; K-means `momentum in [0,1)`, `centroid_lr in (0,1]`, `min_distance > 0`; GMM `variance_floor > 0`, `isometric_regularizer_strength >= 0`, `covariance_type in {'diagonal','low_rank'}`, `covariance_rank` positive int; RBF `gamma_init` (if given) `> 0`, `safety_margin >= 0`; mean shift `bandwidth` in `[1e-2, 1e2]`, `step_size in (0, 2)`, `kernel in {'gaussian', 'vmf'}`, the four flags are bools, `projection_dim` required when `use_projection`.
 
 Factory (`factory.py`):
 
-- `MixtureType = Literal['rbf','kmeans','gmm']`.
-- `MIXTURE_REGISTRY: Dict[str, Dict]` with keys `class`, `description`, `required_params`, `optional_params` (constructor defaults), `use_case`. Required: `rbf` -> `['units']`, `kmeans` -> `['n_clusters']`, `gmm` -> `['n_components']`.
+- `MixtureType = Literal['rbf','kmeans','gmm','mean_shift']`.
+- `MIXTURE_REGISTRY: Dict[str, Dict]` with keys `class`, `description`, `required_params`, `optional_params` (constructor defaults), `use_case`. Required: `rbf` -> `['units']`, `kmeans` -> `['n_clusters']`, `gmm` -> `['n_components']`, `mean_shift` -> `[]`.
 - `create_mixture_layer(mixture_type, name=None, **kwargs) -> keras.layers.Layer`. Calls `validate_mixture_config`, merges registry defaults then kwargs, filters to `required | optional | _KERAS_BASE_PARAMS`, builds the class. Any `TypeError`/`ValueError` is re-raised as a `ValueError` with the type, required params, provided params and original message.
 - `create_mixture_from_config(config)` pops `'type'` from a copy and calls `create_mixture_layer`. Raises `ValueError` if not a dict or no `type`.
 - `get_mixture_info()` returns `copy.deepcopy(MIXTURE_REGISTRY)`.
-- `validate_mixture_config(mixture_type, **kwargs)` checks: known type; required present; count params (`units`, `n_clusters`, `n_components`) positive non-bool int; `temperature`, `gamma_init`, `min_distance`, `variance_floor` positive; `repulsion_strength`, `isometric_regularizer_strength`, `safety_margin` non-negative; `output_mode` in `mixture_info['class'].VALID_OUTPUT_MODES`.
+- `validate_mixture_config(mixture_type, **kwargs)` checks: known type; required present; count params (`units`, `n_clusters`, `n_components`, `num_steps`, `projection_dim`) positive non-bool int; `temperature`, `gamma_init`, `min_distance`, `variance_floor`, `bandwidth`, `step_size` positive; `repulsion_strength`, `isometric_regularizer_strength`, `safety_margin` non-negative; `output_mode` in `mixture_info['class'].VALID_OUTPUT_MODES`.
 - `_KERAS_BASE_PARAMS = {'name','dtype','trainable','activity_regularizer','autocast'}` are always forwarded.
 
 ## Data shapes
@@ -82,6 +89,8 @@ Factory (`factory.py`):
 | | `gamma_raw` | `(units,)` | `trainable_gamma` |
 | `KMeansLayer` | `centroids` | `(n_clusters, D)` | no |
 | | `centroid_momentum` | `(n_clusters, D)` | no |
+| `MeanShiftLayer` | `log_bandwidth` | `()` | yes; exists only when `learnable_bandwidth` |
+| | `projection/kernel` | `(D, projection_dim)` | yes; exists only when `use_projection` (no bias) |
 | `GMMLayer` | `means` | `(n_components, D)` | yes |
 | | `log_variances` | `(n_components, D)` | yes |
 | | `mixture_logits` | `(n_components,)` | yes |
@@ -91,7 +100,7 @@ Factory (`factory.py`):
 
 Output shapes (`compute_output_shape` in the mixin): `assignments` replaces the cluster axes by one axis of size K at the position of the first cluster axis; `mixture` returns the input shape.
 
-`get_config()` keys: RBF adds `units, gamma_init, repulsion_strength, min_distance, center_initializer, center_constraint, trainable_gamma, safety_margin, center_regularizer, gamma_regularizer, output_mode`. K-means adds `n_clusters, temperature, momentum, centroid_lr, repulsion_strength, min_distance, output_mode, cluster_axis, centroid_initializer, centroid_regularizer, random_seed`. GMM adds `n_components, temperature, isometric_regularizer_strength, variance_floor, output_mode, cluster_axis, mean_initializer, log_variance_initializer, mean_regularizer, random_seed, covariance_type, covariance_rank, factor_initializer`. Each layer has a `from_config` that deserializes initializers, regularizers (and the RBF constraint); the string `'orthonormal'` is kept as a string.
+`get_config()` keys: MeanShiftLayer adds `num_steps, bandwidth, learnable_bandwidth, blurring, step_size, kernel, use_projection, projection_dim, return_affinity`. RBF adds `units, gamma_init, repulsion_strength, min_distance, center_initializer, center_constraint, trainable_gamma, safety_margin, center_regularizer, gamma_regularizer, output_mode`. K-means adds `n_clusters, temperature, momentum, centroid_lr, repulsion_strength, min_distance, output_mode, cluster_axis, centroid_initializer, centroid_regularizer, random_seed`. GMM adds `n_components, temperature, isometric_regularizer_strength, variance_floor, output_mode, cluster_axis, mean_initializer, log_variance_initializer, mean_regularizer, random_seed, covariance_type, covariance_rank, factor_initializer`. Each layer has a `from_config` that deserializes initializers, regularizers (and the RBF constraint); the string `'orthonormal'` is kept as a string.
 
 ## Invariants and constraints
 
@@ -100,6 +109,7 @@ Output shapes (`compute_output_shape` in the mixin): `assignments` replaces the 
 - `_reshape_output` inverts the forward layout with a `transpose`, never a bare `reshape`. The `assignments` and `mixture` branches compute different permutations; do not merge them. Both are identity on the last-axis fast path.
 - The non-feature axis lengths come from the live tensor (`leading`), not from `original_shape`, because `original_shape` can hold `None` for a variable-length model.
 - Subclasses of `BaseMixtureLayer` must set `output_mode`, call `_init_cluster_axis(cluster_axis)` in `__init__`, call `_setup_cluster_axes()` in `build()`, set `feature_dims` and `non_feature_dims` there, and implement `call` and the `_n_prototypes` property. `_n_prototypes` is only a naming seam over `n_components` / `n_clusters`; do not rename the public attributes (they are config keys and registry params).
+- `MeanShiftLayer`: the bandwidth is stored as `log h`, clipped to `[1e-2, 1e2]` after `exp`, so it stays positive; the weight is `autocast=False` and created with a `Constant` initializer. The projection `Dense` runs in the accumulation dtype and the iteration runs in at least float32; only the returned tensors are cast to the compute dtype. `num_steps >= 1` (the zero-step identity is `mean_shift_ops.mean_shift_iterate(..., num_steps=0)`). A masked query row is computed and finite; callers ignore it. `assign_clusters` must stay outside any `tf.function` or training step.
 - Mixed precision: every prototype weight is created with `autocast=False` and `dtype=self.dtype`; every `call` casts inputs to `variable_dtype` first and the result to `compute_dtype` last. RBF follows this too even though it is outside the base class.
 - `resolve_initializer_arg` keeps the string `'orthonormal'` (it is not a Keras alias). `resolve_prototype_initializer` (at `build()`) turns it into `OrthonormalInitializer(seed)` when `count <= feature_dims`, else logs a warning and uses `GlorotNormal(seed)`. Detection uses `isinstance`, not a class-name check.
 - K-means `call` computes `output` before `_update_centroids`, so `assignments` and the `mixture` reconstruction use the same pre-update centroids. Do not reorder.
@@ -121,7 +131,8 @@ Internal:
 
 - `dl_techniques.utils.logger.logger` (warnings and info).
 - `dl_techniques.utils.keras_registration.register_dl_technique`.
-- `dl_techniques.utils.tensors`: `resolve_training_factor` (all three layers), `pairwise_squared_distance` (K-means, RBF).
+- `dl_techniques.utils.tensors`: `resolve_training_factor` (all three prototype layers), `pairwise_squared_distance` (K-means, RBF).
+- `dl_techniques.utils.validation`: `positive_int`, `positive_float` (`MeanShiftLayer`, `assign_clusters`).
 - `dl_techniques.initializers.orthonormal_initializer.OrthonormalInitializer` (`base.py`).
 
 External: `keras` (all math through `keras.ops`), `numpy` (`np.prod` in `base.py`; `np.log` / `np.expm1` / `np.pi` in `gmm.py` and `radial_basis_function.py`).
@@ -129,7 +140,7 @@ External: `keras` (all math through `keras.ops`), `numpy` (`np.prod` in `base.py
 ## Failure modes
 
 - Reading build-derived attributes (`feature_dims`, `non_feature_dims`, `original_shape`, `input_rank`) before `build()` fails with a `TypeError` on the `None` placeholders. Only `compute_output_shape` is safe pre-build.
-- `build()` with fewer than 2 input dims raises `ValueError` (all three). RBF also raises if the last dim is `None`. K-means and GMM raise `ValueError` for a cluster axis equal to 0 or out of range, or for an input shape where the cluster axes have `None` size (`_compute_feature_dims`).
+- `build()` with fewer than 2 input dims raises `ValueError` (the three prototype layers); `MeanShiftLayer.build` needs exactly rank 3 with a static last dim. RBF also raises if the last dim is `None`. K-means and GMM raise `ValueError` for a cluster axis equal to 0 or out of range, or for an input shape where the cluster axes have `None` size (`_compute_feature_dims`).
 - Orthonormal init with `count > feature_dims` falls back to Glorot normal with a logged warning, not an error.
 - GMM `low_rank` with `covariance_rank >= feature_dims` logs a warning and still builds.
 - `reset_parameters` / `reset_centroids` raise `ValueError` if unbuilt or if the supplied tensor has the wrong shape.
@@ -137,7 +148,7 @@ External: `keras` (all math through `keras.ops`), `numpy` (`np.prod` in `base.py
 - RBF `basis` with non-standardized input or large `D`: gradients go to exactly zero or below useful size, no error. RBF `normalized` can produce NaN only on float32 overflow of the unclipped exponent (`D * gamma * max|x|^2 > 3.4e38`).
 - Factory: unknown type, missing required param, bad range or bad `output_mode` raise `ValueError` (wrapped with context). Unknown extra kwargs are only logged as a warning and dropped.
 - K-means under multi-replica `tf.distribute`: centroids diverge per replica (no all-reduce).
-- Masks are ignored by all three layers.
+- Masks are ignored by `RBFLayer`, `KMeansLayer` and `GMMLayer`. `MeanShiftLayer` honours a `(B, N)` keep mask passed as `mask=`; a batch row with no kept point gets uniform weights, so its output is the plain mean.
 
 ## Working here
 

@@ -55,7 +55,7 @@ Subpackages. F = has `factory.py`. Counts were measured with the registry object
 | `heads/` | Y | 24 task-head classes (8 NLP, 10 vision, 6 VLM) in `nlp/`, `vision/`, `vlm/` | Curated (42 names, from `heads.nlp`, `vision`, `vlm` plus `create_head`); the eight NLP in-model helpers (`TASK_HEAD_NAME`, `build_model_task_head`, ...) are not exported, import them from `heads.nlp`. `create_head(domain, *args, **kwargs)` forwards verbatim to a per-domain factory. Domain signatures differ on purpose. `validation.py`, `masking.py` hold shared checks |
 | `logic/` | Y | Fuzzy logic and arithmetic operators, circuits | 4 keys: `logic`, `arithmetic`, `neural_circuit`, `circuit_depth`. Curated (10 names) |
 | `memory/` | Y | NTM, SOM family, NeuroGrid | `create_mann` is the only MANN construction path (no standalone MANN class; the old `MannLayer` is deleted). `create_som_2d` for 2-D SOM. Curated (25 names), both factory functions exported |
-| `mixtures/` | Y | `RBFLayer`, `KMeansLayer`, `GMMLayer` | 3 keys. Curated (9 names). Non-strict factory (see invariants) |
+| `mixtures/` | Y | `RBFLayer`, `KMeansLayer`, `GMMLayer`, `MeanShiftLayer` | 4 keys. Curated (11 names). Non-strict factory (see invariants) |
 | `norms/` | Y | 16 normalization classes plus `PolarWeightNorm` | 19 factory keys: 2 stock Keras, 17 local keys over 16 classes (`dml_plus_focal`, `dml_plus_center` both build `DMLPlus`). `PolarWeightNorm` is exported (24 names in `__all__`) but not a key |
 | `sequence_pooling/` | Y | `SequencePooling` (18 strategies), attention, weighted and mode pooling | 4 keys: `sequence`, `attention`, `weighted`, `mode`. Curated (14 names) |
 | `ssm/` | Y | Mamba v1 and Mamba-2 layers, `ContextMambaLayer`, residual blocks | `SSM_REGISTRY` 4 keys: `selective_ssm`, `context_mamba`, `mamba`, `mamba2`. `MambaResidualBlock` and `Mamba2ResidualBlock` are exported (15 names in `__all__`) but are not registry keys |
@@ -115,7 +115,7 @@ Factory entry points:
 | Activation | `create_activation_layer(activation_type, name=None, **kw)` in `activations/factory.py` | 25 |
 | Sequence pooling | `create_sequence_pooling_layer(pooling_type, name=None, **kw)` in `sequence_pooling/factory.py` | 4 |
 | Logic | `create_logic_layer(layer_type, name=None, **kw)` in `logic/factory.py` | 4 |
-| Mixtures | `create_mixture_layer(mixture_type, name=None, **kw)` in `mixtures/factory.py` | 3 |
+| Mixtures | `create_mixture_layer(mixture_type, name=None, **kw)` in `mixtures/factory.py` | 4 |
 | SSM | `create_ssm_layer(ssm_type, name=None, **kw)` in `ssm/factory.py` | 4 |
 | Adapters | `create_adapter_layer(adapter_type, name=None, **kw)` in `adapters/factory.py` | 1 |
 | Transformer blocks | `create_transformer_block(config, *, name=None)` in `transformers/factory.py`; `config["type"]` picks the block | 12 |
@@ -128,7 +128,7 @@ Import shape, re-derived from each `__init__.py`:
 
 | Shape | Packages |
 | --- | --- |
-| Curated re-export with `__all__` (18) | `activations` (38 names), `adapters` (13), `attention` (45), `conv_blocks` (1), `dynamic_chunking` (3), `embedding` (11), `ffn` (27), `heads` (42), `logic` (10), `memory` (25), `mixtures` (9), `moe` (5), `norms` (24), `sequence_pooling` (14), `ssm` (15), `time_series` (32), `tokenizers` (8), `transformers` (34) |
+| Curated re-export with `__all__` (18) | `activations` (38 names), `adapters` (13), `attention` (45), `conv_blocks` (1), `dynamic_chunking` (3), `embedding` (11), `ffn` (27), `heads` (42), `logic` (10), `memory` (25), `mixtures` (11), `moe` (5), `norms` (24), `sequence_pooling` (14), `ssm` (15), `time_series` (32), `tokenizers` (8), `transformers` (34) |
 | Exports nothing (17) | `acc_unet`, `blt`, `complex`, `fusion`, `generative`, `geometric`, `graphs`, `matching`, `physics`, `pooling`, `reasoning`, `regularization`, `signal_processing`, `statistics`, `structured_linear`, `tabular`, `yolo12`, and the top-level modules |
 
 Exported without a registry key: `AxialRoPE2D` (embedding), `MambaResidualBlock` and `Mamba2ResidualBlock` (ssm), `GatedAdapter` (adapters), `PolarWeightNorm` (norms), `AttentionRoutingCapsule`, `CapsuleBlockV2`, `Ideogram4Attention`, `MMDiTJointAttention` (attention). Not exported by their curated package, so import from the module or `factory`: 21 of the 24 embedding classes (14 reachable through the factory, 7 without a key), `embedding.factory.get_embedding_info`, `attention.factory.assemble_attention_config`, and the transformers and moe items in the Key files table.

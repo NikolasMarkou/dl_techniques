@@ -13,6 +13,7 @@ from dl_techniques.layers.mixtures import (
     RBFLayer,
     KMeansLayer,
     GMMLayer,
+    MeanShiftLayer,
     MIXTURE_REGISTRY,
     create_mixture_layer,
     create_mixture_from_config,
@@ -97,8 +98,8 @@ class TestCreateFromConfigAndInfo:
 
     def test_get_mixture_info_keys(self) -> None:
         info = get_mixture_info()
-        assert set(info.keys()) == {"rbf", "kmeans", "gmm"}
-        for key in ("rbf", "kmeans", "gmm"):
+        assert set(info.keys()) == {"rbf", "kmeans", "gmm", "mean_shift"}
+        for key in ("rbf", "kmeans", "gmm", "mean_shift"):
             assert "class" in info[key]
             assert "required_params" in info[key]
 
@@ -106,6 +107,7 @@ class TestCreateFromConfigAndInfo:
         assert MIXTURE_REGISTRY["rbf"]["class"] is RBFLayer
         assert MIXTURE_REGISTRY["kmeans"]["class"] is KMeansLayer
         assert MIXTURE_REGISTRY["gmm"]["class"] is GMMLayer
+        assert MIXTURE_REGISTRY["mean_shift"]["class"] is MeanShiftLayer
 
 
 # ------------------------------------------------------- diagnostics (step 5)
@@ -265,7 +267,7 @@ class TestValidOutputModesIsDeclaredOnce:
         """
         cls = MIXTURE_REGISTRY[mtype]['class']
         base = {"rbf": {"units": 8}, "kmeans": {"n_clusters": 4},
-                "gmm": {"n_components": 4}}[mtype]
+                "gmm": {"n_components": 4}, "mean_shift": {}}[mtype]
 
         for mode in sorted(cls.VALID_OUTPUT_MODES):
             validate_mixture_config(mtype, output_mode=mode, **base)

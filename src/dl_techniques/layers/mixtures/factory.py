@@ -1,7 +1,7 @@
 """
 A Factory Method design pattern providing a single, centralized entry point for
 creating the differentiable clustering / mixture layers in this sub-package
-(`RBFLayer`, `KMeansLayer`, `GMMLayer`). By abstracting the instantiation logic,
+(`RBFLayer`, `KMeansLayer`, `GMMLayer`, `MeanShiftLayer`). By abstracting the instantiation logic,
 it decouples client code from the concrete layer implementations and enables
 configuration-driven model construction, mirroring the `attention/`, `norms/`,
 and `ffn/` factories.
@@ -26,6 +26,8 @@ Supported layers:
     layer with online centroid updates.
 -   ``gmm``    — :class:`GMMLayer`, a differentiable Gaussian Mixture layer
     producing soft component responsibilities with an isometric regularizer.
+-   ``mean_shift`` — :class:`MeanShiftLayer`, a differentiable mean-shift layer
+    that moves every point of a set toward its mode (no required parameters).
 
 References:
 -   Gamma, E., Helm, R., Johnson, R., & Vlissides, J. (1994). Design
@@ -45,6 +47,7 @@ from ...utils.logger import logger
 from .radial_basis_function import RBFLayer
 from .kmeans import KMeansLayer
 from .gmm import GMMLayer
+from .mean_shift import MeanShiftLayer
 
 # ---------------------------------------------------------------------
 # Type definition for mixture types
@@ -54,6 +57,7 @@ MixtureType = Literal[
     'rbf',
     'kmeans',
     'gmm',
+    'mean_shift',
 ]
 
 # DECISION plan-2026-07-21T080009-845927c7/D-005: generic keras.layers.Layer constructor
@@ -131,6 +135,23 @@ MIXTURE_REGISTRY: Dict[str, Dict[str, Any]] = {
             'factor_initializer': 'glorot_uniform',
         },
         'use_case': 'Soft probabilistic mixture assignments with learnable per-component variances',
+    },
+    'mean_shift': {
+        'class': MeanShiftLayer,
+        'description': 'Differentiable mean-shift layer that moves every point of a set toward its density mode',
+        'required_params': [],
+        'optional_params': {
+            'num_steps': 5,
+            'bandwidth': 1.0,
+            'learnable_bandwidth': True,
+            'blurring': True,
+            'step_size': 1.0,
+            'kernel': 'gaussian',
+            'use_projection': False,
+            'projection_dim': None,
+            'return_affinity': False,
+        },
+        'use_case': 'Mode seeking and soft clustering of a point set inside a network; read labels out with assign_clusters',
     },
 }
 
@@ -227,7 +248,7 @@ def validate_mixture_config(mixture_type: str, **kwargs: Any) -> None:
             f"Required: {required_params}"
         )
 
-    count_params = ['units', 'n_clusters', 'n_components']
+    count_params = ['units', 'n_clusters', 'n_components', 'num_steps', 'projection_dim']
     for count_param in count_params:
         if count_param in kwargs and kwargs[count_param] is not None:
             value = kwargs[count_param]
@@ -236,7 +257,9 @@ def validate_mixture_config(mixture_type: str, **kwargs: Any) -> None:
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise ValueError(f"{count_param} must be a positive integer, got {value}")
 
-    positive_floats = ['temperature', 'gamma_init', 'min_distance', 'variance_floor']
+    positive_floats = [
+        'temperature', 'gamma_init', 'min_distance', 'variance_floor', 'bandwidth', 'step_size',
+    ]
     for float_param in positive_floats:
         if float_param in kwargs and kwargs[float_param] is not None:
             if kwargs[float_param] <= 0:
@@ -286,7 +309,7 @@ def create_mixture_layer(
     filtering, and consistent error handling.
 
     :param mixture_type: Type of mixture layer to create. See ``MixtureType``
-        for all supported types ('rbf', 'kmeans', 'gmm').
+        for all supported types ('rbf', 'kmeans', 'gmm', 'mean_shift').
     :type mixture_type: MixtureType
     :param name: Optional name for the layer.
     :type name: Optional[str]
