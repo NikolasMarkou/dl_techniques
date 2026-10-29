@@ -90,6 +90,8 @@ class BaseVisualizer(ABC):
             all_models.update(self.results.information_flow.keys())
         if self.results.training_history:
             all_models.update(self.results.training_history.keys())
+        if self.results.fisher_summary_per_model:
+            all_models.update(self.results.fisher_summary_per_model.keys())
 
         # Return alphabetically sorted list for consistency
         return sorted(list(all_models))

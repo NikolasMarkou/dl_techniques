@@ -111,6 +111,8 @@ from .analyzers.calibration_analyzer import CalibrationAnalyzer
 from .analyzers.information_flow_analyzer import InformationFlowAnalyzer
 from .analyzers.training_dynamics_analyzer import TrainingDynamicsAnalyzer
 from .analyzers.spectral_analyzer import SpectralAnalyzer
+from .analyzers.fisher_analyzer import FisherAnalyzer
+from .fisher_metrics import FisherSignal
 
 from .visualizers.weight_visualizer import WeightVisualizer
 from .visualizers.summary_visualizer import SummaryVisualizer
@@ -118,6 +120,7 @@ from .visualizers.calibration_visualizer import CalibrationVisualizer
 from .visualizers.information_flow_visualizer import InformationFlowVisualizer
 from .visualizers.training_dynamics_visualizer import TrainingDynamicsVisualizer
 from .visualizers.spectral_visualizer import SpectralVisualizer
+from .visualizers.fisher_visualizer import FisherVisualizer
 
 from dl_techniques.utils.logger import logger
 
@@ -158,9 +161,11 @@ ANALYSIS_TYPE_CALIBRATION: str = 'calibration'
 ANALYSIS_TYPE_INFORMATION_FLOW: str = 'information_flow'
 ANALYSIS_TYPE_TRAINING_DYNAMICS: str = 'training_dynamics'
 ANALYSIS_TYPE_SPECTRAL: str = 'spectral'
+ANALYSIS_TYPE_FISHER: str = 'fisher'
 
 # Analysis types that require input data to function
-DATA_REQUIRED_ANALYSES: Set[str] = {ANALYSIS_TYPE_CALIBRATION, ANALYSIS_TYPE_INFORMATION_FLOW}
+DATA_REQUIRED_ANALYSES: Set[str] = {ANALYSIS_TYPE_CALIBRATION, ANALYSIS_TYPE_INFORMATION_FLOW,
+                                    ANALYSIS_TYPE_FISHER}
 
 # File naming constants
 DEFAULT_RESULTS_FILENAME: str = "analysis_results.json"
@@ -253,7 +258,11 @@ JSON_INDENT: int = 2
 # carries `status`/`degenerate_fields` with substituted rather than NaN moments.
 # An artifact written before the bump reports an unevaluated model's loss as a
 # perfect 0.0, so the two cannot be compared without reading this stamp.
-RESULTS_SCHEMA_VERSION: int = 4
+# Bumped 4 -> 5 by the Fisher analysis: the artifact gains `fisher_summary`,
+# `fisher_summary_per_model`, `fisher_gradient_recall`, `fisher_token_level` and
+# `fisher_persistence` (and, only under `json_include_fisher_raw`, the per-parameter
+# `fisher_analysis` table). Existing keys keep their meaning.
+RESULTS_SCHEMA_VERSION: int = 5
 
 
 # ---------------------------------------------------------------------
@@ -403,7 +412,8 @@ class ModelAnalyzer:
         models: Dict[str, keras.Model],
         config: Optional[AnalysisConfig] = None,
         output_dir: Optional[Union[str, Path]] = None,
-        training_history: Optional[Dict[str, Dict[str, List[float]]]] = None
+        training_history: Optional[Dict[str, Dict[str, List[float]]]] = None,
+        fisher_signal: Optional[FisherSignal] = None
     ) -> None:
         """
         Initialize the analyzer.
@@ -417,6 +427,10 @@ class ModelAnalyzer:
             training_history: Optional training history for each model, used for training
                             dynamics analysis. Should map model names to dictionaries
                             containing metric histories.
+            fisher_signal: Callables and models the Fisher analysis needs for its gradient
+                          arm or a custom likelihood (reward, teacher, nu log-probability,
+                          sampler). Kept out of ``config`` because ``save_results``
+                          serializes every public config field.
 
         Raises:
             ValueError: If no models are provided in the models dictionary.
@@ -426,6 +440,7 @@ class ModelAnalyzer:
 
         self.models: Dict[str, keras.Model] = models
         self.config: AnalysisConfig = config or AnalysisConfig()
+        self._fisher_signal: Optional[FisherSignal] = fisher_signal
 
         # Create output directory with timestamp if not provided
         if output_dir is None:
@@ -548,7 +563,8 @@ class ModelAnalyzer:
             ANALYSIS_TYPE_CALIBRATION: CalibrationAnalyzer(self.models, self.config),
             ANALYSIS_TYPE_INFORMATION_FLOW: InformationFlowAnalyzer(self.models, self.config),
             ANALYSIS_TYPE_TRAINING_DYNAMICS: TrainingDynamicsAnalyzer(self.models, self.config),
-            ANALYSIS_TYPE_SPECTRAL: SpectralAnalyzer(self.models, self.config)
+            ANALYSIS_TYPE_SPECTRAL: SpectralAnalyzer(self.models, self.config),
+            ANALYSIS_TYPE_FISHER: FisherAnalyzer(self.models, self.config, self._fisher_signal),
         }
 
     def analyze(
@@ -569,7 +585,7 @@ class ModelAnalyzer:
                  Required for calibration and information flow analyses.
             analysis_types: Set of analysis types to run. If None, runs analyses
                           based on configuration flags. Valid types: 'weights',
-                          'calibration', 'information_flow', 'training_dynamics', 'spectral'.
+                          'calibration', 'information_flow', 'training_dynamics', 'spectral', 'fisher'.
 
         Returns:
             AnalysisResults object containing all computed metrics, statistics,
@@ -586,6 +602,7 @@ class ModelAnalyzer:
                 ANALYSIS_TYPE_INFORMATION_FLOW if self.config.analyze_information_flow else None,
                 ANALYSIS_TYPE_TRAINING_DYNAMICS if self.config.analyze_training_dynamics else None,
                 ANALYSIS_TYPE_SPECTRAL if self.config.analyze_spectral else None,
+                ANALYSIS_TYPE_FISHER if self.config.analyze_fisher else None,
             }
             # Remove None values from the set
             analysis_types.discard(None)
@@ -833,7 +850,8 @@ class ModelAnalyzer:
             ANALYSIS_TYPE_CALIBRATION: CalibrationVisualizer,
             ANALYSIS_TYPE_INFORMATION_FLOW: InformationFlowVisualizer,
             ANALYSIS_TYPE_TRAINING_DYNAMICS: TrainingDynamicsVisualizer,
-            ANALYSIS_TYPE_SPECTRAL: SpectralVisualizer
+            ANALYSIS_TYPE_SPECTRAL: SpectralVisualizer,
+            ANALYSIS_TYPE_FISHER: FisherVisualizer,
         }
 
         # Create visualizations for each completed analysis
@@ -951,6 +969,27 @@ class ModelAnalyzer:
                 for stats in layers.values():
                     if isinstance(stats, dict):
                         stats.pop('sample_activations', None)
+
+        # Fisher analysis. Everything here is built into NEW containers, so serializing
+        # is a read of `self.results` (F-040). The per-parameter table and the
+        # parameter-sized token arrays are one entry per parameter and are emitted only
+        # when `json_include_fisher_raw` asks for them.
+        if self.results.fisher_summary_per_model:
+            results_dict['fisher_summary'] = self.results.fisher_summary
+            results_dict['fisher_summary_per_model'] = self.results.fisher_summary_per_model
+            results_dict['fisher_gradient_recall'] = self.results.fisher_gradient_recall
+            raw = self.config.json_include_fisher_raw
+            results_dict['fisher_token_level'] = {
+                model: {k: v for k, v in token.items()
+                        if raw or not (isinstance(v, np.ndarray) and v.ndim == 1)}
+                for model, token in self.results.fisher_token_level.items()}
+            if self.results.fisher_persistence is not None:
+                results_dict['fisher_persistence'] = self.results.fisher_persistence.to_dict(
+                    orient='records')
+            if raw and self.results.fisher_analysis is not None:
+                table = self.results.fisher_analysis.copy()
+                table['variable_path'] = table['variable_path'].astype(str)
+                results_dict['fisher_analysis'] = table.to_dict(orient='records')
 
         # Add spectral analysis DataFrame if it exists
         if self.results.spectral_analysis is not None:
@@ -1098,6 +1137,8 @@ class ModelAnalyzer:
             summary['analyses_performed'].append('training_dynamics_analysis')
         if self.results.spectral_analysis is not None:
             summary['analyses_performed'].append('spectral_analysis')
+        if self.results.fisher_outputs:
+            summary['analyses_performed'].append('fisher_analysis')
 
 
         # Compile model performance summaries

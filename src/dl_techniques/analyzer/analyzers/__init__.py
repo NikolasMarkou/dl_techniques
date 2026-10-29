@@ -8,6 +8,7 @@ from .calibration_analyzer import CalibrationAnalyzer
 from .information_flow_analyzer import InformationFlowAnalyzer
 from .training_dynamics_analyzer import TrainingDynamicsAnalyzer
 from .spectral_analyzer import SpectralAnalyzer
+from .fisher_analyzer import FisherAnalyzer
 
 __all__ = [
     'BaseAnalyzer',
@@ -15,5 +16,6 @@ __all__ = [
     'CalibrationAnalyzer',
     'InformationFlowAnalyzer',
     'TrainingDynamicsAnalyzer',
-    'SpectralAnalyzer'
+    'SpectralAnalyzer',
+    'FisherAnalyzer'
 ]

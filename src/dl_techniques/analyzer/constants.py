@@ -237,3 +237,11 @@ class FisherMetricNames:
     ESTIMATOR = 'estimator'
     VARIABLE_FINGERPRINT = 'variable_fingerprint'
     COMPUTATION_TIME = 'computation_time_seconds'
+    STATUS = 'status'
+    ERROR = 'error'
+
+# Columns of `AnalysisResults.fisher_analysis`, one row per trainable parameter.
+FISHER_TABLE_COLUMNS = (
+    'model_name', 'variable_path', 'flat_index', 'fisher_value', 'standard_error',
+    'gradient_value', 'gradient_rank',
+)

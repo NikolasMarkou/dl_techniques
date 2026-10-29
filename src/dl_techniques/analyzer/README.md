@@ -2,7 +2,7 @@
 
 Post-training diagnostics for trained Keras models. Point it at one or more models (plus optional
 test data and training histories) and it produces weight-health, calibration, information-flow,
-training-dynamics and spectral (WeightWatcher/SETOL) metrics, writes a set of figures, and dumps
+training-dynamics, spectral (WeightWatcher/SETOL) and diagonal-Fisher metrics, writes a set of figures, and dumps
 everything to `analysis_results.json`.
 
 Nothing here changes a model — except `create_smoothed_model`, which returns a new one.
@@ -34,7 +34,7 @@ print(analyzer.get_summary_statistics())
 
 | Symbol | Notes |
 |---|---|
-| `ModelAnalyzer(models, config=None, output_dir=None, training_history=None)` | `models` must be non-empty (`ValueError` otherwise). `output_dir=None` creates `analysis_<YYYYmmdd_HHMMSS>/` in the cwd. |
+| `ModelAnalyzer(models, config=None, output_dir=None, training_history=None, fisher_signal=None)` | `models` must be non-empty (`ValueError` otherwise). `output_dir=None` creates `analysis_<YYYYmmdd_HHMMSS>/` in the cwd. `fisher_signal` is a `FisherSignal` (reward / teacher / nu callables) for the Fisher gradient arm; it is not a config field because `save_results` serializes every public config field |
 | `.analyze(data=None, analysis_types=None)` | returns `AnalysisResults`; also writes figures and `analysis_results.json` |
 | `.get_summary_statistics()` | dict keyed by analysis **category** — `n_models`, `n_multi_input_models`, `multi_input_models`, `analyses_performed`, `model_performance`, `calibration_summary`, `confidence_summary`, `weight_summary`, `training_summary`, `spectral_summary`, `spectral_summary_per_model` — with per-model sub-dicts one level down. `summary[model_name]` does **not** exist; `summary['calibration_summary'][model_name]` does |
 | `with ModelAnalyzer(...) as analyzer:` | on exit, calls `config.restore_plotting_style()`; the only shipped caller of it. Without the `with`, the global matplotlib style stays applied |
@@ -44,10 +44,11 @@ print(analyzer.get_summary_statistics())
 | `AnalysisConfig` | dataclass of toggles, see below |
 | `DataInput(x_data, y_data)` | `NamedTuple`; `.from_tuple((x, y))` and `.from_object(obj)` helpers |
 | `AnalysisResults`, `TrainingMetrics` | result containers |
+| `FisherAnalyzer`, `FisherVisualizer`, `FisherConfig`, `FisherOutput`, `FisherSignal` | the Fisher analysis, see [Fisher](#fisher-resultsfisher_) |
 | `LayerType`, `SmoothingMethod`, `StatusCode`, `MetricNames` | enums / name constants |
 
 `analysis_types` is a set drawn from `{'weights', 'calibration', 'information_flow',
-'training_dynamics', 'spectral'}`. `'calibration'` and `'information_flow'` require `data` —
+'training_dynamics', 'spectral', 'fisher'}`. `'calibration'`, `'information_flow'` and `'fisher'` require `data` —
 asking for them without it raises `ValueError`. When `analysis_types` is omitted the set comes
 from the `analyze_*` flags on the config.
 
@@ -74,6 +75,17 @@ attributes.
 | `spectral_n_randomizations` | `5` | independent permutations averaged per layer when `spectral_randomize` is on; each one is a full extra `compute_eigenvalues`, so this is a direct multiplier on the randomized-comparison cost |
 | `spectral_glorot_fix` | `False` | |
 | `spectral_per_layer_diagnostics` | `False` | one power-law fit plot per layer into `spectral_plots/` |
+| `analyze_fisher` | `False` | off by default: one eager forward and backward pass per sample. Sub-options are the `fisher_*` fields, documented in the [Fisher section](#fisher-resultsfisher_) |
+| `fisher_n_samples` / `fisher_n_responses` / `fisher_n_gradient_prompts` | `100` / `1` / `100` | N_F (inputs the Fisher estimate averages over; the paper's runs use 800), G (responses per prompt in the gradient arm; `>= 2` for `rl` and `opd_pg`) and N_g (gradient-arm prompts, disjoint from the Fisher prompts) |
+| `fisher_compute_gradients` / `fisher_signal_type` | `False` / `'rl'` | run the gradient arm; `'rl'`, `'sft'`, `'opd_pg'`, `'opd_full'` or `'none'`. The reward / teacher / nu callables travel in the `fisher_signal` argument of `ModelAnalyzer`, never in the config |
+| `fisher_token_level` / `fisher_n_positions_per_response` / `fisher_n_token_pairs_per_position` | `True` / `8` / `8` | token-level arm for sequence models; its cost is one backward per pair |
+| `fisher_max_tokens` / `fisher_force_sequence` / `fisher_score_scope` | `512` / `None` / `'response'` | response length cap for sampling AND scoring; `None` infers the sequence path (`True` / `False` force it); `'response_plus_prompt'` also scores the prompt tokens |
+| `fisher_batch_size` / `fisher_accumulate_dtype` | `8` / `'float32'` | sampling microbatch only (scoring is one sample per backward); `'float32'` or `'float64'` accumulators |
+| `fisher_sampling_temperature` / `fisher_regression_variance` | `1.0` / `None` | the paper always uses 1; sigma^2 of a Gaussian likelihood, which also selects the regression output kind |
+| `fisher_selection_percentages` / `fisher_zero_threshold` | `None` (`0.05, 0.1, 0.5, 1, 5`) / `1e-12` | the q grid; coordinates at or below the threshold are Fisher-dead and excluded from recall and retention |
+| `fisher_sft_chi2_cap` / `fisher_assert_no_weight_drift` | `1e4` / `True` | chi^2(nu\|\|pi) above which SFT weights are flagged; hash the trainable variables before and after the pass and raise on drift |
+| `fisher_persistence_indices` | `None` | ordered model names, initial policy first, for the persistence arm |
+| `json_include_fisher_raw` | `False` | emit the per-parameter `fisher_analysis` table and the parameter-sized token-level arrays into the artifact — one row per parameter |
 | `plot_style` | `'publication'` | also `'presentation'`, `'draft'` |
 | `color_palette` / `fig_width` / `fig_height` / `dpi` | `'deep'` / 12 / 8 / 300 | |
 | `save_plots` / `save_format` | `True` / `'png'` | |
@@ -118,6 +130,10 @@ Written into `output_dir`:
 | `spectral_summary.png`, `spectral_funnel_diagram.png` | `analyze_spectral` |
 | `spectral_plots/*.png` | `spectral_per_layer_diagnostics=True` |
 | `trap_plots/*.png` | correlation-trap detection (needs `spectral_randomize=True`) |
+| `fisher_distribution.png`, `fisher_top_coordinates.png`, `fisher_variable_summary.png` | `analyze_fisher` |
+| `fisher_vs_gradient.png`, `fisher_gradient_recall.png` | `analyze_fisher` with `fisher_compute_gradients` |
+| `fisher_token_level.png` | `analyze_fisher` on a sequence model with `fisher_token_level` |
+| `fisher_persistence.png` | `analyze_fisher` with `fisher_persistence_indices` |
 | `pareto_analysis.png` | `create_pareto_analysis()` |
 
 Everything above is written only when `config.save_plots` is `True`. A figure that fails to render
@@ -207,6 +223,66 @@ Not produced by `ModelAnalyzer`; import the functions directly. They implement t
 | `parallelogram_loss`, `sample_parallelogram_quadruples` | Geometry: `||E_i + E_n - E_j - E_m|| / sigma` in the first two PCs, invariant to embedding scale |
 | `partition_silhouette`, `rank_partitions` | How well a label partition (for example subgroup cosets) clusters the embedding |
 | `epochs_to_threshold`, `grokking_gap` | Epochs to reach accuracy above a threshold for N consecutive epochs, and the test-minus-train lag |
+
+### Fisher (`results.fisher_*`)
+
+Diagonal **model** Fisher, `F_i = E_x E_{y~pi_theta}[(d_i log pi_theta(y|x))^2]`, after arXiv:2609.36262.
+It is objective-independent (no reward, teacher or label enters) and bounds the expected gradient of
+any post-training objective: `|g_i| <= sqrt(E[a^2]) * sqrt(F_i)`. It is NOT the empirical Fisher:
+`y` is always sampled from the model, never taken from the labels.
+
+```python
+config = AnalysisConfig(analyze_fisher=True, fisher_n_samples=200, random_state=0)
+analyzer = ModelAnalyzer(models, config, output_dir="results/fisher")
+results = analyzer.analyze(DataInput(x_data=x, y_data=y), analysis_types={"fisher"})
+results.fisher_outputs["m"].fisher_flat          # F-hat, canonical flat coordinate order
+results.fisher_summary_per_model["m"]            # totals, skipped samples, signal_scale, ...
+```
+
+| Output | Content |
+|---|---|
+| `fisher_outputs[m]` | `FisherOutput`: `fisher_flat` (F-hat), `standard_errors`, `param_slices`, `variable_fingerprint`, gradient and token arms |
+| `fisher_analysis` | per-parameter DataFrame: `model_name, variable_path, flat_index, fisher_value, standard_error, gradient_value, gradient_rank` (NaN, never 0.0, where an arm did not run) |
+| `fisher_summary`, `fisher_summary_per_model` | run-level facts (sample plan and fingerprint, batch size) and per-model summary scalars keyed by `FisherMetricNames`; a failed model has `status: 'error'` and no numbers |
+| `fisher_gradient_recall` | `model -> q -> Recall(q)`; the random baseline is `q` |
+| `fisher_token_level` | group-by-position matrices, `real_uniform_ratio` per group, parameter-sized arrays |
+| `fisher_persistence` | retention and magnitude ratio per checkpoint and q |
+
+Output kinds, chosen from a probe of the model: softmax or logit classifier (categorical), sigmoid head
+(independent Bernoulli), `fisher_regression_variance` set (Gaussian, `y ~ N(f(x), sigma^2)`), integer `(B, L)`
+prompts with `(B, L, V)` logits (autoregressive, full-recompute sampling at temperature 1, no top-k/top-p),
+or `FisherSignal.output_logprob_fn` + `sampler` for anything else. An ambiguous rank-3 output raises and names
+`fisher_force_sequence`; a multi-output model raises and asks for `output_logprob_fn`. Sampling a Gaussian at
+its mean would make every score exactly zero, which is why the response is drawn around the mean.
+
+Two estimators, never merged: `fisher_flat` is the **sequence** estimator (mean of the squared SUM of token
+scores, no length normalization); `token_fisher_mean` is the **mean-token** estimator (token Fisher averaged
+over sampled prefixes, so at a fixed response length `T` it estimates `F / T`). They agree in expectation
+(the cross terms of the token scores cancel in expectation, not per sample) but not per sample. Token-level
+pairs use the squared gradient of `(z_a - z_b)/sqrt(2)`, which is unbiased for `Var_p[j_i]`; a `(z_a - z_b)/2`
+scale would estimate half of it.
+
+Gradient arm (`fisher_compute_gradients`, needs `fisher_signal`): `rl` (`a = r - group mean`, G >= 2),
+`opd_pg` (same centering, teacher log-ratio, G >= 2), `opd_full` (`a = sum_t q_t/p_t - 1`) and `sft`. For `sft`
+the demonstrations are `y_data` drawn from nu and `g = E_nu[h]`; the importance weight is already inside the
+sampling, so it enters only the signal scale (`E_nu[w] - 1 = chi^2(nu||pi)`), and a chi^2 above
+`fisher_sft_chi2_cap` is flagged, not fatal. Group-centered `g` carries a factor `(G-1)/G`. Fisher and
+gradient prompts are drawn without replacement and are disjoint by construction.
+
+- **Persistence needs one architecture.** `fisher_persistence_indices=[initial, ckpt1, ...]`. Coordinates are
+  aligned by a fingerprint over the variable structure with Keras auto-name counters stripped; a mismatch raises.
+  Random retention baselines are `q` for the high set and `100 - q` for the low set. Stationarity is measured,
+  not assumed.
+- **Fisher-dead coordinates** (`F <= fisher_zero_threshold`) are counted and excluded from recall and retention;
+  an empty selection set reports NaN.
+- **Read-only and eager.** Trainable variables are hashed before and after (`fisher_assert_no_weight_drift`);
+  a non-finite score drops that sample (counted in `skipped_samples`), it is never clipped. The pass needs the
+  TensorFlow backend and cannot be traced or jit-compiled. TF32 matmul perturbs squared scores; the analyzer warns
+  but does not toggle it.
+- **Cost.** One backward per sample; token level adds `n_samples * n_positions * pairs * 2` backwards.
+  `fisher_batch_size` only groups the sampling draws, and is sized once for all models against `memory_limit_mb`.
+- `fisher_mask_export(output, q)` returns per-variable boolean top-`K_q` masks for masked-training experiments;
+  the consuming loop is `src/train/` work.
 
 ### Information flow (`results.information_flow`, per layer)
 
@@ -400,6 +476,10 @@ replaces. Pinned by `tests/test_analyzer/test_spectral_truncation_policy.py`.
   classifier can produce, so it was indistinguishable from a real score. A failed evaluation
   reports `None` too; read `status` before reading the number. `results.model_metrics[m]` keeps
   the raw `compile_metrics` key as well.
+- **`schema_version` went 4 -> 5 with the Fisher analysis.** Existing keys keep their meaning; the artifact gains
+  `fisher_summary`, `fisher_summary_per_model`, `fisher_gradient_recall`, `fisher_token_level` and
+  `fisher_persistence`, and (only under `json_include_fisher_raw`) the per-parameter `fisher_analysis` table.
+  `analyzer_version` is `1.2.0`.
 - **`loss` is `None` for a model that failed to evaluate, and `schema_version` went 3 -> 4 with
   it.** Until 2026-09-02 both failure branches wrote `0.0`, so the same record reported the
   accuracy honestly as `None` and the loss as a PERFECT `0.0` — the third instance in this package

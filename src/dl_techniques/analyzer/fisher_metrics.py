@@ -63,6 +63,7 @@ needs TensorFlow's ``GradientTape`` for the per-sample score (imported lazily in
 import dataclasses
 import hashlib
 import math
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -478,8 +479,19 @@ class FisherOutput:
 # layout
 # ---------------------------------------------------------------------
 
+# Keras appends a per-session counter to repeated layer names (``dense``, ``dense_2``,
+# ``sequential_1``). It is not part of the architecture, and two identically built models
+# in one session differ only by it.
+_AUTO_NAME_COUNTER = re.compile(r'_\d+(?=/|$)')
+
+
 def variable_fingerprint(paths: Sequence[str], shapes: Sequence[Tuple[int, ...]]) -> str:
     """SHA-256 over variable paths and shapes, in order.
+
+    The auto-name counters of the paths are stripped first, so two instances of one
+    architecture built in the same session agree, while a different structure, a
+    different layer name or a different shape does not. The un-normalized paths remain
+    the join key of every table; only the alignment check uses the normalized form.
 
     Args:
         paths: Variable paths.
@@ -488,7 +500,8 @@ def variable_fingerprint(paths: Sequence[str], shapes: Sequence[Tuple[int, ...]]
     Returns:
         A 16-hex-digit digest.
     """
-    payload = repr([(p, tuple(int(d) for d in s)) for p, s in zip(paths, shapes)]).encode()
+    payload = repr([(_AUTO_NAME_COUNTER.sub('', p), tuple(int(d) for d in s))
+                    for p, s in zip(paths, shapes)]).encode()
     return hashlib.sha256(payload).hexdigest()[:16]
 
 

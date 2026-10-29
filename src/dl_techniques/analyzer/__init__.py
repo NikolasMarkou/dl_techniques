@@ -10,6 +10,8 @@ Key Features:
 - Confidence and calibration metrics
 - Information flow through network layers
 - Spectral weight analysis (WeightWatcher integration)
+- Diagonal model Fisher information (arXiv:2609.36262), with an optional
+  objective-signal gradient arm, token-level arm and persistence arm
 - Quantitative training metrics
 - Summary dashboard with training insights
 
@@ -74,6 +76,9 @@ from .model_analyzer import ModelAnalyzer
 from .config import AnalysisConfig
 from .data_types import DataInput, AnalysisResults, TrainingMetrics
 from .constants import LayerType, SmoothingMethod, StatusCode, MetricNames
+from .analyzers.fisher_analyzer import FisherAnalyzer
+from .visualizers.fisher_visualizer import FisherVisualizer
+from .fisher_metrics import FisherConfig, FisherOutput, FisherSignal
 
 __all__ = [
     'ModelAnalyzer',
@@ -84,7 +89,12 @@ __all__ = [
     'LayerType',
     'SmoothingMethod',
     'StatusCode',
-    'MetricNames'
+    'MetricNames',
+    'FisherAnalyzer',
+    'FisherVisualizer',
+    'FisherConfig',
+    'FisherOutput',
+    'FisherSignal'
 ]
 
-__version__ = '1.1.0' # Updated version
+__version__ = '1.2.0' # Fisher information analysis added

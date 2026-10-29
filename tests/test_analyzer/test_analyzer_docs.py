@@ -1668,7 +1668,7 @@ class TestTheLossSentinelRemovalIsDocumented:
         from dl_techniques.analyzer.model_analyzer import RESULTS_SCHEMA_VERSION
 
         readme = README_PATH.read_text(encoding="utf-8")
-        assert f"went 3 -> {RESULTS_SCHEMA_VERSION}" in readme, (
+        assert re.search(rf"went \d+ -> {RESULTS_SCHEMA_VERSION}\b", readme), (
             f"the code stamps schema_version {RESULTS_SCHEMA_VERSION} but the "
             "README still documents a different latest bump"
         )

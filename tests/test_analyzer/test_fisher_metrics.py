@@ -331,6 +331,14 @@ class TestLayoutAndPlan:
         assert a.slices[0][0] == 0 and a.slices[-1][1] == a.total
         assert all(x[1] == y[0] for x, y in zip(a.slices, a.slices[1:]))
 
+    def test_identically_built_models_agree_despite_keras_auto_names_and_others_do_not(self):
+        first, second = make_classifier(0), make_classifier(1)
+        assert [v.path for v in first.trainable_variables] != [v.path for v in second.trainable_variables]
+        assert canonical_layout(first).fingerprint == canonical_layout(second).fingerprint
+        wider = keras.Sequential([keras.layers.Input((N_FEATURES,)), keras.layers.Dense(7, activation="tanh"),
+                                  keras.layers.Dense(N_CLASSES)])
+        assert canonical_layout(wider).fingerprint != canonical_layout(first).fingerprint
+
     def test_sample_plan_is_disjoint_replayable_and_refuses_an_undersized_pool(self):
         plan = SamplePlan.build(100, 30, 20, np.random.default_rng(0), seed=0)
         assert not set(plan.fisher_indices) & set(plan.gradient_indices)

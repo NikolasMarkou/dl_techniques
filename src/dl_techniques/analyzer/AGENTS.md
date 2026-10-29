@@ -1,6 +1,6 @@
 # Analyzer Package
 
-Comprehensive model analysis framework for evaluating trained Keras models. Provides weight health diagnostics, calibration metrics, information flow analysis, spectral analysis, and training dynamics insights.
+Comprehensive model analysis framework for evaluating trained Keras models. Provides weight health diagnostics, calibration metrics, information flow analysis, spectral analysis, diagonal Fisher information, and training dynamics insights.
 
 ## Theory
 
@@ -17,14 +17,15 @@ Comprehensive model analysis framework for evaluating trained Keras models. Prov
 - `calibration_metrics.py` — Brier score, ECE, reliability diagrams
 - `representation_metrics.py` — Loss-agnostic interpretability and grokking metrics from the harmonic-loss paper (arXiv:2502.01628): PCA explained variance (`explained_variance_ratios`, `cumulative_explained_variance`, `top_k_explained_variance`), scale-invariant `parallelogram_loss` (Eq. 3) with `sample_parallelogram_quadruples`, silhouette scoring of cluster/coset partitions (`partition_silhouette`, `rank_partitions`), and `epochs_to_threshold` / `grokking_gap`. Pure numpy, importable as `dl_techniques.analyzer.representation_metrics`; not wired into `ModelAnalyzer`
 - `spectral_metrics.py` / `spectral_utils.py` — Spectral weight analysis (WeightWatcher-style)
+- `fisher_metrics.py` — Diagonal model Fisher (arXiv:2609.36262): score, Welford F-hat, gradient arm (rl / sft / opd_pg / opd_full), token-level arm, persistence, `SamplePlan`, `fisher_mask_export`. Pure functions; `FisherSignal` carries the callables that must not live in the serialized config
 - `utils.py` — Shared helper functions
 
 ### Subpackages
 
 - `analyzers/` — Specialized analyzer classes (all inherit from `base.py`):
-  - `weight_analyzer.py`, `calibration_analyzer.py`, `information_flow_analyzer.py`, `spectral_analyzer.py`, `training_dynamics_analyzer.py`
+  - `weight_analyzer.py`, `calibration_analyzer.py`, `information_flow_analyzer.py`, `spectral_analyzer.py`, `training_dynamics_analyzer.py`, `fisher_analyzer.py`
 - `visualizers/` — Corresponding visualization classes (all inherit from `base.py`):
-  - `weight_visualizer.py`, `calibration_visualizer.py`, `information_flow_visualizer.py`, `spectral_visualizer.py`, `training_dynamics_visualizer.py`, `summary_visualizer.py`
+  - `weight_visualizer.py`, `calibration_visualizer.py`, `information_flow_visualizer.py`, `spectral_visualizer.py`, `training_dynamics_visualizer.py`, `summary_visualizer.py`, `fisher_visualizer.py`
 
 ## Public API
 
@@ -36,7 +37,7 @@ from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
 
 - Analyzers and visualizers follow a base class pattern in their respective subpackages
 - All analysis is config-driven via `AnalysisConfig` flags
-- Version tracked in `__init__.py` (`__version__ = '1.1.0'`)
+- Version tracked in `__init__.py` (`__version__ = '1.2.0'`)
 
 ## Testing
 
