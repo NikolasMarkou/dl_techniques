@@ -55,6 +55,8 @@ from typing import Optional, Dict, Any, Literal, Set
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
+
 from .rms_norm import RMSNorm
 from .bias_free_batch_norm import BiasFreeBatchNorm
 from .band_rms import BandRMS
@@ -142,9 +144,21 @@ _FACTORY_OWNED_PARAMS: Dict[str, frozenset] = {
 # caller who sets `epsilon=1e-3` here and is not told would reasonably believe it
 # applied. Contrast `global_response_norm`, which ALIASES `epsilon` to `eps`. There the
 # value is meaningful, so it is accepted. Rejecting it there WAS drift, and is fixed.
+#
+# `local_response_norm` is in the same position: its stabilizing constant is `k`, and
+# there is no `epsilon` to bind to. `create_normalization_layer` takes `epsilon` as a
+# NAMED parameter, so the key never reaches the validator through the builder; the
+# builder reports an explicit value itself (see `_EPSILON_FREE_TYPES`), and only a
+# direct call to `validate_normalization_config` rejects it.
 _FACTORY_DROPPED_PARAMS: Dict[str, frozenset] = {
     'dynamic_tanh': frozenset({'epsilon'}),
+    'local_response_norm': frozenset({'epsilon'}),
 }
+
+# Types with no epsilon at all. An explicit `epsilon=` for one of these is logged as
+# ignored instead of being dropped without a word. It is a warning and not an error
+# because callers such as the text decoder pass `epsilon` for any configured type.
+_EPSILON_FREE_TYPES = frozenset({'dynamic_tanh', 'local_response_norm'})
 
 
 def _accepted_params(normalization_type: str) -> Set[str]:
@@ -196,7 +210,7 @@ def _accepted_params(normalization_type: str) -> Set[str]:
 def create_normalization_layer(
         normalization_type: NormalizationType,
         name: Optional[str] = None,
-        epsilon: float = 1e-6,
+        epsilon: Optional[float] = None,
         **kwargs: Any
 ) -> keras.layers.Layer:
     """Build one of the 19 registered normalization layers.
@@ -360,6 +374,16 @@ def create_normalization_layer(
     # D-016.
     if normalization_type in _TYPE_TO_CLASS:
         validate_normalization_config(normalization_type, **kwargs)
+
+    # `epsilon=None` means "not given". A type with no epsilon says so when one was
+    # given; every other type falls back to the factory default, 1e-6.
+    if epsilon is not None and normalization_type in _EPSILON_FREE_TYPES:
+        logger.warning(
+            f"create_normalization_layer: '{normalization_type}' has no epsilon; "
+            f"epsilon={epsilon} is ignored."
+        )
+    if epsilon is None:
+        epsilon = 1e-6
 
     # Prepare base parameters
     layer_kwargs = kwargs.copy()

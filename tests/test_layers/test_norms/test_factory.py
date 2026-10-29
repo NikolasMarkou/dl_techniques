@@ -79,6 +79,48 @@ class TestF1ValidateWhitelist:
             validate_normalization_config("dynamic_tanh", epsilon=1e-6)
 
 
+class TestEpsilonOnTypesThatHaveNone:
+    """`epsilon` is a named parameter of the factory, so the validator never sees
+    it and the factory used to drop it for `dynamic_tanh` and
+    `local_response_norm` without a word."""
+
+    @pytest.mark.parametrize("norm_type", ["dynamic_tanh", "local_response_norm"])
+    def test_an_explicit_epsilon_is_reported_as_ignored(self, norm_type, monkeypatch):
+        from dl_techniques.layers.norms import factory as factory_module
+
+        messages = []
+        monkeypatch.setattr(
+            factory_module.logger, "warning",
+            lambda message, *args, **kwargs: messages.append(str(message)),
+        )
+        layer = create_normalization_layer(norm_type, epsilon=1e-3)
+
+        assert isinstance(layer, keras.layers.Layer)
+        assert any(norm_type in m and "epsilon" in m for m in messages), messages
+
+    @pytest.mark.parametrize("norm_type", ["dynamic_tanh", "local_response_norm"])
+    def test_no_report_when_epsilon_is_left_out(self, norm_type, monkeypatch):
+        from dl_techniques.layers.norms import factory as factory_module
+
+        messages = []
+        monkeypatch.setattr(
+            factory_module.logger, "warning",
+            lambda message, *args, **kwargs: messages.append(str(message)),
+        )
+        create_normalization_layer(norm_type)
+        assert messages == []
+
+    def test_the_other_types_keep_the_factory_default_and_honour_an_explicit_value(self):
+        assert create_normalization_layer("rms_norm").epsilon == 1e-6
+        assert create_normalization_layer("layer_norm").epsilon == 1e-6
+        assert create_normalization_layer("layer_norm", epsilon=1e-3).epsilon == 1e-3
+        assert create_normalization_layer("global_response_norm", epsilon=1e-3).eps == 1e-3
+
+    def test_local_response_norm_rejects_epsilon_in_the_validator_like_dynamic_tanh(self):
+        with pytest.raises(ValueError):
+            validate_normalization_config("local_response_norm", epsilon=1e-6)
+
+
 class TestEnergyLayerNormGammaConstraint:
     """G-03: the validator and the BUILDER must agree about the layer's own signature.
 
