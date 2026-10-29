@@ -1023,16 +1023,16 @@ class TestTheAdopterCountsAreMechanical:
                 derivers.append(path.name)
         return adopters, derivers
 
-    def test_there_are_exactly_twelve_adopters_and_nine_derive_the_axis(self):
+    def test_there_are_exactly_thirteen_adopters_and_nine_derive_the_axis(self):
         adopters, derivers = self._counts()
-        assert len(adopters) == 12, f"adopters drifted: {adopters}"
+        assert len(adopters) == 13, f"adopters drifted: {adopters}"
         assert len(derivers) == 9, f"derivers drifted: {derivers}"
         assert set(derivers) <= set(adopters)
 
-    def test_the_three_non_deriving_adopters_are_the_documented_ones(self):
-        """``capsule_routing`` PINS its axis; ``ring`` OPTS OUT; ``beit`` has no config.
+    def test_the_four_non_deriving_adopters_are_the_documented_ones(self):
+        """``capsule_routing`` PINS its axis; ``ring`` OPTS OUT; ``beit`` and ``mean_shift`` have no config.
 
-        Each of the three is non-deriving for its OWN documented reason, and none of
+        Each of the four is non-deriving for its OWN documented reason, and none of
         them is an oversight:
 
         * ``capsule_routing_attention.py`` — PINS the axis in ``__init__`` via
@@ -1044,11 +1044,16 @@ class TestTheAdopterCountsAreMechanical:
           It calls ``ops.softmax(..., axis=-1)`` directly, so ``rescue_axis=-1`` is a
           literal *by necessity*, not by oversight. Do not "fix" it by adding a
           ``probability_config`` to that layer's surface just to make this set smaller.
+        * ``mean_shift_attention.py`` — has **no** ``probability_config`` parameter
+          either: the kernel weights are normalised over the key axis by
+          construction, so ``rescue_axis=-1`` is a literal *by necessity*, not by
+          oversight, for the same reason as ``beit``.
         """
         adopters, derivers = self._counts()
         assert set(adopters) - set(derivers) == {
             "beit_attention.py",
             "capsule_routing_attention.py",
+            "mean_shift_attention.py",
             "ring_attention.py",
         }
 

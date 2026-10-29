@@ -397,7 +397,7 @@ class TestTransformerLayer:
 
 # ===================================================================
 # F4: newly-wired attention types (plan_2026-06-12_0bb1729b)
-# multi_head_latent, anchor, lighthouse, fnet
+# multi_head_latent, anchor, lighthouse, fnet (mean_shift joined later)
 # ===================================================================
 class TestTransformerLayerExtendedAttention:
     """Covers the attention types added to TransformerLayer._get_attention_params.
@@ -435,6 +435,8 @@ class TestTransformerLayerExtendedAttention:
         ('anchor', {}),
         ('lighthouse', {}),
         ('fnet', {}),
+        ('mean_shift', {}),
+        ('mean_shift', {'num_steps': 3, 'kernel': 'vmf'}),
     ])
     @pytest.mark.parametrize("normalization_position", ['pre', 'post'])
     def test_construct_and_forward(self, sample_input, attention_type, attention_args, normalization_position):
@@ -449,6 +451,7 @@ class TestTransformerLayerExtendedAttention:
         ('anchor', {}),
         ('lighthouse', {}),
         ('fnet', {}),
+        ('mean_shift', {'num_steps': 2}),
     ])
     def test_serialization_round_trip(self, sample_input, attention_type, attention_args):
         """`.keras` save/load is numerically identical at atol=1e-6."""
@@ -468,7 +471,7 @@ class TestTransformerLayerExtendedAttention:
             err_msg=f"round-trip mismatch for {attention_type} {attention_args}",
         )
 
-    @pytest.mark.parametrize("attention_type", ['multi_head_latent', 'anchor', 'lighthouse', 'fnet'])
+    @pytest.mark.parametrize("attention_type", ['multi_head_latent', 'anchor', 'lighthouse', 'fnet', 'mean_shift'])
     def test_gradient_flow(self, sample_input, attention_type):
         """Gradients flow end-to-end through the layer.
 

@@ -10,12 +10,15 @@ across dtype policies. The three identity checks are factored into functions so 
 proof can inject a defect into the layer's ``kernel_logits`` and assert that the very
 same body fails.
 
-The layer is not registered in the attention factory yet; the factory, transformer
-and ``.keras`` rows for the registry arrive with the registration.
+The last two classes cover the registration: the attention factory (strict kwargs,
+registry defaults equal to the constructor's) and ``TransformerLayer`` (forward, padding
+mask, ``.keras`` round trip).
 """
 
+import inspect
 import json
 import math
+import re
 import warnings
 
 import keras
@@ -24,12 +27,20 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.layers.attention import mean_shift_attention
+from dl_techniques.layers.attention.factory import (
+    ATTENTION_REGISTRY,
+    STRICT_DROPPED_KEY_MARKER,
+    create_attention_layer,
+    get_attention_info,
+    list_attention_types,
+)
 from dl_techniques.layers.attention.mean_shift_attention import (
     MeanShiftAttention,
     softplus_inverse,
 )
 from dl_techniques.layers.attention.multi_head_attention import MultiHeadAttention
 from dl_techniques.layers.mixtures import mean_shift_ops as ops
+from dl_techniques.layers.transformers.transformer import TransformerLayer
 from tests.test_layers.test_mixtures.mean_shift_oracle import oracle_step
 
 pytestmark = pytest.mark.usefixtures("tf32_disabled")
@@ -815,3 +826,142 @@ class TestPrecision:
                 )
         finally:
             keras.mixed_precision.set_global_policy(previous)
+
+
+# ---------------------------------------------------------------------
+# Attention factory
+# ---------------------------------------------------------------------
+
+FULL_KWARGS = {
+    "dim": DIM, "num_heads": HEADS, "head_dim": 4, "num_steps": 3, "blurring": False,
+    "kernel": "vmf", "bandwidth_mode": "per_token", "bandwidth_init": 2.0,
+    "min_bandwidth": 0.05, "max_bandwidth": 50.0, "step_size": 0.8,
+    "learnable_step_size": True, "dropout_rate": 0.1, "use_bias": True,
+    "kernel_initializer": "he_normal", "kernel_regularizer": "l2",
+}
+
+
+class TestFactory:
+    def test_the_key_is_registered_and_listed(self):
+        assert "mean_shift" in ATTENTION_REGISTRY
+        assert "mean_shift" in list_attention_types()
+        assert ATTENTION_REGISTRY["mean_shift"]["class"] is MeanShiftAttention
+
+    def test_dim_alone_builds_the_layer_with_the_constructor_defaults(self):
+        layer = create_attention_layer("mean_shift", name="ms", dim=DIM)
+        assert type(layer) is MeanShiftAttention
+        direct = MeanShiftAttention(dim=DIM, name="ms")
+        assert layer.get_config() == direct.get_config()
+
+    def test_a_full_kwargs_dict_reaches_the_constructor(self):
+        layer = create_attention_layer("mean_shift", name="ms", **FULL_KWARGS)
+        config = layer.get_config()
+        assert layer.name == "ms"
+        for key in ("dim", "num_heads", "head_dim", "num_steps", "blurring", "kernel",
+                    "bandwidth_mode", "bandwidth_init", "min_bandwidth", "max_bandwidth",
+                    "step_size", "learnable_step_size", "dropout_rate", "use_bias"):
+            assert config[key] == FULL_KWARGS[key], key
+
+    def test_an_unknown_keyword_raises_the_strict_error(self):
+        with pytest.raises(ValueError, match=re.escape(STRICT_DROPPED_KEY_MARKER)):
+            create_attention_layer("mean_shift", dim=DIM, bandwidth_scale=2.0)
+
+    def test_a_keyword_of_another_type_raises_the_strict_error(self):
+        with pytest.raises(ValueError, match=re.escape(STRICT_DROPPED_KEY_MARKER)):
+            create_attention_layer("mean_shift", dim=DIM, key_dim=8)
+
+    def test_an_explicit_none_head_dim_is_refused_by_the_factory_but_not_by_the_class(self):
+        """The factory validates a caller-passed ``head_dim`` as a positive int; omission is fine."""
+        assert MeanShiftAttention(dim=DIM, head_dim=None).head_dim == DIM // 8
+        with pytest.raises(ValueError):
+            create_attention_layer("mean_shift", dim=DIM, head_dim=None)
+
+    def test_the_registry_defaults_are_the_constructor_defaults(self):
+        info = get_attention_info()["mean_shift"]
+        assert info["required_params"] == ["dim"]
+        parameters = inspect.signature(MeanShiftAttention.__init__).parameters
+        defaults = {
+            name: p.default for name, p in parameters.items()
+            if name not in ("self", "kwargs") and p.default is not inspect.Parameter.empty
+        }
+        assert info["optional_params"] == defaults
+        required = [name for name, p in parameters.items()
+                    if name not in ("self", "kwargs") and p.default is inspect.Parameter.empty]
+        assert info["required_params"] == required
+
+    def test_a_factory_layer_runs_on_a_padded_batch(self):
+        layer = create_attention_layer("mean_shift", dim=DIM, num_heads=HEADS, num_steps=2)
+        x = _tokens(2, 6, 41)
+        mask = np.ones((2, 6), dtype="float32")
+        mask[1, 4:] = 0.0
+        out = _np(layer(x, attention_mask=mask, training=False))
+        assert out.shape == x.shape and np.isfinite(out).all()
+
+    def test_a_rank_4_input_is_refused_at_build(self):
+        with pytest.raises(ValueError):
+            create_attention_layer("mean_shift", dim=DIM).build((None, 4, 4, DIM))
+
+
+# ---------------------------------------------------------------------
+# TransformerLayer
+# ---------------------------------------------------------------------
+
+def _transformer(**kwargs):
+    kwargs.setdefault("attention_dropout_rate", 0.0)
+    return TransformerLayer(
+        hidden_size=DIM, num_heads=HEADS, intermediate_size=2 * DIM,
+        attention_type="mean_shift", dropout_rate=0.0, **kwargs,
+    )
+
+
+class TestTransformerLayer:
+    @pytest.mark.parametrize("position", ["pre", "post"])
+    @pytest.mark.parametrize("args", [{}, {"num_steps": 3, "kernel": "vmf", "blurring": False}])
+    def test_the_block_builds_and_runs(self, position, args):
+        layer = _transformer(attention_args=args, normalization_position=position)
+        x = _tokens(2, 7, 42)
+        out = _np(layer(x, training=False))
+        assert out.shape == x.shape and np.isfinite(out).all()
+        assert type(layer.attention) is MeanShiftAttention
+
+    def test_the_block_forwards_the_dropout_and_bias_arguments(self):
+        layer = TransformerLayer(
+            hidden_size=DIM, num_heads=HEADS, intermediate_size=2 * DIM,
+            attention_type="mean_shift", attention_dropout_rate=0.25, use_bias=True,
+        )
+        assert layer.attention.dropout_rate == 0.25 and layer.attention.use_bias is True
+
+    def test_a_padding_mask_changes_nothing_for_the_unpadded_rows(self):
+        layer = _transformer(attention_args={"num_steps": 2})
+        x = _tokens(2, 6, 43)
+        mask = np.ones((2, 6), dtype="float32")
+        mask[1, 3:] = 0.0
+        masked = _np(layer(x, attention_mask=mask, training=False))
+        perturbed = x.copy()
+        perturbed[1, 3:] += 5.0
+        again = _np(layer(perturbed, attention_mask=mask, training=False))
+        np.testing.assert_allclose(masked[1, :3], again[1, :3], atol=1e-5, rtol=0)
+        np.testing.assert_allclose(masked[0], again[0], atol=0, rtol=0)
+        unmasked = _np(layer(x, training=False))
+        assert np.abs(unmasked[1, :3] - masked[1, :3]).max() > 1e-4, "the mask never reached the layer"
+
+    def test_a_model_containing_the_block_round_trips_through_a_keras_file(self, tmp_path):
+        inputs = keras.Input((None, DIM))
+        outputs = _transformer(attention_args={"num_steps": 2, "bandwidth_mode": "per_token"})(inputs)
+        model = keras.Model(inputs, outputs)
+        x = _tokens(2, 5, 44)
+        before = _np(model(x, training=False))
+        path = tmp_path / "block.keras"
+        model.save(path)
+        loaded = keras.models.load_model(path)
+        np.testing.assert_allclose(_np(loaded(x, training=False)), before, atol=1e-6, rtol=0)
+        assert len(loaded.weights) == len(model.weights)
+
+    def test_every_weight_of_the_block_receives_a_gradient(self):
+        layer = _transformer(attention_args={"num_steps": 2})
+        x = tf.Variable(_tokens(2, 6, 45))
+        with tf.GradientTape() as tape:
+            loss = tf.reduce_mean(tf.square(layer(x, training=True)))
+        grads = tape.gradient(loss, layer.trainable_variables)
+        missing = [v.path for v, g in zip(layer.trainable_variables, grads) if g is None]
+        assert not missing, missing

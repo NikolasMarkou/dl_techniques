@@ -23,7 +23,7 @@ flowchart TD
     C --> D
 ```
 
-- Base domains hold the small interchangeable parts. Each has a factory with a registry of named types. `norms` builds 19 normalization types, `attention` 35, `ffn` 22, `embedding` 16 and `activations` 25.
+- Base domains hold the small interchangeable parts. Each has a factory with a registry of named types. `norms` builds 19 normalization types, `attention` 36, `ffn` 22, `embedding` 16 and `activations` 25.
 - Composite stacks build on the base domains through those factories. `transformers.TransformerLayer` takes the attention, FFN and normalization types as strings. `moe.MixtureOfExperts` builds each expert with the FFN factory. `heads` holds task heads (classification, detection, captioning and so on) and uses `fusion.MultiModalFusion` for vision-language heads.
 - Self-contained families (state space models, time series, graphs, memory, signal processing, and so on) are mostly independent of each other. They are listed by domain below.
 - The top-level modules each hold one architecture or one small utility that had no sibling files to justify a subpackage.
@@ -40,7 +40,7 @@ Factory column: Y means the package has a `factory.py`.
 |---|:-:|---|
 | `activations/` | Y | GoLU, Mish, hard sigmoid and swish, ReLU-k, sparsemax, squash, thresh-max, adaptive softmax, differentiable step, monotonic and routing-probability outputs, exact-dtype GELU and leaky ReLU. 25 factory keys |
 | `adapters/` | Y | `LoRAAdapter` (several independent low-rank pairs) and `GatedAdapter`. One factory key, `lora` |
-| `attention/` | Y | 35 attention types: multi-head, cross, latent, differential, grouped-query, ring, Performer, Perceiver, Hopfield, window, linear, energy, channel and spatial gates, Fourier mixing, and more |
+| `attention/` | Y | 36 attention types: multi-head, cross, latent, differential, grouped-query, ring, Performer, Perceiver, Hopfield, mean-shift, window, linear, energy, channel and spatial gates, Fourier mixing, and more |
 | `embedding/` | Y | Patch, positional, sinusoidal, rotary (RoPE family), BERT-style token embeddings, class-label and timestep embeddings, special tokens. 16 factory keys over 24 classes; 8 classes have no key |
 | `ffn/` | Y | MLP, SwiGLU, GeGLU, GLU family, gated and Swin MLPs, power MLP, logic, counting and KAN variants. 22 factory keys over 20 classes |
 | `heads/` | Y | 24 task-head classes in `nlp/`, `vision/`, `vlm/`, with `create_head(domain, ...)` |

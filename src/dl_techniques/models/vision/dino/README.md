@@ -98,12 +98,13 @@ file-dependent tests skip with the path when the download is absent) and
 ### The attention types of a `DINOv2Block`, and how its projections start
 
 `attention_type` accepts `multi_head` (the default and the only one with the official checkpoint's
-structure), `multi_head_cross`, `gated`, `linear`, `ring`, `anchor`, `perceiver`, `performer`, `rpc` and
-`wave_field` (`dino_v2.SUPPORTED_ATTENTION_TYPES`); any other value, including every other key of the attention
+structure), `multi_head_cross`, `gated`, `linear`, `ring`, `anchor`, `perceiver`, `performer`, `rpc`,
+`wave_field` and `mean_shift` (`dino_v2.SUPPORTED_ATTENTION_TYPES`); any other value, including every other key of the attention
 registry, raises `ValueError` naming that set at construction (in `DINOv2Block.__init__`, before any layer exists).
 The five last types replayed one draw across projections (1 to 10 replayed kernel pairs per block) until their
 layers began to clone an initializer per projection themselves (decision D-056); each was measured at zero
-replayed pairs in a block and a backbone before it joined the set. The 25 excluded types fall into two
+replayed pairs in a block and a backbone before it joined the set, as was `mean_shift`, whose layer clones one initializer
+per projection from the start. The 25 excluded types fall into two
 groups, each pinned by a test that patches the table and asserts the exception and message it fails with: the
 window types, `single_window`, `differential`, `group_query` and `multi_head_latent` need arguments the block
 does not pass (`window_size`, `head_dim`, `num_kv_heads`, `kv_latent_dim`), and the rest take none of the

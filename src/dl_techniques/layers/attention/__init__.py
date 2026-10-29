@@ -5,8 +5,8 @@ interface that builds them from a config dict. Import a class directly, or
 call `create_attention_layer(type=...)` when the type comes from
 configuration.
 
-`factory.py` registers 35 keys; this package re-exports 37 layer classes,
-32 of them reachable through `create_attention_layer(type=...)`. The other
+`factory.py` registers 36 keys; this package re-exports 38 layer classes,
+33 of them reachable through `create_attention_layer(type=...)`. The other
 5 are direct-import only: `Ideogram4Attention`, `MMDiTJointAttention`,
 `AttentionRoutingCapsule`, `CapsuleBlockV2`, `WindowAttention`.
 
@@ -82,6 +82,7 @@ from .capsule_routing_attention import CapsuleRoutingSelfAttention
 from .fnet_fourier_transform import FNetFourierTransform
 from .hopfield_attention import HopfieldAttention
 from .lighthouse_attention import LighthouseAttention
+from .mean_shift_attention import MeanShiftAttention
 from .perceiver_attention import PerceiverAttention
 
 # Efficient / linear-complexity attention (all factory-registered:
@@ -152,6 +153,7 @@ __all__ = [
     "FNetFourierTransform",
     "HopfieldAttention",
     "LighthouseAttention",
+    "MeanShiftAttention",
     "PerceiverAttention",
 
     # Efficient / linear-complexity (all factory-registered)

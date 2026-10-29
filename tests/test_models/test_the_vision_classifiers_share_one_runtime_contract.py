@@ -1617,6 +1617,8 @@ REPLAY_SUBJECTS: Dict[str, Tuple[Callable, bool]] = {
     "dinov2_vit_performer": (_dinov2_vit("performer"), False),
     "dinov2_vit_rpc": (_dinov2_vit("rpc"), False),
     "dinov2_vit_wave_field": (_dinov2_vit("wave_field"), False),
+    # Registered after that table was measured; its layer clones one initializer per projection itself.
+    "dinov2_vit_mean_shift": (_dinov2_vit("mean_shift"), False),
     # DINOv1 has no initializer knob; DINOv3 takes `kernel_initializer`, so it has both arms.
     "dino_v1": (_dino_v1_vit, False),
     "dino_v3": (_dino_v3_vit, True),

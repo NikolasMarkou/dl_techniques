@@ -49,7 +49,7 @@ Subpackages. F = has `factory.py`. Counts were measured with the registry object
 | --- | :-: | --- | --- |
 | `activations/` | Y | 25 activation types, plus `common.py` argument helpers | `ACTIVATION_REGISTRY` has 25 keys. Curated `__init__` (38 names) |
 | `adapters/` | Y | `LoRAAdapter`, `GatedAdapter` | One key, `lora`. Curated (13 names). `GatedAdapter` is exported but deliberately not a key. Gate half is `statistics/local_support_gate.py` |
-| `attention/` | Y | 35 attention types | `ATTENTION_REGISTRY` 35 keys. Curated (44 names: 37 classes, 6 factory functions, `AttentionType`). `AttentionRoutingCapsule`, `CapsuleBlockV2`, `Ideogram4Attention`, `MMDiTJointAttention` are exported without a key. `assemble_attention_config` is not exported. Sphinx docstrings mandatory |
+| `attention/` | Y | 36 attention types | `ATTENTION_REGISTRY` 36 keys. Curated (45 names: 38 classes, 6 factory functions, `AttentionType`). `AttentionRoutingCapsule`, `CapsuleBlockV2`, `Ideogram4Attention`, `MMDiTJointAttention` are exported without a key. `assemble_attention_config` is not exported. Sphinx docstrings mandatory |
 | `embedding/` | Y | Patch, positional, sinusoidal, RoPE, token, class-label, timestep embeddings | 24 layer classes, 16 keys. 8 classes have no key: `AxialRoPE2D` (exported by `__init__`), and `ClassTokenPrepend`, `MaskTokenApply`, `RegisterTokens`, `StateIndicatorEmbedding`, `HierarchicalCodebookEmbedding`, `PatchEmbed3D`, `VideoRoPE3D` (not exported, import from the module). `__init__` (11 names) exports only 3 layer classes (`AxialRoPE2D`, `ClassLabelEmbedding`, `TimestepEmbedding`), 4 NumPy sin-cos table builders and the factory names. Its docstring is stale (says 23 classes, 7 without a key) |
 | `ffn/` | Y | Feed-forward variants | `FFN_REGISTRY` 22 keys over 20 classes (`glu`, `reglu`, `bilinear` are configurations of `GLUFFN`). Curated (27 names: the 20 classes plus the factory interface incl. `assemble_ffn_config`) |
 | `heads/` | Y | 24 task-head classes (8 NLP, 10 vision, 6 VLM) in `nlp/`, `vision/`, `vlm/` | Curated (42 names, from `heads.nlp`, `vision`, `vlm` plus `create_head`); the eight NLP in-model helpers (`TASK_HEAD_NAME`, `build_model_task_head`, ...) are not exported, import them from `heads.nlp`. `create_head(domain, *args, **kwargs)` forwards verbatim to a per-domain factory. Domain signatures differ on purpose. `validation.py`, `masking.py` hold shared checks |
@@ -109,7 +109,7 @@ Factory entry points:
 | Domain | Entry point | Registry |
 | --- | --- | --- |
 | Normalization | `create_normalization_layer(normalization_type, name=None, epsilon=1e-6, **kw)` in `norms/factory.py` | 19 keys |
-| Attention | `create_attention_layer(attention_type, name=None, **kw)` in `attention/factory.py` | 35 |
+| Attention | `create_attention_layer(attention_type, name=None, **kw)` in `attention/factory.py` | 36 |
 | FFN | `create_ffn_layer(ffn_type, name=None, **kw)` in `ffn/factory.py` | 22 |
 | Embedding | `create_embedding_layer(embedding_type, name=None, **kw)` in `embedding/factory.py` | 16 |
 | Activation | `create_activation_layer(activation_type, name=None, **kw)` in `activations/factory.py` | 25 |
@@ -128,7 +128,7 @@ Import shape, re-derived from each `__init__.py`:
 
 | Shape | Packages |
 | --- | --- |
-| Curated re-export with `__all__` (18) | `activations` (38 names), `adapters` (13), `attention` (44), `conv_blocks` (1), `dynamic_chunking` (3), `embedding` (11), `ffn` (27), `heads` (42), `logic` (10), `memory` (25), `mixtures` (9), `moe` (5), `norms` (24), `sequence_pooling` (14), `ssm` (15), `time_series` (32), `tokenizers` (8), `transformers` (34) |
+| Curated re-export with `__all__` (18) | `activations` (38 names), `adapters` (13), `attention` (45), `conv_blocks` (1), `dynamic_chunking` (3), `embedding` (11), `ffn` (27), `heads` (42), `logic` (10), `memory` (25), `mixtures` (9), `moe` (5), `norms` (24), `sequence_pooling` (14), `ssm` (15), `time_series` (32), `tokenizers` (8), `transformers` (34) |
 | Exports nothing (17) | `acc_unet`, `blt`, `complex`, `fusion`, `generative`, `geometric`, `graphs`, `matching`, `physics`, `pooling`, `reasoning`, `regularization`, `signal_processing`, `statistics`, `structured_linear`, `tabular`, `yolo12`, and the top-level modules |
 
 Exported without a registry key: `AxialRoPE2D` (embedding), `MambaResidualBlock` and `Mamba2ResidualBlock` (ssm), `GatedAdapter` (adapters), `PolarWeightNorm` (norms), `AttentionRoutingCapsule`, `CapsuleBlockV2`, `Ideogram4Attention`, `MMDiTJointAttention` (attention). Not exported by their curated package, so import from the module or `factory`: 21 of the 24 embedding classes (14 reachable through the factory, 7 without a key), `embedding.factory.get_embedding_info`, `attention.factory.assemble_attention_config`, and the transformers and moe items in the Key files table.

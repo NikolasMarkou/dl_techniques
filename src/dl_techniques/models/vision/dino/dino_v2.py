@@ -352,14 +352,15 @@ def _own_draws(attention_type: str, *keywords: str) -> Dict[str, str]:
 # add a type that has not been measured the same way, and do not add one of the refused types by giving
 # the block the argument it lacks without measuring it: the refusal rows of
 # tests/test_models/test_dino/test_the_dinov2_block_draws_each_attention_projection_independently.py
-# pin why each one cannot be built or run. See decisions.md.
+# pin why each one cannot be built or run. See decisions.md. ``mean_shift`` joined the same way: its layer
+# clones one initializer per projection, and a block and a backbone measured zero replayed kernel pairs.
 #: The attention types a block accepts, each with the ``attention_args`` its layer is built with.
 #: These are the types whose projections each start from their own random draw: ``multi_head`` and
 #: ``multi_head_cross`` hand one initializer instance to several Dense layers unless told otherwise
 #: and declare the keywords that separate them (``multi_head`` has a fused ``qkv`` and ``proj``,
 #: ``multi_head_cross`` a ``q``, a ``kv`` and a ``proj``); ``gated``, ``linear`` and ``ring`` already
-#: draw independently, and so do ``anchor``, ``perceiver``, ``performer``, ``rpc`` and ``wave_field``
-#: since their layers clone an initializer per projection themselves (D-056). Every other registry
+#: draw independently, and so do ``anchor``, ``mean_shift``, ``perceiver``, ``performer``, ``rpc`` and
+#: ``wave_field`` since their layers clone an initializer per projection themselves (D-056). Every other registry
 #: type is refused by the block: it cannot be built from the block's arguments (it takes no ``dim``,
 #: ``dropout_rate`` or ``num_heads``, or needs ``head_dim``, ``num_kv_heads``, ``kv_latent_dim`` or
 #: ``window_size``) or cannot run on its tokens (``area`` needs a rank-4 map, ``lighthouse`` a token
@@ -376,6 +377,7 @@ SUPPORTED_ATTENTION_TYPES: Dict[str, Optional[Dict[str, str]]] = {
     "performer": None,
     "rpc": None,
     "wave_field": None,
+    "mean_shift": None,
 }
 
 # ---------------------------------------------------------------------
@@ -420,7 +422,7 @@ class DINOv2Block(keras.layers.Layer):
     :type mlp_ratio: float
     :param attention_type: Attention mechanism, one of ``multi_head``,
         ``multi_head_cross``, ``gated``, ``linear``, ``ring``, ``anchor``, ``perceiver``,
-        ``performer``, ``rpc`` and ``wave_field``
+        ``performer``, ``rpc``, ``wave_field`` and ``mean_shift``
         (:data:`SUPPORTED_ATTENTION_TYPES`); any other value, a registry key included,
         raises `ValueError` naming that set. The first two are built with the
         keywords that give each projection its own initializer, so `qkv` and `proj`
@@ -756,7 +758,7 @@ class DINOv2VisionTransformer(keras.Model):
         init_values: LayerScale initialization value.
         attention_type: Type of attention mechanism, one of `SUPPORTED_ATTENTION_TYPES`
             (`multi_head`, `multi_head_cross`, `gated`, `linear`, `ring`, `anchor`, `perceiver`,
-            `performer`, `rpc`, `wave_field`); any other value raises
+            `performer`, `rpc`, `wave_field`, `mean_shift`); any other value raises
             `ValueError` at construction (the first block's constructor raises it). Only `multi_head` has the official
             checkpoint's structure.
         ffn_type: Type of feed-forward network.

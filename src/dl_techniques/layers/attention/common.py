@@ -12,7 +12,7 @@ everything rather than producing a NaN softmax (``rescue_axis=None`` opts
 out). Adoption of these helpers across sibling modules is partial; a module
 that declines one says so in a comment naming what it measured instead.
 
-``validate_head_divisibility`` (14 importers) and ``compute_attention_scale``
+``validate_head_divisibility`` (15 importers) and ``compute_attention_scale``
 (17 importers) are consolidated here. **Those two counts are MECHANICAL.
 Re-derive them before editing either**, from the repository root, with an AST
 walk over ``layers/`` matching ``ast.ImportFrom`` whose last dotted module
@@ -30,14 +30,17 @@ appear in prose (including in this docstring)::
     print(c["validate_head_divisibility"], c["compute_attention_scale"])
     PY
 
-It prints ``14 17``.
+It prints ``15 17``.
 
 ``apply_attention_mask``'s ``rescue_axis`` names the axis the CALLER's softmax
 reduces over — never inferred, for the same reason polarity is never inferred.
-**NINE of the TWELVE adopters** DERIVE the axis from their own
+**NINE of the THIRTEEN adopters** DERIVE the axis from their own
 ``probability_config`` rather than inheriting the ``-1`` default; the other
-three (``beit_attention.py``, ``capsule_routing_attention.py``,
-``ring_attention.py``) each have their own documented reason not to.
+four (``beit_attention.py``, ``capsule_routing_attention.py``,
+``mean_shift_attention.py``, ``ring_attention.py``) each have their own
+documented reason not to: ``capsule_routing`` pins its axis, ``ring`` opts out,
+and ``beit`` and ``mean_shift`` have no ``probability_config`` because their
+softmax axis is fixed by construction.
 
 Flat: no classes, no registry, no Keras serialization. A Keras
 layer imports these the way it imports ``math``.

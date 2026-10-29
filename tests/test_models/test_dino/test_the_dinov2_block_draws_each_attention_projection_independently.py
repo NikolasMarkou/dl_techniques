@@ -7,6 +7,7 @@ of 1,326 in a bare ViT-S). The block now builds its attention with the keywords 
 projections (:data:`SUPPORTED_ATTENTION_TYPES`), and only for the attention types whose layer declares
 them. ``anchor``, ``perceiver``, ``performer``, ``rpc`` and ``wave_field`` replayed too and had no keyword;
 their layers now clone an initializer per projection themselves (D-056), so they joined the set.
+``mean_shift`` clones one per projection from its first version and joined with them.
 Every other type is refused at construction because the block cannot build it from its arguments or run
 it on its tokens, and a fixed layer does not change that.
 
@@ -40,9 +41,10 @@ from dl_techniques.models.vision.dino.dino_v2 import (
 from tests.test_models.initializer_replay_oracle import replayed_pairs
 
 SUPPORTED = ["multi_head", "multi_head_cross", "gated", "linear", "ring",
-             "anchor", "perceiver", "performer", "rpc", "wave_field"]
+             "anchor", "perceiver", "performer", "rpc", "wave_field", "mean_shift"]
 #: The types that draw independently because their LAYER clones an initializer per projection.
-LAYER_CLONES = ["gated", "linear", "ring", "anchor", "perceiver", "performer", "rpc", "wave_field"]
+LAYER_CLONES = ["gated", "linear", "ring", "anchor", "perceiver", "performer", "rpc", "wave_field",
+                "mean_shift"]
 DIM, HEADS, TOKENS = 64, 4, 17
 
 

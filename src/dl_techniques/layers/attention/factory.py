@@ -1,7 +1,7 @@
 """
 Attention layer factory: one registry, one construction path, strict kwargs.
 
-``ATTENTION_REGISTRY`` maps 35 string keys to the callable that builds each
+``ATTENTION_REGISTRY`` maps 36 string keys to the callable that builds each
 attention layer, plus that layer's metadata. ``create_attention_layer`` is
 the single construction path: it looks the key up, rejects any keyword the
 target type does not declare, fills in the registry defaults, and
@@ -97,6 +97,7 @@ Registered types:
     hopfield              HopfieldAttention
     lighthouse            LighthouseAttention
     linear                LinearAttention
+    mean_shift            MeanShiftAttention
     mobile_mqa            MobileMQA
     multi_dconv_head_transposed  MultiDconvHeadTransposedAttention
     multi_head            MultiHeadAttention
@@ -120,7 +121,7 @@ Registered types:
     window_zigzag         create_zigzag_window_attention
 
 This table is generated from ``ATTENTION_REGISTRY`` below, not transcribed.
-``README.md`` carries the same 35 keys with the instance type in its Class
+``README.md`` carries the same 36 keys with the instance type in its Class
 column, so the three window keys read ``WindowAttention`` there and name
 the builder function here. The registry is the source of truth for both.
 """
@@ -148,6 +149,7 @@ from .group_query_attention import GroupedQueryAttention
 from .hopfield_attention import HopfieldAttention
 from .lighthouse_attention import LighthouseAttention
 from .linear_attention import LinearAttention
+from .mean_shift_attention import MeanShiftAttention
 from .mobile_mqa import MobileMQA
 from .multi_dconv_head_transposed_attention import (
     MultiDconvHeadTransposedAttention
@@ -190,6 +192,7 @@ AttentionType = Literal[
     'hopfield',
     'lighthouse',
     'linear',
+    'mean_shift',
     'mobile_mqa',
     'multi_dconv_head_transposed',
     'multi_head',
@@ -1420,6 +1423,51 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         ),
         'complexity': 'O(N * d^2) = O(N) in sequence length (associativity path)',
         'paper': 'Transformers are RNNs (Katharopoulos et al., 2020) + Miyasawa/bias-free denoising'
+    },
+
+    'mean_shift': {
+        'class': MeanShiftAttention,
+        'description': (
+            'Attention whose forward pass is num_steps mean-shift steps on tied '
+            'query = key = value tokens. One projection feeds all three roles, the '
+            'kernel weights are a softmax over key-norm-corrected logits, and the '
+            'bandwidth is learnable and defaults to the scaled dot-product '
+            'temperature, so num_steps=1 with the default bandwidth is tied-QKV '
+            'softmax attention. With blurring=True the keys move together with '
+            'the queries at every step (blurring mean shift), with blurring=False '
+            'only the queries move. Gaussian and von Mises-Fisher kernels. Rank-3 '
+            'inputs only; call accepts attention_mask and return_attention_scores.'
+        ),
+        'required_params': ['dim'],
+        'optional_params': {
+            'num_heads': 8,
+            'head_dim': None,
+            'num_steps': 1,
+            'blurring': True,
+            'kernel': 'gaussian',
+            'bandwidth_mode': 'per_head',
+            'bandwidth_init': None,
+            'min_bandwidth': 1e-2,
+            'max_bandwidth': 1e2,
+            'step_size': 1.0,
+            'learnable_step_size': False,
+            'dropout_rate': 0.0,
+            'use_bias': False,
+            'kernel_initializer': 'glorot_uniform',
+            'kernel_regularizer': None
+        },
+        'use_case': (
+            'Self-attention with a density-seeking update: tokens contract toward the '
+            'modes of the token distribution, which suits clustering-flavoured '
+            'representation learning and attention that should denoise rather than '
+            'copy. Cheaper than multi-head attention in parameters because one '
+            'projection replaces three.'
+        ),
+        'complexity': 'O(num_steps * N^2 * d) per head, one projection instead of three',
+        'paper': (
+            'Mean shift (Cheng, 1995; Comaniciu and Meer, 2002) + '
+            'Hopfield Networks is All You Need (Ramsauer et al., 2021)'
+        )
     },
 
     'ring': {

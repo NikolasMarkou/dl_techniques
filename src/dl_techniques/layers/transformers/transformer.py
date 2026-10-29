@@ -363,6 +363,9 @@ class TransformerLayer(keras.layers.Layer):
         * ``beit`` constructs but raises on sequence length unless
           ``seq_len == Wh*Ww + 1``; that is its own documented constraint, not
           a missing branch.
+        * ``mean_shift`` is registered after that measurement and has its own
+          branch; it takes the padding ``attention_mask`` like ``multi_head``
+          and is therefore usable too.
 
         ``attention_type='anchor'`` runs in standard self-attention mode
         here. ``AnchorAttention``'s hierarchical bottleneck is selected by
@@ -755,6 +758,14 @@ class TransformerLayer(keras.layers.Layer):
                 'name': name
             }
         elif self.attention_type == 'anchor':
+            default_params = {
+                'dim': self.hidden_size,
+                'num_heads': self.num_heads,
+                'dropout_rate': self.attention_dropout_rate,
+                'use_bias': self.use_bias,
+                'name': name
+            }
+        elif self.attention_type == 'mean_shift':
             default_params = {
                 'dim': self.hidden_size,
                 'num_heads': self.num_heads,
