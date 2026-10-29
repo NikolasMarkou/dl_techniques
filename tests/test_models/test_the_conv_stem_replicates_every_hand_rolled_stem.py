@@ -1606,6 +1606,15 @@ VAE_DECODER_CONV_CASES = _vae_site_cases(
     _VaeSite("decoder_conv_1", 3, 1, _VAE_STAGE_FILTERS[1], (16, 16, 16)),
 )
 
+# The first convolution of a residual block: ``{prefix}_conv_1``, kernel 3, stride 1, its norm and
+# activation; a Dropout (when ``dropout_rate > 0``) follows OUTSIDE the stem. Encoder stage 1 block 0
+# runs at 8 x 8 x 16; decoder stage 0 block 0 at 32 x 32 x 8.
+VAE_CONV_1_CASES = _vae_site_cases(
+    "conv-1",
+    _VaeSite("encoder_1_0_conv_1", 3, 1, _VAE_STAGE_FILTERS[1], (8, 8, 16)),
+    _VaeSite("decoder_0_0_conv_1", 3, 1, _VAE_STAGE_FILTERS[0], (32, 32, 8)),
+)
+
 # ---------------------------------------------------------------------
 # CliffordRBFProtoNet patch-embedding stem
 # ---------------------------------------------------------------------
@@ -2319,6 +2328,7 @@ CASES = [
     VAE_LINEAR,
     *VAE_DOWNSAMPLE_CASES,
     *VAE_DECODER_CONV_CASES,
+    *VAE_CONV_1_CASES,
     RBF_CLIFFORD_P1,
     RBF_CLIFFORD_P2,
     RBF_CLIFFORD_P2_NOREG,
@@ -2408,6 +2418,12 @@ BUILT_STEM_ROWS = [
         lambda: _vae_model(True, True, "leaky_relu"),
         (32, 32, 3),
         _vae_site_stem_of("decoder_conv_0"),
+    ),
+    (
+        "vae-residual-conv-1",
+        lambda: _vae_model(True, True, "leaky_relu"),
+        (32, 32, 3),
+        _vae_site_stem_of("encoder_1_0_conv_1"),
     ),
     ("rbf-clifford-protonet", lambda: _rbf_clifford_model(2, True), (16, 16, 3)),
     # The CLIP model reads a dict, so the rows call its image tower through a wrapper layer.
@@ -3325,6 +3341,16 @@ _VAE_WRONG_SETTINGS = [
             ({"kernel_size": 2}, "not compatible", "kernel-2"),
         ],
     ),
+    # The same geometry as the decoder's convolution.
+    *_vae_wrong_setting_rows(
+        "conv-1",
+        VAE_CONV_1_CASES,
+        [
+            ({"strides": 2}, "shape", "stride-2"),
+            ({"padding": "valid"}, "shape", "valid-padding"),
+            ({"kernel_size": 2}, "not compatible", "kernel-2"),
+        ],
+    ),
 ]
 
 
@@ -3344,8 +3370,9 @@ def test_the_guard_the_harness_sees_a_vae_site_with_one_wrong_setting(case, over
     [
         _vae_case_named(VAE_DOWNSAMPLE_CASES, "vae-downsample-leaky-relu-bn-bias"),
         _vae_case_named(VAE_DECODER_CONV_CASES, "vae-decoder-conv-leaky-relu-bn-bias"),
+        _vae_case_named(VAE_CONV_1_CASES, "vae-conv-1-leaky-relu-bn-bias"),
     ],
-    ids=["downsample", "decoder-conv"],
+    ids=["downsample", "decoder-conv", "conv-1"],
 )
 def test_the_guard_the_harness_sees_a_vae_site_norm_applied_twice(case):
     """A second ``norm1`` in the forward changes the output."""

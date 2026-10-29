@@ -169,6 +169,18 @@ _SITE_KINDS = {
             name.replace("decoder_conv_", "decoder_activation_"),
         ],
     ),
+    "residual_conv_1": (
+        lambda depths, steps: [
+            f"{side}_{stage}_{step}_conv_1"
+            for side in ("encoder", "decoder")
+            for stage in range(depths)
+            for step in range(steps)
+        ],
+        lambda name: [
+            name.replace("_conv_1", "_bn_1"),
+            name.replace("_conv_1", "_activation_1"),
+        ],
+    ),
 }
 
 
@@ -213,6 +225,17 @@ class TestVAEConvSites:
         vae = _vae_with(depths, steps_per_depth, activation=name)
         for site in names(depths, steps_per_depth):
             assert vae.get_layer(site).act1.activation is exact, site
+
+    def test_the_dropout_of_a_block_follows_its_first_convolution(self, depths, steps_per_depth):
+        """The Dropout stays a layer of the graph, fed by the first convolution's stem: the stem does
+        not absorb it, and it sits before the second convolution."""
+        vae = _vae_with(depths, steps_per_depth, dropout_rate=0.25)
+        for side in ("encoder", "decoder"):
+            for stage in range(depths):
+                for step in range(steps_per_depth):
+                    prefix = f"{side}_{stage}_{step}"
+                    dropout = vae.get_layer(f"{prefix}_dropout")
+                    assert dropout.input is vae.get_layer(f"{prefix}_conv_1").output, prefix
 
 
 class TestVAEVariants:

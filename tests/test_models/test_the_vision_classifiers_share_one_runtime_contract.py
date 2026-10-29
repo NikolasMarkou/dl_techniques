@@ -1768,7 +1768,8 @@ NAMED_SUBJECTS: Tuple[NamedSubject, ...] = (
     # site's name and its inner convolution `<site>_conv1` must both be there.
     _named_other("vae", "vae", ("encoder_stem", "encoder_stem_conv1",
                                 "encoder_downsample_0", "encoder_downsample_0_conv1",
-                                "decoder_conv_0", "decoder_conv_0_conv1")),
+                                "decoder_conv_0", "decoder_conv_0_conv1",
+                                "encoder_0_0_conv_1", "encoder_0_0_conv_1_conv1")),
 )
 
 

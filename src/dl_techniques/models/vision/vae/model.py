@@ -607,24 +607,8 @@ class VAE(keras.Model):
         """Build one conv-conv residual block with a skip connection."""
         residual = x
 
-        # First convolution
-        x = keras.layers.Conv2D(
-            filters=filters,
-            kernel_size=3,
-            strides=1,
-            padding="same",
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name=f"{prefix}_conv_1",
-        )(x)
-
-        if self.use_batch_norm:
-            x = keras.layers.BatchNormalization(center=self.use_bias, name=f"{prefix}_bn_1")(
-                x
-            )
-        x = keras.layers.Activation(
-            substitute_exact(self.activation), name=f"{prefix}_activation_1")(x)
+        # First convolution, its norm and activation
+        x = self._conv_norm_act(x, filters, 3, 1, f"{prefix}_conv_1")
 
         if self.dropout_rate > 0:
             x = keras.layers.Dropout(self.dropout_rate, name=f"{prefix}_dropout")(x)
