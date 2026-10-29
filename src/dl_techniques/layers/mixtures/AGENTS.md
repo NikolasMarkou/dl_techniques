@@ -10,7 +10,7 @@ Does not live here: the MoE framework (`layers/moe/`), the memory/SOM layers (`l
 
 Known external consumers: `models/vision/rbf_protonet/model.py` imports `create_mixture_layer` from `mixtures.factory`.
 
-Tests: `tests/test_layers/test_mixtures/` (`test_factory.py`, `test_gmm.py`, `test_kmeans.py`, `test_radial_basis_function.py`, `cluster_axis_oracle.py`, `test_the_dead_centroid_keeps_its_distinctiveness.py`, `test_the_dynamic_non_batch_axis_survives_a_concrete_call.py`) and the repo-wide `tests/test_layers/test_factory_registry_drift.py`.
+Tests: `tests/test_layers/test_mixtures/` (`test_factory.py`, `test_gmm.py`, `test_kmeans.py`, `test_radial_basis_function.py`, `cluster_axis_oracle.py`, `mean_shift_oracle.py`, `test_mean_shift_ops.py`, `test_the_dead_centroid_keeps_its_distinctiveness.py`, `test_the_dynamic_non_batch_axis_survives_a_concrete_call.py`) and the repo-wide `tests/test_layers/test_factory_registry_drift.py`.
 
 ## Architecture
 
@@ -49,6 +49,7 @@ RBF flow: `pairwise_squared_distance(inputs, centers)`, times `softplus(gamma_ra
 | `kmeans.py` | `KMeansLayer` | EMA codebook, `trainable=False` centroids and momentum buffer. |
 | `gmm.py` | `GMMLayer` | Trainable means, log-variances, mixing logits, optional `covariance_factors`. |
 | `radial_basis_function.py` | `RBFLayer` | Trainable centers and `gamma_raw`. |
+| `mean_shift_ops.py` | Stateless mean-shift functions | Not exported from `__init__`, not registered; float64 oracle in `tests/test_layers/test_mixtures/mean_shift_oracle.py`. |
 | `factory.py` | `MIXTURE_REGISTRY`, validation, creation | Non-strict on unknown kwargs (warns, drops). |
 
 ## Public interface

@@ -50,6 +50,7 @@ Details per layer:
 - `kmeans.py` - `KMeansLayer`.
 - `gmm.py` - `GMMLayer`.
 - `radial_basis_function.py` - `RBFLayer`.
+- `mean_shift_ops.py` - stateless mean-shift functions (squared distance, kernel logits, one step, density, iteration, median bandwidth); not exported from the package.
 - `factory.py` - `MIXTURE_REGISTRY`, `MixtureType`, `create_mixture_layer`, `create_mixture_from_config`, `get_mixture_info`, `validate_mixture_config`.
 
 ## How to use it
