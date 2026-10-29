@@ -42,6 +42,12 @@ _MIN_BANDWIDTH = 1e-2
 
 _MAX_BANDWIDTH = 1e2
 
+_BANDWIDTH_MARGIN = 1e-3
+
+_LOWEST_BANDWIDTH = _MIN_BANDWIDTH * (1.0 + _BANDWIDTH_MARGIN)
+
+_HIGHEST_BANDWIDTH = _MAX_BANDWIDTH * (1.0 - _BANDWIDTH_MARGIN)
+
 # ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.mixtures.mean_shift")
@@ -91,7 +97,8 @@ class MeanShiftLayer(keras.layers.Layer):
 
     The mask is a keep mask (1 or True keeps a point as a key): a masked point has
     exactly zero weight at every step, in every row. The shifted value of a masked
-    point is still computed and finite; callers ignore it. A batch row with no kept
+    point is still computed and finite; callers ignore it, and pass the same mask to
+    :func:`assign_clusters` so such points get the label -1. A batch row with no kept
     point uses uniform weights, so its output is the plain mean of that row.
     ``num_steps`` is at least 1, as in ``MeanShiftAttention``; use the operations
     in ``mean_shift_ops`` for a zero-step identity. The layer is not a
@@ -100,10 +107,17 @@ class MeanShiftLayer(keras.layers.Layer):
     :param num_steps: Number of mean-shift steps, a positive integer.
     :type num_steps: int
     :param bandwidth: Initial (or fixed) bandwidth ``h``, a positive number in
-        ``[1e-2, 1e2]``.
+        ``[0.01001, 99.9]``: the clip range ``[1e-2, 1e2]`` less a relative margin of
+        1e-3. At an end of the clip range the clip is active from the start and the
+        learnable bandwidth gets exactly zero gradient, so the ends are refused.
+        The bandwidth is the scale at which instances separate: points closer than
+        about ``h`` merge. A blurring output collapses when ``h`` is large against
+        the spacing of the data (every point moves to the global mean, so the
+        output has no structure left and the loss signal vanishes); start near the
+        spacing of the instances, not above it.
     :type bandwidth: float
-    :param learnable_bandwidth: Train ``log h`` (one scalar weight). When False the
-        bandwidth is the constant ``bandwidth``.
+    :param learnable_bandwidth: Train ``log h`` (one scalar weight), initialised at
+        ``bandwidth``. When False the bandwidth is the constant ``bandwidth``.
     :type learnable_bandwidth: bool
     :param blurring: Move the keys together with the points.
     :type blurring: bool
@@ -158,10 +172,12 @@ class MeanShiftLayer(keras.layers.Layer):
         owner = "MeanShiftLayer"
         self.num_steps = positive_int(num_steps, "num_steps", owner)
         self.bandwidth = positive_float(bandwidth, "bandwidth", owner)
-        if not _MIN_BANDWIDTH <= self.bandwidth <= _MAX_BANDWIDTH:
+        if not _LOWEST_BANDWIDTH <= self.bandwidth <= _HIGHEST_BANDWIDTH:
             raise ValueError(
-                f"{owner}: bandwidth must lie in [{_MIN_BANDWIDTH}, {_MAX_BANDWIDTH}], "
-                f"got {bandwidth!r}"
+                f"{owner}: bandwidth must lie in "
+                f"[{_LOWEST_BANDWIDTH:.6g}, {_HIGHEST_BANDWIDTH:.6g}] (the clip range "
+                f"[{_MIN_BANDWIDTH}, {_MAX_BANDWIDTH}] less a relative margin of "
+                f"{_BANDWIDTH_MARGIN}), got {bandwidth!r}"
             )
 
         for name, value in (
@@ -325,14 +341,19 @@ class MeanShiftLayer(keras.layers.Layer):
         return config
 
 
-def assign_clusters(shifted: Any, merge_radius: float) -> np.ndarray:
+def assign_clusters(
+        shifted: Any, merge_radius: float, mask: Optional[Any] = None
+) -> np.ndarray:
     """Label converged points by greedy radius merging (eval-only, NumPy).
 
     Points are visited in index order. A point takes the label of the first existing
     cluster center within ``merge_radius`` (Euclidean distance, ``<=``); if none is
     that close it opens a new cluster and becomes that cluster's center, so the
-    centers are converged points, not means. The result depends on the order of the
-    points and is not a partition into the true modes when clusters overlap.
+    centers are converged points, not means. The labels depend on the order of the
+    points, and the result is not a partition into the true modes when clusters
+    overlap. A point whose ``mask`` entry is false gets the label ``-1`` and neither
+    opens nor joins a cluster, so the unmasked points are labelled exactly as if the
+    masked ones were not there.
 
     This is a readout for evaluation and inspection. It is not differentiable, it
     runs outside any graph, and it must not be called inside a training step or a
@@ -344,11 +365,16 @@ def assign_clusters(shifted: Any, merge_radius: float) -> np.ndarray:
     :param merge_radius: points closer than this to a cluster center join it,
         positive.
     :type merge_radius: float
+    :param mask: ``None`` or a keep mask ``(N,)`` or ``(B, N)`` matching the leading
+        axes of ``shifted`` (bool or 0/1, true keeps), such as the mask given to
+        :class:`MeanShiftLayer`.
+    :type mask: Optional[Any]
     :return: integer labels ``(N,)`` or ``(B, N)``, numbered from 0 per sample in
-        order of first appearance.
+        order of first appearance among the kept points; ``-1`` for a masked point.
     :rtype: numpy.ndarray
-    :raises ValueError: if ``merge_radius`` is not positive and finite, or the
-        points are not rank 2 or 3.
+    :raises ValueError: if ``merge_radius`` is not positive and finite, the points
+        are not rank 2 or 3, or ``mask`` does not have the leading shape of the
+        points.
     """
     radius = positive_float(merge_radius, "merge_radius", "assign_clusters")
     points = np.asarray(shifted, dtype=np.float64)
@@ -357,12 +383,24 @@ def assign_clusters(shifted: Any, merge_radius: float) -> np.ndarray:
             f"assign_clusters: shifted must have shape (N, D) or (B, N, D), got "
             f"rank {points.ndim}: {points.shape}"
         )
+    if mask is None:
+        kept = np.ones(points.shape[:-1], dtype=bool)
+    else:
+        kept = np.asarray(mask) != 0
+        if kept.shape != points.shape[:-1]:
+            raise ValueError(
+                f"assign_clusters: mask must have shape {points.shape[:-1]} (the "
+                f"leading axes of shifted), got {kept.shape}"
+            )
     batched = points if points.ndim == 3 else points[None]
+    batched_kept = kept if points.ndim == 3 else kept[None]
 
-    labels = np.zeros(batched.shape[:2], dtype=np.int64)
+    labels = np.full(batched.shape[:2], -1, dtype=np.int64)
     for row, sample in enumerate(batched):
         centers = []
         for index, point in enumerate(sample):
+            if not batched_kept[row, index]:
+                continue
             if centers:
                 gaps = np.linalg.norm(np.stack(centers) - point, axis=-1)
                 near = np.flatnonzero(gaps <= radius)

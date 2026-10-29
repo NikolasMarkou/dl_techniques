@@ -87,8 +87,8 @@ class TestConstructor:
         ({"bandwidth": float("nan")}, "bandwidth.*nan"),
         ({"bandwidth": True}, "bandwidth.*bool"),
         ({"bandwidth": "wide"}, "bandwidth.*wide"),
-        ({"bandwidth": 1e-3}, r"bandwidth must lie in \[0.01, 100.0\], got 0.001"),
-        ({"bandwidth": 500.0}, r"bandwidth must lie in \[0.01, 100.0\], got 500.0"),
+        ({"bandwidth": 1e-3}, r"bandwidth must lie in \[0.01001, 99.9\].*got 0.001"),
+        ({"bandwidth": 500.0}, r"bandwidth must lie in \[0.01001, 99.9\].*got 500.0"),
         ({"step_size": 0.0}, "step_size.*got 0.0"),
         ({"step_size": 2.0}, "step_size.*got 2.0"),
         ({"step_size": -0.5}, "step_size.*got -0.5"),
@@ -114,9 +114,17 @@ class TestConstructor:
         assert layer.return_affinity is False
         assert layer.projection is None
 
-    def test_the_bandwidth_range_ends_are_accepted(self):
-        assert MeanShiftLayer(bandwidth=1e-2).bandwidth == 1e-2
-        assert MeanShiftLayer(bandwidth=1e2).bandwidth == 1e2
+    @pytest.mark.parametrize("bandwidth", [1e-2, 1e2, 1e-2 * 1.0005, 1e2 * 0.9995, 1e-3, 500.0])
+    def test_a_bandwidth_at_an_end_of_the_clip_range_or_outside_it_raises(self, bandwidth):
+        with pytest.raises(ValueError, match=rf"bandwidth must lie in .*got {bandwidth!r}"):
+            MeanShiftLayer(bandwidth=bandwidth)
+
+    @pytest.mark.parametrize("bandwidth", [0.011, 1e-2 * 1.001, 1.0, 1e2 * 0.999, 99.0])
+    def test_a_bandwidth_inside_the_margin_is_accepted_and_the_clip_is_inactive(self, bandwidth):
+        layer = _make(bandwidth=bandwidth)
+        assert layer.bandwidth == bandwidth
+        effective = float(_np(layer._current_bandwidth("float32")))
+        assert effective == pytest.approx(bandwidth, rel=1e-5)
 
     def test_numpy_numbers_are_stored_as_python_numbers(self):
         layer = MeanShiftLayer(num_steps=np.int64(3), bandwidth=np.float32(2.0))
@@ -207,15 +215,14 @@ class TestShapesAndWeights:
         assert layer.count_params() == DIM * 3 + 1
 
     def test_the_bandwidth_is_clipped_to_the_range(self):
-        x = _points(2, 6, 2)
-        wide = _make(learnable_bandwidth=False, bandwidth=1e2)
-        narrow = _make(learnable_bandwidth=False, bandwidth=1e-2)
         high = _make()
         low = _make()
         high.log_bandwidth.assign(np.float32(50.0))
         low.log_bandwidth.assign(np.float32(-50.0))
-        np.testing.assert_allclose(_np(high(x)), _np(wide(x)), atol=1e-6, rtol=0)
-        np.testing.assert_allclose(_np(low(x)), _np(narrow(x)), atol=1e-6, rtol=0)
+        assert float(_np(high._current_bandwidth("float32"))) == pytest.approx(1e2)
+        assert float(_np(low._current_bandwidth("float32"))) == pytest.approx(1e-2)
+        x = _points(2, 6, 2)
+        assert np.isfinite(_np(high(x))).all() and np.isfinite(_np(low(x))).all()
 
 
 # ---------------------------------------------------------------------
@@ -589,6 +596,16 @@ class TestGradients:
         layer = _make(learnable_bandwidth=False)
         assert layer.trainable_variables == []
 
+    @pytest.mark.parametrize("bandwidth", [0.011, 0.1, 1.0, 10.0, 99.0])
+    def test_the_bandwidth_gradient_is_nonzero_across_the_accepted_range(self, bandwidth):
+        layer = _make(bandwidth=bandwidth, num_steps=3)
+        x = tf.constant(_points(2, 8, 25))
+        coefficients = tf.constant(_points(2, 8, 26))
+        with tf.GradientTape() as tape:
+            loss = tf.reduce_sum(layer(x) * coefficients)
+        grad = float(_np(tape.gradient(loss, layer.log_bandwidth)))
+        assert np.isfinite(grad) and abs(grad) > 1e-6
+
     def test_the_bandwidth_gradient_is_zero_outside_the_clip_range(self):
         layer = _make(num_steps=2)
         layer.log_bandwidth.assign(np.float32(50.0))
@@ -624,12 +641,12 @@ class TestLiveness:
 
     def test_a_small_bandwidth_collapses_nothing(self):
         x = _points(2, 8, 26)
-        layer = _make(bandwidth=1e-2, learnable_bandwidth=False, num_steps=5)
+        layer = _make(bandwidth=1.1e-2, learnable_bandwidth=False, num_steps=5)
         np.testing.assert_allclose(_np(layer(x)), x, atol=1e-5, rtol=0)
 
     def test_a_large_bandwidth_collapses_to_the_mean(self):
         x = _points(2, 8, 27)
-        layer = _make(bandwidth=1e2, learnable_bandwidth=False, num_steps=5, blurring=True)
+        layer = _make(bandwidth=99.0, learnable_bandwidth=False, num_steps=5, blurring=True)
         out = _np(layer(x))
         mean = np.broadcast_to(x.mean(axis=1, keepdims=True), x.shape)
         np.testing.assert_allclose(out, mean, atol=1e-3, rtol=0)
@@ -782,6 +799,59 @@ class TestAssignClusters:
     def test_a_wrong_rank_raises(self, shape):
         with pytest.raises(ValueError, match=r"assign_clusters: shifted.*rank"):
             assign_clusters(np.zeros(shape), 1.0)
+
+    def test_a_masked_outlier_gets_minus_one_and_does_not_open_a_cluster(self):
+        points = np.array([[0.0], [10.0], [0.1], [0.2]], dtype="float32")
+        np.testing.assert_array_equal(assign_clusters(points, 0.5), [0, 1, 0, 0])
+        masked = assign_clusters(points, 0.5, mask=np.array([1, 0, 1, 1]))
+        np.testing.assert_array_equal(masked, [0, -1, 0, 0])
+        assert masked.dtype == np.int64
+
+    @pytest.mark.parametrize("mask_kind", ["bool", "float", "tensor"])
+    def test_every_mask_dtype_is_read_as_a_keep_mask(self, mask_kind):
+        points = np.array([[0.0], [10.0], [0.1], [20.0]], dtype="float32")
+        keep = np.array([True, False, True, False])
+        mask = {"bool": keep, "float": keep.astype("float32"),
+                "tensor": tf.constant(keep.astype("float32"))}[mask_kind]
+        np.testing.assert_array_equal(assign_clusters(points, 0.5, mask=mask), [0, -1, 0, -1])
+
+    @pytest.mark.parametrize("batched", [False, True])
+    def test_the_unmasked_points_are_labelled_as_if_the_masked_ones_were_removed(self, batched):
+        rng = np.random.default_rng(41)
+        samples = 3 if batched else 1
+        points = rng.normal(size=(samples, 30, 2)) * 2.0
+        keep = rng.random(size=(samples, 30)) > 0.4
+        keep[:, 0] = False
+        keep[:, 1] = True
+        if batched:
+            labels = assign_clusters(points, 1.0, mask=keep)
+        else:
+            labels = assign_clusters(points[0], 1.0, mask=keep[0])[None]
+        for row in range(samples):
+            expected = assign_clusters(points[row][keep[row]], 1.0)
+            np.testing.assert_array_equal(labels[row][keep[row]], expected)
+            assert np.all(labels[row][~keep[row]] == -1)
+
+    def test_a_sample_with_no_kept_point_is_all_minus_one(self):
+        batch = np.stack([_TWO_CLUSTERS, _TWO_CLUSTERS])
+        mask = np.array([[1, 1, 1, 1, 1], [0, 0, 0, 0, 0]])
+        labels = assign_clusters(batch, 0.5, mask=mask)
+        np.testing.assert_array_equal(labels[0], [0, 1, 0, 1, 0])
+        np.testing.assert_array_equal(labels[1], [-1] * 5)
+
+    def test_a_mask_of_ones_changes_nothing(self):
+        np.testing.assert_array_equal(
+            assign_clusters(_TWO_CLUSTERS, 0.5, mask=np.ones(5)),
+            assign_clusters(_TWO_CLUSTERS, 0.5),
+        )
+
+    @pytest.mark.parametrize("shape,mask_shape", [
+        ((5, 2), (4,)), ((5, 2), (1, 5)), ((2, 5, 2), (5,)), ((2, 5, 2), (2, 4)),
+        ((2, 5, 2), (2, 5, 1)),
+    ])
+    def test_a_mask_whose_shape_does_not_match_the_leading_axes_raises(self, shape, mask_shape):
+        with pytest.raises(ValueError, match=r"assign_clusters: mask must have shape"):
+            assign_clusters(np.zeros(shape), 1.0, mask=np.ones(mask_shape))
 
     def test_it_reads_two_labels_off_the_shifted_output_of_two_blobs(self):
         rng = np.random.default_rng(31)
