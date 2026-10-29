@@ -397,8 +397,14 @@ class HypersphereSampling(keras.layers.Layer):
         # to keras.random.normal, not a SeedGenerator, matching Sampling's
         # save/load contract (same seed -> same output). See decisions.md.
         # epsilon: [B, D]; eta: [B, 1].
-        epsilon = keras.random.normal(shape=ops.shape(z_mean), seed=self.seed)
-        eta = keras.random.normal(shape=ops.shape(z_log_var), seed=self.seed)
+        # Noise and constants follow the compute dtype (as in `Sampling`), or a
+        # half-precision or float64 policy meets float32 operands below.
+        epsilon = keras.random.normal(
+            shape=ops.shape(z_mean), seed=self.seed, dtype=self.compute_dtype
+        )
+        eta = keras.random.normal(
+            shape=ops.shape(z_log_var), seed=self.seed, dtype=self.compute_dtype
+        )
 
         # Raw direction = encoder mean + Gaussian noise.
         g = z_mean + epsilon  # [B, D]
@@ -409,7 +415,9 @@ class HypersphereSampling(keras.layers.Layer):
         # on the zero row). See decisions.md.
         batch = ops.shape(g)[0]
         dim = ops.shape(g)[-1]
-        e_0 = ops.one_hot(ops.zeros((batch,), dtype="int32"), dim)  # [B, D], 1 at col 0
+        e_0 = ops.one_hot(
+            ops.zeros((batch,), dtype="int32"), dim, dtype=self.compute_dtype
+        )  # [B, D], 1 at col 0
         u = ops.where(norm < eps0, e_0, g / ops.maximum(norm, eps0))  # [B, D]
 
         # DECISION plan_2026-06-04_7ff8ea8b/D-004: shell floored at radius*0.05,
@@ -810,7 +818,8 @@ class VMFSampling(keras.layers.Layer):
         # Unit mean direction mu_hat from z_mean, with the canonical e_0
         # fallback on a degenerate (near-zero) encoder mean (shared idiom).
         norm = ops.sqrt(ops.sum(ops.square(z_mean), axis=-1, keepdims=True))
-        e0 = ops.one_hot(ops.zeros((B,), "int32"), D)                 # [B, D]
+        dtype = self.compute_dtype
+        e0 = ops.one_hot(ops.zeros((B,), "int32"), D, dtype=dtype)    # [B, D]
         mu = ops.where(norm < eps0, e0, z_mean / ops.maximum(norm, eps0))
         kap = ops.maximum(kappa, 1e-6)   # [B, 1], keep > 0; NOT stop_gradient
 
@@ -825,9 +834,11 @@ class VMFSampling(keras.layers.Layer):
         c = kap * x0 + m1 * ops.log(ops.maximum(1.0 - x0 * x0, eps0))  # [B, 1]
 
         # K candidate axial coords w in one batched shot. beta(shape, a, b).
-        epsb = keras.random.beta((B, K), m1 / 2.0, m1 / 2.0, seed=self.seed)  # [B,K]
+        epsb = keras.random.beta(
+            (B, K), m1 / 2.0, m1 / 2.0, seed=self.seed, dtype=dtype
+        )                                                             # [B,K]
         w_cand = (1.0 - (1.0 + b) * epsb) / (1.0 - (1.0 - b) * epsb)  # [B,K]
-        uni = keras.random.uniform((B, K), seed=self.seed)            # [B,K]
+        uni = keras.random.uniform((B, K), seed=self.seed, dtype=dtype)  # [B,K]
         accept = (
             kap * w_cand + m1 * ops.log(ops.maximum(1.0 - x0 * w_cand, eps0)) - c
         ) >= ops.log(uni)                                            # [B,K] bool
@@ -845,9 +856,10 @@ class VMFSampling(keras.layers.Layer):
         # re-evaluating stability. See decisions.md.
 
         # Tangent direction v ~ uniform on S^{D-2}, orthogonal to e_0.
-        t = keras.random.normal((B, D), seed=self.seed)
+        t = keras.random.normal((B, D), seed=self.seed, dtype=dtype)
         zero_first = ops.concatenate(
-            [ops.zeros((B, 1)), ops.ones((B, D - 1))], axis=1
+            [ops.zeros((B, 1), dtype=dtype), ops.ones((B, D - 1), dtype=dtype)],
+            axis=1,
         )
         t = t * zero_first
         v = t / ops.maximum(

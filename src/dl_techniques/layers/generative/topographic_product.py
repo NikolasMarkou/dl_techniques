@@ -219,26 +219,34 @@ def build_window_stack(
     latent_dim: int,
     coherence_window: int,
     temporal_coherence: str,
+    num_capsules: int = 1,
 ) -> np.ndarray:
     """Assemble the ``(2L+1, D, D)`` stack ``G`` with ``G[delta+L] = W R_delta``.
 
+    ``R_delta`` rolls each capsule on its own, so it is block-diagonal with
+    ``num_capsules`` copies of the ``latent_dim // num_capsules`` roll.
+
     :param window: The single-timestep neighbourhood matrix ``W``.
     :type window: np.ndarray
-    :param latent_dim: Latent dimensionality ``D``.
+    :param latent_dim: Latent dimensionality ``D`` over all capsules.
     :type latent_dim: int
     :param coherence_window: Half-width ``L`` of the temporal window.
     :type coherence_window: int
     :param temporal_coherence: One of :data:`TEMPORAL_COHERENCE_TYPES`.
     :type temporal_coherence: str
+    :param num_capsules: Number of capsules the latent width is split into;
+        must divide ``latent_dim``. Defaults to ``1``.
+    :type num_capsules: int
     :return: A ``(2L+1, D, D)`` float64 stack.
     :rtype: np.ndarray
     """
+    capsule_dim = latent_dim // num_capsules
     stack = np.empty(
         (2 * coherence_window + 1, latent_dim, latent_dim), dtype=np.float64
     )
     for index, delta in enumerate(range(-coherence_window, coherence_window + 1)):
         if temporal_coherence == "shifting" and delta != 0:
-            roll = build_roll_matrix_1d(latent_dim, delta)
+            roll = np.kron(np.eye(num_capsules), build_roll_matrix_1d(capsule_dim, delta))
             stack[index] = window @ roll
         else:
             # "none" and "stationary" both use W unpermuted: "none" only ever
@@ -571,6 +579,7 @@ class TopographicProduct(keras.layers.Layer):
             self.latent_dim,
             self.coherence_window,
             self.temporal_coherence,
+            num_capsules=self.num_capsules,
         )
 
         def _window_stack_initializer(shape, dtype=None, stack=stack):

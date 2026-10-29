@@ -1273,3 +1273,45 @@ class TestStrictDroppedKeys:
         )
 
         assert isinstance(layer, keras.layers.Layer)
+
+
+class TestSamplingFollowsTheComputeDtype:
+    """Noise and constants are drawn in the layer's compute dtype.
+
+    ``Sampling`` already does this; ``HypersphereSampling`` and ``VMFSampling``
+    drew float32 noise, which fails or silently upcasts the moment the layer
+    runs under a half-precision or float64 policy.
+    """
+
+    @pytest.mark.parametrize("policy", ["mixed_float16", "float64"])
+    def test_hypersphere_sampling(self, policy):
+        layer = HypersphereSampling(radius=2.0, seed=0, dtype=policy)
+        z_mean = np.random.default_rng(0).normal(size=(4, 6)).astype("float32")
+        z_log_var = np.zeros((4, 1), dtype="float32")
+        out = layer([z_mean, z_log_var])
+        assert out.dtype == layer.compute_dtype
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(out)))
+
+    @pytest.mark.parametrize("policy", ["mixed_float16", "float64"])
+    def test_hypersphere_sampling_on_the_zero_vector_fallback(self, policy):
+        layer = HypersphereSampling(seed=0, dtype=policy)
+        out = layer([np.zeros((2, 5), "float32"), np.zeros((2, 1), "float32")])
+        assert out.dtype == layer.compute_dtype
+
+    @pytest.mark.parametrize("policy", ["mixed_float16", "float64"])
+    def test_vmf_sampling(self, policy):
+        layer = VMFSampling(seed=0, dtype=policy)
+        z_mean = np.random.default_rng(0).normal(size=(4, 6)).astype("float32")
+        kappa = np.full((4, 1), 5.0, dtype="float32")
+        out = layer([z_mean, kappa])
+        assert out.dtype == layer.compute_dtype
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(out)))
+
+    @pytest.mark.parametrize("policy", ["mixed_float16", "float64"])
+    def test_vmf_samples_stay_on_the_unit_sphere(self, policy):
+        layer = VMFSampling(seed=0, dtype=policy)
+        z_mean = np.random.default_rng(1).normal(size=(8, 6)).astype("float32")
+        kappa = np.full((8, 1), 10.0, dtype="float32")
+        out = keras.ops.convert_to_numpy(layer([z_mean, kappa])).astype("float64")
+        tolerance = 5e-2 if policy == "mixed_float16" else 1e-6
+        np.testing.assert_allclose(np.linalg.norm(out, axis=-1), 1.0, atol=tolerance)

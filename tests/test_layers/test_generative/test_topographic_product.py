@@ -88,7 +88,11 @@ def _oracle(layer, z, u):
     """NumPy transcription of the layer's own formula, from its config."""
     window = layer._build_window_matrix()
     stack = build_window_stack(
-        window, layer.latent_dim, layer.coherence_window, layer.temporal_coherence
+        window,
+        layer.latent_dim,
+        layer.coherence_window,
+        layer.temporal_coherence,
+        num_capsules=layer.num_capsules,
     )
     energy = windowed_stack_energy(stack, np.asarray(u, dtype=np.float64) ** 2)
     numerator = np.sqrt(2.0) * (
@@ -269,6 +273,36 @@ class TestWindowMatrixClosedForms:
         values = np.arange(4.0)
         np.testing.assert_array_equal(roll @ values, [3.0, 0.0, 1.0, 2.0])
 
+    def test_the_shifting_roll_stays_inside_each_capsule(self):
+        """With C > 1 the roll wraps within a capsule, not over the full width.
+
+        The layer docstring says every capsule is "rolled within its capsule",
+        so the delta=+1 slice is ``blockdiag(W_c R_c, ..., W_c R_c)``. Rolling
+        over the whole latent width instead moves the last unit of capsule 0
+        into the first slot of capsule 1.
+        """
+        layer = TopographicProduct(
+            num_capsules=3, capsule_dim=4, coherence_window=1,
+            neighborhood_size=2, temporal_coherence="shifting",
+        )
+        layer.build([(None, 5, 12), (None, 5, 12)])
+        stack = keras.ops.convert_to_numpy(layer.window_stack)
+
+        block = build_window_matrix_1d(4, 2) @ build_roll_matrix_1d(4, 1)
+        expected = np.kron(np.eye(3), block)
+        np.testing.assert_allclose(stack[2], expected, atol=0.0, rtol=0)
+        # No weight leaves its capsule in any slice of the stack.
+        capsule_of = np.repeat(np.arange(3), 4)
+        off_block = capsule_of[:, None] != capsule_of[None, :]
+        assert not stack[:, off_block].any()
+
+    def test_the_stack_helper_defaults_to_one_capsule(self):
+        window = build_window_matrix_1d(4, 2)
+        np.testing.assert_array_equal(
+            build_window_stack(window, 4, 1, "shifting"),
+            build_window_stack(window, 4, 1, "shifting", num_capsules=1),
+        )
+
     def test_roll_matrix_is_a_permutation(self):
         roll = build_roll_matrix_1d(5, 3)
         np.testing.assert_array_equal(np.sort(roll.sum(axis=0)), np.ones(5))
@@ -339,8 +373,8 @@ class TestWindowMatrixClosedForms:
         orders above the float32 noise floor.
         """
         window = np.kron(np.ones((3, 3)), build_window_matrix_1d(4, 2))
-        shifting = build_window_stack(window, LATENT, 2, "shifting")
-        stationary = build_window_stack(window, LATENT, 2, "stationary")
+        shifting = build_window_stack(window, LATENT, 2, "shifting", num_capsules=C)
+        stationary = build_window_stack(window, LATENT, 2, "stationary", num_capsules=C)
         difference = float(np.abs(shifting - stationary).sum())
         assert difference > 1.0, f"the two coherence modes agree to {difference}"
 
@@ -612,7 +646,11 @@ class TestTopographicProductStatelessBuild:
 
         stack = keras.ops.convert_to_numpy(layer.window_stack)
         expected = build_window_stack(
-            layer._build_window_matrix(), layer.latent_dim, 2, "shifting"
+            layer._build_window_matrix(),
+            layer.latent_dim,
+            2,
+            "shifting",
+            num_capsules=layer.num_capsules,
         )
         # atol=0.0: the initializer either ran or it did not.
         np.testing.assert_allclose(stack, expected, atol=0.0, rtol=0)
@@ -659,7 +697,11 @@ class TestTopographicProductStatelessBuild:
 
         stack = keras.ops.convert_to_numpy(layer.window_stack)
         expected = build_window_stack(
-            layer._build_window_matrix(), layer.latent_dim, 2, "shifting"
+            layer._build_window_matrix(),
+            layer.latent_dim,
+            2,
+            "shifting",
+            num_capsules=layer.num_capsules,
         )
         with pytest.raises(AssertionError):
             np.testing.assert_allclose(stack, expected, atol=0.0, rtol=0)
@@ -674,7 +716,11 @@ class TestTopographicProductStatelessBuild:
         layer.build(((None, S, LATENT), (None, S, LATENT)))
         stack = keras.ops.convert_to_numpy(layer.window_stack)
         expected = build_window_stack(
-            layer._build_window_matrix(), layer.latent_dim, 2, "shifting"
+            layer._build_window_matrix(),
+            layer.latent_dim,
+            2,
+            "shifting",
+            num_capsules=layer.num_capsules,
         )
         np.testing.assert_allclose(stack, expected, atol=0.0, rtol=0)
 

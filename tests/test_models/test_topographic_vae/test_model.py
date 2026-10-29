@@ -1093,11 +1093,12 @@ class TestLogLikelihood:
 
         The epoch count is not decoration and not an optimism knob -- it is the
         point at which the reconstruction begins to correlate with the data at
-        all. MEASURED on this reference instance: correlation 0.00 after 2 epochs,
-        0.05 after 30. Below that the decoder emits a near-constant field and the
+        all. MEASURED on this reference instance (the roll stays inside each
+        capsule): correlation 0.00 after 2 epochs, -0.002 after 30, 0.04 after
+        60, 0.26 after 100. Below that the decoder emits a near-constant field and the
         two likelihoods differ by the CONSTANT's distance to each target, so the
         comparison reports on the initialization and not on the model -- which is
-        why 2 epochs produced the wrong sign here and 30 does not.
+        why 2 epochs produced the wrong sign here and 100 does not.
         """
         model = _build()
         model.compile(
@@ -1105,7 +1106,7 @@ class TestLogLikelihood:
             loss=TopographicVAELoss(kl_loss_weight=0.01),
         )
         sample = _sample(batch=2)
-        model.fit(sample, sample, epochs=30, batch_size=2, verbose=0)
+        model.fit(sample, sample, epochs=100, batch_size=2, verbose=0)
 
         reconstruction = keras.ops.convert_to_numpy(
             model(sample, training=False)["reconstruction"]
@@ -1317,6 +1318,7 @@ class TestKnobSensitivity:
                 LATENT,
                 2,
                 "shifting",
+                num_capsules=CAPSULES,
             )
             np.testing.assert_allclose(stack, expected, atol=0.0, rtol=0)
 
