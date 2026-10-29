@@ -30,6 +30,7 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.embedding.axial_rope_2d import AxialRoPE2D
+from dl_techniques.layers.ffn.factory import create_ffn_layer
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
@@ -377,7 +378,7 @@ class SAM2MemoryAttentionLayer(keras.layers.Layer):
            │   memory ─────────────────────────────────────────────── = v ─┘
            └──────────────────────── + ◄──── dropout2 ◄──────────────────────┘
            │
-           ├─► norm3 ─► Dense(dim_feedforward) ─► act ─► dropout ─► Dense(d_model)
+           ├─► norm3 ─► ffn: fc1(dim_feedforward) ─► act ─► dropout ─► fc2(d_model)
            └──────────────────────── + ◄──── dropout3 ◄──────────────────────┘
 
     Note that the cross-attention VALUES never receive positional encoding under
@@ -471,10 +472,6 @@ class SAM2MemoryAttentionLayer(keras.layers.Layer):
         self.kv_in_dim = int(kv_in_dim)
         self.layer_norm_epsilon = float(layer_norm_epsilon)
 
-        # Resolved once so a test can read the SAME callable the FFN uses,
-        # rather than re-deriving it from the config string.
-        self.activation_fn = keras.activations.get(self.activation)
-
         # Sub-layers -- created unconditionally, built explicitly in build().
         self.self_attn = _SAM2RoPEAttention(
             embedding_dim=self.d_model,
@@ -508,9 +505,18 @@ class SAM2MemoryAttentionLayer(keras.layers.Layer):
             epsilon=self.layer_norm_epsilon, name="norm2")
         self.norm3 = keras.layers.LayerNormalization(
             epsilon=self.layer_norm_epsilon, name="norm3")
-        self.linear1 = keras.layers.Dense(self.dim_feedforward, name="linear1")
-        self.linear2 = keras.layers.Dense(self.d_model, name="linear2")
-        self.ffn_dropout = keras.layers.Dropout(self.dropout_rate, name="ffn_dropout")
+        # fc1 -> activation -> dropout -> fc2. The residual dropout after the
+        # FFN is `dropout3`, a separate layer, so the two never stack.
+        self.ffn = create_ffn_layer(
+            "mlp",
+            hidden_dim=self.dim_feedforward,
+            output_dim=self.d_model,
+            activation=self.activation,
+            dropout_rate=self.dropout_rate,
+            use_bias=True,
+            kernel_initializer="glorot_uniform",
+            name="ffn",
+        )
         self.dropout1 = keras.layers.Dropout(self.dropout_rate, name="dropout1")
         self.dropout2 = keras.layers.Dropout(self.dropout_rate, name="dropout2")
         self.dropout3 = keras.layers.Dropout(self.dropout_rate, name="dropout3")
@@ -565,10 +571,7 @@ class SAM2MemoryAttentionLayer(keras.layers.Layer):
         self.dropout2.build(target_shape)
 
         self.norm3.build(target_shape)
-        self.linear1.build(target_shape)
-        hidden_shape = (*target_shape[:-1], self.dim_feedforward)
-        self.ffn_dropout.build(hidden_shape)
-        self.linear2.build(hidden_shape)
+        self.ffn.build(target_shape)
         self.dropout3.build(target_shape)
 
         super().build(target_shape)
@@ -633,9 +636,8 @@ class SAM2MemoryAttentionLayer(keras.layers.Layer):
 
         # --- feed-forward -----------------------------------------------------
         normed = self.norm3(target)
-        hidden = self.ffn_dropout(
-            self.activation_fn(self.linear1(normed)), training=training)
-        target = target + self.dropout3(self.linear2(hidden), training=training)
+        target = target + self.dropout3(
+            self.ffn(normed, training=training), training=training)
         return target
 
     def compute_output_shape(

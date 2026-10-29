@@ -573,8 +573,8 @@ def memory_attention_closed_form(d_model: int, kv_dim: int, layers: int,
     per_layer = (
         attention(d_model)                          # self-attention
         + attention(kv_dim)                         # cross-attention
-        + d_model * feedforward + feedforward       # linear1
-        + feedforward * d_model + d_model           # linear2
+        + d_model * feedforward + feedforward       # ffn.fc1
+        + feedforward * d_model + d_model           # ffn.fc2
         + 3 * 2 * d_model                           # norm1..norm3
     )
     return layers * per_layer + 2 * d_model         # + the final norm

@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
+from dl_techniques.layers.ffn.factory import create_ffn_layer
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
@@ -608,7 +609,7 @@ class HieraBlock(keras.layers.Layer):
         x ──► norm1 ──┬─► proj ─► pool ─────────────────► shortcut
                       └─► window_partition ─► attn ─► window_unpartition ─┐
                                                     shortcut + drop_path ◄┘
-              └─► norm2 ─► Dense ─► act ─► Dense ─► drop_path ─► + ──► out
+              └─► norm2 ─► mlp (fc1 ─► act ─► fc2) ─► drop_path ─► + ──► out
 
     The window size used to REASSEMBLE the grid after attention is the block's
     window size divided by ``q_stride[0]``, and the padded extent is recomputed
@@ -691,7 +692,6 @@ class HieraBlock(keras.layers.Layer):
 
         # Derived, non-config.
         self.hidden_dim = int(self.dim_out * self.mlp_ratio)
-        self.activation_fn = keras.activations.get(self.activation)
 
         # Sub-layers -- created unconditionally, built explicitly in build().
         self.norm1 = keras.layers.LayerNormalization(
@@ -705,8 +705,16 @@ class HieraBlock(keras.layers.Layer):
         )
         self.norm2 = keras.layers.LayerNormalization(
             epsilon=self.layer_norm_epsilon, name="norm2")
-        self.mlp_fc1 = keras.layers.Dense(self.hidden_dim, name="mlp_fc1")
-        self.mlp_fc2 = keras.layers.Dense(self.dim_out, name="mlp_fc2")
+        self.mlp = create_ffn_layer(
+            "mlp",
+            hidden_dim=self.hidden_dim,
+            output_dim=self.dim_out,
+            activation=self.activation,
+            dropout_rate=0.0,
+            use_bias=True,
+            kernel_initializer="glorot_uniform",
+            name="mlp",
+        )
         # DECISION plan-2026-08-04T044628-4c240b4c/D-012: proj is created
         # unconditionally (per the authoring rule) but built only when used, so an unused instance costs zero weights and the parameter count still matches upstream. See decisions.md.
         self.proj = keras.layers.Dense(self.dim_out, name="proj")
@@ -755,8 +763,7 @@ class HieraBlock(keras.layers.Layer):
 
         out_shape = self.compute_output_shape(input_shape)
         self.norm2.build(out_shape)
-        self.mlp_fc1.build(out_shape)
-        self.mlp_fc2.build((*out_shape[:-1], self.hidden_dim))
+        self.mlp.build(out_shape)
         self.drop_path_layer.build(out_shape)
 
         super().build(input_shape)
@@ -810,8 +817,7 @@ class HieraBlock(keras.layers.Layer):
                 x, window_size, pad_hw, (out_h, out_w), self.dim_out)
 
         x = shortcut + self.drop_path_layer(x, training=training)
-        hidden = self.activation_fn(self.mlp_fc1(self.norm2(x)))
-        x = x + self.drop_path_layer(self.mlp_fc2(hidden), training=training)
+        x = x + self.drop_path_layer(self.mlp(self.norm2(x)), training=training)
         return x
 
     def compute_output_shape(

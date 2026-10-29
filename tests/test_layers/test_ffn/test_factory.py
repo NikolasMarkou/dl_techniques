@@ -1988,6 +1988,21 @@ def _b_models_sam3_vitdet():
     return b.mlp
 
 
+def _b_models_sam2_hiera():
+    from dl_techniques.models.vision_language.sam.sam2.hiera import HieraBlock
+    # `mlp` is created in `__init__`, not `build`, so no build call is needed.
+    return HieraBlock(dim=16, dim_out=16, num_heads=2).mlp
+
+
+def _b_models_sam2_memory_attention():
+    from dl_techniques.models.vision_language.sam.sam2.memory_attention import (
+        SAM2MemoryAttentionLayer,
+    )
+    # `ffn` is created in `__init__`, not `build`, so no build call is needed.
+    return SAM2MemoryAttentionLayer(
+        d_model=16, dim_feedforward=32, feat_sizes=(2, 2), kv_in_dim=8).ffn
+
+
 def _b_models_prism():
     from dl_techniques.models.time_series.prism.model import PRISMModel
     # context_len must clear PRISMModel's band-length floor: at the default
@@ -2084,6 +2099,9 @@ _FFN_CONSTRUCTION_SITE_BUILDERS = {
     "models/vision_language/sam/sam1/transformer.py": _b_models_sam_transformer,
     "models/vision_language/sam/sam3/decoder.py": _b_models_sam3_decoder,
     "models/vision_language/sam/sam3/vitdet.py": _b_models_sam3_vitdet,
+    "models/vision_language/sam/sam2/hiera.py": _b_models_sam2_hiera,
+    "models/vision_language/sam/sam2/memory_attention.py":
+        _b_models_sam2_memory_attention,
     "models/time_series/prism/model.py": _b_models_prism,
     "models/language/tree_transformer/components.py": _b_models_tree_transformer,
     "models/language/hnet/components.py": _b_models_hnet_components,

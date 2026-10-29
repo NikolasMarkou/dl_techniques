@@ -116,8 +116,11 @@ def test_the_natural_ranking_is_followed_row_by_row():
 
     Seeded: the rows' natural ranking is a property of the initial weights,
     and an unseeded build takes whatever the earlier tests left in the RNG.
+    Seed 8, not 7: the memory-attention FFN became an ``MLPBlock``, which draws
+    its initializers in a different order, so seed 7 now gives eight rows that
+    all rank candidate 0 first (measured over seeds 7-12: 8 and 10-12 disagree).
     """
-    keras.utils.set_random_seed(7)
+    keras.utils.set_random_seed(8)
     model = tiny_model()
     pin_object_score(model, 5.0)
     image, points = images(8, seed=3), _click(8, seed=3)

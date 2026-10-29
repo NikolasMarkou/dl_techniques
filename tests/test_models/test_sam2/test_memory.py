@@ -492,8 +492,8 @@ def _capture_ffn_hidden(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Capture the FFN pre-activation and the tensor the FFN actually consumes.
 
-    The hidden tensor is read as the INPUT to ``linear2`` rather than by
-    re-applying ``layer.activation_fn`` in the test: re-applying the layer's own
+    The hidden tensor is read as the INPUT to ``ffn.fc2`` rather than by
+    re-applying ``layer.ffn.activation_fn`` in the test: re-applying the layer's own
     activation would go green even if ``call()`` used a hardcoded different one.
 
     :param stack: A built stack.
@@ -504,8 +504,8 @@ def _capture_ffn_hidden(
     :rtype: Tuple[np.ndarray, np.ndarray]
     """
     block = stack.layers[0]
-    pre_spy = _CallSpy(block.linear1)
-    hidden_spy = _CallSpy(block.linear2)
+    pre_spy = _CallSpy(block.ffn.fc1)
+    hidden_spy = _CallSpy(block.ffn.fc2)
     try:
         _forward(stack, data)
     finally:
@@ -866,7 +866,7 @@ class TestDeadComponentPartition:
             self) -> None:
         """The measured asymmetry: one half of G2.2 survives a dead FFN.
 
-        With ``linear1`` zeroed, every pre-activation is exactly 0.0, so relu
+        With ``ffn.fc1`` zeroed, every pre-activation is exactly 0.0, so relu
         and gelu both emit all-zero hidden tensors. The relu zero-count
         assertion therefore CANNOT distinguish them (its precondition -- that
         negatives exist -- is what dies), while the relu-vs-gelu output
@@ -877,9 +877,9 @@ class TestDeadComponentPartition:
         gelu_stack = _build_stack(activation="gelu")
 
         dead_relu = [
-            v for block in relu_stack.layers for v in block.linear1.weights]
+            v for block in relu_stack.layers for v in block.ffn.fc1.weights]
         dead_gelu = [
-            v for block in gelu_stack.layers for v in block.linear1.weights]
+            v for block in gelu_stack.layers for v in block.ffn.fc1.weights]
 
         with zeroed_variables(dead_relu):
             pre, hidden = _capture_ffn_hidden(relu_stack, data)
