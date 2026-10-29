@@ -81,7 +81,7 @@ Subpackages. F = has `factory.py`. Counts were measured with the registry object
 | `matching/` | | LightGlue: `LearnedFourierRotaryEncoding`, `LightGlueSelfBlock`, `LightGlueCrossBlock`, `MatchAssignment`, `MatchTokenConfidence` | Consumed by `models/vision/keypoints/lightglue/` |
 | `physics/` | | `LagrangianNeuralNetworkLayer`, `ApproximatedLNNLayer` | Exact one is TensorFlow only |
 | `tokenizers/` | | `BPETokenizer`, `TokenEmbedding`, `ASCIICharTokenizer`, `ASCIICharPreprocessor` | Curated (8) |
-| `fusion/` | | `MultiModalFusion` in `multimodal_fusion.py` | `__init__` is docstring only and binds no name |
+| `fusion/` | | `MultiModalFusion` in `multimodal_fusion.py`, `HierarchicalScaleFusion` in `hierarchical_fusion.py` | `__init__` is docstring only and binds no name. `HierarchicalScaleFusion(filters, num_levels, ...)` folds a fine-to-coarse pyramid top-down into one finest-level map; it is built from `ConvBlock` and `PixelShuffle2D`, has no factory and no consumer yet |
 
 Top-level modules (14). Each holds one architecture or utility. Registry package string is `dl_techniques.layers.<module>`.
 

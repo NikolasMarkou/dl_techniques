@@ -1,8 +1,11 @@
 """
-Multimodal fusion layers.
+Fusion layers.
 
-This package holds one public class, ``MultiModalFusion``, defined in
-``multimodal_fusion.py``. It takes one tensor per modality -- vision, text,
+This package holds two public classes. ``HierarchicalScaleFusion``, defined in
+``hierarchical_fusion.py``, folds a fine-to-coarse feature pyramid into one
+finest-resolution map; it is built from ``ConvBlock`` and ``PixelShuffle2D``,
+has no factory and no consumer yet. The rest of this docstring describes the
+other class, ``MultiModalFusion``, defined in ``multimodal_fusion.py``. It takes one tensor per modality -- vision, text,
 audio and so on -- and combines them into a fused representation. A
 ``fusion_strategy`` key selects the path. The strategy decides which
 sub-layers get built and what shape comes back.
@@ -14,6 +17,9 @@ so ``from dl_techniques.layers.fusion import MultiModalFusion`` raises
     from dl_techniques.layers.fusion.multimodal_fusion import (
         MultiModalFusion,
         FusionStrategy,
+    )
+    from dl_techniques.layers.fusion.hierarchical_fusion import (
+        HierarchicalScaleFusion,
     )
 
 The one consumer in this repo already does that:

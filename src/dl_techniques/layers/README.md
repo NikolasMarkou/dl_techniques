@@ -72,7 +72,7 @@ Factory column: Y means the package has a `factory.py`.
 | `matching/` | | LightGlue keypoint-matching layers |
 | `physics/` | | Lagrangian neural network layers (exact and approximate) |
 | `tokenizers/` | | BPE tokenizer, ASCII character tokenizer, token embedding |
-| `fusion/` | | `MultiModalFusion`: combines one tensor per modality with one of 8 strategies |
+| `fusion/` | | `MultiModalFusion`: combines one tensor per modality with one of 8 strategies. `HierarchicalScaleFusion`: folds a fine-to-coarse feature pyramid into one finest-level map |
 
 ## Top-level modules
 
@@ -120,7 +120,7 @@ To test layers, scope pytest to the package you changed, for example `.venv/bin/
 - Several class names exist in more than one package, so import by full path. `MLPBlock` is the FFN one (`ffn/mlp.py`), while `tabular/` calls its block `TabMMLPBlock`. `RepMixerBlock` in `conv_blocks/` is not the FastViT one, which lives in `models/vision/fastvit/components.py` as `FastVitRepMixerBlock`.
 - Normalization epsilon differs by route. The norm factory defaults `epsilon` to `1e-6`, while Keras `LayerNormalization` and `BatchNormalization` default to `1e-3`. Swapping one for the other changes results without any error.
 - `complex/` layers need the TensorFlow backend, because `keras.ops` in Keras 3.8 has no complex constructor.
-- `fusion/` exports nothing. Use `from dl_techniques.layers.fusion.multimodal_fusion import MultiModalFusion`.
+- `fusion/` exports nothing. Use `from dl_techniques.layers.fusion.multimodal_fusion import MultiModalFusion`. The pyramid layer is `from dl_techniques.layers.fusion.hierarchical_fusion import HierarchicalScaleFusion`.
 - `physics/` has an exact Lagrangian layer that works only on TensorFlow and an approximate one that works on any backend.
 - `positional_sine_2d` in `embedding/` takes channels-last input and returns channels-first output.
 - Docstrings use Sphinx/reST (`:param:`, `:type:`, `:raises:`) in most modules. Match the file you edit.
