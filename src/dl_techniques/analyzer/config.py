@@ -8,7 +8,7 @@ import matplotlib
 import seaborn as sns
 import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
-from typing import Any, Dict, Literal, Optional, List, Tuple
+from typing import Any, Dict, Literal, Optional, List, Sequence, Tuple
 
 # ---------------------------------------------------------------------
 
@@ -22,6 +22,8 @@ class AnalysisConfig:
     analyze_information_flow: bool = True
     analyze_training_dynamics: bool = True
     analyze_spectral: bool = True
+    # OFF by default: the Fisher pass runs one eager forward and backward per sample.
+    analyze_fisher: bool = False
 
     # Sampling parameters
     n_samples: int = 1000
@@ -67,6 +69,50 @@ class AnalysisConfig:
     # NEW FLAG: Controls generation of individual layer plot files
     spectral_per_layer_diagnostics: bool = False
     spectral_bootstraps: int = 50
+
+    # Fisher analysis options (arXiv:2609.36262). Every field below is read by
+    # `FisherConfig.from_analysis_config`; a meta-test pins that none goes unread, because
+    # an unread knob advertises behaviour the code does not have (F-028 / D-029).
+    # `None` infers: sequence model iff integer (B, L) input and (B, L, V) output.
+    fisher_force_sequence: Optional[bool] = None
+    # N_F: inputs the Fisher estimate averages over. 100 is the diagnostic default; the
+    # paper's publication runs use 800.
+    fisher_n_samples: int = 100
+    # G: responses per prompt in the gradient arm (>= 2 for the group-centered signals).
+    fisher_n_responses: int = 1
+    # N_g: prompts of the gradient arm, disjoint from the Fisher prompts.
+    fisher_n_gradient_prompts: int = 100
+    fisher_compute_gradients: bool = False
+    # "rl" | "sft" | "opd_pg" | "opd_full" | "none". The callables each needs travel in a
+    # `FisherSignal` passed to `ModelAnalyzer`, never here: `save_results` serializes every
+    # public field of this class, and a callable would lose the whole artifact.
+    fisher_signal_type: str = "rl"
+    fisher_token_level: bool = True
+    fisher_max_tokens: int = 512
+    fisher_n_positions_per_response: int = 8
+    fisher_n_token_pairs_per_position: int = 8
+    # Sampling microbatch only; scoring is always one sample per backward pass.
+    fisher_batch_size: int = 8
+    fisher_accumulate_dtype: str = "float32"
+    fisher_sampling_temperature: float = 1.0
+    # sigma^2 of a Gaussian likelihood. Setting it selects the regression output kind;
+    # the analyzer refuses to guess a variance.
+    fisher_regression_variance: Optional[float] = None
+    # "response" | "response_plus_prompt" (sequence models).
+    fisher_score_scope: str = "response"
+    # The q grid (percent) for recall and retention. None keeps (0.05, 0.1, 0.5, 1, 5).
+    fisher_selection_percentages: Optional[Tuple[float, ...]] = None
+    # Coordinates with Fisher at or below this are "Fisher-dead": counted, and excluded
+    # from recall and retention.
+    fisher_zero_threshold: float = 1e-12
+    fisher_sft_chi2_cap: float = 1e4
+    fisher_assert_no_weight_drift: bool = True
+    # Ordered model names: the first is the initial policy, the rest are later checkpoints
+    # of the SAME architecture. None skips the persistence arm.
+    fisher_persistence_indices: Optional[Sequence[str]] = None
+    # When True, `save_results` also emits the per-parameter Fisher table and the
+    # parameter-sized token-level arrays. Kept False: one row per parameter.
+    json_include_fisher_raw: bool = False
 
     # Visualization settings
     plot_style: str = 'publication'

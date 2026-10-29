@@ -132,6 +132,23 @@ class AnalysisResults:
     spectral_esds: Dict[str, Dict[int, np.ndarray]] = field(default_factory=dict)
     spectral_rand_esds: Dict[str, Dict[int, np.ndarray]] = field(default_factory=dict)
 
+    # Fisher analysis (arXiv:2609.36262). `fisher_outputs` is the source of truth (flat
+    # arrays in the canonical coordinate order); `fisher_analysis` is the per-parameter
+    # table derived from it, so it holds a second copy of the arrays.
+    fisher_outputs: Dict[str, Any] = field(default_factory=dict)
+    # Columns: model_name, variable_path, flat_index, fisher_value, standard_error,
+    # gradient_value (NaN when the gradient arm did not run), gradient_rank (1 = largest |g|).
+    fisher_analysis: Optional[pd.DataFrame] = None
+    # Run-level facts: the sample plan and its fingerprint, the shared batch size, models.
+    fisher_summary: Dict[str, Any] = field(default_factory=dict)
+    fisher_summary_per_model: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # model -> token-level arm outputs (group matrices, ratios, parameter-sized arrays).
+    fisher_token_level: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # model -> q -> Recall(q). The random baseline is q.
+    fisher_gradient_recall: Dict[str, Dict[float, float]] = field(default_factory=dict)
+    # Only when the persistence arm ran.
+    fisher_persistence: Optional[pd.DataFrame] = None
+
     # Metadata
     analysis_timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     config: Optional['AnalysisConfig'] = None  # Forward reference
