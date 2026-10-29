@@ -511,8 +511,11 @@ class TestPrecision:
         assert np.isfinite(got).all() and np.isfinite(_np(affinity).astype("float32")).all()
         scale = np.abs(_np(controls[0])).max()
         error = np.abs(got - _np(controls[0])).max()
-        # Measured max error: 1.3e-3 (gaussian) and 3.0e-4 (vmf) on scales 2.0 and 0.85;
-        # the bound is 0.5 percent of the output scale (float16 input and output rounding).
+        # Measured max error without the projection (reproducible, two runs): 1.3e-3
+        # (gaussian) and 2.3e-4 (vmf), on output scales 2.01 and 0.85. With the projection
+        # the kernel is drawn unseeded: 0.5e-3 to 1.7e-3 (gaussian, scales 0.7 to 2.9) and
+        # 2.3e-4 to 5.5e-4 (vmf, scales 0.74 to 1.0) over 10 draws. The bound is 0.5 percent
+        # of the output scale (float16 input and output rounding).
         assert error <= 5e-3 * scale, f"max error {error:.3e} on scale {scale:.3f}"
         np.testing.assert_allclose(
             _np(affinity).astype("float32").sum(axis=-1), 1.0, atol=5e-3
