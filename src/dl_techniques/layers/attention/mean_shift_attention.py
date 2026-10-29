@@ -109,7 +109,7 @@ class MeanShiftAttention(keras.layers.Layer):
         │  logits = kernel_logits(z, keys, h)   [B, H, N, Nk]   │
         │          │       h: global / per_head / per_token     │
         │          ▼                                            │
-        │  attention mask (1 = keep), float32 softmax, dropout  │
+        │  shift to kept max, mask (1 = keep), softmax, dropout   │
         │          │                                            │
         │          ▼                                            │
         │  z = (1 - eta) z + eta * weights @ keys               │
@@ -127,14 +127,17 @@ class MeanShiftAttention(keras.layers.Layer):
 
     The mask is a keep mask (1 or True keeps a key): rank 2 ``(B, Nk)``, rank 3
     ``(B, Nq, Nk)`` or rank 4 ``(B, 1 or H, Nq, Nk)``. A masked key has exactly
-    zero weight at every step. A query row with no kept key (a pairwise mask that
-    forbids every key, or a key set that is entirely padding) has attention
-    weights of zeros at every step, does not move, and gets an output of zeros;
-    under blurring it therefore never hands a forbidden key to another row. A
-    padded query under a rank-2 padding mask still has kept keys, so its output is
-    computed and left to the caller to ignore. A rank-2 padding mask also keeps the
-    padded keys out of the Gaussian centre; a pairwise mask uses the mean of all
-    keys, which changes the logits only by a per-query constant. Under blurring a
+    zero weight at every step, at any bandwidth: the logits of each row are shifted
+    so that its best kept logit is 0 before the mask is applied, so a kept logit far
+    below the mask constant (a small bandwidth, widely spread tokens) cannot lose to
+    a masked key. A query row with no kept key (a pairwise mask that forbids every
+    key, or a key set that is entirely padding) has attention weights of zeros at
+    every step, does not move, and gets an output of zeros; under blurring it
+    therefore never hands a forbidden key to another row. A padded query under a
+    rank-2 padding mask still has kept keys, so its output is computed and left to
+    the caller to ignore. The Gaussian centre is the mean of the keys that at least
+    one query row keeps, for every mask rank (per head under a rank-4 mask), so a
+    value stored at a key that no row keeps cannot set it. Under blurring a
     pairwise mask that is not transitive still lets a row read the moved value of a
     key, and that value has read other keys, so a read can span two hops.
 
@@ -517,6 +520,61 @@ class MeanShiftAttention(keras.layers.Layer):
         """
         return keras.ops.any(keep, axis=-1, keepdims=True)
 
+    @staticmethod
+    def _shift_to_kept_maximum(
+            logits: keras.KerasTensor, keep: keras.KerasTensor
+    ) -> keras.KerasTensor:
+        """Shift every row so its best kept logit is 0 and park the masked logits at 0.
+
+        The additive mask bias is a fixed constant, so a kept logit far below it (a
+        small bandwidth, widely spread tokens) would lose to a masked key. After this
+        shift the best kept logit is 0 and every masked entry is 0 before the bias, so
+        the bias puts it strictly below the best kept key and its weight is exactly 0.
+        A row with no kept key shifts by 0 and has all entries 0. The row maximum
+        carries no gradient and the softmax is unchanged by the shift.
+
+        :param logits: logits ``(B, H, Nq, Nk)`` in the accumulation dtype.
+        :type logits: keras.KerasTensor
+        :param keep: boolean keep mask ``(B, 1 or H, Nq or 1, Nk)``.
+        :type keep: keras.KerasTensor
+        :return: shifted logits, shaped like ``logits``, finite wherever ``logits`` is.
+        :rtype: keras.KerasTensor
+        """
+        # DECISION plan-2026-10-29T104646-27f045c5/D-027: shift by the kept maximum and park masked logits at 0 before the bias.
+        # Do not rely on the fixed mask constant alone: at a small bandwidth a kept logit is far below it. See decisions.md.
+        kept_max = keras.ops.stop_gradient(
+            keras.ops.max(
+                keras.ops.where(keep, logits, keras.ops.full_like(logits, -math.inf)),
+                axis=-1,
+                keepdims=True,
+            )
+        )
+        kept_max = keras.ops.where(
+            keras.ops.any(keep, axis=-1, keepdims=True),
+            kept_max,
+            keras.ops.zeros_like(kept_max),
+        )
+        return keras.ops.where(
+            keep, logits - kept_max, keras.ops.zeros_like(logits)
+        )
+
+    @staticmethod
+    def _hold_still(
+            live: keras.KerasTensor, moved: keras.KerasTensor, z: keras.KerasTensor
+    ) -> keras.KerasTensor:
+        """Keep the current ``z`` where a query row has no kept key.
+
+        :param live: boolean ``(B, 1 or H, Nq or 1, 1)``, False for a row with no kept key.
+        :type live: keras.KerasTensor
+        :param moved: the shifted queries ``(B, H, Nq, d)``.
+        :type moved: keras.KerasTensor
+        :param z: the current queries ``(B, H, Nq, d)``.
+        :type z: keras.KerasTensor
+        :return: ``moved`` in live rows, ``z`` in the others.
+        :rtype: keras.KerasTensor
+        """
+        return keras.ops.where(live, moved, z)
+
     def call(
             self,
             inputs: Union[keras.KerasTensor, List[keras.KerasTensor]],
@@ -568,15 +626,15 @@ class MeanShiftAttention(keras.layers.Layer):
         centre_mask = None
         if keep is not None:
             live = self._rows_with_a_kept_key(keep)
-            if len(attention_mask.shape) == 2:
-                # A padding mask names the keys that set the Gaussian centre; a pairwise mask uses the plain mean.
-                centre_mask = keras.ops.squeeze(keep, axis=2)
+            # The keys some query row keeps set the Gaussian centre, so a key no row keeps cannot.
+            centre_mask = keras.ops.any(keep, axis=2)
 
         weights = None
         for _ in range(self.num_steps):
             keys = z if self.blurring else keys0
             logits = kernel_logits(z, keys, h, self.kernel, key_mask=centre_mask)
             if keep is not None:
+                logits = self._shift_to_kept_maximum(logits, keep)
                 logits = apply_attention_mask(
                     logits, keep, out_dtype=acc, rescue_axis=-1
                 )
@@ -593,7 +651,7 @@ class MeanShiftAttention(keras.layers.Layer):
             if live is not None:
                 # DECISION plan-2026-10-29T104646-27f045c5/D-004: a query row with no kept key stays put at every step and is zeroed after the loop.
                 # Do not let the rescued keep-all row move: as a blurring key it would hand forbidden keys to other rows. See decisions.md.
-                moved = keras.ops.where(live, moved, z)
+                moved = self._hold_still(live, moved, z)
             z = (1.0 - eta) * z + eta * moved
             if self.kernel == "vmf":
                 z = self._normalize(z, acc)

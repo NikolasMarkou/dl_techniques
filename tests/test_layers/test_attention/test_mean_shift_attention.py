@@ -536,6 +536,279 @@ class TestPaddedKeysDoNotSetTheCentre:
 
 
 # ---------------------------------------------------------------------
+# A masked key has exactly zero weight at any bandwidth
+# ---------------------------------------------------------------------
+
+SPREAD_N = 6
+SPREAD_SCALE = 500.0
+BANDWIDTH_INITS = (0.011, 0.05, None)
+
+
+def _spread_mask(rank):
+    """Keep mask over six widely spread tokens, ``(2, ...)`` batch.
+
+    Rank 2 pads key 5 of batch 0. Rank 3 and 4 forbid every key's own position, so
+    the nearest key of each query is the forbidden one; batch 1 (rank 3) and head 1
+    (rank 4) also leave one query with no kept key.
+    """
+    if rank == 2:
+        mask = np.ones((2, SPREAD_N), dtype="float32")
+        mask[0, 5] = 0.0
+        return mask
+    diagonal = 1.0 - np.eye(SPREAD_N, dtype="float32")
+    if rank == 3:
+        mask = np.broadcast_to(diagonal, (2, SPREAD_N, SPREAD_N)).copy()
+        mask[1, 3, :] = 0.0
+        return mask
+    mask = np.broadcast_to(diagonal, (2, HEADS, SPREAD_N, SPREAD_N)).copy()
+    mask[:, 1, 2, :] = 0.0
+    mask[:, 1, :, 5] = 0.0
+    return mask
+
+
+def _keep_rank_four(mask):
+    keep = mask > 0
+    if keep.ndim == 2:
+        return keep[:, None, None, :]
+    return keep[:, None] if keep.ndim == 3 else keep
+
+
+def _check_a_masked_key_has_exactly_zero_weight(
+        rank, kernel, num_steps, blurring, bandwidth_init
+):
+    layer = _set_identity_kernels(_make(
+        num_steps=num_steps, blurring=blurring, kernel=kernel,
+        bandwidth_init=bandwidth_init,
+    ))
+    mask = _spread_mask(rank)
+    out, weights = layer(_tokens(2, SPREAD_N, 81, scale=SPREAD_SCALE),
+                         attention_mask=mask, return_attention_scores=True)
+    out, weights = _np(out), _np(weights)
+    keep = np.broadcast_to(_keep_rank_four(mask), weights.shape)
+    assert np.isfinite(out).all()
+    assert np.all(weights[~keep] == 0.0)
+    live = keep.any(axis=-1)
+    sums = weights.sum(axis=-1)
+    np.testing.assert_allclose(sums[live], 1.0, atol=1e-5, rtol=0)
+    assert np.all(sums[~live] == 0.0)
+
+
+def _check_the_cross_form_padded_key_has_zero_weight():
+    layer = MeanShiftAttention(
+        dim=4, num_heads=1, num_steps=1, blurring=False, bandwidth_mode="global",
+        bandwidth_init=0.011, use_bias=False,
+    )
+    layer.build([(None, None, 4), (None, None, 4)])
+    layer.projection.kernel.assign(np.eye(4, dtype="float32"))
+    query = np.zeros((1, 1, 4), dtype="float32")
+    keys = np.zeros((1, 3, 4), dtype="float32")
+    keys[0, 0, 0], keys[0, 1, 0] = 1000.0, 1001.0
+    _, weights = layer([query, keys], attention_mask=np.array([[1, 1, 0]], "float32"),
+                       return_attention_scores=True)
+    weights = _np(weights).ravel()
+    assert weights[2] == 0.0
+    np.testing.assert_allclose(weights[:2].sum(), 1.0, atol=1e-6, rtol=0)
+
+
+def _check_a_forbidden_diagonal_has_zero_weight():
+    layer = MeanShiftAttention(
+        dim=4, num_heads=1, num_steps=1, blurring=True, bandwidth_mode="global",
+        bandwidth_init=0.011, use_bias=False,
+    )
+    layer.build((None, None, 4))
+    layer.projection.kernel.assign(np.eye(4, dtype="float32"))
+    tokens = np.zeros((1, 3, 4), dtype="float32")
+    tokens[0, 1, 0], tokens[0, 2, 0] = 500.0, -500.0
+    mask = (1.0 - np.eye(3, dtype="float32"))[None]
+    _, weights = layer(tokens, attention_mask=mask, return_attention_scores=True)
+    weights = _np(weights)[0, 0]
+    assert np.all(np.diagonal(weights) == 0.0)
+    np.testing.assert_allclose(weights.sum(axis=-1), 1.0, atol=1e-6, rtol=0)
+
+
+def _without_the_shift(monkeypatch):
+    monkeypatch.setattr(MeanShiftAttention, "_shift_to_kept_maximum",
+                        staticmethod(lambda logits, keep: logits))
+
+
+GRID_CASES = [
+    (rank, kernel, steps, blurring, bandwidth)
+    for rank in (2, 3, 4)
+    for kernel in ("gaussian", "vmf")
+    for steps in (1, 2, 3)
+    for blurring in (True, False)
+    for bandwidth in BANDWIDTH_INITS
+]
+
+
+class TestAMaskedKeyHasZeroWeightAtAnyBandwidth:
+    @pytest.mark.parametrize("rank,kernel,num_steps,blurring,bandwidth_init", GRID_CASES)
+    def test_masked_weights_are_exactly_zero_and_kept_weights_sum_to_one(
+            self, rank, kernel, num_steps, blurring, bandwidth_init
+    ):
+        _check_a_masked_key_has_exactly_zero_weight(
+            rank, kernel, num_steps, blurring, bandwidth_init
+        )
+
+    def test_a_padded_key_at_the_query_gets_no_weight_in_the_cross_form(self):
+        _check_the_cross_form_padded_key_has_zero_weight()
+
+    def test_a_forbidden_diagonal_gets_no_weight_between_distant_tokens(self):
+        _check_a_forbidden_diagonal_has_zero_weight()
+
+    @pytest.mark.parametrize("rank", [2, 3, 4])
+    def test_the_check_fails_without_the_shift(self, rank, monkeypatch):
+        _without_the_shift(monkeypatch)
+        with pytest.raises(AssertionError):
+            _check_a_masked_key_has_exactly_zero_weight(rank, "gaussian", 1, False, 0.011)
+
+    def test_the_review_cases_fail_without_the_shift(self, monkeypatch):
+        _without_the_shift(monkeypatch)
+        with pytest.raises(AssertionError):
+            _check_the_cross_form_padded_key_has_zero_weight()
+        with pytest.raises(AssertionError):
+            _check_a_forbidden_diagonal_has_zero_weight()
+
+    @pytest.mark.parametrize("rank", [2, 3, 4])
+    @pytest.mark.parametrize("bandwidth_init", [0.011, None])
+    def test_every_gradient_is_finite_with_a_learnable_bandwidth(self, rank, bandwidth_init):
+        layer = _set_kernels(_make(num_steps=2, bandwidth_init=bandwidth_init,
+                                   learnable_step_size=True))
+        x = tf.constant(_tokens(2, SPREAD_N, 82, scale=SPREAD_SCALE))
+        mask = _spread_mask(rank)
+        with tf.GradientTape() as tape:
+            tape.watch(x)
+            loss = tf.reduce_sum(layer(x, attention_mask=mask) ** 2)
+        grads = tape.gradient(loss, [x] + layer.trainable_variables)
+        assert all(grad is not None and np.isfinite(_np(grad)).all() for grad in grads)
+
+    def test_mixed_float16_keeps_masked_weights_at_zero_and_the_output_finite(self):
+        mask = _spread_mask(3)
+        x = _tokens(2, SPREAD_N, 83, scale=SPREAD_SCALE)
+        layer, _ = _run("mixed_float16", x, mask, num_steps=2, bandwidth_init=0.011)
+        out, weights = layer(x, attention_mask=mask, return_attention_scores=True)
+        weights = _np(weights).astype("float32")
+        keep = np.broadcast_to(_keep_rank_four(mask), weights.shape)
+        assert np.isfinite(_np(out).astype("float32")).all()
+        assert np.all(weights[~keep] == 0.0)
+        live = keep.any(axis=-1)
+        np.testing.assert_allclose(weights.sum(axis=-1)[live], 1.0, atol=2e-3, rtol=0)
+
+
+# ---------------------------------------------------------------------
+# A key that no row keeps does not set the Gaussian centre
+# ---------------------------------------------------------------------
+
+def _forbidden_to_every_row_mask(rank):
+    """Key 5 of six is forbidden to every query, in the given mask rank."""
+    if rank == 2:
+        mask = np.ones((1, 6), dtype="float32")
+        mask[0, 5] = 0.0
+        return mask
+    mask = np.ones((1, 6, 6), dtype="float32")
+    mask[0, :, 5] = 0.0
+    return mask if rank == 3 else mask[:, None]
+
+
+def _check_a_key_no_row_keeps_does_not_set_the_centre(rank):
+    layer = _set_kernels(_make(num_steps=2))
+    clean = _tokens(1, 6, 85)
+    junk = clean.copy()
+    junk[0, 5] = 1e4
+    mask = _forbidden_to_every_row_mask(rank)
+    out_clean = _np(layer(clean, attention_mask=mask))
+    out_junk = _np(layer(junk, attention_mask=mask))
+    gap = np.abs(out_junk[0, :5] - out_clean[0, :5]).max()
+    assert gap < 1e-4 * np.abs(out_clean).max()
+
+
+def _check_the_centre_of_a_head_ignores_the_keys_that_head_forbids():
+    layer = _set_identity_kernels(_make(num_steps=2))
+    clean = _tokens(1, 6, 86)
+    junk = clean.copy()
+    junk[0, 5, :HEAD_DIM] = 1e4
+    mask = np.ones((1, HEADS, 6, 6), dtype="float32")
+    mask[0, 0, :, 5] = 0.0
+    out_clean = _np(layer(clean, attention_mask=mask))
+    out_junk = _np(layer(junk, attention_mask=mask))
+    gap = np.abs(out_junk[0, :5, :HEAD_DIM] - out_clean[0, :5, :HEAD_DIM]).max()
+    assert gap < 1e-4 * np.abs(out_clean).max()
+
+
+class TestAKeyNoRowKeepsDoesNotSetTheCentre:
+    @pytest.mark.parametrize("rank", [2, 3, 4])
+    def test_junk_in_a_key_forbidden_to_every_row_changes_no_kept_row(self, rank):
+        _check_a_key_no_row_keeps_does_not_set_the_centre(rank)
+
+    def test_the_centre_of_each_head_follows_that_head_s_mask(self):
+        _check_the_centre_of_a_head_ignores_the_keys_that_head_forbids()
+
+    @pytest.mark.parametrize("rank", [3, 4])
+    def test_the_check_fails_when_the_centre_ignores_the_mask(self, rank, monkeypatch):
+        real = mean_shift_attention.kernel_logits
+
+        def plain_mean(q, k, bandwidth, kernel="gaussian", drop_query_norm=True,
+                       key_mask=None):
+            return real(q, k, bandwidth, kernel, drop_query_norm)
+
+        monkeypatch.setattr(mean_shift_attention, "kernel_logits", plain_mean)
+        with pytest.raises(AssertionError):
+            _check_a_key_no_row_keeps_does_not_set_the_centre(rank)
+        with pytest.raises(AssertionError):
+            _check_the_centre_of_a_head_ignores_the_keys_that_head_forbids()
+
+
+# ---------------------------------------------------------------------
+# A row with no kept key holds still, so the rows that read its column see its token
+# ---------------------------------------------------------------------
+
+def _reference_with_a_held_row(layer, x, mask, num_steps):
+    """Float64 blurring Gaussian mean shift where a row without a kept key stays put.
+
+    Built from the layer's own projection weights and bandwidth, with its own
+    NumPy softmax, so it shares no code with the layer's step.
+    """
+    z = _heads(layer, x)
+    h = _np(layer._bandwidth(layer.projection(x), "float32")).astype("float64")
+    batch, count = x.shape[0], x.shape[1]
+    keep = np.broadcast_to((mask > 0)[:, None], (batch, HEADS, count, count))
+    live = keep.any(axis=-1, keepdims=True)
+    for _ in range(num_steps):
+        logits = (z @ z.transpose(0, 1, 3, 2) / h ** 2
+                  - 0.5 * (z ** 2).sum(-1)[:, :, None, :] / h ** 2)
+        logits = np.where(keep, logits, -np.inf)
+        row_max = np.where(live, logits.max(axis=-1, keepdims=True), 0.0)
+        expd = np.where(keep, np.exp(logits - row_max), 0.0)
+        weights = expd / np.where(live, expd.sum(axis=-1, keepdims=True), 1.0)
+        z = np.where(live, weights @ z, z)
+    return _merge(z * live) @ _kernel(layer.output_projection)
+
+
+def _check_a_row_with_no_kept_key_holds_still(num_steps):
+    layer = _set_kernels(_make(num_steps=num_steps, blurring=True))
+    x = _tokens(1, 6, 87)
+    mask = np.ones((1, 6, 6), dtype="float32")
+    mask[0, 0, :] = 0.0
+    out = _np(layer(x, attention_mask=mask))
+    reference = _reference_with_a_held_row(layer, x, mask, num_steps)
+    assert np.all(out[0, 0] == 0.0)
+    np.testing.assert_allclose(out[0, 1:], reference[0, 1:], atol=1e-4, rtol=0)
+
+
+class TestARowWithNoKeptKeyHoldsStill:
+    @pytest.mark.parametrize("num_steps", [1, 2, 3])
+    def test_the_other_rows_read_the_held_token_of_that_row(self, num_steps):
+        _check_a_row_with_no_kept_key_holds_still(num_steps)
+
+    @pytest.mark.parametrize("num_steps", [2, 3])
+    def test_the_check_fails_when_the_row_is_not_held(self, num_steps, monkeypatch):
+        monkeypatch.setattr(MeanShiftAttention, "_hold_still",
+                            staticmethod(lambda live, moved, z: moved))
+        with pytest.raises(AssertionError):
+            _check_a_row_with_no_kept_key_holds_still(num_steps)
+
+
+# ---------------------------------------------------------------------
 # Cross form and input contract
 # ---------------------------------------------------------------------
 
