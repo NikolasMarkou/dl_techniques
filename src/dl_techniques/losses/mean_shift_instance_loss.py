@@ -201,7 +201,8 @@ class MeanShiftInstanceLoss(keras.losses.Loss):
         same_pair = keras.ops.logical_and(pair, same_id)
         diff_pair = keras.ops.logical_and(pair, keras.ops.logical_not(same_id))
 
-        sq = pairwise_sq_dist(z, z)
+        # The distance centre is the mean of the valid points, so an ignored point cannot set it.
+        sq = pairwise_sq_dist(z, z, valid)
         dist = keras.ops.sqrt(
             keras.ops.maximum(sq, stability_floor(acc, _SQRT_FLOOR))
         )

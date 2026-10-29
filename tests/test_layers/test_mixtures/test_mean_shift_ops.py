@@ -94,7 +94,10 @@ def _check_query_norm_is_softmax_invariant():
     qt, kt = keras.ops.convert_to_tensor(q), keras.ops.convert_to_tensor(k)
     dropped = _np(ops.kernel_logits(qt, kt, h, drop_query_norm=True))
     full = _np(ops.kernel_logits(qt, kt, h, drop_query_norm=False))
-    per_row = 0.5 * np.sum(q * q, axis=-1, keepdims=True) / h**2
+    # The logits are defined up to a per-query constant: the dropped term is the
+    # query norm measured from the key mean, which centres both operands.
+    centre = k.mean(axis=-2, keepdims=True)
+    per_row = 0.5 * np.sum((q - centre) ** 2, axis=-1, keepdims=True) / h**2
     assert per_row.max() > 1.0
     np.testing.assert_allclose(
         dropped - full, np.broadcast_to(per_row, dropped.shape), rtol=0, atol=1e-8
@@ -134,8 +137,8 @@ BIAS_DEFECTS = {"dropped": 0.5, "flipped_sign": 1.0, "doubled": -0.5}
 
 
 def _with_bias_defect(real, coefficient):
-    def patched(q, k, bandwidth, kernel="gaussian", drop_query_norm=True):
-        logits = real(q, k, bandwidth, kernel, drop_query_norm)
+    def patched(q, k, bandwidth, kernel="gaussian", drop_query_norm=True, key_mask=None):
+        logits = real(q, k, bandwidth, kernel, drop_query_norm, key_mask)
         k_cast = keras.ops.cast(k, logits.dtype)
         h = keras.ops.convert_to_tensor(bandwidth, dtype=logits.dtype)
         k_sq = keras.ops.expand_dims(
@@ -147,8 +150,8 @@ def _with_bias_defect(real, coefficient):
 
 
 def _with_key_dependent_query_term(real):
-    def patched(q, k, bandwidth, kernel="gaussian", drop_query_norm=True):
-        logits = real(q, k, bandwidth, kernel, drop_query_norm)
+    def patched(q, k, bandwidth, kernel="gaussian", drop_query_norm=True, key_mask=None):
+        logits = real(q, k, bandwidth, kernel, drop_query_norm, key_mask)
         if drop_query_norm:
             return logits
         k_cast = keras.ops.cast(k, logits.dtype)
@@ -654,3 +657,264 @@ def test_median_heuristic_has_no_gradient():
 def test_median_heuristic_rejects_a_wrong_rank():
     with pytest.raises(ValueError, match="rank"):
         ops.median_heuristic_bandwidth(keras.ops.convert_to_tensor(np.ones((4, 3))))
+
+
+# ---------------------------------------------------------------------
+# Masking without a sentinel: kept logits far below any fixed constant
+# ---------------------------------------------------------------------
+
+TINY_BANDWIDTH = 1e-6
+
+
+def _far_kept_keys():
+    """Query at the origin; keys 0, 1 and 3 kept, key 2 (nearest) masked."""
+    q = np.zeros((1, 1, 2), dtype="float32")
+    k = np.array([[[1.0, 0.0], [3.0, 0.5], [0.0, 0.0], [-2.0, 1.0]]], dtype="float32")
+    keep = np.array([[True, True, False, True]])
+    return q, k, keep
+
+
+def test_w1_a_tiny_bandwidth_keeps_the_nearest_kept_key_and_the_masked_weight_is_zero():
+    q, k, keep = _far_kept_keys()
+    out, weights = ops.mean_shift_step(
+        keras.ops.convert_to_tensor(q), keras.ops.convert_to_tensor(k), None,
+        TINY_BANDWIDTH, mask=keras.ops.convert_to_tensor(keep),
+    )
+    logit = -np.sum(k[0, keep[0]] ** 2, axis=-1) / (2 * TINY_BANDWIDTH**2)
+    assert logit.max() < -1e9
+    weights = _np(weights)[0, 0]
+    assert weights[2] == 0.0
+    np.testing.assert_allclose(weights.sum(), 1.0, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(weights, [1.0, 0.0, 0.0, 0.0], rtol=0, atol=1e-6)
+    np.testing.assert_allclose(_np(out)[0, 0], k[0, 0], rtol=0, atol=1e-6)
+
+
+def test_w1_a_masked_step_equals_the_step_over_the_kept_subset_at_a_tiny_bandwidth():
+    q, k, keep = _far_kept_keys()
+    qt, kt = keras.ops.convert_to_tensor(q), keras.ops.convert_to_tensor(k)
+    out, weights = ops.mean_shift_step(qt, kt, None, 1e-3, mask=keras.ops.convert_to_tensor(keep))
+    kept = keras.ops.convert_to_tensor(k[:, keep[0]])
+    sub_out, sub_weights = ops.mean_shift_step(qt, kept, None, 1e-3)
+    np.testing.assert_allclose(_np(out), _np(sub_out), rtol=0, atol=1e-6)
+    np.testing.assert_allclose(_np(weights)[..., keep[0]], _np(sub_weights), rtol=0, atol=1e-6)
+    assert (_np(weights)[..., ~keep[0]] == 0.0).all()
+
+
+def test_w1_the_kde_density_at_a_tiny_bandwidth_is_finite_and_equals_the_subset_density():
+    q, k, keep = _far_kept_keys()
+    qt, kt = keras.ops.convert_to_tensor(q), keras.ops.convert_to_tensor(k)
+    got = _np(ops.kde_log_density(qt, kt, TINY_BANDWIDTH, mask=keras.ops.convert_to_tensor(keep)))
+    assert np.isfinite(got).all()
+    sub = _np(ops.kde_log_density(qt, keras.ops.convert_to_tensor(k[:, keep[0]]), TINY_BANDWIDTH))
+    np.testing.assert_allclose(got, sub, rtol=1e-6, atol=0)
+    expected = oracle_kde_log_density(q, k, TINY_BANDWIDTH, keep)
+    np.testing.assert_allclose(got, expected, rtol=1e-5, atol=0)
+
+
+def test_w1_a_fully_masked_row_stays_uniform_at_a_tiny_bandwidth():
+    q, k, _ = _far_kept_keys()
+    keep = np.zeros((1, 4), dtype=bool)
+    qt, kt = keras.ops.convert_to_tensor(q), keras.ops.convert_to_tensor(k)
+    out, weights = ops.mean_shift_step(qt, kt, None, TINY_BANDWIDTH, mask=keras.ops.convert_to_tensor(keep))
+    np.testing.assert_allclose(_np(weights), 0.25, rtol=0, atol=0)
+    np.testing.assert_allclose(_np(out)[0, 0], k[0].mean(axis=0), rtol=0, atol=1e-6)
+    density = _np(ops.kde_log_density(qt, kt, TINY_BANDWIDTH, mask=keras.ops.convert_to_tensor(keep)))
+    assert np.isfinite(density).all()
+
+
+def test_w1_float16_inputs_at_a_tiny_bandwidth_are_finite_with_exact_zero_masked_weights():
+    q, k, keep = _far_kept_keys()
+    out, weights = ops.mean_shift_step(
+        keras.ops.convert_to_tensor(q.astype("float16")),
+        keras.ops.convert_to_tensor(k.astype("float16")), None,
+        TINY_BANDWIDTH, mask=keras.ops.convert_to_tensor(keep),
+    )
+    assert np.isfinite(_np(out)).all() and np.isfinite(_np(weights)).all()
+    assert (_np(weights)[..., ~keep[0]] == 0.0).all()
+    np.testing.assert_allclose(_np(weights).sum(), 1.0, rtol=0, atol=1e-6)
+
+
+def test_w1_gradients_through_a_masked_step_are_finite():
+    q, k, keep = _far_kept_keys()
+    qt, kt = tf.constant(q), tf.constant(k)
+    with tf.GradientTape() as tape:
+        tape.watch([qt, kt])
+        out, _ = ops.mean_shift_step(qt, kt, None, 1e-2, mask=tf.constant(keep))
+        total = keras.ops.sum(out * out)
+    grads = tape.gradient(total, [qt, kt])
+    assert all(np.isfinite(_np(g)).all() for g in grads)
+    assert float(np.abs(_np(grads[1])[0, 2]).max()) == 0.0
+
+
+# ---------------------------------------------------------------------
+# Translation safety in float32
+# ---------------------------------------------------------------------
+
+OFFSETS = (0.0, 10.0, 100.0, 1000.0)
+# Offsets up to 1000 on a 2^-10 grid need 20 mantissa bits, so the shifted float32
+# data is exactly the shifted data and only the algorithm's own error is measured.
+GRID = 1024.0
+
+
+def _grid_points(batch, count, dim, seed, scale=1.0):
+    rng = np.random.default_rng(seed)
+    pts = np.round(scale * rng.normal(size=(batch, count, dim)) * GRID) / GRID
+    return pts.astype("float32")
+
+
+def _shifted(x, offset):
+    shifted = (x.astype("float64") + offset).astype("float32")
+    assert (shifted.astype("float64") - offset == x).all()
+    return shifted
+
+
+def _translation_cases():
+    x = _grid_points(2, 24, 4, seed=300, scale=0.5)
+    keep = _keep_with_empty_rows(2, 24, seed=301)
+    return x, keep
+
+
+def _translation_errors(offset):
+    """Largest deviation from the offset-0 result of every function, per function."""
+    x, keep = _translation_cases()
+    kt = keras.ops.convert_to_tensor(keep)
+    base_x = keras.ops.convert_to_tensor(x)
+    moved_x = keras.ops.convert_to_tensor(_shifted(x, offset))
+    h = 0.3
+    errors = {}
+
+    base = _np(ops.pairwise_sq_dist(base_x, base_x))
+    moved = _np(ops.pairwise_sq_dist(moved_x, moved_x))
+    errors["pairwise_sq_dist"] = np.abs(moved - base).max() / base.max()
+
+    base_out, base_w = ops.mean_shift_step(base_x, base_x, None, h, mask=kt)
+    out, w = ops.mean_shift_step(moved_x, moved_x, None, h, mask=kt)
+    errors["step_weights"] = np.abs(_np(w) - _np(base_w)).max()
+    errors["step_points"] = np.abs(_np(out).astype("float64") - offset - _np(base_out)).max()
+
+    base_d = _np(ops.kde_log_density(base_x, base_x, h, mask=kt))
+    moved_d = _np(ops.kde_log_density(moved_x, moved_x, h, mask=kt))
+    errors["kde_log_density"] = np.abs(moved_d - base_d).max() / np.abs(base_d).max()
+
+    base_z = _np(ops.mean_shift_iterate(base_x, h, 4, mask=kt))
+    moved_z = _np(ops.mean_shift_iterate(moved_x, h, 4, mask=kt))
+    errors["iterate"] = np.abs(moved_z.astype("float64") - offset - base_z).max()
+
+    base_h = _np(ops.median_heuristic_bandwidth(base_x, kt))
+    moved_h = _np(ops.median_heuristic_bandwidth(moved_x, kt))
+    errors["median_heuristic"] = np.abs(moved_h - base_h).max() / base_h.max()
+    return errors
+
+
+# Measured with the centred ops at offsets 0, 10, 100 and 1000: the distance-like
+# outputs deviate by at most 4e-7 relative (float32 epsilon is 1.2e-7); the point
+# outputs by at most 1 ulp of the shifted float32 value per step (a result near 1000
+# can only be stored to 6.1e-5) and 3.7 ulp after the four iterations. The bounds
+# below are 1e-6 relative and 2 ulp per step, 8 ulp for the iteration, a few times
+# the measurement. Without the centring the same quantities deviate by 0.07 to 1.2.
+RELATIVE_BOUND = 1e-6
+STEP_ULPS = {"step_points": 2, "iterate": 8}
+
+
+def _check_translation_equivariance(offset):
+    errors = _translation_errors(offset)
+    ulp = float(np.spacing(np.float32(offset + 4.0)))
+    bad = {}
+    for name, err in errors.items():
+        bound = STEP_ULPS[name] * ulp if name in STEP_ULPS else RELATIVE_BOUND
+        if not err <= bound:
+            bad[name] = (float(err), bound)
+    assert not bad, f"offset {offset}: {bad}"
+
+
+@pytest.mark.parametrize("offset", OFFSETS)
+def test_w2_every_op_is_translation_equivariant_in_float32(offset):
+    _check_translation_equivariance(offset)
+
+
+def test_w2_red_proof_without_the_centring_the_translation_check_fails_at_1000(monkeypatch):
+    _check_translation_equivariance(1000.0)
+
+    def no_centre(keys, key_mask=None):
+        return keras.ops.zeros_like(keras.ops.mean(keys, axis=-2, keepdims=True))
+
+    monkeypatch.setattr(ops, "_key_centre", no_centre)
+    with pytest.raises(AssertionError):
+        _check_translation_equivariance(1000.0)
+
+
+def test_w2_pairwise_sq_dist_resolves_a_near_coincident_pair_far_from_the_origin():
+    a = np.array([[[1000.0, 1000.0, 1000.0]]], dtype="float32")
+    b = a + np.float32(2.0**-6)
+    got = float(_np(ops.pairwise_sq_dist(keras.ops.convert_to_tensor(a), keras.ops.convert_to_tensor(b)))[0, 0, 0])
+    np.testing.assert_allclose(got, 3 * 2.0**-12, rtol=1e-5)
+
+
+def test_w2_a_junk_value_in_a_masked_key_does_not_set_the_centre():
+    x = _grid_points(1, 12, 3, seed=310)
+    keep = np.ones((1, 12), dtype=bool)
+    keep[0, 5] = False
+    junk = x.copy()
+    junk[0, 5] = 1.0e4
+    clean = x.copy()
+    clean[0, 5] = x[0, 0]
+    kt = keras.ops.convert_to_tensor(keep)
+    a = _np(ops.mean_shift_step(keras.ops.convert_to_tensor(x), keras.ops.convert_to_tensor(junk), None, 0.4, mask=kt)[1])
+    b = _np(ops.mean_shift_step(keras.ops.convert_to_tensor(x), keras.ops.convert_to_tensor(clean), None, 0.4, mask=kt)[1])
+    np.testing.assert_allclose(a, b, rtol=0, atol=1e-6)
+    da = _np(ops.kde_log_density(keras.ops.convert_to_tensor(x), keras.ops.convert_to_tensor(junk), 0.4, mask=kt))
+    db = _np(ops.kde_log_density(keras.ops.convert_to_tensor(x), keras.ops.convert_to_tensor(clean), 0.4, mask=kt))
+    np.testing.assert_allclose(da, db, rtol=0, atol=1e-4)
+
+
+def test_w2_the_logits_are_defined_up_to_a_per_query_constant_and_the_weights_are_not_affected():
+    q = _points(2, 5, 3, seed=320)
+    k = _points(2, 7, 3, seed=321)
+    h = 0.8
+    logits = _np(ops.kernel_logits(keras.ops.convert_to_tensor(q), keras.ops.convert_to_tensor(k), h))
+    raw = np.einsum("bnd,bmd->bnm", q, k) / h**2 - 0.5 * np.sum(k * k, axis=-1)[:, None, :] / h**2
+    centred_logits = logits - logits.max(axis=-1, keepdims=True)
+    centred_raw = raw - raw.max(axis=-1, keepdims=True)
+    np.testing.assert_allclose(centred_logits, centred_raw, rtol=0, atol=1e-9)
+
+
+# ---------------------------------------------------------------------
+# Tensor-like operands: every tensor argument may be a Variable or an array
+# ---------------------------------------------------------------------
+
+
+def _operand_forms(array):
+    return {
+        "numpy": array,
+        "variable": tf.Variable(array),
+        "tensor": keras.ops.convert_to_tensor(array),
+    }
+
+
+@pytest.mark.parametrize("form", ["numpy", "variable"])
+def test_n12_every_second_operand_may_be_an_array_or_a_variable(form):
+    q = _grid_points(2, 5, 3, seed=330)
+    k = _grid_points(2, 7, 3, seed=331)
+    v = _grid_points(2, 7, 2, seed=332)
+    keep = _keep_with_empty_rows(2, 7, seed=333)
+    qt, kt, vt = (keras.ops.convert_to_tensor(a) for a in (q, k, v))
+    reference = {
+        "sq": _np(ops.pairwise_sq_dist(qt, kt)),
+        "logits": _np(ops.kernel_logits(qt, kt, 0.7)),
+        "step": _np(ops.mean_shift_step(qt, kt, vt, 0.7, mask=keep)[0]),
+        "kde": _np(ops.kde_log_density(qt, kt, 0.7, mask=keep)),
+        "iterate": _np(ops.mean_shift_iterate(kt, 0.7, 2)),
+        "median": _np(ops.median_heuristic_bandwidth(kt)),
+    }
+    kf, vf = _operand_forms(k)[form], _operand_forms(v)[form]
+    qf = _operand_forms(q)[form]
+    got = {
+        "sq": _np(ops.pairwise_sq_dist(qf, kf)),
+        "logits": _np(ops.kernel_logits(qf, kf, 0.7)),
+        "step": _np(ops.mean_shift_step(qf, kf, vf, 0.7, mask=keep)[0]),
+        "kde": _np(ops.kde_log_density(qf, kf, 0.7, mask=keep)),
+        "iterate": _np(ops.mean_shift_iterate(kf, 0.7, 2)),
+        "median": _np(ops.median_heuristic_bandwidth(kf)),
+    }
+    for name, expected in reference.items():
+        np.testing.assert_allclose(got[name], expected, rtol=0, atol=1e-6, err_msg=name)

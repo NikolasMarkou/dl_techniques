@@ -53,7 +53,7 @@ RBF flow: `pairwise_squared_distance(inputs, centers)`, times `softplus(gamma_ra
 | `kmeans.py` | `KMeansLayer` | EMA codebook, `trainable=False` centroids and momentum buffer. |
 | `gmm.py` | `GMMLayer` | Trainable means, log-variances, mixing logits, optional `covariance_factors`. |
 | `radial_basis_function.py` | `RBFLayer` | Trainable centers and `gamma_raw`. |
-| `mean_shift_ops.py` | Stateless mean-shift functions | Not exported from `__init__`, not registered; float64 oracle in `tests/test_layers/test_mixtures/mean_shift_oracle.py`. |
+| `mean_shift_ops.py` | Stateless mean-shift functions | Not exported from `__init__`, not registered; float64 oracle in `tests/test_layers/test_mixtures/mean_shift_oracle.py`. Masking takes the row maximum over kept logits only (no sentinel, so a tiny bandwidth cannot let a masked key win); distances and Gaussian logits are centred by a stop-gradient key mean (the kept-key mean under a mask), so logits are defined up to a per-query constant. |
 | `mean_shift.py` | `MeanShiftLayer`, `assign_clusters` | Plain `keras.layers.Layer`; one scalar `log_bandwidth` weight when learnable; honours a `(B, N)` keep mask. |
 | `factory.py` | `MIXTURE_REGISTRY`, validation, creation | Non-strict on unknown kwargs (warns, drops). |
 

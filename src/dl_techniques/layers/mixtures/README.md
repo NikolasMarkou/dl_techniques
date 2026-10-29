@@ -50,7 +50,7 @@ Details per layer:
 - `kmeans.py` - `KMeansLayer`.
 - `gmm.py` - `GMMLayer`.
 - `radial_basis_function.py` - `RBFLayer`.
-- `mean_shift_ops.py` - stateless mean-shift functions (squared distance, kernel logits, one step, density, iteration, median bandwidth); not exported from the package.
+- `mean_shift_ops.py` - stateless mean-shift functions (squared distance, kernel logits, one step, density, iteration, median bandwidth); not exported from the package. A masked key gets weight exactly 0 at any bandwidth (the row maximum runs over the kept logits only, no fixed mask constant), and squared distances and Gaussian logits are formed on points centred by a key mean, so a constant offset of the data costs no float32 digits.
 - `mean_shift.py` - `MeanShiftLayer` and the eval-only `assign_clusters`.
 - `factory.py` - `MIXTURE_REGISTRY`, `MixtureType`, `create_mixture_layer`, `create_mixture_from_config`, `get_mixture_info`, `validate_mixture_config`.
 

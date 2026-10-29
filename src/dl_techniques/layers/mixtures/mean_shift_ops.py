@@ -11,9 +11,12 @@ kernel on the unit sphere is the same expression with the key-norm term constant
 This module holds only stateless functions: pairwise squared distance, kernel
 logits, one step, a kernel density, a bounded iteration and a median bandwidth
 heuristic. Every logit, softmax and density is computed in at least float32
-(``utils.dtype_policy.accumulation_dtype``), a masked key has exactly zero weight,
-and a row with no kept key never produces NaN. The module is not exported from
-``layers.mixtures`` and registers nothing.
+(``utils.dtype_policy.accumulation_dtype``), a masked key has exactly zero weight
+whatever the scale of the logits (no fixed sentinel is written into them), and a
+row with no kept key never produces NaN. Squared distances and Gaussian logits
+are formed on points centred by a key mean, so a constant offset of the data does
+not cost float32 digits. The module is not exported from ``layers.mixtures`` and
+registers nothing.
 
 References:
     - Fukunaga and Hostetler, 1975. The estimation of the gradient of a density
@@ -149,29 +152,110 @@ def _keep_all_rescue(keep: Any) -> Any:
     return keras.ops.logical_or(keep, keras.ops.logical_not(any_kept))
 
 
-def pairwise_sq_dist(a: Any, b: Any) -> Any:
+def _to_acc(x: Any, acc: str) -> Any:
+    """Convert an array, Variable or tensor to a tensor of dtype ``acc``.
+
+    :param x: tensor-like operand.
+    :type x: Any
+    :param acc: accumulation dtype name.
+    :type acc: str
+    :return: tensor of dtype ``acc``.
+    :rtype: Any
+    """
+    return keras.ops.cast(keras.ops.convert_to_tensor(x), acc)
+
+
+def _key_centre(keys: Any, key_mask: Optional[Any] = None) -> Any:
+    """Mean of the keys over their row axis, as a constant reference point.
+
+    Distances and Gaussian logits are exactly invariant to subtracting one point
+    from queries and keys, and the expanded form loses digits in float32 when the
+    points sit far from the origin; the centre removes that offset. With a
+    keep-mask the mean runs over the kept keys only, so a value stored at a masked
+    position (a large finite junk value, as padding often is) cannot set the centre.
+    The result carries no gradient.
+
+    :param keys: tensor ``(..., M, D)`` in its accumulation dtype.
+    :type keys: Any
+    :param key_mask: ``None`` or a keep-mask ``(..., M)`` whose leading axes
+        broadcast with those of ``keys``; 1/True keeps.
+    :type key_mask: Optional[Any]
+    :return: tensor ``(..., 1, D)``; the zero vector when no key is kept.
+    :rtype: Any
+    """
+    if key_mask is None:
+        centre = keras.ops.mean(keys, axis=-2, keepdims=True)
+    else:
+        weight = keras.ops.expand_dims(
+            keras.ops.cast(keras.ops.convert_to_tensor(key_mask), keys.dtype), axis=-2
+        )
+        count = keras.ops.sum(weight, axis=-1, keepdims=True)
+        centre = keras.ops.matmul(weight, keys) / keras.ops.maximum(count, 1.0)
+    return keras.ops.stop_gradient(centre)
+
+
+def _masked_exp(logits: Any, keep: Any) -> Tuple[Any, Any]:
+    """Exponentiate max-shifted logits; a masked entry is exactly 0.
+
+    The row maximum is taken over the kept logits only (a masked entry is set to
+    negative infinity for the maximum), so the shift does not depend on the scale
+    of the logits and a kept entry is at most ``exp(0) = 1``. A row with no kept
+    entry has maximum negative infinity and an all-zero result; callers handle it.
+
+    :param logits: tensor ``(..., N, M)`` in the accumulation dtype.
+    :type logits: Any
+    :param keep: boolean tensor broadcastable to ``logits``.
+    :type keep: Any
+    :return: ``(exp(logits - row_max) with masked entries 0, row_max)``, the
+        maximum shaped ``(..., N, 1)`` and carrying no gradient.
+    :rtype: Tuple[Any, Any]
+    """
+    row_max = keras.ops.stop_gradient(
+        keras.ops.max(
+            keras.ops.where(keep, logits, keras.ops.full_like(logits, -math.inf)),
+            axis=-1,
+            keepdims=True,
+        )
+    )
+    shifted = keras.ops.where(keep, logits - row_max, keras.ops.zeros_like(logits))
+    zeros = keras.ops.zeros_like(logits)
+    return keras.ops.where(keep, keras.ops.exp(shifted), zeros), row_max
+
+
+def pairwise_sq_dist(a: Any, b: Any, key_mask: Optional[Any] = None) -> Any:
     """Squared Euclidean distance between every row of ``a`` and every row of ``b``.
 
     Uses the expanded form ``||a||^2 - 2 a.b + ||b||^2`` clamped at 0, so the
     result is never negative and the diagonal of ``pairwise_sq_dist(a, a)`` is
-    zero to float tolerance. The math runs in at least float32 and the result is
+    zero to float tolerance. Both operands are first shifted by the mean of ``b``
+    over its row axis: the distance is exactly invariant to the shift, and the
+    expanded form no longer cancels two large squared norms when the points sit
+    far from the origin. The math runs in at least float32 and the result is
     returned in that accumulation dtype; callers cast back if they need to.
 
     ``utils.tensors.pairwise_squared_distance`` is not reused: it takes centers
     of rank 2 only, one shared set for all batch rows, and subtracts directly,
     which would materialise an ``(..., N, M, D)`` tensor for per-batch keys.
 
-    :param a: tensor ``(..., N, D)``.
+    :param a: tensor-like ``(..., N, D)``.
     :type a: Any
-    :param b: tensor ``(..., M, D)`` whose leading axes broadcast with ``a``.
+    :param b: tensor-like ``(..., M, D)`` whose leading axes broadcast with ``a``.
     :type b: Any
+    :param key_mask: ``None`` or a keep-mask ``(..., M)`` for ``b``; the shift is
+        then the mean of the kept rows of ``b``.
+    :type key_mask: Optional[Any]
     :return: squared distances ``(..., N, M)`` in the accumulation dtype.
     :rtype: Any
     """
     a = keras.ops.convert_to_tensor(a)
     _, acc = _dtype_names(a)
     a = keras.ops.cast(a, acc)
-    b = keras.ops.cast(b, acc)
+    b = _to_acc(b, acc)
+    # DECISION plan-2026-10-29T104646-27f045c5/D-027: shift both operands by a key mean before the expanded form.
+    # Do not drop the shift as redundant: the distance is invariant but float32 cancels without it.
+    centre = _key_centre(b, key_mask)
+    a = a - centre
+    b = b - centre
     # DECISION plan-2026-10-29T104646-27f045c5/D-016: batched matmul form, own function.
     # Do not wrap the rank-2-centers direct-subtraction helper here. See decisions.md.
     a_sq = keras.ops.sum(keras.ops.square(a), axis=-1, keepdims=True)
@@ -188,18 +272,25 @@ def kernel_logits(
     bandwidth: Any,
     kernel: str = "gaussian",
     drop_query_norm: bool = True,
+    key_mask: Optional[Any] = None,
 ) -> Any:
     """Log of the unnormalised kernel weight of every (query, key) pair.
 
-    Gaussian: ``q.k / h^2 - ||k||^2 / (2 h^2)``, minus ``||q||^2 / (2 h^2)`` when
-    ``drop_query_norm`` is False. The query-norm term is constant along the key
-    axis, so a softmax over the keys is the same with or without it. vMF:
-    ``q.k / h^2`` on L2-normalised ``q`` and ``k`` (zero rows stay zero, no NaN);
-    ``drop_query_norm`` has no effect. The bandwidth is not clipped here.
+    Gaussian: ``(q - c).(k - c) / h^2 - ||k - c||^2 / (2 h^2)``, minus
+    ``||q - c||^2 / (2 h^2)`` when ``drop_query_norm`` is False, where ``c`` is the
+    mean of the keys (of the kept keys when ``key_mask`` is given), held constant
+    for differentiation. Centring leaves every difference of logits along the key
+    axis equal to that of ``q.k / h^2 - ||k||^2 / (2 h^2)``, so the logits are
+    defined up to a per-query constant: a softmax over the keys is the same with
+    or without the query-norm term and with or without the centre, and only the
+    centred form keeps its float32 digits when the points sit far from the
+    origin. vMF: ``q.k / h^2`` on L2-normalised ``q`` and ``k`` (zero rows stay
+    zero, no NaN); ``drop_query_norm`` and ``key_mask`` have no effect. The
+    bandwidth is not clipped here.
 
-    :param q: queries ``(..., N, D)``.
+    :param q: queries, tensor-like ``(..., N, D)``.
     :type q: Any
-    :param k: keys ``(..., M, D)``.
+    :param k: keys, tensor-like ``(..., M, D)``.
     :type k: Any
     :param bandwidth: ``h``; a scalar, ``(B, 1, 1)``, ``(B, H, 1, 1)`` or per-query
         ``(..., N, 1)``, aligned from the right with the logits ``(..., N, M)``.
@@ -208,6 +299,9 @@ def kernel_logits(
     :type kernel: str
     :param drop_query_norm: omit the per-query constant of the Gaussian kernel.
     :type drop_query_norm: bool
+    :param key_mask: ``None`` or a keep-mask ``(..., M)`` selecting the keys that
+        set the Gaussian centre; ``None`` uses every key.
+    :type key_mask: Optional[Any]
     :return: logits ``(..., N, M)`` in the accumulation dtype.
     :rtype: Any
     :raises ValueError: if ``kernel`` is not a supported name.
@@ -216,7 +310,7 @@ def kernel_logits(
     q = keras.ops.convert_to_tensor(q)
     _, acc = _dtype_names(q)
     q = keras.ops.cast(q, acc)
-    k = keras.ops.cast(k, acc)
+    k = _to_acc(k, acc)
     h = _as_dtype(bandwidth, acc)
     inv_h2 = 1.0 / (h * h)
 
@@ -225,6 +319,11 @@ def kernel_logits(
         k = _normalize_rows(k)
         return keras.ops.matmul(q, keras.ops.swapaxes(k, -1, -2)) * inv_h2
 
+    # DECISION plan-2026-10-29T104646-27f045c5/D-027: centre queries and keys by a key mean.
+    # Do not form q.k - ||k||^2 / 2 on raw points: float32 loses the distances far from the origin.
+    centre = _key_centre(k, key_mask)
+    q = q - centre
+    k = k - centre
     cross = keras.ops.matmul(q, keras.ops.swapaxes(k, -1, -2))
     k_sq = keras.ops.expand_dims(
         keras.ops.sum(keras.ops.square(k), axis=-1), axis=-2
@@ -234,6 +333,11 @@ def kernel_logits(
         q_sq = keras.ops.sum(keras.ops.square(q), axis=-1, keepdims=True)
         logits = logits - 0.5 * q_sq * inv_h2
     return logits
+
+
+def _logit_rank(q: Any, k: Any) -> int:
+    """Rank of the ``(..., N, M)`` logits of two ``(..., N or M, D)`` operands."""
+    return max(len(q.shape), len(k.shape))
 
 
 def mean_shift_step(
@@ -247,16 +351,19 @@ def mean_shift_step(
     """One mean-shift step: the kernel-weighted mean of ``v`` for every query.
 
     Weights are ``softmax(kernel_logits(q, k, h))`` over the key axis. A masked
-    key is removed by ``where`` selection on the logits and again on the weights,
-    so its weight is exactly 0.0. A row with no kept key gets uniform weights over
-    all keys, so its output is the plain mean of ``v``. For the vMF kernel only the
-    logits normalise ``q`` and ``k``; ``v`` is used as given.
+    key is excluded without any fixed sentinel: the row maximum is taken over the
+    kept logits only and a masked weight is set to exactly 0.0, so the result does
+    not depend on the scale of the logits (a tiny bandwidth gives logits of
+    ``-1e12`` and below). A row with no kept key gets uniform weights over all
+    keys, so its output is the plain mean of ``v``. With a mask the Gaussian centre
+    is the mean of the kept keys. For the vMF kernel only the logits normalise
+    ``q`` and ``k``; ``v`` is used as given.
 
-    :param q: queries ``(..., N, D)``.
+    :param q: queries, tensor-like ``(..., N, D)``.
     :type q: Any
-    :param k: keys ``(..., M, D)``.
+    :param k: keys, tensor-like ``(..., M, D)``.
     :type k: Any
-    :param v: values ``(..., M, Dv)``, or ``None`` to use ``k``.
+    :param v: values, tensor-like ``(..., M, Dv)``, or ``None`` to use ``k``.
     :type v: Optional[Any]
     :param bandwidth: ``h``, as in :func:`kernel_logits`.
     :type bandwidth: Any
@@ -276,18 +383,21 @@ def mean_shift_step(
     q = keras.ops.convert_to_tensor(q)
     out_dtype, acc = _dtype_names(q)
     q = keras.ops.cast(q, acc)
-    k = keras.ops.cast(k, acc)
-    v = k if v is None else keras.ops.cast(v, acc)
+    k = _to_acc(k, acc)
+    v = k if v is None else _to_acc(v, acc)
 
-    logits = kernel_logits(q, k, bandwidth, kernel)
-    keep = _keep_mask(mask, len(logits.shape))
+    keep = _keep_mask(mask, _logit_rank(q, k))
+    key_mask = None if keep is None else keras.ops.any(keep, axis=-2)
+    logits = kernel_logits(q, k, bandwidth, kernel, key_mask=key_mask)
     if keep is None:
         weights = keras.ops.softmax(logits, axis=-1)
     else:
-        sentinel = keras.ops.full_like(logits, mask_sentinel(acc))
-        weights = keras.ops.softmax(keras.ops.where(keep, logits, sentinel), axis=-1)
-        weights = keras.ops.where(keep, weights, keras.ops.zeros_like(weights))
+        # DECISION plan-2026-10-29T104646-27f045c5/D-027: masked weights come from a max over kept logits only.
+        # Do not write a fixed sentinel into the logits: at a tiny bandwidth the kept ones are below it.
+        expd, _ = _masked_exp(logits, keep)
+        total = keras.ops.sum(expd, axis=-1, keepdims=True)
         any_kept = keras.ops.any(keep, axis=-1, keepdims=True)
+        weights = expd / keras.ops.where(any_kept, total, keras.ops.ones_like(total))
         # DECISION plan-2026-10-29T104646-27f045c5/D-004: a row with no kept key gets uniform weights.
         # Do not leave it to the sentinel softmax or a kernel-weighted keep-all rescue. See decisions.md.
         uniform = keras.ops.ones_like(weights) / keras.ops.cast(
@@ -295,7 +405,10 @@ def mean_shift_step(
         )
         weights = keras.ops.where(any_kept, weights, uniform)
 
-    shifted = keras.ops.matmul(weights, v)
+    # The weights sum to 1, so averaging the centred values and adding the centre back
+    # is the same mean, without float32 rounding of values far from the origin.
+    v_centre = _key_centre(v, key_mask)
+    shifted = keras.ops.matmul(weights, v - v_centre) + v_centre
     return keras.ops.cast(shifted, out_dtype), weights
 
 
@@ -310,12 +423,14 @@ def kde_log_density(
     ``log p(x) = logsumexp_j(-||x - x_j||^2 / (2 h^2)) - log N_valid
     - (d / 2) log(2 pi h^2)`` where ``N_valid`` counts the kept keys (at least 1).
     The query-norm term is kept: this is a density, not a softmax. Masked keys are
-    excluded from the logsumexp by ``where`` selection. A row with no kept key
-    treats every key as kept (``N_valid`` is then the key count), so it is finite.
+    excluded from the logsumexp without a fixed sentinel (the maximum is taken
+    over the kept terms only), so the value is the density of the kept subset at
+    any bandwidth. A row with no kept key treats every key as kept (``N_valid`` is
+    then the key count), so it is finite.
 
-    :param q: query points ``(..., N, D)``.
+    :param q: query points, tensor-like ``(..., N, D)``.
     :type q: Any
-    :param k: keys ``(..., M, D)``.
+    :param k: keys, tensor-like ``(..., M, D)``.
     :type k: Any
     :param bandwidth: ``h``, as in :func:`kernel_logits`.
     :type bandwidth: Any
@@ -326,23 +441,27 @@ def kde_log_density(
     """
     q = keras.ops.convert_to_tensor(q)
     _, acc = _dtype_names(q)
+    k = _to_acc(k, acc)
     h = _as_dtype(bandwidth, acc)
     dim = q.shape[-1]
 
-    log_kernel = -pairwise_sq_dist(q, k) / (2.0 * h * h)
-    keep = _keep_mask(mask, len(log_kernel.shape))
+    keep = _keep_mask(mask, _logit_rank(q, k))
+    key_mask = None if keep is None else keras.ops.any(keep, axis=-2)
+    log_kernel = -pairwise_sq_dist(q, k, key_mask) / (2.0 * h * h)
     if keep is None:
         n_valid = keras.ops.cast(keras.ops.shape(log_kernel)[-1], acc)
+        log_sum = keras.ops.logsumexp(log_kernel, axis=-1, keepdims=True)
     else:
         keep = _keep_all_rescue(keep)
-        sentinel = keras.ops.full_like(log_kernel, mask_sentinel(acc))
-        log_kernel = keras.ops.where(keep, log_kernel, sentinel)
         n_valid = keras.ops.sum(
             keras.ops.cast(keep, acc), axis=-1, keepdims=True
         )
+        expd, row_max = _masked_exp(log_kernel, keep)
+        log_sum = row_max + keras.ops.log(
+            keras.ops.sum(expd, axis=-1, keepdims=True)
+        )
     n_valid = keras.ops.maximum(n_valid, 1.0)
 
-    log_sum = keras.ops.logsumexp(log_kernel, axis=-1, keepdims=True)
     log_norm = 0.5 * dim * (math.log(2.0 * math.pi) + 2.0 * keras.ops.log(h))
     return keras.ops.squeeze(
         log_sum - keras.ops.log(n_valid) - log_norm, axis=-1
@@ -367,7 +486,7 @@ def mean_shift_iterate(
     The mask applies to the keys at every step; masked query rows are computed
     like any other and stay finite, callers ignore them.
 
-    :param x: points ``(B, N, D)``.
+    :param x: tensor-like points ``(B, N, D)``.
     :type x: Any
     :param bandwidth: ``h``, as in :func:`kernel_logits`.
     :type bandwidth: Any
@@ -429,8 +548,10 @@ def median_heuristic_bandwidth(x: Any, mask: Optional[Any] = None) -> Any:
     ``take``, so it needs no data-dependent Python control flow and works with an
     unknown ``N``. A sample with fewer than two valid points gets 1.0. The result
     is floored at a small positive value so it is never 0, and carries no gradient.
+    The distances are formed on points centred by the mean of the kept points, so
+    a constant offset of ``x`` does not change the median beyond float32 rounding.
 
-    :param x: points ``(B, N, D)``.
+    :param x: tensor-like points ``(B, N, D)``.
     :type x: Any
     :param mask: ``None`` or a keep-mask ``(B, N)``.
     :type mask: Optional[Any]
@@ -445,7 +566,8 @@ def median_heuristic_bandwidth(x: Any, mask: Optional[Any] = None) -> Any:
     out_dtype, acc = _dtype_names(x)
     x = keras.ops.cast(x, acc)
 
-    dist = keras.ops.sqrt(pairwise_sq_dist(x, x))
+    keep = _keep_mask(mask, 2)
+    dist = keras.ops.sqrt(pairwise_sq_dist(x, x, keep))
     size = keras.ops.shape(dist)[1]
     ids = keras.ops.arange(size)
     off_diagonal = keras.ops.expand_dims(
@@ -457,7 +579,6 @@ def median_heuristic_bandwidth(x: Any, mask: Optional[Any] = None) -> Any:
     valid = keras.ops.logical_and(
         off_diagonal, keras.ops.ones_like(dist, dtype="bool")
     )
-    keep = _keep_mask(mask, 2)
     if keep is not None:
         pair = keras.ops.logical_and(
             keras.ops.expand_dims(keep, axis=2), keras.ops.expand_dims(keep, axis=1)

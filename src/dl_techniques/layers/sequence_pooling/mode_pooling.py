@@ -56,6 +56,15 @@ class ModePooling(keras.layers.Layer):
     the sequence, so the output depends on token order; with ``num_starts=1``
     it does not.
 
+    ``bandwidth="auto"`` sorts the ``seq_len ** 2`` pair distances of every sample,
+    about ``O(seq_len^2 log seq_len)`` per sample, and that sort dominates the cost.
+    On CPU in eager mode at batch 8 and ``embed_dim`` 64 a call takes 72, 420 and
+    1700 ms at ``seq_len`` 256, 1024 and 2048, against 37, 45 and 50 ms with a
+    float bandwidth. Pass a float ``bandwidth`` for long sequences. Distances are
+    formed on points centred by the mean of the kept tokens, so a constant offset of
+    the tokens moves the mode by the offset and by float32 rounding only, and a
+    masked token has zero weight at any bandwidth, however small.
+
     **Architecture Overview:**
 
     .. code-block:: text

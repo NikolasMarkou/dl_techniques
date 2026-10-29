@@ -290,6 +290,112 @@ class TestGradients:
         assert layer.weights == []
 
 
+GRID = 1024.0
+DUPLICATE_POINT = -0.5
+
+
+def _grid_outlier_data(seed=0, dim=8):
+    """70 inliers (std 0.05) and 30 outliers (std 0.2) on a 2^-10 grid.
+
+    On this grid a shift by an integer up to 1000 is exact in float32, so only the
+    layer's own arithmetic can move the result.
+    """
+    rng = np.random.default_rng(seed)
+    inliers = 0.05 * rng.normal(size=(70, dim))
+    far = np.zeros(dim)
+    far[0] = 2.0
+    outliers = far + 0.2 * rng.normal(size=(30, dim))
+    tokens = np.round(np.concatenate([inliers, outliers]) * GRID) / GRID
+    return tokens[None].astype("float32")
+
+
+def _duplicate_data(seed=0, dim=8, n_duplicates=85, n_others=15):
+    """More than 71 percent identical tokens, so the median pair distance is 0."""
+    rng = np.random.default_rng(seed)
+    duplicates = np.full((n_duplicates, dim), DUPLICATE_POINT)
+    others = 3.0 + 0.3 * rng.normal(size=(n_others, dim))
+    return np.concatenate([duplicates, others])[None].astype("float32")
+
+
+def _mask_last(total, masked):
+    keep = np.ones((1, total), dtype="float32")
+    keep[0, total - masked:] = 0.0
+    return keep
+
+
+class TestTranslationAndSmallBandwidths:
+    """A constant offset of the tokens, a tiny bandwidth and duplicated tokens."""
+
+    @pytest.mark.parametrize("bandwidth", ["auto", 0.1])
+    @pytest.mark.parametrize("offset", [0.0, 10.0, 100.0, 1000.0])
+    def test_the_mode_moves_with_a_constant_offset_of_the_tokens(self, bandwidth, offset):
+        tokens = _grid_outlier_data()
+        shifted = (tokens.astype("float64") + offset).astype("float32")
+        assert (shifted.astype("float64") - offset == tokens).all()
+        base = _np(ModePooling(num_steps=10, bandwidth=bandwidth)(tokens))
+        moved = _np(ModePooling(num_steps=10, bandwidth=bandwidth)(shifted)) - offset
+        # Measured at most 0.6 float32 ulp of the shifted value (6.1e-5 near 1000), so
+        # the bound is 2 ulp; the uncentred distance form was off by 0.13 at 1000.
+        bound = 2.0 * float(np.spacing(np.float32(offset + 4.0))) + 1e-6
+        assert np.abs(moved - base).max() <= bound, (offset, np.abs(moved - base).max())
+
+    def test_a_tiny_bandwidth_with_a_mask_returns_the_duplicated_point_not_zeros(self):
+        tokens = _duplicate_data()
+        mask = _mask_last(100, 5)
+        pooled, density = ModePooling(num_steps=5, return_density=True)(tokens, mask)
+        np.testing.assert_allclose(_np(pooled), DUPLICATE_POINT, rtol=0, atol=1e-6)
+        # At h = 1e-6 the float32 squared distance to the duplicated point carries
+        # rounding noise of about 1e-7 (a log density near -6e4 here), so only the
+        # absence of the old -1e9 mask constant is pinned; the ops tests pin the value.
+        assert np.isfinite(_np(density)).all() and _np(density)[0] > -1e6
+
+    @pytest.mark.parametrize("bandwidth", [1e-6, 1e-4])
+    def test_a_float_bandwidth_far_below_the_data_scale_with_a_mask_stays_on_the_data(self, bandwidth):
+        tokens = _duplicate_data()
+        mask = _mask_last(100, 5)
+        pooled = _np(ModePooling(num_steps=5, bandwidth=bandwidth)(tokens, mask))
+        np.testing.assert_allclose(pooled, DUPLICATE_POINT, rtol=0, atol=1e-6)
+
+    @pytest.mark.parametrize("num_starts", [1, 4])
+    @pytest.mark.parametrize("masked", [0, 5])
+    def test_mostly_identical_tokens_pool_to_that_token(self, num_starts, masked):
+        tokens = _duplicate_data()
+        mask = _mask_last(100, masked) if masked else None
+        layer = ModePooling(num_steps=5, num_starts=num_starts, return_density=True)
+        pooled, density = layer(tokens) if mask is None else layer(tokens, mask)
+        np.testing.assert_allclose(_np(pooled), DUPLICATE_POINT, rtol=0, atol=1e-6)
+        assert np.isfinite(_np(density)).all()
+
+    @pytest.mark.parametrize("num_starts", [1, 4])
+    @pytest.mark.parametrize("masked", [0, 5])
+    def test_the_gradients_stay_finite_with_identical_tokens_and_a_mask(self, num_starts, masked):
+        tokens = tf.constant(_duplicate_data())
+        mask = tf.constant(_mask_last(100, masked)) if masked else None
+        layer = ModePooling(num_steps=3, num_starts=num_starts)
+        with tf.GradientTape() as tape:
+            tape.watch(tokens)
+            out = layer(tokens) if mask is None else layer(tokens, mask)
+            loss = tf.reduce_sum(out * tf.range(1.0, 9.0))
+        grad = _np(tape.gradient(loss, tokens))
+        assert np.isfinite(grad).all()
+        if masked:
+            assert np.abs(grad[:, 95:]).max() == 0.0
+
+    def test_the_gradient_is_finite_for_a_shifted_token_set(self):
+        tokens = tf.constant((_grid_outlier_data().astype("float64") + 1000.0).astype("float32"))
+        layer = ModePooling(num_steps=3, bandwidth=0.1)
+        with tf.GradientTape() as tape:
+            tape.watch(tokens)
+            loss = tf.reduce_sum(layer(tokens) * tf.range(1.0, 9.0))
+        assert np.isfinite(_np(tape.gradient(loss, tokens))).all()
+
+    def test_a_fully_masked_row_stays_the_plain_mean_at_a_tiny_bandwidth(self):
+        tokens = _duplicate_data()
+        mask = np.zeros((1, 100), dtype="float32")
+        pooled = _np(ModePooling(num_steps=5, bandwidth=1e-6)(tokens, mask))
+        np.testing.assert_allclose(pooled, tokens.mean(axis=1), rtol=0, atol=1e-6)
+
+
 class TestPrecisionAndGraphs:
     def test_mixed_float16_is_finite_and_close_to_float32(self, mixed_float16_policy):
         rng = np.random.default_rng(10)
