@@ -25,7 +25,7 @@ import tensorflow as tf
 from typing import Dict, Any
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.language.mamba import MambaLayer, MambaResidualBlock
+from dl_techniques.layers.ssm.selective_ssm import MambaLayer, MambaResidualBlock
 
 # =============================================================================
 # Test Fixtures

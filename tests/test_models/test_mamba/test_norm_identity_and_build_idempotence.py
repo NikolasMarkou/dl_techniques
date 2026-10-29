@@ -115,11 +115,19 @@ class TestTheNormIsReallyRMSNorm:
 
 
 class TestPackageExports:
-    """F-59. Every class the package imports must be in `__all__`."""
+    """F-59. Every class the package imports must be in `__all__`.
 
-    @pytest.mark.parametrize(
-        "name", ["MambaLayer", "Mamba", "MambaResidualBlock", "Mamba2Layer", "Mamba2", "Mamba2ResidualBlock"]
-    )
+    The `layers/ssm` classes are imported from `dl_techniques.layers.ssm`, not re-exported here.
+    """
+
+    @pytest.mark.parametrize("name", ["Mamba", "Mamba2", "create_mamba", "create_mamba2"])
     def test_public_class_is_exported(self, name):
         assert name in mamba_pkg.__all__
         assert getattr(mamba_pkg, name).__name__ == name
+
+    @pytest.mark.parametrize(
+        "name", ["MambaLayer", "MambaResidualBlock", "Mamba2Layer", "Mamba2ResidualBlock"]
+    )
+    def test_layer_classes_are_not_reexported(self, name):
+        assert name not in mamba_pkg.__all__
+        assert not hasattr(mamba_pkg, name)
