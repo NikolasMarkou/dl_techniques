@@ -230,6 +230,10 @@ class GatedAdapter(keras.layers.Layer):
             raise ValueError(f"alpha must be positive, got {alpha}")
         if num_phases <= 0:
             raise ValueError(f"num_phases must be positive, got {num_phases}")
+        if adapter_type != 'local_support':
+            raise ValueError(
+                f"adapter_type must be 'local_support', got {adapter_type!r}"
+            )
 
         gate_args = dict(gate_args or {})
         for reserved in ('input_dim', 'name'):

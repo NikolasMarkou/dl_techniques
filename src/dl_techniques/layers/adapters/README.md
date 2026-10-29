@@ -90,7 +90,7 @@ adapter.set_active_phases([1])           # stop applying phase 0
 - Old checkpoints: a saved config that uses the old `num_occurrences` key is accepted by `LoRAAdapter.from_config` (with a warning), which rewrites it to `num_adapters`. If both keys are present with different values it raises. `call` also still accepts the `occurrence_idx` keyword as an alias of `adapter_idx`, and the `num_occurrences` property reads `num_adapters`.
 - Slot initialisation: each slot's `A` slice is drawn from its own clone of the initializer. Handing one initializer instance to every slice made all slots identical. `B` is zeros.
 - `GatedAdapter` is not a factory key. Construct it by class name.
-- `GatedAdapter.adapter_type` is stored and serialized, but `build` always creates the `lora` adapter; the value does not change what is built.
+- `GatedAdapter.adapter_type` has one valid value, `'local_support'`, which builds a `lora` adapter per phase; any other value raises `ValueError`. It is stored and serialized.
 - `GatedAdapter.call` casts inputs to float32 and returns float32.
 - If every phase is inactive, `call` returns a zero tensor of the right shape.
 - Selecting a single `phase_idx` that is not in `active_phases` raises `ValueError`.

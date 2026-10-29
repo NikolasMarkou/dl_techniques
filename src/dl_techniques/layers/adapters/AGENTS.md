@@ -109,7 +109,7 @@ Factory functions (`factory.py`):
 - Unfitted gate: no error. The phase's contribution is zero. Check `is_phase_fitted`.
 - `fit_gate` before the layer is built: `self.gates` is empty, so the per-phase lookup fails with `IndexError`. Build or call the layer first.
 - Legacy config with both `num_occurrences` and a different `num_adapters`: `ValueError` from `from_config`.
-- `adapter_type` on `GatedAdapter` is stored and serialized but `build` always creates `'lora'`; a different value does not change the build and is not validated.
+- `adapter_type` on `GatedAdapter` is validated in `__init__` (only `'local_support'`, else `ValueError`), stored and serialized; `build` always creates `'lora'`, so the value cannot change what is built. Add a dispatch table if a second type is ever added.
 - The `GatedAdapter` class docstring says sub-layers are created in `__init__` and `fit_gate` returns `{'pos','neg'}`; the code creates them in `build` and returns per-phase nested dicts. Trust the code.
 
 ## Working here
