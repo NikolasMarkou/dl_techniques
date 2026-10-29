@@ -464,6 +464,7 @@ This package is the image branch only.
 | Padding | symmetric `kernel_size // 2` at every convolution (`padding_mode='reference'`: `ZeroPadding2D` + a `'valid'` conv). Keras' `'same'` pads asymmetrically, so at stride 2 the sampled grid depends on the kernel size (MEASURED with Dirac kernels on a `4 x 4` ramp: `[[0, 2], [8, 10]]` for `k=1`, `[[5, 7], [13, 15]]` for `k=3`). Value-identical to `'same'` for an odd kernel at stride 1. |
 | Attention heads | `dim // 32` |
 | Drop-path schedule | one global linear ramp over `sum(layers)` blocks, sliced stagewise |
+| Kernel initializer | every kernel draws independently: the encoder stores a spec (`initializer_spec`), each block and `MobileOneBlock` / `ReparamLargeKernelConv` hand every sub-layer `clone_initializer(...)`, and attention passes `output_kernel_initializer` so `qkv` and `proj` separate. Before this, one seedless instance fed the whole tower (1653 of 7626 mci0 kernel pairs replayed one draw). A seeded initializer still replays by contract. Guard: `tests/test_models/test_fastvit/test_no_two_kernels_replay_one_draw.py`. |
 | SE ratios | **two in one network** — `1/16` inside `MobileOneBlock`, `0.25` inside the large-kernel conv |
 | SE ordering | SE runs BEFORE the activation: `act(se(x))` |
 

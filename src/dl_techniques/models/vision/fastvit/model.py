@@ -58,6 +58,7 @@ from dl_techniques.layers.activations.exact_activations import exact_name
 from dl_techniques.layers.activations.gelu_tanh import resolve_activation
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
+from dl_techniques.initializers.clone import initializer_spec
 from dl_techniques.layers.conv_blocks.mobile_one_block import MobileOneBlock
 from .components import (
     FastVitStage,
@@ -433,7 +434,10 @@ class FastVitImageEncoder(keras.Model):
         self.down_stride = int(down_stride)
         self.repmixer_kernel_size = int(repmixer_kernel_size)
         self.activation = resolve_activation(activation)  # D-277: float64-exact, bit-identical to stock at float32
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        # A spec (string or dict), never an instance: every site below resolves its
+        # own instance from it, so no two kernels replay one draw. A seeded spec
+        # still replays at every site, by contract (`initializers/clone.py`).
+        self.kernel_initializer = initializer_spec(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         self._validate_config()
@@ -792,7 +796,7 @@ class FastVitImageEncoder(keras.Model):
             'down_stride': self.down_stride,
             'repmixer_kernel_size': self.repmixer_kernel_size,
             'activation': exact_name(self.activation) or keras.activations.serialize(self.activation),
-            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'kernel_initializer': self.kernel_initializer,
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
         })
         return config
@@ -809,8 +813,6 @@ class FastVitImageEncoder(keras.Model):
         config['input_shape'] = tuple(config['input_shape'])
         # resolve, not keras.activations.deserialize: "gelu" must come back as exact_gelu (D-277)
         config['activation'] = resolve_activation(config['activation'])
-        config['kernel_initializer'] = keras.initializers.deserialize(
-            config['kernel_initializer'])
         config['kernel_regularizer'] = keras.regularizers.deserialize(
             config['kernel_regularizer'])
         return cls(**config)

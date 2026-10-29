@@ -46,6 +46,16 @@ weights are ported that a fusion path could be validated against. If you need th
 fused form, write it as an explicit, separately tested conversion pass over a
 trained model; do not change these blocks' ``call()`` paths.
 
+**Every sub-layer gets its own initializer.** Each block resolves its
+``kernel_initializer`` once and hands every sub-layer
+``clone_initializer(self.kernel_initializer)``, never the attribute itself: one
+seedless ``Initializer`` instance reaching several weights replays one sample at
+each (``initializers/clone.py``). Before this rule the whole mci0 tower drew from one
+``he_normal`` stream, 1653 of 7626 kernel pairs replaying, every RepMixer block of a
+stage starting from the same mixer kernels. A SEEDED initializer still replays at
+every site, by contract. Pinned by ``tests/test_models/test_fastvit/
+test_no_two_kernels_replay_one_draw.py``.
+
 **Reference-fidelity constants.** Two facts below are properties of the timm /
 MobileCLIP2 reference, not of any one block, and BOTH are silent when wrong: a
 normalization epsilon and a padding convention are invisible to every shape
@@ -75,6 +85,7 @@ from typing import Optional, Union, Tuple, List, Sequence, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.layers.activations.exact_activations import exact_name
 from dl_techniques.layers.activations.gelu_tanh import resolve_activation
 from dl_techniques.layers.attention.factory import create_attention_layer
@@ -336,7 +347,7 @@ class FastVitConvMlp(keras.layers.Layer):
             strides=1,
             padding='same',
             use_bias=False,
-            depthwise_initializer=self.kernel_initializer,
+            depthwise_initializer=clone_initializer(self.kernel_initializer),
             depthwise_regularizer=self.kernel_regularizer,
             name='dw_conv'
         )
@@ -353,7 +364,7 @@ class FastVitConvMlp(keras.layers.Layer):
             activation=self.activation,
             dropout_rate=self.dropout_rate,
             use_bias=True,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
@@ -601,7 +612,7 @@ class FastVitRepMixer(keras.layers.Layer):
             num_conv_branches=0,
             norm_epsilon=REFERENCE_NORM_EPSILON,
             padding_mode=REFERENCE_PADDING_MODE,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name='norm',
         )
@@ -613,7 +624,7 @@ class FastVitRepMixer(keras.layers.Layer):
             use_act=False,
             norm_epsilon=REFERENCE_NORM_EPSILON,
             padding_mode=REFERENCE_PADDING_MODE,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name='mixer',
         )
@@ -868,7 +879,7 @@ class FastVitRepMixerBlock(keras.layers.Layer):
             dim=self.dim,
             kernel_size=self.kernel_size,
             layer_scale_init_value=self.layer_scale_init_value,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name='token_mixer',
         )
@@ -1120,7 +1131,7 @@ class FastVitPatchEmbed(keras.layers.Layer):
             activation=self.activation if self.lkc_use_act else None,
             padding_mode=REFERENCE_PADDING_MODE,
             norm_epsilon=REFERENCE_NORM_EPSILON,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name='proj_lkc',
         )
@@ -1132,7 +1143,7 @@ class FastVitPatchEmbed(keras.layers.Layer):
             activation=self.activation,
             norm_epsilon=REFERENCE_NORM_EPSILON,
             padding_mode=REFERENCE_PADDING_MODE,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name='proj_mobileone',
         )
@@ -1483,7 +1494,10 @@ class FastVitAttentionBlock(keras.layers.Layer):
             num_heads=self.num_heads,
             dropout_rate=self.attention_dropout_rate,
             use_bias=False,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
+            # `MultiHeadAttention` hands ONE instance to `qkv` and `proj` unless told
+            # otherwise, and the two then replay one draw. A second clone separates them.
+            output_kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
         )
         self.layer_scale_1 = _create_layer_scale(
@@ -1906,7 +1920,7 @@ class FastVitStage(keras.layers.Layer):
                 use_se=self.se_downsample,
                 lkc_use_act=self.lkc_use_act,
                 activation=self.activation,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name='downsample',
             )
@@ -1916,7 +1930,7 @@ class FastVitStage(keras.layers.Layer):
             RepConditionalPosEnc(
                 dim=self.dim,
                 spatial_shape=self.pos_emb_spatial_shape,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name='pos_emb',
             )
@@ -1999,7 +2013,7 @@ class FastVitStage(keras.layers.Layer):
                 drop_path_rate=drop_path_rate,
                 layer_scale_init_value=self.layer_scale_init_value,
                 activation=self.activation,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=name,
             )
@@ -2012,7 +2026,7 @@ class FastVitStage(keras.layers.Layer):
             drop_path_rate=drop_path_rate,
             layer_scale_init_value=self.layer_scale_init_value,
             activation=self.activation,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name=name,
         )

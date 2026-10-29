@@ -20,7 +20,6 @@ References:
 
 import keras
 from typing import Optional, Union, Tuple, Dict, Any
-from keras import layers, initializers, regularizers, activations
 
 # ---------------------------------------------------------------------
 # local imports
@@ -28,6 +27,7 @@ from keras import layers, initializers, regularizers, activations
 
 from dl_techniques.layers.activations.exact_activations import exact_name
 from dl_techniques.layers.activations.gelu_tanh import resolve_activation
+from dl_techniques.initializers.clone import clone_initializer
 from .squeeze_excitation import SqueezeExcitation
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -290,10 +290,10 @@ class MobileOneBlock(keras.layers.Layer):
             norm_epsilon: float = 1e-3,
             se_position: str = 'post_act',
             activation: Union[str, callable] = 'gelu',
-            kernel_initializer: Union[str, initializers.Initializer] = 'he_normal',
-            bias_initializer: Union[str, initializers.Initializer] = 'zeros',
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
-            bias_regularizer: Optional[regularizers.Regularizer] = None,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
+            bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -338,8 +338,12 @@ class MobileOneBlock(keras.layers.Layer):
         self.se_use_bias = se_use_bias
         self.se_position = se_position
         self.activation = resolve_activation(activation)  # D-277: float64-exact, bit-identical to stock at float32
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
+        # Every kernel this block creates takes `clone_initializer(self.kernel_initializer)`,
+        # never the bare attribute: one resolved seedless instance handed to several weights
+        # replays one sample at each (measured in a FastViT tower: the conv branch and the
+        # scale branch were one draw, a rescaled prefix; see `initializers/clone.py`).
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = kernel_regularizer
         self.bias_regularizer = bias_regularizer
 
@@ -368,7 +372,7 @@ class MobileOneBlock(keras.layers.Layer):
             self.se_block = SqueezeExcitation(
                 reduction_ratio=self.se_reduction_ratio,
                 use_bias=self.se_use_bias,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name='se_block'
             )
@@ -385,18 +389,18 @@ class MobileOneBlock(keras.layers.Layer):
         for i in range(self.num_conv_branches):
             conv_branch = keras.Sequential(
                 self._padding_layers(self.kernel_size, f'conv_branch_{i}_pad') + [
-                    layers.Conv2D(
+                    keras.layers.Conv2D(
                         filters=self.out_channels,
                         kernel_size=self.kernel_size,
                         strides=self.stride,
                         padding=self._keras_padding(self.kernel_size),
                         use_bias=False,
                         groups=groups,
-                        kernel_initializer=self.kernel_initializer,
+                        kernel_initializer=clone_initializer(self.kernel_initializer),
                         kernel_regularizer=self.kernel_regularizer,
                         name=f'conv_branch_{i}_conv'
                     ),
-                    layers.BatchNormalization(
+                    keras.layers.BatchNormalization(
                         epsilon=self.norm_epsilon, name=f'conv_branch_{i}_bn')
                 ], name=f'conv_branch_{i}')
             self.conv_branches.append(conv_branch)
@@ -415,7 +419,7 @@ class MobileOneBlock(keras.layers.Layer):
         pad, _ = resolve_conv_padding(kernel_size, self.padding, self.padding_mode)
         if pad == 0:
             return []
-        return [layers.ZeroPadding2D(padding=pad, name=name)]
+        return [keras.layers.ZeroPadding2D(padding=pad, name=name)]
 
     def _keras_padding(self, kernel_size: int) -> str:
         """Return the ``padding`` value to pass to ``Conv2D`` for this kernel size.
@@ -444,18 +448,18 @@ class MobileOneBlock(keras.layers.Layer):
         # the `i * stride` grid, so the two branches sum the SAME input pixels.
         return keras.Sequential(
             self._padding_layers(1, 'scale_branch_pad') + [
-                layers.Conv2D(
+                keras.layers.Conv2D(
                     filters=self.out_channels,
                     kernel_size=1,
                     strides=self.stride,
                     padding=self._keras_padding(1),
                     use_bias=False,
                     groups=groups,
-                    kernel_initializer=self.kernel_initializer,
+                    kernel_initializer=clone_initializer(self.kernel_initializer),
                     kernel_regularizer=self.kernel_regularizer,
                     name='scale_branch_conv'
                 ),
-                layers.BatchNormalization(
+                keras.layers.BatchNormalization(
                     epsilon=self.norm_epsilon, name='scale_branch_bn')
             ], name='scale_branch')
 
@@ -498,7 +502,7 @@ class MobileOneBlock(keras.layers.Layer):
 
         # Create skip branch if input/output channels match and stride is 1
         if input_channels == self.out_channels and self.stride == 1:
-            self.skip_branch = layers.BatchNormalization(
+            self.skip_branch = keras.layers.BatchNormalization(
                 epsilon=self.norm_epsilon, name='skip_branch_bn')
 
         # Build all sub-layers explicitly
@@ -624,11 +628,11 @@ class MobileOneBlock(keras.layers.Layer):
             'se_reduction_ratio': self.se_reduction_ratio,
             'se_use_bias': self.se_use_bias,
             'se_position': self.se_position,
-            'activation': exact_name(self.activation) or activations.serialize(self.activation),
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
-            'bias_initializer': initializers.serialize(self.bias_initializer),
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-            'bias_regularizer': regularizers.serialize(self.bias_regularizer),
+            'activation': exact_name(self.activation) or keras.activations.serialize(self.activation),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
 

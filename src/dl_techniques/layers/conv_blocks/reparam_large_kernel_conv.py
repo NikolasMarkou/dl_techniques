@@ -74,6 +74,7 @@ from typing import Optional, Union, Tuple, Dict, Any
 from dl_techniques.layers.activations.exact_activations import exact_name
 from dl_techniques.layers.activations.gelu_tanh import resolve_activation
 from ..norms.factory import create_normalization_layer
+from dl_techniques.initializers.clone import clone_initializer
 from .squeeze_excitation import SqueezeExcitation
 # Single definition of timm's `num_groups` mapping, shared with MobileOneBlock.
 # Do NOT re-implement it here: the two layers must resolve `group_size`
@@ -273,6 +274,9 @@ class ReparamLargeKernelConv(keras.layers.Layer):
         self.activation = (
             None if activation is None else resolve_activation(activation)  # D-277: float64-exact, bit-identical to stock at float32
         )
+        # The large branch, the small branch and the SE gate each take
+        # `clone_initializer(self.kernel_initializer)`: one shared seedless instance made
+        # the 3x3 kernel a rescaled prefix of the 7x7 draw (see `initializers/clone.py`).
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
@@ -302,7 +306,7 @@ class ReparamLargeKernelConv(keras.layers.Layer):
             self.se = SqueezeExcitation(
                 reduction_ratio=_REFERENCE_SE_REDUCTION_RATIO,
                 use_bias=_REFERENCE_SE_USE_BIAS,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name='se',
             )
@@ -348,7 +352,7 @@ class ReparamLargeKernelConv(keras.layers.Layer):
                 padding=keras_padding,
                 use_bias=False,
                 groups=groups,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f'{name}_conv',
             ),

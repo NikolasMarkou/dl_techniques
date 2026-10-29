@@ -71,6 +71,7 @@ ROOTS = ("src", "tests")
 #: 419 / 400 after ``dasiamrpn/model.py`` and its test moved to ``keras.ops`` (the same plan, step 18).
 #: 418 / 399 after ``sam1/prompt_encoder.py`` moved to ``keras.ops`` and ``keras.layers`` (the same plan, step 19).
 #: 402 / 383 after ``layers/fastvit/`` was dissolved: its 7 modules and 7 tests moved and converted, plus ``fastvit/model.py`` and ``mobile_clip/components.py``, edited for the move.
+#: 401 / 382 after ``conv_blocks/mobile_one_block.py``, edited to clone its initializer per branch.
 #: Edit it in the commit that converts a file (delete its line) or, with a
 #: recorded reason, adds a statement.
 KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
@@ -88,7 +89,6 @@ KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
     "src/dl_techniques/layers/blt/entropy_model.py": 1,
     "src/dl_techniques/layers/blt/local_decoder.py": 1,
     "src/dl_techniques/layers/blt/patch_pooling.py": 1,
-    "src/dl_techniques/layers/conv_blocks/mobile_one_block.py": 1,
     "src/dl_techniques/layers/embedding/albert_factorized_embedding.py": 1,
     "src/dl_techniques/layers/embedding/axial_rope_2d.py": 1,
     "src/dl_techniques/layers/embedding/bert_embeddings.py": 1,
@@ -520,7 +520,7 @@ def test_the_census_is_exact(census):
 
 
 def test_the_census_totals(census):
-    assert (sum(KERAS_SUBMODULE_IMPORTS.values()), len(KERAS_SUBMODULE_IMPORTS)) == (402, 383), (
+    assert (sum(KERAS_SUBMODULE_IMPORTS.values()), len(KERAS_SUBMODULE_IMPORTS)) == (401, 382), (
         "the census's own totals moved; re-derive the module docstring's numbers")
     for path in KERAS_SUBMODULE_IMPORTS:
         assert (REPO_ROOT / path).is_file(), f"census file moved or deleted: {path}"
