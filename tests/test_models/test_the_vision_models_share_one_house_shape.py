@@ -1292,6 +1292,8 @@ ANCHOR_TOKENS: Dict[str, Dict[str, int]] = {
         "plan-2026-10-14T062616-81938e81/D-047": 1,
         "plan-2026-10-14T062616-81938e81/D-070": 1,
         "plan-2026-10-14T062616-81938e81/D-225": 1,
+        "plan-2026-10-26T125959-7af851e5/D-030": 1,
+        "plan-2026-10-26T125959-7af851e5/D-057": 5,
         "plan_2026-05-31_76981d58/D-001": 1,
     },
     "src/dl_techniques/models/vision_language/sam/sam1/prompt_encoder.py": {

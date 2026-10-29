@@ -121,6 +121,15 @@ The vision tower is **hierarchical**: a patch stem, then stages linked by
 `CliffordNetBlock` is transform-only and wrapped in an external residual — the block
 itself has no skip connection.
 
+The patch stem is one `ConvStem` named `vision_stem`, the recipe of `CliffordNet`'s stem.
+`vision_patch_size` 1 and 4 give `Conv(c/2) -> BN -> SiLU -> Conv(c) -> BN` (both convs
+bias-free, 3x3, stride 1 or 2); 2 and any other size give `Conv(c) -> BN` (3x3 stride 2, or
+kernel and stride equal to the patch) and follow `use_bias`. Every BatchNormalization takes
+momentum 0.9 and epsilon 1e-3 (the Keras value the hand-rolled stem had; the norm factory's own
+default is 1e-6). Its weights sit under `vision_stem/vision_stem_{conv1,norm1,conv2,norm2}/`.
+The trainer (`train/cliffordnet/train_clip.py`) classifies the sub-layer by the `vision_stem`
+prefix.
+
 ### Text tower
 
 The text tower is **isotropic**: token + position embeddings, then `text_depth`
@@ -342,3 +351,33 @@ CliffordCLIP additionally builds on:
   year={2021}
 }
 ```
+
+---
+
+## Archives
+
+**Archive break.** Measured by saving the four roster subjects (`nano`, `vision_patch_size` 1 to 4) in a
+separate process with the code of `be92a74eb` (`git archive`, `python -I`) and restoring them with the current
+code. The vision stem was four tracked layers (`vision_stem_conv1`, `vision_stem_bn1`, `vision_stem_conv2`,
+`vision_stem_norm`; two for patch 2 and 3) and is now one `ConvStem`:
+
+- `keras.models.load_model(path)` and `model.load_weights(path)` into a freshly built model both refuse all four
+  archives: `ValueError: A total of 4 objects could not be loaded ... Layer 'vision_stem_conv1' expected 1
+  variables, but received 0 variables during loading` (2 objects, `expected 2 variables`, for patch 2 and 3).
+  The four (or two) objects are exactly the stem's sub-layers; no other object is named.
+- Transplanting by `w.path` restores every tensor of all four subjects (373, 369, 369 and 373 tensors) with
+  inference outputs equal at `atol=0`, once the old stem paths are renamed: `vision_stem_conv1/*` and
+  `vision_stem_conv/*` to `vision_stem/vision_stem_conv1/*`, `vision_stem_bn1/*` to
+  `vision_stem/vision_stem_norm1/*`, `vision_stem_conv2/*` to `vision_stem/vision_stem_conv2/*`, and
+  `vision_stem_norm/*` to `vision_stem/vision_stem_norm2/*` (patch 1 and 4) or `.../vision_stem_norm1/*` (patch 2
+  and 3). The weight order does not change.
+- A model built with a given seed does NOT have the same starting weights as before. The stem's second
+  convolution, every kernel of the vision and text blocks, the merge and projection kernels, the two token tables and
+  the attention pools' `context_vector` are new draws; only the first stem convolution (`vision_stem_conv1`)
+  and the constants (biases, norm scales and offsets and moving statistics, LayerScale gains, `logit_scale`) are
+  equal to the earlier build (136 of 373 tensors differ at patch 1 and 4, 135 of 369 at patch 2 and 3). The cause is
+  that the earlier code handed one initializer instance to several kernels (the two stem convolutions, every
+  sub-layer of every block of a stage, the two projections: 776 of 9,316 kernel pairs of `nano` carried one draw), and a
+  kernel now draws its own.
+- Transcripts: `plans/plan-2026-10-26T125959-7af851e5/scratch_iter2/step20/archive_summary.txt`,
+  `archive_load_model_be92a74eb.txt`, `archive_load_weights_be92a74eb.txt`, `transplant_by_path_clip.txt`.

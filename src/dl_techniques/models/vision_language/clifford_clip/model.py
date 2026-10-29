@@ -42,6 +42,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 # local imports
 # ---------------------------------------------------------------------------
 
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.geometric.clifford_block import (
     CausalCliffordNetBlock,
     CliffordNetBlock,
@@ -60,7 +61,7 @@ from dl_techniques.utils.clip_utils import (
 )
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.logger import logger
-from dl_techniques.initializers import clone_initializer
+from dl_techniques.initializers.clone import clone_initializer, initializer_spec
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.weight_transfer import refuse_pretrained
 from dl_techniques.utils.model_build import refuse_input_shape
@@ -96,11 +97,26 @@ def _head_shifts_for(channels: int, requested: Optional[List[int]]) -> List[int]
 # pass clone_initializer(...) to every consumer, or the two towers come out with 763
 # bit-identical weight pairs. See decisions.md.
 _DEFAULT_KERNEL_INIT = keras.initializers.TruncatedNormal(stddev=0.02)
+# DECISION plan-2026-10-26T125959-7af851e5/D-057: 2026-10-29, the stem and both towers'
+# blocks take initializer_spec(...) instead of clone_initializer(...). The spec gives the
+# same independence one level down: every consumer resolves a fresh initializer from it,
+# and a block resolves it once per sub-layer, which one clone shared by a whole stage did
+# not. D-072's rule stands for every other consumer.
 
 # DECISION plan-2026-08-23T091307-9a110062/D-480: BatchNorm momentum is 0.9, the torch
 # convention CliffordNet's stem uses; keras_momentum = 1 - torch_momentum, so this is
 # not a typo for 0.1. See decisions.md.
 _VISION_STEM_BN_MOMENTUM = 0.9
+
+# DECISION plan-2026-10-26T125959-7af851e5/D-030: the stem's BatchNormalization epsilon
+# is 1e-3, the Keras default these layers had before the stem moved onto ConvStem (as
+# CliffordNet's STEM_BN_EPSILON, its D-007). It is the PRE-MIGRATION value, not a
+# published reference, and the norm factory's own default is 1e-6, so leaving it
+# unstated moved every stem norm by 1000x with no shape symptom. Not an import of
+# CliffordNet's constant: this stem was validated at exactly these two values and an
+# import would tie it to another model. Guard:
+# tests/test_models/test_the_conv_stem_replicates_every_hand_rolled_stem.py.
+_VISION_STEM_BN_EPSILON = 1e-3
 _LN_EPS: float = 1e-6
 
 
@@ -632,6 +648,67 @@ class CliffordCLIP(keras.Model):
             bias_regularizer=self.bias_regularizer,
         )
 
+    def _build_vision_stem(self) -> None:
+        """Create ``vision_stem``, the patch embedding of the vision tower.
+
+        Patch sizes 1 and 4 give the two-conv stem
+        ``Conv(c // 2) -> BN -> SiLU -> Conv(c) -> BN``, both convolutions bias-free,
+        3x3 at stride 1 (patch 1) or 2 (patch 4). Patch 2 gives ``Conv(c) -> BN`` at
+        3x3 stride 2, and any other patch ``Conv(c) -> BN`` with kernel and stride
+        equal to the patch; those two follow ``use_bias``. ``c`` is the first stage's
+        channel count. Every BatchNormalization takes :data:`_VISION_STEM_BN_MOMENTUM`
+        and :data:`_VISION_STEM_BN_EPSILON`.
+        """
+        # DECISION plan-2026-10-26T125959-7af851e5/D-057: the stem is handed the
+        # initializer SPECS and ConvStem draws its second kernel from a clone of the
+        # first one's. Do NOT hand it one clone_initializer(...) instance: the
+        # hand-rolled stem did exactly that and conv2 replayed conv1's draw. Only the
+        # first stem kernel keeps its seeded draw; every later default-seeded kernel
+        # of the model moves (carve-out C-4). See decisions.md D-057.
+        norm_kwargs = {
+            "momentum": _VISION_STEM_BN_MOMENTUM,
+            "epsilon": _VISION_STEM_BN_EPSILON,
+        }
+        conv_kwargs: Dict[str, Any] = dict(
+            kernel_initializer=initializer_spec(self.kernel_initializer),
+            bias_initializer=initializer_spec(self.bias_initializer),
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
+        )
+        channels = self._vision_stem_channels
+        patch = self.vision_patch_size
+
+        if patch in (1, 4):
+            self.vision_stem = ConvStem(
+                filters=channels // 2,
+                conv2_filters=channels,
+                kernel_size=3,
+                strides=1 if patch == 1 else 2,
+                padding="same",
+                use_bias=False,
+                num_convs=2,
+                normalization_type="batch_norm",
+                normalization_kwargs=norm_kwargs,
+                activation_type="silu",
+                final_activation=False,
+                name="vision_stem",
+                **conv_kwargs,
+            )
+        else:
+            self.vision_stem = ConvStem(
+                filters=channels,
+                kernel_size=3 if patch == 2 else patch,
+                strides=2 if patch == 2 else patch,
+                padding="same",
+                use_bias=self.use_bias,
+                num_convs=1,
+                normalization_type="batch_norm",
+                normalization_kwargs=norm_kwargs,
+                activation_type="linear",
+                name="vision_stem",
+                **conv_kwargs,
+            )
+
     def _build_vision_tower(self) -> None:
         """Create the patch stem, the staged blocks, the merges and the head norm.
 
@@ -642,88 +719,7 @@ class CliffordCLIP(keras.Model):
         ``2 * src_channels``, and a Dense projects to the next stage's channel count
         when that differs.
         """
-        _conv_kw: Dict[str, Any] = dict(
-            kernel_initializer=clone_initializer(self.kernel_initializer),
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-        )
-
-        stem_channels = self._vision_stem_channels
-
-        # Stem: mirrors CliffordNet.model._build_stem semantics.
-        if self.vision_patch_size == 1:
-            self.vision_stem_conv1 = keras.layers.Conv2D(
-                filters=stem_channels // 2,
-                kernel_size=3,
-                strides=1,
-                padding="same",
-                use_bias=False,
-                name="vision_stem_conv1",
-                **_conv_kw,
-            )
-            self.vision_stem_bn1 = keras.layers.BatchNormalization(
-                name="vision_stem_bn1", momentum=_VISION_STEM_BN_MOMENTUM
-            )
-            self.vision_stem_conv2 = keras.layers.Conv2D(
-                filters=stem_channels,
-                kernel_size=3,
-                strides=1,
-                padding="same",
-                use_bias=False,
-                name="vision_stem_conv2",
-                **_conv_kw,
-            )
-            self._vision_stem_kind = "two_stage"
-        elif self.vision_patch_size == 2:
-            self.vision_stem_conv = keras.layers.Conv2D(
-                filters=stem_channels,
-                kernel_size=3,
-                strides=2,
-                padding="same",
-                use_bias=self.use_bias,
-                name="vision_stem_conv",
-                **_conv_kw,
-            )
-            self._vision_stem_kind = "single"
-        elif self.vision_patch_size == 4:
-            self.vision_stem_conv1 = keras.layers.Conv2D(
-                filters=stem_channels // 2,
-                kernel_size=3,
-                strides=2,
-                padding="same",
-                use_bias=False,
-                name="vision_stem_conv1",
-                **_conv_kw,
-            )
-            self.vision_stem_bn1 = keras.layers.BatchNormalization(
-                name="vision_stem_bn1", momentum=_VISION_STEM_BN_MOMENTUM
-            )
-            self.vision_stem_conv2 = keras.layers.Conv2D(
-                filters=stem_channels,
-                kernel_size=3,
-                strides=2,
-                padding="same",
-                use_bias=False,
-                name="vision_stem_conv2",
-                **_conv_kw,
-            )
-            self._vision_stem_kind = "two_stage"
-        else:
-            self.vision_stem_conv = keras.layers.Conv2D(
-                filters=stem_channels,
-                kernel_size=self.vision_patch_size,
-                strides=self.vision_patch_size,
-                padding="same",
-                use_bias=self.use_bias,
-                name="vision_stem_conv",
-                **_conv_kw,
-            )
-            self._vision_stem_kind = "single"
-
-        self.vision_stem_norm = keras.layers.BatchNormalization(
-            name="vision_stem_norm", momentum=_VISION_STEM_BN_MOMENTUM
-        )
+        self._build_vision_stem()
 
         # One linear DropPath schedule across the total depth, not per stage.
         total_depth = sum(self.vision_stage_depths)
@@ -749,8 +745,14 @@ class CliffordCLIP(keras.Model):
                 use_global_context=self.vision_use_global_context,
                 layer_scale_init=self.layer_scale_init,
                 use_bias=self.use_bias,
-                kernel_initializer=clone_initializer(self.kernel_initializer),
-                bias_initializer=self.bias_initializer,
+                # DECISION plan-2026-10-26T125959-7af851e5/D-057: a SPEC, never one
+                # clone_initializer(...) per stage. A block resolves its initializer
+                # once per sub-layer, so a live instance is shared by every sub-layer
+                # of every block of the stage (776 of 9316 kernel pairs of the nano
+                # model replayed one draw). A seeded instance still replays by
+                # contract. See decisions.md D-057.
+                kernel_initializer=initializer_spec(self.kernel_initializer),
+                bias_initializer=initializer_spec(self.bias_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
             )
@@ -848,8 +850,11 @@ class CliffordCLIP(keras.Model):
             use_global_context=self.text_use_global_context,
             layer_scale_init=self.layer_scale_init,
             use_bias=self.use_bias,
-            kernel_initializer=clone_initializer(self.kernel_initializer),
-            bias_initializer=self.bias_initializer,
+            # DECISION plan-2026-10-26T125959-7af851e5/D-057: a SPEC, as in the
+            # vision tower; one live clone shared by all text blocks replayed one
+            # draw at every sub-layer of every block. See decisions.md D-057.
+            kernel_initializer=initializer_spec(self.kernel_initializer),
+            bias_initializer=initializer_spec(self.bias_initializer),
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
         )
@@ -887,7 +892,6 @@ class CliffordCLIP(keras.Model):
         embedding carries explicit bivector content, and differ only in how the
         second view ``z_ctx`` is produced.
         """
-        _dk = self._dense_kwargs()
 
         # Clifford sub-layers: only materialised when the head uses them.
         self.vision_head_geo = None
@@ -986,12 +990,19 @@ class CliffordCLIP(keras.Model):
         # ``use_bias`` says, as OpenAI CLIP's ``x @ self.proj`` /
         # ``x @ self.text_projection``; do NOT route ``use_bias`` back here (a
         # learned offset before the L2 norm). See decisions.md.
-        _proj_kw = {**_dk, "use_bias": False}
         self.vision_projection = keras.layers.Dense(
-            self.embed_dim, name="vision_projection", **_proj_kw
+            self.embed_dim,
+            name="vision_projection",
+            **{**self._dense_kwargs(), "use_bias": False},
         )
+        # DECISION plan-2026-10-26T125959-7af851e5/D-057: its own kwargs, so its own
+        # initializer clone. The two projections shared the one dict of a single
+        # _dense_kwargs() call and drew one sample (a pair at r = 1.000000 in the
+        # nano model). See decisions.md D-057.
         self.text_projection = keras.layers.Dense(
-            self.embed_dim, name="text_projection", **_proj_kw
+            self.embed_dim,
+            name="text_projection",
+            **{**self._dense_kwargs(), "use_bias": False},
         )
 
     # ------------------------------------------------------------------
@@ -1063,23 +1074,6 @@ class CliffordCLIP(keras.Model):
     # Encoders
     # ------------------------------------------------------------------
 
-    def _apply_vision_stem(
-        self,
-        images: keras.KerasTensor,
-        training: Optional[bool],
-    ) -> keras.KerasTensor:
-        """Patch stem with optional two-stage conv + BN + SiLU."""
-        if self._vision_stem_kind == "two_stage":
-            x = keras.activations.silu(
-                self.vision_stem_bn1(
-                    self.vision_stem_conv1(images), training=training
-                )
-            )
-            x = self.vision_stem_conv2(x)
-        else:
-            x = self.vision_stem_conv(images)
-        return self.vision_stem_norm(x, training=training)
-
     def _apply_vision_body(
         self,
         images: keras.KerasTensor,
@@ -1095,7 +1089,7 @@ class CliffordCLIP(keras.Model):
         :param training: Whether in training mode.
         :return: ``(B, H', W', vision_stage_channels[-1])``.
         """
-        x = self._apply_vision_stem(images, training=training)
+        x = self.vision_stem(images, training=training)
         # DECISION plan-2026-07-15T114613-5add9baa/D-004: positional encoding is
         # opt-in and off by default, which keeps old checkpoints loadable; the
         # geometric product mixes channels, not space. See decisions.md.

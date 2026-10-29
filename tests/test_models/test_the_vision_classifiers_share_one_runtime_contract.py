@@ -75,7 +75,8 @@ SqueezeNet V1 and V2) and asks each the same questions:
 
 The no-replayed-draw and name rows also cover the models that are not classifiers (VAE, the
 RBF pair, UcaEncoder, CapsNet, DeepSORT, SiamFC, DaSiamRPN, the DINOv2 backbone and wrapper with
-each attention type its block accepts, and the stem sites that are not migrated yet).
+each attention type its block accepts, CliffordCLIP, the VQ-VAE with the rotation trick and the SAM1
+prompt encoder).
 SqueezeNet is a functional model: it is exempt from the build-parity and the
 unbuilt ``compute_output_shape`` rows because it is built in ``__init__``.
 
@@ -446,14 +447,8 @@ class Open:
     signature: str
 
 
-#: Every row that fails today, keyed ``(rule, subject)``.
-LEDGER: Dict[Tuple[str, str], Open] = {
-    ("no_replayed_draw::default", "clifford_clip"): Open(
-        AssertionError,
-        "the CliffordCLIP stem migration",
-        '776 of 9316 kernel pairs replay one draw',
-        'kernel pairs replay one draw'),
-}
+#: Every row that fails today, keyed ``(rule, subject)``. Empty: the contract is complete.
+LEDGER: Dict[Tuple[str, str], Open] = {}
 
 
 def _param(rule: str, key: str, *rest: Any):
@@ -1528,10 +1523,12 @@ def _build_dinov2_classifier(init):
 
 
 def _build_clifford_clip(init):
+    """Both towers, patch 1 (the two-conv stem); ``init`` is the model's own ``kernel_initializer``."""
     from dl_techniques.models.vision_language.clifford_clip import CliffordCLIP
     rng = np.random.default_rng(0)
+    knob = {} if init is None else {"kernel_initializer": init}
     model = CliffordCLIP.from_variant("nano", vocab_size=1000, image_size=16, context_length=16,
-                                      vision_patch_size=1)
+                                      vision_patch_size=1, **knob)
     return _forward(model, {"image": rng.uniform(size=(1, 16, 16, 3)).astype("float32"),
                             "text": rng.integers(1, 100, size=(1, 16)).astype("int32")})
 
@@ -1623,7 +1620,7 @@ REPLAY_SUBJECTS: Dict[str, Tuple[Callable, bool]] = {
     # DINOv1 has no initializer knob; DINOv3 takes `kernel_initializer`, so it has both arms.
     "dino_v1": (_dino_v1_vit, False),
     "dino_v3": (_dino_v3_vit, True),
-    "clifford_clip": (_build_clifford_clip, False),
+    "clifford_clip": (_build_clifford_clip, True),
     "vq_vae_rotation": (_build_vq_vae_rotation, False),
     "sam1_prompt_encoder": (_build_sam1_prompt_encoder, False),
 }
@@ -1954,7 +1951,7 @@ def test_direct_children_lists_every_direct_sublayer_weighted_or_not() -> None:
     assert direct_children(model) == ["body", "classification_head", "dropout_0"]
 
 
-class _Twinned(keras.Model):
+class _Twinned(PublicAutoName, keras.Model):
     """Planted: two children of the model named ``twin``, and one nested layer with two named ``inner``.
 
     ``twinned=False`` is the clean twin: distinct child names, and ``inner`` once under each of two parents.

@@ -264,7 +264,7 @@ REFERENCE_PINS: List[Tuple[str, Callable[[], Any], Any, Any, str]] = [
     ),
     (
         "clip/clifford_clip.py _VISION_STEM_BN_MOMENTUM "
-        "(vision_stem_bn1 x2, vision_stem_norm)",
+        "(vision_stem_norm1, vision_stem_norm2)",
         _clifford_clip_stem_momentum,
         0.9,
         _KERAS_BN_MOMENTUM_DEFAULT,

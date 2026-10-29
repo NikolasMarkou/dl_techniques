@@ -121,6 +121,7 @@ from dl_techniques.models.vision.squeezenet.squeezenet_v1 import SqueezeNetV1
 from dl_techniques.models.vision.squeezenet.squeezenet_v2 import SqueezeNoduleNetV2
 from dl_techniques.models.vision.vae.model import VAE
 from dl_techniques.models.vision.vq_vae_rotation.model import VQVAERotationTrick
+from dl_techniques.models.vision_language.clifford_clip.model import CliffordCLIP
 from dl_techniques.models.vision_language.sam.sam1.prompt_encoder import PromptEncoder
 from tests.layer_naming import PublicAutoName
 from tests.numerics import true_float32_matmul
@@ -507,9 +508,18 @@ _CLIFFORD_KERNEL_INIT_STDDEV = 0.02
 
 
 def _clifford_family_original(
-    width: int, kernel: int, strides: int, two_conv: bool, use_bias: bool
+    width: int,
+    kernel: int,
+    strides: int,
+    two_conv: bool,
+    use_bias: bool,
+    kernel_stddev: float = _CLIFFORD_KERNEL_INIT_STDDEV,
 ) -> Original:
-    """The pre-migration CliffordNet / Hierarchical stem, as literals."""
+    """The pre-migration CliffordNet / Hierarchical stem, as literals.
+
+    CliffordCLIP's hand-rolled stem was the same stack (see the CliffordCLIP section),
+    so its original is this one with the model's own kernel width.
+    """
 
     def conv(filters: int, conv_strides: int, bias: bool, name: str):
         return keras.layers.Conv2D(
@@ -519,7 +529,7 @@ def _clifford_family_original(
             padding="same",
             use_bias=bias,
             kernel_initializer=keras.initializers.TruncatedNormal(
-                stddev=_CLIFFORD_KERNEL_INIT_STDDEV
+                stddev=kernel_stddev
             ),
             bias_initializer=keras.initializers.Constant(_CLIFFORD_BIAS_INIT),
             kernel_regularizer=keras.regularizers.L2(_CLIFFORD_KERNEL_REG),
@@ -1490,6 +1500,111 @@ RBF_CLIFFORD_P4 = _rbf_clifford_case(4, True)
 RBF_CLIFFORD_P3 = _rbf_clifford_case(3, True)
 
 # ---------------------------------------------------------------------
+# CliffordCLIP vision-tower patch stem
+# ---------------------------------------------------------------------
+
+# Original: ``src/dl_techniques/models/vision_language/clifford_clip/model.py`` at
+# ``154b38605`` (``_build_vision_tower`` and ``_apply_vision_stem``), the same stack
+# as CliffordNet's: patch 1 and 4 ran ``Conv2D(c // 2, 3, stride 1 or 2, no bias) ->
+# BN -> silu -> Conv2D(c, 3, same stride, no bias) -> BN``; patch 2 ran ``Conv2D(c, 3,
+# stride 2, bias per use_bias) -> BN``; any other patch ran ``Conv2D(c, patch, patch,
+# bias per use_bias) -> BN``. Every conv took ONE clone of the model's kernel
+# initializer (so the two convs of the two-conv stem shared a draw), its bias
+# initializer and both regularizers; every BatchNormalization was a bare
+# ``BatchNormalization(momentum=0.9)`` (Keras epsilon 1e-3). The original's stem is
+# therefore ``_clifford_family_original`` with the model's own kernel width.
+_CLIP_KERNEL_INIT_STDDEV = 0.03
+_CLIP_STAGE_CHANNELS = [16, 32]
+
+
+def _clifford_clip_original(patch_size: int, use_bias: bool) -> Original:
+    two_conv = patch_size in (1, 4)
+    if two_conv:
+        kernel, strides = 3, 1 if patch_size == 1 else 2
+    elif patch_size == 2:
+        kernel, strides = 3, 2
+    else:
+        kernel, strides = patch_size, patch_size
+    return _clifford_family_original(
+        _CLIP_STAGE_CHANNELS[0], kernel, strides, two_conv, use_bias,
+        kernel_stddev=_CLIP_KERNEL_INIT_STDDEV,
+    )
+
+
+def _clifford_clip_image_size(patch_size: int) -> int:
+    # 16 cells of the 2-stage tower after the stem, and 3 does not divide 16.
+    return 48 if patch_size == 3 else 16
+
+
+def _clifford_clip_model(patch_size: int, use_bias: bool = True) -> CliffordCLIP:
+    return CliffordCLIP(
+        image_size=_clifford_clip_image_size(patch_size),
+        vision_patch_size=patch_size,
+        vision_stage_channels=_CLIP_STAGE_CHANNELS,
+        vision_stage_depths=[1, 1],
+        vocab_size=100,
+        context_length=8,
+        text_channels=16,
+        text_depth=1,
+        embed_dim=8,
+        use_bias=use_bias,
+        kernel_regularizer=keras.regularizers.L2(_CLIFFORD_KERNEL_REG),
+        kernel_initializer=keras.initializers.TruncatedNormal(
+            stddev=_CLIP_KERNEL_INIT_STDDEV
+        ),
+        bias_initializer=keras.initializers.Constant(_CLIFFORD_BIAS_INIT),
+        bias_regularizer=keras.regularizers.L2(_CLIFFORD_BIAS_REG),
+    )
+
+
+def _clifford_clip_case(patch_size: int, use_bias: bool) -> StemCase:
+    side = _clifford_clip_image_size(patch_size)
+    out = -(-side // patch_size)  # ceil under ``same`` padding
+    return StemCase(
+        case_id=f"clifford-clip-patch{patch_size}-{'bias' if use_bias else 'nobias'}",
+        make_model=lambda: _clifford_clip_model(patch_size, use_bias),
+        make_original=lambda: _clifford_clip_original(patch_size, use_bias),
+        input_shape=(side, side, 3),
+        expected_output_shape=(out, out, _CLIP_STAGE_CHANNELS[0]),
+        stem_of=lambda model: model.vision_stem,
+    )
+
+
+CLIFFORD_CLIP_P1 = _clifford_clip_case(1, True)
+CLIFFORD_CLIP_P1_NOBIAS = _clifford_clip_case(1, False)
+CLIFFORD_CLIP_P2 = _clifford_clip_case(2, True)
+CLIFFORD_CLIP_P2_NOBIAS = _clifford_clip_case(2, False)
+# 48 -> 16 cells under ``same`` padding; 16 would not be divisible by 3.
+CLIFFORD_CLIP_P3 = _clifford_clip_case(3, True)
+CLIFFORD_CLIP_P3_NOBIAS = _clifford_clip_case(3, False)
+CLIFFORD_CLIP_P4 = _clifford_clip_case(4, True)
+CLIFFORD_CLIP_P4_NOBIAS = _clifford_clip_case(4, False)
+
+
+class _ClipImageTower(PublicAutoName, keras.layers.Layer):
+    """A thin wrapper: one image batch in, the image features out.
+
+    ``CliffordCLIP.call`` reads a dict or a tuple, and a ``BUILT_STEM_ROWS`` row feeds one
+    array, so the row calls the model through this layer. ``model.clip`` is the model.
+    """
+
+    def __init__(self, clip: CliffordCLIP, **kwargs):
+        super().__init__(**kwargs)
+        self.clip = clip
+
+    def call(self, inputs, training=None):
+        return self.clip({"image": inputs}, training=training)["image_features"]
+
+
+def _clifford_clip_image_tower(patch_size: int) -> _ClipImageTower:
+    return _ClipImageTower(_clifford_clip_model(patch_size))
+
+
+def _clip_tower_stem(tower: _ClipImageTower) -> ConvStem:
+    return tower.clip.vision_stem
+
+
+# ---------------------------------------------------------------------
 # CapsNet and CapsNetV2 convolution blocks
 # ---------------------------------------------------------------------
 
@@ -2034,6 +2149,14 @@ CASES = [
     RBF_CLIFFORD_P2_NOREG,
     RBF_CLIFFORD_P4,
     RBF_CLIFFORD_P3,
+    CLIFFORD_CLIP_P1,
+    CLIFFORD_CLIP_P1_NOBIAS,
+    CLIFFORD_CLIP_P2,
+    CLIFFORD_CLIP_P2_NOBIAS,
+    CLIFFORD_CLIP_P3,
+    CLIFFORD_CLIP_P3_NOBIAS,
+    CLIFFORD_CLIP_P4,
+    CLIFFORD_CLIP_P4_NOBIAS,
     CAPSNET_V1_BLOCK1,
     CAPSNET_V1_BLOCK2,
     CAPSNET_V1_BLOCK3,
@@ -2100,6 +2223,11 @@ BUILT_STEM_ROWS = [
         _vae_stem_of,
     ),
     ("rbf-clifford-protonet", lambda: _rbf_clifford_model(2, True), (16, 16, 3)),
+    # The CLIP model reads a dict, so the rows call its image tower through a wrapper layer.
+    ("clifford-clip-patch1", lambda: _clifford_clip_image_tower(1), (16, 16, 3), _clip_tower_stem),
+    ("clifford-clip-patch2", lambda: _clifford_clip_image_tower(2), (16, 16, 3), _clip_tower_stem),
+    ("clifford-clip-patch3", lambda: _clifford_clip_image_tower(3), (48, 48, 3), _clip_tower_stem),
+    ("clifford-clip-patch4", lambda: _clifford_clip_image_tower(4), (16, 16, 3), _clip_tower_stem),
     ("capsnet-v1-block1", _capsnet_v1_model, (28, 28, 1), _capsnet_block(0)),
     ("capsnet-v1-block2", _capsnet_v1_model, (28, 28, 1), _capsnet_block(1)),
     ("capsnet-v2-legacy-block1", _capsnet_v2_model, (28, 28, 1), _capsnet_block(0)),
@@ -2201,6 +2329,10 @@ INITIALIZER_AUDIT = {
         "default-no-knob",
         "no initializer parameter (only the codebook's); the original Conv2D took Keras' "
         "glorot_uniform / zeros, which are ConvStem's defaults",
+    ),
+    "CliffordCLIP": (
+        "knob",
+        "kernel TruncatedNormal(0.03) (default 0.02), bias Constant(0.25) (default zeros), L2 kernel and bias",
     ),
     "CliffordRBFProtoNet": (
         "default-no-knob",
@@ -2897,6 +3029,61 @@ def test_the_guard_the_harness_sees_a_sam1_norm_applied_twice():
             SAM1_GELU_LAYER_NORM,
             SAM1_GELU_LAYER_NORM.stem_of(model),
             forward=_two_conv_norm_applied_twice,
+        )
+
+
+@pytest.mark.parametrize(
+    "case,override,match",
+    [
+        # The original ends on the second norm: a trailing activation is one more role.
+        (CLIFFORD_CLIP_P1, {"final_activation": True}, "roles"),
+        (CLIFFORD_CLIP_P4, {"final_activation": True}, "roles"),
+        # Keras' epsilon is 1e-3 and the norm factory's own is 1e-6: no shape symptom.
+        (CLIFFORD_CLIP_P4, {"normalization_kwargs": {"epsilon": 1e-6}}, "differs from the original"),
+        (CLIFFORD_CLIP_P2, {"normalization_kwargs": {"epsilon": 1e-6}}, "differs from the original"),
+        # Keras' momentum is 0.99; it shows only in the moving statistics after a training=True pass.
+        (CLIFFORD_CLIP_P1, {"normalization_kwargs": {"momentum": 0.99}}, "after a training=True pass"),
+        (CLIFFORD_CLIP_P4, {"activation_type": "relu"}, "differs from the original"),
+        # The two-conv stem is bias-free, the single-conv stem follows ``use_bias``.
+        (CLIFFORD_CLIP_P1, {"use_bias": True}, "weights"),
+        (CLIFFORD_CLIP_P2, {"use_bias": False}, "weights"),
+        (CLIFFORD_CLIP_P3, {"strides": 2}, "shape"),
+    ],
+    ids=[
+        "final-activation-patch1",
+        "final-activation-patch4",
+        "epsilon-1e-6-patch4",
+        "epsilon-1e-6-patch2",
+        "momentum-0.99",
+        "relu-for-silu",
+        "bias-added-to-the-two-conv-stem",
+        "bias-dropped-from-the-single-conv-stem",
+        "stride-2-for-patch-3",
+    ],
+)
+def test_the_guard_the_harness_sees_a_clifford_clip_stem_with_one_wrong_setting(case, override, match):
+    """Each value the vision tower's stem fixes is a defect when it is not kept; the stem
+    rebuilt from the model's own config passes the same comparison."""
+    stem = _stem_from_config(case, **override)
+    with pytest.raises(AssertionError, match=match):
+        assert_stem_matches_original(case, stem)
+    assert_stem_matches_original(case, _stem_from_config(case))
+
+
+def _clip_stem_norm_applied_twice(stem: ConvStem, x, training):
+    """The two-conv stem without its trailing activation, the first norm running twice."""
+    x = stem.norm1(stem.norm1(stem.conv1(x), training=training), training=training)
+    return stem.norm2(stem.conv2(stem.act1(x)), training=training)
+
+
+def test_the_guard_the_harness_sees_a_clifford_clip_norm_applied_twice():
+    """A second ``norm1`` in the forward changes the output."""
+    model = CLIFFORD_CLIP_P4.make_model()
+    with pytest.raises(AssertionError, match="differs from the original"):
+        assert_stem_matches_original(
+            CLIFFORD_CLIP_P4,
+            CLIFFORD_CLIP_P4.stem_of(model),
+            forward=_clip_stem_norm_applied_twice,
         )
 
 

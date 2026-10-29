@@ -48,6 +48,7 @@ from dl_techniques.utils.weight_transfer import (
     refuse_pretrained,
     vocab_change,
 )
+from tests.layer_naming import PublicAutoName
 
 
 # ---------------------------------------------------------------------------
@@ -1767,7 +1768,7 @@ class TestARefusedLoadCopiesNothing:
 
 
 @keras.saving.register_keras_serializable(package="test_weight_transfer")
-class _Twins(keras.Model):
+class _Twins(PublicAutoName, keras.Model):
     """A subclassed model whose two weighted children carry ONE name (``twin``)."""
 
     def __init__(self, **kwargs):
@@ -1780,7 +1781,7 @@ class _Twins(keras.Model):
 
 
 @keras.saving.register_keras_serializable(package="test_weight_transfer")
-class _WeightlessTwins(keras.Model):
+class _WeightlessTwins(PublicAutoName, keras.Model):
     """Two weightless children named ``act`` beside one weighted ``twin``."""
 
     def __init__(self, **kwargs):

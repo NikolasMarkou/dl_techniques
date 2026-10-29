@@ -16,8 +16,10 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
 from dl_techniques.models.vision_language.clifford_clip import CliffordCLIP
+from tests.test_models.initializer_replay_oracle import replayed_pairs
 
 
 # ---------------------------------------------------------------------
@@ -678,3 +680,123 @@ def test_text_blocks_receive_rank_3(tiny_build_shape, tiny_sample, monkeypatch):
         f"tower is sequence mode — do not reintroduce the caller-side "
         f"expand_dims(axis=1)/squeeze(axis=1) in encode_text."
     )
+
+
+# ---------------------------------------------------------------------
+# Vision stem
+# ---------------------------------------------------------------------
+
+#: The smallest tower the constructor accepts at each patch size: two stages, a post-stem map of at
+#: least 2 ** 2 cells (48 px for patch 3, since 3 does not divide 16).
+_STEM_STAGE_CHANNELS = [16, 32]
+
+
+def _tiny_clip(patch_size: int, **overrides) -> CliffordCLIP:
+    kwargs = dict(
+        image_size=48 if patch_size == 3 else 16,
+        vision_patch_size=patch_size,
+        vision_stage_channels=_STEM_STAGE_CHANNELS,
+        vision_stage_depths=[1, 1],
+        vocab_size=100,
+        context_length=8,
+        text_channels=16,
+        text_depth=2,
+        embed_dim=8,
+    )
+    kwargs.update(overrides)
+    return CliffordCLIP(**kwargs)
+
+
+def _built(model: CliffordCLIP) -> CliffordCLIP:
+    side = model.image_size
+    model({"image": np.zeros((1, side, side, 3), "float32"),
+           "text": np.ones((1, 8), "int32")})
+    return model
+
+
+@pytest.mark.parametrize("patch", [1, 2, 3, 4])
+def test_the_vision_stem_is_one_conv_stem_with_the_stem_constants(patch):
+    """The patch stem is ONE ``ConvStem`` named ``vision_stem`` (the trainer classifies the
+    layer by that prefix), its norms carry the model's momentum and the Keras epsilon of the
+    hand-rolled stem it replaced (the norm factory's own default is 1e-6), and the two-conv
+    stem ends on its second norm."""
+    from dl_techniques.models.vision_language.clifford_clip.model import (
+        _VISION_STEM_BN_EPSILON,
+        _VISION_STEM_BN_MOMENTUM,
+    )
+
+    model = _tiny_clip(patch)
+    stem = model.vision_stem
+    assert isinstance(stem, ConvStem) and stem.name == "vision_stem"
+    assert stem.normalization_kwargs == {
+        "momentum": _VISION_STEM_BN_MOMENTUM, "epsilon": _VISION_STEM_BN_EPSILON}
+    assert (_VISION_STEM_BN_MOMENTUM, _VISION_STEM_BN_EPSILON) == (0.9, 1e-3)
+    assert stem.norm1.momentum == 0.9 and stem.norm1.epsilon == 1e-3
+    if patch in (1, 4):
+        assert stem.num_convs == 2 and stem.final_activation is False
+        assert stem.act1 is not None and stem.act2 is None
+        assert stem.norm2.momentum == 0.9 and stem.norm2.epsilon == 1e-3
+    else:
+        assert stem.num_convs == 1 and stem.act1 is None and stem.conv2 is None
+
+
+@pytest.mark.parametrize(("patch", "roles"), [
+    (1, {"conv1", "norm1", "conv2", "norm2"}),
+    (2, {"conv1", "norm1"}),
+    (3, {"conv1", "norm1"}),
+    (4, {"conv1", "norm1", "conv2", "norm2"}),
+])
+def test_the_vision_stem_weights_sit_under_vision_stem(patch, roles):
+    """Every stem weight is a child of ``vision_stem`` named ``vision_stem_<role>``; the other
+    direct sub-layers of the model keep their own names."""
+    model = _built(_tiny_clip(patch))
+    stem_paths = [w.path for w in model.weights if w.path.split("/")[1] == "vision_stem"]
+    assert {path.split("/")[2].removeprefix("vision_stem_") for path in stem_paths} == roles, stem_paths
+    assert not [w.path for w in model.weights
+                if "vision_stem" in w.path and w.path.split("/")[1] != "vision_stem"]
+
+
+@pytest.mark.parametrize("patch", [1, 4])
+def test_the_two_convs_of_the_vision_stem_draw_independently(patch):
+    """The hand-rolled stem handed ONE initializer instance to both convolutions, so the second
+    kernel was a rescaled prefix of the first; a stem built on ConvStem draws each its own."""
+    keras.utils.set_random_seed(7)
+    model = _built(_tiny_clip(patch))
+    stem = model.vision_stem
+    first = keras.ops.convert_to_numpy(stem.conv1.kernel).ravel()
+    second = keras.ops.convert_to_numpy(stem.conv2.kernel).ravel()
+    n = min(first.size, second.size)
+    assert n > 64
+    assert abs(float(np.corrcoef(first[:n], second[:n])[0, 1])) < 0.5
+
+
+@pytest.mark.parametrize("patch", [1, 2, 3, 4])
+@pytest.mark.parametrize("arm", ["default", "instance"])
+def test_no_two_kernels_of_the_model_replay_one_draw(patch, arm):
+    """Neither tower hands one live initializer instance to several kernels, with the default
+    ``kernel_initializer`` and with a seedless instance the caller gives: the blocks of a stage
+    and the sub-layers of one block used to share a draw (776 of 9316 pairs in the nano model)."""
+    keras.utils.set_random_seed(1234)
+    knob = {"kernel_initializer": keras.initializers.HeNormal()} if arm == "instance" else {}
+    pairs, compared = replayed_pairs(_built(_tiny_clip(patch, **knob)))
+    assert compared > 50
+    assert pairs == [], pairs[:5]
+
+
+@pytest.mark.parametrize("patch", [2, 4])
+def test_a_seed_one_and_a_seed_two_build_differ_in_every_random_kernel(patch):
+    """The default ``kernel_initializer`` is one module-level instance; a kernel handed that
+    instance itself, and not a clone or a spec of it, would draw from the seed fixed when the
+    module was imported and so be the same tensor whatever the caller seeded."""
+    draws = []
+    for seed in (1, 2):
+        keras.utils.set_random_seed(seed)
+        model = _built(_tiny_clip(patch))
+        draws.append({
+            w.path.split("/", 1)[1]: keras.ops.convert_to_numpy(w)
+            for w in model.weights
+            if w.path.rsplit("/", 1)[1] in ("kernel", "embeddings") and w.shape.rank >= 2
+        })
+    assert draws[0].keys() == draws[1].keys() and len(draws[0]) > 20
+    same = [path for path, a in draws[0].items() if np.array_equal(a, draws[1][path])]
+    assert same == [], same
