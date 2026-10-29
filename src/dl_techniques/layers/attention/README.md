@@ -1,74 +1,76 @@
-# `dl_techniques.layers.attention`
+# attention
 
-Thirty-five attention and token-mixing layers behind one factory. `create_attention_layer(attention_type, name=None, **kwargs)`
-looks the type up in `ATTENTION_REGISTRY`, rejects any keyword the target class does not declare,
-fills in the registry defaults and constructs. Nothing on that path filters and drops: an undeclared
-keyword is a `ValueError`, never a discarded argument.
+Keras 3 attention and token-mixing layers for the `dl_techniques` library, plus a factory that builds any of 35 registered types from a string key and a keyword dictionary. Import path: `dl_techniques.layers.attention`.
 
-- Factory contract and registry sizes: `src/dl_techniques/layers/AGENTS.md`.
-- Deeper design notes, including the shared-primitive contracts: `GUIDE.md` in this directory.
+## What it is for
 
-The factory is **construction-only**. It standardizes how layers are built, not how they are called;
-see [Call-signature caveats](#call-signature-caveats).
+Different models need different ways to mix information between positions: standard multi-head attention for text, windowed attention for images, channel and spatial gates for CNNs, cheap linear or Fourier mixers for long sequences, compressed-cache variants for LLM inference. This package keeps all of them in one place with a shared constructor style, so a model can pick its attention type from a config file instead of hard-coding a class. The factory also checks the config before building, so a misspelled keyword fails loudly instead of being ignored.
 
-## Catalogue
+## How it works
 
-Thirty-five keys. `list_attention_types()` returns them sorted; `get_attention_requirements(key)`
-returns one entry's metadata (a deep copy, except the `class` value).
+Every layer is a `keras.layers.Layer` registered for serialization under `dl_techniques.layers.attention.<module>` and implements `get_config()`. The factory is construction only. It standardizes how layers are built, not how they are called, and call signatures differ between layers (see below).
 
-| Key | Class | What it is | Pick it when | Required params |
-|---|---|---|---|---|
-| `anchor` | `AnchorAttention` | Hierarchical attention through anchor tokens; queries cross-attend only to anchors. | Long sequences where full self-attention is too costly. | `dim`, `num_heads` |
-| `area` | `AreaAttention` | Splits a flattened `H*W` map into `area` contiguous groups and attends inside each; `area=1` is global. Depthwise 5x5 positional branch, own 1x1 output projection. Falls back to global when `H*W % area != 0`. | YOLOv12-style detection backbones needing feature-map self-attention below quadratic pixel cost. | `dim` |
-| `beit` | `BeitAttention` | Learnable relative-position bias over a `(Wh, Ww)` patch grid plus three cls slots, added pre-softmax; asymmetric QKV bias (K has **no** bias). | BEiT-style ViTs; any ViT wanting a 2D relative bias instead of absolute positions. | `dim`, `num_heads`, `window_size` |
-| `capsule_routing` | `CapsuleRoutingSelfAttention` | Self-attention with capsule dynamic routing. | Experimental contextualization work. | `num_heads` |
-| `cbam` | `CBAM` | Convolutional Block Attention Module (channel + spatial). | Drop-in refinement for any CNN. | `channels` |
-| `channel` | `ChannelAttention` | The channel half of CBAM. | Channel-wise recalibration in CNNs. | `channels` |
-| `differential` | `DifferentialMultiHeadAttention` | Two attention maps subtracted to cancel common-mode noise. | Transformers wanting sharper focus / less attention noise. | `dim`, `num_heads`, `head_dim` |
-| `energy` | `EnergyAttention` | No value matrix; `call()` returns the closed-form negative gradient of a scalar token-mixing energy. | Energy Transformer blocks whose residual stream is a Lyapunov descent. | `dim` |
-| `fnet` | `FNetFourierTransform` | Parameter-free Fourier token mixing. | Cheap replacement for self-attention. | (none) |
-| `gated` | `GatedAttention` | QK-norm, partial RoPE and an output gate. | Stability-sensitive high-performance transformers. | `dim`, `num_heads` |
-| `group_query` | `GroupedQueryAttention` | GQA: fewer K/V heads than Q heads. | LLMs where the KV cache is the bottleneck. | `dim`, `num_heads`, `num_kv_heads` |
-| `hopfield` | `HopfieldAttention` | Modern Hopfield network retrieval; `update_steps_max=0` mimics standard attention. | Associative-memory tasks. | `key_dim`, `num_heads` |
-| `lighthouse` | `LighthouseAttention` | Coarse-to-fine pyramid plus top-K causal SDPA, scattered back with `segment_sum`. | Long-context causal LM wanting exact attention sub-quadratically. | `dim`, `num_heads` |
-| `linear` | `LinearAttention` | Bias-free, degree-1-homogeneous O(N) attention via a positive feature map and associativity. | Bias-free denoiser stacks; long non-causal sequences. | `dim` |
-| `mobile_mqa` | `MobileMQA` | Multi-query attention for vision on mobile/edge. | Edge vision models. | `dim` |
-| `multi_dconv_head_transposed` | `MultiDconvHeadTransposedAttention` | Restormer MDTA: attention across CHANNELS on a rank-4 NHWC map. 1x1 + depthwise 3x3 qkv projection; Q/K L2-normalised over the flattened spatial axis, so each head's affinity matrix is `(C/heads, C/heads)` and the cost is linear in `H*W`. Learnable per-head temperature. | High-resolution image restoration (denoise / deblur / derain / document) where pixel-pair attention is unaffordable. **Rank-4 NHWC only.** | `dim`, `num_heads` |
-| `multi_head` | `MultiHeadAttention` | Standard MHSA. | The default. | `dim` |
-| `multi_head_cross` | `MultiHeadCrossAttention` | Self- or cross-attention with pluggable attention probabilities. | Encoder-decoders and custom attention. | `dim` |
-| `multi_head_latent` | `MultiHeadLatentAttention` | DeepSeek-V2 MLA with KV compression into a latent. | LLM inference with a small KV cache. | `dim`, `num_heads`, `kv_latent_dim` |
-| `non_local` | `NonLocalAttention` | Non-local block over spatial positions. | Global context inside a CNN. | `attention_channels` |
-| `perceiver` | `PerceiverAttention` | Perceiver cross-attention into a latent array. | Cross-modal / latent-bottleneck models. | `dim` |
-| `performer` | `PerformerAttention` | Random-feature approximation of softmax attention, linear cost. | Very long sequences. | `dim` |
-| `ring` | `RingAttention` | Exact attention via blockwise online softmax. | Near-unbounded context with exact attention. | `dim` |
-| `rpc` | `RPCAttention` | Principal Component Pursuit decomposition of the attention matrix. | Robustness to noise / adversarial input. | `dim` |
-| `shared_weights_cross` | `SharedWeightsCrossAttention` | Cross-attention between modalities with tied weights. | Multi-modal exchange on one concatenated sequence. | `dim` |
-| `single_window` | `SingleWindowAttention` | MHA over the whole sequence as one window, optional relative bias. | Windowed attention without grid partitioning. | `dim`, `num_heads`, `window_size` |
-| `spatial` | `SpatialAttention` | The spatial half of CBAM. | Highlighting spatial regions in a CNN. | (none) |
-| `tripse1` | `TripSE1` | Triplet attention, post-fusion squeeze-and-excitation. | 3D (spatial + channel) vision attention. | (none) |
-| `tripse2` | `TripSE2` | Triplet attention, pre-process SE. | Channel recalibration before spatial rotation. | (none) |
-| `tripse3` | `TripSE3` | Triplet attention, parallel SE. | Independent spatial and channel modelling. | (none) |
-| `tripse4` | `TripSE4` | Hybrid 3D attention with affine fusion of logits. | Deep spatial/channel integration. | (none) |
-| `wave_field` | `WaveFieldAttention` | FFT token mixing with a learned wave-field coupling kernel. | Frequency-domain mixing on long sequences. | `dim` |
-| `window` | `create_grid_window_attention` -> `WindowAttention` | Swin grid windows. Folds a 1-D sequence into a `ceil(sqrt(N))` grid. `O(N*M)` for `N > M = window_size**2`, `O(N^2)` otherwise. | Vision transformers with local windows. | `dim`, `num_heads`, `window_size` |
-| `window_zigzag` | `create_zigzag_window_attention` -> `WindowAttention` | Zigzag partitioning, grouping frequency-proximate tokens. | Vision models where frequency locality matters. | `dim`, `num_heads`, `window_size` |
-| `window_band` | `create_band_window_attention` -> `WindowAttention` | Symmetric 1-D band: query `i` sees key `j` iff `abs(i-j) <= window_size`, a **half-width in tokens**. Cost is `O(N^2)`, same order as `multi_head`; what it buys is the right adjacency for a sequence, not a lower asymptotic. | Text encoders with local layers (ModernBERT / Longformer): pass `local_attention // 2`. | `dim`, `num_heads`, `window_size` |
+```mermaid
+flowchart TD
+    A["create_attention_layer(type, name=None, **kwargs)"] --> B{"type in ATTENTION_REGISTRY?"}
+    B -- yes --> C{"every kwarg declared by that type?"}
+    C -- no --> E["ValueError: unsupported parameter(s)"]
+    C -- yes --> D["validate_attention_config: required params, ranges"]
+    B -- no --> D
+    D --> F["registry optional_params defaults, then caller kwargs on top"]
+    F --> G["class (or builder function) called with the merged dict"]
+    G --> H["keras.layers.Layer"]
+    D -- invalid --> E2["ValueError"]
+```
 
-Everything not listed as required is optional and has a registry default. Read them with
-`get_attention_requirements(key)['optional_params']` rather than trusting a copy in prose.
+Details of the construction path:
 
-### Window-family facts
+- A keyword the type does not declare raises `ValueError`. Nothing is silently dropped.
+- Any `TypeError` or `ValueError` from validation or from the layer constructor is re-raised as a single `ValueError` ("Failed to create ...") chained from the original.
+- Three keys, `window`, `window_zigzag` and `window_band`, map to builder functions in `window_attention.py` that each return a `WindowAttention` locked to one `partition_mode`. The general `WindowAttention` class has no key of its own.
+- Five exported classes have no factory key and are imported directly: `Ideogram4Attention`, `MMDiTJointAttention`, `AttentionRoutingCapsule`, `CapsuleBlockV2`, `WindowAttention`.
 
-- The three `window*` keys map to the **wrapper functions** `create_grid_window_attention`,
-  `create_zigzag_window_attention` and `create_band_window_attention` (in `window_attention.py`),
-  each of which fixes a partitioning mode and returns a `WindowAttention` instance. The
-  `WindowAttention` class has no key of its own; import it directly for arbitrary configurations.
-- `window_band` rejects `use_relative_position_bias=True`: the bias indexes a 2-D tile this
-  layout does not have.
-- `create_kan_key_window_attention` and `create_adaptive_softmax_window_attention` are test-only.
-  They are deliberately not registered and not exported.
+Shared building blocks live in `common.py`: an attention-mask helper (`apply_attention_mask`) that adds the mask bias in at least float32 so masking stays finite under mixed precision, a head-divisibility check, and the `1/sqrt(head_dim)` scale.
 
-## Construction
+## Files
+
+- `__init__.py` - re-exports 7 factory-interface names (6 functions and the `AttentionType` alias) and 37 layer classes, 44 names in `__all__`. Import order fixes Keras registration order.
+- `factory.py` - `ATTENTION_REGISTRY` (35 entries with metadata), `AttentionType` literal, the six re-exported functions, and `assemble_attention_config` (not re-exported).
+- `common.py` - `MASK_BIAS_VALUE`, `mask_dtype`, `apply_attention_mask`, `validate_head_divisibility`, `compute_attention_scale`. Not re-exported.
+- `GUIDE.md` - authoring guide for new attention layers.
+- `multi_head_attention.py` - `MultiHeadAttention`, a thin self-attention wrapper around `MultiHeadCrossAttention`.
+- `multi_head_cross_attention.py` - `MultiHeadCrossAttention`, the shared engine for self- and cross-attention.
+- `perceiver_attention.py` - `PerceiverAttention`, cross-attention from a small latent array into a large input, also a wrapper around the cross-attention engine.
+- `group_query_attention.py` - `GroupedQueryAttention`, fewer key/value heads than query heads, optional RoPE, accepts 3D or 4D input.
+- `mobile_mqa.py` - `MobileMQA`, a subclass of `GroupedQueryAttention` with one key/value head and optional K/V downsampling.
+- `multi_head_latent_attention.py` - `MultiHeadLatentAttention`, DeepSeek-V2 latent KV compression with decoupled RoPE.
+- `differential_attention.py` - `DifferentialMultiHeadAttention`, difference of two attention maps.
+- `gated_attention.py` - `GatedAttention`, QK-norm, partial RoPE, sigmoid output gate, optional grouped KV heads.
+- `shared_weights_cross_attention.py` - `SharedWeightsCrossAttention`, two modalities in one tensor sharing one QKV projection.
+- `anchor_attention.py` - `AnchorAttention`, anchor-token bottleneck for long sequences.
+- `hopfield_attention.py` - `HopfieldAttention`, iterative pattern retrieval.
+- `capsule_routing_attention.py` - `CapsuleRoutingSelfAttention`, attention logits refined by capsule-style routing.
+- `attention_routing_capsule.py` - `AttentionRoutingCapsule` and `CapsuleBlockV2`, single-pass capsule routing layers.
+- `energy_attention.py` - `EnergyAttention`, Energy Transformer attention with no value matrix.
+- `linear_attention.py` - `LinearAttention`, bias-free degree-1-homogeneous O(N) attention.
+- `performer_attention.py` - `PerformerAttention`, FAVOR+ random-feature attention.
+- `ring_attention.py` - `RingAttention`, exact blockwise attention with an online softmax.
+- `rpc_attention.py` - `RPCAttention`, attention scores split into low-rank plus sparse parts.
+- `lighthouse_attention.py` - `LighthouseAttention`, pooled pyramid with top-K selection and causal attention.
+- `wave_field_attention.py` - `WaveFieldAttention`, FFT convolution on a 1-D field instead of dot-product scores.
+- `fnet_fourier_transform.py` - `FNetFourierTransform`, parameter-free 2D DFT mixing.
+- `window_attention.py` - `WindowAttention` (grid, zigzag or band partitioning) and the builder functions.
+- `single_window_attention.py` - `SingleWindowAttention`, attention inside one window, optional KAN key projection and relative position bias.
+- `beit_attention.py` - `BeitAttention`, BEiT attention with 2D relative position bias and a cls token.
+- `area_attention.py` - `AreaAttention`, YOLOv12 area attention over a 4D feature map.
+- `multi_dconv_head_transposed_attention.py` - `MultiDconvHeadTransposedAttention`, Restormer channel-wise attention.
+- `non_local_attention.py` - `NonLocalAttention`, non-local block over spatial positions.
+- `channel_attention.py`, `spatial_attention.py`, `convolutional_block_attention.py` - `ChannelAttention`, `SpatialAttention` and `CBAM`.
+- `tripse_attention.py` - `TripSE1` to `TripSE4` triplet-attention variants, plus the internal `TripletAttentionBranch` and `_SEWeights` helpers.
+- `ideogram4_attention.py` - `Ideogram4Attention`, packed-sequence attention with segment mask and mRoPE tables passed in.
+- `mmdit_joint_attention.py` - `MMDiTJointAttention`, SD3-style dual-stream joint attention.
+
+## How to use it
 
 ```python
 from dl_techniques.layers.attention import create_attention_layer
@@ -78,144 +80,91 @@ cbam = create_attention_layer('cbam', channels=128, ratio=16)
 gqa = create_attention_layer('group_query', dim=1024, num_heads=16, num_kv_heads=4, name='gqa_1')
 ```
 
-From a config dict (the `type` key selects the entry, the rest are kwargs):
+From a config dictionary, where the `type` key selects the entry:
 
 ```python
 from dl_techniques.layers.attention import create_attention_from_config
 
 layer = create_attention_from_config(
-    {'type': 'group_query', 'dim': 1024, 'num_heads': 16, 'num_kv_heads': 4, 'name': 'gqa_1'}
+    {'type': 'group_query', 'dim': 1024, 'num_heads': 16, 'num_kv_heads': 4}
 )
 ```
 
-Discovery and pre-flight validation:
+Discovery and pre-flight checks:
 
 ```python
 from dl_techniques.layers.attention import (
-    get_attention_info, validate_attention_config,
+    list_attention_types, get_attention_info, get_attention_requirements,
+    validate_attention_config,
 )
 
-info = get_attention_info()['group_query']
-print(info['required_params'], sorted(info['optional_params']))
-
+list_attention_types()                      # 35 keys, sorted
+get_attention_requirements('window')        # one entry's metadata
 validate_attention_config('window', dim=96, window_size=7, num_heads=4)  # raises on a bad config
 ```
 
-`validate_attention_config` refuses exactly what `create_attention_layer` refuses, including an
-undeclared keyword (a typo like `num_head=4`), so it is a real pre-flight check for callers that go
-on to build the class directly.
-
-Direct instantiation is always available and bypasses factory validation and defaults:
+Direct construction bypasses the factory checks and defaults:
 
 ```python
-from dl_techniques.layers.attention import MultiHeadAttention, CBAM, WindowAttention
+from dl_techniques.layers.attention import MultiHeadAttention, WindowAttention
 
 mha = MultiHeadAttention(dim=512, num_heads=8)
-cbam = CBAM(channels=256, ratio=16)
-win = WindowAttention(dim=96, window_size=7, num_heads=4)
+win = WindowAttention(dim=96, window_size=7, num_heads=4, partition_mode='zigzag')
 ```
 
-## Customization hooks
+## Catalogue of factory keys
 
-Most softmax-based layers expose two hooks; the defaults preserve standard behaviour.
+| Key | Class | What it is | Required params |
+|---|---|---|---|
+| `anchor` | `AnchorAttention` | Anchor tokens attend among themselves, the rest read only from anchors | `dim`, `num_heads` |
+| `area` | `AreaAttention` | Splits a flattened `H*W` map into `area` groups; `area=1` is global | `dim` |
+| `beit` | `BeitAttention` | Relative position bias over a `(Wh, Ww)` grid plus cls; key projection has no bias | `dim`, `window_size`, `num_heads` |
+| `capsule_routing` | `CapsuleRoutingSelfAttention` | Self-attention with capsule routing over heads and tokens | `num_heads` |
+| `cbam` | `CBAM` | Channel then spatial attention | `channels` |
+| `channel` | `ChannelAttention` | Channel half of CBAM, returns weights `(B,1,1,C)` | `channels` |
+| `differential` | `DifferentialMultiHeadAttention` | Two attention maps subtracted | `dim`, `num_heads`, `head_dim` |
+| `energy` | `EnergyAttention` | Returns the negative gradient of a token-mixing energy | `dim` |
+| `fnet` | `FNetFourierTransform` | Parameter-free Fourier mixing | none |
+| `gated` | `GatedAttention` | QK-norm, partial RoPE, output gate | `dim`, `num_heads` |
+| `group_query` | `GroupedQueryAttention` | Fewer K/V heads than Q heads | `dim`, `num_heads`, `num_kv_heads` |
+| `hopfield` | `HopfieldAttention` | Hopfield retrieval; `update_steps_max=0` is plain attention | `num_heads`, `key_dim` |
+| `lighthouse` | `LighthouseAttention` | Pooled pyramid, top-K, causal | `dim`, `num_heads` |
+| `linear` | `LinearAttention` | Bias-free O(N) attention | `dim` |
+| `mobile_mqa` | `MobileMQA` | Multi-query attention for edge vision | `dim` |
+| `multi_dconv_head_transposed` | `MultiDconvHeadTransposedAttention` | Restormer MDTA, rank-4 NHWC only | `dim`, `num_heads` |
+| `multi_head` | `MultiHeadAttention` | Standard multi-head self-attention | `dim` |
+| `multi_head_cross` | `MultiHeadCrossAttention` | Self- or cross-attention | `dim` |
+| `multi_head_latent` | `MultiHeadLatentAttention` | DeepSeek-V2 MLA | `dim`, `num_heads`, `kv_latent_dim` |
+| `non_local` | `NonLocalAttention` | Non-local block on 4D maps | `attention_channels` |
+| `perceiver` | `PerceiverAttention` | Latent-to-input cross-attention | `dim` |
+| `performer` | `PerformerAttention` | Random-feature linear attention | `dim` |
+| `ring` | `RingAttention` | Exact blockwise attention | `dim` |
+| `rpc` | `RPCAttention` | Low-rank plus sparse score decomposition | `dim` |
+| `shared_weights_cross` | `SharedWeightsCrossAttention` | Tied-weight cross-modal attention | `dim` |
+| `single_window` | `SingleWindowAttention` | Attention over one window | `dim`, `window_size`, `num_heads` |
+| `spatial` | `SpatialAttention` | Spatial half of CBAM, returns a map `(B,H,W,1)` | none |
+| `tripse1` to `tripse4` | `TripSE1` to `TripSE4` | Triplet attention with squeeze-and-excitation variants | none |
+| `wave_field` | `WaveFieldAttention` | FFT damped-wave field mixing | `dim` |
+| `window` | `create_grid_window_attention` | Swin grid windows | `dim`, `window_size`, `num_heads` |
+| `window_zigzag` | `create_zigzag_window_attention` | Zigzag-ordered windows | `dim`, `window_size`, `num_heads` |
+| `window_band` | `create_band_window_attention` | 1-D symmetric band, `window_size` is a half-width in tokens | `dim`, `window_size`, `num_heads` |
 
-- `probability_type` / `probability_config` — the score normalization, via `ProbabilityOutput`
-  (`dl_techniques.layers.activations.probability_output`): `softmax` (default), `sparsemax`,
-  `threshmax`, `adaptive`. Routing/hierarchical modes are rejected — they consume features, not logits.
-- `qk_norm_type` / `qk_norm_kwargs` — optional Q/K normalization through
-  `create_normalization_layer` (`dl_techniques.layers.norms.factory`): `rms_norm`, `layer_norm`,
-  `zero_centered_rms_norm`, ... or `None`.
+Everything not listed as required is optional with a registry default. Read the defaults with `get_attention_requirements(key)['optional_params']`.
 
-```python
-mha = create_attention_layer(
-    'multi_head', dim=256, num_heads=8,
-    probability_type='sparsemax',
-    qk_norm_type='rms_norm',
-)
-```
+## Things to know
 
-Non-default hook behaviour:
-
-| Layer | Note |
-|---|---|
-| `gated` | `qk_norm_type` defaults to `'zero_centered_rms_norm'` and cannot be `None`. |
-| `multi_head_latent` | `qk_norm_type` defaults to `'rms_norm'`. |
-| `hopfield` | `qk_norm_type` defaults to `'layer_norm'`; pass `None` for no pattern normalization. |
-| `ring` | Only `qk_norm_type`; the online softmax is tied to exponential normalization. |
-| `non_local` | Also has `output_norm_type` / `output_norm_kwargs` (default `'batch_norm'`). |
-| `channel`, `spatial`, `cbam`, `tripse*`, `fnet`, `performer`, `wave_field` | No hooks — they do not softmax over `Q@K^T`. |
-
-## Call-signature caveats
-
-Most layers are `call(inputs, attention_mask=None, training=None)`. **Twelve deviate**, for
-architectural reasons; they are documented, not "fixed", because renaming would break serialized
-configs and call sites.
-
-| Layer | Deviation | Why |
-|---|---|---|
-| `rpc` | mask is `mask=`, not `attention_mask=` | Parameter name predates the convention. |
-| `shared_weights_cross` | positional `split_sizes` required | Needs per-modality segment boundaries. |
-| `anchor` | no mask argument | The anchor/local pattern is defined internally. |
-| `performer` | no mask argument | The FAVOR+ kernel takes no dense additive mask. |
-| `lighthouse` | no mask argument; static seq-len required | Causality comes from the pyramid shift; dynamic/`None` seq-len raises `RuntimeError`. |
-| `group_query` | `call(inputs, training=None, attention_mask=None)` | `training` precedes `attention_mask`. |
-| `ring` | `call(inputs, training=None, attention_mask=None)` | Same order swap. |
-| `mobile_mqa` | order swapped, plus `return_attention_weights` | Same order swap, extra flag. |
-| `differential` | `call(inputs, attention_mask=None, layer_idx=0, training=None)` | Extra positional `layer_idx`. |
-| `spatial` | 4D input; `attention_mask` accepted but **ignored** | CBAM spatial attention runs over the whole feature map; there is no token mask to apply. |
-| `area` | 4D input; `attention_mask` is a **spatial keep mask** `(B, H, W)` or `(B, H*W)` | Attends over flattened spatial positions; `1 = keep`, forwarded verbatim. |
-| `non_local` | 4D input; mask argument **ignored** | Dense global spatial affinities; a token mask does not apply. |
-
-Pass `attention_mask` as a keyword to `group_query` / `ring` / `mobile_mqa`, and pass `training`
-as a keyword to `differential` — positionally it would bind to `layer_idx`.
-
-## Gotchas
-
-- `fnet`: `implementation='fft'` is **not implemented**. It warns once and falls back to the matrix
-  DFT, whose cost is `O(S^2*D + S*D^2)`, not `O(N log N)`. Output is identical to `'matrix'`.
-- `performer`: `ortho_scaling` is a scalar multiply on the random features, not FAVOR+
-  orthogonalization.
-- `rpc`: `lambda_sparse` is a regularization weight (`> 0`), not a 0-1 rate.
-- `mobile_mqa`: accepts `attention_mask` for signature compatibility and **ignores it** — optional
-  K/V downsampling changes the key length, so a token mask cannot be applied unambiguously.
-- `linear`: non-causal. `call` takes only an ignored `mask=` kwarg. Keep `feature_map` positively
-  homogeneous (`relu`, `relu_squared`, `abs`); `elu_plus_one` / `exp` / `softmax` are rejected
-  because they break degree-1 homogeneity and therefore the bias-free denoiser identity.
-- `energy`: the output is an **update to add to the residual stream**, not a contextualized value,
-  so it is not a drop-in for `multi_head`. Cost is about 2x standard attention. A rank-2 `(B, N)`
-  mask is a per-token validity mask applied to key **and** query axes; `(B, N, N)` and
-  `(B, H, N, N)` keep the house `(key, query)` semantics. With `attn_self=False` (the paper's
-  ET-Full config) a single-token input gives exactly zero energy and zero update.
-  ([arXiv:2302.07253](https://arxiv.org/abs/2302.07253))
-- `window` folds a 1-D sequence into a square grid, so for text you want `window_band`.
-- **Seeded initial weights.** A layer resolves ONE initializer instance from `kernel_initializer`, and a seedless
-  instance replays the same random numbers at every site it is handed to. `anchor`, `differential`, `lighthouse`,
-  `non_local`, `perceiver`, `performer`, `rpc`, `shared_weights_cross`, `single_window`, `window`, `window_band`,
-  `window_zigzag` and `wave_field` therefore keep the instance on their first projection and give every other
-  projection `clone_initializer(...)` (decision D-056); `group_query`, `multi_head_latent`, `beit` and `tripse*` already
-  drew independently (replay oracle, 0 pairs). The first projection's seeded draw is unchanged, every later one is a new draw, and every
-  default-seeded layer created after them sits further down the seed stream. Only `multi_head` and `multi_head_cross`
-  keep the shared default (the GPT-2 residual rule of D-160): pass `output_kernel_initializer` (and
-  `kv_kernel_initializer` for the cross layer) to separate their projections. Weight paths never change. Guard:
-  `tests/test_layers/test_attention/test_the_attention_projections_draw_independently.py`.
-
-## Shared primitives (`common.py`)
-
-An implementation detail, not re-exported from `__init__.py`; layers do `from .common import ...`.
-Five module-level names, no classes: `MASK_BIAS_VALUE`, `mask_dtype(compute_dtype)`,
-`apply_attention_mask(logits, keep, *, out_dtype=None, rescue_axis=-1)`,
-`validate_head_divisibility(dim, num_heads, ...)` and `compute_attention_scale(head_dim)`.
-
-`apply_attention_mask` is the prescribed way to apply a mask: it applies the bias with `ops.where`
-inside `mask_dtype(...)`, so the `0 * -inf = NaN` product is never formed. Two things it will not
-decide for you:
-
-- **Polarity is per call site.** `keep` is the keep predicate and no polarity is inferred. Pass your
-  site's own spelling verbatim; a uniform `mask > 0` rewrite silently inverts masking at some sites.
-- **`rescue_axis` is the axis YOUR softmax reduces over.** Default `-1` enables the degenerate-row
-  rescue; `None` opts out. `ring_attention` must opt out per tile — a per-tile rescue would un-mask
-  the future under a causal mask while every finiteness test still passed.
-
-`GUIDE.md` section 3.5 documents the contract and the limits of each entry, including why adopting
-`compute_attention_scale` at an existing site needs a bit-identity probe (`x ** -0.5` is not
-bit-identical to it). Read it before using these at a new call site.
+- Call signatures differ. Most mask-taking layers are `call(inputs, attention_mask=None, training=None)`. Exceptions: `group_query`, `ring` and `mobile_mqa` put `training` before `attention_mask`; `differential` has an extra `layer_idx` argument before `training`; `hopfield` puts `return_attention_scores` before `training` and also accepts `[query, key, value]`; `energy` adds `mask` and `adjacency_weight` after `training`; `single_window` adds `pad_to_window`; `rpc` names its mask `mask=`; `linear` takes `training` then an ignored `mask=`; `shared_weights_cross` requires `split_sizes` positionally; `multi_head_cross`, `multi_head_latent` and `perceiver` take `query_input` and an optional `kv_input`. Layers with no mask argument at all: `channel`, `cbam` and `multi_dconv_head_transposed` take only `(inputs, training=None)`, as do `lighthouse` and `tripse*`; `performer` adds `return_attention_scores`; `anchor` takes `(x, num_anchor_tokens=None, training=None)`; `ideogram4` takes `(x, segment_ids, cos, sin, training=None)`; `mmdit_joint` takes one list `[hidden_states, encoder_hidden_states]`. `WindowAttention.call` is plain `(inputs, attention_mask=None, training=None)`. Pass `attention_mask` and `training` by keyword.
+- Masks are not uniform. Most layers treat `attention_mask` as a keep mask (nonzero means attend). `non_local` instead takes an additive mask (0 keeps, a large negative value masks). `spatial`, `mobile_mqa` and `shared_weights_cross` accept the argument and never use it. `linear` silently discards `mask=`. `fnet` only zeroes padded rows after mixing.
+- `window` folds a 1-D sequence into a square grid. For text use `window_band`. `window_band` refuses `use_relative_position_bias=True`. The class allows `window_size=0` for the band, but the factory rejects any `window_size <= 0`.
+- `lighthouse` needs a statically known sequence length (else `RuntimeError` in `call`), and its causality is block-granular, not per position.
+- `wave_field` is causal on its internal field grid, but token-level causality depends on `field_size` and `max_seq_len`. Check before using it in a decoder.
+- `fnet` with `implementation='fft'` warns and falls back to the matrix DFT. `performer`'s `ortho_scaling` is a plain scalar multiply, not FAVOR+ orthogonalization. `rpc`'s `lambda_sparse` is a positive weight, not a 0-1 rate.
+- `energy` returns an update to add to the residual stream, not a contextualized value, so it is not a drop-in for `multi_head`.
+- `linear` rejects feature maps that break degree-1 homogeneity (`elu_plus_one`, `exp`, `softmax`); use `relu`, `relu_squared` or `abs`.
+- `gated` types `qk_norm_type` as `str` (no `None` option) and defaults it to `'zero_centered_rms_norm'`. `multi_head_latent` defaults to `'rms_norm'`, `hopfield` to `'layer_norm'`. `ring` supports only `qk_norm_type`, with no `probability_type`.
+- `output_kernel_initializer` is declared only for `multi_head` and `multi_head_cross` (the latter also `kv_kernel_initializer`).
+- `gated` declares `num_kv_heads` as an optional factory parameter.
+- Layers that share one `kernel_initializer` across several projections give the first projection the instance and the others `clone_initializer(...)` copies, so a seeded initializer does not replay the same numbers at every projection.
+- CNN-family layers (`channel`, `spatial`, `cbam`, `non_local`, `tripse*`) keep `channels` / `attention_channels` because the argument is a real channel count on `(B, H, W, C)` maps.
+- `get_attention_info()` and `get_attention_requirements()` return shallow copies: the nested `optional_params` dict and `required_params` list are the registry's own objects. Do not mutate them.
+- Requires Keras 3 on TensorFlow 2.18; run with the repo `.venv`.

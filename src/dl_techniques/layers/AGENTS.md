@@ -1,276 +1,205 @@
-# Layers Package
+# layers
 
-The largest package in the library — custom Keras 3 layers organized by domain, all with full
-`get_config()` serialization.
+Path: `src/dl_techniques/layers`
+Purpose: the custom Keras 3 layer library of `dl_techniques` (Keras >= 3.8 on TensorFlow 2.18): 35 domain subpackages plus 14 stand-alone layer modules, all serializable, most behind string-keyed factories.
 
-> **New layers MUST follow `research/2026_keras_custom_models_instructions_v2.md`** — the canonical
-> guide for Keras 3 custom layer authoring here (`__init__`/`build`/`call`/`get_config`,
-> serialization, factory registration, tests). Read it before writing a new layer.
+## Scope
 
-## Structure
+Lives here: layers (`keras.layers.Layer` subclasses), their factories and registries, and a few pure helper functions that belong to a layer (for example `coordinate_grid`, `interpolate_grid`, `filter_matches`).
 
-One row per subpackage. **F** = has a `factory.py`. Several class names collide across packages —
-see § Naming traps.
+Does not live here: whole models (`src/dl_techniques/models/`), losses, metrics, initializers and constraints (sibling packages `losses/`, `metrics/`, `initializers/`, `constraints/`), trainers (`src/train/`), tests (`tests/test_layers/`).
 
-| Subpackage | F | Contents |
-|---|:-:|---|
-| `attention/` | Y | 35 registered attention types — multi-head, cross, latent, differential, group-query, ring, performer, perceiver, Hopfield, capsule routing, window / single-window, mobile MQA, non-local, CBAM, linear (Miyasawa-compliant O(N)), energy, area, FNet Fourier, and more, plus Restormer's channel-wise MDTA (rank-4 NHWC only) |
-| `ffn/` | Y | MLP, SwiGLU, GeGLU, GLU, OrthoGLU, gated MLP, power MLP, counting, diff, logic, Swin MLP, residual block, Restormer GDFN (rank-4 NHWC only) |
-| `norms/` | Y | RMS family (RMS, zero-centered, band, adaptive band), logit-norm family, dynamic tanh, GRN, LRN, bias-free batch norm, energy layer norm. Also hosts `PolarWeightNorm` (not factory-registered) |
-| `embedding/` | Y | Patch (1D/2D), learned positional, sinusoidal (2D / scalar / timestep), RoPE family (plain, dual, continuous, multi-axis), BERT / ModernBERT / ALBERT-factorized token embeddings, class-label table with a classifier-free-guidance dropout row, `RepConditionalPosEnc` (FastViT's conditional positional encoding, `dwconv(x) + x` on a rank-4 NHWC map; factory key `rep_conditional_pos_enc`). `HierarchicalCodebookEmbedding` is direct-import-only |
-| `activations/` | Y | GoLU, Mish, hard sigmoid/swish, ReLU-k, sparsemax, squash, thresh-max, adaptive softmax, differentiable step, expanded activations, monotonicity, probability / routing outputs, basis function. `common.py`'s `activation_spec`/`resolve_activation`/`serialize_activation` trio is the shared activation-argument helper for layers elsewhere in the package — see § `activations/common.py` below |
-| `heads/` | Y | Task heads in `nlp/`, `vision/`, `vlm/` — see below |
-| `logic/` | Y | Arithmetic operators, logic operators, neural circuit |
-| `memory/` | Y | NTM family, SOM family, NeuroGrid — see below |
-| `mixtures/` | Y | `RBFLayer`, `KMeansLayer` (differentiable K-means), `GMMLayer` (differentiable GMM with isometric-kernel regularization) |
-| `sequence_pooling/` | Y | `(B, T, D)` → `(B, D)`. `SequencePooling` covers 18 strategies (positional `cls`/`first`/`last`/`middle`, statistical, composite, learnable `attention`/`multi_head_attention`/`weighted`, top-k, `none`/`flatten`); four are reused by `heads/nlp/`. Plus `attention_pooling.py`, `weighted_pooling.py`. Carries its own `README.md` + `GUIDE.md` |
-| `ssm/` | Y | Selective SSM (S6 scan, plus paper-named alias), Mamba-2 SSD scan, temporal ContextMamba mixer, and both residual wrappers, built via `create_ssm_layer()` (residual blocks are direct-import only) |
-| `transformers/` | Y | Standard transformer, Swin block / conv block, perceiver, EoMT, free transformer, text encoder/decoder, vision encoder, `PatchCausalTransformer`, `EnergyTransformer` + `HopfieldNetwork`, `GatedLinearAttentionBlock`, `AreaAttentionBlock`, plus the shared `causal_stack.py` skeleton |
-| `moe/` | — | Full MoE framework: `config.py`, `experts.py`, `gating.py`, `layer.py`, `integration.py` |
-| `graphs/` | — | Graph neural network, relational graph transformer, simplified hyperbolic GCN, entity graph refinement, Fermi-Dirac decoder |
-| `geometric/` | — | Clifford algebra block, point cloud autoencoder, supernode pooling, and `fields/` (connection, field embedding, gauge-invariant attention, holonomic transformer, holonomy, manifold stress, parallel transport) |
-| `statistics/` | — | Deep kernel PCA, invertible kernel PCA, MDN layer, moving std, normalizing flow, `ProbabilityLogits` (log-odds of per-class probabilities, so a softmax over them is not flat), residual ACF, scaler, the `conformal/` subpackage (`ConformalLayer` base owning one frozen `q_hat`, `set_q_hat` and `calibrate(scores, alpha)`; `ConformalInterval` widens a point estimate, `ConformalQuantileHead` widens learned CQR quantiles, `ConformalPredictionSet` + `attach_conformal_sets` turn classifier logits into an APS set; the host-side fits are `utils/conformal_denoiser_intervals.py` and `utils/conformal_classification.py`), and `local_support_gate.py` (`LocalSupportGate` — a per-token GMM likelihood-ratio support gate, the gate half of Local Support Learning; composed with `adapters.GatedAdapter`). Sphinx/reST docstrings like the rest of `layers/`. See `statistics/README.md` and `statistics/AGENTS.md` (and `statistics/conformal/` for the conformal pair) |
-| `adapters/` | Y | `LoRAAdapter` (additive low-rank delta, `num_adapters` independent `A`/`B` pairs selected per call site — extracted here from `models/language/zamba2/layers.py`, where it was not reusable) plus `GatedAdapter`, its composition with one `LocalSupportGate` per phase. `factory.py` registers one key, `lora`; `GatedAdapter` is deliberately NOT a key. Carries its own `README.md` |
-| `time_series/` | — | Adaptive lag attention, DeepAR blocks, EMA layer, forecasting layers, mixed sequential block, N-BEATS/N-BEATSx blocks, PRISM blocks, quantile heads, TCN, temporal fusion, xLSTM blocks |
-| `reasoning/` | — | HRM reasoning core, reasoning module, sparse puzzle embedding |
-| `physics/` | — | Lagrange layer, approximate Lagrange layer |
-| `fusion/` | — | Multimodal fusion layer |
-| `tokenizers/` | — | BPE tokenizer |
-| `complex/` | — | Complex-valued (complex-number) layers, one class per module: `base.py` (the concrete registered `ComplexLayer` base — the shared Rayleigh-magnitude/uniform-phase weight init, `get_config`/`from_config`, and the two pinned-dead knobs `epsilon` and `kernel_initializer`), `complex_conv2d.py`, `complex_dense.py`, `complex_relu.py`, `complex_average_pooling2d.py`, `complex_global_average_pooling2d.py`, `complex_dropout.py`. Each registers under its OWN module path (`dl_techniques.layers.complex.<module>`); the old single multi-class module they were split out of no longer exists and has no shim. Raw-TF backend only (`keras.ops` 3.8 has no complex constructor) |
-| `conv_blocks/` | — | Convolutional building blocks: bias-free Conv1D/2D, ConvNeXt v1/v2, depthwise separable (learnable `DepthwiseSeparableBlock`, plus `GaborDepthwiseSeparableBlock` — a frozen Gabor depthwise bank followed by a learnable 1x1 projection, bias-free and positively homogeneous at defaults), dynamic Conv2D, MobileOne, `ReparamLargeKernelConv` (timm's large + small Conv-BN branch pair, FastViT's downsample; train-time form only, takes `norm_epsilon` / `padding_mode` like MobileOne), RepMixer, ResPath, universal inverted bottleneck, `conv_block.py`/`basic_block.py`/`bottleneck_block.py` (`ConvBlock`/`BasicBlock`/`BottleneckBlock`, relocated from the old multi-class `layers/standard_blocks.py`, which no longer exists and has no compat shim — one class per new file, own registration string each, same `complex/`-precedent ruling above <!-- DECISION plan-2026-09-14T165315-47f9d575/D-001 -->), plus the shared `SqueezeExcitation` gate and `MatchChannels` skip helper, and `stem.py` (`ConvStem` — a configurable one- or two-conv Conv → [norm] → [activation] → [pool] vision stem, rank 2 or 3 (`Conv2D` or `Conv3D`, via its `rank` argument), built from constructor arguments alone through the norms and activations factories; the package's one curated export, see § `__init__.py` policy) |
-| `signal_processing/` | — | Classical/fixed signal and image primitives: Canny, CLAHE, Gaussian filter/pyramid, Laplacian filter family, Haar wavelet decomposition, shearlet transform, FFT/IFFT, strong (color-jitter + CutMix) augmentation |
-| `pooling/` | — | Spatial/channel layout changes with ~0 learned params: blur pool, pixel shuffle/unshuffle, patch merging, global sum pool, U-Net downsample-and-skip junction |
-| `structured_linear/` | — | Alternative parameterizations to a dense weight matrix: BitLinear (1.58-bit), MPS/tensor-train, OrthoBlock, orthogonal butterfly, random Fourier features, KANvolution, `HarmonicDense` (distance-scored head) + `HierarchicalHarmonicHead` (tree-factored harmonic head; consumed by `train/head_comparison/` and `callbacks/periodic_reassign.py` + `callbacks/anneal_harmonic_exponent.py`), plus the **crystal** family — `crystal_frames.py` (shared geometry: `hyperspherical_simplex`, `haar_orthogonal`, `crystal_frame`, `tiled_simplex_frame`), `CrystalLayer`, `HierarchicalCrystalLayer`, `CrystalMultiHeadProjection`. A single simplex supplies only `input_dim + 1` distinct directions, so a wider frame is **packed** from rotated simplexes (`crystal_frame`); `tiled_simplex_frame` is the degenerate tiling the deleted `RigidSimplexLayer` used (measured at `input_dim=16, width=100`: 17 distinct columns of 100, 490 pairs at inner product 1.0). Two documented degeneracies, both pinned by tests: only `input_dim=1` forces an exact repeat, because `S^0 = {-1, +1}` is two points (`input_dim=1` → 2 distinct); past the simplex count a wide frame instead degrades in SEPARATION, not distinctness (measured at `input_dim=2, width=64`: a pair at inner product 0.9992, i.e. near-identical logits); and `HierarchicalCrystalLayer(cluster_spread=0)` collapses every leaf onto its centroid, giving that group identical logits and a uniform conditional softmax. A third degeneracy is documented-only: `crystal_frame` minimises the signed max inner product, so antipodal pairs (`cos -> -1`) are never penalised (measured at `input_dim=2, width=64, seed=0`: a pair at `cos = -1.0000`); the `max|.|` alternative is recorded-but-deferred because it moves every wide frame. All eleven layers route `compute_output_shape` through `utils/tensors.canonical_binary_input_shape`. Carries its own `README.md`. See `structured_linear/MIGRATION.md` |
-| `regularization/` | — | Regularization and routing: layer scale, scheduled dropout, stochastic depth, stochastic gradient, selective gradient mask, router, FiLM, conditional output, plus two generic topographic primitives — `SpatialSmoothness` (an identity tap that adds the spatial-smoothness penalty `0.5 * (1 - corr(r, d))` on a tapped tensor's unit axis, with `SpatialLayout` / `build_patch_tables` / `resolve_grid_shape` beside it; `grid_dim` 2 or 3, stated and never inferred from `len(grid_shape)`, default 2 and a config without the key loads as 2D, with `build_patch_tables` reading the rank from `cell_to_unit.ndim`) and `GaussianReadout` (fixed-FWHM Gaussian blur over that same grid, for simulating a sensor; **2D only**, it refuses a three-entry `grid_shape`, e.g. a 3D layout's grid, at build). Both are unit-axis-to-grid primitives with no model knowledge; `models/language/topolm/` composes them and owns the objective |
-| `generative/` | — | Generative / latent-variable layers: restricted Boltzmann machine, sparse autoencoder, VAE reparameterization samplers, vector quantizer (+ rotation-trick variant), `topographic_product.py` (`TopographicProduct` — the Student-t topographic prior with its `L`-wide temporal-coherence window, plus the pure helpers `build_window_matrix_1d/2d`, `build_roll_matrix_1d`, `build_window_stack`, `windowed_stack_energy` that are the layer's test oracle) |
-| `blt/` | — | Byte Latent Transformer stack: tokenizer, entropy model, dynamic patcher, patch pooling, local encoder/decoder, plus the HRM-fused reasoning core. Its global stage is `transformers/PatchCausalTransformer` — that layer is BLT's, but it is not BLT-*specific*, so it lives with its peers. All four stacks here build their blocks and final norms through `transformers/causal_stack.py` |
-| `dynamic_chunking/` | — | H-Net learned dynamic chunking, one class per module: `routing_module.py` (`RoutingModule` — identity-init q/k, adjacent cosine similarity, hard `p > 0.5` boundary, NOT `argmax` — D-012 bans the argmax spelling because it resolves a p == 0.5 tie to the LOWER index, i.e. to "no boundary", which `>` reproduces and `>=` does not), `chunk_layer.py` (`ChunkLayer` — position-order stable-partition gather to a fixed `max_chunks` width), `dechunk_layer.py` (`DeChunkLayer` — EMA recurrence over the inner sequence + scatter back to full resolution), plus the shared, class-free `indexing.py` (`pad_permutation_to_width` + `batched_gather` — the ONE definition of the chunk/dechunk permutation padding and of the XLA-safe per-row gather; the two layers held these rules in two hand-copied blocks and drifted apart, see D-029). Curated `__init__`, **no factory** (D-004: one consumer, `models/language/hnet/`; same shape as `blt/`). The three are a triple — route → chunk → inner network → dechunk — not independently useful |
-| `acc_unet/` | — | ACC-UNet cluster: HANC block + layer (hierarchical-context aggregation), multi-level feature compilation (cross-scale fusion) |
-| `yolo12/` | — | YOLOv12 backbone blocks (`Bottleneck`, `C3k2Block`, `A2C2fBlock`) and task heads (detection/segmentation/classification) |
-| `tabular/` | — | TabM batched-ensemble MLP building blocks (D-007: named for the domain, not the paper acronym), one class per module: `scale_ensemble.py`, `linear_efficient_ensemble.py`, `nlinear.py`, `tabm_mlp_block.py`, `tabm_backbone.py`, plus the private `_ensemble_scaling.py` (the shared `EnsembleInitDistribution` alias + the `'ones'`/`'normal'`/`'random-signs'` resolver). The `'random-signs'` initializer itself is `initializers/random_signs.py::RandomSigns`, not a `tabular/` symbol |
-| `matching/` | — | LightGlue keypoint-matching building blocks, one concern per module, consumed by `models/vision/keypoints/lightglue/`: `learned_fourier_rotary.py` (`LearnedFourierRotaryEncoding`, learned-Fourier positional table applied as an interleaved rotary rotation, plus `apply_rotary_interleaved`), `lightglue_blocks.py` (`LightGlueSelfBlock`, `LightGlueCrossBlock`), `match_assignment.py` (`MatchAssignment` double log-softmax with a dustbin row/column, plus the `filter_matches` function), `token_confidence.py` (`MatchTokenConfidence`). Class names carry a `LightGlue*` / `Match*` prefix because bare `Attention` / `TokenConfidence` would collide in the registry. Exports nothing, no factory. Torch-layout weights and a numpy oracle in `tests/lightglue_reference_numpy.py` |
+`layers/__init__.py` is empty. Every import goes through a subpackage or a module.
 
-### Semantics worth knowing before you reuse
+## Architecture
 
-| Layer | Fact |
-|---|---|
-| `EnergyAttention` (`attention/`) | no value matrix; `call()` returns the closed-form negative gradient of a scalar token-mixing energy |
-| `BiasFreeBatchNorm` (`norms/`) | no `moving_mean` / `beta`; degree-1 homogeneous at inference, for bias-free / Miyasawa denoisers |
-| `EnergyLayerNorm` (`norms/`) | **scalar** gamma + **vector** delta; the output is `dL/dx` of a Lagrangian with a PSD Hessian — what makes the Energy Transformer's energy descent provable |
-| `PolarWeightNorm` (`norms/`) | a polar-coordinate *weight* reparameterization (radius + hierarchical angles, exact per-unit norm); generalizes Weight Normalization. See its module docstring |
-| `PatchCausalTransformer` (`transformers/`) | the one stack shape the package had no home for: causal attention over **already-embedded** `(B, P, D)` vectors. `TextDecoder` embeds token IDs itself; `VisionEncoder` embeds an image. Renamed from `GlobalTransformer` on 2026-10-06 — "global" meant *patch-level vs byte-level*, a distinction that only exists inside BLT |
-| `LAYER_NORM_EPSILON` (`transformers/causal_stack.py`) | `1e-3`, **not** the norm factory's `1e-6`. Deliberate (D-202, plus the factory's own not-a-drop-in warning): routing these five norms through `create_normalization_layer` divides epsilon by 1000 and moves the BLT forward pass by `max\|delta\| = 1.7e-03`. Pinned per-package in `test_the_norm_epsilon_provenance_is_stated.py` |
-| `EnergyTransformer` (`transformers/`) | recurrent block replacing `attn -> FFN` with `T` steps of gradient descent on a single scalar energy (arXiv:2302.07253) |
-| `GatedLinearAttentionBlock` (`transformers/`) | linear-time recurrent sequence mixer, state follows a gated outer-product rule; consumed 3x per Qwen3-Next block |
-| `positional_sine_2d` (`embedding/`) | emits **channels-first** `(B, 2*num_pos_feats, H, W)` |
-| embedding `call()` paths | all graph-safe — no eager ops |
-
-### `memory/` — the single canonical home
-
-Three families under `dl_techniques.layers.memory.*`: **NTM** (`NeuralTuringMachine` plus its
-memory/head/controller/cell parts, the abstract bases, `AddressingMode` with CONTENT + HYBRID only,
-the state dataclasses and the addressing utilities), **SOM** (`SOMLayer` N-D hard winner,
-`SOM2dLayer`, `SoftSOMLayer` differentiable with per-dim or global softmax), and **NeuroGrid** (a
-differentiable topographic memory grid, orthogonal hypersphere init + soft-orthonormal
-regularization). `factory.py` exposes `create_mann(...)` and `create_som_2d(...)`; **`create_mann`
-is the ONLY MANN construction path** — there is no standalone MANN class, it returns a
-`NeuralTuringMachine` configured to preserve the historical MANN output shape.
-
-### `activations/common.py` — the Layer-rejecting activation-argument trio
-
-Three helpers — `activation_spec(activation)`, `resolve_activation(activation)`,
-`serialize_activation(activation)` — cover a layer's `activation` constructor argument end to end
-(canonicalize on the way in, resolve to a callable in `call()`, serialize back out for
-`get_config()`). They are a **thin, Layer-rejecting convenience wrapper** (partial delegation, see
-decisions.md D-002/D-003) around `utils/activation_serialization.py`'s
-`serialize_activation`/`deserialize_activation` pair — **`utils/AGENTS.md`** owns the underlying
-mechanism (the dl_techniques factory-key passthrough contract, the `allow_layer` parameter, the
-`get_config`/`__init__`-never-`from_config` call-site rule); this section only covers what
-`common.py` adds on top.
-
-**This is the import path used by all 37 files this plan (`plan-2026-09-15T034909-a7edc8da`)
-migrated onto the unified helper** — the 35 Tier-2 batch files (Step 4) plus `clifford_block.py` /
-`clifford_rnn.py`'s literal-duplicate fix (Step 3) — not the raw `activation_serialization.py` pair
-directly. Every one of those files needs correct str/dict-to-callable resolution inline
-(`resolve_activation` must return a callable, and its dict branch must resolve an unregistered
-custom-activation dict); MEASURED (D-003): the raw pair's non-dict branch returns a string
-**unchanged** rather than resolving it, and its dict branch raises on an unregistered custom
-function where `keras.activations.deserialize` succeeds — so only `common.py`'s trio is safe to
-import at those call sites.
-
-**Name clash, still standing (D-010).** `gelu_tanh.py` also defines a `resolve_activation`, and
-*that* is the one `activations/__init__.py` re-exports (its own public API name). The two are
-different functions — `common.py`'s rejects a `keras.layers.Layer`; `gelu_tanh.py`'s extends
-`keras.activations.get` with the tanh-GELU spellings. Always disambiguate with an explicit
-`from .common import resolve_activation`; never rely on the package-level re-export when you mean
-`common.py`'s version.
-
-**`"gelu"` and `"leaky_relu"` are the exact forms (D-277).** Both resolvers map these two strings
-to `exact_activations.exact_gelu` / `exact_leaky_relu` before `keras.activations.get`
-(`EXACT_ACTIVATIONS` is the one table), because TensorFlow builds their constants in float32 at
-float64 input. The forms are bit-identical to stock at float32. `common.serialize_activation`
-maps them back to the two strings, so a layer that serializes its resolved callable keeps a
-string config. A stock Keras layer handed the callable directly stores a function dict instead.
-
-**5 files deliberately stay off this path (Tier-3, D-008 through D-012)** — audited individually,
-not migrated: `bias_free_conv2d.py` and `convunext/model.py`'s supervision head both need
-Layer-serialize round-trip semantics `common.py`'s Layer-rejecting contract cannot provide;
-`fusion/multimodal_fusion.py` got a narrower, targeted fix in place (a real latent serialization bug,
-not a `common.py` migration); `gelu_tanh.py` is a deliberately distinct function (see name-clash
-note above); `ffn/gated_mlp.py`'s narrow activation allow-list is redundant with two other guards in
-the same file, so migrating it would be inert. Full reasoning for each: `decisions.md` D-008–D-012.
-
-### `heads/`
-
-One merged package with `nlp/`, `vision/` and `vlm/` sub-packages, a `create_head(domain, ...)`
-dispatch facade and per-domain factories. **`heads/AGENTS.md` owns it** — read that, not this file.
-
-### Standalone layers (top-level files)
-
-`ls src/dl_techniques/layers/*.py` is the authoritative list. As of this reorg, 14 files remain at
-`layers/` root — each a single-architecture or general-utility layer with no sibling file in scope
-for a subpackage (see D-005: a 1-file subpackage adds a directory for zero organizational gain):
-
-| File | Holds |
-|---|---|
-| `anchor_generator.py` | `AnchorGenerator` — precomputed multi-scale detection anchor/center grid |
-| `capsules.py` | `PrimaryCapsule`, `RoutingCapsule`, `CapsuleBlock` — capsule layers with dynamic routing. Also `CapsuleRoll`, which is **not** routing: a cyclic permutation of the activation vector WITHIN each capsule, `out[..., c, j] = x[..., c, (j - shift) % D]`. That distinction is the module docstring's whole subject — a roll and a routing iteration both permute a capsule, only one of them is a group action — and the two conventions differ in sign, which is invisible under a symmetric metric |
-| `dense_block.py` | `DenseBlock` — factory-driven Dense + norm + activation + dropout block |
-| `eomt_mask.py` | `EomtMask` — query-token class+mask segmentation head for Encoder-only Mask Transformer |
-| `fnet_encoder_block.py` | `FNetEncoderBlock` — full FNet encoder block (Fourier token mixing + FFN) |
-| `fractal_block.py` | `FractalBlock` — recursive FractalNet block |
-| `hierarchical_mlp_stem.py` | `HierarchicalMLPStem` — hierarchical non-overlapping-conv ViT patch stem |
-| `io_preparation.py` | `ClipLayer` (+ normalize/denormalize sibling) — tensor clipping/normalization pre/post-processing |
-| `modality_projection.py` | `ModalityProjection` — pixel-shuffle + dense projection of vision tokens into a language embedding space |
-| `mothnet_blocks.py` | `AntennalLobeLayer`, `MushroomBodyLayer`, `HebbianReadoutLayer` — insect-olfaction-inspired few-shot feature cascade |
-| `one_hot_encoding.py` | `OneHotEncoding` — in-graph multi-column one-hot encoder |
-| `residual_dense_block.py` | `ResidualDenseBlock` — `DenseBlock` with a residual (skip) connection |
-| `spatial_layer.py` | `SpatialLayer` (+ `coordinate_grid`, `interpolate_grid`) — CoordConv-style coordinate grid + bilinear grid sampling |
-| `thera_heat_field.py` | `ThermalActivation`, `HeatField` — THERA neural heat field for anti-aliased arbitrary-scale super-resolution |
-
-### Naming traps
-
-| Trap | Detail |
-|---|---|
-| **`RepMixerBlock` is two different architectures** | `models/vision/fastvit/components.py::FastVitRepMixerBlock` (timm FastViT MCi) is **NOT** `conv_blocks/repmixer_block.py::RepMixerBlock` (consumed by `models/vision_language/fastvlm/`). The FastViT names carry a `FastVit` prefix precisely because the serialization registry is keyed by bare class name |
-| **`MLPBlock` is `ffn/mlp.py`'s, and only its** | `tabular/tabm_mlp_block.py`'s two-Dense ensemble block is **`TabMMLPBlock`**. `ffn/mlp.py::MLPBlock` keeps the bare name because it is the FFN factory's `'mlp'` key, so moving it would move a public factory key. Same rule as `FastVitRepMixerBlock`: the narrower consumer takes the package prefix |
-| **`Downsample` / `Upsample` are `ideogram4/vae.py`'s** | `models/vision/image_restoration/pw_fnet/model.py` spells its pair **`PWFNetDownsample`** / **`PWFNetUpsample`**. pw_fnet's is a strided `Conv2D` / `Conv2DTranspose`; ideogram4's is a kernel-4 conv with manual asymmetric padding / `UpSampling2D`+`Conv2D`. NOT interchangeable; do not merge them |
-
-## Conventions
-
-### `__init__.py` policy varies by subpackage — check before assuming
-
-The `layers/__init__.py` root **is** empty. The subpackages split nearly evenly — 18 curate a
-public surface, 17 export nothing — so neither shape is the default and you have to look.
-
-| Shape | Subpackages | How to import |
-|---|---|---|
-| **Curated re-export with `__all__`** (18) | `activations` (38 names), `adapters` (13), `attention` (44), `conv_blocks` (1: `ConvStem` only), `dynamic_chunking` (3), `embedding` (11), `ffn` (27), `heads` (42), `logic` (10), `memory` (25), `mixtures` (9), `moe` (5), `norms` (24), `sequence_pooling` (13), `ssm` (15), `time_series` (32), `tokenizers` (8), `transformers` (34) | `from dl_techniques.layers.attention import MultiHeadAttention, create_attention_layer` |
-| **Exports nothing** (17) | `acc_unet`, `blt`, `complex`, `fusion`, `generative`, `geometric`, `graphs`, `matching`, `physics`, `pooling`, `reasoning`, `regularization`, `signal_processing`, `statistics`, `structured_linear`, `tabular`, `yolo12`, and the top-level standalone modules | `from dl_techniques.layers.graphs.graph_neural_network import GraphNeuralNetwork` |
-
-All 35 subpackages have an `__init__.py`; every one is in exactly one of the two rows above.
-`fusion` is the only "exports nothing" entry whose `__init__.py` is not a zero-byte file — it is
-docstring-only and deliberately binds no name, and its docstring says so. Re-derive both rows and
-every `__all__` length with:
-
-```bash
-# from the repo root
-for f in $(find src/dl_techniques/layers -mindepth 2 -maxdepth 2 -name __init__.py | sort); do
-  p=$(basename "$(dirname "$f")")
-  if grep -qE '^__all__' "$f"; then
-    n=$(.venv/bin/python -c "import importlib;print(len(importlib.import_module('dl_techniques.layers.$p').__all__))" 2>/dev/null)
-    echo "CURATED $p ($n)"
-  else
-    echo "EXPORTS-NOTHING $p"
-  fi
-done | sort | tee /dev/stderr | cut -d' ' -f1 | uniq -c
+```mermaid
+flowchart TD
+    N[norms] --> T[transformers]
+    A[attention] --> T
+    F[ffn] --> T
+    E[embedding] --> T
+    F --> M[moe]
+    N --> M
+    M --> T
+    T --> B[blt, reasoning]
+    A --> X[fusion]
+    F --> X
+    N --> X
+    X --> H[heads/vlm]
+    ACT[activations] --> N
+    ACT --> F
+    N --> R[root blocks: dense_block, residual_dense_block, fnet_encoder_block, eomt_mask]
+    F --> R
 ```
 
-Submodule imports keep working in both cases — e.g.
-`from dl_techniques.layers.attention.multi_head_attention import MultiHeadAttention` — but for a
-subpackage with an `__all__`, prefer the package-level import.
+- Base domains (`norms`, `activations`, `ffn`, `attention`, `embedding`) each own a `factory.py`. `transformers`, `moe` and `fusion` build their sub-layers through those factories instead of hard-coding classes.
+- `transformers.TransformerLayer` composes `create_attention_layer`, `create_ffn_from_config` (or `MixtureOfExperts` when `moe_config` is set) and the norm factory. `moe` builds experts through the FFN factory.
+- `fusion.MultiModalFusion` builds attention, FFN and norm sub-layers through their factories and is consumed by `heads/vlm`.
+- `blt` builds its stacks through `transformers/causal_stack.py`. `reasoning` pieces are reused by `blt/blt_core.py`.
+- Remaining families (`ssm`, `time_series`, `conv_blocks`, `geometric`, `graphs`, `memory`, `signal_processing`, and others) are mostly independent. Do not assume a cross-import between two of them without grepping.
+- Concrete layers register through `register_dl_technique("dl_techniques.layers.<dotted module path>")` from `dl_techniques.utils.keras_registration`. The key embeds the defining module, so two same-named classes in different modules do not collide. Not registered: the abstract bases in `memory/ntm_interface.py`, `moe/experts.py` (`BaseExpert`) and `mixtures/base.py`, and the private `_LikelihoodHead` in `time_series/deepar_blocks.py`.
 
-### Other conventions
+## Key files
 
-- Docstrings in `layers/` use **Sphinx/reST** (`:param:` / `:type:` / `:raises:`), not Google
-  `Args:`, in the large majority of modules. In `attention/` it is mandatory;
-  `attention/channel_attention.py` is the reference exemplar.
-- Subpackages with `factory.py` support config-driven construction.
-- All layers implement `get_config()` for Keras serialization.
-- Layers follow the Keras 3 pattern: `__init__`, `build`, `call`, `get_config`.
+Subpackages. F = has `factory.py`. Counts were measured with the registry objects.
 
-## Layer Reuse Policy (factory-first)
+| Package | F | Role | Notes |
+| --- | :-: | --- | --- |
+| `activations/` | Y | 25 activation types, plus `common.py` argument helpers | `ACTIVATION_REGISTRY` has 25 keys. Curated `__init__` (38 names) |
+| `adapters/` | Y | `LoRAAdapter`, `GatedAdapter` | One key, `lora`. Curated (13 names). `GatedAdapter` is exported but deliberately not a key. Gate half is `statistics/local_support_gate.py` |
+| `attention/` | Y | 35 attention types | `ATTENTION_REGISTRY` 35 keys. Curated (44 names: 37 classes, 6 factory functions, `AttentionType`). `AttentionRoutingCapsule`, `CapsuleBlockV2`, `Ideogram4Attention`, `MMDiTJointAttention` are exported without a key. `assemble_attention_config` is not exported. Sphinx docstrings mandatory |
+| `embedding/` | Y | Patch, positional, sinusoidal, RoPE, token, class-label, timestep embeddings | 24 layer classes, 16 keys. 8 classes have no key: `AxialRoPE2D` (exported by `__init__`), and `ClassTokenPrepend`, `MaskTokenApply`, `RegisterTokens`, `StateIndicatorEmbedding`, `HierarchicalCodebookEmbedding`, `PatchEmbed3D`, `VideoRoPE3D` (not exported, import from the module). `__init__` (11 names) exports only 3 layer classes (`AxialRoPE2D`, `ClassLabelEmbedding`, `TimestepEmbedding`), 4 NumPy sin-cos table builders and the factory names. Its docstring is stale (says 23 classes, 7 without a key) |
+| `ffn/` | Y | Feed-forward variants | `FFN_REGISTRY` 22 keys over 20 classes (`glu`, `reglu`, `bilinear` are configurations of `GLUFFN`). Curated (27 names: the 20 classes plus the factory interface incl. `assemble_ffn_config`) |
+| `heads/` | Y | 24 task-head classes (8 NLP, 10 vision, 6 VLM) in `nlp/`, `vision/`, `vlm/` | Curated (42 names, from `heads.nlp`, `vision`, `vlm` plus `create_head`); the eight NLP in-model helpers (`TASK_HEAD_NAME`, `build_model_task_head`, ...) are not exported, import them from `heads.nlp`. `create_head(domain, *args, **kwargs)` forwards verbatim to a per-domain factory. Domain signatures differ on purpose. `validation.py`, `masking.py` hold shared checks |
+| `logic/` | Y | Fuzzy logic and arithmetic operators, circuits | 4 keys: `logic`, `arithmetic`, `neural_circuit`, `circuit_depth`. Curated (10 names) |
+| `memory/` | Y | NTM, SOM family, NeuroGrid | `create_mann` is the only MANN construction path (no standalone MANN class; the old `MannLayer` is deleted). `create_som_2d` for 2-D SOM. Curated (25 names), both factory functions exported |
+| `mixtures/` | Y | `RBFLayer`, `KMeansLayer`, `GMMLayer` | 3 keys. Curated (9 names). Non-strict factory (see invariants) |
+| `norms/` | Y | 16 normalization classes plus `PolarWeightNorm` | 19 factory keys: 2 stock Keras, 17 local keys over 16 classes (`dml_plus_focal`, `dml_plus_center` both build `DMLPlus`). `PolarWeightNorm` is exported (24 names in `__all__`) but not a key |
+| `sequence_pooling/` | Y | `SequencePooling` (18 strategies), attention and weighted pooling | 3 keys: `sequence`, `attention`, `weighted`. Curated (13 names) |
+| `ssm/` | Y | Mamba v1 and Mamba-2 layers, `ContextMambaLayer`, residual blocks | `SSM_REGISTRY` 4 keys: `selective_ssm`, `context_mamba`, `mamba`, `mamba2`. `MambaResidualBlock` and `Mamba2ResidualBlock` are exported (15 names in `__all__`) but are not registry keys |
+| `transformers/` | Y | `TransformerLayer`, stacks, specialized blocks, `causal_stack.py` | `TRANSFORMER_BLOCK_REGISTRY` maps 12 keys to classes. Accepted and required keys are read from each class's `__init__`. `__all__` has 34 names. `Gemma3TransformerBlock`, `Ideogram4TransformerBlock`, `Ideogram4FinalLayer`, the `sd3_adaln` layers, `WeightedAdjacencyProjector` and the `causal_stack.py` helpers are not exported |
+| `moe/` | | `MixtureOfExperts`, `config.py`, `experts.py`, `gating.py`, `layer.py` | Linear, cosine, soft gating. Curated (5 names: `MoEConfig`, `ExpertConfig`, `GatingConfig`, `MixtureOfExperts`, `create_ffn_moe`). Gating classes, `FFNExpert`, `create_gating`, `create_expert` are not exported. No other modules |
+| `blt/` | | Byte Latent Transformer layers and `ByteLatentReasoningCore` | Not exported from `__init__` |
+| `dynamic_chunking/` | | `RoutingModule`, `ChunkLayer`, `DeChunkLayer` | Curated (3). Route, chunk, inner network, dechunk is one unit. Consumer: `models/language/hnet/stage.py`. No factory |
+| `reasoning/` | | HRM core, module, sparse puzzle embedding | Outer halting loop lives in `models/language/hrm/model.py` |
+| `acc_unet/` | | `HANCBlock`, `HANCLayer`, `MLFCLayer` | Plus a batch-norm helper in `reference_batch_norm.py` |
+| `yolo12/` | | `Bottleneck`, `C3k2Block`, `A2C2fBlock`, three heads | |
+| `conv_blocks/` | | Conv building blocks | `__all__` is only `ConvStem`. Import every other class from its module |
+| `pooling/` | | `BlurPool2D`, `PixelShuffle2D`, `PixelUnshuffle2D`, `PatchMerging`, `GlobalSumPooling`, `DownsampleAndSkip` | Mostly channels-last |
+| `signal_processing/` | | `Canny`, `CLAHE`, `GaussianFilter`, `GaussianPyramid`, `LaplacianFilter`, `HaarWaveletDecomposition`, `ShearletTransform`, `FFTLayer`, `IFFTLayer`, `StrongAugmentation` | Mostly fixed formulas. `CLAHE` has one trainable gate |
+| `complex/` | | `ComplexLayer` base, conv2d, dense, ReLU, two average poolings, dropout | One class per module. TensorFlow backend only |
+| `structured_linear/` | | `BitLinear`, `MPSLayer`, `OrthoBlock`, `OrthogonalButterfly`, `RFFKernelLayer`, `KANvolution`, `HarmonicDense`, `HierarchicalHarmonicHead`, crystal family | `crystal_frames.py` is shared geometry. No factory |
+| `regularization/` | | `LayerScale`, `ScheduledDropout`, `StochasticDepth`, `StochasticGradient`, `SelectiveGradientMask`, `RouterLayer`, `FiLMLayer`, `ConditionalOutputLayer`, `SpatialSmoothness`, `GaussianReadout` | Name is wider than the content |
+| `statistics/` | | Kernel PCA, `MDNLayer`, normalizing flow, `UnifiedScaler`, `MovingStd`, `ResidualACFLayer`, `LocalSupportGate`, `ProbabilityLogits`, `conformal/` | `conformal/` has `ConformalLayer`, `ConformalInterval`, `ConformalQuantileHead`, `ConformalPredictionSet` |
+| `generative/` | | `RestrictedBoltzmannMachine`, `SparseAutoencoder`, samplers (`Sampling`, `HypersphereSampling`, `VMFSampling`), vector quantizers, `TopographicProduct` | |
+| `geometric/` | | `CliffordNetBlock`, `CausalCliffordNetBlock`, `CliffordRNN`, point-cloud layers, `RayPointCombinator`, `SparseDepthSplat` | |
+| `graphs/` | | `GraphNeuralNetworkLayer`, `SHGCNLayer`, `FermiDiracDecoder`, RELGT blocks, `EntityGraphRefinement` | Seven classes |
+| `time_series/` | | N-BEATS and N-BEATSx blocks, xLSTM, PRISM, DeepAR, quantile heads, TCN, lag attention, temporal fusion, EMA | Curated (32). Consumed by `models/time_series/` |
+| `tabular/` | | TabM pieces: `ScaleEnsemble`, `LinearEfficientEnsemble`, `NLinear`, `TabMMLPBlock`, `TabMBackbone` | Private `_ensemble_scaling.py` |
+| `matching/` | | LightGlue: `LearnedFourierRotaryEncoding`, `LightGlueSelfBlock`, `LightGlueCrossBlock`, `MatchAssignment`, `MatchTokenConfidence` | Consumed by `models/vision/keypoints/lightglue/` |
+| `physics/` | | `LagrangianNeuralNetworkLayer`, `ApproximatedLNNLayer` | Exact one is TensorFlow only |
+| `tokenizers/` | | `BPETokenizer`, `TokenEmbedding`, `ASCIICharTokenizer`, `ASCIICharPreprocessor` | Curated (8) |
+| `fusion/` | | `MultiModalFusion` in `multimodal_fusion.py` | `__init__` is docstring only and binds no name |
 
-> **Before implementing ANY new layer, check for an existing one to reuse.** A bespoke layer is the
-> last resort, not the first move.
+Top-level modules (14). Each holds one architecture or utility. Registry package string is `dl_techniques.layers.<module>`.
 
-Check in this precedence order; proceed to the next step only when nothing fits.
+| File | Classes and functions | Notes |
+| --- | --- | --- |
+| `anchor_generator.py` | `AnchorGenerator(input_image_shape, strides_config=None)` | `None` (or an empty list) becomes `[8, 16, 32]`. Stores non-trainable `anchors` and `strides` weights built in `build`. `call` returns `(anchors (B,N,2), strides (B,N,1))` tiled to the input batch. Input is read only for batch size |
+| `capsules.py` | `PrimaryCapsule`, `RoutingCapsule`, `CapsuleBlock`, `CapsuleRoll` | First three do dynamic routing and use `activations.squash.SquashLayer`. `CapsuleRoll(num_capsules, capsule_dim)` has no weights. Its `call` takes `shift` (default 1) and computes `out[..., c, j] = x[..., c, (j - shift) % D]` |
+| `dense_block.py` | `DenseBlock` | Dense, optional norm (`normalization_type`, default `layer_norm`), activation (`activation_type`, default `relu`), optional dropout. Built via the norms and activations factories |
+| `residual_dense_block.py` | `ResidualDenseBlock` | Same plus skip. `units=None` matches input width. `build` raises `ValueError` if `units` differs from the input width |
+| `eomt_mask.py` | `EomtMask` | Input is `(query_tokens, pixel_features)` or a dict with those keys. Returns `(class_logits (B,Q,C), mask_logits (B,Q,H,W))` |
+| `fnet_encoder_block.py` | `FNetEncoderBlock` | `FNetFourierTransform` plus FFN from `ffn` factory. `normalization_position` is `'post'` (default) or `'pre'`; anything else raises `ValueError`. Optional stochastic depth |
+| `fractal_block.py` | `FractalBlock(block_config, depth=1, drop_path_rate=0.15)` | Base block is `ConvBlock.from_config(block_config)`. Its `strides` must be 1. Longest path is `2^(depth-1)` base blocks |
+| `hierarchical_mlp_stem.py` | `HierarchicalMLPStem` | Non-overlapping strided convs. `patch_size` square, power of two, >= 4. `embed_dim` divisible by 4. Returns `(B, num_patches, embed_dim)` |
+| `io_preparation.py` | `ClipLayer`, `NormalizationLayer`, `DenormalizationLayer`, `TensorPreprocessingLayer` | Normalization defaults map `[0, 255]` to `[-0.5, 0.5]`. Denormalization is the inverse. Both clip to the source range first |
+| `modality_projection.py` | `ModalityProjection(input_dim, output_dim, scale_factor=2)` | `PixelShuffle` then `Dense`, optional GELU and LayerNorm. Input `(B, tokens, input_dim)` |
+| `mothnet_blocks.py` | `AntennalLobeLayer`, `MushroomBodyLayer`, `HebbianReadoutLayer` | `HebbianReadoutLayer.hebbian_update()` applies `dW = alpha * x^T y / batch`. Optional `kernel_constraint` is applied after each update |
+| `one_hot_encoding.py` | `OneHotEncoding(cardinalities)` | Input `(B, num_features)` integers. Output `(B, sum(cardinalities))`. Empty list gives zero width. Non-positive cardinality raises `ValueError` |
+| `spatial_layer.py` | `SpatialLayer`, `coordinate_grid`, `interpolate_grid` | `SpatialLayer` is forced non-trainable and reads only the input shape. `interpolate_grid(coords, grid, order)` accepts `order` 0 or 1 only. It is a bare function so it can run inside a nested gradient tape |
+| `thera_heat_field.py` | `ThermalActivation`, `HeatField` | `HeatField.call(rel_coords, phi_phase, phi_kernel, t)`. The constructor argument `c` is stored and serialized but read by nothing |
 
-1. **The relevant domain factory** — each exposes a `create_*_layer()` entry point backed by a registry of named types. Pass a `type` string + config; do not hand-roll what a factory already builds.
+## Public interface
 
-   | Domain | Factory entry point | Registered types |
-   |--------|---------------------|------------------|
-   | Normalization | `create_normalization_layer()` in `norms/factory.py` | 19 |
-   | Attention | `create_attention_layer()` in `attention/factory.py` | 35 |
-   | FFN / MLP | `create_ffn_layer()` in `ffn/factory.py` | 22 |
-   | Embeddings | `create_embedding_layer()` in `embedding/factory.py` | 16 |
-   | Activations | `create_activation_layer()` in `activations/factory.py` | 24 |
-   | Sequence pooling | `create_sequence_pooling_layer()` in `sequence_pooling/factory.py` | 3 (`sequence`, `attention`, `weighted`) |
-   | Logic | `create_logic_layer()` in `logic/factory.py` | 4 (`logic`, `arithmetic`, `neural_circuit`, `circuit_depth`) |
-   | Mixtures | `create_mixture_layer()` in `mixtures/factory.py` | 3 (RBF / KMeans / GMM) |
-   | Memory | `create_mann()` / `create_som_2d()` in `memory/factory.py` | n/a |
-   | Task heads | `create_head(domain, ...)` in `heads/factory.py` (NLP / vision / VLM) | n/a |
-   | Transformer blocks | `create_transformer_block(config)` in `transformers/factory.py` | 12 |
+Factory entry points:
 
-   > **Most code imports `TransformerLayer` directly** — its config selects attention / FFN / normalization types and normalization position, and it composes the domain factories internally, so it covers most cases without a custom block. `create_transformer_block({"type": ..., ...})` is the config-driven door to the 12 registered blocks; unlike the other registries, `TRANSFORMER_BLOCK_REGISTRY` maps a key to its class only, and the accepted and required keys are read from that class's `__init__` (D-217 of plan-2026-10-14T062616-81938e81: a hand-kept key list left 11 of 12 keys unbuildable). Higher-level `create_*_encoder` builders live in `transformers/vision_encoder.py` and `transformers/text_encoder.py`.
+| Domain | Entry point | Registry |
+| --- | --- | --- |
+| Normalization | `create_normalization_layer(normalization_type, name=None, epsilon=1e-6, **kw)` in `norms/factory.py` | 19 keys |
+| Attention | `create_attention_layer(attention_type, name=None, **kw)` in `attention/factory.py` | 35 |
+| FFN | `create_ffn_layer(ffn_type, name=None, **kw)` in `ffn/factory.py` | 22 |
+| Embedding | `create_embedding_layer(embedding_type, name=None, **kw)` in `embedding/factory.py` | 16 |
+| Activation | `create_activation_layer(activation_type, name=None, **kw)` in `activations/factory.py` | 25 |
+| Sequence pooling | `create_sequence_pooling_layer(pooling_type, name=None, **kw)` in `sequence_pooling/factory.py` | 3 |
+| Logic | `create_logic_layer(layer_type, name=None, **kw)` in `logic/factory.py` | 4 |
+| Mixtures | `create_mixture_layer(mixture_type, name=None, **kw)` in `mixtures/factory.py` | 3 |
+| SSM | `create_ssm_layer(ssm_type, name=None, **kw)` in `ssm/factory.py` | 4 |
+| Adapters | `create_adapter_layer(adapter_type, name=None, **kw)` in `adapters/factory.py` | 1 |
+| Transformer blocks | `create_transformer_block(config, *, name=None)` in `transformers/factory.py`; `config["type"]` picks the block | 12 |
+| Memory | `create_mann(...)`, `create_som_2d(...)` in `memory/factory.py` | n/a |
+| Heads | `create_head(domain, ...)` in `heads/factory.py`, domains `nlp`, `vision`, `vlm` | n/a |
 
-2. **An existing standalone layer** — search the subpackages and the standalone list above before writing your own. The reuse surface is broad; a close match often already exists.
+Most domain factories also have `create_<domain>_from_config(config)`. Higher-level `create_*_encoder` builders live in `transformers/vision_encoder.py` and `transformers/text_encoder.py`. Most model code imports `TransformerLayer` directly instead of the block factory.
 
-3. **Only then, a new custom layer**, following `research/2026_keras_custom_models_instructions_v2.md` (full serialization, `build`, `get_config`, tests). Place it in the right domain subpackage and, where that domain has a `factory.py`, register it there so the next author can reuse it.
+Import shape, re-derived from each `__init__.py`:
 
-### The factory contract
+| Shape | Packages |
+| --- | --- |
+| Curated re-export with `__all__` (18) | `activations` (38 names), `adapters` (13), `attention` (44), `conv_blocks` (1), `dynamic_chunking` (3), `embedding` (11), `ffn` (27), `heads` (42), `logic` (10), `memory` (25), `mixtures` (9), `moe` (5), `norms` (24), `sequence_pooling` (13), `ssm` (15), `time_series` (32), `tokenizers` (8), `transformers` (34) |
+| Exports nothing (17) | `acc_unet`, `blt`, `complex`, `fusion`, `generative`, `geometric`, `graphs`, `matching`, `physics`, `pooling`, `reasoning`, `regularization`, `signal_processing`, `statistics`, `structured_linear`, `tabular`, `yolo12`, and the top-level modules |
 
-**1. Every factory RAISES `ValueError` on an undeclared keyword.** Attention, ffn, norms,
-activations, embedding, logic, ssm, adapters, sampling, sequence_pooling and transformers each reject a
-`bogus_key=1`; a new factory, or any new registry-backed dispatch, does the same. The one recorded
-exception is `mixtures/factory.py`, which logs a warning naming the key and builds (a cross-plan
-ruling, pinned by `tests/test_layers/test_mixtures/test_factory.py`). **Never filter-and-drop** —
-each of these was silent, and passed its tests:
+Exported without a registry key: `AxialRoPE2D` (embedding), `MambaResidualBlock` and `Mamba2ResidualBlock` (ssm), `GatedAdapter` (adapters), `PolarWeightNorm` (norms), `AttentionRoutingCapsule`, `CapsuleBlockV2`, `Ideogram4Attention`, `MMDiTJointAttention` (attention). Not exported by their curated package, so import from the module or `factory`: 21 of the 24 embedding classes (14 reachable through the factory, 7 without a key), `embedding.factory.get_embedding_info`, `attention.factory.assemble_attention_config`, and the transformers and moe items in the Key files table.
 
-| Misspelling | Consequence |
-|---|---|
-| `dropout=` against a declared `dropout_rate` | positional dropout dead repo-wide |
-| `qkv_bias=` against `use_bias` | attention built with zero bias weights |
-| RoPE args into an attention type declaring none | keys evaporated |
+For an exports-nothing package, import from the module: `from dl_techniques.layers.graphs.graph_neural_network import GraphNeuralNetworkLayer`. Submodule imports also work for curated packages, but prefer the package-level import there.
 
-**2. A registry's key set, `Literal` aliases and each entry's `required_params` / `optional_params`
-are public API** — consumed by config-driven callers and asserted by
-`tests/test_layers/test_factory_registry_drift.py`. `transformers/factory.py` declares no key lists:
-it reads them from each block's `__init__`, and
-`tests/test_layers/test_transformers/test_the_block_factory_builds_every_registered_block.py` builds
-every key. Adding, renaming or removing one is a breaking
-change. `attention/factory.py`'s module docstring is the exemplar for declaring this, including why
-two of its keys deliberately map to functions rather than classes, and why two more configurations
-are deliberately NOT registered.
+## Data shapes
 
-**3. An "optional" parameter the layer derives is not safe to pass explicitly.** Consult the registry
-entry's `required_params`: `hidden_dim` is required for 13 of the 22 FFN types and derived for
-`swiglu` (a two-thirds rule plus `ffn_multiple_of`).
+- Factory registry entry: `{ 'class': ..., 'description': ..., 'required_params': [...], 'optional_params': {...} }` (shown for `ATTENTION_REGISTRY`; other registries are close to this shape). Key sets, `Literal` type aliases and `required_params` / `optional_params` are public API.
+- `TRANSFORMER_BLOCK_REGISTRY` is the exception. It maps key to class only, and accepted and required keys come from the class `__init__`.
+- Config dicts passed to a factory are plain Python dicts. Layer configs round-trip through `get_config()` / `from_config()`.
+- `activations/common.py` exposes `activation_spec`, `resolve_activation`, `serialize_activation` for a layer's `activation` argument: canonicalize in, resolve to a callable in `call()`, serialize in `get_config()`. It rejects `keras.layers.Layer` instances. `"gelu"` and `"leaky_relu"` resolve to `exact_gelu` / `exact_leaky_relu` (the `EXACT_ACTIVATIONS` table in `exact_activations.py`), which build constants in the input dtype instead of float32.
 
-**4. When you audit "who calls factory X", also sweep "who builds X's argument dict without calling
-X directly."** Files that pass an `ffn_args=` dict to a wrapper rather than calling
-`create_ffn_layer` themselves are invisible to an AST call inventory of the factory, and invisible
-to a suite sweep run at site defaults (the break needs a non-empty caller dict to appear). A
-`**kwargs`-splat site has the identical blind spot. Use `assemble_ffn_config()` /
-`assemble_attention_config()` so those dicts go through the same validation —
-`models/language/qwen/qwen3.py` is the repaired exemplar and carries a comment explaining why it
-must not be simplified back to a bare dict literal.
+## Invariants and constraints
 
-**5. Normalization epsilon.** The factory sets `1e-6`; Keras' `LayerNormalization` /
-`BatchNormalization` default to `1e-3` — 1000x in every denominator, with no shape symptom and no
-warning. Route normalization through the factory. Constructing directly makes `epsilon=` mandatory,
-with a cited reference. Do not blanket-fix — MobileNet's reference BN genuinely is `1e-3`.
+1. Every registry-keyed factory (norms, attention, ffn, embedding, activations, sequence_pooling, logic, ssm, adapters, transformers) raises `ValueError` on a keyword the type does not declare. `mixtures` is the one exception (below). Never filter-and-drop. `create_mann`, `create_som_2d` and `create_head` have no registry; they forward `**kwargs` to a constructor or a per-domain factory. Silent drops hid real defects (a misspelled `dropout` left dropout dead, a misspelled `qkv_bias` built attention without bias). The one exception is `mixtures/factory.py`, which logs a warning naming the unknown key, drops it and builds; a test pins that.
+2. A factory's key set, type aliases and per-entry required and optional parameters are public API, asserted by `tests/test_layers/test_factory_registry_drift.py`. Adding, renaming or removing a key is a breaking change.
+3. An optional parameter that the layer derives is not safe to pass explicitly. Check `required_params` first. For example `hidden_dim` is required for most FFN types but derived for `swiglu`.
+4. When auditing who calls a factory, also look for code that builds the argument dict without calling the factory (an `ffn_args=` dict passed to a wrapper, a `**kwargs` splat). Use `assemble_ffn_config()` (exported from `ffn`) and `assemble_attention_config()` (import from `attention.factory`) so those dicts go through the same validation.
+5. Normalization epsilon: the norm factory defaults `epsilon` to `1e-6` for every type that takes one (`dynamic_tanh` has none). Keras `LayerNormalization` and `BatchNormalization` default to `1e-3`, a 1000x difference with no shape symptom. Route normalization through the factory. When constructing a Keras norm directly, pass `epsilon=` explicitly and cite the reference. Do not blanket-fix: some references (MobileNet batch norm) really use `1e-3`. `transformers/causal_stack.py` pins `LAYER_NORM_EPSILON = 1e-3` on purpose, because moving its norms to the factory default changed the BLT forward pass.
+6. Layers build their sub-layers in `__init__`, call `sub_layer.build(shape)` explicitly in `build()` (so saved weights restore), and call `super().build(input_shape)` last.
+7. A layer's `get_config()` must cover every constructor argument. Use `keras.ops`, not raw TensorFlow, except where a package states otherwise (`complex/`, the exact `physics/` layer).
+8. Registration uses `register_dl_technique(...)` with the dotted module path. A bare `@keras.saving.register_keras_serializable()` mints `Custom>ClassName`, which collides across modules.
+9. Initializers: when one layer instance creates several sub-layers or weights from one configured initializer, clone it with `dl_techniques.initializers.clone.clone_initializer` so each draws independently. Reusing one instance replays the same draw.
+10. `complex/` layers cannot run on a non-TensorFlow backend. `positional_sine_2d` in `embedding/` takes channels-last and returns channels-first.
+11. `SequencePooling` modes `cls` and `first` ignore the keep-mask on purpose (index 0). `last` and `middle` are mask-aware and index the kept positions, not the padded length.
+12. `GatedAdapter` and `LoRAAdapter` return a delta. The caller adds it to its own output.
 
-## Testing
+Naming traps (the serialization registry is keyed by class name, so bare names must stay unique):
 
-Tests in `tests/test_layers/` organized by subdomain (attention, embeddings, ffn, norms, graphs, moe, etc.).
+| Name | Fact |
+| --- | --- |
+| `RepMixerBlock` | `conv_blocks/repmixer_block.py` (consumed by `models/vision_language/fastvlm/`). The FastViT one is `FastVitRepMixerBlock` in `models/vision/fastvit/components.py` |
+| `MLPBlock` | Belongs to `ffn/mlp.py` (the `mlp` key). `tabular/tabm_mlp_block.py` is `TabMMLPBlock` |
+| `Downsample` / `Upsample` | Belong to `models/vision_language/ideogram4/vae.py`. pw_fnet uses `PWFNetDownsample` / `PWFNetUpsample`. Not interchangeable |
+| `resolve_activation` | Two functions. `activations/gelu_tanh.py` is what `activations/__init__` exports. `activations/common.py` rejects Layers. Use `from dl_techniques.layers.activations.common import resolve_activation` when you mean the second |
+
+When two classes would collide, prefix the narrower consumer's class name. Do not add a second bare name.
+
+## Dependencies
+
+- Internal: `dl_techniques.utils.keras_registration` (`register_dl_technique`), `dl_techniques.utils.logger` (logging, no `print`), `dl_techniques.utils.activation_serialization`, `dl_techniques.initializers` (`clone_initializer`, `LinearUpInitializer`, and others).
+- External: `keras` >= 3.8 and < 4, `tensorflow` 2.18, `numpy`. `keras.ops` is the compute API; the import style is `import keras`, then qualify at the call site. This covers the whole tree, not only the top level: 74 of the 368 non-`__init__` modules under `layers/` still use `from keras import ...` (70 of them import `ops`). At the top level these are `eomt_mask.py`, `io_preparation.py`, `anchor_generator.py`, `one_hot_encoding.py` and `thera_heat_field.py`; in subpackages, for example, `transformers/eomt_transformer.py`, `transformers/transformer_decoder.py`, `transformers/swin_conv_block.py`, `time_series/nbeats_blocks.py` and `pooling/blur_pool.py`. Match the file you edit. Find them with `grep -rlE "^from keras import" --include=*.py src/dl_techniques/layers`.
+- Consumers: `src/dl_techniques/models/**`, `src/train/**`, `src/applications/**`, and `callbacks/` and `metrics/` for some layers (for example `metrics/keypoint_matching.py` imports `filter_matches` from `matching/`).
+
+## Failure modes
+
+- Unknown factory type, missing required parameter, undeclared keyword: `ValueError`, also logged by the factory. Mixtures drop unknown keywords with a logged warning.
+- `ResidualDenseBlock.build`: `ValueError` when `units` differs from the input width.
+- `FractalBlock`, `HierarchicalMLPStem`, `EomtMask`, `CapsuleRoll`, `OneHotEncoding`: constructor `ValueError` on invalid sizes.
+- `interpolate_grid`: `ValueError` for `order` outside {0, 1}.
+- Rare numeric traps: float64 GELU and leaky ReLU constants built in float32 by stock TensorFlow (fixed by the exact forms); epsilon mismatch (invariant 5); a shared initializer instance replaying one draw (invariant 9).
+
+## Working here
+
+Before writing a new layer, check in this order:
+
+1. The domain factory. Pass a type string and config. Do not hand-roll what a factory builds.
+2. An existing layer in a subpackage or in the top-level modules above.
+3. Only then a new layer: put it in the matching domain subpackage, follow the `__init__` / `build` / `call` / `get_config` pattern, register it with `register_dl_technique("dl_techniques.layers.<subpackage>.<module>")`, and add it to the domain factory if one exists. Update the factory registry, its `Literal` alias and the registry drift test together.
+
+Conventions:
+
+- Docstrings are Sphinx/reST (`:param:`, `:type:`, `:raises:`) in most modules and mandatory in `attention/` (`attention/channel_attention.py` is the exemplar). Match the file you edit; never convert a file wholesale.
+- One class per module is the pattern in `complex/`, `dynamic_chunking/` and `tabular/`. A single-file architecture with no siblings stays at the `layers/` root; do not create a one-file subpackage.
+- Subpackages with a curated `__init__` must keep `__all__` in step with new public classes. Run the tree-wide collection gate after changing a public surface: `.venv/bin/python -m pytest tests/test_models/ -q --collect-only` (a curated `__init__` that shadows a submodule breaks only at collection).
+- Keep class names unique repo-wide (see Naming traps).
+
+Tests:
+
+- Layer tests live in `tests/test_layers/`. Packages mirror as `tests/test_layers/test_<package>/` (for example `test_attention/`, `test_fusion/`). Top-level modules have loose files such as `test_capsules.py`, `test_dense_block.py`, `test_eomt_mask.py`, `test_spatial_layer.py`, `test_thera_heat_field.py`.
+- Run only the package you changed: `.venv/bin/python -m pytest tests/test_layers/test_attention/ -q`. The full suite takes about 1.5 hours and cannot run in one process; do not use it as a routine check.
+- After a factory change, run `tests/test_layers/test_factory_registry_drift.py`.
+- Run CPU-only when the GPU is busy: `CUDA_VISIBLE_DEVICES='' .venv/bin/python -m pytest ...`. Do not run pytest jobs in parallel.
+- Never write into the repo-root `results/` from a test or smoke script.

@@ -1,57 +1,74 @@
-# `dl_techniques.layers.transformers`
+# transformers
 
-Assembled transformer blocks and complete modality stacks. Each block composes the `attention/`,
-`ffn/` and `norms/` factories, so an architecture is mostly a choice of type strings.
+Transformer blocks and complete encoder or decoder stacks, written as Keras 3 layers. Lives in `src/dl_techniques/layers/transformers/` and is imported as `dl_techniques.layers.transformers`.
 
-Blocks are usually imported by class from `dl_techniques.layers.transformers` (or from their own
-module) and constructed directly. The type strings you pass *into* them are the attention / FFN /
-normalization registry keys, which are documented in the sibling packages and in
-`src/dl_techniques/layers/AGENTS.md`.
+## What it is for
 
-For config-driven construction, `create_transformer_block({"type": key, **kwargs})` builds any of the
-12 blocks in `TRANSFORMER_BLOCK_REGISTRY` (`factory.py`). The registry maps a key to its class and
-nothing else: the accepted keys are the class's own `__init__` keywords plus `name`, `dtype` and
-`trainable`, the required ones are the `__init__` parameters without a default, and a key outside
-that set, or a missing required one, raises `ValueError` naming it. The keys are the block names in
-snake case (`transformer_layer`, `swin_conv_block`, `energy_transformer`, ...).
+Most transformer models in this library are the same few pieces glued in different ways: an attention layer, a feed-forward network (FFN), a normalization layer, and a choice of where the normalization goes. This package builds those pieces once. `TransformerLayer` takes the attention type, FFN type and normalization type as plain strings and builds the matching sub-layers through the sibling `attention/`, `ffn/` and `norms/` factories (a factory turns a type string plus options into a layer). A new architecture is then mostly a choice of strings, not a new class.
 
-## What is in here
+The package also holds blocks that do not fit that shape: Swin windowed attention, a Perceiver cross-attention block, an object-query segmentation block, diffusion-style blocks conditioned on a vector, a recurrent linear-attention mixer, and an energy-based block. Complete stacks (`VisionEncoder`, `TextEncoder`, `TextDecoder`, `PatchCausalTransformer`) wrap `TransformerLayer` with embeddings and pooling.
 
-| Class | What it is | Pick it when |
-|---|---|---|
-| `TransformerLayer` | The workhorse: self-attention + FFN, each with a residual and factory-configurable normalization, pre- or post-norm. Optional stochastic depth, LayerScale and MoE. | Any encoder-style block. Start here. |
-| `TransformerDecoderLayer` | Causal self-attention + cross-attention to encoder memory + FFN. Same lifecycle and serialization contract as `TransformerLayer`. | Encoder-decoder stacks. |
-| `VisionEncoder` | Complete ViT encoder: patch embedding, optional `[CLS]`, a stack of `TransformerLayer`s, pooled output. | ViT-style image backbones. |
-| `TextEncoder` | Complete BERT-style bidirectional encoder: token/positional embeddings plus the stack. | NLU encoders. |
-| `TextDecoder` | Complete GPT-style causal decoder. | Autoregressive LM stacks. |
-| `PatchCausalTransformer` | Causal stack over **already-embedded** `(B, P, D)` vectors: learned positional embedding, N x `TransformerLayer` under a causal mask, final norm. No input embedding of its own. | When something upstream already pooled the sequence (BLT's patch reps, pooled frame features) and you want the expensive layers paid per patch, not per byte. |
-| `SwinTransformerBlock` | Windowed (W-MSA) and shifted-window (SW-MSA) attention on a 4D `(B, H, W, C)` map. | Swin backbones, dense prediction. |
-| `SwinConvBlock` | Parallel Swin path + conv path, split-transform-merge. **Input channels must equal `conv_dim + trans_dim`.** | Hybrid local/global vision blocks. |
-| `PerceiverTransformerLayer` | Asymmetric cross-attention: a small latent array queries a large byte array, `O(M*N)`. | Very large inputs behind a latent bottleneck. |
-| `EomtTransformer` | Encoder-only mask transformer: joint patch + object-query sequence with optional ground-truth masked self-attention. | Instance segmentation. |
-| `AdaLNZeroConditionalBlock` | DiT-style adaptive LayerNorm-zero conditional block. | Diffusion transformers and other conditioned stacks. |
-| `AreaAttentionBlock` | The YOLOv12 attention stage over a 4D feature map: `AreaAttention` + a 1x1-conv MLP, each in a plain residual. | YOLOv12-style detection backbones. |
-| `GatedLinearAttentionBlock` | Recurrent sequence mixing with one `(head_dim, head_dim)` state per head; linear, not quadratic, in sequence length. | Long-sequence causal mixing (Qwen3-Next uses it 3x per block). |
-| `FreeTransformerLayer` / `BinaryMapper` | FREE latent-variable transformer: a causal block with an optional encoder path inferring a discrete latent, and the straight-through binary latent mapper. | Research on latent-variable transformers only — see the gotcha below. |
-| `EnergyTransformer` / `HopfieldNetwork` | Energy Transformer block (Hoover et al., NeurIPS 2023): `T` steps of gradient descent on one scalar energy, and its associative-memory sub-layer. | Energy-based / Lyapunov-descent residual streams. |
+## How it works
 
-Six more block classes live here but are **not** re-exported from the package `__init__`; import them
-from their module: `Gemma3TransformerBlock` (`gemma3_transformer.py`), `Ideogram4TransformerBlock`
-and `Ideogram4FinalLayer` (`ideogram4_block.py`), and `AdaLayerNormZero`, `AdaLayerNormZeroX`,
-`AdaLayerNormContinuous` (`sd3_adaln.py`, the SD3 modulation layers).
+```mermaid
+flowchart TD
+    A[type strings: attention_type, ffn_type, normalization_type] --> B[TransformerLayer]
+    B --> C[VisionEncoder]
+    B --> D[TextEncoder]
+    B --> E[TextDecoder]
+    B --> F[PatchCausalTransformer]
+    B --> G[EomtTransformer]
+    B --> H[FreeTransformerLayer]
+    I[causal_stack.py helpers] --> F
+    J[factory.py: create_transformer_block] --> B
+    J --> K[the other registered blocks]
+```
 
-Convenience constructors, all thin presets over the two encoder classes: `create_vision_encoder`,
-`create_vit_encoder`, `create_siglip_encoder`, `create_text_encoder`, `create_bert_encoder`
-(vocab 30522), `create_roberta_encoder` (50265), `create_modern_encoder` (1024-wide, depth 24),
-`create_efficient_encoder` (512-wide, depth 8).
+A `TransformerLayer` runs two residual sub-blocks on a `(batch, seq, hidden)` tensor: attention, then an FFN (or a mixture of experts). With `normalization_position='pre'` each sub-block is `x + sublayer(norm(x))`. With `'post'` (the default) it is `norm(x + sublayer(x))`. Optional stochastic depth (randomly skipping a branch during training) and LayerScale (a small learned per-channel scale on each branch) can be added to both branches.
 
-## TransformerLayer
+The stacks add the parts around the blocks:
+
+- `VisionEncoder`: image, patch embedding, optional CLS token, learned positions, N blocks, optional final norm (pre-norm only), pooling.
+- `TextEncoder`: token ids, word embedding, optional segment embedding, optional CLS token, positions, embedding norm, N blocks, optional final norm (pre-norm only), pooling.
+- `TextDecoder`: token ids, word embedding, positions, embedding norm, N blocks under a causal mask (plus an optional padding mask), final norm.
+- `PatchCausalTransformer`: vectors that are already embedded, positions, N blocks under a causal mask, final layer norm.
+
+`factory.py` holds `TRANSFORMER_BLOCK_REGISTRY`, a dict from a key to a block class, and `create_transformer_block(config)`. The accepted keys come from the class constructor itself, so the factory cannot drift from the class.
+
+## Files
+
+- `__init__.py` - re-exports 34 names: the classes, the `create_*_encoder` helpers, the registry, and the type aliases.
+- `transformer.py` - `TransformerLayer`, plus two shared helpers (`build_transformer_ffn_config`, `build_transformer_attention_required_params`) that the decoder also uses.
+- `transformer_decoder.py` - `TransformerDecoderLayer`: causal self-attention, cross-attention to encoder output, FFN.
+- `vision_encoder.py` - `VisionEncoder` and `create_vision_encoder`, `create_vit_encoder`, `create_siglip_encoder`.
+- `text_encoder.py` - `TextEncoder` and `create_text_encoder`, `create_bert_encoder`, `create_roberta_encoder`, `create_modern_encoder`, `create_efficient_encoder`.
+- `text_decoder.py` - `TextDecoder`.
+- `patch_causal_transformer.py` - `PatchCausalTransformer`.
+- `causal_stack.py` - shared skeleton for causal stacks: `CausalTransformerStackMixin`, `build_causal_transformer_stack`, `build_causal_stack_norm`, `LAYER_NORM_EPSILON`.
+- `swin_transformer_block.py` - `SwinTransformerBlock`, windowed and shifted-window attention on a 4D map.
+- `swin_conv_block.py` - `SwinConvBlock`, a conv path and a Swin path on split channels.
+- `perceiver_transformer.py` - `PerceiverTransformerLayer`, a small latent array attends to a large array.
+- `eomt_transformer.py` - `EomtTransformer`, patches and object queries in one sequence, with optional mask-constrained attention.
+- `adaln_zero.py` - `AdaLNZeroConditionalBlock`, a DiT-style block conditioned on a second tensor.
+- `sd3_adaln.py` - `AdaLayerNormZero`, `AdaLayerNormZeroX`, `AdaLayerNormContinuous`, and the `modulate` function (Stable Diffusion 3 style modulation).
+- `ideogram4_block.py` - `Ideogram4TransformerBlock` and `Ideogram4FinalLayer`.
+- `gemma3_transformer.py` - `Gemma3TransformerBlock`.
+- `area_attention_block.py` - `AreaAttentionBlock`, the YOLOv12 attention stage on a 4D map.
+- `gated_linear_attention_block.py` - `GatedLinearAttentionBlock`, a recurrent mixer linear in sequence length.
+- `free_transformer.py` - `FreeTransformerLayer`, `BinaryMapper`, and two KL-loss functions.
+- `energy_transformer.py` - `EnergyTransformer`, `HopfieldNetwork`, `WeightedAdjacencyProjector`.
+- `factory.py` - `TRANSFORMER_BLOCK_REGISTRY` (12 keys) and `create_transformer_block`.
+
+`Gemma3TransformerBlock`, `Ideogram4TransformerBlock`, `Ideogram4FinalLayer`, the three `sd3_adaln` layers, `WeightedAdjacencyProjector` and the `causal_stack.py` helpers are not re-exported from `__init__.py`. Import them from their own module.
+
+## How to use it
+
+A single block:
 
 ```python
 import keras
 from dl_techniques.layers.transformers import TransformerLayer
 
-inputs = keras.Input(shape=(128, 512))
 block = TransformerLayer(
     hidden_size=512,
     num_heads=8,
@@ -61,128 +78,48 @@ block = TransformerLayer(
     use_stochastic_depth=True,
     stochastic_depth_rate=0.1,
 )
-outputs = block(inputs)
+outputs = block(keras.random.normal((2, 128, 512)))   # (2, 128, 512)
 ```
 
-All 28 constructor parameters (plus `**kwargs`, forwarded to `keras.layers.Layer`):
-
-| Argument | Type | Description | Default |
-|---|---|---|---|
-| `hidden_size` | `int` | **Required.** Input/output width. Positive and divisible by `num_heads`. | |
-| `num_heads` | `int` | **Required.** Attention heads. | |
-| `intermediate_size` | `int` | **Required.** FFN hidden width. Positive unless `moe_config` is set — and still read under `moe_config`, see below. | |
-| `attention_type` | `str` | Any `ATTENTION_REGISTRY` key. | `'multi_head'` |
-| `attention_args` | `dict?` | Merged last into the attention factory call. Never pre-filtered, so an unknown key is reported by the factory. | `None` |
-| `normalization_type` | `str` | Any `create_normalization_layer` key. | `'layer_norm'` |
-| `normalization_position` | `str` | `'pre'` or `'post'`. Validated: anything else raises. | `'post'` |
-| `attention_norm_args` | `dict?` | Extra kwargs for the attention-side norm only. | `None` |
-| `ffn_norm_args` | `dict?` | Extra kwargs for the FFN-side norm only. | `None` |
-| `ffn_type` | `str` | Any `FFN_REGISTRY` key. Ignored under `moe_config`. | `'mlp'` |
-| `ffn_args` | `dict?` | Merged last into the FFN factory call. Ignored under `moe_config`. | `None` |
-| `moe_config` | `MoEConfig \| dict?` | Replaces the FFN sub-layer with a `MixtureOfExperts`. | `None` |
-| `dropout_rate` | `float` | FFN-output dropout. The **only** dropout this layer applies itself, and never after attention. | `0.1` |
-| `attention_dropout_rate` | `float` | Attention-**internal** (weight) dropout, forwarded as the attention sub-layer's own `dropout_rate`. | `0.1` |
-| `use_stochastic_depth` | `bool` | Drop-path on both residual branches. | `False` |
-| `stochastic_depth_rate` | `float` | Drop probability. | `0.1` |
-| `activation` | `str \| Callable` | FFN activation. | `'gelu'` |
-| `use_bias` | `bool` | Bias on the linear sub-layers. | `True` |
-| `kernel_initializer` | `str \| Initializer` | Forwarded to the sub-layer factories. | `'glorot_uniform'` |
-| `residual_output_kernel_initializer` | `str \| Initializer?` | Optional separate initializer for the residual output projections. | `None` |
-| `bias_initializer` | `str \| Initializer` | Forwarded to the sub-layer factories. | `'zeros'` |
-| `kernel_regularizer` | `Regularizer?` | Forwarded to the sub-layer factories. | `None` |
-| `bias_regularizer` | `Regularizer?` | Forwarded to the sub-layer factories. | `None` |
-| `window_size` | `int` | Window size for `attention_type='window'`. | `8` |
-| `n_kv_head` | `int?` | KV head count for `attention_type='group_query'`; `None` means `num_heads`. | `None` |
-| `lambda_init` | `float` | Initial lambda for `attention_type='differential'`. | `0.8` |
-| `use_layer_scale` | `bool` | LayerScale on both residual branches. | `False` |
-| `layer_scale_init_value` | `float` | LayerScale initial value. | `1e-5` |
-
-There is **no `norm_args` parameter** on `TransformerLayer` — the two normalization sites are
-configured separately. (`TextEncoder` and `VisionEncoder` do have a single `norm_args`.)
-
-### With Mixture of Experts
+Complete stacks:
 
 ```python
-from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
-
-moe_block = TransformerLayer(
-    hidden_size=512,
-    num_heads=8,
-    intermediate_size=2048,          # NOT ignored — see below
-    moe_config=MoEConfig(
-        num_experts=8,
-        expert_config=ExpertConfig(
-            ffn_config={'type': 'swiglu', 'output_dim': 512, 'ffn_expansion_factor': 4}),
-        gating_config=GatingConfig(top_k=2),
-    ),
-)
-```
-
-`ffn_type` and `ffn_args` are ignored under `moe_config`, and a non-default `ffn_type` or any
-`ffn_args` passed beside it raises a `UserWarning` that names them. **`intermediate_size` is not
-ignored**: it is
-the fallback for the expert FFN's `hidden_dim` whenever `moe_config.expert_config.ffn_config` omits
-that key **and** the expert type is one of `_MOE_EXPERT_TYPES_USING_INTERMEDIATE_SIZE` in
-`transformer.py` (`mlp`, `differential`, `glu`, `geglu`, `residual`, `swin_mlp`). With the `swiglu`
-expert above it genuinely goes unused; switch the expert to `mlp` without a `hidden_dim` and the
-`2048` becomes load-bearing, and a second `UserWarning` says so.
-
-## The complete stacks
-
-```python
-import keras
 from dl_techniques.layers.transformers import (
     VisionEncoder, TextEncoder, TextDecoder, PatchCausalTransformer,
     TransformerDecoderLayer,
 )
 
-vit = VisionEncoder(                       # ViT-B/16
-    img_size=224, patch_size=16, embed_dim=768, depth=12, num_heads=12,
-    patch_embed_type='linear', use_cls_token=True, output_mode='cls',
-)
+vit = VisionEncoder(img_size=224, patch_size=16, embed_dim=768, depth=12,
+                    num_heads=12, use_cls_token=True, output_mode='cls')
 
-bert = TextEncoder(                        # BERT-base shape
-    vocab_size=30522, embed_dim=768, depth=12, num_heads=12, max_seq_len=512,
-    positional_type='learned', output_mode='none',
-)
+bert = TextEncoder(vocab_size=30522, embed_dim=768, depth=12, num_heads=12,
+                   max_seq_len=512, positional_type='learned', output_mode='none')
 
-modern = TextEncoder(                      # SwiGLU + RMSNorm pre-norm encoder
-    vocab_size=50000, embed_dim=768, depth=12, num_heads=12,
-    positional_type='sincos', ffn_type='swiglu',
-    normalization_type='rms_norm', normalization_position='pre',
-)
+gpt = TextDecoder(vocab_size=50257, embed_dim=768, depth=12, num_heads=12,
+                  max_seq_len=1024)
 
-gpt = TextDecoder(                         # GPT-style causal decoder
-    vocab_size=50257, embed_dim=768, depth=12, num_heads=12, max_seq_len=1024,
-)
-
-dec_block = TransformerDecoderLayer(
-    hidden_size=512, num_heads=8, intermediate_size=2048,
-    normalization_position='pre', ffn_type='swiglu',
-)
+dec_block = TransformerDecoderLayer(hidden_size=512, num_heads=8,
+                                    intermediate_size=2048)
 # y = dec_block(target_embeddings, encoder_output=memory)
 
-patch_stack = PatchCausalTransformer(     # over representations, NOT ids
-    dim=768, depth=12, num_heads=12, max_patches=512,
-)
-# y = patch_stack(patch_representations)   # (B, 512, 768) in, same out
+stack = PatchCausalTransformer(dim=768, depth=12, num_heads=12, max_patches=512)
+# y = stack(patch_representations)   # (B, P, 768) in, same shape out
 ```
 
-`PatchCausalTransformer` is the gap the other two stacks leave open:
-`TextDecoder` embeds token IDs itself and wants a padding mask,
-`VisionEncoder` embeds an image. This one starts after the embedding. Its
-`max_patches` is a **hard ceiling** — a statically longer input raises in
-`build()` rather than being truncated — and empty slots are NOT masked out, so
-a caller with genuinely variable-length patches must mask them itself first.
-`name_prefix` renames every sub-layer, so two instances can coexist in one
-model.
+Config-driven construction:
 
-`VisionEncoder` takes 27 constructor parameters, `TextEncoder` 34 and `TextDecoder` 18 (plus
-`**kwargs`); every
-`attention_type`, `ffn_type` and `normalization_type` is a `Literal` of the live registry keys, so
-your editor and `inspect.signature` are the authoritative list.
+```python
+from dl_techniques.layers.transformers import create_transformer_block
 
-## Specialized and Hybrid Blocks
+block = create_transformer_block({
+    "type": "transformer_layer",
+    "hidden_size": 256, "num_heads": 4, "intermediate_size": 1024,
+})
+```
+
+The registry keys are `transformer_layer`, `transformer_decoder_layer`, `swin_transformer_block`, `swin_conv_block`, `perceiver_transformer_layer`, `eomt_transformer`, `adaln_zero_conditional_block`, `free_transformer_layer`, `gated_linear_attention_block`, `area_attention_block`, `energy_transformer`, `hopfield_network`. A key that is not a constructor keyword (or `name`, `dtype`, `trainable`) raises `ValueError`, and so does a missing constructor parameter that has no default.
+
+Specialized blocks:
 
 ```python
 import keras
@@ -191,9 +128,9 @@ from dl_techniques.layers.transformers import (
     AreaAttentionBlock, GatedLinearAttentionBlock, EnergyTransformer,
 )
 
-swin = SwinTransformerBlock(dim=96, num_heads=3, window_size=7, shift_size=7 // 2)
+swin = SwinTransformerBlock(dim=96, num_heads=3, window_size=7, shift_size=3)
 hybrid = SwinConvBlock(conv_dim=64, trans_dim=64, head_dim=32, window_size=7,
-                       block_type='SW', drop_path_rate=0.1)      # needs 128 input channels
+                       block_type='SW', drop_path_rate=0.1)   # input has 128 channels
 
 perceiver = PerceiverTransformerLayer(dim=512, num_heads=8)
 latents = perceiver(query_input=keras.random.normal((2, 256, 512)),
@@ -201,89 +138,64 @@ latents = perceiver(query_input=keras.random.normal((2, 256, 512)),
 
 eomt = EomtTransformer(hidden_size=768, num_heads=12, use_masked_attention=True,
                        mask_probability=0.8, mask_annealing_steps=10000)
+# y = eomt({'inputs': tokens, 'mask': masks}, training=True)
 
 area = AreaAttentionBlock(dim=256, num_heads=8, area=4)
 gla = GatedLinearAttentionBlock(dim=512, num_heads=8, max_seq_len=2048)
-
 et = EnergyTransformer(embed_dim=768, num_heads=12, head_dim=64, hopfield_dim=3072,
-                       num_steps=12, step_size=0.1, attn_self=False)
+                       num_steps=12, step_size=0.1)
 ```
 
-### AdaLNZeroConditionalBlock
+## Things to know
 
-DiT-style adaptive layer-norm "zero" block (Peebles & Xie 2023, adapted in LeWM). Two inputs per
-call: content `x` of shape `(B, T, D)` and conditioning `c` broadcastable to `x`. The conditioning
-drives six modulation streams (shift / scale / gate for the attention and FFN sub-blocks) through one
-SiLU-Linear projection whose final `Dense` is zero-initialized, so **at initialization the block is
-the identity map in `x`**. Norms, attention, FFN and the AdaLN activation are all factory-configurable;
-leaving every factory kwarg at its default reproduces the original DiT/LeWM construction bit-exactly.
-A `normalization_type` swap must disable affine (`use_scale=False`) — the modulation supplies the
-scale.
+`TransformerLayer`:
 
-### EnergyTransformer
+- `dropout_rate` is applied once, to the FFN output. It is never applied after attention. `attention_dropout_rate` is the dropout inside the attention layer.
+- There is no single `norm_args`; use `attention_norm_args` and `ffn_norm_args`. (`TextEncoder` and `VisionEncoder` do have one `norm_args`.)
+- `attention_type` accepts only 11 values in practice: `multi_head`, `window`, `window_zigzag`, `window_band`, `beit`, `group_query`, `differential`, `multi_head_latent`, `anchor`, `lighthouse`, `fnet`. Any other registry key raises `ValueError: Unknown attention type`. `beit` needs a sequence length of exactly `Wh*Ww + 1`.
+- `anchor`, `fnet` and `lighthouse` take no attention mask. A mask passed to the block is silently dropped for them.
+- With `moe_config`, `ffn_type` and `ffn_args` are ignored (a non-default value raises a `UserWarning`). `intermediate_size` is still used as the expert hidden width when the expert config omits `hidden_dim` and the expert type is `mlp`, `differential`, `glu`, `geglu`, `residual` or `swin_mlp`; a second warning says so.
+- `residual_output_kernel_initializer` only works with `attention_type` `multi_head` or `multi_head_cross`, `ffn_type='mlp'`, and no `moe_config`. Other combinations raise.
+- `call` takes `layer_idx` (used only by `differential` attention). The stacks do not pass it, so inside `VisionEncoder`, `TextEncoder` and `TextDecoder` every block uses `layer_idx=0`.
 
-Replaces the `attn -> FFN` residual stream with `T` steps of gradient descent on one scalar energy
-`E = E_ATT + E_HN` ([arXiv:2302.07253](https://arxiv.org/abs/2302.07253)):
+`TransformerDecoderLayer` has no MoE, stochastic depth or LayerScale. Its self-attention is causal by default (`use_causal_mask=True`). With `anchor`, `fnet` or `lighthouse` that cannot be honored and the block logs a warning. With `self_attention_type='window'` it is causal only when the sequence length equals `window_size ** 2`.
 
-```
-for t in 1..T:
-    g = EnergyLayerNorm(x)
-    x = x + step_size * (attn.update(g) + hopfield.update(g))     # update == -dE/dg
-```
+`VisionEncoder`:
 
-`EnergyAttention` (attention key `'energy'`) supplies the token mixing with no value matrix.
-`HopfieldNetwork` is a per-token associative memory with a **single tied** `(hopfield_dim, dim)`
-matrix used in both directions and no bias — not FFN-shaped, which is why it is deliberately not in
-the FFN factory. Because every `update()` is the analytic negative gradient, the energy is provably
-non-increasing across steps (for `noise_std=0`, `gamma > 0` and a small enough `step_size`); both
-closed forms are checked against an autodiff oracle in the tests. `return_energy=True` makes the
-block return `(x, energies)` with `energies` of shape `(batch, num_steps + 1)`. This is the block
-only: no patchify, no `MASK` token, no decoder.
+- `patch_embed_type='siglip'` needs `patch_size` divisible by 2, and `'conv'` needs it divisible by 4. `'hybrid'` downsamples by a fixed 4x and ignores `patch_size`; with `img_size=32, patch_size=8` the forward pass fails in the position embedding. Use it only with `patch_size=4`.
+- `attention_mask` is over patches, shape `(B, num_patches)`. The CLS slot is added internally and always kept.
+- With a CLS token, every `output_mode` except `cls`, `first`, `none` and `flatten` pools the patch tokens only.
+- Extra methods: `get_cls_features`, `get_patch_features`, `get_spatial_features`.
 
-## Gotchas
+`TextEncoder`:
 
-- **`TextEncoder` accepts only `positional_type='learned'` or `'sincos'`.** `'rope'` and
-  `'dual_rope'` are in the `Literal` but raise `NotImplementedError`: RoPE is not wired into the
-  factory attention layers, so choosing it would silently build a model with no positional
-  information at all.
-- **`SwinConvBlock` input channels must equal `conv_dim + trans_dim`.** The block splits the input
-  between its two paths.
-- **`EomtTransformer` with `use_masked_attention=True` needs a maskable `attention_type`.**
-  `'fnet'`, `'anchor'` and `'lighthouse'` take no attention mask and that combination raises.
-  Call it as `eomt({'inputs': tokens, 'mask': masks}, training=True)`.
-- **`PerceiverTransformerLayer` takes `dropout_rate`, and is called with keywords**
-  (`query_input=`, `kv_input=`).
-- **`AreaAttentionBlock`: `normalization_kwargs=None` gives the norm factory's `epsilon=1e-6`, not
-  YOLOv12's.** YOLOv12's `epsilon=1e-3, momentum=0.97` pair lives in exactly one place,
-  `dl_techniques.layers.yolo12_blocks.YOLO12_NORM_KWARGS`, and must be threaded in explicitly —
-  `layers/transformers/` sits below `yolo12_blocks.py` in the dependency order and cannot import it.
-  Omitting it moved the block output by `3.1e-02 .. 8.3e-02` on the relocation grid, 255x-285x the
-  float32 reassociation tolerance. The block also deliberately has **no** Pre/Post-Norm, LayerScale
-  or StochasticDepth, and its MLP is a `ConvBlock` pair rather than `create_ffn_layer('gated_mlp')`
-  (which would drop the intermediate BatchNorm). Adding either is a numerics change, not a tidy-up.
-  `area > 1` engages only when `H * W` is divisible by `area`; otherwise the attention falls back to
-  global, which YOLOv12 exercises routinely.
-- **`GatedLinearAttentionBlock`: `max_seq_len` is advisory.** It shapes no weight and bounds no loop,
-  so a longer sequence is still computed exactly; `build()` only warns when a static length exceeds
-  it. An earlier revision did cap the scan and returned **52 of 60 timesteps all-zero, silently**.
-  Its `ffn_args` / `q_norm_args` / `k_norm_args` / `v_norm_args` **raise** on an unrecognized key —
-  the layer pre-filters only its own generic defaults, and the factories are strict. `head_dim=None`
-  requires `dim % num_heads == 0`; `v_proj` emits `2 * qk_dim` channels, split per head into a write
-  half that enters the state and a read-out half that bypasses it (not a skip connection over the
-  block input). `chunk_size` is a pure performance knob; the chunked and sequential paths agree only
-  to floating-point reassociation, never bitwise.
-- **`FreeTransformerLayer`'s latent width is `num_latent_bits`, not `num_bits`.** Also documented,
-  not redesigned: the encoder path's cross-attention does not receive the sequence as separate K/V,
-  so the posterior `Q(Z|S)` is unconditional on `S` (in-code note D-002). No production model depends
-  on this layer.
-- **`TransformerLayer`'s `dropout_rate` never applies after attention.** If you want dropout on the
-  attention weights, that is `attention_dropout_rate`.
-- **A causal stack's final norm runs at `1e-3`, NOT the norm factory's `1e-6`.** Every layer built
-  on `causal_stack.py` — `PatchCausalTransformer` and the four BLT stacks — has a 1000x split
-  inside one model: its own final norm at `1e-3`, the in-block norms from `TransformerLayer` at
-  `1e-6`. That is deliberate, not an oversight. `create_normalization_layer` imposes `1e-6` via
-  `setdefault`, and adopting it here was measured at `max|delta| = 1.7e-03` on the forward pass;
-  decision D-202 rejected the same rewrite for `mobilenet`/`cbam`. `LAYER_NORM_EPSILON` in
-  `causal_stack.py` is the single place the value lives, and
-  `tests/test_models/test_the_norm_epsilon_provenance_is_stated.py` pins the resulting per-package
-  census so a later silent move fails in either direction.
+- `positional_type` accepts `'learned'` or `'sincos'`. `'rope'` and `'dual_rope'` are in the type but raise `NotImplementedError`.
+- The `kernel_initializer` argument is stored and serialized, but the blocks are built with `TruncatedNormal(stddev=initializer_range)`.
+- A static sequence length above `max_seq_len` raises `ValueError` in `build`. `embedding_type='shared'` is rejected.
+- Extra methods: `get_sequence_features`, `get_pooled_features`. A learnable pooling mode (`attention`, `multi_head_attention`, `weighted`) other than the configured `output_mode` raises.
+
+`TextDecoder`:
+
+- Same `max_seq_len` check, raised as `SequenceLengthError`.
+- The FFN width is fixed at `4 * embed_dim`.
+- `embed_tokens` and `decode_embeddings` are the two halves of `call`, for callers that supply their own embeddings.
+
+`PatchCausalTransformer`: `max_patches` is a hard limit, since a longer static input raises in `build`. Empty patch slots are not masked, so mask them before calling if they are real padding. `name_prefix` renames every sub-layer so two instances can live in one model.
+
+Causal stack epsilon: the final norm of `PatchCausalTransformer` and of the BLT stacks that use `causal_stack.py` runs at `epsilon=1e-3` (`LAYER_NORM_EPSILON`). The norms inside the blocks run at `1e-6`. This split is deliberate. Moving the final norm to `1e-6` changed a measured forward pass by `1.7e-03`.
+
+`SwinConvBlock`: input channels must equal `conv_dim + trans_dim`, and `trans_dim` must be divisible by `head_dim`. `SwinTransformerBlock` pads internally when height or width is not a multiple of `window_size`, so any size works.
+
+`EomtTransformer`: `use_masked_attention=True` with `fnet`, `anchor` or `lighthouse` raises. The masked attention is active only when `training` is true and a `mask` is given.
+
+`AreaAttentionBlock`: `normalization_kwargs=None` gives the norm factory defaults (`epsilon=1e-6`), not YOLOv12's `epsilon=1e-3, momentum=0.97`. Those live in `dl_techniques.layers.yolo12.yolo12_blocks.YOLO12_NORM_KWARGS` and must be passed in. This package cannot import them, because `yolo12` imports it. With `area > 1`, attention is grouped only if `H * W` is divisible by `area`; otherwise it is global.
+
+`GatedLinearAttentionBlock`: `max_seq_len` is advisory only. A longer sequence is computed correctly and `build` logs a warning. Unknown keys in `ffn_args`, `q_norm_args`, `k_norm_args` and `v_norm_args` raise. `attention_mask` must be rank 2, `(B, seq)`, and padding must sit at the start or end of a row.
+
+`FreeTransformerLayer`: with `use_free_transformer=False` it behaves as a `TransformerLayer`. With it on, `call` always returns `(output, bit_logits)`. The latent width argument is `num_latent_bits` (at most 20); `BinaryMapper` takes `num_bits`. Pass `training` as a Python bool, because a tensor value raises.
+
+`AdaLNZeroConditionalBlock`: `call` takes one list `[x, c]`. The block is the identity on `x` at initialization. When `attention_type`, `ffn_type` or `normalization_type` is set, the matching `*_args` dict must supply every needed option (`dim`, `hidden_dim`, `output_dim`, and affine-off flags for the norm). `dim_head`, `mlp_dim`, `eps` and `use_causal_mask` apply only to the default paths.
+
+`EnergyTransformer`: `return_energy=True` returns `(x, energies)` with `energies` shaped `(batch, num_steps + 1)`, always at least float32. `HopfieldNetwork` is deliberately not an FFN registry type. Energy descent is guaranteed only for `noise_std=0`, a positive `gamma` and a small enough `step_size`.
+
+Layers registered with `register_dl_technique` use the package string `dl_techniques.layers.transformers.<module>`. The three `sd3_adaln` layers share one string and differ by class name.

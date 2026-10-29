@@ -1,193 +1,99 @@
-# `dl_techniques.layers.memory`
+# memory
 
-Layers whose distinguishing feature is explicit, addressable memory. Three
-families live here: a learned content- and location-addressable memory matrix
-(NTM / MANN), a topographic grid of prototypes (SOM), and a differentiable
-memory grid with factorized addressing (NeuroGrid). The package merges the
-formerly separate `layers/ntm/` and `layers/memory/`.
+Keras 3 layers whose main feature is an explicit, addressable memory: a Neural Turing Machine (NTM), Self-Organizing Maps (SOM), and a differentiable memory grid called NeuroGrid. The package is `dl_techniques.layers.memory`, in `src/dl_techniques/layers/memory/`.
 
-## Overview
+## What it is for
 
-| Family | Type of memory | Differentiable? | Typical use |
-|--------|----------------|-----------------|-------------|
-| **NTM** | External memory matrix with read/write heads (content + location addressing) | yes | Algorithmic / sequence tasks needing scratchpad memory |
-| **MANN** | The NTM memory, configured with MANN knobs via `create_mann(...)` — no separate class | yes | Drop-in memory-augmented sequence layer |
-| **SOM** | Topographic grid of prototypes (hard or soft winner-take-all) | hard: no, soft: yes | Unsupervised representation, clustering, quantization |
-| **NeuroGrid** | N-D grid of latent vectors, addressed by one softmax per grid axis | yes | Differentiable bottleneck, soft clustering, quality scoring |
+An ordinary layer keeps what it learned inside its weights. These layers keep something you can point at: a matrix of memory slots that a network reads and writes, or a grid of prototype vectors that inputs are matched against.
 
-## Families
+- The NTM (Graves et al., 2014) couples a small recurrent controller to a memory matrix. Read and write heads pick slots by content ("find the slot that looks like this key") and by location ("move one slot to the right"). Every step is differentiable, so ordinary backpropagation trains it. It suits tasks that need a scratchpad, such as copying or sorting sequences.
+- A SOM (Kohonen, 1982) is a grid of prototype vectors. Each input finds its closest prototype, and that prototype and its grid neighbours move toward the input. Nearby grid cells end up holding similar prototypes. It is used for clustering, quantization and visualization.
+- NeuroGrid is a grid of learned vectors read through a soft, factorized address. It is a differentiable alternative to the SOM winner search and works inside a network trained by gradient descent.
 
-### NTM — Neural Turing Machine
+## How it works
 
-References: Graves, Wayne & Danihelka, 2014, *Neural Turing Machines* (arXiv:1410.5401).
+Three families share the package.
 
-Files:
+**NTM.** One timestep, run by `NTMCell`, goes in this order:
 
-- `ntm_interface.py` — abstract base classes (`BaseMemory`, `BaseHead`,
-  `BaseController`, `BaseNTM`), state dataclasses (`MemoryState`, `HeadState`,
-  `NTMOutput`, `NTMConfig`), the `AddressingMode` enum, and
-  addressing utilities (`cosine_similarity`, `circular_convolution`,
-  `sharpen_weights`).
-- `baseline_ntm.py` — production NTM: `NTMMemory`, `NTMReadHead`,
-  `NTMWriteHead`, `NTMController`, `NTMCell` (RNN-cell compatible),
-  `NeuralTuringMachine`, and the `create_ntm` factory.
+```mermaid
+flowchart LR
+    X[input + previous read vectors] --> C[controller: LSTM, GRU or Dense]
+    C --> W[write heads: address, erase, add]
+    W --> R[read heads: address, read]
+    R --> O[output = controller output + read vectors]
+```
 
-`NeuralTuringMachine` wraps `NTMCell` in a `keras.layers.RNN`. It does not run
-the step loop `BaseNTM.call` provides, so its `step()` and `initialize_state()`
-raise; use `NTMCell.get_initial_state(...)` and `return_state=True` to reach the
-state.
+Write heads run before read heads, so a read in the same timestep sees the memory that was just written. A head finds slots in up to four stages: content (cosine similarity to a key, then softmax), interpolation with the previous weights, circular shift, and sharpening. `AddressingMode.CONTENT` stops after the first stage. `AddressingMode.HYBRID` (the default) runs all four. `NeuralTuringMachine` wraps `NTMCell` in `keras.layers.RNN` and adds a `Dense` output projection.
 
-### MANN — Memory-Augmented Neural Network
+MANN (memory-augmented neural network) has no class of its own. `create_mann(...)` returns a `NeuralTuringMachine` configured with MANN-style argument names.
 
-Reference: Santoro et al., 2016, *One-shot Learning with Memory-Augmented
-Neural Networks* (arXiv:1605.06065).
+**SOM.** There are two different learning styles:
 
-There is no standalone MANN class. MANN is available only as a configuration of
-the NTM pipeline, through `factory.py`'s `create_mann(...)`, which returns a
-`NeuralTuringMachine` whose output width matches the historical MANN contract
-(`controller_units + num_read_heads * memory_dim`).
+- `SOMLayer` (and its 2D subclass `SOM2dLayer`) picks one hard winner per input. Its weight map is not trainable. The update runs inside `call()` when `training=True`, with no optimizer and no gradients. It returns the winner's grid coordinates and the distance to it.
+- `SoftSOMLayer` uses a softmax over the whole grid instead of a single winner. Its weight map is trainable and moves only through gradients. It returns a soft reconstruction of the input and adds its own losses during training.
 
-### SOM — Self-Organizing Map
+**NeuroGrid.** One `Dense` plus a temperature softmax per grid axis gives one distribution per axis. Their outer product is the joint address over all cells. The output is the probability-weighted sum of the grid vectors. A grid of `d1 * ... * dn` cells needs only `d1 + ... + dn` logits.
 
-Reference: Kohonen, 1982, *Self-organized formation of topologically correct
-feature maps*, Biological Cybernetics.
+## Files
 
-Files:
+- `__init__.py` - re-exports 25 names. Import from the package, not the modules.
+- `ntm_interface.py` - the NTM vocabulary: `AddressingMode`, the state dataclasses (`MemoryState`, `HeadState`, `NTMOutput`, `NTMConfig`), the abstract bases (`BaseMemory`, `BaseHead`, `BaseController`, `BaseNTM`), and the addressing helpers (`cosine_similarity`, `circular_convolution`, `sharpen_weights`).
+- `baseline_ntm.py` - the working NTM: `NTMMemory`, `NTMReadHead`, `NTMWriteHead`, `NTMController`, `NTMCell`, `NeuralTuringMachine`, and the `create_ntm` builder.
+- `som_nd_layer.py` - `SOMLayer`, the N-dimensional hard-winner SOM.
+- `som_2d_layer.py` - `SOM2dLayer`, a thin 2D subclass of `SOMLayer` (the grid argument is called `map_size`).
+- `som_nd_soft_layer.py` - `SoftSOMLayer`, the differentiable SOM.
+- `neuro_grid.py` - `NeuroGrid`, the factorized-address memory grid, with analysis helpers (utilization, best matching units, input quality scores).
+- `factory.py` - `create_mann` and `create_som_2d`. It also lists `create_ntm` in its `__all__`.
 
-- `som_nd_layer.py` — `SOMLayer`, the N-dimensional hard-winner SOM. Its weight
-  map is non-trainable and is updated inside `call()` with `assign_add`, not by
-  an optimizer.
-- `som_2d_layer.py` — `SOM2dLayer`, a 2D specialization (subclass of `SOMLayer`).
-- `som_nd_soft_layer.py` — `SoftSOMLayer`, fully differentiable soft-winner
-  variant. Its weight map is trainable and moves only through gradients, which
-  is the opposite of `SOMLayer`.
-
-### NeuroGrid
-
-Reference: Lample et al., 2019, *Large Memory Layers with Product Keys*
-(NeurIPS), for the factorized addressing idea.
-
-Files:
-
-- `neuro_grid.py` — `NeuroGrid`, a grid of latent vectors addressed by one
-  `Dense` plus temperature softmax per grid axis. The joint address is the outer
-  product of those per-axis distributions, so a grid of `d1 * ... * dn` cells
-  costs `sum d_i` logits rather than `prod d_i`. Accepts rank-2 and rank-3
-  inputs.
-
-### Factory
-
-- `factory.py` — `create_mann` and `create_som_2d`, plus a re-export of
-  `create_ntm` from `baseline_ntm.py`.
-
-## Public Surface
-
-All 25 names below are importable directly from `dl_techniques.layers.memory`,
-and are exactly the contents of its `__all__`.
-
-| Name | Kind | Module | Family |
-|------|------|--------|--------|
-| `AddressingMode` | Enum | `ntm_interface` | NTM |
-| `MemoryState`, `HeadState`, `NTMOutput`, `NTMConfig` | dataclass | `ntm_interface` | NTM |
-| `BaseMemory`, `BaseHead`, `BaseController`, `BaseNTM` | ABC | `ntm_interface` | NTM |
-| `cosine_similarity`, `circular_convolution`, `sharpen_weights` | function | `ntm_interface` | NTM |
-| `NTMMemory`, `NTMReadHead`, `NTMWriteHead`, `NTMController`, `NTMCell`, `NeuralTuringMachine` | Layer | `baseline_ntm` | NTM |
-| `create_ntm` | factory fn | `baseline_ntm` | NTM |
-| `SOMLayer`, `SOM2dLayer`, `SoftSOMLayer` | Layer | `som_nd_layer`, `som_2d_layer`, `som_nd_soft_layer` | SOM |
-| `NeuroGrid` | Layer | `neuro_grid` | NeuroGrid |
-| `create_mann`, `create_som_2d` | factory fn | `factory` | MANN, SOM |
-
-## Usage
-
-The shapes in the comments are measured, not assumed.
-
-### NTM (factory)
+## How to use it
 
 ```python
-from dl_techniques.layers.memory import create_ntm
-
-ntm = create_ntm(
-    memory_size=128,
-    memory_dim=64,
-    output_dim=10,
-    controller_type='lstm',
+import numpy as np
+from dl_techniques.layers.memory import (
+    create_ntm, create_mann, create_som_2d, SoftSOMLayer, NeuroGrid,
 )
-y = ntm(x)  # x: (batch, time, features)  ->  y: (batch, time, 10)
+
+seq = np.random.rand(2, 6, 16).astype("float32")   # (batch, time, features)
+vec = np.random.rand(4, 16).astype("float32")      # (batch, features)
+
+# NTM: (batch, time, features) -> (batch, time, output_dim)
+ntm = create_ntm(memory_size=16, memory_dim=8, output_dim=3)
+y = ntm(seq)                                        # (2, 6, 3)
+
+# MANN: output width = controller_units + num_read_heads * memory_dim
+mann = create_mann(memory_locations=16, memory_dim=8, controller_units=12,
+                   return_sequences=False)
+y = mann(seq)                                       # (2, 20)
+
+# Hard-winner SOM: coordinates and quantization error, updates itself
+som = create_som_2d(map_size=(5, 5), input_dim=16)
+bmu_coords, quant_err = som(vec, training=True)     # (4, 2) int32, (4,)
+grid = som.get_weights_as_grid()                    # (5, 5, 16)
+
+# Soft SOM: reconstruction, same shape as the input
+soft = SoftSOMLayer(grid_shape=(5, 5), input_dim=16, temperature=0.5)
+recon = soft(vec)                                   # (4, 16)
+assign = soft.get_soft_assignments(vec)             # (4, 5, 5)
+
+# NeuroGrid: rank 2 or rank 3 input
+grid_layer = NeuroGrid(grid_shape=[5, 4], latent_dim=8)
+out = grid_layer(vec)                               # (4, 8)
+joint = grid_layer.get_addressing_probabilities(vec)["joint"]   # (4, 5, 4)
 ```
 
-### NTM (config object + layer)
+To keep the NTM state, build with `return_state=True`. The call then returns `(output, final_states)`.
 
-```python
-from dl_techniques.layers.memory import NTMConfig, NeuralTuringMachine
+## Things to know
 
-config = NTMConfig(
-    memory_size=128, memory_dim=64,
-    num_read_heads=2, controller_dim=256,
-)
-ntm = NeuralTuringMachine(config, output_dim=10)
-```
-
-### MANN (factory)
-
-```python
-from dl_techniques.layers.memory import create_mann
-
-mann = create_mann(memory_locations=128, memory_dim=40, controller_units=200)
-y = mann(x)  # x: (batch, time, features)  ->  y: (batch, time, 240)
-```
-
-The output width is `controller_units + num_read_heads * memory_dim`, so
-`200 + 1 * 40 = 240`.
-
-### SOM (hard winner, N-D grid)
-
-```python
-from dl_techniques.layers.memory import SOMLayer
-
-som = SOMLayer(grid_shape=(10, 10), input_dim=128)
-bmu_coords, quantization_errors = som(x, training=True)
-# bmu_coords: (batch, 2) int32   quantization_errors: (batch,)
-```
-
-The layer returns grid coordinates and a distance, not a code vector. It also
-updates its own weight map when `training=True`.
-
-### SOM 2D (factory)
-
-```python
-from dl_techniques.layers.memory import create_som_2d
-
-som2d = create_som_2d(map_size=(10, 10), input_dim=128)
-bmu_coords, quantization_errors = som2d(x)
-grid = som2d.get_weights_as_grid()  # (10, 10, 128)
-```
-
-### SoftSOM (differentiable)
-
-```python
-from dl_techniques.layers.memory import SoftSOMLayer
-
-soft_som = SoftSOMLayer(grid_shape=(10, 10), input_dim=128, temperature=0.5)
-reconstruction = soft_som(x)          # (batch, 128), same shape as x
-assignments = soft_som.get_soft_assignments(x)   # (batch, 10, 10)
-```
-
-### NeuroGrid
-
-```python
-from dl_techniques.layers.memory import NeuroGrid
-
-grid = NeuroGrid(grid_shape=[10, 8], latent_dim=32)
-y = grid(x)                                    # (batch, 32)
-probs = grid.get_addressing_probabilities(x)['joint']   # (batch, 10, 8)
-```
-
-## References
-
-- Graves, A., Wayne, G., Danihelka, I. (2014). *Neural Turing Machines.* arXiv:1410.5401.
-- Santoro, A., Bartunov, S., Botvinick, M., Wierstra, D., Lillicrap, T. (2016).
-  *One-shot Learning with Memory-Augmented Neural Networks.* arXiv:1605.06065.
-- Kohonen, T. (1982). *Self-organized formation of topologically correct
-  feature maps.* Biological Cybernetics, 43(1), 59-69.
-- Lample, G., Sablayrolles, A., Ranzato, M., Denoyer, L., Jegou, H. (2019).
-  *Large Memory Layers with Product Keys.* NeurIPS.
+- `SOMLayer` only learns when called with `training=True`. `predict` and plain calls do not update it. Its weights are non-trainable, so `model.fit` with an optimizer never changes them. `SoftSOMLayer` is the opposite.
+- The SOM update averages over the batch, and by default its learning rate and neighbourhood radius shrink linearly with the number of inputs seen, against a fixed horizon of 1000 (the `max_iterations` weight). Once that horizon is passed the learning rate is held at 0 and the radius at 1e-4. A custom `decay_function` changes only the learning rate, not the radius.
+- The SOM distance step builds a tensor of shape `(batch, num_neurons, input_dim)`. Large grids with large batches use a lot of memory. `SoftSOMLayer`'s topological loss also builds `num_neurons x num_neurons` tensors.
+- `SoftSOMLayer` refuses `sharpness_weight > 0` together with `use_per_dimension_softmax=False`, because that loss needs the per-axis softmaxes.
+- `NeuralTuringMachine.step()`, `initialize_state()` and `get_memory_state()` raise `NotImplementedError`, and `reset_memory()` does nothing. The RNN owns the state. Use `NTMCell.get_initial_state(...)` or `return_state=True`.
+- `NTMConfig.shift_range` must be a positive odd integer.
+- `NTMReadHead` and `NTMWriteHead` do not round-trip through their own `get_config()` and `from_config()`. The config stores `addressing_mode` as a string name, and the head constructor does not convert it back. The head then silently behaves as content-only, and its next `get_config()` raises `AttributeError`. Serializing a whole `NeuralTuringMachine` or `NTMCell` is fine, because their heads are rebuilt from `NTMConfig`.
+- `NeuroGrid` defaults to an orthogonal-hypersphere grid initializer and a soft-orthonormal grid regularizer. Pass `grid_regularizer=None` to turn the regularizer off.
+- `NeuroGrid.get_addressing_probabilities`, `find_best_matching_units` and the quality helpers flatten rank-3 input, so their leading axis is `batch * seq_len`.
+- `get_quality_statistics` converts to NumPy, so keep it out of compiled training steps.
+- Layers need the repo's Python environment (Keras 3 on TensorFlow 2.18). Each layer registers itself for `.keras` save and load through `register_dl_technique`.

@@ -1,32 +1,78 @@
-# Task Heads (`dl_techniques.layers.heads`)
+# heads
 
-A single, model-agnostic system for attaching task-specific output **heads** to
-any foundation backbone — NLP, vision, or vision-language. This package merges
-the formerly-separate `nlp_heads`, `vision_heads`, and `vlm_heads` packages into
-three domain sub-packages under one import surface.
+Task heads for the `dl_techniques` library, as Keras 3 layers: small networks that sit on top of a backbone and turn its features into a task answer. The package lives at `src/dl_techniques/layers/heads/`. It has three domain sub-packages, `nlp/`, `vision/` and `vlm/` (vision-language), plus a thin dispatch function, `create_head`, and two small modules of shared checks.
 
-**Core philosophy:** decouple the *encoder* (foundation model) from the
-*decoder* (task head). The backbone produces rich contextual features; the head
-transforms them into task-specific predictions (logits, scores, masks,
-embeddings, generated tokens). The same backbone can drive many heads.
+## What it is for
 
-## Layout
+A backbone (BERT, ResNet, CLIP and so on) produces features. It does not produce answers. Each task needs a small head that reshapes those features into class scores, boxes, masks, depth maps, captions or similarity scores. Keeping the head apart from the backbone means one backbone can drive many heads, and one head class works on the features of any backbone with the right width.
 
+This package holds 24 head classes (8 NLP, 10 vision, 6 VLM). Each domain also has a task vocabulary (an enum of task names plus a config type), a table that maps a task name to a head class, and factory functions that build a head from a task name. Models that own their head use two domain-specific helpers: language models use `build_model_task_head` (NLP), vision models use `build_model_vision_head`.
+
+## How it works
+
+```mermaid
+flowchart TD
+    CH["create_head(domain, ...)"] -->|nlp| NF["nlp.create_nlp_head(task_config, input_dim)"]
+    CH -->|vision| VF["vision.create_vision_head(task_type)"]
+    CH -->|vlm| LF["vlm.create_vlm_head(task_config)"]
+    NF --> NT["NLP_HEAD_DISPATCH"]
+    VF --> VT["VISION_HEAD_DISPATCH"]
+    LF --> LT["VLM_HEAD_DISPATCH"]
+    NT --> NH["8 NLP heads"]
+    VT --> VH["10 vision heads"]
+    LT --> LH["6 VLM heads"]
+    V["validation.py + masking.py"] -.-> NF
+    V -.-> VF
+    V -.-> LF
 ```
-heads/
-├── __init__.py        # union re-export of all 3 domains + create_head
-├── factory.py         # create_head(domain, ...) dispatch facade
-├── task_types.py      # aggregator: NLP/Vision/VLM task-type enums + configs
-├── nlp/               # NLP heads     (factory.py, task_types.py, README.md)
-├── vision/            # vision heads  (factory.py, task_types.py, README.md)
-└── vlm/               # VLM heads     (factory.py, task_types.py, README.md)
-```
 
-See the per-domain READMEs for the full input/output contracts and head
-catalogues: [`nlp/README.md`](nlp/README.md),
-[`vision/README.md`](vision/README.md), [`vlm/README.md`](vlm/README.md).
+`create_head(domain, *args, **kwargs)` checks that `domain` is `'nlp'`, `'vision'` or `'vlm'` (else `ValueError`) and calls that domain's single-head factory with every argument unchanged. The three factories have different signatures and `create_head` does not hide that:
 
-## Quick start
+- `nlp`: `task_config` and `input_dim`.
+- `vision`: a task type (member or string) plus head keyword arguments.
+- `vlm`: `task_config` plus head keyword arguments.
+
+Multi-task heads are not reachable through `create_head`. Build them with `create_multi_task_nlp_head`, `create_multi_task_head` (vision) or `create_multi_task_vlm_head`.
+
+Each domain has one dispatch table from task type to head class. A task type with no row raises `ValueError` listing the task types that do have a head. There is no fallback head, so a task without an implementation fails at once instead of returning something that looks right. How many task names have a head:
+
+| Domain | Task names in the enum | Task names with a head |
+| --- | --- | --- |
+| NLP (`NLPTaskType`) | 37 | 24 |
+| Vision (`VisionTaskType`) | 37 | 10 |
+| VLM (`VLMTaskType`) | 47 | 4 |
+
+### Domains
+
+**`nlp/`** - `TextClassificationHead`, `TokenClassificationHead`, `QuestionAnsweringHead`, `TextSimilarityHead`, `TextGenerationHead`, `MultipleChoiceHead` and `MultiTaskNLPHead`, on a shared `BaseNLPHead`. Heads take hidden states `(B, S, D)` or a pooled `(B, D)`, either as a tensor or as a dict `{'hidden_states', 'attention_mask'}`. A head runs some of these stages in order: pool, norm, dropout, an optional intermediate block, optional task attention, optional feed-forward block, then its own output `Dense`. The `'attention'` pooling option is the head's own inline `Dense(1, tanh)` scorer with a masked softmax, not the shared `SequencePooling('attention')` layer. The task config is `NLPTaskConfig` (seven fields). The domain also holds the helpers a language model uses to own its head (`build_model_task_head`, `finalize_head_outputs` and six more).
+
+**`vision/`** - `DetectionHead`, `SegmentationHead`, `ClassificationHead`, `InstanceSegmentationHead`, `DepthEstimationHead`, `SurfaceNormalsHead`, `OpticalFlowHead`, `EnhancementHead` (denoising and super-resolution) and `MultiTaskHead`, on a shared `BaseVisionHead`. Heads take a feature map `(B, H, W, C)`; detection and segmentation also take ViT tokens `(B, N, D)` with `input_format='sequence'`. Depth, normals and flow upsample 8x through one shared decoder. There is no per-head config dataclass: a head is chosen by a `VisionTaskType` plus keyword arguments, and `TaskConfiguration` is a validated set of task types. The domain also holds ready-made keyword presets (`HeadConfiguration`) and `build_model_vision_head`, the one call vision models use to build their head.
+
+**`vlm/`** - `ImageCaptioningHead`, `VQAHead`, `VisualGroundingHead`, `ImageTextMatchingHead` and `MultiTaskVLMHead`, plus `BaseVLMHead`, which cannot be built directly. Heads take dicts of feature tensors, not images or token ids, and read every feature width from the input shapes. The task config is `VLMTaskConfig` (six fields). Outputs:
+
+| Head | Reads | Output dict |
+| --- | --- | --- |
+| `ImageCaptioningHead` | `vision_features`, `text_features` | `logits` `(B, S, vocab_size)`, `hidden_states` `(B, S, hidden_size)` |
+| `VQAHead` | `vision_features`, `question_features` | `answer_logits` `(B, num_classes)` |
+| `VisualGroundingHead` | `vision_features`, `text_features` | `bbox` `(B, 4)`, `confidence` `(B, regions)`, `grounded_features` `(B, hidden_size)` |
+| `ImageTextMatchingHead` | `vision_features`, `text_features` | `similarity_matrix` and `logits` `(B, B)`, `match_score` `(B,)`, `vision_embeddings`, `text_embeddings` `(B, projection_dim)` |
+
+### Output contract
+
+No head applies an activation to a class-like score. Classification, token, span, multiple-choice and generation outputs, detection `classifications`, the segmentation map, `instance_masks`, VQA `answer_logits`, captioning `logits`, grounding `confidence` and matching `match_score` are all pre-activation logits. Compile losses with `from_logits=True`. Where a head also returns `probabilities`, that is the softmax of `logits`. Squashed outputs, by design: the depth sigmoid, the grounding `bbox` sigmoid, unit-length surface normals. Optical flow is linear and signed. `SegmentationHead` is the one head that returns a bare tensor instead of a dict.
+
+## Files
+
+- `__init__.py` - re-exports 42 names: the full public API of the three domains (except the eight NLP in-model helpers) plus `create_head`.
+- `factory.py` - `create_head(domain, *args, **kwargs)`, the dispatch facade.
+- `task_types.py` - one import surface for the task-type enums and config classes of all three domains. Imports only.
+- `validation.py` - shared argument and input checks: `positive_int`, `static_rank`, `resolve_stage_knobs`, `lookup_head`, `pool_or_passthrough`, `key_by_name`. Each raises `ValueError` naming the head.
+- `masking.py` - `fill_masked(scores, keep, sentinel_dtype=None)`, which sets masked positions to the dtype's finite sentinel by selection.
+- `nlp/` - NLP heads, task types, dispatch, factories and in-model helpers (20 exported names).
+- `vision/` - vision heads, task types, dispatch, presets, factories and the one-call builder (18 exported names).
+- `vlm/` - vision-language heads, task types, dispatch and factories (11 exported names).
+
+## How to use it
 
 ```python
 from dl_techniques.layers.heads import create_head
@@ -43,10 +89,10 @@ nlp = create_head(
     input_dim=768,
 )
 
-# Vision: task_type (+ head kwargs)
+# Vision: task type (+ head kwargs)
 vis = create_head("vision", VisionTaskType.CLASSIFICATION, num_classes=1000)
 
-# VLM: task_config (+ head kwargs; every feature width comes from the inputs)
+# VLM: task_config (+ head kwargs; feature widths are read from the inputs)
 vlm = create_head(
     "vlm",
     task_config=VLMTaskConfig(name="caption",
@@ -56,85 +102,26 @@ vlm = create_head(
 )
 ```
 
-`create_head(domain, ...)` is a **thin dispatcher**: each domain keeps its own
-native calling convention and the remaining args are forwarded verbatim (no
-signature unification). It covers the single-head factories only — build
-multi-task heads via the domain functions directly
-(`create_multi_task_nlp_head`, `create_multi_task_head`,
-`create_multi_task_vlm_head`). No model calls it: the language models build
-their heads with `nlp.model_head.build_model_task_head` and the vision models
-with `vision.factory.build_model_vision_head`. It stays as the library entry
-point for code outside this repository's models.
-
-You can also import per domain:
+Per-domain imports expose more than the facade does:
 
 ```python
-from dl_techniques.layers.heads.nlp import create_nlp_head, TextClassificationHead
-from dl_techniques.layers.heads.vision import create_vision_head, VisionTaskType
-from dl_techniques.layers.heads.vlm import create_vlm_head, VLMTaskConfig
+from dl_techniques.layers.heads.nlp import create_nlp_head, build_model_task_head
+from dl_techniques.layers.heads.vision import create_vision_head, create_multi_task_head
+from dl_techniques.layers.heads.vlm import create_vlm_head, create_multi_task_vlm_head
 ```
 
-## Domain summary
+Tests: `.venv/bin/python -m pytest tests/test_layers/test_heads/ -q` from the repo root. The full repo suite takes about 1.5 hours; run only this directory.
 
-| Domain | Heads | Task-type vocabulary |
-|--------|-------|----------------------|
-| **nlp** | `TextClassificationHead`, `TokenClassificationHead`, `QuestionAnsweringHead`, `TextSimilarityHead`, `TextGenerationHead`, `MultipleChoiceHead`, `MultiTaskNLPHead` | `NLPTaskType` / `NLPTaskConfig` |
-| **vision** | `DetectionHead`, `SegmentationHead`, `DepthEstimationHead`, `SurfaceNormalsHead`, `OpticalFlowHead`, `ClassificationHead`, `InstanceSegmentationHead`, `EnhancementHead`, `MultiTaskHead` | `VisionTaskType` / `TaskConfiguration` |
-| **vlm** | `ImageCaptioningHead`, `VQAHead`, `VisualGroundingHead`, `ImageTextMatchingHead`, `MultiTaskVLMHead` | `VLMTaskType` / `VLMTaskConfig` |
+## Things to know
 
-**Consumers.** The vision heads are built by the `models/vision` packages and FastVLM, and the NLP
-heads by the headed language models. **No model, trainer or application constructs a VLM head
-today**; the VLM heads are a library whose only callers are this package and its tests
-(`vlm/README.md` § 1 has the grep that says so).
-
-## Output contract: logits
-
-No head in this package applies an activation to a class-like score. Every such output is a
-pre-activation logit: classification `'logits'` (NLP and vision), the NLP token, span,
-multiple-choice and generation logits, detection `'classifications'`, the segmentation map,
-`'instance_masks'`, VQA `'answer_logits'`, captioning `'logits'`, grounding `'confidence'` and
-matching `'match_score'`. Compile with `from_logits=True`, or apply `softmax`/`sigmoid` yourself.
-Where a head also returns `'probabilities'` (NLP and vision classification, NLP multiple choice), it
-is `softmax('logits')`, computed in the head's compute dtype. Two outputs are squashed by design,
-because they are range maps for regression targets, not class scores: the
-`DepthEstimationHead`'s sigmoid and the grounding `'bbox'` sigmoid. Surface normals are
-L2-normalized to unit length and optical flow is linear and signed. The per-domain READMEs give each head's keys.
-
-Every head owns only the sub-layers its `call` runs. Arguments that a head's `call`
-can never read are refused with `ValueError`: the VLM heads take no `vision_dim`/`text_dim` (widths
-come from the inputs) and no `activation_type`, the post-fusion options belong to
-`ImageTextMatchingHead` alone, `DepthEstimationHead`'s two decoders each refuse the other's
-arguments, and an NLP head refuses `use_task_attention`, `use_ffn` or `use_pooling` for a stage
-its `call` never runs (`nlp/README.md` § 4.1 has the table). A vision or NLP head refuses an
-attention or FFN setting (`attention_type`; `ffn_type`, `ffn_expansion_factor`) when its stage
-(`use_attention` or `use_task_attention`; `use_ffn`) is off, and stores `None` (D-210, D-211);
-`dropout_rate` on the depth, normals and flow heads,
-whose decoders take no dropout, defaults to 0.0 and a positive rate is refused unless attention or
-the FFN is on.
-
-## Notes
-
-- **Serialization-stable names.** All 22 layer-class names of the merge are preserved verbatim (two vision heads were added on 2026-10-15); the
-  package was relocated via `git mv`, so the registry keys of existing `.keras` checkpoints still
-  resolve. A name resolving is not the archive loading: the vision and VLM head layouts changed on
-  2026-10-14/15 (see the vision and VLM READMEs), and archives saved before then either fail to
-  load or load with logits where they held probabilities. The
-  classes register through `@register_dl_technique("dl_techniques.layers.heads.<domain>.<module>")`
-  (from `dl_techniques.utils.keras_registration`; the string is the defining module's path), so
-  `keras.saving.get_registered_name(EnhancementHead)` is
-  `dl_techniques.layers.heads.vision.enhancement>EnhancementHead`. The
-  helper additionally binds the legacy `Custom>ClassName` as an alias to the same object —
-  and that alias is keyed on the **bare class name**, which is why the names must stay
-  verbatim and why a `git mv` costs nothing. See `AGENTS.md` in this directory.
-- **NLP pooling reuse.** `BaseNLPHead` delegates `cls`/`mean`/`max`/`last` pooling to
-  the shared `SequencePooling` layer; the learnable `attention` pooling stays
-  inline (a distinct mechanism + weight set). See `AGENTS.md`.
-- **VLM padding masks.** The VLM heads take optional `vision_mask` / `text_mask` /
-  `question_mask` keep masks in their input dict and honour them in every pooling and
-  attention; their means and max also go through `SequencePooling`. See `vlm/README.md` § 2.
-- **NLP padding masks.** Every NLP head that pools reads `'attention_mask'` from its input
-  dict: classification, both forms of `TextSimilarityHead` (each side of a pair carries its
-  own) and `MultipleChoiceHead` (a `(batch, num_choices, seq)` mask). The token and QA heads
-  hand it to their task attention. See `nlp/README.md` § 3 and § 5.
-- **`VisionTaskType` has no alias.** Vision's task enum was renamed from a generic name to
-  `VisionTaskType`; the old name is gone, so import `VisionTaskType`.
+- **`create_head` has no caller in `src/`.** The 15 language models under `models/language/` build heads with `nlp.build_model_task_head` and import the other in-model helpers from `heads.nlp`; 20 vision model files build theirs with `vision.build_model_vision_head` (23 call sites outside this package at the time of writing). DETR, MambaLCT and SuperPoint call `vision.create_vision_head` directly. The facade is kept as the library's documented entry point and is tested in `tests/test_layers/test_heads/test_factory.py`. Do not route a model's head through it.
+- **No model, trainer or application builds a VLM head.** The only callers are this package and its tests.
+- **A head builds only what its `call` runs.** An argument the head can never read is refused, not stored. Examples that raise `ValueError`: an attention or FFN setting (`attention_type`, `ffn_type`, `ffn_expansion_factor`) given while its stage is off; `use_pooling`, `use_task_attention` or `use_ffn` on an NLP head that never runs that stage; `vocab_size` on a VLM head other than captioning. VLM heads take no `vision_dim` or `text_dim`; widths come from the input shapes.
+- **Stage knobs default to `None`.** With the stage on they resolve to `'multi_head'`, `'mlp'` and `4`.
+- **Padding masks are honoured.** NLP heads read `attention_mask`; VLM heads read `vision_mask`, `text_mask`, `question_mask` (1 = real token). A mask for an input that is already pooled raises `ValueError`.
+- **Registered names follow the defining module**, for example `dl_techniques.layers.heads.vision.enhancement>EnhancementHead`. Archives saved under the older `dl_techniques.layers.heads.<domain>.factory>...` keys do not load. The bare class name stays in the Keras registry as a legacy alias, so class names must not change.
+- **Language-model vocabulary check.** `build_model_task_head(..., vocab_size=...)` raises `ValueError` when a generation-type head's `vocabulary_size` differs from the model's vocabulary. A dict config with no `vocabulary_size` takes the model's.
+- **`use_crf=True` builds no CRF layer.** It only drops the `predictions` key from `TokenClassificationHead`.
+- **Vision attention is built at `hidden_dim`**, so with attention on, the input channel count must equal `hidden_dim`. `MultiTaskHead` forces `use_attention` on every task head to `use_task_specific_attention` (default `True`); pass `False` when a task is denoising or super-resolution.
+- **VLM width rules.** Captioning needs `text_features` exactly `hidden_size` wide. Grounding and matching need both inputs `hidden_size` wide for the fusion; only six fusion strategies work (`concatenation`, `addition`, `multiplication`, `gated`, `bilinear`, `tensor_fusion`). `VQAHead` reads `question_features`; the other three read `text_features`.
+- **`VisionTaskType` has no alias** under any older name.

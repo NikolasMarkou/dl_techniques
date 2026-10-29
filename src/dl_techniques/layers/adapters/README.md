@@ -1,159 +1,102 @@
-# Adapters (`dl_techniques.layers.adapters`)
+# adapters
 
-Low-rank weight updates, and updates confined to a local support.
+Keras 3 layers that add a small, trainable correction on top of a projection someone else owns: a low-rank adapter (`LoRAAdapter`) and a version of it that only fires on inputs a learned gate recognises (`GatedAdapter`). The package is `dl_techniques.layers.adapters` in the `dl_techniques` deep learning library.
 
-## What is here
+## What it is for
 
-| File | Contents |
-| :--- | :--- |
-| `lora.py` | `LoRAAdapter` — an additive low-rank delta with `num_adapters` independent `A`/`B` pairs, selected per call site. |
-| `factory.py` | `ADAPTER_REGISTRY` + `create_adapter_layer` / `create_adapter_from_config` / `validate_adapter_config` / `assemble_adapter_config` / `list_adapter_types` / `get_adapter_info` / `get_adapter_requirements`. One key: `lora`. |
-| `gated_adapter.py` | `GatedAdapter` — `LoRAAdapter` composed with one `LocalSupportGate` per phase, i.e. the Local Support Learning mechanism. |
+Fine-tuning a large weight matrix `W` directly changes every parameter and, applied everywhere, changes the output for every input. A low-rank adapter (LoRA) learns a small additive correction instead: two thin matrices `A` and `B` whose product is added to the output of `W`. The base layer stays untouched.
 
-## `LoRAAdapter`
+This package goes two steps further. A single `LoRAAdapter` holds several independent `A`/`B` pairs ("slots"), so one shared layer can behave differently at many call sites without growing its own parameter count. `GatedAdapter` uses those slots as learning "phases" and multiplies each phase's correction by a gate that is open only for inputs that look like that phase's training data. That is the mechanism of Local Support Learning (LSL), which limits forgetting because a later phase's update cannot reach inputs from an earlier phase.
 
-Computes a **pure additive delta** `(x @ A[i]) @ B[i] * (alpha / rank)` for a
-caller-selected slot `i`. It does **not** own or wrap the base projection it
-augments — the caller adds the returned delta onto its own output. That seam is
-what lets one adapter serve a `Dense` inside a SwiGLU block and a
-grouped-query projection inside a decoder without either knowing the other
-exists.
+Neither layer wraps the base projection. Both return a delta, and the caller adds it to its own output.
+
+## How it works
+
+`LoRAAdapter` computes, for a slot index `i`:
 
 ```
-x  [..., input_dim]
-      │
-      ▼  select slot i (a plain Python int, fixed per call site)
-    A[i]: (input_dim, rank)
-      │
-      ▼  [..., rank]
-    B[i]: (rank, output_dim)
-      │
-      ▼  * (alpha / rank)
-    delta  [..., output_dim]     ← the CALLER adds this onto its base output
+delta = (x @ A[i]) @ B[i] * (alpha / rank)
 ```
 
-The slot index is a **plain Python `int`**, never a tensor: which slots exist is
-fixed at model construction, so it must stay outside the traced graph. It
-defaults to `0`, which is what makes the layer usable where Keras supplies only
-the input — `keras.Sequential`, a functional model, a `fit()`-driven call.
+`A` has shape `(num_adapters, input_dim, rank)` and `B` has shape `(num_adapters, rank, output_dim)`. `B` starts at zero, so the delta is exactly zero until training moves it. The slot index is a plain Python `int` chosen when the model is built, not a tensor. It defaults to `0`, so the layer also works inside `keras.Sequential` or a functional model, where only the input is passed.
 
-Two consumers use the same axis for unrelated reasons, which is why the layer
-is not Zamba2-specific:
+`GatedAdapter` owns one `LoRAAdapter` with `num_phases` slots and one `LocalSupportGate` per phase. The gate (from `dl_techniques.layers.statistics.local_support_gate`) scores each token's input against two fitted mixtures and returns 1 or 0. The output is the sum over active phases of gate times delta.
 
-* **Zamba2** (`models/language/zamba2/`) — the slot is a *depth position*.
-  `num_mem_blocks` physical shared mem-blocks are reused round-robin across far
-  more depth positions than there are blocks, and each position gets its own
-  pair so it can specialize without multiplying the shared block's parameter
-  count.
-* **Local Support Learning** (below) — the slot is a *learning phase*.
-
-### Initialization, and why it is written the way it is
-
-`B` is zero-initialised (the standard LoRA convention), so every slot's delta is
-exactly zero at construction and attaching the adapter does not perturb an
-already-trained block.
-
-`A` is **not** initialized by handing the stacked `(num_adapters, input_dim,
-rank)` tensor to a Keras initializer in one call. Two reasons, both measured:
-
-1. Keras' built-in initializers read a 3-D shape as a convolution kernel's
-   `(receptive_field, fan_in, fan_out)`, so `num_adapters` would be read as a
-   spatial extent and every slice scaled wrongly.
-2. Each slice gets a **fresh `clone_initializer` clone** per iteration. A single
-   seedless initializer *instance* is stateless-deterministic and replays the
-   identical sample at every call of the same shape, which made every slot's `A`
-   bit-identical — so every slot read the same rank-`r` subspace of `x` at
-   initialisation (`plan-2026-09-12T075714-035fd488/D-007`).
-
-Consequence worth knowing: at the zero-init, `grad_B` is nonzero but `grad_A` is
-zero, because `A` only enters the product multiplied by `B`. The two come alive
-in order. This is not a defect — it is why the zero-init is inert — but it does
-mean a loss quadratic in the delta has zero gradient at step 0.
-
-## `GatedAdapter`
-
-Local Support Learning: an additive update whose effect is confined to the input
-region that produced it. Applied everywhere, `ΔW` alters the output of *every*
-input, which is why conventional adaptation forgets.
-
-```
-x  (..., input_dim)        ← the gate scores the base projection's INPUT
-      │
-      ├──► LocalSupportGate ──► g  (...,)     1[log Φ_pos(x) > log Φ_neg(x)]
-      │
-      └──► LoRAAdapter ──────► delta  (..., output_dim)
-
-output = x @ W.T + Σ_p  g_p ⊙ LSL_p(x)          Σ over phases
+```mermaid
+flowchart LR
+    x["x (..., input_dim)"] --> G["gate p: 1 or 0 per token"]
+    x --> L["LoRAAdapter slot p: delta (..., output_dim)"]
+    G --> M["gate * delta"]
+    L --> M
+    M --> S["sum over active phases"]
+    S --> D["delta, added by the caller"]
 ```
 
-`g_p` is phase `p`'s gate decision on *this* token; `LSL_p(x)` is phase `p`'s
-delta via `LoRAAdapter(num_adapters=P)` indexed by `adapter_idx=p`. Every phase
-keeps its own delta and its own support estimate, so a later phase cannot
-overwrite an earlier one's behaviour. Inference cost grows linearly in the phase
-count — the price of not being able to merge the deltas into the base weights.
+A gate must be fitted before it does anything. An unfitted gate routes every token closed, so its phase adds nothing, silently.
 
-The gate lives at `dl_techniques.layers.statistics.local_support_gate` and is
-fitted by an explicit call (`fit_gate`, or `observe` for the streaming path),
-never as a side effect of `call`.
+The factory in `factory.py` builds `LoRAAdapter` from a string key (`lora`). It is strict: a keyword the type does not declare raises `ValueError` instead of being dropped.
 
-**A gate that has not been fitted routes every token closed**, so an unfitted
-phase contributes *nothing* rather than its ungated delta. That is the safe
-direction and it is silent: the phase's parameters are present and
-trained-looking while having no effect. Check `is_phase_fitted` when a phase
-appears to be ignored.
+## Files
 
-### Freezing a phase
+- `__init__.py` - package docstring and curated exports (13 names in `__all__`).
+- `lora.py` - `LoRAAdapter`, the multi-slot additive low-rank delta, and the constant `LEGACY_NUM_OCCURRENCES_KEY`.
+- `gated_adapter.py` - `GatedAdapter`, a `LoRAAdapter` plus one `LocalSupportGate` per phase.
+- `factory.py` - `ADAPTER_REGISTRY` (one key, `lora`), the `AdapterType` literal, and the creation and validation functions.
 
-`set_active_phases([...])` restricts which phases contribute. A frozen phase's
-delta stays in the checkpoint and its gate stays fitted, but stops being applied,
-so the optimizer cannot reach it through this layer.
+## How to use it
 
-## The factory is strict
+Plain adapter:
 
-`create_adapter_layer` raises on any keyword the chosen type does not declare;
-it never filters-and-drops. The message carries
-`factory.STRICT_DROPPED_KEY_MARKER` as a stable substring.
+```python
+import keras
+from dl_techniques.layers.adapters import LoRAAdapter
 
-The reason is measured damage, not taste. A factory that silently discards an
-undeclared keyword converts a typo into a model that trains and behaves
-plausibly while missing the setting the caller asked for; this tree has four
-recorded instances (a `dropout=` key landing on `dropout_rate` killed dropout
-across every vision encoder; `max_seq_len`/`rope_theta` landing on a type
-declaring no rotary parameter made a stack exactly permutation-equivariant).
+adapter = LoRAAdapter(output_dim=256, rank=8, alpha=16.0, num_adapters=4)
+x = keras.random.normal((2, 10, 256))
+base = keras.layers.Dense(256)(x)
+out = base + adapter(x, adapter_idx=1)   # slot 1's delta
+```
 
-A **wrapper** carrying a superset of knobs pre-filters through
-`assemble_adapter_config`, which drops its own noise silently while forwarding
-`caller_args` unfiltered — an explicit caller request still raises.
+Through the factory:
 
-`GatedAdapter` is deliberately **not** a factory key: it is a composition,
-reachable only by naming the class, so a caller cannot reach a gated adapter by
-passing a string.
+```python
+from dl_techniques.layers.adapters import create_adapter_layer
 
-## Tests
+adapter = create_adapter_layer(
+    "lora", name="up_lora", output_dim=256, rank=8, alpha=16.0, num_adapters=4
+)
+```
 
-`tests/test_layers/test_adapters/`:
+Gated, two phases:
 
-* `test_lora_adapter.py` — construction, per-slot independence (D-007), slot
-  index reconciliation, gradient flow, serialization, `.keras` round trip on
-  values.
-* `test_adapter_factory.py` — strictness, registry surface, deep-copy
-  isolation, `from_config`.
-* `test_the_guards_actually_hold.py` — single-claim guards, sentence-named.
-* `test_the_red_proofs.py` — **not a routine run.** Rewrites library source to
-  prove each guard goes red on its own defect; marked `red_proof`. Run it
-  deliberately:
-  `pytest tests/test_layers/test_adapters/test_the_red_proofs.py -v`
+```python
+from dl_techniques.layers.adapters import GatedAdapter
 
-A note on that last one: two of the original red proofs could not go red and
-were replaced. One injected a signed (unclamped) exponent into the smoothing
-decay matrix and stayed green — correctly, because the `ops.where` mask discards
-the offending branch anyway. A red proof that cannot go red is worse than none,
-because it reads as coverage. The clamp survives as a separately-labelled
-defensive guard, and the replacement proof breaks causality instead.
+adapter = GatedAdapter(input_dim=512, output_dim=512, rank=8,
+                       alpha=16.0, num_phases=2, seed=3)
+adapter.build((None, 512))
+adapter.fit_gate(phase_activations=x0, generic_activations=g, phase_idx=0)
+adapter.fit_gate(phase_activations=x1, generic_activations=g, phase_idx=1)
+delta = adapter(hidden)                  # both phases, each gated
+delta = adapter(hidden, phase_idx=0)     # phase 0 only
+adapter.set_active_phases([1])           # stop applying phase 0
+```
 
-## References
+`x0`, `x1`, `g` are `(n, 512)` activation arrays. `fit_gate` needs the gates to exist, and they are created in `build`, so call the layer once or `build` it first.
 
-* Hu et al., 2021. LoRA. [arXiv:2106.09685](https://arxiv.org/abs/2106.09685)
-* Ben-Kish, Kumar, Glass & Giryes, 2026. Local Support Learning.
-  [arXiv:2610.02126](https://arxiv.org/abs/2610.02126)
-* Glorioso et al., 2024. Zamba2. [arXiv:2411.15242](https://arxiv.org/abs/2411.15242)
+## Things to know
+
+- Registration: `LoRAAdapter` registers as `dl_techniques.layers.adapters.lora`, with a legacy alias for the old Zamba2 location (`dl_techniques.models.zamba2.lora_adapter`). `GatedAdapter` registers as `dl_techniques.layers.adapters.gated_adapter`.
+- Old checkpoints: a saved config that uses the old `num_occurrences` key is accepted by `LoRAAdapter.from_config` (with a warning), which rewrites it to `num_adapters`. If both keys are present with different values it raises. `call` also still accepts the `occurrence_idx` keyword as an alias of `adapter_idx`, and the `num_occurrences` property reads `num_adapters`.
+- Slot initialisation: each slot's `A` slice is drawn from its own clone of the initializer. Handing one initializer instance to every slice made all slots identical. `B` is zeros.
+- `GatedAdapter` is not a factory key. Construct it by class name.
+- `GatedAdapter.adapter_type` is stored and serialized, but `build` always creates the `lora` adapter; the value does not change what is built.
+- `GatedAdapter.call` casts inputs to float32 and returns float32.
+- If every phase is inactive, `call` returns a zero tensor of the right shape.
+- Selecting a single `phase_idx` that is not in `active_phases` raises `ValueError`.
+- `fit_gate` with `phase_idx=None` fits every phase on the same samples. Pass `phase_idx` for multi-phase use. It returns `{'phase_<p>': {'pos': iterations, 'neg': iterations}}`. It is exact batch EM; the streaming path is `LocalSupportGate.observe` on `adapter.gates[p]`.
+- `GatedAdapter.get_config` does not store gate fit state, only constructor arguments. Fitted gate state is not part of that config.
+- Consumers inside the repo: `models/language/zamba2/` uses `LoRAAdapter` (slot = depth position of a weight-shared block).
+- Tests: `tests/test_layers/test_adapters/`. `test_the_red_proofs.py` is marked `red_proof`, rewrites source on purpose, and should only be run deliberately.
+
+References: Hu et al., 2021, LoRA (arXiv 2106.09685); Ben-Kish et al., 2026, Local Support Learning (arXiv 2610.02126).

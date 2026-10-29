@@ -1,282 +1,121 @@
-# Structured linear (`dl_techniques.layers.structured_linear`)
+# structured_linear
 
-Alternative parameterizations to a dense weight matrix: quantized, tensor-train,
-orthonormally-regularized, exactly-orthogonal, random-feature, spline-kernel,
-distance-scored, and spherical-code heads.
+Keras 3 layers that replace a plain dense weight matrix with another parameterization: quantized, tensor-train, orthogonal, random-feature, spline-based, distance-scored, or spherical-code. Part of `dl_techniques.layers` (`src/dl_techniques/layers/structured_linear/`).
 
-There is **no factory** here and the `__init__.py` is empty (the
-"exports-nothing" shape in `layers/AGENTS.md`). Import each layer from its
-defining module:
+## What it is for
+
+A dense layer computes `y = x @ W + b` with a full `W`. That is the default, but it is not always the right shape of computation. Sometimes you want fewer parameters (tensor train), a weight that is exactly orthogonal (butterfly), weights stored in about 1.6 bits (BitLinear), a kernel machine with a fixed random feature map (RFF), a convolution whose taps are learnable curves (KANvolution), or a classifier head that scores by distance to prototypes or by cosine to a fixed geometric frame (harmonic and crystal heads).
+
+This package holds eleven such layers and one helper module of geometry code. They are independent of each other, apart from the crystal family sharing `crystal_frames.py`. There is no factory and `__init__.py` is empty, so each layer is imported from its own module.
+
+## How it works
+
+Each layer is a `keras.layers.Layer` registered with `register_dl_technique("dl_techniques.layers.structured_linear.<module>")`. Weights are created in `build()` from the last input dimension, which must be static.
+
+```mermaid
+flowchart LR
+    subgraph hidden[Feature layers]
+        BL[BitLinear]
+        MPS[MPSLayer]
+        OB[OrthoBlock]
+        OBF[OrthogonalButterfly]
+        RFF[RFFKernelLayer]
+        KAN[KANvolution]
+    end
+    subgraph heads[Classifier heads]
+        HD[HarmonicDense]
+        HHH[HierarchicalHarmonicHead]
+        CL[CrystalLayer]
+        HCL[HierarchicalCrystalLayer]
+        CMP[CrystalMultiHeadProjection]
+    end
+    CF[crystal_frames.py] --> CL
+    CF --> HCL
+    CF --> CMP
+```
+
+Short description of each layer:
+
+- `BitLinear`: `y = matmul(round(x / gamma_x), round(W / gamma_w)) * gamma_x * gamma_w`, with a straight-through estimator through the round. Weights default to ternary `{-1, 0, 1}` (`weight_bits=1.58`); `weight_bits=1` is a separate binary `{-1, +1}` path; activations default to 8 bits. `gamma_x` is computed per token (feature axis) and never over the batch axis, so the output for one sample does not depend on batch size.
+- `MPSLayer`: one `(bond_dim, bond_dim)` core per input feature. A boundary vector of ones is multiplied through the cores left to right, scaled by each input value, then projected to `output_dim`. Parameters grow as `input_dim * bond_dim^2`.
+- `OrthoBlock`: `Dense` with a soft orthonormality penalty on the kernel, then `ZeroCenteredRMSNorm`, then a learnable per-feature gate in `[0, 1]`, then the activation (last).
+- `OrthogonalButterfly`: `log2(d)` stages of `d/2` disjoint 2x2 rotations (FFT butterfly pattern). Exactly orthogonal for any angles, exactly invertible, log-det-Jacobian exactly zero. `d` must be a power of two.
+- `RFFKernelLayer`: `phi(x) = sqrt(2/D) * cos(x @ omega + b)` with frozen random `omega` and `b`, followed by a trainable `Dense`.
+- `KANvolution`: a 2D convolution where each kernel tap applies `w_spline * B(x) + w_silu * SiLU(x)`, with `B` a linear B-spline over a fixed grid on `[-1, 1]` and `x` squashed by `tanh`.
+- `HarmonicDense`: scores each class by Euclidean distance to a learned prototype, `logit_i = -n * log ||x - w_i||`. No bias.
+- `HierarchicalHarmonicHead`: the same scoring factored over a fixed balanced tree with a learned class-to-leaf assignment, for large vocabularies.
+- `CrystalLayer`: cosine logits against a frame of unit vectors packed from rotated simplexes.
+- `HierarchicalCrystalLayer`: two-tier version (macro centroids, leaf bundles around each).
+- `CrystalMultiHeadProjection`: splits features into heads, reads each head through its own rotated simplex, then projects back with a `Dense`.
+
+## Files
+
+- `bitlinear_layer.py` - `BitLinear`, quantization-aware dense layer.
+- `mps_layer.py` - `MPSLayer`, matrix-product-state (tensor-train) chain.
+- `orthoblock.py` - `OrthoBlock`, orthonormally regularized, normalized, gated dense block.
+- `orthogonal_butterfly.py` - `OrthogonalButterfly` and the module-level `_butterfly_apply` rotation routine.
+- `random_fourier_features.py` - `RFFKernelLayer`, random Fourier feature map plus trainable projection.
+- `kanvolution.py` - `KANvolution`, convolution with per-tap learnable spline activation.
+- `harmonic_dense.py` - `HarmonicDense`, distance-scored classifier head.
+- `hierarchical_harmonic.py` - `HierarchicalHarmonicHead`, tree-factored harmonic head, plus `_balanced_branching` and `_greedy_capacity_assignment` helpers.
+- `crystal_frames.py` - pure NumPy geometry: `hyperspherical_simplex`, `haar_orthogonal`, `crystal_frame`, `tiled_simplex_frame`.
+- `crystal_layer.py` - `CrystalLayer`, cosine logits against a packed frame.
+- `hierarchical_crystal_layer.py` - `HierarchicalCrystalLayer`, macro/micro two-tier crystal classifier.
+- `crystal_multihead_projection.py` - `CrystalMultiHeadProjection`, per-head simplex prisms plus output projection.
+- `__init__.py` - empty on purpose.
+
+## How to use it
+
+Import each layer from its defining module.
 
 ```python
+import keras
 from dl_techniques.layers.structured_linear.bitlinear_layer import BitLinear
+from dl_techniques.layers.structured_linear.harmonic_dense import HarmonicDense
 from dl_techniques.layers.structured_linear.crystal_layer import CrystalLayer
+
+inputs = keras.Input(shape=(64,))
+x = BitLinear(units=128, activation="gelu", use_bias=True)(inputs)
+logits = CrystalLayer(num_classes=10, scale=10.0, seed=0)(x)
+model = keras.Model(inputs, logits)
 ```
 
-## What is here
-
-| File | Contents |
-| :--- | :--- |
-| `bitlinear_layer.py` | `BitLinear` — 1.58-bit (ternary) quantization-aware dense |
-| `mps_layer.py` | `MPSLayer` — matrix-product-state / tensor-train chain |
-| `orthoblock.py` | `OrthoBlock` — decorrelated, gated dense block |
-| `orthogonal_butterfly.py` | `OrthogonalButterfly` — exactly-orthogonal butterfly (Givens) map |
-| `random_fourier_features.py` | `RFFKernelLayer` — fixed random Fourier features + trainable projection |
-| `kanvolution.py` | `KANvolution` — convolution with per-tap learnable B-spline + SiLU |
-| `harmonic_dense.py` | `HarmonicDense` — Euclidean-distance classifier head |
-| `hierarchical_harmonic.py` | `HierarchicalHarmonicHead` — tree-factored harmonic head for large vocabularies |
-| `crystal_frames.py` | Shared geometry: `hyperspherical_simplex`, `haar_orthogonal`, `crystal_frame`, `tiled_simplex_frame` |
-| `crystal_layer.py` | `CrystalLayer` — cosine logits against a packed spherical-code frame |
-| `hierarchical_crystal_layer.py` | `HierarchicalCrystalLayer` — two-tier crystal classifier over a class tree |
-| `crystal_multihead_projection.py` | `CrystalMultiHeadProjection` — per-head simplex prisms + learned projection |
-
----
-
-## `BitLinear`
+Distance-scored head with probabilities, then a hierarchical head for many classes:
 
 ```python
-y = matmul(round(x / gamma_x), round(W / gamma_w)) * gamma_x * gamma_w
+from dl_techniques.layers.structured_linear.hierarchical_harmonic import HierarchicalHarmonicHead
+
+head = HierarchicalHarmonicHead(num_classes=10000, branching=(100, 100), output_mode="probs")
+# between epochs, outside the graph:
+head.reassign()          # re-estimates class-to-slot assignment, returns {"moved": int}
 ```
 
-with a straight-through estimator through the round. Weights default to ternary
-`{-1, 0, 1}` (`weight_bits=1.58`); `weight_bits=1` is a distinct binary path
-(`{-1, +1}` via `sign`). Activations default to 8-bit. `gamma` never reduces
-over the batch axis, so the layer computes the same function at any batch size.
+Exactly invertible rotation:
 
-`use_bias` defaults to **`False`**, matching the BitNet formulation — unlike
-`keras.layers.Dense`. `get_config` has always carried it, so saved archives
-rebuild as constructed; hand-written code that relied on the old default must
-pass `use_bias=True` (see `MIGRATION.md` in the class docstring).
+```python
+from dl_techniques.layers.structured_linear.orthogonal_butterfly import OrthogonalButterfly
 
-**New in this revision:**
-- `seed` parameter for reproducible quantization noise (stochastic rounding)
-- Explicit `from_config` for reliable deserialization
+layer = OrthogonalButterfly(num_blocks=2, angle_initializer="glorot_uniform")
+y = layer(x)             # x has a power-of-two last dimension
+x_back = layer.inverse(y)
+```
 
----
+Tests: `tests/test_layers/test_structured_linear/` (for example `python -m pytest tests/test_layers/test_structured_linear/test_bitlinear_layer.py`).
 
-## `MPSLayer`
+## Things to know
 
-Each input feature owns a `(bond_dim, bond_dim)` core; a boundary vector
-contracts left-to-right along the chain, then projects to `output_dim`.
-Parameters scale as `O(input_dim * bond_dim^2)` instead of `O(n^2)`.
-
-The chain contracts the **last** axis at any rank: leading dims flatten through
-it and are restored, so `(B, T, D)` works exactly as `compute_output_shape`
-promises (each leading position contracts independently). The two kernel-fed
-weights draw from their **own clones** of `kernel_initializer` — one shared
-seedless instance replays the same sample at every site, so sharing it tied
-the cores to the projection (Pearson r ≈ 1.0; see the `DECISION` block in
-`build()`).
-
-**New in this revision:**
-- `seed` parameter for reproducible initialization
-- Explicit `from_config` for reliable deserialization
-
----
-
-## `OrthoBlock`
-
-Pipeline: orthonormally-regularized `Dense` → `ZeroCenteredRMSNorm` → learnable
-`[0, 1]` gate → activation (applied last, after the gate). The kernel penalty
-is `(lambda / sqrt(rank)) * ||G - I||_F^2` over whichever kernel axis is
-smaller. `use_bias` defaults to `False`: before a centering norm the bias mean
-is unidentifiable.
-
-Two traps, both in the docstrings: `scale_initial_value` defaults to **0.8**,
-not 0.5, because 0.5 is the unstable equilibrium of the binary-preference
-well; and a ReLU-family activation makes a fully-closed gate **absorbing**
-(`relu'(0) = 0`, so a closed gate receives no gradient) — a warning is logged.
-`OrthoBlock` is consumed by `OrthoGLUFFN` in `layers/ffn/orthoglu_ffn.py`.
-
-**New in this revision:**
-- `seed` parameter for reproducible initialization
-- Explicit `from_config` for reliable deserialization
-
----
-
-## `OrthogonalButterfly`
-
-`log2(d)` stages of `d/2` disjoint 2x2 Givens rotations in the FFT butterfly
-pattern: exactly orthogonal for any angles, at `O(d log d)` cost. Exactly
-invertible (`W^-1 = W^T` via `call(x, inverse=True)` or `inverse()`), with an
-exactly-zero log-det-Jacobian — a cheap normalizing-flow step. The feature dim
-must be a power of two; anything else raises. `angle_initializer='zeros'` (the
-default) starts at the identity.
-
-**Fixed in this revision:**
-- **Dtype preservation**: The layer no longer internally casts to float32.
-  It now respects the input dtype (including mixed_float16/bfloat16) throughout
-  the forward and inverse passes.
-
-**New in this revision:**
-- `seed` parameter for reproducible initialization
-- Explicit `from_config` for reliable deserialization
-
----
-
-## `RFFKernelLayer`
-
-`phi(x) = sqrt(2/D) * cos(x @ omega + b)` with frozen `omega ~ N(0, gamma^2)`,
-`b ~ Uniform(0, 2*pi)`, then a trainable `Dense`. By Bochner's theorem
-`phi(x)^T phi(y)` approximates the RBF kernel with `O(D)` memory.
-
-`seed` fixes the frozen projection only; the output `Dense` still draws from
-the global RNG (same contract as the crystal family's `seed`). The projection
-is a saved weight, so `.keras` archives restore it bit-exactly. Two same-seed
-layers share `omega`/`b` bit-exactly and differ downstream.
-
-**New in this revision:**
-- Explicit `from_config` for reliable deserialization
-
----
-
-## `KANvolution`
-
-Convolution layer whose per-tap activation is a learnable B-spline combined
-with SiLU, instead of a fixed kernel weight and activation.
-
-Each kernel tap computes `K(x) = w_spline * B(x) + w_silu * SiLU(x)`, with
-`B(x)` a linear B-spline over a fixed `[-1, 1]` grid and `x` squashed by
-`tanh`. `control_points`, `w_spline` and `w_silu` each draw from their **own
-clone** of `kernel_initializer` (same replay mechanism as `MPSLayer`; see the
-`DECISION` block in `build()`). `strides > 1` together with `dilation_rate > 1`
-raises at construction — TF refuses it at `call()` time.
-
-**New in this revision:**
-- `seed` parameter for reproducible initialization
-- Explicit `from_config` for reliable deserialization
-
----
-
-## `HarmonicDense`
-
-Scores by distance, not dot product: `logit_i = -n * log ||x - w_i||`. Three
-`output_mode`s: `"distances"` (raw `||x - w_i||`, feed into `HarMax`),
-`"logits"` (`-0.5 * n * log(d2)`, for `from_logits=True`), `"probs"`
-(softmax of those, the default). `n=None` resolves to `sqrt(input_dim)` at
-build. `HarMax(distances)` reproduces `"probs"` mode on the same kernel to
-~1e-7. No bias: a per-class additive shift has no distance interpretation.
-
-**New in this revision:**
-- `seed` parameter for reproducible initialization
-- Explicit `from_config` for reliable deserialization
-
----
-
-## `HierarchicalHarmonicHead`
-
-Factorizes the flat `HarMax` over a fixed balanced tree with a **learned**
-class-to-leaf assignment: per-level node prototypes plus one member prototype
-per leaf slot, routed top-down, leaf probability as the product of
-sibling-group-normalized conditionals. Exact forward sums to 1 by
-construction; `beam_call` evaluates only the top-k level-1 subtrees for
-retrieval-scale inference. `reassign()` is the explicit E-step (nearest
-routing-center assignment with exact per-node capacities — dead clusters are
-structurally impossible); member rows permute to follow their classes. Padding
-(`prod(branching) > num_classes`) is a slot suffix: padded leaves land on
-exactly 0.
-
-`"logits"` here are **normalized** log-probabilities — do not pass them to a
-`from_logits=True` loss (that normalizes twice). `set_n_per_level()` is the
-annealing hook (see `callbacks/anneal_harmonic_exponent.py`); a pre-`build()`
-call is overwritten by `build()`'s resolution. Consumed by
-`train/head_comparison/` and `callbacks/periodic_reassign.py`.
-
-**New in this revision:**
-- `seed` parameter for reproducible initialization
-- Explicit `from_config` for reliable deserialization
-
----
-
-## The crystal family
-
-Neural Collapse (Papyan et al., 2020) is taken as the *initialization*:
-`CrystalLayer` scores cosine logits against a frame of unit vectors packed
-from rotated simplexes by a greedy minimax-angular-separation search.
-`HierarchicalCrystalLayer` keeps a two-tier (macro centroid + isotropic leaf
-bundle) version for hierarchical label spaces, with `cluster_spread` as the
-perturbation magnitude. `CrystalMultiHeadProjection` splits features into `H`
-sub-spaces with one rotated-simplex prism each, then projects back with a
-learned `Dense` (hardcoded GELU between prism readout and projection).
-
-All three route `compute_output_shape` through
-`utils/tensors.canonical_binary_input_shape`, and all frames are computed
-inside weight initializers (a `StatelessScope` build discards out-of-
-initializer assignments). `seed` covers the geometric frames only.
-
-### Known limits (measured)
-
-- **Separation, not distinctness.** Packing yields `width` distinct columns at
-  every width measured (up to 50,000 in 2-D). What degrades is the minimum
-  angular separation — and a frame is a set of *lines* while the search prices
-  only the signed inner product, so antipodal pairs (`cos -> -1`) are never
-  penalised: `dim=2, width=64, seed=0` holds a pair at `cos = -1.0000`.
-  Minimising `max|.|` instead is uniformly better-or-equal where measured but
-  moves every wide frame, so it is a recorded-but-deferred option. Details and
-  numbers: `crystal_frames.py` module docstring.
-- **`cluster_spread=0` collapses the leaf tier.** Every leaf becomes its
-  centroid: `num_macro` distinct columns of `num_macro * num_micro`, identical
-  logits per group, uniform conditional softmax by construction. Legal and
-  documented; use a strictly positive spread for leaf discrimination.
-- **`cluster_spread=1` can zero a leaf** (displacement exactly opposite the
-  centroid → all-zero column → permanent zero score). Measure-zero, stays
-  legal, pinned by tests.
-- All eleven layers' `compute_output_shape` now routes through the shared
-  helper `canonical_binary_input_shape`, fixing the list-wrapped shape issue
-  that previously corrupted the batch axis (e.g. `OrthoBlock cos([[None, 8]])
-  = (4,)` instead of `(None, 4)`).
-
-**New in this revision:**
-- All crystal family layers now have explicit `from_config` for reliable deserialization
-
----
-
-## Tests
-
-`tests/test_layers/test_structured_linear/` — one suite per layer plus
-single-claim guards (`test_the_*`): the list-wrapped-shape sweep over all
-seven non-crystal layers, RFF reproducibility/dtype honesty, MPS rank
-generality, the KANvolution strides guard, and the crystal antipodal
-characterisation. `mutation_audit.py` is the crystal mutation harness (its
-`_ALLOWED` covers the whole package); `test_the_mutation_suite_found_no_new_holes.py`
-records which mutations the suite catches.
-
----
-
-## References
-
-- Wang et al., 2024. The Era of 1-bit LLMs. (BitNet)
-- Stoudenmire & Schwab, 2016. Supervised Learning with Tensor Networks. (MPS)
-- Novikov et al., 2015. Tensorizing Neural Networks.
-- Rahimi & Recht, 2007. Random Features for Large-Scale Kernel Machines. (RFF)
-- Liu et al., 2024. KAN: Kolmogorov-Arnold Networks; Bodner et al., 2024. Convolutional KANs.
-- Baek et al., 2025. Harmonic Loss Trains Interpretable AI Models. (HarmonicDense, HarMax)
-- Papyan, Han and Donoho, 2020. Prevalence of Neural Collapse. (crystal family)
-- Strohmer and Heath, 2003. Grassmannian Frames. (crystal packing)
-
----
-
-## Common Parameters
-
-### `seed: Optional[int]`
-
-Added to all layers in this revision for reproducible initialization. When
-provided and the relevant initializer argument is a string (e.g.
-`"glorot_uniform"`), a seeded instance of that initializer is created.
-Deterministic initializers (`"zeros"`, `"ones"`, `Constant`, `Identity`)
-are unaffected. For full reproducibility, call `keras.utils.set_random_seed()`
-and leave the initializer seedless.
-
-### `use_bias: bool`
-
-Default varies by layer to match the cited formulation:
-- `False`: `BitLinear`, `OrthoBlock`, `OrthogonalButterfly`, `CrystalLayer`,
-  `HierarchicalCrystalLayer`, `CrystalMultiHeadProjection` (projection only)
-- `True`: `MPSLayer`, `RFFKernelLayer`, `KANvolution`, `HarmonicDense`,
-  `HierarchicalHarmonicHead`
-
-### `from_config` classmethod
-
-All layers now implement an explicit `from_config` classmethod for reliable
-deserialization. This handles nested initializer/regularizer/constraint dicts
-correctly and is the recommended way to reconstruct a layer from its config.
+- `use_bias` defaults differ. `False`: `BitLinear`, `OrthoBlock`, `OrthogonalButterfly`. `True`: `MPSLayer`, `RFFKernelLayer`, `KANvolution`, and the output projection of `CrystalMultiHeadProjection`. `HarmonicDense`, `HierarchicalHarmonicHead`, `CrystalLayer` and `HierarchicalCrystalLayer` have no bias at all.
+- `BitLinear(units=...)` has no bias unless you pass `use_bias=True`. This differs from `keras.layers.Dense`.
+- `seed` means different things per layer. For `BitLinear` it only seeds stochastic rounding. For `RFFKernelLayer` it seeds only the frozen `omega` and `b`, not the output `Dense`. For the crystal layers it seeds only the geometric frames. For `OrthogonalButterfly` it only changes a string initializer that accepts a seed, so with the default `"zeros"` it has no effect. For `KANvolution`, `MPSLayer`, `HarmonicDense`, `HierarchicalHarmonicHead` and `OrthoBlock` it seeds the kernel initializer when that is given as a string (`OrthoBlock` also seeds its default `OrthogonalHypersphereInitializer`).
+- `MPSLayer` and `KANvolution` give each kernel-fed weight its own clone of `kernel_initializer`. A single seedless initializer instance would replay the same random numbers at every site and tie the weights together.
+- `MPSLayer.call` loops over `input_dim` in Python, so the traced graph grows with the input width.
+- `KANvolution` needs 4D channels-last input. Its basis tensor is `(batch, out_h, out_w, kh*kw*channels, grid_size + 1)`, so memory grows with `grid_size`. Using `strides > 1` together with `dilation_rate > 1` raises `ValueError` at construction.
+- `OrthogonalButterfly` raises `ValueError` if the last dimension is not a power of two. It does not pad.
+- `OrthoBlock` with a `relu` or `relu6` activation can permanently close a gate, because the derivative at zero is zero. The constructor logs a warning in that case. `scale_initial_value` defaults to 0.8, not 0.5.
+- `HierarchicalHarmonicHead` with `output_mode="logits"` returns normalized log-probabilities. Do not feed them to a `from_logits=True` loss. `reassign()` runs eagerly in NumPy and must be called between epochs or from a callback, never inside the graph. Its exact forward is not faster than a flat head at 10,000 classes; the benefit is the learned taxonomy and the `beam_call` retrieval path.
+- Crystal frames: a frame wider than `input_dim + 1` is a packed spherical code. All columns are distinct (except at `input_dim=1`), but minimum angular separation shrinks with width, and antipodal pairs (`cos` near -1) are not penalized by the packing search. Measured: `dimensions=2, width=64, seed=0` holds a pair at `cos = -1.0000`.
+- `HierarchicalCrystalLayer(cluster_spread=0)` is legal but makes every leaf in a group identical to its centroid, so within-group logits are equal. `cluster_spread=1` can produce an all-zero leaf column. Use a strictly positive spread other than 1 if leaves must discriminate.
+- `CrystalLayer` and `CrystalMultiHeadProjection` raise `ValueError` in `call` if the input width differs from the width they were built with.
+- Crystal frames are computed inside weight initializers, not assigned after `add_weight`, because a `StatelessScope` build discards out-of-initializer assignments. `KANvolution`'s `grid` and `RFFKernelLayer`'s `omega`/`b` use the same pattern.
+- Ten of the eleven layers compute `compute_output_shape` through `dl_techniques.utils.tensors.canonical_binary_input_shape`, which tolerates a list-wrapped single shape such as `[[None, 8]]`. `KANvolution` does not; it requires a 4-element shape.
+- References: Wang et al. 2024 (BitNet); Stoudenmire and Schwab 2016, Novikov et al. 2015 (tensor trains); Rahimi and Recht 2007 (random features); Liu et al. 2024 and Bodner et al. 2024 (KAN, convolutional KAN); Baek et al. 2025 (harmonic loss); Papyan, Han and Donoho 2020 (neural collapse); Strohmer and Heath 2003 (Grassmannian frames).

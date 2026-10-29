@@ -1,474 +1,127 @@
-# Normalization Module
+# norms
 
-The `dl_techniques.layers.norms` module provides a comprehensive collection of normalization mechanisms for deep learning, with a unified factory interface for consistent layer creation, configuration management, and parameter validation.
+A package of 17 Keras 3 layer classes (16 normalization layers plus `PolarWeightNorm`, a weight reparameterization), and a factory that builds 19 named normalization types from a string key. Of the 19 keys, 2 are stock Keras layers and 17 are this package's classes. Those 17 keys map to 16 distinct classes, because `dml_plus_focal` and `dml_plus_center` both build `DMLPlus`. It lives at `src/dl_techniques/layers/norms/` in the `dl_techniques` library.
 
-## Overview
+## What it is for
 
-This module includes nineteen different normalization layer types, ranging from standard Keras layers to specialized variants for stability, efficiency, and advanced modeling like out-of-distribution detection. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these normalization mechanisms into your models.
+Deep networks train better when the size of the numbers flowing through them is controlled. A normalization layer does that. Different models want different versions: transformers like RMS-based ones, classifiers want their output scores bounded, out-of-distribution (OOD) detectors want direction and length of the logits kept apart, and bias-free image denoisers need a layer that adds no offset at all.
 
-## Weight Reparameterization (not factory-registered)
+This package holds those variants in one place. The factory lets a config file say `"type": "rms_norm"` instead of hard-coding a class, so a model can swap its normalization without code changes.
 
-In addition to the activation-normalization layers below, this module hosts
-**`PolarWeightNorm`** — a `Dense`-style layer whose trainable parameters are a
-per-unit radius + hierarchical polar angles (a generalization of Weight
-Normalization with exact per-unit weight norm). It reparameterizes *weights*,
-not activations, so it is **not** part of the `create_normalization_layer`
-factory; import it directly:
+## How it works
 
-```python
-from dl_techniques.layers.norms import PolarWeightNorm, polar_encode, polar_decode
+Most layers follow one recipe: pick the axes to reduce over, compute a statistic (RMS, L2 length, variance), divide the input by it, then apply an optional learnable scale. The families differ in what that last step is.
+
+```mermaid
+flowchart LR
+    A[config: type + kwargs] --> B[create_normalization_from_config]
+    B --> C[create_normalization_layer]
+    C --> D[validate_normalization_config]
+    D --> E[fill in epsilon=1e-6 if the type takes one]
+    E --> F[layer instance]
 ```
 
-See the `PolarWeightNorm` module docstring in `polar_weight_norm.py` for the full design, guarantees, and usage.
+Families:
 
-## Available Normalization Types
+- **RMS family** (`rms_norm`, `zero_centered_rms_norm`): divide by the root mean square over the axis. The zero-centered version subtracts the mean first.
+- **Band family** (`band_rms`, `zero_centered_band_rms_norm`, `adaptive_band_rms`, `zero_centered_adaptive_band_rms_norm`): RMS-normalize, then multiply by a scale held inside `[1 - max_band_width, 1]`. In `band_rms` and its zero-centered twin the scale is one learned scalar. In the adaptive pair it comes from a small internal `Dense` fed with the log of the input's own RMS.
+- **Logit family** (`logit_norm`, `band_logit_norm`, `max_logit_norm`, `decoupled_max_logit`, `dml_plus_focal`, `dml_plus_center`): L2-normalize logit vectors, for calibration or OOD detection.
+- **Others**: `bias_free_batch_norm` (variance only, no mean, no beta), `global_response_norm` (ConvNeXt V2 GRN), `local_response_norm` (AlexNet LRN), `dynamic_tanh` (`weight * tanh(alpha * x) + bias`, no statistics at all), `energy_layer_norm` (scalar gamma, vector delta).
+- **Standard Keras**: `layer_norm` and `batch_norm` are wrappers over the stock Keras layers, only reachable through the factory.
+- **Not a factory type**: `PolarWeightNorm`, a Dense-style layer whose kernel is stored as a radius per unit plus polar angles. It normalizes weights, not activations.
 
-The following layers are supported by the factory system with automated parameter validation and defaults:
+## Files
 
-| Type | Class | Description | Use Case | Input Shape |
-|------|-------|-------------|----------|-------------|
-| `layer_norm` | `LayerNormalization` | Standard Keras normalization with learnable scale and bias. | General purpose normalization for transformers and deep networks. | Arbitrary |
-| `batch_norm` | `BatchNormalization` | Standard Keras normalization with moving batch statistics. | Convolutional networks and batch-based training. | Arbitrary |
-| `rms_norm` | `RMSNorm` | Root Mean Square normalization without centering for efficiency. | Transformers, especially for faster training and inference. | Arbitrary |
-| `zero_centered_rms_norm`| `ZeroCenteredRMSNorm` | Combines RMSNorm efficiency with LayerNorm's zero-mean stability. | Large language models (LLMs) requiring enhanced training stability. | Arbitrary |
-| `zero_centered_band_rms_norm`| `ZeroCenteredBandRMSNorm` | Adds a learnable band constraint to Zero-Centered RMSNorm. | Advanced LLMs for maximum stability and controlled flexibility. | Arbitrary |
-| `zero_centered_adaptive_band_rms_norm`| `ZeroCenteredAdaptiveBandRMS` | Zero-centered RMS with adaptive (log-RMS dense-projected) per-feature scaling. | Advanced LLMs needing zero-mean stability + input-adaptive flexibility. | Arbitrary rank, but **resolution-locked** when a spatial/sequence axis is normalized (see note) |
-| `band_rms` | `BandRMS` | RMS normalization with a learnable, bounded magnitude constraint. | Imposing "thick spherical shell" constraints for stable training. | Arbitrary |
-| `adaptive_band_rms` | `AdaptiveBandRMS` | Adaptive RMS with scaling based on log-transformed RMS statistics. | Advanced training stability with input-adaptive scaling. | Arbitrary rank, but **resolution-locked** when a spatial/sequence axis is normalized (see note) |
-| `band_logit_norm` | `BandLogitNorm` | L2 normalization with a band-bounded scale. (Known limitation: the "adaptive" component is degenerate — see note in `band_logit_norm.py`; it reduces to a constant scale `1 - 0.5·max_band_width`.) | Classification tasks with constrained logit magnitude. | Arbitrary |
-| `global_response_norm`| `GlobalResponseNormalization` | Global Response Normalization (GRN) from ConvNeXt V2. **Not** a variant of LRN — see the note below. | ConvNeXt-style architectures to enhance inter-channel competition. | 2D, 3D, or 4D tensors |
-| `local_response_norm`| `LocalResponseNormalization` | Local Response Normalization (LRN) from AlexNet 2012: divides each channel by the squared energy of a centred window of *neighbouring channels* (`n = 2*depth_radius+1`). No weights. **Not** a variant of GRN — see the note below. | AlexNet-faithful CNNs, historical research baselines. | 3D or 4D tensors |
-| `logit_norm` | `LogitNorm` | Temperature-scaled L2 normalization for classification logits. | Classification with calibrated confidence estimates. | Arbitrary |
-| `max_logit_norm` | `MaxLogitNorm` | L2 normalization on logits to separate magnitude and direction. | Out-of-distribution (OOD) detection and uncertainty estimation. | Arbitrary |
-| `decoupled_max_logit` | `DecoupledMaxLogit` | Decouples MaxLogit into cosine similarity and L2 norm components. | Advanced OOD detection with component analysis. | Arbitrary |
-| `dml_plus_focal` | `DMLPlus` | DML+ variant returning the MaxCosine component for OOD detection. | Specialized "focal" models in the DML+ framework. | Arbitrary |
-| `dml_plus_center` | `DMLPlus` | DML+ variant returning the MaxNorm component for OOD detection. | Specialized "center" models in the DML+ framework. | Arbitrary |
-| `dynamic_tanh` | `DynamicTanh` | Learnable scaled hyperbolic tangent as a LayerNorm alternative. | Normalization-free transformer architectures. | Arbitrary |
-| `bias_free_batch_norm` | `BiasFreeBatchNorm` | Variance-only, fixed-statistic normalization (no `moving_mean`, no `beta`); degree-1 homogeneous at inference. | Bias-free / homogeneous architectures (e.g. Miyasawa denoisers) requiring `f(a*x) = a*f(x)` at inference. | Arbitrary |
-| `energy_layer_norm` | `EnergyLayerNorm` | Energy Transformer layer norm: **scalar** `gamma` + **vector** `delta`; the output is `dL/dx` of a Lagrangian with a PSD Hessian. | Energy Transformer blocks, where the norm must be the derivative of a Lagrangian for the energy-descent guarantee to hold. | Arbitrary |
+- `__init__.py` - exports 24 names: 17 classes, `polar_encode`, `polar_decode`, the 4 factory functions and the `NormalizationType` alias.
+- `factory.py` - `create_normalization_layer`, `create_normalization_from_config`, `validate_normalization_config`, `get_normalization_info`, the `NormalizationType` literal and the `_TYPE_TO_CLASS` registry.
+- `_masking.py` - `normalizes_only_the_feature_axis`, the helper that decides whether a layer may claim `supports_masking`.
+- `rms_norm.py` - `RMSNorm`.
+- `zero_centered_rms_norm.py` - `ZeroCenteredRMSNorm`.
+- `band_rms.py` - `BandRMS`.
+- `zero_centered_band_rms_norm.py` - `ZeroCenteredBandRMSNorm`.
+- `adaptive_band_rms.py` - `AdaptiveBandRMS`.
+- `zero_centered_adaptive_band_rms_norm.py` - `ZeroCenteredAdaptiveBandRMS`.
+- `band_logit_norm.py` - `BandLogitNorm`.
+- `logit_norm.py` - `LogitNorm`.
+- `max_logit_norm.py` - `MaxLogitNorm`, `DecoupledMaxLogit`, `DMLPlus` (three classes in one file).
+- `bias_free_batch_norm.py` - `BiasFreeBatchNorm`.
+- `global_response_norm.py` - `GlobalResponseNormalization`.
+- `local_response_norm.py` - `LocalResponseNormalization` and its private band-matrix initializer.
+- `dynamic_tanh.py` - `DynamicTanh`.
+- `energy_layer_norm.py` - `EnergyLayerNorm`.
+- `polar_weight_norm.py` - `PolarWeightNorm`, `polar_encode`, `polar_decode`.
 
-## LRN vs GRN — two different "response normalizations"
+## How to use it
 
-Both names are close and the algorithms are unrelated. Confusing them is easy and
-silently changes the network, so the difference is stated here rather than left to
-whichever docstring you happen to read first.
-
-| | `LocalResponseNormalization` (LRN) | `GlobalResponseNormalization` (GRN) |
-|---|---|---|
-| Paper | Krizhevsky et al. 2012 (AlexNet) | Liu et al. 2022 (ConvNeXt V2) |
-| Neighbourhood | **local**, across *channels* | **global*, over all spatial positions |
-| Operation | **divides** by a denominator | **multiplies** by a score, then adds the input back |
-| Formula | `X_c / (k + alpha * sum_{j=c-r}^{c+r} X_j^2)^beta` | `X + gamma * (X * norm_c / mean(norm)) + beta` |
-| Weights | none — `alpha`, `beta`, `k`, `depth_radius` are fixed | trainable `gamma` and `beta` |
-| Rank support | 3 or 4 | 2, 3 or 4 |
-| Still current practice | no — superseded by BatchNorm | yes |
+Through the factory:
 
 ```python
-from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.layers.norms import (
+    create_normalization_layer,
+    create_normalization_from_config,
+)
 
-lrn = create_normalization_layer('local_response_norm', depth_radius=2,
-                                alpha=1e-4, beta=0.75, k=1.0)
-```
+rms = create_normalization_layer('rms_norm', epsilon=1e-8, use_scale=True)
 
-Note the factory's `epsilon` argument does **not** apply here. LRN's stabilizing
-constant is `k`, named after the paper, so there is no `epsilon` in its signature
-and nothing for the factory to bind. (`tf.nn.local_response_normalization` spells
-that same constant `bias`; there is no separate `bias` argument here, so a caller
-cannot set two constants into the one slot.)
-
-## Factory Interface
-
-### Basic Usage
-
-```python
-from dl_techniques.layers.norms import create_normalization_layer
-
-# Create a standard layer normalization
-layer_norm = create_normalization_layer('layer_norm', name='my_norm')
-
-# Create RMS normalization with custom epsilon and scaling enabled
-rms_norm = create_normalization_layer('rms_norm', epsilon=1e-8, use_scale=True)
-
-# Create Zero-Centered Band RMS for maximum stability and control
-zc_band_rms = create_normalization_layer(
-    'zero_centered_band_rms_norm',
-    max_band_width=0.1,
-    epsilon=1e-6
+band = create_normalization_from_config(
+    {'type': 'band_rms', 'max_band_width': 0.2, 'epsilon': 1e-7}
 )
 ```
 
-### Configuration-Based Creation
+Directly, when the type is fixed:
 
 ```python
-from dl_techniques.layers.norms import create_normalization_from_config
+import keras
+from dl_techniques.layers.norms import RMSNorm, PolarWeightNorm
 
-config = {
-    'type': 'zero_centered_rms_norm',
-    'epsilon': 1e-5,
-    'use_scale': True,
-    'axis': -1,
-    'name': 'llm_norm_block_1'
-}
-
-zc_rms_layer = create_normalization_from_config(config)
+y = RMSNorm(axis=-1)(keras.random.normal((4, 16, 64)))
+z = PolarWeightNorm(4, activation="relu")(keras.random.normal((8, 7)))
 ```
 
-### Parameter Discovery
-
-```python
-from dl_techniques.layers.norms import get_normalization_info
-
-# Get information about all normalization types
-info = get_normalization_info()
-
-# Print details for a specific type
-zc_band_rms_info = info['zero_centered_band_rms_norm']
-print(f"Description: {zc_band_rms_info['description']}")
-print(f"Parameters: {zc_band_rms_info['parameters']}")
-```
-
-### Validation
+Check what a type accepts before building:
 
 ```python
 from dl_techniques.layers.norms import validate_normalization_config
 
-# Validate configuration before creation
-try:
-    validate_normalization_config(
-        'band_rms',
-        axis=-1,
-        max_band_width=0.1,
-        epsilon=1e-5
-    )
-    print("Configuration is valid")
-except ValueError as e:
-    print(f"Validation error: {e}")
+validate_normalization_config('band_rms', axis=-1, max_band_width=0.1)  # returns True, or raises ValueError
 ```
 
-## Layer-Specific Parameters
+Registered factory keys: `layer_norm`, `batch_norm`, `bias_free_batch_norm`, `rms_norm`, `zero_centered_rms_norm`, `zero_centered_band_rms_norm`, `zero_centered_adaptive_band_rms_norm`, `band_rms`, `adaptive_band_rms`, `band_logit_norm`, `global_response_norm`, `local_response_norm`, `logit_norm`, `max_logit_norm`, `decoupled_max_logit`, `dml_plus_focal`, `dml_plus_center`, `dynamic_tanh`, `energy_layer_norm`.
 
-### `layer_norm`
-**Optional:** `axis` (default: -1), `epsilon` (default: 1e-3), `center` (default: True), `scale` (default: True)
-```python
-norm = create_normalization_layer(
-    'layer_norm',
-    epsilon=1e-5,
-    axis=-1
-)
-```
+Constructor defaults worth knowing (class defaults, not factory defaults):
 
-### `batch_norm`
-**Optional:** `axis` (default: -1), `momentum` (default: 0.99), `epsilon` (default: 1e-3), `center` (default: True), `scale` (default: True)
-```python
-norm = create_normalization_layer(
-    'batch_norm',
-    momentum=0.9,
-    axis=-1
-)
-```
+| Class | Key defaults |
+| --- | --- |
+| `RMSNorm`, `ZeroCenteredRMSNorm` | `axis=-1`, `epsilon=1e-6`, `use_scale=True`, `scale_initializer="ones"` |
+| `BandRMS`, `ZeroCenteredBandRMSNorm` | `max_band_width=0.1`, `epsilon=1e-7`, `band_initializer="zeros"`, `band_regularizer` falls back to L2(1e-5) |
+| `AdaptiveBandRMS`, `ZeroCenteredAdaptiveBandRMS` | same as above, but `band_regularizer=None` stays None |
+| `BandLogitNorm` | `max_band_width=0.01`, `epsilon=1e-7` |
+| `LogitNorm` | `temperature=0.04`, `epsilon=1e-7` |
+| `MaxLogitNorm`, `DecoupledMaxLogit` | `epsilon=1e-7`; `DecoupledMaxLogit` also `constant=1.0` |
+| `DMLPlus` | `model_type` required (`"focal"` or `"center"`), `epsilon=1e-7` |
+| `BiasFreeBatchNorm` | `epsilon=1e-6`, `momentum=0.99`, `use_scale=True` |
+| `GlobalResponseNormalization` | `eps=1e-6`, `gamma_initializer='ones'`, `beta_initializer='zeros'`, `use_beta=True` |
+| `LocalResponseNormalization` | `depth_radius=2`, `alpha=1e-4`, `beta=0.75`, `k=1.0` |
+| `DynamicTanh` | `alpha_init_value=0.5`, `kernel_initializer='ones'`, `bias_initializer='zeros'` |
+| `EnergyLayerNorm` | `epsilon=1e-5`, `gamma_constraint` defaults to a floor of 1e-3 |
+| `PolarWeightNorm` | `units` required, `kernel_initializer="glorot_uniform"`, `epsilon=1e-12` |
 
-### `rms_norm`
-**Optional:** `axis` (default: -1), `epsilon` (default: 1e-6), `use_scale` (default: True), `scale_initializer` (default: 'ones')
-```python
-norm = create_normalization_layer(
-    'rms_norm',
-    epsilon=1e-5,
-    use_scale=True
-)
-```
+## Things to know
 
-### `zero_centered_rms_norm`
-**Optional:** `axis` (default: -1), `epsilon` (default: 1e-6), `use_scale` (default: True), `scale_initializer` (default: 'ones')
-```python
-norm = create_normalization_layer(
-    'zero_centered_rms_norm',
-    epsilon=1e-5,
-    use_scale=True
-)
-```
-
-### `zero_centered_band_rms_norm`
-**Optional:** `max_band_width` (default: 0.1), `axis` (default: -1), `epsilon` (default: 1e-7), `band_initializer` (default: 'zeros'), `band_regularizer` (default: L2(1e-5))
-```python
-norm = create_normalization_layer(
-    'zero_centered_band_rms_norm',
-    max_band_width=0.08,
-    epsilon=1e-6
-)
-```
-
-### `zero_centered_adaptive_band_rms_norm`
-**Optional:** `max_band_width` (default: 0.1), `axis` (default: -1), `epsilon` (default: 1e-7), `band_initializer` (default: 'zeros'), `band_regularizer` (default: None)
-
-Combines zero-centering (mean subtraction along the normalization axis) with
-adaptive per-feature scaling. The scaling factor is computed by passing the
-log of the aggregated RMS through a small dense projection followed by a
-sigmoid, producing an input-adaptive "thick spherical shell" constraint
-in the zero-mean RMS-normalized space.
-
-```python
-norm = create_normalization_layer(
-    'zero_centered_adaptive_band_rms_norm',
-    max_band_width=0.1,
-    axis=-1
-)
-```
-
-> **Note (resolution lock):** the internal `Dense` is sized in `build()` from the **product of the
-> sizes at the normalized axes**, so any normalized axis whose size varies between calls locks the
-> layer to its build-time value. Measured: `axis=(1, 2)` built on `(None, 8, 8, 3)` gives
-> `Dense(units=64)`, and calling that built layer on `(2, 16, 16, 3)` raises
-> `InvalidArgumentError: Incompatible shapes: [2,16,16,3] vs. [2,8,8,1] [Op:Mul]`. Two configurations
-> are NOT locked and accept any resolution: the default `axis=-1` (`units` = the channel count, which
-> does not vary), and the global case where every non-batch axis is normalized (e.g. `axis=(1, 2, 3)`
-> on a rank-4 input), which yields a single broadcasting parameter (`units=1`). Use one of those for
-> a fully-convolutional model; `axis=(1, 2)` is only safe at a fixed input resolution.
-
-### `band_rms`
-**Optional:** `max_band_width` (default: 0.1), `axis` (default: -1), `epsilon` (default: 1e-7), `band_initializer` (default: 'zeros'), `band_regularizer` (default: L2(1e-5))
-```python
-norm = create_normalization_layer(
-    'band_rms',
-    max_band_width=0.2,
-    band_initializer='ones'
-)
-```
-
-### `adaptive_band_rms`
-**Optional:** `max_band_width` (default: 0.1), `axis` (default: -1), `epsilon` (default: 1e-7), `band_initializer` (default: 'zeros'), `band_regularizer` (default: None)
-```python
-norm = create_normalization_layer(
-    'adaptive_band_rms',
-    max_band_width=0.15,
-    axis=(1, 2) # Spatial normalization
-)
-```
-
-> **Note (resolution lock):** the internal `Dense` is sized in `build()` from the **product of the
-> sizes at the normalized axes**, so any normalized axis whose size varies between calls locks the
-> layer to its build-time value. Measured: `axis=(1, 2)` built on `(None, 8, 8, 3)` gives
-> `Dense(units=64)`, and calling that built layer on `(2, 16, 16, 3)` raises
-> `InvalidArgumentError: Incompatible shapes: [2,16,16,3] vs. [2,8,8,1] [Op:Mul]`. Two configurations
-> are NOT locked and accept any resolution: the default `axis=-1` (`units` = the channel count, which
-> does not vary), and the global case where every non-batch axis is normalized (e.g. `axis=(1, 2, 3)`
-> on a rank-4 input), which yields a single broadcasting parameter (`units=1`). Use one of those for
-> a fully-convolutional model; `axis=(1, 2)` is only safe at a fixed input resolution.
-
-> The `axis=(1, 2)` example above is exactly the locked case: that layer accepts `8x8` inputs only
-> once it has been built on an `8x8` input.
-
-### `band_logit_norm`
-**Optional:** `max_band_width` (default: 0.01), `axis` (default: -1), `epsilon` (default: 1e-7)
-
-> **Note:** the internal `LayerNormalization` is applied to the per-sample L2-norm
-> tensor of shape `(..., 1)`, which normalizes a single-element axis to 0. The band
-> scale therefore collapses to the constant `1 - 0.5·max_band_width`; the layer
-> behaves as L2-normalization × a fixed band-floor. Retained as-is for backward
-> compatibility.
-
-```python
-norm = create_normalization_layer(
-    'band_logit_norm',
-    max_band_width=0.05
-)
-```
-
-### `global_response_norm`
-**Optional:** `eps` (default: 1e-6), `gamma_initializer` (default: 'ones'), `beta_initializer` (default: 'zeros'), `gamma_regularizer`, `beta_regularizer`, `activity_regularizer`, `use_beta` (default: `True`)
-
-> **Note (`use_beta`):** `use_beta=False` creates no `beta` weight at all (`layer.beta is None`) and drops the additive term, giving `Y = X + γ * (X ⊙ norm')`. The default `True` keeps existing ConvNeXt V2 checkpoints byte-identical.
-
-> **Note (gamma init):** this layer defaults `gamma_initializer='ones'`. The ConvNeXt V2
-> paper initializes gamma=0 (and beta=0) so GRN is an identity at init. To reproduce the
-> paper's identity-at-init behavior, pass `gamma_initializer='zeros'` explicitly.
-```python
-# Note: factory maps `epsilon` to `eps` if `eps` is not provided
-norm = create_normalization_layer(
-    'global_response_norm',
-    eps=1e-5 
-)
-```
-
-### `logit_norm`
-**Optional:** `temperature` (default: 0.04), `axis` (default: -1), `epsilon` (default: 1e-7)
-```python
-norm = create_normalization_layer(
-    'logit_norm',
-    temperature=0.1
-)
-```
-
-### `max_logit_norm`
-**Optional:** `axis` (default: -1), `epsilon` (default: 1e-7)
-```python
-norm = create_normalization_layer('max_logit_norm')
-```
-
-### `decoupled_max_logit`
-**Optional:** `constant` (default: 1.0), `axis` (default: -1), `epsilon` (default: 1e-7)
-```python
-norm = create_normalization_layer(
-    'decoupled_max_logit',
-    constant=0.8
-)
-```
-
-### `dml_plus_focal` / `dml_plus_center`
-These types create a `DMLPlus` layer with `model_type` set to `'focal'` or `'center'`.
-**Optional:** `axis` (default: -1), `epsilon` (default: 1e-7)
-```python
-# Focal model variant
-focal_norm = create_normalization_layer('dml_plus_focal')
-
-# Center model variant
-center_norm = create_normalization_layer('dml_plus_center')
-```
-> **Note (these three keys break the shape-preserving contract):** all three reduce the
-> normalized axis away, and two of them return a tuple rather than one tensor. Measured on a
-> `(3, 5, 8)` input at the default `axis=-1`:
->
-> | Key | `call()` returns | Elements | Shapes |
-> |-----|------------------|----------|--------|
-> | `decoupled_max_logit` | a **3-tuple** | `(combined score, MaxCosine, MaxNorm)` | `(3, 5)`, `(3, 5)`, `(3, 5)` |
-> | `dml_plus_center` | a **2-tuple** | `(MaxNorm score, norm factor)` | `(3, 5)`, `(3, 5, 1)` |
-> | `dml_plus_focal` | a **single tensor** (no tuple) | the MaxCosine score | `(3, 5)` |
->
-> The norm factor of `dml_plus_center` keeps the reduced axis (`keepdims=True`); every other
-> element drops it. Generic code that expects exactly one same-shaped tensor back from any
-> normalization layer must special-case these three keys — see the `:return:` carve-out on
-> `create_normalization_layer`.
-
-### `dynamic_tanh`
-**Optional:** `axis` (default: -1), `alpha_init_value` (default: 0.5), `kernel_initializer` (default: 'ones'), `bias_initializer` (default: 'zeros'), `kernel_regularizer`, `bias_regularizer`, `kernel_constraint`, `bias_constraint`
-```python
-norm = create_normalization_layer(
-    'dynamic_tanh',
-    alpha_init_value=0.7 # Recommended for attention
-)
-```
-
-### `bias_free_batch_norm`
-**Optional:** `axis` (default: -1), `epsilon` (default: 1e-3), `momentum` (default: 0.99), `use_scale` (default: True)
-```python
-norm = create_normalization_layer(
-    'bias_free_batch_norm',
-    momentum=0.9
-)
-```
-> Variance-only: it has no `moving_mean` and no `beta`, so at inference `f(a*x) = a*f(x)` for `a > 0`. This is
-> what keeps a bias-free denoiser's `residual = sigma^2 * score` (Miyasawa) identity intact.
-
-### `energy_layer_norm`
-**Optional:** `epsilon` (default: 1e-5), `gamma_initializer` (default: 'ones'), `delta_initializer` (default: 'zeros')
-```python
-norm = create_normalization_layer(
-    'energy_layer_norm',
-    epsilon=1e-5
-)
-```
-> **`gamma` is a SCALAR and `delta` is a VECTOR of dim `D`** — that parameterization (not the usual vector
-> `gamma`) is the entire reason this is a separate layer. The output `g = gamma * (x - mean) / sqrt(var + eps) + delta`
-> is exactly `dL/dx` of the Lagrangian `L = D * gamma * sqrt(var + eps) + sum_j delta_j * x_j`, whose Hessian is
-> PSD for `gamma > 0`. That PSD Hessian is what makes the Energy Transformer's energy descent provable, so
-> **do not "fix" `gamma` into a per-feature vector.** Paper: [arXiv:2302.07253](https://arxiv.org/abs/2302.07253),
-> eq. 1-2. Consumed by `dl_techniques.layers.transformers.energy_transformer.EnergyTransformer`.
-
-## Direct Layer Instantiation
-
-While the factory is recommended for consistency and safety, direct instantiation is always available.
-
-```python
-from dl_techniques.layers.norms import RMSNorm, ZeroCenteredBandRMSNorm, GlobalResponseNormalization
-
-# Direct instantiation (bypasses factory validation and defaults)
-rms_norm = RMSNorm(epsilon=1e-5, use_scale=True)
-zc_band_rms = ZeroCenteredBandRMSNorm(max_band_width=0.1)
-grn = GlobalResponseNormalization(eps=1e-6)
-```
-
-## Integration Patterns
-
-### In a Custom Transformer Block
-
-```python
-import keras
-from dl_techniques.layers.norms import create_normalization_layer
-from dl_techniques.utils.keras_registration import register_dl_technique
-
-# The package string is the defining module's dotted path -- `my_project.<module>` for your
-# own code, `dl_techniques.<module.path>` for code inside this repo. Never a bare
-# `@keras.saving.register_keras_serializable()`: its `Custom>ClassName` key carries no module
-# path, so two same-named classes claim one slot and the last import wins.
-@register_dl_technique("my_project.transformer_block")
-class TransformerBlock(keras.layers.Layer):
-    def __init__(self, normalization_type='zero_centered_rms_norm', **norm_kwargs):
-        super().__init__()
-        self.normalization_type = normalization_type
-        self.norm_kwargs = norm_kwargs
-        
-        # Create normalization layers using the factory for enhanced stability
-        self.attention_norm = create_normalization_layer(
-            self.normalization_type, name='attention_norm', **self.norm_kwargs
-        )
-        self.ffn_norm = create_normalization_layer(
-            self.normalization_type, name='ffn_norm', **self.norm_kwargs
-        )
-        # ... other layers like Attention, FFN
-    
-    def call(self, inputs):
-        # Pre-normalization pattern
-        norm_inputs = self.attention_norm(inputs)
-        # attn_out = self.attention(norm_inputs, norm_inputs)
-        # ... rest of the block
-        return inputs # Placeholder
-```
-
-### In Model Builders with Configuration Files
-
-```python
-import json
-from dl_techniques.layers.norms import create_normalization_from_config
-
-# Load configuration from file
-with open('model_config.json', 'r') as f:
-    config = json.load(f)
-
-# Create normalization layer from the 'normalization' section of the config
-# config['normalization'] = {'type': 'zero_centered_band_rms_norm', 'max_band_width': 0.1}
-norm_layer = create_normalization_from_config(config['normalization'])
-```
-
-## Parameter Validation
-
-The factory performs comprehensive validation on layer creation.
-
-**Unknown Normalization Type:**
-```python
-# Raises ValueError: "Unknown normalization type: 'vanilla_norm'"
-create_normalization_layer('vanilla_norm')
-```
-
-**Invalid Value Ranges:**
-```python
-# Raises ValueError: "max_band_width must be between 0 and 1, got 1.5"
-create_normalization_layer('band_rms', max_band_width=1.5)
-
-# Raises ValueError: "epsilon must be positive, got -1e-06"
-create_normalization_layer('rms_norm', epsilon=-1e-6)
-```
-
-**Invalid Parameters for a Type:**
-```python
-# Raises ValueError: "Invalid parameters for dynamic_tanh: {'epsilon'}"
-# DynamicTanh does not use the epsilon parameter.
-validate_normalization_config('dynamic_tanh', epsilon=1e-6)
-```
-
-## API Reference
-
-### Functions
-
--   **`create_normalization_layer(normalization_type, name=None, epsilon=1e-6, **kwargs)`**: Factory for creating normalization layers with validation.
--   **`create_normalization_from_config(config)`**: Creates a layer from a configuration dictionary.
--   **`validate_normalization_config(normalization_type, **kwargs)`**: Validates parameters before creation, raising a `ValueError` on failure.
--   **`get_normalization_info()`**: Returns a dictionary with details about all available normalization types, including their descriptions, parameters, and use cases.
+- **The factory is not a drop-in for direct construction.** It sets `epsilon=1e-6` on every type that takes one, unless you pass `epsilon` yourself. For `global_response_norm` the value goes to `eps`, and an explicit `eps` wins. For Keras `layer_norm` and `batch_norm` the Keras default is `1e-3`, so the factory divides epsilon by 1000. `energy_layer_norm` goes from `1e-5` to `1e-6`. The band, `band_logit_norm`, `logit_norm`, `max_logit_norm` and `decoupled_max_logit` types go from `1e-7` to `1e-6`. Build the class directly if you want its own default.
+- **`epsilon` is ignored for two types.** `local_response_norm` has no epsilon (its constant is `k`), and `dynamic_tanh` has none either. The factory takes `epsilon` as a named argument and simply does not forward it for those two, without an error.
+- **Three factory types do not preserve shape.** They reduce the normalized axis away. On a `(3, 5, 8)` input at `axis=-1`: `decoupled_max_logit` returns a 3-tuple `(combined score, MaxCosine, MaxNorm)` of `(3, 5)` tensors; `dml_plus_center` returns a 2-tuple `(MaxNorm, norm factor)` shaped `(3, 5)` and `(3, 5, 1)`; `dml_plus_focal` returns one `(3, 5)` tensor. `max_logit_norm` does keep its shape.
+- **The factory rejects unknown kwargs.** The accepted set for each type is read from the target class's `__init__` signature plus `name`, `epsilon`, and the Keras base kwargs (`dtype`, `trainable`, `activity_regularizer`, `autocast`). `get_normalization_info()[t]['parameters']` is only a curated hint list, not the full set.
+- **`model_type` cannot be passed to `dml_plus_focal` or `dml_plus_center`.** The factory sets it, and the validator raises if you try.
+- **GRN and LRN are different algorithms.** GRN (`global_response_norm`) scores each channel over all spatial positions, multiplies the input by that score and adds the input back; it has trainable `gamma` and `beta`. LRN (`local_response_norm`) divides each channel by the squared energy of neighbouring channels, and has no trainable weights. LRN accepts rank 3 or 4 only; GRN accepts rank 2, 3 or 4.
+- **GRN gamma starts at ones.** The ConvNeXt V2 paper starts it at zero (identity at init). Pass `gamma_initializer='zeros'` to match the paper.
+- **Masking depends on the axis.** Seven classes import `_masking` and claim `supports_masking` only when the normalized axis is the feature axis (the last one): `rms_norm`, `zero_centered_rms_norm`, `band_rms`, `zero_centered_band_rms_norm`, `band_logit_norm`, `logit_norm` and `max_logit_norm`. `DynamicTanh` and `EnergyLayerNorm` always claim it. The two adaptive band types (`adaptive_band_rms`, `zero_centered_adaptive_band_rms_norm`), `bias_free_batch_norm`, GRN, LRN, `decoupled_max_logit` and `dml_plus` do not claim it at all.
+- **Adaptive band layers lock to a resolution** when a spatial or sequence axis is normalized. The internal `Dense` is sized at build time from the product of the normalized axis sizes. `axis=(1, 2)` built on 8x8 input fails on 16x16. The default `axis=-1` and the all-non-batch-axes case do not lock. Axis 0 is rejected.
+- **`BandLogitNorm`'s adaptive part is inert.** Its inner `LayerNormalization` runs on a length-1 axis and always yields 0, so the scale is the constant `1 - 0.5 * max_band_width`. It is L2 normalization times a constant. It is kept as is because `src/train/rms_variants_train/` uses it.
+- **`BiasFreeBatchNorm` is homogeneous only at inference.** `f(a*x) = a*f(x)` holds with `training=False`. In training mode it uses batch variance and is scale-invariant instead. It has `running_var` and optional `gamma`, and no `moving_mean` or `beta`.
+- **`DynamicTanh` rejects `alpha_init_value <= 0`.** A saved model whose config holds a non-positive value no longer loads.
+- **`EnergyLayerNorm` keeps `gamma` a scalar on purpose.** Its output is the gradient of a Lagrangian with a positive semi-definite Hessian, which the Energy Transformer's energy-descent guarantee needs. A per-feature gamma breaks that. `gamma` is constrained to `>= 1e-3` by default; pass `gamma_constraint=None` to turn it off.
+- **`PolarWeightNorm` is not shape-preserving or a factory type.** It maps `(..., fan_in)` to `(..., units)`, rebuilds its kernel on every forward pass, and runs the forward pass in float32. Build it by calling it once eagerly (or via `keras.Input`) before wrapping it in `tf.function`, because `build()` uses NumPy.
+- **`LocalResponseNormalization` holds one non-trainable weight**, `neighbourhood_band`, shape `(C, C)`, built from `depth_radius`.
+- **Statistics dtype.** The RMS family, `bias_free_batch_norm` and `energy_layer_norm` compute their statistics in float32 at minimum (float64 under a float64 policy) and cast back to the input dtype.
+- Tests are in `tests/test_layers/test_norms/`.
