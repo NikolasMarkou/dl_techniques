@@ -478,29 +478,4 @@ backbone = CliffordNet.from_variant("nano", include_top=False)
 features = backbone(images)
 ```
 
-### CliffordCLIP (Vision-Language)
-
-```python
-from dl_techniques.models.vision_language.clifford_clip.model import CliffordCLIP
-
-model = CliffordCLIP.from_variant(
-    "small", vocab_size=50257, image_size=112, context_length=64,
-)
-out = model({"image": images, "text": tokens})
-# out keys: image_features, text_features, logits_per_image,
-#           logits_per_text, logit_scale
-# Default head_kind="learned_query_residual" -- Clifford-aware end-to-end
-```
-
-### Training
-
-No public pretrained weights are distributed for any model in this family. The
-training and inference entry points are:
-
-| Task | Script |
-|:-----|:-------|
-| CIFAR-10/100 classification | `src/train/cliffordnet/train_cliffordnet.py` |
-| CLIP contrastive pre-training | `src/train/cliffordnet/train_clip.py` |
-| Downsampling-variant ablation | `src/train/cliffordnet/train_downsampling_techniques.py` |
-
 See `src/train/cliffordnet/README.md` for the full protocol, flags and results.
