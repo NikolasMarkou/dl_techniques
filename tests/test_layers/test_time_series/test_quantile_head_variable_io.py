@@ -678,6 +678,27 @@ def test_quantile_head_with_activity_regularizer(small_sample_inputs: tf.Tensor)
     assert len(head.losses) > 0
 
 
+def test_quantile_head_charges_the_activity_regularizer_once(
+        small_sample_inputs: tf.Tensor,
+) -> None:
+    """Keras applies ``activity_regularizer`` to the layer output itself, so the
+    inner Dense must not carry a second copy."""
+    head = QuantileSequenceHead(
+        num_quantiles=3,
+        activity_regularizer=keras.regularizers.L1(1.0),
+    )
+
+    outputs = head(small_sample_inputs, training=False)
+
+    assert len(head.projection.losses) == 0
+    assert len(head.losses) == 1, [float(l) for l in head.losses]
+    np.testing.assert_allclose(
+        float(head.losses[0]),
+        float(keras.ops.sum(keras.ops.abs(outputs))),
+        rtol=1e-5,
+    )
+
+
 # Constraint tests
 def test_quantile_head_with_kernel_constraint(small_sample_inputs: tf.Tensor) -> None:
     """Test QuantileSequenceHead with kernel constraints."""

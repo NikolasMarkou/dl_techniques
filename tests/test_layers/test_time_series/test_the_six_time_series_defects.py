@@ -97,6 +97,30 @@ def test_the_gate_declares_the_forecast_shape():
     )
 
 
+def test_the_compliant_model_survives_a_keras_round_trip(tmp_path):
+    """The gate's ``build`` used to take the single saved shape for a list of
+    shapes and read ``shape[0]`` of ``None`` on load."""
+    model = create_manokhin_compliant_model(input_shape=(24, 3), forecast_length=8)
+    x = _f32(5, 24, 3, seed=11)
+    before = model.predict(x, verbose=0)
+
+    path = str(tmp_path / "manokhin.keras")
+    model.save(path)
+    reloaded = keras.saving.load_model(path)
+    after = reloaded.predict(x, verbose=0)
+
+    assert len(before) == len(after)
+    for expected, actual in zip(before, after):
+        np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
+
+
+def test_the_gate_builds_from_a_single_shape_and_from_a_list_of_shapes():
+    for shape in ((None, 24, 3), [None, 24, 3], [(None, 24, 3), (None, 8, 3), (None, 8, 3)]):
+        gate = ForecastabilityGate(hidden_units=8)
+        gate.build(shape)
+        assert gate.built
+
+
 def test_the_gate_still_loads_a_config_written_before_forecast_length_existed():
     """
     Backward-compat control for the D-1 fix.

@@ -146,9 +146,10 @@ class QuantileSequenceHead(keras.layers.Layer):
             # y.shape == (8, 48, 3)
 
     Note:
-        The regularizers and constraints are handed to the inner Dense
-        layer. ``activity_regularizer`` is therefore applied to the Dense
-        output, before the monotonicity step, not to the returned tensor.
+        The kernel and bias regularizers and constraints are handed to the
+        inner Dense layer. ``activity_regularizer`` is not: Keras applies it
+        once, to the tensor this layer returns (after dropout and the
+        monotonicity step).
     """
 
     def __init__(
@@ -196,7 +197,6 @@ class QuantileSequenceHead(keras.layers.Layer):
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
-            activity_regularizer=self.activity_regularizer,
             kernel_constraint=self.kernel_constraint,
             bias_constraint=self.bias_constraint,
             name="quantile_projection"

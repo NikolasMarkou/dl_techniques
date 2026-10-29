@@ -331,8 +331,15 @@ class ForecastabilityGate(layers.Layer):
             call shapes, in which case the first is used.
         :type input_shape: tuple or list
         """
-        # Handle multiple input shapes (inputs, deep_forecast, naive_forecast)
-        if isinstance(input_shape, list):
+        # Handle multiple input shapes (inputs, deep_forecast, naive_forecast).
+        # A list of shapes has shapes for elements; a single shape that was
+        # round-tripped through JSON is a list of ints and None, and must not
+        # be mistaken for one.
+        if (
+            isinstance(input_shape, (list, tuple))
+            and input_shape
+            and isinstance(input_shape[0], (list, tuple))
+        ):
             input_shape = input_shape[0]
 
         # Build the analyzer with flattened input shape
@@ -567,19 +574,6 @@ def create_manokhin_compliant_model(
         with ``input_shape=(24, 3)`` and ``forecast_length=8``:
         ``model.outputs[0]`` reports ``(None, 8, 3)`` and ``predict`` on 5
         samples returns ``(5, 8, 3)``.
-
-    Note:
-        The returned model does not currently survive a ``.keras`` save/load
-        round-trip. ``model.save(path)`` succeeds, but ``keras.saving.
-        load_model(path)`` raises ``TypeError: <class 'keras.src.models.
-        functional.Functional'> could not be deserialized properly ... Exception
-        encountered: 'NoneType' object is not subscriptable``, because the saved
-        Functional config comes back empty (``'config': {}``,
-        ``'build_config': {'input_shape': None}``). This is not caused by the
-        gate's ``forecast_length`` argument: the same graph rebuilt with the
-        gate constructed WITHOUT ``forecast_length`` fails identically, so the
-        defect predates it. Persist weights instead — ``model.save_weights`` /
-        ``model.load_weights`` onto a freshly built model — until it is fixed.
     """
     # Input
     inputs = keras.Input(shape=input_shape, name='input')
