@@ -75,6 +75,7 @@ schedule = keras.optimizers.schedules.CosineDecay(
 dropout = ScheduledDropout(schedule, seed=42)
 
 x = keras.ops.ones((4, 16, 64))
+x = dropout(x, training=True)        # the rate follows the schedule
 branch = LayerScale(multiplier_type="CHANNEL")(x)
 branch = StochasticDepth(drop_path_rate=0.1)(branch, training=True)
 
@@ -88,6 +89,7 @@ Spatial smoothness tap on a tensor whose last axis has 784 units:
 from dl_techniques.layers.regularization.spatial_smoothness import SpatialSmoothness
 from dl_techniques.layers.regularization.gaussian_readout import GaussianReadout
 
+acts = keras.random.normal((8, 784))   # (batch, units)
 tap = SpatialSmoothness(alpha=2.5, radius=5, num_neighborhoods=5, seed=0)
 y = tap(acts, training=True)          # y is acts; the penalty is in tap.losses
 readout = GaussianReadout(fwhm=2.0, unit_spacing=1.0, seed=0)
@@ -101,7 +103,7 @@ Tests live in `tests/test_layers/test_regularization/`. Run them with `.venv/bin
 - `StochasticDepth` and `StochasticGradient` only skip their effect when `training is False` (or the rate is 0). With `training=None` they behave as in training.
 - `ScheduledDropout` counts its own training-mode calls, not optimizer steps. Calling it twice per step, sharing one instance, or running `model(x, training=True)` for Monte Carlo sampling advances the schedule faster than expected. The counter is saved with the model; the random stream position is not.
 - A `ScheduledDropout` schedule that leaves `[0, 1)` is not rejected at construction. Only the call-time clip protects against it.
-- `RouterLayer` computes all three paths on every call (about two transformer applications of cost), so it does not save compute. The router MLP gets no gradient from the task loss, because choosing the action is an argmax. It trains only if you attach a loss to the returned logits or pass `layer_decision`.
+- `RouterLayer` computes all three paths on every call (about two transformer applications of cost), so it does not save compute. The router MLP gets no gradient from the task loss, because choosing the action is an argmax. It trains only if you attach a loss to the returned logits. Passing `layer_decision` does not train it: that argument only forces which path is taken (teacher forcing), in place of the argmax, so a loss on the returned logits is still needed.
 - `RouterLayer.attention_mask` must be multiplicative (1 = keep). An additive mask silently corrupts the routing summary.
 - `RouterLayer` imports `TransformerLayer` from `dl_techniques.layers.transformers.transformer`, and its constructor refuses any other wrapped layer type.
 - `FiLMLayer` needs a static content channel count. `epsilon` only reaches the optional layer norm. If `gamma_units` or `beta_units` differs from the channel count, an extra bias-free Dense maps back to the channel width.

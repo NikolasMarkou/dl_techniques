@@ -36,7 +36,7 @@ Every failure leaves the factory as a `ValueError`, including the ones that star
 
 Not every layer is in the factory. Sixteen are. Eight must be imported from their own module (see Files).
 
-Rotary layers do not add anything to the token. They take query and key tensors shaped `(batch, heads, seq_len, head_dim)` and rotate pairs of channels by an angle that depends on the position. After rotation, the dot product of a query and a key depends only on how far apart the two tokens are.
+Rotary layers do not add anything to the token. `RotaryPositionEmbedding`, `DualRotaryPositionEmbedding`, `AxialRoPE2D` and `VideoRoPE3D` take query and key tensors shaped `(batch, heads, seq_len, head_dim)` and rotate pairs of channels by an angle that depends on the position. `Ideogram4MRoPE` instead takes integer position ids `(batch, seq_len, 3)` and returns cos/sin tables that `apply_rotary_pos_emb` applies to q and k, and `ContinuousRoPE` takes coordinates and returns phase angles. After rotation, the dot product of a query and a key depends only on how far apart the two tokens are.
 
 ## Files
 
@@ -122,7 +122,7 @@ Direct import only: `AxialRoPE2D` (also re-exported from the package), `ClassTok
 
 ## Things to know
 
-- Rotary layers take a post-head-split 4D tensor `(batch, heads, seq_len, head_dim)`. A 3D projection output raises `ValueError`. Reshape and transpose first.
+- `RotaryPositionEmbedding`, `DualRotaryPositionEmbedding`, `AxialRoPE2D` and `VideoRoPE3D` take a post-head-split 4D tensor `(batch, heads, seq_len, head_dim)`; a 3D projection output raises `ValueError`, so reshape and transpose first. `Ideogram4MRoPE` takes `(batch, seq_len, 3)` position ids and returns cos/sin tables, and `ContinuousRoPE` takes coordinates and returns phases; neither takes a head-split tensor.
 - RoPE has two ways of pairing channels, and the wrong one trains fine but gives wrong numbers with a foreign checkpoint. Interleaved (channel 0 with 1, 2 with 3): `RotaryPositionEmbedding`, `AxialRoPE2D`, `VideoRoPE3D`. Split-half (channel `j` with `j + head_dim/2`): `DualRotaryPositionEmbedding`, `Ideogram4MRoPE` with `apply_rotary_pos_emb`. Loading weights across the two needs the `q_proj`/`k_proj` rows permuted.
 - `positional_sine_2d` takes channels-last input and returns channels-first `(batch, 2*num_pos_feats, H, W)`. `num_pos_feats` must be even.
 - `timestep` and `scalar_sinusoidal` are not interchangeable. `TimestepEmbedding` divides its frequency ladder by `half` and emits `[cos, sin]` with no input rescale. `ScalarSinusoidalEmbedding` divides by `half - 1`, emits `[sin, cos]` and first rescales the input onto `[0, 1e4]`.

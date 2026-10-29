@@ -13,8 +13,8 @@ only selects among the already-computed results. It produces the routing
 need per-item conditional dispatch (gather/scatter), which this
 accelerator-friendly select-after-compute layer does not implement. The
 router MLP itself is not trained by task loss alone, since argmax is
-non-differentiable — a caller must either supply ``layer_decision`` or
-attach an explicit loss to the returned logits.
+non-differentiable — a caller must attach an explicit loss to the returned
+logits. Supplying ``layer_decision`` only forces which path is taken.
 
 References:
     - Heakl et al., 2025. Dr.LLM: Dynamic Layer Routing in LLMs.
@@ -57,9 +57,10 @@ class RouterLayer(keras.layers.Layer):
         gradient flows to the router weights from the primary task loss via
         the returned output. The router MLP trains ONLY if the caller attaches
         an explicit loss to the returned ``logits`` (e.g. cross-entropy
-        against teacher decisions). A caller that trains on task loss alone --
-        without supplying ``layer_decision`` and without a loss on ``logits``
-        -- leaves the router MLP at its initialization.
+        against teacher decisions). Supplying ``layer_decision`` forces the
+        path but sends no gradient to the router either. A caller that trains
+        on task loss alone, without a loss on ``logits``, leaves the router MLP
+        at its initialization.
 
     Architecture:
 

@@ -40,7 +40,7 @@ flowchart TD
 | `window_attention.py` | `WindowAttention` + 5 builder functions | Three registered; `create_kan_key_window_attention` and `create_adaptive_softmax_window_attention` are not registered or exported. |
 | `single_window_attention.py` | Inner window layer | `set_window_slots()` is the channel for the slot map, not a call keyword. |
 | `tripse_attention.py` | `TripSE1..4` | Also `TripletAttentionBranch`, `_SEWeights` (internal, not exported). |
-| `attention_routing_capsule.py` | `AttentionRoutingCapsule`, `CapsuleBlockV2` | Direct import only; `CapsuleBlockV2` used by `models/vision/capsnet/model_v2.py`. Both share one registration module string. |
+| `attention_routing_capsule.py` | `AttentionRoutingCapsule`, `CapsuleBlockV2` | No factory key, but both are exported from `attention/__init__.py` (`__all__`); `CapsuleBlockV2` used by `models/vision/capsnet/model_v2.py`. Both share one registration module string. |
 | `lighthouse_attention.py` | Pyramid top-K causal attention | Static sequence length required; index buffers built in `build()`. |
 | `energy_attention.py` | Energy Transformer attention | Hand-coded gradient; `energy()` and `update()` must be edited as a pair. |
 | `ring_attention.py` | Online-softmax blockwise attention | Sequence length must be a static int. |

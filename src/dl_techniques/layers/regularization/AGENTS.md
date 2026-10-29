@@ -35,14 +35,15 @@ Where state is created (checked by constructing each layer and inspecting it bef
 
 | Layer | In `__init__` | In `build` |
 | --- | --- | --- |
-| `ScheduledDropout` | nothing (`step_counter` and `seed_generator` are `None`) | `step_counter` weight, `SeedGenerator` |
+| `ScheduledDropout` | `supports_masking = True`; `step_counter` and `seed_generator` are `None` | `step_counter` weight, `SeedGenerator` |
 | `LayerScale` | nothing (`gamma` is `None`) | `gamma` weight |
 | `FiLMLayer` | style `layer_norm` if `use_layer_norm`; style `dropout` if `projection_dropout_rate > 0`; projection attributes set to `None` | gamma/beta projections per `modulation_mode`, channel projections when the unit count differs from the channel count, then explicit `build` of every sub-layer |
 | `RouterLayer` | `router_bottleneck` and `router_output` Dense layers (unbuilt); the wrapped `transformer_layer` arrives as an argument | builds `transformer_layer`, then the two Dense layers with input shapes `(B, num_windows, hidden_size)` and `(B, num_windows, router_bottleneck_dim)` |
 | `SpatialSmoothness` | `seed_generator`; `layout`, tables and `last_spatial_loss` set to `None` | `SpatialLayout`, tables, five non-trainable weights |
 | `GaussianReadout` | `blur` Conv2D (unbuilt, kernel arrives through an initializer); `layout`, `perm`, `cell_to_unit_flat` set to `None` | `SpatialLayout`, `cell_to_unit_flat` and `perm` weights, `blur.build((-1, h, w, 1))` |
 | `SelectiveGradientMask` | `supports_masking = True` | validates shapes, sets `input_spec`, no weights |
-| `StochasticDepth`, `StochasticGradient`, `ConditionalOutputLayer` | config only | no `build` override, no weights |
+| `ConditionalOutputLayer` | `supports_masking = True` | no `build` override, no weights |
+| `StochasticDepth`, `StochasticGradient` | config only | no `build` override, no weights |
 
 Training-mode behaviour per layer:
 
