@@ -47,7 +47,7 @@ That prints 16 names: the 11 layers of the top-level modules, `ACFMonitorCallbac
 | File | Holds | Notes |
 |---|---|---|
 | `scaler.py` | `UnifiedScaler` | RevIN when `axis=1`, z-score when `axis=-1`; `inverse_transform`, `denormalize`, `get_stats`, `reset_stats` |
-| `mdn_layer.py` | `MDNLayer`; numpy helpers `get_point_estimate`, `get_uncertainty`, `get_prediction_intervals`, `check_component_diversity` | Methods `split_mixture_params`, `loss_func`, `sample`. Output width `2 * num_mixtures * output_dimension + num_mixtures` |
+| `mdn_layer.py` | `MDNLayer`; numpy helpers `get_point_estimate`, `get_uncertainty`, `get_prediction_intervals`, `check_component_diversity`; mode finders `get_mixture_modes` (graph-safe, `keras.ops`, float32 or wider) and `get_mode_estimate` (wrapper, highest-density mode per sample) | Methods `split_mixture_params`, `loss_func`, `sample`. Output width `2 * num_mixtures * output_dimension + num_mixtures` |
 | `normalizing_flow.py` | `AffineCouplingLayer`, `NormalizingFlowLayer` | Conditional Real NVP. `call([data, context])` is data to latent and returns `(z, log_det)`; `loss_func` consumes that tuple; `sample` is latent to data |
 | `deep_kernel_pca.py` | `DeepKernelPCA` | Needs `adapt`. Also `compute_kernel_matrix`, `extract_components`, `get_explained_variance_ratio`, a custom `load_own_variables` |
 | `invertible_kernel_pca.py` | `InvertibleKernelPCA`, `InvertibleKernelPCADenoiser` | Both need `adapt`. Methods `transform`, `inverse_transform`, `fit_transform`, `compute_reconstruction_error`, `estimate_noise_level` |

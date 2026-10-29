@@ -47,6 +47,7 @@ from typing import Dict, Optional, Tuple, Union, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.dtype_policy import accumulation_dtype, stability_floor
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
@@ -716,7 +717,8 @@ def get_point_estimate(
     This is the mean of a multi-modal distribution, so it can land in a region
     the model considers unlikely. With two well-separated modes it returns the
     midpoint between them. Use ``MDNLayer.sample`` when a plausible value
-    matters more than the average.
+    matters more than the average, or ``get_mode_estimate`` (built on
+    ``get_mixture_modes``) when the most likely value is wanted.
 
     :param model: Trained model whose output is an ``MDNLayer`` output.
     :type model: keras.Model
@@ -740,6 +742,201 @@ def get_point_estimate(
     point_estimates = np.sum(weighted_mu, axis=1)
 
     return point_estimates
+
+
+# Sigma and the responsibility-sum floors used by get_mixture_modes. Both are
+# applied in the accumulation dtype, where the requested value is returned as is.
+_MODE_SIGMA_FLOOR = 1e-6
+_MODE_PRECISION_FLOOR = 1e-30
+
+
+def _check_mode_arguments(
+    mu: Any,
+    sigma: Any,
+    pi_logits: Any,
+    num_steps: Any,
+    merge_tol: Any,
+) -> None:
+    """Raise ``ValueError`` unless the arguments of ``get_mixture_modes`` are valid.
+
+    :param mu: Component means, expected rank 3.
+    :param sigma: Component standard deviations, expected rank 3.
+    :param pi_logits: Mixture weight logits, expected rank 2.
+    :param num_steps: Fixed-point iteration count, expected a non-negative int.
+    :param merge_tol: Merge tolerance, expected a positive number.
+    :raises ValueError: naming the offending value.
+    """
+    if isinstance(num_steps, bool) or not isinstance(num_steps, (int, np.integer)):
+        raise ValueError(
+            f"num_steps must be a Python int, got {num_steps!r} "
+            f"of type {type(num_steps).__name__}."
+        )
+    if num_steps < 0:
+        raise ValueError(f"num_steps must be >= 0, got {num_steps}.")
+    if (
+        isinstance(merge_tol, bool)
+        or not isinstance(merge_tol, (int, float, np.integer, np.floating))
+        or not merge_tol > 0
+    ):
+        raise ValueError(f"merge_tol must be a number > 0, got {merge_tol!r}.")
+
+    mu_shape = tuple(mu.shape)
+    sigma_shape = tuple(sigma.shape)
+    pi_shape = tuple(pi_logits.shape)
+    if len(mu_shape) != 3 or len(sigma_shape) != 3 or len(pi_shape) != 2:
+        raise ValueError(
+            f"mu and sigma must have rank 3 and pi_logits rank 2, got shapes "
+            f"mu={mu_shape}, sigma={sigma_shape}, pi_logits={pi_shape}."
+        )
+    for axis_a, axis_b in ((mu_shape, sigma_shape), (mu_shape[:2], pi_shape)):
+        for size_a, size_b in zip(axis_a, axis_b):
+            if size_a is not None and size_b is not None and size_a != size_b:
+                raise ValueError(
+                    f"mu, sigma and pi_logits disagree on a shape: "
+                    f"mu={mu_shape}, sigma={sigma_shape}, pi_logits={pi_shape}."
+                )
+
+
+def get_mixture_modes(
+    mu: Any,
+    sigma: Any,
+    pi_logits: Any,
+    num_steps: int = 100,
+    merge_tol: float = 1e-3,
+) -> Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]:
+    """Find the modes of a diagonal Gaussian mixture by fixed-point iteration.
+
+    Every component mean is a start. Each start is moved by the
+    Carreira-Perpinan fixed point of the mixture density::
+
+        r_m(x) = softmax_m(log pi_m + log N(x; mu_m, sigma_m))
+        x <- (sum_m r_m Lambda_m)^-1 * sum_m r_m Lambda_m mu_m,   Lambda_m = 1 / sigma_m^2
+
+    The inverse and the product are elementwise over the output dimension
+    because every component is axis-aligned. The mean of a multi-modal mixture
+    lands between its modes; these starts end at the modes themselves. With
+    ``num_steps=0`` the starts are returned unchanged.
+
+    The iteration count is a Python int and the loop never stops early on a
+    traced value, so the function runs under ``tf.function`` with an unknown
+    batch size. All arithmetic is done in at least float32 (an input in
+    float16 or bfloat16 is promoted, float64 stays float64). ``modes`` and
+    ``log_density`` come back in the dtype of ``mu``. The pairwise buffers are
+    ``[B, M, M, D]``, so memory grows with ``num_mixtures ** 2``.
+
+    ``is_unique`` is True for the first start of each group of converged
+    modes whose largest absolute difference over the output dimension is at
+    most ``merge_tol``. A start that matches ANY earlier start is False, so a
+    row of identical components has exactly one True. The test uses a
+    strictly-lower-triangular mask built from index comparisons.
+
+    :param mu: Component means of shape ``[B, M, D]``.
+    :type mu: array-like
+    :param sigma: Component standard deviations of shape ``[B, M, D]``. Values
+        below ``1e-6`` are raised to ``1e-6``.
+    :type sigma: array-like
+    :param pi_logits: Raw mixture weight logits of shape ``[B, M]``.
+    :type pi_logits: array-like
+    :param num_steps: Fixed-point iterations, a Python int ``>= 0``.
+    :type num_steps: int
+    :param merge_tol: Two converged starts closer than this count as one mode.
+        Must be ``> 0``.
+    :type merge_tol: float
+    :return: Tuple ``(modes, log_density, is_unique)``. ``modes`` is
+        ``[B, M, D]``; ``log_density`` is ``[B, M]``, the log of the mixture
+        density at each mode; ``is_unique`` is a boolean ``[B, M]``.
+    :rtype: tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]
+    :raises ValueError: if ``num_steps`` is not a non-negative int, ``merge_tol``
+        is not positive or the shapes disagree.
+    """
+    mu = ops.convert_to_tensor(mu)
+    sigma = ops.convert_to_tensor(sigma)
+    pi_logits = ops.convert_to_tensor(pi_logits)
+    _check_mode_arguments(mu, sigma, pi_logits, num_steps, merge_tol)
+
+    out_dtype = keras.backend.standardize_dtype(mu.dtype)
+    work = accumulation_dtype(out_dtype)
+    sigma_floor = stability_floor(work, _MODE_SIGMA_FLOOR)
+    sum_floor = stability_floor(work, _MODE_PRECISION_FLOOR)
+
+    mu_w = ops.cast(mu, work)
+    sigma_w = ops.maximum(ops.cast(sigma, work), sigma_floor)
+    precision = 1.0 / ops.square(sigma_w)
+    # logsumexp instead of softmax: a single component is a size-1 axis, on
+    # which ops.softmax warns.
+    logits_w = ops.cast(pi_logits, work)
+    log_pi = logits_w - ops.logsumexp(logits_w, axis=-1, keepdims=True)
+    dim = ops.cast(ops.shape(mu_w)[-1], work)
+    log_const = log_pi - ops.sum(ops.log(sigma_w), axis=-1) - 0.5 * dim * float(
+        np.log(2.0 * np.pi)
+    )
+
+    def _component_log_density(points):
+        # points [B, K, D] -> log pi_m + log N(point; mu_m, sigma_m), [B, K, M]
+        diff = ops.expand_dims(points, 2) - ops.expand_dims(mu_w, 1)
+        quad = ops.sum(ops.square(diff) * ops.expand_dims(precision, 1), axis=-1)
+        return ops.expand_dims(log_const, 1) - 0.5 * quad
+
+    points = mu_w
+    for _ in range(num_steps):
+        log_joint = _component_log_density(points)
+        resp = ops.exp(log_joint - ops.logsumexp(log_joint, axis=-1, keepdims=True))
+        weight = ops.expand_dims(resp, -1) * ops.expand_dims(precision, 1)
+        numerator = ops.sum(weight * ops.expand_dims(mu_w, 1), axis=2)
+        denominator = ops.maximum(ops.sum(weight, axis=2), sum_floor)
+        points = numerator / denominator
+
+    log_density = ops.logsumexp(_component_log_density(points), axis=-1)
+
+    gap = ops.max(
+        ops.abs(ops.expand_dims(points, 2) - ops.expand_dims(points, 1)), axis=-1
+    )
+    num_starts = ops.shape(points)[1]
+    row = ops.expand_dims(ops.arange(num_starts, dtype="int32"), 1)
+    column = ops.expand_dims(ops.arange(num_starts, dtype="int32"), 0)
+    earlier = ops.expand_dims(column < row, 0)
+    duplicate = ops.any(ops.logical_and(gap <= merge_tol, earlier), axis=-1)
+    is_unique = ops.logical_not(duplicate)
+
+    return ops.cast(points, out_dtype), ops.cast(log_density, out_dtype), is_unique
+
+
+def get_mode_estimate(
+    model: keras.Model,
+    x_data: np.ndarray,
+    mdn_layer: MDNLayer,
+    num_steps: int = 100
+) -> np.ndarray:
+    """Return the highest-density mode of the predicted mixture for each sample.
+
+    Runs ``get_mixture_modes`` on the unpacked prediction and keeps, per sample,
+    the mode whose mixture log density is largest. A duplicate start has the
+    same density as the start it merged into, so a plain argmax over
+    ``log_density`` already picks one of the unique modes.
+
+    Where ``get_point_estimate`` averages a bimodal prediction into the
+    midpoint between its modes, this returns the location of one mode.
+
+    :param model: Trained model whose output is an ``MDNLayer`` output.
+    :type model: keras.Model
+    :param x_data: Input data to predict on.
+    :type x_data: np.ndarray
+    :param mdn_layer: The ``MDNLayer`` instance from that model, used to unpack
+        the prediction.
+    :type mdn_layer: MDNLayer
+    :param num_steps: Fixed-point iterations, passed to ``get_mixture_modes``.
+    :type num_steps: int
+    :return: Modes of shape ``(batch_size, output_dim)``.
+    :rtype: np.ndarray
+    """
+    y_pred = model.predict(x_data)
+    mu, sigma, pi_logits = mdn_layer.split_mixture_params(y_pred)
+    modes, log_density, _ = get_mixture_modes(mu, sigma, pi_logits, num_steps=num_steps)
+
+    modes_np = ops.convert_to_numpy(modes)
+    best = np.argmax(ops.convert_to_numpy(log_density), axis=-1)
+
+    return modes_np[np.arange(modes_np.shape[0]), best]
 
 
 def get_uncertainty(

@@ -13,7 +13,7 @@ A plain network returns one number or one score vector and says nothing about ho
 ```
 statistics/
 ├── scaler.py                  UnifiedScaler: RevIN or z-score, invertible
-├── mdn_layer.py               MDNLayer + four numpy helper functions
+├── mdn_layer.py               MDNLayer + six helper functions (four NumPy, two mode finders)
 ├── normalizing_flow.py        AffineCouplingLayer, NormalizingFlowLayer
 ├── deep_kernel_pca.py         DeepKernelPCA
 ├── invertible_kernel_pca.py   InvertibleKernelPCA, InvertibleKernelPCADenoiser
@@ -32,7 +32,7 @@ Import from the module, not from the package: `statistics/__init__.py` is empty.
 | Module | Classes | What it computes | Imported from outside this package |
 |---|---|---|---|
 | `scaler.py` | `UnifiedScaler` | Normalizes along any axis. `axis=1` gives Reversible Instance Normalization (RevIN) for time series, `axis=-1` gives per-feature standard scaling. Optional learnable scale and shift, NaN replacement, stored statistics, and `inverse_transform` | none |
-| `mdn_layer.py` | `MDNLayer`, `get_point_estimate`, `get_uncertainty`, `get_prediction_intervals`, `check_component_diversity` | A Gaussian mixture over the target: means, standard deviations and mixture weights from three separate heads, concatenated on the last axis. Negative log-likelihood in log space, optional diversity penalty on the means | `models/time_series/mdn/model.py`, `train/time_series/mdn/train_mdn.py`, `train/time_series/mdn/export.py` |
+| `mdn_layer.py` | `MDNLayer`, `get_point_estimate`, `get_uncertainty`, `get_prediction_intervals`, `check_component_diversity`, `get_mixture_modes`, `get_mode_estimate` | A Gaussian mixture over the target: means, standard deviations and mixture weights from three separate heads, concatenated on the last axis. Negative log-likelihood in log space, optional diversity penalty on the means | `models/time_series/mdn/model.py`, `train/time_series/mdn/train_mdn.py`, `train/time_series/mdn/export.py` |
 | `normalizing_flow.py` | `AffineCouplingLayer`, `NormalizingFlowLayer` | A conditional Real NVP flow, `p(y given context)`, with an exact log-likelihood loss and a sampler | none |
 | `deep_kernel_pca.py` | `DeepKernelPCA` | A stack of kernel-PCA levels, each fitted on the previous level's components. The output is every level's components concatenated | none |
 | `invertible_kernel_pca.py` | `InvertibleKernelPCA`, `InvertibleKernelPCADenoiser` | Kernel PCA in a Random Fourier Feature space with a learned linear decoder, and a denoiser that projects through it and back | none |
@@ -103,6 +103,18 @@ model.fit(x, y, epochs=1, verbose=0)
 point = get_point_estimate(model, x, mdn)
 total_variance, aleatoric_variance = get_uncertainty(model, x, mdn, point)
 lower, upper = get_prediction_intervals(point, total_variance, confidence_level=0.95)
+```
+
+`get_point_estimate` is the mixture mean, which for a bimodal prediction lands between the modes. `get_mode_estimate(model, x, mdn)` returns, per sample, the mode with the highest density, and `get_mixture_modes(mu, sigma, pi_logits)` is the graph-safe function under it. It starts one fixed-point iteration at every component mean and returns `(modes [B, M, D], log_density [B, M], is_unique [B, M])`; `is_unique` is False for a start that converged onto an earlier one. Two overlapping components give one unique mode, two separated components give two:
+
+```python
+import numpy as np
+from dl_techniques.layers.statistics.mdn_layer import get_mixture_modes
+
+mu = np.array([[[-3.0], [3.0]], [[-0.5], [0.5]]], dtype="float32")
+sigma = np.full((2, 2, 1), 0.5, dtype="float32")
+modes, log_density, is_unique = get_mixture_modes(mu, sigma, np.zeros((2, 2), "float32"))
+print(np.asarray(is_unique).sum(axis=1))
 ```
 
 `get_prediction_intervals` is a Gaussian band around the mixture mean. It is not calibrated and can be wrong on a multi-modal prediction. When you need a coverage guarantee, calibrate one with the conformal layers instead.

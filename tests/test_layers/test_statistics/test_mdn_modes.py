@@ -1,0 +1,471 @@
+"""Mode extraction for mixture density networks.
+
+``get_point_estimate`` returns the mixture mean, which for a multi-modal output lands
+between the modes. ``get_mixture_modes`` and ``get_mode_estimate`` return the modes
+themselves. Every numeric claim is checked against a float64 NumPy oracle written here,
+independent of the implementation: the log density by direct evaluation, the modes by a
+zoomed brute-force grid search of the mixture density.
+"""
+
+import keras
+import numpy as np
+import pytest
+import tensorflow as tf
+
+from dl_techniques.layers.statistics.mdn_layer import (
+    MDNLayer,
+    get_mixture_modes,
+    get_mode_estimate,
+    get_point_estimate,
+)
+
+
+# ---------------------------------------------------------------------
+# float64 oracles
+# ---------------------------------------------------------------------
+
+
+def _oracle_log_density(points, mu, sigma, pi_logits):
+    """Log of the mixture density at ``points`` [K, D] for one sample (float64).
+
+    :param points: Query points ``[K, D]``.
+    :param mu: Component means ``[M, D]``.
+    :param sigma: Component standard deviations ``[M, D]``.
+    :param pi_logits: Mixture logits ``[M]``.
+    :return: ``[K]`` log densities.
+    """
+    points = np.asarray(points, np.float64)
+    mu = np.asarray(mu, np.float64)
+    sigma = np.asarray(sigma, np.float64)
+    logits = np.asarray(pi_logits, np.float64)
+    log_pi = logits - (logits.max() + np.log(np.exp(logits - logits.max()).sum()))
+    z = (points[:, None, :] - mu[None]) / sigma[None]
+    log_normal = (
+        -0.5 * (z ** 2).sum(-1)
+        - np.log(sigma).sum(-1)[None]
+        - 0.5 * mu.shape[-1] * np.log(2.0 * np.pi)
+    )
+    total = log_pi[None] + log_normal
+    top = total.max(axis=1)
+    return top + np.log(np.exp(total - top[:, None]).sum(axis=1))
+
+
+def _oracle_grid_mode(mu, sigma, pi_logits, centre, half_width, levels=4, size=41):
+    """Argmax of the mixture density by repeated zoomed grid search (float64).
+
+    :param mu: Component means ``[M, D]``.
+    :param sigma: Component standard deviations ``[M, D]``.
+    :param pi_logits: Mixture logits ``[M]``.
+    :param centre: Starting centre of the search box ``[D]``.
+    :param half_width: Half width of the first box.
+    :param levels: Number of zoom levels, each shrinking the box by 10.
+    :param size: Grid points per axis per level.
+    :return: ``(mode [D], log density at the mode)``.
+    """
+    centre = np.asarray(centre, np.float64)
+    dim = centre.shape[0]
+    for _ in range(levels):
+        axes = [np.linspace(c - half_width, c + half_width, size) for c in centre]
+        mesh = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape(-1, dim)
+        values = _oracle_log_density(mesh, mu, sigma, pi_logits)
+        centre = mesh[values.argmax()]
+        half_width = half_width / 10.0
+    return centre, float(values.max())
+
+
+def _oracle_fixed_point(mu, sigma, pi_logits, num_steps):
+    """The Carreira-Perpinan iteration from every component mean (float64)."""
+    mu = np.asarray(mu, np.float64)
+    precision = 1.0 / np.asarray(sigma, np.float64) ** 2
+    logits = np.asarray(pi_logits, np.float64)
+    log_pi = logits - np.log(np.exp(logits).sum())
+    x = mu.copy()
+    for _ in range(num_steps):
+        out = np.empty_like(x)
+        for start in range(x.shape[0]):
+            z2 = ((x[start] - mu) ** 2 * precision).sum(-1)
+            logp = log_pi - 0.5 * z2 - np.log(1.0 / np.sqrt(precision)).sum(-1)
+            r = np.exp(logp - logp.max())
+            r /= r.sum()
+            out[start] = (r[:, None] * precision * mu).sum(0) / (r[:, None] * precision).sum(0)
+        x = out
+    return x
+
+
+def _assert_is_not_the_mixture_mean(estimate, mu, pi_logits, min_gap=1.0):
+    """Fail unless ``estimate`` is at least ``min_gap`` from the mixture mean.
+
+    :param estimate: ``[B, D]`` estimate to inspect.
+    :param mu: Component means ``[B, M, D]``.
+    :param pi_logits: Logits ``[B, M]``.
+    :param min_gap: Smallest accepted distance from the mixture mean.
+    """
+    pi = np.exp(pi_logits - pi_logits.max(-1, keepdims=True))
+    pi /= pi.sum(-1, keepdims=True)
+    mean = (pi[..., None] * mu).sum(1)
+    gap = np.abs(np.asarray(estimate) - mean).max()
+    assert gap >= min_gap, f"estimate sits {gap:.3g} from the mixture mean"
+
+
+# ---------------------------------------------------------------------
+# a model whose output is a fixed mixture
+# ---------------------------------------------------------------------
+
+
+def _constant_mixture_model(mu, sigma, pi_logits):
+    """Build a model that emits the same packed mixture for every input row.
+
+    :param mu: Component means ``[M, D]``.
+    :param sigma: Component standard deviations ``[M, D]``.
+    :param pi_logits: Mixture logits ``[M]``.
+    :return: ``(model, mdn_layer)``; the layer only unpacks, the model's Dense
+        has zero kernel and the packed mixture as bias.
+    """
+    num_mix, dim = np.asarray(mu).shape
+    layer = MDNLayer(output_dimension=dim, num_mixtures=num_mix)
+    packed = np.concatenate(
+        [np.ravel(mu), np.ravel(sigma), np.ravel(pi_logits)]
+    ).astype("float32")
+    inputs = keras.Input((2,))
+    outputs = keras.layers.Dense(
+        packed.size,
+        kernel_initializer="zeros",
+        bias_initializer=keras.initializers.Constant(packed),
+    )(inputs)
+    return keras.Model(inputs, outputs), layer
+
+
+def _batch(mu, sigma, pi_logits, dtype="float32"):
+    """Add a batch axis of one to ``[M, D]``, ``[M, D]``, ``[M]`` arrays."""
+    return (
+        np.asarray(mu, dtype)[None],
+        np.asarray(sigma, dtype)[None],
+        np.asarray(pi_logits, dtype)[None],
+    )
+
+
+BIMODAL_MU = np.array([[-3.0, 2.0], [3.0, -2.0]])
+BIMODAL_SIGMA = np.full((2, 2), 0.5)
+BIMODAL_LOGITS = np.zeros(2)
+
+
+# ---------------------------------------------------------------------
+# 1 to 4: what the modes are
+# ---------------------------------------------------------------------
+
+
+class TestTheModesAreTheMixtureModes:
+    def test_a_single_component_has_its_mean_as_mode(self):
+        mu, sigma, logits = _batch([[1.5, -2.0, 0.25]], [[0.3, 1.0, 2.0]], [0.7])
+        modes, log_density, is_unique = get_mixture_modes(mu, sigma, logits)
+        np.testing.assert_allclose(keras.ops.convert_to_numpy(modes), mu, atol=1e-6)
+        expected = -np.log(sigma).sum() - 1.5 * np.log(2 * np.pi)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(log_density)[0, 0], expected, rtol=1e-5
+        )
+        assert bool(keras.ops.convert_to_numpy(is_unique)[0, 0])
+
+    def test_two_separated_equal_components_return_a_mean_not_the_midpoint(self):
+        model, layer = _constant_mixture_model(BIMODAL_MU, BIMODAL_SIGMA, BIMODAL_LOGITS)
+        x = np.zeros((3, 2), "float32")
+        estimate = get_mode_estimate(model, x, layer)
+        assert estimate.shape == (3, 2)
+        for row in estimate:
+            distance = np.abs(BIMODAL_MU - row).max(axis=1).min()
+            assert distance < 1e-3, f"{row} is not within 1e-3 of a component mean"
+        point = get_point_estimate(model, x, layer)
+        np.testing.assert_allclose(point, np.zeros((3, 2)), atol=1e-5)
+        mu_batch = np.broadcast_to(BIMODAL_MU, (3, 2, 2))
+        logits_batch = np.zeros((3, 2))
+        _assert_is_not_the_mixture_mean(estimate, mu_batch, logits_batch)
+
+    def test_the_mode_estimate_of_two_separated_components_has_two_unique_modes(self):
+        mu, sigma, logits = _batch(BIMODAL_MU, BIMODAL_SIGMA, BIMODAL_LOGITS)
+        modes, _, is_unique = get_mixture_modes(mu, sigma, logits)
+        assert keras.ops.convert_to_numpy(is_unique).all()
+        np.testing.assert_allclose(keras.ops.convert_to_numpy(modes)[0], BIMODAL_MU, atol=1e-3)
+
+    @pytest.mark.parametrize("logits", [[0.0, 0.0], [0.4, 0.0], [-0.3, 0.9]])
+    @pytest.mark.parametrize("dim", [1, 2])
+    def test_overlapping_components_have_one_mode_equal_to_the_grid_maximum(self, logits, dim):
+        mu = np.stack([np.full(dim, -0.5), np.full(dim, 0.5)])
+        sigma = np.full((2, dim), 1.0)
+        batch = _batch(mu, sigma, logits)
+        modes, log_density, is_unique = [
+            keras.ops.convert_to_numpy(t) for t in get_mixture_modes(*batch)
+        ]
+        assert is_unique.sum() == 1, "overlapping components must collapse to one mode"
+        grid_mode, grid_density = _oracle_grid_mode(
+            mu, sigma, logits, centre=np.zeros(dim), half_width=1.5
+        )
+        survivor = modes[0][is_unique[0]][0]
+        error = np.abs(survivor - grid_mode).max()
+        assert error < 1e-3, f"mode {survivor} vs grid {grid_mode}: {error:.2e}"
+        assert abs(log_density[0][is_unique[0]][0] - grid_density) < 1e-5
+        # Between the two means, not on either of them (liveness of the move).
+        assert np.abs(survivor - mu[0]).max() > 1e-2 or np.abs(survivor - mu[1]).max() > 1e-2
+
+    def test_unequal_weights_select_the_heavier_component(self):
+        logits = np.log([0.8, 0.2])
+        model, layer = _constant_mixture_model(BIMODAL_MU, BIMODAL_SIGMA, logits)
+        estimate = get_mode_estimate(model, np.zeros((2, 2), "float32"), layer)
+        np.testing.assert_allclose(estimate, np.broadcast_to(BIMODAL_MU[0], (2, 2)), atol=1e-3)
+        flipped_model, flipped_layer = _constant_mixture_model(
+            BIMODAL_MU, BIMODAL_SIGMA, logits[::-1]
+        )
+        flipped = get_mode_estimate(flipped_model, np.zeros((2, 2), "float32"), flipped_layer)
+        np.testing.assert_allclose(flipped, np.broadcast_to(BIMODAL_MU[1], (2, 2)), atol=1e-3)
+
+    def test_the_modes_match_the_float64_fixed_point(self):
+        rng = np.random.default_rng(3)
+        mu = rng.normal(size=(4, 2))
+        sigma = rng.uniform(0.6, 1.4, size=(4, 2))
+        logits = rng.normal(size=4)
+        modes = keras.ops.convert_to_numpy(get_mixture_modes(*_batch(mu, sigma, logits))[0])[0]
+        reference = _oracle_fixed_point(mu, sigma, logits, 100)
+        assert np.abs(modes - reference).max() < 1e-4
+
+
+# ---------------------------------------------------------------------
+# 5: the log density
+# ---------------------------------------------------------------------
+
+
+class TestTheLogDensity:
+    @staticmethod
+    def _case():
+        rng = np.random.default_rng(11)
+        mu = rng.normal(0.0, 1.5, size=(3, 4, 2))
+        sigma = rng.uniform(0.4, 1.6, size=(3, 4, 2))
+        logits = rng.normal(0.0, 1.0, size=(3, 4))
+        return mu, sigma, logits
+
+    @pytest.mark.parametrize("dtype, tolerance", [("float32", 2e-5), ("float64", 1e-9)])
+    def test_the_log_density_matches_the_float64_oracle_at_the_returned_modes(
+        self, dtype, tolerance
+    ):
+        mu, sigma, logits = self._case()
+        modes, log_density, _ = get_mixture_modes(
+            mu.astype(dtype), sigma.astype(dtype), logits.astype(dtype)
+        )
+        modes = keras.ops.convert_to_numpy(modes)
+        log_density = keras.ops.convert_to_numpy(log_density)
+        assert modes.dtype == np.dtype(dtype) and log_density.dtype == np.dtype(dtype)
+        worst = 0.0
+        for b in range(mu.shape[0]):
+            # The oracle sees the same rounded inputs, so only the arithmetic differs.
+            expected = _oracle_log_density(
+                modes[b].astype(np.float64),
+                mu[b].astype(dtype).astype(np.float64),
+                sigma[b].astype(dtype).astype(np.float64),
+                logits[b].astype(dtype).astype(np.float64),
+            )
+            worst = max(worst, np.abs(log_density[b] - expected).max())
+        assert worst < tolerance, f"max |layer - float64 oracle| = {worst:.3e}"
+
+    def test_the_float64_arm_is_tighter_than_the_float32_arm(self):
+        # Liveness of the dtype split: float64 inputs are not silently demoted.
+        mu, sigma, logits = self._case()
+        out = get_mixture_modes(mu, sigma, logits)[1]
+        assert keras.ops.convert_to_numpy(out).dtype == np.float64
+
+    def test_the_log_density_at_a_mode_is_not_below_the_density_at_the_start(self):
+        mu, sigma, logits = self._case()
+        start = _oracle_log_density(mu[0], mu[0], sigma[0], logits[0])
+        _, log_density, _ = get_mixture_modes(mu, sigma, logits)
+        assert (keras.ops.convert_to_numpy(log_density)[0] >= start - 1e-5).all()
+
+
+# ---------------------------------------------------------------------
+# 6: finiteness
+# ---------------------------------------------------------------------
+
+
+class TestFiniteness:
+    @pytest.mark.parametrize(
+        "sigma_value, spread",
+        [(1e-3, 0.0), (1e-3, 50.0), (1e-6, 0.0), (1.0, 1e4), (1.0, 1e-30), (1e3, 5.0)],
+    )
+    def test_outputs_are_finite(self, sigma_value, spread):
+        rng = np.random.default_rng(5)
+        mu = rng.normal(0.0, 2.0, size=(2, 5, 3)).astype("float32")
+        sigma = np.full((2, 5, 3), sigma_value, "float32")
+        logits = (spread * rng.normal(size=(2, 5))).astype("float32")
+        modes, log_density, is_unique = get_mixture_modes(mu, sigma, logits)
+        assert np.isfinite(keras.ops.convert_to_numpy(modes)).all()
+        assert np.isfinite(keras.ops.convert_to_numpy(log_density)).all()
+        assert keras.ops.convert_to_numpy(is_unique).any(axis=-1).all()
+
+    def test_a_narrow_isolated_component_keeps_its_mean_as_mode(self):
+        mu = np.array([[[0.0], [10.0]]], "float32")
+        sigma = np.full((1, 2, 1), 1e-3, "float32")
+        modes = keras.ops.convert_to_numpy(get_mixture_modes(mu, sigma, np.zeros((1, 2), "float32"))[0])
+        np.testing.assert_allclose(modes, mu, atol=1e-6)
+
+    def test_float16_inputs_are_finite_and_come_back_in_float16(self):
+        mu = np.array([[[-3.0], [3.0]]], "float16")
+        sigma = np.full((1, 2, 1), 0.5, "float16")
+        modes, log_density, _ = get_mixture_modes(mu, sigma, np.zeros((1, 2), "float16"))
+        assert keras.backend.standardize_dtype(modes.dtype) == "float16"
+        assert keras.backend.standardize_dtype(log_density.dtype) == "float16"
+        assert np.isfinite(keras.ops.convert_to_numpy(modes).astype("float32")).all()
+
+
+# ---------------------------------------------------------------------
+# 7: merging
+# ---------------------------------------------------------------------
+
+
+class TestUniqueness:
+    def test_identical_components_leave_exactly_one_unique_start(self):
+        mu = np.tile(np.array([[1.0, 2.0]], "float32"), (2, 1))[None].repeat(3, axis=0)
+        sigma = np.full(mu.shape, 0.7, "float32")
+        logits = np.zeros((3, 2), "float32")
+        _, _, is_unique = get_mixture_modes(mu, sigma, logits)
+        flags = keras.ops.convert_to_numpy(is_unique)
+        assert flags.dtype == np.bool_
+        assert (flags.sum(axis=1) == 1).all()
+        assert flags[:, 0].all() and not flags[:, 1].any(), "the FIRST of a group is kept"
+
+    def test_a_later_start_is_dropped_when_it_matches_any_earlier_one(self):
+        mu = np.array([[[0.0], [5.0], [0.0]]], "float32")
+        sigma = np.full((1, 3, 1), 0.3, "float32")
+        _, _, is_unique = get_mixture_modes(mu, sigma, np.zeros((1, 3), "float32"), num_steps=0)
+        assert keras.ops.convert_to_numpy(is_unique).tolist() == [[True, True, False]]
+
+    def test_merge_tol_controls_the_grouping(self):
+        mu = np.array([[[0.0], [0.01]]], "float32")
+        sigma = np.full((1, 2, 1), 0.3, "float32")
+        logits = np.zeros((1, 2), "float32")
+        tight = get_mixture_modes(mu, sigma, logits, num_steps=0, merge_tol=1e-3)[2]
+        loose = get_mixture_modes(mu, sigma, logits, num_steps=0, merge_tol=0.1)[2]
+        assert keras.ops.convert_to_numpy(tight).all()
+        assert keras.ops.convert_to_numpy(loose).tolist() == [[True, False]]
+
+
+# ---------------------------------------------------------------------
+# 8: tracing
+# ---------------------------------------------------------------------
+
+
+class TestTracing:
+    def test_an_unknown_batch_size_traces_and_matches_eager(self):
+        num_mix, dim = 3, 2
+
+        @tf.function(
+            input_signature=[
+                tf.TensorSpec([None, num_mix, dim], tf.float32),
+                tf.TensorSpec([None, num_mix, dim], tf.float32),
+                tf.TensorSpec([None, num_mix], tf.float32),
+            ]
+        )
+        def traced(mu, sigma, logits):
+            return get_mixture_modes(mu, sigma, logits, num_steps=30)
+
+        rng = np.random.default_rng(2)
+        for batch in (1, 5):
+            mu = rng.normal(size=(batch, num_mix, dim)).astype("float32")
+            sigma = rng.uniform(0.5, 1.5, size=(batch, num_mix, dim)).astype("float32")
+            logits = rng.normal(size=(batch, num_mix)).astype("float32")
+            eager = get_mixture_modes(mu, sigma, logits, num_steps=30)
+            graph = traced(mu, sigma, logits)
+            for a, b in zip(eager, graph):
+                np.testing.assert_allclose(
+                    keras.ops.convert_to_numpy(a), b.numpy(), rtol=1e-5, atol=1e-5
+                )
+
+
+# ---------------------------------------------------------------------
+# 9: the iteration count
+# ---------------------------------------------------------------------
+
+
+class TestTheIterationCount:
+    def test_zero_steps_return_the_component_means(self):
+        mu = np.array([[[-0.5], [0.5]]], "float32")
+        sigma = np.ones((1, 2, 1), "float32")
+        modes = get_mixture_modes(mu, sigma, np.zeros((1, 2), "float32"), num_steps=0)[0]
+        np.testing.assert_array_equal(keras.ops.convert_to_numpy(modes), mu)
+
+    def test_one_hundred_steps_move_a_start_in_the_overlapping_case(self):
+        mu = np.array([[[-0.5], [0.5]]], "float32")
+        sigma = np.ones((1, 2, 1), "float32")
+        modes = get_mixture_modes(mu, sigma, np.zeros((1, 2), "float32"), num_steps=100)[0]
+        assert np.abs(keras.ops.convert_to_numpy(modes) - mu).max() > 0.4
+
+
+# ---------------------------------------------------------------------
+# 10: argument checks
+# ---------------------------------------------------------------------
+
+
+class TestArgumentChecks:
+    MU = np.zeros((1, 2, 2), "float32")
+    SIGMA = np.ones((1, 2, 2), "float32")
+    LOGITS = np.zeros((1, 2), "float32")
+
+    def test_a_negative_num_steps_is_refused_by_value(self):
+        with pytest.raises(ValueError, match="-3"):
+            get_mixture_modes(self.MU, self.SIGMA, self.LOGITS, num_steps=-3)
+
+    @pytest.mark.parametrize("bad", [2.5, "7", True])
+    def test_a_non_int_num_steps_is_refused_by_value(self, bad):
+        with pytest.raises(ValueError, match=repr(bad).replace(".", r"\.")):
+            get_mixture_modes(self.MU, self.SIGMA, self.LOGITS, num_steps=bad)
+
+    @pytest.mark.parametrize("bad", [0.0, -1e-3])
+    def test_a_non_positive_merge_tol_is_refused_by_value(self, bad):
+        with pytest.raises(ValueError, match=repr(bad).replace(".", r"\.").replace("-", r"\-")):
+            get_mixture_modes(self.MU, self.SIGMA, self.LOGITS, merge_tol=bad)
+
+    def test_a_rank_mismatch_names_the_shapes(self):
+        with pytest.raises(ValueError, match=r"mu=\(2, 2\)"):
+            get_mixture_modes(self.MU[0], self.SIGMA, self.LOGITS)
+        with pytest.raises(ValueError, match=r"pi_logits=\(1, 2, 2\)"):
+            get_mixture_modes(self.MU, self.SIGMA, self.MU)
+
+    def test_a_size_mismatch_names_the_shapes(self):
+        with pytest.raises(ValueError, match=r"pi_logits=\(1, 3\)"):
+            get_mixture_modes(self.MU, self.SIGMA, np.zeros((1, 3), "float32"))
+        with pytest.raises(ValueError, match=r"sigma=\(1, 2, 3\)"):
+            get_mixture_modes(self.MU, np.ones((1, 2, 3), "float32"), self.LOGITS)
+
+
+# ---------------------------------------------------------------------
+# 11: the contrast can fail
+# ---------------------------------------------------------------------
+
+
+class TestTheContrastCanFail:
+    def test_the_point_estimate_of_the_bimodal_case_fails_the_not_the_mean_check(self):
+        model, layer = _constant_mixture_model(BIMODAL_MU, BIMODAL_SIGMA, BIMODAL_LOGITS)
+        x = np.zeros((2, 2), "float32")
+        mu_batch = np.broadcast_to(BIMODAL_MU, (2, 2, 2))
+        with pytest.raises(AssertionError, match="mixture mean"):
+            _assert_is_not_the_mixture_mean(
+                get_point_estimate(model, x, layer), mu_batch, np.zeros((2, 2))
+            )
+
+    def test_the_mode_estimate_passes_the_same_check(self):
+        model, layer = _constant_mixture_model(BIMODAL_MU, BIMODAL_SIGMA, BIMODAL_LOGITS)
+        x = np.zeros((2, 2), "float32")
+        mu_batch = np.broadcast_to(BIMODAL_MU, (2, 2, 2))
+        _assert_is_not_the_mixture_mean(
+            get_mode_estimate(model, x, layer), mu_batch, np.zeros((2, 2))
+        )
+
+
+# ---------------------------------------------------------------------
+# the wrapper on a real layer
+# ---------------------------------------------------------------------
+
+
+class TestTheWrapperOnARealLayer:
+    def test_the_estimate_has_the_shape_of_the_target(self):
+        layer = MDNLayer(output_dimension=3, num_mixtures=4)
+        inputs = keras.Input((5,))
+        model = keras.Model(inputs, layer(inputs))
+        x = np.random.default_rng(0).normal(size=(6, 5)).astype("float32")
+        estimate = get_mode_estimate(model, x, layer, num_steps=10)
+        assert estimate.shape == (6, 3)
+        assert np.isfinite(estimate).all()
