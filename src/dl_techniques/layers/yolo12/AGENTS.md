@@ -83,10 +83,10 @@ Config keys (from `get_config`): blocks `filters`, `n`, `shortcut` / `area`, `ke
   - `cv1` and the other sites deliberately keep the shared object, so same-role correlation across blocks is unchanged.
   - `A2C2fBlock` passes the shared object everywhere because its `cv1`/`cv2` have different shapes and `AreaAttentionBlock` decorrelates its own pair.
   - `YOLOv12DetectionHead` clones with `clone_initializer(self.kernel_initializer)` at every site (a shared instance once produced 161 bit-identical weight pairs, 6 of them across different roles, per the source comment).
-  - `YOLOv12SegmentationHead` and `YOLOv12ClassificationHead` pass the one shared `self.kernel_initializer` object to all their convs and denses; they do not clone.
+  - `YOLOv12SegmentationHead` and `YOLOv12ClassificationHead` also clone with `clone_initializer(self.kernel_initializer)` at every conv and dense site (they used to pass the one shared object, which made equal-shape kernels bit-identical). `test_the_yolo12_heads_follow_the_block_conventions.py` pins it.
 - Do not make `cv1`/`cv2` in `Bottleneck` or `C3k2Block` share an initializer instance again.
 - Segmentation head: `skip_convs` and `attention_blocks` exist only for the first `min(2, len(intermediate_filters))` stages; `attention_blocks` is non-empty only when `use_attention`. `SqueezeExcitation(reduction_ratio=0.25)`.
-- Segmentation and classification heads use plain `keras.layers.BatchNormalization` (Keras defaults), not `YOLO12_NORM_KWARGS`; the detection head uses `yolo12_conv_block` so it does.
+- The segmentation head's ten BatchNorm sites (two per upconv stage, one per skip conv) take `**YOLO12_NORM_KWARGS` (epsilon 1e-3, momentum 0.97); they used to be plain `keras.layers.BatchNormalization` (momentum 0.99). The classification head has no BatchNorm.
 - Classification head: pooling layers and dense layers are called without `training`; only the attention gate and dropout layers receive it. `attention_pooling` is created only if `use_attention` and the summed channel count is known and > 0.
 - Registered package strings must stay `dl_techniques.layers.yolo12.yolo12_blocks` / `yolo12_heads` (matching defining module path).
 - Blocks and heads are built via explicit `build()`; keep sub-layer build order equal to the compute order so weight lists and saved archives stay stable.

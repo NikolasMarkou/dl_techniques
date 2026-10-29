@@ -22,7 +22,7 @@ from typing import Optional, Tuple, Dict, Any, List, Union, Sequence
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.initializers import clone_initializer
-from dl_techniques.layers.yolo12.yolo12_blocks import yolo12_conv_block
+from dl_techniques.layers.yolo12.yolo12_blocks import YOLO12_NORM_KWARGS, yolo12_conv_block
 from dl_techniques.layers.conv_blocks.squeeze_excitation import SqueezeExcitation
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.layers.heads.vision.task_types import (
@@ -482,7 +482,7 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
         self.final_conv = keras.layers.Conv2D(
             filters=self.num_classes,
             kernel_size=1,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="final_conv"
         )
@@ -533,21 +533,21 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
                     kernel_size=3,
                     strides=2,
                     padding="same",
-                    kernel_initializer=self.kernel_initializer,
+                    kernel_initializer=clone_initializer(self.kernel_initializer),
                     kernel_regularizer=self.kernel_regularizer,
                     name=f"upconv_{i}_transpose"
                 ),
-                keras.layers.BatchNormalization(name=f"upconv_{i}_bn"),
+                keras.layers.BatchNormalization(name=f"upconv_{i}_bn", **YOLO12_NORM_KWARGS),
                 keras.layers.Activation("silu", name=f"upconv_{i}_silu"),
                 keras.layers.Conv2D(
                     filters=filters,
                     kernel_size=3,
                     padding="same",
-                    kernel_initializer=self.kernel_initializer,
+                    kernel_initializer=clone_initializer(self.kernel_initializer),
                     kernel_regularizer=self.kernel_regularizer,
                     name=f"upconv_{i}_refine"
                 ),
-                keras.layers.BatchNormalization(name=f"upconv_{i}_refine_bn"),
+                keras.layers.BatchNormalization(name=f"upconv_{i}_refine_bn", **YOLO12_NORM_KWARGS),
                 keras.layers.Activation("silu", name=f"upconv_{i}_refine_silu")
             ], name=f"upconv_block_{i}")
 
@@ -560,11 +560,11 @@ class YOLOv12SegmentationHead(keras.layers.Layer):
                 keras.layers.Conv2D(
                     filters=filters,
                     kernel_size=1,
-                    kernel_initializer=self.kernel_initializer,
+                    kernel_initializer=clone_initializer(self.kernel_initializer),
                     kernel_regularizer=self.kernel_regularizer,
                     name=f"skip_{i}_conv"
                 ),
-                keras.layers.BatchNormalization(name=f"skip_{i}_bn"),
+                keras.layers.BatchNormalization(name=f"skip_{i}_bn", **YOLO12_NORM_KWARGS),
                 keras.layers.Activation("silu", name=f"skip_{i}_silu")
             ], name=f"skip_conv_{i}")
 
@@ -920,7 +920,7 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
             dense_layer = keras.layers.Dense(
                 hidden_dim,
                 activation="relu",
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"dense_{i}"
             )
@@ -934,7 +934,7 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
         self.final_dense = keras.layers.Dense(
             self.num_classes,
             activation=None,  # Output logits
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
             name="final_dense"
         )
@@ -976,14 +976,14 @@ class YOLOv12ClassificationHead(keras.layers.Layer):
                 keras.layers.Dense(
                     attention_dim,
                     activation="relu",
-                    kernel_initializer=self.kernel_initializer,
+                    kernel_initializer=clone_initializer(self.kernel_initializer),
                     kernel_regularizer=self.kernel_regularizer,
                     name="attention_dense"
                 ),
                 keras.layers.Dense(
                     total_dim,
                     activation="sigmoid",
-                    kernel_initializer=self.kernel_initializer,
+                    kernel_initializer=clone_initializer(self.kernel_initializer),
                     kernel_regularizer=self.kernel_regularizer,
                     name="attention_weights"
                 )
