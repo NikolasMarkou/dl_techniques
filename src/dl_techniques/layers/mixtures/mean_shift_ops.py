@@ -74,7 +74,7 @@ def _dtype_names(x: Any) -> Tuple[str, str]:
     :return: the tensor's own dtype name and the dtype the math runs in.
     :rtype: Tuple[str, str]
     """
-    name = keras.backend.standardize_dtype(x.dtype)
+    name = getattr(x.dtype, "name", None) or str(x.dtype)
     return name, accumulation_dtype(name)
 
 
@@ -105,7 +105,7 @@ def _normalize_rows(x: Any) -> Any:
     return l2_normalize(
         x,
         axis=-1,
-        eps=stability_floor(keras.backend.standardize_dtype(x.dtype), _NORMALIZE_EPS),
+        eps=stability_floor(_dtype_names(x)[0], _NORMALIZE_EPS),
     )
 
 

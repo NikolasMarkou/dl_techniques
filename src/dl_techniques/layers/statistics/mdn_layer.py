@@ -854,7 +854,7 @@ def get_mixture_modes(
     pi_logits = ops.convert_to_tensor(pi_logits)
     _check_mode_arguments(mu, sigma, pi_logits, num_steps, merge_tol)
 
-    out_dtype = keras.backend.standardize_dtype(mu.dtype)
+    out_dtype = getattr(mu.dtype, "name", None) or str(mu.dtype)
     work = accumulation_dtype(out_dtype)
     sigma_floor = stability_floor(work, _MODE_SIGMA_FLOOR)
     sum_floor = stability_floor(work, _MODE_PRECISION_FLOOR)
