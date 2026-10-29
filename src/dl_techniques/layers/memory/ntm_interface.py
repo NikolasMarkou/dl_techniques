@@ -1,7 +1,7 @@
 """
 Neural Turing Machine (NTM) interface.
 
-This module holds the shared vocabulary of the NTM family: two enums, four
+This module holds the shared vocabulary of the NTM family: one enum, four
 state and configuration dataclasses, four abstract base classes, and three
 pure tensor helpers used by the addressing chain.
 
@@ -42,7 +42,7 @@ import keras
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Literal
+from typing import Any, Literal, Union
 
 # ---------------------------------------------------------------------
 # local imports
@@ -710,7 +710,7 @@ class BaseHead(keras.layers.Layer, ABC):
         self,
         memory_size: int,
         memory_dim: int,
-        addressing_mode: AddressingMode = AddressingMode.HYBRID,
+        addressing_mode: Union[AddressingMode, str] = AddressingMode.HYBRID,
         shift_range: int = 3,
         epsilon: float = 1e-6,
         **kwargs: Any,
@@ -722,8 +722,10 @@ class BaseHead(keras.layers.Layer, ABC):
         :type memory_size: int
         :param memory_dim: Width of one memory slot, M.
         :type memory_dim: int
-        :param addressing_mode: CONTENT or HYBRID. Defaults to HYBRID.
-        :type addressing_mode: AddressingMode
+        :param addressing_mode: CONTENT or HYBRID. Defaults to HYBRID. The
+            member's name as a string is accepted too, which is the form
+            `get_config` writes.
+        :type addressing_mode: Union[AddressingMode, str]
         :param shift_range: Width of the circular-shift distribution, S.
             Defaults to 3.
         :type shift_range: int
@@ -736,6 +738,9 @@ class BaseHead(keras.layers.Layer, ABC):
         super().__init__(**kwargs)
         self.memory_size = memory_size
         self.memory_dim = memory_dim
+        if isinstance(addressing_mode, str):
+            # get_config() writes the enum's name; rebuild the enum on load.
+            addressing_mode = AddressingMode[addressing_mode]
         self.addressing_mode = addressing_mode
         self.shift_range = shift_range
         self.epsilon = epsilon

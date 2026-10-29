@@ -1680,6 +1680,36 @@ class TestBiasInitializerIsClonedPerProjection:
 
 
 # ---------------------------------------------------------------------
+# Head config round trip
+# ---------------------------------------------------------------------
+
+
+class TestHeadConfigRoundTrip:
+    """`from_config(get_config())` must keep the addressing mode a head ran."""
+
+    @pytest.mark.parametrize("head_cls", [NTMReadHead, NTMWriteHead])
+    @pytest.mark.parametrize(
+        "mode", [AddressingMode.CONTENT, AddressingMode.HYBRID]
+    )
+    def test_addressing_mode_survives_the_round_trip(self, head_cls, mode):
+        head = head_cls(memory_size=8, memory_dim=4, addressing_mode=mode)
+        clone = head_cls.from_config(head.get_config())
+
+        assert clone.addressing_mode is mode
+        # The second get_config used to raise AttributeError on a str.
+        assert clone.get_config() == head.get_config()
+
+    def test_a_hybrid_clone_builds_the_shift_projection(self):
+        head = NTMReadHead(memory_size=8, memory_dim=4)
+        clone = NTMReadHead.from_config(head.get_config())
+        clone.build((2, 6))
+
+        original = NTMReadHead(memory_size=8, memory_dim=4)
+        original.build((2, 6))
+        assert len(clone.weights) == len(original.weights)
+
+
+# ---------------------------------------------------------------------
 # Run tests
 # ---------------------------------------------------------------------
 

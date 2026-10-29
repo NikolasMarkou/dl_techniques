@@ -144,7 +144,7 @@ External: `keras` (>=3.8, TensorFlow 2.18 backend), `numpy` (`prod`, statistics 
 
 ## Failure modes
 
-- `NTMReadHead` / `NTMWriteHead` standalone round trip is broken (measured): `get_config()` emits `addressing_mode` as the string `"HYBRID"`, there is no `from_config` override, so `NTMReadHead.from_config(h.get_config())` stores a `str`. The `is AddressingMode.HYBRID` check then fails, `gate_dense`, `shift_dense`, `gamma_dense` are `None`, the head acts content-only, and the next `get_config()` raises `AttributeError: 'str' object has no attribute 'name'`. Whole-layer round trips (`NeuralTuringMachine`, `NTMCell`) are unaffected because they rebuild heads from `NTMConfig`. Fix by converting a string in the head constructor or adding `from_config`, and add a test.
+- `NTMReadHead` / `NTMWriteHead` accept `addressing_mode` as the enum or its name string (`BaseHead.__init__` converts), so `from_config(get_config())` keeps the mode; covered by `TestHeadConfigRoundTrip`.
 - `NeuralTuringMachine.step`, `initialize_state`, `get_memory_state` raise `NotImplementedError`; `reset_memory` is a no-op.
 - `SOMLayer.build` raises `ValueError` unless input is rank 2 with last axis `input_dim`. `SoftSOMLayer.build` raises `ValueError` for rank other than 2, a `None` last axis, or a mismatch. `NeuroGrid.build` raises `ValueError` for rank outside 2..3 or a `None` last axis.
 - `SOM2dLayer.__init__` raises `ValueError` unless `map_size` is a list/tuple of exactly 2 positive `int`s.

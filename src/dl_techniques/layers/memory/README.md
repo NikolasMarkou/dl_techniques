@@ -92,7 +92,6 @@ To keep the NTM state, build with `return_state=True`. The call then returns `(o
 - `SoftSOMLayer` refuses `sharpness_weight > 0` together with `use_per_dimension_softmax=False`, because that loss needs the per-axis softmaxes.
 - `NeuralTuringMachine.step()`, `initialize_state()` and `get_memory_state()` raise `NotImplementedError`, and `reset_memory()` does nothing. The RNN owns the state. Use `NTMCell.get_initial_state(...)` or `return_state=True`.
 - `NTMConfig.shift_range` must be a positive odd integer.
-- `NTMReadHead` and `NTMWriteHead` do not round-trip through their own `get_config()` and `from_config()`. The config stores `addressing_mode` as a string name, and the head constructor does not convert it back. The head then silently behaves as content-only, and its next `get_config()` raises `AttributeError`. Serializing a whole `NeuralTuringMachine` or `NTMCell` is fine, because their heads are rebuilt from `NTMConfig`.
 - `NeuroGrid` defaults to an orthogonal-hypersphere grid initializer and a soft-orthonormal grid regularizer. Pass `grid_regularizer=None` to turn the regularizer off.
 - `NeuroGrid.get_addressing_probabilities`, `find_best_matching_units` and the quality helpers flatten rank-3 input, so their leading axis is `batch * seq_len`.
 - `get_quality_statistics` converts to NumPy, so keep it out of compiled training steps.
