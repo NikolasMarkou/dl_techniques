@@ -77,7 +77,8 @@ SRC_ROOT = os.path.join(os.path.dirname(_TESTS_DIR), "src")
 #: then SAM1's mask stack (``sam1/prompt_encoder.py`` leaves the table): 195 sites, 100 files, 150
 #: dynamic, 45 literal; then ``layers/fastvit/`` dissolved (its three files' sites move unchanged to
 #: ``conv_blocks/reparam_large_kernel_conv.py`` and ``models/vision/fastvit/components.py``): 195 sites,
-#: 99 files, 150 dynamic, 45 literal.
+#: 99 files, 150 dynamic, 45 literal; then the ``layers/time_series`` de-dup (78bba4525) left
+#: ``mixed_sequential_block.py`` with one site instead of three: 193 sites, 99 files, 148 dynamic, 45 literal.
 #: Edit it in the commit that adds or removes a site.
 NORM_CALL_SITES: Dict[str, Tuple[int, int]] = {
     "dl_techniques/layers/attention/area_attention.py": (2, 0),
@@ -120,7 +121,7 @@ NORM_CALL_SITES: Dict[str, Tuple[int, int]] = {
     "dl_techniques/layers/residual_dense_block.py": (1, 0),
     "dl_techniques/layers/ssm/context_mamba.py": (1, 0),
     "dl_techniques/layers/ssm/selective_ssm.py": (0, 1),
-    "dl_techniques/layers/time_series/mixed_sequential_block.py": (3, 0),
+    "dl_techniques/layers/time_series/mixed_sequential_block.py": (1, 0),
     "dl_techniques/layers/time_series/xlstm_blocks.py": (2, 0),
     "dl_techniques/layers/transformers/adaln_zero.py": (2, 0),
     "dl_techniques/layers/transformers/free_transformer.py": (2, 0),
@@ -274,7 +275,7 @@ class TestTheNormFactoryCallSitePopulationIsPinned:
     def test_the_totals_match_the_census(self, norm_call_sites):
         dynamic = sum(pair[0] for pair in NORM_CALL_SITES.values())
         literal = sum(pair[1] for pair in NORM_CALL_SITES.values())
-        assert (dynamic, literal, len(NORM_CALL_SITES)) == (150, 45, 99), (
+        assert (dynamic, literal, len(NORM_CALL_SITES)) == (148, 45, 99), (
             "the census's own totals moved; re-derive the module docstring's numbers"
         )
 
