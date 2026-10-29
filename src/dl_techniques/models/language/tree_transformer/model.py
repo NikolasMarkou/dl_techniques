@@ -70,13 +70,25 @@ from dl_techniques.utils.weight_transfer import (
     load_weights_from_checkpoint,
 )
 
-from .components import (  # noqa: F401
+from .components import (
     PositionalEncoding,
     GroupAttention,
     TreeMHA,
     TreeTransformerBlock,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+#: The deep-import contract of ``nam/`` and ``train/nam/``: the four sub-layers are re-exported here
+#: (``test_sublayers_re_exported_from_model_module``), two of them (``GroupAttention``, ``TreeMHA``)
+#: unused by this module itself. Declared, because a ``# noqa: F401`` comment is not read by pyflakes.
+__all__ = [
+    "TreeTransformer",
+    "create_tree_transformer",
+    "PositionalEncoding",
+    "GroupAttention",
+    "TreeMHA",
+    "TreeTransformerBlock",
+]
 
 # ---------------------------------------------------------------------
 

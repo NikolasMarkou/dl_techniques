@@ -29,6 +29,7 @@ from keras import ops
 from dl_techniques.losses.sam_mask_loss import match_mask_axis
 from .model import SAM
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.model_build import refuse_input_shape
 
 # ---------------------------------------------------------------------------
 # Public output-key constants. Shared with the losses and the trainer so the
@@ -209,6 +210,7 @@ class SAMTrainingModel(keras.Model):
         num_refinement_rounds: int = DEFAULT_REFINEMENT_ROUNDS,
         **kwargs: Any,
     ) -> None:
+        refuse_input_shape(kwargs, "SAMTrainingModel", "it wraps a built SAM")
         super().__init__(**kwargs)
         if not isinstance(sam, SAM):
             raise ValueError(

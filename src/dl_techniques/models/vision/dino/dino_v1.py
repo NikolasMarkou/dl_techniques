@@ -80,7 +80,7 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
-from dl_techniques.utils.model_build import refuse_unknown_model_kwargs
+from dl_techniques.utils.model_build import refuse_unknown_model_kwargs, refuse_input_shape
 
 # ---------------------------------------------------------------------
 # Type definitions
@@ -192,6 +192,7 @@ class DINOHead(keras.layers.Layer):
             kernel_initializer: Union[str, Dict[str, Any]] = DINO_KERNEL_INITIALIZER,
             **kwargs
     ):
+        refuse_input_shape(kwargs, "DINOHead", "its input width is in_dim")
         super().__init__(**kwargs)
 
         # Validate inputs
@@ -882,7 +883,7 @@ class DINOv1(keras.Model):
         super().summary(**kwargs)
 
         # Print additional model information
-        logger.info(f"DINO Vision Transformer configuration:")
+        logger.info("DINO Vision Transformer configuration:")
         logger.info(f"  - Embedding dimension: {self.embed_dim}")
         logger.info(f"  - Number of layers: {self.depth}")
         logger.info(f"  - Number of heads: {self.num_heads}")

@@ -52,6 +52,7 @@ from .image_encoder import ImageEncoderViT
 from .transformer import DEFAULT_ATTENTION_DROPOUT_RATE, TwoWayTransformer
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.weight_transfer import refuse_pretrained
+from dl_techniques.utils.model_build import refuse_input_shape
 
 # ---------------------------------------------------------------------
 
@@ -225,6 +226,9 @@ class SAM(keras.Model):
         binarize_masks: bool = True,
         **kwargs: Any
     ) -> None:
+        refuse_input_shape(
+            kwargs, "SAM",
+            "it wraps an image encoder, a prompt encoder and a mask decoder that are already built")
         super().__init__(**kwargs)
 
         # Validate inputs

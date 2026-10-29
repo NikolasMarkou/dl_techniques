@@ -35,6 +35,7 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.model_build import refuse_input_shape
 
 # ---------------------------------------------------------------------
 
@@ -125,6 +126,7 @@ class DPTDecoder(keras.layers.Layer):
             upsample_factor: int = 1,
             **kwargs: Any
     ) -> None:
+        refuse_input_shape(kwargs, "DPTDecoder", "it is built from the shape of its first input")
         super().__init__(**kwargs)
 
         # Store configuration parameters
@@ -426,6 +428,7 @@ class DPTResidualConvUnit(keras.layers.Layer):
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any,
     ) -> None:
+        refuse_input_shape(kwargs, "DPTResidualConvUnit", "it is built from the shape of its first input")
         super().__init__(**kwargs)
         self.features = int(features)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
@@ -518,6 +521,7 @@ class DPTFeatureFusionBlock(keras.layers.Layer):
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any,
     ) -> None:
+        refuse_input_shape(kwargs, "DPTFeatureFusionBlock", "it is built from the shape of its first input")
         super().__init__(**kwargs)
         self.features = int(features)
         self.has_skip = bool(has_skip)
@@ -685,6 +689,7 @@ class DPTHead(keras.layers.Layer):
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any,
     ) -> None:
+        refuse_input_shape(kwargs, "DPTHead", "it is built from the shape of its first input")
         super().__init__(**kwargs)
         out_channels = [int(c) for c in out_channels]
         if len(out_channels) != 4 or min(out_channels) < 1:

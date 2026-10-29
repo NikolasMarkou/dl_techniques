@@ -67,6 +67,7 @@ from ..activations.factory import ACTIVATION_REGISTRY, create_activation_layer
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.activation_serialization import serialize_activation
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.model_build import refuse_input_shape
 
 
 # ---------------------------------------------------------------------
@@ -297,6 +298,7 @@ class ConvStem(keras.layers.Layer):
         name: Optional[str] = None,
         **kwargs: Any,
     ) -> None:
+        refuse_input_shape(kwargs, "ConvStem", "it is built from the shape of its first input")
         super().__init__(name=name, **kwargs)
 
         if filters <= 0:

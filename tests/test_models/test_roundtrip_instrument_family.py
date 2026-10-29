@@ -95,16 +95,13 @@ AUTONAME_STEMS = {
     "tabm": ("n_linear", "scale_ensemble", "tab_m_backbone"),
 }
 
-#: Packages where two weights share a relative path, with the MEASURED count.
-PATH_COLLISIONS = {
-    # `DepthAnything` keeps a frozen teacher built with
-    # `keras.models.clone_model(self.encoder)`. `clone_model` reproduces the
-    # source's NAME, so student and teacher are both `encoder_vit_s` and 46 of
-    # the 152 weights cannot be addressed by path. The `.keras` archive is
-    # positional and round-trips at 0.0 either way; what is lost is
-    # `load_weights(by_name)` and any by-name checkpoint.
-    "depth_anything": 46,
-}
+#: Packages where two weights share a relative path, with the MEASURED count. Empty:
+#: ``DepthAnything`` was the one entry (46 of 152 placeholder weights, 175 of 410 with the DINOv2
+#: encoder), because its frozen teacher was built by ``clone_model`` under the student's name and
+#: outside any name scope; the teacher is now ``frozen_<student name>`` and built under a name scope of
+#: that name (D-055), so no two weights share a path and ``load_weights(by_name)`` and by-name
+#: checkpoints address both encoders.
+PATH_COLLISIONS = {}
 
 #: Packages whose forward is NOT deterministic, with the bound the output arm
 #: is held to. ``"calibrate"`` means the bound is the model's OWN call-to-call

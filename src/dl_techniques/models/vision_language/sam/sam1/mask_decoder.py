@@ -36,6 +36,7 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.model_build import refuse_input_shape
 
 # ---------------------------------------------------------------------
 
@@ -191,6 +192,7 @@ class MaskDecoder(keras.layers.Layer):
         mlp_activation: str = 'relu',
         **kwargs: Any
     ) -> None:
+        refuse_input_shape(kwargs, "MaskDecoder", "it is built from the shape of its first input")
         super().__init__(**kwargs)
 
         # Validate inputs

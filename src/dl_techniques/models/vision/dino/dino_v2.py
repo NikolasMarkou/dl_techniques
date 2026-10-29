@@ -90,7 +90,7 @@ from dl_techniques.models.vision.dino.official_weights import (
     load_official_dinov2_file,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
-from dl_techniques.utils.model_build import refuse_unknown_model_kwargs
+from dl_techniques.utils.model_build import refuse_unknown_model_kwargs, refuse_input_shape
 
 # ---------------------------------------------------------------------
 # Module constants
@@ -257,6 +257,9 @@ class DINOv2PositionEmbedding(keras.layers.Layer):
             initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
             **kwargs: Any
     ) -> None:
+        refuse_input_shape(
+            kwargs, "DINOv2PositionEmbedding",
+            "its grid is grid_size and it resamples to any output grid")
         super().__init__(**kwargs)
         output_grid = tuple(int(n) for n in output_grid)
         if int(grid_size) < 1 or len(output_grid) != 2 or min(output_grid) < 1:
@@ -471,6 +474,7 @@ class DINOv2Block(keras.layers.Layer):
             ffn_dropout_rate: float = 0.0,
             **kwargs
     ) -> None:
+        refuse_input_shape(kwargs, "DINOv2Block", "its width is dim and it runs on any token count")
         super().__init__(**kwargs)
 
         # Validate inputs
@@ -735,7 +739,7 @@ class DINOv2VisionTransformer(keras.Model):
         init_values: LayerScale initialization value.
         attention_type: Type of attention mechanism, one of `SUPPORTED_ATTENTION_TYPES`
             (`multi_head`, `multi_head_cross`, `gated`, `linear`, `ring`); any other value raises
-            `ValueError` when the first block is built. Only `multi_head` has the official
+            `ValueError` at construction (the first block's constructor raises it). Only `multi_head` has the official
             checkpoint's structure.
         ffn_type: Type of feed-forward network.
         normalization_type: Type of normalization.
@@ -1306,7 +1310,7 @@ class DINOv2VisionTransformer(keras.Model):
         super().summary(**kwargs)
 
         # Print additional model information
-        logger.info(f"DINOv2 ViT configuration:")
+        logger.info("DINOv2 ViT configuration:")
         logger.info(f"  - Input size: {self.image_size}")
         logger.info(f"  - Patch size: {self.patch_size}")
         logger.info(f"  - Embed dim: {self.embed_dim}")
@@ -1578,7 +1582,7 @@ class DINOv2(keras.Model):
         super().summary(**kwargs)
 
         # Print additional model information
-        logger.info(f"DINOv2 Model configuration:")
+        logger.info("DINOv2 Model configuration:")
         logger.info(f"  - Input size: {self.image_size}")
         logger.info(f"  - Patch size: {self.patch_size}")
         logger.info(f"  - Include top: {self.include_top}")

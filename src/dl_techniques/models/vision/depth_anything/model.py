@@ -32,8 +32,8 @@ as in the reference (518 by default). `from_variant(..., pretrained=True)`
 loads the official DINOv2 weights (`facebook/dinov2-{small,base,large}`,
 local download) into the encoder, strictly; the head starts from its
 initialization, as in the paper. `from_pretrained_encoder` loads a saved
-`.keras` encoder instead. The teacher starts as a clone
-of the student and only becomes an EMA average once the caller attaches
+`.keras` encoder instead. The teacher starts as a copy
+of the student (named `frozen_<student name>`) and only becomes an EMA average once the caller attaches
 `TeacherEMACallback` (`teacher_ema.py`); nothing in this module advances it
 on its own. `compile()` with no `loss=` defaults to `AffineInvariantLoss`,
 matching the relative-depth objective; `src/train/depth_anything/` passes
@@ -127,6 +127,11 @@ _DPT_HEAD_CONFIGS: Dict[str, Tuple[int, Tuple[int, int, int, int]]] = {
 
 #: How many encoder layers the head reads (``get_intermediate_layers(x, 4)``).
 _DPT_NUM_LAYERS: int = 4
+
+#: The frozen teacher is named ``frozen_<student encoder name>``. One name for both made every
+#: transfer that matches layers by name (``load_weights_from_checkpoint``, the trainer's
+#: ``--init-from``) keep one of the two and fill the teacher, leaving the student at its random start.
+TEACHER_NAME_PREFIX: str = "frozen_"
 
 # ---------------------------------------------------------------------
 
@@ -451,19 +456,23 @@ class DepthAnything(keras.Model):
         # `enable_semi_supervised` needs a teacher for pseudo-label consistency too; narrowing this silently degraded to labeled-only training. See decisions.md.
         if self.use_feature_alignment or self.enable_semi_supervised:
             try:
-                if isinstance(self.encoder, DINOv2VisionTransformer):
-                    # The class rebuilds its own graph from its config. clone_model
-                    # would return a plain Functional without get_intermediate_layers,
-                    # and under load_model's safe mode it refuses the graph's Lambdas.
-                    self.frozen_encoder = DINOv2VisionTransformer.from_config(
-                        self.encoder.get_config())
-                else:
-                    self.frozen_encoder = keras.models.clone_model(self.encoder)
+                # DECISION plan-2026-10-26T125959-7af851e5/D-055
+                # Do NOT clone the student under its own name (`keras.models.clone_model` reproduces
+                # it): student and teacher then shared a layer name AND every weight path, and a
+                # name-keyed load (`--init-from`) filled the teacher and left the student random.
+                # The class rebuilds its own graph from its config, under a name and a name scope of
+                # its own. clone_model would also return a plain Functional without
+                # get_intermediate_layers for DINOv2, which under load_model's safe mode refuses the
+                # graph's Lambdas.
+                teacher_name = f"{TEACHER_NAME_PREFIX}{self.encoder.name}"
+                with keras.name_scope(teacher_name):
+                    self.frozen_encoder = type(self.encoder).from_config(
+                        {**self.encoder.get_config(), "name": teacher_name})
                 self.frozen_encoder.set_weights(self.encoder.get_weights())
                 self.frozen_encoder.trainable = False
             except Exception as exc:  # pragma: no cover — diagnostic path
                 logger.warning(
-                    f"DepthAnything: clone_model(encoder) failed ({exc!r}); "
+                    f"DepthAnything: rebuilding the teacher encoder from the encoder's config failed ({exc!r}); "
                     "disabling feature alignment for this run"
                     + (
                         ", and the pseudo-label consistency term with it — "
@@ -525,10 +534,13 @@ class DepthAnything(keras.Model):
         a successful load, re-copies student → teacher when feature alignment
         is enabled, so the teacher starts from the pretrained snapshot.
 
-        :param weights_path: Path to a ``.keras`` checkpoint produced by
-            ``model.save(...)``. The checkpoint may itself be a
-            DepthAnything snapshot or a standalone encoder snapshot; the
-            weight-transfer helper matches by layer name.
+        :param weights_path: Path to a ``.keras`` checkpoint of a STANDALONE
+            encoder (``model.encoder.save(...)``); the weight-transfer helper
+            matches the encoder's layers by name. A whole DepthAnything
+            snapshot has none of those layer names at its top level (it holds
+            ``encoder_*``, ``frozen_encoder_*`` and ``depth_head``), so it
+            raises ``ValueError`` (no overlapping layers): load it with the
+            trainer's ``--init-from`` instead.
         :type weights_path: str
         :param skip_prefixes: Layer-name prefixes to ignore during transfer.
         :type skip_prefixes: Tuple[str, ...]
@@ -550,7 +562,7 @@ class DepthAnything(keras.Model):
             f"missing_in_source={len(report.missing_in_source)} "
             f"unused_in_source={len(report.unused_in_source)}"
         )
-        self._sync_teacher()
+        self.sync_teacher()
         return self
 
     def load_official_encoder_weights(self) -> 'DepthAnything':
@@ -572,14 +584,17 @@ class DepthAnything(keras.Model):
         if not self.built:
             self.build((None,) + tuple(self.image_shape))
         load_official_dinov2_file(self.encoder, _VIT_SCALE_MAP[self.encoder_type])
-        self._sync_teacher()
+        self.sync_teacher()
         return self
 
-    def _sync_teacher(self) -> None:
+    def sync_teacher(self) -> None:
         """Copy the student encoder's weights into the frozen teacher, if one exists.
 
-        Raises whatever ``set_weights`` raises: a teacher left at other weights
-        than the loaded student would feed the consistency term silently.
+        Interface contract (callers: :meth:`from_pretrained_encoder`,
+        :meth:`load_official_encoder_weights`, and the trainer's ``--init-from`` when the
+        checkpoint carries no teacher of its own): a no-op without a teacher. Raises whatever
+        ``set_weights`` raises: a teacher left at other weights than the loaded student would
+        feed the consistency term silently.
         """
         if self.frozen_encoder is not None:
             self.frozen_encoder.set_weights(self.encoder.get_weights())

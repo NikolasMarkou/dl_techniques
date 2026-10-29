@@ -301,13 +301,19 @@ def plain_head_config_overrides(
 def refuse_input_shape(kwargs: Mapping[str, Any], class_name: str, reason: str) -> None:
     """Raise for an ``input_shape`` or ``input_dim`` keyword a layer or model does not take.
 
-    Interface contract (call sites, from ``grep -rn refuse_input_shape src``: ``RBFProtoNet``,
-    ``CliffordRBFProtoNet``, ``UcaEncoder``, ``MambaLCT``, ``ConvUNextStem``, ``CliffordNet``,
-    ``HierarchicalCliffordNet``, ``DeepSortAppearanceNet``, ``DeepSortResidualBlock``,
-    ``CosineClassifier``, ``SiamFC``, ``SiamFCBackbone``, ``DaSiamRPN``, ``SiamRPNBackbone``,
-    ``DepthAnything``, ``PositionEmbeddingRandom`` and ``PromptEncoder``, each in its constructor, on its own keyword arguments and before the
-    base class constructor runs, in every layer or subclassed model that has no ``input_shape``
-    parameter): ``kwargs``
+    Interface contract (call sites, from ``grep -rn refuse_input_shape src``: ``ConvStem``, ``RBFProtoNet``,
+    ``CliffordRBFProtoNet``, ``UcaEncoder``, ``MambaLCT``, ``ConvUNextStem``, ``SpatialLinearAttention``,
+    ``CliffordNet``, ``HierarchicalCliffordNet``, ``DeepSortAppearanceNet``, ``DeepSortResidualBlock``,
+    ``CosineClassifier``, ``SiamFC``, ``SiamFCBackbone``, ``DaSiamRPN``, ``SiamRPNBackbone``, ``DepthAnything``,
+    ``DPTDecoder``, ``DPTFeatureFusionBlock``, ``DPTHead``, ``DPTResidualConvUnit``, ``DINOHead``, ``DINOv2Block``,
+    ``DINOv2PositionEmbedding``, ``DINOTrainingModel``, ``FireModule``, ``SimplifiedFireModule``, ``CliffordCLIP``,
+    ``PositionEmbeddingRandom``, ``PromptEncoder``, ``ImageEncoderViT``, ``ViTBlock``, ``WindowedAttentionWithRelPos``,
+    ``MaskDecoder``, ``SAM``, ``SAMTrainingModel``, ``TwoWayAttentionBlock`` and ``TwoWayTransformer``, each in its
+    constructor, on its own keyword arguments and before the base class constructor runs, in every Keras layer or
+    subclassed model of a finished family that has no ``input_shape`` parameter; the census
+    ``test_every_keras_constructor_of_a_finished_package_that_takes_no_shape_refuses_the_keyword`` derives that set from
+    the source, so a new class is found without anyone remembering it; a functional ``keras.Model`` subclass
+    calls :func:`refuse_unknown_model_kwargs` instead, which the census accepts as well): ``kwargs``
     is inspected, never mutated. ``keras.layers.Layer.__init__`` pops both keywords for the sake
     of ``Sequential`` and only warns ("Do not pass an `input_shape`/`input_dim` argument to a
     layer"), so a caller written against an older signature that took an
@@ -331,8 +337,12 @@ def refuse_input_shape(kwargs: Mapping[str, Any], class_name: str, reason: str) 
 def coerce_include_top(include_top: Any) -> bool:
     """Return ``include_top`` as a Python ``bool``, refusing anything else.
 
-    Interface contract (call sites: the ``__init__`` of every vision classifier that
-    takes ``include_top``, as its first statement, and ``DepthAnything``'s): ``bool`` and ``numpy.bool_`` (the
+    Interface contract (call sites, from ``grep -rn coerce_include_top src``: the ``__init__`` of ``ResNet``,
+    ``MobileNetV1``, ``MobileNetV2``, ``MobileNetV3``, ``MobileNetV4``, ``_ConvNeXtBase``, ``RADConvNet``,
+    ``CliffordNet``, ``HierarchicalCliffordNet``, ``SqueezeNetV1``, ``SqueezeNoduleNetV2``, ``DeepSortAppearanceNet``
+    and ``DepthAnything``, on their own ``include_top`` argument and before the code that builds or stores the head;
+    not always the first statement: the constructors that refuse a shape keyword do that first, and
+    the DeepSORT network calls ``super().__init__`` before it): ``bool`` and ``numpy.bool_`` (the
     type every comparison on an array yields) are accepted and coerced, so
     ``get_config`` stays JSON-serializable. Everything else is refused, including
     ``0``/``1``, a 0-d array, ``None`` and a string: ``bool("no")`` is ``True`` and

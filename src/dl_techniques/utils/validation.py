@@ -25,9 +25,16 @@ def positive_int(value: Any, name: str, owner: Optional[str] = None) -> int:
     """
     Check that a count argument is a positive integer, and return it as one.
 
-    Interface contract (callers: the head domains through
+    Interface contract (callers, from ``grep -rn "positive_int(" src``: every head
+    domain of ``layers/heads`` (``nlp``, ``vision``, ``vlm``) through
     ``layers/heads/validation.py``, ``layers/adapters/factory.py``,
-    ``layers/moe/config.py``):
+    ``layers/moe/config.py``, ``AttentionPooling``, ``WeightedPooling``,
+    ``SequencePooling`` and the sequence-pooling factory in
+    ``layers/sequence_pooling``, and the constructors of ``DaSiamRPN``,
+    ``DeepSortAppearanceNet``, ``DeepSortResidualBlock``, ``CosineClassifier``,
+    ``DepthAnything``, ``RBFProtoNet``, ``CliffordRBFProtoNet``, ``SiamFC``,
+    ``SqueezeNetV1``, ``SqueezeNoduleNetV2``, ``VQVAERotationTrick`` and SAM1's
+    ``PromptEncoder``):
 
     * An ``int`` or a numpy integer (a count read from an array shape, a
       ``.npy`` or ``np.argmax``) in ``[1, MAX_TENSOR_DIM]`` is returned as a

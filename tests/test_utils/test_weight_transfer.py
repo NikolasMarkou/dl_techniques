@@ -1764,3 +1764,72 @@ class TestARefusedLoadCopiesNothing:
         assert not _weights_equal(
             tgt.get_layer("stem").get_weights(), src.get_layer("stem").get_weights()
         )
+
+
+@keras.saving.register_keras_serializable(package="test_weight_transfer")
+class _Twins(keras.Model):
+    """A subclassed model whose two weighted children carry ONE name (``twin``)."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.first = keras.layers.Dense(4, name="twin")
+        self.second = keras.layers.Dense(4, name="twin")
+
+    def call(self, x):
+        return self.second(self.first(x))
+
+
+@keras.saving.register_keras_serializable(package="test_weight_transfer")
+class _WeightlessTwins(keras.Model):
+    """Two weightless children named ``act`` beside one weighted ``twin``."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.dense = keras.layers.Dense(4, name="twin")
+        self.act_a = keras.layers.Activation("relu", name="act")
+        self.act_b = keras.layers.Activation("relu", name="act")
+
+    def call(self, x):
+        return self.act_b(self.act_a(self.dense(x)))
+
+
+def _built_twins(cls=_Twins):
+    model = cls()
+    model(np.ones((1, 4), dtype="float32"))
+    return model
+
+
+def _functional_twin():
+    inp = keras.Input(shape=(4,), name="input")
+    return keras.Model(inp, keras.layers.Dense(4, name="twin")(inp), name="one_twin")
+
+
+class TestADuplicateLayerNameIsRefused:
+    """A transfer matches layers by name and keeps one layer per name.
+
+    Two weighted layers with one name made it fill the later one and leave the earlier one at its
+    initialization, with a report that listed a single loaded layer (DepthAnything's student and
+    frozen teacher, R4 finding 2). The transfer now refuses, naming the layers, before any copy.
+    """
+
+    def test_a_target_with_two_weighted_layers_of_one_name_is_refused(self, tmp_path):
+        ckpt = _save(_functional_twin(), tmp_path)
+        tgt = _built_twins()
+        fresh = [w.copy() for layer in (tgt.first, tgt.second) for w in layer.get_weights()]
+        with pytest.raises(ValueError, match=r"target.*\['twin'\]"):
+            load_weights_from_checkpoint(tgt, ckpt, skip_prefixes=())
+        assert _weights_equal(
+            [w for layer in (tgt.first, tgt.second) for w in layer.get_weights()], fresh)
+
+    def test_a_checkpoint_with_two_weighted_layers_of_one_name_is_refused(self, tmp_path):
+        ckpt = _save(_built_twins(), tmp_path)
+        tgt = _functional_twin()
+        with pytest.raises(ValueError, match=r"checkpoint.*\['twin'\]"):
+            load_weights_from_checkpoint(tgt, ckpt, skip_prefixes=())
+
+    def test_two_weightless_layers_of_one_name_are_not_read(self, tmp_path):
+        src = _built_twins(_WeightlessTwins)
+        ckpt = _save(src, tmp_path)
+        tgt = _built_twins(_WeightlessTwins)
+        report = load_weights_from_checkpoint(tgt, ckpt, skip_prefixes=())
+        assert report.loaded == ["twin"]

@@ -467,12 +467,35 @@ def create_model(config: DepthAnythingTrainingConfig) -> DepthAnything:
     )
 
 
+def encoder_kernel_counts(model: DepthAnything, report: TransferReport) -> Tuple[int, int]:
+    """Kernels of the student encoder that a transfer loaded, against the kernels it has.
+
+    Interface contract (caller: :func:`init_from_checkpoint`): ``expected`` is the number of
+    ``kernel`` variables of ``model.encoder``; ``loaded`` is ``expected`` when the transfer
+    ``report`` lists the encoder's layer name among the loaded layers and ``0`` otherwise (a
+    transfer copies a top-level layer whole or not at all). Reads names and variable paths
+    only; never raises for a built model. The student and the teacher carry different names
+    (``encoder_*`` and ``frozen_encoder_*``), so a report that lists the teacher counts 0 here.
+
+    :param model: The built model.
+    :param report: The report of the transfer into ``model``.
+    :return: ``(loaded, expected)``.
+    """
+    expected = sum(1 for w in model.encoder.weights if w.path.endswith("/kernel"))
+    return (expected if model.encoder.name in report.loaded else 0), expected
+
+
 def init_from_checkpoint(model: DepthAnything, ckpt_path: str) -> TransferReport:
     """Load every layer of a saved DepthAnything except its decoder.
 
     The decoder is skipped by the name of ``model.decoder``, so it trains
-    from a fresh init while the encoder (and the teacher, if both models
-    have one) starts from the checkpoint.
+    from a fresh init while the student encoder (and the teacher, if both models
+    have one) starts from the checkpoint. A checkpoint without a teacher leaves the
+    model's teacher equal to the loaded student, not at its random start.
+
+    The log states the student's kernels loaded against the kernels it has. Before the
+    teacher had a name of its own, the student and the teacher shared one, and the transfer
+    filled the teacher and left the student random while reporting one loaded layer.
 
     :param model: A built DepthAnything with its head (``include_top=True``).
     :type model: DepthAnything
@@ -480,7 +503,7 @@ def init_from_checkpoint(model: DepthAnything, ckpt_path: str) -> TransferReport
     :type ckpt_path: str
     :return: The transfer report; ``skipped_by_prefix`` names the decoder.
     :rtype: TransferReport
-    :raises RuntimeError: If no layer was loaded.
+    :raises RuntimeError: If the student encoder was not loaded.
     """
     logger.info(f"Initializing from pretrained checkpoint: {ckpt_path}")
     # The prefix is read off the model. It used to be the literal
@@ -492,11 +515,26 @@ def init_from_checkpoint(model: DepthAnything, ckpt_path: str) -> TransferReport
         ckpt_path=ckpt_path,
         skip_prefixes=(model.decoder.name,),
     )
-    if report.num_loaded == 0:
+    # DECISION plan-2026-10-26T125959-7af851e5/D-055
+    # Do NOT read `report.num_loaded` as "the encoder loaded": it counts top-level layers, and the report
+    # that listed one loaded layer was the TEACHER's. The student is checked by its own name, and kernels
+    # are counted against the kernels the student has.
+    loaded, expected = encoder_kernel_counts(model, report)
+    teacher = model.frozen_encoder
+    logger.info(
+        f"--init-from: student encoder {model.encoder.name!r}: {loaded} of {expected} kernels loaded; "
+        + ("no teacher; " if teacher is None else
+           f"teacher {teacher.name!r}: {'loaded' if teacher.name in report.loaded else 'not in the checkpoint'}; ")
+        + f"decoder {model.decoder.name!r}: kept at its initialization"
+    )
+    if loaded == 0:
         raise RuntimeError(
-            f"Pretrained init loaded 0 layers from {ckpt_path} — "
+            f"Pretrained init loaded 0 of {expected} kernels of the student encoder "
+            f"{model.encoder.name!r} from {ckpt_path} (layers loaded: {report.loaded}) - "
             f"likely a checkpoint / architecture mismatch."
         )
+    if teacher is not None and teacher.name not in report.loaded:
+        model.sync_teacher()
     return report
 
 

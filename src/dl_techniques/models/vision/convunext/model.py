@@ -313,6 +313,7 @@ class SpatialLinearAttention(keras.layers.Layer):
         name: Optional[str] = None,
         **kwargs
     ):
+        refuse_input_shape(kwargs, "SpatialLinearAttention", "it runs at any spatial size")
         super().__init__(name=name, **kwargs)
         self.dim = dim
         self.num_heads = num_heads

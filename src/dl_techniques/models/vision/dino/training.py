@@ -64,6 +64,7 @@ from dl_techniques.models.vision.dino.dino_v1 import (
 )
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.model_build import refuse_input_shape
 
 # ---------------------------------------------------------------------
 
@@ -154,6 +155,7 @@ class DINOTrainingModel(keras.Model):
             n_local_views: int = 0,
             **kwargs: Any
     ) -> None:
+        refuse_input_shape(kwargs, "DINOTrainingModel", "it wraps a student and a teacher that are already built")
         super().__init__(**kwargs)
 
         if n_local_views < 0:

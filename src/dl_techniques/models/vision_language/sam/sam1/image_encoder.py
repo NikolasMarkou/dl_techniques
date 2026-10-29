@@ -40,6 +40,7 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.model_build import refuse_input_shape
 
 # ---------------------------------------------------------------------
 
@@ -110,6 +111,7 @@ class WindowedAttentionWithRelPos(layers.Layer):
         input_size: Optional[Tuple[int, int]] = None,
         **kwargs: Any
     ) -> None:
+        refuse_input_shape(kwargs, "WindowedAttentionWithRelPos", "its relative-position grid is input_size")
         super().__init__(**kwargs)
         # Store all configuration parameters
         self.dim = dim
@@ -383,6 +385,9 @@ class ViTBlock(layers.Layer):
         activation: str = 'gelu',
         **kwargs: Any
     ) -> None:
+        refuse_input_shape(
+            kwargs, "ViTBlock",
+            "its attention window is window_size and its relative-position grid input_size")
         super().__init__(**kwargs)
         # Store all configuration parameters
         self.dim = dim
@@ -670,6 +675,7 @@ class ImageEncoderViT(keras.Model):
         activation: str = 'gelu',
         **kwargs: Any
     ) -> None:
+        refuse_input_shape(kwargs, "ImageEncoderViT", "the image side is img_size and the channel count in_chans")
         super().__init__(**kwargs)
 
         # DECISION plan-2026-08-03T191222-1d751f81/D-014: refuse only when

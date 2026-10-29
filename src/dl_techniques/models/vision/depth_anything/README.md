@@ -125,7 +125,7 @@ It is composed of three sub-networks:
 |--------------------|-------------------------------|-------------------|-----------|
 | `encoder`          | `DINOv2VisionTransformer` or the Conv placeholder | `build()` | yes (the unused iBOT mask token frozen) |
 | `decoder`          | `DPTHead`, named `depth_head` | `build()`, only when `include_top=True` | yes |
-| `frozen_encoder`   | a second encoder of the same config (DINOv2 rebuilt from its config, the placeholder by `clone_model`), weights copied at build | `build()` if `use_feature_alignment=True` **or** `enable_semi_supervised=True` | no |
+| `frozen_encoder`   | a second encoder of the same config, rebuilt from `encoder.get_config()` under the name `frozen_<encoder name>` (`frozen_encoder_vit_s`, `frozen_encoder_vit_s_real`), weights copied at build | `build()` if `use_feature_alignment=True` **or** `enable_semi_supervised=True` | no |
 | `augmentation`     | `StrongAugmentation` layer    | `build()`         | n/a |
 
 Forward path (`call`):
@@ -407,15 +407,16 @@ Its attention layers used to start `qkv` and `proj` from one shared sample, insi
 own initializer (decision D-054), so the real model replays nothing (0 of 3,403). The official weights
 and every layer name are unchanged (weights keyed by path transplant with outputs equal at `atol=0`), but
 a seeded build of the real model at `vit_s`, 56 px differs from the earlier code in 126 of its 410
-tensors, all kernels: 47 encoder kernels, each listed twice because the frozen teacher repeats every
-name (94), and 32 decoder kernels. Each block's `proj` is a new draw, and so is every default-seeded
+tensors, all kernels: 47 encoder kernels of the student and the same 47 of the frozen teacher (94), and 32
+decoder kernels. Each block's `proj` is a new draw, and so is every default-seeded
 kernel created after it (the blocks' FFN kernels, `qkv` of the blocks after the first, the decoder's
 convolutions). The first block's `qkv`, the patch embedding, the tokens and every bias and norm tensor
 are equal. The trained function is the same; only the starting weights of a run that does not load the
 official ones moved.
 
-`frozen_encoder` for the placeholder is `keras.models.clone_model(encoder)`; the stem clones with it, and
-the teacher's output equals the student's at `atol=0` until the EMA moves it.
+The frozen teacher of either encoder kind is rebuilt from the student's config (the placeholder's stem
+rebuilds with it), and its output equals the student's at `atol=0` until the EMA moves it. Its name is
+documented in "Layer names and weight paths of the teacher" below.
 
 **Archives written before the stem.** Measured with a `.keras` file saved by `be92a74eb` and by
 `20b48aba6^` (each in its own process, loaded by the current code; the two give the same results).
@@ -424,11 +425,49 @@ because the archive carries the encoder's own serialized graph: what comes back 
 encoder, not a `ConvStem`. `model.load_weights` into a freshly built placeholder model fails: "A total of
 26 objects could not be loaded ... Layer 'initial_stem_conv1' expected 1 variables, but received 0",
 because the stem is one tracked layer where the archive holds three. The weights themselves move by path:
-copying the weights of an earlier `vit_s` placeholder model at 64 px (152 weights on 106 distinct paths:
-the frozen teacher shares every name) into a current one through
+copying the weights of an earlier `vit_s` placeholder model at 64 px (152 weights, on 106 distinct paths
+because the frozen teacher then repeated the student's paths; see the next subsection) into a current one through
 `initial_conv/kernel` to `initial_stem/initial_stem_conv1/kernel` and `initial_bn/*` to
 `initial_stem/initial_stem_norm1/*` gives outputs equal at `atol=0`. Archives of the real DINOv2 model are
 unaffected: both loaders restore them with equal outputs (410 weights).
+
+### Layer names and weight paths of the teacher
+
+The student and the frozen teacher used to carry ONE layer name (`encoder_vit_s`, or `encoder_vit_s_real`: a
+clone keeps the name) and one set of weight paths (152 weights on 106 paths with the placeholder, 410 on 235 with the
+DINOv2 encoder). Everything that matches layers by name keeps one layer per name, so `--init-from` of the trainer
+(`load_weights_from_checkpoint`) filled the teacher and left the student at its random start while it reported
+"loaded 1 layer": measured on a model with a teacher, 0 of 10 student kernels equal the checkpoint's and 10 of 10 of the
+teacher's. The trainer then applied the pretrained-start learning rate (the decoder at 10x) to a random encoder.
+
+| | Before | Now |
+| :--- | :--- | :--- |
+| student layer name | `encoder_vit_s` / `encoder_vit_s_real` | unchanged |
+| teacher layer name | the student's | `frozen_encoder_vit_s` / `frozen_encoder_vit_s_real` (`TEACHER_NAME_PREFIX` + the student's name) |
+| student weight paths | `<root>/<layer>/...` | unchanged (the student's own name is not a path segment) |
+| teacher weight paths | the student's, repeated | `<root>/frozen_<student name>/<layer>/...`, every path distinct |
+| `.keras` archive keys | the attributes `encoder`, `frozen_encoder` | unchanged |
+
+The teacher is built under `keras.name_scope(<its name>)`, which is what puts the name in its paths. `get_config` writes the
+student only, so no archive carries the teacher's name and none can disagree with the code. The weight-transfer helper
+now raises when two weight-holding layers of a model or a checkpoint share a name, and the trainer's `--init-from`
+raises when the student was not loaded; both are pinned (`test_the_teacher_encoder_has_a_name_of_its_own.py`, the
+`sibling_name_duplicates` rows of the runtime contract over every finished family).
+
+**Archives and checkpoints written before the rename.** Measured with `.keras` files saved by `be92a74eb` and by
+`20b48aba6^` (each in its own process, a model with a teacher, loaded by the current code; the two give the same
+results; `scratch_iter2/step19_2`):
+
+* `keras.models.load_model` restores them with equal outputs for `training=False` and `True` at `atol=0`, for the
+  placeholder and for the real encoder at 56 px: the archive is keyed by the attributes, not by layer names.
+* `model.load_weights` into a freshly built current model restores the real-encoder archive with equal outputs (410
+  weights; 175 paths exist only in the new spelling, the teacher's). It fails for the placeholder ("A total of 26
+  objects could not be loaded ... Layer 'initial_stem_conv1' expected 1 variables, but received 0"), because of the
+  stem change above, not of the teacher.
+* Weights keyed by path transplant: the old list repeats each path, the second occurrence is the teacher, and it goes to
+  `<root>/frozen_<student name>/<rest>`. All 410 (real) and 152 (placeholder) tensors find a place, outputs equal at `atol=0`.
+* The trainer's `--init-from` with such a checkpoint loads the student and the teacher, each from its own weights
+  (10 of 10 kernels of the placeholder student, teacher different from the student by construction of the probe).
 
 ---
 

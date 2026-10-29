@@ -63,6 +63,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.weight_transfer import refuse_pretrained
+from dl_techniques.utils.model_build import refuse_input_shape
 
 # ---------------------------------------------------------------------------
 
@@ -449,6 +450,7 @@ class CliffordCLIP(keras.Model):
         bias_regularizer: Optional[Any] = None,
         **kwargs: Any,
     ) -> None:
+        refuse_input_shape(kwargs, "CliffordCLIP", "the image side is image_size and the channel count image_channels")
         super().__init__(**kwargs)
 
         if image_size <= 0:

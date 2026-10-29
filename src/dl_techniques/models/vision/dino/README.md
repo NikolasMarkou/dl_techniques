@@ -100,7 +100,7 @@ file-dependent tests skip with the path when the download is absent) and
 `attention_type` accepts `multi_head` (the default and the only one with the official checkpoint's
 structure), `multi_head_cross`, `gated`, `linear` and `ring`
 (`dino_v2.SUPPORTED_ATTENTION_TYPES`); any other value, including every other key of the attention
-registry, raises `ValueError` naming that set when the block is built. The excluded types fall into three
+registry, raises `ValueError` naming that set at construction (in `DINOv2Block.__init__`, before any layer exists). The excluded types fall into three
 groups, each measured on a block of width 64 with 4 heads: `anchor`, `perceiver`, `performer`, `rpc` and
 `wave_field` start several projections from one shared random draw and declare no argument that separates
 them; the window, `differential`, `group_query` and `multi_head_latent` types need arguments the block

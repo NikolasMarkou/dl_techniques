@@ -91,6 +91,8 @@ same type), so the migration that fixes or changes a row edits its ledger line i
 the same commit. An empty ledger means the contract is complete.
 """
 
+import ast
+import collections
 import copy
 import functools
 import importlib
@@ -1785,14 +1787,43 @@ def direct_children(model: keras.layers.Layer) -> List[str]:
 
     Interface contract: the direct sublayers of a model or of a plain layer (for a model
     this is ``model.layers``; Keras tracks the ones kept in a list or a dict attribute
-    too). Returns the distinct names, sorted. A weightless child (a drop path, an
-    activation, a pooling) is therefore read, which the weight paths of a built model
-    cannot show. The ``InputLayer`` a functional model holds is not read: it is not a
-    layer the model chose, and its name is a process-wide counter (``input_layer_7``).
+    too). Returns the names sorted, ONE PER LAYER: a name two children share appears twice,
+    so a row that compares the list with the names an architecture gives (:func:`numbering_problems`)
+    fails on a duplicate (it used to return the distinct names, and a student and a frozen teacher
+    that both read ``encoder_vit_s`` looked like one encoder). A weightless child (a drop path, an
+    activation, a pooling) is read, which the weight paths of a built model cannot show. The
+    ``InputLayer`` a functional model holds is not read: it is not a layer the model chose, and
+    its name is a process-wide counter (``input_layer_7``).
     """
-    return sorted({layer.name
-                   for layer in model._flatten_layers(include_self=False, recursive=False)
-                   if not isinstance(layer, keras.layers.InputLayer)})
+    return sorted(layer.name
+                  for layer in model._flatten_layers(include_self=False, recursive=False)
+                  if not isinstance(layer, keras.layers.InputLayer))
+
+
+def sibling_name_duplicates(model: keras.layers.Layer) -> List[str]:
+    """Every pair of layers that share a name under one parent, anywhere in ``model``.
+
+    Interface contract: walks the layer tree below ``model`` (each layer once, however many
+    attributes hold it) and, for every layer, counts its direct children by name
+    (:func:`direct_children` semantics, ``InputLayer`` excluded). Returns one message per
+    repeated name, ``"<path>: `<name>` x<count>"``, sorted; empty when every layer's children
+    carry distinct names. Names that repeat under DIFFERENT parents (``attention`` in each
+    block) are the layers' own business and are not read. Raises nothing.
+    """
+    problems: List[str] = []
+    seen = set()
+    stack = [(model.name, model)]
+    while stack:
+        path, layer = stack.pop()
+        if id(layer) in seen:
+            continue
+        seen.add(id(layer))
+        children = [child for child in layer._flatten_layers(include_self=False, recursive=False)
+                    if not isinstance(child, keras.layers.InputLayer)]
+        counts = collections.Counter(child.name for child in children)
+        problems.extend(f"{path}: `{name}` x{count}" for name, count in counts.items() if count > 1)
+        stack.extend((f"{path}/{child.name}", child) for child in children)
+    return sorted(problems)
 
 
 def child_name_violations(key: str, children: Sequence[str]) -> List[str]:
@@ -1892,6 +1923,107 @@ def test_direct_children_lists_every_direct_sublayer_weighted_or_not() -> None:
     model.drop = keras.layers.Dropout(0.1, name="dropout_0")
     model(np.ones((2, 5), dtype="float32"))
     assert direct_children(model) == ["body", "classification_head", "dropout_0"]
+
+
+class _Twinned(keras.Model):
+    """Planted: two children of the model named ``twin``, and one nested layer with two named ``inner``.
+
+    ``twinned=False`` is the clean twin: distinct child names, and ``inner`` once under each of two parents.
+    """
+
+    def __init__(self, twinned: bool = True, **kwargs):
+        super().__init__(**kwargs)
+        self.first = keras.layers.Dense(3, name="twin" if twinned else "first")
+        self.second = keras.layers.Dense(3, name="twin" if twinned else "second")
+        self.nested = _Nest(name="nest", twins=twinned)
+        self.fine = _Nest(name="fine", twins=False)
+
+    def call(self, x):
+        return self.fine(self.nested(self.second(self.first(x))))
+
+
+class _Nest(keras.layers.Layer):
+    def __init__(self, twins: bool = True, **kwargs):
+        super().__init__(**kwargs)
+        self.twins = twins
+        self.a = keras.layers.Dense(3, name="inner")
+        if twins:
+            self.b = keras.layers.Dense(3, name="inner")
+
+    def call(self, x):
+        return self.b(self.a(x)) if self.twins else self.a(x)
+
+
+def test_direct_children_lists_two_layers_of_one_name_twice() -> None:
+    model = _Twinned()
+    model(np.ones((2, 3), dtype="float32"))
+    assert direct_children(model) == ["fine", "nest", "twin", "twin"]
+
+
+def test_the_exact_name_set_rule_fails_on_a_name_two_layers_share() -> None:
+    assert numbering_problems(["a", "b"], {"a", "b"}) == []
+    assert numbering_problems(["a", "a", "b"], {"a", "b"}) == ["`a` is the name of 2 layers"]
+    assert numbering_problems(["a", "a"], {"a", "b"}) == ["missing `b`", "`a` is the name of 2 layers"]
+
+
+def test_the_sibling_name_rule_sees_a_repeat_at_every_depth_and_only_under_one_parent() -> None:
+    model = _Twinned(name="planted")
+    model(np.ones((2, 3), dtype="float32"))
+    assert sibling_name_duplicates(model) == ["planted/nest: `inner` x2", "planted: `twin` x2"]
+    clean = _Twinned(twinned=False, name="clean")
+    clean(np.ones((2, 3), dtype="float32"))
+    assert sibling_name_duplicates(clean) == [], "`inner` under two parents is not a repeat"
+
+
+@functools.lru_cache(maxsize=None)
+def roster_facts(key: str) -> Tuple[Tuple[str, ...], Tuple[str, ...], int]:
+    """What one build of a replay-roster subject shows, read once per process.
+
+    Interface contract: builds ``REPLAY_SUBJECTS[key]`` at seed 1234 with its default arm and returns
+    ``(sibling_name_duplicates, the directories of the packages under dl_techniques/models that define a class
+    in the model's layer tree, the number of layers below the model)``. The tree is read, not only the model's
+    own class, because a functional model (ConvUNext) is a plain Keras ``Functional`` whose family shows in its
+    layers. Cached, so the rows that read the roster share one build per subject; the model itself is not kept.
+    Raises whatever the builder raises.
+    """
+    build, _ = REPLAY_SUBJECTS[key]
+    keras.utils.set_random_seed(1234)
+    model = build(None)
+    layers = list(model._flatten_layers(include_self=True))
+    models_root = SRC / "models"
+    packages = set()
+    for layer in layers:
+        module = inspect.getmodule(type(layer))
+        origin = Path(module.__file__).resolve() if getattr(module, "__file__", None) else None
+        if origin is not None and models_root in origin.parents:
+            packages.add(str(origin.parent))
+    return tuple(sibling_name_duplicates(model)), tuple(sorted(packages)), len(layers) - 1
+
+
+@pytest.mark.parametrize("key", list(REPLAY_SUBJECTS))
+def test_no_two_sibling_layers_of_a_finished_model_share_a_name(key: str) -> None:
+    """Every finished family's built model, its frozen teacher and nested stems included.
+
+    A transfer that matches layers by name keeps one layer per name, and a by-path reader keeps one
+    weight per path: the student and the frozen teacher of ``DepthAnything`` shared a name and filled
+    the wrong one (R4 finding 2). The subjects are the replay roster, so a model added to it is read
+    here without anyone remembering to list it.
+    """
+    duplicates, _, layers = roster_facts(key)
+    assert layers > 0, "control: the model owns no layer"
+    assert duplicates == ()
+
+
+@pytest.mark.parametrize(
+    ("key", "index"),
+    [(key, i) for key, builds in FAMILY_BUILDS.items() for i in range(len(builds))],
+    ids=lambda v: str(v))
+def test_no_two_sibling_layers_of_a_family_variant_share_a_name(key: str, index: int) -> None:
+    """The variants of the classifier families: headless, deep supervision, bypass, drop path, the 3D model."""
+    keras.utils.set_random_seed(1234)
+    model = FAMILY_BUILDS[key][index]()
+    assert len(list(model._flatten_layers(include_self=False))) > 0, "control: the model owns no layer"
+    assert sibling_name_duplicates(model) == []
 
 
 # ---------------------------------------------------------------------------
@@ -2014,10 +2146,14 @@ def numbering_problems(owned: Sequence[str], expected: set) -> List[str]:
 
     Interface contract: ``owned`` is :func:`direct_children` of a built model; ``expected``
     the set derived from the arguments the test built it with. Returns one message per name
-    that is missing or unexpected, empty when the two sets are equal. Raises nothing.
+    that is missing, unexpected or owned by more than one layer, empty when the layers are
+    exactly the set, each once. Raises nothing.
     """
-    return ([f"missing `{name}`" for name in sorted(expected - set(owned))]
-            + [f"unexpected `{name}`" for name in sorted(set(owned) - expected)])
+    counts = collections.Counter(owned)
+    return ([f"missing `{name}`" for name in sorted(expected - set(counts))]
+            + [f"unexpected `{name}`" for name in sorted(set(counts) - expected)]
+            + [f"`{name}` is the name of {count} layers" for name, count in sorted(counts.items())
+               if count > 1])
 
 
 def test_every_finished_family_has_an_exact_numbered_name_set() -> None:
@@ -2381,12 +2517,13 @@ TRACKER_NUMBERED: Dict[str, Tuple[Callable[[], keras.Model], Callable[[], Any],
     "dasiamrpn": (_dasiamrpn_build, _dasiamrpn_pair, _dasiamrpn_owned),
     "siamrpn_backbone": (_siamrpn_backbone_build, lambda: _images(127, 127, 3, batch=1),
                          _siam_backbone_owned),
-    # The student and its frozen teacher share the name ``encoder_vit_s`` (a clone keeps it), so the
-    # distinct-name set reads one encoder whether or not a teacher exists.
+    # The frozen teacher is ``frozen_<student name>`` (D-055). It used to share the student's name, and
+    # the old distinct-name set read one encoder whether or not a teacher existed.
     "depth_anything": (_depth_anything_build, lambda: _images(64, 64, 3),
                        lambda: {"encoder_vit_s", "depth_head", "strong_augmentation"}),
     "depth_anything_with_teacher": (lambda: _depth_anything_build(teacher=True), lambda: _images(64, 64, 3),
-                                    lambda: {"encoder_vit_s", "depth_head", "strong_augmentation"}),
+                                    lambda: {"encoder_vit_s", "frozen_encoder_vit_s", "depth_head",
+                                             "strong_augmentation"}),
     "depth_anything_encoder": (_depth_anything_encoder_build, lambda: _images(64, 64, 3),
                                _depth_anything_encoder_owned),
     "vq_vae_rotation_encoder": (_vq_encoder_build, lambda: _images(32, 32, 3), _vq_encoder_owned),
@@ -2622,13 +2759,174 @@ def _depth_anything_without_shape(**kw: Any) -> Any:
     return DepthAnything(encoder_kind="placeholder", image_shape=(64, 64, 3), **kw)
 
 
+@_no_shape("siamfc_factory")
+def _siamfc_factory_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.siamfc.model import create_siamfc
+    return create_siamfc(**kw)
+
+
+@_no_shape("dasiamrpn_factory")
+def _dasiamrpn_factory_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.dasiamrpn.model import create_dasiamrpn
+    return create_dasiamrpn(**kw)
+
+
+@_no_shape("deepsort_factory")
+def _deepsort_factory_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.deepsort.appearance import create_deepsort_embedding
+    return create_deepsort_embedding(**kw)
+
+
+@_no_shape("depth_anything_factory")
+def _depth_anything_factory_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.depth_anything.model import create_depth_anything
+    return create_depth_anything(encoder_kind="placeholder", image_shape=(64, 64, 3), **kw)
+
+
+#: Rows added by the census (step 19.2): the owned blocks and the models of the finished families that had no row,
+#: each built with the smallest arguments its constructor accepts.
+@_no_shape("conv_stem")
+def _conv_stem_without_shape(**kw: Any) -> Any:
+    from dl_techniques.layers.conv_blocks.stem import ConvStem
+    return ConvStem(8, **kw)
+
+
+@_no_shape("convunext_spatial_linear_attention")
+def _spatial_linear_attention_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.convunext.model import SpatialLinearAttention
+    return SpatialLinearAttention(dim=8, num_heads=2, **kw)
+
+
+@_no_shape("dpt_head")
+def _dpt_head_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.depth_anything.components import DPTHead
+    return DPTHead(**kw)
+
+
+@_no_shape("dpt_decoder")
+def _dpt_decoder_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.depth_anything.components import DPTDecoder
+    return DPTDecoder(**kw)
+
+
+@_no_shape("dpt_feature_fusion_block")
+def _dpt_fusion_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.depth_anything.components import DPTFeatureFusionBlock
+    return DPTFeatureFusionBlock(features=8, **kw)
+
+
+@_no_shape("dpt_residual_conv_unit")
+def _dpt_residual_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.depth_anything.components import DPTResidualConvUnit
+    return DPTResidualConvUnit(features=8, **kw)
+
+
+@_no_shape("dino_head")
+def _dino_head_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.dino.dino_v1 import DINOHead
+    return DINOHead(in_dim=8, out_dim=16, **kw)
+
+
+@_no_shape("dinov2_block")
+def _dinov2_block_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.dino.dino_v2 import DINOv2Block
+    return DINOv2Block(dim=16, num_heads=2, **kw)
+
+
+@_no_shape("dinov2_position_embedding")
+def _dinov2_position_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.dino.dino_v2 import DINOv2PositionEmbedding
+    return DINOv2PositionEmbedding(grid_size=2, output_grid=(2, 2), **kw)
+
+
+@_no_shape("dino_training_model")
+def _dino_training_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.dino.training import DINOTrainingModel
+    return DINOTrainingModel(student=None, teacher=None, **kw)
+
+
+@_no_shape("squeezenet_fire_module")
+def _fire_module_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.squeezenet.squeezenet_v1 import FireModule
+    return FireModule(s1x1=8, e1x1=16, e3x3=16, **kw)
+
+
+@_no_shape("squeezenet_simplified_fire_module")
+def _simplified_fire_module_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision.squeezenet.squeezenet_v2 import SimplifiedFireModule
+    return SimplifiedFireModule(s1x1=8, e3x3=16, **kw)
+
+
+@_no_shape("clifford_clip")
+def _clifford_clip_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision_language.clifford_clip.model import CliffordCLIP
+    return CliffordCLIP(**kw)
+
+
+@_no_shape("sam1_image_encoder")
+def _sam1_image_encoder_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision_language.sam.sam1.image_encoder import ImageEncoderViT
+    return ImageEncoderViT(**kw)
+
+
+@_no_shape("sam1_vit_block")
+def _sam1_vit_block_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision_language.sam.sam1.image_encoder import ViTBlock
+    return ViTBlock(dim=16, num_heads=2, **kw)
+
+
+@_no_shape("sam1_windowed_attention")
+def _sam1_attention_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision_language.sam.sam1.image_encoder import WindowedAttentionWithRelPos
+    return WindowedAttentionWithRelPos(dim=16, num_heads=2, **kw)
+
+
+@_no_shape("sam1_mask_decoder")
+def _sam1_mask_decoder_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision_language.sam.sam1.mask_decoder import MaskDecoder
+    return MaskDecoder(transformer_dim=16, transformer=None, **kw)
+
+
+@_no_shape("sam1_model")
+def _sam1_model_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision_language.sam.sam1.model import SAM
+    return SAM(image_encoder=None, prompt_encoder=None, mask_decoder=None, **kw)
+
+
+@_no_shape("sam1_training_model")
+def _sam1_training_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision_language.sam.sam1.training_model import SAMTrainingModel
+    return SAMTrainingModel(sam=None, **kw)
+
+
+@_no_shape("sam1_two_way_attention_block")
+def _sam1_two_way_block_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision_language.sam.sam1.transformer import TwoWayAttentionBlock
+    return TwoWayAttentionBlock(embedding_dim=16, num_heads=2, mlp_dim=32, **kw)
+
+
+@_no_shape("sam1_two_way_transformer")
+def _sam1_two_way_transformer_without_shape(**kw: Any) -> Any:
+    from dl_techniques.models.vision_language.sam.sam1.transformer import TwoWayTransformer
+    return TwoWayTransformer(depth=1, embedding_dim=16, num_heads=2, mlp_dim=32, **kw)
+
+
+#: Rows whose arguments are placeholders (``None`` for a wrapped model) or whose valid construction is a full model: the
+#: constructor refuses a shape keyword FIRST, which these rows observe; an unknown keyword reaches Keras only after the
+#: constructor has checked or built its arguments, so the unknown-keyword row does not apply to them.
+SHAPE_REFUSAL_ONLY = frozenset({
+    "dino_training_model", "clifford_clip", "sam1_image_encoder", "sam1_mask_decoder", "sam1_model",
+    "sam1_training_model"})
+
+
 def swallowed_shape_keywords(build: Callable[..., Any]) -> List[str]:
     """The shape keywords ``build`` accepts without raising ``ValueError`` (empty when it refuses both).
 
     Interface contract: ``build(**kw)`` constructs the subject with the given extra keywords. A
     keyword counts as swallowed when construction succeeds (or Keras only warns); a ``ValueError``
-    that does not name the keyword also counts, because the refusal must say what was wrong.
-    Any other exception propagates.
+    or ``TypeError`` that does not name the keyword also counts, because the refusal must say what was
+    wrong. A ``TypeError`` is Python's own refusal of a function that has no ``**kwargs`` (a factory with
+    a fixed signature) and names the keyword. Any other exception propagates.
     """
     import warnings
     swallowed = []
@@ -2638,7 +2936,7 @@ def swallowed_shape_keywords(build: Callable[..., Any]) -> List[str]:
             warnings.simplefilter("ignore")
             try:
                 build(**{key: value})
-            except ValueError as error:
+            except (ValueError, TypeError) as error:
                 if key not in str(error):
                     swallowed.append(key)
             else:
@@ -2651,9 +2949,11 @@ def test_a_constructor_without_an_input_shape_parameter_refuses_the_keyword(key:
     assert swallowed_shape_keywords(NO_SHAPE_CONSTRUCTORS[key]) == []
 
 
-@pytest.mark.parametrize("key", [_param("unknown_keyword_refused", k) for k in NO_SHAPE_CONSTRUCTORS])
+@pytest.mark.parametrize("key", [_param("unknown_keyword_refused", k)
+                                 for k in NO_SHAPE_CONSTRUCTORS if k not in SHAPE_REFUSAL_ONLY])
 def test_an_unknown_keyword_is_refused_naming_it(key: str) -> None:
-    with pytest.raises(ValueError, match="not_an_argument"):
+    # ValueError from Keras; TypeError from Python for a factory whose signature has no **kwargs
+    with pytest.raises((ValueError, TypeError), match="not_an_argument"):
         NO_SHAPE_CONSTRUCTORS[key](not_an_argument=1)
 
 
@@ -2681,6 +2981,195 @@ def test_the_no_shape_rule_sees_a_constructor_that_swallows_the_keyword() -> Non
 
 
 # ---------------------------------------------------------------------------
+# The refusal is derived from the source, not remembered
+# ---------------------------------------------------------------------------
+
+#: Calls that refuse a shape keyword by name: ``refuse_input_shape`` for both keywords, and
+#: ``refuse_unknown_model_kwargs`` for a functional ``keras.Model`` subclass (every key outside ``name``, ``trainable``
+#: and ``dtype`` is refused, and the message prints the dict, so it names ``input_shape``).
+_REFUSERS = ("refuse_input_shape", "refuse_unknown_model_kwargs")
+_KERAS_BASES = frozenset({"Layer", "Model", "Sequential"})
+_STEM_FILE = SRC / "layers" / "conv_blocks" / "stem.py"
+
+
+def scan_constructors(sources: Dict[str, str]) -> Tuple[List[str], Dict[str, str], List[str]]:
+    """Which Keras layers and models in ``sources`` would swallow an ``input_shape`` keyword.
+
+    Interface contract: ``sources`` maps a label (a path) to Python source text. A class counts when it derives
+    from ``Layer``, ``Model`` or ``Sequential``, directly or through a class in ``sources`` (resolved by name).
+    ``keras.layers.Layer.__init__`` pops ``input_shape`` and ``input_dim`` and only warns, so a class that has no
+    such parameter and forwards ``**kwargs`` must refuse them itself. Returns ``(violations, exempt, checked)``:
+    ``violations`` are ``"<label>:<line> <Class>"`` for a class that takes no shape parameter, accepts ``**kwargs``
+    and neither calls a refuser (:data:`_REFUSERS`) nor inherits a constructor that does; ``exempt`` maps a class
+    name to the reason it needs no refusal of its own (it inherits a constructor, or forwards ``**kwargs`` to a parent
+    that takes or refuses the keyword); ``checked`` lists every class the scan read, so a caller can assert the scan was
+    not empty. A class with no ``**kwargs`` is in neither (Python raises ``TypeError`` for the unknown keyword), a
+    class that is not a Keras layer or model is not read. Raises ``SyntaxError`` for source that does not parse.
+    """
+    classes: Dict[Tuple[str, str], ast.ClassDef] = {}
+    for label, text in sources.items():
+        for node in ast.walk(ast.parse(text)):
+            if isinstance(node, ast.ClassDef):
+                classes[(label, node.name)] = node
+    by_name: Dict[str, List[Tuple[str, str]]] = collections.defaultdict(list)
+    for key in classes:
+        by_name[key[1]].append(key)
+
+    def base_names(node: ast.ClassDef) -> List[str]:
+        return [ast.unparse(b).split(".")[-1] for b in node.bases]
+
+    derived = set()
+    changed = True
+    while changed:
+        changed = False
+        for key, node in classes.items():
+            if key not in derived and any(
+                    b in _KERAS_BASES or any(k in derived for k in by_name.get(b, ()))
+                    for b in base_names(node)):
+                derived.add(key)
+                changed = True
+
+    verdicts: Dict[Tuple[str, str], str] = {}
+
+    def verdict(key: Tuple[str, str]) -> str:
+        """``ok`` / ``no-kwargs`` / ``inherits <Parent>`` / ``forwards <Parent>`` / ``violation``."""
+        if key in verdicts:
+            return verdicts[key]
+        verdicts[key] = "violation"  # a cycle cannot happen in valid source; this keeps the walk finite
+        node = classes[key]
+        init = next((n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"), None)
+        parents = [p for b in base_names(node) for p in by_name.get(b, ()) if p in derived]
+        parent_ok = next((p for p in parents if verdict(p) != "violation"), None)
+        if init is None:
+            result = f"inherits {parent_ok[1]}" if parent_ok else "violation"
+        else:
+            params = {a.arg for a in init.args.posonlyargs + init.args.args + init.args.kwonlyargs}
+            text = ast.unparse(init)
+            if "input_shape" in params or "input_dim" in params or any(r in text for r in _REFUSERS):
+                result = "ok"
+            elif init.args.kwarg is None:
+                result = "no-kwargs"
+            elif parent_ok and "super().__init__(" in text:
+                result = f"forwards {parent_ok[1]}"
+            else:
+                result = "violation"
+        verdicts[key] = result
+        return result
+
+    violations, exempt = [], {}
+    for key in sorted(derived):
+        result = verdict(key)
+        if result == "violation":
+            violations.append(f"{key[0]}:{classes[key].lineno} {key[1]}")
+        elif result.startswith(("inherits", "forwards")):
+            exempt[key[1]] = result
+    return violations, exempt, sorted(k[1] for k in derived)
+
+
+def _finished_package_sources() -> Dict[str, str]:
+    """The source of every module in the packages of the replay roster's models, and of ``ConvStem``."""
+    packages = sorted({Path(p) for key in REPLAY_SUBJECTS for p in roster_facts(key)[1]})
+    files = [f for package in packages for f in sorted(package.rglob("*.py"))] + [_STEM_FILE]
+    return {str(f.relative_to(SRC)): f.read_text() for f in files}
+
+
+#: The classes the census exempts, with the reason (the scan derives the reason; this pins WHICH classes, so a new one
+#: is a visible edit). ``ConvNeXtV1`` and ``ConvNeXtV2`` have no ``__init__``: ``_ConvNeXtBase`` takes ``input_shape``
+#: and rank-checks it, and they run exactly that constructor.
+CENSUS_EXEMPT = {
+    "ConvNeXtV1": "inherits _ConvNeXtBase",
+    "ConvNeXtV2": "inherits _ConvNeXtBase",
+}
+
+
+def test_every_keras_constructor_of_a_finished_package_that_takes_no_shape_refuses_the_keyword() -> None:
+    """The census behind ``NO_SHAPE_CONSTRUCTORS``: derived from the roster and the source, not from memory.
+
+    R4 finding 3: ``refuse_input_shape`` sat in the constructors someone remembered, and ``DINOv2Block``,
+    ``FireModule``, ``SpatialLinearAttention`` and ``ConvStem`` still built with ``input_shape=...`` and only a Keras
+    warning. The packages are the ones the replay roster's models are defined in (so a finished family joins when its
+    model joins the roster); every module in them is parsed, and so is ``ConvStem``'s.
+    """
+    sources = _finished_package_sources()
+    violations, exempt, checked = scan_constructors(sources)
+    assert violations == []
+    assert exempt == CENSUS_EXEMPT
+    # control: the scan read the classes it is about, in a package of every kind
+    assert {"ConvStem", "DINOv2Block", "FireModule", "SimplifiedFireModule", "SpatialLinearAttention",
+            "DeepSortResidualBlock", "PromptEncoder", "DepthAnything", "DPTHead"} <= set(checked)
+    assert len(checked) > 50
+
+
+def test_every_class_the_census_names_has_a_row_that_builds_it() -> None:
+    """A census class that is a block or a model of a finished family has a runtime row, except the listed ones."""
+    _, _, checked = scan_constructors(_finished_package_sources())
+    rows = {"ConvStem", "SpatialLinearAttention", "DPTHead", "DPTDecoder", "DPTFeatureFusionBlock",
+            "DPTResidualConvUnit", "DINOHead", "DINOv2Block", "DINOv2PositionEmbedding", "DINOTrainingModel",
+            "FireModule", "SimplifiedFireModule", "CliffordCLIP", "ImageEncoderViT", "ViTBlock",
+            "WindowedAttentionWithRelPos", "MaskDecoder", "SAM", "SAMTrainingModel", "TwoWayAttentionBlock",
+            "TwoWayTransformer"}
+    census_classes = {name for name in checked}
+    # every class of the table above is read by the scan, and the runtime table has a row for each
+    assert rows <= census_classes
+    assert len(NO_SHAPE_CONSTRUCTORS) >= 17 + len(rows)
+
+
+def test_the_constructor_census_sees_each_kind_of_swallow_and_each_exemption() -> None:
+    planted = {"planted.py": """
+import keras
+class Swallows(keras.layers.Layer):
+    def __init__(self, units, **kwargs):
+        super().__init__(**kwargs)
+class SwallowsModel(keras.Model):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+class NoConstructor(keras.layers.Layer):
+    pass
+class Refuses(keras.layers.Layer):
+    def __init__(self, **kwargs):
+        refuse_input_shape(kwargs, "Refuses", "it has none")
+        super().__init__(**kwargs)
+class RefusesUnknown(keras.Model):
+    def __init__(self, **kwargs):
+        refuse_unknown_model_kwargs(kwargs, "RefusesUnknown")
+        super().__init__(**kwargs)
+class Takes(keras.layers.Layer):
+    def __init__(self, input_shape, **kwargs):
+        super().__init__(**kwargs)
+class TakesDim(keras.layers.Layer):
+    def __init__(self, input_dim, **kwargs):
+        super().__init__(**kwargs)
+class NoKwargs(keras.layers.Layer):
+    def __init__(self, units):
+        super().__init__()
+class InheritsRefuser(Refuses):
+    pass
+class InheritsTaker(Takes):
+    pass
+class ForwardsToRefuser(Refuses):
+    def __init__(self, units, **kwargs):
+        super().__init__(**kwargs)
+class SubclassOfSwallower(Swallows):
+    def __init__(self, **kwargs):
+        super().__init__(units=1, **kwargs)
+class NotKeras:
+    def __init__(self, **kwargs):
+        pass
+class Outer:
+    class Nested(keras.layers.Layer):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+"""}
+    violations, exempt, checked = scan_constructors(planted)
+    assert sorted(v.split()[-1] for v in violations) == sorted(
+        ["Nested", "NoConstructor", "Swallows", "SwallowsModel", "SubclassOfSwallower"])
+    assert exempt == {"InheritsRefuser": "inherits Refuses", "InheritsTaker": "inherits Takes",
+                      "ForwardsToRefuser": "forwards Refuses"}
+    assert "NotKeras" not in checked and "NoKwargs" in checked
+    assert scan_constructors({"empty.py": "x = 1\n"}) == ([], {}, [])
+
+
+# ---------------------------------------------------------------------------
 # The ledger names only rows that exist
 # ---------------------------------------------------------------------------
 
@@ -2705,7 +3194,7 @@ def _all_row_names() -> set:
     rows |= {(_row_name("no_replayed_draw", [arm]), key) for key, arm in _REPLAY_ARMS}
     rows |= {("layer_names_follow_the_table", s.key) for s in NAMED_SUBJECTS}
     rows |= {("no_shape_keyword_swallowed", key) for key in NO_SHAPE_CONSTRUCTORS}
-    rows |= {("unknown_keyword_refused", key) for key in NO_SHAPE_CONSTRUCTORS}
+    rows |= {("unknown_keyword_refused", key) for key in NO_SHAPE_CONSTRUCTORS if key not in SHAPE_REFUSAL_ONLY}
     return rows
 
 

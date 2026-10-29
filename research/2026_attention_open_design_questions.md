@@ -1287,6 +1287,17 @@ site. Reported by the step-10 adversarial review as NOTE-level (N10) and explici
 carried here rather than fixed, because it is a call about what a shared seed should
 *mean*, not a bug with a right answer.
 
+**Resolved (step 17 of plan-2026-10-26T125959-7af851e5, decision D-051).** The recommendation
+above (leave it and document it) was not kept. The layer now draws `q` and the `prob_head`
+kernel from `clone_initializer(self.kernel_initializer)` and keeps `W` on the resolved
+instance, so the three weights are independent draws; the measured defect was larger than the
+"seeded instance" case this question assumed: with the default `"glorot_uniform"` string the
+CapsNetV2 models still handed ONE seedless instance to every layer, and 3 of 3 weight pairs
+replayed one sample at `dim_capsules=16`. A seeded instance keeps its seed in the clones
+(pinned by the layer's own test), so a caller who passes `seed=42` still gets that one seed at
+each of the three sites, which is what asking for a seed means; only the seedless case, the
+default, became independent. The text above is the question as it stood when it was written.
+
 ---
 
 ## Q17 — `probability_type`s other than `softmax` have never been exercised WITH a mask

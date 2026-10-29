@@ -2996,8 +2996,7 @@ class _InjectedPretrainedDefect:
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(f"Unknown variant {variant!r}: {list(cls.MODEL_VARIANTS)}")
         if pretrained:
-            logger_message = "Pretrained weights are not yet implemented"
-            del logger_message
+            pass  # the injected defect: pretrained=True is accepted and ignored
         return cls.MODEL_VARIANTS[variant]
 
 

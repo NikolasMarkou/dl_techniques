@@ -332,12 +332,14 @@ import dl_techniques.models.vision_language.sam.sam1.training_model   # registra
 
 model = keras.models.load_model(path, compile=False)
 print(type(model).__name__, len(model.weights))
-# SAMTrainingModel 202
+# SAMTrainingModel <the number of weights the checkpoint holds>
 ```
 
-(The `202` was read before the mask-prompt stem became a `ConvStem`. A checkpoint
-written by the earlier code no longer loads in the current code, whatever the import
-order; see the next subsection.)
+(This paragraph first printed `SAMTrainingModel 202`, read from the smallest checkpoint on
+disk at the time. That checkpoint was written before the mask-prompt stem became a
+`ConvStem` and no longer loads in the current code, whatever the import order, so the
+number is not reproducible and is not quoted; see the next subsection. The count of any
+checkpoint the current code wrote is the model's `len(model.weights)`.)
 
 Note the import names the **module**, not the package. For SAM 1 the package
 import happens to be sufficient (`sam1/__init__.py` imports `training_model`),

@@ -128,7 +128,12 @@ machine.
 - Optional pretrained backbone init via `--init-from <ckpt.keras>`
   (`init_from_checkpoint`): every layer of the checkpoint except the decoder, which is
   skipped by the name of `model.decoder` (`depth_head`) and so starts
-  freshly initialized.
+  freshly initialized. The student encoder and the frozen teacher have names of their own
+  (`encoder_*`, `frozen_encoder_*`), so each is loaded from its own weights; a checkpoint
+  without a teacher leaves the model's teacher equal to the loaded student. The log states
+  `<n> of <m> kernels loaded` for the student, and the run stops with a `RuntimeError` when
+  the student was not loaded (before the teacher had its own name, a name-keyed load filled the
+  teacher and left the student random under a "loaded 1 layer" report).
 
 ## CLI flags
 

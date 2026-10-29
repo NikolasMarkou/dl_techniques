@@ -8,7 +8,7 @@ this file pins what that file cannot see:
 
 * the encoder graph holds the stem and nothing of the old spelling, with 46 weights and
   4,932,544 parameters (the count of the three loose layers);
-* the stem survives ``keras.models.clone_model``: ``build`` swallows a clone failure
+* the stem survives the teacher's rebuild from the encoder's config: ``build`` swallows a failure of it
   into a warning and drops the EMA teacher, so a stem the clone cannot rebuild would
   turn the semi-supervised step into a labeled-only one without a word;
 * the model's first seeded draw is the stem's kernel (the instance the model creates in
@@ -79,7 +79,7 @@ class TestTheTeacherClone:
     def test_the_clone_keeps_the_stem_and_the_teacher_exists(self) -> None:
         model = _model(use_feature_alignment=True, enable_semi_supervised=True)
         assert model.frozen_encoder is not None, (
-            "clone_model failed on the encoder: the teacher was dropped with a warning")
+            "the teacher could not be rebuilt from the encoder's config: it was dropped with a warning")
         assert isinstance(model.frozen_encoder.get_layer("initial_stem"), ConvStem)
         assert model.use_feature_alignment is True
 

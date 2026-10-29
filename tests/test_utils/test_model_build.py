@@ -288,7 +288,8 @@ def _contract_paragraph(function) -> str:
 
 _HELPERS = [
     ("validate_rates", "model_build"), ("require_channel_count", "model_build"),
-    ("refuse_input_shape", "model_build"), ("refuse_pretrained", "weight_transfer")]
+    ("refuse_input_shape", "model_build"), ("coerce_include_top", "model_build"),
+    ("refuse_pretrained", "weight_transfer")]
 
 
 @pytest.mark.parametrize("name, module", _HELPERS)

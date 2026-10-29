@@ -33,6 +33,7 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.model_build import refuse_input_shape
 
 # DECISION plan-2026-08-23T091307-9a110062/D-601: single home for the shipped
 # 0.0 attention-dropout rate -- TwoWayTransformer(depth=2) measured 7 Dropout
@@ -141,6 +142,7 @@ class TwoWayAttentionBlock(keras.layers.Layer):
         attention_downsample_rate: int = 2,
         **kwargs: Any
     ) -> None:
+        refuse_input_shape(kwargs, "TwoWayAttentionBlock", "it is built from the shape of its first input")
         super().__init__(**kwargs)
 
         # Validate inputs
@@ -497,6 +499,7 @@ class TwoWayTransformer(layers.Layer):
         attention_downsample_rate: int = 2,
         **kwargs: Any
     ) -> None:
+        refuse_input_shape(kwargs, "TwoWayTransformer", "it is built from the shape of its first input")
         super().__init__(**kwargs)
 
         # Validate inputs

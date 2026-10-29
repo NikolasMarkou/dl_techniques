@@ -12,21 +12,22 @@ which registry key it will ask for. Measured at Step 15 of
 dynamic, 47 literal.** Plan-2026-10-23T190557-972a9ac5 step 10 (D-030) moved the
 TopoLM block's two norms (now one ``_make_norm`` call site) and the model's final
 norm from literal ``'layer_norm'`` to the ``normalization_type`` knob: **200 sites
-in 101 files, 155 dynamic, 45 literal.** The split of ``heads/nlp/factory.py`` moved its one dynamic site into
-``heads/nlp/base.py`` (same count), and the split of ``heads/vlm/factory.py``
-(2026-10-27) turned that file's ``(1, 3)`` entry into two files,
-``image_text_matching.py`` ``(1, 0)`` and ``image_captioning.py`` ``(0, 3)``:
-**198 sites in 101 files, 153 dynamic, 45 literal.** Plan-2026-10-26T125959-7af851e5 step 1
+in 101 files, 155 dynamic, 45 literal.** Plan-2026-10-26T125959-7af851e5 step 1
 re-derived it after two moves that had left the pins stale: the vision-head
 refactor moved ``heads/vision/factory.py``'s site into ``heads/vision/classification.py``,
 and the stems of ConvUNext, ResNet and UcaEncoder are now built by ``ConvStem``
 (``conv_blocks/stem.py``, one dynamic site in ``_make_norm``, shared by both of the
 stem's norms), so ``convunext`` and ``resnet`` lose their site and ``uca_encoder``
-loses ``stem_norm``: **198 sites in 100 files, 153 dynamic, 45 literal.** The auto-built
+loses ``stem_norm``: **198 sites in 100 files, 153 dynamic, 45 literal.** The split of
+``heads/nlp/factory.py`` (2026-10-27) then moved its one dynamic site into ``heads/nlp/base.py`` (same
+count), and the split of ``heads/vlm/factory.py`` turned that file's ``(1, 3)`` entry into two files,
+``image_text_matching.py`` ``(1, 0)`` and ``image_captioning.py`` ``(0, 3)``:
+**198 sites in 101 files, 153 dynamic, 45 literal.** The auto-built
 encoder of ``vq_vae_rotation`` builds its down-steps with ``ConvStem`` (plan-2026-10-26T125959-7af851e5
 step 19), so its ``(4, 0)`` became ``(3, 0)``: **197 sites in 101 files, 152 dynamic, 45 literal.**
 The mask stack of SAM1's ``PromptEncoder`` is built by ``ConvStem`` as well, which removes that
-file's ``(2, 0)`` entry: **195 sites in 100 files, 150 dynamic, 45 literal.**
+file's ``(2, 0)`` entry: **195 sites in 100 files, 150 dynamic, 45 literal.** (Each step is read from
+the table of the commit that made it: files 100, 101, 100, 101, 101, 100 in this order; sites only fall.)
 
 The population was first pinned by two ``<=`` ceilings (D-201 of
 ``plan-2026-08-22T035419-a11304c8``: 151 dynamic, 180 total, 2026-09-04). A
@@ -70,7 +71,8 @@ SRC_ROOT = os.path.join(os.path.dirname(_TESTS_DIR), "src")
 #: 153 dynamic, 47 literal; then D-030 of plan-2026-10-23T190557-972a9ac5 (TopoLM's
 #: ``normalization_type`` knob): 200 sites, 101 files, 155 dynamic, 45 literal;
 #: then step 1 of plan-2026-10-26T125959-7af851e5 (``ConvStem``, the vision-head
-#: move): 198 sites, 100 files, 153 dynamic, 45 literal; then step 19 of the same plan
+#: move): 198 sites, 100 files, 153 dynamic, 45 literal; then the heads nlp/vlm split
+#: (2026-10-27): 198 sites, 101 files, 153 dynamic, 45 literal; then step 19 of the same plan
 #: (``vq_vae_rotation``'s down-steps are ``ConvStem``): 197 sites, 101 files, 152 dynamic, 45 literal;
 #: then SAM1's mask stack (``sam1/prompt_encoder.py`` leaves the table): 195 sites, 100 files, 150
 #: dynamic, 45 literal.

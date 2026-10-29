@@ -54,6 +54,7 @@ from dl_techniques.utils.model_build import (
     refuse_unknown_model_kwargs,
     require_channel_count,
     validate_rates,
+    refuse_input_shape,
 )
 from dl_techniques.utils.validation import positive_int
 from dl_techniques.utils.weight_transfer import (
@@ -152,6 +153,7 @@ class FireModule(keras.layers.Layer):
             kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = CAFFE_XAVIER_INITIALIZER,
             **kwargs: Any
     ) -> None:
+        refuse_input_shape(kwargs, "FireModule", "it is built from the shape of its first input")
         super().__init__(**kwargs)
 
         if s1x1 <= 0 or e1x1 <= 0 or e3x3 <= 0:

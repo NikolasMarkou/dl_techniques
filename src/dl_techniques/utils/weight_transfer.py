@@ -351,6 +351,36 @@ def _unwrap_single_model(model: keras.Model) -> keras.Model:
     return model
 
 
+def _layers_by_name(model: keras.Model, role: str) -> Dict[str, keras.layers.Layer]:
+    """``{name: layer}`` of the layers a by-name transfer compares in ``model``.
+
+    Interface contract (caller: :func:`load_weights_from_checkpoint`, for the target and for
+    the checkpoint): the layers of :func:`_unwrap_single_model`, keyed by name. A dict keeps one
+    layer per name, so two layers that hold weights under one name would make the transfer fill
+    one and leave the other at its initialization while the report lists a single layer
+    (DepthAnything's student and frozen teacher did exactly that); ``ValueError`` naming the
+    repeated names and ``role`` instead. Layers without weights may repeat a name: they are
+    never read.
+    """
+    layers = _unwrap_single_model(model).layers
+    # DECISION plan-2026-10-26T125959-7af851e5/D-055
+    # Do NOT key the layers by name without this check: a dict keeps the LATER of two layers that share a
+    # name, so the transfer filled that one, left the other at its initialization and reported ONE loaded
+    # layer (DepthAnything's student and frozen teacher: 0 of 10 student kernels loaded, 10 of 10 teacher).
+    counts: Dict[str, int] = {}
+    for layer in layers:
+        if layer.weights:
+            counts[layer.name] = counts.get(layer.name, 0) + 1
+    repeated = sorted(name for name, count in counts.items() if count > 1)
+    if repeated:
+        raise ValueError(
+            f"The {role} has several layers holding weights under one name: {_listed(repeated)}. "
+            f"A transfer matches layers by name and would fill one of them and leave the others "
+            f"at their initialization; give each layer a name of its own."
+        )
+    return {layer.name: layer for layer in layers}
+
+
 def load_weights_from_checkpoint(
     target: keras.Model,
     ckpt_path: str,
@@ -415,7 +445,9 @@ def load_weights_from_checkpoint(
         nothing (a check that needs to know WHICH layers would load).
     :returns: :class:`TransferReport` describing what happened.
     :raises FileNotFoundError: *ckpt_path* does not exist.
-    :raises ValueError: *ckpt_path* does not end in ``.keras``; all source
+    :raises ValueError: *ckpt_path* does not end in ``.keras``; the target or the
+        checkpoint holds weights in two layers of one name (a name-keyed transfer would
+        fill one and leave the other); all source
         layers were filtered / missing in target (no overlap); or, with
         ``allow_unloaded``, a layer outside it was not transferred.
 
@@ -443,12 +475,8 @@ def load_weights_from_checkpoint(
     # compare the wrapper's own layers: its only weighted layer is the whole
     # nested model, so a wrapped classifier's backbone could never move under
     # another head (no overlap, or one all-or-nothing shape mismatch).
-    target_layers = {
-        layer.name: layer for layer in _unwrap_single_model(target).layers
-    }
-    source_layers = {
-        layer.name: layer for layer in _unwrap_single_model(source).layers
-    }
+    target_layers = _layers_by_name(target, "target model")
+    source_layers = _layers_by_name(source, f"checkpoint {ckpt_path!r}")
 
     report = TransferReport()
     allowed = tuple(allow_unloaded or ())
