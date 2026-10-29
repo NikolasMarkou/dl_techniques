@@ -31,11 +31,9 @@ from typing import Optional, Union, Dict, Any, Tuple
 # ---------------------------------------------------------------------
 
 from ..embedding.positional_embedding import PositionalEmbedding
-from ..embedding.rotary_position_embedding import RotaryPositionEmbedding
 from ..reasoning.hrm_reasoning_module import HierarchicalReasoningModule
 from ..reasoning.hrm_sparse_puzzle_embedding import SparsePuzzleEmbedding
 
-from .byte_tokenizer import ByteTokenizer
 from .dynamic_patcher import DynamicPatcher
 from .entropy_model import EntropyModel
 from .local_encoder import LocalEncoder
@@ -210,7 +208,6 @@ class ByteLatentReasoningCore(keras.layers.Layer):
         self.embed_scale = math.sqrt(embed_dim)
 
         # Will be built in build()
-        self.tokenizer = None
         self.entropy_model = None
         self.patcher = None
         self.local_encoder = None
@@ -218,10 +215,8 @@ class ByteLatentReasoningCore(keras.layers.Layer):
         self.local_decoder = None
         self.puzzle_embedding = None
         self.position_embedding = None
-        self.rope = None
         self.h_reasoning = None
         self.l_reasoning = None
-        self.lm_head = None
         self.q_head = None
         self.h_init = None
         self.l_init = None
@@ -234,11 +229,6 @@ class ByteLatentReasoningCore(keras.layers.Layer):
     def build(self, input_shape: Dict[str, Any]) -> None:
         """Build the model components."""
         # Byte processing components
-        self.tokenizer = ByteTokenizer(
-            vocab_size=self.vocab_size,
-            name="tokenizer"
-        )
-
         self.entropy_model = EntropyModel(
             vocab_size=self.vocab_size,
             hidden_dim=self.local_dim,
@@ -298,15 +288,10 @@ class ByteLatentReasoningCore(keras.layers.Layer):
                 name="puzzle_embedding"
             )
 
-        # Positional embeddings for reasoning states
-        if self.pos_encodings == "rope":
-            self.rope = RotaryPositionEmbedding(
-                head_dim=self.embed_dim // self.num_heads,
-                max_seq_len=self.max_patches,
-                rope_theta=self.rope_theta,
-                name="rope"
-            )
-        elif self.pos_encodings == "learned":
+        # Positional signal for the reasoning states. RoPE is not a layer of its
+        # own here: it is applied inside the reasoning modules' attention, so
+        # `rope_theta` and the patch count are handed to them below.
+        if self.pos_encodings == "learned":
             self.position_embedding = PositionalEmbedding(
                 max_seq_len=self.max_patches,
                 dim=self.embed_dim,
@@ -314,12 +299,20 @@ class ByteLatentReasoningCore(keras.layers.Layer):
                 name="position_embedding"
             )
 
-        # Hierarchical reasoning modules (adapted for byte-patch processing)
+        # Hierarchical reasoning modules (adapted for byte-patch processing).
+        # 'group_query' carries RoPE inside attention; with a learned table the
+        # attention is plain, as in `HierarchicalReasoningCore`.
+        reasoning_attention_type = (
+            "group_query" if self.pos_encodings == "rope" else "multi_head"
+        )
         self.h_reasoning = HierarchicalReasoningModule(
             num_layers=self.h_layers,
             embed_dim=self.embed_dim,
             num_heads=self.num_heads,
             ffn_expansion_factor=4,
+            attention_type=reasoning_attention_type,
+            max_seq_len=self.max_patches,
+            rope_theta=self.rope_theta,
             dropout_rate=self.dropout_rate,
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
@@ -332,6 +325,9 @@ class ByteLatentReasoningCore(keras.layers.Layer):
             embed_dim=self.embed_dim,
             num_heads=self.num_heads,
             ffn_expansion_factor=4,
+            attention_type=reasoning_attention_type,
+            max_seq_len=self.max_patches,
+            rope_theta=self.rope_theta,
             dropout_rate=self.dropout_rate,
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
@@ -359,15 +355,6 @@ class ByteLatentReasoningCore(keras.layers.Layer):
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
             name="entropy_to_reasoning_proj"
-        )
-
-        # Output heads
-        self.lm_head = keras.layers.Dense(
-            self.vocab_size,
-            use_bias=False,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="lm_head"
         )
 
         # Q head for adaptive computation (enhanced with entropy information)
@@ -449,10 +436,8 @@ class ByteLatentReasoningCore(keras.layers.Layer):
 
         # Add positional embeddings to reasoning states
         if self.pos_encodings == "learned" and self.position_embedding is not None:
-            seq_len = keras.ops.shape(patch_reasoning)[1]
-            pos_emb = self.position_embedding.position_embeddings[:seq_len]
-            pos_emb = keras.ops.expand_dims(pos_emb, axis=0)
-            patch_reasoning = 0.707106781 * (patch_reasoning + pos_emb)
+            # PositionalEmbedding adds its table, sliced to the input length.
+            patch_reasoning = 0.707106781 * self.position_embedding(patch_reasoning)
 
         # Scale embeddings
         return self.embed_scale * patch_reasoning

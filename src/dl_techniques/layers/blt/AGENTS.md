@@ -112,7 +112,7 @@ Patch ids: non-decreasing int32 per row, clamped at `max_patches - 1`. Worked ex
 
 Internal:
 - `layers/embedding/positional_embedding.PositionalEmbedding` (learned positions in encoder, decoder, entropy model, and the core's `"learned"` mode).
-- `layers/embedding/rotary_position_embedding.RotaryPositionEmbedding` (core, `"rope"` mode).
+- RoPE for the core comes from the reasoning modules' attention, not from a layer of its own here.
 - `layers/reasoning/hrm_reasoning_module.HierarchicalReasoningModule`, `layers/reasoning/hrm_sparse_puzzle_embedding.SparsePuzzleEmbedding` (core).
 - `layers/transformers/causal_stack` and `layers/transformers/patch_causal_transformer.PatchCausalTransformer`.
 - `utils/keras_registration.register_dl_technique`, `utils/masking.create_causal_attend_mask` (package `utils/masking/`, function in `factory.py`), `utils/sequence_ops.cap_boundaries_by_position`, `utils/logger.logger`.
@@ -129,7 +129,7 @@ Consumers: `models/language/blt/model.py` imports `ByteTokenizer`, `DynamicPatch
 - `PatchPooling` attention mode passes no attention mask, so zeroed out-of-patch positions still serve as keys/values. Empty patches attend over an all-zero sequence.
 - No padding mask anywhere in the causal stacks; padding bytes are attended as ordinary bytes.
 - `SparsePuzzleEmbedding` in the core is constructed with `batch_size=self.batch_size` and `embeddings_initializer="zeros"` (the core's `embeddings_initializer` argument is not passed to it). `puzzle_emb_dim` is added to the `embed_dim`-wide reasoning input by slicing `[:, :, :embed_dim]`, so `puzzle_emb_dim < embed_dim` would fail the add.
-- Dead or unused parts of the core (verify before relying on or removing): `tokenizer` sub-layer is built but never called; `lm_head` is built but `call` uses `local_decoder` for logits; `rope` is built in `"rope"` mode but never applied in `_create_reasoning_embeddings`; `carry["patch_context"]` and `carry["entropy_state"]` are never read.
+- Inert parts of the core: `carry["patch_context"]` and `carry["entropy_state"]` are created by `empty_carry` and refreshed by `reset_carry`, but `call` never reads them (only `z_h` and `z_l` are read); they stay for carry-shape stability. The unused `tokenizer`, `lm_head` and `rope` sub-layers were removed: logits come from `local_decoder`, and RoPE runs inside the reasoning modules' `group_query` attention (`rope_theta` and `max_patches` are forwarded to both). With `pos_encodings="learned"` the modules use plain `multi_head` attention and `position_embedding` (a `PositionalEmbedding`) is called on the reasoning input.
 - `get_config` of the core passes `embeddings_initializer` / `kernel_initializer` through `keras.initializers.serialize` and the regularizers through `keras.regularizers.serialize`; no `from_config` override exists.
 
 ## Working here

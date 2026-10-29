@@ -129,6 +129,62 @@ class TestByteLatentReasoningCore:
             arr = keras.ops.convert_to_numpy(outputs[key])
             assert np.all(np.isfinite(arr)), f"{key} contains non-finite values"
 
+    def test_learned_positions_run_a_forward_pass(
+        self, layer_config, sample_inputs, batch_size
+    ):
+        """``pos_encodings='learned'`` used to read a table the layer does not
+        have (``position_embeddings``) and raise at call time."""
+        layer = ByteLatentReasoningCore(**layer_config, pos_encodings="learned")
+        carry = layer.empty_carry(batch_size)
+        _, outputs = layer(carry, sample_inputs, training=False)
+
+        assert outputs["logits"].shape == (batch_size, 32, 260)
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(outputs["logits"])))
+        assert layer.position_embedding.pos_embedding.shape == (1, 4, 16)
+
+    def test_the_learned_table_changes_the_output(
+        self, layer_config, sample_inputs, batch_size
+    ):
+        layer = ByteLatentReasoningCore(**layer_config, pos_encodings="learned")
+        carry = layer.empty_carry(batch_size)
+        _, before = layer(carry, sample_inputs, training=False)
+
+        layer.position_embedding.pos_embedding.assign(
+            keras.ops.ones_like(layer.position_embedding.pos_embedding)
+        )
+        _, after = layer(carry, sample_inputs, training=False)
+        difference = np.abs(
+            keras.ops.convert_to_numpy(before["logits"])
+            - keras.ops.convert_to_numpy(after["logits"])
+        ).max()
+        assert difference > 0.0
+
+    @pytest.mark.parametrize("pos_encodings,attention_type", [
+        ("rope", "group_query"),
+        ("learned", "multi_head"),
+    ])
+    def test_reasoning_modules_get_the_positional_settings(
+        self, layer_config, sample_inputs, batch_size, pos_encodings, attention_type
+    ):
+        """RoPE lives inside attention: ``rope_theta`` and the patch count must
+        reach both reasoning modules, and a learned table gets plain attention."""
+        layer = ByteLatentReasoningCore(
+            **layer_config, pos_encodings=pos_encodings, rope_theta=500.0
+        )
+        layer(layer.empty_carry(batch_size), sample_inputs, training=False)
+
+        for module in (layer.h_reasoning, layer.l_reasoning):
+            assert module.attention_type == attention_type
+            assert module.rope_theta == 500.0
+            assert module.max_seq_len == layer_config["max_patches"]
+
+    def test_no_sublayer_is_built_and_then_never_called(self, layer_config):
+        """``tokenizer``, ``lm_head`` and ``rope`` were created in ``build`` and
+        never used: logits come from ``local_decoder`` and RoPE from attention."""
+        layer = ByteLatentReasoningCore(**layer_config)
+        for name in ("tokenizer", "lm_head", "rope"):
+            assert not hasattr(layer, name), name
+
     @pytest.mark.parametrize("training", [True, False, None])
     def test_training_modes(self, layer_config, sample_inputs, batch_size, training):
         """Forward runs under all training-flag values."""
