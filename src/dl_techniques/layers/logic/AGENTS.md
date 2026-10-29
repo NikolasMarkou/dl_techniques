@@ -92,7 +92,7 @@ Registry (`LOGIC_REGISTRY[key]`): fields `class`, `description`, `required_param
 
 Every `required_params` is empty, so every key builds with no arguments. Allowed enum values: `safe_divide_mode` {hard_clamp, smooth}; `selection_mode` {global, per_channel}; `exponent_clip_mode` {hard, smooth}; `circuit_routing` {output_only, classic}; `apply_sigmoid_per_depth` {first_only, all, none}; `channel_mix` {None, dense}.
 
-Factory-specific defaults that differ from the class defaults: the registry fills `gate_entropy_coefficient=0.0` and `load_balance_coefficient=None` (the class default for both is `None`).
+Factory-specific defaults: the registry fills `gate_entropy_coefficient=None` and `load_balance_coefficient=None`, the same as the classes. (It used to fill `gate_entropy_coefficient=0.0`, which sat under the caller's kwargs and silently outranked the deprecated alias.)
 
 Weights:
 
@@ -154,7 +154,7 @@ External: `keras` (only `keras.ops`, `keras.random`, `keras.layers.Dense`, `kera
 - Unknown type: `ValueError` whose message starts "Failed to create logic layer" and names the unknown type; the original error lists the available types.
 - Undeclared keyword: `ValueError` containing `STRICT_UNSUPPORTED_KEY_MARKER`, the count, the names and the accepted set.
 - Bad enum value: `ValueError` naming the value and the allowed list. A non-hashable value would raise `TypeError` in the `in` test and come out wrapped as `ValueError`.
-- Factory passing `load_balance_coefficient` has no effect (the default `gate_entropy_coefficient=0.0` wins). Verified: `create_logic_layer('circuit_depth', load_balance_coefficient=0.5).gate_entropy_coefficient == 0.0`.
+- Factory passing `load_balance_coefficient` works: `create_logic_layer('circuit_depth', load_balance_coefficient=0.5)` warns with `DeprecationWarning` and resolves `gate_entropy_coefficient == 0.5` (`TestCreate.test_the_deprecated_load_balance_coefficient_is_honoured_with_a_warning`).
 - Logic operator, one tensor, any binary gate, `allow_unary_degenerate=False`: `ValueError` from `call`.
 - Rank < 2 into a circuit layer: `ValueError` from `build` or `call`.
 - `per_channel` with unknown last axis: `ValueError` from `build`.

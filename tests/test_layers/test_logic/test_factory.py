@@ -101,6 +101,34 @@ class TestCreate:
         assert layer.use_residual is False
         assert layer.name == "custom_cd"
 
+    @pytest.mark.parametrize("layer_type", ["circuit_depth", "neural_circuit"])
+    def test_the_deprecated_load_balance_coefficient_is_honoured_with_a_warning(
+        self, layer_type
+    ):
+        """The factory declares the old name, forwards it, and the layer maps it
+        onto ``gate_entropy_coefficient`` with a ``DeprecationWarning``; it is
+        not silently dropped."""
+        with pytest.warns(DeprecationWarning, match="load_balance_coefficient"):
+            layer = create_logic_layer(layer_type, load_balance_coefficient=0.25)
+        assert layer.gate_entropy_coefficient == 0.25
+
+    @pytest.mark.parametrize("layer_type", ["circuit_depth", "neural_circuit"])
+    def test_the_canonical_name_wins_and_neither_name_means_zero(self, layer_type):
+        """The registry default for ``gate_entropy_coefficient`` is ``None``, like
+        the class's. A ``0.0`` default there is merged under the caller's kwargs
+        and made the canonical name "win" over the deprecated one every time."""
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            both = create_logic_layer(
+                layer_type, gate_entropy_coefficient=0.5,
+                load_balance_coefficient=0.25,
+            )
+            neither = create_logic_layer(layer_type)
+        assert both.gate_entropy_coefficient == 0.5
+        assert neither.gate_entropy_coefficient == 0.0
+
     @pytest.mark.parametrize("layer_type", sorted(LOGIC_REGISTRY))
     def test_undeclared_keyword_raises(self, layer_type):
         """A key the entry does not declare is a ValueError, not a default.
