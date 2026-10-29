@@ -183,7 +183,6 @@ External: `keras` (3.x, `keras.ops` and `keras.random`), `numpy` (layout and tab
 
 ## Failure modes
 
-- `ConditionalOutputLayer.call` error text says `BatchConditionalOutputLayer` (stale name); the class is `ConditionalOutputLayer`.
 - `ConditionalOutputLayer` raises `ValueError` for non-list input, a length other than 2, or unequal static shapes.
 - `SelectiveGradientMask` raises `ValueError` from `build` and `call` for non-pair input or unequal shapes.
 - `FiLMLayer.__init__` raises `ValueError` for `projection_dropout_rate` outside `[0, 1)`, an unknown `modulation_mode`, or `epsilon <= 0`. `build` raises for an `input_shape` that is not a list of two shapes or a `None` content channel count; `call` raises if `inputs` does not hold exactly two tensors.

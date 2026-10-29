@@ -34,7 +34,7 @@ class TestConditionalOutputLayer:
 
     def test_invalid_input_count_raises(self):
         layer = ConditionalOutputLayer()
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=r"(?<!Batch)ConditionalOutputLayer expects"):
             layer([keras.ops.zeros((B, D))])
 
     def test_compute_output_shape(self):

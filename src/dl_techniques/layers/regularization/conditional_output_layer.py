@@ -90,7 +90,7 @@ class ConditionalOutputLayer(keras.layers.Layer):
         """
         if not isinstance(inputs, (list, tuple)) or len(inputs) != 2:
             raise ValueError(
-                f"BatchConditionalOutputLayer expects a list of exactly 2 tensors, "
+                f"ConditionalOutputLayer expects a list of exactly 2 tensors, "
                 f"got {type(inputs)} with length {len(inputs) if hasattr(inputs, '__len__') else 'unknown'}"
             )
 
