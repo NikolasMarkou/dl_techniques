@@ -1,7 +1,9 @@
 """
-Training script for CliffordNet vision backbone.
+Training script for the CliffordNet vision backbones.
 
-Trains CliffordNet on CIFAR-10 or CIFAR-100 following the protocol from
+Trains CliffordNet (isotropic) or HierarchicalCliffordNet (``--variant hier_*`` or
+``custom_hier``) on CIFAR-10, CIFAR-100, Imagenette or ImageNet-1k (``--dataset``).
+The CIFAR recipe follows the protocol from
 arXiv:2601.06793v2 and its authors' train.py (github.com/ParaMind2025/CAN):
 200 epochs, batch 128, AdamW (lr 1e-3, weight decay 0.1), cosine decay with NO
 warm-up ("without using warm-up training epochs"), DropPath 0.3 (0.4 for cn_64_5),
@@ -26,6 +28,24 @@ training-time validation and the final evaluation use all 50,000.
 ``--dataset imagenette`` trains on the prepared TFDS Imagenette records at ``--image-size``
 through the shared loader: random-resized-crop and flip, ImageNet mean/std, selection on a
 seeded ``--validation-split`` slice of train, the labelled validation split as the test set.
+``--image-size`` defaults to 224 for Imagenette and ImageNet. The isotropic variants keep
+the full input resolution in every block, so ``nano`` at 224 px and batch 32 asked XLA for a
+34.6 GB buffer and ran out of memory on the 24 GB RTX 4090; pass ``--image-size 128``.
+
+The length of a run is ``--epochs`` (default 200) or, exclusively, ``--train-steps N``: N
+optimizer steps as ``N // K`` rounds of ``K = --eval-every-steps`` (default 250, must divide
+N) over a repeating train stream. Validation, the best checkpoint, the dashboard and
+``training_log.csv`` work per round, the cosine schedule spans exactly N steps, and a run of
+fewer steps than one epoch (CIFAR at batch 32 is 1,406 steps per epoch) is well defined.
+``config.json`` records both values and ``training_summary.txt`` reports "Steps" instead of
+"Epochs".
+
+A run writes its directory under ``--output-dir`` through ``train.common``: ``config.json``,
+``training_log.csv``, ``training_history.json``, ``best_model.keras`` and the final model,
+``visualizations/`` (dashboard, confusion matrix and the other classification figures),
+``model_analysis/``, ``epoch_analysis/`` when ``--epoch-analysis-every`` is positive, and
+``training_summary.txt``. The best checkpoint is selected on ``val_accuracy`` of the held-out
+slice of train; the test split scores it once.
 """
 
 import os
@@ -190,7 +210,19 @@ def build_model(
 
 
 def train_model(args) -> None:
-    """End-to-end training routine for CliffordNet."""
+    """End-to-end training routine for CliffordNet.
+
+    Loads the dataset through ``train.common.classification_data``, builds the model, fits
+    it for ``args.epochs`` epochs, or for ``args.train_steps`` steps in ``args.epochs``
+    rounds of ``args.eval_every_steps`` over a repeating stream, then saves and reloads the
+    final model, scores the best checkpoint on the test split, writes the classification
+    figures and the model analysis, and writes ``training_summary.txt``.
+
+    :param args: The parsed and resolved namespace of :func:`main`. ``args.epochs`` is
+        always an integer here; with ``--train-steps`` it is ``train_steps // eval_every_steps``.
+    :raises Exception: Any failure of loading, fitting, saving or analysis propagates; a run
+        never exits 0 with a missing artifact.
+    """
     logger.info("Starting CliffordNet training")
     setup_gpu(gpu_id=args.gpu)
     set_seeds(args.seed)
@@ -513,7 +545,16 @@ def train_model(args) -> None:
 
 
 def main() -> None:
-    """Entry point for the CliffordNet training script."""
+    """Entry point for the CliffordNet training script.
+
+    Parses the command line and resolves every flag that depends on another: the
+    augmentation preset and random-erasing probability per dataset, ``--eval-samples``
+    (2000 for Imagenette and ImageNet, refused for CIFAR), the model flags from the variant's
+    preset when not given, the DropPath rate per variant, and the length of the run
+    (``--epochs`` defaulting to 200, or ``--train-steps`` with ``--eval-every-steps``
+    defaulting to 250, the two refused together). A flag that does not apply to the chosen
+    dataset or architecture is a parser error, never ignored. Then runs :func:`train_model`.
+    """
     parser = create_base_argument_parser(
         description="Train CliffordNet (geometric-algebra vision backbone)",
         default_dataset="cifar100",
