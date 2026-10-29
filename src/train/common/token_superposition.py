@@ -344,7 +344,7 @@ class TSTEmbedding(keras.layers.Layer):
         """Tied-LM-head passthrough: returns the inner Embedding's variable.
 
         Models like ``CliffordNetLM`` and ``NAM`` re-use this variable via
-        ``matmul(x, transpose(self.token_embedding.embeddings))`` to tie the
+        ``matmul(x, transpose(<embedding layer>.embeddings))`` to tie the
         LM head to the input embedding. Preserving this attribute is the
         load-bearing reason ``TSTEmbedding`` is a wrapper rather than a
         subclass of ``Embedding``.

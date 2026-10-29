@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
+from dl_techniques.layers.embedding.bert_embeddings import BertEmbeddings
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.layers.geometric.clifford_block import (
     CliMode,
@@ -226,17 +227,17 @@ class CliffordNetLM(keras.Model):
         self.normalization_kwargs = dict(normalization_kwargs or {})
 
         # --- Embeddings ---
-        self.token_embedding = keras.layers.Embedding(
-            vocab_size, channels, name="token_embedding",
-        )
-        self.position_embedding = keras.layers.Embedding(
-            max_seq_length, channels, name="position_embedding",
-        )
-        self.embed_norm = keras.layers.LayerNormalization(
-            epsilon=self.LAYERNORM_EPSILON, name="embed_norm",
-        )
-        self.embed_dropout = keras.layers.Dropout(
-            dropout_rate, name="embed_dropout",
+        self.embeddings = BertEmbeddings(
+            vocab_size=vocab_size,
+            hidden_size=channels,
+            max_position_embeddings=max_seq_length,
+            type_vocab_size=None,
+            use_token_type_embeddings=False,
+            mask_zero=False,
+            layer_norm_eps=self.LAYERNORM_EPSILON,
+            dropout_rate=dropout_rate,
+            normalization_type="layer_norm",
+            name="embeddings",
         )
 
         # --- CliffordNet blocks ---
@@ -357,13 +358,8 @@ class CliffordNetLM(keras.Model):
         :param training: Whether in training mode.
         :return: Dict with ``"logits"`` key: ``(B, seq_len, vocab_size)``.
         """
-        seq_len = keras.ops.shape(input_ids)[1]
-        positions = keras.ops.arange(seq_len)
-
-        # Embed tokens + positions
-        x = self.token_embedding(input_ids) + self.position_embedding(positions)
-        x = self.embed_norm(x, training=training)
-        x = self.embed_dropout(x, training=training)
+        # Token + position embedding -> LayerNorm -> Dropout.
+        x = self.embeddings(input_ids, training=training)
 
         # Apply CausalCliffordNet blocks (external residual + drop_path).
         # ``x`` stays ``(B, seq_len, D)`` — see ``layers/geometric/clifford_block.py``.
@@ -376,7 +372,7 @@ class CliffordNetLM(keras.Model):
             x = self.head_dropout(x, training=training)
         if self.tie_word_embeddings:
             logits = tied_embedding_logits(
-                x, self.token_embedding.embeddings, bias=self.output_bias,
+                x, self.embeddings.word_embeddings.embeddings, bias=self.output_bias,
             )
         else:
             logits = self.output_proj(x)

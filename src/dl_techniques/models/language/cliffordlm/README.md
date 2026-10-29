@@ -48,10 +48,8 @@ The model is the CliffordNet vision backbone read along a sequence axis instead 
 input_ids (B, L)
      |
      v
-token Embedding(vocab, D)  +  position Embedding(max_seq_length, D)
-     |
-     v
-LayerNormalization (embed_norm)  ->  Dropout (embed_dropout)
+BertEmbeddings (embeddings): word Embedding(vocab, D) + learned position
+Embedding(max_seq_length, D)  ->  LayerNormalization  ->  Dropout
      |  (B, L, D)
      v
 +---------------------------------------------------------------+
@@ -75,7 +73,7 @@ LayerNormalization (embed_norm)  ->  Dropout (embed_dropout)
 LayerNormalization (head_norm)  ->  Dropout (head_dropout, only if rate > 0)
      |
      v
-tied:    logits = h @ token_embedding^T + output_bias
+tied:    logits = h @ embeddings.word_embeddings^T + output_bias
 untied:  logits = Dense(vocab, name="output_proj")(h)
      |
      v
@@ -339,7 +337,8 @@ stripped, the repo convention), so `get_registered_name` prints
 also resolves. `get_config()` stores every constructor argument, with `global_context_period`
 already normalised (`-1` is stored as `None`).
 
-Layer and weight names: `token_embedding`, `position_embedding`, `embed_norm`, `embed_dropout`,
+Layer and weight names: `embeddings` (a `BertEmbeddings`, holding `word_embeddings`,
+`position_embeddings` and `layer_norm`; both tables start from `TruncatedNormal(stddev=0.02)`),
 `clifford_block_{i}`, `clifford_drop_path_{i}`, `head_norm`, `head_dropout` (only when
 `dropout_rate > 0`), `output_proj` when untied, and a model-level `output_bias` weight when tied
 and `use_bias=True`.
