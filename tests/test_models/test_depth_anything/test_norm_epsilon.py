@@ -87,9 +87,11 @@ class TestPlaceholderEncoderAgreesWithTheHead:
 
     def test_the_walk_reaches_a_norm_inside_a_stem(self):
         """Control: a stem built at the factory's 1e-6 is found by the walk and read as wrong."""
-        inputs = keras.layers.Input(shape=(16, 16, 3))
+        # The input is named: an auto-generated name (`input_layer`, `input_layer_3`) carries
+        # Keras' process-global counter and so depends on which test file ran first.
+        inputs = keras.layers.Input(shape=(16, 16, 3), name="probe_input")
         outputs = ConvStem(8, normalization_kwargs={"epsilon": 1e-6}, name="stem")(inputs)
         encoder = keras.Model(inputs, outputs)
-        assert [layer.name for layer in encoder.layers] == ["input_layer", "stem"]
+        assert [layer.name for layer in encoder.layers] == ["probe_input", "stem"]
         (norm,) = _batch_norms(encoder)
         assert norm.epsilon == 1e-6 != REFERENCE_BN_EPSILON
