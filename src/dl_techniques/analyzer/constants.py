@@ -209,3 +209,31 @@ SPECTRAL_DEFAULT_SUMMARY_METRICS = [
     MetricNames.GINI_COEFFICIENT, MetricNames.DOMINANCE_RATIO,
     MetricNames.PARTICIPATION_RATIO, MetricNames.CONCENTRATION_SCORE
 ]
+
+class FisherMetricNames:
+    """Keys of the per-model Fisher summary dict (``fisher_summary_per_model``).
+
+    The single home of these strings, mirroring the role ``MetricNames`` plays for
+    the spectral side: ``fisher_metrics`` writes them, the analyzer, the visualizer and
+    ``save_results`` read them, and none of those spells one out by hand.
+    """
+    TOTAL_FISHER = 'total_fisher'
+    MEAN_FISHER = 'mean_fisher'
+    STD_FISHER = 'std_fisher'
+    N_PARAMETERS = 'n_parameters'
+    N_ALIVE_PARAMETERS = 'n_alive_parameters'
+    N_FISHER_DEAD = 'n_fisher_dead'
+    N_SAMPLES = 'n_samples'
+    SKIPPED_SAMPLES = 'skipped_samples'
+    SIGNAL_SCALE = 'signal_scale'
+    GRADIENT_RECALL = 'recall_at_q'
+    VIOLATION_RATE = 'violation_rate'
+    SFT_CHI2 = 'sft_chi2'
+    SFT_CHI2_EXCEEDS_CAP = 'sft_chi2_exceeds_cap'
+    REAL_UNIFORM_RATIO = 'real_uniform_ratio'
+    TOKEN_FISHER_MEAN = 'token_fisher_mean'
+    UNIFORM_REFERENCE = 'uniform_reference'
+    OUTPUT_KIND = 'output_kind'
+    ESTIMATOR = 'estimator'
+    VARIABLE_FINGERPRINT = 'variable_fingerprint'
+    COMPUTATION_TIME = 'computation_time_seconds'

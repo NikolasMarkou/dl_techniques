@@ -21,6 +21,55 @@ from dl_techniques.analyzer.data_types import DataInput
 
 # ---------------------------------------------------------------------
 
+OUTPUT_ACTIVATION_SOFTMAX: str = 'softmax'
+OUTPUT_ACTIVATION_SIGMOID: str = 'sigmoid'
+OUTPUT_ACTIVATION_LOGITS: str = 'logits'
+# Slack on the [0, 1] membership test and on the "rows sum to 1" test. Both are
+# read only by `classify_output_activation`.
+PROBABILITY_RANGE_TOLERANCE: float = 1e-5
+PROBABILITY_SUM_TOLERANCE: float = 1e-3
+
+
+def classify_output_activation(predictions: np.ndarray) -> Tuple[str, str]:
+    """Decide what a model's final layer emits, from a sample of its output.
+
+    The single home of this decision: ``ModelAnalyzer._infer_output_activation``
+    (calibration) and the Fisher analyzer (which must know whether a log-probability
+    comes from ``log_softmax`` of logits, ``log`` of probabilities or a Bernoulli
+    likelihood) both call it, so the two can never disagree about a model.
+
+    DECISION plan-2026-09-01T225724-e79ad4bd/D-032
+    A SIGMOID multi-label head emits values in [0, 1] whose rows do NOT sum to
+    1. The former test was `np.any(predictions < 0) or not
+    np.allclose(row_sums, 1.0)`, which called that logits and softmaxed
+    already-normalized probabilities - MEASURED max absolute error 0.47886595
+    on a 3-class head, after which ECE and Brier are meaningless. Do NOT
+    collapse the three cases back to a boolean: "not a softmax distribution"
+    is not the same claim as "unbounded real numbers".
+    See decisions.md D-032.
+
+    Args:
+        predictions: The model's raw output array.
+
+    Returns:
+        ``(activation, reason)`` where ``activation`` is one of ``'softmax'``,
+        ``'sigmoid'`` or ``'logits'`` and ``reason`` is a human-readable
+        justification for the log line.
+    """
+    low = float(np.min(predictions))
+    high = float(np.max(predictions))
+    in_unit_range = low >= 0.0 and high <= 1.0 + PROBABILITY_RANGE_TOLERANCE
+
+    if predictions.ndim >= 2 and in_unit_range and np.allclose(
+            predictions.sum(axis=-1), 1.0, atol=PROBABILITY_SUM_TOLERANCE):
+        return OUTPUT_ACTIVATION_SOFTMAX, "rows are non-negative and sum to 1"
+    if in_unit_range:
+        return (OUTPUT_ACTIVATION_SIGMOID,
+                f"values lie in [{low:.4g}, {high:.4g}] but rows do not sum to 1")
+    return (OUTPUT_ACTIVATION_LOGITS,
+            f"values lie outside [0, 1] ([{low:.4g}, {high:.4g}])")
+
+
 def make_rng(random_state: Optional[int] = None) -> np.random.Generator:
     """Build the analyzer's random generator.
 
