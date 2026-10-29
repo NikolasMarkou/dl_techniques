@@ -167,8 +167,8 @@ class ModalityProjection(keras.layers.Layer):
         )
         self.projection_activation = None
         if self.use_gelu:
-            # DECISION D-277: exact_gelu is float64-exact and bit-identical to
-            # the stock GELU at float32. See decisions.md.
+            # DECISION plan-2026-10-14T062616-81938e81/D-277: exact_gelu is
+            # float64-exact and bit-identical to the stock GELU at float32.
             self.projection_activation = keras.layers.Activation(
                 exact_gelu, name='projection_gelu')
 
