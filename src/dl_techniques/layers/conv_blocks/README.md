@@ -88,7 +88,7 @@ Run the tests for this folder from the repo root:
 
 - `ConvNextV1Block` and `ConvNextV2Block` do not add the skip connection or stochastic depth. Standalone use silently drops both.
 - `BasicBlock` and `BottleneckBlock` with `use_projection=False` need the input channel count to equal the output width (`filters`, or `filters * 4` for the bottleneck). This is not checked up front, the add fails instead.
-- `MobileOneBlock` and `ReparamLargeKernelConv` implement the training-time multi-branch form only. Nothing here folds branches into one convolution. `ConvolutionalStem.reparameterize()` calls a `reparameterize()` method that `MobileOneBlock` does not have; the error is caught and logged as a warning. `ConvolutionalStem.reset_reparameterization()` is not caught and raises `AttributeError`.
+- `MobileOneBlock` and `ReparamLargeKernelConv` implement the training-time multi-branch form only. Nothing here folds branches into one convolution, and `ConvolutionalStem` has no `reparameterize()`.
 - `group_size` in `MobileOneBlock` and `ReparamLargeKernelConv` follows timm: `0` is a dense conv, `k > 0` means `groups = in_channels // k`, so `1` is depthwise.
 - `padding_mode` defaults differ: `MobileOneBlock` uses `'keras_same'`, `ReparamLargeKernelConv` uses `'reference'`.
 - Bias-free homogeneity depends on the normalization. In `BiasFreeConv2D`, only `normalization_type='bias_free_batchnorm'` is degree-1 homogeneous. The default `'batchnorm'` is stock Keras `BatchNormalization(center=False)`, which still has a moving mean.

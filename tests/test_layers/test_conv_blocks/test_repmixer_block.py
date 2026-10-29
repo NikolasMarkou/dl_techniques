@@ -14,6 +14,7 @@ from typing import Any, Dict
 import keras
 import tensorflow as tf
 
+from dl_techniques.layers.conv_blocks.mobile_one_block import MobileOneBlock
 from dl_techniques.layers.conv_blocks.repmixer_block import RepMixerBlock, ConvolutionalStem
 from tests.optimizer_state import build_optimizer_state
 
@@ -242,6 +243,13 @@ class TestRepMixerBlock:
 
 class TestConvolutionalStem:
     """Comprehensive test suite for ConvolutionalStem layer."""
+
+    def test_it_offers_no_reparameterization_the_blocks_cannot_do(self):
+        """MobileOneBlock implements the training branch form only, so the stem
+        must not advertise a fold that logs a failure per block or raises."""
+        assert not hasattr(MobileOneBlock, 'reparameterize')
+        assert not hasattr(ConvolutionalStem, 'reparameterize')
+        assert not hasattr(ConvolutionalStem, 'reset_reparameterization')
 
     @pytest.fixture
     def layer_config(self) -> Dict[str, Any]:

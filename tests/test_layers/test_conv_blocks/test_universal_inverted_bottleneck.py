@@ -33,6 +33,12 @@ class TestUniversalInvertedBottleneck:
         with pytest.raises(ValueError):
             UniversalInvertedBottleneck(**bad)
 
+    def test_causal_padding_is_refused_by_the_layer_itself(self):
+        """Keras Conv2D and DepthwiseConv2D have no 'causal'; the layer's own
+        check must say so instead of passing it on to a Keras error."""
+        with pytest.raises(ValueError, match=r"padding must be 'same' or 'valid'"):
+            UniversalInvertedBottleneck(filters=C, padding="causal")
+
     @pytest.mark.parametrize("kw,out_hw", [
         ({"use_dw1": True, "use_dw2": False}, H),
         ({"use_dw1": True, "use_dw2": True}, H),

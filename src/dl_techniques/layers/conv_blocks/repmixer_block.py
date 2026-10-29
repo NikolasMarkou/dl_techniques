@@ -26,7 +26,6 @@ from typing import Optional, Union, Tuple, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.utils.logger import logger
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
@@ -331,8 +330,9 @@ class ConvolutionalStem(keras.layers.Layer):
     dimensions by a factor of 4 while mapping to a consistent channel
     depth. The first two blocks use ``3x3`` kernels with stride 2 for
     spatial reduction; the third uses a ``1x1`` kernel at stride 1 for
-    channel refinement. All blocks support structural reparameterisation
-    for efficient inference.
+    channel refinement. The blocks keep their multi-branch training form;
+    ``MobileOneBlock`` does not fold branches, so the stem has no
+    ``reparameterize()``.
 
     Architecture:
 
@@ -463,25 +463,6 @@ class ConvolutionalStem(keras.layers.Layer):
         for block in self.blocks:
             x = block(x, training=training)
         return x
-
-    def reparameterize(self) -> None:
-        """Reparameterize all blocks in the stem for efficient inference.
-
-        Fuses multi-branch training topology into single-branch for
-        deployment."""
-        logger.info(f"Reparameterizing ConvolutionalStem with {len(self.blocks)} blocks")
-        for i, block in enumerate(self.blocks):
-            try:
-                block.reparameterize()
-                logger.info(f"Successfully reparameterized stem block {i}")
-            except Exception as e:
-                logger.warning(f"Failed to reparameterize stem block {i}: {e}")
-
-    def reset_reparameterization(self) -> None:
-        """Reset all blocks to training mode."""
-        logger.info("Resetting ConvolutionalStem reparameterization")
-        for block in self.blocks:
-            block.reset_reparameterization()
 
     def compute_output_shape(
             self,

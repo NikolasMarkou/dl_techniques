@@ -169,7 +169,7 @@ Consumers (importers of this folder): `layers/heads/vision`, `layers/acc_unet`, 
 - `build()` raises `ValueError` for wrong rank or an undefined channel dim in `BiasFree*`, `DynamicConv2D`, `RADConv2D`, `GaborDepthwiseSeparableBlock`, `SqueezeExcitation`, `MobileOneBlock`, `ReparamLargeKernelConv`, `RepMixerBlock`, `DepthwiseSeparableBlock`. `MatchChannels.build` does `int(input_shape[-1])` with no guard, so an undefined channel dim fails with a `TypeError`.
 - `BasicBlock` / `BottleneckBlock` without projection and with mismatched channels fail at the `Add`, not at construction.
 - `MobileOneBlock` with `num_conv_branches=0`, no scale branch, and no identity skip raises `ValueError` in `call()`.
-- `ConvolutionalStem.reparameterize()` logs a warning per block (`MobileOneBlock` has no `reparameterize`). `reset_reparameterization()` raises `AttributeError`. `MobileOneBlock.inference_mode` is set to `False` and never read.
+- `MobileOneBlock.inference_mode` is set to `False` and never read. `ConvolutionalStem` has no `reparameterize()` / `reset_reparameterization()` (removed: `MobileOneBlock` has no fold, so they could only log a failure or raise `AttributeError`); `test_it_offers_no_reparameterization_the_blocks_cannot_do` pins that.
 - Unregistered custom activation callables in `ConvStem` write a config that fails at reload (`TypeError`). Register with `keras.saving.register_keras_serializable`.
 - `GaborDepthwiseSeparableBlock` with a non-allowlisted activation only logs a warning.
 - `SqueezeExcitation.build` logs at `info` level on every build.

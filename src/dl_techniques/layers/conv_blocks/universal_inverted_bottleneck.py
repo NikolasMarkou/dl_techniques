@@ -253,9 +253,9 @@ class UniversalInvertedBottleneck(keras.layers.Layer):
             )
         if se_ratio <= 0:
             raise ValueError(f"se_ratio must be positive, got {se_ratio}")
-        if padding not in ['same', 'valid', 'causal']:
+        if padding not in ['same', 'valid']:
             raise ValueError(
-                f"padding must be 'same', 'valid', or 'causal', got {padding}"
+                f"padding must be 'same' or 'valid', got {padding}"
             )
 
         # Store all configuration parameters

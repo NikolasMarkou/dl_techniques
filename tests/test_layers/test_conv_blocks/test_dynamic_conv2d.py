@@ -203,6 +203,23 @@ class TestDynamicConv2D:
         for key in advanced_keys:
             assert key in config, f"Missing {key} in get_config()"
 
+    def test_activity_regularizer_is_charged_once_on_the_output(
+        self, basic_layer_config, sample_input_channels_last
+    ):
+        """Keras applies the attribute to the layer output; the inner experts get
+        None, so the loss appears exactly once."""
+        config = dict(basic_layer_config)
+        config['activity_regularizer'] = keras.regularizers.L1(1.0)
+        layer = DynamicConv2D(**config)
+        output = layer(sample_input_channels_last)
+
+        assert len(layer.losses) == 1
+        np.testing.assert_allclose(
+            float(layer.losses[0]),
+            float(keras.ops.sum(keras.ops.abs(output))),
+            rtol=1e-4,
+        )
+
     def test_from_config_reconstruction(self, basic_layer_config):
         """Test layer can be reconstructed from config."""
         original_layer = DynamicConv2D(**basic_layer_config)
