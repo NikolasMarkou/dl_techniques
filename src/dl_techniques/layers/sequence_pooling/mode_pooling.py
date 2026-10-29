@@ -55,21 +55,22 @@ class ModePooling(keras.layers.Layer):
 
     The median-distance bandwidth of ``bandwidth="auto"`` is large when most
     token pairs are far apart (for example many outliers scattered in different
-    directions), and then the mode drifts toward the mean; lower
-    ``bandwidth_scale`` or pass a float on such data. With ``num_starts > 1`` the start tokens are picked by position in
-    the sequence, so the output depends on token order; with ``num_starts=1``
+    directions), and then the mode drifts toward the mean; pass a float bandwidth
+    on such data. With ``num_starts > 1`` the start tokens are picked by position
+    in the sequence, so the output depends on token order; with ``num_starts=1``
     it does not.
 
     The data floor of ``bandwidth="auto"`` (1e-3 times the RMS radius of the kept
-    tokens about their masked mean, and at least 1e-6) bounds the median heuristic
-    only. ``bandwidth_scale`` and the learnable multiplier act after it, so they
-    always change the bandwidth and the multiplier keeps its gradient when the floor
-    binds (mostly duplicated tokens). The radius is not robust: one far token raises
-    it and with it the floor (one token 1e5 away among 100 tokens near the origin
-    moves the floor-driven bandwidth from 0.83 to 9.95). The absolute 1e-6 floor does
-    not scale with the data, so tokens whose scale is below about 1e-3 should be
-    rescaled; at a data scale of 1e-6 the pooled output differs by 7 percent of its
-    scale from the rescaled run.
+    tokens about their masked mean, and at least 1e-6) applies to the final
+    bandwidth, ``median * bandwidth_scale * exp(log_scale)``. So ``bandwidth_scale``
+    and the learnable multiplier cannot push the bandwidth below it (use a float
+    bandwidth to go lower), and while the floor binds (mostly duplicated tokens)
+    the gradient with respect to ``log_scale`` is exactly zero. The radius is not
+    robust: one far token raises it and with it the floor (one token 1e5 away from
+    99 tokens in two clusters 2 apart moves the floor-driven bandwidth from 0.83 to
+    9.95). The absolute 1e-6 floor does not scale with the data, so tokens whose
+    scale is below about 1e-3 should be rescaled; at a data scale of 1e-6 the
+    pooled output differs by 7 percent of its scale from the rescaled run.
 
     ``bandwidth="auto"`` sorts the ``seq_len ** 2`` pair distances of every sample,
     about ``O(seq_len^2 log seq_len)`` per sample, and that sort dominates the cost.
@@ -129,15 +130,18 @@ class ModePooling(keras.layers.Layer):
         num_steps: Number of mean-shift steps, an integer >= 0. With 0 the
             output is the masked mean (or the best start when ``num_starts > 1``).
         bandwidth: Kernel bandwidth ``h``. ``"auto"`` uses the median pairwise
-            distance among the kept tokens of each sample (no gradient), floored
-            at 1e-3 times the RMS radius of those tokens about their mean so that
+            distance among the kept tokens of each sample (no gradient); after
+            ``bandwidth_scale`` and the learnable multiplier it is floored at
+            1e-3 times the RMS radius of those tokens about their mean so that
             mostly duplicated tokens do not leave a bandwidth at rounding noise;
-            a positive float is used as given.
+            a positive float is used as given (only the absolute 1e-6 floor).
         bandwidth_scale: Positive factor multiplying the bandwidth, estimated
-            (after the floor) or given.
+            or given. With ``"auto"`` it cannot take the bandwidth below the
+            data floor.
         learnable_bandwidth: If True, adds one scalar weight ``log_scale``
-            (initialised to 0) and multiplies the bandwidth, after the floor, by
-            ``exp(log_scale)``.
+            (initialised to 0) and multiplies the bandwidth by ``exp(log_scale)``.
+            With ``"auto"`` the product stays above the data floor, and while the
+            floor binds the gradient of ``log_scale`` is exactly zero.
         num_starts: Number of start points, an integer >= 1. Start 0 is the
             masked mean; the others are kept tokens at evenly spaced ranks of
             the kept tokens in sequence order. Ties go to the lowest start.
@@ -282,18 +286,17 @@ class ModePooling(keras.layers.Layer):
 
         Returns:
             Positive bandwidth tensor, floored away from zero. With
-            ``bandwidth="auto"`` the median heuristic is first floored at
+            ``bandwidth="auto"`` the product of the median heuristic,
+            ``bandwidth_scale`` and ``exp(log_scale)`` is also floored at
             ``_BANDWIDTH_DATA_FLOOR`` times the RMS radius of the kept tokens about
-            their mean, then multiplied by ``bandwidth_scale`` and ``exp(log_scale)``.
+            their mean.
         """
         floor = stability_floor(acc, _BANDWIDTH_FLOOR)
         if self.bandwidth == "auto":
-            # The data floor bounds the median heuristic only, so bandwidth_scale
-            # and the learnable multiplier still act on the floored value.
-            data_floor = keras.ops.maximum(
+            h = median_heuristic_bandwidth(keys, keep)
+            floor = keras.ops.maximum(
                 floor, _BANDWIDTH_DATA_FLOOR * self._rms_radius(keys, keep, acc)
             )
-            h = keras.ops.maximum(median_heuristic_bandwidth(keys, keep), data_floor)
         else:
             h = keras.ops.reshape(
                 keras.ops.convert_to_tensor(self.bandwidth, dtype=acc), (1, 1, 1)
