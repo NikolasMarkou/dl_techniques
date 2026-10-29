@@ -42,9 +42,11 @@ The layer's behavior is determined by the chosen `message_passing` scheme. Let
 -   **GCN (Graph Convolutional Network)**: Treats message passing as a form of
     spectral convolution on the graph. The update rule is a simplified,
     spatially-localized version of this:
-    `h'_i = σ(Σ_{j ∈ N(i) ∪ {i}} (1/√(deg(i)deg(j))) * W @ h_j)`
-    This is a weighted average of a node's features and its neighbors', where
-    the weights are determined by node degrees to ensure stability.
+    `h'_i = σ(Σ_{j ∈ N(i)} (1/deg(i)) * W @ h_j)`
+    This is the mean of the features of the nodes `A` marks as neighbors of
+    `i` (`i` itself only when `A` has a self-loop): the adjacency is row
+    normalized, `D^-1 A`. It is not the symmetric `D^-1/2 A D^-1/2` of Kipf
+    and Welling, and the layer adds no self-loops.
 
 -   **GraphSAGE (Graph Sample and AGgregate)**: An inductive framework that
     explicitly separates the aggregation of neighbor information from the
@@ -106,7 +108,7 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
     GAT, GIN). Each block performs neighborhood aggregation H' = f(A, H, W),
     followed by activation, dropout, optional residual connection, and
     normalization. The layer supports four message-passing schemes:
-    GCN uses spectral convolution H' = sigma(D^{-1/2} A D^{-1/2} H W),
+    GCN uses neighbor averaging H' = sigma(D^{-1} A H W),
     GraphSAGE separates self and neighbor transforms H' = sigma(W_self H + W_neigh AGG(AH)),
     GAT applies learnable attention H' = sigma(sum_j alpha_{ij} W h_j),
     and GIN maximises expressiveness H' = MLP((1+eps) h_i + sum_j h_j).
@@ -704,9 +706,10 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
         degree = keras.ops.sum(adjacency_matrix, axis=-1, keepdims=False)  # (batch, num_nodes)
         degree = keras.ops.maximum(degree, 1e-12)  # Avoid division by zero
 
-        # Row normalization: D^(-1) * A
+        # Row normalization: D^(-1) * A. Scaling row i by 1/deg(i) makes every
+        # row sum to 1, so a node's update is the mean of its neighbours.
         degree_inv = 1.0 / degree  # (batch, num_nodes)
-        degree_inv_matrix = keras.ops.expand_dims(degree_inv, axis=1)  # (batch, 1, num_nodes)
+        degree_inv_matrix = keras.ops.expand_dims(degree_inv, axis=-1)  # (batch, num_nodes, 1)
         normalized_adj = adjacency_matrix * degree_inv_matrix  # Broadcasting
 
         # Process through GNN layers

@@ -27,7 +27,7 @@ There is no single input format. Each layer takes its own:
 
 Adjacency matrices are dense, shape `(batch, nodes, nodes)`.
 
-**GraphNeuralNetworkLayer** stacks `num_layers` blocks. Each block does message passing, activation, dropout, an optional residual add, then a normalization. At the end it optionally pools across nodes. Before the blocks, `call` builds a scaled adjacency: entry `[i, j]` is `adjacency[i, j] / deg[j]`, where `deg[j]` is the row sum of row `j` (floored at 1e-12). So column `j` is scaled by `1/deg[j]`. In general its rows do not sum to 1 for a non-symmetric adjacency, so it is not a plain neighbour average. The message-passing style is one of:
+**GraphNeuralNetworkLayer** stacks `num_layers` blocks. Each block does message passing, activation, dropout, an optional residual add, then a normalization. At the end it optionally pools across nodes. Before the blocks, `call` row-normalizes the adjacency, `D^-1 A`: entry `[i, j]` is `adjacency[i, j] / deg[i]`, where `deg[i]` is the row sum of row `i` (floored at 1e-12). Every row with an edge sums to 1, so a GCN or GraphSAGE update is the mean over a node's neighbours; the layer adds no self-loops. The message-passing style is one of:
 
 - `gcn`: multiply the scaled adjacency by the node features, then apply a Dense layer.
 - `graphsage`: one Dense on the node itself, another on the scaled-adjacency product, summed.
@@ -105,7 +105,7 @@ RELGT inputs are dictionaries and lists:
 
 - `GraphNeuralNetworkLayer`: `num_attention_heads` must divide `concept_dim` (raises `ValueError`). Adjacency must be rank 3, square, and agree with the node features on batch and node count; `None` axes are skipped but the rank is always checked. `aggregation='attention'` keeps all nodes (shape `(B, N, D)`); `mean`, `max`, `sum` give `(B, 1, D)`.
 - `GraphNeuralNetworkLayer` skips the residual add in any block whose input width differs from `concept_dim`, which is normally block 0.
-- `GraphNeuralNetworkLayer` uses the column-scaled adjacency described above for GCN and GraphSAGE, even though its docstrings describe a row-normalized or symmetric form. GIN uses the raw adjacency. GAT only uses it as a mask. An unknown `normalization` string is not rejected; it means no normalization.
+- `GraphNeuralNetworkLayer` uses the row-normalized adjacency `D^-1 A` for GCN and GraphSAGE. GIN uses the raw adjacency. GAT only uses it as a mask. An unknown `normalization` string is not rejected; it means no normalization.
 - `GraphNeuralNetworkLayer` with `graphsage` keeps its Dense layers in two flat lists. A comment in the source records that holding them in a list of dicts left them out of the saved `.keras` archive.
 - `SHGCNLayer` uses the adjacency as given, with no normalization, so any normalization has to happen before the call. Dropout is applied to the input features only when `training` is true and the rate is above 0.
 - `FermiDiracDecoder` returns logits, not probabilities. Nothing forces the temperature `t` to stay positive.

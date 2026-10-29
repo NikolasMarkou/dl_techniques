@@ -19,6 +19,55 @@ def graph_inputs():
     return nodes, adj
 
 
+# A non-symmetric adjacency whose column sums and row sums differ.
+_ADJ = np.array(
+    [[[1, 1, 0, 0], [0, 1, 0, 0], [1, 1, 1, 0], [0, 0, 1, 1]]], dtype="float32"
+)
+
+
+def _identity_probe(message_passing):
+    """One layer, linear, no residual / norm / dropout, identity kernels, so the
+    output exposes the normalized adjacency applied to the node features."""
+    return GraphNeuralNetworkLayer(
+        concept_dim=4, num_layers=1, message_passing=message_passing,
+        aggregation="none", normalization="none", activation="linear",
+        dropout_rate=0.0, use_residual=False, kernel_initializer="identity",
+    )
+
+
+class TestAdjacencyNormalization:
+    """GCN and GraphSAGE average over a node's neighbours: D^-1 A, rows sum to 1."""
+
+    def test_gcn_rows_of_the_normalized_adjacency_sum_to_one(self):
+        layer = _identity_probe("gcn")
+        ones = np.ones((1, 4, 4), dtype="float32")
+        out = keras.ops.convert_to_numpy(layer((ones, _ADJ)))
+        # Row sums of D^-1 A applied to a constant field are 1 everywhere.
+        np.testing.assert_allclose(out, ones, atol=1e-6)
+
+    def test_graphsage_neighbour_term_is_a_mean(self):
+        layer = _identity_probe("graphsage")
+        ones = np.ones((1, 4, 4), dtype="float32")
+        out = keras.ops.convert_to_numpy(layer((ones, _ADJ)))
+        # self term (1) + neighbour mean (1)
+        np.testing.assert_allclose(out, 2.0 * ones, atol=1e-6)
+
+    def test_gcn_averages_each_nodes_own_neighbours(self):
+        layer = _identity_probe("gcn")
+        values = np.arange(4, dtype="float32").reshape(1, 4, 1) * np.ones((1, 4, 4), "float32")
+        out = keras.ops.convert_to_numpy(layer((values, _ADJ)))
+        # Node 2 has neighbours 0, 1, 2 -> mean of (0, 1, 2) = 1.
+        np.testing.assert_allclose(out[0, 2], 1.0, atol=1e-6)
+        # Node 0 has neighbours 0, 1 -> mean 0.5.
+        np.testing.assert_allclose(out[0, 0], 0.5, atol=1e-6)
+
+    def test_a_node_without_edges_stays_finite(self):
+        layer = _identity_probe("gcn")
+        adjacency = np.zeros((1, 4, 4), dtype="float32")
+        out = keras.ops.convert_to_numpy(layer((np.ones((1, 4, 4), "float32"), adjacency)))
+        assert np.all(np.isfinite(out))
+
+
 class TestGraphNeuralNetworkLayer:
 
     def test_construction(self):
