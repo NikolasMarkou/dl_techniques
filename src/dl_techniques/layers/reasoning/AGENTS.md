@@ -86,11 +86,12 @@ Derived attributes: `puzzle_emb_len = max(1, ceil(puzzle_emb_dim / embed_dim))` 
 
 ```python
 HierarchicalReasoningModule(
-    num_layers: int, embed_dim: int, num_heads: int = 8, ffn_expansion_factor: int = 4,
+    num_layers: int, embed_dim: int, num_heads: int = 8, ffn_expansion_factor: int | float = 4,
     attention_type: AttentionType = 'group_query', max_seq_len: int = 2048,
     rope_theta: float = 10000.0, normalization_type: NormalizationType = 'rms_norm',
     normalization_position: NormalizationPositionType = 'post', ffn_type: FFNType = 'swiglu',
-    dropout_rate: float = 0.0, use_bias: bool = False,
+    dropout_rate: float = 0.0, attention_dropout_rate: float | None = None,
+    use_bias: bool = False,
     kernel_initializer="he_normal", kernel_regularizer=None, **kwargs)
 ```
 
@@ -98,7 +99,7 @@ HierarchicalReasoningModule(
 - `build(input_shape)`: requires a list of two shapes, identical to each other, with last dim `embed_dim`; builds each block.
 - `compute_output_shape` returns `input_shape[0]`.
 - Construction `ValueError`s: non-positive `num_layers`, `embed_dim`, `num_heads`, `ffn_expansion_factor`, `max_seq_len`, `rope_theta`; `embed_dim % num_heads != 0`.
-- Each `TransformerLayer` gets `hidden_size=embed_dim`, `intermediate_size=embed_dim * ffn_expansion_factor`, `dropout_rate` and `attention_dropout_rate` both set to `dropout_rate`.
+- Each `TransformerLayer` gets `hidden_size=embed_dim`, `intermediate_size=int(embed_dim * ffn_expansion_factor)` (a float factor is accepted; an int gives the same integer as before), `dropout_rate`, and `attention_dropout_rate` equal to the argument of that name, or to `dropout_rate` when it is `None` (the default). `models/language/trm` builds `H_level` / `L_level` from this module with `use_bias=True`, `kernel_initializer='glorot_uniform'`, a float expansion and an independent attention dropout.
 
 ### SparsePuzzleEmbedding
 
@@ -132,7 +133,7 @@ SparsePuzzleEmbedding(num_embeddings: int, embedding_dim: int, batch_size: int,
 - `h_init` and `l_init` are non-trainable. They reach the loss only through `reset_carry` into the carry, which crosses the `stop_gradient`, so the gradient is `None`. Do not set `trainable=True`; it would overstate the trainable count by `2 * embed_dim`.
 - Position handling (plan-2026-08-17T183311-79c63e38/D-012). `pos_encodings="rope"` owns no layer in the core. It selects `attention_type='group_query'` for both reasoning modules, so RoPE rotates Q and K inside attention. Do not add a `RotaryPositionEmbedding` to the core or apply one in `_input_embeddings`: that previously left the whole stack permutation-equivariant (measured `max|P f(x) - f(P x)| = 2.02656e-06`). `"learned"` selects `multi_head` and adds `position_embedding.pos_embedding` as `0.707106781 * (embeddings + pos)` before the `embed_scale` multiply.
 - The core passes `max_seq_len=total_seq_len` and `rope_theta` to both modules, so RoPE tables cover puzzle positions as well.
-- The module forwards `num_kv_heads`, `max_seq_len`, `rope_theta` as `attention_args` ONLY when `attention_type == 'group_query'`. The attention factory raises on undeclared keys, so passing them to `multi_head` would fail construction. `multi_head_latent` is RoPE-capable but has no `num_kv_heads`, so it is deliberately excluded. Do not simplify the default back to `multi_head`.
+- The module builds `attention_args` with `assemble_attention_config(attention_type, {num_kv_heads, max_seq_len, rope_theta})` for any type, so each type receives only the keys its registry entry declares (`group_query` all three, `multi_head` none, `multi_head_latent` `max_seq_len` and `rope_theta`). The attention factory raises on undeclared keys, so an unfiltered dict would fail construction for `multi_head`. Do not simplify the default back to `multi_head`.
 - Each `TransformerLayer` in the module gets its own `clone_initializer(self.kernel_initializer)` (plan-2026-08-23T091307-9a110062/D-560). One shared seedless initializer instance replays the same draw into every same-shape kernel. `tests/test_the_shared_initializer_population_cannot_grow.py` lists this file. The core's `lm_head` uses `self.kernel_initializer` directly.
 - `SparsePuzzleEmbedding.local_ids` must stay `INDEX_WEIGHT_DTYPE` (int64): an int32 variable lives in host memory and an XLA-compiled GPU step cannot reach it. `tests/index_weights.py` (`int32_variables`) guards this.
 - Sub-layers are created in `__init__` and built explicitly in `build` in computational order (token embedding, puzzle embedding, position embedding, h and l modules, `lm_head`, `q_head`) for save/load. Keep that when adding sub-layers.
@@ -150,7 +151,7 @@ Internal:
 
 External: `keras` (3.x), with `keras.ops` for all tensor math; `math` for `sqrt`.
 
-Consumers: `dl_techniques/models/language/hrm/model.py` imports `HierarchicalReasoningCore` and calls `core.build`, `core.empty_carry`, `core.reset_carry` and the core itself. `dl_techniques/layers/blt/blt_core.py` imports `HierarchicalReasoningModule` and `SparsePuzzleEmbedding` (not the core).
+Consumers: `dl_techniques/models/language/hrm/model.py` imports `HierarchicalReasoningCore` and calls `core.build`, `core.empty_carry`, `core.reset_carry` and the core itself. `dl_techniques/layers/blt/blt_core.py` imports `HierarchicalReasoningModule` and `SparsePuzzleEmbedding` (not the core). `dl_techniques/models/language/trm/components.py` (`TRMInner`) builds both its halves from `HierarchicalReasoningModule`.
 
 ## Failure modes
 
@@ -166,7 +167,7 @@ Consumers: `dl_techniques/models/language/hrm/model.py` imports `HierarchicalRea
 - Docstrings in this package are Sphinx/reST (`:param:` / `:type:`); match them.
 - Any new constructor argument must be validated in `__init__`, stored, and added to `get_config()`. Round-trip serialization is tested.
 - Do not change the registration strings; they are keys for saved `.keras` files.
-- If you add a new attention type option to the module, check whether it declares `num_kv_heads`, `max_seq_len`, `rope_theta` before forwarding them.
+- A new attention type needs no change here: `assemble_attention_config` filters the three keys against its registry entry.
 - Run the scoped tests only:
   ```bash
   .venv/bin/python -m pytest tests/test_layers/test_reasoning/ -q

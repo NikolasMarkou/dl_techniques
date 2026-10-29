@@ -93,9 +93,9 @@ The roles match: the heads read `z_H` (the paper's answer state `y`), and `z_H` 
 
 ## 4. Architecture Deep Dive
 
-### 4.1 `TRMReasoningModule`
+### 4.1 `HierarchicalReasoningModule`
 
-A reusable stack of `TransformerLayer` instances. It takes a latent state and an input-injection tensor, adds them, and runs the sum through its stack. Both `H_level` and `L_level` are instances of this class, differing only in layer count (`h_layers`, `l_layers`).
+The shared stack of `TransformerLayer` instances from `dl_techniques.layers.reasoning.hrm_reasoning_module` (also used by HRM and BLT). It takes `[hidden_states, input_injection]`, adds them, and runs the sum through its stack (`blocks`, named `transformer_layer_{i}`). Both `H_level` and `L_level` are instances of this class, differing only in layer count (`h_layers`, `l_layers`). `TRMInner` configures it with `use_bias=True`, `kernel_initializer='glorot_uniform'`, a float `ffn_expansion_factor=expansion`, an independent `attention_dropout_rate`, and `max_seq_len = seq_len + puzzle_emb_len`.
 
 ### 4.2 `TRMInner`
 
@@ -173,8 +173,8 @@ print(f"Any halted: {new_carry['halted'].numpy().any()}")
 | :--- | :--- | :--- |
 | **`TRM`** | `...trm.model` | The `keras.Model`. Manages carry state and executes one reasoning step per call. |
 | **`TRMInner`** | `...trm.components` | Performs the core two-level (`z_L`, `z_H`) reasoning for one step. |
-| **`TRMReasoningModule`** | `...trm.components` | A stack of `TransformerLayer` instances, used for both H- and L-level processing. |
-| **`TransformerLayer`** | `...layers.transformers` | The configurable block powering `TRMReasoningModule`. |
+| **`HierarchicalReasoningModule`** | `...layers.reasoning.hrm_reasoning_module` | A stack of `TransformerLayer` instances, used for both H- and L-level processing. |
+| **`TransformerLayer`** | `...layers.transformers` | The configurable block powering `HierarchicalReasoningModule`. |
 
 `create_trm(...)` is a thin factory taking the same arguments as the constructor plus `name`.
 
@@ -339,7 +339,7 @@ Begin with `no_act_continue=True` and a small `halt_max_steps` (4 or 8) to confi
 
 ## 12. Serialization & Deployment
 
-`TRM`, `TRMInner` and `TRMReasoningModule` are fully serializable in the `.keras` format. Each is registered with `@register_dl_technique(...)` from `dl_techniques.utils.keras_registration`: `TRM` under `dl_techniques.models.trm.model`, the two layers under `...trm.components`, which is the defining module's dotted path with the `language/` family directory stripped.
+`TRM` and `TRMInner` are fully serializable in the `.keras` format. Each is registered with `@register_dl_technique(...)` from `dl_techniques.utils.keras_registration`: `TRM` under `dl_techniques.models.trm.model`, `TRMInner` under `...trm.components`, which is the defining module's dotted path with the `language/` family directory stripped. The reasoning halves are `HierarchicalReasoningModule`, registered under `dl_techniques.layers.reasoning.hrm_reasoning_module`; their weight paths are `H_level/transformer_layer_{i}/...` (earlier checkpoints used `transformer_block_{i}` and no longer load).
 
 ```python
 model = TRM(...)

@@ -27,7 +27,7 @@ from typing import Dict, Any
 import keras
 import tensorflow as tf
 
-from dl_techniques.models.language.trm import TRM, TRMInner, TRMReasoningModule
+from dl_techniques.models.language.trm import TRM, TRMInner
 
 from ..knob_sensitivity_oracle import (
     as_array,

@@ -1,7 +1,8 @@
 """Where TRM's positional signal comes from, and where it did not.
 
 TRM's package docstring and every one of its constructors advertise a
-``rope_theta``, and ``TRMReasoningModule`` duly forwarded
+``rope_theta``, and the reasoning module (then ``TRMReasoningModule``,
+now ``HierarchicalReasoningModule``) duly forwarded
 ``{'max_seq_len': ..., 'rope_theta': ...}`` into ``TransformerLayer``. But the
 default ``attention_type`` was ``'multi_head'``, and ``MultiHeadAttention``
 declares no RoPE parameter at all — ``create_attention_layer`` filtered kwargs
@@ -100,7 +101,7 @@ class TestTRMIsPositionAware:
 
     def test_attention_holds_a_live_rope_table(self, model):
         _forward(model, IDS)
-        attention = model.inner.L_level.layers_list[0].attention
+        attention = model.inner.L_level.blocks[0].attention
         rope = getattr(attention, "rope", None)
         assert rope is not None, (
             f"{type(attention).__name__} has no RoPE machinery at all; the "
@@ -129,6 +130,6 @@ class TestTRMIsPositionAware:
             rope_theta=12345.0,
         )
         _forward(model, IDS)
-        rope = model.inner.H_level.layers_list[0].attention.rope
+        rope = model.inner.H_level.blocks[0].attention.rope
         assert rope.max_seq_len == SEQ_LEN + PUZZLE_EMB_LEN
         assert rope.rope_theta == pytest.approx(12345.0)

@@ -7,7 +7,8 @@ from typing import Dict, Any, Tuple
 import keras
 import tensorflow as tf
 
-from dl_techniques.models.language.trm.components import TRMReasoningModule, TRMInner
+from dl_techniques.layers.reasoning.hrm_reasoning_module import HierarchicalReasoningModule
+from dl_techniques.models.language.trm.components import TRMInner
 
 
 @pytest.fixture(scope="module")
@@ -20,91 +21,6 @@ def common_config() -> Dict[str, Any]:
         "seq_len": 16,
         "puzzle_emb_len": 4,
     }
-
-
-class TestTRMReasoningModule:
-    """Tests for the TRMReasoningModule layer."""
-
-    @pytest.fixture(scope="class")
-    def reasoning_config(self, common_config: Dict[str, Any]) -> Dict[str, Any]:
-        """Configuration specific to TRMReasoningModule."""
-        return {**common_config, "num_layers": 2}
-
-    @pytest.fixture(scope="class")
-    def sample_input(self, reasoning_config: Dict[str, Any]) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """Provides sample input tensors for the reasoning module."""
-        batch_size = 2
-        full_seq_len = reasoning_config["seq_len"] + reasoning_config["puzzle_emb_len"]
-        hidden_size = reasoning_config["hidden_size"]
-        shape = (batch_size, full_seq_len, hidden_size)
-
-        hidden_states = keras.ops.convert_to_tensor(np.random.randn(*shape), dtype='float32')
-        input_injection = keras.ops.convert_to_tensor(np.random.randn(*shape), dtype='float32')
-        return hidden_states, input_injection
-
-    def test_creation_and_config(self, reasoning_config: Dict[str, Any]):
-        """Test layer creation and sub-layer count."""
-        layer = TRMReasoningModule(**reasoning_config)
-        assert len(layer.layers_list) == reasoning_config["num_layers"]
-
-        # Test get_config and from_config cycle
-        config = layer.get_config()
-        reconstructed_layer = TRMReasoningModule.from_config(config)
-        assert reconstructed_layer.get_config() == config
-
-    def test_build_method(self, reasoning_config: Dict[str, Any], sample_input: Tuple[keras.KerasTensor, ...]):
-        """Test that the build method correctly builds the layer and its sub-layers."""
-        layer = TRMReasoningModule(**reasoning_config)
-        input_shape = sample_input[0].shape
-
-        assert not layer.built
-        layer.build(input_shape)
-        assert layer.built
-
-        # Check that all internal transformer layers are also built
-        for sub_layer in layer.layers_list:
-            assert sub_layer.built
-
-    def test_call_method(self, reasoning_config: Dict[str, Any], sample_input: Tuple[keras.KerasTensor, ...]):
-        """Test the forward pass of the layer."""
-        layer = TRMReasoningModule(**reasoning_config)
-        hidden_states, input_injection = sample_input
-
-        # Test in inference mode
-        output = layer(hidden_states, input_injection, training=False)
-        assert output.shape == hidden_states.shape
-
-        # Test in training mode
-        output_train = layer(hidden_states, input_injection, training=True)
-        assert output_train.shape == hidden_states.shape
-
-    def test_serialization(self, reasoning_config: Dict[str, Any], sample_input: Tuple[keras.KerasTensor, ...]):
-        """Test saving and loading the layer."""
-        layer = TRMReasoningModule(**reasoning_config)
-        hidden_states, input_injection = sample_input
-        original_output = layer(hidden_states, input_injection)
-
-        # Wrap in a Functional API model to save
-        input1 = keras.Input(shape=hidden_states.shape[1:])
-        input2 = keras.Input(shape=input_injection.shape[1:])
-        outputs = layer(input1, input2)
-        model = keras.Model(inputs=[input1, input2], outputs=outputs)
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            model_path = os.path.join(tmpdir, "reasoning_module.keras")
-            model.save(model_path)
-            loaded_model = keras.models.load_model(
-                model_path,
-                custom_objects={"TRMReasoningModule": TRMReasoningModule}
-            )
-
-        loaded_output = loaded_model([hidden_states, input_injection])
-
-        np.testing.assert_allclose(
-            keras.ops.convert_to_numpy(original_output),
-            keras.ops.convert_to_numpy(loaded_output),
-            rtol=1e-6, atol=1e-6
-        )
 
 
 class TestTRMInner:
@@ -143,13 +59,13 @@ class TestTRMInner:
     def test_creation_and_config(self, inner_config: Dict[str, Any]):
         """Test layer creation and structure."""
         layer = TRMInner(**inner_config)
-        assert isinstance(layer.H_level, TRMReasoningModule)
-        assert isinstance(layer.L_level, TRMReasoningModule)
+        assert isinstance(layer.H_level, HierarchicalReasoningModule)
+        assert isinstance(layer.L_level, HierarchicalReasoningModule)
         assert isinstance(layer.token_emb, keras.layers.Embedding)
         assert isinstance(layer.lm_head, keras.layers.Dense)
         assert isinstance(layer.q_head, keras.layers.Dense)
-        assert len(layer.H_level.layers_list) == inner_config["h_layers"]
-        assert len(layer.L_level.layers_list) == inner_config["l_layers"]
+        assert len(layer.H_level.blocks) == inner_config["h_layers"]
+        assert len(layer.L_level.blocks) == inner_config["l_layers"]
 
         # Test get_config and from_config cycle
         config = layer.get_config()
@@ -233,7 +149,7 @@ class TestTRMInner:
             model.save(model_path)
             loaded_model = keras.models.load_model(
                 model_path,
-                custom_objects={"TRMInner": TRMInner, "TRMReasoningModule": TRMReasoningModule}
+                custom_objects={"TRMInner": TRMInner}
             )
 
         # loaded_model is the functional wrapper, not the layer itself.

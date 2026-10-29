@@ -16,9 +16,10 @@ carry through `stop_gradient`), so training covers one step at a time
 rather than the full trajectory, and the halting head reads a (halt,
 continue) logit pair from position 0 of `z_H`.
 
-`TRMReasoningModule` is the raw computation: a stack of `TransformerLayer`
-instances applied to an injected state, used for both halves.
-`TRMInner` orchestrates embeddings, the `z_L`-then-`z_H` update order, the
+`HierarchicalReasoningModule` (shared with HRM, configured here with biases,
+Glorot-uniform kernels and a float FFN expansion) is the raw computation: a
+stack of `TransformerLayer` instances applied to an injected state, used for
+both halves. `TRMInner` orchestrates embeddings, the `z_L`-then-`z_H` update order, the
 prediction head and the halting head, and owns the learnable initial
 states `H_init` and `L_init`. Positional information enters only through
 attention, so the attention type must carry RoPE; the default is
@@ -49,313 +50,16 @@ from typing import Optional, Tuple, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.attention.factory import assemble_attention_config
+from dl_techniques.layers.reasoning.hrm_reasoning_module import (
+    HierarchicalReasoningModule
+)
 from dl_techniques.layers.transformers import (
-    TransformerLayer,
     FFNType,
     AttentionType,
     NormalizationType,
     NormalizationPositionType
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
-
-# ---------------------------------------------------------------------
-
-
-@register_dl_technique("dl_techniques.models.trm.components")
-class TRMReasoningModule(keras.layers.Layer):
-    """
-    A stack of ``TransformerLayer`` instances applied to an injected latent state.
-
-    The raw computational engine of TRM, used for both halves of the hierarchical
-    state. An external tensor is added to the incoming state once, on entry
-    (``hidden_states + input_injection``), and the sum is then passed through
-    ``num_layers`` identical transformer blocks. Additive injection keeps the
-    injected stream on the same footing as the module's own previous output
-    rather than widening the input.
-
-    Positional signal reaches the stack only through attention, so
-    ``attention_type`` must be a RoPE-capable type; the default
-    ``'group_query'`` with ``num_kv_heads == num_heads`` is arithmetically plain
-    multi-head attention that also carries RoPE.
-
-    Architecture:
-
-    .. code-block:: text
-
-        ┌──────────────────────────────────────┐   ┌────────────────────────┐
-        │  hidden_states [B, S+P, H]           │   │  input_injection       │
-        └───────────────┬──────────────────────┘   └───────────┬────────────┘
-                        │                                      │
-                        └──────────────►(+)◄───────────────────┘
-                                         │  (once, on entry)
-                                         ▼
-        ┌──────────────────────────────────────┐
-        │  transformer_block_0                 │
-        │   attn(RoPE) → FFN(swiglu) → RMSNorm │
-        └───────────────┬──────────────────────┘
-                        ▼
-        ┌──────────────────────────────────────┐
-        │  transformer_block_1                 │
-        └───────────────┬──────────────────────┘
-                        ▼
-                       ...
-                        ▼
-        ┌──────────────────────────────────────┐
-        │  transformer_block_{L-1}             │
-        └───────────────┬──────────────────────┘
-                        ▼
-        ┌──────────────────────────────────────┐
-        │  Output [B, S+P, H]                  │
-        └──────────────────────────────────────┘
-
-        B = batch, S = seq_len, P = puzzle_emb_len, H = hidden_size, L = num_layers
-
-    :param hidden_size: Dimensionality of the hidden states. Positive, and
-        divisible by ``num_heads``.
-    :type hidden_size: int
-    :param num_heads: Number of attention heads in each transformer layer.
-        Positive.
-    :type num_heads: int
-    :param expansion: FFN width multiplier; the intermediate size is
-        ``int(hidden_size * expansion)``. Positive.
-    :type expansion: float
-    :param num_layers: Number of ``TransformerLayer`` instances to stack. At
-        least 1.
-    :type num_layers: int
-    :param seq_len: Length of the input token sequence, excluding the puzzle
-        prefix.
-    :type seq_len: int
-    :param puzzle_emb_len: Length of the puzzle embedding prefix. Added to
-        ``seq_len`` to form the RoPE ``max_seq_len``. Defaults to ``16``.
-    :type puzzle_emb_len: int
-    :param rope_theta: RoPE base frequency. Defaults to ``10000.0``.
-    :type rope_theta: float
-    :param attention_type: Attention mechanism identifier. Defaults to
-        ``'group_query'``, the only registry entry reachable from
-        ``TransformerLayer`` that gives plain self-attention AND carries RoPE;
-        ``'multi_head'`` carries none, which would leave this stack exactly
-        permutation-equivariant. See the anchored decision in ``__init__``.
-    :type attention_type: AttentionType
-    :param ffn_type: Feed-forward network identifier. Defaults to ``'swiglu'``.
-    :type ffn_type: FFNType
-    :param normalization_type: Normalization layer identifier. Defaults to
-        ``'rms_norm'``.
-    :type normalization_type: NormalizationType
-    :param normalization_position: ``'pre'`` or ``'post'``. Defaults to
-        ``'post'``.
-    :type normalization_position: NormalizationPositionType
-    :param dropout_rate: Dropout rate for the transformer layers. Defaults to
-        ``0.0``.
-    :type dropout_rate: float
-    :param attention_dropout_rate: Dropout rate applied to attention weights.
-        Defaults to ``0.0``.
-    :type attention_dropout_rate: float
-    :param kwargs: Additional keyword arguments for the ``keras.layers.Layer``
-        base class.
-
-    :raises ValueError: If ``hidden_size`` or ``num_heads`` is non-positive, if
-        ``hidden_size`` is not divisible by ``num_heads``, if ``num_layers`` is
-        less than 1, or if ``expansion`` is non-positive.
-
-    Input shape:
-        3D tensor with shape ``(batch_size, sequence_length, hidden_size)``.
-        ``input_injection`` must broadcast against it.
-
-    Output shape:
-        3D tensor with the same shape as the input.
-
-    Example:
-        >>> reasoning_block = TRMReasoningModule(
-        ...     hidden_size=512, num_heads=8, expansion=4.0,
-        ...     num_layers=4, seq_len=128,
-        ... )
-        >>> inputs = keras.random.normal((2, 144, 512))
-        >>> injection = keras.random.normal((2, 144, 512))
-        >>> output = reasoning_block(inputs, injection)
-
-    Note:
-        Composite-layer pattern: sub-layers are created in ``__init__`` and
-        built explicitly in ``build``, so Keras can restore weights into a fully
-        materialized variable tree instead of raising "layer has not been built".
-
-    Attributes:
-        layers_list: The ``num_layers`` ``TransformerLayer`` instances, in order.
-    """
-
-    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        expansion: float,
-        num_layers: int,
-        seq_len: int,
-        puzzle_emb_len: int = 16,
-        rope_theta: float = 10000.0,
-        # DECISION plan-2026-08-17T183311-79c63e38/D-007: default is 'group_query'
-        # (plain MHA with RoPE); 'multi_head' has no RoPE and left the stack permutation-equivariant. See decisions.md.
-        attention_type: AttentionType = 'group_query',
-        ffn_type: FFNType = 'swiglu',
-        normalization_type: NormalizationType = 'rms_norm',
-        normalization_position: NormalizationPositionType = 'post',
-        dropout_rate: float = 0.0,
-        attention_dropout_rate: float = 0.0,
-        **kwargs: Any
-    ) -> None:
-        """Validate the configuration and create the transformer stack.
-
-        Sub-layers are instantiated here and remain unbuilt until :meth:`build`.
-        See the class docstring for the full parameter reference.
-        """
-        super().__init__(**kwargs)
-
-        if hidden_size <= 0 or num_heads <= 0:
-            raise ValueError(
-                f"hidden_size and num_heads must be positive, got "
-                f"hidden_size={hidden_size}, num_heads={num_heads}"
-            )
-        if hidden_size % num_heads != 0:
-            raise ValueError(
-                f"hidden_size ({hidden_size}) must be divisible by "
-                f"num_heads ({num_heads})."
-            )
-        if num_layers < 1:
-            raise ValueError(f"num_layers must be >= 1, got {num_layers}")
-        if expansion <= 0:
-            raise ValueError(f"expansion must be positive, got {expansion}")
-
-        self.hidden_size = hidden_size
-        self.num_heads = num_heads
-        self.expansion = expansion
-        self.num_layers = num_layers
-        self.seq_len = seq_len
-        self.puzzle_emb_len = puzzle_emb_len
-        self.rope_theta = rope_theta
-        self.attention_type = attention_type
-        self.ffn_type = ffn_type
-        self.normalization_type = normalization_type
-        self.normalization_position = normalization_position
-        self.dropout_rate = dropout_rate
-        self.attention_dropout_rate = attention_dropout_rate
-
-        intermediate_size = int(hidden_size * expansion)
-
-        # DECISION plan-2026-08-18T140459-7991552f/D-029: pre-filter these three
-        # keys against the target attention type's registry allowlist; create_attention_layer raises on an
-        # unsupported key, and MultiHeadAttention declares none of them. See decisions.md.
-        attention_args = assemble_attention_config(
-            attention_type,
-            {
-                'num_kv_heads': num_heads,
-                'max_seq_len': seq_len + puzzle_emb_len,
-                'rope_theta': rope_theta,
-            },
-        )
-
-        # CREATE sub-layers in __init__ as per the Golden Rule.
-        self.layers_list = [
-            TransformerLayer(
-                hidden_size=hidden_size,
-                num_heads=num_heads,
-                intermediate_size=intermediate_size,
-                attention_type=attention_type,
-                attention_args=dict(attention_args),
-                normalization_type=normalization_type,
-                normalization_position=normalization_position,
-                ffn_type=ffn_type,
-                dropout_rate=dropout_rate,
-                attention_dropout_rate=attention_dropout_rate,
-                name=f"transformer_block_{i}"
-            ) for i in range(num_layers)
-        ]
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build every constituent ``TransformerLayer``.
-
-        Each sub-layer is built by hand rather than being left to materialize on
-        first call: weight restoration during deserialization requires the
-        variables to already exist, so an implicitly-built stack reloads into an
-        incomplete variable tree.
-
-        :param input_shape: Shape of the input tensor, e.g.
-            ``(batch_size, seq_len, hidden_size)``.
-        :type input_shape: Tuple[Optional[int], ...]
-        """
-        for layer in self.layers_list:
-            if not layer.built:
-                layer.build(input_shape)
-        super().build(input_shape)
-
-    def call(
-            self,
-            hidden_states: keras.KerasTensor,
-            input_injection: keras.KerasTensor,
-            training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """Inject, then run the transformer stack.
-
-        The injection is added once, before the first block, not re-applied
-        between layers.
-
-        :param hidden_states: The latent state to refine, shape
-            ``(batch, seq, hidden_size)``.
-        :type hidden_states: keras.KerasTensor
-        :param input_injection: External tensor added to the state on entry --
-            token embeddings for the low-level module, the refreshed low-level
-            state for the high-level one.
-        :type input_injection: keras.KerasTensor
-        :param training: Whether the call is in training mode (enables dropout).
-        :type training: Optional[bool]
-        :return: The transformed state, same shape as ``hidden_states``.
-        :rtype: keras.KerasTensor
-        """
-        hidden_states = hidden_states + input_injection
-        for layer in self.layers_list:
-            hidden_states = layer(hidden_states, training=training)
-        return hidden_states
-
-    def compute_output_shape(
-        self,
-        input_shape: Tuple[Optional[int], ...]
-    ) -> Tuple[Optional[int], ...]:
-        """Return the output shape, which equals the input shape.
-
-        Every transformation in the stack is shape-preserving.
-
-        :param input_shape: Shape of the input tensor.
-        :type input_shape: Tuple[Optional[int], ...]
-        :return: The identical shape.
-        :rtype: Tuple[Optional[int], ...]
-        """
-        return input_shape
-
-    def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization.
-
-        Every ``__init__`` parameter is included, so the stack is reconstructed
-        from config rather than from serialized sub-layers.
-
-        :return: The configuration dictionary.
-        :rtype: Dict[str, Any]
-        """
-        config = super().get_config()
-        config.update({
-            'hidden_size': self.hidden_size,
-            'num_heads': self.num_heads,
-            'expansion': self.expansion,
-            'num_layers': self.num_layers,
-            'seq_len': self.seq_len,
-            'puzzle_emb_len': self.puzzle_emb_len,
-            'rope_theta': self.rope_theta,
-            'attention_type': self.attention_type,
-            'ffn_type': self.ffn_type,
-            'normalization_type': self.normalization_type,
-            'normalization_position': self.normalization_position,
-            'dropout_rate': self.dropout_rate,
-            'attention_dropout_rate': self.attention_dropout_rate,
-        })
-        return config
-
 
 # ---------------------------------------------------------------------
 
@@ -400,14 +104,14 @@ class TRMInner(keras.layers.Layer):
                │                   │ injection              │
                ▼                   ▼                        │
         ┌──────────────────────────────────────┐            │
-        │  L_level (TRMReasoningModule)        │            │
+        │  L_level (reasoning module)          │            │
         │  l_layers blocks                     │            │
         └──────────────────┬───────────────────┘            │
                            │ z_L (updated)                  │
                            │  ── injection ──┐              ▼
                            │                 ▼   ┌──────────────────┐
                            │      ┌──────────────────────────────────┐
-                           │      │  H_level (TRMReasoningModule)    │
+                           │      │  H_level (reasoning module)      │
                            │      │  h_layers blocks                 │
                            │      └──────────────┬───────────────────┘
                            │                     │ z_H (updated)
@@ -462,7 +166,7 @@ class TRMInner(keras.layers.Layer):
     :type rope_theta: float
     :param attention_type: Attention mechanism identifier. Defaults to
         ``'group_query'``; ``'multi_head'`` carries no RoPE. See the anchored
-        decision on ``TRMReasoningModule.__init__``.
+        decision in ``__init__``.
     :type attention_type: AttentionType
     :param ffn_type: Feed-forward network identifier. Defaults to ``'swiglu'``.
     :type ffn_type: FFNType
@@ -512,8 +216,8 @@ class TRMInner(keras.layers.Layer):
 
     Attributes:
         token_emb: Embedding layer for the input token ids.
-        H_level: ``TRMReasoningModule`` performing the high-level state update.
-        L_level: ``TRMReasoningModule`` performing the low-level state update.
+        H_level: ``HierarchicalReasoningModule`` performing the high-level state update.
+        L_level: ``HierarchicalReasoningModule`` performing the low-level state update.
         lm_head: Dense head producing prediction logits.
         q_head: Dense head producing the ACT halting logits.
         H_init: Learnable initial value of ``z_H``.
@@ -532,7 +236,8 @@ class TRMInner(keras.layers.Layer):
         l_layers: int = 2,
         rope_theta: float = 10000.0,
         # DECISION plan-2026-08-17T183311-79c63e38/D-007: 'group_query', not
-        # 'multi_head' — see the anchor on TRMReasoningModule.__init__ above.
+        # 'multi_head': RoPE is only reachable through attention, and a stack
+        # without it is exactly permutation-equivariant.
         attention_type: AttentionType = 'group_query',
         ffn_type: FFNType = 'swiglu',
         normalization_type: NormalizationType = 'rms_norm',
@@ -588,30 +293,45 @@ class TRMInner(keras.layers.Layer):
             output_dim=hidden_size,
             name="token_embedding"
         )
-        self.H_level = TRMReasoningModule(
-            hidden_size=hidden_size, num_heads=num_heads, expansion=expansion,
-            num_layers=h_layers, seq_len=seq_len,
-            puzzle_emb_len=puzzle_emb_len, rope_theta=rope_theta,
-            attention_type=attention_type, ffn_type=ffn_type,
-            normalization_type=normalization_type,
-            normalization_position=normalization_position,
-            dropout_rate=dropout_rate,
-            attention_dropout_rate=attention_dropout_rate, name="H_level"
-        )
-        self.L_level = TRMReasoningModule(
-            hidden_size=hidden_size, num_heads=num_heads, expansion=expansion,
-            num_layers=l_layers, seq_len=seq_len,
-            puzzle_emb_len=puzzle_emb_len, rope_theta=rope_theta,
-            attention_type=attention_type, ffn_type=ffn_type,
-            normalization_type=normalization_type,
-            normalization_position=normalization_position,
-            dropout_rate=dropout_rate,
-            attention_dropout_rate=attention_dropout_rate, name="L_level"
-        )
+        # The two halves are the shared HierarchicalReasoningModule, configured
+        # to TRM's math: biased projections and the TransformerLayer default
+        # Glorot-uniform kernels, a float FFN expansion, attention dropout set
+        # independently of dropout_rate, and RoPE tables covering the puzzle
+        # prefix.
+        self.H_level = self._make_level(h_layers, "H_level")
+        self.L_level = self._make_level(l_layers, "L_level")
         self.lm_head = keras.layers.Dense(
             vocab_size, use_bias=False, name="lm_head"
         )
         self.q_head = keras.layers.Dense(2, name="q_head")
+
+    def _make_level(self, num_layers: int, name: str) -> HierarchicalReasoningModule:
+        """Create one reasoning half as a ``HierarchicalReasoningModule``.
+
+        :param num_layers: Number of transformer layers in the half.
+        :type num_layers: int
+        :param name: Layer name, ``'H_level'`` or ``'L_level'``.
+        :type name: str
+        :return: The unbuilt reasoning module.
+        :rtype: HierarchicalReasoningModule
+        """
+        return HierarchicalReasoningModule(
+            num_layers=num_layers,
+            embed_dim=self.hidden_size,
+            num_heads=self.num_heads,
+            ffn_expansion_factor=self.expansion,
+            attention_type=self.attention_type,
+            max_seq_len=self.seq_len + self.puzzle_emb_len,
+            rope_theta=self.rope_theta,
+            normalization_type=self.normalization_type,
+            normalization_position=self.normalization_position,
+            ffn_type=self.ffn_type,
+            dropout_rate=self.dropout_rate,
+            attention_dropout_rate=self.attention_dropout_rate,
+            use_bias=True,
+            kernel_initializer='glorot_uniform',
+            name=name,
+        )
 
     def build(self, input_shape: Optional[Any] = None) -> None:
         """Build every sub-layer and create the learnable initial states.
@@ -631,9 +351,9 @@ class TRMInner(keras.layers.Layer):
         if not self.token_emb.built:
             self.token_emb.build((None, self.seq_len))
         if not self.H_level.built:
-            self.H_level.build(latent_shape)
+            self.H_level.build([latent_shape, latent_shape])
         if not self.L_level.built:
-            self.L_level.build(latent_shape)
+            self.L_level.build([latent_shape, latent_shape])
         if not self.lm_head.built:
             self.lm_head.build(latent_shape)
         if not self.q_head.built:
@@ -693,8 +413,8 @@ class TRMInner(keras.layers.Layer):
         )
         input_emb_padded = keras.ops.concatenate([puzzle_emb_padding, input_emb], axis=1)
 
-        z_L = self.L_level(z_L, input_emb_padded, training=training)
-        z_H = self.H_level(z_H, z_L, training=training)
+        z_L = self.L_level([z_L, input_emb_padded], training=training)
+        z_H = self.H_level([z_H, z_L], training=training)
 
         new_carry = {
             "z_H": keras.ops.stop_gradient(z_H),

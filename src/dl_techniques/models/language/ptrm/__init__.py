@@ -14,7 +14,7 @@ References:
       Networks. (https://arxiv.org/abs/2510.04871)
 """
 
-from .components import TRMReasoningModule, TRMInner
+from dl_techniques.models.language.trm.components import TRMInner
 from .model import PTRM, create_ptrm
 from .inference import PTRMInference, run_ptrm_inference
 from .factory import (
@@ -26,8 +26,7 @@ from .factory import (
 )
 
 __all__ = [
-    # Core components (re-exported from TRM)
-    'TRMReasoningModule',
+    # Core component (defined in TRM)
     'TRMInner',
     # PTRM model
     'PTRM',

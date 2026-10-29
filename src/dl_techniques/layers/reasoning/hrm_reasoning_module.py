@@ -45,6 +45,7 @@ from typing import Optional, Union, Tuple, Any, Dict, List
 # ---------------------------------------------------------------------
 
 from ...initializers import clone_initializer
+from ..attention.factory import assemble_attention_config
 from ..transformers import (
     TransformerLayer,
     AttentionType,
@@ -104,8 +105,11 @@ class HierarchicalReasoningModule(keras.layers.Layer):
     :type embed_dim: int
     :param num_heads: Number of attention heads. Defaults to 8.
     :type num_heads: int
-    :param ffn_expansion_factor: FFN expansion factor. Defaults to 4.
-    :type ffn_expansion_factor: int
+    :param ffn_expansion_factor: FFN expansion factor; the intermediate size is
+        ``int(embed_dim * ffn_expansion_factor)``, so a float such as ``2.67`` is
+        accepted and an int gives the same integer as before. Positive.
+        Defaults to 4.
+    :type ffn_expansion_factor: Union[int, float]
     :param attention_type: Attention mechanism type. Defaults to
         ``'group_query'``, the only plain-self-attention registry type that also
         carries RoPE; ``'multi_head'`` carries none.
@@ -125,6 +129,10 @@ class HierarchicalReasoningModule(keras.layers.Layer):
     :type ffn_type: FFNType
     :param dropout_rate: Dropout rate. Defaults to 0.0.
     :type dropout_rate: float
+    :param attention_dropout_rate: Dropout rate applied to the attention weights.
+        ``None`` (the default) ties it to ``dropout_rate``; a number, including
+        ``0.0``, sets it independently. In ``[0, 1]``.
+    :type attention_dropout_rate: Optional[float]
     :param use_bias: Whether to use bias terms. Defaults to False.
     :type use_bias: bool
     :param kernel_initializer: Initializer for weights. Defaults to ``"he_normal"``.
@@ -133,6 +141,16 @@ class HierarchicalReasoningModule(keras.layers.Layer):
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param kwargs: Additional Layer base class arguments.
     :type kwargs: Any
+
+    :raises ValueError: If ``num_layers``, ``embed_dim``, ``num_heads``,
+        ``ffn_expansion_factor``, ``max_seq_len`` or ``rope_theta`` is
+        non-positive, if ``embed_dim`` is not divisible by ``num_heads``, or if
+        ``attention_dropout_rate`` is outside ``[0, 1]``.
+
+    Note:
+        Attention arguments (``num_kv_heads``, ``max_seq_len``, ``rope_theta``)
+        are built with ``assemble_attention_config`` for any ``attention_type``:
+        each type receives only the keys its registry entry declares.
     """
 
     def __init__(
@@ -140,7 +158,7 @@ class HierarchicalReasoningModule(keras.layers.Layer):
         num_layers: int,
         embed_dim: int,
         num_heads: int = 8,
-        ffn_expansion_factor: int = 4,
+        ffn_expansion_factor: Union[int, float] = 4,
         # DECISION plan-2026-08-17T183311-79c63e38/D-012: the default is
         # 'group_query' with `num_kv_heads == num_heads` (arithmetically plain
         # MHA) because it is the only registry entry reachable from
@@ -167,6 +185,7 @@ class HierarchicalReasoningModule(keras.layers.Layer):
         normalization_position: NormalizationPositionType = 'post',
         ffn_type: FFNType = 'swiglu',
         dropout_rate: float = 0.0,
+        attention_dropout_rate: Optional[float] = None,
         use_bias: bool = False,
         kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
@@ -188,6 +207,10 @@ class HierarchicalReasoningModule(keras.layers.Layer):
             raise ValueError(f"max_seq_len must be positive, got {max_seq_len}")
         if rope_theta <= 0:
             raise ValueError(f"rope_theta must be positive, got {rope_theta}")
+        if attention_dropout_rate is not None and not 0.0 <= attention_dropout_rate <= 1.0:
+            raise ValueError(
+                f"attention_dropout_rate must be in [0, 1] or None, got {attention_dropout_rate}"
+            )
 
         # Store all configuration parameters for serialization
         self.num_layers = num_layers
@@ -201,25 +224,28 @@ class HierarchicalReasoningModule(keras.layers.Layer):
         self.normalization_position = normalization_position
         self.ffn_type = ffn_type
         self.dropout_rate = dropout_rate
+        self.attention_dropout_rate = attention_dropout_rate
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
-        intermediate_size = self.embed_dim * self.ffn_expansion_factor
+        intermediate_size = int(self.embed_dim * self.ffn_expansion_factor)
+        attention_dropout = (
+            self.dropout_rate if self.attention_dropout_rate is None
+            else self.attention_dropout_rate
+        )
 
-        # RoPE arguments are forwarded ONLY to a type that declares all three.
-        # The attention factory raises on an undeclared key since D-011, so
-        # handing `max_seq_len`/`rope_theta` to e.g. 'multi_head' (which has no
-        # RoPE at all) would be a hard construction failure rather than the
-        # silent drop it used to be. 'multi_head_latent' is deliberately NOT
-        # included: it is RoPE-capable but has no `num_kv_heads`.
-        attention_args = None
-        if self.attention_type == 'group_query':
-            attention_args = {
+        # DECISION plan-2026-08-18T140459-7991552f/D-029: pre-filter these three
+        # keys against the target attention type's registry allowlist; create_attention_layer raises on an
+        # unsupported key, and MultiHeadAttention declares none of them. See decisions.md.
+        attention_args = assemble_attention_config(
+            self.attention_type,
+            {
                 'num_kv_heads': self.num_heads,
                 'max_seq_len': self.max_seq_len,
                 'rope_theta': self.rope_theta,
-            }
+            },
+        )
 
         # Create a list of TransformerLayer instances based on the provided configuration
         self.blocks: List[TransformerLayer] = []
@@ -230,13 +256,13 @@ class HierarchicalReasoningModule(keras.layers.Layer):
                 intermediate_size=intermediate_size,
                 # Pass configurable parameters directly to the TransformerLayer
                 attention_type=self.attention_type,
-                attention_args=attention_args,
+                attention_args=dict(attention_args),
                 normalization_type=self.normalization_type,
                 normalization_position=self.normalization_position,
                 ffn_type=self.ffn_type,
                 # Map other parameters
                 dropout_rate=self.dropout_rate,
-                attention_dropout_rate=self.dropout_rate,
+                attention_dropout_rate=attention_dropout,
                 use_bias=self.use_bias,
                 # DECISION plan-2026-08-23T091307-9a110062/D-560
                 # Every block gets its OWN `clone_initializer(...)` copy. Do NOT
@@ -322,6 +348,7 @@ class HierarchicalReasoningModule(keras.layers.Layer):
             "normalization_position": self.normalization_position,
             "ffn_type": self.ffn_type,
             "dropout_rate": self.dropout_rate,
+            "attention_dropout_rate": self.attention_dropout_rate,
             "use_bias": self.use_bias,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),

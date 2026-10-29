@@ -1,6 +1,7 @@
 """Pins TRM's `attention_type` contract (finding F-47, decisions.md D-029).
 
-Before the fix, `TRMReasoningModule.__init__` forwarded
+Before the fix, the reasoning module's `__init__` (then `TRMReasoningModule`,
+now `HierarchicalReasoningModule`) forwarded
 `{'num_kv_heads', 'max_seq_len', 'rope_theta'}` into every `TransformerLayer`
 regardless of `attention_type`. Since `create_attention_layer` became strict
 (2026-08-17), that made:
@@ -70,7 +71,7 @@ class TestTRMAttentionTypeContract:
     def test_group_query_still_receives_the_rope_keys(self):
         """The filter must not silently disarm the default path (D-007)."""
         model = create_trm(**_toy_config(attention_type="group_query"))
-        block = model.inner.H_level.layers_list[0]
+        block = model.inner.H_level.blocks[0]
         assert block.attention_args["num_kv_heads"] == 2
         assert block.attention_args["rope_theta"] == 10000.0
         assert block.attention_args["max_seq_len"] == 16
@@ -80,7 +81,7 @@ class TestTRMAttentionTypeContract:
     def test_multi_head_drops_them_rather_than_raising(self):
         """A type that declares none of the three gets none of the three."""
         model = create_trm(**_toy_config(attention_type="multi_head"))
-        block = model.inner.H_level.layers_list[0]
+        block = model.inner.H_level.blocks[0]
         assert block.attention_args == {}
         assert not hasattr(block.attention, "rope")
 

@@ -169,7 +169,7 @@ class TRM(keras.Model):
         no_act_continue: bool = True,
         rope_theta: float = 10000.0,
         # DECISION plan-2026-08-17T183311-79c63e38/D-007: 'group_query', not
-        # 'multi_head'; see TRMReasoningModule.__init__ in components.py. See decisions.md.
+        # 'multi_head'; see TRMInner.__init__ in components.py. See decisions.md.
         attention_type: AttentionType = 'group_query',
         ffn_type: FFNType = 'swiglu',
         normalization_type: NormalizationType = 'rms_norm',

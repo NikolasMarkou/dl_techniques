@@ -246,3 +246,78 @@ class TestHierarchicalReasoningModule:
 
         output = layer(minimal_inputs, training=training)
         assert output.shape == (2, 4, 16)
+
+    def test_attention_dropout_defaults_to_dropout_rate(self, minimal_config):
+        """``attention_dropout_rate=None`` ties attention dropout to ``dropout_rate``."""
+        layer = HierarchicalReasoningModule(**minimal_config, dropout_rate=0.3)
+
+        assert layer.attention_dropout_rate is None
+        for block in layer.blocks:
+            assert block.dropout_rate == 0.3
+            assert block.attention_dropout_rate == 0.3
+
+    def test_attention_dropout_rate_is_independent(self, minimal_config):
+        """An explicit ``attention_dropout_rate`` (including 0.0) wins over ``dropout_rate``."""
+        for value in (0.0, 0.1):
+            layer = HierarchicalReasoningModule(
+                **minimal_config, dropout_rate=0.3, attention_dropout_rate=value
+            )
+            for block in layer.blocks:
+                assert block.dropout_rate == 0.3
+                assert block.attention_dropout_rate == value
+
+        with pytest.raises(ValueError, match="attention_dropout_rate"):
+            HierarchicalReasoningModule(**minimal_config, attention_dropout_rate=1.5)
+
+    def test_attention_dropout_rate_config_roundtrip(self, minimal_config):
+        """``attention_dropout_rate`` survives ``get_config`` / ``from_config`` for None and a number."""
+        for value in (None, 0.0, 0.2):
+            layer = HierarchicalReasoningModule(**minimal_config, attention_dropout_rate=value)
+            config = layer.get_config()
+            assert config['attention_dropout_rate'] == value
+
+            rebuilt = HierarchicalReasoningModule.from_config(config)
+            assert rebuilt.attention_dropout_rate == value
+            assert rebuilt.get_config() == config
+
+    def test_integer_expansion_is_unchanged(self, minimal_config):
+        """An int ``ffn_expansion_factor`` gives the same integer intermediate size as ``embed_dim * factor``."""
+        layer = HierarchicalReasoningModule(**minimal_config, ffn_expansion_factor=4)
+
+        for block in layer.blocks:
+            assert block.intermediate_size == 16 * 4
+            assert isinstance(block.intermediate_size, int)
+
+    def test_float_expansion_floors_the_intermediate_size(self, minimal_config):
+        """A float factor gives ``int(embed_dim * factor)`` and is serialized as given."""
+        layer = HierarchicalReasoningModule(**minimal_config, ffn_expansion_factor=2.67)
+
+        for block in layer.blocks:
+            assert block.intermediate_size == int(16 * 2.67) == 42
+        assert layer.get_config()['ffn_expansion_factor'] == 2.67
+
+        with pytest.raises(ValueError, match="ffn_expansion_factor"):
+            HierarchicalReasoningModule(**minimal_config, ffn_expansion_factor=0.0)
+
+    def test_float_expansion_forward(self, minimal_inputs):
+        """A float-expansion module builds and runs."""
+        layer = HierarchicalReasoningModule(
+            num_layers=1, embed_dim=16, num_heads=2, ffn_expansion_factor=2.67,
+            attention_dropout_rate=0.0,
+        )
+        assert layer(minimal_inputs).shape == (2, 4, 16)
+
+    def test_attention_args_follow_the_attention_type(self, minimal_config):
+        """Each type gets only the RoPE keys its registry entry declares."""
+        gq = HierarchicalReasoningModule(**minimal_config, max_seq_len=24, rope_theta=500.0)
+        assert gq.blocks[0].attention_args == {
+            'num_kv_heads': 2, 'max_seq_len': 24, 'rope_theta': 500.0,
+        }
+
+        mh = HierarchicalReasoningModule(**minimal_config, attention_type='multi_head')
+        assert mh.blocks[0].attention_args == {}
+
+    def test_attention_args_are_not_shared_between_blocks(self):
+        """Each block owns its own ``attention_args`` dict."""
+        layer = HierarchicalReasoningModule(num_layers=2, embed_dim=16, num_heads=2)
+        assert layer.blocks[0].attention_args is not layer.blocks[1].attention_args

@@ -100,7 +100,7 @@ class PTRM(TRM):
     # DECISION plan-2026-10-13T035756-5dd4d94d/D-019: WHAT NOT TO DO: do not
     # re-add "mlp_*" variants that build attention models. The paper's TRM-MLP
     # replaces attention with an MLP over the sequence axis (reference trm.py
-    # `mlp_t`); TRMReasoningModule always builds TransformerLayer blocks, so the
+    # `mlp_t`); HierarchicalReasoningModule always builds TransformerLayer blocks, so the
     # old mlp_* entries were attention models under an MLP name (mlp_base ==
     # att_base). See decisions.md D-019.
     #

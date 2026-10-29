@@ -186,8 +186,7 @@ model = create_ptrm(**{k: v for k, v in config.items() if k != "inference"})
 | **`run_ptrm_inference`** | `...ptrm.inference` | Convenience function for one-off inference. |
 | **`create_ptrm`** | `...ptrm.model` | `create_ptrm(variant, vocab_size, seq_len, puzzle_emb_len=16, pretrained=False, **kwargs)`: delegates to `PTRM.from_variant`, returns a built model. A fully custom architecture is the `PTRM` constructor. (`create_ptrm_from_variant` was folded into it.) |
 | **`PRESET_CONFIGS`** | `...ptrm.factory` | Paper-matched configurations. |
-| **`TRMReasoningModule`** | `...ptrm.components` | Re-exported TRM reasoning stack. |
-| **`TRMInner`** | `...ptrm.components` | Re-exported TRM inner step. |
+| **`TRMInner`** | `...trm.components` | The TRM inner step, imported by `ptrm/__init__.py` and used unchanged. |
 
 ---
 
@@ -205,7 +204,7 @@ Counts are `sum(prod(w.shape) for w in model.trainable_weights)` of a built mode
 
 **These are not the paper's "5M"/"7M".** The reference TRM reuses one 2-layer network for both updates (`trm.py` ignores `H_layers`). This TRM has separate 2-layer `H_level` and `L_level` stacks (6,821,888 weights each in `att_base`), so the same width builds about twice the weights.
 
-**No `mlp_*` variants.** The paper's TRM-MLP replaces attention with an MLP over the sequence axis (`trm.py`'s `mlp_t`). `TRMReasoningModule` always builds `TransformerLayer` blocks and has no such mode. The `mlp_tiny`/`mlp_small`/`mlp_base` entries that used to be here were attention models under an MLP name (`mlp_base` was identical to `att_base`), so they were removed on 2026-10-13. The Sudoku-Extreme preset now names `att_base`, which builds the same model `mlp_base` did. For a smaller model, pass overrides: `create_ptrm("att_small", ..., hidden_size=256, num_heads=4)`.
+**No `mlp_*` variants.** The paper's TRM-MLP replaces attention with an MLP over the sequence axis (`trm.py`'s `mlp_t`). `HierarchicalReasoningModule` always builds `TransformerLayer` blocks and has no such mode. The `mlp_tiny`/`mlp_small`/`mlp_base` entries that used to be here were attention models under an MLP name (`mlp_base` was identical to `att_base`), so they were removed on 2026-10-13. The Sudoku-Extreme preset now names `att_base`, which builds the same model `mlp_base` did. For a smaller model, pass overrides: `create_ptrm("att_small", ..., hidden_size=256, num_heads=4)`.
 
 ### Variant Details
 

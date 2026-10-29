@@ -150,7 +150,7 @@ class TestPTRMModelConfigurations:
         Every ``mlp_*`` entry set ``attention_type="group_query"`` and
         ``mlp_base`` equalled ``att_base``, while the paper's TRM-MLP replaces
         attention with an MLP over the sequence axis (reference ``trm.py``,
-        ``mlp_t``). ``TRMReasoningModule`` always builds ``TransformerLayer``
+        ``mlp_t``). ``HierarchicalReasoningModule`` always builds ``TransformerLayer``
         blocks, so no such mode exists here to wire them to. See decisions.md
         D-019 (plan-2026-10-13T035756-5dd4d94d).
         """
