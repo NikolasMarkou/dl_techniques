@@ -1,4 +1,4 @@
-"""compute_output_shape on a list-wrapped single shape, for the seven non-crystal layers.
+"""compute_output_shape on a list-wrapped single shape, for the seven non-crystal layers and KANvolution.
 
 The three crystal layers already route through
 `dl_techniques.utils.tensors.canonical_binary_input_shape`; the other seven
@@ -14,6 +14,7 @@ from dl_techniques.layers.structured_linear.harmonic_dense import HarmonicDense
 from dl_techniques.layers.structured_linear.hierarchical_harmonic import (
     HierarchicalHarmonicHead,
 )
+from dl_techniques.layers.structured_linear.kanvolution import KANvolution
 from dl_techniques.layers.structured_linear.mps_layer import MPSLayer
 from dl_techniques.layers.structured_linear.orthogonal_butterfly import (
     OrthogonalButterfly,
@@ -45,3 +46,18 @@ def test_the_seven_layers_survive_every_list_wrapped_single_shape(form):
 def test_the_tuple_form_is_unchanged():
     for name, layer, expected in _cases():
         assert layer.compute_output_shape((None, 8)) == expected, name
+
+
+@pytest.mark.parametrize(
+    "form", [[[None, 8, 8, 3]], [(None, 8, 8, 3)], [None, 8, 8, 3]]
+)
+def test_kanvolution_survives_every_list_wrapped_single_shape(form):
+    """KANvolution's 4D check used to read ``len([[None, 8, 8, 3]]) == 1``."""
+    layer = KANvolution(filters=5, kernel_size=3)
+    assert layer.compute_output_shape(form) == (None, 8, 8, 5)
+
+
+def test_kanvolution_builds_from_a_list_wrapped_shape():
+    layer = KANvolution(filters=5, kernel_size=3)
+    layer.build([[None, 8, 8, 3]])
+    assert layer.built

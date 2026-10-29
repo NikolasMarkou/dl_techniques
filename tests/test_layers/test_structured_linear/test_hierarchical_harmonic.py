@@ -31,6 +31,48 @@ def _flat_harmax_probs(d2: np.ndarray, n: float, epsilon: float) -> np.ndarray:
     return exp / np.sum(exp, axis=-1, keepdims=True)
 
 
+class _Parent(keras.layers.Layer):
+    """Minimal parent whose ``call`` is the only path that builds the child."""
+
+    def __init__(self, child, **kwargs):
+        super().__init__(**kwargs)
+        self.child = child
+
+    def call(self, inputs):
+        return self.child(inputs)
+
+
+class TestAssignmentTablesSurviveAParentBuild:
+    """A parent's symbolic build runs in a StatelessScope, which discards a
+    ``.assign`` made inside the child's ``build``. The tables must come from
+    their initializers."""
+
+    @pytest.mark.parametrize("num_classes", [10, 37])
+    def test_the_tables_are_the_identity_after_a_parent_build(self, num_classes):
+        head = HierarchicalHarmonicHead(num_classes=num_classes)
+        _Parent(head)(keras.Input(shape=(8,)))
+
+        slot_of_class = keras.ops.convert_to_numpy(head.slot_of_class)
+        class_of_slot = keras.ops.convert_to_numpy(head.class_of_slot)
+
+        np.testing.assert_array_equal(slot_of_class, np.arange(num_classes))
+        expected = np.full(head.total_leaves, -1.0)
+        expected[:num_classes] = np.arange(num_classes)
+        np.testing.assert_array_equal(class_of_slot, expected)
+
+    def test_the_tables_match_a_direct_build(self):
+        direct = HierarchicalHarmonicHead(num_classes=10)
+        direct.build((None, 8))
+        nested = HierarchicalHarmonicHead(num_classes=10)
+        _Parent(nested)(keras.Input(shape=(8,)))
+
+        for name in ("slot_of_class", "class_of_slot"):
+            np.testing.assert_array_equal(
+                keras.ops.convert_to_numpy(getattr(direct, name)),
+                keras.ops.convert_to_numpy(getattr(nested, name)),
+            )
+
+
 class TestInit:
     def test_default_branching_is_balanced_depth_two(self):
         layer = HierarchicalHarmonicHead(10000)

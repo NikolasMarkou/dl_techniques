@@ -31,6 +31,7 @@ from typing import Tuple, Optional, Union, Any, Dict, Callable
 
 from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.tensors import canonical_binary_input_shape
 from dl_techniques.layers.activations.common import resolve_activation, serialize_activation
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -263,6 +264,7 @@ class KANvolution(keras.layers.Layer):
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        input_shape = canonical_binary_input_shape(input_shape)
         logger.info(f"Building KANvolution layer with input shape: {input_shape}")
 
         if len(input_shape) != 4:
@@ -492,6 +494,7 @@ class KANvolution(keras.layers.Layer):
         :return: Output shape tuple (batch_size, new_height, new_width, filters).
         :rtype: Tuple[Optional[int], ...]
         """
+        input_shape = canonical_binary_input_shape(input_shape)
         if len(input_shape) != 4:
             raise ValueError(f"Expected 4D input shape, got {input_shape}")
 

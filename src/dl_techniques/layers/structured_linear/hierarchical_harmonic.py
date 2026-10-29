@@ -463,30 +463,42 @@ class HierarchicalHarmonicHead(keras.layers.Layer):
             regularizer=self.kernel_regularizer,
             trainable=True,
         )
-        self.slot_of_class = self.add_weight(
-            name="slot_of_class",
-            shape=(self.num_classes,),
-            initializer="zeros",
-            trainable=False,
-        )
-        # NOTE: stored as float32, not int32. TensorFlow pins integer
-        # variables to CPU, and a GPU (XLA) graph then refuses to read
+        # NOTE: both tables are stored as float32, not int32. TensorFlow pins
+        # integer variables to CPU, and a GPU (XLA) graph then refuses to read
         # them ("Trying to access resource ... located in CPU:0 from
         # GPU:0"). Float variables mirror to the device; every use site
         # casts back to int32. Integers below 2**24 round-trip exactly,
         # far above any sane class count -- asserted in the scale test.
-        self.slot_of_class.assign(
-            np.arange(self.num_classes, dtype=np.float32)
+        #
+        # They are filled by their initializers, not by `.assign` here: a
+        # parent's symbolic build runs `build` inside a StatelessScope, which
+        # discards the assign and leaves every class on slot 0.
+        num_classes, total_leaves = self.num_classes, self.total_leaves
+
+        def _identity_slots(shape, dtype=None):
+            return keras.ops.cast(
+                keras.ops.arange(num_classes), dtype or "float32"
+            )
+
+        def _padded_class_ids(shape, dtype=None):
+            ids = keras.ops.concatenate([
+                keras.ops.arange(num_classes),
+                keras.ops.full((total_leaves - num_classes,), -1, "int32"),
+            ])
+            return keras.ops.cast(ids, dtype or "float32")
+
+        self.slot_of_class = self.add_weight(
+            name="slot_of_class",
+            shape=(num_classes,),
+            initializer=_identity_slots,
+            trainable=False,
         )
         self.class_of_slot = self.add_weight(
             name="class_of_slot",
-            shape=(self.total_leaves,),
-            initializer="zeros",
+            shape=(total_leaves,),
+            initializer=_padded_class_ids,
             trainable=False,
         )
-        full = np.full(self.total_leaves, -1, dtype=np.float32)
-        full[:self.num_classes] = np.arange(self.num_classes, dtype=np.float32)
-        self.class_of_slot.assign(full)
         super().build(input_shape)
 
     def _level_logprob(

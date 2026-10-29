@@ -151,7 +151,7 @@ Mode strings: `output_mode` in `"probs" | "logits" | "distances"` (both harmonic
 
 ## Invariants and constraints
 
-- Never create frames, grids or projections by `add_weight(...)` then `.assign(...)` in `build`. A parent's symbolic build runs in a `StatelessScope` that discards such assignments and leaves zeros. Compute the value inside the weight initializer. Crystal layers (`_frame_initializer`, `_prism_initializer`, `_macro_initializer`, `_micro_initializer`), `KANvolution.grid` and `RFFKernelLayer.omega`/`b` follow this. `HierarchicalHarmonicHead.build` is the one place that assigns after `add_weight` (`slot_of_class`, `class_of_slot`); do not add more such sites without testing under functional-model construction and a `.keras` round trip.
+- Never create frames, grids or projections by `add_weight(...)` then `.assign(...)` in `build`. A parent's symbolic build runs in a `StatelessScope` that discards such assignments and leaves zeros. Compute the value inside the weight initializer. Crystal layers (`_frame_initializer`, `_prism_initializer`, `_macro_initializer`, `_micro_initializer`), `KANvolution.grid` and `RFFKernelLayer.omega`/`b` follow this. `HierarchicalHarmonicHead.slot_of_class` and `class_of_slot` follow this too (identity and `-1`-padded tables from initializers); `TestAssignmentTablesSurviveAParentBuild` builds the head through a parent. `reassign()` still assigns, which is fine because it runs eagerly outside `build`.
 - Independent initializer clones: `MPSLayer` (`mps_cores`, `projection`) and `KANvolution` (`control_points`, `w_spline`, `w_silu`) pass `clone_initializer(self.kernel_initializer)` per site. Do not revert to the bare attribute: one seedless Keras 3 initializer replays the same random sample at every site. Exemptions that stay tied by design: a caller-supplied seeded instance, deterministic initializers, and custom initializers whose config round trip fails (deepcopy fallback). Bias sites are not cloned.
 - `HierarchicalHarmonicHead` hands the same `seed` to both `kernel_initializer` and `node_initializer` when each is a string, and does not clone them.
 - `BitLinear`: `gamma` statistics are under `stop_gradient` and never reduce over the batch axis (activation: feature axis; weight: axis 0 if `weight_per_channel`, else whole tensor). Stochastic rounding applies only when `quantization_method="stochastic"` and `training` is true, with a `keras.random.SeedGenerator(seed)` created in `__init__`. `supports_masking = True`. Do not move `norm_epsilon` into `epsilon`; they guard different denominators.
@@ -175,7 +175,7 @@ Mode strings: `output_mode` in `"probs" | "logits" | "distances"` (both harmonic
 
 Internal:
 - `dl_techniques.utils.keras_registration.register_dl_technique` (all layers).
-- `dl_techniques.utils.tensors`: `canonical_binary_input_shape` (10 of 11 layers), `is_power_of_two` (butterfly), `l2_normalize` (three crystal layers).
+- `dl_techniques.utils.tensors`: `canonical_binary_input_shape` (all 11 layers), `is_power_of_two` (butterfly), `l2_normalize` (three crystal layers).
 - `dl_techniques.utils.logger.logger` (`OrthogonalButterfly`, `KANvolution`, `OrthoBlock`).
 - `dl_techniques.initializers.clone_initializer` (`MPSLayer`, `KANvolution`).
 - `dl_techniques.layers.activations.common`: `resolve_activation`, `serialize_activation` (`BitLinear`, `KANvolution`, `OrthoBlock`, `RFFKernelLayer`); `layers.activations.gelu_tanh.gelu_tanh` (`CrystalMultiHeadProjection`).
@@ -204,7 +204,7 @@ Known consumers outside the package: `layers/ffn/orthoglu_ffn.py` (`OrthoBlock`)
 
 - Follow the existing layer shape: sub-layers in `__init__`, weights in `build`, `get_config` listing every constructor argument, explicit `from_config` that deserializes initializer/regularizer/constraint dicts (and tuple-typed values such as `branching` and `n` in the hierarchical head).
 - Register with `@register_dl_technique("dl_techniques.layers.structured_linear.<module_name>")`. Registering a second class with the same bare name anywhere in the repo collides in the serialization registry.
-- Route `compute_output_shape` through `canonical_binary_input_shape` so a list-wrapped single shape (for example `[[None, 8]]`) does not corrupt the batch axis. `KANvolution` is the only layer that does not.
+- Route `build` and `compute_output_shape` through `canonical_binary_input_shape` so a list-wrapped single shape (for example `[[None, 8]]`) does not corrupt the batch axis. All eleven layers do, `KANvolution` included.
 - Docstrings are Sphinx/reST (`:param:`, `:type:`, `:raises:`); match the file you edit. Use `import keras` and `keras.ops.*`; never `from keras import ops`. Log through `dl_techniques.utils.logger`, no `print`.
 - When adding a layer with several kernel-fed weights, give each its own `clone_initializer(...)`.
 - Adding a new `seed` option: decide and document what it covers. Today it differs by layer (see Invariants); do not assume it seeds every random site.
