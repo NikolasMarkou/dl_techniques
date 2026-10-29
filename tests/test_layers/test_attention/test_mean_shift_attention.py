@@ -195,10 +195,10 @@ CHECKS = {
 def _patched_logits(defect):
     real = mean_shift_attention.kernel_logits
 
-    def patched(q, k, bandwidth, kernel="gaussian", drop_query_norm=True):
+    def patched(q, k, bandwidth, kernel="gaussian", drop_query_norm=True, key_mask=None):
         if defect == "temperature":
-            return real(q, k, bandwidth * 1.05, kernel, drop_query_norm)
-        base = real(q, k, bandwidth, kernel, drop_query_norm)
+            return real(q, k, bandwidth * 1.05, kernel, drop_query_norm, key_mask)
+        base = real(q, k, bandwidth, kernel, drop_query_norm, key_mask)
         if kernel == "gaussian":
             k_sq = keras.ops.expand_dims(
                 keras.ops.sum(keras.ops.square(keras.ops.cast(k, base.dtype)), axis=-1),
@@ -400,6 +400,139 @@ class TestMasks:
             warnings.simplefilter("error", UserWarning)
             out = _np(layer(x))
         assert np.isfinite(out).all()
+
+
+# ---------------------------------------------------------------------
+# A forbidden key never reaches another row, at any step
+# ---------------------------------------------------------------------
+
+LEAK_N = 6
+FORBIDDEN_KEY = 5
+NO_KEPT_KEY_ROW = 0
+
+
+def _pairwise_mask(rank, forbid_row_key=False):
+    """Pairwise keep mask: key 5 forbidden to every query, query 0 keeps nothing.
+
+    With ``forbid_row_key`` the key 0 is forbidden to every query as well.
+    """
+    mask = np.ones((1, LEAK_N, LEAK_N), dtype="float32")
+    mask[0, :, FORBIDDEN_KEY] = 0.0
+    mask[0, NO_KEPT_KEY_ROW, :] = 0.0
+    if forbid_row_key:
+        mask[0, :, NO_KEPT_KEY_ROW] = 0.0
+    return mask if rank == 3 else mask[:, None]
+
+
+def _check_a_forbidden_key_does_not_leak(rank, num_steps, blurring, kernel):
+    layer = _set_kernels(_make(
+        num_steps=num_steps, blurring=blurring, kernel=kernel,
+        bandwidth_init=1.0 if kernel == "gaussian" else 0.5,
+    ))
+    x = _tokens(1, LEAK_N, 71)
+    shifted = x.copy()
+    shifted[0, FORBIDDEN_KEY] += 10.0
+    mask = _pairwise_mask(rank)
+    out = _np(layer(x, attention_mask=mask))
+    out_shifted = _np(layer(shifted, attention_mask=mask))
+    others = [i for i in range(LEAK_N) if i not in (NO_KEPT_KEY_ROW, FORBIDDEN_KEY)]
+    np.testing.assert_allclose(out_shifted[0, others], out[0, others], atol=1e-5, rtol=0)
+    assert np.all(out[0, NO_KEPT_KEY_ROW] == 0.0)
+
+
+LEAK_CASES = [
+    (rank, steps, blurring, kernel)
+    for rank in (3, 4)
+    for steps in (1, 2, 3)
+    for blurring in (True, False)
+    for kernel in ("gaussian", "vmf")
+]
+
+
+class TestAForbiddenKeyDoesNotLeak:
+    @pytest.mark.parametrize("rank,num_steps,blurring,kernel", LEAK_CASES)
+    def test_the_other_rows_do_not_read_the_forbidden_key(
+            self, rank, num_steps, blurring, kernel
+    ):
+        _check_a_forbidden_key_does_not_leak(rank, num_steps, blurring, kernel)
+
+    @pytest.mark.parametrize("kernel", ["gaussian", "vmf"])
+    def test_the_check_fails_when_a_row_with_no_kept_key_moves(self, kernel, monkeypatch):
+        def every_row_lives(keep):
+            return keras.ops.logical_or(keras.ops.any(keep, axis=-1, keepdims=True), True)
+
+        monkeypatch.setattr(MeanShiftAttention, "_rows_with_a_kept_key",
+                            staticmethod(every_row_lives))
+        with pytest.raises(AssertionError):
+            _check_a_forbidden_key_does_not_leak(3, 2, True, kernel)
+
+    @pytest.mark.parametrize("blurring", [True, False])
+    @pytest.mark.parametrize("num_steps", [1, 3])
+    def test_the_other_rows_equal_the_run_without_the_dead_row_and_the_forbidden_key(
+            self, blurring, num_steps
+    ):
+        layer = _set_kernels(_make(num_steps=num_steps, blurring=blurring))
+        x = _tokens(1, LEAK_N, 72)
+        mask = _pairwise_mask(3, forbid_row_key=True)
+        out = _np(layer(x, attention_mask=mask))
+        inner = list(range(1, FORBIDDEN_KEY))
+        alone = _np(layer(x[:, inner]))
+        np.testing.assert_allclose(out[0, inner], alone[0], atol=1e-5, rtol=0)
+
+    @pytest.mark.parametrize("num_steps", [1, 2, 3])
+    def test_a_row_with_no_kept_key_has_zero_output_and_zero_weights(self, num_steps):
+        layer = _set_kernels(_make(num_steps=num_steps))
+        out, weights = layer(_tokens(1, LEAK_N, 73), attention_mask=_pairwise_mask(3),
+                             return_attention_scores=True)
+        assert np.all(_np(out)[0, NO_KEPT_KEY_ROW] == 0.0)
+        assert np.all(_np(weights)[0, :, NO_KEPT_KEY_ROW, :] == 0.0)
+        assert np.all(_np(weights)[0, :, :, FORBIDDEN_KEY] == 0.0)
+
+    def test_a_row_with_no_kept_key_receives_no_gradient_and_nothing_goes_nan(self):
+        layer = _set_kernels(_make(num_steps=3))
+        x = tf.constant(_tokens(1, LEAK_N, 74))
+        with tf.GradientTape() as tape:
+            tape.watch(x)
+            loss = tf.reduce_sum(layer(x, attention_mask=_pairwise_mask(3)) ** 2)
+        grad = _np(tape.gradient(loss, x))
+        assert np.isfinite(grad).all()
+
+
+# ---------------------------------------------------------------------
+# Padded keys do not set the Gaussian centre
+# ---------------------------------------------------------------------
+
+class TestPaddedKeysDoNotSetTheCentre:
+    @pytest.mark.parametrize("blurring", [True, False])
+    def test_junk_in_the_padded_keys_changes_no_unpadded_output(self, blurring):
+        mask = np.array([[1, 1, 1, 1, 0, 0]], dtype="float32")
+        clean = _tokens(1, 6, 75)
+        clean[0, 4:] = 0.0
+        junk = clean.copy()
+        junk[0, 4:] = 1e4
+        layer = _set_kernels(_make(num_steps=2, blurring=blurring, bandwidth_init=1.0))
+        out_clean = _np(layer(clean, attention_mask=mask))
+        out_junk = _np(layer(junk, attention_mask=mask))
+        assert np.isfinite(out_junk).all()
+        np.testing.assert_allclose(out_junk[0, :4], out_clean[0, :4], atol=1e-5, rtol=0)
+
+    def test_the_check_fails_when_the_centre_ignores_the_padding(self, monkeypatch):
+        real = mean_shift_attention.kernel_logits
+
+        def plain_mean(q, k, bandwidth, kernel="gaussian", drop_query_norm=True,
+                       key_mask=None):
+            return real(q, k, bandwidth, kernel, drop_query_norm)
+
+        monkeypatch.setattr(mean_shift_attention, "kernel_logits", plain_mean)
+        mask = np.array([[1, 1, 1, 1, 0, 0]], dtype="float32")
+        clean = _tokens(1, 6, 75)
+        clean[0, 4:] = 0.0
+        junk = clean.copy()
+        junk[0, 4:] = 1e4
+        layer = _set_kernels(_make(num_steps=1, blurring=False, bandwidth_init=1.0))
+        gap = np.abs(_np(layer(junk, attention_mask=mask))[0, :4]
+                     - _np(layer(clean, attention_mask=mask))[0, :4]).max()
+        assert gap > 1e-4
 
 
 # ---------------------------------------------------------------------

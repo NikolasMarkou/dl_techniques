@@ -49,7 +49,7 @@ Shared building blocks live in `common.py`: an attention-mask helper (`apply_att
 - `shared_weights_cross_attention.py` - `SharedWeightsCrossAttention`, two modalities in one tensor sharing one QKV projection.
 - `anchor_attention.py` - `AnchorAttention`, anchor-token bottleneck for long sequences.
 - `hopfield_attention.py` - `HopfieldAttention`, iterative pattern retrieval.
-- `mean_shift_attention.py` - `MeanShiftAttention`, `num_steps` mean-shift steps on tied query, key and value tokens with a learnable bandwidth.
+- `mean_shift_attention.py` - `MeanShiftAttention`, `num_steps` mean-shift steps on tied query, key and value tokens with a learnable bandwidth. The default bandwidth `head_dim ** 0.25` suits the Gaussian kernel; for `kernel="vmf"` it gives a nearly uniform kernel (largest weight 0.047 against a uniform 0.031 at dim 64, 8 heads, 32 tokens), so pass a smaller `bandwidth_init` such as 0.3.
 - `capsule_routing_attention.py` - `CapsuleRoutingSelfAttention`, attention logits refined by capsule-style routing.
 - `attention_routing_capsule.py` - `AttentionRoutingCapsule` and `CapsuleBlockV2`, single-pass capsule routing layers.
 - `energy_attention.py` - `EnergyAttention`, Energy Transformer attention with no value matrix.

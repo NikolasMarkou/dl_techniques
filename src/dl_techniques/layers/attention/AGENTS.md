@@ -135,6 +135,7 @@ Call signatures (frozen; renaming or reordering breaks serialized configs and ca
 - `ring`: sequence length must be a static Python int (`ValueError` otherwise); no gradient checkpointing, so backward memory grows with `N`.
 - `rpc`: no float16 SVD kernel outside XLA, so it cannot run under `mixed_float16`; cost is `max_pcp_iter` batched SVDs per call.
 - `fnet` `implementation='fft'`: warns and uses the matrix DFT.
+- `mean_shift`: the default `bandwidth_init` (`head_dim ** 0.25`) makes the `vmf` kernel nearly uniform (largest weight 0.047 against a uniform 0.031 at dim 64, 8 heads, 32 tokens); pass a smaller value such as 0.3 for vMF. A query row with no kept key holds still at every step and returns zeros, so under blurring it never passes a forbidden key to another row.
 - `linear`: `mask=` accepted and discarded; feature maps `elu_plus_one`, `exp`, `softmax` rejected.
 - `spatial`, `mobile_mqa`, `shared_weights_cross`: `attention_mask` accepted and never read.
 - `non_local`: `attention_mask` is additive, clamped to the compute dtype's minimum (`np.finfo(...).min`) before the cast; it is not a keep mask.

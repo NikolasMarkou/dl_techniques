@@ -128,10 +128,15 @@ class MeanShiftAttention(keras.layers.Layer):
     The mask is a keep mask (1 or True keeps a key): rank 2 ``(B, Nk)``, rank 3
     ``(B, Nq, Nk)`` or rank 4 ``(B, 1 or H, Nq, Nk)``. A masked key has exactly
     zero weight at every step. A query row with no kept key (a pairwise mask that
-    forbids every key, or a key set that is entirely padding) gets an output of
-    zeros and attention weights of zeros. A padded query under a rank-2 padding
-    mask still has kept keys, so its output is computed and left to the caller to
-    ignore.
+    forbids every key, or a key set that is entirely padding) has attention
+    weights of zeros at every step, does not move, and gets an output of zeros;
+    under blurring it therefore never hands a forbidden key to another row. A
+    padded query under a rank-2 padding mask still has kept keys, so its output is
+    computed and left to the caller to ignore. A rank-2 padding mask also keeps the
+    padded keys out of the Gaussian centre; a pairwise mask uses the mean of all
+    keys, which changes the logits only by a per-query constant. Under blurring a
+    pairwise mask that is not transitive still lets a row read the moved value of a
+    key, and that value has read other keys, so a read can span two hops.
 
     Input shape:
         ``(batch_size, seq_len, dim)``, or a list ``[query, key_value]`` of two such
@@ -166,7 +171,11 @@ class MeanShiftAttention(keras.layers.Layer):
         map of the projected tokens).
     :type bandwidth_mode: str
     :param bandwidth_init: Initial bandwidth in ``(min_bandwidth, max_bandwidth]``.
-        ``None`` means ``head_dim ** 0.25``.
+        ``None`` means ``head_dim ** 0.25``. For ``kernel="vmf"`` that default gives
+        ``kappa = 1 / sqrt(head_dim)`` on unit vectors, a nearly uniform kernel
+        (measured at dim 64, 8 heads, 32 tokens: the largest weight is 0.047 against
+        a uniform 0.031, while the Gaussian default reaches 0.72), so a smaller
+        value such as 0.3 is the usual choice for vMF.
     :type bandwidth_init: Optional[float]
     :param min_bandwidth: Lower end of the bandwidth range, positive.
     :type min_bandwidth: float
@@ -497,6 +506,17 @@ class MeanShiftAttention(keras.layers.Layer):
             f"MeanShiftAttention: attention_mask must have rank 2, 3 or 4, got rank {rank}"
         )
 
+    @staticmethod
+    def _rows_with_a_kept_key(keep: keras.KerasTensor) -> keras.KerasTensor:
+        """Mark the query rows that keep at least one key.
+
+        :param keep: boolean keep mask ``(B, 1 or H, Nq or 1, Nk)``.
+        :type keep: keras.KerasTensor
+        :return: boolean ``(B, 1 or H, Nq or 1, 1)``, False where a row keeps nothing.
+        :rtype: keras.KerasTensor
+        """
+        return keras.ops.any(keep, axis=-1, keepdims=True)
+
     def call(
             self,
             inputs: Union[keras.KerasTensor, List[keras.KerasTensor]],
@@ -544,31 +564,42 @@ class MeanShiftAttention(keras.layers.Layer):
         h = self._bandwidth(projected, acc)
         eta = self._step_size(acc)
         keep = None if attention_mask is None else self._keep_mask(attention_mask)
+        live = None
+        centre_mask = None
+        if keep is not None:
+            live = self._rows_with_a_kept_key(keep)
+            if len(attention_mask.shape) == 2:
+                # A padding mask names the keys that set the Gaussian centre; a pairwise mask uses the plain mean.
+                centre_mask = keras.ops.squeeze(keep, axis=2)
 
         weights = None
         for _ in range(self.num_steps):
             keys = z if self.blurring else keys0
-            logits = kernel_logits(z, keys, h, self.kernel)
+            logits = kernel_logits(z, keys, h, self.kernel, key_mask=centre_mask)
             if keep is not None:
                 logits = apply_attention_mask(
                     logits, keep, out_dtype=acc, rescue_axis=-1
                 )
+            # DECISION plan-2026-10-29T104646-27f045c5/D-021: exp(logits - logsumexp) replaces keras.ops.softmax.
+            # Do not restore softmax: a size-1 key axis warns and the warnings-as-errors guard fails. See decisions.md.
             weights = keras.ops.exp(
                 logits - keras.ops.logsumexp(logits, axis=-1, keepdims=True)
             )
+            if live is not None:
+                weights = weights * keras.ops.cast(live, acc)
             if self.dropout_rate > 0.0:
                 weights = self.attention_dropout(weights, training=training)
             moved = keras.ops.matmul(weights, keys)
+            if live is not None:
+                # DECISION plan-2026-10-29T104646-27f045c5/D-004: a query row with no kept key stays put at every step and is zeroed after the loop.
+                # Do not let the rescued keep-all row move: as a blurring key it would hand forbidden keys to other rows. See decisions.md.
+                moved = keras.ops.where(live, moved, z)
             z = (1.0 - eta) * z + eta * moved
             if self.kernel == "vmf":
                 z = self._normalize(z, acc)
 
-        if keep is not None:
-            # DECISION plan-2026-10-29T104646-27f045c5/D-004: a query row with no kept key is zeroed here, after the loop.
-            # Do not leave the rescued keep-all row or zero every padded query under a rank-2 mask. See decisions.md.
-            live = keras.ops.cast(keras.ops.any(keep, axis=-1, keepdims=True), acc)
-            z = z * live
-            weights = weights * live
+        if live is not None:
+            z = z * keras.ops.cast(live, acc)
 
         shape = keras.ops.shape(z)
         merged = keras.ops.reshape(
