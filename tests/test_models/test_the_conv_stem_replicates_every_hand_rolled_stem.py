@@ -79,6 +79,7 @@ Four guards cover what the weight transplant cannot see (D-014, D-020):
 """
 
 import contextlib
+import functools
 import inspect
 from dataclasses import dataclass, replace
 from typing import Callable, Dict, Iterator, Optional, Tuple
@@ -1300,7 +1301,7 @@ SQUEEZENET_V2_3D_STRIDE1_SAME = StemCase(
 )
 
 # ---------------------------------------------------------------------
-# VAE encoder stem
+# VAE conv-norm-activation sites
 # ---------------------------------------------------------------------
 
 # Original: ``git show cad74076e^:src/dl_techniques/models/vision/vae/model.py``
@@ -1312,44 +1313,76 @@ SQUEEZENET_V2_3D_STRIDE1_SAME = StemCase(
 # ``"gelu"`` / ``"leaky_relu"``, the string itself for any other name. The
 # stem is a layer of the functional encoder graph, reached through
 # ``vae.get_layer("encoder_stem")``.
+#
+# The same three layers were written out four more times in ``model.py`` at
+# ``6942c85f2`` and are the other VAE cases below: the encoder's downsample
+# (``encoder_downsample_{i}``: kernel 2, stride 2), the decoder's convolution after
+# the upsampling (``decoder_conv_{i}``: kernel 3), and the two convolutions of a
+# residual block (``{prefix}_conv_1`` with its activation, ``{prefix}_conv_2`` with the
+# norm and NO activation: the block's ``Add`` comes first). Each site is a
+# layer of the functional graph, reached by its name; the shape it receives is
+# read from the graph (``layer.input.shape``) and never typed, because a site
+# deep in the network has no input of its own.
 _VAE_FILTERS = 8
+#: One filter count per depth; the second differs from the first, so a site that
+#: reads the wrong stage's width is visible.
+_VAE_STAGE_FILTERS = [_VAE_FILTERS, 16]
 _VAE_KERNEL_REG = 1e-4
 #: Not the VAE's default (``he_normal``) and not ConvStem's (``glorot_uniform``).
 _VAE_KERNEL_INIT = "lecun_normal"
 
 
 def _vae_original(
-    use_batch_norm: bool, use_bias: bool, activation, identity_activation: bool = False
+    use_batch_norm: bool,
+    use_bias: bool,
+    activation,
+    identity_activation: bool = False,
+    filters: int = _VAE_FILTERS,
+    kernel_size: int = 3,
+    strides: int = 1,
+    has_activation: bool = True,
+    name: str = "encoder_stem",
 ) -> Original:
+    """One pre-migration site: Conv2D, a bare BatchNormalization, an Activation.
+
+    ``has_activation=False`` is the second convolution of a residual block, which
+    ends on its norm (the ``Add`` and the block's own activation come next).
+    ``identity_activation`` declares the activation ``"linear"``, which the original
+    held as a layer and ``ConvStem`` does not build.
+    """
     conv = keras.layers.Conv2D(
-        filters=_VAE_FILTERS,
-        kernel_size=3,
-        strides=1,
+        filters=filters,
+        kernel_size=kernel_size,
+        strides=strides,
         padding="same",
         use_bias=use_bias,
         kernel_initializer=_VAE_KERNEL_INIT,
         kernel_regularizer=keras.regularizers.L2(_VAE_KERNEL_REG),
-        name="encoder_stem_conv",
+        name=f"{name}_conv",
     )
     norm = (
         keras.layers.BatchNormalization(
-            momentum=0.99, epsilon=1e-3, center=use_bias, name="encoder_stem_bn"
+            momentum=0.99, epsilon=1e-3, center=use_bias, name=f"{name}_bn"
         )
         if use_batch_norm
         else None
     )
-    act = keras.layers.Activation(activation, name="encoder_stem_activation")
+    act = (
+        keras.layers.Activation(activation, name=f"{name}_activation")
+        if has_activation
+        else None
+    )
 
     def forward(x, training):
         x = conv(x)
         if norm is not None:
             x = norm(x, training=training)
-        return act(x)
+        return x if act is None else act(x)
 
     sublayers = {"conv1": conv}
     if norm is not None:
         sublayers["norm1"] = norm
-    if not identity_activation:
+    if act is not None and not identity_activation:
         sublayers["act1"] = act
     return Original(sublayers=sublayers, forward=forward)
 
@@ -1360,7 +1393,7 @@ def _vae_model(use_batch_norm: bool, use_bias: bool, activation) -> VAE:
         input_shape=(32, 32, 3),
         depths=2,
         steps_per_depth=1,
-        filters=[_VAE_FILTERS, 16],
+        filters=list(_VAE_STAGE_FILTERS),
         kernel_initializer=_VAE_KERNEL_INIT,
         kernel_regularizer=keras.regularizers.L2(_VAE_KERNEL_REG),
         use_batch_norm=use_batch_norm,
@@ -1431,6 +1464,138 @@ VAE_LINEAR = _vae_case(
     lambda: "linear",
     lambda: "linear",
     identity_activation=True,
+)
+
+
+@dataclass(frozen=True)
+class _VaeSite:
+    """One conv-norm-activation site of the VAE graph and the constants of its original.
+
+    :param layer_name: The name the site's layer has in the functional graph.
+    :param kernel_size: The original convolution's kernel.
+    :param strides: The original convolution's stride.
+    :param filters: The original convolution's width (the stage's entry of
+        ``_VAE_STAGE_FILTERS``).
+    :param output_shape: ``(H', W', C')`` the original yields at ``_vae_model``'s
+        32 x 32 x 3 input: typed from the architecture, not read from the model.
+    :param has_activation: ``False`` for the second convolution of a residual block.
+    """
+
+    layer_name: str
+    kernel_size: int
+    strides: int
+    filters: int
+    output_shape: Tuple[int, int, int]
+    has_activation: bool = True
+
+
+@functools.lru_cache(maxsize=None)
+def _vae_site_input_shape(layer_name: str) -> Tuple[int, int, int]:
+    """``(H, W, C)`` that the VAE graph feeds the layer called ``layer_name``.
+
+    Interface contract: reads ``layer.input.shape[1:]`` from one VAE built by
+    ``_vae_model`` (the shape is a fact of the graph, so it is never typed). It
+    works for the pre-migration ``Conv2D`` and for a ``ConvStem`` alike, which is
+    what lets a case be written before the site is migrated. Raises ``ValueError``
+    from ``get_layer`` for an unknown name.
+    """
+    return tuple(_vae_graph().get_layer(layer_name).input.shape[1:])
+
+
+@functools.lru_cache(maxsize=None)
+def _vae_graph() -> VAE:
+    return _vae_model(True, True, "leaky_relu")
+
+
+def _vae_site_stem_of(layer_name: str) -> Callable[[VAE], ConvStem]:
+    """Accessor for a site's layer; it must BE a ``ConvStem`` (the migration is the claim)."""
+
+    def stem_of(model: VAE) -> ConvStem:
+        layer = model.get_layer(layer_name)
+        assert isinstance(layer, ConvStem), (
+            f"{layer_name} is a {type(layer).__name__}, not a ConvStem: the site is "
+            f"still hand-rolled"
+        )
+        return layer
+
+    return stem_of
+
+
+def _vae_site_case(
+    case_id: str,
+    site: _VaeSite,
+    use_batch_norm: bool,
+    use_bias: bool,
+    make_activation: Callable[[], object],
+    make_original_activation: Callable[[], object],
+    identity_activation: bool = False,
+) -> StemCase:
+    """One case of one site; the activations are zero-argument factories (see ``_vae_case``)."""
+    return StemCase(
+        case_id=case_id,
+        make_model=lambda: _vae_model(use_batch_norm, use_bias, make_activation()),
+        make_original=lambda: _vae_original(
+            use_batch_norm,
+            use_bias,
+            make_original_activation(),
+            identity_activation,
+            filters=site.filters,
+            kernel_size=site.kernel_size,
+            strides=site.strides,
+            has_activation=site.has_activation,
+            name=site.layer_name,
+        ),
+        input_shape=_vae_site_input_shape(site.layer_name),
+        expected_output_shape=site.output_shape,
+        stem_of=_vae_site_stem_of(site.layer_name),
+    )
+
+
+def _vae_site_cases(label: str, site: _VaeSite, twin: _VaeSite) -> list:
+    """The cases of one kind of site.
+
+    ``site`` crosses batch norm with bias at the exact leaky ReLU, then ``gelu``
+    (the other exact form), an activation Layer instance and ``linear`` (no activation
+    layer at all); ``twin`` is the same kind of site at the other stage, with other
+    widths and another feature map. A site without an activation takes the same
+    activations anyway: the claim is that none of them reaches it.
+    """
+    leaky = (lambda: "leaky_relu", lambda: exact_leaky_relu)
+    cases = [
+        _vae_site_case(f"vae-{label}-{bn_id}-{bias_id}", site, bn, bias, *leaky)
+        for bn, bn_id in ((True, "leaky-relu-bn"), (False, "leaky-relu-no-bn"))
+        for bias, bias_id in ((True, "bias"), (False, "no-bias"))
+    ]
+    cases += [
+        _vae_site_case(f"vae-{label}-gelu", site, True, True, lambda: "gelu", lambda: exact_gelu),
+        _vae_site_case(
+            f"vae-{label}-leaky-relu-instance",
+            site,
+            True,
+            True,
+            lambda: keras.layers.LeakyReLU(negative_slope=0.1),
+            lambda: keras.layers.LeakyReLU(negative_slope=0.1),
+        ),
+        _vae_site_case(
+            f"vae-{label}-linear",
+            site,
+            True,
+            True,
+            lambda: "linear",
+            lambda: "linear",
+            identity_activation=True,
+        ),
+        _vae_site_case(f"vae-{label}-other-stage", twin, True, True, *leaky),
+    ]
+    return cases
+
+
+# The encoder's downsample: ``encoder_downsample_{i}``, kernel 2, stride 2, ``same``.
+# Stage 1 takes 16 x 16 x 8 to 8 x 8 x 16; stage 0 takes 32 x 32 x 8 to 16 x 16 x 8.
+VAE_DOWNSAMPLE_CASES = _vae_site_cases(
+    "downsample",
+    _VaeSite("encoder_downsample_1", 2, 2, _VAE_STAGE_FILTERS[1], (8, 8, 16)),
+    _VaeSite("encoder_downsample_0", 2, 2, _VAE_STAGE_FILTERS[0], (16, 16, 8)),
 )
 
 # ---------------------------------------------------------------------
@@ -2144,6 +2309,7 @@ CASES = [
     VAE_RELU_STRING,
     VAE_LEAKY_RELU_INSTANCE,
     VAE_LINEAR,
+    *VAE_DOWNSAMPLE_CASES,
     RBF_CLIFFORD_P1,
     RBF_CLIFFORD_P2,
     RBF_CLIFFORD_P2_NOREG,
@@ -2221,6 +2387,12 @@ BUILT_STEM_ROWS = [
         lambda: _vae_model(True, True, "leaky_relu"),
         (32, 32, 3),
         _vae_stem_of,
+    ),
+    (
+        "vae-encoder-downsample",
+        lambda: _vae_model(True, True, "leaky_relu"),
+        (32, 32, 3),
+        _vae_site_stem_of("encoder_downsample_1"),
     ),
     ("rbf-clifford-protonet", lambda: _rbf_clifford_model(2, True), (16, 16, 3)),
     # The CLIP model reads a dict, so the rows call its image tower through a wrapper layer.
@@ -3084,6 +3256,62 @@ def test_the_guard_the_harness_sees_a_clifford_clip_norm_applied_twice():
             CLIFFORD_CLIP_P4,
             CLIFFORD_CLIP_P4.stem_of(model),
             forward=_clip_stem_norm_applied_twice,
+        )
+
+
+def _vae_case_named(cases: list, case_id: str) -> StemCase:
+    return next(case for case in cases if case.case_id == case_id)
+
+
+_VAE_DOWN_BN_BIAS = _vae_case_named(VAE_DOWNSAMPLE_CASES, "vae-downsample-leaky-relu-bn-bias")
+_VAE_DOWN_BN_NOBIAS = _vae_case_named(VAE_DOWNSAMPLE_CASES, "vae-downsample-leaky-relu-bn-no-bias")
+_VAE_DOWN_NOBN_BIAS = _vae_case_named(VAE_DOWNSAMPLE_CASES, "vae-downsample-leaky-relu-no-bn-bias")
+
+
+@pytest.mark.parametrize(
+    "case,override,match",
+    [
+        # Keras' BatchNormalization epsilon is 1e-3 and the norm factory's own is 1e-6: no shape symptom.
+        (_VAE_DOWN_BN_BIAS, {"normalization_kwargs": {"epsilon": 1e-6}}, "differs from the original"),
+        # Keras' momentum is 0.99; it shows only in the moving statistics after a training=True pass.
+        (_VAE_DOWN_BN_BIAS, {"normalization_kwargs": {"momentum": 0.9}}, "after a training=True pass"),
+        # ``center`` follows ``use_bias``: a centered norm on a bias-free site is one more weight.
+        (_VAE_DOWN_BN_NOBIAS, {"normalization_kwargs": {"center": True}}, "weights"),
+        (_VAE_DOWN_BN_BIAS, {"use_bias": False}, "weights"),
+        # Kernel 2 at stride 2 halves 32 x 32; stride 1 does not, kernel 3 is another weight shape.
+        (_VAE_DOWN_BN_BIAS, {"strides": 1}, "shape"),
+        (_VAE_DOWN_BN_BIAS, {"kernel_size": 3}, "not compatible"),
+        (_VAE_DOWN_BN_BIAS, {"activation_type": "relu"}, "differs from the original"),
+        # A norm the original did not have is a role of its own.
+        (_VAE_DOWN_NOBN_BIAS, {"normalization_type": "batch_norm"}, "roles"),
+    ],
+    ids=[
+        "factory-epsilon-1e-6",
+        "momentum-0.9",
+        "center-on-a-bias-free-site",
+        "bias-dropped",
+        "stride-1",
+        "kernel-3",
+        "relu-for-leaky-relu",
+        "norm-added",
+    ],
+)
+def test_the_guard_the_harness_sees_a_vae_downsample_with_one_wrong_setting(case, override, match):
+    """Each value the encoder's downsample fixes is a defect when it is not kept; the stem
+    rebuilt from the model's own config passes the same comparison."""
+    stem = _stem_from_config(case, **override)
+    exception = ValueError if match == "not compatible" else AssertionError
+    with pytest.raises(exception, match=match):
+        assert_stem_matches_original(case, stem)
+    assert_stem_matches_original(case, _stem_from_config(case))
+
+
+def test_the_guard_the_harness_sees_a_vae_downsample_norm_applied_twice():
+    """A second ``norm1`` in the forward changes the output."""
+    case = _VAE_DOWN_BN_BIAS
+    with pytest.raises(AssertionError, match="differs from the original"):
+        assert_stem_matches_original(
+            case, case.stem_of(case.make_model()), forward=_norm_applied_twice
         )
 
 

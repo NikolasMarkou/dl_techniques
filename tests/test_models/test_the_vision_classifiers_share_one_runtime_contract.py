@@ -1764,6 +1764,10 @@ NAMED_SUBJECTS: Tuple[NamedSubject, ...] = (
     _named_other("deepsort", "deepsort", ("stem",)),
     _named_other("siamfc", "siamfc", ("stem",)),
     _named_other("dasiamrpn", "dasiamrpn", ("stem",)),
+    # The VAE's conv-norm-activation sites are ConvStems that keep the name the convolution had, so each
+    # site's name and its inner convolution `<site>_conv1` must both be there.
+    _named_other("vae", "vae", ("encoder_stem", "encoder_stem_conv1",
+                                "encoder_downsample_0", "encoder_downsample_0_conv1")),
 )
 
 

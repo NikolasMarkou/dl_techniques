@@ -8,6 +8,7 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.layers.activations.exact_activations import exact_gelu, exact_leaky_relu
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.layers.generative.sampling import Sampling, HypersphereSampling, VMFSampling
 import dl_techniques.models.vision.vae.model as vae_module
 from dl_techniques.models.vision.vae.model import VAE, compile_vae, create_vae
@@ -148,6 +149,63 @@ class TestVAEEncoderStem:
         )
         stem = vae.get_layer("encoder_stem")
         assert stem.act1.activation is exact
+
+
+#: The conv-norm-activation sites of the graph other than the stem, by kind: the names of
+#: their layers for a given ``(depths, steps_per_depth)``, and the names the same site had
+#: as separate layers before it was one ``ConvStem``.
+_SITE_KINDS = {
+    "downsample": (
+        lambda depths, steps: [f"encoder_downsample_{i}" for i in range(depths)],
+        lambda name: [
+            name.replace("encoder_downsample_", "encoder_downsample_bn_"),
+            name.replace("encoder_downsample_", "encoder_downsample_activation_"),
+        ],
+    ),
+}
+
+
+def _vae_with(depths: int, steps_per_depth: int, **kwargs) -> VAE:
+    return VAE(
+        latent_dim=8,
+        input_shape=(32, 32, 3),
+        depths=depths,
+        steps_per_depth=steps_per_depth,
+        filters=[8, 16, 32][:depths],
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize("depths,steps_per_depth", [(2, 1), (3, 2)])
+class TestVAEConvSites:
+    """Each repeated conv, norm, activation triple of the graph is one ``ConvStem``."""
+
+    @pytest.mark.parametrize("kind", sorted(_SITE_KINDS))
+    def test_every_site_of_a_kind_is_one_conv_stem(self, kind, depths, steps_per_depth):
+        """One ``ConvStem`` per instance, under the name the convolution had, and none of the
+        layers it replaced is left in the graph."""
+        names, replaced = _SITE_KINDS[kind]
+        vae = _vae_with(depths, steps_per_depth)
+        for name in names(depths, steps_per_depth):
+            assert type(vae.get_layer(name)) is ConvStem, name
+            for old_name in replaced(name):
+                with pytest.raises(ValueError, match="No such layer"):
+                    vae.get_layer(old_name)
+
+    @pytest.mark.parametrize("kind", sorted(_SITE_KINDS))
+    @pytest.mark.parametrize(
+        "name,exact", [("leaky_relu", exact_leaky_relu), ("gelu", exact_gelu)]
+    )
+    def test_every_site_runs_the_exact_activation(
+        self, kind, name, exact, depths, steps_per_depth
+    ):
+        """The exact forms of ``substitute_exact`` reach every site that has an activation
+        (they are bit-identical to the stock kernels at float32, so only the layer's own
+        function can show it)."""
+        names, _ = _SITE_KINDS[kind]
+        vae = _vae_with(depths, steps_per_depth, activation=name)
+        for site in names(depths, steps_per_depth):
+            assert vae.get_layer(site).act1.activation is exact, site
 
 
 class TestVAEVariants:

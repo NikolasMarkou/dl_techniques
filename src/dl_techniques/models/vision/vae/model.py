@@ -460,27 +460,41 @@ class VAE(keras.Model):
             "reconstruction": reconstruction,
         }
 
-    def _build_encoder(
-        self, inputs: keras.KerasTensor
-    ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """Build the encoder network with ResNet blocks.
+    def _conv_norm_act(
+        self,
+        x: keras.KerasTensor,
+        filters: int,
+        kernel_size: int,
+        strides: int,
+        name: str,
+    ) -> keras.KerasTensor:
+        """Apply one convolution, its batch norm and the hidden activation as one ``ConvStem``.
 
-        :param inputs: Input tensor.
-        :type inputs: keras.KerasTensor
-        :return: ``(z_mean, z_log_var)`` tensors.
-        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
+        Interface contract: ``x`` is a ``[B, H, W, C]`` tensor; the result is the
+        output of a ``ConvStem`` named ``name`` (``same`` padding), whose layers are
+        ``{name}_conv1``, ``{name}_norm1`` (only with ``use_batch_norm``) and
+        ``{name}_act1`` (none for a linear activation). ``use_bias``,
+        ``kernel_initializer``, ``kernel_regularizer`` and ``activation`` are the
+        model's. The initializer is handed on as the stored spec, so each call
+        resolves its own and no two sites replay one draw.
+
+        :param x: Input feature map.
+        :param filters: Width of the convolution.
+        :param kernel_size: Square kernel size of the convolution.
+        :param strides: Stride of the convolution.
+        :param name: Name of the stem layer.
+        :return: The stem's output tensor.
         """
-        x = inputs
-
-        # Initial conv layer: the stem, one ConvStem. Its BatchNormalization is
-        # the Keras one the encoder always used (momentum 0.99, epsilon 1e-3;
-        # the norm factory's epsilon default is 1e-6), with ``center`` following
-        # ``use_bias``. The per-stage downsample below is a downsampling block,
-        # not a stem, and stays inline.
-        x = ConvStem(
-            filters=self.filters[0],
-            kernel_size=3,
-            strides=1,
+        # DECISION plan-2026-10-26T125959-7af851e5/D-058: the norm is the Keras
+        # BatchNormalization every site of this graph always used: momentum 0.99,
+        # epsilon 1e-3, ``center`` following ``use_bias``. Do NOT leave out
+        # ``epsilon`` or ``momentum``: the norm factory's own epsilon default is
+        # 1e-6, which changes the network without changing a shape or a weight
+        # count, so only a numeric comparison sees it.
+        return ConvStem(
+            filters=filters,
+            kernel_size=kernel_size,
+            strides=strides,
             padding="same",
             use_bias=self.use_bias,
             normalization_type="batch_norm" if self.use_batch_norm else None,
@@ -493,8 +507,24 @@ class VAE(keras.Model):
             activation_type=substitute_exact(self.activation),
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
-            name="encoder_stem",
+            name=name,
         )(x)
+
+    def _build_encoder(
+        self, inputs: keras.KerasTensor
+    ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
+        """Build the encoder network with ResNet blocks.
+
+        :param inputs: Input tensor.
+        :type inputs: keras.KerasTensor
+        :return: ``(z_mean, z_log_var)`` tensors.
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
+        """
+        x = inputs
+
+        # Initial conv layer: the stem. The per-stage downsample below is a
+        # downsampling block, not a stem, and shares its recipe.
+        x = self._conv_norm_act(x, self.filters[0], 3, 1, "encoder_stem")
 
         # Encoder blocks with downsampling
         for depth in range(self.depths):
@@ -561,24 +591,7 @@ class VAE(keras.Model):
         num_filters = self.filters[stage_idx]
 
         # Downsampling layer
-        x = keras.layers.Conv2D(
-            filters=num_filters,
-            kernel_size=2,
-            strides=2,
-            padding="same",
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name=f"encoder_downsample_{stage_idx}",
-        )(x)
-
-        if self.use_batch_norm:
-            x = keras.layers.BatchNormalization(
-                center=self.use_bias, name=f"encoder_downsample_bn_{stage_idx}"
-            )(x)
-        x = keras.layers.Activation(
-            substitute_exact(self.activation), name=f"encoder_downsample_activation_{stage_idx}"
-        )(x)
+        x = self._conv_norm_act(x, num_filters, 2, 2, f"encoder_downsample_{stage_idx}")
 
         # Residual blocks
         for step in range(self.steps_per_depth):
