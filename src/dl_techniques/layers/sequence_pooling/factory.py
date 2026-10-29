@@ -3,11 +3,13 @@ Sequence Pooling Layer Factory.
 
 A registry-driven factory for creating sequence-pooling layers with a unified
 interface, type safety, parameter validation, and detailed metadata. The factory
-mirrors the canonical ``attention/`` sub-package template and exposes the three
+mirrors the canonical ``attention/`` sub-package template and exposes the four
 pooling layers in this package through a single, consistent construction surface.
 
-The factory supports three pooling mechanisms:
+The factory supports four pooling mechanisms:
     - ``attention``: learnable, content-aware attention-weighted pooling.
+    - ``mode``: pooling to the dominant mode of the tokens by mean-shift
+      iterations, robust to a minority of far-away tokens.
     - ``weighted``: learnable, content-agnostic per-position weighted pooling.
     - ``sequence``: a unified facade dispatching 18 strategies and 4 aggregation
       methods (internally composing the attention and weighted poolers).
@@ -35,12 +37,13 @@ from dl_techniques.utils.validation import positive_float, positive_int
 from .weighted_pooling import WeightedPooling
 from .sequence_pooling import SequencePooling, check_strategy_config
 from .attention_pooling import AttentionPooling
+from .mode_pooling import ModePooling
 
 # ---------------------------------------------------------------------
 # Type Definitions
 # ---------------------------------------------------------------------
 
-SequencePoolingType = Literal['attention', 'weighted', 'sequence']
+SequencePoolingType = Literal['attention', 'mode', 'weighted', 'sequence']
 """
 Type alias for supported sequence-pooling mechanisms.
 
@@ -79,6 +82,38 @@ SEQUENCE_POOLING_REGISTRY: Dict[str, Dict[str, Any]] = {
             'is input-dependent: sentence/document embeddings, sequence '
             'classification heads, and any task where the model should '
             'dynamically focus on the most informative tokens.'
+        ),
+    },
+
+    'mode': {
+        'class': ModePooling,
+        'description': (
+            'Mode pooling, with no weights unless learnable_bandwidth is set. '
+            'The tokens are the keys of a Gaussian (or von Mises-Fisher) kernel '
+            'density; start points (the masked mean '
+            'and, optionally, tokens at evenly spaced ranks) move for num_steps '
+            'mean-shift steps against the fixed tokens and the start with the '
+            'highest density is returned, so a minority of far-away tokens does '
+            'not pull the summary the way a mean does. The bandwidth is the '
+            'median pairwise distance or a given value, optionally scaled by a '
+            'learnable factor.'
+        ),
+        'required_params': [],
+        'optional_params': {
+            'num_steps': 5,
+            'bandwidth': 'auto',
+            'bandwidth_scale': 1.0,
+            'learnable_bandwidth': False,
+            'num_starts': 1,
+            'kernel': 'gaussian',
+            'exclude_positions': None,
+            'return_density': False,
+        },
+        'use_case': (
+            'Summarising a token set that holds a dominant cluster plus '
+            'outliers or a second minority cluster: robust sentence or patch '
+            'embeddings, and pooling where the mean lands between modes. '
+            'return_density also gives a log density usable as a confidence.'
         ),
     },
 
@@ -162,7 +197,7 @@ test_marker_is_identical_in_every_factory`` finds every definition in ``src``
 and fails if one drifts.
 """
 
-# Base ``keras.layers.Layer`` kwargs. All three pooling classes forward
+# Base ``keras.layers.Layer`` kwargs. All four pooling classes forward
 # ``**kwargs`` to ``Layer.__init__``, so these build and are not refused. The
 # same frozenset lives in ``norms/factory.py`` and is pinned identical by the
 # same test class as the marker above.
@@ -256,15 +291,16 @@ def validate_sequence_pooling_config(
     # exactly what the constructors refuse.
     positive_int_params = [
         'hidden_dim', 'num_heads', 'max_seq_len', 'attention_hidden_dim',
-        'attention_num_heads', 'weighted_max_seq_len', 'top_k'
+        'attention_num_heads', 'weighted_max_seq_len', 'top_k', 'num_starts'
     ]
     for param in positive_int_params:
         if param in kwargs:
             positive_int(kwargs[param], param, f"sequence pooling '{pooling_type}'")
-    if 'temperature' in kwargs:
-        positive_float(
-            kwargs['temperature'], 'temperature', f"sequence pooling '{pooling_type}'"
-        )
+    for param in ('temperature', 'bandwidth_scale'):
+        if param in kwargs:
+            positive_float(
+                kwargs[param], param, f"sequence pooling '{pooling_type}'"
+            )
 
     # Validate probability/rate parameters (0.0 to 1.0)
     rate_params = ['dropout_rate', 'attention_dropout_rate']
@@ -303,7 +339,7 @@ def create_sequence_pooling_layer(
 
     Args:
         pooling_type: The type of pooling layer to create
-            (``'attention'``, ``'weighted'``, or ``'sequence'``).
+            (``'attention'``, ``'mode'``, ``'weighted'``, or ``'sequence'``).
         name: Optional name for the layer instance.
         **kwargs: Type-specific parameters for the pooling layer, plus any of
             ``dtype``, ``trainable``, ``activity_regularizer``, ``autocast``.

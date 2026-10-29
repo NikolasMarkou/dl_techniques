@@ -48,7 +48,7 @@ Factory column: Y means the package has a `factory.py`.
 | `memory/` | Y | Neural Turing Machine, self-organizing maps, NeuroGrid |
 | `mixtures/` | Y | `RBFLayer`, `KMeansLayer`, `GMMLayer` |
 | `norms/` | Y | RMS family, logit norms, dynamic tanh, GRN, LRN, bias-free batch norm, energy layer norm, `PolarWeightNorm`. 19 factory keys |
-| `sequence_pooling/` | Y | `(batch, seq, dim)` to `(batch, dim)` pooling with 18 strategies, plus attention and weighted pooling |
+| `sequence_pooling/` | Y | `(batch, seq, dim)` to `(batch, dim)` pooling with 18 strategies, plus attention, weighted and mode pooling |
 | `ssm/` | Y | Selective state space layers: Mamba v1, Mamba-2, a temporal context mixer, and residual wrappers (exported, but not factory keys). 4 factory keys |
 | `transformers/` | Y | `TransformerLayer`, Swin, Perceiver, EoMT, energy and free transformers, text and vision encoders, a causal patch transformer. 12 block-factory keys |
 | `moe/` | | `MixtureOfExperts` with linear, cosine and soft routers and load-balancing losses |

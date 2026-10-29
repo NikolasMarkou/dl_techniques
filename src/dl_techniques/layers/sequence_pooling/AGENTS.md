@@ -5,7 +5,7 @@ Purpose: Keras 3 layers that collapse `(batch, seq_len, dim)` to one vector per 
 
 ## Scope
 
-In: `AttentionPooling`, `WeightedPooling`, `SequencePooling` (18 strategies, 4 aggregation methods), the factory, the shared strategy validator `check_strategy_config`.
+In: `AttentionPooling`, `WeightedPooling`, `ModePooling`, `SequencePooling` (18 strategies, 4 aggregation methods), the factory, the shared strategy validator `check_strategy_config`.
 
 Out: the NLP task heads' `pooling_type='attention'`. That is an inline `Dense(1, tanh)` scorer inside `layers/heads/nlp`, not `AttentionPooling`. Spatial pooling (blur, pixel shuffle, patch merging) lives in `layers/pooling/`, not here.
 
@@ -34,25 +34,26 @@ flowchart TD
 
 | File | Role | Notes |
 | --- | --- | --- |
-| `__init__.py` | Curated export, `__all__` has 13 names | Factory functions, `SequencePoolingType`, `SEQUENCE_POOLING_REGISTRY`, `STRICT_DROPPED_KEY_MARKER`, three layers, `PoolingStrategy`, `AggregationMethod` |
+| `__init__.py` | Curated export, `__all__` has 14 names | Factory functions, `SequencePoolingType`, `SEQUENCE_POOLING_REGISTRY`, `STRICT_DROPPED_KEY_MARKER`, four layers, `PoolingStrategy`, `AggregationMethod` |
 | `sequence_pooling.py` | `SequencePooling`, literals, validators | 1091 lines; helpers `check_strategy_config`, `_check_exclude_positions`, `_strategy_width`; module consts `STRATEGY_NAMES`, `AGGREGATION_NAMES`, `_WIDTH_MULTIPLE`, `_KERNEL_STRATEGIES` |
 | `attention_pooling.py` | `AttentionPooling` | `attention_dense` (`Dense(hidden_dim*num_heads, tanh)`) plus `context_vector (num_heads, hidden_dim)` |
 | `weighted_pooling.py` | `WeightedPooling` | `position_weights (max_seq_len,)` |
+| `mode_pooling.py` | `ModePooling` | Weightless unless `learnable_bandwidth` (then one scalar `log_scale`); mean-shift functions come from `layers/mixtures/mean_shift_ops.py`; reuses `SequencePooling._take_positions` and `_check_exclude_positions` |
 | `factory.py` | Registry and builders | Dispatch is registry lookup, no if/elif |
 | `README.md` | User doc | A repo test parses its `#### Shared knobs` table (see Working here) |
 | `GUIDE.md` | Longer guide | A repo test parses its Pattern B code block |
 
-Registration strings: `dl_techniques.layers.sequence_pooling.sequence_pooling`, `.attention_pooling`, `.weighted_pooling` (via `register_dl_technique`).
+Registration strings: `dl_techniques.layers.sequence_pooling.sequence_pooling`, `.attention_pooling`, `.weighted_pooling`, `.mode_pooling` (via `register_dl_technique`).
 
 ## Public interface
 
 Factory (`factory.py`):
 
-- `create_sequence_pooling_layer(pooling_type: 'attention'|'weighted'|'sequence', name: Optional[str] = None, **kwargs) -> keras.layers.Layer`. Runs `validate_sequence_pooling_config`, merges registry defaults under the caller's kwargs, builds. A `TypeError` or `ValueError` from the constructor is re-raised as `ValueError("Failed to create '<type>' sequence pooling layer ...")`.
+- `create_sequence_pooling_layer(pooling_type: 'attention'|'mode'|'weighted'|'sequence', name: Optional[str] = None, **kwargs) -> keras.layers.Layer`. Runs `validate_sequence_pooling_config`, merges registry defaults under the caller's kwargs, builds. A `TypeError` or `ValueError` from the constructor is re-raised as `ValueError("Failed to create '<type>' sequence pooling layer ...")`.
 - `create_sequence_pooling_from_config(config: dict)`. Pops `'type'`; missing key raises `ValueError`.
 - `validate_sequence_pooling_config(pooling_type, **kwargs) -> None`. Raises `ValueError`.
 - `get_sequence_pooling_info() -> dict`. Deep copy per entry (the `class` value is shared).
-- `list_sequence_pooling_types() -> List[str]`. Sorted: `['attention', 'sequence', 'weighted']`.
+- `list_sequence_pooling_types() -> List[str]`. Sorted: `['attention', 'mode', 'sequence', 'weighted']`.
 - `STRICT_DROPPED_KEY_MARKER = "unsupported parameter(s)"`. `_KERAS_BASE_PARAMS = {name, dtype, trainable, activity_regularizer, autocast}` are always accepted.
 
 Layers (all `call(inputs, mask=None, training=None)`; mask is `(batch, seq_len)`, 1/True = keep):
@@ -60,14 +61,15 @@ Layers (all `call(inputs, mask=None, training=None)`; mask is `(batch, seq_len)`
 - `SequencePooling(strategy='mean', exclude_positions=None, aggregation_method='concat', attention_hidden_dim=256, attention_num_heads=1, attention_dropout_rate=0.0, weighted_max_seq_len=512, top_k=10, temperature=1.0, use_bias=True, kernel_initializer='glorot_uniform', bias_initializer='zeros', kernel_regularizer=None, bias_regularizer=None, **kwargs)`.
 - `AttentionPooling(hidden_dim=256, num_heads=1, dropout_rate=0.0, use_bias=True, temperature=1.0, kernel_initializer, bias_initializer, kernel_regularizer, bias_regularizer, **kwargs)`.
 - `WeightedPooling(max_seq_len=512, dropout_rate=0.0, temperature=1.0, initializer='ones', regularizer=None, **kwargs)`.
+- `ModePooling(num_steps=5, bandwidth='auto', bandwidth_scale=1.0, learnable_bandwidth=False, num_starts=1, kernel='gaussian', exclude_positions=None, return_density=False, **kwargs)`. `call(inputs, mask=None)` (no `training`); returns `(batch, dim)`, or `((batch, dim), (batch,))` with `return_density`.
 
-Output shapes: `compute_output_shape` returns `input_shape` for `['none']`; otherwise `(batch, width)` where width comes from `_strategy_width` (`_WIDTH_MULTIPLE[s] * dim`, or `seq_len * dim` for `flatten`, `None` if unknown); summed for `concat`, the common width otherwise. `AttentionPooling` and `WeightedPooling` return `(batch, input_shape[-1])`.
+Output shapes: `compute_output_shape` returns `input_shape` for `['none']`; otherwise `(batch, width)` where width comes from `_strategy_width` (`_WIDTH_MULTIPLE[s] * dim`, or `seq_len * dim` for `flatten`, `None` if unknown); summed for `concat`, the common width otherwise. `AttentionPooling`, `WeightedPooling` and `ModePooling` return `(batch, input_shape[-1])` (`ModePooling` adds `(batch,)` with `return_density`).
 
 ## Data shapes
 
 Strategies (`PoolingStrategy`, 18): `cls first last middle mean max min sum mean_max mean_std mean_max_min attention multi_head_attention weighted top_k_mean top_k_max none flatten`. Aggregations (`AggregationMethod`, 4): `concat add multiply weighted_sum`.
 
-Registry entry (`SEQUENCE_POOLING_REGISTRY[type]`): `class`, `description`, `required_params` (empty for all three), `optional_params` (name to default), `use_case`.
+Registry entry (`SEQUENCE_POOLING_REGISTRY[type]`): `class`, `description`, `required_params` (empty for all four), `optional_params` (name to default), `use_case`.
 
 `get_config` of `SequencePooling` stores `strategy` as the caller gave it (string stays string, sequence becomes list), `exclude_positions` as a list of ints, initializers serialized only if they are `Initializer` instances, regularizers serialized.
 
@@ -89,6 +91,7 @@ Registry entry (`SEQUENCE_POOLING_REGISTRY[type]`): `class`, `description`, `req
 - `check_strategy_config` is called by both `SequencePooling.__init__` and `validate_sequence_pooling_config`, so any config the factory accepts is one the layer accepts. Rules: names in `STRATEGY_NAMES`, aggregation in `AGGREGATION_NAMES` (checked even for one strategy), no repeats, no `none` in a list of two or more, non-`concat` aggregation needs equal widths and no `flatten`.
 - `_check_exclude_positions`: list or tuple of distinct non-negative ints (numpy ints accepted, returned as Python ints; bool refused).
 - The factory refuses undeclared keywords inside `validate_sequence_pooling_config`, not by filtering in the create function. Do not reintroduce a filter.
+- `ModePooling` treats a row with no kept key (a fully masked row, or `exclude_positions` removing every position) as an explicit rule: the output is the plain mean over all positions, the same value `AttentionPooling` reaches by degeneration. Masked and excluded keys have exactly zero weight. With `num_starts > 1` the extra starts are kept tokens at evenly spaced ranks, so the output depends on token order; the best start is picked by `argmax` of the KDE log density under `stop_gradient` and gathered with `_take_positions`. The bandwidth median is a stop-gradient value.
 - `STRICT_DROPPED_KEY_MARKER` and `_KERAS_BASE_PARAMS` are copies of definitions in other factories (not imported, to avoid pulling their layer trees). A repo test finds every definition under `src` and fails if the marker drifts.
 
 ## Dependencies
@@ -98,6 +101,8 @@ Internal:
 - `dl_techniques.utils.dtype_policy`: `accumulation_dtype`, `mask_sentinel`, `stability_floor`.
 - `dl_techniques.utils.validation`: `positive_int` (rejects bool, float, str, None, 0, negatives; returns a Python int), `positive_float` (positive finite number, returns float).
 - `dl_techniques.utils.keras_registration.register_dl_technique`.
+- `dl_techniques.layers.mixtures.mean_shift_ops` (`mode_pooling.py` only: `mean_shift_step`, `kde_log_density`, `median_heuristic_bandwidth`, and the private `_check_kernel`). The import runs `mixtures/__init__`.
+- `dl_techniques.utils.tensors.l2_normalize` (`mode_pooling.py` only).
 - `dl_techniques.initializers.clone.clone_initializer` (`attention_pooling.py` only).
 - `dl_techniques.utils.logger.logger` (`factory.py`).
 
@@ -113,15 +118,17 @@ External: `keras` (Keras 3, `keras.ops` only for tensor math), `numpy` (type che
 - `WeightedPooling` with static `seq_len > max_seq_len`: `ValueError` from `_check_length`, at `build` and again at `call`. With unknown length no check is traced, the backend raises `Incompatible shapes` on a longer input.
 - `_positional_index` called with a mode outside `first/middle/last`: `ValueError` (internal).
 - Fully masked rows: finite output, see Invariants. Never NaN in the pooling paths.
+- `ModePooling`: bad `num_steps`, `bandwidth`, `kernel` or flag values raise `ValueError` in `__init__`; an input that is not rank 3 with a known last axis raises at `build`.
 
 ## Working here
 
 - Add a strategy: extend the `PoolingStrategy` literal; add a branch in `_apply_single_strategy`; if its width is not `dim`, add it to `_WIDTH_MULTIPLE` (every non-`flatten`, non-`none` name is auto-included at 1); handle mask and `exclude_positions` through `_apply_mask_and_exclusions`; keep `compute_output_shape` and `call` in agreement; update README strategy table.
+- Add a pooling layer type (like `mode`): new file with `register_dl_technique`, a `SequencePoolingType` entry, a registry entry whose `optional_params` equal the constructor defaults, an `__init__.py` export, the type list in `test_the_sequence_pooling_factory_refuses_an_unknown_keyword.py`, and the counts in the docs.
 - Add a learnable strategy: create the layer in `__init__` into `learnable_components`, build it in `build`, and add its knobs to the README `#### Shared knobs` table.
 - Add a constructor parameter to a layer: add it to `get_config`, to the matching `optional_params` in `factory.py`, to `validate_sequence_pooling_config` if it has a range, and to the README.
 - The registry key set and each entry's `required_params` / `optional_params` are public API, asserted by `tests/test_layers/test_factory_registry_drift.py`.
 - Docstrings in this package are a mix: `sequence_pooling.py` has Sphinx-style `:param:` in helpers and Google `Args:` in the class docstring. Match the surrounding block; do not convert wholesale.
 - Use `import keras` and qualify (`keras.ops.where`). Never `from keras import ops`. Log through `dl_techniques.utils.logger`, no `print`.
 - Docs are tested. `tests/test_layers/test_the_sequence_pooling_docs_match_the_code.py` requires: no fenced python block in README or GUIDE with an additive mask or `from keras import`; the GUIDE has exactly one block containing `class MyPooling` that parses and uses `mask_sentinel(self.compute_dtype)` and `keras.ops.where`; the README keeps a `#### Shared knobs` section whose table's first-column backtick names equal the test's check set (`temperature`, `attention_dropout_rate`, `attention_hidden_dim`, `attention_num_heads`, `use_bias`, `bias_initializer`, `bias_regularizer`, `kernel_initializer`, `kernel_regularizer`, `weighted_max_seq_len`, `top_k`) and each "Reaches" claim holds; the README contains the phrase ``inline `Dense(1, tanh)` scorer``. The README table must stay the last table in that section, which ends at the next `####` heading.
-- Tests live in `tests/test_layers/`: `test_sequence_pooling.py` (main suite, includes `TestPositionalModesIsolateMaskedPositions`) plus single-claim files named `test_the_sequence_pooling_*`, `test_the_pooling_layers_refuse_bad_arguments_early.py`, `test_a_fully_masked_row_pools_to_the_plain_mean.py`, `test_no_two_pooling_weights_replay_one_draw.py`, `test_the_attention_pooler_bias_knobs_take_effect.py`.
+- Tests live in `tests/test_layers/`: `test_sequence_pooling.py` (main suite, includes `TestPositionalModesIsolateMaskedPositions`), `test_mode_pooling.py` (`ModePooling`) plus single-claim files named `test_the_sequence_pooling_*`, `test_the_pooling_layers_refuse_bad_arguments_early.py`, `test_a_fully_masked_row_pools_to_the_plain_mean.py`, `test_no_two_pooling_weights_replay_one_draw.py`, `test_the_attention_pooler_bias_knobs_take_effect.py`.
 - Run scoped, from the repo root, with the venv: `CUDA_VISIBLE_DEVICES= .venv/bin/python -m pytest tests/test_layers/test_sequence_pooling.py tests/test_layers/test_the_sequence_pooling_docs_match_the_code.py -q`. Add the transformers encoder tests if you change a signature the encoders use. Do not run the full suite.

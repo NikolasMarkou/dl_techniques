@@ -34,8 +34,8 @@ TYPES = sorted(SEQUENCE_POOLING_REGISTRY)
 MARKER = re.escape(STRICT_DROPPED_KEY_MARKER)
 
 
-def test_the_registry_has_its_three_types():
-    assert TYPES == ["attention", "sequence", "weighted"]
+def test_the_registry_has_its_four_types():
+    assert TYPES == ["attention", "mode", "sequence", "weighted"]
 
 
 @pytest.mark.parametrize("pooling_type", TYPES)

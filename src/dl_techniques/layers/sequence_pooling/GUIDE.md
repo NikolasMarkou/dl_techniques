@@ -52,6 +52,7 @@ return info['class'](**params)
   | `AttentionPooling` | `attention_pooling.py` | `dl_techniques.layers.sequence_pooling.attention_pooling>AttentionPooling` |
   | `WeightedPooling` | `weighted_pooling.py` | `dl_techniques.layers.sequence_pooling.weighted_pooling>WeightedPooling` |
   | `SequencePooling` | `sequence_pooling.py` | `dl_techniques.layers.sequence_pooling.sequence_pooling>SequencePooling` |
+  | `ModePooling` | `mode_pooling.py` | `dl_techniques.layers.sequence_pooling.mode_pooling>ModePooling` |
 
   The package string is the defining module's dotted path. (Only under
   `dl_techniques.models` is anything stripped — its 13 family directories and its 4
@@ -244,7 +245,7 @@ When adding a new pooling **type** to the package, update `factory.py` and
    `__init__`/`build`/`call`/`compute_output_shape`/`get_config` methods, and
    Google-style docstrings.
 2. **Add the type literal.** Extend
-   `SequencePoolingType = Literal['attention', 'weighted', 'sequence', ...]`.
+   `SequencePoolingType = Literal['attention', 'mode', 'weighted', 'sequence', ...]`.
 3. **Add the registry entry** to `SEQUENCE_POOLING_REGISTRY` with:
    - `class`: the class object,
    - `required_params`: list of mandatory `__init__` args (often `[]`),

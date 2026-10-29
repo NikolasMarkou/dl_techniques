@@ -3,9 +3,10 @@ Sequence Pooling Layers Module.
 
 This package collapses a sequence of token vectors
 ``(batch, seq_len, hidden_dim)`` into a fixed-size summary representation. It
-exposes three pooling layers and a registry-driven factory:
+exposes four pooling layers and a registry-driven factory:
 
     - :class:`AttentionPooling` — learnable, content-aware attention pooling.
+    - :class:`ModePooling` — mean-shift pooling to the dominant mode of the tokens.
     - :class:`WeightedPooling` — learnable, content-agnostic per-position pooling.
     - :class:`SequencePooling` — a unified facade over 18 strategies and 4
       aggregation methods (composing the two leaf poolers for learnable modes).
@@ -29,6 +30,7 @@ from .factory import (
 
 # Layer Classes
 from .attention_pooling import AttentionPooling
+from .mode_pooling import ModePooling
 from .weighted_pooling import WeightedPooling
 from .sequence_pooling import SequencePooling
 
@@ -48,6 +50,7 @@ __all__ = [
 
     # Layer Classes
     "AttentionPooling",
+    "ModePooling",
     "WeightedPooling",
     "SequencePooling",
 

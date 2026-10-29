@@ -37,6 +37,7 @@ flowchart TD
 - `transformers.TransformerLayer` composes `create_attention_layer`, `create_ffn_from_config` (or `MixtureOfExperts` when `moe_config` is set) and the norm factory. `moe` builds experts through the FFN factory.
 - `fusion.MultiModalFusion` builds attention, FFN and norm sub-layers through their factories and is consumed by `heads/vlm`.
 - `blt` builds its stacks through `transformers/causal_stack.py`. `reasoning` pieces are reused by `blt/blt_core.py`.
+- `sequence_pooling.ModePooling` imports the mean-shift functions from `mixtures/mean_shift_ops.py`, so importing `sequence_pooling` also imports `mixtures/__init__` (no cycle: `mixtures` imports only `utils` and `initializers`).
 - Remaining families (`ssm`, `time_series`, `conv_blocks`, `geometric`, `graphs`, `memory`, `signal_processing`, and others) are mostly independent. Do not assume a cross-import between two of them without grepping.
 - Concrete layers register through `register_dl_technique("dl_techniques.layers.<dotted module path>")` from `dl_techniques.utils.keras_registration`. The key embeds the defining module, so two same-named classes in different modules do not collide. Not registered: the abstract bases in `memory/ntm_interface.py`, `moe/experts.py` (`BaseExpert`) and `mixtures/base.py`, and the private `_LikelihoodHead` in `time_series/deepar_blocks.py`.
 
@@ -56,7 +57,7 @@ Subpackages. F = has `factory.py`. Counts were measured with the registry object
 | `memory/` | Y | NTM, SOM family, NeuroGrid | `create_mann` is the only MANN construction path (no standalone MANN class; the old `MannLayer` is deleted). `create_som_2d` for 2-D SOM. Curated (25 names), both factory functions exported |
 | `mixtures/` | Y | `RBFLayer`, `KMeansLayer`, `GMMLayer` | 3 keys. Curated (9 names). Non-strict factory (see invariants) |
 | `norms/` | Y | 16 normalization classes plus `PolarWeightNorm` | 19 factory keys: 2 stock Keras, 17 local keys over 16 classes (`dml_plus_focal`, `dml_plus_center` both build `DMLPlus`). `PolarWeightNorm` is exported (24 names in `__all__`) but not a key |
-| `sequence_pooling/` | Y | `SequencePooling` (18 strategies), attention and weighted pooling | 3 keys: `sequence`, `attention`, `weighted`. Curated (13 names) |
+| `sequence_pooling/` | Y | `SequencePooling` (18 strategies), attention, weighted and mode pooling | 4 keys: `sequence`, `attention`, `weighted`, `mode`. Curated (14 names) |
 | `ssm/` | Y | Mamba v1 and Mamba-2 layers, `ContextMambaLayer`, residual blocks | `SSM_REGISTRY` 4 keys: `selective_ssm`, `context_mamba`, `mamba`, `mamba2`. `MambaResidualBlock` and `Mamba2ResidualBlock` are exported (15 names in `__all__`) but are not registry keys |
 | `transformers/` | Y | `TransformerLayer`, stacks, specialized blocks, `causal_stack.py` | `TRANSFORMER_BLOCK_REGISTRY` maps 12 keys to classes. Accepted and required keys are read from each class's `__init__`. `__all__` has 34 names. `Gemma3TransformerBlock`, `Ideogram4TransformerBlock`, `Ideogram4FinalLayer`, the `sd3_adaln` layers, `WeightedAdjacencyProjector` and the `causal_stack.py` helpers are not exported |
 | `moe/` | | `MixtureOfExperts`, `config.py`, `experts.py`, `gating.py`, `layer.py` | Linear, cosine, soft gating. Curated (5 names: `MoEConfig`, `ExpertConfig`, `GatingConfig`, `MixtureOfExperts`, `create_ffn_moe`). Gating classes, `FFNExpert`, `create_gating`, `create_expert` are not exported. No other modules |
@@ -112,7 +113,7 @@ Factory entry points:
 | FFN | `create_ffn_layer(ffn_type, name=None, **kw)` in `ffn/factory.py` | 22 |
 | Embedding | `create_embedding_layer(embedding_type, name=None, **kw)` in `embedding/factory.py` | 16 |
 | Activation | `create_activation_layer(activation_type, name=None, **kw)` in `activations/factory.py` | 25 |
-| Sequence pooling | `create_sequence_pooling_layer(pooling_type, name=None, **kw)` in `sequence_pooling/factory.py` | 3 |
+| Sequence pooling | `create_sequence_pooling_layer(pooling_type, name=None, **kw)` in `sequence_pooling/factory.py` | 4 |
 | Logic | `create_logic_layer(layer_type, name=None, **kw)` in `logic/factory.py` | 4 |
 | Mixtures | `create_mixture_layer(mixture_type, name=None, **kw)` in `mixtures/factory.py` | 3 |
 | SSM | `create_ssm_layer(ssm_type, name=None, **kw)` in `ssm/factory.py` | 4 |
@@ -127,7 +128,7 @@ Import shape, re-derived from each `__init__.py`:
 
 | Shape | Packages |
 | --- | --- |
-| Curated re-export with `__all__` (18) | `activations` (38 names), `adapters` (13), `attention` (44), `conv_blocks` (1), `dynamic_chunking` (3), `embedding` (11), `ffn` (27), `heads` (42), `logic` (10), `memory` (25), `mixtures` (9), `moe` (5), `norms` (24), `sequence_pooling` (13), `ssm` (15), `time_series` (32), `tokenizers` (8), `transformers` (34) |
+| Curated re-export with `__all__` (18) | `activations` (38 names), `adapters` (13), `attention` (44), `conv_blocks` (1), `dynamic_chunking` (3), `embedding` (11), `ffn` (27), `heads` (42), `logic` (10), `memory` (25), `mixtures` (9), `moe` (5), `norms` (24), `sequence_pooling` (14), `ssm` (15), `time_series` (32), `tokenizers` (8), `transformers` (34) |
 | Exports nothing (17) | `acc_unet`, `blt`, `complex`, `fusion`, `generative`, `geometric`, `graphs`, `matching`, `physics`, `pooling`, `reasoning`, `regularization`, `signal_processing`, `statistics`, `structured_linear`, `tabular`, `yolo12`, and the top-level modules |
 
 Exported without a registry key: `AxialRoPE2D` (embedding), `MambaResidualBlock` and `Mamba2ResidualBlock` (ssm), `GatedAdapter` (adapters), `PolarWeightNorm` (norms), `AttentionRoutingCapsule`, `CapsuleBlockV2`, `Ideogram4Attention`, `MMDiTJointAttention` (attention). Not exported by their curated package, so import from the module or `factory`: 21 of the 24 embedding classes (14 reachable through the factory, 7 without a key), `embedding.factory.get_embedding_info`, `attention.factory.assemble_attention_config`, and the transformers and moe items in the Key files table.

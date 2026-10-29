@@ -10,10 +10,11 @@ There is no single best way to pool. You can read one token (the `[CLS]` token),
 
 ## How it works
 
-Three layers, one factory.
+Four layers, one factory.
 
 - `AttentionPooling`: each token goes through a `Dense` with `tanh`. The result is scored against a learned context vector. A softmax over the sequence turns scores into weights. The output is the weighted sum of the original tokens. With several heads, the per-head sums are averaged.
 - `WeightedPooling`: one learned scalar per position, up to `max_seq_len`. The first `seq_len` scalars go through a softmax and weight the tokens. The weights do not depend on the token content.
+- `ModePooling`: the dominant mode of the tokens instead of their mean. The tokens are the keys of a kernel density, and a few mean-shift steps move the masked mean (and optionally other start tokens) uphill on that density, against the fixed tokens. A minority of far-away tokens pulls the mean but not the mode. It has no weights by default; `learnable_bandwidth=True` adds one scalar that scales the bandwidth.
 - `SequencePooling`: the general entry point. It runs one or more named strategies, then joins the results with an aggregation method. For `attention`, `multi_head_attention` and `weighted` it creates the two layers above inside itself.
 
 ```mermaid
@@ -50,14 +51,15 @@ How masks are treated:
 - `last` returns the last kept position. `middle` returns the middle of the kept positions, not of the padded length.
 - `cls` and `first` always return index 0, even if the mask hides it. This is intended.
 - `none` and `flatten` return masked positions as zeros.
-- A fully masked row is not rescued. `mean`, `sum` and `top_k_mean` give zeros. `attention` and `weighted` give the plain mean over the whole sequence. `max`, `min` and `top_k_max` give the large finite mask sentinel. `last`, `middle` and `first` pick index 0.
+- A fully masked row is not rescued. `mean`, `sum` and `top_k_mean` give zeros. `attention` and `weighted` give the plain mean over the whole sequence, and so does the `mode` layer, by an explicit rule (also when `exclude_positions` removes every position). `max`, `min` and `top_k_max` give the large finite mask sentinel. `last`, `middle` and `first` pick index 0.
 
 ## Files
 
-- `__init__.py` - re-exports the 13 names in `__all__`: five factory functions (`create_sequence_pooling_layer`, `create_sequence_pooling_from_config`, `validate_sequence_pooling_config`, `get_sequence_pooling_info`, `list_sequence_pooling_types`), `SEQUENCE_POOLING_REGISTRY`, the `STRICT_DROPPED_KEY_MARKER` string, the `SequencePoolingType` literal, three layers, and the `PoolingStrategy` and `AggregationMethod` literals.
+- `__init__.py` - re-exports the 14 names in `__all__`: five factory functions (`create_sequence_pooling_layer`, `create_sequence_pooling_from_config`, `validate_sequence_pooling_config`, `get_sequence_pooling_info`, `list_sequence_pooling_types`), `SEQUENCE_POOLING_REGISTRY`, the `STRICT_DROPPED_KEY_MARKER` string, the `SequencePoolingType` literal, four layers, and the `PoolingStrategy` and `AggregationMethod` literals.
 - `sequence_pooling.py` - `SequencePooling`, the `PoolingStrategy` and `AggregationMethod` literals, `STRATEGY_NAMES`, `AGGREGATION_NAMES`, and `check_strategy_config`, the shared strategy validator.
 - `attention_pooling.py` - `AttentionPooling`.
 - `weighted_pooling.py` - `WeightedPooling`.
+- `mode_pooling.py` - `ModePooling`; its mean-shift functions live in `layers/mixtures/mean_shift_ops.py`.
 - `factory.py` - `SEQUENCE_POOLING_REGISTRY` and the functions that validate, describe and build layers from it.
 - `GUIDE.md` - a longer usage guide that a repo test checks against the code.
 
@@ -87,6 +89,9 @@ skip_cls = create_sequence_pooling_layer(
     "sequence", strategy="mean", exclude_positions=[0]
 )
 print(skip_cls(x).shape)                      # (2, 16)
+
+mode_pool = create_sequence_pooling_layer("mode", num_steps=5, num_starts=3)
+print(mode_pool(x, mask=mask).shape)          # (2, 16)
 ```
 
 From a dict (the `type` key picks the layer, the rest are constructor arguments):
@@ -107,11 +112,11 @@ from dl_techniques.layers.sequence_pooling import SequencePooling
 pool = SequencePooling(strategy=["mean", "max"], aggregation_method="concat")
 ```
 
-Other factory helpers: `list_sequence_pooling_types()` returns `['attention', 'sequence', 'weighted']`; `get_sequence_pooling_info()` returns a deep copy of each registry entry (description, required and optional params, use case); `validate_sequence_pooling_config(type, **kwargs)` runs the checks without building.
+Other factory helpers: `list_sequence_pooling_types()` returns `['attention', 'mode', 'sequence', 'weighted']`; `get_sequence_pooling_info()` returns a deep copy of each registry entry (description, required and optional params, use case); `validate_sequence_pooling_config(type, **kwargs)` runs the checks without building.
 
 ## Things to know
 
-- Registry keys are `attention`, `weighted` and `sequence`. None has required parameters.
+- Registry keys are `attention`, `mode`, `weighted` and `sequence`. None has required parameters.
 - The factory refuses any keyword the type does not declare, with a `ValueError` whose text contains `unsupported parameter(s)`. A typo such as `dropout=` for `dropout_rate=` fails instead of silently doing nothing. The Keras base keywords `name`, `dtype`, `trainable`, `activity_regularizer` and `autocast` are always accepted.
 - `exclude_positions` takes distinct non-negative ints. A negative, repeated, boolean or non-integer entry raises `ValueError`. Every strategy honours it except `none` and `flatten`. It is an explicit instruction, so `cls` and `first` with position 0 excluded return the first non-excluded position, though they still ignore the keep-mask.
 - A list of strategies is refused if a name repeats, if it contains `none`, or if the aggregation is not `concat` and the strategies have different output widths (`flatten` never matches). A single strategy still has its `aggregation_method` name checked.
@@ -119,6 +124,7 @@ Other factory helpers: `list_sequence_pooling_types()` returns `['attention', 's
 - `weighted` and the `weighted_sum` aggregation weights start at `'ones'` regardless of `kernel_initializer`, so they begin as a plain mean.
 - `SequencePooling` resolves `kernel_initializer` and `bias_initializer` only when an attention strategy is present. This avoids consuming a random seed for a layer with no weights.
 - The NLP task heads' `pooling_type='attention'` is not `AttentionPooling` or `SequencePooling('attention')`: it is the head's own inline `Dense(1, tanh)` scorer, with its own weights.
+- `ModePooling` with `num_starts > 1` starts from kept tokens at evenly spaced ranks of the sequence, so its output depends on token order; with `num_starts=1` it does not. `bandwidth='auto'` is the median pairwise distance, which is large when most token pairs are far apart; lower `bandwidth_scale` or pass a float there. `return_density=True` makes `call` return `(pooled, log_density)`. `bandwidth_scale` must be a positive finite number and `num_steps` an int of at least 0.
 - `temperature` must be a positive finite number. Count arguments (`hidden_dim`, `num_heads`, `max_seq_len`, `top_k` and their prefixed forms) must be positive ints. Booleans, floats and strings are refused.
 
 #### Shared knobs
