@@ -748,6 +748,9 @@ def get_point_estimate(
 # applied in the accumulation dtype, where the requested value is returned as is.
 _MODE_SIGMA_FLOOR = 1e-6
 _MODE_PRECISION_FLOOR = 1e-30
+# Each start is nudged off its component mean by this many standard deviations per
+# dimension, so a start on an unstable stationary point leaves it.
+_MODE_START_OFFSET = 1e-3
 
 
 def _check_mode_arguments(
@@ -804,10 +807,11 @@ def get_mixture_modes(
     num_steps: int = 100,
     merge_tol: float = 1e-3,
 ) -> Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]:
-    """Find the modes of a diagonal Gaussian mixture by fixed-point iteration.
+    """Find stationary points of a diagonal Gaussian mixture by fixed-point iteration.
 
-    Every component mean is a start. Each start is moved by the
-    Carreira-Perpinan fixed point of the mixture density::
+    Every component mean is a start, moved off it by ``1e-3`` standard deviations
+    per dimension. Each start is moved by the Carreira-Perpinan fixed point of the
+    mixture density::
 
         r_m(x) = softmax_m(log pi_m + log N(x; mu_m, sigma_m))
         x <- (sum_m r_m Lambda_m)^-1 * sum_m r_m Lambda_m mu_m,   Lambda_m = 1 / sigma_m^2
@@ -815,7 +819,26 @@ def get_mixture_modes(
     The inverse and the product are elementwise over the output dimension
     because every component is axis-aligned. The mean of a multi-modal mixture
     lands between its modes; these starts end at the modes themselves. With
-    ``num_steps=0`` the starts are returned unchanged.
+    ``num_steps=0`` the starts are returned unchanged, exactly the component
+    means.
+
+    What comes back are stationary points of the mixture density reached from
+    each start, not a guarantee of local maxima. The iteration never lowers the
+    density, so a stationary point that is a minimum or a saddle is unstable and
+    a start leaves it; only a start exactly on one stays, which is why the
+    starts are offset from the means (without the offset, components at -1, 0, 1
+    with weights 0.45, 0.1, 0.45 and sigma 0.5 return the middle mean, a density
+    minimum, as a unique mode). A start can still stay on a critical point when
+    the offset is lost to rounding (a mean far larger than its sigma) or lies
+    exactly on its stable manifold. ``get_mode_estimate`` keeps the highest
+    density among these points, which is always a true mode.
+
+    Convergence is linear and slows to a crawl near the merge point of two
+    components, about two standard deviations apart: two equal unit components
+    1.98 sigma apart still report two unique modes at +-0.032 after 100 steps
+    (the true mode is 0), and at exactly 2 sigma they sit at +-0.121 after 100
+    steps and +-0.039 after 1000. Use more steps, or a larger ``merge_tol``,
+    when components sit within about 2 sigma of each other.
 
     The iteration count is a Python int and the loop never stops early on a
     traced value, so the function runs under ``tf.function`` with an unknown
@@ -877,7 +900,9 @@ def get_mixture_modes(
         quad = ops.sum(ops.square(diff) * ops.expand_dims(precision, 1), axis=-1)
         return ops.expand_dims(log_const, 1) - 0.5 * quad
 
-    points = mu_w
+    # DECISION plan-2026-10-29T104646-27f045c5/D-030: starts sit a hair off the component means.
+    # Do not start exactly on mu: a symmetric start stays on a saddle or minimum forever.
+    points = mu_w + _MODE_START_OFFSET * sigma_w if num_steps > 0 else mu_w
     for _ in range(num_steps):
         log_joint = _component_log_density(points)
         resp = ops.exp(log_joint - ops.logsumexp(log_joint, axis=-1, keepdims=True))

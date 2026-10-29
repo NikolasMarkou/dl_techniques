@@ -456,6 +456,108 @@ class TestTheContrastCanFail:
 
 
 # ---------------------------------------------------------------------
+# stationary points and the merge point
+# ---------------------------------------------------------------------
+
+# Components at -1, 0, +1 (sigma 0.5, weights 0.45, 0.1, 0.45): the middle mean is a density
+# minimum (Hessian of log p +4.79). Measured 2026-10-29 in float64: with the 1e-3 sigma start
+# offset the middle start reaches the side mode 0.9658 after 30 steps (0.8041 after 10).
+SADDLE_MU = np.array([[-1.0], [0.0], [1.0]])
+SADDLE_SIGMA = np.full((3, 1), 0.5)
+SADDLE_LOGITS = np.log([0.45, 0.1, 0.45])
+SADDLE_SIDE_MODE = 0.9658
+SADDLE_STEPS = 100
+
+
+def _check_the_middle_start_leaves_the_density_minimum():
+    mu, sigma, logits = _batch(SADDLE_MU, SADDLE_SIGMA, SADDLE_LOGITS)
+    modes, log_density, is_unique = get_mixture_modes(mu, sigma, logits, num_steps=SADDLE_STEPS)
+    modes = keras.ops.convert_to_numpy(modes)[0, :, 0]
+    np.testing.assert_allclose(modes, [-SADDLE_SIDE_MODE, SADDLE_SIDE_MODE, SADDLE_SIDE_MODE], atol=2e-3)
+    assert keras.ops.convert_to_numpy(is_unique).tolist() == [[True, True, False]]
+    at_minimum = _oracle_log_density(np.zeros((1, 1)), SADDLE_MU, SADDLE_SIGMA, SADDLE_LOGITS)[0]
+    assert keras.ops.convert_to_numpy(log_density)[0, 1] > at_minimum + 0.5
+
+
+class TestStationaryPointsReachedFromEachComponentMean:
+    def test_a_start_at_a_density_minimum_leaves_it(self):
+        _check_the_middle_start_leaves_the_density_minimum()
+
+    def test_red_without_the_start_offset_the_minimum_is_returned_as_a_unique_mode(self, monkeypatch):
+        import dl_techniques.layers.statistics.mdn_layer as mdn_module
+
+        _check_the_middle_start_leaves_the_density_minimum()
+        monkeypatch.setattr(mdn_module, "_MODE_START_OFFSET", 0.0)
+        mu, sigma, logits = _batch(SADDLE_MU, SADDLE_SIGMA, SADDLE_LOGITS)
+        modes, _, is_unique = get_mixture_modes(mu, sigma, logits, num_steps=SADDLE_STEPS)
+        assert abs(float(keras.ops.convert_to_numpy(modes)[0, 1, 0])) < 1e-6
+        assert keras.ops.convert_to_numpy(is_unique).tolist() == [[True, True, True]]
+        with pytest.raises(AssertionError):
+            _check_the_middle_start_leaves_the_density_minimum()
+
+    def test_the_mode_estimate_is_the_highest_density_start(self):
+        mu, sigma, logits = _batch(SADDLE_MU, SADDLE_SIGMA, SADDLE_LOGITS)
+        modes, log_density, _ = get_mixture_modes(mu, sigma, logits, num_steps=SADDLE_STEPS)
+        modes = keras.ops.convert_to_numpy(modes)[0, :, 0]
+        best = int(np.argmax(keras.ops.convert_to_numpy(log_density)[0]))
+        assert abs(abs(modes[best]) - SADDLE_SIDE_MODE) < 2e-3
+
+    def test_zero_steps_keep_the_means_without_the_offset(self):
+        mu, sigma, logits = _batch(SADDLE_MU, SADDLE_SIGMA, SADDLE_LOGITS)
+        modes = get_mixture_modes(mu, sigma, logits, num_steps=0)[0]
+        np.testing.assert_array_equal(keras.ops.convert_to_numpy(modes), mu)
+
+
+# Two equal unit components a distance s apart; the true density has one mode at 0 for
+# s <= 2 and two for s > 2. Measured 2026-10-29 in float32 (modes are the symmetric pair +-m):
+# s=1.9 m=1.7e-5 after 100 steps; s=1.99 m=0.0669 after 100 and 1.1e-5 after 1000; s=2.0
+# m=0.1212 after 100, 0.0387 after 1000, 0.0224 after 3000; s=2.5 m=1.0997 from 100 steps on.
+class TestTheMergePointConvergesSlowly:
+    @staticmethod
+    def _run(separation, num_steps, merge_tol=1e-3):
+        mu = np.array([[[-separation / 2.0], [separation / 2.0]]], "float32")
+        sigma = np.ones((1, 2, 1), "float32")
+        modes, _, is_unique = get_mixture_modes(
+            mu, sigma, np.zeros((1, 2), "float32"), num_steps=num_steps, merge_tol=merge_tol
+        )
+        return (
+            keras.ops.convert_to_numpy(modes)[0, :, 0],
+            int(keras.ops.convert_to_numpy(is_unique).sum()),
+        )
+
+    @pytest.mark.parametrize("separation", [1.9, 1.99])
+    def test_after_one_hundred_steps_the_starts_are_within_a_tenth_of_the_true_mode(self, separation):
+        modes, _ = self._run(separation, 100)
+        assert np.abs(modes).max() < 0.1
+
+    def test_one_hundred_steps_still_report_two_unique_modes_at_1_99_sigma(self):
+        modes, unique = self._run(1.99, 100)
+        assert unique == 2, "the documented over-count near the merge point"
+        assert 0.03 < np.abs(modes).max() < 0.1
+
+    @pytest.mark.parametrize("separation", [1.9, 1.99])
+    def test_many_steps_reach_the_single_true_mode(self, separation):
+        modes, unique = self._run(separation, 3000)
+        assert unique == 1
+        assert np.abs(modes).max() < 1e-3
+
+    def test_a_larger_merge_tol_merges_them_at_the_documented_step_count(self):
+        _, unique = self._run(1.99, 100, merge_tol=0.2)
+        assert unique == 1
+
+    def test_at_exactly_two_sigma_the_convergence_is_still_slow(self):
+        modes_1000, unique_1000 = self._run(2.0, 1000)
+        assert unique_1000 == 2
+        assert 0.01 < np.abs(modes_1000).max() < 0.08
+        assert self._run(2.0, 1000, merge_tol=0.2)[1] == 1
+
+    def test_well_separated_components_stay_two_modes_under_the_larger_merge_tol(self):
+        modes, unique = self._run(2.5, 3000, merge_tol=0.2)
+        assert unique == 2
+        assert np.abs(modes).min() > 0.5
+
+
+# ---------------------------------------------------------------------
 # the wrapper on a real layer
 # ---------------------------------------------------------------------
 

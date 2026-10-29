@@ -105,13 +105,13 @@ total_variance, aleatoric_variance = get_uncertainty(model, x, mdn, point)
 lower, upper = get_prediction_intervals(point, total_variance, confidence_level=0.95)
 ```
 
-`get_point_estimate` is the mixture mean, which for a bimodal prediction lands between the modes. `get_mode_estimate(model, x, mdn)` returns, per sample, the mode with the highest density, and `get_mixture_modes(mu, sigma, pi_logits)` is the graph-safe function under it. It starts one fixed-point iteration at every component mean and returns `(modes [B, M, D], log_density [B, M], is_unique [B, M])`; `is_unique` is False for a start that converged onto an earlier one. Two overlapping components give one unique mode, two separated components give two:
+`get_point_estimate` is the mixture mean, which for a bimodal prediction lands between the modes. `get_mode_estimate(model, x, mdn)` returns, per sample, the mode with the highest density, and `get_mixture_modes(mu, sigma, pi_logits)` is the graph-safe function under it. It starts one fixed-point iteration at every component mean (moved off it by 1e-3 standard deviations) and returns `(modes [B, M, D], log_density [B, M], is_unique [B, M])`; `is_unique` is False for a start that converged onto an earlier one. The returned points are stationary points of the mixture density reached from each start, not a guarantee of local maxima: the iteration never lowers the density, so a start leaves a minimum or a saddle unless it sits exactly on one (the offset exists for that case, for instance components at -1, 0, 1 with weights 0.45, 0.1, 0.45 and sigma 0.5), and `get_mode_estimate` keeps the highest-density point, which is always a true mode. Convergence is linear and slows near the merge point of two components, about two standard deviations apart: two equal unit components 1.99 sigma apart still show two unique modes at +-0.067 after 100 steps (the true mode is 0) and one after 1000. Raise `num_steps` or `merge_tol` when components sit within about 2 sigma of each other. Two overlapping components give one unique mode, two separated components give two:
 
 ```python
 import numpy as np
 from dl_techniques.layers.statistics.mdn_layer import get_mixture_modes
 
-mu = np.array([[[-3.0], [3.0]], [[-0.5], [0.5]]], dtype="float32")
+mu = np.array([[[-3.0], [3.0]], [[-0.25], [0.25]]], dtype="float32")
 sigma = np.full((2, 2, 1), 0.5, dtype="float32")
 modes, log_density, is_unique = get_mixture_modes(mu, sigma, np.zeros((2, 2), "float32"))
 print(np.asarray(is_unique).sum(axis=1))
