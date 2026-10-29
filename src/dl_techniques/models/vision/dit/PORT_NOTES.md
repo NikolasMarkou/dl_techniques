@@ -86,7 +86,7 @@ established by reading the candidate, not by name-matching.
 | Upstream component | New artifact | MUST-WRITE-NEW justification |
 |---|---|---|
 | `get_1d_sincos_pos_embed_from_grid` / `get_2d_sincos_pos_embed_from_grid` / `get_2d_sincos_pos_embed` | **NEW** `dl_techniques.layers.embedding.sincos_pos_embed_2d` (pure NumPy, unregistered) | The only bit-exact copy in the repo is module-private to `bit_diffusion/blocks.py:724-864`. A `models/` → `models/` import inverts the dependency direction and has no precedent here — D-001 |
-| `TimestepEmbedder` | **NEW** `TimestepEmbedding` — `dl_techniques.layers.embedding.timestep_embedding`, registered and added to `EMBEDDING_REGISTRY` under the key `'timestep'` | The existing `ScalarSinusoidalEmbedding` diverges on **three** independent numerics (sin-first concat, `/(half-1)` denominator, an input rescale); `bit_diffusion`'s `DiTXATimestepEmbedder` is correct but model-package-private and moving it would change its registration key — D-001 |
+| `TimestepEmbedder` | **NEW** `TimestepEmbedding` — `dl_techniques.layers.embedding.timestep_embedding`, registered and added to `EMBEDDING_REGISTRY` under the key `'timestep'` | The existing `ScalarSinusoidalEmbedding` diverges on **three** independent numerics (sin-first concat, `/(half-1)` denominator, an input rescale); `bit_diffusion` kept a model-private copy at the time (since removed: `DiTXA` now uses this class) — D-001 |
 | the beta schedules and every derived constant table | **NEW** `DDPMSchedule` + `get_named_beta_schedule` + `space_timesteps` — `dl_techniques.utils.ddpm_schedule` (frozen dataclass, pure NumPy) | **No DDPM schedule exists anywhere in the repo.** `bit_diffusion` is an SDE bridge; `sd3_mmdit` and `ideogram4` are flow-matching. Three in-plan call sites (loss, sampler, data pipeline) earn the shared home under the rule of three, and `losses/` cannot import `models/` — D-030 |
 | `LossType.MSE` + `ModelVarType.LEARNED_RANGE` training objective | **NEW** `DDPMHybridLoss(keras.losses.Loss)` — `dl_techniques.losses.ddpm_hybrid_loss` | No repo loss implements a DDPM epsilon MSE, and none implements a variational-bound term at all |
 
@@ -371,12 +371,13 @@ call-count test (`TestTheLoopIsAnEagerPythonLoop`). The per-step methods themsel
 ### 4.15 The sin-cos trio and the timestep ladder now exist TWICE in the repo — **D-001**, accepted
 
 Both were promoted to `layers/embedding/` so this package does not import from a sibling *model*
-package. `bit_diffusion` was deliberately left untouched: moving its registered
-`DiTXATimestepEmbedder` would change the registration key and break a package shipped the same day,
+package. `bit_diffusion` was deliberately left untouched at the time: moving its registered
+timestep embedder would have changed the registration key and broken a package shipped the same day,
 and a cross-package `models/` → `models/` import inverts the dependency direction with no precedent
-in this repo.
+in this repo. The timestep copy has since been removed (`DiTXA` builds its embedders from
+`TimestepEmbedding`); the sin-cos trio still exists twice.
 
-So there are two copies, and they can silently drift. The follow-up — migrate `bit_diffusion` onto
+So there are two copies of the trio, and they can silently drift. The follow-up — migrate `bit_diffusion` onto
 the shared home once a checkpoint-key migration is worth doing — is recorded here and in D-001, and
 is **not scheduled**. The bounded mitigation:
 `tests/test_layers/test_embedding/test_the_sincos_grid_is_w_first.py::TestItAgreesWithTheBitDiffusionSibling`

@@ -25,7 +25,7 @@ to the same set, would read green forever. There is a second anti-vacuity arm
 below (``use_bias=False``) covering the over-building direction the guide names.
 
 Classes covered: ``DiTXA``, ``DiTXABlock``, ``DiTXAFinalLayer``,
-``DiTXATimestepEmbedder``, ``SharedTokenDecoder`` and ``ClassLabelEmbedding``
+``TimestepEmbedding``, ``SharedTokenDecoder`` and ``ClassLabelEmbedding``
 -- every custom class this plan introduced.
 """
 
@@ -38,9 +38,9 @@ import pytest
 from dl_techniques.layers.embedding.class_label_embedding import (
     ClassLabelEmbedding,
 )
+from dl_techniques.layers.embedding.timestep_embedding import TimestepEmbedding
 from dl_techniques.models.vision_language.bit_diffusion.blocks import (
     DiTXABlock,
-    DiTXATimestepEmbedder,
 )
 from dl_techniques.models.vision_language.bit_diffusion.model import (
     DiTXA,
@@ -193,15 +193,15 @@ class TestParityPerClass:
             label="DiTXAFinalLayer",
         )
 
-    def test_ditxa_timestep_embedder(self):
+    def test_timestep_embedding(self):
         rng = np.random.default_rng(3)
         assert_build_parity(
-            lambda: DiTXATimestepEmbedder(
+            lambda: TimestepEmbedding(
                 hidden_size=HIDDEN, frequency_embedding_size=16
             ),
             (BATCH,),
             rng.uniform(0.0, 1000.0, size=(BATCH,)).astype("float32"),
-            label="DiTXATimestepEmbedder",
+            label="TimestepEmbedding",
         )
 
     def test_shared_token_decoder(self):

@@ -1,8 +1,11 @@
-"""The two package-local embedders: the timestep MLP and the 2D sin-cos table.
+"""The two embedders DiTXA consumes: the timestep MLP and the 2D sin-cos table.
 
 Both are numerically specified and both have a plausible substitute that is
 WRONG. This file is the guard that makes each substitution red rather than
-silent.
+silent. The timestep embedder is the shared
+:class:`~dl_techniques.layers.embedding.timestep_embedding.TimestepEmbedding`;
+its own basis, ladder and serialization arms live in
+``tests/test_layers/test_embedding/test_timestep_embedding.py``.
 
 What is pinned, and why a cheaper assertion would not do:
 
@@ -35,104 +38,40 @@ import pytest
 from dl_techniques.layers.embedding.scalar_sinusoidal_embedding import (
     ScalarSinusoidalEmbedding,
 )
+from dl_techniques.layers.embedding.timestep_embedding import TimestepEmbedding
 from dl_techniques.models.vision_language.bit_diffusion.blocks import (
-    DiTXATimestepEmbedder,
     get_1d_sincos_pos_embed_from_grid,
     get_2d_sincos_pos_embed,
     get_2d_sincos_pos_embed_from_grid,
 )
+from dl_techniques.models.vision_language.bit_diffusion.model import DiTXA
 from tests.layer_naming import PublicAutoName
-
-# The upstream time scale. The MODEL multiplies by this before calling the
-# embedder; the embedder itself must not.
-TIME_SCALE = 1000.0
-
 
 def _np(x):
     return keras.ops.convert_to_numpy(x)
 
 
 # =====================================================================
-# The timestep embedder's own contract
+# The timestep embedder is not the house layer
 # =====================================================================
 
 
-class TestTimestepEmbedderBasis:
-    """The sinusoidal basis, isolated from the MLP."""
+class TestDiTXAWiresTheSharedTimestepEmbedding:
 
-    def test_the_concat_is_cos_first_not_sin_first(self):
-        # At t = 0 every argument is 0, so cos = 1 and sin = 0. Cos-first means
-        # the FIRST half is ones. This single reading separates the two orders
-        # with the largest gap a bounded sinusoid admits (1.0).
-        emb = DiTXATimestepEmbedder(hidden_size=4, frequency_embedding_size=8)
-        emb.build((None,))
-        basis = _np(emb.timestep_embedding(keras.ops.zeros((1,))))
-        half = 4
-        np.testing.assert_allclose(basis[0, :half], np.ones(half), atol=0.0)
-        np.testing.assert_allclose(basis[0, half:], np.zeros(half), atol=0.0)
-
-    def test_the_frequency_ladder_divides_by_half_not_by_half_minus_one(self):
-        # freqs_i = exp(-log(max_period) * i / half). Written out here from the
-        # definition, not read back from the layer.
-        freq_size = 8
-        half = freq_size // 2
-        emb = DiTXATimestepEmbedder(
-            hidden_size=4, frequency_embedding_size=freq_size
-        )
-        emb.build((None,))
-        got = _np(emb.freqs)
-
-        expected = np.exp(
-            -math.log(10000.0) * np.arange(half, dtype="float32") / half
-        )
-        np.testing.assert_allclose(got, expected, rtol=1e-6, atol=0.0)
-
-        # The ladder never reaches 1 / max_period: that is the whole difference
-        # from a `half - 1` denominator.
-        assert float(got[-1]) > 1e-4
-        house_ladder = np.exp(
-            np.arange(half) * -(math.log(1e4) / (half - 1))
-        )
-        assert float(house_ladder[-1]) == pytest.approx(1e-4, rel=1e-6)
-        assert float(got[-1]) / float(house_ladder[-1]) == pytest.approx(
-            10.0, rel=1e-5
-        )
-
-    def test_the_layer_does_not_rescale_its_input(self):
-        # args = t * freqs, with t used AS GIVEN. The house layer would map
-        # t = 0.25 onto 2500.0 first.
-        freq_size = 8
-        emb = DiTXATimestepEmbedder(
-            hidden_size=4, frequency_embedding_size=freq_size
-        )
-        emb.build((None,))
-        freqs = _np(emb.freqs)
-
-        t = np.array([0.25], dtype="float32")
-        got = _np(emb.timestep_embedding(keras.ops.convert_to_tensor(t)))
-        args = t[:, None] * freqs[None]
-        expected = np.concatenate([np.cos(args), np.sin(args)], axis=-1)
-        np.testing.assert_allclose(got, expected, rtol=1e-6, atol=1e-7)
-
-        # And a rescaled input is a materially different embedding, so the
-        # absence of the rescale is observable rather than cosmetic.
-        rescaled = _np(
-            emb.timestep_embedding(keras.ops.convert_to_tensor(1e4 * t))
-        )
-        assert float(np.max(np.abs(rescaled - got))) > 0.5
-
-    def test_an_odd_frequency_size_pads_one_trailing_zero(self):
-        emb = DiTXATimestepEmbedder(hidden_size=4, frequency_embedding_size=7)
-        emb.build((None,))
-        basis = _np(emb.timestep_embedding(keras.ops.ones((3,))))
-        assert basis.shape == (3, 7)
-        # half = 3, so 6 real columns then one zero column. Padding, not a
-        # dropped frequency.
-        np.testing.assert_allclose(basis[:, 6], np.zeros(3), atol=0.0)
-        assert float(np.min(np.abs(basis[:, :6]))) > 0.0
+    def test_both_timestep_embedders_are_independent_timestep_embeddings(self):
+        model = DiTXA.from_variant("tiny")
+        assert type(model.t_embedder) is TimestepEmbedding
+        assert type(model.cond_t_embedder) is TimestepEmbedding
+        assert model.t_embedder is not model.cond_t_embedder
+        for embedder in (model.t_embedder, model.cond_t_embedder):
+            assert embedder.hidden_size == model.hidden_size
+            assert (
+                embedder.frequency_embedding_size
+                == model.frequency_embedding_size
+            )
 
 
-class TestTimestepEmbedderIsNotTheHouseLayer:
+class TestTimestepEmbeddingIsNotTheHouseLayer:
     """The three numeric differences and the structural one, side by side.
 
     Each arm constructs BOTH layers at the same width and shows the actual
@@ -146,7 +85,7 @@ class TestTimestepEmbedderIsNotTheHouseLayer:
     def _both(self):
         house = ScalarSinusoidalEmbedding(dim=self.WIDTH)
         house.build((None,))
-        ours = DiTXATimestepEmbedder(
+        ours = TimestepEmbedding(
             hidden_size=self.WIDTH, frequency_embedding_size=self.WIDTH
         )
         ours.build((None,))
@@ -218,7 +157,7 @@ class TestTimestepEmbedderIsNotTheHouseLayer:
 
     def test_difference_4_the_frequency_width_is_decoupled_from_hidden_size(self):
         hidden = 64
-        ours = DiTXATimestepEmbedder(
+        ours = TimestepEmbedding(
             hidden_size=hidden, frequency_embedding_size=256
         )
         ours.build((None,))
@@ -229,84 +168,6 @@ class TestTimestepEmbedderIsNotTheHouseLayer:
         house.build((None,))
         # One `dim` drives both, so the house layer cannot express 256 -> 64.
         assert tuple(house.mlp_in.kernel.shape) == (hidden, hidden)
-
-
-class TestTimestepEmbedderMechanics:
-
-    def test_output_shape_and_rank_1_or_2_input(self):
-        emb = DiTXATimestepEmbedder(hidden_size=16, frequency_embedding_size=32)
-        t = keras.ops.convert_to_tensor(
-            np.array([0.0, 0.5, 1.0], dtype="float32") * TIME_SCALE
-        )
-        flat = _np(emb(t))
-        column = _np(emb(keras.ops.reshape(t, (3, 1))))
-        assert flat.shape == (3, 16)
-        np.testing.assert_allclose(flat, column, atol=0.0)
-        assert emb.compute_output_shape((None,)) == (None, 16)
-        assert emb.compute_output_shape((3, 1)) == (3, 16)
-
-    def test_the_frequency_ladder_is_a_non_trainable_weight(self):
-        emb = DiTXATimestepEmbedder(hidden_size=8, frequency_embedding_size=8)
-        emb.build((None,))
-        names = [w.name for w in emb.weights]
-        trainable = [w.name for w in emb.trainable_weights]
-        assert "freqs" in names
-        assert "freqs" not in trainable
-
-    def test_the_two_dense_layers_do_not_share_an_initializer_instance(self):
-        emb = DiTXATimestepEmbedder(hidden_size=8)
-        assert (
-            emb.mlp_in.kernel_initializer is not emb.mlp_out.kernel_initializer
-        )
-
-    def test_config_round_trip_preserves_every_knob(self):
-        emb = DiTXATimestepEmbedder(
-            hidden_size=12,
-            frequency_embedding_size=10,
-            max_period=5000.0,
-            kernel_stddev=0.05,
-        )
-        restored = DiTXATimestepEmbedder.from_config(emb.get_config())
-        assert restored.hidden_size == 12
-        assert restored.frequency_embedding_size == 10
-        assert restored.max_period == 5000.0
-        assert restored.kernel_stddev == 0.05
-
-    def test_the_ladder_survives_a_keras_round_trip(self, tmp_path):
-        # The reason `freqs` is a weight and not a plain attribute.
-        inputs = keras.Input(shape=(), dtype="float32")
-        outputs = DiTXATimestepEmbedder(
-            hidden_size=8, frequency_embedding_size=8, name="temb"
-        )(inputs)
-        model = keras.Model(inputs, outputs)
-        t = keras.ops.convert_to_tensor(
-            np.array([0.0, 0.3, 0.9], dtype="float32")
-        )
-        before = _np(model(t, training=False))
-
-        path = tmp_path / "temb.keras"
-        model.save(path)
-        reloaded = keras.models.load_model(path)
-        after = _np(reloaded(t, training=False))
-        np.testing.assert_allclose(before, after, rtol=0.0, atol=1e-6)
-        np.testing.assert_allclose(
-            _np(reloaded.get_layer("temb").freqs),
-            _np(model.get_layer("temb").freqs),
-            atol=0.0,
-        )
-
-    @pytest.mark.parametrize(
-        "kwargs",
-        [
-            dict(hidden_size=0),
-            dict(hidden_size=8, frequency_embedding_size=1),
-            dict(hidden_size=8, max_period=1.0),
-            dict(hidden_size=8, kernel_stddev=0.0),
-        ],
-    )
-    def test_invalid_arguments_raise(self, kwargs):
-        with pytest.raises(ValueError):
-            DiTXATimestepEmbedder(**kwargs)
 
 
 # =====================================================================

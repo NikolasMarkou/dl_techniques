@@ -18,11 +18,9 @@ INDEPENDENTLY of the other:
 Both were proven RED by injection before this file was committed; the readings
 are in the step's commit message.
 
-A third arm cross-checks the whole layer, elementwise at ``atol=0``, against
-its bit-exact sibling ``DiTXATimestepEmbedder`` in
-``models/vision_language/bit_diffusion/blocks.py`` -- the deliberate,
-recorded duplication of plan ``plan-2026-09-02T170923-1285ed83`` D-001. If the
-two copies ever drift, that arm is what says so.
+``DiTXA`` in ``models/vision_language/bit_diffusion`` builds both of its
+timestep embedders from this layer; the guard that it does lives in
+``tests/test_models/test_bit_diffusion/test_the_embedders.py``.
 """
 
 import math
@@ -35,9 +33,6 @@ from dl_techniques.layers.embedding import TimestepEmbedding
 from dl_techniques.layers.embedding.factory import (
     EMBEDDING_REGISTRY,
     create_embedding_layer,
-)
-from dl_techniques.models.vision_language.bit_diffusion.blocks import (
-    DiTXATimestepEmbedder,
 )
 from tests.layer_naming import PublicAutoName
 
@@ -169,34 +164,6 @@ class TestTheConcatOrder:
         # half == 3, so 6 real columns plus one ZERO pad -- upstream pads, it
         # does not drop a frequency.
         np.testing.assert_array_equal(basis[:, 6], np.zeros(2, "float32"))
-
-
-class TestItAgreesWithTheBitDiffusionSibling:
-    """The recorded duplication (D-001) is pinned elementwise, not by prose."""
-
-    @pytest.mark.parametrize(
-        "hidden_size,freq_size", [(16, 32), (64, 256), (8, 7)]
-    )
-    def test_the_basis_is_identical_at_atol_zero(self, hidden_size, freq_size):
-        t = np.array([0.0, 1.0, 17.0, 999.0], dtype="float32")
-        mine = _built(hidden_size, freq_size)
-        sibling = DiTXATimestepEmbedder(
-            hidden_size=hidden_size, frequency_embedding_size=freq_size
-        )
-        sibling.build((None,))
-        np.testing.assert_array_equal(_basis(mine, t), _basis(sibling, t))
-
-    def test_the_whole_layer_is_identical_under_the_same_seed(self):
-        t = np.array([0.0, 250.0, 999.0], dtype="float32")
-        keras.utils.set_random_seed(0)
-        mine = TimestepEmbedding(hidden_size=32, frequency_embedding_size=64)
-        a = _np(mine(keras.ops.convert_to_tensor(t)))
-        keras.utils.set_random_seed(0)
-        sibling = DiTXATimestepEmbedder(
-            hidden_size=32, frequency_embedding_size=64
-        )
-        b = _np(sibling(keras.ops.convert_to_tensor(t)))
-        np.testing.assert_array_equal(a, b)
 
 
 class TestTheTableIsAWeightAndSurvivesTheStatelessBuild:

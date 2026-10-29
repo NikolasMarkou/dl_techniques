@@ -66,7 +66,7 @@ is that the layer's *numerics* match, not merely its name:
 | Upstream component | New artifact | Gap that forced it |
 |---|---|---|
 | `DiTBlockWithCrossAttention` | **NEW** `DiTXABlock` — `bit_diffusion/blocks.py` | 12-way adaLN over **three different normed streams** (`norm1(x)`, `norm_cross(x)`, `norm_cond(cond_tokens)`). Built from one zero-init `Dense(12*hidden)` + `ops.split` **inside the block**; **0** new classes under `layers/transformers/` — D-004 |
-| `TimestepEmbedder` | **NEW** `DiTXATimestepEmbedder` — `blocks.py` | `ScalarSinusoidalEmbedding` differs on **three independent numerics**: cos-first vs sin-first concat, `/half` vs `/(half-1)` frequency denominator, and an input rescale this one must not do. A value-level test pins all three so nobody "simplifies" it back |
+| `TimestepEmbedder` | `TimestepEmbedding` — `dl_techniques.layers.embedding.timestep_embedding` (a package-private copy in `blocks.py` was deleted as a duplicate) | `ScalarSinusoidalEmbedding` differs on **three independent numerics**: cos-first vs sin-first concat, `/half` vs `/(half-1)` frequency denominator, and an input rescale this one must not do. A value-level test pins all three so nobody "simplifies" it back |
 | `LabelEmbedder` (CFG label dropout) | **NEW** shared layer `ClassLabelEmbedding` — `dl_techniques.layers.embedding.class_label_embedding`, registered in the embedding factory | `create_embedding_layer()`'s registered types contained no class-embedding-with-CFG-dropout. The **one** new shared layer this port earns |
 | `FinalLayer` | **NEW** `DiTXAFinalLayer` — `bit_diffusion/model.py` | 2-way modulation + zero-init projection + a **channels-last** unpatchify. Lives in `model.py`, not `blocks.py` (it is the model's terminal, and only the model constructs it) |
 | `get_2d_sincos_pos_embed` | ported as a pure NumPy helper, installed via `add_weight(trainable=False, initializer=Constant(...))` | A plain tensor attribute breaks the `.keras` round trip silently, and `.assign()` inside `build()` is discarded by `StatelessScope` |
@@ -430,8 +430,8 @@ rather than presented as a design.
 ### 4.18 Registration and the `Custom>` namespace
 
 Every registered class uses `@register_dl_technique(package="dl_techniques.models.bit_diffusion.<module>")`
-— the defining module's dotted path, per the tree-wide convention. All 11 new class names
-(`DiTXA`, `DiTXABlock`, `DiTXAFinalLayer`, `DiTXATimestepEmbedder`, `SharedTokenDecoder`,
+— the defining module's dotted path, per the tree-wide convention. All 10 new class names
+(`DiTXA`, `DiTXABlock`, `DiTXAFinalLayer`, `SharedTokenDecoder`,
 `ClassLabelEmbedding`, `BridgeSDE`, `UniformVolatilitySDE`, `PeriodicVolatilitySDE`,
 `CosineDecayingVolatilitySDE`, `FlowMatchingODE`) are defined in exactly one file each, and the
 bare-name legacy-alias namespace stays collision-free.

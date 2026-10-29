@@ -1,6 +1,7 @@
 """The DiTXA transformer block, built by ``DiTXABlock``, and the three
-embedders that feed it: ``DiTXATimestepEmbedder`` and ``get_2d_sincos_pos_embed``
-here, plus the shared ``ClassLabelEmbedding`` layer.
+embedders that feed it: the shared ``TimestepEmbedding`` layer, the
+``get_2d_sincos_pos_embed`` helper here, and the shared ``ClassLabelEmbedding``
+layer.
 
 A plain DiT block conditions self-attention and an MLP from one vector,
 emitting ``6 * hidden_size`` modulation numbers. This block conditions four
@@ -26,7 +27,6 @@ References:
     - Ported from ``DiTBlockWithCrossAttention``, upstream ``dit.py``.
 """
 
-import math
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import keras
@@ -415,259 +415,6 @@ class DiTXABlock(keras.layers.Layer):
         return config
 
 
-@register_dl_technique(package="dl_techniques.models.bit_diffusion.blocks")
-class DiTXATimestepEmbedder(keras.layers.Layer):
-    """Sinusoidal embedding of a scalar timestep, refined by ``Dense -> SiLU -> Dense``.
-
-    Ported from upstream ``TimestepEmbedder``, in turn OpenAI's GLIDE
-    ``timestep_embedding``.
-
-    .. code-block:: text
-
-        t  (B,)  -- already scaled by the caller (DiTXA multiplies by
-          |         time_scale = 1000 before calling; this layer does not)
-          v
-        freqs = exp(-log(max_period) * arange(half) / half)     half = F // 2
-          |     a non-trainable weight, F = frequency_embedding_size
-          v
-        args = t[:, None] * freqs[None]                          (B, half)
-          v
-        concat([cos(args), sin(args)], axis=-1)                  (B, 2*half)
-          |   cos first, not sin first -- see below
-          v
-        (odd F only) one trailing zero column                    (B, F)
-          v
-        Dense(hidden_size) -> SiLU -> Dense(hidden_size)         (B, hidden_size)
-
-    This differs from the house layer,
-    :class:`~dl_techniques.layers.embedding.scalar_sinusoidal_embedding.ScalarSinusoidalEmbedding`,
-    on three numeric axes plus a structural one. Measured at ``dim = 8`` on
-    ``t = [0, 0.25, 0.5, 1]``:
-
-    1. Concat order: the house layer emits ``concat([sin, cos])``, this one
-       ``concat([cos, sin])``. At ``t = 0`` the house basis is
-       ``[0,0,0,0,1,1,1,1]`` and this one ``[1,1,1,1,0,0,0,0]``,
-       ``max|delta| = 1.0``.
-    2. Frequency-ladder denominator: the house ladder divides the exponent
-       by ``half - 1``, landing its last frequency on ``1e-4``; this one
-       divides by ``half``, landing 10x larger at ``half = 4``.
-       ``max|delta| = 0.0534341932``.
-    3. Input rescale: the house layer rescales its input onto ``[0, 1e4]``
-       before the sinusoidal map; this layer does no input rescale, since
-       the caller pre-scales ``t`` by ``time_scale = 1000`` already.
-       ``max|delta| = 1.8825995338``.
-    4. Structural: the house layer's single ``dim`` sets both the basis
-       width and the Dense widths. Here ``frequency_embedding_size`` (256)
-       is decoupled from ``hidden_size`` (384-1152 across the shipped
-       DiTXA variants, never 256), so the MLP is ``256 -> hidden -> hidden``.
-
-    All four are pinned by
-    ``tests/test_models/test_bit_diffusion/test_the_embedders.py``.
-
-    :param hidden_size: Output width, and the width of both Dense layers.
-    :type hidden_size: int
-    :param frequency_embedding_size: Width of the sinusoidal basis feeding
-        the MLP, independent of ``hidden_size``; upstream's default is 256
-        for every variant.
-    :type frequency_embedding_size: int
-    :param max_period: Base of the frequency ladder. Upstream's ``10000``.
-    :type max_period: float
-    :param kernel_stddev: Standard deviation of the ``RandomNormal`` kernel
-        initializer of both Dense layers, upstream's
-        ``nn.init.normal_(std=0.02)``. A fresh initializer instance is
-        constructed per Dense, since a shared instance draws bit-identically
-        forever.
-    :type kernel_stddev: float
-    :param kwargs: Standard ``keras.layers.Layer`` keyword arguments.
-
-    :raises ValueError: If ``hidden_size`` or ``frequency_embedding_size`` is not
-        positive, if ``frequency_embedding_size`` is less than 2 (no frequency
-        ladder exists), if ``max_period`` is not greater than 1, or if
-        ``kernel_stddev`` is not positive.
-
-    Input shape:
-        ``(B,)`` or ``(B, 1)``. A trailing singleton axis is squeezed.
-
-    Output shape:
-        ``(B, hidden_size)``.
-
-    Example:
-        >>> import keras
-        >>> emb = DiTXATimestepEmbedder(hidden_size=64)
-        >>> t = keras.ops.convert_to_tensor([0.0, 0.5, 1.0]) * 1000.0
-        >>> emb(t).shape
-        (3, 64)
-
-    Attributes:
-        freqs: Non-trainable ``(half,)`` frequency ladder, materialized in
-            :meth:`build` from NumPy and installed through a constant
-            initializer. NOT a plain tensor attribute -- that does not round-trip
-            through ``.keras`` save/load, which is the bug
-            ``ScalarSinusoidalEmbedding``'s own anchor was written to prevent.
-        mlp_in, mlp_out: The two Dense layers.
-    """
-
-    def __init__(
-        self,
-        hidden_size: int,
-        frequency_embedding_size: int = 256,
-        max_period: float = 10000.0,
-        kernel_stddev: float = 0.02,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(**kwargs)
-
-        if hidden_size <= 0:
-            raise ValueError(f"hidden_size must be positive, got {hidden_size}")
-        if frequency_embedding_size < 2:
-            raise ValueError(
-                "frequency_embedding_size must be at least 2 (half = "
-                f"frequency_embedding_size // 2 must be positive), got "
-                f"{frequency_embedding_size}"
-            )
-        if max_period <= 1.0:
-            raise ValueError(
-                "max_period must be greater than 1 so that log(max_period) is "
-                f"positive and the ladder decreases, got {max_period}"
-            )
-        if kernel_stddev <= 0.0:
-            raise ValueError(f"kernel_stddev must be positive, got {kernel_stddev}")
-
-        self.hidden_size = int(hidden_size)
-        self.frequency_embedding_size = int(frequency_embedding_size)
-        self.max_period = float(max_period)
-        self.kernel_stddev = float(kernel_stddev)
-        self.half = self.frequency_embedding_size // 2
-
-        # A fresh RandomNormal per Dense -- a shared instance draws the
-        # same numbers at every layer, forever, with no default that exposes it.
-        self.mlp_in = keras.layers.Dense(
-            self.hidden_size,
-            use_bias=True,
-            kernel_initializer=keras.initializers.RandomNormal(
-                stddev=self.kernel_stddev
-            ),
-            name="mlp_in",
-        )
-        self.mlp_out = keras.layers.Dense(
-            self.hidden_size,
-            use_bias=True,
-            kernel_initializer=keras.initializers.RandomNormal(
-                stddev=self.kernel_stddev
-            ),
-            name="mlp_out",
-        )
-
-        self.freqs = None
-
-    def build(self, input_shape: Any) -> None:
-        """Materialize the frequency ladder and build both Dense sub-layers.
-
-        :param input_shape: ``(B,)`` or ``(B, 1)``.
-        :type input_shape: Any
-        """
-        if self.built:
-            return
-
-        # Computed with NumPy, installed as a non-trainable weight through a
-        # constant initializer -- a plain tensor attribute does not survive a
-        # .keras round trip, and .assign() inside build() is discarded by StatelessScope.
-        freqs_np = np.exp(
-            -math.log(self.max_period)
-            * np.arange(self.half, dtype="float32")
-            / self.half
-        )
-        self.freqs = self.add_weight(
-            name="freqs",
-            shape=(self.half,),
-            initializer=keras.initializers.Constant(freqs_np),
-            trainable=False,
-            dtype="float32",
-        )
-
-        batch = tuple(input_shape)[0] if len(tuple(input_shape)) > 0 else None
-        self.mlp_in.build((batch, self.frequency_embedding_size))
-        self.mlp_out.build((batch, self.hidden_size))
-
-        super().build(input_shape)
-
-    def timestep_embedding(self, t: keras.KerasTensor) -> keras.KerasTensor:
-        """Map a scalar timestep onto the sinusoidal basis, cos first.
-
-        Exposed as a method so the guard test can compare the basis against the
-        house layer's basis without the two MLPs in the way.
-
-        :param t: Timesteps, shape ``(B,)``. Already scaled by the caller.
-        :type t: keras.KerasTensor
-        :return: ``(B, frequency_embedding_size)``.
-        :rtype: keras.KerasTensor
-        """
-        args = keras.ops.expand_dims(keras.ops.cast(t, "float32"), axis=-1) * self.freqs
-        # DECISION plan-2026-09-02T094601-77d4a04e/D-033: cos first, matching
-        # upstream -- swapping to sin-first is a column permutation invisible to shape/norm/round-trip checks. See decisions.md.
-        embedding = keras.ops.concatenate(
-            [keras.ops.cos(args), keras.ops.sin(args)], axis=-1
-        )
-        if self.frequency_embedding_size % 2:
-            # An odd width leaves the basis one column short; upstream pads one
-            # trailing zero column, it does not drop a frequency.
-            embedding = keras.ops.pad(embedding, [(0, 0), (0, 1)])
-        return embedding
-
-    def call(
-        self,
-        inputs: keras.KerasTensor,
-        training: Optional[bool] = None,
-    ) -> keras.KerasTensor:
-        """Embed the timestep.
-
-        :param inputs: Timesteps, ``(B,)`` or ``(B, 1)``. No rescale happens
-            here: the caller is expected to have applied ``time_scale``.
-        :type inputs: keras.KerasTensor
-        :param training: Forwarded to both Dense sub-layers.
-        :type training: Optional[bool]
-        :return: ``(B, hidden_size)``.
-        :rtype: keras.KerasTensor
-        """
-        t = inputs
-        # Static rank read, as `ScalarSinusoidalEmbedding` does: `len(t.shape)`
-        # is known at trace time. `len(keras.ops.shape(t))` is not graph-safe.
-        if len(t.shape) > 1 and t.shape[-1] == 1:
-            t = keras.ops.squeeze(t, axis=-1)
-        t_freq = self.timestep_embedding(t)
-        h = keras.activations.silu(self.mlp_in(t_freq, training=training))
-        return self.mlp_out(h, training=training)
-
-    def compute_output_shape(self, input_shape: Any) -> Tuple[Optional[int], ...]:
-        """Return ``(B, hidden_size)``.
-
-        :param input_shape: ``(B,)`` or ``(B, 1)``.
-        :type input_shape: Any
-        :return: ``(B, hidden_size)``.
-        :rtype: Tuple[Optional[int], ...]
-        """
-        shape = tuple(input_shape)
-        batch = shape[0] if len(shape) > 0 else None
-        return (batch, self.hidden_size)
-
-    def get_config(self) -> Dict[str, Any]:
-        """Return every constructor argument.
-
-        :return: A JSON-serializable configuration dictionary.
-        :rtype: Dict[str, Any]
-        """
-        config = super().get_config()
-        config.update(
-            {
-                "hidden_size": self.hidden_size,
-                "frequency_embedding_size": self.frequency_embedding_size,
-                "max_period": self.max_period,
-                "kernel_stddev": self.kernel_stddev,
-            }
-        )
-        return config
-
-
 def get_1d_sincos_pos_embed_from_grid(
     embed_dim: int, pos: np.ndarray
 ) -> np.ndarray:
@@ -675,7 +422,7 @@ def get_1d_sincos_pos_embed_from_grid(
 
     Ported from MAE's ``util/pos_embed.py`` (via upstream ``dit.py``).
 
-    Two things here contradict :class:`DiTXATimestepEmbedder` and are correct
+    Two things here contradict :class:`~dl_techniques.layers.embedding.timestep_embedding.TimestepEmbedding` and are correct
     anyway, because the two are independently specified upstream:
 
     * the concat is ``[sin, cos]``, not ``[cos, sin]``;

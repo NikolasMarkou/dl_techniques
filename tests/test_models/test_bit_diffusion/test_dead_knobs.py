@@ -64,9 +64,9 @@ from dl_techniques.models.vision_language import bit_diffusion as dl_bit_diffusi
 from dl_techniques.layers.embedding.class_label_embedding import (
     ClassLabelEmbedding,
 )
+from dl_techniques.layers.embedding.timestep_embedding import TimestepEmbedding
 from dl_techniques.models.vision_language.bit_diffusion.blocks import (
     DiTXABlock,
-    DiTXATimestepEmbedder,
 )
 from dl_techniques.models.vision_language.bit_diffusion.model import (
     DiTXA,
@@ -475,7 +475,7 @@ def make_embedder(**overrides):
     config = dict(hidden_size=HIDDEN, frequency_embedding_size=16)
     config.update(overrides)
     keras.utils.set_random_seed(1234)
-    layer = DiTXATimestepEmbedder(**config)
+    layer = TimestepEmbedding(**config)
     layer(np.linspace(0.0, 900.0, BATCH).astype("float32"))
     return layer
 
@@ -803,7 +803,7 @@ COVERED = {
         "hidden_size", "patch_size", "out_channels", "grid_height",
         "grid_width", "norm_epsilon",
     },
-    DiTXATimestepEmbedder: {
+    TimestepEmbedding: {
         "hidden_size", "frequency_embedding_size", "max_period", "kernel_stddev",
     },
     SharedTokenDecoder: {

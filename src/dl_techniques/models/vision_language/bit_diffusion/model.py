@@ -30,6 +30,7 @@ import numpy as np
 
 from dl_techniques.layers.embedding.class_label_embedding import ClassLabelEmbedding
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
+from dl_techniques.layers.embedding.timestep_embedding import TimestepEmbedding
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.layers.transformers.sd3_adaln import modulate
 from dl_techniques.utils.drop_path import linear_drop_path_rates
@@ -40,7 +41,7 @@ from dl_techniques.utils.weight_transfer import (
     pretrained_path_or_raise,
 )
 
-from .blocks import DiTXABlock, DiTXATimestepEmbedder, get_2d_sincos_pos_embed
+from .blocks import DiTXABlock, get_2d_sincos_pos_embed
 from .config import PROMPT_NUM_CLASSES
 
 #: Keys :meth:`DiTXA.call` requires of its input dictionary.
@@ -617,12 +618,12 @@ class DiTXA(keras.Model):
             flatten=True,
             name="cond_embedder_reverse",
         )
-        self.t_embedder = DiTXATimestepEmbedder(
+        self.t_embedder = TimestepEmbedding(
             hidden_size=self.hidden_size,
             frequency_embedding_size=self.frequency_embedding_size,
             name="t_embedder",
         )
-        self.cond_t_embedder = DiTXATimestepEmbedder(
+        self.cond_t_embedder = TimestepEmbedding(
             hidden_size=self.hidden_size,
             frequency_embedding_size=self.frequency_embedding_size,
             name="cond_t_embedder",

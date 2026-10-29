@@ -116,7 +116,7 @@ from dl_techniques.models.vision_language.bit_diffusion.blocks import DiTXABlock
 | `token_bridge.py` | the packing bijection, token-norm and padding-stop helpers |
 | `sde.py` | `BridgeSDE` + the four processes, `dX_t`, `simulate`, `create_bridge_sde` |
 | `bridge_process.py` | both score targets, both weightings, the two time samplers |
-| `blocks.py` | `DiTXABlock` (12-way adaLN), `DiTXATimestepEmbedder`, the sin-cos helper |
+| `blocks.py` | `DiTXABlock` (12-way adaLN), the sin-cos helper |
 | `model.py` | `DiTXA`, `DiTXAFinalLayer`, `create_ditxa` |
 | `token_decoder.py` | `SharedTokenDecoder` |
 

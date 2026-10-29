@@ -62,21 +62,16 @@ Why this is not
 :class:`~dl_techniques.layers.embedding.scalar_sinusoidal_embedding.ScalarSinusoidalEmbedding`:
     That layer looks like a drop-in and is not, on all three numeric axes above
     plus a fourth: it rescales its input onto ``[0, 1e4]`` before the
-    sinusoidal map. The divergences were MEASURED (see
-    ``bit_diffusion/blocks.py:494-527``, which records
+    sinusoidal map. The divergences were MEASURED and are pinned by
+    ``tests/test_models/test_bit_diffusion/test_the_embedders.py``:
     ``max|delta| = 1.0`` for the concat order, ``0.0534`` for the ladder and
-    ``1.88`` for the rescale). Do not substitute one for the other.
+    ``1.88`` for the rescale. Do not substitute one for the other.
 
 Relationship to ``bit_diffusion``:
-    ``DiTXATimestepEmbedder``
-    (``src/dl_techniques/models/vision_language/bit_diffusion/blocks.py:454-721``)
-    is a bit-exact sibling of this class, model-package-private. This module is
-    the shared promotion of it (plan ``plan-2026-09-02T170923-1285ed83``
-    D-001); ``bit_diffusion`` was deliberately left untouched because moving a
-    registered class changes its serialization key. The duplication is
-    recorded, and
-    ``tests/test_layers/test_embedding/test_timestep_embedding.py``
-    cross-checks the two implementations elementwise so a drift reddens.
+    ``DiTXA`` (``src/dl_techniques/models/vision_language/bit_diffusion/model.py``)
+    builds both of its timestep embedders (``t_embedder`` and
+    ``cond_t_embedder``) from this class, so there is one copy of the
+    arithmetic in the repo.
 
 Serialization:
     ``get_config()`` returns every constructor argument under the names
@@ -115,13 +110,8 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 __all__ = ["TimestepEmbedding"]
 
 
-# DECISION plan-2026-09-02T170923-1285ed83/D-001
-# A deliberate promotion, NOT a duplicate to delete. Do NOT replace this with a
-# cross-package import of `bit_diffusion`'s `DiTXATimestepEmbedder` (models ->
-# models inverts the dependency direction), do NOT move that class here (its
-# registration key would change), and do NOT alias it to
-# `ScalarSinusoidalEmbedding`, which differs on three measured numerics.
-# decisions.md D-001.
+# Do NOT alias this to `ScalarSinusoidalEmbedding`, which differs on three
+# measured numerics (concat order, ladder denominator, input rescale).
 @register_dl_technique(
     package="dl_techniques.layers.embedding.timestep_embedding"
 )
