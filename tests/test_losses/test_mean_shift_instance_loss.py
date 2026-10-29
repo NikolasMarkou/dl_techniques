@@ -291,6 +291,118 @@ def test_coincident_points_of_different_instances_have_a_finite_gradient():
     )
 
 
+def test_a_variable_a_numpy_array_and_a_tensor_give_the_same_loss():
+    ids, z = _random_batch(batch=2, n=7, seed=61)
+    z32 = z.astype("float32")
+    loss = MeanShiftInstanceLoss()
+    with true_float32_matmul():
+        from_tensor = keras.ops.convert_to_numpy(loss.call(_tensor(ids, "int32"), _tensor(z32)))
+        from_numpy = keras.ops.convert_to_numpy(loss.call(ids.astype("int32"), z32))
+        from_variable = keras.ops.convert_to_numpy(
+            loss.call(tf.Variable(ids.astype("int32")), tf.Variable(z32))
+        )
+        scalar = float(loss(tf.Variable(ids.astype("int32")), tf.Variable(z32)))
+    np.testing.assert_array_equal(from_numpy, from_tensor)
+    np.testing.assert_array_equal(from_variable, from_tensor)
+    np.testing.assert_allclose(scalar, from_tensor.mean(), atol=1e-6, rtol=0)
+
+
+# ---------------------------------------------------------------------
+# Translation
+# ---------------------------------------------------------------------
+
+# Measured 2026-10-29 on CPU against the float64 value of the very float32 points fed in
+# (a float32 offset of 1000 quantises a 1e-2 gap to a multiple of 6.1e-5, so the expected
+# value is taken from the stored points, not from the nominal gap): the centred loss deviates
+# by at most 2e-4 in value and 2e-4 in gradient over the cases below.
+TRANSLATION_VALUE_ATOL = 5e-4
+TRANSLATION_GRAD_ATOL = 5e-4
+TRANSLATION_CASES = [
+    (0.0, 1e-3), (10.0, 1e-3), (100.0, 1e-3),
+    (0.0, 1e-2), (10.0, 1e-2), (100.0, 1e-2), (1000.0, 1e-2),
+]
+
+
+def _two_close_points(offset, gap):
+    """Two points of different instances ``gap`` apart along axis 0, shifted by ``offset``."""
+    points = np.zeros((1, 2, 4))
+    points[0, 1, 0] = gap
+    return (points + offset).astype("float32")
+
+
+def _value_and_gradient(fn_loss, points):
+    variable = tf.Variable(points)
+    with true_float32_matmul(), tf.GradientTape() as tape:
+        value = fn_loss(tf.constant([[0, 1]], tf.int32), tf.identity(variable))
+    return float(keras.ops.convert_to_numpy(value)), keras.ops.convert_to_numpy(
+        tape.gradient(value, variable)
+    )
+
+
+def _check_translation_keeps_value_and_push_gradient(fn_loss, cases):
+    margin = 2.0
+    for offset, gap in cases:
+        points = _two_close_points(offset, gap)
+        stored_gap = float(points[0, 1, 0]) - float(points[0, 0, 0])
+        value, grad = _value_and_gradient(fn_loss, points)
+        expected_value = (margin - stored_gap) ** 2
+        expected_grad = 2.0 * (margin - stored_gap)
+        label = f"offset {offset} gap {gap}"
+        np.testing.assert_allclose(
+            value, expected_value, atol=TRANSLATION_VALUE_ATOL, rtol=0, err_msg=label
+        )
+        np.testing.assert_allclose(
+            grad[0, 0, 0], expected_grad, atol=TRANSLATION_GRAD_ATOL, rtol=0, err_msg=label
+        )
+        np.testing.assert_allclose(
+            grad[0, 1, 0], -expected_grad, atol=TRANSLATION_GRAD_ATOL, rtol=0, err_msg=label
+        )
+        assert abs(grad[0, 0, 0]) > 1.0, f"{label}: push gradient vanished"
+
+
+@pytest.mark.parametrize("offset,gap", TRANSLATION_CASES)
+def test_two_close_points_of_different_instances_push_the_same_at_any_offset(offset, gap):
+    _check_translation_keeps_value_and_push_gradient(
+        MeanShiftInstanceLoss(), [(offset, gap)]
+    )
+
+
+def test_the_value_and_gradient_at_every_offset_agree_with_the_offset_zero_result():
+    loss = MeanShiftInstanceLoss()
+    base_value, base_grad = _value_and_gradient(loss, _two_close_points(0.0, 1e-2))
+    for offset in (10.0, 100.0, 1000.0):
+        value, grad = _value_and_gradient(loss, _two_close_points(offset, 1e-2))
+        np.testing.assert_allclose(
+            value, base_value, atol=TRANSLATION_VALUE_ATOL, rtol=0, err_msg=f"offset {offset}"
+        )
+        np.testing.assert_allclose(
+            grad, base_grad, atol=TRANSLATION_GRAD_ATOL, rtol=0, err_msg=f"offset {offset}"
+        )
+
+
+def test_red_an_uncentred_distance_loses_the_push_at_a_large_offset(monkeypatch):
+    import dl_techniques.losses.mean_shift_instance_loss as loss_module
+
+    def uncentred(a, b, key_mask=None):
+        a_sq = keras.ops.sum(keras.ops.square(a), axis=-1, keepdims=True)
+        b_sq = keras.ops.sum(keras.ops.square(b), axis=-1)[..., None, :]
+        cross = keras.ops.matmul(a, keras.ops.swapaxes(b, -1, -2))
+        return keras.ops.maximum(a_sq - 2.0 * cross + b_sq, 0.0)
+
+    _check_translation_keeps_value_and_push_gradient(
+        MeanShiftInstanceLoss(), TRANSLATION_CASES
+    )
+    monkeypatch.setattr(loss_module, "pairwise_sq_dist", uncentred)
+    with pytest.raises(AssertionError):
+        _check_translation_keeps_value_and_push_gradient(
+            MeanShiftInstanceLoss(), [(100.0, 1e-2)]
+        )
+    with pytest.raises(AssertionError):
+        _check_translation_keeps_value_and_push_gradient(
+            MeanShiftInstanceLoss(), [(1000.0, 1e-2)]
+        )
+
+
 # ---------------------------------------------------------------------
 # Optimisation
 # ---------------------------------------------------------------------
@@ -498,6 +610,51 @@ def test_an_unknown_point_count_is_not_subsampled_and_traces_in_a_graph():
     np.testing.assert_allclose(
         again, _real(MeanShiftInstanceLoss(max_points=64))(ids[:, :9], z[:, :9]),
         atol=1e-6, rtol=0,
+    )
+
+
+def _dynamic_loss(loss, ids, z):
+    @tf.function(
+        input_signature=[
+            tf.TensorSpec([None, None], tf.int32),
+            tf.TensorSpec([None, None, z.shape[-1]], tf.float32),
+        ]
+    )
+    def graph(i, e):
+        return loss.call(i, e)
+
+    with true_float32_matmul():
+        return keras.ops.convert_to_numpy(
+            graph(_tensor(ids, "int32"), _tensor(z.astype("float32")))
+        )
+
+
+@pytest.mark.parametrize("n", [5, 8, 12])
+def test_static_and_unknown_point_counts_agree_when_n_is_at_most_max_points(n):
+    ids, z = _random_batch(batch=2, n=n, ignore_frac=0.2, seed=71 + n)
+    loss = MeanShiftInstanceLoss(max_points=12)
+    np.testing.assert_allclose(
+        _real(loss)(ids, z), _dynamic_loss(loss, ids, z), atol=1e-6, rtol=0
+    )
+
+
+def test_a_static_count_above_max_points_drops_a_lone_off_stride_instance_and_an_unknown_count_does_not():
+    # Five points, max_points=4: the stride keeps points 0..3, so instance 2 (point 4 only)
+    # has no pair in the static case. Measured 2026-10-29: 2.4508 static, 2.4432 unknown N.
+    rng = np.random.default_rng(0)
+    z = rng.normal(size=(1, 5, 2))
+    ids = np.array([[0, 1, 0, 1, 2]])
+    capped = MeanShiftInstanceLoss(max_points=4)
+    full = _real(MeanShiftInstanceLoss(max_points=64))(ids, z)
+    static = _real(capped)(ids, z)
+    unknown = _dynamic_loss(capped, ids, z)
+    np.testing.assert_allclose(
+        static, _real(MeanShiftInstanceLoss(max_points=64))(ids[:, :4], z[:, :4]),
+        atol=1e-6, rtol=0,
+    )
+    np.testing.assert_allclose(unknown, full, atol=1e-6, rtol=0)
+    assert abs(float(static[0]) - float(unknown[0])) > 1e-3, (
+        "the static and unknown-count values coincide, so the documented difference is not exercised"
     )
 
 

@@ -80,8 +80,16 @@ class MeanShiftInstanceLoss(keras.losses.Loss):
     ``call`` returns shape ``(B,)`` and ``sample_weight`` zeroes whole rows.
     Memory is O(N^2) per row; when the static point count exceeds ``max_points``
     the rows are reduced to ``max_points`` evenly spaced points (the same indices
-    on every call). With an unknown point count at trace time no subsampling is
-    done, so keep ``N`` static for large point sets.
+    on every call). With an unknown point count at trace time (``None``, for
+    example a ``tf.function`` signature ``[None, None]``) no subsampling is done,
+    so keep ``N`` static for large point sets.
+
+    The value therefore depends on whether ``N`` is static once ``N`` exceeds
+    ``max_points``: the same data gives different values, and an instance whose
+    only point falls between the evenly spaced indices drops out of the pair sums
+    in the static case. With ``N = 5`` and ``max_points = 4`` one such example gave
+    2.4508 for a static ``N`` and 2.4432 for an unknown ``N`` (the full-data
+    value). For ``N <= max_points`` both cases agree.
 
     .. code-block:: text
 
@@ -166,10 +174,10 @@ class MeanShiftInstanceLoss(keras.losses.Loss):
     ) -> keras.KerasTensor:
         """Compute the per-row pull and push loss.
 
-        :param y_true: Instance ids ``(B, N)``; a float dtype (``fit`` may pass one)
-            is cast to ``int32``.
+        :param y_true: Instance ids ``(B, N)``, a tensor, array or variable; a float
+            dtype (``fit`` may pass one) is cast to ``int32``.
         :type y_true: keras.KerasTensor
-        :param y_pred: Embeddings ``(B, N, D)``.
+        :param y_pred: Embeddings ``(B, N, D)``, a tensor, array or variable.
         :type y_pred: keras.KerasTensor
         :return: Per-row loss ``(B,)`` in at least float32.
         :rtype: keras.KerasTensor
@@ -177,7 +185,7 @@ class MeanShiftInstanceLoss(keras.losses.Loss):
         z = keras.ops.convert_to_tensor(y_pred)
         acc = accumulation_dtype(getattr(z.dtype, "name", None) or str(z.dtype))
         z = keras.ops.cast(z, acc)
-        ids = keras.ops.cast(y_true, "int32")
+        ids = keras.ops.cast(keras.ops.convert_to_tensor(y_true), "int32")
 
         n_points = z.shape[1]
         if n_points is not None and n_points > self.max_points:
