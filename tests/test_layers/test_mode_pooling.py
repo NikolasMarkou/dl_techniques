@@ -340,14 +340,16 @@ class TestTranslationAndSmallBandwidths:
         bound = 2.0 * float(np.spacing(np.float32(offset + 4.0))) + 1e-6
         assert np.abs(moved - base).max() <= bound, (offset, np.abs(moved - base).max())
 
-    def test_a_tiny_bandwidth_with_a_mask_returns_the_duplicated_point_not_zeros(self):
+    def test_a_float_bandwidth_of_1e_6_with_a_mask_returns_the_duplicated_point_not_zeros(self):
         tokens = _duplicate_data()
         mask = _mask_last(100, 5)
-        pooled, density = ModePooling(num_steps=5, return_density=True)(tokens, mask)
+        layer = ModePooling(num_steps=5, bandwidth=1e-6, return_density=True)
+        pooled, density = layer(tokens, mask)
         np.testing.assert_allclose(_np(pooled), DUPLICATE_POINT, rtol=0, atol=1e-6)
-        # At h = 1e-6 the float32 squared distance to the duplicated point carries
-        # rounding noise of about 1e-7 (a log density near -6e4 here), so only the
-        # absence of the old -1e9 mask constant is pinned; the ops tests pin the value.
+        # A float bandwidth is not raised by the data floor, so h is 1e-6 here. The
+        # float32 squared distance to the duplicated point then carries rounding noise
+        # of about 1e-7 (log density near -6e4); the old -1e9 mask constant would give
+        # a density below -1e6, so only that is pinned. The ops tests pin the value.
         assert np.isfinite(_np(density)).all() and _np(density)[0] > -1e6
 
     @pytest.mark.parametrize("bandwidth", [1e-6, 1e-4])
@@ -465,6 +467,48 @@ class TestTheAutoBandwidthFloorFollowsTheDataScale:
             without_floor = _np(pool(tokens, mask))
             monkeypatch.undo()
             np.testing.assert_allclose(with_floor, without_floor, rtol=0, atol=1e-6)
+
+    @pytest.mark.parametrize("scale", [1e-3, 1e-2, 0.5, 2.0])
+    @pytest.mark.parametrize("layout", ["duplicated", "ordinary"])
+    def test_the_bandwidth_scale_multiplies_the_floored_bandwidth(self, scale, layout):
+        # The data floor bounds the median heuristic; bandwidth_scale acts after it.
+        tokens = _duplicate_data() if layout == "duplicated" else _outlier_data()[0]
+        keep = keras.ops.ones((1, 100), dtype="bool")
+
+        def bandwidth(bandwidth_scale):
+            layer = ModePooling(bandwidth_scale=bandwidth_scale)
+            layer.build(tokens.shape)
+            h = layer._resolve_bandwidth(keras.ops.convert_to_tensor(tokens), keep, "float32")
+            return float(_np(h).reshape(-1)[0])
+
+        np.testing.assert_allclose(bandwidth(scale) / bandwidth(1.0), scale, rtol=1e-6, atol=0)
+
+    @pytest.mark.parametrize("log_scale", [-2.0, 0.7])
+    def test_the_learnable_multiplier_scales_the_floored_bandwidth(self, log_scale):
+        tokens = _duplicate_data()
+        keep = keras.ops.ones((1, 100), dtype="bool")
+        layer = ModePooling(learnable_bandwidth=True)
+        layer.build(tokens.shape)
+        base = float(_np(layer._resolve_bandwidth(keras.ops.convert_to_tensor(tokens), keep, "float32")).reshape(-1)[0])
+        layer.log_scale.assign(np.float32(log_scale))
+        h = float(_np(layer._resolve_bandwidth(keras.ops.convert_to_tensor(tokens), keep, "float32")).reshape(-1)[0])
+        np.testing.assert_allclose(h / base, np.exp(log_scale), rtol=1e-6, atol=0)
+
+    def test_the_learnable_scale_receives_a_nonzero_finite_gradient_when_the_floor_binds(self):
+        # Mostly duplicated tokens: the median distance is 0, so the floor sets h.
+        tokens = tf.constant(_duplicate_data())
+        layer = ModePooling(num_steps=3, learnable_bandwidth=True)
+        layer.build(tokens.shape)
+        h = layer._resolve_bandwidth(tokens, keras.ops.ones((1, 100), dtype="bool"), "float32")
+        assert float(_np(h).reshape(-1)[0]) == pytest.approx(
+            mode_pooling_module._BANDWIDTH_DATA_FLOOR
+            * float(_np(layer._rms_radius(tokens, keras.ops.ones((1, 100), dtype="bool"), "float32")).reshape(-1)[0]),
+            rel=1e-5,
+        )
+        with tf.GradientTape() as tape:
+            loss = tf.reduce_sum(layer(tokens) * tf.range(1.0, 9.0))
+        grad = _np(tape.gradient(loss, layer.log_scale))
+        assert np.isfinite(grad) and abs(grad) > 1e-6, grad
 
     def test_a_float_bandwidth_is_not_floored_by_the_data_scale(self):
         tokens, _ = _outlier_data()
