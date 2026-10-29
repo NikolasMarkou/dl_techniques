@@ -640,7 +640,7 @@ def test_static_and_unknown_point_counts_agree_when_n_is_at_most_max_points(n):
 
 def test_a_static_count_above_max_points_drops_a_lone_off_stride_instance_and_an_unknown_count_does_not():
     # Five points, max_points=4: the stride keeps points 0..3, so instance 2 (point 4 only)
-    # has no pair in the static case. Measured 2026-10-29: 2.4508 static, 2.4432 unknown N.
+    # has no pair in the static case. Measured 2026-10-29 on this data: 1.6292 static, 1.3340 unknown N (the full-data value).
     rng = np.random.default_rng(0)
     z = rng.normal(size=(1, 5, 2))
     ids = np.array([[0, 1, 0, 1, 2]])

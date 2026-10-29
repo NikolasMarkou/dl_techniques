@@ -87,9 +87,11 @@ class MeanShiftInstanceLoss(keras.losses.Loss):
     The value therefore depends on whether ``N`` is static once ``N`` exceeds
     ``max_points``: the same data gives different values, and an instance whose
     only point falls between the evenly spaced indices drops out of the pair sums
-    in the static case. With ``N = 5`` and ``max_points = 4`` one such example gave
-    2.4508 for a static ``N`` and 2.4432 for an unknown ``N`` (the full-data
-    value). For ``N <= max_points`` both cases agree.
+    in the static case. With ``max_points = 4``, ``N = 5`` and three instances (ids
+    ``[0, 1, 0, 1, 2]``, standard normal embeddings in two dimensions, the setup of
+    the test ``test_a_static_count_above_max_points_drops_a_lone_off_stride_instance_and_an_unknown_count_does_not``)
+    the loss was 1.6292 for a static ``N`` and 1.3340 for an unknown ``N`` (equal
+    to the full-data value). For ``N <= max_points`` both cases agree.
 
     .. code-block:: text
 
