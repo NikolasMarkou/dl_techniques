@@ -461,7 +461,7 @@ class TestTheContrastCanFail:
 
 # Components at -1, 0, +1 (sigma 0.5, weights 0.45, 0.1, 0.45): the middle mean is a density
 # minimum (Hessian of log p +4.79). Measured 2026-10-29 in float64: with the 1e-3 sigma start
-# offset the middle start reaches the side mode 0.9658 after 30 steps (0.8041 after 10).
+# offset the middle start reaches the side mode 0.9658 after 30 steps (-0.6543 after 10).
 SADDLE_MU = np.array([[-1.0], [0.0], [1.0]])
 SADDLE_SIGMA = np.full((3, 1), 0.5)
 SADDLE_LOGITS = np.log([0.45, 0.1, 0.45])
@@ -483,7 +483,37 @@ def _check_the_middle_start_leaves_the_density_minimum():
     np.testing.assert_allclose(log_density[1], log_density[[0, 2]], atol=1e-3)
 
 
+def _check_the_shifted_middle_start_leaves_the_density_minimum(shift, num_steps=300):
+    """The -1/0/+1 triple moved to ``shift`` in float32: the middle start must leave the minimum."""
+    mu, sigma, logits = _batch(SADDLE_MU + shift, SADDLE_SIGMA, SADDLE_LOGITS)
+    # Float32 spacing at the shift bounds how exactly a mode can be located.
+    ulp = float(np.spacing(np.float32(abs(shift) + 1.0)))
+    modes, log_density, is_unique = get_mixture_modes(
+        mu, sigma, logits, num_steps=num_steps, merge_tol=max(1e-3, 8.0 * ulp)
+    )
+    modes = keras.ops.convert_to_numpy(modes)[0, :, 0].astype(np.float64) - shift
+    log_density = keras.ops.convert_to_numpy(log_density)[0]
+    atol = max(2e-3, 4.0 * ulp)
+    np.testing.assert_allclose(modes[[0, 2]], [-SADDLE_SIDE_MODE, SADDLE_SIDE_MODE], atol=atol)
+    assert abs(abs(modes[1]) - SADDLE_SIDE_MODE) < atol and abs(modes[1]) > 0.5
+    assert int(keras.ops.convert_to_numpy(is_unique).sum()) == 2
+    at_minimum = _oracle_log_density(
+        np.full((1, 1), float(shift)), SADDLE_MU + shift, SADDLE_SIGMA, SADDLE_LOGITS
+    )[0]
+    assert log_density[1] > at_minimum + 0.5
+    np.testing.assert_allclose(log_density[1], log_density[[0, 2]], atol=0.05)
+
+
 class TestStationaryPointsReachedFromEachComponentMean:
+    @pytest.mark.parametrize("shift", [0.0, 50.0, 5000.0, 10000.0])
+    def test_a_far_from_origin_density_minimum_is_still_left_in_float32(self, shift):
+        _check_the_shifted_middle_start_leaves_the_density_minimum(shift)
+
+    def test_a_shifted_triple_keeps_its_means_at_zero_steps(self):
+        mu, sigma, logits = _batch(SADDLE_MU + 1e4, SADDLE_SIGMA, SADDLE_LOGITS)
+        modes = get_mixture_modes(mu, sigma, logits, num_steps=0)[0]
+        np.testing.assert_array_equal(keras.ops.convert_to_numpy(modes), mu)
+
     def test_a_start_at_a_density_minimum_leaves_it(self):
         _check_the_middle_start_leaves_the_density_minimum()
 
@@ -616,6 +646,18 @@ class TestTheStartOffsetBreaksCoordinateSymmetry:
             assert pattern.shape == (num_mix, dim)
             assert np.abs(pattern).min() >= 0.25 and np.abs(pattern).max() <= 1.0
             assert len(np.unique(pattern)) == num_mix * dim
+
+    def test_the_pattern_stays_distinct_and_nonzero_for_large_tables(self):
+        from dl_techniques.layers.statistics import mdn_layer as mdn_module
+
+        flat = keras.ops.convert_to_numpy(mdn_module._mode_start_pattern(1000, 70, "float32")).ravel()
+        assert flat.shape == (70000,)
+        assert np.abs(flat).min() >= 0.25 and np.abs(flat).max() <= 1.0
+        assert len(np.unique(flat)) == 70000
+        assert all(len(np.unique(flat[i : i + 4096])) == len(flat[i : i + 4096]) for i in range(0, 70000, 4096))
+        # The table depends on the flat index alone, so a wider table repeats the same entries.
+        wide = keras.ops.convert_to_numpy(mdn_module._mode_start_pattern(7, 10000, "float32")).ravel()
+        np.testing.assert_array_equal(wide[:70000], flat)
 
     def test_red_with_one_shared_offset_direction_the_x_shaped_saddle_is_returned(self, monkeypatch):
         from dl_techniques.layers.statistics import mdn_layer as mdn_module

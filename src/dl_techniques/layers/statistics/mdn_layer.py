@@ -748,9 +748,12 @@ def get_point_estimate(
 # applied in the accumulation dtype, where the requested value is returned as is.
 _MODE_SIGMA_FLOOR = 1e-6
 _MODE_PRECISION_FLOOR = 1e-30
-# Each start is nudged off its component mean by this many standard deviations per
-# dimension, so a start on an unstable stationary point leaves it.
+# Each start is nudged off its component mean by the larger of this many standard
+# deviations and this fraction of |mean|, per dimension, so a start on an unstable
+# stationary point leaves it. The relative term keeps the nudge above float32
+# rounding of the mean (about 1.2e-7 |mean|).
 _MODE_START_OFFSET = 1e-3
+_MODE_START_RELATIVE_OFFSET = 1e-5
 
 _GOLDEN_FRACTION = 0.6180339887498949
 
@@ -763,8 +766,10 @@ def _mode_start_pattern(num_mixtures: Any, dim: Any, dtype: str) -> Any:
     the golden ratio conjugate, mapped to ``sign(2u - 1) * (0.25 + 0.75 * |2u - 1|)``.
     Every entry therefore lies in ``[-1, -0.25]`` or ``[0.25, 1]`` (never zero) and
     no two entries are equal, so no coordinate swap or reflection of a mixture
-    leaves the offset direction unchanged. Built from ``ops.arange``, so the
-    arguments may be tensors and nothing depends on the data.
+    leaves the offset direction unchanged. The phase is computed in float64 and the
+    result cast to ``dtype``; in float32 the phase repeats entries from a flat index
+    of about 3000 on. Built from ``ops.arange``, so the arguments may be tensors and
+    nothing depends on the data.
 
     :param num_mixtures: Number of mixture components ``M``.
     :param dim: Output dimension ``D``.
@@ -776,10 +781,10 @@ def _mode_start_pattern(num_mixtures: Any, dim: Any, dtype: str) -> Any:
     index = ops.expand_dims(ops.arange(num_mixtures), 1) * dim + ops.expand_dims(
         ops.arange(dim), 0
     )
-    phase = ops.cast(index + 1, dtype) * _GOLDEN_FRACTION
+    phase = ops.cast(index + 1, "float64") * _GOLDEN_FRACTION
     centred = 2.0 * (phase - ops.floor(phase)) - 1.0
-    sign = ops.cast(ops.where(centred >= 0.0, 1.0, -1.0), dtype)
-    return sign * (0.25 + 0.75 * ops.abs(centred))
+    sign = ops.cast(ops.where(centred >= 0.0, 1.0, -1.0), "float64")
+    return ops.cast(sign * (0.25 + 0.75 * ops.abs(centred)), dtype)
 
 
 def _check_mode_arguments(
@@ -838,10 +843,12 @@ def get_mixture_modes(
 ) -> Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]:
     """Find stationary points of a diagonal Gaussian mixture by fixed-point iteration.
 
-    Every component mean is a start, moved off it by at most ``1e-3`` standard
-    deviations per dimension, in a fixed direction that differs between components
-    and dimensions, so a mixture symmetric under a coordinate swap does not keep a
-    start on its symmetric saddle. Each start is moved by the Carreira-Perpinan fixed point of the
+    Every component mean is a start, moved off it per dimension by the larger of
+    ``1e-3`` standard deviations and ``1e-5`` times ``|mu|`` (so the move stays above
+    float32 rounding of a mean far larger than its sigma), times a fixed factor in
+    ``[0.25, 1]`` whose sign and size differ between components and dimensions, so a
+    mixture symmetric under a coordinate swap does not keep a start on its symmetric
+    saddle. Each start is moved by the Carreira-Perpinan fixed point of the
     mixture density::
 
         r_m(x) = softmax_m(log pi_m + log N(x; mu_m, sigma_m))
@@ -859,10 +866,12 @@ def get_mixture_modes(
     a start leaves it; only a start exactly on one stays, which is why the
     starts are offset from the means (without the offset, components at -1, 0, 1
     with weights 0.45, 0.1, 0.45 and sigma 0.5 return the middle mean, a density
-    minimum, as a unique mode). A start can still stay on a critical point when
-    the offset is lost to rounding (a mean far larger than its sigma) or lies
-    exactly on its stable manifold. ``get_mode_estimate`` keeps the highest
-    density among these points, which is always a true mode.
+    minimum, as a unique mode). No fixed deterministic direction avoids every
+    symmetry: a mixture whose symmetry axis lies exactly along the offset of one
+    start (an X mixture rotated until its axis follows the offset direction of the
+    centre component) can still keep that start on a saddle. ``get_mode_estimate``
+    keeps the highest density among these points, which is always a true mode, so
+    use it when a true mode is needed.
 
     Convergence is linear and slows to a crawl near the merge point of two
     components, about two standard deviations apart: two equal unit components
@@ -932,12 +941,15 @@ def get_mixture_modes(
         return ops.expand_dims(log_const, 1) - 0.5 * quad
 
     # DECISION plan-2026-10-29T104646-27f045c5/D-030: starts sit a hair off the component means, each in its own direction.
-    # Do not start exactly on mu or shift every start along (1, ..., 1): a symmetric start stays on a saddle forever.
+    # Do not start exactly on mu, shift every start along (1, ..., 1) or use 1e-3 sigma alone: a symmetric or rounded-away start stays on a saddle.
     points = mu_w
     if num_steps > 0:
         shape = ops.shape(mu_w)
         pattern = _mode_start_pattern(shape[1], shape[2], work)
-        points = mu_w + _MODE_START_OFFSET * sigma_w * ops.expand_dims(pattern, 0)
+        magnitude = ops.maximum(
+            _MODE_START_OFFSET * sigma_w, _MODE_START_RELATIVE_OFFSET * ops.abs(mu_w)
+        )
+        points = mu_w + magnitude * ops.expand_dims(pattern, 0)
     for _ in range(num_steps):
         log_joint = _component_log_density(points)
         resp = ops.exp(log_joint - ops.logsumexp(log_joint, axis=-1, keepdims=True))
