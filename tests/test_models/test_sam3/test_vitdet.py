@@ -603,6 +603,24 @@ class TestParameterAudit:
         assert tiny_trunk.patch_embed.count_params() == expected["patch_embed"]
         assert int(np.prod(tiny_trunk.pos_embed.shape)) == expected["pos_embed"]
 
+    def test_patch_embed_is_the_library_stem_with_the_conv2d_default_init(self, tiny_trunk):
+        """The stem is PatchEmbedding2D(flatten=False) and keeps the old init.
+
+        A bare `PatchEmbedding2D` draws from `glorot_normal`; the Conv2D this
+        stem replaced drew from `glorot_uniform`, which is what is pinned.
+        """
+        from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
+
+        stem = tiny_trunk.patch_embed
+        assert isinstance(stem, PatchEmbedding2D)
+        assert stem.flatten is False
+        assert isinstance(
+            stem.kernel_initializer, keras.initializers.GlorotUniform
+        )
+        assert [w.path.split("/", 1)[1] for w in stem.weights] == [
+            "patch_embed/projection/kernel"
+        ]
+
     def test_shipped_closed_form_is_the_documented_number(self):
         expected = self._closed_form(SHIPPED)
         assert expected["per_block"] == 13_907_584

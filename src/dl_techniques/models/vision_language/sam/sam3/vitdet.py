@@ -43,6 +43,7 @@ from dl_techniques.layers.regularization.layer_scale import LayerScale
 from dl_techniques.layers.ffn.factory import create_ffn_layer
 from dl_techniques.layers.norms.factory import create_normalization_layer
 from dl_techniques.layers.embedding.axial_rope_2d import AxialRoPE2D
+from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
@@ -642,7 +643,7 @@ class Sam3ViTDetBackbone(keras.layers.Layer):
 
         image (B, img_size, img_size, in_channels)
               │
-        Conv2D(embed_dim, patch_size, stride=patch_size)   -> (B, g, g, embed_dim)
+        PatchEmbedding2D(patch_size, embed_dim, flatten=False) -> (B, g, g, embed_dim)
               │
             + tile_abs_pos(pos_embed)      tile-then-CROP, never interpolate
               │
@@ -837,12 +838,15 @@ class Sam3ViTDetBackbone(keras.layers.Layer):
         self.last_global_block = max(self.global_att_blocks)
 
         # Sub-layers -- created UNCONDITIONALLY, built explicitly in build().
-        self.patch_embed = keras.layers.Conv2D(
-            filters=self.embed_dim,
-            kernel_size=self.patch_size,
-            strides=self.patch_size,
-            padding="valid",
+        # `glorot_uniform` is the initializer the stem's plain Conv2D drew from;
+        # PatchEmbedding2D defaults to `glorot_normal`, which would silently
+        # change every freshly initialised trunk.
+        self.patch_embed = PatchEmbedding2D(
+            patch_size=self.patch_size,
+            embed_dim=self.embed_dim,
+            kernel_initializer="glorot_uniform",
             use_bias=self.bias_patch_embed,
+            flatten=False,
             name="patch_embed",
         )
         # `ln_pre=False` / `ln_post=False` map to a real `Identity` layer, for
