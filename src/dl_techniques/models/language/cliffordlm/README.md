@@ -248,18 +248,17 @@ for bad in ({"global_context_period": 0}, {"normalization_type": "batch_norm"}):
 
 ### Training
 
-The shipped pipeline is `src/train/cliffordnet/train_cliffordnet_nlp.py`, documented in
-[`src/train/cliffordnet/README.md`](../../../../train/cliffordnet/README.md) (section 2 lists
-every flag). It trains on English Wikipedia or a TFDS text dataset with the tiktoken GPT-2
+The pipeline was `src/train/cliffordnet/train_cliffordnet_nlp.py` (removed from the tree; see its
+git history). It trained on English Wikipedia or a TFDS text dataset with the tiktoken GPT-2
 tokenizer, compiles `AdamW` with a warmup plus cosine schedule, and keys the loss on the output
 dict: `loss={"logits": MaskedCausalLMLoss()}`.
 
 ```bash
 MPLBACKEND=Agg .venv/bin/python -m train.cliffordnet.train_cliffordnet_nlp \
-    --variant nano --epochs 3
+    --variant nano --epochs 3   # at a commit before its removal
 ```
 
-`--help` is the source of truth for flags. The same keyed compile on a tiny model, one step on
+The same keyed compile on a tiny model, one step on
 random ids, showing the input/target shift that is the caller's job:
 
 ```python
@@ -282,8 +281,8 @@ print(sorted(history.history))  # ['loss']
 
 The class has no `generate()`. Two routes exist:
 
-- [`src/train/cliffordnet/infer_cliffordnet_nlp.py`](../../../../train/cliffordnet/infer_cliffordnet_nlp.py)
-  loads a `.keras` checkpoint and runs nucleus sampling, MCMC power sampling or max-swap
+- `src/train/cliffordnet/infer_cliffordnet_nlp.py` (removed from the tree; see its git history)
+  loaded a `.keras` checkpoint and runs nucleus sampling, MCMC power sampling or max-swap
   (`--method standard|power|max_swap`, `--compare` for all three).
 - [`models/common/power_sampling`](../../common/power_sampling/) holds the sampler itself
   (`PowerSampler`, `make_logits_fn`), model-agnostic; its README covers the algorithm and the

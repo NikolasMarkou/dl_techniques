@@ -64,3 +64,22 @@ def test_cifar100_is_normalised_with_cifar100_statistics(monkeypatch):
 
 # The re-derivation of CIFAR100_MEAN/STD from the data lives with their one
 # home's guard: tests/test_datasets/test_the_dataset_statistics_have_one_home.py.
+
+
+def test_the_flip_augmentation_runs_on_the_resized_unit_image(monkeypatch):
+    """A random half of the ramp images come back mirrored; the pixels stay a permutation."""
+    def ramp(name):
+        row = (np.arange(32, dtype=np.uint8) * 8)[None, :, None, None]
+        x = np.broadcast_to(row, (40, 32, 32, 3)).copy()
+        x = np.ascontiguousarray(np.transpose(x, (0, 2, 1, 3)))
+        return (x, np.zeros(40, np.int64)), (x[:10], np.zeros(10, np.int64))
+
+    monkeypatch.setattr(classification_data, "_load_raw", ramp)
+    config = module.TrainingConfig(
+        dataset="cifar10", image_size=64, batch_size=4, augment_data=True)
+    data = module.create_cifar_data(config)
+    seen = set()
+    for images, _ in data.train_ds:
+        for image in np.asarray(images)[:, 0, :, 0]:
+            seen.add("ascending" if image[0] < image[-1] else "descending")
+    assert seen == {"ascending", "descending"}

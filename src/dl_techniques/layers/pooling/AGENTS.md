@@ -122,7 +122,7 @@ Known callers outside the package (from imports in `src/`):
 - `PixelShuffle`: `layers/modality_projection.py` (`from .pooling.pixel_shuffle import PixelShuffle`).
 - `PixelShuffle2D`: `models/vision/image_restoration/darkir/model.py`, `models/vision/super_resolution/pft_sr/model.py`; `models/vision/image_restoration/doc_res/components.py` imports both `PixelShuffle2D` and `PixelUnshuffle2D` from `pixel_unshuffle`.
 - `BlurPool2D`, `GlobalSumPooling`: no callers in `src/` outside this package (tests only).
-- `PatchMerging`: `models/vision/swin_transformer/model.py`, `models/vision_language/clifford_clip/model.py`, `src/train/cliffordnet/train_downsampling_techniques.py`.
+- `PatchMerging`: `models/vision/swin_transformer/model.py`, `models/vision_language/clifford_clip/model.py`.
 
 ## Failure modes
 

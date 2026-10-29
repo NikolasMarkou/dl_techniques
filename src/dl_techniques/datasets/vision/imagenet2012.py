@@ -57,11 +57,12 @@ import math
 import os
 import time
 from dataclasses import dataclass
-from typing import List, NamedTuple, Optional, Tuple
+from typing import Callable, List, NamedTuple, Optional, Tuple
 
 import numpy as np
 import tensorflow as tf
 
+from dl_techniques.datasets.vision.augment_hook import apply_hook
 from dl_techniques.datasets.vision.crops import (
     EVAL_CROP_FRACTION,
     RANDOM_RESIZED_CROP_AREA,
@@ -106,6 +107,10 @@ class ImageNet2012Config:
     # hue (+-0.1), applied on [0, 1] pixels after the crop and flip.  Only
     # takes effect together with ``augment``.
     augment_color: bool = False
+    # A train augmentation hook (dl_techniques.datasets.vision.augment_hook): it sees the
+    # [0, 1] image after the crop, flip and optional colour jitter, before normalization;
+    # a seeded hook gets the element's seed. Needs ``augment``.
+    augment_hook: Optional[Callable[..., Tuple[tf.Tensor, tf.Tensor]]] = None
     shuffle: bool = True
 
     seed: int = 0
@@ -126,6 +131,8 @@ class ImageNet2012Config:
             raise ValueError(
                 f"normalize must be one of {_NORMALIZE_MODES}, got {self.normalize!r}"
             )
+        if self.augment_hook is not None and not self.augment:
+            raise ValueError("augment_hook needs augment=True: it would never run")
         if self.image_size <= 0 or self.batch_size <= 0:
             raise ValueError(
                 f"image_size and batch_size must be positive, got "
@@ -417,6 +424,10 @@ def _make_dataset(
             image = tf.cond(flip, lambda: tf.image.flip_left_right(image), lambda: image)
             if cfg.augment_color:
                 image = _color_jitter(image, seed)
+            if cfg.augment_hook is not None:
+                # The hook's contract is [0, 1] pixels; no clipping, as in every loader.
+                image, label = apply_hook(cfg.augment_hook, image / 255.0, label, seed + 6)
+                image = image * 255.0
             return _normalize(image, mode), label
     else:
         def load(path, label):

@@ -43,7 +43,7 @@ the text tower.
 
 The contrastive loss is **not** defined in this module;
 `dl_techniques.losses.CLIPContrastiveLoss` matches this model's output schema. See
-`src/train/cliffordnet/train_clip.py` for a full training usage example.
+`src/train/clip/train_clip.py` for a training usage example of the CLIP family (the CliffordCLIP trainer `train/cliffordnet/train_clip.py` was removed from the tree; see its git history).
 
 References (from the module docstring, `model.py`):
 
@@ -127,7 +127,7 @@ bias-free, 3x3, stride 1 or 2); 2 and any other size give `Conv(c) -> BN` (3x3 s
 kernel and stride equal to the patch) and follow `use_bias`. Every BatchNormalization takes
 momentum 0.9 and epsilon 1e-3 (the Keras value the hand-rolled stem had; the norm factory's own
 default is 1e-6). Its weights sit under `vision_stem/vision_stem_{conv1,norm1,conv2,norm2}/`.
-The trainer (`train/cliffordnet/train_clip.py`) classifies the sub-layer by the `vision_stem`
+The removed trainer (`train/cliffordnet/train_clip.py`) classified the sub-layer by the `vision_stem`
 prefix.
 
 ### Text tower
@@ -311,8 +311,8 @@ contrastive loss lives outside the model in `dl_techniques.losses.CLIPContrastiv
 
 ## 8. Training
 
-No public pretrained weights are distributed. The training entry point is
-`src/train/cliffordnet/train_clip.py`, which writes a single timestamped run directory
+No public pretrained weights are distributed. The training entry point was
+`src/train/cliffordnet/train_clip.py` (removed from the tree; see its git history), which wrote a single timestamped run directory
 per launch:
 
 ```

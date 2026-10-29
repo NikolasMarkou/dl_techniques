@@ -14,10 +14,13 @@ Constants (mean, std, class names, shapes) come from
 :mod:`dl_techniques.datasets.vision.classification`. ``_load_raw`` is the ONE place under
 ``src/train`` that reads ``keras.datasets``; a test replaces it.
 
-The in-memory pipeline order is fixed: image scaled to [0, 1], then the ``augment``
-hook, then normalization, then batching. Augmenting after normalizing and clipping
-saturated most pixels in ``train_vit`` once (its D-006/D-007), so the hook always sees
-[0, 1].
+The pipeline order is fixed: image scaled to [0, 1] (and resized or cropped), then the
+``augment`` hook, then normalization, then batching. Augmenting after normalizing and
+clipping saturated most pixels in ``train_vit`` once (its D-006/D-007), so the hook always
+sees [0, 1], for every dataset, ImageNet and Imagenette included. A hook is plain
+``(image, label)`` or seeded ``(seed, image, label)``
+(:mod:`dl_techniques.datasets.vision.augment_hook`); :mod:`train.common.image_augment`
+builds the shared seeded ones.
 """
 from __future__ import annotations
 
@@ -29,6 +32,7 @@ import keras
 import numpy as np
 import tensorflow as tf
 
+from dl_techniques.datasets.vision.augment_hook import Augment, with_hook
 from dl_techniques.datasets.vision.classification import DatasetSpec, get_spec
 from dl_techniques.datasets.vision.crops import flip_and_pad_crop
 from dl_techniques.datasets.vision.imagenet2012 import IMAGENET2012_DEFAULT_ROOT
@@ -58,7 +62,6 @@ DEFAULT_EVAL_SAMPLES = 2000
 NORMALIZE_MODES = ("standardize", "unit")
 LABEL_MODES = ("sparse", "one_hot")
 
-Augment = Callable[[tf.Tensor, tf.Tensor], Tuple[tf.Tensor, tf.Tensor]]
 
 
 # ---------------------------------------------------------------------
@@ -163,8 +166,8 @@ def array_examples(
         dataset = dataset.shuffle(len(x), seed=seed, reshuffle_each_iteration=True)
     dataset = dataset.map(lambda image, label: (resize(image), label),
                           num_parallel_calls=tf.data.AUTOTUNE)
-    if training and augment is not None:
-        dataset = dataset.map(augment, num_parallel_calls=tf.data.AUTOTUNE)
+    if training:
+        dataset = with_hook(dataset, augment, seed)
     return dataset.map(lambda image, label: (normalize(image), label),
                        num_parallel_calls=tf.data.AUTOTUNE)
 
@@ -346,8 +349,11 @@ def load_classification_data(
         ``"unit"`` (leave in [0, 1]).
     :param labels: ``"sparse"`` integer ids or ``"one_hot"`` float vectors.
     :param channels: MNIST only: ``3`` repeats the channel; ``None`` keeps it native.
-    :param augment: In-memory datasets only: a map applied to the train pipeline on the
-        [0, 1] image, e.g. :func:`flip_pad_crop`. ``None`` means no augmentation.
+    :param augment: A map applied to the train pipeline on the [0, 1] image, after the
+        resize or crop and before normalization, for every dataset: plain
+        ``(image, label)``, e.g. :func:`flip_pad_crop`, or seeded ``(seed, image, label)``,
+        e.g. ``train.common.image_augment.build_augment``. ``None`` means none. ImageNet and
+        Imagenette also need ``imagenet_augment=True`` (the hook runs after their crop).
     :param imagenet_augment: ImageNet and Imagenette: the loader's own train augmentation
         (the ``crop_policy`` of Imagenette; random-resized crop and flip for ImageNet).
     :param imagenet_augment_color: ImageNet only: also jitter brightness, contrast,
@@ -384,11 +390,6 @@ def load_classification_data(
         return _load_in_memory(
             spec, batch_size, seed, validation_split, normalize, labels, channels, augment,
             resize, max_samples)
-    if augment is not None:
-        raise ValueError(
-            f"augment applies to in-memory datasets; {spec.name} augments in its loader "
-            "(imagenet_augment)"
-        )
     if resize is not None:
         raise ValueError(f"resize applies to in-memory datasets; {spec.name} takes image_size")
     if channels not in (None, 3):
@@ -403,7 +404,7 @@ def load_classification_data(
             raise ValueError(f"imagenet_augment_color does not apply to {spec.name!r}")
         return _load_imagenette(
             spec, batch_size, seed, validation_split, normalize, labels, imagenet_augment,
-            crop_policy, max_samples, eval_samples, image_size)
+            crop_policy, max_samples, eval_samples, image_size, augment)
     if validation_split is not None:
         raise ValueError(
             f"validation_split={validation_split} does not apply to ImageNet, which selects "
@@ -412,7 +413,7 @@ def load_classification_data(
     return _load_imagenet(
         spec, batch_size, seed, holdout_per_class, normalize, labels, imagenet_augment,
         imagenet_augment_color,
-        max_samples, eval_samples, imagenet_root, devkit_dir, image_size)
+        max_samples, eval_samples, imagenet_root, devkit_dir, image_size, augment)
 
 
 def load_split_arrays(
@@ -551,7 +552,7 @@ def _load_imagenet(
         spec: DatasetSpec, batch_size: int, seed: int, holdout_per_class: Optional[int],
         normalize: str, labels: str, augment: bool, augment_color: bool,
         max_samples: Optional[int], eval_samples: int, root: Optional[str], devkit_dir: Optional[str],
-        image_size: Optional[int],
+        image_size: Optional[int], augment_hook: Optional[Augment],
 ) -> ClassificationData:
     root = IMAGENET2012_DEFAULT_ROOT if root is None else root
     holdout = DEFAULT_HOLDOUT_PER_CLASS if holdout_per_class is None else holdout_per_class
@@ -561,7 +562,7 @@ def _load_imagenet(
         root, devkit_dir, size, batch_size, seed, augment=augment,
         augment_color=augment_color, holdout_per_class=holdout,
         normalize="imagenet" if normalize == "standardize" else "unit",
-        num_classes=spec.num_classes, max_images=max_samples,
+        num_classes=spec.num_classes, max_images=max_samples, augment_hook=augment_hook,
     )
     return _finish_file_based(
         spec, batch_size, labels, normalize, size, eval_samples, train, select, test,
@@ -575,11 +576,13 @@ def _load_imagenette(
         spec: DatasetSpec, batch_size: int, seed: int, validation_split: Optional[float],
         normalize: str, labels: str, augment: bool, crop_policy: str,
         max_samples: Optional[int], eval_samples: int, image_size: Optional[int],
+        augment_hook: Optional[Augment],
 ) -> ClassificationData:
     split = DEFAULT_VALIDATION_SPLIT if validation_split is None else validation_split
     size = spec.input_shape[0] if image_size is None else image_size
     config = ImagenetteConfig(
         image_size=size, batch_size=batch_size, crop_policy=crop_policy, augment=augment,
+        augment_hook=augment_hook,
         normalize="imagenet" if normalize == "standardize" else "unit",
         validation_split=split, seed=seed, max_images=max_samples,
     )

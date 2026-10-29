@@ -7,15 +7,19 @@ the cliffordnet conditional/confidence denoisers, which were deleted, and went
 with them.
 
 ``augment_patch`` applies independent random horizontal/vertical flips and a
-random 90-degree rotation to a single image patch.
+random 90-degree rotation to a single image patch. It is
+``train.common.image_augment.random_dihedral`` with its seed drawn from the global TF
+generator (the denoiser pipelines carry no per-element seed); the THERA sample builder uses
+it too.
 """
 
 import tensorflow as tf
 
+from train.common.image_augment import random_dihedral, unseeded
+
+_dihedral = unseeded(random_dihedral())
+
 
 def augment_patch(patch: tf.Tensor) -> tf.Tensor:
     """Apply random flips and 90-degree rotations."""
-    patch = tf.image.random_flip_left_right(patch)
-    patch = tf.image.random_flip_up_down(patch)
-    k = tf.random.uniform([], 0, 4, dtype=tf.int32)
-    return tf.image.rot90(patch, k)
+    return _dihedral(patch)

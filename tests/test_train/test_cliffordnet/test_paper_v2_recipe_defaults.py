@@ -159,3 +159,31 @@ def test_the_built_model_has_the_presets_branches(monkeypatch, variant, cli_mode
     assert model.use_global_context is glob
     assert model.cli_mode == cli_mode
     assert model.depth == {"lite_g": 12, "nano_g": 12, "cn_64_5": 64}[variant]
+
+
+# ---------------------------------------------------------------------
+# --augment: the preset of train.common.image_augment
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("dataset, preset, erasing", [
+    ("cifar10", "cifar_autoaugment", 0.25), ("cifar100", "cifar_autoaugment", 0.25),
+    ("imagenette", "none", 0.0), ("imagenet", "none", 0.0),
+])
+def test_the_augmentation_preset_defaults_per_dataset(monkeypatch, dataset, preset, erasing):
+    got = _parsed_args(monkeypatch, "--dataset", dataset)
+    assert (got["augment"], got["random_erasing_prob"]) == (preset, erasing)
+
+
+def test_a_preset_replaces_the_paper_recipe_and_drops_the_erasing(monkeypatch):
+    got = _parsed_args(monkeypatch, "--dataset", "cifar10", "--augment", "cifar_light")
+    assert got["augment"] == "cifar_light" and got["random_erasing_prob"] == 0.0
+
+
+def test_the_erasing_probability_is_refused_without_its_preset(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["prog", "--dataset", "cifar10", "--augment", "flip",
+                                      "--random-erasing-prob", "0.1"])
+    with pytest.raises(SystemExit) as exc:
+        module.main()
+    assert exc.value.code == 2
+    assert "cifar_autoaugment" in capsys.readouterr().err

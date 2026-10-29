@@ -17,6 +17,7 @@ import pytest  # noqa: E402
 import tensorflow as tf  # noqa: E402
 
 import dl_techniques.datasets.vision.classification as classification  # noqa: E402
+from dl_techniques.datasets.vision.augment_hook import seeded  # noqa: E402
 import train.common.classification_data as cd  # noqa: E402
 from tests.classification_fakes import use_fake_imagenette  # noqa: E402
 from tests.imagenet_fake_tree import (  # noqa: E402
@@ -272,11 +273,12 @@ def test_imagenet_standardizes_with_the_spec_statistics(tree, three_class_imagen
     np.testing.assert_allclose(data.std, spec.std, rtol=1e-6)
 
 
-def test_imagenet_refuses_a_validation_split_and_an_in_memory_augment(tree, three_class_imagenet):
+def test_imagenet_refuses_a_validation_split_and_a_hook_that_would_never_run(
+        tree, three_class_imagenet):
     with pytest.raises(ValueError, match="validation_split=0.1 does not apply to ImageNet"):
         _imagenet(tree, validation_split=0.1)
-    with pytest.raises(ValueError, match="augment applies to in-memory datasets"):
-        _imagenet(tree, augment=cd.flip_pad_crop())
+    with pytest.raises(ValueError, match="augment_hook needs augment=True"):
+        _imagenet(tree, augment=cd.flip_pad_crop(), imagenet_augment=False)
     with pytest.raises(ValueError, match="channels=1 is not available for 'imagenet'"):
         _imagenet(tree, channels=1)
 
@@ -482,7 +484,7 @@ def test_imagenette_passes_the_crop_policy_and_the_augmentation_switch(
 @pytest.mark.parametrize("kwargs, message", [
     (dict(holdout_per_class=5), "holdout_per_class=5 does not apply to 'imagenette'"),
     (dict(imagenet_augment_color=True), "imagenet_augment_color does not apply to 'imagenette'"),
-    (dict(augment=cd.flip_pad_crop()), "augment applies to in-memory datasets"),
+    (dict(augment=cd.flip_pad_crop(), imagenet_augment=False), "augment_hook needs augment=True"),
     (dict(resize=64), "resize applies to in-memory datasets"),
     (dict(channels=1), "channels=1 is not available for 'imagenette'"),
     (dict(validation_split=0.0), "strictly inside"),
@@ -575,3 +577,71 @@ def test_flip_pad_crop_with_a_seed_is_reproducible_and_without_one_keeps_its_sig
     np.testing.assert_array_equal(run(5), run(5))
     out, label = cd.flip_pad_crop()(image, 7)
     assert out.shape == image.shape and int(label) == 7
+
+
+# ---------------------------------------------------------------------
+# The augment hook on every dataset: [0, 1] pixels, plain or seeded
+# ---------------------------------------------------------------------
+
+
+def _half(image, label):
+    return image * 0.0 + 0.5, label
+
+
+@seeded
+def _noise_by_seed(seed, image, label):
+    """Plant a value fixed by the element's seed, so a test reads the seed stream back."""
+    value = tf.cast(tf.random.stateless_uniform([], seed), image.dtype)
+    return image * 0.0 + value, label
+
+
+def _planted(data) -> np.ndarray:
+    return np.concatenate([x.numpy()[:, 0, 0, 0] for x, _ in data.train_ds])
+
+
+def test_a_seeded_hook_is_reproducible_per_seed_and_differs_between_epochs() -> None:
+    first = _planted(_load(augment=_noise_by_seed))
+    again = _planted(_load(augment=_noise_by_seed))
+    other_seed = _planted(_load(augment=_noise_by_seed, seed=4))
+    np.testing.assert_array_equal(first, again)
+    assert not np.array_equal(first, other_seed)
+    assert len(np.unique(first)) == len(first), "every element gets its own seed"
+    data = _load(augment=_noise_by_seed)
+    assert not np.array_equal(_planted(data), _planted(data)), "the next epoch draws new seeds"
+
+
+def test_a_plain_hook_still_runs_on_in_memory_data_unseeded() -> None:
+    x, _ = next(iter(_load(augment=_half).train_ds))
+    np.testing.assert_allclose(x.numpy(), 0.5)
+
+
+def test_imagenette_hook_sees_unit_pixels_before_normalization(imagenette_records) -> None:
+    data = _imagenette(normalize="standardize", augment=_half)
+    x, _ = next(iter(data.train_ds))
+    want = (0.5 - data.mean) / data.std
+    np.testing.assert_allclose(x.numpy()[:, 2, 2, :], np.tile(want, (x.shape[0], 1)), atol=1e-5)
+    held, _ = next(iter(data.select_ds))
+    assert not np.allclose(held.numpy(), x.numpy()[: held.shape[0]]), "select is never hooked"
+
+
+def test_imagenette_seeded_hook_is_reproducible_and_changes_each_epoch(imagenette_records) -> None:
+    first = _planted(_imagenette(augment=_noise_by_seed))
+    again = _planted(_imagenette(augment=_noise_by_seed))
+    np.testing.assert_array_equal(first, again)
+    assert len(np.unique(first)) == len(first)
+    data = _imagenette(augment=_noise_by_seed)
+    assert not np.array_equal(_planted(data), _planted(data))
+
+
+def test_imagenet_hook_sees_unit_pixels_before_normalization(tree, three_class_imagenet) -> None:
+    data = _imagenet(tree, normalize="standardize", augment=_half)
+    x, _ = next(iter(data.train_ds))
+    want = (0.5 - data.mean) / data.std
+    np.testing.assert_allclose(x.numpy()[:, 2, 2, :], np.tile(want, (x.shape[0], 1)), atol=1e-4)
+
+
+def test_imagenet_seeded_hook_is_reproducible(tree, three_class_imagenet) -> None:
+    first = _planted(_imagenet(tree, augment=_noise_by_seed, normalize="unit"))
+    again = _planted(_imagenet(tree, augment=_noise_by_seed, normalize="unit"))
+    np.testing.assert_allclose(first, again, atol=1e-6)
+    assert len(np.unique(np.round(first, 5))) == len(first)

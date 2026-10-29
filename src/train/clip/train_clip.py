@@ -35,6 +35,7 @@ from train.common import (
     save_training_history_json,
 )
 from dl_techniques.datasets.vision.imagenet2012 import IMAGENET_MEAN, IMAGENET_STD
+from train.common.image_augment import build_op, unseeded
 from train.common.callbacks import (
     BestSubmodelCheckpoint,
     EpochCSVLogger,
@@ -125,6 +126,7 @@ class CLIPDataLoader:
         self.tokenizer = tokenizer
         self.image_normalization = image_normalization
         self.augmentation = augmentation
+        self._photometric = unseeded(build_op("photometric"))
         logger.info(
             f"CLIPDataLoader: image_size={image_size}, context_length={context_length}, "
             f"normalization={image_normalization}, augmentation={augmentation}"
@@ -160,13 +162,14 @@ class CLIPDataLoader:
         return image
 
     def _augment_image(self, image: tf.Tensor) -> tf.Tensor:
-        """Apply data augmentation to image."""
-        image = tf.image.random_flip_left_right(image)
-        image = tf.image.random_brightness(image, max_delta=0.1)
-        image = tf.image.random_contrast(image, lower=0.9, upper=1.1)
-        if image.shape[-1] == 3:
-            image = tf.image.random_saturation(image, lower=0.9, upper=1.1)
-            image = tf.image.random_hue(image, max_delta=0.05)
+        """Apply the shared ``photometric`` preset to a 0..255 image.
+
+        The ops run on the [0, 1] image (a brightness delta of 0.1 is 10% of the range; on
+        0..255 values the old call moved a pixel by 0.1 of 255 levels, which did nothing), and
+        the result goes back to 0..255 clipped, the scale the resize and the normalization
+        after it expect.
+        """
+        image = self._photometric(image / 255.0) * 255.0
         return tf.clip_by_value(image, 0.0, 255.0)
 
     def preprocess_text(self, text: str) -> tf.Tensor:

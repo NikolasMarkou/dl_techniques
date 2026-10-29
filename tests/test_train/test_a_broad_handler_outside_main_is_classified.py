@@ -83,10 +83,6 @@ _OPTIONAL_OUTPUT = {
         ('on_epoch_end', 'Reconstruction failed epoch', 'predictions = self.model.predict(self.sample_',
          'reconstruction figure'),
     ],
-    'train/cliffordnet/train_clip.py': [
-        ('_run_probe', 'Retrieval probe failed at step', 'metrics = _compute_retrieval_metrics(self.cli',
-         'periodic retrieval probe written to probes.jsonl'),
-    ],
     'train/common/callbacks.py': [
         ('_plot', 'EpochMetricsPlotCallback: failed to crea', 'history = self._build_history()',
          'per-epoch metric figures and latest_metrics.json'),
@@ -252,32 +248,6 @@ _EXEMPT = {
          'an unreadable image is skipped and the next is drawn; every result row carries its scored count n'),
         ('_load_full_image', 'skip unreadable image', 'raw = tf.io.read_file(path)',
          'an unreadable image is skipped and the next is drawn; every result row carries its scored count n'),
-    ],
-    'train/cliffordnet/prepare_cc3m.py': [
-        ('_write_pair', '[warn] decode failed for', 'im = PILImage.open(BytesIO(jpg_bytes))',
-         'a corrupt JPEG is printed and its pair is not written (caption included)'),
-        ('_extract_split', 'HTTP open failed', 'tar = _open_tar_stream(tar_name)',
-         'counts the shard as failed and stops the split; the shard stays in progress and a rerun extracts it again under the same ids (D-187); main raises after every split (D-183)'),
-        ('_extract_split', 'tar read failed', 'for jpg_bytes, caption in _iter_pairs_in_tar(',
-         'counts the shard as failed and stops the split; the shard stays in progress and a rerun extracts it again under the same ids (D-187); main raises after every split (D-183)'),
-        ('_extract_split', 'pass', 'tar.close()',
-         'closing a stream during cleanup'),
-    ],
-    'train/cliffordnet/resize_cc3m_to_ssd.py': [
-        ('_resize_one', 'err:', 'if os.path.exists(dst):',
-         'returns an err status that main counts; main raises after every split (D-183)'),
-    ],
-    'train/cliffordnet/train_clip.py': [
-        ('_run_probe', "scale_val = float('nan')", 'scale_val = float(keras.ops.convert_to_numpy(',
-         'a logged diagnostic value (NaN when unreadable)'),
-        ('_gamma_mean', 'return None', 'return float(keras.ops.mean(keras.ops.convert',
-         'a logged diagnostic value (None when unreadable)'),
-    ],
-    'train/cliffordnet/train_downsampling_techniques.py': [
-        ('train_one_variant', 'BUILD FAILED for', 'model = build_variant(variant_name, num_class',
-         'returns None; train_all_variants records the variant as failed and raises after the sweep (D-095)'),
-        ('train_one_variant', 'TRAIN FAILED for', 'history = model.fit(train_ds, epochs=epochs, ',
-         'returns None; train_all_variants records the variant as failed and raises after the sweep (D-095)'),
     ],
     'train/common/callbacks.py': [
         ('read_current_lr', "return float('nan')", 'optimizer = model.optimizer',
@@ -566,14 +536,19 @@ def test_the_census_counts_are_pinned():
 
     Exempt 60 -> 59 and records 4 -> 3 when ``train.common.datasets`` lost its TFDS
     ImageNet branch: the handler around ``tfds.builder('imagenet2012')`` in
-    ``get_class_names`` went with it."""
+    ``get_class_names`` went with it.
+
+    Optional 59 -> 58, exempt 59 -> 50 and records 3 -> 2 when the CliffordCLIP trainer, its
+    CC3M preparation scripts and the downsampling sweep (``train/cliffordnet/train_clip.py``,
+    ``prepare_cc3m.py``, ``resize_cc3m_to_ssd.py``, ``train_downsampling_techniques.py``) left
+    the tree with their handlers."""
     verdicts = [verdict for rows in CENSUS.values() for _l, _n, verdict, _e in rows]
     counts = {kind: verdicts.count(kind)
               for kind in ("raises", "exits", "records", "optional", "exempt", None)}
-    assert counts == {"raises": 8, "exits": 4, "records": 3,
-                      "optional": 59, "exempt": 59, None: 0}
-    assert sum(len(entries) for entries in _OPTIONAL_OUTPUT.values()) == 59
-    assert sum(len(entries) for entries in _EXEMPT.values()) == 59
+    assert counts == {"raises": 8, "exits": 4, "records": 2,
+                      "optional": 58, "exempt": 50, None: 0}
+    assert sum(len(entries) for entries in _OPTIONAL_OUTPUT.values()) == 58
+    assert sum(len(entries) for entries in _EXEMPT.values()) == 50
 
 
 _PLANTED = '''
@@ -669,4 +644,4 @@ def test_the_census_tells_a_swallow_from_a_classified_handler():
 def test_the_census_sees_the_tree():
     """Anti-vacuity: the scan reaches the handlers it classifies."""
     assert sum(len(rows) for rows in CENSUS.values()) >= 120
-    assert len(CENSUS) >= 50
+    assert len(CENSUS) >= 45

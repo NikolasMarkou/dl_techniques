@@ -224,7 +224,7 @@ read `failed` in the helper's return value.
 `TrainingDashboardCallback` (not an audit), these image classification trainers do not follow the
 pattern yet: `alexnet`, `beit/train_classification.py`, `coshnet`,
 `energy_transformer/train_classification.py`, `mobilenet`, `resnet`, `vit`, `head_comparison`,
-`som_nd_soft/train_cifar.py`, `cliffordnet/train_downsampling_techniques.py`. `power_mlp` already writes the
+`som_nd_soft/train_cifar.py`. `power_mlp` already writes the
 figures and gets the schedule from the defaults whenever its `epoch_analysis` option is on. Bring a trainer up to the pattern when you touch it, and delete it
 from this list in the same commit. No test enforces this list.
 
@@ -353,7 +353,25 @@ train, and the TEST split never selects.
 - `normalize="standardize"` uses the dataset's published statistics, `"unit"` leaves [0, 1];
   `labels="one_hot"` for CapsNet; `channels=3` repeats MNIST's channel; `resize=` upsamples
   (AlexNet); `augment=` is a hook that sees the [0, 1] image BEFORE normalization (the vit D-006
-  rule). `flip_pad_crop` is the shared flip + pad-crop.
+  rule), on every dataset: after the resize for MNIST and CIFAR, after the crop and flip for
+  Imagenette and ImageNet (which also need `imagenet_augment=True`). `flip_pad_crop` is the plain
+  flip + pad-crop hook.
+- **Augmentation has one home, `train.common.image_augment`.** Every op is
+  `op(seed, image) -> image` on a [0, 1] `(H, W, C)` image of any size, no `clip_by_value`, all
+  randomness from the `int32` seed pair: `random_flip`, `flip_pad_crop`, `random_crop`,
+  `random_affine`, `photometric`, `random_erasing` (fill = the dataset mean in [0, 1] space, the
+  same as 0 after normalization), `random_dihedral`, `autoaugment` (PIL, a numpy generator from the
+  seed) and `compose`. `build_augment(preset)` returns the loader hook (`as_hook`), `build_op` the
+  bare op, `unseeded(op)` an `image -> image` map for a pipeline with no per-element seed (CLIP
+  image-text, DTD), `add_augmentation_arguments` declares `--augment`. Presets: `none`, `flip`,
+  `flip_pad_crop`, `cifar_light` (vit), `cifar_autoaugment` (cliffordnet, the paper recipe, with
+  `random_erasing_prob`), `photometric` (clip). A seeded hook is `(seed, image, label)`
+  (`dl_techniques.datasets.vision.augment_hook.seeded`): the loader gives each element its seed from
+  `tf.data.Dataset.random(seed, rerandomize_each_iteration=True)` zipped in BEFORE the parallel map, so
+  a run is reproducible from `--seed` and no epoch repeats another. Do not hand-roll a flip, crop or
+  colour jitter in a trainer: add the op here with a test in `tests/test_train/test_common_image_augment.py`.
+  Left on purpose with their own code: DINO multi-crop, video, detection/COCO, convunext's
+  mask-paired flips and imagenet2012's built-in crop and `augment_color`.
 - `add_selection_arguments(parser, imagenet=, in_memory=, figures=)` declares the matching flags
   (`--validation-split`, `--holdout-per-class`, `--max-samples`, `--imagenet-root`, `--devkit-dir`,
   `--eval-samples`), all defaulting to `None` so a flag that does not apply to the chosen dataset

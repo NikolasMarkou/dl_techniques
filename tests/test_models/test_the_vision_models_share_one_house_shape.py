@@ -1086,11 +1086,6 @@ def lost_anchor_tokens_over(sources: Sequence[str], expected: Dict[str, int]) ->
 #: was written). A token may move with its code inside the file or, for a family
 #: in :data:`ANCHOR_SETS`, to another file of the family; it may not disappear.
 ANCHOR_TOKENS: Dict[str, Dict[str, int]] = {
-    "src/train/cliffordnet/train_downsampling_techniques.py": {
-        "plan-2026-10-14T062616-81938e81/D-095": 1,
-        "plan-2026-10-14T062616-81938e81/D-117": 1,
-        "plan-2026-10-14T062616-81938e81/D-118": 1,
-    },
     "src/train/rbf_protonet/train_rbf_protonet.py": {
         "plan-2026-09-16T052349-7dfede94/D-003": 1,
         "plan-2026-09-16T052349-7dfede94/D-008": 1,

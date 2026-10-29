@@ -60,11 +60,6 @@ NOT_TRAINING: Dict[str, str] = {
     "train.bert.deploy": "loads a saved model and serves predictions",
     "train.bfunet.eval_per_pixel_uncertainty": "evaluates saved denoisers",
     "train.bfunet.eval_psnr_vs_noise": "evaluates saved denoisers",
-    "train.cliffordnet.eval_clip_retrieval": "scores a saved CLIP on retrieval",
-    "train.cliffordnet.filter_cc3m_clipscore": "scores CC3M pairs with a saved CLIP",
-    "train.cliffordnet.infer_cliffordnet_nlp": "generates text from a saved model",
-    "train.cliffordnet.prepare_cc3m": "data preparation",
-    "train.cliffordnet.resize_cc3m_to_ssd": "data preparation",
     "train.common.compare_runs": "compares two finished runs' histories",
     "train.convnext.run_stochastic_comparison": (
         "launches the seeded ConvNeXt trainer per arm and passes its --seed"),

@@ -14,9 +14,10 @@ the four trainers each declare their own ``TrainingConfig`` dataclass and this m
 must not learn any one of them.
 
 Promoted from four verbatim copies (``train.gpt2.pretrain``,
-``train.wave_field.pretrain``, ``train.wave_field.train_memory``,
-``train.cliffordnet.train_cliffordnet_nlp``); each of those keeps a module-level alias
-under its old private name so every import path live before the move still resolves.
+``train.wave_field.pretrain``, ``train.wave_field.train_memory`` and
+``train.cliffordnet.train_cliffordnet_nlp``, both since removed); the remaining ones keep a
+module-level alias under their old private name so every import path live before the move
+still resolves.
 ``train.wave_field.train_memory`` was DELETED on user instruction (2026-08-13), so
 three of the four copies survive; the measurements taken against the fourth are kept
 below because they are what several of the rules here were derived from.
@@ -256,9 +257,9 @@ def create_clm_loss_fn(config: Any) -> keras.losses.Loss:
 
 # DECISION plan-2026-08-12T123743-e798a9e1/D-009
 # `data_seed` is REQUIRED and has NO default. Three of the four pre-move copies
-# declared it required; `train.cliffordnet.train_cliffordnet_nlp` carried a
-# `data_seed: int = 42` default that was DEAD (its single caller passes
-# `data_seed=data_seed` explicitly, at train_cliffordnet_nlp.py:443-444).
+# declared it required; the removed `train.cliffordnet.train_cliffordnet_nlp` carried a
+# `data_seed: int = 42` default that was DEAD (its single caller passed
+# `data_seed=data_seed` explicitly).
 # WHAT NOT TO DO: do NOT re-add `= 42`. A default here turns the CLM resume-seeding
 # contract (`src/train/AGENTS.md` Pattern 3 / D-006: `data_seed = config.seed +
 # initial_step`) from a `TypeError` at the call site into a SILENT wrong article
@@ -282,7 +283,7 @@ def load_train_val_datasets(
     - ``True`` (default): wraps labels as ``(x, {"logits": y})``, matching a
       dict-output model (e.g. a bare ``GPT2``/``WaveFieldLLM`` that is not wrapped
       in ``CausalLanguageModel``, or is wrapped with ``pre_shifted=False``). This is
-      ``cliffordnet/train_cliffordnet_nlp.py``'s only, unchanged, path.
+      the removed ``cliffordnet/train_cliffordnet_nlp.py``'s only, unchanged, path.
     - ``False``: returns the raw ``(x, y)`` plain-tensor-pair datasets, unwrapped.
       Required for a ``CausalLanguageModel(skip_head=True, output_key=..., pre_shifted=True)``
       consumer, whose ``call()`` returns a plain tensor and whose ``pre_shifted=True``
@@ -297,8 +298,8 @@ def load_train_val_datasets(
         data_seed: Holdout-split seed. REQUIRED -- see the D-009 anchor above.
         wrap_for_dict_output: Whether to wrap labels as ``(x, {"logits": y})``.
             Defaults to ``True``, preserving the exact prior behavior for every
-            caller that does not pass this argument explicitly (currently only
-            ``cliffordnet/train_cliffordnet_nlp.py``). Pass ``False`` for a
+            caller that does not pass this argument explicitly (formerly only the
+            removed ``cliffordnet/train_cliffordnet_nlp.py``). Pass ``False`` for a
             ``CausalLanguageModel(pre_shifted=True)`` consumer (``gpt2``,
             ``wave_field``).
 

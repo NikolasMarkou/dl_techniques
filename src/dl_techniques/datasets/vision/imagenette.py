@@ -16,11 +16,12 @@ repeated off the disk. :func:`imagenette_examples` is the unbatched stage undern
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, NamedTuple, Optional, Tuple
+from typing import Callable, List, NamedTuple, Optional, Tuple
 
 import numpy as np
 import tensorflow as tf
 
+from dl_techniques.datasets.vision.augment_hook import apply_hook, seed_stream
 from dl_techniques.datasets.vision.crops import (
     flip_and_pad_crop,
     random_resized_crop,
@@ -116,6 +117,9 @@ class ImagenetteConfig:
     :param batch_size: Batch size of the pipeline.
     :param crop_policy: One of :data:`CROP_POLICIES`.
     :param augment: Train-time augmentation of the chosen crop policy.
+    :param augment_hook: A train augmentation hook (:mod:`dl_techniques.datasets.vision.augment_hook`)
+        run on the ``[0, 1]`` image after the crop policy, before normalization; a seeded hook
+        gets one seed per element. Needs ``augment``.
     :param normalize: ``"imagenet"`` ((x/255 - mean) / std) or ``"unit"`` (x/255).
     :param validation_split: Fraction of the train records held out as the selection split.
     :param seed: Seed of the selection permutation, the shuffle and the augmentation.
@@ -128,6 +132,7 @@ class ImagenetteConfig:
     batch_size: int = 128
     crop_policy: str = "random_resized_crop"
     augment: bool = True
+    augment_hook: Optional[Callable[..., Tuple[tf.Tensor, tf.Tensor]]] = None
     normalize: str = "imagenet"
     validation_split: float = 0.1
     seed: int = 0
@@ -151,6 +156,8 @@ def _check_config(config: ImagenetteConfig) -> None:
         raise ValueError(f"image_size must be positive, got {config.image_size}")
     if config.batch_size <= 0:
         raise ValueError(f"batch_size must be positive, got {config.batch_size}")
+    if config.augment_hook is not None and not config.augment:
+        raise ValueError("augment_hook needs augment=True: it would never run")
     if config.crop_policy not in CROP_POLICIES:
         raise ValueError(
             f"Unknown crop_policy {config.crop_policy!r}; known: {list(CROP_POLICIES)}")
@@ -205,7 +212,11 @@ def imagenette_examples(
         # Shuffle the encoded rows: the buffer holds bytes, not decoded floats.
         dataset = dataset.shuffle(len(rows), seed=config.seed, reshuffle_each_iteration=True)
 
-    def decode(encoded: tf.Tensor, label: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
+    hook = config.augment_hook if augment else None
+
+    def decode(
+            encoded: tf.Tensor, label: tf.Tensor, seed: Optional[tf.Tensor] = None,
+    ) -> Tuple[tf.Tensor, tf.Tensor]:
         # Records are VARIABLE-SIZE (e.g. 320x396x3): the geometry step must make them square.
         image = tf.cast(tf.io.decode_jpeg(encoded, channels=3), tf.float32) / 255.0
         if config.crop_policy == "resize":
@@ -217,12 +228,20 @@ def imagenette_examples(
         else:
             image = resize_and_centre_crop(image, size)
         image = tf.ensure_shape(image, (size, size, 3))
+        if hook is not None:
+            image, label = apply_hook(hook, image, label, seed)
         return (image - mean) / std, label
 
-    dataset = dataset.map(decode, num_parallel_calls=config.num_parallel_calls)
+    if hook is not None:
+        # One seed per element, attached before the parallel map (see augment_hook).
+        dataset = tf.data.Dataset.zip((dataset, seed_stream(config.seed))).map(
+            lambda item, seed: decode(*item, seed),
+            num_parallel_calls=config.num_parallel_calls)
+    else:
+        dataset = dataset.map(decode, num_parallel_calls=config.num_parallel_calls)
     logger.info(
         f"imagenette [{split}]: {len(rows)} images, {size}x{size}, "
-        f"crop_policy={config.crop_policy}, augment={augment}"
+        f"crop_policy={config.crop_policy}, augment={augment}, hook={hook is not None}"
     )
     return dataset, int(len(rows))
 

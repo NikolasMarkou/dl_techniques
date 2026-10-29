@@ -1,8 +1,7 @@
 """The contrastive stock-``fit`` bridge shared by the CLIP-family trainers.
 
-``train.clip.train_clip`` (CLIP, MobileCLIP) and
-``train.cliffordnet.train_clip`` (CliffordCLIP) both train a model whose
-output is a dict of two logit matrices through stock ``compile``/``fit``.
+``train.clip.train_clip`` (CLIP, MobileCLIP; the CliffordCLIP trainer shared it before it was
+removed) trains a model whose output is a dict of two logit matrices through stock ``compile``/``fit``.
 Keras hands each compiled loss and metric ONE leaf of a structured output, so
 `StackedCLIPLogits` stacks the two matrices into one ``(N, 2, N)`` tensor and
 the loss and metrics here unstack it (decisions.md D-036 of
@@ -159,8 +158,7 @@ def compile_for_contrastive_training(
 ) -> StackedCLIPLogits:
     """Wrap ``clip_model`` and compile it for stock ``fit``.
 
-    Interface contract (callers: ``train.clip.train_clip.main``, the
-    CliffordCLIP trainer ``train.cliffordnet.train_clip``, tests): returns a compiled
+    Interface contract (callers: ``train.clip.train_clip.main``, tests): returns a compiled
     `StackedCLIPLogits` with loss ``StackedCLIPContrastiveLoss(inner_loss)``
     (``inner_loss=None`` is ``CLIPContrastiveLoss()``) and metrics
     ``clip_i2t_accuracy`` and ``clip_i2t_recall@5``. Feed its ``fit`` the
@@ -201,8 +199,8 @@ def as_contrastive_fit_batches(dataset: tf.data.Dataset) -> tf.data.Dataset:
 def build_contrastive_loss(loss: str, label_smoothing: float) -> keras.losses.Loss:
     """The inner contrastive loss for ``--loss``.
 
-    Interface contract (callers: ``train.cliffordnet.train_clip.train``,
-    tests): returns a `keras.losses.Loss` whose ``call(None,
+    Interface contract (callers: tests; the CliffordCLIP trainer that used it was removed):
+    returns a `keras.losses.Loss` whose ``call(None,
     {'logits_per_image', 'logits_per_text'})`` is the per-sample loss, the
     shape `StackedCLIPContrastiveLoss` requires of its ``inner``. Neither
     loss applies a temperature of its own.

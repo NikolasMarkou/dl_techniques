@@ -141,34 +141,6 @@ def test_memory_growth_is_enabled_on_the_selected_gpu(monkeypatch):
     assert grown == [("/physical_device:GPU:0", True)]
 
 
-def test_the_downsampling_trainer_selects_through_setup_gpu(monkeypatch):
-    """It wrote ``str(args.gpu)`` itself before calling ``setup_gpu(None)``."""
-    import train.cliffordnet.train_downsampling_techniques as trainer
-
-    seen = []
-    monkeypatch.setattr(trainer, "setup_gpu", lambda gpu_id=None: seen.append(gpu_id))
-    monkeypatch.setattr(trainer, "train_all_variants", lambda args: None)
-    monkeypatch.setattr(sys, "argv", ["train_downsampling_techniques", "--gpu", "0"])
-    monkeypatch.setenv(VAR, "1")
-    trainer.main()
-    assert seen == [0]
-    assert os.environ[VAR] == "1"
-
-
-def test_the_clifford_clip_trainer_does_not_preselect_at_import():
-    """Its import-time block wrote ``--gpu``'s value before ``setup_gpu`` ran.
-
-    Two selections cannot both index into the list: the first one would have
-    already narrowed it to one entry.
-    """
-    from pathlib import Path
-
-    source = (Path(gpu_module.__file__).resolve().parents[1]
-              / "cliffordnet" / "train_clip.py").read_text(encoding="utf-8")
-    assert f'os.environ["{VAR}"] =' not in source
-    assert "setup_gpu(args.gpu)" in source
-
-
 # ---------------------------------------------------------------------------
 # Census: train/common/gpu.py is the only writer of the variable (step 13.7, D-116)
 # ---------------------------------------------------------------------------

@@ -13,8 +13,9 @@ One home for the numbers and the one operation that more than one dataset module
   both build on.
 """
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
+import numpy as np
 import tensorflow as tf
 
 #: Evaluation centre-crop fraction: the shorter side is resized to ``image_size /
@@ -63,7 +64,7 @@ def resize_and_centre_crop(image: tf.Tensor, image_size: int) -> tf.Tensor:
 
 def flip_and_pad_crop(
         image: tf.Tensor, pad: int = 4, mode: str = "CONSTANT", flip: bool = True,
-        seed: Optional[int] = None,
+        seed: Optional[Union[int, tf.Tensor]] = None,
 ) -> tf.Tensor:
     """Random horizontal flip, then a ``pad``-pixel pad and a random crop back to the size.
 
@@ -76,11 +77,22 @@ def flip_and_pad_crop(
     :param pad: Pixels added on each side.
     :param mode: ``tf.pad`` mode (``"CONSTANT"``, ``"REFLECT"``, ``"SYMMETRIC"``).
     :param flip: Whether to flip horizontally (not for digits).
-    :param seed: Op-level seed of the flip and the crop; ``None`` draws from the global
-        generator.
+    :param seed: ``None`` draws from the global generator; an ``int`` is the op-level seed of
+        the flip and the crop; an ``int32``/``int64`` tensor of shape ``(2,)`` makes both
+        stateless, a pure function of ``(seed, image)`` (the per-element seed of
+        :mod:`dl_techniques.datasets.vision.augment_hook`).
     """
+    stateless = tf.is_tensor(seed) or isinstance(seed, (tuple, list, np.ndarray))
+    if stateless:
+        seed = tf.convert_to_tensor(seed)
+        flip_seed, crop_seed = tf.unstack(tf.random.experimental.stateless_split(seed, 2))
     if flip:
-        image = tf.image.random_flip_left_right(image, seed=seed)
+        image = (tf.image.stateless_random_flip_left_right(image, flip_seed) if stateless
+                 else tf.image.random_flip_left_right(image, seed=seed))
     size = tf.shape(image)
-    image = tf.pad(image, [[pad, pad], [pad, pad], [0, 0]], mode=mode)
-    return tf.image.random_crop(image, size, seed=seed)
+    padded = tf.pad(image, [[pad, pad], [pad, pad], [0, 0]], mode=mode)
+    if stateless:
+        cropped = tf.image.stateless_random_crop(padded, size, crop_seed)
+        cropped.set_shape(image.shape)
+        return cropped
+    return tf.image.random_crop(padded, size, seed=seed)

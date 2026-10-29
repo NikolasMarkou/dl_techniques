@@ -1127,7 +1127,7 @@ class CliffordCLIP(keras.Model):
         """Apply the vision body and flatten its last-stage map to tokens.
 
         Interface contract (callers: :meth:`encode_image`, and the vision
-        pretraining classifier of ``train/cliffordnet/train_clip.py``, which
+        pretraining classifier of the removed ``train/cliffordnet/train_clip.py``, which
         pools these tokens with ``vision_det_pool`` exactly as the CLIP anchor
         does): returns ``(B, H' * W', vision_stage_channels[-1])`` in
         row-major order; it raises nothing of its own.
@@ -1556,5 +1556,5 @@ def create_clifford_clip(
 # ===========================================================================
 #
 # Training uses dl_techniques.losses.CLIPContrastiveLoss (or SigLIPContrastiveLoss),
-# which matches this model's output schema; train/cliffordnet/train_clip.py trains
+# which matches this model's output schema; the removed train/cliffordnet/train_clip.py trained
 # it under stock compile/fit through the stacking bridge of train/clip/train_clip.py.

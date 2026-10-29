@@ -4,6 +4,7 @@ import gc
 import json
 import keras
 import numpy as np
+import tensorflow as tf
 import matplotlib.pyplot as plt
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -12,6 +13,8 @@ from typing import Tuple, Optional, Dict, Any, List
 from train.common import setup_gpu, set_seeds, create_base_argument_parser, create_callbacks, save_config_json
 from train.common.classification_data import SplitArrays, add_selection_arguments, load_split_arrays
 from train.common.run_io import default_experiment_name
+from train.common.image_augment import as_hook, compose, photometric, random_affine, random_flip
+from dl_techniques.datasets.vision.augment_hook import Augment, with_hook
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import optimizer_builder
 from dl_techniques.layers.memory.som_nd_soft_layer import SoftSOMLayer
@@ -86,17 +89,32 @@ def load_cifar_data(config: CIFARSOMConfig) -> SplitArrays:
     )
 
 
-def create_augmentation_layer(config: CIFARSOMConfig) -> keras.layers.Layer:
-    """Create data augmentation preprocessing layer."""
+def create_augmentation(config: CIFARSOMConfig) -> Optional[Augment]:
+    """The train augmentation hook (``train.common.image_augment``), or ``None`` when off.
+
+    Flip, a rotation of up to ``36 * s`` degrees, zoom and translation of ``0.1 * s``, brightness
+    and contrast of ``0.2 * s``, with ``s = augmentation_strength``. It runs on the [0, 1] image
+    and draws new values every epoch. The Keras ``RandomBrightness`` and ``RandomContrast``
+    layers this replaces assume a 0-255 ``value_range``, so on a [0, 1] image their delta
+    saturated it, and the layer ran once over ``x_train``, freezing one augmentation for the
+    whole run.
+    """
+    if not config.use_data_augmentation:
+        return None
     s = config.augmentation_strength
-    return keras.Sequential([
-        keras.layers.RandomFlip("horizontal"),
-        keras.layers.RandomRotation(0.1 * s),
-        keras.layers.RandomZoom(0.1 * s),
-        keras.layers.RandomTranslation(0.1 * s, 0.1 * s),
-        keras.layers.RandomBrightness(0.2 * s),
-        keras.layers.RandomContrast(0.2 * s),
-    ], name="augmentation")
+    return as_hook(compose(
+        random_flip(),
+        random_affine(rotation=36.0 * s, zoom=0.1 * s, translation=0.1 * s),
+        photometric(brightness=0.2 * s, contrast=0.2 * s),
+    ))
+
+
+def make_train_dataset(x_train: np.ndarray, config: CIFARSOMConfig) -> tf.data.Dataset:
+    """Batches of ``(augmented image, clean image)``: the autoencoder reconstructs the clean one."""
+    dataset = tf.data.Dataset.from_tensor_slices((x_train, x_train))
+    dataset = dataset.shuffle(len(x_train), seed=config.seed, reshuffle_each_iteration=True)
+    dataset = with_hook(dataset, create_augmentation(config), config.seed)
+    return dataset.batch(config.batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
 
 
 # =============================================================================
@@ -558,8 +576,7 @@ def train_cifar_som_autoencoder(config: CIFARSOMConfig) -> keras.Model:
     arrays = load_cifar_data(config)
     x_train, x_select, x_test, y_test = arrays.x_train, arrays.x_select, arrays.x_test, arrays.y_test
     logger.info(f"Train: {len(x_train)}, selection: {len(x_select)}, test: {len(x_test)}")
-    x_train_aug = create_augmentation_layer(config)(x_train, training=True) \
-        if config.use_data_augmentation else x_train
+    train_ds = make_train_dataset(x_train, config)
 
     model = create_cifar_som_autoencoder(config)
     steps_per_epoch = len(x_train) // config.batch_size
@@ -600,7 +617,7 @@ def train_cifar_som_autoencoder(config: CIFARSOMConfig) -> keras.Model:
     save_config_json(config, str(results_dir), "config.json")
 
     model.fit(
-        x_train_aug, x_train, batch_size=config.batch_size,
+        train_ds,
         epochs=config.epochs, validation_data=(x_select, x_select),
         callbacks=callbacks, verbose=1
     )

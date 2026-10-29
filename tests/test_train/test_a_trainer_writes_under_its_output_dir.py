@@ -124,35 +124,6 @@ def test_darkir_writes_under_its_output_dir(monkeypatch, tmp_path):
     assert seen["output_root"] == str(tmp_path)
 
 
-def test_the_downsampling_sweep_writes_under_its_output_dir(monkeypatch, tmp_path):
-    from train.cliffordnet import train_downsampling_techniques as module
-
-    # A run that ignored the flag would write ``results/`` here, not into
-    # the repository.
-    monkeypatch.chdir(tmp_path)
-    out = tmp_path / "out"
-    roots = []
-
-    def fake_train_one_variant(variant_name, args, run_root, *rest):
-        roots.append(run_root)
-        return {
-            "variant": variant_name, "parameters": 1,
-            "best_val_accuracy": 0.0, "final_val_accuracy": 0.0,
-            "best_val_top5_accuracy": 0.0, "wall_seconds": 0.0,
-            "epochs_trained": 1, "results_dir": run_root,
-        }
-
-    use_raw_from_unit(monkeypatch, _tiny_cifar)
-    monkeypatch.setattr(module, "train_one_variant", fake_train_one_variant)
-    args = module._parse_args(
-        ["--variant", "V1_3stage_strided_conv", "--output-dir", str(out)]
-    )
-    module.train_all_variants(args)
-    assert len(roots) == 1
-    assert roots[0].startswith(str(out))
-    assert not (tmp_path / "results").exists()
-
-
 def _capture_common_callbacks(monkeypatch, module):
     seen = {}
 

@@ -9,6 +9,12 @@ AutoAugment (CIFAR-10 policy), random flip/crop, per-channel normalisation, and
 random erasing 0.25. Remaining differences from the authors' run: the cosine here
 decays per step and ends at 1e-5 (alpha 0.01), theirs per epoch to 0.
 
+The augmentation is ``train.common.image_augment``'s (``--augment``, default
+``cifar_autoaugment`` on CIFAR: flip, pad-4 crop, the CIFAR-10 AutoAugment policy, random
+erasing), seeded from ``--seed`` and applied to the [0, 1] image before standardization.
+It is a hook of ``load_classification_data``, so ``--augment`` also works on ImageNet and
+Imagenette on top of their random-resized-crop.
+
 Label smoothing is opt-in (``--label-smoothing``, off in the paper recipe).
 
 ``--dataset imagenet`` trains on the extracted ImageNet-1k (``--imagenet-root``,
@@ -23,25 +29,18 @@ seeded ``--validation-split`` slice of train, the labelled validation split as t
 """
 
 import os
-import math
 from pathlib import Path
 import numpy as np
 import tensorflow as tf
 import keras
-from typing import Dict, Any, List, Tuple, Optional, Sequence
-from PIL import Image, ImageOps, ImageEnhance
+from typing import Dict, Any, List, Optional
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.datasets.vision.classification import (
-    CIFAR10_MEAN,
-    CIFAR10_STD,
-    CIFAR100_MEAN,
-    CIFAR100_STD,
-)
+from dl_techniques.datasets.vision.classification import get_spec
 from dl_techniques.models.vision.cliffordnet import CliffordNet, HierarchicalCliffordNet
 from dl_techniques.optimization import (
     optimizer_builder,
@@ -65,8 +64,8 @@ from train.common.conformal import add_conformal_arguments, run_conformal
 from train.common.classification_data import (
     add_selection_arguments,
     load_classification_data,
-    load_split_arrays,
 )
+from train.common.image_augment import add_augmentation_arguments, build_augment
 from train.common.run_io import save_training_history_json
 from train.convnext.common import build_loss
 
@@ -85,310 +84,6 @@ _STOCHASTIC_DEPTH_BY_VARIANT: Dict[str, float] = {
 }
 # Variants built by HierarchicalCliffordNet: the presets of its own table plus "custom_hier".
 _HIERARCHICAL_VARIANTS = (*HierarchicalCliffordNet.MODEL_VARIANTS, "custom_hier")
-
-
-# ---------------------------------------------------------------------
-# Per-channel normalisation constants (computed from training sets; the
-# one home is train.common.datasets, D-112)
-# ---------------------------------------------------------------------
-
-_CIFAR_STATS: Dict[str, Dict[str, np.ndarray]] = {
-    "cifar10": {
-        "mean": np.array(CIFAR10_MEAN, dtype=np.float32),
-        "std": np.array(CIFAR10_STD, dtype=np.float32),
-    },
-    "cifar100": {
-        "mean": np.array(CIFAR100_MEAN, dtype=np.float32),
-        "std": np.array(CIFAR100_STD, dtype=np.float32),
-    },
-}
-
-
-# ---------------------------------------------------------------------
-# CIFAR-10 AutoAugment policy (from the original AutoAugment paper)
-# Each sub-policy is a list of (op_name, probability, magnitude_index).
-# Magnitude indices map to operation-specific ranges (num_bins=31).
-# ---------------------------------------------------------------------
-
-_CIFAR10_POLICIES = [
-    [("Invert", 0.1, 7), ("Contrast", 0.2, 6)],
-    [("Rotate", 0.7, 2), ("TranslateX", 0.3, 9)],
-    [("Sharpness", 0.8, 1), ("Sharpness", 0.9, 3)],
-    [("ShearY", 0.5, 8), ("TranslateY", 0.7, 9)],
-    [("AutoContrast", 0.5, 8), ("Equalize", 0.9, 2)],
-    [("ShearY", 0.7, 2), ("Invert", 0.4, 7)],
-    [("Color", 0.6, 1), ("Equalize", 1.0, 2)],
-    [("Invert", 0.6, 4), ("Rotate", 0.6, 4)],
-    [("Solarize", 0.3, 5), ("AutoContrast", 0.1, 12)],
-    [("Equalize", 0.2, 4), ("Rotate", 0.6, 8)],
-    [("Color", 0.1, 0), ("Brightness", 0.7, 2)],
-    [("Sharpness", 0.4, 7), ("TranslateX", 0.9, 9)],
-    [("ShearX", 0.6, 5), ("Rotate", 0.7, 2)],
-    [("AutoContrast", 0.8, 4), ("Solarize", 0.4, 5)],
-    [("TranslateY", 0.9, 9), ("TranslateY", 0.7, 9)],
-    [("AutoContrast", 0.9, 2), ("Solarize", 0.8, 3)],
-    [("Equalize", 0.8, 8), ("Invert", 0.1, 3)],
-    [("TranslateY", 0.7, 9), ("AutoContrast", 0.9, 1)],
-    [("Solarize", 0.4, 5), ("AutoContrast", 0.9, 3)],
-    [("TranslateY", 0.7, 9), ("TranslateY", 0.7, 9)],
-    [("AutoContrast", 0.9, 0), ("Solarize", 0.4, 3)],
-    [("Equalize", 0.7, 5), ("Invert", 0.1, 3)],
-    [("Equalize", 0.7, 8), ("TranslateY", 0.3, 9)],
-    [("Rotate", 0.8, 7), ("TranslateY", 0.7, 9)],
-    [("ShearX", 0.7, 5), ("Equalize", 0.8, 5)],
-]
-
-_NUM_MAGNITUDE_BINS = 31
-
-
-def _apply_autoaugment_op(
-    pil_img: Image.Image, op_name: str, magnitude_idx: int, img_size: int,
-) -> Image.Image:
-    """Apply a single AutoAugment operation to a PIL image.
-
-    Magnitude mapping matches torchvision AutoAugment with num_bins=31.
-    """
-    m = magnitude_idx
-    n = _NUM_MAGNITUDE_BINS - 1  # 30
-
-    # --- Unsigned ops (no magnitude or special handling) ---
-    if op_name == "Invert":
-        return ImageOps.invert(pil_img)
-    if op_name == "AutoContrast":
-        return ImageOps.autocontrast(pil_img)
-    if op_name == "Equalize":
-        return ImageOps.equalize(pil_img)
-    if op_name == "Posterize":
-        bits = max(1, int(8 - round(m / (n / 4.0))))
-        return ImageOps.posterize(pil_img, bits)
-    if op_name == "Solarize":
-        threshold = int(255 - m / n * 255)
-        return ImageOps.solarize(pil_img, threshold)
-
-    # --- Compute base magnitude ---
-    if op_name in ("ShearX", "ShearY"):
-        magnitude = m / n * 0.3
-    elif op_name in ("TranslateX", "TranslateY"):
-        magnitude = m / n * (150.0 / 331.0 * img_size)
-    elif op_name == "Rotate":
-        magnitude = m / n * 30.0
-    elif op_name in ("Brightness", "Color", "Contrast", "Sharpness"):
-        magnitude = m / n * 0.9
-    else:
-        return pil_img
-
-    # --- Random sign for signed operations ---
-    if np.random.random() > 0.5:
-        magnitude = -magnitude
-
-    # --- Enhancement operations ---
-    if op_name == "Brightness":
-        return ImageEnhance.Brightness(pil_img).enhance(1.0 + magnitude)
-    if op_name == "Color":
-        return ImageEnhance.Color(pil_img).enhance(1.0 + magnitude)
-    if op_name == "Contrast":
-        return ImageEnhance.Contrast(pil_img).enhance(1.0 + magnitude)
-    if op_name == "Sharpness":
-        return ImageEnhance.Sharpness(pil_img).enhance(1.0 + magnitude)
-
-    # --- Geometric operations ---
-    fill = (128, 128, 128)
-
-    if op_name == "Rotate":
-        return pil_img.rotate(magnitude, fillcolor=fill)
-    if op_name == "ShearX":
-        return pil_img.transform(
-            pil_img.size, Image.AFFINE, (1, magnitude, 0, 0, 1, 0),
-            fillcolor=fill,
-        )
-    if op_name == "ShearY":
-        return pil_img.transform(
-            pil_img.size, Image.AFFINE, (1, 0, 0, magnitude, 1, 0),
-            fillcolor=fill,
-        )
-    if op_name == "TranslateX":
-        pixels = int(round(magnitude))
-        return pil_img.transform(
-            pil_img.size, Image.AFFINE, (1, 0, pixels, 0, 1, 0),
-            fillcolor=fill,
-        )
-    if op_name == "TranslateY":
-        pixels = int(round(magnitude))
-        return pil_img.transform(
-            pil_img.size, Image.AFFINE, (1, 0, 0, 0, 1, pixels),
-            fillcolor=fill,
-        )
-
-    return pil_img
-
-
-def _autoaugment_cifar10(image_np: np.ndarray) -> np.ndarray:
-    """Apply CIFAR-10 AutoAugment policy to a float32 [0,1] HWC array."""
-    pil_img = Image.fromarray(
-        np.clip(image_np * 255.0, 0, 255).astype(np.uint8)
-    )
-    img_size = pil_img.size[0]
-
-    idx = np.random.randint(len(_CIFAR10_POLICIES))
-    sub_policy = _CIFAR10_POLICIES[idx]
-
-    for op_name, prob, mag_idx in sub_policy:
-        if np.random.random() > prob:
-            continue
-        pil_img = _apply_autoaugment_op(pil_img, op_name, mag_idx, img_size)
-
-    return np.array(pil_img, dtype=np.float32) / 255.0
-
-
-# ---------------------------------------------------------------------
-# Random erasing (matches torchvision.transforms.RandomErasing defaults)
-# Applied AFTER normalisation so fill_value=0 corresponds to the mean.
-# ---------------------------------------------------------------------
-
-
-def _random_erase(
-    image_np: np.ndarray,
-    sl: float = 0.02,
-    sh: float = 0.33,
-    r1: float = 0.3,
-    r2: float = 3.3,
-) -> np.ndarray:
-    """Erase a random rectangle from a normalised image, filling with 0."""
-    h, w, _ = image_np.shape
-    area = h * w
-
-    for _ in range(100):
-        target_area = np.random.uniform(sl, sh) * area
-        log_ratio = np.random.uniform(math.log(r1), math.log(r2))
-        aspect = math.exp(log_ratio)
-
-        eh = int(round(math.sqrt(target_area * aspect)))
-        ew = int(round(math.sqrt(target_area / aspect)))
-
-        if 0 < eh < h and 0 < ew < w:
-            top = np.random.randint(0, h - eh)
-            left = np.random.randint(0, w - ew)
-            image_np = image_np.copy()
-            image_np[top : top + eh, left : left + ew, :] = 0.0
-            return image_np
-
-    return image_np
-
-
-# ---------------------------------------------------------------------
-# Per-image augmentation (train) — matches the reference PyTorch recipe:
-#   RandomCrop(32, pad=4) → RandomHFlip → AutoAugment → Normalize → RandomErasing
-# ---------------------------------------------------------------------
-
-
-def _normalization_stats(
-    dataset_name: str,
-    normalization: Optional[Tuple[Sequence[float], Sequence[float]]],
-) -> Tuple[np.ndarray, np.ndarray]:
-    """``(mean, std)`` as float32 arrays: the caller's, else the dataset's."""
-    if normalization is None:
-        stats = _CIFAR_STATS[dataset_name]
-        return stats["mean"], stats["std"]
-    mean, std = normalization
-    return np.asarray(mean, dtype=np.float32), np.asarray(std, dtype=np.float32)
-
-
-def _make_train_augment_fn(
-    dataset_name: str, random_erasing_prob: float = 0.25,
-    normalization: Optional[Tuple[Sequence[float], Sequence[float]]] = None,
-):
-    """Create a per-image train augmentation function (numpy-level).
-
-    Returned callable takes a float32 [0,1] HWC array and returns
-    a normalised float32 HWC array with augmentations applied. The
-    normalisation is ``normalization`` (``(mean, std)``) when given, else the
-    dataset's own statistics.
-    """
-    mean, std = _normalization_stats(dataset_name, normalization)
-    erasing_prob = random_erasing_prob
-
-    def augment(image_np: np.ndarray) -> np.ndarray:
-        # 1. Random horizontal flip
-        if np.random.random() > 0.5:
-            image_np = image_np[:, ::-1, :].copy()
-
-        # 2. Pad-4 + random crop back to 32×32
-        padded = np.pad(image_np, ((4, 4), (4, 4), (0, 0)), mode="constant")
-        top = np.random.randint(0, 9)  # 0..8 inclusive (40-32=8)
-        left = np.random.randint(0, 9)
-        image_np = padded[top : top + 32, left : left + 32, :]
-
-        # 3. AutoAugment (CIFAR-10 policy, applied on [0,1] images)
-        image_np = _autoaugment_cifar10(image_np)
-
-        # 4. Per-channel normalisation
-        image_np = (image_np - mean) / std
-
-        # 5. Random erasing (on normalised images, fill=0 = dataset mean)
-        if np.random.random() < erasing_prob:
-            image_np = _random_erase(image_np)
-
-        return image_np.astype(np.float32)
-
-    return augment
-
-
-# ---------------------------------------------------------------------
-# tf.data pipelines
-# ---------------------------------------------------------------------
-
-
-def build_train_dataset(
-    x: np.ndarray,
-    y: np.ndarray,
-    batch_size: int,
-    dataset_name: str,
-    random_erasing_prob: float = 0.25,
-    normalization: Optional[Tuple[Sequence[float], Sequence[float]]] = None,
-) -> tf.data.Dataset:
-    """Build a shuffled, augmented, normalised training dataset.
-
-    ``normalization`` (``(mean, std)``) overrides the dataset statistics; the
-    CliffordCLIP vision pretraining passes the contrastive stage's (D-090).
-    """
-    augment_fn = _make_train_augment_fn(
-        dataset_name, random_erasing_prob, normalization)
-
-    ds = tf.data.Dataset.from_tensor_slices((x, y))
-    ds = ds.shuffle(buffer_size=len(x), reshuffle_each_iteration=True)
-
-    def _map_fn(image, label):
-        [image] = tf.numpy_function(augment_fn, [image], [tf.float32])
-        image.set_shape([32, 32, 3])
-        return image, label
-
-    ds = ds.map(_map_fn, num_parallel_calls=tf.data.AUTOTUNE)
-    ds = ds.batch(batch_size, drop_remainder=True)
-    return ds.prefetch(tf.data.AUTOTUNE)
-
-
-def build_eval_dataset(
-    x: np.ndarray,
-    y: np.ndarray,
-    batch_size: int,
-    dataset_name: str,
-    normalization: Optional[Tuple[Sequence[float], Sequence[float]]] = None,
-) -> tf.data.Dataset:
-    """Build a normalised (no augmentation) evaluation dataset.
-
-    ``normalization`` (``(mean, std)``) overrides the dataset statistics.
-    """
-    mean_np, std_np = _normalization_stats(dataset_name, normalization)
-    mean = tf.constant(mean_np)
-    std = tf.constant(std_np)
-
-    def _normalize(image, label):
-        return (image - mean) / std, label
-
-    ds = tf.data.Dataset.from_tensor_slices((x, y))
-    ds = ds.map(_normalize, num_parallel_calls=tf.data.AUTOTUNE)
-    ds = ds.batch(batch_size)
-    return ds.prefetch(tf.data.AUTOTUNE)
 
 
 # ---------------------------------------------------------------------
@@ -501,55 +196,43 @@ def train_model(args) -> None:
     set_seeds(args.seed)
 
     # ---- Data --------------------------------------------------------
-    # x_eval / y_eval are the in-memory images the end-of-run figures, the model
-    # analysis and the save/reload check read; the datasets feed fit and evaluate.
-    figure_kwargs: Dict[str, Any] = {}
-    file_based = args.dataset in ("imagenet", "imagenette")
-    if file_based:
-        if args.dataset == "imagenet":
-            require_imagenet_root(args.imagenet_root)
-            data = load_classification_data(
-                "imagenet", batch_size=args.batch_size, seed=args.seed, normalize="standardize",
-                imagenet_augment=True, holdout_per_class=args.holdout_per_class,
-                max_samples=args.max_samples, eval_samples=args.eval_samples,
-                imagenet_root=args.imagenet_root, devkit_dir=args.devkit_dir,
-                image_size=args.image_size,
-            )
-        else:
-            data = load_classification_data(
-                "imagenette", batch_size=args.batch_size, seed=args.seed,
-                normalize="standardize", imagenet_augment=True,
-                crop_policy="random_resized_crop", validation_split=args.validation_split,
-                max_samples=args.max_samples, eval_samples=args.eval_samples,
-                image_size=args.image_size,
-            )
-        # Selection (fit validation, the best checkpoint) is a held-out slice of train;
-        # the official val split is the test set.
-        train_ds, val_ds, test_ds = data.train_ds, data.select_ds, data.test_ds
-        steps_per_epoch = data.steps_per_epoch
-        num_classes = data.num_classes
-        input_shape = data.input_shape
-        class_names = data.class_names
-        x_eval, y_eval = data.x_fig, data.y_fig
-        # The images are standardized, so the figures un-standardize them.
-        figure_kwargs = dict(mean=data.mean, std=data.std)
-        # fit and the final evaluate see all of their split; the figures see the head.
-        figure_ds = tf.data.Dataset.from_tensor_slices(x_eval).batch(args.batch_size)
+    # x_eval / y_eval are the in-memory test images the end-of-run figures, the model
+    # analysis and the save/reload check read (standardized, like the datasets that feed
+    # fit and evaluate); the augmentation is train.common.image_augment's, on the [0, 1]
+    # image before the standardization.
+    augment = build_augment(
+        args.augment, random_erasing_prob=args.random_erasing_prob,
+        fill=get_spec(args.dataset).mean)
+    load_kwargs: Dict[str, Any] = dict(
+        batch_size=args.batch_size, seed=args.seed, normalize="standardize",
+        max_samples=args.max_samples, augment=augment)
+    if args.dataset == "imagenet":
+        require_imagenet_root(args.imagenet_root)
+        load_kwargs.update(
+            imagenet_augment=True, holdout_per_class=args.holdout_per_class,
+            eval_samples=args.eval_samples, imagenet_root=args.imagenet_root,
+            devkit_dir=args.devkit_dir, image_size=args.image_size)
+    elif args.dataset == "imagenette":
+        load_kwargs.update(
+            imagenet_augment=True, crop_policy="random_resized_crop",
+            validation_split=args.validation_split, eval_samples=args.eval_samples,
+            image_size=args.image_size)
     else:
-        arrays = load_split_arrays(
-            args.dataset, seed=args.seed, validation_split=args.validation_split,
-            max_samples=args.max_samples)
-        input_shape, num_classes = arrays.input_shape, arrays.num_classes
-        train_ds = build_train_dataset(
-            arrays.x_train, arrays.y_train, args.batch_size, args.dataset,
-            random_erasing_prob=args.random_erasing_prob,
-        )
-        val_ds = build_eval_dataset(arrays.x_select, arrays.y_select, args.batch_size, args.dataset)
-        test_ds = build_eval_dataset(arrays.x_test, arrays.y_test, args.batch_size, args.dataset)
-        x_eval, y_eval = arrays.x_test, arrays.y_test
-        steps_per_epoch = len(arrays.x_train) // args.batch_size
-        class_names = arrays.class_names
-        figure_ds = test_ds
+        load_kwargs.update(validation_split=args.validation_split)
+    data = load_classification_data(args.dataset, **load_kwargs)
+    # Selection (fit validation, the best checkpoint) is a held-out slice of train; the
+    # dataset's own test split is the test set.
+    train_ds, val_ds, test_ds = data.train_ds, data.select_ds, data.test_ds
+    steps_per_epoch = data.steps_per_epoch
+    num_classes = data.num_classes
+    input_shape = data.input_shape
+    class_names = data.class_names
+    x_eval, y_eval = data.x_fig, data.y_fig
+    # The images are standardized, so the figures un-standardize them.
+    figure_kwargs = dict(mean=data.mean, std=data.std)
+    # fit and the final evaluate see all of their split; the figures see the head.
+    figure_ds = tf.data.Dataset.from_tensor_slices(x_eval).batch(args.batch_size)
+    file_based = args.dataset in ("imagenet", "imagenette")
 
     # ---- Shifts and stage lists parsing ------------------------------
     shifts: List[int] = _parse_int_list(args.shifts, "--shifts") or [1, 2]
@@ -678,6 +361,7 @@ def train_model(args) -> None:
         "cli_mode": args.cli_mode, "ctx_mode": args.ctx_mode,
         "use_global_context": args.use_global_context,
         "warmup_epochs": args.warmup_epochs,
+        "augment": args.augment,
         "random_erasing_prob": args.random_erasing_prob,
         "stage_depths": stage_depths, "stage_dims": stage_dims,
         "epoch_analysis_every": args.epoch_analysis_every,
@@ -750,9 +434,8 @@ def train_model(args) -> None:
 
     # ---- Classification figures --------------------------------------
     # The model emits logits; every probability consumer gets a softmax. The eval
-    # data is ordered, so the predictions line up with y_eval. For CIFAR x_eval is
-    # in [0, 1] (normalisation happens inside the dataset), so no mean/std is
-    # given; the ImageNet head is already standardized and comes with its own.
+    # data is ordered, so the predictions line up with y_eval. x_eval is
+    # standardized, so the figures get the mean/std to un-standardize it.
     logits = best_model.predict(figure_ds, verbose=0)
     probs = keras.ops.convert_to_numpy(keras.ops.softmax(logits, axis=-1))
     run_summary.write_classification_figures(
@@ -785,6 +468,9 @@ def train_model(args) -> None:
             f.write(f"Image size: {args.image_size}\n")
         if args.dataset == "imagenet":
             f.write(f"ImageNet root: {args.imagenet_root}\n")
+        f.write(f"Augmentation: {args.augment}"
+                + (f" (random erasing {args.random_erasing_prob})"
+                   if args.augment == "cifar_autoaugment" else "") + "\n")
         if file_based:
             f.write(f"Figures and analysis on the first {len(x_eval)} val images\n")
         f.write(f"Parameters: {model.count_params():,}\n\n")
@@ -876,10 +562,11 @@ def main() -> None:
                              'and are not comparable with unsmoothed runs.')
 
     # Augmentation
+    add_augmentation_arguments(parser)
     parser.add_argument('--random-erasing-prob', type=float, default=None,
                         dest='random_erasing_prob',
-                        help='CIFAR only (default 0.25). ImageNet uses '
-                             'random-resized-crop and flip, so the flag is refused there.')
+                        help='Random-erasing probability of --augment cifar_autoaugment '
+                             '(default 0.25); refused with any other preset.')
 
     # Analysis
     parser.add_argument('--epoch-analysis-every', type=int, default=0,
@@ -911,18 +598,20 @@ def main() -> None:
     if not 0.0 <= args.label_smoothing < 1.0:
         parser.error(f"--label-smoothing must be in [0, 1), got {args.label_smoothing}")
     # A flag that does not apply to the chosen dataset is refused, never ignored.
+    # The CIFAR recipe of the paper is the default there; ImageNet and Imagenette keep the
+    # loader's random-resized-crop and flip unless a preset is asked for on top.
+    if args.augment is None:
+        args.augment = "cifar_autoaugment" if args.dataset.startswith("cifar") else "none"
+    if args.random_erasing_prob is not None and args.augment != "cifar_autoaugment":
+        parser.error("--random-erasing-prob only applies with --augment cifar_autoaugment")
+    if args.random_erasing_prob is None:
+        args.random_erasing_prob = 0.25 if args.augment == "cifar_autoaugment" else 0.0
     if args.dataset in ("imagenet", "imagenette"):
-        if args.random_erasing_prob is not None:
-            parser.error("--random-erasing-prob only applies to the CIFAR datasets")
-        args.random_erasing_prob = 0.0  # none is applied; config.json records that
         args.eval_samples = 2000 if args.eval_samples is None else args.eval_samples
         if args.eval_samples <= 0:
             parser.error(f"--eval-samples must be positive, got {args.eval_samples}")
-    else:
-        if args.eval_samples is not None:
-            parser.error("--eval-samples only applies with --dataset imagenet or imagenette")
-        if args.random_erasing_prob is None:
-            args.random_erasing_prob = 0.25
+    elif args.eval_samples is not None:
+        parser.error("--eval-samples only applies with --dataset imagenet or imagenette")
     # DECISION plan-2026-10-23T100412-e7eaaa02/D-009
     # Flags the user did not pass take the PRESET's value. Do NOT give these
     # three flags their own defaults again: always passing cli_mode='full' and

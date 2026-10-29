@@ -562,7 +562,7 @@ because the number is wrong.
    endpoint. Until both exist, every number in this package is a number about synthetic data.
 3. **Generation metrics.** FID / CLIPScore / CIDEr. FID and CIDEr exist nowhere in `src/`;
    CLIPScore does exist, but only as a dataset FILTER for another model
-   (`src/train/cliffordnet/filter_cc3m_clipscore.py`), not as an evaluation metric anything
+   (`src/train/cliffordnet/filter_cc3m_clipscore.py`, since removed from the tree), not as an evaluation metric anything
    here could call. Re-measured at step 9.1 — the earlier "none of which exist anywhere" was
    wrong about CLIPScore.
 4. **Train something.** Only `tiny` has ever been run, for 3 CPU epochs. S/B/L/XL are defined and

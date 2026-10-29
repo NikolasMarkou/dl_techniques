@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import numpy as np
 import tensorflow as tf
@@ -71,12 +71,13 @@ def add_holdout_argument(parser: argparse.ArgumentParser) -> None:
 def _loader_kwargs(
         root: str, devkit_dir: Optional[str], image_size: int, batch_size: int,
         seed: int, augment: bool, augment_color: bool, num_parallel_calls: int,
-        normalize: str,
+        normalize: str, augment_hook: Optional[Callable] = None,
 ) -> dict:
     return dict(
         root=root, devkit_dir=devkit_dir, image_size=image_size,
         batch_size=batch_size, augment=augment, augment_color=augment_color,
         seed=seed, num_parallel_calls=num_parallel_calls, normalize=normalize,
+        augment_hook=augment_hook,
     )
 
 
@@ -102,6 +103,7 @@ def load_imagenet_selection_splits(
         num_parallel_calls: int = tf.data.AUTOTUNE,
         num_classes: Optional[int] = None,
         max_images: Optional[int] = None,
+        augment_hook: Optional[Callable] = None,
 ) -> Tuple[ImageNet2012Data, ImageNet2012Data, ImageNet2012Data]:
     """Build ``(train, select, test)`` where ``test`` never influences selection.
 
@@ -124,6 +126,8 @@ def load_imagenet_selection_splits(
         num_classes: When given, the number of class folders under ``train/``
             must equal it.
         max_images: Smoke-run cap on train and on test; ``select`` is never capped.
+        augment_hook: A train augmentation hook run on the [0, 1] image after the crop, flip
+            and colour jitter (``dl_techniques.datasets.vision.augment_hook``); needs ``augment``.
 
     Raises:
         ValueError: ``holdout_per_class`` is not positive, or ``num_classes``
@@ -135,7 +139,7 @@ def load_imagenet_selection_splits(
             f"train, got {holdout_per_class}"
         )
     kwargs = _loader_kwargs(root, devkit_dir, image_size, batch_size, seed, augment,
-                            augment_color, num_parallel_calls, normalize)
+                            augment_color, num_parallel_calls, normalize, augment_hook)
     kwargs["holdout_per_class"] = holdout_per_class
     train = load_imagenet2012(
         "train", ImageNet2012Config(drop_remainder=True, max_images=max_images, **kwargs))

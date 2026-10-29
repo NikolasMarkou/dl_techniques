@@ -22,8 +22,6 @@ import pytest
 
 import dl_techniques.datasets.vision.classification as classification
 import dl_techniques.datasets.vision.imagenet2012 as imagenet2012
-import train.cliffordnet.train_cliffordnet as cliffordnet
-import train.cliffordnet.train_downsampling_techniques as downsampling
 import train.clip.train_clip as clip
 import train.common.megadepth as megadepth
 import train.power_mlp.train_power_mlp as power_mlp
@@ -77,9 +75,6 @@ def _copies(tree: ast.AST, dataset: str) -> list:
 
 
 CONSUMERS = [
-    ("cifar100", cliffordnet, "CIFAR100"),
-    ("cifar100", downsampling, "CIFAR100"),
-    ("cifar10", cliffordnet, "CIFAR10"),
     ("cifar10", power_mlp, "CIFAR10"),
     ("mnist", power_mlp, "MNIST"),
 ]
@@ -136,12 +131,6 @@ def test_the_allowed_copies_exist_and_hold_what_they_claim():
     for relative in ALLOWED_COPIES:
         tree = ast.parse((SRC / relative).read_text(encoding="utf-8"))
         assert _copies(tree, "imagenet"), f"{relative} no longer holds a copy"
-
-
-def test_the_cliffordnet_pipeline_normalises_with_the_cifar100_pair():
-    mean, std = cliffordnet._normalization_stats("cifar100", None)
-    np.testing.assert_array_equal(mean, np.asarray(classification.CIFAR100_MEAN, np.float32))
-    np.testing.assert_array_equal(std, np.asarray(classification.CIFAR100_STD, np.float32))
 
 
 @pytest.mark.parametrize("name, loader, channels", [

@@ -11,8 +11,8 @@ scripts share:
 
   - Synthetic random pairs (smoke tests).
   - MS-COCO 2017 from a locally-extracted tree.
-  - Conceptual Captions 3M from the layout written by
-    ``train/cliffordnet/prepare_cc3m.py``.
+  - Conceptual Captions 3M from the layout once written by
+    ``train/cliffordnet/prepare_cc3m.py`` (removed from the tree; see its git history).
 
 - :func:`hold_out_images`, the selection cut of a path-list train split:
   a seeded set of IMAGES (never pairs) leaves the fit set, with one caption
@@ -44,6 +44,7 @@ import numpy as np
 import tensorflow as tf
 
 from dl_techniques.utils.logger import logger
+from train.common.image_augment import compose, random_crop, random_flip, unseeded
 
 
 # ---------------------------------------------------------------------------
@@ -115,8 +116,7 @@ def augment_and_normalize(
     """
     img = tf.cast(img_uint8, tf.float32) / 255.0
     if training:
-        img = tf.image.random_crop(img, (image_size, image_size, 3))
-        img = tf.image.random_flip_left_right(img)
+        img = unseeded(compose(random_crop(image_size, image_size), random_flip()))(img)
     img = (img - IMAGE_MEAN) / IMAGE_STD
     return img
 
@@ -289,7 +289,7 @@ def load_coco2017_local_split(
 def _cc3m_shard_of(img_id: str) -> str:
     """Deterministic byte-hash shard for a CC3M image id.
 
-    Matches the layout written by ``train/cliffordnet/prepare_cc3m.py``
+    Matches the layout written by the removed ``train/cliffordnet/prepare_cc3m.py``
     so the loader can rebuild the image path from the id alone.
     """
     h = 0
@@ -334,7 +334,8 @@ def load_cc3m_local_split(
     if not os.path.exists(jsonl_path):
         raise FileNotFoundError(
             f"CC3M captions file not found: {jsonl_path}. "
-            f"Run train/cliffordnet/prepare_cc3m.py --dst {cc3m_root} first."
+            f"Prepare the CC3M layout under {cc3m_root} first (the removed "
+            f"train/cliffordnet/prepare_cc3m.py wrote it; see its git history)."
         )
     if not os.path.isdir(img_root):
         raise FileNotFoundError(f"CC3M image dir not found: {img_root}")
@@ -460,7 +461,7 @@ def hold_out_images(
     images in train. The cut is per image and not per pair because COCO carries about five
     captions per image: cutting pairs would leave a held-out image's other captions in the
     fit set, and retrieval is scored one caption per image
-    (:func:`train.cliffordnet.train_clip._compute_retrieval_metrics` labels ``arange(n)``).
+    (retrieval metrics label ``arange(n)``, as ``train.clip.train_clip`` scores them).
 
     :param images: Image paths, one per pair (repeats allowed).
     :param token_ids: ``(len(images), L)`` token matrix aligned with ``images``.

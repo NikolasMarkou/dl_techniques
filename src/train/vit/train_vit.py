@@ -27,13 +27,13 @@ import gc
 import time
 import keras
 import argparse
-import tensorflow as tf
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Tuple, List, Optional, Dict, Any, Union
 
 from train.common import setup_gpu, set_seeds, create_callbacks as create_common_callbacks, EpochMetricsPlotCallback
 from train.common.classification_data import add_selection_arguments, load_classification_data
+from train.common.image_augment import build_augment
 from train.common.conformal import DEFAULT_ALPHA, add_conformal_arguments, run_conformal
 from train.common.imagenet import require_imagenet_root
 from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
@@ -141,30 +141,20 @@ class TrainingConfig:
 # CIFAR DATA PIPELINE
 # =============================================================================
 
-def _cifar_augment(image: tf.Tensor, label: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-    """Standard CIFAR augmentation on [0,1]-valued float32 images.
+def _augment_hook(config: "TrainingConfig"):
+    """The train augmentation hook of ``config``'s dataset, or ``None``.
 
-    DECISION plan_2026-05-12_f2d29729/D-007: this function operates on the
-    [0,1]-valued pre-normalization tensors. Augmentation MUST run BEFORE
-    per-channel mean/std normalization (which is applied in
-    `_cifar_normalize` via a subsequent `.map`). The previous version
-    applied augmentation AFTER numpy-level normalization and then
-    `tf.clip_by_value(image, 0.0, 1.0)`, which saturated most pixels to
-    {0,1} on normalized data (range ~[-1.99, +2.06]) and produced a
-    train/val distribution mismatch (val skipped augment). Do NOT add a
-    `clip_by_value` here; brightness ±0.1 and contrast 0.9-1.1 may
-    transiently nudge a few pixels slightly outside [0,1] but the
-    subsequent normalization is unaffected and the upstream pipelines in
-    train_resnet.py follow the same no-clip convention.
+    CIFAR gets the shared ``cifar_light`` preset (flip, reflect pad-4 crop, brightness 0.1,
+    contrast 0.9-1.1) on the [0, 1] image BEFORE standardization, with no clipping
+    (DECISION plan_2026-05-12_f2d29729/D-007: the old version augmented the normalized
+    image and then clipped it to [0, 1], which saturated most pixels and made train and
+    validation disagree; do NOT add a ``clip_by_value``). ImageNet keeps the loader's own
+    random-resized-crop and flip: the CIFAR recipe was passed to it once and the loader
+    refused it.
     """
-    image = tf.image.random_flip_left_right(image)
-    image = tf.image.random_crop(
-        tf.pad(image, [[4, 4], [4, 4], [0, 0]], mode="REFLECT"),
-        size=tf.shape(image),
-    )
-    image = tf.image.random_brightness(image, max_delta=0.1)
-    image = tf.image.random_contrast(image, lower=0.9, upper=1.1)
-    return image, label
+    if not config.augment_data or config.dataset not in ("cifar10", "cifar100"):
+        return None
+    return build_augment("cifar_light")
 
 
 # =============================================================================
@@ -249,7 +239,7 @@ def train_vit(
     data = load_classification_data(
         config.dataset, batch_size=config.batch_size, seed=config.seed,
         normalize="standardize",
-        augment=_cifar_augment if config.augment_data else None,
+        augment=_augment_hook(config),
         imagenet_augment=config.augment_data,
         validation_split=config.validation_split,
         holdout_per_class=config.holdout_per_class,

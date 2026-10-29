@@ -284,8 +284,8 @@ def test_eval_per_pixel_uncertainty_selects_by_the_rule(
 # - ``bfunet/run_gabor_depthwise_depth_sweep.sh`` forwarded ``--gpu "$GPU"``
 #   (default 1) to ``train_convunext_denoiser``: ValueError at ``setup_gpu``.
 # - four scripts (``nam/eval_dfsa.py``, ``nam/test_extreme.py``,
-#   ``cliffordnet/eval_clip_retrieval.py``, ``cliffordnet/filter_cc3m_clipscore.py``)
-#   default ``--gpu`` to 1, which no one-entry export can satisfy.
+#   ``cliffordnet/eval_clip_retrieval.py``, ``cliffordnet/filter_cc3m_clipscore.py``, the last two
+#   since removed from the tree) default ``--gpu`` to 1, which no one-entry export can satisfy.
 
 import ast  # noqa: E402
 import re  # noqa: E402
@@ -491,11 +491,6 @@ def test_the_convnext_driver_without_gpu_flag_keeps_the_export(
 @pytest.mark.parametrize("script, argv", [
     ("nam/eval_dfsa.py", ["eval_dfsa"]),
     ("nam/test_extreme.py", ["test_extreme", "--checkpoint", "x.h5"]),
-    ("cliffordnet/eval_clip_retrieval.py",
-     ["eval_clip_retrieval", "--checkpoint", "x.keras"]),
-    ("cliffordnet/filter_cc3m_clipscore.py",
-     ["filter_cc3m_clipscore", "--checkpoint", "x.keras",
-      "--out-manifest", "x.jsonl"]),
 ])
 @pytest.mark.parametrize("visible, flag, expected", [
     ("1", [], "1"),                  # an export is respected (was a refusal)

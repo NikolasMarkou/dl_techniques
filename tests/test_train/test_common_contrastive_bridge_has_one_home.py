@@ -3,9 +3,9 @@
 Guard for plan-2026-10-14T062616-81938e81 step 12 Part F item 9 (D-086). The
 bridge (`StackedCLIPLogits`, its loss and metrics, `compile_for_contrastive_training`,
 `as_contrastive_fit_batches`) lived in ``train.clip.train_clip`` and
-``build_contrastive_loss`` in ``train.cliffordnet.train_clip``, so the
-CliffordCLIP trainer imported the CLIP trainer to train. Both trainers now
-import the bridge from ``train.common.contrastive`` and define none of it.
+``build_contrastive_loss`` in ``train.cliffordnet.train_clip`` (that trainer is gone), so the
+CliffordCLIP trainer imported the CLIP trainer to train. The CLIP trainer now
+imports the bridge from ``train.common.contrastive`` and defines none of it.
 """
 
 import ast
@@ -13,7 +13,6 @@ from pathlib import Path
 
 import pytest
 
-import train.cliffordnet.train_clip as clifford_trainer
 import train.clip.train_clip as clip_trainer
 import train.common.contrastive as contrastive
 
@@ -32,16 +31,12 @@ BRIDGE = (
 
 TRAINERS = {
     "train/clip/train_clip.py": clip_trainer,
-    "train/cliffordnet/train_clip.py": clifford_trainer,
 }
 
 #: What each trainer actually uses from the bridge.
 USES = {
     "train/clip/train_clip.py": ("compile_for_contrastive_training",
                                  "as_contrastive_fit_batches"),
-    "train/cliffordnet/train_clip.py": ("compile_for_contrastive_training",
-                                        "as_contrastive_fit_batches",
-                                        "build_contrastive_loss"),
 }
 
 
@@ -71,13 +66,3 @@ def test_each_trainer_uses_the_common_objects(relative):
     for name in USES[relative]:
         assert getattr(module, name) is getattr(contrastive, name), (
             f"{relative}.{name} is not train.common.contrastive.{name}")
-
-
-def test_the_cliffordnet_trainer_does_not_import_the_clip_trainer():
-    imported = set()
-    for node in ast.walk(_tree("train/cliffordnet/train_clip.py")):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            imported.add(node.module)
-        elif isinstance(node, ast.Import):
-            imported.update(alias.name for alias in node.names)
-    assert "train.clip.train_clip" not in imported

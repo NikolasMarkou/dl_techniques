@@ -62,7 +62,6 @@ the examples above) so runs land in the repo-root ``results/`` directory, never
 
 import sys
 import argparse
-import tensorflow as tf
 import keras
 import numpy as np
 from pathlib import Path
@@ -77,6 +76,7 @@ from train.common import (
     create_callbacks as create_common_callbacks,
     EpochMetricsPlotCallback,
 )
+from train.common.image_augment import build_augment
 from train.common.classification_data import (
     ClassificationData,
     add_selection_arguments,
@@ -199,11 +199,6 @@ def create_imagenette_data(config: TrainingConfig) -> ClassificationData:
     )
 
 
-def _flip(image, label):
-    """Random horizontal flip on the resized [0, 1] image (AlexNet's only CIFAR augmentation)."""
-    return tf.image.random_flip_left_right(image), label
-
-
 def create_cifar_data(config: TrainingConfig) -> ClassificationData:
     """Load CIFAR through the shared loader, upsampled to the model's input.
 
@@ -223,7 +218,7 @@ def create_cifar_data(config: TrainingConfig) -> ClassificationData:
     return load_classification_data(
         config.dataset, batch_size=config.batch_size, seed=config.seed,
         normalize="standardize", resize=config.image_size,
-        augment=_flip if config.augment_data else None,
+        augment=build_augment("flip") if config.augment_data else None,
         validation_split=config.validation_split, max_samples=config.max_samples,
     )
 

@@ -56,6 +56,7 @@ import tensorflow as tf
 from dl_techniques.utils.logger import logger
 
 # Reuse the recursive image-discovery helper instead of re-implementing rglob.
+from train.common.augment import augment_patch
 from train.common.datasets import collect_image_paths
 
 # ---------------------------------------------------------------------
@@ -235,10 +236,7 @@ def _per_sample(
 
     # --- augmentations: random h/v flip + k*90 rotation (train only) ---
     if training:
-        target = tf.image.random_flip_left_right(target)
-        target = tf.image.random_flip_up_down(target)
-        k = tf.random.uniform([], 0, 4, dtype=tf.int32)
-        target = tf.image.rot90(target, k=k)
+        target = augment_patch(target)
 
     # --- LR source (bicubic downscale, antialias for clean decimation: E6) ---
     source = tf.image.resize(

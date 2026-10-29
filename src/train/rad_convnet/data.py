@@ -19,6 +19,7 @@ from dl_techniques.utils.logger import logger
 # has no DTD-specific constant, and ImageNet statistics are the standard default
 # for natural-image classification when a dataset-specific one is not computed).
 from dl_techniques.datasets.vision.imagenet2012 import IMAGENET_MEAN, IMAGENET_STD
+from train.common.image_augment import compose, random_crop, random_flip, unseeded
 
 # ---------------------------------------------------------------------
 
@@ -126,6 +127,7 @@ def make_dtd_dataset(
 
     mean = tf.constant(IMAGENET_MEAN, dtype=tf.float32)
     std = tf.constant(IMAGENET_STD, dtype=tf.float32)
+    _train_crop = unseeded(compose(random_crop(image_size, image_size), random_flip()))
 
     def _load(path: tf.Tensor, label: tf.Tensor):
         raw = tf.io.read_file(path)
@@ -135,8 +137,7 @@ def make_dtd_dataset(
         if is_training and augment:
             resize_to = int(image_size * 1.15)
             image = tf.image.resize(image, (resize_to, resize_to))
-            image = tf.image.random_crop(image, (image_size, image_size, 3))
-            image = tf.image.random_flip_left_right(image)
+            image = _train_crop(image)
         else:
             image = tf.image.resize(image, (image_size, image_size))
 

@@ -23,7 +23,7 @@ turn that scatter-read into a few large sequential reads per step, and
 
 - It does not own dataset-specific logic (no CC3M / COCO / ImageNet
   loaders here). Dataset-specific converters live with their dataset
-  (e.g. ``train/cliffordnet/convert_cc3m_to_tfrecord.py``) and call the
+  (e.g. the removed ``train/cliffordnet/convert_cc3m_to_tfrecord.py``) and call the
   generic primitives below.
 - It does not own preprocessing. Augmentation, normalization, and
   tokenization stay in the domain modules (``image_text.py``,

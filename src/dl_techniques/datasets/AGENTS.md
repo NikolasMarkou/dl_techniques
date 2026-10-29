@@ -50,6 +50,13 @@ Data loading, generation, and preprocessing utilities for various domains.
     (the ImageNet recipe) or `"resize"`. `read_imagenette_records` is the only TFDS touch and the
     test seam. `imagenette_examples(split, config)` is the unbatched stage under it (the same decode
     and crop path serves `train.common.image_streams`, the self-supervised trainers' loader).
+  - `augment_hook.py` — the protocol of the loaders' train-augmentation hook: a plain
+    `(image, label)` map or a `@seeded` `(seed, image, label)` one, always on the [0, 1] image
+    after the crop and before normalization; `with_hook` / `apply_hook` / `seed_stream` give every
+    element its own seed from `tf.data.Dataset.random(seed, rerandomize_each_iteration=True)`
+    (reproducible per seed, new each epoch). `ImagenetteConfig.augment_hook` and
+    `ImageNet2012Config.augment_hook` take one (they need `augment=True`); the operations live in
+    `train.common.image_augment`. `crops.flip_and_pad_crop` takes an `int32[2]` seed to be stateless.
   - `splits.py` — the seeded train / selection / test arithmetic (`split_sizes`,
     `seeded_split_indices`) that MNIST, CIFAR and Imagenette share.
   - `imagenet2012.py` — ImageNet-1k read straight from the extracted

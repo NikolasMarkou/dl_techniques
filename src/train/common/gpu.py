@@ -66,8 +66,7 @@ def gpu_or_default(
 
     Interface contract (callers: :func:`child_visible_devices`,
     ``bfunet/eval_per_pixel_uncertainty.py``, ``nam/eval_dfsa.py``,
-    ``nam/test_extreme.py``, ``cliffordnet/eval_clip_retrieval.py``,
-    ``cliffordnet/filter_cc3m_clipscore.py``, ``logic/train_e5_clevr_hans.py``,
+    ``nam/test_extreme.py``, ``logic/train_e5_clevr_hans.py``,
     ``mothnet/train_mothnet.py``, ``thera/train_thera.py``; a script with a
     preferred GPU defaults ``--gpu`` to ``None`` and picks it here, D-118,
     D-234):

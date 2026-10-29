@@ -218,8 +218,6 @@ class TestTheClmPretrainersDriveAnEpochBySteps:
     @pytest.mark.parametrize("module_name,train_name,kwargs", [
         ("train.gpt2.pretrain", "train_gpt2", {}),
         ("train.wave_field.pretrain", "train_wave_field_llm", {}),
-        ("train.cliffordnet.train_cliffordnet_nlp", "train_cliffordnet_nlp",
-         {"model_loader": "create_model"}),
     ])
     def test_fit_gets_the_epoch_as_steps(self, monkeypatch, tmp_path, module_name,
                                          train_name, kwargs):
