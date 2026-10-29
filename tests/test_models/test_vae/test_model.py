@@ -162,6 +162,13 @@ _SITE_KINDS = {
             name.replace("encoder_downsample_", "encoder_downsample_activation_"),
         ],
     ),
+    "decoder_conv": (
+        lambda depths, steps: [f"decoder_conv_{i}" for i in range(depths)],
+        lambda name: [
+            name.replace("decoder_conv_", "decoder_bn_"),
+            name.replace("decoder_conv_", "decoder_activation_"),
+        ],
+    ),
 }
 
 

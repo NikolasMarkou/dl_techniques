@@ -1598,6 +1598,14 @@ VAE_DOWNSAMPLE_CASES = _vae_site_cases(
     _VaeSite("encoder_downsample_0", 2, 2, _VAE_STAGE_FILTERS[0], (16, 16, 8)),
 )
 
+# The decoder's convolution after the upsampling: ``decoder_conv_{i}``, kernel 3, stride 1.
+# Stage 0 takes 32 x 32 x 16 to 32 x 32 x 8; stage 1 takes 16 x 16 x 16 to 16 x 16 x 16.
+VAE_DECODER_CONV_CASES = _vae_site_cases(
+    "decoder-conv",
+    _VaeSite("decoder_conv_0", 3, 1, _VAE_STAGE_FILTERS[0], (32, 32, 8)),
+    _VaeSite("decoder_conv_1", 3, 1, _VAE_STAGE_FILTERS[1], (16, 16, 16)),
+)
+
 # ---------------------------------------------------------------------
 # CliffordRBFProtoNet patch-embedding stem
 # ---------------------------------------------------------------------
@@ -2310,6 +2318,7 @@ CASES = [
     VAE_LEAKY_RELU_INSTANCE,
     VAE_LINEAR,
     *VAE_DOWNSAMPLE_CASES,
+    *VAE_DECODER_CONV_CASES,
     RBF_CLIFFORD_P1,
     RBF_CLIFFORD_P2,
     RBF_CLIFFORD_P2_NOREG,
@@ -2393,6 +2402,12 @@ BUILT_STEM_ROWS = [
         lambda: _vae_model(True, True, "leaky_relu"),
         (32, 32, 3),
         _vae_site_stem_of("encoder_downsample_1"),
+    ),
+    (
+        "vae-decoder-conv",
+        lambda: _vae_model(True, True, "leaky_relu"),
+        (32, 32, 3),
+        _vae_site_stem_of("decoder_conv_0"),
     ),
     ("rbf-clifford-protonet", lambda: _rbf_clifford_model(2, True), (16, 16, 3)),
     # The CLIP model reads a dict, so the rows call its image tower through a wrapper layer.
@@ -3263,42 +3278,60 @@ def _vae_case_named(cases: list, case_id: str) -> StemCase:
     return next(case for case in cases if case.case_id == case_id)
 
 
-_VAE_DOWN_BN_BIAS = _vae_case_named(VAE_DOWNSAMPLE_CASES, "vae-downsample-leaky-relu-bn-bias")
-_VAE_DOWN_BN_NOBIAS = _vae_case_named(VAE_DOWNSAMPLE_CASES, "vae-downsample-leaky-relu-bn-no-bias")
-_VAE_DOWN_NOBN_BIAS = _vae_case_named(VAE_DOWNSAMPLE_CASES, "vae-downsample-leaky-relu-no-bn-bias")
+def _vae_wrong_setting_rows(label: str, cases: list, geometry: list, activated: bool = True) -> list:
+    """The one-wrong-setting controls of one kind of VAE site, as ``pytest.param`` rows.
 
-
-@pytest.mark.parametrize(
-    "case,override,match",
-    [
+    Every site fixes the same norm (Keras' epsilon 1e-3 and momentum 0.99, ``center`` following
+    ``use_bias``) and the same bias; ``geometry`` adds what only this site fixes (its stride, its
+    padding, its kernel) as ``(override, match, id)`` triples. A site with an activation is also
+    given the wrong one; a site without one is given an activation (a role the original lacked).
+    """
+    bn_bias = _vae_case_named(cases, f"vae-{label}-leaky-relu-bn-bias")
+    bn_nobias = _vae_case_named(cases, f"vae-{label}-leaky-relu-bn-no-bias")
+    nobn_bias = _vae_case_named(cases, f"vae-{label}-leaky-relu-no-bn-bias")
+    rows = [
         # Keras' BatchNormalization epsilon is 1e-3 and the norm factory's own is 1e-6: no shape symptom.
-        (_VAE_DOWN_BN_BIAS, {"normalization_kwargs": {"epsilon": 1e-6}}, "differs from the original"),
+        (bn_bias, {"normalization_kwargs": {"epsilon": 1e-6}}, "differs from the original", "factory-epsilon-1e-6"),
         # Keras' momentum is 0.99; it shows only in the moving statistics after a training=True pass.
-        (_VAE_DOWN_BN_BIAS, {"normalization_kwargs": {"momentum": 0.9}}, "after a training=True pass"),
+        (bn_bias, {"normalization_kwargs": {"momentum": 0.9}}, "after a training=True pass", "momentum-0.9"),
         # ``center`` follows ``use_bias``: a centered norm on a bias-free site is one more weight.
-        (_VAE_DOWN_BN_NOBIAS, {"normalization_kwargs": {"center": True}}, "weights"),
-        (_VAE_DOWN_BN_BIAS, {"use_bias": False}, "weights"),
-        # Kernel 2 at stride 2 halves 32 x 32; stride 1 does not, kernel 3 is another weight shape.
-        (_VAE_DOWN_BN_BIAS, {"strides": 1}, "shape"),
-        (_VAE_DOWN_BN_BIAS, {"kernel_size": 3}, "not compatible"),
-        (_VAE_DOWN_BN_BIAS, {"activation_type": "relu"}, "differs from the original"),
+        (bn_nobias, {"normalization_kwargs": {"center": True}}, "weights", "center-on-a-bias-free-site"),
+        (bn_bias, {"use_bias": False}, "weights", "bias-dropped"),
         # A norm the original did not have is a role of its own.
-        (_VAE_DOWN_NOBN_BIAS, {"normalization_type": "batch_norm"}, "roles"),
-    ],
-    ids=[
-        "factory-epsilon-1e-6",
-        "momentum-0.9",
-        "center-on-a-bias-free-site",
-        "bias-dropped",
-        "stride-1",
-        "kernel-3",
-        "relu-for-leaky-relu",
-        "norm-added",
-    ],
-)
-def test_the_guard_the_harness_sees_a_vae_downsample_with_one_wrong_setting(case, override, match):
-    """Each value the encoder's downsample fixes is a defect when it is not kept; the stem
-    rebuilt from the model's own config passes the same comparison."""
+        (nobn_bias, {"normalization_type": "batch_norm"}, "roles", "norm-added"),
+    ]
+    rows += [(bn_bias, override, match, name) for override, match, name in geometry]
+    if activated:
+        rows.append((bn_bias, {"activation_type": "relu"}, "differs from the original", "relu-for-leaky-relu"))
+    else:
+        rows.append((bn_bias, {"activation_type": "leaky_relu"}, "roles", "activation-added"))
+    return [pytest.param(case, override, match, id=f"{label}-{name}") for case, override, match, name in rows]
+
+
+_VAE_WRONG_SETTINGS = [
+    # Kernel 2 at stride 2 halves 32 x 32; stride 1 does not, kernel 3 is another weight shape.
+    *_vae_wrong_setting_rows(
+        "downsample",
+        VAE_DOWNSAMPLE_CASES,
+        [({"strides": 1}, "shape", "stride-1"), ({"kernel_size": 3}, "not compatible", "kernel-3")],
+    ),
+    # Kernel 3 at stride 1 keeps the size: stride 2 halves it, 'valid' trims two pixels, kernel 2 is another weight shape.
+    *_vae_wrong_setting_rows(
+        "decoder-conv",
+        VAE_DECODER_CONV_CASES,
+        [
+            ({"strides": 2}, "shape", "stride-2"),
+            ({"padding": "valid"}, "shape", "valid-padding"),
+            ({"kernel_size": 2}, "not compatible", "kernel-2"),
+        ],
+    ),
+]
+
+
+@pytest.mark.parametrize("case,override,match", _VAE_WRONG_SETTINGS)
+def test_the_guard_the_harness_sees_a_vae_site_with_one_wrong_setting(case, override, match):
+    """Each value a conv-norm-activation site of the VAE fixes is a defect when it is not kept; the
+    stem rebuilt from the model's own config passes the same comparison."""
     stem = _stem_from_config(case, **override)
     exception = ValueError if match == "not compatible" else AssertionError
     with pytest.raises(exception, match=match):
@@ -3306,9 +3339,16 @@ def test_the_guard_the_harness_sees_a_vae_downsample_with_one_wrong_setting(case
     assert_stem_matches_original(case, _stem_from_config(case))
 
 
-def test_the_guard_the_harness_sees_a_vae_downsample_norm_applied_twice():
+@pytest.mark.parametrize(
+    "case",
+    [
+        _vae_case_named(VAE_DOWNSAMPLE_CASES, "vae-downsample-leaky-relu-bn-bias"),
+        _vae_case_named(VAE_DECODER_CONV_CASES, "vae-decoder-conv-leaky-relu-bn-bias"),
+    ],
+    ids=["downsample", "decoder-conv"],
+)
+def test_the_guard_the_harness_sees_a_vae_site_norm_applied_twice(case):
     """A second ``norm1`` in the forward changes the output."""
-    case = _VAE_DOWN_BN_BIAS
     with pytest.raises(AssertionError, match="differs from the original"):
         assert_stem_matches_original(
             case, case.stem_of(case.make_model()), forward=_norm_applied_twice

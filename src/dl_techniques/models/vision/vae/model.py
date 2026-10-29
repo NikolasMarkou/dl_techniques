@@ -720,25 +720,7 @@ class VAE(keras.Model):
         )(x)
 
         # Convolution after upsampling
-        x = keras.layers.Conv2D(
-            filters=num_filters,
-            kernel_size=3,
-            strides=1,
-            padding="same",
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name=f"decoder_conv_{stage_idx}",
-        )(x)
-
-        if self.use_batch_norm:
-            x = keras.layers.BatchNormalization(
-                center=self.use_bias, name=f"decoder_bn_{stage_idx}"
-            )(x)
-        x = keras.layers.Activation(
-            substitute_exact(self.activation), name=f"decoder_activation_{stage_idx}")(
-            x
-        )
+        x = self._conv_norm_act(x, num_filters, 3, 1, f"decoder_conv_{stage_idx}")
 
         # Residual blocks
         for step in range(self.steps_per_depth):
