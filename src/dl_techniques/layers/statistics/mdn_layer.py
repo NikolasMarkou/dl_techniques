@@ -884,10 +884,12 @@ def get_mixture_modes(
 
     Float32 limit: when sigma is below roughly one float32 ulp of ``|mu|``
     (``|mu| / sigma`` above about 1e7) the returned points are rounded to the ulp
-    grid and can lie far below the density peak (up to about 50 nats at sigma of
-    0.1 ulp on 40 random three-component mixtures); means closer than an ulp are
-    one float (the -1/0/+1 triple, sigma 0.5, at 3e7 and above returns that float,
-    log density -0.2258). Centre or rescale the data first; float64 has no
+    grid and can lie far below the density peak (random three-component mixtures
+    at sigma of 0.1 ulp, shifts 1e3 and 1e5, float32: the worst deficit was
+    between 50 and 5000 nats across draws of 10 to 40 mixtures, so expect
+    tens to thousands of nats); means closer than an ulp are one float (the
+    -1/0/+1 triple, sigma 0.5, at 3e7 and above returns that float, log density
+    -0.2258). Centre or rescale the data first; float64 has no
     practical limit here.
 
     The iteration count is a Python int and the loop never stops early on a
