@@ -36,6 +36,8 @@ from typing import Optional, Union, Tuple, Any, Dict
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers import clone_initializer
+
 from .common import (
     compute_attention_scale,
     validate_head_divisibility
@@ -307,6 +309,14 @@ class PerformerAttention(keras.layers.Layer):
         self.scale = compute_attention_scale(self.head_dim)
         self._feature_scale = math.sqrt(2.0 / float(self.nb_features))
 
+        # DECISION plan-2026-10-26T125959-7af851e5/D-056: only the first projection (`qkv_projection`) keeps
+        # `self.kernel_initializer`; every other one takes `clone_initializer(...)` at its own
+        # site. One seedless instance handed to all of them replays one sample at every
+        # site (measured: 1 of 1 kernel pair of this layer were the same random numbers,
+        # tests/test_layers/test_attention/test_the_attention_projections_draw_independently.py).
+        # Do not hand the shared instance back to the others, and do not clone it once in
+        # `__init__` (every site would then share that one clone). The first site stays on the
+        # instance so its seeded draw does not move (carve-out C-8). See decisions.md.
         # Q, K, V projection layer
         self.to_qkv = keras.layers.Dense(
             3 * dim,
@@ -322,7 +332,7 @@ class PerformerAttention(keras.layers.Layer):
         self.to_out = keras.layers.Dense(
             dim,
             use_bias=use_bias,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,

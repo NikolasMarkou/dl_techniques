@@ -42,6 +42,7 @@ from typing import Optional, Union, Tuple, Dict, Any, Callable, Literal
 # ---------------------------------------------------------------------
 
 from dl_techniques.initializers import clone_initializer
+from dl_techniques.initializers.clone import initializer_spec
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.transformers import TransformerLayer
@@ -455,7 +456,18 @@ class DINOv3(keras.Model):
                 'max_seq_len': self.sequence_length,
                 'use_bias': self.qkv_bias,
             }
-        return 'multi_head', {'use_bias': self.qkv_bias}
+        # DECISION plan-2026-10-26T125959-7af851e5/D-056: the output projection takes its own initializer
+        # of the class `qkv` draws from. `MultiHeadAttention` hands ONE instance to `qkv` and `proj`
+        # unless told otherwise, and the smaller draw replays the larger (measured: 2 of 66 kernel
+        # pairs of a two-block DINOv3, one per block, also with an instance `kernel_initializer`).
+        # The spec is the model's `kernel_initializer` serialized once: each block resolves its own
+        # instance of it, so no two projections share one. Do not drop it to simplify and do not
+        # change `TransformerLayer` instead (D-160, every language model builds on it). Carve-out C-8.
+        # See decisions.md.
+        return 'multi_head', {
+            'use_bias': self.qkv_bias,
+            'output_kernel_initializer': initializer_spec(self.kernel_initializer),
+        }
 
     def _build_encoder(self, x: keras.KerasTensor) -> keras.KerasTensor:
         """Create the stack of transformer encoder layers and apply it."""

@@ -1505,6 +1505,20 @@ def _dinov2_vit(attention_type: str = "multi_head"):
     return build
 
 
+def _dino_v1_vit(init):
+    """A two-block DINOv1 trunk (the attention output projection is built by the model, D-056)."""
+    from dl_techniques.models.vision.dino.dino_v1 import DINOv1
+    model = DINOv1(image_size=32, patch_size=16, embed_dim=64, depth=2, num_heads=4)
+    return _forward(model, _images(32, 32, 3))
+
+
+def _dino_v3_vit(init):
+    """A two-block DINOv3: its ``kernel_initializer`` reaches ``qkv``, the FFN and the output projection."""
+    from dl_techniques.models.vision.dino.dino_v3 import DINOv3
+    model = DINOv3(image_size=32, patch_size=16, embed_dim=64, depth=2, num_heads=4, **_kw(init))
+    return _forward(model, _images(32, 32, 3))
+
+
 def _build_dinov2_classifier(init):
     """DINOv2 itself: the backbone plus its classifier, whose initializer the wrapper builds."""
     from dl_techniques.models.vision.dino.dino_v2 import DINOv2
@@ -1575,6 +1589,12 @@ REPLAY_SUBJECTS: Dict[str, Tuple[Callable, bool]] = {
     "uca_encoder": (_uca("multi_head"), False),
     "uca_encoder_group_query": (_uca("group_query"), False),
     "uca_encoder_multi_head_latent": (_uca("multi_head_latent"), False),
+    # The four types whose layers began to clone an initializer per projection (D-056); the encoder has
+    # no initializer knob, the layer-level replay file measures them with an instance.
+    "uca_encoder_differential": (_uca("differential"), False),
+    "uca_encoder_anchor": (_uca("anchor"), False),
+    "uca_encoder_window": (_uca("window"), False),
+    "uca_encoder_window_band": (_uca("window_band"), False),
     "mambalct": (_build_mambalct, False),
     "capsnet": (_build_capsnet, True),
     "capsnet_v2_legacy": (_capsnet_v2("legacy", (28, 28, 1)), True),
@@ -1594,6 +1614,15 @@ REPLAY_SUBJECTS: Dict[str, Tuple[Callable, bool]] = {
     "dinov2_vit_gated": (_dinov2_vit("gated"), False),
     "dinov2_vit_linear": (_dinov2_vit("linear"), False),
     "dinov2_vit_ring": (_dinov2_vit("ring"), False),
+    # The five types that replayed a draw inside a block until their layers cloned per projection (D-056).
+    "dinov2_vit_anchor": (_dinov2_vit("anchor"), False),
+    "dinov2_vit_perceiver": (_dinov2_vit("perceiver"), False),
+    "dinov2_vit_performer": (_dinov2_vit("performer"), False),
+    "dinov2_vit_rpc": (_dinov2_vit("rpc"), False),
+    "dinov2_vit_wave_field": (_dinov2_vit("wave_field"), False),
+    # DINOv1 has no initializer knob; DINOv3 takes `kernel_initializer`, so it has both arms.
+    "dino_v1": (_dino_v1_vit, False),
+    "dino_v3": (_dino_v3_vit, True),
     "clifford_clip": (_build_clifford_clip, False),
     "vq_vae_rotation": (_build_vq_vae_rotation, False),
     "sam1_prompt_encoder": (_build_sam1_prompt_encoder, False),

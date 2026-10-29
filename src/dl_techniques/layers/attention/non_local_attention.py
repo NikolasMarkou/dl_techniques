@@ -30,6 +30,7 @@ from typing import Any, Dict, Tuple, Optional, Literal, Union
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.activations import ProbabilityOutput, resolve_activation_layer
 from dl_techniques.utils.activation_serialization import (
@@ -257,13 +258,20 @@ class NonLocalAttention(keras.layers.Layer):
             'strides': (1, 1),
             'padding': 'same',
             'use_bias': self.use_bias,
-            'kernel_initializer': self.kernel_initializer,
             'bias_initializer': self.bias_initializer,
             'kernel_regularizer': self.kernel_regularizer,
             'bias_regularizer': self.bias_regularizer,
             'activity_regularizer': self.activity_regularizer
         }
 
+        # DECISION plan-2026-10-26T125959-7af851e5/D-056: only the first projection (`depthwise_conv`) keeps
+        # `self.kernel_initializer`; every other one takes `clone_initializer(...)` at its own
+        # site. One seedless instance handed to all of them replays one sample at every
+        # site (measured: 10 of 10 kernel pairs of this layer were the same random numbers,
+        # tests/test_layers/test_attention/test_the_attention_projections_draw_independently.py).
+        # Do not hand the shared instance back to the others, and do not clone it once in
+        # `__init__` (every site would then share that one clone). The first site stays on the
+        # instance so its seeded draw does not move (carve-out C-8). See decisions.md.
         self.depthwise_conv = keras.layers.DepthwiseConv2D(
             kernel_size=self.kernel_size,
             padding='same',
@@ -315,18 +323,21 @@ class NonLocalAttention(keras.layers.Layer):
         # Create Query, Key, Value projection layers (all share the embedded dim)
         self.query_conv = keras.layers.Conv2D(
             filters=self.key_value_channels,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             name='query_conv',
             **self._conv_params
         )
 
         self.key_conv = keras.layers.Conv2D(
             filters=self.key_value_channels,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             name='key_conv',
             **self._conv_params
         )
 
         self.value_conv = keras.layers.Conv2D(
             filters=self.key_value_channels,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             name='value_conv',
             **self._conv_params
         )
@@ -433,8 +444,11 @@ class NonLocalAttention(keras.layers.Layer):
 
         # output_conv/output_activation_layer are built here, not __init__; see D-003.
         if self.output_conv is None:
+            # Created here, not in `__init__` (D-003), so its clone is taken here: the D-056
+            # rule above applies to it like to the other three.
             self.output_conv = keras.layers.Conv2D(
                 filters=actual_output_channels,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 name='output_conv',
                 **self._conv_params
             )
@@ -463,7 +477,6 @@ class NonLocalAttention(keras.layers.Layer):
         )
         self.key_activation.build(key_output_shape)
 
-        batch_size = input_shape[0] if input_shape[0] is not None else 1
         height = input_shape[1] if input_shape[1] is not None else 32
         width = input_shape[2] if input_shape[2] is not None else 32
         seq_len = height * width if (input_shape[1] is not None and input_shape[2] is not None) else None

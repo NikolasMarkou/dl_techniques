@@ -346,14 +346,24 @@ def _own_draws(attention_type: str, *keywords: str) -> Dict[str, str]:
     return {keyword: default for keyword in keywords}
 
 
+# DECISION plan-2026-10-26T125959-7af851e5/D-056: ``anchor``, ``perceiver``, ``performer``, ``rpc`` and
+# ``wave_field`` joined this table because their layers now give every projection its own initializer;
+# each was measured at zero replayed kernel pairs in a block and in a backbone before it was added. Do not
+# add a type that has not been measured the same way, and do not add one of the refused types by giving
+# the block the argument it lacks without measuring it: the refusal rows of
+# tests/test_models/test_dino/test_the_dinov2_block_draws_each_attention_projection_independently.py
+# pin why each one cannot be built or run. See decisions.md.
 #: The attention types a block accepts, each with the ``attention_args`` its layer is built with.
 #: These are the types whose projections each start from their own random draw: ``multi_head`` and
 #: ``multi_head_cross`` hand one initializer instance to several Dense layers unless told otherwise
 #: and declare the keywords that separate them (``multi_head`` has a fused ``qkv`` and ``proj``,
 #: ``multi_head_cross`` a ``q``, a ``kv`` and a ``proj``); ``gated``, ``linear`` and ``ring`` already
-#: draw independently. Every other registry type is refused by the block: ``anchor``, ``perceiver``,
-#: ``performer``, ``rpc`` and ``wave_field`` replay a draw across projections and declare no keyword to
-#: separate them, and the rest cannot be built from the block's arguments or run on its tokens.
+#: draw independently, and so do ``anchor``, ``perceiver``, ``performer``, ``rpc`` and ``wave_field``
+#: since their layers clone an initializer per projection themselves (D-056). Every other registry
+#: type is refused by the block: it cannot be built from the block's arguments (it takes no ``dim``,
+#: ``dropout_rate`` or ``num_heads``, or needs ``head_dim``, ``num_kv_heads``, ``kv_latent_dim`` or
+#: ``window_size``) or cannot run on its tokens (``area`` needs a rank-4 map, ``lighthouse`` a token
+#: count divisible by its pooling factor, ``shared_weights_cross`` call arguments).
 SUPPORTED_ATTENTION_TYPES: Dict[str, Optional[Dict[str, str]]] = {
     "multi_head": _own_draws("multi_head", "output_kernel_initializer"),
     "multi_head_cross": _own_draws(
@@ -361,6 +371,11 @@ SUPPORTED_ATTENTION_TYPES: Dict[str, Optional[Dict[str, str]]] = {
     "gated": None,
     "linear": None,
     "ring": None,
+    "anchor": None,
+    "perceiver": None,
+    "performer": None,
+    "rpc": None,
+    "wave_field": None,
 }
 
 # ---------------------------------------------------------------------
@@ -404,11 +419,13 @@ class DINOv2Block(keras.layers.Layer):
     :param mlp_ratio: Ratio of MLP hidden dimension to embedding dimension.
     :type mlp_ratio: float
     :param attention_type: Attention mechanism, one of ``multi_head``,
-        ``multi_head_cross``, ``gated``, ``linear`` and ``ring``
+        ``multi_head_cross``, ``gated``, ``linear``, ``ring``, ``anchor``, ``perceiver``,
+        ``performer``, ``rpc`` and ``wave_field``
         (:data:`SUPPORTED_ATTENTION_TYPES`); any other value, a registry key included,
         raises `ValueError` naming that set. The first two are built with the
         keywords that give each projection its own initializer, so `qkv` and `proj`
-        start from independent draws (`'multi_head_attention'` is not a key; use
+        start from independent draws; the rest clone an initializer per projection
+        themselves (`'multi_head_attention'` is not a key; use
         `'multi_head'`). `qkv_bias` reaches `multi_head` only: the others keep their
         layer's own bias default.
     :type attention_type: str
@@ -738,7 +755,8 @@ class DINOv2VisionTransformer(keras.Model):
         drop_path_uniform: Use uniform drop rate across blocks.
         init_values: LayerScale initialization value.
         attention_type: Type of attention mechanism, one of `SUPPORTED_ATTENTION_TYPES`
-            (`multi_head`, `multi_head_cross`, `gated`, `linear`, `ring`); any other value raises
+            (`multi_head`, `multi_head_cross`, `gated`, `linear`, `ring`, `anchor`, `perceiver`,
+            `performer`, `rpc`, `wave_field`); any other value raises
             `ValueError` at construction (the first block's constructor raises it). Only `multi_head` has the official
             checkpoint's structure.
         ffn_type: Type of feed-forward network.

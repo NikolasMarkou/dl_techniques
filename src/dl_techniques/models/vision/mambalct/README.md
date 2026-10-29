@@ -35,18 +35,17 @@ is architecture-specific (per-frame pooled box + score) and lives here —
 tracker heads.
 
 **Attention types of the encoder.** `UcaEncoder(attention_type=...)` accepts `"multi_head"` (the default and the
-only one `MambaLCT` builds), `"group_query"` and `"multi_head_latent"`, the three whose projections each start
-from their own random draw (the replay oracle finds 0 pairs of kernels carrying one draw in each; `multi_head`
-needs the output initializer the encoder gives it, the other two clone one per projection themselves). Any other
-value raises `ValueError` naming that set. The others were refused because they cannot be made to draw
-independently from this side, or cannot run on the encoder's tokens (measured on a two-stage encoder with two
-blocks per stage): `differential` replays 60 of 630 kernel pairs, `anchor` 40 of 496, `window` 4 of 276 and
-`window_band` 4 of 190 (their layers hand one initializer instance to several projections and declare no
-argument that separates them; changing those layers would move the seeded weights of every model built on
-them), `window_zigzag`, `fnet` and `lighthouse` need a statically known sequence length, `beit` fails inside its
-attention at the encoder's token shape, and `multi_head_cross` is not an attention type of `TransformerLayer`.
-`test_a_refused_attention_type_would_have_to_run_and_draw_independently` holds those nine as strict expected
-failures: when a layer is fixed the row passes and the run goes red, which is the cue to widen the set.
+only one `MambaLCT` builds), `"group_query"`, `"multi_head_latent"`, `"differential"`, `"anchor"`, `"window"` and
+`"window_band"`, the seven whose projections each start from their own random draw (the replay oracle finds 0 pairs
+of kernels carrying one draw in each; `multi_head` needs the output initializer the encoder gives it, the other six
+clone one per projection themselves). Any other value raises `ValueError` naming that set. `differential` (60 of 630
+kernel pairs on a two-stage encoder with two blocks per stage), `anchor` (40 of 496), `window` (4 of 276) and
+`window_band` (4 of 190) replayed one draw until their layers began to clone an initializer per projection
+(decision D-056) and then joined the set. Five types stay refused because they cannot run on the encoder's tokens,
+which no layer fix changes: `window_zigzag`, `fnet` and `lighthouse` need a statically known sequence length, `beit`
+fails inside its attention at the encoder's token shape, and `multi_head_cross` is not an attention type of
+`TransformerLayer`. `test_a_refused_type_fails_for_the_reason_the_table_gives` patches the table and asserts the
+exception and message each of the five fails with.
 
 ## Variants
 

@@ -49,6 +49,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.activations import ProbabilityOutput
 from dl_techniques.layers.norms import create_normalization_layer
 
@@ -443,7 +444,6 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         # Sub-layers are created here, per the Keras 3 pattern.
         try:
             dense_kwargs = {
-                "kernel_initializer": self.kernel_initializer,
                 "bias_initializer": self.bias_initializer,
                 "kernel_regularizer": self.kernel_regularizer,
                 "bias_regularizer": self.bias_regularizer,
@@ -453,15 +453,33 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
             # stream's Q/K would also work, but five separate layers keep
             # debugging trivial and match the per-site pattern this module
             # documents.
-            self.q1_dense = keras.layers.Dense(self._proj_dim, name="q1", **dense_kwargs)
-            self.k1_dense = keras.layers.Dense(self._proj_dim, name="k1", **dense_kwargs)
-            self.q2_dense = keras.layers.Dense(self._proj_dim, name="q2", **dense_kwargs)
-            self.k2_dense = keras.layers.Dense(self._proj_dim, name="k2", **dense_kwargs)
-            self.v_dense = keras.layers.Dense(self._proj_dim, name="v", **dense_kwargs)
+            # DECISION plan-2026-10-26T125959-7af851e5/D-056: only the first projection (`q1`) keeps
+            # `self.kernel_initializer`; every other one takes `clone_initializer(...)` at its own
+            # site. One seedless instance handed to all of them replays one sample at every
+            # site (measured: 15 of 15 kernel pairs of this layer were the same random numbers,
+            # tests/test_layers/test_attention/test_the_attention_projections_draw_independently.py).
+            # Do not hand the shared instance back to the others, and do not clone it once in
+            # `__init__` (every site would then share that one clone). The first site stays on the
+            # instance so its seeded draw does not move (carve-out C-8). See decisions.md.
+            self.q1_dense = keras.layers.Dense(
+                self._proj_dim, kernel_initializer=self.kernel_initializer, name="q1", **dense_kwargs)
+            self.k1_dense = keras.layers.Dense(
+                self._proj_dim, kernel_initializer=clone_initializer(self.kernel_initializer),
+                name="k1", **dense_kwargs)
+            self.q2_dense = keras.layers.Dense(
+                self._proj_dim, kernel_initializer=clone_initializer(self.kernel_initializer),
+                name="q2", **dense_kwargs)
+            self.k2_dense = keras.layers.Dense(
+                self._proj_dim, kernel_initializer=clone_initializer(self.kernel_initializer),
+                name="k2", **dense_kwargs)
+            self.v_dense = keras.layers.Dense(
+                self._proj_dim, kernel_initializer=clone_initializer(self.kernel_initializer),
+                name="v", **dense_kwargs)
 
             # Output projection layer
             self.proj = keras.layers.Dense(
                 self.dim,
+                kernel_initializer=clone_initializer(self.kernel_initializer),
                 name='proj',
                 **dense_kwargs,
             )

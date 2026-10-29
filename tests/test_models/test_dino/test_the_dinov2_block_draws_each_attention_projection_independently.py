@@ -5,8 +5,10 @@
 (``qkv``), one replayed kernel pair per block (12 of 3,403 pairs in the real Depth Anything encoder, 12
 of 1,326 in a bare ViT-S). The block now builds its attention with the keywords that separate the
 projections (:data:`SUPPORTED_ATTENTION_TYPES`), and only for the attention types whose layer declares
-them. Every other type is refused at construction, because each one hands one instance to several
-projections and declares no argument to separate them, or cannot run on a block's tokens at all.
+them. ``anchor``, ``perceiver``, ``performer``, ``rpc`` and ``wave_field`` replayed too and had no keyword;
+their layers now clone an initializer per projection themselves (D-056), so they joined the set.
+Every other type is refused at construction because the block cannot build it from its arguments or run
+it on its tokens, and a fixed layer does not change that.
 
 This file pins what the runtime contract's replay rows cannot see by themselves:
 
@@ -16,8 +18,9 @@ This file pins what the runtime contract's replay rows cannot see by themselves:
   block's first kernel is unmoved and every initializer created after ``proj`` sits one seed further
   down the stream (carve-out C-7, decision D-054);
 * no weight name changed, and weights keyed by path still transplant;
-* every refused type is a strict expected failure carrying its measured reason, so a library layer
-  that is fixed turns its row red and the type can join the set.
+* every refused type is a ``pytest.raises`` row carrying the exception class and the message it fails with
+  when the table is patched to let it through, so the reason is pinned, not described: a block that learns
+  to pass the missing argument turns its row red and the type can be measured and added.
 """
 
 import re
@@ -36,7 +39,10 @@ from dl_techniques.models.vision.dino.dino_v2 import (
 )
 from tests.test_models.initializer_replay_oracle import replayed_pairs
 
-SUPPORTED = ["multi_head", "multi_head_cross", "gated", "linear", "ring"]
+SUPPORTED = ["multi_head", "multi_head_cross", "gated", "linear", "ring",
+             "anchor", "perceiver", "performer", "rpc", "wave_field"]
+#: The types that draw independently because their LAYER clones an initializer per projection.
+LAYER_CLONES = ["gated", "linear", "ring", "anchor", "perceiver", "performer", "rpc", "wave_field"]
 DIM, HEADS, TOKENS = 64, 4, 17
 
 
@@ -144,10 +150,76 @@ class TestTheSeparatingInitializers:
         assert len({id(i) for i in inits}) == 3
         assert {type(i) for i in inits} == {keras.initializers.GlorotUniform}
 
-    @pytest.mark.parametrize("attention_type", ["gated", "linear", "ring"])
+    @pytest.mark.parametrize("attention_type", LAYER_CLONES)
     def test_the_types_that_separate_their_projections_themselves_get_no_extra_keyword(
             self, attention_type: str) -> None:
         assert dino_v2.SUPPORTED_ATTENTION_TYPES[attention_type] is None
+
+
+#: Why each type outside the supported set is outside it: the exception class and a fragment of the message
+#: it fails with when ``SUPPORTED_ATTENTION_TYPES`` is patched to let it through, on a block of ``dim=64``,
+#: ``num_heads=4`` over 17 tokens (``step19_3/refused_reasons_dino.txt``). ``build`` rows fail in the
+#: block's constructor, ``call`` rows on the first forward pass.
+_NO_DIM_DROPOUT_HEADS = "unsupported parameter(s) ['dim', 'dropout_rate', 'num_heads']"
+_REFUSED: Dict[str, Tuple[type, str, str]] = {
+    "area": (ValueError, "call", "Kernel shape must have the same length as input"),
+    "beit": (ValueError, "build", "unsupported parameter(s) ['dropout_rate']"),
+    "capsule_routing": (ValueError, "build", "unsupported parameter(s) ['dim']"),
+    "cbam": (ValueError, "build", _NO_DIM_DROPOUT_HEADS),
+    "channel": (ValueError, "build", _NO_DIM_DROPOUT_HEADS),
+    "differential": (ValueError, "build", "Required parameters for 'differential' are missing: ['head_dim']"),
+    "energy": (ValueError, "build", "unsupported parameter(s) ['dropout_rate']"),
+    "fnet": (ValueError, "build", _NO_DIM_DROPOUT_HEADS),
+    "group_query": (ValueError, "build", "Required parameters for 'group_query' are missing: ['num_kv_heads']"),
+    "hopfield": (ValueError, "build", "unsupported parameter(s) ['dim']"),
+    "lighthouse": (ValueError, "call", "must be divisible by pooling_factor ** (num_levels - 1) = 16"),
+    "mobile_mqa": (ValueError, "build", "unsupported parameter(s) ['dropout_rate']"),
+    "multi_dconv_head_transposed": (ValueError, "build", "unsupported parameter(s) ['dropout_rate']"),
+    "multi_head_latent": (
+        ValueError, "build", "Required parameters for 'multi_head_latent' are missing: ['kv_latent_dim']"),
+    "non_local": (ValueError, "build", "unsupported parameter(s) ['dim', 'num_heads']"),
+    "shared_weights_cross": (TypeError, "call", "missing a required argument: 'split_sizes'"),
+    "single_window": (
+        ValueError, "build", "Required parameters for 'single_window' are missing: ['window_size']"),
+    "spatial": (ValueError, "build", _NO_DIM_DROPOUT_HEADS),
+    "tripse1": (ValueError, "build", _NO_DIM_DROPOUT_HEADS),
+    "tripse2": (ValueError, "build", _NO_DIM_DROPOUT_HEADS),
+    "tripse3": (ValueError, "build", _NO_DIM_DROPOUT_HEADS),
+    "tripse4": (ValueError, "build", _NO_DIM_DROPOUT_HEADS),
+    "window": (ValueError, "build", "Required parameters for 'window' are missing: ['window_size']"),
+    "window_band": (ValueError, "build", "Required parameters for 'window_band' are missing: ['window_size']"),
+    "window_zigzag": (
+        ValueError, "build", "Required parameters for 'window_zigzag' are missing: ['window_size']"),
+}
+
+
+def test_the_refused_types_and_the_supported_ones_are_every_registry_type() -> None:
+    """A type added to the attention registry is either supported here or named with its reason."""
+    known = set(SUPPORTED) | set(_REFUSED)
+    assert set(ATTENTION_REGISTRY) - known == set(), sorted(set(ATTENTION_REGISTRY) - known)
+    assert not set(SUPPORTED) & set(_REFUSED)
+    assert len(_REFUSED) == 25
+
+
+@pytest.mark.parametrize("attention_type", sorted(_REFUSED))
+def test_a_refused_type_fails_for_the_reason_the_table_gives(
+        attention_type: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The refusal is not a layer defect: patched in, the type still cannot be built or run here."""
+    exception, stage, fragment = _REFUSED[attention_type]
+    monkeypatch.setitem(dino_v2.SUPPORTED_ATTENTION_TYPES, attention_type, None)
+    keras.utils.set_random_seed(1234)
+
+    def build() -> DINOv2Block:
+        return DINOv2Block(dim=DIM, num_heads=HEADS, attention_type=attention_type, name="blk")
+
+    if stage == "build":
+        with pytest.raises(exception) as raised:
+            build()
+    else:
+        block = build()
+        with pytest.raises(exception) as raised:
+            block(_tokens(), training=False)
+    assert fragment in str(raised.value), str(raised.value)[:300]
 
 
 class TestTheSupportedSet:
@@ -157,9 +229,8 @@ class TestTheSupportedSet:
         assert all(f"``{name}``" in DINOv2Block.__doc__ for name in SUPPORTED), (
             "the attention_type docstring of the block must name the supported set")
 
-    @pytest.mark.parametrize("attention_type", ["anchor", "perceiver", "performer", "rpc",
-                                                "wave_field", "differential", "window",
-                                                "multi_head_attention", "no_such_attention"])
+    @pytest.mark.parametrize("attention_type", [*sorted(_REFUSED), "multi_head_attention",
+                                                "no_such_attention"])
     def test_a_block_refuses_an_unsupported_type_naming_the_supported_set(
             self, attention_type: str) -> None:
         with pytest.raises(ValueError, match=re.escape(
@@ -168,75 +239,16 @@ class TestTheSupportedSet:
 
     def test_the_backbone_refuses_it_at_construction_too(self) -> None:
         with pytest.raises(ValueError, match=re.escape(
-                f"attention_type must be one of {sorted(SUPPORTED)}, got 'anchor'")):
-            _backbone("anchor")
+                f"attention_type must be one of {sorted(SUPPORTED)}, got 'differential'")):
+            _backbone("differential")
 
     def test_the_refusal_comes_before_any_layer_is_built(self) -> None:
         keras.utils.set_random_seed(7)
         seeds = [keras.initializers.HeNormal().seed for _ in range(2)]
         keras.utils.set_random_seed(7)
         with pytest.raises(ValueError):
-            DINOv2Block(dim=DIM, num_heads=HEADS, attention_type="anchor")
+            DINOv2Block(dim=DIM, num_heads=HEADS, attention_type="differential")
         assert keras.initializers.HeNormal().seed == seeds[0]
-
-
-#: Why each type outside the supported set is outside it, as measured on a block of ``dim=64``,
-#: ``num_heads=4`` over 17 tokens (``step19_1/probe_types_before.txt``). The rows are strict expected
-#: failures: when a library layer is fixed or learns the block's arguments, its row passes, the run
-#: goes red, and the type can join the supported set.
-_REFUSED: Dict[str, str] = {
-    "anchor": "10 of 21 kernel pairs replay one draw (query_proj ~ key_proj ~ value_proj)",
-    "perceiver": "3 of 10 kernel pairs replay one draw",
-    "performer": "1 of 6 kernel pairs replay one draw (qkv ~ proj)",
-    "rpc": "1 of 6 kernel pairs replay one draw (qkv ~ proj)",
-    "wave_field": "1 of 10 kernel pairs replay one draw",
-    "area": "ValueError: the layer needs a rank-4 input",
-    "beit": "ValueError: the layer takes no dropout_rate",
-    "capsule_routing": "ValueError: the layer takes no dim",
-    "cbam": "ValueError: the layer takes no dim, dropout_rate or num_heads",
-    "channel": "ValueError: the layer takes no dim, dropout_rate or num_heads",
-    "differential": "ValueError: the block does not pass the required head_dim",
-    "energy": "ValueError: the layer takes no dropout_rate",
-    "fnet": "ValueError: the layer takes no dim, dropout_rate or num_heads",
-    "group_query": "ValueError: the block does not pass the required num_kv_heads",
-    "hopfield": "ValueError: the layer takes no dim",
-    "lighthouse": "ValueError: the token count must divide by the pooling factor",
-    "mobile_mqa": "ValueError: the layer takes no dropout_rate",
-    "multi_dconv_head_transposed": "ValueError: the layer takes no dropout_rate",
-    "multi_head_latent": "ValueError: the block does not pass the required kv_latent_dim",
-    "non_local": "ValueError: the layer takes no dim or num_heads",
-    "shared_weights_cross": "TypeError: call needs split_sizes",
-    "single_window": "ValueError: the block does not pass the required window_size",
-    "spatial": "ValueError: the layer takes no dim, dropout_rate or num_heads",
-    "tripse1": "ValueError: the layer takes no dim, dropout_rate or num_heads",
-    "tripse2": "ValueError: the layer takes no dim, dropout_rate or num_heads",
-    "tripse3": "ValueError: the layer takes no dim, dropout_rate or num_heads",
-    "tripse4": "ValueError: the layer takes no dim, dropout_rate or num_heads",
-    "window": "ValueError: the block does not pass the required window_size",
-    "window_band": "ValueError: the block does not pass the required window_size",
-    "window_zigzag": "ValueError: the block does not pass the required window_size",
-}
-
-
-def test_the_refused_types_and_the_supported_ones_are_every_registry_type() -> None:
-    """A type added to the attention registry is either supported here or named with its reason."""
-    known = set(SUPPORTED) | set(_REFUSED)
-    assert set(ATTENTION_REGISTRY) - known == set(), sorted(set(ATTENTION_REGISTRY) - known)
-    assert not set(SUPPORTED) & set(_REFUSED)
-
-
-@pytest.mark.parametrize("attention_type", [
-    pytest.param(name, marks=pytest.mark.xfail(strict=True, reason=f"measured: {why}"), id=name)
-    for name, why in _REFUSED.items()])
-def test_a_refused_type_would_have_to_run_and_draw_independently(
-        attention_type: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(dino_v2.SUPPORTED_ATTENTION_TYPES, attention_type, None)
-    keras.utils.set_random_seed(1234)
-    block = DINOv2Block(dim=DIM, num_heads=HEADS, attention_type=attention_type, name="blk")
-    assert np.isfinite(np.asarray(block(_tokens(), training=False))).all()
-    pairs, compared = replayed_pairs(block)
-    assert compared > 0
-    assert not pairs, f"{len(pairs)} of {compared} kernel pairs replay one draw: {pairs[:2]}"
 
 
 class TestTheSeededDraws:

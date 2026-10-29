@@ -36,6 +36,7 @@ from typing import Any, List, Union, Tuple, Optional, Dict
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.activations import ProbabilityOutput
 from dl_techniques.layers.norms import create_normalization_layer
 from .common import (
@@ -250,6 +251,14 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         # leak out of this symbolic scratch graph on the next trace.
         self.scale = compute_attention_scale(self.head_dim)
 
+        # DECISION plan-2026-10-26T125959-7af851e5/D-056: only the first projection (`qkv`) keeps
+        # `self.kernel_initializer`; every other one takes `clone_initializer(...)` at its own
+        # site. One seedless instance handed to all of them replays one sample at every
+        # site (measured: 1 of 1 kernel pair of this layer were the same random numbers,
+        # tests/test_layers/test_attention/test_the_attention_projections_draw_independently.py).
+        # Do not hand the shared instance back to the others, and do not clone it once in
+        # `__init__` (every site would then share that one clone). The first site stays on the
+        # instance so its seeded draw does not move (carve-out C-8). See decisions.md.
         # Sub-layers are created here, unbuilt.
         self.qkv_dense = keras.layers.Dense(
             self.dim * 3,
@@ -264,7 +273,7 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         self.proj_dense = keras.layers.Dense(
             self.dim,
             use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
@@ -517,7 +526,6 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
 
         # Combine modality A (anchors + queries) and modality B (anchors + queries)
         mod_a_total = mod_a_anchor + mod_a_query
-        mod_b_total = mod_b_anchor + mod_b_query
 
         # Queries: all of each modality, anchors and query tokens alike.
         q_mod_a = q[:, :, :mod_a_total, :]

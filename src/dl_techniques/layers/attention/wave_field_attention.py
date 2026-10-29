@@ -45,6 +45,7 @@ from typing import Optional, Any, Dict, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.activations import resolve_activation_layer
 from dl_techniques.initializers.identity_plus_noise import IdentityPlusNoise
 
@@ -347,14 +348,24 @@ class WaveFieldAttention(keras.layers.Layer):
 
         dense_kw: Dict[str, Any] = {
             "use_bias": self.use_bias,
-            "kernel_initializer": self.kernel_initializer,
             "bias_initializer": self.bias_initializer,
             "kernel_regularizer": self.kernel_regularizer,
             "bias_regularizer": self.bias_regularizer,
         }
 
-        self.qkv_proj = keras.layers.Dense(3 * dim, name="qkv_proj", **dense_kw)
-        self.output_proj = keras.layers.Dense(dim, name="output_proj", **dense_kw)
+        # DECISION plan-2026-10-26T125959-7af851e5/D-056: only the first projection (`qkv_proj`) keeps
+        # `self.kernel_initializer`; every other one takes `clone_initializer(...)` at its own
+        # site. One seedless instance handed to all of them replays one sample at every
+        # site (measured: 1 of 3 compared kernel pairs of this layer were the same random numbers,
+        # tests/test_layers/test_attention/test_the_attention_projections_draw_independently.py).
+        # Do not hand the shared instance back to the others, and do not clone it once in
+        # `__init__` (every site would then share that one clone). The first site stays on the
+        # instance so its seeded draw does not move (carve-out C-8). See decisions.md.
+        self.qkv_proj = keras.layers.Dense(
+            3 * dim, kernel_initializer=self.kernel_initializer, name="qkv_proj", **dense_kw)
+        self.output_proj = keras.layers.Dense(
+            dim, kernel_initializer=clone_initializer(self.kernel_initializer),
+            name="output_proj", **dense_kw)
 
         self.gate_proj = keras.layers.Dense(
             dim,

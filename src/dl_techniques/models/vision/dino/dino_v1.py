@@ -56,6 +56,7 @@ References:
       (https://arxiv.org/abs/1603.09382)
 """
 
+import inspect
 import keras
 from typing import Optional, Union, Tuple, Dict, Any, Literal
 
@@ -80,6 +81,11 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+#: The kernel initializer the blocks' ``TransformerLayer`` is built with (its own default: DINOv1 passes
+#: none), read from the signature so the attention output projection can be given the same class.
+_BLOCK_KERNEL_INITIALIZER = inspect.signature(
+    TransformerLayer.__init__).parameters["kernel_initializer"].default
 from dl_techniques.utils.model_build import refuse_unknown_model_kwargs, refuse_input_shape
 
 # ---------------------------------------------------------------------
@@ -687,12 +693,24 @@ class DINOv1(keras.Model):
         for i in range(self.depth):
             # DECISION plan-2026-08-01T105809-dc0c402e/D-010: forward qkv_bias unconditionally, spelled `use_bias` (the registry's actual key).
             # A gate on `attention_type == "multi_head_attention"` was dead code; that string was never the registry key. See decisions.md.
+            # DECISION plan-2026-10-26T125959-7af851e5/D-056: the `multi_head` block gives its output
+            # projection its own initializer, the class `qkv` draws from. `MultiHeadAttention` hands ONE
+            # instance to `qkv` and `proj` unless told otherwise, and the smaller draw replays the larger
+            # (measured: 2 of 66 kernel pairs of a two-block DINOv1, one per block). Do not drop the
+            # keyword to simplify and do not change `TransformerLayer` instead: its default is the GPT-2
+            # residual rule of D-160 and every language model builds on it. The value is the
+            # `TransformerLayer` default read from its signature, so a change of that default cannot make
+            # `qkv` and `proj` two classes. The other attention types clone per projection themselves
+            # (carve-out C-8). See decisions.md.
+            attention_args = {"use_bias": self.qkv_bias}
+            if self.attention_type == "multi_head":
+                attention_args["output_kernel_initializer"] = _BLOCK_KERNEL_INITIALIZER
             block = TransformerLayer(
                 hidden_size=self.embed_dim,
                 num_heads=self.num_heads,
                 intermediate_size=self.intermediate_size,
                 attention_type=self.attention_type,
-                attention_args={"use_bias": self.qkv_bias},
+                attention_args=attention_args,
                 normalization_type=self.normalization_type,
                 normalization_position="pre",  # Pre-normalization as in DINO
                 ffn_type=self.ffn_type,

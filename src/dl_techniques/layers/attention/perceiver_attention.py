@@ -46,6 +46,7 @@ from typing import Optional, Any, Dict, Tuple, Union, List
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers import clone_initializer
 from .common import validate_head_divisibility
 from .multi_head_cross_attention import MultiHeadCrossAttention
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -258,6 +259,14 @@ class PerceiverAttention(keras.layers.Layer):
         self.qk_norm_type = qk_norm_type
         self.qk_norm_kwargs = qk_norm_kwargs
 
+        # DECISION plan-2026-10-26T125959-7af851e5/D-056: the engine's `q` keeps
+        # `self.kernel_initializer`; `kv` and `proj` take a clone each, through the two keywords the
+        # engine already declares (`kv_kernel_initializer`, `output_kernel_initializer`). Without
+        # them the three kernels were the same random numbers (measured: 3 of 3 kernel pairs, see
+        # tests/test_layers/test_attention/test_the_attention_projections_draw_independently.py).
+        # Do not drop the clones to simplify, and do not clone once here for both (`kv` and
+        # `proj` would share that clone). `q` stays on the instance so its seeded draw does not
+        # move (carve-out C-8). See decisions.md.
         # The engine. Its name is part of the checkpoint format.
         self.cross_attention = MultiHeadCrossAttention(
             dim=self.dim,
@@ -268,6 +277,8 @@ class PerceiverAttention(keras.layers.Layer):
             shared_qk_projections=False,
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
+            kv_kernel_initializer=clone_initializer(self.kernel_initializer),
+            output_kernel_initializer=clone_initializer(self.kernel_initializer),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,

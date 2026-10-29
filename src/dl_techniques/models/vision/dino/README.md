@@ -98,30 +98,44 @@ file-dependent tests skip with the path when the download is absent) and
 ### The attention types of a `DINOv2Block`, and how its projections start
 
 `attention_type` accepts `multi_head` (the default and the only one with the official checkpoint's
-structure), `multi_head_cross`, `gated`, `linear` and `ring`
-(`dino_v2.SUPPORTED_ATTENTION_TYPES`); any other value, including every other key of the attention
-registry, raises `ValueError` naming that set at construction (in `DINOv2Block.__init__`, before any layer exists). The excluded types fall into three
-groups, each measured on a block of width 64 with 4 heads: `anchor`, `perceiver`, `performer`, `rpc` and
-`wave_field` start several projections from one shared random draw and declare no argument that separates
-them; the window, `differential`, `group_query` and `multi_head_latent` types need arguments the block
-does not pass; the rest take none of the block's `dim`, `num_heads` and `dropout_rate`, or cannot run on
-its tokens. `qkv_bias` reaches `multi_head` only.
+structure), `multi_head_cross`, `gated`, `linear`, `ring`, `anchor`, `perceiver`, `performer`, `rpc` and
+`wave_field` (`dino_v2.SUPPORTED_ATTENTION_TYPES`); any other value, including every other key of the attention
+registry, raises `ValueError` naming that set at construction (in `DINOv2Block.__init__`, before any layer exists).
+The five last types replayed one draw across projections (1 to 10 replayed kernel pairs per block) until their
+layers began to clone an initializer per projection themselves (decision D-056); each was measured at zero
+replayed pairs in a block and a backbone before it joined the set. The 25 excluded types fall into two
+groups, each pinned by a test that patches the table and asserts the exception and message it fails with: the
+window types, `single_window`, `differential`, `group_query` and `multi_head_latent` need arguments the block
+does not pass (`window_size`, `head_dim`, `num_kv_heads`, `kv_latent_dim`), and the rest take none of the
+block's `dim`, `num_heads` and `dropout_rate`, or cannot run on its tokens (`area` needs a rank-4 map,
+`lighthouse` a token count divisible by 16, `shared_weights_cross` a `split_sizes` call argument). A fixed layer
+changes none of that. `qkv_bias` reaches `multi_head` only.
 
 `MultiHeadAttention` gives its `qkv` and `proj` Dense layers one initializer instance, and the smaller
 draw (`proj`) comes out as a rescaled prefix of the larger (`qkv`): one replayed kernel pair per block
 (12 of 1,326 kernel pairs of a ViT-S backbone, 0 now). The block therefore builds `multi_head` with
 `output_kernel_initializer` and `multi_head_cross` with that and `kv_kernel_initializer`, each the
 layer's own `kernel_initializer` default as a string, so every projection resolves its own instance of
-the class `qkv` draws from (decision D-054; the library layer is unchanged because cloning an initializer
-there would move the seeded weights of every attention user). No weight name changes, so the official
+the class `qkv` draws from (decision D-054; `MultiHeadAttention` keeps its shared default because that is the
+GPT-2 residual rule every language model builds on). No weight name changes, so the official
 weights, every archive and a transplant keyed by path address the same variables. What moves is the
 seeded starting weights of a build that does not load them: the first block's `qkv`, the patch
 embedding, the tokens and every bias and norm tensor are equal to the earlier code at the same seed, and
 every default-seeded kernel from the first block's `proj` on is a new draw (47 of 175 tensors of the
 56 px ViT-S backbone, 3 of 14 of a single block). Guard:
 `tests/test_models/test_dino/test_the_dinov2_block_draws_each_attention_projection_independently.py`
-(replay, seed positions, the supported set and the refusal, strict expected failures with the measured
-reason for every excluded type) and the DINOv2 rows of the shared runtime contract.
+(replay, seed positions, the supported set and the refusal, a `pytest.raises` row with the measured exception
+and message for every excluded type) and the DINOv2 rows of the shared runtime contract.
+
+`DINOv1` and `DINOv3` build `TransformerLayer` blocks with `multi_head` attention and had the same replay: 2 of 66
+kernel pairs of a two-block model (one per block), also with an instance `kernel_initializer` on `DINOv3`. Both now
+pass `output_kernel_initializer` in their `attention_args` (the `TransformerLayer` default class for `DINOv1`, the
+model's own `kernel_initializer` spec for `DINOv3`; the rope path of `DINOv3` is `group_query`, which clones per
+projection itself and gets none), decision D-056. Seeded starting weights move exactly as for `DINOv2Block`: the
+first block's `qkv` and everything created before it are unchanged, `proj` and every default-seeded kernel after it
+are new draws. Guard:
+`tests/test_models/test_dino/test_the_dino_v1_and_v3_blocks_draw_each_projection_independently.py` and the `dino_v1`
+and `dino_v3` rows of the shared runtime contract.
 
 ### `norm_last_layer` on `DINOHead`
 

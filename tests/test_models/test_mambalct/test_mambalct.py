@@ -12,6 +12,7 @@ import h5py
 import keras
 import numpy as np
 import pytest
+import tensorflow as tf
 
 from dl_techniques.layers.attention.multi_head_cross_attention import MultiHeadCrossAttention
 from dl_techniques.models.vision.mambalct import MambaLCT, create_mambalct
@@ -350,7 +351,10 @@ def test_every_block_of_the_uca_encoder_draws_each_projection_independently() ->
     assert not pairs, f"{len(pairs)} of {compared} kernel pairs replay one draw: {pairs[:3]}"
 
 
-SUPPORTED_ATTENTION_TYPES = ["multi_head", "group_query", "multi_head_latent"]
+SUPPORTED_ATTENTION_TYPES = ["multi_head", "group_query", "multi_head_latent", "differential", "anchor",
+                             "window", "window_band"]
+#: The types whose LAYER clones an initializer per projection, so the encoder hands them no argument.
+LAYER_CLONES = [name for name in SUPPORTED_ATTENTION_TYPES if name != "multi_head"]
 
 
 @pytest.mark.parametrize("attention_type", SUPPORTED_ATTENTION_TYPES)
@@ -375,51 +379,72 @@ def test_the_supported_attention_types_are_exactly_these() -> None:
         "the attention_type docstring must name the supported set")
 
 
-@pytest.mark.parametrize("attention_type", [
-    "differential", "anchor", "window", "window_zigzag", "window_band", "beit", "lighthouse",
-    "fnet", "multi_head_cross", "no_such_attention"])
-def test_an_unsupported_attention_type_is_refused_naming_the_supported_set(
+#: Why each refused type is refused: the exception class, the stage it is raised in and a fragment of
+#: its message when ``SUPPORTED_ATTENTION_TYPES`` is patched to let the type through, on a two-stage
+#: encoder with two blocks per stage (``step19_3/refused_reasons_uca.txt``). None of them is a replay: a
+#: layer fix cannot make any of them run on the encoder's tokens.
+_REFUSED = {
+    "window_zigzag": (ValueError, "call", "requires a fixed sequence length for XLA compatibility"),
+    "beit": (tf.errors.InvalidArgumentError, "call", "but the requested shape requires a multiple of 1040"),
+    "lighthouse": (RuntimeError, "call", "requires a statically known sequence length"),
+    "fnet": (ValueError, "call", "Sequence length and hidden dimension must be known at build time"),
+    "multi_head_cross": (ValueError, "build", "Unknown attention type: multi_head_cross"),
+}
+
+_SUPPORTED_MESSAGE = (
+    "attention_type must be one of ['anchor', 'differential', 'group_query', 'multi_head', "
+    "'multi_head_latent', 'window', 'window_band'], got {name!r}: every other attention type is not "
+    "one of TransformerLayer's or cannot run on the encoder's tokens")
+
+
+@pytest.mark.parametrize("attention_type", [*sorted(_REFUSED), "no_such_attention"])
+def test_an_unsupported_attention_type_is_refused_with_the_exact_message(
         attention_type: str) -> None:
-    with pytest.raises(ValueError, match=re.escape(
-            "attention_type must be one of ['group_query', 'multi_head', 'multi_head_latent'], "
-            f"got {attention_type!r}")):
+    with pytest.raises(ValueError, match=re.escape(_SUPPORTED_MESSAGE.format(name=attention_type))):
         UcaEncoder(stage_dims=[16, 32], stage_depths=[1, 1], num_heads=[2, 4],
                    attention_type=attention_type)
 
 
-#: Why each refused type is refused, as the encoder measured it: the types that replay a draw hand
-#: ONE initializer instance to several projections and declare no argument to separate them; the
-#: others cannot run on the encoder's token shape. The rows are strict expected failures: when a
-#: library layer is fixed the row passes, the run goes red, and the type can join the supported set.
-_REFUSED = {
-    "differential": "60 of 630 kernel pairs replay one draw (q1 ~ k1 ~ q2 ...)",
-    "anchor": "40 of 496 kernel pairs replay one draw (query_proj ~ key_proj ~ value_proj)",
-    "window": "4 of 276 kernel pairs replay one draw (qkv ~ proj)",
-    "window_band": "4 of 190 kernel pairs replay one draw (qkv ~ proj)",
-    "window_zigzag": "ValueError: needs a fixed sequence length for XLA",
-    "beit": "InvalidArgumentError in BeitAttention.call at the encoder's token shape",
-    "lighthouse": "RuntimeError: needs a statically known sequence length",
-    "fnet": "ValueError: sequence length and hidden dimension must be known at build time",
-    "multi_head_cross": "ValueError: TransformerLayer has no such attention type",
-}
+def test_the_refused_types_and_the_supported_ones_are_every_transformer_layer_attention_type() -> None:
+    """The five refused types are not replays; the other registry types are not ``TransformerLayer`` types."""
+    assert not set(SUPPORTED_ATTENTION_TYPES) & set(_REFUSED)
+    assert len(_REFUSED) == 5
 
 
-@pytest.mark.parametrize("attention_type", [
-    pytest.param(name, marks=pytest.mark.xfail(strict=True, reason=f"measured: {why}"), id=name)
-    for name, why in _REFUSED.items()])
-def test_a_refused_attention_type_would_have_to_run_and_draw_independently(
+@pytest.mark.parametrize("attention_type", sorted(_REFUSED))
+def test_a_refused_type_fails_for_the_reason_the_table_gives(
         attention_type: str, monkeypatch: pytest.MonkeyPatch) -> None:
     from dl_techniques.models.vision.mambalct import uca_encoder
+    exception, stage, fragment = _REFUSED[attention_type]
     monkeypatch.setitem(uca_encoder.SUPPORTED_ATTENTION_TYPES, attention_type, None)
     keras.utils.set_random_seed(1234)
-    encoder = UcaEncoder(
-        stage_dims=[16, 32], stage_depths=[2, 2], num_heads=[2, 4], attention_type=attention_type)
-    assert np.isfinite(np.asarray(encoder(_images(), training=False))).all()
-    pairs, _ = replayed_pairs(encoder)
-    assert not pairs, f"{len(pairs)} kernel pairs replay one draw: {pairs[:2]}"
+
+    def build() -> UcaEncoder:
+        return UcaEncoder(
+            stage_dims=[16, 32], stage_depths=[2, 2], num_heads=[2, 4], attention_type=attention_type)
+
+    if stage == "build":
+        with pytest.raises(exception) as raised:
+            build()
+    else:
+        encoder = build()
+        with pytest.raises(exception) as raised:
+            encoder(_images(), training=False)
+    assert fragment in str(raised.value), str(raised.value)[:300]
 
 
-@pytest.mark.parametrize("attention_type", ["group_query", "multi_head_latent"])
+@pytest.mark.parametrize("attention_type", SUPPORTED_ATTENTION_TYPES)
+def test_the_runtime_contract_has_a_replay_row_for_every_supported_type(attention_type: str) -> None:
+    from tests.test_models.test_the_vision_classifiers_share_one_runtime_contract import (
+        REPLAY_SUBJECTS,
+    )
+    key = "uca_encoder" if attention_type == "multi_head" else f"uca_encoder_{attention_type}"
+    build, knob = REPLAY_SUBJECTS[key]
+    assert knob is False, "the encoder has no initializer knob to arm"
+    assert build(None).attention_type == attention_type
+
+
+@pytest.mark.parametrize("attention_type", LAYER_CLONES)
 def test_the_types_that_clone_per_projection_themselves_are_given_no_extra_arguments(
         attention_type: str) -> None:
     encoder = UcaEncoder(

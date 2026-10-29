@@ -25,6 +25,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from .common import apply_attention_mask
+from dl_techniques.initializers import clone_initializer
 from ..ffn.kan_linear import KANLinear
 from ..activations import ProbabilityOutput
 from ..norms.factory import create_normalization_layer
@@ -383,10 +384,23 @@ class SingleWindowAttention(keras.layers.Layer):
                 self.dim, use_bias=False, name="value"
             )
 
+        # DECISION plan-2026-10-26T125959-7af851e5/D-056: only the first projection (`qkv`) keeps
+        # `self.kernel_initializer`; every other one takes `clone_initializer(...)` at its own
+        # site. One seedless instance handed to all of them replays one sample at every
+        # site (measured: 1 of 3 compared kernel pairs, qkv ~ proj of this layer were the same random numbers,
+        # tests/test_layers/test_attention/test_the_attention_projections_draw_independently.py).
+        # Do not hand the shared instance back to the others, and do not clone it once in
+        # `__init__` (every site would then share that one clone). The first site stays on the
+        # instance so its seeded draw does not move (carve-out C-8). See decisions.md.
+        # In `kan_key` mode nothing else holds the instance (`query` and `value` draw from their own
+        # default strings), so `proj` keeps it there and no default seed is spent.
         self.proj = keras.layers.Dense(
             self.dim,
             use_bias=self.proj_bias,
-            kernel_initializer=self.kernel_initializer,
+            kernel_initializer=(
+                clone_initializer(self.kernel_initializer)
+                if self.attention_mode == "linear" else self.kernel_initializer
+            ),
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,

@@ -34,6 +34,7 @@ from typing import Optional, Dict, Any, Tuple, Union, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.activations import ProbabilityOutput
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.utils.masking import MaskFactory
@@ -463,29 +464,39 @@ class LighthouseAttention(keras.layers.Layer):
         # ---- sub-layers (built in build()) ----
         proj_units = num_heads * head_dim
 
-        def _dense(units: int, name: str) -> keras.layers.Dense:
+        # DECISION plan-2026-10-26T125959-7af851e5/D-056: only the first projection (`wq`) keeps
+        # `self.kernel_initializer`; every other one takes `clone_initializer(...)` at its own
+        # site. One seedless instance handed to all of them replays one sample at every
+        # site (measured: 6 of 6 kernel pairs of this layer were the same random numbers,
+        # tests/test_layers/test_attention/test_the_attention_projections_draw_independently.py).
+        # Do not hand the shared instance back to the others, and do not clone it once in
+        # `__init__` (every site would then share that one clone). The first site stays on the
+        # instance so its seeded draw does not move (carve-out C-8). See decisions.md.
+        def _dense(units: int, name: str, kernel_initializer: Any) -> keras.layers.Dense:
             """Build one projection Dense with this layer's shared settings.
 
             :param units: Output width of the projection.
             :type units: int
             :param name: Sub-layer name.
             :type name: str
+            :param kernel_initializer: The projection's own initializer.
+            :type kernel_initializer: Union[str, keras.initializers.Initializer]
             :return: An unbuilt ``Dense``.
             :rtype: keras.layers.Dense
             """
             return keras.layers.Dense(
                 units,
                 use_bias=use_bias,
-                kernel_initializer=self.kernel_initializer,
+                kernel_initializer=kernel_initializer,
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name=name,
             )
 
-        self.wq = _dense(proj_units, "wq")
-        self.wk = _dense(proj_units, "wk")
-        self.wv = _dense(proj_units, "wv")
-        self.wo = _dense(dim, "wo")
+        self.wq = _dense(proj_units, "wq", self.kernel_initializer)
+        self.wk = _dense(proj_units, "wk", clone_initializer(self.kernel_initializer))
+        self.wv = _dense(proj_units, "wv", clone_initializer(self.kernel_initializer))
+        self.wo = _dense(dim, "wo", clone_initializer(self.kernel_initializer))
 
         # QK-norm is opt-in and is applied only to the tensors that enter the
         # pyramid, never to the tensors the scorer reads (DECISION D-004(a)).

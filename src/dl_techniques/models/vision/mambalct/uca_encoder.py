@@ -46,15 +46,19 @@ ATTENTION_OUTPUT_INITIALIZER = "glorot_uniform"
 #: The attention types a block accepts, each with the ``attention_args`` its blocks are built
 #: with. These are the types whose projections each start from their own random draw: a
 #: ``multi_head`` layer needs the output initializer above (it hands one instance to ``qkv`` and
-#: ``proj`` otherwise), ``group_query`` and ``multi_head_latent`` clone one per projection
-#: themselves. Every other type ``TransformerLayer`` offers is refused by ``UcaEncoder``: the
-#: ``differential``, ``anchor`` and window layers hand ONE instance to several projections and
-#: declare no knob to separate them, ``multi_head_cross`` is refused by ``TransformerLayer``,
-#: and ``beit``, ``lighthouse`` and ``fnet`` fail on the first call at the encoder's token shape.
+#: ``proj`` otherwise); ``group_query``, ``multi_head_latent``, ``differential``, ``anchor``,
+#: ``window`` and ``window_band`` clone one per projection themselves. Every other type is
+#: refused by ``UcaEncoder``: ``multi_head_cross`` is not an attention type of
+#: ``TransformerLayer``, and ``window_zigzag``, ``beit``, ``lighthouse`` and ``fnet`` fail on the
+#: first call at the encoder's token shape (a layer fix does not change that).
 SUPPORTED_ATTENTION_TYPES: Dict[str, Optional[Dict[str, Any]]] = {
     "multi_head": {"output_kernel_initializer": ATTENTION_OUTPUT_INITIALIZER},
     "group_query": None,
     "multi_head_latent": None,
+    "differential": None,
+    "anchor": None,
+    "window": None,
+    "window_band": None,
 }
 
 # ---------------------------------------------------------------------
@@ -80,7 +84,8 @@ class UcaEncoder(keras.layers.Layer):
     :param mlp_ratio: FFN expansion ratio. Defaults to 4.0.
     :type mlp_ratio: float
     :param attention_type: Attention layer of every block: ``"multi_head"``,
-        ``"group_query"`` or ``"multi_head_latent"``, the types whose projections each
+        ``"group_query"``, ``"multi_head_latent"``, ``"differential"``, ``"anchor"``,
+        ``"window"`` or ``"window_band"``, the types whose projections each
         draw their own initial weights (:data:`SUPPORTED_ATTENTION_TYPES`). Defaults to
         ``"multi_head"``.
     :type attention_type: str
@@ -160,8 +165,8 @@ class UcaEncoder(keras.layers.Layer):
         if attention_type not in SUPPORTED_ATTENTION_TYPES:
             raise ValueError(
                 f"attention_type must be one of {sorted(SUPPORTED_ATTENTION_TYPES)}, got "
-                f"{attention_type!r}: every other attention layer either hands one random "
-                f"draw to several projections or cannot run on the encoder's tokens"
+                f"{attention_type!r}: every other attention type is not one of TransformerLayer's "
+                f"or cannot run on the encoder's tokens"
             )
 
         self.stage_dims = dims
@@ -205,6 +210,12 @@ class UcaEncoder(keras.layers.Layer):
         # window type back to widen the encoder: each one replays a draw across
         # projections (measured: 60 of 630, 40 of 496 and 4 of 276 kernel pairs) and no
         # argument of those layers separates them.
+        # DECISION plan-2026-10-26T125959-7af851e5/D-056: this supersedes the last sentence of the
+        # D-050 anchor above. `differential`, `anchor`, `window` and `window_band` joined the set
+        # because their layers now clone an initializer per projection themselves (zero replayed
+        # kernel pairs, measured on this encoder). Do not add a type that has not been measured
+        # the same way; the types that stay out cannot run on this encoder's tokens and the
+        # refusal rows of test_mambalct.py pin why. See decisions.md.
         attention_args = SUPPORTED_ATTENTION_TYPES[attention_type]
 
         # DECISION plan-2026-10-26T125959-7af851e5/D-049: these two lists keep the

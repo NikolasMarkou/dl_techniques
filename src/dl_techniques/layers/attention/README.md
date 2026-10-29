@@ -188,6 +188,16 @@ as a keyword to `differential` — positionally it would bind to `layer_idx`.
   ET-Full config) a single-token input gives exactly zero energy and zero update.
   ([arXiv:2302.07253](https://arxiv.org/abs/2302.07253))
 - `window` folds a 1-D sequence into a square grid, so for text you want `window_band`.
+- **Seeded initial weights.** A layer resolves ONE initializer instance from `kernel_initializer`, and a seedless
+  instance replays the same random numbers at every site it is handed to. `anchor`, `differential`, `lighthouse`,
+  `non_local`, `perceiver`, `performer`, `rpc`, `shared_weights_cross`, `single_window`, `window`, `window_band`,
+  `window_zigzag` and `wave_field` therefore keep the instance on their first projection and give every other
+  projection `clone_initializer(...)` (decision D-056); `group_query`, `multi_head_latent`, `beit` and `tripse*` already
+  drew independently (replay oracle, 0 pairs). The first projection's seeded draw is unchanged, every later one is a new draw, and every
+  default-seeded layer created after them sits further down the seed stream. Only `multi_head` and `multi_head_cross`
+  keep the shared default (the GPT-2 residual rule of D-160): pass `output_kernel_initializer` (and
+  `kv_kernel_initializer` for the cross layer) to separate their projections. Weight paths never change. Guard:
+  `tests/test_layers/test_attention/test_the_attention_projections_draw_independently.py`.
 
 ## Shared primitives (`common.py`)
 

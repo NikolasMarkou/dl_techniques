@@ -31,6 +31,7 @@ from typing import Optional, Any, Dict, Tuple, Union
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.activations import ProbabilityOutput
 from .common import (
     compute_attention_scale,
@@ -290,25 +291,35 @@ class AnchorAttention(keras.layers.Layer):
 
         common_kwargs = {
             "use_bias": self.use_bias,
-            "kernel_initializer": self.kernel_initializer,
             "bias_initializer": self.bias_initializer,
             "kernel_regularizer": self.kernel_regularizer,
             "bias_regularizer": self.bias_regularizer,
         }
 
+        # DECISION plan-2026-10-26T125959-7af851e5/D-056: only the first projection keeps
+        # `self.kernel_initializer`; every other one takes `clone_initializer(...)` at its own
+        # site. One seedless instance handed to all of them replays one sample at every
+        # site (measured: 10 of 10 kernel pairs of this layer were the same random numbers,
+        # tests/test_layers/test_attention/test_the_attention_projections_draw_independently.py).
+        # Do not hand the shared instance back to the others, and do not clone it once in
+        # `__init__` (every site would then share that one clone). The first site stays on the
+        # instance so its seeded draw does not move (carve-out C-8). See decisions.md.
         # Projections for anchor tokens, reused for all tokens in standard mode
         self.query_proj = keras.layers.Dense(
             self.inner_dim,
+            kernel_initializer=self.kernel_initializer,
             name="query_proj",
             **common_kwargs
         )
         self.key_proj = keras.layers.Dense(
             self.inner_dim,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             name="key_proj",
             **common_kwargs
         )
         self.value_proj = keras.layers.Dense(
             self.inner_dim,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             name="value_proj",
             **common_kwargs
         )
@@ -318,6 +329,7 @@ class AnchorAttention(keras.layers.Layer):
         # read behaviours against the same anchor keys.
         self.query_token_proj = keras.layers.Dense(
             self.inner_dim,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             name="query_token_proj",
             **common_kwargs
         )
@@ -325,6 +337,7 @@ class AnchorAttention(keras.layers.Layer):
         # Output projection: maps the merged heads (inner_dim) back to `dim`
         self.output_proj = keras.layers.Dense(
             self.dim,
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             name="output_proj",
             **common_kwargs
         )
