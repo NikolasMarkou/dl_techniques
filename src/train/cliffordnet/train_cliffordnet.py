@@ -16,6 +16,10 @@ Label smoothing is opt-in (``--label-smoothing``, off in the paper recipe).
 ImageNet mean/std, no AutoAugment and no random erasing. The end-of-run figures,
 model analysis and save/reload check use the first ``--eval-samples`` val images;
 training-time validation and the final evaluation use all 50,000.
+
+``--dataset imagenette`` trains on the prepared TFDS Imagenette records at ``--image-size``
+through the shared loader: random-resized-crop and flip, ImageNet mean/std, selection on a
+seeded ``--validation-split`` slice of train, the labelled validation split as the test set.
 """
 
 import os
@@ -500,15 +504,25 @@ def train_model(args) -> None:
     # x_eval / y_eval are the in-memory images the end-of-run figures, the model
     # analysis and the save/reload check read; the datasets feed fit and evaluate.
     figure_kwargs: Dict[str, Any] = {}
-    if args.dataset == "imagenet":
-        require_imagenet_root(args.imagenet_root)
-        data = load_classification_data(
-            "imagenet", batch_size=args.batch_size, seed=args.seed, normalize="standardize",
-            imagenet_augment=True, holdout_per_class=args.holdout_per_class,
-            max_samples=args.max_samples, eval_samples=args.eval_samples,
-            imagenet_root=args.imagenet_root, devkit_dir=args.devkit_dir,
-            image_size=args.image_size,
-        )
+    file_based = args.dataset in ("imagenet", "imagenette")
+    if file_based:
+        if args.dataset == "imagenet":
+            require_imagenet_root(args.imagenet_root)
+            data = load_classification_data(
+                "imagenet", batch_size=args.batch_size, seed=args.seed, normalize="standardize",
+                imagenet_augment=True, holdout_per_class=args.holdout_per_class,
+                max_samples=args.max_samples, eval_samples=args.eval_samples,
+                imagenet_root=args.imagenet_root, devkit_dir=args.devkit_dir,
+                image_size=args.image_size,
+            )
+        else:
+            data = load_classification_data(
+                "imagenette", batch_size=args.batch_size, seed=args.seed,
+                normalize="standardize", imagenet_augment=True,
+                crop_policy="random_resized_crop", validation_split=args.validation_split,
+                max_samples=args.max_samples, eval_samples=args.eval_samples,
+                image_size=args.image_size,
+            )
         # Selection (fit validation, the best checkpoint) is a held-out slice of train;
         # the official val split is the test set.
         train_ds, val_ds, test_ds = data.train_ds, data.select_ds, data.test_ds
@@ -669,6 +683,9 @@ def train_model(args) -> None:
         "epoch_analysis_every": args.epoch_analysis_every,
         "input_shape": list(input_shape),
         "num_classes": num_classes,
+        **({"image_size": args.image_size, "validation_split": args.validation_split,
+            "eval_samples": args.eval_samples}
+           if args.dataset == "imagenette" else {}),
         **({"imagenet_root": args.imagenet_root, "devkit_dir": args.devkit_dir,
             "eval_samples": args.eval_samples,
             "conformal_alpha": None if args.no_conformal else args.conformal_alpha}
@@ -764,8 +781,11 @@ def train_model(args) -> None:
         f.write(f"Variant: {args.variant}\n")
         f.write(f"Input shape: {input_shape}\n")
         f.write(f"Num classes: {num_classes}\n")
+        if args.dataset == "imagenette":
+            f.write(f"Image size: {args.image_size}\n")
         if args.dataset == "imagenet":
             f.write(f"ImageNet root: {args.imagenet_root}\n")
+        if file_based:
             f.write(f"Figures and analysis on the first {len(x_eval)} val images\n")
         f.write(f"Parameters: {model.count_params():,}\n\n")
         f.write(f"Epochs: {trained_epochs}, Batch: {args.batch_size}\n")
@@ -799,7 +819,7 @@ def main() -> None:
     parser = create_base_argument_parser(
         description="Train CliffordNet (geometric-algebra vision backbone)",
         default_dataset="cifar100",
-        dataset_choices=["cifar10", "cifar100", "imagenet"],
+        dataset_choices=["cifar10", "cifar100", "imagenette", "imagenet"],
     )
     add_selection_arguments(parser)
     # None means "not given": --eval-samples is refused for the CIFAR datasets (below).
@@ -891,7 +911,7 @@ def main() -> None:
     if not 0.0 <= args.label_smoothing < 1.0:
         parser.error(f"--label-smoothing must be in [0, 1), got {args.label_smoothing}")
     # A flag that does not apply to the chosen dataset is refused, never ignored.
-    if args.dataset == "imagenet":
+    if args.dataset in ("imagenet", "imagenette"):
         if args.random_erasing_prob is not None:
             parser.error("--random-erasing-prob only applies to the CIFAR datasets")
         args.random_erasing_prob = 0.0  # none is applied; config.json records that
@@ -900,7 +920,7 @@ def main() -> None:
             parser.error(f"--eval-samples must be positive, got {args.eval_samples}")
     else:
         if args.eval_samples is not None:
-            parser.error("--eval-samples only applies with --dataset imagenet")
+            parser.error("--eval-samples only applies with --dataset imagenet or imagenette")
         if args.random_erasing_prob is None:
             args.random_erasing_prob = 0.25
     # DECISION plan-2026-10-23T100412-e7eaaa02/D-009
