@@ -748,13 +748,13 @@ def get_point_estimate(
 # applied in the accumulation dtype, where the requested value is returned as is.
 _MODE_SIGMA_FLOOR = 1e-6
 _MODE_PRECISION_FLOOR = 1e-30
-# Each start is nudged off its component mean by the larger of this many standard
-# deviations and this many machine epsilons of the working dtype times |mean|, per
-# dimension, so a start on an unstable stationary point leaves it. The second term
-# tracks rounding of the mean (half an ulp is at most 0.5 eps |mean|) and, unlike a
-# fixed fraction of the mean, stays far below sigma wherever rounding is resolved.
+# A start moves off its component mean, per dimension, by the larger of this many standard deviations and this many
+# machine epsilons of the working dtype times |mean|, so a start on an unstable stationary point leaves it.
 _MODE_START_OFFSET = 1e-3
 _MODE_START_EPS_MULTIPLE = 8.0
+# The machine-epsilon term stops at this many standard deviations: a start further out reaches the basin of a
+# neighbouring component and steals its mode (3 sigma pairs are lost from |mean| / sigma of about 1.4e6).
+_MODE_START_CAP = 0.5
 
 _GOLDEN_FRACTION = 0.6180339887498949
 
@@ -845,9 +845,10 @@ def get_mixture_modes(
     """Find stationary points of a diagonal Gaussian mixture by fixed-point iteration.
 
     Every component mean is a start, moved off it per dimension by the larger of
-    ``1e-3`` standard deviations and ``8`` machine epsilons of the working dtype times
-    ``|mu|`` (so the move stays above rounding of a mean far larger than its sigma
-    without growing past sigma), times a fixed factor in
+    ``1e-3`` standard deviations and the smaller of ``8`` machine epsilons of the
+    working dtype times ``|mu|`` and half a standard deviation (the first keeps the
+    move above rounding of a mean far larger than its sigma, the second keeps it from
+    reaching a neighbouring mode), times a fixed factor in
     ``[0.25, 1]`` whose sign and size differ between components and dimensions, so a
     mixture symmetric under a coordinate swap does not keep a start on its symmetric
     saddle. Each start is moved by the Carreira-Perpinan fixed point of the
@@ -882,15 +883,27 @@ def get_mixture_modes(
     steps and +-0.039 after 1000. Use more steps, or a larger ``merge_tol``,
     when components sit within about 2 sigma of each other.
 
-    Float32 limit: when sigma is below roughly one float32 ulp of ``|mu|``
-    (``|mu| / sigma`` above about 1e7) the returned points are rounded to the ulp
-    grid and can lie far below the density peak (random three-component mixtures
-    at sigma of 0.1 ulp, shifts 1e3 and 1e5, float32: the worst deficit was
-    between 50 and 5000 nats across draws of 10 to 40 mixtures, so expect
+    Float32 limit, measured on CPU with two-component pairs and random 1-D
+    mixtures of two to four components (not with larger ``M`` or ``D``): separated
+    modes (3 sigma apart or more) are found up to ``|mu| / sigma`` of about 6e6,
+    where sigma is about 2 ulp of ``|mu|``; the first loss is one 3 sigma pair with
+    weights 0.7 / 0.3, 5 sigma and wider lost none up to 1.2e7, and the random
+    mixtures missed none of 547 maxima up to 1e6 and 0.2 % at 4e6. A start on a
+    density minimum leaves it for every start multiplier up to ``|mu| / sigma`` of
+    about 1e6; above that a start with a small multiplier (0.25 to 0.3) can stay on
+    the minimum from about 1.1e6, while the -1/0/+1 triple (sigma 0.5) leaves it up
+    to about 5.8e6. A start that stays sits at a lower density than the modes, so
+    ``get_mode_estimate`` skips it. When sigma is below roughly one float32 ulp of
+    ``|mu|`` (``|mu| / sigma`` above about 1e7) the returned points are rounded to
+    the ulp grid and can lie far below the density peak (random three-component
+    mixtures at sigma of 0.1 ulp, shifts 1e3 and 1e5, float32: the worst deficit
+    was between 50 and 5000 nats across draws of 10 to 40 mixtures, so expect
     tens to thousands of nats); means closer than an ulp are one float (the
     -1/0/+1 triple, sigma 0.5, at 3e7 and above returns that float, log density
-    -0.2258). Centre or rescale the data first; float64 has no
-    practical limit here.
+    -0.2258). Centre or rescale the data first. In float64 the same sweep lost no
+    separated mode up to ``|mu| / sigma`` of about 4e15 (about ``2**29`` times the
+    float32 figure), and sigma falls below one ulp at about 4.5e15; the start
+    behaviour on a minimum was not measured in float64.
 
     The iteration count is a Python int and the loop never stops early on a
     traced value, so the function runs under ``tf.function`` with an unknown
@@ -952,14 +965,19 @@ def get_mixture_modes(
         quad = ops.sum(ops.square(diff) * ops.expand_dims(precision, 1), axis=-1)
         return ops.expand_dims(log_const, 1) - 0.5 * quad
 
-    # DECISION plan-2026-10-29T104646-27f045c5/D-030: starts sit off the means by max(1e-3 sigma, 8 eps |mu|), each in its own direction.
+    # DECISION plan-2026-10-29T104646-27f045c5/D-030: starts sit off the means by a term that tracks dtype rounding of |mu|, each in its own direction.
     # Do not start on mu, share one direction, drop the eps term or use a fixed fraction of |mu| (it outgrows sigma and loses a mode).
     points = mu_w
     if num_steps > 0:
         shape = ops.shape(mu_w)
         pattern = _mode_start_pattern(shape[1], shape[2], work)
         rounding = _MODE_START_EPS_MULTIPLE * float(np.finfo(work).eps)
-        magnitude = ops.maximum(_MODE_START_OFFSET * sigma_w, rounding * ops.abs(mu_w))
+        # DECISION plan-2026-10-29T224331-aad3f382/D-001: the eps term stops at _MODE_START_CAP sigma and the multiple stays 8. Do not lower the multiple to 2 or 4
+        # (the -1/0/+1 triple stays on its minimum just above a power of two) or lift the cap (the start steals a separated mode). See decisions.md.
+        magnitude = ops.maximum(
+            _MODE_START_OFFSET * sigma_w,
+            ops.minimum(rounding * ops.abs(mu_w), _MODE_START_CAP * sigma_w),
+        )
         points = mu_w + magnitude * ops.expand_dims(pattern, 0)
     for _ in range(num_steps):
         log_joint = _component_log_density(points)

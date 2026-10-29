@@ -483,20 +483,28 @@ def _check_the_middle_start_leaves_the_density_minimum():
     np.testing.assert_allclose(log_density[1], log_density[[0, 2]], atol=1e-3)
 
 
-def _check_the_shifted_middle_start_leaves_the_density_minimum(shift, num_steps=300):
-    """The -1/0/+1 triple moved to ``shift`` in float32: the middle start must leave the minimum."""
-    mu, sigma, logits = _batch(SADDLE_MU + shift, SADDLE_SIGMA, SADDLE_LOGITS)
+def _check_the_shifted_middle_start_leaves_the_density_minimum(shift, num_steps=300, pad=0):
+    """The -1/0/+1 triple moved to ``shift`` in float32: the middle start must leave the minimum.
+
+    :param shift: Offset added to the three means.
+    :param num_steps: Fixed-point iterations.
+    :param pad: Number of zero-weight components placed 20 or more above the triple and ahead of
+        it in the table, so the middle component takes the start-pattern entry ``pad + 1``.
+    """
+    mu = np.concatenate([shift + 20.0 + 3.0 * np.arange(pad)[:, None], SADDLE_MU + shift])
+    logits = np.concatenate([np.full(pad, -80.0), SADDLE_LOGITS])
+    mu, sigma, logits = _batch(mu, np.full((pad + 3, 1), 0.5), logits)
     # Float32 spacing at the shift bounds how exactly a mode can be located.
     ulp = float(np.spacing(np.float32(abs(shift) + 1.0)))
     modes, log_density, is_unique = get_mixture_modes(
         mu, sigma, logits, num_steps=num_steps, merge_tol=max(1e-3, 8.0 * ulp)
     )
-    modes = keras.ops.convert_to_numpy(modes)[0, :, 0].astype(np.float64) - shift
-    log_density = keras.ops.convert_to_numpy(log_density)[0]
+    modes = keras.ops.convert_to_numpy(modes)[0, pad:, 0].astype(np.float64) - shift
+    log_density = keras.ops.convert_to_numpy(log_density)[0, pad:]
     atol = max(2e-3, 4.0 * ulp)
     np.testing.assert_allclose(modes[[0, 2]], [-SADDLE_SIDE_MODE, SADDLE_SIDE_MODE], atol=atol)
     assert abs(abs(modes[1]) - SADDLE_SIDE_MODE) < atol and abs(modes[1]) > 0.5
-    assert int(keras.ops.convert_to_numpy(is_unique).sum()) == 2
+    assert int(keras.ops.convert_to_numpy(is_unique)[0, pad:].sum()) == 2
     at_minimum = _oracle_log_density(
         np.full((1, 1), float(shift)), SADDLE_MU + shift, SADDLE_SIGMA, SADDLE_LOGITS
     )[0]
@@ -504,10 +512,42 @@ def _check_the_shifted_middle_start_leaves_the_density_minimum(shift, num_steps=
     np.testing.assert_allclose(log_density[1], log_density[[0, 2]], atol=0.05)
 
 
+# Shifts of the triple where float32 spacing is widest next to the offset: just above (1.02) and
+# exactly at each power of two from 4096 to 2**20, plus the five older shifts. The middle component
+# takes the start-pattern entry pad + 1: pad 0 is the plain triple (-0.646), pad 2 and pad 36 give
+# entries of about -0.29 and -0.27, close to the smallest size 0.25.
+DENSE_TRIPLE_SHIFTS = [0.0, 50.0, 5000.0, 1e4, 1e6] + [
+    factor * 2.0 ** k for k in range(12, 21) for factor in (1.0, 1.02)
+]
+DENSE_TRIPLE_PADS = [0, 2, 36]
+
+
 class TestStationaryPointsReachedFromEachComponentMean:
     @pytest.mark.parametrize("shift", [0.0, 50.0, 5000.0, 10000.0, 1e6])
     def test_a_far_from_origin_density_minimum_is_still_left_in_float32(self, shift):
         _check_the_shifted_middle_start_leaves_the_density_minimum(shift)
+
+    @pytest.mark.parametrize("pad", DENSE_TRIPLE_PADS)
+    @pytest.mark.parametrize("shift", DENSE_TRIPLE_SHIFTS)
+    def test_the_density_minimum_is_left_on_a_dense_shift_grid_for_each_pattern_entry(self, shift, pad):
+        _check_the_shifted_middle_start_leaves_the_density_minimum(shift, pad=pad)
+
+    # First failing (pad, shift) pair of each multiple on the grid above, measured 2026-10-30 in
+    # float32 (the multiple 8 fails none of the 943 pairs of pads 0..40): the older five-shift test
+    # only fails the multiple 1.
+    @pytest.mark.parametrize(
+        "multiple, pad, shift",
+        [(1.0, 0, 5000.0), (2.0, 0, 4096.0 * 1.02), (4.0, 2, 4096.0 * 1.02)],
+    )
+    def test_red_a_smaller_eps_multiple_keeps_the_middle_start_on_the_density_minimum(
+        self, monkeypatch, multiple, pad, shift
+    ):
+        from dl_techniques.layers.statistics import mdn_layer as mdn_module
+
+        _check_the_shifted_middle_start_leaves_the_density_minimum(shift, pad=pad)
+        monkeypatch.setattr(mdn_module, "_MODE_START_EPS_MULTIPLE", multiple)
+        with pytest.raises(AssertionError):
+            _check_the_shifted_middle_start_leaves_the_density_minimum(shift, pad=pad)
 
     def test_a_shifted_triple_keeps_its_means_at_zero_steps(self):
         mu, sigma, logits = _batch(SADDLE_MU + 1e4, SADDLE_SIGMA, SADDLE_LOGITS)
@@ -692,8 +732,8 @@ class TestTheStartOffsetBreaksCoordinateSymmetry:
         np.testing.assert_allclose(graph, eager, atol=1e-5)
 
 
-# The start offset is max(1e-3 sigma, 8 eps(work dtype) |mu|): a term tied to rounding of the
-# mean, not to a fixed fraction of it, so it never outgrows sigma of a well-separated component.
+# The start offset is max(1e-3 sigma, min(8 eps(work dtype) |mu|, 0.5 sigma)): a term tied to rounding of the
+# mean, not to a fixed fraction of it, and capped so it never outgrows sigma of a well-separated component.
 # Measured 2026-10-30 against the dense-grid maxima: the fixed 1e-5 |mu| term lost a mode of
 # components 10 sigma apart at |mu|/sigma >= 1e6 (float32 and float64).
 def _grid_maxima_count(mu, sigma, logits):
@@ -741,6 +781,30 @@ def _check_the_narrow_pair_at_one_thousand_keeps_both_modes(dtype):
     assert abs(heavier - 0.01) < 1e-4, f"heavier mode at {heavier}"
 
 
+def _check_the_float32_pair_keeps_both_modes(ratio, gap, weights):
+    """Two unit components ``gap`` apart at ``ratio``: both float32 modes are found where the oracle puts them.
+
+    The truth is the float64 mode of the means as float32 stores them, and the tolerance is
+    ``max(0.1, 1.5 ulp)`` because one float32 spacing is 0.125 from a ratio of 1.6e6 on.
+    """
+    modes, log_density, is_unique = _modes_of_two(ratio, gap, 1.0, weights, "float32")
+    stored = np.array([ratio, ratio + gap], np.float32).astype(np.float64) - ratio
+    tolerance = max(0.1, 1.5 * float(np.spacing(np.float32(ratio + gap))))
+    truth = [
+        float(
+            _oracle_grid_mode(
+                stored[:, None], np.ones((2, 1)), np.log(weights), [centre], 1.0, levels=6, size=41
+            )[0][0]
+        )
+        for centre in stored
+    ]
+    assert int(is_unique.sum()) == 2, f"modes {modes}"
+    for expected in truth:
+        assert np.abs(modes[is_unique] - expected).min() <= tolerance, f"modes {modes}, truth {truth}"
+    heavy = truth[int(np.argmax(weights))]
+    assert abs(modes[int(np.argmax(log_density))] - heavy) <= tolerance, f"modes {modes}, truth {truth}"
+
+
 class TestTheStartOffsetTracksRounding:
     @pytest.mark.parametrize("dtype", ["float32", "float64"])
     def test_a_narrow_pair_far_from_the_origin_keeps_both_modes(self, dtype):
@@ -775,6 +839,20 @@ class TestTheStartOffsetTracksRounding:
         assert int(is_unique.sum()) == 2, f"modes {modes}"
         assert abs(modes[int(np.argmax(log_density))] - heavy) < 0.1
 
+    @pytest.mark.parametrize("ratio", [2e6, 4e6])
+    @pytest.mark.parametrize("gap", [3.0, 5.0, 10.0])
+    @pytest.mark.parametrize("weights", [(0.3, 0.7), (0.7, 0.3)])
+    def test_no_separated_mode_is_lost_in_float32_up_to_four_million(self, ratio, gap, weights):
+        _check_the_float32_pair_keeps_both_modes(ratio, gap, weights)
+
+    def test_red_without_the_cap_the_start_offset_merges_the_three_sigma_pair(self, monkeypatch):
+        from dl_techniques.layers.statistics import mdn_layer as mdn_module
+
+        _check_the_float32_pair_keeps_both_modes(2e6, 3.0, (0.7, 0.3))
+        monkeypatch.setattr(mdn_module, "_MODE_START_CAP", 1e9)
+        with pytest.raises(AssertionError):
+            _check_the_float32_pair_keeps_both_modes(2e6, 3.0, (0.7, 0.3))
+
     def test_random_narrow_mixtures_miss_no_maximum_in_float64(self):
         rng = np.random.default_rng(7)
         missed = 0
@@ -801,14 +879,17 @@ class TestTheStartOffsetTracksRounding:
             assert abs(modes[int(np.argmax(top))] - grid_mode[0]) < 0.1 * sigma
         assert missed == 0
 
-    def test_red_the_old_fixed_fraction_of_the_mean_loses_the_narrow_pair(self, monkeypatch):
+    @pytest.mark.parametrize("dtype", ["float32", "float64"])
+    def test_red_the_old_fixed_fraction_of_the_mean_loses_the_narrow_pair(self, monkeypatch, dtype):
         from dl_techniques.layers.statistics import mdn_layer as mdn_module
 
-        eps32 = float(np.finfo(np.float32).eps)
-        _check_the_narrow_pair_at_one_thousand_keeps_both_modes("float32")
-        monkeypatch.setattr(mdn_module, "_MODE_START_EPS_MULTIPLE", 1e-5 / eps32)
+        _check_the_narrow_pair_at_one_thousand_keeps_both_modes(dtype)
+        monkeypatch.setattr(mdn_module, "_MODE_START_EPS_MULTIPLE", 1e-5 / float(np.finfo(dtype).eps))
+        # The fixed fraction is 10 sigma here and the cap 0.5 sigma, so the cap alone keeps the pair.
+        _check_the_narrow_pair_at_one_thousand_keeps_both_modes(dtype)
+        monkeypatch.setattr(mdn_module, "_MODE_START_CAP", 1e9)
         with pytest.raises(AssertionError):
-            _check_the_narrow_pair_at_one_thousand_keeps_both_modes("float32")
+            _check_the_narrow_pair_at_one_thousand_keeps_both_modes(dtype)
 
 
 # Two equal unit components a distance s apart; the true density has one mode at 0 for
