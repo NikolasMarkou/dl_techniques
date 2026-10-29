@@ -1,8 +1,12 @@
 """
-Reparameterizable large-kernel convolution of the FastViT / MobileCLIP2 MCi backbone.
+Reparameterizable large-kernel convolution (a large + small Conv-BN branch pair).
 
-This module transcribes timm's ``ReparamLargeKernelConv``, the downsampling
-primitive that FastViT uses inside every ``PatchEmbed``.
+This module transcribes timm's ``ReparamLargeKernelConv``. FastViT uses it as the
+downsampling primitive inside every ``PatchEmbed``
+(:class:`~dl_techniques.models.vision.fastvit.components.FastVitPatchEmbed`), but the
+block itself is architecture-agnostic: any channels-last vision model that wants a
+large depthwise or dense kernel with a short-range training-time helper branch can
+use it.
 
 The design idea is the same structural-reparameterization trick that
 :class:`~dl_techniques.layers.conv_blocks.mobile_one_block.MobileOneBlock` uses, applied to a
@@ -25,6 +29,15 @@ reparameterization (`reparameterize()` / branch fusion) is provided, matching th
 reference weights shipped by MobileCLIP2 (always evaluated with
 ``inference_mode=False``).
 
+The two branches are only summable on a common sampling grid. Under Keras'
+asymmetric ``padding='same'`` a strided ``k x k`` and a strided ``s x s`` convolution
+sample DIFFERENT input pixels (MEASURED with Dirac kernels at stride 2: ``k=1`` gives
+``[[0, 2], [8, 10]]`` and ``k=3`` gives ``[[5, 7], [13, 15]]`` on a ``4 x 4`` ramp), so
+``padding_mode`` defaults to ``'reference'`` here (symmetric ``kernel_size // 2``
+padding, see :func:`~dl_techniques.layers.conv_blocks.mobile_one_block.resolve_conv_padding`),
+unlike :class:`~dl_techniques.layers.conv_blocks.mobile_one_block.MobileOneBlock`
+whose historical default is ``'keras_same'``.
+
 Three details are load-bearing and easy to get silently wrong:
 
 1. **``group_size`` follows timm's ``num_groups`` semantics**, NOT a literal group
@@ -33,7 +46,7 @@ Three details are load-bearing and easy to get silently wrong:
    :class:`MobileOneBlock`, which resolves the same way.
 2. **A grouped convolution constrains BOTH channel counts.** With
    ``groups = in_channels`` (the ``group_size=1`` case used by
-   :class:`~dl_techniques.layers.fastvit.patch_embed.FastVitPatchEmbed`), the
+   :class:`~dl_techniques.models.vision.fastvit.components.FastVitPatchEmbed`), the
    layer can only map ``in_channels -> out_channels`` when ``out_channels`` is a
    multiple of ``in_channels``. That holds for every MCi variant because the
    channel width exactly doubles from stage to stage — but it is a real
@@ -53,7 +66,6 @@ References:
 
 import keras
 from typing import Optional, Union, Tuple, Dict, Any
-from keras import layers, ops, initializers, regularizers, activations
 
 # ---------------------------------------------------------------------
 # local imports
@@ -62,23 +74,20 @@ from keras import layers, ops, initializers, regularizers, activations
 from dl_techniques.layers.activations.exact_activations import exact_name
 from dl_techniques.layers.activations.gelu_tanh import resolve_activation
 from ..norms.factory import create_normalization_layer
-from ..conv_blocks.squeeze_excitation import SqueezeExcitation
+from .squeeze_excitation import SqueezeExcitation
 # Single definition of timm's `num_groups` mapping, shared with MobileOneBlock.
 # Do NOT re-implement it here: the two layers must resolve `group_size`
 # identically or a FastViT block and the MobileOneBlock beside it would disagree
 # about what `group_size=1` means.
-from ..conv_blocks.mobile_one_block import (
+from .mobile_one_block import (
+    PADDING_MODES,
     resolve_num_groups,
     resolve_conv_padding,
     conv_output_size,
 )
-from .reference import REFERENCE_NORM_EPSILON, REFERENCE_PADDING_MODE
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
-
-#: Single definition of the reference epsilon lives in :mod:`.reference`.
-_REFERENCE_BN_EPSILON = REFERENCE_NORM_EPSILON
 
 #: Squeeze-and-Excitation bottleneck ratio used by the reference AT THIS CALL SITE
 #: (``rd_ratio=0.25``). Deliberately different from timm's ``SqueezeExcite``
@@ -92,7 +101,7 @@ _REFERENCE_SE_USE_BIAS = True
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.layers.fastvit.reparam_large_kernel_conv")
+@register_dl_technique("dl_techniques.layers.conv_blocks.reparam_large_kernel_conv")
 class ReparamLargeKernelConv(keras.layers.Layer):
     """FastViT reparameterizable large-kernel convolution.
 
@@ -164,6 +173,19 @@ class ReparamLargeKernelConv(keras.layers.Layer):
         reference's default — ``act_layer`` is only supplied when
         ``lkc_use_act`` is set). Defaults to ``None``.
     :type activation: Optional[Union[str, callable]]
+    :param padding_mode: How each branch realises ``'same'`` padding — see
+        :func:`~dl_techniques.layers.conv_blocks.mobile_one_block.resolve_conv_padding`.
+        ``'reference'`` (the default) pads symmetrically by ``kernel_size // 2``,
+        which puts both branches on the same grid at any stride. ``'keras_same'``
+        uses Keras' asymmetric ``'same'``; at stride > 1 the two branches then
+        sample different input pixels. Defaults to ``'reference'``.
+    :type padding_mode: str
+    :param norm_epsilon: Variance epsilon of both branch BatchNormalizations.
+        Defaults to ``1e-3`` — Keras' own default, the same as
+        :class:`~dl_techniques.layers.conv_blocks.mobile_one_block.MobileOneBlock`.
+        The FastViT / MobileCLIP2 reference uses ``1e-5``; pass it explicitly for a
+        faithful port. Must be positive.
+    :type norm_epsilon: float
     :param kernel_initializer: Initializer for both convolution kernels.
         Defaults to ``'he_normal'``.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
@@ -173,7 +195,8 @@ class ReparamLargeKernelConv(keras.layers.Layer):
 
     :raises ValueError: If ``out_channels``, ``kernel_size`` or ``stride`` are not
         positive, if ``group_size`` is negative, if ``small_kernel`` is not
-        positive, or if ``small_kernel > kernel_size``. At build time, also if the
+        positive, if ``small_kernel > kernel_size``, if ``padding_mode`` is not
+        a recognised mode, or if ``norm_epsilon`` is not positive. At build time, also if the
         input is not rank 4, if the channel count is undefined, or if the resolved
         group count does not divide both the input and the output channel counts.
 
@@ -196,8 +219,10 @@ class ReparamLargeKernelConv(keras.layers.Layer):
             small_kernel: Optional[int] = None,
             use_se: bool = False,
             activation: Optional[Union[str, callable]] = None,
-            kernel_initializer: Union[str, initializers.Initializer] = 'he_normal',
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
+            padding_mode: str = 'reference',
+            norm_epsilon: float = 1e-3,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -211,6 +236,12 @@ class ReparamLargeKernelConv(keras.layers.Layer):
             raise ValueError(f"stride must be positive, got {stride}")
         if group_size < 0:
             raise ValueError(f"group_size must be non-negative, got {group_size}")
+        if padding_mode not in PADDING_MODES:
+            raise ValueError(
+                f"padding_mode must be one of {PADDING_MODES}, got {padding_mode!r}"
+            )
+        if norm_epsilon <= 0:
+            raise ValueError(f"norm_epsilon must be positive, got {norm_epsilon}")
         if small_kernel is not None:
             if small_kernel <= 0:
                 raise ValueError(
@@ -237,11 +268,13 @@ class ReparamLargeKernelConv(keras.layers.Layer):
         self.group_size = group_size
         self.small_kernel = small_kernel
         self.use_se = use_se
+        self.padding_mode = padding_mode
+        self.norm_epsilon = float(norm_epsilon)
         self.activation = (
             None if activation is None else resolve_activation(activation)  # D-277: float64-exact, bit-identical to stock at float32
         )
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         # Resolved group count. `group_size == 0` is knowable up front; anything
         # else depends on `in_channels` and is finalised in build().
@@ -292,8 +325,9 @@ class ReparamLargeKernelConv(keras.layers.Layer):
         :type groups: int
         :param name: Sub-layer name; the inner conv/BN names are derived from it.
         :type name: str
-        :return: A ``Sequential`` of an optional symmetric ``ZeroPadding2D``, a
-            ``Conv2D(use_bias=False)`` and ``BatchNormalization(epsilon=1e-5)``.
+        :return: A ``Sequential`` of an optional symmetric ``ZeroPadding2D``
+            (``padding_mode='reference'`` only), a ``Conv2D(use_bias=False)`` and
+            ``BatchNormalization(epsilon=norm_epsilon)``.
         :rtype: keras.Sequential
         """
         # The reference pads SYMMETRICALLY by `kernel_size // 2`. Keras'
@@ -301,13 +335,13 @@ class ReparamLargeKernelConv(keras.layers.Layer):
         # branches summed below would sample a grid whose offset depends on the
         # kernel size — MEASURED, a one-pixel shift that no shape assertion sees.
         pad, keras_padding = resolve_conv_padding(
-            kernel_size, 'same', REFERENCE_PADDING_MODE)
+            kernel_size, 'same', self.padding_mode)
         padding_layers = (
             [] if pad == 0
-            else [layers.ZeroPadding2D(padding=pad, name=f'{name}_pad')]
+            else [keras.layers.ZeroPadding2D(padding=pad, name=f'{name}_pad')]
         )
         return keras.Sequential(padding_layers + [
-            layers.Conv2D(
+            keras.layers.Conv2D(
                 filters=self.out_channels,
                 kernel_size=kernel_size,
                 strides=self.stride,
@@ -320,7 +354,7 @@ class ReparamLargeKernelConv(keras.layers.Layer):
             ),
             create_normalization_layer(
                 'batch_norm',
-                epsilon=_REFERENCE_BN_EPSILON,
+                epsilon=self.norm_epsilon,
                 name=f'{name}_bn',
             ),
         ], name=name)
@@ -404,7 +438,7 @@ class ReparamLargeKernelConv(keras.layers.Layer):
         x = self.large_conv(inputs, training=training)
 
         if self.small_conv is not None:
-            x = ops.add(x, self.small_conv(inputs, training=training))
+            x = keras.ops.add(x, self.small_conv(inputs, training=training))
 
         if self.se is not None:
             x = self.se(x, training=training)
@@ -435,10 +469,10 @@ class ReparamLargeKernelConv(keras.layers.Layer):
         input_shape = tuple(input_shape)
         height = conv_output_size(
             input_shape[1], self.kernel_size, self.stride,
-            'same', REFERENCE_PADDING_MODE)
+            'same', self.padding_mode)
         width = conv_output_size(
             input_shape[2], self.kernel_size, self.stride,
-            'same', REFERENCE_PADDING_MODE)
+            'same', self.padding_mode)
         return (input_shape[0], height, width, self.out_channels)
 
     def get_config(self) -> Dict[str, Any]:
@@ -455,12 +489,14 @@ class ReparamLargeKernelConv(keras.layers.Layer):
             'group_size': self.group_size,
             'small_kernel': self.small_kernel,
             'use_se': self.use_se,
+            'padding_mode': self.padding_mode,
+            'norm_epsilon': self.norm_epsilon,
             'activation': (
                 None if self.activation is None
-                else exact_name(self.activation) or activations.serialize(self.activation)
+                else exact_name(self.activation) or keras.activations.serialize(self.activation)
             ),
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
         })
         return config
 
@@ -475,11 +511,11 @@ class ReparamLargeKernelConv(keras.layers.Layer):
         """
         config = dict(config)
         if config.get('activation') is not None:
-            # resolve, not activations.deserialize: "gelu" must come back as exact_gelu (D-277)
+            # resolve, not keras.activations.deserialize: "gelu" must come back as exact_gelu (D-277)
             config['activation'] = resolve_activation(config['activation'])
-        config['kernel_initializer'] = initializers.deserialize(
+        config['kernel_initializer'] = keras.initializers.deserialize(
             config['kernel_initializer'])
-        config['kernel_regularizer'] = regularizers.deserialize(
+        config['kernel_regularizer'] = keras.regularizers.deserialize(
             config['kernel_regularizer'])
         return cls(**config)
 

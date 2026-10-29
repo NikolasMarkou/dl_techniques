@@ -4,7 +4,7 @@
 ``mobile_clip_v2.py`` pairs with the FastViT MCi tower to make "the faithful
 MobileCLIP port". Its ``final_layer_norm`` is OpenCLIP's ``ln_final``, i.e. a
 PyTorch ``nn.LayerNorm``, whose epsilon defaults to 1e-5 — the value
-``layers/fastvit/reference.py`` already defines for every normalization in this
+``models/vision/fastvit/components.py`` already defines for every normalization in this
 port, with an interface contract saying it must be passed EXPLICITLY at every
 construction site because Keras' default (1e-3) is 100x larger and silent.
 
@@ -20,7 +20,7 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
 import keras
 
-from dl_techniques.layers.fastvit.reference import REFERENCE_NORM_EPSILON
+from dl_techniques.models.vision.fastvit.components import REFERENCE_NORM_EPSILON
 from dl_techniques.models.vision_language.mobile_clip.components import MobileClipTextEncoder
 
 KERAS_DEFAULT_EPSILON = 1e-3
@@ -56,7 +56,7 @@ class TestTextTowerFinalNormEpsilon:
     def test_it_is_imported_not_re_declared(self):
         """The constant has ONE definition; a local copy would drift silently.
 
-        ``layers/fastvit/reference.py``'s own module docstring states this as an
+        ``models/vision/fastvit/components.py``'s own module docstring states this as an
         interface contract for consumers, and this package is now one.
         """
         import dl_techniques.models.vision_language.mobile_clip.components as components

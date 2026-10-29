@@ -9,7 +9,7 @@ A hybrid convolution/transformer **image model**: a `ConvolutionalStem` of Mobil
 > **Two things the name invites you to assume, and shouldn't.**
 >
 > 1. **This is not a vision-language model.** It takes images and returns class logits or feature maps. There is no text tower and no cross-modal head.
-> 2. **This is not a weight-compatible port of any published FastViT or FastVLM checkpoint.** It is assembled from this repo's own blocks. In particular `dl_techniques.layers.repmixer_block.RepMixerBlock` shares a *name* with FastViT's RepMixer and is a different construction; the faithful FastViT port lives in `dl_techniques.layers.fastvit` and `models/vision/fastvit/`.
+> 2. **This is not a weight-compatible port of any published FastViT or FastVLM checkpoint.** It is assembled from this repo's own blocks. In particular `dl_techniques.layers.conv_blocks.repmixer_block.RepMixerBlock` shares a *name* with FastViT's RepMixer and is a different construction; the faithful FastViT port lives in `models/vision/fastvit/`.
 >
 > No pretrained weights are distributed, and the model has not been trained or benchmarked in this repository. No accuracy or latency claim is made for it.
 
@@ -82,7 +82,7 @@ Z = Y + ChannelMixer(Norm2(Y))     Conv1x1(expand) -> Act -> Conv1x1(project)
 
 Both halves are convolutional, so the cost is linear in `H * W` rather than quadratic. The channel mixer is an inverted-bottleneck MLP whose expansion is `mlp_ratio`.
 
-Again: this is **this repo's** `RepMixerBlock`, not FastViT's. Use `dl_techniques.layers.fastvit.FastVitRepMixerBlock` for anything that must match timm block-for-block.
+Again: this is **this repo's** `RepMixerBlock`, not FastViT's. Use `dl_techniques.models.vision.fastvit.components.FastVitRepMixerBlock` for anything that must match timm block-for-block.
 
 ### 4.3 `AttentionBlockVLM`
 

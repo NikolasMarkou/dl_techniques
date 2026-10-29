@@ -75,7 +75,9 @@ SRC_ROOT = os.path.join(os.path.dirname(_TESTS_DIR), "src")
 #: (2026-10-27): 198 sites, 101 files, 153 dynamic, 45 literal; then step 19 of the same plan
 #: (``vq_vae_rotation``'s down-steps are ``ConvStem``): 197 sites, 101 files, 152 dynamic, 45 literal;
 #: then SAM1's mask stack (``sam1/prompt_encoder.py`` leaves the table): 195 sites, 100 files, 150
-#: dynamic, 45 literal.
+#: dynamic, 45 literal; then ``layers/fastvit/`` dissolved (its three files' sites move unchanged to
+#: ``conv_blocks/reparam_large_kernel_conv.py`` and ``models/vision/fastvit/components.py``): 195 sites,
+#: 99 files, 150 dynamic, 45 literal.
 #: Edit it in the commit that adds or removes a site.
 NORM_CALL_SITES: Dict[str, Tuple[int, int]] = {
     "dl_techniques/layers/attention/area_attention.py": (2, 0),
@@ -97,13 +99,11 @@ NORM_CALL_SITES: Dict[str, Tuple[int, int]] = {
     "dl_techniques/layers/conv_blocks/conv_block.py": (1, 0),
     "dl_techniques/layers/conv_blocks/depthwise_separable_block.py": (2, 0),
     "dl_techniques/layers/conv_blocks/gabor_depthwise_separable_block.py": (1, 0),
+    "dl_techniques/layers/conv_blocks/reparam_large_kernel_conv.py": (0, 1),
     "dl_techniques/layers/conv_blocks/stem.py": (1, 0),
     "dl_techniques/layers/conv_blocks/universal_inverted_bottleneck.py": (1, 0),
     "dl_techniques/layers/dense_block.py": (1, 0),
     "dl_techniques/layers/eomt_mask.py": (2, 0),
-    "dl_techniques/layers/fastvit/attention_block.py": (1, 0),
-    "dl_techniques/layers/fastvit/conv_mlp.py": (0, 1),
-    "dl_techniques/layers/fastvit/reparam_large_kernel_conv.py": (0, 1),
     "dl_techniques/layers/fnet_encoder_block.py": (2, 0),
     "dl_techniques/layers/fusion/multimodal_fusion.py": (5, 0),
     "dl_techniques/layers/geometric/clifford_block.py": (2, 0),
@@ -154,6 +154,7 @@ NORM_CALL_SITES: Dict[str, Tuple[int, int]] = {
     "dl_techniques/models/vision/dino/dino_v1.py": (3, 0),
     "dl_techniques/models/vision/dino/dino_v2.py": (3, 0),
     "dl_techniques/models/vision/dino/dino_v3.py": (1, 0),
+    "dl_techniques/models/vision/fastvit/components.py": (1, 1),
     "dl_techniques/models/vision/fftnet/model.py": (3, 0),
     "dl_techniques/models/vision/image_restoration/darkir/model.py": (0, 4),
     "dl_techniques/models/vision/image_restoration/pw_fnet/model.py": (2, 0),
@@ -273,7 +274,7 @@ class TestTheNormFactoryCallSitePopulationIsPinned:
     def test_the_totals_match_the_census(self, norm_call_sites):
         dynamic = sum(pair[0] for pair in NORM_CALL_SITES.values())
         literal = sum(pair[1] for pair in NORM_CALL_SITES.values())
-        assert (dynamic, literal, len(NORM_CALL_SITES)) == (150, 45, 100), (
+        assert (dynamic, literal, len(NORM_CALL_SITES)) == (150, 45, 99), (
             "the census's own totals moved; re-derive the module docstring's numbers"
         )
 

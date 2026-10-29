@@ -6,7 +6,7 @@ head follows the Depth Anything V1 recipe (``model.py``'s module docstring
 enumerates the three deliberate departures from the paper; normalization is not
 among them), and that reference is PyTorch, whose ``nn.BatchNorm2d`` defaults to
 **1e-5**. The same torch-vs-Keras fact is written down for the other port in
-this repo at ``layers/fastvit/reference.py``.
+this repo at ``models/vision/fastvit/components.py``.
 
 The three encoder sites are a weaker case and are treated as such in D-028: the
 placeholder encoder is an in-repo stand-in for DINOv2 with no reference

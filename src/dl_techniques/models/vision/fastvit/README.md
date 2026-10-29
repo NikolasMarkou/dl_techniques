@@ -21,8 +21,9 @@ before quoting it against any published number.
 
 | | |
 |---|---|
-| The eight block primitives | [`layers/fastvit/`](../../layers/fastvit/README.md) |
-| The assembled tower (here) | `models/vision/fastvit/` |
+| The FastViT-specific blocks | `models/vision/fastvit/components.py` (§5) |
+| The reusable primitives they build on | `layers/conv_blocks/` (`MobileOneBlock`, `ReparamLargeKernelConv`), `layers/embedding/` (`RepConditionalPosEnc`), `layers/ffn/` (`MLPBlock`) |
+| The assembled tower | `models/vision/fastvit/model.py` |
 | The CLIP model that consumes it | [`models/vision_language/mobile_clip/`](../mobile_clip/README.md) |
 
 ---
@@ -55,9 +56,10 @@ either a projected embedding or pooled backbone features. It has two audiences:
 * **As a general image backbone** — build it with `projection_dim=None` to get
   pooled features for classification, transfer, or dense heads.
 
-The tower lives in `models/` rather than `layers/` because it is a complete
-network with its own variant table and factory. Its constituent blocks stay in
-`layers/fastvit/` so they can be reused independently.
+The tower lives in `models/` because it is a complete network with its own
+variant table and factory. The blocks that only make sense inside it live beside
+it in `components.py`. The two genuinely reusable primitives, the large-kernel
+downsample conv and the conditional positional encoding, live in `layers/`.
 
 ## 2. Core concepts
 
@@ -175,10 +177,63 @@ Methods beyond the Keras surface:
 | `stem_output_shape(input_shape)` | Spatial shape after the /4 stem. |
 | `stage_output_shapes(input_shape)` | Per-stage output shapes, for dense heads. |
 
-The eight primitives the tower is built from live in
-[`src/dl_techniques/layers/fastvit/`](../../layers/fastvit/README.md) and are
-documented there, including the `RepMixerBlock` name-collision warning
-(deviation **X-5**).
+### The blocks (`components.py`)
+
+Not exported from the package; import them from
+`dl_techniques.models.vision.fastvit.components`. Generic reference names carry a
+`FastVit` prefix so they cannot collide in the legacy `Custom>ClassName` alias
+namespace (see **X-5** for the `RepMixerBlock` collision in particular).
+
+| Class | Reference name | What it is |
+|---|---|---|
+| `FastVitConvMlp` | `ConvMlp` | depthwise 7x7 + BN (no act), then `layers/ffn/mlp.py::MLPBlock` (Dense -> GELU -> drop -> Dense, both biased; a Dense on channels-last is the reference 1x1 conv), then dropout. Kernels `TruncatedNormal(0.02)`, biases zero. |
+| `FastVitRepMixer` | `RepMixer` | `x + gamma * (mixer(x) - norm(x))`; `norm` is a degenerate single-BatchNorm `MobileOneBlock`, `mixer` a depthwise `MobileOneBlock(use_act=False)`. |
+| `FastVitRepMixerBlock` | `RepMixerBlock` | `x = token_mixer(x)`, then `x = x + drop_path(gamma2 * ConvMlp(x))`. |
+| `FastVitPatchEmbed` | `PatchEmbed` | `ReparamLargeKernelConv(k=7, stride=2, depthwise, small_kernel=3)` -> `MobileOneBlock(k=1)`. The downsample. |
+| `FastVitAttentionBlock` | `AttentionBlock` | pre-norm global self-attention + ConvMlp, LayerScale + stochastic depth on both residual branches. Owns the rank-4 <-> rank-3 flatten. |
+| `FastVitStage` | `FastVitStage` | optional `FastVitPatchEmbed` -> optional `RepConditionalPosEnc` -> `depth` x (RepMixer block \| attention block). |
+
+The module also holds `REFERENCE_NORM_EPSILON` (`1e-5`) and
+`REFERENCE_PADDING_MODE` (`'reference'`), the two silent-when-wrong reference
+facts every FastViT construction site imports rather than re-declares
+(`models/vision_language/mobile_clip/` imports the epsilon too).
+
+The reusable primitives:
+
+| Class | Home | What it is |
+|---|---|---|
+| `ReparamLargeKernelConv` | `layers/conv_blocks/reparam_large_kernel_conv.py` | large-kernel conv + optional small-kernel conv (both Conv+BN, no act), optional SE, optional activation. Takes `norm_epsilon` (default `1e-3`) and `padding_mode` (default `'reference'`); `FastVitPatchEmbed` passes the reference values. |
+| `RepConditionalPosEnc` | `layers/embedding/rep_conditional_pos_enc.py` (factory key `rep_conditional_pos_enc`) | depthwise 7x7 biased conv, `padding='same'`, output `conv(x) + x`. |
+| `MobileOneBlock` | `layers/conv_blocks/mobile_one_block.py` | the shared MobileOne block, extended additively with `norm_epsilon` / `padding_mode` / `num_conv_branches=0` rather than copied. |
+
+### `FastVitStage` and the drop-path contract
+
+```python
+from dl_techniques.models.vision.fastvit.components import FastVitStage
+
+stage = FastVitStage(
+    dim=128,
+    depth=4,
+    token_mixer='repmixer',        # or 'attention'
+    downsample=True,               # False for the first stage (the stem did the /4)
+    use_pos_emb=False,             # True for the attention stages of mci3 / mci4
+    mlp_ratio=4.0,
+    drop_path_rates=[0.00, 0.02, 0.04, 0.06],   # EXACTLY `depth` entries
+)
+y = stage(x, training=False)       # (B, H, W, C_in) -> (B, H/2, W/2, 128)
+```
+
+**The stage does not compute its own stochastic-depth schedule.** The schedule is
+global across every block of every stage (see §2), so `drop_path_rates` is an
+explicit list of exactly `depth` floats supplied by the encoder, and the stage
+gives element `i` to block `i`. Build the global schedule with
+`dl_techniques.utils.drop_path.linear_drop_path_rates(total_blocks, max_rate)`,
+then slice it stagewise. `None` means all zeros; any other length raises
+`ValueError` naming both `depth` and the length received.
+
+The blocks live in a **flat** Python list, `stage.blocks`, named `block_0` …
+`block_{depth-1}`. The names do not encode the token mixer, so a
+repmixer/attention change does not move the variable paths.
 
 ## 6. The MCi variant table
 
@@ -257,13 +312,19 @@ it — inside MobileCLIP2 that name is fixed by the module constant
   `compute_output_shape`, so `model.save(...)` / `keras.models.load_model(...)` round-trips.
   The package string is the defining module's dotted path:
   `dl_techniques.models.fastvit.model>FastVitImageEncoder` here, and
-  `dl_techniques.layers.fastvit.<module>><ClassName>` for the eight blocks in
-  `dl_techniques/layers/fastvit/`. Archives written before the registration migration
-  still load through the legacy `Custom>ClassName` alias the helper also binds.
+  `dl_techniques.models.fastvit.components><ClassName>` for the six blocks in
+  `components.py`, `dl_techniques.layers.conv_blocks.reparam_large_kernel_conv>ReparamLargeKernelConv`
+  and `dl_techniques.layers.embedding.rep_conditional_pos_enc>RepConditionalPosEnc`.
+  Archives written before the registration migration still load through the legacy
+  `Custom>ClassName` alias the helper also binds. Archives written while the blocks
+  lived in `layers/fastvit/` (keys `dl_techniques.layers.fastvit.*`) do not load by
+  that key; no such checkpoints were ever distributed.
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m pytest \
-    tests/test_models/test_fastvit/ tests/test_layers/test_fastvit/ -q
+    tests/test_models/test_fastvit/ \
+    tests/test_layers/test_conv_blocks/test_reparam_large_kernel_conv.py \
+    tests/test_layers/test_embedding/test_rep_conditional_pos_enc.py -q
 ```
 
 The suites cover initialization, invalid-config raises, forward shape,
@@ -288,8 +349,8 @@ reference actually executes.
 
 **No claim of numerical identity to a fused form is made or tested here.** Fusing
 parallel branches requires them to sample the same input pixels; the padding
-convention here is the reference's symmetric `kernel_size // 2` (see the
-`layers/fastvit/README.md` deviation list), so the branches **are** fusible in
+convention here is the reference's symmetric `kernel_size // 2` (see §11 and
+`REFERENCE_PADDING_MODE` in `components.py`), so the branches **are** fusible in
 principle. Keras' asymmetric `padding='same'` would instead offset the strided
 `k x k` and `1 x 1` branches by one pixel at stride 2 and make them unfusible.
 Since no fusion code exists, "the fused form is identical" is an unexecuted claim
@@ -354,7 +415,7 @@ construction, and no conversion script exists here.
 
 ### X-5 — `RepMixerBlock` is a different architecture that shares the name
 
-`src/dl_techniques/layers/repmixer_block.py::RepMixerBlock` is **not** FastViT's
+`src/dl_techniques/layers/conv_blocks/repmixer_block.py::RepMixerBlock` is **not** FastViT's
 RepMixer block. It has no LayerScale, no stochastic depth, a different token
 mixer, and a 1x1 ConvFFN instead of a depthwise 7x7 ConvMlp. It is consumed by
 `models/vision_language/fastvlm/` and was deliberately left untouched — substituting the FastViT
@@ -364,11 +425,11 @@ block would change a shipped model's semantics and its checkpoint layout.
 
 * Building a faithful FastViT / MobileCLIP2 tower, or anything that must
   correspond block-for-block to timm's `fastvit.py` — use
-  `dl_techniques.layers.fastvit.FastVitRepMixerBlock`.
+  `dl_techniques.models.vision.fastvit.components.FastVitRepMixerBlock`.
 * Touching `models/vision_language/fastvlm/` or loading one of its checkpoints — that model
-  consumes `layers/repmixer_block.py::RepMixerBlock`. Leave it alone.
+  consumes `layers/conv_blocks/repmixer_block.py::RepMixerBlock`. Leave it alone.
 
-The same disambiguation applies to `layers/repmixer_block.py::ConvolutionalStem`,
+The same disambiguation applies to `layers/conv_blocks/repmixer_block.py::ConvolutionalStem`,
 which is likewise not the FastViT stem.
 
 ## 10. Troubleshooting & FAQs
@@ -400,6 +461,7 @@ This package is the image branch only.
 | Input resolution | 256 x 256 x 3, channels last (the MobileCLIP setting) |
 | LayerScale | `LayerScale(CHANNEL, Constant(1e-5), constraint=None)` |
 | Normalization epsilon | `1e-5`, passed **explicitly** (the factory `setdefault`s `1e-6`) |
+| Padding | symmetric `kernel_size // 2` at every convolution (`padding_mode='reference'`: `ZeroPadding2D` + a `'valid'` conv). Keras' `'same'` pads asymmetrically, so at stride 2 the sampled grid depends on the kernel size (MEASURED with Dirac kernels on a `4 x 4` ramp: `[[0, 2], [8, 10]]` for `k=1`, `[[5, 7], [13, 15]]` for `k=3`). Value-identical to `'same'` for an odd kernel at stride 1. |
 | Attention heads | `dim // 32` |
 | Drop-path schedule | one global linear ramp over `sum(layers)` blocks, sliced stagewise |
 | SE ratios | **two in one network** — `1/16` inside `MobileOneBlock`, `0.25` inside the large-kernel conv |

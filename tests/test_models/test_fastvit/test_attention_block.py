@@ -24,9 +24,8 @@ import keras
 import numpy as np
 import pytest
 import tensorflow as tf
-from keras import ops
 
-from dl_techniques.layers.fastvit.attention_block import FastVitAttentionBlock
+from dl_techniques.models.vision.fastvit.components import FastVitAttentionBlock
 
 
 class TestFastVitAttentionBlock:
@@ -153,7 +152,7 @@ class TestFastVitAttentionBlock:
         x = rng.normal(size=shape).astype('float32')
         y = block(x, training=False)
         assert tuple(y.shape) == shape
-        assert np.all(np.isfinite(ops.convert_to_numpy(y)))
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(y)))
 
     def test_compute_output_shape_pre_and_post_build(self, basic_config):
         block = FastVitAttentionBlock(**basic_config)
@@ -170,13 +169,13 @@ class TestFastVitAttentionBlock:
         y_eval = block(sample_input, training=False)
         assert tuple(y_train.shape) == sample_input.shape
         assert tuple(y_eval.shape) == sample_input.shape
-        assert np.all(np.isfinite(ops.convert_to_numpy(y_eval)))
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(y_eval)))
 
     def test_training_false_is_deterministic(self, basic_config, sample_input):
         block = FastVitAttentionBlock(**basic_config, drop_path_rate=0.5,
                                       dropout_rate=0.5)
-        first = ops.convert_to_numpy(block(sample_input, training=False))
-        second = ops.convert_to_numpy(block(sample_input, training=False))
+        first = keras.ops.convert_to_numpy(block(sample_input, training=False))
+        second = keras.ops.convert_to_numpy(block(sample_input, training=False))
         np.testing.assert_allclose(first, second, atol=1e-6, rtol=0)
 
     @pytest.mark.parametrize("normalization_type", ['batch_norm', 'layer_norm'])
@@ -197,7 +196,7 @@ class TestFastVitAttentionBlock:
         x = tf.constant(sample_input)
         with tf.GradientTape() as tape:
             y = block(x, training=True)
-            loss = ops.mean(ops.square(y))
+            loss = keras.ops.mean(keras.ops.square(y))
         grads = tape.gradient(loss, block.trainable_variables)
 
         assert len(block.trainable_variables) > 0
@@ -225,8 +224,8 @@ class TestFastVitAttentionBlock:
             after = restored(sample_input, training=False)
 
         np.testing.assert_allclose(
-            ops.convert_to_numpy(before),
-            ops.convert_to_numpy(after),
+            keras.ops.convert_to_numpy(before),
+            keras.ops.convert_to_numpy(after),
             atol=1e-6, rtol=0,
         )
 
@@ -255,30 +254,30 @@ class TestFastVitAttentionBlock:
         rng = np.random.default_rng(4242)
         x = rng.normal(size=(batch, height, width, dim)).astype('float32')
 
-        y = ops.convert_to_numpy(block(x, training=False))
+        y = keras.ops.convert_to_numpy(block(x, training=False))
         assert y.shape == (batch, height, width, dim)
 
         normed = block.norm(x, training=False)
 
         # --- arm A: independent H-major oracle --------------------------
-        sequence = ops.reshape(normed, (batch, height * width, dim))
-        attended = ops.reshape(block.attn(sequence, training=False),
+        sequence = keras.ops.reshape(normed, (batch, height * width, dim))
+        attended = keras.ops.reshape(block.attn(sequence, training=False),
                                (batch, height, width, dim))
-        mid = ops.add(x, block.layer_scale_1(attended, training=False))
-        expected = ops.convert_to_numpy(
-            ops.add(mid, block.layer_scale_2(block.mlp(mid, training=False),
+        mid = keras.ops.add(x, block.layer_scale_1(attended, training=False))
+        expected = keras.ops.convert_to_numpy(
+            keras.ops.add(mid, block.layer_scale_2(block.mlp(mid, training=False),
                                              training=False))
         )
         np.testing.assert_allclose(y, expected, atol=1e-5, rtol=0)
 
         # --- arm B: the W-major orientation defect must be DISTINGUISHABLE
-        transposed = ops.transpose(normed, (0, 2, 1, 3))
-        bad_sequence = ops.reshape(transposed, (batch, width * height, dim))
-        bad_attended = ops.reshape(block.attn(bad_sequence, training=False),
+        transposed = keras.ops.transpose(normed, (0, 2, 1, 3))
+        bad_sequence = keras.ops.reshape(transposed, (batch, width * height, dim))
+        bad_attended = keras.ops.reshape(block.attn(bad_sequence, training=False),
                                    (batch, height, width, dim))
-        bad_mid = ops.add(x, block.layer_scale_1(bad_attended, training=False))
-        broken = ops.convert_to_numpy(
-            ops.add(bad_mid,
+        bad_mid = keras.ops.add(x, block.layer_scale_1(bad_attended, training=False))
+        broken = keras.ops.convert_to_numpy(
+            keras.ops.add(bad_mid,
                     block.layer_scale_2(block.mlp(bad_mid, training=False),
                                         training=False))
         )
@@ -313,7 +312,7 @@ class TestFastVitAttentionBlock:
         rows = rng.normal(size=(batch, height, 1, dim)).astype('float32')
         x = np.repeat(rows, width, axis=2)
 
-        y = ops.convert_to_numpy(block(x, training=False))
+        y = keras.ops.convert_to_numpy(block(x, training=False))
         spread_along_w = np.max(np.abs(y - y[:, :, :1, :]))
         assert spread_along_w < 1e-4, (
             f"a W-constant input produced a W-varying output (max deviation "
@@ -407,10 +406,10 @@ class TestFastVitAttentionBlock:
             gamma = scale.gamma
             optimizer = keras.optimizers.SGD(learning_rate=1.0)
             optimizer.build([gamma])
-            grad = ops.convert_to_tensor(
+            grad = keras.ops.convert_to_tensor(
                 np.ones(gamma.shape, dtype='float32'))
             optimizer.apply_gradients([(grad, gamma)])
-            gamma_value = ops.convert_to_numpy(gamma)
+            gamma_value = keras.ops.convert_to_numpy(gamma)
             assert np.all(gamma_value < 0.0), (
                 f"gamma was clamped at zero by a weight constraint after an "
                 f"optimizer step; got {gamma_value}"
@@ -429,7 +428,7 @@ class TestFastVitAttentionBlock:
         block = FastVitAttentionBlock(**basic_config)
         rng = np.random.default_rng(555)
         x = rng.normal(size=(2, 8, 4, 64)).astype('float32')
-        eager = ops.convert_to_numpy(block(x, training=False))
+        eager = keras.ops.convert_to_numpy(block(x, training=False))
 
         @tf.function(input_signature=[
             tf.TensorSpec(shape=(None, None, None, 64), dtype=tf.float32)])

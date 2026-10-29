@@ -350,7 +350,7 @@ model.save('mobileclip2_s0.keras')
 restored = keras.models.load_model('mobileclip2_s0.keras')
 ```
 
-Every class carries `@register_dl_technique` (from `dl_techniques.utils.keras_registration`), a complete `get_config` and a `compute_output_shape`. The package string is the defining module's dotted path with the `vision_language/` family directory stripped: `dl_techniques.models.mobile_clip.mobile_clip_v1>MobileClipModel`, `...mobile_clip_v2>MobileClipV2Model`, and `dl_techniques.models.mobile_clip.components><ClassName>` for the three component classes. FastViT blocks register under `dl_techniques.layers.fastvit.<module>`. Older archives still load through the legacy `Custom>ClassName` alias.
+Every class carries `@register_dl_technique` (from `dl_techniques.utils.keras_registration`), a complete `get_config` and a `compute_output_shape`. The package string is the defining module's dotted path with the `vision_language/` family directory stripped: `dl_techniques.models.mobile_clip.mobile_clip_v1>MobileClipModel`, `...mobile_clip_v2>MobileClipV2Model`, and `dl_techniques.models.mobile_clip.components><ClassName>` for the three component classes. FastViT blocks register under `dl_techniques.models.fastvit.components` (and `ReparamLargeKernelConv` / `RepConditionalPosEnc` under their `layers/conv_blocks` / `layers/embedding` modules). Older archives still load through the legacy `Custom>ClassName` alias.
 
 Three v2 details matter if you subclass or extend:
 
@@ -367,7 +367,8 @@ Three v2 details matter if you subclass or extend:
 ```bash
 CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m pytest \
     tests/test_models/test_mobile_clip/ tests/test_models/test_fastvit/ \
-    tests/test_layers/test_fastvit/ -q
+    tests/test_layers/test_conv_blocks/test_reparam_large_kernel_conv.py \
+    tests/test_layers/test_embedding/test_rep_conditional_pos_enc.py -q
 ```
 
 The suites cover initialization, invalid-config raises, forward shape, `compute_output_shape` pre- and post-build, `.keras` save/load compared **by value** (`atol=1e-6, rtol=0`), an **elementwise** weight check on the list-held per-block sub-layers, gradient flow to every trainable weight, and per-class behavioural pins each proven RED against a deliberately broken variant.
@@ -431,7 +432,7 @@ Every known divergence carries a stable id — a deviation that is silently abso
 | **X-2** | **One `use_bias` for both qkv and the output projection.** The shared `MultiHeadAttention` cannot express timm's unbiased-qkv + biased-proj split, so each attention block is short exactly one bias vector of length `dim`. Pinned by test. |
 | **X-3** | **`mci0`/`mci1`/`mci2` have no local oracle.** Transcribed from timm upstream, which is not installed here. `mci3`/`mci4` *do* have a committed oracle. |
 | **X-4** | **No pretrained weights.** Architecture only; **no accuracy claim**. Any comparison against published MobileCLIP2 numbers is invalid by construction. |
-| **X-5** | **`RepMixerBlock` is a different architecture sharing the name.** `layers/repmixer_block.py::RepMixerBlock` is not FastViT's block; it is consumed by `models/vision_language/fastvlm/` and deliberately untouched. Use `layers/fastvit/FastVitRepMixerBlock` for anything that must match timm block-for-block. |
+| **X-5** | **`RepMixerBlock` is a different architecture sharing the name.** `layers/conv_blocks/repmixer_block.py::RepMixerBlock` is not FastViT's block; it is consumed by `models/vision_language/fastvlm/` and deliberately untouched. Use `models/vision/fastvit/components.py::FastVitRepMixerBlock` for anything that must match timm block-for-block. |
 
 ---
 

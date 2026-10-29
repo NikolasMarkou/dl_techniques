@@ -15,9 +15,8 @@ import keras
 import numpy as np
 import pytest
 import tensorflow as tf
-from keras import ops
 
-from dl_techniques.layers.fastvit.conv_mlp import FastVitConvMlp
+from dl_techniques.models.vision.fastvit.components import FastVitConvMlp
 
 
 class TestFastVitConvMlp:
@@ -166,7 +165,7 @@ class TestFastVitConvMlp:
         y = layer(x, training=False)
 
         assert tuple(y.shape) == (2, height, width, dim)
-        assert np.all(np.isfinite(ops.convert_to_numpy(y)))
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(y)))
 
     def test_compute_output_shape_pre_build(self):
         layer = FastVitConvMlp(dim=16, hidden_dim=64)
@@ -211,8 +210,8 @@ class TestFastVitConvMlp:
     def test_training_modes_differ_with_dropout(self, sample_input):
         layer = FastVitConvMlp(dim=16, hidden_dim=64, dropout_rate=0.5)
         keras.utils.set_random_seed(42)
-        train_out = ops.convert_to_numpy(layer(sample_input, training=True))
-        eval_out = ops.convert_to_numpy(layer(sample_input, training=False))
+        train_out = keras.ops.convert_to_numpy(layer(sample_input, training=True))
+        eval_out = keras.ops.convert_to_numpy(layer(sample_input, training=False))
 
         assert not np.allclose(train_out, eval_out), (
             "dropout_rate=0.5 must make training and inference outputs differ"
@@ -222,15 +221,15 @@ class TestFastVitConvMlp:
         layer = FastVitConvMlp(dim=16, hidden_dim=64, dropout_rate=0.0)
         # Run once with training=False first so BatchNorm moving stats are the
         # same on both reads (training=True would update them).
-        eval_out = ops.convert_to_numpy(layer(sample_input, training=False))
-        eval_out2 = ops.convert_to_numpy(layer(sample_input, training=False))
+        eval_out = keras.ops.convert_to_numpy(layer(sample_input, training=False))
+        eval_out2 = keras.ops.convert_to_numpy(layer(sample_input, training=False))
         np.testing.assert_allclose(eval_out, eval_out2, atol=1e-6, rtol=0)
 
         layer_no_bn_update = FastVitConvMlp(dim=16, hidden_dim=64, dropout_rate=0.0)
         layer_no_bn_update.build(sample_input.shape)
         layer_no_bn_update.norm.trainable = False
-        a = ops.convert_to_numpy(layer_no_bn_update(sample_input, training=True))
-        b = ops.convert_to_numpy(layer_no_bn_update(sample_input, training=False))
+        a = keras.ops.convert_to_numpy(layer_no_bn_update(sample_input, training=True))
+        b = keras.ops.convert_to_numpy(layer_no_bn_update(sample_input, training=False))
         np.testing.assert_allclose(a, b, atol=1e-6, rtol=0)
 
     # ------------------------------------------------------------------
@@ -243,14 +242,14 @@ class TestFastVitConvMlp:
 
         with tf.GradientTape() as tape:
             y = layer(x, training=True)
-            loss = ops.mean(ops.square(y))
+            loss = keras.ops.mean(keras.ops.square(y))
 
         grads = tape.gradient(loss, layer.trainable_variables)
 
         assert len(layer.trainable_variables) > 0
         for var, grad in zip(layer.trainable_variables, grads):
             assert grad is not None, f"no gradient for {var.path}"
-            assert np.any(ops.convert_to_numpy(grad) != 0.0), (
+            assert np.any(keras.ops.convert_to_numpy(grad) != 0.0), (
                 f"all-zero gradient for {var.path}"
             )
 
@@ -263,13 +262,13 @@ class TestFastVitConvMlp:
         outputs = FastVitConvMlp(dim=16, hidden_dim=32, dropout_rate=0.1)(inputs)
         model = keras.Model(inputs, outputs)
 
-        original = ops.convert_to_numpy(model(sample_input, training=False))
+        original = keras.ops.convert_to_numpy(model(sample_input, training=False))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, 'conv_mlp.keras')
             model.save(path)
             loaded = keras.models.load_model(path)
-            restored = ops.convert_to_numpy(loaded(sample_input, training=False))
+            restored = keras.ops.convert_to_numpy(loaded(sample_input, training=False))
 
         np.testing.assert_allclose(
             original, restored, atol=1e-6, rtol=0,

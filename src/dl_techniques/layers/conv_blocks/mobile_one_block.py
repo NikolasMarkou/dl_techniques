@@ -37,8 +37,8 @@ def resolve_num_groups(group_size: int, in_channels: int) -> int:
     """Resolve timm's ``num_groups(group_size, in_chs)`` mapping.
 
     Single definition of the grouped-convolution convention shared by
-    :class:`MobileOneBlock` and by the FastViT blocks that must resolve groups the
-    same way (``layers/fastvit/reparam_large_kernel_conv.py``). Callers are
+    :class:`MobileOneBlock` and by the blocks that must resolve groups the
+    same way (``layers/conv_blocks/reparam_large_kernel_conv.py``). Callers are
     responsible for their own ``out_channels`` divisibility check, whose error
     message differs per layer.
 
@@ -78,7 +78,7 @@ def resolve_conv_padding(
     """Map ``(padding, padding_mode)`` onto an explicit pad amount + Keras padding.
 
     Single definition of the two padding conventions, shared by
-    :class:`MobileOneBlock` and ``layers/fastvit/reparam_large_kernel_conv.py``.
+    :class:`MobileOneBlock` and ``layers/conv_blocks/reparam_large_kernel_conv.py``.
     Do NOT re-implement it: two branches summed inside one block must resolve the
     convention identically or they sample different pixels.
 

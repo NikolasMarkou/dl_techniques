@@ -1,5 +1,5 @@
 """
-Test suite for ReparamLargeKernelConv (FastViT / MobileCLIP2 MCi).
+Test suite for ReparamLargeKernelConv (``layers/conv_blocks``; used by FastViT / MobileCLIP2 MCi).
 
 Covers initialization + stored config, constructor validation, forward shape over
 multiple spatial sizes (including NON-square ones, with the stride-2 halving
@@ -20,9 +20,8 @@ import keras
 import numpy as np
 import pytest
 import tensorflow as tf
-from keras import ops
 
-from dl_techniques.layers.fastvit.reparam_large_kernel_conv import (
+from dl_techniques.layers.conv_blocks.reparam_large_kernel_conv import (
     ReparamLargeKernelConv,
 )
 
@@ -80,6 +79,8 @@ class TestReparamLargeKernelConv:
         assert layer.small_kernel == 3
         assert layer.use_se is False
         assert layer.activation is None
+        assert layer.padding_mode == 'reference'
+        assert layer.norm_epsilon == pytest.approx(1e-3)
         assert not layer.built
 
     def test_dense_path_creates_branches_in_init(self):
@@ -114,13 +115,15 @@ class TestReparamLargeKernelConv:
 
     def test_config_completeness(self, basic_config):
         layer = ReparamLargeKernelConv(**basic_config, use_se=True,
-                                       activation='gelu')
+                                       activation='gelu',
+                                       padding_mode='keras_same',
+                                       norm_epsilon=1e-5)
         config = layer.get_config()
 
         for key in (
                 'out_channels', 'kernel_size', 'stride', 'group_size',
-                'small_kernel', 'use_se', 'activation',
-                'kernel_initializer', 'kernel_regularizer',
+                'small_kernel', 'use_se', 'activation', 'padding_mode',
+                'norm_epsilon', 'kernel_initializer', 'kernel_regularizer',
         ):
             assert key in config, f"missing '{key}' in get_config()"
 
@@ -132,6 +135,8 @@ class TestReparamLargeKernelConv:
         assert rebuilt.small_kernel == layer.small_kernel
         assert rebuilt.use_se == layer.use_se
         assert rebuilt.activation is not None
+        assert rebuilt.padding_mode == 'keras_same'
+        assert rebuilt.norm_epsilon == pytest.approx(1e-5)
 
     def test_config_round_trip_with_no_activation(self, basic_config):
         layer = ReparamLargeKernelConv(**basic_config)
@@ -152,6 +157,9 @@ class TestReparamLargeKernelConv:
         ({'group_size': -1}, "group_size must be non-negative"),
         ({'small_kernel': 0}, "small_kernel must be positive"),
         ({'small_kernel': 9}, "small_kernel must not exceed kernel_size"),
+        ({'padding_mode': 'symmetric'}, "padding_mode must be one of"),
+        ({'norm_epsilon': 0.0}, "norm_epsilon must be positive"),
+        ({'norm_epsilon': -1e-5}, "norm_epsilon must be positive"),
     ])
     def test_invalid_config_raises(self, basic_config, kwargs, match):
         config = dict(basic_config)
@@ -237,7 +245,7 @@ class TestReparamLargeKernelConv:
         expected_h = (height + 1) // 2
         expected_w = (width + 1) // 2
         assert tuple(y.shape) == (2, expected_h, expected_w, 32)
-        assert np.all(np.isfinite(ops.convert_to_numpy(y)))
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(y)))
 
     def test_stride_one_preserves_spatial_dims(self):
         layer = ReparamLargeKernelConv(
@@ -302,7 +310,7 @@ class TestReparamLargeKernelConv:
         for a, b in zip(without_small.large_conv.weights,
                         with_small.large_conv.weights):
             np.testing.assert_allclose(
-                ops.convert_to_numpy(a), ops.convert_to_numpy(b),
+                keras.ops.convert_to_numpy(a), keras.ops.convert_to_numpy(b),
                 atol=0, rtol=0,
                 err_msg="the large-branch transplant did not take; the comparison "
                         "below would be between two different large branches")
@@ -310,8 +318,8 @@ class TestReparamLargeKernelConv:
         assert with_small.small_conv is not None
         assert without_small.small_conv is None
 
-        y_without = ops.convert_to_numpy(without_small(sample_input, training=False))
-        y_with = ops.convert_to_numpy(with_small(sample_input, training=False))
+        y_without = keras.ops.convert_to_numpy(without_small(sample_input, training=False))
+        y_with = keras.ops.convert_to_numpy(with_small(sample_input, training=False))
 
         max_abs_delta = float(np.abs(y_with - y_without).max())
         assert max_abs_delta > 1e-6, (
@@ -379,8 +387,8 @@ class TestReparamLargeKernelConv:
         with_se.large_conv.set_weights(without_se.large_conv.get_weights())
         with_se.small_conv.set_weights(without_se.small_conv.get_weights())
 
-        y_without = ops.convert_to_numpy(without_se(sample_input, training=False))
-        y_with = ops.convert_to_numpy(with_se(sample_input, training=False))
+        y_without = keras.ops.convert_to_numpy(without_se(sample_input, training=False))
+        y_with = keras.ops.convert_to_numpy(with_se(sample_input, training=False))
 
         assert float(np.abs(y_with - y_without).max()) > 1e-6
 
@@ -400,11 +408,11 @@ class TestReparamLargeKernelConv:
         gelu.large_conv.set_weights(plain.large_conv.get_weights())
         gelu.small_conv.set_weights(plain.small_conv.get_weights())
 
-        y_plain = ops.convert_to_numpy(plain(sample_input, training=False))
-        y_gelu = ops.convert_to_numpy(gelu(sample_input, training=False))
+        y_plain = keras.ops.convert_to_numpy(plain(sample_input, training=False))
+        y_gelu = keras.ops.convert_to_numpy(gelu(sample_input, training=False))
 
         np.testing.assert_allclose(
-            y_gelu, ops.convert_to_numpy(keras.activations.gelu(y_plain)),
+            y_gelu, keras.ops.convert_to_numpy(keras.activations.gelu(y_plain)),
             atol=1e-6, rtol=0,
             err_msg="the trailing activation is not applied as act(sum)")
 
@@ -414,8 +422,8 @@ class TestReparamLargeKernelConv:
 
     def test_inference_is_deterministic(self, sample_input, basic_config):
         layer = ReparamLargeKernelConv(**basic_config)
-        a = ops.convert_to_numpy(layer(sample_input, training=False))
-        b = ops.convert_to_numpy(layer(sample_input, training=False))
+        a = keras.ops.convert_to_numpy(layer(sample_input, training=False))
+        b = keras.ops.convert_to_numpy(layer(sample_input, training=False))
         np.testing.assert_allclose(a, b, atol=1e-6, rtol=0)
 
     def test_training_true_updates_batchnorm_statistics(
@@ -423,11 +431,11 @@ class TestReparamLargeKernelConv:
         layer = ReparamLargeKernelConv(**basic_config)
         layer.build(sample_input.shape)
         bn = _branch_bn(layer.large_conv)
-        before = ops.convert_to_numpy(bn.moving_mean).copy()
+        before = keras.ops.convert_to_numpy(bn.moving_mean).copy()
 
         layer(sample_input, training=True)
 
-        after = ops.convert_to_numpy(bn.moving_mean)
+        after = keras.ops.convert_to_numpy(bn.moving_mean)
         assert not np.allclose(before, after), (
             "training=True must reach the large branch's BatchNormalization")
 
@@ -437,16 +445,44 @@ class TestReparamLargeKernelConv:
         layer.build(sample_input.shape)
         layer.trainable = False
 
-        a = ops.convert_to_numpy(layer(sample_input, training=True))
-        b = ops.convert_to_numpy(layer(sample_input, training=False))
+        a = keras.ops.convert_to_numpy(layer(sample_input, training=True))
+        b = keras.ops.convert_to_numpy(layer(sample_input, training=False))
         np.testing.assert_allclose(a, b, atol=1e-6, rtol=0)
 
-    def test_batchnorm_epsilon_is_the_reference_value(self, basic_config):
-        layer = ReparamLargeKernelConv(**basic_config)
-        layer.build((None, 16, 16, 16))
+    def test_batchnorm_epsilon_follows_norm_epsilon(self, basic_config):
+        """Both branch norms take ``norm_epsilon``; the default is Keras' 1e-3."""
+        default = ReparamLargeKernelConv(**basic_config)
+        default.build((None, 16, 16, 16))
+        assert _branch_bn(default.large_conv).epsilon == pytest.approx(1e-3)
+        assert _branch_bn(default.small_conv).epsilon == pytest.approx(1e-3)
 
-        assert _branch_bn(layer.large_conv).epsilon == pytest.approx(1e-5)
-        assert _branch_bn(layer.small_conv).epsilon == pytest.approx(1e-5)
+        reference = ReparamLargeKernelConv(**basic_config, norm_epsilon=1e-5)
+        reference.build((None, 16, 16, 16))
+        assert _branch_bn(reference.large_conv).epsilon == pytest.approx(1e-5)
+        assert _branch_bn(reference.small_conv).epsilon == pytest.approx(1e-5)
+
+    def test_padding_mode_moves_the_strided_sampling_grid(self, sample_input):
+        """``padding_mode`` is live: same weights, stride 2, different outputs.
+
+        ``'reference'`` pads each branch explicitly by ``kernel_size // 2``;
+        ``'keras_same'`` relies on Keras' asymmetric ``'same'``. The two modes
+        hold identical weights, so copying them across isolates the padding.
+        """
+        config = dict(out_channels=32, kernel_size=7, stride=2, group_size=1,
+                      small_kernel=3)
+        reference = ReparamLargeKernelConv(**config, padding_mode='reference')
+        keras_same = ReparamLargeKernelConv(**config, padding_mode='keras_same')
+        y_ref = reference(sample_input, training=False)
+        keras_same.build(sample_input.shape)
+        keras_same.set_weights(reference.get_weights())
+        y_same = keras_same(sample_input, training=False)
+
+        assert tuple(y_ref.shape) == tuple(y_same.shape)
+        assert isinstance(reference.large_conv.layers[0], keras.layers.ZeroPadding2D)
+        assert not any(isinstance(l, keras.layers.ZeroPadding2D)
+                       for l in keras_same.large_conv.layers)
+        assert not np.allclose(keras.ops.convert_to_numpy(y_ref),
+                               keras.ops.convert_to_numpy(y_same), atol=1e-4)
 
     # ------------------------------------------------------------------
     # gradients
@@ -460,14 +496,14 @@ class TestReparamLargeKernelConv:
 
         with tf.GradientTape() as tape:
             y = layer(x, training=True)
-            loss = ops.mean(ops.square(y))
+            loss = keras.ops.mean(keras.ops.square(y))
 
         grads = tape.gradient(loss, layer.trainable_variables)
 
         assert len(layer.trainable_variables) > 0
         for var, grad in zip(layer.trainable_variables, grads):
             assert grad is not None, f"no gradient for {var.path}"
-            assert np.any(ops.convert_to_numpy(grad) != 0.0), (
+            assert np.any(keras.ops.convert_to_numpy(grad) != 0.0), (
                 f"all-zero gradient for {var.path}")
 
     # ------------------------------------------------------------------
@@ -481,13 +517,13 @@ class TestReparamLargeKernelConv:
             small_kernel=3, use_se=True, activation='gelu')(inputs)
         model = keras.Model(inputs, outputs)
 
-        original = ops.convert_to_numpy(model(sample_input, training=False))
+        original = keras.ops.convert_to_numpy(model(sample_input, training=False))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, 'lkc.keras')
             model.save(path)
             loaded = keras.models.load_model(path)
-            restored = ops.convert_to_numpy(loaded(sample_input, training=False))
+            restored = keras.ops.convert_to_numpy(loaded(sample_input, training=False))
 
         np.testing.assert_allclose(
             original, restored, atol=1e-6, rtol=0,

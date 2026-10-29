@@ -31,13 +31,12 @@ References:
 
 import keras
 from typing import Optional, Union, Tuple, Dict, Any
-from keras import ops, layers, initializers, regularizers
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.layers.fastvit.rep_conditional_pos_enc")
+@register_dl_technique("dl_techniques.layers.embedding.rep_conditional_pos_enc")
 class RepConditionalPosEnc(keras.layers.Layer):
     """Conditional positional encoding: ``out = depthwise_conv(x) + x``.
 
@@ -118,10 +117,10 @@ class RepConditionalPosEnc(keras.layers.Layer):
             dim: int,
             dim_out: Optional[int] = None,
             spatial_shape: Union[int, Tuple[int, int]] = (7, 7),
-            kernel_initializer: Union[str, initializers.Initializer] = 'he_normal',
-            bias_initializer: Union[str, initializers.Initializer] = 'zeros',
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
-            bias_regularizer: Optional[regularizers.Regularizer] = None,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
+            bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -147,13 +146,13 @@ class RepConditionalPosEnc(keras.layers.Layer):
         self.dim = dim
         self.dim_out = resolved_dim_out
         self.spatial_shape = resolved_spatial_shape
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # ---- CREATE all sub-layers (unbuilt) ----------------------------
-        self.pos_conv = layers.DepthwiseConv2D(
+        self.pos_conv = keras.layers.DepthwiseConv2D(
             kernel_size=self.spatial_shape,
             strides=1,
             padding='same',
@@ -241,7 +240,7 @@ class RepConditionalPosEnc(keras.layers.Layer):
         :type training: Optional[bool]
         :return: Output tensor of shape ``(B, H, W, dim)``.
         """
-        return ops.add(self.pos_conv(inputs), inputs)
+        return keras.ops.add(self.pos_conv(inputs), inputs)
 
     def compute_output_shape(
             self,
@@ -268,10 +267,10 @@ class RepConditionalPosEnc(keras.layers.Layer):
             'dim': self.dim,
             'dim_out': self.dim_out,
             'spatial_shape': self.spatial_shape,
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
-            'bias_initializer': initializers.serialize(self.bias_initializer),
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
-            'bias_regularizer': regularizers.serialize(self.bias_regularizer),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
+            'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
 
@@ -287,13 +286,13 @@ class RepConditionalPosEnc(keras.layers.Layer):
         config = dict(config)
         if config.get('spatial_shape') is not None:
             config['spatial_shape'] = tuple(config['spatial_shape'])
-        config['kernel_initializer'] = initializers.deserialize(
+        config['kernel_initializer'] = keras.initializers.deserialize(
             config['kernel_initializer'])
-        config['bias_initializer'] = initializers.deserialize(
+        config['bias_initializer'] = keras.initializers.deserialize(
             config['bias_initializer'])
-        config['kernel_regularizer'] = regularizers.deserialize(
+        config['kernel_regularizer'] = keras.regularizers.deserialize(
             config['kernel_regularizer'])
-        config['bias_regularizer'] = regularizers.deserialize(
+        config['bias_regularizer'] = keras.regularizers.deserialize(
             config['bias_regularizer'])
         return cls(**config)
 

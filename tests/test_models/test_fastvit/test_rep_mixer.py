@@ -21,9 +21,8 @@ import keras
 import numpy as np
 import pytest
 import tensorflow as tf
-from keras import ops
 
-from dl_techniques.layers.fastvit.rep_mixer import (
+from dl_techniques.models.vision.fastvit.components import (
     FastVitRepMixer,
     FastVitRepMixerBlock,
 )
@@ -151,7 +150,7 @@ class TestFastVitRepMixer:
         y = layer(x, training=False)
 
         assert tuple(y.shape) == (2, height, width, dim)
-        assert np.all(np.isfinite(ops.convert_to_numpy(y)))
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(y)))
 
     def test_compute_output_shape_pre_build(self):
         layer = FastVitRepMixer(dim=16)
@@ -183,7 +182,7 @@ class TestFastVitRepMixer:
         :meth:`test_gamma_nonzero_is_not_identity` exists.
         """
         layer = FastVitRepMixer(dim=16, layer_scale_init_value=0.0)
-        y = ops.convert_to_numpy(layer(sample_input, training=False))
+        y = keras.ops.convert_to_numpy(layer(sample_input, training=False))
 
         np.testing.assert_allclose(
             y, sample_input, atol=1e-6, rtol=0,
@@ -200,7 +199,7 @@ class TestFastVitRepMixer:
         fails.
         """
         layer = FastVitRepMixer(dim=16, layer_scale_init_value=1e-5)
-        y = ops.convert_to_numpy(layer(sample_input, training=False))
+        y = keras.ops.convert_to_numpy(layer(sample_input, training=False))
 
         max_abs_delta = float(np.abs(y - sample_input).max())
         assert max_abs_delta > 1e-6, (
@@ -229,10 +228,10 @@ class TestFastVitRepMixer:
         optimizer = keras.optimizers.SGD(learning_rate=1.0)
         optimizer.build([gamma])
         # A positive gradient with lr=1.0 moves gamma from +1e-5 to about -1.0.
-        grad = ops.convert_to_tensor(np.ones(gamma.shape, dtype='float32'))
+        grad = keras.ops.convert_to_tensor(np.ones(gamma.shape, dtype='float32'))
         optimizer.apply_gradients([(grad, gamma)])
 
-        gamma_value = ops.convert_to_numpy(gamma)
+        gamma_value = keras.ops.convert_to_numpy(gamma)
         assert np.all(gamma_value < 0.0), (
             f"LayerScale gamma was clamped at zero by a weight constraint "
             f"after an optimizer step; got {gamma_value}"
@@ -276,19 +275,19 @@ class TestFastVitRepMixer:
 
     def test_inference_is_deterministic(self, sample_input):
         layer = FastVitRepMixer(dim=16)
-        a = ops.convert_to_numpy(layer(sample_input, training=False))
-        b = ops.convert_to_numpy(layer(sample_input, training=False))
+        a = keras.ops.convert_to_numpy(layer(sample_input, training=False))
+        b = keras.ops.convert_to_numpy(layer(sample_input, training=False))
         np.testing.assert_allclose(a, b, atol=1e-6, rtol=0)
 
     def test_training_true_updates_batchnorm_statistics(self, sample_input):
         """training=True must reach the BatchNormalizations (moving stats move)."""
         layer = FastVitRepMixer(dim=16)
         layer.build(sample_input.shape)
-        before = ops.convert_to_numpy(layer.norm.skip_branch.moving_mean).copy()
+        before = keras.ops.convert_to_numpy(layer.norm.skip_branch.moving_mean).copy()
 
         layer(sample_input, training=True)
 
-        after = ops.convert_to_numpy(layer.norm.skip_branch.moving_mean)
+        after = keras.ops.convert_to_numpy(layer.norm.skip_branch.moving_mean)
         assert not np.allclose(before, after), (
             "training=True must reach the identity BatchNormalization"
         )
@@ -298,8 +297,8 @@ class TestFastVitRepMixer:
         layer.build(sample_input.shape)
         layer.trainable = False
 
-        a = ops.convert_to_numpy(layer(sample_input, training=True))
-        b = ops.convert_to_numpy(layer(sample_input, training=False))
+        a = keras.ops.convert_to_numpy(layer(sample_input, training=True))
+        b = keras.ops.convert_to_numpy(layer(sample_input, training=False))
         np.testing.assert_allclose(a, b, atol=1e-6, rtol=0)
 
     # ------------------------------------------------------------------
@@ -312,14 +311,14 @@ class TestFastVitRepMixer:
 
         with tf.GradientTape() as tape:
             y = layer(x, training=True)
-            loss = ops.mean(ops.square(y))
+            loss = keras.ops.mean(keras.ops.square(y))
 
         grads = tape.gradient(loss, layer.trainable_variables)
 
         assert len(layer.trainable_variables) > 0
         for var, grad in zip(layer.trainable_variables, grads):
             assert grad is not None, f"no gradient for {var.path}"
-            assert np.any(ops.convert_to_numpy(grad) != 0.0), (
+            assert np.any(keras.ops.convert_to_numpy(grad) != 0.0), (
                 f"all-zero gradient for {var.path}"
             )
 
@@ -332,13 +331,13 @@ class TestFastVitRepMixer:
         outputs = FastVitRepMixer(dim=16, layer_scale_init_value=0.3)(inputs)
         model = keras.Model(inputs, outputs)
 
-        original = ops.convert_to_numpy(model(sample_input, training=False))
+        original = keras.ops.convert_to_numpy(model(sample_input, training=False))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, 'rep_mixer.keras')
             model.save(path)
             loaded = keras.models.load_model(path)
-            restored = ops.convert_to_numpy(loaded(sample_input, training=False))
+            restored = keras.ops.convert_to_numpy(loaded(sample_input, training=False))
 
         np.testing.assert_allclose(
             original, restored, atol=1e-6, rtol=0,
@@ -475,7 +474,7 @@ class TestFastVitRepMixerBlock:
         y = block(x, training=False)
 
         assert tuple(y.shape) == (2, height, width, dim)
-        assert np.all(np.isfinite(ops.convert_to_numpy(y)))
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(y)))
 
     def test_compute_output_shape_pre_build(self):
         block = FastVitRepMixerBlock(dim=16)
@@ -522,15 +521,15 @@ class TestFastVitRepMixerBlock:
         block.trainable = False
 
         keras.utils.set_random_seed(0)
-        train_a = ops.convert_to_numpy(block(sample_input, training=True))
-        train_b = ops.convert_to_numpy(block(sample_input, training=True))
+        train_a = keras.ops.convert_to_numpy(block(sample_input, training=True))
+        train_b = keras.ops.convert_to_numpy(block(sample_input, training=True))
         assert not np.allclose(train_a, train_b, atol=1e-6, rtol=0), (
             "drop_path_rate=0.5 at training=True must make repeated calls "
             "differ; the StochasticDepth layer is not wired into the branch"
         )
 
-        eval_a = ops.convert_to_numpy(block(sample_input, training=False))
-        eval_b = ops.convert_to_numpy(block(sample_input, training=False))
+        eval_a = keras.ops.convert_to_numpy(block(sample_input, training=False))
+        eval_b = keras.ops.convert_to_numpy(block(sample_input, training=False))
         np.testing.assert_allclose(
             eval_a, eval_b, atol=1e-6, rtol=0,
             err_msg="training=False must be deterministic"
@@ -542,7 +541,7 @@ class TestFastVitRepMixerBlock:
         reference.build(sample_input.shape)
         reference.set_weights(block.get_weights())
         reference.trainable = False
-        no_drop = ops.convert_to_numpy(reference(sample_input, training=False))
+        no_drop = keras.ops.convert_to_numpy(reference(sample_input, training=False))
 
         np.testing.assert_allclose(
             eval_a, no_drop, atol=1e-6, rtol=0,
@@ -565,8 +564,8 @@ class TestFastVitRepMixerBlock:
         block = FastVitRepMixerBlock(dim=16, mlp_ratio=2.0, dropout_rate=0.5,
                                      layer_scale_init_value=0.5)
         keras.utils.set_random_seed(42)
-        train_out = ops.convert_to_numpy(block(sample_input, training=True))
-        eval_out = ops.convert_to_numpy(block(sample_input, training=False))
+        train_out = keras.ops.convert_to_numpy(block(sample_input, training=True))
+        eval_out = keras.ops.convert_to_numpy(block(sample_input, training=False))
 
         assert not np.allclose(train_out, eval_out), (
             "dropout_rate=0.5 must make training and inference outputs differ"
@@ -575,8 +574,8 @@ class TestFastVitRepMixerBlock:
     def test_inference_is_deterministic(self, sample_input):
         block = FastVitRepMixerBlock(dim=16, mlp_ratio=2.0, dropout_rate=0.3,
                                      drop_path_rate=0.3)
-        a = ops.convert_to_numpy(block(sample_input, training=False))
-        b = ops.convert_to_numpy(block(sample_input, training=False))
+        a = keras.ops.convert_to_numpy(block(sample_input, training=False))
+        b = keras.ops.convert_to_numpy(block(sample_input, training=False))
         np.testing.assert_allclose(a, b, atol=1e-6, rtol=0)
 
     # ------------------------------------------------------------------
@@ -590,14 +589,14 @@ class TestFastVitRepMixerBlock:
 
         with tf.GradientTape() as tape:
             y = block(x, training=True)
-            loss = ops.mean(ops.square(y))
+            loss = keras.ops.mean(keras.ops.square(y))
 
         grads = tape.gradient(loss, block.trainable_variables)
 
         assert len(block.trainable_variables) > 0
         for var, grad in zip(block.trainable_variables, grads):
             assert grad is not None, f"no gradient for {var.path}"
-            assert np.any(ops.convert_to_numpy(grad) != 0.0), (
+            assert np.any(keras.ops.convert_to_numpy(grad) != 0.0), (
                 f"all-zero gradient for {var.path}"
             )
 
@@ -612,13 +611,13 @@ class TestFastVitRepMixerBlock:
             layer_scale_init_value=0.3)(inputs)
         model = keras.Model(inputs, outputs)
 
-        original = ops.convert_to_numpy(model(sample_input, training=False))
+        original = keras.ops.convert_to_numpy(model(sample_input, training=False))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, 'rep_mixer_block.keras')
             model.save(path)
             loaded = keras.models.load_model(path)
-            restored = ops.convert_to_numpy(loaded(sample_input, training=False))
+            restored = keras.ops.convert_to_numpy(loaded(sample_input, training=False))
 
         np.testing.assert_allclose(
             original, restored, atol=1e-6, rtol=0,

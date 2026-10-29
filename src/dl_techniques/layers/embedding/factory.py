@@ -1,7 +1,7 @@
 """
 Factory for the embedding layers in this package.
 
-One entry point, :func:`create_embedding_layer`, builds any of the 15
+One entry point, :func:`create_embedding_layer`, builds any of the 16
 registered embedding types from a type key plus keyword arguments. The type
 key selects a row of ``EMBEDDING_REGISTRY``, which names the class, the
 parameters that must be supplied and the parameters that have defaults.
@@ -9,8 +9,10 @@ parameters that must be supplied and the parameters that have defaults.
 The registry covers patch embeddings, learned positional embeddings, the
 rotary family (RoPE, dual RoPE, continuous RoPE, multi-axis RoPE), the fixed
 sinusoidal family, the BERT-style token embeddings, the class-label
-embedding with its classifier-free-guidance dropout row, and the diffusion
-timestep embedding.
+embedding with its classifier-free-guidance dropout row, the diffusion
+timestep embedding, and the conditional positional encoding of FastViT
+(``rep_conditional_pos_enc``, a depthwise convolution of a channels-last
+feature map added back onto it).
 
 The registry is public API. Its key set, each entry's key names, and each
 entry's ``required_params`` and ``optional_params`` are consumed by
@@ -76,6 +78,7 @@ Registered types:
     mrope_ideogram4         Ideogram4MRoPE                      0
     class_label             ClassLabelEmbedding                 3
     timestep                TimestepEmbedding                   3
+    rep_conditional_pos_enc RepConditionalPosEnc                6
     ======================  ===========================  ========
 
 Required parameters per type:
@@ -116,6 +119,8 @@ Required parameters per type:
         num_classes, hidden_size
     timestep
         hidden_size
+    rep_conditional_pos_enc
+        dim
 
 Two registry facts do not appear in either table:
     - ``bert_embeddings`` needs ``type_vocab_size`` whenever
@@ -129,6 +134,9 @@ Two registry facts do not appear in either table:
       ``dropout_rate > 0`` and ``num_classes`` rows when it is ``0``. The size
       of a weight is therefore a function of an ``optional_params`` default,
       which no other entry does.
+    - ``rep_conditional_pos_enc`` takes a rank-4 channels-last
+      ``(B, H, W, dim)`` feature map, not a token sequence, and returns the
+      same shape.
 """
 
 import copy
@@ -160,6 +168,7 @@ from .modern_bert_embeddings import ModernBertEmbeddings
 from .albert_factorized_embedding import AlbertFactorizedEmbedding
 from .class_label_embedding import ClassLabelEmbedding
 from .timestep_embedding import TimestepEmbedding
+from .rep_conditional_pos_enc import RepConditionalPosEnc
 
 # ---------------------------------------------------------------------
 # Type definition for Embedding types
@@ -180,7 +189,8 @@ EmbeddingType = Literal[
     'scalar_sinusoidal',
     'mrope_ideogram4',
     'class_label',
-    'timestep'
+    'timestep',
+    'rep_conditional_pos_enc'
 ]
 
 # ---------------------------------------------------------------------
@@ -361,6 +371,20 @@ EMBEDDING_REGISTRY: Dict[str, Dict[str, Any]] = {
             'kernel_stddev': 0.02
         },
         'use_case': 'Diffusion transformers (DiT and descendants) conditioning on a scalar timestep, where the sinusoidal basis width is independent of the model width.'
+    },
+    'rep_conditional_pos_enc': {
+        'class': RepConditionalPosEnc,
+        'description': 'Conditional positional encoding out = depthwise_conv(x) + x over a channels-last (B, H, W, dim) feature map: a biased depthwise convolution, stride 1, symmetric same padding. Resolution-agnostic.',
+        'required_params': ['dim'],
+        'optional_params': {
+            'dim_out': None,
+            'spatial_shape': (7, 7),
+            'kernel_initializer': 'he_normal',
+            'bias_initializer': 'zeros',
+            'kernel_regularizer': None,
+            'bias_regularizer': None
+        },
+        'use_case': 'Convolutional / hybrid vision backbones (FastViT, CPVT-style) that need positional information generated from the feature map itself at any input resolution.'
     }
 }
 

@@ -1,5 +1,4 @@
 import keras
-from keras import ops, layers, initializers, activations
 from typing import Optional, Union, Tuple, Dict, Any, Callable, List
 
 # ---------------------------------------------------------------------
@@ -9,7 +8,7 @@ from typing import Optional, Union, Tuple, Dict, Any, Callable, List
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.masking import MaskFactory
 from dl_techniques.layers.transformers import TransformerLayer
-from dl_techniques.layers.fastvit.reference import REFERENCE_NORM_EPSILON
+from dl_techniques.models.vision.fastvit.components import REFERENCE_NORM_EPSILON
 from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -92,8 +91,8 @@ class ImageProjectionHead(keras.layers.Layer):
         projection_dim: int,
         dropout_rate: float = 0.0,
         activation: Optional[Union[str, Callable]] = None,
-        kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-        bias_initializer: Union[str, initializers.Initializer] = 'zeros',
+        kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+        bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -111,14 +110,14 @@ class ImageProjectionHead(keras.layers.Layer):
         # Store ALL configuration
         self.projection_dim = projection_dim
         self.dropout_rate = dropout_rate
-        self.activation = activations.get(activation)
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
+        self.activation = keras.activations.get(activation)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
 
         # CREATE all sub-layers in __init__ (they are unbuilt)
-        self.global_pool = layers.GlobalAveragePooling2D(name='global_pool')
-        self.dropout = layers.Dropout(self.dropout_rate, name='dropout')
-        self.projection = layers.Dense(
+        self.global_pool = keras.layers.GlobalAveragePooling2D(name='global_pool')
+        self.dropout = keras.layers.Dropout(self.dropout_rate, name='dropout')
+        self.projection = keras.layers.Dense(
             units=self.projection_dim,
             kernel_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
@@ -170,9 +169,9 @@ class ImageProjectionHead(keras.layers.Layer):
         config.update({
             'projection_dim': self.projection_dim,
             'dropout_rate': self.dropout_rate,
-            'activation': activations.serialize(self.activation),
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
-            'bias_initializer': initializers.serialize(self.bias_initializer),
+            'activation': keras.activations.serialize(self.activation),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
         })
         return config
 
@@ -435,7 +434,7 @@ class MobileClipTextEncoder(keras.layers.Layer):
         self.embed_scale = embed_scale if embed_scale is not None else (embed_dim ** -0.5)
 
         # CREATE all sub-layers in __init__
-        self.token_embedding = layers.Embedding(
+        self.token_embedding = keras.layers.Embedding(
             self.vocab_size, self.embed_dim, name='token_embedding'
         )
         self.positional_embedding = PositionalEmbedding(
@@ -460,7 +459,7 @@ class MobileClipTextEncoder(keras.layers.Layer):
         ]
         # DECISION plan-2026-08-17T183311-79c63e38/D-028: epsilon is explicit and
         # imported, not a literal; Keras' 1e-3 default is 100x the PyTorch reference and is invisible to every shape assertion. See decisions.md.
-        self.layer_norm = layers.LayerNormalization(
+        self.layer_norm = keras.layers.LayerNormalization(
             epsilon=REFERENCE_NORM_EPSILON, name='final_layer_norm'
         )
 
@@ -504,12 +503,12 @@ class MobileClipTextEncoder(keras.layers.Layer):
 
         causal_mask = None
         if self.use_causal_mask:
-            seq_len = ops.shape(x)[1]
+            seq_len = keras.ops.shape(x)[1]
             # Lower-triangular KEEP mask (1 = attend to current+past, 0 = future),
             # 3D so it broadcasts across the batch and head dimensions.
             #
             # Built from `MaskFactory.create_causal_mask` (which is an arange index
-            # comparison) rather than `ops.tril`. `ops.tril` -- and `ops.triu`,
+            # comparison) rather than `keras.ops.tril`. `keras.ops.tril` -- and `keras.ops.triu`,
             # same implementation, same trap -- routes through a
             # `tf.cond` that rejects a Python-bool predicate the moment it is
             # traced, raising `TypeError: pred must not be a Python bool` -- it
@@ -521,15 +520,15 @@ class MobileClipTextEncoder(keras.layers.Layer):
             # MaskFactory returns the BLOCK polarity (True where a position must
             # be suppressed, i.e. j > i); this layer needs the complementary KEEP
             # mask as a float, hence the `logical_not` + cast. Verified
-            # bit-identical to the previous `ops.tril` expression.
-            # dtype: `ops.ones(...)` defaulted to `backend.floatx()`, NOT this
+            # bit-identical to the previous `keras.ops.tril` expression.
+            # dtype: `keras.ops.ones(...)` defaulted to `backend.floatx()`, NOT this
             # layer's compute dtype -- keep that exactly, so the fix stays a pure
             # graph-safety change and does not alter mixed-precision behaviour.
-            causal_mask = ops.cast(
-                ops.logical_not(MaskFactory.create_causal_mask(seq_len, dtype="bool")),
+            causal_mask = keras.ops.cast(
+                keras.ops.logical_not(MaskFactory.create_causal_mask(seq_len, dtype="bool")),
                 keras.config.floatx(),
             )
-            causal_mask = ops.expand_dims(causal_mask, axis=0)
+            causal_mask = keras.ops.expand_dims(causal_mask, axis=0)
 
         for transformer_layer in self.transformer_layers:
             x = transformer_layer(x, attention_mask=causal_mask, training=training)
@@ -537,14 +536,14 @@ class MobileClipTextEncoder(keras.layers.Layer):
         x = self.layer_norm(x)
 
         # Extract the features of the EOT (end-of-text) token.
-        eot_positions = ops.argmax(text_tokens, axis=-1)
-        eot_mask = ops.one_hot(
-            eot_positions, num_classes=ops.shape(x)[1], dtype=x.dtype
+        eot_positions = keras.ops.argmax(text_tokens, axis=-1)
+        eot_mask = keras.ops.one_hot(
+            eot_positions, num_classes=keras.ops.shape(x)[1], dtype=x.dtype
         )
         # Use the mask to gather the EOT embeddings
-        eot_embeddings = ops.sum(x * ops.expand_dims(eot_mask, axis=-1), axis=1)
+        eot_embeddings = keras.ops.sum(x * keras.ops.expand_dims(eot_mask, axis=-1), axis=1)
 
-        return ops.matmul(eot_embeddings, self.projection_weights)
+        return keras.ops.matmul(eot_embeddings, self.projection_weights)
 
     def compute_output_shape(
         self,

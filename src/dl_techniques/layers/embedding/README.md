@@ -1,9 +1,9 @@
 # `dl_techniques.layers.embedding`
 
-Twenty embedding layer classes: patch tokenizers, learned and fixed positional encodings, four
+Twenty-one embedding layer classes: patch tokenizers, learned and fixed positional encodings, four
 rotary (RoPE) variants, scalar/timestep sinusoidal embeddings, BERT/ModernBERT/ALBERT token
-embeddings and a class-label table with a classifier-free-guidance dropout row. **Fifteen** are
-reachable through the factory; the other five are direct-import only.
+embeddings, a class-label table with a classifier-free-guidance dropout row, and a convolutional
+conditional positional encoding. **Sixteen** are reachable through the factory; the other five are direct-import only.
 
 `create_embedding_layer(embedding_type, name=None, **kwargs)` looks the type up in `EMBEDDING_REGISTRY`, rejects any
 keyword the target class does not declare, fills in the registry defaults and constructs. The
@@ -14,7 +14,7 @@ The package `__init__` exports ten names — `AxialRoPE2D`, `ClassLabelEmbedding
 pure-NumPy sin-cos table builders of `sincos_pos_embed_2d`. Every other class is imported from its
 own module.
 
-## Factory catalogue (15 keys)
+## Factory catalogue (16 keys)
 
 | Key | Class | What it is | Pick it when | Required params |
 |---|---|---|---|---|
@@ -33,6 +33,7 @@ own module.
 | `albert_factorized` | `AlbertFactorizedEmbedding` | Vocab -> bottleneck -> hidden factorization. | Parameter-efficient token embeddings. | `vocab_size`, `bottleneck_dim`, `output_dim` |
 | `class_label` | `ClassLabelEmbedding` | Categorical label table with one extra "unconditional" row. The table has `num_classes + 1` rows when `dropout_rate > 0` and `num_classes` rows when it is `0`, so an *optional* parameter sizes a weight. | Conditional diffusion transformers (DiT and descendants) needing a learned null token for classifier-free guidance. | `num_classes`, `hidden_size` |
 | `timestep` | `TimestepEmbedding` | Cos-first sinusoidal timestep basis of width `frequency_embedding_size`, refined by `Dense -> SiLU -> Dense`. The DiT/GLIDE numerics: the ladder divides by `half`, **not** `half - 1`, and the basis is `concat([cos, sin])`. **Not** interchangeable with `scalar_sinusoidal`, which differs on both of those plus an input rescale onto `[0, 1e4]`. | Diffusion transformers (DiT and descendants) conditioning on a scalar timestep, where the basis width is independent of the model width. | `hidden_size` |
+| `rep_conditional_pos_enc` | `RepConditionalPosEnc` | Conditional positional encoding `out = depthwise_conv(x) + x` over a channels-last `(B, H, W, dim)` feature map: a biased depthwise `k x k` conv (default `7 x 7`), stride 1, `'same'`. Rank-4 in, same shape out; `dim_out` must equal `dim`. | Conv / hybrid vision backbones (FastViT, CPVT-style) that need positional information at any input resolution. | `dim` |
 
 `modern_bert_embeddings` is the one entry with no optional parameters: everything it takes is
 required. Read all defaults from the registry rather than from prose:

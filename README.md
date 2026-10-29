@@ -96,7 +96,7 @@ This library is a comprehensive suite of tools organized into five key pillars, 
 - **Accelerated Development with Training Pipelines**: **~70 ready-to-use `train_*.py` entry points across ~74 trainer directories** (`src/train/`, plus the shared `src/train/common/` library and 2 family containers `train/language/`, `train/time_series/`), establishing standardized and reproducible workflows for training, validation, and testing across domains like NLP, Vision, and Time Series.
 - **Production-Ready Utilities**: A suite of tools including advanced data loaders, augmentation pipelines, a structured visualization and logging manager (`VisualizationManager`), and enhanced model serialization with custom object support.
 - **Assured Reliability**: An extensive **1,558-module test suite** (`tests/`) ensures the correctness and stability of every component, with dedicated fixtures for mixed-precision and TF32-sensitive regressions. It mirrors `src/dl_techniques/` directory-for-directory, with the deliberate exception of `tests/test_models/`, which stays flat rather than following the model family nesting.
-- **Verified Against the Source**: Where a reference implementation exists, ports are checked against it numerically — several packages commit the reference itself as an executable oracle (e.g. `src/dl_techniques/layers/fastvit/reference.py`) rather than asserting parity in prose.
+- **Verified Against the Source**: Where a reference implementation exists, ports are checked against it numerically — several packages commit the reference itself as an executable oracle (e.g. `src/dl_techniques/layers/matching/` against `tests/lightglue_reference_numpy.py`) rather than asserting parity in prose.
 </p>
 </details>
 

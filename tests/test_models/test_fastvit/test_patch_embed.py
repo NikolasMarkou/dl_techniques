@@ -18,10 +18,9 @@ import keras
 import numpy as np
 import pytest
 import tensorflow as tf
-from keras import ops
 
-from dl_techniques.layers.fastvit.patch_embed import FastVitPatchEmbed
-from dl_techniques.layers.fastvit.reparam_large_kernel_conv import (
+from dl_techniques.models.vision.fastvit.components import FastVitPatchEmbed
+from dl_techniques.layers.conv_blocks.reparam_large_kernel_conv import (
     ReparamLargeKernelConv,
 )
 from dl_techniques.layers.conv_blocks.mobile_one_block import MobileOneBlock
@@ -245,7 +244,7 @@ class TestFastVitPatchEmbed:
         y = layer(x, training=False)
 
         assert tuple(y.shape) == (2, (height + 1) // 2, (width + 1) // 2, 32)
-        assert np.all(np.isfinite(ops.convert_to_numpy(y)))
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(y)))
 
     def test_compute_output_shape_pre_build(self):
         layer = FastVitPatchEmbed(embed_dim=64)
@@ -290,8 +289,8 @@ class TestFastVitPatchEmbed:
         assert without_act.proj_lkc.activation is None
         assert with_act.proj_lkc.activation is not None
 
-        y_without = ops.convert_to_numpy(without_act(sample_input, training=False))
-        y_with = ops.convert_to_numpy(with_act(sample_input, training=False))
+        y_without = keras.ops.convert_to_numpy(without_act(sample_input, training=False))
+        y_with = keras.ops.convert_to_numpy(with_act(sample_input, training=False))
 
         max_abs_delta = float(np.abs(y_with - y_without).max())
         assert max_abs_delta > 1e-6, (
@@ -306,8 +305,8 @@ class TestFastVitPatchEmbed:
 
     def test_inference_is_deterministic(self, sample_input, basic_config):
         layer = FastVitPatchEmbed(**basic_config)
-        a = ops.convert_to_numpy(layer(sample_input, training=False))
-        b = ops.convert_to_numpy(layer(sample_input, training=False))
+        a = keras.ops.convert_to_numpy(layer(sample_input, training=False))
+        b = keras.ops.convert_to_numpy(layer(sample_input, training=False))
         np.testing.assert_allclose(a, b, atol=1e-6, rtol=0)
 
     def test_training_true_updates_batchnorm_statistics(
@@ -315,11 +314,11 @@ class TestFastVitPatchEmbed:
         layer = FastVitPatchEmbed(**basic_config)
         layer.build(sample_input.shape)
         bn = _branch_bn(layer.proj_lkc.large_conv)
-        before = ops.convert_to_numpy(bn.moving_mean).copy()
+        before = keras.ops.convert_to_numpy(bn.moving_mean).copy()
 
         layer(sample_input, training=True)
 
-        after = ops.convert_to_numpy(bn.moving_mean)
+        after = keras.ops.convert_to_numpy(bn.moving_mean)
         assert not np.allclose(before, after), (
             "training=True must reach the large-kernel branch's BatchNormalization")
 
@@ -329,8 +328,8 @@ class TestFastVitPatchEmbed:
         layer.build(sample_input.shape)
         layer.trainable = False
 
-        a = ops.convert_to_numpy(layer(sample_input, training=True))
-        b = ops.convert_to_numpy(layer(sample_input, training=False))
+        a = keras.ops.convert_to_numpy(layer(sample_input, training=True))
+        b = keras.ops.convert_to_numpy(layer(sample_input, training=False))
         np.testing.assert_allclose(a, b, atol=1e-6, rtol=0)
 
     # ------------------------------------------------------------------
@@ -344,14 +343,14 @@ class TestFastVitPatchEmbed:
 
         with tf.GradientTape() as tape:
             y = layer(x, training=True)
-            loss = ops.mean(ops.square(y))
+            loss = keras.ops.mean(keras.ops.square(y))
 
         grads = tape.gradient(loss, layer.trainable_variables)
 
         assert len(layer.trainable_variables) > 0
         for var, grad in zip(layer.trainable_variables, grads):
             assert grad is not None, f"no gradient for {var.path}"
-            assert np.any(ops.convert_to_numpy(grad) != 0.0), (
+            assert np.any(keras.ops.convert_to_numpy(grad) != 0.0), (
                 f"all-zero gradient for {var.path}")
 
     # ------------------------------------------------------------------
@@ -364,13 +363,13 @@ class TestFastVitPatchEmbed:
             embed_dim=32, use_se=True, lkc_use_act=True)(inputs)
         model = keras.Model(inputs, outputs)
 
-        original = ops.convert_to_numpy(model(sample_input, training=False))
+        original = keras.ops.convert_to_numpy(model(sample_input, training=False))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, 'patch_embed.keras')
             model.save(path)
             loaded = keras.models.load_model(path)
-            restored = ops.convert_to_numpy(loaded(sample_input, training=False))
+            restored = keras.ops.convert_to_numpy(loaded(sample_input, training=False))
 
         np.testing.assert_allclose(
             original, restored, atol=1e-6, rtol=0,

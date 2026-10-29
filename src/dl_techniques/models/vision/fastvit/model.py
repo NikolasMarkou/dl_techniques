@@ -2,7 +2,7 @@
 
 Builds :class:`FastVitImageEncoder`, a channels-last Keras 3 port of timm's
 ``FastVit`` class restricted to the five MCi configurations (mci0 through
-mci4), assembled from the block primitives in ``layers/fastvit/``.
+mci4), assembled from the blocks in this package's ``components.py``.
 
 Self-attention mixes tokens globally but its cost grows with the square of
 the token count, so it is too expensive in the early, high-resolution stages
@@ -16,8 +16,9 @@ an identity) that also collapses to one convolution once batch
 normalization is folded in.
 
 This port implements only the train-time multi-branch form: there is no
-``reparameterize()`` / branch-fusion path anywhere under ``layers/fastvit/``
-or ``layers/mobile_one_block.py``, so a built model always runs every
+``reparameterize()`` / branch-fusion path anywhere in ``components.py``,
+``layers/conv_blocks/reparam_large_kernel_conv.py`` or
+``layers/conv_blocks/mobile_one_block.py``, so a built model always runs every
 branch and the latency half of the paper's claim does not apply here. This
 matches how the MobileCLIP2 reference weights are shipped and evaluated
 (always with ``inference_mode=False``). The tower works standalone and also
@@ -46,7 +47,6 @@ References:
 import keras
 # `keras.layers` is not imported under the bare name `layers`: this module has
 # a constructor argument and a variant field named `layers` (per-stage depths).
-from keras import initializers, regularizers, activations
 from types import MappingProxyType
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, Mapping
 
@@ -59,10 +59,12 @@ from dl_techniques.layers.activations.gelu_tanh import resolve_activation
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.layers.conv_blocks.mobile_one_block import MobileOneBlock
-from dl_techniques.layers.fastvit import FastVitStage
-from dl_techniques.layers.fastvit.reference import (
+from .components import (
+    FastVitStage,
     REFERENCE_NORM_EPSILON,
     REFERENCE_PADDING_MODE,
+    _REFERENCE_HEAD_DIM,
+    _REFERENCE_LAYER_SCALE_INIT,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -85,12 +87,6 @@ _FINAL_CONV_SE_USE_BIAS = True
 #: The reference applies SE before the activation
 #: (``return self.act(self.se(out))`` in ``MobileOneBlock.forward``).
 _FINAL_CONV_SE_POSITION = 'pre_act'
-
-#: LayerScale gamma initialization used by every MCi block.
-_REFERENCE_LAYER_SCALE_INIT = 1e-5
-
-#: Per-head width of the attention token mixer; ``num_heads = dim // head_dim``.
-_REFERENCE_HEAD_DIM = 32
 
 #: Downsample (``FastVitPatchEmbed``) geometry, identical in every MCi variant.
 _REFERENCE_DOWN_PATCH_SIZE = 7
@@ -381,8 +377,8 @@ class FastVitImageEncoder(keras.Model):
             down_stride: int = _REFERENCE_DOWN_STRIDE,
             repmixer_kernel_size: int = _REFERENCE_REPMIXER_KERNEL_SIZE,
             activation: Union[str, callable] = 'gelu',
-            kernel_initializer: Union[str, initializers.Initializer] = 'he_normal',
-            kernel_regularizer: Optional[regularizers.Regularizer] = None,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
+            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -437,8 +433,8 @@ class FastVitImageEncoder(keras.Model):
         self.down_stride = int(down_stride)
         self.repmixer_kernel_size = int(repmixer_kernel_size)
         self.activation = resolve_activation(activation)  # D-277: float64-exact, bit-identical to stock at float32
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         self._validate_config()
 
@@ -795,9 +791,9 @@ class FastVitImageEncoder(keras.Model):
             'down_patch_size': self.down_patch_size,
             'down_stride': self.down_stride,
             'repmixer_kernel_size': self.repmixer_kernel_size,
-            'activation': exact_name(self.activation) or activations.serialize(self.activation),
-            'kernel_initializer': initializers.serialize(self.kernel_initializer),
-            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
+            'activation': exact_name(self.activation) or keras.activations.serialize(self.activation),
+            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
+            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
         })
         return config
 
@@ -811,11 +807,11 @@ class FastVitImageEncoder(keras.Model):
         """
         config = dict(config)
         config['input_shape'] = tuple(config['input_shape'])
-        # resolve, not activations.deserialize: "gelu" must come back as exact_gelu (D-277)
+        # resolve, not keras.activations.deserialize: "gelu" must come back as exact_gelu (D-277)
         config['activation'] = resolve_activation(config['activation'])
-        config['kernel_initializer'] = initializers.deserialize(
+        config['kernel_initializer'] = keras.initializers.deserialize(
             config['kernel_initializer'])
-        config['kernel_regularizer'] = regularizers.deserialize(
+        config['kernel_regularizer'] = keras.regularizers.deserialize(
             config['kernel_regularizer'])
         return cls(**config)
 

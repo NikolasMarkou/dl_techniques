@@ -28,15 +28,14 @@ import keras
 import numpy as np
 import pytest
 import tensorflow as tf
-from keras import ops
 
-from dl_techniques.layers.fastvit.attention_block import FastVitAttentionBlock
-from dl_techniques.layers.fastvit.patch_embed import FastVitPatchEmbed
-from dl_techniques.layers.fastvit.rep_conditional_pos_enc import (
+from dl_techniques.models.vision.fastvit.components import FastVitAttentionBlock
+from dl_techniques.models.vision.fastvit.components import FastVitPatchEmbed
+from dl_techniques.layers.embedding.rep_conditional_pos_enc import (
     RepConditionalPosEnc,
 )
-from dl_techniques.layers.fastvit.rep_mixer import FastVitRepMixerBlock
-from dl_techniques.layers.fastvit.stage import FastVitStage
+from dl_techniques.models.vision.fastvit.components import FastVitRepMixerBlock
+from dl_techniques.models.vision.fastvit.components import FastVitStage
 
 
 class TestFastVitStage:
@@ -186,7 +185,7 @@ class TestFastVitStage:
         x = rng.normal(size=(2, 16, 16, 32)).astype('float32')
         y = stage(x, training=False)
         assert tuple(y.shape) == (2, 8, 8, 64)
-        assert np.all(np.isfinite(ops.convert_to_numpy(y)))
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(y)))
 
     @pytest.mark.parametrize("token_mixer", ['repmixer', 'attention'])
     def test_forward_shape_without_downsample(self, token_mixer):
@@ -235,13 +234,13 @@ class TestFastVitStage:
         y_eval = stage(sample_input, training=False)
         assert tuple(y_train.shape) == (2, 8, 4, 64)
         assert tuple(y_eval.shape) == (2, 8, 4, 64)
-        assert np.all(np.isfinite(ops.convert_to_numpy(y_eval)))
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(y_eval)))
 
     def test_training_false_is_deterministic(self, basic_config, sample_input):
         stage = FastVitStage(**basic_config, dropout_rate=0.5,
                              drop_path_rates=[0.5, 0.5])
-        first = ops.convert_to_numpy(stage(sample_input, training=False))
-        second = ops.convert_to_numpy(stage(sample_input, training=False))
+        first = keras.ops.convert_to_numpy(stage(sample_input, training=False))
+        second = keras.ops.convert_to_numpy(stage(sample_input, training=False))
         np.testing.assert_allclose(first, second, atol=1e-6, rtol=0)
 
     # ------------------------------------------------------------------
@@ -257,7 +256,7 @@ class TestFastVitStage:
         x = tf.constant(rng.normal(size=(2, 16, 16, 32)).astype('float32'))
         with tf.GradientTape() as tape:
             y = stage(x, training=True)
-            loss = ops.mean(ops.square(y))
+            loss = keras.ops.mean(keras.ops.square(y))
         grads = tape.gradient(loss, stage.trainable_variables)
 
         assert len(stage.trainable_variables) > 0
@@ -286,8 +285,8 @@ class TestFastVitStage:
             after = restored(sample_input, training=False)
 
         np.testing.assert_allclose(
-            ops.convert_to_numpy(before),
-            ops.convert_to_numpy(after),
+            keras.ops.convert_to_numpy(before),
+            keras.ops.convert_to_numpy(after),
             atol=1e-6, rtol=0,
         )
 
@@ -420,8 +419,8 @@ class TestFastVitStage:
         for target, source in zip(without_pos.blocks, with_pos.blocks):
             target.set_weights(source.get_weights())
 
-        y_with = ops.convert_to_numpy(with_pos(x, training=False))
-        y_without = ops.convert_to_numpy(without_pos(x, training=False))
+        y_with = keras.ops.convert_to_numpy(with_pos(x, training=False))
+        y_without = keras.ops.convert_to_numpy(without_pos(x, training=False))
 
         # --- arm A: the positional encoding changes the output ----------
         assert not np.allclose(y_with, y_without, atol=1e-5), (
@@ -432,7 +431,7 @@ class TestFastVitStage:
         # --- arm B: with a zeroed kernel the RepCPE is exactly identity --
         for variable in with_pos.pos_emb.pos_conv.weights:
             variable.assign(np.zeros(variable.shape, dtype='float32'))
-        y_zeroed = ops.convert_to_numpy(with_pos(x, training=False))
+        y_zeroed = keras.ops.convert_to_numpy(with_pos(x, training=False))
         np.testing.assert_allclose(y_zeroed, y_without, atol=1e-5, rtol=0)
 
     # ==================================================================
@@ -483,7 +482,7 @@ class TestFastVitStage:
                 rng.normal(size=variable.shape).astype('float32') * 0.1)
 
         expected = [
-            [ops.convert_to_numpy(w) for w in block.weights]
+            [keras.ops.convert_to_numpy(w) for w in block.weights]
             for block in stage.blocks
         ]
 
@@ -502,7 +501,7 @@ class TestFastVitStage:
         assert len(restored.blocks) == len(stage.blocks)
         for index, (block, reference) in enumerate(
                 zip(restored.blocks, expected)):
-            actual = [ops.convert_to_numpy(w) for w in block.weights]
+            actual = [keras.ops.convert_to_numpy(w) for w in block.weights]
             assert len(actual) == len(reference), (
                 f"block_{index} restored with {len(actual)} weights, "
                 f"expected {len(reference)}"

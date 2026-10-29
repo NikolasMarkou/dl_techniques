@@ -14,7 +14,7 @@ This is a hybrid classifier assembled from this repository's own blocks,
 not a weight-compatible port of a published FastViT/FastVLM checkpoint.
 ``dl_techniques.layers.conv_blocks.repmixer_block.RepMixerBlock`` shares a name with
 FastViT's RepMixer but is a different construction; the FastViT port lives
-in ``dl_techniques.layers.fastvit``. No pretrained weights are distributed
+in ``dl_techniques.models.vision.fastvit``. No pretrained weights are distributed
 for this package.
 
 The classification head is the FastViT reference classifier: ``conv_exp``

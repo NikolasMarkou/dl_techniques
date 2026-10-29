@@ -27,7 +27,7 @@ What this module exports
 * ``STRICT_DROPPED_KEY_MARKER`` - the substring the factory puts in its error
   message when strict mode rejects unsupported parameters. Callers match on it.
 
-The package defines 22 layer classes. The other 19 are NOT re-exported here.
+The package defines 23 layer classes. The other 20 are NOT re-exported here.
 Import them from their own module, for example::
 
     from dl_techniques.layers.embedding.patch_embedding import (
@@ -39,7 +39,7 @@ Import them from their own module, for example::
 Getting a layer
 ---------------
 
-The factory in ``factory.py`` registers 15 keys, one per class it can build::
+The factory in ``factory.py`` registers 16 keys, one per class it can build::
 
     from dl_techniques.layers.embedding import create_embedding_layer
 

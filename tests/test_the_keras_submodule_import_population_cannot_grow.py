@@ -70,6 +70,7 @@ ROOTS = ("src", "tests")
 #: 421 / 402 after ``siamfc/model.py`` and its test moved to ``keras.ops`` (the same plan, step 18).
 #: 419 / 400 after ``dasiamrpn/model.py`` and its test moved to ``keras.ops`` (the same plan, step 18).
 #: 418 / 399 after ``sam1/prompt_encoder.py`` moved to ``keras.ops`` and ``keras.layers`` (the same plan, step 19).
+#: 402 / 383 after ``layers/fastvit/`` was dissolved: its 7 modules and 7 tests moved and converted, plus ``fastvit/model.py`` and ``mobile_clip/components.py``, edited for the move.
 #: Edit it in the commit that converts a file (delete its line) or, with a
 #: recorded reason, adds a statement.
 KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
@@ -99,13 +100,6 @@ KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
     "src/dl_techniques/layers/embedding/positional_embedding.py": 1,
     "src/dl_techniques/layers/embedding/positional_embedding_sine_2d.py": 1,
     "src/dl_techniques/layers/eomt_mask.py": 1,
-    "src/dl_techniques/layers/fastvit/attention_block.py": 1,
-    "src/dl_techniques/layers/fastvit/conv_mlp.py": 1,
-    "src/dl_techniques/layers/fastvit/patch_embed.py": 1,
-    "src/dl_techniques/layers/fastvit/rep_conditional_pos_enc.py": 1,
-    "src/dl_techniques/layers/fastvit/rep_mixer.py": 1,
-    "src/dl_techniques/layers/fastvit/reparam_large_kernel_conv.py": 1,
-    "src/dl_techniques/layers/fastvit/stage.py": 1,
     "src/dl_techniques/layers/generative/restricted_boltzmann_machine.py": 3,
     "src/dl_techniques/layers/generative/sampling.py": 1,
     "src/dl_techniques/layers/generative/sparse_autoencoder.py": 1,
@@ -214,7 +208,6 @@ KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
     "src/dl_techniques/models/time_series/xlstm/model.py": 1,
     "src/dl_techniques/models/vision/detr/model.py": 1,
     "src/dl_techniques/models/vision/dino/training.py": 1,
-    "src/dl_techniques/models/vision/fastvit/model.py": 1,
     "src/dl_techniques/models/vision/image_restoration/pw_fnet/model.py": 1,
     "src/dl_techniques/models/world_models/lewm/model.py": 1,
     "src/dl_techniques/models/world_models/lewm/predictor.py": 1,
@@ -230,7 +223,6 @@ KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
     "src/dl_techniques/models/vision/vq_vae/model.py": 1,
     "src/dl_techniques/models/vision/yolo12/feature_extractor.py": 1,
     "src/dl_techniques/models/vision_language/fastvlm/components.py": 1,
-    "src/dl_techniques/models/vision_language/mobile_clip/components.py": 1,
     "src/dl_techniques/models/vision_language/sam/sam1/image_encoder.py": 1,
     "src/dl_techniques/models/vision_language/sam/sam1/mask_decoder.py": 1,
     "src/dl_techniques/models/vision_language/sam/sam1/preprocessing.py": 1,
@@ -295,13 +287,6 @@ KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
     "tests/test_layers/test_embedding/test_patch_embed_3d.py": 1,
     "tests/test_layers/test_embedding/test_patch_embedding.py": 1,
     "tests/test_layers/test_embedding/test_video_rope.py": 1,
-    "tests/test_layers/test_fastvit/test_attention_block.py": 1,
-    "tests/test_layers/test_fastvit/test_conv_mlp.py": 1,
-    "tests/test_layers/test_fastvit/test_patch_embed.py": 1,
-    "tests/test_layers/test_fastvit/test_rep_conditional_pos_enc.py": 1,
-    "tests/test_layers/test_fastvit/test_rep_mixer.py": 1,
-    "tests/test_layers/test_fastvit/test_reparam_large_kernel_conv.py": 1,
-    "tests/test_layers/test_fastvit/test_stage.py": 1,
     "tests/test_layers/test_ffn/test_gated_mlp.py": 1,
     "tests/test_layers/test_ffn/test_kan_linear.py": 1,
     "tests/test_layers/test_ffn/test_tversky_projection.py": 1,
@@ -535,7 +520,7 @@ def test_the_census_is_exact(census):
 
 
 def test_the_census_totals(census):
-    assert (sum(KERAS_SUBMODULE_IMPORTS.values()), len(KERAS_SUBMODULE_IMPORTS)) == (418, 399), (
+    assert (sum(KERAS_SUBMODULE_IMPORTS.values()), len(KERAS_SUBMODULE_IMPORTS)) == (402, 383), (
         "the census's own totals moved; re-derive the module docstring's numbers")
     for path in KERAS_SUBMODULE_IMPORTS:
         assert (REPO_ROOT / path).is_file(), f"census file moved or deleted: {path}"

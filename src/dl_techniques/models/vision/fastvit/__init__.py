@@ -1,8 +1,8 @@
 """FastViT (MCi) image backbone, a channels-last port of timm's ``FastVit``.
 
 A Keras 3 port of timm's ``FastVit`` class restricted to the five ``MCi``
-configurations (``mci0``..``mci4``), assembled from the block primitives in
-``layers/fastvit/``. Architecture only: no pretrained weights are ported and
+configurations (``mci0``..``mci4``), assembled from the FastViT-specific
+blocks in ``components.py``. Architecture only: no pretrained weights are ported and
 this package makes no accuracy claim.
 
 The tower works as a standalone image encoder and also as the vision branch
@@ -20,8 +20,8 @@ Three things to know before using it:
   every stage, then sliced stagewise, not recomputed per stage. A per-stage
   ramp gives an identically-shaped, identically-parameterized, subtly wrong
   model.
-* ``FastVitRepMixerBlock`` (in ``layers/fastvit/``) is not the pre-existing
-  ``layers/repmixer_block.py::RepMixerBlock``. They are different
+* ``FastVitRepMixerBlock`` (in ``components.py``) is not
+  ``layers/conv_blocks/repmixer_block.py::RepMixerBlock``. They are different
   architectures sharing a name; the latter is used by
   ``models/vision_language/fastvlm/`` and is untouched by this package.
 

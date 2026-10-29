@@ -1,6 +1,6 @@
 """F-51: the reference epsilon must reach EVERY norm in the text tower.
 
-``layers/fastvit/reference.py``'s interface contract says
+``models/vision/fastvit/components.py``'s interface contract says
 ``REFERENCE_NORM_EPSILON`` (1e-5, torch's ``nn.LayerNorm`` default) is to be
 passed EXPLICITLY at every construction site in this port, because Keras'
 default is 1e-3 and the mismatch is invisible to every shape assertion.
@@ -26,7 +26,7 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 import keras
 import pytest
 
-from dl_techniques.layers.fastvit.reference import REFERENCE_NORM_EPSILON
+from dl_techniques.models.vision.fastvit.components import REFERENCE_NORM_EPSILON
 from dl_techniques.models.vision_language.mobile_clip.components import MobileClipTextEncoder
 
 KERAS_DEFAULT_EPSILON = 1e-3

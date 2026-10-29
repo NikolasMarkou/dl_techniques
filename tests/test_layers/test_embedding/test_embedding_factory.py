@@ -38,6 +38,7 @@ VALID_CFGS = {
     "mrope_ideogram4": dict(head_dim=64, rope_theta=10000.0, mrope_section=(2, 3, 3)),
     "class_label": dict(num_classes=3, hidden_size=16),
     "timestep": dict(hidden_size=16),
+    "rep_conditional_pos_enc": dict(dim=16),
 }
 
 

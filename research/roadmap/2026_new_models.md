@@ -187,7 +187,7 @@ Feed-forward multi-view 3D reconstruction. From 1 to hundreds of images, predict
 
 ## 4. FastViT
 
-**Status: exists.** `models/vision/fastvit/`, `layers/fastvit/` (RepMixer, RepCPE, reparam large-kernel conv, committed `reference.py`), `conv_blocks/repmixer_block.py`. Used by MobileCLIP v2.
+**Status: exists.** `models/vision/fastvit/` (RepMixer, attention block, stage and the reference constants in `components.py`), `layers/conv_blocks/reparam_large_kernel_conv.py`, `layers/embedding/rep_conditional_pos_enc.py` (RepCPE), `conv_blocks/repmixer_block.py`. Used by MobileCLIP v2.
 
 | Gap check | Action |
 | --- | --- |
@@ -263,7 +263,7 @@ Feed-forward multi-view 3D reconstruction. From 1 to hundreds of images, predict
 
 | Existing | Reuse |
 | --- | --- |
-| `layers/fastvit/rep_conditional_pos_enc.py` (RepCPE) | Reparameterizable variant already present |
+| `layers/embedding/rep_conditional_pos_enc.py` (RepCPE) | Reparameterizable variant already present |
 
 | New | Target |
 | --- | --- |

@@ -15,9 +15,8 @@ import keras
 import numpy as np
 import pytest
 import tensorflow as tf
-from keras import ops
 
-from dl_techniques.layers.fastvit.rep_conditional_pos_enc import RepConditionalPosEnc
+from dl_techniques.layers.embedding.rep_conditional_pos_enc import RepConditionalPosEnc
 
 
 class TestRepConditionalPosEnc:
@@ -128,7 +127,7 @@ class TestRepConditionalPosEnc:
         y = layer(x, training=False)
 
         assert tuple(y.shape) == (2, height, width, dim)
-        assert np.all(np.isfinite(ops.convert_to_numpy(y)))
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(y)))
 
     def test_compute_output_shape_pre_build(self):
         layer = RepConditionalPosEnc(dim=16)
@@ -167,8 +166,8 @@ class TestRepConditionalPosEnc:
         removes the `+ x` from `call()` moves only ONE side of the comparison.
         """
         layer = RepConditionalPosEnc(dim=16)
-        out = ops.convert_to_numpy(layer(sample_input, training=False))
-        conv_out = ops.convert_to_numpy(layer.pos_conv(sample_input))
+        out = keras.ops.convert_to_numpy(layer(sample_input, training=False))
+        conv_out = keras.ops.convert_to_numpy(layer.pos_conv(sample_input))
 
         assert not np.allclose(out, conv_out, atol=1e-6), (
             "output equals the internal conv output alone: the `+ x` skip "
@@ -186,8 +185,8 @@ class TestRepConditionalPosEnc:
     def test_training_modes_are_identical(self, sample_input):
         """The layer holds no stochastic or statistic-bearing sub-layer."""
         layer = RepConditionalPosEnc(dim=16)
-        a = ops.convert_to_numpy(layer(sample_input, training=True))
-        b = ops.convert_to_numpy(layer(sample_input, training=False))
+        a = keras.ops.convert_to_numpy(layer(sample_input, training=True))
+        b = keras.ops.convert_to_numpy(layer(sample_input, training=False))
         np.testing.assert_allclose(a, b, atol=1e-6, rtol=0)
 
     # ------------------------------------------------------------------
@@ -200,14 +199,14 @@ class TestRepConditionalPosEnc:
 
         with tf.GradientTape() as tape:
             y = layer(x, training=True)
-            loss = ops.mean(ops.square(y))
+            loss = keras.ops.mean(keras.ops.square(y))
 
         grads = tape.gradient(loss, layer.trainable_variables)
 
         assert len(layer.trainable_variables) == 2
         for var, grad in zip(layer.trainable_variables, grads):
             assert grad is not None, f"no gradient for {var.path}"
-            assert np.any(ops.convert_to_numpy(grad) != 0.0), (
+            assert np.any(keras.ops.convert_to_numpy(grad) != 0.0), (
                 f"all-zero gradient for {var.path}"
             )
 
@@ -220,13 +219,13 @@ class TestRepConditionalPosEnc:
         outputs = RepConditionalPosEnc(dim=16)(inputs)
         model = keras.Model(inputs, outputs)
 
-        original = ops.convert_to_numpy(model(sample_input, training=False))
+        original = keras.ops.convert_to_numpy(model(sample_input, training=False))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, 'rep_cpe.keras')
             model.save(path)
             loaded = keras.models.load_model(path)
-            restored = ops.convert_to_numpy(loaded(sample_input, training=False))
+            restored = keras.ops.convert_to_numpy(loaded(sample_input, training=False))
 
         np.testing.assert_allclose(
             original, restored, atol=1e-6, rtol=0,
