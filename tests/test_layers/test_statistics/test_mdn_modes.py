@@ -461,7 +461,7 @@ class TestTheContrastCanFail:
 
 # Components at -1, 0, +1 (sigma 0.5, weights 0.45, 0.1, 0.45): the middle mean is a density
 # minimum (Hessian of log p +4.79). Measured 2026-10-29 in float64: with the 1e-3 sigma start
-# offset the middle start reaches the side mode 0.9658 after 30 steps (-0.6543 after 10).
+# offset the middle start reaches the side mode -0.9658 after 30 steps (-0.6543 after 10).
 SADDLE_MU = np.array([[-1.0], [0.0], [1.0]])
 SADDLE_SIGMA = np.full((3, 1), 0.5)
 SADDLE_LOGITS = np.log([0.45, 0.1, 0.45])
