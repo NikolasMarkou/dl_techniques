@@ -141,6 +141,17 @@ class MeanShiftAttention(keras.layers.Layer):
     pairwise mask that is not transitive still lets a row read the moved value of a
     key, and that value has read other keys, so a read can span two hops.
 
+    Under a causal mask the centre still includes every key (each key is kept by
+    some row), so a later token can change an earlier row through the centre at
+    float32 rounding level, and the change grows with the token magnitude relative
+    to the output scale. With the default Gaussian bandwidth, 8 tokens and an output
+    scale of 4, setting a future token to 1e1, 1e2, 1e3 and 1e4 changes the earlier
+    rows by 6e-7, 2e-5, 3.3e-3 and 0.49 (without blurring). The change is exactly 0
+    at ``bandwidth_init=0.3`` and for the vMF kernel at 0.5, and a value at a padded
+    key changes no kept row under a rank-2 padding mask, alone or combined with a
+    causal mask. For strictly causal use keep the token scale moderate (normalise
+    the inputs) until a causal-safe centre is added.
+
     Input shape:
         ``(batch_size, seq_len, dim)``, or a list ``[query, key_value]`` of two such
         tensors (only with ``blurring=False``). Rank 4 raises ``ValueError``.
