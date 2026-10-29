@@ -266,7 +266,8 @@ class TestGradients:
             loss = tf.reduce_sum(layer(tokens) * tf.range(1.0, 5.0))
         grad = _np(tape.gradient(loss, tokens))
         assert np.isfinite(grad).all()
-        assert np.abs(grad).max() > 1e-6
+        # Measured 0.52 for one and four starts; a 1e-6 floor passed a 5e5-fold attenuation.
+        assert np.abs(grad).max() > 0.25
 
     def test_the_learnable_scale_receives_a_nonzero_finite_gradient(self):
         tokens, _ = _outlier_data()
@@ -275,7 +276,8 @@ class TestGradients:
             out = layer(tf.constant(tokens))
             loss = tf.reduce_sum(out * tf.range(1.0, 9.0))
         grad = _np(tape.gradient(loss, layer.log_scale))
-        assert np.isfinite(grad) and abs(grad) > 1e-6
+        # Measured 0.063; a 1e-6 floor passed a 6e4-fold attenuation.
+        assert np.isfinite(grad) and abs(grad) > 0.03
         assert [w.name for w in layer.trainable_weights] == ["log_scale"]
 
     def test_the_learnable_scale_moves_the_output_when_it_moves(self):
@@ -348,9 +350,9 @@ class TestTranslationAndSmallBandwidths:
         np.testing.assert_allclose(_np(pooled), DUPLICATE_POINT, rtol=0, atol=1e-6)
         # A float bandwidth is not raised by the data floor, so h is 1e-6 here. The
         # float32 squared distance to the duplicated point then carries rounding noise
-        # of about 1e-7 (log density near -6e4); the old -1e9 mask constant would give
-        # a density below -1e6, so only that is pinned. The ops tests pin the value.
-        assert np.isfinite(_np(density)).all() and _np(density)[0] > -1e6
+        # of about 1e-7, a log density of -59502 measured; the bound is 3.4 times that,
+        # and 5 times tighter than the old -1e6 that only rejected the -1e9 mask constant.
+        assert np.isfinite(_np(density)).all() and _np(density)[0] > -2e5
 
     @pytest.mark.parametrize("bandwidth", [1e-6, 1e-4])
     def test_a_float_bandwidth_far_below_the_data_scale_with_a_mask_stays_on_the_data(self, bandwidth):
@@ -467,6 +469,116 @@ def _assert_duplicate_sweep_is_pooled(bandwidth_scale, log_scale=None):
     assert wrong == 0, f"{wrong} of {total} runs off the duplicated point, worst {worst:.4g}"
 
 
+_GRADIENT_LAYOUTS = {"dup85": 85, "dup55": 55}
+
+
+def _bandwidth_and_data_floor(layer, keys, keep, acc="float32"):
+    """Return the resolved bandwidth and the data floor of ``layer`` as Python floats."""
+    h = float(_np(layer._resolve_bandwidth(keys, keep, acc)).reshape(-1)[0])
+    data_floor = mode_pooling_module._BANDWIDTH_DATA_FLOOR * float(
+        _np(layer._rms_radius(keys, keep, acc)).reshape(-1)[0]
+    )
+    return h, data_floor
+
+
+def _multiplier_probe(layout, scale, num_starts, masked, pooled_term=False, dtype="float32"):
+    """Build a learnable-multiplier layer on a duplicate layout and its density loss.
+
+    ``dup85`` has 85 identical tokens (median distance 0), ``dup55`` has 55 (positive
+    median); the last five tokens are masked when ``masked``. The loss is the sum of the
+    density, which carries ``-(d/2) log(2 pi h^2)`` and so depends on ``h``, plus the
+    weighted pooled output when ``pooled_term``. Returns ``(layer, tokens, keep, loss)``.
+    """
+    n_dup = _GRADIENT_LAYOUTS[layout]
+    tokens = tf.constant(_duplicate_data(n_duplicates=n_dup, n_others=100 - n_dup).astype(dtype))
+    mask = tf.constant(_mask_last(100, 5).astype(dtype)) if masked else None
+    keep = keras.ops.ones((1, 100), dtype="bool") if mask is None else mask > 0
+    extra = {} if mask is None else {"mask": mask}
+    layer = ModePooling(
+        num_steps=3, num_starts=num_starts, bandwidth_scale=scale,
+        learnable_bandwidth=True, return_density=True,
+    )
+    layer.build(tokens.shape)
+    weights = tf.range(1.0, 9.0, dtype=dtype)
+
+    def loss():
+        pooled, density = layer(tokens, **extra)
+        total = tf.reduce_sum(density)
+        return total + tf.reduce_sum(pooled * weights) if pooled_term else total
+
+    return layer, tokens, keep, loss
+
+
+def _assert_multiplier_gradient_is_zero(masked, num_starts, layout, scale, pooled_term=False):
+    """Fail unless the floor binds and the multiplier gradient is exactly zero.
+
+    The density loss depends on ``h``, so a gradient leaking through ``h`` shows as
+    about ``-d``. The finite-difference arm cannot see a leak that leaves the forward
+    pass unchanged; only the autodiff gradient and the ``h == floor`` check carry it.
+    """
+    layer, tokens, keep, loss = _multiplier_probe(layout, scale, num_starts, masked, pooled_term)
+    h, data_floor = _bandwidth_and_data_floor(layer, tokens, keep)
+    assert h == pytest.approx(data_floor, rel=1e-5), f"bandwidth {h} is not the data floor {data_floor}"
+    with tf.GradientTape() as tape:
+        value = loss()
+    grad = float(_np(tape.gradient(value, layer.log_scale)))
+    assert grad == 0.0, f"multiplier gradient {grad} while the floor binds"
+    # A leak that leaves the forward pass unchanged is invisible to this arm.
+    for eps in (0.1, 0.01):
+        layer.log_scale.assign(np.float32(eps))
+        up = float(_np(loss()))
+        layer.log_scale.assign(np.float32(-eps))
+        down = float(_np(loss()))
+        assert up - down == 0.0, f"loss moves by {up - down} at eps {eps} while the floor binds"
+
+
+def _assert_multiplier_gradient_is_live(num_starts, eps, central_atol, dtype="float32"):
+    """Fail unless, with the floor not binding, the density gradient is -d and central.
+
+    On ``dup55`` at scale 1 the bandwidth is far above the floor, so the density loss
+    gives ``-d`` with ``d = 8`` and autodiff must agree with a central difference.
+    """
+    layer, tokens, keep, loss = _multiplier_probe("dup55", 1.0, num_starts, True, dtype=dtype)
+    h, data_floor = _bandwidth_and_data_floor(layer, tokens, keep, dtype)
+    assert h > 100.0 * data_floor, f"floor binds: {h} vs {data_floor}"
+    with tf.GradientTape() as tape:
+        value = loss()
+    grad = float(_np(tape.gradient(value, layer.log_scale)))
+    assert abs(grad + 8.0) < 0.01, f"multiplier gradient {grad} is not -8"
+    layer.log_scale.assign(np.asarray(eps, dtype))
+    up = float(_np(loss()))
+    layer.log_scale.assign(np.asarray(-eps, dtype))
+    down = float(_np(loss()))
+    central = (up - down) / (2 * eps)
+    assert abs(grad - central) <= central_atol, f"autodiff {grad} vs central {central}"
+
+
+def _mutated_resolve_bandwidth(kind):
+    """Return a stand-in for ``ModePooling._resolve_bandwidth`` with one emulated defect.
+
+    Built from the module's own helpers, auto bandwidth only. ``floor_removed`` drops
+    the data floor, ``scaled_leak`` keeps the forward value and leaks ``h * dL/dh``,
+    ``bypass_leak`` keeps the forward value and passes the product's gradient through
+    the floor, ``dead_gradient`` makes the multiplier gradient zero everywhere.
+    """
+    module = mode_pooling_module
+
+    def resolve(self, keys, keep, acc):
+        floor = module.stability_floor(acc, module._BANDWIDTH_FLOOR)
+        ls = keras.ops.cast(self.log_scale, acc)
+        product = module.median_heuristic_bandwidth(keys, keep) * self.bandwidth_scale * keras.ops.exp(ls)
+        if kind == "floor_removed":
+            return keras.ops.maximum(product, floor)
+        floor = keras.ops.maximum(floor, module._BANDWIDTH_DATA_FLOOR * self._rms_radius(keys, keep, acc))
+        if kind == "scaled_leak":
+            return keras.ops.maximum(product, floor) * keras.ops.exp(ls - keras.ops.stop_gradient(ls))
+        if kind == "bypass_leak":
+            return product + keras.ops.stop_gradient(keras.ops.maximum(product, floor) - product)
+        return keras.ops.maximum(keras.ops.stop_gradient(product) + 0.0 * product, floor)
+
+    return resolve
+
+
 class TestTheAutoBandwidthFloorFollowsTheDataScale:
     """Mostly duplicated tokens give a median distance of 0, then rounding noise sets the mode."""
 
@@ -498,11 +610,9 @@ class TestTheAutoBandwidthFloorFollowsTheDataScale:
             monkeypatch.undo()
             np.testing.assert_allclose(with_floor, without_floor, rtol=0, atol=1e-6)
 
-    @pytest.mark.parametrize("log_scale", [None, -10.0, 0.7])
-    @pytest.mark.parametrize("scale", [2.0, 1.0, 0.1, 1e-3])
-    @pytest.mark.parametrize("layout", ["duplicated", "ordinary"])
-    def test_the_floor_applies_to_the_product_of_median_scale_and_multiplier(self, layout, scale, log_scale):
-        # h = max(median * scale * exp(log_scale), data floor): the scale never goes below it.
+    @staticmethod
+    def _bandwidth_case(layout, scale, log_scale):
+        """Return the resolved bandwidth, the data floor and the unfloored product."""
         tokens = _duplicate_data() if layout == "duplicated" else _outlier_data()[0]
         keep = keras.ops.ones((1, 100), dtype="bool")
         layer = ModePooling(bandwidth_scale=scale, learnable_bandwidth=log_scale is not None)
@@ -510,15 +620,30 @@ class TestTheAutoBandwidthFloorFollowsTheDataScale:
         if log_scale is not None:
             layer.log_scale.assign(np.float32(log_scale))
         keys = keras.ops.convert_to_tensor(tokens)
-        h = float(_np(layer._resolve_bandwidth(keys, keep, "float32")).reshape(-1)[0])
+        h, data_floor = _bandwidth_and_data_floor(layer, keys, keep)
         median = float(_np(mode_pooling_module.median_heuristic_bandwidth(keys, keep)).reshape(-1)[0])
-        data_floor = mode_pooling_module._BANDWIDTH_DATA_FLOOR * float(
-            _np(layer._rms_radius(keys, keep, "float32")).reshape(-1)[0]
-        )
-        product = median * scale * (1.0 if log_scale is None else float(np.exp(log_scale)))
+        return h, data_floor, median * scale * (1.0 if log_scale is None else float(np.exp(log_scale)))
+
+    @pytest.mark.parametrize("log_scale", [None, -10.0, 0.7])
+    @pytest.mark.parametrize("scale", [2.0, 1.0, 0.1, 1e-3])
+    @pytest.mark.parametrize("layout", ["duplicated", "ordinary"])
+    def test_the_floor_applies_to_the_product_of_median_scale_and_multiplier(self, layout, scale, log_scale):
+        # h = max(median * scale * exp(log_scale), data floor): the scale never goes below it.
+        h, data_floor, product = self._bandwidth_case(layout, scale, log_scale)
         assert h == pytest.approx(max(product, data_floor, 1e-6), rel=1e-5)
-        if layout == "ordinary" and scale == 1e-3 and (log_scale or 0.0) <= 0.0:
-            assert h == pytest.approx(data_floor, rel=1e-5) and product < data_floor
+        # The floor is the answer exactly when the product is below it, in every case.
+        assert (h == pytest.approx(data_floor, rel=1e-5)) == (product < data_floor)
+
+    def test_the_floor_binds_in_some_of_the_cases_and_not_in_others(self):
+        # Measured 17 binding and 7 not of the 24, so neither side can go vacuous.
+        cases = [
+            self._bandwidth_case(layout, scale, log_scale)
+            for layout in ("duplicated", "ordinary")
+            for scale in (2.0, 1.0, 0.1, 1e-3)
+            for log_scale in (None, -10.0, 0.7)
+        ]
+        binds = [h == pytest.approx(data_floor, rel=1e-5) for h, data_floor, _ in cases]
+        assert len(binds) == 24 and sum(binds) >= 3 and len(binds) - sum(binds) >= 3, sum(binds)
 
     @pytest.mark.parametrize("bandwidth_scale", [1.0, 0.5, 2.0, 0.1, 0.01, 1e-3])
     def test_the_duplicate_sweep_pools_to_the_duplicated_point_at_every_bandwidth_scale(self, bandwidth_scale):
@@ -534,33 +659,48 @@ class TestTheAutoBandwidthFloorFollowsTheDataScale:
         with pytest.raises(AssertionError, match="off the duplicated point"):
             _assert_duplicate_sweep_is_pooled(bandwidth_scale)
 
+    @pytest.mark.parametrize("num_starts", [1, 2, 4])
     @pytest.mark.parametrize("masked", [False, True])
-    def test_the_multiplier_gradient_is_exactly_zero_while_the_floor_binds(self, masked):
-        tokens = tf.constant(_duplicate_data())
-        mask = tf.constant(_mask_last(100, 5)) if masked else None
-        keep = keras.ops.ones((1, 100), dtype="bool") if mask is None else mask > 0
-        layer = ModePooling(num_steps=3, bandwidth_scale=1e-3, learnable_bandwidth=True)
-        layer.build(tokens.shape)
-        h = float(_np(layer._resolve_bandwidth(tokens, keep, "float32")).reshape(-1)[0])
-        data_floor = mode_pooling_module._BANDWIDTH_DATA_FLOOR * float(
-            _np(layer._rms_radius(tokens, keep, "float32")).reshape(-1)[0]
-        )
-        assert h == pytest.approx(data_floor, rel=1e-5)
-        weights = tf.range(1.0, 9.0)
-        extra = {} if mask is None else {"mask": mask}
+    @pytest.mark.parametrize(("layout", "scale"), [("dup85", 1e-3), ("dup55", 1e-4)])
+    def test_the_multiplier_gradient_is_exactly_zero_while_the_floor_binds(
+        self, layout, scale, masked, num_starts
+    ):
+        _assert_multiplier_gradient_is_zero(masked, num_starts, layout, scale)
 
-        def loss():
-            return tf.reduce_sum(layer(tokens, **extra) * weights)
+    def test_the_multiplier_gradient_is_exactly_zero_with_a_pooled_term_in_the_loss(self):
+        _assert_multiplier_gradient_is_zero(True, 4, "dup55", 1e-4, pooled_term=True)
 
-        with tf.GradientTape() as tape:
-            value = loss()
-        assert abs(float(_np(tape.gradient(value, layer.log_scale)))) <= 1e-6
-        for eps in (0.1, 0.01):
-            layer.log_scale.assign(np.float32(eps))
-            up = float(_np(loss()))
-            layer.log_scale.assign(np.float32(-eps))
-            down = float(_np(loss()))
-            assert abs(up - down) / (2 * eps) <= 1e-6, eps
+    @pytest.mark.parametrize("num_starts", [1, 2, 4])
+    def test_the_density_gradient_is_live_and_central_when_the_floor_does_not_bind(self, num_starts):
+        # Measured |autodiff - central| 1e-4 to 3.8e-4 in float32 at eps 1e-3, bound 2e-3.
+        _assert_multiplier_gradient_is_live(num_starts, 1e-3, 2e-3)
+
+    @pytest.mark.parametrize("num_starts", [1, 4])
+    def test_the_density_gradient_matches_a_central_difference_in_float64(self, float64_policy, num_starts):
+        # Measured |autodiff - central| 7e-11 at eps 1e-5.
+        _assert_multiplier_gradient_is_live(num_starts, 1e-5, 1e-6)
+
+    @pytest.mark.parametrize("masked", [False, True])
+    @pytest.mark.parametrize(("layout", "scale"), [("dup85", 1e-3), ("dup55", 1e-4)])
+    @pytest.mark.parametrize(
+        ("kind", "message"),
+        [
+            ("floor_removed", "data floor"),
+            ("scaled_leak", "multiplier gradient"),
+            ("bypass_leak", "multiplier gradient"),
+        ],
+    )
+    def test_red_proof_the_gradient_check_fails_under_an_emulated_defect(
+        self, monkeypatch, kind, message, layout, scale, masked
+    ):
+        monkeypatch.setattr(ModePooling, "_resolve_bandwidth", _mutated_resolve_bandwidth(kind))
+        with pytest.raises(AssertionError, match=message):
+            _assert_multiplier_gradient_is_zero(masked, 2, layout, scale)
+
+    def test_red_proof_a_dead_multiplier_gradient_fails_the_live_check(self, monkeypatch):
+        monkeypatch.setattr(ModePooling, "_resolve_bandwidth", _mutated_resolve_bandwidth("dead_gradient"))
+        with pytest.raises(AssertionError, match="is not -8"):
+            _assert_multiplier_gradient_is_live(2, 1e-3, 2e-3)
 
     @pytest.mark.parametrize("masked", [False, True])
     @pytest.mark.parametrize("log_scale", [0.0, -0.8])
@@ -746,8 +886,8 @@ class TestSerialization:
         actual = loaded(tokens, training=False)
         if isinstance(expected, (list, tuple)):
             for want, got in zip(expected, actual):
-                np.testing.assert_allclose(_np(got), _np(want), atol=1e-6, rtol=0)
+                np.testing.assert_array_equal(_np(got), _np(want))
         else:
-            np.testing.assert_allclose(_np(actual), _np(expected), atol=1e-6, rtol=0)
+            np.testing.assert_array_equal(_np(actual), _np(expected))
         if kwargs.get("learnable_bandwidth"):
             assert float(loaded.get_layer("mode").log_scale) == pytest.approx(0.3, abs=1e-7)
