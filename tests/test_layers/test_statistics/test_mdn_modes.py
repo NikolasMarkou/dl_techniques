@@ -505,7 +505,7 @@ def _check_the_shifted_middle_start_leaves_the_density_minimum(shift, num_steps=
 
 
 class TestStationaryPointsReachedFromEachComponentMean:
-    @pytest.mark.parametrize("shift", [0.0, 50.0, 5000.0, 10000.0])
+    @pytest.mark.parametrize("shift", [0.0, 50.0, 5000.0, 10000.0, 1e6])
     def test_a_far_from_origin_density_minimum_is_still_left_in_float32(self, shift):
         _check_the_shifted_middle_start_leaves_the_density_minimum(shift)
 
@@ -690,6 +690,125 @@ class TestTheStartOffsetBreaksCoordinateSymmetry:
         graph = run(tf.constant(mu), tf.constant(sigma), tf.constant(logits)).numpy()
         eager = keras.ops.convert_to_numpy(get_mixture_modes(mu, sigma, logits, num_steps=X_STEPS)[0])
         np.testing.assert_allclose(graph, eager, atol=1e-5)
+
+
+# The start offset is max(1e-3 sigma, 8 eps(work dtype) |mu|): a term tied to rounding of the
+# mean, not to a fixed fraction of it, so it never outgrows sigma of a well-separated component.
+# Measured 2026-10-30 against the dense-grid maxima: the fixed 1e-5 |mu| term lost a mode of
+# components 10 sigma apart at |mu|/sigma >= 1e6 (float32 and float64).
+def _grid_maxima_count(mu, sigma, logits):
+    """Number of strict local maxima of a 1-D mixture density on a dense float64 grid.
+
+    The mixture is recentred first (the density is shift invariant), so the grid
+    resolution does not depend on how far the components sit from the origin.
+
+    :param mu: Component means ``[M]``.
+    :param sigma: Component standard deviations ``[M]``.
+    :param logits: Mixture logits ``[M]``.
+    :return: Number of local maxima.
+    """
+    mu = np.asarray(mu, np.float64)
+    mu = mu - mu.min()
+    sigma = np.asarray(sigma, np.float64)
+    grid = np.linspace(-6.0 * sigma.max(), mu.max() + 6.0 * sigma.max(), 100001)
+    values = _oracle_log_density(grid[:, None], mu[:, None], sigma[:, None], logits)
+    return int(np.sum((values[1:-1] > values[:-2]) & (values[1:-1] >= values[2:])))
+
+
+def _modes_of_two(level, gap, sigma, weights, dtype, num_steps=200):
+    """Run the finder on two components at ``level`` and ``level + gap``.
+
+    :return: ``(modes - level [2], log_density [2], is_unique [2])`` as float64 / bool arrays.
+    """
+    mu = np.array([[level], [level + gap]])
+    sg = np.full((2, 1), sigma)
+    mu_b, sg_b, lg_b = _batch(mu, sg, np.log(weights), dtype)
+    # A rounded float32 mean sits up to half an ulp off its stored value.
+    merge_tol = max(0.1 * sigma, 8.0 * float(np.spacing(np.float32(level + gap)))) if dtype == "float32" else 0.1 * sigma
+    modes, log_density, is_unique = get_mixture_modes(mu_b, sg_b, lg_b, num_steps=num_steps, merge_tol=merge_tol)
+    return (
+        keras.ops.convert_to_numpy(modes)[0, :, 0].astype(np.float64) - level,
+        keras.ops.convert_to_numpy(log_density)[0].astype(np.float64),
+        keras.ops.convert_to_numpy(is_unique)[0],
+    )
+
+
+def _check_the_narrow_pair_at_one_thousand_keeps_both_modes(dtype):
+    """Components 1e3 and 1e3 + 0.01, sigma 1e-3, weights 0.3 / 0.7: both modes, the heavier wins."""
+    modes, log_density, is_unique = _modes_of_two(1e3, 0.01, 1e-3, [0.3, 0.7], dtype)
+    assert is_unique.tolist() == [True, True], f"modes {modes}"
+    heavier = modes[int(np.argmax(log_density))]
+    assert abs(heavier - 0.01) < 1e-4, f"heavier mode at {heavier}"
+
+
+class TestTheStartOffsetTracksRounding:
+    @pytest.mark.parametrize("dtype", ["float32", "float64"])
+    def test_a_narrow_pair_far_from_the_origin_keeps_both_modes(self, dtype):
+        _check_the_narrow_pair_at_one_thousand_keeps_both_modes(dtype)
+
+    def test_the_mode_estimate_of_the_narrow_pair_is_the_heavier_mode(self):
+        model, layer = _constant_mixture_model(
+            np.array([[1e3], [1e3 + 0.01]]), np.full((2, 1), 1e-3), np.log([0.3, 0.7])
+        )
+        estimate = get_mode_estimate(model, np.zeros((1, 2), "float32"), layer, num_steps=200)
+        assert abs(float(estimate[0, 0]) - (1e3 + 0.01)) < 1e-4
+
+    @pytest.mark.parametrize("ratio", [1e3, 1e5, 2e5, 5e5, 1e6, 2e6])
+    @pytest.mark.parametrize("gap", [3.0, 5.0, 10.0])
+    @pytest.mark.parametrize("weights", [(0.3, 0.7), (0.7, 0.3)])
+    def test_no_separated_mode_is_lost_in_float64(self, ratio, gap, weights):
+        expected = _grid_maxima_count([0.0, gap], [1.0, 1.0], np.log(weights))
+        assert expected == 2
+        modes, log_density, is_unique = _modes_of_two(ratio, gap, 1.0, weights, "float64")
+        heavy = 0.0 if weights[0] > weights[1] else gap
+        assert int(is_unique.sum()) == expected, f"modes {modes}"
+        assert abs(modes[int(np.argmax(log_density))] - heavy) < 0.1
+
+    # Measured 2026-10-30 in float32 with the eps-scaled offset: no loss up to |mu|/sigma = 1e6 at
+    # 3, 5 and 10 sigma, a lost heavy 5 sigma mode first at 2e6 (reviewer probe), so 1e6 is the bound.
+    @pytest.mark.parametrize("ratio", [1e3, 1e5, 5e5, 1e6])
+    @pytest.mark.parametrize("gap", [3.0, 5.0, 10.0])
+    @pytest.mark.parametrize("weights", [(0.3, 0.7), (0.7, 0.3)])
+    def test_no_separated_mode_is_lost_in_float32_up_to_one_million(self, ratio, gap, weights):
+        modes, log_density, is_unique = _modes_of_two(ratio, gap, 1.0, weights, "float32")
+        heavy = 0.0 if weights[0] > weights[1] else gap
+        assert int(is_unique.sum()) == 2, f"modes {modes}"
+        assert abs(modes[int(np.argmax(log_density))] - heavy) < 0.1
+
+    def test_random_narrow_mixtures_miss_no_maximum_in_float64(self):
+        rng = np.random.default_rng(7)
+        missed = 0
+        for _ in range(100):
+            count = int(rng.integers(2, 5))
+            level = float(rng.choice([1e2, 1e4, 1e5, 1e6]))
+            sigma = float(rng.uniform(1e-3, 1e-2)) * level / 1e4
+            # Components land on a lattice at least 3 sigma apart, so every one is its own maximum.
+            slots = rng.choice(np.arange(0, 12), size=count, replace=False) * 3.0 * sigma
+            mu = level + np.sort(slots)
+            logits = rng.normal(size=count)
+            mu_b, sg_b, lg_b = _batch(mu[:, None], np.full((count, 1), sigma), logits, "float64")
+            modes, log_density, is_unique = get_mixture_modes(
+                mu_b, sg_b, lg_b, num_steps=100, merge_tol=0.3 * sigma
+            )
+            modes = keras.ops.convert_to_numpy(modes)[0, :, 0]
+            kept = modes[keras.ops.convert_to_numpy(is_unique)[0]]
+            grid_count = _grid_maxima_count(mu, np.full(count, sigma), logits)
+            missed += max(grid_count - len(kept), 0)
+            top = keras.ops.convert_to_numpy(log_density)[0]
+            grid_mode, _ = _oracle_grid_mode(
+                mu[:, None], np.full((count, 1), sigma), logits, [mu[int(np.argmax(logits))]], 6.0 * sigma, levels=6, size=201
+            )
+            assert abs(modes[int(np.argmax(top))] - grid_mode[0]) < 0.1 * sigma
+        assert missed == 0
+
+    def test_red_the_old_fixed_fraction_of_the_mean_loses_the_narrow_pair(self, monkeypatch):
+        from dl_techniques.layers.statistics import mdn_layer as mdn_module
+
+        eps32 = float(np.finfo(np.float32).eps)
+        _check_the_narrow_pair_at_one_thousand_keeps_both_modes("float32")
+        monkeypatch.setattr(mdn_module, "_MODE_START_EPS_MULTIPLE", 1e-5 / eps32)
+        with pytest.raises(AssertionError):
+            _check_the_narrow_pair_at_one_thousand_keeps_both_modes("float32")
 
 
 # Two equal unit components a distance s apart; the true density has one mode at 0 for

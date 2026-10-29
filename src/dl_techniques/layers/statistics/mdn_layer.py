@@ -749,11 +749,12 @@ def get_point_estimate(
 _MODE_SIGMA_FLOOR = 1e-6
 _MODE_PRECISION_FLOOR = 1e-30
 # Each start is nudged off its component mean by the larger of this many standard
-# deviations and this fraction of |mean|, per dimension, so a start on an unstable
-# stationary point leaves it. The relative term keeps the nudge above float32
-# rounding of the mean (about 1.2e-7 |mean|).
+# deviations and this many machine epsilons of the working dtype times |mean|, per
+# dimension, so a start on an unstable stationary point leaves it. The second term
+# tracks rounding of the mean (half an ulp is at most 0.5 eps |mean|) and, unlike a
+# fixed fraction of the mean, stays far below sigma wherever rounding is resolved.
 _MODE_START_OFFSET = 1e-3
-_MODE_START_RELATIVE_OFFSET = 1e-5
+_MODE_START_EPS_MULTIPLE = 8.0
 
 _GOLDEN_FRACTION = 0.6180339887498949
 
@@ -844,8 +845,9 @@ def get_mixture_modes(
     """Find stationary points of a diagonal Gaussian mixture by fixed-point iteration.
 
     Every component mean is a start, moved off it per dimension by the larger of
-    ``1e-3`` standard deviations and ``1e-5`` times ``|mu|`` (so the move stays above
-    float32 rounding of a mean far larger than its sigma), times a fixed factor in
+    ``1e-3`` standard deviations and ``8`` machine epsilons of the working dtype times
+    ``|mu|`` (so the move stays above rounding of a mean far larger than its sigma
+    without growing past sigma), times a fixed factor in
     ``[0.25, 1]`` whose sign and size differ between components and dimensions, so a
     mixture symmetric under a coordinate swap does not keep a start on its symmetric
     saddle. Each start is moved by the Carreira-Perpinan fixed point of the
@@ -879,6 +881,14 @@ def get_mixture_modes(
     (the true mode is 0), and at exactly 2 sigma they sit at +-0.121 after 100
     steps and +-0.039 after 1000. Use more steps, or a larger ``merge_tol``,
     when components sit within about 2 sigma of each other.
+
+    Float32 limit: when sigma is below roughly one float32 ulp of ``|mu|``
+    (``|mu| / sigma`` above about 1e7) the returned points are rounded to the ulp
+    grid and can lie far below the density peak (up to about 50 nats at sigma of
+    0.1 ulp on 40 random three-component mixtures); means closer than an ulp are
+    one float (the -1/0/+1 triple, sigma 0.5, at 3e7 and above returns that float,
+    log density -0.2258). Centre or rescale the data first; float64 has no
+    practical limit here.
 
     The iteration count is a Python int and the loop never stops early on a
     traced value, so the function runs under ``tf.function`` with an unknown
@@ -940,15 +950,14 @@ def get_mixture_modes(
         quad = ops.sum(ops.square(diff) * ops.expand_dims(precision, 1), axis=-1)
         return ops.expand_dims(log_const, 1) - 0.5 * quad
 
-    # DECISION plan-2026-10-29T104646-27f045c5/D-030: starts sit a hair off the component means, each in its own direction.
-    # Do not start exactly on mu, shift every start along (1, ..., 1) or use 1e-3 sigma alone: a symmetric or rounded-away start stays on a saddle.
+    # DECISION plan-2026-10-29T104646-27f045c5/D-030: starts sit off the means by max(1e-3 sigma, 8 eps |mu|), each in its own direction.
+    # Do not start on mu, share one direction, drop the eps term or use a fixed fraction of |mu| (it outgrows sigma and loses a mode).
     points = mu_w
     if num_steps > 0:
         shape = ops.shape(mu_w)
         pattern = _mode_start_pattern(shape[1], shape[2], work)
-        magnitude = ops.maximum(
-            _MODE_START_OFFSET * sigma_w, _MODE_START_RELATIVE_OFFSET * ops.abs(mu_w)
-        )
+        rounding = _MODE_START_EPS_MULTIPLE * float(np.finfo(work).eps)
+        magnitude = ops.maximum(_MODE_START_OFFSET * sigma_w, rounding * ops.abs(mu_w))
         points = mu_w + magnitude * ops.expand_dims(pattern, 0)
     for _ in range(num_steps):
         log_joint = _component_log_density(points)
