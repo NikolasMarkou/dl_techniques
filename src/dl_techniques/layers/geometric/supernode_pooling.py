@@ -332,20 +332,15 @@ class SupernodePooling(keras.layers.Layer):
         diff = pos_expanded - super_expanded
         sq_distances = keras.ops.sum(keras.ops.square(diff), axis=-1)  # (num_points, num_supernodes)
 
-        # Find k nearest neighbors for each supernode
+        # A point is a neighbor of a supernode when its squared distance is no
+        # larger than that supernode's k-th smallest one. Ties at the k-th
+        # distance keep every tied point.
         k = keras.ops.minimum(self.k_neighbors, num_points)
-
-        # Get indices of k smallest distances for each supernode
-        _, top_k_indices = keras.ops.top_k(-sq_distances, k=k)  # (num_points, k) - using negative for smallest
-
-        # Create mask from top-k indices
-        mask = keras.ops.zeros_like(sq_distances, dtype="bool")
-
-        # This is a simplified approach - in practice, you'd use scatter operations
-        # For now, we'll use top-k based selection
-        threshold_distances = keras.ops.take_along_axis(-keras.ops.sort(-sq_distances, axis=0)[:k, :],
-                                                  keras.ops.array([k - 1]), axis=0)  # (1, num_supernodes)
-        mask = sq_distances <= threshold_distances
+        sorted_sq = keras.ops.sort(sq_distances, axis=0)  # ascending per supernode
+        threshold_distances = keras.ops.expand_dims(
+            keras.ops.take(sorted_sq, k - 1, axis=0), 0
+        )  # (1, num_supernodes)
+        mask = sq_distances <= threshold_distances  # (num_points, num_supernodes)
 
         return mask
 

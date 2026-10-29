@@ -198,7 +198,6 @@ class TestSupernodePooling:
         assert output.shape == (1, 5, hidden_dim)
         assert not np.any(np.isnan(output.numpy()))
 
-    @pytest.mark.xfail(reason="Known bug in _knn_neighbors: take_along_axis shape mismatch")
     def test_forward_pass_k_neighbors(self, hidden_dim, ndim):
         """Test forward pass with k_neighbors mode."""
         layer = SupernodePooling(hidden_dim=hidden_dim, ndim=ndim, k_neighbors=3)
@@ -325,7 +324,6 @@ class TestSupernodePooling:
             output = layer(inputs)
             assert output.shape == (1, n_super, hidden_dim)
 
-    @pytest.mark.xfail(reason="Known bug in _knn_neighbors: take_along_axis shape mismatch")
     def test_k_neighbors_mode_output_shape(self, hidden_dim, ndim):
         """Test k_neighbors mode produces correct output shape."""
         layer = SupernodePooling(hidden_dim=hidden_dim, ndim=ndim, k_neighbors=3)
@@ -334,6 +332,33 @@ class TestSupernodePooling:
         inputs = {"positions": positions, "supernode_indices": supernode_indices}
         output = layer(inputs)
         assert output.shape == (1, 3, hidden_dim)
+
+    def test_k_neighbors_picks_exactly_the_k_nearest_points(self):
+        """The mask keeps the k smallest squared distances per supernode."""
+        layer = SupernodePooling(hidden_dim=8, ndim=1, k_neighbors=3)
+        positions = tf.constant([[0.0], [1.0], [2.0], [3.0], [4.0], [5.0]])
+        supernodes = tf.constant([[2.0], [5.0]])
+        mask = layer._knn_neighbors(positions, supernodes).numpy()
+        # Distances from 2.0: 4,1,0,1,4,9 -> points 1, 2, 3.
+        # Distances from 5.0: 25,16,9,4,1,0 -> points 3, 4, 5.
+        np.testing.assert_array_equal(mask[:, 0], [0, 1, 1, 1, 0, 0])
+        np.testing.assert_array_equal(mask[:, 1], [0, 0, 0, 1, 1, 1])
+
+    def test_k_neighbors_with_fewer_supernodes_than_k(self, hidden_dim, ndim):
+        """k_neighbors may exceed the number of supernodes."""
+        layer = SupernodePooling(hidden_dim=hidden_dim, ndim=ndim, k_neighbors=3)
+        positions = tf.random.normal([50, ndim])
+        inputs = {"positions": positions, "supernode_indices": tf.constant([0, 10])}
+        output = layer(inputs)
+        assert output.shape == (1, 2, hidden_dim)
+        assert not np.any(np.isnan(output.numpy()))
+
+    def test_k_neighbors_larger_than_the_point_count_keeps_every_point(self):
+        layer = SupernodePooling(hidden_dim=8, ndim=2, k_neighbors=10)
+        positions = tf.random.normal([4, 2])
+        supernodes = positions[:2]
+        mask = layer._knn_neighbors(positions, supernodes).numpy()
+        assert mask.all()
 
     def test_relpos_has_rel_pos_embed(self, hidden_dim, ndim):
         """relpos mode should create rel_pos_embed layer."""
