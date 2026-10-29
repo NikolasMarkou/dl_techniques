@@ -27,6 +27,7 @@ from typing import Any, Dict, Optional, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.sequence_pooling.sequence_pooling import SequencePooling
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -109,6 +110,8 @@ class Sam3DotProductScoring(keras.layers.Layer):
                                               name="prompt_mlp_dropout")
             self.prompt_norm = layers.LayerNormalization(
                 epsilon=1e-5, name="prompt_mlp_norm")
+        # Stateless (no weights), so no weight path moves.
+        self.prompt_pool = SequencePooling(strategy="mean", name="prompt_pool")
         self.prompt_proj = layers.Dense(self.d_proj, name="prompt_proj")
         self.hs_proj = layers.Dense(self.d_proj, name="hs_proj")
 
@@ -155,39 +158,10 @@ class Sam3DotProductScoring(keras.layers.Layer):
             self.prompt_drop.build(hidden)
             self.prompt_fc2.build(hidden)
             self.prompt_norm.build(tuple(prompt_shape))
+        self.prompt_pool.build(tuple(prompt_shape))
         self.prompt_proj.build((prompt_shape[0], self.d_model))
         self.hs_proj.build(tuple(hs_shape))
         super().build(hs_shape)
-
-    # A static method so `Sam3EncoderQuerySelection`'s prompt-conditioned branch
-    # can share it without a second, drift-prone copy of the pooling logic.
-    @staticmethod
-    def masked_mean_pool(
-            prompt: keras.KerasTensor,
-            prompt_padding_mask: Optional[keras.KerasTensor],
-    ) -> keras.KerasTensor:
-        """Mean-pool the prompt over its sequence axis, ignoring padding.
-
-        :param prompt: Prompt features ``(batch, seq, d_model)``.
-        :type prompt: keras.KerasTensor
-        :param prompt_padding_mask: ``(batch, seq)``, ``True`` at PADDING
-            positions. ``None`` means every position is valid.
-        :type prompt_padding_mask: Optional[keras.KerasTensor]
-        :return: Pooled prompt ``(batch, d_model)``.
-        :rtype: keras.KerasTensor
-        """
-        if prompt_padding_mask is None:
-            return ops.mean(prompt, axis=1)
-        # DECISION plan-2026-08-04T044628-4c240b4c/D-104: mask polarity is
-        # padding-is-True; do not flip it to match the text tower's keep mask.
-        # Divisor is floored at one so an all-padding row does not divide by zero. See decisions.md.
-        valid = ops.cast(
-            ops.logical_not(ops.cast(prompt_padding_mask, "bool")), prompt.dtype
-        )
-        valid = ops.expand_dims(valid, axis=-1)
-        total = ops.sum(prompt * valid, axis=1)
-        count = ops.maximum(ops.sum(valid, axis=1), ops.cast(1.0, prompt.dtype))
-        return total / count
 
     def call(
             self, hs: keras.KerasTensor, prompt: keras.KerasTensor,
@@ -214,8 +188,14 @@ class Sam3DotProductScoring(keras.layers.Layer):
                 ops.relu(self.prompt_fc1(prompt)), training=training)
             prompt = self.prompt_norm(self.prompt_fc2(hidden) + prompt)
 
-        pooled = self.prompt_proj(self.masked_mean_pool(
-            prompt, prompt_padding_mask))
+        # DECISION plan-2026-08-04T044628-4c240b4c/D-104: mask polarity is
+        # padding-is-True; do not flip it to match the text tower's keep mask.
+        # SequencePooling reads a KEEP mask, so the inversion happens here, at
+        # the call site, and nowhere else. Its divisor is floored at one, so an
+        # all-padding row pools to zeros. See decisions.md.
+        keep = (None if prompt_padding_mask is None else ops.logical_not(
+            ops.cast(prompt_padding_mask, "bool")))
+        pooled = self.prompt_proj(self.prompt_pool(prompt, mask=keep))
         scores = ops.matmul(
             self.hs_proj(hs), ops.expand_dims(pooled, axis=-1)) * self.scale
 

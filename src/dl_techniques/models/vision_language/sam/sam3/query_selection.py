@@ -34,7 +34,7 @@ from typing import Any, Dict, Optional, Tuple
 # ---------------------------------------------------------------------
 
 from .decoder import Sam3TransformerDecoder
-from .model_misc import Sam3DotProductScoring
+from dl_techniques.layers.sequence_pooling.sequence_pooling import SequencePooling
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -145,7 +145,11 @@ class Sam3EncoderQuerySelection(keras.layers.Layer):
         # only when the flag is on, and never zero-initialize it.
         # Unconditional creation breaks byte-identity-when-off and 21 on-disk checkpoints; zero-init here (unlike box_head) would make the gate born degenerate. See decisions.md.
         self.prompt_film = None
+        self.prompt_pool = None
         if self.prompt_conditioned:
+            # Stateless (no weights), created with the FiLM it feeds.
+            self.prompt_pool = SequencePooling(
+                strategy="mean", name="prompt_pool")
             self.prompt_film = Sam3TransformerDecoder._make_mlp(
                 1, self.d_model, 2 * self.d_model, "prompt_film")
 
@@ -221,6 +225,7 @@ class Sam3EncoderQuerySelection(keras.layers.Layer):
         Sam3TransformerDecoder._build_mlp(self.objectness_head, input_shape)
         Sam3TransformerDecoder._build_mlp(self.box_head, input_shape)
         if self.prompt_film is not None:
+            self.prompt_pool.build((input_shape[0], None, self.d_model))
             Sam3TransformerDecoder._build_mlp(
                 self.prompt_film, (input_shape[0], self.d_model))
         super().build(input_shape)
@@ -246,8 +251,8 @@ class Sam3EncoderQuerySelection(keras.layers.Layer):
             layer still builds.
         :type prompt: Optional[keras.KerasTensor]
         :param prompt_padding_mask: ``(batch, seq)``, ``True`` at PADDING
-            positions -- the polarity :meth:`Sam3DotProductScoring.
-            masked_mean_pool` documents. ``None`` pools every position.
+            positions -- the polarity :meth:`Sam3DotProductScoring.call`
+            documents. ``None`` pools every position.
         :type prompt_padding_mask: Optional[keras.KerasTensor]
         :param training: Training-mode flag; accepted for uniformity, unused
             (this head holds no dropout and no normalization).
@@ -276,8 +281,12 @@ class Sam3EncoderQuerySelection(keras.layers.Layer):
             # DECISION plan-2026-08-07T065516-6add49a9/D-014: modulate memory
             # before both MLPs, never add a bias to the objectness logits.
             # A per-position-constant logit bias cannot change a top_k argsort, so the selection would stay prompt-blind. See decisions.md.
-            pooled = Sam3DotProductScoring.masked_mean_pool(
-                ops.cast(prompt, memory.dtype), prompt_padding_mask)
+            # SequencePooling reads a KEEP mask; this head's is padding-True
+            # (D-104), so it is inverted here.
+            keep = (None if prompt_padding_mask is None else ops.logical_not(
+                ops.cast(prompt_padding_mask, "bool")))
+            pooled = self.prompt_pool(
+                ops.cast(prompt, memory.dtype), mask=keep)
             film = Sam3TransformerDecoder._run_mlp(self.prompt_film, pooled)
             scale, shift = ops.split(film, 2, axis=-1)
             memory = (memory * (1.0 + ops.expand_dims(scale, axis=1))

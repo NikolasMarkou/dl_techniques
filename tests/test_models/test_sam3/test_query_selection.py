@@ -42,7 +42,7 @@ from keras import ops
 from typing import Any, Dict, Iterator, List
 
 from dl_techniques.models.vision_language.sam.sam3.decoder import Sam3TransformerDecoder
-from dl_techniques.models.vision_language.sam.sam3.model_misc import Sam3DotProductScoring
+from dl_techniques.layers.sequence_pooling.sequence_pooling import SequencePooling
 from dl_techniques.models.vision_language.sam.sam3.query_selection import (
     DEFAULT_ANCHOR_SIZE, Sam3EncoderQuerySelection)
 from dl_techniques.models.vision_language.sam.sam3.sam3_image import Sam3Image
@@ -960,7 +960,7 @@ class TestPromptConditionedFlag:
         assert _box_delta(sweep) == 0.0
 
     def test_the_pool_respects_the_padding_mask(self):
-        """It pools through `Sam3DotProductScoring.masked_mean_pool`, so a
+        """It pools through its `SequencePooling` `prompt_pool`, so a
         padded position must not reach the proposals. Driven by CHANGING the
         content of a masked-out position, which a mask-blind pool would see."""
         conditioned = _conditioned_head()
@@ -974,8 +974,13 @@ class TestPromptConditionedFlag:
                         training=False)
         b = conditioned(memory, prompt=polluted, prompt_padding_mask=mask,
                         training=False)
-        delta = float(np.max(np.abs(np.asarray(a["boxes"]).astype("float64")
-                                    - np.asarray(b["boxes"]).astype("float64"))))
+        # `objectness`, not only `boxes`: the default head keeps the box
+        # stack's last projection at zero, so `boxes` is the anchor grid for
+        # ANY prompt and cannot see the pool at all.
+        delta = max(float(np.max(np.abs(
+            np.asarray(a[key]).astype("float64")
+            - np.asarray(b[key]).astype("float64"))))
+            for key in ("boxes", "objectness"))
         assert delta == 0.0, (
             f"masked-out prompt positions changed the proposals by {delta!r}: "
             f"the pool is not honouring the padding mask")
@@ -1024,33 +1029,26 @@ class TestPromptConditionedFlag:
 # ---------------------------------------------------------------------
 
 
-class _ConstantPool:
-    """A stand-in for `Sam3DotProductScoring` whose pool ignores the prompt.
+def _constant_pool_call(self, inputs, mask=None, training=None):
+    """A `SequencePooling.call` that ignores the prompt entirely."""
+    del self, mask, training
+    return ops.mean(ops.zeros_like(inputs), axis=1) + 0.5
 
-    Patched over the NAME `query_selection.py` imported, never over
-    `Sam3DotProductScoring.masked_mean_pool` itself. That is not fastidiousness:
-    the real method is a `@staticmethod`, `getattr` on the class unwraps it to a
-    plain function, and `monkeypatch.undo` would put the plain function BACK --
-    silently re-binding it as an instance method and breaking
-    `Sam3DotProductScoring.call`'s own `self.masked_mean_pool(...)` for every
-    test that runs afterwards in the same session. This package has already
-    been bitten once by a test whose effect leaked into whatever collected
-    next (D-016).
+
+def _inject_constant_pool(monkeypatch, head) -> None:
+    """INJECTION 1: the pooled prompt becomes a constant, path intact.
+
+    Patched over `SequencePooling.call` for the test's duration, which
+    `monkeypatch` restores. When `head` is prompt-conditioned the injection is
+    first proven to sit on the layer the head actually pools through, so it
+    cannot be a no-op wearing a mutation's name; a flag-off head owns no pool,
+    which is the point of the inertness test that passes one.
     """
-
-    @staticmethod
-    def masked_mean_pool(prompt, prompt_padding_mask):
-        del prompt_padding_mask
-        return ops.mean(ops.zeros_like(prompt), axis=1) + 0.5
-
-
-def _inject_constant_pool(monkeypatch) -> None:
-    """INJECTION 1: the pooled prompt becomes a constant, path intact."""
-    import dl_techniques.models.vision_language.sam.sam3.query_selection as module
-    assert module.Sam3DotProductScoring is Sam3DotProductScoring, (
-        "the injection is patching a name the head does not actually pool "
-        "through, so it would be a no-op wearing a mutation's name")
-    monkeypatch.setattr(module, "Sam3DotProductScoring", _ConstantPool)
+    if head.prompt_conditioned:
+        assert type(head.prompt_pool) is SequencePooling, (
+            "the injection is patching a class the head does not actually "
+            "pool through, so it would be a no-op wearing a mutation's name")
+    monkeypatch.setattr(SequencePooling, "call", _constant_pool_call)
 
 
 class TestPromptLivenessIsRedProven:
@@ -1061,7 +1059,7 @@ class TestPromptLivenessIsRedProven:
     either alone leaves half of it unproven:
 
     - **The prompt's INFORMATION is killed, the code path stays alive.**
-      `masked_mean_pool` is replaced by a constant pool, so the FiLM
+      the prompt pool is replaced by a constant, so the FiLM
       projection still runs, still emits a scale and a shift, and still
       modulates `memory` -- with a value that is the same for every prompt.
     - **The MODULATION is killed, the prompt keeps flowing.** The FiLM
@@ -1095,7 +1093,7 @@ class TestPromptLivenessIsRedProven:
         """INJECTION 1 -- kill the prompt's information, keep the path."""
         conditioned = _conditioned_head()
         memory = _memory()
-        _inject_constant_pool(monkeypatch)
+        _inject_constant_pool(monkeypatch, conditioned)
         live, null = self._sweeps(conditioned, memory)
         self._assert_plausible(live)
         assert _moved_fraction(live) == 0.0, (
@@ -1108,7 +1106,7 @@ class TestPromptLivenessIsRedProven:
         """The same injection, on the default path: it must be inert there."""
         memory = _memory()
         before = _sweep_prompts(head, memory, [100, 101])
-        _inject_constant_pool(monkeypatch)
+        _inject_constant_pool(monkeypatch, head)
         after = _sweep_prompts(head, memory, [100, 101])
         for a, b in zip(before, after):
             for key in a:
@@ -1286,7 +1284,7 @@ def _shipped_inputs(seed: int = 7):
     Returns:
         `(memory, prompt, prompt_padding_mask)`, float32/float32/bool. The mask
         is all-False, i.e. every one of the 32 prompt positions is real -- the
-        polarity `masked_mean_pool` documents.
+        polarity `Sam3DotProductScoring.call` documents.
     """
     rng = np.random.default_rng(seed)
     memory = rng.normal(
