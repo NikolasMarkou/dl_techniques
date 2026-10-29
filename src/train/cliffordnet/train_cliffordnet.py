@@ -262,7 +262,10 @@ def train_model(args) -> None:
     model.summary(print_fn=logger.info)
 
     # ---- Optimiser & schedule ----------------------------------------
-    total_steps = args.epochs * steps_per_epoch
+    # --train-steps: the run is `epochs` virtual epochs of `eval_every_steps` optimizer
+    # steps over a repeating train stream, so the schedule spans exactly train_steps.
+    by_steps = args.train_steps is not None
+    total_steps = args.train_steps if by_steps else args.epochs * steps_per_epoch
     warmup_steps = args.warmup_epochs * steps_per_epoch
     decay_steps = max(1, total_steps - warmup_steps)
 
@@ -353,6 +356,7 @@ def train_model(args) -> None:
     save_config_json({
         "dataset": args.dataset, "variant": args.variant,
         "epochs": args.epochs, "batch_size": args.batch_size,
+        "train_steps": args.train_steps, "eval_every_steps": args.eval_every_steps,
         "learning_rate": args.learning_rate,
         "weight_decay": args.weight_decay,
         "stochastic_depth_rate": args.stochastic_depth_rate,
@@ -379,12 +383,15 @@ def train_model(args) -> None:
     logger.info(
         f"Training | dataset={args.dataset}, variant={args.variant}, "
         f"epochs={args.epochs}, batch={args.batch_size}, lr={args.learning_rate}"
+        + (f", train_steps={args.train_steps} (every {args.eval_every_steps})"
+           if by_steps else "")
     )
 
     # ---- Training ----------------------------------------------------
     history = model.fit(
-        train_ds,
+        train_ds.repeat() if by_steps else train_ds,
         epochs=args.epochs,
+        steps_per_epoch=args.eval_every_steps if by_steps else None,
         validation_data=val_ds,
         callbacks=callbacks,
         verbose=1,
@@ -474,7 +481,12 @@ def train_model(args) -> None:
         if file_based:
             f.write(f"Figures and analysis on the first {len(x_eval)} val images\n")
         f.write(f"Parameters: {model.count_params():,}\n\n")
-        f.write(f"Epochs: {trained_epochs}, Batch: {args.batch_size}\n")
+        if by_steps:
+            f.write(f"Steps: {trained_epochs * args.eval_every_steps} "
+                    f"({trained_epochs} x {args.eval_every_steps}), "
+                    f"Batch: {args.batch_size}\n")
+        else:
+            f.write(f"Epochs: {trained_epochs}, Batch: {args.batch_size}\n")
         f.write(f"LR: {args.learning_rate}, Weight decay: {args.weight_decay}\n")
         f.write(f"Stochastic depth: {args.stochastic_depth_rate}\n")
         f.write(f"Label smoothing: {args.label_smoothing}\n\n")
@@ -575,6 +587,16 @@ def main() -> None:
                              'every N epochs into <run>/epoch_analysis/ '
                              '(0 = off).')
 
+    # Step budget
+    parser.add_argument('--train-steps', type=int, default=None, dest='train_steps',
+                        help='Train for exactly this many optimizer steps instead of '
+                             '--epochs: virtual epochs of --eval-every-steps over a '
+                             'repeating train stream, the LR schedule spans the budget.')
+    parser.add_argument('--eval-every-steps', type=int, default=None,
+                        dest='eval_every_steps',
+                        help='Steps between validations with --train-steps '
+                             '(default 250; must divide --train-steps).')
+
     # Warmup
     parser.add_argument('--warmup-epochs', type=int, default=0, dest='warmup_epochs',
                         help='Linear warm-up epochs (paper v2: none).')
@@ -588,13 +610,27 @@ def main() -> None:
     parser.set_defaults(
         weight_decay=0.1,
         batch_size=128,
-        epochs=200,
+        epochs=None,
         patience=30,
     )
     parser.add_argument('--seed', type=int, default=42,
                         help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
 
     args = parser.parse_args()
+    if args.train_steps is None:
+        if args.eval_every_steps is not None:
+            parser.error("--eval-every-steps only applies with --train-steps")
+        args.epochs = 200 if args.epochs is None else args.epochs
+    else:
+        if args.epochs is not None:
+            parser.error("--train-steps and --epochs are mutually exclusive")
+        if args.train_steps <= 0:
+            parser.error(f"--train-steps must be positive, got {args.train_steps}")
+        args.eval_every_steps = 250 if args.eval_every_steps is None else args.eval_every_steps
+        if args.eval_every_steps <= 0 or args.train_steps % args.eval_every_steps:
+            parser.error(f"--eval-every-steps {args.eval_every_steps} must be positive "
+                         f"and divide --train-steps {args.train_steps}")
+        args.epochs = args.train_steps // args.eval_every_steps
     if not 0.0 <= args.label_smoothing < 1.0:
         parser.error(f"--label-smoothing must be in [0, 1), got {args.label_smoothing}")
     # A flag that does not apply to the chosen dataset is refused, never ignored.
