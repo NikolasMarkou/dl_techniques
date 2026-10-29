@@ -1,7 +1,4 @@
-"""The DiTXA transformer block, built by ``DiTXABlock``, and the three
-embedders that feed it: the shared ``TimestepEmbedding`` layer, the
-``get_2d_sincos_pos_embed`` helper here, and the shared ``ClassLabelEmbedding``
-layer.
+"""The DiTXA transformer block, built by ``DiTXABlock``.
 
 A plain DiT block conditions self-attention and an MLP from one vector,
 emitting ``6 * hidden_size`` modulation numbers. This block conditions four
@@ -17,11 +14,10 @@ GELU MLP, and ``modulate`` is imported from ``layers/transformers/sd3_adaln.py``
 The 12-way split stays here rather than becoming a sibling there; see
 ``decisions.md`` D-004.
 
-The timestep embedder and the positional table are numerically specified
-and differ from the closest house-layer substitute on several measured
-axes (see each function's own docstring); ``ClassLabelEmbedding`` is
-genuinely reusable and lives at
-``src/dl_techniques/layers/embedding/class_label_embedding.py`` instead.
+The embedders that feed the block are shared layers, not defined here: the
+timestep embedder is ``layers/embedding/timestep_embedding.py``, the fixed 2D
+sin-cos table is ``layers/embedding/sincos_pos_embed_2d.py``, and the class
+label embedder is ``layers/embedding/class_label_embedding.py``.
 
 References:
     - Ported from ``DiTBlockWithCrossAttention``, upstream ``dit.py``.
@@ -30,7 +26,6 @@ References:
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import keras
-import numpy as np
 
 from dl_techniques.layers.attention.multi_head_cross_attention import (
     MultiHeadCrossAttention,
@@ -413,146 +408,3 @@ class DiTXABlock(keras.layers.Layer):
             }
         )
         return config
-
-
-def get_1d_sincos_pos_embed_from_grid(
-    embed_dim: int, pos: np.ndarray
-) -> np.ndarray:
-    """Sinusoidally embed a flat array of positions, sin first.
-
-    Ported from MAE's ``util/pos_embed.py`` (via upstream ``dit.py``).
-
-    Two things here contradict :class:`~dl_techniques.layers.embedding.timestep_embedding.TimestepEmbedding` and are correct
-    anyway, because the two are independently specified upstream:
-
-    * the concat is ``[sin, cos]``, not ``[cos, sin]``;
-    * ``omega`` is built in float64 and the whole computation stays float64,
-      whereas the timestep ladder is float32.
-
-    :param embed_dim: Output width per position. Must be even.
-    :type embed_dim: int
-    :param pos: Positions of any shape; flattened to ``(M,)`` first.
-    :type pos: np.ndarray
-    :return: ``(M, embed_dim)`` float64 array.
-    :rtype: np.ndarray
-    :raises ValueError: If ``embed_dim`` is not even or not positive.
-    """
-    if embed_dim <= 0 or embed_dim % 2 != 0:
-        raise ValueError(
-            f"embed_dim must be a positive even integer, got {embed_dim}"
-        )
-    omega = np.arange(embed_dim // 2, dtype=np.float64)
-    omega /= embed_dim / 2.0
-    omega = 1.0 / 10000 ** omega  # (D/2,)
-
-    pos = np.asarray(pos).reshape(-1)  # (M,)
-    out = np.einsum("m,d->md", pos, omega)  # (M, D/2)
-
-    return np.concatenate([np.sin(out), np.cos(out)], axis=1)  # (M, D)
-
-
-def get_2d_sincos_pos_embed_from_grid(
-    embed_dim: int, grid: np.ndarray
-) -> np.ndarray:
-    """Concatenate two 1D embeddings, one per meshgrid output.
-
-    Ported from upstream ``dit.py``.
-
-    .. code-block:: text
-
-        grid (2, 1, G, G)   from np.meshgrid(grid_w, grid_h)  -- "w goes first"
-          |
-          +-- grid[0]  value at (row, col) == col   (the w / column position)
-          |      -> get_1d(embed_dim // 2)  -> first  half of the output
-          |
-          +-- grid[1]  value at (row, col) == row   (the h / row position)
-                 -> get_1d(embed_dim // 2)  -> second half of the output
-
-    Upstream names those halves ``emb_h`` and ``emb_w``, backwards relative
-    to what they encode: ``emb_h = get_1d(grid[0])`` actually encodes the
-    column. Only the order matters for a correct port, not those names: the
-    first ``embed_dim // 2`` columns encode the column index, the last
-    ``embed_dim // 2`` encode the row index. Swapping them preserves the
-    shape, the dtype, every norm and every per-row statistic on a square
-    grid, so only an elementwise comparison sees it.
-
-    :param embed_dim: Total output width. Must be even (each half is again
-        halved by the 1D helper, so a multiple of 4 is the practical constraint).
-    :type embed_dim: int
-    :param grid: ``(2, ...)`` array of positions.
-    :type grid: np.ndarray
-    :return: ``(H*W, embed_dim)`` float64 array.
-    :rtype: np.ndarray
-    :raises ValueError: If ``embed_dim`` is not even.
-    """
-    if embed_dim % 2 != 0:
-        raise ValueError(f"embed_dim must be even, got {embed_dim}")
-
-    emb_col = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[0])
-    emb_row = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[1])
-
-    return np.concatenate([emb_col, emb_row], axis=1)  # (H*W, D)
-
-
-def get_2d_sincos_pos_embed(
-    embed_dim: int,
-    grid_size: int,
-    cls_token: bool = False,
-    extra_tokens: int = 0,
-) -> np.ndarray:
-    """Build the fixed 2D sin-cos positional table for a square patch grid.
-
-    Ported from upstream ``dit.py``. Pure NumPy: no Keras op runs here, so
-    it is safe to call at ``build()`` time and feed to
-    ``add_weight(trainable=False, initializer=keras.initializers.Constant(...))``.
-
-    The returned array is a constant, but it must still become a
-    non-trainable weight: never a plain tensor attribute (does not
-    round-trip through ``.keras`` save/load), and never
-    ``add_weight(...)`` followed by ``.assign(...)`` inside ``build()``
-    (``StatelessScope`` discards the assign and the table stays all zeros
-    in every real model, with no shape symptom). The one correct form is a
-    ``Constant`` initializer passed to ``add_weight``.
-
-    :param embed_dim: Width of the embedding per grid position.
-    :type embed_dim: int
-    :param grid_size: Side length of the square grid; the table has
-        ``grid_size ** 2`` rows.
-    :type grid_size: int
-    :param cls_token: Whether to prepend ``extra_tokens`` zero rows.
-    :type cls_token: bool
-    :param extra_tokens: Number of zero rows prepended when ``cls_token`` is
-        true. Upstream prepends only when both are set; reproduced exactly.
-    :type extra_tokens: int
-    :return: ``(grid_size**2, embed_dim)``, or
-        ``(extra_tokens + grid_size**2, embed_dim)`` with a cls token. float64.
-    :rtype: np.ndarray
-    :raises ValueError: If ``grid_size`` is not positive or ``embed_dim`` is not
-        even.
-
-    Example:
-        >>> table = get_2d_sincos_pos_embed(embed_dim=8, grid_size=4)
-        >>> table.shape
-        (16, 8)
-    """
-    if grid_size <= 0:
-        raise ValueError(f"grid_size must be positive, got {grid_size}")
-
-    grid_h = np.arange(grid_size, dtype=np.float32)
-    grid_w = np.arange(grid_size, dtype=np.float32)
-    # "w goes first" (upstream's own annotation, NumPy's default indexing='xy'):
-    # grid[0] holds the column index, grid[1] the row index. Swapping to
-    # (grid_h, grid_w) is a no-op on a square grid, not a transposition -- the
-    # transposing mutations are indexing="ij" here, or swapping grid[0]/grid[1]
-    # in get_2d_sincos_pos_embed_from_grid, both invisible to shape/dtype/norm
-    # checks. Same fact, same measurement, in layers/embedding/sincos_pos_embed_2d.py.
-    grid = np.meshgrid(grid_w, grid_h)
-    grid = np.stack(grid, axis=0)
-
-    grid = grid.reshape([2, 1, grid_size, grid_size])
-    pos_embed = get_2d_sincos_pos_embed_from_grid(embed_dim, grid)
-    if cls_token and extra_tokens > 0:
-        pos_embed = np.concatenate(
-            [np.zeros([extra_tokens, embed_dim]), pos_embed], axis=0
-        )
-    return pos_embed

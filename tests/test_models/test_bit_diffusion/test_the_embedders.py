@@ -38,14 +38,12 @@ import pytest
 from dl_techniques.layers.embedding.scalar_sinusoidal_embedding import (
     ScalarSinusoidalEmbedding,
 )
+from dl_techniques.layers.embedding.sincos_pos_embed_2d import get_2d_sincos_pos_embed
 from dl_techniques.layers.embedding.timestep_embedding import TimestepEmbedding
-from dl_techniques.models.vision_language.bit_diffusion.blocks import (
-    get_1d_sincos_pos_embed_from_grid,
-    get_2d_sincos_pos_embed,
-    get_2d_sincos_pos_embed_from_grid,
-)
 from dl_techniques.models.vision_language.bit_diffusion.model import DiTXA
 from tests.layer_naming import PublicAutoName
+
+from ._ditxa_helpers import batch
 
 def _np(x):
     return keras.ops.convert_to_numpy(x)
@@ -213,89 +211,15 @@ class TestTwoDimensionalSinCosTable:
         assert got.shape == expected.shape == (16, 8)
         np.testing.assert_allclose(got, expected, rtol=0.0, atol=1e-15)
 
-    def test_a_swapped_half_order_is_a_different_table(self):
-        # Anti-vacuity for the arm above: prove the assertion it makes could
-        # fail, and that a SHAPE test could not. Both halves are 4 wide, the
-        # grid is square, so the swap is a row permutation -- same shape, same
-        # sorted contents, same Frobenius norm.
-        expected = _expected_table_embed8_grid4()
-        swapped = np.concatenate([expected[:, 4:], expected[:, :4]], axis=1)
-        assert swapped.shape == expected.shape
-        assert np.linalg.norm(swapped) == pytest.approx(
-            np.linalg.norm(expected), rel=1e-12
+    def test_ditxa_installs_the_shared_table_as_its_pos_embed(self):
+        model = DiTXA.from_variant("tiny")
+        model(batch(model, batch_size=2))
+        table = get_2d_sincos_pos_embed(model.hidden_size, model.grid_size)
+        assert model.pos_embed.trainable is False
+        np.testing.assert_array_equal(
+            _np(model.pos_embed).reshape(table.shape),
+            table.astype("float32"),
         )
-        np.testing.assert_allclose(
-            np.sort(swapped, axis=None), np.sort(expected, axis=None), atol=1e-15
-        )
-        assert float(np.max(np.abs(swapped - expected))) > 1.0
-
-    def test_the_first_half_moves_with_the_column_and_the_second_with_the_row(
-        self,
-    ):
-        # A second, independent reading of the same fact, stated as a
-        # difference rather than as absolute values.
-        table = get_2d_sincos_pos_embed(embed_dim=8, grid_size=4)
-        origin = table[0]       # (row 0, col 0)
-        same_row = table[1]     # (row 0, col 1) -- only the column moved
-        same_col = table[4]     # (row 1, col 0) -- only the row moved
-
-        np.testing.assert_allclose(same_row[4:], origin[4:], atol=1e-15)
-        assert float(np.max(np.abs(same_row[:4] - origin[:4]))) > 0.5
-
-        np.testing.assert_allclose(same_col[:4], origin[:4], atol=1e-15)
-        assert float(np.max(np.abs(same_col[4:] - origin[4:]))) > 0.5
-
-    def test_the_meshgrid_is_w_first(self):
-        # `np.meshgrid(grid_w, grid_h)` -> grid[0] is the COLUMN index. Read the
-        # consequence off the table rather than the source: at (row 0, col 1)
-        # the first half must encode 1 and the second half 0.
-        table = get_2d_sincos_pos_embed(embed_dim=8, grid_size=4)
-        w0, w1 = OMEGA_AT_HALF_4
-        np.testing.assert_allclose(
-            table[1],
-            [
-                math.sin(w0), math.sin(w1), math.cos(w0), math.cos(w1),
-                0.0, 0.0, 1.0, 1.0,
-            ],
-            rtol=0.0,
-            atol=1e-15,
-        )
-
-    def test_the_1d_helper_is_sin_first(self):
-        # Deliberately the OPPOSITE of the timestep embedder. Both orders are
-        # upstream; unifying them would break one of the two.
-        emb = get_1d_sincos_pos_embed_from_grid(4, np.zeros((3,)))
-        np.testing.assert_allclose(emb[:, :2], np.zeros((3, 2)), atol=0.0)
-        np.testing.assert_allclose(emb[:, 2:], np.ones((3, 2)), atol=0.0)
-
-    def test_shapes_and_the_cls_token_branch(self):
-        assert get_2d_sincos_pos_embed(16, 8).shape == (64, 16)
-        with_cls = get_2d_sincos_pos_embed(
-            8, 4, cls_token=True, extra_tokens=2
-        )
-        assert with_cls.shape == (18, 8)
-        np.testing.assert_allclose(with_cls[:2], np.zeros((2, 8)), atol=0.0)
-        np.testing.assert_allclose(
-            with_cls[2:], get_2d_sincos_pos_embed(8, 4), atol=0.0
-        )
-        # Upstream prepends only when BOTH flags are set.
-        assert get_2d_sincos_pos_embed(8, 4, cls_token=True).shape == (16, 8)
-        assert get_2d_sincos_pos_embed(
-            8, 4, cls_token=False, extra_tokens=2
-        ).shape == (16, 8)
-
-    @pytest.mark.parametrize(
-        "call",
-        [
-            lambda: get_2d_sincos_pos_embed(8, 0),
-            lambda: get_2d_sincos_pos_embed_from_grid(7, np.zeros((2, 4))),
-            lambda: get_1d_sincos_pos_embed_from_grid(3, np.zeros((4,))),
-            lambda: get_1d_sincos_pos_embed_from_grid(0, np.zeros((4,))),
-        ],
-    )
-    def test_invalid_arguments_raise(self, call):
-        with pytest.raises(ValueError):
-            call()
 
     def test_the_table_installs_as_a_non_trainable_constant_weight(self, tmp_path):
         # The documented install pattern, exercised end to end: Constant

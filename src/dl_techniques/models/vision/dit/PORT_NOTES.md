@@ -85,7 +85,7 @@ established by reading the candidate, not by name-matching.
 
 | Upstream component | New artifact | MUST-WRITE-NEW justification |
 |---|---|---|
-| `get_1d_sincos_pos_embed_from_grid` / `get_2d_sincos_pos_embed_from_grid` / `get_2d_sincos_pos_embed` | **NEW** `dl_techniques.layers.embedding.sincos_pos_embed_2d` (pure NumPy, unregistered) | The only bit-exact copy in the repo is module-private to `bit_diffusion/blocks.py:724-864`. A `models/` → `models/` import inverts the dependency direction and has no precedent here — D-001 |
+| `get_1d_sincos_pos_embed_from_grid` / `get_2d_sincos_pos_embed_from_grid` / `get_2d_sincos_pos_embed` | **NEW** `dl_techniques.layers.embedding.sincos_pos_embed_2d` (pure NumPy, unregistered) | The only bit-exact copy in the repo was module-private to `bit_diffusion/blocks.py` (since deleted; `DiTXA` imports this module). A `models/` → `models/` import inverts the dependency direction and has no precedent here — D-001 |
 | `TimestepEmbedder` | **NEW** `TimestepEmbedding` — `dl_techniques.layers.embedding.timestep_embedding`, registered and added to `EMBEDDING_REGISTRY` under the key `'timestep'` | The existing `ScalarSinusoidalEmbedding` diverges on **three** independent numerics (sin-first concat, `/(half-1)` denominator, an input rescale); `bit_diffusion` kept a model-private copy at the time (since removed: `DiTXA` now uses this class) — D-001 |
 | the beta schedules and every derived constant table | **NEW** `DDPMSchedule` + `get_named_beta_schedule` + `space_timesteps` — `dl_techniques.utils.ddpm_schedule` (frozen dataclass, pure NumPy) | **No DDPM schedule exists anywhere in the repo.** `bit_diffusion` is an SDE bridge; `sd3_mmdit` and `ideogram4` are flow-matching. Three in-plan call sites (loss, sampler, data pipeline) earn the shared home under the rule of three, and `losses/` cannot import `models/` — D-030 |
 | `LossType.MSE` + `ModelVarType.LEARNED_RANGE` training objective | **NEW** `DDPMHybridLoss(keras.losses.Loss)` — `dl_techniques.losses.ddpm_hybrid_loss` | No repo loss implements a DDPM epsilon MSE, and none implements a variational-bound term at all |
@@ -368,23 +368,17 @@ so a future Keras that fixes this reddens loudly instead of drifting silently.
 Relatedly, the sampling loops are **eager Python loops** — one model call per step, pinned by a
 call-count test (`TestTheLoopIsAnEagerPythonLoop`). The per-step methods themselves are traceable.
 
-### 4.15 The sin-cos trio and the timestep ladder now exist TWICE in the repo — **D-001**, accepted
+### 4.15 The sin-cos trio and the timestep ladder were promoted to `layers/embedding/` — **D-001**
 
 Both were promoted to `layers/embedding/` so this package does not import from a sibling *model*
-package. `bit_diffusion` was deliberately left untouched at the time: moving its registered
-timestep embedder would have changed the registration key and broken a package shipped the same day,
-and a cross-package `models/` → `models/` import inverts the dependency direction with no precedent
-in this repo. The timestep copy has since been removed (`DiTXA` builds its embedders from
-`TimestepEmbedding`); the sin-cos trio still exists twice.
+package (a `models/` → `models/` import inverts the dependency direction with no precedent in this
+repo). At promotion time `bit_diffusion` kept private copies of both, because moving its registered
+timestep embedder would have changed the registration key. Those copies have since been deleted:
+`DiTXA` builds its two timestep embedders from `TimestepEmbedding` and its positional table from
+`get_2d_sincos_pos_embed`, so each exists once in the repo and cannot drift.
 
-So there are two copies of the trio, and they can silently drift. The follow-up — migrate `bit_diffusion` onto
-the shared home once a checkpoint-key migration is worth doing — is recorded here and in D-001, and
-is **not scheduled**. The bounded mitigation:
-`tests/test_layers/test_embedding/test_the_sincos_grid_is_w_first.py::TestItAgreesWithTheBitDiffusionSibling`
-asserts the two copies still produce the same table, so a drift reddens.
-
-**A known documentation defect in the sibling, deliberately NOT edited.**
-`bit_diffusion/blocks.py:855-857` claims:
+**A defect that was in the deleted copy, kept here because the false claim is easy to re-derive.**
+The copy's comment said:
 
 > `# Passing (grid_h, grid_w) instead transposes the table with no shape change.`
 
@@ -394,9 +388,7 @@ at 31 passed, a false negative that would have credited an unproven guard. The t
 transpose the table are `indexing="ij"` (12 failed / 23 passed) and swapping `grid[0]`/`grid[1]`
 inside `get_2d_sincos_pos_embed_from_grid` (13 failed / 22 passed); those are what the shared module's
 guard is proven against, and the inertness of the swap is itself pinned by a test so nobody
-re-derives the false claim. The sibling's line is left uncorrected under D-001's "leave
-`bit_diffusion` untouched" rule and is recorded here as an upstream-sibling defect this port
-knowingly did not fix.
+re-derives the false claim.
 
 ### 4.16 The diagram requirement is a test, not a promise — **D-006**
 

@@ -30,6 +30,7 @@ import numpy as np
 
 from dl_techniques.layers.embedding.class_label_embedding import ClassLabelEmbedding
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
+from dl_techniques.layers.embedding.sincos_pos_embed_2d import get_2d_sincos_pos_embed
 from dl_techniques.layers.embedding.timestep_embedding import TimestepEmbedding
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.layers.transformers.sd3_adaln import modulate
@@ -41,7 +42,7 @@ from dl_techniques.utils.weight_transfer import (
     pretrained_path_or_raise,
 )
 
-from .blocks import DiTXABlock, get_2d_sincos_pos_embed
+from .blocks import DiTXABlock
 from .config import PROMPT_NUM_CLASSES
 
 #: Keys :meth:`DiTXA.call` requires of its input dictionary.

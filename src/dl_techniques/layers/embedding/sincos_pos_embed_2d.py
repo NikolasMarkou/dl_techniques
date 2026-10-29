@@ -66,16 +66,11 @@ Concat order, and why it disagrees with the timestep ladder:
     specified upstream (MAE vs GLIDE) and must not be unified.
 
 Relationship to ``bit_diffusion``:
-    An identical bit-exact copy of these three functions lives, module-private,
-    in
-    ``src/dl_techniques/models/vision_language/bit_diffusion/blocks.py:724-864``.
-    This module is the shared promotion of it (plan
-    ``plan-2026-09-02T170923-1285ed83`` D-001); ``bit_diffusion`` was left
-    untouched because moving its registered classes would change their
-    serialization keys. The duplication is deliberate and recorded -- if you
-    change the numerics here, the two copies have drifted and
-    ``tests/test_layers/test_embedding/test_the_sincos_grid_is_w_first.py``
-    (which cross-checks the sibling copy) will say so.
+    ``DiTXA`` (``src/dl_techniques/models/vision_language/bit_diffusion/model.py``)
+    builds its fixed positional table with :func:`get_2d_sincos_pos_embed` from
+    this module, so there is one copy of the arithmetic in the repo.
+    ``tests/test_models/test_bit_diffusion/test_the_embedders.py`` checks the
+    table against a hand-written formula.
 
 References:
     - Peebles & Xie, 2022. Scalable Diffusion Models with Transformers.
@@ -89,11 +84,6 @@ from typing import Any
 
 import numpy as np
 
-# DECISION plan-2026-09-02T170923-1285ed83/D-001
-# This module is a deliberate promotion, NOT a cleanup target. Do NOT delete it
-# in favour of importing from `bit_diffusion/blocks.py` (a models -> models
-# import inverts the dependency direction), and do NOT "de-duplicate" by MOVING
-# the sibling: that changes its registered keys. decisions.md D-001.
 __all__ = [
     "get_1d_sincos_pos_embed_from_grid",
     "get_2d_sincos_pos_embed",

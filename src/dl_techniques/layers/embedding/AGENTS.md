@@ -11,7 +11,7 @@ Does not live here:
 
 - Attention layers that consume the rotary output (`layers/attention/`).
 - Normalization layers (`layers/norms/`).
-- Model-private embedders. `models/vision_language/bit_diffusion/blocks.py` keeps its own copies of `get_1d_sincos_pos_embed_from_grid`, `get_2d_sincos_pos_embed_from_grid`, `get_2d_sincos_pos_embed`, left in place on purpose. One test ties the copies to this package (listed under Working here). `DiTXA` itself builds its two timestep embedders from `TimestepEmbedding`.
+- Model-private embedders. None for the timestep MLP or the 2D sin-cos table: `models/vision_language/bit_diffusion/` builds its timestep embedders from `TimestepEmbedding` and its positional table from `get_2d_sincos_pos_embed`.
 
 ## Architecture
 
@@ -222,7 +222,5 @@ Known consumers (directories with a real `import` line from this package, not do
 - Smoke check after a change to the factory: `PYTHONPATH=src .venv/bin/python -c "from dl_techniques.layers.embedding.factory import EMBEDDING_REGISTRY as R; print(len(R))"` prints 16.
 - Fixing numerics (pairing, ladder, concat order) in a layer with a published reference changes what checkpoints it can load. Check the reference and the existing docstring before editing, and add an elementwise test against an independent oracle, since shape and norm checks do not see these changes.
 - Stale text to know about: `__init__.py` docstring (says 23 classes, 20 not exported, seven direct-only, omits `StateIndicatorEmbedding`; the code has 24, 21 and eight), the `factory.py` module docstring optional-count column (shows 2 for `continuous_rope` and `continuous_sincos`; the registry has 1) and the `create_embedding_layer` docstring ("15 registered"). Treat the code as correct.
-- Do not delete `sincos_pos_embed_2d.py` in favor of the `bit_diffusion` copies: that would invert the layers/models dependency direction. The module docstring calls the copy "bit-exact"; the test supports a narrower statement:
-  - `test_the_sincos_grid_is_w_first.py::TestItAgreesWithTheBitDiffusionSibling` asserts `get_2d_sincos_pos_embed` equals the `bit_diffusion` function at exact equality for `(embed_dim, grid_size)` = (8, 4), (64, 3), (16, 1), (32, 7). The 1D helper and `get_2d_sincos_pos_embed_from_grid` are not compared directly, only through that call.
+- `bit_diffusion` used to carry bit-exact private copies of `TimestepEmbedding` and of the 2D sin-cos helpers; both were deleted and `DiTXA` imports from here. Do not re-introduce a model-local copy (a layers module cannot import `models/`, so the shared module is the only home). Where the pins now live:
   - `tests/test_models/test_bit_diffusion/test_the_embedders.py` compares `TimestepEmbedding` against `ScalarSinusoidalEmbedding` to pin the four differences between them, asserts `DiTXA` builds both timestep embedders from `TimestepEmbedding`, and checks the 2D table against a hand-written formula.
-  - A numeric change in the 2D copy alone reddens the first test.

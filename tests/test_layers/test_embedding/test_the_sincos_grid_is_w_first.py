@@ -34,9 +34,6 @@ from dl_techniques.layers.embedding.sincos_pos_embed_2d import (
     get_2d_sincos_pos_embed,
     get_2d_sincos_pos_embed_from_grid,
 )
-from dl_techniques.models.vision_language.bit_diffusion.blocks import (
-    get_2d_sincos_pos_embed as sibling_get_2d_sincos_pos_embed,
-)
 
 
 def _sincos_1d(embed_dim: int, pos: float) -> np.ndarray:
@@ -219,19 +216,6 @@ class TestTheOneDimensionalHelperIsSinFirst:
         assert (
             get_1d_sincos_pos_embed_from_grid(8, np.arange(4)).dtype
             == np.float64
-        )
-
-
-class TestItAgreesWithTheBitDiffusionSibling:
-    """The recorded duplication (D-001) is pinned elementwise, not by prose."""
-
-    @pytest.mark.parametrize(
-        "embed_dim,grid_size", [(8, 4), (64, 3), (16, 1), (32, 7)]
-    )
-    def test_the_tables_are_identical_at_atol_zero(self, embed_dim, grid_size):
-        np.testing.assert_array_equal(
-            get_2d_sincos_pos_embed(embed_dim, grid_size),
-            sibling_get_2d_sincos_pos_embed(embed_dim, grid_size),
         )
 
 
