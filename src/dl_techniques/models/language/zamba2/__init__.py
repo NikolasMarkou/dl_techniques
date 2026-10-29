@@ -18,7 +18,6 @@ and `README.md` in this package for the architecture writeup.
 
 from dl_techniques.layers.adapters.lora import LoRAAdapter
 from dl_techniques.models.language.zamba2.layers import (
-    Zamba2MambaBlock,
     Zamba2SharedAttentionBlock,
     Zamba2SharedMLPBlock,
 )
@@ -31,7 +30,6 @@ from dl_techniques.models.language.zamba2.model import (
 __all__ = [
     "LoRAAdapter",
     "MODEL_VARIANTS",
-    "Zamba2MambaBlock",
     "Zamba2Model",
     "Zamba2SharedAttentionBlock",
     "Zamba2SharedMLPBlock",

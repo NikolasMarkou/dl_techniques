@@ -17,14 +17,14 @@ per depth without multiplying its parameter count.
 
 Zamba2's central idea is **parameter sharing across depth**, applied selectively: the SSM
 (Mamba2) mixer blocks are *not* shared — every depth position gets its own, independently
-weighted `Zamba2MambaBlock` (`decisions.md` D-005) — but a handful of attention+MLP "mem-blocks"
+weighted `Mamba2ResidualBlock` (`decisions.md` D-005) — but a handful of attention+MLP "mem-blocks"
 *are* shared, invoked at multiple depths with identical base weights. To let a shared block
 specialize per depth anyway, each invocation ("occurrence") of the shared MLP block's
 up-projection gets its own low-rank LoRA delta, selected by a monotonically increasing global
 occurrence counter that is independent of which physical mem-block slot is invoked.
 
 This package reuses `dl_techniques.layers.ssm.mamba2.Mamba2ResidualBlock`
-directly for the SSM mixer (wrapped by `Zamba2MambaBlock`, a thin kwarg-translation adapter), and
+directly for the SSM mixer (no Zamba2-specific wrapper), and
 the repo's existing `RMSNorm`, `RotaryPositionEmbedding` and `'multi_head'` attention factory
 entry for the shared attention block. The only genuinely new primitive is `LoRAAdapter`
 (`decisions.md` D-001) — no additive, frozen-base low-rank adapter existed anywhere in the repo
@@ -46,7 +46,7 @@ hidden_state = original_embedding                    │
        ▼  for token in layer_mapping:                │
   ┌────┴─────────────────────────────────┐           │
   │ 'm': hidden_state =                  │           │
-  │   Zamba2MambaBlock_i(hidden_state)   │  (fresh instance per 'm')
+  │   Mamba2ResidualBlock_i(hidden_state)│  (fresh instance per 'm')
   │ 'g': hidden_state =                  │           │
   │   Zamba2SharedAttentionBlock_{i%N}(  │◄──────────┘
   │     hidden_state, original_embedding)│  (one of N=num_mem_blocks
@@ -63,12 +63,14 @@ logits = hidden_state @ embedding.weights[0]^T   (tied LM head)
 [B, S, vocab_size]
 ```
 
-### 2.1 `Zamba2MambaBlock` (`'m'` positions)
+### 2.1 `Mamba2ResidualBlock` (`'m'` positions)
 
-A thin adapter around `Mamba2ResidualBlock`, translating Zamba2's constructor vocabulary
-(`d_model`, `d_state`, `d_conv`, `expand`, `headdim`) onto the shared primitive's own kwargs, plus
-pass-through for `d_ssm`, `ngroups`, `norm_epsilon`, `rmsnorm`, `norm_before_gate`, the `dt_*`
-initialization knobs, and bias flags. Every `'m'` position builds its own instance — never shared.
+Used directly from `dl_techniques.layers.ssm.mamba2`. The block returns
+`(mamba_output, new_residual)` and leaves the residual open; `Zamba2Model.call` passes
+`residual=None` and adds the two itself, because the mem-blocks consume a closed `hidden_state`.
+`Zamba2Model` resolves `d_ssm=None` to `hidden_size * expand` before building (the block has no
+default for it) and forwards the remaining knobs one-to-one. Every `'m'` position builds its own
+instance, never shared.
 
 ### 2.2 `Zamba2SharedAttentionBlock` (half of every `'g'` position)
 

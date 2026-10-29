@@ -1,11 +1,12 @@
 """Zamba2 decoder-stack assembly: the full causal language model.
 
-Composes the four building blocks in ``layers.py`` -- :class:`LoRAAdapter`
-(wrapped inside :class:`Zamba2SharedMLPBlock`), :class:`Zamba2SharedAttentionBlock`,
-:class:`Zamba2SharedMLPBlock`, and :class:`Zamba2MambaBlock` -- into
+Composes the building blocks in ``layers.py`` -- :class:`LoRAAdapter`
+(wrapped inside :class:`Zamba2SharedMLPBlock`), :class:`Zamba2SharedAttentionBlock`
+and :class:`Zamba2SharedMLPBlock` -- with the existing
+:class:`~dl_techniques.layers.ssm.mamba2.Mamba2ResidualBlock` into
 :class:`Zamba2Model`, a ``keras.Model`` causal LM. The decoder walks a
 ``layer_mapping`` list of ``'m'``/``'g'`` tokens: every ``'m'`` position gets a
-freshly-built, independently-weighted :class:`Zamba2MambaBlock`; every
+freshly-built, independently-weighted :class:`Mamba2ResidualBlock`; every
 ``'g'`` position invokes one of ``num_mem_blocks`` physical
 attention+MLP mem-block pairs, round-robin, with a monotonically increasing
 global occurrence index that selects the MLP block's per-occurrence LoRA
@@ -168,8 +169,8 @@ from dl_techniques.layers.heads.nlp import (
     validate_task_head_knobs,
 )
 from dl_techniques.layers.norms.rms_norm import RMSNorm
+from dl_techniques.layers.ssm.mamba2 import Mamba2ResidualBlock
 from dl_techniques.models.language.zamba2.layers import (
-    Zamba2MambaBlock,
     Zamba2SharedAttentionBlock,
     Zamba2SharedMLPBlock,
 )
@@ -184,7 +185,7 @@ class Zamba2Model(RecordedBuildShapeMixin, keras.Model):
 
     Embeds token ids once, walks ``layer_mapping`` (a list of ``'m'``/``'g'``
     tokens, one per depth position) to route through a per-depth
-    :class:`Zamba2MambaBlock` at every ``'m'`` position or one of
+    :class:`Mamba2ResidualBlock` at every ``'m'`` position or one of
     ``num_mem_blocks`` shared attention+MLP mem-block pairs at every ``'g'``
     position (round-robin, each carrying its own LoRA delta via a global
     occurrence counter), applies a final :class:`RMSNorm`, and projects to
@@ -209,7 +210,7 @@ class Zamba2Model(RecordedBuildShapeMixin, keras.Model):
                ▼  for token in layer_mapping:                │
           ┌────┴─────────────────────────────────┐           │
           │ 'm': hidden_state =                  │           │
-          │   Zamba2MambaBlock_i(hidden_state)   │  (fresh instance per 'm')
+          │   Mamba2ResidualBlock_i(hidden_state) │  (fresh instance per 'm')
           │ 'g': hidden_state =                  │           │
           │   Zamba2SharedAttentionBlock_{i%N}(  │◄──────────┘
           │     hidden_state, original_embedding)│  (one of N=num_mem_blocks
@@ -237,7 +238,7 @@ class Zamba2Model(RecordedBuildShapeMixin, keras.Model):
         every sub-block). Must be positive.
     :type hidden_size: int
     :param layer_mapping: Per-depth-position token list, each entry either
-        ``'m'`` (a fresh :class:`Zamba2MambaBlock`) or ``'g'`` (one of the
+        ``'m'`` (a fresh :class:`Mamba2ResidualBlock`) or ``'g'`` (one of the
         ``num_mem_blocks`` shared mem-block pairs, round-robin). Must be
         non-empty; every entry must be ``'m'`` or ``'g'``.
     :type layer_mapping: Sequence[str]
@@ -286,46 +287,46 @@ class Zamba2Model(RecordedBuildShapeMixin, keras.Model):
         owned :class:`LoRAAdapter`. Defaults to 16.0.
     :type lora_alpha: float
     :param d_state: SSM latent-state width, forwarded to every
-        :class:`Zamba2MambaBlock`. Defaults to 128.
+        :class:`Mamba2ResidualBlock`. Defaults to 128.
     :type d_state: int
     :param d_conv: Causal-conv kernel size, forwarded to every
-        :class:`Zamba2MambaBlock`. Defaults to 4.
+        :class:`Mamba2ResidualBlock`. Defaults to 4.
     :type d_conv: int
     :param expand: SSM internal expansion factor, forwarded to every
-        :class:`Zamba2MambaBlock`. Defaults to 2.
+        :class:`Mamba2ResidualBlock`. Defaults to 2.
     :type expand: int
     :param headdim: Per-SSM-head width, forwarded to every
-        :class:`Zamba2MambaBlock`. Defaults to 64.
+        :class:`Mamba2ResidualBlock`. Defaults to 64.
     :type headdim: int
     :param d_ssm: Number of dims the SSM scan runs on; forwarded to every
-        :class:`Zamba2MambaBlock`. ``None`` resolves per-instance to
+        :class:`Mamba2ResidualBlock`. ``None`` resolves per-instance to
         ``hidden_size * expand``. Defaults to None.
     :type d_ssm: Optional[int]
-    :param ngroups: Forwarded to every :class:`Zamba2MambaBlock`. Defaults
+    :param ngroups: Forwarded to every :class:`Mamba2ResidualBlock`. Defaults
         to 1.
     :type ngroups: int
-    :param mamba_norm_epsilon: Forwarded to every :class:`Zamba2MambaBlock`
+    :param mamba_norm_epsilon: Forwarded to every :class:`Mamba2ResidualBlock`
         as its own internal pre-norm epsilon. Defaults to 1e-5.
     :type mamba_norm_epsilon: float
-    :param mamba_rmsnorm: Forwarded to every :class:`Zamba2MambaBlock` as
+    :param mamba_rmsnorm: Forwarded to every :class:`Mamba2ResidualBlock` as
         ``rmsnorm``. Defaults to True.
     :type mamba_rmsnorm: bool
-    :param norm_before_gate: Forwarded to every :class:`Zamba2MambaBlock`.
+    :param norm_before_gate: Forwarded to every :class:`Mamba2ResidualBlock`.
         Defaults to False.
     :type norm_before_gate: bool
-    :param dt_min: Forwarded to every :class:`Zamba2MambaBlock`. Defaults to
+    :param dt_min: Forwarded to every :class:`Mamba2ResidualBlock`. Defaults to
         0.001.
     :type dt_min: float
-    :param dt_max: Forwarded to every :class:`Zamba2MambaBlock`. Defaults to
+    :param dt_max: Forwarded to every :class:`Mamba2ResidualBlock`. Defaults to
         0.1.
     :type dt_max: float
-    :param dt_init_floor: Forwarded to every :class:`Zamba2MambaBlock`.
+    :param dt_init_floor: Forwarded to every :class:`Mamba2ResidualBlock`.
         Defaults to 1e-4.
     :type dt_init_floor: float
-    :param mamba_bias: Forwarded to every :class:`Zamba2MambaBlock` as
+    :param mamba_bias: Forwarded to every :class:`Mamba2ResidualBlock` as
         ``bias``. Defaults to False.
     :type mamba_bias: bool
-    :param conv_bias: Forwarded to every :class:`Zamba2MambaBlock`. Defaults
+    :param conv_bias: Forwarded to every :class:`Mamba2ResidualBlock`. Defaults
         to True.
     :type conv_bias: bool
     :param use_bias: Whether the shared mem-blocks' internal ``Dense``
@@ -374,9 +375,9 @@ class Zamba2Model(RecordedBuildShapeMixin, keras.Model):
     :ivar embedding: The token embedding table; its single weight is also
         the tied LM head's projection matrix.
     :vartype embedding: keras.layers.Embedding
-    :ivar mamba_blocks: One freshly-built :class:`Zamba2MambaBlock` per
+    :ivar mamba_blocks: One freshly-built :class:`Mamba2ResidualBlock` per
         ``'m'`` entry in ``layer_mapping``, in depth order.
-    :vartype mamba_blocks: List[Zamba2MambaBlock]
+    :vartype mamba_blocks: List[Mamba2ResidualBlock]
     :ivar mem_attention_blocks: ``num_mem_blocks`` physical
         :class:`Zamba2SharedAttentionBlock` instances, reused round-robin
         across every ``'g'`` position.
@@ -593,7 +594,7 @@ class Zamba2Model(RecordedBuildShapeMixin, keras.Model):
             name="embedding",
         )
 
-        self.mamba_blocks: List[Zamba2MambaBlock] = []
+        self.mamba_blocks: List[Mamba2ResidualBlock] = []
         self.mem_attention_blocks: List[Zamba2SharedAttentionBlock] = []
         self.mem_mlp_blocks: List[Zamba2SharedMLPBlock] = []
 
@@ -629,11 +630,11 @@ class Zamba2Model(RecordedBuildShapeMixin, keras.Model):
             )
 
         # DECISION plan-2026-09-12T075714-035fd488/D-005: every 'm' position
-        # gets its OWN Zamba2MambaBlock instance -- never shared -- while
+        # gets its OWN Mamba2ResidualBlock instance -- never shared -- while
         # 'g' positions route to one of the `num_mem_blocks` shared pairs
         # built above, round-robin. Do not route 'm' positions through the
         # mem-block lists, and do not give two 'm' positions the same
-        # Zamba2MambaBlock instance. See decisions.md D-005.
+        # Mamba2ResidualBlock instance. See decisions.md D-005.
         #
         # `_position_info` is the per-depth dispatch table `call()` walks:
         # each entry is (kind, ref_idx, occurrence_idx) where `ref_idx`
@@ -645,17 +646,21 @@ class Zamba2Model(RecordedBuildShapeMixin, keras.Model):
         # through the physical blocks, e.g. ABAB for num_mem_blocks=2).
         self._position_info: List[Tuple[str, int, Optional[int]]] = []
         occurrence_counter = 0
+        # `Mamba2ResidualBlock` has no default for `d_ssm`; `Mamba2Layer`'s is d_model * expand.
+        mamba_d_ssm = (
+            self.hidden_size * self.expand if self.d_ssm is None else self.d_ssm
+        )
         for token in self.layer_mapping:
             if token == "m":
                 ref_idx = len(self.mamba_blocks)
                 self.mamba_blocks.append(
-                    Zamba2MambaBlock(
+                    Mamba2ResidualBlock(
                         d_model=self.hidden_size,
                         d_state=self.d_state,
                         d_conv=self.d_conv,
                         expand=self.expand,
                         headdim=self.headdim,
-                        d_ssm=self.d_ssm,
+                        d_ssm=mamba_d_ssm,
                         ngroups=self.ngroups,
                         norm_epsilon=self.mamba_norm_epsilon,
                         rmsnorm=self.mamba_rmsnorm,
@@ -782,9 +787,12 @@ class Zamba2Model(RecordedBuildShapeMixin, keras.Model):
 
         for kind, ref_idx, occurrence_idx in self._position_info:
             if kind == "m":
-                hidden_states = self.mamba_blocks[ref_idx](
-                    hidden_states, training=training
+                # The block leaves the residual open; the mem-blocks consume a
+                # closed hidden state, so close it here.
+                mamba_output, residual = self.mamba_blocks[ref_idx](
+                    hidden_states, residual=None, training=training
                 )
+                hidden_states = mamba_output + residual
             else:
                 hidden_states = self.mem_attention_blocks[ref_idx](
                     hidden_states, original_embedding, training=training
