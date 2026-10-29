@@ -1,5 +1,5 @@
 import keras
-from typing import Optional, Union, Tuple, Dict, Any, Callable, List
+from typing import Optional, Union, Tuple, Dict, Any, List
 
 # ---------------------------------------------------------------------
 # local imports
@@ -8,6 +8,7 @@ from typing import Optional, Union, Tuple, Dict, Any, Callable, List
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.masking import MaskFactory
 from dl_techniques.layers.transformers import TransformerLayer
+from dl_techniques.layers.heads.vision.classification import ClassificationHead
 from dl_techniques.models.vision.fastvit.components import REFERENCE_NORM_EPSILON
 from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -31,160 +32,14 @@ _BACKBONE_ALIASES: Dict[str, str] = {
 
 
 @register_dl_technique("dl_techniques.models.mobile_clip.components")
-class ImageProjectionHead(keras.layers.Layer):
-    """
-    Projects image feature maps into a fixed-size embedding.
-
-    This layer takes 4D feature maps from a convolutional backbone, applies
-    global average pooling to summarize spatial information, and then projects
-    the result into a final embedding vector using a Dense layer. It includes
-    optional dropout and activation for regularization and non-linearity.
-
-    **Intent**: To serve as the final stage of an image encoder, creating a
-    fixed-size representation of an image suitable for contrastive learning
-    or other downstream tasks.
-
-    **Architecture**:
-    ```
-    Input(shape=[B, H, W, C])
-           ↓
-    GlobalAveragePooling2D()
-           ↓
-    Output(shape=[B, C])
-           ↓
-    Dropout(rate=dropout_rate)
-           ↓
-    Dense(projection_dim)
-           ↓
-    Activation(·) (if provided)
-           ↓
-    Output(shape=[B, projection_dim])
-    ```
-
-    Args:
-        projection_dim: Integer, dimensionality of the output embedding space.
-            Must be positive.
-        dropout_rate: Float between 0 and 1. Fraction of the pooled units to
-            drop. Defaults to 0.0.
-        activation: Optional activation function for the final output. Can be
-            a string name or a callable. Defaults to None (linear activation).
-        kernel_initializer: Initializer for the projection layer's kernel.
-            Defaults to 'glorot_uniform'.
-        bias_initializer: Initializer for the projection layer's bias.
-            Defaults to 'zeros'.
-        **kwargs: Additional arguments for the Layer base class.
-
-    Input shape:
-        4D tensor with shape `(batch_size, height, width, channels)`.
-
-    Output shape:
-        2D tensor with shape `(batch_size, projection_dim)`.
-
-    Attributes:
-        global_pool: GlobalAveragePooling2D layer.
-        dropout: Dropout layer for regularization.
-        projection: Dense layer for the final projection.
-    """
-
-    def __init__(
-        self,
-        projection_dim: int,
-        dropout_rate: float = 0.0,
-        activation: Optional[Union[str, Callable]] = None,
-        kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
-        bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
-        **kwargs: Any
-    ) -> None:
-        super().__init__(**kwargs)
-
-        # Validate inputs
-        if projection_dim <= 0:
-            raise ValueError(
-                f"projection_dim must be positive, got {projection_dim}"
-            )
-        if not (0.0 <= dropout_rate <= 1.0):
-            raise ValueError(
-                f"dropout_rate must be between 0 and 1, got {dropout_rate}"
-            )
-
-        # Store ALL configuration
-        self.projection_dim = projection_dim
-        self.dropout_rate = dropout_rate
-        self.activation = keras.activations.get(activation)
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.bias_initializer = keras.initializers.get(bias_initializer)
-
-        # CREATE all sub-layers in __init__ (they are unbuilt)
-        self.global_pool = keras.layers.GlobalAveragePooling2D(name='global_pool')
-        self.dropout = keras.layers.Dropout(self.dropout_rate, name='dropout')
-        self.projection = keras.layers.Dense(
-            units=self.projection_dim,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            activation=None,  # Activation is applied manually in call
-            name='projection'
-        )
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Build the layer and all its sub-layers.
-
-        CRITICAL: Explicitly build each sub-layer for robust serialization.
-        """
-        # Build sub-layers in computational order
-        self.global_pool.build(input_shape)
-
-        # Compute intermediate shapes to build subsequent layers
-        pooled_shape = self.global_pool.compute_output_shape(input_shape)
-        self.dropout.build(pooled_shape)
-        self.projection.build(pooled_shape)
-
-        # Always call parent build at the end
-        super().build(input_shape)
-
-    def call(
-        self,
-        inputs: keras.KerasTensor,
-        training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """Forward pass through sub-layers."""
-        x = self.global_pool(inputs)
-        x = self.dropout(x, training=training)
-        x = self.projection(x)
-
-        if self.activation is not None:
-            x = self.activation(x)
-        return x
-
-    def compute_output_shape(
-        self,
-        input_shape: Tuple[Optional[int], ...]
-    ) -> Tuple[Optional[int], int]:
-        """Compute the output shape."""
-        return input_shape[0], self.projection_dim
-
-    def get_config(self) -> Dict[str, Any]:
-        """Return configuration for serialization."""
-        config = super().get_config()
-        config.update({
-            'projection_dim': self.projection_dim,
-            'dropout_rate': self.dropout_rate,
-            'activation': keras.activations.serialize(self.activation),
-            'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
-            'bias_initializer': keras.initializers.serialize(self.bias_initializer),
-        })
-        return config
-
-# ---------------------------------------------------------------------
-
-@register_dl_technique("dl_techniques.models.mobile_clip.components")
 class MobileClipImageEncoder(keras.Model):
     """
     MobileClip Image Encoder combining a backbone and a projection head.
 
     This model encapsulates the image processing pipeline for a CLIP-like
     model, using a pre-trained convolutional network (the backbone) to
-    extract features, and an `ImageProjectionHead` to map these features
+    extract features, and a `ClassificationHead` (global average pool,
+    dropout, linear) to map these features
     into a final embedding space.
 
     **Intent**: To provide a complete, serializable image encoder that can be
@@ -199,7 +54,7 @@ class MobileClipImageEncoder(keras.Model):
            ↓
     Feature Maps(shape=[B, H, W, C])
            ↓
-    ImageProjectionHead(projection_dim)
+    ClassificationHead(num_classes=projection_dim, block_dims=())
            ↓
     Output(shape=[B, projection_dim])
     ```
@@ -227,7 +82,8 @@ class MobileClipImageEncoder(keras.Model):
 
     Attributes:
         backbone: The instantiated Keras application model.
-        projection_head: The `ImageProjectionHead` layer.
+        projection_head: The `ClassificationHead` layer; its `classifier` Dense
+            is the projection, and `call` returns its `'logits'`.
     """
 
     def __init__(
@@ -252,9 +108,14 @@ class MobileClipImageEncoder(keras.Model):
 
         # CREATE all sub-layers in __init__
         self.backbone = self._create_backbone()
-        self.projection_head = ImageProjectionHead(
-            projection_dim=self.projection_dim,
-            dropout_rate=self.projection_dropout_rate,
+        self.projection_head = ClassificationHead(
+            num_classes=self.projection_dim,
+            use_global_pooling=True,
+            pooling_type='avg',
+            use_attention=False,
+            block_dims=(),
+            normalization_type=None,
+            classifier_dropout_rate=self.projection_dropout_rate,
             name='projection_head'
         )
 
@@ -307,7 +168,7 @@ class MobileClipImageEncoder(keras.Model):
     ) -> keras.KerasTensor:
         """Forward pass through the backbone and projection head."""
         features = self.backbone(inputs, training=training)
-        return self.projection_head(features, training=training)
+        return self.projection_head(features, training=training)['logits']
 
     def get_config(self) -> Dict[str, Any]:
         """Return model configuration for serialization."""

@@ -91,9 +91,9 @@ Both towers return **raw, un-normalized** features from their own `call`. Normal
 
 ### 4.2 `MobileClipImageEncoder` — v1's image tower
 
-Deliberately non-faithful: a `keras.applications` backbone plus an `ImageProjectionHead` (global average pool + `Dense` into `embed_dim`).
+Deliberately non-faithful: a `keras.applications` backbone plus a `ClassificationHead` (`layers/heads/vision/classification.py`: global average pool, optional dropout, linear `classifier` `Dense` into `embed_dim`, `block_dims=()`; the encoder returns its `'logits'`).
 
-The official backbones have no equivalent in `keras.applications` — there is no MCi port and no ViT — and since `ImageProjectionHead` opens with `GlobalAveragePooling2D`, the backbone must emit a 4-D `[B, H, W, C]` map, which independently rules out a token-sequence ViT. `components._BACKBONE_ALIASES` therefore resolves:
+The official backbones have no equivalent in `keras.applications` — there is no MCi port and no ViT — and since the head opens with `GlobalAveragePooling2D`, the backbone must emit a 4-D `[B, H, W, C]` map, which independently rules out a token-sequence ViT. `components._BACKBONE_ALIASES` therefore resolves:
 
 | Config name | Actually built |
 |:---|:---|
@@ -168,7 +168,6 @@ print(sorted(v1({'image': ..., 'text': ...}, training=False)))
 | **`MobileClipTextEncoder`** | `...mobile_clip.components` | The text encoder — used by **both** models. |
 | **`FastVitImageEncoder`** | `...models.vision.fastvit` | v2's faithful FastViT MCi image tower. |
 | **`MobileClipImageEncoder`** | `...mobile_clip.components` | v1's `keras.applications` backbone + projection head. |
-| **`ImageProjectionHead`** | `...mobile_clip.components` | v1's pooling and projection layer. |
 
 The four model-level names are re-exported from the package. **`MODEL_VARIANTS` is deliberately not** — each model owns its own table as a class attribute and their key sets are disjoint. Reach them explicitly: `MobileClipModel.MODEL_VARIANTS`, `MobileClipV2Model.MODEL_VARIANTS`.
 
@@ -448,7 +447,7 @@ Use **v2** for anything that should correspond to the published architecture, or
 | Text tower | `MobileClipTextEncoder` | the same class, shared |
 | Faithful? | **No** (substitute image tower) | Yes, modulo X-1..X-5 |
 | Variant keys | `b`, `s0`, `s1`, `s2` | `mobileclip2_s0/s2/s3/s4`, `mobileclip_s3/s4` |
-| Image projection | a separate `ImageProjectionHead` | the tower's own terminal `Dense` |
+| Image projection | a separate `ClassificationHead` (`projection_head`) | the tower's own terminal `Dense` |
 | `call` output | features + scale; `None` for a missing modality | features + both logits matrices; absent keys omitted |
 | Pretrained weights | none; `pretrained=True` raises | none; `pretrained=True` raises |
 

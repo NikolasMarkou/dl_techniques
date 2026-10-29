@@ -8,165 +8,9 @@ from typing import Any, Dict
 
 
 from dl_techniques.models.vision_language.mobile_clip.components import (
-    ImageProjectionHead,
     MobileClipImageEncoder,
     MobileClipTextEncoder
 )
-
-from ..knob_sensitivity_oracle import assert_value_knob_changes_output
-
-class TestImageProjectionHead:
-    """Comprehensive test suite for ImageProjectionHead layer."""
-
-    @pytest.fixture
-    def layer_config(self) -> Dict[str, Any]:
-        """Standard configuration for testing."""
-        return {
-            'projection_dim': 512,
-            'dropout_rate': 0.1,
-            'activation': 'relu'
-        }
-
-    @pytest.fixture
-    def sample_input(self) -> keras.KerasTensor:
-        """Sample input for testing - 4D feature maps."""
-        return keras.random.normal(shape=(4, 7, 7, 2048))
-
-    def test_initialization(self, layer_config):
-        """Test layer initialization."""
-        layer = ImageProjectionHead(**layer_config)
-
-        assert hasattr(layer, 'projection_dim')
-        assert hasattr(layer, 'dropout_rate')
-        assert hasattr(layer, 'activation')
-        assert not layer.built
-        assert layer.global_pool is not None  # Sub-layers created
-        assert layer.dropout is not None
-        assert layer.projection is not None
-
-    def test_forward_pass(self, layer_config, sample_input):
-        """Test forward pass and building."""
-        layer = ImageProjectionHead(**layer_config)
-
-        output = layer(sample_input)
-
-        assert layer.built
-        assert output.shape[0] == sample_input.shape[0]  # Batch size preserved
-        assert output.shape[1] == layer_config['projection_dim']  # Correct output dim
-        assert len(output.shape) == 2  # Flattened to 2D
-
-    def test_serialization_cycle(self, layer_config, sample_input):
-        """CRITICAL TEST: Full serialization cycle."""
-        # Create model with custom layer
-        inputs = keras.Input(shape=sample_input.shape[1:])
-        outputs = ImageProjectionHead(**layer_config)(inputs)
-        model = keras.Model(inputs, outputs)
-
-        # Get original prediction
-        original_pred = model(sample_input)
-
-        # Save and load
-        with tempfile.TemporaryDirectory() as tmpdir:
-            filepath = os.path.join(tmpdir, 'test_model.keras')
-            model.save(filepath)
-
-            loaded_model = keras.models.load_model(filepath)
-            loaded_pred = loaded_model(sample_input)
-
-            # Verify identical predictions
-            np.testing.assert_allclose(
-                keras.ops.convert_to_numpy(original_pred),
-                keras.ops.convert_to_numpy(loaded_pred),
-                rtol=1e-6, atol=1e-6,
-                err_msg="Predictions differ after serialization"
-            )
-
-    def test_config_completeness(self, layer_config):
-        """Test that get_config contains all __init__ parameters."""
-        layer = ImageProjectionHead(**layer_config)
-        config = layer.get_config()
-
-        # Check all config parameters are present
-        for key in layer_config:
-            assert key in config, f"Missing {key} in get_config()"
-
-        # Check additional parameters that have defaults
-        expected_keys = {
-            'projection_dim', 'dropout_rate', 'activation',
-            'kernel_initializer', 'bias_initializer'
-        }
-        for key in expected_keys:
-            assert key in config, f"Missing {key} in get_config()"
-
-    def test_gradients_flow(self, layer_config, sample_input):
-        """Test gradient computation."""
-        layer = ImageProjectionHead(**layer_config)
-
-        with tf.GradientTape() as tape:
-            tape.watch(sample_input)
-            output = layer(sample_input)
-            loss = keras.ops.mean(keras.ops.square(output))
-
-        gradients = tape.gradient(loss, layer.trainable_variables)
-
-        assert all(g is not None for g in gradients)
-        assert len(gradients) > 0
-
-    @pytest.mark.parametrize("training", [True, False, None])
-    def test_training_modes(self, layer_config, sample_input, training):
-        """Test behavior in different training modes."""
-        layer = ImageProjectionHead(**layer_config)
-
-        output = layer(sample_input, training=training)
-        assert output.shape[0] == sample_input.shape[0]
-        assert output.shape[1] == layer_config['projection_dim']
-
-    def test_edge_cases(self):
-        """Test error conditions."""
-        with pytest.raises(ValueError):
-            ImageProjectionHead(projection_dim=0)  # Invalid projection_dim
-
-        with pytest.raises(ValueError):
-            ImageProjectionHead(projection_dim=512, dropout_rate=-0.1)  # Invalid dropout
-
-        with pytest.raises(ValueError):
-            ImageProjectionHead(projection_dim=512, dropout_rate=1.5)  # Invalid dropout
-
-    def test_different_activations(self, sample_input):
-        """The activation must reach the projection head's forward pass.
-
-        A value knob: the head holds the same weights for every activation, so
-        under one seed the layers are bit-identical and the whole output
-        difference is the activation. ``None`` (linear) is included, which is
-        the setting a dropped kwarg would silently collapse the others onto.
-        """
-        activations_to_test = [None, 'relu', 'gelu', 'tanh']
-
-        def _build(activation):
-            layer = ImageProjectionHead(projection_dim=256, activation=activation)
-            layer(keras.ops.zeros_like(sample_input[:1]))
-            return layer
-
-        builders = {a: (lambda a=a: _build(a)) for a in activations_to_test}
-        deltas = assert_value_knob_changes_output(
-            builders, sample_input, knob="activation",
-        )
-        assert min(deltas.values()) > 1e-5
-
-        for activation in activations_to_test:
-            layer = ImageProjectionHead(projection_dim=256, activation=activation)
-            output = layer(sample_input)
-            assert output.shape == (sample_input.shape[0], 256)
-
-    def test_compute_output_shape(self, layer_config):
-        """Test output shape computation."""
-        layer = ImageProjectionHead(**layer_config)
-        input_shape = (32, 7, 7, 2048)
-
-        output_shape = layer.compute_output_shape(input_shape)
-        expected_shape = (32, layer_config['projection_dim'])
-
-        assert output_shape == expected_shape
 
 
 class TestMobileClipImageEncoder:
@@ -198,6 +42,22 @@ class TestMobileClipImageEncoder:
         assert hasattr(model, 'projection_head')
         assert model.backbone is not None
         assert model.projection_head is not None
+
+    def test_projection_head_is_a_pool_then_linear_classification_head(self):
+        """The projection is ClassificationHead's `classifier` Dense and nothing else."""
+        from dl_techniques.layers.heads.vision.classification import ClassificationHead
+
+        model = MobileClipImageEncoder(
+            backbone_weights=None, image_size=32, projection_dim=16
+        )
+        model(np.zeros((1, 32, 32, 3), dtype='float32'))
+        head = model.projection_head
+        assert isinstance(head, ClassificationHead)
+        assert head.dense_blocks == []
+        paths = [w.path for w in head.weights]
+        assert len(paths) == 2
+        assert paths[0].endswith('projection_head/classifier/kernel')
+        assert paths[1].endswith('projection_head/classifier/bias')
 
     def test_forward_pass(self, model_config, sample_input):
         """Test forward pass."""
