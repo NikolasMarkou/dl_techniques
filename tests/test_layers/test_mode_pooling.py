@@ -26,6 +26,7 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.layers.mixtures.mean_shift_ops import kde_log_density
+from dl_techniques.layers.sequence_pooling import mode_pooling as mode_pooling_module
 from dl_techniques.layers.sequence_pooling import (
     ModePooling,
     STRICT_DROPPED_KEY_MARKER,
@@ -394,6 +395,93 @@ class TestTranslationAndSmallBandwidths:
         mask = np.zeros((1, 100), dtype="float32")
         pooled = _np(ModePooling(num_steps=5, bandwidth=1e-6)(tokens, mask))
         np.testing.assert_allclose(pooled, tokens.mean(axis=1), rtol=0, atol=1e-6)
+
+
+def _random_duplicate_batch(rows=40, dim=8, seed=1, value=None):
+    """Rows of 75 to 95 percent identical tokens plus loose far tokens, shuffled.
+
+    Returns the tokens ``(rows, 100, dim)``, a mask ``(rows, 100)`` that drops five
+    random positions, and the duplicated value of every row ``(rows, dim)``. With
+    ``value`` given the duplicated point is that scalar in every coordinate, otherwise
+    a random float that float32 does not store exactly.
+    """
+    rng = np.random.default_rng(seed)
+    tokens, mask, points = [], [], []
+    for _ in range(rows):
+        n_dup = int(rng.integers(75, 96))
+        point = np.full(dim, value) if value is not None else rng.normal(size=dim)
+        loose = point + 4.0 + rng.normal(size=(100 - n_dup, dim))
+        row = np.concatenate([np.tile(point, (n_dup, 1)), loose])
+        order = rng.permutation(100)
+        keep = np.ones(100)
+        keep[rng.choice(100, 5, replace=False)] = 0.0
+        tokens.append(row[order])
+        mask.append(keep)
+        points.append(point)
+    return (
+        np.stack(tokens).astype("float32"),
+        np.stack(mask).astype("float32"),
+        np.stack(points).astype("float32"),
+    )
+
+
+def _assert_duplicated_mode_is_pooled(num_starts, masked, value=None):
+    """Fail unless every row pools to its duplicated point within 1e-3."""
+    tokens, mask, points = _random_duplicate_batch(value=value)
+    pool = ModePooling(num_steps=5, num_starts=num_starts)
+    pooled = _np(pool(tokens, mask) if masked else pool(tokens))
+    error = np.abs(pooled - _np(points)).max(axis=1)
+    wrong = int((error > 1e-3).sum())
+    assert wrong == 0, f"{wrong} of {len(error)} rows off the duplicated point, worst {error.max():.4g}"
+
+
+class TestTheAutoBandwidthFloorFollowsTheDataScale:
+    """Mostly duplicated tokens give a median distance of 0, then rounding noise sets the mode."""
+
+    @pytest.mark.parametrize("masked", [False, True])
+    @pytest.mark.parametrize("num_starts", [1, 2, 4])
+    def test_random_duplicated_values_pool_to_the_duplicated_point(self, num_starts, masked):
+        _assert_duplicated_mode_is_pooled(num_starts, masked)
+
+    @pytest.mark.parametrize("value", [1.1, 0.3141, -0.7071, DUPLICATE_POINT])
+    @pytest.mark.parametrize("num_starts", [2, 4])
+    def test_named_duplicated_values_with_a_mask_pool_to_the_duplicated_point(self, num_starts, value):
+        _assert_duplicated_mode_is_pooled(num_starts, True, value=value)
+
+    @pytest.mark.parametrize("value", [1.1, 0.3141])
+    def test_the_plan_layout_with_a_non_representable_value_pools_to_it(self, value):
+        tokens = _duplicate_data()
+        tokens[:, :85] = value
+        pooled = _np(ModePooling(num_steps=5, num_starts=4)(tokens, _mask_last(100, 5)))
+        np.testing.assert_allclose(pooled, value, rtol=0, atol=1e-3)
+
+    def test_ordinary_data_does_not_reach_the_floor(self, monkeypatch):
+        tokens, _ = _outlier_data()
+        mask = _mask_last(100, 7)
+        for num_starts in (1, 3):
+            pool = ModePooling(num_steps=6, num_starts=num_starts, bandwidth_scale=0.5)
+            with_floor = _np(pool(tokens, mask))
+            monkeypatch.setattr(mode_pooling_module, "_BANDWIDTH_DATA_FLOOR", 0.0)
+            without_floor = _np(pool(tokens, mask))
+            monkeypatch.undo()
+            np.testing.assert_allclose(with_floor, without_floor, rtol=0, atol=1e-6)
+
+    def test_a_float_bandwidth_is_not_floored_by_the_data_scale(self):
+        tokens, _ = _outlier_data()
+        layer = ModePooling(bandwidth=1e-5)
+        layer.build(tokens.shape)
+        h = layer._resolve_bandwidth(
+            keras.ops.convert_to_tensor(tokens),
+            keras.ops.ones((1, 100), dtype="bool"),
+            "float32",
+        )
+        np.testing.assert_allclose(_np(h), 1e-5, rtol=1e-6)
+
+    @pytest.mark.parametrize("num_starts", [2, 4])
+    def test_the_check_fails_when_the_floor_is_the_old_absolute_constant(self, monkeypatch, num_starts):
+        monkeypatch.setattr(mode_pooling_module, "_BANDWIDTH_DATA_FLOOR", 0.0)
+        with pytest.raises(AssertionError, match="off the duplicated point"):
+            _assert_duplicated_mode_is_pooled(num_starts, True, value=1.1)
 
 
 class TestPrecisionAndGraphs:

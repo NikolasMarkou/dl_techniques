@@ -35,6 +35,10 @@ _NORMALIZE_EPS = 1e-12
 
 _BANDWIDTH_FLOOR = 1e-6
 
+# Fraction of the kept tokens' RMS radius below which "auto" never goes, so the
+# kernel cannot resolve float32 rounding noise in the squared distances.
+_BANDWIDTH_DATA_FLOOR = 1e-3
+
 
 @register_dl_technique("dl_techniques.layers.sequence_pooling.mode_pooling")
 class ModePooling(keras.layers.Layer):
@@ -114,8 +118,10 @@ class ModePooling(keras.layers.Layer):
         num_steps: Number of mean-shift steps, an integer >= 0. With 0 the
             output is the masked mean (or the best start when ``num_starts > 1``).
         bandwidth: Kernel bandwidth ``h``. ``"auto"`` uses the median pairwise
-            distance among the kept tokens of each sample (no gradient); a
-            positive float is used as given.
+            distance among the kept tokens of each sample (no gradient), floored
+            at 1e-3 times the RMS radius of those tokens about their mean so that
+            mostly duplicated tokens do not leave a bandwidth at rounding noise;
+            a positive float is used as given.
         bandwidth_scale: Positive factor multiplying the bandwidth, estimated
             or given.
         learnable_bandwidth: If True, adds one scalar weight ``log_scale``
@@ -263,10 +269,16 @@ class ModePooling(keras.layers.Layer):
             acc: Accumulation dtype name.
 
         Returns:
-            Positive bandwidth tensor, floored away from zero.
+            Positive bandwidth tensor, floored away from zero. With
+            ``bandwidth="auto"`` it is also floored at ``_BANDWIDTH_DATA_FLOOR``
+            times the RMS radius of the kept tokens about their mean.
         """
+        floor = stability_floor(acc, _BANDWIDTH_FLOOR)
         if self.bandwidth == "auto":
             h = median_heuristic_bandwidth(keys, keep)
+            floor = keras.ops.maximum(
+                floor, _BANDWIDTH_DATA_FLOOR * self._rms_radius(keys, keep, acc)
+            )
         else:
             h = keras.ops.reshape(
                 keras.ops.convert_to_tensor(self.bandwidth, dtype=acc), (1, 1, 1)
@@ -274,7 +286,31 @@ class ModePooling(keras.layers.Layer):
         h = h * self.bandwidth_scale
         if self.learnable_bandwidth:
             h = h * keras.ops.exp(keras.ops.cast(self.log_scale, acc))
-        return keras.ops.maximum(h, stability_floor(acc, _BANDWIDTH_FLOOR))
+        return keras.ops.maximum(h, floor)
+
+    @staticmethod
+    def _rms_radius(
+        keys: keras.KerasTensor,
+        keep: keras.KerasTensor,
+        acc: str,
+    ) -> keras.KerasTensor:
+        """RMS distance of the kept tokens from their mean, per sample.
+
+        Args:
+            keys: Tokens ``(batch, seq_len, embed_dim)`` in the accumulation dtype.
+            keep: Boolean keep-mask ``(batch, seq_len)``.
+            acc: Accumulation dtype name.
+
+        Returns:
+            Radius ``(batch, 1, 1)`` without gradient; 0 for a row with no kept token.
+        """
+        weight = keras.ops.cast(keep, acc)
+        count = keras.ops.maximum(keras.ops.sum(weight, axis=1, keepdims=True), 1.0)
+        mean = keras.ops.sum(keys * weight[:, :, None], axis=1, keepdims=True)
+        mean = mean / count[:, :, None]
+        spread = keras.ops.sum(keras.ops.square(keys - mean), axis=-1) * weight
+        radius = keras.ops.sqrt(keras.ops.sum(spread, axis=1, keepdims=True) / count)
+        return keras.ops.stop_gradient(keras.ops.expand_dims(radius, -1))
 
     def _token_starts(
         self,
