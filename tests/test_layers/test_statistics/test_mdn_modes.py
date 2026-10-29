@@ -473,10 +473,14 @@ def _check_the_middle_start_leaves_the_density_minimum():
     mu, sigma, logits = _batch(SADDLE_MU, SADDLE_SIGMA, SADDLE_LOGITS)
     modes, log_density, is_unique = get_mixture_modes(mu, sigma, logits, num_steps=SADDLE_STEPS)
     modes = keras.ops.convert_to_numpy(modes)[0, :, 0]
-    np.testing.assert_allclose(modes, [-SADDLE_SIDE_MODE, SADDLE_SIDE_MODE, SADDLE_SIDE_MODE], atol=2e-3)
-    assert keras.ops.convert_to_numpy(is_unique).tolist() == [[True, True, False]]
+    log_density = keras.ops.convert_to_numpy(log_density)[0]
+    # The middle start leaves the minimum on whichever side its offset points.
+    np.testing.assert_allclose(modes[[0, 2]], [-SADDLE_SIDE_MODE, SADDLE_SIDE_MODE], atol=2e-3)
+    assert abs(abs(modes[1]) - SADDLE_SIDE_MODE) < 2e-3 and abs(modes[1]) > 1e-3
+    assert int(keras.ops.convert_to_numpy(is_unique).sum()) == 2
     at_minimum = _oracle_log_density(np.zeros((1, 1)), SADDLE_MU, SADDLE_SIGMA, SADDLE_LOGITS)[0]
-    assert keras.ops.convert_to_numpy(log_density)[0, 1] > at_minimum + 0.5
+    assert log_density[1] > at_minimum + 0.5
+    np.testing.assert_allclose(log_density[1], log_density[[0, 2]], atol=1e-3)
 
 
 class TestStationaryPointsReachedFromEachComponentMean:
@@ -506,6 +510,144 @@ class TestStationaryPointsReachedFromEachComponentMean:
         mu, sigma, logits = _batch(SADDLE_MU, SADDLE_SIGMA, SADDLE_LOGITS)
         modes = get_mixture_modes(mu, sigma, logits, num_steps=0)[0]
         np.testing.assert_array_equal(keras.ops.convert_to_numpy(modes), mu)
+
+
+# A mixture symmetric under swapping coordinates has saddles on the swap-symmetric
+# manifold; a start moved along one shared direction stays on that manifold.
+X_MU = np.array([[-1.0, 1.0], [1.0, -1.0], [0.0, 0.0]])
+X_SIGMA = np.full((3, 2), 0.5)
+X_LOGITS = np.log([0.45, 0.45, 0.1])
+X_STEPS = 300
+
+
+def _oracle_gradient_and_hessian(point, mu, sigma, pi_logits):
+    """Gradient and Hessian of the log mixture density at one point (float64).
+
+    :param point: ``[D]`` point.
+    :param mu: Component means ``[M, D]``.
+    :param sigma: Component standard deviations ``[M, D]``.
+    :param pi_logits: Mixture logits ``[M]``.
+    :return: ``(gradient [D], hessian [D, D])`` of log p.
+    """
+    point = np.asarray(point, np.float64)
+    mu, sigma = np.asarray(mu, np.float64), np.asarray(sigma, np.float64)
+    precision = 1.0 / sigma ** 2
+    joint = _component_log_joint(point, mu, sigma, pi_logits)
+    resp = np.exp(joint - (joint.max() + np.log(np.exp(joint - joint.max()).sum())))
+    slope = -precision * (point - mu)
+    mean_slope = (resp[:, None] * slope).sum(0)
+    hessian = -np.diag((resp[:, None] * precision).sum(0))
+    for r, g in zip(resp, slope):
+        hessian += r * np.outer(g, g)
+    hessian -= np.outer(mean_slope, mean_slope)
+    return mean_slope, hessian
+
+
+def _component_log_joint(point, mu, sigma, pi_logits):
+    logits = np.asarray(pi_logits, np.float64)
+    log_pi = logits - (logits.max() + np.log(np.exp(logits - logits.max()).sum()))
+    z = (point - mu) / sigma
+    return log_pi - 0.5 * (z ** 2).sum(-1) - np.log(sigma).sum(-1) - 0.5 * mu.shape[-1] * np.log(2 * np.pi)
+
+
+def _assert_every_unique_mode_is_a_local_maximum(mu, sigma, logits, num_steps=X_STEPS):
+    """Fail unless each unique returned mode has a vanishing gradient and a negative-definite Hessian."""
+    inputs = _batch(mu, sigma, logits, "float64")
+    modes, _, is_unique = get_mixture_modes(*inputs, num_steps=num_steps)
+    modes = keras.ops.convert_to_numpy(modes)[0]
+    unique = keras.ops.convert_to_numpy(is_unique)[0]
+    assert unique.any()
+    for index in np.flatnonzero(unique):
+        gradient, hessian = _oracle_gradient_and_hessian(modes[index], mu, sigma, logits)
+        top = np.linalg.eigvalsh(hessian).max()
+        assert np.linalg.norm(gradient) < 1e-3 and top < 0.0, (
+            f"start {index} at {np.round(modes[index], 4)}: gradient {np.linalg.norm(gradient):.3g}, "
+            f"largest Hessian eigenvalue {top:.3g}"
+        )
+
+
+def _swap_symmetric_mixture(seed, dim):
+    """A random mixture invariant under swapping coordinates 0 and 1.
+
+    Two mirrored pairs, two components on the diagonal (equal means and sigmas in
+    coordinates 0 and 1) and a small diagonal centre; all means within 1.5 of the origin.
+    """
+    rng = np.random.default_rng(seed)
+    mu, sigma, weight = [], [], []
+
+    def swapped(row):
+        row = np.array(row)
+        row[[0, 1]] = row[[1, 0]]
+        return row
+
+    for _ in range(2):
+        m, sg, w = rng.uniform(-1.5, 1.5, dim), rng.uniform(0.3, 0.6, dim), rng.uniform(0.5, 1.0)
+        mu += [m, swapped(m)]
+        sigma += [sg, swapped(sg)]
+        weight += [w, w]
+    for _ in range(3):
+        m, sg = rng.uniform(-1.5, 1.5, dim), rng.uniform(0.3, 0.6, dim)
+        m[1], sg[1] = m[0], sg[0]
+        mu.append(m)
+        sigma.append(sg)
+        weight.append(rng.uniform(0.05, 0.3))
+    weight = np.array(weight) / np.sum(weight)
+    return np.array(mu), np.array(sigma), np.log(weight)
+
+
+class TestTheStartOffsetBreaksCoordinateSymmetry:
+    def test_the_x_shaped_mixture_centre_start_does_not_stop_on_its_saddle(self):
+        _assert_every_unique_mode_is_a_local_maximum(X_MU, X_SIGMA, X_LOGITS)
+
+    def test_the_x_shaped_saddle_is_one_of_the_stationary_points(self):
+        gradient, hessian = _oracle_gradient_and_hessian(np.zeros(2), X_MU, X_SIGMA, X_LOGITS)
+        assert np.linalg.norm(gradient) < 1e-12 and np.linalg.eigvalsh(hessian).max() > 0.0
+
+    @pytest.mark.parametrize("dim", [2, 3])
+    @pytest.mark.parametrize("seed", range(20))
+    def test_swap_symmetric_mixtures_return_no_saddle_or_minimum_as_a_unique_mode(self, seed, dim):
+        _assert_every_unique_mode_is_a_local_maximum(*_swap_symmetric_mixture(seed, dim))
+
+    def test_every_component_and_dimension_gets_its_own_nonzero_offset(self):
+        from dl_techniques.layers.statistics import mdn_layer as mdn_module
+
+        for num_mix, dim in [(1, 1), (3, 2), (7, 3), (16, 8)]:
+            pattern = keras.ops.convert_to_numpy(mdn_module._mode_start_pattern(num_mix, dim, "float32"))
+            assert pattern.shape == (num_mix, dim)
+            assert np.abs(pattern).min() >= 0.25 and np.abs(pattern).max() <= 1.0
+            assert len(np.unique(pattern)) == num_mix * dim
+
+    def test_red_with_one_shared_offset_direction_the_x_shaped_saddle_is_returned(self, monkeypatch):
+        from dl_techniques.layers.statistics import mdn_layer as mdn_module
+
+        _assert_every_unique_mode_is_a_local_maximum(X_MU, X_SIGMA, X_LOGITS)
+        monkeypatch.setattr(
+            mdn_module,
+            "_mode_start_pattern",
+            lambda num_mix, dim, dtype: keras.ops.ones((num_mix, dim), dtype),
+        )
+        with pytest.raises(AssertionError, match="largest Hessian eigenvalue"):
+            _assert_every_unique_mode_is_a_local_maximum(X_MU, X_SIGMA, X_LOGITS)
+        failing = 0
+        for seed in range(20):
+            for dim in (2, 3):
+                try:
+                    _assert_every_unique_mode_is_a_local_maximum(*_swap_symmetric_mixture(seed, dim))
+                except AssertionError:
+                    failing += 1
+        assert failing >= 1
+
+    def test_the_offset_survives_an_unknown_batch_under_tf_function(self):
+        spec = [tf.TensorSpec((None, 3, 2), tf.float32)] * 2 + [tf.TensorSpec((None, 3), tf.float32)]
+
+        @tf.function(input_signature=spec)
+        def run(mu, sigma, logits):
+            return get_mixture_modes(mu, sigma, logits, num_steps=X_STEPS)[0]
+
+        mu, sigma, logits = _batch(X_MU, X_SIGMA, X_LOGITS)
+        graph = run(tf.constant(mu), tf.constant(sigma), tf.constant(logits)).numpy()
+        eager = keras.ops.convert_to_numpy(get_mixture_modes(mu, sigma, logits, num_steps=X_STEPS)[0])
+        np.testing.assert_allclose(graph, eager, atol=1e-5)
 
 
 # Two equal unit components a distance s apart; the true density has one mode at 0 for

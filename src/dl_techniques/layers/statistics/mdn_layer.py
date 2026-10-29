@@ -752,6 +752,35 @@ _MODE_PRECISION_FLOOR = 1e-30
 # dimension, so a start on an unstable stationary point leaves it.
 _MODE_START_OFFSET = 1e-3
 
+_GOLDEN_FRACTION = 0.6180339887498949
+
+
+def _mode_start_pattern(num_mixtures: Any, dim: Any, dtype: str) -> Any:
+    """Per-component, per-dimension signed multipliers for the start offset.
+
+    The multiplier of component ``m`` and dimension ``d`` is a fixed function of
+    ``m * dim + d`` alone: the fractional part ``u`` of ``(m * dim + d + 1)`` times
+    the golden ratio conjugate, mapped to ``sign(2u - 1) * (0.25 + 0.75 * |2u - 1|)``.
+    Every entry therefore lies in ``[-1, -0.25]`` or ``[0.25, 1]`` (never zero) and
+    no two entries are equal, so no coordinate swap or reflection of a mixture
+    leaves the offset direction unchanged. Built from ``ops.arange``, so the
+    arguments may be tensors and nothing depends on the data.
+
+    :param num_mixtures: Number of mixture components ``M``.
+    :param dim: Output dimension ``D``.
+    :param dtype: Floating dtype name of the result.
+    :return: Tensor of shape ``[M, D]``.
+    """
+    # DECISION plan-2026-10-29T104646-27f045c5/D-033: sign(2u - 1) * (0.25 + 0.75 * |2u - 1|), never zero and injective in u.
+    # Do not clamp small |2u - 1| to 0.25: clamped entries can repeat and keep a coordinate-symmetric start on its saddle.
+    index = ops.expand_dims(ops.arange(num_mixtures), 1) * dim + ops.expand_dims(
+        ops.arange(dim), 0
+    )
+    phase = ops.cast(index + 1, dtype) * _GOLDEN_FRACTION
+    centred = 2.0 * (phase - ops.floor(phase)) - 1.0
+    sign = ops.cast(ops.where(centred >= 0.0, 1.0, -1.0), dtype)
+    return sign * (0.25 + 0.75 * ops.abs(centred))
+
 
 def _check_mode_arguments(
     mu: Any,
@@ -809,8 +838,10 @@ def get_mixture_modes(
 ) -> Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]:
     """Find stationary points of a diagonal Gaussian mixture by fixed-point iteration.
 
-    Every component mean is a start, moved off it by ``1e-3`` standard deviations
-    per dimension. Each start is moved by the Carreira-Perpinan fixed point of the
+    Every component mean is a start, moved off it by at most ``1e-3`` standard
+    deviations per dimension, in a fixed direction that differs between components
+    and dimensions, so a mixture symmetric under a coordinate swap does not keep a
+    start on its symmetric saddle. Each start is moved by the Carreira-Perpinan fixed point of the
     mixture density::
 
         r_m(x) = softmax_m(log pi_m + log N(x; mu_m, sigma_m))
@@ -900,9 +931,13 @@ def get_mixture_modes(
         quad = ops.sum(ops.square(diff) * ops.expand_dims(precision, 1), axis=-1)
         return ops.expand_dims(log_const, 1) - 0.5 * quad
 
-    # DECISION plan-2026-10-29T104646-27f045c5/D-030: starts sit a hair off the component means.
-    # Do not start exactly on mu: a symmetric start stays on a saddle or minimum forever.
-    points = mu_w + _MODE_START_OFFSET * sigma_w if num_steps > 0 else mu_w
+    # DECISION plan-2026-10-29T104646-27f045c5/D-030: starts sit a hair off the component means, each in its own direction.
+    # Do not start exactly on mu or shift every start along (1, ..., 1): a symmetric start stays on a saddle forever.
+    points = mu_w
+    if num_steps > 0:
+        shape = ops.shape(mu_w)
+        pattern = _mode_start_pattern(shape[1], shape[2], work)
+        points = mu_w + _MODE_START_OFFSET * sigma_w * ops.expand_dims(pattern, 0)
     for _ in range(num_steps):
         log_joint = _component_log_density(points)
         resp = ops.exp(log_joint - ops.logsumexp(log_joint, axis=-1, keepdims=True))
