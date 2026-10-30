@@ -509,6 +509,8 @@ def _multiplier_probe(layout, scale, num_starts, masked, pooled_term=False, dtyp
     return layer, tokens, keep, loss
 
 
+# DECISION plan-2026-10-29T224331-aad3f382/D-003: the exact zero (autodiff == 0.0, not a tolerance) and the dup55 layout are what catch a leaked multiplier gradient.
+# Do not loosen the check to 1e-6 or drop the positive-median dup55 layout (dup85 has median 0 and shows the bypass leak at only -2.6e-6). See decisions.md.
 def _assert_multiplier_gradient_is_zero(masked, num_starts, layout, scale, pooled_term=False):
     """Fail unless the floor binds and the multiplier gradient is exactly zero.
 
