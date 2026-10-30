@@ -398,8 +398,8 @@ dl_techniques/
 │   │   ├── norms/             # 19 registered normalization layers (factory)
 │   │   ├── embedding/         # 15 registered positional/semantic embeddings (factory)
 │   │   ├── transformers/      # Assembled transformer/encoder/decoder blocks
-│   │   ├── heads/             # Task heads dispatched by domain (nlp/vision/vlm)
-│   │   ├── time_series/       # Forecasting-specific layers
+│   │   ├── heads/             # Task heads dispatched by domain (nlp/vision/vlm); time_series heads import directly
+│   │   ├── time_series/       # Forecasting-specific layers (heads are in heads/time_series)
 │   │   ├── fastvit/           # FastViT primitives (+ a committed reference impl)
 │   │   ├── graphs/            # Graph neural network components
 │   │   ├── moe/               # Mixture of Experts (MoE) system

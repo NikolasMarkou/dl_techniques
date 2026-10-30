@@ -1,11 +1,11 @@
 # heads
 
 Path: `src/dl_techniques/layers/heads`
-Purpose: Keras 3 task-head layers for `dl_techniques`, grouped by domain (`nlp/`, `vision/`, `vlm/`), with a thin `create_head` dispatch facade and the argument checks shared by the domains.
+Purpose: Keras 3 task-head layers for `dl_techniques`, grouped by domain (`nlp/`, `vision/`, `vlm/`, `time_series/`), with a thin `create_head` dispatch facade (nlp, vision and vlm only) and the argument checks shared by the domains.
 
 ## Scope
 
-Lives here: three domain sub-packages (heads, task-type enums and configs, dispatch tables, factories), the facade `factory.py`, the aggregator `task_types.py`, and two cross-domain helper modules, `validation.py` and `masking.py`.
+Lives here: four domain sub-packages (heads, and for nlp, vision and vlm also task-type enums and configs, dispatch tables, factories), the facade `factory.py`, the aggregator `task_types.py`, and two cross-domain helper modules, `validation.py` and `masking.py`.
 
 Does not live here: backbones (`models/`), the pooling, attention, FFN, norm and fusion layers the heads compose (`layers/sequence_pooling`, `layers/attention`, `layers/ffn`, `layers/norms`, `layers/fusion`; attention, FFN and norm layers are built through their factories, while `SequencePooling` and `MultiModalFusion` are constructed directly), trainers (`src/train/`). The package replaced three older packages (`nlp_heads`, `vision_heads`, `vlm_heads`) by `git mv`; every layer class name was preserved.
 
@@ -38,13 +38,14 @@ Per-domain structure:
 - vision: `task_types` -> `dispatch`; `utils` -> `base` -> heads -> `dispatch` -> `multitask`, `config` -> `factory` (a re-export layer only). `BaseVisionHead` owns optional `attention` then `ffn` stages (no common norm or Dropout); depth, normals and flow share `decoder.py` (three ConvBlock + stride-2 transposed-conv stages, 8x upsampling).
 - vlm: `task_types` -> (`utils`, `base`) -> leaf heads -> `dispatch` -> `multitask` -> `factory`. `BaseVLMHead` owns only a `fusion` (`MultiModalFusion`) layer; captioning, VQA and the wrapper derive from `keras.layers.Layer` directly.
 
-Class families (24 classes with a `Head` name; 8 NLP + 10 vision + 6 VLM):
+Class families (29 registered classes with a `Head` name; 8 NLP + 10 vision + 6 VLM + 5 time series):
 
 | Domain | Classes | Base |
 | --- | --- | --- |
 | nlp | `BaseNLPHead`, `TextClassificationHead`, `TokenClassificationHead`, `QuestionAnsweringHead`, `TextSimilarityHead`, `TextGenerationHead`, `MultipleChoiceHead`, `MultiTaskNLPHead` | leaf heads subclass `BaseNLPHead`; `MultiTaskNLPHead` does not |
 | vision | `BaseVisionHead`, `DetectionHead`, `SegmentationHead`, `DepthEstimationHead`, `SurfaceNormalsHead`, `OpticalFlowHead`, `ClassificationHead`, `InstanceSegmentationHead`, `EnhancementHead`, `MultiTaskHead` | heads subclass `BaseVisionHead`; `MultiTaskHead` does not. Private `_DenseVectorHeadBase` (normals, flow) is unregistered and not counted |
 | vlm | `BaseVLMHead`, `ImageCaptioningHead`, `VQAHead`, `VisualGroundingHead`, `ImageTextMatchingHead`, `MultiTaskVLMHead` | grounding and matching subclass `BaseVLMHead`; the rest subclass `keras.layers.Layer` |
+| time_series | `QuantileHead`, `QuantileSequenceHead`, `GaussianLikelihoodHead`, `NegativeBinomialLikelihoodHead`, `TimestralQuantileHead` | all subclass `keras.layers.Layer`; the two likelihood heads share the private, unregistered `_LikelihoodHead`. No task enum, dispatch or factory; see `time_series/AGENTS.md` |
 
 Dispatch tables (one per domain, every helper reads the same table): `nlp.task_types.NLP_HEAD_DISPATCH` (24 rows of 37 `NLPTaskType` members; holds class NAMES, because `task_types.py` imports no head; `nlp.dispatch._HEAD_CLASSES` maps names to classes), `vision.dispatch.VISION_HEAD_DISPATCH` (10 rows of 37 `VisionTaskType`, each row a head class plus default kwargs, caller wins), `vlm.dispatch.VLM_HEAD_DISPATCH` (4 rows of 47 `VLMTaskType`).
 
@@ -52,7 +53,7 @@ Dispatch tables (one per domain, every helper reads the same table): `nlp.task_t
 
 | File | Role | Notes |
 | --- | --- | --- |
-| `__init__.py` | Union re-export, 42 names in `__all__` | NLP 12, vision 18, VLM 11, plus `create_head`. The eight NLP in-model helpers (`TASK_HEAD_NAME`, `build_model_task_head`, ...) are not re-exported here; import them from `heads.nlp` |
+| `__init__.py` | Union re-export, 47 names in `__all__` | NLP 12, vision 18, VLM 11, time series 5, plus `create_head`. The eight NLP in-model helpers (`TASK_HEAD_NAME`, `build_model_task_head`, ...) are not re-exported here; import them from `heads.nlp` |
 | `factory.py` | `create_head`, `HeadDomain` literal | Single-head factories only. Carries two `DECISION` comments (keep thin; keep with no production caller) |
 | `task_types.py` | Re-exports `NLPTaskType`, `NLPTaskConfig`, `VisionTaskType`, `TaskConfiguration`, `CommonTaskConfigurations`, `parse_task_list`, `VLMTaskType`, `VLMTaskConfig`, `VLMTaskConfiguration` | Imports only. No name collides; no alias |
 | `validation.py` | Six shared checks | See Public interface |
@@ -60,6 +61,7 @@ Dispatch tables (one per domain, every helper reads the same table): `nlp.task_t
 | `nlp/` | NLP heads, `NLPTaskConfig`, dispatch, `create_nlp_head`, `create_multi_task_nlp_head`, `model_head.py` | `__all__` has 20 names. Modules: `task_types`, `utils`, `base`, six leaf heads, `multitask`, `dispatch`, `factory`, `model_head` |
 | `vision/` | Vision heads, `VisionTaskType`, presets, `create_vision_head`, `create_multi_task_head`, `create_enhancement_head`, `build_model_vision_head` | `__all__` has 18 names; `vision/factory.py` is a re-export layer only, logic lives in the defining module. Other modules: `base`, `utils`, `decoder`, `dense_vector`, `multitask`, `dispatch`, `config`, `task_types` |
 | `vlm/` | VLM heads, `VLMTaskConfig`, dispatch, `create_vlm_head`, `create_multi_task_vlm_head` | `__all__` has 11 names. Modules: `task_types`, `utils` (private helpers), `base`, four leaf heads, `multitask`, `dispatch`, `factory` |
+| `time_series/` | Forecasting heads, no task types, dispatch or factory | `__all__` has 5 names. Modules: `quantile_head_fixed_io`, `quantile_head_variable_io`, `likelihood_heads`, `timestral_quantile_head`. Models build these heads directly |
 
 ## Public interface
 
@@ -93,7 +95,7 @@ Domain entry points:
 
 ## Invariants and constraints
 
-- **Registration.** Every class uses `@register_dl_technique("dl_techniques.layers.heads.<domain>.<module>")` from `dl_techniques.utils.keras_registration`, with the defining module's dotted path (nothing is stripped under `layers/`). Moving a class changes its key. Never use a bare `@keras.saving.register_keras_serializable()`: its key `Custom>ClassName` ignores the module, so two same-named classes would share one slot. The helper also binds `Custom>ClassName` as an alias to the same object, keyed on the bare class name, so a class name must not change (`EnhancementHead` especially: it is module-scope, not a closure inside `create_enhancement_head`, and must not be re-nested). Keys were renamed when the NLP and VLM factories were split and the vision keys were aligned; archives saved under `dl_techniques.layers.heads.<domain>.factory>...` do not load, by decision. `tests/test_layers/test_heads/test_the_head_classes_register_under_their_own_module.py` pins all 24 classes.
+- **Registration.** Every class uses `@register_dl_technique("dl_techniques.layers.heads.<domain>.<module>")` from `dl_techniques.utils.keras_registration`, with the defining module's dotted path (nothing is stripped under `layers/`). Moving a class changes its key. Never use a bare `@keras.saving.register_keras_serializable()`: its key `Custom>ClassName` ignores the module, so two same-named classes would share one slot. The helper also binds `Custom>ClassName` as an alias to the same object, keyed on the bare class name, so a class name must not change (`EnhancementHead` especially: it is module-scope, not a closure inside `create_enhancement_head`, and must not be re-nested). Keys were renamed when the NLP and VLM factories were split and the vision keys were aligned; archives saved under `dl_techniques.layers.heads.<domain>.factory>...` do not load, by decision. `tests/test_layers/test_heads/test_the_head_classes_register_under_their_own_module.py` pins all 29 classes.
 - **No silent dispatch fallback.** An unimplemented task type raises `ValueError` through `lookup_head`. Do not restore a default head or add a placeholder row. NLP and VLM dispatchers once ended in `table.get(task_type, <default>)`, which turned a translation task into a classifier and made unimplemented VLM tasks return a `BaseVLMHead` with no `call`. `BaseVLMHead` refuses direct construction with `TypeError` and must never appear in `VLM_HEAD_DISPATCH`.
 - **Logits out.** No class-like output gets an activation. Do not add one; the consumer's loss takes `from_logits=True`. `probabilities` entries are `softmax(logits)` in the compute dtype. Allowed squashed outputs: depth sigmoid, grounding `bbox` sigmoid, unit-normalized normals. `finalize_head_outputs` drops `probabilities` / `predictions` so a model compiles against one tensor.
 - **A head owns what its `call` runs, and nothing else.** A sub-layer `call` never reaches is not created. An argument `call` can never read raises `ValueError` (it is not stored). Check by counting each sub-layer's `call` over one forward, not by weights: a layer created and never called is never built and holds none. The VLM version is `test_vlm.py::TestEveryVLMHeadOwnsOnlyWhatItRuns`. Per domain: NLP `_refuse_unapplied_stages`; vision `_refuse_common_layers_call_never_runs` (call it BEFORE `super().__init__`); VLM `_check_task_config_fields` (`vocab_size` belongs to captioning, `num_classes` to VQA).
@@ -146,4 +148,4 @@ Consumers outside the package (counted by grep of `src/` for imports of `layers.
 - Do not add a unified `Base*Head`, a default head to a dispatcher, or an activation to a class-like output.
 - After a change to a head, build it, call it, and round-trip it through `.keras`; the round-trip tests compare weights by path (vision, NLP) or outputs (VLM).
 - Tests: `tests/test_layers/test_heads/` (including `test_factory.py`, `test_nlp.py`, `test_vision.py`, `test_vlm.py`, `test_nlp_model_head.py`, `test_the_shared_head_helpers.py`, `test_head_dispatch_no_silent_fallback.py`). Run `.venv/bin/python -m pytest tests/test_layers/test_heads/ -q` from the repo root. Docs that tests read by path: `heads/nlp/README.md` (`tests/test_layers/test_the_sequence_pooling_docs_match_the_code.py`) and `heads/vlm/README.md` (output table, `test_the_vlm_dispatch_names_exactly_four_heads.py`). The full repo suite takes about 1.5 hours; do not run it. Do not run GPU jobs in parallel; use `CUDA_VISIBLE_DEVICES=` or a free GPU. Training outputs go to the repo-root `results/`, which must never be deleted.
-- Re-derive the class count with `grep -hoP '^class \K\w+Head\b' src/dl_techniques/layers/heads/{nlp,vision,vlm}/*.py | sort -u | wc -l` (24 at the time of writing; the `\b` keeps names that only contain `Head` out).
+- Re-derive the class count with `grep -hoP '^class \K\w+Head\b' src/dl_techniques/layers/heads/{nlp,vision,vlm}/*.py | sort -u | wc -l` (24 at the time of writing; the `\b` keeps names that only contain `Head` out). `time_series/` is left out of that grep on purpose: it adds 5 registered classes and the unregistered `_LikelihoodHead`, which the pattern would also match.
