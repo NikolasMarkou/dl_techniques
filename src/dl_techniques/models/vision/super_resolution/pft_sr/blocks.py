@@ -54,6 +54,7 @@ from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth
 from dl_techniques.utils.dtype_policy import accumulation_dtype
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.tensors import window_partition, window_reverse
 
 # ---------------------------------------------------------------------
 
@@ -172,48 +173,6 @@ def mirror_pad(x: keras.KerasTensor, window_size: int) -> keras.KerasTensor:
         x = keras.ops.concatenate([x, keras.ops.flip(x, axis=axis)], axis=axis)
         x = x[:, :target] if axis == 1 else x[:, :, :target]
     return x
-
-
-def window_partition(x: keras.KerasTensor, window_size: int) -> keras.KerasTensor:
-    """
-    ``(B, H, W, C) -> (B * nW, window_size**2, C)``, windows row-major per
-    image (the official ``window_partition``, :172, flattened).
-
-    :param x: Map with static ``H``, ``W``, ``C``, multiples of ``window_size``.
-    :type x: keras.KerasTensor
-    :param window_size: Window side.
-    :type window_size: int
-    :return: Window tokens.
-    :rtype: keras.KerasTensor
-    """
-    height, width, channels = x.shape[1], x.shape[2], x.shape[3]
-    x = keras.ops.reshape(x, (-1, height // window_size, window_size,
-                              width // window_size, window_size, channels))
-    x = keras.ops.transpose(x, (0, 1, 3, 2, 4, 5))
-    return keras.ops.reshape(x, (-1, window_size * window_size, channels))
-
-
-def window_reverse(windows: keras.KerasTensor, window_size: int, height: int,
-                   width: int) -> keras.KerasTensor:
-    """
-    Inverse of :func:`window_partition` (the official ``window_reverse``, :186).
-
-    :param windows: ``(B * nW, window_size**2, C)``.
-    :type windows: keras.KerasTensor
-    :param window_size: Window side.
-    :type window_size: int
-    :param height: Map height.
-    :type height: int
-    :param width: Map width.
-    :type width: int
-    :return: ``(B, height, width, C)``.
-    :rtype: keras.KerasTensor
-    """
-    channels = windows.shape[-1]
-    x = keras.ops.reshape(windows, (-1, height // window_size, width // window_size,
-                                    window_size, window_size, channels))
-    x = keras.ops.transpose(x, (0, 1, 3, 2, 4, 5))
-    return keras.ops.reshape(x, (-1, height, width, channels))
 
 
 def topk_mask(scores: keras.KerasTensor, k: int) -> keras.KerasTensor:
@@ -530,9 +489,12 @@ class PFTLayer(keras.layers.Layer):
         if self.shift_size > 0:
             tokens = keras.ops.roll(tokens, shift=(-self.shift_size, -self.shift_size),
                                     axis=(1, 2))
-        out, values, mask = self._attend(
-            window_partition(tokens, self.window_size), height, width,
-            prev_values, prev_mask)
+        # (B * nW, ws, ws, C) from the shared helper, flattened to the
+        # (B * nW, ws * ws, C) layout _attend consumes (and window_reverse accepts).
+        windows = window_partition(tokens, self.window_size)
+        windows = keras.ops.reshape(windows, (-1, self.window_size * self.window_size,
+                                              windows.shape[-1]))
+        out, values, mask = self._attend(windows, height, width, prev_values, prev_mask)
         out = window_reverse(out, self.window_size, height, width)
         if self.shift_size > 0:
             out = keras.ops.roll(out, shift=(self.shift_size, self.shift_size), axis=(1, 2))
