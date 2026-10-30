@@ -70,7 +70,6 @@ NOT_TRAINING: Dict[str, str] = {
     "train.doc_res.prepare_doc_res_data": "data preparation",
     "train.doc_scanner.prepare_doc_scanner_data": "data preparation",
     "train.doc_scanner.stage_uvdoc_samples": "data staging",
-    "train.head_comparison.analyze_heads": "analyses finished runs",
     "train.hnet.infer_hnet": "generates from a saved model",
     "train.hnet.prepare_hnet_data": "data preparation",
     "train.lightglue.eval_homography": "evaluates a saved matcher",
@@ -114,6 +113,7 @@ MULTI_SEED: Tuple[str, ...] = (
     "train.logic.train_e4_monks",
     "train.mean_shift.exp1_mode_pooling",
     "train.mean_shift.exp2_mean_shift_attention",
+    "train.neural_hmm.compare_baselines",
     "train.sam3.baselines",
 )
 

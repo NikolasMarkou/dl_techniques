@@ -32,8 +32,6 @@ SRC_TRAIN = Path(common.__file__).resolve().parents[1]
 
 #: ``keras.datasets`` callers outside the seam, each with the reason it stays.
 KERAS_DATASET_EXCEPTIONS = {
-    "head_comparison/train_heads.py": "CIFAR-100's coarse labels, a second label set aligned "
-                                      "through the loader's row indices",
     "rms_variants_train/experiments/e3_tinytransformer_imdb.py": "IMDB text, not images",
 }
 
@@ -134,7 +132,7 @@ def test_the_census_sees_the_seam() -> None:
     # A broken walk would make every check below pass vacuously.
     calls = {name: _keras_dataset_calls(tree) for name, tree in _trees()}
     assert len(calls["common/classification_data.py"]) == 3
-    assert sum(1 for lines in calls.values() if lines) >= 3
+    assert sum(1 for lines in calls.values() if lines) >= 2
 
 
 def test_only_the_seam_and_the_named_exceptions_read_keras_datasets() -> None:
