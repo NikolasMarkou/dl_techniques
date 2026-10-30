@@ -97,53 +97,6 @@ STEM_BN_EPSILON = 1e-3
 # ---------------------------------------------------------------------
 
 
-# DECISION plan-2026-09-16T064227-b83f88ad/D-002: 'normalized' is the ONLY
-# supported output_mode for this head -- do not expose output_mode as a
-# parameter here defaulting to 'basis'. RBFLayer's own docstring and
-# decisions.md D-002 both document 'basis' as barely-trainable at this
-# scale; making it reachable here would reintroduce that footgun through
-# both models' config surfaces at once. See decisions.md D-002 for the
-# full trade-off.
-def _create_rbf_head(
-        num_classes: int,
-        repulsion_strength: float,
-        min_distance: float,
-        name: str = "rbf_head",
-) -> keras.layers.Layer:
-    """Build the RBF prototype-classification head shared by both backbones.
-
-    The ONE genuinely-reused piece of construction logic between
-    :class:`RBFProtoNet` and :class:`CliffordRBFProtoNet` -- both call this
-    function from their own ``_build_rbf_head`` rather than duplicating the
-    ``create_mixture_layer`` call inline.
-
-    :param num_classes: Number of RBF prototype units (= number of output
-        classes).
-    :type num_classes: int
-    :param repulsion_strength: Strength of the RBF head's center-repulsion
-        penalty, forwarded verbatim to ``create_mixture_layer('rbf', ...)``.
-    :type repulsion_strength: float
-    :param min_distance: Minimum desired distance between RBF centers,
-        forwarded verbatim to ``create_mixture_layer('rbf', ...)``.
-    :type min_distance: float
-    :param name: Layer name. Defaults to ``"rbf_head"``.
-    :type name: str
-    :return: A configured RBF mixture layer (``output_mode='normalized'``).
-    :rtype: keras.layers.Layer
-    """
-    return create_mixture_layer(
-        "rbf",
-        units=num_classes,
-        output_mode="normalized",
-        repulsion_strength=repulsion_strength,
-        min_distance=min_distance,
-        name=name,
-    )
-
-
-# ---------------------------------------------------------------------
-
-
 @register_dl_technique("dl_techniques.models.rbf_protonet.model")
 class RBFProtoNet(keras.Model):
     """
@@ -413,15 +366,14 @@ class RBFProtoNet(keras.Model):
     # reintroduce that footgun through this model's own config surface.
     # See decisions.md D-002 for the full trade-off.
     def _build_rbf_head(self) -> None:
-        """Build the RBF prototype-classification head.
-
-        Delegates to the module-level ``_create_rbf_head`` helper shared with
-        :class:`CliffordRBFProtoNet`.
-        """
-        self.rbf_head = _create_rbf_head(
-            self.num_classes,
-            self.repulsion_strength,
-            self.min_distance,
+        """Build the RBF prototype-classification head (``output_mode='normalized'``)."""
+        self.rbf_head = create_mixture_layer(
+            "rbf",
+            units=self.num_classes,
+            output_mode="normalized",
+            repulsion_strength=self.repulsion_strength,
+            min_distance=self.min_distance,
+            name="rbf_head",
         )
 
     def build(self, input_shape: Any) -> None:
@@ -737,16 +689,21 @@ class CliffordRBFProtoNet(keras.Model):
         else:
             self.feature_proj = None
 
+    # DECISION plan-2026-09-16T064227-b83f88ad/D-002: 'normalized' is the ONLY
+    # supported output_mode for this head -- do not expose output_mode as a
+    # constructor knob defaulting to 'basis' (RBFLayer's own docstring and
+    # decisions.md D-002 document 'basis' as barely-trainable at this scale).
+    # The pin is written inline here and in RBFProtoNet._build_rbf_head, one
+    # call per model; a test asserts both heads are 'normalized'.
     def _build_rbf_head(self) -> None:
-        """Build the RBF prototype-classification head.
-
-        Delegates to the module-level ``_create_rbf_head`` helper shared with
-        :class:`RBFProtoNet`.
-        """
-        self.rbf_head = _create_rbf_head(
-            self.num_classes,
-            self.repulsion_strength,
-            self.min_distance,
+        """Build the RBF prototype-classification head (``output_mode='normalized'``)."""
+        self.rbf_head = create_mixture_layer(
+            "rbf",
+            units=self.num_classes,
+            output_mode="normalized",
+            repulsion_strength=self.repulsion_strength,
+            min_distance=self.min_distance,
+            name="rbf_head",
         )
 
     def build(self, input_shape: Any) -> None:

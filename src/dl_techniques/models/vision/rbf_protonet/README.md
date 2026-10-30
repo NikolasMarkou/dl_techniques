@@ -58,7 +58,7 @@ phi_i(x) = exp(-gamma_i * ||x - c_i||^2)
 where `c_i` is prototype `i`'s learned center (`RBFLayer.centers`) and `gamma_i` is its
 learned, always-positive (softplus-parameterized) width (`RBFLayer.gamma_raw`), per
 `radial_basis_function.py`'s docstring. `RBFProtoNet` fixes `output_mode='normalized'`
-(never `'basis'`: the comment above `_create_rbf_head` in `model.py` records why), so the head's output is the **normalized RBF (NRBF)**
+(never `'basis'`: the comment above each model's `_build_rbf_head` in `model.py` records why), so the head's output is the **normalized RBF (NRBF)**
 activation:
 
 ```
@@ -174,8 +174,8 @@ outputs are compared at `atol=0`:
 An alternative backbone for the same RBF prototype head: instead of `RBFProtoNet`'s
 multi-stage stride-2 CNN, `CliffordRBFProtoNet` pairs an isotropic stack of
 `CliffordNetBlock`s (`dl_techniques.layers.geometric.clifford_block`) with the identical
-`_create_rbf_head(...)` classification head. Both classes live in this package's `model.py`
-and share that one helper; the two backbones themselves have no shared code, mirroring
+`create_mixture_layer('rbf', ..., output_mode='normalized')` classification head. Both classes live in this package's `model.py`
+and each builds that head in its own `_build_rbf_head`; the two backbones themselves have no shared code, mirroring
 `vision/dino/`'s own "no common trunk" precedent for architecturally distinct backbones.
 
 ### Overview
@@ -183,7 +183,7 @@ and share that one helper; the two backbones themselves have no shared code, mir
 | | |
 |---|---|
 | Backbone | One strided patch-embedding stem (a `ConvStem` named `stem`: one `Conv2D`, then `BatchNormalization` with momentum 0.9 and epsilon 1e-3, no activation), then `depth` identical `CliffordNetBlock`s (`block_{i}`, each with a `block_{i}_drop_path`) at a fixed `channels` width -- isotropic, no per-stage downsampling |
-| Head | The same `_create_rbf_head(...)` / `RBFLayer(output_mode='normalized')` head as `RBFProtoNet` |
+| Head | The same `create_mixture_layer('rbf', ..., output_mode='normalized')` (`RBFLayer`) head as `RBFProtoNet`, built in its own `_build_rbf_head` |
 | Feature width | `feature_dim=128` (default); a `Dense` projection is only created if `channels != feature_dim` |
 | Registration | `dl_techniques.models.rbf_protonet.model` (same module as `RBFProtoNet`) |
 | Input size | any: the pooling is global, so the constructor takes no `input_shape`, and a stale `input_shape=` or `input_dim=` raises `ValueError` naming it (Keras alone would only warn) |
