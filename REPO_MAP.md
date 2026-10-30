@@ -214,7 +214,9 @@ same-named trainer is usually still trained, under another name:
 trainers live one level down. `src/train/logic/` is a boolean-circuit and rule-learning
 research harness (numbered experiment scripts plus its own `PAPER.md`), and
 `src/train/rms_variants_train/` is a normalization-layer ablation sweep (`sweep.py`,
-`RESULTS.md`). `src/train/common/` is a shared library, not a trainer. Read `src/train/` as
+`RESULTS.md`), and `src/train/mean_shift/` is the harness for the Mode Pooling and MeanShift
+Attention experiments (a gated subprocess per cell, `rows.jsonl`, `report.py`, `README.md`).
+`src/train/common/` is a shared library, not a trainer. Read `src/train/` as
 "runnable pipelines", not "one directory per model".
 
 **3. `models/time_series/` is the one family whose `__init__.py` re-exports its children.**
