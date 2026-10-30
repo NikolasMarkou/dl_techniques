@@ -145,44 +145,6 @@ _TOKEN_MIXERS = ('repmixer', 'attention')
 # ---------------------------------------------------------------------
 
 
-def _create_layer_scale(
-        layer_scale_init_value: Optional[float],
-        name: str,
-) -> Optional[LayerScale]:
-    """Build a FastViT ``LayerScale2d`` equivalent, or ``None`` when disabled.
-
-    Shared by every block in this module so that the ``constraint=None``
-    requirement is stated in exactly one place.
-
-    :param layer_scale_init_value: Constant value the per-channel gamma is
-        initialized to, or ``None`` to disable LayerScale entirely (the branch is
-        then admitted unscaled, which is the reference's ``layer_scale_init_value
-        is None`` path).
-    :type layer_scale_init_value: Optional[float]
-    :param name: Sub-layer name.
-    :type name: str
-    :return: A per-channel :class:`LayerScale` with ``constraint=None``,
-        or ``None`` when ``layer_scale_init_value is None``.
-    :rtype: Optional[LayerScale]
-
-    .. warning::
-       ``constraint=None`` is REQUIRED, not cosmetic. The layer's own default
-       is ``constraint='non_neg'``, which clamps gamma at zero; a LayerScale
-       gamma must be free to take a negative value.
-    """
-    if layer_scale_init_value is None:
-        return None
-    return LayerScale(
-        multiplier_type='CHANNEL',
-        initializer=keras.initializers.Constant(layer_scale_init_value),
-        constraint=None,
-        name=name,
-    )
-
-
-# ---------------------------------------------------------------------
-
-
 @register_dl_technique("dl_techniques.models.fastvit.components")
 class FastVitConvMlp(keras.layers.Layer):
     """FastViT convolutional MLP: depthwise ``k x k`` + BN, then a position-wise MLP.
@@ -628,8 +590,13 @@ class FastVitRepMixer(keras.layers.Layer):
             kernel_regularizer=self.kernel_regularizer,
             name='mixer',
         )
-        self.layer_scale = _create_layer_scale(
-            self.layer_scale_init_value, name='layer_scale')
+        # constraint=None is REQUIRED: LayerScale defaults to non_neg, which clamps gamma at zero.
+        self.layer_scale = LayerScale(
+            multiplier_type='CHANNEL',
+            initializer=keras.initializers.Constant(self.layer_scale_init_value),
+            constraint=None,
+            name='layer_scale',
+        ) if self.layer_scale_init_value is not None else None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Explicitly build every sub-layer, then the layer itself.
@@ -891,8 +858,13 @@ class FastVitRepMixerBlock(keras.layers.Layer):
             kernel_regularizer=self.kernel_regularizer,
             name='mlp',
         )
-        self.layer_scale = _create_layer_scale(
-            self.layer_scale_init_value, name='layer_scale')
+        # constraint=None is REQUIRED: LayerScale defaults to non_neg, which clamps gamma at zero.
+        self.layer_scale = LayerScale(
+            multiplier_type='CHANNEL',
+            initializer=keras.initializers.Constant(self.layer_scale_init_value),
+            constraint=None,
+            name='layer_scale',
+        ) if self.layer_scale_init_value is not None else None
         # Created UNCONDITIONALLY: StochasticDepth accepts a rate of exactly 0.0
         # and short-circuits to the identity for it, so there is no reason to gate
         # construction on the rate. `drop_path_rate >= 1.0` raises from here.
@@ -1500,10 +1472,20 @@ class FastVitAttentionBlock(keras.layers.Layer):
             output_kernel_initializer=clone_initializer(self.kernel_initializer),
             kernel_regularizer=self.kernel_regularizer,
         )
-        self.layer_scale_1 = _create_layer_scale(
-            self.layer_scale_init_value, name='layer_scale_1')
-        self.layer_scale_2 = _create_layer_scale(
-            self.layer_scale_init_value, name='layer_scale_2')
+        # constraint=None is REQUIRED: LayerScale defaults to non_neg, which clamps gamma at zero.
+        self.layer_scale_1 = LayerScale(
+            multiplier_type='CHANNEL',
+            initializer=keras.initializers.Constant(self.layer_scale_init_value),
+            constraint=None,
+            name='layer_scale_1',
+        ) if self.layer_scale_init_value is not None else None
+        # constraint=None is REQUIRED: LayerScale defaults to non_neg, which clamps gamma at zero.
+        self.layer_scale_2 = LayerScale(
+            multiplier_type='CHANNEL',
+            initializer=keras.initializers.Constant(self.layer_scale_init_value),
+            constraint=None,
+            name='layer_scale_2',
+        ) if self.layer_scale_init_value is not None else None
         # Created UNCONDITIONALLY: StochasticDepth accepts a rate of exactly 0.0
         # and short-circuits to the identity for it.
         self.drop_path_1 = StochasticDepth(
