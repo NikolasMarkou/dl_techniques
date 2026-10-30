@@ -34,6 +34,7 @@ from dl_techniques.models.vision_language.sam.sam2.training_model import SAM2Tra
 from .test_model import images, pin_object_score, tiny_model
 
 BATCH = 3
+SEEDS = tuple(range(7, 15))
 
 
 def _click(batch: int = BATCH, points: int = 1, seed: int = 0) -> Any:
@@ -114,17 +115,32 @@ def test_call_answers_a_single_click_with_the_best_iou_candidate(model, winner):
 def test_the_natural_ranking_is_followed_row_by_row():
     """No forced bias: each row takes its own argmax, and the rows disagree.
 
-    Seeded: the rows' natural ranking is a property of the initial weights,
-    and an unseeded build takes whatever the earlier tests left in the RNG.
-    Seed 8, not 7: the memory-attention FFN became an ``MLPBlock``, which draws
-    its initializers in a different order, so seed 7 now gives eight rows that
-    all rank candidate 0 first (measured over seeds 7-12: 8 and 10-12 disagree).
+    The rows' natural ranking is a property of the initial weights, so the
+    property under test (following the ranking row by row is distinguishable
+    from always picking one candidate) needs a build whose rows do not all
+    rank the same candidate first. Whether a seed gives one is luck of the
+    initializers' draw order: swapping a feed-forward block for an ``MLPBlock``
+    moved seed 7 from disagreeing rows to eight rows that all rank candidate 0
+    first, and a fixed replacement seed would rot the same way. So the test
+    walks ``SEEDS`` and uses the first build whose rows disagree, and FAILS
+    LOUDLY if none does; it never passes on rows that agree. Each build is
+    seeded, since an unseeded one takes whatever the earlier tests left in the RNG.
     """
-    keras.utils.set_random_seed(8)
-    model = tiny_model()
-    pin_object_score(model, 5.0)
     image, points = images(8, seed=3), _click(8, seed=3)
-    hand = _hand_selection(model({"image": image, "points": points}, multimask_output=True))
+    tried = []
+    for seed in SEEDS:
+        keras.utils.set_random_seed(seed)
+        model = tiny_model()
+        pin_object_score(model, 5.0)
+        hand = _hand_selection(
+            model({"image": image, "points": points}, multimask_output=True))
+        tried.append(hand["best"].tolist())
+        if len(set(tried[-1])) > 1:
+            break
+    else:
+        pytest.fail(
+            f"no seed in {SEEDS} gave rows that disagree, so the property is "
+            f"not exercised; best candidate per row for each seed: {tried}")
     assert len(set(hand["best"].tolist())) > 1, f"rows agree: {hand['best']}"
     answer = model({"image": image, "points": points})
     np.testing.assert_array_equal(

@@ -12,6 +12,30 @@ pipeline's (numpy draws, one foreground cell of frame 0 per clip). MEASURED on t
 RTX 4070 (scratchpad ``s128/m2_fixed_200``): 0.31 after 20 steps, 0.028 after 100,
 against 0.959; with the standardization removed the same 20 steps stay above the
 constant.
+
+Why ``STEPS`` is 150 and not 20. MEASURED 2026-10-30 on CPU (no CUDA device on the
+box), ``max(losses)`` over the four fixed clicks against the bar ``0.5 * constant``
+(constants 3.38-3.88, bars 1.69-1.94), ``SAM2TrainingConfig`` seeds 40-47, one
+fresh model per seed, worst seed of the eight and the number of seeds under the
+bar. Every column is one run per seed fitted in chunks; the single 150-step ``fit``
+this test makes was measured on HEAD too (worst seed 47: 0.374 against a bar of 1.771)::
+
+    steps                  20     40     60     100    150
+    HEAD   worst max       3.15   2.11   1.28   0.68   0.43
+    HEAD   seeds passing   2/8    5/8    8/8    8/8    8/8
+    before 43cf54658
+           worst max       3.70   2.89   2.37   1.72   1.14
+    before seeds passing   1/8    4/8    7/8    8/8    8/8
+
+At 20 steps the bar was passed by the luck of the seed, not by the model: only
+seed 42 passed before commit 43cf54658 swapped the Hiera and memory-attention
+FFNs for ``MLPBlock`` (which draws its initializers in a different order), and
+42 stopped passing after it, although the forward output on fixed weights, the
+kernel initializer (glorot uniform, same std and bounds), the bias (zeros) and
+the activation are unchanged. 150 steps clears the bar on every measured seed on
+either side of that commit (by 4.7x on HEAD's worst seed, 1.7x on the old tree's
+worst), and costs about 15 s on top of the compile-dominated 110 s the 20-step
+run took.
 """
 
 import keras
@@ -30,7 +54,7 @@ from train.sam2.train_sam2 import (
     create_sam2_training_model,
 )
 
-STEPS = 20
+STEPS = 150
 DRAWS = 4
 
 
