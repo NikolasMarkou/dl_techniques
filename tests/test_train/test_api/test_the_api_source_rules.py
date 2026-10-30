@@ -1,20 +1,34 @@
 """Source rules for ``src/train/__main__.py`` and ``src/train/api/**/*.py``.
 
-Several census guards under ``tests/test_train/`` either cannot see the new
-package or sit beside a pinned count that is already red at HEAD
+A module planted under ``api/`` is caught by most of the repository's own
+guards: the seed census (an unlisted entry point), the history-write, ingestion
+and keras2 censuses, and by count the broad-handler, setup-gpu and
+no-val-columns guards (measured in review-iter-1, concern 12). The rules here
+are an additional, syntactic layer over exactly these files, for the
+properties the plan states and the censuses do not name. They do not replace
+the censuses, and the censuses do not replace them: a dict key such as
+``drop_rate=`` and an ``if __name__`` block under a ``test_`` function did not
+fire any census.
+
+One census is still red at HEAD for an unrelated reason
 (``test_the_census_counts_are_pinned``, exempt 48 != 50, which Step 1 of the
-plan deselects by exact id). This file therefore carries the checks for the
-API on its own, by AST:
+plan deselects by exact id), so a count-based guard is not a reliable signal.
 
 1. no bare, ``Exception`` or ``BaseException`` handler;
 2. no ``except KeyboardInterrupt``;
 3. no ``if __name__ ...`` test (an entry-point block would make
    ``train.__main__`` a seed-census entry point that declares no ``--seed``);
 4. every handler in ``api/cli.py`` names exactly ``DLTrainError`` (D-009);
-5. no module-scope import of ``tensorflow``, ``keras``, ``train.common``,
-   ``dl_techniques.models`` or ``yaml`` (D-012; the help path stays light);
+5. no module-scope import of ``tensorflow``, ``keras``, ``tf_keras``,
+   ``tensorboard``, ``train.common``, ``dl_techniques.models`` or ``yaml``
+   (D-012; the help path stays light);
 6. no ``print(`` call (logging goes through the logger, output through ``sys.stdout.write``);
-7. no write of ``CUDA_VISIBLE_DEVICES``.
+7. no write of ``CUDA_VISIBLE_DEVICES``;
+8. no deletion call (``unlink``, ``rmtree``, ``remove``, ``rmdir``, however
+   spelled): a run directory is never emptied or removed by this package
+   (invariant 5), and the repository has lost results to a cleanup before;
+9. no ``contextlib.suppress(Exception)`` (or ``BaseException``), which is a
+   broad handler in a ``with`` statement.
 
 Each rule is a function over a source text. A planted snippet proves the
 rule fires, a clean snippet proves it stays quiet, and the sweep applies it to
@@ -36,8 +50,19 @@ API_DIR = SRC_TRAIN / "api"
 MIN_FILES = 8
 
 BROAD = ("Exception", "BaseException")
-HEAVY = ("tensorflow", "keras", "train.common", "dl_techniques.models", "yaml")
+HEAVY = (
+    "tensorflow",
+    "keras",
+    "tf_keras",
+    "tensorboard",
+    "train.common",
+    "dl_techniques.models",
+    "yaml",
+)
 GPU_VARIABLE = "CUDA_VISIBLE_DEVICES"
+
+#: Names that delete a file or a tree, as a function, a method or an attribute.
+DELETERS = ("unlink", "rmtree", "remove", "rmdir", "removedirs")
 
 
 def api_files() -> List[Path]:
@@ -206,6 +231,37 @@ def rule_no_gpu_variable_write(tree: ast.AST, path: Path) -> List[str]:
     return problems
 
 
+def _called_name(node: ast.Call) -> str:
+    """Return the last name of what a call calls: ``a.b.c()`` gives ``c``."""
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    return ""
+
+
+def rule_no_deletion_call(tree: ast.AST, path: Path) -> List[str]:
+    problems = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _called_name(node) in DELETERS:
+            problems.append(f"{path.name}:{node.lineno}: deletion call {ast.unparse(node.func)}()")
+        elif isinstance(node, ast.ImportFrom):
+            # ``from shutil import rmtree as gone`` hides the name at the call.
+            for alias in node.names:
+                if alias.name in DELETERS:
+                    problems.append(f"{path.name}:{node.lineno}: imports {alias.name}")
+    return problems
+
+
+def rule_no_broad_suppress(tree: ast.AST, path: Path) -> List[str]:
+    problems = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _called_name(node) == "suppress":
+            if any(name in BROAD for arg in node.args for name in _names(arg)):
+                problems.append(f"{path.name}:{node.lineno}: broad {ast.unparse(node)}")
+    return problems
+
+
 RULES = {
     "no_broad_handler": rule_no_broad_handler,
     "no_keyboard_interrupt_handler": rule_no_keyboard_interrupt_handler,
@@ -214,6 +270,8 @@ RULES = {
     "no_heavy_module_scope_import": rule_no_heavy_module_scope_import,
     "no_print": rule_no_print,
     "no_gpu_variable_write": rule_no_gpu_variable_write,
+    "no_deletion_call": rule_no_deletion_call,
+    "no_broad_suppress": rule_no_broad_suppress,
 }
 
 CLI_PATH = API_DIR / "cli.py"
@@ -252,6 +310,24 @@ PLANTED = [
     ("no_gpu_variable_write", 'env = {"CUDA_VISIBLE_DEVICES": "0"}\n', OTHER_PATH),
     ("no_gpu_variable_write", 'import os\nNAME = "CUDA_VISIBLE_DEVICES"\nos.environ[NAME] = "0"\n', OTHER_PATH),
     ("no_gpu_variable_write", 'import subprocess\nsubprocess.run([], env=dict(CUDA_VISIBLE_DEVICES="0"))\n', OTHER_PATH),
+    ("no_heavy_module_scope_import", "import tf_keras\n", OTHER_PATH),
+    ("no_heavy_module_scope_import", "from tf_keras.src import layers\n", OTHER_PATH),
+    ("no_heavy_module_scope_import", "import tensorboard\n", OTHER_PATH),
+    ("no_heavy_module_scope_import", "from tensorboard.compat import tf\n", OTHER_PATH),
+    ("no_deletion_call", "from pathlib import Path\nPath('x').unlink()\n", OTHER_PATH),
+    ("no_deletion_call", "from pathlib import Path\nPath('x').unlink(missing_ok=True)\n", OTHER_PATH),
+    ("no_deletion_call", "import os\nos.unlink('x')\n", OTHER_PATH),
+    ("no_deletion_call", "import os\nos.remove('x')\n", OTHER_PATH),
+    ("no_deletion_call", "import os\nos.rmdir('x')\n", OTHER_PATH),
+    ("no_deletion_call", "import os\nos.removedirs('x')\n", OTHER_PATH),
+    ("no_deletion_call", "import shutil\nshutil.rmtree('x', ignore_errors=True)\n", OTHER_PATH),
+    ("no_deletion_call", "def f(run_dir):\n    for stale in run_dir.glob('*.json'):\n        stale.unlink()\n", OTHER_PATH),
+    ("no_deletion_call", "from shutil import rmtree\nrmtree('x')\n", OTHER_PATH),
+    ("no_deletion_call", "from os import unlink as gone\ngone('x')\n", OTHER_PATH),
+    ("no_broad_suppress", "import contextlib\nwith contextlib.suppress(Exception):\n    pass\n", OTHER_PATH),
+    ("no_broad_suppress", "from contextlib import suppress\nwith suppress(BaseException):\n    pass\n", OTHER_PATH),
+    ("no_broad_suppress", "import contextlib\nwith contextlib.suppress(OSError, Exception):\n    pass\n", OTHER_PATH),
+    ("no_broad_suppress", "import contextlib\nwith contextlib.suppress(builtins.Exception):\n    pass\n", OTHER_PATH),
 ]
 
 # Source that every rule must leave alone.
@@ -280,6 +356,22 @@ CLEAN = [
         "doc = 'CUDA_VISIBLE_DEVICES is read, never written'\n"
         "if sys.argv:\n"
         "    pass\n"
+    ),
+    (
+        "import contextlib\n"
+        "import os\n"
+        "from pathlib import Path\n"
+        "\n"
+        "def g(run_dir: Path):\n"
+        "    note = 'unlink and rmtree and remove are words here, not calls'\n"
+        "    removed = []  # a name that merely contains the word\n"
+        "    run_dir.mkdir(parents=True, exist_ok=True)\n"
+        "    held = sorted(entry.name for entry in run_dir.iterdir())\n"
+        "    fd = os.open(run_dir / 'x', os.O_CREAT | os.O_EXCL | os.O_WRONLY)\n"
+        "    os.close(fd)\n"
+        "    with contextlib.suppress(KeyError):\n"
+        "        pass\n"
+        "    return note, removed, held, run_dir.exists()\n"
     ),
 ]
 

@@ -8,8 +8,11 @@ parser forgot to forward fails the first check; a key whose value equals the
 default would pass the first check for the wrong reason, which the second
 check refuses.
 
-``Task`` is a stand-in that carries the seven groups. The real task config
-(Step 16) extends this table with its own top-level keys.
+``Task`` is a stand-in built from ``train.api.args`` itself (``_groups.py``),
+one field per group class the module defines, so an eighth group appears in it
+the moment it is written and fails the completeness test until it has rows. A
+hand-written ``Task`` could not notice. The real task config (Step 16) extends
+this table with its own top-level keys.
 """
 
 import dataclasses
@@ -17,28 +20,12 @@ from typing import Any, Dict, Tuple
 
 import pytest
 
-from train.api.args import (
-    AnalysisArgs,
-    CheckpointArgs,
-    DebugArgs,
-    LoggerArgs,
-    MetricArgs,
-    OptimArgs,
-    TransformArgs,
-)
 from train.api.cli import coerce_mapping, parse_dotlist
 from train.api.config import AUTO, StrictConfig, validate
 
+from ._groups import args_groups, task_class
 
-@dataclasses.dataclass(frozen=True)
-class Task(StrictConfig):
-    optim_args: OptimArgs = dataclasses.field(default_factory=OptimArgs)
-    transform_args: TransformArgs = dataclasses.field(default_factory=TransformArgs)
-    metric_args: MetricArgs = dataclasses.field(default_factory=MetricArgs)
-    checkpoint_args: CheckpointArgs = dataclasses.field(default_factory=CheckpointArgs)
-    logger_args: LoggerArgs = dataclasses.field(default_factory=LoggerArgs)
-    analysis_args: AnalysisArgs = dataclasses.field(default_factory=AnalysisArgs)
-    debug_args: DebugArgs = dataclasses.field(default_factory=DebugArgs)
+Task = task_class()
 
 
 #: (dotted key, command-line text, expected value). One row per group field.
@@ -94,6 +81,13 @@ def every_group_key() -> set:
         for group in dataclasses.fields(Task)
         for field in dataclasses.fields(group.type)
     }
+
+
+def test_the_stand_in_carries_every_group_the_args_module_defines():
+    carried = [field.type for field in dataclasses.fields(Task)]
+    assert carried == args_groups()
+    assert len(carried) >= 7, "Phase 1 ships seven groups; a derivation that finds fewer is broken"
+    assert issubclass(Task, StrictConfig)
 
 
 def test_the_table_covers_every_group_field_exactly():

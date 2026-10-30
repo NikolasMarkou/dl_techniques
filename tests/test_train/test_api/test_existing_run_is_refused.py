@@ -158,6 +158,73 @@ def test_a_directory_beside_a_finished_run_is_accepted(tmp_path):
     assert open_run(tmp_path / "sibling", resume=False) == tmp_path / "sibling"
 
 
+#: Files of a run's layout that are not all in the artifact tuple; none may
+#: be deleted by a call that accepts the directory.
+RUN_TREE = (
+    "config.json",
+    "training_history.json",
+    "model_summary.txt",
+    "best_model.keras",
+    "tensorboard/events.out",
+    "visualizations/curves.png",
+    "model_analysis/a.json",
+    "epoch_analysis/e1/x.png",
+    "checkpoints/fit_state.json",
+    "conformal.json",
+    "notes.json",
+)
+
+
+def test_accepting_a_directory_deletes_nothing_beside_a_finished_run(tmp_path):
+    finished = tmp_path / "finished"
+    for name in (*RUN_TREE, "results_summary.json"):
+        plant(finished, name)
+    (tmp_path / "empty_sibling").mkdir()  # an empty directory is not ours to remove
+    before = snapshot(tmp_path)
+    assert open_run(tmp_path / "sibling", resume=False) == tmp_path / "sibling"
+    assert open_run(tmp_path / "new_parent" / "run", resume=False)
+    after = snapshot(tmp_path)
+    assert {key: after.get(key) for key in before} == before, "something under the finished run changed"
+    assert set(after) - set(before) == {
+        "sibling", "sibling/config_requested.json",
+        "new_parent", "new_parent/run", "new_parent/run/config_requested.json",
+    }
+
+
+def test_the_writers_delete_nothing_that_is_already_in_the_run_directory(tmp_path):
+    # Between open_run and the writers a trainer puts files in the directory
+    # (a log, a stale config.json from a crashed attempt, an empty directory).
+    run_dir = tmp_path / "run"
+    open_run(run_dir, resume=False)
+    for name in ("config.json", "run.log", "best_model.keras", "notes.json", "tensorboard/x"):
+        plant(run_dir, name)
+    (run_dir / "empty_dir").mkdir()
+    before = snapshot(tmp_path)
+    write_requested(run_dir, {"epochs": 1})
+    after = snapshot(tmp_path)
+    assert {key: after.get(key) for key in before if key != "run/config_requested.json"} == {
+        key: value for key, value in before.items() if key != "run/config_requested.json"
+    }
+    before = after
+    write_resolved(run_dir, {"epochs": 1})
+    after = snapshot(tmp_path)
+    assert {key: after.get(key) for key in before if key != "run/config.json"} == {
+        key: value for key, value in before.items() if key != "run/config.json"
+    }
+
+
+def test_the_two_config_writers_add_files_and_delete_none(tmp_path):
+    run_dir = tmp_path / "run"
+    open_run(run_dir, resume=False)
+    write_requested(run_dir, {"epochs": 1})
+    after_request = snapshot(tmp_path)
+    write_resolved(run_dir, {"epochs": 1})
+    after_resolved = snapshot(tmp_path)
+    assert set(after_request) == {"run", "run/config_requested.json"}
+    assert set(after_resolved) == {"run", "run/config_requested.json", "run/config.json"}
+    assert after_resolved["run/config_requested.json"] == after_request["run/config_requested.json"]
+
+
 # ---------------------------------------------------------------------
 # The claim
 # ---------------------------------------------------------------------
@@ -261,6 +328,28 @@ def test_resume_with_a_backup_returns_the_path_and_touches_nothing(tmp_path):
     plant(run_dir, "config_requested.json")
     plant(run_dir, "training_log.csv")
     before = snapshot(tmp_path)
+    assert open_run(run_dir, resume=True) == run_dir
+    assert snapshot(tmp_path) == before
+
+
+def test_resume_where_the_backup_is_a_plain_file_is_refused(tmp_path):
+    run_dir = tmp_path / "run"
+    (run_dir / "checkpoints").mkdir(parents=True)
+    (run_dir / "checkpoints" / "backup").write_text("not a directory")
+    before = snapshot(tmp_path)
+    with pytest.raises(ConfigError, match="checkpoints/backup"):
+        open_run(run_dir, resume=True)
+    assert snapshot(tmp_path) == before
+
+
+def test_resume_leaves_a_whole_unfinished_run_tree_byte_identical(tmp_path):
+    run_dir = tmp_path / "run"
+    for name in RUN_TREE:
+        plant(run_dir, name)
+    plant(run_dir, "checkpoints/backup")
+    (run_dir / "checkpoints" / "backup" / "state.json").write_text("{}")
+    before = snapshot(tmp_path)
+    assert len(before) >= len(RUN_TREE), "the tree was not planted"
     assert open_run(run_dir, resume=True) == run_dir
     assert snapshot(tmp_path) == before
 
@@ -405,6 +494,13 @@ def test_auto_goes_under_the_repo_results_directory_and_creates_nothing(tmp_path
     assert not (tmp_path / "results").exists()
     listing_after = sorted(p.name for p in results.iterdir()) if results.is_dir() else None
     assert listing_after == listing_before
+
+
+@pytest.mark.parametrize("word", ["AUTO", "Auto", "auto/", "auto2"])
+def test_only_the_exact_lowercase_word_asks_for_a_timestamped_directory(word):
+    run_dir = resolve_out(word, "image_classification", "vit", "vit_pico")
+    assert run_dir == REPO / word.rstrip("/"), run_dir
+    assert run_dir.parent == REPO
 
 
 def test_a_relative_path_is_anchored_at_the_repo_root_not_the_working_directory(

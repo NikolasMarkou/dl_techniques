@@ -11,7 +11,7 @@ import json
 import math
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
 
 import pytest
 
@@ -86,6 +86,19 @@ class Containers(StrictConfig):
     pair: Tuple[Auto[int], int] = (1, 1)
     free: Dict[str, Any] = dataclasses.field(default_factory=dict)
     text: str = "auto"
+
+
+@dataclasses.dataclass(frozen=True)
+class Shapes(StrictConfig):
+    """One field per container shape, and a Literal of numbers."""
+
+    counts: List[int] = dataclasses.field(default_factory=list)
+    pair: Tuple[int, str] = (1, "a")
+    run: Tuple[float, ...] = ()
+    weights: Dict[str, float] = dataclasses.field(default_factory=dict)
+    seq: Sequence[int] = ()
+    level: Literal[1, 2] = 1
+    lr: float = 1.0
 
 
 def errors_of(cls, mapping):
@@ -219,6 +232,122 @@ def test_a_non_mapping_top_level_is_refused():
 
 
 # ---------------------------------------------------------------------
+# Container element and key types, unknown keys, Literal numbers
+# ---------------------------------------------------------------------
+
+
+def test_list_elements_are_checked_one_by_one_with_their_index():
+    assert errors_of(Shapes, {"counts": ["a", 1, 2.5]}) == (
+        "Invalid value for 'counts[0]': expected int, got 'a' (str)",
+        "Invalid value for 'counts[2]': expected int, got 2.5 (float)",
+    )
+
+
+def test_fixed_tuple_elements_are_checked_against_their_own_position():
+    assert errors_of(Shapes, {"pair": ["x", 2]}) == (
+        "Invalid value for 'pair[0]': expected int, got 'x' (str)",
+        "Invalid value for 'pair[1]': expected str, got 2 (int)",
+    )
+    assert validate(Shapes, {"pair": [3, "b"]}).pair == (3, "b")
+
+
+def test_variadic_tuple_elements_are_checked():
+    assert errors_of(Shapes, {"run": ["a", 1]}) == (
+        "Invalid value for 'run[0]': expected float, got 'a' (str)",
+    )
+    assert validate(Shapes, {"run": [1, 2.5]}).run == (1.0, 2.5)
+
+
+def test_dict_values_and_dict_keys_are_checked():
+    assert errors_of(Shapes, {"weights": {"a": "x", 1: 2.0}}) == (
+        "Invalid value for 'weights.a': expected float, got 'x' (str)",
+        "Invalid value for 'weights.1': expected str, got 1 (int)",
+    )
+    assert validate(Shapes, {"weights": {"a": 1}}).weights == {"a": 1.0}
+
+
+@pytest.mark.parametrize("field", ["counts", "pair", "seq"])
+@pytest.mark.parametrize("text", ["12", "ab", ""])
+def test_a_string_is_not_a_list(field, text):
+    (line,) = errors_of(Shapes, {field: text})
+    assert line.startswith(f"Invalid value for '{field}': expected a list")
+
+
+def test_a_tuple_is_a_list_for_a_sequence_field():
+    assert validate(Shapes, {"seq": (1, 2)}).seq == [1, 2]
+    assert validate(Shapes, {"counts": (1, 2)}).counts == [1, 2]
+
+
+def test_a_literal_of_numbers_matches_type_as_well_as_value():
+    assert validate(Shapes, {"level": 2}).level == 2
+    for bad in (True, 1.0, "1", 3):
+        (line,) = errors_of(Shapes, {"level": bad})
+        assert line.startswith("Invalid value for 'level': expected one of 1, 2")
+
+
+def test_an_integer_too_large_for_a_float_is_a_line_not_a_traceback():
+    (line,) = errors_of(Shapes, {"lr": 10**400})
+    assert line.startswith("Invalid value for 'lr': expected float")
+    assert line.endswith(": too large for a float")
+
+
+def test_every_unknown_key_is_reported_and_the_walk_goes_on():
+    assert errors_of(Shapes, {"zz": 1, "yy": 2, "counts": ["a"]}) == (
+        "Unknown key 'zz'.",
+        "Unknown key 'yy'.",
+        "Invalid value for 'counts[0]': expected int, got 'a' (str)",
+    )
+    assert errors_of(Top, {"optim_args": {"stepz": 1, "lrr": 2, "steps": "x"}, "nme": 1}) == (
+        "Unknown key 'optim_args.stepz'. Did you mean 'optim_args.steps'?",
+        "Unknown key 'optim_args.lrr'. Did you mean 'optim_args.lr'?",
+        "Invalid value for 'optim_args.steps': expected int, got 'x' (str)",
+        "Unknown key 'nme'. Did you mean 'name'?",
+    )
+
+
+@pytest.mark.parametrize("typo", ["cosine", "momentum", "epochs", "xyz"])
+def test_a_key_that_resembles_no_sibling_gets_no_suggestion(typo):
+    # difflib's default cutoff (0.6) is the rule; "epochs" scores 0.55 against "steps".
+    (line,) = errors_of(Top, {"optim_args": {typo: 1}})
+    assert line == f"Unknown key 'optim_args.{typo}'."
+
+
+@pytest.mark.parametrize("typo, wanted", [("stps", "steps"), ("sched", "schedule"), ("lrr", "lr")])
+def test_a_key_that_resembles_a_sibling_names_it(typo, wanted):
+    (line,) = errors_of(Top, {"optim_args": {typo: 1}})
+    assert line == f"Unknown key 'optim_args.{typo}'. Did you mean 'optim_args.{wanted}'?"
+
+
+def test_an_instance_of_another_group_is_not_read_as_the_group_asked_for():
+    (line,) = errors_of(Top, {"optim_args": Inner()})
+    assert line.startswith("Invalid value for 'optim_args': expected a mapping of Optim fields, got Inner(")
+
+
+def test_to_json_writes_numpy_values_of_a_free_dict_as_native_json():
+    import numpy as np
+
+    config = validate(
+        Top,
+        {"model_args": {"a": np.float32(1.5), "b": np.int64(3), "c": np.arange(3)}},
+    )
+    assert json.loads(to_json(config))["model_args"] == {"a": 1.5, "b": 3, "c": [0, 1, 2]}
+
+
+@pytest.mark.parametrize("text", [".inf", "-.inf", ".Inf", ".INF", ".nan", ".NaN", ".NAN"])
+def test_yaml_dot_inf_and_dot_nan_are_floats_that_a_float_field_then_refuses(tmp_path, text):
+    loaded = load_yaml_mapping(write(tmp_path, f"optim_args:\n  lr: {text}\n"))
+    assert isinstance(loaded["optim_args"]["lr"], float)
+    (line,) = errors_of(Top, loaded)
+    assert line.startswith("Invalid value for 'optim_args.lr': expected float, got ")
+    assert line.endswith("(float)"), "the YAML text must arrive as a float, not as text"
+
+
+def test_a_null_override_replaces_a_whole_mapping_and_survives_a_second_merge():
+    assert merge({"a": {"x": 1}, "b": 2}, {"a": None}) == {"a": None, "b": 2}
+    assert merge(merge({"a": {"x": 1}}, {"a": None}), {"a": {"y": 2}}) == {"a": {"y": 2}}
+
+
+# ---------------------------------------------------------------------
 # merge, assert_resolved, base class
 # ---------------------------------------------------------------------
 
@@ -339,6 +468,12 @@ def test_yaml_one_point_two_floats_and_the_usual_scalars(tmp_path):
         "a": 0.001, "b": 0.5, "c": 2.0, "d": -150.0, "e": "abc", "f": None, "g": 7,
     }
     assert type(loaded["g"]) is int
+
+
+def test_yaml_reads_a_leading_plus_as_a_float_and_a_leading_minus_as_the_int_it_is(tmp_path):
+    loaded = load_yaml_mapping(write(tmp_path, "a: +1.5\nb: +5\nc: -5\nd: +.5\ne: +1e-3\nf: -1.5\n"))
+    assert loaded == {"a": 1.5, "b": 5.0, "c": -5, "d": 0.5, "e": 0.001, "f": -1.5}
+    assert [type(loaded[k]) for k in "abcdef"] == [float, float, int, float, float, float]
 
 
 def test_a_yaml_one_point_one_surprise_fails_loudly_in_validation(tmp_path):
@@ -551,6 +686,20 @@ def test_a_free_dict_refuses_a_non_string_key_at_any_depth():
 def test_a_non_string_top_level_key_is_refused_with_the_word_string():
     (line,) = errors_of(Top, {1: 2})
     assert line == "Invalid key '1': keys must be strings, got 1 (int)"
+
+
+def test_every_non_string_key_is_reported_and_the_walk_goes_on():
+    assert errors_of(Top, {1: "a", 2: "b", "nme": 3, "name": 4}) == (
+        "Invalid key '1': keys must be strings, got 1 (int)",
+        "Invalid key '2': keys must be strings, got 2 (int)",
+        "Unknown key 'nme'. Did you mean 'name'?",
+        "Invalid value for 'name': expected str, got 4 (int)",
+    )
+    assert errors_of(Top, {"optim_args": {1: 1, 2: 2, "steps": "x"}}) == (
+        "Invalid key 'optim_args.1': keys must be strings, got 1 (int)",
+        "Invalid key 'optim_args.2': keys must be strings, got 2 (int)",
+        "Invalid value for 'optim_args.steps': expected int, got 'x' (str)",
+    )
 
 
 def test_validate_copies_a_free_dict_deeply():

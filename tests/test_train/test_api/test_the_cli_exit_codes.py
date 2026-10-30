@@ -43,6 +43,7 @@ import typing
 from types import SimpleNamespace
 
 from train.api.config import StrictConfig
+from train.api.errors import DLTrainError, UnknownModelError, UnresolvedAutoError
 
 
 @dataclasses.dataclass(frozen=True)
@@ -84,6 +85,26 @@ def run_interrupted(*, value=1, rate=0.5, tags=()):
     raise KeyboardInterrupt
 
 
+def run_none(*, value=1, rate=0.5, tags=()):
+    _announce("none", value=value, rate=rate)
+    return SimpleNamespace(success=None)
+
+
+def run_unresolved(*, value=1, rate=0.5, tags=()):
+    _announce("unresolved", value=value, rate=rate)
+    raise UnresolvedAutoError("these fields are still 'auto': optim_args.lr")
+
+
+def run_unknown_model(*, value=1, rate=0.5, tags=()):
+    _announce("unknown_model", value=value, rate=rate)
+    raise UnknownModelError("no model 'vit/huge'")
+
+
+def run_dltrain(*, value=1, rate=0.5, tags=()):
+    _announce("dltrain", value=value, rate=rate)
+    raise DLTrainError("a plain base-class failure")
+
+
 def run_required(*, out, value=1):
     _announce("required", out=out, value=value)
     return SimpleNamespace(success=True)
@@ -92,12 +113,17 @@ def run_required(*, out, value=1):
 # The driver registers the fake tasks, then runs the real ``train.__main__``.
 # It reads sys.argv[1:] the way ``python -m train`` does, so the arguments
 # after ``-c`` are the command line under test.
+FAKE_NAMES = (
+    "ok", "unmet", "raises", "interrupted", "required",
+    "none", "unresolved", "unknown_model", "dltrain",
+)
+
 DRIVER = f'''
 import runpy
 
 from train.api.registry import TaskSpec, register_task
 
-for name in ("ok", "unmet", "raises", "interrupted", "required"):
+for name in {FAKE_NAMES!r}:
     register_task(
         TaskSpec(
             name=f"fake_{{name}}",
@@ -126,13 +152,18 @@ def cwd(tmp_path) -> Path:
     return directory
 
 
-def run_injected(args: Sequence[str], source_dir: Path, cwd: Path):
-    """Run ``python -m train <args>`` with the fake tasks registered first."""
+def run_injected(
+    args: Sequence[str], source_dir: Path, cwd: Path, python_args: Sequence[str] = ()
+):
+    """Run ``python -m train <args>`` with the fake tasks registered first.
+
+    :param python_args: interpreter options placed before ``-c``, e.g. ``-X importtime``.
+    """
     existing = os.environ.get("PYTHONPATH")
     path = os.pathsep.join([str(source_dir)] + ([existing] if existing else []))
     env = {**os.environ, "PYTHONPATH": path}
     return subprocess.run(
-        [sys.executable, "-c", DRIVER, *args],
+        [sys.executable, *python_args, "-c", DRIVER, *args],
         cwd=cwd,
         env=env,
         capture_output=True,
@@ -174,8 +205,8 @@ def test_the_injected_tasks_are_listed(source_dir, cwd):
     # Liveness for every injected arm: the driver really registered the fakes.
     result = run_injected(["list_tasks"], source_dir, cwd)
     assert result.returncode == 0, result.stderr[-2000:]
-    for name in ("fake_ok", "fake_unmet", "fake_raises", "fake_interrupted", "fake_required"):
-        assert name in result.stdout
+    for name in FAKE_NAMES:
+        assert f"fake_{name}" in result.stdout
 
 
 # ---------------------------------------------------------------------
@@ -276,6 +307,26 @@ def test_a_list_command_accepts_every_help_word(command, word, cwd):
     assert result.stderr == ""
 
 
+# A task that raises a DLTrainError of its own is a user-fixable failure, not a
+# crash: every subclass of the base class exits 2, whichever branch it sits on.
+DLTRAIN_ARMS = [
+    pytest.param("fake_unresolved", "these fields are still 'auto': optim_args.lr", id="unresolved-auto"),
+    pytest.param("fake_unknown_model", "no model 'vit/huge'", id="unknown-model"),
+    pytest.param("fake_dltrain", "a plain base-class failure", id="base-class"),
+]
+
+
+@pytest.mark.parametrize("task, message", DLTRAIN_ARMS)
+def test_every_dltrain_error_a_task_raises_exits_two_without_a_traceback(
+    task, message, source_dir, cwd
+):
+    result = run_injected([task, "value=1"], source_dir, cwd)
+    assert f"{MARKER} {task[len('fake_'):]}" in result.stdout, "the task was not reached"
+    assert result.returncode == 2, (result.stdout[-500:], result.stderr[-1500:])
+    assert result.stderr == f"error: {message}\n", result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_two_bad_keys_print_two_lines_at_once(source_dir, cwd):
     result = run_injected(["fake_ok", "value=abc", "rate=zzz"], source_dir, cwd)
     assert result.returncode == 2
@@ -308,6 +359,13 @@ def test_an_unmet_result_exits_one_without_a_traceback(source_dir, cwd):
     result = run_injected(["fake_unmet", "value=1"], source_dir, cwd)
     assert result.returncode == 1, result.stderr[-2000:]
     assert f"{MARKER} unmet" in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+def test_a_result_with_no_success_value_exits_one(source_dir, cwd):
+    result = run_injected(["fake_none", "value=1"], source_dir, cwd)
+    assert f"{MARKER} none" in result.stdout, "the task was not reached"
+    assert result.returncode == 1, (result.stdout[-500:], result.stderr[-1500:])
     assert "Traceback" not in result.stderr
 
 

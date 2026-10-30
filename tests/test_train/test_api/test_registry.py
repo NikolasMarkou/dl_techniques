@@ -5,6 +5,7 @@ so no real family is imported (that would load TensorFlow). The module name is
 unique, so "was it imported" is answered by ``sys.modules``.
 """
 
+import subprocess
 import sys
 import textwrap
 
@@ -23,11 +24,13 @@ MODULE = "fake_train_api_registry_module"
 
 SOURCE = '''
 import dataclasses
+from typing import Any, Dict
+
 from train.api.config import StrictConfig
 
 
 class Family:
-    MODEL_VARIANTS = {"small": 1, "tiny": 2}
+    MODEL_VARIANTS = {"tiny": 2, "small": 1}  # not in sorted order, on purpose
 
 
 def make_model(variant):
@@ -38,6 +41,25 @@ def make_model(variant):
 class FakeConfig(StrictConfig):
     count: int = dataclasses.field(default=1, metadata={"help": "a count"})
     name: str = dataclasses.field(default="x", metadata={"help": "a name"})
+
+
+@dataclasses.dataclass(frozen=True)
+class DeepGroup(StrictConfig):
+    rate: float = dataclasses.field(default=0.1, metadata={"help": "a rate"})
+    kind: str = dataclasses.field(default="a", metadata={"help": "a kind"})
+
+
+@dataclasses.dataclass(frozen=True)
+class MiddleGroup(StrictConfig):
+    deep: DeepGroup = dataclasses.field(default_factory=DeepGroup)
+    limit: int = dataclasses.field(default=3, metadata={"help": "a limit"})
+
+
+@dataclasses.dataclass(frozen=True)
+class NestedConfig(StrictConfig):
+    out: str = dataclasses.field(metadata={"help": "where to write"})
+    middle: MiddleGroup = dataclasses.field(default_factory=MiddleGroup)
+    tags: Dict[str, Any] = dataclasses.field(default_factory=dict, metadata={"help": "free tags"})
 
 
 CALLS = []
@@ -81,10 +103,10 @@ def model_spec(family="fam", tasks=("fake_task",), module=MODULE):
     )
 
 
-def task_spec(name="fake_task", module=MODULE):
+def task_spec(name="fake_task", module=MODULE, config="FakeConfig"):
     return registry.TaskSpec(
         name=name,
-        config_class=f"{module}:FakeConfig",
+        config_class=f"{module}:{config}",
         function=f"{module}:run_fake",
         summary="a synthetic task",
     )
@@ -378,6 +400,55 @@ def test_a_task_command_prints_its_keys_instead_of_running(
     assert sys.modules[fake_module].CALLS == []
 
 
+def test_the_task_help_reaches_nested_keys_at_every_depth(
+    fake_module, empty_registries, capsys
+):
+    registry.register_task(task_spec(config="NestedConfig"))
+    assert cli.main(["fake_task"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert "  out  (str)  where to write [required]" in lines
+    assert "  middle.limit  (int)  a limit [default: 3]" in lines
+    assert "  middle.deep.rate  (float)  a rate [default: 0.1]" in lines
+    assert "  middle.deep.kind  (str)  a kind [default: 'a']" in lines
+    assert "  tags  (a mapping)  free tags [default: {}]" in lines
+    # A group is not a leaf: only its fields are listed, never the group itself.
+    assert not any(line.startswith(("  middle  ", "  middle.deep  ")) for line in lines)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [["help", "count=3"], ["count=3", "help"], ["help", "help"], ["-h", "--help"]],
+    ids=str,
+)
+def test_a_help_word_among_other_arguments_is_not_a_help_request(
+    args, fake_module, empty_registries, capsys
+):
+    registry.register_task(task_spec())
+    assert cli.main(["fake_task", *args]) == 2
+    captured = capsys.readouterr()
+    assert "is not key=value" in captured.err or "Repeated key" in captured.err
+    assert "usage:" not in captured.out
+    assert sys.modules[fake_module].CALLS == []
+
+
+@pytest.mark.parametrize("word", ["help", "-h", "--help"])
+def test_a_top_level_help_word_takes_no_arguments(word, empty_registries, capsys):
+    assert cli.main([word, "x=1"]) == 2
+    captured = capsys.readouterr()
+    assert captured.err == f"error: {word} takes no arguments, got: x=1\n"
+    assert captured.out == ""
+    assert cli.main([word]) == 0
+    assert "usage:" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("args", [["x=1"], ["task=a"], ["extra"], ["a", "b"]], ids=str)
+def test_list_tasks_refuses_any_argument_that_is_not_a_help_word(args, empty_registries, capsys):
+    assert cli.main(["list_tasks", *args]) == 2
+    captured = capsys.readouterr()
+    assert captured.err == f"error: list_tasks takes no arguments, got: {' '.join(args)}\n"
+    assert captured.out == ""
+
+
 def test_the_task_help_says_an_empty_mapping_does_not_clear_a_file_value(
     fake_module, empty_registries, capsys
 ):
@@ -413,3 +484,29 @@ def test_dir_lists_the_surface_and_every_name_resolves():
 def test_an_unknown_attribute_is_an_attribute_error():
     with pytest.raises(AttributeError, match="no attribute 'nope'"):
         train.api.nope
+
+
+def test_the_surface_lists_every_lazy_name_once_and_sorted():
+    assert train.api.__all__ == sorted(train.api._LAZY)
+    assert len(set(train.api.__all__)) == len(train.api.__all__)
+    # The first and the last name are the ones an off-by-one slice would lose.
+    assert train.api.__all__[0] in dir(train.api) and train.api.__all__[-1] in dir(train.api)
+
+
+def test_a_fresh_import_loads_no_submodule_and_a_first_access_is_cached():
+    code = (
+        "import sys\n"
+        "import train.api\n"
+        "loaded = sorted(n for n in sys.modules if n.startswith('train.api.'))\n"
+        "print('LOADED', loaded)\n"
+        "assert 'ConfigError' not in vars(train.api)\n"
+        "error = train.api.ConfigError\n"
+        "assert vars(train.api)['ConfigError'] is error, 'the first access was not cached'\n"
+        "print('CACHED')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert "LOADED []" in result.stdout, result.stdout
+    assert "CACHED" in result.stdout

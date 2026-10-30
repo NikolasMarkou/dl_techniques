@@ -335,6 +335,76 @@ def test_every_bad_value_and_unknown_key_is_reported_in_one_error():
     assert "Unknown key 'outt'. Did you mean 'out'?" in errors
 
 
+@dataclasses.dataclass(frozen=True)
+class Typed(StrictConfig):
+    labels: Dict[str, str] = dataclasses.field(default_factory=dict)
+    counts: Dict[str, int] = dataclasses.field(default_factory=dict)
+    maybe: Dict[str, Optional[str]] = dataclasses.field(default_factory=dict)
+
+
+def test_dotted_keys_of_a_typed_dict_are_coerced_by_its_value_type():
+    # Typed as Any, "5" would be the number 5 and "null" would be None; a str
+    # value type keeps the text, an int value type refuses a float.
+    _, raw = parse_dotlist(["labels.a=5", "labels.b=true", "labels.c=null", "counts.n=7"])
+    assert coerce_mapping(Typed, raw) == {
+        "labels": {"a": "5", "b": "true", "c": "null"},
+        "counts": {"n": 7},
+    }
+    _, bad = parse_dotlist(["counts.n=1.5"])
+    with pytest.raises(ConfigValidationError) as caught:
+        coerce_mapping(Typed, bad)
+    assert caught.value.errors == (
+        "Invalid value for 'counts.n': expected int, got '1.5' (str)",
+    )
+
+
+def test_a_typed_dict_of_optional_values_reads_null_as_none():
+    _, raw = parse_dotlist(["maybe.a=null", "maybe.b=x"])
+    assert coerce_mapping(Typed, raw) == {"maybe": {"a": None, "b": "x"}}
+
+
+@dataclasses.dataclass(frozen=True)
+class Choices(StrictConfig):
+    level: Literal[1, 2] = 1
+    flag: Literal[True] = True
+    mixed: Literal["a", 3] = "a"
+
+
+def test_a_literal_of_numbers_reads_its_choices_by_their_own_type():
+    assert coerce(Literal[1, 2], "2", "k") == 2
+    assert type(coerce(Literal[1, 2], "2", "k")) is int
+    assert coerce(Literal["a", 3], "3", "k") == 3
+    assert coerce(Literal["a", 3], "a", "k") == "a"
+    for bad in ("3", "1.0", "one", "", "True"):
+        assert "expected one of 1, 2" in coerce_error(Literal[1, 2], bad)
+
+
+def test_a_literal_of_numbers_in_a_group_is_typed_from_the_command_line():
+    _, raw = parse_dotlist(["level=2", "mixed=3"])
+    assert coerce_mapping(Choices, raw) == {"level": 2, "mixed": 3}
+    assert coerce_mapping(Choices, parse_dotlist(["flag=true"])[1]) == {"flag": True}
+
+
+@pytest.mark.parametrize("text", ["null", "NULL", "None", "none", "nOnE"])
+def test_the_null_type_reads_the_null_words_in_any_case(text):
+    assert coerce(type(None), text, "k") is None
+    assert "expected null" in coerce_error(type(None), "nil")
+
+
+@pytest.mark.parametrize(
+    "raw, line",
+    [
+        ({"optim_args": "[1]"}, "Invalid value for 'optim_args': expected a mapping of Optim fields, got '[1]' (str): the JSON text is not a dict"),
+        ({"model_args": "[1]"}, "Invalid value for 'model_args': expected a mapping, got '[1]' (str): the JSON text is not a dict"),
+        ({"layers": '{"a": 1}'}, 'Invalid value for \'layers\': expected a list of int, got \'{"a": 1}\' (str): the JSON text is not a list'),
+        ({"layers": "7"}, "Invalid value for 'layers': expected a list of int, got '7' (str): the JSON text is not a list"),
+    ],
+    ids=["group-given-a-list", "dict-given-a-list", "list-given-a-dict", "list-given-a-number"],
+)
+def test_json_of_the_wrong_shape_is_refused_at_the_command_line_with_its_reason(raw, line):
+    assert mapping_errors(raw) == (line,)
+
+
 def test_sub_keys_under_a_scalar_field_are_refused():
     errors = mapping_errors({"epochs": {"foo": "1"}})
     assert len(errors) == 1
@@ -399,6 +469,19 @@ def test_an_unmet_result_returns_one():
     function, calls = recorder(success=False)
     assert run_task(Top, function, ["epochs=3"]) == 1
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("success", [None, 0, False, ""])
+def test_a_result_that_is_not_truthy_returns_one(success):
+    function, calls = recorder(success=success)
+    assert run_task(Top, function, ["epochs=3"]) == 1
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("success", [True, 1, "yes"])
+def test_a_truthy_success_returns_zero(success):
+    function, _calls = recorder(success=success)
+    assert run_task(Top, function, ["epochs=3"]) == 0
 
 
 def test_the_config_file_loads_first_and_the_dotlist_wins(tmp_path):

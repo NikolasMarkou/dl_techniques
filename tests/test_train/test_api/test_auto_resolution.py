@@ -29,15 +29,9 @@ from train.api.errors import (
     UnresolvedAutoError,
 )
 
-GROUPS = (
-    OptimArgs,
-    TransformArgs,
-    MetricArgs,
-    CheckpointArgs,
-    LoggerArgs,
-    AnalysisArgs,
-    DebugArgs,
-)
+from ._groups import args_groups, task_class
+
+GROUPS = tuple(args_groups())
 
 FAKE_RECIPE: Mapping[str, Mapping[str, Any]] = {
     "optim_args": {
@@ -75,17 +69,9 @@ def context(num_classes: int = 10, defaults: Mapping[str, Any] = None) -> AutoCo
     )
 
 
-@dataclasses.dataclass(frozen=True)
-class Task(StrictConfig):
-    """A stand-in task config: the seven groups and nothing else."""
-
-    optim_args: OptimArgs = dataclasses.field(default_factory=OptimArgs)
-    transform_args: TransformArgs = dataclasses.field(default_factory=TransformArgs)
-    metric_args: MetricArgs = dataclasses.field(default_factory=MetricArgs)
-    checkpoint_args: CheckpointArgs = dataclasses.field(default_factory=CheckpointArgs)
-    logger_args: LoggerArgs = dataclasses.field(default_factory=LoggerArgs)
-    analysis_args: AnalysisArgs = dataclasses.field(default_factory=AnalysisArgs)
-    debug_args: DebugArgs = dataclasses.field(default_factory=DebugArgs)
+# The stand-in task config is built from train.api.args, so a group added there
+# is resolved, documented and checked by every test below (see _groups.py).
+Task = task_class()
 
 
 def resolve_all(task: Task, ctx: AutoContext) -> Task:
@@ -135,7 +121,8 @@ def test_resolve_returns_a_new_instance_and_leaves_the_original():
 
 
 @pytest.mark.parametrize(
-    "num_classes, expected", [(10, 0.2), (100, 0.05), (2, 0.95), (1000, 0.05)]
+    "num_classes, expected",
+    [(10, 0.2), (100, 0.05), (2, 0.95), (1000, 0.05), (1, 0.95), (3, 2 / 3), (7, 2 / 7)],
 )
 def test_success_threshold_literals(num_classes, expected):
     metric = MetricArgs().resolve_auto(context(num_classes))
@@ -197,6 +184,117 @@ def test_an_explicit_global_clipnorm_does_not_collide_with_the_recipe_clip():
     recipe = {"optim_args": {**FAKE_RECIPE["optim_args"], "clipnorm": 1.0, "global_clipnorm": None}}
     optim = OptimArgs(global_clipnorm=2.0).resolve_auto(context(defaults=recipe))
     assert (optim.clipnorm, optim.global_clipnorm) == (None, 2.0)
+
+
+@pytest.mark.parametrize("value", [0.5, 0.0, 0, 1.0])
+def test_an_explicit_success_threshold_is_kept_and_the_formula_is_not_applied(value):
+    # The formula gives 0.2 for ten classes; none of these may become it.
+    metric = MetricArgs(success_threshold=value).resolve_auto(context(10))
+    assert metric.success_threshold == value
+    assert type(metric.success_threshold) is float
+
+
+ZERO_RECIPE = {
+    "optim_args": {"warmup_epochs": 5, "warmup_start_lr": 1e-8, "min_lr_ratio": 0.01, "lr": 3e-4},
+    "transform_args": {"random_erasing_prob": 0.25, "augment": "flip"},
+    "checkpoint_args": {"early_stopping_patience": 15},
+}
+
+
+@pytest.mark.parametrize(
+    "recipe_key, group, key, zero",
+    [
+        ("optim_args", OptimArgs, "warmup_epochs", 0),
+        ("optim_args", OptimArgs, "warmup_start_lr", 0.0),
+        ("optim_args", OptimArgs, "min_lr_ratio", 0.0),
+        ("optim_args", OptimArgs, "lr", 0.0),
+        ("transform_args", TransformArgs, "random_erasing_prob", 0.0),
+        ("checkpoint_args", CheckpointArgs, "early_stopping_patience", 0),
+    ],
+)
+def test_an_explicit_zero_beats_a_recipe_value_that_is_not_zero(recipe_key, group, key, zero):
+    # 0 is falsy and equals False and 0.0; none of that may let the recipe in.
+    assert ZERO_RECIPE[recipe_key][key] != 0
+    result = group(**{key: zero}).resolve_auto(context(defaults=ZERO_RECIPE))
+    assert getattr(result, key) == zero
+    assert type(getattr(result, key)) is type(zero)
+
+
+# The two clipping fields exclude each other, and the rule that keeps them
+# apart acts on a number only (D-028).
+
+
+def test_an_explicit_null_clipnorm_does_not_clear_the_recipe_global_clip():
+    recipe = {"optim_args": {"clipnorm": None, "global_clipnorm": 1.0}}
+    optim = OptimArgs(clipnorm=None).resolve_auto(context(defaults=recipe))
+    assert (optim.clipnorm, optim.global_clipnorm) == (None, 1.0)
+
+
+def test_an_explicit_null_global_clipnorm_does_not_clear_the_recipe_clipnorm():
+    recipe = {"optim_args": {"clipnorm": 1.0, "global_clipnorm": None}}
+    optim = OptimArgs(global_clipnorm=None).resolve_auto(context(defaults=recipe))
+    assert (optim.clipnorm, optim.global_clipnorm) == (1.0, None)
+
+
+def test_two_explicit_clips_both_survive_resolution_and_the_refusal_is_not_ours():
+    # optim.py refuses the pair later; resolution must not repair it silently.
+    optim = OptimArgs(clipnorm=0.5, global_clipnorm=2.0).resolve_auto(context())
+    assert (optim.clipnorm, optim.global_clipnorm) == (0.5, 2.0)
+
+
+def test_an_explicit_clip_resolves_the_other_to_none_whatever_the_recipe_says():
+    recipe = {"optim_args": {"clipnorm": 3.0, "global_clipnorm": 4.0}}
+    one = OptimArgs(clipnorm=0.5).resolve_auto(context(defaults=recipe))
+    other = OptimArgs(global_clipnorm=0.5).resolve_auto(context(defaults=recipe))
+    assert (one.clipnorm, one.global_clipnorm) == (0.5, None)
+    assert (other.clipnorm, other.global_clipnorm) == (None, 0.5)
+
+
+def test_the_recipe_cannot_decide_the_mode_the_threshold_or_the_image_size():
+    # Each of the three has its own rule: the metric's name, the class count, the data.
+    recipe = {
+        "metric_args": {"watch_metric": "val_accuracy", "watch_mode": "min", "success_threshold": 0.9},
+        "transform_args": {"image_size": 224, "augment": "flip"},
+    }
+    metric = MetricArgs().resolve_auto(context(10, defaults=recipe))
+    assert (metric.watch_metric, metric.watch_mode, metric.success_threshold) == ("val_accuracy", "max", 0.2)
+    assert TransformArgs().resolve_auto(context(defaults=recipe)).image_size == 32
+
+
+def test_a_recipe_mode_with_no_recipe_metric_leaves_the_mode_auto_to_be_reported():
+    # The mode follows the resolved metric's name; with no metric to read it
+    # from, the recipe's mode is not a substitute (it may belong to another metric).
+    recipe = {"metric_args": {"watch_mode": "min"}}
+    metric = MetricArgs().resolve_auto(context(defaults=recipe))
+    assert (metric.watch_metric, metric.watch_mode) == (AUTO, AUTO)
+    with pytest.raises(UnresolvedAutoError, match="metric_args.watch_mode"):
+        assert_resolved(resolve_all(validate(Task, {}), context(defaults=recipe)))
+
+
+def test_the_context_is_frozen():
+    ctx = context()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        ctx.num_classes = 3
+
+
+@pytest.mark.parametrize(
+    "group",
+    [
+        OptimArgs(
+            optimizer="sgd", lr=0.1, weight_decay=None, momentum=0.9, beta_1=None, beta_2=None,
+            epsilon=None, schedule="constant", warmup_epochs=0, warmup_start_lr=0.0,
+            min_lr_ratio=0.0, decay_over="total", clipnorm=None, global_clipnorm=None,
+        ),
+        TransformArgs(image_size=16, augment="flip", random_erasing_prob=0.0),
+        MetricArgs(watch_metric="val_loss", watch_mode="min", success_threshold=0.5),
+        CheckpointArgs(early_stopping_patience=4),
+    ],
+    ids=lambda group: type(group).__name__,
+)
+def test_a_group_with_nothing_to_fill_still_comes_back_as_a_new_equal_instance(group):
+    result = group.resolve_auto(context())
+    assert result == group
+    assert result is not group
 
 
 def test_an_explicit_augment_is_kept():
@@ -374,11 +472,53 @@ def test_the_seven_groups_default_to_their_documented_values():
     assert TransformArgs().normalize == "standardize"
 
 
+@pytest.mark.parametrize(
+    "group, field",
+    [
+        ("optim_args", "weight_decay"),
+        ("optim_args", "momentum"),
+        ("optim_args", "beta_1"),
+        ("optim_args", "beta_2"),
+        ("optim_args", "epsilon"),
+        ("optim_args", "clipnorm"),
+        ("optim_args", "global_clipnorm"),
+        ("analysis_args", "conformal_alpha"),
+    ],
+)
+def test_the_fields_documented_as_null_for_none_accept_null_and_keep_it(group, field):
+    task = validate(Task, {group: {field: None}})
+    assert getattr(getattr(task, group), field) is None
+    # An explicit null also survives resolution, even where the recipe has a number.
+    recipe = {"optim_args": {field: 0.5}} if group == "optim_args" else FAKE_RECIPE
+    kept = resolve_all(task, context(defaults={**FAKE_RECIPE, **recipe}))
+    assert getattr(getattr(kept, group), field) is None
+
+
+@pytest.mark.parametrize("bad", ["avg", "MAX", "", 1, True, None])
+def test_watch_mode_refuses_everything_but_min_max_and_auto(bad):
+    with pytest.raises(ConfigValidationError, match="metric_args.watch_mode"):
+        validate(Task, {"metric_args": {"watch_mode": bad}})
+
+
+@pytest.mark.parametrize("good", ["min", "max", "auto"])
+def test_watch_mode_accepts_min_max_and_auto(good):
+    assert validate(Task, {"metric_args": {"watch_mode": good}}).metric_args.watch_mode == good
+
+
 def test_a_tensorboard_dict_with_keys_is_refused_and_null_is_accepted():
     assert LoggerArgs(tensorboard=None).tensorboard is None
     with pytest.raises(ConfigValidationError, match="logger_args.tensorboard"):
         validate(Task, {"logger_args": {"tensorboard": {"update_freq": "batch"}}})
     assert validate(Task, {"logger_args": {"tensorboard": None}}).logger_args.tensorboard is None
+
+
+def test_an_empty_tensorboard_dict_is_the_accepted_default_however_it_is_given():
+    # {} turns TensorBoard on; only a dict WITH keys is refused. A group built
+    # from a mapping runs the check, so the empty cases must pass it.
+    for given in ({"logger_args": {}}, {"logger_args": {"tensorboard": {}}}, {"logger_args": LoggerArgs()}):
+        assert validate(Task, given).logger_args.tensorboard == {}
+    assert LoggerArgs().problems("logger_args") == []
+    assert LoggerArgs(tensorboard=None).problems("logger_args") == []
 
 
 @dataclasses.dataclass(frozen=True)

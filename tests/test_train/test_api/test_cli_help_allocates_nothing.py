@@ -1,7 +1,8 @@
 """``python -m train help`` is the one property of the CLI with a hard limit.
 
 The help path, ``<task> help`` included, imports no ``tensorflow``, ``keras``,
-``train.common``, ``dl_techniques.models`` or ``yaml``, and
+``tf_keras``, ``tensorboard``, ``train.common``, ``dl_techniques.models`` or
+``yaml``, and
 ``python -m train help`` finishes in under one second. Every ``train.common``
 import costs about 4.2 s and loads TensorFlow (D-012), so one stray
 module-scope import is enough to break it.
@@ -23,7 +24,18 @@ import pytest
 
 from train.api import cli
 
-FORBIDDEN = ("tensorflow", "keras", "train.common", "dl_techniques.models", "yaml")
+# ``cwd`` and ``source_dir`` are fixtures; importing them makes them visible here.
+from .test_the_cli_exit_codes import cwd, run_injected, source_dir  # noqa: F401
+
+FORBIDDEN = (
+    "tensorflow",
+    "keras",
+    "tf_keras",
+    "tensorboard",
+    "train.common",
+    "dl_techniques.models",
+    "yaml",
+)
 HELP_ARMS = [["help"], ["-h"], ["--help"], []]
 RUN_ARMS = [["list_tasks"], ["list_tasks", "help"]]
 TIME_LIMIT_SECONDS = 1.0
@@ -68,6 +80,32 @@ def test_the_help_path_imports_nothing_heavy(args, tmp_path):
     # Liveness: the listing really covers the CLI, so an empty parse cannot pass.
     assert "train.api.cli" in modules, modules[-20:]
     assert forbidden_in(modules) == []
+
+
+@pytest.mark.parametrize(
+    "args",
+    [["fake_ok"], ["fake_ok", "help"], ["fake_ok", "-h"], ["fake_ok", "--help"]],
+    ids=lambda a: " ".join(a),
+)
+def test_a_task_help_imports_nothing_heavy_either(args, source_dir, cwd):
+    result = run_injected(args, source_dir, cwd, python_args=("-X", "importtime"))
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert "usage: python -m train fake_ok" in result.stdout
+    modules = imported_modules(result.stderr)
+    # Liveness: the listing covers the CLI, and the task's config class really
+    # was imported by the help path (importlib.import_module is not an
+    # importtime line, so the keys it supplied are the evidence).
+    assert "train.api.cli" in modules, modules[-20:]
+    assert "  value  (int)  a count [default: 1]" in result.stdout, result.stdout
+    assert forbidden_in(modules) == []
+
+
+def test_the_forbidden_list_names_the_two_keras_backends_and_their_children():
+    assert forbidden_in(
+        ["tf_keras", "tf_keras.src.layers", "tensorboard", "tensorboard.compat.v1"]
+    ) == ["tensorboard", "tensorboard.compat.v1", "tf_keras", "tf_keras.src.layers"]
+    # A longer name that merely starts with a forbidden one is not under it.
+    assert forbidden_in(["tensorboardx", "kerastuner", "yamlish"]) == []
 
 
 @pytest.mark.parametrize("args", HELP_ARMS, ids=lambda a: " ".join(a) or "no-args")
@@ -123,3 +161,35 @@ def test_verbose_flag_anywhere_sets_the_dl_logger_to_debug(capsys):
     finally:
         logger.setLevel(before)
     capsys.readouterr()
+
+
+def test_the_logger_level_is_left_alone_without_the_verbose_flag(capsys):
+    logger = logging.getLogger("dl")
+    before = logger.level
+    logger.setLevel(logging.WARNING)
+    try:
+        assert cli.main(["list_tasks"]) == 0
+        assert logger.level == logging.WARNING
+        assert cli.main(["help"]) == 0
+        assert logger.level == logging.WARNING
+    finally:
+        logger.setLevel(before)
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["-v", "list_tasks"], ["list_tasks", "--verbose"], ["--verbose", "help", "-v"]],
+    ids=str,
+)
+def test_the_verbose_flag_in_any_position_sets_debug_and_is_not_an_argument(argv, capsys):
+    logger = logging.getLogger("dl")
+    before = logger.level
+    logger.setLevel(logging.WARNING)
+    try:
+        # A leftover flag would be refused by list_tasks and by help ("takes no arguments").
+        assert cli.main(argv) == 0
+        assert logger.level == logging.DEBUG
+    finally:
+        logger.setLevel(before)
+    assert capsys.readouterr().err == ""
