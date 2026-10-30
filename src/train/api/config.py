@@ -130,7 +130,7 @@ def invalid_value_message(
     :param note: text appended after the "got ..." part.
     """
     return (
-        f"Invalid value for {path!r}: expected {_describe(annotation)}, "
+        f"Invalid value for {path!r}: expected {describe_annotation(annotation)}, "
         f"got {_describe_value(value)}{note}"
     )
 
@@ -150,7 +150,7 @@ def unknown_key_message(prefix: str, name: str, siblings: Any) -> str:
     return message
 
 
-def _describe(annotation: Any) -> str:
+def describe_annotation(annotation: Any) -> str:
     """Return the "expected ..." wording for ``annotation``."""
     origin = typing.get_origin(annotation)
     args = typing.get_args(annotation)
@@ -161,7 +161,7 @@ def _describe(annotation: Any) -> str:
     if origin is Literal:
         return "one of " + ", ".join(repr(a) for a in args)
     if origin is Union:
-        words = [_describe(a) for a in args if typing.get_origin(a) is not Literal]
+        words = [describe_annotation(a) for a in args if typing.get_origin(a) is not Literal]
         choices = [
             c for a in args if typing.get_origin(a) is Literal
             for c in typing.get_args(a)
@@ -177,9 +177,9 @@ def _describe(annotation: Any) -> str:
     if _is_config_class(annotation):
         return f"a mapping of {annotation.__name__} fields"
     if origin in (list, collections.abc.Sequence):
-        return f"a list of {_describe(args[0]) if args else 'values'}"
+        return f"a list of {describe_annotation(args[0]) if args else 'values'}"
     if origin is tuple:
-        return "a list" if not args else f"a list of {_describe(args[0])}"
+        return "a list" if not args else f"a list of {describe_annotation(args[0])}"
     if origin in (dict, collections.abc.Mapping):
         return "a mapping"
     return getattr(annotation, "__name__", str(annotation))
@@ -303,7 +303,7 @@ def _check_group(
         }
     if not isinstance(value, collections.abc.Mapping):
         errors.append(
-            f"Invalid value for {path!r}: expected {_describe(cls)}, "
+            f"Invalid value for {path!r}: expected {describe_annotation(cls)}, "
             f"got {_describe_value(value)}"
         )
         return value

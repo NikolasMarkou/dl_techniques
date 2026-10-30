@@ -108,7 +108,9 @@ def test_help_finishes_in_under_a_second(tmp_path):
 def test_help_lists_every_command_in_the_table_and_nothing_else(capsys):
     assert cli.main(["help"]) == 0
     out = capsys.readouterr().out
-    listed = re.findall(r"^  (\w+)\s{2,}", out, flags=re.MULTILINE)
+    # Only the "commands:" section: registered tasks list under "tasks:".
+    section = out.split("commands:\n", 1)[1].split("\n\n", 1)[0]
+    listed = re.findall(r"^  (\w+)\s{2,}", section, flags=re.MULTILINE)
     assert listed == list(cli.COMMANDS)
 
 

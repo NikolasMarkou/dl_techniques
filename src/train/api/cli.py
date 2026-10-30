@@ -7,6 +7,12 @@ process exit code: 0 on success, 2 when a :class:`~train.api.errors.DLTrainError
 was raised. Any other exception propagates, so Python exits 1 with a
 traceback. Help text goes to stdout, error text to stderr.
 
+Commands are the rows of ``COMMANDS`` (``help``, ``list_tasks``,
+``list_models``), then the tasks in :data:`train.api.registry.TASKS`. A task
+command with no arguments, or with a lone help word, prints its config keys;
+any other arguments go to ``run_task``. ``list_*`` commands list instead of
+printing help, even when given ``help``.
+
 ``parse_dotlist(tokens)``
     :param tokens: ``key=value`` tokens; dots nest, ``config=path.yaml`` is special.
     :return: ``(config_path or None, nested dict of raw strings)``.
@@ -77,8 +83,10 @@ from typing import (
 
 from dl_techniques.utils.logger import logger
 
+from . import registry
 from .config import (
     StrictConfig,
+    describe_annotation,
     invalid_value_message,
     load_yaml_mapping,
     merge,
@@ -110,7 +118,7 @@ class Command(NamedTuple):
 
 
 def _write_help(_args: List[str]) -> int:
-    """Print the help text derived from :data:`COMMANDS`."""
+    """Print the help text derived from :data:`COMMANDS` and the task registry."""
     lines = [
         f"usage: {PROGRAM} <command> [key=value ...]",
         f"       {PROGRAM} <command> help",
@@ -120,6 +128,11 @@ def _write_help(_args: List[str]) -> int:
     width = max(len(name) for name in COMMANDS)
     for command in COMMANDS.values():
         lines.append(f"  {command.name.ljust(width)}  {command.summary}")
+    tasks = registry.list_tasks()
+    if tasks:
+        width = max(len(spec.name) for spec in tasks)
+        lines += ["", "tasks:"]
+        lines += [f"  {spec.name.ljust(width)}  {spec.summary}" for spec in tasks]
     lines += [
         "",
         "options:",
@@ -132,22 +145,101 @@ def _write_help(_args: List[str]) -> int:
 
 
 def _list_tasks(args: List[str]) -> int:
-    """Print the registered task names, one per line."""
+    """Print the registered tasks, one ``name  summary`` line each."""
     if args not in ([], ["help"]):
         raise ConfigError(
             f"list_tasks takes no arguments, got: {' '.join(args)}"
         )
-    sys.stdout.write("no tasks are registered\n")
+    tasks = registry.list_tasks()
+    if not tasks:
+        sys.stdout.write("no tasks are registered\n")
+        return 0
+    width = max(len(spec.name) for spec in tasks)
+    sys.stdout.write(
+        "".join(f"{spec.name.ljust(width)}  {spec.summary}\n" for spec in tasks)
+    )
     return 0
 
 
+def _list_models(args: List[str]) -> int:
+    """Print ``family/variant`` names, one per line; ``task=<name>`` filters.
+
+    This imports the model families' variant tables, so it is not on the help
+    path. ``list_models help`` lists, like ``list_tasks help``.
+    """
+    task = None
+    if args != ["help"]:
+        config_path, raw = parse_dotlist(args)
+        if config_path is not None:
+            raise ConfigError("list_models takes only task=<name>, not config=")
+        for key in raw:
+            if key != "task":
+                raise ConfigError(unknown_key_message("", key, ["task"]))
+        task = raw.get("task")
+        if task is not None and not isinstance(task, str):
+            raise ConfigError("list_models: 'task' takes one name, not a nested key")
+    names = registry.list_models(task)
+    if not names:
+        scope = f" for task {task!r}" if task else ""
+        sys.stdout.write(f"no models are registered{scope}\n")
+        return 0
+    sys.stdout.write("".join(f"{name}\n" for name in names))
+    return 0
+
+
+def _field_help_lines(cls: Type[StrictConfig], prefix: str = "") -> List[str]:
+    """Return one ``key  type  help [default]`` line per leaf key of ``cls``."""
+    hints = typing.get_type_hints(cls)
+    lines: List[str] = []
+    for item in dataclasses.fields(cls):
+        if not item.init:
+            continue
+        key = f"{prefix}.{item.name}" if prefix else item.name
+        annotation = hints[item.name]
+        if isinstance(annotation, type) and issubclass(annotation, StrictConfig):
+            lines += _field_help_lines(annotation, key)
+            continue
+        if item.default is not dataclasses.MISSING:
+            default = f" [default: {item.default!r}]"
+        elif item.default_factory is not dataclasses.MISSING:
+            default = f" [default: {item.default_factory()!r}]"
+        else:
+            default = " [required]"
+        text = item.metadata.get("help", "")
+        lines.append(f"  {key}  ({describe_annotation(annotation)})  {text}{default}")
+    return lines
+
+
+def _write_task_help(spec: registry.TaskSpec) -> int:
+    """Print the keys of a task's config, nested keys written with dots."""
+    lines = [
+        f"usage: {PROGRAM} {spec.name} [config=path.yaml] [key=value ...]",
+        "",
+        spec.summary,
+        "",
+        "keys (dots reach a group, as in optim_args.lr=3e-4):",
+        *_field_help_lines(spec.load_config_class()),
+        "",
+    ]
+    sys.stdout.write("\n".join(lines))
+    return 0
+
+
+def _run_registered_task(spec: registry.TaskSpec, args: List[str]) -> int:
+    """Run a registered task; a bare command or a lone help word prints its keys."""
+    if not args or (len(args) == 1 and args[0] in HELP_WORDS):
+        return _write_task_help(spec)
+    return run_task(spec.load_config_class(), spec.load_function(), args)
+
+
 # One table drives dispatch and the help text, so help never lists a command
-# that does not exist (D-007). Later phases add rows.
+# that does not exist (D-007). Registered tasks are looked up after it (D-029).
 COMMANDS: Dict[str, Command] = {
     command.name: command
     for command in (
         Command("help", "show this help", _write_help),
         Command("list_tasks", "list the registered tasks", _list_tasks),
+        Command("list_models", "list family/variant names, task=<name> filters", _list_models),
     )
 }
 
@@ -182,15 +274,21 @@ def _dispatch(args: List[str]) -> int:
             )
         return COMMANDS["help"].run([])
     command = COMMANDS.get(args[0])
-    if command is None:
+    if command is not None:
+        return command.run(args[1:])
+    # DECISION plan-2026-10-30T132432-a865fa08/D-029: a task is a registry row,
+    # not a COMMANDS row. Do NOT add one hand-written Command per task: the
+    # exit-code tests inject a TaskSpec and expect __main__ to dispatch it.
+    task = registry.TASKS.get(args[0])
+    if task is None:
         raise ConfigError(_unknown_command_message(args[0]))
-    return command.run(args[1:])
+    return _run_registered_task(task, args[1:])
 
 
 def _unknown_command_message(name: str) -> str:
     """Build the unknown-command text, with a suggestion when one is close."""
     message = f"unknown command {name!r}."
-    close = difflib.get_close_matches(name, list(COMMANDS), n=1)
+    close = difflib.get_close_matches(name, [*COMMANDS, *registry.TASKS], n=1)
     if close:
         message += f" Did you mean {close[0]!r}?"
     return message + f" Run '{PROGRAM} help' for the list."
