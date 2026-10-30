@@ -440,6 +440,98 @@ CUDA_VISIBLE_DEVICES="" MPLBACKEND=Agg .venv/bin/python -m train.neural_hmm.trai
     --stay-prob 0.95 --num-train 1500 --epochs 40 --seed 0
 ```
 
+**Reruns on 2026-10-30.** The result directories of the nine runs above are no longer in
+`results/`, so their tables could not be re-derived. Runs A, B and C at seed 0 were rerun
+after the inference changes, on the CPU, not GPU 1, which is unreachable:
+
+| Run | Key | Table above | Rerun |
+|---|---|---|---|
+| A | `nll_gap` | 0.0060 | 0.0058 |
+| A | `viterbi_acc_matched` | 0.9952 | 0.9952 |
+| B | `nll_gap` | 0.0010 | 0.0010 |
+| B | `viterbi_acc_matched` | 0.8871 | 0.8853 |
+| B | `true_viterbi_acc` | 0.9068 | 0.9074 |
+| C | `nll_gap` | 0.0052 | 0.0052 |
+| C | `viterbi_acc` | 0.9414 | 0.9414 |
+
+Run B's `true_viterbi_acc` moved because this data has exact ties: a state's own symbols
+share one probability. Viterbi paths from before and after the rescaling differ in 31 of 500
+test sequences at float32, and both score within 2e-13 of the float64 optimum, so the
+change picks between equally optimal paths. Run B's matched accuracy has the same exposure,
+and its 0.0018 drop has not been separated from training differences between the devices.
+
+### Against Baum-Welch, a softmax tagger, and an autoregressive trap
+
+`compare_baselines.py` on 2026-10-30, on the CPU, 1000 training sequences of 50 steps, at most
+60 epochs, every row written to one JSON-lines file:
+
+```bash
+CUDA_VISIBLE_DEVICES="" MPLBACKEND=Agg .venv/bin/python -m train.neural_hmm.compare_baselines \
+    --output comparison.jsonl
+```
+
+**Baum-Welch.** Means over 5 seeds, `[min, max]` where it matters. Shifted and scaled is
+`5x + 100`. Gaps are to the true model under the same transform. Baum-Welch sees either
+transform identically, as it should, and its numbers agree to 0.001.
+
+| K | Data | Method | `nll_gap` | Matched accuracy | Fit seconds |
+|---|---|---|---|---|---|
+| 4 | standardized | `neural-hmm` | 0.0034 | 0.9945 | 24.3 |
+| 4 | standardized | `neural-hmm` + k-means | 0.0012 | 0.9946 | 27.7 |
+| 4 | standardized | Baum-Welch, k-means | 0.0006 | 0.9946 | 0.3 |
+| 4 | standardized | Baum-Welch, random | 0.1834 `[0.0004, 0.4597]` | 0.8977 | 0.8 |
+| 4 | shifted, scaled | `neural-hmm` | 1.3325 `[0.9074, 1.9620]` | 0.4175 `[0.2514, 0.5404]` | 28.2 |
+| 4 | shifted, scaled | `neural-hmm` + k-means | 0.0011 | 0.9946 | 27.9 |
+| 4 | shifted, scaled | Baum-Welch, k-means | 0.0006 | 0.9946 | 0.3 |
+| 16 | standardized | `neural-hmm` | 0.2347 `[0.1320, 0.3363]` | 0.9040 `[0.8623, 0.9482]` | 47.4 |
+| 16 | standardized | `neural-hmm` + k-means | 0.1904 `[0.0410, 0.3764]` | 0.9059 `[0.8314, 0.9963]` | 49.0 |
+| 16 | standardized | Baum-Welch, k-means | 0.2670 `[0.2117, 0.3429]` | 0.8743 `[0.8432, 0.8956]` | 4.4 |
+| 16 | shifted, scaled | `neural-hmm` | 1.0256 `[0.8924, 1.1758]` | 0.6075 `[0.5669, 0.6361]` | 54.1 |
+| 16 | shifted, scaled | `neural-hmm` + k-means | 0.1729 `[0.0386, 0.2673]` | 0.9169 `[0.8691, 0.9965]` | 48.2 |
+| 16 | shifted, scaled | Baum-Welch, k-means | 0.2668 `[0.2117, 0.3429]` | 0.8756 `[0.8431, 0.8956]` | 3.0 |
+
+What this shows and does not:
+
+- Far from the origin the default start fails, and it had not converged at the epoch cap.
+  `initialize_emissions_from_kmeans` fixes it, so it was kept. On standardized data at K=4 it
+  changes the gap only, and at K=16 the seed ranges overlap.
+- On this data the neural model never beats the same model class fitted well: K=4 ties. At
+  K=16 both methods sit in local optima, with single seeds as low as 0.04. The neural mean is
+  ahead of one k-means start of Baum-Welch, but restarts of Baum-Welch were not measured, so
+  this is not evidence that the neural parametrization finds better optima in general.
+- Baum-Welch was 10 to 100 times faster here, partly because the neural runs used all 60 epochs.
+- Multi-restart for the neural model was not added: the gate was losing to Baum-Welch, and
+  with k-means it no longer does.
+
+**CRF against softmax.** Three seeds, `sample_bio` data with hard BIO constraints, the same
+`transformer` encoder throughout. The softmax tagger is the CRF with frozen uniform transitions.
+
+| Method | Accuracy | Sequences with an invalid path | Epochs |
+|---|---|---|---|
+| softmax | 0.7854 | 0.9983 | 20 |
+| `neural-crf-tagger` | 0.8611 | 0.0517 | 58 |
+| `neural-crf-tagger` + BIO mask | 0.8674 | 0.0000 | 29 |
+
+The data was built to reward label structure, so this bounds what a CRF can add, not what it
+adds on any given task.
+
+**Autoregressive emissions.** Three seeds, `x_t = 0.9 x_{t-1} + 0.1 mu_z + noise`, K=3, where
+history predicts `x_t` strongly and each step says little about the state.
+
+| Method | `nll_gap` | Matched accuracy | Shuffled gap | Posterior entropy |
+|---|---|---|---|---|
+| true model | 0 | 0.7798 | 0.1330 | 0.4728 |
+| `autoregressive-neural-hmm` | 0.0261 | 0.6062 | 0.0702 | 0.6804 |
+| `neural-hmm` | 1.6014 | 0.6634 | 1.5586 | 0.0862 |
+| Baum-Welch, k-means | 1.5956 | 0.6628 | not measured | not measured |
+
+The autoregressive model is partly collapsed: it reaches almost the true likelihood with about
+half the true state information, and it decodes worse than the plain models that fit the data
+far less well. A good likelihood is therefore no evidence of good states. The states are
+weakened, not gone, so this is documented (package README, L-10) with no runtime warning. Read
+the shuffled gap against the data: the true model's own gap is only 0.13 here, and the plain
+HMM's 1.56 comes from a confidently wrong model.
+
 ## 8. Tests
 
 `tests/test_train/test_neural_hmm/`:
@@ -449,6 +541,8 @@ CUDA_VISIBLE_DEVICES="" MPLBACKEND=Agg .venv/bin/python -m train.neural_hmm.trai
   `inference.forward_log_likelihood` and `inference.viterbi_decode`, on an HMM with an
   asymmetric transition matrix and a non-uniform initial distribution (so a transposed
   matrix fails); `unread_arguments` against what `make_true_hmm` actually reads;
+- `test_baselines.py`: Baum-Welch against brute-force enumeration and against the true
+  model, its monotone likelihood and parameter recovery, and a tiny `compare_baselines` run;
 - `test_cli_contract.py`: one contract row per flag, the `--gpu` sentinel, two real
   runs recording what the sampler, the model factory, the optimizer and `fit` received,
   every ignored-flag refusal of §4 and the `null` they leave in `config.json`;

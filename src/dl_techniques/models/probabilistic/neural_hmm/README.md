@@ -230,6 +230,10 @@ The package `__init__.py` exports `NeuralHMM` and `create_neural_hmm`. The `prob
 
 `decode` over 64 sequences of 800 steps at `batch_size=16`, on the CPU, took 2.13 s including its trace; the same batches through the eager `viterbi` took 26.41 s. Each call traces once, so pass a whole split rather than one batch at a time.
 
+### Initialization (`initialization.py`)
+
+`initialize_emissions_from_kmeans(model, inputs, seed=0)`: fits the last layer of the emission head in closed form so that each state starts at a k-means cluster with its spread. Generative Gaussian models with `emission_context="none"` only; any other is refused. Call it before `fit`, on the training split.
+
 ## 8. Configuration & Presets
 
 `NeuralHMM.MODEL_VARIANTS` holds the structural choices only; `n_states` and the observation shape (`obs_type` with `obs_dim` or `vocab_size`) come from the caller, and any argument overrides the preset. Every component a preset builds is read by the forward pass, so every built weight receives a gradient.
@@ -318,6 +322,8 @@ log_z = inference.forward_log_likelihood(out["log_pi"], out["log_A"], out["log_e
 
 The trainer lives in [`src/train/neural_hmm/`](../../../../train/neural_hmm/): it samples sequences from a known ground-truth HMM, trains with stock `fit()`, and scores the learned model against the true model. Run it with `MPLBACKEND=Agg .venv/bin/python -m train.neural_hmm.train_neural_hmm --help` for its flags; measured results are recorded in that directory's README, not here.
 
+- **Standardize Gaussian data, or start from k-means.** The default start puts every mean near 0 and every scale near 1. On `5x + 100` data, `neural-hmm` reached 0.42 matched accuracy at K=4 after 60 epochs against Baum-Welch's 0.99; `initialize_emissions_from_kmeans` or standardizing reaches 0.99 ([comparison](../../../../train/neural_hmm/README.md)).
+- **Check the states, not only the likelihood.** `state_diagnostics` reads what the likelihood cannot (L-10).
 - **Pad on the right.** The mask must be a contiguous valid prefix; interior gaps are not supported and are not checked (§13).
 - **Label switching.** Unsupervised states are identifiable only up to a permutation. Compare decoded paths with ground truth after matching states (Hungarian matching on the confusion matrix).
 - **Sticky starts.** `self_loop_init` (default `2.0`) makes states sticky at initialization, which keeps early decoding from flickering. Lower it for data whose states switch often.
@@ -379,6 +385,7 @@ dwell = 1.0 / (1.0 - np.diag(transition))                              # expecte
 - **L-7. The key part of a fused attention bias does not train.** The `transformer` encoder's attention projects `qkv` with one biased `Dense`; the key bias adds a per-query constant that the softmax removes, so that part receives no gradient, while the fused variable as a whole does.
 - **L-8. Cost grows faster than `T` without XLA.** One loss-and-gradient step of the forward pass, measured on the CPU (`B = 8`, `K = 8`): 202, 274 and 656 us per time step at `T` = 1000, 4000 and 16000 in a plain `tf.function`, and a flat 6 to 9 us per time step with `jit_compile=True`. An `lstm`/`gru` encoder cannot use XLA (§10). Replacing the per-step slices with `keras.ops.take` did not help. `viterbi` and `posteriors` also rewrite a `(B, T, K)` history at each step, about 5 s for 8000 steps of that write alone at `B = 8`, `K = 8`, also on the CPU. Neither has been measured on a GPU.
 - **L-9. A generative hard end is a joint, not a conditional.** With `allowed_ends` in generative mode, `log_likelihood` is `log p(x, z_last in ends)`, which sums to `p(z_last in ends)` over `x`, not to 1. Compare such a model's NLL only with another model under the same constraint. A gold path that breaks a constraint scores about `-1e9` per broken move, which is loud on purpose.
+- **L-10. Autoregressive emissions can weaken the states.** When history predicts `x_t` strongly, `autoregressive-neural-hmm` reached an NLL gap of 0.026 with matched accuracy 0.606, below the 0.663 of a plain HMM with a gap of 1.60, and against a true model's 0.780 (three seeds). It carried about half the true model's state information (shuffled gap 0.070 against 0.133). The likelihood does not show this; `state_diagnostics` does, read against what the data allows. Nothing warns at runtime.
 
 ### Troubleshooting / FAQs
 

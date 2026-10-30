@@ -136,7 +136,10 @@ def state_diagnostics(
             "steps": keras.ops.sum(mask, axis=1),
         }
         if generative:
-            shuffled = keras.ops.take_along_axis(log_emit, batch["permutation"], axis=-1)
+            # Select, never multiply by the one-hot: 0 * -inf is NaN.
+            chosen = keras.ops.one_hot(batch["permutation"], m.n_states) > 0
+            picks = keras.ops.where(chosen, log_emit[:, :, None, :], keras.ops.zeros_like(log_emit[:, :, None, :]))
+            shuffled = keras.ops.sum(picks, axis=-1)
             result["log_z"] = inference.forward_log_likelihood(log_pi, log_A, log_emit, mask, log_end)
             result["shuffled_log_z"] = inference.forward_log_likelihood(log_pi, log_A, shuffled, mask, log_end)
         return result
