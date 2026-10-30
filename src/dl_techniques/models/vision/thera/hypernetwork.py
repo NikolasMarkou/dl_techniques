@@ -29,7 +29,11 @@ from typing import Any, Dict, Optional, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.spatial_layer import coordinate_grid, interpolate_grid
-from dl_techniques.layers.thera_heat_field import HeatField, DEFAULT_K_INIT
+from dl_techniques.layers.thera_heat_field import (
+    DEFAULT_COMPONENTS_INIT_SCALE,
+    DEFAULT_K_INIT,
+    HeatField,
+)
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -108,7 +112,7 @@ class TheraHypernetwork(keras.layers.Layer):
         w0: float = 1.0,
         c: float = 6.0,
         k_init: float = DEFAULT_K_INIT,
-        components_init_scale: float = 16.0,
+        components_init_scale: float = DEFAULT_COMPONENTS_INIT_SCALE,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)

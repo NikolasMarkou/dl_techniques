@@ -57,6 +57,14 @@ import keras
 import tensorflow as tf
 
 from dl_techniques.utils.logger import logger
+# THERA reference field-init defaults live in the heat-field layer that owns
+# them. ``build_thera`` accepts ``None`` and falls back to the same values
+# internally, but the config exposes them so they round-trip and a user can
+# override.
+from dl_techniques.layers.thera_heat_field import (
+    DEFAULT_COMPONENTS_INIT_SCALE,
+    DEFAULT_K_INIT,
+)
 from dl_techniques.models.vision.thera import build_thera
 from dl_techniques.losses.thera_jacobian_tv import thera_tv_penalty
 from dl_techniques.losses.image_restoration_loss import CharbonnierLoss
@@ -72,12 +80,6 @@ from train.thera.data import build_arbitrary_scale_dataset
 # ``standardize(x) = (x - MEAN) / sqrt(VAR)``.
 THERA_MEAN = np.array([0.4488, 0.4371, 0.4040], dtype=np.float32)
 THERA_VAR = np.array([0.25, 0.25, 0.25], dtype=np.float32)
-
-# THERA reference field-init defaults. ``build_thera`` accepts ``None`` and
-# falls back to the same values internally, but the config exposes them so they
-# round-trip and a user can override.
-DEFAULT_K_INIT = float(np.sqrt(np.log(4.0)) / (np.pi ** 2 * 2.0))
-DEFAULT_COMPONENTS_INIT_SCALE = 16.0
 
 
 # =====================================================================

@@ -24,7 +24,10 @@ from typing import Any, Dict, Optional, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.thera_heat_field import DEFAULT_K_INIT
+from dl_techniques.layers.thera_heat_field import (
+    DEFAULT_COMPONENTS_INIT_SCALE,
+    DEFAULT_K_INIT,
+)
 from dl_techniques.models.vision.thera.edsr_backbone import EDSRBackbone
 from dl_techniques.models.vision.thera.rdn_backbone import RDNBackbone
 from dl_techniques.models.vision.thera.tails import build_thera_tail
@@ -32,9 +35,6 @@ from dl_techniques.models.vision.thera.hypernetwork import TheraHypernetwork
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
-
-# THERA frequency-disk scale for the heat-field components init (reference).
-DEFAULT_COMPONENTS_INIT_SCALE: float = 16.0
 
 # THERA hidden width: 32 for the tiny "air" size, 512 otherwise.
 _AIR_HIDDEN_DIM: int = 32
