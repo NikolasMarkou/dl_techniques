@@ -43,11 +43,12 @@ def bandwidth_block(layer_means, *, inside=True):
 
 
 def exp2_row(config, seed, select, test, *, steps=3, attention="mean_shift", bandwidths=None,
-             params=900, status="ok", attempt=1):
+             params=900, status="ok", attempt=1, args=None):
     if bandwidths is None:
         bandwidths = {"status": "not applicable: the model has no MeanShiftAttention layer",
                       "layers": []}
-    args = {"num_steps": steps} if attention == "mean_shift" else {}
+    if args is None:
+        args = {"num_steps": steps} if attention == "mean_shift" else {}
     metrics = None
     if status == "ok":
         metrics = {"params": params, "seconds_per_epoch": 3.0, "finite": True, "metrics": {
@@ -281,6 +282,43 @@ def test_the_reference_is_not_ranked_and_exp1_has_no_ranking(tmp_path):
     assert "mha" not in [r["config"] for r in summary["groups"][0]["ranking"]["rows"]]
     only_exp1 = report.build_summary([make_root(tmp_path, "s", [accuracy_row("mean", 0, 0.5)])])
     assert "ranking" not in only_exp1["groups"][0]
+
+
+def control_rows():
+    """mha, the multi_head control ``mha_oinit`` and two MeanShift configs, 2 seeds."""
+    rows = []
+    for seed in (0, 1):
+        rows += [
+            exp2_row("mha", seed, 0.30, 0.30, attention="multi_head", params=1000),
+            exp2_row("mha_oinit", seed, 0.33 + 0.01 * seed, 0.32, attention="multi_head",
+                     params=1000, args={"output_kernel_initializer": "glorot_uniform"}),
+            exp2_row("cfg_a", seed, 0.40, 0.10, steps=1),
+            exp2_row("cfg_b", seed, 0.35, 0.20, steps=3),
+        ]
+    return rows
+
+
+def test_an_extra_multi_head_config_is_a_variant_paired_with_mha_by_seed(tmp_path):
+    """The control config id is a plain exp2 variant: its own cell, paired against ``mha``."""
+    summary = report.build_summary([make_root(tmp_path, "r", control_rows())])
+    control = variant(summary, "mha_oinit", "exp2")
+    assert control["arm"] == "multi_head" and control["config"] == "mha_oinit"
+    assert control["n_seeds"] == 2
+    assert control["config_args"] == {"output_kernel_initializer": "glorot_uniform"}
+    paired = control["paired"]["select_accuracy"]
+    assert paired["reference"] == "mha" and paired["seeds"] == [0, 1]
+    assert paired["diffs"] == pytest.approx([0.03, 0.04])
+    assert control["bandwidths"]["status"].startswith("not applicable")
+    assert variant(summary, "mha", "exp2")["paired"] is None
+    assert report.render_markdown(summary).count("mha_oinit") >= 3
+
+
+def test_a_multi_head_control_is_not_ranked_among_the_mean_shift_configs(tmp_path):
+    """The ranking picks the MeanShift configs for the long run; a control must not enter it."""
+    summary = report.build_summary([make_root(tmp_path, "r", control_rows())])
+    rows = summary["groups"][0]["ranking"]["rows"]
+    assert [r["config"] for r in rows] == ["cfg_a", "cfg_b"]
+    assert [r["rank"] for r in rows] == [1, 2]
 
 
 def test_exp2_paired_differences_use_the_mha_reference(tmp_path):

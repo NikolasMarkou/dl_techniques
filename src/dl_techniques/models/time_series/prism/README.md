@@ -300,7 +300,7 @@ model.save("prism.keras")
 restored = keras.models.load_model("prism.keras")     # no custom_objects
 ```
 
-`PRISM`, `PRISMLayer`, `PRISMTimeTree`, `PRISMNode`, `FrequencyBandRouter` and `QuantileHead` all register through `register_dl_technique` (`dl_techniques.utils.keras_registration`). The package string is the *defining* module's dotted path, and only one of the six is defined here, so the keys are not uniform: `dl_techniques.models.prism.model>PRISM`, `dl_techniques.layers.time_series.prism_blocks><ClassName>` for the four block classes, and `dl_techniques.layers.time_series.quantile_head_fixed_io>QuantileHead`. Archives written before the registration migration still load through the legacy `Custom>ClassName` alias the helper also binds.
+`PRISM`, `PRISMLayer`, `PRISMTimeTree`, `PRISMNode`, `FrequencyBandRouter` and `QuantileHead` all register through `register_dl_technique` (`dl_techniques.utils.keras_registration`). The package string is the *defining* module's dotted path, and only one of the six is defined here, so the keys are not uniform: `dl_techniques.models.prism.model>PRISM`, `dl_techniques.layers.time_series.prism_blocks><ClassName>` for the four block classes, and `dl_techniques.layers.heads.time_series.quantile_head_fixed_io>QuantileHead`. Archives written before the registration migration still load through the legacy `Custom>ClassName` alias the helper also binds.
 
 `kernel_initializer` and `kernel_regularizer` are normalized via `keras.initializers.get` / `keras.regularizers.get` in `get_config()`; `quantile_levels` round-trips as a list (or `None` in point mode).
 
@@ -388,7 +388,7 @@ Run a forward pass and pull the router's intermediate output through a `keras.Mo
 
 - Model: `dl_techniques/models/time_series/prism/model.py`
 - Blocks: `dl_techniques/layers/time_series/prism_blocks.py` (`PRISMLayer`, `PRISMTimeTree`, `PRISMNode`, `FrequencyBandRouter`, `FrequencyBandStatistics`)
-- Quantile head: `dl_techniques/layers/time_series/quantile_head_fixed_io.py`
+- Quantile head: `dl_techniques/layers/heads/time_series/quantile_head_fixed_io.py`
 - Loss: `dl_techniques/losses/quantile_loss.py`
 - Trainer: `train/time_series/prism/train_prism.py`; ONNX export: `train/time_series/prism/export.py`
 - Tests: `tests/test_models/test_prism/test_model.py`

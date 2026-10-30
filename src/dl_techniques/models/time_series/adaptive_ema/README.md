@@ -410,7 +410,7 @@ Adaptive EMA is the right tool when you already know your strategy is "trade onl
 
 **Related code:**
 - Layer: `dl_techniques/layers/time_series/ema_layer.py`
-- Layer: `dl_techniques/layers/time_series/quantile_head_variable_io.py`
+- Layer: `dl_techniques/layers/heads/time_series/quantile_head_variable_io.py`
 - Trainer: `train/adaptive_ema/train_adaptive_ema.py`
 - ONNX export: `train/adaptive_ema/export.py`
 - Peer time-series models: `dl_techniques/models/{tirex, prism, nbeats, mdn, deepar}`

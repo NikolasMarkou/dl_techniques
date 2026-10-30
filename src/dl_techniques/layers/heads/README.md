@@ -1,12 +1,12 @@
 # heads
 
-Task heads for the `dl_techniques` library, as Keras 3 layers: small networks that sit on top of a backbone and turn its features into a task answer. The package lives at `src/dl_techniques/layers/heads/`. It has three domain sub-packages, `nlp/`, `vision/` and `vlm/` (vision-language), plus a thin dispatch function, `create_head`, and two small modules of shared checks.
+Task heads for the `dl_techniques` library, as Keras 3 layers: small networks that sit on top of a backbone and turn its features into a task answer. The package lives at `src/dl_techniques/layers/heads/`. It has four domain sub-packages, `nlp/`, `vision/`, `vlm/` (vision-language) and `time_series/` (forecasting), plus a thin dispatch function, `create_head`, and two small modules of shared checks.
 
 ## What it is for
 
 A backbone (BERT, ResNet, CLIP and so on) produces features. It does not produce answers. Each task needs a small head that reshapes those features into class scores, boxes, masks, depth maps, captions or similarity scores. Keeping the head apart from the backbone means one backbone can drive many heads, and one head class works on the features of any backbone with the right width.
 
-This package holds 24 head classes (8 NLP, 10 vision, 6 VLM). Each domain also has a task vocabulary (an enum of task names plus a config type), a table that maps a task name to a head class, and factory functions that build a head from a task name. Models that own their head use two domain-specific helpers: language models use `build_model_task_head` (NLP), vision models use `build_model_vision_head`.
+This package holds 29 registered head classes (8 NLP, 10 vision, 6 VLM, 5 time series). The NLP, vision and VLM domains also have a task vocabulary (an enum of task names plus a config type), a table that maps a task name to a head class, and factory functions that build a head from a task name. The time-series domain has none of those: its heads are built directly by the forecasting models. Models that own their head use two domain-specific helpers: language models use `build_model_task_head` (NLP), vision models use `build_model_vision_head`.
 
 ## How it works
 
@@ -57,13 +57,15 @@ Each domain has one dispatch table from task type to head class. A task type wit
 | `VisualGroundingHead` | `vision_features`, `text_features` | `bbox` `(B, 4)`, `confidence` `(B, regions)`, `grounded_features` `(B, hidden_size)` |
 | `ImageTextMatchingHead` | `vision_features`, `text_features` | `similarity_matrix` and `logits` `(B, B)`, `match_score` `(B,)`, `vision_embeddings`, `text_embeddings` `(B, projection_dim)` |
 
+**`time_series/`** - `QuantileHead`, `QuantileSequenceHead`, `GaussianLikelihoodHead`, `NegativeBinomialLikelihoodHead` and `TimestralQuantileHead`. Heads take the hidden states of a forecasting backbone and return quantiles or distribution parameters as plain tensors. There is no task enum, dispatch table or factory; `create_head` does not accept `'time_series'`.
+
 ### Output contract
 
 No head applies an activation to a class-like score. Classification, token, span, multiple-choice and generation outputs, detection `classifications`, the segmentation map, `instance_masks`, VQA `answer_logits`, captioning `logits`, grounding `confidence` and matching `match_score` are all pre-activation logits. Compile losses with `from_logits=True`. Where a head also returns `probabilities`, that is the softmax of `logits`. Squashed outputs, by design: the depth sigmoid, the grounding `bbox` sigmoid, unit-length surface normals. Optical flow is linear and signed. `SegmentationHead` is the one head that returns a bare tensor instead of a dict.
 
 ## Files
 
-- `__init__.py` - re-exports 42 names: the full public API of the three domains (except the eight NLP in-model helpers) plus `create_head`.
+- `__init__.py` - re-exports 47 names: the full public API of the four domains (except the eight NLP in-model helpers) plus `create_head`.
 - `factory.py` - `create_head(domain, *args, **kwargs)`, the dispatch facade.
 - `task_types.py` - one import surface for the task-type enums and config classes of all three domains. Imports only.
 - `validation.py` - shared argument and input checks: `positive_int`, `static_rank`, `resolve_stage_knobs`, `lookup_head`, `pool_or_passthrough`, `key_by_name`. Each raises `ValueError` naming the head.
@@ -71,6 +73,7 @@ No head applies an activation to a class-like score. Classification, token, span
 - `nlp/` - NLP heads, task types, dispatch, factories and in-model helpers (20 exported names).
 - `vision/` - vision heads, task types, dispatch, presets, factories and the one-call builder (18 exported names).
 - `vlm/` - vision-language heads, task types, dispatch and factories (11 exported names).
+- `time_series/` - forecasting heads: quantile heads, Gaussian and negative-binomial likelihood heads, and the Timestral quantile head (5 exported names, no factory). See its own `README.md`.
 
 ## How to use it
 

@@ -18,7 +18,7 @@ import numpy as np
 import keras
 from typing import Dict, Any
 
-from dl_techniques.layers.time_series.quantile_head_variable_io import QuantileSequenceHead
+from dl_techniques.layers.heads.time_series.quantile_head_variable_io import QuantileSequenceHead
 
 
 # Helper functions

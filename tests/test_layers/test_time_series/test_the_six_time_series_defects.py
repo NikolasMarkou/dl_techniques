@@ -42,7 +42,7 @@ from dl_techniques.layers.time_series.forecasting_layers import (
 )
 from dl_techniques.layers.time_series.nbeats_blocks import GenericBlock
 from dl_techniques.layers.time_series.nbeatsx_blocks import ExogenousBlock
-from dl_techniques.layers.time_series.quantile_head_fixed_io import QuantileHead
+from dl_techniques.layers.heads.time_series.quantile_head_fixed_io import QuantileHead
 from dl_techniques.layers.time_series.temporal_fusion import TemporalFusionLayer
 from tests.layer_naming import PublicAutoName
 

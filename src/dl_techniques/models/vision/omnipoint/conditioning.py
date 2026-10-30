@@ -5,9 +5,10 @@ pair into a handful of full-resolution channels and concatenates them onto the
 RGB image, so conditioning enters before the ViT rather than at the token level.
 That leaves ``ViT`` and its patch embedding untouched: the encoder's
 ``input_shape`` simply carries a wider channel count.
-``ConditioningStateEmbedding`` runs after the encoder instead, because the
-present/absent indicator it adds operates on a token sequence, which does not
-exist until the encoder has run. Every conditioning computation therefore sits
+The two ``StateIndicatorEmbedding`` layers ``OmniPoint`` holds (``intrinsics_state``
+and ``depth_state``) run after the encoder instead, because the present/absent
+indicator they add operates on a token sequence, which does not exist until the
+encoder has run. Every conditioning computation therefore sits
 in exactly one of two stages, pixel-space or token-space.
 
 A ``None`` tensor means the modality is absent for the whole batch. Within a
@@ -26,9 +27,6 @@ from typing import Any, Dict, Optional, Tuple, Union
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.embedding.state_indicator_embedding import (
-    StateIndicatorEmbedding,
-)
 from dl_techniques.layers.geometric.sparse_depth_splat import SparseDepthSplat
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -303,80 +301,3 @@ class ConditioningInputEncoder(keras.layers.Layer):
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
         })
         return config
-
-
-@register_dl_technique("dl_techniques.models.omnipoint.conditioning.state_embedding")
-class ConditioningStateEmbedding(keras.layers.Layer):
-    """Add present and absent indicators for both modalities to a token sequence.
-
-    Two :class:`StateIndicatorEmbedding` layers run in turn, one per modality.
-    Each selects a learned vector according to the sample's flag and adds it to
-    every token of that sample, so the encoder's output carries which modalities
-    the sample actually had.
-
-    Architecture:
-
-    .. code-block:: text
-
-                  tokens [B, N, D]
-                            ▼
-            ┌───────────────────────────┐
-            │ StateIndicatorEmbedding   │ ◄── intrinsics_present
-            └─────────────┬─────────────┘
-                          ▼
-            ┌───────────────────────────┐
-            │ StateIndicatorEmbedding   │ ◄── sparse_depth_present
-            └─────────────┬─────────────┘
-                          ▼
-                  tokens [B, N, D]
-
-    :param kwargs: Additional ``Layer`` base-class arguments.
-
-    Input shape:
-        ``tokens``: 3D ``(batch_size, sequence_length, dim)``.
-        ``intrinsics_present`` and ``sparse_depth_present``: 1D
-        ``(batch_size,)``.
-
-    Output shape:
-        3D tensor, same shape as ``tokens``.
-    """
-
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self.intrinsics_state = StateIndicatorEmbedding(name="intrinsics_state")
-        self.depth_state = StateIndicatorEmbedding(name="depth_state")
-
-    def call(
-            self,
-            tokens: keras.KerasTensor,
-            intrinsics_present: keras.KerasTensor,
-            sparse_depth_present: keras.KerasTensor,
-            training: Optional[bool] = None,
-    ) -> keras.KerasTensor:
-        """Add both present and absent embeddings to ``tokens``.
-
-        :param tokens: Encoder output sequence, ``(B, N, D)``.
-        :type tokens: keras.KerasTensor
-        :param intrinsics_present: Per-sample flag, ``(B,)``.
-        :type intrinsics_present: keras.KerasTensor
-        :param sparse_depth_present: Per-sample flag, ``(B,)``.
-        :type sparse_depth_present: keras.KerasTensor
-        :param training: Forwarded to the inner embedding layers.
-        :type training: Optional[bool]
-        :return: ``tokens`` plus both selected embeddings, ``(B, N, D)``.
-        :rtype: keras.KerasTensor
-        """
-        tokens = self.intrinsics_state((tokens, intrinsics_present), training=training)
-        tokens = self.depth_state((tokens, sparse_depth_present), training=training)
-        return tokens
-
-    def get_config(self) -> Dict[str, Any]:
-        """Return the layer configuration for serialization.
-
-        :return: The base ``Layer`` config; this layer adds no constructor
-            arguments of its own.
-        :rtype: dict
-        """
-        return super().get_config()
-
-# ---------------------------------------------------------------------

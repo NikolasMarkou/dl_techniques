@@ -8,6 +8,10 @@ V make the MeanShift stack about 16 % smaller than multi_head at the same width 
 The configs are the table :data:`CONFIGS`: ``mha`` (multi_head) and 16 MeanShift Attention
 configs, the product of blurring {off, on}, steps {1, 3}, bandwidth mode {per_head,
 per_token} and kernel {gaussian, vmf}. Every vMF config starts its bandwidth at 0.3.
+:data:`CONTROL_CONFIGS` holds configs that are not part of that 17-cell grid: ``mha_oinit``
+is ``mha`` with an independent initializer for the output projection (``mha`` replays one
+draw for ``qkv`` and ``proj``, the MeanShift projections are independent), reachable only
+through ``--mode main --configs mha_oinit``.
 
 A cell trains with the shared recipe and scores its final-epoch weights. The row carries the
 parameter count, the loss history, top-1 on the selection split (a held-out slice of TRAIN,
@@ -20,7 +24,7 @@ Driver modes (``--mode``), one gated subprocess per cell::
 
     smoke  mha and the default MeanShift config (blurring, 3 steps, per_head, gaussian), 1 seed
     grid   mha and the 16 MeanShift configs, 1 seed, cheapest first
-    main   mha and the configs named by --configs, 3 seeds
+    main   mha and the configs named by --configs (a grid or control id), 3 seeds
 
     MPLBACKEND=Agg .venv/bin/python -m train.mean_shift.exp2_mean_shift_attention \\
         --mode grid --out-dir results/mean_shift/exp2_grid --epochs 10
@@ -78,14 +82,27 @@ def _build_configs() -> Dict[str, Dict[str, Any]]:
 
 
 #: Config id -> ``{"attention_type", "attention_args"}``, cheapest first (1 step, no blurring).
+#: These 17 are the grid; ``mha`` is exactly as its stored rows were run (empty attention_args).
 CONFIGS: Dict[str, Dict[str, Any]] = _build_configs()
+
+#: Control configs, outside the grid (same shape as ``CONFIGS``); ``--mode main --configs`` only.
+CONTROL_CONFIGS: Dict[str, Dict[str, Any]] = {
+    "mha_oinit": {
+        "attention_type": "multi_head",
+        # DECISION plan-2026-10-30T025213-f75ab4e9/D-011
+        # mha replays one seeded initializer instance for qkv and proj; a string here builds a separate proj instance. Do NOT edit mha itself (its rows are stored).
+        "attention_args": {"output_kernel_initializer": "glorot_uniform"}},
+}
+
+#: Every config id a cell may name: the grid and the controls.
+ALL_CONFIGS: Dict[str, Dict[str, Any]] = {**CONFIGS, **CONTROL_CONFIGS}
 
 
 def build_model(config_id: str, num_classes: int):
     """The small ViT of ``config_id`` with a logits ``Dense`` head (the same backbone for all)."""
     import keras
     from dl_techniques.layers.transformers.vision_encoder import VisionEncoder
-    spec = CONFIGS[config_id]
+    spec = ALL_CONFIGS[config_id]
     # DECISION plan-2026-10-30T025213-f75ab4e9/D-006
     # VisionEncoder, not ViT: ViT hardcodes multi_head attention, so the arms could not differ; do NOT swap it in.
     encoder = VisionEncoder(
@@ -199,18 +216,19 @@ def parse_driver_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Nam
                         help="smoke: mha and the default config; grid: all 17 configs; "
                              "main: mha and --configs")
     parser.add_argument("--configs", nargs="*", default=[],
-                        help="main mode: the MeanShift config ids to compare with mha")
+                        help="main mode: the config ids to compare with mha (MeanShift grid "
+                             f"ids or a control id: {', '.join(CONTROL_CONFIGS)})")
     parser.add_argument("--seeds", type=int, nargs="+", default=None,
                         help="seeds (default: 0 for smoke and grid, 0 1 2 for main)")
     args = parser.parse_args(argv)
     if args.mode == "main":
         if not args.configs:
-            parser.error("--mode main needs --configs (the MeanShift config ids to compare)")
+            parser.error("--mode main needs --configs (the config ids to compare with mha)")
     elif args.configs:
         parser.error("--configs only applies to --mode main")
-    unknown = [c for c in args.configs if c not in CONFIGS or c == REFERENCE_CONFIG]
+    unknown = [c for c in args.configs if c not in ALL_CONFIGS or c == REFERENCE_CONFIG]
     if unknown:
-        parser.error(f"--configs must be MeanShift config ids, got {unknown}")
+        parser.error(f"--configs must be config ids other than {REFERENCE_CONFIG}, got {unknown}")
     if args.seeds is None:
         args.seeds = [0, 1, 2] if args.mode == "main" else [0]
     return args
@@ -228,7 +246,7 @@ def config_ids(args: argparse.Namespace) -> List[str]:
 def build_cells(args: argparse.Namespace) -> List[common.CellSpec]:
     """One cell per (seed, config), seed-major."""
     extra = common.run_extra_args(args)
-    return [common.CellSpec(EXPERIMENT, CONFIGS[config]["attention_type"], config, seed, extra)
+    return [common.CellSpec(EXPERIMENT, ALL_CONFIGS[config]["attention_type"], config, seed, extra)
             for seed in args.seeds for config in config_ids(args)]
 
 
@@ -239,7 +257,7 @@ def build_cells(args: argparse.Namespace) -> List[common.CellSpec]:
 def run_worker(args: argparse.Namespace) -> int:
     """Train one cell and write its ``result.json``; exceptions propagate (exit non-zero)."""
     from train.common import set_seeds, setup_gpu
-    spec = CONFIGS[args.config]
+    spec = ALL_CONFIGS[args.config]
     if args.arm != spec["attention_type"]:
         raise ValueError(f"config {args.config!r} is a {spec['attention_type']} config, "
                          f"not arm {args.arm!r}")

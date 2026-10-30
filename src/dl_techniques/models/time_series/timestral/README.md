@@ -95,7 +95,7 @@ This trains from scratch on synthetic series. Fine-tuning released weights is no
 - **Patch embedding**: Each patch of 32 time steps is embedded from `[values, missing]` channels
 - **Time/Variate attention**: Alternating attention over time axis (with RoPE) and variate axis
 - **DHF decoding**: Decoder tokens attend to full context; block-autoregressive for long horizons
-- **Quantile head**: Monotone quantiles via softplus cumulative sum from median
+- **Quantile head**: Monotone quantiles via softplus cumulative sum from median. The head is `TimestralQuantileHead` in `dl_techniques/layers/heads/time_series/timestral_quantile_head.py`; the patch projection is `ResidualProjectionBlock` in `dl_techniques/layers/time_series/residual_projection_block.py`
 - **Normalization**: Causal per-patch mean/std with asinh squash; advancing refine frame for decoding
 - **Covariate encoding**: Categorical covariates target-encoded per series
 

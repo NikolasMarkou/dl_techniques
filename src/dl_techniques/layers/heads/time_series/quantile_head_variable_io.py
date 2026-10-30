@@ -39,7 +39,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 
-@register_dl_technique("dl_techniques.layers.time_series.quantile_head_variable_io")
+@register_dl_technique("dl_techniques.layers.heads.time_series.quantile_head_variable_io")
 class QuantileSequenceHead(keras.layers.Layer):
     """
     Quantile prediction head applied at every sequence position.

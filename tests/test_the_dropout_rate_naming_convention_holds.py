@@ -115,6 +115,11 @@ NON_RATE_PARAMS: Set[Tuple[str, str, str]] = {
         "_stream",
         "attn_dropout_layer",
     ),
+    (
+        "src/dl_techniques/layers/time_series/mixed_sequential_block.py",
+        "_residual",
+        "dropout_layer",
+    ),
 }
 
 #: Surviving keyword-call sites, pinned as ``(file, callee, keyword)``.

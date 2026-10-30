@@ -36,9 +36,10 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.models.vision.vit.model import ViT
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+from dl_techniques.layers.embedding.state_indicator_embedding import StateIndicatorEmbedding
 from dl_techniques.models.vision.depth_anything.components import DPTDecoder
 from .heads import RayDistanceHead, MetricScaleHead
-from .conditioning import ConditioningInputEncoder, ConditioningStateEmbedding
+from .conditioning import ConditioningInputEncoder
 
 # ---------------------------------------------------------------------
 
@@ -86,7 +87,7 @@ class OmniPoint(keras.Model):
                    [B, N+1, D], CLS at index 0
                                 ▼
                   ┌───────────────────────────────┐
-                  │ ConditioningStateEmbedding    │
+                  │ StateIndicatorEmbedding x2    │
                   │  (enable_conditioning only)   │
                   └───────────────┬───────────────┘
                                 ▼
@@ -265,7 +266,8 @@ class OmniPoint(keras.Model):
         self.encoder: Optional[keras.Model] = encoder
 
         self.conditioning_input_encoder: Optional[ConditioningInputEncoder] = None
-        self.conditioning_state_embedding: Optional[ConditioningStateEmbedding] = None
+        self.intrinsics_state: Optional[StateIndicatorEmbedding] = None
+        self.depth_state: Optional[StateIndicatorEmbedding] = None
         if self.enable_conditioning:
             self.conditioning_input_encoder = ConditioningInputEncoder(
                 intrinsics_channels=self.intrinsics_channels,
@@ -277,9 +279,8 @@ class OmniPoint(keras.Model):
                 kernel_regularizer=self.kernel_regularizer,
                 name="conditioning_input_encoder",
             )
-            self.conditioning_state_embedding = ConditioningStateEmbedding(
-                name="conditioning_state_embedding",
-            )
+            self.intrinsics_state = StateIndicatorEmbedding(name="intrinsics_state")
+            self.depth_state = StateIndicatorEmbedding(name="depth_state")
 
         # DECISION plan-2026-09-11T050223-1b47bcf6/D-011: upsample_factor=1 on both dense heads; patch_size 14
         # is not a power of 2 and DPTDecoder needs one. See decisions.md.
@@ -347,12 +348,14 @@ class OmniPoint(keras.Model):
             img_h, img_w, img_c = self.image_shape
             dummy_image = keras.ops.zeros((1, img_h, img_w, img_c))
             _ = self.conditioning_input_encoder(dummy_image)
-        if self.conditioning_state_embedding is not None:
+        if self.intrinsics_state is not None:
             dummy_tokens = keras.ops.zeros(
                 (1, self.grid_h * self.grid_w + 1, self.embed_dim)
             )
             dummy_flag = keras.ops.zeros((1,), dtype="bool")
-            _ = self.conditioning_state_embedding(dummy_tokens, dummy_flag, dummy_flag)
+            _ = self.depth_state(
+                (self.intrinsics_state((dummy_tokens, dummy_flag)), dummy_flag)
+            )
 
     def _features_to_spatial(self, x: keras.KerasTensor) -> keras.KerasTensor:
         """Drop the CLS token and reshape ``(B, N+1, D)`` to ``(B, h, w, D)``.
@@ -439,11 +442,11 @@ class OmniPoint(keras.Model):
                     keras.ops.cast(sparse_depth_present, "bool"), (-1,)
                 )
 
-            sequence = self.conditioning_state_embedding(
-                sequence,
-                intrinsics_present_flags,
-                sparse_depth_present_flags,
-                training=training,
+            sequence = self.intrinsics_state(
+                (sequence, intrinsics_present_flags), training=training
+            )
+            sequence = self.depth_state(
+                (sequence, sparse_depth_present_flags), training=training
             )
         else:
             sequence = self.encoder(inputs, training=training)

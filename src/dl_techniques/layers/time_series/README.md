@@ -1,10 +1,10 @@
 # time_series
 
-Keras 3 layers for forecasting and sequence modeling, in `dl_techniques.layers.time_series`: N-BEATS and N-BEATSx blocks, xLSTM cells and blocks, the PRISM wavelet tree, DeepAR likelihood heads, quantile heads, a temporal convolutional network, lag attention, temporal fusion, a naive-benchmark gate and EMA filters.
+Keras 3 layers for forecasting and sequence modeling, in `dl_techniques.layers.time_series`: N-BEATS and N-BEATSx blocks, xLSTM cells and blocks, the PRISM wavelet tree, the DeepAR cell and scale layer, a temporal convolutional network, lag attention, temporal fusion, a naive-benchmark gate and EMA filters. The forecasting heads (quantile and likelihood heads) are in `dl_techniques.layers.heads.time_series`.
 
 ## What it is for
 
-Time series models need parts that ordinary vision or language layers do not give you. A forecaster has to say how sure it is (quantile and likelihood heads). It has to handle series whose size differs by orders of magnitude (`ScaleLayer`). It has to split a signal into trend, seasonality and frequency bands (N-BEATS blocks, PRISM). It has to remember far back without numerical blowup (xLSTM).
+Time series models need parts that ordinary vision or language layers do not give you. A forecaster has to say how sure it is (quantile and likelihood heads, which live in `layers/heads/time_series`). It has to handle series whose size differs by orders of magnitude (`ScaleLayer`). It has to split a signal into trend, seasonality and frequency bands (N-BEATS blocks, PRISM). It has to remember far back without numerical blowup (xLSTM).
 
 This package holds those parts as plain Keras layers. The models in `src/dl_techniques/models/time_series/` (adaptive_ema, deepar, nbeats, prism, tirex, xlstm) are built from them. You can also use them directly in your own `keras.Model`.
 
@@ -26,9 +26,7 @@ flowchart LR
       T[TCN]
       M[MixedSequentialBlock]
     end
-    subgraph HEAD[heads and fusion]
-      Q[QuantileHead, QuantileSequenceHead]
-      D[Gaussian and NegativeBinomial heads]
+    subgraph HEAD[fusion and gates]
       F[TemporalFusionLayer, AdaptiveLagAttentionLayer]
       G[NaiveResidual, ForecastabilityGate]
     end
@@ -41,15 +39,14 @@ flowchart LR
 
 ## Files
 
-- `__init__.py` - curated exports: 32 names in `__all__`, all layers except the builder `create_manokhin_compliant_model`. No factory.
+- `__init__.py` - curated exports: 29 names in `__all__`, all layers except the builder `create_manokhin_compliant_model`. No factory.
 - `nbeats_blocks.py` - `NBeatsBlock` (base: four dense layers plus two theta heads), `GenericBlock`, `TrendBlock`, `SeasonalityBlock`.
 - `nbeatsx_blocks.py` - `ExogenousBlock`, an N-BEATS block whose basis comes from covariates.
 - `temporal_convolutional_network.py` - `TemporalBlock` and `TemporalConvNet` (dilated causal convolutions).
 - `xlstm_blocks.py` - `sLSTMCell`, `sLSTMLayer`, `sLSTMBlock`, `mLSTMCell`, `mLSTMLayer`, `mLSTMBlock`.
 - `prism_blocks.py` - `FrequencyBandStatistics`, `FrequencyBandRouter`, `PRISMNode`, `PRISMTimeTree`, `PRISMLayer`.
-- `deepar_blocks.py` - `ScaleLayer`, `GaussianLikelihoodHead`, `NegativeBinomialLikelihoodHead`, `DeepARCell` (and a private base class for the two heads).
-- `quantile_head_fixed_io.py` - `QuantileHead`, quantiles for a fixed future horizon.
-- `quantile_head_variable_io.py` - `QuantileSequenceHead`, quantiles at every input position.
+- `deepar_blocks.py` - `ScaleLayer`, `DeepARCell`. The likelihood heads moved to `layers/heads/time_series/likelihood_heads.py`.
+- `residual_projection_block.py` - `ResidualProjectionBlock`, the residual MLP block of the Timestral patch embedding and quantile head.
 - `mixed_sequential_block.py` - `MixedSequentialBlock`, an LSTM, attention or both, with pre-normalization.
 - `adaptive_lag_attention.py` - `AdaptiveLagAttentionLayer`.
 - `temporal_fusion.py` - `TemporalFusionLayer`.
@@ -73,10 +70,7 @@ flowchart LR
 | `PRISMLayer` | The PRISM entry point: time tree, dropout, optional residual, optional output norm |
 | `PRISMTimeTree` / `PRISMNode` | The tree, and one node of it |
 | `FrequencyBandRouter` / `FrequencyBandStatistics` | Band importance weights, and the six summary statistics they read |
-| `QuantileHead` | Fixed-horizon quantiles, output `(batch, output_length, num_quantiles)` |
-| `QuantileSequenceHead` | Quantiles at each input step, output `(batch, seq_len, num_quantiles)` |
-| `GaussianLikelihoodHead` | Returns `(mu, sigma)`, `sigma` is a standard deviation |
-| `NegativeBinomialLikelihoodHead` | Returns `(mu, alpha)`: mean and dispersion, `Var = mu + mu^2 * alpha` |
+| `ResidualProjectionBlock` | `output(silu(hidden(x))) + residual(x)`, three Dense layers named after the Timestral reference state dict |
 | `DeepARCell` | Thin wrapper around `keras.layers.LSTMCell` for use inside `keras.layers.RNN` |
 | `ScaleLayer` | Divides by a per-item scale (mean over time plus `epsilon`), or multiplies back with `inverse=True` |
 | `TemporalFusionLayer` | Gated blend of a context forecast and an attention-weighted lag forecast |
@@ -136,12 +130,13 @@ p = PRISMLayer(tree_depth=2, num_wavelet_levels=3)(p_in)
 print(keras.Model(p_in, p).output_shape)   # (None, 128, 32)
 ```
 
-DeepAR heads:
+DeepAR cell and likelihood heads:
 
 ```python
 import keras
-from dl_techniques.layers.time_series import (
-    DeepARCell, ScaleLayer, GaussianLikelihoodHead, NegativeBinomialLikelihoodHead)
+from dl_techniques.layers.time_series import DeepARCell, ScaleLayer
+from dl_techniques.layers.heads.time_series import (
+    GaussianLikelihoodHead, NegativeBinomialLikelihoodHead)
 
 inputs = keras.Input(shape=(48, 8))
 hidden = keras.layers.RNN(DeepARCell(units=64), return_sequences=True)(ScaleLayer()(inputs))
@@ -154,8 +149,8 @@ Encoder, lag attention, fusion and quantile heads:
 ```python
 import keras
 from dl_techniques.layers.time_series import (
-    TemporalConvNet, AdaptiveLagAttentionLayer, TemporalFusionLayer,
-    QuantileHead, QuantileSequenceHead)
+    TemporalConvNet, AdaptiveLagAttentionLayer, TemporalFusionLayer)
+from dl_techniques.layers.heads.time_series import QuantileHead, QuantileSequenceHead
 
 context = keras.Input(shape=(168, 16))
 lags = keras.Input(shape=(12,))
@@ -190,9 +185,8 @@ signals = EMASlopeFilter(ema_period=25, lookback_period=25, output_mode="all")(i
 - **`NBeatsBlock` is not truly abstract.** Its two basis methods are marked `@abstractmethod`, but a Keras layer is not an ABC, so Python still lets you instantiate it. Use a subclass.
 - **`ExogenousBlock` has no `thetas_dim`.** Passing it raises `TypeError`. The theta width is the basis channel count: `tcn_filters` when `use_tcn=True`, else `exogenous_dim`. Calling it without `exogenous_inputs` raises `ValueError`, so it cannot be dropped into a stack that calls `block(x)`.
 - **`TrendBlock` and `SeasonalityBlock` basis matrices are non-trainable weights.** Only theta learns. `GenericBlock` defaults `basis_initializer` to `Orthogonal(gain=0.1)`.
-- **Quantile heads.** With `enforce_monotonicity=True` the first quantile is kept and each later one adds a softplus step, so quantiles never cross. This only runs when `num_quantiles > 1`. `QuantileHead` with `flatten_input=False` needs a 2D input and raises `ValueError` in `build()` on anything else; use `flatten_input=True` for `(batch, seq, features)` with both trailing dims known.
-- **`QuantileSequenceHead` and `activity_regularizer`.** The regularizer is charged once, by Keras, on the tensor the head returns (after dropout and the monotonicity step). The inner Dense does not carry a copy.
-- **DeepAR heads floor every positive parameter at `1e-6`** (`MIN_LIKELIHOOD_PARAM` in `deepar_blocks.py`) so `log(sigma)` and `lgamma(1/alpha)` stay finite. `DeepARCell` does no concatenation or scaling itself; the caller concatenates the previous observation with covariates.
+- **Quantile and likelihood heads** are documented in `layers/heads/time_series/README.md`.
+- **`DeepARCell` does no concatenation or scaling itself**; the caller concatenates the previous observation with covariates.
 - **Lag layers need exactly two inputs**, a list `[context, lags]`, and `lags.shape[-1]` must equal `num_lags`. Both layers use sigmoid, not softmax, so lag weights do not compete. In `TemporalFusionLayer` the weighted lag sum is a single number per sample, so `lag_forecaster` has kernel shape `(1, output_dim)`.
 - **`ForecastabilityGate` and output shape.** `deep_forecast` and `naive_forecast` are extra `call` arguments, so Keras gives `compute_output_shape` only the backcast shape. Pass `forecast_length=` to the constructor so the declared output shape is right. Without it the gate logs a warning and declares the backcast shape. `build()` needs both trailing dims of the input to be static.
 - **`create_manokhin_compliant_model` survives a `.keras` save and load.** `ForecastabilityGate.build` tells a single saved shape from a list of shapes by looking at the first element. Both entries of `input_shape` must be concrete integers.

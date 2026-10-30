@@ -50,7 +50,7 @@ half of every Python file under `src/`. The other eleven combined are smaller th
 
 | Subpackage | Role |
 |---|---|
-| **`layers/`** | The largest package. Themed subpackages (attention, ffn, norms, embedding, activations, transformers, heads, memory, moe, time_series, …) plus a large set of loose top-level modules of standalone building blocks. Most subpackages expose a factory module with a registry — see *The registry / factory surface*. `adapters/` holds `LoRAAdapter` and `GatedAdapter`; `statistics/` holds `LocalSupportGate`, the gate half of Local Support Learning. |
+| **`layers/`** | The largest package. Themed subpackages (attention, ffn, norms, embedding, activations, transformers, heads, memory, moe, time_series, …; forecasting heads live in `heads/time_series/`, not in `layers/time_series/`) plus a large set of loose top-level modules of standalone building blocks. Most subpackages expose a factory module with a registry — see *The registry / factory surface*. `adapters/` holds `LoRAAdapter` and `GatedAdapter`; `statistics/` holds `LocalSupportGate`, the gate half of Local Support Learning. |
 | **`models/`** | The second largest, and the only subpackage that is not flat. Leaf model packages are grouped into family directories: `vision`, `language`, `vision_language`, `time_series`, `general_purpose`, `graph`, `neural_computer`, `common`, `memory`, `point_cloud`, `probabilistic`, `tabular`, `world_models`. Four of those nest a third level: `vision/image_restoration/`, `vision/keypoints/`, `vision/super_resolution/`, `vision_language/sam/`. Catalogue: `src/dl_techniques/models/AGENTS.md`; family taxonomy: `src/dl_techniques/models/README.md`. |
 | `losses/` | Loss families, one module each; `losses/any_loss.py` holds the single dict-based loss registry. |
 | `utils/` | Cross-cutting helpers — `utils/logger.py` (mandatory central logging), `utils/masking/` (the canonical mask factory), plus tensor, alignment and geometry helpers. |
@@ -130,7 +130,9 @@ other shapes:
   `create_head(domain, ...)` shim that forwards to one per-domain factory each:
   `heads/nlp/factory.py`, `heads/vision/factory.py`, `heads/vlm/factory.py`. Each domain is a
   package of one module per head plus `dispatch.py` (task type to class) and a thin
-  `factory.py`. Task heads are selected by *domain first*, then by key.
+  `factory.py`. Task heads are selected by *domain first*, then by key. A fourth domain,
+  `heads/time_series/` (quantile, likelihood and Timestral heads), has no factory and is not a
+  `create_head` domain: the forecasting models import its classes directly.
 
 Two deliberate absences. **`src/dl_techniques/layers/dynamic_chunking/` has no factory and
 no registry** — its three layers (`RoutingModule`, `ChunkLayer`, `DeChunkLayer`) are H-Net's

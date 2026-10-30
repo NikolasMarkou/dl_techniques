@@ -90,7 +90,7 @@ DeepAR has two distinct modes: **training** (teacher forcing) and **prediction**
 
 ## 4. Architecture Deep Dive
 
-All three blocks live in `dl_techniques/layers/time_series/deepar_blocks.py`.
+`ScaleLayer` and `DeepARCell` live in `dl_techniques/layers/time_series/deepar_blocks.py`. The two likelihood heads live in `dl_techniques/layers/heads/time_series/likelihood_heads.py`.
 
 ### 4.1 `ScaleLayer`
 
@@ -108,7 +108,7 @@ Projects the LSTM state to `mu` (affine) and `sigma` (affine + softplus, so posi
 
 For counts. Projects to mean `mu` and shape `alpha`, a Gamma-Poisson mixture that models overdispersion (variance > mean) — the normal case for sales data.
 
-`DeepARCell` also lives in that module; the model itself uses standard `keras.layers.LSTM` stacks for speed.
+`DeepARCell` lives in `deepar_blocks.py`; the model itself uses standard `keras.layers.LSTM` stacks for speed.
 
 ---
 
@@ -173,8 +173,8 @@ lo, hi = forecast.interval(0.1, 0.9)
 | `create_deepar` | `models.time_series.deepar.model` | Factory; returns an already-built model. |
 | `DeepARTrainingWrapper` | `train.time_series.deepar.train_deepar` | Wraps the NLL via `add_loss` so `fit` works. |
 | `ScaleLayer` | `layers.time_series.deepar_blocks` | Reversible per-series normalization. |
-| `GaussianLikelihoodHead` | `layers.time_series.deepar_blocks` | Emits `mu`, `sigma`. |
-| `NegativeBinomialLikelihoodHead` | `layers.time_series.deepar_blocks` | Emits `mu`, `alpha`. |
+| `GaussianLikelihoodHead` | `layers.heads.time_series.likelihood_heads` | Emits `mu`, `sigma`. |
+| `NegativeBinomialLikelihoodHead` | `layers.heads.time_series.likelihood_heads` | Emits `mu`, `alpha`. |
 
 The `deepar/` package `__init__.py` is intentionally empty, so import from `.model`. The `time_series` family package does re-export the public names, so `from dl_techniques.models.time_series import DeepAR, create_deepar` also works.
 

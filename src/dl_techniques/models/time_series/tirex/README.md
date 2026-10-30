@@ -169,7 +169,7 @@ To plot, fill between `p10` and `p90` and draw `p50` as the median line.
 | `create_tirex_by_variant` | `models.time_series.tirex.model` | Build one of the named variants (recommended). |
 | `TiRexExtended` | `models.time_series.tirex.model_extended` | Subclass with a different prediction-head / token graph. |
 | `create_tirex_extended` | `models.time_series.tirex.model_extended` | Variant factory for `TiRexExtended`. |
-| `StandardScaler`, `PatchEmbedding1D`, `MixedSequentialBlock`, `QuantileHead` | `layers.embedding`, `layers.time_series` | The building blocks. |
+| `StandardScaler`, `PatchEmbedding1D`, `MixedSequentialBlock`, `QuantileHead` | `layers.embedding`, `layers.time_series`, `layers.heads.time_series` (`QuantileHead`) | The building blocks. |
 
 The `tirex/` package `__init__.py` is intentionally empty, so import from `.model` / `.model_extended`. The `time_series` family package re-exports the three `TiRexCore` names, so `from dl_techniques.models.time_series import TiRexCore, create_tirex_by_variant` also works. `TiRexExtended` is not on that list — import it from its module.
 
