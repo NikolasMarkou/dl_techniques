@@ -301,7 +301,9 @@ class TransformArgs(StrictConfig):
         and is 0.0 under any other preset.
 
         :raises ConfigError: when ``augment``, given or from the recipe, is not
-            a name in ``train.common.image_augment.PRESETS``.
+            a name in ``train.common.image_augment.PRESETS``, or when an
+            explicit nonzero ``random_erasing_prob`` meets a preset other than
+            ``cifar_autoaugment`` (D-042).
         """
         from train.common.image_augment import PRESETS
 
@@ -331,6 +333,25 @@ class TransformArgs(StrictConfig):
                 f"Invalid value for 'transform_args.augment': "
                 f"{resolved.augment!r} is not a preset; choose one of "
                 f"{', '.join(PRESETS)}."
+            )
+        # DECISION plan-2026-10-30T132432-a865fa08/D-042: an EXPLICIT nonzero
+        # random_erasing_prob under a preset that takes none is refused HERE, as a
+        # ConfigError. Do NOT leave it to ``build_augment``: its ValueError reaches
+        # the user as a traceback and exit 1 (the code for a failed run), from the
+        # loader, after the run directory is claimed. An AUTO probability never gets
+        # here nonzero (it is 0.0 under any other preset, D-041).
+        probability = resolved.random_erasing_prob
+        if (
+            not _is_auto(probability)
+            and probability != 0
+            and not _is_auto(resolved.augment)
+            and resolved.augment != ERASING_PRESET
+        ):
+            raise ConfigError(
+                f"Invalid value for 'transform_args.random_erasing_prob': {probability!r} "
+                f"applies to the {ERASING_PRESET!r} preset only, but "
+                f"transform_args.augment is {resolved.augment!r}; set "
+                f"transform_args.augment={ERASING_PRESET} or drop the probability"
             )
         return resolved
 

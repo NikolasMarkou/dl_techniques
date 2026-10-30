@@ -399,3 +399,81 @@ def test_an_interrupted_task_exits_non_zero(source_dir, cwd):
     # The value is the interpreter's (130 or -SIGINT); only "not 0" is the contract.
     assert result.returncode != 0
     assert result.returncode != 2, "Ctrl-C must not look like a configuration error"
+
+
+# ---------------------------------------------------------------------
+# A real training run: the image-classification task, on fake arrays
+# ---------------------------------------------------------------------
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+# The fake loader is installed in the child before ``train.__main__`` runs, so
+# the real task, the real trainer and ``sys.exit(main(...))`` all run.
+TRAIN_DRIVER = f'''
+import runpy
+import sys
+
+sys.path.insert(0, {str(REPO_ROOT)!r})
+import train.common.classification_data as classification_data
+from tests.classification_fakes import tiny_raw
+
+classification_data._load_raw = tiny_raw(n_train=40, n_test=8)
+runpy.run_module("train", run_name="__main__")
+'''
+
+TRAIN_TOKENS = [
+    "image_classification",
+    "model=vit/vit_pico",
+    "data.dataset=cifar10",
+    "epochs=1",
+    "batch_size=4",
+    "analysis_args.model_analysis=false",
+]
+
+
+def run_training(extra: Sequence[str], cwd: Path):
+    return subprocess.run(
+        [sys.executable, "-c", TRAIN_DRIVER, *TRAIN_TOKENS, *extra],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+
+
+def error_lines(stderr: str) -> List[str]:
+    return [line for line in stderr.splitlines() if line.startswith("error:")]
+
+
+def test_a_real_training_run_exits_zero_and_writes_its_run_directory(cwd, tmp_path):
+    out = tmp_path / "run"
+    result = run_training([f"out={out}", "metric_args.success_threshold=0.0"], cwd)
+    assert result.returncode == 0, result.stderr[-3000:]
+    assert (out / "results_summary.json").is_file() and (out / "final_model.keras").is_file()
+    assert "Traceback" not in result.stderr
+    # Nothing was written next to the process: the run lives under `out` only.
+    assert list(cwd.iterdir()) == []
+
+
+def test_an_unmet_threshold_of_a_real_run_exits_one_without_a_traceback(cwd, tmp_path):
+    out = tmp_path / "run"
+    result = run_training([f"out={out}", "metric_args.success_threshold=1.5"], cwd)
+    assert result.returncode == 1, result.stderr[-3000:]
+    assert (out / "results_summary.json").is_file()
+    assert "Traceback" not in result.stderr
+    assert error_lines(result.stderr) == []
+
+
+def test_an_erasing_probability_with_another_preset_exits_two_before_the_run_is_claimed(
+    cwd, tmp_path
+):
+    out = tmp_path / "run"
+    result = run_training(
+        [f"out={out}", "transform_args.augment=flip", "transform_args.random_erasing_prob=0.3"],
+        cwd,
+    )
+    assert result.returncode == 2, (result.stdout[-1000:], result.stderr[-3000:])
+    lines = error_lines(result.stderr)
+    assert len(lines) == 1 and "'transform_args.random_erasing_prob'" in lines[0], lines
+    assert "Traceback" not in result.stderr
+    assert not out.exists()

@@ -1,8 +1,8 @@
 """``TaskTrainer.run()``: the one sequence, observed on real fits of a tiny model.
 
-The task is ``_stub_task.StubTrainer``: the real data config, loader, family
-registry and shared helpers around a ``vit/vit_pico`` on fake CIFAR-10 arrays.
-Three fits are shared by the arms that read their outputs:
+The task is the real ``ImageClassificationTrainer`` (``make_config`` below
+builds its config): the real data config, loader, family registry and shared
+helpers around a ``vit/vit_pico`` on fake CIFAR-10 arrays. Three fits are shared by the arms that read their outputs:
 
 * the **base** run (defaults, two epochs): the literal file list, the request
   and the resolved config, the log order, the result, the CSV;
@@ -27,13 +27,40 @@ import tensorflow as tf
 import train.api.recipes as recipes
 import train.api.trainer as trainer_module
 from train.api import registry
-from train.api.config import AUTO
+from train.api.config import AUTO, validate
 from train.api.errors import ConfigError, UnknownModelError
+from train.api.tasks.image_classification import (
+    ImageClassificationConfig,
+    ImageClassificationTrainer,
+)
 from train.api.trainer import CONFIG_FIELDS, TaskTrainer, TrainResult
 
 from tests.classification_fakes import use_tiny_raw
 
-from ._stub_task import StubConfig, StubTrainer, make_config
+
+def make_config(out, **changes):
+    """Return a validated task config for ``vit/vit_pico`` on cifar10.
+
+    :param out: the run directory (an absolute path under ``tmp_path``).
+    :param changes: field -> value; a dotted key (``"debug_args.smoke"``) sets a
+        field of a group.
+    :return: an ``ImageClassificationConfig`` with a batch of 4 and the model
+        analysis off (it costs a minute on the CPU).
+    """
+    mapping = {
+        "out": str(out),
+        "model": "vit/vit_pico",
+        "data": {"dataset": "cifar10"},
+        "batch_size": 4,
+        "analysis_args": {"model_analysis": False},
+    }
+    for key, value in changes.items():
+        head, _, tail = key.partition(".")
+        if tail:
+            mapping[head] = {**mapping.get(head, {}), tail: value}
+        else:
+            mapping[head] = value
+    return validate(ImageClassificationConfig, mapping)
 
 # ---------------------------------------------------------------------
 # The world: fake arrays, and an empty registry holding the six families
@@ -84,7 +111,7 @@ def base(world, tmp_path_factory):
     config = make_config(
         run_dir, epochs=2, **{"metric_args.success_threshold": 0.0, "optim_args.warmup_start_lr": 0}
     )
-    return StubTrainer(config).run(), run_dir, config
+    return ImageClassificationTrainer(config).run(), run_dir, config
 
 
 @pytest.fixture(scope="module")
@@ -101,14 +128,14 @@ def knobs(world, tmp_path_factory):
             "metric_args.success_threshold": 1.5,
         },
     )
-    return StubTrainer(config).run(), run_dir, config
+    return ImageClassificationTrainer(config).run(), run_dir, config
 
 
 @pytest.fixture(scope="module")
 def smoke(world, tmp_path_factory):
     run_dir = tmp_path_factory.mktemp("smoke") / "run"
     config = make_config(run_dir, **{"debug_args.smoke": True})
-    return StubTrainer(config).run(), run_dir, config
+    return ImageClassificationTrainer(config).run(), run_dir, config
 
 
 # ---------------------------------------------------------------------
@@ -281,7 +308,7 @@ def test_smoke_runs_one_epoch_on_at_most_512_samples(smoke):
 
 
 def resolve(config, family="vit", variant="vit_pico"):
-    trainer = StubTrainer(config)
+    trainer = ImageClassificationTrainer(config)
     facts = trainer.describe_data(config)
     return trainer._resolve(facts, family, variant)
 
@@ -307,7 +334,7 @@ def test_the_recipe_loader_mapping_reaches_the_data_of_the_family(world, tmp_pat
     # convnext repeats MNIST's channel (its recipe's loader says channels=3); vit does not.
     def loaded(model):
         config = make_config(tmp_path / "r", model=model, **{"data.dataset": "mnist"})
-        trainer = StubTrainer(config)
+        trainer = ImageClassificationTrainer(config)
         family, variant = model.split("/")
         resolved, context = trainer._resolve(trainer.describe_data(config), family, variant)
         return context, trainer.build_data(resolved, context)
@@ -328,21 +355,21 @@ def test_the_recipe_loader_mapping_reaches_the_data_of_the_family(world, tmp_pat
 def test_smoke_with_an_explicit_epochs_is_refused_before_anything_is_created(world, tmp_path):
     out = tmp_path / "run"
     with pytest.raises(ConfigError, match="'epochs'.*smoke"):
-        StubTrainer(make_config(out, epochs=3, **{"debug_args.smoke": True})).run()
+        ImageClassificationTrainer(make_config(out, epochs=3, **{"debug_args.smoke": True})).run()
     assert not out.exists()
 
 
 def test_resuming_is_refused_while_it_is_not_implemented(world, tmp_path):
     out = tmp_path / "run"
     with pytest.raises(ConfigError, match="resume_interrupted"):
-        StubTrainer(make_config(out, resume_interrupted=True)).run()
+        ImageClassificationTrainer(make_config(out, resume_interrupted=True)).run()
     assert not out.exists()
 
 
 def test_an_unknown_model_is_refused_before_the_directory_is_claimed(world, tmp_path):
     out = tmp_path / "run"
     with pytest.raises(UnknownModelError, match="vit_pic"):
-        StubTrainer(make_config(out, model="vit/vit_pic")).run()
+        ImageClassificationTrainer(make_config(out, model="vit/vit_pic")).run()
     assert not out.exists()
 
 
@@ -351,12 +378,12 @@ def test_a_used_directory_is_refused_and_left_alone(world, tmp_path):
     out.mkdir()
     (out / "results_summary.json").write_text("{}")
     with pytest.raises(ConfigError, match="already holds a run"):
-        StubTrainer(make_config(out)).run()
+        ImageClassificationTrainer(make_config(out)).run()
     assert [p.name for p in out.iterdir()] == ["results_summary.json"]
 
 
 def test_a_task_that_describes_other_data_than_it_loads_is_a_bug_and_says_so(world, tmp_path):
-    class Lying(StubTrainer):
+    class Lying(ImageClassificationTrainer):
         def describe_data(self, config):
             facts = super().describe_data(config)
             return dataclasses.replace(facts, num_classes=facts.num_classes + 1)
@@ -374,8 +401,8 @@ def test_a_trainer_needs_every_config_field(world, tmp_path):
         TaskTrainer(Thin())
 
 
-def test_the_stub_config_has_exactly_the_fields_the_trainer_reads():
-    assert {f.name for f in dataclasses.fields(StubConfig)} == set(CONFIG_FIELDS)
+def test_the_task_config_has_exactly_the_fields_the_trainer_reads():
+    assert {f.name for f in dataclasses.fields(ImageClassificationConfig)} == set(CONFIG_FIELDS)
 
 
 # ---------------------------------------------------------------------
@@ -394,14 +421,14 @@ def saved_dense(path, name="probe", fill=None):
 def test_a_checkpoint_that_is_no_file_is_refused_with_the_key(world, tmp_path):
     out = tmp_path / "run"
     with pytest.raises(ConfigError, match="'checkpoint'.*not a file"):
-        StubTrainer(make_config(out, checkpoint=str(tmp_path / "nope.keras"))).run()
+        ImageClassificationTrainer(make_config(out, checkpoint=str(tmp_path / "nope.keras"))).run()
 
 
 def test_a_checkpoint_that_shares_no_layer_is_a_config_error(world, tmp_path):
     other = tmp_path / "other.keras"
     saved_dense(other, name="unrelated")
     with pytest.raises(ConfigError, match="'checkpoint'"):
-        StubTrainer(make_config(tmp_path / "run", checkpoint=str(other))).run()
+        ImageClassificationTrainer(make_config(tmp_path / "run", checkpoint=str(other))).run()
 
 
 def test_a_checkpoint_with_a_matching_layer_loads_its_weights(world, tmp_path):
@@ -409,7 +436,7 @@ def test_a_checkpoint_with_a_matching_layer_loads_its_weights(world, tmp_path):
     saved_dense(source, fill=0.5)
     target = keras.Sequential([keras.layers.Input((4,)), keras.layers.Dense(3, name="probe")])
     assert not (target.get_weights()[0] == 0.5).all()
-    StubTrainer(make_config(tmp_path / "unused"))._load_checkpoint(target, str(source))
+    ImageClassificationTrainer(make_config(tmp_path / "unused"))._load_checkpoint(target, str(source))
     assert (target.get_weights()[0] == 0.5).all()
 
 
@@ -422,7 +449,7 @@ class _Stop(Exception):
     """Raised from a callback to end a run right after ``fit`` starts."""
 
 
-class Recording(StubTrainer):
+class Recording(ImageClassificationTrainer):
     """Records the policy and the optimizer in force when training begins, then stops."""
 
     seen = {}
@@ -512,7 +539,7 @@ def test_a_diverged_fit_writes_the_summary_and_the_history_then_raises(world, tm
     out = tmp_path / "run"
     config = make_config(out, epochs=1, **{"optim_args.lr": 1e30, "optim_args.warmup_epochs": 0})
     with pytest.raises(RuntimeError, match="Training diverged"):
-        StubTrainer(config).run()
+        ImageClassificationTrainer(config).run()
     summary = read_json(out, "results_summary.json")
     assert summary["status"] == "diverged"
     assert summary["non_finite_metrics"]

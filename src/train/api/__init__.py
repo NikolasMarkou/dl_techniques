@@ -41,6 +41,8 @@ _LAZY: Dict[str, str] = {
     "load_data_config": ".data_args",
     "TaskTrainer": ".trainer",
     "TrainResult": ".trainer",
+    "ImageClassificationConfig": ".tasks.image_classification",
+    "train_image_classification": ".tasks.image_classification",
 }
 
 __all__ = sorted(_LAZY)

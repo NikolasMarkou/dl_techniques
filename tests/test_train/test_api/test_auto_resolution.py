@@ -250,12 +250,45 @@ def test_an_auto_erasing_probability_follows_the_preset_in_force(
 
 
 def test_an_explicit_erasing_probability_is_not_moved_by_the_preset_rule():
-    # D-010: the rule fills AUTO only. 0.4 with a recipe preset that takes no
-    # erasing stays 0.4 (build_augment refuses it later, at the loader).
-    transform = TransformArgs(random_erasing_prob=0.4).resolve_auto(
+    # D-010: the rule fills AUTO only. 0.4 under a preset that takes it stays 0.4,
+    # whether the preset is the recipe's or the caller's.
+    kept = TransformArgs(random_erasing_prob=0.4).resolve_auto(
+        context(defaults=AUTOAUGMENT_RECIPE)
+    )
+    assert kept.random_erasing_prob == 0.4
+    explicit = TransformArgs(augment="cifar_autoaugment", random_erasing_prob=0.4).resolve_auto(
         context(defaults=ERASING_RECIPE)
     )
-    assert transform.random_erasing_prob == 0.4
+    assert (explicit.augment, explicit.random_erasing_prob) == ("cifar_autoaugment", 0.4)
+
+
+@pytest.mark.parametrize(
+    "recipe, augment",
+    [
+        (ERASING_RECIPE, AUTO),  # the recipe's preset, "none"
+        (ERASING_RECIPE, "flip"),
+        (AUTOAUGMENT_RECIPE, "cifar_light"),
+        (AUTOAUGMENT_RECIPE, "photometric"),
+    ],
+)
+def test_an_explicit_erasing_probability_under_another_preset_is_a_config_error(recipe, augment):
+    # D-042: build_augment would raise a ValueError at the loader (a traceback, exit 1);
+    # the refusal is made here, names the key, and exits 2 through the CLI.
+    with pytest.raises(ConfigError) as caught:
+        TransformArgs(augment=augment, random_erasing_prob=0.4).resolve_auto(
+            context(defaults=recipe)
+        )
+    message = str(caught.value)
+    assert message.startswith("Invalid value for 'transform_args.random_erasing_prob': 0.4")
+    assert "cifar_autoaugment" in message
+
+
+def test_an_explicit_zero_erasing_probability_is_fine_under_any_preset():
+    # The control of the arm above: only a NONZERO probability is refused.
+    result = TransformArgs(augment="flip", random_erasing_prob=0.0).resolve_auto(
+        context(defaults=ERASING_RECIPE)
+    )
+    assert (result.augment, result.random_erasing_prob) == ("flip", 0.0)
 
 
 # The two clipping fields exclude each other, and the rule that keeps them

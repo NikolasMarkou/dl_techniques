@@ -100,6 +100,30 @@ def test_a_task_help_imports_nothing_heavy_either(args, source_dir, cwd):
     assert forbidden_in(modules) == []
 
 
+@pytest.mark.parametrize(
+    "args",
+    [["image_classification"], ["image_classification", "help"], ["image_classification", "-h"]],
+    ids=lambda a: " ".join(a),
+)
+def test_the_real_task_help_imports_nothing_heavy_either(args, tmp_path):
+    result = run_train(args, tmp_path, importtime=True)
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert "usage: python -m train image_classification" in result.stdout
+    modules = imported_modules(result.stderr)
+    # Liveness: the CLI ran, and the task's config class really was imported by the
+    # help path (importlib.import_module is not an importtime line, so the keys it
+    # supplied are the evidence).
+    assert "train.api.cli" in modules, modules[-20:]
+    assert "  data.dataset  (" in result.stdout and "  optim_args.lr  (" in result.stdout
+    assert forbidden_in(modules) == []
+
+
+def test_the_command_help_lists_the_real_task(tmp_path):
+    result = run_train(["help"], tmp_path, importtime=False)
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert "tasks:\n  image_classification  " in result.stdout
+
+
 def test_the_forbidden_list_names_the_two_keras_backends_and_their_children():
     assert forbidden_in(
         ["tf_keras", "tf_keras.src.layers", "tensorboard", "tensorboard.compat.v1"]

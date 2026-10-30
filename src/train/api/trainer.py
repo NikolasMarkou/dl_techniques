@@ -38,12 +38,15 @@ Interface contract
 
     The sequence, with no ``except`` anywhere in it:
 
-    1. ``parse_model_name``, ``resolve_out``, ``open_run`` (claims the directory);
+    1. ``parse_model_name``, ``describe_data`` -> the family recipe ->
+       ``resolve_auto`` on every group -> ``assert_resolved`` (a refusal here
+       leaves no trace: the directory is not claimed yet, D-042), then
+       ``resolve_out`` and ``open_run`` (claims the directory);
     2. ``setup_gpu``, ``set_seeds(config.seed)``, the precision policy (restored
        in a ``finally``);
     3. ``write_requested``; ``run.log`` opens; ``Args:`` is logged;
-    4. ``describe_data`` -> the family recipe -> ``resolve_auto`` on every group
-       -> ``assert_resolved`` -> ``Resolved args:`` -> ``write_resolved``;
+       ``Resolved args:`` is logged and ``write_resolved`` writes ``config.json``;
+    4. (the data is described in step 1 and loaded in step 5)
     5. ``build_data``, ``build_model``, the optional ``checkpoint`` weights,
        ``compile`` through ``optim.py``;
     6. ``check_initial_loss``;
@@ -63,6 +66,10 @@ Hooks (override in a task)
     the ``AutoContext``, which has to exist before the data is loaded: the
     augmentation hook, a recipe decision, is an argument of the loader. This
     deviates from the plan's order "build_data, then resolve_auto" (D-041).
+    The resolution runs before the run directory is claimed (D-042), so a
+    request that cannot resolve (an explicit ``random_erasing_prob`` under a
+    preset that takes none, an unknown augmentation preset) is refused without
+    touching ``out``.
 ``build_data(config, context)``
     The loaded data, an object with the attributes of
     ``train.common.classification_data.ClassificationData``. ``config`` is
@@ -331,6 +338,13 @@ class TaskTrainer:
             )
 
         family, variant = registry.parse_model_name(config.model)
+        # DECISION plan-2026-10-30T132432-a865fa08/D-042: the request is RESOLVED
+        # before the run directory is claimed. Do NOT move this below ``open_run``:
+        # a request that cannot resolve is a configuration error, and refusing it
+        # after the claim would leave ``config_requested.json`` behind and block
+        # the same ``out`` for a mistake the user has not yet been told about.
+        facts = self.describe_data(config)
+        resolved, context = self._resolve(facts, family, variant)
         run_dir = open_run(
             resolve_out(config.out, self.task, family, variant), config.resume_interrupted
         )
@@ -339,7 +353,7 @@ class TaskTrainer:
         previous_policy = keras.mixed_precision.global_policy().name
         setup_mixed_precision(config.precision != "float32", config.precision)
         try:
-            return self._train(family, variant, run_dir)
+            return self._train(family, variant, run_dir, facts, resolved, context)
         finally:
             keras.mixed_precision.set_global_policy(previous_policy)
 
@@ -377,7 +391,15 @@ class TaskTrainer:
         assert_resolved(resolved)
         return resolved, context
 
-    def _train(self, family: str, variant: str, run_dir: Path) -> TrainResult:
+    def _train(
+        self,
+        family: str,
+        variant: str,
+        run_dir: Path,
+        facts: DataFacts,
+        config: StrictConfig,
+        context: AutoContext,
+    ) -> TrainResult:
         import keras
 
         from dl_techniques.utils.logger import logger
@@ -396,13 +418,11 @@ class TaskTrainer:
                 f"TensorFlow sees {devices['tf_visible_devices']} ({devices['gpu_names']})"
             )
 
-            # DECISION plan-2026-10-30T132432-a865fa08/D-041: the data is DESCRIBED here
-            # and LOADED after ``resolve_auto``. Do NOT load first and resolve from the
-            # loaded data (the plan's order): the augmentation hook and the recipe's
-            # ``loader`` arguments are arguments of the loader, and both are decided by
-            # the recipe, which needs the class count and image size.
-            facts = self.describe_data(self.config)
-            config, context = self._resolve(facts, family, variant)
+            # DECISION plan-2026-10-30T132432-a865fa08/D-041: the data is DESCRIBED
+            # (in ``run``) and LOADED after ``resolve_auto``. Do NOT load first and
+            # resolve from the loaded data (the plan's order): the augmentation hook
+            # and the recipe's ``loader`` arguments are arguments of the loader, and
+            # both are decided by the recipe, which needs the class count and image size.
             logger.info(f"Resolved args:\n{to_json(config)}")
             write_resolved(run_dir, config)
 

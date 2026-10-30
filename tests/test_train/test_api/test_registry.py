@@ -294,6 +294,29 @@ def test_no_registered_task_shadows_a_command():
     assert set(registry.TASKS).isdisjoint(cli.COMMANDS)
 
 
+def test_no_real_task_name_shadows_a_command_or_a_help_word(empty_registries):
+    from train.api.tasks import BUILTIN_TASKS, register_builtin_tasks
+
+    names = [spec.name for spec in BUILTIN_TASKS]
+    assert names, "the built-in task table is empty, so the pin below proves nothing"
+    assert set(names).isdisjoint(cli.COMMANDS)
+    assert set(names).isdisjoint(cli.HELP_WORDS)
+    # The registry's own refusal agrees: registering the real rows raises nothing...
+    register_builtin_tasks()
+    assert sorted(registry.TASKS) == sorted(names)
+    # ...and is idempotent.
+    register_builtin_tasks()
+    assert sorted(registry.TASKS) == sorted(names)
+    # Control: the refusal does fire for a real command's name.
+    with pytest.raises(ValueError, match="name of a built-in command"):
+        registry.register_task(task_spec("help"))
+
+
+def test_the_python_surface_exports_the_task_function_and_its_config():
+    assert train.api.train_image_classification.__name__ == "train_image_classification"
+    assert train.api.ImageClassificationConfig.__name__ == "ImageClassificationConfig"
+
+
 @pytest.mark.parametrize("name", list(cli.COMMANDS))
 def test_registering_a_task_named_like_a_command_is_a_bug(name, empty_registries):
     with pytest.raises(ValueError, match="name of a built-in command"):
