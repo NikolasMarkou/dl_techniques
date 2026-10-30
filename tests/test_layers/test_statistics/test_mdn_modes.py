@@ -532,9 +532,12 @@ class TestStationaryPointsReachedFromEachComponentMean:
     def test_the_density_minimum_is_left_on_a_dense_shift_grid_for_each_pattern_entry(self, shift, pad):
         _check_the_shifted_middle_start_leaves_the_density_minimum(shift, pad=pad)
 
-    # First failing (pad, shift) pair of each multiple on the grid above, measured 2026-10-30 in
-    # float32 (the multiple 8 fails none of the 943 pairs of pads 0..40): the older five-shift test
-    # only fails the multiple 1.
+    # A failing (pad, shift) pair of each multiple on the grid above, measured 2026-10-30 in float32
+    # with the cap on: the multiple 1 fails the plain triple at 6 of the 23 shifts (first 5000), the
+    # multiple 2 at 4 (first 4177.92), the multiple 4 fails pad 2 at 5 (first 5000). The older five-shift
+    # test only fails the multiple 1 (at 5000). The multiple 8 passes all 69 pairs of pads 0, 2 and 36; of
+    # the 943 pairs of pads 0..40 it keeps 3 on the minimum (pads 23, 31 and 39, all at shift 1e6),
+    # against 14 for the multiple 4 and 54 for the multiple 2.
     @pytest.mark.parametrize(
         "multiple, pad, shift",
         [(1.0, 0, 5000.0), (2.0, 0, 4096.0 * 1.02), (4.0, 2, 4096.0 * 1.02)],
@@ -734,8 +737,9 @@ class TestTheStartOffsetBreaksCoordinateSymmetry:
 
 # The start offset is max(1e-3 sigma, min(8 eps(work dtype) |mu|, 0.5 sigma)): a term tied to rounding of the
 # mean, not to a fixed fraction of it, and capped so it never outgrows sigma of a well-separated component.
-# Measured 2026-10-30 against the dense-grid maxima: the fixed 1e-5 |mu| term lost a mode of
-# components 10 sigma apart at |mu|/sigma >= 1e6 (float32 and float64).
+# Measured 2026-10-30 against the float64 oracle modes: the fixed 1e-5 |mu| term lost a mode in float32 and
+# float64 alike, in windows of |mu|/sigma: 3 sigma apart at about 2e5 to 4e5 (mostly weights 0.7 / 0.3),
+# 5 sigma at about 4e5 to 6e5, 10 sigma at 1e6 but not at 2e6.
 def _grid_maxima_count(mu, sigma, logits):
     """Number of strict local maxima of a 1-D mixture density on a dense float64 grid.
 
@@ -785,7 +789,7 @@ def _check_the_float32_pair_keeps_both_modes(ratio, gap, weights):
     """Two unit components ``gap`` apart at ``ratio``: both float32 modes are found where the oracle puts them.
 
     The truth is the float64 mode of the means as float32 stores them, and the tolerance is
-    ``max(0.1, 1.5 ulp)`` because one float32 spacing is 0.125 from a ratio of 1.6e6 on.
+    ``max(0.1, 1.5 ulp)`` because one float32 spacing is 0.125 from a ratio of 2**20 (1.05e6) on.
     """
     modes, log_density, is_unique = _modes_of_two(ratio, gap, 1.0, weights, "float32")
     stored = np.array([ratio, ratio + gap], np.float32).astype(np.float64) - ratio
@@ -828,8 +832,10 @@ class TestTheStartOffsetTracksRounding:
         assert int(is_unique.sum()) == expected, f"modes {modes}"
         assert abs(modes[int(np.argmax(log_density))] - heavy) < 0.1
 
-    # Measured 2026-10-30 in float32 with the eps-scaled offset: no loss up to |mu|/sigma = 1e6 at
-    # 3, 5 and 10 sigma, a lost heavy 5 sigma mode first at 2e6 (reviewer probe), so 1e6 is the bound.
+    # Measured 2026-10-30 in float32 with the eps term of the offset uncapped: no mode lost or merged up to
+    # |mu|/sigma = 1e6 at 3, 5 and 10 sigma. At 2e6 the 3 sigma light mode was merged (weights 0.7 / 0.3) or
+    # found 5 spacings off (0.3 / 0.7), and the heavy 5 sigma mode was found one spacing (0.125) high, which
+    # is above a tolerance of 0.1. The cap keeps these pairs to 4e6 (the next test).
     @pytest.mark.parametrize("ratio", [1e3, 1e5, 5e5, 1e6])
     @pytest.mark.parametrize("gap", [3.0, 5.0, 10.0])
     @pytest.mark.parametrize("weights", [(0.3, 0.7), (0.7, 0.3)])
