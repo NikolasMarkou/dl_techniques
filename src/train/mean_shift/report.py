@@ -64,6 +64,8 @@ REFERENCES: Dict[str, str] = {"exp1": "mean", "exp2": "mha"}
 
 #: Experiments whose variants are ranked by selection-split accuracy.
 RANKED_EXPERIMENTS = ("exp2",)
+# DECISION plan-2026-10-30T025213-f75ab4e9/D-007
+# Rank on the SELECTION split (a held-out slice of train), never on test_accuracy: the long run's configs are chosen from this ranking; do NOT switch it to the test split.
 RANKING_METRIC = "select_accuracy"
 FAILED_TAIL_CHARS = 300
 
@@ -121,6 +123,8 @@ def collect(roots: Sequence[Path]) -> Dict[str, Any]:
     ok: Dict[Tuple[str, str, str, int], Tuple[Path, Dict[str, Any]]] = {}
     failed: Dict[Tuple[str, str, str, int], List[Dict[str, Any]]] = {}
     expected: List[Tuple[str, str, str, int]] = []
+    # DECISION plan-2026-10-30T025213-f75ab4e9/D-004
+    # Rows are keyed by the FULL (experiment, arm, config, seed) tuple and paired by seed value (see _paired); a key on the seed alone or pairing by position once gave a wrong verdict. Do NOT simplify.
     for root in map(Path, roots):
         manifest = _manifest_keys(root)
         if manifest is None and not (root / common.ROWS_NAME).is_file():
@@ -225,6 +229,8 @@ def _rank(variants: Mapping[str, Mapping[str, Any]], reference: str) -> List[Dic
 
 
 def _paired(cell: Mapping[str, Any], reference: Mapping[str, Any], metric: str, ref_name: str):
+    # DECISION plan-2026-10-30T025213-f75ab4e9/D-004
+    # Pair by the seed VALUE (dict keyed on seed), never by list position: a variant that lost a seed would otherwise be paired with the wrong run.
     mine = dict(zip(cell["seeds"], cell["metrics"][metric]["values"]))
     theirs = dict(zip(reference["seeds"], reference["metrics"][metric]["values"]))
     seeds = sorted(set(mine) & set(theirs))

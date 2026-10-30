@@ -218,6 +218,16 @@ class TestMemorizationRatio:
         assert summary["frac_below_half"] == pytest.approx(1.0 / 3.0)
         assert summary["n_scored"] == 3 and summary["self_retrieval_rate"] is None
 
+    def test_the_summary_reports_the_median_not_the_mean(self) -> None:
+        """Ratios 0, 0, 1: median 0, mean 1/3. The worked example (0, 0.5, 1) cannot tell them apart."""
+        estimates = np.array([[0.0, 0.0], [0.0, 0.0], [1.0, 0.5]])
+        scores = em.memorization_scores(np.tile(self.TRUTH, (3, 1)), estimates, self.BANK, 8, in_bank=False)
+        np.testing.assert_allclose(scores.ratio, [0.0, 0.0, 1.0], atol=1e-12)
+        assert np.mean(scores.ratio) == pytest.approx(1.0 / 3.0)
+        summary = em.summarize_memorization(scores)
+        assert summary["median"] == 0.0
+        assert summary["frac_below_half"] == pytest.approx(2.0 / 3.0)
+
     def test_a_bank_with_an_exact_twin_and_a_near_twin_counts_instead_of_dividing(self) -> None:
         a = np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32)
         near = a + np.float32(1e-5)

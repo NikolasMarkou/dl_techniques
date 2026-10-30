@@ -67,18 +67,37 @@ def run_worker(module, root, arm, config, *, seed=0, dataset="cifar10", epochs=1
     return json.loads((cell_dir / "result.json").read_text(encoding="utf-8"))
 
 
+def dataset_images_sha(dataset):
+    """The hash of the images of a batched ``tf.data`` dataset of ``(x, y)``, in iteration order."""
+    return sha(np.concatenate([np.asarray(x) for x, _ in dataset.as_numpy_iterator()]))
+
+
 class Recorder:
-    """Wraps ``common.top1`` and keeps a hash of every array a worker scored."""
+    """Wraps ``common.top1`` and ``Model.fit``.
+
+    ``hashes`` keeps a hash of every array a worker scored; ``fit_validation`` keeps a hash of
+    the images of the ``validation_data`` every ``fit`` call received, so a worker that
+    monitors the wrong split during training is visible.
+    """
 
     def __init__(self, monkeypatch):
+        import keras
         self.hashes = []
+        self.fit_validation = []
         real = common.top1
+        real_fit = keras.Model.fit
+        recorder = self
 
         def recording(model, x, y, batch_size=256):
             self.hashes.append(sha(x))
             return real(model, x, y, batch_size)
 
+        def recording_fit(model, *args, **kwargs):
+            recorder.fit_validation.append(dataset_images_sha(kwargs["validation_data"]))
+            return real_fit(model, *args, **kwargs)
+
         monkeypatch.setattr(common, "top1", recording)
+        monkeypatch.setattr(keras.Model, "fit", recording_fit)
 
 
 @pytest.fixture(scope="module")
@@ -229,6 +248,17 @@ def test_the_exp1_selection_score_reads_the_selection_split_not_the_test_split(
         assert sha(split_arrays.x_select) in recorder.hashes
     assert len(split_arrays.x_select) != len(split_arrays.x_test)
     assert not np.array_equal(split_arrays.x_select[:5], split_arrays.x_test[:5])
+
+
+def test_the_exp1_fit_validates_on_the_selection_split_not_the_test_split(
+        exp1_runs, split_arrays):
+    """The stored ``val_*`` history is the selection curve; a ``fit`` that monitored the test
+    split would turn it into a test curve without any score changing."""
+    _, recorders = exp1_runs
+    selection, test = sha(split_arrays.x_select), sha(split_arrays.x_test)
+    assert selection != test
+    for arm, recorder in recorders.items():
+        assert recorder.fit_validation == [selection], arm
 
 
 # ---------------------------------------------------------------------------
@@ -542,6 +572,14 @@ def test_the_exp2_selection_and_test_scores_read_their_own_splits(exp2_runs):
     for config, recorder in exp2_runs[1].items():
         assert sorted(recorder.hashes) == sorted([sha(arrays.x_select), sha(arrays.x_test)]), config
     assert not np.array_equal(arrays.x_select[:5], arrays.x_test[:5])
+
+
+def test_the_exp2_fit_validates_on_the_selection_split_not_the_test_split(exp2_runs):
+    arrays = load_split_arrays("cifar100", seed=0, max_samples=MAX_SAMPLES)
+    selection, test = sha(arrays.x_select), sha(arrays.x_test)
+    assert selection != test
+    for config, recorder in exp2_runs[1].items():
+        assert recorder.fit_validation == [selection], config
 
 
 # ---------------------------------------------------------------------------
