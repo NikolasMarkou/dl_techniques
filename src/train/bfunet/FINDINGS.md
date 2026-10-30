@@ -516,9 +516,11 @@ covers (self-retrieved and degenerate queries are set aside). The held-out rows 
 
 What the table says, and no more:
 
-- **Held-out, low sigma: the oracle is below the noisy input.** At sigma 5, 10 and 15 the oracle median PSNR (23.56, 23.56, 23.57 dB) is below the
+- **Held-out, low sigma: the oracle median is below the noisy-input median.** At sigma 5, 10 and 15 the oracle median PSNR (23.56, 23.56, 23.57 dB) is below the
   noisy-input median (34.15, 28.15, 24.61 dB). The oracle median is nearly flat across sigma (23.47 to 23.61 dB), while the noisy input falls from
-  34.15 to 11.87 dB, so the oracle median passes the noisy input between sigma 15 and sigma 25 (20.18 against 23.60 dB at sigma 25).
+  34.15 to 11.87 dB, so the oracle median passes the noisy input between sigma 15 and sigma 25 (20.18 against 23.60 dB at sigma 25). This is a statement
+  about the median: the oracle mean (27.13, 26.88, 26.73 dB at sigma 5, 10, 15) is above the noisy input (mean 24.60 dB) already at sigma 15, so under the mean the
+  crossover lies between sigma 10 and sigma 15.
 - **It acts as a lookup of one bank patch there.** For held-out queries the effective number `exp(H)` has median 1.00 at sigma 5, 10 and 15, the memorization
   median is 2.66e-07 to 4.95e-07, and 0.994, 0.977 and 0.968 of the scored queries are below 0.5: the output is essentially a patch of the bank, and a copied bank patch is a worse
   estimate of a new crop than the noisy input is at low sigma. At higher sigma the weights
