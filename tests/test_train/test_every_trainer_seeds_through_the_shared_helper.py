@@ -75,6 +75,7 @@ NOT_TRAINING: Dict[str, str] = {
     "train.hnet.prepare_hnet_data": "data preparation",
     "train.lightglue.eval_homography": "evaluates a saved matcher",
     "train.logic.multiseed_sweep": "launches seeded trainers as subprocesses",
+    "train.mean_shift.report": "aggregates finished cells",
     "train.mothnet.multiseed_sweep": "launches the seeded MothNet trainer per seed",
     "train.nam.create_dataset": "data generation",
     "train.nam.eval_dfsa": "evaluates a saved DFSA",
