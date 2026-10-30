@@ -897,8 +897,8 @@ def get_mixture_modes(
     ``|mu|`` (``|mu| / sigma`` above about 1e7) the returned points are rounded to
     the ulp grid and can lie far below the density peak (random three-component
     mixtures at sigma of 0.1 ulp, shifts 1e3 and 1e5, float32: the worst deficit
-    was between 50 and 5000 nats across draws of 10 to 40 mixtures, so expect
-    tens to thousands of nats); means closer than an ulp are one float (the
+    was between about 2 and about 55 nats across draws of 10 to 40 mixtures, so
+    expect tens of nats); means closer than an ulp are one float (the
     -1/0/+1 triple, sigma 0.5, at 3e7 and above returns that float, log density
     -0.2258). Centre or rescale the data first. In float64 the same sweep lost no
     separated mode up to ``|mu| / sigma`` of about 4e15 (about ``2**29`` times the
