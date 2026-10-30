@@ -1,21 +1,56 @@
-"""Canonical cross-attention transformer decoder block.
+"""
+``TransformerDecoderLayer``, the decoder block of an encoder-decoder
+transformer: masked self-attention over the target sequence,
+cross-attention to an encoder's output, then a feed-forward network.
 
-Implements :class:`TransformerDecoderLayer`, the encoder-decoder counterpart
-to :class:`~dl_techniques.layers.transformers.transformer.TransformerLayer`.
-Where ``TransformerLayer`` runs one self-attention sub-block, this layer
-composes three residual sub-blocks: masked self-attention over the decoder
-sequence, cross-attention from the decoder sequence to an external encoder
-memory, then a feed-forward network. All three are built through the shared
-component factories, so attention, FFN and normalization types are
-configurable without subclassing, and cross-attention is built on
-``MultiHeadCrossAttention`` (factory key ``'multi_head_cross'``), which
-cross-attends given distinct query and key/value tensors.
+Sequence-to-sequence tasks read one sequence and write another:
+translation, summarization, speech recognition, captioning. An
+encoder-only block can mix a sequence with itself but cannot read a
+second one. This block adds that path. Self-attention lets each output
+position read the positions written before it; cross-attention lets it
+query the encoder memory (``query`` from the decoder, ``key``/``value``
+from the encoder); the FFN then transforms each position. Each sub-block
+has a residual and a norm, placed as in ``TransformerLayer``::
 
-``Attention(Q, K, V) = softmax((Q K^T) / sqrt(d_k)) V``
+    post (default):  x = Norm(x + Sublayer(x))
+    pre:             x = x + Sublayer(Norm(x))
 
-Every self-attention type in the attention factory's registry is accepted by
-the constructor, but only a subset actually works with this block's
-cross-attention and masking plumbing; see the class docstring for which.
+Attention, FFN and normalization types all come from the shared
+factories, so variants need no subclass. Cross-attention defaults to
+``'multi_head_cross'``, which takes separate query and key/value tensors.
+
+Use it to build the decoder stack of a sequence-to-sequence model. With
+``use_causal_mask=False`` it also serves as a non-autoregressive decoder
+in which a fixed set of queries reads an encoder memory, as in DETR.
+
+Before use: call as ``layer(x, encoder_output, ...)`` with
+``x: (B, T, hidden_size)`` and ``encoder_output: (B, S, hidden_size)``;
+output is ``(B, T, hidden_size)``. Masks are keep masks (``1`` = attend):
+``self_attention_mask`` is ``(B, T, T)`` and ``cross_attention_mask`` is
+``(B, T, S)``. The causal mask is generated only when
+``self_attention_mask`` is ``None``; a supplied mask replaces it, so it
+must carry causality itself. Only some ``self_attention_type`` keys work
+here (see the class docstring); maskless types (``'anchor'``,
+``'fnet'``, ``'lighthouse'``) log a warning and make the block
+non-causal, and ``'window'`` is causal only at
+``seq_len == window_size ** 2``. ``'differential'`` needs the real
+``layer_idx`` of each block in the stack. ``kernel_regularizer`` and
+``bias_regularizer`` are stored and serialized but not passed to any
+sub-layer.
+
+References:
+    - Vaswani et al., 2017. Attention Is All You Need. The
+      encoder-decoder transformer and post-norm placement.
+      (https://arxiv.org/abs/1706.03762)
+    - Xiong et al., 2020. On Layer Normalization in the Transformer
+      Architecture. Pre-norm placement.
+      (https://arxiv.org/abs/2002.04745)
+    - Raffel et al., 2020. Exploring the Limits of Transfer Learning with
+      a Unified Text-to-Text Transformer. T5, a pre-norm
+      encoder-decoder. (https://arxiv.org/abs/1910.10683)
+    - Carion et al., 2020. End-to-End Object Detection with Transformers.
+      DETR, a non-causal decoder over learned queries.
+      (https://arxiv.org/abs/2005.12872)
 """
 
 import keras

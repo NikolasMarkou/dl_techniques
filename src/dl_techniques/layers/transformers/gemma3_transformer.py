@@ -1,32 +1,55 @@
-"""``Gemma3TransformerBlock``, sandwich-normalized grouped-query attention plus
-a GeGLU feed-forward network, with the attention window chosen per block.
+"""
+``Gemma3TransformerBlock``, one decoder block of the Gemma 3 language
+model: grouped-query causal attention and a GeGLU feed-forward network,
+each wrapped in a sandwich of RMSNorms, with full or sliding-window
+attention chosen per block.
 
-Each sublayer is bracketed by RMSNorm rather than only preceded by it —
-``x = x + PostNorm(Sublayer(PreNorm(x)))`` for both attention and the FFN,
-four norms per block. The post-norm half bounds each branch's contribution
-to the residual stream, which a pure pre-norm transformer leaves unbounded
-as depth grows, while the residual path itself stays unnormalized so
-gradients still reach layer zero.
+Long-context decoders run into two costs: attention compute over the
+whole context and a key/value cache that grows with it in every layer.
+Gemma 3 cuts both. Most blocks use a sliding window, so each token sees
+only the last ``W`` keys and those layers cache only ``W`` positions;
+a few interleaved blocks keep full causal attention to carry long-range
+information. Grouped-query attention shares each key/value head across
+several query heads, shrinking the cache further. Each sub-layer has a
+norm on its input and on its output, inside the residual::
 
-The causal (and, when windowed, banded) mask is built inside the block
-because it depends on this block's own ``attention_type``, then inverted to
-the attend-semantics the attention layer expects and expanded to rank 3 so
-it is not read as a padding mask. Attention and the FFN come from the
-``group_query`` and ``geglu`` factories; this block does not pass
-``qk_norm_type`` (no QK normalization) and leaves ``rope_theta`` at the
-attention layer's default for every block, so its long-context behaviour
-differs from the published model's raised RoPE base in global layers.
+    x = x + PostNorm(Attention(PreNorm(x)))
+    y = x + PostNorm(FFN(PreNorm(x)))
+
+The post-norm bounds what each branch adds to the residual stream, which
+plain pre-norm leaves unbounded as depth grows, while the residual path
+itself stays unnormalized.
+
+Use it to build a Gemma 3 style decoder-only language model: stack
+blocks with ``attention_type='sliding_window'`` and
+``'full_attention'`` in the ratio the model needs (Gemma 3 uses five
+local blocks per global one). The interleave is the model's job; each
+block holds one fixed type.
+
+Before use: input is ``(B, T, hidden_size)`` and output has the same
+shape. ``attention_mask`` is an optional ``(B, T)`` padding mask, ``1`` =
+attend and ``0`` = pad; it masks padded keys only, so padded query rows
+still produce output for the loss to ignore. The causal and window masks
+are built inside the block. ``num_key_value_heads`` must divide
+``num_attention_heads``. The block differs from the published model in
+three ways: no QK normalization, the attention layer's default
+``rope_theta`` in every block instead of a raised base in global blocks,
+and a default ``sliding_window_size`` of ``512`` where Gemma 3 uses
+``1024``. Long-context behaviour therefore does not match the released
+checkpoints without changes.
 
 References:
     - Gemma Team, 2025. Gemma 3 Technical Report.
       (https://arxiv.org/abs/2503.19786)
-    - Gemma Team, 2024. Gemma 2: Improving Open Language Models at a Practical Size.
+    - Gemma Team, 2024. Gemma 2: Improving Open Language Models at a
+      Practical Size. Sandwich norm and local/global interleaving.
       (https://arxiv.org/abs/2408.00118)
-    - Ainslie et al., 2023. GQA: Training Generalized Multi-Query Transformer Models
-      from Multi-Head Checkpoints. (https://arxiv.org/abs/2305.13245)
+    - Ainslie et al., 2023. GQA: Training Generalized Multi-Query
+      Transformer Models from Multi-Head Checkpoints.
+      (https://arxiv.org/abs/2305.13245)
     - Beltagy et al., 2020. Longformer: The Long-Document Transformer.
-      (https://arxiv.org/abs/2004.05150)
-    - Shazeer, 2020. GLU Variants Improve Transformer.
+      Sliding-window attention. (https://arxiv.org/abs/2004.05150)
+    - Shazeer, 2020. GLU Variants Improve Transformer. GeGLU.
       (https://arxiv.org/abs/2002.05202)
     - Zhang and Sennrich, 2019. Root Mean Square Layer Normalization.
       (https://arxiv.org/abs/1910.07467)

@@ -1,18 +1,59 @@
-"""A configurable Vision Transformer encoder, built by :class:`VisionEncoder`.
+"""
+``VisionEncoder``, a configurable Vision Transformer (ViT) encoder that
+turns an image into a sequence of patch tokens, runs a transformer stack
+over them, and pools the result.
 
-An input image is split into a grid of non-overlapping patches, each patch
-linearly projected into a `D`-dimensional embedding, and a learnable CLS
-token optionally prepended: `z0 = [x_class; E*p1; ...; E*p_N] + E_pos`. Patch
-embedding, attention type, normalization type and position, and FFN type are
-all constructor arguments routed through factory components, so one class
-covers architectures from the standard ViT to SigLIP's two-stage patch
-embedder or a RMSNorm + SwiGLU variant.
+A transformer has no notion of pixels or locality, so the image is cut
+into a grid of ``patch_size x patch_size`` patches, each projected to an
+``embed_dim`` vector. An optional learnable CLS token is prepended and a
+learned positional embedding added::
+
+    z0 = [x_cls; E * p_1; ...; E * p_N] + E_pos
+
+The sequence then passes through ``depth`` ``TransformerLayer`` blocks,
+which let every patch attend to every other, so global context is
+available from the first layer. Patch stem, attention, normalization
+type and position, and FFN type are all constructor arguments routed
+through the shared factories, so one class covers the standard ViT, a
+convolutional-stem ViT, a hybrid CNN stem, or an RMSNorm + SwiGLU
+variant, with stochastic depth rising linearly over the stack.
+
+Use it as an image backbone: pooled features for classification or
+retrieval, ``get_patch_features`` or ``get_spatial_features`` for dense
+prediction, or as the vision tower of a vision-language model.
+``create_vit_encoder`` and ``create_siglip_encoder`` give preset
+configurations.
+
+Before use: input is a square ``(B, img_size, img_size, C)`` image, since
+the positional table is sized for exactly ``(img_size // patch_size) ** 2``
+patches. ``img_size`` must be divisible by ``patch_size``; ``'siglip'``
+needs ``patch_size`` divisible by 2 and ``'conv'`` by 4. ``'hybrid'``
+downsamples by 4 whatever ``patch_size`` is, so it matches the positional
+table only at ``patch_size=4``. The default is post-norm with no final
+norm; the ViT paper uses pre-norm with a final norm, so pass
+``normalization_position='pre'`` for that. The ``'siglip'`` stem is a
+two-stage conv, not SigLIP's single-conv stem, so ``create_siglip_encoder``
+does not reproduce the SigLIP tower. ``attention_mask`` is an optional
+``(B, num_patches)`` keep mask over patches; the CLS token is always kept.
+With a CLS token, every ``output_mode`` except ``'cls'``, ``'first'``,
+``'none'`` and ``'flatten'`` pools the patch tokens only. Output shape
+depends on ``output_mode``.
 
 References:
-    - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words: Transformers
-      for Image Recognition at Scale.
+    - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words:
+      Transformers for Image Recognition at Scale. ViT and the hybrid
+      CNN stem. (https://arxiv.org/abs/2010.11929)
     - Vaswani et al., 2017. Attention Is All You Need.
+      (https://arxiv.org/abs/1706.03762)
+    - Touvron et al., 2021. Training data-efficient image transformers &
+      distillation through attention. DeiT.
+      (https://arxiv.org/abs/2012.12877)
+    - Xiao et al., 2021. Early Convolutions Help Transformers See Better.
+      Convolutional patch stems. (https://arxiv.org/abs/2106.14881)
     - Zhai et al., 2023. Sigmoid Loss for Language Image Pre-Training.
+      SigLIP. (https://arxiv.org/abs/2303.15343)
+    - Huang et al., 2016. Deep Networks with Stochastic Depth.
+      ``stochastic_depth_rate``. (https://arxiv.org/abs/1603.09382)
 """
 
 import keras

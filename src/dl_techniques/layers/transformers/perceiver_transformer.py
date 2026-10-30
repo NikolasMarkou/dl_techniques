@@ -1,22 +1,41 @@
-"""Perceiver-style transformer block with decoupled cross-attention.
+"""
+``PerceiverTransformerLayer``, a pre-norm transformer block in which a
+query array attends to a separate key/value array, as in the Perceiver.
 
-Implements :class:`PerceiverTransformerLayer`, a pre-norm transformer block
-that attends a small, fixed-size latent array to a separate key/value array
-instead of running self-attention on one sequence. A standard block costs
-``O(N^2)`` in the sequence length; this block costs ``O(M*N)``, where ``M``
-is the latent length and ``N`` the key/value length, so cost stays linear in
-input size for a fixed latent size. Both halves keep the usual pre-norm,
-residual shape:
+Self-attention over an input of ``N`` elements costs ``O(N^2)``, which
+rules out raw pixels, audio samples or large point clouds. The Perceiver
+instead keeps a small latent array of ``M`` vectors (``M << N``) and lets
+it read the input through cross-attention, at ``O(M * N)``. The MLP then
+runs on the ``M`` latents only, so the block's cost is linear in input
+size and the depth of the model no longer depends on ``N``. Called with
+one tensor, the same block is plain self-attention over the latents,
+which is how a Perceiver stacks cheap latent processing after each read.
+Both halves are pre-norm with a residual, and the query and key/value
+inputs get separate LayerNorms::
 
-``L' = L + CrossAttention(LN(L), LN(X))``
-``L_out = L' + MLP(LN(L'))``
+    L'    = L + CrossAttention(LN_q(L), LN_kv(X))
+    L_out = L' + MLP(LN(L'))
 
-``call()`` accepts one tensor (self-attention, query and key/value share the
-input) or a ``[query, kv]`` pair (cross-attention).
+Use it to build Perceiver or Perceiver IO style models over large or
+multimodal inputs: as the encoder that compresses an input into latents,
+as a latent self-attention block, or as a decoder where output queries
+read from the latents.
+
+Before use: call as ``layer(query, kv)`` for cross-attention or
+``layer(query)`` for self-attention; ``kv`` is a separate argument, not a
+list. ``query`` is ``(B, M, dim)``, ``kv`` is ``(B, N, dim)``, and output
+is ``(B, M, dim)``. Both inputs must already have ``dim`` channels, so
+project raw inputs first. The block does not create the latent array;
+the model owns it as a trainable weight. There is no attention mask, so
+padded ``kv`` elements are attended. ``kernel_regularizer`` and
+``bias_regularizer`` reach the MLP only, not the attention projections.
 
 References:
     - Jaegle et al., 2021. Perceiver: General Perception with Iterative
       Attention. (https://arxiv.org/abs/2103.03206)
+    - Jaegle et al., 2021. Perceiver IO: A General Architecture for
+      Structured Inputs & Outputs. Output queries for decoding.
+      (https://arxiv.org/abs/2107.14795)
     - Vaswani et al., 2017. Attention Is All You Need.
       (https://arxiv.org/abs/1706.03762)
 """

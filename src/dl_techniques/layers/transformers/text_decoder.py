@@ -1,4 +1,5 @@
-"""A configurable Transformer text decoder, built by :class:`TextDecoder`.
+"""
+A configurable Transformer text decoder, built by :class:`TextDecoder`.
 
 The layer follows the decoder side of the Transformer: causal self-attention
 restricts each position's representation to tokens at or before it, so the

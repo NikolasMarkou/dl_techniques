@@ -1,21 +1,51 @@
-"""A transformer-style block over 2D feature maps, built on area attention.
+"""
+AreaAttentionBlock, the attention stage of the YOLOv12 detector: a
+residual self-attention plus MLP block that runs directly on a 2D
+feature map ``(B, H, W, C)``.
 
-This is the yolo12 detector's attention stage, built by
-:class:`AreaAttentionBlock`. It is a bare residual pair,
-``x = inputs + attn(inputs)`` then ``x = x + mlp2(mlp1(x))``, where ``attn``
-is :class:`~dl_techniques.layers.attention.area_attention.AreaAttention`
-(multi-head self-attention over a ``(B, H, W, C)`` map, either global or
-split into ``area`` contiguous groups) and ``mlp1``/``mlp2`` are a
-1x1-convolution pair that expands the channel width by ``mlp_ratio`` and
-projects it back.
+Self-attention gives a detector a receptive field that spans the whole
+feature map, but its cost grows with ``(HW)^2``, which is too slow for
+real-time detection at typical resolutions. Area attention splits the
+flattened map into ``area`` contiguous groups and runs multi-head
+self-attention inside each group, cutting the cost by about a factor of
+``area`` while keeping each group large; ``area=1`` is plain global
+attention. The block wraps that attention and a 1x1-convolution MLP
+(expand by ``mlp_ratio`` with SiLU, then project back) in two residual
+adds:
 
-The block has no Pre/Post-Norm, no LayerScale and no stochastic depth on
-the residual stream, and its MLP is a ``ConvBlock`` pair rather than a
-`ffn/` factory type, because `'gated_mlp'`, the one 4D-capable FFN type,
-carries no normalization stage and would drop the intermediate BatchNorm
-the ``ConvBlock`` pair applies. Normalization type is fixed to
-`'batch_norm'`; only its epsilon/momentum pair is configurable, through
-`normalization_kwargs`. `use_bias` defaults to `False`.
+    x = inputs + attn(inputs)
+    y = x + mlp2(mlp1(x))
+
+Every stage is a convolution followed by BatchNorm, with no LayerNorm,
+LayerScale or stochastic depth on the residual stream. The block stays
+close to a CNN in its operations, and BatchNorm can be folded into the
+preceding convolution at inference, which suits real-time deployment.
+
+Use it to add attention to a convolutional detector or dense prediction
+backbone where latency matters, as YOLOv12 does inside its R-ELAN
+stages.
+
+Before use: input is channels-last ``(B, H, W, C)`` with ``C = dim``,
+since both residual adds need matching widths, and output has the same
+shape. ``dim`` must be divisible by ``num_heads``. How groups are formed
+and any constraint on ``H * W`` live in ``AreaAttention``. Normalization
+is fixed to BatchNorm, so output depends on ``training``; only
+epsilon/momentum are configurable, through ``normalization_kwargs``.
+``use_bias`` defaults to ``False`` and ``mlp_ratio`` to ``1.2``, the
+YOLOv12 values.
+
+References:
+    - Tian et al., 2025. YOLOv12: Attention-Centric Real-Time Object
+      Detectors. Area attention and this block.
+      (https://arxiv.org/abs/2502.12524)
+    - Vaswani et al., 2017. Attention Is All You Need. Multi-head
+      self-attention and the attention + MLP block.
+      (https://arxiv.org/abs/1706.03762)
+    - Ioffe and Szegedy, 2015. Batch Normalization: Accelerating Deep
+      Network Training by Reducing Internal Covariate Shift.
+      (https://arxiv.org/abs/1502.03167)
+    - YOLOv12 reference implementation.
+      (https://github.com/sunsmarterjie/yolov12)
 """
 
 import keras

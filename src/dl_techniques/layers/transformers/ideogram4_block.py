@@ -1,19 +1,58 @@
-"""``Ideogram4TransformerBlock`` and ``Ideogram4FinalLayer``, the Ideogram4 DiT
-block and output head, both conditioned by 4-stream tanh-gated AdaLN.
+"""
+``Ideogram4TransformerBlock`` and ``Ideogram4FinalLayer``, the transformer
+block and output head of the Ideogram 4 single-stream diffusion
+transformer (DiT).
 
-A single ``Dense(4 * hidden_size)`` maps the conditioning vector to
-``(scale_msa, gate_msa, scale_mlp, gate_mlp)``. Gates pass through ``tanh``;
-scales are ``1 + x`` with no shift term, unlike standard DiT AdaLN-zero:
+Ideogram 4 puts text tokens and image latent tokens in one sequence and
+runs every block of self-attention and SwiGLU FFN over both. A
+conditioning vector (the timestep embedding) steers each block through
+AdaLN. One ``Dense(4 * hidden_size)`` maps it to two scales and two
+gates; the scales enter as ``1 + scale`` with no shift term, and the
+gates pass through ``tanh``. Each sub-layer is wrapped in a sandwich of
+RMSNorms, one on its input and one on its output, inside the residual::
 
-``x = x + tanh(gate_msa) * norm2(attn(norm1(x) * (1 + scale_msa)))``
-``x = x + tanh(gate_mlp) * norm2(ffn(norm1(x) * (1 + scale_mlp)))``
+    x = x + tanh(gate_msa) * norm2(attn(norm1(x) * (1 + scale_msa)))
+    x = x + tanh(gate_mlp) * norm2(ffn(norm1(x) * (1 + scale_mlp)))
 
-Each sublayer sandwiches a pre-norm on its input and a post-norm on its
-output, inside the residual. The final layer applies an affine-free
-LayerNorm, the same scale-only modulation, then a linear head.
+Compared with DiT's six-stream AdaLN-zero, the post-norm caps the size
+of each branch output and ``tanh`` bounds each gate to ``(-1, 1)``, so
+no single block can blow up the residual stream. This keeps activations
+in range in deep, wide DiTs trained at high resolution. The final layer
+applies an affine-free LayerNorm, the same scale-only modulation, and a
+linear head to ``out_channels``.
 
-The conditioning vector arriving at both classes must already carry its
-SiLU activation; neither applies its own.
+Use these classes to build or load an Ideogram 4 style DiT, or any
+single-stream text-to-image transformer that wants bounded, scale-only
+AdaLN conditioning.
+
+Before use: the conditioning must already have SiLU applied; neither
+class applies its own. It is rank 3, ``(B, 1, adaln_dim)`` for one
+vector per sample or ``(B, L, adaln_dim)`` per token. ``x`` is
+``(B, L, hidden_size)``; the block returns the same shape and the final
+layer returns ``(B, L, out_channels)``. The block also takes
+``segment_ids (B, L)`` and mRoPE tables ``cos, sin (B, L, head_dim)``,
+passed straight to ``Ideogram4Attention``. ``intermediate_size`` must be
+at least ``int(hidden_size * 2 / 3)``. The modulation Dense uses the
+default Keras initializer, not zeros, so a freshly built block is not
+the identity map; the classes are meant to load pretrained weights.
+
+References:
+    - Ideogram, 2026. Ideogram 4.0 technical blog post.
+      (https://ideogram.ai/blog/ideogram-4.0/)
+    - Ideogram 4 reference implementation.
+      (https://github.com/ideogram-oss/ideogram4)
+    - Peebles and Xie, 2023. Scalable Diffusion Models with Transformers.
+      DiT and AdaLN conditioning. (https://arxiv.org/abs/2212.09748)
+    - Zhuo et al., 2024. Lumina-Next: Making Lumina-T2X Stronger and
+      Faster with Next-DiT. Tanh-gated scale-only AdaLN with sandwich
+      norm. (https://arxiv.org/abs/2406.18583)
+    - Ding et al., 2021. CogView: Mastering Text-to-Image Generation via
+      Transformers. Sandwich-LN. (https://arxiv.org/abs/2105.13290)
+    - Shazeer, 2020. GLU Variants Improve Transformer. SwiGLU.
+      (https://arxiv.org/abs/2002.05202)
+    - Wang et al., 2024. Qwen2-VL: Enhancing Vision-Language Model's
+      Perception of the World at Any Resolution. Multimodal RoPE.
+      (https://arxiv.org/abs/2409.12191)
 """
 
 import keras

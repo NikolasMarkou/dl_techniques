@@ -1,24 +1,57 @@
-"""SD3 MMDiT adaptive layer normalization (AdaLN) modulation trio.
+"""
+SD3 MMDiT adaptive layer normalization (AdaLN) layers.
 
-Three AdaLN variants that condition a hidden-state stream `x` of shape
-`(B, N, dim)` on a single per-sample vector `cond` of shape `(B, dim)`:
-:class:`AdaLayerNormZero` (6-way, attention + MLP shift/scale/gate),
-:class:`AdaLayerNormZeroX` (9-way, adds a second attention path reusing
-the same normalized stream), and :class:`AdaLayerNormContinuous` (2-way,
-scale + shift with no gate, for the final blocks). Each runs
-`SiLU(cond) -> Dense(K*dim) -> split` to produce `K` modulation chunks,
-then modulates an affine-free `LayerNormalization` of `x`.
+A diffusion transformer must act differently for each noise timestep and
+each prompt. These three layers carry that signal into every block: a
+small Dense maps a per-sample vector `cond` of shape `(B, dim)` to
+per-channel scale, shift and gate values, which then adjust an
+affine-free LayerNorm of the token stream `x` of shape `(B, N, dim)`.
+A plain LayerNorm learns one scale and shift shared by all samples. Here
+each sample gets its own, computed from `cond`, for the cost of one Dense.
+Each layer runs `SiLU(cond) -> Dense(K*dim) -> split` into `K` chunks.
 
-The modulation Dense is zero-initialized (kernel and bias), so at
-initialization every chunk is zero: the normalized stream equals a plain
-no-affine LayerNorm of `x` and every gate is `0`, the identity-at-init
-property that lets the optimizer turn conditioning on gradually. The
-gate and MLP-shift/scale chunks are returned at shape `(B, dim)` for the
-surrounding block to expand as needed; only the in-layer `x_norm`
-modulation is broadcast here, to `(B, 1, dim)`.
+The modulation Dense starts at zero (kernel and bias). At init every
+scale, shift and gate is zero, so the modulated stream equals a plain
+LayerNorm of `x` and every gated residual branch adds nothing. Each block
+starts as an identity map, which keeps early training of deep stacks
+stable, and conditioning grows in as the Dense weights move off zero.
 
-This is a Keras 3 port of diffusers' `AdaLayerNormZero` /
-`AdaLayerNormZeroX` / `AdaLayerNormContinuous`.
+Which layer to use:
+
+    AdaLayerNormZero        6 chunks. Standard MMDiT block. Returns the
+                            modulated attention input, the attention gate
+                            and the MLP shift, scale and gate.
+    AdaLayerNormZeroX       9 chunks. MMDiT block with a second attention
+                            path. Adds x_norm2 and gate_msa2, built from
+                            the same LayerNorm output as x_norm.
+    AdaLayerNormContinuous  2 chunks, scale then shift, no gate. Final
+                            norm before the output projection.
+
+Inputs go in as a list `[x, cond]`. The last dim of `cond` must equal
+`dim`, or `build` raises `ValueError`. Gate and MLP chunks come back at
+`(B, dim)`; the calling block expands them. Only `x_norm` and `x_norm2`
+are broadcast here, to `(B, 1, dim)`, before modulation.
+
+Keras 3 port of diffusers `AdaLayerNormZero`, `AdaLayerNormZeroX` and
+`AdaLayerNormContinuous`.
+
+References:
+    - Esser et al., 2024. Scaling Rectified Flow Transformers for
+      High-Resolution Image Synthesis. SD3 and the MMDiT block.
+      (https://arxiv.org/abs/2403.03206)
+    - Peebles and Xie, 2023. Scalable Diffusion Models with Transformers.
+      DiT; introduces adaLN-Zero and compares it to cross-attention and
+      in-context conditioning. (https://arxiv.org/abs/2212.09748)
+    - Perez et al., 2018. FiLM: Visual Reasoning with a General
+      Conditioning Layer. Per-channel scale and shift from a condition.
+      (https://arxiv.org/abs/1709.07871)
+    - Ba et al., 2016. Layer Normalization.
+      (https://arxiv.org/abs/1607.06450)
+    - Goyal et al., 2017. Accurate, Large Minibatch SGD: Training ImageNet
+      in 1 Hour. Zero-init of the last scale in each residual branch.
+      (https://arxiv.org/abs/1706.02677)
+    - diffusers source for the reference implementations.
+      (https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/normalization.py)
 """
 
 import keras

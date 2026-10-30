@@ -1,4 +1,5 @@
-"""A configurable Transformer text encoder, built by :class:`TextEncoder`.
+"""
+A configurable Transformer text encoder, built by :class:`TextEncoder`.
 
 The layer follows the standard encoder side of the Transformer: every token
 attends to every other token, with no causal mask, so each position's output

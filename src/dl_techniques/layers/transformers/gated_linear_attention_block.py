@@ -420,7 +420,8 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         """Warn -- never raise -- when a static length exceeds ``max_seq_len``.
 
         # DECISION plan-2026-07-30T081929-1645aa52/D-018: never restore a raise
-        # here -- both scan branches are bounded by the actual sequence length, so max_seq_len is advisory only. See decisions.md.
+        # here -- both scan branches are bounded by the actual sequence length,
+        so max_seq_len is advisory only. See decisions.md.
 
         :param seq_len: Statically known sequence length.
         :type seq_len: int
@@ -1015,7 +1016,10 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         batch_size, seq_len, _ = ops.shape(inputs)
 
         # DECISION plan-2026-07-31T042809-ddc92265/D-004: the padding mask is
-        # applied at 3 places (pre-convolution zeroing, post-activation re-zeroing since the conv bias makes PAD rows non-zero, and forcing alpha=1 at PAD steps for exact gradient isolation, pinned by test_pad_content_cannot_influence_real_outputs). See decisions.md.
+        # applied at 3 places (pre-convolution zeroing,
+        # post-activation re-zeroing since the conv bias makes PAD rows non-zero,
+        # and forcing alpha=1 at PAD steps for exact gradient isolation,
+        # pinned by test_pad_content_cannot_influence_real_outputs). See decisions.md.
         keep = None
         if attention_mask is not None:
             keep = ops.cast(attention_mask, self.compute_dtype)
@@ -1036,7 +1040,9 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         v = self.v_proj(inputs, training=training)
 
         # DECISION plan-2026-07-29T173132-adbe605f/D-003: reshape to per-head,
-        # normalize, reshape back, keeping the proj->norm->conv->activation order unchanged. v_norm stays whole-tensor. See decisions.md.
+        # normalize, reshape back, keeping the proj->norm->conv->activation order unchanged.
+        # v_norm stays whole-tensor.
+        # See decisions.md.
         q_heads_pre = ops.reshape(q, (batch_size, seq_len, self.num_heads, self.head_dim))
         k_heads_pre = ops.reshape(k, (batch_size, seq_len, self.num_heads, self.head_dim))
         q_norm = ops.reshape(
@@ -1071,7 +1077,10 @@ class GatedLinearAttentionBlock(keras.layers.Layer):
         v_heads = ops.reshape(v_conv, (batch_size, seq_len, self.num_heads, 2 * self.head_dim))
 
         # DECISION plan-2026-07-30T140922-8af1028f/D-033: this sigmoid is the
-        # only place this layer produces alpha, so alpha>1 is unreachable on the layer path -- the exponent-masking fix in _chunked_scan matters only for the public gated_linear_scan API, not for training quality here. See decisions.md.
+        # only place this layer produces alpha, so alpha>1 is unreachable on the layer path --
+        # the exponent-masking fix in _chunked_scan matters only for the public gated_linear_scan API,
+        # not for training quality here.
+        # See decisions.md.
         alpha = ops.sigmoid(self.alpha_proj(inputs, training=training))
         beta = ops.sigmoid(self.beta_proj(inputs, training=training))
 

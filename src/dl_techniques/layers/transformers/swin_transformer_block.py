@@ -1,23 +1,50 @@
-"""``SwinTransformerBlock``, one block of windowed self-attention plus an MLP,
-the unit the Swin Transformer stacks into stages.
+"""
+SwinTransformerBlock, one block of windowed multi-head self-attention
+plus an MLP, the unit the Swin Transformer stacks into stages.
 
-Full self-attention over an ``(H, W)`` feature map costs ``O((HW)^2)``.
-Windowed attention runs it independently inside non-overlapping ``M x M``
-windows instead, at ``O(M^2 * H * W)`` — linear in image area. Alternating
-regular and shifted windows (``shift_size = window_size // 2``) between
-blocks lets information cross window boundaries: the shift rolls the feature
-map before partitioning, so each shifted window mixes tokens from four
-windows of the previous layer, and a pairwise keep mask stops attention
-between tokens the roll brought together from unrelated regions.
+Full self-attention over an ``(H, W)`` feature map costs ``O((HW)^2)``,
+which rules it out at high resolution. This block runs attention inside
+non-overlapping ``M x M`` windows instead, at ``O(M^2 * H * W)``, linear
+in image area. Windows alone never exchange information, so blocks
+alternate regular windows (``shift_size=0``) with shifted windows
+(``shift_size=window_size // 2``): the feature map is rolled before
+partitioning, each shifted window mixes tokens from up to four windows
+of the previous block, and a pairwise keep mask stops attention between
+tokens the roll placed together from unrelated regions. Both sub-layers
+are pre-norm with a residual add and optional stochastic depth:
 
+    x' = x + DropPath(W-MSA(LN(x)))
+    y  = x' + DropPath(MLP(LN(x')))
+
+Use it wherever a model needs attention over a 2D feature map at a cost
+that grows with image area: hierarchical backbones, dense prediction,
+image restoration and super-resolution. It works on any ``(H, W)``,
+static or dynamic.
+
+Before use: input is channels-last ``(B, H, W, C)`` with ``C = dim``,
+and output has the same shape. ``dim`` must be divisible by
+``num_heads`` and ``shift_size`` must be below ``window_size``.
 ``(H, W)`` need not be a multiple of ``window_size``: the block pads
-bottom/right internally, excludes the padding from attention, and crops back
-before the residual add. A statically-known feature map at most one window
-across drops the shift entirely, matching the reference implementation.
+bottom/right, excludes the padding from attention, and crops back before
+the residual add. When a static ``H`` or ``W`` is at most
+``window_size``, the shift is dropped, matching the reference
+implementation; dynamic dims apply the same rule at runtime. A dynamic
+spatial dim always builds the keep mask, which costs one extra
+``(B * num_windows, M^2, M^2)`` int32 tensor per call.
 
 References:
     - Liu et al., 2021. Swin Transformer: Hierarchical Vision Transformer
       using Shifted Windows. (https://arxiv.org/abs/2103.14030)
+    - Vaswani et al., 2017. Attention Is All You Need. Multi-head
+      self-attention and the attention + MLP block.
+      (https://arxiv.org/abs/1706.03762)
+    - Xiong et al., 2020. On Layer Normalization in the Transformer
+      Architecture. Pre-norm placement.
+      (https://arxiv.org/abs/2002.04745)
+    - Huang et al., 2016. Deep Networks with Stochastic Depth.
+      ``stochastic_depth_rate``. (https://arxiv.org/abs/1603.09382)
+    - Microsoft Swin Transformer reference implementation.
+      (https://github.com/microsoft/Swin-Transformer)
 """
 
 import keras

@@ -1,25 +1,46 @@
-"""PatchCausalTransformer, a causal transformer stack over ALREADY-EMBEDDED
-sequence representations, using the shared `create_causal_attend_mask` helper
-from `dl_techniques.utils.masking`.
+"""
+``PatchCausalTransformer``, a causal transformer stack that runs over
+sequences the caller has already embedded, shaped
+``(batch, num_patches, dim)``.
 
-This is the shape none of the package's other stacks cover.
-:class:`TextDecoder` embeds token IDs itself and takes a padding mask;
-:class:`VisionEncoder` embeds an image. This layer starts one step later: the
-caller has already produced ``(batch, num_patches, dim)`` vectors -- pooled
-patch representations, pooled frame features -- and wants long-range causal
-mixing across that short axis, over a sequence much shorter than the byte or
-token sequence underneath.
+Hierarchical models first compress a long sequence (bytes, tokens,
+video frames) into a much shorter sequence of patch vectors, then model
+how those patches depend on each other. This layer is that second
+stage: it adds a learned positional embedding, runs ``depth`` causal
+``TransformerLayer`` blocks with an FFN of width ``4 * dim``, and applies
+a final ``LayerNormalization``. Attention cost is quadratic in the patch
+count, not the length of the sequence underneath, so the expensive
+layers run once per patch instead of once per byte or token. The other
+stacks in the package start one step earlier: ``TextDecoder`` embeds
+token IDs and takes a padding mask, ``VisionEncoder`` embeds an image.
 
-The Byte Latent Transformer (Pagnoni et al., 2024) is the reference consumer:
-its local encoder pools bytes into patches, and this stack then runs the
-expensive layers once per patch rather than once per byte.
+Use it as the global model in a byte- or token-patch architecture such
+as the BLT latent transformer, or for autoregressive modelling over any
+pooled representation, such as frame features or chunk embeddings.
 
-The stack skeleton itself lives in :mod:`.causal_stack`, shared with the four
-BLT layers that have the same shape with different heads.
+Before use: input is ``(batch, P, dim)`` and output has the same shape.
+Static ``P`` above ``max_patches`` raises ``ValueError`` in ``build``,
+with a message that names ``max_seq_len``. The mask is causal only:
+empty patch slots get no padding mask and take part in attention, as in
+BLT, where ``max_patches`` is a fixed slot count. Mask or zero them
+upstream if they must be ignored. The final norm uses ``epsilon=1e-3``
+(see :data:`~.causal_stack.LAYER_NORM_EPSILON`). Two instances in one
+model need distinct ``name_prefix`` values. The defaults
+(``dim=768, depth=12, num_heads=12``) give a base-size stack.
+
+Example::
+
+    layer = PatchCausalTransformer(dim=64, depth=2, num_heads=4, max_patches=16)
+    y = layer(np.zeros((2, 16, 64), dtype="float32"))
+    y.shape  # (2, 16, 64)
 
 References:
     - Pagnoni et al., 2024. Byte Latent Transformer: Patches Scale Better
-      Than Tokens. (https://arxiv.org/abs/2412.09871)
+      Than Tokens. The reference consumer of this stack.
+      (https://arxiv.org/abs/2412.09871)
+    - Yu et al., 2023. MEGABYTE: Predicting Million-byte Sequences with
+      Multiscale Transformers. A global causal model over byte patches.
+      (https://arxiv.org/abs/2305.07185)
     - Vaswani et al., 2017. Attention Is All You Need.
       (https://arxiv.org/abs/1706.03762)
 """

@@ -1,21 +1,58 @@
-"""The causal-transformer-stack skeleton, shared by every layer that is
-"positional embedding -> N causal transformer layers -> final norm".
+"""
+Shared skeleton for causal transformer stacks: positional embedding,
+then ``depth`` causal ``TransformerLayer`` blocks, then a final
+``LayerNormalization``.
 
-Four BLT layers and the general-purpose :class:`PatchCausalTransformer` are the
-same skeleton with different heads bolted on: an entropy projection, a patch
-pooler, a cross-attention interleaved between blocks. Rather than have each
-re-state the loop, the loop lives here once and the per-layer differences stay
-in their own modules.
+Four BLT layers and :class:`PatchCausalTransformer` all run this same
+stack and differ only in what sits around it: an entropy projection, a
+patch pooler, cross-attention between blocks. This module holds the
+stack once, so every caller builds the same blocks, applies the same
+causal mask and uses the same final-norm epsilon, while the per-layer
+heads stay in their own modules. It provides two builders and a mixin:
+:func:`build_causal_transformer_stack` makes the blocks,
+:func:`build_causal_stack_norm` makes the final norm, and
+:class:`CausalTransformerStackMixin` drives them from a host layer's
+``build`` and ``call``.
 
-Two things this module deliberately does NOT do:
+Use it when writing a new layer that needs an autoregressive
+transformer over a ``(batch, seq, dim)`` sequence. The host layer
+creates the three parts in ``__init__`` and hands them over; the mixin
+adds no constructor arguments, so the host's ``get_config`` is
+unchanged::
 
-* It does not route normalization through
-  :func:`~dl_techniques.layers.norms.factory.create_normalization_layer`. That
-  factory imposes ``epsilon=1e-6`` via ``setdefault``, 1000x below
-  ``keras.layers.LayerNormalization``'s own ``1e-3``; adopting it would
-  silently re-tune every stack's forward pass. See :data:`LAYER_NORM_EPSILON`.
-* It does not own the block's constructor arguments. Every caller keeps its own
-  ``get_config``; the mixin adds no parameters, so no archive's config moves.
+    class MyLayer(CausalTransformerStackMixin, keras.layers.Layer):
+        def __init__(self, ...):
+            ...
+            self.bind_causal_stack(
+                PositionalEmbedding(...),
+                build_causal_transformer_stack(dim, heads, depth, rate),
+                build_causal_stack_norm(name="final_norm"),
+            )
+
+        def build(self, input_shape):
+            self.build_causal_stack(input_shape)
+            super().build(input_shape)
+
+        def call(self, x, training=None):
+            return self.run_causal_stack(x, training=training)
+
+Before use: ``build_causal_stack`` must be called from the host's
+``build``, or the sub-layer weights do not reload from a ``.keras``
+file. The attention mask is causal only, with no padding term; a padded
+batch needs its own mask. Sequence length is bounded by the positional
+embedding's table. The final norm uses ``epsilon=1e-3``
+(:data:`LAYER_NORM_EPSILON`), not the norm factory's ``1e-6``; changing
+it shifts every stack's output. ``intermediate_size`` defaults to
+``4 * hidden_size``.
+
+References:
+    - Pagnoni et al., 2024. Byte Latent Transformer: Patches Scale Better
+      Than Tokens. BLT, the main consumer of this stack.
+      (https://arxiv.org/abs/2412.09871)
+    - Vaswani et al., 2017. Attention Is All You Need. Transformer blocks
+      and causal self-attention. (https://arxiv.org/abs/1706.03762)
+    - Ba et al., 2016. Layer Normalization.
+      (https://arxiv.org/abs/1607.06450)
 """
 
 import keras

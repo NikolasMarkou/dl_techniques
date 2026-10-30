@@ -1,24 +1,53 @@
 """
-AdaLN-zero conditional transformer block, built by :class:`AdaLNZeroConditionalBlock`.
+``AdaLNZeroConditionalBlock``, a transformer block (self-attention then
+FFN) whose behaviour is steered by an external conditioning tensor ``c``
+through AdaLN-zero modulation.
 
-Defines a transformer block whose two normalization layers carry no learnable affine
-parameters. Per-channel shift, scale and gate come instead from an external
-conditioning tensor ``c``, through one zero-initialized Dense projection whose output
-is split six ways: shift, scale and gate for the attention sub-block and the same
-three for the FFN sub-block. Because that projection starts at zero, both gates start
-at zero, so the block is the identity map in ``x`` at initialization and the optimizer
-turns conditioning on gradually. Normalization, attention, FFN and the AdaLN
-activation are each factory-configurable through the ``*_type``/``*_args`` arguments,
-and leaving every one at its default reproduces the DiT/LeWM construction bit-exactly.
-``call`` takes ``inputs=[x, c]``, a list of two tensors. With a non-default
-``normalization_type`` the caller has to disable affine through
-``normalization_args``, and ``use_causal_mask`` reaches the default attention path
-only.
+Many models need a transformer whose computation depends on a side
+signal: a diffusion timestep or class label in DiT, an action at each
+step in a world-model predictor. Concatenating that signal to the tokens
+or attending to it with cross-attention adds sequence length or a
+second attention. AdaLN-zero instead removes the learnable affine from
+both norms and lets ``c`` supply it: ``SiLU(c) -> Dense(6 * D)`` gives a
+shift, scale and gate for the attention sub-block and the same three for
+the FFN sub-block, applied as ``h * (1 + scale) + shift`` after each norm
+and as a multiplier on each residual branch. The Dense starts at zero
+(kernel and bias), so both gates start at zero, the block is the identity
+map in ``x`` at initialization, and conditioning grows in during
+training. Deep stacks of these blocks train stably from the start.
+
+Use it to build a conditioned transformer, such as a DiT-style denoiser or
+an action-conditioned autoregressive predictor like the one in LeWM.
+Attention is causal by default, for next-step prediction. For one
+conditioning vector per sample in the SD3 MMDiT layout, see
+``sd3_adaln.py`` instead.
+
+Before use: ``call`` takes ``inputs=[x, c]``. ``x`` is ``(B, T, D)``.
+``c`` is rank 3, ``(B, T, C)`` for per-token conditioning or
+``(B, 1, C)`` for one vector per sample; its width ``C`` is free, since
+the Dense maps it to ``6 * D``. Output is ``(B, T, D)``. With every
+``*_type`` argument at ``None`` the block reproduces the DiT/LeWM
+construction exactly. A non-default ``normalization_type`` must have its
+affine turned off through ``normalization_args``. A factory
+``attention_type`` is called as self-attention on one tensor and does not
+receive ``use_causal_mask``; ``dim_head``, ``mlp_dim``, ``eps`` and
+``dropout_rate`` reach the default paths only.
 
 References:
-    - Peebles, W. & Xie, S., 2023. Scalable Diffusion Models with
-      Transformers. (https://arxiv.org/abs/2212.09748)
-    - Sobal, V. et al., 2024. Learning the World with Minimal Supervision.
+    - Peebles and Xie, 2023. Scalable Diffusion Models with Transformers.
+      DiT; introduces adaLN-Zero. (https://arxiv.org/abs/2212.09748)
+    - Maes et al., 2026. LeWorldModel: Stable End-to-End Joint-Embedding
+      Predictive Architecture from Pixels. Action-conditioned causal
+      predictor built from these blocks.
+      (https://arxiv.org/abs/2603.19312)
+    - Perez et al., 2018. FiLM: Visual Reasoning with a General
+      Conditioning Layer. Per-channel scale and shift from a condition.
+      (https://arxiv.org/abs/1709.07871)
+    - Goyal et al., 2017. Accurate, Large Minibatch SGD: Training ImageNet
+      in 1 Hour. Zero-init of the last scale in each residual branch.
+      (https://arxiv.org/abs/1706.02677)
+    - Vaswani et al., 2017. Attention Is All You Need.
+      (https://arxiv.org/abs/1706.03762)
 """
 
 import keras

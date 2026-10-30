@@ -1,32 +1,57 @@
-"""The Energy Transformer block, its Hopfield memory module, and the optional weighted-
-adjacency projector, built by :class:`EnergyTransformer`, :class:`HopfieldNetwork`, and
+"""
+The Energy Transformer (ET) block and its two helper layers:
+:class:`EnergyTransformer`, :class:`HopfieldNetwork` and
 :class:`WeightedAdjacencyProjector`.
 
-The block replaces the usual attention-then-FFN stack with explicit gradient descent on
-one scalar energy. Each step normalizes the token state, evaluates the negative gradient
-of `E(g) = E_ATT(g) + E_HN(g)` with respect to that normalized state, and adds it back to
-the token state:
-
-.. code-block:: text
+A standard transformer block applies attention, then an FFN, then moves
+on, and nothing ties its updates to an objective. ET defines one scalar
+energy over the token state, ``E(g) = E_ATT(g) + E_HN(g)``, and the block
+runs ``T`` steps of gradient descent on it with the same weights at every
+step:
 
     for t in 1..T:
         g      = EnergyLayerNorm(x)
         update = attn.update(g) + hopfield.update(g)   # == -dE/dg
         x      = x + alpha * update
 
-Every gradient is hand-coded in closed form with `keras.ops` (no autodiff in this
-package). `HopfieldNetwork` replaces the usual feed-forward block: one tied `(K, D)`
-memory matrix applied per token, with no bias and no independent up/down projections.
-`WeightedAdjacencyProjector` is an optional trainable reweighting of a graph adjacency,
-consumed by `EnergyAttention`.
+``EnergyAttention`` mixes tokens; ``HopfieldNetwork`` replaces the FFN
+with an associative memory, one tied, bias-free ``(K, D)`` matrix used to
+project up and back down per token. Every gradient is written in closed
+form with ``keras.ops``, so ``update`` is the exact descent direction of
+the reported energy. ``WeightedAdjacencyProjector`` is an optional
+trainable reweighting of a graph adjacency for attention on graphs.
 
-A caller who wants the energy trace back (`return_energy=True`) gets it in float32 even
-under a mixed-precision policy, because a realistic trace magnitude overflows float16; a
-head consuming that trace must itself be built with `dtype='float32'`.
+Use it when the forward pass should be an interpretable optimization:
+the energy trace shows whether each sample converged, tokens settle
+toward stored memories, and a block has about half the parameters of a
+vanilla transformer layer at the same width. The paper applies it to
+masked image completion and to graph classification and anomaly
+detection. The cost is compute: ``T=12`` steps run at roughly 6 to 11
+times one vanilla block, and backward memory grows linearly with ``T``.
+
+Before use: input is ``(B, N, embed_dim)`` and output has the same shape,
+or ``(x, energies)`` with ``energies`` of shape ``(B, T + 1)`` when
+``return_energy=True``. The energy decreases only for ``noise_std=0``,
+``gamma > 0`` and a small enough ``step_size``; with ``noise_std > 0``,
+training runs Langevin sampling instead. A rank-2 ``attention_mask`` and a
+Keras-propagated mask are both per-token masks and reach both energy
+terms; a rank-3 or rank-4 mask is a pair mask and reaches attention only.
+The weighted adjacency runs only with ``use_weighted_adjacency=True`` and
+a pair mask, and turning it on changes the weight set. The energy trace
+stays float32 under mixed precision, so a head that consumes it must be
+built with ``dtype='float32'``. ``HopfieldNetwork`` used on its own
+ignores Keras masks; pass ``mask`` to ``energy``/``update`` explicitly.
 
 References:
-    - Hoover et al., "Energy Transformer", NeurIPS 2023. (https://arxiv.org/abs/2302.07253)
-    - Ramsauer et al., "Hopfield Networks is All You Need", ICLR 2021.
+    - Hoover et al., 2023. Energy Transformer. The block, its energy and
+      the weighted adjacency. (https://arxiv.org/abs/2302.07253)
+    - Ramsauer et al., 2021. Hopfield Networks is All You Need. The
+      ``'softmax'`` Hopfield energy. (https://arxiv.org/abs/2008.02217)
+    - Krotov and Hopfield, 2016. Dense Associative Memory for Pattern
+      Recognition. (https://arxiv.org/abs/1606.01164)
+    - Krotov and Hopfield, 2021. Large Associative Memory Problem in
+      Neurobiology and Machine Learning. The Lagrangian view behind
+      ``EnergyLayerNorm``. (https://arxiv.org/abs/2008.06996)
 """
 
 import math

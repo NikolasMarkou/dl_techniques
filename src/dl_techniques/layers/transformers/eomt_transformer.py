@@ -1,27 +1,57 @@
-"""A transformer encoder layer for joint patch-query processing.
+"""
+EomtTransformer, one block of the Encoder-only Mask Transformer
+(EoMT): a transformer layer that processes image patch tokens and
+learnable object query tokens together in one sequence.
 
-Implements :class:`EomtTransformer`, the core block of the Encoder-only Mask
-Transformer (EoMT). It runs a standard pre-norm transformer block (attention
-then FFN, both with residuals) over a concatenated sequence of image patch
-tokens and learnable object query tokens, so queries and patches exchange
-information in the same self-attention pass instead of through a separate
-cross-attention decoder. During training, an optional masked-attention mode
-constrains each query to attend only to the patches inside its ground-truth
-object mask, scored to negative infinity elsewhere before the softmax; this
-mask can be applied probabilistically and annealed over training steps via
-``mask_probability`` and ``mask_annealing_steps``. ``use_masked_attention``
-requires an ``attention_type`` whose attention layer accepts an
-``attention_mask``; combining it with a maskless type (``fnet``, ``anchor``,
-``lighthouse``) raises at construction.
+Mask-based segmentation models such as Mask2Former place an adapter, a
+pixel decoder and a separate cross-attention transformer decoder on top
+of a ViT. EoMT removes all three. Object queries are appended to the
+patch tokens for the last blocks of a plain ViT, and shared
+self-attention lets queries read from patches and patches read from
+queries in the same pass. This block is that shared layer: a standard
+transformer block (attention then FFN, each with a residual, pre-norm
+by default) over ``[patches; queries]``. With no decoder the model stays
+a plain ViT, which makes it simpler and faster than decoder-based
+designs while scaling with the backbone and its pretraining.
+
+During training the block can also apply masked attention: each query
+attends only to the patches inside its mask plus all queries, while
+patches attend to everything. The mask is whatever the caller passes;
+in EoMT it is the mask predicted from the previous block's queries.
+
+Use it to build semantic, instance or panoptic segmentation on a large
+pretrained ViT when inference speed matters and a separate decoder is
+not wanted.
+
+Before use: input is ``(B, seq_len, hidden_size)`` with patch tokens
+first and the ``num_queries`` query tokens last, as a tensor or a dict
+with ``'inputs'`` (and optionally ``'mask'``). ``mask`` is
+``(B, num_queries, H, W)``, thresholded at ``0.5``; its flattened
+``H * W`` entries map to the first ``seq_len - num_queries`` tokens.
+Masking runs only when ``use_masked_attention=True``, a ``mask`` is
+passed and ``training`` is true, so inference is always unmasked. One
+random draw per call decides whether the mask applies, for the whole
+batch. ``mask_annealing_steps`` ramps that probability up linearly from
+``0`` to ``mask_probability``, counted in training calls of this layer;
+the paper's schedule runs the other way, decaying from ``1`` to ``0``.
+``use_masked_attention=True`` with a maskless ``attention_type`` such
+as ``'fnet'``, ``'anchor'`` or ``'lighthouse'`` raises ``ValueError`` at
+construction.
 
 References:
+    - Kerssies et al., 2025. Your ViT is Secretly an Image Segmentation
+      Model. EoMT and mask annealing.
+      (https://arxiv.org/abs/2503.19108)
+    - Cheng et al., 2022. Masked-attention Mask Transformer for Universal
+      Image Segmentation. Mask2Former; masked attention for queries.
+      (https://arxiv.org/abs/2112.01527)
+    - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words:
+      Transformers for Image Recognition at Scale. The plain ViT.
+      (https://arxiv.org/abs/2010.11929)
     - Vaswani et al., 2017. Attention Is All You Need.
       (https://arxiv.org/abs/1706.03762)
-    - Dosovitskiy et al., 2020. An Image is Worth 16x16 Words.
-      (https://arxiv.org/abs/2010.11929)
-    - Li et al., 2023. Your ViT is Secretly a Segmentation Model.
-      (https://arxiv.org/abs/2312.02113)
 """
+
 
 import keras
 from keras import ops, initializers, regularizers

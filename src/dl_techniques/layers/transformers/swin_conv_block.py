@@ -1,14 +1,43 @@
-"""``SwinConvBlock``, a layer that splits its input channels into a
-convolutional path and a Swin-attention path, processes each separately, and
-fuses the results.
+"""
+SwinConvBlock, a hybrid layer that runs a residual conv path and a Swin
+window-attention path side by side on separate channel slices, then fuses
+them.
 
-A plain Swin block covers long-range dependencies well but has no local
-inductive bias; a plain conv block is the opposite. Instead of choosing one,
-this block runs both on disjoint channel slices and merges them with a 1x1
-convolution, so the same layer carries both a local receptive field and a
-window-attention receptive field at every stage.
+Convolution adds a strong local bias (edges, textures) and is cheap.
+Window attention models longer-range, content-dependent interactions
+inside each window, and shifted windows pass information between
+neighbouring windows. A plain block of either kind gives up one of these.
+This block gets both at every stage: a 1x1 conv mixes the input, the
+result is split into `conv_dim` and `trans_dim` channels, the first slice
+goes through a residual `3x3 Conv -> ReLU -> 3x3 Conv` and the second
+through a `SwinTransformerBlock`, and a 1x1 conv fuses the concatenated
+outputs before a residual add with the input. Splitting the channels
+keeps the cost near that of one path at the full width, and the
+`conv_dim` / `trans_dim` ratio sets how much capacity goes to each.
 
-Input and output channels must equal ``conv_dim + trans_dim``.
+Use it as a drop-in stage block where a model needs both fine local
+detail and wider context, such as image restoration, denoising and
+dense prediction. Stack blocks in pairs, `block_type='W'` then
+`block_type='SW'`, so the shifted windows link the regular ones.
+
+Before use: input is channels-last `(B, H, W, C)` with
+`C = conv_dim + trans_dim`, and output has the same shape. `trans_dim`
+must be divisible by `head_dim`. `input_resolution` is advisory only;
+whether the shift applies is decided per call from the actual `(H, W)`.
+`drop_path_rate` applies to the transformer path only.
+
+References:
+    - Zhang et al., 2023. Practical Blind Image Denoising via
+      Swin-Conv-UNet and Data Synthesis. SCUNet; source of this block.
+      (https://arxiv.org/abs/2203.13278)
+    - Liu et al., 2021. Swin Transformer: Hierarchical Vision Transformer
+      using Shifted Windows. W-MSA and SW-MSA.
+      (https://arxiv.org/abs/2103.14030)
+    - He et al., 2016. Deep Residual Learning for Image Recognition.
+      Residual conv path and main skip.
+      (https://arxiv.org/abs/1512.03385)
+    - Huang et al., 2016. Deep Networks with Stochastic Depth.
+      `drop_path_rate`. (https://arxiv.org/abs/1603.09382)
 """
 
 import keras

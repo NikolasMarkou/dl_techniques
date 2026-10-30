@@ -220,10 +220,12 @@ class BinaryMapper(keras.layers.Layer):
         )
 
         # DECISION plan-2026-07-31T132403-b3f540cb/D-020: plain truthiness,
-        # never `is True` -- that identity test let an eager tensor `training` skip the pass-through silently. See decisions.md.
+        # never `is True` -- that identity test let an eager tensor `training` skip the pass-through silently.
+        # See decisions.md.
         if training:
             # DECISION plan-2026-07-31T132403-b3f540cb/D-004: G_{t,d} is
-            # P(B_t = U(d)) for every category d (eq. 8), not one scalar broadcast -- the scalar form gave every category an identical gradient. See decisions.md.
+            # P(B_t = U(d)) for every category d (eq. 8), not one scalar broadcast --
+            # the scalar form gave every category an identical gradient. See decisions.md.
             logits = keras.ops.cast(bit_logits, self.compute_dtype)
             u_table = keras.ops.convert_to_tensor(self._bit_patterns)
             log_g = keras.ops.matmul(
@@ -234,7 +236,8 @@ class BinaryMapper(keras.layers.Layer):
             g_td = keras.ops.exp(log_g)  # (B, T, 2^H)
 
             # DECISION plan-2026-07-31T132403-b3f540cb/D-013: group the
-            # subtraction as `z + (G - sg(G))`, never `z + G - sg(G)` -- the left-to-right form rounds ~25% of values off the exact one-hot by 1 ulp. See decisions.md.
+            # subtraction as `z + (G - sg(G))`, never `z + G - sg(G)` --
+            # the left-to-right form rounds ~25% of values off the exact one-hot by 1 ulp. See decisions.md.
             z_one_hot = z_one_hot + (g_td - keras.ops.stop_gradient(g_td))
 
         return z_one_hot
@@ -428,7 +431,9 @@ class FreeTransformerLayer(TransformerLayer):
         )
 
         # DECISION plan-2026-07-30T081929-1645aa52/D-013: pre-filter these
-        # generic defaults to what `encoder_ffn_type` accepts -- the default `'swiglu'` rejects `activation`, which reached create_ffn_layer and was dropped silently. See decisions.md.
+        # generic defaults to what `encoder_ffn_type` accepts --
+        # the default `'swiglu'` rejects `activation`, which reached create_ffn_layer and was dropped silently.
+        # See decisions.md.
         encoder_ffn_config = {
             'hidden_dim': self.intermediate_size,
             'output_dim': self.hidden_size,
@@ -602,7 +607,9 @@ class FreeTransformerLayer(TransformerLayer):
         bit_logits = None  # Populated during training.
 
         # DECISION plan-2026-07-31T042809-ddc92265/D-005: derive the encoder's
-        # key-validity mask via max over query axes -- forwarding the caller's mask verbatim would make the non-causal encoder inherit causality, and None would let it pool over PAD keys. See decisions.md.
+        # key-validity mask via max over query axes --
+        # forwarding the caller's mask verbatim would make the non-causal encoder inherit causality,
+        # and None would let it pool over PAD keys. See decisions.md.
         if attention_mask is None:
             encoder_key_mask = None
         else:
