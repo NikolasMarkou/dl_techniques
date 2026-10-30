@@ -176,7 +176,7 @@ Other:
 - `ClassLabelEmbedding`: no mutable `self.training`; reads the `training` call arg. The drop mask draws from the layer's own `SeedGenerator(seed)` created in `build()`. A fresh initializer copy is made for the table.
 - `StateIndicatorEmbedding`: the absent vector gets a fresh initializer instance built from the serialized one; a shared instance gives identical draws.
 - `ModernBertEmbeddings` has no position term; `layer_norm` uses `center=use_bias`. It validates only `vocab_size`, `hidden_size`, `type_vocab_size`, `dropout_rate`.
-- `mask_token.py` and `state_indicator_embedding.py` convert the bare string `"truncated_normal"` to `TruncatedNormal(stddev=0.02)`. `ClassTokenPrepend` and `RegisterTokens` pass the initializer straight to `add_weight` / `keras.initializers.get`.
+- `mask_token.py` and `state_indicator_embedding.py` convert the bare string `"truncated_normal"` to `TruncatedNormal(stddev=0.02)`. `ClassTokenPrepend` resolves its initializer once with `keras.initializers.get` and serializes it in `get_config` (an instance round-trips; `vit_hmlp` passes `RandomNormal(stddev=0.02)`, `vit` and `vit_siglip` pass `"zeros"`). `RegisterTokens` passes the initializer straight to `add_weight` / `keras.initializers.get`.
 - `BertEmbeddings` does not propagate a Keras mask (`supports_masking` is false; the inner `Embedding` mask dies at the sum).
 
 ## Dependencies

@@ -14,6 +14,7 @@ import tempfile
 import numpy as np
 from typing import Tuple, Dict, Any, List
 
+from dl_techniques.layers.embedding.class_token import ClassTokenPrepend
 from dl_techniques.models.vision.vit_hmlp.model import (
     ViTHMLP,
     create_vit_hmlp,
@@ -290,7 +291,8 @@ class TestViTHMLPBuildProcess:
 
             # Check that all sub-layers exist and are created
             assert model.stem is not None  # HierarchicalMLPStem
-            assert model.cls_token is not None
+            assert isinstance(model.cls_token, ClassTokenPrepend)
+            assert model.cls_token.built
             assert model.pos_embed is not None
             assert len(model.transformer_layers) == model.num_layers
             assert model.norm is not None

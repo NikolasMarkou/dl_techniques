@@ -326,8 +326,7 @@ vit(keras.ops.zeros((1, 32, 32, 3)))  # build
 
 x = keras.ops.zeros((2, 32, 32, 3))
 x = vit.patch_embed(x)
-cls = keras.ops.broadcast_to(vit.cls_token, (2, 1, vit.embed_dim))
-x = keras.ops.concatenate([cls, x], axis=1)
+x = vit.cls_token(x)  # ClassTokenPrepend, weight path cls_token/cls_token
 x = vit.pos_embed(x)
 
 per_layer = []

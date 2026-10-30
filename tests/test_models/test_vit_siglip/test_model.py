@@ -14,6 +14,7 @@ import tempfile
 import numpy as np
 from typing import Tuple, Dict, Any, List
 
+from dl_techniques.layers.embedding.class_token import ClassTokenPrepend
 from dl_techniques.models.vision.vit_siglip.model import (
     SigLIPVisionTransformer,
     create_siglip_vision_transformer
@@ -182,7 +183,8 @@ class TestSigLIPBuildProcess:
 
             # Check that all sub-layers exist and are created properly
             assert model.siglip_patch_embed is not None  # SigLIP-specific two-stage embedding
-            assert model.cls_token is not None
+            assert isinstance(model.cls_token, ClassTokenPrepend)
+            assert model.cls_token.built
             assert model.pos_embed is not None
             assert len(model.transformer_layers) == model.num_layers
 
@@ -470,8 +472,8 @@ class TestSigLIPForwardPass:
         # method's own one-line body, `features[:, 0, :]`. It therefore said
         # nothing about whether sequence position 0 HOLDS the CLS token.
         # MEASURED 2026-08-21: appending the CLS token at the END of the
-        # sequence instead of prepending it (`concatenate([x, cls_tokens])` at
-        # model.py:604), which makes `get_cls_token` return a PATCH and makes the
+        # sequence instead of prepending it (`concatenate([x, cls_tokens])` in the
+        # CLS prepend), which makes `get_cls_token` return a PATCH and makes the
         # include_top head classify off a patch, left the ENTIRE directory at
         # 62 passed. The tautology is kept -- it does pin the index -- but the
         # real claim is now stated below it.

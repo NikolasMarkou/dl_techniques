@@ -31,7 +31,7 @@ Mathematics:
 """
 
 import keras
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, Union
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -66,14 +66,16 @@ class ClassTokenPrepend(keras.layers.Layer):
                                  ▼
                     output Y  [B, L + 1, D]
 
-    :param initializer: Initializer for the class-token weight. Defaults to
-        ``"truncated_normal"``, the DINO / ViT convention. Passed straight to
-        ``add_weight``, so any value ``add_weight`` accepts works.
-    :type initializer: str
+    :param initializer: Initializer for the class-token weight: a name, a
+        config dict or a ``keras.initializers.Initializer`` instance. Defaults
+        to ``"truncated_normal"``, the DINO / ViT convention. Resolved once
+        with ``keras.initializers.get``, so ``get_config`` always emits the
+        serialized dict form and ``from_config`` round-trips an instance.
+    :type initializer: Union[str, dict, keras.initializers.Initializer]
     :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
-    :ivar initializer: The configured weight initializer, stored as given.
-    :vartype initializer: str
+    :ivar initializer: The resolved weight initializer instance.
+    :vartype initializer: keras.initializers.Initializer
     :ivar cls_token: The learnable token of shape ``(1, 1, dim)``. ``None``
         until ``build()`` runs.
     :vartype cls_token: keras.Variable or None
@@ -103,19 +105,19 @@ class ClassTokenPrepend(keras.layers.Layer):
 
     def __init__(
             self,
-            initializer: str = "truncated_normal",
+            initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = "truncated_normal",
             **kwargs: Any
     ) -> None:
-        """Store the initializer. No weight is created here.
+        """Resolve the initializer. No weight is created here.
 
         :param initializer: Initializer for the class-token weight.
-        :type initializer: str
+        :type initializer: Union[str, dict, keras.initializers.Initializer]
         :param kwargs: Additional keyword arguments for the ``Layer`` base
             class.
         :type kwargs: Any
         """
         super().__init__(**kwargs)
-        self.initializer = initializer
+        self.initializer = keras.initializers.get(initializer)
         self.cls_token = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -183,11 +185,11 @@ class ClassTokenPrepend(keras.layers.Layer):
     def get_config(self) -> Dict[str, Any]:
         """Return the layer configuration for serialization.
 
-        :return: The base ``Layer`` config plus ``initializer``.
+        :return: The base ``Layer`` config plus the serialized ``initializer``.
         :rtype: dict
         """
         config = super().get_config()
-        config.update({"initializer": self.initializer})
+        config.update({"initializer": keras.initializers.serialize(self.initializer)})
         return config
 
 # ---------------------------------------------------------------------

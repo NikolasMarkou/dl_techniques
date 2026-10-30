@@ -14,6 +14,7 @@ import tempfile
 import numpy as np
 from typing import Tuple, Dict, Any, List
 
+from dl_techniques.layers.embedding.class_token import ClassTokenPrepend
 from dl_techniques.models.vision.vit.model import (
     ViT,
     create_vit,
@@ -185,7 +186,8 @@ class TestViTBuildProcess:
 
             # Check that all sub-layers exist and are created using factories
             assert model.patch_embed is not None
-            assert model.cls_token is not None
+            assert isinstance(model.cls_token, ClassTokenPrepend)
+            assert model.cls_token.built
             assert model.pos_embed is not None
             assert len(model.transformer_layers) == model.num_layers
             assert model.norm is not None

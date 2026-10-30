@@ -1,6 +1,7 @@
 import pytest
 import numpy as np
 import tensorflow as tf
+import json
 import keras
 import tempfile
 import os
@@ -36,13 +37,13 @@ class TestClassTokenPrepend:
     def test_initialization_defaults(self):
         """Default initializer matches the DINO/ViT convention; weight is lazy."""
         layer = ClassTokenPrepend()
-        assert layer.initializer == "truncated_normal"
+        assert isinstance(layer.initializer, keras.initializers.TruncatedNormal)
         assert layer.cls_token is None
 
     def test_initialization_custom(self):
-        """Custom initializer is retained verbatim."""
+        """A custom initializer name is resolved to its instance."""
         layer = ClassTokenPrepend(initializer="zeros")
-        assert layer.initializer == "zeros"
+        assert isinstance(layer.initializer, keras.initializers.Zeros)
 
     def test_build_process(self, input_tensor: tf.Tensor):
         """The layer builds and creates the (1, 1, dim) class-token weight."""
@@ -105,10 +106,10 @@ class TestClassTokenPrepend:
         original.build(input_shape)
 
         config = original.get_config()
-        assert config["initializer"] == "glorot_uniform"
+        assert config["initializer"]["class_name"] == "GlorotUniform"
 
         recreated = ClassTokenPrepend.from_config(config)
-        assert recreated.initializer == "glorot_uniform"
+        assert isinstance(recreated.initializer, keras.initializers.GlorotUniform)
 
         recreated.build(input_shape)
         # Copy the single weight so outputs are bit-comparable.
@@ -118,6 +119,29 @@ class TestClassTokenPrepend:
         orig_out = original(test_input, training=False).numpy()
         recr_out = recreated(test_input, training=False).numpy()
         assert np.allclose(orig_out, recr_out, atol=1e-7)
+
+    def test_initializer_instance_round_trip(self):
+        """A non-string initializer survives get_config/from_config and JSON.
+
+        Before the layer resolved its initializer, ``get_config`` returned the
+        live ``RandomNormal`` object (not JSON-serializable) and ``from_config``
+        kept the raw dict, so the rebuilt layer's ``initializer`` was a dict.
+        """
+        original = ClassTokenPrepend(
+            initializer=keras.initializers.RandomNormal(stddev=0.02),
+            name="cls_token",
+        )
+        config = original.get_config()
+        json.dumps(config)  # raises if any live object leaked into the config
+        assert config["initializer"]["class_name"] == "RandomNormal"
+        assert config["initializer"]["config"]["stddev"] == 0.02
+
+        recreated = ClassTokenPrepend.from_config(config)
+        assert isinstance(recreated.initializer, keras.initializers.RandomNormal)
+        assert recreated.initializer.stddev == 0.02
+        recreated.build((None, 4, 8))
+        # stddev 0.02 draws are nowhere near the truncated_normal default's scale
+        assert float(np.abs(recreated.cls_token.numpy()).max()) < 0.2
 
     # ----- (e) .keras model save/load round-trip -----
     def test_model_save_load(self, input_tensor: tf.Tensor):

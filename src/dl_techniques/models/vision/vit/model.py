@@ -56,6 +56,7 @@ from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
+from dl_techniques.layers.embedding.class_token import ClassTokenPrepend
 from dl_techniques.layers.sequence_pooling import SequencePooling
 from dl_techniques.layers.heads.vision import VisionTaskType
 from dl_techniques.layers.heads.vision.factory import build_model_vision_head
@@ -320,8 +321,9 @@ class ViT(keras.Model):
     :vartype num_patches: int
     :ivar max_seq_len: ``num_patches + 1``, counting the CLS token.
     :vartype max_seq_len: int
-    :ivar cls_token: Learnable ``(1, 1, embed_dim)`` token, created in ``build``.
-    :vartype cls_token: keras.Variable
+    :ivar cls_token: The :class:`ClassTokenPrepend` layer owning the learnable
+        ``(1, 1, embed_dim)`` token (weight path ``cls_token/cls_token``).
+    :vartype cls_token: ClassTokenPrepend
     :ivar transformer_layers: The encoder stack.
     :vartype transformer_layers: list[TransformerLayer]
 
@@ -669,15 +671,17 @@ class ViT(keras.Model):
                 strategy=self.pooling, exclude_positions=[0], name="seq_pool"
             )
 
-        # CLS token weight (created in build())
-        self.cls_token = None
+        # CLS token: the shared ClassTokenPrepend layer, which creates its weight
+        # in its own build() (path `cls_token/cls_token`).
+        self.cls_token = ClassTokenPrepend(
+            initializer="zeros", name="cls_token")
 
         logger.info(f"Created VisionTransformer-{scale} with {self.embed_dim}d, {self.num_heads}h, {self.num_layers}L")
         logger.info(
             f"Image shape: {self.input_shape_config}, Patch size: {self.patch_size}, Num patches: {self.num_patches}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Create the CLS token and explicitly build every sub-layer.
+        """Explicitly build every sub-layer, the CLS token layer included.
 
         Each sub-layer is built in computational order rather than left to a
         lazy first call, so the weight tree materializes on ``.keras`` reload.
@@ -693,18 +697,13 @@ class ViT(keras.Model):
         if len(input_shape) < 4:
             raise ValueError(f"Expected 4D input shape (batch, height, width, channels), got {input_shape}")
 
-        # Create CLS token weight
-        self.cls_token = self.add_weight(
-            name="cls_token",
-            shape=(1, 1, self.embed_dim),
-            initializer="zeros",
-            trainable=True
-        )
-
         # Build all sub-layers in computational order
         # Patch embedding
         dummy_input_shape = (None,) + self.input_shape_config
         self.patch_embed.build(dummy_input_shape)
+
+        # CLS token prepend: (None, num_patches, embed_dim) -> (None, max_seq_len, embed_dim)
+        self.cls_token.build((None, self.num_patches, self.embed_dim))
 
         # Positional embedding
         pos_input_shape = (None, self.max_seq_len, self.embed_dim)
@@ -751,9 +750,7 @@ class ViT(keras.Model):
         x = self.patch_embed(inputs, training=training)
 
         # 2. Prepend the CLS token
-        batch_size = keras.ops.shape(x)[0]
-        cls_tokens = keras.ops.broadcast_to(self.cls_token, (batch_size, 1, self.embed_dim))
-        x = keras.ops.concatenate([cls_tokens, x], axis=1)
+        x = self.cls_token(x)
 
         # 3. Add learned positional embeddings
         x = self.pos_embed(x, training=training)
