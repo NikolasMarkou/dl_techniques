@@ -19,6 +19,8 @@ Interface contract:
   against the reference, formed seed by seed (only seeds both variants finished).
 * ``exp2`` also reports the learned bandwidths per config and ranks the MeanShift configs by
   SELECTION-split accuracy (ties: fewer steps, then config id). The test split never ranks.
+  A multi_head variant other than the reference (the ``mha_oinit`` control) is a variant like
+  any other (paired against ``mha``) but is not ranked.
 * No significance test is applied: with 3 seeds a sign-flip test cannot go below p = 0.25.
 * Failure modes: ``FileNotFoundError`` (a root without ``rows.jsonl`` and ``manifest.json``),
   ``ValueError`` (the same ok key in two roots, a malformed ok row, an unknown experiment),
@@ -197,10 +199,14 @@ def _bandwidth_summary(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
 
 
 def _rank(variants: Mapping[str, Mapping[str, Any]], reference: str) -> List[Dict[str, Any]]:
-    """Variants other than the reference ordered by selection accuracy, then steps, then id."""
+    """MeanShift variants ordered by selection accuracy, then steps, then id.
+
+    The reference and any other multi_head variant (a control such as ``mha_oinit``) are not
+    ranked: the ranking chooses the MeanShift configs for the long run.
+    """
     rows = []
     for name, cell in variants.items():
-        if name == reference:
+        if name == reference or cell["arm"] != "mean_shift":
             continue
         entry = cell["metrics"][RANKING_METRIC]
         steps = cell["config_args"].get("num_steps")

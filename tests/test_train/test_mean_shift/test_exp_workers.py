@@ -259,18 +259,77 @@ def test_every_vmf_config_starts_at_bandwidth_0_3_and_gaussian_ones_keep_the_def
             assert "bandwidth_init" not in args, config_id
 
 
-@pytest.mark.parametrize("config_id", list(exp2.CONFIGS))
+@pytest.mark.parametrize("config_id", list(exp2.ALL_CONFIGS))
 def test_every_config_builds_and_runs_a_forward_pass(config_id):
     model = exp2.build_model(config_id, 100)
     out = np.asarray(model(np.random.default_rng(0).random((2, 32, 32, 3), dtype="float32")))
     assert out.shape == (2, 100) and np.isfinite(out).all()
     layers = exp2.attention_layers(model)
-    spec = exp2.CONFIGS[config_id]
+    spec = exp2.ALL_CONFIGS[config_id]
     assert len(layers) == 6
     if spec["attention_type"] == "mean_shift":
         for layer in layers:
             for name, value in spec["attention_args"].items():
                 assert getattr(layer, name) == value, (config_id, name)
+
+
+# ---------------------------------------------------------------------------
+# exp2: the output-projection initializer control (mha_oinit)
+# ---------------------------------------------------------------------------
+
+CONTROL = "mha_oinit"
+#: Values compared per block: the first N of the larger kernel against the whole smaller one
+#: (192x192 proj against the first 192*192 values of the 192x576 qkv).
+PROJ_SIZE = 192 * 192
+
+
+def test_the_control_is_outside_the_grid_and_the_baseline_is_exactly_as_run():
+    assert CONTROL not in exp2.CONFIGS and len(exp2.CONFIGS) == 17
+    assert list(exp2.CONTROL_CONFIGS) == [CONTROL]
+    assert list(exp2.ALL_CONFIGS) == [*exp2.CONFIGS, CONTROL]
+    # mha keeps the empty attention_args its stored rows were run with
+    assert exp2.CONFIGS["mha"] == {"attention_type": "multi_head", "attention_args": {}}
+    control = exp2.CONTROL_CONFIGS[CONTROL]
+    assert control["attention_type"] == "multi_head"
+    assert control["attention_args"] == {"output_kernel_initializer": "glorot_uniform"}
+
+
+def kernel_pair(model, config_id):
+    """Per block: (the first PROJ_SIZE values of the input kernel, the output kernel values)."""
+    names = {"multi_head": ("qkv/kernel", "proj/kernel"),
+             "mean_shift": ("projection/kernel", "output_projection/kernel")}
+    first, second = names[exp2.ALL_CONFIGS[config_id]["attention_type"]]
+    pairs = []
+    for layer in exp2.attention_layers(model):
+        kernels = {w.path.split("attention/", 1)[1].replace("cross_attention/", ""): np.asarray(w)
+                   for w in layer.weights}
+        pairs.append((kernels[first].ravel()[:PROJ_SIZE], kernels[second].ravel()))
+    return pairs
+
+
+def init_correlations(config_id):
+    """The correlations the worker would start from: ``set_seeds`` then ``build_model``."""
+    from train.common import set_seeds
+    set_seeds(0)
+    pairs = kernel_pair(exp2.build_model(config_id, 100), config_id)
+    assert len(pairs) == 6 and all(a.size == b.size == PROJ_SIZE for a, b in pairs)
+    return [float(np.corrcoef(a, b)[0, 1]) for a, b in pairs]
+
+
+def test_mha_replays_one_draw_for_qkv_and_proj_the_documented_confound():
+    """A property of the layer's shared initializer instance, pinned so it stays named, not a goal."""
+    assert min(init_correlations("mha")) > 0.999
+
+
+@pytest.mark.parametrize("config_id", [CONTROL, DEFAULT_MS, "noblur_s3_per_token_vmf"])
+def test_the_control_and_the_mean_shift_configs_start_with_independent_projections(config_id):
+    correlations = init_correlations(config_id)
+    assert max(abs(c) for c in correlations) < 0.1, correlations
+
+
+def test_the_control_has_the_parameter_count_of_mha():
+    counts = {c: exp2.build_model(c, 100).count_params() for c in ("mha", CONTROL)}
+    assert counts == {"mha": 2_710_564, CONTROL: 2_710_564}
 
 
 def test_the_parameter_ratio_of_mean_shift_to_multi_head_is_measured(record_property):
@@ -396,6 +455,18 @@ def test_the_main_mode_is_mha_plus_the_two_chosen_configs_by_three_seeds():
     assert arms["mha"] == "multi_head" and arms[DEFAULT_MS] == "mean_shift"
 
 
+def test_the_control_is_reachable_through_main_mode_next_to_mha_and_not_through_the_grid():
+    cells = exp2.build_cells(parse2("--mode", "main", "--configs", CONTROL))
+    assert len(cells) == 6 and len({c.key for c in cells}) == 6
+    assert [c.seed for c in cells] == [0] * 2 + [1] * 2 + [2] * 2
+    assert [c.config for c in cells[:2]] == ["mha", CONTROL]
+    assert {c.arm for c in cells} == {"multi_head"}
+    assert CONTROL not in {c.config for c in exp2.build_cells(parse2("--mode", "grid"))}
+    assert CONTROL not in {c.config for c in exp2.build_cells(parse2("--mode", "smoke"))}
+    with pytest.raises(SystemExit):
+        parse2("--mode", "main", "--configs", "mha")
+
+
 def test_the_main_mode_needs_known_configs_and_at_least_one():
     with pytest.raises(SystemExit):
         exp2.build_cells(parse2("--mode", "main"))
@@ -407,7 +478,7 @@ def test_the_main_mode_needs_known_configs_and_at_least_one():
 # exp2: workers
 # ---------------------------------------------------------------------------
 
-EXP2_RUNS = [("multi_head", "mha"), ("mean_shift", DEFAULT_MS),
+EXP2_RUNS = [("multi_head", "mha"), ("multi_head", CONTROL), ("mean_shift", DEFAULT_MS),
              ("mean_shift", "noblur_s1_per_token_vmf")]
 
 
@@ -429,7 +500,7 @@ def test_an_exp2_worker_writes_one_complete_result(arm, config, exp2_runs):
     metrics = result["metrics"]
     assert result["finite"] is True and result["epochs_run"] == 1
     assert result["params"] > 0
-    assert (result["params"] == 2_710_564) == (config == "mha")
+    assert (result["params"] == 2_710_564) == (config in ("mha", CONTROL))
     assert 0.0 <= metrics["select_accuracy"] <= 1.0 and 0.0 <= metrics["test_accuracy"] <= 1.0
     assert metrics["throughput_images_per_s"] > 0 and metrics["n_test"] == MAX_SAMPLES
     assert metrics["dataset"] == "cifar100" and metrics["config"] == config
@@ -440,6 +511,7 @@ def test_an_exp2_worker_writes_one_complete_result(arm, config, exp2_runs):
 def test_the_exp2_rows_carry_the_learned_bandwidths(exp2_runs):
     results = exp2_runs[0]
     assert results["mha"]["metrics"]["bandwidths"]["layers"] == []
+    assert results[CONTROL]["metrics"]["bandwidths"]["layers"] == []
     per_head = results[DEFAULT_MS]["metrics"]["bandwidths"]
     assert per_head["status"] == "extracted" and per_head["mode"] == "per_head"
     assert len(per_head["layers"]) == 6
@@ -448,6 +520,15 @@ def test_the_exp2_rows_carry_the_learned_bandwidths(exp2_runs):
     assert per_token["status"] == "extracted" and per_token["mode"] == "per_token"
     assert per_token["probe_images"] == results["noblur_s1_per_token_vmf"]["metrics"]["n_select"]
     assert all(layer["min"] <= layer["mean"] <= layer["max"] for layer in per_token["layers"])
+
+
+def test_the_control_row_names_its_arm_config_and_initializer(exp2_runs):
+    result = exp2_runs[0][CONTROL]
+    metrics = result["metrics"]
+    assert metrics["attention_type"] == "multi_head" and metrics["config"] == CONTROL
+    assert metrics["config_args"] == {"output_kernel_initializer": "glorot_uniform"}
+    assert exp2_runs[0]["mha"]["metrics"]["config_args"] == {}
+    json.dumps(result)
 
 
 def test_a_vmf_cell_starts_its_bandwidth_at_0_3(exp2_runs):
