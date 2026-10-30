@@ -76,7 +76,7 @@ SUMMARY_KEYS = {
     "test_valid_steps", "separation", "stay_prob", "seed", "jit_compile", "epochs_requested",
     "epochs_run", "best_checkpoint", "nll_kind", "test_nll_per_step", "true_nll_per_step",
     "nll_gap", "viterbi_acc", "viterbi_acc_matched", "state_mapping", "true_viterbi_acc",
-    "majority_rate", "fit_seconds", "visualizations", "total_seconds",
+    "majority_rate", "state_diagnostics", "fit_seconds", "visualizations", "total_seconds",
 }
 
 

@@ -62,7 +62,7 @@ import matplotlib.ticker
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.probabilistic.neural_hmm import NeuralHMM, create_neural_hmm
-from dl_techniques.models.probabilistic.neural_hmm import inference
+from dl_techniques.models.probabilistic.neural_hmm import diagnostics, inference
 from dl_techniques.models.probabilistic.neural_hmm.encoders import ENCODER_TYPES
 from dl_techniques.optimization import optimizer_builder
 from train.common import (
@@ -322,21 +322,19 @@ def evaluate(model: NeuralHMM, split: HMMDataset, batch_size: int) -> Dict[str, 
     :rtype: Dict[str, Any]
     """
     k = model.n_states
-    log_lik, paths = [], []
     transition_sum, transition_count = np.zeros((k, k)), 0
     for start in range(0, len(split.obs), batch_size):
         stop = start + batch_size
         inputs = _inputs(split, start, stop)
-        states = split.states[start:stop] if model.mode == "discriminative" else None
-        log_lik.append(keras.ops.convert_to_numpy(model.log_likelihood(inputs, states)))
-        paths.append(keras.ops.convert_to_numpy(model.viterbi(inputs)[0]))
         log_a = keras.ops.convert_to_numpy(model(inputs, training=False)["log_A"]).astype(np.float64)
         moves = (split.mask[start:stop, 1:] > 0)
         transition_sum += np.exp(log_a[:, 1:])[moves].sum(axis=0)
         transition_count += int(moves.sum())
     return {
-        "log_likelihood": np.concatenate(log_lik).astype(np.float64),
-        "path": np.concatenate(paths),
+        "log_likelihood": diagnostics.score(
+            model, _inputs(split), split.states if model.mode == "discriminative" else None, batch_size,
+        ).astype(np.float64),
+        "path": diagnostics.decode(model, _inputs(split), batch_size)[0],
         "transition": transition_sum / max(transition_count, 1),
     }
 
@@ -540,6 +538,8 @@ def main(argv=None) -> int:
                 f"epoch {epoch + 1}: loss {logs.get('loss', float('nan')):.5f}, "
                 f"val_loss {logs.get('val_loss', float('nan')):.5f}")),
         ]
+        for split in (train, val, test):
+            diagnostics.validate_inputs(model, _inputs(split), split.states if discriminative else None)
         fit_start = time.perf_counter()
         history = model.fit(
             _inputs(train), _labels(model, train),
@@ -576,6 +576,7 @@ def main(argv=None) -> int:
         else:
             nll_kind, true_nll = "marginal", true_nll_per_step(hmm, test.obs, test.mask, test.inputs)
         mapping = hungarian_mapping(scores["path"], test.states, args.n_states)
+        state_report = diagnostics.state_diagnostics(scored, _inputs(test), args.batch_size, seed=args.seed)
         true_path = true_viterbi_path(test, args.batch_size)
 
         summary: Dict[str, Any] = {
@@ -612,6 +613,7 @@ def main(argv=None) -> int:
             "state_mapping": [int(v) for v in mapping],
             "true_viterbi_acc": accuracy(true_path, test.states),
             "majority_rate": majority_rate(test.states),
+            "state_diagnostics": {**state_report, "occupancy": state_report["occupancy"].tolist()},
             "fit_seconds": fit_seconds,
         }
 

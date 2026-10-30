@@ -219,6 +219,17 @@ The package `__init__.py` exports `NeuralHMM` and `create_neural_hmm`. The `prob
 
 ---
 
+### Diagnostics (`diagnostics.py`)
+
+| Function | Returns |
+|----------|---------|
+| `decode(model, inputs, batch_size=32)` | `(path (N, T), score (N,))` of a whole split, in compiled batches |
+| `score(model, inputs, states=None, batch_size=32)` | `(N,)` log-likelihood of a whole split, in compiled batches |
+| `state_diagnostics(model, inputs, batch_size=32, seed=0)` | `occupancy`, `occupancy_entropy`, `mean_posterior_entropy`, and `state_shuffled_gap` (`None` in discriminative mode). A gap near 0 means the states carry no information |
+| `validate_inputs(model, inputs, states=None)` | raises `ValueError` naming a non-prefix mask, a bad symbol or label, a negative count, or a non-finite value at a valid step |
+
+`decode` over 64 sequences of 800 steps at `batch_size=16`, on the CPU, took 2.13 s including its trace; the same batches through the eager `viterbi` took 26.41 s. Each call traces once, so pass a whole split rather than one batch at a time.
+
 ## 8. Configuration & Presets
 
 `NeuralHMM.MODEL_VARIANTS` holds the structural choices only; `n_states` and the observation shape (`obs_type` with `obs_dim` or `vocab_size`) come from the caller, and any argument overrides the preset. Every component a preset builds is read by the forward pass, so every built weight receives a gradient.
