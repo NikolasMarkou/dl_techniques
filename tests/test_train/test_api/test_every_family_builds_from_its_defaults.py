@@ -333,6 +333,29 @@ def test_the_per_dataset_and_per_variant_rules(
     assert resolved == model_args
 
 
+@pytest.mark.parametrize(
+    "family, variant, dataset, image_size, explicit, erasing",
+    [
+        # train_cliffordnet.py:684-685: the preset carries 0.25 on ANY dataset.
+        ("cliffordnet", "nano", "imagenet", 224, "cifar_autoaugment", 0.25),
+        ("cliffordnet", "lite", "imagenette", 224, "cifar_autoaugment", 0.25),
+        ("cliffordnet_hier", "hier_345", "imagenet", 224, "cifar_autoaugment", 0.25),
+        # Any other preset on cifar: no erasing, as the legacy default for it.
+        ("cliffordnet", "nano", "cifar10", 32, "flip", 0.0),
+        ("cliffordnet", "nano", "cifar10", 32, "none", 0.0),
+        # Control: a family with no erasing recipe gives none under the preset.
+        ("vit", "vit_pico", "imagenet", 224, "cifar_autoaugment", 0.0),
+        ("convnext_v1", "tiny", "imagenet", 224, "cifar_autoaugment", 0.0),
+    ],
+)
+def test_an_explicit_autoaugment_gets_the_erasing_probability_the_legacy_trainer_gave(
+    family, variant, dataset, image_size, explicit, erasing, builtin
+):
+    ctx = context(family, variant, dataset, image_size)
+    transform = TransformArgs(augment=explicit).resolve_auto(ctx)
+    assert (transform.augment, transform.random_erasing_prob) == (explicit, erasing)
+
+
 # ---------------------------------------------------------------------
 # The weight-decay rule and the model-argument rules
 # ---------------------------------------------------------------------

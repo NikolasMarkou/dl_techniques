@@ -115,6 +115,7 @@ from train.common.classification_run import (  # noqa: F401
     base_summary,
     check_best_checkpoint,
     check_initial_loss,
+    evaluate_dict,
     finalize_last_epoch,
     report_best_weights,
     summarize_fit,
@@ -711,10 +712,9 @@ class _EpochLogLine(EpochLogLine):
 # Evaluation helpers
 # ---------------------------------------------------------------------
 
-def _evaluate(model: keras.Model, dataset: "tf.data.Dataset") -> Dict[str, float]:
-    """``model.evaluate`` over a batched dataset as a plain ``{metric: float}`` dict."""
-    metrics = model.evaluate(dataset, verbose=0, return_dict=True)
-    return {k: float(v) for k, v in metrics.items()}
+# Promoted to ``train.common.classification_run.evaluate_dict``; the private name stays
+# because the tests patch it on this module and ``train()`` reads it from here.
+_evaluate = evaluate_dict
 
 
 def _label_smoothing_notes(label_smoothing: float) -> List[str]:

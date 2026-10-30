@@ -220,6 +220,44 @@ def test_an_explicit_zero_beats_a_recipe_value_that_is_not_zero(recipe_key, grou
     assert type(getattr(result, key)) is type(zero)
 
 
+# The random-erasing probability belongs to one preset (D-041).
+
+ERASING_RECIPE = {"transform_args": {"augment": "none", "random_erasing_prob": 0.25}}
+AUTOAUGMENT_RECIPE = {
+    "transform_args": {"augment": "cifar_autoaugment", "random_erasing_prob": 0.25}
+}
+
+
+@pytest.mark.parametrize(
+    "recipe, explicit_augment, expected",
+    [
+        # Where the preset comes from does not matter, only what is in force.
+        (ERASING_RECIPE, AUTO, 0.0),
+        (ERASING_RECIPE, "cifar_autoaugment", 0.25),
+        (ERASING_RECIPE, "flip", 0.0),
+        (ERASING_RECIPE, "cifar_light", 0.0),
+        (AUTOAUGMENT_RECIPE, AUTO, 0.25),
+        (AUTOAUGMENT_RECIPE, "none", 0.0),
+        (AUTOAUGMENT_RECIPE, "photometric", 0.0),
+    ],
+)
+def test_an_auto_erasing_probability_follows_the_preset_in_force(
+    recipe, explicit_augment, expected
+):
+    transform = TransformArgs(augment=explicit_augment).resolve_auto(context(defaults=recipe))
+    assert transform.random_erasing_prob == expected
+    assert type(transform.random_erasing_prob) is float
+
+
+def test_an_explicit_erasing_probability_is_not_moved_by_the_preset_rule():
+    # D-010: the rule fills AUTO only. 0.4 with a recipe preset that takes no
+    # erasing stays 0.4 (build_augment refuses it later, at the loader).
+    transform = TransformArgs(random_erasing_prob=0.4).resolve_auto(
+        context(defaults=ERASING_RECIPE)
+    )
+    assert transform.random_erasing_prob == 0.4
+
+
 # The two clipping fields exclude each other, and the rule that keeps them
 # apart acts on a number only (D-028).
 

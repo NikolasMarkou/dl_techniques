@@ -55,6 +55,59 @@ STATUS_DIVERGED = "diverged"
 Evaluate = Callable[[keras.Model, "tf.data.Dataset"], Dict[str, float]]
 
 
+def evaluate_dict(model: keras.Model, dataset: "tf.data.Dataset") -> Dict[str, float]:
+    """``model.evaluate`` over a batched dataset as a plain ``{metric: float}`` dict.
+
+    The default :data:`Evaluate` seam. A caller whose tests patch the seam by name on
+    their own module (``train.convnext.common._evaluate``) binds this under that name.
+
+    :param model: A compiled model.
+    :param dataset: A batched dataset of ``(x, y)``.
+    :return: Every metric ``evaluate`` reports, as floats.
+    """
+    metrics = model.evaluate(dataset, verbose=0, return_dict=True)
+    return {k: float(v) for k, v in metrics.items()}
+
+
+# ---------------------------------------------------------------------
+# Metrics that survive a mixed-precision policy
+# ---------------------------------------------------------------------
+
+@keras.saving.register_keras_serializable(package="dl_techniques.train.classification_run")
+class TopKAccuracy(keras.metrics.SparseTopKCategoricalAccuracy):
+    """Sparse top-k accuracy of logits in any float dtype.
+
+    Under ``mixed_float16`` or ``mixed_bfloat16`` a classifier emits half-precision
+    logits, and the stock metric's ``InTopKV2`` op accepts float32 only (measured:
+    ``TypeError: Input 'predictions' of 'InTopKV2' Op has type float16``). Casting the
+    logits up first changes no ranking. The class is registered because ``best_model.keras``
+    and ``final_model.keras`` carry the compiled metrics and are reloaded.
+    """
+
+    def update_state(self, y_true: Any, y_pred: Any, sample_weight: Any = None) -> Any:
+        # DECISION plan-2026-10-30T132432-a865fa08/D-041: cast the logits up HERE. Do NOT
+        # use the stock ``SparseTopKCategoricalAccuracy`` with ``precision=mixed_float16``
+        # (its in_top_k op raises on half precision) and do NOT cast the model's output
+        # (model code is out of scope and a cast layer would change every saved model).
+        return super().update_state(y_true, keras.ops.cast(y_pred, "float32"), sample_weight)
+
+
+def classification_metrics(num_classes: int, top_k: int) -> List[keras.metrics.Metric]:
+    """``accuracy``, plus ``top{k}_accuracy`` when there are more than ``k`` classes.
+
+    :param num_classes: Class count; top-k of every class would be 1.0 and tells nothing.
+    :param top_k: ``k``.
+    :return: Metric OBJECTS (a string alias such as ``"top_5_accuracy"`` is not resolvable
+        by Keras and crashes ``compile``), named ``accuracy`` and ``top{k}_accuracy``.
+    """
+    metrics: List[keras.metrics.Metric] = [
+        keras.metrics.SparseCategoricalAccuracy(name="accuracy")
+    ]
+    if num_classes > top_k:
+        metrics.append(TopKAccuracy(k=top_k, name=f"top{top_k}_accuracy"))
+    return metrics
+
+
 # ---------------------------------------------------------------------
 # H1: the last epoch's weights
 # ---------------------------------------------------------------------
@@ -205,7 +258,7 @@ def check_best_checkpoint(
 def report_best_weights(
         model: keras.Model, data: ClassificationData, history: keras.callbacks.History,
         run_dir: Path, vis_dir: Path, experiment_name: str, model_analysis: bool,
-        run_analysis: Callable[..., Any],
+        run_analysis: Callable[..., Any], figures: bool = True,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Write the figures and run the analyzer for the BEST (selected) weights.
 
@@ -221,15 +274,21 @@ def report_best_weights(
     :param model_analysis: Whether to run the analyzer.
     :param run_analysis: The caller's ``run_model_analysis`` seam, called as
         ``(model, (x_fig, y_fig), history, experiment_name, str(run_dir))``.
+    :param figures: ``False`` writes no figure and does not predict; the record is then
+        ``{"files": [], "ece": None, "failed": [], "skipped": True}``. The default
+        reproduces the legacy trainers.
     :return: ``(visualizations, analysis)``: the figure record (it carries ``ece``) and
         the analyzer status read back from disk, or the skipped status.
     """
-    logits = model.predict(data.x_fig, batch_size=EVAL_BATCH_SIZE, verbose=0)
-    probs = keras.ops.convert_to_numpy(keras.ops.softmax(logits, axis=-1))
-    visualizations = run_summary.write_classification_figures(
-        vis_dir, data.x_fig, data.y_fig, probs, data.class_names,
-        mean=data.mean, std=data.std,
-    )
+    if figures:
+        logits = model.predict(data.x_fig, batch_size=EVAL_BATCH_SIZE, verbose=0)
+        probs = keras.ops.convert_to_numpy(keras.ops.softmax(logits, axis=-1))
+        visualizations = run_summary.write_classification_figures(
+            vis_dir, data.x_fig, data.y_fig, probs, data.class_names,
+            mean=data.mean, std=data.std,
+        )
+    else:
+        visualizations = {"files": [], "ece": None, "failed": [], "skipped": True}
     if model_analysis:
         run_analysis(model, (data.x_fig, data.y_fig), history, experiment_name, str(run_dir))
         analysis = run_summary.read_analysis_status(run_dir, experiment_name)

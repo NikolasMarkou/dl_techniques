@@ -57,7 +57,7 @@ Module scope imports only the standard library and ``train.api`` (D-012);
 
 from typing import Any, Dict, Mapping, Optional, Tuple
 
-from .args import AutoContext, OptimArgs
+from .args import ERASING_PRESET, AutoContext, OptimArgs
 from .config import AUTO
 from .errors import ConfigError, UnresolvedAutoError
 from . import registry
@@ -142,14 +142,20 @@ def _recipe(
     model_args: Dict[str, Any],
     per_dataset: Dict[str, Any],
     per_variant: Optional[Dict[str, Any]] = None,
+    erasing_prob: float = 0.0,
 ) -> Dict[str, Any]:
-    """Return a recipe: the AUTO keys every family lists, plus its overlays."""
+    """Return a recipe: the AUTO keys every family lists, plus its overlays.
+
+    :param erasing_prob: the random-erasing probability the family's
+        ``cifar_autoaugment`` preset takes; ``TransformArgs.resolve_auto`` uses it
+        under that preset only and gives 0.0 under any other.
+    """
     return {
         "epochs": epochs,
         "batch_size": batch_size,
         "optim_args": optim_args,
         # No augmentation and no erasing unless a dataset overlay says so.
-        "transform_args": {"augment": "none", "random_erasing_prob": 0.0},
+        "transform_args": {"augment": "none", "random_erasing_prob": erasing_prob},
         "metric_args": {"watch_metric": watch_metric},
         "checkpoint_args": {"early_stopping_patience": patience},
         "model_args": model_args,
@@ -259,12 +265,14 @@ def _convnext_recipe() -> Dict[str, Any]:
 # (train/common/args.py:345). AdamW with betas 0.9/0.999 and epsilon 1e-8
 # :313-319, NO clipping, the schedule over `total - warmup` with alpha 1e-2 and
 # a 1e-8 start :299-311. CIFAR trains with `cifar_autoaugment` and random
-# erasing 0.25 (:680-685); other datasets with none. Stochastic depth is 0.3,
-# 0.4 for cn_64_5 (_STOCHASTIC_DEPTH_BY_VARIANT :98-104), 0.1 for hier_345.
+# erasing 0.25 (:680-685); other datasets with none. The 0.25 belongs to the
+# preset, not to the dataset: `--augment cifar_autoaugment` on any other dataset
+# also erases with 0.25 (:684-685), so the base recipe carries 0.25 and
+# TransformArgs.resolve_auto applies it under that preset only (D-041).
+# Stochastic depth is 0.3, 0.4 for cn_64_5 (_STOCHASTIC_DEPTH_BY_VARIANT
+# :98-104), 0.1 for hier_345.
 CLIFFORDNET_PER_DATASET: Dict[str, Any] = {
-    name: {
-        "transform_args": {"augment": "cifar_autoaugment", "random_erasing_prob": 0.25}
-    }
+    name: {"transform_args": {"augment": ERASING_PRESET}}
     for name in ("cifar10", "cifar100")
 }
 
@@ -282,6 +290,7 @@ def _cliffordnet_recipe(stochastic_depth_rate: float, per_variant: Dict[str, Any
         model_args={"stochastic_depth_rate": stochastic_depth_rate},
         per_dataset=CLIFFORDNET_PER_DATASET,
         per_variant=per_variant,
+        erasing_prob=0.25,
     )
 
 

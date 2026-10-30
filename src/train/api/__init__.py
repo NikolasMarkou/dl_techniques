@@ -37,6 +37,10 @@ _LAZY: Dict[str, str] = {
     "write_requested": ".run_dir",
     "write_resolved": ".run_dir",
     "main": ".cli",
+    "BuiltinImageData": ".data_args",
+    "load_data_config": ".data_args",
+    "TaskTrainer": ".trainer",
+    "TrainResult": ".trainer",
 }
 
 __all__ = sorted(_LAZY)

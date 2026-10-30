@@ -64,6 +64,10 @@ SUCCESS_CHANCE_MULTIPLE = 2
 SUCCESS_THRESHOLD_FLOOR = 0.05
 SUCCESS_THRESHOLD_CEILING = 0.95
 
+#: The one augmentation preset that takes a random-erasing probability
+#: (``train.common.image_augment.build_augment``).
+ERASING_PRESET = "cifar_autoaugment"
+
 #: ``OptimArgs`` fields that belong to some optimizers and not to others.
 _OPTIMIZER_OPTIONS = ("beta_1", "beta_2", "epsilon", "momentum", "weight_decay")
 
@@ -292,12 +296,26 @@ class TransformArgs(StrictConfig):
     def resolve_auto(self, context: AutoContext) -> "TransformArgs":
         """Fill ``"auto"`` fields; ``image_size`` comes from the data.
 
+        An AUTO ``random_erasing_prob`` takes the recipe's value when the
+        augment in force (explicit or the recipe's) is ``cifar_autoaugment``
+        and is 0.0 under any other preset.
+
         :raises ConfigError: when ``augment``, given or from the recipe, is not
             a name in ``train.common.image_augment.PRESETS``.
         """
         from train.common.image_augment import PRESETS
 
         found = _recipe_values(self, context, "transform_args", skip=("image_size",))
+        # DECISION plan-2026-10-30T132432-a865fa08/D-041: an AUTO
+        # random_erasing_prob is the recipe's value only under the preset it
+        # belongs to. Do NOT take it from the recipe whatever the augment is:
+        # the recipe's erasing probability is the cifar_autoaugment recipe's
+        # (train_cliffordnet.py:684-685 gives 0.25 to that preset on ANY dataset
+        # and 0.0 to every other), and image_augment.build_augment refuses a
+        # nonzero probability with another preset.
+        augment = found.get("augment", self.augment)
+        if _is_auto(self.random_erasing_prob) and augment != ERASING_PRESET:
+            found["random_erasing_prob"] = 0.0
         if _is_auto(self.image_size):
             size = context.image_size
             if not isinstance(size, int) or isinstance(size, bool) or size < 1:
