@@ -1,22 +1,23 @@
 """Output heads for OmniPoint.
 
-Three heads read one shared encoder output. ``RayDistanceHead`` and ``MaskHead``
-each wrap a single
+Two heads live here. ``RayDistanceHead`` wraps a
 :class:`~dl_techniques.models.vision.depth_anything.components.DPTDecoder` over
-the spatial feature map, with head-specific ``output_channels`` and
-``output_activation``. ``MetricScaleHead`` is a small MLP over one pooled token,
-because ``DPTDecoder`` preserves the spatial axes and cannot produce a pooled
-scalar.
+the spatial feature map with a ray+distance split and the
+``RayPointCombinator``. The sky and validity mask head is not a class: it is one
+bare ``DPTDecoder`` (one linear channel) built directly in ``model.py``.
+``MetricScaleHead`` is a small MLP over one pooled
+token, because ``DPTDecoder`` preserves the spatial axes and cannot produce a
+pooled scalar.
 
 Two output activations are fixed by ``losses/omnipoint_losses.py`` rather than
-chosen here. ``MaskHead`` emits linear logits, because ``MaskLoss`` wraps
-``BinaryCrossentropy(from_logits=True)`` and a sigmoid here would be applied
+chosen here. The mask decoder emits linear logits, because ``MaskLoss`` wraps
+``BinaryCrossentropy(from_logits=True)`` and a sigmoid there would be applied
 twice. ``MetricScaleHead`` emits a positive scale rather than a log-scale value,
 because ``MetricScaleLoss`` takes the log of its ``y_pred`` itself.
 ``RayDistanceHead``'s decoder is linear for the same kind of reason:
 ``RayPointCombinator`` owns the normalization and the positivity.
 
-Both dense heads take ``upsample_factor``, which ``DPTDecoder`` requires to be a
+``RayDistanceHead`` takes ``upsample_factor``, which ``DPTDecoder`` requires to be a
 power of 2.
 """
 
@@ -166,108 +167,6 @@ class RayDistanceHead(keras.layers.Layer):
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "epsilon": self.epsilon,
-        })
-        return config
-
-
-@register_dl_technique("dl_techniques.models.omnipoint.heads.mask_head")
-class MaskHead(keras.layers.Layer):
-    """Predict a per-pixel sky and validity mask as linear logits.
-
-    One ``DPTDecoder`` emits a single unbounded channel. The sigmoid lives in
-    ``MaskLoss``, which wraps ``BinaryCrossentropy(from_logits=True)``, so a
-    caller that wants probabilities applies one itself.
-
-    Architecture:
-
-    .. code-block:: text
-
-                  features [B, H, W, C]
-                            ▼
-            ┌───────────────────────────────┐
-            │ DPTDecoder                    │
-            │  1 channel, linear            │
-            └───────────────┬───────────────┘
-                            ▼
-                mask_logit [B, H', W', 1]
-
-    H' and W' are the input size times ``upsample_factor``.
-
-    :param dims: Channel dimension per ``DPTDecoder`` stage. ``None`` gives
-        ``[256, 128, 64, 32]``.
-    :type dims: Optional[list]
-    :param upsample_factor: Total bilinear upsampling factor. Must be a power
-        of 2. Defaults to ``1``.
-    :type upsample_factor: int
-    :param kernel_initializer: Initializer for every conv kernel. Defaults to
-        ``"he_normal"``.
-    :type kernel_initializer: Union[str, keras.initializers.Initializer]
-    :param kernel_regularizer: Optional regularizer for every conv kernel.
-    :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
-    :param kwargs: Additional ``Layer`` base-class arguments.
-
-    Input shape:
-        4D tensor ``(batch_size, height, width, channels)``.
-
-    Output shape:
-        4D tensor ``(batch_size, height * upsample_factor,
-        width * upsample_factor, 1)``, linear mask logits.
-    """
-
-    def __init__(
-            self,
-            dims: Optional[list] = None,
-            upsample_factor: int = 1,
-            kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
-            kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            **kwargs: Any,
-    ) -> None:
-        super().__init__(**kwargs)
-        self.dims = list(dims) if dims is not None else [256, 128, 64, 32]
-        self.upsample_factor = int(upsample_factor)
-        self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
-
-        self.decoder = DPTDecoder(
-            dims=self.dims,
-            output_channels=1,
-            # DECISION plan-2026-09-11T050223-1b47bcf6/D-010: linear logits, not sigmoid; MaskLoss wraps
-            # BinaryCrossentropy(from_logits=True). See decisions.md.
-            output_activation="linear",
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            upsample_factor=self.upsample_factor,
-            name="mask_decoder",
-        )
-
-    def call(
-            self,
-            inputs: keras.KerasTensor,
-            training: Optional[bool] = None,
-    ) -> keras.KerasTensor:
-        """Decode the mask logits.
-
-        :param inputs: Encoder spatial feature map, ``(B, H, W, C)``.
-        :type inputs: keras.KerasTensor
-        :param training: Forwarded to the inner ``DPTDecoder``.
-        :type training: Optional[bool]
-        :return: Mask logits, ``(B, H*upsample_factor, W*upsample_factor, 1)``.
-        :rtype: keras.KerasTensor
-        """
-        return self.decoder(inputs, training=training)
-
-    def get_config(self) -> Dict[str, Any]:
-        """Return the layer configuration for serialization.
-
-        :return: The base ``Layer`` config plus every constructor argument.
-        :rtype: Dict[str, Any]
-        """
-        config = super().get_config()
-        config.update({
-            "dims": self.dims,
-            "upsample_factor": self.upsample_factor,
-            "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
-            "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
         })
         return config
 

@@ -115,7 +115,7 @@ neither KITTI nor MegaDepth carries any such annotation locally, and no zero-new
 exists (`decisions.md` D-017). The mask head therefore learns "was this pixel measurable" (a mix
 of sensor dropout, occlusion and out-of-range geometry), not the paper's intended semantic sky
 mask. This is a real, non-fabricated training signal, but a materially different one — do not
-read a trained `MaskHead` output as a sky/foreground segmentation.
+read a trained `mask_head` output as a sky/foreground segmentation.
 
 ## See also
 

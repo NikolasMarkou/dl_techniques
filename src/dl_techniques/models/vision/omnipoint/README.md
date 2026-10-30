@@ -51,7 +51,7 @@ cls_token = seq[:, 0]   _features_to_spatial:
     v                 +-----+-----+
 MetricScaleHead        |           |
 (pooled MLP)           v           v
-    |            RayDistanceHead  MaskHead
+    |            RayDistanceHead  mask_head
     |            (DPTDecoder x4   (DPTDecoder x1
     |             + combinator)    logits)
     v                  |           |
@@ -66,10 +66,12 @@ MetricScaleHead        |           |
   pooling=None)` (`decisions.md` D-009 — chosen over `DINOv2VisionTransformer` because this
   repo's `DPTDecoder` is single-scale, so DINOv2's multi-scale/register-token apparatus buys
   nothing here, and neither backbone carries pretrained weights regardless).
-- **Heads** (`heads.py`): `RayDistanceHead` and `MaskHead` are each one `DPTDecoder` instance
-  (head-specific `output_channels`/`output_activation`) feeding `layers/geometric/
-  ray_point_combinator.py::RayPointCombinator` for the ray+distance head (L2-normalize `r_hat`,
-  positive-activation `d_hat`, `P = d_hat * r_hat`); `MetricScaleHead` is a small pooled MLP over
+- **Heads**: `RayDistanceHead` (`heads.py`) is one `DPTDecoder` (4 linear channels) feeding
+  `layers/geometric/ray_point_combinator.py::RayPointCombinator` (L2-normalize `r_hat`,
+  positive-activation `d_hat`, `P = d_hat * r_hat`). The mask head is not a class: `model.py`
+  builds one bare `DPTDecoder(output_channels=1, output_activation="linear")` named `mask_head`,
+  linear because `MaskLoss` wraps `BinaryCrossentropy(from_logits=True)` (`decisions.md` D-010).
+  `MetricScaleHead` is a small pooled MLP over
   the ViT's own CLS token. Each `DPTDecoder` stage is `Conv2D` + `BatchNormalization` + ReLU.
   The paper's heads follow MoGe V2, whose conv heads use `GroupNorm(C // 32, C)` and no
   BatchNorm. A GroupNorm version was built and measured, and it was not adopted. See "BatchNorm

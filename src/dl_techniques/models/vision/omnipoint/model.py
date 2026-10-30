@@ -36,7 +36,8 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.models.vision.vit.model import ViT
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-from .heads import RayDistanceHead, MaskHead, MetricScaleHead
+from dl_techniques.models.vision.depth_anything.components import DPTDecoder
+from .heads import RayDistanceHead, MetricScaleHead
 from .conditioning import ConditioningInputEncoder, ConditioningStateEmbedding
 
 # ---------------------------------------------------------------------
@@ -57,7 +58,7 @@ class OmniPoint(keras.Model):
 
     A ViT encoder produces a CLS-prefixed patch sequence. The CLS row feeds
     :class:`MetricScaleHead`; the remaining tokens are reshaped to a patch grid
-    and feed :class:`RayDistanceHead` and :class:`MaskHead`. When
+    and feed :class:`RayDistanceHead` and the mask ``DPTDecoder``. When
     ``enable_conditioning=True``, an intrinsics ray map and sparse depth are
     encoded into extra input channels before the encoder, and a token-space
     embedding marks which samples actually carried each modality.
@@ -98,7 +99,7 @@ class OmniPoint(keras.Model):
           ▼                     ▼                   ▼
        from cls            from spatial        from spatial
       ┌────────────────┐  ┌────────────────┐  ┌────────────────┐
-      │ MetricScaleHead│  │ RayDistanceHead│  │ MaskHead       │
+      │ MetricScaleHead│  │ RayDistanceHead│  │ mask DPTDecoder│
       └───────┬────────┘  └───────┬────────┘  └───────┬────────┘
               ▼                   ▼                   ▼
           scale [B]      ray, distance, point     mask_logit
@@ -134,7 +135,7 @@ class OmniPoint(keras.Model):
     :param patch_size: Square ViT patch size. Defaults to 14.
     :type patch_size: int
     :param decoder_dims: Channel dimensions per ``DPTDecoder`` stage, shared by
-        :class:`RayDistanceHead` and :class:`MaskHead`. ``None`` gives
+        :class:`RayDistanceHead` and the mask ``DPTDecoder``. ``None`` gives
         ``[256, 128, 64, 32]``.
     :type decoder_dims: Optional[list]
     :param metric_hidden_dim: Hidden width of :class:`MetricScaleHead`'s MLP.
@@ -290,11 +291,15 @@ class OmniPoint(keras.Model):
             epsilon=self.epsilon,
             name="ray_distance_head",
         )
-        self.mask_head = MaskHead(
-            dims=self.decoder_dims,
-            upsample_factor=1,
+        self.mask_head = DPTDecoder(
+            dims=list(self.decoder_dims),
+            output_channels=1,
+            # DECISION plan-2026-09-11T050223-1b47bcf6/D-010: linear logits, not sigmoid; MaskLoss wraps
+            # BinaryCrossentropy(from_logits=True). See decisions.md.
+            output_activation="linear",
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
+            upsample_factor=1,
             name="mask_head",
         )
         self.metric_scale_head = MetricScaleHead(
