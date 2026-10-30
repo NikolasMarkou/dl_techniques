@@ -888,17 +888,34 @@ def get_mixture_modes(
     modes (3 sigma apart or more) are found up to ``|mu| / sigma`` of about 6e6,
     where sigma is about 2 ulp of ``|mu|``; the first loss is one 3 sigma pair with
     weights 0.7 / 0.3, 5 sigma and wider lost none up to 1.2e7, and the random
-    mixtures missed none of 547 maxima up to 1e6 and 0.2 % at 4e6. A start on a
-    density minimum leaves it for every start multiplier up to ``|mu| / sigma`` of
-    about 1e6; above that a start with a small multiplier (0.25 to 0.3) can stay on
-    the minimum from about 1.1e6, while the -1/0/+1 triple (sigma 0.5) leaves it up
-    to about 5.8e6. A start that stays sits at a lower density than the modes, so
-    ``get_mode_estimate`` skips it. When sigma is below roughly one float32 ulp of
+    mixtures missed none of 547 maxima up to 1e6 and 0.2 % at 4e6.
+
+    A start on a density minimum can stay on it when its offset is lost in
+    rounding, and how early that happens depends on the mixture. Measured for the
+    -1/0/+1 triple (sigma 0.5, weights 0.45 / 0.1 / 0.45) on 32 to 64 shifts per
+    binade: the middle start leaves the minimum up to ``|mu| / sigma`` of about
+    2.7e6 when its multiplier is the plain -0.646, a positive multiplier near 0.25
+    (0.250 to 0.252) can stay from 1.08e6, and 0.26 and 0.343 from 1.84e6. Other
+    mixtures stall earlier: weights 0.4 / 0.2 / 0.4 with the multiplier +0.312
+    keep the start on the minimum at 27 shifts at or below 1e6 that the previous,
+    uncapped offset left (first 5.4e5), and the swap-symmetric test mixtures
+    (seeds 3, 6, 14, 15, 16) stall between 5.6e5 and 9.9e5, so a stall can begin
+    near 5e5 in general. A start that stays never changes ``get_mode_estimate``:
+    it sits at a lower density than the modes, and no true maximum was lost at or
+    below 1e6 (the outer starts of the stalled triples are within 3 float32 ulp
+    of the modes). That is the trade the cap makes: the uncapped offset left these
+    starts but loses a separated mode from 1.4e6 (3 sigma apart), which does
+    change ``get_mode_estimate``.
+
+    When sigma is below roughly one float32 ulp of
     ``|mu|`` (``|mu| / sigma`` above about 1e7) the returned points are rounded to
     the ulp grid and can lie far below the density peak (random three-component
-    mixtures at sigma of 0.1 ulp, shifts 1e3 and 1e5, float32: the worst deficit
-    was between about 2 and about 55 nats across draws of 10 to 40 mixtures, so
-    expect tens of nats); means closer than an ulp are one float (the
+    mixtures at sigma of 0.1 ulp, shifts 1e3 and 1e5, float32: the worst drop
+    below the best component mean was between about 2 and about 55 nats across
+    draws of 10 to 40 mixtures; the low end, 2.3, is the weight gap to a weaker
+    mode, and every real drop below a returned point's own peak is about 50
+    nats, one spacing of 10 sigma, so expect tens of nats); means closer than an
+    ulp are one float (the
     -1/0/+1 triple, sigma 0.5, at 3e7 and above returns that float, log density
     -0.2258). Centre or rescale the data first. In float64 the same sweep lost no
     separated mode up to ``|mu| / sigma`` of about 4e15 (about ``2**29`` times the
@@ -966,7 +983,7 @@ def get_mixture_modes(
         return ops.expand_dims(log_const, 1) - 0.5 * quad
 
     # DECISION plan-2026-10-29T104646-27f045c5/D-030: starts sit off the means by a term that tracks dtype rounding of |mu|, each in its own direction.
-    # Do not start on mu, share one direction, drop the eps term or use a fixed fraction of |mu| (it outgrows sigma and loses a mode).
+    # Do not start on mu, share one direction, drop the eps term or use a fixed fraction of |mu| (it outgrows sigma and loses a mode; the cap hides that and eps32 for float64, so their RED arms lift the cap).
     points = mu_w
     if num_steps > 0:
         shape = ops.shape(mu_w)

@@ -516,6 +516,13 @@ def _check_the_shifted_middle_start_leaves_the_density_minimum(shift, num_steps=
 # exactly at each power of two from 4096 to 2**20, plus the five older shifts. The middle component
 # takes the start-pattern entry pad + 1: pad 0 is the plain triple (-0.646), pad 2 and pad 36 give
 # entries of about -0.29 and -0.27, close to the smallest size 0.25.
+# The grid ends at shift 2**20 (|mu|/sigma 2.1e6). Beyond or outside it the middle start can stall on
+# the minimum in float32 (rounding, not slow escape), and where depends on the mixture; measured
+# 2026-10-30 with 3000 steps: the plain triple from 2.75e6 (14 of 192 shifts between 1.05e6 and 8.4e6
+# on 64 shifts per binade, a coarser grid saw fewer), a positive entry near 0.25 (0.250 to 0.252) from
+# 1.08e6, and weights 0.4/0.2/0.4 with entry +0.312 at 27 shifts at or below 1e6 that the uncapped
+# offset left (first 5.4e5). A stalled start never changes get_mode_estimate, and no true maximum is
+# lost at or below 1e6; the uncapped offset instead merges a separated mode from 1.4e6 (3 sigma).
 DENSE_TRIPLE_SHIFTS = [0.0, 50.0, 5000.0, 1e4, 1e6] + [
     factor * 2.0 ** k for k in range(12, 21) for factor in (1.0, 1.02)
 ]
@@ -676,6 +683,9 @@ class TestTheStartOffsetBreaksCoordinateSymmetry:
         gradient, hessian = _oracle_gradient_and_hessian(np.zeros(2), X_MU, X_SIGMA, X_LOGITS)
         assert np.linalg.norm(gradient) < 1e-12 and np.linalg.eigvalsh(hessian).max() > 0.0
 
+    # This test runs the mixtures unshifted. Shifted in float32, the capped offset keeps a start on its
+    # saddle at shifts the uncapped offset left: measured 2026-10-30 for seeds 3, 6, 14, 15 and 16 at
+    # |mu|/sigma between 5.6e5 and 9.9e5 (13 ratios for seed 14 dim 2). No true maximum is lost there.
     @pytest.mark.parametrize("dim", [2, 3])
     @pytest.mark.parametrize("seed", range(20))
     def test_swap_symmetric_mixtures_return_no_saddle_or_minimum_as_a_unique_mode(self, seed, dim):
@@ -737,6 +747,8 @@ class TestTheStartOffsetBreaksCoordinateSymmetry:
 
 # The start offset is max(1e-3 sigma, min(8 eps(work dtype) |mu|, 0.5 sigma)): a term tied to rounding of the
 # mean, not to a fixed fraction of it, and capped so it never outgrows sigma of a well-separated component.
+# The cap trades saddle stalls that can begin near 5e5 (see DENSE_TRIPLE_SHIFTS) for separated modes that
+# the uncapped offset loses from 1.4e6; a stalled start does not change get_mode_estimate, a lost mode does.
 # Measured 2026-10-30 against the float64 oracle modes: the fixed 1e-5 |mu| term lost a mode in float32 and
 # float64 alike, in windows of |mu|/sigma: 3 sigma apart at about 2e5 to 4e5 (mostly weights 0.7 / 0.3),
 # 5 sigma at about 4e5 to 6e5, 10 sigma at 1e6 but not at 2e6.
@@ -845,6 +857,11 @@ class TestTheStartOffsetTracksRounding:
         assert int(is_unique.sum()) == 2, f"modes {modes}"
         assert abs(modes[int(np.argmax(log_density))] - heavy) < 0.1
 
+    # The ratios 2e6 and 4e6 are chosen where the helper passes. Measured 2026-10-30 on 140 ratios from 1e6 to
+    # 4e6 (step 1.01), the helper fails for the 3 sigma pair with weights 0.7/0.3 at 11 of 140 ratios (first
+    # 1580459: light mode found at 2.645, truth 2.918, 2.2 spacings off against a tolerance of 1.5) and with
+    # weights 0.3/0.7 at 1 of 140, and at none for 5 and 10 sigma. These are position stalls of about 2 ulp:
+    # the 11 failing cases still return two unique modes. Moving a pinned ratio can turn this test red.
     @pytest.mark.parametrize("ratio", [2e6, 4e6])
     @pytest.mark.parametrize("gap", [3.0, 5.0, 10.0])
     @pytest.mark.parametrize("weights", [(0.3, 0.7), (0.7, 0.3)])
@@ -891,7 +908,8 @@ class TestTheStartOffsetTracksRounding:
 
         _check_the_narrow_pair_at_one_thousand_keeps_both_modes(dtype)
         monkeypatch.setattr(mdn_module, "_MODE_START_EPS_MULTIPLE", 1e-5 / float(np.finfo(dtype).eps))
-        # The fixed fraction is 10 sigma here and the cap 0.5 sigma, so the cap alone keeps the pair.
+        # The fixed fraction is 10 sigma here and the cap 0.5 sigma, so the cap alone keeps the pair: this
+        # RED arm lifts the cap, because the cap masks the fixed fraction (and eps32 used for float64).
         _check_the_narrow_pair_at_one_thousand_keeps_both_modes(dtype)
         monkeypatch.setattr(mdn_module, "_MODE_START_CAP", 1e9)
         with pytest.raises(AssertionError):
