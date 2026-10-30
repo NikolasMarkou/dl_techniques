@@ -77,6 +77,15 @@ data = [
     "huggingface_hub"
 ]
 
+# The key=value training CLI and config files (src/train/api). PyYAML is read
+# only by train.api.config.load_yaml_mapping, which imports it inside the
+# function; `python -m train help` never needs it. train/ is not part of the
+# redistributable wheel (see packages.find below), so this extra serves a
+# source checkout.
+train = [
+    "PyYAML>=6.0"
+]
+
 [tool.setuptools]
 # Tells setuptools the source code is in src/
 package-dir = { "" = "src" }
