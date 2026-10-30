@@ -144,7 +144,7 @@ class TestOmniPoint:
     # step 4.1): the review's CRITICAL #3 found this exact gap -- the test above
     # only exercised the default `enable_conditioning=False` model, so D-023's
     # original heads-only build() fix silently left the 2 conditioning layers
-    # (`conditioning_input_encoder`, `conditioning_state_embedding`) 0-weight on
+    # (`conditioning_input_encoder`, and the `intrinsics_state`/`depth_state` pair) 0-weight on
     # `.keras` reload (8 of 212 weights re-randomized). This parametrized test
     # covers BOTH values, including a weight-by-weight comparison (not just
     # output comparison, which the review found insufficient on its own to

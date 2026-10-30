@@ -341,11 +341,11 @@ class OmniPointTrainingWrapper(keras.Model):
         # convention, OmniPoint Supplementary Section B: "geometric conditions ... enabled
         # with a probability of 90% to preserve robustness under RGB-only inputs" --
         # `--intrinsics-conditioning-prob` defaults to 0.9). This reuses the per-sample
-        # mixed-batch machinery `ConditioningInputEncoder`/`ConditioningStateEmbedding`
+        # mixed-batch machinery `ConditioningInputEncoder`/`StateIndicatorEmbedding`
         # already implement and `test_conditioning.py` already exercises (D-013): passing a
         # non-None `intrinsics_present` flag makes `ConditioningInputEncoder._zero_absent_samples`
         # zero out the ray-map channels for the samples drawn absent, and
-        # `ConditioningStateEmbedding` selects `absent_embedding` for exactly those same
+        # `intrinsics_state` selects `absent_embedding` for exactly those same
         # samples -- both signals still agree, so nothing new needs to happen here beyond
         # generating the flag itself. See decisions.md D-029 for the direct gradient
         # measurement (before: `absent_embedding` grad == 0.0 every step; after: nonzero on
