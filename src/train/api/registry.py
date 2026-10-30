@@ -32,12 +32,18 @@ Interface contract
 ``list_tasks()``
     :return: the registered :class:`TaskSpec` rows, sorted by name.
 
+``ModelSpec.recipe(dataset, variant)``
+    :return: a deep copy of the family's ``defaults`` with the ``per_dataset``
+        and ``per_variant`` overlays merged in. This, not ``defaults``, is what
+        goes into an ``AutoContext``.
+
 ``load_attr(path)``
     :param path: ``"module:attr"`` or ``"module:Class.attr"``.
     :return: the object. An import or attribute failure propagates; it means
         the spec is wrong.
 """
 
+import copy
 import difflib
 import importlib
 import re
@@ -49,6 +55,9 @@ from .errors import ConfigError, UnknownModelError
 # ---------------------------------------------------------------------
 
 _ATTR_PATH = re.compile(r"^[A-Za-z_][\w.]*:[A-Za-z_][\w.]*$")
+
+#: Keys of ``ModelSpec.defaults`` that hold overlays, not recipe values.
+OVERLAY_KEYS = ("per_dataset", "per_variant")
 
 
 def load_attr(path: str) -> Any:
@@ -81,8 +90,12 @@ class ModelSpec:
         are the variant names.
     :param tasks: the task names this family can train.
     :param defaults: the family recipe as a nested mapping (see ``AutoContext``).
-    :param resolve_model_args: optional ``"module:callable"`` that turns the
-        recipe and the data into factory keyword arguments.
+        Two sibling keys, ``per_dataset`` and ``per_variant``, hold overlays
+        that :meth:`recipe` applies; they are not read anywhere else.
+    :param resolve_model_args: optional ``"module:callable"`` called as
+        ``f(context, optim_args, model_args)`` (an ``AutoContext``, the
+        resolved ``OptimArgs`` and the caller's free mapping) that returns the
+        factory keyword arguments; see :mod:`train.api.recipes`.
     """
 
     family: str
@@ -101,6 +114,32 @@ class ModelSpec:
             _require_attr_path("ModelSpec", "resolve_model_args", self.resolve_model_args)
         if not isinstance(self.tasks, tuple) or not self.tasks:
             raise ValueError(f"ModelSpec.tasks must be a non-empty tuple, got {self.tasks!r}")
+
+    def recipe(self, dataset: str, variant: str) -> Dict[str, Any]:
+        """Return the recipe for one dataset and variant, overlays applied.
+
+        :param dataset: dataset name, e.g. ``"cifar10"``.
+        :param variant: variant name, e.g. ``"cn_64_5"``.
+        :return: a deep copy of :attr:`defaults` without its ``per_dataset``
+            and ``per_variant`` keys, with ``per_dataset[dataset]`` and then
+            ``per_variant[variant]`` laid over it. An overlay entry that is a
+            mapping is merged key by key into the base entry of the same name
+            (a dataset changes ``optim_args.lr`` and leaves its other keys); any
+            other value replaces. A dataset or variant with no overlay gets
+            the base recipe, unchanged.
+        """
+        merged = {
+            key: copy.deepcopy(value)
+            for key, value in self.defaults.items()
+            if key not in OVERLAY_KEYS
+        }
+        for table, name in (("per_dataset", dataset), ("per_variant", variant)):
+            for key, value in self.defaults.get(table, {}).get(name, {}).items():
+                if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
+                    merged[key] = {**merged[key], **copy.deepcopy(dict(value))}
+                else:
+                    merged[key] = copy.deepcopy(value)
+        return merged
 
     def load_factory(self) -> Any:
         """Import and return the model factory."""

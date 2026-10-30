@@ -304,7 +304,16 @@ def test_a_token_that_would_crash_the_parser_is_a_refusal_with_exit_two(token, s
 def test_a_list_command_accepts_every_help_word(command, word, cwd):
     result = run_real([command, word], cwd)
     assert result.returncode == 0, result.stderr[-2000:]
-    assert result.stderr == ""
+    if command == "list_tasks":
+        assert result.stderr == ""
+    else:
+        # It lists the real families, which imports TensorFlow; that prints
+        # its own start-up lines on stderr. Ours would start with ``error:``.
+        assert "Traceback" not in result.stderr
+        assert not any(
+            line.startswith("error:") for line in result.stderr.splitlines()
+        )
+        assert len(result.stdout.split()) == 36
 
 
 # A task that raises a DLTrainError of its own is a user-fixable failure, not a
