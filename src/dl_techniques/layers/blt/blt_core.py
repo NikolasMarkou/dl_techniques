@@ -90,7 +90,7 @@ class ByteLatentReasoningCore(keras.layers.Layer):
         └──────────────────┬───────────────────┘
                            ▼
         ┌──────────────────────────────────────┐
-        │  PatchCausalTransformer(proj(z_h))    │
+        │  PatchCausalTransformer(proj(z_h))   │
         └──────────────────┬───────────────────┘
                            ▼
         ┌──────────────────────────────────────┐
