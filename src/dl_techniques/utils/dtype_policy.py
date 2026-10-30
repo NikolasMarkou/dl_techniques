@@ -466,8 +466,7 @@ def stability_floor(dtype: _DTypeLike, requested: float) -> float:
 
     This follows the house pattern at
     ``models/language/colbert/components.py:99-113`` (``_safe_l2_normalize``) and
-    its ``max(literal, finfo(compute_dtype).tiny)`` siblings in
-    ``models/neural_computer/nam/cell.py`` and
+    its ``max(literal, finfo(compute_dtype).tiny)`` sibling in
     ``models/vision/keypoints/superpoint/model.py`` -- the only exemplars in the
     tree carrying a MEASURED before/after NaN regression. Do not "simplify" a
     call to this function back to a bare literal, and do not write

@@ -143,8 +143,6 @@ NORM_CALL_SITES: Dict[str, Tuple[int, int]] = {
     "dl_techniques/models/language/topolm/model.py": (1, 0),
     "dl_techniques/models/language/tree_transformer/components.py": (3, 0),
     "dl_techniques/models/language/tree_transformer/model.py": (1, 0),
-    "dl_techniques/models/neural_computer/nam/cell.py": (2, 0),
-    "dl_techniques/models/neural_computer/nam/model.py": (1, 0),
     "dl_techniques/models/probabilistic/neural_hmm/encoders.py": (1, 0),
     "dl_techniques/models/time_series/tirex/model.py": (0, 1),
     "dl_techniques/models/time_series/xlstm/forecaster.py": (1, 0),

@@ -182,7 +182,6 @@ image-patch input modality now matches its filing.)
 | `graph/graph_energy_transformer/` | Graph Energy Transformer, node anomaly + graph classification |
 | `graph/relgt/` | Relational Graph Transformer |
 | `graph/shgcn/` | Simplified Hyperbolic GCN |
-| `neural_computer/nam/` | Neural Arithmetic **Module**. Name misattributes |
 | `neural_computer/ntm/` | Neural Turing Machine |
 | `common/power_sampling/` | inference-time power sampling for any causal LM/VLM — model-agnostic, which is why it is not under `language/` |
 | `common/lm_pretraining/` | MLM/CLM training heads — consumed by every language trainer, filed here (not under `language/`) because they wrap any backbone rather than implementing one |
@@ -216,7 +215,6 @@ into `AGENTS.md`.
 |---|---|---|---|
 | `vision_language/fastvlm/` | a vision-*language* model | **vision-only** — the package is `model.py` + `components.py`, with no text tower, no tokenizer and no vocabulary anywhere in it | `ls` the package; the only `token` hits in `model.py` are "token-mixing" and the stage-3 patch grid |
 | `vision/vit_siglip/` | SigLIP | **a ViT with a two-stage conv patch-embedding stem**. SigLIP's contribution is a *loss* — the pairwise sigmoid objective — and this package contains no text tower and no loss at all, so nothing in it can be sigmoid-contrastive | `model.py` lines 5-12 and 75-76 say so at the site |
-| `neural_computer/nam/` | Neural *Additive* Model | Neural Arithmetic **Module** — a differentiable-computer cell, not a GAM | `__init__.py` line 1 |
 
 `vision/image_restoration/pw_fnet/` is **not** in that list: PW-FNet is the architecture's
 own name in Jiang et al., *Global Modeling Matters: A Fast, Lightweight and Effective

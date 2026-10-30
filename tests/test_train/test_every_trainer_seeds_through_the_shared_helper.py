@@ -77,9 +77,6 @@ NOT_TRAINING: Dict[str, str] = {
     "train.logic.multiseed_sweep": "launches seeded trainers as subprocesses",
     "train.mean_shift.report": "aggregates finished cells",
     "train.mothnet.multiseed_sweep": "launches the seeded MothNet trainer per seed",
-    "train.nam.create_dataset": "data generation",
-    "train.nam.eval_dfsa": "evaluates a saved DFSA",
-    "train.nam.test_extreme": "evaluates a saved DFSA",
     "train.ntm.run_benchmark_suite": "evaluates a saved model",
     "train.omnipoint.generate_synthetic_camera_eval_set": "data generation",
     "train.rms_variants_train.norm_overhead_bench": (

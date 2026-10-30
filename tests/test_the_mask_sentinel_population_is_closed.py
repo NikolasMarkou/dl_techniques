@@ -454,16 +454,6 @@ SENTINEL_ALLOWLIST: Dict[Tuple[str, str], str] = {
     # -- Outside the library. Added by completion fix 3.1, when the walk widened
     #    from `src/dl_techniques/` to `src/`. None of these is a masked forward
     #    path under a mixed-precision policy; each says why.
-    ("train/nam/train_dfsa.py", "DifferentiableFSA.reduce_step"): (
-        "the five additive -1e9 masks inventoried in "
-        "NON_LIBRARY_ADDITIVE_INVENTORY; see that entry for the full reason. "
-        "Listed here too because the population predicate sees the same "
-        "literals and the two predicates are independent by design."
-    ),
-    ("train/nam/train_dfsa_ste.py", "_make_ste_train_fn._step"): (
-        "the STE trainer's consistency-loss mask, inventoried in "
-        "NON_LIBRARY_ADDITIVE_INVENTORY; same reason, same file family."
-    ),
     ("train/common/generation_probe.py", "GenerationProbeCallback._generate_token_ids"): (
         "logits is a numpy float32 array (`np.asarray(..., dtype='float32').copy()`) "
         "and the -1e9 writes are numpy ITEM ASSIGNMENTS suppressing EOT and "
@@ -524,40 +514,11 @@ _KEPT_WITHOUT_A_LITERAL = frozenset({
 # ---------------------------------------------------------------------------
 #
 # Compared by EXACT EQUALITY including the count, never as a skip-list. Fixing
-# one of these, or adding a new one, both redden the guard.
+# one of these, or adding a new one, both redden the guard. Empty since the
+# last two inventoried sites (the NAM trainers under `train/nam/`) were deleted
+# with the model.
 
-NON_LIBRARY_ADDITIVE_INVENTORY: Dict[Tuple[str, str], Tuple[int, str]] = {
-    ("train/nam/train_dfsa.py", "DifferentiableFSA.reduce_step"): (
-        5,
-        "The DFSA research harness for the NAM model. FLAGGED, NOT CONVERTED, "
-        "for three measured reasons. (1) No dtype policy is ever set in "
-        "src/train/nam/ -- `grep -n 'mixed_\\|set_global_policy\\|dtype_policy'` "
-        "over the directory returns nothing -- and every tensor in reduce_step "
-        "is explicitly built in float32 (`ops.cast(..., \"float32\")`), so the "
-        "fp16 overflow that makes this form a defect in the library cannot "
-        "arise here. (2) The additive form is LOAD-BEARING in this function: "
-        "the masks STACK (`scores + (1 - mask) * -1e9 + (1 - is_operator) * "
-        "-1e9`) and a subsequent `+ (1 - any_op) * mask * -100.0` rescue adds "
-        "to the result, so a where-conversion is not a local rewrite. (3) The "
-        "file carries a documented bit-identity invariant against its iter-5 "
-        "forward pass ('residual term is bit-zero in float32 -> forward "
-        "bit-identical', plan_2026-05-12_995a621a/D-002), and converting to "
-        "selection changes the masked values from `x - 1e9` to exactly `-1e9`, "
-        "which is not bit-identical. This becomes a real defect the moment "
-        "anyone sets a mixed policy around this trainer; that is what the "
-        "inventory is for.",
-    ),
-    ("train/nam/train_dfsa_ste.py", "_make_ste_train_fn._step"): (
-        1,
-        "The STE trainer's consistency loss re-masks `residual_logits` with the "
-        "SAME additive -1e9 that train_dfsa.py already applied to "
-        "`pemdas_logits`, so that KL(P_pemdas || P_residual) is taken over the "
-        "same support. Converting one side alone would silently change the "
-        "support the KL is defined on; converting both is the train_dfsa.py "
-        "change above, with the same three reasons against it. Pure float32 "
-        "TensorFlow inside a tf.function train step, no policy set.",
-    ),
-}
+NON_LIBRARY_ADDITIVE_INVENTORY: Dict[Tuple[str, str], Tuple[int, str]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -1376,18 +1337,6 @@ class TestTheAdditiveFormOutsideTheLibraryIsInventoried:
             "If you ADDED a site: convert it to keras.ops.where. If you FIXED "
             "one: delete or decrement its NON_LIBRARY_ADDITIVE_INVENTORY entry "
             "in the same commit."
-        )
-
-    def test_the_inventory_is_not_empty(self) -> None:
-        """Vacuity guard: an empty inventory would make the equality trivial.
-
-        Delete this test on the day the inventory legitimately empties -- and
-        the deletion is exactly the moment somebody must confirm the six sites
-        were fixed rather than moved out of the walk.
-        """
-        assert NON_LIBRARY_ADDITIVE_INVENTORY, (
-            "the inventory is empty; either every non-library site was fixed "
-            "(delete this test and say so) or the walk stopped seeing them"
         )
 
     def test_every_inventory_entry_carries_a_real_reason(self) -> None:

@@ -141,7 +141,6 @@ INTERNAL: Dict[Key, str] = {
     ("language/tree_transformer/components.py", "GroupAttention.call", "softmax()"): "attention weights",
     ("language/tree_transformer/components.py", "TreeMHA.call", "softmax()"): "attention weights",
     ("language/trm/model.py", "TRM.call", "sigmoid()"): "Q-learning continue target",
-    ("neural_computer/nam/cell.py", "NAMCell.call", "softmax()"): "reduction and operator mixing weights",
     ("time_series/adaptive_ema/model.py", "AdaptiveEMASlopeFilterModel.call", "sigmoid()"): "soft slope gates",
     ("time_series/ets/model.py", "ETSModel._smoothing", "sigmoid()"): "smoothing coefficients in (0, 1)",
     ("time_series/ets/model.py", "ETSModel.alpha", "sigmoid()"): "smoothing coefficient read-out",

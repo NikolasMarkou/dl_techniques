@@ -237,8 +237,7 @@ That silence is the reason they are written down here.
   their logits are never negative), CoShNet, AccUNet, the DocScanner segmenter (its composite
   applies the sigmoid before its `> 0.5` threshold), SHGCN's node classifier and link predictor
   (its shared `FermiDiracDecoder` returns the edge logit), RelGT, PowerMLP
-  (`output_activation='softmax'`/`'sigmoid'` raise), KAN's default output and NAM's
-  `valid_logits`. A sigmoid or softmax that maps to a range (boxes, pixels, gates, attention) is
+  (`output_activation='softmax'`/`'sigmoid'` raise), KAN's default output. A sigmoid or softmax that maps to a range (boxes, pixels, gates, attention) is
   not a class score. `tests/test_models/test_every_classifier_output_is_logits_or_a_named_exception.py`
   is the AST census that holds this (it also scans a shared layer outside `models/` whose output
   a model returns, listed in its `SHARED_OUTPUT_LAYERS`), and it reads the list below. The exceptions are exactly
@@ -529,8 +528,8 @@ shared CSV logger and best-submodel checkpoint, the shared seed).
 The trainer patterns of this iteration are in [`src/train/GUIDE.md`](../../train/GUIDE.md) § 2.
 
 - **A classifier output that is not logits.** § 5's rule named four exceptions and nothing
-  enforced it; CoShNet, AccUNet, the DocScanner segmenter, SHGCN, RelGT, PowerMLP, KAN and NAM's
-  validity head ended in a softmax or sigmoid. *Rule:* every softmax or sigmoid in `models/` is
+  enforced it; CoShNet, AccUNet, the DocScanner segmenter, SHGCN, RelGT, PowerMLP and KAN
+  ended in a softmax or sigmoid. *Rule:* every softmax or sigmoid in `models/` is
   internal, a range map, or a named class-score exception (the Qwen3 reranker's score stays a
   probability). *Detected:* an AST census of every softmax and sigmoid. *Guard:*
   `tests/test_models/test_every_classifier_output_is_logits_or_a_named_exception.py`.

@@ -72,6 +72,7 @@ ROOTS = ("src", "tests")
 #: 418 / 399 after ``sam1/prompt_encoder.py`` moved to ``keras.ops`` and ``keras.layers`` (the same plan, step 19).
 #: 402 / 383 after ``layers/fastvit/`` was dissolved: its 7 modules and 7 tests moved and converted, plus ``fastvit/model.py`` and ``mobile_clip/components.py``, edited for the move.
 #: 401 / 382 after ``conv_blocks/mobile_one_block.py``, edited to clone its initializer per branch.
+#: 399 / 380 after the NAM model and its tests were deleted (``nam/cell.py`` and ``test_nam/test_fp16_reduction_mask.py``).
 #: Edit it in the commit that converts a file (delete its line) or, with a
 #: recorded reason, adds a statement.
 KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
@@ -193,7 +194,6 @@ KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
     "src/dl_techniques/models/language/mini_vec2vec/model.py": 1,
     "src/dl_techniques/models/language/tree_transformer/components.py": 1,
     "src/dl_techniques/models/memory/som/model.py": 1,
-    "src/dl_techniques/models/neural_computer/nam/cell.py": 1,
     "src/dl_techniques/models/point_cloud/latent_gmm_registration/model.py": 1,
     "src/dl_techniques/models/tabular/tabm/model.py": 1,
     "src/dl_techniques/models/time_series/adaptive_ema/model.py": 1,
@@ -394,7 +394,6 @@ KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
     "tests/test_models/test_mobile_clip/test_mobile_clip_v2.py": 1,
     "tests/test_models/test_modern_bert/test_positional_signal.py": 1,
     "tests/test_models/test_modern_bert/test_predict_single_key_dict.py": 1,
-    "tests/test_models/test_nam/test_fp16_reduction_mask.py": 1,
     "tests/test_models/test_nbeats/test_model.py": 1,
     "tests/test_models/test_ntm/test_model.py": 1,
     "tests/test_models/test_prism/test_model.py": 2,
@@ -520,7 +519,7 @@ def test_the_census_is_exact(census):
 
 
 def test_the_census_totals(census):
-    assert (sum(KERAS_SUBMODULE_IMPORTS.values()), len(KERAS_SUBMODULE_IMPORTS)) == (401, 382), (
+    assert (sum(KERAS_SUBMODULE_IMPORTS.values()), len(KERAS_SUBMODULE_IMPORTS)) == (399, 380), (
         "the census's own totals moved; re-derive the module docstring's numbers")
     for path in KERAS_SUBMODULE_IMPORTS:
         assert (REPO_ROOT / path).is_file(), f"census file moved or deleted: {path}"

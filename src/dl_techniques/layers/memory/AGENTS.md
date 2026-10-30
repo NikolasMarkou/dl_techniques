@@ -13,7 +13,7 @@ Lives here:
 
 Does not live here:
 - No standalone MANN class. `create_mann` returns a `NeuralTuringMachine`. Do not add one (a deleted `MannLayer` had no consumers and kept a drifted copy of the shift math).
-- No models or trainers. Consumers are elsewhere: `src/dl_techniques/models/neural_computer/ntm/{model.py,model_multitask.py}`, `models/neural_computer/nam/cell.py`, `models/memory/som/model.py` (uses `SOM2dLayer`), `src/train/ntm/`, `src/train/som_nd_soft/`.
+- No models or trainers. Consumers are elsewhere: `src/dl_techniques/models/neural_computer/ntm/{model.py,model_multitask.py}`, `models/memory/som/model.py` (uses `SOM2dLayer`), `src/train/ntm/`, `src/train/som_nd_soft/`.
 - The old `layers/ntm/` package no longer exists; everything was merged here.
 
 ## Architecture
@@ -161,7 +161,7 @@ Tests live in `tests/test_layers/test_memory/`: `test_neuro_grid.py`, `test_som_
 Commands (repo root, `.venv`):
 ```bash
 .venv/bin/python -m pytest tests/test_layers/test_memory -q
-.venv/bin/python -m pytest tests/test_models/test_ntm tests/test_models/test_som tests/test_models/test_nam -q   # consumers
+.venv/bin/python -m pytest tests/test_models/test_ntm tests/test_models/test_som -q   # consumers
 ```
 Do not run the whole suite. Do not run pytest jobs in parallel. Set `MPLBACKEND=Agg` for anything that plots.
 

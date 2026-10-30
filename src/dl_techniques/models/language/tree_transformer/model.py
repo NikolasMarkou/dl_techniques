@@ -78,7 +78,7 @@ from .components import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-#: The deep-import contract of ``nam/`` and ``train/nam/``: the four sub-layers are re-exported here
+#: The deep-import contract (once shared with the since-deleted ``nam/`` and ``train/nam/``): the four sub-layers are re-exported here
 #: (``test_sublayers_re_exported_from_model_module``), two of them (``GroupAttention``, ``TreeMHA``)
 #: unused by this module itself. Declared, because a ``# noqa: F401`` comment is not read by pyflakes.
 __all__ = [

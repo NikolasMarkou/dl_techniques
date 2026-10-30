@@ -68,20 +68,8 @@ def _zamba2(name):
         num_heads=4, max_seq_len=16, d_state=16, headdim=8, name=name)
 
 
-def _nam(name):
-    from dl_techniques.models.neural_computer.nam.model import NAM, NAMConfig
-    return NAM(config=NAMConfig(
-        hidden_size=32, num_heads=4, num_tree_layers=2, intermediate_size=64,
-        memory_size=8, num_read_heads=2, max_expression_len=16,
-        halt_max_steps=2, hidden_dropout_rate=0.0, attention_dropout_rate=0.0),
-        name=name)
-
-
 def _forward(subject, model):
-    if subject == "nam":
-        batch = {"input_ids": _ids(2, 16, 16)}
-        model(model.initial_carry(batch), batch, training=False)
-    elif subject == "zamba2":
+    if subject == "zamba2":
         model(_ids(2, 8, 37), training=False)
     elif subject == "tree":
         model({"input_ids": _ids()}, training=False)
@@ -90,7 +78,7 @@ def _forward(subject, model):
 
 
 _SUBJECTS = {
-    "tree": _tree, "nam": _nam, "mamba": _mamba, "mamba2": _mamba2,
+    "tree": _tree, "mamba": _mamba, "mamba2": _mamba2,
     "qwen3_next": _qwen3_next, "qwen3_moe": _qwen3_moe, "zamba2": _zamba2,
 }
 

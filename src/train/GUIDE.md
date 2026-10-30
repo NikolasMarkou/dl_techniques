@@ -103,8 +103,7 @@ Moved from `models/GUIDE.md` § 10.3 (iteration 1 of that plan).
   passes it to `train.common.seed.set_seeds`; a script that does not train is named with its
   reason. A fixed evaluation seed uses a private generator when training draws from the same
   global module. *Detected:* an AST call graph from each `__main__` block. *Guard:*
-  `tests/test_train/test_every_trainer_seeds_through_the_shared_helper.py`,
-  `tests/test_train/test_nam/test_the_quick_eval_leaves_the_training_stream_alone.py`.
+  `tests/test_train/test_every_trainer_seeds_through_the_shared_helper.py`.
   *Example:* D-247, D-248.
 - **A generator dataset of unknown length that shrank every logged loss.** With a
   `from_generator` source and no `steps_per_epoch`, Keras 3.8 finds the epoch end through one

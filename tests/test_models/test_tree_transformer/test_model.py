@@ -889,7 +889,7 @@ class TestTreeTransformerComponentsSplitLockIn:
             assert cls is not None
 
     def test_sublayers_re_exported_from_model_module(self):
-        # Deep-import contract for nam/ and train/nam/.
+        # Deep-import contract (formerly also used by the deleted nam/ and train/nam/).
         from dl_techniques.models.language.tree_transformer.model import (
             GroupAttention, TreeMHA, PositionalEncoding, TreeTransformerBlock,
         )

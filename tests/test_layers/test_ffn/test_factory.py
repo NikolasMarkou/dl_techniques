@@ -1716,7 +1716,7 @@ def _strictness_break(fn) -> Optional[str]:
 # grid.
 #
 # It was RIGHT not to be one at step 5, when 4 sites --
-# `layers/time_series/mixed_sequential_block.py`, `models/neural_computer/nam/cell.py`,
+# `layers/time_series/mixed_sequential_block.py`, `models/neural_computer/nam/cell.py` (since deleted),
 # `models/vision_language/sam/sam1/image_encoder.py` and `models/language/tree_transformer/components.py` --
 # passed `activation` unconditionally and dropped it for `differential`,
 # `gelu_tanh`, `squared_relu` and `swiglu`. All four adopted
@@ -1928,13 +1928,6 @@ def _b_models_gemma():
     return b.ffn
 
 
-def _b_models_nam():
-    from dl_techniques.models.neural_computer.nam.cell import NAMCell, NAMConfig
-    c = NAMCell(NAMConfig(hidden_size=16, num_heads=2, intermediate_size=32))
-    c.build((None, 8, 16))
-    return c.ffn
-
-
 def _b_models_pw_fnet():
     from dl_techniques.models.vision.image_restoration.pw_fnet.model import PW_FNet_Block
     b = PW_FNet_Block(dim=16, use_spatial_ffn=False, ffn_type='mlp')
@@ -2090,7 +2083,6 @@ _FFN_CONSTRUCTION_SITE_BUILDERS = {
     "models/vision/dino/dino_v2.py": _b_models_dino_v2,
     "models/vision/fftnet/model.py": _b_models_fftnet,
     "layers/transformers/gemma3_transformer.py": _b_models_gemma,
-    "models/neural_computer/nam/cell.py": _b_models_nam,
     "models/vision/image_restoration/pw_fnet/model.py": _b_models_pw_fnet,
     "models/graph/relgt/model.py": _b_models_relgt,
     "models/vision_language/bit_diffusion/blocks.py": _b_models_bit_diffusion_blocks,
@@ -2425,7 +2417,7 @@ class TestStrictDroppedKeyRaise:
 
 
 class TestFormerlyDroppingConstructionSites:
-    """The 3 sites that adopted `assemble_ffn_config` with DISCARD semantics.
+    """The 2 sites that adopted `assemble_ffn_config` with DISCARD semantics.
 
     Step 5 measured four sites passing `activation` unconditionally, dropping
     it for `differential`, `gelu_tanh`, `squared_relu` and `swiglu` (4/21 each,
@@ -2434,7 +2426,7 @@ class TestFormerlyDroppingConstructionSites:
     `differential` and is guarded in its own suite, because a dropped-key grid
     is structurally blind to a missing rename.
 
-    These three chose DISCARD (D-022) -- none of them ever enumerated FFN
+    These two chose DISCARD (D-022) -- none of them ever enumerated FFN
     types, so their `activation` is an unconditional default rather than an
     expressed per-type intent. This class pins BOTH halves of that choice: the
     21-type grid (no strictness break anywhere) AND the discard itself, which
@@ -2443,16 +2435,6 @@ class TestFormerlyDroppingConstructionSites:
     The grid lives HERE rather than in each model's own suite so it shares the
     one `_strictness_break` classifier, whose bite is RED-proved above.
     """
-
-    @staticmethod
-    def _nam(ffn_type: str):
-        from dl_techniques.models.neural_computer.nam.cell import NAMCell, NAMConfig
-        cell = NAMCell(NAMConfig(
-            hidden_size=16, num_heads=2, intermediate_size=32,
-            ffn_type=ffn_type, hidden_act='relu',
-        ))
-        cell.build((None, 8, 16))
-        return cell.ffn
 
     @staticmethod
     def _sam(ffn_type: str):
@@ -2476,14 +2458,14 @@ class TestFormerlyDroppingConstructionSites:
 
     @property
     def _sites(self):
-        return {'nam': self._nam, 'sam': self._sam, 'tree': self._tree}
+        return {'sam': self._sam, 'tree': self._tree}
 
     #: The 4 types each of these sites dropped `activation` for, measured at
     #: HEAD before step 6 with a handler on the `dl` logger.
     FORMERLY_DROPPED_TYPES = ('differential', 'gelu_tanh', 'squared_relu',
                               'swiglu')
 
-    @pytest.mark.parametrize('site', ['nam', 'sam', 'tree'])
+    @pytest.mark.parametrize('site', ['sam', 'tree'])
     @pytest.mark.parametrize('ffn_type', sorted(FFN_REGISTRY))
     def test_no_ffn_type_is_broken_by_strictness(self, site, ffn_type) -> None:
         build = self._sites[site]
@@ -2493,7 +2475,7 @@ class TestFormerlyDroppingConstructionSites:
             f"that type does not accept: {broke}"
         )
 
-    @pytest.mark.parametrize('site', ['nam', 'sam', 'tree'])
+    @pytest.mark.parametrize('site', ['sam', 'tree'])
     def test_the_formerly_dropped_types_actually_construct(self, site) -> None:
         """Anti-vacuity: a zero also comes from a site that raises EARLIER.
 
@@ -2507,7 +2489,7 @@ class TestFormerlyDroppingConstructionSites:
                 f"{site} did not construct an FFN for {ffn_type!r}"
             )
 
-    @pytest.mark.parametrize('site', ['nam', 'sam', 'tree'])
+    @pytest.mark.parametrize('site', ['sam', 'tree'])
     def test_differential_keeps_its_default_branch_activation(
             self, site) -> None:
         """D-022 DISCARD, stated as an assertion rather than only in prose.

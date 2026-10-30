@@ -341,12 +341,6 @@ _EXEMPT = {
         ('collect_csvs', '[agg] failed to read', 'run_df = pd.read_csv(csv_path)',
          'a failed status row; main raises after the summary (D-183)'),
     ],
-    'train/nam/data_generator.py': [
-        ('_safe_eval', 'return (0.0, False)', "result = eval(compile(expression, '<expr>', '",
-         'an expression that does not evaluate is an invalid sample, flagged False'),
-        ('_parse_single_op', 'left_operand = 0.0', "tree = ast.parse(expression, mode='eval')",
-         'an expression that is not one binary operation of two literals has no single operand pair; the multi-op path takes its operands from _parse_multi_op'),
-    ],
     'train/ntm/harness.py': [
         ('run_full_suite', "Benchmark '", 'getattr(self, self.BENCHMARK_METHODS[benchmar',
          "recorded in the suite report's errored_benchmarks (02be1d7e/D-014); run_benchmark_suite.run_suite writes the report, then raises (D-186)"),

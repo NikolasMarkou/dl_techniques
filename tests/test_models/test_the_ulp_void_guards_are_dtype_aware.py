@@ -1,30 +1,25 @@
-"""Guard: `nam` and `superpoint`'s stability floors are not smaller than one ULP.
+"""Guard: `superpoint`'s stability floor is not smaller than one ULP.
 
 Rule ``R-091``, plan ``plan-2026-08-19T163559-499b6f0e``, step 17.1.
 
-Both packages divided by ``<reduction> + <literal>`` where the literal is
+The package divided by ``<reduction> + <literal>`` where the literal is
 **exactly 0.0 in float16**:
 
-* ``models/neural_computer/nam/model.py`` (masked mean) and ``models/neural_computer/nam/cell.py`` (halt input):
-  ``+ 1e-9``. An all-padding row makes the numerator and the denominator both
-  zero, so the division is ``0/0``.
 * ``models/vision/keypoints/superpoint/model.py`` (descriptor L2 normalisation): ``+ 1e-12``. A
-  zero descriptor vector is the same ``0/0``.
+  zero descriptor vector makes the numerator and the denominator both zero, so
+  the division is ``0/0``.
 
 MEASURED at HEAD on the REAL models (CPU, not a synthetic expression):
 
 ============================ =================== ===============
 subject                      ``mixed_float16``   ``float32``
 ============================ =================== ===============
-`NAM`, all-PAD row           **nan 8 / 8**       nan 0 / 8
-`NAM`, valid rows (liveness) nan 0 / 8           nan 0 / 8
 `SuperPoint`, zero desc.     **nan 32768/32768** nan 0 / 32768
 `SuperPoint`, random desc.   nan 0 / 32768       nan 0 / 32768
 ============================ =================== ===============
 
-Neither fires at random initialisation, which is exactly why no existing test
-sees them: a random descriptor is never exactly zero and the fixtures never feed
-an all-padding row.
+It does not fire at random initialisation, which is exactly why no existing test
+sees it: a random descriptor is never exactly zero.
 
 The remedy is D-027's instrument, not a bigger constant: the floor becomes
 ``max(literal, finfo(compute_dtype).tiny)``, which is **inert in float32** by
@@ -37,13 +32,7 @@ import numpy as np
 import pytest
 import keras
 
-from dl_techniques.models.neural_computer.nam.model import NAM
-from dl_techniques.models.neural_computer.nam.config import NAMConfig
-from dl_techniques.models.neural_computer.nam.tokenizer import ArithmeticTokenizer
 from dl_techniques.models.vision.keypoints.superpoint.model import SuperPoint
-
-
-NAM_OUTPUT_KEYS = ("result", "valid_logits", "q_halt_logits", "q_continue_logits")
 
 
 @pytest.fixture
@@ -67,27 +56,6 @@ def _nan_count(tensor):
     return int(np.isnan(array).sum()), array.size
 
 
-def _nam():
-    config = NAMConfig(
-        hidden_size=32, num_heads=4, num_tree_layers=1, intermediate_size=64,
-        memory_size=8, num_read_heads=2, max_expression_len=16,
-        halt_max_steps=4, hidden_dropout_rate=0.0, attention_dropout_rate=0.0,
-    )
-    return NAM(config=config)
-
-
-def _nam_nans(model, input_ids):
-    batch = {"input_ids": input_ids}
-    carry = model.initial_carry(batch)
-    _, outputs = model(carry, batch, training=False)
-    total = size = 0
-    for key in NAM_OUTPUT_KEYS:
-        n, s = _nan_count(outputs[key])
-        total += n
-        size += s
-    return total, size
-
-
 def _superpoint(descriptor_dim=8):
     return SuperPoint(
         input_shape=(64, 64, 1), descriptor_dim=descriptor_dim,
@@ -106,37 +74,6 @@ def _superpoint_nans(zero_the_head):
         for weight in model.descriptor_head.weights:
             weight.assign(np.zeros(weight.shape, dtype="float32"))
     return _nan_count(model(image, training=False)["descriptors"])
-
-
-# ---------------------------------------------------------------------------
-# nam — the all-padding row
-# ---------------------------------------------------------------------------
-
-def test_nam_all_padding_row_is_finite_under_mixed_float16(float16_policy):
-    model = _nam()
-    all_pad = np.zeros((2, 16), dtype="int32")  # token 0 is PAD
-    n_nan, size = _nam_nans(model, all_pad)
-    assert n_nan == 0, (
-        f"NAM produced {n_nan} of {size} NaN on an all-padding row under "
-        "mixed_float16 — the `+ 1e-9` masked-mean floor is exactly 0.0 in "
-        "float16, so the division is 0/0"
-    )
-
-
-def test_nam_valid_rows_are_finite_under_mixed_float16(float16_policy):
-    """LIVENESS. Without it, a NAM broken in every regime would read as a pass."""
-    model = _nam()
-    tokenizer = ArithmeticTokenizer(max_len=16)
-    n_nan, size = _nam_nans(model, tokenizer.encode_batch(["1 + 2", "3 * 4"]))
-    assert n_nan == 0, f"NAM produced {n_nan} of {size} NaN on VALID rows"
-
-
-def test_nam_all_padding_row_is_finite_under_float32():
-    """The float32 CONTROL: this arm was green at HEAD and must stay green."""
-    assert keras.mixed_precision.global_policy().name == "float32"
-    model = _nam()
-    n_nan, size = _nam_nans(model, np.zeros((2, 16), dtype="int32"))
-    assert n_nan == 0, f"NAM float32 control: {n_nan} of {size} NaN"
 
 
 # ---------------------------------------------------------------------------

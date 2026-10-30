@@ -1393,32 +1393,6 @@ def _mobile_clip_inputs():
 _extra("mobile_clip", _b_mobile_clip, _mobile_clip_inputs)
 
 
-def _b_nam():
-    from dl_techniques.models.neural_computer.nam.model import NAM, NAMConfig
-    return NAM(config=NAMConfig(hidden_size=32, num_heads=4,
-                                num_tree_layers=1, intermediate_size=64,
-                                memory_size=8, num_read_heads=2,
-                                max_expression_len=16, halt_max_steps=2,
-                                hidden_dropout_rate=0.0,
-                                attention_dropout_rate=0.0))
-
-
-def _nam_call(model, inputs, training):
-    """``NAM.call(carry, batch, training)`` -- one ACT step, not ``model(x)``.
-
-    Same three-positional contract as :func:`_trm_call` above. The carry is
-    derived from the batch by the model's own ``initial_carry``, so the call
-    stays deterministic for a given batch.
-    """
-    carry = model.initial_carry(inputs)
-    _carry, outputs = model(carry, inputs, training=training)
-    return outputs
-
-
-_extra("nam", _b_nam, lambda: {"input_ids": _ids(16, 2, 16)},
-       call_fn=_nam_call)
-
-
 def _b_thera():
     from dl_techniques.models.vision.thera.model import Thera
     from dl_techniques.models.vision.thera.edsr_backbone import EDSRBackbone
@@ -1451,7 +1425,7 @@ def _b_ptrm():
 
 # Same ``(carry, batch, training)`` contract as ``trm`` (``PTRM`` subclasses
 # ``TRM``), so the batch and the call adapter are ``trm``'s. Round-trip family
-# only, like ``nam``: the precision arm for the recursive family is ``trm``'s.
+# only: the precision arm for the recursive family is ``trm``'s.
 _extra("ptrm", _b_ptrm, _trm_batch, call_fn=_trm_call)
 
 
