@@ -1,10 +1,10 @@
 # Mean Shift in Deep Learning: Identities, Components and the Tests That Pin Them
 
-*Date: 2026-10-29. Status: implemented and unit-tested on CPU. No training experiment has been run.*
+*Date: 2026-10-29, experiments added 2026-10-30. Status: implemented and unit-tested on CPU; Mode Pooling and MeanShift Attention were trained and compared on CIFAR (section 7); the empirical denoiser oracle ran on CPU (section 7.3).*
 
 ## 1. Scope
 
-Mean shift moves a point to the kernel-weighted mean of a point set. Repeated, it climbs the kernel density estimate of that set to a mode. The library now holds one set of stateless mean-shift operations and five consumers built on it: a pooling layer that returns the dominant mode of a token set instead of its mean, mode extraction for mixture density network (MDN) outputs, an attention layer whose forward pass is mean-shift steps on tied tokens, a differentiable point-set layer with an eval-only clustering readout, and an instance-embedding loss. This note states the identities they implement, where the code lives, which test pins which claim, and what was measured. It describes what is implemented and nothing else; section 7 lists what is not.
+Mean shift moves a point to the kernel-weighted mean of a point set. Repeated, it climbs the kernel density estimate of that set to a mode. The library now holds one set of stateless mean-shift operations and five consumers built on it: a pooling layer that returns the dominant mode of a token set instead of its mean, mode extraction for mixture density network (MDN) outputs, an attention layer whose forward pass is mean-shift steps on tied tokens, a differentiable point-set layer with an eval-only clustering readout, and an instance-embedding loss. This note states the identities they implement, where the code lives, which test pins which claim, and what was measured, including the training experiments of section 7. It describes what is implemented and nothing else; section 8 lists what is not.
 
 | Component | File | Public name | Registry key |
 |---|---|---|---|
@@ -99,7 +99,7 @@ y = x + sigma n, n ~ N(0, I):        E[x | y] = y + sigma^2 grad log p_Y(y)
 prior = empirical set {x_j}:         p_Y is the KDE with h = sigma,   E[x | y] = m(y)
 ```
 
-The Bayes denoiser under an empirical prior is one non-blurring mean-shift step with `h = sigma`. This repository does not implement that denoiser yet.
+The Bayes denoiser under an empirical prior is one non-blurring mean-shift step with `h = sigma`. `src/train/bfunet/eval_empirical_mean_shift.py` implements it as an oracle over a bank of clean patches; section 7.3 gives its numbers. It has not been compared with a trained denoiser, because no checkpoint stamped for the `[0, 1]` domain exists.
 
 ### 2.8 The diagonal Gaussian mixture fixed point
 
@@ -273,12 +273,60 @@ Failure modes and what counters them:
 - Default vMF bandwidth. `bandwidth_init = head_dim ** 0.25` gives `kappa = 1 / sqrt(head_dim)` on unit vectors, a nearly uniform kernel (section 5); pass a smaller `bandwidth_init` for a sharper vMF attention.
 - Cluster ids. `assign_clusters` is NumPy, not differentiable, order-dependent (greedy merge in index order: the same points in another order can give another labelling) and must stay outside `tf.function` and any training step. Its `mask` labels padded or masked points -1 so they cannot open a cluster.
 
-## 7. Limits and open items
+## 7. Experimental results
+
+Measured on 2026-10-30 on one GPU (RTX 4090) with the harness in `src/train/mean_shift/`. Two experiments on real images and one CPU oracle run were done; this section gives their numbers and caveats, and `src/train/mean_shift/FINDINGS.md` holds the commands, run directories, per-seed tables and the full grid (the empirical denoiser oracle is in `src/train/bfunet/FINDINGS.md`, section 10). "Points" means percentage points of accuracy; standard deviations are sample stds over seeds; no significance test is applied, because three seeds cannot go below a two-sided sign-flip p of 0.25. Every comparison trained for 50 epochs (the stability smoke for 5) with one recipe for every arm (AdamW, learning rate 3e-4, weight decay 0.05, batch 128, final-epoch weights scored once on the test split).
+
+### 7.1 Experiment 1: Mode Pooling on vit_pico, CIFAR-10
+
+Four pooling heads on `vit_pico` (patch size 4), 12 cells (4 arms, seeds 0, 1, 2), run `results/mean_shift/20261030_054304_exp1_cifar10`. `mean` and `cls` are the references, `mode` is `ModePooling` with one start and `mode_s4` with four. The four arms have the same parameter count. Test accuracy in percent, mean +- std over 3 seeds; `occ25` and `occ50` black out 25 % and 50 % of the 4x4-pixel blocks, `noise s` adds Gaussian noise of std s in the [0, 1] pixel domain and clips.
+
+| arm | seeds | params | s/epoch | clean | occ25 | occ50 | noise 0.05 | noise 0.1 | noise 0.2 | selection |
+|---|---|---|---|---|---|---|---|---|---|---|
+| mean | 3 | 2,693,578 | 5.18 +- 0.02 | 82.48 +- 0.16 | 63.33 +- 1.21 | 41.80 +- 0.82 | 74.71 +- 0.77 | 52.28 +- 3.04 | 22.98 +- 3.38 | 82.30 +- 0.32 |
+| cls | 3 | 2,693,578 | 5.15 +- 0.05 | 81.35 +- 0.55 | 62.92 +- 1.11 | 45.76 +- 0.61 | 73.76 +- 1.26 | 51.67 +- 3.07 | 22.32 +- 1.76 | 81.14 +- 0.47 |
+| mode | 3 | 2,693,578 | 5.33 +- 0.06 | 82.24 +- 0.27 | 63.29 +- 1.69 | 42.82 +- 2.08 | 74.68 +- 1.26 | 52.51 +- 2.15 | 22.19 +- 0.82 | 82.27 +- 0.44 |
+| mode_s4 | 3 | 2,693,578 | 5.55 +- 0.05 | 82.24 +- 0.28 | 63.26 +- 1.65 | 42.80 +- 2.13 | 74.68 +- 1.25 | 52.51 +- 2.18 | 22.19 +- 0.81 | 82.27 +- 0.40 |
+
+Result, limited to what the numbers support:
+
+- Mode Pooling matches mean pooling within the seed noise on every condition. The condition means differ by -0.79 to +1.02 points, and the per-seed sign changes in 6 of 7 metrics; `occ50` is positive on all three seeds (+0.09, +0.32, +2.64 points), but its mean of +1.02 comes from one seed.
+- Four starts are the same as one: at most 0.03 points apart in any condition mean, at most 0.08 points in any single seed and metric.
+- CLS pooling is the only arm with a consistent effect: 3.26 to 4.60 points better than `mean` at 50 % occlusion on all three seeds, at 0.46 to 1.81 points lower clean accuracy.
+- This is a null result: no robustness advantage for Mode Pooling was found in this setting (clean-trained model, black-block occlusion, clipped Gaussian noise). Possible reasons are hypotheses that were not tested: the final tokens may already be near-uniform so that a mode has no outlier cluster to ignore; the median-heuristic bandwidth may keep five steps close to the mean; occluded tokens may form a coherent second cluster. The distance between the mode and the mean of the trained tokens was not measured.
+
+### 7.2 Experiment 2: MeanShift Attention in a small ViT, CIFAR-100
+
+`VisionEncoder` (patch 4, width 192, depth 6, 3 heads) with `multi_head` attention (`mha`) or `MeanShiftAttention`, 17 configs in the grid. MeanShift has 16.4 % (per-head bandwidth) or 16.3 % (per-token) fewer parameters than `mha`, because Q, K and V are tied; parameters were reported, not matched.
+
+Stability smoke (`results/mean_shift/20261030_065822_exp2_stability`, 5 epochs): the default config (blurring, 3 steps, per-head Gaussian) passed all four pre-registered conditions (finite loss, epoch-5 loss below epoch-1, selection accuracy 13.92 % at epoch 5 against a floor of 3 %, bandwidths strictly inside [0.01, 100]); it learned more slowly than `mha` over those 5 epochs (13.92 % against 25.60 % selection accuracy).
+
+Grid (`results/mean_shift/20261030_070258_exp2_grid`, 1 seed): `mha` reached 43.26 % selection accuracy and the 16 MeanShift configs 53.24 to 57.08 %, that is 9.98 to 13.82 points above `mha`. The best four are within 0.98 points of each other, which is about the spread of one-step blurring and non-blurring twins (0.16 to 0.34 points), so the ranking is weak: `noblur_s3_per_token_vmf` (57.08 %) and `blur_s1_per_head_vmf` (56.82 %) were taken to the main run. The vMF kernel beat its Gaussian twin in 7 of 8 matched pairs (by 0.22 to 3.32 points, one pair -0.30); this is confounded with the vMF bandwidth initialization of 0.3 against the Gaussian default 2.83.
+
+Main run (`results/mean_shift/20261030_090740_exp2_main`, seeds 0, 1, 2), percent, mean +- std; "train" is Keras' running training accuracy of the last epoch (augmented batches, a rough figure):
+
+| config | seeds | params | s/epoch | images/s | selection | test | final-epoch train accuracy |
+|---|---|---|---|---|---|---|---|
+| mha | 3 | 2,710,564 | 5.08 +- 0.21 | 13986 +- 620 | 42.81 +- 0.83 | 43.63 +- 0.48 | 76.33 +- 0.83 |
+| blur_s1_per_head_vmf | 3 | 2,265,910 | 5.00 +- 0.09 | 15831 +- 1456 | 56.85 +- 0.40 | 57.97 +- 0.16 | 76.08 +- 0.27 |
+| noblur_s3_per_token_vmf | 3 | 2,269,366 | 6.76 +- 0.13 | 14527 +- 212 | 56.57 +- 0.91 | 57.07 +- 0.55 | 80.49 +- 0.29 |
+
+Paired differences against `mha` per seed (points): selection +13.02, +14.26, +14.86 for `blur_s1_per_head_vmf` and +13.66, +13.98, +13.64 for `noblur_s3_per_token_vmf`; test +14.00, +14.67, +14.33 and +13.61, +13.53, +13.18. Both configs are above `mha` on every seed and are not separated from each other. `mha` has a train-to-selection gap of 33.5 points, `blur_s1_per_head_vmf` 19.2 at about the same training accuracy, and `noblur_s3_per_token_vmf` 23.9 at a higher one.
+
+Learned bandwidths (main run, layer means over seeds and heads, for the per-token config also over 512 selection images): the per-head vMF config moves from 0.3 (layer 0 mean 0.303) to 1.284 in layer 5 and the three seeds agree to within 0.027; the per-token config spans 0.010 to 18.594 and its layer-0 mean differs by seed (0.152, 3.851, 3.960). All values stay inside the clip range [0.01, 100].
+
+What this does not show: the baseline recipe is untuned (no dropout, one learning rate and weight decay), and `mha` shows a large train-to-selection gap, which is consistent with an under-regularized baseline (not tested); the gain may come from fewer parameters, tied projections or a different initialization effect rather than from mean-shift smoothing; the vMF configs use a different bandwidth initialization from the Gaussian ones; there is one dataset, 3 seeds and no significance test; the two experiments use different backbones and are not compared.
+
+### 7.3 The empirical denoiser oracle
+
+Section 2.7's estimator was implemented as an oracle in `src/train/bfunet/eval_empirical_mean_shift.py` and run on CPU (bank of 16384 grayscale 32 x 32 DIV2K crops, 1000 held-out and 1000 in-bank queries, one run; details in `src/train/bfunet/FINDINGS.md`, section 10). No trained denoiser with a `[0, 1]` stamp existed, so the run compares no network. On held-out crops the oracle median PSNR is flat across sigma (23.47 to 23.61 dB) while the noisy input falls from 34.15 dB (sigma 5) to 11.87 dB (sigma 65); the oracle is below the noisy input at sigma 5, 10 and 15 (at sigma 5, 23.56 against 34.15 dB) and above it from sigma 25 (23.60 against 20.18 dB). On in-bank queries the oracle copies: the median is the 120 dB cap at every sigma, with 985 of 1000 queries at the cap at sigma 5 and 586 at sigma 65.
+
+## 8. Limits and open items
 
 Not implemented:
 
-- No experiment on real data has been run: `MeanShiftAttention` has not been compared with softmax attention in a trained model, `ModePooling` has not been used in a classification head, and `MeanShiftInstanceLoss` has only been run on the synthetic 3-blob toy.
-- No empirical denoiser oracle: mean shift on a patch or embedding set has not been compared with a trained Miyasawa denoiser (2.7 is a derivation, not code).
+- Real-data experiments are limited to those of section 7: `MeanShiftAttention` against `multi_head` attention in a small ViT on CIFAR-100, and `ModePooling` in a `vit_pico` classification head on CIFAR-10, each with one dataset, one model size and 3 seeds (1 for the grid). `MeanShiftInstanceLoss` has only been run on the synthetic 3-blob toy.
+- The empirical denoiser oracle exists (2.7, section 7.3) but has not been compared with a trained Miyasawa denoiser.
 - No kNN or windowed variants: every step is dense.
 - `get_mixture_modes` handles diagonal Gaussian components only.
 
@@ -294,7 +342,7 @@ Follow-on ideas, none of them started:
 - Sparse and linear kernels: neighbour-limited or random-feature kernels against the O(N^2) cost.
 - DEQ solve: solve the fixed point with a root finder instead of unrolled steps.
 
-## 8. References
+## 9. References
 
 - Fukunaga and Hostetler, 1975. The estimation of the gradient of a density function, with applications in pattern recognition. IEEE Transactions on Information Theory 21(1).
 - Cheng, 1995. Mean shift, mode seeking, and clustering. IEEE TPAMI 17(8).
