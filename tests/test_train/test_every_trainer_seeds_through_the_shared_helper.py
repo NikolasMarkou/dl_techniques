@@ -58,6 +58,9 @@ TRAINS_WITHOUT_A_TRAIN_CALL: Dict[str, str] = {
 #: Entry points that do not train, each with its reason.
 NOT_TRAINING: Dict[str, str] = {
     "train.bert.deploy": "loads a saved model and serves predictions",
+    "train.bfunet.eval_empirical_mean_shift": (
+        "scores the exact empirical Tweedie denoiser and an optional saved denoiser on "
+        "seeded draws; trains nothing"),
     "train.bfunet.eval_per_pixel_uncertainty": "evaluates saved denoisers",
     "train.bfunet.eval_psnr_vs_noise": "evaluates saved denoisers",
     "train.common.compare_runs": "compares two finished runs' histories",
