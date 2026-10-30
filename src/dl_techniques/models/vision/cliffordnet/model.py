@@ -490,8 +490,12 @@ class CliffordNet(keras.Model):
         self.stochastic_depth_rate = stochastic_depth_rate
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
-        # DECISION plan-2026-10-26T125959-7af851e5/D-031: store each initializer as a spec and hand that spec, never a live instance, to the stem, every block and the head.
-        # A block resolves one instance per sub-layer from a spec. An instance given to the stem and the blocks replays one draw at all of them (666 of 1891 kernel pairs at `nano`), and a clone built once outside the block loop and splatted into every block still shares it. See decisions.md.
+        # DECISION plan-2026-10-26T125959-7af851e5/D-031: store each initializer as a spec and hand that spec,
+        # never a live instance, to the stem, every block and the head.
+        # A block resolves one instance per sub-layer from a spec. An instance given to the stem
+        # and the blocks replays one draw at all of them (666 of 1891 kernel pairs at `nano`),
+        # and a clone built once outside the block loop and splatted into every block still shares it.
+        # See decisions.md.
         self.kernel_initializer = initializer_spec(kernel_initializer)
         self.bias_initializer = initializer_spec(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)

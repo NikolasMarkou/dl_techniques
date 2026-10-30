@@ -885,3 +885,4 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
