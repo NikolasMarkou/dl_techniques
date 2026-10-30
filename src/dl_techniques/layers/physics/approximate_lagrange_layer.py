@@ -32,6 +32,11 @@ The computation flow is:
 import keras
 from keras import ops, layers
 from typing import List, Dict, Any, Tuple, Optional
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
     deserialize_activation,
