@@ -464,3 +464,76 @@ CAVEATS: medical images are grayscale-replicated to 3 channels (perfect chroma c
 inflates the *absolute* medical PSNRs — the DDNM-vs-K&S *delta* is unaffected and is the claim. And
 this is an **internal** comparison: there is still no published MRI-reconstruction SOTA baseline
 in-repo (§9.4), so it is a capability result, not a competitiveness result.
+
+---
+
+## 10. The exact empirical Tweedie denoiser as an oracle (DIV2K, 32 x 32 grayscale, oracle only)
+
+Not a result about any trained denoiser. No loadable `[0,1]` checkpoint existed (the provenance gate refuses every stored one), so the run
+scored only the oracle of `eval_empirical_mean_shift.py`: for a bank of N clean patches, `x_hat(y) = sum_i x_i softmax_i(-||y - x_i||^2 / (2 sigma^2))`,
+the posterior mean under the empirical prior, which is one non-blurring mean-shift step with `h = sigma` over the bank. Definitions of every
+column are in the README ("`eval_empirical_mean_shift.py`"). Every number below is copied from `summary.json` / `oracle_vs_sigma.csv` of the run.
+
+Command (from the repo root, CPU only):
+
+```bash
+CUDA_VISIBLE_DEVICES= MPLBACKEND=Agg PYTHONPATH=src .venv/bin/python -m train.bfunet.eval_empirical_mean_shift --bank-size 16384 --num-queries 1000
+```
+
+Run directory: `results/mean_shift_denoiser/20261030_060609/` (`summary.json`, `oracle_vs_sigma.csv`, `psnr_vs_sigma.png`, `eval_config.json`).
+
+Setup as run: bank of 16384 grayscale 32 x 32 crops from the 800 DIV2K train images, of which 16304 are unique (duplicate share 0.00488,
+0.00519 of the patches have an exact twin); 1000 held-out queries cropped from the 100 DIV2K validation images; 1000 in-bank queries drawn
+from the bank; sigmas 5 10 15 25 35 50 65 on the 0-255 scale; unclipped additive Gaussian noise (Tweedie's identity holds only for unclipped
+noise); float32; seed 42; one run.
+
+Held-out queries (crops of images that are not in the bank):
+
+| sigma | noisy PSNR median | oracle PSNR median | oracle PSNR mean | at cap | exp(H) median | exp(H) mean | memorization median | frac < 0.5 | scored | degenerate |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 5 | 34.15 | 23.56 | 27.13 | 2 | 1.00 | 1.47 | 2.66e-07 | 0.994 | 989 | 11 |
+| 10 | 28.15 | 23.56 | 26.88 | 0 | 1.00 | 1.89 | 3.33e-07 | 0.977 | 988 | 12 |
+| 15 | 24.61 | 23.57 | 26.73 | 0 | 1.00 | 2.44 | 4.95e-07 | 0.968 | 994 | 6 |
+| 25 | 20.18 | 23.60 | 26.60 | 0 | 1.01 | 4.41 | 6.54e-04 | 0.941 | 991 | 9 |
+| 35 | 17.26 | 23.61 | 26.34 | 0 | 1.16 | 7.40 | 0.015 | 0.932 | 993 | 7 |
+| 50 | 14.15 | 23.57 | 26.08 | 0 | 1.71 | 14.32 | 0.076 | 0.913 | 996 | 4 |
+| 65 | 11.87 | 23.47 | 25.64 | 0 | 2.52 | 23.57 | 0.129 | 0.911 | 998 | 2 |
+
+In-bank queries (bank members, which the oracle can copy):
+
+| sigma | noisy PSNR median | oracle PSNR median | oracle PSNR mean | at cap | exp(H) median | exp(H) mean | memorization median | frac < 0.5 | scored | degenerate | self-retrieval |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 5 | 34.16 | 120.00 | 119.50 | 985 | 1.00 | 1.27 | n/a | n/a | 0 | 2 | 0.998 |
+| 10 | 28.14 | 120.00 | 116.09 | 913 | 1.00 | 1.43 | 0.360 | 0.929 | 14 | 2 | 0.984 |
+| 15 | 24.61 | 120.00 | 112.22 | 848 | 1.00 | 1.81 | 0.432 | 0.711 | 45 | 1 | 0.954 |
+| 25 | 20.17 | 120.00 | 106.05 | 782 | 1.00 | 3.08 | 0.464 | 0.640 | 111 | 3 | 0.886 |
+| 35 | 17.25 | 120.00 | 101.55 | 725 | 1.00 | 5.79 | 0.449 | 0.661 | 165 | 1 | 0.834 |
+| 50 | 14.16 | 120.00 | 95.56 | 647 | 1.00 | 11.79 | 0.404 | 0.702 | 228 | 1 | 0.771 |
+| 65 | 11.88 | 120.00 | 90.12 | 586 | 1.00 | 19.08 | 0.384 | 0.687 | 275 | 2 | 0.723 |
+
+PSNR in dB; `at cap` is the number of the 1000 queries at the 120 dB per-image ceiling; `scored` is the number of queries the memorization ratio
+covers (self-retrieved and degenerate queries are set aside). The held-out rows have no self-retrieval rate.
+
+What the table says, and no more:
+
+- **Held-out, low sigma: the oracle is below the noisy input.** At sigma 5, 10 and 15 the oracle median PSNR (23.56, 23.56, 23.57 dB) is below the
+  noisy-input median (34.15, 28.15, 24.61 dB). The oracle median is nearly flat across sigma (23.47 to 23.61 dB), while the noisy input falls from
+  34.15 to 11.87 dB, so the oracle median passes the noisy input between sigma 15 and sigma 25 (20.18 against 23.60 dB at sigma 25).
+- **It acts as a lookup of one bank patch there.** For held-out queries the effective number `exp(H)` has median 1.00 at sigma 5, 10 and 15, the memorization
+  median is 2.66e-07 to 4.95e-07, and 0.994, 0.977 and 0.968 of the scored queries are below 0.5: the output is essentially a patch of the bank, and a copied bank patch is a worse
+  estimate of a new crop than the noisy input is at low sigma. At higher sigma the weights
+  spread (median `exp(H)` 2.52 and median memorization 0.129 at sigma 65) and the fraction below 0.5 stays at 0.911 or above.
+- **The held-out mean exceeds the median** at every sigma (for example 27.13 against 23.56 dB at sigma 5), so the typical held-out crop is matched worse than the average suggests;
+  the median is the figure to quote. 2 of 1000 held-out queries reach the cap at sigma 5 and none at the other sigmas.
+- **In-bank, the oracle copies.** The median is the 120 dB cap at every sigma, the self-retrieval rate is 0.998 at sigma 5 and falls to 0.723 at sigma 65, and
+  the count at the cap falls from 985 to 586 of 1000. The mean PSNR falls from 119.50 to 90.12 dB. Median `exp(H)` stays at 1.00 while its mean rises from 1.27 to 19.08, so some
+  in-bank queries spread their weight over many patches, more of them at high sigma. The memorization median (0.360 to 0.464) covers only the queries that were not self-retrieved
+  (0 of 1000 at sigma 5, 275 of 1000 at sigma 65), a selected subset, and is not a statement about all in-bank queries.
+- The in-bank rows measure what a lookup of the bank reaches on bank members. They are not a target for a network and not a bound on one.
+
+Caveats: one seed (42) and one run; 1000 queries per set; the bank is 16384 crops of 32 x 32 grayscale from the 800 DIV2K train images, so the
+held-out numbers describe that bank size and would move with a larger or smaller bank (not measured here); held-out queries come from the 100 DIV2K validation
+images; sigma values are on the 0-255 scale; the noise is unclipped, so the figures are not those of the trainers' clipped noise; float32 was used throughout; no confidence intervals were computed.
+
+What a comparison to a trained denoiser would need: a checkpoint stamped `data_range: "[0,1]"` with a `(32, 32, 1)` input, passed as `--model-path`. The script then scores it
+on the same noisy patches and writes the side-by-side columns; the arm is tested on a synthetic stamped checkpoint only. No trained-denoiser number is claimed here.

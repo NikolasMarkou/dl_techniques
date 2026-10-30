@@ -50,7 +50,8 @@ its value *is* `‖f(1) − 1‖`.
 | `eval_psnr_vs_noise.py` | **Standalone tool** — PSNR-vs-noise-level evaluation of any saved `.keras` denoiser, with optional SOTA reference overlay. |
 | `eval_per_pixel_uncertainty.py` | **Standalone tool** — per-pixel uncertainty / residual maps for a saved `.keras` denoiser. |
 | `variance_probe.py` | **Standalone tool** — ConvUNeXt-only training-stability probe (run-to-run variance across seeds). |
-| `FINDINGS.md` | Two bodies of evidence. Sections 1-7: the channel-matching (`--zero-pad-channels` / `--extra-zero-output-channels`) variance experiment. Sections 8-9: eval caveats, the SOTA and SSIM comparison tables and the capability-boundary work, measured on **legacy `[-0.5,+0.5]`-domain checkpoints** (`20260707`, `20260710`) that the provenance gate now refuses; the dB numbers there must be re-measured on a `[0,1]` model and are not results of the current trainers. |
+| `eval_empirical_mean_shift.py` | **Standalone tool** - the exact empirical Tweedie denoiser (one non-blurring mean-shift step over a bank of clean training patches) as an oracle for 32 x 32 grayscale patch denoisers; trains nothing. See "`eval_empirical_mean_shift.py`" below and `FINDINGS.md` section 10. |
+| `FINDINGS.md` | Two bodies of evidence. Sections 1-7: the channel-matching (`--zero-pad-channels` / `--extra-zero-output-channels`) variance experiment. Sections 8-9: eval caveats, the SOTA and SSIM comparison tables and the capability-boundary work, measured on **legacy `[-0.5,+0.5]`-domain checkpoints** (`20260707`, `20260710`) that the provenance gate now refuses; the dB numbers there must be re-measured on a `[0,1]` model and are not results of the current trainers. Section 10: the empirical-Tweedie oracle run of `eval_empirical_mean_shift.py` (no checkpoint involved). |
 
 All three trainers are deliberately thin: each supplies only a `build_model()`, a `verify_bias_free()`,
 a model-specific `TrainingConfig(BFUnetTrainingConfig)`, and CLI glue. Everything else —
@@ -639,6 +640,63 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.variance_probe \
     --compare zero_pad_channels --variant small --seeds 5 --steps 1500 --gpu 1
 ```
 
+### `eval_empirical_mean_shift.py` - the exact empirical Tweedie denoiser (oracle)
+
+Scores the closed-form Bayes denoiser for the empirical prior, a uniform mixture of point masses
+at the N clean patches of a bank. For `y = x + N(0, sigma^2 I)` it is
+
+    x_hat(y) = sum_i x_i softmax_i(-||y - x_i||^2 / (2 sigma^2))
+
+which is one non-blurring mean-shift step with bandwidth `h = sigma` over the bank (it calls
+`dl_techniques.layers.mixtures.mean_shift_ops.mean_shift_step`). It is the Tweedie/Miyasawa
+posterior mean for that prior, so it says how much of a patch denoiser's score a lookup of the
+training set could already reach. The bank is 32 x 32 grayscale crops of the DIV2K train images
+(decoded once per image); the report gives its duplicate share. Nothing in this script trains.
+
+Two query sets, each scored per noise level on the same noisy patches: `in_bank` (random bank members,
+which the oracle can copy) and `held_out` (crops of the validation images, which are not in the bank).
+
+```bash
+MPLBACKEND=Agg .venv/bin/python -m train.bfunet.eval_empirical_mean_shift \
+    --bank-size 16384 --num-queries 1000
+```
+
+CPU only unless `--gpu` is given (the oracle needs no GPU). Flags: `--bank-size` (16384),
+`--chunk-size` (queries per mean-shift call, 250; lower it if memory is short), `--num-queries`
+(per query set, 1000), `--sigmas-255` (the evaluator's default sweep `5 10 15 25 35 50 65`),
+`--dtype {float32,float64}` (float32; the expanded-square distance cancels below sigma 10, so
+per-query weights there need float64), `--clip` (off), `--model-path`, `--train-dir`, `--test-dir`,
+`--output-dir` (`results/mean_shift_denoiser`), `--seed` (42), `--gpu`.
+
+Metrics, per (query set, sigma):
+
+- **PSNR** of the oracle (mean and median over the queries; `max_val = 1`) next to the noisy-input PSNR, and the
+  count of queries at the 120 dB cap (the per-image PSNR floors the MSE at 1e-12, so a copy reads exactly 120).
+- **Effective number** `exp(H)`, with `H` the entropy in nats of the softmax weights (mean and median): 1 means the
+  output is one bank patch, N means a uniform average of the bank.
+- **Memorization ratio** `||x_hat - b*|| / ||x - b*||`, with `b*` the bank patch nearest to `x_hat` (searched in
+  float64). Near 0 the output is a copy of a bank patch; near 1 it is as far from its nearest bank patch as the
+  truth is. Reported as the median (never the mean: exact twins make the denominator 0), the fraction below 0.5,
+  the degenerate count (the truth lies within 1e-3 RMS of `b*`, so the denominator is about 0; counted, not
+  scored) and, for `in_bank` only, the self-retrieval rate (`b*` is the query's own clean patch; those queries
+  are not scored either). The ratio's median and fraction are therefore over the remaining queries only,
+  and `oracle_mem_n_scored` says how many.
+
+Noise convention: unclipped additive Gaussian by default, because Tweedie's identity holds only for
+unclipped noise; `--clip` reproduces the trainers' clipped noise and the result is then not
+Tweedie-exact. Sigma is on the [0, 255] scale, divided by 255 on a [0, 1] image. Every noise level draws
+its noise from one seeded generator per query set.
+
+Oracle only. The side-by-side arm (`--model-path`, a checkpoint stamped `data_range: "[0,1]"` with a
+`(32, 32, 1)` input, loaded through the provenance gate) exists and is tested on a synthetic stamped
+checkpoint only; no loadable checkpoint existed when the script was run (the gate refuses every stored one), so
+with no `--model-path` the summary carries `model: null` and a sentence saying oracle only.
+
+Output under `results/mean_shift_denoiser/<timestamp>/` (an existing run directory is refused, never
+overwritten): `summary.json` (strict JSON: config, bank and duplicate statistics, one row per query set and
+sigma), `oracle_vs_sigma.csv` (the same rows), `psnr_vs_sigma.png`, `eval_config.json`. The measured run
+and its reading are in `FINDINGS.md` section 10.
+
 ---
 
 ## Measured runs (audit iteration 1, tiny variant, 8 epochs, GPU 1)
@@ -759,5 +817,6 @@ CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_trai
 | `test_config_validation.py` | The config-time refusal table with boundary twins |
 | `test_train_bfunet_run.py` | Real tiny end-to-end runs: run-directory contract, refusal order, `run.log`, start-of-epoch `lr`, the cosine last-step pin, final versus best model, divergence record, `init_from` checks, `results_summary.json` and `test_eval` |
 | `test_provenance_gate.py` | Legacy-domain checkpoints are refused by the checkpoint-load paths (the eval tools and `--init-from`) |
+| `test_eval_empirical_mean_shift.py` | The empirical-Tweedie oracle (CPU, `tmp_path`): the two-point closed form by quadrature, chunk-size invariance, the entropy and memorization worked examples, degenerate and self-retrieval counting, the 120 dB cap count, the model arm on a synthetic stamped checkpoint (an unstamped one and a shape mismatch refused), `--help` |
 | `test_unet_denoiser.py`, `test_bfcnn_denoiser.py` | The two baseline trainers: config, `build_model` wiring, bias-free check, CLI parsing (construction only, CPU) |
 | `test_the_*_gabor_stem_*.py`, `test_convunext_*.py` | Gabor stem flags and width rule, self-iterate and `--deterministic-data` (`test_convunext_self_iterate.py`: identical batches in two builds, the default call pattern), supporting fixes (`test_convunext_supporting_fixes.py`: the seeded grid, the clipped pass-1 label, the analyzer and `visualizations` blocks, the once-only test evaluation, the import-time TensorFlow context, the dashboard cadence including a resumed fit) |
