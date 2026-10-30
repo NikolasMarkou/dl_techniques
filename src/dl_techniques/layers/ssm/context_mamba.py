@@ -1,4 +1,5 @@
-"""Unidirectional temporal Context Mamba for long-term visual tracking.
+"""
+Unidirectional temporal Context Mamba for long-term visual tracking.
 
 Implements the Context Mamba module of MambaLCT (Li et al., 2024): search
 frame features ``f_i`` from the first frame to the current one are scanned

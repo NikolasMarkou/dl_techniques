@@ -1,4 +1,5 @@
-"""Canny edge detection, implemented as a Keras layer with fixed
+"""
+Canny edge detection, implemented as a Keras layer with fixed
 (non-trainable) convolution kernels.
 
 The layer runs the classical five-stage algorithm — Gaussian smoothing,

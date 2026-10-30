@@ -1,4 +1,5 @@
-"""Mode pooling for sequence data.
+"""
+Mode pooling for sequence data.
 
 This module provides :class:`ModePooling`, a pooling layer with no weights by
 default (``learnable_bandwidth`` adds one scalar) that collapses a sequence of

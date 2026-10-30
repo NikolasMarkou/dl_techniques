@@ -38,6 +38,11 @@ Internal State:
 
 import keras
 from typing import Optional, Union, Tuple, Any, Dict
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.dtype_policy import INDEX_WEIGHT_DTYPE
 

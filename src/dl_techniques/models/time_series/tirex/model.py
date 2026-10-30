@@ -260,7 +260,9 @@ class TiRexCore(keras.Model, ForecastMixin):
         self.use_normalization = use_normalization
         self.attention_window_size = attention_window_size
         # DECISION plan-2026-08-14T183218-f4c612aa/D-008: no membership check on
-        # attention_type here; create_attention_layer already raises eagerly on an unregistered key. Don't add a local whitelist. See decisions.md.
+        # attention_type here; create_attention_layer already raises eagerly on an unregistered key.
+        # Don't add a local whitelist.
+        # See decisions.md.
         self.attention_type = attention_type
 
         if len(self.block_types) != num_blocks:
@@ -286,7 +288,8 @@ class TiRexCore(keras.Model, ForecastMixin):
         self.blocks = []
         for i, block_type in enumerate(self.block_types):
             # DECISION plan-2026-08-17T183311-79c63e38/D-011: window_size stays
-            # wired unconditionally; MixedSequentialBlock scopes it per attention type, not this call site. See decisions.md.
+            # wired unconditionally; MixedSequentialBlock scopes it per attention type, not this call site.
+            # See decisions.md.
             block = MixedSequentialBlock(
                 embed_dim=self.embed_dim,
                 num_heads=self.num_heads,

@@ -1,4 +1,5 @@
-"""Attention-based pooling layer for sequence data.
+"""
+Attention-based pooling layer for sequence data.
 
 This module provides :class:`AttentionPooling`, a learnable, content-aware
 pooling layer that collapses a sequence of token vectors

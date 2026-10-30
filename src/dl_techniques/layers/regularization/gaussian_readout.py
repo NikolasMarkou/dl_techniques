@@ -40,7 +40,7 @@ import numpy as np
 
 # ---------------------------------------------------------------------
 # local imports
-# ------
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique

@@ -1,5 +1,5 @@
 """
-``SelectiveGradientMask`` is an identity layer on the forward pass that
+SelectiveGradientMask is an identity layer on the forward pass that
 blocks gradients element-wise on the backward pass, based on a binary mask.
 
 Given a signal ``x`` and mask ``m``, it computes

@@ -1,4 +1,5 @@
-r"""Shared primitives for the ``layers/attention`` package: the attention-mask
+"""
+Shared primitives for the ``layers/attention`` package: the attention-mask
 bias constant and its dtype rule, ``apply_attention_mask`` (the fp16-safe way
 to apply that bias), ``validate_head_divisibility``, and
 ``compute_attention_scale``.

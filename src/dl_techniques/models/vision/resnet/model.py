@@ -1,4 +1,5 @@
-"""``ResNet``, a configurable residual network, plus the ``create_resnet`` factory.
+"""
+``ResNet``, a configurable residual network, plus the ``create_resnet`` factory.
 
 Each block learns a residual `F(x)` added to an identity shortcut,
 `y = F(x) + x`, instead of learning the full mapping directly, which makes

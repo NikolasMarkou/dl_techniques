@@ -1,7 +1,7 @@
 # Training Scripts
 
 Training pipelines for models in `dl_techniques/models/`. One directory per runnable pipeline; the
-grouped families `time_series/` and `language/` keep their trainers one level further down.
+grouped families `time_series/`, `language/`, `vision/`, `vision_language/`, `world_models/`, `experiments/`, keep their trainers one level further down.
 `REPO_MAP.md` maps the model/trainer/test triangle, including the trainers whose directory name
 differs from the model package they train.
 

@@ -1,5 +1,5 @@
-"""Fixed multi-scale, multi-directional shearlet transform, built by
-:class:`ShearletTransform`.
+"""
+Fixed multiscale, multi-directional shearlet transform
 
 Wavelets scale isotropically and so represent curved edges inefficiently.
 Shearlets replace isotropic scaling with a combination of anisotropic

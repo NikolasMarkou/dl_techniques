@@ -21,8 +21,13 @@ import keras
 from keras import ops
 from typing import Optional, Any, Dict, Tuple, Union, Sequence
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.layers.pooling.global_sum_pool")
 class GlobalSumPooling(keras.layers.Layer):
@@ -194,3 +199,5 @@ class GlobalSumPooling(keras.layers.Layer):
             "keepdims": self.keepdims,
         })
         return config
+
+# ---------------------------------------------------------------------

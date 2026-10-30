@@ -22,9 +22,8 @@ References:
       Modeling. (https://arxiv.org/abs/2507.07955)
 """
 
-from typing import Any, Dict, Optional, Tuple
-
 import keras
+from typing import Any, Dict, Optional, Tuple
 
 # ---------------------------------------------------------------------
 # local imports

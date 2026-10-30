@@ -1,4 +1,5 @@
-"""AreaAttention, self-attention over a 2D feature map partitioned into
+"""
+AreaAttention, self-attention over a 2D feature map partitioned into
 contiguous spatial areas, as used by the YOLOv12 detector.
 
 Flattening a ``(B, H, W, C)`` feature map gives ``H*W`` tokens and a

@@ -1,4 +1,5 @@
-"""ScheduledDropout, a dropout layer whose rate follows a schedule over training.
+"""
+ScheduledDropout, a dropout layer whose rate follows a schedule over training.
 
 The drop probability at training step ``t`` is ``clip(schedule(t), 0.0,
 1.0 - 1e-6)``, where ``schedule`` is any

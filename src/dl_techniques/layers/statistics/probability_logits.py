@@ -108,3 +108,5 @@ class ProbabilityLogits(keras.layers.Layer):
         config = super().get_config()
         config.update({"epsilon": self.epsilon})
         return config
+
+# ---------------------------------------------------------------------

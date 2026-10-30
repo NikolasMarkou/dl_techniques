@@ -1,8 +1,8 @@
 """
-Construct a multi-scale Gaussian pyramid representation of an image.
+Construct a multiscale Gaussian pyramid representation of an image.
 
 Implements the classic Gaussian pyramid by iteratively applying Gaussian blur
-(anti-aliasing low-pass filter) followed by downsampling. Each level is a
+(antialiasing low-pass filter) followed by downsampling. Each level is a
 smoothed, lower-resolution version of its predecessor. The Gaussian function
 G(x,y) = (1/(2*pi*sigma^2)) * exp(-(x^2+y^2)/(2*sigma^2)) prevents aliasing
 artifacts per the Nyquist-Shannon sampling theorem by limiting signal

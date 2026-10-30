@@ -1,4 +1,5 @@
-"""Learnable position-weighted pooling layer for sequence data.
+"""
+Learnable position-weighted pooling layer for sequence data.
 
 This module provides :class:`WeightedPooling`, a learnable pooling layer that
 collapses a sequence of token vectors ``(batch, seq_len, embed_dim)`` into a

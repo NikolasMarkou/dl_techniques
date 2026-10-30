@@ -1,4 +1,5 @@
-"""``CLAHE``, a trainable Contrast Limited Adaptive Histogram Equalization layer
+"""
+CLAHE, a trainable Contrast Limited Adaptive Histogram Equalization layer
 for single-channel images.
 
 Standard histogram equalization remaps pixel intensities through one global

@@ -1,4 +1,5 @@
-"""Spatial smoothness regularization over a fixed 2D or 3D layout of a layer's units.
+"""
+Spatial smoothness regularization over a fixed 2D or 3D layout of a layer's units.
 
 The problem
 -----------

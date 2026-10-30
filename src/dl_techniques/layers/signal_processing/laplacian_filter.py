@@ -1,4 +1,5 @@
-"""Laplacian edge filters and an invertible Laplacian pyramid level.
+"""
+Laplacian edge filters and an invertible Laplacian pyramid level.
 
 ``LaplacianFilter`` finds edges with a Difference of Gaussians: it blurs the
 input and subtracts the blur from the original,
