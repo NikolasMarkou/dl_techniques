@@ -26,7 +26,7 @@ from dl_techniques.layers.heads.vision.factory import create_multi_task_head
 from dl_techniques.layers.heads.vision.task_types import (
     TaskConfiguration, VisionTaskType,
 )
-from dl_techniques.layers.heads.vlm import (
+from dl_techniques.layers.heads.vision_language import (
     VLMTaskConfig, VLMTaskType, create_multi_task_vlm_head,
 )
 

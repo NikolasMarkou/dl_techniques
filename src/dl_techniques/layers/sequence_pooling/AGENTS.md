@@ -9,7 +9,7 @@ In: `AttentionPooling`, `WeightedPooling`, `ModePooling`, `SequencePooling` (18 
 
 Out: the NLP task heads' `pooling_type='attention'`. That is an inline `Dense(1, tanh)` scorer inside `layers/heads/nlp`, not `AttentionPooling`. Spatial pooling (blur, pixel shuffle, patch merging) lives in `layers/pooling/`, not here.
 
-Consumers: `layers/transformers/text_encoder.py` and `vision_encoder.py` (pass `output_mode` as `strategy`; `VisionEncoder` adds `exclude_positions=[0]` for reductions when it has a CLS token), `layers/heads/nlp/base.py`, `layers/heads/vlm/*`, `models/vision/{vit,vit_siglip,vit_hmlp,beit}`, `models/vision_language/clifford_clip`.
+Consumers: `layers/transformers/text_encoder.py` and `vision_encoder.py` (pass `output_mode` as `strategy`; `VisionEncoder` adds `exclude_positions=[0]` for reductions when it has a CLS token), `layers/heads/nlp/base.py`, `layers/heads/vision_language/*`, `models/vision/{vit,vit_siglip,vit_hmlp,beit}`, `models/vision_language/clifford_clip`.
 
 ## Architecture
 

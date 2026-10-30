@@ -30,7 +30,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.layers.heads.vlm import (
+from dl_techniques.layers.heads.vision_language import (
     MultiTaskVLMHead,
     VLMTaskConfig,
     VLMTaskType,

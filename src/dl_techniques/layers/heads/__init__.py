@@ -1,4 +1,4 @@
-"""Task-head layers, grouped by domain (``nlp``, ``vision``, ``vlm``, ``time_series``).
+"""Task-head layers, grouped by domain (``nlp``, ``vision``, ``vision_language``, ``time_series``).
 
 This package merges the former ``nlp_heads``, ``vision_heads`` and
 ``vlm_heads`` packages into one import surface. It re-exports the full public
@@ -19,7 +19,7 @@ Domains
 - :mod:`~dl_techniques.layers.heads.vision` — vision task heads: detection,
   segmentation, depth, classification, instance segmentation, enhancement and
   multi-task, plus the task-type vocabulary.
-- :mod:`~dl_techniques.layers.heads.vlm` — vision-language heads: captioning,
+- :mod:`~dl_techniques.layers.heads.vision_language` — vision-language heads: captioning,
   VQA, visual grounding, image-text matching and multi-task.
 - :mod:`~dl_techniques.layers.heads.time_series` — forecasting heads: fixed and
   variable horizon quantile heads, Gaussian and negative-binomial likelihood
@@ -88,7 +88,7 @@ from .vision import (
 # =========================================================================
 # VLM heads
 # =========================================================================
-from .vlm import (
+from .vision_language import (
     VLMTaskType,
     VLMTaskConfig,
     VLMTaskConfiguration,

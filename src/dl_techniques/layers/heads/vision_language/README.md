@@ -1,6 +1,6 @@
-# heads/vlm
+# heads/vision_language
 
-Keras 3 layers that turn image features and text features into a task answer: a caption, an answer class, a bounding box, or an image-text match score. Package path: `dl_techniques.layers.heads.vlm` (source in `src/dl_techniques/layers/heads/vlm/`).
+Keras 3 layers that turn image features and text features into a task answer: a caption, an answer class, a bounding box, or an image-text match score. Package path: `dl_techniques.layers.heads.vision_language` (source in `src/dl_techniques/layers/heads/vision_language/`).
 
 ## What it is for
 
@@ -66,7 +66,7 @@ Optional padding masks go in the same dict: `vision_mask`, `text_mask`, `questio
 One head:
 
 ```python
-from dl_techniques.layers.heads.vlm import create_vlm_head, VLMTaskConfig, VLMTaskType
+from dl_techniques.layers.heads.vision_language import create_vlm_head, VLMTaskConfig, VLMTaskType
 
 config = VLMTaskConfig(
     name="vqa_v2",
@@ -88,7 +88,7 @@ head = create_vlm_head(config, num_layers=6, num_heads=12)
 Several tasks behind one layer:
 
 ```python
-from dl_techniques.layers.heads.vlm import create_multi_task_vlm_head
+from dl_techniques.layers.heads.vision_language import create_multi_task_vlm_head
 
 multi = create_multi_task_vlm_head(
     [

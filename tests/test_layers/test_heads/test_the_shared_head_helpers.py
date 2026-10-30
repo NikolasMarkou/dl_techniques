@@ -28,7 +28,7 @@ from dl_techniques.layers.heads.validation import (
     pool_or_passthrough,
 )
 from dl_techniques.layers.heads.vision.task_types import VisionTaskType
-from dl_techniques.layers.heads.vlm import VLMTaskConfig, VLMTaskType
+from dl_techniques.layers.heads.vision_language import VLMTaskConfig, VLMTaskType
 
 HEADS_DIR = Path(heads_pkg.__file__).parent
 
@@ -69,7 +69,7 @@ def test_lookup_head_refuses_a_string_naming_no_task_type() -> None:
 
 def test_the_three_dispatchers_route_through_lookup_head() -> None:
     """A fourth copy of the lookup would not show up in any dispatch test."""
-    for rel in ("nlp/dispatch.py", "vlm/dispatch.py", "vision/dispatch.py"):
+    for rel in ("nlp/dispatch.py", "vision_language/dispatch.py", "vision/dispatch.py"):
         tree = ast.parse((HEADS_DIR / rel).read_text())
         called = {n.func.id for n in ast.walk(tree)
                   if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}

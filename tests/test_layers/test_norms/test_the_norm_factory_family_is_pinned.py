@@ -20,7 +20,7 @@ and the stems of ConvUNext, ResNet and UcaEncoder are now built by ``ConvStem``
 stem's norms), so ``convunext`` and ``resnet`` lose their site and ``uca_encoder``
 loses ``stem_norm``: **198 sites in 100 files, 153 dynamic, 45 literal.** The split of
 ``heads/nlp/factory.py`` (2026-10-27) then moved its one dynamic site into ``heads/nlp/base.py`` (same
-count), and the split of ``heads/vlm/factory.py`` turned that file's ``(1, 3)`` entry into two files,
+count), and the split of ``heads/vision_language/factory.py`` turned that file's ``(1, 3)`` entry into two files,
 ``image_text_matching.py`` ``(1, 0)`` and ``image_captioning.py`` ``(0, 3)``:
 **198 sites in 101 files, 153 dynamic, 45 literal.** The auto-built
 encoder of ``vq_vae_rotation`` builds its down-steps with ``ConvStem`` (plan-2026-10-26T125959-7af851e5
@@ -113,8 +113,8 @@ NORM_CALL_SITES: Dict[str, Tuple[int, int]] = {
     "dl_techniques/layers/graphs/relational_graph_transformer_blocks.py": (2, 0),
     "dl_techniques/layers/heads/nlp/base.py": (1, 0),
     "dl_techniques/layers/heads/vision/classification.py": (1, 0),
-    "dl_techniques/layers/heads/vlm/image_captioning.py": (0, 3),
-    "dl_techniques/layers/heads/vlm/image_text_matching.py": (1, 0),
+    "dl_techniques/layers/heads/vision_language/image_captioning.py": (0, 3),
+    "dl_techniques/layers/heads/vision_language/image_text_matching.py": (1, 0),
     "dl_techniques/layers/moe/experts.py": (2, 0),
     "dl_techniques/layers/moe/gating.py": (1, 0),
     "dl_techniques/layers/norms/factory.py": (1, 0),

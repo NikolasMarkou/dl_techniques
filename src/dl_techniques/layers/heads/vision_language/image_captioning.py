@@ -21,7 +21,10 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 from .utils import _ffn_width_kwargs, _check_task_config_fields
 
 
-@register_dl_technique("dl_techniques.layers.heads.vlm.image_captioning")
+@register_dl_technique(
+    "dl_techniques.layers.heads.vision_language.image_captioning",
+    legacy_packages=("dl_techniques.layers.heads.vlm.image_captioning",),
+)
 class ImageCaptioningHead(keras.layers.Layer):
     """
     A transformer decoder over text, cross-attending to vision features.

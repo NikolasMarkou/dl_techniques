@@ -8,7 +8,7 @@ reject them a line later; a string task type died with ``AttributeError:
 'str' object has no attribute 'name'``.
 
 The VLM domain has no ``get_output_types``; its output contract is the table
-in ``vlm/README.md`` § 2 and each head's ``compute_output_shape``. The last
+in ``vision_language/README.md`` § 2 and each head's ``compute_output_shape``. The last
 test pins the README table against what each head returns
 (``test_every_vlm_head_reports_the_shapes_it_returns.py`` pins
 ``compute_output_shape``).
@@ -20,7 +20,7 @@ import re
 import numpy as np
 import pytest
 
-from dl_techniques.layers.heads.vlm import (
+from dl_techniques.layers.heads.vision_language import (
     BaseVLMHead,
     ImageCaptioningHead,
     ImageTextMatchingHead,
@@ -30,7 +30,7 @@ from dl_techniques.layers.heads.vlm import (
     VQAHead,
     create_vlm_head,
 )
-from dl_techniques.layers.heads.vlm import dispatch as vlm_dispatch
+from dl_techniques.layers.heads.vision_language import dispatch as vlm_dispatch
 
 FOUR = {
     VLMTaskType.IMAGE_CAPTIONING: ImageCaptioningHead,
@@ -40,7 +40,7 @@ FOUR = {
 }
 
 README = (pathlib.Path(__file__).resolve().parents[3]
-          / "src/dl_techniques/layers/heads/vlm/README.md")
+          / "src/dl_techniques/layers/heads/vision_language/README.md")
 
 
 def test_the_dispatch_table_holds_the_four_heads_and_nothing_else() -> None:

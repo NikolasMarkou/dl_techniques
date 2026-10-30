@@ -579,7 +579,7 @@ Edge-oriented VLM family. Three parts: LFM2.5 hybrid language backbone (gated sh
 | `LFM2` causal LM + `create_lfm2(variant)` | `models/language/lfm2/` |
 | SigLIP2 NaFlex encoder (variable-resolution patching, aspect-preserving resize, padding mask) | `models/vision/siglip2/` |
 | Tiling + thumbnail image processor with special tokens | `models/vision_language/lfm2_vl/` |
-| `PixelUnshuffleMLPProjector` | `layers/heads/vlm` or package-local |
+| `PixelUnshuffleMLPProjector` | `layers/heads/vision_language` or package-local |
 | HF checkpoint converter + parity oracle | both packages |
 
 ### Implementation plan

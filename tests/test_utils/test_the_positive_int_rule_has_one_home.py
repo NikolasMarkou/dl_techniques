@@ -16,7 +16,7 @@ import pytest
 
 from dl_techniques.layers.adapters import factory as adapters_factory
 from dl_techniques.layers.heads import validation as heads_validation
-from dl_techniques.layers.heads.vlm.task_types import VLMTaskConfig, VLMTaskType
+from dl_techniques.layers.heads.vision_language.task_types import VLMTaskConfig, VLMTaskType
 from dl_techniques.layers.moe import config as moe_config
 from dl_techniques.layers.sequence_pooling import (
     attention_pooling,

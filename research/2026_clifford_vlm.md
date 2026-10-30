@@ -92,7 +92,7 @@ not a gate on the spine.
 | `CLIPContrastiveLoss` | `losses/clip_contrastive_loss.py` | Standard two-way contrastive |
 | `AffineInvariantLoss` | `losses/affine_invariant_loss.py` | Median+MAD normalized L1, per-sample `(batch,)` return; depth auxiliary |
 | `SegmentationHead` | `layers/heads/vision/factory.py` | Power-of-two `upsampling_factor`; **every skip must match the base map's H×W** (checked, raises); returns a bare tensor |
-| VLM task heads | `layers/heads/vlm/factory.py` | Captioning, VQA, grounding, matching |
+| VLM task heads | `layers/heads/vision_language/factory.py` | Captioning, VQA, grounding, matching |
 | `DPTDecoder` | `models/vision/depth_anything/components.py` | Depth decoder for the downstream depth track |
 | Synthetic-generator precedent | `datasets/document_rectification/synthetic_warp.py`, `datasets/document_restoration/dtsprompt.py` | numpy+scipy only, no cv2/skimage — guard-enforced; new generators follow the same rule |
 

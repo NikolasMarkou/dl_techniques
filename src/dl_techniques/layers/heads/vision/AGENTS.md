@@ -7,7 +7,7 @@ Purpose: Keras 3 vision task heads (detection, segmentation, classification, ins
 
 Lives here: the head layer classes, `VISION_HEAD_DISPATCH`, the factory functions, `HeadConfiguration` presets, `VisionTaskType` / `TaskConfiguration` / `CommonTaskConfigurations`, and the helpers they share.
 
-Does not live here: the NLP and VLM heads (sibling packages `heads/nlp`, `heads/vlm`), the `create_head(domain, ...)` facade (`heads/factory.py`, which calls `create_vision_head` for `'vision'`), and the shared checks in `heads/validation.py` (`positive_int`, `resolve_stage_knobs`, `lookup_head`, `key_by_name`, `static_rank`). The backbones that consume these heads are in `models/`.
+Does not live here: the NLP and VLM heads (sibling packages `heads/nlp`, `heads/vision_language`), the `create_head(domain, ...)` facade (`heads/factory.py`, which calls `create_vision_head` for `'vision'`), and the shared checks in `heads/validation.py` (`positive_int`, `resolve_stage_knobs`, `lookup_head`, `key_by_name`, `static_rank`). The backbones that consume these heads are in `models/`.
 
 `heads/vision` imports only from sibling packages `conv_blocks`, `dense_block`, `norms`, `ffn`, `attention`, `activations`, `heads/validation`, plus `dl_techniques.utils` and `dl_techniques.initializers`.
 

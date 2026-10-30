@@ -1781,7 +1781,7 @@ def _b_heads_vlm_image_captioning():
     # Both VLM sites already carry their own dedicated 21-type grid in
     # tests/test_layers/test_heads/test_vlm.py (TestVLMFFNTypeGrid). Reached
     # here too so the derived file set stays fully covered.
-    from dl_techniques.layers.heads.vlm import (
+    from dl_techniques.layers.heads.vision_language import (
         ImageCaptioningHead, VLMTaskConfig, VLMTaskType,
     )
     head = ImageCaptioningHead(
@@ -1796,7 +1796,7 @@ def _b_heads_vlm_image_captioning():
 
 
 def _b_heads_vlm_image_text_matching():
-    from dl_techniques.layers.heads.vlm import (
+    from dl_techniques.layers.heads.vision_language import (
         ImageTextMatchingHead, VLMTaskConfig, VLMTaskType,
     )
     head = ImageTextMatchingHead(
@@ -2068,8 +2068,8 @@ _FFN_CONSTRUCTION_SITE_BUILDERS = {
         _b_relational_graph_transformer_blocks,
     "layers/heads/nlp/base.py": _b_heads_nlp_factory,
     "layers/heads/vision/base.py": _b_heads_vision_factory,
-    "layers/heads/vlm/image_captioning.py": _b_heads_vlm_image_captioning,
-    "layers/heads/vlm/image_text_matching.py": _b_heads_vlm_image_text_matching,
+    "layers/heads/vision_language/image_captioning.py": _b_heads_vlm_image_captioning,
+    "layers/heads/vision_language/image_text_matching.py": _b_heads_vlm_image_text_matching,
     "layers/moe/experts.py": _b_moe_experts,
     "layers/time_series/mixed_sequential_block.py": _b_mixed_sequential_block,
     "layers/time_series/prism_blocks.py": _b_prism_blocks,

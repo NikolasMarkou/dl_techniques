@@ -14,7 +14,7 @@ from dl_techniques.layers.heads.nlp import (
     NLPTaskType, NLPTaskConfig, TextClassificationHead,
 )
 from dl_techniques.layers.heads.vision import VisionTaskType, ClassificationHead
-from dl_techniques.layers.heads.vlm import (
+from dl_techniques.layers.heads.vision_language import (
     VLMTaskType, VLMTaskConfig, ImageTextMatchingHead,
 )
 

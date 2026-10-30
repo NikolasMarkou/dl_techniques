@@ -7,7 +7,7 @@ Purpose: Keras 3 forecasting heads that map backbone hidden states to non-crossi
 
 In: five registered head layers (`QuantileHead`, `QuantileSequenceHead`, `GaussianLikelihoodHead`, `NegativeBinomialLikelihoodHead`, `TimestralQuantileHead`), the private `_LikelihoodHead` base, the private `_floored_softplus` and `MIN_LIKELIHOOD_PARAM`, and the function `monotone_quantiles`.
 
-Out: encoders and backbones (`layers/time_series`, `models/time_series`), the pinball and likelihood losses, `ConformalQuantileHead` (`layers/statistics/conformal/quantile_head.py`), `MDNLayer` (`layers/statistics/mdn_layer.py`), the `Forecast` / `ForecastMixin` contract (`models/time_series/forecast.py`). Unlike `heads/nlp`, `heads/vision` and `heads/vlm`, this domain has no task enum, no task config, no dispatch table, no factory and no multi-task wrapper, and `heads/factory.py` `create_head` does not accept `'time_series'`. The heads are re-exported from `heads/__init__.py`.
+Out: encoders and backbones (`layers/time_series`, `models/time_series`), the pinball and likelihood losses, `ConformalQuantileHead` (`layers/statistics/conformal/quantile_head.py`), `MDNLayer` (`layers/statistics/mdn_layer.py`), the `Forecast` / `ForecastMixin` contract (`models/time_series/forecast.py`). Unlike `heads/nlp`, `heads/vision` and `heads/vision_language`, this domain has no task enum, no task config, no dispatch table, no factory and no multi-task wrapper, and `heads/factory.py` `create_head` does not accept `'time_series'`. The heads are re-exported from `heads/__init__.py`.
 
 Callers are the forecasting models, which construct a head directly:
 

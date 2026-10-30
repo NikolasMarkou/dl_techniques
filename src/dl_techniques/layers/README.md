@@ -43,7 +43,7 @@ Factory column: Y means the package has a `factory.py`.
 | `attention/` | Y | 36 attention types: multi-head, cross, latent, differential, grouped-query, ring, Performer, Perceiver, Hopfield, mean-shift, window, linear, energy, channel and spatial gates, Fourier mixing, and more |
 | `embedding/` | Y | Patch, positional, sinusoidal, rotary (RoPE family), BERT-style token embeddings, class-label and timestep embeddings, special tokens. 16 factory keys over 24 classes; 8 classes have no key |
 | `ffn/` | Y | MLP, SwiGLU, GeGLU, GLU family, gated and Swin MLPs, power MLP, logic, counting and KAN variants. 22 factory keys over 20 classes |
-| `heads/` | Y | 29 registered task-head classes in `nlp/`, `vision/`, `vlm/`, `time_series/`, with `create_head(domain, ...)` for the first three |
+| `heads/` | Y | 29 registered task-head classes in `nlp/`, `vision/`, `vision_language/`, `time_series/`, with `create_head(domain, ...)` for the first three |
 | `logic/` | Y | Learnable fuzzy logic gates, arithmetic operators and circuits |
 | `memory/` | Y | Neural Turing Machine, self-organizing maps, NeuroGrid |
 | `mixtures/` | Y | `RBFLayer`, `KMeansLayer`, `GMMLayer`, `MeanShiftLayer` |

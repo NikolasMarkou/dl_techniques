@@ -453,7 +453,7 @@ Use **v2** for anything that should correspond to the published architecture, or
 
 ### Why the text tower is shared rather than duplicated
 
-`MobileClipTextEncoder` owns one of exactly **two** block-to-keep causal-mask adapter sites in `src/` (the other is `layers/heads/vlm/factory.py`). A **third** site triggers a mandatory promotion of that adapter into a keep-polarity `MaskFactory` variant — an unrelated refactor with its own blast radius.
+`MobileClipTextEncoder` owns one of exactly **two** block-to-keep causal-mask adapter sites in `src/` (the other is `layers/heads/vision_language/factory.py`). A **third** site triggers a mandatory promotion of that adapter into a keep-polarity `MaskFactory` variant — an unrelated refactor with its own blast radius.
 
 Re-implementing the tower for v2 would create that third site for no architectural gain: the layer is already dimension-generic (measured at 768/12/3072 and 512/8/2048, causal on and off) and already carries the graph-safe mask path (§4.3).
 

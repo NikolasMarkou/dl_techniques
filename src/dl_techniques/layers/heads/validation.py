@@ -156,7 +156,7 @@ def lookup_head(
     Resolve a task type to its row of a dispatch table, or refuse it.
 
     Interface contract, shared by ``nlp.dispatch.get_head_class``,
-    ``vlm.dispatch.get_head_class`` and the vision dispatch
+    ``vision_language.dispatch.get_head_class`` and the vision dispatch
     (``create_vision_head``, ``HeadConfiguration.get_config``,
     ``MultiTaskHead``):
 

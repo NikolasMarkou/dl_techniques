@@ -15,7 +15,10 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 from .utils import _check_task_config_fields, _pool_sequence
 
 
-@register_dl_technique("dl_techniques.layers.heads.vlm.vqa")
+@register_dl_technique(
+    "dl_techniques.layers.heads.vision_language.vqa",
+    legacy_packages=("dl_techniques.layers.heads.vlm.vqa",),
+)
 class VQAHead(keras.layers.Layer):
     """
     Pools each modality, concatenates them, and classifies the answer.

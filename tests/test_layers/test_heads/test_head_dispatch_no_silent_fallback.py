@@ -1,6 +1,6 @@
 """Guard: a head factory must never SILENTLY substitute a head for an unimplemented task.
 
-`heads/nlp/factory.py` and `heads/vlm/factory.py` both used to end their dispatch with a
+`heads/nlp/factory.py` and `heads/vision_language/factory.py` both used to end their dispatch with a
 silent default::
 
     return head_mapping.get(task_type, TextClassificationHead)   # nlp
@@ -35,9 +35,9 @@ import pytest
 
 from dl_techniques.layers.heads.nlp import dispatch as nlp_dispatch
 from dl_techniques.layers.heads.nlp.task_types import NLPTaskType
-from dl_techniques.layers.heads.vlm import dispatch as vlm_dispatch
-from dl_techniques.layers.heads.vlm import BaseVLMHead
-from dl_techniques.layers.heads.vlm.task_types import VLMTaskType
+from dl_techniques.layers.heads.vision_language import dispatch as vlm_dispatch
+from dl_techniques.layers.heads.vision_language import BaseVLMHead
+from dl_techniques.layers.heads.vision_language.task_types import VLMTaskType
 
 
 def _is_usable_head(cls):

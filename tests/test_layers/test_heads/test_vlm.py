@@ -1,7 +1,7 @@
-"""Tests for the merged ``heads.vlm`` sub-package.
+"""Tests for the merged ``heads.vision_language`` sub-package.
 
 The old ``vlm_heads`` package had ZERO test coverage and a broken (empty)
-``__init__.py``; the merge populated ``heads/vlm/__init__.py``. This file asserts
+``__init__.py``; the merge populated ``heads/vision_language/__init__.py``. This file asserts
 import + Keras registration of all 6 VLM classes, constructs heads via
 ``create_vlm_head``, and (as of the bugfix plan) exercises the full forward pass
 + a ``.keras`` round-trip for the three previously-broken heads.
@@ -37,15 +37,15 @@ from dl_techniques.layers.ffn.factory import (
     STRICT_DROPPED_KEY_MARKER,
     create_ffn_layer as _factory_create_ffn_layer,
 )
-from dl_techniques.layers.heads.vlm import image_captioning as vlm_captioning
-from dl_techniques.layers.heads.vlm import image_text_matching as vlm_matching
-from dl_techniques.layers.heads.vlm.utils import (
+from dl_techniques.layers.heads.vision_language import image_captioning as vlm_captioning
+from dl_techniques.layers.heads.vision_language import image_text_matching as vlm_matching
+from dl_techniques.layers.heads.vision_language.utils import (
     _accepted_constructor_kwargs,
     _ffn_width_kwargs,
 )
 from dl_techniques.utils.tensors import is_single_shape
 from tests.numerics import reassociation_atol
-from dl_techniques.layers.heads.vlm import (
+from dl_techniques.layers.heads.vision_language import (
     VLMTaskType,
     VLMTaskConfig,
     create_vlm_head,
@@ -264,7 +264,7 @@ class TestVLMForwardPass:
 
         NOT VACUOUS, RED-proved the same day: replacing `attention_mask=causal_mask`
         with `attention_mask=None` in `ImageCaptioningHead.call`
-        (`layers/heads/vlm/`) makes this assertion fail at
+        (`layers/heads/vision_language/`) makes this assertion fail at
         max|diff| = 3.27e+00 (TF32 on) / 3.03e+00 (TF32 off), i.e. the defect
         signal is ~5 orders of magnitude above `atol`, against a noise floor of
         exactly zero.
@@ -1371,7 +1371,7 @@ class TestCaptioningFFNTypes:
 #
 # The honest reachable outcome and the reasons the rest stay closed live in ONE
 # home: the `ffn_type` docstring of `ImageCaptioningHead` in
-# `src/dl_techniques/layers/heads/vlm/`. It is not restated here.
+# `src/dl_techniques/layers/heads/vision_language/`. It is not restated here.
 # ---------------------------------------------------------------------
 
 _WIDTH_PARAM_BY_FFN_TYPE = {
@@ -1562,7 +1562,7 @@ class TestFFNOutputWidthParamRouting:
             return result
 
         # Each site binds the helper by name in its own module, so the spy is
-        # installed there (a patch on `vlm.utils` would reach neither).
+        # installed there (a patch on `vision_language.utils` would reach neither).
         vlm_captioning._ffn_width_kwargs = spy
         vlm_matching._ffn_width_kwargs = spy
         try:
@@ -1656,7 +1656,7 @@ class TestSite1PostFusionWidthAssertion:
         the failing OP (`AddV2`, which both wordings name), and the deepest Python
         frame — eager execution raises at the line that ISSUED the op, and Keras's
         `traceback_utils` filters its own frames, so that frame is exactly
-        `heads/vlm/image_captioning.py`'s `x + ffn_output`. A Python traceback is a property
+        `heads/vision_language/image_captioning.py`'s `x + ffn_output`. A Python traceback is a property
         of the program, not of the kernel. Together these are STRICTER than the old
         text match, which would have accepted a shape error raised anywhere else as
         long as it happened to mention 48 and 96.

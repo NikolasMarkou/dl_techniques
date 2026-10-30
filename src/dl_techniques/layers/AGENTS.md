@@ -26,7 +26,7 @@ flowchart TD
     A --> X[fusion]
     F --> X
     N --> X
-    X --> H[heads/vlm]
+    X --> H[heads/vision_language]
     ACT[activations] --> N
     ACT --> F
     N --> R[root blocks: dense_block, residual_dense_block, fnet_encoder_block, eomt_mask]
@@ -35,7 +35,7 @@ flowchart TD
 
 - Base domains (`norms`, `activations`, `ffn`, `attention`, `embedding`) each own a `factory.py`. `transformers`, `moe` and `fusion` build their sub-layers through those factories instead of hard-coding classes.
 - `transformers.TransformerLayer` composes `create_attention_layer`, `create_ffn_from_config` (or `MixtureOfExperts` when `moe_config` is set) and the norm factory. `moe` builds experts through the FFN factory.
-- `fusion.MultiModalFusion` builds attention, FFN and norm sub-layers through their factories and is consumed by `heads/vlm`.
+- `fusion.MultiModalFusion` builds attention, FFN and norm sub-layers through their factories and is consumed by `heads/vision_language`.
 - `blt` builds its stacks through `transformers/causal_stack.py`. `reasoning` pieces are reused by `blt/blt_core.py`.
 - `sequence_pooling.ModePooling` imports the mean-shift functions from `mixtures/mean_shift_ops.py`, so importing `sequence_pooling` also imports `mixtures/__init__` (no cycle: `mixtures` imports only `utils` and `initializers`).
 - Remaining families (`ssm`, `time_series`, `conv_blocks`, `geometric`, `graphs`, `memory`, `signal_processing`, and others) are mostly independent. Do not assume a cross-import between two of them without grepping.
@@ -52,7 +52,7 @@ Subpackages. F = has `factory.py`. Counts were measured with the registry object
 | `attention/` | Y | 36 attention types | `ATTENTION_REGISTRY` 36 keys. Curated (45 names: 38 classes, 6 factory functions, `AttentionType`). `AttentionRoutingCapsule`, `CapsuleBlockV2`, `Ideogram4Attention`, `MMDiTJointAttention` are exported without a key. `assemble_attention_config` is not exported. Sphinx docstrings mandatory |
 | `embedding/` | Y | Patch, positional, sinusoidal, RoPE, token, class-label, timestep embeddings | 24 layer classes, 16 keys. 8 classes have no key: `AxialRoPE2D` (exported by `__init__`), and `ClassTokenPrepend`, `MaskTokenApply`, `RegisterTokens`, `StateIndicatorEmbedding`, `HierarchicalCodebookEmbedding`, `PatchEmbed3D`, `VideoRoPE3D` (not exported, import from the module). `__init__` (11 names) exports only 3 layer classes (`AxialRoPE2D`, `ClassLabelEmbedding`, `TimestepEmbedding`), 4 NumPy sin-cos table builders and the factory names. Its docstring is stale (says 23 classes, 7 without a key) |
 | `ffn/` | Y | Feed-forward variants | `FFN_REGISTRY` 22 keys over 20 classes (`glu`, `reglu`, `bilinear` are configurations of `GLUFFN`). Curated (27 names: the 20 classes plus the factory interface incl. `assemble_ffn_config`) |
-| `heads/` | Y | 29 registered task-head classes (8 NLP, 10 vision, 6 VLM, 5 time series) in `nlp/`, `vision/`, `vlm/`, `time_series/` | Curated (47 names, from `heads.nlp`, `vision`, `vlm`, `time_series` plus `create_head`); `time_series/` (`QuantileHead`, `QuantileSequenceHead`, `GaussianLikelihoodHead`, `NegativeBinomialLikelihoodHead`, `TimestralQuantileHead`) has no factory and is not a `create_head` domain; the eight NLP in-model helpers (`TASK_HEAD_NAME`, `build_model_task_head`, ...) are not exported, import them from `heads.nlp`. `create_head(domain, *args, **kwargs)` forwards verbatim to a per-domain factory. Domain signatures differ on purpose. `validation.py`, `masking.py` hold shared checks |
+| `heads/` | Y | 29 registered task-head classes (8 NLP, 10 vision, 6 VLM, 5 time series) in `nlp/`, `vision/`, `vision_language/`, `time_series/` | Curated (47 names, from `heads.nlp`, `vision`, `vision_language`, `time_series` plus `create_head`); `time_series/` (`QuantileHead`, `QuantileSequenceHead`, `GaussianLikelihoodHead`, `NegativeBinomialLikelihoodHead`, `TimestralQuantileHead`) has no factory and is not a `create_head` domain; the eight NLP in-model helpers (`TASK_HEAD_NAME`, `build_model_task_head`, ...) are not exported, import them from `heads.nlp`. `create_head(domain, *args, **kwargs)` forwards verbatim to a per-domain factory. Domain signatures differ on purpose. `validation.py`, `masking.py` hold shared checks |
 | `logic/` | Y | Fuzzy logic and arithmetic operators, circuits | 4 keys: `logic`, `arithmetic`, `neural_circuit`, `circuit_depth`. Curated (10 names) |
 | `memory/` | Y | NTM, SOM family, NeuroGrid | `create_mann` is the only MANN construction path (no standalone MANN class; the old `MannLayer` is deleted). `create_som_2d` for 2-D SOM. Curated (25 names), both factory functions exported |
 | `mixtures/` | Y | `RBFLayer`, `KMeansLayer`, `GMMLayer`, `MeanShiftLayer` | 4 keys. Curated (11 names). Non-strict factory (see invariants) |

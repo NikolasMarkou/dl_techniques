@@ -15,7 +15,7 @@ Does not live here:
 - The factories the layers build from: `layers/ffn/` (`create_ffn_layer`), `layers/attention/` (`create_attention_layer`), `layers/norms/` (`create_normalization_layer`).
 - `ConvBlock` (`layers/conv_blocks/conv_block.py`) and `PixelShuffle2D` (`layers/pooling/pixel_unshuffle.py`), which `HierarchicalScaleFusion` is built from.
 - `clone_initializer`, `initializer_spec` (`dl_techniques/initializers/clone.py`).
-- The vision-language heads that consume `MultiModalFusion` (`layers/heads/vlm/`).
+- The vision-language heads that consume `MultiModalFusion` (`layers/heads/vision_language/`).
 - There is no factory, no registry and no `create_*` function in this package.
 
 ## Architecture
@@ -133,7 +133,7 @@ External: `keras` (`keras.ops`, `keras.layers.Conv2D`, `keras.layers.UpSampling2
 
 Consumers:
 
-- `MultiModalFusion`: `layers/heads/vlm/base.py` (`BaseVLMHead._build_fusion_stack`), used by `ImageTextMatchingHead` and `VisualGroundingHead`. NanoVLM stopped using it on 2026-10-15 because the symmetric `'cross_attention'` leaks future text into a causal model.
+- `MultiModalFusion`: `layers/heads/vision_language/base.py` (`BaseVLMHead._build_fusion_stack`), used by `ImageTextMatchingHead` and `VisualGroundingHead`. NanoVLM stopped using it on 2026-10-15 because the symmetric `'cross_attention'` leaks future text into a causal model.
 - `HierarchicalScaleFusion`: none yet.
 
 ## Failure modes

@@ -24,7 +24,10 @@ from .utils import _ffn_width_kwargs, _check_task_config_fields, _pool_sequence
 from .base import BaseVLMHead
 
 
-@register_dl_technique("dl_techniques.layers.heads.vlm.image_text_matching")
+@register_dl_technique(
+    "dl_techniques.layers.heads.vision_language.image_text_matching",
+    legacy_packages=("dl_techniques.layers.heads.vlm.image_text_matching",),
+)
 class ImageTextMatchingHead(BaseVLMHead):
     """
     Runs a contrastive branch and a fine-grained branch in parallel.

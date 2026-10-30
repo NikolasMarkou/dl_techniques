@@ -46,12 +46,12 @@ _HOMES = {
     "OpticalFlowHead": "vision.dense_vector",
     "EnhancementHead": "vision.enhancement",
     "MultiTaskHead": "vision.multitask",
-    "BaseVLMHead": "vlm.base",
-    "ImageCaptioningHead": "vlm.image_captioning",
-    "VQAHead": "vlm.vqa",
-    "VisualGroundingHead": "vlm.visual_grounding",
-    "ImageTextMatchingHead": "vlm.image_text_matching",
-    "MultiTaskVLMHead": "vlm.multitask",
+    "BaseVLMHead": "vision_language.base",
+    "ImageCaptioningHead": "vision_language.image_captioning",
+    "VQAHead": "vision_language.vqa",
+    "VisualGroundingHead": "vision_language.visual_grounding",
+    "ImageTextMatchingHead": "vision_language.image_text_matching",
+    "MultiTaskVLMHead": "vision_language.multitask",
     "QuantileHead": "time_series.quantile_head_fixed_io",
     "QuantileSequenceHead": "time_series.quantile_head_variable_io",
     "GaussianLikelihoodHead": "time_series.likelihood_heads",
@@ -115,3 +115,12 @@ def test_every_registration_string_is_its_own_files_dotted_path() -> None:
 
 def test_the_census_sees_exactly_the_tabled_classes() -> None:
     assert sorted(cls for _, cls, _ in _decorated_sites()) == sorted(_HOMES)
+
+
+@pytest.mark.parametrize("name,home", sorted(
+    (name, home) for name, home in _HOMES.items() if home.startswith("vision_language.")
+))
+def test_the_key_from_before_the_package_rename_still_resolves(name: str, home: str) -> None:
+    """Archives saved while the package was ``heads/vlm`` store the old key."""
+    module = home.split(".", 1)[1]
+    assert keras.saving.get_registered_object(f"{PACKAGE}.vlm.{module}>{name}") is _class(name)

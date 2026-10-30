@@ -18,7 +18,10 @@ from .utils import (
 from .dispatch import get_head_class
 
 
-@register_dl_technique("dl_techniques.layers.heads.vlm.multitask")
+@register_dl_technique(
+    "dl_techniques.layers.heads.vision_language.multitask",
+    legacy_packages=("dl_techniques.layers.heads.vlm.multitask",),
+)
 class MultiTaskVLMHead(keras.layers.Layer):
     """
     Several VLM heads behind one layer, fed from one shared input dict.

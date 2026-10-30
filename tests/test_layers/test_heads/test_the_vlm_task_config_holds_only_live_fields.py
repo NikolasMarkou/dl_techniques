@@ -27,7 +27,7 @@ import dataclasses
 
 import pytest
 
-from dl_techniques.layers.heads.vlm import (
+from dl_techniques.layers.heads.vision_language import (
     ImageTextMatchingHead,
     VLMTaskConfig,
     VLMTaskType,

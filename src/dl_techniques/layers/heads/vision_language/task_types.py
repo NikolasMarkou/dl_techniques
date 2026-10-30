@@ -10,7 +10,7 @@ classes live here:
 * :class:`VLMTaskConfiguration` -- a validated set of tasks, plus a query for
   whether that set needs text generation.
 
-``vlm/factory.py`` (through ``vlm/dispatch.py``) reads these objects and picks the head class to build,
+``vision_language/factory.py`` (through ``vision_language/dispatch.py``) reads these objects and picks the head class to build,
 from its one table, ``VLM_HEAD_DISPATCH``. Only 4 of the 47 task names have a
 head; the other 43 raise ``ValueError``. The table in :class:`VLMTaskType`
 lists both groups.
@@ -38,7 +38,7 @@ class VLMTaskType(Enum):
 
     **Head dispatch:**
 
-    ``vlm/dispatch.py``'s ``VLM_HEAD_DISPATCH`` decides which head class runs
+    ``vision_language/dispatch.py``'s ``VLM_HEAD_DISPATCH`` decides which head class runs
     a task, and ``get_head_class`` reads it. Four members have a head. The
     other 43 are absent from the table and raise ``ValueError`` when the head
     is created, not when it is called. The two groups sum to 47.
@@ -338,7 +338,7 @@ class VLMTaskConfig:
     The hyperparameters of one VLM task head.
 
     A dataclass holding the six fields a head reads, and nothing else.
-    ``vlm/factory.py``'s ``create_vlm_head`` takes one of these and builds the
+    ``vision_language/factory.py``'s ``create_vlm_head`` takes one of these and builds the
     matching head. Only ``name`` and ``task_type`` are required.
 
     **Fields and their readers:**

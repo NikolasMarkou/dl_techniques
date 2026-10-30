@@ -39,7 +39,7 @@ from dl_techniques.layers.heads.nlp import (
     NLPTaskType,
     create_nlp_head,
 )
-from dl_techniques.layers.heads.vlm import (
+from dl_techniques.layers.heads.vision_language import (
     ImageTextMatchingHead,
     VLMTaskConfig,
     VLMTaskType,
@@ -51,7 +51,7 @@ HEADS = pathlib.Path(__file__).resolve().parents[3] / "src/dl_techniques/layers/
 #: module of a domain is scanned, not only its ``factory.py``: each factory was
 #: split into one module per head, and a scan of ``factory.py`` alone would read
 #: a re-export file and pass forever.
-SCANNED = ("nlp", "vlm", "vision")
+SCANNED = ("nlp", "vision_language", "vision")
 MODULES = sorted(
     p for domain in SCANNED for p in (HEADS / domain).glob("*.py")
     if p.name != "__init__.py"

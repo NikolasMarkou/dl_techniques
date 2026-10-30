@@ -37,7 +37,7 @@ position as real.
 
 Example::
 
-    >>> from dl_techniques.layers.heads.vlm import (
+    >>> from dl_techniques.layers.heads.vision_language import (
     ...     create_vlm_head, VLMTaskConfig, VLMTaskType)
     >>> head = create_vlm_head(VLMTaskConfig(
     ...     name='vqa', task_type=VLMTaskType.VISUAL_QUESTION_ANSWERING,
@@ -52,7 +52,7 @@ directly raises ``TypeError``. Use one of the four task heads instead.
 
 Import from this package rather than from the submodule::
 
-    from dl_techniques.layers.heads.vlm import create_vlm_head
+    from dl_techniques.layers.heads.vision_language import create_vlm_head
 
 The wider facade ``dl_techniques.layers.heads.create_head('vlm', ...)`` calls
 ``create_vlm_head`` for you.

@@ -2,7 +2,7 @@
 
 This module re-exports the task-type enums, their config classes and their
 helpers. They come from the three domain sub-packages: ``nlp``, ``vision`` and
-``vlm``. Import them from one place::
+``vision_language``. Import them from one place::
 
     from dl_techniques.layers.heads.task_types import (
         NLPTaskType, VisionTaskType, VLMTaskType,
@@ -26,7 +26,7 @@ from .vision.task_types import (
     CommonTaskConfigurations,
     parse_task_list,
 )
-from .vlm.task_types import (
+from .vision_language.task_types import (
     VLMTaskType,
     VLMTaskConfig,
     VLMTaskConfiguration,

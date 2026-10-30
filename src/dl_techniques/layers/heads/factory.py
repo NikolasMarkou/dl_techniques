@@ -56,7 +56,7 @@ from dl_techniques.utils.logger import logger
 
 from .nlp import create_nlp_head
 from .vision import create_vision_head
-from .vlm import create_vlm_head
+from .vision_language import create_vlm_head
 
 # Supported head domains for the dispatch facade.
 HeadDomain = Literal['nlp', 'vision', 'vlm']
@@ -122,7 +122,7 @@ def create_head(domain: HeadDomain, *args: Any, **kwargs: Any) -> Any:
 
           create_head('vision', 'classification', num_classes=10)
 
-    - ``vlm``   -> :func:`~dl_techniques.layers.heads.vlm.create_vlm_head`::
+    - ``vlm``   -> :func:`~dl_techniques.layers.heads.vision_language.create_vlm_head`::
 
           create_head('vlm', task_config=vlm_cfg, num_layers=2)
 

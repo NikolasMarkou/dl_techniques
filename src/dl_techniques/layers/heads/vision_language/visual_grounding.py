@@ -15,7 +15,10 @@ from .utils import _check_task_config_fields, _pool_sequence
 from .base import BaseVLMHead
 
 
-@register_dl_technique("dl_techniques.layers.heads.vlm.visual_grounding")
+@register_dl_technique(
+    "dl_techniques.layers.heads.vision_language.visual_grounding",
+    legacy_packages=("dl_techniques.layers.heads.vlm.visual_grounding",),
+)
 class VisualGroundingHead(BaseVLMHead):
     """
     Scores image regions against a text query and boxes the best one.

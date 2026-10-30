@@ -1,6 +1,6 @@
 # heads
 
-Task heads for the `dl_techniques` library, as Keras 3 layers: small networks that sit on top of a backbone and turn its features into a task answer. The package lives at `src/dl_techniques/layers/heads/`. It has four domain sub-packages, `nlp/`, `vision/`, `vlm/` (vision-language) and `time_series/` (forecasting), plus a thin dispatch function, `create_head`, and two small modules of shared checks.
+Task heads for the `dl_techniques` library, as Keras 3 layers: small networks that sit on top of a backbone and turn its features into a task answer. The package lives at `src/dl_techniques/layers/heads/`. It has four domain sub-packages, `nlp/`, `vision/`, `vision_language/` and `time_series/` (forecasting), plus a thin dispatch function, `create_head`, and two small modules of shared checks.
 
 ## What it is for
 
@@ -14,7 +14,7 @@ This package holds 29 registered head classes (8 NLP, 10 vision, 6 VLM, 5 time s
 flowchart TD
     CH["create_head(domain, ...)"] -->|nlp| NF["nlp.create_nlp_head(task_config, input_dim)"]
     CH -->|vision| VF["vision.create_vision_head(task_type)"]
-    CH -->|vlm| LF["vlm.create_vlm_head(task_config)"]
+    CH -->|vlm| LF["vision_language.create_vlm_head(task_config)"]
     NF --> NT["NLP_HEAD_DISPATCH"]
     VF --> VT["VISION_HEAD_DISPATCH"]
     LF --> LT["VLM_HEAD_DISPATCH"]
@@ -48,7 +48,7 @@ Each domain has one dispatch table from task type to head class. A task type wit
 
 **`vision/`** - `DetectionHead`, `SegmentationHead`, `ClassificationHead`, `InstanceSegmentationHead`, `DepthEstimationHead`, `SurfaceNormalsHead`, `OpticalFlowHead`, `EnhancementHead` (denoising and super-resolution) and `MultiTaskHead`, on a shared `BaseVisionHead`. Heads take a feature map `(B, H, W, C)`; detection and segmentation also take ViT tokens `(B, N, D)` with `input_format='sequence'`. Depth, normals and flow upsample 8x through one shared decoder. There is no per-head config dataclass: a head is chosen by a `VisionTaskType` plus keyword arguments, and `TaskConfiguration` is a validated set of task types. The domain also holds ready-made keyword presets (`HeadConfiguration`) and `build_model_vision_head`, the one call vision models use to build their head.
 
-**`vlm/`** - `ImageCaptioningHead`, `VQAHead`, `VisualGroundingHead`, `ImageTextMatchingHead` and `MultiTaskVLMHead`, plus `BaseVLMHead`, which cannot be built directly. Heads take dicts of feature tensors, not images or token ids, and read every feature width from the input shapes. The task config is `VLMTaskConfig` (six fields). Outputs:
+**`vision_language/`** - `ImageCaptioningHead`, `VQAHead`, `VisualGroundingHead`, `ImageTextMatchingHead` and `MultiTaskVLMHead`, plus `BaseVLMHead`, which cannot be built directly. Heads take dicts of feature tensors, not images or token ids, and read every feature width from the input shapes. The task config is `VLMTaskConfig` (six fields). Outputs:
 
 | Head | Reads | Output dict |
 | --- | --- | --- |
@@ -72,7 +72,7 @@ No head applies an activation to a class-like score. Classification, token, span
 - `masking.py` - `fill_masked(scores, keep, sentinel_dtype=None)`, which sets masked positions to the dtype's finite sentinel by selection.
 - `nlp/` - NLP heads, task types, dispatch, factories and in-model helpers (20 exported names).
 - `vision/` - vision heads, task types, dispatch, presets, factories and the one-call builder (18 exported names).
-- `vlm/` - vision-language heads, task types, dispatch and factories (11 exported names).
+- `vision_language/` - vision-language heads, task types, dispatch and factories (11 exported names).
 - `time_series/` - forecasting heads: quantile heads, Gaussian and negative-binomial likelihood heads, and the Timestral quantile head (5 exported names, no factory). See its own `README.md`.
 
 ## How to use it
@@ -110,7 +110,7 @@ Per-domain imports expose more than the facade does:
 ```python
 from dl_techniques.layers.heads.nlp import create_nlp_head, build_model_task_head
 from dl_techniques.layers.heads.vision import create_vision_head, create_multi_task_head
-from dl_techniques.layers.heads.vlm import create_vlm_head, create_multi_task_vlm_head
+from dl_techniques.layers.heads.vision_language import create_vlm_head, create_multi_task_vlm_head
 ```
 
 Tests: `.venv/bin/python -m pytest tests/test_layers/test_heads/ -q` from the repo root. The full repo suite takes about 1.5 hours; run only this directory.

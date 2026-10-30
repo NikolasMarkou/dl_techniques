@@ -90,7 +90,7 @@ Options on the pyramid layer: `upsample="bilinear"` swaps the learned sub-pixel 
 - Normalization in `HierarchicalScaleFusion` comes from the norms factory, so the epsilon is `1e-6`, not the Keras batch-norm default of `1e-3`.
 - Both layers serialize through `get_config`. Saved models register under the module path, for example `dl_techniques.layers.fusion.hierarchical_fusion>HierarchicalScaleFusion`. Renaming a class or moving it to another module breaks `.keras` archives saved earlier.
 - `MultiModalFusion.from_config` modifies the dict you pass, so give it a copy.
-- Consumers today: `MultiModalFusion` is used by the VLM heads in `src/dl_techniques/layers/heads/vlm/`. `HierarchicalScaleFusion` has no consumer yet.
+- Consumers today: `MultiModalFusion` is used by the VLM heads in `src/dl_techniques/layers/heads/vision_language/`. `HierarchicalScaleFusion` has no consumer yet.
 - The code uses only `keras.ops` and stock Keras layers. The repo targets Keras 3 on TensorFlow 2.18.
 
 ## References

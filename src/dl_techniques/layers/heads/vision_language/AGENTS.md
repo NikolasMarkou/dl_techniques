@@ -1,6 +1,6 @@
-# heads/vlm
+# heads/vision_language
 
-Path: `src/dl_techniques/layers/heads/vlm`
+Path: `src/dl_techniques/layers/heads/vision_language`
 Purpose: Keras 3 task heads that map vision and text feature tensors to captions, answer logits, boxes and match scores, plus the task enum, config, dispatch table and factories.
 
 ## Scope
@@ -67,7 +67,7 @@ Forward paths:
 
 ## Public interface
 
-Exported from `dl_techniques.layers.heads.vlm` (`__all__`, 11 names): `VLMTaskType`, `VLMTaskConfig`, `VLMTaskConfiguration`, `create_vlm_head`, `create_multi_task_vlm_head`, `BaseVLMHead`, `ImageCaptioningHead`, `VQAHead`, `VisualGroundingHead`, `ImageTextMatchingHead`, `MultiTaskVLMHead`. `get_head_class` and `VLM_HEAD_DISPATCH` are importable from `.dispatch` only, not re-exported.
+Exported from `dl_techniques.layers.heads.vision_language` (`__all__`, 11 names): `VLMTaskType`, `VLMTaskConfig`, `VLMTaskConfiguration`, `create_vlm_head`, `create_multi_task_vlm_head`, `BaseVLMHead`, `ImageCaptioningHead`, `VQAHead`, `VisualGroundingHead`, `ImageTextMatchingHead`, `MultiTaskVLMHead`. `get_head_class` and `VLM_HEAD_DISPATCH` are importable from `.dispatch` only, not re-exported.
 
 Factories:
 
@@ -88,7 +88,7 @@ Head constructors:
 
 `MultiTaskVLMHead.call(inputs, training=None, *, task_name=None)`; `compute_output_shape(input_shape, *, task_name=None)`; `compute_output_spec(inputs, training=None, *, task_name=None)`. Heads are stored in `task_heads` and as attributes `head_<task_name>`.
 
-The four task heads (not `MultiTaskVLMHead`) default the layer name to `f"{task_config.name}_head"` via `kwargs.setdefault("name", ...)`; a stored `name` survives `from_config`. `MultiTaskVLMHead` has a list of configs and no single `task_config`, so it sets no such default: its name is Keras's auto-generated `multi_task_vlm_head` unless a Keras `name` is passed (it goes to the wrapper's `Layer.__init__` only, and is saved and restored through `get_config`). Its sub-heads are still named `<task name>_head`. All six classes are registered with `@register_dl_technique("dl_techniques.layers.heads.vlm.<module>")` where `<module>` is `base`, `image_captioning`, `vqa`, `visual_grounding`, `image_text_matching`, `multitask`.
+The four task heads (not `MultiTaskVLMHead`) default the layer name to `f"{task_config.name}_head"` via `kwargs.setdefault("name", ...)`; a stored `name` survives `from_config`. `MultiTaskVLMHead` has a list of configs and no single `task_config`, so it sets no such default: its name is Keras's auto-generated `multi_task_vlm_head` unless a Keras `name` is passed (it goes to the wrapper's `Layer.__init__` only, and is saved and restored through `get_config`). Its sub-heads are still named `<task name>_head`. All six classes are registered with `@register_dl_technique("dl_techniques.layers.heads.vision_language.<module>")` where `<module>` is `base`, `image_captioning`, `vqa`, `visual_grounding`, `image_text_matching`, `multitask`. Each also passes `legacy_packages` with its old `dl_techniques.layers.heads.vlm.<module>` string, so archives saved before the package was renamed keep loading.
 
 ## Data shapes
 
@@ -154,7 +154,7 @@ External: `keras` (Keras 3, `keras.ops` only), standard library `dataclasses`, `
 
 ## Working here
 
-- To add a head for a new task type: write the class in its own module with its own `register_dl_technique("dl_techniques.layers.heads.vlm.<module>")` string, add a row to `VLM_HEAD_DISPATCH`, export it in `__init__.py` `__all__`, and update the pinned lists in tests (`test_the_vlm_dispatch_names_exactly_four_heads.py`, `test_the_head_classes_register_under_their_own_module.py`).
+- To add a head for a new task type: write the class in its own module with its own `register_dl_technique("dl_techniques.layers.heads.vision_language.<module>")` string, add a row to `VLM_HEAD_DISPATCH`, export it in `__init__.py` `__all__`, and update the pinned lists in tests (`test_the_vlm_dispatch_names_exactly_four_heads.py`, `test_the_head_classes_register_under_their_own_module.py`).
 - Read config through `_check_task_config_fields` in the head `__init__`; do not add `VLMTaskConfig` fields no head reads.
 - Do not restore a default in `get_head_class` and do not add a placeholder row.
 - Use `import keras` and `keras.ops`; log through `dl_techniques.utils.logger`; docstrings in this package are Sphinx/reST.

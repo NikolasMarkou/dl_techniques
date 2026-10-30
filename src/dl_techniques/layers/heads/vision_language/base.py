@@ -13,7 +13,10 @@ from .task_types import VLMTaskConfig
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 
-@register_dl_technique("dl_techniques.layers.heads.vlm.base")
+@register_dl_technique(
+    "dl_techniques.layers.heads.vision_language.base",
+    legacy_packages=("dl_techniques.layers.heads.vlm.base",),
+)
 class BaseVLMHead(keras.layers.Layer):
     """
     Shared construction for the fusion layer two VLM heads use.
