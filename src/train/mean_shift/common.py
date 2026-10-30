@@ -5,9 +5,11 @@ one model in its own subprocess, so a failure, an XLA state or a seed state neve
 into the next cell, and so the idle gate can run before every cell.
 
 Interface contract (callers: ``exp1_mode_pooling`` and ``exp2_mean_shift_attention``, in
-their driver mode through :func:`add_sweep_arguments` and :func:`run_driver`, in their
-worker mode through :func:`add_worker_arguments`, :func:`epoch_timer`,
-:func:`build_result` and :func:`write_result`):
+their driver mode through :func:`add_sweep_arguments`, :func:`add_run_arguments` and
+:func:`run_driver`, in their worker mode through :func:`add_worker_arguments`,
+:func:`add_run_arguments`, :func:`load_cell_data`, :func:`fit_cell`,
+:func:`selection_split`, :func:`top1`, :func:`physical_devices`, :func:`build_result` and
+:func:`write_result`):
 
 * ``run_sweep(cells, worker_module, root, ...)`` writes ``root/manifest.json`` first, then
   for each pending cell (seed-major order) waits for GPU 0 to be idle, runs
@@ -23,7 +25,8 @@ worker mode through :func:`add_worker_arguments`, :func:`epoch_timer`,
   without a manifest), :class:`GateTimeout` (GPU 0 not idle within the sweep's wait cap),
   ``RuntimeError`` (no ``nvidia-smi`` for a GPU sweep).
 * Importing this module does not import TensorFlow or Keras: the pieces that need them
-  (:func:`build_optimizer`, :func:`epoch_timer`, the child environment) import them on call.
+  (:func:`build_optimizer`, :func:`epoch_timer`, :func:`load_cell_data`, :func:`fit_cell`,
+  :func:`top1`, :func:`physical_devices`, the child environment) import them on call.
 """
 
 import argparse
@@ -67,6 +70,7 @@ GATE_REQUIRED_SAMPLES = 3
 GATE_GAP_S = 5.0
 GATE_RETRY_S = 60.0
 GATE_MAX_WAIT_S = 6 * 3600.0
+DEFAULT_CELL_TIMEOUT_S = 7200.0
 
 MANIFEST_NAME = "manifest.json"
 ROWS_NAME = "rows.jsonl"
@@ -197,6 +201,74 @@ def _epoch_timer_class():
 def epoch_timer():
     """A Keras callback that adds ``epoch_seconds`` to the history of ``fit``."""
     return _epoch_timer_class()()
+
+
+# ---------------------------------------------------------------------
+# the worker side of a cell: data, fit, scoring
+
+
+def load_cell_data(dataset: str, recipe: Recipe, seed: int, max_samples: Optional[int]):
+    """The CIFAR splits of one cell through the shared loader, in the ``[0, 1]`` model domain.
+
+    ``normalize="unit"`` makes the model input equal the pixel domain the corruptions work
+    in; the train pipeline gets the ``cifar_light`` augmentation. Selection is the held-out
+    slice of train that the loader cuts (``validation_split`` default); the test split only
+    scores. ``max_samples`` caps the train pool and the test split (smoke runs).
+
+    Returns:
+        A ``train.common.classification_data.ClassificationData``; ``data.arrays`` holds the
+        selection and test images and labels as float32 ``[0, 1]`` arrays.
+    """
+    from train.common.classification_data import load_classification_data
+    from train.common.image_augment import build_augment
+    return load_classification_data(
+        dataset, batch_size=recipe.batch_size, seed=seed, normalize="unit",
+        augment=build_augment("cifar_light"), max_samples=max_samples)
+
+
+def fit_cell(model, data, recipe: Recipe) -> Dict[str, List[float]]:
+    """Compile and train ``model`` with the shared recipe; return the history snapshot.
+
+    Stock ``fit``, float32 policy (refused otherwise), no early stopping and no analyzer
+    callbacks, so the weights left in ``model`` are the final-epoch weights. The returned
+    dict is copied out of ``History`` here because Keras 3 resets it on the next predict
+    or evaluate call.
+
+    Raises:
+        RuntimeError: the global dtype policy is not float32.
+    """
+    import keras
+    policy = keras.config.dtype_policy().name
+    if policy != "float32":
+        raise RuntimeError(f"the harness trains in float32, the dtype policy is {policy!r}")
+    model.compile(
+        optimizer=build_optimizer(recipe, data.steps_per_epoch),
+        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        metrics=[keras.metrics.SparseCategoricalAccuracy(name="accuracy")])
+    history = model.fit(
+        data.train_ds, epochs=recipe.epochs, steps_per_epoch=data.steps_per_epoch,
+        validation_data=data.select_ds, callbacks=[epoch_timer()], verbose=2)
+    return {name: [float(v) for v in values] for name, values in history.history.items()}
+
+
+def selection_split(data) -> Tuple[np.ndarray, np.ndarray]:
+    """``(images, labels)`` of the selection split: the slice of TRAIN the loader held out.
+
+    The only split any ranking or choice may read; the test split only scores.
+    """
+    return data.arrays.x_select, data.arrays.y_select
+
+
+def top1(model, x: np.ndarray, y: np.ndarray, batch_size: int = 256) -> float:
+    """Top-1 accuracy of a logits model on the images ``x`` with integer labels ``y``."""
+    logits = model.predict(x, batch_size=batch_size, verbose=0)
+    return float(np.mean(np.argmax(logits, axis=-1) == np.asarray(y).reshape(-1)))
+
+
+def physical_devices() -> List[str]:
+    """The physical devices TensorFlow lists in this process, for the result row."""
+    import tensorflow as tf
+    return [f"{d.device_type}:{d.name}" for d in tf.config.list_physical_devices()]
 
 
 # ---------------------------------------------------------------------
@@ -470,8 +542,26 @@ def add_worker_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--seed", type=int, required=True, help="seed of this cell")
 
 
+def add_run_arguments(parser: argparse.ArgumentParser, default_dataset: str) -> None:
+    """The run arguments of both the driver and a worker: dataset, epochs, sample cap."""
+    parser.add_argument("--dataset", default=default_dataset, choices=("cifar10", "cifar100"),
+                        help=f"classification dataset (default: {default_dataset})")
+    parser.add_argument("--epochs", type=int, required=True,
+                        help="epochs of every cell (the shared recipe, no early stopping)")
+    parser.add_argument("--max-samples", type=int, default=None,
+                        help="smoke cap on the train pool and the test split")
+
+
+def run_extra_args(args: argparse.Namespace) -> Tuple[str, ...]:
+    """The worker command-line tail that carries :func:`add_run_arguments` to a cell."""
+    extra = ["--dataset", args.dataset, "--epochs", str(args.epochs)]
+    if args.max_samples is not None:
+        extra += ["--max-samples", str(args.max_samples)]
+    return tuple(extra)
+
+
 def add_sweep_arguments(parser: argparse.ArgumentParser) -> None:
-    """The driver arguments shared by every experiment: the root, resume, device."""
+    """The driver arguments shared by every experiment: the root, resume, device, timeout."""
     parser.add_argument("--out-dir", help="NEW sweep root (must not exist or be empty)")
     parser.add_argument("--resume", help="resume the sweep at this existing root")
     parser.add_argument("--gpu", type=int, default=None,
@@ -480,6 +570,9 @@ def add_sweep_arguments(parser: argparse.ArgumentParser) -> None:
                         help="run the cells on CPU without the idle gate (tests only)")
     parser.add_argument("--gate-max-wait-hours", type=float, default=GATE_MAX_WAIT_S / 3600,
                         help="cumulative wait for an idle GPU 0 before the sweep raises")
+    parser.add_argument("--cell-timeout-s", type=float, default=DEFAULT_CELL_TIMEOUT_S,
+                        help="wall-clock limit of one cell (the orchestrator sets it from the "
+                             "measured epoch time)")
 
 
 # ---------------------------------------------------------------------

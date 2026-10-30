@@ -114,6 +114,7 @@ MULTI_SEED: Tuple[str, ...] = (
     "train.bfunet.variance_probe",
     "train.logic.train_e4_lowdata_mux",
     "train.logic.train_e4_monks",
+    "train.mean_shift.exp1_mode_pooling",
     "train.sam3.baselines",
 )
 
