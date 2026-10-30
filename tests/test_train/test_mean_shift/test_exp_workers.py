@@ -1,16 +1,19 @@
 """The two Phase B experiment workers and drivers, end to end on CPU.
 
-Plan plan-2026-10-30T025213-f75ab4e9 step 3. Exp1 compares four pooling heads on vit_pico.
-The claims pinned here are the ones a quiet mistake would break without any run failing:
+Plan plan-2026-10-30T025213-f75ab4e9 steps 3 and 4. Exp1 compares four pooling heads on
+vit_pico, exp2 compares MeanShift Attention against multi_head in a small ViT. The claims
+pinned here are the ones a quiet mistake would break without any run failing:
 
 * the four exp1 arms differ only in the pooling head, with equal parameter counts, and the
   mean and mode heads ignore the CLS position;
 * every arm scores the very same corrupted images for the same seed and condition, the
   selection score reads the held-out slice of train and never the test split;
-* a cell that runs through the real subprocess driver writes one complete row.
+* all 17 exp2 configs build and run, every vMF config starts at ``bandwidth_init=0.3``, the
+  parameter ratio is measured, and the learned bandwidths are read through the layer's own
+  helper.
 
-Workers run in this process on a tiny fake CIFAR (``tests.classification_fakes``); one test
-drives the real subprocess path with ``--cpu`` and the Keras cache. Everything is written
+Workers run in this process on a tiny fake CIFAR (``tests.classification_fakes``); two tests
+drive the real subprocess path with ``--cpu`` and the Keras cache. Everything is written
 under ``tmp_path``; nothing here touches ``results/`` or a GPU.
 """
 
@@ -28,10 +31,12 @@ from tests.classification_fakes import use_tiny_raw
 from train.common.classification_data import load_split_arrays
 from train.mean_shift import common, corruption
 from train.mean_shift import exp1_mode_pooling as exp1
+from train.mean_shift import exp2_mean_shift_attention as exp2
 
 REPO = Path(__file__).resolve().parents[3]
 CIFAR_CACHE = Path.home() / ".keras" / "datasets" / "cifar-10-batches-py-target"
 MAX_SAMPLES = 256
+DEFAULT_MS = "blur_s3_per_head_gaussian"
 
 
 def sha(x):
@@ -227,6 +232,238 @@ def test_the_exp1_selection_score_reads_the_selection_split_not_the_test_split(
 
 
 # ---------------------------------------------------------------------------
+# exp2: configs
+# ---------------------------------------------------------------------------
+
+def test_the_config_table_is_mha_plus_the_sixteen_grid_configs():
+    ids = list(exp2.CONFIGS)
+    assert ids[0] == "mha"
+    assert len(ids) == 17 and len(set(ids)) == 17
+    grid = [exp2.CONFIGS[i] for i in ids if i != "mha"]
+    combos = {(c["attention_args"]["blurring"], c["attention_args"]["num_steps"],
+               c["attention_args"]["bandwidth_mode"], c["attention_args"]["kernel"])
+              for c in grid}
+    assert combos == {(b, s, m, k) for b in (False, True) for s in (1, 3)
+                      for m in ("per_head", "per_token") for k in ("gaussian", "vmf")}
+    assert exp2.CONFIGS["mha"]["attention_type"] == "multi_head"
+    assert all(c["attention_type"] == "mean_shift" for c in grid)
+    assert DEFAULT_MS in exp2.CONFIGS
+
+
+def test_every_vmf_config_starts_at_bandwidth_0_3_and_gaussian_ones_keep_the_default():
+    for config_id, config in exp2.CONFIGS.items():
+        args = config["attention_args"]
+        if args.get("kernel") == "vmf":
+            assert args["bandwidth_init"] == 0.3, config_id
+        else:
+            assert "bandwidth_init" not in args, config_id
+
+
+@pytest.mark.parametrize("config_id", list(exp2.CONFIGS))
+def test_every_config_builds_and_runs_a_forward_pass(config_id):
+    model = exp2.build_model(config_id, 100)
+    out = np.asarray(model(np.random.default_rng(0).random((2, 32, 32, 3), dtype="float32")))
+    assert out.shape == (2, 100) and np.isfinite(out).all()
+    layers = exp2.attention_layers(model)
+    spec = exp2.CONFIGS[config_id]
+    assert len(layers) == 6
+    if spec["attention_type"] == "mean_shift":
+        for layer in layers:
+            for name, value in spec["attention_args"].items():
+                assert getattr(layer, name) == value, (config_id, name)
+
+
+def test_the_parameter_ratio_of_mean_shift_to_multi_head_is_measured(record_property):
+    reference = exp2.build_model("mha", 100).count_params()
+    shifted = exp2.build_model(DEFAULT_MS, 100).count_params()
+    ratio = shifted / reference
+    record_property("params_multi_head", reference)
+    record_property("params_mean_shift", shifted)
+    record_property("param_ratio", round(ratio, 4))
+    assert (reference, shifted) == (2_710_564, 2_265_910)
+    assert 0.835 < ratio < 0.837
+
+
+# ---------------------------------------------------------------------------
+# exp2: learned bandwidth extraction
+# ---------------------------------------------------------------------------
+
+def softplus(v):
+    return np.log1p(np.exp(v))
+
+
+def toy_layer(**kwargs):
+    from dl_techniques.layers.attention.mean_shift_attention import MeanShiftAttention
+    options = dict(dim=12, num_heads=3, num_steps=1)
+    options.update(kwargs)
+    layer = MeanShiftAttention(**options)
+    layer.build((None, 5, 12))
+    return layer
+
+
+def test_per_head_bandwidths_are_softplus_of_the_raw_weight_plus_the_minimum():
+    layer = toy_layer(bandwidth_mode="per_head")
+    raw = np.array([-0.5, 0.3, 1.2], dtype="float32")
+    layer.raw_bandwidth.assign(raw)
+    tokens = np.random.default_rng(0).normal(size=(2, 5, 12)).astype("float32")
+    (recorded,) = exp2.record_bandwidths([layer], lambda: layer(tokens))
+    expected = layer.min_bandwidth + softplus(raw.astype("float64"))
+    assert recorded.shape == (1, 3, 1, 1)
+    assert np.allclose(recorded.reshape(3), expected, rtol=1e-6)
+    summary = exp2.summarize_bandwidth(recorded, layer)
+    assert summary["per_head_mean"] == pytest.approx(expected.tolist(), rel=1e-6)
+    assert summary["min"] == pytest.approx(expected.min(), rel=1e-6)
+    assert summary["max"] == pytest.approx(expected.max(), rel=1e-6)
+    assert summary["inside_clip_range"] is True
+
+
+def test_per_token_bandwidths_go_through_the_layers_own_helper():
+    layer = toy_layer(bandwidth_mode="per_token", bandwidth_init=0.7)
+    rng = np.random.default_rng(3)
+    kernel = rng.normal(scale=0.2, size=(12, 3)).astype("float32")
+    bias = rng.normal(scale=0.3, size=(3,)).astype("float32")
+    layer.bandwidth_projection.kernel.assign(kernel)
+    layer.bandwidth_projection.bias.assign(bias)
+    tokens = rng.normal(size=(4, 5, 12)).astype("float32")
+    (recorded,) = exp2.record_bandwidths([layer], lambda: layer(tokens))
+    projected = np.asarray(layer.projection(tokens))
+    raw = projected.astype("float64") @ kernel.astype("float64") + bias
+    expected = (layer.min_bandwidth + softplus(raw)).transpose(0, 2, 1)[..., None]
+    assert recorded.shape == (4, 3, 5, 1)
+    assert np.allclose(recorded, expected, rtol=1e-4)
+    summary = exp2.summarize_bandwidth(recorded, layer)
+    assert summary["mean"] == pytest.approx(float(expected.mean()), rel=1e-4)
+    assert summary["min"] == pytest.approx(float(expected.min()), rel=1e-4)
+    assert summary["max"] == pytest.approx(float(expected.max()), rel=1e-4)
+
+
+def test_a_bandwidth_on_the_clip_bound_is_flagged():
+    layer = toy_layer(bandwidth_mode="per_head")
+    layer.raw_bandwidth.assign(np.array([0.0, 0.0, 200.0], dtype="float32"))
+    tokens = np.zeros((1, 5, 12), dtype="float32")
+    (recorded,) = exp2.record_bandwidths([layer], lambda: layer(tokens))
+    assert exp2.summarize_bandwidth(recorded, layer)["inside_clip_range"] is False
+
+
+def test_recording_leaves_the_layer_unpatched():
+    layer = toy_layer(bandwidth_mode="per_head")
+    tokens = np.zeros((1, 5, 12), dtype="float32")
+    exp2.record_bandwidths([layer], lambda: layer(tokens))
+    assert "_bandwidth" not in layer.__dict__
+
+
+def test_a_multi_head_model_has_no_bandwidth_to_extract():
+    model = exp2.build_model("mha", 10)
+    block = exp2.learned_bandwidths(model, np.zeros((2, 32, 32, 3), dtype="float32"))
+    assert block["status"] == "not applicable: the model has no MeanShiftAttention layer"
+    assert block["layers"] == []
+
+
+# ---------------------------------------------------------------------------
+# exp2: cells
+# ---------------------------------------------------------------------------
+
+def parse2(*argv):
+    return exp2.parse_driver_arguments(["--out-dir", "x", "--epochs", "4", *argv])
+
+
+def test_the_smoke_mode_is_mha_and_the_default_mean_shift_config_on_one_seed():
+    args = parse2("--mode", "smoke")
+    cells = exp2.build_cells(args)
+    assert [(c.arm, c.config, c.seed) for c in cells] == [
+        ("multi_head", "mha", 0), ("mean_shift", DEFAULT_MS, 0)]
+    assert args.dataset == "cifar100"
+
+
+def test_the_grid_mode_is_seventeen_cells_cheapest_first():
+    cells = exp2.build_cells(parse2("--mode", "grid"))
+    assert len(cells) == 17 and {c.seed for c in cells} == {0}
+    assert {c.config for c in cells} == set(exp2.CONFIGS)
+    steps = [exp2.CONFIGS[c.config]["attention_args"].get("num_steps") for c in cells
+             if c.config != "mha"]
+    assert steps == sorted(steps)
+    first = exp2.CONFIGS[next(c.config for c in cells if c.config != "mha")]
+    assert first["attention_args"]["blurring"] is False and first["attention_args"]["num_steps"] == 1
+
+
+def test_the_main_mode_is_mha_plus_the_two_chosen_configs_by_three_seeds():
+    chosen = [DEFAULT_MS, "noblur_s1_per_head_gaussian"]
+    cells = exp2.build_cells(parse2("--mode", "main", "--configs", *chosen))
+    assert len(cells) == 9 and len({c.key for c in cells}) == 9
+    assert [c.seed for c in cells] == [0] * 3 + [1] * 3 + [2] * 3
+    assert {c.config for c in cells} == {"mha", *chosen}
+    arms = {c.config: c.arm for c in cells}
+    assert arms["mha"] == "multi_head" and arms[DEFAULT_MS] == "mean_shift"
+
+
+def test_the_main_mode_needs_known_configs_and_at_least_one():
+    with pytest.raises(SystemExit):
+        exp2.build_cells(parse2("--mode", "main"))
+    with pytest.raises(SystemExit):
+        exp2.build_cells(parse2("--mode", "main", "--configs", "no_such_config"))
+
+
+# ---------------------------------------------------------------------------
+# exp2: workers
+# ---------------------------------------------------------------------------
+
+EXP2_RUNS = [("multi_head", "mha"), ("mean_shift", DEFAULT_MS),
+             ("mean_shift", "noblur_s1_per_token_vmf")]
+
+
+@pytest.fixture(scope="module")
+def exp2_runs(fake_cifar, tmp_path_factory):
+    root = tmp_path_factory.mktemp("exp2_workers")
+    patch = pytest.MonkeyPatch()
+    recorders, results = {}, {}
+    for arm, config in EXP2_RUNS:
+        recorders[config] = Recorder(patch)
+        results[config] = run_worker(exp2, root, arm, config, dataset="cifar100")
+        patch.undo()
+    return results, recorders
+
+
+@pytest.mark.parametrize("arm, config", EXP2_RUNS)
+def test_an_exp2_worker_writes_one_complete_result(arm, config, exp2_runs):
+    result = exp2_runs[0][config]
+    metrics = result["metrics"]
+    assert result["finite"] is True and result["epochs_run"] == 1
+    assert result["params"] > 0
+    assert (result["params"] == 2_710_564) == (config == "mha")
+    assert 0.0 <= metrics["select_accuracy"] <= 1.0 and 0.0 <= metrics["test_accuracy"] <= 1.0
+    assert metrics["throughput_images_per_s"] > 0 and metrics["n_test"] == MAX_SAMPLES
+    assert metrics["dataset"] == "cifar100" and metrics["config"] == config
+    assert metrics["attention_type"] == arm and metrics["dtype_policy"] == "float32"
+    assert len(result["history"]["loss"]) == 1
+
+
+def test_the_exp2_rows_carry_the_learned_bandwidths(exp2_runs):
+    results = exp2_runs[0]
+    assert results["mha"]["metrics"]["bandwidths"]["layers"] == []
+    per_head = results[DEFAULT_MS]["metrics"]["bandwidths"]
+    assert per_head["status"] == "extracted" and per_head["mode"] == "per_head"
+    assert len(per_head["layers"]) == 6
+    assert all(len(layer["per_head_mean"]) == 3 for layer in per_head["layers"])
+    per_token = results["noblur_s1_per_token_vmf"]["metrics"]["bandwidths"]
+    assert per_token["status"] == "extracted" and per_token["mode"] == "per_token"
+    assert per_token["probe_images"] == results["noblur_s1_per_token_vmf"]["metrics"]["n_select"]
+    assert all(layer["min"] <= layer["mean"] <= layer["max"] for layer in per_token["layers"])
+
+
+def test_a_vmf_cell_starts_its_bandwidth_at_0_3(exp2_runs):
+    first = exp2_runs[0]["noblur_s1_per_token_vmf"]["metrics"]["config_args"]
+    assert first["bandwidth_init"] == 0.3 and first["kernel"] == "vmf"
+    assert "bandwidth_init" not in exp2_runs[0][DEFAULT_MS]["metrics"]["config_args"]
+
+
+def test_the_exp2_selection_and_test_scores_read_their_own_splits(exp2_runs):
+    arrays = load_split_arrays("cifar100", seed=0, max_samples=MAX_SAMPLES)
+    for config, recorder in exp2_runs[1].items():
+        assert sorted(recorder.hashes) == sorted([sha(arrays.x_select), sha(arrays.x_test)]), config
+    assert not np.array_equal(arrays.x_select[:5], arrays.x_test[:5])
+
+
+# ---------------------------------------------------------------------------
 # the real subprocess path
 # ---------------------------------------------------------------------------
 
@@ -239,7 +476,8 @@ def run_module(module, *argv, cwd=REPO, timeout=900):
                           capture_output=True, text=True, timeout=timeout)
 
 
-@pytest.mark.parametrize("module", ["train.mean_shift.exp1_mode_pooling"])
+@pytest.mark.parametrize("module", ["train.mean_shift.exp1_mode_pooling",
+                                    "train.mean_shift.exp2_mean_shift_attention"])
 def test_help_prints_usage_and_nothing_else_is_written(module, tmp_path):
     done = run_module(module, "--help", cwd=tmp_path)
     assert done.returncode == 0 and done.stdout.lstrip().startswith("usage:")
@@ -260,3 +498,18 @@ def test_the_exp1_driver_runs_a_cell_in_a_subprocess_on_cpu(tmp_path):
     assert set(accuracy) == set(corruption.CONDITIONS)
     manifest = json.loads((root / "manifest.json").read_text())
     assert manifest["resolved"]["epochs"] == 1 and manifest["devices"] == ""
+
+
+@needs_cache
+def test_the_exp2_smoke_driver_runs_both_cells_in_a_subprocess_on_cpu(tmp_path):
+    root = tmp_path / "sweep"
+    done = run_module("train.mean_shift.exp2_mean_shift_attention", "--cpu", "--out-dir",
+                      str(root), "--mode", "smoke", "--dataset", "cifar10", "--epochs", "1",
+                      "--max-samples", str(MAX_SAMPLES))
+    assert done.returncode == 0, done.stderr[-2000:]
+    rows = [json.loads(line) for line in (root / "rows.jsonl").read_text().splitlines()]
+    assert sorted((r["config"], r["status"]) for r in rows) == [
+        (DEFAULT_MS, "ok"), ("mha", "ok")]
+    by_config = {r["config"]: r["metrics"]["metrics"] for r in rows}
+    assert by_config["mha"]["bandwidths"]["layers"] == []
+    assert len(by_config[DEFAULT_MS]["bandwidths"]["layers"]) == 6
