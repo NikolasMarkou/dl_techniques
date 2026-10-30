@@ -324,6 +324,26 @@ def test_a_yaml_parse_error_is_a_config_error(tmp_path):
         load_yaml_mapping(write(tmp_path, "a: [1, 2\n"))
 
 
+@pytest.mark.parametrize(
+    "text, key",
+    [
+        ("lr: 1\nname: a\nlr: 2\n", "lr"),
+        ("optim_args:\n  steps: 1\n  steps: 2\n", "steps"),
+    ],
+    ids=["top-level", "nested"],
+)
+def test_a_repeated_yaml_key_is_refused_instead_of_last_wins(tmp_path, text, key):
+    # PyYAML alone keeps the last of two equal keys; the CLI refuses a repeated key.
+    import yaml
+
+    assert yaml.safe_load("a: 1\na: 2\n") == {"a": 2}
+    with pytest.raises(ConfigError, match=f"duplicate key '{key}'"):
+        load_yaml_mapping(write(tmp_path, text))
+    # A merge key overriding a merged value is not a repeated key.
+    merged = load_yaml_mapping(write(tmp_path, "base: &b {x: 1}\nuse:\n  <<: *b\n  x: 2\n"))
+    assert merged["use"] == {"x": 2}
+
+
 def test_an_unreadable_yaml_file_is_a_config_error(tmp_path):
     with pytest.raises(ConfigError, match="Cannot read"):
         load_yaml_mapping(tmp_path / "missing.yaml")

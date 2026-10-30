@@ -26,8 +26,8 @@ Interface contract
     held to the same rules as a Python call.
 
 ``load_yaml_mapping(path)``
-    :raises ConfigError: for an unreadable file, a parse error, a missing PyYAML,
-        or a top level that is not a mapping.
+    :raises ConfigError: for an unreadable file, a parse error (a repeated key
+        included), a missing PyYAML, or a top level that is not a mapping.
 
 Strings are never coerced here. ``"5"`` for an ``int`` field is an error; the
 command line turns text into typed values before it calls this module, and a
@@ -58,6 +58,7 @@ from typing import (
     Literal,
     Mapping,
     Optional,
+    Tuple,
     Type,
     TypeVar,
     Union,
@@ -114,6 +115,41 @@ def _describe_value(value: Any) -> str:
     return f"{value!r} ({type(value).__name__})"
 
 
+def invalid_value_message(
+    path: str, annotation: Any, value: Any, note: str = ""
+) -> str:
+    """Return the one-line wording for a value that does not fit its field.
+
+    ``validate`` and the command line's text coercion share this function, so
+    a bad ``optim_args.lr`` reads the same from a Python call and from a
+    ``key=value`` token.
+
+    :param path: the dotted key.
+    :param annotation: the field annotation the value was held to.
+    :param value: the offending value.
+    :param note: text appended after the "got ..." part.
+    """
+    return (
+        f"Invalid value for {path!r}: expected {_describe(annotation)}, "
+        f"got {_describe_value(value)}{note}"
+    )
+
+
+def unknown_key_message(prefix: str, name: str, siblings: Any) -> str:
+    """Return the wording for an unknown key, with a "did you mean" suggestion.
+
+    :param prefix: the dotted path of the group holding the key; ``""`` at the top.
+    :param name: the unknown key, without its prefix.
+    :param siblings: the names (without prefix) of the keys that do exist there.
+    """
+    dotted = (lambda key: f"{prefix}.{key}") if prefix else (lambda key: key)
+    message = f"Unknown key {dotted(name)!r}."
+    close = difflib.get_close_matches(name, list(siblings), n=1)
+    if close:
+        message += f" Did you mean {dotted(close[0])!r}?"
+    return message
+
+
 def _describe(annotation: Any) -> str:
     """Return the "expected ..." wording for ``annotation``."""
     origin = typing.get_origin(annotation)
@@ -159,10 +195,7 @@ def _check(annotation: Any, value: Any, path: str, errors: List[str]) -> Any:
     args = typing.get_args(annotation)
 
     def fail(note: str = "") -> None:
-        errors.append(
-            f"Invalid value for {path!r}: expected {_describe(annotation)}, "
-            f"got {_describe_value(value)}{note}"
-        )
+        errors.append(invalid_value_message(path, annotation, value, note))
 
     if annotation is Any:
         return value
@@ -292,12 +325,11 @@ def _build(
     for key, value in mapping.items():
         name = str(key)
         if not isinstance(key, str) or name not in fields:
-            message = f"Unknown key {dotted(name)!r}."
-            if isinstance(key, str):
-                close = difflib.get_close_matches(name, list(fields), n=1)
-                if close:
-                    message += f" Did you mean {dotted(close[0])!r}?"
-            errors.append(message)
+            errors.append(
+                unknown_key_message(
+                    prefix, name, fields if isinstance(key, str) else []
+                )
+            )
             continue
         kwargs[name] = _check(hints[name], value, dotted(name), errors)
     for name, field in fields.items():
@@ -418,16 +450,42 @@ def _refuse_constant(name: str) -> Any:
     raise ValueError(f"{name} is not allowed in a config")
 
 
+def _finite_float(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f"{text} is not a finite number")
+    return value
+
+
+def parse_json(text: str) -> Tuple[Any, Optional[str]]:
+    """Parse JSON text, refusing NaN, Infinity and overflowing numbers.
+
+    The failure comes back as a value, not as an exception, so a caller that
+    collects many problems (the command line's coercion) needs no handler.
+
+    :param text: JSON text.
+    :return: ``(value, None)`` on success, ``(None, reason)`` on failure.
+    """
+    try:
+        return (
+            json.loads(
+                text, parse_constant=_refuse_constant, parse_float=_finite_float
+            ),
+            None,
+        )
+    except ValueError as exc:
+        return None, str(exc)
+
+
 def from_json(cls: Type[T], text: str) -> T:
     """Parse ``text`` and build ``cls`` through :func:`validate`.
 
     :raises ConfigError: when ``text`` is not JSON, or holds NaN or Infinity.
     :raises ConfigValidationError: when the parsed mapping does not fit ``cls``.
     """
-    try:
-        mapping = json.loads(text, parse_constant=_refuse_constant)
-    except ValueError as exc:
-        raise ConfigError(f"Config text is not valid JSON: {exc}") from exc
+    mapping, reason = parse_json(text)
+    if reason is not None:
+        raise ConfigError(f"Config text is not valid JSON: {reason}")
     return validate(cls, mapping)
 
 
@@ -456,7 +514,33 @@ def _yaml_loader() -> Any:
         ) from exc
 
     class Yaml12SafeLoader(yaml.SafeLoader):
-        """SafeLoader whose float resolver accepts ``3e-4``."""
+        """SafeLoader whose float resolver accepts ``3e-4`` and which refuses a repeated key."""
+
+        def construct_mapping(self, node, deep=False):
+            # DECISION plan-2026-10-30T132432-a865fa08/D-027: PyYAML keeps the
+            # LAST of two equal keys without a word, while the command line
+            # refuses a repeated key. Do NOT leave the silent last-wins in a
+            # config file: a typo'd copy-paste would override a value and
+            # nothing would say so. Only scalar keys are compared, and merge
+            # keys (``<<``) are skipped because overriding a merged value is
+            # what a merge is for.
+            seen = set()
+            for key_node, _value_node in node.value:
+                if (
+                    not isinstance(key_node, yaml.ScalarNode)
+                    or key_node.tag == "tag:yaml.org,2002:merge"
+                ):
+                    continue
+                key = self.construct_object(key_node, deep=True)
+                if key in seen:
+                    raise yaml.constructor.ConstructorError(
+                        "while constructing a mapping",
+                        node.start_mark,
+                        f"found a duplicate key {key!r}",
+                        key_node.start_mark,
+                    )
+                seen.add(key)
+            return super().construct_mapping(node, deep=deep)
 
     # DECISION plan-2026-10-30T132432-a865fa08/D-002: PyYAML implements YAML
     # 1.1, whose float pattern needs a dot, so yaml.safe_load("3e-4") returns
@@ -480,8 +564,8 @@ def load_yaml_mapping(path: Any) -> Dict[str, Any]:
 
     :param path: the file to read.
     :return: the parsed mapping, with ``3e-4`` read as a float.
-    :raises ConfigError: for an unreadable file, a parse error, a missing
-        PyYAML, or a top level that is not a mapping.
+    :raises ConfigError: for an unreadable file, a parse error (a repeated
+        key included), a missing PyYAML, or a top level that is not a mapping.
     """
     loader_class = _yaml_loader()
     import yaml
