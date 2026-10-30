@@ -1,12 +1,15 @@
-"""``DiTXA``, the bidirectional bridge's cross-attention diffusion
-transformer, built by the ``DiTXA`` class with size presets reachable
-through ``DiTXA.from_variant`` / ``create_ditxa``.
+"""
+DiTXA, the cross-attention diffusion transformer of the bidirectional bridge.
 
-Text-to-image and image-to-text are not two models sharing weights; they
-are one model told, per sample, which way time runs, via a ``direction``
-tensor rather than a Python branch. See :class:`DiTXA` for the forward-path
-diagram and the two upstream oddities this port reproduces rather than
-repairs.
+:class:`DiTXA` predicts the bridge score of a noisy tensor ``x_t`` given the
+opposite endpoint ``x_cond``, a time and a prompt-kind label. Text-to-image and
+image-to-text are one model: a per-sample ``direction`` tensor, not a Python
+branch, picks the conditioning embedder, so one traced graph serves batches that
+mix both directions. Size presets come from :meth:`DiTXA.from_variant` and
+:func:`create_ditxa`; ``pretrained`` takes a local ``.keras`` path, and ``True``
+raises. Two upstream details are reproduced rather than repaired: the
+conditioning vector averages two timestep embeddings, and classifier-free
+guidance computes ``cond + s * (cond - uncond)``.
 
 References:
     - Peebles & Xie (2023). *Scalable Diffusion Models with Transformers*.
@@ -19,14 +22,17 @@ References:
       arXiv:2207.12598. The dropout row of the class-label table exists for the
       unconditional branch; the guidance formula itself lands in ``sde.py``.
     - Upstream ``dit.py`` (``DiTWithCrossAttention``), staged verbatim under the
-      plan's ``reference/`` directory -- the line-by-line source of this port.
+      plan's ``reference/`` directory, the line-by-line source of this port.
 """
 
 import math
-from typing import Any, Dict, List, Optional, Tuple, Union
-
 import keras
 import numpy as np
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+# ---------------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------------
 
 from dl_techniques.layers.embedding.class_label_embedding import ClassLabelEmbedding
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
@@ -45,6 +51,8 @@ from dl_techniques.utils.weight_transfer import (
 from .blocks import DiTXABlock
 from .config import PROMPT_NUM_CLASSES
 
+# ---------------------------------------------------------------------------
+
 #: Keys :meth:`DiTXA.call` requires of its input dictionary.
 REQUIRED_INPUT_KEYS: Tuple[str, ...] = ("x_t", "t", "y", "x_cond", "direction")
 
@@ -52,25 +60,27 @@ REQUIRED_INPUT_KEYS: Tuple[str, ...] = ("x_t", "t", "y", "x_cond", "direction")
 OPTIONAL_INPUT_KEYS: Tuple[str, ...] = ("cond_mask",)
 
 #: Upstream's ``self.time_scale``. ``t`` lives in ``[0, 1]`` and the sinusoidal
-#: basis expects the DDPM-era ``[0, 1000]`` range, so the model -- not the
-#: embedder -- multiplies.
+#: basis expects the DDPM-era ``[0, 1000]``, so the model, not the embedder,
+#: multiplies.
 DEFAULT_TIME_SCALE: float = 1000.0
 
 #: Number of chunks the final layer's adaLN emits: ``shift`` and ``scale``, no gate.
 NUM_FINAL_ADALN_CHUNKS: int = 2
 
+# ---------------------------------------------------------------------------
 
+# DECISION plan-2026-09-02T094601-77d4a04e/D-016: not "glorot_uniform" on the conv.
+# Keras takes fan_out = p*p*D for a conv kernel; upstream uses fan_out = D. See decisions.md.
 def flattened_linear_xavier(
     fan_in: int, fan_out: int
 ) -> keras.initializers.Initializer:
-    """Xavier-uniform for a conv kernel treated as a flattened ``Linear``.
+    """Return Xavier-uniform for a conv kernel treated as a flattened ``Linear``.
 
-    # DECISION plan-2026-09-02T094601-77d4a04e/D-016: do not pass "glorot_uniform"
-    # to PatchEmbedding2D as equivalent -- Keras computes fan_out over the full kernel (p*p*D), upstream reshapes first (fan_out=D), a 4x difference at p=2. See decisions.md.
-
-    A fresh initializer object is returned on every call: a shared
-    :class:`~keras.initializers.Initializer` instance draws bit-identically
-    forever, and this model has three patch embedders.
+    Keras' ``glorot_uniform`` on a ``(p, p, C, D)`` kernel uses
+    ``fan_out = p * p * D``; upstream reshapes the kernel to a ``Linear`` first,
+    so ``fan_out = D``. A fresh initializer is returned on every call, because a
+    shared instance draws identically every time and the model has three patch
+    embedders.
 
     :param fan_in: ``patch_h * patch_w * in_channels``.
     :type fan_in: int
@@ -88,6 +98,7 @@ def flattened_linear_xavier(
     limit = math.sqrt(6.0 / float(fan_in + fan_out))
     return keras.initializers.RandomUniform(minval=-limit, maxval=limit)
 
+# ---------------------------------------------------------------------------
 
 def _as_batch_vector(value: Any) -> Any:
     """Drop a trailing singleton axis so ``(B, 1)`` and ``(B,)`` behave alike.
@@ -99,60 +110,70 @@ def _as_batch_vector(value: Any) -> Any:
         return keras.ops.squeeze(value, axis=-1)
     return value
 
+# ---------------------------------------------------------------------------
 
 @register_dl_technique(package="dl_techniques.models.bit_diffusion.model")
 class DiTXAFinalLayer(keras.layers.Layer):
-    """2-way adaLN, a zero-init projection, and the channels-last unpatchify.
+    """Turn final tokens into a channels-last bridge tensor.
 
-    The projection is zero in weight and bias, so a freshly built model
-    predicts exactly zero (adaLN-Zero). Combined with the zero-init gates in
-    every block, this makes the whole stack the zero map at step 0, which is
-    what makes a 28-block stack trainable.
+    The projection is zero in kernel and bias, so a freshly built model predicts
+    exactly zero (adaLN-Zero); with the zero gates of every block, the whole
+    stack is the zero map at step 0, which keeps a deep stack trainable. The
+    unpatchify writes the width as ``w * p``; upstream writes ``h * p`` for both
+    axes (``dit.py:239``), which only works because it asserts ``H == W``.
 
     .. code-block:: text
 
-        c (B, hidden)                     x (B, N, hidden)
-          |                                 |
-        SiLU -> Dense(2*hidden, zeros)      v
-          |                            LayerNorm(eps, non-affine)
-          +--> split 2 -> shift, scale      |
-                          \\_______ modulate ___/
-                                    |
-                          Dense(p*p*out_channels, zeros)
-                                    |
-                    reshape (B, h, w, p, p, c)
-                    transpose (0, 1, 3, 2, 4, 5)
-                    reshape (B, h*p, w*p, c)      <- w*p, not h*p
-                                    |
-                                    v
-                            (B, H, W, out_channels)
+        x [B, N, hidden]            c [B, hidden]
+                 │                             │
+                 ▼                             ▼
+        norm_final (non-affine)              SiLU
+                 │                             │
+                 │                             ▼
+                 │                  ┌─────────────────────┐
+                 │                  │ adaln_dense         │  zero-init
+                 │                  │ Dense(2 * hidden)   │
+                 │                  └─────────────────────┘
+                 │                             │  shift, scale
+                 ▼                             │
+             modulate ◄────────────────────────┘
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ linear              │  zero-init
+        │ Dense(p * p * C)    │
+        └─────────────────────┘
+                 │  [B, N, p * p * C]
+                 ▼
+        reshape [B, h, w, p, p, C]
+                 │
+                 ▼
+        transpose (0, 1, 3, 2, 4, 5)
+                 │
+                 ▼
+        reshape [B, h * p, w * p, C]
 
-    The width dimension is written ``w * p``. Upstream writes
-    ``h * p`` for both (``dit.py:239``), which is correct only because it also
-    asserts ``H == W``; copying the shortcut would make the first non-square
-    preset a silent transposition rather than an error.
-
-    :param hidden_size: Model width.
+    :param hidden_size: Model width. Must be positive.
     :type hidden_size: int
-    :param patch_size: Patch side; the projection emits ``patch_size ** 2 *
-        out_channels`` numbers per token.
+    :param patch_size: Patch side ``p``; the projection emits ``p * p *
+        out_channels`` numbers per token. Must be positive.
     :type patch_size: int
-    :param out_channels: Channel count of the reconstructed bridge tensor. Equal
-        to ``in_channels`` here, because DiTXA asserts ``learn_sigma=False``.
+    :param out_channels: Channel count ``C`` of the reconstructed bridge tensor;
+        :class:`DiTXA` passes its ``in_channels``. Must be positive.
     :type out_channels: int
-    :param grid_height: Patch-grid rows, ``H // patch_size``.
+    :param grid_height: Patch-grid rows ``h``, ``H // patch_size``. Must be
+        positive.
     :type grid_height: int
-    :param grid_width: Patch-grid columns, ``W // patch_size``.
+    :param grid_width: Patch-grid columns ``w``, ``W // patch_size``. Must be
+        positive.
     :type grid_width: int
-    :param norm_epsilon: Epsilon of the non-affine ``LayerNormalization``.
-        Explicit: bare Keras defaults to ``1e-3``.
+    :param norm_epsilon: Epsilon of the non-affine ``LayerNormalization``;
+        bare Keras defaults to ``1e-3``. Not validated.
     :type norm_epsilon: float
-    :param kwargs: Standard ``keras.layers.Layer`` keyword arguments.
-
-    :raises ValueError: If any size argument is not positive.
+    :param **kwargs: Standard ``keras.layers.Layer`` keyword arguments.
 
     Input shape:
-        ``[x, c]`` -- ``(B, N, hidden_size)`` and ``(B, hidden_size)``, with
+        ``[x, c]``: ``(B, N, hidden_size)`` and ``(B, hidden_size)``, with
         ``N == grid_height * grid_width``.
 
     Output shape:
@@ -177,6 +198,13 @@ class DiTXAFinalLayer(keras.layers.Layer):
         norm_epsilon: float = 1e-6,
         **kwargs: Any,
     ) -> None:
+        """Validate the sizes and create the sub-layers.
+
+        Arguments are documented on the class. Sizes are converted with
+        ``int()``, so a float is truncated before the check.
+
+        :raises ValueError: If any size argument is not positive.
+        """
         super().__init__(**kwargs)
 
         for name, value in (
@@ -199,8 +227,8 @@ class DiTXAFinalLayer(keras.layers.Layer):
         self.norm_final = keras.layers.LayerNormalization(
             epsilon=self.norm_epsilon, center=False, scale=False, name="norm_final"
         )
-        # Four separate Zeros() instances, one per initializer slot -- an
-        # Initializer instance is never shared across layers.
+        # Four separate Zeros() instances, one per initializer slot; an
+        # initializer instance is never shared across layers.
         self.adaln_dense = keras.layers.Dense(
             NUM_FINAL_ADALN_CHUNKS * self.hidden_size,
             use_bias=True,
@@ -217,7 +245,7 @@ class DiTXAFinalLayer(keras.layers.Layer):
         )
 
     def build(self, input_shape: Any) -> None:
-        """Build the norm and both Dense layers.
+        """Build the norm and both Dense layers. Returns at once if already built.
 
         :param input_shape: ``[x_shape, c_shape]``.
         :type input_shape: Any
@@ -239,9 +267,10 @@ class DiTXAFinalLayer(keras.layers.Layer):
         super().build(input_shape)
 
     def unpatchify(self, tokens: Any) -> Any:
-        """``(B, N, p*p*C)`` -> ``(B, h*p, w*p, C)``.
+        """Reshape ``(B, N, p*p*C)`` tokens into ``(B, h*p, w*p, C)``.
 
-        Exposed as a method so a test can drive the interleave directly.
+        Uses the configured grid, so ``N`` must equal
+        ``grid_height * grid_width``.
 
         :param tokens: Per-token payloads.
         :return: The channels-last bridge tensor.
@@ -262,7 +291,7 @@ class DiTXAFinalLayer(keras.layers.Layer):
 
         :param inputs: ``[x, c]``.
         :type inputs: List[keras.KerasTensor]
-        :param training: Forwarded to the Dense sub-layers.
+        :param training: Forwarded to the Dense sub-layers, which ignore it.
         :type training: Optional[bool]
         :return: ``(B, h*p, w*p, out_channels)``.
         :rtype: keras.KerasTensor
@@ -312,95 +341,153 @@ class DiTXAFinalLayer(keras.layers.Layer):
         )
         return config
 
+# ---------------------------------------------------------------------------
 
 @register_dl_technique(package="dl_techniques.models.bit_diffusion.model")
 class DiTXA(keras.Model):
-    """Bidirectional bridge diffusion transformer with cross-attention.
+    """Predict the bridge score for a batch that may mix both directions.
 
-    One network runs the bridge in both directions: ``direction`` is a
-    per-sample tensor, not a Python branch, so both conditioning embedders
-    are built and run on every sample and ``keras.ops.where`` picks the
-    answer. That costs one extra patch-embedding convolution per forward
-    pass and buys a single traced graph, stock ``fit()``, and
-    mixed-direction batches.
+    ``direction`` is a per-sample tensor, not a Python branch: both conditioning
+    embedders are built and run on every sample and ``keras.ops.where`` keeps
+    one. That costs one extra patch-embedding convolution per pass and buys a
+    single traced graph, stock ``fit()`` and mixed-direction batches. Two
+    upstream details are reproduced rather than repaired (see
+    ``PORT_NOTES.md``): ``c`` averages the two timestep embeddings instead of
+    plain DiT's ``t + y``, and ``forward_cond_scale`` multiplies the raw
+    ``x_cond`` pixels in the forward direction only. Inputs must be
+    ``input_size`` square; nothing checks it, and a non-square input with the
+    same patch count is reshaped silently.
+
+    Main path:
 
     .. code-block:: text
 
-        x_t (B,H,W,C)      t (B,)   y (B,)     x_cond (B,H,W,C)   direction (B,)
-            |                |        |              |               |
-            v                v        v              |               | 0 = forward
-        PatchEmbedding2D  t_embedder  |              |               | 1 = reverse
-        (kernel=stride=p) (x1000)     |              |               |
-            |                |        |     +--------+--------+      |
-            v                |        |     |                 |      |
-        + pos_embed          |        |  x_cond * fwd_scale  x_cond  |
-        (fixed 2D sin-cos,   |        |     |                 |      |
-         one table, shared)  |        |     v                 v      |
-            |                |        |  cond_embedder_   cond_embedder_
-            |                |        |     forward          reverse
-            |                |        |     |                 |      |
-            |                |        |     +----> where(dir) <------+
-            |                |        |              |
-            |         t_cond = where(dir, 1, 0)      v
-            |                |        |          + pos_embed   (the same table)
-            |          cond_t_embedder|              |
-            |            (x1000)      |              v
-            |                |        |          * cond_mask[:, None, None]
-            +--> c = (t + t_cond) / 2 + y           |   applied once, after pos_embed:
-                             |                      |   a masked sample's stream is
-                             |                      |   the exact zero tensor
-                             v                      v
-                        +----------------------------------+
-                        |  depth x DiTXABlock(x, c, cond)  |
-                        |  12-way adaLN, msa -> xa -> mlp  |
-                        +----------------------------------+
-                                         |
-                                         v
-                          DiTXAFinalLayer: 2-way adaLN,
-                          Dense(p*p*out_channels), unpatchify
-                                         |
-                                         v
-                                output (B, H, W, C)
+        x_t [B, H, W, C]
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ x_embedder          │  kernel = stride = p
+        └─────────────────────┘
+                 │  [B, N, hidden]
+                 ▼
+        + pos_embed (fixed 2D sin-cos)
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ DiTXABlock x depth  │◄── c, cond_tokens
+        └─────────────────────┘
+                 │  [B, N, hidden]
+                 ▼
+        ┌─────────────────────┐
+        │ final_layer         │◄── c
+        └─────────────────────┘
+                 │
+                 ▼
+        output [B, H, W, C]
 
-    Two upstream details are reproduced rather than repaired: ``c = (t +
-    t_cond) / 2 + y`` is an average, not ``t + y`` as in plain DiT, and
-    ``forward_cond_scale`` multiplies the raw ``x_cond`` pixels in the
-    forward direction only. See ``PORT_NOTES.md`` for both.
+    With ``drop_path_rate > 0`` each block's change to the tokens, not its
+    output, passes through ``StochasticDepth``.
 
-    :param input_size: Side of the square bridge tensor. Upstream asserts
-        ``H == W``; so does this port, and the fixed positional table is built
-        on a square grid.
+    Conditioning vector ``c``:
+
+    .. code-block:: text
+
+        t [B]                     direction [B]
+                 │                           │
+                 ▼                           ▼
+        * time_scale              t_cond: 1 reverse, 0 forward
+                 │                           │  * time_scale
+                 ▼                           ▼
+        ┌─────────────────────┐   ┌─────────────────────┐
+        │ t_embedder          │   │ cond_t_embedder     │
+        └─────────────────────┘   └─────────────────────┘
+                 │                           │
+                 └─────────────┬─────────────┘
+                               ▼
+                    average of the two
+                               │
+                               ▼
+                    + y_embedder(y)
+                               │
+                               ▼
+                    c [B, hidden]
+
+    Conditioning tokens:
+
+    .. code-block:: text
+
+        x_cond [B, H, W, C]
+                 │
+                 ├───────────────────────────┐
+                 ▼                           │
+        * forward_cond_scale                 │
+                 │                           │
+                 ▼                           ▼
+        ┌─────────────────────┐   ┌─────────────────────┐
+        │ cond_embedder_      │   │ cond_embedder_      │
+        │ forward             │   │ reverse             │
+        └─────────────────────┘   └─────────────────────┘
+                 │                           │
+                 └─────────────┬─────────────┘
+                               ▼
+                where(reverse, reverse, forward)
+                               │  [B, N, hidden]
+                               ▼
+                + pos_embed (same table as x)
+                               │
+                               ▼
+                * cond_mask (if given)
+                               │
+                               ▼
+                cond_tokens [B, N, hidden]
+
+    Variants (``MODEL_VARIANTS``):
+
+    .. code-block:: text
+
+        variant  input  patch  channels  hidden  depth  heads
+        tiny     8      2      4         64      2      4
+        S        32     2      4         384     12     6
+        B        32     2      4         768     12     12
+        L        32     2      4         1024    24     16
+        XL       32     2      4         1152    28     16
+
+    :param input_size: Side of the square bridge tensor; the fixed positional
+        table is built on a square grid. Must be positive.
     :type input_size: int
-    :param patch_size: Patch side. Must divide ``input_size``.
+    :param patch_size: Patch side. Must be positive and divide ``input_size``.
     :type patch_size: int
-    :param in_channels: Bridge channel count. ``learn_sigma`` is fixed at
-        ``False`` upstream for this architecture, so ``out_channels`` equals it.
+    :param in_channels: Bridge channel count, also ``out_channels``: upstream
+        fixes ``learn_sigma=False`` for this architecture. Must be positive.
     :type in_channels: int
-    :param hidden_size: Model width. Must be divisible by ``num_heads``.
+    :param hidden_size: Model width. Must be positive and divisible by
+        ``num_heads``.
     :type hidden_size: int
-    :param depth: Number of :class:`~...blocks.DiTXABlock` layers.
+    :param depth: Number of :class:`~...blocks.DiTXABlock` layers. Must be
+        positive.
     :type depth: int
     :param num_heads: Attention heads in both attention sub-layers of a block.
+        Must be positive.
     :type num_heads: int
-    :param mlp_ratio: Block MLP expansion factor.
+    :param mlp_ratio: Block MLP expansion factor; :class:`DiTXABlock` rejects a
+        non-positive value.
     :type mlp_ratio: float
     :param num_classes: Prompt-kind classes. Default
         :data:`~...config.PROMPT_NUM_CLASSES`.
     :type num_classes: int
-    :param class_dropout_rate: CFG label-dropout probability. Any positive value
-        adds the extra unconditional row to the label table, which
-        ``forward_with_cfg`` needs.
+    :param class_dropout_rate: Label-dropout probability of ``y_embedder``. Any
+        positive value adds an extra unconditional row to the label table.
     :type class_dropout_rate: float
-    :param forward_cond_scale: Multiplier on the **raw** ``x_cond`` pixels, in
-        the **forward direction only**, before patch embedding. Opaque
+    :param forward_cond_scale: Multiplier on the raw ``x_cond`` pixels, in the
+        forward direction only, before patch embedding. Opaque upstream
         hyperparameter; default ``1.0``.
     :type forward_cond_scale: float
     :param time_scale: Multiplier applied to both ``t`` and ``t_cond`` before
         embedding. Upstream's ``1000``.
     :type time_scale: float
-    :param drop_path_rate: Maximum stochastic-depth rate; rates ramp linearly
-        from ``0`` at block 0. ``0.0`` (the default, and upstream's only
-        behaviour) creates no ``StochasticDepth`` sub-layer at all.
+    :param drop_path_rate: Maximum stochastic-depth rate, in ``[0, 1)``; rates
+        ramp linearly from ``0`` at block 0. ``0.0`` (the default, and
+        upstream's only behaviour) creates no ``StochasticDepth`` sub-layer.
     :type drop_path_rate: float
     :param dropout_rate: Attention and MLP dropout inside every block.
     :type dropout_rate: float
@@ -416,17 +503,28 @@ class DiTXA(keras.Model):
     :type frequency_embedding_size: int
     :param label_seed: Seed of the label embedder's own dropout RNG.
     :type label_seed: Optional[int]
-    :param kwargs: Standard ``keras.Model`` keyword arguments.
+    :param **kwargs: Standard ``keras.Model`` keyword arguments.
 
-    :raises ValueError: If ``input_size`` is not divisible by ``patch_size``, if
-        ``hidden_size`` is not divisible by ``num_heads``, or if any size
-        argument is not positive.
+    :ivar pos_embed: The single fixed ``(1, num_patches, hidden_size)`` sin-cos
+        table, non-trainable and always float32, added to ``x`` and to the
+        conditioning tokens. ``None`` until built.
+    :ivar x_embedder: ``PatchEmbedding2D`` of ``x_t``.
+    :ivar cond_embedder_forward: ``PatchEmbedding2D`` of ``x_cond``, forward.
+    :ivar cond_embedder_reverse: ``PatchEmbedding2D`` of ``x_cond``, reverse.
+    :ivar t_embedder: Timestep embedder of ``t``.
+    :ivar cond_t_embedder: Independent timestep embedder of ``t_cond``.
+    :ivar y_embedder: The class-label table with its dropout row.
+    :ivar blocks: ``depth`` ``DiTXABlock`` layers.
+    :ivar drop_paths: One ``StochasticDepth`` per block, ``None`` where the
+        rate is 0.
+    :ivar final_layer: :class:`DiTXAFinalLayer`.
 
     Input shape:
-        A dictionary with ``x_t`` ``(B, H, W, C)``, ``t`` ``(B,)`` in ``[0, 1]``,
-        ``y`` ``(B,)`` integer labels, ``x_cond`` ``(B, H, W, C)``,
-        ``direction`` ``(B,)`` (``0`` forward, ``1`` reverse) and the optional
-        ``cond_mask`` ``(B,)`` (``1`` attend, ``0`` zero the stream).
+        A dictionary with ``x_t`` ``(B, H, W, C)``, ``t`` ``(B,)`` or
+        ``(B, 1)`` in ``[0, 1]``, ``y`` ``(B,)`` integer labels, ``x_cond``
+        ``(B, H, W, C)``, ``direction`` ``(B,)`` (above 0.5 means reverse) and
+        the optional ``cond_mask`` ``(B,)`` (``1`` attend, ``0`` zero the
+        stream; other values scale it).
 
     Output shape:
         ``(B, H, W, C)``.
@@ -446,22 +544,11 @@ class DiTXA(keras.Model):
                 "direction": keras.ops.convert_to_tensor([0.0, 1.0]),
             }
             model(batch).shape  # (2, 8, 8, 4)
-
-    Attributes:
-        pos_embed: The single fixed ``(1, num_patches, hidden_size)`` sin-cos
-            table, non-trainable, added to ``x`` AND to the conditioning tokens.
-        x_embedder, cond_embedder_forward, cond_embedder_reverse: The three
-            ``PatchEmbedding2D`` projections.
-        t_embedder, cond_t_embedder: Two independent timestep embedders.
-        y_embedder: The class-label table with its CFG dropout row.
-        blocks: ``depth`` ``DiTXABlock`` layers.
-        final_layer: :class:`DiTXAFinalLayer`.
     """
 
-    #: hidden / depth / heads follow ``DiTXA_{S,B,L,XL}/2`` (``dit.py:695-745``);
-    #: every shipped variant is patch size 2 (D-003). ``tiny`` exists so a test
-    #: can round-trip a real model in seconds, and rides the ``tiny`` bridge
-    #: preset's ``(8, 8, 4)`` geometry rather than the ``sd`` preset's.
+    #: hidden / depth / heads follow upstream ``DiTXA_{S,B,L,XL}/2``, all patch 2
+    #: (D-003). ``tiny`` is a seconds-fast model on the ``tiny`` bridge preset's
+    #: ``(8, 8, 4)`` geometry.
     MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
         "tiny": {
             "input_size": 8,
@@ -532,6 +619,16 @@ class DiTXA(keras.Model):
         label_seed: Optional[int] = None,
         **kwargs: Any,
     ) -> None:
+        """Validate the sizes and create every sub-layer.
+
+        Arguments are documented on the class. Sizes are converted with
+        ``int()``, so a float is truncated before the check.
+
+        :raises ValueError: If a size argument is not positive, ``input_size``
+            is not divisible by ``patch_size``, ``hidden_size`` is not divisible
+            by ``num_heads``, ``drop_path_rate`` is outside ``[0, 1)``, or a
+            block rejects ``mlp_ratio``.
+        """
         super().__init__(**kwargs)
 
         for name, value in (
@@ -652,8 +749,8 @@ class DiTXA(keras.Model):
             for i in range(self.depth)
         ]
 
-        # DECISION plan-2026-09-02T094601-77d4a04e/D-017: apply StochasticDepth to
-        # the block's delta, never its raw output -- DiTXABlock does its own residual adds, so dropping the output zeros the whole activation, not the contribution. See decisions.md.
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-017: drop the block's delta, not its output.
+        # DiTXABlock adds its own residuals; dropping the output zeros everything. See decisions.md.
         rates = linear_drop_path_rates(self.depth, self.drop_path_rate)
         self.drop_path_rates = list(rates)
         self.drop_paths = [
@@ -700,15 +797,15 @@ class DiTXA(keras.Model):
         return {k: tuple(v) for k, v in input_shape.items()}
 
     def build(self, input_shape: Any) -> None:
-        """Materialize the positional table and every sub-layer ``call`` runs.
+        """Create the positional table and build every sub-layer ``call`` runs.
 
-        Both conditioning embedders are built unconditionally: ``direction`` is
-        a per-sample tensor, so both of them run on every forward pass (D-005),
-        and a ``build()`` that materialized only one would produce a weight tree
-        that does not match the traced graph.
+        Both conditioning embedders are built, because both run on every pass
+        (D-005). Returns at once if already built.
 
-        :param input_shape: A dict of input shapes.
+        :param input_shape: A dict of input shapes with every required key.
         :type input_shape: Any
+        :raises ValueError: If ``input_shape`` is not a dict or lacks a required
+            key.
         """
         if self.built:
             return
@@ -722,9 +819,8 @@ class DiTXA(keras.Model):
         token_shape = (batch, self.num_patches, self.hidden_size)
         c_shape = (batch, self.hidden_size)
 
-        # The fixed 2D sin-cos table, computed with NumPy and installed through a
-        # Constant initializer -- never a plain tensor attribute (no .keras round
-        # trip) and never add_weight().assign() inside build() (StatelessScope discards it).
+        # Installed through a Constant initializer: a plain tensor attribute skips the
+        # .keras round trip, and an assign inside build() is discarded by StatelessScope.
         table = get_2d_sincos_pos_embed(self.hidden_size, self.grid_size)
         self.pos_embed = self.add_weight(
             name="pos_embed",
@@ -762,9 +858,10 @@ class DiTXA(keras.Model):
         )
 
     def _is_reverse(self, direction: Any) -> Any:
-        """``(B,)`` direction flag -> a ``(B, 1, 1)`` boolean selector.
+        """Turn a ``(B,)`` direction flag into a ``(B, 1, 1)`` boolean selector.
 
-        :param direction: ``0`` forward, ``1`` reverse. Float or integer.
+        :param direction: ``0`` forward, ``1`` reverse, float or integer; any
+            value above 0.5 counts as reverse.
         :return: Boolean tensor broadcastable against ``(B, N, D)``.
         """
         flag = keras.ops.cast(_as_batch_vector(direction), "float32") > 0.5
@@ -777,27 +874,24 @@ class DiTXA(keras.Model):
         cond_mask: Optional[Any] = None,
         training: Optional[bool] = None,
     ) -> Any:
-        """Build the conditioning token stream, masked to exact zeros.
+        """Build the conditioning token stream; a masked sample's stream is exactly zero.
 
-        Both conditioning embedders run; ``direction`` selects. The mask is
-        applied **after** ``pos_embed`` is added, once, upstream of every block
-        (``dit.py:533-542``) -- masking before it would leave a masked sample
-        carrying the positional signal instead of the exact zero tensor, with no
-        shape symptom and a plausible-looking output.
-
-        Exposed as a method so a test can assert the zeros directly rather than
-        inferring them from the model's output.
+        Both conditioning embedders run and ``direction`` selects. The mask is
+        applied once, after ``pos_embed`` is added, before any block, as
+        upstream: masking first would leave the positional signal in a masked
+        sample.
 
         :param x_cond: ``(B, H, W, C)`` conditioning bridge tensor.
         :param direction: ``(B,)`` per-sample direction flag.
-        :param cond_mask: Optional ``(B,)`` mask; ``None`` means all-ones.
+        :param cond_mask: Optional ``(B,)`` mask; ``None`` means all-ones. Values
+            other than 0 and 1 scale the stream.
         :param training: Forwarded to the patch embedders.
         :return: ``(B, num_patches, hidden_size)`` conditioning tokens.
         """
         is_reverse = self._is_reverse(direction)
 
-        # DECISION plan-2026-09-02T094601-77d4a04e/D-005: forward_cond_scale applies
-        # only inside the forward branch, before two separate embedders -- selecting between already-embedded streams keeps that structural, not conventional. See decisions.md.
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-005: scale only the forward branch.
+        # Two embedders, selected after embedding, keep the scale off reverse. See decisions.md.
         forward_tokens = self.cond_embedder_forward(
             x_cond * self.forward_cond_scale, training=training
         )
@@ -806,8 +900,8 @@ class DiTXA(keras.Model):
 
         cond_tokens = cond_tokens + keras.ops.cast(self.pos_embed, cond_tokens.dtype)
 
-        # DECISION plan-2026-09-02T094601-77d4a04e/D-034: apply the mask after the
-        # positional add, never before -- masking first leaves a masked sample carrying the positional signal instead of the exact zero tensor. See decisions.md.
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-034: mask after the positional add.
+        # Masking first leaves the positional signal in a masked sample. See decisions.md.
         if cond_mask is not None:
             mask = keras.ops.cast(
                 _as_batch_vector(cond_mask), cond_tokens.dtype
@@ -823,14 +917,15 @@ class DiTXA(keras.Model):
         """Predict the bridge score for a batch that may mix both directions.
 
         :param inputs: Dict with ``x_t``, ``t``, ``y``, ``x_cond``,
-            ``direction`` and optionally ``cond_mask``.
+            ``direction`` and optionally ``cond_mask``; see the class.
         :type inputs: Dict[str, Any]
         :param training: Threaded to the label dropout, the block dropouts and
             stochastic depth.
         :type training: Optional[bool]
         :return: ``(B, H, W, out_channels)``.
         :rtype: keras.KerasTensor
-        :raises ValueError: If a required key is missing.
+        :raises ValueError: If ``inputs`` is not a dict or a required key is
+            missing.
         """
         if not isinstance(inputs, dict):
             raise ValueError(
@@ -865,8 +960,8 @@ class DiTXA(keras.Model):
             t_cond * self.time_scale, training=training
         )
         y_emb = self.y_embedder(y, training=training)
-        # DECISION plan-2026-09-02T094601-77d4a04e/D-035: average the two timestep
-        # embeddings, not their sum and not t + y as in plain DiT -- dropping the /2 or reusing t_embedder for t_cond raises nothing but changes what adaLN sees. See decisions.md.
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-035: average two separate embeddings.
+        # Dropping /2 or reusing t_embedder raises nothing but changes adaLN. See decisions.md.
         c = (t_emb + t_cond_emb) / 2.0 + y_emb
 
         cond_tokens = self._embed_conditioning(
@@ -888,35 +983,24 @@ class DiTXA(keras.Model):
         cfg_scale: float,
         training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        """Classifier-free guidance, in upstream's non-standard algebra.
+        """Return the classifier-free-guided prediction, in upstream's algebra.
 
-        Two forward passes: one with the conditioning stream intact, one with
-        ``cond_mask`` all-false so every conditioning token is the exact zero
-        tensor (the branch :meth:`_embed_conditioning` guards). Then::
+        Runs two passes, one with the conditioning stream intact and one with
+        ``cond_mask`` all zero, so every conditioning token is exactly zero, and
+        returns::
 
             cond + cfg_scale * (cond - uncond)
 
-        This is not the DiT paper's formula. The textbook form is
-        ``uncond + s * (cond - uncond)``; upstream starts from ``cond``,
-        which is the textbook formula evaluated at ``s + 1``. The two differ
-        by exactly one unit of guidance at every ``s``, so a "corrected"
-        implementation reproduces none of the reference results at any
-        published ``cfg_scale`` and produces perfectly plausible images
-        while doing it. Ported as written; pinned by
-        ``test_the_cfg_formula_is_the_nonstandard_one.py``.
-
-        Note the consequence at ``s = 0``: this formula returns ``cond``
-        unchanged, so guidance is off. The sampler still gates on
-        ``cfg_scale > 0`` before calling here (``BridgeSDE._evaluate_score``),
-        because the gate saves the second forward pass, not because the value
-        would differ.
-
-        Any ``cond_mask`` present in ``inputs`` is ignored: the conditional pass
-        is defined as the fully-unmasked one.
+        This is the textbook ``uncond + s * (cond - uncond)`` evaluated at
+        ``s + 1``: one unit more guidance at every ``s``. The reference results
+        and published ``cfg_scale`` values use this form, so it is ported as
+        written. At ``s = 0`` it returns ``cond``. Any ``cond_mask`` in
+        ``inputs`` is ignored; the conditional pass is fully unmasked. The label
+        ``y`` is passed unchanged to both passes.
 
         :param inputs: The same dict :meth:`call` takes.
         :type inputs: Dict[str, Any]
-        :param cfg_scale: Guidance strength ``s``.
+        :param cfg_scale: Guidance strength ``s``. Not validated.
         :type cfg_scale: float
         :param training: Forwarded to both passes.
         :type training: Optional[bool]
@@ -924,8 +1008,7 @@ class DiTXA(keras.Model):
         :rtype: keras.KerasTensor
         """
         cond_inputs = {k: v for k, v in inputs.items() if k != "cond_mask"}
-        # The all-false mask is derived from `t`, which is `(B,)` by contract, so
-        # no static batch size is needed and this stays graph-safe.
+        # The all-zero mask comes from `t`, so no static batch size is needed.
         uncond_inputs = dict(cond_inputs)
         uncond_inputs["cond_mask"] = keras.ops.zeros_like(
             _as_batch_vector(inputs["t"])
@@ -933,17 +1016,19 @@ class DiTXA(keras.Model):
 
         cond = self(cond_inputs, training=training)
         uncond = self(uncond_inputs, training=training)
-        # DECISION plan-2026-09-02T094601-77d4a04e/D-018: keep this non-textbook
-        # form -- it is what the reference checkpoints and every published cfg_scale value were tuned against, equal to the textbook form at cfg_scale + 1. See decisions.md.
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-018: keep this non-textbook form.
+        # Reference checkpoints and published cfg_scale values were tuned on it. See decisions.md.
         return cond + cfg_scale * (cond - uncond)
 
     def compute_output_shape(self, input_shape: Any) -> Tuple[Optional[int], ...]:
-        """Return ``(B, H, W, out_channels)`` without building anything.
+        """Return ``(B, input_size, input_size, out_channels)`` without building.
 
-        :param input_shape: A dict of input shapes.
+        :param input_shape: A dict of input shapes with every required key.
         :type input_shape: Any
         :return: The output bridge shape.
         :rtype: Tuple[Optional[int], ...]
+        :raises ValueError: If ``input_shape`` is not a dict or lacks a required
+            key.
         """
         shapes = self._input_shapes(input_shape)
         batch = shapes["x_t"][0]
@@ -1014,12 +1099,13 @@ class DiTXA(keras.Model):
             ``NotImplementedError``: no weights are distributed with this
             package.
         :type pretrained: Union[bool, str]
-        :param kwargs: Overrides applied on top of the variant's entry.
-        :type kwargs: Any
+        :param **kwargs: Overrides applied on top of the variant's entry.
+        :type **kwargs: Any
         :return: The configured model; built when ``pretrained`` is a path.
         :rtype: DiTXA
-        :raises ValueError: If ``variant`` is not a known key, or a
-            ``pretrained`` checkpoint does not fit the model.
+        :raises ValueError: If ``variant`` is not a known key, a merged
+            argument is invalid, or a ``pretrained`` checkpoint does not fit the
+            model.
         :raises NotImplementedError: If ``pretrained`` is ``True``.
         :raises FileNotFoundError: If a ``pretrained`` path does not exist.
         """
@@ -1040,10 +1126,8 @@ class DiTXA(keras.Model):
         model = cls(**config)
 
         if weights_path is not None:
-            # DECISION plan-2026-10-14T062616-81938e81/D-042: build from the config's shapes,
-            # then the complete-or-raise by-name copy; do NOT call model.load_weights here --
-            # into the unbuilt model it always raised, and after a build it restores nothing
-            # on a name or shape mismatch and still returns. See decisions.md.
+            # DECISION plan-2026-10-14T062616-81938e81/D-042: build, then strict by-name copy.
+            # model.load_weights skips mismatches silently after a build. See decisions.md.
             side, channels = model.input_size, model.in_channels
             model.build(
                 {
@@ -1064,13 +1148,14 @@ class DiTXA(keras.Model):
             logger.info("Loaded DiTXA weights from %s", weights_path)
         return model
 
+# ---------------------------------------------------------------------------
 
 def create_ditxa(
     variant: str = "S",
     pretrained: Union[bool, str] = False,
     **kwargs: Any,
 ) -> DiTXA:
-    """Module-level thin factory over :meth:`DiTXA.from_variant`.
+    """Create a :class:`DiTXA` through :meth:`DiTXA.from_variant`.
 
     :param variant: One of ``"tiny"``, ``"S"``, ``"B"``, ``"L"``, ``"XL"``.
     :type variant: str
@@ -1079,12 +1164,12 @@ def create_ditxa(
         layer loads or the call raises), or ``True`` to raise
         ``NotImplementedError``. See :meth:`DiTXA.from_variant`.
     :type pretrained: Union[bool, str]
-    :param kwargs: Overrides forwarded to the constructor.
-    :type kwargs: Any
+    :param **kwargs: Overrides forwarded to the constructor.
+    :type **kwargs: Any
     :return: The configured model.
     :rtype: DiTXA
-    :raises ValueError: If ``variant`` is not a known key, or a
-        ``pretrained`` checkpoint does not fit the model.
+    :raises ValueError: If ``variant`` is not a known key, a merged argument
+        is invalid, or a ``pretrained`` checkpoint does not fit the model.
     :raises NotImplementedError: If ``pretrained`` is ``True``.
     :raises FileNotFoundError: If a ``pretrained`` path does not exist.
 
@@ -1092,3 +1177,5 @@ def create_ditxa(
         >>> model = create_ditxa("tiny")
     """
     return DiTXA.from_variant(variant, pretrained=pretrained, **kwargs)
+
+# ---------------------------------------------------------------------------

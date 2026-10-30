@@ -1,4 +1,5 @@
-"""Geometry and constants of the BiT/BiB text<->image bridge, held by the
+"""
+Geometry and constants of the BiT/BiB text<->image bridge, held by the
 ``BridgeConfig`` dataclass and its named presets in ``BRIDGE_PRESETS``.
 
 A caption is a sequence of token embeddings; an image is a VAE latent map.
@@ -12,14 +13,19 @@ This module is channels-last: the bridge shape is ``(H, W, C)``, where an
 upstream PyTorch implementation would store ``(C, H, W)``.
 
 References:
-    - Upstream ``token_bridge.py``, from which every constant here is
-      ported.
+    - Upstream ``token_bridge.py``, from which every constant here is ported.
 """
 
 from dataclasses import dataclass
 from typing import Dict, Tuple
 
+# ---------------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------------
 
 #: Endpoint clamp for every time sampler. ``C(0, t, t)`` and ``C(t, 1, 1)`` are
 #: exactly zero at ``t = 0`` / ``t = 1``, so the score targets divide by zero
@@ -49,6 +55,7 @@ SD_LATENT_SHIFT: float = 0.0
 FLUX_LATENT_SCALE: float = 0.3611
 FLUX_LATENT_SHIFT: float = 0.1159
 
+# ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class BridgeConfig:
@@ -166,6 +173,7 @@ class BridgeConfig:
             )
         return self
 
+# ---------------------------------------------------------------------------
 
 # sd   : 64 tokens x 64 dims   = 4096  == 32 * 32 * 4  = 4096
 # flux : 128 tokens x 128 dims = 16384 == 32 * 32 * 16 = 16384
@@ -203,6 +211,7 @@ logger.debug(
     "bit_diffusion bridge presets validated: %s", ", ".join(sorted(BRIDGE_PRESETS))
 )
 
+# ---------------------------------------------------------------------------
 
 def get_bridge_config(name: str) -> BridgeConfig:
     """Look a preset up by name.
@@ -218,3 +227,5 @@ def get_bridge_config(name: str) -> BridgeConfig:
             f"Unknown bridge preset '{name}'. Available: {sorted(BRIDGE_PRESETS)}"
         )
     return BRIDGE_PRESETS[name]
+
+# ---------------------------------------------------------------------------

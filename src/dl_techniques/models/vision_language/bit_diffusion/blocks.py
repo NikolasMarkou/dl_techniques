@@ -1,31 +1,27 @@
-"""The DiTXA transformer block, built by ``DiTXABlock``.
+"""
+DiTXA transformer block: a DiT block with cross-attention and 12-way adaLN-Zero.
 
-A plain DiT block conditions self-attention and an MLP from one vector,
-emitting ``6 * hidden_size`` modulation numbers. This block conditions four
-things and emits ``12 * hidden_size``: a third chunk triple modulates the
-conditioning tokens on their way into cross-attention's K/V projection
-instead of gating a residual. See :class:`DiTXABlock` for the diagram and
-exact chunk order.
-
-Attention, the MLP and the modulation broadcast are not reimplemented here:
-``MultiHeadCrossAttention`` covers both attention modes,
-``create_ffn_layer('gelu_tanh', ...)`` matches upstream's tanh-approximate
-GELU MLP, and ``modulate`` is imported from ``layers/transformers/sd3_adaln.py``.
-The 12-way split stays here rather than becoming a sibling there; see
-``decisions.md`` D-004.
-
-The embedders that feed the block are shared layers, not defined here: the
-timestep embedder is ``layers/embedding/timestep_embedding.py``, the fixed 2D
-sin-cos table is ``layers/embedding/sincos_pos_embed_2d.py``, and the class
-label embedder is ``layers/embedding/class_label_embedding.py``.
+:class:`DiTXABlock` updates a token stream ``x`` with self-attention,
+cross-attention onto conditioning tokens, and an MLP, each gated from one
+conditioning vector ``c``. A plain DiT block emits ``6 * hidden_size``
+modulation numbers for its two residuals; this block emits ``12 * hidden_size``,
+one triple per residual plus a triple that modulates the conditioning tokens on
+their way into cross-attention's K/V. Attention, the MLP and ``modulate`` come
+from shared layers (``MultiHeadCrossAttention``,
+``create_ffn_layer('gelu_tanh', ...)``, ``layers/transformers/sd3_adaln.py``),
+as do the timestep, 2D sin-cos and class-label embedders that feed the block
+(``layers/embedding/``).
 
 References:
     - Ported from ``DiTBlockWithCrossAttention``, upstream ``dit.py``.
 """
 
-from typing import Any, Dict, List, Optional, Tuple, Union
-
 import keras
+from typing import Any, Dict, List, Optional, Tuple
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.layers.attention.multi_head_cross_attention import (
     MultiHeadCrossAttention,
@@ -35,10 +31,9 @@ from dl_techniques.layers.transformers.sd3_adaln import modulate
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.logger import logger
 
-#: The order the 12 modulation chunks are consumed in, upstream ``dit.py:351-352``.
-#: Index ``k`` of ``ops.split(adaLN_modulation(c), 12, axis=-1)`` is
-#: ``ADALN_CHUNK_NAMES[k]``. Exported so the guard test can name chunks rather
-#: than count slices.
+# ---------------------------------------------------------------------
+#: Order of the 12 modulation chunks, as in upstream ``dit.py``: index ``k`` of
+#: ``ops.split(adaLN_modulation(c), 12, axis=-1)`` is ``ADALN_CHUNK_NAMES[k]``.
 ADALN_CHUNK_NAMES: Tuple[str, ...] = (
     "shift_msa", "scale_msa", "gate_msa",
     "shift_xa", "scale_xa", "gate_xa",
@@ -49,6 +44,7 @@ ADALN_CHUNK_NAMES: Tuple[str, ...] = (
 #: Width multiplier of the modulation projection.
 NUM_ADALN_CHUNKS: int = len(ADALN_CHUNK_NAMES)
 
+# ---------------------------------------------------------------------
 
 def _unpack_triple_shape(
     input_shape: Any,
@@ -59,13 +55,15 @@ def _unpack_triple_shape(
 ]:
     """Split ``[x_shape, c_shape, cond_shape]`` into its three parts.
 
-    :param input_shape: A list or tuple of exactly three shapes: ``x_shape``
-        ``(B, N, hidden)``, ``c_shape`` ``(B, hidden)`` and ``cond_shape``
-        ``(B, N, hidden)``.
+    :param input_shape: A list or tuple of exactly three shapes, each itself a
+        list or tuple: ``x_shape`` ``(B, N, hidden)``, ``c_shape``
+        ``(B, hidden)`` and ``cond_shape`` ``(B, N, hidden)``. Their sizes are
+        not checked.
     :type input_shape: Any
     :return: ``(x_shape, c_shape, cond_shape)`` as tuples.
     :rtype: Tuple[Tuple, Tuple, Tuple]
-    :raises ValueError: If the input is not a triple of shapes.
+    :raises ValueError: If the input is not a triple, or one entry is not a
+        list or tuple.
     """
     if not isinstance(input_shape, (list, tuple)) or len(input_shape) != 3:
         raise ValueError(
@@ -88,100 +86,145 @@ def _unpack_triple_shape(
 
 @register_dl_technique(package="dl_techniques.models.bit_diffusion.blocks")
 class DiTXABlock(keras.layers.Layer):
-    """DiT block with cross-attention and a 12-way adaLN-Zero modulation.
+    """Update a token stream with gated self-attention, cross-attention and MLP.
 
-    A plain DiT block conditions self-attention and an MLP from one vector,
-    emitting ``6 * hidden_size`` modulation numbers. This block conditions
-    four things and emits ``12 * hidden_size``: the third chunk triple does
-    not gate a residual at all, it modulates the conditioning tokens on
-    their way into cross-attention's K/V projection.
+    One ``Dense(12 * hidden_size)`` on ``SiLU(c)`` yields twelve ``(B, hidden)``
+    chunks in the order of ``ADALN_CHUNK_NAMES``. Three triples shift, scale and
+    gate the three residuals; the fourth shifts and scales the conditioning
+    tokens before they become cross-attention's K/V. Its gate, chunk 8, is
+    emitted and never used, as upstream. ``cond_tokens`` is consumed, not
+    updated, so every block of a stack receives the same tensor; only ``x``
+    accumulates. The modulation ``Dense`` starts at zero in kernel and bias
+    (adaLN-Zero), so every gate is 0 and the block is the exact identity on
+    ``x`` at initialisation, which keeps a deep stack trainable.
+
+    Modulation:
 
     .. code-block:: text
 
-        c (B, hidden)                                cond_tokens (B, N, hidden)
-          |                                                     |
-          v                                                     |
-        SiLU -> Dense(12*hidden, zero-init)                      |
-          |                                                     |
-          +-> split into 12 chunks, in order:                    |
-          |                                                     |
-          |   0 shift_msa  1 scale_msa  2 gate_msa   -- triple 1 |
-          |   3 shift_xa   4 scale_xa   5 gate_xa    -- triple 2 |
-          |   6 shift_cond 7 scale_cond 8 gate_cond  -- triple 3 |
-          |   9 shift_mlp 10 scale_mlp 11 gate_mlp   -- triple 4 |
-          |                                                     |
-        x (B, N, hidden)                                         |
-          |                                                     |
-          |--------------------------------+                     |
-          v                                |                     |
-        norm1 -> modulate(shift_msa, scale_msa)                   |
-          v                                |                     |
-        attn (self-attention, fused QKV, per-head RMSNorm on Q/K) |
-          v                                |                     |
-        * gate_msa ---------------------> (+)  residual 1         |
-                                           |                     |
-          +--------------------------------+                     |
-          |                                |                     v
-          v                                |          norm_cond -> modulate(
-        norm_cross -> modulate(shift_xa,   |             shift_cond, scale_cond)
-          |            scale_xa)           |                     |
-          |            = the query         |            = the K/V stream
-          v                                |                     |
-        cross_attn(query, kv) <------------|---------------------+
-          |                                |
-          v                                |     gate_cond is emitted and
-        * gate_xa ----------------------> (+)    consumed by no residual add;
-                                           |     it is the one dead chunk.
-          +--------------------------------+
-          |                                |
-          v                                |
-        norm2 -> modulate(shift_mlp, scale_mlp)
-          v                                |
-        mlp (tanh-approximate GELU)        |
-          v                                |
-        * gate_mlp ---------------------> (+)  residual 3
-                                           |
-                                           v
-                                  output (B, N, hidden)
+        c [B, hidden]
+                 │
+                 ▼
+               SiLU
+                 │
+                 ▼
+        ┌──────────────────────────┐
+        │ adaln_dense              │  zero-init kernel and bias
+        │ Dense(12 * hidden)       │
+        └──────────────────────────┘
+                 │  [B, 12 * hidden]
+                 ▼
+        split into 12 chunks of [B, hidden]
 
-    The conditioning stream is not carried forward: ``cond_tokens`` is
-    modulated per block and consumed, never updated, so block ``n + 1``
-    receives the same tensor block ``n`` did. Only ``x`` accumulates.
+         0 shift_msa    1 scale_msa    2 gate_msa     self-attention
+         3 shift_xa     4 scale_xa     5 gate_xa      cross-attention query
+         6 shift_cond   7 scale_cond   8 gate_cond    cond K/V; gate unused
+         9 shift_mlp   10 scale_mlp   11 gate_mlp     MLP
+
+    Residual stream:
+
+    .. code-block:: text
+
+        x [B, N, hidden]
+                 │
+                 ├────────────────────┐
+                 ▼                    │
+        norm1, modulate msa           │
+                 │                    │
+                 ▼                    │
+        ┌─────────────────────┐       │
+        │ attn  self          │       │
+        └─────────────────────┘       │
+                 │                    │
+                 ▼                    │
+             * gate_msa               │
+                 │                    │
+                 ▼                    │
+                 + ◄──────────────────┘
+                 │
+                 ├────────────────────┐
+                 ▼                    │
+        norm_cross, modulate xa       │
+                 │                    │
+                 ▼                    │
+        ┌─────────────────────┐       │
+        │ cross_attn          │◄──────┼── kv
+        └─────────────────────┘       │
+                 │                    │
+                 ▼                    │
+             * gate_xa                │
+                 │                    │
+                 ▼                    │
+                 + ◄──────────────────┘
+                 │
+                 ├────────────────────┐
+                 ▼                    │
+        norm2, modulate mlp           │
+                 │                    │
+                 ▼                    │
+        ┌─────────────────────┐       │
+        │ mlp  GELU (tanh)    │       │
+        └─────────────────────┘       │
+                 │                    │
+                 ▼                    │
+             * gate_mlp               │
+                 │                    │
+                 ▼                    │
+                 + ◄──────────────────┘
+                 │
+                 ▼
+        output [B, N, hidden]
+
+    "modulate msa" is ``modulate(., shift_msa, scale_msa)``, and likewise for
+    xa and mlp. ``kv = modulate(norm_cond(cond_tokens), shift_cond,
+    scale_cond)``. Both attention sub-layers apply a per-head ``RMSNorm``
+    without scale to Q and K; ``attn`` runs in self-attention mode.
 
     :param hidden_size: Model width. Must be positive and divisible by
         ``num_heads``.
     :type hidden_size: int
-    :param num_heads: Attention head count for both attention sub-layers.
+    :param num_heads: Attention head count for both attention sub-layers. Must
+        be positive.
     :type num_heads: int
     :param mlp_ratio: Expansion factor of the MLP's hidden width,
         ``int(hidden_size * mlp_ratio)``. Must be positive.
     :type mlp_ratio: float
     :param norm_epsilon: Epsilon of the four non-affine ``LayerNormalization``
-        sub-layers. Bare Keras defaults to ``1e-3``, a silent 1000x error
-        with no shape symptom.
+        sub-layers. The Keras default of ``1e-3`` would differ from this
+        ``1e-6`` by 1000x with no shape symptom. Not validated.
     :type norm_epsilon: float
     :param qk_norm_epsilon: Epsilon of the per-head Q/K ``RMSNorm``s inside both
-        attention sub-layers.
+        attention sub-layers. Not validated.
     :type qk_norm_epsilon: float
-    :param dropout_rate: Attention-weight dropout, and the MLP's dropout.
+    :param dropout_rate: Attention-weight dropout, and the MLP's dropout. Not
+        validated.
     :type dropout_rate: float
     :param use_bias: Whether the attention projections and the MLP carry biases.
-        Upstream is ``qkv_bias=True`` throughout.
+        Upstream is ``qkv_bias=True`` throughout. ``adaln_dense`` always has a
+        bias.
     :type use_bias: bool
-    :param kwargs: Standard ``keras.layers.Layer`` keyword arguments.
+    :param **kwargs: Standard ``keras.layers.Layer`` keyword arguments.
 
-    :raises ValueError: If ``hidden_size`` is not positive or not divisible by
-        ``num_heads``, if ``num_heads`` is not positive, or if ``mlp_ratio`` is
-        not positive.
+    :ivar adaln_dense: The zero-init ``Dense(12 * hidden_size)`` producing the
+        chunks; its layer name, and so its weight path, is ``adaln_modulation``.
+    :ivar attn: Self-attention over ``x``.
+    :ivar cross_attn: Cross-attention, ``x`` querying the modulated
+        ``cond_tokens``.
+    :ivar mlp: The tanh-approximate GELU MLP.
+    :ivar norm1: Non-affine ``LayerNormalization`` before ``attn``.
+    :ivar norm_cross: Non-affine ``LayerNormalization`` on the cross-attention
+        query.
+    :ivar norm_cond: Non-affine ``LayerNormalization`` on ``cond_tokens``.
+    :ivar norm2: Non-affine ``LayerNormalization`` before ``mlp``.
 
     Input shape:
-        A list of three tensors -- ``x`` ``(B, N, hidden_size)``, ``c``
+        A list of three tensors: ``x`` ``(B, N, hidden_size)``, ``c``
         ``(B, hidden_size)`` and ``cond_tokens`` ``(B, N, hidden_size)``.
-        Upstream asserts ``cond_tokens.shape == x.shape``; this is same-length
-        cross-attention, not variable-length K/V.
+        Upstream asserts ``cond_tokens.shape == x.shape``; this layer does not
+        check it.
 
     Output shape:
-        ``(B, N, hidden_size)`` -- the query stream only.
+        ``(B, N, hidden_size)``, the updated ``x`` only.
 
     Example:
         >>> import keras
@@ -191,20 +234,6 @@ class DiTXABlock(keras.layers.Layer):
         >>> cond = keras.random.normal((2, 16, 64))
         >>> block([x, c, cond]).shape
         (2, 16, 64)
-
-    Note:
-        At initialisation the modulation ``Dense`` is zero in both kernel and
-        bias (adaLN-Zero), so all three gates are ``0`` and the block is the
-        exact identity on ``x``. That is not a quirk to be optimised away: it is
-        what makes a deep stack trainable, and it is also the premise the
-        attribution probe rests on.
-
-    Attributes:
-        adaln_dense: The zero-init ``Dense(12 * hidden_size)`` producing the chunks.
-        attn: Self-attention over ``x`` (fused QKV).
-        cross_attn: Cross-attention, ``x`` querying ``cond_tokens`` (fused KV).
-        mlp: The tanh-approximate GELU MLP.
-        norm1, norm_cross, norm_cond, norm2: Non-affine ``LayerNormalization``s.
     """
 
     def __init__(
@@ -218,6 +247,14 @@ class DiTXABlock(keras.layers.Layer):
         use_bias: bool = True,
         **kwargs: Any,
     ) -> None:
+        """Validate the sizes and create the sub-layers.
+
+        Arguments are documented on the class.
+
+        :raises ValueError: If ``hidden_size`` or ``num_heads`` is not positive,
+            ``hidden_size`` is not divisible by ``num_heads``, or ``mlp_ratio``
+            is not positive.
+        """
         super().__init__(**kwargs)
 
         if hidden_size <= 0:
@@ -287,8 +324,8 @@ class DiTXABlock(keras.layers.Layer):
             use_bias=self.use_bias,
             name="mlp",
         )
-        # Two separate Zeros() instances -- a shared Initializer object
-        # draws bit-identically forever, invisible for Zeros but not the habit to keep across 28-block variants.
+        # Separate Zeros() instances: a shared initializer object draws
+        # identically every time, harmless for Zeros but a habit to avoid.
         self.adaln_dense = keras.layers.Dense(
             NUM_ADALN_CHUNKS * self.hidden_size,
             use_bias=True,
@@ -298,7 +335,7 @@ class DiTXABlock(keras.layers.Layer):
         )
 
     def build(self, input_shape: Any) -> None:
-        """Build every sub-layer at the shape it will actually see.
+        """Build every sub-layer at the shape it will see. Returns at once if built.
 
         :param input_shape: ``[x_shape, c_shape, cond_shape]``.
         :type input_shape: Any
@@ -334,7 +371,7 @@ class DiTXABlock(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Run the three gated residuals in the order ``msa -> xa -> mlp``.
 
-        :param inputs: ``[x, c, cond_tokens]``.
+        :param inputs: ``[x, c, cond_tokens]``, indexed without a length check.
         :type inputs: List[keras.KerasTensor]
         :param training: Keras training flag, threaded to the attention and MLP
             dropouts.
@@ -344,8 +381,8 @@ class DiTXABlock(keras.layers.Layer):
         """
         x, c, cond_tokens = inputs[0], inputs[1], inputs[2]
 
-        # DECISION plan-2026-09-02T094601-77d4a04e/D-004: keep this 12-way split
-        # inside the block, not an sd3_adaln.py sibling -- the four triples apply to three different normed streams, not that family's one-norm shape. See decisions.md.
+        # DECISION plan-2026-09-02T094601-77d4a04e/D-004: the 12-way split stays here.
+        # Its triples feed three normed streams, unlike sd3_adaln.py's one. See decisions.md.
         chunks = keras.ops.split(
             self.adaln_dense(keras.ops.silu(c)), NUM_ADALN_CHUNKS, axis=-1
         )
@@ -355,8 +392,8 @@ class DiTXABlock(keras.layers.Layer):
             shift_cond, scale_cond, _gate_cond,
             shift_mlp, scale_mlp, gate_mlp,
         ) = chunks
-        # _gate_cond is chunk 8 and gates nothing. Upstream emits it and never
-        # consumes it; dropping it here would renumber chunks 9-11 and silently rewire the MLP triple.
+        # _gate_cond (chunk 8) gates nothing, as upstream. Dropping it from the split
+        # would renumber chunks 9-11 and silently rewire the MLP triple.
 
         x = x + keras.ops.expand_dims(gate_msa, axis=1) * self.attn(
             modulate(self.norm1(x), shift_msa, scale_msa),
@@ -378,7 +415,7 @@ class DiTXABlock(keras.layers.Layer):
     def compute_output_shape(
         self, input_shape: Any
     ) -> Tuple[Optional[int], ...]:
-        """Return the query stream's shape; the conditioning stream is not carried.
+        """Return the shape of the updated ``x``; ``cond_tokens`` is not returned.
 
         :param input_shape: ``[x_shape, c_shape, cond_shape]``.
         :type input_shape: Any
@@ -408,3 +445,5 @@ class DiTXABlock(keras.layers.Layer):
             }
         )
         return config
+
+# ---------------------------------------------------------------------

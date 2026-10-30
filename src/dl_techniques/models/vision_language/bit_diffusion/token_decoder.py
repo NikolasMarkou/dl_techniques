@@ -1,42 +1,15 @@
-"""``SharedTokenDecoder`` reads text back out of a sampled bridge tensor.
+"""
+SharedTokenDecoder: reads caption tokens back out of a sampled bridge tensor.
 
-The bridge carries a caption as raw token embeddings, not token ids, and the
-diffusion model never sees a vocabulary. This decoder turns the sampler's
-output back into words: one small MLP applied to every token position
-independently, sharing weights across positions the way a language-model
-head shares weights across time.
-
-It is a separate model, not part of :class:`DiTXA` and not touched by the
-diffusion training loop. It consumes the reverse direction's output
-(image to text) after that output has been unpacked by
-:func:`~.token_bridge.bridge_to_token_flat`.
-
-.. code-block:: text
-
-    bridge tensor            (B, H, W, C)        e.g. (B, 32, 32, 4)
-        |
-        |  bridge_to_token_flat()   -- exact inverse of the packing
-        v
-    token_flat               (B, token_seq_len * token_emb_dim)
-        |
-        |  reshape, then L2-normalize each token row
-        v
-    unit tokens              (B, token_seq_len, token_emb_dim)
-        |
-        |  Dense(hidden_dim) -> GELU -> Dense(hidden_dim) -> GELU
-        |  -> Dense(vocab_size)                 [exact-erf GELU, see below]
-        v
-    logits                   (B, token_seq_len, vocab_size)
-
-Normalizing each token row makes the decoder invariant to the absolute
-scale of its input: ``decode(x)`` and ``decode(k * x)`` give the same
-logits for any ``k > 0``. This makes it robust to a sampler whose output
-drifts in magnitude, and means the decoder does not need to know
-``token_scale``.
-
-This decoder uses exact-erf GELU, while the DiTXA transformer blocks use
-the tanh approximation; the two formulas differ by up to 4.732e-04 and are
-pinned by a value-level guard, not to be unified.
+The bridge carries a caption as raw token embeddings, and the diffusion model
+never sees a vocabulary. :class:`SharedTokenDecoder` turns the image-to-text
+sampler's output, unpacked by :func:`~.token_bridge.bridge_to_token_flat`, into
+per-token vocabulary logits with one small MLP shared across positions, like a
+language-model head. It is a separate model, outside :class:`DiTXA` and the
+diffusion training loop. Each token row is L2-normalized first, so
+``decode(x)`` equals ``decode(k * x)`` for any ``k > 0`` and the decoder needs no
+``token_scale``. Its GELU is the exact erf form, not the tanh approximation of
+the DiTXA blocks; the two differ by up to 4.7e-4.
 
 References:
     - Upstream ``token_decoder.py``, the source of this port.
@@ -56,28 +29,28 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import refuse_pretrained
 
-#: ``torch.nn.functional.normalize``'s default lower bound on the norm, the
-#: only thing standing between an all-zero (padding) token row and a 0/0.
+#: ``torch.nn.functional.normalize``'s default epsilon; it keeps an all-zero
+#: (padding) token row from becoming 0/0.
 DEFAULT_NORMALIZE_EPSILON: float = 1e-12
 
-#: Upstream's ``torch.nn.GELU()`` default. ``False`` is the exact
-#: ``0.5 * x * (1 + erf(x / sqrt(2)))``; ``True`` is the tanh approximation the
-#: DiTXA block's MLP uses. This package uses both.
-# DECISION plan-2026-09-02T094601-77d4a04e/D-026: do not unify this with the
-# gelu_tanh FFN factory key blocks.py uses -- the two formulas differ by up to 4.732e-04, invisible to shape/dtype/round-trip tests. See decisions.md.
+# DECISION plan-2026-09-02T094601-77d4a04e/D-026: keep exact GELU, separate from blocks.py.
+# The tanh form differs by up to 4.7e-4, invisible to shape and dtype checks. See decisions.md.
+#: ``False`` (upstream ``torch.nn.GELU()``) selects exact erf GELU; ``True`` the tanh form.
 GELU_APPROXIMATE: bool = False
 
 #: Number of ``Dense`` layers in the shared per-token head.
 NUM_MLP_LAYERS: int = 3
 
 
+# DECISION plan-2026-09-02T094601-77d4a04e/D-025: floor epsilon at the dtype's smallest normal.
+# In float16, 1e-12 is zero, and a padding row would divide by zero. See decisions.md.
 def _normalize_epsilon_for(epsilon: float, dtype: str) -> float:
     """Raise ``epsilon`` to the smallest normal of ``dtype`` when it underflows.
 
-    # DECISION plan-2026-09-02T094601-77d4a04e/D-025: floor epsilon at the compute
-    # dtype's smallest normal -- under float16, 1e-12 is itself zero, so a padding row's norm divides by zero. See decisions.md.
+    A dtype NumPy cannot read as a float (an integer or unknown name) returns
+    ``epsilon`` unchanged.
 
-    :param epsilon: The configured lower bound on the token norm.
+    :param epsilon: The configured normalization epsilon.
     :type epsilon: float
     :param dtype: The compute dtype the normalization runs in.
     :type dtype: str
@@ -93,25 +66,72 @@ def _normalize_epsilon_for(epsilon: float, dtype: str) -> float:
 
 @register_dl_technique(package="dl_techniques.models.bit_diffusion.token_decoder")
 class SharedTokenDecoder(keras.Model):
-    """Per-token MLP head mapping bridge token embeddings to vocabulary logits.
+    """Map flattened bridge token embeddings to per-token vocabulary logits.
 
-    :param vocab_size: Number of output logits per token position.
+    Each token row is L2-normalized, then one three-layer MLP runs on every
+    position with shared weights. An all-zero (padding) row stays zero after
+    normalization and decodes to the MLP's response to a zero input.
+
+    .. code-block:: text
+
+        token_flat [B, T * D]
+                 │
+                 ▼
+        reshape [B, T, D]
+                 │
+                 ▼
+        L2-normalize each token row
+                 │  unit rows; zero rows stay zero
+                 ▼
+        ┌─────────────────────┐
+        │ mlp_in  Dense(H)    │
+        └─────────────────────┘
+                 │
+                 ▼
+        GELU (exact erf)
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ mlp_hidden  Dense(H)│
+        └─────────────────────┘
+                 │
+                 ▼
+        GELU (exact erf)
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │ mlp_out  Dense(V)   │
+        └─────────────────────┘
+                 │
+                 ▼
+        logits [B, T, V]
+
+    T is token_seq_len, D token_emb_dim, H hidden_dim, V vocab_size.
+
+    :param vocab_size: Number of output logits per token position. Must be
+        positive.
     :type vocab_size: int
-    :param hidden_dim: Width of both hidden ``Dense`` layers.
+    :param hidden_dim: Width of both hidden ``Dense`` layers. Must be positive.
     :type hidden_dim: int
     :param token_seq_len: Token positions carried by one bridge tensor; must
-        match :attr:`~.config.BridgeConfig.token_seq_len`.
+        match :attr:`~.config.BridgeConfig.token_seq_len`, which is not
+        checked. Must be positive.
     :type token_seq_len: int
     :param token_emb_dim: Width of one token embedding; must match
-        :attr:`~.config.BridgeConfig.token_emb_dim`.
+        :attr:`~.config.BridgeConfig.token_emb_dim`, which is not checked. Must
+        be positive.
     :type token_emb_dim: int
-    :param normalize_epsilon: Lower bound on a token's L2 norm, so an all-zero
-        padding token decodes rather than dividing by zero.
+    :param normalize_epsilon: Epsilon of the L2 normalization, floored at the
+        compute dtype's smallest normal. Must be positive.
     :type normalize_epsilon: float
     :param use_bias: Whether the three ``Dense`` layers carry biases; upstream
         does (``torch.nn.Linear``'s default).
     :type use_bias: bool
-    :raises ValueError: If any size argument is not positive.
+    :param **kwargs: Standard ``keras.Model`` keyword arguments.
+
+    :ivar mlp_in: ``Dense(hidden_dim)`` on the normalized tokens.
+    :ivar mlp_hidden: ``Dense(hidden_dim)``.
+    :ivar mlp_out: ``Dense(vocab_size)`` producing the logits.
 
     Example:
         >>> decoder = SharedTokenDecoder(vocab_size=1000, token_seq_len=8,
@@ -131,6 +151,14 @@ class SharedTokenDecoder(keras.Model):
         use_bias: bool = True,
         **kwargs: Any,
     ) -> None:
+        """Validate the sizes and create the three ``Dense`` layers.
+
+        Arguments are documented on the class. Sizes are converted with
+        ``int()``, so a float is truncated before the check.
+
+        :raises ValueError: If a size argument or ``normalize_epsilon`` is not
+            positive.
+        """
         super().__init__(**kwargs)
 
         for name, value in (
@@ -187,7 +215,7 @@ class SharedTokenDecoder(keras.Model):
 
     @property
     def token_flat_dim(self) -> int:
-        """``token_seq_len * token_emb_dim`` -- the expected input width.
+        """Return ``token_seq_len * token_emb_dim``, the expected input width.
 
         :return: Number of numbers in one flattened token sequence.
         :rtype: int
@@ -195,9 +223,12 @@ class SharedTokenDecoder(keras.Model):
         return self.token_seq_len * self.token_emb_dim
 
     def build(self, input_shape: Any) -> None:
-        """Build the three ``Dense`` layers against the per-token shape.
+        """Build the three ``Dense`` layers on the per-token shape.
 
-        :param input_shape: ``(B, token_flat_dim)``.
+        Returns at once if already built.
+
+        :param input_shape: ``(B, token_flat_dim)``. An unknown width is
+            accepted here; a wrong one then fails in the reshape at call time.
         :type input_shape: Any
         :raises ValueError: If the input is not rank 2, or its last axis is not
             :attr:`token_flat_dim`.
@@ -228,9 +259,6 @@ class SharedTokenDecoder(keras.Model):
     def normalize_tokens(self, token_flat: Any) -> Any:
         """Reshape to ``(B, T, D)`` and L2-normalize each token row.
 
-        Exposed as a method so a guard can drive the scale-invariance and the
-        zero-row (padding) behaviour directly, without the MLP in the way.
-
         :param token_flat: ``(B, token_flat_dim)`` embeddings, at whatever
             absolute scale the sampler produced.
         :return: ``(B, token_seq_len, token_emb_dim)`` rows of unit norm; an
@@ -240,9 +268,7 @@ class SharedTokenDecoder(keras.Model):
         tokens = keras.ops.reshape(
             token_flat, (batch, self.token_seq_len, self.token_emb_dim)
         )
-        # The sanctioned two-step for naming a backend dtype; `keras.backend.*`
-        # is a Keras-2 residue banned across all of `src/` by
-        # `tests/test_the_keras2_backend_calls_are_gone.py`.
+        # Read the dtype name directly: keras.backend.* is banned across src/.
         dtype_name = getattr(tokens.dtype, "name", None) or str(tokens.dtype)
         epsilon = _normalize_epsilon_for(self.normalize_epsilon, dtype_name)
         return keras.ops.normalize(tokens, axis=-1, order=2, epsilon=epsilon)
@@ -256,14 +282,14 @@ class SharedTokenDecoder(keras.Model):
 
         :param inputs: ``(B, token_flat_dim)`` token embeddings.
         :type inputs: keras.KerasTensor
-        :param training: Forwarded to the ``Dense`` sub-layers.
+        :param training: Forwarded to the ``Dense`` sub-layers, which ignore it.
         :type training: Optional[bool]
         :return: ``(B, token_seq_len, vocab_size)`` logits.
         :rtype: keras.KerasTensor
         """
         x = self.normalize_tokens(inputs)
-        # D-277: the two GELU forms with float64-exact constants, chosen by
-        # GELU_APPROXIMATE as before; bit-identical to keras.ops.gelu at float32.
+        # Both GELU forms use float64-exact constants (D-277) and match
+        # keras.ops.gelu bit for bit at float32.
         gelu = gelu_tanh if GELU_APPROXIMATE else exact_gelu
         x = self.mlp_in(x, training=training)
         x = gelu(x)
@@ -324,10 +350,8 @@ def create_shared_token_decoder(
     """Build a :class:`SharedTokenDecoder`.
 
     There is no ``variant`` argument and no ``MODEL_VARIANTS`` table: the
-    decoder's geometry is fully determined by the
-    :class:`~.config.BridgeConfig` it reads and by the tokenizer's vocabulary,
-    so a named-variant table here would be an invented axis. See
-    ``models/AGENTS.md`` "When the shape does not apply".
+    decoder's geometry comes from the :class:`~.config.BridgeConfig` and the
+    tokenizer's vocabulary.
 
     :param vocab_size: Number of output logits per token position.
     :type vocab_size: int
@@ -338,15 +362,15 @@ def create_shared_token_decoder(
     :param token_emb_dim: Width of one token embedding.
     :type token_emb_dim: int
     :param pretrained: ``False`` (default) for random init. Any truthy value,
-        a path included, raises ``NotImplementedError``: no weights are
-        distributed, and a saved decoder is restored whole with
-        ``keras.models.load_model(path)``.
+        a path string included, raises ``NotImplementedError``; restore a saved
+        decoder whole with ``keras.models.load_model(path)``.
     :type pretrained: bool
-    :param kwargs: Forwarded to the constructor.
-    :type kwargs: Any
+    :param **kwargs: Forwarded to the constructor.
+    :type **kwargs: Any
     :return: The configured decoder.
     :rtype: SharedTokenDecoder
     :raises NotImplementedError: If ``pretrained`` is truthy.
+    :raises ValueError: If the constructor rejects an argument.
 
     Example:
         >>> decoder = create_shared_token_decoder(vocab_size=32000)
