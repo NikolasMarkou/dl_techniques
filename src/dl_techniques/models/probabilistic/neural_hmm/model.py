@@ -4,7 +4,8 @@ emissions are produced by neural layers, trained by exact maximum likelihood thr
 forward algorithm. :class:`NeuralHMM` composes four parts, each its own module:
 
 - an optional sequence encoder (:class:`~.encoders.NeuralHMMEncoder`) that turns the
-  observations into a per-step context ``h``;
+  observations, or an exogenous input ``u`` when ``input_dim`` is set, into a per-step
+  context ``h``;
 - a transition layer (:class:`~.transitions.StaticTransition`, or
   :class:`~.transitions.InputDependentTransition` reading ``h``) giving ``log pi`` and
   ``log A``;
@@ -39,13 +40,17 @@ reads the input shifted right by one step, so the emission of ``x_t`` is conditi
 ``x_{<t}`` only. ``discriminative`` is a linear-chain CRF trained on integer state labels,
 ``log p(y | x) = score(y) - log Z``; its encoder is non-causal and reads the whole sequence.
 
+**Exogenous inputs.** With ``input_dim`` set the inputs are ``{"obs", "inputs", "mask"}``,
+the encoder reads ``u_{<=t}`` instead of the observations, and the model is
+``p(x | u)``: an input-output HMM.
+
 **Padding.** ``mask`` marks a contiguous valid prefix (right padding). A padded step
 contributes nothing, so the loss of a padded sequence equals that of the truncated one.
 
 **Training.** Stock ``fit()``: the loss is this class's ``compute_loss`` override, and
 ``compile(loss=...)`` is ignored. ``sample_weight`` weights whole sequences.
 
-**Variants.** :attr:`NeuralHMM.MODEL_VARIANTS` holds five presets, each with every built
+**Variants.** :attr:`NeuralHMM.MODEL_VARIANTS` holds six presets, each with every built
 component live. No pretrained weights are distributed; ``pretrained=True`` raises
 ``NotImplementedError``.
 
@@ -91,6 +96,9 @@ EMISSION_CONTEXTS: Tuple[str, ...] = ("none", "autoregressive")
 #: Transition layer types.
 TRANSITIONS: Tuple[str, ...] = ("static", "input_dependent")
 
+#: Presets that are meaningless without an exogenous input: ``input_dim`` is required.
+_VARIANTS_NEEDING_INPUT_DIM: Tuple[str, ...] = ("io-hmm",)
+
 # ---------------------------------------------------------------------
 
 
@@ -121,8 +129,8 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
         must be ``None`` otherwise.
     :param emission_context: ``none``, or ``autoregressive`` (the generative emission also
         reads ``h_t``, built from ``x_{<t}``). Must be ``none`` in discriminative mode.
-    :param transition: ``static``, or ``input_dependent`` (per-step transitions from ``h``,
-        an input-output HMM).
+    :param transition: ``static``, or ``input_dependent`` (per-step transitions from ``h``:
+        Tran et al.'s context transitions, or an input-output HMM when ``input_dim`` is set).
     :param topology: ``ergodic``, ``left_to_right`` or ``banded``.
     :param band_width: Largest forward skip under ``banded``; non-negative.
     :param self_loop_init: Initial diagonal of the transition logits.
@@ -147,6 +155,9 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
     :param dropout_rate: Encoder dropout in ``[0, 1)``.
     :param attention_dropout_rate: Attention-probability dropout of the ``transformer``
         encoder, in ``[0, 1)``.
+    :param input_dim: Feature count of an exogenous input ``inputs`` of shape
+        ``(B, T, input_dim)``, which the encoder then reads instead of the observations;
+        positive, or ``None`` for no such input. Generative mode with an encoder only.
     :param kwargs: Base ``keras.Model`` arguments.
     :raises ValueError: If an argument is out of range, unknown, missing for the
         ``obs_type``, the combination is invalid, or an argument the configuration does
@@ -166,7 +177,8 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
             "topology": "ergodic",
         },
         # Tran et al., 2016, with the emission also conditioned on the observed history
-        # x_{<t} through a causal LSTM.
+        # x_{<t} through a causal LSTM. An extension of this package: the paper's context
+        # drives the transitions (context-transition-hmm below), not the emission.
         "autoregressive-neural-hmm": {
             "mode": "generative",
             "emission_context": "autoregressive",
@@ -174,8 +186,19 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
             "topology": "ergodic",
             "encoder_type": "lstm",
         },
-        # Bengio and Frasconi, 1995 (NIPS 7, pp. 427-434): an input-output HMM whose
-        # transition into step t is driven by the recent inputs x_{t-k..t-1} (causal conv).
+        # Tran et al., 2016, section 6: the transition into step t is driven by a causal
+        # summary of the observations x_{<t}. The paper's summary is an LSTM; this preset
+        # uses a causal conv, and encoder_type="lstm" gives the paper's.
+        "context-transition-hmm": {
+            "mode": "generative",
+            "emission_context": "none",
+            "transition": "input_dependent",
+            "topology": "ergodic",
+            "encoder_type": "conv",
+        },
+        # Bengio and Frasconi, 1995 (NIPS 7, pp. 427-434): an input-output HMM, p(x | u),
+        # whose transition into step t is driven by an exogenous input u_{<=t} (causal
+        # conv). Needs input_dim.
         "io-hmm": {
             "mode": "generative",
             "emission_context": "none",
@@ -229,6 +252,7 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
         normalization_type: str = "layer_norm",
         dropout_rate: float = 0.0,
         attention_dropout_rate: float = 0.0,
+        input_dim: Optional[int] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -292,7 +316,10 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
         self.normalization_type = normalization_type
         self.dropout_rate = dropout_rate
         self.attention_dropout_rate = attention_dropout_rate
+        self.input_dim = input_dim
 
+        if input_dim is not None and input_dim <= 0:
+            raise ValueError(f"input_dim must be positive or None, got {input_dim}.")
         arguments = self._arguments()
         defaults = self._argument_defaults()
         # DECISION plan-2026-10-13T192257-1bb3bf1f/D-025: refuse a NON-DEFAULT value for an
@@ -337,7 +364,7 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
                 attention_dropout_rate=attention_dropout_rate,
                 name="encoder",
             )
-            if obs_type == "categorical":
+            if obs_type == "categorical" and input_dim is None:
                 self.obs_embedding = keras.layers.Embedding(vocab_size, hidden_dim, name="obs_embedding")
 
         transition_class = InputDependentTransition if transition == "input_dependent" else StaticTransition
@@ -373,9 +400,10 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
         """Build every sublayer in computational order.
 
         :param input_shape: ``{"obs": (B, T) or (B, T, obs_dim), "mask": (B, T)}``; the
-            ``mask`` entry is optional.
+            ``mask`` entry is optional. With ``input_dim`` set it also holds
+            ``"inputs": (B, T, input_dim)``.
         :raises ValueError: If ``input_shape`` is not a dict with an ``obs`` entry of the
-            rank the ``obs_type`` needs.
+            rank the ``obs_type`` needs, or the ``inputs`` entry disagrees with ``input_dim``.
         """
         if not isinstance(input_shape, dict) or "obs" not in input_shape:
             raise ValueError(f"NeuralHMM expects inputs {{'obs', 'mask'}}, got shape {input_shape}.")
@@ -387,8 +415,17 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
             )
         batch, steps = obs_shape[0], obs_shape[1]
         context_shape = (batch, steps, self.hidden_dim)
+        if self.input_dim is None and "inputs" in input_shape:
+            raise ValueError("Got an 'inputs' entry but input_dim=None, so nothing would read it.")
+        if self.input_dim is not None:
+            inputs_shape = tuple(input_shape.get("inputs", ()))
+            if len(inputs_shape) != 3 or inputs_shape[-1] not in (None, self.input_dim):
+                raise ValueError(
+                    f"input_dim={self.input_dim} expects inputs['inputs'] of shape "
+                    f"(batch, time, {self.input_dim}), got {inputs_shape or 'no such entry'}."
+                )
         if self.encoder is not None:
-            features_shape = obs_shape
+            features_shape = obs_shape if self.input_dim is None else inputs_shape
             if self.obs_embedding is not None:
                 self.obs_embedding.build((batch, steps))
                 features_shape = context_shape
@@ -411,13 +448,21 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
             (``categorical``) or ``(B, T, obs_dim)`` floats; ``mask`` is ``(B, T)``,
             nonzero at valid steps, a contiguous valid prefix. Without ``mask`` every
             step is valid. Padded content may hold anything, including NaN or ``-1``.
+            With ``input_dim`` set, also ``"inputs"``: ``(B, T, input_dim)`` floats.
         :param training: Forwarded to every sublayer.
         :return: ``{"log_pi": (B, K), "log_A": (B, T, K, K), "log_emit": (B, T, K)}`` in the
             accumulation dtype (float32 under float32 and mixed precision).
         """
         obs, valid = self._observations(inputs)
         context = None
-        if self.encoder is not None:
+        if self.input_dim is not None and self.encoder is not None:
+            # DECISION plan-2026-10-30T000000-neuralhmm/D-002: an exogenous input is NOT
+            # shifted. The model is p(x | u), so u is conditioned on, never scored, and
+            # h_t may read u_t: the D-022 shift exists only to keep x_t out of its own
+            # parameters. Do NOT shift it "for consistency": the transition into t would
+            # then miss the input at t, which is the one an input-output HMM acts on.
+            context = self.encoder(keras.ops.cast(inputs["inputs"], self.compute_dtype), mask=valid, training=training)
+        elif self.encoder is not None:
             features = self._features(obs, valid)
             if self.mode == "generative":
                 # DECISION plan-2026-10-13T192257-1bb3bf1f/D-022: this one-step right shift
@@ -737,6 +782,10 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
         """
         resolved = {**cls._argument_defaults(), **config}
         unread: Dict[str, str] = {}
+        if resolved["mode"] == "discriminative":
+            unread["input_dim"] = "mode='discriminative' encodes the observations and models p(y | x)"
+        elif not cls._builds_encoder(resolved):
+            unread["input_dim"] = "no encoder is built, so nothing reads an exogenous input"
         if not cls._builds_encoder(resolved):
             reason = (
                 "no encoder is built, since nothing reads its context (emission_context='none', "
@@ -787,6 +836,7 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
             "normalization_type": self.normalization_type,
             "dropout_rate": self.dropout_rate,
             "attention_dropout_rate": self.attention_dropout_rate,
+            "input_dim": self.input_dim,
         }
 
     @classmethod
@@ -798,7 +848,8 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
         :param kwargs: Constructor arguments; they override the preset. ``n_states`` and the
             observation shape (``obs_type`` with ``obs_dim`` or ``vocab_size``) are needed.
         :return: An unbuilt model.
-        :raises ValueError: If ``variant`` is unknown.
+        :raises ValueError: If ``variant`` is unknown, or it needs an exogenous input and
+            ``input_dim`` is missing.
         :raises NotImplementedError: If ``pretrained`` is set.
         """
         if variant not in cls.MODEL_VARIANTS:
@@ -807,6 +858,12 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
             raise NotImplementedError(
                 f"No pretrained weights are distributed for NeuralHMM variant '{variant}'. Train one, "
                 f"then restore it with keras.models.load_model(path) or model.load_weights(path)."
+            )
+        if variant in _VARIANTS_NEEDING_INPUT_DIM and kwargs.get("input_dim") is None:
+            raise ValueError(
+                f"Variant '{variant}' conditions on an exogenous input, so it needs input_dim. "
+                f"For transitions driven by the observations themselves, use "
+                f"'context-transition-hmm' (this preset's behaviour before it took exogenous inputs)."
             )
         config = dict(cls.MODEL_VARIANTS[variant])
         config.update(kwargs)

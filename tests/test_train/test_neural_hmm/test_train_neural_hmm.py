@@ -6,7 +6,7 @@ validation and 24 test sequences of length 4 to 10, 2 epochs. One module-scoped 
 configuration serves every assertion about it:
 
 - ``gaussian``: ``neural-hmm`` (unsupervised, no encoder);
-- ``categorical``: ``io-hmm`` (unsupervised, input-dependent transitions, conv encoder);
+- ``categorical``: ``context-transition-hmm`` (unsupervised, input-dependent transitions, conv encoder);
 - ``supervised``: ``neural-crf-tagger`` (discriminative, transformer encoder).
 
 Mechanisms guarded:
@@ -35,7 +35,7 @@ import csv
 import hashlib
 import json
 from pathlib import Path
-from typing import Dict, List, NamedTuple
+from typing import Optional, Dict, List, NamedTuple
 
 import keras
 import numpy as np
@@ -55,13 +55,15 @@ TINY = (
 RUN_ARGS = {
     "gaussian": ("--variant", "neural-hmm", "--obs-type", "gaussian", "--n-states", "3",
                  "--obs-dim", "2"),
-    "categorical": ("--variant", "io-hmm", "--obs-type", "categorical", "--n-states", "3",
+    "categorical": ("--variant", "context-transition-hmm", "--obs-type", "categorical", "--n-states", "3",
                     "--vocab-size", "6"),
     "supervised": ("--variant", "neural-crf-tagger", "--obs-type", "gaussian", "--n-states", "3",
                    "--obs-dim", "2", "--separation", "2.0"),
+    "exogenous": ("--variant", "io-hmm", "--input-dim", "2", "--obs-type", "gaussian", "--n-states", "3",
+                  "--obs-dim", "2"),
 }
 RUNS = sorted(RUN_ARGS)
-UNSUPERVISED = ("categorical", "gaussian")
+UNSUPERVISED = ("categorical", "exogenous", "gaussian")
 
 EXPECTED_FILES = {
     "config.json", "run.log", "results_summary.json", "best_model.keras", "training_log.csv",
@@ -69,7 +71,7 @@ EXPECTED_FILES = {
     "visualizations/state_strip.png",
 }
 SUMMARY_KEYS = {
-    "model", "variant", "mode", "obs_type", "n_states", "obs_dim", "vocab_size", "encoder_type",
+    "model", "variant", "mode", "obs_type", "n_states", "obs_dim", "vocab_size", "input_dim", "encoder_type",
     "hidden_dim", "params", "seq_len", "min_seq_len", "num_train", "num_val", "num_test",
     "test_valid_steps", "separation", "stay_prob", "seed", "jit_compile", "epochs_requested",
     "epochs_run", "best_checkpoint", "nll_kind", "test_nll_per_step", "true_nll_per_step",
@@ -259,7 +261,7 @@ def test_the_reference_numbers_are_the_data_modules_on_the_runs_test_split(runs,
         expected = true_conditional_nll_per_step(test.true_hmm, test.obs, test.states, test.mask)
         assert summary["nll_kind"] == "conditional"
     else:
-        expected = true_nll_per_step(test.true_hmm, test.obs, test.mask)
+        expected = true_nll_per_step(test.true_hmm, test.obs, test.mask, test.inputs)
         assert summary["nll_kind"] == "marginal"
     assert summary["true_nll_per_step"] == pytest.approx(expected, abs=1e-12)
     assert summary["nll_gap"] == pytest.approx(summary["test_nll_per_step"] - expected, abs=1e-12)
@@ -398,6 +400,7 @@ def test_a_model_refusal_comes_before_anything_is_written(tmp_path, bad, match) 
 class _Split(NamedTuple):
     obs: np.ndarray
     mask: np.ndarray
+    inputs: Optional[np.ndarray] = None
 
 
 def _fixed_output(**outputs):

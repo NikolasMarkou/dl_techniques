@@ -52,7 +52,7 @@ from .._cli_contract import (  # noqa: TID252 -- shared driver, one level up
 #: The default observation type is gaussian, where ``--vocab-size`` is refused as
 #: ignored, so that one row runs in a categorical mode.
 GAUSSIAN_ROWS: Tuple[Row, ...] = (
-    Row(("--variant",), ("--variant", "io-hmm"), "variant", "io-hmm"),
+    Row(("--variant",), ("--variant", "context-transition-hmm"), "variant", "context-transition-hmm"),
     Row(("--obs-type",), ("--obs-type", "categorical"), "obs_type", "categorical"),
     Row(("--n-states",), ("--n-states", "5"), "n_states", 5),
     Row(("--obs-dim",), ("--obs-dim", "7"), "obs_dim", 7),
@@ -82,7 +82,13 @@ GAUSSIAN_ROWS: Tuple[Row, ...] = (
 CATEGORICAL_ROWS: Tuple[Row, ...] = (
     Row(("--vocab-size",), ("--vocab-size", "13"), "vocab_size", 13),
 )
-NHMM_ROWS: Tuple[Row, ...] = GAUSSIAN_ROWS + CATEGORICAL_ROWS
+IO_HMM_ROWS: Tuple[Row, ...] = (
+    # Not a `field` row: parse_arguments() refuses --variant io-hmm without this flag, so
+    # the row cannot be driven with its fragment removed. This row proves parsing only;
+    # the "--input-dim" wired checks prove it reaches the data and the model.
+    Row(("--input-dim",), ("--input-dim", "19"), namespace_dest="input_dim", expected=19),
+)
+NHMM_ROWS: Tuple[Row, ...] = GAUSSIAN_ROWS + CATEGORICAL_ROWS + IO_HMM_ROWS
 
 NHMM_TRAINER = Contract(
     name="train.neural_hmm.train_neural_hmm",
@@ -91,6 +97,7 @@ NHMM_TRAINER = Contract(
     modes=(
         Mode(id="gaussian", required_argv=(), rows=GAUSSIAN_ROWS),
         Mode(id="categorical", required_argv=("--obs-type", "categorical"), rows=CATEGORICAL_ROWS),
+        Mode(id="io_hmm", required_argv=("--variant", "io-hmm"), rows=IO_HMM_ROWS),
     ),
 )
 
@@ -212,7 +219,8 @@ def test_fewer_than_two_states_is_refused_before_anything_is_written(tmp_path, c
     err = capsys.readouterr().err
     assert f"--n-states must be >= 2, got {n_states}" in err and "at least two states" in err, err
     assert list(tmp_path.iterdir()) == []
-    assert train_nhmm.parse_arguments(["--variant", variant, "--obs-type", obs_type, "--n-states", "2"]).n_states == 2
+    needed = ("--input-dim", "2") if variant == "io-hmm" else ()
+    assert train_nhmm.parse_arguments(["--variant", variant, "--obs-type", obs_type, "--n-states", "2", *needed]).n_states == 2
 
 
 @pytest.mark.parametrize("argv,nulls", [
@@ -231,13 +239,13 @@ def test_an_unread_data_flag_that_is_not_given_is_none(argv, nulls) -> None:
 # ---------------------------------------------------------------------
 
 #: Every data, model and optimization flag off its default. A gaussian run with an
-#: encoder the override can replace (io-hmm: conv -> transformer, the one encoder that
+#: encoder the override can replace (context-transition-hmm: conv -> transformer, the one encoder that
 #: reads --seq-len as its position table), and a categorical run for the two flags only
 #: a categorical run reads (--obs-type, --vocab-size), whose conv encoder must NOT be
 #: handed max_seq_len (the model refuses an unread non-default argument, D-025).
 WIRED_RUNS: Dict[str, Tuple[str, ...]] = {
     "gaussian": (
-        "--variant", "io-hmm", "--encoder", "transformer", "--n-states", "3", "--obs-dim", "3",
+        "--variant", "context-transition-hmm", "--encoder", "transformer", "--n-states", "3", "--obs-dim", "3",
         "--hidden-dim", "12", "--seq-len", "7", "--min-seq-len", "3", "--num-train", "13",
         "--num-val", "5", "--num-test", "6", "--separation", "2.5", "--stay-prob", "0.75",
         "--epochs", "2", "--batch-size", "7", "--learning-rate", "0.004",
@@ -246,6 +254,11 @@ WIRED_RUNS: Dict[str, Tuple[str, ...]] = {
     "categorical": (
         "--variant", "autoregressive-neural-hmm", "--encoder", "conv", "--obs-type", "categorical",
         "--n-states", "2", "--vocab-size", "11", "--hidden-dim", "8", "--seq-len", "6",
+        "--min-seq-len", "2", "--num-train", "9", "--num-val", "3", "--num-test", "4",
+        "--epochs", "1", "--batch-size", "5",
+    ),
+    "exogenous": (
+        "--variant", "io-hmm", "--input-dim", "5", "--n-states", "2", "--hidden-dim", "8", "--seq-len", "6",
         "--min-seq-len", "2", "--num-train", "9", "--num-val", "3", "--num-test", "4",
         "--epochs", "1", "--batch-size", "5",
     ),
@@ -313,8 +326,10 @@ def _only(calls: list):
 
 #: check -> (what the callee received, what the CLI asked for).
 WIRED_CHECKS = {
-    "--variant": lambda s: (_only(s["gaussian"]["create"]).get("variant", "<not passed>"), "io-hmm"),
+    "--variant": lambda s: (_only(s["gaussian"]["create"]).get("variant", "<not passed>"), "context-transition-hmm"),
     "--encoder": lambda s: (_only(s["gaussian"]["create"]).get("encoder_type", "<not passed>"), "transformer"),
+    "--input-dim (data)": lambda s: (_only(s["exogenous"]["splits"]).get("input_dim", "<not passed>"), 5),
+    "--input-dim (model)": lambda s: (_only(s["exogenous"]["create"]).get("input_dim", "<not passed>"), 5),
     "--n-states (data)": lambda s: (_only(s["gaussian"]["splits"]).get("n_states", "<not passed>"), 3),
     "--n-states (model)": lambda s: (_only(s["gaussian"]["create"]).get("n_states", "<not passed>"), 3),
     "--obs-dim (data)": lambda s: (_only(s["gaussian"]["splits"]).get("obs_dim", "<not passed>"), 3),

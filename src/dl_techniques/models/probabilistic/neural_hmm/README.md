@@ -15,7 +15,8 @@ A Keras 3 **Neural Hidden Markov Model**: a `K`-state HMM whose initial distribu
 | Knob | Values | What it changes |
 |------|--------|-----------------|
 | `mode` | `generative` (default), `discriminative` | unsupervised `log p(x)`, or a linear-chain CRF `log p(y \| x)` trained on state labels |
-| `transition` | `static` (default), `input_dependent` | one learned matrix, or per-step matrices driven by the encoder (an input-output HMM) |
+| `transition` | `static` (default), `input_dependent` | one learned matrix, or per-step matrices driven by the encoder |
+| `input_dim` | `None` (default), a positive int | the encoder reads the observations, or an exogenous input `u`, which makes the model `p(x \| u)`, an input-output HMM |
 | `emission_context` | `none` (default), `autoregressive` | the generative emission reads only the state, or also the encoder's summary of `x_{<t}` |
 | `obs_type` | `gaussian` (default), `poisson`, `categorical` | diagonal Gaussian over `obs_dim` reals, Poisson over `obs_dim` counts, or one symbol in `[0, vocab_size)` |
 
@@ -36,8 +37,8 @@ A classical HMM has exact, cheap inference (likelihood, decoding, posteriors in 
 │  2. Neural parametrization: emissions come from learned     │
 │     state embeddings through a feed-forward head (Tran et   │
 │     al., 2016), optionally conditioned on the history;      │
-│     transitions can depend on the input (Bengio and         │
-│     Frasconi, 1995).                                        │
+│     transitions can depend on the history (Tran et al.) or  │
+│     on an exogenous input (Bengio and Frasconi, 1995).      │
 │                                                             │
 │  3. One model, two regimes: unsupervised (segment and       │
 │     cluster sequences) or supervised (a CRF tagger, Lample  │
@@ -168,19 +169,20 @@ gamma = model.posteriors(inputs)       # (8, 20, 3); rows sum to 1 at valid step
 | `normalization_type` | `str` | `"layer_norm"` | Normalization inside the encoder (`create_normalization_layer`). |
 | `dropout_rate` | `float` | `0.0` | Encoder dropout, `[0, 1)`; active only with `training=True`. |
 | `attention_dropout_rate` | `float` | `0.0` | Attention-probability dropout (`transformer`), `[0, 1)`. |
+| `input_dim` | `Optional[int]` | `None` | Features of an exogenous input `inputs` `(B, T, input_dim)`, which the encoder reads instead of the observations, without the one-step shift. Generative mode with an encoder only. |
 
 **An argument the configuration does not read must keep its default.** A non-default value for one raises `ValueError` naming the argument, its value and why it is not read, instead of being silently ignored. The rule lives in one place, `NeuralHMM.unread_arguments(config) -> {name: reason}`, whose encoder half is the table `ARGUMENT_READERS` in `encoders.py`:
 
 | Configuration | Arguments it does not read |
 |:---|:---|
-| no encoder (`emission_context="none"`, `transition="static"`, `mode="generative"`) | `encoder_type`, `num_layers`, `num_heads`, `intermediate_size`, `max_seq_len`, `kernel_size`, `ffn_type`, `normalization_type`, `dropout_rate`, `attention_dropout_rate` |
+| no encoder (`emission_context="none"`, `transition="static"`, `mode="generative"`) | `input_dim`, `encoder_type`, `num_layers`, `num_heads`, `intermediate_size`, `max_seq_len`, `kernel_size`, `ffn_type`, `normalization_type`, `dropout_rate`, `attention_dropout_rate` |
 | encoder `lstm` or `gru` | `num_heads`, `intermediate_size`, `max_seq_len`, `ffn_type`, `attention_dropout_rate`, `kernel_size` |
 | encoder `mlp` | `num_heads`, `max_seq_len`, `ffn_type`, `attention_dropout_rate`, `kernel_size` |
 | encoder `conv` | `num_heads`, `intermediate_size`, `max_seq_len`, `ffn_type`, `attention_dropout_rate` |
 | encoder `transformer` | `kernel_size` |
 | `topology` other than `banded` | `band_width` |
 | `obs_type="categorical"` (generative) | `min_scale` |
-| `mode="discriminative"` | `min_scale`, `state_emb_dim` |
+| `mode="discriminative"` | `min_scale`, `state_emb_dim`, `input_dim` |
 
 The same argument at its default is accepted, because `get_config` returns every argument. `from_config` resets a stale non-default value of an unread argument to its default, with a warning, so an archive saved before this rule (the trainer used to pass `max_seq_len` to every model) still loads into the same model. `hidden_dim`, `topology`, `self_loop_init` and the data shape are read by every configuration; `obs_dim`/`vocab_size` and `emission_context` have their own checks. `n_states` below 2 is refused outright (L-4), so no configuration has a one-state transition whose knobs would change nothing.
 
@@ -220,8 +222,9 @@ The package `__init__.py` exports `NeuralHMM` and `create_neural_hmm`. The `prob
 | variant | mode | transition | emission | encoder | source |
 |:---|:---|:---|:---|:---|:---|
 | `neural-hmm` | generative | static, ergodic | state embedding -> FFN head | none | Tran et al., 2016 |
-| `autoregressive-neural-hmm` | generative | static, ergodic | head also reads `h_t` from `x_{<t}` | causal `lstm` | Tran et al., 2016, conditioned on history |
-| `io-hmm` | generative | input-dependent, ergodic | state embedding -> FFN head | causal `conv` | Bengio and Frasconi, 1995 |
+| `autoregressive-neural-hmm` | generative | static, ergodic | head also reads `h_t` from `x_{<t}` | causal `lstm` | this package's extension of Tran et al., 2016, whose context drives transitions |
+| `context-transition-hmm` | generative | input-dependent, ergodic | state embedding -> FFN head | causal `conv` over `x_{<t}` | Tran et al., 2016, section 6 (the paper's encoder is an LSTM, `encoder_type="lstm"`) |
+| `io-hmm` | generative, `p(x \| u)` | input-dependent, ergodic | state embedding -> FFN head | causal `conv` over `u_{<=t}`; needs `input_dim` | Bengio and Frasconi, 1995 |
 | `left-to-right-segmenter` | generative | static, `banded` (`band_width=1`) | head also reads `h_t` | causal `transformer` | Rabiner, 1989 (left-to-right models) |
 | `neural-crf-tagger` | discriminative | static, ergodic | `Dense(K)` potentials from `h` | non-causal `transformer` | Lample et al., 2016 |
 
@@ -252,13 +255,22 @@ tagged, _ = tagger.viterbi(inputs)               # (8, 20)
 symbols = rng.integers(0, 6, size=(8, 20)).astype("int32")
 symbols[mask == 0] = -1  # padding may hold anything; -1 is conventional
 
+context = create_neural_hmm(
+    "context-transition-hmm", n_states=3, obs_type="categorical", vocab_size=6,
+    hidden_dim=16, num_layers=1,
+)
+context.compile(optimizer="adam")
+context.fit({"obs": symbols, "mask": mask}, None, batch_size=4, epochs=1, verbose=0)
+per_step_nll = -context.log_likelihood({"obs": symbols, "mask": mask}) / mask.sum(axis=1)
+
+# An input-output HMM: p(x | u), with transitions driven by an exogenous input.
+covariates = rng.normal(size=(8, 20, 3)).astype("float32")
 io_hmm = create_neural_hmm(
-    "io-hmm", n_states=3, obs_type="categorical", vocab_size=6,
+    "io-hmm", n_states=3, obs_type="categorical", vocab_size=6, input_dim=3,
     hidden_dim=16, num_layers=1,
 )
 io_hmm.compile(optimizer="adam")
-io_hmm.fit({"obs": symbols, "mask": mask}, None, batch_size=4, epochs=1, verbose=0)
-per_step_nll = -io_hmm.log_likelihood({"obs": symbols, "mask": mask}) / mask.sum(axis=1)
+io_hmm.fit({"obs": symbols, "inputs": covariates, "mask": mask}, None, batch_size=4, epochs=1, verbose=0)
 ```
 
 ### Example 3 — A left-to-right segmenter on Poisson counts
@@ -347,7 +359,7 @@ dwell = 1.0 / (1.0 - np.diag(transition))                              # expecte
 - **L-2. `max_seq_len` bounds the `transformer` encoder.** Its learned position table has `max_seq_len` rows. A statically known `T > max_seq_len` is refused at build time; a longer dynamic `T` fails inside the table slice. The other encoder types have no length limit.
 - **L-3. Two cuDNN traps are worked around in the recurrent encoders** (Keras 3.8, visible on a GPU only). (a) `LSTM/GRU(dropout=...)` applies its input-dropout mask on the cuDNN path whatever `training` is, so the encoder never passes `dropout=` to them and runs a separate `Dropout` (one mask per sequence) before each recurrent layer. (b) cuDNN refuses a mask row with no valid step in graph mode (`fit`, `predict`, `tf.function`), so an all-padding row gets step 0 marked valid; that step reads zeroed input and every output of the row is padding.
 - **L-4. Constant parameters under constrained topologies, and no one-state model.** Under `banded` or `left_to_right` the chain starts in state 0, so the initial-state logits are constant and never train. With `n_states=1`, `log_pi` and `log_A` are identically 0 whatever `pi_logits` and `transition_logits` hold, in every configuration: those weights are constants that never train, and the model would be a density model with a constant transition, not an HMM. The constructor therefore refuses `n_states < 2` with `ValueError` for every configuration (measured before the refusal: `transition_logits` gets an exactly-zero gradient at one state, `test_at_one_state_the_transition_is_constant`).
-- **L-5. `io-hmm` starts at the static solution.** Its context projection is zero-initialized, so the encoder receives its first nonzero gradient on the second optimizer step.
+- **L-5. `context-transition-hmm` and `io-hmm` start at the static solution.** Its context projection is zero-initialized, so the encoder receives its first nonzero gradient on the second optimizer step.
 - **L-6. Mixed precision rounds the inputs.** Keras casts a model's float inputs to the compute dtype, so under `mixed_float16` the observations are float16 before the float32 density math; values above 65504 overflow.
 - **L-7. The key part of a fused attention bias does not train.** The `transformer` encoder's attention projects `qkv` with one biased `Dense`; the key bias adds a per-query constant that the softmax removes, so that part receives no gradient, while the fused variable as a whole does.
 - **L-8. Cost grows faster than `T` without XLA.** One loss-and-gradient step of the forward pass, measured on the CPU (`B = 8`, `K = 8`): 202, 274 and 656 us per time step at `T` = 1000, 4000 and 16000 in a plain `tf.function`, and a flat 6 to 9 us per time step with `jit_compile=True`. An `lstm`/`gru` encoder cannot use XLA (§10). Replacing the per-step slices with `keras.ops.take` did not help. `viterbi` and `posteriors` also rewrite a `(B, T, K)` history at each step, about 5 s for 8000 steps of that write alone at `B = 8`, `K = 8`, also on the CPU. Neither has been measured on a GPU.

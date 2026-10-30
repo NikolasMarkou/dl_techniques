@@ -96,7 +96,9 @@ from .test_inference import brute_force
 B, T, D, K, V = 4, 7, 2, 3, 5
 #: Valid lengths of the padded batch: full, middle, one step, empty.
 LENGTHS = (T, 4, 1, 0)
-VARIANTS = sorted(NeuralHMM.MODEL_VARIANTS)
+#: Every preset that takes the shared {"obs", "mask"} inputs. io-hmm also needs an exogenous
+#: input, and test_io_hmm.py holds it to the same contracts.
+VARIANTS = sorted(set(NeuralHMM.MODEL_VARIANTS) - {"io-hmm"})
 OUTPUT_KEYS = {"log_pi", "log_A", "log_emit"}
 #: Small widths, all different from T, D, K and V.
 SMALL = {"hidden_dim": 8, "state_emb_dim": 6, "num_layers": 1, "num_heads": 2, "intermediate_size": 12,
@@ -111,7 +113,7 @@ ONE_STEP_UNMOVED = {
     # The transition's context projection is zero-initialized (training starts at the
     # static solution), so at step 1 the gradient reaching the encoder through it is
     # W^T g = 0 exactly. A second step moves them (test_..._move_after_a_second_step).
-    "io-hmm": "encoder/",
+    "context-transition-hmm": "encoder/",
     # The banded topology forces the chain to start in state 0: log_pi = log_softmax of
     # [x_0, sentinel, ...] is exactly [0, -inf-ish, ...] for every x_0, so pi_logits gets
     # an exactly-zero gradient forever. Structural, not a training state.
@@ -197,8 +199,9 @@ def _loss(model, inputs, y=None, training=False, sample_weight=None):
 
 
 def test_the_variant_table_is_the_d005_table():
-    assert VARIANTS == sorted(
-        ["neural-hmm", "autoregressive-neural-hmm", "io-hmm", "left-to-right-segmenter", "neural-crf-tagger"]
+    assert sorted(NeuralHMM.MODEL_VARIANTS) == sorted(
+        ["neural-hmm", "autoregressive-neural-hmm", "context-transition-hmm", "io-hmm", "left-to-right-segmenter",
+         "neural-crf-tagger"]
     )
     params = set(inspect.signature(NeuralHMM.__init__).parameters) - {"self", "kwargs"}
     for name, preset in NeuralHMM.MODEL_VARIANTS.items():
@@ -252,7 +255,7 @@ STRUCTURAL_KNOBS = [
     ("num_layers", (1, 2), "autoregressive-neural-hmm", "gaussian", {}),
     ("intermediate_size", (12, 16), "left-to-right-segmenter", "gaussian", {}),
     ("max_seq_len", (16, 20), "left-to-right-segmenter", "gaussian", {}),
-    ("kernel_size", (2, 3), "io-hmm", "gaussian", {}),
+    ("kernel_size", (2, 3), "context-transition-hmm", "gaussian", {}),
     ("normalization_type", ("layer_norm", "rms_norm"), "neural-crf-tagger", "gaussian", {}),
     ("mode", ("generative", "discriminative"), "neural-hmm", "gaussian", {}),
     ("emission_context", ("none", "autoregressive"), "neural-hmm", "gaussian", {}),
@@ -375,8 +378,8 @@ def test_every_built_weight_moves_after_one_fit_step(variant):
 
 
 def test_the_io_hmm_encoder_moves_after_a_second_step():
-    """The io-hmm waiver is a step-1 fact only: once W leaves zero, the encoder learns."""
-    model, x, y = _compiled("io-hmm")
+    """The context-transition-hmm waiver is a step-1 fact only: once W leaves zero, the encoder learns."""
+    model, x, y = _compiled("context-transition-hmm")
     fit_one_step_moved_variables(model, x, y, batch_size=B)
     report = fit_one_step_moved_variables(model, x, y, batch_size=B)
     assert report.unmoved == (), report.summary()
@@ -464,7 +467,8 @@ def _defaults():
 
 
 def test_the_round_trip_configs_put_every_argument_off_its_default():
-    params = set(inspect.signature(NeuralHMM.__init__).parameters) - {"self", "kwargs"}
+    # input_dim changes the input dict, so test_io_hmm.py round-trips it instead.
+    params = set(inspect.signature(NeuralHMM.__init__).parameters) - {"self", "kwargs", "input_dim"}
     defaults = _defaults()
     off = set()
     for config in ROUND_TRIP_CONFIGS:
@@ -669,7 +673,7 @@ def test_empty_and_single_step_sequences_are_finite():
 
 
 def test_the_helpers_agree_with_the_inference_module():
-    model = _model("io-hmm")
+    model = _model("context-transition-hmm")
     x = _inputs()
     out = model(x, training=False)
     args = (out["log_pi"], out["log_A"], out["log_emit"], x["mask"])
@@ -688,10 +692,10 @@ def test_the_helpers_agree_with_the_inference_module():
 
 
 #: One preset per way a categorical symbol is read: the emission alone (neural-hmm), the
-#: emission and an encoder (io-hmm, autoregressive), the emission and an encoder under the
+#: emission and an encoder (context-transition-hmm, autoregressive), the emission and an encoder under the
 #: banded topology, whose transition holds forbidden entries (the segmenter, D-029), the
 #: embedding alone (the CRF). Every preset, so a new one fails the coverage check below.
-CATEGORICAL_READERS = ["neural-hmm", "io-hmm", "autoregressive-neural-hmm", "left-to-right-segmenter",
+CATEGORICAL_READERS = ["neural-hmm", "context-transition-hmm", "autoregressive-neural-hmm", "left-to-right-segmenter",
                        "neural-crf-tagger"]
 
 
@@ -931,7 +935,7 @@ def test_at_one_state_the_transition_is_constant(transition_class):
 GENERATIVE_CASES = (
     [("neural-hmm", None)]
     + [("autoregressive-neural-hmm", encoder) for encoder in ENCODER_TYPES]
-    + [("io-hmm", encoder) for encoder in ENCODER_TYPES]
+    + [("context-transition-hmm", encoder) for encoder in ENCODER_TYPES]
     + [("left-to-right-segmenter", "transformer")]
 )
 GENERATIVE_IDS = [f"{variant}-{encoder or 'none'}" for variant, encoder in GENERATIVE_CASES]
@@ -940,7 +944,7 @@ GENERATIVE_IDS = [f"{variant}-{encoder or 'none'}" for variant, encoder in GENER
 #: and segmenter case, since neither the enumeration nor the per-step arm reached it.
 ENUM_V, ENUM_T = 3, 6
 #: |sum_x p(x) - 1| bound. The measured float32 error at lengths up to 6 is at most
-#: 4.0e-7 (GPU 1); the no-shift mutant misses by 7.5e-3 (io-hmm/conv) to 0.17
+#: 4.0e-7 (GPU 1); the no-shift mutant misses by 7.5e-3 (context-transition-hmm/conv) to 0.17
 #: (autoregressive/lstm) at lengths up to 4, the step-4 leak by 5e-4 to 0.99 at 5 and 6.
 NORMALIZATION_ATOL = 1e-5
 #: The long arm of the perturbation guards (D-029): a sequence of LONG_T steps, perturbed
@@ -962,7 +966,7 @@ def _every_sequence(length, steps=ENUM_T, seed=0):
 def _randomized(variant, encoder_type, obs_type, seed=3):
     """A built preset with every trainable weight redrawn from N(0, 0.7).
 
-    The default initialization hides an input dependence: io-hmm's context projection
+    The default initialization hides an input dependence: context-transition-hmm's context projection
     starts at zero, so its transitions would not read the encoder at all.
     """
     overrides = {} if encoder_type is None else {"encoder_type": encoder_type}
@@ -1043,7 +1047,7 @@ def test_the_generative_potentials_read_only_the_past(variant, encoder_type):
 
 
 #: The generative cases with an input-dependent potential, and which potential reads
-#: x_{t-1}: the emission (autoregressive, segmenter) or the transition INTO t (io-hmm).
+#: x_{t-1}: the emission (autoregressive, segmenter) or the transition INTO t (context-transition-hmm).
 LIVE_CASES = [(variant, encoder) for variant, encoder in GENERATIVE_CASES if variant != "neural-hmm"]
 LIVE_IDS = [f"{variant}-{encoder}" for variant, encoder in LIVE_CASES]
 
@@ -1051,14 +1055,14 @@ LIVE_IDS = [f"{variant}-{encoder}" for variant, encoder in LIVE_CASES]
 @pytest.mark.parametrize("variant,encoder_type", LIVE_CASES, ids=LIVE_IDS)
 def test_the_generative_potentials_read_the_previous_step(variant, encoder_type):
     """The shift is exactly ONE step (D-027): perturbing x_{s-1} alone must change
-    log_emit[:, s] (an autoregressive emission) or log_A[:, s] (io-hmm), in every row.
+    log_emit[:, s] (an autoregressive emission) or log_A[:, s] (context-transition-hmm), in every row.
 
     The normalization and read-only-the-past arms cannot see a shift by two: h_t built
     from x_{<t-1} is still a valid likelihood, but the model no longer conditions on the
     previous observation (an all-green suite measured it, review pass 2, concern 3).
     """
     model = _randomized(variant, encoder_type, "gaussian")
-    key = "log_A" if variant == "io-hmm" else "log_emit"
+    key = "log_A" if variant == "context-transition-hmm" else "log_emit"
     rng = np.random.default_rng(7)
     # Every step of a 6-step sequence, and the late steps of a LONG_T one (D-029).
     for steps, splits in ((6, range(1, 6)), (LONG_T, LONG_SPLITS)):
@@ -1124,7 +1128,7 @@ def test_the_float64_arm():
 
 def test_from_variant_honours_an_override_and_leaves_the_table_alone():
     before = {k: dict(v) for k, v in NeuralHMM.MODEL_VARIANTS.items()}
-    model = NeuralHMM.from_variant("io-hmm", **_kwargs(variant="io-hmm", encoder_type="gru", topology="banded"))
+    model = NeuralHMM.from_variant("context-transition-hmm", **_kwargs(variant="context-transition-hmm", encoder_type="gru", topology="banded"))
     assert model.encoder_type == "gru" and model.topology == "banded"
     assert model.encoder.encoder_type == "gru"
     assert NeuralHMM.MODEL_VARIANTS == before
@@ -1143,8 +1147,8 @@ def test_create_neural_hmm_equals_from_variant():
 
 
 def test_pretrained_raises_naming_the_variant():
-    with pytest.raises(NotImplementedError, match="io-hmm"):
-        create_neural_hmm("io-hmm", pretrained=True, **_kwargs(variant="io-hmm"))
+    with pytest.raises(NotImplementedError, match="context-transition-hmm"):
+        create_neural_hmm("context-transition-hmm", pretrained=True, **_kwargs(variant="context-transition-hmm"))
     with pytest.raises(NotImplementedError, match="neural-hmm"):
         NeuralHMM.from_variant("neural-hmm", pretrained=True)
 
@@ -1204,12 +1208,12 @@ INAPPLICABLE = [
     ("autoregressive-neural-hmm", {"encoder_type": "mlp"}, "ffn_type", "glu", "encoder_type='mlp'"),
     ("autoregressive-neural-hmm", {"encoder_type": "mlp"}, "attention_dropout_rate", 0.1, "encoder_type='mlp'"),
     ("autoregressive-neural-hmm", {"encoder_type": "mlp"}, "kernel_size", 5, "encoder_type='mlp'"),
-    # a conv encoder (io-hmm)
-    ("io-hmm", {}, "num_heads", 2, "encoder_type='conv'"),
-    ("io-hmm", {}, "intermediate_size", 12, "encoder_type='conv'"),
-    ("io-hmm", {}, "max_seq_len", 16, "encoder_type='conv'"),
-    ("io-hmm", {}, "ffn_type", "glu", "encoder_type='conv'"),
-    ("io-hmm", {}, "attention_dropout_rate", 0.1, "encoder_type='conv'"),
+    # a conv encoder (context-transition-hmm)
+    ("context-transition-hmm", {}, "num_heads", 2, "encoder_type='conv'"),
+    ("context-transition-hmm", {}, "intermediate_size", 12, "encoder_type='conv'"),
+    ("context-transition-hmm", {}, "max_seq_len", 16, "encoder_type='conv'"),
+    ("context-transition-hmm", {}, "ffn_type", "glu", "encoder_type='conv'"),
+    ("context-transition-hmm", {}, "attention_dropout_rate", 0.1, "encoder_type='conv'"),
     # a transformer encoder, generative and discriminative
     ("left-to-right-segmenter", {}, "kernel_size", 5, "encoder_type='transformer'"),
     ("neural-crf-tagger", {}, "kernel_size", 5, "encoder_type='transformer'"),
@@ -1266,7 +1270,7 @@ def test_every_preset_constructs_and_sets_only_what_it_reads(variant, obs_type):
 def test_from_config_resets_a_stale_unread_value_to_its_default():
     """An archive written before D-025 (the trainer passed max_seq_len=50 to every model)
     still loads, into the model it was: the stale value never reached a layer."""
-    reference = create_neural_hmm("io-hmm", **_shape_kwargs({}))
+    reference = create_neural_hmm("context-transition-hmm", **_shape_kwargs({}))
     stale = {**reference.get_config(), "max_seq_len": 50, "num_heads": 2}
     with pytest.raises(ValueError, match="would be ignored"):
         NeuralHMM(**{k: v for k, v in stale.items() if k != "name"})

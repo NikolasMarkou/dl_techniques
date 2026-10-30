@@ -36,6 +36,7 @@ from scipy.special import logsumexp
 from scipy.stats import norm
 
 from dl_techniques.models.probabilistic.neural_hmm import inference
+from train.neural_hmm import data
 from train.neural_hmm.data import (
     OBS_TYPES, OWN_SYMBOL_MASS, SPLIT_TAGS, TrueHMM, accuracy, hungarian_mapping, make_true_hmm,
     majority_rate, matched_accuracy, sample_hmm_dataset, sample_splits, split_seed,
@@ -386,3 +387,70 @@ def test_an_out_of_range_predicted_label_is_refused() -> None:
     states = np.array([[0, 1, 1]])
     with pytest.raises(ValueError, match="Predicted labels"):
         hungarian_mapping(np.array([[0, -1, 1]]), states, 2)
+
+
+# ---------------------------------------------------------------------
+# Exogenous inputs
+# ---------------------------------------------------------------------
+
+
+def _gated(seed=0, n=400, steps=40, input_dim=3):
+    return data.sample_hmm_dataset(
+        n, steps, min(20, steps), 3, "gaussian", obs_dim=2, separation=4.0, stay_prob=0.9, seed=seed, input_dim=input_dim)
+
+
+def test_without_input_dim_there_are_no_inputs_and_with_it_the_lengths_are_still_drawn_first():
+    plain = data.sample_hmm_dataset(50, 20, 10, 3, "gaussian", obs_dim=2, seed=4)
+    assert plain.inputs is None
+    # Drawing inputs happens after the lengths and shifts what follows, so only the mask agrees.
+    gated = data.sample_hmm_dataset(50, 20, 10, 3, "gaussian", obs_dim=2, seed=4, input_dim=2)
+    np.testing.assert_array_equal(plain.mask, gated.mask)
+    assert not np.array_equal(plain.states, gated.states)
+
+
+def test_the_input_gates_the_empirical_transitions():
+    split = _gated(n=2000)
+    source, destination = split.states[:, :-1], split.states[:, 1:]
+    moves = destination >= 0
+    closed = split.inputs[:, 1:, 0] > 0
+    assert (source == destination)[moves & closed].mean() == pytest.approx(0.9, abs=0.01)
+    assert (source == destination)[moves & ~closed].mean() == pytest.approx(1.0 / 3.0, abs=0.01)
+
+
+def test_padded_inputs_are_zero():
+    split = _gated()
+    assert (split.inputs[split.mask == 0] == 0).all()
+
+
+def test_the_conditional_likelihood_matches_brute_force_with_inputs():
+    split = _gated(seed=1, n=5, steps=6)
+    split = split._replace(mask=np.ones_like(split.mask))
+    hmm = split.true_hmm
+    log_b = data.true_log_emissions(hmm, split.obs)
+    matrices = data.true_transitions(hmm, split.inputs)
+    for n in range(len(split.obs)):
+        total = 0.0
+        for path in itertools.product(range(3), repeat=6):
+            p = hmm.pi[path[0]] * np.exp(log_b[n, 0, path[0]])
+            for t in range(1, 6):
+                p *= matrices[n, t, path[t - 1], path[t]] * np.exp(log_b[n, t, path[t]])
+            total += p
+        got = data.true_log_likelihood(hmm, split.obs[n:n + 1], split.mask[n:n + 1], split.inputs[n:n + 1])
+        np.testing.assert_allclose(got[0], np.log(total), rtol=0, atol=1e-9)
+
+
+def test_ignoring_the_input_is_measurably_worse_than_the_true_conditional_model():
+    """The data must reward reading u, or an io-hmm run could not show that it does."""
+    split = _gated(n=400)
+    hmm = split.true_hmm
+    with_inputs = data.true_nll_per_step(hmm, split.obs, split.mask, split.inputs)
+    marginal = data.mean_true_transition(hmm, split.inputs, split.mask)
+    without = data.true_nll_per_step(
+        data.TrueHMM(hmm.pi, marginal, hmm.obs_type, means=hmm.means), split.obs, split.mask)
+    assert without - with_inputs > 0.005
+
+
+def test_the_mean_transition_is_the_static_matrix_without_inputs():
+    plain = data.sample_hmm_dataset(5, 10, 5, 3, "gaussian", obs_dim=2, seed=0)
+    assert data.mean_true_transition(plain.true_hmm, None, plain.mask) is plain.true_hmm.transition
+

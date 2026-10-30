@@ -47,6 +47,7 @@ The true HMM has no random parameter; `--seed` drives only the sampling.
 | Transitions | `--stay-prob` on the diagonal, `(1 - stay_prob) / (K - 1)` elsewhere |
 | Gaussian emissions | state `k` emits `N(mu_k, I)` in `--obs-dim` dimensions; the means lie on the all-ones direction, consecutive states `--separation` standard deviations apart, centred on 0 |
 | Categorical emissions | symbol `v` belongs to state `v mod K`; a state puts 0.8 of its mass (`OWN_SYMBOL_MASS`) uniformly on its own symbols and the rest uniformly on the others |
+| Exogenous input (`--input-dim` only) | each step draws `u_t ~ N(0, I)`; when `u_t[0] > 0` the transition into `t` is the sticky matrix above, otherwise the next state is uniform. The emissions do not read `u` |
 
 Valid lengths are uniform on `[--min-seq-len, --seq-len]`; shorter sequences are
 right-padded (mask 0, state `-1`, observation 0).
@@ -76,6 +77,7 @@ right-padded (mask 0, state `-1`, observation 0).
 | `--n-states` | 4 | the data and the model; at least 2 (parse time, exit 2) |
 | `--obs-dim` | 2 (gaussian), `null` (categorical) | the data and the model, gaussian only; refused with categorical |
 | `--vocab-size` | 8 (categorical), `null` (gaussian) | the data and the model, categorical only; must be `>= --n-states`; refused with gaussian |
+| `--input-dim` | none | the data (features of the exogenous input that gates the true transitions) and the model; required by `io-hmm`, refused by every other preset (parse time, exit 2) |
 | `--encoder` | the preset's | the model (`mlp`, `transformer`, `lstm`, `gru`, `conv`); refused for a preset that builds no encoder (`neural-hmm`) |
 | `--hidden-dim` | 32 | the model (encoder, observation embedding, emission head); divisible by 4 for a transformer encoder |
 | `--seq-len` | 50 | the data (padded length) and, with a `transformer` encoder only, the model (its position table, `max_seq_len`) |
@@ -152,6 +154,8 @@ encoder and a `transformer` encoder) all resolved it to `true` on GPU 1.
 ## 7. Measured runs
 
 Nine runs on 2026-10-14, one at a time on GPU 1 (RTX 4070), from the repository root.
+Run B's preset was named `io-hmm` then; it is `context-transition-hmm` now, with the same
+architecture, and `io-hmm` names a true input-output HMM. The command below uses the new name.
 Runs A, D and E train three generative presets on the same data (same truth, same
 `--seed`, so the same test split); runs B and C were each repeated with `--seed` 1 and 2.
 
@@ -176,7 +180,7 @@ CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.neural_hmm.train
     --experiment-name neural_hmm_runE_segmenter_gaussian_k4_sep4_seed0_20261014
 # Run B: unsupervised, categorical, K=3, 8 symbols, every other flag at its default
 CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.neural_hmm.train_neural_hmm \
-    --variant io-hmm --obs-type categorical --n-states 3 --vocab-size 8 --stay-prob 0.9 \
+    --variant context-transition-hmm --obs-type categorical --n-states 3 --vocab-size 8 --stay-prob 0.9 \
     --seq-len 50 --min-seq-len 25 --num-train 2000 --num-val 200 --num-test 500 \
     --epochs 60 --seed 0 --experiment-name neural_hmm_runB_categorical_k3_v8_seed0_20261014
 # Run C: supervised, gaussian, K=4, half the separation of run A
@@ -240,7 +244,7 @@ Runs B and C over three seeds, as mean, min and max of the per-seed values:
 
 | Summary key | Run B seed 0 | Run B seed 1 | Run B seed 2 |
 |---|---|---|---|
-| `variant` | `io-hmm` | `io-hmm` | `io-hmm` |
+| `variant` | `context-transition-hmm` | `context-transition-hmm` | `context-transition-hmm` |
 | `obs_type` | categorical | categorical | categorical |
 | `n_states` | 3 | 3 | 3 |
 | `seed` | 0 | 1 | 2 |
@@ -284,9 +288,9 @@ Runs B and C over three seeds, as mean, min and max of the per-seed values:
 
 | Variant | Summary key | seed 0 | seed 1 | seed 2 | mean | min | max |
 |---|---|---|---|---|---|---|---|
-| `io-hmm` | `nll_gap` | 0.0010 | 0.0012 | 0.0025 | 0.0016 | 0.0010 | 0.0025 |
-| `io-hmm` | `viterbi_acc_matched` | 0.8871 | 0.8987 | 0.8927 | 0.8928 | 0.8871 | 0.8987 |
-| `io-hmm` | `true_viterbi_acc` | 0.9068 | 0.9086 | 0.8988 | 0.9047 | 0.8988 | 0.9086 |
+| `context-transition-hmm` | `nll_gap` | 0.0010 | 0.0012 | 0.0025 | 0.0016 | 0.0010 | 0.0025 |
+| `context-transition-hmm` | `viterbi_acc_matched` | 0.8871 | 0.8987 | 0.8927 | 0.8928 | 0.8871 | 0.8987 |
+| `context-transition-hmm` | `true_viterbi_acc` | 0.9068 | 0.9086 | 0.8988 | 0.9047 | 0.8988 | 0.9086 |
 | `neural-crf-tagger` | `nll_gap` | 0.0052 | 0.0056 | 0.0069 | 0.0059 | 0.0052 | 0.0069 |
 | `neural-crf-tagger` | `viterbi_acc` | 0.9414 | 0.9388 | 0.9336 | 0.9379 | 0.9336 | 0.9414 |
 | `neural-crf-tagger` | `true_viterbi_acc` | 0.9452 | 0.9415 | 0.9384 | 0.9417 | 0.9384 | 0.9452 |
@@ -353,8 +357,8 @@ The figures show the following (epochs counted from 1, as `best_checkpoint.epoch
 - **Run B.** On seed 0, `val_loss` is flat from epoch 2 and rises slightly after its
   minimum at epoch 9, while the training loss keeps falling, and the decoded strips lag
   the true state changes by 1 to 3 steps. The learned transition diagonal is 0.74 to
-  0.83 against the true 0.90 on all three seeds. The `io-hmm` transitions depend on the
-  input, so each heatmap is an average of per-step matrices, not one static matrix.
+  0.83 against the true 0.90 on all three seeds. The `context-transition-hmm` transitions depend on
+  the observations, so each heatmap is an average of per-step matrices, not one static matrix.
 - **Run C.** On seed 0, `val_loss` reaches its minimum at epoch 12 and then rises while
   the training loss keeps falling. The learned transition diagonal is 0.84 to 0.87 on all
   three seeds.
@@ -425,6 +429,17 @@ print("TF32", sys.argv[1], "max|predict - eager| log_emit = %.2e"
 PY
 ```
 
+**The input-output HMM.** One CPU run on 2026-10-30, on data whose exogenous input gates the
+true transitions (§2). `nll_kind` reads `marginal`, and for this preset both NLLs are
+`-log p(x | u)`. Test NLL per step 3.4304 against 3.4247 for the true model (gap 0.0057),
+matched Viterbi accuracy 0.9608 against the true model's 0.9621, majority rate 0.3380, 15 epochs:
+
+```bash
+CUDA_VISIBLE_DEVICES="" MPLBACKEND=Agg .venv/bin/python -m train.neural_hmm.train_neural_hmm \
+    --variant io-hmm --input-dim 2 --obs-type gaussian --n-states 3 --obs-dim 2 --separation 3.0 \
+    --stay-prob 0.95 --num-train 1500 --epochs 40 --seed 0
+```
+
 ## 8. Tests
 
 `tests/test_train/test_neural_hmm/`:
@@ -438,7 +453,7 @@ PY
   runs recording what the sampler, the model factory, the optimizer and `fit` received,
   every ignored-flag refusal of §4 and the `null` they leave in `config.json`;
 - `test_train_neural_hmm.py`: real tiny runs of `main()` for gaussian `neural-hmm`,
-  categorical `io-hmm` and gaussian `neural-crf-tagger`, every artifact, the archive
+  categorical `context-transition-hmm`, gaussian `io-hmm` and gaussian `neural-crf-tagger`, every artifact, the archive
   reload (including a run whose best epoch is not its last, so that the exact reload
   depends on `restore_best_weights=True`), the refusals and a failing figure.
 

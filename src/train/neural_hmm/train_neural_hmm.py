@@ -42,7 +42,7 @@ Usage:
     python -m train.neural_hmm.train_neural_hmm --help
     python -m train.neural_hmm.train_neural_hmm --variant neural-hmm --obs-type gaussian \
         --n-states 4 --obs-dim 2 --separation 4.0 --stay-prob 0.9
-    python -m train.neural_hmm.train_neural_hmm --variant io-hmm --obs-type categorical \
+    python -m train.neural_hmm.train_neural_hmm --variant context-transition-hmm --obs-type categorical \
         --n-states 3 --vocab-size 8
 """
 
@@ -73,7 +73,7 @@ from train.common.callbacks import EpochCSVLogger, best_checkpoint_path
 from train.common.run_artifacts import attach_run_log, refuse_existing_run, write_summary_json
 from train.neural_hmm.data import (
     OBS_TYPES, HMMDataset, accuracy, hungarian_mapping, majority_rate, matched_accuracy,
-    sample_splits, true_conditional_nll_per_step, true_log_potentials, true_nll_per_step,
+    mean_true_transition, sample_splits, true_conditional_nll_per_step, true_log_potentials, true_nll_per_step,
     unread_arguments,
 )
 
@@ -113,6 +113,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vocab-size", type=int, default=8,
                         help="Symbol count of a categorical observation. Refused with gaussian "
                              "(recorded as null when not given).")
+    parser.add_argument("--input-dim", type=int, default=None,
+                        help="Features of the exogenous input that gates the true transitions. "
+                             "Required by --variant io-hmm and refused by every other variant.")
     parser.add_argument("--encoder", choices=ENCODER_TYPES, default=None,
                         help="Override the preset's encoder type (default: the preset's). "
                              "Refused for a preset that builds no encoder.")
@@ -199,7 +202,10 @@ def parse_arguments(argv=None) -> argparse.Namespace:
                          f"{args.obs_type} and --n-states {args.n_states}: {reason}. Drop it.")
         setattr(args, dest, None)
 
-    for flag in ("obs_dim", "vocab_size", "hidden_dim", "seq_len", "min_seq_len",
+    if (args.variant == "io-hmm") != (args.input_dim is not None):
+        parser.error(f"--input-dim is required by --variant io-hmm and refused by every other "
+                     f"variant, got --variant {args.variant} and --input-dim {args.input_dim}")
+    for flag in ("input_dim", "obs_dim", "vocab_size", "hidden_dim", "seq_len", "min_seq_len",
                  "num_train", "num_val", "num_test", "epochs", "batch_size"):
         if getattr(args, flag) is not None and getattr(args, flag) < 1:
             parser.error(f"--{flag.replace('_', '-')} must be >= 1, got {getattr(args, flag)}")
@@ -243,6 +249,7 @@ def load_splits(args: argparse.Namespace) -> Dict[str, HMMDataset]:
         vocab_size=args.vocab_size,
         separation=args.separation,
         stay_prob=args.stay_prob,
+        input_dim=args.input_dim,
     )
 
 
@@ -268,6 +275,8 @@ def build_model(args: argparse.Namespace) -> NeuralHMM:
         kwargs["vocab_size"] = args.vocab_size
     else:
         kwargs["obs_dim"] = args.obs_dim
+    if args.input_dim is not None:
+        kwargs["input_dim"] = args.input_dim
     if args.encoder is not None:
         kwargs["encoder_type"] = args.encoder
     # The model refuses a non-default value for an argument it does not read (D-025), and
@@ -286,7 +295,10 @@ def build_model(args: argparse.Namespace) -> NeuralHMM:
 
 def _inputs(split: HMMDataset, start: int = 0, stop: Optional[int] = None) -> Dict[str, np.ndarray]:
     """The model input dict of rows ``start:stop`` of a split."""
-    return {"obs": split.obs[start:stop], "mask": split.mask[start:stop]}
+    inputs = {"obs": split.obs[start:stop], "mask": split.mask[start:stop]}
+    if split.inputs is not None:
+        inputs["inputs"] = split.inputs[start:stop]
+    return inputs
 
 
 def _labels(model: NeuralHMM, split: HMMDataset) -> Optional[np.ndarray]:
@@ -342,7 +354,8 @@ def true_viterbi_path(split: HMMDataset, batch_size: int) -> np.ndarray:
     paths = []
     for start in range(0, len(split.obs), batch_size):
         stop = start + batch_size
-        potentials = true_log_potentials(split.true_hmm, split.obs[start:stop])
+        potentials = true_log_potentials(
+            split.true_hmm, split.obs[start:stop], None if split.inputs is None else split.inputs[start:stop])
         path, _ = inference.viterbi_decode(
             potentials["log_pi"], potentials["log_A"], potentials["log_emit"], split.mask[start:stop])
         paths.append(keras.ops.convert_to_numpy(path))
@@ -561,7 +574,7 @@ def main(argv=None) -> int:
             nll_kind, true_nll = "conditional", true_conditional_nll_per_step(
                 hmm, test.obs, test.states, test.mask)
         else:
-            nll_kind, true_nll = "marginal", true_nll_per_step(hmm, test.obs, test.mask)
+            nll_kind, true_nll = "marginal", true_nll_per_step(hmm, test.obs, test.mask, test.inputs)
         mapping = hungarian_mapping(scores["path"], test.states, args.n_states)
         true_path = true_viterbi_path(test, args.batch_size)
 
@@ -573,6 +586,7 @@ def main(argv=None) -> int:
             "n_states": args.n_states,
             "obs_dim": args.obs_dim,
             "vocab_size": args.vocab_size,
+            "input_dim": args.input_dim,
             "encoder_type": model.encoder_type if model.encoder is not None else None,
             "hidden_dim": args.hidden_dim,
             "params": int(scored.count_params()),
@@ -611,7 +625,7 @@ def main(argv=None) -> int:
             "loss_curve": lambda: render_loss_curve(
                 run_dir / TRAINING_LOG_NAME, true_nll, nll_kind, viz_dir / "loss_curve.png"),
             "transitions": lambda: render_transitions(
-                _relabel_matrix(scores["transition"], shown), hmm.transition,
+                _relabel_matrix(scores["transition"], shown), mean_true_transition(hmm, test.inputs, test.mask),
                 f"Transition matrix ({order}; learned: mean over valid test steps)",
                 viz_dir / "transitions.png"),
             "state_strip": lambda: render_state_strip(

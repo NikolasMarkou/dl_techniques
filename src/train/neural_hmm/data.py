@@ -20,6 +20,11 @@ parameter; the seed only drives the sampling:
   puts :data:`OWN_SYMBOL_MASS` of its probability uniformly on its own symbols and the
   rest uniformly on the others. ``separation`` is not read.
 
+**Exogenous inputs** (``input_dim`` set, for an input-output model): each step draws
+``u_t ~ N(0, I)``, and its first feature gates the transition into ``t``: above 0 the
+sticky matrix applies, otherwise the next state is uniform. Emissions do not read ``u``.
+:func:`true_transitions` gives those matrices.
+
 :func:`unread_arguments` names the arguments of :func:`make_true_hmm` that a given
 ``n_states`` and ``obs_type`` do not read (``obs_dim`` for categorical, ``vocab_size``
 for gaussian, ``separation`` for categorical or ``K = 1``, ``stay_prob`` for ``K = 1``);
@@ -104,12 +109,14 @@ class HMMDataset(NamedTuple):
     :param mask: ``(N, T)`` float32, 1.0 on the valid prefix.
     :param states: ``(N, T)`` int32 true states, ``-1`` at padded steps.
     :param true_hmm: The generating :class:`TrueHMM`.
+    :param inputs: ``(N, T, U)`` float32 exogenous inputs, 0 at padded steps, or ``None``.
     """
 
     obs: np.ndarray
     mask: np.ndarray
     states: np.ndarray
     true_hmm: TrueHMM
+    inputs: Optional[np.ndarray] = None
 
 
 # ---------------------------------------------------------------------
@@ -208,6 +215,32 @@ def make_true_hmm(
     return TrueHMM(pi, transition, obs_type, emission_probs=probs)
 
 
+def true_transitions(hmm: TrueHMM, inputs: np.ndarray) -> np.ndarray:
+    """Return the true per-step transition matrices of an input-driven sequence.
+
+    :param hmm: The true HMM.
+    :param inputs: ``(N, T, U)`` exogenous inputs.
+    :return: ``(N, T, K, K)`` float64: ``hmm.transition`` where ``inputs[..., 0] > 0``,
+        uniform elsewhere. Rows are the source, and step ``t`` is the transition INTO ``t``.
+    """
+    closed = np.asarray(inputs)[:, :, 0, None, None] > 0
+    return np.where(closed, hmm.transition, 1.0 / hmm.n_states)
+
+
+def mean_true_transition(hmm: TrueHMM, inputs: Optional[np.ndarray], mask: np.ndarray) -> np.ndarray:
+    """Return the true transition matrix averaged over the valid moves of a split.
+
+    :param hmm: The true HMM.
+    :param inputs: ``(N, T, U)`` exogenous inputs, or ``None`` (the static matrix itself).
+    :param mask: ``(N, T)`` right-padding mask.
+    :return: ``(K, K)`` float64.
+    """
+    if inputs is None:
+        return hmm.transition
+    moves = np.asarray(mask)[:, 1:] > 0
+    return true_transitions(hmm, inputs)[:, 1:][moves].mean(axis=0)
+
+
 def _draw(rng: np.random.Generator, probs: np.ndarray) -> np.ndarray:
     """Draw one index per row of ``probs`` (``(N, K)`` rows summing to 1) by inverse CDF."""
     cdf = np.cumsum(probs, axis=1)
@@ -226,11 +259,13 @@ def sample_hmm_dataset(
         separation: Optional[float] = 4.0,
         stay_prob: Optional[float] = 0.9,
         seed: Union[int, Sequence[int]] = 0,
+        input_dim: Optional[int] = None,
 ) -> HMMDataset:
     """Sample ``n_sequences`` right-padded sequences from :func:`make_true_hmm`'s HMM.
 
     The draws come in a fixed order from one ``numpy.random.default_rng(seed)``: the
-    valid lengths, the state paths, then the observations.
+    valid lengths, the exogenous inputs (only with ``input_dim``), the state paths, then
+    the observations.
 
     :param n_sequences: ``N >= 1``.
     :param seq_len: Padded length ``T >= 1``.
@@ -242,6 +277,8 @@ def sample_hmm_dataset(
     :param separation: See :func:`make_true_hmm`.
     :param stay_prob: See :func:`make_true_hmm`.
     :param seed: Seed (or seed list) of the generator.
+    :param input_dim: Features ``U`` of an exogenous input that gates the transitions (see
+        the module docstring), or ``None`` for a plain HMM.
     :return: The split and its true HMM.
     :raises ValueError: If a size is out of range, or :func:`make_true_hmm` refuses.
     """
@@ -255,10 +292,19 @@ def sample_hmm_dataset(
     lengths = rng.integers(min_seq_len, seq_len + 1, size=n_sequences)
     valid = np.arange(seq_len)[None, :] < lengths[:, None]
 
+    inputs = None
+    if input_dim is not None:
+        drawn = rng.standard_normal((n_sequences, seq_len, input_dim))
+        inputs = np.where(valid[:, :, None], drawn, 0.0).astype(np.float32)
+
     states = np.empty((n_sequences, seq_len), dtype=np.int64)
     states[:, 0] = _draw(rng, np.broadcast_to(hmm.pi, (n_sequences, n_states)))
+    matrices = None if inputs is None else true_transitions(hmm, inputs)
     for t in range(1, seq_len):
-        states[:, t] = _draw(rng, hmm.transition[states[:, t - 1]])
+        if matrices is None:
+            states[:, t] = _draw(rng, hmm.transition[states[:, t - 1]])
+        else:
+            states[:, t] = _draw(rng, matrices[np.arange(n_sequences), t, states[:, t - 1]])
 
     if obs_type == "gaussian":
         obs = hmm.means[states] + rng.standard_normal((n_sequences, seq_len, obs_dim))
@@ -271,6 +317,7 @@ def sample_hmm_dataset(
         mask=valid.astype(np.float32),
         states=np.where(valid, states, -1).astype(np.int32),
         true_hmm=hmm,
+        inputs=inputs,
     )
 
 
@@ -316,7 +363,9 @@ def true_log_emissions(hmm: TrueHMM, obs: np.ndarray) -> np.ndarray:
     return np.moveaxis(log_probs[:, np.asarray(obs, dtype=np.int64)], 0, -1)
 
 
-def true_log_likelihood(hmm: TrueHMM, obs: np.ndarray, mask: np.ndarray) -> np.ndarray:
+def true_log_likelihood(
+        hmm: TrueHMM, obs: np.ndarray, mask: np.ndarray, inputs: Optional[np.ndarray] = None
+) -> np.ndarray:
     """Return ``log p(x)`` of every sequence under the true HMM, by the scaled forward.
 
     Each step's forward vector is normalized to sum to 1 and the log of the normalizer
@@ -326,9 +375,12 @@ def true_log_likelihood(hmm: TrueHMM, obs: np.ndarray, mask: np.ndarray) -> np.n
     :param hmm: The true HMM.
     :param obs: Observations.
     :param mask: ``(N, T)`` right-padding mask.
+    :param inputs: ``(N, T, U)`` exogenous inputs, or ``None``; with them this is
+        ``log p(x | u)``.
     :return: ``(N,)`` float64 log-likelihoods.
     """
     log_b = true_log_emissions(hmm, obs)
+    matrices = None if inputs is None else true_transitions(hmm, inputs)
     shift = log_b.max(axis=-1)
     b = np.exp(log_b - shift[:, :, None])
     lengths = (np.asarray(mask) > 0).sum(axis=1)
@@ -340,8 +392,10 @@ def true_log_likelihood(hmm: TrueHMM, obs: np.ndarray, mask: np.ndarray) -> np.n
             break
         if t == 0:
             step = hmm.pi[None, :] * b[rows, 0]
-        else:
+        elif matrices is None:
             step = (alpha[rows] @ hmm.transition) * b[rows, t]
+        else:
+            step = np.einsum("ni,nij->nj", alpha[rows], matrices[rows, t]) * b[rows, t]
         norm = step.sum(axis=1)
         alpha[rows] = step / norm[:, None]
         log_lik[rows] += np.log(norm) + shift[rows, t]
@@ -377,7 +431,9 @@ def _per_step(total_log_prob: np.ndarray, mask: np.ndarray) -> float:
     return float(-np.sum(total_log_prob) / steps)
 
 
-def true_nll_per_step(hmm: TrueHMM, obs: np.ndarray, mask: np.ndarray) -> float:
+def true_nll_per_step(
+        hmm: TrueHMM, obs: np.ndarray, mask: np.ndarray, inputs: Optional[np.ndarray] = None
+) -> float:
     """Return ``-log p(x)`` per valid step under the true HMM, summed over the split.
 
     The same reduction as the model's training loss (total NLL over total valid
@@ -386,10 +442,11 @@ def true_nll_per_step(hmm: TrueHMM, obs: np.ndarray, mask: np.ndarray) -> float:
     :param hmm: The true HMM.
     :param obs: Observations.
     :param mask: ``(N, T)`` right-padding mask.
+    :param inputs: ``(N, T, U)`` exogenous inputs, or ``None``.
     :return: Nats per valid step.
     :raises ValueError: If the split has no valid step.
     """
-    return _per_step(true_log_likelihood(hmm, obs, mask), mask)
+    return _per_step(true_log_likelihood(hmm, obs, mask, inputs), mask)
 
 
 def true_conditional_nll_per_step(
@@ -411,11 +468,14 @@ def true_conditional_nll_per_step(
     return _per_step(conditional, mask)
 
 
-def true_log_potentials(hmm: TrueHMM, obs: np.ndarray) -> Dict[str, np.ndarray]:
+def true_log_potentials(
+        hmm: TrueHMM, obs: np.ndarray, inputs: Optional[np.ndarray] = None
+) -> Dict[str, np.ndarray]:
     """Return the true parameters in the model's output shapes, float64.
 
     :param hmm: The true HMM.
     :param obs: Observations, ``N`` sequences of length ``T``.
+    :param inputs: ``(N, T, U)`` exogenous inputs, or ``None``.
     :return: ``{"log_pi": (N, K), "log_A": (N, T, K, K), "log_emit": (N, T, K)}``, the
         input of the model package's ``inference`` functions.
     """
@@ -424,7 +484,8 @@ def true_log_potentials(hmm: TrueHMM, obs: np.ndarray) -> Dict[str, np.ndarray]:
     log_pi, log_a = np.log(hmm.pi), np.log(hmm.transition)
     return {
         "log_pi": np.broadcast_to(log_pi, (n, k)).copy(),
-        "log_A": np.broadcast_to(log_a, (n, steps, k, k)).copy(),
+        "log_A": (np.broadcast_to(log_a, (n, steps, k, k)).copy() if inputs is None
+                  else np.log(true_transitions(hmm, inputs))),
         "log_emit": log_emit,
     }
 

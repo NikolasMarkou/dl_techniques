@@ -33,8 +33,9 @@ Architecture:
     h (B, T, hidden_dim), in the compute dtype
 
 **Causality.** With ``causal=True`` the output at step ``t`` depends on ``x_{<=t}`` only.
-The model shifts its input right by one step before the encoder, so the emission of ``x_t``
-reads a context built from ``x_{<t}`` (Tran et al., 2016). The ``mlp`` path is per-step
+The model shifts its input right by one step before the encoder, so whatever reads the
+context at step ``t`` sees ``x_{<t}`` only (Tran et al., 2016, section 6, on transitions).
+An exogenous input is not shifted: the model conditions on it and never scores it. The ``mlp`` path is per-step
 and therefore causal under either setting.
 
 **Padding.** A mask marks a contiguous valid prefix (right padding). Padded inputs are

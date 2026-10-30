@@ -9,9 +9,11 @@ destination, every row of ``exp(log_A)`` sums to 1, and the ``t = 0`` slot is ne
 
 - :class:`StaticTransition` is a plain HMM: one learned matrix, broadcast over the batch and
   time axes of whatever ``(B, T, ...)`` tensor it is called on.
-- :class:`InputDependentTransition` is an input-output HMM (Bengio and Frasconi, 1995): the
-  static logits plus a per-step offset projected from a ``(B, T, H)`` context. The
-  projection is zero-initialized, so training starts at the static solution.
+- :class:`InputDependentTransition` adds a per-step offset projected from a ``(B, T, H)``
+  context to the static logits: Tran et al.'s context transitions when the context
+  summarizes the observations, an input-output HMM (Bengio and Frasconi, 1995) when it
+  summarizes an exogenous input. The projection is zero-initialized, so training starts at
+  the static solution.
 
 The topology says which transitions exist at all, independently of the layer type:
 
@@ -207,7 +209,7 @@ class StaticTransition(LogSpaceOutputSpec, keras.layers.Layer):
 
 @register_dl_technique("dl_techniques.models.neural_hmm.transitions")
 class InputDependentTransition(StaticTransition):
-    """Per-step transition matrices driven by a context: an input-output HMM.
+    """Per-step transition matrices driven by a context.
 
     ``log_A[:, t] = log_softmax(where(keep, transition_logits + W h_t, sentinel))``, where
     ``W`` is a zero-initialized, bias-free projection of the ``(B, T, H)`` context to
