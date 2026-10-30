@@ -9,15 +9,19 @@ creates nothing, so the ``results/`` listing is compared before and after.
 import dataclasses
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Dict
 
+import numpy as np
 import pytest
 
 import train
+from train.api.args import OptimArgs
 from train.api.errors import ConfigError
 from train.api.run_dir import (
     open_run,
@@ -44,7 +48,12 @@ def snapshot(root: Path) -> Dict[str, str]:
     seen: Dict[str, str] = {}
     for path in sorted(root.rglob("*")):
         rel = path.relative_to(root).as_posix()
-        seen[rel] = "dir" if path.is_dir() else hashlib.sha256(path.read_bytes()).hexdigest()
+        if path.is_symlink():
+            seen[rel] = "link->" + os.readlink(path)
+        elif path.is_dir():
+            seen[rel] = "dir"
+        else:
+            seen[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
     return seen
 
 
@@ -87,6 +96,8 @@ def test_each_artifact_alone_is_refused_and_nothing_changes(tmp_path, name):
 
     assert name.split("/")[0] in str(caught.value)
     assert "'out'" in str(caught.value)
+    assert "--experiment-name" not in str(caught.value)
+    assert "out=auto" in str(caught.value)
     assert snapshot(tmp_path) == before
 
 
@@ -105,20 +116,124 @@ def test_a_missing_directory_is_created_with_its_parents(tmp_path):
     assert run_dir.is_dir()
 
 
-def test_an_empty_directory_is_accepted(tmp_path):
+def test_an_empty_directory_is_accepted_and_claimed(tmp_path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     assert open_run(run_dir, resume=False) == run_dir
-    assert snapshot(tmp_path) == {"run": "dir"}
+    assert set(snapshot(tmp_path)) == {"run", "run/config_requested.json"}
+    assert (run_dir / "config_requested.json").read_bytes() == b""
 
 
-def test_unrelated_files_and_a_bare_checkpoints_directory_are_accepted(tmp_path):
+@pytest.mark.parametrize("held", ["notes.txt", ".hidden", "checkpoints/", "tensorboard/x"])
+def test_a_non_empty_directory_is_refused_and_nothing_changes(tmp_path, held):
+    """Any content refuses a new run: the run layout has more files than the tuple names."""
     run_dir = tmp_path / "run"
-    (run_dir / "checkpoints").mkdir(parents=True)
-    (run_dir / "notes.txt").write_text("mine")
+    if held.endswith("/"):
+        (run_dir / held).mkdir(parents=True)
+    else:
+        (run_dir / held).parent.mkdir(parents=True, exist_ok=True)
+        (run_dir / held).write_text("mine")
     before = snapshot(tmp_path)
-    assert open_run(run_dir, resume=False) == run_dir
+    with pytest.raises(ConfigError, match="not empty") as caught:
+        open_run(run_dir, resume=False)
+    assert "'out'" in str(caught.value)
     assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("name", run_artifact_names())
+def test_a_run_nested_inside_a_used_directory_is_refused(tmp_path, name):
+    parent = tmp_path / "finished"
+    plant(parent, name)
+    before = snapshot(tmp_path)
+    for nested in ("nested", "checkpoints/backup/x", "a/b/c"):
+        with pytest.raises(ConfigError, match="lies inside") as caught:
+            open_run(parent / nested, resume=False)
+        assert name.split("/")[0] in str(caught.value)
+        assert "'out'" in str(caught.value)
+    assert snapshot(tmp_path) == before
+
+
+def test_a_directory_beside_a_finished_run_is_accepted(tmp_path):
+    plant(tmp_path / "finished", "results_summary.json")
+    assert open_run(tmp_path / "sibling", resume=False) == tmp_path / "sibling"
+
+
+# ---------------------------------------------------------------------
+# The claim
+# ---------------------------------------------------------------------
+
+
+def test_a_second_open_with_no_write_between_is_refused(tmp_path):
+    run_dir = tmp_path / "run"
+    open_run(run_dir, resume=False)
+    before = snapshot(tmp_path)
+    with pytest.raises(ConfigError, match="config_requested.json"):
+        open_run(run_dir, resume=False)
+    assert snapshot(tmp_path) == before
+
+
+def test_write_requested_replaces_the_claim(tmp_path):
+    run_dir = tmp_path / "run"
+    open_run(run_dir, resume=False)
+    write_requested(run_dir, {"epochs": 2})
+    assert json.loads((run_dir / "config_requested.json").read_text()) == {"epochs": 2}
+
+
+_RACER = """
+import json, sys, time
+from pathlib import Path
+from train.api.errors import ConfigError
+from train.api.run_dir import open_run
+
+root, tag, count = Path(sys.argv[1]), sys.argv[2], int(sys.argv[3])
+open_run(root / ("warm_" + tag), False)  # the heavy imports happen before the race
+(root / ("ready_" + tag)).write_text("")
+while not (root / "go").exists():
+    pass
+results = []
+for i in range(count):
+    try:
+        open_run(root / f"run_{i}", False)
+        results.append("ok")
+    except ConfigError:
+        results.append("refused")
+print(json.dumps(results))
+"""
+
+
+def test_two_processes_opening_the_same_directories_never_both_win(tmp_path):
+    """Two real processes, released together, open the same 150 new directories."""
+    count = 150
+    env = {**os.environ, "CUDA_VISIBLE_DEVICES": "-1", "MPLBACKEND": "Agg"}
+    procs = [
+        subprocess.Popen(
+            [sys.executable, "-c", _RACER, str(tmp_path), tag, str(count)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        for tag in ("a", "b")
+    ]
+    try:
+        deadline = time.time() + 180
+        while not all((tmp_path / f"ready_{t}").exists() for t in ("a", "b")):
+            assert time.time() < deadline, "the racers never got ready"
+            assert all(p.poll() is None for p in procs), [p.communicate() for p in procs]
+            time.sleep(0.05)
+        (tmp_path / "go").write_text("")
+        outputs = [p.communicate(timeout=180) for p in procs]
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
+    assert [p.returncode for p in procs] == [0, 0], outputs
+    first, second = (json.loads(out) for out, _ in outputs)
+    assert len(first) == len(second) == count
+    for i, pair in enumerate(zip(first, second)):
+        assert sorted(pair) == ["ok", "refused"], (i, pair)
+    for i in range(count):
+        assert (tmp_path / f"run_{i}" / "config_requested.json").is_file()
 
 
 # ---------------------------------------------------------------------
@@ -206,6 +321,72 @@ def test_the_request_alone_makes_the_same_out_refused(tmp_path):
     assert snapshot(tmp_path) == before
 
 
+@dataclasses.dataclass(frozen=True)
+class Plain:
+    lr: float = 0.5
+    pair: tuple = (1, 2)
+
+
+def test_write_requested_accepts_the_group_instances_validate_accepts(tmp_path):
+    run_dir = tmp_path / "run"
+    open_run(run_dir, resume=False)
+    mapping = {
+        "epochs": 3,
+        "optim_args": OptimArgs(lr=1.0),
+        "nested": {"inner": Plain(), "values": (1, 2.5, "auto")},
+    }
+    write_requested(run_dir, mapping)
+    written = json.loads((run_dir / "config_requested.json").read_text())
+    assert written == {
+        "epochs": 3,
+        "optim_args": dataclasses.asdict(OptimArgs(lr=1.0)),
+        "nested": {"inner": {"lr": 0.5, "pair": [1, 2]}, "values": [1, 2.5, "auto"]},
+    }
+    assert written["optim_args"]["lr"] == 1.0
+    assert written["optim_args"]["optimizer"] == "auto"
+
+
+def test_write_requested_accepts_a_top_level_dataclass(tmp_path):
+    run_dir = tmp_path / "run"
+    open_run(run_dir, resume=False)
+    write_requested(run_dir, Plain())
+    assert json.loads((run_dir / "config_requested.json").read_text()) == {
+        "lr": 0.5,
+        "pair": [1, 2],
+    }
+
+
+@pytest.mark.parametrize(
+    "mapping, where",
+    [
+        ({"lr": float("nan")}, "'lr'"),
+        ({"lr": float("inf")}, "'lr'"),
+        ({"a": {"b": [1, float("-inf")]}}, "'a.b[1]'"),
+        ({"model_args": {"x": float("nan")}}, "'model_args.x'"),
+        ({"opt": Plain(lr=float("nan"))}, "'opt.lr'"),
+        ({"v": np.float32("nan")}, "'v'"),
+        ({"v": (np.float64("inf"),)}, "'v[0]'"),
+    ],
+)
+def test_write_requested_refuses_a_non_finite_number_and_writes_no_nan(tmp_path, mapping, where):
+    run_dir = tmp_path / "run"
+    open_run(run_dir, resume=False)
+    before = snapshot(tmp_path)
+    with pytest.raises(ConfigError, match="NaN or infinity") as caught:
+        write_requested(run_dir, mapping)
+    assert where in str(caught.value)
+    assert snapshot(tmp_path) == before
+    assert (run_dir / "config_requested.json").read_bytes() == b""
+
+
+def test_write_requested_refuses_every_non_finite_number_at_once(tmp_path):
+    run_dir = tmp_path / "run"
+    open_run(run_dir, resume=False)
+    with pytest.raises(ConfigError) as caught:
+        write_requested(run_dir, {"a": float("nan"), "b": [float("inf")]})
+    assert "'a'" in str(caught.value) and "'b[0]'" in str(caught.value)
+
+
 # ---------------------------------------------------------------------
 # resolve_out
 # ---------------------------------------------------------------------
@@ -249,6 +430,68 @@ def test_a_path_that_does_not_name_a_run_directory_is_refused(out):
         resolve_out(out, "t", "f", "v")
 
 
+@pytest.mark.parametrize(
+    "out",
+    [
+        "a/../b",
+        "missing/../finished_run",
+        "../outside",
+        "../../x",
+        "results/../../x",
+        "x/..",
+        "/tmp/a/../b",
+        "~",
+        "~/x",
+        "~someone/x",
+    ],
+)
+def test_a_dotdot_segment_and_a_leading_tilde_are_refused(out):
+    with pytest.raises(ConfigError, match="'out'"):
+        resolve_out(out, "t", "f", "v")
+
+
+def test_the_missing_parent_bypass_overwrites_nothing_and_creates_nothing(tmp_path):
+    """The review's reproduction: ``typo/../finished`` used to reach a finished run."""
+    finished = tmp_path / "finished_run"
+    plant(finished, "results_summary.json")
+    plant(finished, "config.json")
+    before = snapshot(tmp_path)
+    for out in (f"{tmp_path}/typo_dir/../finished_run", f"{tmp_path}/typo_dir/../fresh"):
+        with pytest.raises(ConfigError, match="'out'"):
+            open_run(resolve_out(out, "t", "f", "v"), resume=False)
+    assert snapshot(tmp_path) == before
+    assert not (tmp_path / "typo_dir").exists()
+
+
+def test_the_repo_root_and_the_results_root_are_refused_by_identity(tmp_path):
+    results = REPO / "results"
+    listing_before = sorted(p.name for p in results.iterdir()) if results.is_dir() else None
+    link = tmp_path / "link_to_repo"
+    link.symlink_to(REPO)
+    spellings = [
+        str(REPO),
+        str(REPO) + "/",
+        str(REPO / "."),
+        str(REPO / "results"),
+        str(REPO / "results") + "/",
+        "results",
+        "results/",
+        "./results",
+        str(link),
+        str(link / "results"),
+    ]
+    for out in spellings:
+        with pytest.raises(ConfigError, match="repo root|results root"):
+            resolve_out(out, "t", "f", "v")
+    listing_after = sorted(p.name for p in results.iterdir()) if results.is_dir() else None
+    assert listing_after == listing_before
+    assert snapshot(tmp_path) == {"link_to_repo": "link->" + str(REPO)}
+
+
+def test_a_directory_inside_the_results_root_is_still_a_run_directory():
+    assert resolve_out("results/one_run", "t", "f", "v") == REPO / "results" / "one_run"
+
+
 def test_a_path_naming_an_existing_file_is_refused(tmp_path):
     victim = tmp_path / "a_file"
     victim.write_text("data")
@@ -278,6 +521,85 @@ def test_two_auto_runs_in_one_second_share_a_name_and_the_second_is_refused(tmp_
     write_requested(run_dir, {"epochs": 1})
     with pytest.raises(ConfigError):
         open_run(run_dir, resume=False)
+
+
+# ---------------------------------------------------------------------
+# An OSError never reaches the user as a traceback
+# ---------------------------------------------------------------------
+
+
+def _under_a_file(tmp_path):
+    (tmp_path / "a_file").write_text("data")
+    return str(tmp_path / "a_file" / "sub" / "run")
+
+
+def _dangling(tmp_path):
+    (tmp_path / "dangling").symlink_to(tmp_path / "nowhere")
+    return str(tmp_path / "dangling")
+
+
+def _under_a_dangling_link(tmp_path):
+    (tmp_path / "dangling").symlink_to(tmp_path / "nowhere")
+    return str(tmp_path / "dangling" / "run")
+
+
+def _loop(tmp_path):
+    (tmp_path / "loop").symlink_to(tmp_path / "loop")
+    return str(tmp_path / "loop")
+
+
+def _too_long(tmp_path):
+    return str(tmp_path / ("x" * 300))
+
+
+def _unwritable_parent(tmp_path):
+    (tmp_path / "locked").mkdir()
+    (tmp_path / "locked").chmod(0o500)
+    return str(tmp_path / "locked" / "run")
+
+
+def _unsearchable_parent(tmp_path):
+    (tmp_path / "shut" / "inner").mkdir(parents=True)
+    (tmp_path / "shut").chmod(0o000)
+    return str(tmp_path / "shut" / "inner" / "run")
+
+
+OS_ERROR_CASES = {
+    "NotADirectoryError": _under_a_file,
+    "FileExistsError, dangling symlink": _dangling,
+    "dangling symlink as a parent": _under_a_dangling_link,
+    "symlink loop": _loop,
+    "name too long": _too_long,
+    "PermissionError, unwritable parent": _unwritable_parent,
+    "PermissionError, unsearchable parent": _unsearchable_parent,
+}
+
+
+@pytest.mark.parametrize("case", list(OS_ERROR_CASES))
+def test_an_os_error_becomes_a_config_error_naming_out_and_creates_nothing(tmp_path, case):
+    if case.startswith("PermissionError") and os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions")
+    out = OS_ERROR_CASES[case](tmp_path)
+    try:
+        with pytest.raises(ConfigError, match="'out'"):
+            open_run(resolve_out(out, "t", "f", "v"), resume=False)
+    finally:
+        for name in ("locked", "shut"):
+            if (tmp_path / name).exists():
+                (tmp_path / name).chmod(0o700)
+    after = snapshot(tmp_path)
+    expected_names = {"a_file", "dangling", "loop", "locked", "shut", "shut/inner"}
+    assert set(after) <= expected_names, after  # no run directory and no `nowhere`
+    assert not (tmp_path / "nowhere").exists()
+
+
+def test_open_run_alone_translates_when_given_a_path_resolve_out_did_not_see(tmp_path):
+    (tmp_path / "a_file").write_text("data")
+    with pytest.raises(ConfigError, match="'out'"):
+        open_run(tmp_path / "a_file" / "sub", resume=False)
+    with pytest.raises(ConfigError, match="'out'"):
+        open_run(tmp_path / "a_file", resume=False)
+    assert snapshot(tmp_path) == {"a_file": hashlib.sha256(b"data").hexdigest()}
 
 
 # ---------------------------------------------------------------------

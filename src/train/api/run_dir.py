@@ -13,8 +13,11 @@ Interface contract
         is anchored at the repo root, not the working directory; an absolute
         path is kept.
     :return: the run directory as a ``Path``. Nothing is created.
-    :raises ConfigError: for an empty ``out`` (or only blanks), ``.``, a path
-        ending in ``..``, the filesystem root, or a path naming an existing file.
+    :raises ConfigError: for an empty ``out`` (or only blanks), ``.``, any ``..``
+        segment, a leading ``~``, the filesystem root, the repo root, the results
+        root, a path naming an existing file, a dangling or looping symbolic
+        link, and any ``OSError`` met while looking (not a directory, no
+        permission, name too long). The text names ``out``.
 
 ``run_artifact_names()``
     :return: the names whose presence marks a directory as holding a run: the
@@ -23,21 +26,33 @@ Interface contract
 ``open_run(run_dir, resume)``
     :param run_dir: from :func:`resolve_out`.
     :param resume: ``False`` for a new run, ``True`` to continue one.
-    :return: ``run_dir``. A new run creates the directory (empty or missing is
-        fine); a resumed run touches nothing.
-    :raises ConfigError: a new run into a directory holding any artifact; a
-        resume without ``checkpoints/backup`` or with ``results_summary.json``
-        present (a finished run has nothing to resume, D-016).
+    :return: ``run_dir``. A new run needs a missing or EMPTY directory and
+        claims it before returning, by creating an empty
+        ``config_requested.json`` with ``O_CREAT | O_EXCL``, so two callers
+        cannot both succeed. A resumed run touches nothing.
+    :raises ConfigError: a new run into a non-empty directory, into a directory
+        holding any artifact, or under an ancestor directory holding one; a lost
+        claim; a resume without ``checkpoints/backup`` or with
+        ``results_summary.json`` present (a finished run has nothing to resume,
+        D-016); any ``OSError`` met on the way. Nothing is created before a
+        refusal. The text names ``out``.
 
 ``write_requested(run_dir, mapping)`` / ``write_resolved(run_dir, config)``
-    Write ``config_requested.json`` (the mapping as the caller gave it, AUTO
-    values included) and ``config.json`` (the resolved config). Both raise
-    ``OSError`` or ``TypeError`` on a failed write; neither is wrapped.
+    Write ``config_requested.json`` (replacing the claim; the mapping as the
+    caller gave it, AUTO values included, group instances turned into plain
+    values) and ``config.json`` (the resolved config). ``write_requested`` raises
+    ``ConfigError`` for a NaN or an infinity, and writes nothing then; both raise
+    ``OSError`` or ``TypeError`` on a failed write, which neither wraps.
 """
 
+import collections.abc
+import dataclasses
+import math
+import numbers
+import os
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Mapping, Tuple
+from typing import Any, List, Mapping, Tuple
 
 from .errors import ConfigError
 
@@ -58,6 +73,33 @@ BACKUP_DIR = "checkpoints/backup"
 # ---------------------------------------------------------------------
 
 
+def _anchor(output_dir: str) -> Path:
+    """Return ``output_dir`` anchored the way ``resolve_out`` anchors a relative path."""
+    from train.common.args import resolved_run_dir
+
+    return resolved_run_dir(SimpleNamespace(output_dir=output_dir, experiment_name=""))
+
+
+def _unusable(path: Path, exc: BaseException) -> ConfigError:
+    """Turn an ``OSError`` (or a symlink-loop ``RuntimeError``) into a ``ConfigError``."""
+    reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
+    return ConfigError(f"Invalid value for 'out': {path} cannot be used: {reason}")
+
+
+def _refuse_links(run_dir: Path) -> None:
+    """Refuse a dangling or looping symbolic link at ``run_dir`` or any parent.
+
+    ``mkdir(parents=True)`` follows a dangling link and creates its target, so the
+    link must be found before anything is created.
+    """
+    for part in (run_dir, *run_dir.parents):
+        if part.is_symlink() and not part.exists():
+            raise ConfigError(
+                f"Invalid value for 'out': {part} is a dangling or looping symbolic "
+                "link, so no directory can be made there"
+            )
+
+
 def resolve_out(out: Any, task: str, family: str, variant: str) -> Path:
     """Turn the ``out`` config value into a run directory path.
 
@@ -76,7 +118,6 @@ def resolve_out(out: Any, task: str, family: str, variant: str) -> Path:
     if text.strip() == "":
         raise ConfigError("Invalid value for 'out': it is empty; use a path or 'auto'")
 
-    from train.common.args import resolved_run_dir
     from train.common.run_io import default_experiment_name
 
     # DECISION plan-2026-10-30T132432-a865fa08/D-030
@@ -87,25 +128,44 @@ def resolve_out(out: Any, task: str, family: str, variant: str) -> Path:
     # `parents[3]` here: that index is a layout coincidence owned by the helper
     # (plan-2026-08-12T123743-e798a9e1/D-014).
     if text == AUTO_OUT:
-        config = SimpleNamespace(
-            output_dir=AUTO_PARENT,
-            experiment_name=default_experiment_name(task, family, variant),
-        )
+        run_dir = _anchor(AUTO_PARENT) / default_experiment_name(task, family, variant)
     else:
+        # DECISION plan-2026-10-30T132432-a865fa08/D-033
+        # A `..` segment and a leading `~` are REFUSED, not resolved. Do NOT
+        # normalize the path and accept it: `missing/../finished_run` made
+        # `mkdir(parents=True)` create `missing`, after which the path reached the
+        # finished run and its files were overwritten (review-iter-1 concern 1).
+        # A user wanting a parent directory writes the absolute path.
         path = Path(text)
-        if not path.parts or path.name == "..":
+        if not path.parts or ".." in path.parts:
             raise ConfigError(
-                f"Invalid value for 'out': {text!r} does not name a run directory"
+                f"Invalid value for 'out': {text!r} does not name a run directory "
+                "(no '.', and no '..' segment; write an absolute path instead)"
             )
-        config = SimpleNamespace(output_dir=path, experiment_name="")
-    run_dir = resolved_run_dir(config)
+        if text.startswith("~"):
+            raise ConfigError(
+                f"Invalid value for 'out': {text!r} starts with '~', which is not "
+                "expanded here; write an absolute path"
+            )
+        run_dir = _anchor(text)
 
     if run_dir.parent == run_dir:
         raise ConfigError(f"Invalid value for 'out': {text!r} is the filesystem root")
-    if run_dir.exists() and not run_dir.is_dir():
-        raise ConfigError(
-            f"Invalid value for 'out': {run_dir} is an existing file, not a directory"
-        )
+    try:
+        _refuse_links(run_dir)
+        resolved = run_dir.resolve()
+        for label, root in (("the repo root", "."), ("the results root", AUTO_PARENT)):
+            if resolved == _anchor(root).resolve():
+                raise ConfigError(
+                    f"Invalid value for 'out': {text!r} is {label}, which holds other "
+                    "work; name a run directory inside it, or use 'auto'"
+                )
+        if run_dir.exists() and not run_dir.is_dir():
+            raise ConfigError(
+                f"Invalid value for 'out': {run_dir} is an existing file, not a directory"
+            )
+    except (OSError, RuntimeError) as exc:
+        raise _unusable(run_dir, exc) from exc
     return run_dir
 
 
@@ -124,50 +184,147 @@ def run_artifact_names() -> Tuple[str, ...]:
     return (*RUN_ARTIFACT_NAMES, REQUESTED_CONFIG_NAME, "final_model.keras", "task.json", BACKUP_DIR)
 
 
+def _refuse_holder(directory: Path, run_dir: Path) -> None:
+    """Call the shared refusal on ``directory`` and say it in terms of ``out``."""
+    from train.common.run_artifacts import refuse_existing_run
+
+    names = run_artifact_names()
+    try:
+        refuse_existing_run(directory, names)
+    except FileExistsError as exc:
+        found = ", ".join(name for name in names if (directory / name).exists())
+        place = (
+            f"{directory} already holds a run"
+            if directory == run_dir
+            else f"{run_dir} lies inside {directory}, which already holds a run"
+        )
+        raise ConfigError(
+            f"Invalid value for 'out': {place} ({found}). Nothing was written. "
+            "Choose a new 'out' ('out=auto' picks a new timestamped directory); "
+            "existing results are never overwritten or deleted."
+        ) from exc
+
+
+def _refuse_used(run_dir: Path) -> None:
+    """Refuse ``run_dir`` for a new run when it, or a parent, is already used."""
+    _refuse_holder(run_dir, run_dir)
+    if run_dir.exists() and not run_dir.is_dir():
+        raise ConfigError(
+            f"Invalid value for 'out': {run_dir} is an existing file, not a directory"
+        )
+    if run_dir.is_dir():
+        held = sorted(entry.name for entry in run_dir.iterdir())
+        if held:
+            shown = ", ".join(held[:5]) + (", ..." if len(held) > 5 else "")
+            raise ConfigError(
+                f"Invalid value for 'out': {run_dir} is not empty ({shown}). Nothing "
+                "was written. A new run needs a missing or empty directory; choose a "
+                "new 'out' ('out=auto' picks a new timestamped directory)."
+            )
+    for ancestor in run_dir.resolve().parents:
+        _refuse_holder(ancestor, run_dir)
+
+
+def _claim(run_dir: Path) -> None:
+    """Create an empty ``config_requested.json`` that only one caller can create."""
+    # DECISION plan-2026-10-30T132432-a865fa08/D-033
+    # The claim is `O_CREAT | O_EXCL` on the request file, because the directory
+    # may legitimately exist already (empty), so `mkdir` without `exist_ok` cannot
+    # arbitrate. Do NOT replace it with "check the artifact names, then write
+    # later": two callers with no write between them both passed (review-iter-1
+    # concern 7; `setup_gpu` and seeding sit between open_run and write_requested).
+    try:
+        fd = os.open(
+            run_dir / REQUESTED_CONFIG_NAME, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666
+        )
+    except FileExistsError as exc:
+        raise ConfigError(
+            f"Invalid value for 'out': {run_dir} was claimed by another run just now "
+            f"({REQUESTED_CONFIG_NAME} exists). Nothing was written. Choose a new "
+            "'out' ('out=auto' picks a new timestamped directory)."
+        ) from exc
+    os.close(fd)
+
+
 def open_run(run_dir: Path, resume: bool) -> Path:
-    """Refuse a run directory that cannot be used, then make it usable.
+    """Refuse a run directory that cannot be used, then claim it.
 
     :param run_dir: the directory from :func:`resolve_out`.
     :param resume: ``True`` to continue an interrupted run.
     :return: ``run_dir``.
     :raises ConfigError: see the module contract.
     """
-    from train.common.run_artifacts import RESULTS_SUMMARY_NAME, refuse_existing_run
-
-    if resume:
-        if not (run_dir / BACKUP_DIR).is_dir():
-            raise ConfigError(
-                f"Cannot resume: {run_dir / BACKUP_DIR} does not exist, so there is "
-                "no interrupted run to continue"
-            )
-        if (run_dir / RESULTS_SUMMARY_NAME).exists():
-            raise ConfigError(
-                f"Cannot resume: {run_dir} holds {RESULTS_SUMMARY_NAME}, so the run "
-                "has finished; choose a new 'out' to train again"
-            )
-        return run_dir
+    from train.common.run_artifacts import RESULTS_SUMMARY_NAME
 
     try:
-        refuse_existing_run(run_dir, run_artifact_names())
-    except FileExistsError as exc:
-        raise ConfigError(
-            f"{exc} In this API the run directory is set by 'out'; "
-            "'out=auto' picks a new timestamped one."
-        ) from exc
-    run_dir.mkdir(parents=True, exist_ok=True)
+        if resume:
+            if not (run_dir / BACKUP_DIR).is_dir():
+                raise ConfigError(
+                    f"Cannot resume: {run_dir / BACKUP_DIR} does not exist, so there is "
+                    "no interrupted run to continue"
+                )
+            if (run_dir / RESULTS_SUMMARY_NAME).exists():
+                raise ConfigError(
+                    f"Cannot resume: {run_dir} holds {RESULTS_SUMMARY_NAME}, so the run "
+                    "has finished; choose a new 'out' to train again"
+                )
+            return run_dir
+
+        _refuse_links(run_dir)
+        _refuse_used(run_dir)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        _claim(run_dir)
+    except (OSError, RuntimeError) as exc:
+        raise _unusable(run_dir, exc) from exc
     return run_dir
 
 
-def write_requested(run_dir: Path, mapping: Mapping[str, Any]) -> Path:
+def _plain(value: Any, path: str, non_finite: List[str]) -> Any:
+    """Return ``value`` as plain JSON values, listing each non-finite number's path."""
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {
+            f.name: _plain(getattr(value, f.name), f"{path}.{f.name}" if path else f.name, non_finite)
+            for f in dataclasses.fields(value)
+        }
+    if isinstance(value, collections.abc.Mapping):
+        return {
+            key: _plain(item, f"{path}.{key}" if path else str(key), non_finite)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_plain(item, f"{path}[{i}]", non_finite) for i, item in enumerate(value)]
+    if (
+        isinstance(value, numbers.Real)
+        and not isinstance(value, numbers.Integral)
+        and not math.isfinite(value)
+    ):
+        non_finite.append(path or "<top level>")
+    return value
+
+
+def write_requested(run_dir: Path, mapping: Any) -> Path:
     """Write ``config_requested.json``: the request as the caller gave it.
+
+    The file replaces the empty claim :func:`open_run` made.
 
     :param run_dir: an existing run directory.
     :param mapping: the requested configuration, AUTO values left as ``"auto"``.
+        Nested group instances are written as the plain mappings they hold.
     :return: ``run_dir``.
+    :raises ConfigError: when a number is NaN or infinite, since JSON cannot hold
+        it; nothing is written then.
     """
-    from train.common.run_io import prepare_run_dir
+    from train.common.config_io import save_config_json
 
-    return prepare_run_dir(mapping, output_dir=run_dir, config_filename=REQUESTED_CONFIG_NAME)
+    non_finite: List[str] = []
+    plain = _plain(mapping, "", non_finite)
+    if non_finite:
+        raise ConfigError(
+            f"Cannot write {REQUESTED_CONFIG_NAME}: JSON cannot hold NaN or infinity, "
+            "found at " + ", ".join(repr(path) for path in non_finite)
+        )
+    save_config_json(plain, str(run_dir), REQUESTED_CONFIG_NAME)
+    return run_dir
 
 
 def write_resolved(run_dir: Path, config: Any) -> str:
