@@ -1,6 +1,6 @@
 """ConvUNext public API.
 
-Re-exports the stem layer, the attention layer, the variant config table and the
+Re-exports the attention layer, the variant config table and the
 two functional builders. Internal callers may still import from
 ``dl_techniques.models.vision.convunext.model`` directly.
 
@@ -21,7 +21,6 @@ Do not re-add a pass-through here.
 """
 
 from .model import (
-    ConvUNextStem,
     SpatialLinearAttention,
     CONVUNEXT_CONFIGS,
     create_convunext,
@@ -29,7 +28,6 @@ from .model import (
 )
 
 __all__ = [
-    'ConvUNextStem',
     'SpatialLinearAttention',
     'CONVUNEXT_CONFIGS',
     'create_convunext',

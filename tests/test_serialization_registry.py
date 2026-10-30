@@ -55,6 +55,10 @@ so its key stayed byte-stable until 2026-08-29, when the user confirmed there ar
 checkpoints -- the exemption's entire basis -- and it was normalized to
 ``package="dl_techniques.models.convunext.model"`` along with the tree's other 33 ad-hoc
 strings.
+2026-10-30: the survivor is gone too. `ConvUNextStem` was a one-class wrapper around
+`ConvStem`; it was deleted and `create_convunext` builds the `ConvStem` directly, so neither
+`dl_techniques.models.convunext.model>ConvUNextStem` nor `Custom>ConvUNextStem` is registered
+any more (`tests/test_models/test_bias_free_denoisers/test_bfconvunext_wrappers.py` pins that).
 
 Two of the OTHER right-hand modules have since been DELETED and no longer exist anywhere
 in the repo: `models.modern_bert.components` and `models.cliffordnet.confidence_denoiser`

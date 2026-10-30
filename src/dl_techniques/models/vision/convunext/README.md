@@ -71,7 +71,7 @@ denoiser/autoencoder contract. Override it with `output_channels`
 ```
 input
   |
-  stem                    ConvUNextStem  (Conv2D k=7 -> <stem_normalization> -> activation)
+  stem                    ConvStem       (Conv2D k=7 -> <stem_normalization> -> activation)
   |                       or a trainable Gabor-initialized Conv2D + 1x1 projection (use_gabor_stem)
   |
   encoder level i         blocks_per_level x ConvNeXt block   -> skip_i
@@ -226,7 +226,7 @@ deliberately not guarded.
 for sn in ('global_response_norm', 'layer_norm'):
     m = create_convunext(input_shape=(32, 32, 1), depth=2, initial_filters=8,
                          stem_normalization=sn)
-    print(sn, '->', type(m.get_layer('encoder_level_0_stem').stem.norm1).__name__)
+    print(sn, '->', type(m.get_layer('encoder_level_0_stem').norm1).__name__)
 # global_response_norm -> GlobalResponseNormalization
 # layer_norm -> LayerNormalization
 ```
@@ -330,7 +330,7 @@ produces round-trip deltas that look like reinitialized weights.
    `**kwargs`, so an unknown forwarded keyword raises `TypeError` at the call, and a
    parameter added here is reachable through the bias-free arm the same day. Do not
    re-enumerate the parameters in either wrapper's signature.
-2. **The Keras registrar.** Importing it registers `ConvUNextStem`, `ConvNextV1Block`,
+2. **The Keras registrar.** Importing it registers `ConvStem`, `ConvNextV1Block`,
    `GlobalResponseNormalization`, `MatchChannels`, `GaborFiltersInitializer` and
    `SpatialLinearAttention` so `keras.models.load_model` resolves them.
    `applications/bias_free_denoiser/denoiser_prior.py` and the two bfunet eval tools
@@ -347,20 +347,23 @@ print(bf.count_params(), bf2.count_params(), bf.count_params() == bf2.count_para
 # 503424 503424 True
 ```
 
-`ConvUNextStem` lives HERE (`models/vision/convunext/model.py`) and registers under its own
-module path — `@register_dl_technique("dl_techniques.models.convunext.model")`, from
-`dl_techniques.utils.keras_registration`, giving the key
-`dl_techniques.models.convunext.model>ConvUNextStem`.
+The level-0 stem is a plain `ConvStem` (`layers/conv_blocks/stem.py`), registered there under
+`dl_techniques.layers.conv_blocks.stem>ConvStem`. There is no ConvUNext stem class: until 2026-10-30 a
+`ConvUNextStem` wrapper layer (key `dl_techniques.models.convunext.model>ConvUNextStem`) held one
+`ConvStem` and forwarded to it, and `create_convunext` now builds the `ConvStem` itself, named
+`encoder_level_0_stem` (see the archive break below).
 
 `SpatialLinearAttention` in the same file is
-`dl_techniques.models.convunext.model>SpatialLinearAttention`, so the two classes in this one
-file sit under the **same** package string, as the rule requires.
+`dl_techniques.models.convunext.model>SpatialLinearAttention`, the one layer class this file defines.
 
-**`ConvUNextStem` arguments.** The stem keeps its activation under `stem.activation` (the argument's own
-name) and its `kernel_initializer` as a string or a serialized spec: an `Initializer` instance is
-serialized once in the constructor, so `get_config()` is JSON data and the inner `ConvStem` builds its
-own initializer from it. The layer has no `from_config` of its own; the Keras one rebuilds it from
-`get_config()`.
+**Stem arguments.** `ConvStem`'s own defaults (kernel 3, `glorot_uniform`, `batch_norm`, `relu`) are not the
+builder's (kernel 7, `orthogonal`, `global_response_norm`, `gelu`), so the call site states every argument:
+`stem_kernel_size`, `use_bias`, `stem_normalization`, `kernel_initializer`, `kernel_regularizer`, `strides=1`,
+`padding='same'`, `num_convs=1`, `use_pooling=False`, and `stem_activation` after `deserialize_activation` and
+`substitute_exact` (D-277: the exact gelu / leaky_relu are bit-identical to stock at float32, and `ConvStem`
+resolves a string as written). The activation sits in the stem as `stem.act1`; a `Layer` instance is stored
+by its config inside the `ConvStem` and rebuilt there, so it must be unbuilt and its class locatable by name.
+The stem has no `dtype` of its own: it reads the policy in force when the graph is built.
 
 **Initializer arguments of `create_convunext`.** `kernel_initializer` (the stem, the channel adjusts,
 the strided downsamplers, the projections and the supervision heads) and `depthwise_initializer` (the
@@ -400,11 +403,36 @@ revision and restoring it with the current code (`git archive`, `python -I`):
 - Transcripts: `plans/plan-2026-10-26T125959-7af851e5/scratch_iter2/step15/archive_convunext_values.txt`
   and `scratch_iter2/archive/transcripts.txt`.
 
+**Archive break (2026-10-30).** `ConvUNextStem` is deleted: `create_convunext` builds the level-0 stem as a
+`ConvStem` named `encoder_level_0_stem` directly. No loader, alias or shim was added. The registry keys
+`dl_techniques.models.convunext.model>ConvUNextStem` and `Custom>ConvUNextStem` no longer exist, and the stem's
+weights moved down one level. Measured by saving the tiny variant (`create_convunext_variant("tiny", (32, 32, 3))`:
+172 weights, and 128 through the bias-free `bfconvunext.create_convunext_variant`) with the revision before the
+change (`6464c6219`, in a throwaway `git worktree`) and restoring it with the current code:
+
+| | before | after |
+|---|---|---|
+| level-0 stem layer | `ConvUNextStem` holding a `ConvStem` named `stem` | `ConvStem` |
+| conv weights | `encoder_level_0_stem/stem/stem_conv1/{kernel,bias}` | `encoder_level_0_stem/encoder_level_0_stem_conv1/{kernel,bias}` |
+| norm weights | `encoder_level_0_stem/stem/stem_norm1/{gamma,beta}` | `encoder_level_0_stem/encoder_level_0_stem_norm1/{gamma,beta}` |
+| weight count | 172 (bias arm), 128 (bias-free arm) | 172, 128 |
+
+- `keras.models.load_model` fails: `Could not locate class 'ConvUNextStem'`.
+- `model.load_weights` fails: `Layer 'encoder_level_0_stem_conv1' expected 2 variables, but received 0 variables
+  during loading` (1 for the bias-free arm), because the saved weight tree is keyed by the old nesting.
+- The weights transplant by `w.path` with two renames, `encoder_level_0_stem/stem/stem_conv1/*` to
+  `encoder_level_0_stem/encoder_level_0_stem_conv1/*` and `encoder_level_0_stem/stem/stem_norm1/*` to
+  `encoder_level_0_stem/encoder_level_0_stem_norm1/*`: all 172 (128) tensors are assigned and the output is equal at
+  `atol=0` (`training=False`).
+- The graph itself did not change. Rebuilt with the same weights, the float32 outputs and the
+  `mixed_float16` outputs of five tiny builds (bias and bias-free arms; GRN, layer-norm and batch-norm stems;
+  gelu, leaky_relu, relu and a `LeakyReLU(0.1)` instance) are equal at `atol=0`, and so is the
+  kernel-regularizer loss.
+
 ## 9. Package surface
 
 ```python
 from dl_techniques.models.vision.convunext import (
-    ConvUNextStem,                            # the merged stem layer
     SpatialLinearAttention,                   # bias-free bottleneck attention block
     CONVUNEXT_CONFIGS,                        # the one variant dict
     create_convunext,                         # the builder

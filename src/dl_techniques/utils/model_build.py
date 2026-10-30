@@ -302,7 +302,7 @@ def refuse_input_shape(kwargs: Mapping[str, Any], class_name: str, reason: str) 
     """Raise for an ``input_shape`` or ``input_dim`` keyword a layer or model does not take.
 
     Interface contract (call sites, from ``grep -rn refuse_input_shape src``: ``ConvStem``, ``RBFProtoNet``,
-    ``CliffordRBFProtoNet``, ``UcaEncoder``, ``MambaLCT``, ``ConvUNextStem``, ``SpatialLinearAttention``,
+    ``CliffordRBFProtoNet``, ``UcaEncoder``, ``MambaLCT``, ``SpatialLinearAttention``,
     ``CliffordNet``, ``HierarchicalCliffordNet``, ``DeepSortAppearanceNet``, ``DeepSortResidualBlock``,
     ``CosineClassifier``, ``SiamFC``, ``SiamFCBackbone``, ``DaSiamRPN``, ``SiamRPNBackbone``, ``DepthAnything``,
     ``DPTDecoder``, ``DPTFeatureFusionBlock``, ``DPTHead``, ``DPTResidualConvUnit``, ``DINOHead``, ``DINOv2Block``,

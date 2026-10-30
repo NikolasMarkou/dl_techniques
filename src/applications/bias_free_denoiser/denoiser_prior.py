@@ -10,7 +10,7 @@ Loading contract (F1 H2 / INV-2)
 --------------------------------
 ``keras.models.load_model`` on the saved ``.keras`` file FAILS unless the
 registrar module ``dl_techniques.models.vision.bias_free_denoisers.bfconvunext`` has
-been *imported* (executed) first, so that ``ConvUNextStem``, ``ConvNextV1Block``,
+been *imported* (executed) first, so that ``ConvStem``, ``ConvNextV1Block``,
 ``GlobalResponseNormalization``, ``MatchChannels`` and ``GaborFiltersInitializer``
 are present in the Keras serialization registry. A bare ``import dl_techniques`` is
 NOT enough (its ``__init__`` is empty). This mirrors the canonical loader at

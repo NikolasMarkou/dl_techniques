@@ -1,27 +1,28 @@
 """
 Test suite for the bias-free ConvUNext denoiser (models/vision/bias_free_denoisers/bfconvunext.py).
 
-Covers the embedded ConvUNextStem layer (construction / forward / shape / config
-round-trip), the create_convunext_denoiser functional builder (ValueError paths,
-forward pass, deep supervision), the create_convunext_variant wrapper, and the
-M2 full .keras save -> load -> identical-output round-trip.
+Covers the level-0 stem the builder creates, the create_convunext_denoiser
+functional builder (ValueError paths, forward pass, deep supervision), the
+create_convunext_variant wrapper, and the M2 full .keras save -> load ->
+identical-output round-trip.
 
-NOTE: ConvUNextStem is now ONE class, defined in models/vision/convunext/model.py and
-re-exported here; it carries a `use_bias` parameter that defaults to True. Being
-bias-free is therefore a contract of the *bias-free builder*
-(create_convunext_denoiser pins use_bias=False), not a structural property of the
-class. TestConvUNextStem::test_bias_free asserts that contract through the
-builder.
+NOTE: the level-0 stem is a plain `ConvStem` named `encoder_level_0_stem`; the
+`ConvUNextStem` wrapper layer that used to hold it is deleted (2026-10-30).
+`ConvStem` carries a `use_bias` parameter that defaults to True. Being bias-free
+is therefore a contract of the *bias-free builder* (create_convunext_denoiser
+pins use_bias=False), not a structural property of the class.
+TestBiasFreeStem::test_bias_free asserts that contract through the builder.
 """
 
 import os
 import keras
 import pytest
 import numpy as np
-from typing import Dict, Any, Tuple
+from typing import Any, Dict, Tuple
 
+from dl_techniques.layers.activations.exact_activations import exact_gelu
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import (
-    ConvUNextStem,
     create_convunext_denoiser,
     create_convunext_variant,
     CONVUNEXT_CONFIGS,
@@ -35,57 +36,25 @@ from dl_techniques.layers.conv_blocks.convnext_v2_block import ConvNextV2Block
 # ---------------------------------------------------------------------
 
 @pytest.fixture
-def stem_config() -> Dict[str, Any]:
-    return {
-        'filters': 16,
-        'kernel_size': 7,
-        'kernel_initializer': 'he_normal',
-        'kernel_regularizer': None,
-    }
-
-
-@pytest.fixture
-def sample_input() -> np.ndarray:
-    return np.random.randn(2, 32, 32, 3).astype(np.float32)
-
-
-@pytest.fixture
 def input_shape() -> Tuple[int, int, int]:
     return (32, 32, 1)
 
 
 # ---------------------------------------------------------------------
-# ConvUNextStem (embedded layer)
+# The level-0 stem of the bias-free builder
 # ---------------------------------------------------------------------
 
-class TestConvUNextStem:
-    """Test suite for the bias-free ConvUNextStem layer."""
-
-    def test_instantiation(self, stem_config: Dict[str, Any]) -> None:
-        stem = ConvUNextStem(**stem_config)
-        assert stem.filters == stem_config['filters']
-        assert stem.kernel_size == stem_config['kernel_size']
-
-    def test_forward_pass(self, stem_config, sample_input) -> None:
-        stem = ConvUNextStem(**stem_config)
-        output = stem(sample_input)
-        expected = (
-            sample_input.shape[0],
-            sample_input.shape[1],
-            sample_input.shape[2],
-            stem_config['filters'],
-        )
-        assert output.shape == expected
+class TestBiasFreeStem:
+    """The stem the bias-free builder produces."""
 
     def test_bias_free(self, input_shape) -> None:
         """The stem the BIAS-FREE BUILDER produces must carry no bias weights.
 
-        `ConvUNextStem` gained a `use_bias` parameter that defaults to True, so
-        asserting on a bare `ConvUNextStem(...)` would only re-assert a class
-        default and would say nothing about the bias-free arm. The contract that
-        still matters is the wrapper's: a model built by
-        `create_convunext_denoiser` has a stem whose conv is bias-free and has
-        allocated no bias weight.
+        `ConvStem` has a `use_bias` parameter that defaults to True, so asserting
+        on a bare `ConvStem(...)` would only re-assert a class default and would
+        say nothing about the bias-free arm. The contract that still matters is
+        the wrapper's: a model built by `create_convunext_denoiser` has a stem
+        whose conv is bias-free and has allocated no bias weight.
         """
         model = create_convunext_denoiser(
             input_shape=input_shape,
@@ -94,35 +63,11 @@ class TestConvUNextStem:
             blocks_per_level=1,
         )
         stem = model.get_layer('encoder_level_0_stem')
-        assert isinstance(stem, ConvUNextStem)
-        assert stem.stem.conv1.use_bias is False
-        assert stem.stem.conv1.bias is None
+        assert type(stem) is ConvStem
+        assert stem.conv1.use_bias is False
+        assert stem.conv1.bias is None
         assert not [w for w in stem.weights if w.path.endswith('bias')]
-
-    def test_build_creates_weights(self, stem_config, sample_input) -> None:
-        stem = ConvUNextStem(**stem_config)
-        stem(sample_input)
-        assert stem.built
-        assert len(stem.trainable_weights) > 0
-
-    def test_compute_output_shape(self, stem_config, sample_input) -> None:
-        stem = ConvUNextStem(**stem_config)
-        computed = stem.compute_output_shape(sample_input.shape)
-        actual = stem(sample_input)
-        assert tuple(computed) == tuple(actual.shape)
-
-    def test_compute_output_shape_dynamic(self, stem_config) -> None:
-        stem = ConvUNextStem(**stem_config)
-        computed = stem.compute_output_shape((None, 64, 64, 3))
-        assert tuple(computed) == (None, 64, 64, stem_config['filters'])
-
-    def test_config_round_trip(self, stem_config, sample_input) -> None:
-        original = ConvUNextStem(**stem_config)
-        original(sample_input)
-        config = original.get_config()
-        reconstructed = ConvUNextStem.from_config(config)
-        assert reconstructed.filters == original.filters
-        assert reconstructed.kernel_size == original.kernel_size
+        assert stem.normalization_type == 'global_response_norm'
 
 
 # ---------------------------------------------------------------------
@@ -496,7 +441,7 @@ class TestStemSupervisionActivation:
     """Step 9: stem_activation / supervision_activation factory + serialization."""
 
     def test_stem_activation_leaky_relu_keras_roundtrip(self, tmp_path) -> None:
-        # use_gabor_stem=False so the ConvUNextStem (which carries the activation)
+        # use_gabor_stem=False so the ConvStem (which carries the activation)
         # is actually built at encoder level 0.
         model = create_convunext_denoiser(
             input_shape=(32, 32, 3),
@@ -524,8 +469,9 @@ class TestStemSupervisionActivation:
         )
 
     def test_default_stem_activation_is_gelu(self) -> None:
-        # Default (no stem_activation): the standard ConvUNextStem exists only when
-        # use_gabor_stem=False, and its serialized activation must stay 'gelu'.
+        # Default (no stem_activation): the standard ConvStem exists only when
+        # use_gabor_stem=False, and its activation must stay gelu -- the exact
+        # form of it (D-277), found inside the ConvStem by class.
         model = create_convunext_denoiser(
             input_shape=(32, 32, 3),
             depth=3,
@@ -533,13 +479,11 @@ class TestStemSupervisionActivation:
             blocks_per_level=1,
             use_gabor_stem=False,
         )
-        stems = [
-            l for l in model.layers
-            if l.__class__.__name__ == 'ConvUNextStem'
-        ]
-        assert len(stems) > 0, "no ConvUNextStem found in the default build"
+        stems = [l for l in model.layers if isinstance(l, ConvStem)]
+        assert len(stems) > 0, "no ConvStem found in the default build"
         for stem in stems:
-            assert stem.get_config()['activation'] == 'gelu'
+            assert isinstance(stem.act1, keras.layers.Activation)
+            assert stem.act1.activation is exact_gelu
 
     def test_supervision_activation_leaky_relu_keras_roundtrip(self, tmp_path) -> None:
         model = create_convunext_denoiser(
@@ -602,11 +546,14 @@ class TestStemSupervisionActivation:
             f"{[n for n in names if names.count(n) > 1]}"
         )
 
-        # A ConvUNextStem must be present (use_gabor_stem=False) and its
-        # serialized activation must deserialize to LeakyReLU(0.1).
-        stems = [l for l in model.layers if l.__class__.__name__ == 'ConvUNextStem']
-        assert len(stems) > 0, "no ConvUNextStem found (use_gabor_stem=False)"
-        stem_act_cfg = stems[0].get_config()['activation']
+        # A ConvStem must be present (use_gabor_stem=False) and its
+        # activation must be a LeakyReLU(0.1) (the Layer is stored by its config
+        # and rebuilt inside the stem).
+        stems = [l for l in model.layers if isinstance(l, ConvStem)]
+        assert len(stems) > 0, "no ConvStem found (use_gabor_stem=False)"
+        assert isinstance(stems[0].act1, keras.layers.LeakyReLU)
+        assert np.isclose(float(stems[0].act1.negative_slope), 0.1)
+        stem_act_cfg = stems[0].get_config()['activation_type']
         revived = keras.layers.deserialize(stem_act_cfg)
         assert isinstance(revived, keras.layers.LeakyReLU)
         assert np.isclose(float(revived.negative_slope), 0.1)
@@ -633,10 +580,10 @@ class TestStemSupervisionActivation:
 
     def test_leaky_vs_gelu_stem_behavioral_differential(self) -> None:
         """TEST B (reviewer WARNING #3): prove slope-0.1 is APPLIED, not merely
-        serialized. Isolate the stem activation: two ConvUNextStem layers that
-        differ ONLY in activation (LeakyReLU(0.1) vs 'gelu'), with identical
-        weights copied across, must produce DIFFERENT outputs on a
-        negative-bearing input. Plus a micro-check nailing the exact slope 0.1.
+        serialized. Isolate the stem activation: two denoisers that differ ONLY in
+        `stem_activation` (LeakyReLU(0.1) vs 'gelu'), with identical weights copied
+        across, must produce DIFFERENT stem outputs on a negative-bearing input.
+        Plus a micro-check nailing the exact slope 0.1.
         """
         # Micro-check: the slope IS exactly 0.1 (not gelu's ~-0.158 at x=-1,
         # and not the 'leaky_relu' string default of 0.2).
@@ -648,24 +595,29 @@ class TestStemSupervisionActivation:
             f"LeakyReLU(0.1) on -1.0 should be -0.1, got {leaky_val}"
         )
 
-        # Build two stems differing only in activation.
-        stem_leaky = ConvUNextStem(
-            filters=8, activation=keras.layers.LeakyReLU(negative_slope=0.1)
-        )
-        stem_gelu = ConvUNextStem(filters=8, activation='gelu')
+        # Build two models differing only in the stem activation.
+        def _build(activation):
+            return create_convunext_denoiser(
+                input_shape=(16, 16, 3), depth=2, initial_filters=8,
+                blocks_per_level=1, stem_activation=activation)
+
+        model_leaky = _build(keras.layers.LeakyReLU(negative_slope=0.1))
+        model_gelu = _build('gelu')
+        # The activations hold no weights, so the two models have the same
+        # weights in the same order; copy them so ONLY the activation differs.
+        model_gelu.set_weights(model_leaky.get_weights())
+
+        def _stem_output(model, x):
+            stem = model.get_layer('encoder_level_0_stem')
+            return np.array(keras.ops.convert_to_numpy(
+                keras.Model(model.input, stem.output)(x, training=False)))
 
         rng = np.random.RandomState(99)
         # Input with a clearly-negative region so the activation branch matters.
         x = (rng.rand(2, 16, 16, 3).astype(np.float32) - 0.5) * 4.0
 
-        # Build both on the same input shape, then copy weights so ONLY the
-        # activation differs.
-        _ = stem_leaky(x)
-        _ = stem_gelu(x)
-        stem_gelu.set_weights(stem_leaky.get_weights())
-
-        out_leaky = np.array(keras.ops.convert_to_numpy(stem_leaky(x)))
-        out_gelu = np.array(keras.ops.convert_to_numpy(stem_gelu(x)))
+        out_leaky = _stem_output(model_leaky, x)
+        out_gelu = _stem_output(model_gelu, x)
 
         # The activation actually changes behavior: outputs are NOT allclose.
         assert not np.allclose(out_leaky, out_gelu, atol=1e-4), (

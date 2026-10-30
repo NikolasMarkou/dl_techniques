@@ -1580,6 +1580,12 @@ REPLAY_SUBJECTS: Dict[str, Tuple[Callable, bool]] = {
     "convunext_gabor_stem": (_convunext(use_gabor_stem=True, gabor_filters=32, use_bias=False,
                                         final_activation="linear", block_normalization="batchnorm"), True),
     "convunext_deep_supervision": (_convunext(enable_deep_supervision=True), True),
+    # The one layer class the convunext package defines is SpatialLinearAttention, and the default arm
+    # builds none (2026-10-30: the ConvUNextStem wrapper that used to put the package in the roster's
+    # layer trees is deleted). Without this arm the package leaves the finished-package census.
+    "convunext_bottleneck_attention": (_convunext(
+        bottleneck_attention_blocks=1, use_bias=False, final_activation="linear",
+        block_normalization="batchnorm"), True),
     "convunext_strided_downsample": (_convunext(downsample_pool_type="strided_conv"), True),
     "rbf_protonet": (_build_rbf, False),
     "clifford_rbf_protonet": (_build_clifford_rbf, False),
@@ -2713,12 +2719,6 @@ def _mambalct_without_shape(**kw: Any) -> Any:
     return MambaLCT(template_size=32, search_size=64, context_len=1, stage_dims=[64, 128, 512],
                     stage_depths=[1, 1, 1], num_heads=[2, 4, 8], fusion_heads=8,
                     head_hidden_dim=32, **kw)
-
-
-@_no_shape("convunext_stem")
-def _convunext_stem_without_shape(**kw: Any) -> Any:
-    from dl_techniques.models.vision.convunext.model import ConvUNextStem
-    return ConvUNextStem(filters=4, **kw)
 
 
 @_no_shape("cliffordnet")

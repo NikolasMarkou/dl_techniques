@@ -1,5 +1,5 @@
 """
-Tests for the merged ConvUNext: ``ConvUNextStem`` and ``create_convunext``.
+Tests for the merged ConvUNext: ``create_convunext`` and its level-0 ``ConvStem``.
 
 Structure mirrors ``test_bfconvunext_denoiser.py``, with the bias-on and bias-off
 arms exercised SYMMETRICALLY (most classes below are parametrized over
@@ -7,7 +7,8 @@ arms exercised SYMMETRICALLY (most classes below are parametrized over
 a defect that reaches only one arm is exactly what this suite exists to catch.
 
 Covers:
-- ``ConvUNextStem`` lifecycle and its merged ``use_bias`` / ``stem_normalization`` knobs
+- the level-0 ``ConvStem`` the builder creates and the arguments it states
+  (``use_bias`` / ``stem_normalization`` / kernel size / activation / initializer)
 - ``create_convunext``'s ``use_bias`` threading, argument validation, forward pass,
   gradient flow, training integration and ``.keras`` round trips
 - the residual wiring and the drop-path SCHEDULE (encoder ramp, bottleneck ramp,
@@ -70,7 +71,6 @@ from dl_techniques.layers.norms.global_response_norm import (
 )
 from dl_techniques.models.vision.convunext.model import (
     CONVUNEXT_CONFIGS,
-    ConvUNextStem,
     SpatialLinearAttention,
     create_convunext,
     create_convunext_variant,
@@ -94,18 +94,6 @@ def sample_input_medium() -> np.ndarray:
 
 
 @pytest.fixture
-def stem_config() -> Dict[str, Any]:
-    """Default configuration for ConvUNextStem."""
-    return {
-        'filters': 32,
-        'kernel_size': 7,
-        'use_bias': True,
-        'kernel_initializer': 'he_normal',
-        'kernel_regularizer': None,
-    }
-
-
-@pytest.fixture
 def minimal_model_config() -> Dict[str, Any]:
     """Minimal configuration for fast model tests."""
     return {
@@ -121,418 +109,271 @@ def minimal_model_config() -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------
-# ConvUNextStem Tests
+# The level-0 stem: one ConvStem built by create_convunext
 # ---------------------------------------------------------------------
+#
+# 2026-10-30: the ``ConvUNextStem`` wrapper layer is deleted; ``create_convunext``
+# builds the level-0 stem as a ``ConvStem`` named ``encoder_level_0_stem``. The
+# lifecycle of a stem layer (construction, ``compute_output_shape``,
+# ``get_config``, ``from_config``, the dtype policy) is ``ConvStem``'s own and is
+# tested under ``tests/test_layers/test_conv_blocks/``. What is left to test here
+# is what the BUILDER decides about that stem: which arguments it states, because
+# ``ConvStem``'s defaults (kernel 3, glorot_uniform, batch_norm, relu) are not the
+# builder's (kernel 7, orthogonal, global_response_norm, gelu).
 
-class TestConvUNextStem:
-    """Test suite for ConvUNextStem layer."""
+def _stem_model(**overrides) -> keras.Model:
+    """A tiny ``create_convunext`` graph (8 filters, 3 input channels)."""
+    return create_convunext(**dict(_knob_config(), **overrides))
 
-    def test_instantiation(self, stem_config: Dict[str, Any]) -> None:
-        """Test stem can be instantiated with valid config."""
-        stem = ConvUNextStem(**stem_config)
-        assert stem.filters == stem_config['filters']
-        assert stem.kernel_size == stem_config['kernel_size']
-        assert stem.use_bias == stem_config['use_bias']
 
-    def test_forward_pass(
-        self,
-        stem_config: Dict[str, Any],
-        sample_input_small: np.ndarray
-    ) -> None:
-        """Test forward pass produces correct output shape."""
-        stem = ConvUNextStem(**stem_config)
-        output = stem(sample_input_small)
+def _stem_of(model: keras.Model) -> ConvStem:
+    return model.get_layer('encoder_level_0_stem')
 
-        expected_shape = (
-            sample_input_small.shape[0],
-            sample_input_small.shape[1],
-            sample_input_small.shape[2],
-            stem_config['filters'],
-        )
-        assert output.shape == expected_shape
 
-    def test_build_creates_weights(
-        self,
-        stem_config: Dict[str, Any],
-        sample_input_small: np.ndarray
-    ) -> None:
-        """Test that build() creates expected weights."""
-        stem = ConvUNextStem(**stem_config)
-        stem(sample_input_small)
+class TestLevelZeroStem:
+    """The stem the builder creates, argument by argument."""
 
-        assert stem.built
-        assert len(stem.trainable_weights) > 0
+    def test_the_stem_is_one_conv_stem_with_the_builders_arguments(self) -> None:
+        model = _stem_model(stem_kernel_size=5, use_bias=False)
+        stem = _stem_of(model)
+        assert type(stem) is ConvStem
+        assert stem.filters == 8
+        assert stem.kernel_size == 5
+        assert stem.strides == 1
+        assert stem.padding == 'same'
+        assert stem.num_convs == 1
+        assert stem.use_pooling is False and stem.pool is None
+        assert stem.use_bias is False
+        assert stem.normalization_type == 'global_response_norm'
+        assert stem.conv2 is None and stem.norm2 is None and stem.act2 is None
 
-    def test_compute_output_shape(
-        self,
-        stem_config: Dict[str, Any],
-        sample_input_small: np.ndarray
-    ) -> None:
-        """Test compute_output_shape matches actual output."""
-        stem = ConvUNextStem(**stem_config)
+    def test_the_stem_keeps_the_spatial_size_and_emits_initial_filters(self) -> None:
+        stem = _stem_of(_stem_model())
+        assert tuple(stem.output.shape) == (None, 16, 16, 8)
+        assert tuple(stem.compute_output_shape((None, 16, 16, 3))) == (None, 16, 16, 8)
 
-        computed_shape = stem.compute_output_shape(sample_input_small.shape)
-        actual_output = stem(sample_input_small)
+    def test_the_builder_defaults_are_not_conv_stems_defaults(self) -> None:
+        """Kernel 7, orthogonal, global response norm and gelu are the builder's.
 
-        assert computed_shape == actual_output.shape
+        A ``ConvStem(filters=8)`` with nothing else stated is 3 / glorot_uniform /
+        batch_norm / relu, so a call site that dropped an argument would still
+        build, still shape-check, and be a different network.
+        """
+        stem = _stem_of(_stem_model())
+        assert stem.kernel_size == 7
+        assert type(stem.conv1.kernel_initializer) is keras.initializers.Orthogonal
+        assert type(stem.norm1) is GlobalResponseNormalization
+        assert type(stem.act1) is not keras.layers.ReLU
+        reference = ConvStem(filters=8)
+        assert (reference.kernel_size, reference.normalization_type) == (3, 'batch_norm')
 
-    def test_compute_output_shape_before_build(
-        self,
-        stem_config: Dict[str, Any]
-    ) -> None:
-        """Test compute_output_shape works before layer is built."""
-        stem = ConvUNextStem(**stem_config)
+    def test_the_weights_live_under_the_stems_own_name(self) -> None:
+        """The weight paths a checkpoint names (the break of 2026-10-30).
 
-        input_shape = (None, 64, 64, 3)
-        computed_shape = stem.compute_output_shape(input_shape)
+        Before, the stem was a ``ConvUNextStem`` holding a ``ConvStem`` named
+        ``stem``: ``encoder_level_0_stem/stem/stem_conv1/kernel``. Now it is the
+        ``ConvStem`` itself: ``encoder_level_0_stem/encoder_level_0_stem_conv1/kernel``.
+        """
+        paths = sorted(w.path for w in _stem_of(_stem_model()).weights)
+        assert paths == [
+            'encoder_level_0_stem/encoder_level_0_stem_conv1/bias',
+            'encoder_level_0_stem/encoder_level_0_stem_conv1/kernel',
+            'encoder_level_0_stem/encoder_level_0_stem_norm1/beta',
+            'encoder_level_0_stem/encoder_level_0_stem_norm1/gamma',
+        ]
+        assert not any('/stem/stem_' in w.path for w in _stem_model().weights)
 
-        assert computed_shape == (None, 64, 64, stem_config['filters'])
+    def test_no_wrapper_class_is_left(self) -> None:
+        import dl_techniques.models.vision.convunext as package
+        from dl_techniques.models.vision.convunext import model as module
+        assert not hasattr(module, 'ConvUNextStem')
+        assert not hasattr(package, 'ConvUNextStem')
+        assert 'ConvUNextStem' not in package.__all__
 
-    def test_training_vs_inference(
-        self,
-        stem_config: Dict[str, Any],
-        sample_input_small: np.ndarray
-    ) -> None:
-        """Test layer behaves correctly in training vs inference mode."""
-        stem = ConvUNextStem(**stem_config)
+    def test_different_kernel_sizes(self) -> None:
+        """``stem_kernel_size`` must reach the stem's convolution kernel.
 
-        train_output = stem(sample_input_small, training=True)
-        infer_output = stem(sample_input_small, training=False)
-
-        np.testing.assert_allclose(
-            keras.ops.convert_to_numpy(train_output),
-            keras.ops.convert_to_numpy(infer_output),
-            rtol=1e-5, atol=1e-5,
-            err_msg="Stem outputs should match in train vs inference"
-        )
-
-    def test_get_config_complete(self, stem_config: Dict[str, Any]) -> None:
-        """Test get_config returns all constructor arguments."""
-        stem = ConvUNextStem(**stem_config)
-        config = stem.get_config()
-
-        assert 'filters' in config
-        assert 'kernel_size' in config
-        assert 'use_bias' in config
-        assert 'kernel_initializer' in config
-        assert 'kernel_regularizer' in config
-
-    def test_from_config_reconstruction(
-        self,
-        stem_config: Dict[str, Any],
-        sample_input_small: np.ndarray
-    ) -> None:
-        """Test layer can be reconstructed from config."""
-        original = ConvUNextStem(**stem_config)
-        original(sample_input_small)
-
-        config = original.get_config()
-        reconstructed = ConvUNextStem.from_config(config)
-
-        assert reconstructed.filters == original.filters
-        assert reconstructed.use_bias == original.use_bias
-
-    def test_serialization_cycle(
-        self,
-        stem_config: Dict[str, Any],
-        sample_input_small: np.ndarray
-    ) -> None:
-        """Test full save/load cycle preserves functionality."""
-        inputs = keras.Input(shape=sample_input_small.shape[1:])
-        outputs = ConvUNextStem(**stem_config)(inputs)
-        model = keras.Model(inputs, outputs)
-
-        original_output = model(sample_input_small)
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            model_path = os.path.join(tmpdir, 'test_stem.keras')
-            model.save(model_path)
-            loaded_model = keras.models.load_model(model_path)
-
-        loaded_output = loaded_model(sample_input_small)
-
-        np.testing.assert_allclose(
-            keras.ops.convert_to_numpy(original_output),
-            keras.ops.convert_to_numpy(loaded_output),
-            rtol=1e-6, atol=1e-6,
-            err_msg="Stem outputs should match after serialization"
-        )
-
-    @pytest.mark.parametrize("use_bias", [True, False])
-    def test_bias_configuration(
-        self,
-        use_bias: bool,
-        sample_input_small: np.ndarray
-    ) -> None:
-        """Test stem works with and without bias."""
-        stem = ConvUNextStem(filters=32, use_bias=use_bias)
-        output = stem(sample_input_small)
-
-        assert output.shape[-1] == 32
-
-    def test_different_kernel_sizes(
-        self,
-        sample_input_small: np.ndarray
-    ) -> None:
-        """``kernel_size`` must reach the stem's convolution kernel.
-
-        Restructured out of ``@parametrize``: one stem per invocation left
-        nowhere to compare, so the test asserted ``(2, 64, 64, 32)`` -- which is
-        the SAME output shape at 3, 5 and 7 because the stem pads to 'same', so
-        the assertion held whether or not the kwarg reached the Conv2D. The
-        kernel's spatial extent is a weight axis; measured, the stem holds
-        exactly one rank-4 kernel of shape ``(k, k, 3, 32)``.
+        The stem pads to 'same', so the output shape is the SAME at 3, 5 and 7
+        and says nothing about whether the argument arrived. The kernel's spatial
+        extent is a weight axis, so the check is on the weights: the stem's conv
+        kernel must be ``(k, k, 3, 8)``.
         """
         kernel_sizes = [3, 5, 7]
 
-        def _build(kernel_size):
-            stem = ConvUNextStem(filters=32, kernel_size=kernel_size)
-            stem(sample_input_small)
-            return stem
+        def _build(k):
+            return _stem_model(stem_kernel_size=k)
 
         sigs = assert_structural_knob_changes_weights(
-            {k: (lambda k=k: _build(k)) for k in kernel_sizes}, knob="kernel_size")
+            {k: (lambda k=k: _build(k)) for k in kernel_sizes},
+            knob="stem_kernel_size")
+        assert len(sigs) == len(kernel_sizes)
         for k in kernel_sizes:
-            # The stem also holds two (1, 1, 1, 32) GRN parameters, which are
-            # rank-4 but are not the convolution; the conv is the one kernel
-            # whose in-channels axis matches the 3-channel input.
-            kernels = [w for w in sigs[k] if len(w) == 4 and w[2] == 3]
-            assert kernels == [(k, k, 3, 32)], (
-                f"kernel_size={k} produced conv kernels {kernels}"
-            )
+            stem = _stem_of(_build(k))
+            assert tuple(stem.conv1.kernel.shape) == (k, k, 3, 8), k
 
-        for kernel_size in kernel_sizes:
-            stem = ConvUNextStem(filters=32, kernel_size=kernel_size)
-            output = stem(sample_input_small)
+    @pytest.mark.parametrize("use_bias", [True, False])
+    def test_use_bias_reaches_the_conv_and_allocates_the_bias(self, use_bias) -> None:
+        """`use_bias` must reach the conv AND allocate a bias WEIGHT (or none).
 
-            assert output.shape == (2, 64, 64, 32)
-
-    def test_convunext_stem_creates_its_conv_stem_in_init(self) -> None:
-        """``stem.stem`` is a ``ConvStem`` the moment the layer is constructed, is
-        unbuilt until the layer is, and no alias of a sub-layer exists at any time.
-
-        Creating the ConvStem inside ``build()`` and setting ``conv`` / ``norm`` /
-        ``activation_layer`` aliases there would leave the stem with no sub-layers
-        before the first call and the Keras layer tree empty.
+        Asserting the flag alone is not enough: a layer can report
+        `use_bias is True` and still never have allocated the vector.
         """
-        removed_aliases = ("_conv_stem", "conv", "norm", "activation_layer")
-        layer = ConvUNextStem(
-            filters=16, kernel_size=5, activation="gelu", use_bias=False,
-            stem_normalization="global_response_norm")
-        assert isinstance(layer.stem, ConvStem)
-        assert layer.stem.name == "stem"
-        assert layer.stem.built is False
-        assert layer.stem in list(layer._flatten_layers(include_self=False))
-        for name in removed_aliases:
-            assert not hasattr(layer, name), f"alias {name!r} exists before build"
+        stem = _stem_of(_stem_model(use_bias=use_bias))
+        assert stem.use_bias is use_bias and stem.conv1.use_bias is use_bias
+        bias_weights = [w for w in stem.conv1.weights if w.path.endswith('bias')]
+        assert len(bias_weights) == (1 if use_bias else 0)
+        if use_bias:
+            assert int(np.prod(stem.conv1.bias.shape)) == 8
+        else:
+            assert stem.conv1.bias is None
 
-        layer(np.zeros((1, 16, 16, 3), "float32"), training=False)
-        assert layer.stem.built is True
-        for name in removed_aliases:
-            assert not hasattr(layer, name), f"alias {name!r} exists after build"
+    def test_stem_normalization_selects_the_normalization_class(self) -> None:
+        """`stem_normalization` must select the normalization CLASS actually built."""
+        stem_ln = _stem_of(_stem_model(stem_normalization='layer_norm'))
+        assert type(stem_ln.norm1) is keras.layers.LayerNormalization
+        stem_default = _stem_of(_stem_model())
+        assert type(stem_default.norm1) is GlobalResponseNormalization
+
+    def test_a_batch_norm_stem_gets_training_from_the_graph(self) -> None:
+        """The wrapper forwarded ``training`` to the stem; the graph does it now.
+
+        A ``batch_norm`` stem behaves differently in training, so the stem must
+        see the flag the model was called with.
+        """
+        model = _stem_model(stem_normalization='batch_norm', drop_path_rate=0.0)
+        norm = _stem_of(model).norm1
+        assert type(norm) is keras.layers.BatchNormalization
+        x = np.random.default_rng(0).standard_normal((4, 16, 16, 3)).astype('float32')
+        before = keras.ops.convert_to_numpy(norm.moving_mean).copy()
+        model(x, training=False)
+        np.testing.assert_array_equal(keras.ops.convert_to_numpy(norm.moving_mean), before)
+        model(x, training=True)
+        assert not np.array_equal(keras.ops.convert_to_numpy(norm.moving_mean), before)
+
+    def test_the_kernel_regularizer_reaches_the_stem_conv(self) -> None:
+        stem = _stem_of(_stem_model(kernel_regularizer=keras.regularizers.L2(1e-3)))
+        assert isinstance(stem.conv1.kernel_regularizer, keras.regularizers.L2)
+        assert _stem_of(_stem_model()).conv1.kernel_regularizer is None
 
 
-class TestConvUNextStemActivationArgument:
-    """What ``ConvUNextStem`` documents about its ``activation`` argument.
+class TestLevelZeroStemActivationArgument:
+    """What ``create_convunext`` documents about ``stem_activation``.
 
     It is handed to ``ConvStem``, whose rules apply unchanged: a string, a
     callable, or a Layer that is unbuilt (holds no weights) and whose class
     Keras can locate; a built Layer or an unlocatable class is a ``ValueError``
-    at construction. The messages were measured through ``ConvUNextStem``, not
-    only through ``ConvStem``.
+    when the graph is built. The messages were measured through the builder.
     """
 
     @staticmethod
     def _input() -> np.ndarray:
-        return np.random.default_rng(0).standard_normal((2, 8, 8, 3)).astype("float32")
+        return np.random.default_rng(0).standard_normal((2, 16, 16, 3)).astype("float32")
 
     def test_a_built_layer_holding_weights_is_refused(self) -> None:
         built = keras.layers.PReLU()
         built.build((None, 4))
         assert built.weights, "control: the PReLU holds an alpha weight"
         with pytest.raises(ValueError, match="PReLU.*already holds weights"):
-            ConvUNextStem(filters=4, activation=built)
+            _stem_model(stem_activation=built)
 
     def test_a_layer_whose_class_cannot_be_located_is_refused_by_name(self) -> None:
         with pytest.raises(
                 ValueError, match="UnlocatableActivation.*cannot clone") as caught:
-            ConvUNextStem(filters=4, activation=unlocatable_activation())
+            _stem_model(stem_activation=unlocatable_activation())
         assert "register" in str(caught.value)
 
     def test_a_registered_unbuilt_layer_is_accepted_and_rebuilt_per_site(self) -> None:
         """Control for the two refusals: the same PReLU, unbuilt, is fine."""
-        outer = ConvUNextStem(filters=4, activation=keras.layers.PReLU())
-        assert isinstance(outer.stem.act1, keras.layers.PReLU)
-        out = outer(self._input(), training=False)
-        assert tuple(out.shape) == (2, 8, 8, 4)
+        model = _stem_model(stem_activation=keras.layers.PReLU())
+        assert isinstance(_stem_of(model).act1, keras.layers.PReLU)
+        out = model(self._input(), training=False)
+        assert tuple(out.shape) == (2, 16, 16, 3)
 
-    def test_a_registered_callable_activation_is_accepted(self) -> None:
-        outer = ConvUNextStem(filters=4, activation=exact_gelu)
-        assert isinstance(outer.stem.act1, keras.layers.Activation)
-        assert tuple(outer(self._input(), training=False).shape) == (2, 8, 8, 4)
+    def test_the_gelu_string_becomes_the_exact_callable(self) -> None:
+        """``exact_gelu`` is what ``'gelu'`` becomes; both build the same stem act."""
+        by_string = _stem_of(_stem_model(stem_activation='gelu')).act1
+        assert isinstance(by_string, keras.layers.Activation)
+        assert by_string.activation is exact_gelu
 
     @pytest.mark.parametrize("activation", ["gelu", "relu", "linear"])
     def test_a_string_activation_is_accepted(self, activation: str) -> None:
-        outer = ConvUNextStem(filters=4, activation=activation)
-        assert tuple(outer(self._input(), training=False).shape) == (2, 8, 8, 4)
+        model = _stem_model(stem_activation=activation)
+        assert tuple(model(self._input(), training=False).shape) == (2, 16, 16, 3)
+        has_layer = _stem_of(model).act1 is not None
+        assert has_layer is (activation != "linear")
 
-    def test_the_activation_is_stored_under_the_arguments_name(self) -> None:
-        """``self.activation`` holds the argument, and nothing else holds it too."""
-        prelu = keras.layers.PReLU()
-
-        assert ConvUNextStem(filters=4, activation="relu").activation == "relu"
-        assert ConvUNextStem(filters=4, activation=prelu).activation is prelu
-        assert not hasattr(ConvUNextStem(filters=4), "activation_name")
-
-    def test_the_config_names_the_activation_the_attribute_holds(self) -> None:
-        outer = ConvUNextStem(filters=4, activation="relu")
-
-        assert outer.get_config()["activation"] == outer.activation == "relu"
+    def test_the_activation_instance_survives_a_keras_round_trip(self, tmp_path) -> None:
+        """A ``LeakyReLU(0.2)`` instance is stored by its config (alpha included)."""
+        model = _stem_model(stem_activation=keras.layers.LeakyReLU(0.2))
+        path = str(tmp_path / 'leaky.keras')
+        model.save(path)
+        loaded = keras.models.load_model(path)
+        act = _stem_of(loaded).act1
+        assert isinstance(act, keras.layers.LeakyReLU)
+        assert float(act.negative_slope) == pytest.approx(0.2)
 
 
-class TestConvUNextStemKernelInitializer:
-    """The initializer is stored as a spec: JSON data, never the caller's instance."""
+class TestLevelZeroStemKernelInitializer:
+    """The initializer reaches the stem conv as a spec: never the caller's instance."""
 
-    def test_a_string_is_stored_unchanged(self) -> None:
-        stem = ConvUNextStem(filters=4, kernel_initializer="he_uniform")
+    def test_a_string_reaches_the_convolution(self) -> None:
+        stem = _stem_of(_stem_model(kernel_initializer="he_uniform"))
+        assert type(stem.conv1.kernel_initializer) is keras.initializers.HeUniform
 
-        assert stem.kernel_initializer == "he_uniform"
-        assert stem.get_config()["kernel_initializer"] == "he_uniform"
-
-    def test_an_instance_is_stored_as_its_serialized_spec(self) -> None:
-        init = keras.initializers.HeUniform(seed=5)
-
-        stem = ConvUNextStem(filters=4, kernel_initializer=init)
-
-        assert stem.kernel_initializer == keras.initializers.serialize(init)
-        assert stem.kernel_initializer is not init
-
-    def test_the_config_with_an_instance_is_json_safe_and_rebuilds_the_layer(self) -> None:
-        stem = ConvUNextStem(
-            filters=4,
-            activation=keras.layers.LeakyReLU(0.2),
-            kernel_initializer=keras.initializers.RandomNormal(stddev=0.3, seed=1),
-            kernel_regularizer=keras.regularizers.L2(1e-3),
-        )
-
-        config = json.loads(json.dumps(stem.get_config()))
-        rebuilt = ConvUNextStem.from_config(config)
-
-        assert rebuilt.kernel_initializer == stem.kernel_initializer
-        assert rebuilt.kernel_initializer["config"]["stddev"] == 0.3
-        assert isinstance(rebuilt.kernel_regularizer, keras.regularizers.L2)
-        assert rebuilt.get_config() == stem.get_config()
-
-    def test_the_spec_reaches_the_convolution(self) -> None:
-        stem = ConvUNextStem(
-            filters=4, kernel_initializer=keras.initializers.RandomNormal(stddev=0.3, seed=1))
-        stem(np.zeros((1, 8, 8, 3), "float32"))
-
-        conv_initializer = stem.stem.conv1.kernel_initializer
+    def test_an_instance_reaches_the_convolution_as_its_spec_not_as_itself(self) -> None:
+        init = keras.initializers.RandomNormal(stddev=0.3, seed=1)
+        stem = _stem_of(_stem_model(kernel_initializer=init))
+        conv_initializer = stem.conv1.kernel_initializer
         assert isinstance(conv_initializer, keras.initializers.RandomNormal)
         assert conv_initializer.stddev == 0.3
+        assert conv_initializer is not init
+        assert stem.kernel_initializer is not init
+
+    def test_the_stem_config_is_json_safe_with_an_instance(self) -> None:
+        stem = _stem_of(_stem_model(
+            kernel_initializer=keras.initializers.RandomNormal(stddev=0.3, seed=1),
+            stem_activation=keras.layers.LeakyReLU(0.2),
+            kernel_regularizer=keras.regularizers.L2(1e-3)))
+        rebuilt = ConvStem.from_config(json.loads(json.dumps(stem.get_config())))
+        assert rebuilt.get_config() == stem.get_config()
 
     def test_a_value_that_is_no_initializer_is_refused(self) -> None:
         with pytest.raises(TypeError, match="initializer"):
-            ConvUNextStem(filters=4, kernel_initializer=3.5)
+            _stem_model(kernel_initializer=3.5)
 
 
-class TestMergedConvUNextStemKnobs:
-    """The two knobs the merge added: `use_bias` and `stem_normalization`.
+class TestLevelZeroStemRoundTrip:
+    """A `.keras` round trip built at NON-DEFAULT values for the stem's knobs.
 
-    This class collapses what used to be two same-named classes (the bias-free
-    GRN stem in `models/vision/bias_free_denoisers/bfconvunext.py` and the LayerNorm
-    stem here), so each knob needs a guard that is proven to fail when the knob
-    is ignored.
+    Built at the defaults, this test would be vacuous: dropping a key from a
+    config is silently repaired by the constructor default and the round trip
+    still passes (measured). So the stem here is `use_bias=False` (default True),
+    `stem_normalization='layer_norm'` (default 'global_response_norm'), kernel 5
+    (default 7) and `stem_activation='relu'` (default 'gelu').
     """
 
-    def test_stem_use_bias_true_creates_a_bias_vector(
-        self,
-        sample_input_small: np.ndarray
-    ) -> None:
-        """`use_bias=True` must reach the conv AND allocate a bias WEIGHT.
+    def test_round_trip_at_non_default_knob_values(self, tmp_path) -> None:
+        model = _stem_model(
+            use_bias=False, stem_normalization='layer_norm',
+            stem_kernel_size=5, stem_activation='relu', block_normalization='batchnorm')
+        x = np.random.default_rng(1).standard_normal((2, 16, 16, 3)).astype('float32')
+        original = keras.ops.convert_to_numpy(model(x, training=False))
 
-        Asserting the flag alone is not enough: a layer can report
-        `use_bias is True` and still never have allocated the vector.
-        """
-        stem = ConvUNextStem(filters=8, use_bias=True)
-        stem(sample_input_small)
+        path = str(tmp_path / 'stem.keras')
+        model.save(path)
+        loaded = keras.models.load_model(path)
 
-        assert stem.stem.conv1.use_bias is True
-        assert stem.stem.conv1.bias is not None
-        n_bias_weights = sum(
-            1 for w in stem.stem.conv1.weights if w.path.endswith('bias')
-        )
-        assert n_bias_weights == 1, (
-            f"use_bias=True stem allocated {n_bias_weights} bias weights"
-        )
-        assert int(np.prod(stem.stem.conv1.bias.shape)) == 8
-
-        # Control: the bias-free arm allocates none.
-        stem_bf = ConvUNextStem(filters=8, use_bias=False)
-        stem_bf(sample_input_small)
-        assert stem_bf.stem.conv1.use_bias is False
-        assert stem_bf.stem.conv1.bias is None
-        assert not any(w.path.endswith('bias') for w in stem_bf.stem.conv1.weights)
-
-    def test_stem_normalization_layernorm_selects_layer_norm(
-        self,
-        sample_input_small: np.ndarray
-    ) -> None:
-        """`stem_normalization` must select the normalization CLASS actually built."""
-        stem_ln = ConvUNextStem(filters=8, stem_normalization='layer_norm')
-        stem_ln(sample_input_small)
-        assert type(stem_ln.stem.norm1) is keras.layers.LayerNormalization
-
-        # The default is the bias-free / ConvNeXt-V2 choice, a different class.
-        stem_default = ConvUNextStem(filters=8)
-        stem_default(sample_input_small)
-        assert type(stem_default.stem.norm1) is GlobalResponseNormalization
-        assert type(stem_default.stem.norm1) is not type(stem_ln.stem.norm1)
-
-    def test_stem_config_round_trip_at_non_default_knob_values(
-        self,
-        sample_input_small: np.ndarray
-    ) -> None:
-        """Full `.keras` round trip built at NON-DEFAULT values for both knobs.
-
-        Built at the defaults, this test would be vacuous: dropping a key from
-        `get_config` is silently repaired by the constructor default and the
-        round trip still passes (measured). So the stem
-        here is `use_bias=False` (default True) and
-        `stem_normalization='layer_norm'` (default 'global_response_norm').
-        """
-        inputs = keras.Input(shape=sample_input_small.shape[1:])
-        outputs = ConvUNextStem(
-            filters=8,
-            use_bias=False,
-            stem_normalization='layer_norm',
-            name='stem_under_test',
-        )(inputs)
-        model = keras.Model(inputs, outputs)
-
-        original_output = model(sample_input_small, training=False)
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            model_path = os.path.join(tmpdir, 'test_merged_stem.keras')
-            model.save(model_path)
-            loaded_model = keras.models.load_model(model_path)
-
-        loaded_stem = loaded_model.get_layer('stem_under_test')
-        assert loaded_stem.use_bias is False
-        assert loaded_stem.stem.conv1.use_bias is False
-        assert loaded_stem.stem.conv1.bias is None
-        assert loaded_stem.stem_normalization == 'layer_norm'
-        assert type(loaded_stem.stem.norm1) is keras.layers.LayerNormalization
-
-        loaded_output = loaded_model(sample_input_small, training=False)
+        stem = _stem_of(loaded)
+        assert type(stem) is ConvStem
+        assert stem.use_bias is False and stem.conv1.use_bias is False
+        assert stem.conv1.bias is None
+        assert stem.kernel_size == 5
+        assert stem.normalization_type == 'layer_norm'
+        assert type(stem.norm1) is keras.layers.LayerNormalization
+        assert isinstance(stem.act1, keras.layers.ReLU)
         np.testing.assert_allclose(
-            keras.ops.convert_to_numpy(original_output),
-            keras.ops.convert_to_numpy(loaded_output),
-            rtol=1e-6, atol=1e-6,
-            err_msg="Merged stem outputs differ after .keras round-trip",
-        )
-
+            keras.ops.convert_to_numpy(loaded(x, training=False)), original,
+            rtol=1e-6, atol=1e-6, err_msg="outputs differ after the .keras round trip")
 
 
 # ---------------------------------------------------------------------
@@ -618,7 +459,7 @@ class TestCreateConvUNextUseBias:
         )
 
         # Every gabor/attention layer bias-free, and NOTHING else. Checked on BOTH
-        # stem arms: the standard ConvUNextStem (model_on) and the frozen Gabor stem
+        # stem arms: the standard ConvStem stem (model_on) and the frozen Gabor stem
         # + its 1x1 projection (model_gabor_on) are mutually exclusive branches, so
         # a single config cannot see a missed use_bias at both.
         gabor_cfg = dict(cfg, use_gabor_stem=True, gabor_filters=4,
@@ -2281,20 +2122,20 @@ class TestEdgeCases:
 
     def test_stem_normalization_reaches_the_builder(self) -> None:
         """``stem_normalization`` is threaded from ``create_convunext``, not
-        only settable on the layer directly (which ``TestMergedConvUNextStemKnobs``
+        only settable on the layer directly (which ``TestLevelZeroStem``
         already covers).
         """
         model = create_convunext(**_cfg(stem_normalization='layer_norm'))
         stem = model.get_layer(name='encoder_level_0_stem')
-        assert type(stem.stem.norm1) is keras.layers.LayerNormalization
+        assert type(stem.norm1) is keras.layers.LayerNormalization
 
         default = create_convunext(**_cfg())
-        assert type(default.get_layer(name='encoder_level_0_stem').stem.norm1) is \
+        assert type(default.get_layer(name='encoder_level_0_stem').norm1) is \
             GlobalResponseNormalization
 
     def test_gabor_stem_replaces_the_convunext_stem(self) -> None:
         """The two stems are mutually exclusive branches -- with the Gabor stem
-        on, no ``ConvUNextStem`` is built at all.
+        on, no level-0 ``ConvStem`` is built at all.
 
         The stem is a TRAINABLE cross-channel ``Conv2D`` warm started from a Gabor
         bank (Ozbulak & Ekenel), so ``gabor_filters`` is its output channel count,

@@ -52,8 +52,8 @@ from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import (
     create_convunext_denoiser,
     create_convunext_variant as bf_create_convunext_variant,
 )
+from dl_techniques.layers.conv_blocks.stem import ConvStem
 from dl_techniques.models.vision.convunext.model import (
-    ConvUNextStem,
     SpatialLinearAttention,
     create_convunext,
 )
@@ -72,7 +72,11 @@ SMALL: Dict[str, Any] = dict(depth=2, initial_filters=8, blocks_per_level=1)
 # LEGACY ALIAS, not the key a new save writes. It is kept, and kept as a literal, for
 # exactly the reason above: it is what a graph saved BEFORE that date names, and that
 # fact cannot be re-derived from today's source.
-STEM_REGISTRY_KEY = 'dl_techniques.models.convunext.model>ConvUNextStem'  # was `dl_techniques.bias_free_denoisers>...` before 2026-08-29
+#
+# 2026-10-30: the first one is `ConvStem`'s key. The level-0 stem used to be a
+# `ConvUNextStem` (`dl_techniques.models.convunext.model>ConvUNextStem`); that class
+# is deleted and the key with it, so a graph saved before that date no longer loads.
+STEM_REGISTRY_KEY = 'dl_techniques.layers.conv_blocks.stem>ConvStem'
 ATTENTION_REGISTRY_KEY = 'Custom>SpatialLinearAttention'
 
 # Substring alternation covering BOTH TypeError shapes. The contract is "it raises",
@@ -510,8 +514,9 @@ class TestKerasRoundTrip:
     def test_both_registry_keys_a_saved_graph_names_still_resolve(self) -> None:
         """The keys `load_model` looks up, asserted EXACTLY.
 
-        `ConvUNextStem` carries `package='dl_techniques.models.convunext.model'`
-        (normalized 2026-08-29 from `'dl_techniques.bias_free_denoisers'`);
+        The level-0 stem is a `ConvStem`, registered by `layers/conv_blocks/stem.py`
+        under `dl_techniques.layers.conv_blocks.stem>ConvStem` (the `ConvUNextStem`
+        wrapper that used to hold it is deleted, 2026-10-30);
         `SpatialLinearAttention` originally carried a BARE decorator whose key was
         measured to be module-independent, and that bare key survives as its legacy
         alias. Changing either string mints a BRAND-NEW key -- the model would still
@@ -531,8 +536,8 @@ class TestKerasRoundTrip:
         # from any other object that claimed the key, which for a flat `Custom>`
         # key is the whole hazard.
         registered = keras.saving.get_custom_objects()
-        assert registered.get(STEM_REGISTRY_KEY) is ConvUNextStem, (
-            f"{STEM_REGISTRY_KEY!r} does not resolve to ConvUNextStem; every "
+        assert registered.get(STEM_REGISTRY_KEY) is ConvStem, (
+            f"{STEM_REGISTRY_KEY!r} does not resolve to ConvStem; every "
             f"saved bias-free ConvUNext graph names it"
         )
         assert (registered.get(ATTENTION_REGISTRY_KEY)

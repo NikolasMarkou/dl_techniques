@@ -1,7 +1,7 @@
 """create_convunext, a functional builder for a U-Net with ConvNeXt-style blocks.
 
 create_convunext returns a functional `keras.Model` shaped like U-Net, with
-`ConvUNextStem`, `SpatialLinearAttention`, the `CONVUNEXT_CONFIGS` variant
+`SpatialLinearAttention`, the `CONVUNEXT_CONFIGS` variant
 table and `create_convunext_variant` alongside it. Each level's work is done
 by `ConvNextV1Block` or `ConvNextV2Block` (depthwise 7x7, inverted
 bottleneck, Global Response Normalization in V2, layer scale, optional
@@ -55,199 +55,9 @@ from dl_techniques.initializers import (
     create_gabor_depthwise_conv2d,
 )
 from dl_techniques.initializers.clone import initializer_spec
-from dl_techniques.utils.activation_serialization import (
-    serialize_activation,
-    deserialize_activation,
-)
+from dl_techniques.utils.activation_serialization import deserialize_activation
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.model_build import refuse_input_shape
-
-
-# ---------------------------------------------------------------------
-
-@register_dl_technique("dl_techniques.models.convunext.model")
-class ConvUNextStem(keras.layers.Layer):
-    """Extract initial features with a wide convolution, normalization and activation.
-
-    Serves both ConvUNext arms: the normalization type and the bias flag are
-    parameters, so ``'global_response_norm'`` with ``use_bias=False`` gives the
-    bias-free denoiser stem and ``'layer_norm'`` with ``use_bias=True`` gives the
-    standard ConvNeXt stem.
-
-    Architecture:
-
-    .. code-block:: text
-
-        input [B, H, W, C]
-              │
-              ▼
-        ┌──────────────────────────────┐
-        │ conv2d filters, padding same │
-        └──────────────────────────────┘
-              │ [B, H, W, filters]
-              ▼
-        ┌──────────────────────────────┐
-        │ stem_normalization           │
-        └──────────────────────────────┘
-              │
-              ▼
-        ┌──────────────────────────────┐
-        │ activation                   │
-        └──────────────────────────────┘
-              │
-              ▼
-        output [B, H, W, filters]
-
-    Stride is 1 and padding is ``'same'``, so the spatial dimensions are kept.
-
-    :param filters: Number of output filters.
-    :type filters: int
-    :param kernel_size: Spatial size of the convolution kernel. Defaults to 7.
-    :type kernel_size: int or tuple of 2 ints
-    :param activation: Activation applied after the normalization. May be a string,
-        a callable registered with Keras, or a ``keras.layers.Layer`` instance
-        (e.g. ``LeakyReLU(0.1)``). Defaults to ``'gelu'``. Pass ``'linear'`` for a
-        stem with no activation. The inner :class:`ConvStem` rebuilds a Layer
-        instance from its config, so the Layer must be unbuilt (hold no weights)
-        and serializable, i.e. its class must be locatable by name (a Keras
-        built-in such as ``PReLU``, or a class registered with
-        ``keras.saving.register_keras_serializable``). A built Layer that
-        already holds weights, or a class Keras cannot locate, raises
-        ``ValueError`` at construction.
-    :type activation: str or callable or keras.layers.Layer
-    :param use_bias: Whether the stem convolution allocates a bias vector. Defaults
-        to ``True``. Bias-free / Miyasawa denoisers pass ``False``, since degree-1
-        homogeneity requires a zero additive offset.
-    :type use_bias: bool
-    :param stem_normalization: Registered normalization type built through
-        ``create_normalization_layer``. Defaults to ``'global_response_norm'``
-        (the ConvNeXt-V2 / bias-free choice); ``'layer_norm'`` reproduces the
-        standard ConvNeXt stem.
-    :type stem_normalization: str
-    :param kernel_initializer: Initializer for the convolution kernel, a name, a
-        config dict or an ``Initializer`` instance. Defaults to ``'he_normal'``. It is
-        stored as a string or a serialized dict (an instance is serialized once), so
-        ``get_config()`` is JSON data.
-    :type kernel_initializer: str or dict or keras.initializers.Initializer
-    :param kernel_regularizer: Optional regularizer for the convolution kernel.
-    :type kernel_regularizer: str or keras.regularizers.Regularizer or None
-    :param kwargs: Additional arguments forwarded to ``keras.layers.Layer``. A
-        ``dtype`` policy given here is passed on to the inner :class:`ConvStem`,
-        so the convolution, normalization and activation compute in it too.
-    :raises ValueError: If ``activation`` is a built Layer holding weights or a
-        Layer whose class Keras cannot locate.
-    :raises TypeError: If ``kernel_initializer`` is not a string, a dict or an
-        ``Initializer`` instance.
-    :raises ValueError: Also if ``input_shape`` or ``input_dim`` is passed: a layer
-        takes the shape of the tensor it is called on.
-
-    Input shape:
-        4D tensor ``(batch, height, width, channels)``.
-
-    Output shape:
-        4D tensor ``(batch, height, width, filters)``.
-    """
-
-    def __init__(
-            self,
-            filters: int,
-            kernel_size: Union[int, Tuple[int, int]] = 7,
-            activation: Union[str, keras.layers.Layer] = 'gelu',
-            use_bias: bool = True,
-            stem_normalization: str = 'global_response_norm',
-            kernel_initializer: Union[str, Dict[str, Any], keras.initializers.Initializer] = 'he_normal',
-            kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-            **kwargs: Any
-    ) -> None:
-        refuse_input_shape(
-            kwargs, type(self).__name__,
-            "a layer takes the shape of the tensor it is called on")
-        super().__init__(**kwargs)
-        self.filters = filters
-        self.kernel_size = kernel_size
-        self.activation = deserialize_activation(activation)
-        self.use_bias = use_bias
-        self.stem_normalization = stem_normalization
-        self.kernel_initializer = initializer_spec(kernel_initializer)
-        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
-
-        # D-277: the exact gelu / leaky_relu are bit-identical to stock at float32.
-        # ConvStem resolves a string as written, so the substitution happens here.
-        self.stem = ConvStem(
-            filters=self.filters,
-            kernel_size=self.kernel_size,
-            strides=1,
-            padding='same',
-            use_bias=self.use_bias,
-            num_convs=1,
-            normalization_type=self.stem_normalization,
-            activation_type=substitute_exact(self.activation),
-            use_pooling=False,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            dtype=self.dtype_policy,
-            name='stem',
-        )
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the inner :class:`ConvStem`.
-
-        :param input_shape: Shape of the input tensor ``(batch, H, W, C)``.
-        :type input_shape: tuple of int or None
-        """
-        self.stem.build(input_shape)
-        super().build(input_shape)
-
-    def call(
-            self,
-            inputs: keras.KerasTensor,
-            training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """Run the forward pass.
-
-        :param inputs: Input tensor of shape ``(batch, H, W, C)``.
-        :type inputs: keras.KerasTensor
-        :param training: Forwarded to the inner :class:`ConvStem`, which hands it
-            to the normalization. The default GRN and layer norm do not behave
-            differently in training; a ``'batch_norm'`` stem does.
-        :type training: bool or None
-        :return: Output tensor of shape ``(batch, H, W, filters)``.
-        :rtype: keras.KerasTensor
-        """
-        return self.stem(inputs, training=training)
-
-    def compute_output_shape(
-            self,
-            input_shape: Tuple[Optional[int], ...]
-    ) -> Tuple[Optional[int], ...]:
-        """Compute the output shape.
-
-        :param input_shape: Shape of the input tensor.
-        :type input_shape: tuple of int or None
-        :return: Input shape with the channel axis replaced by ``filters``.
-        :rtype: tuple of int or None
-        """
-        return tuple(input_shape)[:-1] + (self.filters,)
-
-    def get_config(self) -> Dict[str, Any]:
-        """Return the constructor configuration.
-
-        :return: Configuration dictionary containing every constructor parameter.
-        :rtype: dict
-        """
-        base_config = super().get_config()
-        config = {
-            'filters': self.filters,
-            'kernel_size': self.kernel_size,
-            # DECISION plan_2026-06-21_eb7fd829/D-005: serialize a layer-instance stem
-            # activation so LeakyReLU(alpha) round-trips. See decisions.md.
-            'activation': serialize_activation(self.activation),
-            'use_bias': self.use_bias,
-            'stem_normalization': self.stem_normalization,
-            'kernel_initializer': self.kernel_initializer,
-            'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
-        }
-        return {**base_config, **config}
 
 
 # ---------------------------------------------------------------------
@@ -792,7 +602,8 @@ def create_convunext(
               ▼
         output [B, H, W, output_channels]
 
-    Without the Gabor stem, encoder level 0 starts with ``ConvUNextStem``.
+    Without the Gabor stem, encoder level 0 starts with a ``ConvStem`` named
+    ``encoder_level_0_stem``.
 
     Encoder level i:
 
@@ -950,7 +761,7 @@ def create_convunext(
     :param use_gabor_stem: If True prepend a trainable, bias-free cross-channel
         ``Conv2D`` Gabor stem, warm started with a Gabor filter bank per Ozbulak &
         Ekenel (SIU 2018), followed by a 1x1 projection to ``initial_filters``,
-        instead of the ``ConvUNextStem``. Defaults to False.
+        instead of the level-0 ``ConvStem``. Defaults to False.
 
         .. note::
 
@@ -1120,8 +931,15 @@ def create_convunext(
         normalization and the deep-supervision-head LayerNorm are outside this
         parameter.
     :type block_normalization: str
-    :param stem_activation: Activation for the ``ConvUNextStem``; default ``'gelu'``.
+    :param stem_activation: Activation for the level-0 ``ConvStem``; default ``'gelu'``.
         Only used when the standard stem is built, i.e. ``use_gabor_stem=False``.
+        A string, a callable, or a ``keras.layers.Layer`` instance (e.g.
+        ``LeakyReLU(0.1)``); ``'linear'`` builds a stem with no activation. The
+        ``ConvStem`` rebuilds a Layer instance from its config, so the Layer must be
+        unbuilt (hold no weights) and its class locatable by name (a Keras built-in,
+        or registered with ``keras.saving.register_keras_serializable``); a built
+        Layer holding weights, or a class Keras cannot locate, raises ``ValueError``
+        when the graph is built.
     :type stem_activation: str or keras.layers.Layer
     :param drop_path_rate: Ceiling of the per-stack linear stochastic-depth ramps;
         see the schedule above, where no single block reaches the ceiling. Defaults
@@ -1471,12 +1289,26 @@ def create_convunext(
         # extraction and set the width to initial_filters, so this branch is only
         # for the level-0 case without it.
         if level == 0 and not use_gabor_stem:
-            x = ConvUNextStem(
+            # The level-0 stem is one ConvStem named `encoder_level_0_stem` (its
+            # layers are `encoder_level_0_stem_conv1`, `_norm1`, `_act1`). The
+            # ConvStem defaults (kernel 3, glorot_uniform, batch_norm, relu)
+            # are NOT this builder's, so every argument is stated. D-277: the
+            # exact gelu / leaky_relu are bit-identical to stock at float32 and
+            # ConvStem resolves a string as written, so the substitution
+            # happens here.
+            # DECISION plan_2026-06-21_eb7fd829/D-005: a layer-instance stem
+            # activation is stored by its serialized config inside the ConvStem so
+            # LeakyReLU(alpha) round-trips. See decisions.md.
+            x = ConvStem(
                 filters=current_filters,
                 kernel_size=stem_kernel_size,
-                activation=stem_activation,
+                strides=1,
+                padding='same',
                 use_bias=use_bias,
-                stem_normalization=stem_normalization,
+                num_convs=1,
+                normalization_type=stem_normalization,
+                activation_type=substitute_exact(deserialize_activation(stem_activation)),
+                use_pooling=False,
                 kernel_initializer=kernel_initializer,
                 kernel_regularizer=kernel_regularizer,
                 name=f'encoder_level_{level}_stem'

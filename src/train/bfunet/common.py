@@ -3447,7 +3447,7 @@ def add_common_arguments(parser) -> None:
     parser.add_argument(
         "--block-activation", type=str, default="leaky_relu",
         help="Activation for the WHOLE denoiser: the ConvNeXt blocks AND the "
-             "ConvUNextStem AND the deep-supervision heads all use it. 'leaky_relu' "
+             "level-0 ConvStem AND the deep-supervision heads all use it. 'leaky_relu' "
              "(default) builds LeakyReLU(negative_slope=--block-activation-alpha); any "
              "other Keras activation name is passed through as a string. The final "
              "activation stays linear (bias-free homogeneity).",

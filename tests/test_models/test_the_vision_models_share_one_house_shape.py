@@ -140,7 +140,7 @@ EXEMPTIONS: Dict[str, str] = {
     ),
     "E-4": (
         "Models without named variants (RBFProtoNet, CliffordRBFProtoNet, "
-        "UcaEncoder, ConvUNextStem, CapsNet, CapsNetV2): no ``MODEL_VARIANTS``, "
+        "UcaEncoder, CapsNet, CapsNetV2): no ``MODEL_VARIANTS``, "
         "so ``from_variant`` and the delegating factory do not apply. The RBF "
         "factories keep a ``pretrained`` argument and refuse it."
     ),
@@ -173,14 +173,9 @@ EXEMPTIONS: Dict[str, str] = {
     ),
     "not-a-traced-model": (
         "Rule h5 describes a subclassed model whose ``call`` is traced by "
-        "``materialize_sublayers``. ConvUNextStem builds its one ConvStem, "
-        "UcaEncoder builds an explicit shape chain, and VAE, like SqueezeNet, "
+        "``materialize_sublayers``. UcaEncoder builds an explicit shape chain, and VAE, like SqueezeNet, "
         "is a functional graph built in ``__init__``: none of them is in that "
         "rule's roster."
-    ),
-    "layer-not-model": (
-        "ConvUNextStem is a layer, and a layer does not log its construction; "
-        "the one-``logger.info`` rule is for models."
     ),
 }
 
@@ -272,7 +267,10 @@ MODULES: Tuple[Module, ...] = (
            factory_signature=CANONICAL_FACTORY),
     Module("squeezenet_v2", f"{VISION}/squeezenet/squeezenet_v2.py",
            ("SqueezeNoduleNetV2",), factory_signature=CANONICAL_FACTORY),
-    Module("convunext", f"{VISION}/convunext/model.py", ("ConvUNextStem",), waived=_E4_FACTORY),
+    # No subject class since 2026-10-30: the ConvUNextStem wrapper is deleted and the
+    # module holds a builder function and SpatialLinearAttention, a layer that is
+    # not a vision model. It stays on the roster for the header and import rules.
+    Module("convunext", f"{VISION}/convunext/model.py", model_module=False),
     Module("vae", f"{VISION}/vae/model.py", ("VAE",),
            factory_signature=("input_shape", "pretrained"), factory_exact=False),
     Module("rbf_protonet", f"{VISION}/rbf_protonet/model.py",
@@ -326,10 +324,6 @@ SUBJECTS: Tuple[Subject, ...] = (
              required_params=_INIT_AND_REG, waived=_E2, rules=_ALL - set(_E2)),
     _subject("squeezenet_v2", "squeezenet_v2", "SqueezeNoduleNetV2", classifier=True,
              required_params=_INIT_AND_REG, waived=_E2, rules=_ALL - set(_E2)),
-    _subject("convunext_stem", "convunext", "ConvUNextStem",
-             rules=_NO_HEAD_ATTRIBUTE - {"h5_build_materializes", "h3_one_init_log"},
-             required_params=_INIT_AND_REG,
-             waived={**_NOT_TRACED, "h3_one_init_log": "layer-not-model"}),
     _subject("vae", "vae", "VAE",
              rules=_NO_HEAD_ATTRIBUTE - {"h5_build_materializes", "h3_builders_assign"},
              required_params=_INIT_AND_REG,
@@ -1921,9 +1915,9 @@ def test_every_row_test_checks_its_ledger_signatures() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_the_roster_names_the_nineteen_subject_classes() -> None:
+def test_the_roster_names_the_eighteen_subject_classes() -> None:
     classes = [c for m in MODULES if m.key != "stem" for c in m.classes]
-    assert len(classes) == len(set(classes)) == 19
+    assert len(classes) == len(set(classes)) == 18
     assert {s.cls for s in SUBJECTS if s.key != "stem"} == set(classes)
 
 
@@ -2060,15 +2054,15 @@ _NO_BUILDERS = "no _build_* method to inspect"
 #: whether the new method obeys the rule (delete the line) or why it does not.
 VACUOUS: Dict[Tuple[str, str], str] = {
     **{("h10_trailing_parameter_order", key): _NOT_A_CLASSIFIER for key in (
-        "convunext_stem", "vae", "rbf_protonet", "clifford_rbf_protonet", "uca_encoder",
+        "vae", "rbf_protonet", "clifford_rbf_protonet", "uca_encoder",
         "capsnet", "capsnet_v2")},
     **{("h11_from_config_does_real_work", key): _NO_FROM_CONFIG for key in (
         "resnet", "cliffordnet", "hierarchical", "mobilenet_v1", "mobilenet_v2", "mobilenet_v3",
-        "mobilenet_v4", "convnext_v1", "convnext_v2", "rad_convnet", "convunext_stem", "vae",
+        "mobilenet_v4", "convnext_v1", "convnext_v2", "rad_convnet", "vae",
         "rbf_protonet", "clifford_rbf_protonet", "uca_encoder", "capsnet")},
-    **{("h3_builders_assign", key): _NO_BUILDERS for key in ("convunext_stem", "uca_encoder")},
+    **{("h3_builders_assign", key): _NO_BUILDERS for key in ("uca_encoder",)},
     **{("h2_call_takes_inputs", key): _NO_CALL for key in ("squeezenet_v1", "squeezenet_v2", "vae")},
-    **{("h10_block_container_names", key): _NO_CONTAINER for key in ("convunext_stem", "vae")},
+    **{("h10_block_container_names", key): _NO_CONTAINER for key in ("vae",)},
     **{("h15_initializer_storage", key): _NO_INITIALIZER for key in (
         "convnext_v1", "convnext_v2", "rad_convnet", "rbf_protonet", "clifford_rbf_protonet",
         "uca_encoder")},

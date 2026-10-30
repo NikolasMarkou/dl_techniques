@@ -204,7 +204,7 @@ print("RESULT " + json.dumps({"resolved": resolved, "module_attrs": attrs}))
 # The five classes `applications/bias_free_denoiser/denoiser_prior.py` names in its
 # loading contract, plus the two a merged bias-free graph now also contains.
 REGISTRAR_CLASSES = [
-    'ConvUNextStem',
+    'ConvStem',
     'ConvNextV1Block',
     'GlobalResponseNormalization',
     'MatchChannels',
@@ -213,14 +213,17 @@ REGISTRAR_CLASSES = [
     'SpatialLinearAttention',
 ]
 
-# UPDATED 2026-08-29: was
-# `'dl_techniques.bias_free_denoisers>ConvUNextStem'`, the module this class was
-# defined in before the ConvUNext merge, held byte-stable so pre-merge archives kept
-# loading. The user confirmed there are no checkpoints, which was that exemption's
-# entire basis, so the string was normalized onto the module-path rule the rest of
-# `src/` follows. Unlike `ATTENTION_REGISTRY_KEY` below this is NOT a legacy-path pin:
-# it is the key a NEW save writes.
-STEM_REGISTRY_KEY = 'dl_techniques.models.convunext.model>ConvUNextStem'
+# 2026-10-30: the level-0 stem is a plain `ConvStem`, registered by
+# `layers/conv_blocks/stem.py` under its package-qualified key and under the `Custom>`
+# alias `register_dl_technique` also binds. This module is still the registrar that
+# makes `load_model` resolve a saved bias-free ConvUNext graph, so BOTH keys must be
+# present after importing only `bfconvunext`. The `ConvUNextStem` wrapper the stem used
+# to be (keys `dl_techniques.models.convunext.model>ConvUNextStem` and
+# `Custom>ConvUNextStem`) is deleted, and so are its keys: a graph saved before
+# 2026-10-30 names them and is refused.
+STEM_REGISTRY_KEY = 'dl_techniques.layers.conv_blocks.stem>ConvStem'
+STEM_LEGACY_KEY = 'Custom>ConvStem'
+DELETED_WRAPPER = 'ConvUNextStem'
 
 # The OTHER key a saved bias-free ConvUNext graph names. Until 2026-08-29
 # `SpatialLinearAttention` carried a BARE `@keras.saving.register_keras_serializable()`
@@ -233,16 +236,15 @@ STEM_REGISTRY_KEY = 'dl_techniques.models.convunext.model>ConvUNextStem'
 # would make it follow the very move it exists to detect. Both keys are asserted below.
 ATTENTION_REGISTRY_KEY = 'Custom>SpatialLinearAttention'
 ATTENTION_QUALIFIED_KEY = 'dl_techniques.models.convunext.model>SpatialLinearAttention'
-STEM_LEGACY_KEY = 'Custom>ConvUNextStem'
 
 # The names `bfconvunext` must keep bound as module ATTRIBUTES. This is a DIFFERENT
 # contract from registry presence, and the difference is measured, not assumed: deleting
-# the `from ...convunext.model import ConvUNextStem` re-export does NOT de-register the
-# class, because `bfconvunext` imports `create_convunext` from that same module and the
-# decorator runs at module-exec time. What the re-export line actually buys is this name
-# binding, which `test_bfconvunext_denoiser.py` and `train/bfunet` import by name.
+# the `from ...layers.conv_blocks.stem import ConvStem` line does NOT de-register the
+# class, because `bfconvunext` imports `create_convunext` from `convunext/model.py`,
+# which imports ConvStem too, and the decorator runs at module-exec time. What the
+# explicit line actually buys is this name binding.
 RE_EXPORTED_NAMES = [
-    'ConvUNextStem',
+    'ConvStem',
     'SpatialLinearAttention',
     'ConvNextV1Block',
     'ConvNextV2Block',
@@ -284,15 +286,29 @@ def registrar_probe_result() -> dict:
 class TestRegistrarContract:
     """Importing `bfconvunext` alone must register every class a saved graph names."""
 
-    def test_registrar_import_registers_convunext_stem(
+    def test_registrar_import_registers_conv_stem(
         self, registrar_probe_result: dict
     ) -> None:
-        keys = sorted(registrar_probe_result['resolved'].get('ConvUNextStem', []))
+        keys = sorted(registrar_probe_result['resolved'].get('ConvStem', []))
         assert keys == [STEM_LEGACY_KEY, STEM_REGISTRY_KEY], (
-            f"ConvUNextStem registry keys after importing only bfconvunext: {keys}; "
+            f"ConvStem registry keys after importing only bfconvunext: {keys}; "
             f"expected exactly [{STEM_LEGACY_KEY!r}, {STEM_REGISTRY_KEY!r}] -- the "
-            f"package-qualified key and the legacy alias the migration added"
+            f"package-qualified key and the `Custom>` alias"
         )
+
+    def test_the_deleted_stem_wrapper_is_not_registered(
+        self, registrar_probe_result: dict
+    ) -> None:
+        """No key resolves to a `ConvUNextStem`, and none is NAMED for it.
+
+        The class is deleted outright, with no alias or shim that would let a
+        pre-2026-10-30 graph load. Both halves matter: the first catches a class
+        that kept its name, the second a key registered for some other object.
+        """
+        assert DELETED_WRAPPER not in registrar_probe_result['resolved']
+        stale = [k for keys in registrar_probe_result['resolved'].values()
+                 for k in keys if DELETED_WRAPPER in k]
+        assert stale == [], f"keys still naming the deleted wrapper: {stale}"
 
     def test_registrar_import_registers_spatial_linear_attention_under_the_bare_key(
         self, registrar_probe_result: dict

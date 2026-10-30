@@ -6,7 +6,7 @@ This module holds two things. First, thin wrappers,
 ``dl_techniques.models.vision.convunext.model.create_convunext``, where the
 architecture and every parameter are described once. Second, this module is
 the Keras registrar for a saved bias-free ConvUNext graph: importing it is
-what lets ``keras.models.load_model`` resolve ``ConvUNextStem``,
+what lets ``keras.models.load_model`` resolve ``ConvStem``,
 ``ConvNextV1Block``, ``ConvNextV2Block``, ``GlobalResponseNormalization``,
 ``MatchChannels``, ``StochasticDepth``, ``DownsampleAndSkip``,
 ``SpatialLinearAttention`` and ``GaborFiltersInitializer``, which
@@ -44,6 +44,7 @@ from typing import Any, Optional, Tuple
 # static unused-import sweep deleted all twelve once, breaking 7 tests. See decisions.md.
 from dl_techniques.layers.conv_blocks.convnext_v1_block import ConvNextV1Block  # noqa: F401
 from dl_techniques.layers.conv_blocks.convnext_v2_block import ConvNextV2Block  # noqa: F401
+from dl_techniques.layers.conv_blocks.stem import ConvStem  # noqa: F401
 from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization  # noqa: F401
 from dl_techniques.layers.regularization.stochastic_depth import StochasticDepth  # noqa: F401
 from dl_techniques.initializers import create_gabor_conv2d  # noqa: F401
@@ -63,10 +64,11 @@ from dl_techniques.utils.logger import logger
 # Registrar re-exports from the shared ConvUNext builder
 # ---------------------------------------------------------------------
 
-# DECISION plan-2026-08-14T092357-0e3d792d/D-010: keep importing ConvUNextStem
-# under this module's own name; it makes this module the Keras registrar that
-# load_model needs to resolve a saved bias-free ConvUNext graph. See decisions.md.
-from dl_techniques.models.vision.convunext.model import ConvUNextStem  # noqa: F401
+# DECISION plan-2026-08-14T092357-0e3d792d/D-010 (superseded 2026-10-30): this module
+# used to re-export ConvUNextStem so that importing it registered the stem class a
+# saved bias-free graph names. That wrapper is deleted; the level-0 stem is a plain
+# ConvStem (imported above, registered by layers/conv_blocks/stem.py), and the
+# registrar role of this module is unchanged. See decisions.md.
 
 # SpatialLinearAttention registers today via register_dl_technique, which also
 # binds the legacy Custom>SpatialLinearAttention alias so old archives still load.

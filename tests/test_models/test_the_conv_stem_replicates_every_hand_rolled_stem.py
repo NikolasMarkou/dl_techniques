@@ -101,7 +101,7 @@ from dl_techniques.models.vision.capsnet.model import CapsNet
 from dl_techniques.models.vision.capsnet.model_v2 import CapsNetV2
 from dl_techniques.models.vision.convnext.convnext_v1 import ConvNeXtV1
 from dl_techniques.models.vision.convnext.convnext_v2 import ConvNeXtV2
-from dl_techniques.models.vision.convunext.model import ConvUNextStem
+from dl_techniques.models.vision.convunext.model import create_convunext
 from dl_techniques.models.vision.dasiamrpn.model import DaSiamRPN, SiamRPNBackbone
 from dl_techniques.models.vision.deepsort.appearance import DeepSortAppearanceNet
 from dl_techniques.models.vision.depth_anything.model import DepthAnything
@@ -720,11 +720,12 @@ UCA_ENCODER_NOBIAS = StemCase(
 )
 
 # ---------------------------------------------------------------------
-# ConvUNextStem
+# create_convunext: the level-0 stem
 # ---------------------------------------------------------------------
 
 # Original: ``git show 20b48aba6^:src/dl_techniques/models/vision/convunext/model.py``
-# ``ConvUNextStem.build``: ``Conv2D(filters, kernel, padding "same", use_bias,
+# ``ConvUNextStem.build`` (the wrapper layer is deleted since 2026-10-30; the builder
+# now creates the ``ConvStem`` itself, named ``encoder_level_0_stem``): ``Conv2D(filters, kernel, padding "same", use_bias,
 # he_normal, kernel regularizer, name="stem_conv")`` -> ``create_normalization_layer(
 # stem_normalization, name="stem_norm")`` (no kwargs, epsilon 1e-6) ->
 # ``keras.layers.Activation(substitute_exact(activation))`` which is ALWAYS built,
@@ -738,10 +739,11 @@ UCA_ENCODER_NOBIAS = StemCase(
 # identity ``Activation`` with no weights: it stays in ``forward`` but, as
 # ConvStem builds no layer for ``"linear"``, it is left out of ``sublayers``
 # (the role-set comparison then pins that ConvStem really has none).
+_BUILDER_PARAMETERS = inspect.signature(create_convunext).parameters
 _CONVUNEXT_FILTERS = 16
 _CONVUNEXT_KERNEL = 5
 _CONVUNEXT_KERNEL_REG = 1e-4
-#: Not ConvUNextStem's default (``he_normal``) and not ConvStem's
+#: Not the builder's default (``orthogonal``) and not ConvStem's
 #: (``glorot_uniform``): the original took the layer's ``kernel_initializer``.
 _CONVUNEXT_KERNEL_INIT = "he_uniform"
 
@@ -772,16 +774,57 @@ def _convunext_original(
     return Original(sublayers=sublayers, forward=forward)
 
 
+class CreateConvUNext:
+    """The ``create_convunext`` builder dressed as the harness's model protocol.
+
+    The harness reads ``type(model).__name__``, the constructor's
+    ``kernel_initializer`` / ``kernel_regularizer`` parameters (and their
+    defaults) and ``model.kernel_initializer``; a functional graph from a builder
+    function has none of those. This adapter states them: its parameters are the
+    builder's, and the defaults of the two knobs are READ from the builder's
+    signature, so they cannot drift from it. The graph is tiny (depth 2, one
+    block per level) and its level-0 ``ConvStem`` is the stem under test.
+    """
+
+    def __init__(
+        self,
+        stem_normalization: str,
+        stem_activation,
+        use_bias: bool,
+        kernel_initializer=_BUILDER_PARAMETERS["kernel_initializer"].default,
+        kernel_regularizer=_BUILDER_PARAMETERS["kernel_regularizer"].default,
+    ) -> None:
+        self.kernel_initializer = kernel_initializer
+        self.model = create_convunext(
+            input_shape=(16, 16, 3),
+            depth=2,
+            initial_filters=_CONVUNEXT_FILTERS,
+            blocks_per_level=1,
+            drop_path_rate=0.0,
+            stem_kernel_size=_CONVUNEXT_KERNEL,
+            stem_normalization=stem_normalization,
+            stem_activation=stem_activation,
+            use_bias=use_bias,
+            kernel_initializer=kernel_initializer,
+            kernel_regularizer=kernel_regularizer,
+        )
+
+    def __call__(self, x, training=None):
+        return self.model(x, training=training)
+
+    @property
+    def stem(self) -> ConvStem:
+        return self.model.get_layer("encoder_level_0_stem")
+
+
 def _convunext_model(
     norm_type: str, activation, use_bias: bool
-) -> ConvUNextStem:
-    """The layer under test: its ``.stem`` is the ``ConvStem``."""
-    return ConvUNextStem(
-        filters=_CONVUNEXT_FILTERS,
-        kernel_size=_CONVUNEXT_KERNEL,
-        activation=activation,
-        use_bias=use_bias,
+) -> CreateConvUNext:
+    """The subject: its ``.stem`` is the ``ConvStem`` the builder created."""
+    return CreateConvUNext(
         stem_normalization=norm_type,
+        stem_activation=activation,
+        use_bias=use_bias,
         kernel_initializer=_CONVUNEXT_KERNEL_INIT,
         kernel_regularizer=keras.regularizers.L2(_CONVUNEXT_KERNEL_REG),
     )
@@ -2495,7 +2538,7 @@ INITIALIZER_AUDIT = {
         "no initializer or regularizer parameter; the original Conv2D took "
         "Keras' glorot_uniform, which is ConvStem's default",
     ),
-    "ConvUNextStem": ("knob", "he_uniform (default he_normal)"),
+    "CreateConvUNext": ("knob", "he_uniform (default orthogonal, the builder's)"),
     "ConvNeXtV1": ("hardcoded", "STEM_INITIALIZER TruncatedNormal(0.02)"),
     "ConvNeXtV2": ("hardcoded", "STEM_INITIALIZER TruncatedNormal(0.02)"),
     "RADConvNet": ("hardcoded", "STEM_INITIALIZER 'truncated_normal'"),

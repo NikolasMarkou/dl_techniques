@@ -118,7 +118,7 @@ The **Bias-Free U-Net** applies the bias-free constraint to the classic U-Net ar
 
 | Param | Default | Meaning |
 |-------|---------|---------|
-| `use_gabor_stem` | `False` | When `True`, build a bias-free Gabor-initialized `Conv2D` + a **mandatory bias-free 1x1 projection** to `initial_filters` **INSTEAD OF** the learned `ConvUNextStem` — not before it. The Gabor front-end already performs initial feature extraction and sets the channel count, so the builder skips the stem entirely and falls through to the (no-op) channel-adjust branch. Default `False` is byte-identical to the original architecture. |
+| `use_gabor_stem` | `False` | When `True`, build a bias-free Gabor-initialized `Conv2D` + a **mandatory bias-free 1x1 projection** to `initial_filters` **INSTEAD OF** the learned level-0 `ConvStem` (`encoder_level_0_stem`) — not before it. The Gabor front-end already performs initial feature extraction and sets the channel count, so the builder skips the stem entirely and falls through to the (no-op) channel-adjust branch. Default `False` is byte-identical to the original architecture. |
 | `gabor_filters` | `32` | **OUTPUT CHANNEL COUNT** of the stem (a `Conv2D` `filters`); the 1x1 projection then maps it to `initial_filters`. |
 | `gabor_kernel_size` | `11` | Kernel size of the Gabor stem convolution. |
 | `gabor_stem_projection` | `True` | `False` DROPS the mandatory 1x1 projection and feeds the stem straight into the encoder — legal only when `gabor_filters == initial_filters` exactly (`ValueError` otherwise). |
