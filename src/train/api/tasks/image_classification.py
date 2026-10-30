@@ -146,23 +146,24 @@ class ImageClassificationTrainer(TaskTrainer):
     task = TASK
 
     def describe_data(self, config: ImageClassificationConfig) -> DataFacts:
-        size = config.transform_args.image_size
+        transform_cfg: TransformArgs = config.transform_args
+        size = transform_cfg.image_size
         return builtin_facts(config.data, None if size == AUTO else size)
 
     def build_data(self, config: ImageClassificationConfig, context: AutoContext) -> Any:
         from train.common.image_augment import build_augment
 
-        transform: TransformArgs = config.transform_args
+        transform_cfg: TransformArgs = config.transform_args
         augment = build_augment(
-            transform.augment, random_erasing_prob=transform.random_erasing_prob
+            transform_cfg.augment, random_erasing_prob=transform_cfg.random_erasing_prob
         )
         return load_builtin_data(
             config.data,
             batch_size=config.batch_size,
             seed=config.seed,
             augment=augment,
-            normalize=transform.normalize,
-            image_size=transform.image_size,
+            normalize=transform_cfg.normalize,
+            image_size=transform_cfg.image_size,
             loader=context.defaults.get("loader"),
         )
 

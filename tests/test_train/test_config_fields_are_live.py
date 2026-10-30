@@ -128,6 +128,15 @@ REGISTERED: List[Tuple[str, str]] = [
     ("train/dasiamrpn/train_dasiamrpn.py", "DaSiamRPNTrainingConfig"),
     ("train/deepsort/train_deepsort.py", "DeepSortTrainingConfig"),
     ("train/mambalct/train_mambalct.py", "MambaLCTTrainingConfig"),
+    ("train/api/args.py", "OptimArgs"),
+    ("train/api/args.py", "TransformArgs"),
+    ("train/api/args.py", "MetricArgs"),
+    ("train/api/args.py", "CheckpointArgs"),
+    ("train/api/args.py", "LoggerArgs"),
+    ("train/api/args.py", "AnalysisArgs"),
+    ("train/api/args.py", "DebugArgs"),
+    ("train/api/tasks/image_classification.py", "ImageClassificationConfig"),
+    ("train/api/data_args.py", "BuiltinImageData"),
 ]
 
 # Fields known to be dead but OUT OF SCOPE of the sweep that introduced this

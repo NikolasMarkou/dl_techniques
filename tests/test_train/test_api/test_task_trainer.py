@@ -25,7 +25,11 @@ import pytest
 import tensorflow as tf
 
 import train.api.recipes as recipes
+import train.api.tasks.image_classification as task_module
 import train.api.trainer as trainer_module
+import train.common.gpu as gpu_module
+import train.common.image_augment as augment_module
+import train.common.seed as seed_module
 from train.api import registry
 from train.api.config import AUTO, validate
 from train.api.errors import ConfigError, UnknownModelError
@@ -328,6 +332,59 @@ def test_without_smoke_the_recipe_decides_the_epochs_and_the_batch(world, tmp_pa
     assert context.defaults["epochs"] == 50
     explicit, _ = resolve(make_config(tmp_path / "r", epochs=7, batch_size=9))
     assert (explicit.epochs, explicit.batch_size) == (7, 9)
+
+
+class _Stop(Exception):
+    """Raised by a patched ``set_seeds`` so that a run ends right after ``setup_gpu``."""
+
+
+@pytest.mark.parametrize(
+    "given, expected",
+    [(1, 1), (0, 0), (AUTO, None), (None, None)],
+    ids=["one", "zero", "auto", "null"],
+)
+def test_devices_reaches_setup_gpu_as_the_index_or_none(given, expected, world, tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(gpu_module, "setup_gpu", lambda *args, **kwargs: seen.append((args, kwargs)))
+
+    def stop(*args, **kwargs):
+        raise _Stop
+
+    monkeypatch.setattr(seed_module, "set_seeds", stop)
+    with pytest.raises(_Stop):
+        ImageClassificationTrainer(make_config(tmp_path / "run", devices=given)).run()
+    assert seen == [((expected,), {})]
+
+
+def test_the_transform_group_reaches_the_augment_hook_and_the_loader(world, tmp_path, monkeypatch):
+    seen = {}
+
+    def augment(name, **kwargs):
+        seen["augment"] = (name, kwargs)
+        return "hook"
+
+    def loader(data, **kwargs):
+        seen["loader"] = kwargs
+        return "data"
+
+    monkeypatch.setattr(augment_module, "build_augment", augment)
+    monkeypatch.setattr(task_module, "load_builtin_data", loader)
+    config = make_config(
+        tmp_path / "run",
+        **{
+            "data": {"dataset": "imagenette"},
+            "transform_args.augment": "cifar_autoaugment",
+            "transform_args.random_erasing_prob": 0.25,
+            "transform_args.normalize": "unit",
+            "transform_args.image_size": 64,
+        },
+    )
+    resolved, context = resolve(config)
+    assert ImageClassificationTrainer(resolved).build_data(resolved, context) == "data"
+    assert seen["augment"] == ("cifar_autoaugment", {"random_erasing_prob": 0.25})
+    assert seen["loader"]["augment"] == "hook"
+    assert (seen["loader"]["normalize"], seen["loader"]["image_size"]) == ("unit", 64)
+    assert ImageClassificationTrainer(resolved).describe_data(resolved).image_size == 64
 
 
 def test_the_recipe_loader_mapping_reaches_the_data_of_the_family(world, tmp_path):
