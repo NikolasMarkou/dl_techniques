@@ -28,7 +28,12 @@ plan deselects by exact id), so a count-based guard is not a reliable signal.
    spelled): a run directory is never emptied or removed by this package
    (invariant 5), and the repository has lost results to a cleanup before;
 9. no ``contextlib.suppress(Exception)`` (or ``BaseException``), which is a
-   broad handler in a ``with`` statement.
+   broad handler in a ``with`` statement;
+10. no use of ``keras.optimizers`` (an attribute, an import of it, or an import
+    from it): an optimizer or a schedule is built by ``optim.py`` through
+    ``dl_techniques.optimization`` only, so the clip, decay and warmup mapping
+    has one home (invariant 9). ``LossScaleOptimizer`` is exempt: it wraps an
+    optimizer that ``optim.py`` built and constructs none.
 
 Each rule is a function over a source text. A planted snippet proves the
 rule fires, a clean snippet proves it stays quiet, and the sweep applies it to
@@ -262,6 +267,28 @@ def rule_no_broad_suppress(tree: ast.AST, path: Path) -> List[str]:
     return problems
 
 
+#: The one name under ``keras.optimizers`` the API may use: a wrapper.
+OPTIMIZER_WRAPPERS = ("LossScaleOptimizer",)
+
+
+def rule_no_direct_optimizer(tree: ast.AST, path: Path) -> List[str]:
+    problems = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and ast.unparse(node.value) == "keras.optimizers":
+            if node.attr not in OPTIMIZER_WRAPPERS:
+                problems.append(f"{path.name}:{node.lineno}: {ast.unparse(node)}")
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith("keras.optimizers"):
+            if not all(alias.name in OPTIMIZER_WRAPPERS for alias in node.names):
+                problems.append(f"{path.name}:{node.lineno}: from {node.module} import ...")
+        elif isinstance(node, ast.ImportFrom) and node.module == "keras":
+            if any(alias.name == "optimizers" for alias in node.names):
+                problems.append(f"{path.name}:{node.lineno}: from keras import optimizers")
+        elif isinstance(node, ast.Import):
+            if any(alias.name.startswith("keras.optimizers") for alias in node.names):
+                problems.append(f"{path.name}:{node.lineno}: import keras.optimizers")
+    return problems
+
+
 RULES = {
     "no_broad_handler": rule_no_broad_handler,
     "no_keyboard_interrupt_handler": rule_no_keyboard_interrupt_handler,
@@ -272,6 +299,7 @@ RULES = {
     "no_gpu_variable_write": rule_no_gpu_variable_write,
     "no_deletion_call": rule_no_deletion_call,
     "no_broad_suppress": rule_no_broad_suppress,
+    "no_direct_optimizer": rule_no_direct_optimizer,
 }
 
 CLI_PATH = API_DIR / "cli.py"
@@ -328,6 +356,13 @@ PLANTED = [
     ("no_broad_suppress", "from contextlib import suppress\nwith suppress(BaseException):\n    pass\n", OTHER_PATH),
     ("no_broad_suppress", "import contextlib\nwith contextlib.suppress(OSError, Exception):\n    pass\n", OTHER_PATH),
     ("no_broad_suppress", "import contextlib\nwith contextlib.suppress(builtins.Exception):\n    pass\n", OTHER_PATH),
+    ("no_direct_optimizer", "import keras\nopt = keras.optimizers.AdamW(learning_rate=1e-3)\n", OTHER_PATH),
+    ("no_direct_optimizer", "import keras\nsched = keras.optimizers.schedules.CosineDecay(1e-3, 10)\n", OTHER_PATH),
+    ("no_direct_optimizer", "import keras\ndef f():\n    return keras.optimizers.get('sgd')\n", OTHER_PATH),
+    ("no_direct_optimizer", "from keras.optimizers import Adam\n", OTHER_PATH),
+    ("no_direct_optimizer", "from keras.optimizers.schedules import CosineDecay\n", OTHER_PATH),
+    ("no_direct_optimizer", "from keras import optimizers\n", OTHER_PATH),
+    ("no_direct_optimizer", "import keras.optimizers\n", OTHER_PATH),
 ]
 
 # Source that every rule must leave alone.
@@ -372,6 +407,13 @@ CLEAN = [
         "    with contextlib.suppress(KeyError):\n"
         "        pass\n"
         "    return note, removed, held, run_dir.exists()\n"
+    ),
+    (
+        "def wrap(optimizer):\n"
+        "    import keras\n"
+        "    from keras.optimizers import LossScaleOptimizer\n"
+        "    note = 'keras.optimizers.AdamW is only a string here'\n"
+        "    return keras.optimizers.LossScaleOptimizer(optimizer), note, keras.layers\n"
     ),
 ]
 

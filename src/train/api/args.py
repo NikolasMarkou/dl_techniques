@@ -64,6 +64,14 @@ SUCCESS_CHANCE_MULTIPLE = 2
 SUCCESS_THRESHOLD_FLOOR = 0.05
 SUCCESS_THRESHOLD_CEILING = 0.95
 
+#: ``OptimArgs`` fields that belong to some optimizers and not to others.
+_OPTIMIZER_OPTIONS = ("beta_1", "beta_2", "epsilon", "momentum", "weight_decay")
+
+#: Options two different optimizers both take, keyed by the pair of names.
+#: ``weight_decay`` is not here: for adamw it is decoupled decay, for sgd it is
+#: the strength of an L2 regularizer on the model, two different quantities.
+_SHARED_OPTIONS = {frozenset(("adam", "adamw")): ("beta_1", "beta_2", "epsilon")}
+
 # ---------------------------------------------------------------------
 
 
@@ -219,7 +227,46 @@ class OptimArgs(StrictConfig):
         if self.global_clipnorm is not None and not _is_auto(self.global_clipnorm):
             if _is_auto(self.clipnorm):
                 found["clipnorm"] = None
+        self._drop_foreign_recipe_values(context, found)
         return _with_values(self, "optim_args", found)
+
+    def _drop_foreign_recipe_values(
+        self, context: AutoContext, found: Dict[str, Any]
+    ) -> None:
+        """Edit ``found`` so a recipe never hands an optimizer another one's options.
+
+        :param context: supplies the recipe's own ``optimizer``.
+        :param found: the recipe values chosen so far; changed in place.
+
+        When the optimizer in force (explicit or the recipe's) is not the
+        recipe's, every AUTO field that belongs to one optimizer and not the
+        other resolves to ``None``. A constant schedule has no warmup, so an
+        AUTO ``warmup_epochs`` resolves to 0 there.
+        """
+        # DECISION plan-2026-10-30T132432-a865fa08/D-039: do NOT fill
+        # beta_1, beta_2, epsilon, momentum or weight_decay from a recipe that
+        # belongs to a different optimizer. ``optimizer=sgd`` on an adamw
+        # family would otherwise receive the recipe's betas and decay, and
+        # optim.py refuses those; the user would be blamed for values the
+        # library chose. Options two optimizers share (adam and adamw take the
+        # same betas and epsilon) are kept. Equally, an AUTO warmup_epochs is
+        # not filled when the schedule is constant, which has no warmup.
+        recipe = context.defaults.get("optim_args", {})
+        chosen = found.get("optimizer", self.optimizer)
+        if isinstance(chosen, str) and not _is_auto(chosen):
+            kind = chosen.strip().lower()
+            recipe_kind = recipe.get("optimizer")
+            recipe_kind = (
+                recipe_kind.strip().lower() if isinstance(recipe_kind, str) else None
+            )
+            if kind != recipe_kind:
+                shared = _SHARED_OPTIONS.get(frozenset((kind, recipe_kind)), ())
+                for name in _OPTIMIZER_OPTIONS:
+                    if name not in shared and _is_auto(getattr(self, name)):
+                        found[name] = None
+        schedule = found.get("schedule", self.schedule)
+        if schedule == "constant" and _is_auto(self.warmup_epochs):
+            found["warmup_epochs"] = 0
 
 
 @dataclasses.dataclass(frozen=True)
