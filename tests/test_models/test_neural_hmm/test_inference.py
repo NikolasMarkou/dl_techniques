@@ -21,7 +21,9 @@ Guards:
   ``None`` signature, in a ``reduce_retracing`` function fed three lengths (how Keras
   traces ``predict``; D-014), and inside a ``keras.Input`` functional trace (SC2);
 * the package source uses no ``keras.ops.tril``/``triu``/``take_along_axis`` and no
-  ``from keras import ops`` (AST scan, SC2).
+  ``from keras import ops`` (AST scan, SC2);
+* float32 stays accurate on long sequences (D-001 of the rescaling plan): posteriors, the
+  Viterbi path and ``logZ`` agree with float64 at ``T`` in the thousands, ergodic and banded.
 """
 
 import ast
@@ -221,6 +223,102 @@ def test_float32_inference_matches_brute_force_within_the_reassociation_bound(
     case = _make_case(n_states, steps, transition, dtype="float32")
     got = _run_all_four(*case[:4])
     _assert_float32_matches_brute_force(got, case, n_states, steps)
+
+
+# ---------------------------------------------------------------------
+# Long sequences in float32 (rescaling)
+# ---------------------------------------------------------------------
+
+
+def _long_chain(steps, emission_offset, topology):
+    """Return ``(log_pi, log_A, log_emit)`` of one long sequence, as float64 numpy arrays.
+
+    :param steps: Sequence length ``T``.
+    :param emission_offset: Added to every log-emission; it sets how fast an unscaled
+        message grows, as a higher-dimensional emission density would.
+    :param topology: ``ergodic``, or ``banded`` with sentinel-valued forbidden entries.
+    :return: Arrays of shape ``(1, K)``, ``(1, T, K, K)`` and ``(1, T, K)``.
+    """
+    rng = np.random.default_rng(0)
+    n_states = 4
+    sentinel = float(mask_sentinel("float32"))
+    if topology == "ergodic":
+        transition = np.full((n_states, n_states), 0.1 / (n_states - 1))
+        np.fill_diagonal(transition, 0.9)
+        log_A = np.log(transition)
+        log_pi = np.log(np.full(n_states, 1.0 / n_states))
+        states = np.zeros(steps, dtype=int)
+        for t in range(1, steps):
+            states[t] = rng.choice(n_states, p=transition[states[t - 1]])
+    else:
+        log_A = np.full((n_states, n_states), sentinel)
+        for i in range(n_states):
+            log_A[i, i] = 0.0 if i == n_states - 1 else np.log(0.999)
+            if i < n_states - 1:
+                log_A[i, i + 1] = np.log(0.001)
+        log_pi = np.array([0.0] + [sentinel] * (n_states - 1))
+        states = np.minimum(np.arange(steps) * n_states // steps, n_states - 1)
+    distance = rng.normal(size=(steps, 1)) + (states[:, None] - np.arange(n_states)[None]) * 2.0
+    log_emit = -0.5 * distance**2 + emission_offset
+    return log_pi[None], np.broadcast_to(log_A, (1, steps, n_states, n_states)).copy(), log_emit[None]
+
+
+def _as_dtype(arrays, dtype):
+    return [tf.constant(a, dtype=dtype) for a in arrays] + [tf.ones(arrays[2].shape[:2], dtype=dtype)]
+
+
+@pytest.mark.parametrize("topology", ["ergodic", "banded"])
+@pytest.mark.parametrize("steps", [1000, 5000])
+@pytest.mark.parametrize("emission_offset", [-3.0, -30.0])
+def test_float32_posteriors_match_float64_on_a_long_sequence(steps, emission_offset, topology):
+    arrays = _long_chain(steps, emission_offset, topology)
+    run = lambda dtype: tf.function(lambda: inference.state_posteriors(*_as_dtype(arrays, dtype)))().numpy()
+    reference = run(tf.float64)
+    got = run(tf.float32)
+    # Unscaled messages measured a largest error of 0.02 to 36 here. Rescaled: below 1e-5.
+    np.testing.assert_allclose(got, reference, rtol=0, atol=2e-5)
+    np.testing.assert_allclose(got.sum(axis=-1), 1.0, rtol=0, atol=2e-5)
+
+
+@pytest.mark.parametrize("topology", ["ergodic", "banded"])
+def test_float32_viterbi_matches_float64_at_twenty_thousand_steps(topology):
+    arrays = _long_chain(20000, -30.0, topology)
+    run = lambda dtype: tf.function(lambda: inference.viterbi_decode(*_as_dtype(arrays, dtype)))()
+    reference_path, _ = run(tf.float64)
+    path, score = run(tf.float32)
+    # The unscaled delta measured 0.075% of the steps decoded differently here (ergodic).
+    np.testing.assert_array_equal(path.numpy(), reference_path.numpy())
+    float64_score = inference.path_log_score(
+        *_as_dtype(arrays[:3], tf.float64)[:3], reference_path, tf.ones_like(reference_path, tf.float64)
+    )
+    # A float32 running total of 6e5 is only good to its accumulated ulps.
+    np.testing.assert_allclose(score.numpy(), float64_score.numpy(), rtol=0, atol=64.0)
+
+
+def test_rescaling_leaves_the_log_partition_function_and_its_gradient_correct_when_long():
+    arrays = _long_chain(2000, -30.0, "ergodic")
+
+    def value_and_gradient(dtype):
+        log_pi, log_A, log_emit, mask = _as_dtype(arrays, dtype)
+        with tf.GradientTape() as tape:
+            tape.watch(log_emit)
+            log_z = inference.forward_log_likelihood(log_pi, log_A, log_emit, mask)
+        return log_z.numpy(), tape.gradient(log_z, log_emit).numpy()
+
+    reference_z, reference_grad = value_and_gradient(tf.float64)
+    got_z, got_grad = value_and_gradient(tf.float32)
+    # d logZ / d log_emit is the posterior. A running total near 6e4 in float32 has ulp 0.004.
+    np.testing.assert_allclose(got_z, reference_z, rtol=0, atol=1.0)
+    np.testing.assert_allclose(got_grad, reference_grad, rtol=0, atol=2e-5)
+
+
+def test_a_sequence_with_every_path_impossible_keeps_an_infinite_log_z_not_nan():
+    n_states, steps = 2, 3
+    log_pi = tf.fill((1, n_states), -np.inf)
+    log_A = tf.zeros((1, steps, n_states, n_states))
+    log_emit = tf.zeros((1, steps, n_states))
+    log_z = inference.forward_log_likelihood(log_pi, log_A, log_emit, tf.ones((1, steps))).numpy()
+    assert np.isneginf(log_z).all()
 
 
 # ---------------------------------------------------------------------

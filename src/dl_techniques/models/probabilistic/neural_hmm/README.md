@@ -64,6 +64,8 @@ A classical HMM has exact, cheap inference (likelihood, decoding, posteriors in 
 
 **Arbitrary sequence length.** Every recursion runs on `keras.ops.while_loop`, so `predict` and `evaluate` work at any sequence length in one process (Keras retraces them with an unknown time axis from the second length on), and the loss differentiates under XLA.
 
+**Long sequences.** Every forward, backward and Viterbi message is shifted to a row maximum of 0 at each step, and the shifts are restored where a total is needed, so float32 keeps its precision however long the sequence is. The loss runs a forward pass that keeps no history; `viterbi` and `posteriors` keep one (L-8).
+
 ---
 
 ## 4. Architecture Deep Dive
@@ -348,6 +350,7 @@ dwell = 1.0 / (1.0 - np.diag(transition))                              # expecte
 - **L-5. `io-hmm` starts at the static solution.** Its context projection is zero-initialized, so the encoder receives its first nonzero gradient on the second optimizer step.
 - **L-6. Mixed precision rounds the inputs.** Keras casts a model's float inputs to the compute dtype, so under `mixed_float16` the observations are float16 before the float32 density math; values above 65504 overflow.
 - **L-7. The key part of a fused attention bias does not train.** The `transformer` encoder's attention projects `qkv` with one biased `Dense`; the key bias adds a per-query constant that the softmax removes, so that part receives no gradient, while the fused variable as a whole does.
+- **L-8. Cost grows faster than `T` without XLA.** One loss-and-gradient step of the forward pass, measured on the CPU (`B = 8`, `K = 8`): 202, 274 and 656 us per time step at `T` = 1000, 4000 and 16000 in a plain `tf.function`, and a flat 6 to 9 us per time step with `jit_compile=True`. An `lstm`/`gru` encoder cannot use XLA (§10). Replacing the per-step slices with `keras.ops.take` did not help. `viterbi` and `posteriors` also rewrite a `(B, T, K)` history at each step, about 5 s for 8000 steps of that write alone at `B = 8`, `K = 8`, also on the CPU. Neither has been measured on a GPU.
 
 ### Troubleshooting / FAQs
 

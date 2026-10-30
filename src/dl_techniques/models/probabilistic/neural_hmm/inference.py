@@ -21,7 +21,8 @@ The recursions run as ``keras.ops.while_loop`` over time, so the time axis may b
 at trace time (Keras retraces ``predict`` and ``evaluate`` with an unknown length from the
 second sequence length on), and the forward pass can be differentiated under XLA. All
 arithmetic runs in float32, or float64 when an input is float64; float16 and bfloat16
-inputs are promoted, because a log-space recursion accumulates.
+inputs are promoted, because a log-space recursion accumulates. The recursions rescale at
+every step so their messages stay near 0, which keeps float32 exact over long sequences.
 
 :class:`LogSpaceOutputSpec` is the one piece of this module that is not a function: the
 mixin every neural_hmm layer that emits a log-space output uses, so that its symbolic
@@ -168,25 +169,78 @@ def _select(values: keras.KerasTensor, index: keras.KerasTensor, n_states: int) 
     return keras.ops.sum(keras.ops.where(chosen, values, keras.ops.zeros_like(values)), axis=-1)
 
 
-def _forward_alphas(
+def _rescale(message: keras.KerasTensor) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
+    """Shift a log-space message so its largest entry is 0, and return the shift.
+
+    :param message: ``(B, K)`` log-space message.
+    :return: ``(message - peak, peak)``, ``peak`` of shape ``(B,)``. A row with no finite
+        entry is returned unchanged, with ``peak = 0``.
+    """
+    # DECISION plan-2026-10-30T000000-neuralhmm/D-001: rescale every alpha, beta and delta
+    # by its row maximum. Do NOT leave the messages unnormalized and only softmax at the
+    # end: at about -30 nats per step an unscaled float32 alpha reaches 1e5 at T = 5000,
+    # where posterior rows measured a sum of 37 (softmax alone still left an error of 0.05
+    # at T = 20000; rescaling left 3e-6). The shift is a constant to the gradient: the
+    # message's own gradient is the correct one, and the shift cancels when it is restored.
+    peak = keras.ops.stop_gradient(keras.ops.max(message, axis=-1))
+    peak = keras.ops.where(keras.ops.isfinite(peak), peak, keras.ops.zeros_like(peak))
+    return message - peak[:, None], peak
+
+
+def _forward_final(
     log_pi: keras.KerasTensor,
     log_A: keras.KerasTensor,
     log_emit: keras.KerasTensor,
     valid: keras.KerasTensor,
-) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-    """Run the forward recursion and return every step's alpha.
+) -> keras.KerasTensor:
+    """Run the forward recursion keeping no history, and return ``logZ`` per sequence.
+
+    The loss reads only this. :func:`_forward_alphas` is the same recursion with a history,
+    which costs ``O(T)`` per step to write.
 
     :param log_pi: ``(B, K)`` accumulation-dtype initial log-potentials.
     :param log_A: ``(B, T, K, K)`` accumulation-dtype transition log-potentials.
     :param log_emit: ``(B, T, K)`` accumulation-dtype emission log-potentials.
     :param valid: ``(B, T)`` boolean validity mask.
-    :return: ``(alpha_last, alphas)``: ``(B, K)`` alpha after the last valid step and
-        ``(B, T, K)`` alpha at every step (frozen across padding).
+    :return: ``(B,)`` log partition function; not yet zeroed for empty sequences.
+    """
+    alpha, log_scale = _rescale(
+        log_pi + keras.ops.where(valid[:, 0, None], log_emit[:, 0], keras.ops.zeros_like(log_pi))
+    )
+
+    def body(t: Any, carry: Any) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
+        alpha, log_scale = carry
+        # D-003 (source axis) and D-009 (a padded step freezes alpha) as in _forward_alphas.
+        moved = keras.ops.logsumexp(alpha[:, :, None] + log_A[:, t], axis=1) + log_emit[:, t]
+        alpha, peak = _rescale(keras.ops.where(valid[:, t, None], moved, alpha))
+        return alpha, log_scale + peak
+
+    num_steps = keras.ops.shape(log_emit)[1]
+    alpha, log_scale = _time_loop(body, (alpha, log_scale), num_steps)
+    return log_scale + keras.ops.logsumexp(alpha, axis=-1)
+
+
+def _forward_alphas(
+    log_pi: keras.KerasTensor,
+    log_A: keras.KerasTensor,
+    log_emit: keras.KerasTensor,
+    valid: keras.KerasTensor,
+) -> keras.KerasTensor:
+    """Run the forward recursion and return every step's rescaled alpha.
+
+    :param log_pi: ``(B, K)`` accumulation-dtype initial log-potentials.
+    :param log_A: ``(B, T, K, K)`` accumulation-dtype transition log-potentials.
+    :param log_emit: ``(B, T, K)`` accumulation-dtype emission log-potentials.
+    :param valid: ``(B, T)`` boolean validity mask.
+    :return: ``(B, T, K)`` alpha at every step (frozen across padding), each row shifted by
+        :func:`_rescale`, so it is correct up to a per-step constant.
     """
     # DECISION plan-2026-10-13T192257-1bb3bf1f/D-009: a padded step FREEZES alpha
     # (no emission, no transition), so a padded sequence's logZ equals the truncated
     # sequence's exactly. Do NOT zero the emission and keep the transition instead.
-    alpha = log_pi + keras.ops.where(valid[:, 0, None], log_emit[:, 0], keras.ops.zeros_like(log_pi))
+    alpha, _ = _rescale(
+        log_pi + keras.ops.where(valid[:, 0, None], log_emit[:, 0], keras.ops.zeros_like(log_pi))
+    )
     alphas = _write(keras.ops.zeros_like(log_emit), 0, alpha)
 
     def body(t: Any, carry: Any) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
@@ -197,11 +251,12 @@ def _forward_alphas(
         # measured defect of the old package (logZ [1.331, 0.750] against the true
         # [0.636, 2.153]).
         moved = keras.ops.logsumexp(alpha[:, :, None] + log_A[:, t], axis=1) + log_emit[:, t]
-        alpha = keras.ops.where(valid[:, t, None], moved, alpha)
+        alpha, _ = _rescale(keras.ops.where(valid[:, t, None], moved, alpha))
         return alpha, _write(alphas, t, alpha)
 
     num_steps = keras.ops.shape(log_emit)[1]
-    return _time_loop(body, (alpha, alphas), num_steps)
+    _, alphas = _time_loop(body, (alpha, alphas), num_steps)
+    return alphas
 
 
 def _empty_to_zero(values: keras.KerasTensor, valid: keras.KerasTensor) -> keras.KerasTensor:
@@ -237,8 +292,7 @@ def forward_log_likelihood(
     :raises ValueError: If an input does not have the documented rank.
     """
     log_pi, log_A, log_emit, valid = _prepare(log_pi, log_A, log_emit, mask)
-    alpha_last, _ = _forward_alphas(log_pi, log_A, log_emit, valid)
-    return _empty_to_zero(keras.ops.logsumexp(alpha_last, axis=-1), valid)
+    return _empty_to_zero(_forward_final(log_pi, log_A, log_emit, valid), valid)
 
 
 def path_log_score(
@@ -320,19 +374,21 @@ def viterbi_decode(
     num_steps = keras.ops.shape(log_emit)[1]
     identity = keras.ops.zeros_like(log_emit, dtype="int32") + keras.ops.arange(n_states, dtype="int32")
 
-    delta = log_pi + keras.ops.where(valid[:, 0, None], log_emit[:, 0], keras.ops.zeros_like(log_pi))
+    delta, log_scale = _rescale(
+        log_pi + keras.ops.where(valid[:, 0, None], log_emit[:, 0], keras.ops.zeros_like(log_pi))
+    )
 
-    def forward(t: Any, carry: Any) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        delta, backpointers = carry
+    def forward(t: Any, carry: Any) -> Tuple[keras.KerasTensor, keras.KerasTensor, keras.KerasTensor]:
+        delta, log_scale, backpointers = carry
         scores = delta[:, :, None] + log_A[:, t]  # (B, K_source, K_destination)
         moved = keras.ops.max(scores, axis=1) + log_emit[:, t]
         pointer = keras.ops.cast(keras.ops.argmax(scores, axis=1), "int32")
         # D-009: a padded step freezes delta and keeps the identity backpointer.
-        delta = keras.ops.where(valid[:, t, None], moved, delta)
+        delta, peak = _rescale(keras.ops.where(valid[:, t, None], moved, delta))
         pointer = keras.ops.where(valid[:, t, None], pointer, identity[:, 0])
-        return delta, _write(backpointers, t, pointer)
+        return delta, log_scale + peak, _write(backpointers, t, pointer)
 
-    delta, backpointers = _time_loop(forward, (delta, identity), num_steps)
+    delta, log_scale, backpointers = _time_loop(forward, (delta, log_scale, identity), num_steps)
 
     last = keras.ops.cast(keras.ops.argmax(delta, axis=-1), "int32")
     path = _write(keras.ops.zeros_like(identity[:, :, 0]), num_steps - 1, last)
@@ -344,7 +400,7 @@ def viterbi_decode(
 
     _, path = _time_loop(backward, (last, path), num_steps, reverse=True)
     path = keras.ops.where(valid, path, keras.ops.full_like(path, -1))
-    return path, _empty_to_zero(keras.ops.max(delta, axis=-1), valid)
+    return path, _empty_to_zero(log_scale + keras.ops.max(delta, axis=-1), valid)
 
 
 def state_posteriors(
@@ -364,8 +420,7 @@ def state_posteriors(
     :raises ValueError: If an input does not have the documented rank.
     """
     log_pi, log_A, log_emit, valid = _prepare(log_pi, log_A, log_emit, mask)
-    alpha_last, alphas = _forward_alphas(log_pi, log_A, log_emit, valid)
-    log_z = keras.ops.logsumexp(alpha_last, axis=-1)
+    alphas = _forward_alphas(log_pi, log_A, log_emit, valid)
     num_steps = keras.ops.shape(log_emit)[1]
 
     def body(t: Any, carry: Any) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
@@ -373,11 +428,12 @@ def state_posteriors(
         # beta_{t-1}[i] = logsumexp_j(log_A[t, i, j] + log_emit[t, j] + beta_t[j]): the
         # reduction runs over the DESTINATION axis (2). A padded step t freezes beta.
         moved = keras.ops.logsumexp(log_A[:, t] + (log_emit[:, t] + beta)[:, None, :], axis=2)
-        beta = keras.ops.where(valid[:, t, None], moved, beta)
+        beta, _ = _rescale(keras.ops.where(valid[:, t, None], moved, beta))
         return beta, _write(betas, t - 1, beta)
 
     beta = keras.ops.zeros_like(log_pi)
     _, betas = _time_loop(body, (beta, keras.ops.zeros_like(log_emit)), num_steps, reverse=True)
 
-    gamma = keras.ops.exp(alphas + betas - log_z[:, None, None])
+    joint = alphas + betas
+    gamma = keras.ops.exp(joint - keras.ops.logsumexp(joint, axis=-1, keepdims=True))
     return keras.ops.where(valid[:, :, None], gamma, keras.ops.zeros_like(gamma))
