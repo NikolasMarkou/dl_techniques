@@ -94,28 +94,9 @@ independent of the defining module, so two same-named model classes claim one sl
 import silently wins. The helper still binds `Custom>ClassName` as an alias, which is why
 archives written before the registration migration keep loading.
 
-### Docstring style — re-derive it, never assume it
+### Docstring style 
 
-```bash
-grep -rlE "^[[:space:]]*Args:[[:space:]]*$" src/dl_techniques/models --include=*.py | wc -l  # 11
-grep -rl ":param " src/dl_techniques/models --include=*.py | wc -l                           # 215
-```
-
-Over 351 files (re-derived 2026-10-05; previously 11 / 217 over 345 files: 2, 208, 9, 126):
-Google-only **2**, Sphinx-only **213**, both **9**, neither **127**. **Match the file you are editing; never convert one wholesale** — that rule
-is unchanged and the 2 remaining Google-only files are exactly the ones it protects.
-Perishable — re-run the greps. The unanchored instrument agrees here (bare `Args:` also
-returns 11); it did not always.
-
-> **This refutes a claim two other files still carry.** The reading previously printed here
-> was *"over 287 files: Google-only 80, Sphinx-only 87, both 8, neither 112 — no
-> package-wide rule"*, and `src/dl_techniques/AGENTS.md` plus the repo-root `AGENTS.md`
-> both still describe `models/` as **"measurably MIXED"** on the strength of it. At 195
-> Sphinx-only against 3 Google-only that characterisation is no longer what the numbers
-> say. The drift is inherited — a docstring-conversion campaign, not any one model port —
-> and correcting those two files is owed a pass of its own. The numbers live HERE; that is
-> also why the repo-root pointer sending you to `src/dl_techniques/AGENTS.md`
-> § Core Conventions → Code Style for them is itself stale (that section prints none).
+Docstring style is Sphinx-only.
 
 ## Tests are FLAT and do not mirror this layout
 
