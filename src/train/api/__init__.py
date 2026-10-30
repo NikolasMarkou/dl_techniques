@@ -32,6 +32,10 @@ _LAZY: Dict[str, str] = {
     "parse_model_name": ".registry",
     "list_models": ".registry",
     "list_tasks": ".registry",
+    "resolve_out": ".run_dir",
+    "open_run": ".run_dir",
+    "write_requested": ".run_dir",
+    "write_resolved": ".run_dir",
     "main": ".cli",
 }
 
