@@ -43,8 +43,8 @@ from typing import Optional, Union, Literal, Dict, Any
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tensors import log_gamma
-from dl_techniques.layers.time_series.deepar_blocks import (
-    ScaleLayer,
+from dl_techniques.layers.time_series.deepar_blocks import ScaleLayer
+from dl_techniques.layers.heads.time_series.likelihood_heads import (
     GaussianLikelihoodHead,
     NegativeBinomialLikelihoodHead,
 )

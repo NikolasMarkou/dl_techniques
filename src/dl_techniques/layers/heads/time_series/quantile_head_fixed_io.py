@@ -30,7 +30,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-@register_dl_technique("dl_techniques.layers.time_series.quantile_head_fixed_io")
+@register_dl_technique("dl_techniques.layers.heads.time_series.quantile_head_fixed_io")
 class QuantileHead(keras.layers.Layer):
     """
     Quantile prediction head for a fixed forecast horizon.

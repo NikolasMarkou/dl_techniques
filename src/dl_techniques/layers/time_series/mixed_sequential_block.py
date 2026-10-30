@@ -469,7 +469,7 @@ class MixedSequentialBlock(keras.layers.Layer):
         x: keras.KerasTensor,
         norm: Optional[keras.layers.Layer],
         sublayer: Callable[..., keras.KerasTensor],
-        dropout: keras.layers.Layer,
+        dropout_layer: keras.layers.Layer,
         training: Optional[bool],
         **sublayer_kwargs: Any
     ) -> keras.KerasTensor:
@@ -483,8 +483,8 @@ class MixedSequentialBlock(keras.layers.Layer):
         :type norm: keras.layers.Layer or None
         :param sublayer: One of ``_lstm``, ``_attention`` or ``_ffn``.
         :type sublayer: callable
-        :param dropout: Dropout applied to the sub-layer output.
-        :type dropout: keras.layers.Layer
+        :param dropout_layer: Dropout layer applied to the sub-layer output.
+        :type dropout_layer: keras.layers.Layer
         :param training: Whether in training mode.
         :type training: bool or None
         :param sublayer_kwargs: Extra keywords for ``sublayer``, e.g. ``mask``.
@@ -493,7 +493,7 @@ class MixedSequentialBlock(keras.layers.Layer):
         """
         h = norm(x, training=training) if norm is not None else x
         h = sublayer(h, training=training, **sublayer_kwargs)
-        return x + dropout(h, training=training)
+        return x + dropout_layer(h, training=training)
 
     def _lstm(
         self,

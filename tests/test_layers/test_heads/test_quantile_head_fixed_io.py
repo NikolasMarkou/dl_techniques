@@ -20,7 +20,7 @@ import keras
 from typing import Dict, Any
 
 
-from dl_techniques.layers.time_series.quantile_head_fixed_io import QuantileHead
+from dl_techniques.layers.heads.time_series.quantile_head_fixed_io import QuantileHead
 
 
 # Helper functions

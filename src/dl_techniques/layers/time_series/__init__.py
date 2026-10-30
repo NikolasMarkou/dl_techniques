@@ -3,14 +3,15 @@ Time series layers.
 
 This package holds the layers used to build forecasting and sequence models.
 It covers four families: N-BEATS blocks, xLSTM cells and blocks, the PRISM
-wavelet tree, and DeepAR-style probabilistic heads. Around those sit quantile
-heads, fusion and lag-attention layers, and a few signal-processing utilities.
+wavelet tree, and the DeepAR scale layer and cell. Around those sit fusion and
+lag-attention layers, and a few signal-processing utilities. The forecasting
+heads (quantile and likelihood heads) live in ``layers/heads/time_series``.
 
 There is no factory here. Unlike ``layers/ffn`` and ``layers/attention``, this
 package has no ``create_*_layer`` dispatcher, so import the class you want by
 name.
 
-The public surface is 33 names. ``__all__`` at the bottom of this file is the
+The public surface is 29 names. ``__all__`` at the bottom of this file is the
 list of record; read it there rather than from a copy that can drift. The
 package README says what each name is for and shows runnable examples.
 
@@ -58,19 +59,16 @@ from .xlstm_blocks import (
 )
 
 # ---------------------------------------------------------------------
-# Forecasting Heads & Fusion
+# Fusion & DeepAR Blocks
 # ---------------------------------------------------------------------
 
 from .adaptive_lag_attention import AdaptiveLagAttentionLayer
 from .temporal_fusion import TemporalFusionLayer
-from .quantile_head_fixed_io import QuantileHead
-from .quantile_head_variable_io import QuantileSequenceHead
 from .deepar_blocks import (
-    GaussianLikelihoodHead,
-    NegativeBinomialLikelihoodHead,
     DeepARCell,
     ScaleLayer
 )
+from .residual_projection_block import ResidualProjectionBlock
 
 # ---------------------------------------------------------------------
 # Scientific Forecasting & Signal Processing
@@ -117,15 +115,12 @@ __all__ = [
     "mLSTMLayer",
     "mLSTMBlock",
 
-    # Forecasting Heads & Fusion
+    # Fusion & DeepAR Blocks
     "AdaptiveLagAttentionLayer",
     "TemporalFusionLayer",
-    "QuantileHead",
-    "QuantileSequenceHead",
-    "GaussianLikelihoodHead",
-    "NegativeBinomialLikelihoodHead",
     "DeepARCell",
     "ScaleLayer",
+    "ResidualProjectionBlock",
 
     # Scientific & Signal Processing
     "NaiveResidual",

@@ -8,7 +8,7 @@ string would mint a key naming a module that does not hold it.
 
 Two instruments, because neither sees what the other does:
 
-* a table of the 24 registered classes, checked through the live Keras registry
+* a table of the 29 registered classes, checked through the live Keras registry
   (key, defining module, alias identity);
 * an AST census of every ``@register_dl_technique("...")`` under ``heads/``, which
   also catches a class added later with a copied string.
@@ -52,6 +52,11 @@ _HOMES = {
     "VisualGroundingHead": "vlm.visual_grounding",
     "ImageTextMatchingHead": "vlm.image_text_matching",
     "MultiTaskVLMHead": "vlm.multitask",
+    "QuantileHead": "time_series.quantile_head_fixed_io",
+    "QuantileSequenceHead": "time_series.quantile_head_variable_io",
+    "GaussianLikelihoodHead": "time_series.likelihood_heads",
+    "NegativeBinomialLikelihoodHead": "time_series.likelihood_heads",
+    "TimestralQuantileHead": "time_series.timestral_quantile_head",
 }
 
 
@@ -61,8 +66,8 @@ def _class(name: str):
 
 def test_the_guard_has_subjects() -> None:
     """Without this, an empty table or census would pass every arm below."""
-    assert len(_HOMES) == 24
-    assert len(_decorated_sites()) >= 24
+    assert len(_HOMES) == 29
+    assert len(_decorated_sites()) >= 29
 
 
 @pytest.mark.parametrize("name,home", sorted(_HOMES.items()))

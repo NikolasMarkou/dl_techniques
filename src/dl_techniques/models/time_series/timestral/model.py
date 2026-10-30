@@ -26,10 +26,16 @@ import keras
 import numpy as np
 from typing import Optional, Tuple, List, Dict, Any
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.layers.heads.time_series.timestral_quantile_head import TimestralQuantileHead
+from dl_techniques.layers.time_series.residual_projection_block import ResidualProjectionBlock
 from dl_techniques.models.time_series.timestral import config as config_module
 from dl_techniques.models.time_series.timestral.config import TimestralConfig
 from dl_techniques.models.time_series.timestral.layers import (
-    ResidualBlock, Transformer, TwoStreamMask
+    Transformer, TwoStreamMask
 )
 from dl_techniques.models.time_series.timestral.masks import (
     build_forecast_positions,
@@ -48,6 +54,8 @@ from dl_techniques.models.time_series.timestral.scaler import (
     instance_norm_stats,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+# ---------------------------------------------------------------------
 
 # Role IDs for covariate rows
 ROLE_TARGET = 0
@@ -92,6 +100,7 @@ TIMESTRAL_VARIANTS = types.MappingProxyType({
 })
 config_module.TIMESTRAL_VARIANTS = TIMESTRAL_VARIANTS
 
+# ---------------------------------------------------------------------
 
 class PatchRepresentation(keras.layers.Layer):
     """Patch embedding over per-step [values, missing] channels, plus forecast-query token."""
@@ -100,7 +109,7 @@ class PatchRepresentation(keras.layers.Layer):
         super().__init__(**kwargs)
         self.patch_size = patch_size
         self.d_model = d_model
-        self.patch_proj = ResidualBlock(
+        self.patch_proj = ResidualProjectionBlock(
             2 * patch_size, 4 * d_model, d_model, use_bias=True, name="patch_proj",
             dtype=self.dtype_policy,
         )
@@ -138,72 +147,7 @@ class PatchRepresentation(keras.layers.Layer):
         return config
 
 
-def monotone_quantiles(raw, levels: Tuple[float, ...], width_factor: float):
-    """Non-crossing quantiles from raw head outputs along last axis (monotone_cumsum).
-
-    Median channel is free. Others fan out as:
-    median +/- cumsum(width_factor * dp * softplus(raw)), dp = prob gap to next level inward.
-    """
-    m = levels.index(0.5)
-    widths = [0.0] * len(levels)
-    for i in range(m + 1, len(levels)):
-        widths[i] = levels[i] - levels[i - 1]
-    for i in range(m):
-        widths[i] = levels[i + 1] - levels[i]
-
-    widths_t = keras.ops.cast(keras.ops.array(widths), raw.dtype)
-    inc = width_factor * widths_t * keras.ops.softplus(raw)
-
-    median = raw[..., m : m + 1]
-    up = keras.ops.cumsum(inc[..., m + 1 :], axis=-1)
-    down = keras.ops.flip(keras.ops.cumsum(keras.ops.flip(inc[..., :m], axis=-1), axis=-1), axis=-1)
-
-    work = str(np.result_type(getattr(raw.dtype, "name", str(raw.dtype)), "float32").name)
-    big = np.finfo(work).max
-    return keras.ops.clip(
-        keras.ops.cast(
-            keras.ops.concatenate([median - down, median, median + up], axis=-1), work
-        ),
-        -big, big
-    )
-
-
-class QuantileHead(keras.layers.Layer):
-    """Maps each decoder token to patch_size monotone quantile vectors in normalized space."""
-
-    def __init__(self, config: TimestralConfig, **kwargs):
-        super().__init__(**kwargs)
-        self.config = config
-        self.patch_size = config.patch_size
-        self.num_quantiles = config.num_quantiles
-        self.projection = ResidualBlock(
-            config.d_model,
-            4 * config.d_model,
-            config.patch_size * config.num_quantiles,
-            use_bias=False,
-            name="projection",
-            dtype=self.dtype_policy,
-        )
-
-    def build(self, input_shape):
-        self.projection.build(input_shape)
-        super().build(input_shape)
-
-    def call(self, x):
-        """(R, N, D) -> normalized quantiles (R, N * patch_size, Q) in at least fp32."""
-        raw = self.projection(x)
-        *leading, n_patches, _ = keras.ops.shape(raw)
-        preds = keras.ops.reshape(raw, (*leading, n_patches, self.patch_size, self.num_quantiles))
-        preds = keras.ops.cast(preds, str(np.result_type(
-            getattr(preds.dtype, "name", str(preds.dtype)), "float32").name))
-        preds = monotone_quantiles(preds, self.config.quantile_knots, self.config.quantile_width_factor)
-        return keras.ops.reshape(preds, (*leading, n_patches * self.patch_size, self.num_quantiles))
-
-    def get_config(self):
-        config = super().get_config()
-        config.update({"config": self.config.to_dict()})
-        return config
-
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.timestral.model")
 class TimestralModel(keras.Model):
@@ -253,7 +197,14 @@ class TimestralModel(keras.Model):
             name="transformer",
             dtype=self.dtype_policy,
         )
-        self.head = QuantileHead(c, name="quantile_head", dtype=self.dtype_policy)
+        self.head = TimestralQuantileHead(
+            d_model=c.d_model,
+            patch_size=c.patch_size,
+            quantile_levels=c.quantile_knots,
+            width_factor=c.quantile_width_factor,
+            name="quantile_head",
+            dtype=self.dtype_policy,
+        )
 
     def build(self, input_shape):
         """Build all sublayers with representative (static-oriented) shapes.
@@ -704,6 +655,7 @@ class TimestralModel(keras.Model):
         )
         return cls(config)
 
+# ---------------------------------------------------------------------
 
 def create_timestral_model(
     variant: str = "28M",
@@ -732,6 +684,7 @@ def create_timestral_model(
         **kwargs
     )
 
+# ---------------------------------------------------------------------
 
 def create_timestral_by_variant(
     variant: str = "28M",
@@ -740,3 +693,5 @@ def create_timestral_by_variant(
 ) -> TimestralModel:
     """Alias for create_timestral_model for API consistency."""
     return TimestralModel.from_variant(variant, prediction_length=prediction_length, **kwargs)
+
+# ---------------------------------------------------------------------

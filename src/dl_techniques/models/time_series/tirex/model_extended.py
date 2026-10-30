@@ -48,7 +48,7 @@ from typing import Optional, List, Any, Dict, Tuple
 # ---------------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.time_series.quantile_head_variable_io import QuantileSequenceHead
+from dl_techniques.layers.heads.time_series.quantile_head_variable_io import QuantileSequenceHead
 
 from .model import BlockType, DEFAULT_QUANTILES, TiRexCore
 from dl_techniques.utils.keras_registration import register_dl_technique

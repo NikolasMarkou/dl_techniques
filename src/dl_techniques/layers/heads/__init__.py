@@ -1,8 +1,8 @@
-"""Task-head layers, grouped by domain (``nlp``, ``vision``, ``vlm``).
+"""Task-head layers, grouped by domain (``nlp``, ``vision``, ``vlm``, ``time_series``).
 
 This package merges the former ``nlp_heads``, ``vision_heads`` and
 ``vlm_heads`` packages into one import surface. It re-exports the full public
-API of all three domain sub-packages except the eight NLP in-model helpers
+API of all four domain sub-packages except the eight NLP in-model helpers
 (``TASK_HEAD_NAME``, ``build_model_task_head`` and the rest), which a language
 model imports from :mod:`~dl_techniques.layers.heads.nlp` itself. It also
 exports :func:`create_head`, a dispatcher that routes to the per-domain
@@ -21,6 +21,10 @@ Domains
   multi-task, plus the task-type vocabulary.
 - :mod:`~dl_techniques.layers.heads.vlm` — vision-language heads: captioning,
   VQA, visual grounding, image-text matching and multi-task.
+- :mod:`~dl_techniques.layers.heads.time_series` — forecasting heads: fixed and
+  variable horizon quantile heads, Gaussian and negative-binomial likelihood
+  heads, and the Timestral quantile head. No factory: the forecasting models
+  build these directly.
 
 Facade
 ------
@@ -97,6 +101,17 @@ from .vlm import (
     ImageTextMatchingHead,
     MultiTaskVLMHead,
 )
+# =========================================================================
+# Time-series heads
+# =========================================================================
+from .time_series import (
+    QuantileHead,
+    QuantileSequenceHead,
+    GaussianLikelihoodHead,
+    NegativeBinomialLikelihoodHead,
+    TimestralQuantileHead,
+)
+
 
 # =========================================================================
 # Dispatch facade
@@ -148,6 +163,12 @@ __all__ = [
     "VisualGroundingHead",
     "ImageTextMatchingHead",
     "MultiTaskVLMHead",
+    # --- Time series ---
+    "QuantileHead",
+    "QuantileSequenceHead",
+    "GaussianLikelihoodHead",
+    "NegativeBinomialLikelihoodHead",
+    "TimestralQuantileHead",
     # --- Facade ---
     "create_head",
 ]

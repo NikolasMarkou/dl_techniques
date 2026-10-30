@@ -51,7 +51,7 @@ from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.ffn.residual_block import ResidualBlock
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding1D
-from dl_techniques.layers.time_series.quantile_head_fixed_io import QuantileHead
+from dl_techniques.layers.heads.time_series.quantile_head_fixed_io import QuantileHead
 from dl_techniques.layers.time_series.mixed_sequential_block import MixedSequentialBlock
 from dl_techniques.utils.keras_registration import register_dl_technique
 

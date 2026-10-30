@@ -32,8 +32,8 @@ from keras import ops
 from scipy.special import gammaln
 
 from dl_techniques.models.time_series.deepar.model import DeepAR
-from dl_techniques.layers.time_series.deepar_blocks import (
-    ScaleLayer,
+from dl_techniques.layers.time_series.deepar_blocks import ScaleLayer
+from dl_techniques.layers.heads.time_series.likelihood_heads import (
     GaussianLikelihoodHead,
     NegativeBinomialLikelihoodHead,
     MIN_LIKELIHOOD_PARAM,
