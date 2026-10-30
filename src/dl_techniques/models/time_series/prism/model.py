@@ -1,5 +1,5 @@
 """
-PRISMModel and its factory create_prism_model, a hierarchical time-frequency
+PRISM and its factory create_prism_model, a hierarchical time-frequency
 forecaster over a binary time tree with per-band routing, a
 channel-independent temporal decoder, and point or monotone-quantile heads.
 
@@ -48,7 +48,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.models.prism.model")
-class PRISMModel(keras.Model, ForecastMixin):
+class PRISM(keras.Model, ForecastMixin):
     """Hierarchical multiscale (time + frequency) forecasting model.
 
     Maps a context window to point forecasts ``[B, H, F]`` or quantile
@@ -609,7 +609,7 @@ class PRISMModel(keras.Model, ForecastMixin):
         forecast_len: int,
         num_features: int,
         **kwargs: Any
-    ) -> "PRISMModel":
+    ) -> "PRISM":
         """Create model from a predefined variant ('tiny', 'small', 'base', 'large')."""
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -652,7 +652,7 @@ class PRISMModel(keras.Model, ForecastMixin):
         return config
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "PRISMModel":
+    def from_config(cls, config: Dict[str, Any]) -> "PRISM":
         """Create model from configuration."""
         config = config.copy()
         if "kernel_initializer" in config:
@@ -667,8 +667,8 @@ class PRISMModel(keras.Model, ForecastMixin):
 
 
 # Module-level alias so external code importing this name keeps working;
-# PRISMModel.DEFAULT_QUANTILES is the canonical source.
-DEFAULT_QUANTILES: List[float] = PRISMModel.DEFAULT_QUANTILES
+# PRISM.DEFAULT_QUANTILES is the canonical source.
+DEFAULT_QUANTILES: List[float] = PRISM.DEFAULT_QUANTILES
 
 
 def create_prism_model(
@@ -689,7 +689,7 @@ def create_prism_model(
     quantile_levels: Optional[List[float]] = None,
     enforce_monotonicity: bool = True,
     **kwargs: Any
-) -> PRISMModel:
+) -> PRISM:
     """Create a PRISM model, then run a dummy forward pass so it is already built.
 
     Mirrors the other time-series factories (e.g. ``create_tirex_model``).
@@ -728,11 +728,11 @@ def create_prism_model(
     :type quantile_levels: Optional[List[float]]
     :param enforce_monotonicity: Whether to enforce non-crossing quantiles.
     :type enforce_monotonicity: bool
-    :param kwargs: Additional arguments for :class:`PRISMModel`.
-    :return: A built :class:`PRISMModel` instance.
-    :rtype: PRISMModel
+    :param kwargs: Additional arguments for :class:`PRISM`.
+    :return: A built :class:`PRISM` instance.
+    :rtype: PRISM
     """
-    model = PRISMModel(
+    model = PRISM(
         context_len=context_len,
         forecast_len=forecast_len,
         num_features=num_features,

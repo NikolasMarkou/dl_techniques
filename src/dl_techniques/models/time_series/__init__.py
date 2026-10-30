@@ -19,7 +19,7 @@ from .ets.model import ETSModel, create_ets
 from .mdn.model import MDNModel, create_mdn_model
 from .nbeats.nbeats import NBeatsNet, create_nbeats_model
 from .nbeats.nbeatsx import NBeatsXNet, create_nbeatsx_model
-from .prism.model import PRISMModel, create_prism_model
+from .prism.model import PRISM, create_prism_model
 from .tirex.model import TiRexCore, create_tirex_by_variant, create_tirex_model
 from .timestral import (
     TimestralConfig,
@@ -40,7 +40,7 @@ __all__ = [
     "MDNModel",
     "NBeatsNet",
     "NBeatsXNet",
-    "PRISMModel",
+    "PRISM",
     "TiRexCore",
     "TimestralConfig",
     "TimestralModel",

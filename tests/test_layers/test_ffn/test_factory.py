@@ -1997,13 +1997,13 @@ def _b_models_sam2_memory_attention():
 
 
 def _b_models_prism():
-    from dl_techniques.models.time_series.prism.model import PRISMModel
-    # context_len must clear PRISMModel's band-length floor: at the default
+    from dl_techniques.models.time_series.prism.model import PRISM
+    # context_len must clear PRISM's band-length floor: at the default
     # tree_depth=2 / num_wavelet_levels=3, context_len=16 gives min_band_len=0
     # (hard ValueError) and 32 gives min_band_len=1 (degenerate-boundary WARNING).
     # 64 builds clean with zero warnings. This is the probe's config, not a product
     # defect: the refusal is deliberate (plan-2026-08-18T073231-52a93f8c/D-005).
-    m = PRISMModel(context_len=64, forecast_len=4, num_features=2, num_layers=1)
+    m = PRISM(context_len=64, forecast_len=4, num_features=2, num_layers=1)
     return m.forecast_head
 
 

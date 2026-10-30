@@ -28,7 +28,7 @@ Two claims, each with its dead component run in the same test:
 
 Scope: `tree_depth` is held at 1-2 throughout, now only because these tests are
 about the ROUTER and the quantile head, not about the tree. The depth-3 defect
-D-039 recorded (`PRISMModel(tree_depth=3)` all-NaN at initialization) was FIXED
+D-039 recorded (`PRISM(tree_depth=3)` all-NaN at initialization) was FIXED
 by plan-2026-08-18T073231-52a93f8c: the cause was a length-1 deepest band, whose
 empty first-difference tensor returned NaN silently and which the router's
 single joint softmax then spread across every band. Depth 3 is finite and swept
@@ -44,7 +44,7 @@ import numpy as np
 import pytest
 
 from dl_techniques.layers.time_series.prism_blocks import FrequencyBandRouter
-from dl_techniques.models.time_series.prism.model import PRISMModel
+from dl_techniques.models.time_series.prism.model import PRISM
 
 
 NUM_BANDS = 4
@@ -139,9 +139,9 @@ class TestQuantileHeadDoesNotCross:
     """`Q_i <= Q_{i+1}` by construction -- the model docstring's own claim."""
 
     @staticmethod
-    def _model(enforce: bool) -> PRISMModel:
+    def _model(enforce: bool) -> PRISM:
         keras.utils.set_random_seed(9)
-        return PRISMModel(
+        return PRISM(
             context_len=48,
             forecast_len=12,
             num_features=3,
@@ -165,7 +165,7 @@ class TestQuantileHeadDoesNotCross:
         )
 
     @staticmethod
-    def _quantiles(model: PRISMModel) -> np.ndarray:
+    def _quantiles(model: PRISM) -> np.ndarray:
         x = np.random.default_rng(0).normal(size=(4, 48, 3)).astype("float32")
         out = model(keras.ops.convert_to_tensor(x), training=False)
         return np.asarray(keras.ops.convert_to_numpy(out))
@@ -209,7 +209,7 @@ class TestQuantileHeadDoesNotCross:
 # VALUE, so an asymmetric caller-supplied level set picks an arbitrary head.
 # ---------------------------------------------------------------------------
 def _median_head_index(levels):
-    """The repaired selection rule, as `PRISMModel.predict_quantiles` runs it."""
+    """The repaired selection rule, as `PRISM.predict_quantiles` runs it."""
     return int(np.argmin(np.abs(np.array(levels) - 0.5)))
 
 
@@ -240,7 +240,7 @@ def test_an_exact_median_still_selects_the_same_head_as_before(levels):
 def test_the_model_uses_the_value_based_rule(monkeypatch):
     """RED against the real source: pin the rule inside `predict_quantiles`."""
     keras.utils.set_random_seed(9)
-    model = PRISMModel(
+    model = PRISM(
         context_len=48, forecast_len=12, num_features=3, hidden_dim=32,
         num_layers=1, tree_depth=2, overlap_ratio=0.25, num_wavelet_levels=2,
         router_hidden_dim=16, router_temperature=1.0, dropout_rate=0.0,

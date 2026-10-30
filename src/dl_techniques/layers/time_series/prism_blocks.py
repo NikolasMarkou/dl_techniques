@@ -198,7 +198,7 @@ class FrequencyBandStatistics(keras.layers.Layer):
 
         # DECISION plan-2026-08-18T111512-29569f8b/D-001
         # Repair the degenerate cases at VALUE level when the time axis is
-        # unknown. MEASURED: a tree_depth=3 PRISMModel traced at [None, None, 7]
+        # unknown. MEASURED: a tree_depth=3 PRISM traced at [None, None, 7]
         # gave nan_frac 1.0 where the same model gave 0.0 eager. Do NOT hoist
         # this out of the `static_len is None` guard. See decisions.md D-001.
         if static_len is None:
@@ -564,7 +564,7 @@ class PRISMNode(keras.layers.Layer):
         length, so the deepest band is ``seq_len // 2 ** num_wavelet_levels``
         long. At length 1 that band is statistically degenerate and at length 0
         the configuration is unusable. See :class:`FrequencyBandStatistics` and
-        ``PRISMModel.__init__``, which rejects such combinations.
+        ``PRISM.__init__``, which rejects such combinations.
     :type num_wavelet_levels: int
     :param router_hidden_dim: Hidden dimension for the router MLP.
         Defaults to 64.
@@ -883,7 +883,7 @@ class PRISMTimeTree(keras.layers.Layer):
         and no splitting. Defaults to 2. The knob has no valid range of its
         own. Together with ``overlap_ratio`` and the input length it fixes the
         deepest segment length, which ``num_wavelet_levels`` then floor-halves
-        down to the deepest band. ``PRISMModel.__init__`` rejects combinations
+        down to the deepest band. ``PRISM.__init__`` rejects combinations
         whose deepest band would have length 0. This layer does not validate.
     :type tree_depth: int
     :param overlap_ratio: Overlap between adjacent segments, in [0, 0.5).

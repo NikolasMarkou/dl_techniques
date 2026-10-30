@@ -48,7 +48,7 @@ from train.common.args import build_generator_config
 from train.common.timeseries import _plot_ts_forecast
 from dl_techniques.utils.logger import logger
 from dl_techniques.analyzer import AnalysisConfig
-from dl_techniques.models.time_series.prism.model import PRISMModel
+from dl_techniques.models.time_series.prism.model import PRISM
 from dl_techniques.losses.quantile_loss import QuantileLoss
 from dl_techniques.datasets.time_series import (
     TimeSeriesGenerator,
@@ -104,9 +104,9 @@ class PRISMTrainingConfig(BaseTimeSeriesTrainingConfig):
 
     def __post_init__(self) -> None:
         super().__post_init__()  # ratio-sum invariant
-        if self.preset not in PRISMModel.MODEL_VARIANTS:
+        if self.preset not in PRISM.MODEL_VARIANTS:
             raise ValueError(
-                f"preset must be one of {list(PRISMModel.MODEL_VARIANTS.keys())}, "
+                f"preset must be one of {list(PRISM.MODEL_VARIANTS.keys())}, "
                 f"got '{self.preset}'"
             )
         if self.input_length <= 0 or self.prediction_length <= 0:
@@ -265,14 +265,14 @@ class PRISMTrainer(BaseTimeSeriesTrainer):
         mode = "quantile" if self.config.use_quantile_head else "point"
         return f"{self.config.experiment_name}_{self.config.preset}_{mode}"
 
-    def _build_model(self) -> PRISMModel:
+    def _build_model(self) -> PRISM:
         """Create and compile the PRISM model (+ dummy-input warmup)."""
         logger.info(f"Building PRISM model (preset={self.config.preset})")
         num_features = self.processor.num_features
 
         model_kwargs: Dict[str, Any] = {
             "variant": self.config.preset,
-            # PRISMModel API kwargs are FIXED (context_len/forecast_len); only the
+            # PRISM API kwargs are FIXED (context_len/forecast_len); only the
             # VALUE source renamed to the config's input_length/prediction_length.
             "context_len": self.config.input_length,
             "forecast_len": self.config.prediction_length,
@@ -293,7 +293,7 @@ class PRISMTrainer(BaseTimeSeriesTrainer):
         if self.config.hidden_dim is not None:
             model_kwargs["hidden_dim"] = self.config.hidden_dim
 
-        model = PRISMModel.from_variant(**model_kwargs)
+        model = PRISM.from_variant(**model_kwargs)
 
         optimizer = self._build_optimizer()
 
@@ -328,7 +328,7 @@ class PRISMTrainer(BaseTimeSeriesTrainer):
 
         model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
 
-        # PRISMModel (subclassed Model) needs a forward pass to finalize weights.
+        # PRISM (subclassed Model) needs a forward pass to finalize weights.
         dummy_input = np.zeros(
             (1, self.config.input_length, num_features), dtype='float32')
         model(dummy_input)
@@ -366,7 +366,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num_layers", type=int, default=2)
     # --tree_depth and --num_wavelet_levels are NOT independently bounded: with
     # --input_length and overlap_ratio they fix the deepest band length
-    # (min_band_len), and PRISMModel.__init__ raises ValueError when it hits 0.
+    # (min_band_len), and PRISM.__init__ raises ValueError when it hits 0.
     parser.add_argument(
         "--tree_depth", type=int, default=2,
         help="Time-tree depth (2 ** tree_depth segments per layer). Jointly "

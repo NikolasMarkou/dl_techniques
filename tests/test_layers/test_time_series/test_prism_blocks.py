@@ -448,15 +448,15 @@ class TestDynamicPathDoesNotLaunderGenuineNaNs:
         )
 
 
-class TestPRISMModelDynamicTimeAxis:
+class TestPRISMDynamicTimeAxis:
     """Model-level closure: a traced PRISM with an unknown time axis is finite."""
 
     def test_depth_three_model_traced_with_unknown_time_axis_is_finite(self):
         import tensorflow as tf
-        from dl_techniques.models.time_series.prism.model import PRISMModel
+        from dl_techniques.models.time_series.prism.model import PRISM
 
         keras.utils.set_random_seed(1234)
-        model = PRISMModel(
+        model = PRISM(
             context_len=96,
             forecast_len=24,
             num_features=7,

@@ -18,7 +18,7 @@ from dl_techniques.layers.time_series.nbeats_blocks import GenericBlock
 from dl_techniques.layers.ffn.kan_linear import KANLinear
 from dl_techniques.layers.memory.ntm_interface import AddressingMode
 from dl_techniques.layers.memory.baseline_ntm import NTMReadHead, NTMWriteHead
-from dl_techniques.models.time_series.prism.model import PRISMModel
+from dl_techniques.models.time_series.prism.model import PRISM
 
 
 # ---------------------------------------------------------------------
@@ -97,12 +97,12 @@ class TestGenericBlockBasisInitializerIsRead:
 
 
 # ---------------------------------------------------------------------
-# Knob 2 — PRISMModel.DEFAULT_QUANTILES
+# Knob 2 — PRISM.DEFAULT_QUANTILES
 # ---------------------------------------------------------------------
 
 
 def _prism(**kwargs):
-    return PRISMModel(
+    return PRISM(
         context_len=8,
         forecast_len=4,
         num_features=2,
@@ -124,7 +124,7 @@ class TestPrismDefaultQuantilesIsUsed:
         model = _prism(use_quantile_head=True, num_quantiles=3)
         # RED before the fix: this was [0.25, 0.5, 0.75].
         assert model.quantile_levels == [0.1, 0.5, 0.9]
-        assert model.quantile_levels == PRISMModel.DEFAULT_QUANTILES
+        assert model.quantile_levels == PRISM.DEFAULT_QUANTILES
 
     def test_the_docstring_claim_about_the_percentiles_now_holds(self):
         model = _prism(use_quantile_head=True)

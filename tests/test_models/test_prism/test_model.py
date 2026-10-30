@@ -1,5 +1,5 @@
 """
-Comprehensive test suite for PRISMModel.
+Comprehensive test suite for PRISM.
 
 Tests cover instantiation, forward pass, serialization, configuration,
 shape inference, and integration with training pipeline.
@@ -13,7 +13,7 @@ import tempfile
 import numpy as np
 from typing import Dict, Any, Tuple
 
-from dl_techniques.models.time_series.prism.model import PRISMModel, create_prism_model
+from dl_techniques.models.time_series.prism.model import PRISM, create_prism_model
 from dl_techniques.layers.time_series.prism_blocks import PRISMTimeTree
 
 from ..knob_sensitivity_oracle import (
@@ -23,7 +23,7 @@ from ..knob_sensitivity_oracle import (
 )
 
 
-class TestPRISMModelInstantiation:
+class TestPRISMInstantiation:
     """Test model instantiation and configuration validation."""
 
     @pytest.fixture
@@ -47,7 +47,7 @@ class TestPRISMModelInstantiation:
 
     def test_valid_instantiation(self, model_config: Dict[str, Any]) -> None:
         """Test model can be instantiated with valid config."""
-        model = PRISMModel(**model_config)
+        model = PRISM(**model_config)
 
         assert model.context_len == model_config["context_len"]
         assert model.forecast_len == model_config["forecast_len"]
@@ -58,7 +58,7 @@ class TestPRISMModelInstantiation:
 
     def test_hidden_dim_defaults_to_num_features(self) -> None:
         """Test hidden_dim defaults to num_features when not specified."""
-        model = PRISMModel(
+        model = PRISM(
             context_len=96,
             forecast_len=24,
             num_features=7,
@@ -70,14 +70,14 @@ class TestPRISMModelInstantiation:
     def test_invalid_context_len(self) -> None:
         """Test model rejects invalid context_len."""
         with pytest.raises(ValueError, match="context_len must be > 0"):
-            PRISMModel(
+            PRISM(
                 context_len=0,
                 forecast_len=24,
                 num_features=7,
             )
 
         with pytest.raises(ValueError, match="context_len must be > 0"):
-            PRISMModel(
+            PRISM(
                 context_len=-10,
                 forecast_len=24,
                 num_features=7,
@@ -86,7 +86,7 @@ class TestPRISMModelInstantiation:
     def test_invalid_forecast_len(self) -> None:
         """Test model rejects invalid forecast_len."""
         with pytest.raises(ValueError, match="forecast_len must be > 0"):
-            PRISMModel(
+            PRISM(
                 context_len=96,
                 forecast_len=0,
                 num_features=7,
@@ -95,7 +95,7 @@ class TestPRISMModelInstantiation:
     def test_invalid_num_features(self) -> None:
         """Test model rejects invalid num_features."""
         with pytest.raises(ValueError, match="num_features must be > 0"):
-            PRISMModel(
+            PRISM(
                 context_len=96,
                 forecast_len=24,
                 num_features=-5,
@@ -115,7 +115,7 @@ class TestPRISMModelInstantiation:
         arithmetic runs -- hence the duplicate guard.
         """
         with pytest.raises(ValueError, match=r"overlap_ratio must be in \[0, 0.5\)"):
-            PRISMModel(
+            PRISM(
                 context_len=96,
                 forecast_len=24,
                 num_features=7,
@@ -128,7 +128,7 @@ class TestPRISMModelInstantiation:
     ) -> None:
         """The interval is half-open: 0.5 itself is refused, 0.0 is not."""
         with pytest.raises(ValueError, match="overlap_ratio"):
-            PRISMModel(
+            PRISM(
                 context_len=96,
                 forecast_len=24,
                 num_features=7,
@@ -137,7 +137,7 @@ class TestPRISMModelInstantiation:
 
     def test_zero_overlap_ratio_is_accepted(self) -> None:
         """The closed end of ``[0, 0.5)`` must still construct."""
-        model = PRISMModel(
+        model = PRISM(
             context_len=96,
             forecast_len=24,
             num_features=7,
@@ -154,7 +154,7 @@ class TestPRISMModelInstantiation:
         rejected.
         """
         with pytest.raises(ValueError, match="tree_depth must be >= 0"):
-            PRISMModel(
+            PRISM(
                 context_len=96,
                 forecast_len=24,
                 num_features=7,
@@ -164,7 +164,7 @@ class TestPRISMModelInstantiation:
     def test_negative_num_wavelet_levels_raises(self) -> None:
         """Negative ``num_wavelet_levels`` must RAISE (same skipped-gate bug)."""
         with pytest.raises(ValueError, match="num_wavelet_levels must be >= 0"):
-            PRISMModel(
+            PRISM(
                 context_len=96,
                 forecast_len=24,
                 num_features=7,
@@ -187,7 +187,7 @@ class TestPRISMModelInstantiation:
         landed, returns finite ALL-ZERO band statistics -- silent garbage.
         """
         with pytest.raises(ValueError, match="min_band_len"):
-            PRISMModel(
+            PRISM(
                 context_len=96,
                 forecast_len=24,
                 num_features=7,
@@ -198,7 +198,7 @@ class TestPRISMModelInstantiation:
     def test_unsupportable_band_message_names_all_four_knobs(self) -> None:
         """The refusal must name every knob the caller can turn to fix it."""
         with pytest.raises(ValueError) as excinfo:
-            PRISMModel(
+            PRISM(
                 context_len=96,
                 forecast_len=24,
                 num_features=7,
@@ -225,7 +225,7 @@ class TestPRISMModelInstantiation:
         guard landed), so this must construct AND forward finite. This is the
         discriminating half of the pair: over-broad validation fails here.
         """
-        model = PRISMModel(
+        model = PRISM(
             context_len=96,
             forecast_len=24,
             num_features=7,
@@ -267,7 +267,7 @@ class TestPRISMModelInstantiation:
         decisions.md D-010. If a shipped preset starts raising, the validation
         rule is wrong -- do not loosen the rule without re-measuring.
         """
-        model = PRISMModel.from_variant(
+        model = PRISM.from_variant(
             variant,
             context_len=96,
             forecast_len=24,
@@ -312,10 +312,10 @@ class TestPRISMModelInstantiation:
         ``base``).
         """
         with pytest.raises(ValueError, match="min_band_len=0"):
-            PRISMModel.from_variant(
+            PRISM.from_variant(
                 "large", context_len=60, forecast_len=4, num_features=1
             )
-        model = PRISMModel.from_variant(
+        model = PRISM.from_variant(
             "large", context_len=61, forecast_len=4, num_features=1
         )
         assert model.context_len == 61
@@ -335,7 +335,7 @@ class TestPRISMDegenerateBandWarning:
         sees.
         """
         with caplog.at_level(logging.WARNING, logger="dl"):
-            PRISMModel(
+            PRISM(
                 context_len=96,
                 forecast_len=24,
                 num_features=7,
@@ -365,7 +365,7 @@ class TestPRISMDegenerateBandWarning:
         25, ``25 >> 3 == 3``.
         """
         with caplog.at_level(logging.WARNING, logger="dl"):
-            PRISMModel(
+            PRISM(
                 context_len=96,
                 forecast_len=24,
                 num_features=7,
@@ -379,7 +379,7 @@ class TestPRISMDegenerateBandWarning:
         )
 
 
-class TestPRISMModelTimeAxisContract:
+class TestPRISMTimeAxisContract:
     """The time axis is pinned statically, and the dynamic axis is finite anyway."""
 
     def test_wrong_static_context_len_is_refused(self) -> None:
@@ -389,7 +389,7 @@ class TestPRISMModelTimeAxisContract:
         geometry is derived from it, so any other static length is a caller
         error rather than a supported mode.
         """
-        model = PRISMModel(
+        model = PRISM(
             context_len=96, forecast_len=24, num_features=7, num_layers=1
         )
         x = np.random.randn(2, 128, 7).astype("float32")
@@ -409,7 +409,7 @@ class TestPRISMModelTimeAxisContract:
         (decisions.md D-001 of plan-2026-08-18T111512-29569f8b, which closes
         D-012 of plan-2026-08-18T073231-52a93f8c).
 
-        ``PRISMModel.input_spec`` is NOT what closes it and never could: Keras'
+        ``PRISM.input_spec`` is NOT what closes it and never could: Keras'
         ``assert_input_compatibility`` tests ``shape[axis] not in {value,
         None}`` (``keras/src/layers/input_spec.py:223-226``), so an unknown
         dimension is explicitly accepted by an ``axes`` constraint. Measured
@@ -417,7 +417,7 @@ class TestPRISMModelTimeAxisContract:
         """
         import tensorflow as tf
 
-        model = PRISMModel(
+        model = PRISM(
             context_len=96,
             forecast_len=24,
             num_features=7,
@@ -445,7 +445,7 @@ class TestPRISMModelTimeAxisContract:
         )
 
 
-class TestPRISMModelForwardPass:
+class TestPRISMForwardPass:
     """Test forward pass and output shapes."""
 
     @pytest.fixture
@@ -475,7 +475,7 @@ class TestPRISMModelForwardPass:
             sample_input: np.ndarray
     ) -> None:
         """Test forward pass produces correct output shape."""
-        model = PRISMModel(**model_config)
+        model = PRISM(**model_config)
         output = model(sample_input)
 
         expected_shape = (
@@ -491,7 +491,7 @@ class TestPRISMModelForwardPass:
             sample_input: np.ndarray
     ) -> None:
         """Test output has correct dtype."""
-        model = PRISMModel(**model_config)
+        model = PRISM(**model_config)
         output = model(sample_input)
 
         assert output.dtype == sample_input.dtype
@@ -503,7 +503,7 @@ class TestPRISMModelForwardPass:
             batch_size: int
     ) -> None:
         """Test model handles various batch sizes."""
-        model = PRISMModel(**model_config)
+        model = PRISM(**model_config)
 
         inputs = np.random.randn(
             batch_size,
@@ -523,7 +523,7 @@ class TestPRISMModelForwardPass:
             sample_input: np.ndarray
     ) -> None:
         """Test model behaves consistently in training vs inference mode."""
-        model = PRISMModel(**model_config)
+        model = PRISM(**model_config)
 
         # Build model first
         _ = model(sample_input, training=False)
@@ -547,7 +547,7 @@ class TestPRISMModelForwardPass:
         config = model_config.copy()
         config["dropout_rate"] = 0.0
 
-        model = PRISMModel(**config)
+        model = PRISM(**config)
 
         train_output = model(sample_input, training=True)
         infer_output = model(sample_input, training=False)
@@ -561,12 +561,12 @@ class TestPRISMModelForwardPass:
         )
 
 
-class TestPRISMModelShapeInference:
+class TestPRISMShapeInference:
     """Test compute_output_shape functionality."""
 
     def test_compute_output_shape(self) -> None:
         """Test compute_output_shape returns correct shape."""
-        model = PRISMModel(
+        model = PRISM(
             context_len=96,
             forecast_len=24,
             num_features=7,
@@ -579,7 +579,7 @@ class TestPRISMModelShapeInference:
 
     def test_compute_output_shape_before_build(self) -> None:
         """Test compute_output_shape works before model is built."""
-        model = PRISMModel(
+        model = PRISM(
             context_len=96,
             forecast_len=24,
             num_features=7,
@@ -593,7 +593,7 @@ class TestPRISMModelShapeInference:
 
     def test_compute_output_shape_matches_actual(self) -> None:
         """Test compute_output_shape matches actual forward pass output."""
-        model = PRISMModel(
+        model = PRISM(
             context_len=96,
             forecast_len=24,
             num_features=7,
@@ -617,7 +617,7 @@ class TestPRISMModelShapeInference:
             num_features: int
     ) -> None:
         """Test compute_output_shape with various configurations."""
-        model = PRISMModel(
+        model = PRISM(
             context_len=context_len,
             forecast_len=forecast_len,
             num_features=num_features,
@@ -630,7 +630,7 @@ class TestPRISMModelShapeInference:
         assert computed_shape == (batch_size, forecast_len, num_features)
 
 
-class TestPRISMModelSerialization:
+class TestPRISMSerialization:
     """Test model serialization and deserialization."""
 
     @pytest.fixture
@@ -662,7 +662,7 @@ class TestPRISMModelSerialization:
 
     def test_get_config_complete(self, model_config: Dict[str, Any]) -> None:
         """Test get_config returns all constructor arguments."""
-        model = PRISMModel(**model_config)
+        model = PRISM(**model_config)
         config = model.get_config()
 
         # Check all required parameters are present
@@ -692,11 +692,11 @@ class TestPRISMModelSerialization:
             sample_input: np.ndarray
     ) -> None:
         """Test model can be reconstructed from config."""
-        original = PRISMModel(**model_config)
+        original = PRISM(**model_config)
         _ = original(sample_input)  # Build model
 
         config = original.get_config()
-        reconstructed = PRISMModel.from_config(config)
+        reconstructed = PRISM.from_config(config)
 
         assert reconstructed.context_len == original.context_len
         assert reconstructed.forecast_len == original.forecast_len
@@ -711,7 +711,7 @@ class TestPRISMModelSerialization:
             sample_input: np.ndarray
     ) -> None:
         """Test full save/load cycle preserves functionality."""
-        model = PRISMModel(**model_config)
+        model = PRISM(**model_config)
 
         # Get original output
         original_output = model(sample_input, training=False)
@@ -740,7 +740,7 @@ class TestPRISMModelSerialization:
         """Test serialization with custom kernel initializer."""
         from keras import initializers
 
-        model = PRISMModel(
+        model = PRISM(
             context_len=96,
             forecast_len=24,
             num_features=7,
@@ -765,7 +765,7 @@ class TestPRISMModelSerialization:
         """Test serialization with kernel regularizer."""
         from keras import regularizers
 
-        model = PRISMModel(
+        model = PRISM(
             context_len=96,
             forecast_len=24,
             num_features=7,
@@ -784,7 +784,7 @@ class TestPRISMModelSerialization:
         assert "kernel_regularizer" in config
 
 
-class TestPRISMModelPresets:
+class TestPRISMPresets:
     """Test model variant configurations."""
 
     @pytest.mark.parametrize(
@@ -793,7 +793,7 @@ class TestPRISMModelPresets:
     )
     def test_variant_creation(self, variant: str) -> None:
         """Test model can be created from variants."""
-        model = PRISMModel.from_variant(
+        model = PRISM.from_variant(
             variant=variant,
             context_len=96,
             forecast_len=24,
@@ -805,14 +805,14 @@ class TestPRISMModelPresets:
         assert model.num_features == 7
 
         # Check variant-specific configurations
-        variant_config = PRISMModel.MODEL_VARIANTS[variant]
+        variant_config = PRISM.MODEL_VARIANTS[variant]
         assert model.hidden_dim == variant_config["hidden_dim"]
         assert model.num_layers == variant_config["num_layers"]
         assert model.tree_depth == variant_config["tree_depth"]
 
     def test_variant_with_override(self) -> None:
         """Test variant parameters can be overridden."""
-        model = PRISMModel.from_variant(
+        model = PRISM.from_variant(
             variant="small",
             context_len=96,
             forecast_len=24,
@@ -827,7 +827,7 @@ class TestPRISMModelPresets:
     def test_invalid_variant_raises_error(self) -> None:
         """Test invalid variant name raises ValueError."""
         with pytest.raises(ValueError, match="Unknown variant"):
-            PRISMModel.from_variant(
+            PRISM.from_variant(
                 variant="nonexistent",
                 context_len=96,
                 forecast_len=24,
@@ -838,8 +838,8 @@ class TestPRISMModelPresets:
         """Test all variants create functional models."""
         inputs = np.random.randn(4, 96, 7).astype(np.float32)
 
-        for variant in PRISMModel.MODEL_VARIANTS.keys():
-            model = PRISMModel.from_variant(
+        for variant in PRISM.MODEL_VARIANTS.keys():
+            model = PRISM.from_variant(
                 variant=variant,
                 context_len=96,
                 forecast_len=24,
@@ -850,7 +850,7 @@ class TestPRISMModelPresets:
             assert output.shape == (4, 24, 7)
 
 
-class TestPRISMModelFactory:
+class TestPRISMFactory:
     """Test the create_prism_model module-level factory."""
 
     def test_factory_builds_point_model(self) -> None:
@@ -890,12 +890,12 @@ class TestPRISMModelFactory:
         assert output.shape == (4, 24, 7, 3)
 
 
-class TestPRISMModelBuild:
+class TestPRISMBuild:
     """Test model building and weight creation."""
 
     def test_model_builds_correctly(self) -> None:
         """Test model.build() creates all expected layers."""
-        model = PRISMModel(
+        model = PRISM(
             context_len=96,
             forecast_len=24,
             num_features=7,
@@ -918,7 +918,7 @@ class TestPRISMModelBuild:
 
     def test_weights_created_after_build(self) -> None:
         """Test weights are created after build."""
-        model = PRISMModel(
+        model = PRISM(
             context_len=96,
             forecast_len=24,
             num_features=7,
@@ -932,7 +932,7 @@ class TestPRISMModelBuild:
 
     def test_model_summary_works(self) -> None:
         """Test model.summary() works after building."""
-        model = PRISMModel(
+        model = PRISM(
             context_len=96,
             forecast_len=24,
             num_features=7,
@@ -947,7 +947,7 @@ class TestPRISMModelBuild:
         model.summary()
 
 
-class TestPRISMModelIntegration:
+class TestPRISMIntegration:
     """Integration tests with training pipeline."""
 
     @pytest.fixture
@@ -975,7 +975,7 @@ class TestPRISMModelIntegration:
         """Test model can be compiled and trained."""
         x_train, y_train = training_data
 
-        model = PRISMModel(
+        model = PRISM(
             context_len=96,
             forecast_len=24,
             num_features=7,
@@ -1009,7 +1009,7 @@ class TestPRISMModelIntegration:
         """Test trained model can be saved and loaded."""
         x_train, y_train = training_data
 
-        model = PRISMModel(
+        model = PRISM(
             context_len=96,
             forecast_len=24,
             num_features=7,
@@ -1048,7 +1048,7 @@ class TestPRISMModelIntegration:
         """Test model.evaluate() works correctly."""
         x_train, y_train = training_data
 
-        model = PRISMModel(
+        model = PRISM(
             context_len=96,
             forecast_len=24,
             num_features=7,
@@ -1072,7 +1072,7 @@ class TestPRISMModelIntegration:
         assert test_mae >= 0
 
 
-class TestPRISMModelDifferentConfigurations:
+class TestPRISMDifferentConfigurations:
     """Test model with various configurations."""
 
     @pytest.mark.parametrize(
@@ -1085,7 +1085,7 @@ class TestPRISMModelDifferentConfigurations:
             forecast_len: int
     ) -> None:
         """Test model with different sequence lengths."""
-        model = PRISMModel(
+        model = PRISM(
             context_len=context_len,
             forecast_len=forecast_len,
             num_features=7,
@@ -1099,7 +1099,7 @@ class TestPRISMModelDifferentConfigurations:
     @pytest.mark.parametrize("num_features", [1, 3, 7, 12, 21])
     def test_different_feature_dimensions(self, num_features: int) -> None:
         """Test model with different feature dimensions."""
-        model = PRISMModel(
+        model = PRISM(
             context_len=96,
             forecast_len=24,
             num_features=num_features,
@@ -1123,7 +1123,7 @@ class TestPRISMModelDifferentConfigurations:
         inputs = np.random.randn(4, 96, 7).astype(np.float32)
 
         def _build(num_layers):
-            model = PRISMModel(
+            model = PRISM(
                 context_len=96,
                 forecast_len=24,
                 num_features=7,
@@ -1154,7 +1154,7 @@ class TestPRISMModelDifferentConfigurations:
         at ``context_len=96`` it drives ``min_band_len`` to 0 and is REFUSED by
         ``__init__`` with a ``ValueError`` at the default
         ``num_wavelet_levels=3`` -- that path is covered by
-        :meth:`TestPRISMModelInstantiation.test_unsupportable_band_config_raises_value_error`.
+        :meth:`TestPRISMInstantiation.test_unsupportable_band_config_raises_value_error`.
 
         Weight counts below are MEASURED (seed 42, this sweep's own builder),
         not extrapolated: 48 weights / 5,989 params at depth 1, 96 / 10,189 at
@@ -1167,7 +1167,7 @@ class TestPRISMModelDifferentConfigurations:
         inputs = np.random.randn(4, 96, 7).astype(np.float32)
 
         def _build(tree_depth):
-            model = PRISMModel(
+            model = PRISM(
                 context_len=96,
                 forecast_len=24,
                 num_features=7,
@@ -1194,7 +1194,7 @@ class TestPRISMModelDifferentConfigurations:
 
     # DECISION plan-2026-08-17T183311-79c63e38/D-037
     # HISTORY (do not delete): D-037 added this test under a strict xfail. The
-    # defect it pinned was real and MEASURED: PRISMModel(tree_depth=3) at
+    # defect it pinned was real and MEASURED: PRISM(tree_depth=3) at
     # context_len=96 returned nan_frac 1.0 on seeds 1234 and 7, because at
     # num_wavelet_levels=3 the deepest leaf segment (12) decimates to a band of
     # length 1, whose first-difference tensor is EMPTY -- ops.mean/ops.var over
@@ -1203,7 +1203,7 @@ class TestPRISMModelDifferentConfigurations:
     # only the output SHAPE, so it stayed green throughout.
     # FIXED by plan-2026-08-18T073231-52a93f8c: D-004 (static-length guard in
     # FrequencyBandStatistics.call emitting exact-zero diff features at length
-    # 1 and all-zero statistics at length 0) and D-005 (PRISMModel.__init__
+    # 1 and all-zero statistics at length 0) and D-005 (PRISM.__init__
     # refuses min_band_len == 0 with a ValueError). The strict xfail did its
     # job -- it turned XPASS the moment D-004 landed -- and was removed in the
     # same commit that restored depth 3 to the sweep above.
@@ -1222,7 +1222,7 @@ class TestPRISMModelDifferentConfigurations:
         built ONE model at the default seed. Measured ``nan_frac == 0.0`` at
         both 1234 and 7.
         """
-        model = build_seeded(lambda: PRISMModel(
+        model = build_seeded(lambda: PRISM(
             context_len=96,
             forecast_len=24,
             num_features=7,
@@ -1250,7 +1250,7 @@ class TestPRISMModelDifferentConfigurations:
         inputs = np.random.randn(4, 96, 7).astype(np.float32)
 
         def _train_mode_spread(dropout_rate):
-            model = build_seeded(lambda: PRISMModel(
+            model = build_seeded(lambda: PRISM(
                 context_len=96,
                 forecast_len=24,
                 num_features=7,
@@ -1332,7 +1332,7 @@ GF_N_INERT = 14
 
 
 def _gf_model():
-    return PRISMModel(
+    return PRISM(
         context_len=96, forecast_len=24, num_features=7, hidden_dim=64,
         num_layers=2, tree_depth=2, overlap_ratio=0.25,
         num_wavelet_levels=3, router_hidden_dim=64, router_temperature=1.0,
@@ -1384,7 +1384,7 @@ class TestPRISMGradientFlow:
 
         dead = sorted(p for p, v in real.items() if v is None or v == 0.0)
         assert not dead, (
-            f"gradient flow is incomplete in PRISMModel: {len(dead)} of "
+            f"gradient flow is incomplete in PRISM: {len(dead)} of "
             f"{len(real)} non-inert weights receive no live gradient:\n  "
             + "\n  ".join(dead)
         )

@@ -35,7 +35,7 @@ from train.common.ts_export import (
 
 # Fallback input length used when neither the model's input shape nor its
 # ``context_len`` config key yields a value. Preserves the historical PRISM
-# default of 168. NOTE: PRISMModel's get_config() key stays ``context_len``
+# default of 168. NOTE: PRISM's get_config() key stays ``context_len``
 # (model API is fixed); only the trainer-config field / CLI flag were renamed
 # to input_length/prediction_length in Step 6 -- the model config key did NOT.
 DEFAULT_INPUT_LENGTH = 168
@@ -65,7 +65,7 @@ def main():
         args.output_path = os.path.join(model_dir, "model.onnx")
 
     # Resolve input length: explicit flag, else detect from the loaded model
-    # (input shape, then the 'context_len' config key -- the PRISMModel API key
+    # (input shape, then the 'context_len' config key -- the PRISM API key
     # is unchanged -- then the PRISM default).
     input_length = args.input_length
     if input_length is None:

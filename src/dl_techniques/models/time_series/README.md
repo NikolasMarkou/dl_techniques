@@ -58,7 +58,7 @@ from dl_techniques.models.time_series import (
     MDNModel, create_mdn_model,
     NBeatsNet, create_nbeats_model,
     NBeatsXNet, create_nbeatsx_model,
-    PRISMModel, create_prism_model,
+    PRISM, create_prism_model,
     TiRexCore, create_tirex_model, create_tirex_by_variant,
     TimestralConfig, TimestralModel, TimestralForecaster, TimestralForecast,
     create_timestral_model, create_timestral_by_variant, load_model,

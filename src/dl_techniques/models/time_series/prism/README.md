@@ -10,7 +10,7 @@ A Keras 3 implementation of **PRISM**, a hierarchical forecaster that replaces a
 
 ## 1. Overview
 
-`PRISMModel` is a `keras.Model` that maps a context window of length `context_len` with `num_features` channels to one of two output regimes. Three knobs decide what it does:
+`PRISM` is a `keras.Model` that maps a context window of length `context_len` with `num_features` channels to one of two output regimes. Three knobs decide what it does:
 
 | Knob | Off (default) | On |
 |------|---------------|-----|
@@ -31,16 +31,16 @@ PRISM sits between them: **hierarchical** (a binary tree over time) and **adapti
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  1. Unified hierarchy: build a binary tree of overlapping    │
-│     time segments instead of flattening time. Coarse scales  │
-│     set the context for fine scales.                         │
-│                                                              │
-│  2. Adaptive filtering: an MLP router weights Haar wavelet   │
-│     bands per node, suppressing high-frequency jitter in     │
-│     trend regions and emphasizing it around spikes.          │
-│                                                              │
-│  3. Efficiency: Haar is O(N); router and FFN are small MLPs; │
-│     the temporal projector is one shared Dense (DLinear).    │
+│  1. Unified hierarchy: build a binary tree of overlapping   │
+│     time segments instead of flattening time. Coarse scales │
+│     set the context for fine scales.                        │
+│                                                             │
+│  2. Adaptive filtering: an MLP router weights Haar wavelet  │
+│     bands per node, suppressing high-frequency jitter in    │
+│     trend regions and emphasizing it around spikes.         │
+│                                                             │
+│  3. Efficiency: Haar is O(N); router and FFN are small MLPs;│
+│     the temporal projector is one shared Dense (DLinear).   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -118,7 +118,7 @@ The `(B * forecast_len, hidden_dim)` collapse before the head is deliberate: it 
 | Point | `False` | `(B, F_out, num_features)` | 3 | MSE, MAE, Huber |
 | Quantile | `True` | `(B, F_out, num_features, num_quantiles)` | 4 | `QuantileLoss(quantiles=...)` |
 
-`PRISMModel.predict_quantiles(context, quantile_levels=None, batch_size=64)` works only in quantile mode and returns `(quantile_preds, point_preds)`, where `point_preds` is the median slice.
+`PRISM.predict_quantiles(context, quantile_levels=None, batch_size=64)` works only in quantile mode and returns `(quantile_preds, point_preds)`, where `point_preds` is the median slice.
 
 ---
 
@@ -127,7 +127,7 @@ The `(B * forecast_len, hidden_dim)` collapse before the head is deliberate: it 
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.time_series.prism.model import PRISMModel
+from dl_techniques.models.time_series.prism.model import PRISM
 
 # 1000 windows of length 96 -> forecast the next 24 steps, 1 channel.
 x = np.linspace(0, 100, 1000 + 96 + 24)
@@ -135,7 +135,7 @@ data = np.sin(x).astype("float32")[:, None]
 X = np.stack([data[i : i + 96] for i in range(1000)])              # (1000, 96, 1)
 y = np.stack([data[i + 96 : i + 96 + 24] for i in range(1000)])    # (1000, 24, 1)
 
-model = PRISMModel.from_variant(
+model = PRISM.from_variant(
     "small", context_len=96, forecast_len=24, num_features=1,
 )
 model.compile(optimizer="adam", loss="mse")
@@ -150,7 +150,7 @@ print(model.count_params())    # 26959
 
 ## 7. Component Reference
 
-### `PRISMModel`
+### `PRISM`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -168,7 +168,7 @@ print(model.count_params())    # 26959
 | `ffn_expansion` | `int` | `4` | Expansion for the point-mode MLP head. Ignored in quantile mode. |
 | `use_quantile_head` | `bool` | `False` | Swap the point head for a `QuantileHead`; output rank becomes 4. |
 | `num_quantiles` | `int` | `3` | Quantiles emitted in quantile mode. Stored and serialized even in point mode. |
-| `quantile_levels` | `Optional[List[float]]` | `None` | Explicit levels; length must equal `num_quantiles`. When `None` in quantile mode: at `num_quantiles == 3` it is `PRISMModel.DEFAULT_QUANTILES = [0.1, 0.5, 0.9]`; at any other length it falls back to `np.linspace(0, 1, num_quantiles + 2)[1:-1]`. |
+| `quantile_levels` | `Optional[List[float]]` | `None` | Explicit levels; length must equal `num_quantiles`. When `None` in quantile mode: at `num_quantiles == 3` it is `PRISM.DEFAULT_QUANTILES = [0.1, 0.5, 0.9]`; at any other length it falls back to `np.linspace(0, 1, num_quantiles + 2)[1:-1]`. |
 | `enforce_monotonicity` | `bool` | `True` | In quantile mode, forces `Q_i <= Q_{i+1}` via cumulative softplus. Eliminates crossing. |
 | `kernel_initializer` | `str` or `Initializer` | `"glorot_uniform"` | For all `Dense` layers. Round-tripped in `get_config`. |
 | `kernel_regularizer` | `Optional[Regularizer]` | `None` | For all `Dense` layers. Round-tripped in `get_config`. |
@@ -177,14 +177,14 @@ print(model.count_params())    # 26959
 
 `tree_depth`, `overlap_ratio`, `num_wavelet_levels`, `router_hidden_dim`, `router_temperature`, `dropout_rate` mean the same as above, plus `use_residual` (add `x + Tree(x)`, default `True`) and `use_output_norm` (LayerNorm after the residual, default `True`).
 
-The `prism/` package `__init__.py` is intentionally empty, so import from `.model`. The `time_series` family package re-exports the public names, so `from dl_techniques.models.time_series import PRISMModel, create_prism_model` also works.
+The `prism/` package `__init__.py` is intentionally empty, so import from `.model`. The `time_series` family package re-exports the public names, so `from dl_techniques.models.time_series import PRISM, create_prism_model` also works.
 
 ---
 
 ## 8. Configuration & Presets
 
 ```python
-PRISMModel.MODEL_VARIANTS = {
+PRISM.MODEL_VARIANTS = {
     "tiny":  {"hidden_dim":  32, "num_layers": 1, "tree_depth": 1, "num_wavelet_levels": 2, "router_hidden_dim":  32, "ffn_expansion": 2},
     "small": {"hidden_dim":  64, "num_layers": 2, "tree_depth": 2, "num_wavelet_levels": 3, "router_hidden_dim":  64, "ffn_expansion": 4},
     "base":  {"hidden_dim": 128, "num_layers": 3, "tree_depth": 2, "num_wavelet_levels": 3, "router_hidden_dim": 128, "ffn_expansion": 4},
@@ -236,7 +236,7 @@ print(model.count_params())   # 114808 -- the factory returns a BUILT model
 from dl_techniques.losses.quantile_loss import QuantileLoss
 
 quantile_levels = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
-model = PRISMModel.from_variant(
+model = PRISM.from_variant(
     "small", context_len=96, forecast_len=24, num_features=1,
     use_quantile_head=True,
     num_quantiles=len(quantile_levels),
@@ -300,7 +300,7 @@ model.save("prism.keras")
 restored = keras.models.load_model("prism.keras")     # no custom_objects
 ```
 
-`PRISMModel`, `PRISMLayer`, `PRISMTimeTree`, `PRISMNode`, `FrequencyBandRouter` and `QuantileHead` all register through `register_dl_technique` (`dl_techniques.utils.keras_registration`). The package string is the *defining* module's dotted path, and only one of the six is defined here, so the keys are not uniform: `dl_techniques.models.prism.model>PRISMModel`, `dl_techniques.layers.time_series.prism_blocks><ClassName>` for the four block classes, and `dl_techniques.layers.time_series.quantile_head_fixed_io>QuantileHead`. Archives written before the registration migration still load through the legacy `Custom>ClassName` alias the helper also binds.
+`PRISM`, `PRISMLayer`, `PRISMTimeTree`, `PRISMNode`, `FrequencyBandRouter` and `QuantileHead` all register through `register_dl_technique` (`dl_techniques.utils.keras_registration`). The package string is the *defining* module's dotted path, and only one of the six is defined here, so the keys are not uniform: `dl_techniques.models.prism.model>PRISM`, `dl_techniques.layers.time_series.prism_blocks><ClassName>` for the four block classes, and `dl_techniques.layers.time_series.quantile_head_fixed_io>QuantileHead`. Archives written before the registration migration still load through the legacy `Custom>ClassName` alias the helper also binds.
 
 `kernel_initializer` and `kernel_regularizer` are normalized via `keras.initializers.get` / `keras.regularizers.get` in `get_config()`; `quantile_levels` round-trips as a list (or `None` in point mode).
 
@@ -353,7 +353,7 @@ Run a forward pass and pull the router's intermediate output through a `keras.Mo
 
   **Legacy checkpoints.** `from_config` routes through `__init__`, so a `.keras` file whose config has `min_band_len == 0` now raises at `load_model` instead of loading. This is deliberate: such a model produced `inf`/NaN band statistics on every forward pass. Re-train at a supported configuration; no migration makes those weights meaningful.
 
-  **A dynamic time axis defeats the guard.** The degenerate-band check branches on the STATIC band length and deliberately falls through when it is unknown. A `tree_depth=3` model traced as `tf.function(input_signature=[tf.TensorSpec([None, None, 7])])` returns `nan_frac == 1.0` where the same model returns `0.0` eager. `PRISMModel.input_spec` pins `axes={1: context_len}` and refuses a WRONG static length, but Keras' `assert_input_compatibility` explicitly accepts an unknown dimension against an `axes` constraint. Pin the time axis statically in any `tf.function`, `saved_model` signature, or `padded_batch` pipeline — the shipped ONNX exporter already does.
+  **A dynamic time axis defeats the guard.** The degenerate-band check branches on the STATIC band length and deliberately falls through when it is unknown. A `tree_depth=3` model traced as `tf.function(input_signature=[tf.TensorSpec([None, None, 7])])` returns `nan_frac == 1.0` where the same model returns `0.0` eager. `PRISM.input_spec` pins `axes={1: context_len}` and refuses a WRONG static length, but Keras' `assert_input_compatibility` explicitly accepts an unknown dimension against an `axes` constraint. Pin the time axis statically in any `tf.function`, `saved_model` signature, or `padded_batch` pipeline — the shipped ONNX exporter already does.
 
   Cost is separately exponential in depth: each layer instantiates `2^tree_depth` leaf segments plus the shallower levels.
 - **L-5. `PRISMNode.call()` uses `keras.ops.cond`** for the interpolation branch. Under the TF backend `ops.cond` traces both branches, so it is control-flow tidiness, not a speed-up — a latent inefficiency when benchmarking very large trees.
@@ -370,7 +370,7 @@ Run a forward pass and pull the router's intermediate output through a `keras.Mo
 
 **Q. Is this faster than a Transformer?** For the forward pass, yes — cost is roughly linear in sequence length against attention's `O(L^2)`, and the router and FFN are small MLPs.
 
-**Q. Can I use this for classification?** Not directly; `PRISMModel` is forecast-only. Lift the `PRISMLayer` stack into a custom model and attach your own head.
+**Q. Can I use this for classification?** Not directly; `PRISM` is forecast-only. Lift the `PRISMLayer` stack into a custom model and attach your own head.
 
 **Q. ONNX export fails.** The exporter pins `CUDA_VISIBLE_DEVICES=""` before `import keras`. Setting it after the import silently does nothing — run the exporter from a fresh process.
 

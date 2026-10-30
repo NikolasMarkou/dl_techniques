@@ -3442,7 +3442,7 @@ _PACKAGES_WITHOUT_MAIN_MODULE = {
         "Pre-existing; exposed 2026-08-25 by the leaf-package walk."
     ),
     "prism": (
-        "ZERO-BYTE __init__.py -- PRISMModel/create_prism_model are re-exported "
+        "ZERO-BYTE __init__.py -- PRISM/create_prism_model are re-exported "
         "by models/time_series/__init__.py, not by the leaf. Pre-existing; "
         "exposed 2026-08-25 by the leaf-package walk."
     ),

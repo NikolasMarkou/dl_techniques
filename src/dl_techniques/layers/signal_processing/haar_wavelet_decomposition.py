@@ -69,7 +69,7 @@ class HaarWaveletDecomposition(keras.layers.Layer):
         ``L // 2 ** K`` long. Defaults to 3. This layer does not refuse a
         ``num_levels`` that drives a dimension to 0: the reductions downstream
         are what break, so callers must bound it against their own input
-        length (``PRISMModel.__init__`` is one such caller).
+        length (``PRISM.__init__`` is one such caller).
     :type num_levels: int
     :param kwargs: Additional arguments for the Layer base class.
     """
