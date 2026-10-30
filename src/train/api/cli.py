@@ -31,19 +31,24 @@ printing help, even when given ``help``.
     :raises ConfigValidationError: every unknown key and every bad value at once.
 
 ``run_task(config_class, function, args)``
-    Parse, coerce, merge over ``config=``, call ``function(**mapping)`` and
-    return 0 when ``result.success`` else 1. ``function`` is the keyword-only
-    function a Python caller uses (D-008); it runs ``validate`` itself.
+    Parse, coerce, merge over ``config=``, run ``validate`` on the merged
+    mapping, call ``function(**mapping)`` and return 0 when ``result.success``
+    else 1. ``function`` is the keyword-only function a Python caller uses
+    (D-008); it validates again, but a bad file or a missing key is refused
+    here with exit 2 before any signature can raise a ``TypeError``.
 
 Coercion rules (the text is the whole token after the first ``=``):
 
 * ``float``: decimal or exponent form (``3e-4``, ``1E-3``, ``.5``), finite.
-* ``int``: ``-?[0-9]+`` only; ``5.0`` and ``1_000`` are refused.
+* ``int``: ``-?[0-9]+`` only (the YAML loader reads the same pattern); ``5.0``,
+  ``1_000`` and a digit string past the interpreter's limit are refused.
 * ``bool``: ``true`` or ``false`` only.
 * ``str``: verbatim, so ``no`` stays ``"no"``.
 * ``Optional``: ``null`` or ``none`` (any case) gives ``None``.
 * list, tuple, dict, group: JSON text; NaN and Infinity are refused.
-* untyped (``Any``) values: JSON, then a finite float (``.5``, ``010``), else the text.
+* untyped (``Any``) values: JSON, then ``null`` or ``none`` (any case) as
+  ``None``, then a finite float (``.5``, ``010``), else the text. Write
+  ``'"none"'`` for the string.
 
 Import rule
 -----------
@@ -90,8 +95,10 @@ from .config import (
     invalid_value_message,
     load_yaml_mapping,
     merge,
+    parse_int,
     parse_json,
     unknown_key_message,
+    validate,
 )
 from .errors import ConfigError, ConfigValidationError, DLTrainError
 
@@ -144,9 +151,14 @@ def _write_help(_args: List[str]) -> int:
     return 0
 
 
+def _is_help_request(args: List[str]) -> bool:
+    """Return whether ``args`` is empty or one help word (``help``, ``-h``, ``--help``)."""
+    return not args or (len(args) == 1 and args[0] in HELP_WORDS)
+
+
 def _list_tasks(args: List[str]) -> int:
     """Print the registered tasks, one ``name  summary`` line each."""
-    if args not in ([], ["help"]):
+    if not _is_help_request(args):
         raise ConfigError(
             f"list_tasks takes no arguments, got: {' '.join(args)}"
         )
@@ -165,10 +177,10 @@ def _list_models(args: List[str]) -> int:
     """Print ``family/variant`` names, one per line; ``task=<name>`` filters.
 
     This imports the model families' variant tables, so it is not on the help
-    path. ``list_models help`` lists, like ``list_tasks help``.
+    path. ``list_models`` with a help word lists, like ``list_tasks``.
     """
     task = None
-    if args != ["help"]:
+    if not (len(args) == 1 and args[0] in HELP_WORDS):
         config_path, raw = parse_dotlist(args)
         if config_path is not None:
             raise ConfigError("list_models takes only task=<name>, not config=")
@@ -219,6 +231,10 @@ def _write_task_help(spec: registry.TaskSpec) -> int:
         "",
         "keys (dots reach a group, as in optim_args.lr=3e-4):",
         *_field_help_lines(spec.load_config_class()),
+        "",
+        "A mapping given on the command line is merged into the one in config=,",
+        "so model_args={} adds nothing and does not clear a file's model_args;",
+        "edit the file to drop a key.",
         "",
     ]
     sys.stdout.write("\n".join(lines))
@@ -373,7 +389,6 @@ def parse_dotlist(tokens: Sequence[str]) -> Tuple[Optional[str], Dict[str, Any]]
 
 _NONE_TYPE = type(None)
 _NULL_WORDS = ("null", "none")
-_INT = re.compile(r"-?[0-9]+")
 _FLOAT = re.compile(r"[-+]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][-+]?[0-9]+)?")
 
 #: ``_convert`` returns ``(value, None)`` on success and ``(None, note)`` on
@@ -397,6 +412,8 @@ def _untyped(text: str) -> Any:
     value, reason = parse_json(text)
     if reason is None:
         return value
+    if text.lower() in _NULL_WORDS:
+        return None
     if _FLOAT.fullmatch(text):
         number = float(text)
         if math.isfinite(number):
@@ -449,9 +466,8 @@ def _convert(annotation: Any, text: str) -> _Converted:
     # ``epochs=1_000`` must be refused for an int field, and ``float("1_000")``,
     # ``float("nan")`` and ``float("inf")`` would all be accepted.
     if annotation is int:
-        if _INT.fullmatch(text):
-            return int(text), None
-        return None, ""
+        number, note = parse_int(text)
+        return (number, None) if note is None else (None, note)
     if annotation is float:
         if not _FLOAT.fullmatch(text):
             return None, ""
@@ -576,5 +592,10 @@ def run_task(
     mapping = coerce_mapping(config_class, raw)
     if config_path is not None:
         mapping = merge(load_yaml_mapping(config_path), mapping)
+    # DECISION plan-2026-10-30T132432-a865fa08/D-034: a file is not coerced, so
+    # it can hold an unknown key, a missing required key or a non-string key.
+    # Do NOT leave that to the keyword-only signature: it raises TypeError,
+    # which exits 1, the code for a failed run.
+    validate(config_class, mapping)
     result = function(**mapping)
     return 0 if result.success else 1

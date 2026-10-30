@@ -15,19 +15,33 @@ Interface contract
         bad key, so a caller sees every problem at once.
 
 ``merge(base, overrides)``
-    Deep merge of two mappings into a new dict. Neither input is changed.
+    Deep merge of two mappings into a new dict. Neither input is changed. A
+    mapping on both sides is merged, so an empty mapping adds nothing: it
+    cannot clear a value that a config file set.
 
 ``assert_resolved(config)``
     :raises UnresolvedAutoError: when a field annotated to accept ``"auto"`` still
-        holds it. The message lists every such field by dotted path.
+        holds it, inside a list or a dict of such values included. The message
+        lists every such field by dotted path.
 
 ``to_json(config)`` / ``from_json(cls, text)``
     ``from_json`` goes back through :func:`validate`, so a file edited by hand is
     held to the same rules as a Python call.
 
 ``load_yaml_mapping(path)``
-    :raises ConfigError: for an unreadable file, a parse error (a repeated key
-        included), a missing PyYAML, or a top level that is not a mapping.
+    :raises ConfigError: for an unreadable file (bytes that are not UTF-8
+        included), a parse error (a repeated key included), a missing PyYAML,
+        or a top level that is not a mapping.
+
+``parse_int(text)``
+    :return: ``(int, None)`` for ``-?[0-9]+``, else ``(None, reason)``; a digit
+        string longer than the interpreter allows is a refusal, not a traceback.
+
+The free parts of a config (``Any`` fields such as ``model_args``) are copied
+deeply and held to two rules at any depth: every key is a string and every
+number is finite, because ``config.json`` is JSON and must read back as the
+same config. A ``Dict`` annotation with a key type other than ``str`` is a
+programming error for the same reason.
 
 Strings are never coerced here. ``"5"`` for an ``int`` field is an error; the
 command line turns text into typed values before it calls this module, and a
@@ -81,7 +95,17 @@ Auto = Union[T, Literal["auto"]]
 #: ``test_strict_config.py`` holds the two equal.
 DEFAULT_SEED = 42
 
+#: The pattern of an integer, shared by the command line and the YAML loader so
+#: ``010`` means 10 from both doors (D-034).
+INT_PATTERN = r"-?[0-9]+"
+
 _NONE_TYPE = type(None)
+
+
+def join_path(prefix: str, name: str) -> str:
+    """Return the dotted key ``prefix.name``; ``name`` alone when ``prefix`` is empty."""
+    return f"{prefix}.{name}" if prefix else name
+
 
 # ---------------------------------------------------------------------
 
@@ -90,8 +114,20 @@ _NONE_TYPE = type(None)
 class StrictConfig:
     """Base class of every config group; it declares no fields.
 
-    Subclasses add fields and may override :meth:`resolve_auto`.
+    Subclasses add fields and may override :meth:`resolve_auto` and
+    :meth:`problems`.
     """
+
+    def problems(self, prefix: str) -> List[str]:
+        """Return one line per cross-field problem of this instance.
+
+        :func:`validate` calls it on every group it builds, so these lines are
+        collected with all the others instead of aborting the walk.
+
+        :param prefix: the dotted path of this group; ``""`` at the top.
+        :return: error lines naming their keys with :func:`join_path`; none here.
+        """
+        return []
 
     def resolve_auto(self, context: Any) -> "StrictConfig":
         """Return a copy with every ``"auto"`` field filled in from ``context``.
@@ -111,8 +147,15 @@ def _is_config_class(annotation: Any) -> bool:
     return isinstance(annotation, type) and issubclass(annotation, StrictConfig)
 
 
+#: Longest ``repr`` an error line quotes; a 5000-digit token must not fill the screen.
+_MAX_QUOTED = 100
+
+
 def _describe_value(value: Any) -> str:
-    return f"{value!r} ({type(value).__name__})"
+    quoted = repr(value)
+    if len(quoted) > _MAX_QUOTED:
+        quoted = quoted[: _MAX_QUOTED - 3] + "..."
+    return f"{quoted} ({type(value).__name__})"
 
 
 def invalid_value_message(
@@ -142,11 +185,10 @@ def unknown_key_message(prefix: str, name: str, siblings: Any) -> str:
     :param name: the unknown key, without its prefix.
     :param siblings: the names (without prefix) of the keys that do exist there.
     """
-    dotted = (lambda key: f"{prefix}.{key}") if prefix else (lambda key: key)
-    message = f"Unknown key {dotted(name)!r}."
+    message = f"Unknown key {join_path(prefix, name)!r}."
     close = difflib.get_close_matches(name, list(siblings), n=1)
     if close:
-        message += f" Did you mean {dotted(close[0])!r}?"
+        message += f" Did you mean {join_path(prefix, close[0])!r}?"
     return message
 
 
@@ -185,6 +227,39 @@ def describe_annotation(annotation: Any) -> str:
     return getattr(annotation, "__name__", str(annotation))
 
 
+def _copy_free(value: Any, path: str, errors: List[str]) -> Any:
+    """Return a deep copy of ``value`` and append every JSON-hostile part to ``errors``.
+
+    A free field (``Any``) has no schema, but ``config.json`` must read back as
+    the same config, so every key at any depth is a string and every float is
+    finite. The copy shares nothing with the caller's object (D-034).
+    """
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            errors.append(
+                f"Invalid value for {path!r}: expected a finite number, "
+                f"got {_describe_value(value)}"
+            )
+        return value
+    if isinstance(value, collections.abc.Mapping):
+        copied: Dict[Any, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                errors.append(
+                    f"Invalid key {join_path(path, str(key))!r}: keys must be "
+                    f"strings, got {_describe_value(key)}"
+                )
+            copied[key] = _copy_free(item, join_path(path, str(key)), errors)
+        return copied
+    if isinstance(value, (list, tuple)):
+        items = [
+            _copy_free(item, f"{path}[{index}]", errors)
+            for index, item in enumerate(value)
+        ]
+        return items if isinstance(value, list) else tuple(items)
+    return copy.deepcopy(value)
+
+
 def _check(annotation: Any, value: Any, path: str, errors: List[str]) -> Any:
     """Return ``value`` converted for ``annotation``, or append to ``errors``.
 
@@ -198,7 +273,7 @@ def _check(annotation: Any, value: Any, path: str, errors: List[str]) -> Any:
         errors.append(invalid_value_message(path, annotation, value, note))
 
     if annotation is Any:
-        return value
+        return _copy_free(value, path, errors)
     if annotation is _NONE_TYPE or annotation is None:
         if value is not None:
             fail()
@@ -210,12 +285,21 @@ def _check(annotation: Any, value: Any, path: str, errors: List[str]) -> Any:
         fail()
         return value
     if origin is Union:
-        if isinstance(value, collections.abc.Mapping):
-            # A mapping can only be meant for a group member; report that
-            # member's own problems instead of one vague line.
-            for member in args:
-                if _is_config_class(member):
-                    return _check(member, value, path, errors)
+        groups = [member for member in args if _is_config_class(member)]
+        if groups and isinstance(value, collections.abc.Mapping):
+            # A mapping can only be meant for a group member: the first member
+            # it fits wins, and when it fits none, the member it came closest
+            # to (fewest problems) reports, not one vague line (D-034).
+            closest: Optional[List[str]] = None
+            for member in groups:
+                attempt = []
+                converted = _check(member, value, path, attempt)
+                if not attempt:
+                    return converted
+                if closest is None or len(attempt) < len(closest):
+                    closest = attempt
+            errors.extend(closest)
+            return value
         for member in args:
             attempt: List[str] = []
             converted = _check(member, value, path, attempt)
@@ -278,10 +362,18 @@ def _check(annotation: Any, value: Any, path: str, errors: List[str]) -> Any:
         if not isinstance(value, collections.abc.Mapping):
             fail()
             return value
-        key_type, value_type = args if args else (Any, Any)
+        key_type, value_type = args if args else (str, Any)
+        if key_type is not str:
+            # JSON object keys are strings, so a Dict[int, ...] would refuse
+            # its own config.json. This is a mistake in the config class.
+            raise TypeError(
+                f"train.api.config cannot round-trip the annotation "
+                f"{annotation!r} of {path!r}: a Dict key type must be str, "
+                f"because config.json keys are strings"
+            )
         return {
-            _check(key_type, k, f"{path}.{k}", errors): _check(
-                value_type, v, f"{path}.{k}", errors
+            _check(key_type, k, join_path(path, str(k)), errors): _check(
+                value_type, v, join_path(path, str(k)), errors
             )
             for k, v in value.items()
         }
@@ -319,29 +411,32 @@ def _build(
     """Build ``cls`` from ``mapping``, appending every problem to ``errors``."""
     hints = typing.get_type_hints(cls)
     fields = {f.name: f for f in dataclasses.fields(cls) if f.init}
-    dotted = (lambda name: f"{prefix}.{name}") if prefix else (lambda name: name)
     problems_before = len(errors)
     kwargs: Dict[str, Any] = {}
     for key, value in mapping.items():
         name = str(key)
-        if not isinstance(key, str) or name not in fields:
+        if not isinstance(key, str):
             errors.append(
-                unknown_key_message(
-                    prefix, name, fields if isinstance(key, str) else []
-                )
+                f"Invalid key {join_path(prefix, name)!r}: keys must be "
+                f"strings, got {_describe_value(key)}"
             )
             continue
-        kwargs[name] = _check(hints[name], value, dotted(name), errors)
+        if name not in fields:
+            errors.append(unknown_key_message(prefix, name, fields))
+            continue
+        kwargs[name] = _check(hints[name], value, join_path(prefix, name), errors)
     for name, field in fields.items():
         no_default = (
             field.default is dataclasses.MISSING
             and field.default_factory is dataclasses.MISSING
         )
         if name not in kwargs and no_default:
-            errors.append(f"Missing required key {dotted(name)!r}.")
+            errors.append(f"Missing required key {join_path(prefix, name)!r}.")
     if len(errors) > problems_before:
         return None
-    return cls(**kwargs)
+    instance = cls(**kwargs)
+    errors.extend(instance.problems(prefix))
+    return instance
 
 
 def validate(cls: Type[T], mapping: Mapping[str, Any]) -> T:
@@ -395,33 +490,65 @@ def _admits_auto(annotation: Any) -> bool:
     return False
 
 
-def _unresolved(config: Any, prefix: str) -> List[str]:
-    hints = typing.get_type_hints(type(config))
-    found: List[str] = []
-    for field in dataclasses.fields(config):
-        value = getattr(config, field.name)
-        path = f"{prefix}.{field.name}" if prefix else field.name
-        if dataclasses.is_dataclass(value) and not isinstance(value, type):
-            found.extend(_unresolved(value, path))
-        elif (
-            isinstance(value, str)
-            and value == AUTO
-            and _admits_auto(hints[field.name])
+def _unresolved(annotation: Any, value: Any, path: str) -> List[str]:
+    """Return the dotted path of every ``"auto"`` that ``annotation`` admits in ``value``.
+
+    A group instance is walked field by field by its own class, so every member
+    of a union of groups is covered. A list or dict is walked element by
+    element by its element annotation; ``Any`` is free data and is not walked.
+    """
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        hints = typing.get_type_hints(type(value))
+        found: List[str] = []
+        for field in dataclasses.fields(value):
+            found.extend(
+                _unresolved(
+                    hints[field.name],
+                    getattr(value, field.name),
+                    join_path(path, field.name),
+                )
+            )
+        return found
+    if isinstance(value, str):
+        return [path] if value == AUTO and _admits_auto(annotation) else []
+    members = (
+        typing.get_args(annotation)
+        if typing.get_origin(annotation) is Union
+        else (annotation,)
+    )
+    found = []
+    for member in members:
+        origin = typing.get_origin(member)
+        args = typing.get_args(member)
+        if origin in (list, collections.abc.Sequence, tuple) and isinstance(
+            value, (list, tuple)
         ):
-            found.append(path)
+            fixed = origin is tuple and args and not (len(args) == 2 and args[1] is Ellipsis)
+            for index, item in enumerate(value):
+                if fixed:
+                    element = args[index] if index < len(args) else Any
+                else:
+                    element = args[0] if args else Any
+                found.extend(_unresolved(element, item, f"{path}[{index}]"))
+        elif origin in (dict, collections.abc.Mapping) and isinstance(
+            value, collections.abc.Mapping
+        ):
+            element = args[1] if len(args) == 2 else Any
+            for key, item in value.items():
+                found.extend(_unresolved(element, item, join_path(path, str(key))))
     return found
 
 
 def assert_resolved(config: StrictConfig) -> None:
     """Raise when an AUTO-annotated field of ``config`` is still ``"auto"``.
 
-    Only dataclass fields are walked, and only a field whose own annotation
-    admits ``Literal["auto"]`` counts. A literal ``"auto"`` inside a free
-    ``model_args`` dict is data, not AUTO.
+    Fields are walked through nested groups, lists and dicts. Only a value
+    whose own annotation admits ``Literal["auto"]`` counts: a literal ``"auto"``
+    inside a free ``model_args`` dict or a plain ``str`` field is data.
 
     :raises UnresolvedAutoError: naming every unresolved field by dotted path.
     """
-    paths = _unresolved(config, "")
+    paths = _unresolved(type(config), config, "")
     if paths:
         raise UnresolvedAutoError(
             "These fields are still 'auto' after resolution, so no recipe "
@@ -457,24 +584,63 @@ def _finite_float(text: str) -> float:
     return value
 
 
+def _refuse_duplicate_keys(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
+    """Build an object, refusing a key given twice instead of keeping the last."""
+    result: Dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"found a duplicate key {key!r}")
+        result[key] = value
+    return result
+
+
 def parse_json(text: str) -> Tuple[Any, Optional[str]]:
-    """Parse JSON text, refusing NaN, Infinity and overflowing numbers.
+    """Parse JSON text, refusing NaN, Infinity, overflowing numbers and repeated keys.
 
     The failure comes back as a value, not as an exception, so a caller that
-    collects many problems (the command line's coercion) needs no handler.
+    collects many problems (the command line's coercion) needs no handler. A
+    digit string longer than the interpreter's limit and a document nested
+    past the recursion limit are failures of the text, so they come back the
+    same way.
 
     :param text: JSON text.
     :return: ``(value, None)`` on success, ``(None, reason)`` on failure.
     """
+    # DECISION plan-2026-10-30T132432-a865fa08/D-034: json keeps the LAST of two
+    # equal keys without a word, which the command line and the YAML loader
+    # both refuse. Do NOT drop object_pairs_hook, and do NOT widen these two
+    # exception types: they are the only ones json.loads raises for bad text.
     try:
         return (
             json.loads(
-                text, parse_constant=_refuse_constant, parse_float=_finite_float
+                text,
+                parse_constant=_refuse_constant,
+                parse_float=_finite_float,
+                object_pairs_hook=_refuse_duplicate_keys,
             ),
             None,
         )
+    except RecursionError:
+        return None, "the JSON text is nested too deeply"
     except ValueError as exc:
         return None, str(exc)
+
+
+def parse_int(text: str) -> Tuple[Optional[int], Optional[str]]:
+    """Read ``text`` as an integer written as :data:`INT_PATTERN`.
+
+    :param text: the whole text of a value.
+    :return: ``(value, None)``, or ``(None, "")`` when the text is not an
+        integer, or ``(None, note)`` when it is one the interpreter refuses
+        (more digits than ``sys.int_info.default_max_str_digits``); ``note``
+        is text for the end of the error line.
+    """
+    if not re.fullmatch(INT_PATTERN, text):
+        return None, ""
+    try:
+        return int(text), None
+    except ValueError:
+        return None, ": too many digits"
 
 
 def from_json(cls: Type[T], text: str) -> T:
@@ -492,6 +658,8 @@ def from_json(cls: Type[T], text: str) -> T:
 # ---------------------------------------------------------------------
 # YAML
 # ---------------------------------------------------------------------
+
+_YAML_INT = re.compile(f"^{INT_PATTERN}$")
 
 _YAML_FLOAT = re.compile(
     r"^(?:[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?"
@@ -514,7 +682,7 @@ def _yaml_loader() -> Any:
         ) from exc
 
     class Yaml12SafeLoader(yaml.SafeLoader):
-        """SafeLoader whose float resolver accepts ``3e-4`` and which refuses a repeated key."""
+        """SafeLoader with the YAML 1.2 int and float rules, which refuses a repeated key."""
 
         def construct_mapping(self, node, deep=False):
             # DECISION plan-2026-10-30T132432-a865fa08/D-027: PyYAML keeps the
@@ -547,15 +715,33 @@ def _yaml_loader() -> Any:
     # the STRING "3e-4" (measured) and ``lr: 3e-4`` in a config file would
     # fail validation. Do NOT fall back to the stock yaml.safe_load, and do NOT
     # coerce strings to numbers in validate(); swap in the 1.2 float pattern on
-    # this subclass only, so the global SafeLoader is left alone.
+    # this subclass only, so the global SafeLoader is left alone. D-034: the
+    # same goes for ints. YAML 1.1 reads ``010`` as 8, ``1:30`` as 90 and
+    # ``1_000`` as 1000, a different number than the command line gives for
+    # the same text. Do NOT keep the stock int resolver or constructor.
+    int_tag = "tag:yaml.org,2002:int"
     float_tag = "tag:yaml.org,2002:float"
+    replaced = (int_tag, float_tag)
     Yaml12SafeLoader.yaml_implicit_resolvers = {
-        first: [(tag, pattern) for tag, pattern in resolvers if tag != float_tag]
+        first: [(tag, pattern) for tag, pattern in resolvers if tag not in replaced]
         for first, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
     }
+    # The int resolver goes first: the float pattern also matches plain digits.
+    Yaml12SafeLoader.add_implicit_resolver(int_tag, _YAML_INT, list("-0123456789"))
     Yaml12SafeLoader.add_implicit_resolver(
         float_tag, _YAML_FLOAT, list("-+0123456789.")
     )
+
+    def construct_int(loader, node):
+        value, note = parse_int(loader.construct_scalar(node))
+        if value is None:
+            raise yaml.constructor.ConstructorError(
+                None, None, f"{node.value!r} is not a decimal integer{note or ''}",
+                node.start_mark,
+            )
+        return value
+
+    Yaml12SafeLoader.add_constructor(int_tag, construct_int)
     return Yaml12SafeLoader
 
 
@@ -573,7 +759,7 @@ def load_yaml_mapping(path: Any) -> Dict[str, Any]:
     try:
         with open(path, "r", encoding="utf-8") as handle:
             text = handle.read()
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise ConfigError(f"Cannot read config file {str(path)!r}: {exc}") from exc
     loader = loader_class(text)
     try:

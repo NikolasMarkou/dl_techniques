@@ -272,6 +272,36 @@ def test_no_registered_task_shadows_a_command():
     assert set(registry.TASKS).isdisjoint(cli.COMMANDS)
 
 
+@pytest.mark.parametrize("name", list(cli.COMMANDS))
+def test_registering_a_task_named_like_a_command_is_a_bug(name, empty_registries):
+    with pytest.raises(ValueError, match="name of a built-in command"):
+        registry.register_task(task_spec(name))
+    assert registry.TASKS == {}
+    assert not issubclass(ValueError, DLTrainError)
+    # Control: the same spec under another name registers.
+    registry.register_task(task_spec(f"{name}_x"))
+
+
+@pytest.mark.parametrize("word", ["help", "-h", "--help"])
+@pytest.mark.parametrize("command", ["list_tasks", "list_models"])
+def test_every_help_word_runs_a_list_command_and_exits_zero(
+    command, word, fake_module, empty_registries, capsys
+):
+    registry.register_task(task_spec())
+    registry.register_model(model_spec())
+    assert cli.main([command, word]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert ("fake_task" if command == "list_tasks" else "fam/small") in captured.out
+
+
+def test_a_help_word_with_other_arguments_is_still_refused(empty_registries, capsys):
+    assert cli.main(["list_tasks", "-h", "x=1"]) == 2
+    assert "list_tasks takes no arguments" in capsys.readouterr().err
+    assert cli.main(["list_models", "--help", "task=x"]) == 2
+    capsys.readouterr()
+
+
 # ---------------------------------------------------------------------
 # The command line over the registries
 # ---------------------------------------------------------------------
@@ -346,6 +376,15 @@ def test_a_task_command_prints_its_keys_instead_of_running(
     assert "count  (int)  a count [default: 1]" in out
     assert "name  (str)  a name [default: 'x']" in out
     assert sys.modules[fake_module].CALLS == []
+
+
+def test_the_task_help_says_an_empty_mapping_does_not_clear_a_file_value(
+    fake_module, empty_registries, capsys
+):
+    registry.register_task(task_spec())
+    assert cli.main(["fake_task", "help"]) == 0
+    out = capsys.readouterr().out
+    assert "model_args={} adds nothing and does not clear" in out
 
 
 def test_help_and_unknown_command_know_the_registered_tasks(

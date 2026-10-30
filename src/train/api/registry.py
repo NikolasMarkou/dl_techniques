@@ -10,8 +10,9 @@ Interface contract
 ``register_model(spec)`` / ``register_task(spec)``
     Add a spec to :data:`MODELS` / :data:`TASKS` and return it.
 
-    :raises ValueError: when the family or task name is already registered.
-        That is a bug in the registering code, not a user error, so it is not
+    :raises ValueError: when the family or task name is already registered, or a
+        task is named like a built-in command (``cli.COMMANDS``), which
+        ``cli`` looks up first and so would hide it. That is a bug in the registering code, not a user error, so it is not
         a :class:`~train.api.errors.DLTrainError` and reaches the user as a
         traceback.
 
@@ -167,6 +168,14 @@ def register_model(spec: ModelSpec) -> ModelSpec:
 
 def register_task(spec: TaskSpec) -> TaskSpec:
     """Add ``spec`` to :data:`TASKS`; see the module contract."""
+    # Imported here because cli imports this module at its own import time.
+    from .cli import COMMANDS
+
+    if spec.name in COMMANDS:
+        raise ValueError(
+            f"task {spec.name!r} has the name of a built-in command "
+            f"({', '.join(COMMANDS)}), which would shadow it"
+        )
     if spec.name in TASKS:
         raise ValueError(f"task {spec.name!r} is already registered")
     TASKS[spec.name] = spec

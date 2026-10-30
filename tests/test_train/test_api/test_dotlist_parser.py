@@ -155,6 +155,34 @@ def test_an_int_refuses_a_float_form_or_a_separator(text):
     )
 
 
+def test_a_digit_string_past_the_interpreter_limit_is_a_refusal_not_a_traceback():
+    text = "9" * 5000
+    assert coerce_error(int, text, "epochs").endswith("(str): too many digits")
+    (line,) = mapping_errors({"optim_args": {"steps": text}})
+    assert line.startswith("Invalid value for 'optim_args.steps': expected int")
+    assert line.endswith("(str): too many digits")
+    assert len(line) < 200  # the token is quoted in part, not whole
+    (union_line,) = mapping_errors({"epochs": text})  # Auto[int]: a union drops the note
+    assert union_line.startswith("Invalid value for 'epochs': expected int") and len(union_line) < 200
+    # An untyped value falls through to the text, as for any other non-number.
+    assert coerce_mapping(Top, {"model_args": {"x": text}}) == {"model_args": {"x": text}}
+
+
+def test_json_nested_past_the_recursion_limit_is_a_refusal_not_a_traceback():
+    deep = "[" * 100000
+    assert "nested too deeply" in coerce_error(List[int], deep, "layers")
+    errors = mapping_errors({"model_args": deep, "layers": deep})
+    assert len(errors) == 2, errors
+    assert coerce_mapping(Top, {"model_args": {"x": deep}}) == {"model_args": {"x": deep}}
+
+
+def test_a_repeated_key_in_json_text_is_refused():
+    assert "duplicate key 'lr'" in coerce_error(Dict[str, Any], '{"lr": 1, "lr": 2}', "model_args")
+    assert "duplicate key 'lr'" in coerce_error(Optim, '{"lr": 1, "lr": 2}', "optim_args")
+    errors = mapping_errors({"optim_args": '{"lr": 1, "lr": 2}'})
+    assert "duplicate key 'lr'" in errors[0]
+
+
 @pytest.mark.parametrize("text, expected", [("true", True), ("false", False)])
 def test_a_bool_reads_true_and_false(text, expected):
     assert coerce(bool, text, "nesterov") is expected
@@ -269,6 +297,16 @@ def test_untyped_dict_values_follow_the_documented_rule():
     assert type(typed["leading_zero"]) is float
 
 
+@pytest.mark.parametrize("text", ["none", "None", "NONE", "Null", "null"])
+def test_an_untyped_value_reads_the_null_words_as_none_like_an_optional_field(text):
+    typed = coerce_mapping(Top, {"model_args": {"x": text}, "seed": text})
+    assert typed == {"model_args": {"x": None}, "seed": None}
+
+
+def test_a_quoted_null_word_stays_a_string_in_an_untyped_value():
+    assert coerce_mapping(Top, {"model_args": {"x": '"none"'}}) == {"model_args": {"x": "none"}}
+
+
 def test_a_nested_untyped_dict_is_typed_leaf_by_leaf():
     typed = coerce_mapping(Top, {"model_args": {"block": {"drop": "0.1", "n": "2"}}})
     assert typed["model_args"] == {"block": {"drop": 0.1, "n": 2}}
@@ -379,6 +417,42 @@ def test_a_bad_token_or_value_stops_before_the_function_runs(tmp_path):
         run_task(Top, function, ["epochs=five"])
     with pytest.raises(ConfigError):
         run_task(Top, function, [f"config={tmp_path / 'missing.yaml'}"])
+    assert calls == []
+
+
+@dataclasses.dataclass(frozen=True)
+class Needs(StrictConfig):
+    out: str
+    epochs: int = 1
+
+
+def test_a_bad_file_or_a_missing_key_is_refused_before_a_keyword_only_function(tmp_path):
+    """The function has a real signature, so reaching it would be a TypeError (exit 1)."""
+    calls = []
+
+    def keyword_only(*, out, epochs=1):
+        calls.append((out, epochs))
+        return SimpleNamespace(success=True)
+
+    def run(text, *tokens):
+        path = tmp_path / "c.yaml"
+        path.write_text(text)
+        with pytest.raises(ConfigValidationError) as caught:
+            run_task(Needs, keyword_only, [f"config={path}", *tokens])
+        return caught.value.errors
+
+    assert run("out: a\nepoch: 3\n") == ("Unknown key 'epoch'. Did you mean 'epochs'?",)
+    assert run("epochs: 3\n") == ("Missing required key 'out'.",)
+    assert run("out: a\n1: 2\n") == ("Invalid key '1': keys must be strings, got 1 (int)",)
+    assert calls == []
+    assert run_task(Needs, keyword_only, ["out=a", "epochs=2"]) == 0
+    assert calls == [("a", 2)]
+
+
+def test_a_missing_required_key_on_the_command_line_alone_is_refused():
+    function, calls = recorder()
+    with pytest.raises(ConfigValidationError, match="Missing required key 'out'"):
+        run_task(Needs, function, ["epochs=1"])
     assert calls == []
 
 

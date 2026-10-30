@@ -17,6 +17,11 @@ fake :class:`~train.api.registry.TaskSpec`, so ``train/__main__.py`` and
 ``sys.exit(main(...))`` really run. The fake task prints a marker before it
 returns or raises, so each arm proves the task was reached and an early exit
 cannot pass.
+
+The fake task functions have the keyword-only signature a real task has
+(``def run(*, value=1, rate=0.5)``) and do NOT validate. A function that
+accepted ``**kwargs`` and validated by itself hid a defect once: a bad config
+file reached a real signature as a ``TypeError`` and exited 1 (D-034).
 """
 
 import os
@@ -34,41 +39,54 @@ MARKER = "FAKE-RAN"
 SOURCE = '''
 import dataclasses
 import sys
+import typing
 from types import SimpleNamespace
 
-from train.api.config import StrictConfig, validate
+from train.api.config import StrictConfig
 
 
 @dataclasses.dataclass(frozen=True)
 class FakeConfig(StrictConfig):
     value: int = dataclasses.field(default=1, metadata={"help": "a count"})
     rate: float = dataclasses.field(default=0.5, metadata={"help": "a rate"})
+    tags: typing.List[int] = dataclasses.field(default_factory=list, metadata={"help": "tags"})
 
 
-def _announce(name, kwargs):
-    config = validate(FakeConfig, kwargs)
-    sys.stdout.write(f"FAKE-RAN {name} value={config.value!r} rate={config.rate!r}\\n")
+@dataclasses.dataclass(frozen=True)
+class RequiredConfig(StrictConfig):
+    out: str = dataclasses.field(metadata={"help": "where to write"})
+    value: int = dataclasses.field(default=1, metadata={"help": "a count"})
+
+
+def _announce(name, **fields):
+    shown = " ".join(f"{key}={val!r}" for key, val in fields.items())
+    sys.stdout.write(f"FAKE-RAN {name} {shown}\\n")
     sys.stdout.flush()
 
 
-def run_ok(**kwargs):
-    _announce("ok", kwargs)
+def run_ok(*, value=1, rate=0.5, tags=()):
+    _announce("ok", value=value, rate=rate)
     return SimpleNamespace(success=True)
 
 
-def run_unmet(**kwargs):
-    _announce("unmet", kwargs)
+def run_unmet(*, value=1, rate=0.5, tags=()):
+    _announce("unmet", value=value, rate=rate)
     return SimpleNamespace(success=False)
 
 
-def run_raises(**kwargs):
-    _announce("raises", kwargs)
+def run_raises(*, value=1, rate=0.5, tags=()):
+    _announce("raises", value=value, rate=rate)
     raise RuntimeError("the fake task blew up")
 
 
-def run_interrupted(**kwargs):
-    _announce("interrupted", kwargs)
+def run_interrupted(*, value=1, rate=0.5, tags=()):
+    _announce("interrupted", value=value, rate=rate)
     raise KeyboardInterrupt
+
+
+def run_required(*, out, value=1):
+    _announce("required", out=out, value=value)
+    return SimpleNamespace(success=True)
 '''
 
 # The driver registers the fake tasks, then runs the real ``train.__main__``.
@@ -79,11 +97,11 @@ import runpy
 
 from train.api.registry import TaskSpec, register_task
 
-for name in ("ok", "unmet", "raises", "interrupted"):
+for name in ("ok", "unmet", "raises", "interrupted", "required"):
     register_task(
         TaskSpec(
             name=f"fake_{{name}}",
-            config_class="{MODULE}:FakeConfig",
+            config_class="{MODULE}:" + ("RequiredConfig" if name == "required" else "FakeConfig"),
             function=f"{MODULE}:run_{{name}}",
             summary="a fake task",
         )
@@ -156,7 +174,7 @@ def test_the_injected_tasks_are_listed(source_dir, cwd):
     # Liveness for every injected arm: the driver really registered the fakes.
     result = run_injected(["list_tasks"], source_dir, cwd)
     assert result.returncode == 0, result.stderr[-2000:]
-    for name in ("fake_ok", "fake_unmet", "fake_raises", "fake_interrupted"):
+    for name in ("fake_ok", "fake_unmet", "fake_raises", "fake_interrupted", "fake_required"):
         assert name in result.stdout
 
 
@@ -184,6 +202,78 @@ def test_a_config_error_exits_two_with_the_message_and_no_traceback(
     assert "Traceback" not in result.stderr
     # The task is never reached for a bad command line.
     assert MARKER not in result.stdout
+
+
+# A config file is not coerced by the command line, so each of these reaches
+# ``run_task`` as a mapping the keyword-only function could not take.
+CONFIG_FILE_ARMS = [
+    pytest.param("fake_ok", b"valu: 3\n", "Unknown key 'valu'. Did you mean 'value'?", id="unknown-top-key"),
+    pytest.param("fake_ok", b"1: 2\n", "Invalid key '1': keys must be strings", id="non-string-key"),
+    pytest.param("fake_ok", b"value: 010x\n", "Invalid value for 'value': expected int, got '010x' (str)", id="bad-value"),
+    pytest.param("fake_ok", b"value: 1_000\n", "Invalid value for 'value': expected int, got '1_000' (str)", id="underscore-int"),
+    pytest.param("fake_ok", b"value: 1:30\n", "Invalid value for 'value': expected int, got '1:30' (str)", id="sexagesimal-int"),
+    pytest.param("fake_ok", b"value: 0x10\n", "Invalid value for 'value': expected int, got '0x10' (str)", id="hex-int"),
+    pytest.param("fake_ok", b"- 1\n- 2\n", "must have a mapping at the top level", id="list-top-level"),
+    pytest.param("fake_ok", b"value: [1\n", "is not valid YAML", id="yaml-syntax"),
+    pytest.param("fake_ok", b"value: 1\nvalue: 2\n", "duplicate key 'value'", id="repeated-key"),
+    pytest.param("fake_ok", b"value: \xff\xfe\n", "Cannot read config file", id="not-utf-8"),
+    pytest.param("fake_required", b"value: 3\n", "Missing required key 'out'.", id="missing-required-key"),
+    pytest.param("fake_required", b"", "mapping at the top level", id="empty-file"),
+]
+
+
+@pytest.mark.parametrize("task, content, message", CONFIG_FILE_ARMS)
+def test_a_bad_config_file_exits_two_before_the_keyword_only_function(
+    task, content, message, source_dir, cwd, tmp_path
+):
+    path = tmp_path / "config.yaml"
+    path.write_bytes(content)
+    result = run_injected([task, f"config={path}"], source_dir, cwd)
+    assert result.returncode == 2, (result.stdout[-1000:], result.stderr[-2000:])
+    assert result.stderr.startswith("error: "), result.stderr
+    assert message in result.stderr, result.stderr
+    assert "Traceback" not in result.stderr
+    assert MARKER not in result.stdout
+
+
+def test_a_missing_required_key_exits_two_and_the_control_with_the_key_runs(source_dir, cwd):
+    refused = run_injected(["fake_required", "value=3"], source_dir, cwd)
+    assert refused.returncode == 2, refused.stderr[-2000:]
+    assert "Missing required key 'out'." in refused.stderr
+    assert "Traceback" not in refused.stderr and MARKER not in refused.stdout
+    accepted = run_injected(["fake_required", "out=somewhere", "value=3"], source_dir, cwd)
+    assert accepted.returncode == 0, accepted.stderr[-2000:]
+    assert f"{MARKER} required out='somewhere' value=3" in accepted.stdout
+
+
+def test_a_good_config_file_runs_and_a_yaml_octal_means_ten(source_dir, cwd, tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("value: 010\nrate: 3e-4\n")
+    result = run_injected(["fake_ok", f"config={path}"], source_dir, cwd)
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert f"{MARKER} ok value=10 rate=0.0003" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["value=" + "9" * 5000, "tags=" + "[" * 100000],
+    ids=["huge-digit-string", "deeply-nested-json"],
+)
+def test_a_token_that_would_crash_the_parser_is_a_refusal_with_exit_two(token, source_dir, cwd):
+    result = run_injected(["fake_ok", token], source_dir, cwd)
+    assert result.returncode == 2, (result.stdout[-500:], result.stderr[-1500:])
+    assert "Traceback" not in result.stderr
+    assert result.stderr.startswith("error: ")
+    assert len(result.stderr) < 1000
+    assert MARKER not in result.stdout
+
+
+@pytest.mark.parametrize("command", ["list_tasks", "list_models"])
+@pytest.mark.parametrize("word", ["-h", "--help", "help"])
+def test_a_list_command_accepts_every_help_word(command, word, cwd):
+    result = run_real([command, word], cwd)
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stderr == ""
 
 
 def test_two_bad_keys_print_two_lines_at_once(source_dir, cwd):

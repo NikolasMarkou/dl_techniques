@@ -11,6 +11,7 @@ from typing import Any, Mapping
 
 import pytest
 
+import train.api.args as args_module
 from train.api.args import (
     AnalysisArgs,
     AutoContext,
@@ -280,6 +281,83 @@ def test_zero_classes_are_refused():
         MetricArgs().resolve_auto(context(num_classes=0))
 
 
+def test_classes_the_data_did_not_report_are_refused_as_the_data_s_fault():
+    with pytest.raises(ConfigError, match="reports None classes"):
+        MetricArgs().resolve_auto(context(num_classes=None))
+
+
+def test_the_success_threshold_is_built_from_its_named_constants(monkeypatch):
+    assert args_module.SUCCESS_CHANCE_MULTIPLE == 2
+    assert args_module.SUCCESS_THRESHOLD_FLOOR == 0.05
+    assert args_module.SUCCESS_THRESHOLD_CEILING == 0.95
+    threshold = lambda n: MetricArgs().resolve_auto(context(num_classes=n)).success_threshold
+    monkeypatch.setattr(args_module, "SUCCESS_CHANCE_MULTIPLE", 3)
+    assert threshold(10) == 0.3
+    monkeypatch.setattr(args_module, "SUCCESS_THRESHOLD_FLOOR", 0.4)
+    assert threshold(10) == 0.4
+    monkeypatch.setattr(args_module, "SUCCESS_THRESHOLD_CEILING", 0.35)
+    assert threshold(10) == 0.35
+
+
+# ---------------------------------------------------------------------
+# A bad recipe or bad data is blamed on its source (D-034)
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("table", [None, ["lr"], "lr", 3])
+def test_a_recipe_group_that_is_not_a_mapping_gives_a_named_error(table):
+    with pytest.raises(ConfigValidationError) as caught:
+        OptimArgs().resolve_auto(context(defaults={"optim_args": table}))
+    (line,) = caught.value.errors
+    assert line.startswith("Family recipe for 'optim_args': expected a mapping of OptimArgs fields")
+
+
+@pytest.mark.parametrize(
+    "group, key, field",
+    [
+        (OptimArgs, "optim_args", "learning_rate"),
+        (OptimArgs, "optim_args", "lrr"),
+        (TransformArgs, "transform_args", "augmnt"),
+        (MetricArgs, "metric_args", "tok_k"),
+        (CheckpointArgs, "checkpoint_args", "early_stoping_patience"),
+    ],
+)
+def test_a_recipe_key_that_is_not_a_field_is_an_error(group, key, field):
+    with pytest.raises(ConfigValidationError) as caught:
+        group().resolve_auto(context(defaults={key: {field: 1}}))
+    (line,) = caught.value.errors
+    assert line.startswith(f"Family recipe for {key!r}: Unknown key '{key}.{field}'")
+
+
+def test_a_recipe_typo_is_an_error_even_when_the_field_it_resembles_is_not_auto():
+    # save_best is a plain bool, never AUTO: the old code dropped its typos.
+    recipe = {"checkpoint_args": {"early_stopping_patience": 15, "save_bset": False}}
+    with pytest.raises(ConfigValidationError, match="Did you mean 'checkpoint_args.save_best'"):
+        CheckpointArgs().resolve_auto(context(defaults=recipe))
+
+
+def test_every_unknown_recipe_key_is_named_at_once():
+    with pytest.raises(ConfigValidationError) as caught:
+        OptimArgs().resolve_auto(context(defaults={"optim_args": {"aa": 1, "bb": 2}}))
+    assert len(caught.value.errors) == 2
+
+
+@pytest.mark.parametrize("size", [None, 0, -4, True, "32", 2.5])
+def test_an_image_size_the_data_did_not_give_blames_the_data(size):
+    ctx = dataclasses.replace(context(), image_size=size)
+    with pytest.raises(ConfigError) as caught:
+        TransformArgs().resolve_auto(ctx)
+    text = str(caught.value)
+    assert not isinstance(caught.value, ConfigValidationError)
+    assert f"The data reports image_size {size!r}" in text
+    assert "Family recipe" not in text
+
+
+def test_an_explicit_image_size_does_not_need_the_data():
+    ctx = dataclasses.replace(context(), image_size=None)
+    assert TransformArgs(image_size=64).resolve_auto(ctx).image_size == 64
+
+
 # ---------------------------------------------------------------------
 # The groups themselves
 # ---------------------------------------------------------------------
@@ -299,9 +377,53 @@ def test_the_seven_groups_default_to_their_documented_values():
 def test_a_tensorboard_dict_with_keys_is_refused_and_null_is_accepted():
     assert LoggerArgs(tensorboard=None).tensorboard is None
     with pytest.raises(ConfigValidationError, match="logger_args.tensorboard"):
-        LoggerArgs(tensorboard={"update_freq": "batch"})
-    with pytest.raises(ConfigValidationError, match="logger_args.tensorboard"):
         validate(Task, {"logger_args": {"tensorboard": {"update_freq": "batch"}}})
+    assert validate(Task, {"logger_args": {"tensorboard": None}}).logger_args.tensorboard is None
+
+
+@dataclasses.dataclass(frozen=True)
+class Elsewhere(StrictConfig):
+    """A config that carries a LoggerArgs under a name other than ``logger_args``."""
+
+    sinks: LoggerArgs = dataclasses.field(default_factory=LoggerArgs)
+    epochs: int = 1
+
+
+def test_the_tensorboard_refusal_is_collected_with_every_other_problem():
+    # It used to raise from __post_init__ and hide the rest of the walk (D-034).
+    with pytest.raises(ConfigValidationError) as caught:
+        validate(
+            Task,
+            {
+                "logger_args": {"tensorboard": {"x": 1}},
+                "optim_args": {"lr": "abc"},
+                "debug_args": {"smoke": "yes"},
+            },
+        )
+    errors = caught.value.errors
+    assert len(errors) == 3, errors
+    assert any(line.startswith("Invalid value for 'logger_args.tensorboard'") for line in errors)
+    assert any("'optim_args.lr'" in line for line in errors)
+    assert any("'debug_args.smoke'" in line for line in errors)
+
+
+def test_the_tensorboard_refusal_names_the_path_of_the_group_that_holds_it():
+    with pytest.raises(ConfigValidationError) as caught:
+        validate(Elsewhere, {"sinks": {"tensorboard": {"x": 1}}, "epochs": "zz"})
+    errors = caught.value.errors
+    assert len(errors) == 2, errors
+    assert any(line.startswith("Invalid value for 'sinks.tensorboard'") for line in errors)
+    assert not any("logger_args" in line for line in errors)
+    with pytest.raises(ConfigValidationError) as bare:
+        validate(LoggerArgs, {"tensorboard": {"x": 1}})
+    assert bare.value.errors[0].startswith("Invalid value for 'tensorboard'")
+
+
+def test_an_instance_whose_tensorboard_dict_was_edited_in_place_is_caught_at_validate():
+    sinks = LoggerArgs()
+    sinks.tensorboard["update_freq"] = "batch"
+    with pytest.raises(ConfigValidationError, match="logger_args.tensorboard"):
+        validate(Task, {"logger_args": sinks})
 
 
 def test_the_group_fields_refuse_text_from_a_python_caller():

@@ -27,8 +27,11 @@ Interface contract
         the recipe's value included, is returned untouched (D-010). A field
         the recipe has no entry for stays ``"auto"``, and
         :func:`~train.api.config.assert_resolved` then reports it by dotted path.
-    :raises ConfigValidationError: when a recipe value does not fit the field.
-    :raises ConfigError: when ``TransformArgs.augment`` names no preset.
+    :raises ConfigValidationError: when a recipe group is not a mapping, names
+        a key the group does not have (AUTO or not), or holds a value that
+        does not fit the field.
+    :raises ConfigError: when ``TransformArgs.augment`` names no preset, or the
+        data's ``image_size`` or ``num_classes`` cannot fill an AUTO field.
 
 The groups carry only data and the AUTO rules. The code that reads the fields
 lands with them: ``optim.py`` (``OptimArgs``), the task file (``TransformArgs``)
@@ -41,10 +44,25 @@ Module scope imports only the standard library and ``train.api``. The two
 """
 
 import dataclasses
-from typing import Any, Dict, Iterable, Literal, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional
 
-from .config import AUTO, Auto, StrictConfig, validate
+from .config import (
+    AUTO,
+    Auto,
+    StrictConfig,
+    join_path,
+    unknown_key_message,
+    validate,
+)
 from .errors import ConfigError, ConfigValidationError
+
+# ---------------------------------------------------------------------
+
+#: ``success_threshold = auto`` is this many times chance (``1 / num_classes``),
+#: kept between the floor and the ceiling.
+SUCCESS_CHANCE_MULTIPLE = 2
+SUCCESS_THRESHOLD_FLOOR = 0.05
+SUCCESS_THRESHOLD_CEILING = 0.95
 
 # ---------------------------------------------------------------------
 
@@ -74,8 +92,29 @@ def _recipe_values(
     :param context: supplies ``context.defaults[key]``.
     :param key: the group's field name in the task config.
     :param skip: field names that must stay as they are.
+    :raises ConfigValidationError: when the recipe's entry for the group is not
+        a mapping, or holds a key that is not a field of the group.
     """
     table = context.defaults.get(key, {})
+    if not isinstance(table, Mapping):
+        raise ConfigValidationError(
+            [
+                f"Family recipe for {key!r}: expected a mapping of "
+                f"{type(group).__name__} fields, got {table!r} "
+                f"({type(table).__name__})"
+            ]
+        )
+    names = [field.name for field in dataclasses.fields(group)]
+    # A key that is no field is a typo whether or not its field is AUTO, so
+    # it is named here and not dropped (D-034).
+    unknown = [name for name in table if name not in names]
+    if unknown:
+        raise ConfigValidationError(
+            [
+                f"Family recipe for {key!r}: {unknown_key_message(key, str(name), names)}"
+                for name in unknown
+            ]
+        )
     skipped = set(skip)
     return {
         field.name: table[field.name]
@@ -213,7 +252,14 @@ class TransformArgs(StrictConfig):
 
         found = _recipe_values(self, context, "transform_args", skip=("image_size",))
         if _is_auto(self.image_size):
-            found["image_size"] = context.image_size
+            size = context.image_size
+            if not isinstance(size, int) or isinstance(size, bool) or size < 1:
+                raise ConfigError(
+                    f"The data reports image_size {size!r}; "
+                    "transform_args.image_size = auto needs a positive integer. "
+                    "Set transform_args.image_size."
+                )
+            found["image_size"] = size
         resolved = _with_values(self, "transform_args", found)
         if not _is_auto(resolved.augment) and resolved.augment not in PRESETS:
             raise ConfigError(
@@ -243,7 +289,8 @@ class MetricArgs(StrictConfig):
         default=AUTO,
         metadata={
             "help": "best val_accuracy at or above this counts as success; "
-            "auto is twice chance, kept between 0.05 and 0.95"
+            f"auto is {SUCCESS_CHANCE_MULTIPLE} times chance, kept between "
+            f"{SUCCESS_THRESHOLD_FLOOR} and {SUCCESS_THRESHOLD_CEILING}"
         },
     )
 
@@ -256,9 +303,10 @@ class MetricArgs(StrictConfig):
         """
         from train.common.callbacks import resolve_monitor_mode
 
-        if context.num_classes < 1:
+        classes = context.num_classes
+        if not isinstance(classes, int) or isinstance(classes, bool) or classes < 1:
             raise ConfigError(
-                f"The data reports {context.num_classes} classes; "
+                f"The data reports {classes!r} classes; "
                 "success_threshold needs at least 1."
             )
         found = _recipe_values(
@@ -268,7 +316,11 @@ class MetricArgs(StrictConfig):
         if _is_auto(self.watch_mode) and not _is_auto(metric):
             found["watch_mode"] = resolve_monitor_mode(metric)
         if _is_auto(self.success_threshold):
-            found["success_threshold"] = min(max(2 / context.num_classes, 0.05), 0.95)
+            auto_threshold = SUCCESS_CHANCE_MULTIPLE / classes
+            found["success_threshold"] = min(
+                max(auto_threshold, SUCCESS_THRESHOLD_FLOOR),
+                SUCCESS_THRESHOLD_CEILING,
+            )
         return _with_values(self, "metric_args", found)
 
 
@@ -306,19 +358,22 @@ class LoggerArgs(StrictConfig):
         },
     )
 
-    def __post_init__(self) -> None:
+    def problems(self, prefix: str) -> List[str]:
+        """Name a non-empty ``tensorboard`` dict as a problem at its own path."""
         # DECISION plan-2026-10-30T132432-a865fa08/D-022: a TensorBoard dict
         # with keys is refused, not ignored. Do NOT accept options and drop
         # them: create_callbacks only switches TensorBoard on or off, so a
-        # silently ignored option looks like it worked.
-        if self.tensorboard:
-            raise ConfigValidationError(
-                [
-                    "Invalid value for 'logger_args.tensorboard': expected {} "
-                    "or null, got a dict with keys "
-                    f"{sorted(self.tensorboard)} (no TensorBoard option is wired)"
-                ]
-            )
+        # silently ignored option looks like it worked. D-034: it is reported
+        # here, from validate's walk, and NOT raised from __post_init__, which
+        # aborted the walk and hid every other bad key, and which a later
+        # in-place edit of the dict bypassed.
+        if not self.tensorboard:
+            return []
+        return [
+            f"Invalid value for {join_path(prefix, 'tensorboard')!r}: expected "
+            "{} or null, got a dict with keys "
+            f"{sorted(map(str, self.tensorboard))} (no TensorBoard option is wired)"
+        ]
 
 
 @dataclasses.dataclass(frozen=True)

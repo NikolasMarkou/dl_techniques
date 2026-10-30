@@ -11,11 +11,12 @@ import json
 import math
 import sys
 from pathlib import Path
-from typing import Any, Dict, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import pytest
 
 from train.api import config as config_module
+from train.api.cli import coerce
 from train.api.config import (
     AUTO,
     DEFAULT_SEED,
@@ -25,6 +26,8 @@ from train.api.config import (
     from_json,
     load_yaml_mapping,
     merge,
+    parse_int,
+    parse_json,
     to_json,
     validate,
 )
@@ -57,6 +60,32 @@ class Top(StrictConfig):
 class NeedsKey(StrictConfig):
     must: int
     optional: int = 1
+
+
+@dataclasses.dataclass(frozen=True)
+class Inner(StrictConfig):
+    lr: Auto[float] = AUTO
+    n: int = 1
+
+
+@dataclasses.dataclass(frozen=True)
+class Mid(StrictConfig):
+    inner: Inner = dataclasses.field(default_factory=Inner)
+    k: int = 1
+
+
+@dataclasses.dataclass(frozen=True)
+class Containers(StrictConfig):
+    """Every shape in which an AUTO field can hide below the top level."""
+
+    one: Inner = dataclasses.field(default_factory=lambda: Inner(lr=1.0))
+    either: Union[Inner, Mid, None] = None
+    floats: List[Auto[float]] = dataclasses.field(default_factory=list)
+    by_name: Dict[str, Auto[float]] = dataclasses.field(default_factory=dict)
+    groups: List[Inner] = dataclasses.field(default_factory=list)
+    pair: Tuple[Auto[int], int] = (1, 1)
+    free: Dict[str, Any] = dataclasses.field(default_factory=dict)
+    text: str = "auto"
 
 
 def errors_of(cls, mapping):
@@ -204,6 +233,12 @@ def test_merge_is_deep_and_mutates_nothing():
     merged["a"]["y"].append(2)
     merged["c"]["d"] = 9
     assert base["a"]["y"] == [1] and overrides["c"]["d"] == 3
+
+
+def test_an_empty_mapping_over_a_mapping_clears_nothing():
+    # What the task help promises about ``model_args={}`` (D-034).
+    assert merge({"model_args": {"a": 1}}, {"model_args": {}}) == {"model_args": {"a": 1}}
+    assert merge({"model_args": {"a": 1}}, {"model_args": None}) == {"model_args": None}
 
 
 def test_merge_replaces_a_mapping_with_a_scalar_and_back():
@@ -369,3 +404,227 @@ def test_the_seed_copy_equals_the_real_default_and_the_literal():
     from train.common.seed import DEFAULT_SEED as real
 
     assert DEFAULT_SEED == real == 42
+
+
+# ---------------------------------------------------------------------
+# YAML integers follow the command line, not YAML 1.1 (D-034)
+# ---------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class Count(StrictConfig):
+    epochs: int = 1
+
+
+@dataclasses.dataclass(frozen=True)
+class Label(StrictConfig):
+    name: str = "x"
+
+
+def test_yaml_one_point_one_ints_are_not_silently_another_number(tmp_path):
+    import yaml
+
+    # The control: the stock loader gives these three different numbers.
+    assert yaml.safe_load("a: 010")["a"] == 8
+    assert yaml.safe_load("a: 1:30")["a"] == 90
+    assert yaml.safe_load("a: 1_000")["a"] == 1000
+    assert load_yaml_mapping(write(tmp_path, "a: 010\n"))["a"] == 10
+
+
+@pytest.mark.parametrize("text", ["010", "007", "0", "-5", "42", "1:30", "1_000", "0x10", "0o17", "+5", "0b11", "5.0"])
+def test_a_yaml_int_means_what_the_command_line_means_or_is_refused(tmp_path, text):
+    from_cli = None
+    try:
+        from_cli = coerce(int, text, "epochs")
+    except ConfigError:
+        pass
+    loaded = load_yaml_mapping(write(tmp_path, f"epochs: {text}\n"))
+    try:
+        from_yaml = validate(Count, loaded).epochs
+    except ConfigValidationError:
+        from_yaml = None
+    # Either door refuses, or both give the same number; neither gives another one.
+    if from_yaml is not None:
+        assert from_cli == from_yaml, (text, from_cli, from_yaml)
+    expected_ints = {"010": 10, "007": 7, "0": 0, "-5": -5, "42": 42}
+    if text in expected_ints:
+        assert from_yaml == expected_ints[text] and type(from_yaml) is int
+    else:
+        assert from_yaml is None, (text, from_yaml)
+
+
+@pytest.mark.parametrize("text", ["1:30", "1_000", "0x10"])
+def test_the_same_text_stays_text_in_a_str_field(tmp_path, text):
+    loaded = load_yaml_mapping(write(tmp_path, f"name: {text}\n"))
+    assert validate(Label, loaded).name == text
+
+
+def test_an_explicit_int_tag_on_a_non_decimal_is_a_config_error_not_a_traceback(tmp_path):
+    for text in ("!!int 0x10", "!!int 1_000", "!!int abc"):
+        with pytest.raises(ConfigError, match="not a decimal integer"):
+            load_yaml_mapping(write(tmp_path, f"epochs: {text}\n"))
+
+
+def test_the_yaml_int_pattern_is_the_one_the_command_line_uses():
+    from train.api import cli
+
+    assert config_module.INT_PATTERN == r"-?[0-9]+"
+    assert cli.parse_int is config_module.parse_int
+
+
+def test_a_huge_digit_string_is_a_refusal_in_every_door(tmp_path):
+    digits = "9" * 5000
+    assert parse_int(digits) == (None, ": too many digits")
+    assert parse_int("12") == (12, None)
+    assert parse_int("1_0") == (None, "")
+    with pytest.raises(ConfigError, match="too many digits"):
+        load_yaml_mapping(write(tmp_path, f"epochs: {digits}\n"))
+
+
+def test_yaml_with_bytes_that_are_not_utf_8_is_a_config_error(tmp_path):
+    path = tmp_path / "binary.yaml"
+    path.write_bytes(b"out: \xff\xfe\n")
+    with pytest.raises(ConfigError, match="Cannot read config file"):
+        load_yaml_mapping(path)
+
+
+# ---------------------------------------------------------------------
+# JSON refuses a repeated key (D-034)
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    ['{"lr": 1, "lr": 2}', '{"a": {"b": 1, "b": 2}}', '[{"x": 1, "x": 1}]'],
+    ids=["top", "nested", "in-a-list"],
+)
+def test_parse_json_refuses_a_repeated_key(text):
+    value, reason = parse_json(text)
+    assert value is None
+    assert "found a duplicate key" in reason
+
+
+def test_a_repeated_key_in_a_config_file_text_is_a_config_error():
+    with pytest.raises(ConfigError, match="duplicate key 'lr'"):
+        from_json(Inner, '{"lr": 1, "lr": 2}')
+    assert from_json(Inner, '{"lr": 1, "n": 2}') == Inner(lr=1.0, n=2)
+
+
+def test_deep_nesting_comes_back_as_a_value_not_a_traceback():
+    value, reason = parse_json("[" * 100000)
+    assert value is None
+    assert "nested too deeply" in reason
+
+
+# ---------------------------------------------------------------------
+# Free dicts: finite numbers, string keys, a private copy (D-034)
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", [math.nan, math.inf, -math.inf])
+def test_a_free_dict_refuses_a_non_finite_number_at_any_depth(bad):
+    errors = errors_of(
+        Top,
+        {"model_args": {"top": bad, "deep": {"deeper": [1, {"x": bad}]}, "ok": 1.5}},
+    )
+    assert len(errors) == 2, errors
+    assert errors[0].startswith("Invalid value for 'model_args.top': expected a finite number")
+    assert errors[1].startswith(
+        "Invalid value for 'model_args.deep.deeper[1].x': expected a finite number"
+    )
+
+
+def test_a_free_dict_with_a_finite_number_still_validates_and_a_nan_does_not_reach_json():
+    top = validate(Top, {"model_args": {"depth": 4, "rate": 0.5, "nested": [1.5, 2]}})
+    assert from_json(Top, to_json(top)) == top
+    with pytest.raises(ConfigValidationError):
+        validate(Top, {"model_args": {"rate": math.nan}})
+
+
+def test_a_free_dict_refuses_a_non_string_key_at_any_depth():
+    errors = errors_of(Top, {"model_args": {1: 2, "a": {3: 4}}})
+    assert len(errors) == 2, errors
+    assert errors[0] == "Invalid value for 'model_args.1': expected str, got 1 (int)"
+    assert errors[1] == "Invalid key 'model_args.a.3': keys must be strings, got 3 (int)"
+
+
+def test_a_non_string_top_level_key_is_refused_with_the_word_string():
+    (line,) = errors_of(Top, {1: 2})
+    assert line == "Invalid key '1': keys must be strings, got 1 (int)"
+
+
+def test_validate_copies_a_free_dict_deeply():
+    payload = {"a": [1, 2], "b": {"c": [3]}}
+    top = validate(Top, {"model_args": payload})
+    payload["a"].append(9)
+    payload["b"]["c"].append(9)
+    assert top.model_args == {"a": [1, 2], "b": {"c": [3]}}
+    assert top.model_args is not payload and top.model_args["a"] is not payload["a"]
+
+
+def test_validate_copies_an_any_field_too():
+    @dataclasses.dataclass(frozen=True)
+    class Loose(StrictConfig):
+        anything: Any = None
+
+    shared = [1, 2]
+    loose = validate(Loose, {"anything": shared})
+    shared.append(3)
+    assert loose.anything == [1, 2]
+    assert validate(Loose, {"anything": (1, 2)}).anything == (1, 2)
+    assert errors_of(Loose, {"anything": [math.nan]})
+
+
+def test_a_dict_annotation_with_a_non_string_key_is_a_programming_error():
+    @dataclasses.dataclass(frozen=True)
+    class IntKeys(StrictConfig):
+        table: Dict[int, float] = dataclasses.field(default_factory=dict)
+
+    with pytest.raises(TypeError, match="Dict key type must be str"):
+        validate(IntKeys, {"table": {1: 2.0}})
+
+
+# ---------------------------------------------------------------------
+# assert_resolved walks containers; a union of groups tries each group (D-034)
+# ---------------------------------------------------------------------
+
+
+def unresolved(mapping):
+    with pytest.raises(UnresolvedAutoError) as caught:
+        assert_resolved(validate(Containers, mapping))
+    return str(caught.value).split(": ", 1)[1].split(", ")
+
+
+def test_assert_resolved_finds_auto_inside_lists_dicts_and_tuples():
+    assert unresolved({"floats": [1.0, "auto"]}) == ["floats[1]"]
+    assert unresolved({"by_name": {"a": 1.0, "b": "auto"}}) == ["by_name.b"]
+    assert unresolved({"groups": [{"lr": 1.0}, {}]}) == ["groups[1].lr"]
+    assert unresolved({"pair": ["auto", 2]}) == ["pair[0]"]
+    assert unresolved({"either": {"lr": "auto"}}) == ["either.lr"]
+
+
+def test_assert_resolved_reads_every_member_of_a_union_of_groups():
+    assert unresolved({"either": {"inner": {}, "k": 2}}) == ["either.inner.lr"]
+
+
+def test_assert_resolved_still_ignores_auto_that_is_data():
+    ok = validate(
+        Containers,
+        {"free": {"x": "auto", "y": ["auto"]}, "text": "auto", "floats": [1.0]},
+    )
+    assert_resolved(ok)
+
+
+def test_a_mapping_for_a_union_of_groups_is_tried_against_each_member():
+    assert validate(Containers, {"either": {"inner": {"lr": 1.0}, "k": 2}}).either == Mid(Inner(lr=1.0), 2)
+    assert validate(Containers, {"either": {"n": 3}}).either == Inner(n=3)
+    assert validate(Containers, {"either": Mid(k=2)}).either == Mid(k=2)
+
+
+def test_a_mapping_that_fits_no_group_reports_the_closest_one():
+    # Inner has one problem (n), Mid two (both keys unknown): Inner reports.
+    errors = errors_of(Containers, {"either": {"n": "z", "lr": 1.0}})
+    assert errors == ("Invalid value for 'either.n': expected int, got 'z' (str)",)
+    # Inner has two unknown keys, Mid one bad value: Mid reports, though it is second.
+    errors = errors_of(Containers, {"either": {"k": 1, "inner": {"lr": "x"}}})
+    assert errors == ("Invalid value for 'either.inner.lr': expected float, got 'x' (str)",)
