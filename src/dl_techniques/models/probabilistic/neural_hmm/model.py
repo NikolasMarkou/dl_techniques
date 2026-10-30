@@ -67,7 +67,7 @@ References:
 """
 
 import inspect
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 import keras
 
@@ -158,6 +158,16 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
     :param input_dim: Feature count of an exogenous input ``inputs`` of shape
         ``(B, T, input_dim)``, which the encoder then reads instead of the observations;
         positive, or ``None`` for no such input. Generative mode with an encoder only.
+    :param allowed_transitions: Optional ``(K, K)`` nested booleans, rows the source: the
+        transitions allowed on top of ``topology``, for structural constraints such as BIO
+        tagging. Every state needs an allowed destination.
+    :param allowed_starts: Optional ``(K,)`` nested booleans: the allowed start states, on
+        top of ``topology``.
+    :param allowed_ends: Optional ``(K,)`` nested booleans: the states a sequence may end in.
+        In generative mode the likelihood is then ``log p(x, z_last in ends)``, which sums to
+        less than 1 over ``x``.
+    :param end_potential: Learn a logit per end state, as a CRF's END tag does.
+        Discriminative mode only: in generative mode it would break the normalization.
     :param kwargs: Base ``keras.Model`` arguments.
     :raises ValueError: If an argument is out of range, unknown, missing for the
         ``obs_type``, the combination is invalid, or an argument the configuration does
@@ -253,6 +263,10 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
         dropout_rate: float = 0.0,
         attention_dropout_rate: float = 0.0,
         input_dim: Optional[int] = None,
+        allowed_transitions: Optional[Sequence] = None,
+        allowed_starts: Optional[Sequence] = None,
+        allowed_ends: Optional[Sequence] = None,
+        end_potential: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -275,6 +289,11 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
             raise ValueError(
                 f"obs_type='{obs_type}' needs a positive obs_dim and vocab_size=None, "
                 f"got obs_dim={obs_dim}, vocab_size={vocab_size}."
+            )
+        if end_potential and mode != "discriminative":
+            raise ValueError(
+                "end_potential=True needs mode='discriminative': a learned end potential would "
+                "break a generative model's normalization. Use allowed_ends for a hard constraint."
             )
         if mode == "discriminative" and emission_context != "none":
             raise ValueError(
@@ -317,6 +336,10 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
         self.dropout_rate = dropout_rate
         self.attention_dropout_rate = attention_dropout_rate
         self.input_dim = input_dim
+        self.allowed_transitions = allowed_transitions
+        self.allowed_starts = allowed_starts
+        self.allowed_ends = allowed_ends
+        self.end_potential = end_potential
 
         if input_dim is not None and input_dim <= 0:
             raise ValueError(f"input_dim must be positive or None, got {input_dim}.")
@@ -369,7 +392,15 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
 
         transition_class = InputDependentTransition if transition == "input_dependent" else StaticTransition
         self.transition = transition_class(
-            n_states, topology=topology, band_width=band_width, self_loop_init=self_loop_init, name="transition"
+            n_states,
+            topology=topology,
+            band_width=band_width,
+            self_loop_init=self_loop_init,
+            allowed_transitions=allowed_transitions,
+            allowed_starts=allowed_starts,
+            allowed_ends=allowed_ends,
+            end_potential=end_potential,
+            name="transition",
         )
         if generative:
             self.emission = GenerativeEmission(
@@ -451,7 +482,8 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
             With ``input_dim`` set, also ``"inputs"``: ``(B, T, input_dim)`` floats.
         :param training: Forwarded to every sublayer.
         :return: ``{"log_pi": (B, K), "log_A": (B, T, K, K), "log_emit": (B, T, K)}`` in the
-            accumulation dtype (float32 under float32 and mixed precision).
+            accumulation dtype (float32 under float32 and mixed precision), plus
+            ``"log_end": (B, K)`` with ``allowed_ends`` or ``end_potential`` set.
         """
         obs, valid = self._observations(inputs)
         context = None
@@ -479,13 +511,16 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
             context = self.encoder(features, mask=valid, training=training)
 
         transition_input = context if self.transition_type == "input_dependent" else obs
-        log_pi, log_A = self.transition(transition_input, training=training)
+        transition_outputs = self.transition(transition_input, training=training)
         if self.mode == "generative":
             emission_context = context if self.emission_context == "autoregressive" else None
             log_emit = self.emission(obs, emission_context, training=training)
         else:
             log_emit = self.emission(context, training=training)
-        return {"log_pi": log_pi, "log_A": log_A, "log_emit": log_emit}
+        outputs = {"log_pi": transition_outputs[0], "log_A": transition_outputs[1], "log_emit": log_emit}
+        if self.transition.returns_log_end:
+            outputs["log_end"] = transition_outputs[2]
+        return outputs
 
     def _observations(self, inputs: Dict[str, keras.KerasTensor]) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """Return the observations with padded steps neutralized, and the boolean mask.
@@ -583,7 +618,8 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
         :raises ValueError: If ``states`` is missing or superfluous for the mode.
         """
         log_pi, log_A, log_emit = outputs["log_pi"], outputs["log_A"], outputs["log_emit"]
-        log_z = inference.forward_log_likelihood(log_pi, log_A, log_emit, mask)
+        log_end = outputs.get("log_end")
+        log_z = inference.forward_log_likelihood(log_pi, log_A, log_emit, mask, log_end)
         # DECISION plan-2026-10-13T192257-1bb3bf1f/D-027: the out-of-range symbol penalty is
         # added to the finished sequence log-likelihood, never to log_emit. Do NOT move it
         # into the potentials: one -1e9 step absorbs every float32 forward/backward value
@@ -597,7 +633,7 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
             return log_z + penalty
         if states is None:
             raise ValueError("mode='discriminative' needs the state labels: pass y=states of shape (B, T).")
-        score = inference.path_log_score(log_pi, log_A, log_emit, states, mask)
+        score = inference.path_log_score(log_pi, log_A, log_emit, states, mask, log_end)
         return score - log_z + penalty
 
     def compute_loss(
@@ -672,7 +708,9 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
         """
         outputs = self(inputs, training=False)
         mask = self._valid_mask(inputs, outputs["log_emit"])
-        return inference.viterbi_decode(outputs["log_pi"], outputs["log_A"], outputs["log_emit"], mask)
+        return inference.viterbi_decode(
+            outputs["log_pi"], outputs["log_A"], outputs["log_emit"], mask, outputs.get("log_end")
+        )
 
     def posteriors(self, inputs: Dict[str, Any]) -> keras.KerasTensor:
         """Return the posterior state marginals ``p(z_t = k | x)``.
@@ -687,7 +725,9 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
         """
         outputs = self(inputs, training=False)
         mask = self._valid_mask(inputs, outputs["log_emit"])
-        return inference.state_posteriors(outputs["log_pi"], outputs["log_A"], outputs["log_emit"], mask)
+        return inference.state_posteriors(
+            outputs["log_pi"], outputs["log_A"], outputs["log_emit"], mask, outputs.get("log_end")
+        )
 
     # -----------------------------------------------------------------
     # Shapes, config and factories
@@ -697,11 +737,15 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
         """Return the output shapes from the stored config; valid before ``build``.
 
         :param input_shape: ``{"obs": (B, T, ...), "mask": (B, T)}``.
-        :return: ``{"log_pi": (B, K), "log_A": (B, T, K, K), "log_emit": (B, T, K)}``.
+        :return: ``{"log_pi": (B, K), "log_A": (B, T, K, K), "log_emit": (B, T, K)}``, plus
+            ``"log_end": (B, K)`` with ``allowed_ends`` or ``end_potential`` set.
         """
         obs_shape = tuple(input_shape["obs"])
         batch, steps, k = obs_shape[0], obs_shape[1], self.n_states
-        return {"log_pi": (batch, k), "log_A": (batch, steps, k, k), "log_emit": (batch, steps, k)}
+        shapes = {"log_pi": (batch, k), "log_A": (batch, steps, k, k), "log_emit": (batch, steps, k)}
+        if self.transition.returns_log_end:
+            shapes["log_end"] = (batch, k)
+        return shapes
 
     def get_config(self) -> Dict[str, Any]:
         """Return every constructor argument.
@@ -837,6 +881,10 @@ class NeuralHMM(LogSpaceOutputSpec, keras.Model):
             "dropout_rate": self.dropout_rate,
             "attention_dropout_rate": self.attention_dropout_rate,
             "input_dim": self.input_dim,
+            "allowed_transitions": self.allowed_transitions,
+            "allowed_starts": self.allowed_starts,
+            "allowed_ends": self.allowed_ends,
+            "end_potential": self.end_potential,
         }
 
     @classmethod

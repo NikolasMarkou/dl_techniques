@@ -16,6 +16,8 @@ Shapes (``B`` batch, ``T`` time, ``K`` states):
   (right padding). A padded step contributes no emission and no transition, so the
   result for a padded sequence equals the result for the truncated sequence. Interior
   gaps are not supported and are not checked.
+- ``log_end``: optional ``(B, K)``, the potential of ending in each state, read at each
+  sequence's last valid step. ``None`` means 0 for every state.
 
 The recursions run as ``keras.ops.while_loop`` over time, so the time axis may be unknown
 at trace time (Keras retraces ``predict`` and ``evaluate`` with an unknown length from the
@@ -33,7 +35,7 @@ References:
       Speech Recognition. Proceedings of the IEEE 77(2), pp. 257-286.
 """
 
-from typing import Any, Callable, Tuple
+from typing import Any, Callable, Optional, Tuple
 
 import keras
 
@@ -169,6 +171,16 @@ def _select(values: keras.KerasTensor, index: keras.KerasTensor, n_states: int) 
     return keras.ops.sum(keras.ops.where(chosen, values, keras.ops.zeros_like(values)), axis=-1)
 
 
+def _plus_end(message: keras.KerasTensor, log_end: Optional[keras.KerasTensor]) -> keras.KerasTensor:
+    """Return a final ``(B, K)`` forward message with the end potentials added.
+
+    :param message: ``(B, K)`` message at each sequence's last valid step.
+    :param log_end: ``(B, K)`` end potentials, or ``None``.
+    :return: ``(B, K)`` message.
+    """
+    return message if log_end is None else message + log_end
+
+
 def _rescale(message: keras.KerasTensor) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
     """Shift a log-space message so its largest entry is 0, and return the shift.
 
@@ -192,6 +204,7 @@ def _forward_final(
     log_A: keras.KerasTensor,
     log_emit: keras.KerasTensor,
     valid: keras.KerasTensor,
+    log_end: Optional[keras.KerasTensor] = None,
 ) -> keras.KerasTensor:
     """Run the forward recursion keeping no history, and return ``logZ`` per sequence.
 
@@ -202,6 +215,7 @@ def _forward_final(
     :param log_A: ``(B, T, K, K)`` accumulation-dtype transition log-potentials.
     :param log_emit: ``(B, T, K)`` accumulation-dtype emission log-potentials.
     :param valid: ``(B, T)`` boolean validity mask.
+    :param log_end: ``(B, K)`` accumulation-dtype end potentials, or ``None``.
     :return: ``(B,)`` log partition function; not yet zeroed for empty sequences.
     """
     alpha, log_scale = _rescale(
@@ -217,7 +231,7 @@ def _forward_final(
 
     num_steps = keras.ops.shape(log_emit)[1]
     alpha, log_scale = _time_loop(body, (alpha, log_scale), num_steps)
-    return log_scale + keras.ops.logsumexp(alpha, axis=-1)
+    return log_scale + keras.ops.logsumexp(_plus_end(alpha, log_end), axis=-1)
 
 
 def _forward_alphas(
@@ -274,6 +288,7 @@ def forward_log_likelihood(
     log_A: keras.KerasTensor,
     log_emit: keras.KerasTensor,
     mask: keras.KerasTensor,
+    log_end: Optional[keras.KerasTensor] = None,
 ) -> keras.KerasTensor:
     """Return the log partition function of every sequence, by the forward algorithm.
 
@@ -288,11 +303,13 @@ def forward_log_likelihood(
         column; ``log_A[:, 0]`` is ignored.
     :param log_emit: ``(B, T, K)`` emission log-potentials.
     :param mask: ``(B, T)`` right-padding mask, nonzero at valid steps.
+    :param log_end: Optional ``(B, K)`` end potentials, added at the last valid step.
     :return: ``(B,)`` log partition function, in float32 (float64 for float64 input).
     :raises ValueError: If an input does not have the documented rank.
     """
     log_pi, log_A, log_emit, valid = _prepare(log_pi, log_A, log_emit, mask)
-    return _empty_to_zero(_forward_final(log_pi, log_A, log_emit, valid), valid)
+    log_end = None if log_end is None else keras.ops.cast(log_end, log_emit.dtype)
+    return _empty_to_zero(_forward_final(log_pi, log_A, log_emit, valid, log_end), valid)
 
 
 def path_log_score(
@@ -301,6 +318,7 @@ def path_log_score(
     log_emit: keras.KerasTensor,
     states: keras.KerasTensor,
     mask: keras.KerasTensor,
+    log_end: Optional[keras.KerasTensor] = None,
 ) -> keras.KerasTensor:
     """Return the unnormalized log score of a given state path for every sequence.
 
@@ -318,6 +336,8 @@ def path_log_score(
     :param log_emit: ``(B, T, K)`` emission log-potentials.
     :param states: ``(B, T)`` integer states, in ``[0, K)`` at valid steps.
     :param mask: ``(B, T)`` right-padding mask, nonzero at valid steps.
+    :param log_end: Optional ``(B, K)`` end potentials; the state at the last valid step
+        adds its entry.
     :return: ``(B,)`` path score, in the accumulation dtype.
     :raises ValueError: If an input does not have the documented rank.
     """
@@ -349,7 +369,15 @@ def path_log_score(
     bad = keras.ops.logical_and(valid, keras.ops.logical_not(in_range))
     sentinel = keras.ops.full_like(emit, mask_sentinel(emit.dtype))
     penalty = keras.ops.where(bad, sentinel, keras.ops.zeros_like(emit))
-    return start + keras.ops.sum(emit, axis=1) + keras.ops.sum(trans, axis=1) + keras.ops.sum(penalty, axis=1)
+    score = start + keras.ops.sum(emit, axis=1) + keras.ops.sum(trans, axis=1) + keras.ops.sum(penalty, axis=1)
+    if log_end is None:
+        return score
+    log_end = keras.ops.cast(log_end, log_emit.dtype)
+    following = keras.ops.concatenate([valid[:, 1:], keras.ops.zeros_like(valid[:, :1])], axis=1)
+    is_last = keras.ops.logical_and(valid, keras.ops.logical_not(following))
+    ended = keras.ops.logical_and(is_last[:, :, None], picked)
+    ends = keras.ops.where(ended, log_end[:, None, :], keras.ops.zeros_like(log_emit))
+    return score + keras.ops.sum(ends, axis=(1, 2))
 
 
 def viterbi_decode(
@@ -357,6 +385,7 @@ def viterbi_decode(
     log_A: keras.KerasTensor,
     log_emit: keras.KerasTensor,
     mask: keras.KerasTensor,
+    log_end: Optional[keras.KerasTensor] = None,
 ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
     """Return the highest-scoring state path of every sequence and its score.
 
@@ -364,6 +393,7 @@ def viterbi_decode(
     :param log_A: ``(B, T, K, K)`` transition log-potentials; ``log_A[:, 0]`` is ignored.
     :param log_emit: ``(B, T, K)`` emission log-potentials.
     :param mask: ``(B, T)`` right-padding mask, nonzero at valid steps.
+    :param log_end: Optional ``(B, K)`` end potentials, added at the last valid step.
     :return: ``(path, score)``: ``path`` is ``(B, T)`` int32 with ``-1`` at padded steps;
         ``score`` is ``(B,)``, equal to :func:`path_log_score` of ``path`` (0 for a
         sequence with no valid step). Ties resolve to the lowest state index.
@@ -390,6 +420,8 @@ def viterbi_decode(
 
     delta, log_scale, backpointers = _time_loop(forward, (delta, log_scale, identity), num_steps)
 
+    log_end = None if log_end is None else keras.ops.cast(log_end, log_emit.dtype)
+    delta = _plus_end(delta, log_end)
     last = keras.ops.cast(keras.ops.argmax(delta, axis=-1), "int32")
     path = _write(keras.ops.zeros_like(identity[:, :, 0]), num_steps - 1, last)
 
@@ -408,6 +440,7 @@ def state_posteriors(
     log_A: keras.KerasTensor,
     log_emit: keras.KerasTensor,
     mask: keras.KerasTensor,
+    log_end: Optional[keras.KerasTensor] = None,
 ) -> keras.KerasTensor:
     """Return the posterior state marginals ``p(z_t = k | x)`` by forward-backward.
 
@@ -415,6 +448,7 @@ def state_posteriors(
     :param log_A: ``(B, T, K, K)`` transition log-potentials; ``log_A[:, 0]`` is ignored.
     :param log_emit: ``(B, T, K)`` emission log-potentials.
     :param mask: ``(B, T)`` right-padding mask, nonzero at valid steps.
+    :param log_end: Optional ``(B, K)`` end potentials, added at the last valid step.
     :return: ``(B, T, K)`` probabilities summing to 1 over ``K`` at every valid step,
         and exactly 0 at padded steps.
     :raises ValueError: If an input does not have the documented rank.
@@ -431,8 +465,9 @@ def state_posteriors(
         beta, _ = _rescale(keras.ops.where(valid[:, t, None], moved, beta))
         return beta, _write(betas, t - 1, beta)
 
-    beta = keras.ops.zeros_like(log_pi)
-    _, betas = _time_loop(body, (beta, keras.ops.zeros_like(log_emit)), num_steps, reverse=True)
+    beta = keras.ops.zeros_like(log_pi) if log_end is None else keras.ops.cast(log_end, log_emit.dtype)
+    betas = _write(keras.ops.zeros_like(log_emit), num_steps - 1, beta)
+    _, betas = _time_loop(body, (beta, betas), num_steps, reverse=True)
 
     joint = alphas + betas
     gamma = keras.ops.exp(joint - keras.ops.logsumexp(joint, axis=-1, keepdims=True))

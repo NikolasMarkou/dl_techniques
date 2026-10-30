@@ -21,6 +21,11 @@ The topology says which transitions exist at all, independently of the layer typ
 - ``left_to_right``: only to the same or a later state, and the chain starts in state 0;
 - ``banded``: like ``left_to_right``, skipping at most ``band_width`` states forward.
 
+``allowed_transitions``, ``allowed_starts`` and ``allowed_ends`` narrow that further, for
+structural constraints such as BIO tagging. With ``allowed_ends`` or ``end_potential`` set
+the layer also returns ``log_end`` of shape ``(B, K)``: 0 (or a learned logit) at an allowed
+end state, the sentinel elsewhere. It is not normalized.
+
 A forbidden transition (or start state) has probability exactly 0. It is masked by
 selection (``keras.ops.where`` with :func:`dl_techniques.utils.dtype_policy.mask_sentinel`),
 never by adding a large negative number, which overflows float16.
@@ -32,7 +37,7 @@ References:
       Information Processing Systems 7, pp. 427-434.
 """
 
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Sequence, Tuple
 
 import keras
 import numpy as np
@@ -78,6 +83,23 @@ def topology_masks(n_states: int, topology: str, band_width: int) -> Tuple[np.nd
     return start_keep, transition_keep
 
 
+def _as_mask(values: Optional[Sequence], shape: Tuple[int, ...], name: str) -> np.ndarray:
+    """Return a user-given constraint as a boolean array, or all True when it is ``None``.
+
+    :param values: Nested booleans, or ``None``.
+    :param shape: The required shape.
+    :param name: The argument's name, for the error.
+    :return: A boolean array of ``shape``.
+    :raises ValueError: If ``values`` has another shape.
+    """
+    if values is None:
+        return np.ones(shape, dtype=bool)
+    mask = np.asarray(values, dtype=bool)
+    if mask.shape != shape:
+        raise ValueError(f"{name} must have shape {shape}, got {mask.shape}.")
+    return mask
+
+
 def _batch_time_zeros(inputs: keras.KerasTensor, dtype: str) -> keras.KerasTensor:
     """Return zeros of shape ``(B, T)`` for a ``(B, T, ...)`` tensor, read from its shape only.
 
@@ -104,8 +126,16 @@ class StaticTransition(LogSpaceOutputSpec, keras.layers.Layer):
     :param self_loop_init: Initial diagonal of the transition logits. A positive value
         makes states sticky at the start of training, which keeps early decoding from
         flickering between states.
+    :param allowed_transitions: Optional ``(K, K)`` booleans, rows the source, ANDed with the
+        topology. Every state needs an allowed destination, or its row would normalize over
+        forbidden entries alone and those would become uniform.
+    :param allowed_starts: Optional ``(K,)`` booleans, ANDed with the topology's start states.
+    :param allowed_ends: Optional ``(K,)`` booleans: the states a sequence may end in.
+    :param end_potential: Whether to learn a logit per end state.
     :param kwargs: Base ``keras.layers.Layer`` arguments.
-    :raises ValueError: If an argument is out of range or ``topology`` is unknown.
+    :raises ValueError: If an argument is out of range, ``topology`` is unknown, a
+        constraint has the wrong shape, or leaves a state with no destination, no start
+        state or no end state.
     """
 
     def __init__(
@@ -114,6 +144,10 @@ class StaticTransition(LogSpaceOutputSpec, keras.layers.Layer):
         topology: str = "ergodic",
         band_width: int = 1,
         self_loop_init: float = 2.0,
+        allowed_transitions: Optional[Sequence] = None,
+        allowed_starts: Optional[Sequence] = None,
+        allowed_ends: Optional[Sequence] = None,
+        end_potential: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -126,9 +160,28 @@ class StaticTransition(LogSpaceOutputSpec, keras.layers.Layer):
         self.band_width = band_width
         self.self_loop_init = self_loop_init
         # Config-derived constants: held as numpy, converted in call(), never weights.
-        self._start_keep, self._transition_keep = topology_masks(n_states, topology, band_width)
+        start_keep, transition_keep = topology_masks(n_states, topology, band_width)
+        self._start_keep = start_keep & _as_mask(allowed_starts, (n_states,), "allowed_starts")
+        self._transition_keep = transition_keep & _as_mask(
+            allowed_transitions, (n_states, n_states), "allowed_transitions"
+        )
+        self._end_keep = _as_mask(allowed_ends, (n_states,), "allowed_ends")
+        if not self._transition_keep.any(axis=1).all():
+            raise ValueError(
+                f"Every state needs an allowed destination; states "
+                f"{np.flatnonzero(~self._transition_keep.any(axis=1)).tolist()} have none."
+            )
+        if not self._start_keep.any():
+            raise ValueError("The constraints leave no allowed start state.")
+        if not self._end_keep.any():
+            raise ValueError("allowed_ends allows no end state.")
+        self.allowed_transitions = allowed_transitions
+        self.allowed_starts = allowed_starts
+        self.allowed_ends = allowed_ends
+        self.end_potential = end_potential
         self.pi_logits = None
         self.transition_logits = None
+        self.end_logits = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Create the initial-state and transition logits.
@@ -144,7 +197,25 @@ class StaticTransition(LogSpaceOutputSpec, keras.layers.Layer):
             shape=(self.n_states, self.n_states),
             initializer=keras.initializers.Identity(gain=self.self_loop_init),
         )
+        if self.end_potential:
+            self.end_logits = self.add_weight(name="end_logits", shape=(self.n_states,), initializer="zeros")
         super().build(input_shape)
+
+    @property
+    def returns_log_end(self) -> bool:
+        """Whether :meth:`call` returns ``log_end`` as a third output."""
+        return self.end_potential or self.allowed_ends is not None
+
+    def _log_end(self, batch_zeros: keras.KerasTensor) -> keras.KerasTensor:
+        """Return the end potentials, batched: masked by selection like the other logits.
+
+        :param batch_zeros: ``(B, 1)`` zeros in the accumulation dtype.
+        :return: ``(B, K)`` in the accumulation dtype.
+        """
+        logits = self.end_logits if self.end_potential else keras.ops.zeros((self.n_states,), dtype=self.compute_dtype)
+        sentinel = keras.ops.full_like(logits, mask_sentinel(self.compute_dtype))
+        masked = keras.ops.where(keras.ops.convert_to_tensor(self._end_keep), logits, sentinel)
+        return batch_zeros + keras.ops.cast(masked, batch_zeros.dtype)
 
     def _normalize(self, pi_logits: keras.KerasTensor, transition_logits: keras.KerasTensor) -> Tuple:
         """Mask forbidden entries, then log-normalize in the accumulation dtype.
@@ -175,20 +246,24 @@ class StaticTransition(LogSpaceOutputSpec, keras.layers.Layer):
 
         :param inputs: Any ``(B, T, ...)`` tensor; only its batch and time axes are read.
         :param training: Unused; accepted for a uniform call signature.
-        :return: ``(log_pi (B, K), log_A (B, T, K, K))`` in the accumulation dtype.
+        :return: ``(log_pi (B, K), log_A (B, T, K, K))`` in the accumulation dtype, then
+            ``log_end (B, K)`` when :attr:`returns_log_end` is true.
         """
         log_pi, log_A = self._normalize(self.pi_logits, self.transition_logits)
         zeros = _batch_time_zeros(inputs, log_A.dtype)
+        if self.returns_log_end:
+            return zeros[:, 0, None] + log_pi, zeros[:, :, None, None] + log_A, self._log_end(zeros[:, 0, None])
         return zeros[:, 0, None] + log_pi, zeros[:, :, None, None] + log_A
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple:
         """Return ``((B, K), (B, T, K, K))`` from the stored config.
 
         :param input_shape: ``(B, T, ...)``.
-        :return: The two output shapes.
+        :return: The two output shapes, or three when :attr:`returns_log_end` is true.
         """
         batch, steps = input_shape[0], input_shape[1]
-        return (batch, self.n_states), (batch, steps, self.n_states, self.n_states)
+        shapes = (batch, self.n_states), (batch, steps, self.n_states, self.n_states)
+        return shapes + ((batch, self.n_states),) if self.returns_log_end else shapes
 
     def get_config(self) -> dict:
         """Return every constructor argument.
@@ -202,6 +277,10 @@ class StaticTransition(LogSpaceOutputSpec, keras.layers.Layer):
                 "topology": self.topology,
                 "band_width": self.band_width,
                 "self_loop_init": self.self_loop_init,
+                "allowed_transitions": self.allowed_transitions,
+                "allowed_starts": self.allowed_starts,
+                "allowed_ends": self.allowed_ends,
+                "end_potential": self.end_potential,
             }
         )
         return config
@@ -221,8 +300,12 @@ class InputDependentTransition(StaticTransition):
     :param topology: One of ``ergodic``, ``left_to_right``, ``banded``.
     :param band_width: Largest forward skip under ``banded``; non-negative.
     :param self_loop_init: Initial diagonal of the static transition logits.
+    :param allowed_transitions: See :class:`StaticTransition`.
+    :param allowed_starts: See :class:`StaticTransition`.
+    :param allowed_ends: See :class:`StaticTransition`.
+    :param end_potential: See :class:`StaticTransition`.
     :param kwargs: Base ``keras.layers.Layer`` arguments.
-    :raises ValueError: If an argument is out of range or ``topology`` is unknown.
+    :raises ValueError: See :class:`StaticTransition`.
     """
 
     def __init__(
@@ -231,9 +314,16 @@ class InputDependentTransition(StaticTransition):
         topology: str = "ergodic",
         band_width: int = 1,
         self_loop_init: float = 2.0,
+        allowed_transitions: Optional[Sequence] = None,
+        allowed_starts: Optional[Sequence] = None,
+        allowed_ends: Optional[Sequence] = None,
+        end_potential: bool = False,
         **kwargs: Any,
     ) -> None:
-        super().__init__(n_states, topology, band_width, self_loop_init, **kwargs)
+        super().__init__(
+            n_states, topology, band_width, self_loop_init, allowed_transitions, allowed_starts, allowed_ends,
+            end_potential, **kwargs,
+        )
         self.context_projection = keras.layers.Dense(
             n_states * n_states, use_bias=False, kernel_initializer="zeros", name="context_projection"
         )
@@ -254,11 +344,14 @@ class InputDependentTransition(StaticTransition):
 
         :param inputs: Context ``(B, T, H)``.
         :param training: Forwarded to the context projection.
-        :return: ``(log_pi (B, K), log_A (B, T, K, K))`` in the accumulation dtype.
+        :return: ``(log_pi (B, K), log_A (B, T, K, K))`` in the accumulation dtype, then
+            ``log_end (B, K)`` when :attr:`returns_log_end` is true.
         """
         offset = self.context_projection(inputs, training=training)
         shape = keras.ops.shape(offset)
         offset = keras.ops.reshape(offset, (shape[0], shape[1], self.n_states, self.n_states))
         log_pi, log_A = self._normalize(self.pi_logits, self.transition_logits + offset)
         zeros = _batch_time_zeros(inputs, log_pi.dtype)
+        if self.returns_log_end:
+            return zeros[:, 0, None] + log_pi, log_A, self._log_end(zeros[:, 0, None])
         return zeros[:, 0, None] + log_pi, log_A

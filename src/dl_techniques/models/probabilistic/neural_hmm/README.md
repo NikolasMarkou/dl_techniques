@@ -170,6 +170,10 @@ gamma = model.posteriors(inputs)       # (8, 20, 3); rows sum to 1 at valid step
 | `dropout_rate` | `float` | `0.0` | Encoder dropout, `[0, 1)`; active only with `training=True`. |
 | `attention_dropout_rate` | `float` | `0.0` | Attention-probability dropout (`transformer`), `[0, 1)`. |
 | `input_dim` | `Optional[int]` | `None` | Features of an exogenous input `inputs` `(B, T, input_dim)`, which the encoder reads instead of the observations, without the one-step shift. Generative mode with an encoder only. |
+| `allowed_transitions` | `Optional[Sequence]` | `None` | `(K, K)` booleans, rows the source, ANDed with `topology`, for constraints such as BIO. Every state needs an allowed destination. |
+| `allowed_starts` | `Optional[Sequence]` | `None` | `(K,)` booleans, ANDed with the start states of `topology`. |
+| `allowed_ends` | `Optional[Sequence]` | `None` | `(K,)` booleans: the states a sequence may end in. Adds `log_end` to the outputs. |
+| `end_potential` | `bool` | `False` | Learn a logit per end state, a CRF's END tag. Discriminative mode only. Adds `log_end` to the outputs. |
 
 **An argument the configuration does not read must keep its default.** A non-default value for one raises `ValueError` naming the argument, its value and why it is not read, instead of being silently ignored. The rule lives in one place, `NeuralHMM.unread_arguments(config) -> {name: reason}`, whose encoder half is the table `ARGUMENT_READERS` in `encoders.py`:
 
@@ -363,6 +367,7 @@ dwell = 1.0 / (1.0 - np.diag(transition))                              # expecte
 - **L-6. Mixed precision rounds the inputs.** Keras casts a model's float inputs to the compute dtype, so under `mixed_float16` the observations are float16 before the float32 density math; values above 65504 overflow.
 - **L-7. The key part of a fused attention bias does not train.** The `transformer` encoder's attention projects `qkv` with one biased `Dense`; the key bias adds a per-query constant that the softmax removes, so that part receives no gradient, while the fused variable as a whole does.
 - **L-8. Cost grows faster than `T` without XLA.** One loss-and-gradient step of the forward pass, measured on the CPU (`B = 8`, `K = 8`): 202, 274 and 656 us per time step at `T` = 1000, 4000 and 16000 in a plain `tf.function`, and a flat 6 to 9 us per time step with `jit_compile=True`. An `lstm`/`gru` encoder cannot use XLA (§10). Replacing the per-step slices with `keras.ops.take` did not help. `viterbi` and `posteriors` also rewrite a `(B, T, K)` history at each step, about 5 s for 8000 steps of that write alone at `B = 8`, `K = 8`, also on the CPU. Neither has been measured on a GPU.
+- **L-9. A generative hard end is a joint, not a conditional.** With `allowed_ends` in generative mode, `log_likelihood` is `log p(x, z_last in ends)`, which sums to `p(z_last in ends)` over `x`, not to 1. Compare such a model's NLL only with another model under the same constraint. A gold path that breaks a constraint scores about `-1e9` per broken move, which is loud on purpose.
 
 ### Troubleshooting / FAQs
 

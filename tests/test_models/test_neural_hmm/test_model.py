@@ -467,8 +467,11 @@ def _defaults():
 
 
 def test_the_round_trip_configs_put_every_argument_off_its_default():
-    # input_dim changes the input dict, so test_io_hmm.py round-trips it instead.
-    params = set(inspect.signature(NeuralHMM.__init__).parameters) - {"self", "kwargs", "input_dim"}
+    # input_dim changes the input dict, so test_io_hmm.py round-trips it instead; the
+    # structural constraints depend on K, so test_structured_decoding.py does.
+    params = set(inspect.signature(NeuralHMM.__init__).parameters) - {
+        "self", "kwargs", "input_dim", "allowed_transitions", "allowed_starts", "allowed_ends", "end_potential",
+    }
     defaults = _defaults()
     off = set()
     for config in ROUND_TRIP_CONFIGS:
