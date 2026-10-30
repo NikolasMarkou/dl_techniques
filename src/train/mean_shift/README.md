@@ -8,7 +8,8 @@ experiments.
 - Experiment 1 compares Mode Pooling (`ModePooling`, one start and four starts) against mean
   pooling and CLS pooling on `vit_pico`, on clean, occluded and noisy test images.
 - Experiment 2 compares MeanShift Attention against `multi_head` attention in a small ViT
-  (`VisionEncoder`), with a 16-config ablation grid.
+  (`VisionEncoder`), with a 16-config ablation grid and an initializer control for the
+  baseline.
 
 Results are in the Results section at the end and, numbered, in `FINDINGS.md`.
 
@@ -24,7 +25,7 @@ them.
 | `common.py` | Cell runner (`run_sweep`), idle-GPU gate, manifest, `rows.jsonl`, resume, the shared recipe, the worker helpers. Imports without TensorFlow. |
 | `corruption.py` | `occlude` and `add_noise`, pure numpy, keyed by `(seed, condition)` |
 | `exp1_mode_pooling.py` | Experiment 1: driver and worker in one module |
-| `exp2_mean_shift_attention.py` | Experiment 2: the 17-config table, driver and worker |
+| `exp2_mean_shift_attention.py` | Experiment 2: the 17-config table, the `mha_oinit` control (`CONTROL_CONFIGS`, outside the grid), driver and worker |
 | `report.py` | Aggregation of `rows.jsonl` into `summary.json` and `summary.md`. Imports without TensorFlow. |
 
 Each experiment module is both the sweep driver (default) and the cell worker (`--worker`).
@@ -88,7 +89,8 @@ manifest check refuses it.
 
 Experiment 1 flags: `--arms` (default `mean cls mode mode_s4`), `--seeds` (default `0 1 2`),
 `--dataset` (`cifar10` default, `cifar100`), `--epochs` (required), `--max-samples` (smoke
-cap), `--cell-timeout-s`, `--gate-max-wait-hours`.
+cap), `--cell-timeout-s` (default 7200; every run reported below used 2400),
+`--gate-max-wait-hours`.
 
 Experiment 2 has three modes, all with `--dataset cifar100` by default:
 
@@ -106,6 +108,9 @@ MPLBACKEND=Agg .venv/bin/python -m train.mean_shift.exp2_mean_shift_attention \
     --mode main --configs <config id> <config id> \
     --out-dir results/mean_shift/<timestamp>_exp2_main --epochs <E2> --gpu 0
 ```
+
+`--configs` also accepts the control `mha_oinit` (see the confounds below), which is not part of
+the grid; `--mode grid` never runs it.
 
 Aggregate finished roots (a report never overwrites an existing one):
 
@@ -172,8 +177,18 @@ Read these before comparing any two numbers.
   mechanism with that capacity difference.
 - Experiment 1 and experiment 2 use different backbones: `vit_pico` (truncated-normal
   initializer, post-norm, CLS token) against `VisionEncoder` (the `glorot_uniform` default,
-  pre-norm, no CLS token). Nothing is claimed across the two experiments. Within each
-  experiment the initializer is identical in every arm.
+  pre-norm, no CLS token). Nothing is claimed across the two experiments. In experiment 1 the
+  arms built from one seed start from identical weights (checked for seed 1); in experiment 2
+  they do not, see the next bullet.
+- Initializer replay in `mha` (experiment 2, measured). `MultiHeadCrossAttention` reuses one
+  seeded initializer instance for `qkv` and `proj`, so after `set_seeds(0)` the 192x192
+  `proj/kernel` of every `mha` block is a rescaled copy of the first 36,864 values of its
+  `qkv/kernel` (correlation 1.000000 in all six blocks). The MeanShift `projection` and
+  `output_projection` are independent (largest absolute correlation 0.012 over the six blocks of
+  the default and the two chosen configs). The control `mha_oinit` is `multi_head` with an
+  independent output projection initializer (largest absolute correlation 0.0099). It scored the
+  same as `mha` on every seed (section "Experiment 2: initializer control"), so this asymmetry
+  does not explain the gap to MeanShift. The `mha` rows were left exactly as run.
 - In experiment 1 the mean and mode arms drop the CLS token from the pooled set, but it still
   runs through attention, so those arms are not "CLS-free" models.
 - vMF bandwidth: the layer default makes the vMF kernel nearly uniform on unit vectors, so
@@ -195,13 +210,46 @@ Read these before comparing any two numbers.
   arm of a seed scores the same occluded and noisy images.
 - Throughput in experiment 2 is images per second of `predict` over the test split after one
   untimed pass, on whatever else GPU 0 was doing; it is a rough ratio between configs, not a
-  benchmark.
-- The grid uses a short epoch budget and 1 seed, so its ranking is weaker than the main
-  run's; the best two configs may not carry over.
+  benchmark. Another process was resident on GPU 0 during 5 of the 9 main-run cells (idle-gate
+  samples of 1378 to 1951 MiB in those cells against at most 1002 MiB in the other four and at
+  most 866 MiB in every other sweep), within the gate rule. That affects the s/epoch and
+  images/s of the main run and nothing else.
+- The grid has 1 seed, so its ranking is weaker than the main run's; the best two configs may
+  not carry over. The grid and the main run used the same 50 epochs.
 - Learned bandwidths: `per_head` reports `softplus(raw) + min_bandwidth` per layer and head;
   `per_token` reports mean, min and max per layer over 512 selection images, read through the
   layer's own `_bandwidth` helper. A bandwidth within the clip range `[0.01, 100]` is
-  "inside"; one at a bound is flagged in the report.
+  "inside"; one at a bound is flagged in the report. "Inside" is a binary flag and says nothing
+  about the distance to the floor: the lowest per-token bandwidth of a config sits as little as
+  4.0e-6 above the 0.01 floor (grid, `blur_s3_per_token_gaussian`) and 4.1e-4 to 8.1e-4 above it
+  in the main run (layer 0 on every seed). In the grid 5 of the 8 per-token configs have a
+  minimum within 2.5e-3 of the floor; the other three are 1.8e-2 to 0.23 above it. The gradient reaching the raw
+  parameter is scaled by `sigmoid(raw)`, which equals `1 - exp(-(h - 0.01))`, about the
+  distance to the floor, so those tokens are saturated at the floor: for the vMF kernel
+  `kappa = 1 / h^2` is about 9e3 there, hard nearest-key attention.
+- Weight decay acts on the bandwidth parameters. The shared recipe passes AdamW weight decay
+  0.05 with no `exclude_from_weight_decay` (`common.build_optimizer` calls
+  `train.common.optimizer.build_optimizer`), so every trainable variable is decayed, including
+  `raw_bandwidth` and, for `per_token`, the `bandwidth_projection` kernel and bias. The decay
+  pulls the raw parameter toward 0, that is `h` toward `0.01 + softplus(0)` = 0.703: upward for
+  the vMF configs that start at 0.3, downward for the Gaussian configs that start at 2.83. Its
+  size against the gradient was not measured, so the learned bandwidths mix learning with that
+  prior.
+- Query and key normalisation (untested confound). The vMF kernel L2-normalises the queries and
+  the keys, and the layer re-normalises the moved tokens after every step, which acts like QK
+  normalisation; `mha` has none (`qk_norm_type` unset). Both chosen configs of the main run are
+  vMF. The Gaussian configs do not normalise and still beat `mha` by 9.98 to 12.36 points in the
+  grid, so normalisation is not the whole gap, but its share was not measured: the matching
+  control is a `multi_head` arm with `qk_norm_type`, which was not run.
+- Provenance. The manifests of the smoke, exp1, stability and grid runs record the git shas
+  `59955ebec`, `65804ba43` and `f5fd449e2`, which are unreachable from the current history
+  after another session rebased the branch; the rebased equivalents are `67b9564d9`,
+  `458ca3bf7` and `c15384002`. A manifest records the sha but not whether the working tree was
+  dirty. No file on the experiment code paths changed between the run shas and the rebased ones
+  except docstring-only edits and the class token refactor of the `vit` family (`5e8f8124f`,
+  made after exp1 finished, zeros initializer before and after; its message reports a maximum
+  absolute output difference of 0.0). The code paths were checked equivalent; nothing was
+  re-run.
 
 ## Reading the report
 
@@ -220,6 +268,8 @@ JSON, no NaN tokens) and `summary.md`.
 - Parameters, seconds per epoch (the median over epochs 2 and later, since epoch 1 carries the
   one-off trace) and, for experiment 2, throughput.
 - Experiment 2: the learned bandwidths per config and the grid ranking by selection accuracy.
+  A `multi_head` variant other than `mha` (the `mha_oinit` control) is paired against `mha`
+  like any variant but is not ranked.
 
 ## Tests
 
@@ -231,7 +281,7 @@ tests train tiny models end to end.
 |---|---|
 | `tests/test_train/test_mean_shift/test_corruption.py` | exact block counts (16 and 32 of 64), determinism per `(seed, condition)`, conditions differ, arm independence, noise std, clipping |
 | `tests/test_train/test_mean_shift/test_cells.py` | the idle gate (3 consecutive samples, a failed `nvidia-smi` is busy), manifest first, fsynced rows, resume, retry in a new directory, manifest mismatch refused, no deleting call, import without TensorFlow |
-| `tests/test_train/test_mean_shift/test_exp_workers.py` | the four exp1 arms and their equal parameter counts, paired corruption across arms, the selection split, the 17 exp2 configs, vMF `bandwidth_init`, the measured parameter ratio, bandwidth extraction on a toy layer, end-to-end CPU workers |
+| `tests/test_train/test_mean_shift/test_exp_workers.py` | the four exp1 arms and their equal parameter counts, paired corruption across arms, the selection split, the 17 exp2 configs, vMF `bandwidth_init`, the measured parameter ratio, the `mha_oinit` control (outside the grid; `mha` replays one draw, correlation above 0.999, the control and the MeanShift configs do not), `fit` validating on the selection split, bandwidth extraction on a toy layer, end-to-end CPU workers |
 | `tests/test_train/test_mean_shift/test_report.py` | two arms by two seeds (a seed-only reader fails), paired arithmetic against hand values, pairing by seed not position, sample std, failed and missing cells, ranking on the selection split, strict JSON, a golden markdown table, no TensorFlow import |
 | `tests/test_train/test_every_trainer_seeds_through_the_shared_helper.py` | classifies both experiment modules as multi-seed trainers and `report` as not training |
 
@@ -260,28 +310,44 @@ cap, so no run was shortened.
 | exp2 stability smoke, CIFAR-100 | `20261030_065822_exp2_stability` | 2 | 5 | 0 |
 | exp2 grid, CIFAR-100 | `20261030_070258_exp2_grid` | 17 | 50 | 0 |
 | exp2 main, CIFAR-100 | `20261030_090740_exp2_main` | 9 | 50 | 0, 1, 2 |
+| exp2 control, CIFAR-100 (`mha` and `mha_oinit`) | `20261030_135834_exp2_control` | 6 | 50 | 0, 1, 2 |
 
-All cells of all six sweeps finished with an `ok` row; there are no failed or missing cells.
+All cells of all seven sweeps finished with an `ok` row; there are no failed or missing cells.
 The sum of the cell seconds (start-up included, gate waits excluded) is 1.21 h for
-exp1, 1.80 h for the grid and 1.01 h for the main run.
+exp1, 1.80 h for the grid, 1.01 h for the main run and 0.63 h for the control.
 
 ```bash
 # exp1: 4 arms x 3 seeds
 MPLBACKEND=Agg .venv/bin/python -m train.mean_shift.exp1_mode_pooling \
-    --out-dir results/mean_shift/20261030_054304_exp1_cifar10 --dataset cifar10 --epochs 50 --gpu 0
+    --out-dir results/mean_shift/20261030_054304_exp1_cifar10 --dataset cifar10 --epochs 50 \
+    --cell-timeout-s 2400 --gpu 0
 # exp2 stability smoke, then grid, then main (the two chosen configs from the grid)
 MPLBACKEND=Agg .venv/bin/python -m train.mean_shift.exp2_mean_shift_attention \
-    --mode smoke --out-dir results/mean_shift/20261030_065822_exp2_stability --epochs 5 --gpu 0
+    --mode smoke --out-dir results/mean_shift/20261030_065822_exp2_stability --epochs 5 \
+    --cell-timeout-s 2400 --gpu 0
 MPLBACKEND=Agg .venv/bin/python -m train.mean_shift.exp2_mean_shift_attention \
-    --mode grid --out-dir results/mean_shift/20261030_070258_exp2_grid --epochs 50 --gpu 0
+    --mode grid --out-dir results/mean_shift/20261030_070258_exp2_grid --epochs 50 \
+    --cell-timeout-s 2400 --gpu 0
 MPLBACKEND=Agg .venv/bin/python -m train.mean_shift.exp2_mean_shift_attention \
     --mode main --configs noblur_s3_per_token_vmf blur_s1_per_head_vmf \
-    --out-dir results/mean_shift/20261030_090740_exp2_main --epochs 50 --gpu 0
+    --out-dir results/mean_shift/20261030_090740_exp2_main --epochs 50 \
+    --cell-timeout-s 2400 --gpu 0
+# exp2 initializer control: mha is re-run too, a reproducibility check
+MPLBACKEND=Agg .venv/bin/python -m train.mean_shift.exp2_mean_shift_attention \
+    --mode main --configs mha_oinit --epochs 50 --dataset cifar100 --cell-timeout-s 2400 \
+    --out-dir results/mean_shift/20261030_135834_exp2_control --gpu 0
 ```
 
-The reports are in `results/mean_shift/20261030_reports/` (`exp1`, `exp2_grid`, `exp2_main`,
-`exp2_stability`, `smoke`), each with `summary.json` and `summary.md`. The grid and the main
-run were reported separately because both hold `mha` at seed 0.
+The control command runs `mha` and `mha_oinit` for seeds 0, 1, 2 (`--mode main` always adds
+the reference). The reports are in `results/mean_shift/20261030_reports/` (`exp1`, `exp2_grid`,
+`exp2_main`, `exp2_control`, `exp2_stability`, `smoke`), each with `summary.json` and
+`summary.md`. The grid, the main run and the control were reported separately because each
+holds `mha` at seed 0 (reporting two of them together is refused).
+
+Provenance and sharing, in short (details under "Conventions and confounds"): the manifests of
+the first four sweeps name git shas that no longer exist in the history, and another process
+was resident on GPU 0 during 5 of the 9 main-run cells, which only touches that run's
+throughput figures.
 
 ### Experiment 1: Mode Pooling on vit_pico, CIFAR-10
 
@@ -391,8 +457,9 @@ selection accuracy (the test column is shown, never used for the ranking). Image
 | 16 | blur_s3_per_token_gaussian | 2,269,366 | 5.99 | 15817 | 53.24 | 54.98 | +9.98 | 0.010 to 34.899 |
 
 Ranking caveat: one seed. The top four configs are within 0.98 points of selection
-accuracy, and the one-step blurring and non-blurring twins, which differ only after the first
-step, differ by 0.16 to 0.34 points on this seed, so the order of the best few is weak. The two
+accuracy, about three times the spread of the one-step blurring and non-blurring twins, which
+differ only after the first step (0.16 to 0.34 points on this seed), and about the size of the
+seed std in the main run (0.40 to 0.91), so the order of the best few is weak. The two
 configs for the main run were `noblur_s3_per_token_vmf` and `blur_s1_per_head_vmf`; there were
 no ties: rank 1 to rank 2 is 0.26 points, and rank 2 and rank 3 are the one-step
 blurring and non-blurring versions of the same config, which compute the same function at one
@@ -435,13 +502,53 @@ spread of per-token bandwidths within the run (smallest 0.010, largest
 has a mean per-token bandwidth of 11.29 and 11.61; in seed 0 no
 layer-0 head is above 0.33.
 
+#### Experiment 2: initializer control
+
+Control (`20261030_135834_exp2_control`, 6 cells, seeds 0, 1, 2, 50 epochs, CIFAR-100, GPU 0
+under the idle gate, the same recipe): `mha_oinit` is `multi_head` with
+`attention_args={"output_kernel_initializer": "glorot_uniform"}`, which builds an independent
+initializer for `proj` so that it no longer replays the `qkv` draw (see Conventions). `mha` was
+re-run in the same root, which doubles as a reproducibility check of the main run. Percent, mean
++- std over 3 seeds; per-seed values in the order seeds 0, 1, 2.
+
+| config | seeds | params | s/epoch | selection | test | final-epoch train accuracy |
+|---|---|---|---|---|---|---|
+| mha (rerun) | 3 | 2,710,564 | 5.02 +- 0.31 | 42.71 +- 0.91 | 43.74 +- 0.57 | 76.40 +- 0.85 |
+| mha_oinit | 3 | 2,710,564 | 4.96 +- 0.26 | 42.74 +- 0.70 | 43.77 +- 0.28 | 76.46 +- 0.58 |
+
+| config | selection, seeds 0, 1, 2 | test, seeds 0, 1, 2 | final-epoch train accuracy, seeds 0, 1, 2 |
+|---|---|---|---|
+| mha (rerun) | 43.46, 42.98, 41.70 | 44.35, 43.23, 43.63 | 75.69, 77.35, 76.16 |
+| mha_oinit | 42.70, 43.46, 42.06 | 43.79, 44.03, 43.48 | 76.52, 77.00, 75.85 |
+
+| comparison (first minus second) | metric | mean diff (points) | per-seed diffs, seeds 0, 1, 2 (points) |
+|---|---|---|---|
+| mha_oinit minus mha rerun | select | +0.03 | -0.76, +0.48, +0.36 |
+| mha_oinit minus mha rerun | test | +0.03 | -0.56, +0.80, -0.15 |
+| mha rerun minus mha main run | select | -0.09 | -0.04, -0.06, -0.18 |
+| mha rerun minus mha main run | test | +0.10 | +0.27, +0.11, -0.07 |
+
+- The independent output initializer does not change the baseline: `mha_oinit` is within noise
+  of `mha` on every seed (selection differences -0.76 to +0.48 points, test -0.56 to +0.80, both
+  with changing signs, means +0.03), at the same train accuracy. The shared-initializer artefact
+  therefore does NOT explain the 13 to 14 point gap to the MeanShift configs. Against
+  `mha_oinit` the two chosen configs are still 13.46 to 14.68 points ahead on selection and
+  12.62 to 14.55 on test, on every seed.
+- The rerun of `mha` reproduces the main run: the per-seed selection accuracy differs by 0.04,
+  0.06 and 0.18 points and the test accuracy by at most 0.27. The baseline rows of the main
+  run and the grid were left as run; the rerun is reported beside them, not instead.
+- Three seeds and a noise floor of a few tenths of a point: the control excludes an
+  initializer effect of the size of the gap, not one of a few tenths.
+
 Reading, limited to what the numbers support:
 
 - In this recipe all 16 MeanShift configs of the grid beat `mha` on selection accuracy by
   9.98 to 13.82 points, at 16 % fewer parameters. The main run repeats it
   for the two chosen configs on three seeds: 13.02 to 14.86
   points on selection and 13.18 to 14.67 on the test split, with the
-  same sign on every seed.
+  same sign on every seed. This headline now includes the initializer control and the baseline
+  rerun above: with an independent output initializer the baseline is unchanged and the gap
+  stays at 13 to 14 points.
 - Of the two chosen configs neither is ahead: selection 56.85 against 56.57 %
   (std 0.40 and 0.91), the opposite order from the 1-seed grid.
 - `mha` reaches 76.33 % running training accuracy and scores 42.81 % on
@@ -463,9 +570,11 @@ What this does not show:
   arm, no baseline-specific tuning. A `multi_head` ViT with a tuned recipe may close some or all
   of the gap. The large training-to-selection gap of `mha` above is consistent with an
   under-regularized baseline; that was not tested.
-- MeanShift has fewer parameters and tied Q, K, V, and the initialization of its
-  projections differs in effect from `multi_head`'s; an initialization or regularization effect
-  is not excluded. The vMF configs also use `bandwidth_init` 0.3 against the Gaussian default.
+- MeanShift has fewer parameters and tied Q, K, V; a regularization effect is not excluded. The
+  initializer replay of `mha` is excluded as the explanation by the control above. The vMF
+  configs also use `bandwidth_init` 0.3 against the Gaussian default and normalise queries and
+  keys, which `mha` does not (untested, see Conventions); weight decay also acts on the
+  learned bandwidths.
 - One dataset (CIFAR-100), a small ViT, 50 epochs, 3 seeds, no significance test.
 - Nothing is claimed across experiment 1 and experiment 2: the backbones differ.
 
@@ -475,5 +584,6 @@ No hyperparameter tuning of the baseline or of any arm, no dataset other than CI
 and CIFAR-100 (exp2), no budget longer than 50 epochs, no more than 3 seeds (1 for the grid), no
 training-time occlusion or noise augmentation for exp1, no measurement of the mode-to-mean
 distance of the trained models, no ablation separating the kernel from its bandwidth
-initialization, and no significance test. The empirical Tweedie denoiser oracle was run on CPU
+initialization, no `multi_head` arm with QK normalisation, no run with the bandwidth parameters
+exempt from weight decay, and no significance test. The empirical Tweedie denoiser oracle was run on CPU
 and is documented in `src/train/bfunet/FINDINGS.md` section 10; it compares no trained denoiser.
