@@ -128,6 +128,15 @@ REGISTERED: List[Tuple[str, str]] = [
     ("train/dasiamrpn/train_dasiamrpn.py", "DaSiamRPNTrainingConfig"),
     ("train/deepsort/train_deepsort.py", "DeepSortTrainingConfig"),
     ("train/mambalct/train_mambalct.py", "MambaLCTTrainingConfig"),
+    # The nine rows below (the seven argument groups, the task config and the data config
+    # of train.api) prove LITTLE here. This guard counts a field consumed when a test file,
+    # a dict key or ANY keyword argument of that name exists, so 51 of their 58 fields stay
+    # green with zero production reads, and a mutant such as `normalize="standardize"` keeps
+    # the other seven green (the keyword name itself counts). A green row is NOT evidence
+    # that the field is wired. What proves it is
+    # tests/test_train/test_api/test_the_api_fields_are_read_in_production.py (a real
+    # attribute read in src/train/api, outside the declaring class) and the behaviour tests
+    # of test_the_run_reaches_what_it_was_told.py. Review iter 2, concern 9.
     ("train/api/args.py", "OptimArgs"),
     ("train/api/args.py", "TransformArgs"),
     ("train/api/args.py", "MetricArgs"),
