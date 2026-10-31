@@ -14,7 +14,9 @@ Interface contract
 
     :ivar run_dir: the run directory.
     :ivar success: the best ``success_metric`` (``val_accuracy``) reached
-        ``metric_args.success_threshold``.
+        ``metric_args.success_threshold``; ``True`` for a ``debug_args.smoke``
+        run that finished, where no threshold applies (the summary's ``success``
+        is then ``null``).
     :ivar best_metric: the best value of ``metric_args.watch_metric``
         (lowest or highest as the metric's direction says).
     :ivar test_metrics_best: the reloaded ``best_model.keras`` on the test split;
@@ -30,8 +32,12 @@ Interface contract
     :return: a :class:`TrainResult`.
     :raises ConfigError: for a request the run cannot honour, found before the
         run directory is claimed (``resume_interrupted``, ``smoke`` with an
-        explicit ``epochs``) or after (a bad optimizer combination, an unusable
-        ``checkpoint``, a factory that refuses its arguments).
+        explicit ``epochs``, a field out of range, an optimizer configuration
+        that cannot be built, a ``watch_metric`` the task does not report, a
+        ``devices`` index outside the visible GPUs) or after (an unusable
+        ``checkpoint``, a value the data loader or the model factory refuses,
+        a monitor the compiled model does not report); a refusal after the
+        claim says that ``out`` is now used and to choose a new one.
     :raises RuntimeError: for a non-finite initial loss, a diverged fit (the
         diverged summary and the history are written first), or a best
         checkpoint that did not load (the summary is written first).
@@ -39,8 +45,10 @@ Interface contract
     The sequence, with no ``except`` anywhere in it:
 
     1. ``parse_model_name``, ``describe_data`` -> the family recipe ->
-       ``resolve_auto`` on every group -> ``assert_resolved`` (a refusal here
-       leaves no trace: the directory is not claimed yet, D-042), then
+       ``resolve_auto`` on every group -> ``assert_resolved`` -> the checks that
+       need no data (``problems`` of the config, ``check_optim_args``, the
+       monitor against ``metric_names``, ``devices``); a refusal here leaves no
+       trace: the directory is not claimed yet (D-042, D-047); then
        ``resolve_out`` and ``open_run`` (claims the directory);
     2. ``setup_gpu``, ``set_seeds(config.seed)``, the precision policy (restored
        in a ``finally``);
@@ -78,6 +86,10 @@ Hooks (override in a task)
     said, else ``RuntimeError``.
 ``build_model(config, context, data)``
     The model; built or not (the trainer builds it from ``data.input_shape``).
+``metric_names(config, facts)``
+    The names of the metrics ``compile`` will report, without ``loss``. A
+    ``watch_metric`` that is not one of them (or ``loss``, or the ``val_`` twin
+    of either) is refused before the run is claimed.
 ``build_loss_and_metrics(config, data)``
     ``(loss, metrics)`` for ``compile``. Metric names must include
     ``accuracy`` and, when ``num_classes > metric_args.top_k``,
@@ -96,7 +108,9 @@ skips the best-checkpoint test; ``save_last=False`` passes ``save=False`` to
 ``finalize_last_epoch``; ``tensorboard=None`` leaves TensorBoard out;
 ``epoch_analysis_every=N`` turns the epoch analyzer on with frequency and start
 N; ``figures=False`` writes no figure and no dashboard; ``terminate_on_nan``
-adds ``TerminateOnNaN``; ``smoke`` runs 1 epoch on at most 512 samples.
+adds ``TerminateOnNaN``; ``smoke`` runs 1 epoch on at most 512 samples and does not apply the success
+threshold (``TrainResult.success`` is ``True``, the summary's ``success`` is
+``null``).
 
 Import rule
 -----------
@@ -104,10 +118,13 @@ Module scope imports only the standard library and ``train.api`` (D-012); every
 ``keras``, ``tensorflow`` and ``train.common`` name is imported inside a method.
 """
 
+import collections.abc
+import contextlib
 import dataclasses
+import os
 import time
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Optional, Tuple
+from typing import Any, ClassVar, Dict, Iterator, List, Optional, Tuple
 
 from . import registry
 from .args import (
@@ -119,10 +136,10 @@ from .args import (
     MetricArgs,
     OptimArgs,
 )
-from .config import AUTO, StrictConfig, assert_resolved, to_json
+from .config import AUTO, StrictConfig, assert_resolved, join_path, to_json
 from .data_args import DataFacts
-from .errors import ConfigError
-from .optim import build_optimizer_and_schedule
+from .errors import ConfigError, ConfigValidationError
+from .optim import build_optimizer_and_schedule, check_optim_args
 from .run_dir import open_run, resolve_out, write_requested, write_resolved
 
 # ---------------------------------------------------------------------
@@ -156,6 +173,10 @@ SMOKE_MAX_SAMPLES = 512
 
 #: Policy name that needs the optimizer wrapped in a loss-scale optimizer.
 LOSS_SCALED_POLICY = "mixed_float16"
+
+#: The largest seed ``numpy`` takes (``np.random.seed`` refuses anything outside
+#: ``[0, 2**32 - 1]``), so the largest ``set_seeds`` takes.
+MAX_SEED = 2**32 - 1
 
 # ---------------------------------------------------------------------
 
@@ -203,6 +224,104 @@ def _is_auto(value: Any) -> bool:
     return isinstance(value, str) and value == AUTO
 
 
+def _non_json_values(value: Any, path: str, found: List[Tuple[str, str]]) -> None:
+    """Append ``(path, type name)`` for every part of ``value`` JSON cannot hold."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _non_json_values(item, f"{path}[{index}]", found)
+    elif isinstance(value, collections.abc.Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                found.append((path, f"a {type(key).__name__} key"))
+            _non_json_values(item, join_path(path, str(key)), found)
+    else:
+        found.append((path, f"a {type(value).__name__}"))
+
+
+def config_problems(config: StrictConfig, prefix: str = "") -> List[str]:
+    """Return one line per top-level field of a task config that cannot be right.
+
+    A task config calls this from its ``problems`` so :func:`validate` reports
+    the lines together with every other bad key, before anything runs.
+
+    :param config: a task config carrying the fields of :data:`CONFIG_FIELDS`;
+        an ``"auto"`` field is skipped (it has no value yet).
+    :param prefix: the dotted path of ``config``; ``""`` at the top.
+    :return: lines for ``epochs`` or ``batch_size`` below 1, a ``seed`` outside
+        ``[0, MAX_SEED]``, a negative ``devices``, and a ``model_args`` value
+        that JSON cannot hold (``config.json`` records the arguments, and a Keras
+        object would fail that write after the run directory is claimed).
+    """
+    lines: List[str] = []
+
+    def bad(name: str, expected: str, value: Any) -> None:
+        lines.append(
+            f"Invalid value for {join_path(prefix, name)!r}: expected {expected}, got {value!r}"
+        )
+
+    for name in ("epochs", "batch_size"):
+        value = getattr(config, name)
+        if not _is_auto(value) and value < 1:
+            bad(name, "an int >= 1", value)
+    if not 0 <= config.seed <= MAX_SEED:
+        bad("seed", f"an int in [0, {MAX_SEED}]", config.seed)
+    devices = config.devices
+    if devices is not None and not _is_auto(devices) and devices < 0:
+        bad("devices", "null, auto or an int >= 0", devices)
+    offenders: List[Tuple[str, str]] = []
+    _non_json_values(config.model_args, join_path(prefix, "model_args"), offenders)
+    for path, kind in offenders:
+        lines.append(
+            f"Invalid value for {path!r}: expected a JSON value (null, bool, number, "
+            f"string, list or mapping) because config.json records it, got {kind}; "
+            "an L2 regularizer for sgd comes from optim_args.weight_decay"
+        )
+    return lines
+
+
+def _monitor_choices(names: List[str]) -> List[str]:
+    """Return the keys a callback can monitor when ``compile`` reports ``names``.
+
+    :param names: the metric names without ``loss``; ``loss`` is added.
+    :return: each name and its ``val_`` twin, the loss included.
+    """
+    reported = ["loss", *names]
+    return [*reported, *(f"val_{name}" for name in reported)]
+
+
+def _claimed_note(run_dir: Path) -> str:
+    """Return the sentence that tells a user a refused run still used ``out``."""
+    return (
+        f"The run directory {run_dir} was claimed before this failed, so 'out' is now "
+        "used; choose a new 'out' ('out=auto' picks a new timestamped directory) after "
+        "fixing the value."
+    )
+
+
+@contextlib.contextmanager
+def _bad_value_is_a_config_error(run_dir: Path, step: str) -> Iterator[None]:
+    """Turn a ``ValueError`` or ``TypeError`` of ``step`` into a ``ConfigError``.
+
+    :param run_dir: the claimed run directory, named in the message.
+    :param step: what ran, e.g. ``"the data loader"``.
+    :raises ConfigError: carrying the original message and :func:`_claimed_note`.
+    """
+    # DECISION plan-2026-10-30T132432-a865fa08/D-046: the data loader and the model
+    # factory refuse a bad value with a ValueError or a TypeError. Do NOT let it
+    # reach the user as a traceback and exit 1, the code for a failed run: the
+    # request was wrong, which is exit 2. The handler is HERE and not in ``run``,
+    # ``_train`` or ``_resolve``, which hold no ``except`` (their census), and
+    # it wraps only these two calls (review-iter-2 concern 5).
+    try:
+        yield
+    except (ValueError, TypeError) as exc:
+        raise ConfigError(
+            f"Invalid argument for {step}: {exc}. {_claimed_note(run_dir)}"
+        ) from exc
+
+
 class TaskTrainer:
     """The training sequence of a task; see the module contract.
 
@@ -226,6 +345,9 @@ class TaskTrainer:
                 "that TaskTrainer reads"
             )
         self.config = config
+        #: ``(level, text)`` lines found while the request is resolved, logged
+        #: once ``run.log`` is open.
+        self._notices: List[Tuple[str, str]] = []
 
     # -----------------------------------------------------------------
     # Hooks
@@ -238,6 +360,10 @@ class TaskTrainer:
         raise NotImplementedError
 
     def build_model(self, config: StrictConfig, context: AutoContext, data: Any) -> Any:
+        raise NotImplementedError
+
+    def metric_names(self, config: StrictConfig, facts: DataFacts) -> List[str]:
+        """Return the names of the metrics ``compile`` will report, without ``loss``."""
         raise NotImplementedError
 
     def build_loss_and_metrics(self, config: StrictConfig, data: Any) -> Tuple[Any, List[Any]]:
@@ -289,6 +415,7 @@ class TaskTrainer:
             analysis_cfg.model_analysis,
             run_analysis=evaluation.run_model_analysis,
             figures=analysis_cfg.figures,
+            analysis_off_hint="analysis_args.model_analysis=false",
         )
         # The last epoch's weights replace the best ones here.
         test_final, load_check = classification_run.finalize_last_epoch(
@@ -348,7 +475,7 @@ class TaskTrainer:
         run_dir = open_run(
             resolve_out(config.out, self.task, family, variant), config.resume_interrupted
         )
-        setup_gpu(None if _is_auto(config.devices) else config.devices)
+        setup_gpu(None if _is_auto(config.devices) else config.devices, flag="devices")
         set_seeds(config.seed)
         previous_policy = keras.mixed_precision.global_policy().name
         setup_mixed_precision(config.precision != "float32", config.precision)
@@ -389,7 +516,117 @@ class TaskTrainer:
                 changes["data"] = dataclasses.replace(data_cfg, max_samples=SMOKE_MAX_SAMPLES)
         resolved = dataclasses.replace(config, **changes)
         assert_resolved(resolved)
+        self._notices = self._recipe_notices(config, resolved, facts, family, recipe)
+        self._refuse_before_the_claim(resolved, facts)
         return resolved, context
+
+    def _recipe_notices(
+        self,
+        config: StrictConfig,
+        resolved: StrictConfig,
+        facts: DataFacts,
+        family: str,
+        recipe: Dict[str, Any],
+    ) -> List[Tuple[str, str]]:
+        """Return the ``(level, text)`` lines the resolution owes the user.
+
+        A recipe value an ``"auto"`` field did not take is listed (the recipe
+        offered a number and the resolver chose another), a family with no
+        overlay for the dataset is named, and a warmup that never ends is warned.
+        """
+        notices: List[Tuple[str, str]] = []
+        for group_field in dataclasses.fields(config):
+            before = getattr(config, group_field.name)
+            after = getattr(resolved, group_field.name)
+            table = recipe.get(group_field.name)
+            if not isinstance(before, StrictConfig) or not isinstance(table, dict):
+                continue
+            for field in dataclasses.fields(before):
+                if (
+                    _is_auto(getattr(before, field.name))
+                    and field.name in table
+                    and table[field.name] != getattr(after, field.name)
+                ):
+                    notices.append(
+                        (
+                            "info",
+                            f"Recipe value not used: {group_field.name}.{field.name} "
+                            f"{table[field.name]!r} -> {getattr(after, field.name)!r} "
+                            f"({family} recipe)",
+                        )
+                    )
+        if facts.dataset not in registry.MODELS[family].defaults.get("per_dataset", {}):
+            notices.append(
+                (
+                    "warning",
+                    f"No recipe overlay for {family} on {facts.dataset}: the family's base "
+                    "recipe applies unchanged, with no dataset-specific augmentation, loader "
+                    "or model arguments. Check transform_args, data and model_args.",
+                )
+            )
+        optim_cfg: OptimArgs = resolved.optim_args
+        debug_cfg: DebugArgs = resolved.debug_args
+        if (
+            not debug_cfg.smoke
+            and optim_cfg.schedule != "constant"
+            and optim_cfg.decay_over != "post_warmup"
+            and optim_cfg.warmup_epochs >= resolved.epochs
+        ):
+            notices.append(
+                (
+                    "warning",
+                    f"optim_args.warmup_epochs {optim_cfg.warmup_epochs} is not below epochs "
+                    f"{resolved.epochs}: the learning rate never leaves its warmup and does "
+                    f"not reach lr {optim_cfg.lr!r}",
+                )
+            )
+        return notices
+
+    def _refuse_before_the_claim(self, resolved: StrictConfig, facts: DataFacts) -> None:
+        """Refuse every request that needs no loaded data to be seen as wrong.
+
+        :raises ConfigValidationError: for a field out of range (the config's
+            own ``problems``) or an optimizer configuration that cannot be built.
+        :raises ConfigError: for a ``watch_metric`` the run does not report, or
+            a ``devices`` index outside the visible GPUs.
+        """
+        # DECISION plan-2026-10-30T132432-a865fa08/D-047: everything checkable
+        # without data is refused HERE, before ``open_run``. Do NOT leave a range
+        # or a combination to the optimizer builder, the loader or ``fit``: each
+        # fails after the claim, so the user's next try with the value fixed is
+        # refused for a directory the first try only half used, and a 200-epoch
+        # run can be lost to a typo in the monitor (review-iter-2 concerns 1, 5).
+        # The config and each of its groups, again: ``validate`` ran them at the
+        # function's entry, but a config built by hand (or a task whose groups
+        # have no ``resolve_auto``) never passed through it.
+        lines = resolved.problems("")
+        for field in dataclasses.fields(resolved):
+            value = getattr(resolved, field.name)
+            if isinstance(value, StrictConfig):
+                lines.extend(value.problems(field.name))
+        if lines:
+            raise ConfigValidationError(lines)
+        check_optim_args(resolved.optim_args, resolved.epochs)
+        monitor = resolved.metric_args.watch_metric
+        choices = _monitor_choices(self.metric_names(resolved, facts))
+        if monitor not in choices:
+            raise ConfigError(
+                f"Invalid value for 'metric_args.watch_metric': {monitor!r} is not a metric "
+                f"this run reports; choose one of {', '.join(sorted(choices))}"
+            )
+        self._check_devices(resolved.devices)
+
+    @staticmethod
+    def _check_devices(devices: Optional[int]) -> None:
+        """Refuse a ``devices`` index that ``setup_gpu`` would refuse, before the claim."""
+        if devices is None:
+            return
+        from train.common.gpu import VISIBLE_DEVICES, visible_device_for
+
+        try:
+            visible_device_for(devices, os.environ.get(VISIBLE_DEVICES))
+        except ValueError as exc:
+            raise ConfigError(f"Invalid value for 'devices': {exc}") from exc
 
     def _train(
         self,
@@ -425,16 +662,20 @@ class TaskTrainer:
             # both are decided by the recipe, which needs the class count and image size.
             logger.info(f"Resolved args:\n{to_json(config)}")
             write_resolved(run_dir, config)
+            for level, text in self._notices:
+                (logger.warning if level == "warning" else logger.info)(text)
 
             optim_cfg: OptimArgs = config.optim_args
             metric_cfg: MetricArgs = config.metric_args
             checkpoint_cfg: CheckpointArgs = config.checkpoint_args
             analysis_cfg: AnalysisArgs = config.analysis_args
+            debug_cfg: DebugArgs = config.debug_args
             epochs = config.epochs
             monitor = metric_cfg.watch_metric
             experiment_name = run_dir.name
 
-            data = self.build_data(config, context)
+            with _bad_value_is_a_config_error(run_dir, "the data loader"):
+                data = self.build_data(config, context)
             if (
                 data.num_classes != facts.num_classes
                 or data.input_shape[0] != facts.image_size
@@ -446,9 +687,10 @@ class TaskTrainer:
                 )
             steps_per_epoch = data.steps_per_epoch
 
-            model = self.build_model(config, context, data)
-            if not model.built:
-                model.build((None, *data.input_shape))
+            with _bad_value_is_a_config_error(run_dir, "the model factory"):
+                model = self.build_model(config, context, data)
+                if not model.built:
+                    model.build((None, *data.input_shape))
             if config.checkpoint is not None:
                 self._load_checkpoint(model, config.checkpoint)
             optimizer, _schedule = build_optimizer_and_schedule(
@@ -475,6 +717,15 @@ class TaskTrainer:
                 evaluate=classification_run.evaluate_dict,
                 hint=self.initial_loss_hint,
             )
+            if monitor not in _monitor_choices([k for k in baseline if k != "loss"]):
+                # The pre-claim check compares the monitor with the names the task
+                # NAMED; this one with the names ``compile`` produced, so a task whose
+                # list and metrics disagree is stopped before ``fit`` and not after it.
+                raise ConfigError(
+                    f"Invalid value for 'metric_args.watch_metric': {monitor!r} is not a "
+                    f"metric the compiled model reports ({', '.join(sorted(baseline))}). "
+                    f"{_claimed_note(run_dir)}"
+                )
             summary_head = self._summary_head(
                 config, family, variant, run_dir, data, params, baseline,
                 initial_ratio, init_warning, devices,
@@ -517,7 +768,12 @@ class TaskTrainer:
                     f"(patience {checkpoint_cfg.early_stopping_patience} on {monitor}); "
                     "the best weights were restored"
                 )
-            best_epoch = run_summary.best_epoch(hist, monitor)
+            # DECISION plan-2026-10-30T132432-a865fa08/D-048: the epoch reported is
+            # chosen with the SAME direction the checkpoint callbacks were given
+            # (``watch_mode``, resolved). Do NOT call ``best_epoch(hist, monitor)``
+            # alone: it re-derives the direction from the name, so an explicit
+            # ``watch_mode`` saved one epoch and the summary named another.
+            best_epoch = run_summary.best_epoch(hist, monitor, metric_cfg.watch_mode)
 
             fit = FitState(
                 model=model,
@@ -530,9 +786,13 @@ class TaskTrainer:
             )
             evaluated = self.evaluate_and_report(config, data, fit)
 
-            threshold = metric_cfg.success_threshold
             reached = max(hist[self.success_metric])
-            success = bool(reached >= threshold)
+            smoke = debug_cfg.smoke
+            # Under smoke one epoch on at most 512 samples cannot reach twice chance, so
+            # the bar is not applied: the run is a success when it finished, and the
+            # summary says "not applicable" rather than a miss (review-iter-2 concern 6).
+            threshold = None if smoke else metric_cfg.success_threshold
+            success = True if smoke else bool(reached >= threshold)
             summary = classification_run.base_summary(
                 summary_head, hist, epochs_run, epochs, best_epoch, lr_reductions,
                 evaluated.test_metrics_best, evaluated.test_metrics_final,
@@ -542,17 +802,23 @@ class TaskTrainer:
                 notes=self._notes(config, baseline, initial_ratio, data),
             )
             summary.update(
-                success=success,
+                success=None if smoke else success,
                 success_metric=self.success_metric,
                 success_threshold=threshold,
                 success_value=reached,
             )
             write_summary_json(run_dir, summary)
             run_summary.fail_on_best_load_error(run_dir, evaluated.best_load_error)
-            logger.info(
-                f"{'Reached' if success else 'Missed'} success_threshold {threshold:g} "
-                f"on {self.success_metric}: best {reached:.4f}"
-            )
+            if smoke:
+                logger.info(
+                    f"success_threshold not applicable under debug_args.smoke: best "
+                    f"{self.success_metric} {reached:.4f}"
+                )
+            else:
+                logger.info(
+                    f"{'Reached' if success else 'Missed'} success_threshold {threshold:g} "
+                    f"on {self.success_metric}: best {reached:.4f}"
+                )
             return TrainResult(
                 run_dir=run_dir,
                 success=success,
@@ -751,6 +1017,11 @@ class TaskTrainer:
             notes.append("analysis_args.model_analysis is false: `analyzer.status` is 'skipped'")
         if analysis_cfg.conformal_alpha is None:
             notes.append("analysis_args.conformal_alpha is null: `conformal` is null")
+        if config.debug_args.smoke:
+            notes.append(
+                "debug_args.smoke is true: the success threshold is not applied, so "
+                "`success` and `success_threshold` are null (not applicable)"
+            )
         return notes
 
     def _write_diverged_summary(

@@ -89,7 +89,9 @@ def _load_raw(name: str) -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarra
 # Split arithmetic and pipelines
 # ---------------------------------------------------------------------
 
-def steps_per_epoch_for(n_train: int, batch_size: int) -> int:
+def steps_per_epoch_for(
+        n_train: int, batch_size: int, max_samples_flag: str = "--max-samples",
+) -> int:
     """Optimizer steps per epoch of the train pipeline: ``n_train // batch_size``.
 
     The train pipeline drops the remainder (a smaller last batch is a second input shape
@@ -97,13 +99,15 @@ def steps_per_epoch_for(n_train: int, batch_size: int) -> int:
     so this is the exact number of batches one epoch yields and the value the LR
     schedule must be built with.
 
+    :param max_samples_flag: What the caller's user calls the train-pool cap, named in the
+        refusal. The default is the legacy flag; the API passes its own key.
     :raises ValueError: If ``n_train < batch_size`` (no batch at all would be yielded).
     """
     if n_train < batch_size:
         raise ValueError(
             f"batch_size {batch_size} exceeds the {n_train} train samples: the train "
             f"pipeline drops the incomplete last batch and would yield no step. "
-            f"Use a batch size of at most {n_train}, or a larger --max-samples."
+            f"Use a batch size of at most {n_train}, or a larger {max_samples_flag}."
         )
     return n_train // batch_size
 
@@ -335,6 +339,7 @@ def load_classification_data(
         imagenet_root: Optional[str] = None,
         devkit_dir: Optional[str] = None,
         image_size: Optional[int] = None,
+        max_samples_flag: str = "--max-samples",
 ) -> ClassificationData:
     """Load ``name`` as ``(train, select, test)`` with the one selection protocol.
 
@@ -371,6 +376,9 @@ def load_classification_data(
     :param imagenet_root, devkit_dir: ImageNet only, ignored otherwise (every parser carries
         ``--imagenet-root`` with a default); ``None`` means the loader's defaults.
     :param image_size: ImageNet and Imagenette: the square input side (``None`` means 224).
+    :param max_samples_flag: What the caller's user calls ``max_samples``, named in the
+        too-large-batch refusal of the in-memory datasets (``"--max-samples"`` for the
+        legacy trainers, the API passes its own key).
     :raises ValueError: An option that does not apply to ``name``, an unknown mode, a
         selection split holding out zero samples, a batch larger than the train split.
     :raises FileNotFoundError: The ImageNet tree or its devkit, or the Imagenette records,
@@ -389,7 +397,7 @@ def load_classification_data(
             )
         return _load_in_memory(
             spec, batch_size, seed, validation_split, normalize, labels, channels, augment,
-            resize, max_samples)
+            resize, max_samples, max_samples_flag)
     if resize is not None:
         raise ValueError(f"resize applies to in-memory datasets; {spec.name} takes image_size")
     if channels not in (None, 3):
@@ -478,6 +486,7 @@ def _load_in_memory(
         spec: DatasetSpec, batch_size: int, seed: int, validation_split: Optional[float],
         normalize: str, labels: str, channels: Optional[int], augment: Optional[Augment],
         resize: Optional[int], max_samples: Optional[int],
+        max_samples_flag: str = "--max-samples",
 ) -> ClassificationData:
     arrays = load_split_arrays(
         spec.name, seed=seed, validation_split=validation_split, labels=labels,
@@ -492,7 +501,7 @@ def _load_in_memory(
     def norm_np(x: np.ndarray) -> np.ndarray:
         return ((x - mean) / std).astype(np.float32)
 
-    steps = steps_per_epoch_for(len(arrays.x_train), batch_size)
+    steps = steps_per_epoch_for(len(arrays.x_train), batch_size, max_samples_flag)
     logger.info(
         f"{spec.name}: train {arrays.x_train.shape}, select {arrays.x_select.shape}, "
         f"test {arrays.x_test.shape}; {normalize}, labels {labels}"

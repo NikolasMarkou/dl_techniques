@@ -457,7 +457,7 @@ def test_a_real_training_run_exits_zero_and_writes_its_run_directory(cwd, tmp_pa
 
 def test_an_unmet_threshold_of_a_real_run_exits_one_without_a_traceback(cwd, tmp_path):
     out = tmp_path / "run"
-    result = run_training([f"out={out}", "metric_args.success_threshold=1.5"], cwd)
+    result = run_training([f"out={out}", "metric_args.success_threshold=1.0"], cwd)
     assert result.returncode == 1, result.stderr[-3000:]
     assert (out / "results_summary.json").is_file()
     assert "Traceback" not in result.stderr

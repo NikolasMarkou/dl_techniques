@@ -161,7 +161,7 @@ _TOO_LATE = (
     "CUDA_VISIBLE_DEVICES before Python starts")
 
 
-def setup_gpu(gpu_id: Optional[int] = None):
+def setup_gpu(gpu_id: Optional[int] = None, flag: str = "--gpu"):
     """Select the GPU and enable memory growth, or raise.
 
     Interface contract (callers: the 133 modules under ``src/train`` that call
@@ -183,6 +183,8 @@ def setup_gpu(gpu_id: Optional[int] = None):
             physical device only when that variable is unset. If None, the
             environment is left alone and memory growth is enabled on every
             visible GPU.
+        flag: What the caller's user calls ``gpu_id``, named in the log line and the
+            refusal. The default is the legacy flag; the API passes its own key.
 
     Raises:
         ValueError: ``gpu_id`` is negative or outside the visible list.
@@ -193,7 +195,7 @@ def setup_gpu(gpu_id: Optional[int] = None):
     if gpu_id is not None:
         selected = visible_device_for(gpu_id, os.environ.get(VISIBLE_DEVICES))
         os.environ[VISIBLE_DEVICES] = selected
-        logger.info(f"--gpu {gpu_id}: set CUDA_VISIBLE_DEVICES={selected}")
+        logger.info(f"{flag} {gpu_id}: set CUDA_VISIBLE_DEVICES={selected}")
 
     gpus = tf.config.experimental.list_physical_devices('GPU')
     # DECISION plan-2026-10-14T062616-81938e81/D-234
@@ -202,7 +204,7 @@ def setup_gpu(gpu_id: Optional[int] = None):
     # trainer on whatever TensorFlow had already picked, with the exit code 0.
     if gpu_id is not None and len(gpus) != 1:
         raise RuntimeError(
-            f"--gpu {gpu_id} set CUDA_VISIBLE_DEVICES={selected}, but this "
+            f"{flag} {gpu_id} set CUDA_VISIBLE_DEVICES={selected}, but this "
             f"process lists {len(gpus)} GPU(s), not 1: the selection did not "
             f"take effect. {_TOO_LATE}.")
     for gpu in gpus:

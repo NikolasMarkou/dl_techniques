@@ -383,7 +383,7 @@ def test_the_cli_trains_and_exits_zero(cli_world, tmp_path, capsys):
 
 def test_an_unmet_success_threshold_exits_one(cli_world, tmp_path, capsys):
     out = tmp_path / "run"
-    assert run_cli(f"out={out}", "metric_args.success_threshold=1.5", *TOKENS) == 1
+    assert run_cli(f"out={out}", "metric_args.success_threshold=1.0", *TOKENS) == 1
     assert read_json(out, "results_summary.json")["success"] is False
     assert "Traceback" not in capsys.readouterr().err
 

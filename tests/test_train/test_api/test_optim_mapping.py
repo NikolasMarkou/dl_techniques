@@ -318,16 +318,17 @@ def resolve(recipe: Mapping[str, Any], **explicit: Any) -> OptimArgs:
 
 
 def test_sgd_on_an_adamw_recipe_builds_and_takes_none_of_the_adamw_options():
-    args = resolve(ADAMW_RECIPE, optimizer="sgd")
+    args = resolve(ADAMW_RECIPE, optimizer="sgd", lr=0.05)
     assert (args.beta_1, args.beta_2, args.epsilon, args.weight_decay) == (None, None, None, None)
-    assert args.lr == 1e-3, "options shared by every optimizer still come from the recipe"
+    assert args.lr == 0.05
+    assert args.warmup_epochs == ADAMW_RECIPE["warmup_epochs"], "the schedule still comes from the recipe"
     optimizer, _ = build(args)
     assert type(optimizer).__name__ == "SGD"
     assert optimizer.weight_decay is None
 
 
 def test_adam_on_an_adamw_recipe_keeps_the_betas_and_drops_the_decay():
-    args = resolve(ADAMW_RECIPE, optimizer="adam")
+    args = resolve(ADAMW_RECIPE, optimizer="adam", lr=1e-3)
     assert (args.beta_1, args.beta_2, args.epsilon) == (0.9, 0.999, 1e-8)
     assert args.weight_decay is None
     optimizer, _ = build(args)
@@ -336,7 +337,7 @@ def test_adam_on_an_adamw_recipe_keeps_the_betas_and_drops_the_decay():
 
 def test_adamw_on_an_sgd_recipe_takes_neither_the_momentum_nor_the_l2_strength():
     """The recipe's ``weight_decay`` is an L2 strength there, not decoupled decay."""
-    args = resolve(SGD_RECIPE, optimizer="adamw")
+    args = resolve(SGD_RECIPE, optimizer="adamw", lr=1e-3)
     assert args.momentum is None
     assert args.weight_decay is None
     optimizer, _ = build(args)
@@ -351,14 +352,14 @@ def test_the_recipe_own_optimizer_keeps_every_recipe_option():
 
 
 def test_an_explicit_option_survives_the_switch_and_is_then_refused_by_the_builder():
-    args = resolve(ADAMW_RECIPE, optimizer="sgd", beta_1=0.8)
+    args = resolve(ADAMW_RECIPE, optimizer="sgd", lr=0.05, beta_1=0.8)
     assert args.beta_1 == 0.8
     with pytest.raises(ConfigValidationError, match="optim_args.beta_1"):
         build(args)
 
 
 def test_an_explicit_sgd_weight_decay_survives_and_is_the_l2_strength():
-    args = resolve(ADAMW_RECIPE, optimizer="sgd", weight_decay=5e-4, momentum=0.8)
+    args = resolve(ADAMW_RECIPE, optimizer="sgd", lr=0.05, weight_decay=5e-4, momentum=0.8)
     assert (args.weight_decay, args.momentum) == (5e-4, 0.8)
     build(args)
 

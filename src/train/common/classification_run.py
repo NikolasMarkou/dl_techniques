@@ -259,6 +259,7 @@ def report_best_weights(
         model: keras.Model, data: ClassificationData, history: keras.callbacks.History,
         run_dir: Path, vis_dir: Path, experiment_name: str, model_analysis: bool,
         run_analysis: Callable[..., Any], figures: bool = True,
+        analysis_off_hint: str = "--no-model-analysis",
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Write the figures and run the analyzer for the BEST (selected) weights.
 
@@ -277,6 +278,9 @@ def report_best_weights(
     :param figures: ``False`` writes no figure and does not predict; the record is then
         ``{"files": [], "ece": None, "failed": [], "skipped": True}``. The default
         reproduces the legacy trainers.
+    :param analysis_off_hint: How the caller's user switched the analyzer off; named in the
+        log line of a skipped analysis. The default is the legacy flag; the API passes its
+        own key.
     :return: ``(visualizations, analysis)``: the figure record (it carries ``ece``) and
         the analyzer status read back from disk, or the skipped status.
     """
@@ -295,7 +299,7 @@ def report_best_weights(
         logger.info(f"Analyzer status (read back from disk): {analysis['status']}")
     else:
         analysis = run_summary.skipped_analysis_status()
-        logger.info("Analyzer skipped (--no-model-analysis)")
+        logger.info(f"Analyzer skipped ({analysis_off_hint})")
     return visualizations, analysis
 
 

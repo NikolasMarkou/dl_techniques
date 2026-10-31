@@ -80,10 +80,16 @@ ROWS: Tuple[Row, ...] = (
     Row("data.eval_samples", "20", 20, IMAGENETTE),
     Row("data.imagenet_root", "/data/imagenet", "/data/imagenet", IMAGENET),
     Row("data.devkit_dir", "/data/devkit", "/data/devkit", IMAGENET),
-    Row("optim_args.optimizer", "sgd", "sgd"),
+    # A switch away from the recipe's optimizer needs an explicit lr (D-045).
+    Row("optim_args.optimizer", "sgd", "sgd", {"optim_args.lr": "0.05"}),
     Row("optim_args.lr", "2.5e-4", 2.5e-4),
     Row("optim_args.weight_decay", "0.07", 0.07),
-    Row("optim_args.momentum", "0.85", 0.85),
+    Row(
+        "optim_args.momentum",
+        "0.85",
+        0.85,
+        {"optim_args.optimizer": "sgd", "optim_args.lr": "0.05"},
+    ),
     Row("optim_args.beta_1", "0.81", 0.81),
     Row("optim_args.beta_2", "0.991", 0.991),
     Row("optim_args.epsilon", "1e-7", 1e-7),
@@ -154,6 +160,16 @@ def capture(**given: Any) -> SimpleNamespace:
     resolved, _context = trainer._resolve(trainer.describe_data(config), family, variant)
     CAPTURED.append((config, resolved))
     return SimpleNamespace(success=True)
+
+
+@pytest.fixture(autouse=True)
+def three_visible_gpus(monkeypatch):
+    """``devices`` is checked against ``CUDA_VISIBLE_DEVICES`` before the run is claimed.
+
+    Nothing here touches TensorFlow's devices (the stand-in task function only
+    resolves), so a list of three entries is enough for the row ``devices=1``.
+    """
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2")
 
 
 @pytest.fixture(scope="module", autouse=True)

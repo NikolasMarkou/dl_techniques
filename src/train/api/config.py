@@ -95,6 +95,11 @@ Auto = Union[T, Literal["auto"]]
 #: ``test_strict_config.py`` holds the two equal.
 DEFAULT_SEED = 42
 
+#: Field-metadata key of a group that may also be given as the path of a YAML
+#: file holding it (``data=data.yaml``). The Python function accepts that form
+#: for such a field, so the command line and a ``config=`` file accept it too.
+PATH_FORM = "path_form"
+
 #: The pattern of an integer, shared by the command line and the YAML loader so
 #: ``010`` means 10 from both doors (D-034).
 INT_PATTERN = r"-?[0-9]+"

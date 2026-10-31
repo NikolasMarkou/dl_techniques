@@ -26,18 +26,19 @@ Interface contract
     ``top{k}_accuracy``.
 
 ``train_image_classification(*, out, model, data, ...)``
-    :param out: run directory, or ``"auto"``.
+    :param out: run directory (a ``str`` or a ``Path``), or ``"auto"``.
     :param model: ``"family/variant"``, e.g. ``"vit/vit_pico"``.
     :param data: a mapping (``{"dataset": "cifar10"}``), a
         :class:`~train.api.data_args.BuiltinImageData` or the path of a YAML file
         holding one.
     :param epochs: / ``batch_size`` / ``devices``: ``"auto"`` takes the family's
         recipe (``devices``: ``None``, every visible GPU).
-    :param seed: seeds Python, numpy and Keras, the split and the augmentation.
+    :param seed: seeds Python, numpy and Keras, the split and the augmentation;
+        an int in ``[0, 2**32 - 1]``.
     :param precision: ``"float32"``, ``"mixed_float16"`` or ``"mixed_bfloat16"``.
     :param resume_interrupted: refused until resume is implemented.
-    :param checkpoint: a ``.keras`` model whose layers of the same names give
-        their weights to the new model.
+    :param checkpoint: a ``.keras`` model (a ``str`` or a ``Path``) whose layers
+        of the same names give their weights to the new model.
     :param model_args: keywords of the family factory; they win over the recipe's.
     :param optim_args: / ``transform_args`` / ``metric_args`` /
         ``checkpoint_args`` / ``logger_args`` / ``analysis_args`` /
@@ -62,7 +63,7 @@ config's keys and must stay free of TensorFlow. Every ``keras`` and
 
 import dataclasses
 from pathlib import Path
-from typing import Any, Dict, Literal, Mapping, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Mapping, Optional, Tuple, Union
 
 from .. import recipes, registry
 from ..args import (
@@ -75,9 +76,9 @@ from ..args import (
     OptimArgs,
     TransformArgs,
 )
-from ..config import AUTO, DEFAULT_SEED, Auto, StrictConfig, validate
+from ..config import AUTO, DEFAULT_SEED, PATH_FORM, Auto, StrictConfig, validate
 from ..data_args import BuiltinImageData, DataFacts, builtin_facts, load_builtin_data, load_data_config
-from ..trainer import TaskTrainer, TrainResult
+from ..trainer import TaskTrainer, TrainResult, config_problems
 
 # ---------------------------------------------------------------------
 
@@ -102,7 +103,11 @@ class ImageClassificationConfig(StrictConfig):
         metadata={"help": "family/variant, e.g. vit/vit_pico; python -m train list_models lists them"}
     )
     data: BuiltinImageData = dataclasses.field(
-        metadata={"help": "the dataset and its split options (data.dataset=cifar10)"}
+        metadata={
+            "help": "the dataset and its split options (data.dataset=cifar10), or the "
+            "path of a YAML file holding them (data=data.yaml)",
+            PATH_FORM: True,
+        }
     )
     epochs: Auto[int] = dataclasses.field(
         default=AUTO, metadata={"help": "epochs to train; auto takes the family's"}
@@ -138,6 +143,10 @@ class ImageClassificationConfig(StrictConfig):
     logger_args: LoggerArgs = dataclasses.field(default_factory=LoggerArgs)
     analysis_args: AnalysisArgs = dataclasses.field(default_factory=AnalysisArgs)
     debug_args: DebugArgs = dataclasses.field(default_factory=DebugArgs)
+
+    def problems(self, prefix: str) -> List[str]:
+        """Name the top-level fields out of range; see :func:`~train.api.trainer.config_problems`."""
+        return config_problems(self, prefix)
 
 
 class ImageClassificationTrainer(TaskTrainer):
@@ -176,6 +185,12 @@ class ImageClassificationTrainer(TaskTrainer):
             spec, context.variant, data.num_classes, data.input_shape, kwargs
         )
 
+    def metric_names(self, config: ImageClassificationConfig, facts: DataFacts) -> List[str]:
+        from train.common.classification_run import classification_metrics
+
+        metric_cfg: MetricArgs = config.metric_args
+        return [m.name for m in classification_metrics(facts.num_classes, metric_cfg.top_k)]
+
     def build_loss_and_metrics(
         self, config: ImageClassificationConfig, data: Any
     ) -> Tuple[Any, Any]:
@@ -192,7 +207,7 @@ class ImageClassificationTrainer(TaskTrainer):
 
 def train_image_classification(
     *,
-    out: str,
+    out: Union[str, Path],
     model: str,
     data: Union[BuiltinImageData, Mapping[str, Any], str, Path],
     epochs: Union[int, str] = AUTO,
@@ -201,7 +216,7 @@ def train_image_classification(
     devices: Union[int, str, None] = AUTO,
     precision: str = "float32",
     resume_interrupted: bool = False,
-    checkpoint: Optional[str] = None,
+    checkpoint: Union[str, Path, None] = None,
     model_args: Optional[Mapping[str, Any]] = None,
     optim_args: Union[OptimArgs, Mapping[str, Any], None] = None,
     transform_args: Union[TransformArgs, Mapping[str, Any], None] = None,
@@ -216,7 +231,7 @@ def train_image_classification(
     if isinstance(data, (str, Path)):
         data = load_data_config(data)
     given = {
-        "out": out,
+        "out": str(out) if isinstance(out, Path) else out,
         "model": model,
         "data": data,
         "epochs": epochs,
@@ -225,7 +240,7 @@ def train_image_classification(
         "devices": devices,
         "precision": precision,
         "resume_interrupted": resume_interrupted,
-        "checkpoint": checkpoint,
+        "checkpoint": str(checkpoint) if isinstance(checkpoint, Path) else checkpoint,
         "model_args": {} if model_args is None else model_args,
     }
     groups = {

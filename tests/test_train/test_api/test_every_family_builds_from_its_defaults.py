@@ -393,7 +393,7 @@ def test_resnet_with_sgd_gets_an_l2_and_its_optimizer_gets_no_decay(builtin):
 
 
 def test_resnet_with_adamw_decays_in_the_optimizer_only(builtin):
-    kwargs, optim = resolved("resnet", "resnet18", optimizer="adamw", weight_decay=0.02)
+    kwargs, optim = resolved("resnet", "resnet18", optimizer="adamw", lr=1e-3, weight_decay=0.02)
     assert kwargs["kernel_regularizer"] is None
     optimizer, _ = build_optimizer_and_schedule(optim, 10, 5)
     assert optimizer.weight_decay == 0.02
@@ -404,7 +404,7 @@ def test_the_decay_is_in_exactly_one_place(builtin):
     for family in sorted(VARIANTS):
         for name in ("adamw", "sgd"):
             kwargs, optim = resolved(
-                family, FIRST_VARIANT[family], optimizer=name, weight_decay=0.03,
+                family, FIRST_VARIANT[family], optimizer=name, lr=0.01, weight_decay=0.03,
                 momentum=0.9 if name == "sgd" else None,
             )
             optimizer, _ = build_optimizer_and_schedule(optim, 10, 5)
@@ -417,7 +417,7 @@ def test_the_decay_is_in_exactly_one_place(builtin):
 
 
 def test_sgd_on_an_adamw_family_takes_no_decay_from_the_recipe(builtin):
-    kwargs, optim = resolved("vit", "vit_pico", optimizer="sgd")
+    kwargs, optim = resolved("vit", "vit_pico", optimizer="sgd", lr=0.05)
     assert optim.weight_decay is None
     assert kwargs["kernel_regularizer"] is None
 
@@ -459,7 +459,7 @@ def test_an_unresolved_optimizer_is_refused(builtin):
 def test_sgd_on_a_family_without_a_regularizer_path_still_decays(family, variant, builtin):
     """The legacy AdamW trainers never pass a regularizer; sgd's decay must not vanish."""
     kwargs, _ = resolved(
-        family, variant, optimizer="sgd", weight_decay=0.01, momentum=0.9
+        family, variant, optimizer="sgd", lr=0.05, weight_decay=0.01, momentum=0.9
     )
     assert l2_strength(kwargs["kernel_regularizer"]) == pytest.approx(0.01)
     plain, _ = resolved(family, variant)

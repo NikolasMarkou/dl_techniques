@@ -258,6 +258,7 @@ def load_builtin_data(
         normalize=normalize,
         augment=augment,
         max_samples=data.max_samples,
+        max_samples_flag="data.max_samples",
         **options,
         **extra,
     )

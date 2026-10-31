@@ -54,8 +54,14 @@ from train.common.config_io import json_numpy_default
 from train.common.evaluation import run_model_analysis
 
 
-def best_epoch(history: Dict[str, List[float]], monitor: str) -> int:
+def best_epoch(
+    history: Dict[str, List[float]], monitor: str, mode: Optional[str] = None
+) -> int:
     """1-based epoch that is best under ``monitor`` (direction from ``resolve_monitor_mode``).
+
+    ``mode`` is the direction the checkpoint callbacks were given (``"min"`` or ``"max"``); ``None``
+    reads it from the metric's name, as the legacy trainers do. A caller that lets the user override
+    the direction passes the resolved one, so the epoch reported is the epoch saved.
 
     Raises:
         ValueError: If any monitored value is NaN or infinite. ``np.argmin`` of a
@@ -65,7 +71,7 @@ def best_epoch(history: Dict[str, List[float]], monitor: str) -> int:
     values = np.asarray(history[monitor], dtype=np.float64)
     if not np.all(np.isfinite(values)):
         raise ValueError(f"cannot pick a best epoch: {monitor} has non-finite values {values.tolist()}")
-    mode = resolve_monitor_mode(monitor)
+    mode = resolve_monitor_mode(monitor, mode)
     return int(np.argmin(values) if mode == "min" else np.argmax(values)) + 1
 
 

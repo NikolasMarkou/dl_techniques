@@ -129,7 +129,7 @@ def knobs(world, tmp_path_factory):
             "checkpoint_args.save_last": False,
             "analysis_args.figures": False,
             "logger_args.tensorboard": None,
-            "metric_args.success_threshold": 1.5,
+            "metric_args.success_threshold": 1.0,
         },
     )
     return ImageClassificationTrainer(config).run(), run_dir, config
@@ -138,7 +138,28 @@ def knobs(world, tmp_path_factory):
 @pytest.fixture(scope="module")
 def smoke(world, tmp_path_factory):
     run_dir = tmp_path_factory.mktemp("smoke") / "run"
-    config = make_config(run_dir, **{"debug_args.smoke": True})
+    # An explicit threshold nothing can reach: smoke must not apply it (review-iter-2 concern 6).
+    config = make_config(
+        run_dir, **{"debug_args.smoke": True, "metric_args.success_threshold": 1.0}
+    )
+    return ImageClassificationTrainer(config).run(), run_dir, config
+
+
+@pytest.fixture(scope="module")
+def reversed_mode(world, tmp_path_factory):
+    """Three epochs watching ``val_loss`` with ``watch_mode=max``: the OTHER direction's epoch is saved."""
+    run_dir = tmp_path_factory.mktemp("reversed") / "run"
+    config = make_config(
+        run_dir,
+        epochs=3,
+        **{
+            "metric_args.watch_metric": "val_loss",
+            "metric_args.watch_mode": "max",
+            "analysis_args.figures": False,
+            "logger_args.tensorboard": None,
+            "checkpoint_args.save_last": False,
+        },
+    )
     return ImageClassificationTrainer(config).run(), run_dir, config
 
 
@@ -311,6 +332,43 @@ def test_smoke_runs_one_epoch_on_at_most_512_samples(smoke):
     assert requested["epochs"] == AUTO and requested["data"]["max_samples"] is None
 
 
+def test_smoke_does_not_apply_the_success_threshold_and_exits_zero(smoke):
+    result, run_dir, _ = smoke
+    summary = read_json(run_dir, "results_summary.json")
+    history = read_json(run_dir, "training_history.json")
+    # The explicit threshold of 1.0 is not reached (the best val_accuracy is below it) and
+    # is still not a failure: the run finished, and the summary says "not applicable".
+    assert max(history["val_accuracy"]) < 1.0
+    assert result.success is True
+    assert summary["success"] is None and summary["success_threshold"] is None
+    assert summary["success_value"] == max(history["val_accuracy"])
+    assert any("not applied" in note for note in summary["notes"])
+    assert "not applicable under debug_args.smoke" in (run_dir / "run.log").read_text()
+    assert "Missed success_threshold" not in (run_dir / "run.log").read_text()
+
+
+def test_watch_mode_reaches_the_epoch_the_summary_and_the_result_report(reversed_mode):
+    result, run_dir, _ = reversed_mode
+    summary = read_json(run_dir, "results_summary.json")
+    losses = read_json(run_dir, "training_history.json")["val_loss"]
+    assert len(set(losses)) == 3, "the arm needs three different val_loss values to tell the directions apart"
+    highest = losses.index(max(losses)) + 1
+    lowest = losses.index(min(losses)) + 1
+    assert highest != lowest
+    assert summary["monitor_mode"] == "max"
+    assert summary["best_epoch"] == highest, "the summary named the epoch the other direction selects"
+    assert summary["final_is_best"] is (highest == 3)
+    assert result.best_metric == max(losses)
+    assert summary["best_val_metrics"]["val_loss"] == max(losses)
+
+
+def test_the_log_names_the_api_key_and_not_the_legacy_flag(base):
+    _, run_dir, _ = base
+    log = (run_dir / "run.log").read_text()
+    assert "Analyzer skipped (analysis_args.model_analysis=false)" in log
+    assert "--no-model-analysis" not in log
+
+
 def resolve(config, family="vit", variant="vit_pico"):
     trainer = ImageClassificationTrainer(config)
     facts = trainer.describe_data(config)
@@ -345,6 +403,8 @@ class _Stop(Exception):
 )
 def test_devices_reaches_setup_gpu_as_the_index_or_none(given, expected, world, tmp_path, monkeypatch):
     seen = []
+    # `devices` is checked against the visible list before the claim; three entries cover 0 and 1.
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2")
     monkeypatch.setattr(gpu_module, "setup_gpu", lambda *args, **kwargs: seen.append((args, kwargs)))
 
     def stop(*args, **kwargs):
@@ -353,7 +413,8 @@ def test_devices_reaches_setup_gpu_as_the_index_or_none(given, expected, world, 
     monkeypatch.setattr(seed_module, "set_seeds", stop)
     with pytest.raises(_Stop):
         ImageClassificationTrainer(make_config(tmp_path / "run", devices=given)).run()
-    assert seen == [((expected,), {})]
+    # The API names its own key in setup_gpu's messages, not the legacy `--gpu`.
+    assert seen == [((expected,), {"flag": "devices"})]
 
 
 def test_the_transform_group_reaches_the_augment_hook_and_the_loader(world, tmp_path, monkeypatch):
@@ -602,6 +663,102 @@ def test_a_diverged_fit_writes_the_summary_and_the_history_then_raises(world, tm
     assert summary["non_finite_metrics"]
     assert (out / "training_history.json").is_file()
     assert not (out / "final_model.keras").exists()
+
+
+# ---------------------------------------------------------------------
+# A bad value met after the claim is a ConfigError that says `out` is used
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "changes, text",
+    [
+        ({"batch_size": 10000}, "data.max_samples"),
+        ({"data.max_samples": 1}, "holds out 0 of 1 samples"),
+        ({"model_args": {"dropout_rate": "high"}}, "model factory"),
+        ({"model_args": {"no_such_option": 1}}, "model factory"),
+    ],
+    ids=["batch_above_the_train_split", "one_sample", "string_for_a_rate", "unknown_model_argument"],
+)
+def test_a_value_the_loader_or_the_factory_refuses_is_a_config_error_naming_out(
+    changes, text, world, tmp_path
+):
+    out = tmp_path / "run"
+    with pytest.raises(ConfigError, match=text) as caught:
+        ImageClassificationTrainer(make_config(out, **changes)).run()
+    message = str(caught.value)
+    assert "'out' is now used" in message and "choose a new 'out'" in message
+    assert str(out) in message
+    assert (out / "config_requested.json").exists(), "the directory really was claimed"
+    assert "--max-samples" not in message
+
+
+def test_a_legacy_caller_still_reads_the_legacy_flag_text():
+    import inspect
+
+    from train.common.classification_data import steps_per_epoch_for
+    from train.common.classification_run import report_best_weights
+
+    with pytest.raises(ValueError, match="a larger --max-samples"):
+        steps_per_epoch_for(5, 10)
+    with pytest.raises(ValueError, match="a larger data.max_samples"):
+        steps_per_epoch_for(5, 10, "data.max_samples")
+    defaults = inspect.signature(report_best_weights).parameters["analysis_off_hint"].default
+    assert defaults == "--no-model-analysis"
+    assert inspect.signature(gpu_module.setup_gpu).parameters["flag"].default == "--gpu"
+
+
+def test_setup_gpu_names_the_callers_key_in_its_refusal(monkeypatch):
+    # The host process lists no GPU, so a selection cannot take effect and setup_gpu refuses.
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    with pytest.raises(RuntimeError, match=r"^devices 0 set CUDA_VISIBLE_DEVICES=0"):
+        gpu_module.setup_gpu(0, flag="devices")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    with pytest.raises(RuntimeError, match=r"^--gpu 0 set CUDA_VISIBLE_DEVICES=0"):
+        gpu_module.setup_gpu(0)
+
+
+# ---------------------------------------------------------------------
+# What the resolution tells the user, in run.log
+# ---------------------------------------------------------------------
+
+
+def test_the_run_log_lists_each_replaced_recipe_value_and_the_warmup_warning(world, tmp_path):
+    out = tmp_path / "run"
+    Recording.seen = {}
+    config = make_config(out, epochs=1, **{"optim_args.optimizer": "sgd", "optim_args.lr": 0.05})
+    with pytest.raises(_Stop):
+        Recording(config).run()
+    log = (out / "run.log").read_text()
+    assert "Recipe value not used: optim_args.weight_decay 0.05 -> None" in log
+    assert "Recipe value not used: optim_args.momentum None -> 0.9" in log
+    assert "WARNING" in log and "warmup_epochs 5 is not below epochs 1" in log
+
+
+def test_a_monitor_the_compiled_model_does_not_report_is_refused_before_fit(world, tmp_path):
+    class Lying(ImageClassificationTrainer):
+        """Names a metric that ``compile`` never makes, so only the backstop can see it."""
+
+        def metric_names(self, config, facts):
+            return [*super().metric_names(config, facts), "invented"]
+
+    out = tmp_path / "run"
+    fitted = []
+
+    class NoFit(keras.callbacks.Callback):
+        def on_train_begin(self, logs=None):
+            fitted.append(True)
+
+    class Spy(Lying):
+        def extra_callbacks(self, config, data):
+            return [NoFit()]
+
+    config = make_config(out, epochs=1, **{"metric_args.watch_metric": "val_invented"})
+    with pytest.raises(ConfigError, match="metric_args.watch_metric.*compiled model") as caught:
+        Spy(config).run()
+    assert "'out' is now used" in str(caught.value)
+    assert not fitted, "the epoch loop started before the monitor was checked"
+    assert not (out / "best_model.keras").exists()
 
 
 # ---------------------------------------------------------------------

@@ -6,6 +6,12 @@ This is a mapping and nothing else. The schedule and the optimizer are built by
 
 Interface contract
 ------------------
+``check_optim_args(args, epochs)``
+    :param args: a resolved :class:`~train.api.args.OptimArgs`.
+    :param epochs: epochs the run lasts; a positive ``int``.
+    :raises ConfigValidationError: for every problem below that does not need
+        ``steps_per_epoch``; the run is then refused before it is claimed.
+
 ``build_optimizer_and_schedule(args, steps_per_epoch, epochs)``
     :param args: a resolved :class:`~train.api.args.OptimArgs` (no ``"auto"``).
     :param steps_per_epoch: optimizer steps in one epoch; a positive ``int``.
@@ -70,8 +76,17 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def _problems(args: OptimArgs, steps_per_epoch: Any, epochs: Any) -> List[str]:
-    """Return one line per reason ``args`` cannot be built; empty when it can."""
+def _problems(
+    args: OptimArgs, steps_per_epoch: Any, epochs: Any, *, data_loaded: bool = True
+) -> List[str]:
+    """Return one line per reason ``args`` cannot be built; empty when it can.
+
+    :param steps_per_epoch: optimizer steps in one epoch; ignored when
+        ``data_loaded`` is false.
+    :param epochs: epochs the run lasts.
+    :param data_loaded: ``False`` before the data exists: the one check that
+        needs ``steps_per_epoch`` is skipped, every other one runs.
+    """
     lines: List[str] = []
 
     def bad(name: str, expected: str, value: Any) -> None:
@@ -80,7 +95,8 @@ def _problems(args: OptimArgs, steps_per_epoch: Any, epochs: Any) -> List[str]:
             f"expected {expected}, got {value!r}"
         )
 
-    for name, value in (("steps_per_epoch", steps_per_epoch), ("epochs", epochs)):
+    counted = (("steps_per_epoch", steps_per_epoch),) if data_loaded else ()
+    for name, value in (*counted, ("epochs", epochs)):
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
             lines.append(f"Invalid value for {name!r}: expected a positive int, got {value!r}")
 
@@ -159,6 +175,22 @@ def _problems(args: OptimArgs, steps_per_epoch: Any, epochs: Any) -> List[str]:
             f"and epochs={epochs!r}; shorten the warmup or use decay_over=total"
         )
     return lines
+
+
+def check_optim_args(args: OptimArgs, epochs: int) -> None:
+    """Refuse an optimizer configuration that no data could make buildable.
+
+    Runs every check of :func:`build_optimizer_and_schedule` except the one
+    that needs ``steps_per_epoch``, so a run can be refused before its
+    directory is claimed and before anything is loaded.
+
+    :param args: a resolved :class:`~train.api.args.OptimArgs`.
+    :param epochs: epochs the run lasts.
+    :raises ConfigValidationError: as :func:`build_optimizer_and_schedule` does.
+    """
+    problems = _problems(args, None, epochs, data_loaded=False)
+    if problems:
+        raise ConfigValidationError(problems)
 
 
 def build_optimizer_and_schedule(

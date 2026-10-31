@@ -46,6 +46,11 @@ Coercion rules (the text is the whole token after the first ``=``):
 * ``str``: verbatim, so ``no`` stays ``"no"``.
 * ``Optional``: ``null`` or ``none`` (any case) gives ``None``.
 * list, tuple, dict, group: JSON text; NaN and Infinity are refused.
+* a path-form group (``data``, marked with ``PATH_FORM`` in its field metadata):
+  text that does not open a JSON object is the path of a YAML file holding the
+  group, from the command line and from a ``config=`` file alike (the Python
+  function accepts the same form); ``run_task`` reads the file, and an
+  unreadable file or a bad key in it is a ``ConfigError``.
 * untyped (``Any``) values: JSON, then ``null`` or ``none`` (any case) as
   ``None``, then a finite float (``.5``, ``010``), else the text. Write
   ``'"none"'`` for the string.
@@ -90,6 +95,7 @@ from dl_techniques.utils.logger import logger
 
 from . import registry
 from .config import (
+    PATH_FORM,
     StrictConfig,
     describe_annotation,
     invalid_value_message,
@@ -542,15 +548,49 @@ def _coerce_group(
     cls: Type[StrictConfig], raw: Mapping[str, Any], prefix: str, errors: List[str]
 ) -> Dict[str, Any]:
     hints = typing.get_type_hints(cls)
-    names = [f.name for f in dataclasses.fields(cls) if f.init]
+    fields = {f.name: f for f in dataclasses.fields(cls) if f.init}
+    names = list(fields)
     result: Dict[str, Any] = {}
     for key, value in raw.items():
         if key not in names:
             errors.append(unknown_key_message(prefix, key, names))
             continue
         path = f"{prefix}.{key}" if prefix else key
+        if _is_path_text(fields[key], value):
+            # A group that also takes a file path (``data=data.yaml``) keeps the text
+            # as a path: run_task loads the file, as the Python function does.
+            result[key] = value
+            continue
         result[key] = _coerce_value(hints[key], value, path, errors)
     return result
+
+
+def _is_path_text(field: dataclasses.Field, value: Any) -> bool:
+    """Return whether ``value`` is the path form of a ``path_form`` group field.
+
+    :param field: the field being coerced.
+    :param value: its raw token: text, or a nested dict.
+    :return: ``True`` for text that does not open a JSON object, on a field whose
+        metadata carries :data:`~train.api.config.PATH_FORM`.
+    """
+    return (
+        bool(field.metadata.get(PATH_FORM))
+        and isinstance(value, str)
+        and not value.lstrip().startswith("{")
+    )
+
+
+def _expand_path_forms(cls: Type[StrictConfig], mapping: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return ``mapping`` with each path-form field's text replaced by the file's mapping.
+
+    :raises ConfigError: for a file that cannot be read, from ``load_yaml_mapping``.
+    """
+    expanded = dict(mapping)
+    for field in dataclasses.fields(cls):
+        value = expanded.get(field.name)
+        if field.metadata.get(PATH_FORM) and isinstance(value, str):
+            expanded[field.name] = load_yaml_mapping(value)
+    return expanded
 
 
 def coerce_mapping(cls: Type[StrictConfig], raw: Mapping[str, Any]) -> Dict[str, Any]:
@@ -596,6 +636,9 @@ def run_task(
     # it can hold an unknown key, a missing required key or a non-string key.
     # Do NOT leave that to the keyword-only signature: it raises TypeError,
     # which exits 1, the code for a failed run.
+    # A path-form field (``data=data.yaml``, or ``data: data.yaml`` in a config file) is
+    # read here, so a bad file or key is refused with exit 2 like any other.
+    mapping = _expand_path_forms(config_class, mapping)
     validate(config_class, mapping)
     result = function(**mapping)
     return 0 if result.success else 1

@@ -64,6 +64,11 @@ SUCCESS_CHANCE_MULTIPLE = 2
 SUCCESS_THRESHOLD_FLOOR = 0.05
 SUCCESS_THRESHOLD_CEILING = 0.95
 
+#: Momentum an sgd run gets when the caller switched to sgd from another
+#: family optimizer and gave none (the legacy ``--optimizer sgd`` default of
+#: ``train_vit`` and ``train_resnet``).
+SGD_MOMENTUM = 0.9
+
 #: The one augmentation preset that takes a random-erasing probability
 #: (``train.common.image_augment.build_augment``).
 ERASING_PRESET = "cifar_autoaugment"
@@ -93,6 +98,11 @@ class AutoContext:
 
 def _is_auto(value: Any) -> bool:
     return isinstance(value, str) and value == AUTO
+
+
+def _range_line(prefix: str, name: str, expected: str, value: Any) -> str:
+    """Return the line for a number outside its range, naming the dotted key."""
+    return f"Invalid value for {join_path(prefix, name)!r}: expected {expected}, got {value!r}"
 
 
 def _recipe_values(
@@ -169,7 +179,10 @@ class OptimArgs(StrictConfig):
     )
     weight_decay: Auto[Optional[float]] = dataclasses.field(
         default=AUTO,
-        metadata={"help": "decoupled weight decay (adamw only); null for none"},
+        metadata={
+            "help": "weight decay: decoupled decay for adamw, the strength of an L2 "
+            "regularizer on the model for sgd, refused for adam; null for none"
+        },
     )
     momentum: Auto[Optional[float]] = dataclasses.field(
         default=AUTO, metadata={"help": "momentum (sgd only); null for none"}
@@ -244,8 +257,11 @@ class OptimArgs(StrictConfig):
 
         When the optimizer in force (explicit or the recipe's) is not the
         recipe's, every AUTO field that belongs to one optimizer and not the
-        other resolves to ``None``. A constant schedule has no warmup, so an
-        AUTO ``warmup_epochs`` resolves to 0 there.
+        other resolves to ``None`` (``momentum`` to :data:`SGD_MOMENTUM` for
+        sgd), and an AUTO ``lr`` is refused. A constant schedule has no
+        warmup, so an AUTO ``warmup_epochs`` resolves to 0 there.
+
+        :raises ConfigError: when the optimizer is switched and ``lr`` is AUTO.
         """
         # DECISION plan-2026-10-30T132432-a865fa08/D-039: do NOT fill
         # beta_1, beta_2, epsilon, momentum or weight_decay from a recipe that
@@ -264,10 +280,23 @@ class OptimArgs(StrictConfig):
                 recipe_kind.strip().lower() if isinstance(recipe_kind, str) else None
             )
             if kind != recipe_kind:
+                # DECISION plan-2026-10-30T132432-a865fa08/D-045: a switch to
+                # another optimizer needs an explicit ``lr``. Do NOT keep the
+                # recipe's: a peak rate tuned for adamw (3e-4) trains an sgd
+                # run badly, and a rate tuned for sgd (0.1) wrecks an adamw
+                # run, with nothing said (review-iter-2 concern 10).
+                if recipe_kind is not None and "lr" in recipe and _is_auto(self.lr):
+                    raise ConfigError(
+                        f"Invalid value for 'optim_args.lr': optim_args.optimizer={kind} "
+                        f"replaces the family's {recipe_kind}, whose peak learning rate "
+                        f"{recipe['lr']!r} was tuned for it; set optim_args.lr"
+                    )
                 shared = _SHARED_OPTIONS.get(frozenset((kind, recipe_kind)), ())
                 for name in _OPTIMIZER_OPTIONS:
                     if name not in shared and _is_auto(getattr(self, name)):
                         found[name] = None
+                if kind == "sgd" and _is_auto(self.momentum):
+                    found["momentum"] = SGD_MOMENTUM
         schedule = found.get("schedule", self.schedule)
         if schedule == "constant" and _is_auto(self.warmup_epochs):
             found["warmup_epochs"] = 0
@@ -292,6 +321,18 @@ class TransformArgs(StrictConfig):
         default="standardize",
         metadata={"help": "standardize with the dataset statistics, or leave in [0, 1]"},
     )
+
+    def problems(self, prefix: str) -> List[str]:
+        """Name an explicit size or probability that cannot be right."""
+        lines: List[str] = []
+        size, probability = self.image_size, self.random_erasing_prob
+        if not _is_auto(size) and size < 1:
+            lines.append(_range_line(prefix, "image_size", "a positive int", size))
+        if not _is_auto(probability) and not 0 <= probability <= 1:
+            lines.append(
+                _range_line(prefix, "random_erasing_prob", "a probability in [0, 1]", probability)
+            )
+        return lines
 
     def resolve_auto(self, context: AutoContext) -> "TransformArgs":
         """Fill ``"auto"`` fields; ``image_size`` comes from the data.
@@ -380,6 +421,18 @@ class MetricArgs(StrictConfig):
         },
     )
 
+    def problems(self, prefix: str) -> List[str]:
+        """Name an explicit ``top_k`` or ``success_threshold`` outside its range."""
+        lines: List[str] = []
+        if self.top_k < 1:
+            lines.append(_range_line(prefix, "top_k", "an int >= 1", self.top_k))
+        threshold = self.success_threshold
+        if not _is_auto(threshold) and not 0 <= threshold <= 1:
+            lines.append(
+                _range_line(prefix, "success_threshold", "a fraction in [0, 1]", threshold)
+            )
+        return lines
+
     def resolve_auto(self, context: AutoContext) -> "MetricArgs":
         """Fill ``"auto"`` fields.
 
@@ -424,6 +477,13 @@ class CheckpointArgs(StrictConfig):
         default=AUTO,
         metadata={"help": "epochs without improvement before stopping"},
     )
+
+    def problems(self, prefix: str) -> List[str]:
+        """Name an explicit negative patience."""
+        patience = self.early_stopping_patience
+        if not _is_auto(patience) and patience < 0:
+            return [_range_line(prefix, "early_stopping_patience", "an int >= 0", patience)]
+        return []
 
     def resolve_auto(self, context: AutoContext) -> "CheckpointArgs":
         """Fill ``early_stopping_patience`` from ``context.defaults["checkpoint_args"]``."""
@@ -478,8 +538,24 @@ class AnalysisArgs(StrictConfig):
     )
     conformal_alpha: Optional[float] = dataclasses.field(
         default=None,
-        metadata={"help": "miscoverage level for conformal prediction sets; null skips it"},
+        metadata={
+            "help": "miscoverage level in (0, 1) for conformal prediction sets; null skips it"
+        },
     )
+
+    def problems(self, prefix: str) -> List[str]:
+        """Name an analysis period below 0 and a miscoverage level outside (0, 1)."""
+        lines: List[str] = []
+        if self.epoch_analysis_every < 0:
+            lines.append(
+                _range_line(prefix, "epoch_analysis_every", "an int >= 0 (0 is off)", self.epoch_analysis_every)
+            )
+        alpha = self.conformal_alpha
+        if alpha is not None and not 0 < alpha < 1:
+            lines.append(
+                _range_line(prefix, "conformal_alpha", "null or a level strictly between 0 and 1", alpha)
+            )
+        return lines
 
 
 @dataclasses.dataclass(frozen=True)
