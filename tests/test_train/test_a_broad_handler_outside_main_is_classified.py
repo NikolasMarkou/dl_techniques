@@ -535,14 +535,23 @@ def test_the_census_counts_are_pinned():
     Optional 59 -> 58, exempt 59 -> 50 and records 3 -> 2 when the CliffordCLIP trainer, its
     CC3M preparation scripts and the downsampling sweep (``train/cliffordnet/train_clip.py``,
     ``prepare_cc3m.py``, ``resize_cc3m_to_ssd.py``, ``train_downsampling_techniques.py``) left
-    the tree with their handlers."""
+    the tree with their handlers.
+
+    Exempt 50 -> 48 at cc5199915 (the NAM model and ``src/train/nam/`` left the tree): the two
+    handlers of ``train/nam/data_generator.py``, ``_safe_eval`` (``return (0.0, False)``, an
+    expression that does not evaluate is an invalid sample) and ``_parse_single_op``
+    (``left_operand = 0.0``, an expression that is not one binary operation of two literals).
+    That commit dropped their two ``_EXEMPT`` rows and left the pin at 50, so this test was red
+    from cc5199915 until plan-2026-10-31T180033-2faf890a step 5, which measured the difference
+    (the table at 8b94188fd against HEAD, 50 rows against 48, exactly those two rows) and
+    corrected the pin. No other count moved and no handler is unclassified."""
     verdicts = [verdict for rows in CENSUS.values() for _l, _n, verdict, _e in rows]
     counts = {kind: verdicts.count(kind)
               for kind in ("raises", "exits", "records", "optional", "exempt", None)}
     assert counts == {"raises": 8, "exits": 4, "records": 2,
-                      "optional": 58, "exempt": 50, None: 0}
+                      "optional": 58, "exempt": 48, None: 0}
     assert sum(len(entries) for entries in _OPTIONAL_OUTPUT.values()) == 58
-    assert sum(len(entries) for entries in _EXEMPT.values()) == 50
+    assert sum(len(entries) for entries in _EXEMPT.values()) == 48
 
 
 _PLANTED = '''
