@@ -32,10 +32,22 @@ Interface contract
         cannot both succeed. A resumed run touches nothing.
     :raises ConfigError: a new run into a non-empty directory, into a directory
         holding any artifact, or under an ancestor directory holding one; a lost
-        claim; a resume without ``checkpoints/backup`` or with
-        ``results_summary.json`` present (a finished run has nothing to resume,
-        D-016); any ``OSError`` met on the way. Nothing is created before a
-        refusal. The text names ``out``.
+        claim; a resume without ``checkpoints/backup``, with
+        ``results_summary.json`` present, or whose sidecar records
+        ``fit_finished`` (a finished run has nothing to resume, D-016, D-021);
+        any ``OSError`` met on the way. Nothing is created before a refusal.
+        The text names ``out``.
+
+``load_resume_point(run_dir, mapping)``
+    :param run_dir: a directory :func:`open_run` accepted for a resume.
+    :param mapping: the requested configuration of THIS call.
+    :return: the :class:`~train.common.resume_state.ResumePoint` read from the
+        run's files. Reads only; touches nothing and calls no TensorFlow op.
+    :raises ConfigError: when ``config_requested.json`` is missing, empty (the
+        run died before writing it) or unreadable; when ``mapping`` differs from
+        it in any key except ``resume_interrupted`` and ``out`` (the keys are
+        named); or when the backup, the CSV and the sidecar do not agree on where
+        the run stopped (D-058).
 
 ``write_requested(run_dir, mapping)`` / ``write_resolved(run_dir, config)``
     Write ``config_requested.json`` (replacing the claim; the mapping as the
@@ -47,6 +59,7 @@ Interface contract
 
 import collections.abc
 import dataclasses
+import json
 import math
 import numbers
 import os
@@ -69,6 +82,18 @@ REQUESTED_CONFIG_NAME = "config_requested.json"
 
 #: A run that can be resumed holds this directory (written by ``BackupAndRestore``).
 BACKUP_DIR = "checkpoints/backup"
+
+#: Where the fit-state sidecar lives, relative to the run directory
+#: (``train.common.resume_state.FIT_STATE_NAME`` inside ``checkpoints``).
+CHECKPOINTS_DIR = "checkpoints"
+
+#: The training log the CSV logger writes, relative to the run directory.
+TRAINING_LOG_NAME = "training_log.csv"
+
+#: Request keys a resume does not compare with the earlier request: the flag that
+#: asks for the resume, and ``out`` (the directory was found from it, and a run
+#: started with ``out=auto`` or moved since is resumed by its real path).
+RESUME_UNCOMPARED_KEYS = ("resume_interrupted", "out")
 
 # ---------------------------------------------------------------------
 
@@ -246,6 +271,34 @@ def _claim(run_dir: Path) -> None:
     os.close(fd)
 
 
+def _fit_state_path(run_dir: Path) -> Path:
+    """Return the sidecar file of ``run_dir`` (the name is the sidecar's own)."""
+    from train.common.resume_state import FIT_STATE_NAME
+
+    return run_dir / CHECKPOINTS_DIR / FIT_STATE_NAME
+
+
+def _refuse_finished_fit(run_dir: Path) -> None:
+    """Refuse a resume of a run whose ``fit`` already returned (D-021).
+
+    A run that crashed after ``fit`` but before its summary has no summary to
+    show it finished; the sidecar's ``fit_finished`` marker does.
+    """
+    from train.common.resume_state import read_fit_state
+
+    path = _fit_state_path(run_dir)
+    try:
+        finished = read_fit_state(path)["fit_finished"]
+    except ValueError as exc:
+        raise ConfigError(f"Cannot resume: {path} is unreadable ({exc})") from exc
+    if finished:
+        raise ConfigError(
+            f"Cannot resume: {run_dir} is marked fit_finished, so its training "
+            "ended (it was stopped early or crashed while reporting); choose a new "
+            "'out' to train again"
+        )
+
+
 def open_run(run_dir: Path, resume: bool) -> Path:
     """Refuse a run directory that cannot be used, then claim it.
 
@@ -268,6 +321,7 @@ def open_run(run_dir: Path, resume: bool) -> Path:
                     f"Cannot resume: {run_dir} holds {RESULTS_SUMMARY_NAME}, so the run "
                     "has finished; choose a new 'out' to train again"
                 )
+            _refuse_finished_fit(run_dir)
             return run_dir
 
         _refuse_links(run_dir)
@@ -302,6 +356,18 @@ def _plain(value: Any, path: str, non_finite: List[str]) -> Any:
     return value
 
 
+def _plain_request(mapping: Any) -> Any:
+    """Return ``mapping`` as plain JSON values, or raise for a NaN or an infinity."""
+    non_finite: List[str] = []
+    plain = _plain(mapping, "", non_finite)
+    if non_finite:
+        raise ConfigError(
+            f"Cannot write {REQUESTED_CONFIG_NAME}: JSON cannot hold NaN or infinity, "
+            "found at " + ", ".join(repr(path) for path in non_finite)
+        )
+    return plain
+
+
 def write_requested(run_dir: Path, mapping: Any) -> Path:
     """Write ``config_requested.json``: the request as the caller gave it.
 
@@ -316,15 +382,112 @@ def write_requested(run_dir: Path, mapping: Any) -> Path:
     """
     from train.common.config_io import save_config_json
 
-    non_finite: List[str] = []
-    plain = _plain(mapping, "", non_finite)
-    if non_finite:
-        raise ConfigError(
-            f"Cannot write {REQUESTED_CONFIG_NAME}: JSON cannot hold NaN or infinity, "
-            "found at " + ", ".join(repr(path) for path in non_finite)
-        )
-    save_config_json(plain, str(run_dir), REQUESTED_CONFIG_NAME)
+    save_config_json(_plain_request(mapping), str(run_dir), REQUESTED_CONFIG_NAME)
     return run_dir
+
+
+def _leaves(value: Any, path: str, found: dict) -> None:
+    """Flatten mappings into ``{dotted path: leaf}``; a list or scalar is one leaf."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _leaves(item, f"{path}.{key}" if path else str(key), found)
+    else:
+        found[path] = value
+
+
+#: Stands for a key one side of a request comparison does not have.
+_ABSENT = object()
+
+
+def _shown(value: Any) -> str:
+    """Return ``value`` for an error line, cut at 60 characters."""
+    if value is _ABSENT:
+        return "<absent>"
+    text = repr(value)
+    return text if len(text) <= 60 else text[:57] + "..."
+
+
+def request_differences(earlier: Any, mapping: Any) -> List[str]:
+    """List the keys where ``mapping`` differs from the ``earlier`` request.
+
+    :param earlier: the parsed ``config_requested.json``.
+    :param mapping: the requested configuration of this call.
+    :return: one ``"<dotted key>: <earlier> -> <now>"`` line per differing key,
+        in key order, skipping :data:`RESUME_UNCOMPARED_KEYS`. Both sides are
+        compared in JSON-normal form (a tuple is a list after the round trip
+        through the file), so a request equal to the earlier one gives ``[]``.
+    :raises ConfigError: when ``mapping`` holds a NaN or an infinity.
+    """
+    from train.common.config_io import json_numpy_default
+
+    now = json.loads(json.dumps(_plain_request(mapping), default=json_numpy_default))
+    before_leaves: dict = {}
+    now_leaves: dict = {}
+    _leaves(earlier, "", before_leaves)
+    _leaves(now, "", now_leaves)
+    lines = []
+    for key in sorted(set(before_leaves) | set(now_leaves)):
+        if key.split(".")[0] in RESUME_UNCOMPARED_KEYS:
+            continue
+        old, new = before_leaves.get(key, _ABSENT), now_leaves.get(key, _ABSENT)
+        if old != new or type(old) is not type(new):
+            lines.append(f"{key}: {_shown(old)} -> {_shown(new)}")
+    return lines
+
+
+def load_resume_point(run_dir: Path, mapping: Any) -> Any:
+    """Check the request against the run's own, then read where the run stopped.
+
+    :param run_dir: a directory :func:`open_run` accepted for a resume.
+    :param mapping: the requested configuration of this call.
+    :return: the :class:`~train.common.resume_state.ResumePoint`.
+    :raises ConfigError: see the module contract.
+    """
+    from train.common.resume_state import read_resume_point
+
+    # DECISION plan-2026-10-30T132432-a865fa08/D-058
+    # The comparison reads `config_requested.json`, NEVER `config.json`: the second
+    # holds the resolved config plus `used` (D-050), so it cannot be loaded as a
+    # request. An empty `config_requested.json` is the claim of a run that died
+    # before writing it; refuse it by name rather than parse it. `out` is not
+    # compared (see RESUME_UNCOMPARED_KEYS); every other difference is a different
+    # run and is refused, because a changed `lr` or `batch_size` would resume a
+    # trajectory it did not start.
+    path = run_dir / REQUESTED_CONFIG_NAME
+    try:
+        text = path.read_text()
+    except OSError as exc:
+        raise ConfigError(
+            f"Cannot resume: {path} cannot be read ({exc.strerror or exc}), so the "
+            "request this run started with is unknown"
+        ) from exc
+    if not text.strip():
+        raise ConfigError(
+            f"Cannot resume: {path} is empty, so the run died before it wrote its "
+            "request and there is nothing to compare; choose a new 'out'"
+        )
+    try:
+        earlier = json.loads(text)
+    except ValueError as exc:
+        raise ConfigError(f"Cannot resume: {path} is not valid JSON ({exc})") from exc
+    if not isinstance(earlier, dict):
+        raise ConfigError(f"Cannot resume: {path} does not hold a JSON object")
+    lines = request_differences(earlier, mapping)
+    if lines:
+        raise ConfigError(
+            f"Cannot resume {run_dir}: the request differs from {REQUESTED_CONFIG_NAME} "
+            "in " + "; ".join(lines) + ". Resume with the request the run started "
+            "with (only resume_interrupted and out may change)"
+        )
+    try:
+        return read_resume_point(
+            run_dir / TRAINING_LOG_NAME, run_dir / BACKUP_DIR, _fit_state_path(run_dir)
+        )
+    except (OSError, ValueError) as exc:
+        raise ConfigError(
+            f"Cannot resume {run_dir}: the run's files do not agree on where it stopped "
+            f"({exc})"
+        ) from exc
 
 
 def write_resolved(run_dir: Path, config: Any, used: Optional[Mapping[str, Any]] = None) -> str:

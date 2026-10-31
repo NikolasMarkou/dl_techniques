@@ -348,9 +348,31 @@ def test_resume_leaves_a_whole_unfinished_run_tree_byte_identical(tmp_path):
         plant(run_dir, name)
     plant(run_dir, "checkpoints/backup")
     (run_dir / "checkpoints" / "backup" / "state.json").write_text("{}")
+    # The sidecar of an unfinished run (`plant` writes text, which is not JSON).
+    (run_dir / "checkpoints" / "fit_state.json").write_text('{"epochs": {}, "fit_finished": false}')
     before = snapshot(tmp_path)
     assert len(before) >= len(RUN_TREE), "the tree was not planted"
     assert open_run(run_dir, resume=True) == run_dir
+    assert snapshot(tmp_path) == before
+
+
+def test_resume_of_a_run_whose_fit_returned_is_refused_though_it_has_no_summary(tmp_path):
+    run_dir = tmp_path / "run"
+    plant(run_dir, "checkpoints/backup")
+    (run_dir / "checkpoints" / "fit_state.json").write_text('{"epochs": {}, "fit_finished": true}')
+    before = snapshot(tmp_path)
+    with pytest.raises(ConfigError, match="fit_finished"):
+        open_run(run_dir, resume=True)
+    assert snapshot(tmp_path) == before
+
+
+def test_resume_with_an_unreadable_sidecar_is_refused_and_names_the_file(tmp_path):
+    run_dir = tmp_path / "run"
+    plant(run_dir, "checkpoints/backup")
+    plant(run_dir, "checkpoints/fit_state.json")  # text, not JSON
+    before = snapshot(tmp_path)
+    with pytest.raises(ConfigError, match="fit_state.json is unreadable"):
+        open_run(run_dir, resume=True)
     assert snapshot(tmp_path) == before
 
 

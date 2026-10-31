@@ -31,7 +31,8 @@ Interface contract
 ``TaskTrainer.run()``
     :return: a :class:`TrainResult`.
     :raises ConfigError: for a request the run cannot honour, found before the
-        run directory is claimed (``resume_interrupted``, ``smoke`` with an
+        run directory is claimed (a ``resume_interrupted`` whose run is finished,
+        missing, or was started with another request; ``smoke`` with an
         explicit ``epochs``, a field out of range, an optimizer configuration
         that cannot be built, a ``watch_metric`` the task does not report, a
         ``devices`` index outside the visible GPUs) or after (an unusable
@@ -60,12 +61,45 @@ Interface contract
     6. ``check_initial_loss``;
     7. callbacks: ``LearningRateLogger(at_epoch_start=True)`` first, then
        ``create_callbacks``, ``LastEpochWeights``, ``extra_callbacks``,
-       ``EpochLogLine``, and the dashboard last;
-    8. ``fit`` on ``data.select_ds``; ``summarize_fit``; a non-finite loss
+       ``EpochLogLine``, the dashboard, and the resume trio last
+       (``RestoreFitState`` on a resume only, ``FitStateSidecar``,
+       ``BackupAndRestore``; the order is ``train.common.resume_state``'s);
+    8. ``fit`` on ``data.select_ds``; the sidecar records ``fit_finished``;
+       ``summarize_fit``; a non-finite loss
        writes the diverged summary and the history, then raises;
     9. ``evaluate_and_report``;
     10. ``base_summary`` -> ``write_summary_json`` -> ``fail_on_best_load_error``;
     11. the :class:`TrainResult`.
+
+Resume (``resume_interrupted=true``)
+------------------------------------
+The same function and the same ``out`` continue a run that was killed. Every
+run writes ``checkpoints/backup/`` (``BackupAndRestore``, kept) and
+``checkpoints/fit_state.json`` (``EarlyStopping``'s best and wait per epoch, the
+epoch-0 evaluation, and ``fit_finished`` once ``fit`` returned). A resume:
+
+* refuses, before anything is written, a run with no backup, a run that is
+  finished (``results_summary.json`` or ``fit_finished``), a request that
+  differs from ``config_requested.json`` (``resume_interrupted`` and ``out`` may
+  differ), a run with ``checkpoint_args.save_best`` false, and a run with no
+  epoch left (all trained, or ``EarlyStopping`` had already decided to stop);
+* appends to ``run.log``, copies ``training_log.csv`` to
+  ``training_log.pre_resume_<k>.csv``, and rewrites it with epochs ``0 .. start-1``
+  from the copy, so a row of an epoch the backup never saw is re-trained, once;
+* gives ``ModelCheckpoint`` the best value, ``EarlyStopping`` its best, wait and
+  best weights (read from ``best_model.keras``), and takes the epoch-0 baseline
+  from the sidecar instead of evaluating the untrained model;
+* merges the earlier epochs into the ``History`` after ``fit``, so every later
+  step (summary, history file, figures) sees all epochs;
+* writes neither ``config_requested.json`` nor ``config.json`` again.
+
+Residuals, stated in ``resume_interrupted``'s help: the training data order
+replays the order of epoch 0 (the pipeline is seeded, not resumed), an epoch
+killed midway is trained again from its start, ``ReduceLROnPlateau`` (schedule
+``constant``) restarts its own best and wait (the sidecar keeps ``EarlyStopping``'s
+only), a kill between the best checkpoint's save and the backup can leave ``best_model.keras``
+from an epoch that is then trained again (D-021), and the summary's
+``epoch_times`` and ``fit_wall_seconds`` cover the resumed epochs only.
 
 Hooks (override in a task)
 --------------------------
@@ -145,7 +179,16 @@ from .config import AUTO, StrictConfig, assert_resolved, join_path, to_json
 from .data_args import DataFacts
 from .errors import ConfigError, ConfigValidationError
 from .optim import build_optimizer_and_schedule, check_optim_args
-from .run_dir import open_run, resolve_out, write_requested, write_resolved
+from .run_dir import (
+    BACKUP_DIR,
+    CHECKPOINTS_DIR,
+    TRAINING_LOG_NAME,
+    load_resume_point,
+    open_run,
+    resolve_out,
+    write_requested,
+    write_resolved,
+)
 
 # ---------------------------------------------------------------------
 
@@ -469,11 +512,6 @@ class TaskTrainer:
 
         config = self.config
         debug_cfg: DebugArgs = config.debug_args
-        if config.resume_interrupted:
-            raise ConfigError(
-                "Invalid value for 'resume_interrupted': resuming a run is not "
-                "available yet; start a new run with a new 'out'"
-            )
         if debug_cfg.smoke and not _is_auto(config.epochs):
             raise ConfigError(
                 "Invalid value for 'epochs': debug_args.smoke runs "
@@ -492,12 +530,15 @@ class TaskTrainer:
         run_dir = open_run(
             resolve_out(config.out, self.task, family, variant), config.resume_interrupted
         )
+        # Reading the earlier run's files is plain file I/O: no TensorFlow op, so it may
+        # come before `setup_gpu` (D-055). Loading its best weights may not, and waits.
+        resume = self._resume_point(run_dir, resolved) if config.resume_interrupted else None
         setup_gpu(None if _is_auto(config.devices) else config.devices, flag="devices")
         set_seeds(config.seed)
         previous_policy = keras.mixed_precision.global_policy().name
         setup_mixed_precision(config.precision != "float32", config.precision)
         try:
-            return self._train(family, variant, run_dir, facts, resolved, context)
+            return self._train(family, variant, run_dir, facts, resolved, context, resume)
         finally:
             keras.mixed_precision.set_global_policy(previous_policy)
 
@@ -645,6 +686,54 @@ class TaskTrainer:
         except ValueError as exc:
             raise ConfigError(f"Invalid value for 'devices': {exc}") from exc
 
+    def _resume_point(self, run_dir: Path, resolved: StrictConfig) -> Any:
+        """Read where the killed run stopped, or refuse to resume it.
+
+        :param run_dir: the directory :func:`open_run` accepted for a resume.
+        :param resolved: this call's config, every ``"auto"`` filled.
+        :return: the :class:`~train.common.resume_state.ResumePoint`.
+        :raises ConfigError: see the module contract, "Resume".
+        """
+        from train.common.callbacks import best_checkpoint_path
+
+        point = load_resume_point(run_dir, self.config)
+        checkpoint_cfg: CheckpointArgs = resolved.checkpoint_args
+        if not checkpoint_cfg.save_best:
+            raise ConfigError(
+                f"Cannot resume {run_dir}: checkpoint_args.save_best is false, so the best "
+                "weights of the killed segment were never written and a resumed run could "
+                "not return to them"
+            )
+        # DECISION plan-2026-10-30T132432-a865fa08/D-058
+        # A fit with nothing left to train is REFUSED, not run. Do NOT let it reach
+        # `fit`: with `start >= epochs` no epoch ends, `LastEpochWeights` holds nothing
+        # and the post-fit steps fail on `None`; with EarlyStopping's patience already
+        # reached (it decides in `on_epoch_end`, which the kill outran) one more epoch
+        # that improves would carry on past the stop an uninterrupted run made.
+        if point.start >= resolved.epochs:
+            raise ConfigError(
+                f"Cannot resume {run_dir}: all {point.start} of its {resolved.epochs} epochs "
+                "were trained and the run died after the last one; a run that crashed while "
+                "reporting is not finished by a resume (D-021). Choose a new 'out'"
+            )
+        if point.start > 1 and point.wait >= checkpoint_cfg.early_stopping_patience:
+            raise ConfigError(
+                f"Cannot resume {run_dir}: after epoch {point.start} EarlyStopping had waited "
+                f"{point.wait} epochs (patience {checkpoint_cfg.early_stopping_patience}) and "
+                "had already decided to stop; the run died before 'fit' returned. Choose a "
+                "new 'out'"
+            )
+        if point.best is not None and not Path(best_checkpoint_path(str(run_dir))).is_file():
+            raise ConfigError(
+                f"Cannot resume {run_dir}: the sidecar records a best value but "
+                f"{best_checkpoint_path(str(run_dir))} does not exist"
+            )
+        if "initial" not in point.state:
+            raise ConfigError(
+                f"Cannot resume {run_dir}: the sidecar holds no epoch-0 evaluation"
+            )
+        return point
+
     def _train(
         self,
         family: str,
@@ -653,16 +742,31 @@ class TaskTrainer:
         facts: DataFacts,
         config: StrictConfig,
         context: AutoContext,
+        resume: Any = None,
     ) -> TrainResult:
         from dl_techniques.utils.logger import logger
         from train.common import classification_run, run_summary
         from train.common.gpu import log_gpu_peak_memory
+        from train.common.resume_state import (
+            FIT_STATE_NAME,
+            copy_log_aside,
+            merge_history,
+            update_fit_state,
+        )
         from train.common.run_artifacts import attach_run_log, write_summary_json
         from train.common.run_io import save_training_history_json
 
-        write_requested(run_dir, self.config)
-        with attach_run_log(run_dir):
+        if resume is None:
+            write_requested(run_dir, self.config)
+        sidecar_path = run_dir / CHECKPOINTS_DIR / FIT_STATE_NAME
+        with attach_run_log(run_dir, mode="w" if resume is None else "a"):
             logger.info(f"Run directory: {run_dir}")
+            if resume is not None:
+                logger.info(
+                    f"Resuming after epoch {resume.start} of {config.epochs}: "
+                    "config_requested.json and config.json stay as they are, run.log and "
+                    "training_log.csv continue"
+                )
             logger.info(f"Args:\n{to_json(self.config)}")
             devices = run_summary.describe_devices()
             logger.info(
@@ -680,7 +784,8 @@ class TaskTrainer:
                 used = self.used_arguments(config, context)
             if used:
                 logger.info(f"Used args:\n{json.dumps(used, indent=2)}")
-            write_resolved(run_dir, config, used)
+            if resume is None:
+                write_resolved(run_dir, config, used)
             for level, text in self._notices:
                 (logger.warning if level == "warning" else logger.info)(text)
 
@@ -730,14 +835,36 @@ class TaskTrainer:
             # DECISION plan-2026-09-19T040641-db6932ec/D-014: the epoch-0 numbers (the
             # summary's initial-loss ratio AND the dashboard baseline) come from THIS one
             # evaluation. Do NOT let the dashboard call ``model.evaluate`` itself.
-            baseline, initial_ratio, init_warning = classification_run.check_initial_loss(
-                model,
-                data.select_ds,
-                data.n_select,
-                data.num_classes,
-                evaluate=classification_run.evaluate_dict,
-                hint=self.initial_loss_hint,
-            )
+            best_weights = None
+            if resume is None:
+                baseline, initial_ratio, init_warning = classification_run.check_initial_loss(
+                    model,
+                    data.select_ds,
+                    data.n_select,
+                    data.num_classes,
+                    evaluate=classification_run.evaluate_dict,
+                    hint=self.initial_loss_hint,
+                )
+                # The sidecar keeps the epoch-0 numbers: a resumed model is not an untrained
+                # one, so a resume reads them here and evaluates nothing (D-058).
+                update_fit_state(
+                    sidecar_path,
+                    initial={
+                        "metrics": baseline,
+                        "ratio": float(initial_ratio),
+                        "warned": bool(init_warning),
+                    },
+                )
+            else:
+                initial = resume.state["initial"]
+                baseline = initial["metrics"]
+                initial_ratio, init_warning = initial["ratio"], initial["warned"]
+                best_weights = self._best_weights_of(run_dir, resume)
+                kept = copy_log_aside(run_dir / TRAINING_LOG_NAME)
+                logger.info(
+                    f"Resume: epochs 0..{resume.start - 1} come back from {TRAINING_LOG_NAME}; "
+                    f"the file as it was is kept as {kept.name}"
+                )
             if monitor not in _monitor_choices([k for k in baseline if k != "loss"]):
                 # The pre-claim check compares the monitor with the names the task
                 # NAMED; this one with the names ``compile`` produced, so a task whose
@@ -757,7 +884,8 @@ class TaskTrainer:
                 vis_dir.mkdir(parents=True, exist_ok=True)
             last_weights = classification_run.LastEpochWeights()
             epoch_line, callbacks = self._callbacks(
-                config, data, run_dir, vis_dir, baseline, experiment_name, last_weights
+                config, data, run_dir, vis_dir, baseline, experiment_name, last_weights,
+                resume, best_weights,
             )
 
             started = time.perf_counter()
@@ -769,6 +897,9 @@ class TaskTrainer:
                 verbose=1,
             )
             fit_wall_seconds = time.perf_counter() - started
+            update_fit_state(sidecar_path, fit_finished=True)
+            if resume is not None:
+                merge_history(resume.rows, history)
             log_gpu_peak_memory()
             hist, epochs_run, non_finite, lr_reductions = classification_run.summarize_fit(
                 history, monitor, constant_lr=optim_cfg.schedule == "constant"
@@ -820,8 +951,10 @@ class TaskTrainer:
                 evaluated.best_load_error, evaluated.checkpoint_max_diff,
                 epoch_line.epoch_times, fit_wall_seconds, evaluated.visualizations,
                 evaluated.load_check, evaluated.conformal, evaluated.analysis,
-                notes=self._notes(config, baseline, initial_ratio, data),
+                notes=self._notes(config, baseline, initial_ratio, data, resume),
             )
+            if resume is not None:
+                summary["resumed_after_epochs"] = resume.start
             summary.update(
                 success=None if smoke else success,
                 success_metric=self.success_metric,
@@ -853,6 +986,21 @@ class TaskTrainer:
     # Pieces
     # -----------------------------------------------------------------
 
+    @staticmethod
+    def _best_weights_of(run_dir: Path, resume: Any) -> Optional[List[Any]]:
+        """Return the weights of ``best_model.keras`` (``get_weights`` order), or ``None``.
+
+        ``None`` when the killed segment had no finite best, so no checkpoint was
+        written. Loaded AFTER ``setup_gpu``: it creates tensors.
+        """
+        import keras
+
+        from train.common.callbacks import best_checkpoint_path
+
+        if resume.best is None:
+            return None
+        return keras.models.load_model(best_checkpoint_path(str(run_dir)), compile=False).get_weights()
+
     def _load_checkpoint(self, model: Any, checkpoint: str) -> None:
         """Copy weights from ``checkpoint`` into the built ``model``, or refuse."""
         from dl_techniques.utils.logger import logger
@@ -883,12 +1031,25 @@ class TaskTrainer:
         baseline: Dict[str, float],
         experiment_name: str,
         last_weights: Any,
+        resume: Any = None,
+        best_weights: Optional[List[Any]] = None,
     ) -> Tuple[Any, List[Any]]:
-        """Return the epoch-line callback and the full callback list, in the D-022 order."""
+        """Return the epoch-line callback and the full callback list, in the D-022 order.
+
+        :param resume: the :class:`~train.common.resume_state.ResumePoint` of a resumed
+            run, else ``None``.
+        :param best_weights: the best epoch's weights of a resumed run, else ``None``.
+        """
         import keras
 
         from train.common.callbacks import EpochLogLine, LearningRateLogger, create_callbacks
         from train.common.classification_viz import TrainingDashboardCallback
+        from train.common.resume_state import (
+            FIT_STATE_NAME,
+            FitStateSidecar,
+            RestoreFitState,
+            rows_as_history,
+        )
 
         optim_cfg: OptimArgs = config.optim_args
         metric_cfg: MetricArgs = config.metric_args
@@ -897,6 +1058,17 @@ class TaskTrainer:
         analysis_cfg: AnalysisArgs = config.analysis_args
         debug_cfg: DebugArgs = config.debug_args
         every = analysis_cfg.epoch_analysis_every
+        resumed: Dict[str, Any] = {}
+        if resume is not None:
+            # The earlier segment's epoch-0 analysis and epoch-1 analysis are on disk; the
+            # analyzer would otherwise redo both, on the weights of a model BackupAndRestore
+            # has not yet restored, and overwrite them.
+            resumed = dict(
+                initial_value_threshold=resume.best,
+                csv_initial_rows=resume.rows,
+                analyzer_on_train_begin=False,
+                analyzer_first_epoch=False,
+            )
 
         callbacks, _ = create_callbacks(
             model_name=experiment_name,
@@ -911,6 +1083,7 @@ class TaskTrainer:
             include_terminate_on_nan=debug_cfg.terminate_on_nan,
             include_analyzer=every > 0,
             analyzer_start_epoch=max(every, 1),
+            **resumed,
         )
         if not checkpoint_cfg.save_best:
             callbacks = [
@@ -945,8 +1118,23 @@ class TaskTrainer:
                     out_path=vis_dir / "training_dashboard.png",
                     baseline_fn=lambda _model: dict(baseline),
                     title=f"{experiment_name} (seed {config.seed})",
+                    initial_history=None if resume is None else rows_as_history(resume.rows),
+                    initial_baseline=None if resume is None else dict(baseline),
                 )
             )
+        # The resume trio goes last, in the order `train.common.resume_state` documents:
+        # the sidecar after EarlyStopping (it reads its best and wait), the backup after
+        # the sidecar, so a kill at any instant leaves a sidecar entry for every epoch the
+        # backup claims.
+        stopper = next(c for c in callbacks if isinstance(c, keras.callbacks.EarlyStopping))
+        if resume is not None:
+            callbacks.append(
+                RestoreFitState(stopper, resume.best, resume.wait, best_weights, resume.best_epoch)
+            )
+        callbacks.append(FitStateSidecar(stopper, run_dir / CHECKPOINTS_DIR / FIT_STATE_NAME))
+        callbacks.append(
+            keras.callbacks.BackupAndRestore(str(run_dir / BACKUP_DIR), delete_checkpoint=False)
+        )
         return epoch_line, callbacks
 
     def _summary_head(
@@ -1006,7 +1194,12 @@ class TaskTrainer:
         }
 
     def _notes(
-        self, config: StrictConfig, baseline: Dict[str, float], ratio: float, data: Any
+        self,
+        config: StrictConfig,
+        baseline: Dict[str, float],
+        ratio: float,
+        data: Any,
+        resume: Any = None,
     ) -> List[str]:
         """Plain-language lines for ``results_summary.json``'s ``notes``."""
         import numpy as np
@@ -1038,6 +1231,14 @@ class TaskTrainer:
             notes.append("analysis_args.model_analysis is false: `analyzer.status` is 'skipped'")
         if analysis_cfg.conformal_alpha is None:
             notes.append("analysis_args.conformal_alpha is null: `conformal` is null")
+        if resume is not None:
+            notes.append(
+                f"resumed after epoch {resume.start}: epochs 0..{resume.start - 1} come from the "
+                "killed segment's training_log.csv (its torn or surplus rows are in "
+                "training_log.pre_resume_<k>.csv), the training data order of the resumed "
+                "epochs replays the order of epoch 0, and `epoch_times` and "
+                "`fit_wall_seconds` cover the resumed epochs only"
+            )
         if config.debug_args.smoke:
             notes.append(
                 "debug_args.smoke is true: the success threshold is not applied, so "

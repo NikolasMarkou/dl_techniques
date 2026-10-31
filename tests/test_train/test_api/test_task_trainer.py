@@ -169,6 +169,9 @@ def reversed_mode(world, tmp_path_factory):
 
 BASE_FILES = {
     "config.json",
+    "checkpoints/backup/latest.weights.h5",
+    "checkpoints/backup/training_metadata.json",
+    "checkpoints/fit_state.json",
     "config_requested.json",
     "results_summary.json",
     "run.log",
@@ -318,6 +321,10 @@ def test_the_knob_run_keeps_what_was_not_turned_off(knobs):
         "run.log",
         "training_history.json",
         "training_log.csv",
+        # the resume files are written whatever the knobs say
+        "checkpoints/backup/latest.weights.h5",
+        "checkpoints/backup/training_metadata.json",
+        "checkpoints/fit_state.json",
     }
 
 
@@ -483,9 +490,9 @@ def test_smoke_with_an_explicit_epochs_is_refused_before_anything_is_created(wor
     assert not out.exists()
 
 
-def test_resuming_is_refused_while_it_is_not_implemented(world, tmp_path):
+def test_resuming_a_run_that_does_not_exist_is_refused_and_creates_nothing(world, tmp_path):
     out = tmp_path / "run"
-    with pytest.raises(ConfigError, match="resume_interrupted"):
+    with pytest.raises(ConfigError, match="checkpoints/backup"):
         ImageClassificationTrainer(make_config(out, resume_interrupted=True)).run()
     assert not out.exists()
 

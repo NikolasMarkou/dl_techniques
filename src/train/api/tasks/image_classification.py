@@ -36,7 +36,14 @@ Interface contract
     :param seed: seeds Python, numpy and Keras, the split and the augmentation;
         an int in ``[0, 2**32 - 1]``.
     :param precision: ``"float32"``, ``"mixed_float16"`` or ``"mixed_bfloat16"``.
-    :param resume_interrupted: refused until resume is implemented.
+    :param resume_interrupted: continue a killed run of the same ``out`` with the same
+        request (only ``resume_interrupted`` and ``out`` may differ). Rows, the best
+        checkpoint, early-stopping state and history are kept. Limits: the training data
+        order replays the order of epoch 0; an epoch killed midway is trained again from
+        its start; ``ReduceLROnPlateau`` (``schedule=constant``) restarts its own best and wait; a kill
+        between the best checkpoint's save and the backup can leave ``best_model.keras``
+        from an epoch that is then trained again. A finished run, a run with no epoch
+        left, and one with ``save_best`` false are refused (exit 2).
     :param checkpoint: a ``.keras`` model (a ``str`` or a ``Path``) whose layers
         of the same names give their weights to the new model.
     :param model_args: keywords of the family factory; they win over the recipe's.
@@ -126,7 +133,12 @@ class ImageClassificationConfig(StrictConfig):
         default="float32", metadata={"help": "float32, mixed_float16 or mixed_bfloat16"}
     )
     resume_interrupted: bool = dataclasses.field(
-        default=False, metadata={"help": "continue a killed run of the same out (not available yet)"}
+        default=False,
+        metadata={
+            "help": "continue a killed run of the same out with the same request; the data "
+            "order replays epoch 0's, a half-done epoch is trained again, and a finished "
+            "run is refused"
+        },
     )
     checkpoint: Optional[str] = dataclasses.field(
         default=None,

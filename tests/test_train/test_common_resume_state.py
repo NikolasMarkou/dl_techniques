@@ -26,11 +26,15 @@ from train.common.callbacks import EpochCSVLogger, create_callbacks
 from train.common.resume_state import (
     FIT_STATE_NAME,
     FitStateSidecar,
+    ResumePoint,
     RestoreFitState,
+    copy_log_aside,
     merge_history,
     prior_rows,
     read_backup_epoch,
     read_fit_state,
+    read_resume_point,
+    rows_as_history,
     update_fit_state,
 )
 
@@ -399,3 +403,56 @@ def test_a_killed_and_resumed_run_matches_an_uninterrupted_one(tmp_path):
     best = keras.models.load_model(killed / "best_model.keras", compile=False).get_weights()
     for restored, expected in zip(model.get_weights(), best):
         np.testing.assert_array_equal(restored, expected)
+
+
+# ---- rows_as_history, read_resume_point, copy_log_aside
+
+
+def test_rows_as_history_lists_a_key_only_for_the_epochs_that_logged_it():
+    rows = [(0, {"loss": 1.0}), (1, {"loss": 0.9, "val_loss": 0.4})]
+    assert rows_as_history(rows) == {"loss": [1.0, 0.9], "val_loss": [0.4]}
+    assert rows_as_history([]) == {}
+
+
+def _plant_run(tmp_path, start=2, entries=None):
+    (tmp_path / "backup").mkdir()
+    (tmp_path / "backup" / "training_metadata.json").write_text(json.dumps({"epoch": start}))
+    (tmp_path / "log.csv").write_text(
+        "epoch,loss\n" + "".join(f"{e},{1.0 - e / 10}\n" for e in range(start + 1)))
+    update_fit_state(
+        tmp_path / FIT_STATE_NAME,
+        epochs={"0": {"best": 0.7, "wait": 0, "best_epoch": 0},
+                "1": {"best": 0.7, "wait": 1, "best_epoch": 0}} if entries is None else entries,
+        initial={"metrics": {"loss": 2.3}})
+
+
+def test_read_resume_point_gathers_the_three_files(tmp_path):
+    _plant_run(tmp_path)
+    point = read_resume_point(tmp_path / "log.csv", tmp_path / "backup", tmp_path / FIT_STATE_NAME)
+    assert isinstance(point, ResumePoint)
+    assert (point.start, point.best, point.wait, point.best_epoch) == (2, 0.7, 1, 0)
+    assert [epoch for epoch, _ in point.rows] == [0, 1]  # the row of epoch 2 is the surplus one
+    assert point.state["initial"] == {"metrics": {"loss": 2.3}}
+
+
+@pytest.mark.parametrize("start, entries, message", [
+    (0, None, "records no finished epoch"),
+    (2, {}, "holds no entry for epoch 1"),
+    (3, None, "holds no entry for epoch 2"),
+])
+def test_read_resume_point_refuses_files_that_disagree(tmp_path, start, entries, message):
+    _plant_run(tmp_path, start=start, entries=entries)
+    with pytest.raises(ValueError, match=message):
+        read_resume_point(tmp_path / "log.csv", tmp_path / "backup", tmp_path / FIT_STATE_NAME)
+
+
+def test_copy_log_aside_never_overwrites_an_earlier_copy(tmp_path):
+    path = tmp_path / "training_log.csv"
+    path.write_text("first")
+    one = copy_log_aside(path)
+    path.write_text("second")
+    two = copy_log_aside(path)
+    assert (one.name, two.name) == ("training_log.pre_resume_1.csv", "training_log.pre_resume_2.csv")
+    assert (one.read_text(), two.read_text(), path.read_text()) == ("first", "second", "second")
+    with pytest.raises(FileNotFoundError):
+        copy_log_aside(tmp_path / "missing.csv")

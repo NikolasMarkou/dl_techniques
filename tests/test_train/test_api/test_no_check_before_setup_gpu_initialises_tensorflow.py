@@ -20,7 +20,13 @@ attribute turns the control red rather than the test blind). The recorder then
 stops the run: only the state at the call matters.
 
 Both ``devices`` paths are covered: the default (``setup_gpu(None)``) and an
-explicit index (``setup_gpu(0)``). The tests write only under ``tmp_path``.
+explicit index (``setup_gpu(0)``). The RESUME path is covered too (mode
+``resume``): the child first lays out, by hand and without a tensor, the files of
+a run killed after one epoch (its request, a backup record, the sidecar, the CSV
+and a ``best_model.keras`` that only has to exist), then calls the function with
+``resume_interrupted=True``. Reading those files is allowed before ``setup_gpu``;
+loading the best weights is not, and waits until after it. The tests write only
+under ``tmp_path``.
 """
 
 import json
@@ -71,10 +77,34 @@ DRIVER = textwrap.dedent(
         keras.ops.zeros(1)
         seen["after_op"] = initialised()
     kwargs = {{}} if devices == "auto" else {{"devices": int(devices)}}
+    resume = mode == "resume"
+    if resume:
+        import csv
+        import pathlib
+
+        from train.api.config import validate
+        from train.api.run_dir import write_requested
+        from train.api.tasks.image_classification import ImageClassificationConfig
+        from train.common.resume_state import update_fit_state
+
+        run = pathlib.Path(out)
+        write_requested(run, validate(ImageClassificationConfig, {{
+            "out": out, "model": "vit/vit_pico", "data": {{"dataset": "cifar10"}},
+            "epochs": 3, "batch_size": 4, **kwargs}}))
+        (run / "checkpoints" / "backup").mkdir(parents=True)
+        (run / "checkpoints" / "backup" / "training_metadata.json").write_text('{{"epoch": 1}}')
+        update_fit_state(
+            run / "checkpoints" / "fit_state.json",
+            epochs={{"0": {{"best": 0.5, "wait": 0, "best_epoch": 0}}}},
+            initial={{"metrics": {{"loss": 2.3}}, "ratio": 1.0, "warned": False}})
+        with open(run / "training_log.csv", "w", newline="") as handle:
+            csv.writer(handle).writerows([["epoch", "loss"], [0, 1.0]])
+        (run / "best_model.keras").write_bytes(b"x")
+        seen["planted_without_tensors"] = not initialised()
     try:
         train_image_classification(
             out=out, model="vit/vit_pico", data={{"dataset": "cifar10"}},
-            epochs=1, batch_size=4, **kwargs,
+            epochs=3 if resume else 1, batch_size=4, resume_interrupted=resume, **kwargs,
         )
     except Recorded:
         pass
@@ -116,4 +146,15 @@ def test_setup_gpu_is_called_once_before_tensorflow_initialises_its_devices(
 ):
     seen = record(tmp_path, devices)
     assert seen["at_start"] is False
+    assert seen["calls"] == [{"gpu_id": gpu_id, "flag": "devices", "initialised": False}], seen
+
+
+@pytest.mark.parametrize(
+    "devices, gpu_id", [("auto", None), ("0", 0)], ids=["devices_auto", "devices_index"]
+)
+def test_a_resume_reads_its_files_without_initialising_tensorflow_before_setup_gpu(
+    tmp_path, devices, gpu_id
+):
+    seen = record(tmp_path, devices, mode="resume")
+    assert seen["planted_without_tensors"] is True
     assert seen["calls"] == [{"gpu_id": gpu_id, "flag": "devices", "initialised": False}], seen

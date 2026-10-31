@@ -41,10 +41,13 @@ from .test_task_trainer import files_of, make_config, read_json
 
 EPOCHS = 3
 
-#: The files of a default run in this phase (``task.json`` and ``checkpoints/backup/``
-#: arrive with the predictor and with resume, Steps 24 and 26).
+#: The files of a default run in this phase (``task.json`` arrives with the predictor,
+#: Step 26). ``checkpoints/`` is the resume state (Step 24).
 MAIN_FILES = {
     "config.json",
+    "checkpoints/backup/latest.weights.h5",
+    "checkpoints/backup/training_metadata.json",
+    "checkpoints/fit_state.json",
     "config_requested.json",
     "results_summary.json",
     "run.log",

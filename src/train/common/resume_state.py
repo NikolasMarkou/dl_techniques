@@ -13,7 +13,9 @@ the primitives that put those back:
 * :class:`RestoreFitState` sets ``best``, ``wait`` and the in-memory best
   weights on the resumed ``EarlyStopping``.
 * :func:`read_backup_epoch`, :func:`read_fit_state`, :func:`prior_rows` and
-  :func:`merge_history` read the previous segment back.
+  :func:`merge_history` read the previous segment back; :func:`read_resume_point`
+  gathers what a resume needs into one :class:`ResumePoint`, and
+  :func:`copy_log_aside` keeps the killed segment's CSV before it is rewritten.
 
 Callback order for a resumable run (every position is load-bearing)::
 
@@ -30,9 +32,11 @@ Importing this module imports ``keras`` and nothing else from the repository.
 """
 
 import csv
+import dataclasses
 import json
 import math
 import os
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
@@ -172,6 +176,16 @@ def prior_rows(csv_path: PathLike, start_epoch: int) -> List[Tuple[int, Dict[str
     return rows
 
 
+def rows_as_history(rows: Sequence[Tuple[int, Mapping[str, float]]]) -> Dict[str, List[float]]:
+    """The ``History.history`` shape of ``rows``: each key to its per-epoch values.
+
+    A key an epoch did not log is skipped for that epoch, as Keras itself lists
+    a key only for the epochs that logged it.
+    """
+    keys = {key for _, logs in rows for key in logs}
+    return {key: [logs[key] for _, logs in rows if key in logs] for key in keys}
+
+
 def merge_history(
         rows: Sequence[Tuple[int, Mapping[str, float]]], history: "keras.callbacks.History"
 ) -> "keras.callbacks.History":
@@ -184,12 +198,97 @@ def merge_history(
     missing from some earlier epochs is prepended as far as it was logged, as
     Keras itself lists a key only for the epochs that logged it.
     """
-    keys = {key for _, logs in rows for key in logs}
-    for key in keys:
-        earlier = [logs[key] for _, logs in rows if key in logs]
+    for key, earlier in rows_as_history(rows).items():
         history.history[key] = earlier + list(history.history.get(key, []))
     history.epoch = [epoch for epoch, _ in rows] + list(history.epoch or [])
     return history
+
+
+@dataclasses.dataclass(frozen=True)
+class ResumePoint:
+    """Where a killed run stopped, as read from its files.
+
+    :ivar start: The epoch index the resumed ``fit`` starts at (epochs ``0 ..
+        start - 1`` are done).
+    :ivar best: ``EarlyStopping``'s best value after epoch ``start - 1``, or
+        ``None`` when none was finite.
+    :ivar wait: Its ``wait`` after that epoch.
+    :ivar best_epoch: Zero-based index of the best epoch.
+    :ivar rows: ``(epoch, logs)`` for epochs ``0 .. start - 1``, from the CSV.
+    :ivar state: The whole sidecar, for the keys a caller stored with
+        :func:`update_fit_state` (such as the epoch-0 evaluation).
+    """
+
+    start: int
+    best: Optional[float]
+    wait: int
+    best_epoch: int
+    rows: Tuple[Tuple[int, Dict[str, float]], ...]
+    state: Dict[str, Any]
+
+
+def read_resume_point(
+        csv_path: PathLike, backup_dir: PathLike, fit_state_path: PathLike
+) -> ResumePoint:
+    """Read the three files a resume starts from and check they agree.
+
+    Interface contract: ``csv_path`` is the run's ``training_log.csv``,
+    ``backup_dir`` its ``BackupAndRestore`` directory, ``fit_state_path`` its
+    :class:`FitStateSidecar` file. Pure file reading: no TensorFlow call, so it
+    may run before the GPU is set up.
+
+    Returns:
+        The :class:`ResumePoint`.
+
+    Raises:
+        FileNotFoundError: no backup metadata, or no CSV.
+        ValueError: no epoch finished, the sidecar has no entry for the epoch
+            before ``start`` (so ``best`` and ``wait`` are unknown), or the CSV
+            does not hold epochs ``0 .. start - 1`` first (:func:`prior_rows`).
+    """
+    start = read_backup_epoch(backup_dir)
+    if start < 1:
+        raise ValueError(f"the backup in {backup_dir} records no finished epoch")
+    state = read_fit_state(fit_state_path)
+    entry = state[_EPOCHS_KEY].get(str(start - 1))
+    if not isinstance(entry, dict):
+        raise ValueError(
+            f"{fit_state_path} holds no entry for epoch {start - 1}, the last epoch the "
+            f"backup in {backup_dir} completed, so the early-stopping state is unknown")
+    rows = prior_rows(csv_path, start)
+    return ResumePoint(
+        start=start,
+        best=entry["best"],
+        wait=int(entry["wait"]),
+        best_epoch=int(entry["best_epoch"]),
+        rows=tuple(rows),
+        state=state,
+    )
+
+
+def copy_log_aside(csv_path: PathLike) -> Path:
+    """Copy ``csv_path`` to ``<stem>.pre_resume_<k>.csv`` for the smallest free ``k``.
+
+    A resume rewrites ``training_log.csv`` (the logger opens it in write mode),
+    which drops the killed segment's torn or surplus rows; the copy keeps them.
+    The target is created exclusively, so an earlier copy is never overwritten.
+
+    Returns:
+        The path of the new copy.
+
+    Raises:
+        FileNotFoundError: ``csv_path`` does not exist.
+    """
+    csv_path = Path(csv_path)
+    k = 1
+    while True:
+        target = csv_path.with_name(f"{csv_path.stem}.pre_resume_{k}{csv_path.suffix}")
+        try:
+            with open(csv_path, "rb") as source, open(target, "xb") as copy:
+                shutil.copyfileobj(source, copy)
+            return target
+        except FileExistsError:
+            k += 1
 
 
 # ---------------------------------------------------------------------
