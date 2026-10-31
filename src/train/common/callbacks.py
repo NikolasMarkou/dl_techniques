@@ -7,7 +7,7 @@ import math
 import time
 import keras
 from datetime import datetime
-from typing import Tuple, List, Dict, Optional, Any
+from typing import Tuple, List, Dict, Optional, Any, Sequence
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
@@ -77,9 +77,16 @@ class EpochCSVLogger(keras.callbacks.CSVLogger):
       epoch under ``validation_freq > 1``), the file is rewritten once with
       the sorted union as header; every row stays on disk at its epoch end.
       A key an epoch does not log is an empty cell, never ``NA``.
+    * ``initial_rows`` (default empty, legacy behaviour) is the resume hook:
+      a sequence of ``(epoch, logs)`` pairs from an earlier segment of the same
+      run. ``on_train_begin`` still rewrites the file, then writes those rows
+      back in order and takes the header from their keys, so the file holds the
+      earlier epochs once and the resumed ones after them. ``append=True``
+      stays refused. Failure mode: an ``initial_rows`` entry that is not a
+      ``(epoch, mapping)`` pair raises at construction.
     """
 
-    def __init__(self, filename, separator=",", append=False):
+    def __init__(self, filename, separator=",", append=False, initial_rows=()):
         if append:
             raise ValueError(
                 "EpochCSVLogger does not append: a key first seen after "
@@ -87,11 +94,20 @@ class EpochCSVLogger(keras.callbacks.CSVLogger):
                 "cannot widen the header an earlier run wrote. Log each run "
                 "to its own file.")
         super().__init__(filename, separator=separator, append=False)
+        self._initial_rows = [(int(epoch), dict(row)) for epoch, row in initial_rows]
         self._rows = []
 
     def on_train_begin(self, logs=None):
         self._rows = []
         super().on_train_begin(logs)
+        # DECISION plan-2026-10-30T132432-a865fa08/D-057
+        # The earlier segment's rows go back AFTER the stock rewrite, one
+        # row per `on_epoch_end` call, so the header-widening path above sees
+        # them as ordinary rows. Do NOT open the file in append mode (pinned
+        # refusal) and do NOT skip the rewrite: a torn last row of the killed
+        # segment would then stay in the file.
+        for past_epoch, past_logs in self._initial_rows:
+            self.on_epoch_end(past_epoch, past_logs)
 
     def on_epoch_end(self, epoch, logs=None):
         logs = dict(logs or {})
@@ -234,6 +250,8 @@ def create_callbacks(
         analyzer_start_epoch: int = 1,
         analyzer_on_train_begin: bool = True,
         analyzer_first_epoch: bool = True,
+        initial_value_threshold: Optional[float] = None,
+        csv_initial_rows: Sequence[Tuple[int, Dict[str, Any]]] = (),
 ) -> Tuple[List, str]:
     """
     Create standard training callbacks.
@@ -281,6 +299,15 @@ def create_callbacks(
         Also analyze after epoch 1 whatever the cadence says (default True).
         With both on, the schedule is the repository standard: ``epoch_000``,
         ``epoch_001``, then ``analyzer_start_epoch + k * analyzer_epoch_frequency``.
+    initial_value_threshold : Optional[float]
+        Resume hook, passed to ``ModelCheckpoint``: the best monitored value of
+        an earlier segment of the same run, so a worse epoch does not overwrite
+        ``best_model.keras``. ``None`` (default) is the legacy behaviour (the
+        first epoch always saves).
+    csv_initial_rows : Sequence[Tuple[int, Dict[str, Any]]]
+        Resume hook, passed to :class:`EpochCSVLogger` as ``initial_rows``: the
+        ``(epoch, logs)`` rows of the earlier segment. Empty (default) is the
+        legacy behaviour.
 
     Returns
     -------
@@ -310,9 +337,11 @@ def create_callbacks(
             save_best_only=True,
             verbose=1,
             mode=monitor_mode,
+            initial_value_threshold=initial_value_threshold,
         ),
         EpochCSVLogger(
-            filename=os.path.join(results_dir, 'training_log.csv')
+            filename=os.path.join(results_dir, 'training_log.csv'),
+            initial_rows=csv_initial_rows,
         ),
     ]
 

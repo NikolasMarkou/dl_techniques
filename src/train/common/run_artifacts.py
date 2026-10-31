@@ -72,10 +72,14 @@ def refuse_existing_run(
 
 
 @contextmanager
-def attach_run_log(run_dir: Path, log_name: str = RUN_LOG_NAME) -> Iterator[logging.Handler]:
+def attach_run_log(
+        run_dir: Path, log_name: str = RUN_LOG_NAME, mode: str = "w"
+) -> Iterator[logging.Handler]:
     """Tee the ``dl`` logger into ``<run_dir>/<log_name>`` inside a ``with`` block.
 
-    The file is opened in write mode with the repo ``LOGGER_FORMAT``. The handler
+    The file is opened in ``mode`` (default write, which truncates; a resumed run
+    passes ``"a"`` so the lines of the killed segment stay) with the repo
+    ``LOGGER_FORMAT``. The handler
     is detached and closed when the block exits, on return AND on an exception,
     so a later run in the same process never writes into this run's log.
 
@@ -83,11 +87,15 @@ def attach_run_log(run_dir: Path, log_name: str = RUN_LOG_NAME) -> Iterator[logg
         run_dir: An EXISTING run directory (a missing one raises
             ``FileNotFoundError`` from the file handler).
         log_name: File name inside ``run_dir``; defaults to :data:`RUN_LOG_NAME`.
+        mode: ``"w"`` (default, the legacy behaviour) or ``"a"``; any other
+            value raises ``ValueError`` before a file is touched.
 
     Yields:
         The attached :class:`logging.FileHandler`.
     """
-    handler = logging.FileHandler(run_dir / log_name, mode="w")
+    if mode not in ("w", "a"):
+        raise ValueError(f"attach_run_log mode must be 'w' or 'a', got {mode!r}")
+    handler = logging.FileHandler(run_dir / log_name, mode=mode)
     handler.setFormatter(logging.Formatter(LOGGER_FORMAT))
     logger.addHandler(handler)
     try:

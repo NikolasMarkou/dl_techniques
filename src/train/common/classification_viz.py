@@ -491,7 +491,10 @@ def render_training_dashboard(
         drawn = times
         clipped = np.zeros(len(times), dtype=bool)
         if len(times) > 1:
-            reference = float(np.median(times[1:]))  # epoch 1 carries the XLA warmup
+            # epoch 1 carries the XLA warmup; a NaN is a resumed run's earlier epoch
+            # whose wall time was not kept (nanmedian equals median without one)
+            finite = times[1:][np.isfinite(times[1:])]
+            reference = float(np.median(finite)) if finite.size else float("nan")
             if np.isfinite(reference) and reference > 0.0:
                 ceiling = TIME_CLIP_FACTOR * reference
                 clipped = times > ceiling
@@ -503,7 +506,7 @@ def render_training_dashboard(
                 ax.annotate(f"{true_value:.4g} s (clipped)", xy=(xi, top), xytext=(0, 3),
                             textcoords="offset points", fontsize=8, color="#444444",
                             ha="left" if xi <= (len(times) + 1) / 2 else "right", va="bottom")
-            ax.set_ylim(0.0, float(drawn.max()) * 1.25)  # room for the annotation
+            ax.set_ylim(0.0, float(np.nanmax(drawn)) * 1.25)  # room for the annotation
         ax.set_xlabel("epoch")
         ax.set_ylabel("seconds")
 
@@ -599,6 +602,14 @@ class TrainingDashboardCallback(keras.callbacks.Callback):
         best_key: Optional history key (e.g. ``"val_loss"``): the epoch with its best finite
             value so far (lowest, or highest when ``resolve_monitor_mode`` says ``max``) is passed to :func:`render_training_dashboard` as ``best_epoch`` on
             every draw, so the marker follows the run. ``None`` (the default) marks nothing.
+        initial_history: Resume hook. The per-epoch metrics of the earlier segment of the
+            same run (``history`` keys to value lists). They seed :attr:`history`, and each
+            earlier epoch gets a NaN wall time (it was not kept), so the time panel shows
+            no bar for it and the epoch count stays right. A resumed model is not an
+            untrained one, so ``on_train_begin`` then measures no baseline. ``None``
+            (the default) is the legacy behaviour.
+        initial_baseline: Resume hook. The epoch-0 metrics measured by the earlier segment;
+            only read when ``initial_history`` is given. ``None`` draws no baseline marker.
 
     Attributes:
         history: Accumulated per-epoch metrics (``loss``, ``val_loss``, ...,
@@ -616,6 +627,8 @@ class TrainingDashboardCallback(keras.callbacks.Callback):
             baseline_fn: Optional[Callable[[keras.Model], Dict[str, float]]] = None,
             baseline_mode: str = "inference",
             best_key: Optional[str] = None,
+            initial_history: Optional[Dict[str, Sequence[float]]] = None,
+            initial_baseline: Optional[Dict[str, float]] = None,
     ) -> None:
         super().__init__()
         self.out_path = Path(out_path)
@@ -631,13 +644,19 @@ class TrainingDashboardCallback(keras.callbacks.Callback):
         self.history: Dict[str, List[float]] = {}
         self.epoch_times: List[float] = []
         self.baseline: Optional[Dict[str, float]] = None
+        self._resumed = initial_history is not None
+        if self._resumed:
+            self.history = {key: [float(v) for v in values] for key, values in initial_history.items()}
+            self.epoch_times = [float("nan")] * max((len(v) for v in self.history.values()), default=0)
+            if initial_baseline is not None:
+                self.baseline = {k: float(v) for k, v in initial_baseline.items()}
         self._epoch_start = 0.0
         # Number of completed epochs the PNG on disk shows (0 = nothing drawn yet).
         self._drawn_epochs = 0
 
     def on_train_begin(self, logs: Optional[Dict[str, Any]] = None) -> None:
         """Measure the untrained model (epoch 0): ``baseline_fn`` or ``baseline_data``."""
-        if self.baseline_fn is None and self.baseline_data is None:
+        if self._resumed or (self.baseline_fn is None and self.baseline_data is None):
             return
         try:
             if self.baseline_fn is not None:
