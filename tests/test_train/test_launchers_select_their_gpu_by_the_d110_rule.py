@@ -284,12 +284,13 @@ def test_eval_per_pixel_uncertainty_selects_by_the_rule(
 # - ``bfunet/run_gabor_depthwise_depth_sweep.sh`` forwarded ``--gpu "$GPU"``
 #   (default 1) to ``train_convunext_denoiser``: ValueError at ``setup_gpu``.
 # - four scripts (``nam/eval_dfsa.py``, ``nam/test_extreme.py``,
-#   ``cliffordnet/eval_clip_retrieval.py``, ``cliffordnet/filter_cc3m_clipscore.py``, the last two
-#   since removed from the tree) default ``--gpu`` to 1, which no one-entry export can satisfy.
+#   ``cliffordnet/eval_clip_retrieval.py``, ``cliffordnet/filter_cc3m_clipscore.py``) default
+#   ``--gpu`` to 1, which no one-entry export can satisfy. All four have since left the tree
+#   (the two ``nam`` scripts with the whole NAM model, cc5199915), and with them their
+#   per-script row; the ``--gpu`` default census below still covers every script that remains.
 
 import ast  # noqa: E402
 import re  # noqa: E402
-import runpy  # noqa: E402
 import shlex  # noqa: E402
 import warnings  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -486,36 +487,6 @@ def test_the_convnext_driver_without_gpu_flag_keeps_the_export(
     with pytest.raises(_Stop):
         driver.run_comparison(args, visible)
     assert seen[0][1][VAR] == expected
-
-
-@pytest.mark.parametrize("script, argv", [
-    ("nam/eval_dfsa.py", ["eval_dfsa"]),
-    ("nam/test_extreme.py", ["test_extreme", "--checkpoint", "x.h5"]),
-])
-@pytest.mark.parametrize("visible, flag, expected", [
-    ("1", [], "1"),                  # an export is respected (was a refusal)
-    (None, [], "1"),                 # unset, no flag: the script's GPU 1 default
-    ("0,1", ["--gpu", "1"], "1"),
-])
-def test_a_script_with_a_preferred_gpu_selects_by_the_rule(
-        monkeypatch, script, argv, visible, flag, expected):
-    _set_visible(monkeypatch, visible)
-    real_setup_gpu = gpu_module.setup_gpu
-
-    def stop(gpu_id=None):
-        real_setup_gpu(gpu_id)
-        raise _Stop  # where the script would load a checkpoint
-
-    # Two of the scripts parse in an ``if __name__ == "__main__"`` block, so
-    # each runs as ``__main__`` from its file (one is named ``test_*.py``,
-    # which pytest's import hook would claim); every ``setup_gpu`` import sees
-    # the stop.
-    monkeypatch.setattr(gpu_module, "setup_gpu", stop)
-    monkeypatch.setattr(importlib.import_module("train.common"), "setup_gpu", stop)
-    monkeypatch.setattr(sys, "argv", [*argv, *flag])
-    with pytest.raises(_Stop):
-        runpy.run_path(str(_TRAIN / script), run_name="__main__")
-    assert os.environ.get(VAR) == expected
 
 
 # --- shell launchers ----------------------------------------------------------
