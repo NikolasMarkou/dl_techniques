@@ -1027,6 +1027,34 @@ def listing_fingerprint(listing: FileListing, mode: str = "listing") -> str:
     return digest.hexdigest()
 
 
+#: The integer weights of ``tf.io.decode_image(channels=1)`` on an RGB PNG. TensorFlow asks
+#: libpng for ``png_set_rgb_to_gray(0.299, 0.587)`` and libpng keeps them as integers of 1/32768
+#: (red and green truncated, blue the rest). Measured: ``(9797 R + 19234 G + 3737 B) >> 15``
+#: equals the decoder's byte on 65,536 random colours with no mismatch, where
+#: ``tf.image.rgb_to_grayscale`` (float luma, rounded) differs in a quarter of the pixels by one
+#: level and PIL's ``convert("L")`` in half. The shift is 15 and the weights sum to ``1 << 15``.
+GREY_WEIGHTS = (9797, 19234, 3737)
+
+
+def rgb8_to_grey8(rgb: np.ndarray) -> np.ndarray:
+    """Turn colour pixels into the grey byte the loader's decoder makes of the same PNG pixels.
+
+    Interface contract: the one definition of the loader's colour to grey rule for pixels that
+    are already decoded (the predictor calls it for an array or a PIL image).
+
+    :param rgb: a ``uint8`` array ``(..., 3)`` of 8-bit colour values (no alpha).
+    :return: a ``uint8`` array ``(..., 1)``: ``(9797 R + 19234 G + 3737 B) >> 15``, computed
+        in ``int32`` (the largest sum is below ``2 ** 23``).
+    :raises ValueError: when ``rgb`` is not ``uint8`` or does not end in 3 channels.
+    """
+    if rgb.dtype != np.uint8 or rgb.shape[-1] != 3:
+        raise ValueError(f"expected a uint8 array ending in 3 channels, got {rgb.dtype} {rgb.shape}")
+    wide = rgb.astype(np.int32)
+    grey = (GREY_WEIGHTS[0] * wide[..., 0] + GREY_WEIGHTS[1] * wide[..., 1]
+            + GREY_WEIGHTS[2] * wide[..., 2]) >> 15
+    return grey.astype(np.uint8)[..., None]
+
+
 def decode_image_file(path: tf.Tensor, channels: int = 3) -> tf.Tensor:
     """One image file as a float32 ``(H, W, channels)`` tensor in [0, 1], at its own size.
 

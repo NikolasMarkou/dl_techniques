@@ -541,14 +541,20 @@ def test_a_file_that_is_not_an_image_is_refused(tmp_path):
         Predictor(constant_model([0.0, 1.0, 2.0]), record()).predict(str(path))
 
 
-def test_a_rgb_array_for_a_one_channel_model_is_turned_grey_and_grey_is_repeated_for_rgb():
+def test_a_rgb_array_for_a_one_channel_model_is_turned_grey_and_grey_is_repeated_for_rgb(tmp_path):
     model = linear_model((8, 8, 3), 3, seed=5)
     grey_record = record(eval_transform={"kind": "resize", "source_channels": 1})
     rgb = np.random.default_rng(0).integers(0, 255, (8, 8, 3)).astype(np.uint8)
     got = Predictor(model, grey_record).predict(rgb)
     import tensorflow as tf
+    from PIL import Image
 
-    grey = tf.image.rgb_to_grayscale(tf.image.convert_image_dtype(tf.constant(rgb), tf.float32))
+    from train.common.classification_data import decode_image_file
+
+    # The expected grey is the LOADER's: the same pixels stored as a PNG and decoded with
+    # channels=1 (not `tf.image.rgb_to_grayscale`, which is a level off in a quarter of them).
+    Image.fromarray(rgb).save(tmp_path / "rgb.png")
+    grey = decode_image_file(str(tmp_path / "rgb.png"), 1)
     batch = (tf.repeat(grey, 3, axis=-1)[None] - np.asarray(grey_record["mean"], np.float32)) / np.asarray(
         grey_record["std"], np.float32
     )

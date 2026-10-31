@@ -54,7 +54,14 @@ spinning disk; the seconds go to `run.log`). A resume refuses a changed mode or 
 
 **Predict**: `python -m train predict model=<run dir or .keras> data=<image or directory> out=pred.json`
 writes a new JSON list of `{"path", "labels", "scores"}`, every class best first. A directory is
-searched recursively. `out` must not exist.
+searched recursively. `out` must not exist. Through the Python `Predictor`, a colour array or PIL image given to a
+grey model (MNIST) is made grey on its 8-bit pixels with the loader's own rule, `(9797 R + 19234 G + 3737 B) >> 15`
+(libpng's weights as `tf.io.decode_image(channels=1)` uses them), so a PNG gives the loader's pixels exactly (checked
+within 1e-5, measured 0). **Measured limit:** a JPEG given as a path is read by the loader's decoder and is exact, but
+a JPEG that was already decoded to an array or a PIL image has lost the Y plane the decoder takes its grey from, and
+PIL's and TensorFlow's JPEG decoders differ, so its grey is off the loader's by up to 14 levels of 255 on random
+colour noise at quality 75 (mean 0.56; 13 and 1.15 at quality 95) and by 1 to 2 levels (mean 0.5 to 0.6, about
+0.002) on smooth images: above 1e-5, and not removable from the decoded pixels.
 
 **Export**: `python -m train export model=<run dir or .keras> out=<path> format=keras|saved_model|tflite|onnx`
 writes one new file (a directory for `saved_model`) and `<out>.task.json` beside it, and prints

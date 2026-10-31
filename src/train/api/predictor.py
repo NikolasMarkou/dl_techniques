@@ -70,6 +70,22 @@ Interface contract
         of those, or a 4-D array. A ``uint8`` array is divided by 255; a floating array
         must already lie in ``[0, 1]`` and is refused otherwise; any other dtype is
         refused. A 4-channel array is RGBA and loses its alpha channel, as a PIL image does. A path is read with ``channels`` of ``eval_transform.source_channels``.
+        **Grey models** (``source_channels`` 1): a colour array or PIL image is made grey on its
+        8-bit pixels with the loader's rule, ``(9797 R + 19234 G + 3737 B) >> 15``
+        (:func:`train.common.classification_data.rgb8_to_grey8`; libpng's integer weights as
+        ``tf.io.decode_image(channels=1)`` applies them to a PNG, equal to it on 65,536 random
+        colours), and a floating array is rounded to its 8-bit values first, as storing it as a
+        PNG would. So a PNG's pixels (RGB, RGBA, palette) come out as the loader's within 1e-5
+        (measured: identical). **Measured limit, JPEG:** a JPEG given as a PATH is decoded by the
+        loader's own call and is exact; a JPEG already decoded to an array or PIL image is not,
+        because the loader's grey is the JPEG's Y plane, which RGB output no longer holds, and
+        PIL's and TensorFlow's JPEG decoders differ besides. Against the loader's decode of the
+        same file, in levels of 255: random colour noise at quality 75, worst pixel 14, mean 0.56;
+        at quality 95, 13 and 1.15; smooth images, worst 1 to 2, mean 0.5 to 0.6 (about 0.002 of
+        the scale). That is above 1e-5 and cannot be brought under it from decoded pixels; pass the
+        file's path when the exact value matters. ``tf.image.rgb_to_grayscale`` and PIL's ``convert("L")`` (the earlier
+        calls) differ from the loader on PNG pixels too: one level in a quarter and in a half of
+        the pixels.
     :param top_k: keep the ``top_k`` best classes of each image; ``None`` keeps all.
     :param threshold: drop classes whose probability is below it; ``None`` drops none.
     :return: ``{"labels", "scores"}``. For a single image both are flat lists, best class
@@ -148,6 +164,9 @@ EVAL_KIND_OF_DATA = {
 CHUNK = 32
 
 _NORMALIZE = ("standardize", "unit")
+
+#: The PIL modes that already are grey (read as ``L``); every other mode is read as RGB.
+GREY_MODES = ("L", "LA", "1")
 
 
 def build_task_record(
@@ -438,17 +457,17 @@ class Predictor:
         import tensorflow as tf
 
         wanted = self.record["eval_transform"]["source_channels"]
-        have = int(image.shape[-1])
-        if have == wanted:
+        if int(image.shape[-1]) == wanted:
             return image
-        if have == 3 and wanted == 1:
-            return tf.image.rgb_to_grayscale(image)
+        # Colour to grey is NOT done here: it happens on the 8-bit pixels in `_from_array`.
         return tf.repeat(image, wanted, axis=-1)
 
     def _from_array(self, array: Any) -> Any:
         """Return one array as a float32 ``[0, 1]`` tensor ``(H, W, source_channels)``."""
         import numpy as np
         import tensorflow as tf
+
+        from train.common.classification_data import rgb8_to_grey8
 
         if array.dtype != np.uint8 and not np.issubdtype(array.dtype, np.floating):
             raise ConfigError(
@@ -466,14 +485,25 @@ class Predictor:
             # exactly as ``PIL.Image.convert("RGB")`` does for a PIL image. Do NOT composite it
             # over a background: the two input forms would then give different pixels.
             array = array[..., :3]
+        if array.dtype != np.uint8 and not (np.all(array >= 0.0) and np.all(array <= 1.0)):
+            raise ConfigError(
+                "Invalid image: a floating array must lie in [0, 1] (the scale of a "
+                "uint8 array divided by 255), got values outside it or NaN"
+            )
+        if array.shape[-1] == 3 and self.record["eval_transform"]["source_channels"] == 1:
+            # DECISION plan-2026-10-31T180033-2faf890a/D-019
+            # Grey is made on the 8-bit pixels with the loader's own integer rule, the stage
+            # and the rounding at which `tf.io.decode_image(channels=1)` makes it for a PNG.
+            # Do NOT use `tf.image.rgb_to_grayscale` (float luma, other weights: a level off
+            # in a quarter of the pixels) or PIL's `convert("L")` (rounds: a level off in half).
+            # A float array is rounded to the 8-bit value first, as storing it as a PNG would.
+            # A JPEG already decoded to RGB cannot be exact: its Y plane is gone (module docstring).
+            if array.dtype != np.uint8:
+                array = np.rint(array.astype(np.float64) * 255.0).astype(np.uint8)
+            array = rgb8_to_grey8(array)
         if array.dtype == np.uint8:
             image = tf.image.convert_image_dtype(tf.constant(array), tf.float32)
         else:
-            if not (np.all(array >= 0.0) and np.all(array <= 1.0)):
-                raise ConfigError(
-                    "Invalid image: a floating array must lie in [0, 1] (the scale of a "
-                    "uint8 array divided by 255), got values outside it or NaN"
-                )
             image = tf.constant(array.astype(np.float32))
         return self._to_source_channels(image)
 
@@ -500,8 +530,10 @@ class Predictor:
         if isinstance(item, (str, os.PathLike)):
             return self._from_path(item)
         if isinstance(item, Image.Image):
-            mode = "L" if self.record["eval_transform"]["source_channels"] == 1 else "RGB"
-            return self._from_array(np.asarray(item.convert(mode)))
+            # A colour image keeps its colours (alpha dropped) so `_from_array` converts them
+            # to grey the loader's way; only an image that is already grey is read as grey.
+            grey = self.record["eval_transform"]["source_channels"] == 1 and item.mode in GREY_MODES
+            return self._from_array(np.asarray(item.convert("L" if grey else "RGB")))
         if isinstance(item, np.ndarray) and item.ndim in (2, 3):
             return self._from_array(item)
         raise ConfigError(
