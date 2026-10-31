@@ -13,8 +13,8 @@ Interface contract
     Frozen record returned by :meth:`TaskTrainer.run`.
 
     :ivar run_dir: the run directory.
-    :ivar success: the best ``success_metric`` (``val_accuracy``) reached
-        ``metric_args.success_threshold``; ``True`` for a ``debug_args.smoke``
+    :ivar success: the task's ``success_value`` (the best ``success_metric``) reached
+        its ``success_threshold``; ``True`` for a ``debug_args.smoke``
         run that finished, where no threshold applies (the summary's ``success``
         is then ``null``).
     :ivar best_metric: the best value of ``metric_args.watch_metric``
@@ -61,7 +61,7 @@ Interface contract
     5. ``build_data`` (a resume then checks the data against ``task.json`` and settles the
        backup, D-069), ``build_model``, the optional ``checkpoint`` weights,
        ``compile`` through ``optim.py``;
-    6. ``check_initial_loss``;
+    6. ``initial_loss_check``;
     7. callbacks: ``LearningRateLogger(at_epoch_start=True)`` first, then
        ``create_callbacks``, ``LastEpochWeights``, ``extra_callbacks``,
        ``EpochLogLine``, the dashboard, and the resume trio last
@@ -134,6 +134,9 @@ Hooks (override in a task)
     (the files ``fit`` and the first evaluation read, so an undecodable one can be
     named in a ``ConfigError``) and ``fingerprint`` (recorded in the sidecar and
     compared at resume, D-070, with the ``data.fingerprint`` mode beside it); data without them is not scanned and carries none.
+``input_check(facts, data)``
+    Raise ``RuntimeError`` when the loaded data is not what ``describe_data`` said (the
+    class count, the image side). Required.
 ``build_model(config, context, data)``
     The model; built or not (the trainer builds it from ``data.input_shape``).
 ``metric_names(config, facts)``
@@ -141,17 +144,36 @@ Hooks (override in a task)
     ``watch_metric`` that is not one of them (or ``loss``, or the ``val_`` twin
     of either) is refused before the run is claimed.
 ``build_loss_and_metrics(config, data)``
-    ``(loss, metrics)`` for ``compile``. Metric names must include
-    ``accuracy`` and, when ``num_classes > metric_args.top_k``,
-    ``top{k}_accuracy``.
+    ``(loss, metrics)`` for ``compile``. The names must be the ones ``metric_names`` gave.
+``initial_loss_check(config, model, data)``
+    ``(baseline, ratio, warned)``: the epoch-0 evaluation of the compiled, untrained model
+    (the dashboard's baseline and the summary's initial-loss ratio come from this one
+    evaluation); raises ``RuntimeError`` for a non-finite loss. Required.
+``success_value(hist)`` / ``success_threshold(config)``
+    The number the run is judged by (read from ``hist``, the history of ``summarize_fit``, under
+    the ``success_metric`` class variable) and the bar it must reach. Required, and a task must
+    set ``success_metric`` (it is written to the summary). Smoke runs apply no bar.
 ``extra_callbacks(config, data)``
     Callbacks inserted after ``LastEpochWeights``. Default: none.
+``epoch_line_metrics(config)``
+    The history keys the one-line-per-epoch log prints. Default: ``("loss", "val_loss")``.
 ``evaluate_and_report(config, data, fit)``
-    Step 9's classification sequence: best-checkpoint test, conformal sets,
-    figures and analysis of the best weights, the last epoch's weights. Returns
-    an :class:`Evaluation`.
+    The reporting sequence after ``fit``: best-checkpoint test, figures and analysis of the best
+    weights, the last epoch's weights. Returns an :class:`Evaluation`. Required.
 ``task_metadata(config, data)``
     Extra keys for the summary head. Default: none.
+``summary_fields(config, data)``
+    Keys the summary head carries because of what this task's data holds (they sit between
+    ``n_test`` and ``epochs_requested``). Default: none.
+``task_notes(config, baseline, ratio, data)``
+    The plain-language lines of ``results_summary.json``'s ``notes`` that belong to the task, in
+    order; the trainer appends the resume and smoke lines after them. Default: none.
+``files_to_scan(data)``
+    The files ``fit`` and the first evaluation read, so a decode failure can name the culprit
+    (``None`` or empty: nothing to scan, and the original error propagates). Default: ``None``.
+``recipe_notices(facts, family)``
+    ``(level, text)`` lines about how the family recipe meets this data, logged once ``run.log``
+    is open. Default: none. Called before ``setup_gpu``: no tensor.
 ``task_record(config, context, data)``
     The ``task.json`` record of a run: what the saved models need to be used without
     this config (class names, preprocessing, the statistics the data was standardized
@@ -184,7 +206,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, ClassVar, Dict, Iterator, List, Optional, Tuple
+from typing import Any, ClassVar, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from . import registry
 from .args import (
@@ -238,6 +260,21 @@ CONFIG_FIELDS = (
     "logger_args",
     "analysis_args",
     "debug_args",
+)
+
+#: The hooks a task must override: the base class has no body for them that would be right
+#: for every task. ``TaskTrainer(config)`` of a subclass lacking one raises ``TypeError``.
+REQUIRED_HOOKS = (
+    "describe_data",
+    "build_data",
+    "input_check",
+    "build_model",
+    "metric_names",
+    "build_loss_and_metrics",
+    "initial_loss_check",
+    "success_value",
+    "success_threshold",
+    "evaluate_and_report",
 )
 
 #: ``debug_args.smoke`` runs this many epochs on at most this many samples.
@@ -425,17 +462,20 @@ def _bad_value_is_a_config_error(run_dir: Path, step: str) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def _a_corrupt_file_is_named(run_dir: Path, data: Any, step: str) -> Iterator[None]:
+def _a_corrupt_file_is_named(
+    run_dir: Path, files: Optional[Sequence[str]], step: str
+) -> Iterator[None]:
     """Turn TensorFlow's ``InvalidArgumentError`` of an undecodable image into a ``ConfigError``.
 
     Wraps the first evaluation and ``fit``, the calls that run the data pipelines. When the
-    error is raised the files the data lists (``data.image_files``) are decoded one by one to
-    find the culprit; if one is found it is named, if none is, the original error propagates
-    unchanged (an ``InvalidArgumentError`` that is not about a file is somebody else's bug).
+    error is raised the ``files`` are decoded one by one to find the culprit; if one is found
+    it is named, if none is, the original error propagates unchanged (an
+    ``InvalidArgumentError`` that is not about a file is somebody else's bug).
 
     :param run_dir: the claimed run directory, named in the message.
-    :param data: the loaded data; the files are read from its ``image_files`` attribute, and a
-        record without one (the built-in datasets) has nothing to scan.
+    :param files: the files the data pipelines read (the task's
+        :meth:`TaskTrainer.files_to_scan`); ``None`` or empty, as for the built-in datasets,
+        has nothing to scan.
     :param step: what ran, e.g. ``"fit"``.
     :raises ConfigError: naming the file, and that the run directory is used.
     """
@@ -451,7 +491,6 @@ def _a_corrupt_file_is_named(run_dir: Path, data: Any, step: str) -> Iterator[No
     except tf.errors.InvalidArgumentError as exc:
         from train.common.classification_data import scan_for_undecodable
 
-        files = getattr(data, "image_files", None)
         found = scan_for_undecodable(files) if files else None
         if found is None:
             raise
@@ -464,17 +503,17 @@ def _a_corrupt_file_is_named(run_dir: Path, data: Any, step: str) -> Iterator[No
 class TaskTrainer:
     """The training sequence of a task; see the module contract.
 
+    The base class holds the sequence and no task: a hook in :data:`REQUIRED_HOOKS` raises
+    until a subclass supplies it, and the others have the neutral default their docstring
+    names.
+
     :cvar task: the task's command word; a subclass sets it.
-    :cvar success_metric: the history key the success threshold is read from.
-    :cvar initial_loss_hint: the remedy sentence of the non-finite initial loss refusal.
+    :cvar success_metric: the history key ``success_value`` reads and the summary names; a
+        subclass sets it.
     """
 
     task: ClassVar[str] = ""
-    success_metric: ClassVar[str] = "val_accuracy"
-    initial_loss_hint: ClassVar[str] = (
-        "Lower the dropout or drop-path rates in model_args, or check the model "
-        "and the data settings."
-    )
+    success_metric: ClassVar[str] = ""
 
     def __init__(self, config: StrictConfig) -> None:
         missing = [name for name in CONFIG_FIELDS if not hasattr(config, name)]
@@ -482,6 +521,23 @@ class TaskTrainer:
             raise TypeError(
                 f"{type(config).__name__} lacks the field(s) {', '.join(missing)} "
                 "that TaskTrainer reads"
+            )
+        # DECISION plan-2026-10-31T180033-2faf890a/D-021: a task that forgets a required hook
+        # is refused HERE, when it is built, naming the hook. Do NOT give these hooks a
+        # classification body in the base class "so old tasks keep working": a second task
+        # would then run the classification sequence on its own data and fail late, or not
+        # at all, and the one success_metric default would score it by the wrong number.
+        forgotten = [
+            name
+            for name in REQUIRED_HOOKS
+            if getattr(type(self), name) is getattr(TaskTrainer, name)
+        ]
+        if not self.success_metric:
+            forgotten.append("success_metric (class variable)")
+        if forgotten:
+            raise TypeError(
+                f"{type(self).__name__} does not supply: {', '.join(forgotten)}; "
+                "TaskTrainer has no default for them"
             )
         self.config = config
         #: ``(level, text)`` lines found while the request is resolved, logged
@@ -531,89 +587,54 @@ class TaskTrainer:
     def evaluate_and_report(
         self, config: StrictConfig, data: Any, fit: FitState
     ) -> Evaluation:
-        """Run the classification reporting sequence; see the module contract."""
-        from dl_techniques.utils.logger import logger
-        from train.common import classification_run, evaluation
-        from train.common.conformal import run_conformal
+        """Run the task's reporting after ``fit`` and return its :class:`Evaluation`; required."""
+        raise NotImplementedError
 
-        checkpoint_cfg: CheckpointArgs = config.checkpoint_args
-        analysis_cfg: AnalysisArgs = config.analysis_args
-        test_best: Optional[Dict[str, float]] = None
-        load_error: Optional[str] = None
-        max_diff: Optional[float] = None
-        # DECISION plan-2026-10-30T132432-a865fa08/D-060: data with no test split
-        # (``test_ds`` is ``None``) skips the test metrics, the figures, conformal and the
-        # model analysis, which all read test images, and the summary says so. Do NOT
-        # substitute the selection split for the test split in any of them: it selected the
-        # best epoch, so every number would be optimistic and still look like a test number.
-        # The one thing kept is the reload check of ``best_model.keras``, run on the
-        # selection split with its metrics discarded.
-        has_test = data.test_ds is not None
-        if checkpoint_cfg.save_best:
-            # The in-memory model holds the BEST weights here (EarlyStopping restored them).
-            reloaded, load_error, max_diff = classification_run.check_best_checkpoint(
-                fit.model,
-                fit.run_dir,
-                data.test_ds if has_test else data.select_ds,
-                evaluate=classification_run.evaluate_dict,
-                split_label="Test results" if has_test else "Selection results (reload check only)",
-            )
-            test_best = reloaded if has_test else None
-        conformal: Optional[Dict[str, Any]] = None
-        if analysis_cfg.conformal_alpha is not None and not has_test:
-            logger.warning(
-                "analysis_args.conformal_alpha is set but the data has no test split to "
-                "calibrate on: conformal prediction is skipped"
-            )
-        elif analysis_cfg.conformal_alpha is not None:
-            conformal = run_conformal(
-                fit.model,
-                data.test_ds,
-                alpha=analysis_cfg.conformal_alpha,
-                seed=config.seed,
-                out_dir=fit.run_dir,
-                input_shape=data.input_shape,
-                model_name=fit.experiment_name,
-                weights=f"best weights, selected on {data.selection_split}",
-                selection_overlaps_calibration=False,
-            )
-        visualizations, analysis = classification_run.report_best_weights(
-            fit.model,
-            data,
-            fit.history,
-            fit.run_dir,
-            fit.vis_dir,
-            fit.experiment_name,
-            analysis_cfg.model_analysis and has_test,
-            run_analysis=evaluation.run_model_analysis,
-            figures=analysis_cfg.figures and has_test,
-            analysis_off_hint=(
-                "the data has no test split"
-                if analysis_cfg.model_analysis
-                else "analysis_args.model_analysis=false"
-            ),
-        )
-        # The last epoch's weights replace the best ones here.
-        test_final, load_check = classification_run.finalize_last_epoch(
-            fit.model,
-            fit.last_weights,
-            data,
-            fit.run_dir,
-            fit.history,
-            fit.epochs_run,
-            evaluate=classification_run.evaluate_dict,
-            save=checkpoint_cfg.save_last,
-        )
-        return Evaluation(
-            test_metrics_best=test_best,
-            best_load_error=load_error,
-            checkpoint_max_diff=max_diff,
-            conformal=conformal,
-            visualizations=visualizations,
-            analysis=analysis,
-            test_metrics_final=test_final,
-            load_check=load_check,
-        )
+    def input_check(self, facts: DataFacts, data: Any) -> None:
+        """Raise ``RuntimeError`` when ``data`` is not what ``describe_data`` said; required."""
+        raise NotImplementedError
+
+    def initial_loss_check(
+        self, config: StrictConfig, model: Any, data: Any
+    ) -> Tuple[Dict[str, float], float, bool]:
+        """Return ``(baseline, ratio, warned)`` of the untrained, compiled ``model``; required.
+
+        ``baseline`` maps each metric name (``loss`` included) to its epoch-0 value on the
+        selection split, ``ratio`` is the number the summary reports as
+        ``initial_loss_ratio`` and ``warned`` the summary's ``init_scale_warning``. Raise
+        ``RuntimeError`` for a non-finite loss.
+        """
+        raise NotImplementedError
+
+    def success_value(self, hist: Dict[str, List[float]]) -> float:
+        """Return the number the run is judged by, from ``hist`` (``summarize_fit``); required."""
+        raise NotImplementedError
+
+    def success_threshold(self, config: StrictConfig) -> float:
+        """Return the bar ``success_value`` must reach (a smoke run applies none); required."""
+        raise NotImplementedError
+
+    def epoch_line_metrics(self, config: StrictConfig) -> Tuple[str, ...]:
+        """Return the history keys the per-epoch log line prints; default ``loss``, ``val_loss``."""
+        return ("loss", "val_loss")
+
+    def summary_fields(self, config: StrictConfig, data: Any) -> Dict[str, Any]:
+        """Return the summary-head keys this task's data supplies; default: none."""
+        return {}
+
+    def task_notes(
+        self, config: StrictConfig, baseline: Dict[str, float], ratio: float, data: Any
+    ) -> List[str]:
+        """Return the task's lines of the summary's ``notes``, in order; default: none."""
+        return []
+
+    def files_to_scan(self, data: Any) -> Optional[Sequence[str]]:
+        """Return the files the pipelines read, to name a corrupt one; default ``None``."""
+        return None
+
+    def recipe_notices(self, facts: DataFacts, family: str) -> List[Tuple[str, str]]:
+        """Return ``(level, text)`` lines on the recipe meeting this data; default: none."""
+        return []
 
     # -----------------------------------------------------------------
     # The sequence
@@ -710,8 +731,9 @@ class TaskTrainer:
         """Return the ``(level, text)`` lines the resolution owes the user.
 
         A recipe value an ``"auto"`` field did not take is listed (the recipe
-        offered a number and the resolver chose another), a family with no
-        overlay for the dataset is named, and a warmup that never ends is warned.
+        offered a number and the resolver chose another), the task's
+        :meth:`recipe_notices` follow (a family with no overlay for the dataset is
+        named, for a classifier), and a warmup that never ends is warned.
         """
         notices: List[Tuple[str, str]] = []
         for group_field in dataclasses.fields(config):
@@ -734,24 +756,7 @@ class TaskTrainer:
                             f"({family} recipe)",
                         )
                     )
-        if facts.dataset in registry.FILE_DATASETS:
-            notices.append(
-                (
-                    "info",
-                    f"{facts.dataset} data: no legacy trainer reads files, so the {family} "
-                    "recipe is its base recipe with transform_args.augment=flip (D-060) and the "
-                    "statistics come from one pass over the fit split",
-                )
-            )
-        elif facts.dataset not in registry.MODELS[family].defaults.get("per_dataset", {}):
-            notices.append(
-                (
-                    "warning",
-                    f"No recipe overlay for {family} on {facts.dataset}: the family's base "
-                    "recipe applies unchanged, with no dataset-specific augmentation, loader "
-                    "or model arguments. Check transform_args, data and model_args.",
-                )
-            )
+        notices.extend(self.recipe_notices(facts, family))
         optim_cfg: OptimArgs = resolved.optim_args
         debug_cfg: DebugArgs = resolved.debug_args
         if (
@@ -941,15 +946,7 @@ class TaskTrainer:
 
             with _bad_value_is_a_config_error(run_dir, "the data loader"):
                 data = self.build_data(config, context)
-            if (
-                data.num_classes != facts.num_classes
-                or data.input_shape[0] != facts.image_size
-            ):
-                raise RuntimeError(
-                    f"{type(self).__name__}.describe_data said {facts.num_classes} classes "
-                    f"at {facts.image_size} px, but build_data loaded {data.num_classes} "
-                    f"classes with input shape {tuple(data.input_shape)}"
-                )
+            self.input_check(facts, data)
             steps_per_epoch = data.steps_per_epoch
             if resume is not None:
                 # Before anything of the earlier run is touched (the CSV is copied aside
@@ -984,14 +981,11 @@ class TaskTrainer:
             # evaluation. Do NOT let the dashboard call ``model.evaluate`` itself.
             best_weights = None
             if resume is None:
-                with _a_corrupt_file_is_named(run_dir, data, "the first evaluation"):
-                    baseline, initial_ratio, init_warning = classification_run.check_initial_loss(
-                        model,
-                        data.select_ds,
-                        data.n_select,
-                        data.num_classes,
-                        evaluate=classification_run.evaluate_dict,
-                        hint=self.initial_loss_hint,
+                with _a_corrupt_file_is_named(
+                    run_dir, self.files_to_scan(data), "the first evaluation"
+                ):
+                    baseline, initial_ratio, init_warning = self.initial_loss_check(
+                        config, model, data
                     )
                 # The sidecar keeps the epoch-0 numbers: a resumed model is not an untrained
                 # one, so a resume reads them here and evaluates nothing (D-058).
@@ -1049,7 +1043,7 @@ class TaskTrainer:
                     logger.info("task.json is already in the run directory: left as it is")
 
             started = time.perf_counter()
-            with _a_corrupt_file_is_named(run_dir, data, "fit"):
+            with _a_corrupt_file_is_named(run_dir, self.files_to_scan(data), "fit"):
                 history = model.fit(
                     data.train_ds,
                     validation_data=data.select_ds,
@@ -1099,12 +1093,12 @@ class TaskTrainer:
             )
             evaluated = self.evaluate_and_report(config, data, fit)
 
-            reached = max(hist[self.success_metric])
+            reached = self.success_value(hist)
             smoke = debug_cfg.smoke
             # Under smoke one epoch on at most 512 samples cannot reach twice chance, so
             # the bar is not applied: the run is a success when it finished, and the
             # summary says "not applicable" rather than a miss (review-iter-2 concern 6).
-            threshold = None if smoke else metric_cfg.success_threshold
+            threshold = None if smoke else self.success_threshold(config)
             success = True if smoke else bool(reached >= threshold)
             summary = classification_run.base_summary(
                 summary_head, hist, epochs_run, epochs, best_epoch, lr_reductions,
@@ -1363,17 +1357,7 @@ class TaskTrainer:
         callbacks.insert(0, LearningRateLogger(at_epoch_start=True))
         callbacks.append(last_weights)
         callbacks.extend(self.extra_callbacks(config, data))
-        top_k = metric_cfg.top_k
-        epoch_line = EpochLogLine(
-            (
-                "loss",
-                "accuracy",
-                f"top{top_k}_accuracy",
-                "val_loss",
-                "val_accuracy",
-                f"val_top{top_k}_accuracy",
-            )
-        )
+        epoch_line = EpochLogLine(self.epoch_line_metrics(config))
         # After every callback that edits `logs`, before the dashboard (whose redraw
         # must stay outside this line's clock).
         callbacks.append(epoch_line)
@@ -1459,8 +1443,7 @@ class TaskTrainer:
             "n_train": data.n_train,
             "n_val": data.n_select,
             "n_test": data.n_test,
-            "figure_samples": int(len(data.x_fig)),
-            "input_normalization": {"mean": data.mean, "std": data.std},
+            **self.summary_fields(config, data),
             "epochs_requested": config.epochs,
             "monitor": metric_cfg.watch_metric,
             "monitor_mode": metric_cfg.watch_mode,
@@ -1486,43 +1469,8 @@ class TaskTrainer:
         data: Any,
         resume: Any = None,
     ) -> List[str]:
-        """Plain-language lines for ``results_summary.json``'s ``notes``."""
-        import numpy as np
-
-        checkpoint_cfg: CheckpointArgs = config.checkpoint_args
-        analysis_cfg: AnalysisArgs = config.analysis_args
-        notes = [
-            f"initial loss {baseline['loss']:.4f} vs ln(C)={np.log(data.num_classes):.4f} "
-            f"(ratio {ratio:.2f}), a plain evaluate on the validation split",
-            "CSV `epoch` is 0-based, `best_epoch` is 1-based (`best_epoch_csv_index` = "
-            "`best_epoch` - 1)",
-            "CSV `lr` is the rate at the START of the epoch (its first step)",
-            "`test_metrics_best` is the reloaded best_model.keras, `test_metrics_final` "
-            "the last epoch's weights; the test set never influenced selection",
-        ]
-        if data.test_ds is None:
-            notes.append(
-                "the data has no test split: `test_metrics_best`, `test_metrics_final`, "
-                "`conformal` and `ece` are null, no figure was written and the model analysis "
-                "was skipped; the best_model.keras reload check ran on the selection split "
-                "(`best_checkpoint_max_abs_diff`)"
-            )
-        if not checkpoint_cfg.save_best:
-            notes.append(
-                "checkpoint_args.save_best is false: no best_model.keras was written, so "
-                "`test_metrics_best` is null; figures and analysis use the in-memory best weights"
-            )
-        if not checkpoint_cfg.save_last:
-            notes.append(
-                "checkpoint_args.save_last is false: no final_model.keras was written and "
-                "`model_loading_validated` is null"
-            )
-        if not analysis_cfg.figures:
-            notes.append("analysis_args.figures is false: no figure was written and `ece` is null")
-        if not analysis_cfg.model_analysis:
-            notes.append("analysis_args.model_analysis is false: `analyzer.status` is 'skipped'")
-        if analysis_cfg.conformal_alpha is None:
-            notes.append("analysis_args.conformal_alpha is null: `conformal` is null")
+        """Return the summary's ``notes``: the task's, then the lines of the sequence itself."""
+        notes = list(self.task_notes(config, baseline, ratio, data))
         if resume is not None:
             notes.append(
                 f"resumed after epoch {resume.start}: epochs 0..{resume.start - 1} come from the "

@@ -438,7 +438,7 @@ def test_the_wrapper_names_the_first_undecodable_file_in_the_order_the_data_list
     corrupt(files[5])
     corrupt(files[2])
     with pytest.raises(ConfigError) as caught:
-        with _a_corrupt_file_is_named(pair.tmp, SimpleNamespace(image_files=files), "fit"):
+        with _a_corrupt_file_is_named(pair.tmp, files, "fit"):
             tf.io.decode_image(tf.io.read_file(files[5]))  # the error the pipeline raised
     assert files[2] in str(caught.value) and files[5] not in str(caught.value)
 
@@ -447,17 +447,17 @@ def test_an_invalid_argument_error_that_is_not_about_a_listed_file_propagates_un
     good = png(tmp_path / "ok.png")
     error = tf.errors.InvalidArgumentError(None, None, "a shape mismatch")
     with pytest.raises(tf.errors.InvalidArgumentError, match="a shape mismatch"):
-        with _a_corrupt_file_is_named(tmp_path, SimpleNamespace(image_files=(str(good),)), "fit"):
+        with _a_corrupt_file_is_named(tmp_path, (str(good),), "fit"):
             raise error
     with pytest.raises(tf.errors.InvalidArgumentError):  # a record with no file list: nothing to scan
-        with _a_corrupt_file_is_named(tmp_path, SimpleNamespace(), "fit"):
+        with _a_corrupt_file_is_named(tmp_path, None, "fit"):
             raise error
     # No broad handler: an error of another class is not turned into a decode report, even when
     # a listed file really is corrupt.
     bad = tmp_path / "bad.png"
     corrupt(bad)
     with pytest.raises(KeyError):
-        with _a_corrupt_file_is_named(tmp_path, SimpleNamespace(image_files=(str(bad),)), "fit"):
+        with _a_corrupt_file_is_named(tmp_path, (str(bad),), "fit"):
             raise KeyError("x")
 
 

@@ -5,8 +5,11 @@ function ``python -m train image_classification key=value ...`` calls (D-008), s
 the two cannot disagree. It validates its keywords into an
 :class:`ImageClassificationConfig` and hands that to
 :class:`ImageClassificationTrainer`, a :class:`~train.api.trainer.TaskTrainer`
-that supplies the four hooks of this task and nothing else: the sequence is the
-shared one.
+that supplies the hooks of this task and nothing else: the sequence is the
+shared one. The hooks are the classification assumptions of the run: its data and model, the
+``val_accuracy`` success value and bar, the loss against ``ln(C)`` at epoch 0, the epoch line,
+the summary fields and notes, the files a decode failure is searched in, the recipe notices,
+and the reporting after ``fit`` (conformal sets, figures, the analyzer).
 
 Interface contract
 ------------------
@@ -77,7 +80,7 @@ config's keys and must stay free of TensorFlow. Every ``keras`` and
 
 import dataclasses
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Mapping, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Literal, Mapping, Optional, Sequence, Tuple, Union
 
 from .. import recipes, registry
 from ..args import (
@@ -100,7 +103,7 @@ from ..data_args import (
     read_data_file,
 )
 from ..predictor import build_task_record
-from ..trainer import TaskTrainer, TrainResult, config_problems
+from ..trainer import Evaluation, FitState, TaskTrainer, TrainResult, config_problems
 
 # ---------------------------------------------------------------------
 
@@ -182,9 +185,17 @@ class ImageClassificationConfig(StrictConfig):
 
 
 class ImageClassificationTrainer(TaskTrainer):
-    """The four hooks of an image-classification run; see the module contract."""
+    """The hooks of an image-classification run; see the module contract.
+
+    :cvar initial_loss_hint: the remedy sentence of the non-finite initial loss refusal.
+    """
 
     task = TASK
+    success_metric = "val_accuracy"
+    initial_loss_hint: ClassVar[str] = (
+        "Lower the dropout or drop-path rates in model_args, or check the model "
+        "and the data settings."
+    )
 
     def describe_data(self, config: ImageClassificationConfig) -> DataFacts:
         transform_cfg: TransformArgs = config.transform_args
@@ -315,6 +326,216 @@ class ImageClassificationTrainer(TaskTrainer):
             classification_metrics(
                 data.num_classes, metric_cfg.top_k, half_precision=config.precision != "float32"
             ),
+        )
+
+    def input_check(self, facts: DataFacts, data: Any) -> None:
+        if (
+            data.num_classes != facts.num_classes
+            or data.input_shape[0] != facts.image_size
+        ):
+            raise RuntimeError(
+                f"{type(self).__name__}.describe_data said {facts.num_classes} classes "
+                f"at {facts.image_size} px, but build_data loaded {data.num_classes} "
+                f"classes with input shape {tuple(data.input_shape)}"
+            )
+
+    def initial_loss_check(
+        self, config: ImageClassificationConfig, model: Any, data: Any
+    ) -> Tuple[Dict[str, float], float, bool]:
+        """Return the epoch-0 numbers; the ratio is the loss over ``ln(num_classes)``."""
+        from train.common import classification_run
+
+        return classification_run.check_initial_loss(
+            model,
+            data.select_ds,
+            data.n_select,
+            data.num_classes,
+            evaluate=classification_run.evaluate_dict,
+            hint=self.initial_loss_hint,
+        )
+
+    def success_value(self, hist: Dict[str, List[float]]) -> float:
+        return max(hist[self.success_metric])
+
+    def success_threshold(self, config: ImageClassificationConfig) -> float:
+        metric_cfg: MetricArgs = config.metric_args
+        return metric_cfg.success_threshold
+
+    def epoch_line_metrics(self, config: ImageClassificationConfig) -> Tuple[str, ...]:
+        metric_cfg: MetricArgs = config.metric_args
+        top_k = metric_cfg.top_k
+        return (
+            "loss",
+            "accuracy",
+            f"top{top_k}_accuracy",
+            "val_loss",
+            "val_accuracy",
+            f"val_top{top_k}_accuracy",
+        )
+
+    def summary_fields(self, config: ImageClassificationConfig, data: Any) -> Dict[str, Any]:
+        return {
+            "figure_samples": int(len(data.x_fig)),
+            "input_normalization": {"mean": data.mean, "std": data.std},
+        }
+
+    def files_to_scan(self, data: Any) -> Optional[Sequence[str]]:
+        # A built-in dataset carries no ``image_files``: nothing to scan.
+        return getattr(data, "image_files", None)
+
+    def recipe_notices(self, facts: DataFacts, family: str) -> List[Tuple[str, str]]:
+        notices: List[Tuple[str, str]] = []
+        if facts.dataset in registry.FILE_DATASETS:
+            notices.append(
+                (
+                    "info",
+                    f"{facts.dataset} data: no legacy trainer reads files, so the {family} "
+                    "recipe is its base recipe with transform_args.augment=flip (D-060) and the "
+                    "statistics come from one pass over the fit split",
+                )
+            )
+        elif facts.dataset not in registry.MODELS[family].defaults.get("per_dataset", {}):
+            notices.append(
+                (
+                    "warning",
+                    f"No recipe overlay for {family} on {facts.dataset}: the family's base "
+                    "recipe applies unchanged, with no dataset-specific augmentation, loader "
+                    "or model arguments. Check transform_args, data and model_args.",
+                )
+            )
+        return notices
+
+    def task_notes(
+        self,
+        config: ImageClassificationConfig,
+        baseline: Dict[str, float],
+        ratio: float,
+        data: Any,
+    ) -> List[str]:
+        """Return the classification lines of ``results_summary.json``'s ``notes``."""
+        import numpy as np
+
+        checkpoint_cfg: CheckpointArgs = config.checkpoint_args
+        analysis_cfg: AnalysisArgs = config.analysis_args
+        notes = [
+            f"initial loss {baseline['loss']:.4f} vs ln(C)={np.log(data.num_classes):.4f} "
+            f"(ratio {ratio:.2f}), a plain evaluate on the validation split",
+            "CSV `epoch` is 0-based, `best_epoch` is 1-based (`best_epoch_csv_index` = "
+            "`best_epoch` - 1)",
+            "CSV `lr` is the rate at the START of the epoch (its first step)",
+            "`test_metrics_best` is the reloaded best_model.keras, `test_metrics_final` "
+            "the last epoch's weights; the test set never influenced selection",
+        ]
+        if data.test_ds is None:
+            notes.append(
+                "the data has no test split: `test_metrics_best`, `test_metrics_final`, "
+                "`conformal` and `ece` are null, no figure was written and the model analysis "
+                "was skipped; the best_model.keras reload check ran on the selection split "
+                "(`best_checkpoint_max_abs_diff`)"
+            )
+        if not checkpoint_cfg.save_best:
+            notes.append(
+                "checkpoint_args.save_best is false: no best_model.keras was written, so "
+                "`test_metrics_best` is null; figures and analysis use the in-memory best weights"
+            )
+        if not checkpoint_cfg.save_last:
+            notes.append(
+                "checkpoint_args.save_last is false: no final_model.keras was written and "
+                "`model_loading_validated` is null"
+            )
+        if not analysis_cfg.figures:
+            notes.append("analysis_args.figures is false: no figure was written and `ece` is null")
+        if not analysis_cfg.model_analysis:
+            notes.append("analysis_args.model_analysis is false: `analyzer.status` is 'skipped'")
+        if analysis_cfg.conformal_alpha is None:
+            notes.append("analysis_args.conformal_alpha is null: `conformal` is null")
+        return notes
+
+    def evaluate_and_report(
+        self, config: ImageClassificationConfig, data: Any, fit: FitState
+    ) -> Evaluation:
+        """Run the classification reporting sequence; see the module contract."""
+        from dl_techniques.utils.logger import logger
+        from train.common import classification_run, evaluation
+        from train.common.conformal import run_conformal
+
+        checkpoint_cfg: CheckpointArgs = config.checkpoint_args
+        analysis_cfg: AnalysisArgs = config.analysis_args
+        test_best: Optional[Dict[str, float]] = None
+        load_error: Optional[str] = None
+        max_diff: Optional[float] = None
+        # DECISION plan-2026-10-30T132432-a865fa08/D-060: data with no test split
+        # (``test_ds`` is ``None``) skips the test metrics, the figures, conformal and the
+        # model analysis, which all read test images, and the summary says so. Do NOT
+        # substitute the selection split for the test split in any of them: it selected the
+        # best epoch, so every number would be optimistic and still look like a test number.
+        # The one thing kept is the reload check of ``best_model.keras``, run on the
+        # selection split with its metrics discarded.
+        has_test = data.test_ds is not None
+        if checkpoint_cfg.save_best:
+            # The in-memory model holds the BEST weights here (EarlyStopping restored them).
+            reloaded, load_error, max_diff = classification_run.check_best_checkpoint(
+                fit.model,
+                fit.run_dir,
+                data.test_ds if has_test else data.select_ds,
+                evaluate=classification_run.evaluate_dict,
+                split_label="Test results" if has_test else "Selection results (reload check only)",
+            )
+            test_best = reloaded if has_test else None
+        conformal: Optional[Dict[str, Any]] = None
+        if analysis_cfg.conformal_alpha is not None and not has_test:
+            logger.warning(
+                "analysis_args.conformal_alpha is set but the data has no test split to "
+                "calibrate on: conformal prediction is skipped"
+            )
+        elif analysis_cfg.conformal_alpha is not None:
+            conformal = run_conformal(
+                fit.model,
+                data.test_ds,
+                alpha=analysis_cfg.conformal_alpha,
+                seed=config.seed,
+                out_dir=fit.run_dir,
+                input_shape=data.input_shape,
+                model_name=fit.experiment_name,
+                weights=f"best weights, selected on {data.selection_split}",
+                selection_overlaps_calibration=False,
+            )
+        visualizations, analysis = classification_run.report_best_weights(
+            fit.model,
+            data,
+            fit.history,
+            fit.run_dir,
+            fit.vis_dir,
+            fit.experiment_name,
+            analysis_cfg.model_analysis and has_test,
+            run_analysis=evaluation.run_model_analysis,
+            figures=analysis_cfg.figures and has_test,
+            analysis_off_hint=(
+                "the data has no test split"
+                if analysis_cfg.model_analysis
+                else "analysis_args.model_analysis=false"
+            ),
+        )
+        # The last epoch's weights replace the best ones here.
+        test_final, load_check = classification_run.finalize_last_epoch(
+            fit.model,
+            fit.last_weights,
+            data,
+            fit.run_dir,
+            fit.history,
+            fit.epochs_run,
+            evaluate=classification_run.evaluate_dict,
+            save=checkpoint_cfg.save_last,
+        )
+        return Evaluation(
+            test_metrics_best=test_best,
+            best_load_error=load_error,
+            checkpoint_max_diff=max_diff,
+            conformal=conformal,
+            visualizations=visualizations,
+            analysis=analysis,
+            test_metrics_final=test_final,
+            load_check=load_check,
         )
 
 

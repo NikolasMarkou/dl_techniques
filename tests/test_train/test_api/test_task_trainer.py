@@ -37,7 +37,7 @@ from train.api.tasks.image_classification import (
     ImageClassificationConfig,
     ImageClassificationTrainer,
 )
-from train.api.trainer import CONFIG_FIELDS, TaskTrainer, TrainResult
+from train.api.trainer import CONFIG_FIELDS, REQUIRED_HOOKS, TaskTrainer, TrainResult
 
 from tests.classification_fakes import use_tiny_raw
 
@@ -538,6 +538,46 @@ def test_a_trainer_needs_every_config_field(world, tmp_path):
         TaskTrainer(Thin())
 
 
+def test_a_task_that_forgets_a_required_hook_is_refused_when_built_and_the_hook_is_named(
+    world, tmp_path
+):
+    class Forgetful(TaskTrainer):
+        task = "forgetful"
+        success_metric = "val_x"
+
+        def describe_data(self, config):
+            raise AssertionError("must not run")
+
+    with pytest.raises(TypeError) as caught:
+        Forgetful(make_config(tmp_path / "run"))
+    text = str(caught.value)
+    for name in REQUIRED_HOOKS:
+        assert (name in text) == (name != "describe_data"), name
+
+    class NoMetric(ImageClassificationTrainer):
+        success_metric = ""
+
+    with pytest.raises(TypeError, match="success_metric"):
+        NoMetric(make_config(tmp_path / "run"))
+
+
+def test_the_neutral_defaults_of_the_optional_hooks_carry_no_classification(world, tmp_path):
+    class Bare(ImageClassificationTrainer):
+        epoch_line_metrics = TaskTrainer.epoch_line_metrics
+        summary_fields = TaskTrainer.summary_fields
+        task_notes = TaskTrainer.task_notes
+        files_to_scan = TaskTrainer.files_to_scan
+        recipe_notices = TaskTrainer.recipe_notices
+
+    task = Bare(make_config(tmp_path / "run"))
+    assert task.epoch_line_metrics(task.config) == ("loss", "val_loss")
+    assert task.summary_fields(task.config, object()) == {}
+    assert task.task_notes(task.config, {}, 0.0, object()) == []
+    assert task.files_to_scan(object()) is None
+    assert task.recipe_notices(None, "vit") == []
+    assert TaskTrainer.success_metric == ""
+
+
 def test_the_task_config_has_exactly_the_fields_the_trainer_reads():
     assert {f.name for f in dataclasses.fields(ImageClassificationConfig)} == set(CONFIG_FIELDS)
 
@@ -802,14 +842,24 @@ def test_a_monitor_the_compiled_model_does_not_report_is_refused_before_fit(worl
 
 
 def test_run_and_its_steps_hold_no_except_clause():
-    tree = ast.parse(Path(trainer_module.__file__).read_text())
-    methods = {
-        node.name: node
-        for cls in tree.body
-        if isinstance(cls, ast.ClassDef) and cls.name == "TaskTrainer"
-        for node in cls.body
-        if isinstance(node, ast.FunctionDef)
-    }
-    for name in ("run", "_train", "_resolve", "_callbacks", "evaluate_and_report", "_write_diverged_summary"):
+    def methods_of(module, class_name):
+        tree = ast.parse(Path(module.__file__).read_text())
+        return {
+            node.name: node
+            for cls in tree.body
+            if isinstance(cls, ast.ClassDef) and cls.name == class_name
+            for node in cls.body
+            if isinstance(node, ast.FunctionDef)
+        }
+
+    methods = methods_of(trainer_module, "TaskTrainer")
+    for name in ("run", "_train", "_resolve", "_callbacks", "_notes", "_write_diverged_summary"):
         handlers = [n for n in ast.walk(methods[name]) if isinstance(n, ast.ExceptHandler)]
+        assert not handlers, name
+    # The reporting sequence is the classification task's since the hooks moved (step 10).
+    from train.api.tasks import image_classification
+
+    task_methods = methods_of(image_classification, "ImageClassificationTrainer")
+    for name in ("evaluate_and_report", "task_notes", "initial_loss_check"):
+        handlers = [n for n in ast.walk(task_methods[name]) if isinstance(n, ast.ExceptHandler)]
         assert not handlers, name
