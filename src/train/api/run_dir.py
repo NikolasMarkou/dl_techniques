@@ -96,6 +96,10 @@ CHECKPOINTS_DIR = "checkpoints"
 #: schema and reader in :mod:`train.api.predictor`.
 TASK_FILE = "task.json"
 
+#: The ending of the record ``export`` writes beside an exported model (``<out>.task.json``);
+#: ``predict`` reads it for a ``.keras`` file (D-068).
+TASK_SUFFIX = ".task.json"
+
 #: The training log the CSV logger writes, relative to the run directory.
 TRAINING_LOG_NAME = "training_log.csv"
 

@@ -14,19 +14,23 @@ help word, prints its config keys; any other arguments go to ``run_task``.
 ``list_*`` commands list instead of printing help, even when given ``help``.
 
 ``export model= out= format=``
-    Load the run (a run directory, or a ``.keras`` file beside its ``task.json``) and
-    write it with :func:`train.api.export.export`; the input shape comes from
-    ``task.json``. ``format`` is one of ``train.api.export.FORMATS``. Every check that
-    needs no model runs before the model is loaded and before TensorFlow is imported: the
-    keys, ``format``, the suffix of ``out``, that ``out`` is free, and that ``model``
-    exists. Exit 0 and the written path on stdout, else 2.
+    Load the run (a run directory, or a ``.keras`` file beside its record) and write it with
+    :func:`train.api.exporting.export`; the input shape comes from ``task.json``. ``format``
+    is one of ``train.api.exporting.FORMATS``. Every check that needs no model runs before
+    the model is loaded and before TensorFlow is imported: the keys (none empty), that
+    ``model`` exists, ``format``, the suffix of ``out``, and that ``out`` and
+    ``<out>.task.json`` are free. The exported model takes inputs standardized with the run's
+    mean and std and returns raw logits (D-068); ``<out>.task.json`` is written beside it and
+    the log says so. Exit 0 and ONLY the written path on stdout (whatever Keras prints while
+    exporting goes to stderr, failed runs too), else 2.
 
 ``predict model= data= out=``
     ``data`` is an image file or a directory of images (searched recursively, hidden
     entries skipped, by the suffixes the folder loader reads, sorted by path). ``out`` is a
     new JSON file holding a list with one ``{"path", "labels", "scores"}`` object per image:
     every class, best first, the :class:`~train.api.predictor.Predictor`'s answer. An
-    existing ``out`` is refused. Exit 0, else 2.
+    existing ``out`` (a dangling symlink included), or one under a file, is refused before
+    the model is loaded. Exit 0, else 2.
 
 Both commands take exactly their keys (no ``config=``, no nested key), a bare command or
 a lone help word prints them, and the help path imports no TensorFlow.
@@ -87,6 +91,7 @@ function that needs it.
 # tensorflow or yaml here: train.common's eager __init__ loads TensorFlow
 # (about 4.2 s) and the help path must finish in under 1 s.
 import collections.abc
+import contextlib
 import dataclasses
 import difflib
 import json
@@ -236,8 +241,14 @@ class Option(NamedTuple):
 
 EXPORT_OPTIONS = (
     Option("model", "a run directory (its best_model.keras) or a .keras file beside its task.json"),
-    Option("out", "the file or directory to write; it must not exist"),
+    Option("out", "the file or directory to write; it must not exist (<out>.task.json is written beside it)"),
     Option("format", "keras, saved_model, tflite or onnx"),
+)
+EXPORT_NOTES = (
+    "input contract: the exported model takes float32 images (batch, height, width, channels)",
+    "with pixels scaled to [0, 1] and then standardized, (x - mean) / std, using the mean and",
+    "std in <out>.task.json; it returns raw logits (no softmax), one score per class name in",
+    "that file. mixed_float16 runs differ from Keras by up to about 1e-4 in onnx.",
 )
 PREDICT_OPTIONS = (
     Option("model", "a run directory (its best_model.keras) or a .keras file beside its task.json"),
@@ -246,7 +257,9 @@ PREDICT_OPTIONS = (
 )
 
 
-def _write_command_help(name: str, summary: str, options: Sequence[Option]) -> int:
+def _write_command_help(
+    name: str, summary: str, options: Sequence[Option], notes: Sequence[str] = ()
+) -> int:
     """Print the usage and the keys of an ``export`` or ``predict`` command."""
     width = max(len(o.key) for o in options)
     lines = [
@@ -257,6 +270,7 @@ def _write_command_help(name: str, summary: str, options: Sequence[Option]) -> i
         "keys (all required):",
         *[f"  {o.key.ljust(width)}  {o.help}" for o in options],
         "",
+        *([*notes, ""] if notes else []),
     ]
     sys.stdout.write("\n".join(lines))
     return 0
@@ -281,6 +295,7 @@ def _command_values(
         elif not isinstance(value, str):
             errors.append(f"{key!r} takes one value, not sub-keys.")
     errors += [f"Missing required key {key!r}." for key in names if key not in raw]
+    errors += [f"Invalid value for {key!r}: it is empty." for key in names if raw.get(key) == ""]
     if errors:
         raise ConfigValidationError(errors)
     return {key: raw[key] for key in names}
@@ -300,25 +315,34 @@ def _existing_model_path(text: str) -> Path:
 def _export(args: List[str]) -> int:
     """Run ``export model= out= format=``; see the module docstring."""
     if _is_help_request(args):
-        return _write_command_help("export", COMMANDS["export"].summary, EXPORT_OPTIONS)
+        return _write_command_help(
+            "export", COMMANDS["export"].summary, EXPORT_OPTIONS, EXPORT_NOTES
+        )
     values = _command_values("export", args, EXPORT_OPTIONS)
-    from .export import check_target, export
+    from .exporting import check_target, export
 
-    # DECISION plan-2026-10-30T132432-a865fa08/D-064: the target and the model path are checked
+    # DECISION plan-2026-10-30T132432-a865fa08/D-064: the model path and the target are checked
     # BEFORE ``load_model``, and the traced shape is ``task.json``'s ``input_shape``. Do NOT load
     # first and let ``export`` refuse (a bad ``out`` would cost a TensorFlow import and a model
-    # load), and do NOT ask the model for its shape (a ViT has no ``inputs``).
-    target = check_target(values["out"], values["format"])
+    # load), and do NOT ask the model for its shape (a ViT has no ``inputs``). The model path
+    # comes first: ``check_target`` imports tf2onnx (and so TensorFlow) for ``onnx``.
     model_path = _existing_model_path(values["model"])
+    target = check_target(values["out"], values["format"], with_record=True)
     from .predictor import load_model
 
-    loaded = load_model(model_path)
-    written = export(
-        model=loaded.model,
-        out=target,
-        format=values["format"],
-        input_shape=loaded.record["input_shape"],
-    )
+    # DECISION plan-2026-10-30T132432-a865fa08/D-068: stdout carries ONLY the written path, so
+    # ``OUT=$(python -m train export ...)`` works. Keras prints "Saved artifact at ..." and the
+    # endpoint list to stdout whatever ``verbose`` says; do NOT filter those lines, send the
+    # whole call's stdout to stderr (an exception included, the context restores it).
+    with contextlib.redirect_stdout(sys.stderr):
+        loaded = load_model(model_path)
+        written = export(
+            model=loaded.model,
+            out=target,
+            format=values["format"],
+            input_shape=loaded.record["input_shape"],
+            record=loaded.record,
+        )
     sys.stdout.write(f"{written}\n")
     return 0
 
@@ -354,12 +378,10 @@ def _predict(args: List[str]) -> int:
     if _is_help_request(args):
         return _write_command_help("predict", COMMANDS["predict"].summary, PREDICT_OPTIONS)
     values = _command_values("predict", args, PREDICT_OPTIONS)
+    from .exporting import check_free
+
     out = Path(values["out"])
-    if out.exists():
-        raise ConfigError(
-            f"Invalid value for 'out': {out} already exists; predict never overwrites, so "
-            "choose a path that is not there"
-        )
+    check_free(out, "out", "predict")
     model_path = _existing_model_path(values["model"])
     data = Path(values["data"])
     if not data.exists():

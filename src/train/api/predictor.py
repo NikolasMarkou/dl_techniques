@@ -40,28 +40,33 @@ Interface contract
     :param record: a parsed ``task.json``.
     :param source: its path, for the messages.
     :raises ConfigError: for a wrong ``schema_version``, a missing or unknown key,
-        a value of the wrong kind, a ``mean`` or ``std`` of the wrong length, a ``std``
-        that is not positive, or an ``eval_transform`` whose kind is not in :data:`EVAL_KINDS`.
+        a value of the wrong kind, repeated class names, a ``model`` that is not
+        ``family/variant``, a ``mean`` or ``std`` of the wrong length, a ``std`` that is not
+        positive, ``normalize`` of ``unit`` with a ``mean`` that is not zeros or a ``std`` that
+        is not ones, or an ``eval_transform`` whose kind is not in :data:`EVAL_KINDS`.
 
 ``load_model(path)``
-    :param path: a run directory (its ``best_model.keras``) or a ``.keras`` file whose
-        directory holds ``task.json``.
-    :return: a :class:`Predictor`. Compiles nothing.
+    :param path: a run directory (its ``best_model.keras``) or a ``.keras`` file. A
+        ``.keras`` file reads the first record that exists of ``<file>.task.json`` (what
+        ``export`` writes beside its output), ``<stem>.task.json``, and ``task.json`` in its
+        directory.
+    :return: a :class:`Predictor`. Compiles nothing. The model is called once on zeros, so
+        a model whose output width is not the number of class names is refused here.
     :raises ConfigError: for a missing path, ``task.json`` or model file, a bad record,
-        or a family that is not registered.
+        a family that is not registered, or a class-count mismatch.
 
 ``Predictor.predict(x, top_k=None, threshold=None)``
     :param x: one image or several. A single image is a path (``str`` or ``Path``), a
         ``PIL.Image.Image``, or a 2-D or 3-D ``numpy`` array; several are a list or tuple
         of those, or a 4-D array. A ``uint8`` array is divided by 255; a floating array
         must already lie in ``[0, 1]`` and is refused otherwise; any other dtype is
-        refused. A path is read with ``channels`` of ``eval_transform.source_channels``.
+        refused. A 4-channel array is RGBA and loses its alpha channel, as a PIL image does. A path is read with ``channels`` of ``eval_transform.source_channels``.
     :param top_k: keep the ``top_k`` best classes of each image; ``None`` keeps all.
     :param threshold: drop classes whose probability is below it; ``None`` drops none.
     :return: ``{"labels", "scores"}``. For a single image both are flat lists, best class
         first (ties keep class order); for several images, one such list per image.
         ``scores`` are softmax probabilities of the model's logits, as plain floats.
-    :raises ConfigError: for an unreadable file, an unsupported array, an empty list, a
+    :raises ConfigError: for an unreadable file, an unsupported or empty array, an empty list, a
         ``top_k`` that is not a positive int, a ``threshold`` outside ``[0, 1]``, or a
         model whose output width is not the number of class names.
 
@@ -82,7 +87,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from . import registry
 from .errors import ConfigError
-from .run_dir import TASK_FILE
+from .run_dir import TASK_FILE, TASK_SUFFIX
 
 # ---------------------------------------------------------------------
 
@@ -204,6 +209,15 @@ def record_problems(record: Mapping[str, Any]) -> List[str]:
     names = record["class_names"]
     if not (isinstance(names, list) and names and all(isinstance(n, str) for n in names)):
         lines.append(f"'class_names' must be a non-empty list of texts, got {names!r}")
+    elif len(set(names)) != len(names):
+        repeated = sorted({n for n in names if names.count(n) > 1})
+        lines.append(f"'class_names' repeats {', '.join(map(repr, repeated))}; each class needs its own name")
+    if all(isinstance(record[key], str) and record[key] for key in ("model", "family", "variant")):
+        if record["model"] != f"{record['family']}/{record['variant']}":
+            lines.append(
+                f"'model' is {record['model']!r} but 'family' and 'variant' give "
+                f"{record['family'] + '/' + record['variant']!r}"
+            )
     shape = record["input_shape"]
     shape_ok = (
         isinstance(shape, list)
@@ -224,9 +238,16 @@ def record_problems(record: Mapping[str, Any]) -> List[str]:
             lines.append(f"{key!r} must be a list of finite numbers, got {values!r}")
         elif width is not None and len(values) != width:
             lines.append(f"{key!r} holds {len(values)} numbers for {width} channels")
-    std = record["std"]
+    mean, std = record["mean"], record["std"]
     if isinstance(std, list) and all(_is_number(v) for v in std) and any(v <= 0 for v in std):
         lines.append(f"'std' must be positive, got {std!r}")
+    numbers = all(isinstance(v, list) and all(_is_number(x) for x in v) for v in (mean, std))
+    if record["normalize"] == "unit" and numbers:
+        if any(v != 0 for v in mean) or any(v != 1 for v in std):
+            lines.append(
+                f"'normalize' is 'unit' (no standardization) but 'mean' is {mean!r} and 'std' is "
+                f"{std!r}; unit means zeros and ones"
+            )
     transform = record["eval_transform"]
     if not isinstance(transform, dict) or set(transform) != {"kind", "source_channels"}:
         lines.append(
@@ -270,6 +291,18 @@ def read_record(path: Path) -> Dict[str, Any]:
     return record
 
 
+def _task_candidates(model_file: Path) -> Tuple[Path, ...]:
+    """Return the records a ``.keras`` file may be read with, best first (see the module contract)."""
+    # DECISION plan-2026-10-30T132432-a865fa08/D-068: ``<file>.task.json`` first, because that is
+    # the name ``export`` writes for ``<out>``; ``<stem>.task.json`` and ``task.json`` after it.
+    # Do NOT read only ``task.json``: an exported file moved away from its run has none.
+    return (
+        model_file.with_name(model_file.name + TASK_SUFFIX),
+        model_file.with_name(model_file.stem + TASK_SUFFIX),
+        model_file.parent / TASK_FILE,
+    )
+
+
 def _model_files(path: Path) -> Tuple[Path, Path]:
     """Return ``(model file, task file)`` for a run directory or a ``.keras`` file."""
     from train.common.callbacks import best_checkpoint_path
@@ -284,7 +317,15 @@ def _model_files(path: Path) -> Tuple[Path, Path]:
             )
         return model_file, path / TASK_FILE
     if path.is_file():
-        return path, path.parent / TASK_FILE
+        candidates = _task_candidates(path)
+        for candidate in candidates:
+            if candidate.is_file():
+                return path, candidate
+        raise ConfigError(
+            f"Invalid value for 'model': {path} has no record beside it; a .keras file is read "
+            f"with the first of {', '.join(c.name for c in candidates)} that exists in "
+            f"{path.parent} (export writes {candidates[0].name})"
+        )
     raise ConfigError(f"Invalid value for 'model': {path} is neither a run directory nor a file")
 
 
@@ -310,7 +351,26 @@ def load_model(path: Union[str, Path]) -> "Predictor":
     # predictor needs no loss or metric, and a metric class the archive names (the
     # library's half-precision top-k, D-051) would be one more thing that can fail a
     # reload that needs only the weights.
-    return Predictor(keras.models.load_model(str(model_file), compile=False), record)
+    model = keras.models.load_model(str(model_file), compile=False)
+    _check_width(model(_zeros_of(record), training=False), record)
+    return Predictor(model, record)
+
+
+def _zeros_of(record: Mapping[str, Any]) -> Any:
+    """Return one all-zero input of the record's shape, to ask a loaded model its output width."""
+    import numpy as np
+
+    return np.zeros((1, *record["input_shape"]), np.float32)
+
+
+def _check_width(logits: Any, record: Mapping[str, Any]) -> None:
+    """Raise :class:`ConfigError` unless ``logits`` is ``(N, classes)`` for the record's classes."""
+    shape = tuple(logits.shape)
+    if len(shape) != 2 or shape[1] != len(record["class_names"]):
+        raise ConfigError(
+            f"The model outputs {shape[1:]} per image but {TASK_FILE} names "
+            f"{len(record['class_names'])} classes; the file and the model are not from one run"
+        )
 
 
 def _softmax(logits: Any) -> Any:
@@ -361,11 +421,16 @@ class Predictor:
             )
         if array.ndim == 2:
             array = array[..., None]
-        if array.ndim != 3 or array.shape[-1] not in (1, 3) or min(array.shape[:2]) < 1:
+        if array.ndim != 3 or array.shape[-1] not in (1, 3, 4) or min(array.shape[:2]) < 1:
             raise ConfigError(
-                "Invalid image: an array must be (H, W), (H, W, 1) or (H, W, 3), got shape "
-                f"{tuple(array.shape)}"
+                "Invalid image: an array must be (H, W), (H, W, 1), (H, W, 3) or (H, W, 4), got "
+                f"shape {tuple(array.shape)}"
             )
+        if array.shape[-1] == 4:
+            # DECISION plan-2026-10-30T132432-a865fa08/D-068: an RGBA array loses its alpha channel,
+            # exactly as ``PIL.Image.convert("RGB")`` does for a PIL image. Do NOT composite it
+            # over a background: the two input forms would then give different pixels.
+            array = array[..., :3]
         if array.dtype == np.uint8:
             image = tf.image.convert_image_dtype(tf.constant(array), tf.float32)
         else:
@@ -415,6 +480,8 @@ class Predictor:
         import numpy as np
 
         if isinstance(x, np.ndarray) and x.ndim == 4:
+            if len(x) == 0:
+                raise ConfigError(f"Invalid image: the array of images is empty (shape {tuple(x.shape)})")
             return [self._one(image) for image in x], True
         if isinstance(x, (list, tuple)):
             if not x:
@@ -463,11 +530,7 @@ class Predictor:
             logits = self.model((batch - mean) / std, training=False)
             rows.append(np.asarray(logits, dtype=np.float64))
         logits = np.concatenate(rows, axis=0)
-        if logits.ndim != 2 or logits.shape[1] != len(self.class_names):
-            raise ConfigError(
-                f"The model outputs {tuple(logits.shape[1:])} per image but {TASK_FILE} names "
-                f"{len(self.class_names)} classes; the file and the model are not from one run"
-            )
+        _check_width(logits, self.record)
         return _softmax(logits)
 
     def predict(

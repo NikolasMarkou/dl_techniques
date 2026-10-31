@@ -21,7 +21,7 @@ import pytest
 
 from dl_techniques.models.vision.vit.model import create_vit
 from train.api.errors import ConfigError
-from train.api.export import FORMATS, TFLITE_SIBLING, export
+from train.api.exporting import FORMATS, TFLITE_SIBLING, export
 
 ATOL = 1e-5
 SHAPE = (32, 32, 3)

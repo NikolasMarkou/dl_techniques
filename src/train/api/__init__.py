@@ -6,19 +6,19 @@ and a name is imported from its module on first access. That keeps
 
 A name enters ``__all__`` when its module exists (D-007).
 
-``export`` is both a submodule and a function. Python binds a submodule on its package
-the moment it is first imported, so ``train.api.export`` is the FUNCTION only when it is
-read before anything imports the submodule (the command line imports it); after that it is
-the module. Write ``from train.api.export import export`` when order is not under your
-control (D-064).
+``export`` is a function in the module ``train.api.exporting`` (D-068): a submodule named
+``export`` would replace the function on the package the moment it was first imported, so
+``train.api.export`` would be the module after the command line ran. The submodule has a
+different name, and ``train.api.export`` is the function in every import order.
 """
 
 import importlib
 from typing import Dict, List
 
-# DECISION plan-2026-10-30T132432-a865fa08/D-064: ``export`` keeps its row although the submodule
-# has the same name (see the docstring). Do NOT rename the module (the plan and the tests name
-# ``train.api.export``) and do NOT import it eagerly here (a fresh ``import train.api`` loads no
+# DECISION plan-2026-10-30T132432-a865fa08/D-068: the row ``export`` points at the module
+# ``exporting``. Do NOT name that module ``export`` (importing it would bind the module over the
+# function on this package, so ``train.api.export`` would depend on import order, as D-064
+# accepted wrongly) and do NOT import it eagerly here (a fresh ``import train.api`` loads no
 # submodule, pinned by test_registry).
 _LAZY: Dict[str, str] = {
     "DLTrainError": ".errors",
@@ -52,7 +52,7 @@ _LAZY: Dict[str, str] = {
     "CsvImageData": ".data_args",
     "load_data_config": ".data_args",
     "load_model": ".predictor",
-    "export": ".export",
+    "export": ".exporting",
     "TaskTrainer": ".trainer",
     "TrainResult": ".trainer",
     "ImageClassificationConfig": ".tasks.image_classification",

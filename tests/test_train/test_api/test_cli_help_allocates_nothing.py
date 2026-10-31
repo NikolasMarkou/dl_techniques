@@ -163,7 +163,16 @@ def test_a_cheap_refusal_of_export_and_predict_imports_nothing_heavy_either(comm
         good = [missing, "out=" + str(tmp_path / "o.keras"), "format=keras"]
     else:
         good = [missing, "data=" + str(tmp_path), "out=" + str(tmp_path / "o.json")]
-    arms = [[command, "nope=1"], [command, *good]]
+    arms = [[command, "nope=1"], [command, *good], [command, "model=", *good[1:]]]
+    if command == "export":
+        # The model path is checked before `tf2onnx` (and so TensorFlow) is imported (concern 16).
+        arms.append([command, missing, "out=" + str(tmp_path / "o.onnx"), "format=onnx"])
+    else:
+        (tmp_path / "afile").write_text("x")
+        arms += [
+            [command, "model=" + str(tmp_path), "data=" + str(tmp_path), "out=" + str(tmp_path / "afile" / "o.json")],
+            [command, "model=" + str(tmp_path), "data=", "out=" + str(tmp_path / "o.json")],
+        ]
     for args in arms:
         result = run_train(args, tmp_path, importtime=True)
         assert result.returncode == 2, (args, result.stderr[-1500:])
@@ -172,7 +181,7 @@ def test_a_cheap_refusal_of_export_and_predict_imports_nothing_heavy_either(comm
 
 
 def test_load_model_and_export_are_on_the_lazy_surface_and_import_nothing_until_read(tmp_path):
-    """`train.api.load_model` and `train.api.export` resolve on first read, to functions (D-064)."""
+    """`train.api.load_model` and `train.api.export` resolve on first read, to functions (D-064, D-068)."""
     code = (
         "import sys\n"
         "import train.api\n"
@@ -180,8 +189,10 @@ def test_load_model_and_export_are_on_the_lazy_surface_and_import_nothing_until_
         "assert not [n for n in sys.modules if n.startswith('train.api.')], 'import loaded a submodule'\n"
         "export = train.api.export\n"
         "assert callable(export) and not hasattr(export, '__path__'), type(export)\n"
-        "assert export.__module__ == 'train.api.export' and export.__name__ == 'export'\n"
+        "assert export.__module__ == 'train.api.exporting' and export.__name__ == 'export'\n"
         "assert 'tensorflow' not in sys.modules, 'export pulled in TensorFlow'\n"
+        "import train.api.exporting\n"
+        "assert train.api.export is export, 'importing the module replaced the function (D-068)'\n"
         "load_model = train.api.load_model\n"
         "assert callable(load_model) and load_model.__module__ == 'train.api.predictor'\n"
         "assert 'tensorflow' not in sys.modules, 'load_model pulled in TensorFlow'\n"

@@ -458,7 +458,7 @@ def test_the_sweep_sees_the_package():
     names = {path.name for path in files}
     assert {
         "__main__.py", "cli.py", "registry.py", "trainer.py", "image_classification.py",
-        "predictor.py", "export.py",
+        "predictor.py", "exporting.py",
     } <= names
     # Liveness: cli.py holds the handler the rule about it is about.
     handler_count = sum(1 for _ in handlers(ast.parse(CLI_PATH.read_text())))

@@ -573,8 +573,12 @@ def test_export_writes_each_format_from_a_run_directory(format, name, trained_ru
         ["export", f"model={trained_run}", f"out={out}", f"format={format}"], capsys
     )
     assert code == 0, stderr[-1500:]
-    assert stdout.strip().splitlines()[-1] == str(out)
+    assert stdout == f"{out}\n"  # ONLY the path, for every format (concern 17)
     assert out.exists()
+    # The run's record travels with the export (concern 12): same content, a new file.
+    assert json.loads((tmp_path / (name + ".task.json")).read_text()) == json.loads(
+        (trained_run / "task.json").read_text()
+    )
     if format == "keras":
         # Liveness: the written file is the run's model, not any model.
         batch = np.random.default_rng(0).random((2, 32, 32, 3)).astype(np.float32)
@@ -639,6 +643,24 @@ def lone_model(run, tmp):
     return target
 
 
+def a_file(tmp):
+    path = tmp / "afile"
+    path.write_text("a file, not a directory")
+    return path
+
+
+def task_json_taken(tmp, name):
+    """Create ``<name>.task.json`` in ``tmp`` and return the free ``tmp / name`` it sits beside."""
+    (tmp / (name + ".task.json")).write_text("{}")
+    return tmp / name
+
+
+def a_dangling_link(tmp, name):
+    link = tmp / ("link_" + name)
+    link.symlink_to(tmp / "points_nowhere")
+    return link
+
+
 EXPORT_REFUSALS = [
     pytest.param(lambda run, tmp: ["format=keras", f"out={tmp / 'o.keras'}", f"model={tmp / 'gone'}"],
                  "Invalid value for 'model': ", id="model-path-missing"),
@@ -661,6 +683,16 @@ EXPORT_REFUSALS = [
                  "export takes no config=", id="config-file"),
     pytest.param(lambda run, tmp: ["format=keras", "out=" + str(tmp), f"model={run}"],
                  "Invalid value for 'out': ", id="out-is-an-existing-directory-with-wrong-suffix"),
+    pytest.param(lambda run, tmp: ["format=keras", f"out={tmp / 'o.keras'}", "model="],
+                 "Invalid value for 'model': it is empty.", id="empty-model"),
+    pytest.param(lambda run, tmp: ["format=keras", "out=", f"model={run}"],
+                 "Invalid value for 'out': it is empty.", id="empty-out"),
+    pytest.param(lambda run, tmp: ["format=keras", f"out={a_file(tmp) / 'o.keras'}", f"model={run}"],
+                 "is not a directory, so", id="out-under-a-file"),
+    pytest.param(lambda run, tmp: ["format=keras", f"out={a_dangling_link(tmp, 'o.keras')}", f"model={run}"],
+                 "already exists", id="out-is-a-dangling-symlink"),
+    pytest.param(lambda run, tmp: ["format=keras", f"out={task_json_taken(tmp, 'o.keras')}", f"model={run}"],
+                 "o.keras.task.json already exists", id="the-task-json-beside-out-exists"),
 ]
 
 
@@ -672,6 +704,66 @@ def test_a_bad_export_exits_two_with_one_message_and_no_traceback(build, message
     assert code == 2, (stdout, stderr[-1500:])
     assert message in one_error(stderr), stderr
     assert sorted(p.name for p in tmp_path.iterdir()) == before, "a refused export wrote something"
+
+
+def test_export_stdout_is_only_the_path_even_when_the_export_prints_and_when_it_fails(
+    trained_run, tmp_path, capsys, monkeypatch
+):
+    """Keras prints `Saved artifact at ...` to stdout; the command sends that to stderr (concern 17)."""
+    from train.api import exporting
+
+    def chatty(*, model, out, format, input_shape, record):
+        print("Saved artifact at 'x'. The following endpoints are available:")
+        print("* Endpoint 'serve'")
+        return Path(out)
+
+    monkeypatch.setattr(exporting, "export", chatty)
+    out = tmp_path / "m.keras"
+    code, stdout, stderr = run_command(
+        ["export", f"model={trained_run}", f"out={out}", "format=keras"], capsys
+    )
+    assert code == 0 and stdout == f"{out}\n", (stdout, stderr[-500:])
+    assert "Saved artifact at" in stderr and "Endpoint 'serve'" in stderr  # moved, not lost
+
+    def chatty_and_failing(*, model, out, format, input_shape, record):
+        print("* Endpoint 'serve'")
+        raise exporting.ConfigError("Invalid value for 'format': the converter said no")
+
+    monkeypatch.setattr(exporting, "export", chatty_and_failing)
+    code, stdout, stderr = run_command(
+        ["export", f"model={trained_run}", f"out={tmp_path / 'n.keras'}", "format=keras"], capsys
+    )
+    assert code == 2 and stdout == "" and "the converter said no" in stderr
+
+
+def test_export_writes_the_record_beside_it_and_predict_reads_a_keras_export(
+    trained_run, pictures, tmp_path, capsys
+):
+    """Concern 12: an exported .keras file predicts on its own, via `<out>.task.json`."""
+    out = tmp_path / "moved" / "m.keras"
+    code, _, stderr = run_command(
+        ["export", f"model={trained_run / 'final_model.keras'}", f"out={out}", "format=keras"], capsys
+    )
+    assert code == 0, stderr[-1500:]
+    record = out.parent / "m.keras.task.json"
+    assert json.loads(record.read_text()) == json.loads((trained_run / "task.json").read_text())
+    predicted = tmp_path / "p.json"
+    code, _, stderr = run_command(
+        ["predict", f"model={out}", f"data={pictures / 'a.png'}", f"out={predicted}"], capsys
+    )
+    assert code == 0, stderr[-1500:]
+    from train.api.predictor import load_model
+
+    expected = load_model(trained_run).predict(str(pictures / "a.png"))
+    assert read_predictions(predicted)[0]["labels"] == expected["labels"]
+
+
+def test_export_help_states_the_input_contract(capsys):
+    code, stdout, _ = run_command(["export", "help"], capsys)
+    text = " ".join(stdout.split())
+    assert code == 0
+    for phrase in ("standardized", "mean", "std", "raw logits", "<out>.task.json", "mixed_float16", "1e-4"):
+        assert phrase in text, phrase
 
 
 def test_export_to_an_existing_out_is_refused_and_leaves_it_byte_identical(trained_run, tmp_path, capsys):
@@ -798,6 +890,14 @@ PREDICT_REFUSALS = [
                  "Unknown key 'format'.", id="unknown-key"),
     pytest.param(lambda run, pics, tmp: [f"model={run}", f"data={pics}", f"out={tmp / 'p.json'}", "config=c.yaml"],
                  "predict takes no config=", id="config-file"),
+    pytest.param(lambda run, pics, tmp: ["model=", f"data={pics}", f"out={tmp / 'p.json'}"],
+                 "Invalid value for 'model': it is empty.", id="empty-model"),
+    pytest.param(lambda run, pics, tmp: [f"model={run}", "data=", f"out={tmp / 'p.json'}"],
+                 "Invalid value for 'data': it is empty.", id="empty-data"),
+    pytest.param(lambda run, pics, tmp: [f"model={run}", f"data={pics}", f"out={a_file(tmp) / 'p.json'}"],
+                 "is not a directory, so", id="out-under-a-file"),
+    pytest.param(lambda run, pics, tmp: [f"model={run}", f"data={pics}", f"out={a_dangling_link(tmp, 'p.json')}"],
+                 "already exists", id="out-is-a-dangling-symlink"),
 ]
 
 
@@ -812,6 +912,21 @@ def test_a_bad_predict_exits_two_with_a_message_and_no_traceback(
     assert message in one_error(stderr), stderr
     assert not (tmp_path / "p.json").exists(), "a refused predict wrote its out"
     assert sorted(p.name for p in tmp_path.iterdir()) == existing
+
+
+def test_predict_refuses_an_unwritable_out_before_the_model_is_loaded(trained_run, pictures, tmp_path, capsys, monkeypatch):
+    """Concern 16: `out` under a file or a dangling link was found after inference, as a traceback."""
+    from train.api import predictor as predictor_module
+
+    def boom(path):
+        raise AssertionError("the model was loaded before `out` was checked")
+
+    monkeypatch.setattr(predictor_module, "load_model", boom)
+    for out in (a_file(tmp_path) / "p.json", a_dangling_link(tmp_path, "p.json")):
+        code, _, stderr = run_command(
+            ["predict", f"model={trained_run}", f"data={pictures}", f"out={out}"], capsys
+        )
+        assert code == 2 and one_error(stderr), out
 
 
 def test_predict_to_an_existing_out_is_refused_and_leaves_it_byte_identical(
@@ -835,7 +950,10 @@ def test_the_real_command_exports_and_predicts_with_exit_zero(trained_run, pictu
         ["export", f"model={trained_run}", f"out={tmp_path / 'm.keras'}", "format=keras"], cwd
     )
     assert exported.returncode == 0, exported.stderr[-2000:]
-    assert exported.stdout.strip().splitlines()[-1] == str(tmp_path / "m.keras")
+    assert exported.stdout == f"{tmp_path / 'm.keras'}\n"
+    assert (tmp_path / "m.keras.task.json").is_file()
+    assert f"Wrote {tmp_path / 'm.keras.task.json'}" in exported.stderr  # the log says so
+    assert "mean and std" in exported.stderr and "raw logits" in exported.stderr
     assert not any(line.startswith("error:") for line in exported.stderr.splitlines())
     predicted = run_real(
         ["predict", f"model={trained_run}", f"data={pictures / 'a.png'}", f"out={tmp_path / 'p.json'}"], cwd
@@ -858,3 +976,30 @@ def test_the_real_command_refuses_a_bad_path_format_and_argument_with_exit_two(t
         result = run_real(args, cwd)
         assert result.returncode == 2, (args, result.stderr[-1500:])
         assert "Traceback" not in result.stderr and error_lines(result.stderr), args
+
+
+def test_train_api_export_is_the_function_after_a_command_ran_and_after_the_module_was_imported(
+    trained_run, tmp_path
+):
+    """Concern 11: the submodule is `exporting`, so the lazy name `export` is never shadowed by it."""
+    out = tmp_path / "m.keras"
+    code = (
+        "import sys\n"
+        "from train.api import main\n"
+        f"assert main(['export', 'model={trained_run}', 'out={out}', 'format=keras']) == 0\n"
+        "import train.api\n"
+        "function = train.api.export\n"
+        "assert callable(function) and not hasattr(function, '__path__'), type(function)\n"
+        "assert function.__module__ == 'train.api.exporting' and function.__name__ == 'export'\n"
+        "import train.api.exporting\n"
+        "assert train.api.export is function, 'importing the module changed train.api.export'\n"
+        "assert train.api.exporting.FORMATS == ('keras', 'saved_model', 'tflite', 'onnx')\n"
+        "from train.api import export\n"
+        "assert export is function\n"
+        "print('EXPORT-IS-THE-FUNCTION')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=tmp_path, capture_output=True, text=True, timeout=180
+    )
+    assert result.returncode == 0, result.stderr[-2500:]
+    assert result.stdout.endswith("EXPORT-IS-THE-FUNCTION\n") and out.is_file()

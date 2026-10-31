@@ -495,7 +495,9 @@ def test_a_4d_array_is_several_images_and_a_3d_array_is_one():
         (np.zeros((8, 8, 3), np.int64), "uint8 or floating"),
         (np.zeros((8, 8, 3), bool), "uint8 or floating"),
         (np.zeros((8, 8, 2), np.uint8), "shape"),
-        (np.zeros((8, 8, 4), np.uint8), "shape"),
+        (np.zeros((8, 8, 5), np.uint8), "shape"),
+        (np.zeros((0, 8, 8, 3), np.uint8), "empty"),
+        (np.zeros((0, 8, 3), np.uint8), "shape"),
         (np.zeros((8,), np.uint8), "got ndarray of shape"),
         (np.zeros((2, 2, 8, 8, 3), np.uint8), "got ndarray of shape"),
         ([], "empty"),
@@ -503,7 +505,8 @@ def test_a_4d_array_is_several_images_and_a_3d_array_is_one():
         (3, "got int"),
         ("/no/such/file.png", "is not a file"),
     ],
-    ids=["above", "below", "nan", "int64", "bool", "two-channels", "rgba", "1d", "5d", "empty", "object", "int", "missing"],
+    ids=["above", "below", "nan", "int64", "bool", "two-channels", "five-channels", "no-images",
+         "no-rows", "1d", "5d", "empty", "object", "int", "missing"],
 )
 def test_an_unusable_image_is_refused_naming_why(given, pattern):
     with pytest.raises(ConfigError, match=pattern):
@@ -617,6 +620,63 @@ def test_a_model_and_a_record_that_disagree_on_the_class_count_are_refused():
         Predictor(constant_model([0.0, 1.0, 2.0, 3.0]), record()).predict(blank())
 
 
+def test_the_class_count_is_checked_at_load_not_at_the_first_predict(run_dir, tmp_path):
+    two = copy_with_record(run_dir, tmp_path / "two", class_names=["ant", "moth"])
+    with pytest.raises(ConfigError, match=r"outputs \(3,\) per image but task\.json names 2 classes"):
+        load_model(two)
+    assert load_model(copy_with_record(run_dir, tmp_path / "three")).class_names == CLASS_NAMES  # control
+
+
+# ---------------------------------------------------------------------
+# Arrays: RGBA, and nothing at all
+# ---------------------------------------------------------------------
+
+
+def test_an_rgba_array_is_read_like_an_rgba_pil_image_and_its_alpha_is_dropped():
+    model = linear_model((8, 8, 3), 3, seed=7)
+    predictor_ = Predictor(model, record())
+    pixels = np.random.default_rng(1).integers(0, 255, (8, 8, 4)).astype(np.uint8)
+    from_pil = predictor_.predict(Image.fromarray(pixels, "RGBA"))
+    from_array = predictor_.predict(pixels)
+    assert from_array == from_pil
+    assert from_array == predictor_.predict(pixels[..., :3])  # the rgb part alone
+    opaque = pixels.copy()
+    opaque[..., 3] = 255 - opaque[..., 3]
+    assert predictor_.predict(opaque) == from_array  # alpha is not used
+    assert predictor_.predict((pixels.astype(np.float32) / 255.0)) == predictor_.predict(pixels.astype(np.float32)[..., :3] / 255.0)
+    assert predictor_.predict(np.stack([pixels, pixels]))["labels"] == [from_array["labels"]] * 2
+    grey = Predictor(model, record(eval_transform={"kind": "resize", "source_channels": 1}))
+    assert grey.predict(pixels) == grey.predict(pixels[..., :3])  # grey from the rgb part, alpha unused
+
+
+def test_an_empty_array_of_images_is_a_config_error_not_a_numpy_one():
+    with pytest.raises(ConfigError, match=r"the array of images is empty \(shape \(0, 8, 8, 3\)\)"):
+        Predictor(constant_model([0.0, 1.0, 2.0]), record()).predict(np.zeros((0, 8, 8, 3), np.float32))
+
+
+# ---------------------------------------------------------------------
+# A .keras file and the record beside it
+# ---------------------------------------------------------------------
+
+
+def test_a_keras_file_reads_its_name_task_json_then_its_stem_task_json_then_task_json(run_dir, tmp_path):
+    record_ = read_task(run_dir)
+    order = ["m.keras.task.json", "m.task.json", "task.json"]
+    classes = {"m.keras.task.json": ["ant", "moth", "zebra"], "m.task.json": ["ant", "moth", "yak"], "task.json": ["ant", "moth", "wolf"]}
+    for start, expected in enumerate(order):
+        folder = tmp_path / f"beside{start}"  # holds this record and the ones after it in the order
+        folder.mkdir()
+        shutil.copy(run_dir / "best_model.keras", folder / "m.keras")
+        for name in order[start:]:
+            (folder / name).write_text(json.dumps({**record_, "class_names": classes[name]}))
+        assert load_model(folder / "m.keras").class_names == classes[expected], expected
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    shutil.copy(run_dir / "best_model.keras", bare / "m.keras")
+    with pytest.raises(ConfigError, match="has no record beside it"):
+        load_model(bare / "m.keras")
+
+
 # ---------------------------------------------------------------------
 # The record
 # ---------------------------------------------------------------------
@@ -651,6 +711,11 @@ BAD_RECORDS = [
     (record(class_names=[]), "class_names"),
     (record(class_names=[1, 2, 3]), "class_names"),
     (record(model=""), "'model'"),
+    (record(class_names=["a", "b", "a"]), "'class_names' repeats 'a'"),
+    (record(family="resnet"), "'model' is 'vit/vit_pico' but 'family' and 'variant' give 'resnet/vit_pico'"),
+    (record(variant="vit_tiny"), "'model' is 'vit/vit_pico' but"),
+    (record(normalize="unit"), "'normalize' is 'unit'.*unit means zeros and ones"),
+    (record(normalize="unit", mean=[0.0, 0.0, 0.0], std=[1.0, 2.0, 1.0]), "unit means zeros and ones"),
     (record(input_shape=[8, 8]), "input_shape"),
     (record(input_shape=[8, 9, 3]), "input_shape"),
     (record(input_shape=[0, 0, 3]), "input_shape"),
@@ -675,6 +740,11 @@ def test_a_bad_record_is_refused_naming_the_key(bad, pattern):
         check_record(bad, "/some/task.json")
     with pytest.raises(ConfigError, match=pattern):
         Predictor(constant_model([0.0, 1.0, 2.0]), bad)
+
+
+def test_a_unit_record_of_zeros_and_ones_and_a_standardize_record_with_any_numbers_pass():
+    check_record(record(normalize="unit", mean=[0, 0, 0], std=[1, 1.0, 1]), "<test>")
+    check_record(record(normalize="standardize", mean=[0.0, 0.0, 0.0], std=[1.0, 1.0, 1.0]), "<test>")
 
 
 def test_a_record_that_is_not_an_object_is_refused():
@@ -713,7 +783,7 @@ def test_a_path_that_does_not_exist_is_refused(tmp_path):
 def test_a_model_file_without_a_task_json_beside_it_is_refused(run_dir, tmp_path):
     (tmp_path / "bare").mkdir()
     shutil.copy(run_dir / "best_model.keras", tmp_path / "bare" / "best_model.keras")
-    with pytest.raises(ConfigError, match=r"task\.json.*does not exist"):
+    with pytest.raises(ConfigError, match=r"has no record beside it.*best_model\.keras\.task\.json.*task\.json"):
         load_model(tmp_path / "bare" / "best_model.keras")
 
 
@@ -741,12 +811,12 @@ def test_a_task_json_that_is_not_json_is_refused(run_dir, tmp_path):
 
 
 def test_a_family_that_is_not_registered_is_refused(run_dir, tmp_path):
-    path = copy_with_record(run_dir, tmp_path / "family", family="nosuchnet")
+    path = copy_with_record(run_dir, tmp_path / "family", family="nosuchnet", model="nosuchnet/vit_pico")
     with pytest.raises(ConfigError, match="'nosuchnet' is not registered"):
         load_model(path)
 
 
-def test_class_names_that_do_not_match_the_model_are_refused_at_predict(run_dir, tmp_path, truth):
+def test_class_names_that_do_not_match_the_model_are_refused_when_it_is_loaded(run_dir, tmp_path, truth):
     path = copy_with_record(run_dir, tmp_path / "wide", class_names=CLASS_NAMES + ["extra"])
     with pytest.raises(ConfigError, match="names 4 classes"):
         load_model(path).predict(truth.paths[0])
