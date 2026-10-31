@@ -391,7 +391,8 @@ def test_each_data_source_records_the_transform_its_evaluation_pipeline_applies(
     kinds = predictor.EVAL_KIND_OF_DATA
     assert {kinds[n] for n in ("mnist", "cifar10", "cifar100", "folder", "csv")} == {"resize"}
     assert kinds["imagenette"] == "resize_centre_crop"
-    assert kinds["imagenet"] == "imagenet_centre_crop" and "imagenet_centre_crop" not in EVAL_KINDS
+    assert kinds["imagenet"] == "imagenet_centre_crop"
+    assert set(kinds.values()) == set(EVAL_KINDS)  # every recorded kind is one the predictor reads
     from train.api.data_args import DATASETS, FORMATS
 
     assert set(kinds) == set(DATASETS) | {f for f in FORMATS if f != "builtin"}
@@ -552,6 +553,65 @@ def test_the_centre_crop_kind_is_the_loaders_own_function():
     assert np.abs(squash.probabilities([unit])[0] - expected).max() > 1e-4  # the kind is live
 
 
+def imagenet_loader_batch(path, side):
+    """The batch ImageNet's own evaluation pipeline yields for one file (its ``_make_dataset``)."""
+    from dl_techniques.datasets.vision import imagenet2012
+
+    config = imagenet2012.ImageNet2012Config(
+        image_size=side, batch_size=1, normalize="imagenet", augment=False, shuffle=False
+    )
+    dataset = imagenet2012._make_dataset(np.asarray([str(path)]), np.asarray([0], np.int32), False, config)
+    (batch, _), = list(dataset.as_numpy_iterator())
+    return batch
+
+
+@pytest.mark.parametrize("extension", ["png", "jpg"])
+@pytest.mark.parametrize("shape", [(60, 150), (150, 60), (120, 120)])
+def test_an_imagenet_run_is_predicted_through_the_loaders_own_crop(tmp_path, shape, extension):
+    from dl_techniques.datasets.vision.imagenet2012 import IMAGENET_MEAN, IMAGENET_STD
+
+    side = 16
+    pixels = np.random.default_rng(5).integers(0, 256, (*shape, 3)).astype(np.uint8)
+    path = tmp_path / f"photo.{extension}"
+    Image.fromarray(pixels).save(path)
+    expected = imagenet_loader_batch(path, side)
+    assert expected.shape == (1, side, side, 3)
+
+    imagenet = build_task_record(
+        task="image_classification", model="vit/vit_pico", family="vit", variant="vit_pico",
+        class_names=["a", "b", "c"], input_shape=(side, side, 3), normalize="standardize",
+        mean=IMAGENET_MEAN, std=IMAGENET_STD, data_kind="imagenet", source_channels=3,
+    )
+    check_record(imagenet, "<built>")  # the record the trainer writes is one the reader accepts
+    assert imagenet["eval_transform"]["kind"] == "imagenet_centre_crop"
+    model = linear_model((side, side, 3), 3, seed=11)
+    given = Predictor(model, imagenet)
+
+    # The preprocessing itself: the loader's normalized tensor, from the file, a PIL image and an array.
+    mean, std = np.asarray(IMAGENET_MEAN, np.float32), np.asarray(IMAGENET_STD, np.float32)
+    # (PIL's JPEG decoder differs from TensorFlow's by a few levels, so the PIL and array forms
+    # are built from the pixels the loader decodes, and only the path form reads the file.)
+    import tensorflow as tf
+
+    decoded = tf.io.decode_image(tf.io.read_file(str(path)), channels=3, expand_animations=False).numpy()
+    for form in (str(path), Image.fromarray(decoded), decoded):
+        image = given._one(form)
+        got = (np.asarray(given._shaped(image)) - mean) / std
+        np.testing.assert_allclose(got, expected[0], atol=1e-4, rtol=0)
+
+    # And through the model: the probabilities of the loader's batch.
+    truth = softmax(np.asarray(model(expected, training=False), np.float64))[0]
+    result = given.predict(str(path))
+    by_name = dict(zip(result["labels"], result["scores"]))
+    np.testing.assert_allclose([by_name[n] for n in "abc"], truth, atol=ATOL, rtol=0)
+
+    # Liveness: the antialiased ImageNet crop is not the Imagenette crop, nor a plain resize.
+    for other in ("resize_centre_crop", "resize"):
+        moved = Predictor(model, {**imagenet, "eval_transform": {"kind": other, "source_channels": 3}})
+        wrong = (np.asarray(moved._shaped(moved._one(str(path)))) - mean) / std
+        assert np.abs(wrong - expected[0]).max() > 1e-2, other
+
+
 def test_a_model_and_a_record_that_disagree_on_the_class_count_are_refused():
     with pytest.raises(ConfigError, match="names 3 classes"):
         Predictor(constant_model([0.0, 1.0, 2.0, 3.0]), record()).predict(blank())
@@ -603,7 +663,7 @@ BAD_RECORDS = [
     (record(eval_transform={"kind": "resize"}), "eval_transform"),
     (record(eval_transform={"kind": "resize", "source_channels": 2}), "source_channels"),
     (
-        record(eval_transform={"kind": "imagenet_centre_crop", "source_channels": 3}),
+        record(eval_transform={"kind": "stretch", "source_channels": 3}),
         "does not reproduce",
     ),
 ]

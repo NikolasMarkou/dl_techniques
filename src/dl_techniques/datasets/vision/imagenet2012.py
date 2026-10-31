@@ -364,7 +364,18 @@ def _random_resized_crop(image: tf.Tensor, size: int, seed: tf.Tensor) -> tf.Ten
     return tf.image.resize(crop, [size, size], method="bilinear", antialias=True)
 
 
-def _center_crop(image: tf.Tensor, size: int) -> tf.Tensor:
+def center_crop(image: tf.Tensor, size: int) -> tf.Tensor:
+    """ImageNet's evaluation crop: antialiased resize of the shorter side, then a centre square.
+
+    The shorter side becomes ``ceil(size / EVAL_CROP_FRACTION)`` pixels (bilinear, antialiased),
+    the longer side keeps the aspect ratio, and the centre ``size`` x ``size`` square is kept.
+    Linear in the pixel values, so it gives the same result (to float rounding) on a 0..255
+    image as on a 0..1 image. ``train.api.predictor`` calls it for a run trained on ImageNet.
+
+    :param image: ``(H, W, C)`` float or integer image.
+    :param size: side of the output square.
+    :return: ``(size, size, C)`` float32.
+    """
     shape = tf.shape(image)
     short = tf.cast(tf.minimum(shape[0], shape[1]), tf.float32)
     scale = tf.cast(math.ceil(size / EVAL_CROP_FRACTION), tf.float32) / short
@@ -431,7 +442,7 @@ def _make_dataset(
             return _normalize(image, mode), label
     else:
         def load(path, label):
-            return _normalize(_center_crop(_decode(path), size), mode), label
+            return _normalize(center_crop(_decode(path), size), mode), label
 
     ds = ds.map(load, num_parallel_calls=cfg.num_parallel_calls, deterministic=not shuffle)
     ds = ds.batch(cfg.batch_size, drop_remainder=cfg.drop_remainder)

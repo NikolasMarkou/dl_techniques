@@ -41,7 +41,7 @@ Interface contract
     :param source: its path, for the messages.
     :raises ConfigError: for a wrong ``schema_version``, a missing or unknown key,
         a value of the wrong kind, a ``mean`` or ``std`` of the wrong length, a ``std``
-        that is not positive, or an ``eval_transform`` this predictor does not reproduce.
+        that is not positive, or an ``eval_transform`` whose kind is not in :data:`EVAL_KINDS`.
 
 ``load_model(path)``
     :param path: a run directory (its ``best_model.keras``) or a ``.keras`` file whose
@@ -108,16 +108,18 @@ RECORD_KEYS = (
 #: The evaluation transforms this predictor reproduces, by the loader code each one is:
 #: ``resize`` is ``train.common.classification_data.resizer`` (the in-memory datasets,
 #: folder and csv data); ``resize_centre_crop`` is
-#: ``dl_techniques.datasets.vision.crops.resize_and_centre_crop`` (Imagenette).
-EVAL_KINDS = ("resize", "resize_centre_crop")
+#: ``dl_techniques.datasets.vision.crops.resize_and_centre_crop`` (Imagenette);
+#: ``imagenet_centre_crop`` is ``dl_techniques.datasets.vision.imagenet2012.center_crop``
+#: (ImageNet's antialiased crop).
+EVAL_KINDS = ("resize", "resize_centre_crop", "imagenet_centre_crop")
 
-#: The evaluation transform each data source records. ImageNet's antialiased centre crop
-#: is recorded truthfully and is NOT in :data:`EVAL_KINDS`: a record naming it is refused
-#: by :func:`check_record` instead of being predicted with a different crop.
-# DECISION plan-2026-10-30T132432-a865fa08/D-061: do NOT record ``resize`` for ImageNet to make its
-# run loadable, and do NOT silently approximate its crop with Imagenette's: a prediction
-# through another crop looks fine and is wrong. The record says what training did and the
-# reader says what it cannot reproduce.
+#: The evaluation transform each data source records.
+# DECISION plan-2026-10-30T132432-a865fa08/D-062: ImageNet records ``imagenet_centre_crop`` and
+# the predictor calls the loader's own ``center_crop`` for it. Do NOT record ``resize`` for
+# ImageNet and do NOT approximate its crop with Imagenette's (an unrounded shorter side and no
+# antialias): a prediction through another crop looks fine and is wrong. Each kind names the
+# one loader function the predictor calls, so a new kind is a new row here and a branch in
+# ``Predictor._shaped``, never a refusal at read.
 EVAL_KIND_OF_DATA = {
     "mnist": "resize",
     "cifar10": "resize",
@@ -154,8 +156,7 @@ def build_task_record(
         or ``csv``.
     :param source_channels: the channels the files are read with.
     :return: the record. It is NOT checked: ImageNet's antialiased centre crop is recorded
-        truthfully as a kind this predictor does not reproduce, and training must not fail
-        for it; :func:`check_record` refuses it when the record is READ.
+        truthfully; every kind it can hold is one :func:`check_record` accepts.
     """
     shape = [int(side) for side in input_shape]
     return {
@@ -430,13 +431,17 @@ class Predictor:
         import tensorflow as tf
 
         from dl_techniques.datasets.vision.crops import resize_and_centre_crop
+        from dl_techniques.datasets.vision.imagenet2012 import center_crop
         from train.common.classification_data import resizer
 
         side = self.record["input_shape"][0]
-        if self.record["eval_transform"]["kind"] == "resize":
+        kind = self.record["eval_transform"]["kind"]
+        if kind == "resize":
             image = resizer(side)(image)
-        else:
+        elif kind == "resize_centre_crop":
             image = resize_and_centre_crop(image, side)
+        else:
+            image = center_crop(image, side)
         wanted = self.record["channels"]
         if int(image.shape[-1]) != wanted:
             image = tf.repeat(image, wanted, axis=-1)
