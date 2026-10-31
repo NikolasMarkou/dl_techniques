@@ -266,6 +266,7 @@ def file_tables(tmp_path_factory) -> Dict[str, FileTable]:
         Row("data.validation_split", "0.3", 0.3),
         Row("data.max_samples", "5", 5),
         Row("data.eval_samples", "3", 3),
+        Row("data.fingerprint", "content", "content"),
     )
     folder_base = {
         **BASE,
@@ -307,12 +308,15 @@ def file_tables(tmp_path_factory) -> Dict[str, FileTable]:
 
 FILE_KEYS = [
     ("folder", key)
-    for key in ("data.train_dir", "data.test_dir", "data.validation_split", "data.max_samples", "data.eval_samples")
+    for key in (
+        "data.train_dir", "data.test_dir", "data.validation_split", "data.max_samples",
+        "data.eval_samples", "data.fingerprint",
+    )
 ] + [
     ("csv", key)
     for key in (
         "data.train_csv", "data.test_csv", "data.path_column", "data.label_column",
-        "data.validation_split", "data.max_samples", "data.eval_samples",
+        "data.validation_split", "data.max_samples", "data.eval_samples", "data.fingerprint",
     )
 ]
 

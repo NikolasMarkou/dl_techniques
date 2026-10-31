@@ -46,7 +46,11 @@ and a reused pid blocks nobody; the pid in the file is a label for the refusal m
 **Resume**: `resume_interrupted=true` with the same `out` and the same request continues a killed
 run. It is refused for a finished run, another request, other data, a live process holding the
 run, or a torn backup; `devices` may differ. The training data order replays epoch 0's and a half-done epoch is
-trained again (the key's help lists the rest).
+trained again (the key's help lists the rest). For folder and CSV data the sidecar holds a fingerprint of the
+files: `data.fingerprint=listing` (the default) hashes every file's relative path, class and size and opens no
+file, so two same-sized files swapped, or a pixel edited, go unseen; `data.fingerprint=content` also hashes every
+file's bytes, streamed, which reads all the data once (a pass over the disk tree, minutes on a large one on a
+spinning disk; the seconds go to `run.log`). A resume refuses a changed mode or digest.
 
 **Predict**: `python -m train predict model=<run dir or .keras> data=<image or directory> out=pred.json`
 writes a new JSON list of `{"path", "labels", "scores"}`, every class best first. A directory is

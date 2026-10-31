@@ -236,6 +236,16 @@ def _file_problems(data: Any, prefix: str, text_keys: Tuple[str, ...]) -> List[s
     return lines
 
 
+#: The help of ``fingerprint`` on folder and CSV data (one text for both).
+_FINGERPRINT_HELP = (
+    "what the run records to tell, at a resume, that the files are the same: 'listing' is every "
+    "file's relative path, class and size (no file is opened); 'content' also hashes every file's "
+    "bytes, so a swapped or edited file of the same size is caught, at the cost of reading all "
+    "the data once (a pass over the whole disk tree, minutes on a large one on a spinning disk; "
+    "the seconds are logged)"
+)
+
+
 @dataclasses.dataclass(frozen=True)
 class FolderImageData(StrictConfig):
     """A directory of images per class: ``train_dir/<class>/*.png``, and optionally a test one."""
@@ -267,6 +277,10 @@ class FolderImageData(StrictConfig):
     eval_samples: Optional[int] = dataclasses.field(
         default=None,
         metadata={"help": "test images kept for figures and analysis; null is the loader's default"},
+    )
+    fingerprint: Literal["listing", "content"] = dataclasses.field(
+        default="listing",
+        metadata={"help": _FINGERPRINT_HELP},
     )
 
     def problems(self, prefix: str) -> List[str]:
@@ -311,6 +325,10 @@ class CsvImageData(StrictConfig):
     eval_samples: Optional[int] = dataclasses.field(
         default=None,
         metadata={"help": "test images kept for figures and analysis; null is the loader's default"},
+    )
+    fingerprint: Literal["listing", "content"] = dataclasses.field(
+        default="listing",
+        metadata={"help": _FINGERPRINT_HELP},
     )
 
     def problems(self, prefix: str) -> List[str]:
@@ -516,6 +534,7 @@ def load_file_data(
         augment_from_mean=augment_from_mean,
         max_samples=data.max_samples,
         max_samples_flag="data.max_samples",
+        fingerprint=data.fingerprint,
     )
     try:
         if isinstance(data, FolderImageData):

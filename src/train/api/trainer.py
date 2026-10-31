@@ -133,7 +133,7 @@ Hooks (override in a task)
     said, else ``RuntimeError``. File-based data also carries ``image_files``
     (the files ``fit`` and the first evaluation read, so an undecodable one can be
     named in a ``ConfigError``) and ``fingerprint`` (recorded in the sidecar and
-    compared at resume, D-070); data without them is not scanned and carries none.
+    compared at resume, D-070, with the ``data.fingerprint`` mode beside it); data without them is not scanned and carries none.
 ``build_model(config, context, data)``
     The model; built or not (the trainer builds it from ``data.input_shape``).
 ``metric_names(config, facts)``
@@ -299,10 +299,20 @@ def _data_counts(data: Any) -> Dict[str, int]:
     }
 
 
-def _data_fingerprint_field(data: Any) -> Dict[str, str]:
-    """``{"data_fingerprint": sha256}`` of a file-based data record, ``{}`` for one with none (D-070)."""
+def _data_fingerprint_field(config: Any, data: Any) -> Dict[str, str]:
+    """The sidecar's fingerprint keys of a file-based data record, ``{}`` for one with none (D-070).
+
+    ``data_fingerprint`` is the digest and ``data_fingerprint_mode`` the ``data.fingerprint``
+    value that made it (``listing`` or ``content``), so a resume can say which of the two
+    changed.
+    """
     fingerprint = getattr(data, "fingerprint", None)
-    return {} if fingerprint is None else {"data_fingerprint": fingerprint}
+    if fingerprint is None:
+        return {}
+    return {
+        "data_fingerprint": fingerprint,
+        "data_fingerprint_mode": getattr(config.data, "fingerprint", None),
+    }
 
 
 def _is_auto(value: Any) -> bool:
@@ -993,7 +1003,7 @@ class TaskTrainer:
                         "warned": bool(init_warning),
                     },
                     data_counts=_data_counts(data),
-                    **_data_fingerprint_field(data),
+                    **_data_fingerprint_field(config, data),
                 )
             else:
                 initial = resume.state["initial"]
@@ -1159,7 +1169,8 @@ class TaskTrainer:
         # tolerance in a large set; the names and the sizes catch what they miss. The
         # statistics catch a swap of two class folders (same names, same sizes). A swap
         # that leaves the fit split's statistics equal is caught by the data fingerprint
-        # (D-070): relative path, class and file size of every listed file, no pixel read.
+        # (D-070): relative path, class and file size of every listed file, no pixel read; a swap
+        # of two same-sized files is caught only by data.fingerprint=content, which hashes bytes.
         lines: List[str] = []
         record = self.task_record(config, context, data)
         task_path = run_dir / TASK_FILE
@@ -1177,12 +1188,19 @@ class TaskTrainer:
                 lines.append(f"{key}: {earlier_counts.get(key)} -> {now_counts.get(key)}")
         earlier_print = resume.state.get("data_fingerprint")
         now_print = getattr(data, "fingerprint", None)
+        earlier_mode = resume.state.get("data_fingerprint_mode")
+        now_mode = _data_fingerprint_field(config, data).get("data_fingerprint_mode")
+        if earlier_mode != now_mode:
+            lines.append(
+                f"data_fingerprint_mode: {earlier_mode or 'none'} -> {now_mode or 'none'} (the "
+                "run recorded its data by another rule, so the two digests cannot be compared)")
         if earlier_print != now_print:
             lines.append(
                 "data_fingerprint: "
                 f"{'none' if earlier_print is None else str(earlier_print)[:12]} -> "
-                f"{'none' if now_print is None else str(now_print)[:12]} (a file, its class or "
-                "its size is not the one the run started with)")
+                f"{'none' if now_print is None else str(now_print)[:12]} (a file, its class, "
+                "its size or, with data.fingerprint=content, its bytes is not the one the run "
+                "started with)")
         if lines:
             raise ConfigError(
                 f"Cannot resume {run_dir}: the data is not the data the run started with ("

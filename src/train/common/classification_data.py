@@ -32,7 +32,8 @@ The listing also refuses what would leak or mislead, by RESOLVED path (a symlink
 points to): a file listed twice, under two classes, or in both the train and the test split; two
 csv labels of one integer value; a class with fewer than two train images. It logs a WARNING for
 images below a class directory's own level and for a class the seeded cut leaves out of a split.
-:func:`listing_fingerprint` hashes the listing (relative path, class, size), reading no pixel. The
+:func:`listing_fingerprint` hashes the listing (relative path, class, size), reading no pixel, or
+with ``mode="content"`` the listing and every file's bytes (streamed). The
 loader decodes every test file it will score before any training (:func:`find_undecodable`) and
 names the file behind a decode error met by the statistics pass; ``ClassificationData.image_files``
 lets a trainer name the one behind an error met by ``fit``.
@@ -46,6 +47,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Sequence, Tuple
 
@@ -966,30 +968,62 @@ def read_image_csv(
                        os.path.dirname(os.path.abspath(train_csv)), test_base)
 
 
-def listing_fingerprint(listing: FileListing) -> str:
+#: The values of ``fingerprint``: what :func:`listing_fingerprint` hashes.
+FINGERPRINT_MODES = ("listing", "content")
+
+#: Bytes read per ``read`` while hashing a file in ``content`` mode.
+_HASH_CHUNK = 1 << 20
+
+
+def listing_fingerprint(listing: FileListing, mode: str = "listing") -> str:
     """A sha256 over the sorted ``(split, relative path, class, file size)`` rows of a listing.
 
-    Computed from the listing and ``stat`` alone: no pixel is read and no tensor made, so it
+    With ``mode="listing"`` (the default; its value is the one earlier runs recorded) it is
+    computed from the listing and ``stat`` alone: no pixel is read and no tensor made, so it
     may run before ``setup_gpu``. A path is relative to :attr:`FileListing.train_base` (or
     ``test_base``), so moving a whole tree does not change it; a file added, removed, renamed,
     given another class or another size does. It does NOT see a change that keeps every name,
     class and size (two same-sized images swapped, a pixel edited).
 
+    With ``mode="content"`` every row is followed by the file's bytes, read in
+    :data:`_HASH_CHUNK` pieces (a file is never held whole), so it also sees that change. It
+    reads every listed file once: on a spinning disk that is the time of a pass over the data,
+    and it logs the files, megabytes and seconds. The digest never equals the ``listing`` one.
+
+    :param listing: the listing of a folder or CSV source.
+    :param mode: one of :data:`FINGERPRINT_MODES`.
     :return: the hex digest.
+    :raises ValueError: for another ``mode``.
     """
-    rows: List[List[object]] = []
+    if mode not in FINGERPRINT_MODES:
+        raise ValueError(f"fingerprint mode must be one of {FINGERPRINT_MODES}, got {mode!r}")
+    rows: List[Tuple[str, str, str, int, str]] = []
     for split, paths, labels, base in (
             ("train", listing.train_paths, listing.train_labels, listing.train_base),
             ("test", listing.test_paths, listing.test_labels, listing.test_base)):
         if paths is None:
             continue
         for path, label in zip(paths, labels):
-            rows.append([split, os.path.relpath(path, base).replace(os.sep, "/"),
-                         listing.class_names[int(label)], os.path.getsize(path)])
-    rows.sort()
+            rows.append((split, os.path.relpath(path, base).replace(os.sep, "/"),
+                         listing.class_names[int(label)], os.path.getsize(path), path))
+    rows.sort(key=lambda row: row[:4])
     digest = hashlib.sha256(listing.source.encode("utf-8"))
+    if mode == "content":
+        digest.update(b"\x00content")
+    started = time.perf_counter()
+    total = 0
     for row in rows:
-        digest.update(b"\n" + json.dumps(row, ensure_ascii=False).encode("utf-8"))
+        digest.update(b"\n" + json.dumps(list(row[:4]), ensure_ascii=False).encode("utf-8"))
+        if mode == "content":
+            digest.update(b"\n")
+            with open(row[4], "rb") as handle:
+                for chunk in iter(lambda: handle.read(_HASH_CHUNK), b""):
+                    digest.update(chunk)
+                    total += len(chunk)
+    if mode == "content":
+        logger.info(
+            f"{listing.source}: content fingerprint of {len(rows)} files, "
+            f"{total / 1e6:.1f} MB, in {time.perf_counter() - started:.2f} s")
     return digest.hexdigest()
 
 
@@ -1151,7 +1185,7 @@ def _load_file_listing(
         validation_split: Optional[float], eval_samples: int, normalize: str,
         augment: Optional[Augment],
         augment_from_mean: Optional[Callable[[Tuple[float, ...]], Optional[Augment]]],
-        max_samples: Optional[int], max_samples_flag: str,
+        max_samples: Optional[int], max_samples_flag: str, fingerprint: str = "listing",
 ) -> ClassificationData:
     """The record of a listed folder or CSV source; see :func:`load_folder_data`."""
     if normalize not in NORMALIZE_MODES:
@@ -1237,7 +1271,7 @@ def _load_file_listing(
         test_split=("none: the data has no test split" if test is None
                     else "the test files"),
         image_files=tuple(fit_paths) + tuple(train_all[select_idx].tolist()),
-        fingerprint=listing_fingerprint(listing),
+        fingerprint=listing_fingerprint(listing, fingerprint),
     )
 
 
@@ -1255,6 +1289,7 @@ def load_folder_data(
         augment_from_mean: Optional[Callable[[Tuple[float, ...]], Optional[Augment]]] = None,
         max_samples: Optional[int] = None,
         max_samples_flag: str = "--max-samples",
+        fingerprint: str = "listing",
 ) -> ClassificationData:
     """Load ``train_dir/<class>/*.png`` (and ``test_dir``) as ``(train, select, test)``.
 
@@ -1282,6 +1317,9 @@ def load_folder_data(
     :param max_samples: Smoke-run cap on the train pool and the test split.
     :param max_samples_flag: What the caller's user calls ``max_samples``, named in the
         too-large-batch refusal.
+    :param fingerprint: ``"listing"`` or ``"content"``, the ``mode`` of
+        :func:`listing_fingerprint` recorded as the record's ``fingerprint``; ``"content"``
+        reads every listed file once.
     :raises DataSourceError: The listing is unusable (see :func:`scan_image_folder`).
     :raises ValueError: A bad option, a selection split holding out zero files, a batch larger
         than the fit split, or images with no variation under ``standardize``.
@@ -1290,7 +1328,7 @@ def load_folder_data(
         scan_image_folder(train_dir, test_dir), batch_size=batch_size, seed=seed,
         image_size=image_size, validation_split=validation_split, eval_samples=eval_samples,
         normalize=normalize, augment=augment, augment_from_mean=augment_from_mean,
-        max_samples=max_samples, max_samples_flag=max_samples_flag)
+        max_samples=max_samples, max_samples_flag=max_samples_flag, fingerprint=fingerprint)
 
 
 def load_csv_data(
@@ -1309,11 +1347,13 @@ def load_csv_data(
         augment_from_mean: Optional[Callable[[Tuple[float, ...]], Optional[Augment]]] = None,
         max_samples: Optional[int] = None,
         max_samples_flag: str = "--max-samples",
+        fingerprint: str = "listing",
 ) -> ClassificationData:
     """Load the images a CSV file lists (and ``test_csv``) as ``(train, select, test)``.
 
     Everything but the listing is :func:`load_folder_data`'s: ``path_column`` holds the image
-    path (relative to the CSV's directory, or absolute) and ``label_column`` the class.
+    path (relative to the CSV's directory, or absolute) and ``label_column`` the class;
+    ``fingerprint`` is :func:`load_folder_data`'s.
 
     :raises DataSourceError: The listing is unusable (see :func:`read_image_csv`).
     """
@@ -1322,7 +1362,7 @@ def load_csv_data(
         batch_size=batch_size, seed=seed, image_size=image_size,
         validation_split=validation_split, eval_samples=eval_samples, normalize=normalize,
         augment=augment, augment_from_mean=augment_from_mean, max_samples=max_samples,
-        max_samples_flag=max_samples_flag)
+        max_samples_flag=max_samples_flag, fingerprint=fingerprint)
 
 
 # ---------------------------------------------------------------------
