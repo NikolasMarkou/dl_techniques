@@ -490,10 +490,32 @@ def main(argv: Sequence[str]) -> int:
     # ``if __name__`` block, and an unexpected failure must reach the user as
     # a traceback with exit code 1, Ctrl-C included.
     try:
+        _register_builtins()
         return _dispatch(args)
     except DLTrainError as exc:
         sys.stderr.write(f"error: {exc}\n")
         return 2
+
+
+def _register_builtins() -> None:
+    """Register the built-in families and tasks (idempotent, imports no TensorFlow).
+
+    ``main`` does this itself, so ``train.api.main([...])`` from Python lists and
+    dispatches exactly what ``python -m train`` does (review-iter-3 concern 22): both
+    registrations hold ``"module:attr"`` text and import no model or task code, which
+    ``test_cli_help_allocates_nothing`` pins for the help path. A row already in
+    the registry is left alone.
+    """
+    # DECISION plan-2026-10-30T132432-a865fa08/D-071: `main` registers, not `__main__`. Do NOT
+    # move this back into `__main__.py` (a Python caller of `train.api.main` then gets
+    # "unknown command 'image_classification'" for the only task there is), and do NOT make
+    # it a module-level call in this file (the registries are swapped by tests and must stay
+    # empty at import).
+    from .recipes import register_builtin_models
+    from .tasks import register_builtin_tasks
+
+    register_builtin_models()
+    register_builtin_tasks()
 
 
 def _dispatch(args: List[str]) -> int:

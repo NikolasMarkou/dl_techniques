@@ -190,6 +190,50 @@ def test_an_existing_onnx_out_is_refused_and_left_as_it_is(model, tmp_path):
     assert out.read_text() == "mine"
 
 
+@pytest.mark.parametrize("format", ["keras", "tflite", "onnx"])
+def test_a_file_that_appears_after_the_check_and_before_the_write_is_never_overwritten(
+    format, tmp_path, monkeypatch
+):
+    """Mutants ``model.save overwrite on``, ``tflite wb`` and ``onnx wb`` (D-063 anchor).
+
+    ``check_target`` found ``out`` free; the conversion takes seconds, and someone writes the
+    path meanwhile. The last step must fail rather than truncate what is there.
+    """
+    from train.api import exporting
+
+    if format == "onnx":
+        pytest.importorskip("tf2onnx")
+    inputs = keras.Input((6, 5, 3))
+    net = keras.Model(inputs, keras.layers.Dense(4)(keras.layers.Flatten()(inputs)))
+    out = tmp_path / NAMES[format]
+    theirs = b"someone else's file"
+
+    def appear(real, before=False):
+        def wrapper(*arguments, **keywords):
+            if before:
+                out.write_bytes(theirs)
+            result = real(*arguments, **keywords)
+            if not before:
+                out.write_bytes(theirs)
+            return result
+
+        return wrapper
+
+    if format == "keras":  # the save IS the write: the file must be there when it starts
+        monkeypatch.setattr(net, "save", appear(net.save, before=True))
+    elif format == "tflite":
+        monkeypatch.setattr(exporting, "_convert_tflite", appear(exporting._convert_tflite))
+    else:
+        import tf2onnx
+
+        monkeypatch.setattr(tf2onnx.convert, "from_function", appear(tf2onnx.convert.from_function))
+    # Keras asks on stdin before it overwrites a file (an OSError under capture); the two
+    # byte writers raise FileExistsError.
+    with pytest.raises((FileExistsError, OSError, EOFError)):
+        export(model=net, out=out, format=format)
+    assert out.read_bytes() == theirs
+
+
 def test_an_existing_tflite_sibling_is_refused_before_anything_is_written(model, tmp_path):
     sibling = tmp_path / ("m.tflite" + TFLITE_SIBLING)
     sibling.mkdir()

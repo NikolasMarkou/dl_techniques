@@ -94,6 +94,17 @@ def empty_registries(monkeypatch):
     return models, tasks
 
 
+@pytest.fixture
+def only_the_fakes(empty_registries, monkeypatch):
+    """Empty registries that ``cli.main`` does not fill with the built-in rows.
+
+    ``main`` registers the real families and tasks itself (concern 22), so an arm that counts
+    or lists what is registered switches that off to see only its own synthetic rows.
+    """
+    monkeypatch.setattr(cli, "_register_builtins", lambda: None)
+    return empty_registries
+
+
 def model_spec(family="fam", tasks=("fake_task",), module=MODULE):
     return registry.ModelSpec(
         family=family,
@@ -359,7 +370,7 @@ def test_list_tasks_prints_each_registered_task(fake_module, empty_registries, c
     assert out.split()[:1] == ["fake_task"] and "a synthetic task" in out
 
 
-def test_list_models_prints_names_and_filters(fake_module, empty_registries, capsys):
+def test_list_models_prints_names_and_filters(fake_module, only_the_fakes, capsys):
     registry.register_model(model_spec(family="fam", tasks=("fake_task",)))
     registry.register_model(model_spec(family="other", tasks=("else",)))
     registry.register_task(task_spec())
@@ -374,7 +385,7 @@ def test_list_models_prints_names_and_filters(fake_module, empty_registries, cap
     assert "usage:" not in out and "fam/tiny" in out
 
 
-def test_list_models_with_nothing_registered_says_so(empty_registries, capsys):
+def test_list_models_with_nothing_registered_says_so(only_the_fakes, capsys):
     assert cli.main(["list_models"]) == 0
     assert "no models are registered" in capsys.readouterr().out
 
@@ -482,7 +493,7 @@ def test_the_task_help_says_an_empty_mapping_does_not_clear_a_file_value(
 
 
 def test_help_and_unknown_command_know_the_registered_tasks(
-    fake_module, empty_registries, capsys
+    fake_module, only_the_fakes, capsys
 ):
     registry.register_task(task_spec())
     assert cli.main(["help"]) == 0
@@ -490,6 +501,54 @@ def test_help_and_unknown_command_know_the_registered_tasks(
     assert "tasks:\n  fake_task  a synthetic task" in out
     assert cli.main(["fake_tsk"]) == 2
     assert "Did you mean 'fake_task'?" in capsys.readouterr().err
+
+
+def test_a_python_call_to_main_registers_the_built_in_families_and_tasks(
+    empty_registries, capsys
+):
+    """``train.api.main([...])`` is ``python -m train``: it registers by itself (concern 22).
+
+    Before the fix only ``__main__`` registered, so a Python caller got
+    ``unknown command 'image_classification'`` for the one task the package has.
+    """
+    models, tasks = empty_registries
+    assert not tasks and not models
+    # Control: a name that is no command and no task is still refused, with the hint.
+    assert train.api.main(["image_clasification"]) == 2
+    err = capsys.readouterr().err
+    assert "unknown command 'image_clasification'" in err
+    assert "Did you mean 'image_classification'?" in err
+    # The task is a command now, and its bare form prints its keys.
+    assert train.api.main(["image_classification"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("usage: ") and "model" in out and "epochs" in out
+    # The listings see both registries.
+    assert train.api.main(["list_tasks"]) == 0
+    assert capsys.readouterr().out.startswith("image_classification  ")
+    assert train.api.main(["list_models", "task=image_classification"]) == 0
+    assert "vit/vit_pico" in capsys.readouterr().out.split()
+    # A second call registers nothing twice.
+    before = (sorted(models), sorted(tasks))
+    assert train.api.main(["list_tasks"]) == 0
+    assert (sorted(models), sorted(tasks)) == before
+
+
+def test_python_main_without_the_module_entry_imports_no_tensorflow_on_the_help_path(tmp_path):
+    code = (
+        "import sys\n"
+        "from train.api import main\n"
+        "assert main(['help']) == 0 and main(['list_tasks']) == 0\n"
+        "assert main(['image_clasification']) == 2\n"
+        "assert 'tensorflow' not in sys.modules and 'keras' not in sys.modules\n"
+        "print('MAIN-OK')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=tmp_path, capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert "MAIN-OK" in result.stdout
+    assert "image_classification  " in result.stdout
+    assert "Did you mean 'image_classification'?" in result.stderr
 
 
 # ---------------------------------------------------------------------

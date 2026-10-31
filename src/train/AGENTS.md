@@ -223,7 +223,7 @@ read `failed` in the helper's return value.
 **Not yet conforming.** From a grep for `write_classification_figures` and
 `TrainingDashboardCallback` (not an audit), these image classification trainers do not follow the
 pattern yet: `alexnet`, `beit/train_classification.py`, `coshnet`,
-`energy_transformer/train_classification.py`, `mobilenet`, `resnet`, `vit`, `head_comparison`,
+`energy_transformer/train_classification.py`, `mobilenet`, `resnet`, `vit`,
 `som_nd_soft/train_cifar.py`. `power_mlp` already writes the
 figures and gets the schedule from the defaults whenever its `epoch_analysis` option is on. Bring a trainer up to the pattern when you touch it, and delete it
 from this list in the same commit. No test enforces this list.
@@ -381,8 +381,9 @@ train, and the TEST split never selects.
   ImageNet's pair is defined once in `imagenet2012.py`. A trainer imports the names.
 - `classification_data._load_raw` is the ONE `keras.datasets` call under `src/train`; a trainer
   test replaces it (`tests/classification_fakes.py`). The one exception, named with its reason in
-  `tests/test_train/test_the_image_classification_trainers_share_one_ingestion_path.py`, is
-  CIFAR-100's coarse labels (`head_comparison`).
+  `tests/test_train/test_the_image_classification_trainers_share_one_ingestion_path.py`, is IMDB
+  text (`rms_variants_train/experiments/e3_tinytransformer_imdb.py`), which is not an image
+  dataset.
 - **Self-supervised trainers** (dino, BEiT MIM and tokenizer, ET masked completion) take their
   images from `train.common.image_streams.load_image_streams(dataset, ...)`: the same protocol
   (a seeded `validation_split` slice of train is the selection split, the labelled test split is
@@ -430,3 +431,32 @@ a CLI argument `main()` forgets to forward. **Serialization is not consumption**
 DELETE such a field rather than wiring it, unless a caller actually wants the behaviour.
 `tests/test_train/test_config_fields_are_live.py` enforces this for the classes in its `REGISTERED`
 list — add a row when you add a config class; never add an exemption to green a newly dead field.
+
+## `python -m train` and `train.api`
+
+`src/train/api/` is a key=value command line and a Python function over strict configs, beside the
+per-model scripts (usage, keys, run directory, resume, `predict`, `export`, exit codes:
+[`README.md`](README.md)). It has one task, `image_classification`, trained by
+`api/trainer.py:TaskTrainer`, which calls the same `train.common.classification_run` helpers as
+`train.convnext.common` in the same order.
+
+- **One table drives dispatch and help**: `api/cli.py:COMMANDS` plus `api/registry.py:TASKS`.
+  `cli.main(argv) -> int` registers the built-in families and tasks itself (`train.api.main([...])`
+  from Python and `python -m train` are the same), and `__main__.py` is only
+  `sys.exit(main(sys.argv[1:]))`. A new task is a `TaskSpec` row in `api/tasks/__init__.py` (strings,
+  imported on use), and a new family a `ModelSpec` in `api/recipes.py`.
+- **The help path imports no TensorFlow, Keras or yaml and stays under 1 s**:
+  `tests/test_train/test_api/test_cli_help_allocates_nothing.py`. Heavy imports go inside functions.
+  A request that can be refused without loading data is refused before `setup_gpu` and before the
+  run directory is claimed (`TaskTrainer.run`'s docstring lists them).
+- **Exit codes**: `DLTrainError` (`ConfigError`, ...) is exit 2, a run with `success` false is 1,
+  anything else is a traceback. Do not widen the one `except DLTrainError` in `main`.
+- **Config fields must be live** applies to the API configs as well
+  (`tests/test_train/test_config_fields_are_live.py`, `REGISTERED` rows).
+- **An export is not `model.export`**: `api/exporting.py` traces with `training=False`
+  (a drop-path model is otherwise random in `serve`). `train.api.export` is the function, so the
+  module is not named `export`.
+- **Parity with the legacy trainer is measured for `vit_pico` on CIFAR-10 only.** Do not claim it for
+  another family without a run.
+- Tests: `tests/test_train/test_api/`. Scope pytest to that directory; the whole of it takes a long
+  time (the export-per-family file alone is minutes).

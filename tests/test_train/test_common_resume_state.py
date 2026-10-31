@@ -221,6 +221,17 @@ def test_read_backup_epoch_refuses_a_missing_or_malformed_file(tmp_path):
         read_backup_epoch(tmp_path)
 
 
+@pytest.mark.parametrize("text", ["[]", "3", '"a string"', "null"])
+def test_a_sidecar_that_is_not_a_json_object_is_refused(tmp_path, text):
+    """Mutant ``fit-state: non-object accepted``: a list would fail later on ``setdefault``."""
+    path = tmp_path / FIT_STATE_NAME
+    path.write_text(text)
+    with pytest.raises(ValueError, match="is not a JSON object"):
+        read_fit_state(path)
+    path.write_text("{}")  # control: an empty object is the empty state
+    assert read_fit_state(path) == {"epochs": {}, "fit_finished": False}
+
+
 def test_a_missing_sidecar_reads_as_the_empty_state_and_update_merges_atomically(tmp_path):
     path = tmp_path / FIT_STATE_NAME
     assert read_fit_state(path) == {"epochs": {}, "fit_finished": False}
@@ -305,6 +316,22 @@ def test_the_sidecar_extends_an_earlier_segment_and_replaces_stale_entries(tmp_p
     assert state["baseline"] == {"loss": 2.3}
 
 
+def test_entries_of_the_resumed_epoch_and_every_later_one_are_dropped(tmp_path):
+    """Mutant ``sidecar keeps stale entries``: a segment killed AFTER epoch 3's entry was written
+    and BEFORE the backup claimed it leaves entries for epochs the resume trains again."""
+    path = tmp_path / FIT_STATE_NAME
+    update_fit_state(path, epochs={str(e): {"best": 0.5, "wait": e, "best_epoch": 0} for e in range(5)})
+    stopper = keras.callbacks.EarlyStopping(monitor="val_loss", mode="min")
+    stopper.best, stopper.wait, stopper.best_epoch = 0.4, 0, 2
+    sidecar = FitStateSidecar(stopper, path)
+    sidecar.on_train_begin()
+    sidecar.on_epoch_end(2)
+    entries = read_fit_state(path)["epochs"]
+    assert sorted(entries) == ["0", "1", "2"]
+    assert entries["2"] == {"best": 0.4, "wait": 0, "best_epoch": 2}
+    assert entries["1"]["wait"] == 1  # the earlier ones are kept as they were
+
+
 def test_a_non_finite_best_is_recorded_as_null(tmp_path):
     path = tmp_path / FIT_STATE_NAME
     stopper = keras.callbacks.EarlyStopping(monitor="val_loss", mode="min")
@@ -328,6 +355,16 @@ def test_a_restored_early_stopper_keeps_the_in_memory_best_weights(tmp_path):
     assert stopper.best == 0.5 and stopper.wait == 3 and stopper.best_epoch == 0
     for restored, expected in zip(model.get_weights(), best_weights):
         np.testing.assert_array_equal(restored, expected)
+
+
+def test_a_restored_early_stopper_keeps_the_best_epoch_it_was_given(tmp_path):
+    """Mutant ``restore: best_epoch not set``: ``EarlyStopping`` resets it to 0 at ``on_train_begin``,
+    and the resumed run then reports the wrong best epoch (the default 0 hid the mutant above)."""
+    x, y = _data()
+    stopper = keras.callbacks.EarlyStopping(monitor="val_loss", patience=9, mode="min")
+    _model().fit(x, y, epochs=1, batch_size=4, verbose=0, callbacks=[
+        Scripted([0.9]), stopper, RestoreFitState(stopper, best=0.5, wait=1, best_weights=None, best_epoch=3)])
+    assert stopper.best == 0.5 and stopper.best_epoch == 3
 
 
 def test_the_restored_wait_decides_when_the_run_stops():

@@ -819,6 +819,50 @@ def test_predict_labels_a_directory_and_matches_the_predictor(trained_run, pictu
         assert entry["scores"] == sorted(entry["scores"], reverse=True)
 
 
+def test_the_images_of_a_directory_come_back_sorted_whatever_order_the_filesystem_lists(tmp_path):
+    """Mutant ``predict dir unsorted``: the JSON is a function of the directory's contents.
+
+    The names are created in a scrambled order (neither ascending nor descending, so neither a
+    creation-ordered nor a reverse-creation-ordered filesystem lists them sorted), and the test
+    states the raw listing it is up against.
+    """
+    from train.api.cli import _image_files
+
+    scrambled = ["m/k.png", "b.png", "z/a.png", "a.png", "m/c.png", "z/y.PNG", "d.jpg",
+                 "m/q.bmp", "c.png", "z/b.png", "m/.hidden.png", "notes.txt"]
+    for name in scrambled:
+        path = tmp_path / name
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(b"x")
+    raw = [item for item in tmp_path.rglob("*") if item.is_file() and item.suffix.lower() != ".txt"
+           and not item.name.startswith(".")]
+    if raw == sorted(raw):
+        pytest.skip("this filesystem lists the scrambled names in sorted order, so no order is seen")
+    found = _image_files(tmp_path)
+    assert found == sorted(raw) and len(found) == 10
+    assert found != raw  # liveness: the function did sort, the listing it started from was not
+
+
+def test_export_checks_the_model_path_before_anything_that_imports_or_loads(tmp_path, capsys, monkeypatch):
+    """Mutant ``export model existence check off``: the refusal for a missing model is the same
+    sentence either way (``load_model`` says it too); what it costs is not. The path is checked
+    before ``check_target`` (which imports ``tf2onnx``, and so TensorFlow, for ``onnx``) and before
+    ``load_model``."""
+    from train.api import exporting, predictor
+
+    def boom(*arguments, **keywords):
+        raise AssertionError("the missing model path was not refused first")
+
+    monkeypatch.setattr(exporting, "_require_tf2onnx", boom)
+    monkeypatch.setattr(predictor, "load_model", boom)
+    for format, name in (("onnx", "o.onnx"), ("keras", "o.keras")):
+        code, stdout, stderr = run_command(
+            ["export", f"model={tmp_path / 'gone'}", f"out={tmp_path / name}", f"format={format}"], capsys)
+        assert code == 2 and stdout == "", (format, stdout, stderr[-1500:])
+        assert "Invalid value for 'model': " in stderr and "does not exist" in stderr, stderr
+    assert sorted(p.name for p in tmp_path.iterdir()) == []
+
+
 def test_predict_takes_one_image_file(trained_run, pictures, tmp_path, capsys):
     out = tmp_path / "one.json"
     code, _, stderr = run_command(
@@ -940,6 +984,27 @@ def test_predict_to_an_existing_out_is_refused_and_leaves_it_byte_identical(
     )
     assert code == 2 and "already exists" in one_error(stderr)
     assert sha256_of(out) == before
+
+
+def test_predict_never_overwrites_an_out_that_appears_while_it_runs(
+    trained_run, pictures, tmp_path, monkeypatch
+):
+    """Mutant ``predict out overwrite open w``: ``out`` is free when the command starts (the early
+    check) and may be taken by the time the answer is written (the ``x`` mode is the second)."""
+    from train.api import predictor as predictor_module
+
+    out = tmp_path / "late.json"
+    real_predict = predictor_module.Predictor.predict
+
+    def predict_then_someone_writes(self, *arguments, **keywords):
+        answer = real_predict(self, *arguments, **keywords)
+        out.write_text("someone else's file")
+        return answer
+
+    monkeypatch.setattr(predictor_module.Predictor, "predict", predict_then_someone_writes)
+    with pytest.raises(FileExistsError):
+        cli_main(["predict", f"model={trained_run}", f"data={pictures / 'a.png'}", f"out={out}"])
+    assert out.read_text() == "someone else's file"
 
 
 def test_the_real_command_exports_and_predicts_with_exit_zero(trained_run, pictures, tmp_path):

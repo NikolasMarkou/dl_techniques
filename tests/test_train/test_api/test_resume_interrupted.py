@@ -29,6 +29,7 @@ import hashlib
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import keras
 import pytest
@@ -39,6 +40,7 @@ from train.api.errors import ConfigError
 from train.api.run_dir import request_differences, write_requested
 from train.api.tasks import register_builtin_tasks
 from train.api.tasks.image_classification import ImageClassificationTrainer
+from train.common.classification_viz import TrainingDashboardCallback
 from train.common.resume_state import FIT_STATE_NAME, update_fit_state
 
 from tests.classification_fakes import use_tiny_raw
@@ -269,6 +271,20 @@ def test_the_baseline_comes_from_the_sidecar(killed, resumed):
     assert summary["initial_loss_ratio"] == sidecar["initial"]["ratio"]
 
 
+def test_only_a_resumed_summary_carries_the_resume_note(whole, resumed):
+    """Mutant ``note dropped`` (review-iter-3 concern 15): the summary says what a resume changes."""
+    _, run_dir = resumed
+    _, whole_dir = whole
+    notes = read_json(run_dir, "results_summary.json")["notes"]
+    resume_notes = [note for note in notes if note.startswith("resumed after epoch 2: epochs 0..1 ")]
+    assert len(resume_notes) == 1
+    assert "training_log.pre_resume_<k>.csv" in resume_notes[0]
+    assert "`epoch_times` and `fit_wall_seconds` cover the resumed epochs only" in resume_notes[0]
+    # Control: the uninterrupted run has the other notes and not this one.
+    whole_notes = read_json(whole_dir, "results_summary.json")["notes"]
+    assert whole_notes and not any(note.startswith("resumed after") for note in whole_notes)
+
+
 def test_the_resumed_run_leaves_a_finished_sidecar_and_the_usual_files(resumed):
     _, run_dir = resumed
     assert json.loads((run_dir / "checkpoints" / FIT_STATE_NAME).read_text())["fit_finished"] is True
@@ -276,6 +292,77 @@ def test_the_resumed_run_leaves_a_finished_sidecar_and_the_usual_files(resumed):
     assert {"best_model.keras", "final_model.keras", "results_summary.json",
             "visualizations/training_dashboard.png", "training_log.pre_resume_1.csv"} <= found
     assert any(name.startswith("checkpoints/backup/") for name in found)
+
+
+# ---------------------------------------------------------------------
+# What a resume hands to the callbacks (a resume killed again before its first epoch)
+# ---------------------------------------------------------------------
+
+
+class Recording(Killed):
+    """Killed at the start of the first resumed epoch, after the callbacks are built."""
+
+    seen = None
+
+    def _callbacks(self, *arguments):
+        epoch_line, callbacks = super()._callbacks(*arguments)
+        self.seen = callbacks
+        return epoch_line, callbacks
+
+
+class FakeAnalyzer(keras.callbacks.Callback):
+    """Stands for ``EpochAnalyzerCallback`` (a minute of model analysis); keeps its arguments."""
+
+    made = []
+
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.kwargs = kwargs
+        FakeAnalyzer.made.append(self)
+
+
+@pytest.fixture(scope="module")
+def handed_over(world, tmp_path_factory):
+    """A killed run with the epoch analyzer on, and a resume of it killed before epoch 2 trains."""
+    import train.common.callbacks as callbacks_module
+
+    request = {**REQUEST, "analysis_args.epoch_analysis_every": 1}
+    FakeAnalyzer.made = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(callbacks_module, "EpochAnalyzerCallback", FakeAnalyzer)
+        first = tmp_path_factory.mktemp("handed_first") / "run"
+        with pytest.raises(RuntimeError, match="killed"):
+            Killed(make_config(first, **request)).run()
+        copy = tmp_path_factory.mktemp("handed_second") / "copy"
+        shutil.copytree(first, copy)
+        trainer = Recording(make_config(copy, resume_interrupted=True, **request))
+        with pytest.raises(RuntimeError, match="killed"):
+            trainer.run()
+    sidecar = json.loads((first / "checkpoints" / FIT_STATE_NAME).read_text())
+    return SimpleNamespace(analyzers=list(FakeAnalyzer.made), callbacks=trainer.seen, sidecar=sidecar)
+
+
+def test_a_resume_does_not_ask_the_analyzer_to_redo_epochs_zero_and_one(handed_over):
+    """Mutant ``analyzer redoes epoch 0``: the earlier segment's ``epoch_000`` and ``epoch_001``
+    are on disk, and the analyzer would redo them on weights the backup has not restored yet."""
+    first, second = handed_over.analyzers
+    assert first.kwargs["analyze_on_train_begin"] is True  # control: a fresh run asks for both
+    assert first.kwargs["analyze_first_epoch"] is True
+    assert second.kwargs["analyze_on_train_begin"] is False
+    assert second.kwargs["analyze_first_epoch"] is False
+    assert second.kwargs["epoch_frequency"] == first.kwargs["epoch_frequency"] == 1
+
+
+def test_a_resumed_dashboard_starts_from_the_earlier_epochs_and_the_sidecars_baseline(handed_over):
+    """Mutants ``dashboard loses earlier history`` and ``dashboard loses baseline``."""
+    dashboards = [c for c in handed_over.callbacks if isinstance(c, TrainingDashboardCallback)]
+    assert len(dashboards) == 1
+    dashboard = dashboards[0]
+    assert dashboard.history["val_accuracy"] == list(SCRIPT[:KILL_AT])
+    assert len(dashboard.epoch_times) == KILL_AT  # one (unknown) wall time per earlier epoch
+    measured = handed_over.sidecar["initial"]["metrics"]
+    assert dashboard.baseline == {key: float(value) for key, value in measured.items()}
+    assert dashboard.baseline["loss"] > 0  # liveness: a real measurement, not an empty dict
 
 
 # ---------------------------------------------------------------------
@@ -330,7 +417,20 @@ def test_a_changed_request_is_refused_naming_the_key(world, killed, tmp_path, ca
     with pytest.raises(ConfigError, match="optim_args.lr: 'auto' -> 0.01"):
         Scripted(make_config(run_dir, resume_interrupted=True, **REQUEST,
                              **{"optim_args.lr": 0.01})).run()
+    # Mutant ``compare: seed ignored``: the seed fixes the weights, the split and the order.
+    with pytest.raises(ConfigError, match="seed: 42 -> 43"):
+        Scripted(make_config(run_dir, resume_interrupted=True, seed=43, **REQUEST)).run()
     assert snapshot(run_dir) == before
+
+
+def test_a_resume_compares_every_key_but_the_three_it_names():
+    from train.api.run_dir import RESUME_UNCOMPARED_KEYS
+
+    assert RESUME_UNCOMPARED_KEYS == ("resume_interrupted", "out", "devices")
+    earlier = {"out": "x", "resume_interrupted": False, "devices": 0, "seed": 42, "epochs": 3}
+    moved = {"out": "y", "resume_interrupted": True, "devices": 1, "seed": 42, "epochs": 3}
+    assert request_differences(earlier, moved) == []
+    assert request_differences(earlier, {**moved, "seed": 43}) == ["seed: 42 -> 43"]
 
 
 def test_resume_ignores_out_and_the_flag_and_reads_json_normal_form():
@@ -343,7 +443,7 @@ def test_resume_ignores_out_and_the_flag_and_reads_json_normal_form():
 
 
 def plant_run(run_dir, config, *, start=2, wait=1, best=0.9, rows=None, best_model=True,
-              sidecar_entries=True, request="written"):
+              sidecar_entries=True, request="written", initial=True):
     """Lay out the files of a run killed after ``start`` epochs, without training."""
     run_dir.mkdir(parents=True)
     if request == "written":
@@ -354,10 +454,11 @@ def plant_run(run_dir, config, *, start=2, wait=1, best=0.9, rows=None, best_mod
     backup.mkdir(parents=True)
     (backup / "training_metadata.json").write_text(json.dumps({"epoch": start}))
     entries = {str(e): {"best": best, "wait": wait, "best_epoch": 0} for e in range(start)}
+    fields = {"initial": {"metrics": {"loss": 2.3, "accuracy": 0.1}, "ratio": 1.0, "warned": False}}
     update_fit_state(
         run_dir / "checkpoints" / FIT_STATE_NAME,
         epochs=entries if sidecar_entries else {},
-        initial={"metrics": {"loss": 2.3, "accuracy": 0.1}, "ratio": 1.0, "warned": False},
+        **(fields if initial else {}),
     )
     count = start if rows is None else rows
     with open(run_dir / "training_log.csv", "w", newline="") as handle:
@@ -382,9 +483,10 @@ def plant_run(run_dir, config, *, start=2, wait=1, best=0.9, rows=None, best_mod
         ({}, {"rows": 1}, "holds 1 complete epoch rows"),
         ({}, {"request": ""}, "is empty, so the run died before it wrote its request"),
         ({}, {"request": "{not json"}, "not valid JSON"),
+        ({}, {"best": None, "initial": False}, "the sidecar holds no epoch-0 evaluation"),
     ],
     ids=["save_best_off", "no_epoch_left", "stop_already_decided", "best_model_missing",
-         "sidecar_without_entry", "csv_short", "empty_request", "request_not_json"],
+         "sidecar_without_entry", "csv_short", "empty_request", "request_not_json", "no_epoch_zero_evaluation"],
 )
 def test_a_run_that_cannot_be_continued_is_refused_and_left_alone(
         world, tmp_path, overrides, plant, message):

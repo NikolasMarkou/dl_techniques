@@ -65,6 +65,7 @@ from train.common.classification_data import (
     load_folder_data,
     read_image_csv,
     scan_image_folder,
+    seeded_split_indices,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -184,6 +185,36 @@ def test_a_hidden_entry_and_a_file_of_another_suffix_are_not_images(tmp_path):
     assert listing.test_paths is None and listing.test_labels is None
 
 
+def test_a_suffix_in_capitals_is_an_image_in_a_folder_and_in_a_csv(tmp_path):
+    """Mutant ``suffix case-sensitive``: cameras and phones write ``IMG_0001.JPG``."""
+    names = ("one.PNG", "two.Png", "three.png")
+    for name in ("a", "b"):
+        for index, file in enumerate(names):
+            write_png(tmp_path / "pics" / name / file, (8, 8), (index * 40, 5, 9))
+    listing = scan_image_folder(str(tmp_path / "pics"))
+    assert [Path(p).name for p in listing.train_paths] == sorted(names) * 2
+    rows = [(str(path), path.parent.name) for path in sorted((tmp_path / "pics").rglob("*.*"))]
+    assert len(rows) == 6
+    write_csv(tmp_path / "caps.csv", rows)
+    from_csv = read_image_csv(str(tmp_path / "caps.csv"))
+    assert sorted(Path(p).name for p in from_csv.train_paths) == sorted(names * 2)
+    # Control: another suffix is still no image.
+    (tmp_path / "pics" / "a" / "notes.TXT").write_text("no")
+    assert len(scan_image_folder(str(tmp_path / "pics")).train_paths) == 6
+
+
+def test_a_csv_label_is_stripped_like_its_path(tmp_path):
+    """Mutant ``csv label not stripped``: ``" cat"`` and ``"cat"`` are one class."""
+    for name in ("cat", "dog"):
+        for index in range(2):
+            write_png(tmp_path / f"{name}{index}.png", (8, 8), (index * 50, 9, 9))
+    rows = [("cat0.png", " cat"), ("cat1.png", "cat "), ("dog0.png", "dog"), ("dog1.png", "\tdog")]
+    write_csv(tmp_path / "labels.csv", rows)
+    listing = read_image_csv(str(tmp_path / "labels.csv"))
+    assert listing.class_names == ["cat", "dog"]
+    assert listing.train_labels.tolist() == [0, 0, 1, 1]
+
+
 def test_the_labels_the_pipelines_yield_are_the_class_indices(tree):
     data = load(tree)
     for dataset in (data.train_ds, data.select_ds, data.test_ds):
@@ -220,6 +251,36 @@ def test_the_cut_is_a_function_of_the_seed(tree):
     select_c, _ = reds_and_labels(load(tree, seed=8).select_ds)
     assert select_a == select_b
     assert select_a != select_c
+
+
+def test_the_selection_split_is_the_one_the_shared_seeded_cut_gives(tree):
+    """Mutant ``selection split seed+1``: the file loaders and the builtin ones cut the same
+    rows for one seed, through ``seeded_split_indices`` (D-019). Only a comparison with that
+    function, at the caller's seed, can see a loader that cuts with another."""
+    listing = scan_image_folder(str(tree.train_dir), str(tree.test_dir))
+    red = {path: rgb[0] for path, rgb in tree.colours.items()}
+    train_idx, select_idx, test_order = seeded_split_indices(
+        len(listing.train_paths), len(listing.test_paths), 7, 0.25, None)
+    data = load(tree, seed=7)
+    assert reds_and_labels(data.select_ds)[0] == sorted(red[listing.train_paths[i]] for i in select_idx)
+    assert reds_and_labels(data.test_ds)[0] == sorted(red[listing.test_paths[i]] for i in test_order)
+    fit = [red[listing.train_paths[i]] for i in train_idx]
+    assert reds_and_labels(data.train_ds)[0] == sorted(fit)
+    # Control: another seed cuts differently, so the comparison above has a power to fail.
+    other = seeded_split_indices(len(listing.train_paths), len(listing.test_paths), 8, 0.25, None)
+    assert sorted(select_idx) != sorted(other[1])
+
+
+def test_the_train_pipeline_drops_a_partial_batch_and_the_evaluation_ones_keep_it(tree):
+    """Mutant ``train drop_remainder off``: 32 fit images in batches of 5 are six full batches,
+    while the 10 selection and 12 test images are all scored."""
+    data = load(tree, batch_size=5)
+    sizes = [len(labels) for _, labels in data.train_ds.as_numpy_iterator()]
+    assert sizes == [5] * 6 and data.steps_per_epoch == 6
+    assert [len(l) for _, l in data.select_ds.as_numpy_iterator()] == [5, 5]
+    assert [len(l) for _, l in data.test_ds.as_numpy_iterator()] == [5, 5, 2]
+    one = load(tree, batch_size=4)  # control: 32 = 8 * 4, nothing is dropped
+    assert sum(len(l) for _, l in one.train_ds.as_numpy_iterator()) == 32
 
 
 def test_max_samples_caps_the_train_pool_and_the_test_split(tree):
@@ -427,6 +488,17 @@ def test_test_classes_that_differ_from_the_train_classes_are_refused(tmp_path):
         folder_data(train_dir=str(tmp_path / "train"), test_dir=str(tmp_path / "good")), 8
     )
     assert facts == DataFacts(dataset="folder", num_classes=3, image_size=8)
+
+
+def test_a_test_split_with_only_some_of_the_train_classes_is_refused_too(tmp_path):
+    """Mutant ``test subset of train accepted``: the test classes must EQUAL the train classes,
+    in both directions (a model scored on two of its three classes reports a flattering number)."""
+    make_classes(tmp_path / "train", names=("a", "b", "c"))
+    make_classes(tmp_path / "test", names=("a", "b"))
+    with pytest.raises(ConfigError) as caught:
+        image_facts(folder_data(train_dir=str(tmp_path / "train"), test_dir=str(tmp_path / "test")), 8)
+    assert str(caught.value).startswith("Invalid value for 'data.test_dir'")
+    assert "only in train ['c'], only in test []" in str(caught.value)
 
 
 def test_an_unset_image_size_is_refused_because_files_have_no_native_size(tmp_path):

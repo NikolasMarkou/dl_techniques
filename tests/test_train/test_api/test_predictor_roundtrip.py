@@ -448,6 +448,27 @@ def test_equal_scores_keep_the_class_order():
     assert result["labels"] == ["a", "b", "c"]
 
 
+def test_equal_scores_keep_the_class_order_beyond_the_size_numpy_sorts_by_insertion():
+    """Mutant ``stable sort off``: above 16 elements ``np.argsort`` is a quicksort and orders
+    ties as it likes; three score levels over 40 classes make 13 or 14 ties at each level."""
+    count = 40
+    names = [f"c{index:02d}" for index in range(count)]
+    predictor_ = Predictor(constant_model([float(i % 3) for i in range(count)]), record(class_names=names))
+    expected = sorted(range(count), key=lambda i: (-(i % 3), i))
+    if list(np.argsort(-(np.arange(count) % 3).astype(np.float64))) == expected:
+        pytest.skip("this numpy happens to order these ties stably, so no mutant is visible")
+    result = predictor_.predict(blank())
+    assert result["labels"] == [names[i] for i in expected]
+
+
+def test_a_class_exactly_at_the_threshold_is_kept():
+    """Mutant ``threshold > not >=``: the docstring drops classes BELOW the threshold only."""
+    predictor_ = Predictor(constant_model([0.0] * 4), record(class_names=list("abcd")))
+    assert predictor_.predict(blank())["scores"] == [0.25] * 4  # exact in float32
+    assert predictor_.predict(blank(), threshold=0.25)["labels"] == list("abcd")
+    assert predictor_.predict(blank(), threshold=0.2500001)["labels"] == []
+
+
 def test_top_k_keeps_the_best_k_and_a_larger_k_keeps_all():
     predictor_ = Predictor(constant_model([0.0, 2.0, 1.0]), record())
     assert predictor_.predict(blank(), top_k=1)["labels"] == ["b"]
