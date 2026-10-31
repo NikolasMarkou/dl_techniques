@@ -18,14 +18,23 @@ the recipe's proves nothing and fails.
 The task config is the real ``ImageClassificationConfig`` (Step 16); the seven
 groups come from ``train.api.args`` through ``_groups.args_groups`` and must all
 be in it, so an eighth group fails the completeness test until it has rows.
+
+``data`` is a union of three groups told apart by ``format`` (D-060). ``ROWS`` drives the
+first member (``builtin``); ``FILE_TABLES`` drives the other two (``folder``, ``csv``)
+through the same ``cli.main``, with the same two lines per key. Their paths must exist
+(the listing that refuses a bad path runs before the stand-in is reached), so they point
+into small trees and csv files written once per module.
 """
 
 import dataclasses
 import typing
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, NamedTuple, Tuple
 
+import numpy as np
 import pytest
+from PIL import Image
 
 import train.api.recipes as recipes
 from train.api import cli, registry
@@ -125,8 +134,12 @@ ROWS: Tuple[Row, ...] = (
 SINGLE_VALUED = ("data.format",)
 
 
-def leaf_keys(cls: type, prefix: str = "") -> List[str]:
-    """Every dotted leaf key of a config class: groups are walked, anything else is a leaf."""
+def leaf_keys(cls: type, prefix: str = "", member: int = 0) -> List[str]:
+    """Every dotted leaf key of a config class: groups are walked, anything else is a leaf.
+
+    :param member: which member of a union of groups (``data``) is walked: 0 is ``builtin``,
+        the default format; 1 is ``folder``; 2 is ``csv``.
+    """
     hints = typing.get_type_hints(cls)
     keys = []
     for field in dataclasses.fields(cls):
@@ -135,12 +148,9 @@ def leaf_keys(cls: type, prefix: str = "") -> List[str]:
         if typing.get_origin(annotation) is typing.Union and all(
             isinstance(m, type) and issubclass(m, StrictConfig) for m in typing.get_args(annotation)
         ):
-            # A union of groups (``data``) is walked as its FIRST member, the default
-            # format (``builtin``); the folder and csv keys are driven by
-            # ``test_folder_and_csv_data`` (Step 25) and get rows here in Step 28.
-            annotation = typing.get_args(annotation)[0]
+            annotation = typing.get_args(annotation)[member]
         if isinstance(annotation, type) and issubclass(annotation, StrictConfig):
-            keys += leaf_keys(annotation, key)
+            keys += leaf_keys(annotation, key, member)
         else:
             keys.append(key)
     return keys
@@ -152,8 +162,8 @@ def read(config: Any, key: str) -> Any:
     return config
 
 
-def tokens(row: Row, with_fragment: bool) -> List[str]:
-    merged = {**BASE, **row.companions}
+def tokens(row: Row, with_fragment: bool, base: Dict[str, str] = BASE) -> List[str]:
+    merged = {**base, **row.companions}
     if with_fragment:
         merged[row.key] = row.text
     return [f"{key}={value}" for key, value in merged.items()]
@@ -211,6 +221,103 @@ def build(arguments: List[str]) -> Config:
 
 
 # ---------------------------------------------------------------------
+# The folder and csv members of ``data``
+# ---------------------------------------------------------------------
+
+
+class FileTable(NamedTuple):
+    """The base line and the rows of one file format, built from the paths of a tree."""
+
+    member: int
+    base: Dict[str, str]
+    rows: Tuple[Row, ...]
+
+
+FILE_FORMATS = {"folder": 1, "csv": 2}
+CLASS_DIRS = ("ant", "moth")
+
+
+def write_images(root: Path, names: Tuple[str, ...] = CLASS_DIRS) -> List[Tuple[str, str]]:
+    """Write two small PNGs per class under ``root/<class>/``; return ``(path, class)`` pairs."""
+    rng = np.random.default_rng(0)
+    pairs = []
+    for name in names:
+        for index in range(2):
+            path = root / name / f"{index}.png"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(rng.integers(0, 255, size=(20, 30, 3), dtype=np.uint8)).save(path)
+            pairs.append((str(path), name))
+    return pairs
+
+
+def write_csv(path: Path, pairs: List[Tuple[str, str]]) -> None:
+    """A csv whose image and class are in two columns each, so a column NAME can be switched."""
+    lines = ["path,label,file,klass"] + [f"{p},{c},{p},{c}" for p, c in pairs]
+    path.write_text("\n".join(lines) + "\n")
+
+
+@pytest.fixture(scope="module")
+def file_tables(tmp_path_factory) -> Dict[str, FileTable]:
+    root = tmp_path_factory.mktemp("file_data")
+    pairs = {name: write_images(root / name) for name in ("train", "other", "test")}
+    for name in ("train", "other", "test"):
+        write_csv(root / f"{name}.csv", pairs[name])
+    shared = (
+        Row("data.validation_split", "0.3", 0.3),
+        Row("data.max_samples", "5", 5),
+        Row("data.eval_samples", "3", 3),
+    )
+    folder_base = {
+        **BASE,
+        "data.format": "folder",
+        "data.train_dir": str(root / "train"),
+        "transform_args.image_size": "24",
+    }
+    del folder_base["data.dataset"]
+    csv_base = {
+        **BASE,
+        "data.format": "csv",
+        "data.train_csv": str(root / "train.csv"),
+        "transform_args.image_size": "24",
+    }
+    del csv_base["data.dataset"]
+    return {
+        "folder": FileTable(
+            1,
+            folder_base,
+            (
+                Row("data.train_dir", str(root / "other"), str(root / "other")),
+                Row("data.test_dir", str(root / "test"), str(root / "test")),
+                *shared,
+            ),
+        ),
+        "csv": FileTable(
+            2,
+            csv_base,
+            (
+                Row("data.train_csv", str(root / "other.csv"), str(root / "other.csv")),
+                Row("data.test_csv", str(root / "test.csv"), str(root / "test.csv")),
+                Row("data.path_column", "file", "file"),
+                Row("data.label_column", "klass", "klass"),
+                *shared,
+            ),
+        ),
+    }
+
+
+FILE_KEYS = [
+    ("folder", key)
+    for key in ("data.train_dir", "data.test_dir", "data.validation_split", "data.max_samples", "data.eval_samples")
+] + [
+    ("csv", key)
+    for key in (
+        "data.train_csv", "data.test_csv", "data.path_column", "data.label_column",
+        "data.validation_split", "data.max_samples", "data.eval_samples",
+    )
+]
+
+
+# ---------------------------------------------------------------------
 # The table covers the config
 # ---------------------------------------------------------------------
 
@@ -231,6 +338,29 @@ def test_the_table_covers_every_leaf_key_of_the_task_config_exactly():
     assert set(keys) | set(SINGLE_VALUED) == set(leaf_keys(Config))
     assert not set(keys) & set(SINGLE_VALUED)
     assert len(leaf_keys(Config)) >= 48, "32 group keys, 10 top-level keys, 8 data keys"
+
+
+@pytest.mark.parametrize("fmt", sorted(FILE_FORMATS))
+def test_the_file_table_covers_every_leaf_key_of_its_member_exactly(fmt, file_tables):
+    table = file_tables[fmt]
+    keys = [row.key for row in table.rows]
+    assert len(keys) == len(set(keys)), "a key has two rows"
+    # The keys of the other groups are the main table's; a file row covers the data keys only.
+    data_keys = {key for key in leaf_keys(Config, member=table.member) if key.startswith("data.")}
+    assert set(keys) | set(SINGLE_VALUED) == data_keys
+    assert not set(keys) & set(SINGLE_VALUED)
+    # The list the parametrized tests run is the table's keys: no row is silently unrun.
+    assert sorted(k for f, k in FILE_KEYS if f == fmt) == sorted(keys)
+    assert set(table.base) <= set(leaf_keys(Config, member=table.member))
+
+
+@pytest.mark.parametrize("fmt", sorted(FILE_FORMATS))
+def test_the_file_expected_values_are_distinct_within_a_format(fmt, file_tables):
+    seen: Dict[Any, str] = {}
+    for row in file_tables[fmt].rows:
+        identity = (type(row.expected), repr(row.expected))
+        assert identity not in seen, f"{row.key} repeats the value of {seen.get(identity)}"
+        seen[identity] = row.key
 
 
 def test_a_single_valued_key_has_exactly_one_legal_value():
@@ -290,6 +420,32 @@ def test_the_key_survives_resolve_auto(row):
     )
     # Resolution leaves nothing automatic behind.
     assert AUTO not in [read(resolved, key) for key in leaf_keys(Config)]
+
+
+@pytest.mark.parametrize("fmt, key", FILE_KEYS, ids=[f"{f}:{k}" for f, k in FILE_KEYS])
+def test_a_file_key_reaches_its_field_and_only_its_field(fmt, key, file_tables):
+    table = file_tables[fmt]
+    row = next(r for r in table.rows if r.key == key)
+    config, _ = drive(tokens(row, with_fragment=True, base=table.base))
+    control, _ = drive(tokens(row, with_fragment=False, base=table.base))
+    assert type(config.data).__name__ == {"folder": "FolderImageData", "csv": "CsvImageData"}[fmt]
+    assert read(config, row.key) == row.expected
+    assert type(read(config, row.key)) is type(row.expected)
+    assert read(control, row.key) != row.expected, f"{row.key}={row.text} equals the default"
+    for other in set(leaf_keys(Config, member=table.member)) - {row.key}:
+        assert read(config, other) == read(control, other), other
+
+
+@pytest.mark.parametrize("fmt, key", FILE_KEYS, ids=[f"{f}:{k}" for f, k in FILE_KEYS])
+def test_a_file_key_survives_resolve_auto(fmt, key, file_tables):
+    table = file_tables[fmt]
+    row = next(r for r in table.rows if r.key == key)
+    _, resolved = drive(tokens(row, with_fragment=True, base=table.base))
+    _, control = drive(tokens(row, with_fragment=False, base=table.base))
+    assert read(resolved, row.key) == row.expected
+    assert type(read(resolved, row.key)) is type(row.expected)
+    assert read(control, row.key) != row.expected
+    assert AUTO not in [read(resolved, k) for k in leaf_keys(Config, member=table.member)]
 
 
 def test_every_group_row_at_once_reaches_all_the_fields():

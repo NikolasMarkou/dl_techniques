@@ -5,11 +5,21 @@ and a name is imported from its module on first access. That keeps
 ``python -m train help`` free of TensorFlow, Keras and ``yaml``.
 
 A name enters ``__all__`` when its module exists (D-007).
+
+``export`` is both a submodule and a function. Python binds a submodule on its package
+the moment it is first imported, so ``train.api.export`` is the FUNCTION only when it is
+read before anything imports the submodule (the command line imports it); after that it is
+the module. Write ``from train.api.export import export`` when order is not under your
+control (D-064).
 """
 
 import importlib
 from typing import Dict, List
 
+# DECISION plan-2026-10-30T132432-a865fa08/D-064: ``export`` keeps its row although the submodule
+# has the same name (see the docstring). Do NOT rename the module (the plan and the tests name
+# ``train.api.export``) and do NOT import it eagerly here (a fresh ``import train.api`` loads no
+# submodule, pinned by test_registry).
 _LAZY: Dict[str, str] = {
     "DLTrainError": ".errors",
     "ConfigError": ".errors",
@@ -41,6 +51,8 @@ _LAZY: Dict[str, str] = {
     "FolderImageData": ".data_args",
     "CsvImageData": ".data_args",
     "load_data_config": ".data_args",
+    "load_model": ".predictor",
+    "export": ".export",
     "TaskTrainer": ".trainer",
     "TrainResult": ".trainer",
     "ImageClassificationConfig": ".tasks.image_classification",

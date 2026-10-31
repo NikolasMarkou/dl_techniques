@@ -456,7 +456,10 @@ def test_the_sweep_sees_the_package():
     files = api_files()
     assert len(files) >= MIN_FILES, [path.name for path in files]
     names = {path.name for path in files}
-    assert {"__main__.py", "cli.py", "registry.py", "trainer.py", "image_classification.py"} <= names
+    assert {
+        "__main__.py", "cli.py", "registry.py", "trainer.py", "image_classification.py",
+        "predictor.py", "export.py",
+    } <= names
     # Liveness: cli.py holds the handler the rule about it is about.
     handler_count = sum(1 for _ in handlers(ast.parse(CLI_PATH.read_text())))
     assert handler_count >= 1

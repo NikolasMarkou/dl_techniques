@@ -43,6 +43,15 @@ Interface contract
         ``input_shape``, or ``onnx`` without ``tf2onnx``. A converter's own failure
         propagates, and leaves no ``out`` behind (a file is written last, in one piece).
 
+``check_target(out, format)``
+    :param out: the path the caller means to write.
+    :param format: one of :data:`FORMATS`.
+    :return: ``Path(out)``.
+    :raises ConfigError: for an unknown format, a name of the wrong kind, an ``out`` (or
+        ``<out>.saved_model`` for ``tflite``) that exists, or ``onnx`` without ``tf2onnx``.
+        Everything ``export`` can refuse from the target alone, with no model and no write, so
+        the command line can refuse before it loads a model (D-064). ``export`` calls it first.
+
 Import rule
 -----------
 Module scope imports only the standard library and ``train.api`` (D-012); ``keras``,
@@ -141,24 +150,11 @@ def _require_tf2onnx() -> None:
         ) from exc
 
 
-def export(
-    *,
-    model: Any,
-    out: Union[str, "os.PathLike[str]"],
-    format: str,
-    input_shape: Optional[Sequence[int]] = None,
-) -> Path:
-    """Write ``model`` to ``out`` as ``format``; see the module contract."""
-    import keras
-
+def check_target(out: Union[str, "os.PathLike[str]"], format: str) -> Path:
+    """Return ``Path(out)`` after every check the target alone allows; see the module contract."""
     if format not in FORMATS:
         raise ConfigError(
             f"Invalid value for 'format': expected one of {', '.join(map(repr, FORMATS))}, got {format!r}"
-        )
-    if not isinstance(model, keras.Model) or not model.built:
-        raise ConfigError(
-            "Invalid value for 'model': export needs a built keras.Model (one that has been "
-            f"called or loaded), got {type(model).__name__}"
         )
     path = Path(out)
     suffix = SUFFIX.get(format)
@@ -169,6 +165,25 @@ def export(
         _refuse_existing(path.with_name(path.name + TFLITE_SIBLING), "out")
     if format == "onnx":
         _require_tf2onnx()
+    return path
+
+
+def export(
+    *,
+    model: Any,
+    out: Union[str, "os.PathLike[str]"],
+    format: str,
+    input_shape: Optional[Sequence[int]] = None,
+) -> Path:
+    """Write ``model`` to ``out`` as ``format``; see the module contract."""
+    import keras
+
+    path = check_target(out, format)
+    if not isinstance(model, keras.Model) or not model.built:
+        raise ConfigError(
+            "Invalid value for 'model': export needs a built keras.Model (one that has been "
+            f"called or loaded), got {type(model).__name__}"
+        )
     spec = None if format == "keras" else _input_spec(model, input_shape)
 
     from dl_techniques.utils.logger import logger

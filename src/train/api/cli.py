@@ -8,10 +8,28 @@ was raised. Any other exception propagates, so Python exits 1 with a
 traceback. Help text goes to stdout, error text to stderr.
 
 Commands are the rows of ``COMMANDS`` (``help``, ``list_tasks``,
-``list_models``), then the tasks in :data:`train.api.registry.TASKS`. A task
-command with no arguments, or with a lone help word, prints its config keys;
-any other arguments go to ``run_task``. ``list_*`` commands list instead of
-printing help, even when given ``help``.
+``list_models``, ``export``, ``predict``), then the tasks in
+:data:`train.api.registry.TASKS`. A task command with no arguments, or with a lone
+help word, prints its config keys; any other arguments go to ``run_task``.
+``list_*`` commands list instead of printing help, even when given ``help``.
+
+``export model= out= format=``
+    Load the run (a run directory, or a ``.keras`` file beside its ``task.json``) and
+    write it with :func:`train.api.export.export`; the input shape comes from
+    ``task.json``. ``format`` is one of ``train.api.export.FORMATS``. Every check that
+    needs no model runs before the model is loaded and before TensorFlow is imported: the
+    keys, ``format``, the suffix of ``out``, that ``out`` is free, and that ``model``
+    exists. Exit 0 and the written path on stdout, else 2.
+
+``predict model= data= out=``
+    ``data`` is an image file or a directory of images (searched recursively, hidden
+    entries skipped, by the suffixes the folder loader reads, sorted by path). ``out`` is a
+    new JSON file holding a list with one ``{"path", "labels", "scores"}`` object per image:
+    every class, best first, the :class:`~train.api.predictor.Predictor`'s answer. An
+    existing ``out`` is refused. Exit 0, else 2.
+
+Both commands take exactly their keys (no ``config=``, no nested key), a bare command or
+a lone help word prints them, and the help path imports no TensorFlow.
 
 ``parse_dotlist(tokens)``
     :param tokens: ``key=value`` tokens; dots nest, ``config=path.yaml`` is special.
@@ -71,11 +89,13 @@ function that needs it.
 import collections.abc
 import dataclasses
 import difflib
+import json
 import logging
 import math
 import re
 import sys
 import typing
+from pathlib import Path
 from typing import (
     Any,
     Callable,
@@ -207,6 +227,163 @@ def _list_models(args: List[str]) -> int:
     return 0
 
 
+class Option(NamedTuple):
+    """One key of a command that is not a task: its name and its help text."""
+
+    key: str
+    help: str
+
+
+EXPORT_OPTIONS = (
+    Option("model", "a run directory (its best_model.keras) or a .keras file beside its task.json"),
+    Option("out", "the file or directory to write; it must not exist"),
+    Option("format", "keras, saved_model, tflite or onnx"),
+)
+PREDICT_OPTIONS = (
+    Option("model", "a run directory (its best_model.keras) or a .keras file beside its task.json"),
+    Option("data", "an image file, or a directory of images (searched recursively)"),
+    Option("out", "a new .json file; it must not exist"),
+)
+
+
+def _write_command_help(name: str, summary: str, options: Sequence[Option]) -> int:
+    """Print the usage and the keys of an ``export`` or ``predict`` command."""
+    width = max(len(o.key) for o in options)
+    lines = [
+        f"usage: {PROGRAM} {name} " + " ".join(f"{o.key}=<{o.key}>" for o in options),
+        "",
+        summary,
+        "",
+        "keys (all required):",
+        *[f"  {o.key.ljust(width)}  {o.help}" for o in options],
+        "",
+    ]
+    sys.stdout.write("\n".join(lines))
+    return 0
+
+
+def _command_values(
+    name: str, args: List[str], options: Sequence[Option]
+) -> Dict[str, str]:
+    """Return the text of each of ``options`` given in ``args``.
+
+    :raises ConfigValidationError: naming every unknown or nested key and every missing key.
+    :raises ConfigError: for ``config=``, which these commands do not read.
+    """
+    config_path, raw = parse_dotlist(args)
+    if config_path is not None:
+        raise ConfigError(f"{name} takes no config=; give {', '.join(o.key for o in options)}")
+    names = [o.key for o in options]
+    errors: List[str] = []
+    for key, value in raw.items():
+        if key not in names:
+            errors.append(unknown_key_message("", key, names))
+        elif not isinstance(value, str):
+            errors.append(f"{key!r} takes one value, not sub-keys.")
+    errors += [f"Missing required key {key!r}." for key in names if key not in raw]
+    if errors:
+        raise ConfigValidationError(errors)
+    return {key: raw[key] for key in names}
+
+
+def _existing_model_path(text: str) -> Path:
+    """Return the path ``text`` names, which must exist (checked before TensorFlow is imported)."""
+    path = Path(text)
+    if not path.exists():
+        raise ConfigError(
+            f"Invalid value for 'model': {path} does not exist; give a run directory, or a "
+            ".keras file beside a task.json"
+        )
+    return path
+
+
+def _export(args: List[str]) -> int:
+    """Run ``export model= out= format=``; see the module docstring."""
+    if _is_help_request(args):
+        return _write_command_help("export", COMMANDS["export"].summary, EXPORT_OPTIONS)
+    values = _command_values("export", args, EXPORT_OPTIONS)
+    from .export import check_target, export
+
+    # DECISION plan-2026-10-30T132432-a865fa08/D-064: the target and the model path are checked
+    # BEFORE ``load_model``, and the traced shape is ``task.json``'s ``input_shape``. Do NOT load
+    # first and let ``export`` refuse (a bad ``out`` would cost a TensorFlow import and a model
+    # load), and do NOT ask the model for its shape (a ViT has no ``inputs``).
+    target = check_target(values["out"], values["format"])
+    model_path = _existing_model_path(values["model"])
+    from .predictor import load_model
+
+    loaded = load_model(model_path)
+    written = export(
+        model=loaded.model,
+        out=target,
+        format=values["format"],
+        input_shape=loaded.record["input_shape"],
+    )
+    sys.stdout.write(f"{written}\n")
+    return 0
+
+
+def _image_files(data: Path) -> List[Path]:
+    """Return the image files ``data`` names: the file itself, or a directory's, sorted.
+
+    :raises ConfigError: for a path that is neither, or a directory holding no image.
+    """
+    from train.common.classification_data import IMAGE_SUFFIXES
+
+    # DECISION plan-2026-10-30T132432-a865fa08/D-064: a directory is searched RECURSIVELY. Do NOT
+    # list only its top level: a folder of class directories (the layout the folder loader reads)
+    # would then hold "no image". The suffixes are the loader's own, not a second list.
+    if data.is_file():
+        return [data]
+    found = sorted(
+        item
+        for item in data.rglob("*")
+        if item.is_file()
+        and item.suffix.lower() in IMAGE_SUFFIXES
+        and not any(part.startswith(".") for part in item.relative_to(data).parts)
+    )
+    if not found:
+        raise ConfigError(
+            f"Invalid value for 'data': {data} holds no image ({', '.join(IMAGE_SUFFIXES)})"
+        )
+    return found
+
+
+def _predict(args: List[str]) -> int:
+    """Run ``predict model= data= out=``; see the module docstring."""
+    if _is_help_request(args):
+        return _write_command_help("predict", COMMANDS["predict"].summary, PREDICT_OPTIONS)
+    values = _command_values("predict", args, PREDICT_OPTIONS)
+    out = Path(values["out"])
+    if out.exists():
+        raise ConfigError(
+            f"Invalid value for 'out': {out} already exists; predict never overwrites, so "
+            "choose a path that is not there"
+        )
+    model_path = _existing_model_path(values["model"])
+    data = Path(values["data"])
+    if not data.exists():
+        raise ConfigError(f"Invalid value for 'data': {data} does not exist")
+    from .predictor import CHUNK, load_model
+
+    files = _image_files(data)
+    predictor = load_model(model_path)
+    entries: List[Dict[str, Any]] = []
+    for start in range(0, len(files), CHUNK):
+        chunk = files[start : start + CHUNK]
+        answer = predictor.predict([str(file) for file in chunk])
+        entries += [
+            {"path": str(file), "labels": labels, "scores": scores}
+            for file, labels, scores in zip(chunk, answer["labels"], answer["scores"])
+        ]
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "x") as handle:
+        json.dump(entries, handle, indent=2)
+        handle.write("\n")
+    sys.stdout.write(f"{out}\n")
+    return 0
+
+
 def _field_help_lines(cls: Type[StrictConfig], prefix: str = "") -> List[str]:
     """Return one ``key  type  help [default]`` line per leaf key of ``cls``."""
     hints = typing.get_type_hints(cls)
@@ -270,6 +447,8 @@ COMMANDS: Dict[str, Command] = {
         Command("help", "show this help", _write_help),
         Command("list_tasks", "list the registered tasks", _list_tasks),
         Command("list_models", "list family/variant names, task=<name> filters", _list_models),
+        Command("export", "write a trained run as keras, saved_model, tflite or onnx", _export),
+        Command("predict", "label the images in a file or directory with a trained run", _predict),
     )
 }
 

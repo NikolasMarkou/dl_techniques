@@ -118,6 +118,82 @@ def test_the_real_task_help_imports_nothing_heavy_either(args, tmp_path):
     assert forbidden_in(modules) == []
 
 
+MODEL_COMMANDS = {
+    "export": ["model", "out", "format"],
+    "predict": ["model", "data", "out"],
+}
+MODEL_COMMAND_ARMS = [
+    [command, *word] for command in MODEL_COMMANDS for word in ([], ["help"], ["-h"], ["--help"])
+]
+
+
+@pytest.mark.parametrize("args", MODEL_COMMAND_ARMS, ids=lambda a: " ".join(a))
+def test_the_export_and_predict_help_imports_nothing_heavy_and_names_its_keys(args, tmp_path):
+    started = time.perf_counter()
+    result = run_train(args, tmp_path, importtime=True)
+    elapsed = time.perf_counter() - started
+    assert result.returncode == 0, result.stderr[-2000:]
+    command = args[0]
+    assert f"usage: python -m train {command} " in result.stdout
+    for key in MODEL_COMMANDS[command]:
+        assert f"  {key}" in result.stdout and f"{key}=<{key}>" in result.stdout, key
+    modules = imported_modules(result.stderr)
+    assert "train.api.cli" in modules, modules[-20:]
+    assert forbidden_in(modules) == []
+    # `-X importtime` slows the child, so this is a loose bound: a TensorFlow import is 4 s.
+    assert elapsed < 3 * TIME_LIMIT_SECONDS, elapsed
+
+
+@pytest.mark.parametrize("command", sorted(MODEL_COMMANDS))
+def test_the_export_and_predict_help_finishes_in_under_a_second(command, tmp_path):
+    times = []
+    for _ in range(3):
+        start = time.perf_counter()
+        result = run_train([command, "help"], tmp_path, importtime=False)
+        times.append(time.perf_counter() - start)
+        assert result.returncode == 0, result.stderr[-2000:]
+    assert min(times) < TIME_LIMIT_SECONDS, times
+
+
+@pytest.mark.parametrize("command", sorted(MODEL_COMMANDS))
+def test_a_cheap_refusal_of_export_and_predict_imports_nothing_heavy_either(command, tmp_path):
+    """A missing key and a bad path are refused before TensorFlow is imported (D-064)."""
+    missing = "model=" + str(tmp_path / "no_such_run")
+    if command == "export":
+        good = [missing, "out=" + str(tmp_path / "o.keras"), "format=keras"]
+    else:
+        good = [missing, "data=" + str(tmp_path), "out=" + str(tmp_path / "o.json")]
+    arms = [[command, "nope=1"], [command, *good]]
+    for args in arms:
+        result = run_train(args, tmp_path, importtime=True)
+        assert result.returncode == 2, (args, result.stderr[-1500:])
+        assert "Traceback" not in result.stderr
+        assert forbidden_in(imported_modules(result.stderr)) == [], args
+
+
+def test_load_model_and_export_are_on_the_lazy_surface_and_import_nothing_until_read(tmp_path):
+    """`train.api.load_model` and `train.api.export` resolve on first read, to functions (D-064)."""
+    code = (
+        "import sys\n"
+        "import train.api\n"
+        "assert 'load_model' in train.api.__all__ and 'export' in train.api.__all__\n"
+        "assert not [n for n in sys.modules if n.startswith('train.api.')], 'import loaded a submodule'\n"
+        "export = train.api.export\n"
+        "assert callable(export) and not hasattr(export, '__path__'), type(export)\n"
+        "assert export.__module__ == 'train.api.export' and export.__name__ == 'export'\n"
+        "assert 'tensorflow' not in sys.modules, 'export pulled in TensorFlow'\n"
+        "load_model = train.api.load_model\n"
+        "assert callable(load_model) and load_model.__module__ == 'train.api.predictor'\n"
+        "assert 'tensorflow' not in sys.modules, 'load_model pulled in TensorFlow'\n"
+        "print('SURFACE-OK')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=tmp_path, capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert "SURFACE-OK" in result.stdout
+
+
 def test_the_command_help_lists_the_real_task(tmp_path):
     result = run_train(["help"], tmp_path, importtime=False)
     assert result.returncode == 0, result.stderr[-2000:]

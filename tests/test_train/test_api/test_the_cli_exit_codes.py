@@ -477,3 +477,384 @@ def test_an_erasing_probability_with_another_preset_exits_two_before_the_run_is_
     assert len(lines) == 1 and "'transform_args.random_erasing_prob'" in lines[0], lines
     assert "Traceback" not in result.stderr
     assert not out.exists()
+
+
+# ---------------------------------------------------------------------
+# `export` and `predict`: exit 0 on a trained run, exit 2 for anything the user can fix
+# ---------------------------------------------------------------------
+#
+# One tiny real run (fake CIFAR-10 arrays, one epoch) is trained once. Its `task.json` is the
+# only source of the input shape the export command traces with: the ViT is a subclassed
+# model with no `.inputs`, so a command that asked the model for it would fail here.
+
+import hashlib
+import json
+import math
+
+import numpy as np
+from PIL import Image
+
+CLASSES = 10
+
+
+@pytest.fixture(scope="module")
+def trained_run(tmp_path_factory):
+    import train.api.recipes as recipes
+    from tests.classification_fakes import use_tiny_raw
+    from train.api import registry
+    from train.api.tasks.image_classification import train_image_classification
+
+    out = tmp_path_factory.mktemp("trained") / "run"
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(registry, "MODELS", {})
+        patch.setattr(registry, "TASKS", {})
+        use_tiny_raw(patch, n_train=40, n_test=12)
+        recipes.register_builtin_models()
+        result = train_image_classification(
+            out=str(out),
+            model="vit/vit_pico",
+            data={"dataset": "cifar10"},
+            epochs=1,
+            batch_size=4,
+            analysis_args={"model_analysis": False},
+            metric_args={"success_threshold": 0.0},
+        )
+    assert result.success
+    return out
+
+
+@pytest.fixture(scope="module")
+def pictures(tmp_path_factory):
+    """Five non-square images: three at the top of a directory, two under a sub-directory."""
+    root = tmp_path_factory.mktemp("pictures")
+    rng = np.random.default_rng(1)
+    for name, size in (("a.png", (40, 30)), ("b.jpg", (30, 45)), ("c.PNG", (36, 36)),
+                       ("nested/d.png", (50, 20)), ("nested/e.bmp", (24, 24))):
+        path = root / name
+        path.parent.mkdir(exist_ok=True)
+        pixels = rng.integers(0, 255, size=(size[1], size[0], 3), dtype=np.uint8)
+        Image.fromarray(pixels).save(path)
+    (root / "notes.txt").write_text("not an image")
+    (root / ".hidden.png").write_bytes(b"not read")
+    return root
+
+
+def sha256_of(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def run_command(argv, capsys):
+    code = cli_main(argv)
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def cli_main(argv):
+    from train.api import cli
+
+    return cli.main(argv)
+
+
+def one_error(err: str) -> str:
+    lines = [line for line in err.splitlines() if line.startswith("error:")]
+    assert "Traceback" not in err, err[-1500:]
+    assert len(lines) >= 1, err[-1500:]
+    return "\n".join(err.splitlines())
+
+
+@pytest.mark.parametrize("format, name", [("keras", "m.keras"), ("saved_model", "m_dir"), ("tflite", "m.tflite")])
+def test_export_writes_each_format_from_a_run_directory(format, name, trained_run, tmp_path, capsys):
+    import keras
+
+    from train.api.predictor import load_model
+
+    out = tmp_path / name
+    code, stdout, stderr = run_command(
+        ["export", f"model={trained_run}", f"out={out}", f"format={format}"], capsys
+    )
+    assert code == 0, stderr[-1500:]
+    assert stdout.strip().splitlines()[-1] == str(out)
+    assert out.exists()
+    if format == "keras":
+        # Liveness: the written file is the run's model, not any model.
+        batch = np.random.default_rng(0).random((2, 32, 32, 3)).astype(np.float32)
+        expected = load_model(trained_run).model(batch, training=False)
+        got = keras.models.load_model(str(out), compile=False)(batch, training=False)
+        np.testing.assert_allclose(np.asarray(got), np.asarray(expected), atol=1e-6, rtol=0)
+    if format == "tflite":
+        assert (tmp_path / "m.tflite.saved_model").is_dir()  # kept, never deleted
+
+
+def test_export_reads_the_input_shape_from_task_json_for_a_model_with_no_inputs(trained_run, tmp_path, capsys):
+    """The ViT reports no `inputs`, so the traced size can only have come from `task.json`."""
+    from train.api.predictor import load_model
+
+    assert not getattr(load_model(trained_run).model, "inputs", None), "the shape must come from task.json"
+    out = tmp_path / "m_dir"
+    code, _, stderr = run_command(
+        ["export", f"model={trained_run}", f"out={out}", "format=saved_model"], capsys
+    )
+    assert code == 0, stderr[-1500:]
+    import tensorflow as tf
+
+    loaded = tf.saved_model.load(str(out))
+    spec = loaded.signatures["serving_default"].structured_input_signature[1]
+    assert [dim for dim in list(spec.values())[0].shape][1:] == [32, 32, 3]
+
+
+def test_export_to_onnx_runs_or_is_refused_with_exit_two(trained_run, tmp_path, capsys, monkeypatch):
+    out = tmp_path / "m.onnx"
+    monkeypatch.setitem(sys.modules, "tf2onnx", None)  # `import tf2onnx` raises ImportError
+    code, _, stderr = run_command(
+        ["export", f"model={trained_run}", f"out={out}", "format=onnx"], capsys
+    )
+    assert code == 2 and not out.exists()
+    assert one_error(stderr).startswith("error: Invalid value for 'format': 'onnx' needs the tf2onnx")
+    monkeypatch.undo()
+    pytest.importorskip("tf2onnx")
+    pytest.importorskip("onnxruntime")
+    code, _, stderr = run_command(
+        ["export", f"model={trained_run}", f"out={out}", "format=onnx"], capsys
+    )
+    assert code == 0, stderr[-1500:]
+    assert out.is_file() and out.stat().st_size > 0
+
+
+def test_export_accepts_a_keras_file_beside_its_task_json(trained_run, tmp_path, capsys):
+    out = tmp_path / "again.keras"
+    code, _, stderr = run_command(
+        ["export", f"model={trained_run / 'final_model.keras'}", f"out={out}", "format=keras"], capsys
+    )
+    assert code == 0, stderr[-1500:]
+    assert out.is_file()
+
+
+def lone_model(run, tmp):
+    """A copy of the run's model file in a directory that holds no ``task.json``."""
+    import shutil
+
+    target = tmp / "lone" / "model.keras"
+    target.parent.mkdir()
+    shutil.copy(run / "final_model.keras", target)
+    return target
+
+
+EXPORT_REFUSALS = [
+    pytest.param(lambda run, tmp: ["format=keras", f"out={tmp / 'o.keras'}", f"model={tmp / 'gone'}"],
+                 "Invalid value for 'model': ", id="model-path-missing"),
+    pytest.param(lambda run, tmp: ["format=keras", f"out={tmp / 'o.keras'}", f"model={tmp}"],
+                 "holds no best_model.keras", id="directory-without-a-run"),
+    pytest.param(lambda run, tmp: ["format=keras", f"out={tmp / 'o.keras'}", f"model={lone_model(run, tmp)}"],
+                 "task.json", id="model-file-without-a-task-json"),
+    pytest.param(lambda run, tmp: ["format=zip", f"out={tmp / 'o.keras'}", f"model={run}"],
+                 "Invalid value for 'format': expected one of 'keras', 'saved_model', 'tflite', 'onnx', got 'zip'",
+                 id="bad-format"),
+    pytest.param(lambda run, tmp: ["format=keras", f"out={tmp / 'o.h5'}", f"model={run}"],
+                 "Invalid value for 'out': format 'keras' writes a file named *.keras", id="wrong-suffix"),
+    pytest.param(lambda run, tmp: ["format=keras", f"model={run}"],
+                 "Missing required key 'out'.", id="missing-key"),
+    pytest.param(lambda run, tmp: ["format=keras", f"out={tmp / 'o.keras'}", f"model={run}", "data=x"],
+                 "Unknown key 'data'.", id="unknown-key"),
+    pytest.param(lambda run, tmp: ["format=keras", f"out={tmp / 'o.keras'}", f"model.x={run}"],
+                 "'model' takes one value, not sub-keys.", id="nested-key"),
+    pytest.param(lambda run, tmp: ["format=keras", f"out={tmp / 'o.keras'}", f"model={run}", "config=c.yaml"],
+                 "export takes no config=", id="config-file"),
+    pytest.param(lambda run, tmp: ["format=keras", "out=" + str(tmp), f"model={run}"],
+                 "Invalid value for 'out': ", id="out-is-an-existing-directory-with-wrong-suffix"),
+]
+
+
+@pytest.mark.parametrize("build, message", EXPORT_REFUSALS)
+def test_a_bad_export_exits_two_with_one_message_and_no_traceback(build, message, trained_run, tmp_path, capsys):
+    arguments = build(trained_run, tmp_path)
+    before = sorted(p.name for p in tmp_path.iterdir())
+    code, stdout, stderr = run_command(["export", *arguments], capsys)
+    assert code == 2, (stdout, stderr[-1500:])
+    assert message in one_error(stderr), stderr
+    assert sorted(p.name for p in tmp_path.iterdir()) == before, "a refused export wrote something"
+
+
+def test_export_to_an_existing_out_is_refused_and_leaves_it_byte_identical(trained_run, tmp_path, capsys):
+    out = tmp_path / "taken.keras"
+    out.write_bytes(b"precious")
+    before = sha256_of(out)
+    code, _, stderr = run_command(
+        ["export", f"model={trained_run}", f"out={out}", "format=keras"], capsys
+    )
+    assert code == 2 and "already exists" in one_error(stderr)
+    assert sha256_of(out) == before
+
+
+def test_a_tflite_export_whose_saved_model_sibling_exists_is_refused_before_a_write(trained_run, tmp_path, capsys):
+    (tmp_path / "m.tflite.saved_model").mkdir()
+    code, _, stderr = run_command(
+        ["export", f"model={trained_run}", f"out={tmp_path / 'm.tflite'}", "format=tflite"], capsys
+    )
+    assert code == 2 and "already exists" in one_error(stderr)
+    assert not (tmp_path / "m.tflite").exists()
+
+
+def read_predictions(path):
+    entries = json.loads(Path(path).read_text())
+    assert isinstance(entries, list)
+    return entries
+
+
+def test_predict_labels_a_directory_and_matches_the_predictor(trained_run, pictures, tmp_path, capsys):
+    from train.api.predictor import load_model
+
+    out = tmp_path / "pred.json"
+    code, stdout, stderr = run_command(
+        ["predict", f"model={trained_run}", f"data={pictures}", f"out={out}"], capsys
+    )
+    assert code == 0, stderr[-1500:]
+    assert stdout.strip().splitlines()[-1] == str(out)
+    entries = read_predictions(out)
+    paths = [entry["path"] for entry in entries]
+    # Recursive, sorted, by suffix (case-folded), hidden entries and other suffixes skipped.
+    assert paths == sorted(
+        str(pictures / name) for name in ("a.png", "b.jpg", "c.PNG", "nested/d.png", "nested/e.bmp")
+    )
+    predictor = load_model(trained_run)
+    expected = predictor.predict(paths)
+    for entry, labels, scores in zip(entries, expected["labels"], expected["scores"]):
+        assert set(entry) == {"path", "labels", "scores"}
+        assert entry["labels"] == labels and entry["labels"][0] in predictor.class_names
+        assert sorted(entry["labels"]) == sorted(predictor.class_names) and len(entry["labels"]) == CLASSES
+        np.testing.assert_allclose(entry["scores"], scores, atol=1e-9, rtol=0)
+        assert all(math.isfinite(s) and 0 <= s <= 1 for s in entry["scores"])
+        assert sum(entry["scores"]) == pytest.approx(1.0, abs=1e-6)
+        assert entry["scores"] == sorted(entry["scores"], reverse=True)
+
+
+def test_predict_takes_one_image_file(trained_run, pictures, tmp_path, capsys):
+    out = tmp_path / "one.json"
+    code, _, stderr = run_command(
+        ["predict", f"model={trained_run}", f"data={pictures / 'b.jpg'}", f"out={out}"], capsys
+    )
+    assert code == 0, stderr[-1500:]
+    entries = read_predictions(out)
+    assert [e["path"] for e in entries] == [str(pictures / "b.jpg")]
+
+
+def test_predict_creates_the_parent_of_out(trained_run, pictures, tmp_path, capsys):
+    out = tmp_path / "deeper" / "still" / "pred.json"
+    code, _, stderr = run_command(
+        ["predict", f"model={trained_run}", f"data={pictures / 'a.png'}", f"out={out}"], capsys
+    )
+    assert code == 0, stderr[-1500:]
+    assert out.is_file()
+
+
+def test_predict_takes_more_images_than_one_chunk(trained_run, tmp_path, capsys, monkeypatch):
+    """The command predicts in slices of `CHUNK`; the answer is the same for every slice size."""
+    from train.api import predictor as predictor_module
+
+    root = tmp_path / "many"
+    root.mkdir()
+    rng = np.random.default_rng(5)
+    for index in range(7):
+        Image.fromarray(rng.integers(0, 255, size=(20 + index, 30, 3), dtype=np.uint8)).save(root / f"i{index}.png")
+    whole = tmp_path / "whole.json"
+    sliced = tmp_path / "sliced.json"
+    assert run_command(["predict", f"model={trained_run}", f"data={root}", f"out={whole}"], capsys)[0] == 0
+    monkeypatch.setattr(predictor_module, "CHUNK", 3)
+    assert run_command(["predict", f"model={trained_run}", f"data={root}", f"out={sliced}"], capsys)[0] == 0
+    a, b = read_predictions(whole), read_predictions(sliced)
+    assert len(a) == len(b) == 7
+    for left, right in zip(a, b):
+        assert left["path"] == right["path"] and left["labels"] == right["labels"]
+        np.testing.assert_allclose(left["scores"], right["scores"], atol=1e-6, rtol=0)
+
+
+def empty_dir(tmp):
+    path = tmp / "empty"
+    path.mkdir()
+    return path
+
+
+def broken_image(tmp):
+    path = tmp / "broken.png"
+    path.write_bytes(b"this is not a png")
+    return path
+
+
+PREDICT_REFUSALS = [
+    pytest.param(lambda run, pics, tmp: [f"model={tmp / 'gone'}", f"data={pics}", f"out={tmp / 'p.json'}"],
+                 "Invalid value for 'model': ", id="model-path-missing"),
+    pytest.param(lambda run, pics, tmp: [f"model={tmp}", f"data={pics}", f"out={tmp / 'p.json'}"],
+                 "holds no best_model.keras", id="directory-without-a-run"),
+    pytest.param(lambda run, pics, tmp: [f"model={lone_model(run, tmp)}", f"data={pics}", f"out={tmp / 'p.json'}"],
+                 "task.json", id="model-file-without-a-task-json"),
+    pytest.param(lambda run, pics, tmp: [f"model={run}", f"data={tmp / 'gone'}", f"out={tmp / 'p.json'}"],
+                 "Invalid value for 'data': ", id="data-missing"),
+    pytest.param(lambda run, pics, tmp: [f"model={run}", f"data={empty_dir(tmp)}", f"out={tmp / 'p.json'}"],
+                 "holds no image", id="no-image-in-the-directory"),
+    pytest.param(lambda run, pics, tmp: [f"model={run}", f"data={broken_image(tmp)}", f"out={tmp / 'p.json'}"],
+                 "Invalid image", id="unreadable-image"),
+    pytest.param(lambda run, pics, tmp: [f"model={run}", f"data={pics}"],
+                 "Missing required key 'out'.", id="missing-key"),
+    pytest.param(lambda run, pics, tmp: [f"model={run}", f"data={pics}", f"out={tmp / 'p.json'}", "format=keras"],
+                 "Unknown key 'format'.", id="unknown-key"),
+    pytest.param(lambda run, pics, tmp: [f"model={run}", f"data={pics}", f"out={tmp / 'p.json'}", "config=c.yaml"],
+                 "predict takes no config=", id="config-file"),
+]
+
+
+@pytest.mark.parametrize("build, message", PREDICT_REFUSALS)
+def test_a_bad_predict_exits_two_with_a_message_and_no_traceback(
+    build, message, trained_run, pictures, tmp_path, capsys
+):
+    arguments = build(trained_run, pictures, tmp_path)
+    existing = sorted(p.name for p in tmp_path.iterdir())
+    code, stdout, stderr = run_command(["predict", *arguments], capsys)
+    assert code == 2, (stdout, stderr[-1500:])
+    assert message in one_error(stderr), stderr
+    assert not (tmp_path / "p.json").exists(), "a refused predict wrote its out"
+    assert sorted(p.name for p in tmp_path.iterdir()) == existing
+
+
+def test_predict_to_an_existing_out_is_refused_and_leaves_it_byte_identical(
+    trained_run, pictures, tmp_path, capsys
+):
+    out = tmp_path / "taken.json"
+    out.write_text("[]")
+    before = sha256_of(out)
+    code, _, stderr = run_command(
+        ["predict", f"model={trained_run}", f"data={pictures}", f"out={out}"], capsys
+    )
+    assert code == 2 and "already exists" in one_error(stderr)
+    assert sha256_of(out) == before
+
+
+def test_the_real_command_exports_and_predicts_with_exit_zero(trained_run, pictures, tmp_path):
+    """`python -m train` in a child process, from a directory that is not the repository."""
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    exported = run_real(
+        ["export", f"model={trained_run}", f"out={tmp_path / 'm.keras'}", "format=keras"], cwd
+    )
+    assert exported.returncode == 0, exported.stderr[-2000:]
+    assert exported.stdout.strip().splitlines()[-1] == str(tmp_path / "m.keras")
+    assert not any(line.startswith("error:") for line in exported.stderr.splitlines())
+    predicted = run_real(
+        ["predict", f"model={trained_run}", f"data={pictures / 'a.png'}", f"out={tmp_path / 'p.json'}"], cwd
+    )
+    assert predicted.returncode == 0, predicted.stderr[-2000:]
+    assert len(read_predictions(tmp_path / "p.json")) == 1
+    assert list(cwd.iterdir()) == []
+
+
+def test_the_real_command_refuses_a_bad_path_format_and_argument_with_exit_two(trained_run, tmp_path):
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    arms = [
+        ["export", f"model={tmp_path / 'gone'}", f"out={tmp_path / 'm.keras'}", "format=keras"],
+        ["export", f"model={trained_run}", f"out={tmp_path / 'm.keras'}", "format=zip"],
+        ["predict", f"model={trained_run}", f"data={tmp_path / 'gone'}", f"out={tmp_path / 'p.json'}"],
+        ["predict", "model"],
+    ]
+    for args in arms:
+        result = run_real(args, cwd)
+        assert result.returncode == 2, (args, result.stderr[-1500:])
+        assert "Traceback" not in result.stderr and error_lines(result.stderr), args
