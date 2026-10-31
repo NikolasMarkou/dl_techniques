@@ -74,6 +74,24 @@ def evaluate_dict(model: keras.Model, dataset: "tf.data.Dataset") -> Dict[str, f
 # Metrics that survive a mixed-precision policy
 # ---------------------------------------------------------------------
 
+def classification_metric_names(num_classes: int, top_k: int) -> List[str]:
+    """Return the names :func:`classification_metrics` gives its metrics, building none.
+
+    Interface contract: pure, no TensorFlow or Keras call. A Keras metric allocates
+    variables, and the first eager op initialises TensorFlow's devices, after which
+    ``setup_gpu`` can no longer enable memory growth (D-055). A caller that needs only
+    the names before the GPU is set up (the API's monitor check) uses this function.
+
+    :param num_classes: Class count; ``top{k}_accuracy`` exists only above ``top_k``.
+    :param top_k: ``k``.
+    :return: ``["accuracy"]`` or ``["accuracy", "top{k}_accuracy"]``.
+    """
+    names = ["accuracy"]
+    if num_classes > top_k:
+        names.append(f"top{top_k}_accuracy")
+    return names
+
+
 def classification_metrics(
     num_classes: int, top_k: int, half_precision: bool = False
 ) -> List[keras.metrics.Metric]:
@@ -87,17 +105,18 @@ def classification_metrics(
         ``False`` uses the stock metric, so a float32 model carries no class from this
         repository and reloads with a plain ``load_model``.
     :return: Metric OBJECTS (a string alias such as ``"top_5_accuracy"`` is not resolvable
-        by Keras and crashes ``compile``), named ``accuracy`` and ``top{k}_accuracy`` in
+        by Keras and crashes ``compile``), named by :func:`classification_metric_names` in
         both cases, so a ``watch_metric`` holds whichever precision the run uses.
     """
+    names = classification_metric_names(num_classes, top_k)
     metrics: List[keras.metrics.Metric] = [
-        keras.metrics.SparseCategoricalAccuracy(name="accuracy")
+        keras.metrics.SparseCategoricalAccuracy(name=names[0])
     ]
-    if num_classes > top_k:
+    if len(names) > 1:
         top_k_class = (
             HalfPrecisionTopKAccuracy if half_precision else keras.metrics.SparseTopKCategoricalAccuracy
         )
-        metrics.append(top_k_class(k=top_k, name=f"top{top_k}_accuracy"))
+        metrics.append(top_k_class(k=top_k, name=names[1]))
     return metrics
 
 

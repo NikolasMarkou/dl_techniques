@@ -213,10 +213,14 @@ class ImageClassificationTrainer(TaskTrainer):
         }
 
     def metric_names(self, config: ImageClassificationConfig, facts: DataFacts) -> List[str]:
-        from train.common.classification_run import classification_metrics
+        # DECISION plan-2026-10-30T132432-a865fa08/D-055: names only. Do NOT build the
+        # metrics to read ``.name``: a Keras metric allocates variables, the first eager
+        # op initialises TensorFlow's devices, and ``setup_gpu`` (called after this
+        # pre-claim check) then fails with "Physical devices cannot be modified".
+        from train.common.classification_run import classification_metric_names
 
         metric_cfg: MetricArgs = config.metric_args
-        return [m.name for m in classification_metrics(facts.num_classes, metric_cfg.top_k)]
+        return classification_metric_names(facts.num_classes, metric_cfg.top_k)
 
     def build_loss_and_metrics(
         self, config: ImageClassificationConfig, data: Any
