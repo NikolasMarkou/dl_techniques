@@ -307,7 +307,7 @@ def test_a_mixed_float16_epoch_wraps_the_optimizer_scores_top_k_and_restores_the
     assert Mixed.recorder.optimizer == "LossScaleOptimizer"
     assert keras.mixed_precision.global_policy().name == before == "float32"
     history = read_json(run_dir, "training_history.json")
-    # The stock top-k metric cannot take half-precision logits (D-041); ours can.
+    # The stock top-k metric cannot take half-precision logits (D-041); ours can (D-051).
     assert np.isfinite(history["top5_accuracy"]).all()
     assert read_json(run_dir, "config.json")["precision"] == "mixed_float16"
     assert result.test_metrics_final["top5_accuracy"] >= 0.0

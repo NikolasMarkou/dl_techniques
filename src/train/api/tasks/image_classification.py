@@ -160,11 +160,18 @@ class ImageClassificationTrainer(TaskTrainer):
         return builtin_facts(config.data, None if size == AUTO else size)
 
     def build_data(self, config: ImageClassificationConfig, context: AutoContext) -> Any:
+        from dl_techniques.datasets.vision.classification import get_spec
         from train.common.image_augment import build_augment
 
         transform_cfg: TransformArgs = config.transform_args
+        # DECISION plan-2026-10-30T132432-a865fa08/D-049: random erasing paints the
+        # dataset's per-channel MEAN, as ``train_cliffordnet.py`` does. Do NOT leave
+        # ``fill`` at ``build_op``'s default of zero: it erases to black on the [0, 1]
+        # image, which is -1.99 after standardize, where the legacy trainer erases to 0.
         augment = build_augment(
-            transform_cfg.augment, random_erasing_prob=transform_cfg.random_erasing_prob
+            transform_cfg.augment,
+            random_erasing_prob=transform_cfg.random_erasing_prob,
+            fill=get_spec(config.data.dataset).mean,
         )
         return load_builtin_data(
             config.data,
@@ -180,10 +187,30 @@ class ImageClassificationTrainer(TaskTrainer):
         self, config: ImageClassificationConfig, context: AutoContext, data: Any
     ) -> Any:
         spec = registry.MODELS[context.family]
-        kwargs = spec.load_resolver()(context, config.optim_args, config.model_args)
         return recipes.build_model(
-            spec, context.variant, data.num_classes, data.input_shape, kwargs
+            spec, context.variant, data.num_classes, data.input_shape,
+            self._model_kwargs(config, context),
         )
+
+    @staticmethod
+    def _model_kwargs(config: ImageClassificationConfig, context: AutoContext) -> Dict[str, Any]:
+        """Return the family factory's keywords: the recipe's, then the caller's."""
+        spec = registry.MODELS[context.family]
+        return spec.load_resolver()(context, config.optim_args, config.model_args)
+
+    def used_arguments(
+        self, config: ImageClassificationConfig, context: AutoContext
+    ) -> Dict[str, Any]:
+        """Return what the run was built with, for ``config.json`` (D-050).
+
+        :return: ``{"model_args": ..., "loader": ...}``: the factory keywords the
+            resolver produced (a regularizer as its serialized config) and the
+            recipe's loader mapping.
+        """
+        return {
+            "model_args": recipes.serialize_model_args(self._model_kwargs(config, context)),
+            "loader": dict(context.defaults.get("loader") or {}),
+        }
 
     def metric_names(self, config: ImageClassificationConfig, facts: DataFacts) -> List[str]:
         from train.common.classification_run import classification_metrics
@@ -201,7 +228,9 @@ class ImageClassificationTrainer(TaskTrainer):
         metric_cfg: MetricArgs = config.metric_args
         return (
             keras.losses.SparseCategoricalCrossentropy(from_logits=True),
-            classification_metrics(data.num_classes, metric_cfg.top_k),
+            classification_metrics(
+                data.num_classes, metric_cfg.top_k, half_precision=config.precision != "float32"
+            ),
         )
 
 

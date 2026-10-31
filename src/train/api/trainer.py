@@ -102,6 +102,10 @@ Hooks (override in a task)
     an :class:`Evaluation`.
 ``task_metadata(config, data)``
     Extra keys for the summary head. Default: none.
+``used_arguments(config, context)``
+    A JSON-plain mapping written to ``config.json`` under the key ``used``: what
+    the run is built with beyond the config's fields (D-050). Default: empty, which
+    writes no key.
 
 The knobs of D-022 act here: ``save_best=False`` removes ``ModelCheckpoint`` and
 skips the best-checkpoint test; ``save_last=False`` passes ``save=False`` to
@@ -121,6 +125,7 @@ Module scope imports only the standard library and ``train.api`` (D-012); every
 import collections.abc
 import contextlib
 import dataclasses
+import json
 import os
 import time
 from pathlib import Path
@@ -170,9 +175,6 @@ CONFIG_FIELDS = (
 #: ``debug_args.smoke`` runs this many epochs on at most this many samples.
 SMOKE_EPOCHS = 1
 SMOKE_MAX_SAMPLES = 512
-
-#: Policy name that needs the optimizer wrapped in a loss-scale optimizer.
-LOSS_SCALED_POLICY = "mixed_float16"
 
 #: The largest seed ``numpy`` takes (``np.random.seed`` refuses anything outside
 #: ``[0, 2**32 - 1]``), so the largest ``set_seeds`` takes.
@@ -317,6 +319,13 @@ def _bad_value_is_a_config_error(run_dir: Path, step: str) -> Iterator[None]:
     try:
         yield
     except (ValueError, TypeError) as exc:
+        # DECISION plan-2026-10-30T132432-a865fa08/D-053: a genuine bug that raises
+        # ``TypeError`` or ``ValueError`` here is reported as a configuration error, and
+        # the command line prints only the message. Do NOT drop the original traceback:
+        # ``-v`` (DEBUG) must show where it was raised, in ``run.log`` too.
+        from dl_techniques.utils.logger import logger
+
+        logger.debug(f"Original error of {step}:", exc_info=True)
         raise ConfigError(
             f"Invalid argument for {step}: {exc}. {_claimed_note(run_dir)}"
         ) from exc
@@ -373,6 +382,14 @@ class TaskTrainer:
         return []
 
     def task_metadata(self, config: StrictConfig, data: Any) -> Dict[str, Any]:
+        return {}
+
+    def used_arguments(self, config: StrictConfig, context: AutoContext) -> Dict[str, Any]:
+        """Return what the run is built with beyond the config, for ``config.json``.
+
+        The value is a JSON-plain mapping written under the key ``used``; empty
+        writes no key. Default: empty.
+        """
         return {}
 
     def evaluate_and_report(
@@ -637,8 +654,6 @@ class TaskTrainer:
         config: StrictConfig,
         context: AutoContext,
     ) -> TrainResult:
-        import keras
-
         from dl_techniques.utils.logger import logger
         from train.common import classification_run, run_summary
         from train.common.gpu import log_gpu_peak_memory
@@ -661,7 +676,11 @@ class TaskTrainer:
             # and the recipe's ``loader`` arguments are arguments of the loader, and
             # both are decided by the recipe, which needs the class count and image size.
             logger.info(f"Resolved args:\n{to_json(config)}")
-            write_resolved(run_dir, config)
+            with _bad_value_is_a_config_error(run_dir, "the model arguments"):
+                used = self.used_arguments(config, context)
+            if used:
+                logger.info(f"Used args:\n{json.dumps(used, indent=2)}")
+            write_resolved(run_dir, config, used)
             for level, text in self._notices:
                 (logger.warning if level == "warning" else logger.info)(text)
 
@@ -696,8 +715,10 @@ class TaskTrainer:
             optimizer, _schedule = build_optimizer_and_schedule(
                 optim_cfg, steps_per_epoch, epochs
             )
-            if config.precision == LOSS_SCALED_POLICY:
-                optimizer = keras.mixed_precision.LossScaleOptimizer(optimizer)
+            # DECISION plan-2026-10-30T132432-a865fa08/D-052: do NOT wrap the optimizer in
+            # ``LossScaleOptimizer`` here. ``compile`` does it under ``mixed_float16``
+            # (keras/src/trainers/trainer.py wraps a plain optimizer when the policy asks
+            # for loss scaling), and a second wrap is a second place to get it wrong.
             loss, metrics = self.build_loss_and_metrics(config, data)
             model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
             params = int(model.count_params())

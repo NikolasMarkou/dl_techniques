@@ -32,8 +32,9 @@ plan deselects by exact id), so a count-based guard is not a reliable signal.
 10. no use of ``keras.optimizers`` (an attribute, an import of it, or an import
     from it): an optimizer or a schedule is built by ``optim.py`` through
     ``dl_techniques.optimization`` only, so the clip, decay and warmup mapping
-    has one home (invariant 9). ``LossScaleOptimizer`` is exempt: it wraps an
-    optimizer that ``optim.py`` built and constructs none.
+    has one home (invariant 9). No name is exempt: ``compile`` wraps an optimizer
+    for ``mixed_float16`` itself, so the API never names ``LossScaleOptimizer``
+    (D-052).
 
 Each rule is a function over a source text. A planted snippet proves the
 rule fires, a clean snippet proves it stays quiet, and the sweep applies it to
@@ -267,19 +268,24 @@ def rule_no_broad_suppress(tree: ast.AST, path: Path) -> List[str]:
     return problems
 
 
-#: The one name under ``keras.optimizers`` the API may use: a wrapper.
-OPTIMIZER_WRAPPERS = ("LossScaleOptimizer",)
+#: Spelled under ``keras.mixed_precision`` as well as ``keras.optimizers``, so the
+#: rule names it wherever it appears.
+LOSS_SCALE_WRAPPER = "LossScaleOptimizer"
 
 
 def rule_no_direct_optimizer(tree: ast.AST, path: Path) -> List[str]:
     problems = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and ast.unparse(node.value) == "keras.optimizers":
-            if node.attr not in OPTIMIZER_WRAPPERS:
-                problems.append(f"{path.name}:{node.lineno}: {ast.unparse(node)}")
+        if isinstance(node, ast.Attribute) and node.attr == LOSS_SCALE_WRAPPER:
+            problems.append(f"{path.name}:{node.lineno}: {ast.unparse(node)}")
+        elif isinstance(node, ast.Name) and node.id == LOSS_SCALE_WRAPPER:
+            problems.append(f"{path.name}:{node.lineno}: {LOSS_SCALE_WRAPPER}")
+        elif isinstance(node, ast.ImportFrom) and any(a.name == LOSS_SCALE_WRAPPER for a in node.names):
+            problems.append(f"{path.name}:{node.lineno}: from {node.module} import {LOSS_SCALE_WRAPPER}")
+        elif isinstance(node, ast.Attribute) and ast.unparse(node.value) == "keras.optimizers":
+            problems.append(f"{path.name}:{node.lineno}: {ast.unparse(node)}")
         elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith("keras.optimizers"):
-            if not all(alias.name in OPTIMIZER_WRAPPERS for alias in node.names):
-                problems.append(f"{path.name}:{node.lineno}: from {node.module} import ...")
+            problems.append(f"{path.name}:{node.lineno}: from {node.module} import ...")
         elif isinstance(node, ast.ImportFrom) and node.module == "keras":
             if any(alias.name == "optimizers" for alias in node.names):
                 problems.append(f"{path.name}:{node.lineno}: from keras import optimizers")
@@ -363,6 +369,11 @@ PLANTED = [
     ("no_direct_optimizer", "from keras.optimizers.schedules import CosineDecay\n", OTHER_PATH),
     ("no_direct_optimizer", "from keras import optimizers\n", OTHER_PATH),
     ("no_direct_optimizer", "import keras.optimizers\n", OTHER_PATH),
+    # The wrapper is not exempt: compile wraps for mixed_float16 (D-052).
+    ("no_direct_optimizer", "import keras\nopt = keras.optimizers.LossScaleOptimizer(base)\n", OTHER_PATH),
+    ("no_direct_optimizer", "from keras.optimizers import LossScaleOptimizer\n", OTHER_PATH),
+    ("no_direct_optimizer", "import keras\nopt = keras.mixed_precision.LossScaleOptimizer(base)\n", OTHER_PATH),
+    ("no_direct_optimizer", "from keras.mixed_precision import LossScaleOptimizer\nopt = LossScaleOptimizer(base)\n", OTHER_PATH),
 ]
 
 # Source that every rule must leave alone.
@@ -411,9 +422,8 @@ CLEAN = [
     (
         "def wrap(optimizer):\n"
         "    import keras\n"
-        "    from keras.optimizers import LossScaleOptimizer\n"
-        "    note = 'keras.optimizers.AdamW is only a string here'\n"
-        "    return keras.optimizers.LossScaleOptimizer(optimizer), note, keras.layers\n"
+        "    note = 'keras.optimizers.LossScaleOptimizer is only a string here'\n"
+        "    return optimizer, note, keras.layers\n"
     ),
 ]
 

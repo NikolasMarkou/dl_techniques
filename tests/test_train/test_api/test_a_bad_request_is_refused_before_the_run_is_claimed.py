@@ -16,6 +16,8 @@ tests write only under ``tmp_path``.
 """
 
 import dataclasses
+import logging
+import traceback
 from pathlib import Path
 
 import keras
@@ -210,6 +212,65 @@ def test_a_value_only_the_loader_can_see_is_exit_2_and_says_out_is_used(tmp_path
     error = capsys.readouterr().err
     assert "'out' is now used" in error and "data.max_samples" in error
     assert (out / "config_requested.json").exists(), "this refusal needs the data, so it comes after the claim"
+
+
+# ---------------------------------------------------------------------
+# The original traceback of a wrapped error survives, at DEBUG
+# ---------------------------------------------------------------------
+
+#: (id, changes, the step the message names, the exception type raised underneath)
+WRAPPED = [
+    ("loader_value_error", {"batch_size": 10000}, "the data loader", ValueError),
+    ("factory_type_error", {"model_args": {"dropout_rate": "high"}}, "the model factory", TypeError),
+]
+
+
+@pytest.fixture
+def dl_logger():
+    """Return the library logger, its level put back afterwards (``-v`` changes it)."""
+    logger = logging.getLogger("dl")
+    before = logger.level
+    yield logger
+    logger.setLevel(before)
+
+
+@pytest.mark.parametrize("changes, step, kind", [case[1:] for case in WRAPPED], ids=[c[0] for c in WRAPPED])
+def test_a_wrapped_error_keeps_its_traceback_for_verbose_runs(changes, step, kind, tmp_path, caplog, dl_logger):
+    dl_logger.setLevel(logging.DEBUG)
+    caplog.set_level(logging.DEBUG, logger="dl")
+    with pytest.raises(ConfigError) as info:
+        run(tmp_path / "run", **changes)
+    cause = info.value.__cause__
+    assert isinstance(cause, kind), "the original error is chained"
+    records = [r for r in caplog.records if f"Original error of {step}" in r.getMessage()]
+    assert len(records) == 1 and records[0].levelno == logging.DEBUG
+    shown = "".join(traceback.format_exception(*records[0].exc_info))
+    assert type(cause).__name__ in shown and str(cause) in shown
+    # The frame that raised it is in the text, not only the wrapper.
+    raised_in = traceback.extract_tb(cause.__traceback__)[-1]
+    assert raised_in.name in shown and Path(raised_in.filename).name in shown
+
+
+def test_the_traceback_is_not_logged_at_the_default_level(tmp_path, caplog, dl_logger):
+    dl_logger.setLevel(logging.INFO)
+    caplog.set_level(logging.INFO, logger="dl")
+    with pytest.raises(ConfigError):
+        run(tmp_path / "run", batch_size=10000)
+    assert not [r for r in caplog.records if "Original error of" in r.getMessage()]
+
+
+def test_dash_v_at_the_command_line_shows_the_traceback(tmp_path, caplog, dl_logger):
+    caplog.set_level(logging.DEBUG, logger="dl")
+    tokens = [
+        "-v",
+        "image_classification",
+        f"out={tmp_path / 'run'}",
+        "model=vit/vit_pico",
+        "data.dataset=cifar10",
+        "batch_size=10000",
+    ]
+    assert cli.main(tokens) == 2
+    assert [r for r in caplog.records if "Original error of the data loader" in r.getMessage()]
 
 
 # ---------------------------------------------------------------------

@@ -26,6 +26,7 @@ import keras
 import numpy as np
 import tensorflow as tf
 
+from dl_techniques.metrics.half_precision_top_k import HalfPrecisionTopKAccuracy
 from dl_techniques.utils.logger import logger
 
 from train.common import run_summary
@@ -73,38 +74,30 @@ def evaluate_dict(model: keras.Model, dataset: "tf.data.Dataset") -> Dict[str, f
 # Metrics that survive a mixed-precision policy
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="dl_techniques.train.classification_run")
-class TopKAccuracy(keras.metrics.SparseTopKCategoricalAccuracy):
-    """Sparse top-k accuracy of logits in any float dtype.
-
-    Under ``mixed_float16`` or ``mixed_bfloat16`` a classifier emits half-precision
-    logits, and the stock metric's ``InTopKV2`` op accepts float32 only (measured:
-    ``TypeError: Input 'predictions' of 'InTopKV2' Op has type float16``). Casting the
-    logits up first changes no ranking. The class is registered because ``best_model.keras``
-    and ``final_model.keras`` carry the compiled metrics and are reloaded.
-    """
-
-    def update_state(self, y_true: Any, y_pred: Any, sample_weight: Any = None) -> Any:
-        # DECISION plan-2026-10-30T132432-a865fa08/D-041: cast the logits up HERE. Do NOT
-        # use the stock ``SparseTopKCategoricalAccuracy`` with ``precision=mixed_float16``
-        # (its in_top_k op raises on half precision) and do NOT cast the model's output
-        # (model code is out of scope and a cast layer would change every saved model).
-        return super().update_state(y_true, keras.ops.cast(y_pred, "float32"), sample_weight)
-
-
-def classification_metrics(num_classes: int, top_k: int) -> List[keras.metrics.Metric]:
+def classification_metrics(
+    num_classes: int, top_k: int, half_precision: bool = False
+) -> List[keras.metrics.Metric]:
     """``accuracy``, plus ``top{k}_accuracy`` when there are more than ``k`` classes.
 
     :param num_classes: Class count; top-k of every class would be 1.0 and tells nothing.
     :param top_k: ``k``.
+    :param half_precision: ``True`` when the model emits half-precision logits (a
+        ``mixed_float16`` or ``mixed_bfloat16`` policy): the top-k metric is then
+        :class:`~dl_techniques.metrics.half_precision_top_k.HalfPrecisionTopKAccuracy`.
+        ``False`` uses the stock metric, so a float32 model carries no class from this
+        repository and reloads with a plain ``load_model``.
     :return: Metric OBJECTS (a string alias such as ``"top_5_accuracy"`` is not resolvable
-        by Keras and crashes ``compile``), named ``accuracy`` and ``top{k}_accuracy``.
+        by Keras and crashes ``compile``), named ``accuracy`` and ``top{k}_accuracy`` in
+        both cases, so a ``watch_metric`` holds whichever precision the run uses.
     """
     metrics: List[keras.metrics.Metric] = [
         keras.metrics.SparseCategoricalAccuracy(name="accuracy")
     ]
     if num_classes > top_k:
-        metrics.append(TopKAccuracy(k=top_k, name=f"top{top_k}_accuracy"))
+        top_k_class = (
+            HalfPrecisionTopKAccuracy if half_precision else keras.metrics.SparseTopKCategoricalAccuracy
+        )
+        metrics.append(top_k_class(k=top_k, name=f"top{top_k}_accuracy"))
     return metrics
 
 

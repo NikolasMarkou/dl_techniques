@@ -52,7 +52,7 @@ import numbers
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, List, Mapping, Tuple
+from typing import Any, List, Mapping, Optional, Tuple
 
 from .errors import ConfigError
 
@@ -327,13 +327,23 @@ def write_requested(run_dir: Path, mapping: Any) -> Path:
     return run_dir
 
 
-def write_resolved(run_dir: Path, config: Any) -> str:
+def write_resolved(run_dir: Path, config: Any, used: Optional[Mapping[str, Any]] = None) -> str:
     """Write ``config.json``: the configuration after AUTO resolution.
 
     :param run_dir: an existing run directory.
     :param config: a dataclass instance (or a JSON-serializable mapping).
+    :param used: what the run was built with beyond the config's fields (the
+        model keywords its resolver produced, the loader mapping); written under
+        the key ``used``. ``None`` or empty adds no key.
     :return: the path written, as text.
     """
     from train.common.config_io import save_config_json
 
-    return save_config_json(config, str(run_dir), "config.json")
+    payload = dataclasses.asdict(config) if dataclasses.is_dataclass(config) else config
+    # DECISION plan-2026-10-30T132432-a865fa08/D-050: what the run was built with goes
+    # under its OWN key, ``used``. Do NOT overwrite the config's ``model_args`` with the
+    # resolver's output: that field is what the caller typed (and what a replay of this
+    # file would feed back through the resolver), and a regularizer object is not JSON.
+    if used:
+        payload = {**payload, "used": dict(used)}
+    return save_config_json(payload, str(run_dir), "config.json")

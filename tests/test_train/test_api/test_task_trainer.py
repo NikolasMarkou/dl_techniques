@@ -442,7 +442,13 @@ def test_the_transform_group_reaches_the_augment_hook_and_the_loader(world, tmp_
     )
     resolved, context = resolve(config)
     assert ImageClassificationTrainer(resolved).build_data(resolved, context) == "data"
-    assert seen["augment"] == ("cifar_autoaugment", {"random_erasing_prob": 0.25})
+    from dl_techniques.datasets.vision.classification import get_spec
+
+    # D-049: the erasing value is the dataset's mean, as in the legacy cliffordnet trainer.
+    assert seen["augment"] == (
+        "cifar_autoaugment",
+        {"random_erasing_prob": 0.25, "fill": get_spec("imagenette").mean},
+    )
     assert seen["loader"]["augment"] == "hook"
     assert (seen["loader"]["normalize"], seen["loader"]["image_size"]) == ("unit", 64)
     assert ImageClassificationTrainer(resolved).describe_data(resolved).image_size == 64
@@ -607,33 +613,49 @@ def test_the_precision_sets_the_policy_and_wraps_the_optimizer_and_is_put_back(
 def test_the_top_k_metric_takes_half_precision_logits_where_the_stock_one_cannot():
     import numpy as np
 
-    from train.common.classification_run import TopKAccuracy
+    from dl_techniques.metrics.half_precision_top_k import HalfPrecisionTopKAccuracy
 
     labels = np.array([1, 2], dtype="int32")
     logits = np.array([[0.1, 0.9, 0.0], [0.5, 0.4, 0.1]], dtype="float16")
     stock = keras.metrics.SparseTopKCategoricalAccuracy(k=2)
     with pytest.raises((TypeError, tf.errors.InvalidArgumentError), match="InTopKV2"):
         stock.update_state(labels, logits)
-    ours = TopKAccuracy(k=2, name="top2_accuracy")
+    ours = HalfPrecisionTopKAccuracy(k=2, name="top2_accuracy")
     ours.update_state(labels, logits)
     assert float(ours.result()) == 0.5
 
 
-def test_the_metrics_are_named_and_top_k_needs_more_classes_than_k():
+@pytest.mark.parametrize("half_precision", [False, True])
+def test_the_metrics_are_named_and_top_k_needs_more_classes_than_k(half_precision):
     from train.common.classification_run import classification_metrics
 
-    assert [m.name for m in classification_metrics(10, 5)] == ["accuracy", "top5_accuracy"]
-    assert [m.name for m in classification_metrics(5, 5)] == ["accuracy"]
-    assert [m.name for m in classification_metrics(100, 3)] == ["accuracy", "top3_accuracy"]
+    def names(num_classes, top_k):
+        return [m.name for m in classification_metrics(num_classes, top_k, half_precision)]
+
+    assert names(10, 5) == ["accuracy", "top5_accuracy"]
+    assert names(5, 5) == ["accuracy"]
+    assert names(100, 3) == ["accuracy", "top3_accuracy"]
 
 
-def test_the_top_k_metric_survives_a_save_and_a_reload(tmp_path):
+def test_float32_gets_the_stock_top_k_metric_and_half_precision_ours():
+    # D-051: a float32 model carries no class from this repository.
+    from dl_techniques.metrics.half_precision_top_k import HalfPrecisionTopKAccuracy
+    from train.common.classification_run import classification_metrics
+
+    stock = classification_metrics(10, 5)[1]
+    half = classification_metrics(10, 5, half_precision=True)[1]
+    assert type(stock) is keras.metrics.SparseTopKCategoricalAccuracy
+    assert type(half) is HalfPrecisionTopKAccuracy
+
+
+@pytest.mark.parametrize("half_precision", [False, True])
+def test_the_top_k_metric_survives_a_save_and_a_reload(half_precision, tmp_path):
     from train.common.classification_run import classification_metrics
 
     model = keras.Sequential([keras.layers.Input((4,)), keras.layers.Dense(10)])
     model.compile(
         loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
-        metrics=classification_metrics(10, 5),
+        metrics=classification_metrics(10, 5, half_precision),
     )
     import numpy as np
 

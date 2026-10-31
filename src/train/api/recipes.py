@@ -29,6 +29,11 @@ Interface contract
         (``variant``, ``num_classes``, ``input_shape``), or hands an AdamW run
         a ``kernel_regularizer``.
 
+``serialize_model_args(kwargs)``
+    :param kwargs: the output of a resolver.
+    :return: the same keywords with a regularizer as its serialized config, so
+        ``config.json`` can record what the model was built with.
+
 ``build_model(spec, variant, num_classes, input_shape, kwargs)``
     :param spec: the family's :class:`~train.api.registry.ModelSpec`.
     :param variant: variant name.
@@ -306,9 +311,10 @@ def _weight_decay_regularizer(optim_args: OptimArgs) -> Any:
     :raises UnresolvedAutoError: when ``optimizer`` or ``weight_decay`` is ``"auto"``.
     """
     # DECISION plan-2026-10-30T132432-a865fa08/D-040: weight decay lives in
-    # exactly one place. AdamW decays inside the optimizer, so the model gets
-    # NO regularizer; sgd has no decoupled decay, so the same number becomes an
-    # L2 regularizer on the model and optim.py gives the optimizer none. Do NOT
+    # exactly one place. AdamW decays inside the optimizer, so the recipe adds NO
+    # model regularizer (a convnext block sets its own gamma L2, as legacy does,
+    # D-052); sgd has no decoupled decay, so the same number becomes an L2
+    # regularizer on the model and optim.py gives the optimizer none. Do NOT
     # return an L2 for adamw "as well": the decay would apply twice.
     for name in ("optimizer", "weight_decay"):
         value = getattr(optim_args, name)
@@ -422,6 +428,27 @@ def resolve_cliffordnet_args(
 ) -> Dict[str, Any]:
     """Return the cliffordnet keywords: the recipe's stochastic depth."""
     return _resolve_regularizer_on_request(context, optim_args, model_args)
+
+
+def serialize_model_args(kwargs: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return ``kwargs`` with each Keras object as its serialized config.
+
+    The only object a resolver produces is the sgd ``kernel_regularizer``; a
+    caller's ``model_args`` are plain JSON values (``config_problems``).
+
+    :param kwargs: the output of a resolver.
+    :return: a new dict that ``json.dumps`` takes: a regularizer becomes
+        ``{"module": "keras.regularizers", "class_name": "L2", "config": {"l2": ...}, ...}``;
+        every other value is returned as it is.
+    """
+    import keras
+
+    return {
+        key: keras.regularizers.serialize(value)
+        if isinstance(value, keras.regularizers.Regularizer)
+        else value
+        for key, value in kwargs.items()
+    }
 
 
 def build_model(
