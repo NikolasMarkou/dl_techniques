@@ -21,12 +21,21 @@ sees [0, 1], for every dataset, ImageNet and Imagenette included. A hook is plai
 ``(image, label)`` or seeded ``(seed, image, label)``
 (:mod:`dl_techniques.datasets.vision.augment_hook`); :mod:`train.common.image_augment`
 builds the shared seeded ones.
+
+Folder and CSV data (:func:`load_folder_data`, :func:`load_csv_data`) are the same record
+from a list of image files: the files are listed without reading a pixel
+(:func:`scan_image_folder`, :func:`read_image_csv`, which a caller may run before it
+loads anything), a seeded cut of the TRAIN list selects, the test list is optional and,
+when absent, the record's ``test_ds`` is ``None`` and ``n_test`` is 0.
 """
 from __future__ import annotations
 
 import argparse
+import csv
+import os
+import re
 from dataclasses import dataclass
-from typing import Callable, Optional, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
 import keras
 import numpy as np
@@ -61,6 +70,8 @@ DEFAULT_EVAL_SAMPLES = 2000
 
 NORMALIZE_MODES = ("standardize", "unit")
 LABEL_MODES = ("sparse", "one_hot")
+#: File suffixes (lower case) that folder and CSV data accept: what ``tf.io.decode_image`` reads.
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp")
 
 
 
@@ -243,7 +254,9 @@ class ClassificationData:
     :param train_ds: Augmented, shuffled, batched train pipeline (drops the last batch).
     :param select_ds: The selection split: drives early stopping, the best checkpoint and
         the epoch-0 baseline. A held-out slice of train; never the test set.
-    :param test_ds: The test split, to be evaluated whole.
+    :param test_ds: The test split, to be evaluated whole; ``None`` when the data has no test
+        split (folder and CSV data without one), in which case ``n_test`` is 0 and ``x_fig``
+        holds no rows.
     :param steps_per_epoch: Batches in one epoch of ``train_ds``.
     :param n_train, n_select, n_test: Sample counts of the three splits.
     :param x_fig, y_fig: Test images (normalized as asked) and labels kept in memory for
@@ -260,7 +273,7 @@ class ClassificationData:
 
     train_ds: "tf.data.Dataset"
     select_ds: "tf.data.Dataset"
-    test_ds: "tf.data.Dataset"
+    test_ds: Optional["tf.data.Dataset"]
     steps_per_epoch: int
     n_train: int
     n_select: int
@@ -529,8 +542,9 @@ def _finish_file_based(
         spec: DatasetSpec, batch_size: int, labels: str, normalize: str, size: int,
         eval_samples: int, train, select, test, selection_split: str, test_split: str,
 ) -> ClassificationData:
-    """The record for a file-based dataset from its three loader splits (ImageNet, Imagenette)."""
-    if eval_samples == 0:
+    """The record for a file-based dataset from its three loader splits (ImageNet, Imagenette,
+    folder and CSV data); ``test`` may be ``None`` (no test split)."""
+    if test is None or eval_samples == 0:
         x_fig, y_fig = np.zeros((0, size, size, 3), np.float32), np.zeros((0,), np.int32)
     else:
         x_fig, y_fig = eval_head(test, eval_samples)
@@ -547,9 +561,10 @@ def _finish_file_based(
         y_fig = _one_hot(y_fig, spec.num_classes)
     return ClassificationData(
         train_ds=encode(train.dataset), select_ds=encode(select.dataset),
-        test_ds=encode(test.dataset),
+        test_ds=None if test is None else encode(test.dataset),
         steps_per_epoch=steps_per_epoch_for(train.num_samples, batch_size),
-        n_train=train.num_samples, n_select=select.num_samples, n_test=test.num_samples,
+        n_train=train.num_samples, n_select=select.num_samples,
+        n_test=0 if test is None else test.num_samples,
         x_fig=x_fig, y_fig=y_fig, arrays=None, mean=mean, std=std,
         input_shape=(size, size, 3), num_classes=train.num_classes,
         class_names=list(train.class_names),
@@ -601,6 +616,409 @@ def _load_imagenette(
         selection_split=f"validation_split={split} of the train records (seeded permutation)",
         test_split="the labelled validation split",
     )
+
+
+# ---------------------------------------------------------------------
+# Folder and CSV data: a list of image files
+# ---------------------------------------------------------------------
+
+class DataSourceError(ValueError):
+    """A folder or CSV source that cannot be used, naming the argument that is wrong.
+
+    A :class:`ValueError`, so a caller that wraps every loader refusal catches it; ``key``
+    (``"train_dir"``, ``"test_csv"``, ``"path_column"``, ...) lets a caller with its own
+    config prefix the line with the dotted key.
+    """
+
+    def __init__(self, key: str, message: str) -> None:
+        super().__init__(message)
+        self.key = key
+
+
+@dataclass(frozen=True)
+class FileListing:
+    """The image files of a folder or CSV source, listed and labelled, nothing read.
+
+    :param source: ``"folder"`` or ``"csv"``.
+    :param class_names: One name per class; the label of a file is its index here.
+    :param train_paths, train_labels: Every train file and its label (``int32``).
+    :param test_paths, test_labels: The same for the test split, or ``None`` and ``None``.
+    """
+
+    source: str
+    class_names: List[str]
+    train_paths: List[str]
+    train_labels: np.ndarray
+    test_paths: Optional[List[str]]
+    test_labels: Optional[np.ndarray]
+
+    @property
+    def num_classes(self) -> int:
+        return len(self.class_names)
+
+
+def _has_image_suffix(name: str) -> bool:
+    return name.lower().endswith(IMAGE_SUFFIXES)
+
+
+def _folder_files(root: str, key: str) -> "dict[str, List[str]]":
+    """``{class name: sorted image paths}`` of the class directories of ``root``."""
+    if not os.path.isdir(root):
+        raise DataSourceError(key, f"{root!r} is not a directory")
+    classes = {}
+    for entry in sorted(os.scandir(root), key=lambda item: item.name):
+        if entry.name.startswith(".") or not entry.is_dir():
+            continue
+        files = sorted(
+            item.path for item in os.scandir(entry.path)
+            if item.is_file() and not item.name.startswith(".") and _has_image_suffix(item.name))
+        if not files:
+            raise DataSourceError(
+                key, f"class directory {entry.name!r} of {root!r} holds no images "
+                     f"({', '.join(IMAGE_SUFFIXES)})")
+        classes[entry.name] = files
+    if len(classes) < 2:
+        raise DataSourceError(
+            key, f"{root!r} holds {len(classes)} class directories; a classifier needs at least "
+                 "two (one directory of images per class)")
+    return classes
+
+
+def _same_classes(train: Sequence[str], test: Sequence[str], key: str) -> None:
+    """Refuse a test split whose classes are not exactly the train split's."""
+    if set(train) == set(test):
+        return
+    raise DataSourceError(
+        key, f"the test classes differ from the train classes: only in train "
+             f"{sorted(set(train) - set(test))}, only in test {sorted(set(test) - set(train))}")
+
+
+def _labelled(files: "dict[str, List[str]]", names: List[str]) -> Tuple[List[str], np.ndarray]:
+    paths = [path for name in names for path in files[name]]
+    labels = np.concatenate([np.full(len(files[name]), index, np.int32)
+                             for index, name in enumerate(names)])
+    return paths, labels
+
+
+def scan_image_folder(train_dir: str, test_dir: Optional[str] = None) -> FileListing:
+    """List the images of ``train_dir/<class>/*`` (and ``test_dir/<class>/*``), reading none.
+
+    A class is a sub-directory; hidden entries and files of other suffixes are skipped.
+
+    :param train_dir: The train root.
+    :param test_dir: The test root, or ``None`` for a source with no test split.
+    :return: The :class:`FileListing`; the class names are the sorted directory names.
+    :raises DataSourceError: A root that is not a directory, fewer than two classes, a class
+        directory with no image, or test classes that are not the train classes.
+    """
+    train = _folder_files(train_dir, "train_dir")
+    names = sorted(train)
+    train_paths, train_labels = _labelled(train, names)
+    test_paths = test_labels = None
+    if test_dir is not None:
+        test = _folder_files(test_dir, "test_dir")
+        _same_classes(names, sorted(test), "test_dir")
+        test_paths, test_labels = _labelled(test, names)
+    return FileListing("folder", names, train_paths, train_labels, test_paths, test_labels)
+
+
+def _csv_rows(
+        csv_path: str, key: str, path_column: str, label_column: str,
+) -> Tuple[List[str], List[str]]:
+    """``(image paths, label texts)`` of one CSV file; every file must exist and be an image."""
+    if not os.path.isfile(csv_path):
+        raise DataSourceError(key, f"{csv_path!r} is not a file")
+    base = os.path.dirname(os.path.abspath(csv_path))
+    paths: List[str] = []
+    labels: List[str] = []
+    problems: List[str] = []
+    with open(csv_path, newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        columns = list(reader.fieldnames or [])
+        for column_key, column in (("path_column", path_column), ("label_column", label_column)):
+            if column not in columns:
+                raise DataSourceError(
+                    column_key, f"column {column!r} is not in {csv_path!r} (columns: {columns})")
+        for number, row in enumerate(reader, start=2):
+            path, label = row.get(path_column), row.get(label_column)
+            if path is None or label is None or not path.strip() or not label.strip():
+                problems.append(f"line {number} has an empty {path_column!r} or {label_column!r}")
+                continue
+            path = path.strip()
+            full = path if os.path.isabs(path) else os.path.join(base, path)
+            if not _has_image_suffix(full):
+                problems.append(f"line {number}: {path!r} is not one of {IMAGE_SUFFIXES}")
+            elif not os.path.isfile(full):
+                problems.append(f"line {number}: {full!r} does not exist")
+            paths.append(full)
+            labels.append(label.strip())
+    if problems:
+        shown = "; ".join(problems[:5]) + (f"; and {len(problems) - 5} more" if len(problems) > 5 else "")
+        raise DataSourceError(key, f"{csv_path!r}: {shown}")
+    if not paths:
+        raise DataSourceError(key, f"{csv_path!r} holds no rows")
+    return paths, labels
+
+
+def _ordered_labels(labels: Sequence[str]) -> List[str]:
+    """Class names: the distinct labels, numerically ordered when all are integers."""
+    distinct = set(labels)
+    if all(re.fullmatch(r"-?[0-9]+", name) for name in distinct):
+        return sorted(distinct, key=int)
+    return sorted(distinct)
+
+
+def read_image_csv(
+        train_csv: str, test_csv: Optional[str] = None, *,
+        path_column: str = "path", label_column: str = "label",
+) -> FileListing:
+    """List the images named by a CSV file (and a test CSV), reading none.
+
+    A relative image path is relative to the CSV file's directory. The class names are the
+    distinct labels (integers in numeric order, otherwise sorted text).
+
+    :raises DataSourceError: A file that is missing, a missing column, an empty cell, an image
+        path that does not exist or is not an image suffix, fewer than two classes, or test
+        classes that are not the train classes.
+    """
+    train_paths, train_texts = _csv_rows(train_csv, "train_csv", path_column, label_column)
+    names = _ordered_labels(train_texts)
+    if len(names) < 2:
+        raise DataSourceError(
+            "train_csv", f"{train_csv!r} holds {len(names)} class(es); a classifier needs at least two")
+    index = {name: i for i, name in enumerate(names)}
+    train_labels = np.asarray([index[text] for text in train_texts], np.int32)
+    test_paths = test_labels = None
+    if test_csv is not None:
+        test_paths, test_texts = _csv_rows(test_csv, "test_csv", path_column, label_column)
+        _same_classes(names, sorted(set(test_texts)), "test_csv")
+        test_labels = np.asarray([index[text] for text in test_texts], np.int32)
+    return FileListing("csv", names, train_paths, train_labels, test_paths, test_labels)
+
+
+def _decode_file(path: tf.Tensor) -> tf.Tensor:
+    """One image file as a float32 ``(H, W, 3)`` tensor in [0, 1], at its own size."""
+    image = tf.io.decode_image(tf.io.read_file(path), channels=3, expand_animations=False)
+    image.set_shape([None, None, 3])
+    return tf.image.convert_image_dtype(image, tf.float32)
+
+
+def path_examples(
+        paths: Sequence[str], labels: np.ndarray, *, training: bool, seed: int,
+        augment: Optional[Augment], normalize: Callable[[tf.Tensor], tf.Tensor], size: int,
+) -> "tf.data.Dataset":
+    """The unbatched ``(image, label)`` examples of a list of image files.
+
+    The sibling of :func:`array_examples` for files, with the same order of work: training
+    reshuffles the PATHS every pass (cheap), then decodes, resizes to ``size`` x ``size`` (so
+    files of mixed sizes batch), augments on the [0, 1] image and normalizes; evaluation
+    keeps the list's order. ``from_tensor_slices(paths).map(decode)`` keeps the length known.
+    """
+    dataset = tf.data.Dataset.from_tensor_slices((list(paths), np.asarray(labels, np.int32)))
+    if training:
+        dataset = dataset.shuffle(len(paths), seed=seed, reshuffle_each_iteration=True)
+    resize = resizer(size)
+    dataset = dataset.map(lambda path, label: (resize(_decode_file(path)), label),
+                          num_parallel_calls=tf.data.AUTOTUNE)
+    if training:
+        dataset = with_hook(dataset, augment, seed)
+    return dataset.map(lambda image, label: (normalize(image), label),
+                       num_parallel_calls=tf.data.AUTOTUNE)
+
+
+def _fit_split_statistics(paths: Sequence[str], size: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Per-channel mean and standard deviation of the images at ``size`` x ``size``, in [0, 1].
+
+    One pass over ``paths`` (the FIT split: the selection and test images never contribute),
+    accumulated in float64.
+
+    :raises ValueError: A channel with no variation (its standard deviation would be 0).
+    """
+    resize = resizer(size)
+    dataset = (tf.data.Dataset.from_tensor_slices(list(paths))
+               .map(lambda path: resize(_decode_file(path)), num_parallel_calls=tf.data.AUTOTUNE)
+               .batch(64))
+    total, total_square, pixels = np.zeros(3), np.zeros(3), 0
+    for batch in dataset.as_numpy_iterator():
+        batch = batch.astype(np.float64)
+        total += batch.sum(axis=(0, 1, 2))
+        total_square += np.square(batch).sum(axis=(0, 1, 2))
+        pixels += batch.shape[0] * size * size
+    mean = total / pixels
+    std = np.sqrt(np.maximum(total_square / pixels - np.square(mean), 0.0))
+    if np.any(std < 1e-6):
+        raise ValueError(
+            f"the train images have no variation in channel(s) {np.flatnonzero(std < 1e-6).tolist()}"
+            f" (standard deviation {std.tolist()}), so they cannot be standardized; "
+            "use normalize='unit'")
+    return mean.astype(np.float32), std.astype(np.float32)
+
+
+@dataclass(frozen=True)
+class _FileSplit:
+    """The four attributes ``_finish_file_based`` reads of a loader split."""
+
+    dataset: "tf.data.Dataset"
+    num_samples: int
+    num_classes: int
+    class_names: List[str]
+
+
+def _load_file_listing(
+        listing: FileListing, *, batch_size: int, seed: int, image_size: int,
+        validation_split: Optional[float], eval_samples: int, normalize: str,
+        augment: Optional[Augment],
+        augment_from_mean: Optional[Callable[[Tuple[float, ...]], Optional[Augment]]],
+        max_samples: Optional[int], max_samples_flag: str,
+) -> ClassificationData:
+    """The record of a listed folder or CSV source; see :func:`load_folder_data`."""
+    if normalize not in NORMALIZE_MODES:
+        raise ValueError(f"normalize must be one of {NORMALIZE_MODES}, got {normalize!r}")
+    if augment is not None and augment_from_mean is not None:
+        raise ValueError("pass augment or augment_from_mean, not both")
+    if image_size < 1:
+        raise ValueError(f"image_size must be a positive int, got {image_size!r}")
+    split = DEFAULT_VALIDATION_SPLIT if validation_split is None else validation_split
+    train_all = np.asarray(listing.train_paths)
+    n_test_files = 0 if listing.test_paths is None else len(listing.test_paths)
+    train_idx, select_idx, test_order = seeded_split_indices(
+        len(train_all), n_test_files, seed, split, max_samples)
+    # Refuse a batch larger than the fit split now, in the caller's words, before any decode.
+    steps_per_epoch_for(len(train_idx), batch_size, max_samples_flag)
+
+    fit_paths = train_all[train_idx].tolist()
+    # DECISION plan-2026-10-30T132432-a865fa08/D-019: the statistics come from the FIT split only. Do NOT pass
+    # ``train_all`` (it holds the selection images, so the selection split would shape the
+    # inputs it then selects on) and never the test files; and do NOT borrow ImageNet's
+    # constants for an arbitrary folder, whose pixels they do not describe.
+    if normalize == "standardize" or augment_from_mean is not None:
+        logger.info(f"{listing.source}: statistics from one pass over {len(fit_paths)} fit images "
+                    f"at {image_size} px")
+        mean, std = _fit_split_statistics(fit_paths, image_size)
+    else:
+        mean, std = np.zeros(3, np.float32), np.ones(3, np.float32)
+    if augment_from_mean is not None:
+        augment = augment_from_mean(tuple(float(m) for m in mean))
+    spec = DatasetSpec(
+        listing.source, listing.num_classes, (image_size, image_size, 3),
+        tuple(float(m) for m in mean), tuple(float(s) for s in std),
+        tuple(listing.class_names), "files", len(train_all))
+    shift, scale = _stats(spec, 3, normalize)
+    shift_t, scale_t = tf.constant(shift), tf.constant(scale)
+
+    def norm(image: tf.Tensor) -> tf.Tensor:
+        return (image - shift_t) / scale_t
+
+    def evaluation(indices: np.ndarray, paths: np.ndarray, labels: np.ndarray) -> _FileSplit:
+        dataset = (path_examples(paths[indices].tolist(), labels[indices], training=False,
+                                 seed=0, augment=None, normalize=norm, size=image_size)
+                   .batch(batch_size))
+        return _FileSplit(dataset, int(len(indices)), spec.num_classes, listing.class_names)
+
+    train_labels = np.asarray(listing.train_labels)
+    train = _FileSplit(
+        path_examples(fit_paths, train_labels[train_idx], training=True, seed=seed,
+                      augment=augment, normalize=norm, size=image_size)
+        .batch(batch_size, drop_remainder=True),
+        int(len(train_idx)), spec.num_classes, listing.class_names)
+    select = evaluation(select_idx, train_all, train_labels)
+    test = None
+    if listing.test_paths is not None:
+        test = evaluation(test_order, np.asarray(listing.test_paths), np.asarray(listing.test_labels))
+    logger.info(
+        f"{listing.source}: train {train.num_samples}, select {select.num_samples}, "
+        f"test {0 if test is None else test.num_samples}; {spec.num_classes} classes; "
+        f"{normalize}, mean {spec.mean}, std {spec.std}")
+    return _finish_file_based(
+        spec, batch_size, "sparse", normalize, image_size, eval_samples, train, select, test,
+        selection_split=f"validation_split={split} of the train files (seeded permutation)",
+        test_split=("none: the data has no test split" if test is None
+                    else "the test files"),
+    )
+
+
+def load_folder_data(
+        train_dir: str,
+        *,
+        batch_size: int,
+        seed: int,
+        image_size: int,
+        test_dir: Optional[str] = None,
+        validation_split: Optional[float] = None,
+        eval_samples: int = DEFAULT_EVAL_SAMPLES,
+        normalize: str = "standardize",
+        augment: Optional[Augment] = None,
+        augment_from_mean: Optional[Callable[[Tuple[float, ...]], Optional[Augment]]] = None,
+        max_samples: Optional[int] = None,
+        max_samples_flag: str = "--max-samples",
+) -> ClassificationData:
+    """Load ``train_dir/<class>/*.png`` (and ``test_dir``) as ``(train, select, test)``.
+
+    The protocol is the other loaders': a seeded ``validation_split`` cut of the TRAIN files
+    is the selection split, the test files are only scored. Every image is resized to
+    ``image_size`` x ``image_size`` (bilinear, squashing the aspect ratio), so files of mixed
+    sizes batch. ``normalize="standardize"`` uses the per-channel mean and standard deviation
+    of ONE pass over the fit images (not the selection or test images), recorded as the
+    record's ``mean`` and ``std``.
+
+    :param train_dir: Root holding one directory of images per class.
+    :param batch_size: Batch size of all three pipelines (the train one drops the remainder).
+    :param seed: Seed of the cut, the shuffle and the augmentation.
+    :param image_size: The square input side; folders have no native size.
+    :param test_dir: The test root with the SAME class directories, or ``None``: the record's
+        ``test_ds`` is then ``None``, ``n_test`` 0 and ``x_fig`` empty.
+    :param validation_split: Fraction of the train files held out; ``None`` is
+        :data:`DEFAULT_VALIDATION_SPLIT`.
+    :param eval_samples: Test images kept in memory for figures; ``0`` keeps none.
+    :param normalize: ``"standardize"`` or ``"unit"`` (leave in [0, 1]).
+    :param augment: The train hook on the [0, 1] image (see :func:`load_classification_data`).
+    :param augment_from_mean: Instead of ``augment``: a function of the fit images' per-channel
+        mean returning the hook, for an op that needs it (random erasing paints the mean).
+        Asking for it makes the statistics pass run even for ``normalize="unit"``.
+    :param max_samples: Smoke-run cap on the train pool and the test split.
+    :param max_samples_flag: What the caller's user calls ``max_samples``, named in the
+        too-large-batch refusal.
+    :raises DataSourceError: The listing is unusable (see :func:`scan_image_folder`).
+    :raises ValueError: A bad option, a selection split holding out zero files, a batch larger
+        than the fit split, or images with no variation under ``standardize``.
+    """
+    return _load_file_listing(
+        scan_image_folder(train_dir, test_dir), batch_size=batch_size, seed=seed,
+        image_size=image_size, validation_split=validation_split, eval_samples=eval_samples,
+        normalize=normalize, augment=augment, augment_from_mean=augment_from_mean,
+        max_samples=max_samples, max_samples_flag=max_samples_flag)
+
+
+def load_csv_data(
+        train_csv: str,
+        *,
+        batch_size: int,
+        seed: int,
+        image_size: int,
+        test_csv: Optional[str] = None,
+        path_column: str = "path",
+        label_column: str = "label",
+        validation_split: Optional[float] = None,
+        eval_samples: int = DEFAULT_EVAL_SAMPLES,
+        normalize: str = "standardize",
+        augment: Optional[Augment] = None,
+        augment_from_mean: Optional[Callable[[Tuple[float, ...]], Optional[Augment]]] = None,
+        max_samples: Optional[int] = None,
+        max_samples_flag: str = "--max-samples",
+) -> ClassificationData:
+    """Load the images a CSV file lists (and ``test_csv``) as ``(train, select, test)``.
+
+    Everything but the listing is :func:`load_folder_data`'s: ``path_column`` holds the image
+    path (relative to the CSV's directory, or absolute) and ``label_column`` the class.
+
+    :raises DataSourceError: The listing is unusable (see :func:`read_image_csv`).
+    """
+    return _load_file_listing(
+        read_image_csv(train_csv, test_csv, path_column=path_column, label_column=label_column),
+        batch_size=batch_size, seed=seed, image_size=image_size,
+        validation_split=validation_split, eval_samples=eval_samples, normalize=normalize,
+        augment=augment, augment_from_mean=augment_from_mean, max_samples=max_samples,
+        max_samples_flag=max_samples_flag)
 
 
 # ---------------------------------------------------------------------

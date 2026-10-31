@@ -234,7 +234,7 @@ class TrainResult:
     success: bool
     best_metric: float
     test_metrics_best: Optional[Dict[str, float]]
-    test_metrics_final: Dict[str, float]
+    test_metrics_final: Optional[Dict[str, float]]
     summary_path: Path
 
 
@@ -439,6 +439,7 @@ class TaskTrainer:
         self, config: StrictConfig, data: Any, fit: FitState
     ) -> Evaluation:
         """Run the classification reporting sequence; see the module contract."""
+        from dl_techniques.utils.logger import logger
         from train.common import classification_run, evaluation
         from train.common.conformal import run_conformal
 
@@ -447,13 +448,31 @@ class TaskTrainer:
         test_best: Optional[Dict[str, float]] = None
         load_error: Optional[str] = None
         max_diff: Optional[float] = None
+        # DECISION plan-2026-10-30T132432-a865fa08/D-060: data with no test split
+        # (``test_ds`` is ``None``) skips the test metrics, the figures, conformal and the
+        # model analysis, which all read test images, and the summary says so. Do NOT
+        # substitute the selection split for the test split in any of them: it selected the
+        # best epoch, so every number would be optimistic and still look like a test number.
+        # The one thing kept is the reload check of ``best_model.keras``, run on the
+        # selection split with its metrics discarded.
+        has_test = data.test_ds is not None
         if checkpoint_cfg.save_best:
             # The in-memory model holds the BEST weights here (EarlyStopping restored them).
-            test_best, load_error, max_diff = classification_run.check_best_checkpoint(
-                fit.model, fit.run_dir, data.test_ds, evaluate=classification_run.evaluate_dict
+            reloaded, load_error, max_diff = classification_run.check_best_checkpoint(
+                fit.model,
+                fit.run_dir,
+                data.test_ds if has_test else data.select_ds,
+                evaluate=classification_run.evaluate_dict,
+                split_label="Test results" if has_test else "Selection results (reload check only)",
             )
+            test_best = reloaded if has_test else None
         conformal: Optional[Dict[str, Any]] = None
-        if analysis_cfg.conformal_alpha is not None:
+        if analysis_cfg.conformal_alpha is not None and not has_test:
+            logger.warning(
+                "analysis_args.conformal_alpha is set but the data has no test split to "
+                "calibrate on: conformal prediction is skipped"
+            )
+        elif analysis_cfg.conformal_alpha is not None:
             conformal = run_conformal(
                 fit.model,
                 data.test_ds,
@@ -472,10 +491,14 @@ class TaskTrainer:
             fit.run_dir,
             fit.vis_dir,
             fit.experiment_name,
-            analysis_cfg.model_analysis,
+            analysis_cfg.model_analysis and has_test,
             run_analysis=evaluation.run_model_analysis,
-            figures=analysis_cfg.figures,
-            analysis_off_hint="analysis_args.model_analysis=false",
+            figures=analysis_cfg.figures and has_test,
+            analysis_off_hint=(
+                "the data has no test split"
+                if analysis_cfg.model_analysis
+                else "analysis_args.model_analysis=false"
+            ),
         )
         # The last epoch's weights replace the best ones here.
         test_final, load_check = classification_run.finalize_last_epoch(
@@ -613,7 +636,16 @@ class TaskTrainer:
                             f"({family} recipe)",
                         )
                     )
-        if facts.dataset not in registry.MODELS[family].defaults.get("per_dataset", {}):
+        if facts.dataset in registry.FILE_DATASETS:
+            notices.append(
+                (
+                    "info",
+                    f"{facts.dataset} data: no legacy trainer reads files, so the {family} "
+                    "recipe is its base recipe with transform_args.augment=flip (D-060) and the "
+                    "statistics come from one pass over the fit split",
+                )
+            )
+        elif facts.dataset not in registry.MODELS[family].defaults.get("per_dataset", {}):
             notices.append(
                 (
                     "warning",
@@ -1160,7 +1192,9 @@ class TaskTrainer:
             "model": config.model,
             "model_family": family,
             "variant": variant,
-            "dataset": config.data.dataset,
+            "dataset": config.data.dataset if config.data.format == "builtin" else config.data.format,
+            "data_format": config.data.format,
+            "has_test_split": data.test_ds is not None,
             "params": params,
             "input_shape": list(data.input_shape),
             "num_classes": data.num_classes,
@@ -1215,6 +1249,13 @@ class TaskTrainer:
             "`test_metrics_best` is the reloaded best_model.keras, `test_metrics_final` "
             "the last epoch's weights; the test set never influenced selection",
         ]
+        if data.test_ds is None:
+            notes.append(
+                "the data has no test split: `test_metrics_best`, `test_metrics_final`, "
+                "`conformal` and `ece` are null, no figure was written and the model analysis "
+                "was skipped; the best_model.keras reload check ran on the selection split "
+                "(`best_checkpoint_max_abs_diff`)"
+            )
         if not checkpoint_cfg.save_best:
             notes.append(
                 "checkpoint_args.save_best is false: no best_model.keras was written, so "

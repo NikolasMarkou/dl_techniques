@@ -146,6 +146,8 @@ REGISTERED: List[Tuple[str, str]] = [
     ("train/api/args.py", "DebugArgs"),
     ("train/api/tasks/image_classification.py", "ImageClassificationConfig"),
     ("train/api/data_args.py", "BuiltinImageData"),
+    ("train/api/data_args.py", "FolderImageData"),
+    ("train/api/data_args.py", "CsvImageData"),
 ]
 
 # Fields known to be dead but OUT OF SCOPE of the sweep that introduced this

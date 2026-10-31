@@ -235,6 +235,7 @@ def summarize_fit(
 
 def check_best_checkpoint(
         model: keras.Model, run_dir: Path, test_ds: "tf.data.Dataset", evaluate: Evaluate,
+        split_label: str = "Test results",
 ) -> Tuple[Optional[Dict[str, float]], Optional[str], Optional[float]]:
     """Test metrics of the reloaded ``best_model.keras`` and its gap to ``model``.
 
@@ -246,6 +247,9 @@ def check_best_checkpoint(
     :param run_dir: The run directory holding ``best_model.keras``.
     :param test_ds: The batched test split (only scored, never used to select).
     :param evaluate: The caller's ``(model, dataset) -> {metric: float}`` seam.
+    :param split_label: How the log line names ``test_ds``. A caller whose data has no test
+        split passes the selection split to keep the reload check and names it here; the
+        metrics it gets back are then NOT test metrics.
     :return: ``(metrics, load_error, max_abs_diff)``; ``metrics`` and ``max_abs_diff``
         are ``None`` when the checkpoint is missing or does not load.
     """
@@ -253,12 +257,13 @@ def check_best_checkpoint(
         run_dir, lambda m: evaluate(m, test_ds))
     if reloaded is None:
         return None, load_error, None
-    logger.info(f"Test results (best_model.keras): {reloaded}")
+    logger.info(f"{split_label} (best_model.keras): {reloaded}")
     in_memory = evaluate(model, test_ds)
     gap = max(abs(in_memory[k] - reloaded[k]) for k in in_memory if k in reloaded)
     if gap > WEIGHT_MISMATCH_TOLERANCE:
         logger.warning(
-            f"best_model.keras and the in-memory best weights disagree on the test set by {gap:.3g}"
+            f"best_model.keras and the in-memory best weights disagree on the "
+            f"{split_label.lower()} data by {gap:.3g}"
         )
     return reloaded, None, gap
 
@@ -323,7 +328,7 @@ def finalize_last_epoch(
         model: keras.Model, last_weights: LastEpochWeights, data: ClassificationData,
         run_dir: Path, history: keras.callbacks.History, epochs_run: int,
         evaluate: Evaluate, save: bool = True,
-) -> Tuple[Dict[str, float], Optional[bool]]:
+) -> Tuple[Optional[Dict[str, float]], Optional[bool]]:
     """Restore the last epoch's weights, score them, save them, write the history, reload.
 
     The order is the contract: weights, final evaluation, save, history, load check. The
@@ -333,7 +338,9 @@ def finalize_last_epoch(
     :param model: The model, holding the best weights on entry and the last epoch's on
         return.
     :param last_weights: The :class:`LastEpochWeights` callback that ran during ``fit``.
-    :param data: The loaded data; ``test_ds`` and ``x_fig`` are read.
+    :param data: The loaded data; ``test_ds`` and ``x_fig`` are read. A ``test_ds`` of
+        ``None`` (no test split) skips the final evaluation, and the load check reads its
+        sample from the first batch of ``select_ds``.
     :param run_dir: The run directory; ``final_model.keras`` is written there.
     :param history: The ``History`` returned by ``model.fit``.
     :param epochs_run: The number of epochs that ran (for the log line).
@@ -341,7 +348,7 @@ def finalize_last_epoch(
     :param save: ``False`` skips the ``final_model.keras`` write and therefore the load
         check, which has nothing to reload; the history is still written.
     :return: ``(test_metrics_final, load_check)``; ``load_check`` is ``None`` when
-        ``save`` is ``False``.
+        ``save`` is ``False``, ``test_metrics_final`` when there is no test split.
     """
     # DECISION plan-2026-09-19T040641-db6932ec/D-012: the FINAL model is the last
     # epoch's weights, captured by ``LastEpochWeights``, because Keras 3.8
@@ -350,8 +357,10 @@ def finalize_last_epoch(
     # the best model and ``test_metrics_final`` would equal ``test_metrics_best`` by
     # construction, hiding any best-versus-final difference.
     model.set_weights(last_weights.weights)
-    test_metrics_final = evaluate(model, data.test_ds)
-    logger.info(f"Test results (final weights, epoch {epochs_run}): {test_metrics_final}")
+    test_metrics_final = None
+    if data.test_ds is not None:
+        test_metrics_final = evaluate(model, data.test_ds)
+        logger.info(f"Test results (final weights, epoch {epochs_run}): {test_metrics_final}")
     final_path = run_dir / "final_model.keras"
     if save:
         model.save(final_path)
@@ -360,7 +369,10 @@ def finalize_last_epoch(
     save_training_history_json(history, str(run_dir))
     load_check: Optional[bool] = None
     if save:
-        sample = data.x_fig[:LOAD_CHECK_SAMPLES]
+        if data.test_ds is None:
+            sample = next(iter(data.select_ds.take(1)))[0].numpy()[:LOAD_CHECK_SAMPLES]
+        else:
+            sample = data.x_fig[:LOAD_CHECK_SAMPLES]
         load_check = bool(validate_model_loading(
             str(final_path), sample, model.predict(sample, verbose=0)
         ))
@@ -375,7 +387,7 @@ def base_summary(
         summary_head: Dict[str, Any], hist: Dict[str, List[float]], epochs_run: int,
         epochs_requested: int, best_epoch: int, lr_reduction_epochs: Optional[List[int]],
         test_metrics_best: Optional[Dict[str, float]],
-        test_metrics_final: Dict[str, float], best_load_error: Optional[str],
+        test_metrics_final: Optional[Dict[str, float]], best_load_error: Optional[str],
         checkpoint_max_diff: Optional[float], epoch_times: List[float],
         fit_wall_seconds: float, visualizations: Dict[str, Any], load_check: Optional[bool],
         conformal: Optional[Dict[str, Any]], analysis: Dict[str, Any], notes: List[str],

@@ -97,6 +97,7 @@ from . import registry
 from .config import (
     PATH_FORM,
     StrictConfig,
+    candidate_groups,
     describe_annotation,
     invalid_value_message,
     load_yaml_mapping,
@@ -104,6 +105,7 @@ from .config import (
     parse_int,
     parse_json,
     unknown_key_message,
+    unknown_tag_message,
     validate,
 )
 from .errors import ConfigError, ConfigValidationError, DLTrainError
@@ -216,6 +218,12 @@ def _field_help_lines(cls: Type[StrictConfig], prefix: str = "") -> List[str]:
         annotation = hints[item.name]
         if isinstance(annotation, type) and issubclass(annotation, StrictConfig):
             lines += _field_help_lines(annotation, key)
+            continue
+        members = typing.get_args(annotation) if typing.get_origin(annotation) is Union else ()
+        if members and all(isinstance(m, type) and issubclass(m, StrictConfig) for m in members):
+            # A union of groups (``data``): the keys of each member, told apart by ``format``.
+            for member in members:
+                lines += _field_help_lines(member, key)
             continue
         if item.default is not dataclasses.MISSING:
             default = f" [default: {item.default!r}]"
@@ -524,9 +532,18 @@ def _coerce_value(
         if note is not None:
             errors.append(invalid_value_message(path, annotation, raw, note))
         return value
-    for member in _members(annotation):
-        if isinstance(member, type) and issubclass(member, StrictConfig):
-            return _coerce_group(member, raw, path, errors)
+    groups = [
+        member
+        for member in _members(annotation)
+        if isinstance(member, type) and issubclass(member, StrictConfig)
+    ]
+    if groups:
+        # A union of groups (``data``) is told apart by its ``format`` key.
+        candidates = candidate_groups(groups, raw)
+        if not candidates:
+            errors.append(unknown_tag_message(path, groups, raw))
+            return None
+        return _coerce_group(candidates[0], raw, path, errors)
     if annotation is Any:
         return {
             key: _coerce_value(Any, value, f"{path}.{key}", errors)
@@ -588,8 +605,10 @@ def _expand_path_forms(cls: Type[StrictConfig], mapping: Mapping[str, Any]) -> D
     expanded = dict(mapping)
     for field in dataclasses.fields(cls):
         value = expanded.get(field.name)
-        if field.metadata.get(PATH_FORM) and isinstance(value, str):
-            expanded[field.name] = load_yaml_mapping(value)
+        reader = field.metadata.get(PATH_FORM)
+        if reader and isinstance(value, str):
+            # ``PATH_FORM`` is ``True`` (read the YAML as it is) or the field's own reader.
+            expanded[field.name] = reader(value) if callable(reader) else load_yaml_mapping(value)
     return expanded
 
 

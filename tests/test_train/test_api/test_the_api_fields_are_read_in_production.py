@@ -34,7 +34,7 @@ from typing import Dict, List, Set, Tuple
 import pytest
 
 from train.api import args as args_module
-from train.api.data_args import BuiltinImageData
+from train.api.data_args import BuiltinImageData, CsvImageData, FolderImageData
 from train.api.tasks.image_classification import ImageClassificationConfig
 
 from ._groups import args_groups
@@ -49,15 +49,7 @@ SCANNED = sorted((SRC / "train" / "api").rglob("*.py")) + [
 
 #: ``(class name, field)`` -> why the field has no attribute read. One row per field, each
 #: with a reason; a row for a field that IS read fails ``test_no_exemption_is_stale``.
-EXEMPT: Dict[Tuple[str, str], str] = {
-    (
-        "BuiltinImageData",
-        "format",
-    ): "read as the mapping key ``given['format']`` in ``load_data_config`` (and "
-    "``FORMATS``) before the instance exists; the instance's own value is never "
-    "consulted while ``builtin`` is the only format (Step 25 adds the others and the "
-    "dispatch on it)",
-}
+EXEMPT: Dict[Tuple[str, str], str] = {}
 
 
 # ---------------------------------------------------------------------
@@ -142,8 +134,8 @@ def production_reads() -> Dict[str, List[str]]:
 
 
 def classes_checked() -> List[type]:
-    """The seven groups (found by looking), the task config and the data config."""
-    return [*args_groups(), ImageClassificationConfig, BuiltinImageData]
+    """The seven groups (found by looking), the task config and the three data configs."""
+    return [*args_groups(), ImageClassificationConfig, BuiltinImageData, FolderImageData, CsvImageData]
 
 
 def fields_of(cls: type) -> List[str]:
@@ -192,9 +184,9 @@ def test_no_exemption_is_stale(reads):
         )
 
 
-def test_the_scan_covers_the_nine_classes_and_the_files_it_names():
+def test_the_scan_covers_the_eleven_classes_and_the_files_it_names():
     assert len(args_groups()) == 7, "the brief names seven groups; a new one is a new row to review"
-    assert len(classes_checked()) == 9
+    assert len(classes_checked()) == 11
     assert all(fields_of(cls) for cls in classes_checked())
     assert all(path.is_file() for path in SCANNED)
     assert SRC / "train" / "api" / "trainer.py" in SCANNED

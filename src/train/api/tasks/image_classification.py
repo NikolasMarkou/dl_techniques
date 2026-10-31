@@ -17,8 +17,9 @@ Interface contract
 
 ``ImageClassificationTrainer(config)``
     :class:`~train.api.trainer.TaskTrainer` with ``task = "image_classification"``.
-    ``describe_data`` reads the dataset table; ``build_data`` goes through
-    ``build_augment`` and :func:`~train.api.data_args.load_builtin_data`;
+    ``describe_data`` reads the dataset table, or LISTS the files of a folder or csv
+    (no image is read); ``build_data`` goes through ``build_augment`` and
+    :func:`~train.api.data_args.load_image_data`;
     ``build_model`` through the family's resolver and
     :func:`~train.api.recipes.build_model`; the loss is
     ``SparseCategoricalCrossentropy(from_logits=True)`` and the metrics are
@@ -29,8 +30,10 @@ Interface contract
     :param out: run directory (a ``str`` or a ``Path``), or ``"auto"``.
     :param model: ``"family/variant"``, e.g. ``"vit/vit_pico"``.
     :param data: a mapping (``{"dataset": "cifar10"}``), a
-        :class:`~train.api.data_args.BuiltinImageData` or the path of a YAML file
-        holding one.
+        :class:`~train.api.data_args.BuiltinImageData`,
+        :class:`~train.api.data_args.FolderImageData` or
+        :class:`~train.api.data_args.CsvImageData` (a mapping's ``format`` says which;
+        ``builtin`` when absent), or the path of a YAML file holding one.
     :param epochs: / ``batch_size`` / ``devices``: ``"auto"`` takes the family's
         recipe (``devices``: ``None``, every visible GPU).
     :param seed: seeds Python, numpy and Keras, the split and the augmentation;
@@ -84,7 +87,14 @@ from ..args import (
     TransformArgs,
 )
 from ..config import AUTO, DEFAULT_SEED, PATH_FORM, Auto, StrictConfig, validate
-from ..data_args import BuiltinImageData, DataFacts, builtin_facts, load_builtin_data, load_data_config
+from ..data_args import (
+    DataFacts,
+    ImageData,
+    image_facts,
+    load_data_config,
+    load_image_data,
+    read_data_file,
+)
 from ..trainer import TaskTrainer, TrainResult, config_problems
 
 # ---------------------------------------------------------------------
@@ -109,11 +119,12 @@ class ImageClassificationConfig(StrictConfig):
     model: str = dataclasses.field(
         metadata={"help": "family/variant, e.g. vit/vit_pico; python -m train list_models lists them"}
     )
-    data: BuiltinImageData = dataclasses.field(
+    data: ImageData = dataclasses.field(
         metadata={
-            "help": "the dataset and its split options (data.dataset=cifar10), or the "
-            "path of a YAML file holding them (data=data.yaml)",
-            PATH_FORM: True,
+            "help": "the data and its split options: data.dataset=cifar10, or "
+            "data.format=folder data.train_dir=..., or data.format=csv data.train_csv=...; "
+            "or the path of a YAML file holding them (data=data.yaml)",
+            PATH_FORM: read_data_file,
         }
     )
     epochs: Auto[int] = dataclasses.field(
@@ -169,27 +180,42 @@ class ImageClassificationTrainer(TaskTrainer):
     def describe_data(self, config: ImageClassificationConfig) -> DataFacts:
         transform_cfg: TransformArgs = config.transform_args
         size = transform_cfg.image_size
-        return builtin_facts(config.data, None if size == AUTO else size)
+        return image_facts(config.data, None if size == AUTO else size)
 
     def build_data(self, config: ImageClassificationConfig, context: AutoContext) -> Any:
-        from dl_techniques.datasets.vision.classification import get_spec
         from train.common.image_augment import build_augment
 
         transform_cfg: TransformArgs = config.transform_args
-        # DECISION plan-2026-10-30T132432-a865fa08/D-049: random erasing paints the
-        # dataset's per-channel MEAN, as ``train_cliffordnet.py`` does. Do NOT leave
-        # ``fill`` at ``build_op``'s default of zero: it erases to black on the [0, 1]
-        # image, which is -1.99 after standardize, where the legacy trainer erases to 0.
-        augment = build_augment(
-            transform_cfg.augment,
-            random_erasing_prob=transform_cfg.random_erasing_prob,
-            fill=get_spec(config.data.dataset).mean,
-        )
-        return load_builtin_data(
-            config.data,
+        data_cfg: ImageData = config.data
+
+        def hook(fill: Any) -> Any:
+            # DECISION plan-2026-10-30T132432-a865fa08/D-049: random erasing paints the
+            # dataset's per-channel MEAN, as ``train_cliffordnet.py`` does. Do NOT leave
+            # ``fill`` at ``build_op``'s default of zero: it erases to black on the [0, 1]
+            # image, which is -1.99 after standardize, where the legacy trainer erases to 0.
+            return build_augment(
+                transform_cfg.augment,
+                random_erasing_prob=transform_cfg.random_erasing_prob,
+                fill=fill,
+            )
+
+        augment, from_mean = None, None
+        if data_cfg.format == "builtin":
+            from dl_techniques.datasets.vision.classification import get_spec
+
+            augment = hook(get_spec(data_cfg.dataset).mean)
+        elif transform_cfg.random_erasing_prob:
+            # Folder and csv data have no published statistics: the loader computes the
+            # mean from the fit split and builds the hook with it (D-049 for file data).
+            from_mean = hook
+        else:
+            augment = hook((0.0,))
+        return load_image_data(
+            data_cfg,
             batch_size=config.batch_size,
             seed=config.seed,
             augment=augment,
+            augment_from_mean=from_mean,
             normalize=transform_cfg.normalize,
             image_size=transform_cfg.image_size,
             loader=context.defaults.get("loader"),
@@ -254,7 +280,7 @@ def train_image_classification(
     *,
     out: Union[str, Path],
     model: str,
-    data: Union[BuiltinImageData, Mapping[str, Any], str, Path],
+    data: Union[ImageData, Mapping[str, Any], str, Path],
     epochs: Union[int, str] = AUTO,
     batch_size: Union[int, str] = AUTO,
     seed: int = DEFAULT_SEED,

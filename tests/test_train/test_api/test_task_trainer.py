@@ -436,7 +436,7 @@ def test_the_transform_group_reaches_the_augment_hook_and_the_loader(world, tmp_
         return "data"
 
     monkeypatch.setattr(augment_module, "build_augment", augment)
-    monkeypatch.setattr(task_module, "load_builtin_data", loader)
+    monkeypatch.setattr(task_module, "load_image_data", loader)
     config = make_config(
         tmp_path / "run",
         **{
@@ -456,7 +456,7 @@ def test_the_transform_group_reaches_the_augment_hook_and_the_loader(world, tmp_
         "cifar_autoaugment",
         {"random_erasing_prob": 0.25, "fill": get_spec("imagenette").mean},
     )
-    assert seen["loader"]["augment"] == "hook"
+    assert seen["loader"]["augment"] == "hook" and seen["loader"]["augment_from_mean"] is None
     assert (seen["loader"]["normalize"], seen["loader"]["image_size"]) == ("unit", 64)
     assert ImageClassificationTrainer(resolved).describe_data(resolved).image_size == 64
 

@@ -132,6 +132,13 @@ def leaf_keys(cls: type, prefix: str = "") -> List[str]:
     for field in dataclasses.fields(cls):
         annotation = hints[field.name]
         key = f"{prefix}.{field.name}" if prefix else field.name
+        if typing.get_origin(annotation) is typing.Union and all(
+            isinstance(m, type) and issubclass(m, StrictConfig) for m in typing.get_args(annotation)
+        ):
+            # A union of groups (``data``) is walked as its FIRST member, the default
+            # format (``builtin``); the folder and csv keys are driven by
+            # ``test_folder_and_csv_data`` (Step 25) and get rows here in Step 28.
+            annotation = typing.get_args(annotation)[0]
         if isinstance(annotation, type) and issubclass(annotation, StrictConfig):
             keys += leaf_keys(annotation, key)
         else:
@@ -227,8 +234,12 @@ def test_the_table_covers_every_leaf_key_of_the_task_config_exactly():
 
 
 def test_a_single_valued_key_has_exactly_one_legal_value():
-    hints = typing.get_type_hints(typing.get_type_hints(Config)["data"])
-    assert typing.get_args(hints["format"]) == ("builtin",)
+    members = typing.get_args(typing.get_type_hints(Config)["data"])
+    assert [typing.get_args(typing.get_type_hints(m)["format"]) for m in members] == [
+        ("builtin",),
+        ("folder",),
+        ("csv",),
+    ]
 
 
 def test_the_companions_are_legal_tokens_of_the_base_line():

@@ -38,6 +38,8 @@ _LAZY: Dict[str, str] = {
     "write_resolved": ".run_dir",
     "main": ".cli",
     "BuiltinImageData": ".data_args",
+    "FolderImageData": ".data_args",
+    "CsvImageData": ".data_args",
     "load_data_config": ".data_args",
     "TaskTrainer": ".trainer",
     "TrainResult": ".trainer",

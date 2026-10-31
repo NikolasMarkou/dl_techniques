@@ -72,6 +72,7 @@ from typing import (
     Literal,
     Mapping,
     Optional,
+    Sequence,
     Tuple,
     Type,
     TypeVar,
@@ -98,6 +99,9 @@ DEFAULT_SEED = 42
 #: Field-metadata key of a group that may also be given as the path of a YAML
 #: file holding it (``data=data.yaml``). The Python function accepts that form
 #: for such a field, so the command line and a ``config=`` file accept it too.
+#: The value is ``True`` (the file is read as plain YAML) or a callable
+#: ``reader(path) -> mapping`` that reads it its own way (``data``'s anchors the
+#: relative paths it holds to the file).
 PATH_FORM = "path_form"
 
 #: The pattern of an integer, shared by the command line and the YAML loader so
@@ -150,6 +154,48 @@ class StrictConfig:
 
 def _is_config_class(annotation: Any) -> bool:
     return isinstance(annotation, type) and issubclass(annotation, StrictConfig)
+
+
+#: The field that names which member of a union of groups a mapping is (``data.format``).
+TAG = "format"
+
+
+def _tag_choices(member: Any) -> Tuple[Any, ...]:
+    """Return the values the group ``member`` allows for :data:`TAG`, or ``()`` if untagged."""
+    hint = typing.get_type_hints(member).get(TAG)
+    return typing.get_args(hint) if typing.get_origin(hint) is Literal else ()
+
+
+def candidate_groups(groups: Sequence[Any], mapping: Mapping[str, Any]) -> List[Any]:
+    """Return the members of a union of groups that ``mapping`` may be.
+
+    A union is TAGGED when a member declares ``format: Literal[...]``. A mapping then
+    is the member whose literal equals its ``format`` (the first member when it has
+    none, which is the default format), and is NONE of them when the value names
+    no member. An untagged union returns every member, in order.
+
+    :param groups: the group classes of one union, in annotation order.
+    :param mapping: the raw mapping being validated or coerced.
+    :return: the candidates; empty only when ``mapping[TAG]`` names no member.
+    """
+    # DECISION plan-2026-10-30T132432-a865fa08/D-060: a tagged union is told apart by its ``format`` key, not by
+    # "the first member the mapping fits". Do NOT drop this for the untagged rule: a
+    # folder mapping with a stray ``dataset`` key then reports the NEAREST member's
+    # complaint about ``format``, and ``data.format=folder`` on the command line is
+    # coerced as the first member and refuses ``data.train_dir`` as an unknown key.
+    if not any(_tag_choices(member) for member in groups):
+        return list(groups)
+    if TAG not in mapping:
+        return list(groups[:1])
+    return [member for member in groups if mapping[TAG] in _tag_choices(member)]
+
+
+def unknown_tag_message(path: str, groups: Sequence[Any], mapping: Mapping[str, Any]) -> str:
+    """Return the line for a ``format`` value that names no member of the union."""
+    choices = tuple(choice for member in groups for choice in _tag_choices(member))
+    return invalid_value_message(
+        join_path(path, TAG), Literal[choices], mapping.get(TAG)  # type: ignore[valid-type]
+    )
 
 
 #: Longest ``repr`` an error line quotes; a 5000-digit token must not fill the screen.
@@ -295,8 +341,12 @@ def _check(annotation: Any, value: Any, path: str, errors: List[str]) -> Any:
             # A mapping can only be meant for a group member: the first member
             # it fits wins, and when it fits none, the member it came closest
             # to (fewest problems) reports, not one vague line (D-034).
+            candidates = candidate_groups(groups, value)
+            if not candidates:
+                errors.append(unknown_tag_message(path, groups, value))
+                return value
             closest: Optional[List[str]] = None
-            for member in groups:
+            for member in candidates:
                 attempt = []
                 converted = _check(member, value, path, attempt)
                 if not attempt:

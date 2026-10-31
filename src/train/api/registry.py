@@ -59,6 +59,20 @@ _ATTR_PATH = re.compile(r"^[A-Za-z_][\w.]*:[A-Za-z_][\w.]*$")
 #: Keys of ``ModelSpec.defaults`` that hold overlays, not recipe values.
 OVERLAY_KEYS = ("per_dataset", "per_variant")
 
+#: The ``DataFacts.dataset`` names of file-based data (the ``format`` of a folder or
+#: csv config). ``test_folder_and_csv_data`` holds them equal to the non-builtin
+#: formats of ``train.api.data_args``, which this module does not import.
+FILE_DATASETS = ("folder", "csv")
+
+#: What every family's recipe says about file-based data, laid over its base recipe
+#: before its own overlays. NEW BEHAVIOUR, not a legacy trainer's default (no legacy
+#: trainer reads files): a horizontal flip, the one augmentation that is safe for any
+#: photographs, in place of the base recipe's.
+# DECISION plan-2026-10-30T132432-a865fa08/D-060: Do NOT give file data a family's per-dataset recipe (cifar's
+# pad-crop and autoaugment are tuned for 32 px tiles); the overlay is one flip, and an
+# explicit ``transform_args.augment`` still wins (D-010).
+FILE_DATA_OVERLAY: Dict[str, Any] = {"transform_args": {"augment": "flip"}}
+
 
 def load_attr(path: str) -> Any:
     """Import ``path`` (``"module:attr"``) and return the attribute.
@@ -121,8 +135,9 @@ class ModelSpec:
         :param dataset: dataset name, e.g. ``"cifar10"``.
         :param variant: variant name, e.g. ``"cn_64_5"``.
         :return: a deep copy of :attr:`defaults` without its ``per_dataset``
-            and ``per_variant`` keys, with ``per_dataset[dataset]`` and then
-            ``per_variant[variant]`` laid over it. An overlay entry that is a
+            and ``per_variant`` keys, with :data:`FILE_DATA_OVERLAY` (for the
+            dataset names ``"folder"`` and ``"csv"``), ``per_dataset[dataset]`` and
+            then ``per_variant[variant]`` laid over it. An overlay entry that is a
             mapping is merged key by key into the base entry of the same name
             (a dataset changes ``optim_args.lr`` and leaves its other keys); any
             other value replaces. A dataset or variant with no overlay gets
@@ -133,8 +148,13 @@ class ModelSpec:
             for key, value in self.defaults.items()
             if key not in OVERLAY_KEYS
         }
-        for table, name in (("per_dataset", dataset), ("per_variant", variant)):
-            for key, value in self.defaults.get(table, {}).get(name, {}).items():
+        overlays = [
+            FILE_DATA_OVERLAY if dataset in FILE_DATASETS else {},
+            self.defaults.get("per_dataset", {}).get(dataset, {}),
+            self.defaults.get("per_variant", {}).get(variant, {}),
+        ]
+        for overlay in overlays:
+            for key, value in overlay.items():
                 if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
                     merged[key] = {**merged[key], **copy.deepcopy(dict(value))}
                 else:

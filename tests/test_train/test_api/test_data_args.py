@@ -128,8 +128,8 @@ def test_an_instance_is_returned_as_it_is():
 
 
 def test_an_unknown_format_is_refused_naming_the_choices():
-    with pytest.raises(ConfigError, match="'data.format'.*builtin"):
-        load_data_config({"dataset": "mnist", "format": "folder"})
+    with pytest.raises(ConfigError, match="'data.format'.*builtin, folder, csv"):
+        load_data_config({"dataset": "mnist", "format": "parquet"})
 
 
 @pytest.mark.parametrize("value", [3, ["cifar10"], None])
