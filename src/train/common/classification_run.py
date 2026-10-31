@@ -409,7 +409,9 @@ def base_summary(
     :param checkpoint_max_diff: From :func:`check_best_checkpoint`.
     :param epoch_times: Seconds per epoch.
     :param fit_wall_seconds: Wall time of ``fit``.
-    :param visualizations: From :func:`report_best_weights`; it carries ``ece``.
+    :param visualizations: From :func:`report_best_weights`; it carries ``ece``, which the
+        summary repeats at top level. A record without the key (another task's) writes no
+        ``ece`` key.
     :param load_check: From :func:`finalize_last_epoch`.
     :param conformal: The conformal record, or ``None``.
     :param analysis: From :func:`report_best_weights`.
@@ -437,7 +439,8 @@ def base_summary(
         "best_checkpoint_max_abs_diff": checkpoint_max_diff,
         "epoch_times": epoch_times,
         "fit_wall_seconds": fit_wall_seconds,
-        "ece": visualizations["ece"],
+        # A task whose figure record has no `ece` (not a probability classifier) writes no key.
+        **({"ece": visualizations["ece"]} if "ece" in visualizations else {}),
         "visualizations": visualizations,
         "model_loading_validated": load_check,
         "conformal": conformal,

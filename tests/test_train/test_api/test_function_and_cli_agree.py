@@ -29,7 +29,10 @@ import pytest
 import train.api.recipes as recipes
 from train.api import cli, registry
 from train.api.tasks import register_builtin_tasks
-from train.api.tasks.image_classification import train_image_classification
+from train.api.tasks.image_classification import (
+    ImageClassificationTrainer,
+    train_image_classification,
+)
 
 from tests.classification_fakes import use_tiny_raw
 from tests.results_session_guard import results_entries, results_root
@@ -171,6 +174,82 @@ def test_vacuity_one_changed_value_changes_the_bytes_in_that_key_only(runs):
     assert read(runs.base, "cli", "config.json") != read(runs.base, "other_seed", "config.json")
     changed = {key for key in first if first[key] != other[key]}
     assert changed == {"seed"} and first["out"] == other["out"]
+
+
+# ---------------------------------------------------------------------
+# The same config, for every family
+# ---------------------------------------------------------------------
+
+#: One small variant of each of the six families (the smallest that fits 32x32 inputs).
+FAMILY_VARIANTS = (
+    "vit/vit_pico",
+    "resnet/resnet18",
+    "convnext_v1/cifar10",
+    "convnext_v2/atto",
+    "cliffordnet/nano",
+    "cliffordnet_hier/hier_345",
+)
+
+#: The run of :data:`KEYWORDS` and :data:`TOKENS` without the ViT-only ``model_args`` and with
+#: the family named, in both spellings.
+FAMILY_KEYWORDS = {
+    key: value for key, value in KEYWORDS.items() if key not in ("model", "model_args")
+}
+FAMILY_TOKENS = tuple(
+    token
+    for token in TOKENS
+    if not token.startswith(("model=", "model_args."))
+)
+
+
+class StopAtBuild(Exception):
+    """Raised in place of ``build_model``: ``config.json`` is already on disk by then."""
+
+
+@pytest.fixture(scope="module", params=FAMILY_VARIANTS)
+def family_runs(world, request, tmp_path_factory):
+    """Run the function, then the CLI, for one family up to the model build.
+
+    ``config_requested.json`` and ``config.json`` are written before the model is built
+    and never written again (``trainer.py``, step 3 of the sequence), so a run stopped
+    at ``build_model`` leaves the same two files a finished one does; the full fits of the
+    six families were also run once (``scratch_step11/six_family.log``, 6 passed in 575 s)
+    and are too slow for a test that stays in the suite. The ViT arm above is a real fit.
+    """
+    model = request.param
+    base = tmp_path_factory.mktemp("agree_" + model.replace("/", "_"))
+    out = base / "run"
+    reached = []
+
+    def stop(self, config, context, data):
+        reached.append(context.family)
+        raise StopAtBuild
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.chdir(base)
+        patch.setattr(ImageClassificationTrainer, "build_model", stop)
+        with pytest.raises(StopAtBuild):
+            train_image_classification(out=str(out), model=model, **FAMILY_KEYWORDS)
+        out.rename(base / "function")
+        try:
+            cli.main(["image_classification", f"out={out}", f"model={model}", *FAMILY_TOKENS])
+        except StopAtBuild:
+            pass
+        out.rename(base / "cli")
+    return model, base / "function", base / "cli", reached
+
+
+def test_every_family_writes_the_same_config_bytes_by_function_and_by_cli(family_runs):
+    model, function_dir, cli_dir, reached = family_runs
+    family, _ = model.split("/")
+    assert reached == [family, family], model  # both entry points got as far as the build
+    for name in ("config.json", "config_requested.json"):
+        assert (function_dir / name).read_bytes() == (cli_dir / name).read_bytes(), (model, name)
+    # The pair is not the ViT pair six times: the file names the family it ran.
+    resolved = json.loads((cli_dir / "config.json").read_text())
+    assert resolved["model"] == model
+    assert resolved["epochs"] == 1 and resolved["seed"] == 7
+    assert resolved["optim_args"]["lr"] == 1e-3
 
 
 # ---------------------------------------------------------------------

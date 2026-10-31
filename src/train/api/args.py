@@ -534,7 +534,7 @@ class AnalysisArgs(StrictConfig):
         default=True, metadata={"help": "run the full model analysis once after training"}
     )
     figures: bool = dataclasses.field(
-        default=True, metadata={"help": "write the classification figures"}
+        default=True, metadata={"help": "write the task's figures"}
     )
     conformal_alpha: Optional[float] = dataclasses.field(
         default=None,

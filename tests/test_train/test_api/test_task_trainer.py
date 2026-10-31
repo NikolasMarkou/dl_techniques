@@ -568,6 +568,7 @@ def test_the_neutral_defaults_of_the_optional_hooks_carry_no_classification(worl
         task_notes = TaskTrainer.task_notes
         files_to_scan = TaskTrainer.files_to_scan
         recipe_notices = TaskTrainer.recipe_notices
+        figure_callbacks = TaskTrainer.figure_callbacks
 
     task = Bare(make_config(tmp_path / "run"))
     assert task.epoch_line_metrics(task.config) == ("loss", "val_loss")
@@ -575,6 +576,7 @@ def test_the_neutral_defaults_of_the_optional_hooks_carry_no_classification(worl
     assert task.task_notes(task.config, {}, 0.0, object()) == []
     assert task.files_to_scan(object()) is None
     assert task.recipe_notices(None, "vit") == []
+    assert task.figure_callbacks(task.config, object(), tmp_path) == []
     assert TaskTrainer.success_metric == ""
 
 

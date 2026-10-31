@@ -64,7 +64,8 @@ Interface contract
     6. ``initial_loss_check``;
     7. callbacks: ``LearningRateLogger(at_epoch_start=True)`` first, then
        ``create_callbacks``, ``LastEpochWeights``, ``extra_callbacks``,
-       ``EpochLogLine``, the dashboard, and the resume trio last
+       ``EpochLogLine``, the task's ``figure_callbacks`` and the dashboard (both only
+       while ``analysis_args.figures`` is true), and the resume trio last
        (``RestoreFitState`` on a resume only, ``FitStateSidecar``,
        ``BackupAndRestore``; the order is ``train.common.resume_state``'s);
     8. ``task.json`` (the task's :meth:`~TaskTrainer.task_record`, when it gives one;
@@ -155,6 +156,15 @@ Hooks (override in a task)
     set ``success_metric`` (it is written to the summary). Smoke runs apply no bar.
 ``extra_callbacks(config, data)``
     Callbacks inserted after ``LastEpochWeights``. Default: none.
+``figure_callbacks(config, data, vis_dir)``
+    The task's per-epoch figure callbacks (a prediction grid drawn every few epochs, say). Called
+    only while ``analysis_args.figures`` is true, with ``vis_dir`` already created; the callbacks
+    go after ``EpochLogLine`` and before the dashboard, so they must not edit ``logs``. The end
+    of run figures belong to ``evaluate_and_report``, which reads the same switch through
+    ``FitState.vis_dir``. The training dashboard is not part of this hook: it is the base
+    class's, it reads whichever of ``loss``, ``accuracy``, ``top_5_accuracy``, ``miou`` and
+    ``lr`` the logs hold (only ``loss`` or ``val_loss`` is needed), and a task that returns
+    nothing here still gets it. Default: none.
 ``epoch_line_metrics(config)``
     The history keys the one-line-per-epoch log prints. Default: ``("loss", "val_loss")``.
 ``evaluate_and_report(config, data, fit)``
@@ -565,6 +575,16 @@ class TaskTrainer:
         raise NotImplementedError
 
     def extra_callbacks(self, config: StrictConfig, data: Any) -> List[Any]:
+        return []
+
+    def figure_callbacks(self, config: StrictConfig, data: Any, vis_dir: Path) -> List[Any]:
+        """Return the task's per-epoch figure callbacks; see the module contract.
+
+        :param vis_dir: the existing ``visualizations`` directory of the run; the only place
+            these callbacks write under.
+        :return: callbacks placed after ``EpochLogLine`` and before the dashboard. Called only
+            while ``analysis_args.figures`` is true. Default: none.
+        """
         return []
 
     def task_metadata(self, config: StrictConfig, data: Any) -> Dict[str, Any]:
@@ -1362,6 +1382,18 @@ class TaskTrainer:
         # must stay outside this line's clock).
         callbacks.append(epoch_line)
         if analysis_cfg.figures:
+            # The task's own per-epoch figures: after every callback that edits `logs`,
+            # before the dashboard (`SegmentationGridCallback` in
+            # `train.convunext.segmentation_viz` documents the same order).
+            callbacks.extend(self.figure_callbacks(config, data, vis_dir))
+            # DECISION plan-2026-10-31T180033-2faf890a/D-022: the dashboard stays HERE, not
+            # behind `figure_callbacks`. It reads only the keys the logs hold (`loss`,
+            # `accuracy`, `miou`, `lr`, ...) and draws a panel per key found, so a task
+            # without `accuracy` needs nothing; and it needs the baseline, the experiment
+            # name and the resumed rows, which the hook's signature does not carry. Do NOT
+            # move it into the classification task: a second task would then have to
+            # remember it, and its position (last, after `EpochLogLine`) would be each
+            # task's to get right.
             # Last: it reads `logs['lr']`, written by LearningRateLogger above.
             callbacks.append(
                 TrainingDashboardCallback(
