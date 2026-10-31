@@ -136,10 +136,15 @@ def killed(world, tmp_path_factory):
     return run_dir
 
 
+#: Written over the copy's task.json before the resume: a resume that rewrote the file would erase it.
+PLANTED_TASK_JSON = '{"planted": "by the test"}\n'
+
+
 @pytest.fixture(scope="module")
 def resumed(world, killed, tmp_path_factory):
     run_dir = tmp_path_factory.mktemp("resumed") / "copy"
     shutil.copytree(killed, run_dir)
+    (run_dir / "task.json").write_text(PLANTED_TASK_JSON)
     with open(run_dir / "training_log.csv", newline="") as handle:
         header = next(csv.reader(handle))
     # The kill that fell between a CSV row and the backup: epoch 2's row exists, its backup does not.
@@ -243,6 +248,14 @@ def test_the_two_configs_are_not_written_again(killed, resumed):
     _, run_dir = resumed
     for name in ("config_requested.json", "config.json"):
         assert sha(run_dir / name) == sha(killed / name)
+
+
+def test_a_killed_run_already_has_its_task_json_and_a_resume_leaves_it_alone(killed, resumed):
+    from train.api.predictor import read_record
+
+    assert read_record(killed / "task.json")["class_names"]  # written before `fit`, so a killed run is usable
+    _, run_dir = resumed
+    assert (run_dir / "task.json").read_text() == PLANTED_TASK_JSON
 
 
 def test_the_baseline_comes_from_the_sidecar(killed, resumed):

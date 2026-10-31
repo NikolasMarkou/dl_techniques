@@ -24,7 +24,8 @@ Interface contract
     :func:`~train.api.recipes.build_model`; the loss is
     ``SparseCategoricalCrossentropy(from_logits=True)`` and the metrics are
     ``accuracy`` and, when there are more classes than ``metric_args.top_k``,
-    ``top{k}_accuracy``.
+    ``top{k}_accuracy``; ``task_record`` is the ``task.json`` that
+    :func:`~train.api.predictor.load_model` reads.
 
 ``train_image_classification(*, out, model, data, ...)``
     :param out: run directory (a ``str`` or a ``Path``), or ``"auto"``.
@@ -95,6 +96,7 @@ from ..data_args import (
     load_image_data,
     read_data_file,
 )
+from ..predictor import build_task_record
 from ..trainer import TaskTrainer, TrainResult, config_problems
 
 # ---------------------------------------------------------------------
@@ -249,6 +251,39 @@ class ImageClassificationTrainer(TaskTrainer):
             "model_args": recipes.serialize_model_args(self._model_kwargs(config, context)),
             "loader": dict(context.defaults.get("loader") or {}),
         }
+
+    def task_record(
+        self, config: ImageClassificationConfig, context: AutoContext, data: Any
+    ) -> Dict[str, Any]:
+        """Return the ``task.json`` record (schema in :mod:`train.api.predictor`).
+
+        ``mean`` and ``std`` are the loader's own, so the record holds what the training
+        inputs were standardized with: a built-in dataset's published constants, or the
+        statistics of the fit split of a folder or csv run (D-060). Zeros and ones when
+        ``transform_args.normalize`` is ``unit``.
+        """
+        transform_cfg: TransformArgs = config.transform_args
+        data_cfg: ImageData = config.data
+        source_channels = 3
+        data_kind = data_cfg.format
+        if data_cfg.format == "builtin":
+            from dl_techniques.datasets.vision.classification import get_spec
+
+            data_kind = data_cfg.dataset
+            source_channels = get_spec(data_cfg.dataset).input_shape[-1]
+        return build_task_record(
+            task=self.task,
+            model=config.model,
+            family=context.family,
+            variant=context.variant,
+            class_names=data.class_names,
+            input_shape=data.input_shape,
+            normalize=transform_cfg.normalize,
+            mean=data.mean,
+            std=data.std,
+            data_kind=data_kind,
+            source_channels=source_channels,
+        )
 
     def metric_names(self, config: ImageClassificationConfig, facts: DataFacts) -> List[str]:
         # DECISION plan-2026-10-30T132432-a865fa08/D-055: names only. Do NOT build the

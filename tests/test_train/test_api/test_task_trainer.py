@@ -175,6 +175,7 @@ BASE_FILES = {
     "config_requested.json",
     "results_summary.json",
     "run.log",
+    "task.json",
     "training_history.json",
     "training_log.csv",
     "best_model.keras",
@@ -319,6 +320,7 @@ def test_the_knob_run_keeps_what_was_not_turned_off(knobs):
         "config_requested.json",
         "results_summary.json",
         "run.log",
+        "task.json",
         "training_history.json",
         "training_log.csv",
         # the resume files are written whatever the knobs say

@@ -55,6 +55,11 @@ Interface contract
     values) and ``config.json`` (the resolved config). ``write_requested`` raises
     ``ConfigError`` for a NaN or an infinity, and writes nothing then; both raise
     ``OSError`` or ``TypeError`` on a failed write, which neither wraps.
+
+``write_task(run_dir, record)``
+    :param record: the ``task.json`` record (:mod:`train.api.predictor`).
+    :return: ``True`` when ``task.json`` was written; ``False`` when the directory
+        already held one (a resume), which is then left untouched.
 """
 
 import collections.abc
@@ -86,6 +91,10 @@ BACKUP_DIR = "checkpoints/backup"
 #: Where the fit-state sidecar lives, relative to the run directory
 #: (``train.common.resume_state.FIT_STATE_NAME`` inside ``checkpoints``).
 CHECKPOINTS_DIR = "checkpoints"
+
+#: What a model needs to be used without its config (class names, preprocessing);
+#: schema and reader in :mod:`train.api.predictor`.
+TASK_FILE = "task.json"
 
 #: The training log the CSV logger writes, relative to the run directory.
 TRAINING_LOG_NAME = "training_log.csv"
@@ -206,7 +215,7 @@ def run_artifact_names() -> Tuple[str, ...]:
     # `RUN_ARTIFACT_NAMES` itself: seven other callers and the power_mlp
     # parametrized refusal test read it, and a legacy trainer's refusal must not
     # change when this package grows a file.
-    return (*RUN_ARTIFACT_NAMES, REQUESTED_CONFIG_NAME, "final_model.keras", "task.json", BACKUP_DIR)
+    return (*RUN_ARTIFACT_NAMES, REQUESTED_CONFIG_NAME, "final_model.keras", TASK_FILE, BACKUP_DIR)
 
 
 def _refuse_holder(directory: Path, run_dir: Path) -> None:
@@ -510,3 +519,20 @@ def write_resolved(run_dir: Path, config: Any, used: Optional[Mapping[str, Any]]
     if used:
         payload = {**payload, "used": dict(used)}
     return save_config_json(payload, str(run_dir), "config.json")
+
+
+def write_task(run_dir: Path, record: Mapping[str, Any]) -> bool:
+    """Write ``task.json`` unless the run directory already holds one.
+
+    :param run_dir: an existing run directory.
+    :param record: the checked record from :func:`train.api.predictor.build_task_record`.
+    :return: ``True`` when the file was written; ``False`` when it was already there, which
+        is a resume: the earlier segment trained on the statistics it holds, so the file is
+        left exactly as it is and a resume never rewrites it.
+    """
+    from train.common.config_io import save_config_json
+
+    if (run_dir / TASK_FILE).exists():
+        return False
+    save_config_json(dict(record), str(run_dir), TASK_FILE)
+    return True

@@ -64,7 +64,9 @@ Interface contract
        ``EpochLogLine``, the dashboard, and the resume trio last
        (``RestoreFitState`` on a resume only, ``FitStateSidecar``,
        ``BackupAndRestore``; the order is ``train.common.resume_state``'s);
-    8. ``fit`` on ``data.select_ds``; the sidecar records ``fit_finished``;
+    8. ``task.json`` (the task's :meth:`~TaskTrainer.task_record`, when it gives one;
+       left alone on a resume), then ``fit`` on ``data.select_ds``; the sidecar records
+       ``fit_finished``;
        ``summarize_fit``; a non-finite loss
        writes the diverged summary and the history, then raises;
     9. ``evaluate_and_report``;
@@ -136,6 +138,11 @@ Hooks (override in a task)
     an :class:`Evaluation`.
 ``task_metadata(config, data)``
     Extra keys for the summary head. Default: none.
+``task_record(config, context, data)``
+    The ``task.json`` record of a run: what the saved models need to be used without
+    this config (class names, preprocessing, the statistics the data was standardized
+    with). Default: ``None``, which writes no ``task.json``. It is written once, before
+    ``fit``, so a killed run has it and a resume leaves it as it is.
 ``used_arguments(config, context)``
     A JSON-plain mapping written to ``config.json`` under the key ``used``: what
     the run is built with beyond the config's fields (D-050). Default: empty, which
@@ -188,6 +195,7 @@ from .run_dir import (
     resolve_out,
     write_requested,
     write_resolved,
+    write_task,
 )
 
 # ---------------------------------------------------------------------
@@ -426,6 +434,12 @@ class TaskTrainer:
 
     def task_metadata(self, config: StrictConfig, data: Any) -> Dict[str, Any]:
         return {}
+
+    def task_record(
+        self, config: StrictConfig, context: AutoContext, data: Any
+    ) -> Optional[Dict[str, Any]]:
+        """Return the ``task.json`` record, or ``None`` for a task that writes none."""
+        return None
 
     def used_arguments(self, config: StrictConfig, context: AutoContext) -> Dict[str, Any]:
         """Return what the run is built with beyond the config, for ``config.json``.
@@ -919,6 +933,16 @@ class TaskTrainer:
                 config, data, run_dir, vis_dir, baseline, experiment_name, last_weights,
                 resume, best_weights,
             )
+
+            # DECISION plan-2026-10-30T132432-a865fa08/D-061: task.json is written BEFORE `fit`, and a resume
+            # leaves an existing one as it is. Do NOT move it after `fit` or into the
+            # post-fit reporting: a run killed in training would leave models that cannot
+            # be used, and do NOT rewrite it on a resume: the earlier epochs trained on
+            # the statistics it holds, and a rewrite would state others.
+            record = self.task_record(config, context, data)
+            if record is not None:
+                if not write_task(run_dir, record):
+                    logger.info("task.json is already in the run directory: left as it is")
 
             started = time.perf_counter()
             history = model.fit(

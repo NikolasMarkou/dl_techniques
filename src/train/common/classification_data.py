@@ -796,10 +796,19 @@ def read_image_csv(
     return FileListing("csv", names, train_paths, train_labels, test_paths, test_labels)
 
 
-def _decode_file(path: tf.Tensor) -> tf.Tensor:
-    """One image file as a float32 ``(H, W, 3)`` tensor in [0, 1], at its own size."""
-    image = tf.io.decode_image(tf.io.read_file(path), channels=3, expand_animations=False)
-    image.set_shape([None, None, 3])
+def decode_image_file(path: tf.Tensor, channels: int = 3) -> tf.Tensor:
+    """One image file as a float32 ``(H, W, channels)`` tensor in [0, 1], at its own size.
+
+    The one decoder of folder and CSV data; ``train.api.predictor`` calls it with the
+    channel count the model was trained on, so a prediction reads a file the way the
+    training pipeline did.
+
+    :param path: a scalar string tensor (or a ``str``): the file.
+    :param channels: ``1`` (grey) or ``3`` (RGB); ``tf.io.decode_image`` converts.
+    :return: the decoded image, ``tf.float32`` in [0, 1].
+    """
+    image = tf.io.decode_image(tf.io.read_file(path), channels=channels, expand_animations=False)
+    image.set_shape([None, None, channels])
     return tf.image.convert_image_dtype(image, tf.float32)
 
 
@@ -818,7 +827,7 @@ def path_examples(
     if training:
         dataset = dataset.shuffle(len(paths), seed=seed, reshuffle_each_iteration=True)
     resize = resizer(size)
-    dataset = dataset.map(lambda path, label: (resize(_decode_file(path)), label),
+    dataset = dataset.map(lambda path, label: (resize(decode_image_file(path)), label),
                           num_parallel_calls=tf.data.AUTOTUNE)
     if training:
         dataset = with_hook(dataset, augment, seed)
@@ -836,7 +845,7 @@ def _fit_split_statistics(paths: Sequence[str], size: int) -> Tuple[np.ndarray, 
     """
     resize = resizer(size)
     dataset = (tf.data.Dataset.from_tensor_slices(list(paths))
-               .map(lambda path: resize(_decode_file(path)), num_parallel_calls=tf.data.AUTOTUNE)
+               .map(lambda path: resize(decode_image_file(path)), num_parallel_calls=tf.data.AUTOTUNE)
                .batch(64))
     total, total_square, pixels = np.zeros(3), np.zeros(3), 0
     for batch in dataset.as_numpy_iterator():
