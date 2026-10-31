@@ -17,7 +17,7 @@ Moved from `models/GUIDE.md` § 10.3 (iteration 1 of that plan).
 - **Entry points and default paths no test runs.** Trainers died before step one: a tokenizer in
   `tf.data.map`, `astype` on a symbolic tensor, a stale attribute on a default path the test
   skipped. *Detected:* running each trainer. *Rule:* test the default path. *Guard:*
-  `tests/test_train/test_cliffordnet/test_the_trainer_entry_point_pretrains_both_towers.py`,
+  `tests/test_train/test_clip/test_the_trainer_entry_point_trains_end_to_end.py`,
   `tests/test_train/test_alexnet/test_the_cifar_pipeline_builds_a_batch.py`. *Example:* D-034,
   D-069, D-098. Refines `models/GUIDE.md` § 8.
 - **A failed run that exits 0.** A swallowed training error, save, history write, evaluation,
