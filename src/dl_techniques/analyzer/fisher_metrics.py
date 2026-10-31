@@ -596,10 +596,10 @@ def _tf() -> Any:
     Raises:
         RuntimeError: If the Keras backend is not TensorFlow or the call is traced.
     """
-    if keras.backend.backend() != 'tensorflow':
+    if keras.config.backend() != 'tensorflow':
         raise RuntimeError(
             f"the Fisher analyzer needs the TensorFlow Keras backend for its per-sample "
-            f"gradient tape; the active backend is {keras.backend.backend()!r}")
+            f"gradient tape; the active backend is {keras.config.backend()!r}")
     import tensorflow as tf
     if not tf.executing_eagerly():
         raise RuntimeError(

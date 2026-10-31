@@ -97,7 +97,7 @@ class ProbabilityLogits(keras.layers.Layer):
             keras.ops.cast(inputs, "float32"), self.epsilon, 1.0 - self.epsilon
         )
         logits = keras.ops.log(p) - keras.ops.log1p(-p)
-        return keras.ops.cast(logits, keras.backend.standardize_dtype(inputs.dtype))
+        return keras.ops.cast(logits, getattr(inputs.dtype, "name", None) or str(inputs.dtype))
 
     def compute_output_shape(self, input_shape: Any) -> Any:
         """The output has the input's shape."""
