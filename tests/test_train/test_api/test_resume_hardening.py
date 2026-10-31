@@ -30,7 +30,6 @@ import shutil
 import subprocess
 import sys
 import textwrap
-import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -44,7 +43,6 @@ from train.api.run_dir import (
     LOCK_NAME,
     RESUME_UNCOMPARED_KEYS,
     check_model_file,
-    lock_holder_is_live,
     process_stamp,
     read_lock,
     refuse_live_holder,
@@ -83,7 +81,6 @@ from .test_resume_interrupted import (  # noqa: F401  (fixtures are used by name
 )
 from .test_task_trainer import make_config
 
-HAS_PROC = Path("/proc/self/stat").is_file()
 
 
 def cut_in_half(path: Path) -> None:
@@ -746,7 +743,7 @@ HOLDER = textwrap.dedent(
     from pathlib import Path
     from train.api.run_dir import take_run_lock
 
-    take_run_lock(Path(sys.argv[1]), resume=sys.argv[2] == "resume")
+    handle = take_run_lock(Path(sys.argv[1]), resume=sys.argv[2] == "resume")  # the handle IS the lock
     print("held", flush=True)
     sys.stdin.read()
     """
@@ -770,11 +767,11 @@ def release(process: subprocess.Popen) -> None:
 
 
 def test_a_fresh_lock_is_made_with_o_excl_and_names_this_process(tmp_path):
-    take_run_lock(tmp_path, resume=False)
-    record = read_lock(tmp_path)
-    assert record["pid"] == os.getpid() and record["start"] == process_stamp(os.getpid())
-    with pytest.raises(ConfigError, match="claimed by another run just now"):
-        take_run_lock(tmp_path, resume=False)
+    with take_run_lock(tmp_path, resume=False):
+        record = read_lock(tmp_path)
+        assert record["pid"] == os.getpid() and record["start"] == process_stamp(os.getpid())
+        with pytest.raises(ConfigError, match="claimed by another run just now"):
+            take_run_lock(tmp_path, resume=False)
 
 
 def test_a_resume_refuses_a_live_holder_and_replaces_the_lock_of_a_dead_one(tmp_path):
@@ -782,7 +779,6 @@ def test_a_resume_refuses_a_live_holder_and_replaces_the_lock_of_a_dead_one(tmp_
     try:
         record = read_lock(tmp_path)
         assert record["pid"] == holder.pid != os.getpid()
-        assert lock_holder_is_live(record)
         before = (tmp_path / LOCK_NAME).read_bytes()
         with pytest.raises(ConfigError, match=rf"process {holder.pid} holds run\.lock and is still running"):
             refuse_live_holder(tmp_path)
@@ -793,38 +789,18 @@ def test_a_resume_refuses_a_live_holder_and_replaces_the_lock_of_a_dead_one(tmp_
         release(holder)
     # The holder exited: its lock is still there (nothing deletes it) and reads as stale.
     assert (tmp_path / LOCK_NAME).read_bytes() == before
-    assert not lock_holder_is_live(read_lock(tmp_path))
-    take_run_lock(tmp_path, resume=True)
-    assert read_lock(tmp_path)["pid"] == os.getpid()
-    assert names(tmp_path) == [LOCK_NAME]  # the temporary file was renamed over the old lock
-
-
-@pytest.mark.skipif(not HAS_PROC, reason="needs /proc")
-def test_a_killed_holder_that_nobody_reaped_is_dead_and_a_reused_pid_is_not_the_holder(tmp_path):
-    holder = start_holder(tmp_path)
-    record = read_lock(tmp_path)
-    assert lock_holder_is_live(record)
-    # Same pid, another start time: the pid was reused by a different process.
-    assert not lock_holder_is_live({**record, "start": "other-boot:1"})
-    holder.kill()
-    deadline = 50
-    while lock_holder_is_live(record) and deadline:
-        deadline -= 1
-        time.sleep(0.1)
-    assert not lock_holder_is_live(record)  # a zombie (not waited for yet) is dead
-    holder.wait(timeout=60)
-    holder.stdin.close()
-    holder.stdout.close()
-    holder.stderr.close()
+    refuse_live_holder(tmp_path)  # nobody holds it: the file is just a label now
+    with take_run_lock(tmp_path, resume=True):
+        assert read_lock(tmp_path)["pid"] == os.getpid()
+    assert names(tmp_path) == [LOCK_NAME]  # taken over in place: no temporary file, nothing deleted
 
 
 def test_a_garbled_or_empty_lock_is_stale_and_this_process_is_never_its_own_holder(tmp_path):
     (tmp_path / LOCK_NAME).write_text('{"pid"')
-    assert read_lock(tmp_path) == {} and not lock_holder_is_live({})
+    assert read_lock(tmp_path) == {}
     refuse_live_holder(tmp_path)
-    take_run_lock(tmp_path, resume=True)
-    assert read_lock(tmp_path)["pid"] == os.getpid()
-    assert not lock_holder_is_live(read_lock(tmp_path))  # a run that raised in this very process has ended
+    with take_run_lock(tmp_path, resume=True):
+        assert read_lock(tmp_path)["pid"] == os.getpid()
 
 
 def test_a_resume_of_a_run_another_process_holds_is_refused_before_anything_is_written(world, killed, tmp_path):

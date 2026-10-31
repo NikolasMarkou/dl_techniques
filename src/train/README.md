@@ -39,7 +39,9 @@ nothing is overwritten or deleted. A run writes `config_requested.json` (what wa
 `config.json` (resolved), `run.log`, `training_log.csv`, `results_summary.json`, `task.json`
 (class names, input shape, mean and std: what a model needs to be used without its config),
 `best_model.keras`, `final_model.keras`, the figures and analysis, and `checkpoints/`
-(`backup/`, `fit_state.json`) and `run.lock` for resume.
+(`backup/`, `fit_state.json`) and `run.lock` for resume. `run.lock` is a kernel `flock` held for the
+life of the run and released when the process ends, a SIGKILL included, so two resumes cannot both run
+and a reused pid blocks nobody; the pid in the file is a label for the refusal message.
 
 **Resume**: `resume_interrupted=true` with the same `out` and the same request continues a killed
 run. It is refused for a finished run, another request, other data, a live process holding the

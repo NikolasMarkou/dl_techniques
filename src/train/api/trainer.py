@@ -51,9 +51,10 @@ Interface contract
        monitor against ``metric_names``, ``devices``); a refusal here leaves no
        trace: the directory is not claimed yet (D-042, D-047); then
        ``resolve_out`` and ``open_run`` (claims the directory); ``take_run_lock`` (``run.lock``: created
-       with ``O_EXCL`` by a fresh run; a resume refuses a live holder and replaces a dead one's);
+       with ``O_EXCL`` by a fresh run; a ``flock`` held until the run ends; a resume refuses a
+       live holder and takes over a dead one's);
     2. ``setup_gpu``, ``set_seeds(config.seed)``, the precision policy (restored
-       in a ``finally``);
+       in a ``finally``); the lock is released when the run ends, an exception included;
     3. ``write_requested``; ``run.log`` opens; ``Args:`` is logged;
        ``Resolved args:`` is logged and ``write_resolved`` writes ``config.json``;
     4. (the data is described in step 1 and loaded in step 5)
@@ -638,17 +639,19 @@ class TaskTrainer:
         # Reading the earlier run's files is plain file I/O: no TensorFlow op, so it may
         # come before `setup_gpu` (D-055). Loading its best weights may not, and waits.
         resume = self._resume_point(run_dir, resolved) if config.resume_interrupted else None
-        # The run lock (D-069): a fresh run creates it with O_EXCL, a resume replaces a dead
-        # holder's. After every refusal that needs no tensor, before the first thing is written.
-        take_run_lock(run_dir, resume=resume is not None)
-        setup_gpu(None if _is_auto(config.devices) else config.devices, flag="devices")
-        set_seeds(config.seed)
-        previous_policy = keras.mixed_precision.global_policy().name
-        setup_mixed_precision(config.precision != "float32", config.precision)
-        try:
-            return self._train(family, variant, run_dir, facts, resolved, context, resume)
-        finally:
-            keras.mixed_precision.set_global_policy(previous_policy)
+        # The run lock (D-011 of this plan): a kernel flock held for the life of the run, so a
+        # fresh run and a resume exclude each other, and the descriptor is released when the
+        # `with` ends (also on an exception) or the process dies. After every refusal that
+        # needs no tensor, before the first thing is written.
+        with take_run_lock(run_dir, resume=resume is not None):
+            setup_gpu(None if _is_auto(config.devices) else config.devices, flag="devices")
+            set_seeds(config.seed)
+            previous_policy = keras.mixed_precision.global_policy().name
+            setup_mixed_precision(config.precision != "float32", config.precision)
+            try:
+                return self._train(family, variant, run_dir, facts, resolved, context, resume)
+            finally:
+                keras.mixed_precision.set_global_policy(previous_policy)
 
     def _resolve(
         self, facts: DataFacts, family: str, variant: str
