@@ -129,7 +129,10 @@ Hooks (override in a task)
     ``train.common.classification_data.ClassificationData``. ``config`` is
     RESOLVED, ``context.defaults`` is the recipe (read ``loader`` from it).
     ``num_classes`` and ``input_shape[0]`` must equal what ``describe_data``
-    said, else ``RuntimeError``.
+    said, else ``RuntimeError``. File-based data also carries ``image_files``
+    (the files ``fit`` and the first evaluation read, so an undecodable one can be
+    named in a ``ConfigError``) and ``fingerprint`` (recorded in the sidecar and
+    compared at resume, D-070); data without them is not scanned and carries none.
 ``build_model(config, context, data)``
     The model; built or not (the trainer builds it from ``data.input_shape``).
 ``metric_names(config, facts)``
@@ -295,6 +298,12 @@ def _data_counts(data: Any) -> Dict[str, int]:
     }
 
 
+def _data_fingerprint_field(data: Any) -> Dict[str, str]:
+    """``{"data_fingerprint": sha256}`` of a file-based data record, ``{}`` for one with none (D-070)."""
+    fingerprint = getattr(data, "fingerprint", None)
+    return {} if fingerprint is None else {"data_fingerprint": fingerprint}
+
+
 def _is_auto(value: Any) -> bool:
     return isinstance(value, str) and value == AUTO
 
@@ -401,6 +410,43 @@ def _bad_value_is_a_config_error(run_dir: Path, step: str) -> Iterator[None]:
         logger.debug(f"Original error of {step}:", exc_info=True)
         raise ConfigError(
             f"Invalid argument for {step}: {exc}. {_claimed_note(run_dir)}"
+        ) from exc
+
+
+@contextlib.contextmanager
+def _a_corrupt_file_is_named(run_dir: Path, data: Any, step: str) -> Iterator[None]:
+    """Turn TensorFlow's ``InvalidArgumentError`` of an undecodable image into a ``ConfigError``.
+
+    Wraps the first evaluation and ``fit``, the calls that run the data pipelines. When the
+    error is raised the files the data lists (``data.image_files``) are decoded one by one to
+    find the culprit; if one is found it is named, if none is, the original error propagates
+    unchanged (an ``InvalidArgumentError`` that is not about a file is somebody else's bug).
+
+    :param run_dir: the claimed run directory, named in the message.
+    :param data: the loaded data; the files are read from its ``image_files`` attribute, and a
+        record without one (the built-in datasets) has nothing to scan.
+    :param step: what ran, e.g. ``"fit"``.
+    :raises ConfigError: naming the file, and that the run directory is used.
+    """
+    import tensorflow as tf
+
+    # DECISION plan-2026-10-30T132432-a865fa08/D-070: ONE narrow class is caught, here and
+    # nowhere else in the run. Do NOT add ``tf.data``'s ``ignore_errors`` (a skipped image
+    # changes the epoch, the statistics and the split with nothing said) and do NOT catch
+    # ``Exception``: an error that is not a decode failure of a listed file is re-raised
+    # as it came. The scan costs a decode pass only when a file has already failed.
+    try:
+        yield
+    except tf.errors.InvalidArgumentError as exc:
+        from train.common.classification_data import scan_for_undecodable
+
+        files = getattr(data, "image_files", None)
+        found = scan_for_undecodable(files) if files else None
+        if found is None:
+            raise
+        raise ConfigError(
+            f"The image {found[0]!r} cannot be decoded ({found[1]}); it stopped {step}. Repair "
+            f"or remove the file. {_claimed_note(run_dir)}"
         ) from exc
 
 
@@ -925,14 +971,15 @@ class TaskTrainer:
             # evaluation. Do NOT let the dashboard call ``model.evaluate`` itself.
             best_weights = None
             if resume is None:
-                baseline, initial_ratio, init_warning = classification_run.check_initial_loss(
-                    model,
-                    data.select_ds,
-                    data.n_select,
-                    data.num_classes,
-                    evaluate=classification_run.evaluate_dict,
-                    hint=self.initial_loss_hint,
-                )
+                with _a_corrupt_file_is_named(run_dir, data, "the first evaluation"):
+                    baseline, initial_ratio, init_warning = classification_run.check_initial_loss(
+                        model,
+                        data.select_ds,
+                        data.n_select,
+                        data.num_classes,
+                        evaluate=classification_run.evaluate_dict,
+                        hint=self.initial_loss_hint,
+                    )
                 # The sidecar keeps the epoch-0 numbers: a resumed model is not an untrained
                 # one, so a resume reads them here and evaluates nothing (D-058).
                 update_fit_state(
@@ -943,6 +990,7 @@ class TaskTrainer:
                         "warned": bool(init_warning),
                     },
                     data_counts=_data_counts(data),
+                    **_data_fingerprint_field(data),
                 )
             else:
                 initial = resume.state["initial"]
@@ -988,13 +1036,14 @@ class TaskTrainer:
                     logger.info("task.json is already in the run directory: left as it is")
 
             started = time.perf_counter()
-            history = model.fit(
-                data.train_ds,
-                validation_data=data.select_ds,
-                epochs=epochs,
-                callbacks=callbacks,
-                verbose=1,
-            )
+            with _a_corrupt_file_is_named(run_dir, data, "fit"):
+                history = model.fit(
+                    data.train_ds,
+                    validation_data=data.select_ds,
+                    epochs=epochs,
+                    callbacks=callbacks,
+                    verbose=1,
+                )
             fit_wall_seconds = time.perf_counter() - started
             update_fit_state(sidecar_path, fit_finished=True)
             if resume is not None:
@@ -1106,8 +1155,8 @@ class TaskTrainer:
         # its images keep their pixels, and an added image moves them by less than the
         # tolerance in a large set; the names and the sizes catch what they miss. The
         # statistics catch a swap of two class folders (same names, same sizes). A swap
-        # that leaves the fit split's statistics equal is NOT caught (the loader exposes
-        # no per-file fingerprint).
+        # that leaves the fit split's statistics equal is caught by the data fingerprint
+        # (D-070): relative path, class and file size of every listed file, no pixel read.
         lines: List[str] = []
         record = self.task_record(config, context, data)
         task_path = run_dir / TASK_FILE
@@ -1123,6 +1172,14 @@ class TaskTrainer:
         for key in sorted(set(earlier_counts) | set(now_counts)):
             if earlier_counts.get(key) != now_counts.get(key):
                 lines.append(f"{key}: {earlier_counts.get(key)} -> {now_counts.get(key)}")
+        earlier_print = resume.state.get("data_fingerprint")
+        now_print = getattr(data, "fingerprint", None)
+        if earlier_print != now_print:
+            lines.append(
+                "data_fingerprint: "
+                f"{'none' if earlier_print is None else str(earlier_print)[:12]} -> "
+                f"{'none' if now_print is None else str(now_print)[:12]} (a file, its class or "
+                "its size is not the one the run started with)")
         if lines:
             raise ConfigError(
                 f"Cannot resume {run_dir}: the data is not the data the run started with ("

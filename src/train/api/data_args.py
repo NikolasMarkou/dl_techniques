@@ -57,8 +57,11 @@ Interface contract
     :raises ConfigError: for an in-memory dataset asked for a size other than its
         native one (the loader keeps its figure arrays at the native size, so a
         resized model could not predict on them); for a folder or CSV source
-        with no ``image_size``, with a class that has no image, a missing column
-        or file, or test classes that are not the train classes.
+        with no ``image_size``, with a class that has no image or only one, a missing
+        column or file, test classes that are not the train classes, a file listed
+        twice, under two classes (a symlink counts as the file it points to) or in both
+        the train and the test split, or two csv labels of one integer value (``01`` and
+        ``1``).
 
 ``load_image_data(data, *, batch_size, seed, augment, augment_from_mean, normalize, image_size, loader)``
     :param data: any of the three configs.

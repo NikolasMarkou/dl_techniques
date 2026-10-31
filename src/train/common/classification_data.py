@@ -27,11 +27,23 @@ from a list of image files: the files are listed without reading a pixel
 (:func:`scan_image_folder`, :func:`read_image_csv`, which a caller may run before it
 loads anything), a seeded cut of the TRAIN list selects, the test list is optional and,
 when absent, the record's ``test_ds`` is ``None`` and ``n_test`` is 0.
+
+The listing also refuses what would leak or mislead, by RESOLVED path (a symlink is the file it
+points to): a file listed twice, under two classes, or in both the train and the test split; two
+csv labels of one integer value; a class with fewer than two train images. It logs a WARNING for
+images below a class directory's own level and for a class the seeded cut leaves out of a split.
+:func:`listing_fingerprint` hashes the listing (relative path, class, size), reading no pixel. The
+loader decodes every test file it will score before any training (:func:`find_undecodable`) and
+names the file behind a decode error met by the statistics pass; ``ClassificationData.image_files``
+lets a trainer name the one behind an error met by ``fit``.
 """
 from __future__ import annotations
 
 import argparse
+import collections
 import csv
+import hashlib
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -269,6 +281,11 @@ class ClassificationData:
     :param num_classes: Number of classes.
     :param class_names: One name per class.
     :param selection_split, test_split: Plain-language provenance of the two splits.
+    :param image_files: The files ``train_ds`` and ``select_ds`` read (fit split, then
+        selection split), for a trainer that has to name the file behind a decode error;
+        ``None`` for the sources whose pixels are not files of a listing.
+    :param fingerprint: :func:`listing_fingerprint` of a folder or CSV source; ``None`` for the
+        built-in datasets, which carry none.
     """
 
     train_ds: "tf.data.Dataset"
@@ -288,6 +305,8 @@ class ClassificationData:
     class_names: list
     selection_split: str
     test_split: str
+    image_files: Optional[Tuple[str, ...]] = None
+    fingerprint: Optional[str] = None
 
     @property
     def select_steps(self) -> int:
@@ -541,6 +560,7 @@ def _load_in_memory(
 def _finish_file_based(
         spec: DatasetSpec, batch_size: int, labels: str, normalize: str, size: int,
         eval_samples: int, train, select, test, selection_split: str, test_split: str,
+        image_files: Optional[Tuple[str, ...]] = None, fingerprint: Optional[str] = None,
 ) -> ClassificationData:
     """The record for a file-based dataset from its three loader splits (ImageNet, Imagenette,
     folder and CSV data); ``test`` may be ``None`` (no test split)."""
@@ -569,6 +589,7 @@ def _finish_file_based(
         input_shape=(size, size, 3), num_classes=train.num_classes,
         class_names=list(train.class_names),
         selection_split=selection_split, test_split=test_split,
+        image_files=image_files, fingerprint=fingerprint,
     )
 
 
@@ -643,6 +664,9 @@ class FileListing:
     :param class_names: One name per class; the label of a file is its index here.
     :param train_paths, train_labels: Every train file and its label (``int32``).
     :param test_paths, test_labels: The same for the test split, or ``None`` and ``None``.
+    :param train_base, test_base: What a file's path is relative to in
+        :func:`listing_fingerprint`: the root directory of a folder source, the directory of
+        the CSV file of a CSV one (``test_base`` is ``None`` without a test split).
     """
 
     source: str
@@ -651,6 +675,8 @@ class FileListing:
     train_labels: np.ndarray
     test_paths: Optional[List[str]]
     test_labels: Optional[np.ndarray]
+    train_base: str = ""
+    test_base: Optional[str] = None
 
     @property
     def num_classes(self) -> int:
@@ -661,8 +687,22 @@ def _has_image_suffix(name: str) -> bool:
     return name.lower().endswith(IMAGE_SUFFIXES)
 
 
-def _folder_files(root: str, key: str) -> "dict[str, List[str]]":
-    """``{class name: sorted image paths}`` of the class directories of ``root``."""
+def _nested_images(class_dir: str) -> int:
+    """Image files below the sub-directories of ``class_dir`` (hidden entries skipped)."""
+    count = 0
+    for folder, subdirs, names in os.walk(class_dir):
+        subdirs[:] = [name for name in subdirs if not name.startswith(".")]
+        if folder != class_dir:
+            count += sum(1 for name in names if not name.startswith(".") and _has_image_suffix(name))
+    return count
+
+
+def _folder_files(root: str, key: str, minimum: int = 1) -> "dict[str, List[str]]":
+    """``{class name: sorted image paths}`` of the class directories of ``root``.
+
+    :param minimum: Images a class directory must hold (2 for a train root: one for the fit
+        split and one for the selection split).
+    """
     if not os.path.isdir(root):
         raise DataSourceError(key, f"{root!r} is not a directory")
     classes = {}
@@ -676,6 +716,16 @@ def _folder_files(root: str, key: str) -> "dict[str, List[str]]":
             raise DataSourceError(
                 key, f"class directory {entry.name!r} of {root!r} holds no images "
                      f"({', '.join(IMAGE_SUFFIXES)})")
+        if len(files) < minimum:
+            raise DataSourceError(
+                key, f"class directory {entry.name!r} of {root!r} holds {len(files)} image; "
+                     f"every class needs at least {minimum} (one to fit on, one to select on)")
+        nested = _nested_images(entry.path)
+        if nested:
+            logger.warning(
+                f"class directory {entry.name!r} of {root!r}: {nested} image file(s) in its "
+                "sub-directories are ignored; only the images directly inside a class "
+                "directory belong to the class")
         classes[entry.name] = files
     if len(classes) < 2:
         raise DataSourceError(
@@ -700,39 +750,128 @@ def _labelled(files: "dict[str, List[str]]", names: List[str]) -> Tuple[List[str
     return paths, labels
 
 
+def _resolver() -> Callable[[str], str]:
+    """A function returning the resolved path of a file (symlinks followed).
+
+    The directory part is resolved once per directory; only a file that is itself a symlink is
+    resolved on its own, so a listing of a million files makes about one ``lstat`` each.
+    """
+    directories: "dict[str, str]" = {}
+
+    def resolve(path: str) -> str:
+        if os.path.islink(path):
+            return os.path.realpath(path)
+        folder, name = os.path.split(path)
+        if folder not in directories:
+            directories[folder] = os.path.realpath(folder)
+        return os.path.join(directories[folder], name)
+
+    return resolve
+
+
+def _examples(items: Sequence[str], total: int) -> str:
+    shown = "; ".join(items[:3])
+    return shown + (f"; and {total - 3} more" if total > 3 else "")
+
+
+def _refuse_repeats(
+        paths: Sequence[str], classes: Sequence[str], resolve: Callable[[str], str], key: str,
+) -> List[str]:
+    """Resolve ``paths`` and refuse a file that is listed twice or under two classes.
+
+    :param classes: The class text of each path.
+    :return: The resolved paths, in the order of ``paths``.
+    :raises DataSourceError: ``key`` names the source; the message gives examples.
+    """
+    resolved = [resolve(path) for path in paths]
+    first: "dict[str, Tuple[str, str]]" = {}
+    two_classes: List[str] = []
+    twice: List[str] = []
+    for path, real, name in zip(paths, resolved, classes):
+        if real not in first:
+            first[real] = (path, name)
+        elif first[real][1] != name:
+            two_classes.append(f"{path!r} is under {first[real][1]!r} (as {first[real][0]!r}) and under {name!r}")
+        else:
+            twice.append(repr(path))
+    if two_classes:
+        raise DataSourceError(
+            key, f"{len(two_classes)} file(s) are under two classes (files are compared by "
+                 f"resolved path, so a symlink is the file it points to): "
+                 f"{_examples(two_classes, len(two_classes))}")
+    if twice:
+        raise DataSourceError(
+            key, f"{len(twice)} file(s) are listed more than once (files are compared by "
+                 f"resolved path, so a symlink is the file it points to): "
+                 f"{_examples(twice, len(twice))}; a file in the list twice can land in both the "
+                 "fit and the selection split")
+    return resolved
+
+
+def _refuse_shared(
+        train_resolved: Sequence[str], test_paths: Sequence[str], test_resolved: Sequence[str],
+        key: str,
+) -> None:
+    """Refuse a test file that is also a train file (by resolved path).
+
+    :raises DataSourceError: ``key`` names the test source.
+    """
+    train = set(train_resolved)
+    shared = [repr(path) for path, real in zip(test_paths, test_resolved) if real in train]
+    if shared:
+        raise DataSourceError(
+            key, f"{len(shared)} of the {len(test_paths)} test file(s) are also train files "
+                 f"(compared by resolved path): {_examples(shared, len(shared))}; a model scored on "
+                 "images it trained on reports an accuracy it does not have")
+
+
 def scan_image_folder(train_dir: str, test_dir: Optional[str] = None) -> FileListing:
     """List the images of ``train_dir/<class>/*`` (and ``test_dir/<class>/*``), reading none.
 
-    A class is a sub-directory; hidden entries and files of other suffixes are skipped.
+    A class is a sub-directory; hidden entries and files of other suffixes are skipped. Images
+    inside a class's own sub-directories are not listed (a WARNING counts them).
 
     :param train_dir: The train root.
     :param test_dir: The test root, or ``None`` for a source with no test split.
     :return: The :class:`FileListing`; the class names are the sorted directory names.
     :raises DataSourceError: A root that is not a directory, fewer than two classes, a class
-        directory with no image, or test classes that are not the train classes.
+        directory with no image or with one train image, test classes that are not the train
+        classes, a file under two classes (through a symlink, say), or a file in both splits.
     """
-    train = _folder_files(train_dir, "train_dir")
+    train = _folder_files(train_dir, "train_dir", minimum=2)
     names = sorted(train)
     train_paths, train_labels = _labelled(train, names)
-    test_paths = test_labels = None
+    resolve = _resolver()
+    train_real = _refuse_repeats(
+        train_paths, [names[i] for i in train_labels], resolve, "train_dir")
+    test_paths = test_labels = test_base = None
     if test_dir is not None:
         test = _folder_files(test_dir, "test_dir")
         _same_classes(names, sorted(test), "test_dir")
         test_paths, test_labels = _labelled(test, names)
-    return FileListing("folder", names, train_paths, train_labels, test_paths, test_labels)
+        test_real = _refuse_repeats(
+            test_paths, [names[i] for i in test_labels], resolve, "test_dir")
+        _refuse_shared(train_real, test_paths, test_real, "test_dir")
+        test_base = os.path.abspath(test_dir)
+    return FileListing("folder", names, train_paths, train_labels, test_paths, test_labels,
+                       os.path.abspath(train_dir), test_base)
 
 
 def _csv_rows(
         csv_path: str, key: str, path_column: str, label_column: str,
 ) -> Tuple[List[str], List[str]]:
-    """``(image paths, label texts)`` of one CSV file; every file must exist and be an image."""
+    """``(image paths, label texts)`` of one CSV file; every file must exist and be an image.
+
+    The file is read as ``utf-8-sig``, so the byte-order mark a spreadsheet export starts with
+    does not become part of the first column's name.
+    """
     if not os.path.isfile(csv_path):
         raise DataSourceError(key, f"{csv_path!r} is not a file")
     base = os.path.dirname(os.path.abspath(csv_path))
     paths: List[str] = []
     labels: List[str] = []
     problems: List[str] = []
-    with open(csv_path, newline="", encoding="utf-8") as handle:
+    with open(csv_path, newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
         columns = list(reader.fieldnames or [])
         for column_key, column in (("path_column", path_column), ("label_column", label_column)):
@@ -761,11 +900,27 @@ def _csv_rows(
 
 
 def _ordered_labels(labels: Sequence[str]) -> List[str]:
-    """Class names: the distinct labels, numerically ordered when all are integers."""
-    distinct = set(labels)
+    """Class names: the distinct labels, numerically ordered when all are integers.
+
+    The order is a function of the label texts alone: they are sorted before anything else,
+    and two integer labels of equal value (``"01"`` and ``"1"``) are refused rather than tied,
+    so the class order cannot depend on set iteration order (``PYTHONHASHSEED``).
+
+    :raises DataSourceError: Two labels that are the same integer written differently.
+    """
+    distinct = sorted(set(labels))
     if all(re.fullmatch(r"-?[0-9]+", name) for name in distinct):
-        return sorted(distinct, key=int)
-    return sorted(distinct)
+        by_value: "dict[int, List[str]]" = {}
+        for name in distinct:
+            by_value.setdefault(int(name), []).append(name)
+        tied = [names for names in by_value.values() if len(names) > 1]
+        if tied:
+            raise DataSourceError(
+                "label_column",
+                f"the labels {tied[0]} are the same integer written differently, so they would be "
+                "one class to you and two to the loader; write each class one way")
+        return sorted(distinct, key=lambda name: (int(name), name))
+    return distinct
 
 
 def read_image_csv(
@@ -775,25 +930,67 @@ def read_image_csv(
     """List the images named by a CSV file (and a test CSV), reading none.
 
     A relative image path is relative to the CSV file's directory. The class names are the
-    distinct labels (integers in numeric order, otherwise sorted text).
+    distinct labels (integers in numeric order, otherwise sorted text). The file is read as
+    ``utf-8-sig``.
 
     :raises DataSourceError: A file that is missing, a missing column, an empty cell, an image
-        path that does not exist or is not an image suffix, fewer than two classes, or test
-        classes that are not the train classes.
+        path that does not exist or is not an image suffix, fewer than two classes, a class
+        with one train image, two labels of one integer value, test classes that are not the
+        train classes, a file listed twice or under two labels (compared by resolved path), or
+        a file in both CSVs.
     """
     train_paths, train_texts = _csv_rows(train_csv, "train_csv", path_column, label_column)
     names = _ordered_labels(train_texts)
     if len(names) < 2:
         raise DataSourceError(
             "train_csv", f"{train_csv!r} holds {len(names)} class(es); a classifier needs at least two")
+    counts = collections.Counter(train_texts)
+    single = [name for name in names if counts[name] < 2]
+    if single:
+        raise DataSourceError(
+            "train_csv", f"{train_csv!r}: class(es) {single} have one image each; every class "
+                         "needs at least 2 (one to fit on, one to select on)")
+    resolve = _resolver()
+    train_real = _refuse_repeats(train_paths, train_texts, resolve, "train_csv")
     index = {name: i for i, name in enumerate(names)}
     train_labels = np.asarray([index[text] for text in train_texts], np.int32)
-    test_paths = test_labels = None
+    test_paths = test_labels = test_base = None
     if test_csv is not None:
         test_paths, test_texts = _csv_rows(test_csv, "test_csv", path_column, label_column)
         _same_classes(names, sorted(set(test_texts)), "test_csv")
+        test_real = _refuse_repeats(test_paths, test_texts, resolve, "test_csv")
+        _refuse_shared(train_real, test_paths, test_real, "test_csv")
         test_labels = np.asarray([index[text] for text in test_texts], np.int32)
-    return FileListing("csv", names, train_paths, train_labels, test_paths, test_labels)
+        test_base = os.path.dirname(os.path.abspath(test_csv))
+    return FileListing("csv", names, train_paths, train_labels, test_paths, test_labels,
+                       os.path.dirname(os.path.abspath(train_csv)), test_base)
+
+
+def listing_fingerprint(listing: FileListing) -> str:
+    """A sha256 over the sorted ``(split, relative path, class, file size)`` rows of a listing.
+
+    Computed from the listing and ``stat`` alone: no pixel is read and no tensor made, so it
+    may run before ``setup_gpu``. A path is relative to :attr:`FileListing.train_base` (or
+    ``test_base``), so moving a whole tree does not change it; a file added, removed, renamed,
+    given another class or another size does. It does NOT see a change that keeps every name,
+    class and size (two same-sized images swapped, a pixel edited).
+
+    :return: the hex digest.
+    """
+    rows: List[List[object]] = []
+    for split, paths, labels, base in (
+            ("train", listing.train_paths, listing.train_labels, listing.train_base),
+            ("test", listing.test_paths, listing.test_labels, listing.test_base)):
+        if paths is None:
+            continue
+        for path, label in zip(paths, labels):
+            rows.append([split, os.path.relpath(path, base).replace(os.sep, "/"),
+                         listing.class_names[int(label)], os.path.getsize(path)])
+    rows.sort()
+    digest = hashlib.sha256(listing.source.encode("utf-8"))
+    for row in rows:
+        digest.update(b"\n" + json.dumps(row, ensure_ascii=False).encode("utf-8"))
+    return digest.hexdigest()
 
 
 def decode_image_file(path: tf.Tensor, channels: int = 3) -> tf.Tensor:
@@ -810,6 +1007,61 @@ def decode_image_file(path: tf.Tensor, channels: int = 3) -> tf.Tensor:
     image = tf.io.decode_image(tf.io.read_file(path), channels=channels, expand_animations=False)
     image.set_shape([None, None, channels])
     return tf.image.convert_image_dtype(image, tf.float32)
+
+
+def scan_for_undecodable(paths: Sequence[str]) -> Optional[Tuple[str, str]]:
+    """Decode ``paths`` one at a time, in order, and return the first that cannot be decoded.
+
+    The slow, exact half of :func:`find_undecodable`; a trainer calls it directly after a
+    ``tf.errors.InvalidArgumentError`` has already told it that some file is bad.
+
+    :param paths: image files.
+    :return: ``(path, reason)`` of the first file :func:`decode_image_file` refuses with
+        ``tf.errors.InvalidArgumentError`` (``reason`` is the first line of its message), or
+        ``None`` when every file decodes. Any other error (a file that vanished) propagates.
+    """
+    for path in paths:
+        try:
+            decode_image_file(path)
+        except tf.errors.InvalidArgumentError as exc:
+            return path, str(exc).strip().splitlines()[0][:200]
+    return None
+
+
+def find_undecodable(paths: Sequence[str]) -> Optional[Tuple[str, str]]:
+    """The first of ``paths`` that cannot be decoded, or ``None``; see :func:`scan_for_undecodable`.
+
+    One parallel ``tf.data`` pass over every file; only if that pass meets a bad file are the
+    files scanned one by one to name it.
+    """
+    if not len(paths):
+        return None
+    dataset = (tf.data.Dataset.from_tensor_slices(list(paths))
+               .map(lambda path: tf.shape(decode_image_file(path)), num_parallel_calls=tf.data.AUTOTUNE)
+               .batch(256))
+    try:
+        for _ in dataset:
+            pass
+    except tf.errors.InvalidArgumentError:
+        return scan_for_undecodable(paths)
+    return None
+
+
+def _name_undecodable(paths: Sequence[str], key: str, error: Exception) -> None:
+    """Raise a :class:`DataSourceError` naming the undecodable file behind ``error``, if one is found.
+
+    Returns without raising when every file decodes, so the caller re-raises the original.
+    """
+    found = scan_for_undecodable(paths)
+    if found is not None:
+        raise DataSourceError(
+            key, f"{found[0]!r} cannot be decoded as an image ({found[1]}); repair or remove "
+                 "the file") from error
+
+
+def _source_keys(source: str) -> Tuple[str, str]:
+    """``(train key, test key)`` of a source, as :class:`DataSourceError` names them."""
+    return ("train_dir", "test_dir") if source == "folder" else ("train_csv", "test_csv")
 
 
 def path_examples(
@@ -873,6 +1125,27 @@ class _FileSplit:
     class_names: List[str]
 
 
+def _warn_absent_classes(listing: FileListing, train_idx: np.ndarray, select_idx: np.ndarray) -> None:
+    """Log a WARNING naming each class the seeded cut leaves out of the fit or the selection split.
+
+    The cut is a plain permutation, not stratified, so a small class can miss a split. A class
+    absent from selection is one the best epoch is chosen without; a class absent from fit is
+    one the model never sees.
+    """
+    labels = np.asarray(listing.train_labels)
+    for name, indices, consequence in (
+            ("selection", select_idx,
+             "the best epoch and early stopping are chosen without it"),
+            ("fit", train_idx, "the model never trains on it")):
+        present = set(labels[indices].tolist())
+        absent = [listing.class_names[i] for i in range(listing.num_classes) if i not in present]
+        if absent:
+            logger.warning(
+                f"{listing.source}: class(es) {absent} have no image in the {name} split "
+                f"(the seeded cut is not stratified); {consequence}. A different seed, a "
+                "smaller validation_split or more images of the class changes this")
+
+
 def _load_file_listing(
         listing: FileListing, *, batch_size: int, seed: int, image_size: int,
         validation_split: Optional[float], eval_samples: int, normalize: str,
@@ -896,6 +1169,22 @@ def _load_file_listing(
     steps_per_epoch_for(len(train_idx), batch_size, max_samples_flag)
 
     fit_paths = train_all[train_idx].tolist()
+    train_key, test_key = _source_keys(listing.source)
+    _warn_absent_classes(listing, train_idx, select_idx)
+    if listing.test_paths is not None:
+        # DECISION plan-2026-10-30T132432-a865fa08/D-070: every test file this run will score is
+        # decoded NOW, before any weight is trained. Do NOT leave the test split to the
+        # post-fit evaluation: one corrupt test file there costs a finished run its summary,
+        # its final model and its resume. The train and selection files are NOT checked here
+        # (a pass over them is a second epoch of decoding); a bad one met by the statistics
+        # pass or by ``fit`` is named by ``_name_undecodable`` and the trainer's wrapper.
+        used_test = np.asarray(listing.test_paths)[test_order].tolist()
+        bad = find_undecodable(used_test)
+        if bad is not None:
+            raise DataSourceError(
+                test_key, f"{bad[0]!r} cannot be decoded as an image ({bad[1]}); the test "
+                          "files are checked before training so that a finished run is never "
+                          "lost to one of them; repair or remove the file")
     # DECISION plan-2026-10-30T132432-a865fa08/D-019: the statistics come from the FIT split only. Do NOT pass
     # ``train_all`` (it holds the selection images, so the selection split would shape the
     # inputs it then selects on) and never the test files; and do NOT borrow ImageNet's
@@ -903,7 +1192,11 @@ def _load_file_listing(
     if normalize == "standardize" or augment_from_mean is not None:
         logger.info(f"{listing.source}: statistics from one pass over {len(fit_paths)} fit images "
                     f"at {image_size} px")
-        mean, std = _fit_split_statistics(fit_paths, image_size)
+        try:
+            mean, std = _fit_split_statistics(fit_paths, image_size)
+        except tf.errors.InvalidArgumentError as exc:
+            _name_undecodable(fit_paths, train_key, exc)
+            raise
     else:
         mean, std = np.zeros(3, np.float32), np.ones(3, np.float32)
     if augment_from_mean is not None:
@@ -943,6 +1236,8 @@ def _load_file_listing(
         selection_split=f"validation_split={split} of the train files (seeded permutation)",
         test_split=("none: the data has no test split" if test is None
                     else "the test files"),
+        image_files=tuple(fit_paths) + tuple(train_all[select_idx].tolist()),
+        fingerprint=listing_fingerprint(listing),
     )
 
 

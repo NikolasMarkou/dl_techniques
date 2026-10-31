@@ -173,13 +173,14 @@ def test_the_class_names_are_the_sorted_directory_names_and_a_label_is_the_index
 def test_a_hidden_entry_and_a_file_of_another_suffix_are_not_images(tmp_path):
     for name in ("a", "b"):
         write_png(tmp_path / name / "one.png", (8, 8), (1, 2, 3))
+        write_png(tmp_path / name / "two.png", (8, 8), (3, 2, 1))  # a class needs two (D-070)
     (tmp_path / "a" / "notes.txt").write_text("not an image")
     (tmp_path / "a" / ".hidden.png").write_bytes(b"")
     (tmp_path / ".cache").mkdir()
     (tmp_path / "loose.png").write_bytes(b"")
     listing = scan_image_folder(str(tmp_path))
     assert listing.class_names == ["a", "b"]
-    assert [Path(p).name for p in listing.train_paths] == ["one.png", "one.png"]
+    assert [Path(p).name for p in listing.train_paths] == ["one.png", "two.png"] * 2
     assert listing.test_paths is None and listing.test_labels is None
 
 
@@ -459,8 +460,8 @@ def csv_for(tmp_path: Path, rows, name="data.csv", header=("path", "label")):
     ],
 )
 def test_a_bad_csv_is_refused_naming_the_key(tmp_path, case, pattern):
-    make_classes(tmp_path / "pics")
-    good = [("pics/a/0.png", "a"), ("pics/b/0.png", "b")]
+    make_classes(tmp_path / "pics", count=3)
+    good = [("pics/a/0.png", "a"), ("pics/a/1.png", "a"), ("pics/b/0.png", "b"), ("pics/b/1.png", "b")]
     data = {"train_csv": str(csv_for(tmp_path, good))}
     if case == "missing_path_column":
         data["train_csv"] = str(csv_for(tmp_path, good, header=("file", "label")))
@@ -481,7 +482,7 @@ def test_a_bad_csv_is_refused_naming_the_key(tmp_path, case, pattern):
         data["train_csv"] = str(tmp_path / "absent.csv")
     elif case == "test_classes":
         data["test_csv"] = str(
-            csv_for(tmp_path, [("pics/a/0.png", "a"), ("pics/b/0.png", "z")], name="test.csv")
+            csv_for(tmp_path, [("pics/a/2.png", "a"), ("pics/b/2.png", "z")], name="test.csv")
         )
     with pytest.raises(ConfigError, match=pattern):
         image_facts(CsvImageData(**data), 8)
