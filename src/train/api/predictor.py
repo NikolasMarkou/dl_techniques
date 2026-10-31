@@ -45,6 +45,14 @@ Interface contract
         positive, ``normalize`` of ``unit`` with a ``mean`` that is not zeros or a ``std`` that
         is not ones, or an ``eval_transform`` whose kind is not in :data:`EVAL_KINDS`.
 
+``record_differences(earlier, now)``
+    :param earlier: a checked record (a run's ``task.json``).
+    :param now: a record built from the data loaded now (:func:`build_task_record`).
+    :return: one ``"<key>: <earlier> -> <now>"`` line per key of :data:`DATA_KEYS` that
+        differs: the class names (as a list, in order), the geometry, the normalization and
+        the per-channel ``mean`` and ``std`` (within a relative ``1e-5``). A resume compares
+        with this before it trains on the data (D-069).
+
 ``load_model(path)``
     :param path: a run directory (its ``best_model.keras``) or a ``.keras`` file. A
         ``.keras`` file reads the first record that exists of ``<file>.task.json`` (what
@@ -52,8 +60,9 @@ Interface contract
         directory.
     :return: a :class:`Predictor`. Compiles nothing. The model is called once on zeros, so
         a model whose output width is not the number of class names is refused here.
-    :raises ConfigError: for a missing path, ``task.json`` or model file, a bad record,
-        a family that is not registered, or a class-count mismatch.
+    :raises ConfigError: for a missing path, ``task.json`` or model file, a model file that
+        is not an intact ``.keras`` archive (one cut short by a kill is named, not a Keras
+        traceback), a bad record, a family that is not registered, or a class-count mismatch.
 
 ``Predictor.predict(x, top_k=None, threshold=None)``
     :param x: one image or several. A single image is a path (``str`` or ``Path``), a
@@ -87,7 +96,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from . import registry
 from .errors import ConfigError
-from .run_dir import TASK_FILE, TASK_SUFFIX
+from .run_dir import TASK_FILE, TASK_SUFFIX, check_model_file
 
 # ---------------------------------------------------------------------
 
@@ -291,6 +300,31 @@ def read_record(path: Path) -> Dict[str, Any]:
     return record
 
 
+#: The keys of a record that describe the DATA a run was trained on (a resume compares them).
+DATA_KEYS = ("class_names", "input_shape", "normalize", "eval_transform", "mean", "std")
+
+
+def _shown(value: Any) -> str:
+    text = json.dumps(value)
+    return text if len(text) <= 100 else text[:97] + "..."
+
+
+def record_differences(earlier: Mapping[str, Any], now: Mapping[str, Any]) -> List[str]:
+    """List the :data:`DATA_KEYS` where ``now`` differs from ``earlier``; see the module contract."""
+    lines = []
+    for key in DATA_KEYS:
+        before, after = earlier[key], now[key]
+        if key in ("mean", "std"):
+            same = len(before) == len(after) and all(
+                math.isclose(a, b, rel_tol=1e-5, abs_tol=1e-7) for a, b in zip(before, after)
+            )
+        else:
+            same = before == after
+        if not same:
+            lines.append(f"{key}: {_shown(before)} -> {_shown(after)}")
+    return lines
+
+
 def _task_candidates(model_file: Path) -> Tuple[Path, ...]:
     """Return the records a ``.keras`` file may be read with, best first (see the module contract)."""
     # DECISION plan-2026-10-30T132432-a865fa08/D-068: ``<file>.task.json`` first, because that is
@@ -351,6 +385,7 @@ def load_model(path: Union[str, Path]) -> "Predictor":
     # predictor needs no loss or metric, and a metric class the archive names (the
     # library's half-precision top-k, D-051) would be one more thing that can fail a
     # reload that needs only the weights.
+    check_model_file(model_file, "Invalid value for 'model'")
     model = keras.models.load_model(str(model_file), compile=False)
     _check_width(model(_zeros_of(record), training=False), record)
     return Predictor(model, record)

@@ -233,6 +233,51 @@ def resolve_monitor_mode(monitor: str, mode: Optional[str] = None) -> str:
     return 'min'
 
 
+class AtomicModelCheckpoint(keras.callbacks.ModelCheckpoint):
+    """``ModelCheckpoint`` whose file is never seen half written.
+
+    Interface contract: the same arguments as ``keras.callbacks.ModelCheckpoint``
+    (``filepath`` must end in ``.keras``). An improvement is saved to
+    ``<stem>.partial.keras`` in the SAME directory, flushed to disk, and moved over
+    ``filepath`` with ``os.replace``, which is atomic on one filesystem. A process
+    killed at any instant therefore leaves the earlier best intact or the new one
+    whole. The stock callback writes ``filepath`` in place, so a kill mid-write
+    destroys the earlier best as well (review-iter-3 concern 3). An epoch that does
+    not improve writes nothing and replaces nothing, so a ``.partial.keras`` left by
+    an earlier killed process is never promoted.
+
+    Failure mode: an ``OSError`` from the save, the flush or the rename propagates
+    out of ``fit``, as the stock callback's does. The log line Keras prints for an
+    improvement names the ``.partial`` file; the file at ``filepath`` is the result.
+    """
+
+    def _get_file_path(self, epoch, batch, logs):
+        # DECISION plan-2026-10-30T132432-a865fa08/D-069
+        # The stock callback is told a TEMPORARY name and the rename happens in
+        # `_save_model`. Do NOT hand it `filepath` and "fix" a torn file afterwards: a
+        # kill inside `model.save` has already destroyed the earlier best, and a resume
+        # then has no best to return to (review-iter-3 concern 3).
+        final = super()._get_file_path(epoch, batch, logs)
+        self._final_path = final
+        root, extension = os.path.splitext(final)
+        return f"{root}.partial{extension}"
+
+    def _save_model(self, epoch, batch, logs):
+        before = self.best
+        super()._save_model(epoch, batch, logs)
+        if self.save_best_only and self.best == before:
+            return
+        final = self._final_path
+        root, extension = os.path.splitext(final)
+        partial = f"{root}.partial{extension}"
+        descriptor = os.open(partial, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(partial, final)
+
+
 def create_callbacks(
         model_name: str,
         results_dir_prefix: str = "model",
@@ -252,6 +297,7 @@ def create_callbacks(
         analyzer_first_epoch: bool = True,
         initial_value_threshold: Optional[float] = None,
         csv_initial_rows: Sequence[Tuple[int, Dict[str, Any]]] = (),
+        atomic_best_checkpoint: bool = False,
 ) -> Tuple[List, str]:
     """
     Create standard training callbacks.
@@ -308,6 +354,10 @@ def create_callbacks(
         Resume hook, passed to :class:`EpochCSVLogger` as ``initial_rows``: the
         ``(epoch, logs)`` rows of the earlier segment. Empty (default) is the
         legacy behaviour.
+    atomic_best_checkpoint : bool
+        Use :class:`AtomicModelCheckpoint` for ``best_model.keras``: written to a
+        temporary name in the same directory and moved into place, so a kill never
+        leaves a torn file. ``False`` (default) is the legacy in-place write.
 
     Returns
     -------
@@ -331,7 +381,7 @@ def create_callbacks(
             verbose=1,
             mode=monitor_mode,
         ),
-        keras.callbacks.ModelCheckpoint(
+        (AtomicModelCheckpoint if atomic_best_checkpoint else keras.callbacks.ModelCheckpoint)(
             filepath=best_checkpoint_path(results_dir),
             monitor=monitor,
             save_best_only=True,

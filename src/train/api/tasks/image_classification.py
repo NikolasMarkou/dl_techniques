@@ -41,13 +41,16 @@ Interface contract
         an int in ``[0, 2**32 - 1]``.
     :param precision: ``"float32"``, ``"mixed_float16"`` or ``"mixed_bfloat16"``.
     :param resume_interrupted: continue a killed run of the same ``out`` with the same
-        request (only ``resume_interrupted`` and ``out`` may differ). Rows, the best
-        checkpoint, early-stopping state and history are kept. Limits: the training data
-        order replays the order of epoch 0; an epoch killed midway is trained again from
-        its start; ``ReduceLROnPlateau`` (``schedule=constant``) restarts its own best and wait; a kill
-        between the best checkpoint's save and the backup can leave ``best_model.keras``
-        from an epoch that is then trained again. A finished run, a run with no epoch
-        left, and one with ``save_best`` false are refused (exit 2).
+        request (only ``resume_interrupted``, ``out`` and ``devices`` may differ). Rows, the
+        best checkpoint, early-stopping and ``ReduceLROnPlateau`` state, the learning rate
+        and the history are kept. Limits: the training data order replays the order of
+        epoch 0; an epoch killed midway is trained again from its start; a kill between the
+        best checkpoint's save and the backup can leave ``best_model.keras`` one epoch LATER
+        than the resumed state's best (the epoch that is then trained again; never an earlier
+        one). A finished run, a run with no epoch left, one with ``save_best`` false, one
+        whose data (class names, statistics, split sizes) is no longer the data it started
+        with, one a live process holds (``run.lock``) and one whose backup has no sound copy
+        are refused (exit 2).
     :param checkpoint: a ``.keras`` model (a ``str`` or a ``Path``) whose layers
         of the same names give their weights to the new model.
     :param model_args: keywords of the family factory; they win over the recipe's.
@@ -148,9 +151,13 @@ class ImageClassificationConfig(StrictConfig):
     resume_interrupted: bool = dataclasses.field(
         default=False,
         metadata={
-            "help": "continue a killed run of the same out with the same request; the data "
-            "order replays epoch 0's, a half-done epoch is trained again, and a finished "
-            "run is refused"
+            "help": "continue a killed run of the same out with the same request (devices "
+            "may differ); the data order replays epoch 0's and a half-done epoch is trained "
+            "again; the learning rate, ReduceLROnPlateau and early stopping come back; a kill "
+            "between the best checkpoint's save and the backup can leave best_model.keras one "
+            "epoch LATER than the resumed state's best (the epoch that is then trained again; "
+            "never an earlier one); refused: a finished run, other data than the run's, a live "
+            "process holding the run, a backup neither of whose copies is sound"
         },
     )
     checkpoint: Optional[str] = dataclasses.field(

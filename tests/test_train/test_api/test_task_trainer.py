@@ -170,8 +170,11 @@ def reversed_mode(world, tmp_path_factory):
 BASE_FILES = {
     "config.json",
     "checkpoints/backup/latest.weights.h5",
+    "checkpoints/backup/latest.weights.h5.bkp",
     "checkpoints/backup/training_metadata.json",
+    "checkpoints/backup/training_metadata.json.bkp",
     "checkpoints/fit_state.json",
+    "run.lock",
     "config_requested.json",
     "results_summary.json",
     "run.log",
@@ -327,6 +330,7 @@ def test_the_knob_run_keeps_what_was_not_turned_off(knobs):
         "checkpoints/backup/latest.weights.h5",
         "checkpoints/backup/training_metadata.json",
         "checkpoints/fit_state.json",
+        "run.lock",  # one epoch, so no previous backup pair (it is copied before the second save)
     }
 
 

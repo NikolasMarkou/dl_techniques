@@ -136,15 +136,18 @@ def killed(world, tmp_path_factory):
     return run_dir
 
 
-#: Written over the copy's task.json before the resume: a resume that rewrote the file would erase it.
-PLANTED_TASK_JSON = '{"planted": "by the test"}\n'
+#: The copy's task.json is rewritten with this ``task`` value before the resume (the data keys
+#: stay, since a resume compares them with the data): a resume that rewrote the file would erase it.
+PLANTED_TASK = "planted by the test"
 
 
 @pytest.fixture(scope="module")
 def resumed(world, killed, tmp_path_factory):
     run_dir = tmp_path_factory.mktemp("resumed") / "copy"
     shutil.copytree(killed, run_dir)
-    (run_dir / "task.json").write_text(PLANTED_TASK_JSON)
+    planted = json.loads((run_dir / "task.json").read_text())
+    planted["task"] = PLANTED_TASK
+    (run_dir / "task.json").write_text(json.dumps(planted, indent=2) + "\n")
     with open(run_dir / "training_log.csv", newline="") as handle:
         header = next(csv.reader(handle))
     # The kill that fell between a CSV row and the backup: epoch 2's row exists, its backup does not.
@@ -255,7 +258,7 @@ def test_a_killed_run_already_has_its_task_json_and_a_resume_leaves_it_alone(kil
 
     assert read_record(killed / "task.json")["class_names"]  # written before `fit`, so a killed run is usable
     _, run_dir = resumed
-    assert (run_dir / "task.json").read_text() == PLANTED_TASK_JSON
+    assert json.loads((run_dir / "task.json").read_text())["task"] == PLANTED_TASK
 
 
 def test_the_baseline_comes_from_the_sidecar(killed, resumed):

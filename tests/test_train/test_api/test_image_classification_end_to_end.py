@@ -46,8 +46,11 @@ EPOCHS = 3
 MAIN_FILES = {
     "config.json",
     "checkpoints/backup/latest.weights.h5",
+    "checkpoints/backup/latest.weights.h5.bkp",
     "checkpoints/backup/training_metadata.json",
+    "checkpoints/backup/training_metadata.json.bkp",
     "checkpoints/fit_state.json",
+    "run.lock",
     "config_requested.json",
     "results_summary.json",
     "run.log",
@@ -382,7 +385,9 @@ def test_the_cli_trains_and_exits_zero(cli_world, tmp_path, capsys):
     out = tmp_path / "run"
     code = run_cli(f"out={out}", "metric_args.success_threshold=0.0", *TOKENS)
     assert code == 0, capsys.readouterr().err
-    assert files_of(out) == MAIN_FILES
+    # One epoch: the backup copies its previous pair before the SECOND save only.
+    assert files_of(out) == MAIN_FILES - {
+        "checkpoints/backup/latest.weights.h5.bkp", "checkpoints/backup/training_metadata.json.bkp"}
 
 
 def test_an_unmet_success_threshold_exits_one(cli_world, tmp_path, capsys):

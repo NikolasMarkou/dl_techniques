@@ -50,13 +50,15 @@ Interface contract
        need no data (``problems`` of the config, ``check_optim_args``, the
        monitor against ``metric_names``, ``devices``); a refusal here leaves no
        trace: the directory is not claimed yet (D-042, D-047); then
-       ``resolve_out`` and ``open_run`` (claims the directory);
+       ``resolve_out`` and ``open_run`` (claims the directory); ``take_run_lock`` (``run.lock``: created
+       with ``O_EXCL`` by a fresh run; a resume refuses a live holder and replaces a dead one's);
     2. ``setup_gpu``, ``set_seeds(config.seed)``, the precision policy (restored
        in a ``finally``);
     3. ``write_requested``; ``run.log`` opens; ``Args:`` is logged;
        ``Resolved args:`` is logged and ``write_resolved`` writes ``config.json``;
     4. (the data is described in step 1 and loaded in step 5)
-    5. ``build_data``, ``build_model``, the optional ``checkpoint`` weights,
+    5. ``build_data`` (a resume then checks the data against ``task.json`` and settles the
+       backup, D-069), ``build_model``, the optional ``checkpoint`` weights,
        ``compile`` through ``optim.py``;
     6. ``check_initial_loss``;
     7. callbacks: ``LearningRateLogger(at_epoch_start=True)`` first, then
@@ -80,11 +82,18 @@ run writes ``checkpoints/backup/`` (``BackupAndRestore``, kept) and
 ``checkpoints/fit_state.json`` (``EarlyStopping``'s best and wait per epoch, the
 epoch-0 evaluation, and ``fit_finished`` once ``fit`` returned). A resume:
 
-* refuses, before anything is written, a run with no backup, a run that is
-  finished (``results_summary.json`` or ``fit_finished``), a request that
-  differs from ``config_requested.json`` (``resume_interrupted`` and ``out`` may
-  differ), a run with ``checkpoint_args.save_best`` false, and a run with no
-  epoch left (all trained, or ``EarlyStopping`` had already decided to stop);
+* refuses, before anything is written, a run with no backup (killed before its first
+  epoch ended: nothing to resume, choose a new ``out``), a run that is finished
+  (``results_summary.json`` or ``fit_finished``), a run a live process holds
+  (``run.lock``), a request that differs from ``config_requested.json``
+  (``resume_interrupted``, ``out`` and ``devices`` may differ), a run with
+  ``checkpoint_args.save_best`` false, a ``best_model.keras`` cut short by a kill, and a
+  run with no epoch left (all trained, or ``EarlyStopping`` had already decided to stop);
+* after the data is loaded and before the CSV is touched, refuses data that is not the run's
+  (class names, geometry, mean and std against ``task.json``; split sizes against the
+  sidecar) and settles the backup (``resume_state.settle_backup``: the latest pair when the
+  optimizer's step count equals epoch times steps, else the previous pair of
+  ``double_checkpoint``, else a refusal naming both files);
 * appends to ``run.log``, copies ``training_log.csv`` to
   ``training_log.pre_resume_<k>.csv``, and rewrites it with epochs ``0 .. start-1``
   from the copy, so a row of an epoch the backup never saw is re-trained, once;
@@ -95,13 +104,14 @@ epoch-0 evaluation, and ``fit_finished`` once ``fit`` returned). A resume:
   step (summary, history file, figures) sees all epochs;
 * writes neither ``config_requested.json`` nor ``config.json`` again.
 
-Residuals, stated in ``resume_interrupted``'s help: the training data order
-replays the order of epoch 0 (the pipeline is seeded, not resumed), an epoch
-killed midway is trained again from its start, ``ReduceLROnPlateau`` (schedule
-``constant``) restarts its own best and wait (the sidecar keeps ``EarlyStopping``'s
-only), a kill between the best checkpoint's save and the backup can leave ``best_model.keras``
-from an epoch that is then trained again (D-021), and the summary's
-``epoch_times`` and ``fit_wall_seconds`` cover the resumed epochs only.
+Residuals, stated in ``resume_interrupted``'s help (a test pins the text): the training
+data order replays the order of epoch 0 (the pipeline is seeded, not resumed), an epoch
+killed midway is trained again from its start, a kill between the best checkpoint's save and
+the backup can leave ``best_model.keras`` one epoch LATER than the resumed state's best (the
+epoch that is then trained again; never an earlier one, D-021, D-069), and the summary's
+``epoch_times`` and ``fit_wall_seconds`` cover the resumed epochs only. ``ReduceLROnPlateau``'s
+best, wait and cooldown come back through the sidecar and the learning rate through the
+optimizer (D-069); the best checkpoint is written atomically.
 
 Hooks (override in a task)
 --------------------------
@@ -189,10 +199,13 @@ from .optim import build_optimizer_and_schedule, check_optim_args
 from .run_dir import (
     BACKUP_DIR,
     CHECKPOINTS_DIR,
+    TASK_FILE,
     TRAINING_LOG_NAME,
+    check_model_file,
     load_resume_point,
     open_run,
     resolve_out,
+    take_run_lock,
     write_requested,
     write_resolved,
     write_task,
@@ -271,6 +284,15 @@ class Evaluation:
     analysis: Dict[str, Any]
     test_metrics_final: Dict[str, float]
     load_check: Optional[bool]
+
+
+def _data_counts(data: Any) -> Dict[str, int]:
+    """The sizes of the three splits a run trained and was selected and tested on (D-069)."""
+    return {
+        "n_train": int(data.n_train),
+        "n_select": int(data.n_select),
+        "n_test": int(data.n_test),
+    }
 
 
 def _is_auto(value: Any) -> bool:
@@ -570,6 +592,9 @@ class TaskTrainer:
         # Reading the earlier run's files is plain file I/O: no TensorFlow op, so it may
         # come before `setup_gpu` (D-055). Loading its best weights may not, and waits.
         resume = self._resume_point(run_dir, resolved) if config.resume_interrupted else None
+        # The run lock (D-069): a fresh run creates it with O_EXCL, a resume replaces a dead
+        # holder's. After every refusal that needs no tensor, before the first thing is written.
+        take_run_lock(run_dir, resume=resume is not None)
         setup_gpu(None if _is_auto(config.devices) else config.devices, flag="devices")
         set_seeds(config.seed)
         previous_policy = keras.mixed_precision.global_policy().name
@@ -740,9 +765,16 @@ class TaskTrainer:
         :return: the :class:`~train.common.resume_state.ResumePoint`.
         :raises ConfigError: see the module contract, "Resume".
         """
+        return self._check_resume_point(run_dir, resolved, load_resume_point(run_dir, self.config))
+
+    @staticmethod
+    def _check_resume_point(run_dir: Path, resolved: StrictConfig, point: Any) -> Any:
+        """Apply the refusals of :meth:`_resume_point` to ``point`` and return it.
+
+        Called again when the backup settles on its previous copy (one epoch earlier).
+        """
         from train.common.callbacks import best_checkpoint_path
 
-        point = load_resume_point(run_dir, self.config)
         checkpoint_cfg: CheckpointArgs = resolved.checkpoint_args
         if not checkpoint_cfg.save_best:
             raise ConfigError(
@@ -774,6 +806,10 @@ class TaskTrainer:
                 f"Cannot resume {run_dir}: the sidecar records a best value but "
                 f"{best_checkpoint_path(str(run_dir))} does not exist"
             )
+        if point.best is not None:
+            # Plain file I/O, so before the GPU: a best checkpoint cut short by a kill is
+            # named here, not met as a Keras traceback after the model is built (D-069).
+            check_model_file(Path(best_checkpoint_path(str(run_dir))), f"Cannot resume {run_dir}")
         if "initial" not in point.state:
             raise ConfigError(
                 f"Cannot resume {run_dir}: the sidecar holds no epoch-0 evaluation"
@@ -856,6 +892,12 @@ class TaskTrainer:
                     f"classes with input shape {tuple(data.input_shape)}"
                 )
             steps_per_epoch = data.steps_per_epoch
+            if resume is not None:
+                # Before anything of the earlier run is touched (the CSV is copied aside
+                # below): the data is the killed run's data, and the backup is a pair that
+                # belongs together (D-069).
+                self._check_data_unchanged(run_dir, config, context, data, resume)
+                resume = self._settle_backup(run_dir, config, resume, steps_per_epoch)
 
             with _bad_value_is_a_config_error(run_dir, "the model factory"):
                 model = self.build_model(config, context, data)
@@ -900,6 +942,7 @@ class TaskTrainer:
                         "ratio": float(initial_ratio),
                         "warned": bool(init_warning),
                     },
+                    data_counts=_data_counts(data),
                 )
             else:
                 initial = resume.state["initial"]
@@ -1042,6 +1085,87 @@ class TaskTrainer:
     # Pieces
     # -----------------------------------------------------------------
 
+    def _check_data_unchanged(
+        self, run_dir: Path, config: StrictConfig, context: AutoContext, data: Any, resume: Any
+    ) -> None:
+        """Refuse a resume whose data is not the data the killed run trained on.
+
+        Compares the class names, the geometry, the normalization and the per-channel
+        statistics the loader reports now with the run's ``task.json``, and the split
+        sizes with the sidecar's ``data_counts``. The loader has already made its one
+        statistics pass by this point, so the check costs nothing more.
+
+        :raises ConfigError: naming each difference as ``key: earlier -> now``, and that
+            the run cannot be continued on other data.
+        """
+        from .predictor import read_record, record_differences
+
+        # DECISION plan-2026-10-30T132432-a865fa08/D-069
+        # Class names and statistics against `task.json`, split sizes against the sidecar.
+        # Do NOT compare the statistics alone: a renamed class leaves them unchanged when
+        # its images keep their pixels, and an added image moves them by less than the
+        # tolerance in a large set; the names and the sizes catch what they miss. The
+        # statistics catch a swap of two class folders (same names, same sizes). A swap
+        # that leaves the fit split's statistics equal is NOT caught (the loader exposes
+        # no per-file fingerprint).
+        lines: List[str] = []
+        record = self.task_record(config, context, data)
+        task_path = run_dir / TASK_FILE
+        if record is not None and task_path.is_file():
+            lines.extend(record_differences(read_record(task_path), record))
+        earlier_counts = resume.state.get("data_counts")
+        if not isinstance(earlier_counts, dict):
+            raise ConfigError(
+                f"Cannot resume {run_dir}: the sidecar holds no record of the data's size, so "
+                "it cannot be shown that the data is unchanged. Choose a new 'out'"
+            )
+        now_counts = _data_counts(data)
+        for key in sorted(set(earlier_counts) | set(now_counts)):
+            if earlier_counts.get(key) != now_counts.get(key):
+                lines.append(f"{key}: {earlier_counts.get(key)} -> {now_counts.get(key)}")
+        if lines:
+            raise ConfigError(
+                f"Cannot resume {run_dir}: the data is not the data the run started with ("
+                + "; ".join(lines)
+                + "). The earlier epochs trained on the earlier data, and a resume would "
+                "standardize, split and label differently; restore the data as it was, or "
+                "choose a new 'out'"
+            )
+
+    def _settle_backup(
+        self, run_dir: Path, resolved: StrictConfig, resume: Any, steps_per_epoch: int
+    ) -> Any:
+        """Make the backup a consistent pair, or refuse; see ``resume_state.settle_backup``.
+
+        :return: ``resume``, or, when the previous copy had to be chosen (so the run goes
+            back one epoch), the resume point re-read for that epoch with every refusal of
+            :meth:`_resume_point` applied to it again: the CSV rows, the sidecar entry and
+            the best value are those of the epoch ``fit`` will start at.
+        :raises ConfigError: when neither the latest nor the previous copy is sound,
+            naming both files. Nothing has been changed then.
+        """
+        from train.common.resume_state import settle_backup
+
+        try:
+            _label, epoch = settle_backup(run_dir / BACKUP_DIR, steps_per_epoch)
+        except ValueError as exc:
+            raise ConfigError(
+                f"Cannot resume {run_dir}: {exc}. The run cannot be continued from its "
+                "backup; choose a new 'out'"
+            ) from exc
+        if epoch == resume.start:
+            return resume
+        # DECISION plan-2026-10-30T132432-a865fa08/D-069
+        # When the previous pair is the one that is sound, the run goes back to ITS epoch
+        # and the resume point is read AGAIN (CSV rows, sidecar entry, best, wait) for that
+        # epoch, with every refusal applied to it. Do NOT keep the point read from the
+        # latest metadata: its rows include the epoch `fit` is about to train again, so the
+        # CSV would hold that epoch twice (the duplicate row a harness copy of Keras's
+        # steps produced in review-iter-3).
+        return self._check_resume_point(
+            run_dir, resolved, load_resume_point(run_dir, self.config)
+        )
+
     @staticmethod
     def _best_weights_of(run_dir: Path, resume: Any) -> Optional[List[Any]]:
         """Return the weights of ``best_model.keras`` (``get_weights`` order), or ``None``.
@@ -1055,7 +1179,14 @@ class TaskTrainer:
 
         if resume.best is None:
             return None
-        return keras.models.load_model(best_checkpoint_path(str(run_dir)), compile=False).get_weights()
+        path = best_checkpoint_path(str(run_dir))
+        try:
+            return keras.models.load_model(path, compile=False).get_weights()
+        except (OSError, ValueError, KeyError) as exc:
+            raise ConfigError(
+                f"Cannot resume {run_dir}: {path} cannot be loaded ({str(exc).splitlines()[0][:150]}); "
+                "the best weights of the killed segment are unreadable. Choose a new 'out'"
+            ) from exc
 
     def _load_checkpoint(self, model: Any, checkpoint: str) -> None:
         """Copy weights from ``checkpoint`` into the built ``model``, or refuse."""
@@ -1139,6 +1270,7 @@ class TaskTrainer:
             include_terminate_on_nan=debug_cfg.terminate_on_nan,
             include_analyzer=every > 0,
             analyzer_start_epoch=max(every, 1),
+            atomic_best_checkpoint=True,
             **resumed,
         )
         if not checkpoint_cfg.save_best:
@@ -1183,13 +1315,30 @@ class TaskTrainer:
         # the sidecar, so a kill at any instant leaves a sidecar entry for every epoch the
         # backup claims.
         stopper = next(c for c in callbacks if isinstance(c, keras.callbacks.EarlyStopping))
+        plateau = next(
+            (c for c in callbacks if isinstance(c, keras.callbacks.ReduceLROnPlateau)), None
+        )
         if resume is not None:
             callbacks.append(
-                RestoreFitState(stopper, resume.best, resume.wait, best_weights, resume.best_epoch)
+                RestoreFitState(
+                    stopper, resume.best, resume.wait, best_weights, resume.best_epoch,
+                    reduce_lr=plateau, reduce_lr_state=resume.reduce_lr,
+                )
             )
-        callbacks.append(FitStateSidecar(stopper, run_dir / CHECKPOINTS_DIR / FIT_STATE_NAME))
         callbacks.append(
-            keras.callbacks.BackupAndRestore(str(run_dir / BACKUP_DIR), delete_checkpoint=False)
+            FitStateSidecar(stopper, run_dir / CHECKPOINTS_DIR / FIT_STATE_NAME, reduce_lr=plateau)
+        )
+        # DECISION plan-2026-10-30T132432-a865fa08/D-069
+        # `double_checkpoint=True`: the backup keeps the previous pair as `*.bkp`. Do NOT
+        # drop it to save the second copy's disk space: a kill inside the weights write
+        # leaves the only copy torn, and the run can never be resumed (review-iter-3
+        # concern 4, measured exposure 0.6 to 3.3 s of every epoch). `settle_backup`
+        # chooses between the pair before `fit`; Keras's own fallback (on `OSError` only)
+        # stays as the second line.
+        callbacks.append(
+            keras.callbacks.BackupAndRestore(
+                str(run_dir / BACKUP_DIR), double_checkpoint=True, delete_checkpoint=False
+            )
         )
         return epoch_line, callbacks
 

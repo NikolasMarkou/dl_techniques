@@ -29,14 +29,32 @@ Interface contract
     :return: ``run_dir``. A new run needs a missing or EMPTY directory and
         claims it before returning, by creating an empty
         ``config_requested.json`` with ``O_CREAT | O_EXCL``, so two callers
-        cannot both succeed. A resumed run touches nothing.
+        cannot both succeed. A resumed run touches nothing (the trainer takes
+        ``run.lock`` later, :func:`take_run_lock`).
     :raises ConfigError: a new run into a non-empty directory, into a directory
         holding any artifact, or under an ancestor directory holding one; a lost
         claim; a resume without ``checkpoints/backup``, with
         ``results_summary.json`` present, or whose sidecar records
-        ``fit_finished`` (a finished run has nothing to resume, D-016, D-021);
-        any ``OSError`` met on the way. Nothing is created before a refusal.
+        ``fit_finished`` (a finished run has nothing to resume, D-016, D-021), or
+        whose ``run.lock`` names a live process (D-069); a resume of a run killed before
+        its first epoch ended says so and to choose a new ``out``; any ``OSError`` met
+        on the way. Nothing is created before a refusal.
         The text names ``out``.
+
+``take_run_lock(run_dir, resume)`` / ``refuse_live_holder(run_dir)``
+    The run lock ``run.lock`` (D-069): ``{"pid", "start", "created"}``, where ``start``
+    is the process start time from ``/proc/<pid>/stat`` with the boot id (``null`` where
+    ``/proc`` is missing). A fresh run creates it with ``O_CREAT | O_EXCL``; a resume
+    replaces a lock whose holder is dead with ``os.replace`` of a freshly written temp
+    file. A holder is live when its pid exists, is not a zombie, and (where ``/proc``
+    exists) has the recorded start time; the process that asks is never counted as live
+    (a run that raised in this process has ended). Nothing here deletes: a finished or
+    killed run's lock stays and reads as stale.
+    :raises ConfigError: a live holder; a lock lost to another resume.
+
+``check_model_file(path, what)``
+    :raises ConfigError: when ``path`` is not an intact ``.keras`` archive (a zip whose
+        every member passes its CRC), naming the file.
 
 ``load_resume_point(run_dir, mapping)``
     :param run_dir: a directory :func:`open_run` accepted for a resume.
@@ -45,8 +63,8 @@ Interface contract
         run's files. Reads only; touches nothing and calls no TensorFlow op.
     :raises ConfigError: when ``config_requested.json`` is missing, empty (the
         run died before writing it) or unreadable; when ``mapping`` differs from
-        it in any key except ``resume_interrupted`` and ``out`` (the keys are
-        named); or when the backup, the CSV and the sidecar do not agree on where
+        it in any key except ``resume_interrupted``, ``out`` and ``devices`` (the
+        keys are named); or when the backup, the CSV and the sidecar do not agree on where
         the run stopped (D-058).
 
 ``write_requested(run_dir, mapping)`` / ``write_resolved(run_dir, config)``
@@ -68,6 +86,7 @@ import json
 import math
 import numbers
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, List, Mapping, Optional, Tuple
@@ -103,10 +122,15 @@ TASK_SUFFIX = ".task.json"
 #: The training log the CSV logger writes, relative to the run directory.
 TRAINING_LOG_NAME = "training_log.csv"
 
+#: The run lock (D-069): who is running in this directory.
+LOCK_NAME = "run.lock"
+
 #: Request keys a resume does not compare with the earlier request: the flag that
-#: asks for the resume, and ``out`` (the directory was found from it, and a run
-#: started with ``out=auto`` or moved since is resumed by its real path).
-RESUME_UNCOMPARED_KEYS = ("resume_interrupted", "out")
+#: asks for the resume, ``out`` (the directory was found from it, and a run
+#: started with ``out=auto`` or moved since is resumed by its real path) and
+#: ``devices`` (the weights and the optimizer do not depend on which GPU holds
+#: them, so a run may move to another one; D-069).
+RESUME_UNCOMPARED_KEYS = ("resume_interrupted", "out", "devices")
 
 # ---------------------------------------------------------------------
 
@@ -312,6 +336,176 @@ def _refuse_finished_fit(run_dir: Path) -> None:
         )
 
 
+def _first_epoch_message(run_dir: Path) -> str:
+    """The refusal for a run that was killed before its first epoch ended (nothing to resume)."""
+    return (
+        f"Cannot resume {run_dir}: the run was killed before its first epoch ended, so nothing "
+        "was saved that a resume could continue from. Choose a new 'out' (this directory is "
+        "kept as it is; nothing in it is deleted)"
+    )
+
+
+# ---------------------------------------------------------------------
+# The run lock
+# ---------------------------------------------------------------------
+
+
+def _proc_stat(pid: int) -> Optional[Tuple[str, str]]:
+    """Return ``(state, start time in clock ticks)`` of ``pid`` from ``/proc``, or ``None``."""
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    # `pid (comm) state ppid ...`: comm may hold spaces and parentheses, so cut at the LAST ")".
+    fields = text[text.rindex(")") + 2:].split()
+    try:
+        return fields[0], fields[19]
+    except IndexError:
+        return None
+
+
+def process_stamp(pid: int) -> Optional[str]:
+    """Return the start time of ``pid`` (boot id and clock ticks), or ``None`` without ``/proc``."""
+    stat = _proc_stat(pid)
+    if stat is None:
+        return None
+    try:
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        boot = ""
+    return f"{boot}:{stat[1]}"
+
+
+def read_lock(run_dir: Path) -> Optional[dict]:
+    """Return the parsed ``run.lock`` of ``run_dir``; ``None`` if absent; ``{}`` if unreadable.
+
+    An empty or garbled file is the lock of a process that died while writing it.
+    """
+    try:
+        text = (run_dir / LOCK_NAME).read_text()
+    except FileNotFoundError:
+        return None
+    try:
+        record = json.loads(text)
+    except ValueError:
+        return {}
+    return record if isinstance(record, dict) else {}
+
+
+def lock_holder_is_live(record: dict) -> bool:
+    """Whether the process a lock names is running (and is not the caller).
+
+    :param record: a parsed lock. One that names no pid is nobody's.
+    """
+    pid = record.get("pid")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 or pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass  # exists, owned by someone else
+    stat = _proc_stat(pid)
+    if stat is not None and stat[0] in ("Z", "X"):
+        return False  # killed, not yet reaped
+    recorded = record.get("start")
+    current = process_stamp(pid)
+    return not (recorded is not None and current is not None and recorded != current)
+
+
+def refuse_live_holder(run_dir: Path) -> None:
+    """Refuse when ``run_dir``'s lock names a process that is still running.
+
+    :raises ConfigError: naming the pid. Reads only.
+    """
+    record = read_lock(run_dir)
+    if record is not None and lock_holder_is_live(record):
+        raise ConfigError(
+            f"Cannot resume {run_dir}: process {record['pid']} holds {LOCK_NAME} and is still "
+            "running in it. Two processes in one run directory corrupt its log and its "
+            "checkpoints; wait for that process to end, or stop it if it is not meant to run"
+        )
+
+
+def _lock_payload() -> str:
+    pid = os.getpid()
+    return json.dumps(
+        {"pid": pid, "start": process_stamp(pid), "created": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+    )
+
+
+def take_run_lock(run_dir: Path, resume: bool) -> None:
+    """Record this process as the holder of ``run_dir``.
+
+    :param run_dir: the run directory.
+    :param resume: ``False`` for a fresh run: ``run.lock`` is created with ``O_EXCL``, and
+        its existing is a lost claim. ``True``: a live holder is refused; otherwise the
+        lock is written to a temp file and moved over the stale one with ``os.replace``
+        (created with ``O_EXCL`` when there is none).
+    :raises ConfigError: a lost claim, a live holder, or a lock another resume took in
+        the moment between our read and our replace.
+    """
+    # DECISION plan-2026-10-30T132432-a865fa08/D-069
+    # A stale lock is REPLACED (`os.replace` of a fully written temp file), never
+    # removed, and a fresh lock is made with O_EXCL. Do NOT add an unlink for a
+    # finished run's lock: the package deletes nothing (invariant 5), and a stale
+    # lock reads as stale. Residual: two resumes that both read the same stale lock in
+    # the same instant each replace it; the second to read back finds the other's pid
+    # and refuses, and if both read back before either's replace lands, both run
+    # (a window of microseconds; an advisory lock, not a mutex).
+    lock = run_dir / LOCK_NAME
+    if not resume:
+        try:
+            descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+        except FileExistsError as exc:
+            raise ConfigError(
+                f"Invalid value for 'out': {run_dir} was claimed by another run just now "
+                f"({LOCK_NAME} exists). Nothing was written. Choose a new 'out'"
+            ) from exc
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(_lock_payload())
+        return
+    refuse_live_holder(run_dir)
+    temp = run_dir / f"{LOCK_NAME}.{os.getpid()}.{time.time_ns()}.tmp"
+    descriptor = os.open(temp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+    with os.fdopen(descriptor, "w") as handle:
+        handle.write(_lock_payload())
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp, lock)
+    held = read_lock(run_dir) or {}
+    if held.get("pid") != os.getpid():
+        raise ConfigError(
+            f"Cannot resume {run_dir}: process {held.get('pid')} took {LOCK_NAME} in the same "
+            "moment and is resuming it"
+        )
+
+
+def check_model_file(path: Path, what: str) -> None:
+    """Raise a :class:`ConfigError` naming ``path`` unless it is an intact ``.keras`` archive.
+
+    A ``.keras`` file is a zip whose central directory is written last, so a file cut
+    short by a kill or a full disk fails here, in plain file I/O, instead of as a
+    traceback from Keras ("File not found" for a file that exists). Every member is read
+    once and checked against its CRC.
+
+    :param what: the sentence head, e.g. ``"Cannot resume <dir>"``.
+    """
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(path) as archive:
+            damaged = archive.testzip()
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise ConfigError(
+            f"{what}: {path} is not a readable .keras archive ({exc}); it was probably cut "
+            "short by a kill or a full disk"
+        ) from exc
+    if damaged is not None:
+        raise ConfigError(f"{what}: {path} is damaged (member {damaged!r} fails its checksum)")
+
+
 def open_run(run_dir: Path, resume: bool) -> Path:
     """Refuse a run directory that cannot be used, then claim it.
 
@@ -325,6 +519,10 @@ def open_run(run_dir: Path, resume: bool) -> Path:
     try:
         if resume:
             if not (run_dir / BACKUP_DIR).is_dir():
+                if (run_dir / REQUESTED_CONFIG_NAME).exists() and not (
+                    run_dir / RESULTS_SUMMARY_NAME
+                ).exists():
+                    raise ConfigError(_first_epoch_message(run_dir))
                 raise ConfigError(
                     f"Cannot resume: {run_dir / BACKUP_DIR} does not exist, so there is "
                     "no interrupted run to continue"
@@ -335,6 +533,7 @@ def open_run(run_dir: Path, resume: bool) -> Path:
                     "has finished; choose a new 'out' to train again"
                 )
             _refuse_finished_fit(run_dir)
+            refuse_live_holder(run_dir)
             return run_dir
 
         _refuse_links(run_dir)
@@ -497,6 +696,11 @@ def load_resume_point(run_dir: Path, mapping: Any) -> Any:
             run_dir / TRAINING_LOG_NAME, run_dir / BACKUP_DIR, _fit_state_path(run_dir)
         )
     except (OSError, ValueError) as exc:
+        from train.common.resume_state import BACKUP_METADATA_NAME, PREVIOUS_SUFFIX
+
+        backup = run_dir / BACKUP_DIR
+        if not any((backup / (BACKUP_METADATA_NAME + tail)).exists() for tail in ("", PREVIOUS_SUFFIX)):
+            raise ConfigError(_first_epoch_message(run_dir)) from exc
         raise ConfigError(
             f"Cannot resume {run_dir}: the run's files do not agree on where it stopped "
             f"({exc})"
