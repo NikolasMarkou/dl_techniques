@@ -179,6 +179,12 @@ def _recipe(
 # (decay_over total), alpha 0.01 :291. dropout 0.1 and attention dropout 0.1
 # :79-80. The CIFAR hook is `cifar_light` (_augment_hook :144-157); ImageNet keeps
 # the loader's own crop and flip, so its augment is "none".
+# DECISION plan-2026-10-31T180033-2faf890a/D-035: every (family, dataset) pair of ImageNet and
+# Imagenette has an entry in `per_dataset`, even one equal to the base recipe, because the "No recipe
+# overlay" notice (ImageClassificationTrainer.recipe_notices) looks for the dataset as a KEY. Do NOT
+# delete an entry because it changes nothing, and do NOT give an Imagenette pair the ImageNet epochs
+# (50 or 100 epochs of 66 steps is 3,300 or 6,600 steps, below the one measured Imagenette budget of
+# 13,200). The rule behind each new number is in the table of src/train/README.md.
 VIT = _recipe(
     epochs=50,
     batch_size=128,
@@ -192,6 +198,18 @@ VIT = _recipe(
     per_dataset={
         "cifar10": {"transform_args": {"augment": "cifar_light"}},
         "cifar100": {"transform_args": {"augment": "cifar_light"}},
+        # ImageNet is the base recipe (train_vit.py:83-89 and the loader's own crop and flip,
+        # augment None :151-157); the entry says so. Label smoothing is 0 (:99, :125).
+        "imagenet": {"transform_args": {"augment": "none"}},
+        # NEW, no legacy source (train_vit.py offers cifar10, cifar100 and imagenet only, :375).
+        # 200 epochs of 66 steps (8,523 images, batch 128) is the step budget of the one legacy
+        # Imagenette recipe (cliffordnet, 200 epochs :664); the warmup keeps the legacy 10% of the
+        # schedule (5 of 50 epochs, :83 and :87). Every rule is in the README table and D-035.
+        "imagenette": {
+            "epochs": 200,
+            "optim_args": {"warmup_epochs": 20},
+            "transform_args": {"augment": "none"},
+        },
     },
 )
 
@@ -213,7 +231,21 @@ RESNET = _recipe(
     watch_metric="val_loss",
     patience=15,
     model_args={},
-    per_dataset={"imagenet": {"loader": {"imagenet_augment_color": True}}},
+    per_dataset={
+        "imagenet": {"loader": {"imagenet_augment_color": True}},
+        # NEW, no legacy source (train_resnet.py is ImageNet only). Batch 128, because batch 256 is
+        # 33 steps an epoch on 8,523 images; lr 0.05 is the linear rule of Goyal et al. 2017
+        # (0.1 * 128 / 256); 200 epochs of 66 steps is the cliffordnet Imagenette step budget;
+        # warmup 10 epochs keeps the legacy 5% of the schedule (5 of 100, :74 and :78). The loader
+        # refuses imagenet_augment_color for Imagenette (classification_data.py:447-448), so the
+        # augmentation is the loader's crop and flip alone. README table, D-035.
+        "imagenette": {
+            "epochs": 200,
+            "batch_size": 128,
+            "optim_args": {"lr": 0.05, "warmup_epochs": 10},
+            "transform_args": {"augment": "none"},
+        },
+    },
 )
 
 
@@ -227,11 +259,11 @@ def _convnext(strides: int, drop_path_rate: float, dropout_rate: float) -> Dict[
     }
 
 
-# convnext/common.py: epochs :257, batch :258, lr :259, wd :260, warmup :263,
-# patience :264, MONITOR val_loss :175. A direct AdamW with a PER-VARIABLE
-# clipnorm 1.0 (GRADIENT_CLIP_NORM :172), the schedule decaying over
+# convnext/common.py: epochs :258, batch :259, lr :260, wd :261, warmup :264,
+# patience :265, MONITOR val_loss :176. A direct AdamW with a PER-VARIABLE
+# clipnorm 1.0 (GRADIENT_CLIP_NORM :173), the schedule decaying over
 # `total - warmup` (decay_over post_warmup; it refuses warmup >= epochs).
-# DEFAULT_STRIDES :154 and REGULARIZATION_DEFAULTS :159-165 give the per-dataset
+# DEFAULT_STRIDES :155 and REGULARIZATION_DEFAULTS :160-165 give the per-dataset
 # model arguments; the D-033 anchor in TrainingConfig explains strides 2 on 32 px.
 # Augmentation is flip_pad_crop with a flip on CIFAR only (:909); MNIST's legacy
 # pad-crop WITHOUT a flip has no preset, so MNIST gets "none" here. MNIST is
@@ -247,6 +279,12 @@ CONVNEXT_PER_DATASET: Dict[str, Any] = {
         "transform_args": {"augment": "flip_pad_crop"},
     },
     "imagenet": _convnext(4, 0.1, 0.0),
+    # NEW, no legacy source: the legacy trainer REFUSES Imagenette (UNSUPPORTED_DATASETS :140). The
+    # ImageNet row, because it is the legacy table's only 224 px row (strides 4 :155, the ConvNeXt-T
+    # rates :160-165) and the recipe's epochs and batch stay the legacy 100 and 64: 133 steps an
+    # epoch is 13,300 steps, the cliffordnet Imagenette budget. Without an entry the factory
+    # defaults would apply (drop path 0). README table, D-035.
+    "imagenette": _convnext(4, 0.1, 0.0),
 }
 
 
@@ -276,9 +314,21 @@ def _convnext_recipe() -> Dict[str, Any]:
 # TransformArgs.resolve_auto applies it under that preset only (D-041).
 # Stochastic depth is 0.3, 0.4 for cn_64_5 (_STOCHASTIC_DEPTH_BY_VARIANT
 # :98-104), 0.1 for hier_345.
+#
+# ImageNet and Imagenette are the legacy trainer's own (:241-251): the loader's random-resized-crop
+# and flip, `--augment none` (:681), 224 px, label smoothing 0 (:611). The entries equal the base
+# recipe and say so. EXPECTED TO CHANGE in step 17: nano at 224 px does not fit 24 GB at batch 128
+# (the legacy docstring :31-33 reports 34.6 GB asked at batch 32), so the batch (and the Imagenette
+# image size, `--image-size 128` in the legacy README) come from a measurement.
 CLIFFORDNET_PER_DATASET: Dict[str, Any] = {
-    name: {"transform_args": {"augment": ERASING_PRESET}}
-    for name in ("cifar10", "cifar100")
+    **{
+        name: {"transform_args": {"augment": ERASING_PRESET}}
+        for name in ("cifar10", "cifar100")
+    },
+    **{
+        name: {"transform_args": {"augment": "none"}}
+        for name in ("imagenet", "imagenette")
+    },
 }
 
 

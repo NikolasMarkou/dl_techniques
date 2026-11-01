@@ -156,6 +156,50 @@ without `train/` or `val/`, a devkit (`data.devkit_dir`, or `devkit/` under the 
 `ILSVRC2012_validation_ground_truth.txt`, and no `imagenette/320px-v2` records under `$TFDS_DATA_DIR` (or
 `~/tensorflow_datasets`) each exit 2 with a message that names the key and the path looked at.
 
+**Recipes on ImageNet and Imagenette**: each of the six families has an entry for `imagenet` and for
+`imagenette` in its recipe, so the notice `No recipe overlay for <family> on <dataset>` is printed only for a
+dataset a family has no entry for (`mnist` for `vit`, `resnet` and both cliffordnet families). What a run on one of
+these pairs resolves to, with every value `auto`:
+
+| Family | Dataset | Epochs | Batch | Optimizer | Peak lr | Weight decay | Warmup epochs | Augment | Smoothing | Image size | Patience | Source |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| vit | imagenet | 50 | 128 | adamw | 3e-4 | 0.05 | 5 | none | 0 | 224 | 15 | legacy: `vit/train_vit.py:67,83-89,99,103` |
+| vit | imagenette | 200 | 128 | adamw | 3e-4 | 0.05 | 20 | none | 0 | 224 | 15 | new: rules E, W below |
+| resnet | imagenet | 100 | 256 | sgd | 0.1 | 1e-4 as L2 | 5 | none, loader colour jitter | 0 | 224 | 15 | legacy: `resnet/train_resnet.py:61,74-81,89,347` |
+| resnet | imagenette | 200 | 128 | sgd | 0.05 | 1e-4 as L2 | 10 | none | 0 | 224 | 15 | new: rules E, B, L, W |
+| convnext_v1, convnext_v2 | imagenet | 100 | 64 | adamw | 1e-3 | 1e-4 | 0 | none | 0 | 224 | 50 | legacy: `convnext/common.py:155,160-165,258-265` |
+| convnext_v1, convnext_v2 | imagenette | 100 | 64 | adamw | 1e-3 | 1e-4 | 0 | none | 0 | 224 | 50 | new (the legacy trainer refuses Imagenette): rules E, M |
+| cliffordnet, cliffordnet_hier | imagenet | 200 | 128 | adamw | 1e-3 | 0.1 | 0 | none | 0 | 224 | 30 | legacy: `cliffordnet/train_cliffordnet.py:241-246,611,652-664,681`, `common/args.py:345` |
+| cliffordnet, cliffordnet_hier | imagenette | 200 | 128 | adamw | 1e-3 | 0.1 | 0 | none | 0 | 224 | 30 | legacy: `cliffordnet/train_cliffordnet.py:247-251,611,652-664,681` |
+
+"Augment none" adds nothing to the loader's own random-resized-crop and flip, which every ImageNet and Imagenette
+run has (`resnet` on ImageNet adds the loader's colour jitter through `imagenet_augment_color`, which the loader
+refuses for Imagenette). "Smoothing" is the label smoothing of the loss, 0 everywhere: the task builds a plain sparse
+cross-entropy, `vit` refuses a nonzero value (`vit/train_vit.py:125`), the 0.1 of `resnet/train_resnet.py` never
+reaches its loss, and the other two trainers default to 0. "Image size" is the dataset's own 224 (`transform_args.image_size`
+can change it). Other values of the six recipes: ViT uses patch 16 at 224 with dropout 0.1 and attention dropout 0.1
+(`vit/train_vit.py:79-80,451-453`); the sgd weight decay of `resnet` is an L2 on the model, adamw decays in the
+optimizer; `convnext_v1` and `convnext_v2` use strides 4, drop path 0.1 and dropout 0 on both datasets; stochastic
+depth is 0.3 for `cliffordnet` (0.4 for `cn_64_5`) and 0.1 for `cliffordnet_hier`. The cliffordnet rows are the
+recipe BEFORE a memory measurement: the isotropic `nano` at 224 px does not fit a 24 GB card at batch 128 (its legacy
+docstring reports 34.6 GB asked at batch 32), so the batch there, and the Imagenette image size (128 in the legacy
+README), are expected to change. The table is pinned, value by value, by
+`tests/test_train/test_api/test_the_imagenet_and_imagenette_recipes.py`, which also reads the legacy trainers'
+own defaults and compares.
+
+**The four Imagenette pairs that have no legacy trainer** (`vit`, `resnet`, `convnext_v1`, `convnext_v2`) get values
+from these rules, each a derivation from a legacy value or a cited recipe, not from a run: no run of these four pairs
+has been made, so read them as starting points. Only `cliffordnet` has an Imagenette parity run planned.
+
+| Rule | Value | Basis |
+|---|---|---|
+| E, epochs | 200 for `vit` and `resnet` at batch 128, 100 for `convnext` at batch 64 | The fit split is 8,523 images (9,469 train records less 946 held out), 66 steps an epoch at batch 128 and 133 at batch 64, so 200 and 100 epochs are 13,200 and 13,300 steps: the step count of the one legacy Imagenette recipe, `cliffordnet` at 200 epochs (`cliffordnet/train_cliffordnet.py:664`). The ImageNet epochs (50, 100) would be 3,300 and 6,600 steps |
+| B, batch | `vit` 128 and `convnext` 64 unchanged; `resnet` 128 | `resnet`'s 256 is 33 steps an epoch on this split (`resnet/train_resnet.py:61`) |
+| L, learning rate | `resnet` 0.05; the others unchanged | linear scaling of the SGD rate with the batch, 0.1 x 128 / 256 (Goyal et al. 2017, "Accurate, Large Minibatch SGD"); the adamw rates are the legacy ones at the legacy batch |
+| W, warmup | `vit` 20 epochs, `resnet` 10, `convnext` 0 | the legacy share of the schedule: `vit` 5 of 50 epochs (`vit/train_vit.py:83,87`), `resnet` 5 of 100 (`resnet/train_resnet.py:74,78`), `convnext` none (`convnext/common.py:264`) |
+| Weight decay, clipping, patience, dropout | the legacy values | no cited recipe changes them with the size of the data |
+| M, `convnext` model arguments | strides 4, drop path 0.1, dropout 0 | the legacy table's only 224 px row (`convnext/common.py:155,160-165`), the ConvNeXt-T values; without an entry the factory would apply drop path 0 |
+
 **Parity**: the API run and the legacy trainer were compared on `vit_pico` on CIFAR-10 only
 (10 epochs, three seeds each; the means differ by less than a tolerance measured from the legacy
 trainer's own run-to-run spread). The other families' recipes are pinned by tests that build them,
