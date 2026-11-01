@@ -64,6 +64,7 @@ attributes.
 | `weight_layer_types` | `None` (all) | e.g. `['Dense', 'Conv2D']` |
 | `analyze_biases` | `False` | |
 | `compute_weight_pca` | `True` | |
+| `ignore_label` / `max_pixels` | `None` / `100000` | per-pixel (mask) models only, i.e. a single output of rank 4 or more, `(N, H, W, C)` scores against `(N, H, W)` class-index labels; a rank-2 model never reads them and they are absent from its published `config` block. `ignore_label` is the label that marks a pixel with no class: those pixels are dropped before any calibration number, so they move no ECE, Brier or per-class figure; `None` drops nothing and a label outside `[0, C)` then fails calibration loudly. `max_pixels` caps the labelled pixels calibration sees, drawn uniformly without replacement (seeded by `random_state`); measured ECE error against the full pool of 1,000,000 pixels at 100,000: sd 0.0011, worst of 20 draws 0.0026. See [per-pixel outputs](#per-pixel-mask-outputs) |
 | `calibration_bins` | `10` | ECE bin count for the pooled top-1 `ece` |
 | `per_class_calibration_bins` | `None` (halves `calibration_bins`) | bin count for `per_class_ece` / `per_class_conditional_top1_ece`. It is a DIFFERENT number from `ece` on purpose — a per-class column carries far less mass than the pooled score — so the two published ECEs are not directly comparable. The effective value is recorded per model as `per_class_ece_bins`, and `ece`'s as `ece_bins`. |
 | `output_activation` | `None` (infer) | `'softmax'` / `'sigmoid'` / `'logits'`; pins what the head emits instead of inferring it |
@@ -212,6 +213,30 @@ that panel (see `D-033`).
 > anchor). On that function's own docstring example the two differ by 2x: binned top-1 `0.0725`
 > (raw top-1 `0.075`) against multiclass `0.15`. If you were reading the decomposition's
 > `brier_score` as the multiclass score, call `compute_brier_score` instead.
+
+### Per-pixel (mask) outputs
+
+A model whose single output has rank 4 or more, `(N, H, W, C)`, is scored per pixel. `ModelAnalyzer`
+predicts 16 images at a time, softmaxes each batch (unless the model emits probabilities), drops
+the pixels whose label equals `AnalysisConfig.ignore_label`, keeps `max_pixels` of the rest by a
+uniform draw without replacement, and hands the calibration analyzer a rank-2 cache: `(P, C)`
+probabilities and `(P,)` labels. Labels are class indices of shape `(N, H, W)` (a trailing axis of
+1 is squeezed); anything else, a one-hot mask included, raises a `ValueError` naming both shapes
+and the model is left out of calibration. Each model's `calibration_metrics` entry gains
+`pixels_total`, `pixels_void` and `pixels_used`. Memory stays at `O(max_pixels * C)` however many
+images there are.
+
+Measured on a 128x128 `convunext` tiny, 21 classes, 200 images: the full-array path before this
+held 3.6 GB and rising; this path peaks at about 2.0 GB. `effective_rank` in information flow is
+`min(batch, ...)` for every layer of a mask model (and of a rank-2 model's convolutional layers),
+so read it as a batch-size-bound number there; the train API passes `memory_limit_mb=256` for such
+models (3.6 GB and 30 s against 12.3 GB and 103 s at the default 2048). Weights, spectral and
+training-dynamics analyses read no labels and are unchanged. `model_metrics` is `model.evaluate`,
+so it inherits the compile: use a loss with `ignore_class` and a void-aware metric, since a stock
+`SparseCategoricalAccuracy` scores a void pixel as wrong and a stock `MeanIoU` raises on it.
+
+A calibration that raises is still isolated (one model never aborts the run), but it is no longer
+silent downstream: the dashboard prints `n/a` for a missing ECE / Brier instead of `0.000`.
 
 ### Representation geometry and grokking (standalone, `analyzer/representation_metrics.py`)
 

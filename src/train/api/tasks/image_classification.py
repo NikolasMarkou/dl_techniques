@@ -79,6 +79,7 @@ config's keys and must stay free of TensorFlow. Every ``keras`` and
 """
 
 import dataclasses
+import functools
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Literal, Mapping, Optional, Sequence, Tuple, Union
 
@@ -456,7 +457,7 @@ class ImageClassificationTrainer(TaskTrainer):
     ) -> Evaluation:
         """Run the classification reporting sequence; see the module contract."""
         from dl_techniques.utils.logger import logger
-        from train.common import classification_run, evaluation
+        from train.common import classification_run
         from train.common.conformal import run_conformal
 
         checkpoint_cfg: CheckpointArgs = config.checkpoint_args
@@ -508,7 +509,8 @@ class ImageClassificationTrainer(TaskTrainer):
             fit.vis_dir,
             fit.experiment_name,
             analysis_cfg.model_analysis and has_test,
-            run_analysis=evaluation.run_model_analysis,
+            run_analysis=functools.partial(self.run_analysis, config),
+            name_failed_analyses=True,
             figures=analysis_cfg.figures and has_test,
             analysis_off_hint=(
                 "the data has no test split"

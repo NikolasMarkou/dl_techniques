@@ -521,6 +521,40 @@ def generate_comprehensive_visualizations(
 
 # ---------------------------------------------------------------------
 
+#: The activation budget, in MB, of the information-flow analysis of a per-pixel model.
+#: Measured (plan-2026-10-31T180033-2faf890a step 9) on 200 images of 128 px, 21 classes:
+#: the default 2048 MB peaks at 12.3 GB and 103 s, 256 MB at 3.6 GB and 30 s.
+PER_PIXEL_MEMORY_LIMIT_MB = 256
+
+
+def analysis_config_for(model: keras.Model, ignore_label: Optional[int] = None) -> Optional[AnalysisConfig]:
+    """The analyzer configuration a model needs beyond the default, or ``None``.
+
+    Args:
+        model: The model about to be analyzed.
+        ignore_label: The label value that marks a void pixel, or ``None``. Read only for
+            a per-pixel model.
+
+    Returns:
+        ``None`` for a model that is not per-pixel (output rank below 4), which is what
+        :func:`run_model_analysis` takes as "the default configuration", so a classifier
+        is analyzed exactly as before. For a per-pixel model, all five analyses with
+        ``memory_limit_mb`` set to :data:`PER_PIXEL_MEMORY_LIMIT_MB` and ``ignore_label``
+        passed through, so a void pixel is dropped before calibration.
+    """
+    if not ModelAnalyzer.outputs_per_pixel(model):
+        return None
+    return AnalysisConfig(
+        analyze_weights=True,
+        analyze_calibration=True,
+        analyze_information_flow=True,
+        analyze_training_dynamics=True,
+        analyze_spectral=True,
+        memory_limit_mb=PER_PIXEL_MEMORY_LIMIT_MB,
+        ignore_label=ignore_label,
+    )
+
+
 def run_model_analysis(
         model: keras.Model,
         test_data: Tuple[Any, np.ndarray],

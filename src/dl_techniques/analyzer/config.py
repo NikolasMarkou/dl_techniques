@@ -33,6 +33,20 @@ class AnalysisConfig:
     analyze_biases: bool = False
     compute_weight_pca: bool = True
 
+    # Per-pixel (mask) outputs: a model whose output has rank 4 or more, e.g.
+    # ``(N, H, W, C)`` class scores against ``(N, H, W)`` class-index labels. A rank-2
+    # model never reads these two fields.
+    # DECISION plan-2026-10-31T180033-2faf890a/D-020
+    # `ignore_label` is the label value that marks a pixel with no class (void). Those
+    # pixels are dropped BEFORE any calibration number is computed, so a void pixel
+    # moves no ECE, Brier or per-class figure. `None` drops nothing, so a label outside
+    # [0, C) is then a loud error rather than a silently counted miss.
+    # `max_pixels` caps the labelled pixels that calibration sees, drawn uniformly at
+    # random without replacement (seeded by `random_state`). 100_000 was measured:
+    # ECE error sd 0.0011 against the full pool, one pass of the figure code 16 s.
+    ignore_label: Optional[int] = None
+    max_pixels: int = 100_000
+
     # Calibration options
     calibration_bins: int = 10
     # DECISION plan-2026-10-05-analyzer-audit/F-044

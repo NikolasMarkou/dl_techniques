@@ -170,6 +170,14 @@ Hooks (override in a task)
 ``evaluate_and_report(config, data, fit)``
     The reporting sequence after ``fit``: best-checkpoint test, figures and analysis of the best
     weights, the last epoch's weights. Returns an :class:`Evaluation`. Required.
+``run_analysis(config, model, test_data, history, experiment_name, run_dir)``
+    The model analyzer call, made by the task's ``evaluate_and_report`` through
+    ``classification_run.report_best_weights(run_analysis=..., name_failed_analyses=True)``.
+    Returns what ``run_model_analysis`` returns. The default picks the analyzer configuration
+    by the model's output rank: a classifier (rank 2) gets the stock one, a per-pixel model
+    the pixel path (D-020) and a 256 MB budget for information flow. A task with void labels
+    overrides it to pass ``ignore_label``. A failed analysis is named in the ``analyzer``
+    block of the summary as ``failed_analyses`` (present only when non-empty).
 ``task_metadata(config, data)``
     Extra keys for the summary head. Default: none.
 ``summary_fields(config, data)``
@@ -603,6 +611,41 @@ class TaskTrainer:
         writes no key. Default: empty.
         """
         return {}
+
+    def run_analysis(
+        self,
+        config: StrictConfig,
+        model: Any,
+        test_data: Tuple[Any, Any],
+        history: Any,
+        experiment_name: str,
+        run_dir: str,
+    ) -> Any:
+        """Run the model analyzer; called by the task's ``evaluate_and_report``.
+
+        :param test_data: ``(x, y)``: the images and their labels (class indices for a
+            classifier, a mask of class indices for a per-pixel model).
+        :param run_dir: the run directory; the analyzer writes ``model_analysis/`` under it.
+        :return: what ``run_model_analysis`` returns, the ``AnalysisResults`` or ``None`` when
+            the analysis raised; ``run_summary.failed_analyses`` reads it.
+
+        The default asks ``analysis_config_for`` for the configuration: ``None`` (the stock
+        configuration, exactly the classification call) for a model whose output has rank 2,
+        and for a per-pixel model, a ``memory_limit_mb`` of 256 for information flow with
+        the pixel path of the calibration analyzer. A task whose labels mark void pixels
+        overrides this and passes ``ignore_label``; without it a void label is not dropped
+        and the calibration analyzer raises on it, which ``failed_analyses`` then names.
+        """
+        from train.common import evaluation
+
+        return evaluation.run_model_analysis(
+            model,
+            test_data,
+            history,
+            experiment_name,
+            run_dir,
+            config=evaluation.analysis_config_for(model),
+        )
 
     def evaluate_and_report(
         self, config: StrictConfig, data: Any, fit: FitState

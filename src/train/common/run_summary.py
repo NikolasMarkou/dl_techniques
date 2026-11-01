@@ -320,6 +320,42 @@ def skipped_analysis_status() -> Dict[str, Any]:
     return {"status": "skipped", "loss": None, "accuracy": None, "error": None, "path": None}
 
 
+#: The name :func:`failed_analyses` gives a ``run_model_analysis`` that returned ``None``.
+MODEL_ANALYSIS_FAILED = "model_analysis"
+
+
+# DECISION plan-2026-10-31T180033-2faf890a/D-020
+# The analyzer isolates a failing analysis and carries on, twice: the calibration analyzer
+# logs the exception and skips the model (``calibration_analyzer.py``, F-046), and
+# ``run_model_analysis`` swallows anything that reaches it and returns ``None``
+# (``evaluation.py``). The analysis then writes a normal-looking file, and
+# ``read_analysis_status`` reads only ``model_metrics[model]["status"]``, which is ``ok``
+# whatever calibration did. This list is how a failure becomes visible in the summary.
+# Do NOT derive it from ``read_analysis_status`` (it cannot see calibration) and do NOT
+# widen the analyzer's handlers: the isolation is deliberate, the silence was the defect.
+def failed_analyses(results: Any, model_name: str) -> List[str]:
+    """Name the analyses that were requested for ``model_name`` and left no result.
+
+    Args:
+        results: What ``run_model_analysis`` returned: an ``AnalysisResults`` (its
+            ``config`` says what was requested), or ``None`` when the analysis raised.
+        model_name: The key the analysis was run under.
+
+    Returns:
+        ``[MODEL_ANALYSIS_FAILED]`` for ``None``; ``["calibration"]`` when calibration was
+        requested and ``calibration_metrics`` holds no entry for the model; ``[]`` when
+        nothing is missing. Only calibration is checked: it is the one analysis that
+        reads the labels and the prediction layout, and the one whose isolation hid a
+        failure behind a successful status (measured on per-pixel outputs).
+    """
+    if results is None:
+        return [MODEL_ANALYSIS_FAILED]
+    failed: List[str] = []
+    if results.config.analyze_calibration and model_name not in results.calibration_metrics:
+        failed.append("calibration")
+    return failed
+
+
 def data_free_analysis_config() -> AnalysisConfig:
     """Weights and spectral analyses only.
 

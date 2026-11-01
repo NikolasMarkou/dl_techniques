@@ -195,6 +195,17 @@ CACHE_KEY_Y_DATA: str = 'y_data'
 CACHE_KEY_MULTI_INPUT: str = 'multi_input'
 CACHE_KEY_STATUS: str = 'status'
 CACHE_KEY_ERROR: str = 'error'
+CACHE_KEY_PIXEL_COUNTS: str = 'pixel_counts'
+
+# Per-pixel (mask) models, plan-2026-10-31T180033-2faf890a/D-020. A model whose static
+# output has this many axes or more takes `_cache_pixel_predictions`; every other model
+# takes the original lines of `_cache_predictions` untouched.
+PER_PIXEL_MIN_RANK: int = 4
+PER_PIXEL_BATCH_SIZE: int = 16
+# `AnalysisConfig` fields only the per-pixel path reads. They reach the published `config`
+# block only when that path ran, so an artifact of a rank-2 model is byte-for-byte what it
+# was before the fields existed.
+PER_PIXEL_CONFIG_FIELDS: frozenset = frozenset({'ignore_label', 'max_pixels'})
 
 # Visualization parameters
 PARETO_SCATTER_SIZE: int = 100
@@ -468,6 +479,9 @@ class ModelAnalyzer:
         self._multi_input_models: Set[str] = set()
         self._identify_multi_input_models()
 
+        # Models whose predictions took the per-pixel path in `_cache_predictions`.
+        self._per_pixel_models: Set[str] = set()
+
         # Initialize model colors for consistent visualization across all plots
         self.model_colors: Dict[str, str] = {}
         self._setup_model_colors()
@@ -649,6 +663,9 @@ class ModelAnalyzer:
                 # Execute the analysis
                 analyzer.analyze(self.results, data, self._prediction_cache)
 
+                if analysis_type == ANALYSIS_TYPE_CALIBRATION:
+                    self._record_pixel_counts()
+
         # Generate visualizations for completed analyses
         self._create_visualizations(analysis_types)
 
@@ -714,6 +731,22 @@ class ModelAnalyzer:
 
         for model_name, model in tqdm(self.models.items(), desc="Computing predictions"):
             try:
+                # DECISION plan-2026-10-31T180033-2faf890a/D-020
+                # A model that emits one class vector per pixel, `(N, H, W, C)`, gets
+                # its OWN cache entry: flattened to `(P, C)` / `(P,)` with void dropped,
+                # so the calibration analyzer below runs UNCHANGED on a rank-2 cache.
+                # Do NOT widen `calibration_analyzer.py` to understand rank 4: it reads
+                # `shape[1]` (here H) as the class count in a dozen places and the
+                # F-046/F-047 label-encoding anchors guard it. Do NOT hand it the full
+                # `(N, H, W, C)` array either: measured, it raises on the multi-hot
+                # test and a one-hot mask gives a WRONG ECE (0.5375 for a hand 0.35).
+                # Every model of rank < 4 takes the original lines below.
+                if self.outputs_per_pixel(model):
+                    self._prediction_cache[model_name] = self._cache_pixel_predictions(
+                        model_name, model, x_data, y_data)
+                    self._per_pixel_models.add(model_name)
+                    continue
+
                 # Run prediction
                 predictions = model.predict(x_data, verbose=0)
 
@@ -752,6 +785,156 @@ class ModelAnalyzer:
                 }
 
         self._evaluate_models(x_data, y_data)
+
+    @staticmethod
+    def outputs_per_pixel(model: keras.Model) -> bool:
+        """Whether a model's static output holds one class vector per pixel.
+
+        Args:
+            model: The model to inspect.
+
+        Returns:
+            ``True`` for a single-output model whose ``output_shape`` has
+            ``PER_PIXEL_MIN_RANK`` axes or more. ``False`` for everything else, including a
+            multi-output model (its ``output_shape`` is a collection of shapes) and a
+            model that has no static ``output_shape``; those keep the original path.
+        """
+        try:
+            shape = model.output_shape
+        except (AttributeError, ValueError, RuntimeError):
+            return False
+        return (
+            isinstance(shape, (tuple, list))
+            and len(shape) >= PER_PIXEL_MIN_RANK
+            and all(dim is None or isinstance(dim, int) for dim in shape)
+        )
+
+    def _cache_pixel_predictions(
+            self,
+            model_name: str,
+            model: keras.Model,
+            x_data: Union[np.ndarray, Dict[str, np.ndarray]],
+            y_data: np.ndarray,
+    ) -> Dict[str, Any]:
+        """Build the cache entry of a per-pixel model: ``(P, C)`` scores, ``(P,)`` labels.
+
+        The model predicts ``PER_PIXEL_BATCH_SIZE`` images at a time, each batch is
+        softmaxed (unless the model already emits probabilities), pixels whose label equals
+        ``config.ignore_label`` are dropped, and ``config.max_pixels`` of the rest are kept
+        by an exactly uniform draw without replacement: every pixel gets a random key and
+        the smallest keys survive across batches, so memory stays at
+        ``O(max_pixels * C)`` however many images there are. The draw is seeded by
+        ``config.random_state``; the kept pixels are returned in image order.
+
+        Args:
+            model_name: Name of the model, used for the log lines.
+            model: A model whose output is ``(N, ..., C)`` with rank 4 or more.
+            x_data: The sampled inputs, an array or a dict of arrays.
+            y_data: Class-index labels of shape ``predictions.shape[:-1]``, or the same
+                with a trailing axis of 1.
+
+        Returns:
+            A cache entry as `_cache_predictions` builds, with ``predictions`` of shape
+            ``(P, C)``, ``y_data`` of shape ``(P,)``, no logits, and a ``pixel_counts``
+            dict holding ``pixels_total``, ``pixels_void`` and ``pixels_used``.
+
+        Raises:
+            ValueError: If a label array does not have the shape of the prediction minus
+                its class axis (both shapes are named), if ``max_pixels`` is below 1, or
+                if no pixel is left once void is dropped. The caller records the model
+                as failed.
+        """
+        max_pixels = int(self.config.max_pixels)
+        if max_pixels < 1:
+            raise ValueError(f"AnalysisConfig.max_pixels must be at least 1, got {max_pixels}")
+        ignore = self.config.ignore_label
+        rng = make_rng(self.config.random_state)
+        labels = np.asarray(y_data)
+        n_images = (len(next(iter(x_data.values()))) if isinstance(x_data, dict)
+                    else len(x_data))
+
+        kept_probs = kept_labels = kept_keys = kept_index = None
+        activation = None
+        total = void = offset = 0
+        for start in range(0, n_images, PER_PIXEL_BATCH_SIZE):
+            stop = start + PER_PIXEL_BATCH_SIZE
+            batch_x = ({k: v[start:stop] for k, v in x_data.items()}
+                       if isinstance(x_data, dict) else x_data[start:stop])
+            scores = np.asarray(model.predict(batch_x, verbose=0))
+
+            batch_y = labels[start:stop]
+            if batch_y.ndim == scores.ndim and batch_y.shape[-1] == 1:
+                batch_y = batch_y[..., 0]
+            if batch_y.shape != scores.shape[:-1]:
+                raise ValueError(
+                    f"per-pixel labels of shape {tuple(labels.shape)} do not match the "
+                    f"predictions of shape {tuple(scores.shape)}: expected labels of shape "
+                    f"{tuple(scores.shape[:-1])} (a trailing axis of 1 is squeezed)")
+
+            if activation is None:
+                activation = self._infer_output_activation(model_name, scores)
+            if activation == OUTPUT_ACTIVATION_LOGITS:
+                scores = np.array(keras.ops.softmax(scores, axis=-1))
+
+            flat_probs = scores.reshape(-1, scores.shape[-1])
+            flat_labels = batch_y.reshape(-1)
+            flat_index = np.arange(offset, offset + flat_labels.size)
+            offset += flat_labels.size
+            total += flat_labels.size
+            if ignore is not None:
+                labelled = flat_labels != ignore
+                void += int(flat_labels.size - labelled.sum())
+                flat_probs, flat_labels, flat_index = (
+                    flat_probs[labelled], flat_labels[labelled], flat_index[labelled])
+
+            keys = rng.random(flat_labels.size)
+            if kept_labels is not None:
+                flat_probs = np.concatenate([kept_probs, flat_probs])
+                flat_labels = np.concatenate([kept_labels, flat_labels])
+                flat_index = np.concatenate([kept_index, flat_index])
+                keys = np.concatenate([kept_keys, keys])
+            if flat_labels.size > max_pixels:
+                smallest = np.argpartition(keys, max_pixels - 1)[:max_pixels]
+                flat_probs, flat_labels, flat_index, keys = (
+                    flat_probs[smallest], flat_labels[smallest],
+                    flat_index[smallest], keys[smallest])
+            kept_probs, kept_labels, kept_index, kept_keys = (
+                flat_probs, flat_labels, flat_index, keys)
+
+        if kept_labels is None or kept_labels.size == 0:
+            raise ValueError(
+                f"no labelled pixel is left for '{model_name}': {total} pixels, {void} equal "
+                f"ignore_label={ignore}")
+        order = np.argsort(kept_index)
+        counts = {
+            'pixels_total': int(total),
+            'pixels_void': int(void),
+            'pixels_used': int(kept_labels.size),
+        }
+        logger.info(
+            f"{model_name}: per-pixel calibration on {counts['pixels_used']} of "
+            f"{counts['pixels_total']} pixels ({counts['pixels_void']} void, "
+            f"max_pixels={max_pixels})")
+        return {
+            CACHE_KEY_PREDICTIONS: kept_probs[order],
+            CACHE_KEY_LOGITS: None,
+            CACHE_KEY_X_DATA: x_data,
+            CACHE_KEY_Y_DATA: kept_labels[order],
+            CACHE_KEY_MULTI_INPUT: model_name in self._multi_input_models,
+            CACHE_KEY_STATUS: STATUS_SUCCESS,
+            CACHE_KEY_PIXEL_COUNTS: counts,
+        }
+
+    def _record_pixel_counts(self) -> None:
+        """Copy each per-pixel model's pixel counts into its ``calibration_metrics``.
+
+        A model with no calibration entry (the analysis failed) gets none; a rank-2 model's
+        entry is never touched.
+        """
+        for model_name, entry in self._prediction_cache.items():
+            counts = entry.get(CACHE_KEY_PIXEL_COUNTS)
+            if counts and model_name in self.results.calibration_metrics:
+                self.results.calibration_metrics[model_name].update(counts)
 
     def _evaluate_models(self, x_data: Union[np.ndarray, Dict[str, np.ndarray]], y_data: np.ndarray) -> None:
         """Evaluate models and store performance metrics.
@@ -897,6 +1080,9 @@ class ModelAnalyzer:
             f.name: getattr(self.config, f.name)
             for f in dataclasses.fields(self.config)
             if not f.name.startswith('_')
+            # plan-2026-10-31T180033-2faf890a/D-020: the per-pixel fields appear only when
+            # the per-pixel path ran, so a rank-2 artifact is unchanged.
+            and (f.name not in PER_PIXEL_CONFIG_FIELDS or self._per_pixel_models)
         }
 
         # Compile all results into a single dictionary structure

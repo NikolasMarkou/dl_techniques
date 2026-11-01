@@ -276,7 +276,7 @@ def report_best_weights(
         model: keras.Model, data: ClassificationData, history: keras.callbacks.History,
         run_dir: Path, vis_dir: Path, experiment_name: str, model_analysis: bool,
         run_analysis: Callable[..., Any], figures: bool = True,
-        analysis_off_hint: str = "--no-model-analysis",
+        analysis_off_hint: str = "--no-model-analysis", name_failed_analyses: bool = False,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Write the figures and run the analyzer for the BEST (selected) weights.
 
@@ -298,6 +298,10 @@ def report_best_weights(
     :param analysis_off_hint: How the caller's user switched the analyzer off; named in the
         log line of a skipped analysis. The default is the legacy flag; the API passes its
         own key.
+    :param name_failed_analyses: ``True`` adds ``failed_analyses`` to the analyzer status
+        when :func:`train.common.run_summary.failed_analyses` finds one (the seam must then
+        return what ``run_model_analysis`` returns). Off by default: the legacy trainers'
+        summaries keep their keys. With nothing failed the key is absent either way.
     :return: ``(visualizations, analysis)``: the figure record (it carries ``ece``) and
         the analyzer status read back from disk, or the skipped status.
     """
@@ -311,8 +315,13 @@ def report_best_weights(
     else:
         visualizations = {"files": [], "ece": None, "failed": [], "skipped": True}
     if model_analysis:
-        run_analysis(model, (data.x_fig, data.y_fig), history, experiment_name, str(run_dir))
+        results = run_analysis(model, (data.x_fig, data.y_fig), history, experiment_name, str(run_dir))
         analysis = run_summary.read_analysis_status(run_dir, experiment_name)
+        if name_failed_analyses:
+            failed = run_summary.failed_analyses(results, experiment_name)
+            if failed:
+                analysis = {**analysis, "failed_analyses": failed}
+                logger.warning(f"Analyzer: {failed} left no result (see the log above)")
         logger.info(f"Analyzer status (read back from disk): {analysis['status']}")
     else:
         analysis = run_summary.skipped_analysis_status()

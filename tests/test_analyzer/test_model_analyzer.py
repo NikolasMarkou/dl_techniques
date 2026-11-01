@@ -845,7 +845,11 @@ class TestTheConfigsPrivateStateIsDeclared:
 
         payload = json.loads(
             (analyzer.output_dir / "analysis_results.json").read_text())
-        assert set(payload["config"]) == _config_field_names()
+        # The two per-pixel fields (plan 2faf890a D-020) reach the artifact only when the
+        # per-pixel path ran, so a rank-2 artifact is what it was before they existed;
+        # test_per_pixel_calibration.py pins the other half (they ARE there after a mask run).
+        from dl_techniques.analyzer.model_analyzer import PER_PIXEL_CONFIG_FIELDS
+        assert set(payload["config"]) == _config_field_names() - PER_PIXEL_CONFIG_FIELDS
 
 
 # =====================================================================

@@ -307,9 +307,14 @@ class SummaryVisualizer(BaseVisualizer):
         calibration_metrics = self.results.calibration_metrics.get(
             model_name, {}
         )
-        ece = calibration_metrics.get('ece', 0.0)
-        brier = calibration_metrics.get('brier_score', 0.0)
-        row_data.extend([f'{ece:.3f}', f'{brier:.3f}'])
+        # DECISION plan-2026-10-31T180033-2faf890a/D-020
+        # No calibration entry (the analysis failed or was off) prints 'n/a', never 0.0:
+        # a default of 0.0 read as a perfectly calibrated model, and a per-pixel run whose
+        # calibration raised showed ECE 0.000 / Brier 0.000. Do NOT restore `.get(.., 0.0)`.
+        row_data.extend([
+            _format_metric(calibration_metrics.get('ece')),
+            _format_metric(calibration_metrics.get('brier_score')),
+        ])
 
         # Training efficiency metrics
         conv_speed = self.results.training_metrics.epochs_to_convergence.get(
@@ -350,9 +355,11 @@ class SummaryVisualizer(BaseVisualizer):
         calibration_metrics = self.results.calibration_metrics.get(
             model_name, {}
         )
-        ece = calibration_metrics.get('ece', 0.0)
-        brier = calibration_metrics.get('brier_score', 0.0)
-        row_data.extend([f'{ece:.3f}', f'{brier:.3f}'])
+        # 'n/a' for a missing entry, as above (plan-2026-10-31T180033-2faf890a/D-020).
+        row_data.extend([
+            _format_metric(calibration_metrics.get('ece')),
+            _format_metric(calibration_metrics.get('brier_score')),
+        ])
 
         # Confidence entropy from confidence metrics
         confidence_metrics = self.results.confidence_metrics.get(
