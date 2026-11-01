@@ -233,6 +233,39 @@ def resolve_monitor_mode(monitor: str, mode: Optional[str] = None) -> str:
     return 'min'
 
 
+def partial_path(final: str) -> str:
+    """Return the name a file is written under before it is moved to ``final``.
+
+    Interface contract: pure. ``final`` must end in an extension (``.keras``); the result is in
+    the SAME directory (``os.replace`` is atomic on one filesystem only), ``<stem>.partial<ext>``.
+
+    :param final: the path the finished file must have.
+    :return: ``final`` with ``.partial`` inserted before its extension.
+    """
+    root, extension = os.path.splitext(final)
+    return f"{root}.partial{extension}"
+
+
+def promote_partial(final: str) -> None:
+    """Flush ``partial_path(final)`` to disk and move it over ``final`` atomically.
+
+    Interface contract: the caller has written ``partial_path(final)`` completely and closed it.
+    A process killed at any instant leaves the earlier ``final`` intact, or the new one whole;
+    never a half-written ``final``. Shared by :class:`AtomicModelCheckpoint` (the best model)
+    and :func:`train.common.classification_run.finalize_last_epoch` (the final model).
+
+    :param final: the path the finished file must have.
+    :raises FileNotFoundError: when the partial file does not exist.
+    :raises OSError: when the flush or the rename fails; the partial file is left in place.
+    """
+    descriptor = os.open(partial_path(final), os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(partial_path(final), final)
+
+
 class AtomicModelCheckpoint(keras.callbacks.ModelCheckpoint):
     """``ModelCheckpoint`` whose file is never seen half written.
 
@@ -259,23 +292,14 @@ class AtomicModelCheckpoint(keras.callbacks.ModelCheckpoint):
         # then has no best to return to (review-iter-3 concern 3).
         final = super()._get_file_path(epoch, batch, logs)
         self._final_path = final
-        root, extension = os.path.splitext(final)
-        return f"{root}.partial{extension}"
+        return partial_path(final)
 
     def _save_model(self, epoch, batch, logs):
         before = self.best
         super()._save_model(epoch, batch, logs)
         if self.save_best_only and self.best == before:
             return
-        final = self._final_path
-        root, extension = os.path.splitext(final)
-        partial = f"{root}.partial{extension}"
-        descriptor = os.open(partial, os.O_RDONLY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        os.replace(partial, final)
+        promote_partial(self._final_path)
 
 
 def create_callbacks(

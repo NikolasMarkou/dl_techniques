@@ -30,6 +30,7 @@ from dl_techniques.metrics.half_precision_top_k import HalfPrecisionTopKAccuracy
 from dl_techniques.utils.logger import logger
 
 from train.common import run_summary
+from train.common.callbacks import partial_path, promote_partial
 from train.common.classification_data import EVAL_BATCH_SIZE, ClassificationData
 from train.common.evaluation import validate_model_loading
 from train.common.run_io import save_training_history_json
@@ -339,7 +340,7 @@ def report_best_weights(
 def finalize_last_epoch(
         model: keras.Model, last_weights: LastEpochWeights, data: ClassificationData,
         run_dir: Path, history: keras.callbacks.History, epochs_run: int,
-        evaluate: Evaluate, save: bool = True,
+        evaluate: Evaluate, save: bool = True, atomic: bool = False,
 ) -> Tuple[Optional[Dict[str, float]], Optional[bool]]:
     """Restore the last epoch's weights, score them, save them, write the history, reload.
 
@@ -359,6 +360,10 @@ def finalize_last_epoch(
     :param evaluate: The caller's ``(model, dataset) -> {metric: float}`` seam.
     :param save: ``False`` skips the ``final_model.keras`` write and therefore the load
         check, which has nothing to reload; the history is still written.
+    :param atomic: ``True`` saves to ``final_model.partial.keras`` and moves it over
+        ``final_model.keras`` with :func:`train.common.callbacks.promote_partial`, so a kill
+        inside the save never leaves a torn ``final_model.keras``. ``False`` (the default, the
+        legacy trainers) saves in place.
     :return: ``(test_metrics_final, load_check)``; ``load_check`` is ``None`` when
         ``save`` is ``False``, ``test_metrics_final`` when there is no test split.
     """
@@ -374,7 +379,15 @@ def finalize_last_epoch(
         test_metrics_final = evaluate(model, data.test_ds)
         logger.info(f"Test results (final weights, epoch {epochs_run}): {test_metrics_final}")
     final_path = run_dir / "final_model.keras"
-    if save:
+    if save and atomic:
+        # DECISION plan-2026-10-31T180033-2faf890a/D-029
+        # The API path writes the final model to a partial name and moves it into place. Do NOT
+        # save in place here for the API: a kill inside `model.save` tore `final_model.keras` in
+        # a run whose fit had finished, which cannot be resumed, so the last epoch's weights
+        # were lost (review-iter-1 blind spot). The legacy default stays in place on purpose.
+        model.save(partial_path(str(final_path)))
+        promote_partial(str(final_path))
+    elif save:
         model.save(final_path)
     # After the save: a failed history write raises and must not cost the
     # weights (D-174). The diverged branch of a caller writes it before raising.

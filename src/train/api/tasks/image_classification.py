@@ -528,6 +528,7 @@ class ImageClassificationTrainer(TaskTrainer):
             fit.epochs_run,
             evaluate=classification_run.evaluate_dict,
             save=checkpoint_cfg.save_last,
+            atomic=True,
         )
         return Evaluation(
             test_metrics_best=test_best,

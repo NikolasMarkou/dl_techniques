@@ -190,6 +190,30 @@ def test_an_existing_onnx_out_is_refused_and_left_as_it_is(model, tmp_path):
     assert out.read_text() == "mine"
 
 
+def test_a_task_json_that_appears_after_the_check_is_never_overwritten(tmp_path, monkeypatch):
+    """Mutant ``xp_record_w`` (review-iter-1 concern 10): the record beside the export is opened
+    exclusively, so a ``<out>.task.json`` written by someone else while the model was converting
+    is an error and not a truncation."""
+    from train.api.run_dir import TASK_SUFFIX
+
+    inputs = keras.Input((6, 5, 3))
+    net = keras.Model(inputs, keras.layers.Dense(4)(keras.layers.Flatten()(inputs)))
+    out = tmp_path / "m.keras"
+    sibling = tmp_path / ("m.keras" + TASK_SUFFIX)
+    theirs = "someone else's record"
+    real = net.save
+
+    def save_then_they_write(*arguments, **keywords):
+        result = real(*arguments, **keywords)
+        sibling.write_text(theirs)
+        return result
+
+    monkeypatch.setattr(net, "save", save_then_they_write)
+    with pytest.raises(FileExistsError):
+        export(model=net, out=out, format="keras", record={"schema_version": 1})
+    assert sibling.read_text() == theirs
+
+
 @pytest.mark.parametrize("format", ["keras", "tflite", "onnx"])
 def test_a_file_that_appears_after_the_check_and_before_the_write_is_never_overwritten(
     format, tmp_path, monkeypatch

@@ -285,6 +285,12 @@ def test_conformal_alpha_writes_the_sets_and_records_them(full):
     assert (run_dir / "conformal.json").is_file()
     assert summary["conformal"] is not None
     assert summary["conformal"]["alpha"] == 0.2
+    # The best weights were selected on the selection split, not on the test split the sets are
+    # calibrated on: the record must say so (a flipped flag selects the wrong caveat text).
+    assert summary["conformal"]["model_selected_on_calibration_set"] is False
+    from train.common.conformal import CAVEAT_NOT_SELECTED_ON_CALIBRATION
+
+    assert summary["conformal"]["caveat"] == CAVEAT_NOT_SELECTED_ON_CALIBRATION
 
 
 @pytest.mark.parametrize("terminate, epochs_run", [(True, 1), (False, 3)])

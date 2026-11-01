@@ -297,3 +297,27 @@ def test_a_resume_that_asks_for_another_mode_than_the_run_started_with_is_refuse
     with pytest.raises(ConfigError, match=r"data\.fingerprint: 'content' -> 'listing'"):
         ImageClassificationTrainer(
             run_config(run_dir, root, resume_interrupted=True, fingerprint="listing")).run()
+
+
+def test_the_content_digest_never_equals_the_listing_digest_even_when_there_is_nothing_to_hash(tmp_path):
+    """Mutant ``fp_no_prefix`` (review-iter-1 concern 10, near-equivalent by reading, now measured).
+
+    The docstring promises that the two modes never collide. For any real listing the per-row
+    separator that content mode adds already keeps them apart (so files with no bytes differ, shown
+    first); only a listing with NO rows would collide without the mode's own prefix, and the
+    prefix is what makes the promise unconditional. A listing of no files cannot be scanned (a class
+    needs two), so the function is driven on a bare one."""
+    from types import SimpleNamespace
+
+    root = tmp_path / "empty"
+    for name in ("a", "b"):
+        (root / name).mkdir(parents=True)
+        for index in range(2):
+            (root / name / f"{index}.png").write_bytes(b"")
+    listing = scan_image_folder(str(root), None)
+    assert listing_fingerprint(listing, "content") != listing_fingerprint(listing, "listing")
+    bare = SimpleNamespace(
+        source="nothing", class_names=[], train_paths=[], train_labels=[], train_base=str(root),
+        test_paths=None, test_labels=None, test_base=None,
+    )
+    assert listing_fingerprint(bare, "content") != listing_fingerprint(bare, "listing")

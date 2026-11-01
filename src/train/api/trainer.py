@@ -556,13 +556,28 @@ class TaskTrainer:
             for name in REQUIRED_HOOKS
             if getattr(type(self), name) is getattr(TaskTrainer, name)
         ]
-        if not self.success_metric:
-            forgotten.append("success_metric (class variable)")
-        if forgotten:
-            raise TypeError(
-                f"{type(self).__name__} does not supply: {', '.join(forgotten)}; "
-                "TaskTrainer has no default for them"
-            )
+        # DECISION plan-2026-10-31T180033-2faf890a/D-029
+        # A hook must be CALLABLE, a task and a success metric non-empty texts. Do NOT stop at
+        # "differs from the base": `input_check = None` passed that, and raised `'NoneType'
+        # object is not callable` after the run directory was claimed, and `task = ""` ran to a
+        # summary (review-iter-1 concern 12).
+        uncallable = [
+            name for name in REQUIRED_HOOKS
+            if name not in forgotten and not callable(getattr(type(self), name))
+        ]
+        for name in ("task", "success_metric"):
+            value = getattr(type(self), name)
+            if not isinstance(value, str) or not value:
+                forgotten.append(f"{name} (class variable)")
+        if forgotten or uncallable:
+            parts = []
+            if forgotten:
+                parts.append(
+                    f"does not supply: {', '.join(forgotten)}; TaskTrainer has no default for them"
+                )
+            if uncallable:
+                parts.append(f"has hooks that are not callable: {', '.join(uncallable)}")
+            raise TypeError(f"{type(self).__name__} {'; and '.join(parts)}")
         self.config = config
         #: ``(level, text)`` lines found while the request is resolved, logged
         #: once ``run.log`` is open.
@@ -883,7 +898,28 @@ class TaskTrainer:
                 f"Invalid value for 'metric_args.watch_metric': {monitor!r} is not a metric "
                 f"this run reports; choose one of {', '.join(sorted(choices))}"
             )
+        self._check_success_metric(choices, "this run reports", "")
         self._check_devices(resolved.devices)
+
+    def _check_success_metric(self, choices: Sequence[str], where: str, claimed: str) -> None:
+        """Raise :class:`ConfigError` unless ``success_metric`` is one of ``choices``.
+
+        Interface contract: ``choices`` are the history keys the run can report (the metric names
+        and their ``val_`` twins, :func:`_monitor_choices`); ``where`` names their source and
+        ``claimed`` is appended to the message (the "out is now used" note after the claim).
+        Without it a misspelt name cost the whole run: ``success_value`` raised ``KeyError``
+        after ``fit`` and all the reporting, with no ``results_summary.json`` and ``fit_finished``
+        true, so the run could not be resumed (review-iter-1 concern 11).
+        """
+        # DECISION plan-2026-10-31T180033-2faf890a/D-029
+        # Checked twice, like `watch_metric`: BEFORE the claim against the names the task
+        # NAMED, and before `fit` against the names `compile` produced. Do NOT leave it to
+        # `success_value`: that runs after the training it would have spared.
+        if self.success_metric not in choices:
+            raise ConfigError(
+                f"Invalid {type(self).__name__}.success_metric: {self.success_metric!r} is not a "
+                f"metric {where}; choose one of {', '.join(sorted(choices))}. {claimed}".rstrip()
+            )
 
     @staticmethod
     def _check_devices(devices: Optional[int]) -> None:
@@ -1094,6 +1130,10 @@ class TaskTrainer:
                     f"metric the compiled model reports ({', '.join(sorted(baseline))}). "
                     f"{_claimed_note(run_dir)}"
                 )
+            self._check_success_metric(
+                _monitor_choices([k for k in baseline if k != "loss"]),
+                "the compiled model reports", _claimed_note(run_dir),
+            )
             summary_head = self._summary_head(
                 config, family, variant, run_dir, data, params, baseline,
                 initial_ratio, init_warning, devices,
