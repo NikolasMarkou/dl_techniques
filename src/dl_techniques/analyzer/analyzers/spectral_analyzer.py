@@ -154,6 +154,12 @@ class SpectralAnalyzer(BaseAnalyzer):
              recommendations, model_summary) = self._analyze_single_model(
                  model, rng=pass_rng)
 
+            if details_df.empty:
+                results.record_failure(
+                    'spectral', model_name,
+                    f"no layer qualifies for spectral analysis: a layer needs at least "
+                    f"spectral_min_evals={self.config.spectral_min_evals} eigenvalues "
+                    f"(the smaller side of its weight matrix)")
             if not details_df.empty:
                 details_df['model_name'] = model_name
                 all_model_details.append(details_df)

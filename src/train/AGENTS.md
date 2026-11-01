@@ -486,14 +486,18 @@ and in the module docstring of `api/trainer.py`):
   `failed_analyses` calls it through `report_best_weights(run_analysis=..., name_failed_analyses=True)`, as the
   classification task does; the legacy trainers do not, so their summaries keep their keys.
 
-`failed_analyses` (`run_summary.failed_analyses`) is the only place a swallowed analyzer failure becomes visible, and
-its coverage is narrow on purpose. It names two things: `calibration` (requested, and `calibration_metrics` holds no
-entry for the model) and `model_analysis` (the seam returned `None`). It does not check weights, spectral,
-information flow or training dynamics. `summary.analyzer.status` comes from `read_analysis_status`, which reads
-only `model_metrics[model]["status"]` from the result file, so it can read `success` beside a non-empty
-`summary.analyzer.failed_analyses`: a green status does not mean every requested analysis produced a result. The key is
-absent when nothing failed. Do not derive the list from the status and do not widen the analyzer's handlers: the
-isolation is deliberate, the silence was the defect (D-020, anchor at `run_summary.py:failed_analyses`).
+`failed_analyses` (`run_summary.failed_analyses`) is the only place a swallowed analyzer failure becomes visible in the
+summary. It maps each name to its reason, and names every analysis the analyzer attempted that left no result: an
+analysis (`weights`, `calibration`, `information_flow`, `training_dynamics`, `spectral`), a figure set that raised
+(`visualizer:<analysis>`, `visualizer:summary`), `analysis` (a failure before any analyzer ran) and `model_analysis`
+(the seam returned `None`). The analyzers record the exception text where they swallow it
+(`AnalysisResults.record_failure`), and `ModelAnalyzer.analyze` runs each analyzer and each figure in isolation, writes
+`analysis_results.json` before the first figure and re-raises the first exception at the end (D-027). When any name is
+present, `summary.analyzer.status` reads `partial` instead of `success` (`report_best_weights` does it); the other
+statuses are unchanged. The key is absent when nothing failed. Do not derive the mapping from the status and do not
+remove the isolation: it is deliberate, the silence was the defect (D-020, anchor at `run_summary.py:failed_analyses`).
+The default `run_analysis` passes the run's `seed` as the analyzer's `random_state` (D-027), so the bootstrap
+`pl_pvalue` is reproducible between runs of one seed; the legacy trainers stay unseeded.
 <!-- knobs:end -->
 
 - **Parity with the legacy trainer is measured for `vit_pico` on CIFAR-10 only.** Do not claim it for

@@ -96,6 +96,7 @@ class TrainingDynamicsAnalyzer(BaseAnalyzer):
 
         if not results.training_history:
             logger.warning("No training history available for analysis")
+            results.record_failure('training_dynamics', '*', "no training history was given")
             return
 
         # Initialize training metrics container
@@ -104,6 +105,7 @@ class TrainingDynamicsAnalyzer(BaseAnalyzer):
         for model_name, history in results.training_history.items():
             if not history:
                 logger.warning(f"No training history available for {model_name}")
+                results.record_failure('training_dynamics', model_name, "the training history is empty")
                 continue
 
             # Compute quantitative metrics

@@ -78,15 +78,19 @@ grows with the number of layers and test images, and the dashboard render is rec
 (`common/classification_viz.py`). The evidence is `plans/plan-2026-10-31T180033-2faf890a/scratch_step13/measure_out.txt`
 (the plans directory is untracked).
 
-**A failed analysis is named, but only some are.** The analyzer isolates a failing analysis and carries on, so
+**A failed analysis is named, with its reason.** The analyzer isolates a failing analysis and carries on, so
 a run can write a normal-looking `model_analysis/` after one of its parts failed. For this task the summary's
-`analyzer` block gains `summary.analyzer.failed_analyses`, a list, only when it is not empty (a clean run
-writes the same keys as before), and `run.log` carries a WARNING. It covers exactly two things:
-`calibration` (requested, and the analyzer produced no calibration entry for the model) and `model_analysis`
-(the whole analysis raised and returned nothing). It does not check weights, spectral, information flow or
-training dynamics. `summary.analyzer.status` is read back from the analyzer's own result file and does not see
-calibration, so it can read `success` beside a non-empty `failed_analyses`: read both. In the analyzer's
-summary dashboard a missing ECE or Brier prints `n/a`, not 0.0.
+`analyzer` block gains `summary.analyzer.failed_analyses`, an object that maps each name to its reason, only when
+it is not empty (a clean run writes the same keys as before), and `run.log` carries a WARNING. A name is an
+analysis that was attempted and left no result (`weights`, `calibration`, `information_flow`,
+`training_dynamics`, `spectral`), a figure set that raised (`visualizer:calibration`, `visualizer:summary`, and so
+on), `analysis` (a failure before any analyzer ran) or `model_analysis` (the whole call raised and returned
+nothing). The reason is `ExcType: message` of the swallowed exception, or a sentence for an analysis that ran and
+produced nothing (spectral on a model whose layers all have fewer than `spectral_min_evals` = 10 eigenvalues
+says so). When any analysis is named, `summary.analyzer.status` reads `partial` instead of `success`; `error`,
+`missing` and the other statuses are unchanged. The analyzer writes `model_analysis/analysis_results.json` before
+it draws any figure, so a figure that crashed loses no computed number; the file gains an `analysis_failures`
+object only when something failed. In the analyzer's summary dashboard a missing ECE or Brier prints `n/a`, not 0.0.
 
 **For a task author**: the trainer calls two optional hooks and one required one for this output. They are
 documented at their definitions in `api/trainer.py`: `TaskTrainer.figure_callbacks(config, data, vis_dir)`

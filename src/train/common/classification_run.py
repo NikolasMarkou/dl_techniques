@@ -298,10 +298,11 @@ def report_best_weights(
     :param analysis_off_hint: How the caller's user switched the analyzer off; named in the
         log line of a skipped analysis. The default is the legacy flag; the API passes its
         own key.
-    :param name_failed_analyses: ``True`` adds ``failed_analyses`` to the analyzer status
-        when :func:`train.common.run_summary.failed_analyses` finds one (the seam must then
-        return what ``run_model_analysis`` returns). Off by default: the legacy trainers'
-        summaries keep their keys. With nothing failed the key is absent either way.
+    :param name_failed_analyses: ``True`` adds ``failed_analyses`` (``{name: reason}``) to the
+        analyzer status when :func:`train.common.run_summary.failed_analyses` finds one (the
+        seam must then return what ``run_model_analysis`` returns), and a status of
+        ``success`` becomes ``partial``. Off by default: the legacy trainers' summaries keep
+        their keys and values. With nothing failed the key is absent either way.
     :return: ``(visualizations, analysis)``: the figure record (it carries ``ece``) and
         the analyzer status read back from disk, or the skipped status.
     """
@@ -318,10 +319,12 @@ def report_best_weights(
         results = run_analysis(model, (data.x_fig, data.y_fig), history, experiment_name, str(run_dir))
         analysis = run_summary.read_analysis_status(run_dir, experiment_name)
         if name_failed_analyses:
-            failed = run_summary.failed_analyses(results, experiment_name)
+            failed = run_summary.failed_analyses(results, experiment_name, run_dir)
             if failed:
                 analysis = {**analysis, "failed_analyses": failed}
-                logger.warning(f"Analyzer: {failed} left no result (see the log above)")
+                if analysis["status"] == "success":
+                    analysis["status"] = run_summary.PARTIAL_ANALYSIS_STATUS
+                logger.warning(f"Analyzer: {sorted(failed)} left no result: {failed}")
         logger.info(f"Analyzer status (read back from disk): {analysis['status']}")
     else:
         analysis = run_summary.skipped_analysis_status()

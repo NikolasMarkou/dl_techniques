@@ -177,7 +177,8 @@ Hooks (override in a task)
     by the model's output rank: a classifier (rank 2) gets the stock one, a per-pixel model
     the pixel path (D-020) and a 256 MB budget for information flow. A task with void labels
     overrides it to pass ``ignore_label``. A failed analysis is named in the ``analyzer``
-    block of the summary as ``failed_analyses`` (present only when non-empty).
+    block of the summary as ``failed_analyses`` (a ``{name: reason}`` object, present only
+    when non-empty), and ``analyzer.status`` then reads ``partial`` instead of ``success``.
 ``task_metadata(config, data)``
     Extra keys for the summary head. Default: none.
 ``summary_fields(config, data)``
@@ -634,12 +635,15 @@ class TaskTrainer:
         :return: what ``run_model_analysis`` returns, the ``AnalysisResults`` or ``None`` when
             the analysis raised; ``run_summary.failed_analyses`` reads it.
 
-        The default asks ``analysis_config_for`` for the configuration: ``None`` (the stock
-        configuration, exactly the classification call) for a model whose output has rank 2,
-        and for a per-pixel model, a ``memory_limit_mb`` of 256 for information flow with
-        the pixel path of the calibration analyzer. A task whose labels mark void pixels
-        overrides this and passes ``ignore_label``; without it a void label is not dropped
-        and the calibration analyzer raises on it, which ``failed_analyses`` then names.
+        The default asks ``analysis_config_for`` for the configuration: the stock one for a
+        model whose output has rank 2, and for a per-pixel model a ``memory_limit_mb`` of 256
+        for information flow with the pixel path of the calibration analyzer. Both carry the
+        run's ``seed`` as the analyzer's ``random_state`` (step 14.3, D-027), so the bootstrap
+        ``pl_pvalue`` of the spectral analysis is reproducible between runs of one seed. A
+        subclassed model, whose output rank is only known from a call, is given one image to
+        be probed with. A task whose labels mark void pixels overrides this and passes
+        ``ignore_label``; without it a void label is not dropped and the calibration analyzer
+        raises on it, which ``failed_analyses`` then names.
         """
         from train.common import evaluation
 
@@ -649,7 +653,11 @@ class TaskTrainer:
             history,
             experiment_name,
             run_dir,
-            config=evaluation.analysis_config_for(model),
+            config=evaluation.analysis_config_for(
+                model,
+                sample=evaluation.first_sample(test_data),
+                random_state=getattr(config, "seed", None),
+            ),
         )
 
     def evaluate_and_report(

@@ -4,20 +4,24 @@ The hook is the one place a task decides how the model analyzer is called. These
 REAL analyzer (a fake one would not see the budget, the pixel path or the swallowed exception that
 the step is about) on tiny models, and one-epoch fits of ``vit/vit_pico`` on fake CIFAR-10 arrays:
 
-* the default hook gives a classifier the stock call (``config=None``, so the stock 2048 MB
-  information-flow budget and no per-pixel field in the artifact) and a per-pixel model a 256 MB
-  budget, read back from the ``config`` block of the analyzer's own ``analysis_results.json``;
-* ``analysis_config_for`` passes ``ignore_label`` through for a per-pixel model only;
-* a failed analysis is named: a seam that returns ``None`` gives ``failed_analyses:
-  ["model_analysis"]``, and a mask run whose void label is not configured gives
-  ``["calibration"]`` beside a model status that still reads ``success`` (the swallow at
-  ``calibration_analyzer.py``);
-* the key is absent when nothing failed, and absent for a caller that did not ask
-  (``name_failed_analyses`` off: the legacy trainers).
+* the default hook gives a classifier the stock configuration (the stock 2048 MB information-flow
+  budget and no per-pixel field in the artifact) and a per-pixel model a 256 MB budget, read back
+  from the ``config`` block of the analyzer's own ``analysis_results.json``; both carry the run's
+  seed as ``random_state`` (step 14.3), the legacy call (no hook) stays unseeded;
+* ``analysis_config_for`` passes ``ignore_label`` through for a per-pixel model only, and takes a
+  sample so a subclassed mask model is recognised;
+* a failed analysis is named WITH ITS REASON and ``analyzer.status`` reads ``partial``: a seam that
+  returns ``None`` gives ``failed_analyses: {"model_analysis": ...}``, a mask run whose void label
+  is not configured gives ``calibration``, and an injected exception in each of information flow,
+  weights, training dynamics, spectral producing nothing, and a figure each give their own name and
+  the exception text (never ``FileNotFoundError ... analysis_results.json``);
+* the key is absent when nothing failed (status ``success``), and absent for a caller that did not
+  ask (``name_failed_analyses`` off: the legacy trainers).
 
 The tests write only under ``tmp_path``.
 """
 
+import dataclasses
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -67,11 +71,15 @@ def world():
         yield
 
 
-def mask_model(ignore_class=VOID):
-    """A small fully convolutional net: ``(N, 16, 16, 3)`` images to ``(N, 16, 16, 3)`` logits."""
+def mask_model(ignore_class=VOID, width=16):
+    """A small fully convolutional net: ``(N, 16, 16, 3)`` images to ``(N, 16, 16, 3)`` logits.
+
+    ``width`` 16 gives the first convolution 16 eigenvalues, above ``spectral_min_evals`` (10), so
+    spectral has a layer to analyze; ``width`` 8 does not.
+    """
     keras.utils.set_random_seed(0)
     inputs = keras.Input((SIZE, SIZE, 3))
-    h = keras.layers.Conv2D(8, 3, padding="same", activation="relu")(inputs)
+    h = keras.layers.Conv2D(width, 3, padding="same", activation="relu")(inputs)
     model = keras.Model(inputs, keras.layers.Conv2D(CLASSES, 1)(h))
     model.compile(
         optimizer="adam",
@@ -131,6 +139,65 @@ def test_the_configuration_of_a_classifier_is_the_stock_one():
     assert evaluation.analysis_config_for(classifier(), ignore_label=VOID) is None
 
 
+def test_a_seeded_classifier_configuration_is_the_stock_one_plus_the_seed():
+    seeded = evaluation.analysis_config_for(classifier(), random_state=5)
+    stock = evaluation.stock_analysis_config()
+    assert seeded.random_state == 5 and stock.random_state is None
+    assert dataclasses.replace(seeded, random_state=None) == stock
+
+
+def test_a_subclassed_mask_model_is_given_the_per_pixel_configuration_from_a_sample():
+    class Sub(keras.Model):
+        def __init__(self):
+            super().__init__(name="sub")
+            self.head = keras.layers.Conv2D(CLASSES, 1)
+
+        def call(self, inputs, training=None):
+            return self.head(inputs)
+
+    x, _ = mask_data()
+    model = Sub()
+    model(x[:1])
+    assert evaluation.analysis_config_for(model) is None  # nothing to read the rank from
+    config = evaluation.analysis_config_for(model, ignore_label=VOID, sample=evaluation.first_sample((x, None)))
+    assert config.memory_limit_mb == 256 and config.ignore_label == VOID
+
+
+def test_the_default_hook_gives_a_subclassed_mask_model_the_per_pixel_path_and_budget(world, tmp_path):
+    """Through ``TaskTrainer.run_analysis`` and the real analyzer: the artifact shows the 256 MB budget."""
+    class Sub(keras.Model):
+        def __init__(self):
+            super().__init__(name="seg")
+            self.head = keras.layers.Conv2D(CLASSES, 1)
+
+        def call(self, inputs, training=None):
+            return self.head(inputs)
+
+    x, y = mask_data()
+    model = Sub()
+    model(x[:1])
+    model.compile(optimizer="adam",
+                  loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True))
+    task = ImageClassificationTrainer(make_config(tmp_path / "run"))
+    results = task.run_analysis(task.config, model, (x, y), history(model, x, y), "seg",
+                                str(tmp_path / "out"))
+    payload = analysis_file(tmp_path / "out")
+    assert payload["config"]["memory_limit_mb"] == 256
+    assert payload["calibration_metrics"]["seg"]["pixels_used"] == 12 * SIZE * SIZE
+    assert results.calibration_metrics["seg"]["pixels_total"] == 12 * SIZE * SIZE
+
+
+def test_first_sample_is_one_image_of_an_array_a_dict_or_a_dataset():
+    import tensorflow as tf
+
+    x, y = mask_data()
+    assert evaluation.first_sample((x, y)).shape == (1, SIZE, SIZE, 3)
+    assert evaluation.first_sample(({"a": x}, y))["a"].shape == (1, SIZE, SIZE, 3)
+    dataset = tf.data.Dataset.from_tensor_slices((x, y)).batch(4)
+    assert evaluation.first_sample((dataset, None)).shape == (1, SIZE, SIZE, 3)
+    assert evaluation.first_sample((x[:0], y[:0])) is None
+
+
 def test_the_configuration_of_a_per_pixel_model_carries_the_budget_and_the_void_label():
     config = evaluation.analysis_config_for(mask_model(), ignore_label=VOID)
     assert config.memory_limit_mb == evaluation.PER_PIXEL_MEMORY_LIMIT_MB == 256
@@ -151,6 +218,7 @@ def test_the_default_hook_passes_a_256_mb_budget_to_the_real_analyzer_for_a_mask
     payload = analysis_file(tmp_path / "out")
     assert payload["config"]["memory_limit_mb"] == 256
     assert payload["config"]["ignore_label"] is None and payload["config"]["max_pixels"] == 100_000
+    assert payload["config"]["random_state"] == task.config.seed
     # the per-pixel path ran: counts are recorded
     assert payload["calibration_metrics"]["seg"]["pixels_used"] == 12 * SIZE * SIZE
 
@@ -164,6 +232,7 @@ def test_the_default_hook_leaves_a_classifier_on_the_stock_budget_and_artifact(w
     assert results is not None
     payload = analysis_file(tmp_path / "out")
     assert payload["config"]["memory_limit_mb"] == 2048
+    assert payload["config"]["random_state"] == task.config.seed
     assert not {"ignore_label", "max_pixels"} & set(payload["config"])
     assert "pixels_used" not in payload["calibration_metrics"]["clf"]
 
@@ -189,7 +258,8 @@ def test_a_seam_that_returns_none_is_named_model_analysis(world, tmp_path):
         None, classifier(), *classifier_data(), keras.callbacks.History(), tmp_path / "run",
         run_analysis=lambda *args: None, name_failed_analyses=True,
     )
-    assert analysis["failed_analyses"] == [run_summary.MODEL_ANALYSIS_FAILED] == ["model_analysis"]
+    assert list(analysis["failed_analyses"]) == [run_summary.MODEL_ANALYSIS_FAILED] == ["model_analysis"]
+    assert "see the log" in analysis["failed_analyses"]["model_analysis"]
     assert analysis["status"] == "missing"
 
 
@@ -202,12 +272,16 @@ def test_calibration_that_raised_is_named_beside_a_model_status_that_still_reads
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     analysis = report(
-        task, model, x, y, keras.callbacks.History(), run_dir,
+        task, model, x, y, history(model, x, y), run_dir,
         run_analysis=lambda *args: task.run_analysis(task.config, *args),
         name_failed_analyses=True,
     )
-    assert analysis["status"] == "success"
-    assert analysis["failed_analyses"] == ["calibration"]
+    # the model status alone is green; the summary status must not be
+    assert analysis_file(run_dir)["model_metrics"]["seg"]["status"] == "success"
+    assert analysis["status"] == run_summary.PARTIAL_ANALYSIS_STATUS == "partial"
+    assert list(analysis["failed_analyses"]) == ["calibration"]
+    assert analysis["failed_analyses"]["calibration"].startswith("ValueError:")
+    assert "255" in analysis["failed_analyses"]["calibration"]
     assert "seg" not in analysis_file(run_dir)["calibration_metrics"]
 
 
@@ -218,7 +292,7 @@ def test_nothing_failed_writes_no_key(world, tmp_path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     analysis = report(
-        task, model, x, y, keras.callbacks.History(), run_dir,
+        task, model, x, y, history(model, x, y), run_dir,
         run_analysis=lambda *args: task.run_analysis(task.config, *args),
         name_failed_analyses=True,
     )
@@ -234,17 +308,111 @@ def test_a_caller_that_does_not_ask_keeps_the_legacy_analyzer_block(world, tmp_p
     assert "failed_analyses" not in analysis
 
 
-def test_failed_analyses_reads_the_requested_analyses_from_the_results():
+def test_failed_analyses_reads_what_the_analyzer_recorded_for_this_model():
     from dl_techniques.analyzer import AnalysisConfig
     from dl_techniques.analyzer.data_types import AnalysisResults
 
-    off = AnalysisResults(config=AnalysisConfig(analyze_calibration=False, verbose=False))
-    assert run_summary.failed_analyses(off, "m") == []
-    on = AnalysisResults(config=AnalysisConfig(verbose=False))
-    assert run_summary.failed_analyses(on, "m") == ["calibration"]
-    on.calibration_metrics["m"] = {"ece": 0.1}
-    assert run_summary.failed_analyses(on, "m") == []
-    assert run_summary.failed_analyses(on, "other") == ["calibration"]
+    clean = AnalysisResults(config=AnalysisConfig(verbose=False))
+    assert run_summary.failed_analyses(clean, "m") == {}
+    recorded = AnalysisResults(config=AnalysisConfig(verbose=False))
+    recorded.record_failure("calibration", "m", "ValueError: bad")
+    recorded.record_failure("weights", "*", "RuntimeError: boom")
+    recorded.record_failure("spectral", "other", "not this model's")
+    assert run_summary.failed_analyses(recorded, "m") == {
+        "calibration": "ValueError: bad", "weights": "RuntimeError: boom"}
+    assert run_summary.failed_analyses(recorded, "other") == {
+        "weights": "RuntimeError: boom", "spectral": "not this model's"}
+
+
+def test_the_first_recorded_reason_wins_and_a_none_result_reads_the_file(tmp_path):
+    from dl_techniques.analyzer.data_types import AnalysisResults
+
+    results = AnalysisResults()
+    results.record_failure("spectral", "m", "the real cause")
+    results.record_failure("spectral", "m", "a later, vaguer one")
+    assert run_summary.failed_analyses(results, "m") == {"spectral": "the real cause"}
+    (tmp_path / "model_analysis").mkdir()
+    (tmp_path / "model_analysis" / "analysis_results.json").write_text(
+        json.dumps({"analysis_failures": {"weights": {"*": "RuntimeError: boom"}}}))
+    named = run_summary.failed_analyses(None, "m", tmp_path)
+    assert named["weights"] == "RuntimeError: boom" and "model_analysis" in named
+    assert "see the log" in run_summary.failed_analyses(None, "m", tmp_path / "absent")["model_analysis"]
+
+
+# ---------------------------------------------------------------------
+# An analysis that raised, produced nothing or whose figure raised is named with its reason
+# ---------------------------------------------------------------------
+
+MODULES = {"weights": "weight_analyzer", "training_dynamics": "training_dynamics_analyzer"}
+
+
+def _boom(*args, **kwargs):
+    raise RuntimeError("INJECTED")
+
+
+def injected(world, tmp_path, monkeypatch, target, name, replacement=_boom):
+    """Run the real default hook on a mask model with ``target.name`` replaced; return the analyzer block."""
+    monkeypatch.setattr(target, name, replacement)
+    task = ImageClassificationTrainer(make_config(tmp_path / "run"))
+    model = mask_model()
+    x, y = mask_data()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    return report(
+        task, model, x, y, history(model, x, y), run_dir,
+        run_analysis=lambda *args: task.run_analysis(task.config, *args),
+        name_failed_analyses=True,
+    ), run_dir
+
+
+def test_a_swallowed_information_flow_error_is_named_with_its_text(world, tmp_path, monkeypatch):
+    from dl_techniques.analyzer.analyzers.information_flow_analyzer import InformationFlowAnalyzer
+
+    analysis, _ = injected(world, tmp_path, monkeypatch, InformationFlowAnalyzer,
+                           "_analyze_layer_information")
+    assert analysis["status"] == "partial"
+    assert analysis["failed_analyses"]["information_flow"] == "RuntimeError: INJECTED"
+
+
+@pytest.mark.parametrize("analysis_name, cls, method", [
+    ("weights", "WeightAnalyzer", "analyze"),
+    ("training_dynamics", "TrainingDynamicsAnalyzer", "analyze"),
+])
+def test_an_analyzer_that_raises_is_named_and_the_error_is_not_a_missing_file(
+        world, tmp_path, monkeypatch, analysis_name, cls, method):
+    import importlib
+
+    module = importlib.import_module(f"dl_techniques.analyzer.analyzers.{MODULES[analysis_name]}")
+    analysis, run_dir = injected(world, tmp_path, monkeypatch, getattr(module, cls), method)
+    assert analysis["failed_analyses"][analysis_name] == "RuntimeError: INJECTED"
+    assert "model_analysis" in analysis["failed_analyses"]  # the call raised out of the analyzer
+    assert analysis["status"] == "partial" and analysis["error"] is None
+    assert "FileNotFoundError" not in json.dumps(analysis)
+    assert "seg" in analysis_file(run_dir)["calibration_metrics"]  # the computed results survived
+
+
+def test_a_figure_that_raises_is_named_and_the_numbers_are_on_disk(world, tmp_path, monkeypatch):
+    from dl_techniques.analyzer.visualizers.calibration_visualizer import CalibrationVisualizer
+
+    analysis, run_dir = injected(world, tmp_path, monkeypatch, CalibrationVisualizer,
+                                 "create_visualizations")
+    assert analysis["status"] == "partial"
+    assert analysis["failed_analyses"]["visualizer:calibration"] == "RuntimeError: INJECTED"
+    assert "seg" in analysis_file(run_dir)["calibration_metrics"]
+
+
+def test_a_spectral_analysis_that_finds_no_layer_is_named_with_the_threshold(world, tmp_path):
+    """An 8-filter convolution and a 3-filter head: below 10 eigenvalues each."""
+    task = ImageClassificationTrainer(make_config(tmp_path / "run"))
+    model = mask_model(width=8)
+    x, y = mask_data()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    analysis = report(task, model, x, y, history(model, x, y), run_dir,
+                      run_analysis=lambda *args: task.run_analysis(task.config, *args),
+                      name_failed_analyses=True)
+    assert "spectral_min_evals=10" in analysis["failed_analyses"]["spectral"]
+    assert analysis["status"] == "partial"
 
 
 # ---------------------------------------------------------------------
@@ -273,7 +441,7 @@ def test_the_classification_task_reports_through_its_hook_and_the_summary_names_
     assert call["config"].out == config.out and call["run_dir"] == str(run_dir)
     assert call["x_shape"][0] > 0
     summary = json.loads(result.summary_path.read_text())
-    assert summary["analyzer"]["failed_analyses"] == ["model_analysis"]
+    assert list(summary["analyzer"]["failed_analyses"]) == ["model_analysis"]
 
 
 def test_a_successful_classification_analysis_writes_the_legacy_analyzer_block(world, tmp_path):

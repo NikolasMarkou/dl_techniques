@@ -527,32 +527,87 @@ def generate_comprehensive_visualizations(
 PER_PIXEL_MEMORY_LIMIT_MB = 256
 
 
-def analysis_config_for(model: keras.Model, ignore_label: Optional[int] = None) -> Optional[AnalysisConfig]:
-    """The analyzer configuration a model needs beyond the default, or ``None``.
+def stock_analysis_config(random_state: Optional[int] = None, **overrides: Any) -> AnalysisConfig:
+    """The five-analysis configuration every trainer's end-of-run analysis starts from.
 
     Args:
-        model: The model about to be analyzed.
-        ignore_label: The label value that marks a void pixel, or ``None``. Read only for
-            a per-pixel model.
+        random_state: Seed of the analyzer's generator, or ``None`` (unseeded, what every
+            legacy trainer uses). The API passes the run's seed so that the bootstrap
+            ``pl_pvalue`` of the spectral analysis is reproducible.
+        **overrides: Further :class:`AnalysisConfig` fields (a per-pixel model sets its
+            budget and void label here).
 
     Returns:
-        ``None`` for a model that is not per-pixel (output rank below 4), which is what
-        :func:`run_model_analysis` takes as "the default configuration", so a classifier
-        is analyzed exactly as before. For a per-pixel model, all five analyses with
-        ``memory_limit_mb`` set to :data:`PER_PIXEL_MEMORY_LIMIT_MB` and ``ignore_label``
-        passed through, so a void pixel is dropped before calibration.
+        An :class:`AnalysisConfig` with weights, calibration, information flow, training
+        dynamics and spectral on.
     """
-    if not ModelAnalyzer.outputs_per_pixel(model):
-        return None
     return AnalysisConfig(
         analyze_weights=True,
         analyze_calibration=True,
         analyze_information_flow=True,
         analyze_training_dynamics=True,
         analyze_spectral=True,
-        memory_limit_mb=PER_PIXEL_MEMORY_LIMIT_MB,
-        ignore_label=ignore_label,
+        random_state=random_state,
+        **overrides,
     )
+
+
+def first_sample(test_data: Tuple[Any, Any]) -> Any:
+    """One input of ``test_data`` as a batch of one, or ``None`` when it cannot be taken cheaply.
+
+    Args:
+        test_data: ``(x, y)`` as :func:`run_model_analysis` takes it: ``x`` an array, a dict
+            of arrays or a ``tf.data.Dataset`` of ``(images, labels)`` batches.
+
+    Returns:
+        ``x[:1]`` (the dict of such slices), the first image of the first batch of a
+        dataset, or ``None`` for anything else.
+    """
+    x = test_data[0]
+    if isinstance(x, tf.data.Dataset):
+        for batch_images, _ in x.take(1):
+            return batch_images.numpy()[:1]
+        return None
+    if isinstance(x, dict):
+        return {k: v[:1] for k, v in x.items()}
+    return x[:1] if hasattr(x, "__getitem__") and len(x) else None
+
+
+# DECISION plan-2026-10-31T180033-2faf890a/D-027
+# The API passes the run's seed as `random_state`, so the spectral bootstrap `pl_pvalue` (and the
+# `spectral_recommendations` strings derived from it) repeat between two runs of one seed. A
+# seeded classifier therefore gets an explicit config instead of `None`. Do NOT seed the legacy
+# call (`run_model_analysis(config=None)`): legacy artifacts stay what they were, unseeded.
+def analysis_config_for(
+        model: keras.Model,
+        ignore_label: Optional[int] = None,
+        sample: Optional[Any] = None,
+        random_state: Optional[int] = None,
+) -> Optional[AnalysisConfig]:
+    """The analyzer configuration a model needs beyond the default, or ``None``.
+
+    Args:
+        model: The model about to be analyzed.
+        ignore_label: The label value that marks a void pixel, or ``None``. Read only for
+            a per-pixel model.
+        sample: One input (see :func:`first_sample`), or ``None``. Read only for a model
+            with no static output shape, a subclassed one, whose output rank is then taken
+            from one real call.
+        random_state: The run's seed, or ``None`` (the legacy, unseeded configuration).
+
+    Returns:
+        With ``random_state`` ``None``: ``None`` for a model that is not per-pixel (output
+        rank below 4), which :func:`run_model_analysis` takes as "the default
+        configuration", so a classifier is analyzed exactly as before. With a
+        ``random_state``: the stock configuration carrying it, since ``None`` has nowhere to
+        hold a seed. For a per-pixel model, all five analyses with ``memory_limit_mb`` set
+        to :data:`PER_PIXEL_MEMORY_LIMIT_MB`, ``ignore_label`` passed through (so a void
+        pixel is dropped before calibration) and the seed.
+    """
+    if not ModelAnalyzer.outputs_per_pixel(model, sample=sample):
+        return None if random_state is None else stock_analysis_config(random_state)
+    return stock_analysis_config(
+        random_state, memory_limit_mb=PER_PIXEL_MEMORY_LIMIT_MB, ignore_label=ignore_label)
 
 
 def run_model_analysis(
@@ -588,13 +643,7 @@ def run_model_analysis(
     logger.info("Running model analysis...")
 
     if config is None:
-        config = AnalysisConfig(
-            analyze_weights=True,
-            analyze_calibration=True,
-            analyze_information_flow=True,
-            analyze_training_dynamics=True,
-            analyze_spectral=True,
-        )
+        config = stock_analysis_config()
 
     try:
         # Extract numpy arrays from tf.data.Dataset if needed

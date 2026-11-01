@@ -149,9 +149,30 @@ class AnalysisResults:
     # Only when the persistence arm ran.
     fisher_persistence: Optional[pd.DataFrame] = None
 
+    # Analyses that were attempted and left no result, plan-2026-10-31T180033-2faf890a
+    # step 14.3 (review-iter-1 concern 2). Analysis name (an `ANALYSIS_TYPE_*`, or
+    # `visualizer:<type>` for a figure that raised, or `analysis` for a failure outside any
+    # one analyzer) -> model name (`*` when the failure is not one model's) -> the reason:
+    # `ExcType: message` when an exception was swallowed, a plain sentence when the analysis
+    # ran and produced nothing. Empty for a run in which every attempted analysis produced
+    # its result, and then absent from the published file (use `record_failure` to write).
+    analysis_failures: Dict[str, Dict[str, str]] = field(default_factory=dict)
+
     # Metadata
     analysis_timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     config: Optional['AnalysisConfig'] = None  # Forward reference
+
+    def record_failure(self, analysis: str, model_name: str, reason: str) -> None:
+        """Record that ``analysis`` left no result for ``model_name``; the first reason wins.
+
+        Args:
+            analysis: The analysis name (see ``analysis_failures``).
+            model_name: The model, or ``'*'`` when the failure is not one model's.
+            reason: Why: ``ExcType: message`` for a swallowed exception, else a sentence.
+                The analyzers record the exception text at the place they swallow it, so a
+                later generic "produced no result" never overwrites the real cause.
+        """
+        self.analysis_failures.setdefault(analysis, {}).setdefault(model_name, reason)
 
     def __post_init__(self):
         """Post-initialization to set up any derived fields.

@@ -323,37 +323,82 @@ def skipped_analysis_status() -> Dict[str, Any]:
 #: The name :func:`failed_analyses` gives a ``run_model_analysis`` that returned ``None``.
 MODEL_ANALYSIS_FAILED = "model_analysis"
 
+#: The ``analyzer.status`` of a run whose model status read ``success`` but that has a
+#: non-empty ``failed_analyses``: some of what was requested is there, some is not.
+PARTIAL_ANALYSIS_STATUS = "partial"
+
 
 # DECISION plan-2026-10-31T180033-2faf890a/D-020
-# The analyzer isolates a failing analysis and carries on, twice: the calibration analyzer
-# logs the exception and skips the model (``calibration_analyzer.py``, F-046), and
-# ``run_model_analysis`` swallows anything that reaches it and returns ``None``
-# (``evaluation.py``). The analysis then writes a normal-looking file, and
-# ``read_analysis_status`` reads only ``model_metrics[model]["status"]``, which is ``ok``
-# whatever calibration did. This list is how a failure becomes visible in the summary.
-# Do NOT derive it from ``read_analysis_status`` (it cannot see calibration) and do NOT
-# widen the analyzer's handlers: the isolation is deliberate, the silence was the defect.
-def failed_analyses(results: Any, model_name: str) -> List[str]:
-    """Name the analyses that were requested for ``model_name`` and left no result.
+# The analyzer isolates a failing analysis and carries on, in several places: the calibration
+# analyzer logs the exception and skips the model (``calibration_analyzer.py``, F-046), the
+# information-flow analyzer skips a model, ``ModelAnalyzer.analyze`` runs every analyzer and
+# every figure in isolation (D-027), and ``run_model_analysis`` swallows anything that reaches
+# it and returns ``None`` (``evaluation.py``). The analysis then writes a normal-looking file,
+# and ``read_analysis_status`` reads only ``model_metrics[model]["status"]``, which is ``ok``
+# whatever the other analyses did. This mapping is how a failure becomes visible in the summary.
+# Do NOT derive it from ``read_analysis_status`` (it cannot see the other analyses) and do NOT
+# remove the isolation: it is deliberate, the silence was the defect. Each place that swallows
+# records the exception text in ``AnalysisResults.analysis_failures`` (D-027), so the reason
+# is the real one, not the ``FileNotFoundError`` of a results file that was never written.
+def failed_analyses(results: Any, model_name: str, run_dir: Optional[Path] = None) -> Dict[str, str]:
+    """Name the analyses that were attempted for ``model_name`` and left no result, with the reason.
 
     Args:
         results: What ``run_model_analysis`` returned: an ``AnalysisResults`` (its
-            ``config`` says what was requested), or ``None`` when the analysis raised.
+            ``analysis_failures`` is what the analyzer recorded), or ``None`` when the
+            analysis raised out of the analyzer.
         model_name: The key the analysis was run under.
+        run_dir: The run directory, read only when ``results`` is ``None``: the analyzer
+            writes its record before it re-raises, so ``model_analysis/analysis_results.json``
+            holds the reason.
 
     Returns:
-        ``[MODEL_ANALYSIS_FAILED]`` for ``None``; ``["calibration"]`` when calibration was
-        requested and ``calibration_metrics`` holds no entry for the model; ``[]`` when
-        nothing is missing. Only calibration is checked: it is the one analysis that
-        reads the labels and the prediction layout, and the one whose isolation hid a
-        failure behind a successful status (measured on per-pixel outputs).
+        ``{name: reason}``, empty when nothing is missing. A name is an analysis (``weights``,
+        ``calibration``, ``information_flow``, ``training_dynamics``, ``spectral``), a figure
+        set (``visualizer:<analysis>``, ``visualizer:summary``) or ``analysis`` (a failure
+        before any analyzer ran). The reason is ``ExcType: message`` for a swallowed
+        exception and a sentence for an analysis that ran and produced nothing. For ``None``
+        the key :data:`MODEL_ANALYSIS_FAILED` is present, beside the entries the analyzer
+        wrote to its file before it re-raised (none when it never got that far).
     """
     if results is None:
-        return [MODEL_ANALYSIS_FAILED]
-    failed: List[str] = []
-    if results.config.analyze_calibration and model_name not in results.calibration_metrics:
-        failed.append("calibration")
-    return failed
+        recorded = _recorded_failures(run_dir, model_name)
+        reason = ("an exception left the analyzer after it recorded the reasons named here"
+                  if recorded else "the analysis raised before it recorded a reason; see the log")
+        return {**recorded, MODEL_ANALYSIS_FAILED: reason}
+    return _failures_of(results.analysis_failures, model_name)
+
+
+def _failures_of(table: Any, model_name: str) -> Dict[str, str]:
+    """Flatten the analyzer's ``analysis -> model -> reason`` table to ``analysis -> reason``.
+
+    A ``table`` that is not that shape (a file that was edited, or written by another
+    version) yields what can be read and nothing else.
+    """
+    out: Dict[str, str] = {}
+    if not isinstance(table, dict):
+        return out
+    for analysis, per_model in table.items():
+        if not isinstance(per_model, dict):
+            continue
+        reason = per_model.get(model_name) or per_model.get("*")
+        if isinstance(reason, str) and reason:
+            out[analysis] = reason
+    return out
+
+
+def _recorded_failures(run_dir: Optional[Path], model_name: str) -> Dict[str, str]:
+    """The ``analysis_failures`` of ``<run_dir>/model_analysis/analysis_results.json``, or ``{}``."""
+    if run_dir is None:
+        return {}
+    path = Path(run_dir) / "model_analysis" / "analysis_results.json"
+    try:
+        with open(path) as f:
+            payload = json.load(f)
+    except (OSError, ValueError) as e:
+        logger.warning(f"Could not read the recorded analysis failures from {path}: {e}")
+        return {}
+    return _failures_of(payload.get("analysis_failures") if isinstance(payload, dict) else None, model_name)
 
 
 def data_free_analysis_config() -> AnalysisConfig:

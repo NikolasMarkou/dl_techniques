@@ -123,6 +123,15 @@ class CalibrationAnalyzer(BaseAnalyzer):
             # This variable now correctly holds probabilities, not logits.
             y_pred_proba = model_cache.get('predictions', None)
 
+            if y_pred_proba is None and model_cache.get('error'):
+                # The prediction cache could not be built for this model (`ModelAnalyzer`
+                # recorded why). The reason is the cache's, not a missing-logits one.
+                logger.warning(
+                    f"Skipping calibration analysis for '{model_name}': its predictions "
+                    f"could not be computed: {model_cache['error']}")
+                skipped_models[model_name] = model_cache['error']
+                continue
+
             if y_pred_proba is None:
                 # DECISION plan-2026-10-05-analyzer-audit/F-045
                 # This branch is UNREACHABLE from `ModelAnalyzer`: `_cache_predictions`
@@ -303,6 +312,10 @@ class CalibrationAnalyzer(BaseAnalyzer):
                 skipped_models[model_name] = f"{type(e).__name__}: {e}"
                 continue
 
+        for name, reason in skipped_models.items():
+            # The reason is carried to the artifact and the run summary, not only the log
+            # (plan-2026-10-31T180033-2faf890a step 14.3). The isolation itself is unchanged.
+            results.record_failure('calibration', name, reason)
         if skipped_models:
             logger.warning(
                 f"Calibration analysis skipped for {len(skipped_models)} of "

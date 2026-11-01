@@ -30,6 +30,110 @@ PROBABILITY_RANGE_TOLERANCE: float = 1e-5
 PROBABILITY_SUM_TOLERANCE: float = 1e-3
 
 
+#: Machine epsilon of the 16-bit floats a mixed-precision policy makes a model emit. The
+#: numpy name of the dtype is the key because ``bfloat16`` is not a numpy-native dtype.
+REDUCED_PRECISION_EPSILON: Dict[str, float] = {'float16': 2.0 ** -10, 'bfloat16': 2.0 ** -7}
+#: A row of a 16-bit softmax sums to 1 within a few epsilons (each of the C terms is rounded,
+#: and the layer's own exp/sum ran in 16 bits); measured in the step 14.3 test at C = 3..150.
+REDUCED_PRECISION_SUM_EPSILONS: float = 4.0
+
+
+def reduced_precision_epsilon(dtype: Any) -> Optional[float]:
+    """The machine epsilon of a 16-bit float dtype, or ``None`` for any other dtype.
+
+    Args:
+        dtype: A numpy dtype or anything ``np.dtype`` accepts (``bfloat16`` arrays carry the
+            ``ml_dtypes`` dtype, whose ``name`` is ``'bfloat16'``).
+
+    Returns:
+        ``2**-10`` for ``float16``, ``2**-7`` for ``bfloat16``, ``None`` otherwise.
+    """
+    return REDUCED_PRECISION_EPSILON.get(getattr(np.dtype(dtype), 'name', None))
+
+
+def to_full_precision(array: np.ndarray) -> np.ndarray:
+    """``float32`` copy of a 16-bit float array; every other array is returned as it is.
+
+    Args:
+        array: Model output.
+
+    Returns:
+        The same object for a ``float32``/``float64``/integer array (so a full-precision
+        model's numbers are untouched), a ``float32`` array for ``float16``/``bfloat16``.
+    """
+    array = np.asarray(array)
+    return array.astype(np.float32) if reduced_precision_epsilon(array.dtype) is not None else array
+
+
+# DECISION plan-2026-10-31T180033-2faf890a/D-027
+# The activation of a per-pixel model is decided ONCE, from statistics folded in over EVERY
+# batch, and applied to the kept pixels afterwards. Do NOT decide it from the first batch (the
+# step-12 form): a logits model whose first 16 images scored inside [0, 1] was never softmaxed
+# and reported Brier 13.2, an impossible value, with no error. Do NOT decide it per batch either
+# (batches would be softmaxed differently inside one cache). The 16-bit tolerance is the other
+# half: a float16/bfloat16 softmax does not sum to 1 within 1e-3, and "does not sum to 1" is how a
+# multi-label head is recognised, so a softmax was read as sigmoids and calibration failed with a
+# false "multi-label" message at 21 or more classes.
+class OutputStatistics:
+    """What is needed to tell softmax, sigmoid and logits apart, summed over any number of batches.
+
+    ``classify_output_activation`` decides from the minimum, the maximum and whether EVERY row
+    sums to 1, so those three facts can be collected batch by batch and decided once at the end
+    with exactly the answer one call on the concatenated array would give. The per-pixel path
+    needs this: it cannot hold every batch, and deciding from the first batch alone calls a
+    logits model "softmax" whenever that batch happens to score inside ``[0, 1]`` (measured:
+    Brier 13.2, an impossible value, with no error).
+
+    A 16-bit input (``float16``/``bfloat16``, what a mixed-precision policy emits) is read in
+    ``float32`` and its row-sum test gets a tolerance of a few epsilons of that dtype, since a
+    16-bit softmax does not sum to 1 within the ``float32`` tolerance of ``1e-3``.
+    """
+
+    def __init__(self) -> None:
+        self._low = float('inf')
+        self._high = float('-inf')
+        self._rows_sum_to_one = True
+        self._rank_ok = True
+        #: ``True`` once any batch folded in was ``float16``/``bfloat16``.
+        self.reduced_precision = False
+
+    def update(self, predictions: np.ndarray) -> None:
+        """Fold one batch of raw model output into the statistics.
+
+        Args:
+            predictions: Raw output of a batch, class axis last. Must not be empty.
+        """
+        values = np.asarray(predictions)
+        epsilon = reduced_precision_epsilon(values.dtype)
+        tolerance = PROBABILITY_SUM_TOLERANCE
+        if epsilon is not None:
+            self.reduced_precision = True
+            values = values.astype(np.float32)
+            tolerance = max(tolerance, REDUCED_PRECISION_SUM_EPSILONS * epsilon)
+        self._low = min(self._low, float(np.min(values)))
+        self._high = max(self._high, float(np.max(values)))
+        if values.ndim < 2:
+            self._rank_ok = False
+        elif self._rows_sum_to_one:
+            self._rows_sum_to_one = bool(np.allclose(values.sum(axis=-1), 1.0, atol=tolerance))
+
+    def classify(self) -> Tuple[str, str]:
+        """The decision for everything folded in so far.
+
+        Returns:
+            ``(activation, reason)`` as :func:`classify_output_activation` returns.
+        """
+        low, high = self._low, self._high
+        in_unit_range = low >= 0.0 and high <= 1.0 + PROBABILITY_RANGE_TOLERANCE
+        if self._rank_ok and in_unit_range and self._rows_sum_to_one:
+            return OUTPUT_ACTIVATION_SOFTMAX, "rows are non-negative and sum to 1"
+        if in_unit_range:
+            return (OUTPUT_ACTIVATION_SIGMOID,
+                    f"values lie in [{low:.4g}, {high:.4g}] but rows do not sum to 1")
+        return (OUTPUT_ACTIVATION_LOGITS,
+                f"values lie outside [0, 1] ([{low:.4g}, {high:.4g}])")
+
+
 def classify_output_activation(predictions: np.ndarray) -> Tuple[str, str]:
     """Decide what a model's final layer emits, from a sample of its output.
 
@@ -56,18 +160,9 @@ def classify_output_activation(predictions: np.ndarray) -> Tuple[str, str]:
         ``'sigmoid'`` or ``'logits'`` and ``reason`` is a human-readable
         justification for the log line.
     """
-    low = float(np.min(predictions))
-    high = float(np.max(predictions))
-    in_unit_range = low >= 0.0 and high <= 1.0 + PROBABILITY_RANGE_TOLERANCE
-
-    if predictions.ndim >= 2 and in_unit_range and np.allclose(
-            predictions.sum(axis=-1), 1.0, atol=PROBABILITY_SUM_TOLERANCE):
-        return OUTPUT_ACTIVATION_SOFTMAX, "rows are non-negative and sum to 1"
-    if in_unit_range:
-        return (OUTPUT_ACTIVATION_SIGMOID,
-                f"values lie in [{low:.4g}, {high:.4g}] but rows do not sum to 1")
-    return (OUTPUT_ACTIVATION_LOGITS,
-            f"values lie outside [0, 1] ([{low:.4g}, {high:.4g}])")
+    statistics = OutputStatistics()
+    statistics.update(predictions)
+    return statistics.classify()
 
 
 def make_rng(random_state: Optional[int] = None) -> np.random.Generator:

@@ -216,13 +216,21 @@ that panel (see `D-033`).
 
 ### Per-pixel (mask) outputs
 
-A model whose single output has rank 4 or more, `(N, H, W, C)`, is scored per pixel. `ModelAnalyzer`
-predicts 16 images at a time, softmaxes each batch (unless the model emits probabilities), drops
-the pixels whose label equals `AnalysisConfig.ignore_label`, keeps `max_pixels` of the rest by a
-uniform draw without replacement, and hands the calibration analyzer a rank-2 cache: `(P, C)`
-probabilities and `(P,)` labels. Labels are class indices of shape `(N, H, W)` (a trailing axis of
-1 is squeezed); anything else, a one-hot mask included, raises a `ValueError` naming both shapes
-and the model is left out of calibration. Each model's `calibration_metrics` entry gains
+A model whose single output has rank 4 or more, `(N, H, W, C)`, is scored per pixel. A subclassed
+model has no static `output_shape`; its rank is read from one real call on the first image
+(`ModelAnalyzer.outputs_per_pixel(model, sample=...)`). `ModelAnalyzer`
+predicts 16 images at a time, drops the pixels whose label equals `AnalysisConfig.ignore_label`,
+keeps `max_pixels` of the rest by a uniform draw without replacement, decides ONCE from every pixel of
+every batch whether the model emits logits, softmax or sigmoid (the rank-2 rule, on all the data; a
+first batch that happens to lie inside `[0, 1]` cannot decide for the rest), softmaxes the kept logits,
+and hands the calibration analyzer a rank-2 cache: `(P, C)`
+probabilities and `(P,)` labels. A 16-bit output (`mixed_float16`, `mixed_bfloat16`) is read in
+`float32`, and a 16-bit softmax, whose rows sum to 1 only within a few epsilons of its dtype, is
+renormalised in `float32` (this also applies to rank-2 models); a `float32` model's numbers are
+untouched. A single-channel output `(N, H, W, 1)` is a binary mask: `[1 - p, p]` per pixel, `p` the
+sigmoid of a logit or the probability itself. Labels are class indices of shape `(N, H, W)` (a trailing axis of
+1 is squeezed); anything else, a one-hot mask included, raises a `ValueError` naming the shapes of the
+whole arrays and the model is left out of calibration. Each model's `calibration_metrics` entry gains
 `pixels_total`, `pixels_void` and `pixels_used`. Memory stays at `O(max_pixels * C)` however many
 images there are.
 
@@ -237,6 +245,18 @@ so it inherits the compile: use a loss with `ignore_class` and a void-aware metr
 
 A calibration that raises is still isolated (one model never aborts the run), but it is no longer
 silent downstream: the dashboard prints `n/a` for a missing ECE / Brier instead of `0.000`.
+
+### Analyses that left no result
+
+`AnalysisResults.analysis_failures` maps analysis (`weights`, `calibration`, `information_flow`,
+`training_dynamics`, `spectral`; `visualizer:<analysis>` or `visualizer:summary` for a figure; `analysis`
+for a failure before any analyzer ran) to model (or `*`) to a reason: `ExcType: message` where an analyzer
+swallowed an exception, a sentence where it ran and produced nothing (spectral on a model whose layers all
+have fewer than `spectral_min_evals` eigenvalues says so). `analyze()` runs each analyzer and each figure in
+isolation and writes `analysis_results.json` before the first figure, so a figure that crashed loses no
+number. An analyzer that raised still raises out of `analyze()`, after everything else has run and been
+written (the first exception is re-raised). The saved file gains an `analysis_failures` object only when
+something is in it, so the file of a clean run is unchanged.
 
 ### Representation geometry and grokking (standalone, `analyzer/representation_metrics.py`)
 

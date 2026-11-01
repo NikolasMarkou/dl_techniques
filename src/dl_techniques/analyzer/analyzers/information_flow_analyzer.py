@@ -155,6 +155,8 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                 except Exception as e:
                     logger.error(
                         f"Failed to build model '{model_name}'. Skipping information flow analysis. Error: {e}")
+                    results.record_failure(
+                        'information_flow', model_name, f"{type(e).__name__}: {e}")
                     continue
 
             captured_outputs: Dict[str, np.ndarray] = {}
@@ -171,6 +173,8 @@ class InformationFlowAnalyzer(BaseAnalyzer):
 
                 if not extraction_layers:
                     logger.warning(f"No suitable layers for information flow analysis in '{model_name}'.")
+                    results.record_failure(
+                        'information_flow', model_name, "no layer qualifies for information flow analysis")
                     continue
 
                 wrapped = self._wrap_recording_calls(
@@ -239,6 +243,7 @@ class InformationFlowAnalyzer(BaseAnalyzer):
                 raise
             except Exception as e:
                 logger.error(f"Failed to analyze information flow for {model_name}: {e}", exc_info=True)
+                results.record_failure('information_flow', model_name, f"{type(e).__name__}: {e}")
                 continue
             finally:
                 # Runs on every exit path, including the re-raise and the `continue`.

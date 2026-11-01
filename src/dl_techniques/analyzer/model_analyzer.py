@@ -100,6 +100,7 @@ from .config import AnalysisConfig
 from .data_types import DataInput, AnalysisResults
 from .utils import (find_pareto_front, normalize_metric, DataSampler, make_rng,
                     recursively_get_layers, classify_output_activation,
+                    OutputStatistics, to_full_precision, reduced_precision_epsilon,
                     OUTPUT_ACTIVATION_SOFTMAX, OUTPUT_ACTIVATION_SIGMOID,
                     OUTPUT_ACTIVATION_LOGITS, PROBABILITY_RANGE_TOLERANCE,
                     PROBABILITY_SUM_TOLERANCE)
@@ -167,6 +168,10 @@ ANALYSIS_TYPE_FISHER: str = 'fisher'
 DATA_REQUIRED_ANALYSES: Set[str] = {ANALYSIS_TYPE_CALIBRATION, ANALYSIS_TYPE_INFORMATION_FLOW,
                                     ANALYSIS_TYPE_FISHER}
 
+# Keys of `AnalysisResults.analysis_failures` that are not an analysis type
+VISUALIZER_FAILURE_PREFIX: str = 'visualizer:'
+ANALYSIS_FAILED_OUTSIDE_AN_ANALYZER: str = 'analysis'
+
 # File naming constants
 DEFAULT_RESULTS_FILENAME: str = "analysis_results.json"
 
@@ -206,6 +211,25 @@ PER_PIXEL_BATCH_SIZE: int = 16
 # block only when that path ran, so an artifact of a rank-2 model is byte-for-byte what it
 # was before the fields existed.
 PER_PIXEL_CONFIG_FIELDS: frozenset = frozenset({'ignore_label', 'max_pixels'})
+
+
+def _training_metrics_hold(results: AnalysisResults, model_name: str) -> bool:
+    """Whether any per-model table of the training metrics has an entry for ``model_name``."""
+    metrics = results.training_metrics
+    return metrics is not None and any(
+        model_name in value for value in vars(metrics).values() if isinstance(value, dict))
+
+
+# What "this analysis produced a result for this model" means, one test per analysis type
+# (plan-2026-10-31T180033-2faf890a step 14.3). `weight_pca` is cross-model and is not one of
+# them: a single model never has one.
+RESULT_PRODUCED = {
+    ANALYSIS_TYPE_WEIGHTS: lambda r, m: bool(r.weight_stats.get(m)),
+    ANALYSIS_TYPE_CALIBRATION: lambda r, m: m in r.calibration_metrics,
+    ANALYSIS_TYPE_INFORMATION_FLOW: lambda r, m: m in r.information_flow,
+    ANALYSIS_TYPE_TRAINING_DYNAMICS: _training_metrics_hold,
+    ANALYSIS_TYPE_SPECTRAL: lambda r, m: m in r.spectral_summary_per_model,
+}
 
 # Visualization parameters
 PARETO_SCATTER_SIZE: int = 100
@@ -395,6 +419,21 @@ def _resolve_accuracy(model: keras.Model,
 
 
 # ---------------------------------------------------------------------
+
+
+def _first_sample(x_data: Union[np.ndarray, Dict[str, np.ndarray]]) -> Any:
+    """The first input of ``x_data`` (an array or a dict of arrays), as a batch of one.
+
+    Args:
+        x_data: The sampled inputs.
+
+    Returns:
+        ``x_data[:1]``, or the dict of such slices; ``None`` when there is nothing to take.
+    """
+    if isinstance(x_data, dict):
+        return {k: v[:1] for k, v in x_data.items()} if x_data else None
+    return x_data[:1] if len(x_data) else None
+
 
 class ModelAnalyzer:
     """
@@ -636,10 +675,27 @@ class ModelAnalyzer:
 
         # Cache model predictions if needed for data-dependent analyses
         # This avoids redundant computation across different analyses
-        if data is not None and analysis_types & DATA_REQUIRED_ANALYSES:
-            self._cache_predictions(data)
+        try:
+            if data is not None and analysis_types & DATA_REQUIRED_ANALYSES:
+                self._cache_predictions(data)
+        except Exception as e:
+            # Nothing was computed yet, but the cause is written down before it propagates.
+            self._record_exception(ANALYSIS_FAILED_OUTSIDE_AN_ANALYZER, e)
+            self.save_results()
+            raise
 
-        # Run each selected analysis
+        # DECISION plan-2026-10-31T180033-2faf890a/D-027
+        # One analysis raising must not lose the others' results, and no analysis that
+        # raises or produces nothing may be silent. Each analyzer runs in isolation: its
+        # exception is recorded in `results.analysis_failures`, the remaining analyses
+        # and the figures still run, the file is written, and the FIRST exception is
+        # re-raised at the end, so a direct caller of `analyze()` still sees it (a bug in
+        # an analyzer is not swallowed; it is also no longer the only trace of the run).
+        # Do NOT write the file after the figures only: a figure that crashed used to take
+        # every computed result with it (the file was never written).
+        first_error: Optional[Exception] = None
+        attempted: List[str] = []
+        raised: Set[str] = set()
         for analysis_type in analysis_types:
             if analysis_type in self.analyzers:
                 analyzer = self.analyzers[analysis_type]
@@ -661,21 +717,66 @@ class ModelAnalyzer:
                     logger.warning(f"Limited {analysis_type} analysis for multi-input models: {affected_models}")
 
                 # Execute the analysis
-                analyzer.analyze(self.results, data, self._prediction_cache)
+                attempted.append(analysis_type)
+                try:
+                    analyzer.analyze(self.results, data, self._prediction_cache)
+                except Exception as e:
+                    logger.error(f"The {analysis_type} analysis raised: {type(e).__name__}: {e}",
+                                 exc_info=True)
+                    self._record_exception(analysis_type, e)
+                    raised.add(analysis_type)
+                    first_error = first_error or e
+                    continue
 
                 if analysis_type == ANALYSIS_TYPE_CALIBRATION:
                     self._record_pixel_counts()
 
-        # Generate visualizations for completed analyses
-        self._create_visualizations(analysis_types)
+        self._record_missing_results(attempted)
 
-        # Create comprehensive summary dashboard
-        self.create_summary_dashboard()
-
-        # Serialize and save all results
+        # The numbers are on disk before any figure is drawn.
         self.save_results()
 
+        # Generate visualizations for completed analyses
+        self._create_visualizations(analysis_types - raised)
+
+        # Create comprehensive summary dashboard
+        self._create_summary_dashboard_isolated()
+
+        if any(name.startswith(VISUALIZER_FAILURE_PREFIX) for name in self.results.analysis_failures):
+            self.save_results()  # a figure failure is part of the record
+        if first_error is not None:
+            raise first_error
+
         return self.results
+
+    def _record_exception(self, analysis: str, error: Exception) -> None:
+        """Record a raised exception as the reason ``analysis`` left no result.
+
+        Args:
+            analysis: The analysis name.
+            error: The exception; its type and text are the reason.
+        """
+        self.results.record_failure(analysis, '*', f"{type(error).__name__}: {error}")
+
+    def _record_missing_results(self, attempted: List[str]) -> None:
+        """Name every attempted analysis that left no result for a model.
+
+        An analyzer that swallows an exception has recorded the cause already (the first
+        reason wins). What is left is an analysis that ran and produced nothing, which gets
+        a plain sentence, so "requested" and "produced" are compared, not assumed.
+
+        Args:
+            attempted: The analysis types that ran (not those skipped for lack of data).
+        """
+        for analysis_type in attempted:
+            produced = RESULT_PRODUCED.get(analysis_type)
+            if produced is None or '*' in self.results.analysis_failures.get(analysis_type, {}):
+                continue
+            for model_name in self.models:
+                if not produced(self.results, model_name):
+                    self.results.record_failure(
+                        analysis_type, model_name,
+                        "the analysis ran and produced no result for this model")
 
     def _infer_output_activation(
             self, model_name: str, predictions: np.ndarray) -> str:
@@ -689,17 +790,57 @@ class ModelAnalyzer:
             One of ``'softmax'``, ``'sigmoid'`` or ``'logits'``. Only ``'logits'``
             is softmaxed by the caller.
         """
+        statistics = OutputStatistics()
+        if self.config.output_activation is None:
+            statistics.update(predictions)
+        return self._activation_from_statistics(model_name, statistics)
+
+    def _activation_from_statistics(
+            self, model_name: str, statistics: OutputStatistics) -> str:
+        """The decision of :meth:`_infer_output_activation`, from statistics already collected.
+
+        Args:
+            model_name: Name of the model, used only for the log line.
+            statistics: The raw output of the model folded in batch by batch. Read only when
+                the user did not pin ``config.output_activation``.
+
+        Returns:
+            One of ``'softmax'``, ``'sigmoid'`` or ``'logits'``.
+        """
         if self.config.output_activation is not None:
             return self.config.output_activation
 
         # The decision (and its D-032 rationale) lives in
         # `utils.classify_output_activation`, shared with the Fisher analyzer.
-        activation, reason = classify_output_activation(predictions)
+        activation, reason = statistics.classify()
 
         logger.info(
             f"{model_name}: inferred output activation '{activation}' "
             f"({reason}). Set config.output_activation to override.")
         return activation
+
+    @staticmethod
+    def _probabilities_from_scores(
+            scores: np.ndarray, activation: str, reduced_precision: bool) -> np.ndarray:
+        """Turn full-precision raw scores into class probabilities.
+
+        Args:
+            scores: Raw model output, ``float32`` or wider (see ``to_full_precision``).
+            activation: ``'softmax'``, ``'sigmoid'`` or ``'logits'``.
+            reduced_precision: Whether the model emitted 16-bit floats. A 16-bit softmax
+                row sums to 1 only within a few epsilons of its dtype, which the
+                calibration analyzer's multi-label test (1e-3) reads as independent
+                sigmoids, so such rows are renormalised in ``float32``.
+
+        Returns:
+            Probabilities, same shape as ``scores``. Logits are softmaxed; a softmax or
+            sigmoid output is returned as it is, except for the 16-bit renormalisation.
+        """
+        if activation == OUTPUT_ACTIVATION_LOGITS:
+            return np.array(keras.ops.softmax(scores, axis=-1))
+        if reduced_precision and activation == OUTPUT_ACTIVATION_SOFTMAX:
+            return scores / scores.sum(axis=-1, keepdims=True)
+        return scores
 
     def _cache_predictions(self, data: DataInput) -> None:
         """
@@ -741,7 +882,7 @@ class ModelAnalyzer:
                 # `(N, H, W, C)` array either: measured, it raises on the multi-hot
                 # test and a one-hot mask gives a WRONG ECE (0.5375 for a hand 0.35).
                 # Every model of rank < 4 takes the original lines below.
-                if self.outputs_per_pixel(model):
+                if self.outputs_per_pixel(model, sample=_first_sample(x_data)):
                     self._prediction_cache[model_name] = self._cache_pixel_predictions(
                         model_name, model, x_data, y_data)
                     self._per_pixel_models.add(model_name)
@@ -755,15 +896,18 @@ class ModelAnalyzer:
                 # pinned it, and is inferred otherwise.
                 activation = self._infer_output_activation(model_name, predictions)
 
-                if activation == OUTPUT_ACTIVATION_LOGITS:
-                    probabilities = keras.ops.softmax(predictions, axis=-1)
-                    logits = predictions
-                else:
-                    # Already-normalized outputs, softmax or sigmoid alike, are used
-                    # as they are. We do not hold logits for them: inverting the
-                    # activation would invent a scale the model never had.
-                    probabilities = predictions
-                    logits = None
+                # A model under a mixed-precision policy emits float16/bfloat16. Its
+                # softmax is taken in float32 (a float16 one is imprecise enough to fail
+                # the multi-label test downstream) and a 16-bit softmax output is
+                # renormalised in float32; a float32/float64 model is passed through
+                # untouched, so its numbers are the ones it always had.
+                reduced = reduced_precision_epsilon(np.asarray(predictions).dtype) is not None
+                predictions = to_full_precision(predictions)
+                probabilities = self._probabilities_from_scores(predictions, activation, reduced)
+                # Already-normalized outputs, softmax or sigmoid alike, are used as they
+                # are. We do not hold logits for them: inverting the activation would
+                # invent a scale the model never had.
+                logits = predictions if activation == OUTPUT_ACTIVATION_LOGITS else None
 
                 self._prediction_cache[model_name] = {
                     CACHE_KEY_PREDICTIONS: np.array(probabilities),
@@ -780,34 +924,62 @@ class ModelAnalyzer:
                     CACHE_KEY_LOGITS: None,
                     CACHE_KEY_X_DATA: x_data,
                     CACHE_KEY_Y_DATA: y_data,
-                    CACHE_KEY_ERROR: str(e),
+                    CACHE_KEY_ERROR: f"{type(e).__name__}: {e}",
                     CACHE_KEY_STATUS: STATUS_ERROR
                 }
 
         self._evaluate_models(x_data, y_data)
 
     @staticmethod
-    def outputs_per_pixel(model: keras.Model) -> bool:
-        """Whether a model's static output holds one class vector per pixel.
+    def outputs_per_pixel(model: keras.Model, sample: Optional[Any] = None) -> bool:
+        """Whether a model's output holds one class vector per pixel.
 
         Args:
             model: The model to inspect.
+            sample: Optional input (one image or a few), an array or a dict of arrays. Read
+                only when the model has no static ``output_shape`` (a subclassed model
+                that was never given an input signature raises on it): the model is then
+                called once on the sample and the rank of what it returns decides. A model
+                that has a static shape never sees the sample.
 
         Returns:
-            ``True`` for a single-output model whose ``output_shape`` has
-            ``PER_PIXEL_MIN_RANK`` axes or more. ``False`` for everything else, including a
-            multi-output model (its ``output_shape`` is a collection of shapes) and a
-            model that has no static ``output_shape``; those keep the original path.
+            ``True`` for a single-output model whose output has ``PER_PIXEL_MIN_RANK`` axes
+            or more. ``False`` for everything else: a multi-output model (its
+            ``output_shape`` is a collection of shapes), a rank-2 model, and a model whose
+            shape is unknown and either got no sample or fails on it; those keep the
+            original path.
         """
         try:
             shape = model.output_shape
         except (AttributeError, ValueError, RuntimeError):
-            return False
+            return ModelAnalyzer._sample_output_is_per_pixel(model, sample)
         return (
             isinstance(shape, (tuple, list))
             and len(shape) >= PER_PIXEL_MIN_RANK
             and all(dim is None or isinstance(dim, int) for dim in shape)
         )
+
+    @staticmethod
+    def _sample_output_is_per_pixel(model: keras.Model, sample: Optional[Any]) -> bool:
+        """``outputs_per_pixel`` for a model with no static output shape: ask it.
+
+        Args:
+            model: The model.
+            sample: The input to call the model on, or ``None``.
+
+        Returns:
+            ``True`` when one call in inference mode returns a single array of rank
+            ``PER_PIXEL_MIN_RANK`` or more; ``False`` for no sample, a call that raises, or
+            any other output (several outputs, a lower rank).
+        """
+        if sample is None:
+            return False
+        try:
+            output = model(sample, training=False)
+            return len(keras.ops.shape(output)) >= PER_PIXEL_MIN_RANK
+        except Exception as e:  # noqa: BLE001 - the original path then reports the real failure
+            logger.debug(f"Could not probe '{model.name}' for a per-pixel output: {e}")
+            return False
 
     def _cache_pixel_predictions(
             self,
@@ -818,13 +990,20 @@ class ModelAnalyzer:
     ) -> Dict[str, Any]:
         """Build the cache entry of a per-pixel model: ``(P, C)`` scores, ``(P,)`` labels.
 
-        The model predicts ``PER_PIXEL_BATCH_SIZE`` images at a time, each batch is
-        softmaxed (unless the model already emits probabilities), pixels whose label equals
-        ``config.ignore_label`` are dropped, and ``config.max_pixels`` of the rest are kept
-        by an exactly uniform draw without replacement: every pixel gets a random key and
-        the smallest keys survive across batches, so memory stays at
-        ``O(max_pixels * C)`` however many images there are. The draw is seeded by
-        ``config.random_state``; the kept pixels are returned in image order.
+        The model predicts ``PER_PIXEL_BATCH_SIZE`` images at a time. Pixels whose label
+        equals ``config.ignore_label`` are dropped and ``config.max_pixels`` of the rest are
+        kept by an exactly uniform draw without replacement: every pixel gets a random key and
+        the smallest keys survive across batches, so memory stays at ``O(max_pixels * C)``
+        however many images there are. The draw is seeded by ``config.random_state``; the kept
+        pixels are returned in image order.
+
+        What the model emits (logits, softmax, sigmoid) is decided ONCE, from every pixel of
+        every batch (``OutputStatistics``), the way a rank-2 model is decided from all of its
+        rows, and then applied to the kept pixels. Deciding from the first batch let a logits
+        model whose first 16 images scored inside ``[0, 1]`` skip its softmax (Brier 13.2).
+        A 16-bit output (mixed precision) is read in ``float32``. A single-channel output
+        ``(N, ..., 1)`` is a binary mask: it becomes two classes ``[1 - p, p]`` (``p`` is the
+        sigmoid of a logit, or the output itself when it is a probability).
 
         Args:
             model_name: Name of the model, used for the log lines.
@@ -835,14 +1014,15 @@ class ModelAnalyzer:
 
         Returns:
             A cache entry as `_cache_predictions` builds, with ``predictions`` of shape
-            ``(P, C)``, ``y_data`` of shape ``(P,)``, no logits, and a ``pixel_counts``
-            dict holding ``pixels_total``, ``pixels_void`` and ``pixels_used``.
+            ``(P, C)`` (``(P, 2)`` for a single channel), ``y_data`` of shape ``(P,)``, no
+            logits, and a ``pixel_counts`` dict holding ``pixels_total``, ``pixels_void`` and
+            ``pixels_used``.
 
         Raises:
             ValueError: If a label array does not have the shape of the prediction minus
-                its class axis (both shapes are named), if ``max_pixels`` is below 1, or
-                if no pixel is left once void is dropped. The caller records the model
-                as failed.
+                its class axis (the shapes of the whole arrays are named), if
+                ``max_pixels`` is below 1, or if no pixel is left once void is dropped. The
+                caller records the model as failed.
         """
         max_pixels = int(self.config.max_pixels)
         if max_pixels < 1:
@@ -853,30 +1033,28 @@ class ModelAnalyzer:
         n_images = (len(next(iter(x_data.values()))) if isinstance(x_data, dict)
                     else len(x_data))
 
-        kept_probs = kept_labels = kept_keys = kept_index = None
-        activation = None
+        statistics = OutputStatistics()
+        kept_scores = kept_labels = kept_keys = kept_index = None
         total = void = offset = 0
         for start in range(0, n_images, PER_PIXEL_BATCH_SIZE):
             stop = start + PER_PIXEL_BATCH_SIZE
             batch_x = ({k: v[start:stop] for k, v in x_data.items()}
                        if isinstance(x_data, dict) else x_data[start:stop])
-            scores = np.asarray(model.predict(batch_x, verbose=0))
+            raw = np.asarray(model.predict(batch_x, verbose=0))
 
             batch_y = labels[start:stop]
-            if batch_y.ndim == scores.ndim and batch_y.shape[-1] == 1:
+            if batch_y.ndim == raw.ndim and batch_y.shape[-1] == 1:
                 batch_y = batch_y[..., 0]
-            if batch_y.shape != scores.shape[:-1]:
+            if batch_y.shape != raw.shape[:-1]:
+                expected = (n_images, *raw.shape[1:-1])
                 raise ValueError(
                     f"per-pixel labels of shape {tuple(labels.shape)} do not match the "
-                    f"predictions of shape {tuple(scores.shape)}: expected labels of shape "
-                    f"{tuple(scores.shape[:-1])} (a trailing axis of 1 is squeezed)")
+                    f"predictions of shape {(n_images, *raw.shape[1:])}: expected labels of "
+                    f"shape {expected} (a trailing axis of 1 is squeezed)")
 
-            if activation is None:
-                activation = self._infer_output_activation(model_name, scores)
-            if activation == OUTPUT_ACTIVATION_LOGITS:
-                scores = np.array(keras.ops.softmax(scores, axis=-1))
-
-            flat_probs = scores.reshape(-1, scores.shape[-1])
+            statistics.update(raw)
+            scores = to_full_precision(raw)
+            flat_scores = scores.reshape(-1, scores.shape[-1])
             flat_labels = batch_y.reshape(-1)
             flat_index = np.arange(offset, offset + flat_labels.size)
             offset += flat_labels.size
@@ -884,28 +1062,48 @@ class ModelAnalyzer:
             if ignore is not None:
                 labelled = flat_labels != ignore
                 void += int(flat_labels.size - labelled.sum())
-                flat_probs, flat_labels, flat_index = (
-                    flat_probs[labelled], flat_labels[labelled], flat_index[labelled])
+                flat_scores, flat_labels, flat_index = (
+                    flat_scores[labelled], flat_labels[labelled], flat_index[labelled])
 
             keys = rng.random(flat_labels.size)
             if kept_labels is not None:
-                flat_probs = np.concatenate([kept_probs, flat_probs])
+                flat_scores = np.concatenate([kept_scores, flat_scores])
                 flat_labels = np.concatenate([kept_labels, flat_labels])
                 flat_index = np.concatenate([kept_index, flat_index])
                 keys = np.concatenate([kept_keys, keys])
             if flat_labels.size > max_pixels:
                 smallest = np.argpartition(keys, max_pixels - 1)[:max_pixels]
-                flat_probs, flat_labels, flat_index, keys = (
-                    flat_probs[smallest], flat_labels[smallest],
+                flat_scores, flat_labels, flat_index, keys = (
+                    flat_scores[smallest], flat_labels[smallest],
                     flat_index[smallest], keys[smallest])
-            kept_probs, kept_labels, kept_index, kept_keys = (
-                flat_probs, flat_labels, flat_index, keys)
+            kept_scores, kept_labels, kept_index, kept_keys = (
+                flat_scores, flat_labels, flat_index, keys)
 
         if kept_labels is None or kept_labels.size == 0:
             raise ValueError(
                 f"no labelled pixel is left for '{model_name}': {total} pixels, {void} equal "
                 f"ignore_label={ignore}")
+        activation = self._activation_from_statistics(model_name, statistics)
+        if activation == OUTPUT_ACTIVATION_SIGMOID and kept_scores.shape[-1] > 1:
+            # Independent per-class probabilities with class-index masks: the calibration
+            # analyzer would answer "a multi-label head needs an indicator matrix", which
+            # reads as a fault of the labels. Say what was seen instead.
+            raise ValueError(
+                f"'{model_name}' emits independent per-class probabilities per pixel (values in "
+                f"[0, 1] whose rows do not sum to 1, {kept_scores.shape[-1]} classes) but the "
+                f"labels are class indices: per-pixel calibration needs a softmax or logits head. "
+                f"Set AnalysisConfig.output_activation to 'logits' if these scores are logits "
+                f"that happen to lie in [0, 1].")
         order = np.argsort(kept_index)
+        kept_scores = kept_scores[order]
+        if kept_scores.shape[-1] == 1:
+            # One channel is a binary mask: the score is P(class 1), whatever form it takes.
+            positive = (np.array(keras.ops.sigmoid(kept_scores))
+                        if activation == OUTPUT_ACTIVATION_LOGITS else kept_scores)
+            probabilities = np.concatenate([1.0 - positive, positive], axis=-1)
+        else:
+            probabilities = self._probabilities_from_scores(
+                kept_scores, activation, statistics.reduced_precision)
         counts = {
             'pixels_total': int(total),
             'pixels_void': int(void),
@@ -916,7 +1114,7 @@ class ModelAnalyzer:
             f"{counts['pixels_total']} pixels ({counts['pixels_void']} void, "
             f"max_pixels={max_pixels})")
         return {
-            CACHE_KEY_PREDICTIONS: kept_probs[order],
+            CACHE_KEY_PREDICTIONS: probabilities,
             CACHE_KEY_LOGITS: None,
             CACHE_KEY_X_DATA: x_data,
             CACHE_KEY_Y_DATA: kept_labels[order],
@@ -1037,14 +1235,28 @@ class ModelAnalyzer:
             ANALYSIS_TYPE_FISHER: FisherVisualizer,
         }
 
-        # Create visualizations for each completed analysis
+        # Create visualizations for each completed analysis. A figure that raises is
+        # recorded and the other figures still draw: the numbers are already on disk.
         for analysis_type in analysis_types:
             if analysis_type in visualizers:
                 visualizer_class = visualizers[analysis_type]
-                visualizer = visualizer_class(
-                    self.results, self.config, self.output_dir, self.model_colors
-                )
-                visualizer.create_visualizations()
+                try:
+                    visualizer = visualizer_class(
+                        self.results, self.config, self.output_dir, self.model_colors
+                    )
+                    visualizer.create_visualizations()
+                except Exception as e:
+                    logger.error(f"The {analysis_type} figures raised: {type(e).__name__}: {e}",
+                                 exc_info=True)
+                    self._record_exception(VISUALIZER_FAILURE_PREFIX + analysis_type, e)
+
+    def _create_summary_dashboard_isolated(self) -> None:
+        """``create_summary_dashboard``, with a failure recorded instead of lost."""
+        try:
+            self.create_summary_dashboard()
+        except Exception as e:
+            logger.error(f"The summary dashboard raised: {type(e).__name__}: {e}", exc_info=True)
+            self._record_exception(VISUALIZER_FAILURE_PREFIX + 'summary', e)
 
     def create_summary_dashboard(self) -> None:
         """
@@ -1110,6 +1322,9 @@ class ModelAnalyzer:
             'spectral_recommendations': self.results.spectral_recommendations,
             'multi_input_models': list(self._multi_input_models),
         }
+        if self.results.analysis_failures:
+            # Present only when something failed, so the file of a clean run is unchanged.
+            results_dict['analysis_failures'] = self.results.analysis_failures
 
         # DECISION plan-2026-09-01T225724-e79ad4bd/D-028
         # `json_include_raw_esds` was serialized into the artifact's `config` block
