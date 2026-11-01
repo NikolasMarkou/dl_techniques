@@ -156,8 +156,9 @@ class ImageClassificationConfig(StrictConfig):
         default=False,
         metadata={
             "help": "continue a killed run of the same out with the same request (devices "
-            "may differ); the data order replays epoch 0's and a half-done epoch is trained "
-            "again; the learning rate, ReduceLROnPlateau and early stopping come back; a kill "
+            "may differ); the data order replays epoch 0's; a killed epoch is lost and a "
+            "half-done epoch is trained again from its first batch (an ImageNet epoch is "
+            "hours); the learning rate, ReduceLROnPlateau and early stopping come back; a kill "
             "between the best checkpoint's save and the backup can leave best_model.keras one "
             "epoch LATER than the resumed state's best (the epoch that is then trained again; "
             "never an earlier one); refused: a finished run, other data than the run's, a live "

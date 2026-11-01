@@ -75,7 +75,7 @@ Measured cost, one run each, so a difference of a few seconds is inside the nois
 CIFAR-10 images (240 test images), 3 epochs, batch 16, CPU with one thread. Each row turns on the one setting, against a
 base run with figures, model analysis and epoch analysis off and TensorBoard on (the `base` row, wall seconds of the whole
 call); the TensorBoard row is the base run against one with TensorBoard off. The cost grows with the number of layers and
-test images. Durations are stated only in this table, and `test_the_knob_docs_name_real_keys.py` recomputes every row from
+test images. The durations of the knobs are stated only in this table, and `test_the_knob_docs_name_real_keys.py` recomputes every row from
 `tests/test_train/test_api/knob_cost_evidence.json` (a copy of the measurement in the untracked
 `plans/plan-2026-10-31T180033-2faf890a/scratch_step13/measure_out.txt`; the test does not re-measure it).
 
@@ -215,7 +215,7 @@ out-of-memory line in the log (TensorFlow degrades silently otherwise: `Garbage 
 regions` means the allocator reached the card's limit and recovered, which is a run with no margin). The batch is halved
 from the recipe's until one fits. An OOM was observed in each failed row below, not inferred: the process died on
 `Out of memory while trying to allocate N bytes` or on an allocator `ran out of memory` line. On ImageNet the rows near 100
-images per second are limited by the disk (the first read of those files); the rows that repeat a
+images per second are limited by the disk (the first read of those files, below); the rows that repeat a
 `data.max_samples` read the same files from the page cache.
 
 <!-- memory:begin -->
@@ -299,6 +299,46 @@ dataset, so changing the batch for these two would change their CIFAR recipes; t
 and up, `resnet101`, `convnext` above `tiny`) were not measured. A run of 20 steps is not a run of 200 epochs: nothing here
 says the margin holds for the whole run. The table is pinned to `tests/test_train/test_api/memory_fit_evidence.json` by the
 test, row by row.
+
+**ImageNet on a spinning disk.** The ImageNet train images are on a hard disk (a 4 TB WD40EFAX, `ROTA=1`) on the development
+machine. In the runs above the first read of files cost **96.3, 97.5 and 106.9 images per second** (`vit/vit_pico`,
+`resnet/resnet18`, `convnext_v1/tiny`; cold random reads of single files measured 44 to 115), against about 1,150 images
+per second of CPU decode, so the disk is the limit, not the GPU. One epoch is 1,271,167 images; that is 3.7 to 3.3 hours,
+and a run of E epochs takes (validation not counted):
+
+<!-- imagenet-time:begin -->
+| Epochs | Days at 96.3 images per second | Days at 106.9 images per second |
+|---|---|---|
+| 50 | 7.6 | 6.9 |
+| 100 | 15.3 | 13.8 |
+| 200 | 30.6 | 27.5 |
+<!-- imagenet-time:end -->
+
+So the 50-epoch ImageNet recipe (`vit`) takes about a week, and the 100-epoch ones (`resnet`, `convnext`) about two. A
+killed epoch is lost: the run goes back to the start of the epoch it was in (`resume_interrupted=true` trains it again), and
+at these rates an epoch is hours. A shorter trial is `data.max_samples` (it caps the train pool and the test split; the
+selection set is `data.holdout_per_class` images per class).
+
+The exact commands for a full 50-epoch and a full 100-epoch run, from the repo root with the project virtual environment.
+**They were NOT run**, because each takes a week or more of the only working GPU; the test
+`tests/test_train/test_api/test_the_help_and_the_commands_state_the_imagenet_cost.py` only checks that each line is a valid request
+(every key exists, every value has its type), not that it trains.
+
+<!-- imagenet-commands:begin -->
+```bash
+# NOT RUN. 50 epochs of the vit recipe on the full ImageNet: about a week.
+MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m train image_classification \
+    out=results/imagenet_vit_pico_50ep model=vit/vit_pico data.dataset=imagenet epochs=50
+
+# NOT RUN. 100 epochs of the resnet recipe on the full ImageNet: about two weeks.
+MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m train image_classification \
+    out=results/imagenet_resnet18_100ep model=resnet/resnet18 data.dataset=imagenet epochs=100
+
+# NOT RUN. After a kill, the same line with resume_interrupted=true continues it (the killed epoch is trained again).
+MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m train image_classification \
+    out=results/imagenet_resnet18_100ep model=resnet/resnet18 data.dataset=imagenet epochs=100 resume_interrupted=true
+```
+<!-- imagenet-commands:end -->
 
 **Parity**: the API run and the legacy trainer were compared on `vit_pico` on CIFAR-10 only
 (10 epochs, three seeds each; the means differ by less than a tolerance measured from the legacy
