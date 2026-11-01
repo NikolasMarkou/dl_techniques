@@ -121,6 +121,7 @@ ROWS: Tuple[Row, ...] = (
     Row("checkpoint_args.save_best", "false", False),
     Row("checkpoint_args.save_last", "false", False),
     Row("checkpoint_args.early_stopping_patience", "11", 11),
+    Row("checkpoint_args.backup_every_steps", "40", 40),
     Row("logger_args.tensorboard", "null", None),
     Row("analysis_args.epoch_analysis_every", "4", 4),
     Row("analysis_args.model_analysis", "false", False),

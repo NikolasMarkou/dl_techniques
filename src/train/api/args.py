@@ -477,13 +477,33 @@ class CheckpointArgs(StrictConfig):
         default=AUTO,
         metadata={"help": "epochs without improvement before stopping"},
     )
+    backup_every_steps: Optional[int] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "also back the run up every this many batches INSIDE an epoch (an int >= 2 "
+            "and below the steps per epoch), so a killed epoch loses at most that many batches "
+            "of weights; null backs up at each epoch end only. A resume from such a backup "
+            "trains the killed epoch again from its first batch on the weights of the last "
+            "backup (the examples already seen are seen again) and puts the optimizer's step "
+            "count back to the epoch's start. Each backup writes the weights and optimizer "
+            "state twice (the previous copy is kept): src/train/README.md has the measured "
+            "cost per save"
+        },
+    )
 
     def problems(self, prefix: str) -> List[str]:
-        """Name an explicit negative patience."""
+        """Name an explicit negative patience and a ``backup_every_steps`` below 2."""
+        lines = []
         patience = self.early_stopping_patience
         if not _is_auto(patience) and patience < 0:
-            return [_range_line(prefix, "early_stopping_patience", "an int >= 0", patience)]
-        return []
+            lines.append(_range_line(prefix, "early_stopping_patience", "an int >= 0", patience))
+        # DECISION plan-2026-10-31T180033-2faf890a/D-038: 1 is refused, not rounded up. A
+        # copy after the first batch of an epoch writes the same metadata as the epoch-end
+        # copy (`batch` 0), and `settle_backup` tells the two apart by that index.
+        every = self.backup_every_steps
+        if every is not None and every < 2:
+            lines.append(_range_line(prefix, "backup_every_steps", "null or an int >= 2", every))
+        return lines
 
     def resolve_auto(self, context: AutoContext) -> "CheckpointArgs":
         """Fill ``early_stopping_patience`` from ``context.defaults["checkpoint_args"]``."""

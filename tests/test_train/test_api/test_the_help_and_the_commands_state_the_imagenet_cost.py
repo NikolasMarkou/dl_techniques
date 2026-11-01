@@ -8,8 +8,8 @@ week. This file pins:
 * ``python -m train image_classification help`` says that ImageNet is read from a spinning disk, the
   measured images per second (the lowest and the highest cold row of the evidence, rounded), the
   length of the 50-epoch recipe, that a killed epoch is lost, and where the exact commands are. It
-  names no key that does not exist (step 19's ``checkpoint_args.backup_every_steps`` is not there yet:
-  when it is, its sentence is added to the same help and this file needs no change);
+  names no key that does not exist; since step 19 it also says that ``checkpoint_args.backup_every_steps``
+  bounds the loss (in the ``data.dataset`` help and in ``resume_interrupted``'s);
 * the README's table of days per recipe length is the arithmetic of the epoch size over those two
   rates, and the sentence that follows it says the right thing about the 50- and 100-epoch recipes;
 * the README's exact commands are valid requests: each line is parsed with the CLI's own parser and
@@ -80,6 +80,14 @@ def test_the_help_states_the_disk_the_rate_the_week_and_the_lost_epoch(help_text
 
 def test_the_resume_help_says_a_killed_epoch_is_lost(help_text):
     assert "a killed epoch is lost and a half-done epoch is trained again from its first batch" in help_text
+
+
+def test_both_helps_name_the_key_that_bounds_the_lost_epoch(help_text):
+    assert ("A killed epoch is lost; checkpoint_args.backup_every_steps bounds the loss to that many "
+            "batches of weights") in help_text
+    assert ("checkpoint_args.backup_every_steps bounds the loss to that many batches of weights, and the "
+            "epoch is then trained again from its first batch on the weights of the last backup") in help_text
+    assert help_text.count("checkpoint_args.backup_every_steps") >= 3, "the key's own help is the third"
 
 
 def test_the_help_names_no_key_that_does_not_exist(help_text):
@@ -187,6 +195,8 @@ def test_the_50_and_100_epoch_commands_ask_for_those_epochs(builtin):
         _, raw = parse_dotlist(arguments(command))
         requested.append(coerce_mapping(ImageClassificationConfig, raw))
     assert [m["epochs"] for m in requested] == [50, 100, 100]
+    # Each asks for a backup every 500 batches (a resume must repeat the request it started with).
+    assert [m["checkpoint_args"] for m in requested] == [{"backup_every_steps": 500}] * 3
     assert requested[2].get("resume_interrupted") is True and requested[1].get("resume_interrupted") is None
     # The resume line is the 100-epoch line plus the one key.
     assert {k: v for k, v in requested[2].items() if k != "resume_interrupted"} == requested[1]
@@ -207,5 +217,6 @@ def test_a_broken_command_is_found():
 def test_the_new_sections_stand_outside_the_knob_region():
     """The knob guard's duration rule covers that region only; the tables above check these."""
     begin, end = README.index(KNOB_BEGIN), README.index(KNOB_END)
-    for marker in ("<!-- memory:begin -->", "<!-- imagenet-time:begin -->", "<!-- imagenet-commands:begin -->"):
+    for marker in ("<!-- memory:begin -->", "<!-- imagenet-time:begin -->", "<!-- imagenet-commands:begin -->",
+                   "<!-- backup-cost:begin -->"):
         assert not begin < README.index(marker) < end, marker

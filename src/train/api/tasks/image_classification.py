@@ -47,7 +47,10 @@ Interface contract
         request (only ``resume_interrupted``, ``out`` and ``devices`` may differ). Rows, the
         best checkpoint, early-stopping and ``ReduceLROnPlateau`` state, the learning rate
         and the history are kept. Limits: the training data order replays the order of
-        epoch 0; an epoch killed midway is trained again from its start; a kill between the
+        epoch 0; an epoch killed midway is trained again from its start (on the weights of the
+        last ``checkpoint_args.backup_every_steps`` backup when that is set, with the examples
+        seen since then seen again and the optimizer's step count put back to the epoch's
+        start); a kill between the
         best checkpoint's save and the backup can leave ``best_model.keras`` one epoch LATER
         than the resumed state's best (the epoch that is then trained again; never an earlier
         one). A finished run, a run with no epoch left, one with ``save_best`` false, one
@@ -158,7 +161,9 @@ class ImageClassificationConfig(StrictConfig):
             "help": "continue a killed run of the same out with the same request (devices "
             "may differ); the data order replays epoch 0's; a killed epoch is lost and a "
             "half-done epoch is trained again from its first batch (an ImageNet epoch is "
-            "hours); the learning rate, ReduceLROnPlateau and early stopping come back; a kill "
+            "hours; checkpoint_args.backup_every_steps bounds the loss to that many batches "
+            "of weights, and the epoch is then trained again from its first batch on the "
+            "weights of the last backup); the learning rate, ReduceLROnPlateau and early stopping come back; a kill "
             "between the best checkpoint's save and the backup can leave best_model.keras one "
             "epoch LATER than the resumed state's best (the epoch that is then trained again; "
             "never an earlier one); refused: a finished run, other data than the run's, a live "

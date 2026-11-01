@@ -85,7 +85,8 @@ run writes ``checkpoints/backup/`` (``BackupAndRestore``, kept) and
 epoch-0 evaluation, and ``fit_finished`` once ``fit`` returned). A resume:
 
 * refuses, before anything is written, a run with no backup (killed before its first
-  epoch ended: nothing to resume, choose a new ``out``), a run that is finished
+  epoch ended, and before the first ``checkpoint_args.backup_every_steps`` copy when that
+  is set: nothing to resume, choose a new ``out``), a run that is finished
   (``results_summary.json`` or ``fit_finished``), a run a live process holds
   (``run.lock``), a request that differs from ``config_requested.json``
   (``resume_interrupted``, ``out`` and ``devices`` may differ), a run with
@@ -94,8 +95,9 @@ epoch-0 evaluation, and ``fit_finished`` once ``fit`` returned). A resume:
 * after the data is loaded and before the CSV is touched, refuses data that is not the run's
   (class names, geometry, mean and std against ``task.json``; split sizes against the
   sidecar) and settles the backup (``resume_state.settle_backup``: the latest pair when the
-  optimizer's step count equals epoch times steps, else the previous pair of
-  ``double_checkpoint``, else a refusal naming both files);
+  optimizer's step count equals epoch times steps (plus the batches taken, for a copy
+  written inside an epoch), else the previous pair of ``double_checkpoint``, else a
+  refusal naming both files);
 * appends to ``run.log``, copies ``training_log.csv`` to
   ``training_log.pre_resume_<k>.csv``, and rewrites it with epochs ``0 .. start-1``
   from the copy, so a row of an epoch the backup never saw is re-trained, once;
@@ -108,7 +110,9 @@ epoch-0 evaluation, and ``fit_finished`` once ``fit`` returned). A resume:
 
 Residuals, stated in ``resume_interrupted``'s help (a test pins the text): the training
 data order replays the order of epoch 0 (the pipeline is seeded, not resumed), an epoch
-killed midway is trained again from its start, a kill between the best checkpoint's save and
+killed midway is trained again from its start (with ``checkpoint_args.backup_every_steps``,
+on the weights of the last copy taken inside it, ``resume_state.StepBackupAndRestore``, D-038),
+a kill between the best checkpoint's save and
 the backup can leave ``best_model.keras`` one epoch LATER than the resumed state's best (the
 epoch that is then trained again; never an earlier one, D-021, D-069), and the summary's
 ``epoch_times`` and ``fit_wall_seconds`` cover the resumed epochs only. ``ReduceLROnPlateau``'s
@@ -1033,8 +1037,10 @@ class TaskTrainer:
             logger.info(f"Run directory: {run_dir}")
             if resume is not None:
                 logger.info(
-                    f"Resuming after epoch {resume.start} of {config.epochs}: "
-                    "config_requested.json and config.json stay as they are, run.log and "
+                    (f"Resuming after epoch {resume.start} of {config.epochs}: "
+                     if resume.start else
+                     f"Resuming inside epoch 0 of {config.epochs} (a backup_every_steps copy): ")
+                    + "config_requested.json and config.json stay as they are, run.log and "
                     "training_log.csv continue"
                 )
             logger.info(f"Args:\n{to_json(self.config)}")
@@ -1072,6 +1078,16 @@ class TaskTrainer:
                 data = self.build_data(config, context)
             self.input_check(facts, data)
             steps_per_epoch = data.steps_per_epoch
+            every = checkpoint_cfg.backup_every_steps
+            if every is not None and every >= steps_per_epoch:
+                # The key needs the length of an epoch, known only now. Refuse, do not run
+                # with a key that saves nothing inside an epoch (it would look like it worked).
+                raise ConfigError(
+                    f"Invalid value for 'checkpoint_args.backup_every_steps': {every} is not below "
+                    f"the {steps_per_epoch} steps of an epoch of this data, so no batch inside an "
+                    f"epoch would be backed up (each epoch end always is). Choose a value from 2 to "
+                    f"{max(steps_per_epoch - 1, 2)} or null. {_claimed_note(run_dir)}"
+                )
             if resume is not None:
                 # Before anything of the earlier run is touched (the CSV is copied aside
                 # below): the data is the killed run's data, and the backup is a pair that
@@ -1130,8 +1146,9 @@ class TaskTrainer:
                 best_weights = self._best_weights_of(run_dir, resume)
                 kept = copy_log_aside(run_dir / TRAINING_LOG_NAME)
                 logger.info(
-                    f"Resume: epochs 0..{resume.start - 1} come back from {TRAINING_LOG_NAME}; "
-                    f"the file as it was is kept as {kept.name}"
+                    f"Resume: " + (f"epochs 0..{resume.start - 1} come back from {TRAINING_LOG_NAME}"
+                                   if resume.start else "no epoch had finished, so no row comes back")
+                    + f"; the file as it was is kept as {kept.name}"
                 )
             if monitor not in _monitor_choices([k for k in baseline if k != "loss"]):
                 # The pre-claim check compares the monitor with the names the task
@@ -1449,6 +1466,7 @@ class TaskTrainer:
             FIT_STATE_NAME,
             FitStateSidecar,
             RestoreFitState,
+            StepBackupAndRestore,
             rows_as_history,
         )
 
@@ -1468,7 +1486,9 @@ class TaskTrainer:
                 initial_value_threshold=resume.best,
                 csv_initial_rows=resume.rows,
                 analyzer_on_train_begin=False,
-                analyzer_first_epoch=False,
+                # A resume inside epoch 0 (a `backup_every_steps` copy) has not yet reached
+                # the epoch-1 analysis; any later resume is past it.
+                analyzer_first_epoch=resume.start == 0,
             )
 
         callbacks, _ = create_callbacks(
@@ -1551,11 +1571,25 @@ class TaskTrainer:
         # concern 4, measured exposure 0.6 to 3.3 s of every epoch). `settle_backup`
         # chooses between the pair before `fit`; Keras's own fallback (on `OSError` only)
         # stays as the second line.
-        callbacks.append(
-            keras.callbacks.BackupAndRestore(
-                str(run_dir / BACKUP_DIR), double_checkpoint=True, delete_checkpoint=False
+        # DECISION plan-2026-10-31T180033-2faf890a/D-038
+        # `backup_every_steps` swaps in `StepBackupAndRestore`; unset, the stock callback is
+        # built exactly as before (the golden). Do NOT pass `save_freq=N` to the stock one:
+        # it skips the epoch end, records the wrong epoch after a resume and leaves the
+        # step count advanced (resume_state.StepBackupAndRestore says what was measured).
+        if checkpoint_cfg.backup_every_steps is None:
+            callbacks.append(
+                keras.callbacks.BackupAndRestore(
+                    str(run_dir / BACKUP_DIR), double_checkpoint=True, delete_checkpoint=False
+                )
             )
-        )
+        else:
+            callbacks.append(
+                StepBackupAndRestore(
+                    str(run_dir / BACKUP_DIR),
+                    save_every_steps=checkpoint_cfg.backup_every_steps,
+                    steps_per_epoch=data.steps_per_epoch,
+                )
+            )
         return epoch_line, callbacks
 
     def _summary_head(
@@ -1626,9 +1660,15 @@ class TaskTrainer:
         """Return the summary's ``notes``: the task's, then the lines of the sequence itself."""
         notes = list(self.task_notes(config, baseline, ratio, data))
         if resume is not None:
-            notes.append(
+            earlier = (
                 f"resumed after epoch {resume.start}: epochs 0..{resume.start - 1} come from the "
-                "killed segment's training_log.csv (its torn or surplus rows are in "
+                "killed segment's training_log.csv"
+                if resume.start else
+                "resumed inside epoch 0 from a backup_every_steps copy: no epoch had finished, "
+                "so the killed segment's training_log.csv held none"
+            )
+            notes.append(
+                f"{earlier} (its torn or surplus rows are in "
                 "training_log.pre_resume_<k>.csv), the training data order of the resumed "
                 "epochs replays the order of epoch 0, and `epoch_times` and "
                 "`fit_wall_seconds` cover the resumed epochs only"

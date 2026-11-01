@@ -1,0 +1,104 @@
+{
+ "what": "Seconds per StepBackupAndRestore save at the ImageNet recipe's shapes (224x224x3, 1000 classes, the recipe's optimizer, built and compiled, no data): 4 consecutive saves into an empty directory; the first has no previous copy to rotate, so the cost is the median of saves 2 to 4, which also copy the previous pair to *.bkp. CPU (CUDA_VISIBLE_DEVICES=-1), disk /dev/sda1 mounted at /media/arxwn/data_fast (ROTA=0, an SSD; results/ is on it). Page cache: Keras does not fsync the copies, so this is the write into the cache plus the h5 serialization, not a flush to the platters/cells. File sizes are those of latest.weights.h5; the previous copy doubles the disk use.",
+ "measured": "2026-11-01, plans/plan-2026-10-31T180033-2faf890a/scratch_step19/save_cost.py, save_cost.json",
+ "rows": [
+  {
+   "family": "vit",
+   "variant": "vit_pico",
+   "optimizer": "adamw",
+   "params": 3048232,
+   "file_mb": 35.2,
+   "first_s": 0.19,
+   "later_s": [
+    0.38,
+    0.48,
+    0.38
+   ],
+   "median_later_s": 0.38
+  },
+  {
+   "family": "resnet",
+   "variant": "resnet18",
+   "optimizer": "sgd",
+   "params": 11699112,
+   "file_mb": 89.4,
+   "first_s": 0.21,
+   "later_s": [
+    0.43,
+    0.67,
+    0.68
+   ],
+   "median_later_s": 0.67
+  },
+  {
+   "family": "resnet",
+   "variant": "resnet50",
+   "optimizer": "sgd",
+   "params": 25610152,
+   "file_mb": 195.7,
+   "first_s": 0.51,
+   "later_s": [
+    1.16,
+    1.54,
+    1.55
+   ],
+   "median_later_s": 1.54
+  },
+  {
+   "family": "convnext_v1",
+   "variant": "tiny",
+   "optimizer": "adamw",
+   "params": 33233992,
+   "file_mb": 380.9,
+   "first_s": 0.67,
+   "later_s": [
+    1.78,
+    2.61,
+    2.67
+   ],
+   "median_later_s": 2.61
+  },
+  {
+   "family": "convnext_v2",
+   "variant": "atto",
+   "optimizer": "adamw",
+   "params": 4516640,
+   "file_mb": 52.1,
+   "first_s": 0.31,
+   "later_s": [
+    0.46,
+    0.7,
+    0.66
+   ],
+   "median_later_s": 0.66
+  },
+  {
+   "family": "cliffordnet",
+   "variant": "nano",
+   "optimizer": "adamw",
+   "params": 1552616,
+   "file_mb": 18.2,
+   "first_s": 0.31,
+   "later_s": [
+    0.35,
+    0.4,
+    0.39
+   ],
+   "median_later_s": 0.39
+  },
+  {
+   "family": "cliffordnet_hier",
+   "variant": "hier_345",
+   "optimizer": "adamw",
+   "params": 883576,
+   "file_mb": 10.6,
+   "first_s": 0.32,
+   "later_s": [
+    0.33,
+    0.35,
+    0.35
+   ],
+   "median_later_s": 0.35
+  }
+ ]
+}

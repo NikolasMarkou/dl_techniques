@@ -21,6 +21,11 @@ the primitives that put those back:
 * :func:`settle_backup` checks the two copies ``BackupAndRestore(double_checkpoint=True)``
   keeps against each other and the run's step count, and puts the previous copy in
   place when the latest is torn or from a different epoch than its metadata.
+* :class:`StepBackupAndRestore` is ``BackupAndRestore`` that also saves INSIDE an epoch
+  (``checkpoint_args.backup_every_steps``), which stock Keras 3.8 cannot do coherently
+  (its ``save_freq=N`` skips the epoch end, forgets the epoch after a resume, and leaves the
+  optimizer's step count advanced); the section below the class says what a resume from
+  such a backup is.
 
 Callback order for a resumable run (every position is load-bearing)::
 
@@ -42,6 +47,7 @@ import json
 import math
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
@@ -152,6 +158,30 @@ def read_backup_epoch(backup_dir: PathLike, previous: bool = False) -> int:
     if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
         raise ValueError(f"{path} holds no non-negative integer 'epoch': {metadata!r}")
     return epoch
+
+
+def read_backup_position(backup_dir: PathLike, previous: bool = False) -> Tuple[int, int]:
+    """``(epoch, batch)`` the ``BackupAndRestore`` in ``backup_dir`` last recorded.
+
+    ``epoch`` is as in :func:`read_backup_epoch`: the epoch a resumed ``fit`` starts at.
+    ``batch`` is the zero-based index of the last batch trained in that epoch when the
+    copy was written INSIDE it (:class:`StepBackupAndRestore`), and ``0`` for a copy
+    written at an epoch end, which is what stock Keras writes in ``save_freq="epoch"``
+    mode; a metadata file without the key counts as ``0``. A mid-epoch copy always has
+    ``batch >= 1`` (``backup_every_steps`` of 1 is refused), so ``batch == 0`` means
+    "the epoch had not started" and nothing else.
+
+    Raises:
+        FileNotFoundError: No metadata file.
+        ValueError: The file holds no non-negative integer ``epoch`` or ``batch``
+            (or is not JSON: a torn write).
+    """
+    epoch = read_backup_epoch(backup_dir, previous=previous)
+    path = Path(backup_dir) / (BACKUP_METADATA_NAME + (PREVIOUS_SUFFIX if previous else ""))
+    batch = json.loads(path.read_text()).get("batch", 0)
+    if isinstance(batch, bool) or not isinstance(batch, int) or batch < 0:
+        raise ValueError(f"{path} holds no non-negative integer 'batch': {batch!r}")
+    return epoch, batch
 
 
 def prior_rows(csv_path: PathLike, start_epoch: int) -> List[Tuple[int, Dict[str, float]]]:
@@ -270,16 +300,22 @@ def read_resume_point(
             the message names the ``<stem>.pre_resume_<k>.csv`` copies that do).
     """
     try:
-        start = read_backup_epoch(backup_dir)
+        start, batch = read_backup_position(backup_dir)
     except (FileNotFoundError, ValueError) as latest_error:
         try:
-            start = read_backup_epoch(backup_dir, previous=True)
+            start, batch = read_backup_position(backup_dir, previous=True)
         except (FileNotFoundError, ValueError):
             raise latest_error from None
-    if start < 1:
+    if start < 1 and batch < 1:
         raise ValueError(f"the backup in {backup_dir} records no finished epoch")
     state = read_fit_state(fit_state_path)
-    entry = state[_EPOCHS_KEY].get(str(start - 1))
+    if start < 1:
+        # Killed inside the FIRST epoch, after a mid-epoch backup (`backup_every_steps`):
+        # no epoch finished, so the early-stopping state is the fresh one and there are no
+        # rows to bring back. Every later `start` needs the entry of the epoch before it.
+        entry = {"best": None, "wait": 0, "best_epoch": 0}
+    else:
+        entry = state[_EPOCHS_KEY].get(str(start - 1))
     if not isinstance(entry, dict):
         raise ValueError(
             f"{fit_state_path} holds no entry for epoch {start - 1}, the last epoch the "
@@ -386,15 +422,21 @@ def _inspect_copy(
 ) -> Tuple[Optional[int], Optional[str]]:
     """Return ``(epoch, problem)`` for the latest or the previous copy; ``problem`` None if sound.
 
-    A copy is sound when its metadata holds an epoch, its weights file opens, and the
-    optimizer's step count equals ``epoch * steps_per_epoch`` (``<=`` under a loss-scaling
-    optimizer, which skips steps with non-finite gradients).
+    A copy is sound when its metadata holds an epoch and a batch, its weights file opens,
+    and the optimizer's step count is what that position implies: ``epoch * steps_per_epoch``
+    for a copy written at an epoch end (``batch`` 0), and ``epoch * steps_per_epoch + batch + 1``
+    for one written inside the epoch after ``batch + 1`` of its batches
+    (:class:`StepBackupAndRestore`). Under a loss-scaling optimizer the count may be LOWER
+    (it skips steps with non-finite gradients), never higher. The two forms cannot be
+    confused: a mid-epoch copy has ``batch >= 1`` and ``batch + 1 < steps_per_epoch``, so
+    it never equals an epoch-end count of the same epoch, and a weights file written one
+    save after its metadata (a kill between the two writes) matches neither.
     """
     suffix = PREVIOUS_SUFFIX if previous else ""
     metadata_name = BACKUP_METADATA_NAME + suffix
     weights_name = BACKUP_WEIGHTS_NAME + suffix
     try:
-        epoch = read_backup_epoch(backup_dir, previous=previous)
+        epoch, batch = read_backup_position(backup_dir, previous=previous)
     except FileNotFoundError:
         return None, f"{metadata_name} does not exist"
     except ValueError:
@@ -406,12 +448,13 @@ def _inspect_copy(
     except (OSError, KeyError, ValueError) as exc:
         reason = str(exc).splitlines()[0][:120] if str(exc) else type(exc).__name__
         return epoch, f"{weights_name} cannot be read ({reason})"
-    expected = epoch * steps_per_epoch
+    expected = epoch * steps_per_epoch + (batch + 1 if batch > 0 else 0)
     if iterations == expected or (scaled and iterations < expected):
         return epoch, None
+    where = f"{epoch} epochs x {steps_per_epoch} steps" + (f" + {batch + 1} batches" if batch > 0 else "")
     return epoch, (
         f"{weights_name} holds an optimizer that took {iterations} steps, but "
-        f"{metadata_name} says {epoch} epochs x {steps_per_epoch} steps = {expected}: "
+        f"{metadata_name} says {where} = {expected}: "
         "the weights and the metadata are from different epochs"
     )
 
@@ -639,3 +682,150 @@ class RestoreFitState(keras.callbacks.Callback):
         logger.info(
             f"Resume: early stopping restored to best={self.best} (epoch {self.best_epoch + 1}), "
             f"wait={self.wait}, in-memory best weights {'set' if self.best_weights else 'absent'}")
+
+
+# ---------------------------------------------------------------------
+
+class StepBackupAndRestore(keras.callbacks.BackupAndRestore):
+    """``BackupAndRestore`` that also saves every ``save_every_steps`` batches of an epoch.
+
+    Interface contract: ``backup_dir`` and the two flags are ``BackupAndRestore``'s;
+    ``save_every_steps`` is an int ``>= 2`` and ``< steps_per_epoch``;
+    ``steps_per_epoch`` is the run's batches per epoch (the same number
+    :func:`settle_backup` is given). It takes the stock callback's place in the
+    documented order (last). Failure mode: a bad argument raises ``ValueError`` at
+    construction; a write error raises ``OSError`` out of ``fit``, like the stock save.
+
+    Stock ``save_freq=N`` is not usable alone (MEASURED, Keras 3.8, plan-2026-10-31T180033-2faf890a
+    ``scratch_step19``): it does not save at an epoch end; its batch counter runs on across
+    epochs, so a save may land on batch 0 and look like an epoch-end one; a FRESH process
+    keeps ``_current_epoch`` at 0 until its first epoch ends, so the first mid-epoch save of
+    a resumed run records epoch 0 over weights of epoch k (a second kill then resumes from
+    epoch 0); and the restored optimizer keeps the step count of the killed batch, so every
+    later epoch trains with the schedule ahead of its epoch. This subclass
+
+    (a) saves at every epoch end too, and counts batches within the epoch (saves follow
+        batch ``N``, ``2N``, ... of each epoch, never the last batch, which the epoch-end
+        save covers), so a mid-epoch copy always has ``batch >= 1``;
+    (b) sets ``_current_epoch`` from the restored metadata, so a resumed segment's mid-epoch
+        saves name the epoch they are in;
+    (c) rewinds the optimizer's step count by the ``batch + 1`` batches the restored copy had
+        taken inside its epoch, so the epoch restarts from batch 0 with the schedule on its
+        nominal step (``epoch * steps_per_epoch``) and the run ends on
+        ``epochs * steps_per_epoch`` steps. Under a loss-scaling optimizer the counter that
+        is rewound is the inner optimizer's (the outer one stays 0), the result is clamped
+        at 0, and it keeps the steps skipped before the killed epoch.
+
+    What a resume from a mid-epoch copy is: the killed epoch restarts from its FIRST batch
+    on the weights (and Adam moments, and loss scale) of batch ``k``; the ``k`` examples
+    already seen are seen again, in the order of an epoch-0 pass (the data iterator is new
+    and nothing about its position is stored). The CSV, the sidecar and the best checkpoint
+    hold completed epochs only, so they are those of the epoch before the killed one. Adam's
+    moments have seen ``k`` steps more than the rewound step count, which makes its bias
+    correction differ slightly from an unkilled run's for the first steps of that epoch.
+
+    The save is the stock one: weights, then metadata, the previous pair kept as ``*.bkp``;
+    a kill between the two writes leaves a weights file newer than its metadata, which
+    :func:`settle_backup` detects (the step count matches neither) and answers with the
+    previous pair, one save older.
+
+    The private Keras names this relies on (``_current_epoch``, ``_last_batch_seen``,
+    ``_save_model``, ``_should_save_on_batch``, ``_training_metadata_path``) are pinned by
+    ``tests/test_train/test_api/test_backup_every_steps.py``; Keras is ``<4``.
+    """
+
+    def __init__(
+            self,
+            backup_dir: PathLike,
+            save_every_steps: int,
+            steps_per_epoch: int,
+            double_checkpoint: bool = True,
+            delete_checkpoint: bool = False,
+    ) -> None:
+        for name, value in (("save_every_steps", save_every_steps), ("steps_per_epoch", steps_per_epoch)):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{name} must be an int, got {value!r}")
+        if steps_per_epoch < 1:
+            raise ValueError(
+                f"steps_per_epoch must be a positive count, got {steps_per_epoch} (an unknown "
+                "length, tf.data.UNKNOWN_CARDINALITY, cannot place the epoch end)")
+        if save_every_steps < 2:
+            raise ValueError(
+                f"save_every_steps must be >= 2, got {save_every_steps}: a copy after batch 1 of an "
+                "epoch is told apart from the epoch-end copy by its batch index, which would be 0")
+        if save_every_steps >= steps_per_epoch:
+            raise ValueError(
+                f"save_every_steps {save_every_steps} must be < steps_per_epoch {steps_per_epoch}: "
+                "no batch inside the epoch would be saved (the epoch end always is)")
+        super().__init__(
+            str(backup_dir), save_freq=save_every_steps,
+            double_checkpoint=double_checkpoint, delete_checkpoint=delete_checkpoint)
+        self.save_every_steps = save_every_steps
+        self.steps_per_epoch = steps_per_epoch
+        self._saved_at = 0
+        self._save_seconds: List[float] = []
+        self.rewound_from: Optional[int] = None
+
+    def on_train_begin(self, logs: Optional[Dict[str, Any]] = None) -> None:
+        """Restore as stock Keras does, then fix the epoch and the step count (b, c)."""
+        super().on_train_begin(logs)
+        path = Path(self._training_metadata_path)
+        if not path.exists():
+            return
+        epoch, batch = read_backup_position(path.parent)
+        self._current_epoch = epoch
+        if batch < 1 or self.model.optimizer is None:
+            return
+        # DECISION plan-2026-10-31T180033-2faf890a/D-038
+        # The step count goes back by the batches the copy had taken in its epoch. Do NOT
+        # leave it advanced (the stock behaviour): the epoch restarts from batch 0, so every
+        # later epoch would run with the schedule `batch + 1` steps ahead and the run would
+        # end on more steps than `epochs * steps_per_epoch`. Do NOT set it to
+        # `epoch * steps_per_epoch` outright: under a loss-scaling optimizer the counter lags
+        # that by the steps skipped for non-finite gradients, and `settle_backup` accepts it.
+        optimizer = self.model.optimizer
+        counter = getattr(optimizer, "inner_optimizer", optimizer).iterations
+        before = int(keras.ops.convert_to_numpy(counter))
+        counter.assign(max(0, before - (batch + 1)))
+        self.rewound_from = before
+        logger.info(
+            f"Resume: the backup was taken after batch {batch + 1} of epoch {epoch}; that epoch "
+            f"restarts from its first batch on those weights, and the optimizer's step count "
+            f"goes from {before} back to {int(keras.ops.convert_to_numpy(counter))}")
+
+    def on_epoch_begin(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
+        """A new epoch counts its batches from 0."""
+        self._saved_at = 0
+        self._save_seconds = []
+
+    def _should_save_on_batch(self, batch: int) -> bool:
+        """True after every ``save_every_steps``-th batch of the epoch, except its last (a).
+
+        ``batch`` is the index of the first batch of the execution that just ended
+        (``steps_per_execution`` above 1 reports the group's first index), so the batches
+        done are ``min(batch + steps_per_execution, steps_per_epoch)``; ``_last_batch_seen``
+        is set to the index of the last of them, the number the metadata records.
+        """
+        done = min(batch + int(self.model.steps_per_execution), self.steps_per_epoch)
+        self._last_batch_seen = done - 1
+        if done >= self.steps_per_epoch or done - self._saved_at < self.save_every_steps:
+            return False
+        self._saved_at = done
+        return True
+
+    def _save_model(self) -> None:
+        """The stock save, timed."""
+        started = time.perf_counter()
+        super()._save_model()
+        self._save_seconds.append(time.perf_counter() - started)
+
+    def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
+        """Save at the epoch end too (a): stock ``save_freq=N`` does not."""
+        super().on_epoch_end(epoch, logs)
+        inside = len(self._save_seconds)
+        self._save_model()
+        if inside:
+            logger.info(
+                f"Backup: epoch {epoch}: {inside} saves inside the epoch took "
+                f"{sum(self._save_seconds[:inside]):.2f} s ({sum(self._save_seconds[:inside]) / inside:.2f} s "
+                f"each), the epoch-end save {self._save_seconds[-1]:.2f} s")

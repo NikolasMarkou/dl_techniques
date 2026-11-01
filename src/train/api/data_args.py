@@ -146,10 +146,10 @@ class DataFacts:
 class BuiltinImageData(StrictConfig):
     """A dataset of the shared loader and its selection options."""
 
-    # DECISION plan-2026-10-31T180033-2faf890a/D-037: this help names NO `checkpoint_args.*` key
-    # for the lost epoch. Step 19's `backup_every_steps` does not exist yet and the knob guard
-    # refuses a key the config lacks; do NOT promise it here before it ships (step 19 adds the
-    # sentence). The rates are the lowest and highest cold ImageNet training row of
+    # DECISION plan-2026-10-31T180033-2faf890a/D-037: the help names the one key that bounds the
+    # lost epoch, `checkpoint_args.backup_every_steps` (D-038 added it; the knob guard refuses a
+    # key the config lacks, so do NOT name a `checkpoint_args.*` key here that is not a field).
+    # The rates are the lowest and highest cold ImageNet training row of
     # tests/test_train/test_api/memory_fit_evidence.json, pinned by
     # test_the_help_and_the_commands_state_the_imagenet_cost.py: change them together.
     dataset: _DatasetName = dataclasses.field(
@@ -158,8 +158,10 @@ class BuiltinImageData(StrictConfig):
             "the data disk, a spinning disk on the development machine: 96 to 107 images per "
             "second were measured in training runs (44 to 115 for cold single-file reads), so "
             "one epoch of its 1,271,167 images takes 3 to 4 hours and the 50-epoch recipe "
-            "about a week (100 epochs about two). A killed epoch is lost. src/train/README.md "
-            "has the numbers and the exact 50 and 100 epoch commands, which were not run"
+            "about a week (100 epochs about two). A killed epoch is lost; "
+            "checkpoint_args.backup_every_steps bounds the loss to that many batches of weights. "
+            "src/train/README.md has the numbers and the exact 50 and 100 epoch commands, which "
+            "were not run"
         }
     )
     format: Literal["builtin"] = dataclasses.field(
