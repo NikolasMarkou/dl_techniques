@@ -47,10 +47,12 @@ and a reused pid blocks nobody; the pid in the file is a label for the refusal m
 run. It is refused for a finished run, another request, other data, a live process holding the
 run, or a torn backup; `devices` may differ. The training data order replays epoch 0's and a half-done epoch is
 trained again (the key's help lists the rest). For folder and CSV data the sidecar holds a fingerprint of the
-files: `data.fingerprint=listing` (the default) hashes every file's relative path, class and size and opens no
-file, so two same-sized files swapped, or a pixel edited, go unseen; `data.fingerprint=content` also hashes every
+files: `data.fingerprint=listing` (the default) hashes every file's relative path, class and size, in listing
+order, and opens no file (a CSV whose rows were reordered splits differently, so it is another listing), so two
+same-sized files swapped, or a pixel edited, go unseen; `data.fingerprint=content` also hashes every
 file's bytes, streamed, which reads all the data once (a pass over the disk tree, minutes on a large one on a
-spinning disk; the seconds go to `run.log`). A resume refuses a changed mode or digest.
+spinning disk; the seconds go to `run.log`). A resume refuses a changed mode or digest, and a sidecar written before the rows were hashed in listing order
+(no `data_fingerprint_scheme`).
 
 **Figures, analysis and TensorBoard**: five keys decide what is written besides the models and the
 summary. The region between the markers below is read by

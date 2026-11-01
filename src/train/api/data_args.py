@@ -239,7 +239,8 @@ def _file_problems(data: Any, prefix: str, text_keys: Tuple[str, ...]) -> List[s
 #: The help of ``fingerprint`` on folder and CSV data (one text for both).
 _FINGERPRINT_HELP = (
     "what the run records to tell, at a resume, that the files are the same: 'listing' is every "
-    "file's relative path, class and size (no file is opened); 'content' also hashes every file's "
+    "file's relative path, class and size, in the order they are listed (no file is opened; a CSV "
+    "whose rows were reordered is another listing); 'content' also hashes every file's "
     "bytes, so a swapped or edited file of the same size is caught, at the cost of reading all "
     "the data once (a pass over the whole disk tree, minutes on a large one on a spinning disk; "
     "the seconds are logged)"

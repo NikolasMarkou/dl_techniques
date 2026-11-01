@@ -32,8 +32,9 @@ The listing also refuses what would leak or mislead, by RESOLVED path (a symlink
 points to): a file listed twice, under two classes, or in both the train and the test split; two
 csv labels of one integer value; a class with fewer than two train images. It logs a WARNING for
 images below a class directory's own level and for a class the seeded cut leaves out of a split.
-:func:`listing_fingerprint` hashes the listing (relative path, class, size), reading no pixel, or
-with ``mode="content"`` the listing and every file's bytes (streamed). The
+:func:`listing_fingerprint` hashes the listing IN LISTING ORDER (relative path, class, size),
+reading no pixel, or with ``mode="content"`` the listing and every file's bytes (streamed); the
+order is hashed because the seeded split permutes listing positions. The
 loader decodes every test file it will score before any training (:func:`find_undecodable`) and
 names the file behind a decode error met by the statistics pass; ``ClassificationData.image_files``
 lets a trainer name the one behind an error met by ``fit``.
@@ -43,6 +44,7 @@ from __future__ import annotations
 import argparse
 import collections
 import csv
+import errno
 import hashlib
 import json
 import os
@@ -699,6 +701,52 @@ def _nested_images(class_dir: str) -> int:
     return count
 
 
+def _link_state(path: str) -> Optional[str]:
+    """Why a symbolic link leads nowhere (``"dangling"`` or ``"a loop"``), or ``None`` if it leads to a file."""
+    try:
+        os.stat(path)
+    except FileNotFoundError:
+        return "dangling"
+    except OSError as exc:
+        return "a loop" if exc.errno == errno.ELOOP else f"unreadable: {exc.strerror}"
+    return None
+
+
+def _refuse_unusable_names(
+        items: "Sequence[os.DirEntry]", class_name: str, root: str, key: str) -> None:
+    """Refuse an image-named entry of a class directory that the loader could not use.
+
+    The entry is a name that is not UTF-8, or a symbolic link that leads nowhere (dangling or
+    looping). Entries with no image suffix are not dataset files and stay ignored.
+
+    :raises DataSourceError: ``key`` names the source; the message names up to three files.
+    """
+    # DECISION plan-2026-10-31T180033-2faf890a/D-026
+    # Two entries were skipped or broken without the file's name (review-iter-1 concern 18): a
+    # name that is not UTF-8 (`os.scandir` returns it with surrogate escapes, and the tensor
+    # conversion later fails with a `ValueError` that names no file), and a symbolic link that
+    # leads nowhere (`is_file()` is False, so it was skipped silently: one image fewer than the
+    # folder shows). Both are REFUSED naming the file, the way a corrupt image is, not warned
+    # about: a warning leaves a dataset that is not the folder the user sees, and the run would
+    # resume on it. Do NOT turn either back into a skip.
+    problems = []
+    for item in sorted(items, key=lambda entry: entry.name):
+        try:
+            item.name.encode("utf-8")
+        except UnicodeEncodeError:
+            problems.append(f"{item.name!r} is not a valid UTF-8 file name")
+            continue
+        if item.is_symlink():  # is_file() would raise on a loop, so the link is followed here
+            state = _link_state(item.path)
+            if state is not None:
+                problems.append(f"{item.name!r} is a symbolic link that leads nowhere ({state})")
+    if problems:
+        raise DataSourceError(
+            key, f"class directory {class_name!r} of {root!r}: {_examples(problems, len(problems))}; "
+                 "rename the file to UTF-8, or repair or remove the link (a file the loader would "
+                 "skip or fail on is named here instead of dropped)")
+
+
 def _folder_files(root: str, key: str, minimum: int = 1) -> "dict[str, List[str]]":
     """``{class name: sorted image paths}`` of the class directories of ``root``.
 
@@ -711,9 +759,10 @@ def _folder_files(root: str, key: str, minimum: int = 1) -> "dict[str, List[str]
     for entry in sorted(os.scandir(root), key=lambda item: item.name):
         if entry.name.startswith(".") or not entry.is_dir():
             continue
-        files = sorted(
-            item.path for item in os.scandir(entry.path)
-            if item.is_file() and not item.name.startswith(".") and _has_image_suffix(item.name))
+        items = [item for item in os.scandir(entry.path)
+                 if not item.name.startswith(".") and _has_image_suffix(item.name)]
+        _refuse_unusable_names(items, entry.name, root, key)
+        files = sorted(item.path for item in items if item.is_file())
         if not files:
             raise DataSourceError(
                 key, f"class directory {entry.name!r} of {root!r} holds no images "
@@ -810,21 +859,43 @@ def _refuse_repeats(
     return resolved
 
 
+def _identity(path: str) -> Optional[Tuple[int, int]]:
+    """``(device, inode)`` of the file ``path`` leads to (symlinks followed), or ``None`` without one.
+
+    A filesystem that reports inode 0 for everything (some network and FUSE mounts) has no
+    identity to compare, and treating every file as the same one would refuse every dataset.
+    """
+    status = os.stat(path)
+    return (status.st_dev, status.st_ino) if status.st_ino else None
+
+
 def _refuse_shared(
-        train_resolved: Sequence[str], test_paths: Sequence[str], test_resolved: Sequence[str],
-        key: str,
+        train_paths: Sequence[str], train_resolved: Sequence[str], test_paths: Sequence[str],
+        test_resolved: Sequence[str], key: str,
 ) -> None:
-    """Refuse a test file that is also a train file (by resolved path).
+    """Refuse a test file that is also a train file: by resolved path, or by file identity.
+
+    A hard link is a second NAME for the same bytes, so it has a different resolved path from
+    the train file it shares them with (review-iter-1 concern 18); ``(st_dev, st_ino)`` is the
+    file itself. Both are compared.
 
     :raises DataSourceError: ``key`` names the test source.
     """
+    # DECISION plan-2026-10-31T180033-2faf890a/D-026
+    # The resolved path alone let a hard link through: a test image that IS a train image under
+    # another name was scored as unseen. Compare the file identity too. Do NOT drop the resolved
+    # path (it is cheap and covers a filesystem with no usable inode) and do NOT make inode 0 an
+    # identity (`_identity`): some mounts report 0 for every file.
     train = set(train_resolved)
-    shared = [repr(path) for path, real in zip(test_paths, test_resolved) if real in train]
+    train_ids = {identity for identity in map(_identity, train_paths) if identity is not None}
+    shared = [repr(path) for path, real in zip(test_paths, test_resolved)
+              if real in train or _identity(path) in train_ids]
     if shared:
         raise DataSourceError(
             key, f"{len(shared)} of the {len(test_paths)} test file(s) are also train files "
-                 f"(compared by resolved path): {_examples(shared, len(shared))}; a model scored on "
-                 "images it trained on reports an accuracy it does not have")
+                 f"(the same file, compared by resolved path and by file identity, so a symlink or "
+                 f"a hard link to a train file counts): {_examples(shared, len(shared))}; a model "
+                 "scored on images it trained on reports an accuracy it does not have")
 
 
 def scan_image_folder(train_dir: str, test_dir: Optional[str] = None) -> FileListing:
@@ -853,7 +924,7 @@ def scan_image_folder(train_dir: str, test_dir: Optional[str] = None) -> FileLis
         test_paths, test_labels = _labelled(test, names)
         test_real = _refuse_repeats(
             test_paths, [names[i] for i in test_labels], resolve, "test_dir")
-        _refuse_shared(train_real, test_paths, test_real, "test_dir")
+        _refuse_shared(train_paths, train_real, test_paths, test_real, "test_dir")
         test_base = os.path.abspath(test_dir)
     return FileListing("folder", names, train_paths, train_labels, test_paths, test_labels,
                        os.path.abspath(train_dir), test_base)
@@ -961,7 +1032,7 @@ def read_image_csv(
         test_paths, test_texts = _csv_rows(test_csv, "test_csv", path_column, label_column)
         _same_classes(names, sorted(set(test_texts)), "test_csv")
         test_real = _refuse_repeats(test_paths, test_texts, resolve, "test_csv")
-        _refuse_shared(train_real, test_paths, test_real, "test_csv")
+        _refuse_shared(train_paths, train_real, test_paths, test_real, "test_csv")
         test_labels = np.asarray([index[text] for text in test_texts], np.int32)
         test_base = os.path.dirname(os.path.abspath(test_csv))
     return FileListing("csv", names, train_paths, train_labels, test_paths, test_labels,
@@ -971,19 +1042,27 @@ def read_image_csv(
 #: The values of ``fingerprint``: what :func:`listing_fingerprint` hashes.
 FINGERPRINT_MODES = ("listing", "content")
 
+#: How :func:`listing_fingerprint` orders its rows. It is hashed into the digest and recorded in
+#: the sidecar beside it, so a sidecar written under another scheme is refused outright, never
+#: compared (the earlier scheme sorted the rows by path).
+FINGERPRINT_SCHEME = "listing-order"
+
 #: Bytes read per ``read`` while hashing a file in ``content`` mode.
 _HASH_CHUNK = 1 << 20
 
 
 def listing_fingerprint(listing: FileListing, mode: str = "listing") -> str:
-    """A sha256 over the sorted ``(split, relative path, class, file size)`` rows of a listing.
+    """A sha256 over the ``(split, relative path, class, file size)`` rows of a listing, in listing order.
 
-    With ``mode="listing"`` (the default; its value is the one earlier runs recorded) it is
-    computed from the listing and ``stat`` alone: no pixel is read and no tensor made, so it
-    may run before ``setup_gpu``. A path is relative to :attr:`FileListing.train_base` (or
-    ``test_base``), so moving a whole tree does not change it; a file added, removed, renamed,
-    given another class or another size does. It does NOT see a change that keeps every name,
-    class and size (two same-sized images swapped, a pixel edited).
+    With ``mode="listing"`` (the default) it is computed from the listing and ``stat`` alone: no
+    pixel is read and no tensor made, so it may run before ``setup_gpu``. A path is relative to
+    :attr:`FileListing.train_base` (or ``test_base``), so moving a whole tree does not change it;
+    a file added, removed, renamed, given another class or another size does, and so does a
+    different ORDER of the same files: the seeded split permutes listing positions, so a CSV
+    whose rows were reordered splits differently and must not read as the same data. A folder's
+    order is a function of its names (class directories sorted, then files sorted), so the
+    same tree always gives the same digest. It does NOT see a change that keeps every name,
+    class, size and order (two same-sized images swapped, a pixel edited).
 
     With ``mode="content"`` every row is followed by the file's bytes, read in
     :data:`_HASH_CHUNK` pieces (a file is never held whole), so it also sees that change. It
@@ -992,11 +1071,20 @@ def listing_fingerprint(listing: FileListing, mode: str = "listing") -> str:
 
     :param listing: the listing of a folder or CSV source.
     :param mode: one of :data:`FINGERPRINT_MODES`.
-    :return: the hex digest.
+    :return: the hex digest; it embeds :data:`FINGERPRINT_SCHEME`.
     :raises ValueError: for another ``mode``.
     """
     if mode not in FINGERPRINT_MODES:
         raise ValueError(f"fingerprint mode must be one of {FINGERPRINT_MODES}, got {mode!r}")
+    # DECISION plan-2026-10-31T180033-2faf890a/D-025
+    # The rows are hashed in LISTING ORDER, not sorted. The split is `seeded_split_indices` over
+    # listing positions (`_load_file_listing`), so the file at each position decides who trains
+    # and who selects: a fingerprint that sorted its rows (steps 7 and earlier, D-070) was a
+    # function of the file SET and let a CSV with reordered rows resume on a different split
+    # (review-iter-1 concern 1: 8 of 12 selection files had been in the killed run's fit split).
+    # Do NOT sort here again, and do NOT lean on the fit statistics to catch it: `normalize=unit`
+    # has none, and a reorder inside the fit split leaves them equal. The scheme is hashed in
+    # and recorded in the sidecar, which refuses any older one (no fallback).
     rows: List[Tuple[str, str, str, int, str]] = []
     for split, paths, labels, base in (
             ("train", listing.train_paths, listing.train_labels, listing.train_base),
@@ -1006,8 +1094,8 @@ def listing_fingerprint(listing: FileListing, mode: str = "listing") -> str:
         for path, label in zip(paths, labels):
             rows.append((split, os.path.relpath(path, base).replace(os.sep, "/"),
                          listing.class_names[int(label)], os.path.getsize(path), path))
-    rows.sort(key=lambda row: row[:4])
     digest = hashlib.sha256(listing.source.encode("utf-8"))
+    digest.update(b"\x00" + FINGERPRINT_SCHEME.encode("utf-8"))
     if mode == "content":
         digest.update(b"\x00content")
     started = time.perf_counter()

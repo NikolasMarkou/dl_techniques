@@ -359,14 +359,19 @@ def _data_fingerprint_field(config: Any, data: Any) -> Dict[str, str]:
 
     ``data_fingerprint`` is the digest and ``data_fingerprint_mode`` the ``data.fingerprint``
     value that made it (``listing`` or ``content``), so a resume can say which of the two
-    changed.
+    changed. ``data_fingerprint_scheme`` is how the rows were ordered and hashed
+    (``classification_data.FINGERPRINT_SCHEME``): a sidecar without it, or with another one,
+    was written by a fingerprint that could not tell a reordered CSV, and is refused.
     """
     fingerprint = getattr(data, "fingerprint", None)
     if fingerprint is None:
         return {}
+    from train.common.classification_data import FINGERPRINT_SCHEME
+
     return {
         "data_fingerprint": fingerprint,
         "data_fingerprint_mode": getattr(config.data, "fingerprint", None),
+        "data_fingerprint_scheme": FINGERPRINT_SCHEME,
     }
 
 
@@ -1226,7 +1231,8 @@ class TaskTrainer:
         # tolerance in a large set; the names and the sizes catch what they miss. The
         # statistics catch a swap of two class folders (same names, same sizes). A swap
         # that leaves the fit split's statistics equal is caught by the data fingerprint
-        # (D-070): relative path, class and file size of every listed file, no pixel read; a swap
+        # (D-070, D-025): relative path, class and file size of every listed file IN LISTING
+        # ORDER (a reordered CSV splits differently), no pixel read; a swap
         # of two same-sized files is caught only by data.fingerprint=content, which hashes bytes.
         lines: List[str] = []
         record = self.task_record(config, context, data)
@@ -1245,19 +1251,32 @@ class TaskTrainer:
                 lines.append(f"{key}: {earlier_counts.get(key)} -> {now_counts.get(key)}")
         earlier_print = resume.state.get("data_fingerprint")
         now_print = getattr(data, "fingerprint", None)
+        now_fields = _data_fingerprint_field(config, data)
         earlier_mode = resume.state.get("data_fingerprint_mode")
-        now_mode = _data_fingerprint_field(config, data).get("data_fingerprint_mode")
-        if earlier_mode != now_mode:
+        now_mode = now_fields.get("data_fingerprint_mode")
+        earlier_scheme = resume.state.get("data_fingerprint_scheme")
+        now_scheme = now_fields.get("data_fingerprint_scheme")
+        if earlier_scheme != now_scheme:
+            # DECISION plan-2026-10-31T180033-2faf890a/D-025
+            # A sidecar of another scheme is refused, and its digest is NOT compared: the
+            # earlier scheme sorted the rows, so it equals nothing the loader computes now and
+            # a "fallback to the old comparison" would pass exactly the reordered CSV this
+            # exists to refuse. No legacy path (user rule).
+            lines.append(
+                f"data_fingerprint_scheme: {earlier_scheme or 'none'} -> {now_scheme or 'none'} "
+                "(the run recorded its files by a rule that could not tell a reordered CSV, so "
+                "it cannot be shown that the split is the same)")
+        elif earlier_mode != now_mode:
             lines.append(
                 f"data_fingerprint_mode: {earlier_mode or 'none'} -> {now_mode or 'none'} (the "
                 "run recorded its data by another rule, so the two digests cannot be compared)")
-        if earlier_print != now_print:
+        if earlier_scheme == now_scheme and earlier_print != now_print:
             lines.append(
                 "data_fingerprint: "
                 f"{'none' if earlier_print is None else str(earlier_print)[:12]} -> "
                 f"{'none' if now_print is None else str(now_print)[:12]} (a file, its class, "
-                "its size or, with data.fingerprint=content, its bytes is not the one the run "
-                "started with)")
+                "its size, the order of the files or, with data.fingerprint=content, its bytes is "
+                "not the one the run started with)")
         if lines:
             raise ConfigError(
                 f"Cannot resume {run_dir}: the data is not the data the run started with ("

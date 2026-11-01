@@ -4,8 +4,9 @@ The ``listing`` fingerprint hashes relative path, class and size, so two same-si
 swapped with their modification times kept leave it equal. ``content`` hashes the file bytes
 too. Pinned here:
 
-* ``listing`` is byte-identical to the value the earlier code computed (re-derived in the
-  test from the documented rows), for a folder and for a CSV;
+* ``listing`` equals the value re-derived in the test from the documented rows IN LISTING ORDER
+  (the earlier code sorted them; step 14.2 / D-025 removed the sort so a reordered CSV is another
+  digest, see ``test_the_fingerprint_follows_the_split.py``), for a folder and for a CSV;
 * an equal-size, equal-mtime byte swap passes ``listing`` and is refused by ``content``;
 * ``content`` is a function of relative path, class and bytes (a moved tree keeps it), never
   equals the ``listing`` digest, is streamed in pieces, and logs its time;
@@ -28,6 +29,7 @@ from train.api.tasks.image_classification import ImageClassificationTrainer
 from train.common import classification_data as data_module
 from train.common.classification_data import (
     FINGERPRINT_MODES,
+    FINGERPRINT_SCHEME,
     listing_fingerprint,
     load_csv_data,
     load_folder_data,
@@ -72,7 +74,7 @@ def swap_bytes_keeping_mtime(first: Path, second: Path) -> None:
 
 
 def reference_listing_digest(listing) -> str:
-    """The earlier ``listing_fingerprint``, written out from its documented rows."""
+    """``listing_fingerprint``, written out from its documented rows, in listing order."""
     rows = []
     for split, paths, labels, base in (
         ("train", listing.train_paths, listing.train_labels, listing.train_base),
@@ -83,8 +85,8 @@ def reference_listing_digest(listing) -> str:
         for path, label in zip(paths, labels):
             rows.append([split, os.path.relpath(path, base).replace(os.sep, "/"),
                          listing.class_names[int(label)], os.path.getsize(path)])
-    rows.sort()
     digest = hashlib.sha256(listing.source.encode("utf-8"))
+    digest.update(b"\x00" + FINGERPRINT_SCHEME.encode("utf-8"))
     for row in rows:
         digest.update(b"\n" + json.dumps(row, ensure_ascii=False).encode("utf-8"))
     return digest.hexdigest()
@@ -103,7 +105,7 @@ def csv_of(root: Path, target: Path) -> Path:
 # ---------------------------------------------------------------------
 
 
-def test_the_listing_value_is_byte_identical_to_the_earlier_one_for_a_folder_and_a_csv(tmp_path):
+def test_the_listing_value_is_the_documented_rows_in_listing_order_for_a_folder_and_a_csv(tmp_path):
     root = make_tree(tmp_path / "data")
     test_root = make_tree(tmp_path / "test")
     folder = scan_image_folder(str(root), str(test_root))
