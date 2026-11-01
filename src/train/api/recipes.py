@@ -316,23 +316,42 @@ def _convnext_recipe() -> Dict[str, Any]:
 # :98-104), 0.1 for hier_345.
 #
 # ImageNet and Imagenette are the legacy trainer's own (:241-251): the loader's random-resized-crop
-# and flip, `--augment none` (:681), 224 px, label smoothing 0 (:611). The entries equal the base
-# recipe and say so. EXPECTED TO CHANGE in step 17: nano at 224 px does not fit 24 GB at batch 128
-# (the legacy docstring :31-33 reports 34.6 GB asked at batch 32), so the batch (and the Imagenette
-# image size, `--image-size 128` in the legacy README) come from a measurement.
-CLIFFORDNET_PER_DATASET: Dict[str, Any] = {
-    **{
-        name: {"transform_args": {"augment": ERASING_PRESET}}
-        for name in ("cifar10", "cifar100")
-    },
-    **{
-        name: {"transform_args": {"augment": "none"}}
-        for name in ("imagenet", "imagenette")
-    },
-}
+# and flip, `--augment none` (:681), 224 px, label smoothing 0 (:611). The BATCH is not the legacy
+# 128: step 17 ran 20 real steps through this API on GPU 0 (RTX 4090, 24,564 MiB) with XLA, halving
+# the batch from 128 until a run fit (allocator peak <= 20,000 MiB, device <= 23,000 MiB, no
+# allocator garbage collection or out-of-memory line). Measured at 224 px, Imagenette and ImageNet
+# alike (memory_fit_evidence.json, README table):
+#   cliffordnet/nano      128 OOM (asks 147.6 GiB), 64 OOM, 32 OOM (asks 32.2 GiB, the legacy
+#                         docstring's 34.6 GB), 16 completes at peak 18,388 MiB with an allocator
+#                         garbage collection (no margin), 8 fits: peak 10,869 MiB
+#   cliffordnet/lite      same, 16 still OOM, 8 fits: peak 16,456 MiB
+#   cliffordnet_hier/hier_345  128 and 64 OOM, 32 completes with a garbage collection (peak
+#                         18,442 MiB), 16 fits: peak 11,601 MiB
+# so cliffordnet takes 8 and cliffordnet_hier 16. The learning rate stays 1e-3: the legacy trainer
+# has no batch rule (1e-3 at batch 128 in the paper recipe and at batch 32 in its README), so none
+# is invented; no run has checked that 1e-3 suits a batch of 8. The image size stays the data's own
+# 224: it is not a recipe key here (the data decides it before the recipe is read), and
+# `transform_args.image_size=128 batch_size=32` is the legacy README's form, measured to fit for
+# nano (peak 14,315 MiB; lite needs 16 there). A variant larger than these is not covered
+# (cn_64_5 needs batch 2 at 224 px; its CIFAR recipe is the paper's and cannot take that batch).
+# DECISION plan-2026-10-31T180033-2faf890a/D-036: do NOT put these batches into `per_variant` (it
+# applies to every dataset and would change the CIFAR recipes) and do NOT restore 128.
+def _cliffordnet_per_dataset(large_image_batch: int) -> Dict[str, Any]:
+    return {
+        **{
+            name: {"transform_args": {"augment": ERASING_PRESET}}
+            for name in ("cifar10", "cifar100")
+        },
+        **{
+            name: {"batch_size": large_image_batch, "transform_args": {"augment": "none"}}
+            for name in ("imagenet", "imagenette")
+        },
+    }
 
 
-def _cliffordnet_recipe(stochastic_depth_rate: float, per_variant: Dict[str, Any]) -> Dict[str, Any]:
+def _cliffordnet_recipe(
+    stochastic_depth_rate: float, per_variant: Dict[str, Any], large_image_batch: int
+) -> Dict[str, Any]:
     return _recipe(
         epochs=200,
         batch_size=128,
@@ -343,7 +362,7 @@ def _cliffordnet_recipe(stochastic_depth_rate: float, per_variant: Dict[str, Any
         watch_metric="val_accuracy",
         patience=30,
         model_args={"stochastic_depth_rate": stochastic_depth_rate},
-        per_dataset=CLIFFORDNET_PER_DATASET,
+        per_dataset=_cliffordnet_per_dataset(large_image_batch),
         per_variant=per_variant,
         erasing_prob=0.25,
     )
@@ -599,7 +618,7 @@ def builtin_models() -> Tuple[ModelSpec, ...]:
             variants_attr=f"{clifford}.model:CliffordNet.MODEL_VARIANTS",
             tasks=(TASK,),
             defaults=_cliffordnet_recipe(
-                0.3, {"cn_64_5": {"model_args": {"stochastic_depth_rate": 0.4}}}
+                0.3, {"cn_64_5": {"model_args": {"stochastic_depth_rate": 0.4}}}, 8
             ),
             resolve_model_args=f"{_HERE}:resolve_cliffordnet_args",
         ),
@@ -608,7 +627,7 @@ def builtin_models() -> Tuple[ModelSpec, ...]:
             factory=f"{clifford}.hierarchical:create_hierarchical_cliffordnet",
             variants_attr=f"{clifford}.hierarchical:HierarchicalCliffordNet.MODEL_VARIANTS",
             tasks=(TASK,),
-            defaults=_cliffordnet_recipe(0.1, {}),
+            defaults=_cliffordnet_recipe(0.1, {}, 16),
             resolve_model_args=f"{_HERE}:resolve_cliffordnet_args",
         ),
     )

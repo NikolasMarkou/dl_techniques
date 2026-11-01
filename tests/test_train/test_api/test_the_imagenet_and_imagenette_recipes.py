@@ -108,18 +108,21 @@ RECIPES = {
         epochs=100, batch_size=64, patience=50, watch="val_loss", optim=CONVNEXT_OPTIM, model_args=CONVNEXT_MODEL),
     ("convnext_v2", "imagenette"): row(
         epochs=100, batch_size=64, patience=50, watch="val_loss", optim=CONVNEXT_OPTIM, model_args=CONVNEXT_MODEL),
-    # cliffordnet and hier /imagenet and /imagenette: train_cliffordnet.py (200, 128, 1e-3, wd 0.1, patience 30, augment none).
+    # cliffordnet and hier /imagenet and /imagenette: train_cliffordnet.py (200, 1e-3, wd 0.1, patience 30, augment none)
+    # with the BATCH from the step 17 memory measurement at 224 px (memory_fit_evidence.json): the legacy 128 asks
+    # 147.6 GiB of an isotropic nano, so cliffordnet takes 8 and cliffordnet_hier 16. The learning rate is NOT scaled:
+    # the legacy trainer has no batch rule (lr 1e-3 at batch 128 in the paper recipe and at batch 32 in its README).
     ("cliffordnet", "imagenet"): row(
-        epochs=200, batch_size=128, patience=30, watch="val_accuracy", optim=CLIFFORD_OPTIM,
+        epochs=200, batch_size=8, patience=30, watch="val_accuracy", optim=CLIFFORD_OPTIM,
         model_args={"stochastic_depth_rate": 0.3}),
     ("cliffordnet", "imagenette"): row(
-        epochs=200, batch_size=128, patience=30, watch="val_accuracy", optim=CLIFFORD_OPTIM,
+        epochs=200, batch_size=8, patience=30, watch="val_accuracy", optim=CLIFFORD_OPTIM,
         model_args={"stochastic_depth_rate": 0.3}),
     ("cliffordnet_hier", "imagenet"): row(
-        epochs=200, batch_size=128, patience=30, watch="val_accuracy", optim=CLIFFORD_OPTIM,
+        epochs=200, batch_size=16, patience=30, watch="val_accuracy", optim=CLIFFORD_OPTIM,
         model_args={"stochastic_depth_rate": 0.1}),
     ("cliffordnet_hier", "imagenette"): row(
-        epochs=200, batch_size=128, patience=30, watch="val_accuracy", optim=CLIFFORD_OPTIM,
+        epochs=200, batch_size=16, patience=30, watch="val_accuracy", optim=CLIFFORD_OPTIM,
         model_args={"stochastic_depth_rate": 0.1}),
 }
 PAIRS = sorted(RECIPES)

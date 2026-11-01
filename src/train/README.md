@@ -169,8 +169,10 @@ these pairs resolves to, with every value `auto`:
 | resnet | imagenette | 200 | 128 | sgd | 0.05 | 1e-4 as L2 | 10 | none | 0 | 224 | 15 | new: rules E, B, L, W |
 | convnext_v1, convnext_v2 | imagenet | 100 | 64 | adamw | 1e-3 | 1e-4 | 0 | none | 0 | 224 | 50 | legacy: `convnext/common.py:155,160-165,258-265` |
 | convnext_v1, convnext_v2 | imagenette | 100 | 64 | adamw | 1e-3 | 1e-4 | 0 | none | 0 | 224 | 50 | new (the legacy trainer refuses Imagenette): rules E, M |
-| cliffordnet, cliffordnet_hier | imagenet | 200 | 128 | adamw | 1e-3 | 0.1 | 0 | none | 0 | 224 | 30 | legacy: `cliffordnet/train_cliffordnet.py:241-246,611,652-664,681`, `common/args.py:345` |
-| cliffordnet, cliffordnet_hier | imagenette | 200 | 128 | adamw | 1e-3 | 0.1 | 0 | none | 0 | 224 | 30 | legacy: `cliffordnet/train_cliffordnet.py:247-251,611,652-664,681` |
+| cliffordnet | imagenet | 200 | 8 | adamw | 1e-3 | 0.1 | 0 | none | 0 | 224 | 30 | legacy except the batch (legacy 128): `cliffordnet/train_cliffordnet.py:241-246,611,652-664,681`, `common/args.py:345`; batch measured, see Memory fit |
+| cliffordnet | imagenette | 200 | 8 | adamw | 1e-3 | 0.1 | 0 | none | 0 | 224 | 30 | legacy except the batch (legacy 128): `cliffordnet/train_cliffordnet.py:247-251,611,652-664,681`; batch measured, see Memory fit |
+| cliffordnet_hier | imagenet | 200 | 16 | adamw | 1e-3 | 0.1 | 0 | none | 0 | 224 | 30 | legacy except the batch (legacy 128): same lines as `cliffordnet`; batch measured, see Memory fit |
+| cliffordnet_hier | imagenette | 200 | 16 | adamw | 1e-3 | 0.1 | 0 | none | 0 | 224 | 30 | legacy except the batch (legacy 128): same lines as `cliffordnet`; batch measured, see Memory fit |
 
 "Augment none" adds nothing to the loader's own random-resized-crop and flip, which every ImageNet and Imagenette
 run has (`resnet` on ImageNet adds the loader's colour jitter through `imagenet_augment_color`, which the loader
@@ -180,10 +182,8 @@ reaches its loss, and the other two trainers default to 0. "Image size" is the d
 can change it). Other values of the six recipes: ViT uses patch 16 at 224 with dropout 0.1 and attention dropout 0.1
 (`vit/train_vit.py:79-80,451-453`); the sgd weight decay of `resnet` is an L2 on the model, adamw decays in the
 optimizer; `convnext_v1` and `convnext_v2` use strides 4, drop path 0.1 and dropout 0 on both datasets; stochastic
-depth is 0.3 for `cliffordnet` (0.4 for `cn_64_5`) and 0.1 for `cliffordnet_hier`. The cliffordnet rows are the
-recipe BEFORE a memory measurement: the isotropic `nano` at 224 px does not fit a 24 GB card at batch 128 (its legacy
-docstring reports 34.6 GB asked at batch 32), so the batch there, and the Imagenette image size (128 in the legacy
-README), are expected to change. The table is pinned, value by value, by
+depth is 0.3 for `cliffordnet` (0.4 for `cn_64_5`) and 0.1 for `cliffordnet_hier`. The cliffordnet batches are measured, not
+legacy (Memory fit, below). The table is pinned, value by value, by
 `tests/test_train/test_api/test_the_imagenet_and_imagenette_recipes.py`, which also reads the legacy trainers'
 own defaults and compares.
 
@@ -199,6 +199,106 @@ has been made, so read them as starting points. Only `cliffordnet` has an Imagen
 | W, warmup | `vit` 20 epochs, `resnet` 10, `convnext` 0 | the legacy share of the schedule: `vit` 5 of 50 epochs (`vit/train_vit.py:83,87`), `resnet` 5 of 100 (`resnet/train_resnet.py:74,78`), `convnext` none (`convnext/common.py:264`) |
 | Weight decay, clipping, patience, dropout | the legacy values | no cited recipe changes them with the size of the data |
 | M, `convnext` model arguments | strides 4, drop path 0.1, dropout 0 | the legacy table's only 224 px row (`convnext/common.py:155,160-165`), the ConvNeXt-T values; without an entry the factory would apply drop path 0 |
+
+**Memory fit** (measured, GPU 0): for the smallest variant of each of the six families on both datasets, for
+`cliffordnet/lite` (the factory's default variant) and `cliffordnet/cn_64_5` (its largest), and for `resnet/resnet50`
+(the legacy ImageNet trainer's default variant), 20 real train steps ran through `python -m train image_classification`
+on an RTX 4090 (24,564 MiB; 717 MiB in use when idle), with XLA as Keras sets it (`jit_compile` auto; the logs show the
+XLA cluster compiled), the recipe's own values except `batch_size`, and `epochs=1` on a `data.max_samples` that gives 20
+steps. "Allocator peak" is the run's own `GPU peak on` log line (`tf.config.experimental.get_memory_info`, read right
+after `fit`, so the validation pass is in it); "Device" is the highest `nvidia-smi` `memory.used` sampled every half
+second. The device figure is always above the peak plus the idle use (the allocator holds a pool larger than its peak, and
+the CUDA context and kernels sit outside it) and, once a model has a big temporary, the pool grows to about 22,600 MiB,
+92% of the card, so Device is a ceiling and not a headroom measure. **The rule:** a batch fits when it completes 20 steps
+with the allocator peak at or under 20,000 MiB, the device at or under 23,000 MiB, and no allocator garbage-collection or
+out-of-memory line in the log (TensorFlow degrades silently otherwise: `Garbage collection: deallocate free memory
+regions` means the allocator reached the card's limit and recovered, which is a run with no margin). The batch is halved
+from the recipe's until one fits. An OOM was observed in each failed row below, not inferred: the process died on
+`Out of memory while trying to allocate N bytes` or on an allocator `ran out of memory` line. On ImageNet the rows near 100
+images per second are limited by the disk (the first read of those files); the rows that repeat a
+`data.max_samples` read the same files from the page cache.
+
+<!-- memory:begin -->
+| Model | Dataset | Image | Batch | Allocator peak, MiB | Device, MiB | Steps | Seconds per step | Images per second | Result |
+|---|---|---|---|---|---|---|---|---|---|
+| `vit/vit_pico` | imagenet | 224 | 128 | 3,235 | 6,293 | 20 | 1.330 | 96.3 | fits |
+| `vit/vit_pico` | imagenette | 224 | 128 | 3,230 | 6,277 | 20 | 0.045 | 2,843.7 | fits |
+| `resnet/resnet18` | imagenet | 224 | 256 | 5,326 | 18,165 | 20 | 2.624 | 97.5 | fits |
+| `resnet/resnet18` | imagenette | 224 | 128 | 2,630 | 9,330 | 20 | 0.061 | 2,092.5 | fits |
+| `resnet/resnet50` | imagenet | 224 | 256 | 18,239 | 22,591 | 20 | 0.326 | 785.3 | completed, allocator garbage collection, no margin |
+| `resnet/resnet50` | imagenet | 224 | 128 | 10,579 | 22,589 | 20 | 0.164 | 780.4 | fits |
+| `resnet/resnet50` | imagenette | 224 | 128 | 10,577 | 22,589 | 20 | 0.166 | 768.9 | fits |
+| `convnext_v1/tiny` | imagenet | 224 | 64 | 4,184 | 9,337 | 20 | 0.598 | 106.9 | fits |
+| `convnext_v1/tiny` | imagenette | 224 | 64 | 4,162 | 9,336 | 20 | 0.056 | 1,141.6 | fits |
+| `convnext_v2/atto` | imagenet | 224 | 64 | 1,238 | 5,269 | 20 | 0.034 | 1,899.2 | fits |
+| `convnext_v2/atto` | imagenette | 224 | 64 | 1,232 | 5,270 | 20 | 0.030 | 2,125.0 | fits |
+| `cliffordnet/nano` | imagenet | 224 | 128 | - | 17,657 | - | - | - | OOM, asks 147.6 GiB |
+| `cliffordnet/nano` | imagenet | 224 | 64 | - | 17,591 | - | - | - | OOM, asks 55.8 GiB |
+| `cliffordnet/nano` | imagenet | 224 | 32 | - | 9,367 | - | - | - | OOM, asks 32.2 GiB |
+| `cliffordnet/nano` | imagenet | 224 | 16 | 18,391 | 22,575 | 20 | 0.260 | 61.5 | completed, allocator garbage collection, no margin |
+| `cliffordnet/nano` | imagenet | 224 | 8 | 10,804 | 19,587 | 20 | 0.133 | 60.2 | fits |
+| `cliffordnet/nano` | imagenette | 224 | 128 | - | 17,654 | - | - | - | OOM, asks 147.6 GiB |
+| `cliffordnet/nano` | imagenette | 224 | 64 | - | 17,590 | - | - | - | OOM, asks 55.8 GiB |
+| `cliffordnet/nano` | imagenette | 224 | 32 | - | 9,366 | - | - | - | OOM, asks 32.2 GiB |
+| `cliffordnet/nano` | imagenette | 224 | 16 | 18,388 | 22,574 | 20 | 0.260 | 61.6 | completed, allocator garbage collection, no margin |
+| `cliffordnet/nano` | imagenette | 224 | 8 | 10,869 | 19,586 | 20 | 0.134 | 59.6 | fits |
+| `cliffordnet/nano` | imagenette | 128 | 64 | 18,758 | 22,577 | 20 | 0.373 | 171.5 | completed, allocator garbage collection, no margin |
+| `cliffordnet/nano` | imagenette | 128 | 32 | 14,315 | 19,589 | 20 | 0.183 | 174.4 | fits |
+| `cliffordnet/lite` | imagenet | 224 | 128 | - | 22,565 | - | - | - | OOM, asks 112.3 GiB |
+| `cliffordnet/lite` | imagenet | 224 | 64 | - | 17,591 | - | - | - | OOM, asks 60.0 GiB |
+| `cliffordnet/lite` | imagenet | 224 | 32 | - | 14,487 | - | - | - | OOM, asks 38.3 GiB |
+| `cliffordnet/lite` | imagenet | 224 | 16 | - | 9,351 | - | - | - | OOM, asks 24.9 GiB |
+| `cliffordnet/lite` | imagenet | 224 | 8 | 16,458 | 22,575 | 20 | 0.200 | 40.0 | fits |
+| `cliffordnet/lite` | imagenette | 224 | 128 | - | 17,645 | - | - | - | OOM |
+| `cliffordnet/lite` | imagenette | 224 | 64 | - | 22,559 | - | - | - | OOM, asks 60.0 GiB |
+| `cliffordnet/lite` | imagenette | 224 | 32 | - | 14,487 | - | - | - | OOM, asks 38.3 GiB |
+| `cliffordnet/lite` | imagenette | 224 | 16 | - | 7,815 | - | - | - | OOM, asks 24.9 GiB |
+| `cliffordnet/lite` | imagenette | 224 | 8 | 16,456 | 22,575 | 20 | 0.201 | 39.8 | fits |
+| `cliffordnet/lite` | imagenette | 128 | 64 | - | 9,351 | - | - | - | OOM, asks 29.9 GiB |
+| `cliffordnet/lite` | imagenette | 128 | 32 | 19,897 | 22,577 | 20 | 0.278 | 114.9 | completed, allocator garbage collection, no margin |
+| `cliffordnet/lite` | imagenette | 128 | 16 | 15,148 | 19,859 | 20 | 0.146 | 109.8 | fits |
+| `cliffordnet/cn_64_5` | imagenette | 224 | 8 | - | 3,249 | - | - | - | OOM, asks 32.9 GiB |
+| `cliffordnet/cn_64_5` | imagenette | 224 | 4 | - | 2,225 | - | - | - | OOM, asks 21.9 GiB |
+| `cliffordnet/cn_64_5` | imagenette | 224 | 2 | 18,166 | 22,619 | 21 | 0.207 | 9.7 | fits |
+| `cliffordnet/cn_64_5` | imagenette | 224 | 1 | 6,405 | 9,613 | 22 | 0.129 | 7.8 | fits |
+| `cliffordnet_hier/hier_345` | imagenet | 224 | 128 | - | 19,695 | - | - | - | OOM, asks 70.8 GiB |
+| `cliffordnet_hier/hier_345` | imagenet | 224 | 64 | - | 17,589 | - | - | - | OOM, asks 33.4 GiB |
+| `cliffordnet_hier/hier_345` | imagenet | 224 | 32 | 18,647 | 22,589 | 20 | 0.282 | 113.6 | completed, allocator garbage collection, no margin |
+| `cliffordnet_hier/hier_345` | imagenet | 224 | 16 | 11,582 | 21,653 | 20 | 0.140 | 114.7 | fits |
+| `cliffordnet_hier/hier_345` | imagenette | 224 | 128 | - | 17,652 | - | - | - | OOM, asks 70.8 GiB |
+| `cliffordnet_hier/hier_345` | imagenette | 224 | 64 | - | 17,591 | - | - | - | OOM, asks 26.8 GiB |
+| `cliffordnet_hier/hier_345` | imagenette | 224 | 32 | 18,442 | 22,585 | 20 | 0.289 | 110.7 | completed, allocator garbage collection, no margin |
+| `cliffordnet_hier/hier_345` | imagenette | 224 | 16 | 11,601 | 21,657 | 20 | 0.142 | 112.7 | fits |
+<!-- memory:end -->
+
+What the table settles, in the recipes:
+
+* `vit/vit_pico`, `resnet/resnet18`, `convnext_v1/tiny` and `convnext_v2/atto` fit at their recipes' batches on both
+  datasets (allocator peaks 1,232 to 5,326 MiB). Their recipes did not change.
+* `cliffordnet/nano` at 224 px does not fit at batch 128, 64 or 32 (the 32 asks 32.2 GiB, the legacy docstring's 34.6 GB),
+  completes at 16 with a garbage collection (no margin) and fits at **8** (allocator peak 10,869 MiB). `cliffordnet/lite`
+  also needs **8** (peak 16,456 MiB). `cliffordnet_hier/hier_345` fits at **16** (peak 11,601 MiB; 32 completes with a
+  garbage collection). So the `cliffordnet` recipe on ImageNet and Imagenette is batch 8, the `cliffordnet_hier` recipe
+  is 16, and both were 128. The CIFAR recipes keep 128 (32 px).
+* **The learning rate is not scaled with the batch.** `cliffordnet/train_cliffordnet.py` has no batch rule (its learning rate
+  is 1e-3 at batch 128 in the paper recipe and at batch 32 in its own README), so none is invented, and no run has
+  checked that 1e-3 suits a batch of 8 or 16. (`resnet` is different: its Imagenette lr 0.05 is the linear rule of
+  Goyal et al. 2017, as the rules above say.)
+* **The image size stays the data's own 224.** The legacy README asks for `--image-size 128` on the isotropic variants,
+  but in this API the data decides the size before the recipe is read, so a recipe cannot set it. The legacy README's
+  form `--image-size 128 --batch-size 32` is `transform_args.image_size=128 batch_size=32` here, and it was measured: `cliffordnet/nano` fits at 32 there
+  (peak 14,315 MiB, 174 images per second against 60 at 224 px), and `cliffordnet/lite` fits at 16. A parity run against the
+  legacy trainer sets both keys itself.
+
+Not covered by a recipe, and measured: `resnet/resnet50` on ImageNet completes at the recipe's batch 256 but with a garbage
+collection and the device at 22,591 MiB (no margin); batch 128 fits (peak 10,579 MiB), with `optim_args.lr=0.05` by the same
+linear rule. `cliffordnet/cn_64_5` does not fit at 8 or 4 on Imagenette and fits at 2 (peak 18,166 MiB); it was not run on
+ImageNet (the tensors are the same but for the 1,000-way head). A recipe is per family and `per_variant` applies to every
+dataset, so changing the batch for these two would change their CIFAR recipes; they are left, and
+`tests/test_train/test_api/test_the_recipe_batches_are_the_measured_memory_fit.py` names them. The larger variants of the other families (`vit_tiny`
+and up, `resnet101`, `convnext` above `tiny`) were not measured. A run of 20 steps is not a run of 200 epochs: nothing here
+says the margin holds for the whole run. The table is pinned to `tests/test_train/test_api/memory_fit_evidence.json` by the
+test, row by row.
 
 **Parity**: the API run and the legacy trainer were compared on `vit_pico` on CIFAR-10 only
 (10 epochs, three seeds each; the means differ by less than a tolerance measured from the legacy
