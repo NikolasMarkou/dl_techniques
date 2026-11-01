@@ -110,6 +110,13 @@ a JPEG that was already decoded to an array or a PIL image has lost the Y plane 
 PIL's and TensorFlow's JPEG decoders differ, so its grey is off the loader's by up to 14 levels of 255 on random
 colour noise at quality 75 (mean 0.56; 13 and 1.15 at quality 95) and by 1 to 2 levels (mean 0.5 to 0.6, about
 0.002) on smooth images: above 1e-5, and not removable from the decoded pixels.
+A 16-bit grey PIL image (`I;16` and its byte-order variants) is converted as the decoder reads the same file, each
+sample's high byte, and is equal to the loader on it; PIL's `I` and `F` (32-bit integers and floats) are refused with a
+`ConfigError` naming the mode, because the loader reads no file of that depth. A 16-bit RGB or RGBA PNG opens in PIL as
+8-bit, which cannot be told from an 8-bit file, so for a grey model it is within 1 level of 255 of the loader (measured; a
+path is exact). `load_model` refuses, at load, a `task.json` whose `task` is not `image_classification`, whose family or
+variant is not the model's, or whose `input_shape` the model does not take, and a `.keras` zip with no `config.json` or no
+weights, each with a `ConfigError` naming the problem.
 
 **Export**: `python -m train export model=<run dir or .keras> out=<path> format=keras|saved_model|tflite|onnx`
 writes one new file (a directory for `saved_model`) and `<out>.task.json` beside it, and prints

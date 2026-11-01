@@ -61,8 +61,12 @@ Interface contract
     :return: a :class:`Predictor`. Compiles nothing. The model is called once on zeros, so
         a model whose output width is not the number of class names is refused here.
     :raises ConfigError: for a missing path, ``task.json`` or model file, a model file that
-        is not an intact ``.keras`` archive (one cut short by a kill is named, not a Keras
-        traceback), a bad record, a family that is not registered, or a class-count mismatch.
+        is not an intact ``.keras`` archive (one cut short by a kill, or a zip with no
+        ``config.json`` or no weights, is named, not a Keras traceback), a bad record, a
+        ``task`` other than ``image_classification``, a family that is not registered, a
+        family or variant the model is not (:func:`check_model_against_record`), an
+        ``input_shape`` or ``channels`` the model does not take, or a class-count mismatch.
+        All of them are raised by ``load_model``, none waits for the first prediction.
 
 ``Predictor.predict(x, top_k=None, threshold=None)``
     :param x: one image or several. A single image is a path (``str`` or ``Path``), a
@@ -86,6 +90,15 @@ Interface contract
         file's path when the exact value matters. ``tf.image.rgb_to_grayscale`` and PIL's ``convert("L")`` (the earlier
         calls) differ from the loader on PNG pixels too: one level in a quarter and in a half of
         the pixels.
+        **16-bit sources, by PIL mode:** ``I;16`` (and ``I;16L``, ``I;16B``, ``I;16N``) is
+        converted as the decoder reads the file, each sample's high byte (``value >> 8``, equal
+        to the loader on the same file), for one and three channels. ``I`` and ``F`` (32-bit
+        integers and floats) are REFUSED with a :class:`ConfigError` naming the mode: the loader
+        reads no file of that depth. A 16-bit RGB or RGBA PNG opens in PIL as 8-bit ``RGB`` or
+        ``RGBA``, which cannot be told from an 8-bit file, so it is neither refused nor exact for
+        a grey model: the decoder makes the grey from the 16-bit samples before it strips them, and
+        the 8-bit pixels no longer hold that. **Measured limit:** at most 1 level of 255 against the loader's
+        decode of the same file (a path is exact; a three-channel model is exact).
     :param top_k: keep the ``top_k`` best classes of each image; ``None`` keeps all.
     :param threshold: drop classes whose probability is below it; ``None`` drops none.
     :return: ``{"labels", "scores"}``. For a single image both are flat lists, best class
@@ -118,6 +131,9 @@ from .run_dir import TASK_FILE, TASK_SUFFIX, check_model_file
 
 #: The only ``schema_version`` this module reads and writes.
 SCHEMA_VERSION = 1
+
+#: The one task this predictor serves; a record of another task is refused at load.
+SERVED_TASK = "image_classification"
 
 #: The keys of a record, in the order they are written.
 RECORD_KEYS = (
@@ -167,6 +183,14 @@ _NORMALIZE = ("standardize", "unit")
 
 #: The PIL modes that already are grey (read as ``L``); every other mode is read as RGB.
 GREY_MODES = ("L", "LA", "1")
+
+#: The 16-bit grey PIL modes (a 16-bit grey PNG opens as ``I;16``; the others differ in byte
+#: order). Read as the decoder reads the same file: each sample stripped to its high byte.
+GREY16_MODES = ("I;16", "I;16L", "I;16B", "I;16N")
+
+#: The PIL modes of 32-bit integers and floats. REFUSED: the loader reads no file of that depth,
+#: so there is no decoder rule to reproduce.
+WIDE_MODES = ("I", "F")
 
 
 def build_task_record(
@@ -390,6 +414,11 @@ def load_model(path: Union[str, Path]) -> "Predictor":
 
     model_file, task_file = _model_files(Path(path))
     record = read_record(task_file)
+    if record["task"] != SERVED_TASK:
+        raise ConfigError(
+            f"Invalid {TASK_FILE} {task_file}: the task is {record['task']!r} but this predictor "
+            f"serves {SERVED_TASK!r} only"
+        )
     # The family's model code is imported BEFORE the Keras file is read, so the classes
     # the archive names are registered whatever the caller imported (D-051).
     recipes.register_builtin_models()
@@ -406,8 +435,90 @@ def load_model(path: Union[str, Path]) -> "Predictor":
     # reload that needs only the weights.
     check_model_file(model_file, "Invalid value for 'model'")
     model = keras.models.load_model(str(model_file), compile=False)
-    _check_width(model(_zeros_of(record), training=False), record)
+    check_model_against_record(model, record, spec, model_file, task_file)
+    _check_width(_run_on_zeros(model, record, model_file, task_file), record)
     return Predictor(model, record)
+
+
+def _plain(value: Any) -> Any:
+    """Return ``value`` with every tuple a list, so a config and a variant table compare equal."""
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _plain(item) for key, item in value.items()}
+    return value
+
+
+def check_model_against_record(
+    model: Any, record: Mapping[str, Any], spec: "registry.ModelSpec", model_file: Path, task_file: Path
+) -> None:
+    """Raise :class:`ConfigError` unless ``model`` is the family and variant ``record`` names.
+
+    Interface contract: ``model`` is a loaded Keras model, ``record`` a checked record, ``spec`` the
+    registered :class:`~train.api.registry.ModelSpec` of ``record["family"]``. The family is the
+    class named by ``spec.variants_attr`` (``model`` must be an instance of it); the variant must
+    be a key of that class's ``MODEL_VARIANTS``, and every key of the variant's table that the
+    model's ``get_config()`` also holds must be equal. Measured on all six families (the
+    smallest variant of each, against every variant's table): a wrong variant differs in at least
+    one such key. A model trained with ``model_args`` that override a key of its variant's table
+    is refused by the last rule, because its record then names a variant it no longer is.
+    """
+    # DECISION plan-2026-10-31T180033-2faf890a/D-028
+    # The family and the variant of the record are compared with the MODEL, not only with each
+    # other (``record_problems`` already checks ``model == family/variant``): a record that names
+    # another family or variant still predicts, with a lie in its metadata. Do NOT compare the
+    # whole config: ``model_args`` that are not part of a variant table are free.
+    from .registry import load_attr
+
+    module_name, _, attr_path = spec.variants_attr.partition(":")
+    owner = load_attr(f"{module_name}:{attr_path.rsplit('.', 1)[0]}")
+    family, variant = record["family"], record["variant"]
+    if not isinstance(model, owner):
+        raise ConfigError(
+            f"Invalid {TASK_FILE} {task_file}: it names the family {family!r} ({owner.__name__}) "
+            f"but {model_file} holds a {type(model).__name__}; the file and the model are not "
+            "from one run"
+        )
+    table = spec.load_variants()
+    if variant not in table:
+        raise ConfigError(
+            f"Invalid {TASK_FILE} {task_file}: {variant!r} is not a variant of {family!r} "
+            f"(known: {', '.join(sorted(table))})"
+        )
+    wanted = table[variant]
+    if isinstance(wanted, Mapping):
+        built = model.get_config()
+        differing = [
+            f"{key} is {_shown(_plain(built[key]))} in the model, {_shown(_plain(value))} in {variant!r}"
+            for key, value in wanted.items()
+            if key in built and _plain(built[key]) != _plain(value)
+        ]
+        if differing:
+            raise ConfigError(
+                f"Invalid {TASK_FILE} {task_file}: it names the variant {variant!r} but "
+                f"{model_file} is not that variant ({'; '.join(differing)}); the file and the "
+                "model are not from one run"
+            )
+
+
+def _run_on_zeros(model: Any, record: Mapping[str, Any], model_file: Path, task_file: Path) -> Any:
+    """Return ``model`` called on one zero input of the record's shape, or raise :class:`ConfigError`.
+
+    A model that cannot take the record's ``input_shape`` (another side, another channel count)
+    fails inside Keras or TensorFlow with a message about a layer; here it is named as what it
+    is, at load, not at the first prediction.
+    """
+    import tensorflow as tf
+
+    try:
+        return model(_zeros_of(record), training=False)
+    except (ValueError, tf.errors.InvalidArgumentError) as exc:
+        first = (str(exc).strip().splitlines() or [type(exc).__name__])[0]
+        raise ConfigError(
+            f"Invalid {TASK_FILE} {task_file}: {model_file} does not take the input_shape "
+            f"{record['input_shape']} it names ({type(exc).__name__}: {first[:150]}); the file "
+            "and the model are not from one run"
+        ) from exc
 
 
 def _zeros_of(record: Mapping[str, Any]) -> Any:
@@ -530,6 +641,19 @@ class Predictor:
         if isinstance(item, (str, os.PathLike)):
             return self._from_path(item)
         if isinstance(item, Image.Image):
+            if item.mode in WIDE_MODES:
+                raise ConfigError(
+                    f"Invalid image: a PIL image of mode {item.mode} holds 32-bit values and its "
+                    "bit depth cannot be preserved (the loader reads no such file); convert it "
+                    "to an 8-bit mode ('L' or 'RGB') yourself, or pass the file's path"
+                )
+            if item.mode in GREY16_MODES:
+                # DECISION plan-2026-10-31T180033-2faf890a/D-028
+                # A 16-bit grey image is read as `tf.io.decode_image` reads the file: the high
+                # byte of each sample. Do NOT hand it to PIL's `convert`: that CLIPS to 255 and
+                # was 254 levels off in 99% of the pixels (review-iter-1 concern 4).
+                high = (np.asarray(item).astype(np.uint16) >> 8).astype(np.uint8)
+                return self._from_array(high)
             # A colour image keeps its colours (alpha dropped) so `_from_array` converts them
             # to grey the loader's way; only an image that is already grey is read as grey.
             grey = self.record["eval_transform"]["source_channels"] == 1 and item.mode in GREY_MODES

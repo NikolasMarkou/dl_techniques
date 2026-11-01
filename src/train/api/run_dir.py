@@ -75,7 +75,8 @@ Interface contract
 
 ``check_model_file(path, what)``
     :raises ConfigError: when ``path`` is not an intact ``.keras`` archive (a zip whose
-        every member passes its CRC), naming the file.
+        every member passes its CRC and which holds ``config.json`` and a weights file,
+        :data:`KERAS_ARCHIVE_NEEDS`), naming the file.
 
 ``load_resume_point(run_dir, mapping)``
     :param run_dir: a directory :func:`open_run` accepted for a resume.
@@ -614,6 +615,10 @@ def take_run_lock(run_dir: Path, resume: bool) -> RunLock:
     return handle
 
 
+#: Each row is the alternatives of one member a ``.keras`` archive cannot be loaded without.
+KERAS_ARCHIVE_NEEDS = (("config.json",), ("model.weights.h5", "model.weights.npz"))
+
+
 def check_model_file(path: Path, what: str) -> None:
     """Raise a :class:`ConfigError` naming ``path`` unless it is an intact ``.keras`` archive.
 
@@ -629,6 +634,7 @@ def check_model_file(path: Path, what: str) -> None:
     try:
         with zipfile.ZipFile(path) as archive:
             damaged = archive.testzip()
+            members = set(archive.namelist())
     except (OSError, zipfile.BadZipFile) as exc:
         raise ConfigError(
             f"{what}: {path} is not a readable .keras archive ({exc}); it was probably cut "
@@ -636,6 +642,12 @@ def check_model_file(path: Path, what: str) -> None:
         ) from exc
     if damaged is not None:
         raise ConfigError(f"{what}: {path} is damaged (member {damaged!r} fails its checksum)")
+    missing = [" or ".join(map(repr, row)) for row in KERAS_ARCHIVE_NEEDS if not members & set(row)]
+    if missing:
+        raise ConfigError(
+            f"{what}: {path} is a zip but not a .keras model: it has no {' and no '.join(missing)} "
+            f"(members: {', '.join(sorted(members)) or 'none'})"
+        )
 
 
 def open_run(run_dir: Path, resume: bool) -> Path:
