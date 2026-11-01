@@ -131,8 +131,11 @@ sample's high byte, and is equal to the loader on it; PIL's `I` and `F` (32-bit 
 `ConfigError` naming the mode, because the loader reads no file of that depth. A 16-bit RGB or RGBA PNG opens in PIL as
 8-bit, which cannot be told from an 8-bit file, so for a grey model it is within 1 level of 255 of the loader (measured; a
 path is exact). `load_model` refuses, at load, a `task.json` whose `task` is not `image_classification`, whose family or
-variant is not the model's, or whose `input_shape` the model does not take, and a `.keras` zip with no `config.json` or no
-weights, each with a `ConfigError` naming the problem. A run whose `model_args` change a key of its variant's table
+variant is not the model's, or whose `input_shape` the model does not take, whose `mean` is outside 0 to 1 or whose `std` is
+outside 1e-6 to 1 (the images are standardized from the range 0 to 1; a `mean` of 1e30 used to predict NaN without an error),
+and a `.keras` zip with no `config.json` or no weights, each with a `ConfigError` naming the problem. **Limit:** the class
+names are checked for their count and for repeats, never for their order, so a `task.json` whose names are a permutation of
+the right ones loads and reports the wrong name for the swapped classes; nothing in the file or the model can tell. A run whose `model_args` change a key of its variant's table
 (`depth` of `cliffordnet/nano`, `blocks_per_stage` of `resnet/resnet18`, `depths` of a convnext) records those keys in an
 optional `variant_overrides` object of `task.json`, written only when there is one; `predict` and `export` then compare
 the model with the variant plus those changes (and `export` copies the object into `<out>.task.json`). A ViT's `scale`
@@ -147,7 +150,11 @@ no error. A `tflite` file of a CliffordNet needs the Flex delegate (a WARNING sa
 
 **Exit codes**: 0 success; 2 a request that cannot be honoured (bad key, value, path, data,
 resume), found before TensorFlow loads when it can be; 1 a run that finished without reaching its
-success threshold, or any unexpected failure (a traceback).
+success threshold, or any unexpected failure (a traceback). `data.dataset=imagenet` and `imagenette` look at
+the disk before the run directory is made, with path tests only: a missing `data.imagenet_root`, a root
+without `train/` or `val/`, a devkit (`data.devkit_dir`, or `devkit/` under the root) without `meta.mat` or
+`ILSVRC2012_validation_ground_truth.txt`, and no `imagenette/320px-v2` records under `$TFDS_DATA_DIR` (or
+`~/tensorflow_datasets`) each exit 2 with a message that names the key and the path looked at.
 
 **Parity**: the API run and the legacy trainer were compared on `vit_pico` on CIFAR-10 only
 (10 epochs, three seeds each; the means differ by less than a tolerance measured from the legacy

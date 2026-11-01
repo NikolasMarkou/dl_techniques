@@ -37,7 +37,7 @@ import pytest
 from PIL import Image
 
 import train.api.recipes as recipes
-from train.api import cli, registry
+from train.api import cli, data_args, registry
 from train.api.cli import coerce_mapping, parse_dotlist
 from train.api.config import AUTO, StrictConfig, validate
 from train.api.errors import ConfigValidationError
@@ -194,6 +194,10 @@ def world():
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(registry, "MODELS", {})
         patch.setattr(registry, "TASKS", {})
+        # The rows `data.imagenet_root` and `data.devkit_dir` carry paths that do not exist; this
+        # file is about the key reaching its field, and the existence check has its own file
+        # (test_the_builtin_sources_are_refused_before_the_claim).
+        patch.setattr(data_args, "check_builtin_sources", lambda data: None)
         recipes.register_builtin_models()
         registry.register_task(
             registry.TaskSpec(

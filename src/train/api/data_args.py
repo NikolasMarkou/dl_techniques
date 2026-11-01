@@ -85,7 +85,19 @@ Interface contract
         loader refuses for this data.
 
 ``builtin_facts`` / ``load_builtin_data``
-    The built-in halves of the two functions above.
+    The built-in halves of the two functions above. ``builtin_facts`` also calls
+    ``check_builtin_sources``.
+
+``check_builtin_sources(data)``
+    :param data: a :class:`BuiltinImageData`.
+    :raises ConfigError: for ``imagenet`` when the root (``data.imagenet_root`` or the loader's
+        default) is not a directory, has no ``train/`` or no ``val/``, or the devkit
+        (``data.devkit_dir`` or ``<root>/devkit``, then its ``data/``) lacks ``meta.mat`` or
+        ``ILSVRC2012_validation_ground_truth.txt``; for ``imagenette`` when no
+        ``imagenette/320px-v2/<version>/dataset_info.json`` is under ``$TFDS_DATA_DIR`` (or
+        ``~/tensorflow_datasets``). The message names the key and the path looked at.
+        ``Path`` tests only: no TFDS import, no tensor, nothing opened or written, so it runs
+        before ``open_run``. Other datasets return.
 
 Import rule
 -----------
@@ -406,7 +418,100 @@ def builtin_facts(data: BuiltinImageData, requested_image_size: Optional[int]) -
             f"{native} px and in-memory datasets are not resized, got {size!r}; "
             "leave it at 'auto'"
         )
+    check_builtin_sources(data)
     return DataFacts(dataset=data.dataset, num_classes=spec.num_classes, image_size=size)
+
+
+def _tfds_data_dir() -> Path:
+    """Return the directory TFDS reads when no ``data_dir`` is given, without importing it.
+
+    ``$TFDS_DATA_DIR`` when the variable is set (even empty, as TFDS reads it), else
+    ``~/tensorflow_datasets``.
+    """
+    given = os.environ.get("TFDS_DATA_DIR")
+    if given is not None:
+        return Path(given)
+    return Path(os.path.expanduser("~")) / "tensorflow_datasets"
+
+
+def check_builtin_sources(data: BuiltinImageData) -> None:
+    """Refuse an ImageNet tree or Imagenette record set that is not on disk; see the module contract.
+
+    Interface contract: ``data`` is any built-in data config. In-memory datasets download
+    through Keras and have nothing to look for, so they return. Only ``Path`` tests run: no
+    TFDS import, no tensor, no file is opened or written, so it is safe before ``open_run`` and
+    before ``setup_gpu``. Each test is the one the loader makes first, so a tree that passes
+    here is the tree the loader opens (a missing ``val/`` or devkit file is a
+    ``FileNotFoundError`` there, after the claim and with exit 1).
+
+    :param data: the data config.
+    :raises ConfigError: naming the dotted key and the path looked at.
+    """
+    if data.dataset == "imagenet":
+        _check_imagenet_tree(data)
+    elif data.dataset == "imagenette":
+        _check_imagenette_records()
+
+
+def _check_imagenet_tree(data: BuiltinImageData) -> None:
+    """Refuse a missing ImageNet root, ``train/``, ``val/`` or devkit file; see :func:`check_builtin_sources`."""
+    # DECISION plan-2026-10-31T180033-2faf890a/D-034: path tests only, and exactly the loader's
+    # own. Do NOT import ``train.common.imagenet`` or call the loader: they open files and the
+    # first dataset op creates TensorFlow's devices before ``setup_gpu``. Do NOT test more than
+    # the loader needs (an image count, a class count): a false refusal of the real tree is the
+    # worst failure here.
+    from dl_techniques.datasets.vision import imagenet2012 as loader
+
+    key = "data.imagenet_root"
+    root = loader.IMAGENET2012_DEFAULT_ROOT if data.imagenet_root is None else data.imagenet_root
+    origin = "" if data.imagenet_root is not None else " (null: the loader's default)"
+    if not os.path.isdir(root):
+        raise ConfigError(
+            f"Invalid value for {key!r}: the ImageNet root {root!r}{origin} is not a directory; "
+            "point it at the extracted ILSVRC2012 tree (train/<wnid>/, val/, devkit/)"
+        )
+    for split in ("train", "val"):
+        if not os.path.isdir(os.path.join(root, split)):
+            raise ConfigError(
+                f"Invalid value for {key!r}: {os.path.join(root, split)!r} is not a directory; "
+                f"the ImageNet root {root!r}{origin} must hold {split}/ "
+                "(every run reads train for the classes and val as the test split)"
+            )
+    devkit = data.devkit_dir if data.devkit_dir is not None else os.path.join(root, "devkit")
+    missing = [
+        name
+        for name in (loader._META_FILE, loader._VAL_GROUND_TRUTH_FILE)
+        if loader._find_devkit_file(devkit, name) is None
+    ]
+    if missing:
+        raise ConfigError(
+            f"Invalid value for 'data.devkit_dir': {', '.join(missing)} not found in {devkit!r} "
+            f"or {os.path.join(devkit, 'data')!r}"
+            + ("" if data.devkit_dir is not None else " (null: <imagenet_root>/devkit)")
+            + "; the validation labels need the extracted ILSVRC2012 devkit"
+        )
+
+
+def _check_imagenette_records() -> None:
+    """Refuse an Imagenette ``320px-v2`` record set that is not under the TFDS directory."""
+    # DECISION plan-2026-10-31T180033-2faf890a/D-034: look for a version directory that holds
+    # ``dataset_info.json`` and do NOT name a version: the builder's version is only known by
+    # importing TFDS, which this check must not do. The loader still checks the exact one.
+    from dl_techniques.datasets.vision.imagenette import IMAGENETTE_TFDS_NAME
+
+    root = _tfds_data_dir()
+    here = root / IMAGENETTE_TFDS_NAME
+    found = here.is_dir() and any(
+        (child / "dataset_info.json").is_file() for child in here.iterdir() if child.is_dir()
+    )
+    if not found:
+        raise ConfigError(
+            f"Invalid value for 'data.dataset': imagenette reads the TFDS records of "
+            f"{IMAGENETTE_TFDS_NAME}, and none are under {str(here)!r} "
+            f"(TFDS directory {str(root)!r} from "
+            f"{'$TFDS_DATA_DIR' if 'TFDS_DATA_DIR' in os.environ else 'the default ~/tensorflow_datasets'}); "
+            "nothing is downloaded. Set TFDS_DATA_DIR to the directory that holds imagenette/"
+        )
 
 
 def load_builtin_data(

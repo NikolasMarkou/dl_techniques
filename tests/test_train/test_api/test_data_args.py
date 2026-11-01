@@ -173,6 +173,9 @@ def test_the_facts_come_from_the_table_without_loading(dataset, size, expected, 
         raise AssertionError("builtin_facts must not read any data")
 
     monkeypatch.setattr(classification_data, "_load_raw", refuse)
+    # The table is what is under test; whether the ImageNet tree and the TFDS records exist on
+    # this machine is the business of test_the_builtin_sources_are_refused_before_the_claim.
+    monkeypatch.setattr(data_args, "check_builtin_sources", lambda data: None)
     facts = builtin_facts(BuiltinImageData(dataset=dataset), size)
     assert (facts.num_classes, facts.image_size) == expected
     assert facts.dataset == dataset

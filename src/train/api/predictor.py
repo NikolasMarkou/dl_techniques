@@ -18,7 +18,13 @@ Interface contract
 ``task``, ``model``, ``family``, ``variant``
     The task word, ``"family/variant"``, and its two halves.
 ``class_names``
-    One text per class, in the order of the model's outputs.
+    One text per class, in the order of the model's outputs. **Limit, stated because it cannot
+    be checked:** the reader verifies the COUNT (against the model's output width) and that no
+    name repeats, never the ORDER. A record whose names are a permutation of the right ones (two
+    classes swapped by hand or by a bug in whatever wrote it) loads and predicts, and reports the
+    wrong name for those classes; no property of the model or of the record tells the two apart.
+    Trust the file only as far as you trust its writer; ``export`` and a training run write it
+    from the data they loaded.
 ``input_shape``, ``channels``
     ``[height, width, channels]`` of the model's input; ``channels`` repeats the last.
 ``normalize``
@@ -26,7 +32,14 @@ Interface contract
 ``mean``, ``std``
     One number per channel: what the training inputs were standardized with, as the
     data loader reports it. ``unit`` is zeros and ones. A folder or csv run records the
-    statistics of ONE pass over its fit split, not an ImageNet constant.
+    statistics of ONE pass over its fit split, not an ImageNet constant. **Bounds:**
+    ``MEAN_RANGE`` (0 to 1) for each ``mean`` and ``STD_RANGE`` (1e-6 to 1) for each ``std``.
+    The loader standardizes images that lie in ``[0, 1]``, so the mean of its pixels lies in
+    ``[0, 1]`` and their standard deviation cannot pass 0.5 (``unit`` records 1); the loader
+    itself refuses a folder or csv channel whose deviation is under 1e-6. A value outside these
+    is not a statistic of such images, and the predictor would divide by it: a ``mean`` of 1e30
+    turns every input into -1e30 and the probabilities into NaN, with no error. It is refused
+    at load.
 ``eval_transform``
     ``{"kind", "source_channels"}``: how an image of any size becomes the model's
     input before standardization (:data:`EVAL_KINDS`, the evaluation pipelines of the
@@ -52,7 +65,7 @@ Interface contract
         a value of the wrong kind (``variant_overrides`` included: a non-empty object of text
         keys and JSON values), repeated class names, a ``model`` that is not
         ``family/variant``, a ``mean`` or ``std`` of the wrong length, a ``std`` that is not
-        positive, ``normalize`` of ``unit`` with a ``mean`` that is not zeros or a ``std`` that
+        positive, a ``mean`` or ``std`` outside the bounds above, ``normalize`` of ``unit`` with a ``mean`` that is not zeros or a ``std`` that
         is not ones, or an ``eval_transform`` whose kind is not in :data:`EVAL_KINDS`.
 
 ``record_differences(earlier, now)``
@@ -193,6 +206,13 @@ EVAL_KIND_OF_DATA = {
 CHUNK = 32
 
 _NORMALIZE = ("standardize", "unit")
+
+#: The range of a record's per-channel ``mean`` and ``std``. The loader's images lie in [0, 1], so
+#: their mean does too and their deviation cannot pass 0.5 (``unit`` records exactly 1); 1e-6 is
+#: the loader's own floor for a folder or csv channel (``classification_data`` refuses less).
+#: A value outside is no statistic of such images and the predictor divides by it.
+MEAN_RANGE = (0.0, 1.0)
+STD_RANGE = (1e-6, 1.0)
 
 #: The PIL modes that already are grey (read as ``L``); every other mode is read as RGB.
 GREY_MODES = ("L", "LA", "1")
@@ -347,6 +367,17 @@ def record_problems(record: Mapping[str, Any]) -> List[str]:
     mean, std = record["mean"], record["std"]
     if isinstance(std, list) and all(_is_number(v) for v in std) and any(v <= 0 for v in std):
         lines.append(f"'std' must be positive, got {std!r}")
+    for key, (low, high) in (("mean", MEAN_RANGE), ("std", STD_RANGE)):
+        values = record[key]
+        if not (isinstance(values, list) and all(_is_number(v) for v in values)):
+            continue  # named above
+        # A std of zero or less is already named above; do not say it twice.
+        outside = [v for v in values if not low <= v <= high and (key == "mean" or v > 0)]
+        if outside:
+            lines.append(
+                f"{key!r} must lie in [{low:g}, {high:g}] (the loader standardizes images in "
+                f"[0, 1]), got {values!r}"
+            )
     numbers = all(isinstance(v, list) and all(_is_number(x) for x in v) for v in (mean, std))
     if record["normalize"] == "unit" and numbers:
         if any(v != 0 for v in mean) or any(v != 1 for v in std):

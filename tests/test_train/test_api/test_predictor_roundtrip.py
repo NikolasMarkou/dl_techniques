@@ -752,6 +752,13 @@ BAD_RECORDS = [
     (record(std=[0.1, 0.2, "x"]), "'std' must be a list of finite numbers"),
     (record(mean=[0.1, float("nan"), 0.3]), "'mean' must be a list of finite numbers"),
     (record(std=[0.2, 0.0, 0.3]), "'std' must be positive"),
+    # Step 15: a statistic of images in [0, 1] cannot be this big, and the predictor divides by it.
+    (record(mean=[1e30, 0.5, 0.5]), r"'mean' must lie in \[0, 1\].*1e\+30"),
+    (record(mean=[0.1, -0.0001, 0.3]), r"'mean' must lie in \[0, 1\]"),
+    (record(mean=[0.1, 1.0000001, 0.3]), r"'mean' must lie in \[0, 1\]"),
+    (record(std=[1e30, 0.2, 0.2]), r"'std' must lie in \[1e-06, 1\]"),
+    (record(std=[0.2, 1.01, 0.2]), r"'std' must lie in \[1e-06, 1\]"),
+    (record(std=[0.2, 1e-7, 0.2]), r"'std' must lie in \[1e-06, 1\]"),
     (record(eval_transform={"kind": "resize"}), "eval_transform"),
     (record(eval_transform={"kind": "resize", "source_channels": 2}), "source_channels"),
     (
@@ -772,6 +779,33 @@ def test_a_bad_record_is_refused_naming_the_key(bad, pattern):
 def test_a_unit_record_of_zeros_and_ones_and_a_standardize_record_with_any_numbers_pass():
     check_record(record(normalize="unit", mean=[0, 0, 0], std=[1, 1.0, 1]), "<test>")
     check_record(record(normalize="standardize", mean=[0.0, 0.0, 0.0], std=[1.0, 1.0, 1.0]), "<test>")
+
+
+def test_the_bounds_of_mean_and_std_are_inclusive_and_a_std_at_or_below_zero_is_named_once():
+    check_record(record(mean=[0.0, 1.0, 0.5], std=[1e-6, 0.5, 1.0]), "<test>")
+    for bad in (record(std=[0.2, 0.0, 0.3]), record(std=[-1.0, 0.2, 0.3])):
+        with pytest.raises(ConfigError) as caught:
+            check_record(bad, "<test>")
+        assert "'std' must be positive" in str(caught.value)
+        assert "must lie in" not in str(caught.value)
+
+
+def test_a_record_with_an_absurd_mean_is_refused_at_load_not_at_the_first_prediction(
+    run_dir, tmp_path
+):
+    """The review's pred.py: ``mean`` 1e30 loaded and predicted NaN probabilities with no error."""
+    for key, value in (("mean", [1e30] * 3), ("std", [1e-30] * 3)):
+        bad = copy_with_record(run_dir, tmp_path / key, **{key: value})
+        with pytest.raises(ConfigError, match=f"'{key}' must lie in"):
+            load_model(bad)
+
+
+def test_the_contract_states_the_limits_that_cannot_be_checked():
+    """The class ORDER cannot be verified; the module contract must say so (step 15)."""
+    text = " ".join(predictor.__doc__.split())
+    assert "never the ORDER" in text and "permutation of the right ones" in text
+    assert "MEAN_RANGE" in text and "STD_RANGE" in text
+    assert predictor.MEAN_RANGE == (0.0, 1.0) and predictor.STD_RANGE == (1e-6, 1.0)
 
 
 def test_a_record_that_is_not_an_object_is_refused():
