@@ -198,6 +198,9 @@ Hooks (override in a task)
     this config (class names, preprocessing, the statistics the data was standardized
     with). Default: ``None``, which writes no ``task.json``. It is written once, before
     ``fit``, so a killed run has it and a resume leaves it as it is.
+``check_model_args(config, context)``
+    Optional. Raises ``ConfigError`` for a model argument the run cannot honour, called with the
+    resolved config before the run directory is claimed. Default: nothing is checked.
 ``used_arguments(config, context)``
     A JSON-plain mapping written to ``config.json`` under the key ``used``: what
     the run is built with beyond the config's fields (D-050). Default: empty, which
@@ -625,6 +628,14 @@ class TaskTrainer:
         """Return the ``task.json`` record, or ``None`` for a task that writes none."""
         return None
 
+    def check_model_args(self, config: StrictConfig, context: AutoContext) -> None:
+        """Raise :class:`ConfigError` for a model argument the run cannot honour, before the claim.
+
+        Called with the RESOLVED config (every ``"auto"`` filled) and the context, after the
+        other pre-claim checks and before ``open_run``, so a request that would fail while the
+        model is built is refused with no trace. Default: nothing is checked.
+        """
+
     def used_arguments(self, config: StrictConfig, context: AutoContext) -> Dict[str, Any]:
         """Return what the run is built with beyond the config, for ``config.json``.
 
@@ -809,6 +820,7 @@ class TaskTrainer:
         assert_resolved(resolved)
         self._notices = self._recipe_notices(config, resolved, facts, family, recipe)
         self._refuse_before_the_claim(resolved, facts)
+        self.check_model_args(resolved, context)
         return resolved, context
 
     def _recipe_notices(

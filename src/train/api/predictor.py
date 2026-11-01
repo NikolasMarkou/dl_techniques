@@ -33,6 +33,15 @@ Interface contract
     loader), and the channel count the files are read with (``1`` for MNIST, whose
     single channel is repeated up to ``channels``).
 
+``variant_overrides`` (OPTIONAL)
+    ``{table key: value}``: the keys of the variant's table (``MODEL_VARIANTS[variant]``) that the
+    run's resolved ``model_args`` set to another value, so the model is the variant WITH these
+    changes. Written ONLY when there is at least one (a default run's ``task.json`` is
+    byte-identical to one written before the key existed); a record may omit it, and an empty or
+    malformed one is refused. :func:`check_model_against_record` compares the model with the
+    variant's table updated by it, so an override is honoured and a wrong variant or an override the
+    model does not have is still refused. ``export`` carries it into ``<out>.task.json``.
+
 ``build_task_record(...)``
     :return: the record for a finished data load (not checked; see its docstring).
 
@@ -40,7 +49,8 @@ Interface contract
     :param record: a parsed ``task.json``.
     :param source: its path, for the messages.
     :raises ConfigError: for a wrong ``schema_version``, a missing or unknown key,
-        a value of the wrong kind, repeated class names, a ``model`` that is not
+        a value of the wrong kind (``variant_overrides`` included: a non-empty object of text
+        keys and JSON values), repeated class names, a ``model`` that is not
         ``family/variant``, a ``mean`` or ``std`` of the wrong length, a ``std`` that is not
         positive, ``normalize`` of ``unit`` with a ``mean`` that is not zeros or a ``std`` that
         is not ones, or an ``eval_transform`` whose kind is not in :data:`EVAL_KINDS`.
@@ -151,6 +161,9 @@ RECORD_KEYS = (
     "eval_transform",
 )
 
+#: Keys a record MAY carry (written only when they hold something); every other key is required.
+OPTIONAL_RECORD_KEYS = ("variant_overrides",)
+
 #: The evaluation transforms this predictor reproduces, by the loader code each one is:
 #: ``resize`` is ``train.common.classification_data.resizer`` (the in-memory datasets,
 #: folder and csv data); ``resize_centre_crop`` is
@@ -206,8 +219,12 @@ def build_task_record(
     std: Any,
     data_kind: str,
     source_channels: int,
+    variant_overrides: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Return the ``task.json`` record of a run; see the module contract.
+
+    :param variant_overrides: the output of :func:`overrides_of_variant`; the record gets the
+        ``variant_overrides`` key only when this is not empty.
 
     :param data_kind: a key of :data:`EVAL_KIND_OF_DATA`: the dataset name, or ``folder``
         or ``csv``.
@@ -216,7 +233,7 @@ def build_task_record(
         truthfully; every kind it can hold is one :func:`check_record` accepts.
     """
     shape = [int(side) for side in input_shape]
-    return {
+    record = {
         "schema_version": SCHEMA_VERSION,
         "task": task,
         "model": model,
@@ -233,10 +250,47 @@ def build_task_record(
             "source_channels": int(source_channels),
         },
     }
+    if variant_overrides:
+        record["variant_overrides"] = _plain(dict(variant_overrides))
+    return record
 
 
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _is_json_plain(value: Any) -> bool:
+    """Whether ``value`` is None, a bool, a finite number, a text, or a list or text-keyed dict of those."""
+    if value is None or isinstance(value, (bool, str)):
+        return True
+    if isinstance(value, (int, float)):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_is_json_plain(item) for item in value)
+    if isinstance(value, dict):
+        return all(isinstance(key, str) and _is_json_plain(item) for key, item in value.items())
+    return False
+
+
+def overrides_of_variant(table_row: Mapping[str, Any], kwargs: Mapping[str, Any]) -> Dict[str, Any]:
+    """Return the keys of ``table_row`` that ``kwargs`` set to another value, as JSON-plain values.
+
+    Interface contract: ``table_row`` is ``MODEL_VARIANTS[variant]`` and ``kwargs`` the factory
+    keywords a run was built with (the resolver's output: the recipe's ``model_args``, the computed
+    keys and the caller's ``model_args``). A key counts only when it is in the table AND its value
+    differs from the table's (tuples read as lists), so a run that restates a table value, and
+    every run that touches no table key, gets ``{}`` and therefore no ``variant_overrides`` key.
+    Pure; imports nothing heavy.
+
+    :param table_row: the variant's table.
+    :param kwargs: the factory keywords.
+    :return: ``{key: value}`` in the table's key order; ``{}`` when nothing was overridden.
+    """
+    return {
+        key: _plain(kwargs[key])
+        for key in table_row
+        if key in kwargs and _plain(kwargs[key]) != _plain(table_row[key])
+    }
 
 
 def record_problems(record: Mapping[str, Any]) -> List[str]:
@@ -248,7 +302,7 @@ def record_problems(record: Mapping[str, Any]) -> List[str]:
             f"'schema_version' is {version!r}; this reader understands {SCHEMA_VERSION} only"
         ]
     missing = [key for key in RECORD_KEYS if key not in record]
-    unknown = sorted(set(record) - set(RECORD_KEYS))
+    unknown = sorted(set(record) - set(RECORD_KEYS) - set(OPTIONAL_RECORD_KEYS))
     if missing:
         lines.append(f"missing key(s) {', '.join(map(repr, missing))}")
     if unknown:
@@ -300,6 +354,18 @@ def record_problems(record: Mapping[str, Any]) -> List[str]:
                 f"'normalize' is 'unit' (no standardization) but 'mean' is {mean!r} and 'std' is "
                 f"{std!r}; unit means zeros and ones"
             )
+    if "variant_overrides" in record:
+        overrides = record["variant_overrides"]
+        if not (
+            isinstance(overrides, dict)
+            and overrides
+            and all(isinstance(key, str) and key and _is_json_plain(value) for key, value in overrides.items())
+        ):
+            lines.append(
+                "'variant_overrides' must be a non-empty object of text keys and JSON values "
+                f"(it is written only when a model_args key changed a key of the variant's table), "
+                f"got {_shown(overrides)}"
+            )
     transform = record["eval_transform"]
     if not isinstance(transform, dict) or set(transform) != {"kind", "source_channels"}:
         lines.append(
@@ -348,7 +414,7 @@ DATA_KEYS = ("class_names", "input_shape", "normalize", "eval_transform", "mean"
 
 
 def _shown(value: Any) -> str:
-    text = json.dumps(value)
+    text = json.dumps(value, default=repr)
     return text if len(text) <= 100 else text[:97] + "..."
 
 
@@ -457,17 +523,27 @@ def check_model_against_record(
     Interface contract: ``model`` is a loaded Keras model, ``record`` a checked record, ``spec`` the
     registered :class:`~train.api.registry.ModelSpec` of ``record["family"]``. The family is the
     class named by ``spec.variants_attr`` (``model`` must be an instance of it); the variant must
-    be a key of that class's ``MODEL_VARIANTS``, and every key of the variant's table that the
-    model's ``get_config()`` also holds must be equal. Measured on all six families (the
-    smallest variant of each, against every variant's table): a wrong variant differs in at least
-    one such key. A model trained with ``model_args`` that override a key of its variant's table
-    is refused by the last rule, because its record then names a variant it no longer is.
+    be a key of that class's ``MODEL_VARIANTS``. The EXPECTED table is the variant's table updated
+    by the record's ``variant_overrides`` (each override key must be a key of the table, and the
+    model's ``get_config()`` must report it), and every key of the expected table that the model's
+    ``get_config()`` also holds must be equal. Measured on all six families (the smallest variant of
+    each, against every variant's table): a wrong variant differs in at least one such key.
+    A run trained with ``model_args`` that override table keys is honoured through
+    ``variant_overrides`` (D-032, which replaces the refusal D-028 accepted for it); a model
+    that differs from its variant in a key the record does not list is refused. Two variants that
+    differ only in keys the record overrides are the same architecture and cannot be told apart.
     """
     # DECISION plan-2026-10-31T180033-2faf890a/D-028
     # The family and the variant of the record are compared with the MODEL, not only with each
     # other (``record_problems`` already checks ``model == family/variant``): a record that names
     # another family or variant still predicts, with a lie in its metadata. Do NOT compare the
     # whole config: ``model_args`` that are not part of a variant table are free.
+    # DECISION plan-2026-10-31T180033-2faf890a/D-032
+    # Supersedes D-028's accepted refusal of a model whose table keys ``model_args`` overrode.
+    # Do NOT refuse such a model: the run records the overridden keys in ``variant_overrides``
+    # and the EXPECTED table is the variant's updated by them. Refusing it made a run that
+    # trained for hours unable to ``predict`` or ``export`` (step 14.7, measured on 5 of 6
+    # families). A wrong variant, a foreign key and an override the model lacks stay refused.
     from .registry import load_attr
 
     module_name, _, attr_path = spec.variants_attr.partition(":")
@@ -486,11 +562,31 @@ def check_model_against_record(
             f"(known: {', '.join(sorted(table))})"
         )
     wanted = table[variant]
+    overrides = record.get("variant_overrides") or {}
+    if overrides and not isinstance(wanted, Mapping):
+        raise ConfigError(
+            f"Invalid {TASK_FILE} {task_file}: it records variant_overrides but {variant!r} of "
+            f"{family!r} has no table of keys to override"
+        )
     if isinstance(wanted, Mapping):
         built = model.get_config()
+        foreign = [key for key in overrides if key not in wanted]
+        if foreign:
+            raise ConfigError(
+                f"Invalid {TASK_FILE} {task_file}: variant_overrides names {', '.join(map(repr, foreign))}, "
+                f"which {variant!r} of {family!r} does not have (it has {', '.join(map(repr, wanted))})"
+            )
+        unreported = [key for key in overrides if key not in built]
+        if unreported:
+            raise ConfigError(
+                f"Invalid {TASK_FILE} {task_file}: variant_overrides names {', '.join(map(repr, unreported))} "
+                f"but {model_file} does not report that key, so the override cannot be true of it"
+            )
+        expected = {**wanted, **overrides}
         differing = [
-            f"{key} is {_shown(_plain(built[key]))} in the model, {_shown(_plain(value))} in {variant!r}"
-            for key, value in wanted.items()
+            f"{key} is {_shown(_plain(built[key]))} in the model, {_shown(_plain(value))} in "
+            f"{variant!r}{' with the recorded overrides' if overrides else ''}"
+            for key, value in expected.items()
             if key in built and _plain(built[key]) != _plain(value)
         ]
         if differing:

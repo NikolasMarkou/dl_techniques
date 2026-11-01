@@ -132,7 +132,11 @@ sample's high byte, and is equal to the loader on it; PIL's `I` and `F` (32-bit 
 8-bit, which cannot be told from an 8-bit file, so for a grey model it is within 1 level of 255 of the loader (measured; a
 path is exact). `load_model` refuses, at load, a `task.json` whose `task` is not `image_classification`, whose family or
 variant is not the model's, or whose `input_shape` the model does not take, and a `.keras` zip with no `config.json` or no
-weights, each with a `ConfigError` naming the problem.
+weights, each with a `ConfigError` naming the problem. A run whose `model_args` change a key of its variant's table
+(`depth` of `cliffordnet/nano`, `blocks_per_stage` of `resnet/resnet18`, `depths` of a convnext) records those keys in an
+optional `variant_overrides` object of `task.json`, written only when there is one; `predict` and `export` then compare
+the model with the variant plus those changes (and `export` copies the object into `<out>.task.json`). A ViT's `scale`
+cannot be overridden: choose the variant (`model=vit/vit_tiny`); the request is refused before the run directory is made.
 
 **Export**: `python -m train export model=<run dir or .keras> out=<path> format=keras|saved_model|tflite|onnx`
 writes one new file (a directory for `saved_model`) and `<out>.task.json` beside it, and prints

@@ -338,11 +338,25 @@ def _merged(
     optim_args: OptimArgs,
     model_args: Mapping[str, Any],
     computed: Mapping[str, Any],
+    fixed: Tuple[str, ...] = (),
 ) -> Dict[str, Any]:
     """Lay the recipe's data, the computed values and the caller's keys, in that order.
 
     :param computed: the keys the family derives from the data and the optimizer.
+    :param fixed: keys of the variant's table that the family's factory sets itself and cannot
+        take as an override (measured: a ViT's ``scale`` raises ``TypeError``, "multiple values
+        for keyword argument"); naming one in ``model_args`` is refused here, which a task
+        reaches before the run directory is claimed (``check_model_args``). Every OTHER key of a
+        variant's table may be overridden, and the run records the change in ``task.json``
+        (``variant_overrides``).
     """
+    fixed_asked = [key for key in model_args if key in fixed]
+    if fixed_asked:
+        raise ConfigError(
+            f"Invalid value for 'model_args': {', '.join(map(repr, fixed_asked))} is fixed by the "
+            f"variant {context.variant!r} of {context.family!r} and cannot be overridden; choose "
+            f"the variant instead (model={context.family}/<variant>)"
+        )
     supplied = [key for key in model_args if key in _SUPPLIED]
     if supplied:
         raise ConfigError(
@@ -382,6 +396,7 @@ def resolve_vit_args(
         optim_args,
         model_args,
         {"patch_size": patch, "kernel_regularizer": _weight_decay_regularizer(optim_args)},
+        fixed=("scale",),
     )
 
 

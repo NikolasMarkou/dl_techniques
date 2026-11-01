@@ -99,11 +99,13 @@ DRIVER = textwrap.dedent(
             initial={{"metrics": {{"loss": 2.3}}, "ratio": 1.0, "warned": False}})
         with open(run / "training_log.csv", "w", newline="") as handle:
             csv.writer(handle).writerows([["epoch", "loss"], [0, 1.0]])
-        # An intact archive, so the pre-GPU integrity check passes; its content is never loaded here.
+        # An intact archive with the two members a .keras file cannot be loaded without (step 14.4),
+        # so the pre-GPU integrity check passes; its content is never loaded here.
         import zipfile
 
         with zipfile.ZipFile(run / "best_model.keras", "w") as archive:
             archive.writestr("config.json", "{{}}")
+            archive.writestr("model.weights.h5", "")
         seen["planted_without_tensors"] = not initialised()
     try:
         train_image_classification(

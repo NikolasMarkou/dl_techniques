@@ -103,7 +103,7 @@ from ..data_args import (
     load_image_data,
     read_data_file,
 )
-from ..predictor import build_task_record
+from ..predictor import build_task_record, overrides_of_variant
 from ..trainer import Evaluation, FitState, TaskTrainer, TrainResult, config_problems
 
 # ---------------------------------------------------------------------
@@ -302,7 +302,17 @@ class ImageClassificationTrainer(TaskTrainer):
             std=data.std,
             data_kind=data_kind,
             source_channels=source_channels,
+            variant_overrides=overrides_of_variant(
+                registry.MODELS[context.family].load_variants()[context.variant],
+                self._model_kwargs(config, context),
+            ),
         )
+
+    def check_model_args(self, config: ImageClassificationConfig, context: AutoContext) -> None:
+        # Run the family's resolver before the claim: it refuses a model_args key the library
+        # supplies, a double weight decay and a fixed variant key (a ViT's ``scale``), which
+        # used to surface only after the run directory was claimed.
+        self._model_kwargs(config, context)
 
     def metric_names(self, config: ImageClassificationConfig, facts: DataFacts) -> List[str]:
         # DECISION plan-2026-10-30T132432-a865fa08/D-055: names only. Do NOT build the
