@@ -56,8 +56,11 @@ spinning disk; the seconds go to `run.log`). A resume refuses a changed mode or 
 
 **Figures, analysis and TensorBoard**: five keys decide what is written besides the models and the
 summary. The region between the markers below is read by
-`tests/test_train/test_api/test_the_knob_docs_name_real_keys.py`: every key, default and name in it is
-checked against the code, so a stale one fails the test.
+`tests/test_train/test_api/test_the_knob_docs_name_real_keys.py`, which checks the config keys (and any `=value`), the
+defaults in the table, the hook names and signatures, the file paths and the output file names it mentions against the
+code, and the cost table against its evidence file, so a stale one of those fails the test. It does not check the
+wording of a description (what a knob writes or needs) or any number that is not a cost in that table; the test's
+docstring lists what is unchecked.
 
 <!-- knobs:begin -->
 | Key | Default | What it does |
@@ -68,15 +71,28 @@ checked against the code, so a stale one fails the test.
 | `analysis_args.conformal_alpha` | `null` | A level strictly between 0 and 1 (0.1 aims at 90% coverage) writes `conformal.json` and `conformal_model.keras` (outputs logits, probabilities and set membership), calibrated on the test split. `null` skips it and the summary's `conformal` is null. A level with no test split is skipped with a note |
 | `logger_args.tensorboard` | `{}` | `{}` writes TensorBoard event files into `tensorboard/` (`train/` and `validation/`); `null` turns them off; a dict with keys is refused, because no TensorBoard option is wired |
 
-Measured cost, one run each, `vit/vit_pico` on 240 fake CIFAR-10 images (240 test images), 3 epochs, batch 16,
-CPU with one thread, wall seconds of the whole call against a run with figures, model analysis and epoch
-analysis off (68.0 s; its fit took 53.7 s; TensorBoard on, no conformal): `epoch_analysis_every=1` +29.4 s to the fit (four snapshots, `epoch_000` to `epoch_003`, about
-7 s each, 6.2 MB); `model_analysis` +23.4 s (3.1 MB); `figures` +6.9 s (0.4 MB); `conformal_alpha=0.1` +4.2 s
-(`conformal_model.keras` is a full copy of the model, 32 MB here); TensorBoard on against off was 68.0 s against 65.0 s (0.2 MB), which one run each cannot tell
-from noise. These are small-model, small-data numbers: the analyzer's cost
-grows with the number of layers and test images, and the dashboard render is recorded at 1.0 to 1.7 s each
-(`common/classification_viz.py`). The evidence is `plans/plan-2026-10-31T180033-2faf890a/scratch_step13/measure_out.txt`
-(the plans directory is untracked).
+Measured cost, one run each, so a difference of a few seconds is inside the noise. Setup: `vit/vit_pico` on 240 fake
+CIFAR-10 images (240 test images), 3 epochs, batch 16, CPU with one thread. Each row turns on the one setting, against a
+base run with figures, model analysis and epoch analysis off and TensorBoard on (the `base` row, wall seconds of the whole
+call); the TensorBoard row is the base run against one with TensorBoard off. The cost grows with the number of layers and
+test images. Durations are stated only in this table, and `test_the_knob_docs_name_real_keys.py` recomputes every row from
+`tests/test_train/test_api/knob_cost_evidence.json` (a copy of the measurement in the untracked
+`plans/plan-2026-10-31T180033-2faf890a/scratch_step13/measure_out.txt`; the test does not re-measure it).
+
+<!-- costs:begin -->
+| Setting | Extra wall seconds | Output, MB |
+|---|---|---|
+| `base` | 68.0 | - |
+| `analysis_args.epoch_analysis_every=1` | 29.3 | 6.4 |
+| `analysis_args.model_analysis=true` | 23.4 | 3.1 |
+| `analysis_args.figures=true` | 6.9 | 0.4 |
+| `analysis_args.conformal_alpha=0.1` | 4.2 | 32.6 |
+| `logger_args.tensorboard={}` | 3.0 | 0.2 |
+<!-- costs:end -->
+
+`epoch_analysis_every=1` writes four snapshots (`epoch_000` to `epoch_003`). The `conformal_model.keras` of the conformal
+row is a full copy of the model. The `base` row is the whole call, not an extra, and the TensorBoard row is inside the
+noise of one run each.
 
 **A failed analysis is named, with its reason.** The analyzer isolates a failing analysis and carries on, so
 a run can write a normal-looking `model_analysis/` after one of its parts failed. For this task the summary's

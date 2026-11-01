@@ -458,8 +458,11 @@ per-model scripts (usage, keys, run directory, resume, `predict`, `export`, exit
   module is not named `export`.
 - **Figures, analysis and TensorBoard knobs** (the user-facing table, what each writes and the measured costs are in
   [`README.md`](README.md); this is the contributor's side). The region between the markers is read by
-  `tests/test_train/test_api/test_the_knob_docs_name_real_keys.py`, which checks each backticked key, default,
-  `summary.analyzer.*` key and `TaskTrainer.*(...)` signature against the code, and fails when a knob is not named.
+  `tests/test_train/test_api/test_the_knob_docs_name_real_keys.py`, which checks every `<group>_args.<field>` and
+  `data.<field>` key in the document (and any `=value`), the defaults in a `Default` column, the `Read at` paths and
+  `Class.attr` names, the output file names, the `summary.analyzer.*` keys and the `TaskTrainer.*` names and signatures
+  against the code, forbids a duration outside the README's cost table (which is recomputed from
+  `test_api/knob_cost_evidence.json`), and fails when a knob is not named. The wording of a description is unchecked.
   Add a knob to `AnalysisArgs` or `LoggerArgs` and this region and the README's change in the same commit.
 
 <!-- knobs:begin -->

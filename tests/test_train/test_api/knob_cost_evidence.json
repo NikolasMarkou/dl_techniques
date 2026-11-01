@@ -1,0 +1,62 @@
+{
+  "source": "plans/plan-2026-10-31T180033-2faf890a/scratch_step13/measure_out.txt and its runs/ directory (untracked; copied here so a tracked file pins the numbers the README states)",
+  "setup": "vit/vit_pico, 240 fake CIFAR-10 images (240 test images), 3 epochs, batch 16, CPU with one thread, one run each; the base run has figures, model analysis and epoch analysis off and TensorBoard on",
+  "runs": {
+    "base": {
+      "wall_s": 68.0,
+      "fit_wall_s": 53.73096835601609
+    },
+    "ea1": {
+      "wall_s": 97.3,
+      "fit_wall_s": 83.12389054405503
+    },
+    "ma": {
+      "wall_s": 91.4,
+      "fit_wall_s": 54.75065416703001
+    },
+    "fig": {
+      "wall_s": 74.9,
+      "fit_wall_s": 56.15256926801521
+    },
+    "conf": {
+      "wall_s": 72.2,
+      "fit_wall_s": 54.24585506506264
+    },
+    "base_notb": {
+      "wall_s": 65.0,
+      "fit_wall_s": 50.66823279997334
+    }
+  },
+  "rows": {
+    "base": {
+      "run": "base",
+      "against": null,
+      "output_bytes": null
+    },
+    "analysis_args.epoch_analysis_every=1": {
+      "run": "ea1",
+      "against": "base",
+      "output_bytes": 6364474
+    },
+    "analysis_args.model_analysis=true": {
+      "run": "ma",
+      "against": "base",
+      "output_bytes": 3146751
+    },
+    "analysis_args.figures=true": {
+      "run": "fig",
+      "against": "base",
+      "output_bytes": 410657
+    },
+    "analysis_args.conformal_alpha=0.1": {
+      "run": "conf",
+      "against": "base",
+      "output_bytes": 32619457
+    },
+    "logger_args.tensorboard={}": {
+      "run": "base",
+      "against": "base_notb",
+      "output_bytes": 207778
+    }
+  }
+}
