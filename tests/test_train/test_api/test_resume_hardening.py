@@ -241,6 +241,30 @@ def test_check_model_file_names_a_missing_a_cut_and_a_damaged_file(tmp_path):
         check_model_file(tmp_path / "missing.keras", "x")
 
 
+def test_check_model_file_refuses_a_member_whose_bytes_fail_their_checksum(tmp_path):
+    """A flipped byte inside a member leaves the central directory intact; only the CRC sees it.
+
+    The earlier test cut a file (no directory at all). This one is the other damage a full disk or
+    a bad sector leaves, and the branch (``testzip`` naming a member) no other test reached.
+    """
+    import zipfile
+
+    good = tmp_path / "good.keras"
+    tiny_model().save(good)
+    with zipfile.ZipFile(good) as archive:
+        member = max(archive.infolist(), key=lambda info: info.file_size)
+        assert member.compress_type == zipfile.ZIP_STORED  # a byte flip then stays a CRC mismatch
+        middle = member.header_offset + 30 + len(member.filename.encode()) + len(member.extra) + member.file_size // 2
+    damaged = tmp_path / "damaged.keras"
+    data = bytearray(good.read_bytes())
+    data[middle] ^= 0xFF
+    damaged.write_bytes(bytes(data))
+    with zipfile.ZipFile(damaged) as archive:  # the directory still reads: the cut-file branch is not this one
+        assert len(archive.infolist()) > 0
+    with pytest.raises(ConfigError, match=rf"x: {damaged} is damaged \(member '{member.filename}' fails its checksum\)"):
+        check_model_file(damaged, "x")
+
+
 # ---------------------------------------------------------------------
 # C4, C5: the backup is a pair, and the pair is checked
 # ---------------------------------------------------------------------

@@ -58,12 +58,19 @@ Interface contract
         ignores the return value holds nothing. The descriptor is not inherited across
         ``exec``.
     :raises ConfigError: a lost claim, a live holder (naming its pid when the file says
-        it), or a filesystem on which ``flock`` fails (the error is named). A failed
-        ``take`` leaves the file as it was. Nothing here deletes: a finished or killed
-        run's lock file stays and its payload is overwritten by the next holder.
+        it, and saying that a child of that process may still hold the lock), a filesystem
+        on which ``flock`` fails, or a lock file that cannot be opened, written or read (a
+        read-only file or directory, a full disk, an unreadable file); each names the lock
+        path. A failed ``take`` leaves the earlier file as it was: the label is written over
+        the old one BEFORE the file is cut to its length, so a failed write never zeroes a lock
+        that existed. A file that this very call created stays, empty (a stale label): nothing
+        here deletes. A finished or killed run's lock file stays and its payload is
+        overwritten by the next holder. A payload that is empty, garbled or not UTF-8 is a
+        stale label (``read_lock`` gives ``{}``), never an error.
     ``refuse_live_holder`` is the read-only check of the same lock (a shared ``flock``
     taken and dropped at once, so it writes nothing): it raises the same refusals and is
-    what ``open_run`` calls before any file of a resume is read. While it runs, a process
+    what ``open_run`` calls FIRST on a resume, before any other file is read, so a live
+    holder is named as such in the first-epoch and the reporting windows alike. While it runs, a process
     taking the lock at that instant is refused as if the probe were a holder.
 
 ``check_model_file(path, what)``
@@ -393,25 +400,43 @@ def process_stamp(pid: int) -> Optional[str]:
 
 
 def read_lock(run_dir: Path) -> Optional[dict]:
-    """Return the parsed ``run.lock`` of ``run_dir``; ``None`` if absent; ``{}`` if unreadable.
+    """Return the parsed ``run.lock`` of ``run_dir``; ``None`` if absent; ``{}`` if unreadable text.
 
-    An empty or garbled file is the lock of a process that died while writing it.
+    An empty, garbled or non-UTF-8 payload is the lock of a process that died while writing
+    it (or of a disk that damaged it): ``{}``, a label that names nobody.
+
+    :raises ConfigError: naming the lock when the file exists but cannot be read at all
+        (no permission, a directory, an I/O error).
     """
+    lock = run_dir / LOCK_NAME
     try:
-        text = (run_dir / LOCK_NAME).read_text()
+        data = lock.read_bytes()
     except FileNotFoundError:
         return None
+    except OSError as exc:
+        raise _lock_unusable(lock, "read", exc) from exc
     try:
-        record = json.loads(text)
-    except ValueError:
+        record = json.loads(data.decode("utf-8"))
+    except ValueError:  # UnicodeDecodeError and JSONDecodeError are both ValueErrors
         return {}
     return record if isinstance(record, dict) else {}
 
 
 def _holder_text(run_dir: Path) -> str:
     """Name the process the lock file says holds ``run_dir`` (the file is only a label)."""
-    pid = (read_lock(run_dir) or {}).get("pid")
+    try:
+        pid = (read_lock(run_dir) or {}).get("pid")
+    except ConfigError:  # a holder whose label cannot be read is still a holder
+        pid = None
     return f"process {pid}" if isinstance(pid, int) and not isinstance(pid, bool) else "another process"
+
+
+def _lock_unusable(lock: Path, doing: str, exc: OSError) -> ConfigError:
+    """The refusal for an open, a write or a read of ``lock`` that the operating system refused."""
+    return ConfigError(
+        f"Cannot {doing} {lock}: {exc.strerror or exc}. The run lock needs a writable run "
+        "directory on a local disk; fix the permission or space, or choose another 'out'"
+    )
 
 
 def _flock_failed(lock: Path, exc: OSError) -> ConfigError:
@@ -428,23 +453,33 @@ def _is_held(exc: OSError) -> bool:
 
 
 def _held_by_another(run_dir: Path) -> ConfigError:
+    # DECISION plan-2026-10-31T180033-2faf890a/D-024
+    # The second sentence is true and needed: a flock lives as long as ANY descriptor of the open
+    # file does, so a holder killed while a forked worker (no exec) lives still blocks the lock,
+    # and the pid named is then dead (review-iter-1 concern 16). Do NOT word it as "process N is
+    # running": it is the kernel that holds the lock, and the pid is only a label.
     return ConfigError(
         f"Cannot resume {run_dir}: {_holder_text(run_dir)} holds {LOCK_NAME} and is still "
         "running in it. Two processes in one run directory corrupt its log and its "
-        "checkpoints; wait for that process to end, or stop it if it is not meant to run"
+        "checkpoints; wait for that process to end, or stop it if it is not meant to run. "
+        "If that process was killed and this message stays, a child it started (a forked "
+        "worker) may still hold the lock; it is released when that child ends"
     )
 
 
 def refuse_live_holder(run_dir: Path) -> None:
     """Refuse when a process holds ``run_dir``'s lock; write nothing.
 
-    :raises ConfigError: naming the pid when the lock file says it, or when ``flock`` fails.
+    :raises ConfigError: naming the pid when the lock file says it, naming the lock when
+        ``flock`` fails or the file cannot be opened.
     """
     lock = run_dir / LOCK_NAME
     try:
         descriptor = os.open(lock, os.O_RDONLY)
     except FileNotFoundError:
         return
+    except OSError as exc:
+        raise _lock_unusable(lock, "open", exc) from exc
     try:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
@@ -489,6 +524,44 @@ class RunLock:
         self.close()
 
 
+def _open_lock(run_dir: Path, resume: bool) -> int:
+    """Open ``run.lock`` for writing and return the descriptor.
+
+    A fresh run creates it with ``O_EXCL``. A resume opens the existing file, and creates it
+    (also with ``O_EXCL``, so a creator that got in between wins) only when it is absent.
+    """
+    lock = run_dir / LOCK_NAME
+    try:
+        if resume:
+            try:
+                return os.open(lock, os.O_WRONLY)
+            except FileNotFoundError:
+                pass
+        return os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    except FileExistsError as exc:
+        raise ConfigError(
+            f"Invalid value for 'out': {run_dir} was claimed by another run just now "
+            f"({LOCK_NAME} exists). Nothing was written. Choose a new 'out'"
+        ) from exc
+    except OSError as exc:
+        raise _lock_unusable(lock, "open", exc) from exc
+
+
+def _write_payload(descriptor: int) -> None:
+    """Write the label over the start of the file, then cut the file to its length, then sync.
+
+    The write comes BEFORE the cut, so a write that fails leaves the earlier payload in
+    place (never an empty file), and the cut removes a longer earlier payload's tail.
+
+    :raises OSError: a failed or short write, cut or sync.
+    """
+    payload = _lock_payload()
+    if os.pwrite(descriptor, payload, 0) != len(payload):
+        raise OSError(errno.ENOSPC, "short write")
+    os.ftruncate(descriptor, len(payload))
+    os.fsync(descriptor)
+
+
 def take_run_lock(run_dir: Path, resume: bool) -> RunLock:
     """Take the run lock of ``run_dir`` for this process; see the module contract.
 
@@ -496,7 +569,8 @@ def take_run_lock(run_dir: Path, resume: bool) -> RunLock:
     :param resume: ``False`` for a fresh run (``O_EXCL`` creates the file), ``True`` to take
         over a lock whose holder is gone.
     :return: the held :class:`RunLock`.
-    :raises ConfigError: a lost claim, a live holder, or a failing ``flock``.
+    :raises ConfigError: a lost claim, a live holder, a failing ``flock``, or a lock file that
+        cannot be opened or written (each names the lock path).
     """
     # DECISION plan-2026-10-31T180033-2faf890a/D-018
     # The lock is a kernel `flock` (LOCK_EX | LOCK_NB) on `run.lock`, held on a descriptor for
@@ -507,17 +581,14 @@ def take_run_lock(run_dir: Path, resume: bool) -> RunLock:
     # liveness guess, and do NOT take over by rename-then-create: both are check-then-act.
     # The pid in the file is a label for the message only. Do NOT add an unlink for the lock:
     # the package deletes nothing (invariant 5); a stale lock is simply one nobody holds.
+    # A failed write leaves the earlier payload in place (the label is written BEFORE the file
+    # is cut, D-024) and never zeroes a lock that existed. A file this very call created stays
+    # empty (a stale label, like the empty claim file of `_claim`): removing it would need a
+    # deletion call, which `test_the_api_source_rules` forbids, so do NOT add an unlink.
     # The descriptor is opened by `os.open`, which is close-on-exec, so a child process does
     # not keep the lock alive. A fresh run still decides its claim by `O_EXCL`.
     lock = run_dir / LOCK_NAME
-    flags = os.O_WRONLY | os.O_CREAT | (os.O_EXCL if not resume else 0)
-    try:
-        descriptor = os.open(lock, flags, 0o666)
-    except FileExistsError as exc:
-        raise ConfigError(
-            f"Invalid value for 'out': {run_dir} was claimed by another run just now "
-            f"({LOCK_NAME} exists). Nothing was written. Choose a new 'out'"
-        ) from exc
+    descriptor = _open_lock(run_dir, resume)
     handle = RunLock(descriptor)  # owns the descriptor from here: any refusal below closes it
     taken = False
     try:
@@ -532,9 +603,10 @@ def take_run_lock(run_dir: Path, resume: bool) -> RunLock:
                     f"({LOCK_NAME} is held). Nothing was written. Choose a new 'out'"
                 ) from exc
             raise _held_by_another(run_dir) from exc
-        os.ftruncate(descriptor, 0)
-        os.write(descriptor, _lock_payload())
-        os.fsync(descriptor)
+        try:
+            _write_payload(descriptor)
+        except OSError as exc:
+            raise _lock_unusable(lock, "write", exc) from exc
         taken = True
     finally:
         if not taken:
@@ -578,6 +650,11 @@ def open_run(run_dir: Path, resume: bool) -> Path:
 
     try:
         if resume:
+            # DECISION plan-2026-10-31T180033-2faf890a/D-024
+            # The lock is asked FIRST: a live holder is the one fact that makes every other
+            # finding (no backup yet, fit_finished) a state of a healthy run, not a dead one
+            # (review-iter-1 concern 5). Do NOT move it below those checks.
+            refuse_live_holder(run_dir)
             if not (run_dir / BACKUP_DIR).is_dir():
                 if (run_dir / REQUESTED_CONFIG_NAME).exists() and not (
                     run_dir / RESULTS_SUMMARY_NAME
@@ -593,7 +670,6 @@ def open_run(run_dir: Path, resume: bool) -> Path:
                     "has finished; choose a new 'out' to train again"
                 )
             _refuse_finished_fit(run_dir)
-            refuse_live_holder(run_dir)
             return run_dir
 
         _refuse_links(run_dir)
