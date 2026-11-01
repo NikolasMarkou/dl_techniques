@@ -456,6 +456,46 @@ per-model scripts (usage, keys, run directory, resume, `predict`, `export`, exit
 - **An export is not `model.export`**: `api/exporting.py` traces with `training=False`
   (a drop-path model is otherwise random in `serve`). `train.api.export` is the function, so the
   module is not named `export`.
+- **Figures, analysis and TensorBoard knobs** (the user-facing table, what each writes and the measured costs are in
+  [`README.md`](README.md); this is the contributor's side). The region between the markers is read by
+  `tests/test_train/test_api/test_the_knob_docs_name_real_keys.py`, which checks each backticked key, default,
+  `summary.analyzer.*` key and `TaskTrainer.*(...)` signature against the code, and fails when a knob is not named.
+  Add a knob to `AnalysisArgs` or `LoggerArgs` and this region and the README's change in the same commit.
+
+<!-- knobs:begin -->
+| Key | Default | Read at |
+|---|---|---|
+| `analysis_args.figures` | `true` | `TaskTrainer._callbacks` (dashboard and `figure_callbacks`), `_train` (creates `visualizations/`), the task's `evaluate_and_report` |
+| `analysis_args.model_analysis` | `true` | the task's `evaluate_and_report`, which calls `TaskTrainer.run_analysis` through `classification_run.report_best_weights` |
+| `analysis_args.epoch_analysis_every` | `0` | `TaskTrainer._callbacks`: `create_callbacks(include_analyzer=N > 0, analyzer_epoch_frequency=max(N, 1), analyzer_start_epoch=max(N, 1))`; a resume passes `analyzer_on_train_begin=False, analyzer_first_epoch=False` |
+| `analysis_args.conformal_alpha` | `null` | the task's `evaluate_and_report`, `train.common.conformal.run_conformal` |
+| `logger_args.tensorboard` | `{}` | `TaskTrainer._callbacks` (`include_tensorboard=... is not None`); `LoggerArgs.problems` refuses a non-empty dict |
+
+The hooks a task author touches for these outputs (all on `TaskTrainer`, documented at their definitions
+and in the module docstring of `api/trainer.py`):
+
+- `TaskTrainer.figure_callbacks(config, data, vis_dir)` is optional (default none). It is called only while
+  `analysis_args.figures` is true, with `visualizations/` already created, and its callbacks go after the
+  epoch log line and before the dashboard, so they must not edit `logs`. The generic dashboard is not part of
+  it: the base class draws it from whichever of `loss`, `accuracy`, `top_5_accuracy`, `miou` and `lr` the logs
+  hold (D-022). End-of-run figures belong to `TaskTrainer.evaluate_and_report(config, data, fit)`, which is
+  required and reads the same switch.
+- `TaskTrainer.run_analysis(config, model, test_data, history, experiment_name, run_dir)` is optional. Its
+  default picks the analyzer configuration by the model's output rank (a rank-2 classifier gets the stock call,
+  unchanged) and returns what `run_model_analysis` returns, `None` when the analysis raised. A task that wants
+  `failed_analyses` calls it through `report_best_weights(run_analysis=..., name_failed_analyses=True)`, as the
+  classification task does; the legacy trainers do not, so their summaries keep their keys.
+
+`failed_analyses` (`run_summary.failed_analyses`) is the only place a swallowed analyzer failure becomes visible, and
+its coverage is narrow on purpose. It names two things: `calibration` (requested, and `calibration_metrics` holds no
+entry for the model) and `model_analysis` (the seam returned `None`). It does not check weights, spectral,
+information flow or training dynamics. `summary.analyzer.status` comes from `read_analysis_status`, which reads
+only `model_metrics[model]["status"]` from the result file, so it can read `success` beside a non-empty
+`summary.analyzer.failed_analyses`: a green status does not mean every requested analysis produced a result. The key is
+absent when nothing failed. Do not derive the list from the status and do not widen the analyzer's handlers: the
+isolation is deliberate, the silence was the defect (D-020, anchor at `run_summary.py:failed_analyses`).
+<!-- knobs:end -->
+
 - **Parity with the legacy trainer is measured for `vit_pico` on CIFAR-10 only.** Do not claim it for
   another family without a run.
 - Tests: `tests/test_train/test_api/`. Scope pytest to that directory; the whole of it takes a long

@@ -52,6 +52,48 @@ file, so two same-sized files swapped, or a pixel edited, go unseen; `data.finge
 file's bytes, streamed, which reads all the data once (a pass over the disk tree, minutes on a large one on a
 spinning disk; the seconds go to `run.log`). A resume refuses a changed mode or digest.
 
+**Figures, analysis and TensorBoard**: five keys decide what is written besides the models and the
+summary. The region between the markers below is read by
+`tests/test_train/test_api/test_the_knob_docs_name_real_keys.py`: every key, default and name in it is
+checked against the code, so a stale one fails the test.
+
+<!-- knobs:begin -->
+| Key | Default | What it does |
+|---|---|---|
+| `analysis_args.figures` | `true` | Writes `visualizations/`: `training_dashboard.png` (redrawn after epoch 1, about 20 times per run, and at the end), then after the best weights are loaded `confusion_matrix.png`, `per_class_metrics.png`, `confidence_calibration.png`, `misclassifications.png` and `classification_report.json` (these five need a test split). `false` writes none of them and `ece` in the summary is null |
+| `analysis_args.model_analysis` | `true` | Runs the full model analyzer once, after training, on the best weights, into `model_analysis/` (`analysis_results.json` and seven PNGs: weights, spectral, information flow, calibration, training dynamics and the summary dashboard). Needs a test split. `false` leaves `analyzer.status` at `skipped` |
+| `analysis_args.epoch_analysis_every` | `0` | `N > 0` runs the data-free epoch analyzer (weights and spectral only) before training into `epoch_analysis/epoch_000/` (the untrained model), after epoch 1 into `epoch_001/`, then at epochs N, 2N, ... into `epoch_NNN/`. `0` is off. A failure on a built model stops the fit, so no snapshot is silently missing. A resumed run does not redo `epoch_000` and `epoch_001` |
+| `analysis_args.conformal_alpha` | `null` | A level strictly between 0 and 1 (0.1 aims at 90% coverage) writes `conformal.json` and `conformal_model.keras` (outputs logits, probabilities and set membership), calibrated on the test split. `null` skips it and the summary's `conformal` is null. A level with no test split is skipped with a note |
+| `logger_args.tensorboard` | `{}` | `{}` writes TensorBoard event files into `tensorboard/` (`train/` and `validation/`); `null` turns them off; a dict with keys is refused, because no TensorBoard option is wired |
+
+Measured cost, one run each, `vit/vit_pico` on 240 fake CIFAR-10 images (240 test images), 3 epochs, batch 16,
+CPU with one thread, wall seconds of the whole call against a run with figures, model analysis and epoch
+analysis off (68.0 s; its fit took 53.7 s; TensorBoard on, no conformal): `epoch_analysis_every=1` +29.4 s to the fit (four snapshots, `epoch_000` to `epoch_003`, about
+7 s each, 6.2 MB); `model_analysis` +23.4 s (3.1 MB); `figures` +6.9 s (0.4 MB); `conformal_alpha=0.1` +4.2 s
+(`conformal_model.keras` is a full copy of the model, 32 MB here); TensorBoard on against off was 68.0 s against 65.0 s (0.2 MB), which one run each cannot tell
+from noise. These are small-model, small-data numbers: the analyzer's cost
+grows with the number of layers and test images, and the dashboard render is recorded at 1.0 to 1.7 s each
+(`common/classification_viz.py`). The evidence is `plans/plan-2026-10-31T180033-2faf890a/scratch_step13/measure_out.txt`
+(the plans directory is untracked).
+
+**A failed analysis is named, but only some are.** The analyzer isolates a failing analysis and carries on, so
+a run can write a normal-looking `model_analysis/` after one of its parts failed. For this task the summary's
+`analyzer` block gains `summary.analyzer.failed_analyses`, a list, only when it is not empty (a clean run
+writes the same keys as before), and `run.log` carries a WARNING. It covers exactly two things:
+`calibration` (requested, and the analyzer produced no calibration entry for the model) and `model_analysis`
+(the whole analysis raised and returned nothing). It does not check weights, spectral, information flow or
+training dynamics. `summary.analyzer.status` is read back from the analyzer's own result file and does not see
+calibration, so it can read `success` beside a non-empty `failed_analyses`: read both. In the analyzer's
+summary dashboard a missing ECE or Brier prints `n/a`, not 0.0.
+
+**For a task author**: the trainer calls two optional hooks and one required one for this output. They are
+documented at their definitions in `api/trainer.py`: `TaskTrainer.figure_callbacks(config, data, vis_dir)`
+returns per-epoch figure callbacks (called only while `analysis_args.figures` is true, placed after the
+epoch log line and before the dashboard); `TaskTrainer.run_analysis(config, model, test_data, history, experiment_name, run_dir)`
+returns what the model analyzer returns, `None` when it raised; `TaskTrainer.evaluate_and_report(config, data, fit)`
+is the required end-of-run sequence that calls them. `src/train/AGENTS.md` has the rules.
+<!-- knobs:end -->
+
 **Predict**: `python -m train predict model=<run dir or .keras> data=<image or directory> out=pred.json`
 writes a new JSON list of `{"path", "labels", "scores"}`, every class best first. A directory is
 searched recursively. `out` must not exist. Through the Python `Predictor`, a colour array or PIL image given to a
