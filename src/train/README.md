@@ -160,7 +160,10 @@ writes one new file (a directory for `saved_model`) and `<out>.task.json` beside
 only the path on stdout. Input contract: float32 `(batch, height, width, channels)` pixels scaled
 to `[0, 1]` then standardized, `(x - mean) / std`, with the mean and std in `<out>.task.json`;
 the output is raw logits, one per class name in that file. Other pixel ranges give numbers and
-no error. A `tflite` file of a CliffordNet needs the Flex delegate (a WARNING says so).
+no error. A `tflite` file of a CliffordNet needs the Flex delegate (a WARNING says so). The check `export` makes of such a
+file runs the Keras model on the CPU, as the interpreter does, so a GPU machine compares CPU with CPU (the tolerance is
+unchanged: 1e-4 of the logits' scale, and a file that really differs is still refused). **Serving on a GPU is a different
+computation from the CPU's**: it differs from the CPU's by about 1e-3 in the logits. Measured on the ImageNet gate's `cliffordnet/nano`, the same weights run on the GPU and on the CPU: up to 1.1e-3 on logits of scale 3.6 for 16 real validation images (5.8e-4 on scale 3.0 for 16 noise images), argmaxes equal on all 16 of each. No export format changes that.
 
 **Exit codes**: 0 success; 2 a request that cannot be honoured (bad key, value, path, data,
 resume), found before TensorFlow loads when it can be; 1 a run that finished without reaching its

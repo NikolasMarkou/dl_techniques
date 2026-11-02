@@ -21,7 +21,12 @@ The command line therefore writes ``<out>.task.json`` beside every export (:func
 ``record``), and its log says so.
 
 Numerical agreement: float32 models match Keras to about 1e-6 in ``keras``, ``saved_model`` and
-``tflite``, and in ``onnx``. A ``mixed_float16`` model matches in ``keras``, ``saved_model``
+``tflite``, and in ``onnx``, with Keras run on the CPU (the check ``export`` makes of a ``tflite``
+file written with select operators runs the Keras side on the CPU too, so a GPU machine compares
+CPU with CPU). Serving a model on a GPU is a different computation: it differs from the CPU by about
+1e-3 in the logits (measured on ``cliffordnet/nano`` of the ImageNet gate, GPU against CPU on the same
+weights: up to 1.1e-3 on logits of scale 3.6 for 16 real validation images and 5.8e-4 on scale 3.0 for 16
+noise images; the argmaxes were equal on all 16 of each), which no export format changes. A ``mixed_float16`` model matches in ``keras``, ``saved_model``
 and ``tflite``, but its ``onnx`` export differs from Keras by up to about 1e-4 (9.0e-05
 measured on ``vit_pico``): ONNX Runtime rounds the half-precision steps its own way.
 
@@ -209,11 +214,24 @@ def _tflite_logits(blob: bytes, batch: Any) -> Any:
 
 
 def _check_tflite_against_keras(blob: bytes, model: Any, spec: Any, out: Path) -> None:
-    """Raise :class:`ConfigError` when ``blob`` does not give the Keras model's logits."""
+    """Raise :class:`ConfigError` when ``blob`` does not give the Keras model's logits.
+
+    Both sides run on the CPU: the interpreter always does, and the Keras side is placed there
+    with ``tf.device`` so a GPU machine compares CPU with CPU.
+    """
     import numpy as np
+    import tensorflow as tf
 
     batch = np.random.default_rng(0).random((2, *tuple(spec.shape[1:]))).astype(np.float32)
-    expected = np.asarray(model(batch, training=False), np.float64)
+    # DECISION plan-2026-10-31T180033-2faf890a/D-042
+    # The Keras side is placed on the CPU. Do NOT let it run on the default device: on a GPU
+    # machine the model's own logits then come from GPU kernels (TF32 convolutions and
+    # matmuls, other reduction orders) and differ from the CPU interpreter by about 1e-3
+    # (measured: nano 4.9e-4 against an allowance of 2.9e-4), so a faithful file was refused
+    # on exactly the machines that train. Do NOT widen the tolerance to hide it: the check
+    # must still refuse a file that is really wrong (the mutation test breaks the file).
+    with tf.device("/CPU:0"):
+        expected = np.asarray(model(batch, training=False), np.float64)
     got = _tflite_logits(blob, batch)
     scale = max(1.0, float(np.abs(expected).max()))
     worst = float("inf") if got.shape != expected.shape else float(np.abs(got - expected).max())
