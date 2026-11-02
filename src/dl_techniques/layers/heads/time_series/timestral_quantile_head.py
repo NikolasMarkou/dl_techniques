@@ -12,7 +12,7 @@ layers package does not depend on ``dl_techniques.models``.
 
 import keras
 import numpy as np
-from typing import Any, Dict, Sequence, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
@@ -22,6 +22,11 @@ from dl_techniques.layers.time_series.residual_projection_block import ResidualP
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
+
+
+def _working_dtype(dtype: Any) -> str:
+    """The name of ``dtype`` promoted to at least float32."""
+    return str(np.result_type(getattr(dtype, "name", str(dtype)), "float32").name)
 
 
 def monotone_quantiles(raw, levels: Tuple[float, ...], width_factor: float):
@@ -44,7 +49,7 @@ def monotone_quantiles(raw, levels: Tuple[float, ...], width_factor: float):
     up = keras.ops.cumsum(inc[..., m + 1 :], axis=-1)
     down = keras.ops.flip(keras.ops.cumsum(keras.ops.flip(inc[..., :m], axis=-1), axis=-1), axis=-1)
 
-    work = str(np.result_type(getattr(raw.dtype, "name", str(raw.dtype)), "float32").name)
+    work = _working_dtype(raw.dtype)
     big = np.finfo(work).max
     return keras.ops.clip(
         keras.ops.cast(
@@ -71,6 +76,7 @@ class TimestralQuantileHead(keras.layers.Layer):
     :param kwargs: Additional arguments for the Layer base class.
     :ivar projection: Residual block producing ``patch_size * num_quantiles`` raw outputs.
     :vartype projection: ResidualProjectionBlock
+    :raises ValueError: If ``quantile_levels`` does not contain 0.5.
     """
 
     def __init__(
@@ -85,6 +91,11 @@ class TimestralQuantileHead(keras.layers.Layer):
         self.d_model = d_model
         self.patch_size = patch_size
         self.quantile_levels = tuple(float(q) for q in quantile_levels)
+        if 0.5 not in self.quantile_levels:
+            raise ValueError(
+                f"TimestralQuantileHead: quantile_levels must contain 0.5, the "
+                f"channel the others fan out from; got {self.quantile_levels}"
+            )
         self.width_factor = width_factor
         self.num_quantiles = len(self.quantile_levels)
         self.projection = ResidualProjectionBlock(
@@ -105,10 +116,20 @@ class TimestralQuantileHead(keras.layers.Layer):
         raw = self.projection(x)
         *leading, n_patches, _ = keras.ops.shape(raw)
         preds = keras.ops.reshape(raw, (*leading, n_patches, self.patch_size, self.num_quantiles))
-        preds = keras.ops.cast(preds, str(np.result_type(
-            getattr(preds.dtype, "name", str(preds.dtype)), "float32").name))
+        preds = keras.ops.cast(preds, _working_dtype(preds.dtype))
         preds = monotone_quantiles(preds, self.quantile_levels, self.width_factor)
         return keras.ops.reshape(preds, (*leading, n_patches * self.patch_size, self.num_quantiles))
+
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """(..., N, D) -> (..., N * patch_size, Q)."""
+        *leading, n_patches, _ = input_shape
+        steps = None if n_patches is None else n_patches * self.patch_size
+        return (*leading, steps, self.num_quantiles)
+
+    def compute_output_spec(self, x: Any) -> keras.KerasTensor:
+        """Report the at-least-fp32 dtype ``call`` returns, not the compute dtype."""
+        return keras.KerasTensor(
+            self.compute_output_shape(x.shape), dtype=_working_dtype(self.compute_dtype))
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()

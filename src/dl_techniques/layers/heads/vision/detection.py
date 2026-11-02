@@ -161,6 +161,11 @@ class DetectionHead(BaseVisionHead):
         self.patch_grid_size = patch_grid_size
         self.use_regression = use_regression
 
+        if self.input_format not in ("spatial", "sequence"):
+            raise ValueError(
+                f"DetectionHead: input_format must be one of ['spatial', "
+                f"'sequence'], got {self.input_format!r}"
+            )
         if self.input_format == "sequence" and self.patch_grid_size is None:
             raise ValueError("patch_grid_size is required when input_format='sequence'")
 

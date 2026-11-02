@@ -82,7 +82,7 @@ out = head({"hidden_states": hidden, "attention_mask": mask})
 out["logits"]  # (4, 3), pre-softmax
 ```
 
-Extra keyword arguments go to the head constructor: `normalization_type`, `activation_type`, `use_pooling`, `pooling_type`, `use_intermediate`, `intermediate_size`, `use_task_attention`, `attention_type`, `use_ffn`, `ffn_type`, `ffn_expansion_factor`, `initializer_range`. `TextSimilarityHead` also takes `output_embeddings` and `similarity_function`.
+Extra keyword arguments go to the head constructor: `normalization_type`, `activation_type`, `use_pooling`, `pooling_type`, `use_intermediate`, `intermediate_size`, `use_task_attention`, `attention_type`, `use_ffn`, `ffn_type`, `ffn_expansion_factor`, `initializer_range`, `num_heads` (task attention of type `multi_head` or `window`; default 8, and it must divide the stage width). `TextSimilarityHead` also takes `output_embeddings` and `similarity_function`.
 
 Several tasks on one backbone:
 
@@ -103,8 +103,7 @@ ner_only = multi({"hidden_states": hidden}, task_name="ner")  # {...}
 Inside a language model that owns its head (`include_top=True`):
 
 ```python
-from dl_techniques.layers.heads.nlp import (
-    build_model_task_head, finalize_head_outputs, task_config_to_dict)
+from dl_techniques.layers.heads.nlp import build_model_task_head, finalize_head_outputs
 
 head = build_model_task_head(config, input_dim=768, default_pooling="last", vocab_size=30522)
 logits = finalize_head_outputs(head({"hidden_states": hidden, "attention_mask": mask}))
@@ -116,6 +115,8 @@ logits = finalize_head_outputs(head({"hidden_states": hidden, "attention_mask": 
 - Heads copy the config you pass. Editing your config afterwards changes nothing in the head or its `get_config`.
 - Heads return pre-activation `logits`. `probabilities` and `predictions` are derived entries; `finalize_head_outputs` drops them so `model.compile` sees one tensor.
 - `attention_type`, `ffn_type` and `ffn_expansion_factor` default to `None`. With their stage on they resolve to `'multi_head'`, `'mlp'` and `4`. With the stage off, passing a value raises `ValueError`.
+- `task_config.hidden_size` wins over `intermediate_size`: with both set, `intermediate_size` is ignored. `num_classes` and `use_crf` are likewise ignored by heads that do not read them, such as `QuestionAnsweringHead`.
+- Not every registered layer type works here. Norms `local_response_norm`, `decoupled_max_logit`, `dml_plus_focal`, `dml_plus_center` and FFN types `counting`, `gated_dconv`, `gated_mlp`, `kan`, `logic`, `mixer`, `power_mlp`, `tversky` fail with `ValueError` or another error when the head is built or called.
 - Use `pooling_type='last'` for a causal backbone. The default `'cls'` reads position 0, which has seen only itself in a causal model.
 - `'attention'` pooling is the head's own inline `Dense(1, tanh)` scorer (the `attention_pooling` attribute), followed by a masked softmax over positions. It is not the same layer as `SequencePooling('attention')` and has different weights.
 - An unknown `pooling_type` raises at construction for every head, including the heads that never pool.

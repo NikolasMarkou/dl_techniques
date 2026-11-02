@@ -8,11 +8,11 @@ A forecaster that returns one number cannot say how sure it is. These heads put 
 
 A head takes a hidden-state tensor, not a raw series. It does not know which backbone produced it, so the same head works behind a TCN, an xLSTM, a transformer or an LSTM. Every input width is read from the shape handed to `build`. The one exception is `TimestralQuantileHead`, which takes `d_model` because it owns a residual projection of that width.
 
-Five heads are here. Six models under `dl_techniques.models.time_series` build one of them directly: `tirex`, `prism`, `xlstm`, `adaptive_ema`, `deepar` and `timestral`.
+Five heads are here. Six models under `dl_techniques.models.time_series` build one of them through `create_time_series_head`: `tirex`, `prism`, `xlstm`, `adaptive_ema`, `deepar` and `timestral`.
 
 ## How it works
 
-There is no factory and no task enum. You import the class you want and build it with its own arguments. Every head returns plain tensors, not a dict.
+Import the class you want and build it with its own arguments, or name a task and let `create_time_series_head` pick the class. Every head returns plain tensors, not a dict.
 
 ```mermaid
 flowchart LR
@@ -48,7 +48,10 @@ Train the quantile heads with the pinball loss and the likelihood heads with the
 
 ## Files
 
-- `__init__.py` - the public surface (5 names) and a package docstring.
+- `__init__.py` - the public surface (7 names) and a package docstring.
+- `task_types.py` - `TimeSeriesTaskType`, the five task names.
+- `dispatch.py` - `TIME_SERIES_HEAD_DISPATCH`, the table from task type to head class, and `get_head_class`.
+- `factory.py` - `create_time_series_head`.
 - `quantile_head_fixed_io.py` - `QuantileHead`.
 - `quantile_head_variable_io.py` - `QuantileSequenceHead`.
 - `likelihood_heads.py` - `GaussianLikelihoodHead`, `NegativeBinomialLikelihoodHead`, the private base `_LikelihoodHead`, the private `_floored_softplus` and the constant `MIN_LIKELIHOOD_PARAM`.
@@ -82,9 +85,21 @@ head = TimestralQuantileHead(
 quantiles = head(tokens)   # tokens: (rows, n_patches, 64) -> (rows, n_patches * 8, 5)
 ```
 
+By task type. Keywords go to the head's constructor, so each task needs its own head's required arguments:
+
+```python
+from dl_techniques.layers.heads import create_head
+from dl_techniques.layers.heads.time_series import TimeSeriesTaskType, create_time_series_head
+
+head = create_time_series_head(TimeSeriesTaskType.QUANTILE_FORECAST, num_quantiles=3, output_length=24)
+head = create_time_series_head("gaussian_likelihood", units=1)
+head = create_head("time_series", "quantile_sequence", num_quantiles=3)
+```
+
 ## Things to know
 
 - **`enforce_monotonicity` is off by default** on both quantile heads. Without it the 90th percentile can come out below the 10th. It only does anything when `num_quantiles > 1`. `TimestralQuantileHead` is always ordered.
+- **`TimestralQuantileHead` levels and dtype.** `quantile_levels` must contain 0.5, or the constructor raises `ValueError`. The output is at least float32 even under `mixed_float16`, and the symbolic dtype says so.
 - **`QuantileHead` input rank.** With `flatten_input=False` it needs a 2D input and raises `ValueError` in `build()` on anything else. With `flatten_input=True` it needs a 3D input whose sequence and feature dimensions are both known.
 - **`QuantileSequenceHead` and `activity_regularizer`.** Keras charges the regularizer once, on the returned tensor. The inner `Dense` does not carry a copy.
 - **The likelihood floor.** Every positive parameter is floored at `MIN_LIKELIHOOD_PARAM = 1e-6`, because softplus underflows to exactly 0.0 in float32 below a logit of about -103, and `log(sigma)`, `1/sigma` and `lgamma(1/alpha)` are then infinite or NaN.

@@ -213,6 +213,7 @@ class BaseNLPHead(keras.layers.Layer):
             ffn_type: Optional[FFNType] = None,
             ffn_expansion_factor: Optional[int] = None,
             initializer_range: float = 0.02,
+            num_heads: Optional[int] = None,
             **kwargs: Any
     ) -> None:
         """
@@ -255,6 +256,9 @@ class BaseNLPHead(keras.layers.Layer):
         :type ffn_expansion_factor: Optional[int]
         :param initializer_range: Truncated normal standard deviation.
         :type initializer_range: float
+        :param num_heads: Head count of a ``'multi_head'`` or ``'window'`` task
+            attention; ``None`` means 8 there. Refused for any other stage.
+        :type num_heads: Optional[int]
         :param kwargs: Additional arguments for the base Layer class.
         :return: None.
         :rtype: None
@@ -319,6 +323,27 @@ class BaseNLPHead(keras.layers.Layer):
         # after it was built for a width it was never fed (review NLP-1, eight
         # settings failed). See decisions.md D-062.
         self._stage_width = self.hidden_size if use_intermediate else self.input_dim
+
+        # The head count follows VQAHead (VLM D-056): an argument, resolved to 8
+        # only where a layer reads it, refused elsewhere, and checked against
+        # the width here so the error names this head, not the attention factory.
+        if self.attention_type in ('multi_head', 'window'):
+            self.num_heads = positive_int(
+                8 if num_heads is None else num_heads, 'num_heads', owner)
+            if self._stage_width % self.num_heads != 0:
+                raise ValueError(
+                    f"{owner}: task attention runs at width {self._stage_width}, "
+                    f"which num_heads={self.num_heads} does not divide; pass "
+                    f"num_heads=... to match."
+                )
+        elif num_heads is not None:
+            raise ValueError(
+                f"{owner}: num_heads={num_heads!r} is read only by task attention "
+                f"of type 'multi_head' or 'window'; got use_task_attention="
+                f"{use_task_attention!r}, attention_type={self.attention_type!r}."
+            )
+        else:
+            self.num_heads = None
 
         # Create common layers (following Golden Rule: CREATE in __init__)
         self._create_common_layers()
@@ -481,6 +506,7 @@ class BaseNLPHead(keras.layers.Layer):
             # create_attention_layer raises on an undeclared key, and 14 of the
             # 33 registered types declare neither `dim` nor `dropout_rate`, or
             # only one. Do NOT declare `dim` on those entries. See D-023.
+            # NOTE 2026-11-02: re-measured 15 of 36 lacking at least one of them.
             attn_defaults = {'dim': self._stage_width}
             # 'sliding_window' was dropped from both tuples below on 2026-08-27.
             # It is not an ATTENTION_REGISTRY key and never has been, so
@@ -488,7 +514,7 @@ class BaseNLPHead(keras.layers.Layer):
             # either branch can matter. The 1-D banded variant is 'window_band'.
             # Adding that name here would be a new feature, not a fix.
             if self.attention_type in ('multi_head', 'window'):
-                attn_defaults['num_heads'] = 8
+                attn_defaults['num_heads'] = self.num_heads
             if self.attention_type == 'window':
                 attn_defaults['window_size'] = 7
             attn_defaults['dropout_rate'] = self.task_config.dropout_rate
@@ -646,13 +672,9 @@ class BaseNLPHead(keras.layers.Layer):
         else:
             hidden_shape = input_shape
 
-        # Build normalization layer.
-        # Rank 3 is a sequence; anything shorter is already pooled.
-        if len(hidden_shape) == 3:
-            norm_input_shape = hidden_shape
-        else:
-            norm_input_shape = (hidden_shape[0], self.input_dim)
-
+        # Build normalization layer at the rank call feeds it: a norm with an
+        # InputSpec (batch_norm) pins the rank here and refused any other.
+        norm_input_shape = self._norm_input_shape(hidden_shape)
         self.norm.build(norm_input_shape)
 
         # Build the delegated sequence pooler if there is one (D-002).
@@ -670,12 +692,8 @@ class BaseNLPHead(keras.layers.Layer):
 
         # Build intermediate layer if needed
         if self.intermediate is not None:
-            # Intermediate can receive pooled or sequence input
-            if self.use_pooling and len(hidden_shape) == 3:
-                intermediate_input = (hidden_shape[0], self.input_dim)
-            else:
-                intermediate_input = norm_input_shape
-            self.intermediate.build(intermediate_input)
+            # Rank 2 always: a pooled vector, or one row of _apply_per_row.
+            self.intermediate.build((norm_input_shape[0], norm_input_shape[-1]))
 
         # Build FFN if needed
         if self.ffn is not None:
@@ -684,6 +702,24 @@ class BaseNLPHead(keras.layers.Layer):
             self.ffn.build(ffn_input)
 
         super().build(input_shape)
+
+    def _norm_input_shape(self, hidden_shape: Tuple) -> Tuple:
+        """
+        The shape ``call`` feeds ``norm``.
+
+        A sequence is normalized as it is, unless the head pools it first;
+        anything shorter than rank 3 is already pooled.
+
+        :param hidden_shape: Shape of the hidden states.
+        :type hidden_shape: Tuple
+        :return: Shape of the tensor ``norm`` receives.
+        :rtype: Tuple
+        """
+        if len(hidden_shape) != 3:
+            return (hidden_shape[0], self.input_dim)
+        if self.use_pooling:
+            return (hidden_shape[0], hidden_shape[-1])
+        return hidden_shape
 
     def compute_output_shape(self, input_shape: Union[Tuple, Dict]) -> Dict[str, Tuple]:
         """
@@ -735,5 +771,6 @@ class BaseNLPHead(keras.layers.Layer):
             'ffn_type': self.ffn_type,
             'ffn_expansion_factor': self.ffn_expansion_factor,
             'initializer_range': self.initializer_range,
+            'num_heads': self.num_heads,
         })
         return config

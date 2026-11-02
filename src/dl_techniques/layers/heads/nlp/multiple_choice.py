@@ -140,6 +140,20 @@ class MultipleChoiceHead(BaseNLPHead):
         scorer_input_shape = (None, scorer_input_dim)
         self.scorer.build(scorer_input_shape)
 
+    def _norm_input_shape(self, hidden_shape: Tuple) -> Tuple:
+        """
+        The shape ``call`` feeds ``norm``: ``(batch, num_choices, width)``.
+
+        Choices are pooled before the norm, or arrive pooled, so the choice
+        axis stays and any sequence axis is gone.
+
+        :param hidden_shape: Shape of the hidden states, rank 3 or 4.
+        :type hidden_shape: Tuple
+        :return: Shape of the tensor ``norm`` receives.
+        :rtype: Tuple
+        """
+        return (hidden_shape[0], hidden_shape[1], hidden_shape[-1])
+
     def compute_output_shape(self, input_shape: Union[Tuple, Dict]) -> Dict[str, Tuple]:
         """
         Report the two output shapes.
@@ -210,7 +224,9 @@ class MultipleChoiceHead(BaseNLPHead):
             if attention_mask is not None:
                 folded_mask = keras.ops.reshape(attention_mask, (-1, shape[2]))
             pooled = self._pool_sequence(folded, folded_mask)
-            pooled = keras.ops.reshape(pooled, (shape[0], shape[1], -1))
+            # shape[3], not -1: with the two leading axes unknown, -1 lost the
+            # static width and the norm below could not trace.
+            pooled = keras.ops.reshape(pooled, (shape[0], shape[1], shape[3]))
         elif rank == 3:
             if attention_mask is not None:
                 raise ValueError(

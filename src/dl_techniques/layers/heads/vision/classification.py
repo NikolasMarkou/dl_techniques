@@ -11,7 +11,7 @@ import keras
 from ...dense_block import DenseBlock
 from ...norms import create_normalization_layer, NormalizationType
 from dl_techniques.initializers import clone_initializer
-from ..validation import positive_int
+from ..validation import positive_int, static_rank
 from dl_techniques.utils.keras_registration import register_dl_technique
 from .base import BaseVisionHead
 from .utils import _refuse_common_layers_call_never_runs, _validated_block_dims, _require_hidden_dim_at_least
@@ -99,10 +99,8 @@ class ClassificationHead(BaseVisionHead):
     the layer's compute dtype exactly as the NLP ``TextClassificationHead``
     does. Under ``mixed_float16`` it is therefore a float16 softmax.
 
-    With ``use_global_pooling=False`` the flatten is a ``keras.layers.Flatten()``
-    created inside ``call`` on every invocation. It is not a stored
-    sub-layer, so it appears in no weight list. ``Flatten`` holds no weights,
-    so this costs correctness nothing.
+    With ``use_global_pooling=False`` the flatten is the weightless sub-layer
+    ``flatten``, created in ``__init__``. It adds nothing to any weight list.
 
     Input shape:
         ``(batch, height, width, channels)``, or ``(batch, seq_len, dim)``
@@ -375,6 +373,8 @@ class ClassificationHead(BaseVisionHead):
             else:
                 self.pooling = keras.layers.GlobalMaxPooling2D()
         # For 'cls_token', no pooling layer is built; extraction happens in call()
+        if not self.use_global_pooling:
+            self.flatten = keras.layers.Flatten(name='flatten')
 
         if self.pooled_normalization_type is not None:
             self.pooled_norm = create_normalization_layer(
@@ -436,21 +436,48 @@ class ClassificationHead(BaseVisionHead):
             name='classifier'
         )
 
+    def _refuse_pooling_rank(self, rank: int, shape: Tuple[Optional[int], ...]) -> None:
+        """
+        Raise for an input the configured pooling cannot reduce.
+
+        :param rank: The rank the pooling reduces.
+        :type rank: int
+        :param shape: The shape it got.
+        :type shape: Tuple[Optional[int], ...]
+        :return: None.
+        :rtype: None
+        :raises ValueError: Always, naming the head and the pooling type.
+        """
+        raise ValueError(
+            f"ClassificationHead: pooling_type='{self.pooling_type}' reduces a "
+            f"rank-{rank} input, got shape {shape}."
+        )
+
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
         Build the classification layers on the shapes ``call`` produces.
 
         This does not use ``_common_processed_shape``, because ``call``
-        applies attention and skips the FFN. The flatten branch computes the
-        flat width here rather than building a layer, since ``call`` makes
-        its own ``Flatten``.
+        applies attention and skips the FFN.
 
         :param input_shape: Input feature-map shape (4D) or sequence shape (3D).
         :type input_shape: Tuple[Optional[int], ...]
         :return: None.
         :rtype: None
+        :raises ValueError: If pooling cannot reduce an input of this rank:
+            ``'avg'`` and ``'max'`` take rank 4. ``'cls_token'`` refuses rank 4
+            and above here, and anything but rank 3 in ``call``: the ViT family
+            builds this head at the pooled shape ``(None, D)``, then calls it
+            on the sequence.
         """
         shape = tuple(input_shape)
+        if self.use_global_pooling:
+            if self.pooling_type == 'cls_token':
+                if len(shape) > 3:
+                    self._refuse_pooling_rank(3, shape)
+            elif len(shape) != 4:
+                self._refuse_pooling_rank(4, shape)
+
         # Classification call() applies attention only (no FFN) before pooling.
         if self.use_attention:
             shape = self._attention_output_shape(shape)
@@ -462,11 +489,8 @@ class ClassificationHead(BaseVisionHead):
             # cls_token extracts position 0: (B, seq_len, D) -> (B, D)
             shape = (shape[0], shape[-1])
         else:
-            # call() flattens via an inline (stateless) Flatten layer.
-            flat = 1
-            for dim in shape[1:]:
-                flat = None if (dim is None or flat is None) else flat * dim
-            shape = (shape[0], flat)
+            self.flatten.build(shape)
+            shape = tuple(self.flatten.compute_output_shape(shape))
 
         if self.pooled_normalization_type is not None:
             self.pooled_norm.build(shape)
@@ -514,12 +538,14 @@ class ClassificationHead(BaseVisionHead):
         # Global pooling
         if self.use_global_pooling:
             if self.pooling_type == 'cls_token':
+                if static_rank(x, 'inputs', 'ClassificationHead') != 3:
+                    self._refuse_pooling_rank(3, tuple(x.shape))
                 # Extract CLS token at position 0 for sequence inputs (B, seq_len, D) -> (B, D)
                 x = x[:, 0, :]
             else:
                 x = self.pooling(x)
         else:
-            x = keras.layers.Flatten()(x)
+            x = self.flatten(x)
 
         if self.pooled_normalization_type is not None:
             x = self.pooled_norm(x, training=training)

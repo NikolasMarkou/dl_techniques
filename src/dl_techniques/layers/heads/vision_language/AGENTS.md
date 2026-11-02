@@ -100,7 +100,7 @@ Output dict keys: captioning `logits`, `hidden_states`; VQA `answer_logits`; gro
 
 Shape requirements:
 
-- Captioning: both inputs rank 3 (checked in `build`); `text_features` last dim must equal `hidden_size` (checked in `build`); vision width free; `hidden_size % num_heads == 0`.
+- Captioning: both inputs rank 3 (checked in `build`); `text_features` last dim must equal `hidden_size` (checked in `build`); vision width free; `num_heads` a positive integer that divides `hidden_size`.
 - VQA `attention`: both inputs rank 3 and `hidden_size` wide; `hidden_size % num_heads == 0` (default 8). Pooled width is `2 * embed_dim`. `mean`/`max`: pooled width is `D_vis + D_txt`; rank-2 inputs pass through.
 - Grounding: `vision_features` rank 3 (checked in `call`); both inputs `hidden_size` wide for the fusion.
 - Matching: rank 2 or 3 each; both must be `hidden_size` wide for the fusion; the post-fusion FFN output width must equal `hidden_size` or `build` raises.
@@ -116,6 +116,7 @@ Shape requirements:
 - Both FFN construction sites (`ImageCaptioningHead.__init__` loop, `ImageTextMatchingHead._create_post_fusion_layers`) must stay identical in three rules: pass `hidden_dim` (as `hidden_size * ffn_expansion_factor`) only when the registry entry lists it in `required_params`; forward `ffn_expansion_factor` only to a type that lists it; take the output-width kwarg name from `_ffn_width_kwargs` (registry `output_dim_param`), never the literal `"output_dim"`. Both run `assemble_ffn_config` before creating the layer.
 - `_ffn_width_kwargs` is imported by name into `image_captioning.py` and `image_text_matching.py`. A test that patches it must patch it in those modules, not in `utils.py`.
 - `ImageTextMatchingHead`: `temperature` must be a positive finite real (bool refused); config stores `initial_temperature` under the key `temperature`; the trained value is the weight `<name>_temperature`.
+- `ImageCaptioningHead`: `task_config.dropout_rate` reaches the attention layers but not the decoder FFN (measured 2026-11-02: attention 0.5, FFN 0.0, against 0.5 on matching). Wiring it through changes training results for existing configs, so it is left as is.
 - `VQAHead`: `num_heads` is accepted only with `pooling_strategy="attention"` (resolved to 8 when `None`); other strategies refuse a value. `hidden_dims` is stored as a list.
 - Sub-layers are created in `__init__` and built explicitly in `build` in computational order; `build` returns early if `self.built`. Keep sub-layers in flat lists or named attributes so Keras serializes them.
 - `get_config` must stay JSON-safe: `task_config` is stored via `to_dict()`; `from_config` restores it with `VLMTaskConfig.coerce`. `ImageTextMatchingHead` has no `from_config` of its own; it inherits `BaseVLMHead.from_config`. `MultiTaskVLMHead` stores `task_configs` as a dict of `to_dict()` results plus `task_specific_kwargs`, writes the shared head kwargs back out flat, and has no `from_config`: Keras's default calls the constructor, which coerces each config dict.
@@ -144,6 +145,7 @@ External: `keras` (Keras 3, `keras.ops` only), standard library `dataclasses`, `
 - Unsupported task type: `ValueError` from `get_head_class` at head creation (not at call). Message lists the types that have a head.
 - `BaseVLMHead(...)` direct: `TypeError`.
 - Config field mismatch (missing `vocab_size` on captioning, missing `num_classes` on VQA, set field the head does not read): `ValueError` naming the field.
+- `ImageCaptioningHead`: `num_heads` not a positive integer, or not a divisor of `hidden_size`: `ValueError` at construction.
 - Width mismatch: captioning text width, VQA attention widths, fusion widths: `ValueError` at `build` naming the head.
 - Unusable fusion strategy: `ValueError` at `build`.
 - Post-fusion FFN output width other than `hidden_size`: `ValueError` at `build` of `ImageTextMatchingHead`.
@@ -159,5 +161,4 @@ External: `keras` (Keras 3, `keras.ops` only), standard library `dataclasses`, `
 - Do not restore a default in `get_head_class` and do not add a placeholder row.
 - Use `import keras` and `keras.ops`; log through `dl_techniques.utils.logger`; docstrings in this package are Sphinx/reST.
 - Tests live in `tests/test_layers/test_heads/`: `test_vlm.py`, `test_the_vlm_*` files, `test_every_vlm_head_reports_the_shapes_it_returns.py`, `test_head_dispatch_no_silent_fallback.py`, `test_the_head_classes_register_under_their_own_module.py`. Run only that directory, for example `.venv/bin/python -m pytest tests/test_layers/test_heads/ -q`. Do not run the full suite.
-- Docstring inaccuracy to be aware of: the `MultiTaskVLMHead` and `create_multi_task_vlm_head` docstrings say "the other four heads" read `text_features`; only three do (captioning, grounding, matching).
 - To confirm nothing outside `layers/heads` builds a VLM head: `grep -rln --include=*.py "create_vlm_head(\|create_multi_task_vlm_head(\|VQAHead(\|ImageTextMatchingHead(\|VisualGroundingHead(\|ImageCaptioningHead(" src/ | grep -v "layers/heads/"` (empty at time of writing).

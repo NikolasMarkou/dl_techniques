@@ -16,6 +16,7 @@ from ...ffn.factory import (
 )
 from ...norms.factory import create_normalization_layer
 from ....utils.masking import MaskFactory
+from ..validation import positive_int
 from .task_types import VLMTaskConfig
 from dl_techniques.utils.keras_registration import register_dl_technique
 from .utils import _ffn_width_kwargs, _check_task_config_fields
@@ -135,7 +136,7 @@ class ImageCaptioningHead(keras.layers.Layer):
           stream can never satisfy.
         * ``gated_mlp`` -- a permanent capability gap. ``GatedMLP`` is 1x1-conv
           based and needs a rank-4 ``(B, H, W, C)`` input; this head passes
-          rank-3 and ``BaseVLMHead`` rank-2. Its ``filters`` width parameter now
+          rank-3 and ``ImageTextMatchingHead`` rank-2. Its ``filters`` width parameter now
           reaches it, which is exactly why the failure moved from a missing
           parameter to a kernel-rank error.
         * ``counting``, ``logic``, ``mixer`` -- closed by a hyperparameter
@@ -168,11 +169,11 @@ class ImageCaptioningHead(keras.layers.Layer):
         Read by every FFN type that can use it, via one of two channels. Types
         that REQUIRE an explicit ``hidden_dim`` receive
         ``hidden_dim * ffn_expansion_factor``. Types that derive their own width
-        receive the factor itself and apply their own rule to it. Of the 8 such
+        receive the factor itself and apply their own rule to it. Of the 9 such
         registry types only ``swiglu`` does, and its rule is 2/3 of
         ``output_dim * factor``, rounded up to ``ffn_multiple_of`` (D-020).
 
-        The remaining 7 optional-``hidden_dim`` types (``kan``, ``mixer``,
+        The remaining 8 optional-``hidden_dim`` types (``kan``, ``mixer``,
         ``tversky``, ...) have no expansion concept. They size themselves from
         unrelated parameters, so this value does not reach them.
 
@@ -213,8 +214,8 @@ class ImageCaptioningHead(keras.layers.Layer):
         :param ffn_expansion_factor: FFN width multiplier.
         :type ffn_expansion_factor: int
         :param kwargs: Additional arguments for the base Layer class.
-        :raises ValueError: If ``hidden_dim`` is not divisible by
-            ``num_heads``, ``task_config.vocab_size`` is unset, or
+        :raises ValueError: If ``num_heads`` is not a positive integer or does
+            not divide ``hidden_dim``, ``task_config.vocab_size`` is unset, or
             ``task_config.num_classes`` is set.
         :return: None.
         :rtype: None
@@ -227,7 +228,7 @@ class ImageCaptioningHead(keras.layers.Layer):
         # D-014: dead fallback removed (see BaseVLMHead.__init__).
         self.hidden_dim = task_config.hidden_size
         self.num_layers = num_layers
-        self.num_heads = num_heads
+        self.num_heads = positive_int(num_heads, "num_heads", "ImageCaptioningHead")
         self.ffn_type = ffn_type
         self.ffn_expansion_factor = ffn_expansion_factor
 
@@ -263,7 +264,7 @@ class ImageCaptioningHead(keras.layers.Layer):
             self.self_attention_layers.append(self_attn)
 
             # Supply `hidden_dim` only to FFN types that REQUIRE it. 13 of the
-            # registry's 21 types do (`mlp`, `geglu`, `glu`, `reglu`, `lowrank`,
+            # registry's 22 types do (`mlp`, `geglu`, `glu`, `reglu`, `lowrank`,
             # ...), and omitting it raised
             # "Required parameters missing for mlp: ['hidden_dim']" -- so every
             # one of those `ffn_type` values was unusable on this head.

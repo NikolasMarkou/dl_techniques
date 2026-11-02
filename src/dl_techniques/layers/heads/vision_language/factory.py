@@ -83,7 +83,7 @@ def create_multi_task_vlm_head(
            ``task_specific_kwargs`` when you mean exactly one head.
 
         The heads also disagree on their input key. ``VQAHead`` reads
-        ``question_features`` while the other four read ``text_features``, and
+        ``question_features`` while the other three read ``text_features``, and
         this wrapper fans one input dict to all of them. A wrapper mixing VQA
         with any other task raises ``KeyError`` unless the caller supplies both
         keys. Duplicating the same tensor under both is fine.

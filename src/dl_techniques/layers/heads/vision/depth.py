@@ -1,5 +1,7 @@
 """Depth estimation head: one depth map at 8x the input resolution."""
 
+import math
+import numbers
 from typing import Any, Dict, Optional, Tuple
 
 import keras
@@ -17,6 +19,9 @@ from .decoder import (
     _run_progressive_decoder,
 )
 from .utils import _refuse_dropout_no_layer_applies
+
+#: Largest finite float16: a range above it scales to inf under ``mixed_float16``.
+_FLOAT16_MAX = 65504.0
 
 
 @register_dl_technique("dl_techniques.layers.heads.vision.depth")
@@ -99,9 +104,11 @@ class DepthEstimationHead(BaseVisionHead):
 
     :param output_channels: Channel count of the output map. 1 for depth.
     :type output_channels: int
-    :param min_depth: Lower end of the output range.
+    :param min_depth: Lower end of the output range. Finite and below
+        ``max_depth``; also above 0 with ``use_log_depth``.
     :type min_depth: float
-    :param max_depth: Upper end of the output range.
+    :param max_depth: Upper end of the output range. Finite, and at most
+        65504 when the head computes in float16.
     :type max_depth: float
     :param use_log_depth: Scale in log space instead of linearly.
     :type use_log_depth: bool
@@ -138,6 +145,7 @@ class DepthEstimationHead(BaseVisionHead):
         :param kwargs: Arguments for :class:`BaseVisionHead`.
         :return: None.
         :rtype: None
+        :raises ValueError: If the depth range cannot be scaled into.
         """
         # Set defaults for DepthEstimationHead before calling parent constructor
         kwargs.setdefault('use_attention', False)
@@ -149,6 +157,7 @@ class DepthEstimationHead(BaseVisionHead):
         self.min_depth = min_depth
         self.max_depth = max_depth
         self.use_log_depth = use_log_depth
+        self._check_depth_range()
 
         # Progressive upsampling with refinement: the shared decoder, named
         # depth_conv_{i} / depth_upsample_{i} (two flat lists).
@@ -165,6 +174,43 @@ class DepthEstimationHead(BaseVisionHead):
             activation='sigmoid',
             name='depth_head'
         )
+
+    def _check_depth_range(self) -> None:
+        """
+        Refuse a depth range the scaling in ``call`` cannot produce.
+
+        A range that is not finite and increasing gives NaN or an inverted
+        map, ``log(min_depth)`` needs ``min_depth > 0``, and a ``max_depth``
+        above the float16 maximum scales to inf in that dtype.
+
+        :return: None.
+        :rtype: None
+        :raises ValueError: Naming the head and the range.
+        """
+        owner = type(self).__name__
+        for name, value in (('min_depth', self.min_depth), ('max_depth', self.max_depth)):
+            if (isinstance(value, bool) or not isinstance(value, numbers.Real)
+                    or not math.isfinite(value)):
+                raise ValueError(
+                    f"{owner}: {name} must be a finite number, got {value!r}"
+                )
+        if self.min_depth >= self.max_depth:
+            raise ValueError(
+                f"{owner}: min_depth must be below max_depth, got "
+                f"min_depth={self.min_depth!r}, max_depth={self.max_depth!r}"
+            )
+        if self.use_log_depth and self.min_depth <= 0:
+            raise ValueError(
+                f"{owner}: use_log_depth=True takes log(min_depth), so min_depth "
+                f"must be above 0, got {self.min_depth!r}. Pass "
+                f"use_log_depth=False for a range that starts at 0."
+            )
+        if self.compute_dtype == 'float16' and self.max_depth > _FLOAT16_MAX:
+            raise ValueError(
+                f"{owner}: max_depth={self.max_depth!r} is above the float16 "
+                f"maximum {_FLOAT16_MAX} and would scale to inf; lower it or "
+                f"compute this head in float32."
+            )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
@@ -218,9 +264,12 @@ class DepthEstimationHead(BaseVisionHead):
 
         # Scale to actual depth range
         if self.use_log_depth:
-            # Convert from log space
-            log_min = keras.ops.log(self.min_depth)
-            log_max = keras.ops.log(self.max_depth)
+            # Convert from log space. The logs are taken in the map's dtype:
+            # keras.ops.log of a Python float is float32, which TensorFlow
+            # refuses to multiply with a float16 map.
+            dtype = depth_normalized.dtype
+            log_min = keras.ops.log(keras.ops.cast(self.min_depth, dtype))
+            log_max = keras.ops.log(keras.ops.cast(self.max_depth, dtype))
             depth = keras.ops.exp(depth_normalized * (log_max - log_min) + log_min)
         else:
             # Linear scaling

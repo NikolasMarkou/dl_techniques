@@ -109,7 +109,8 @@ Tests: `pytest tests/test_layers/test_heads/` (run only that directory, not the 
 - `BaseVLMHead` is exported but constructing it directly raises `TypeError`.
 - A head refuses a config field it does not read: `vocab_size` belongs to captioning only and `num_classes` to VQA only. Captioning requires `vocab_size`, and VQA requires `num_classes`.
 - Class-like scores are logits, not probabilities: `confidence` (grounding), `match_score` (matching), `answer_logits` and caption `logits`. Use `from_logits=True` in the loss. The one squashed output is grounding `bbox`, which goes through a sigmoid and lies in (0, 1).
-- Captioning residual adds have no projection, so `text_features` must be exactly `hidden_size` wide. The vision width is free.
+- Captioning residual adds have no projection, so `text_features` must be exactly `hidden_size` wide. The vision width is free. `num_heads` must be a positive integer that divides `hidden_size`.
+- `dropout_rate` in the captioning config reaches the attention layers but not the decoder FFN.
 - `VQAHead(pooling_strategy="attention")` (the default) runs one cross-attention in both directions, so both inputs must be `hidden_size` wide and `hidden_size` must divide by `num_heads` (default 8). `mean` and `max` take any widths and also accept already-pooled rank-2 inputs; they refuse `num_heads`.
 - `VisualGroundingHead` and `ImageTextMatchingHead` need both inputs `hidden_size` wide for the fusion. Only six fusion strategies work: `concatenation`, `addition`, `multiplication`, `gated`, `bilinear`, `tensor_fusion`. `cross_attention` and `attention_pooling` raise `ValueError` at build.
 - Only `ImageTextMatchingHead` has a post-fusion norm and FFN (`normalization_type`, `use_post_fusion_ffn`, `ffn_type`, `ffn_expansion_factor`). Passing those to the grounding head is an error.

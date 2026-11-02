@@ -67,7 +67,7 @@ class MultiTaskVLMHead(keras.layers.Layer):
     share a signature. A shared keyword no head accepts raises; partial
     application is reported through ``logger.info``.
 
-    :class:`VQAHead` reads ``question_features`` while the other four heads
+    :class:`VQAHead` reads ``question_features`` while the other three heads
     read ``text_features``. One dict goes to all of them, so a wrapper mixing
     VQA with any other task raises ``KeyError`` unless the caller supplies
     both keys. Duplicating the same tensor under both keys is fine.

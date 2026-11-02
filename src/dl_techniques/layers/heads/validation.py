@@ -17,7 +17,7 @@ Six helpers, each with one rule that more than one head domain needs:
 
 * :func:`lookup_head` -- a task type (member or string) names the head a
   dispatch table serves, or the lookup raises. No fallback head exists in any
-  domain. The NLP, VLM and vision dispatchers call it.
+  domain. The NLP, VLM, vision and time-series dispatchers call it.
 * :func:`pool_or_passthrough` -- a head that takes either a sequence or an
   already pooled vector pools the sequence under its padding mask and passes
   the vector through, refusing a mask for the vector. The NLP and VLM heads

@@ -95,9 +95,9 @@ class VisualGroundingHead(BaseVLMHead):
                │ Dense 4, linear     │
                └──────────┬──────────┘
                           ▼
-               ┌─────────────────────┐
+               ┌───────────────────────────┐
                │ keras.ops.sigmoid in call │
-               └──────────┬──────────┘
+               └──────────┬────────────────┘
                           ▼
                     'bbox' (B, 4)
 

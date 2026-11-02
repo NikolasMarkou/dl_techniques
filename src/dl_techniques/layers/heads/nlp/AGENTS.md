@@ -44,7 +44,7 @@ Stage flags per head (class attributes `_POOLS`, `_APPLIES_TASK_ATTENTION`, `_AP
 
 `__init__` raises `ValueError` for `use_pooling` / `use_task_attention` / `use_ffn` set True on a head where the flag is False (`_refuse_unapplied_stages`). Token, QA and generation heads do `kwargs.setdefault('use_pooling', False)` before `super().__init__`.
 
-Task attention defaults built in `_create_common_layers`: `dim` = stage width, `dropout_rate` = `task_config.dropout_rate`, `num_heads=8` for `multi_head` and `window`, `window_size=7` for `window`; passed through `assemble_attention_config`. Intermediate: `DenseBlock(units=hidden_size, ...)`. FFN: `create_ffn_layer(ffn_type, hidden_dim=hidden_size * ffn_expansion_factor, output_dim=hidden_size, ...)`.
+Task attention defaults built in `_create_common_layers`: `dim` = stage width, `dropout_rate` = `task_config.dropout_rate`, `num_heads` (argument, default 8; refused for any other stage or type, and must divide the stage width) for `multi_head` and `window`, `window_size=7` for `window`; passed through `assemble_attention_config`. Intermediate: `DenseBlock(units=hidden_size, ...)`. FFN: `create_ffn_layer(ffn_type, hidden_dim=hidden_size * ffn_expansion_factor, output_dim=hidden_size, ...)`.
 
 ## Key files
 
@@ -55,7 +55,7 @@ Task attention defaults built in `_create_common_layers`: `dim` = stage width, `
 | `utils.py` | `_DELEGATED_POOLING_STRATEGIES = ('cls','mean','max','last')`, `_POOLING_TYPES` (those plus `'attention'`), `NLP_STAGE_KNOB_DEFAULTS`, `_split_inputs`, `_is_pair`, `_apply_per_row` | Private-named helpers are shared by the leaf modules |
 | `base.py` | `BaseNLPHead` | The only module in this package that calls `create_normalization_layer` |
 | `text_classification.py` | `TextClassificationHead` | `classifier` `Dense(num_classes)`; outputs `logits`, `probabilities` |
-| `token_classification.py` | `TokenClassificationHead` | `token_classifier`; `predictions` = argmax unless `use_crf` |
+| `token_classification.py` | `TokenClassificationHead` | `token_classifier`; `predictions` = argmax unless `use_crf`, reported as int32 by `compute_output_spec` |
 | `question_answering.py` | `QuestionAnsweringHead` | `start_classifier`, `end_classifier` (both `Dense(1)`); masks via `fill_masked` |
 | `text_similarity.py` | `TextSimilarityHead` | `projection` + `similarity_layers` (only for `'learned'`); pair or single input |
 | `text_generation.py` | `TextGenerationHead` | `lm_head` `Dense(vocabulary_size)`; ignores `attention_mask` |
@@ -72,7 +72,7 @@ Exports from the package (`from dl_techniques.layers.heads.nlp import ...`):
 - `NLPTaskType`, `NLPTaskConfig`
 - `create_nlp_head(task_config, input_dim, **kwargs) -> BaseNLPHead`: `NLPTaskConfig.coerce`, `get_head_class(task_config.task_type)`, then `head_class(task_config=..., input_dim=..., **kwargs)`. `ValueError` for a task type with no head or an invalid field; `TypeError` if `task_config` is neither a config nor a dict.
 - `create_multi_task_nlp_head(task_configs, input_dim, **kwargs) -> MultiTaskNLPHead`: a list or tuple is coerced and keyed by config `name` through `validation.key_by_name` (a repeated name raises); a dict is used as given. `input_dim` becomes `shared_input_dim`.
-- `BaseNLPHead(task_config, input_dim, normalization_type='layer_norm', activation_type='gelu', use_pooling=True, pooling_type='cls', use_intermediate=True, intermediate_size=None, use_task_attention=False, attention_type=None, use_ffn=False, ffn_type=None, ffn_expansion_factor=None, initializer_range=0.02, **kwargs)`
+- `BaseNLPHead(task_config, input_dim, normalization_type='layer_norm', activation_type='gelu', use_pooling=True, pooling_type='cls', use_intermediate=True, intermediate_size=None, use_task_attention=False, attention_type=None, use_ffn=False, ffn_type=None, ffn_expansion_factor=None, initializer_range=0.02, num_heads=None, **kwargs)`
 - `TextClassificationHead`, `TokenClassificationHead`, `QuestionAnsweringHead`, `MultipleChoiceHead`, `TextGenerationHead`: base arguments only. `TextSimilarityHead(output_embeddings=True, similarity_function='cosine'|'dot'|'learned', **kwargs)`.
 - `MultiTaskNLPHead(task_configs: dict, shared_input_dim, use_task_specific_projections=False, **kwargs)`; `call(inputs, training=None, *, task_name=None)`. `task_name` is keyword-only. `compute_output_shape` and `compute_output_spec` also take `task_name`. Unknown `task_name` raises `ValueError`.
 - `model_head` helpers:
@@ -111,6 +111,7 @@ Head outputs (dict, pre-activation):
 
 - Registration: `@register_dl_technique("dl_techniques.layers.heads.nlp.<module>")`, using the defining module's name (`base`, `text_classification`, `token_classification`, `question_answering`, `text_similarity`, `text_generation`, `multiple_choice`, `multitask`). Moving a class changes its key. Never use a bare `@keras.saving.register_keras_serializable()`. Archives saved under the old `...nlp.factory>X` keys do not load.
 - Layers are created in `__init__` and built in `build`. A leaf `build` calls `super().build` first, then builds the output layer at `self._output_width()` (`hidden_size` if `use_intermediate` or `use_ffn`, else `input_dim`).
+- `norm` and `intermediate` are built at the rank `call` feeds them (`_norm_input_shape`; `intermediate` is always rank 2). A norm with an `InputSpec` pins the rank at build, and one built too high keeps broadcasting at that rank.
 - `_stage_width` is `hidden_size` with the intermediate block and `input_dim` without it. Task attention and FFN are created and built at that width.
 - `compute_output_shape` must work unbuilt and return the same keys `call` returns.
 - Stage knobs: `attention_type`, `ffn_type`, `ffn_expansion_factor` default to `None`, resolve to `'multi_head'` / `'mlp'` / `4` through `validation.resolve_stage_knobs` with `NLP_STAGE_KNOB_DEFAULTS`, are stored as `None` with their stage off, and raise if given with their stage off.
@@ -149,7 +150,7 @@ A model imports the helpers from this package, never from `.model_head` or any o
 ## Failure modes
 
 All raise at construction unless noted:
-- Unknown `pooling_type`; `use_pooling` / `use_task_attention` / `use_ffn` for a stage the head never runs; an attention or FFN knob with its stage off; non-positive `input_dim` / `intermediate_size` -> `ValueError` naming the head and argument.
+- Unknown `pooling_type`; `use_pooling` / `use_task_attention` / `use_ffn` for a stage the head never runs; an attention or FFN knob with its stage off; non-positive `input_dim` / `intermediate_size` / `num_heads`; `num_heads` without `'multi_head'` or `'window'` task attention, or one that does not divide the stage width -> `ValueError` naming the head and argument.
 - `num_classes` missing for classification and token heads -> `ValueError` (from `NLPTaskConfig` and again in the head). The head's own `vocabulary_size is None` check for `TextGenerationHead` is a backstop: the config fills 32000 for every generation-routed task type.
 - Task type with no row (13 of 37) -> `ValueError` from `get_head_class` / `lookup_head` listing supported types. `NLPTaskType.get_output_types` raises the same way.
 - Unknown `NLPTaskConfig` field -> `TypeError`.
@@ -157,6 +158,8 @@ All raise at construction unless noted:
 - At call time: rank-3 input with `use_pooling=False`; mask given for an already pooled (rank-2 or rank-3 pooled-choice) input; mask given to an attention type without `attention_mask`; `MultipleChoiceHead` input rank other than 3 or 4; unknown `task_name` -> `ValueError`.
 - `build_model_task_head`: `MULTIPLE_CHOICE`, `name` in overrides, or a generation `vocabulary_size` different from `vocab_size` -> `ValueError`. An `NLPTaskConfig` instance that leaves the 32000 default on a model of another vocabulary also raises, since it cannot be told from an explicit 32000.
 - `use_crf=True` builds no CRF; it only removes `predictions`.
+- Not usable here (measured 2026-11-02): norms `local_response_norm`, `decoupled_max_logit`, `dml_plus_focal`, `dml_plus_center`; FFN types `counting`, `gated_dconv`, `gated_mlp`, `kan`, `logic`, `mixer`, `power_mlp`, `tversky`, which need arguments the head does not pass.
+- Accepted and ignored: `intermediate_size` when `task_config.hidden_size` is set (`hidden_size` wins); `num_classes` and `use_crf` on heads that do not read them. These are not refused: `get_config` writes the resolved `intermediate_size`, and language-model tests build QA configs with `num_classes=2`.
 
 ## Working here
 
@@ -174,6 +177,6 @@ Do not import classes from `factory.py` (it defines only the two `create_*` func
 
 Docstrings are Sphinx/reST (`:param:`, `:type:`, `:raises:`); match the file you edit.
 
-Tests are in `tests/test_layers/test_heads/`: `test_nlp.py`, `test_nlp_model_head.py`, `test_every_nlp_head_survives_a_keras_round_trip.py`, `test_every_nlp_head_reports_the_shapes_it_returns.py`, `test_every_nlp_preset_builds.py`, `test_the_nlp_dispatch_is_one_table.py`, `test_the_nlp_heads_honour_padding_masks.py`, `test_the_nlp_task_attention_ignores_padding.py`, `test_the_nlp_heads_build_at_the_width_call_feeds.py`, `test_the_nlp_heads_own_their_task_configs.py`, `test_the_nlp_heads_refuse_bad_arguments_early.py`, `test_the_nlp_task_config_holds_only_live_fields.py`, `test_an_nlp_head_refuses_a_stage_knob_its_flag_turns_off.py`, `test_the_head_classes_register_under_their_own_module.py`. Repo-level pins that name files here: `tests/test_layers/test_norms/test_the_norm_factory_family_is_pinned.py` (the one norm-factory site in `base.py`), `tests/test_the_head_factories_and_finetune_scripts_bind_no_dead_names.py`, `tests/test_the_mask_sentinel_population_is_closed.py`, `tests/test_layers/test_the_sequence_pooling_docs_match_the_code.py`.
+Tests are in `tests/test_layers/test_heads/`: `test_nlp.py`, `test_nlp_model_head.py`, `test_every_nlp_head_survives_a_keras_round_trip.py`, `test_every_nlp_head_reports_the_shapes_it_returns.py`, `test_every_nlp_preset_builds.py`, `test_the_nlp_dispatch_is_one_table.py`, `test_the_nlp_heads_honour_padding_masks.py`, `test_the_nlp_task_attention_ignores_padding.py`, `test_the_nlp_heads_build_at_the_width_call_feeds.py`, `test_the_nlp_heads_build_each_stage_at_the_rank_call_feeds.py`, `test_the_nlp_heads_own_their_task_configs.py`, `test_the_nlp_heads_refuse_bad_arguments_early.py`, `test_the_nlp_task_config_holds_only_live_fields.py`, `test_an_nlp_head_refuses_a_stage_knob_its_flag_turns_off.py`, `test_the_head_classes_register_under_their_own_module.py`. Repo-level pins that name files here: `tests/test_layers/test_norms/test_the_norm_factory_family_is_pinned.py` (the one norm-factory site in `base.py`), `tests/test_the_head_factories_and_finetune_scripts_bind_no_dead_names.py`, `tests/test_the_mask_sentinel_population_is_closed.py`, `tests/test_layers/test_the_sequence_pooling_docs_match_the_code.py`.
 
 Run: `.venv/bin/python -m pytest tests/test_layers/test_heads/ -q` from the repo root. Scope runs to that directory; the full suite takes about 1.5 hours. Do not run GPU jobs in parallel.

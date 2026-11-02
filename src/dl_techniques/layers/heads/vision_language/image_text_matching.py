@@ -127,8 +127,8 @@ class ImageTextMatchingHead(BaseVLMHead):
         (D-008 and D-020). A type that requires an explicit ``hidden_dim``
         receives ``hidden_dim * ffn_expansion_factor``. A type that derives
         its own width receives the factor itself and applies its own rule. Of
-        the 8 registry types in the second group, only ``swiglu`` accepts it.
-        For the other 7 (``kan``, ``mixer``, ``tversky``, ...) the concept does
+        the 9 registry types in the second group, only ``swiglu`` accepts it.
+        For the other 8 (``kan``, ``mixer``, ``tversky``, ...) the concept does
         not apply, and the value does not reach them. It is never passed both
         ways.
 
@@ -318,8 +318,8 @@ class ImageTextMatchingHead(BaseVLMHead):
             elif "ffn_expansion_factor" in set(
                 _entry.get("required_params", ())
             ) | set(_entry.get("optional_params", {})):
-                # Of the 8 registry types that treat `hidden_dim` as optional,
-                # only `swiglu` accepts this parameter. The other 7 (`kan`,
+                # Of the 9 registry types that treat `hidden_dim` as optional,
+                # only `swiglu` accepts this parameter. The other 8 (`kan`,
                 # `mixer`, `tversky`, ...) size themselves from unrelated
                 # parameters, so for them the factor does not apply at all.
                 #
@@ -346,6 +346,8 @@ class ImageTextMatchingHead(BaseVLMHead):
             # `assemble_ffn_config` drops it for 6 of the 21 registry types:
             # counting, gated_mlp, kan, logic, power_mlp, tversky. Do NOT drop
             # this filter; the factory raises on them. See decisions.md D-019.
+            # NOTE 2026-11-02: re-measured 7 of 22; `gated_dconv` joined the
+            # registry and the dropped list after the counts above.
             ffn_kwargs = assemble_ffn_config(self.ffn_type, ffn_kwargs)
             self.post_fusion_ffn = create_ffn_layer(self.ffn_type, **ffn_kwargs)
     def build(self, input_shape: Union[Dict, Tuple, List]) -> None:

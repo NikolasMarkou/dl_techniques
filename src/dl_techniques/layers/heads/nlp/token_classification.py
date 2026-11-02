@@ -177,6 +177,24 @@ class TokenClassificationHead(BaseNLPHead):
 
         return output_shapes
 
+    def compute_output_spec(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """
+        Report the symbolic outputs, with ``'predictions'`` as integers.
+
+        Keras gives every key of ``compute_output_shape`` the compute dtype,
+        but ``'predictions'`` is an argmax.
+
+        :param args: Forwarded to the base method.
+        :param kwargs: Forwarded to the base method.
+        :return: The symbolic outputs.
+        :rtype: Dict[str, Any]
+        """
+        spec = super().compute_output_spec(*args, **kwargs)
+        if 'predictions' in spec:
+            spec['predictions'] = keras.KerasTensor(
+                spec['predictions'].shape, dtype='int32')
+        return spec
+
     def call(
             self,
             inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]],

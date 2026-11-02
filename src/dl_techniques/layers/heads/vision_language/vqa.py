@@ -91,7 +91,8 @@ class VQAHead(keras.layers.Layer):
         'question_features': (batch, seq_len, text_width)}``, plus the
         optional masks. ``mean`` and ``max`` also take rank-2 (already
         pooled) features, and refuse a mask for them. ``attention`` needs
-        both inputs rank 3 and ``hidden_size`` wide, checked in ``build``.
+        both inputs rank 3 and ``hidden_size`` wide. ``build`` checks the
+        widths; the attention layer refuses another rank.
 
     Output shape:
         ``{'answer_logits': (batch, num_classes)}``.
@@ -311,8 +312,8 @@ class VQAHead(keras.layers.Layer):
         """
         Pool both modalities, concatenate them, and classify.
 
-        ``"mean"`` and ``"max"`` reduce over axis 1, so they need rank-3
-        inputs. ``"attention"`` runs one cross-attention layer in both
+        ``"mean"`` and ``"max"`` reduce a rank-3 input over axis 1 and pass a
+        rank-2 input through. ``"attention"`` runs one cross-attention layer in both
         directions and mean-pools each attended result.
 
         :param inputs: Dict with ``vision_features`` and ``question_features``,

@@ -10,7 +10,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # ---------------------------------------------------------------------
 
 from ..validation import key_by_name, lookup_head
-from .dispatch import VISION_HEAD_DISPATCH, create_vision_head
+from .dispatch import ENHANCEMENT_TASK_TYPES, VISION_HEAD_DISPATCH, create_vision_head
 from .task_types import TaskConfiguration, VisionTaskType
 
 
@@ -76,7 +76,9 @@ class MultiTaskHead(keras.layers.Layer):
         that does not set one.
     :type shared_backbone_dim: int
     :param use_task_specific_attention: Value forced onto every task head's
-        ``use_attention``. A per-task ``use_attention`` is overwritten.
+        ``use_attention``. A per-task ``use_attention`` is overwritten. The
+        denoising and super-resolution heads run no attention, so they are left
+        out of it and keep their own value.
     :type use_task_specific_attention: bool
     :param kwargs: Additional arguments for the base Layer class.
 
@@ -108,14 +110,20 @@ class MultiTaskHead(keras.layers.Layer):
             config that does not set one.
         :type shared_backbone_dim: int
         :param use_task_specific_attention: Value forced onto every task
-            head's ``use_attention``.
+            head's ``use_attention``, except the two enhancement heads.
         :type use_task_specific_attention: bool
         :param kwargs: Additional arguments for the base Layer class.
         :return: None.
         :rtype: None
-        :raises ValueError: If ``task_configs`` is empty, or a config names a
-            task type with no head.
+        :raises ValueError: If ``task_configs`` is not a dict or is empty, or a
+            config has no ``task_type`` or names a task type with no head.
         """
+        if not isinstance(task_configs, dict):
+            raise ValueError(
+                f"MultiTaskHead: task_configs must be a dict of task name to "
+                f"config, got {type(task_configs).__name__}; "
+                f"create_multi_task_head also takes a list or tuple of tasks."
+            )
         if not task_configs:
             raise ValueError(
                 "MultiTaskHead needs at least one task in task_configs; an "
@@ -140,7 +148,9 @@ class MultiTaskHead(keras.layers.Layer):
         Each entry names a task type and carries that head's keyword
         arguments. ``hidden_dim`` defaults to ``shared_backbone_dim`` and
         ``use_attention`` is forced to ``use_task_specific_attention``, so a
-        per-task ``use_attention`` in the caller dict is overwritten.
+        per-task ``use_attention`` in the caller dict is overwritten. An
+        enhancement head refuses ``use_attention=True``, so it is not forced
+        there; a per-task value reaches it and is refused.
 
         Every head comes from :func:`create_vision_head`: the ten task types
         it dispatches are accepted, with its per-task defaults. Any other
@@ -148,12 +158,18 @@ class MultiTaskHead(keras.layers.Layer):
 
         :return: None.
         :rtype: None
-        :raises ValueError: If a config names a task type with no head.
+        :raises ValueError: If a config has no ``task_type`` or names a task
+            type with no head.
         """
 
         self.task_heads = {}
 
         for task_name, config in self.task_configs.items():
+            if 'task_type' not in config:
+                raise ValueError(
+                    f"MultiTaskHead task {task_name!r}: the config needs a "
+                    f"'task_type', got keys {sorted(config)}"
+                )
             # Copy before pop: popping 'task_type' from the stored config
             # stripped it as a side effect and broke get_config() round trips
             # and repeated construction.
@@ -164,7 +180,8 @@ class MultiTaskHead(keras.layers.Layer):
 
             # Add shared configuration
             config['hidden_dim'] = config.get('hidden_dim', self.shared_backbone_dim)
-            config['use_attention'] = self.use_task_specific_attention
+            if task_type not in ENHANCEMENT_TASK_TYPES:
+                config['use_attention'] = self.use_task_specific_attention
             # Named after the task, unless the caller names it: an unnamed
             # head takes a process-global Keras suffix ('detection_head_2'),
             # which a .keras reload re-enters, so every weight path under it

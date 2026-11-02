@@ -32,6 +32,15 @@ PRESET_FIXED_KEYS: Dict[VisionTaskType, Dict[str, Any]] = {
         'use_attention': False, 'use_ffn': False, 'dropout_rate': 0.0},
 }
 
+#: The task types whose head reads ``dropout_rate`` only in its attention and
+#: FFN stages (:func:`_refuse_dropout_no_layer_applies`). With both stages off
+#: their preset dropout has no reader.
+_DROPOUT_ONLY_IN_STAGES: Tuple[VisionTaskType, ...] = (
+    VisionTaskType.DEPTH_ESTIMATION,
+    VisionTaskType.SURFACE_NORMALS,
+    VisionTaskType.OPTICAL_FLOW,
+)
+
 
 class HeadConfiguration:
     """
@@ -299,7 +308,9 @@ def build_model_vision_head(
     * A preset knob of a stage the merged config turns off
       (``attention_type``; ``ffn_type``, ``ffn_expansion_factor``) is
       dropped, unless ``head_config`` or the overrides set it: then it
-      reaches the head, which refuses it (D-210).
+      reaches the head, which refuses it (D-210). The preset ``dropout_rate``
+      of depth, normals and flow goes the same way when both of their stages
+      are off.
     * Returns ``create_vision_head(task_type, **merged)``; an unknown key is
       refused by the head constructor.
 
@@ -330,6 +341,10 @@ def build_model_vision_head(
     config = merge_head_config_overrides(config, head_config_overrides)
     # A preset knob for a stage the model or the caller turned off is dropped
     # with the stage; one they set themselves reaches the head and is refused.
-    config = _drop_off_stage_knobs(
-        config, keep=(head_config, head_config_overrides or {}))
+    keep = (head_config, head_config_overrides or {})
+    config = _drop_off_stage_knobs(config, keep=keep)
+    if (VisionTaskType.coerce(task_type) in _DROPOUT_ONLY_IN_STAGES
+            and not (config.get('use_attention') or config.get('use_ffn'))
+            and not any('dropout_rate' in source for source in keep)):
+        config.pop('dropout_rate', None)
     return create_vision_head(task_type, **config)

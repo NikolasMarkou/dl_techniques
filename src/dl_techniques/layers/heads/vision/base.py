@@ -21,7 +21,7 @@ from ...attention.factory import (
     assemble_attention_config,
 )
 from ...norms import NormalizationType
-from ..validation import positive_int, resolve_stage_knobs
+from ..validation import positive_int, resolve_stage_knobs, static_rank
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # registration decorator is imported above
@@ -296,6 +296,7 @@ class BaseVisionHead(keras.layers.Layer):
                 # 'cbam' (handled above), 'channel', 'spatial', the four
                 # 'tripseN', 'capsule_routing', 'fnet', 'hopfield', 'non_local'.
                 # Do NOT pass `dim` unconditionally. See decisions.md D-023.
+                # NOTE 2026-11-02: the registry now has 36 types; still 11 lack `dim`.
                 self.attention = create_attention_layer(
                     self.attention_type,
                     name=f'{self.name}_attention',
@@ -427,7 +428,7 @@ class BaseVisionHead(keras.layers.Layer):
         :rtype: keras.KerasTensor
         :raises ValueError: See :meth:`_attention_takes_spatial`.
         """
-        rank = len(x.shape)
+        rank = static_rank(x, 'features', type(self).__name__)
         spatial = self._attention_takes_spatial(rank)
         batch = keras.ops.shape(x)[0]
         if rank == 4 and not spatial:

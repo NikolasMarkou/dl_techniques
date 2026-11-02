@@ -89,7 +89,8 @@ class EnhancementHead(BaseVisionHead):
     :param output_channels: Channel count of the output image.
     :type output_channels: int
     :param scale_factor: Spatial upscaling factor. Above 1 selects the
-        transposed-conv path; 1 selects the same-resolution conv.
+        transposed-conv path, with a kernel of ``max(3, scale_factor)``;
+        1 selects the same-resolution conv.
     :type scale_factor: int
     :param block_dims: Width of each refinement ``ConvBlock``, in order.
         ``None`` means ``(hidden_dim, hidden_dim, hidden_dim)``. ``()``
@@ -177,10 +178,13 @@ class EnhancementHead(BaseVisionHead):
         ]
 
         if self.scale_factor > 1:
-            # For super-resolution
+            # For super-resolution. The kernel must span the stride: at
+            # kernel 3 and stride 4, 7/16 of the output pixels received no
+            # input, and 55/64 at stride 8 (measured 2026-11-02). Scales 2 and 3
+            # keep kernel 3, so their weights do not change.
             self.upsample = keras.layers.Conv2DTranspose(
                 filters=self.output_channels,
-                kernel_size=3,
+                kernel_size=max(3, self.scale_factor),
                 strides=self.scale_factor,
                 padding='same',
                 use_bias=self.output_use_bias,

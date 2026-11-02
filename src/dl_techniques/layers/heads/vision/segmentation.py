@@ -178,11 +178,24 @@ class SegmentationHead(BaseVisionHead):
         self.input_format = input_format
         self.patch_grid_size = patch_grid_size
 
+        if self.input_format not in ("spatial", "sequence"):
+            raise ValueError(
+                f"SegmentationHead: input_format must be one of ['spatial', "
+                f"'sequence'], got {self.input_format!r}"
+            )
+        if self.skip_channel_mode not in ("auto", "explicit"):
+            raise ValueError(
+                f"SegmentationHead: skip_channel_mode must be one of ['auto', "
+                f"'explicit'], got {self.skip_channel_mode!r}"
+            )
+
         if self.input_format == "sequence" and self.patch_grid_size is None:
             raise ValueError("patch_grid_size is required when input_format='sequence'")
 
         if self.skip_channel_mode == "explicit" and self.explicit_skip_channels is None:
             raise ValueError("explicit_skip_channels is required when skip_channel_mode='explicit'")
+        if self.skip_channel_mode == "explicit":
+            self._check_explicit_skip_channels()
 
         # DECISION plan-2026-10-14T062616-81938e81/D-028
         # One stride-2 transposed conv per doubling: log2(factor) of them. Do
@@ -299,6 +312,59 @@ class SegmentationHead(BaseVisionHead):
             name='seg_head'
         )
 
+    def _check_explicit_skip_channels(self) -> None:
+        """
+        Refuse ``explicit_skip_channels`` the refine widths cannot come from.
+
+        :meth:`_explicit_refine_widths` reads the entries ``-2``, ``-3`` and
+        ``-4`` and halves them, so at least four positive entries are needed,
+        and those three must be at least 2.
+
+        :return: None.
+        :rtype: None
+        :raises ValueError: Naming ``explicit_skip_channels``.
+        """
+        owner = type(self).__name__
+        channels = [
+            positive_int(c, 'explicit_skip_channels entry', owner)
+            for c in self.explicit_skip_channels
+        ]
+        if len(channels) < 4:
+            raise ValueError(
+                f"{owner}: explicit_skip_channels needs at least 4 entries, "
+                f"got {channels}: the three refine blocks take their widths "
+                f"from entries -2, -3 and -4."
+            )
+        if min(channels[-4:-1]) < 2:
+            raise ValueError(
+                f"{owner}: explicit_skip_channels entries -2, -3 and -4 must be "
+                f"at least 2, got {channels}: each refine block takes half of "
+                f"one."
+            )
+
+    def _refuse_unused_skips(self, skip_count: int) -> None:
+        """
+        Refuse more auto-mode skips than there are refine blocks to take them.
+
+        ``call`` concatenates skip ``i`` after refine block ``i``, so a further
+        skip would change nothing in the output. Explicit mode declares its
+        skips in ``explicit_skip_channels`` and ``build`` checks them there.
+
+        :param skip_count: Number of skips in the input.
+        :type skip_count: int
+        :return: None.
+        :rtype: None
+        :raises ValueError: If a skip would be dropped.
+        """
+        limit = len(self.refine_blocks)
+        if self.skip_channel_mode == "auto" and skip_count > limit:
+            raise ValueError(
+                f"SegmentationHead got {skip_count} skip maps but has {limit} "
+                f"refine blocks to concatenate them after, so the "
+                f"{skip_count - limit} earliest would have no effect. Pass at "
+                f"most {limit + 1} maps, the highest-level one last."
+            )
+
     def _explicit_refine_widths(self) -> List[int]:
         """
         Output widths of the three refine blocks in explicit mode.
@@ -380,6 +446,7 @@ class SegmentationHead(BaseVisionHead):
         else:
             base_shape = input_shape[-1] if shape_list else input_shape
             skip_shapes = []
+        self._refuse_unused_skips(len(skip_shapes))
         self._check_skip_resolution(base_shape, skip_shapes)
 
         # In explicit mode, validate skip channels
@@ -436,8 +503,10 @@ class SegmentationHead(BaseVisionHead):
         :rtype: keras.KerasTensor
         """
 
+        # A tuple of maps means what a list of them means.
+        x = list(inputs) if isinstance(inputs, tuple) else inputs
+
         # Handle sequence input format (ViT patch tokens)
-        x = inputs
         if self.input_format == "sequence":
             if self.patch_grid_size is None:
                 raise ValueError("patch_grid_size must be set for sequence input format")
@@ -456,6 +525,7 @@ class SegmentationHead(BaseVisionHead):
         else:
             x_main = x if not isinstance(x, list) else x[-1]
             skip_features = []
+        self._refuse_unused_skips(len(skip_features))
         self._check_skip_resolution(
             tuple(x_main.shape), [tuple(s.shape) for s in skip_features])
 
