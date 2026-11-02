@@ -89,7 +89,7 @@ docstring lists what is unchecked.
 | `analysis_args.model_analysis` | `true` | Runs the full model analyzer once, after training, on the best weights, into `model_analysis/` (`analysis_results.json` and seven PNGs: weights, spectral, information flow, calibration, training dynamics and the summary dashboard). Needs a test split. `false` leaves `analyzer.status` at `skipped` |
 | `analysis_args.epoch_analysis_every` | `0` | `N > 0` runs the data-free epoch analyzer (weights and spectral only) before training into `epoch_analysis/epoch_000/` (the untrained model), after epoch 1 into `epoch_001/`, then at epochs N, 2N, ... into `epoch_NNN/`. `0` is off. A failure on a built model stops the fit, so no snapshot is silently missing. A resumed run does not redo `epoch_000` and `epoch_001` |
 | `analysis_args.conformal_alpha` | `null` | A level strictly between 0 and 1 (0.1 aims at 90% coverage) writes `conformal.json` and `conformal_model.keras` (outputs logits, probabilities and set membership), calibrated on the test split. `null` skips it and the summary's `conformal` is null. A level with no test split is skipped with a note |
-| `analysis_args.eval_batch_size` | `"auto"` | Images per pass of every evaluation and prediction that is not training: the in-memory (CIFAR, MNIST) validation and test splits, the figures' predictions, the model analyzer's predictions (when below its own 32) and the final-model load check. `auto` is the recipe's value, and 256 where the recipe says nothing, so a default run evaluates exactly as before. The cliffordnet recipes on ImageNet and Imagenette set the batch they train at (8 for `cliffordnet`, 16 for `cliffordnet_hier`), because 256 images of 224 px ask 18 GB. ImageNet, Imagenette, folder and csv splits are evaluated at the training `batch_size` and ignore it. It changes no weight, and it may differ when a run is resumed |
+| `analysis_args.eval_batch_size` | `"auto"` | Images per pass of the predictions made after training: the figures' predictions (every dataset, folder and csv included), the model analyzer's predictions (it caps its own 32 at this value when this is lower; its information-flow pass sizes its own batch from the analyzer's memory budget and does not read it) and the final-model load check (the same cap), and the validation and test splits of the in-memory datasets (CIFAR, MNIST). The validation and test splits of ImageNet, Imagenette, folder and csv data are batched at `batch_size` and ignore it. `auto` is the recipe's value, and 256 where the recipe says nothing, so a default run evaluates exactly as before. The cliffordnet recipes on ImageNet and Imagenette set the batch they train at (8 for `cliffordnet`, 16 for `cliffordnet_hier`), because 256 images of 224 px ask 18 GB. Those recipe values are keyed to the dataset: folder and csv data take 256 whatever the family or the image size (a run on files of 224 px or more with a family whose ImageNet recipe sets a batch logs a warning naming `batch_size` and this key). It changes no weight, and it may differ when a run is resumed |
 | `checkpoint_args.backup_every_steps` | `null` | `N >= 2` (and below the steps of an epoch) also writes the resume backup after every N-th batch inside an epoch, so a kill loses at most N batches of training; `null` backs up at each epoch end only. A resume continues the killed epoch on the weights of the last copy and runs only the batches that copy had not taken, from a fresh pass of the data (some examples of that epoch repeat and some are missed); the optimizer's step count and the learning rate of every step are the unkilled run's, and that epoch's row holds the train metrics of its remaining batches only. Each copy writes the weights and optimizer state twice (the previous copy is kept); the cost per save is in the backup table of the ImageNet section |
 | `logger_args.tensorboard` | `{}` | `{}` writes TensorBoard event files into `tensorboard/` (`train/` and `validation/`); `null` turns them off; a dict with keys is refused, because no TensorBoard option is wired |
 
@@ -234,7 +234,7 @@ own defaults and compares.
 
 **The four Imagenette pairs that have no legacy trainer** (`vit`, `resnet`, `convnext_v1`, `convnext_v2`) get values
 from these rules, each a derivation from a legacy value or a cited recipe, not from a run: no run of these four pairs
-has been made, so read them as starting points. Only `cliffordnet` has an Imagenette parity run planned.
+has been made, so read them as starting points. Only `cliffordnet` has an Imagenette parity run (the nano variant at 128 px and batch 32, see Parity below).
 
 | Rule | Value | Basis |
 |---|---|---|
@@ -341,6 +341,10 @@ What the table settles, in the recipes:
   weights, 512 images, allocator peak: 924 MiB at batch 8, 1,468 at 16, 2,555 at 32, 5,043 at 64, 17,775 at 256; the real
   reporting pass of that run (20,000 test images, figures, analyzer, final evaluation, load check) at batch 8 peaked at
   4,681.5 MiB. `cliffordnet` on CIFAR at 224 px is not reachable: `transform_args.image_size` is refused for in-memory data.
+  Folder and csv data at 224 px are NOT covered: the overlay is keyed to the dataset names, so they resolve to the base recipe's
+  batch of 128 and to 256 here. The review ran `cliffordnet/nano` at 256 on 224 px files: the allocator logged an out-of-memory
+  request of 12.27 GiB for the figures and the run recovered and finished; no death was reproduced, so the answer is a warning at
+  resolution (both keys named), not a changed default.
 
 Not covered by a recipe, and measured: `resnet/resnet50` on ImageNet completes at the recipe's batch 256 but with a garbage
 collection and the device at 22,591 MiB (no margin), and a bounded whole run of it (`data.max_samples=2560`, one epoch)
@@ -476,7 +480,11 @@ MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m train image_classifica
 ```
 <!-- imagenet-commands:end -->
 
-**Parity**: the API run and the legacy trainer were compared on `vit_pico` on CIFAR-10 only
-(10 epochs, three seeds each; the means differ by less than a tolerance measured from the legacy
-trainer's own run-to-run spread). The other families' recipes are pinned by tests that build them,
-not by a run. The legacy `train.<model>` scripts remain.
+**Parity**: the API run and the legacy trainer were compared on `vit_pico` on CIFAR-10 (10 epochs, three
+seeds each) and on `cliffordnet/nano` on Imagenette at batch 32 and 128 px (20 epochs, three seeds each); in both
+the means differ by less than a tolerance measured from the legacy trainer's own run-to-run spread (on Imagenette the API
+was lower on both statistics, by 0.0106 and 0.0088 against tolerances of 0.0137 and 0.0116, with a selection split of 946
+images: "no difference larger than the machine's own repeat noise", not "equal"). **Parity does not cover the shipped
+`cliffordnet` recipe**: batch 8 (16 for `cliffordnet_hier`) at 224 px with a learning rate of 1e-3 that is not scaled for
+that batch (Memory fit, above), which nobody has trained to an accuracy, so whether it learns on Imagenette or ImageNet is
+unknown. The other families' recipes are pinned by tests that build them, not by a run. The legacy `train.<model>` scripts remain.

@@ -231,6 +231,22 @@ def test_fresh_statistics_are_listed_and_moved_ones_are_not():
     assert classification_run.unset_batch_statistics(model) == []
 
 
+def test_statistics_that_are_only_partly_at_their_initial_value_are_not_unset():
+    """Mutant ``ub_any_not_all`` (review-iter-2 concern 19): ``any`` for ``all`` listed a layer whose
+    variance is 1 in three channels and 2 in the fourth, or whose mean is 0 in three and 0.1 in
+    the fourth. Those statistics have moved; only ALL channels at 1 and 0 are the initial ones."""
+    model, layer = small(keras.layers.BatchNormalization(name="bn"))
+    assert classification_run.unset_batch_statistics(model) == ["bn"]
+    layer.moving_variance.assign(np.array([1.0, 1.0, 1.0, 2.0], "float32"))
+    assert classification_run.unset_batch_statistics(model) == []
+    layer.moving_variance.assign(np.ones((4,), "float32"))
+    layer.moving_mean.assign(np.array([0.0, 0.0, 0.0, 0.1], "float32"))
+    assert classification_run.unset_batch_statistics(model) == []
+    model, layer = small(BiasFreeBatchNorm(name="bf"))
+    layer.running_var.assign(np.array([1.0, 3.0, 1.0, 1.0], "float32"))
+    assert classification_run.unset_batch_statistics(model) == []
+
+
 def test_a_frozen_layer_is_not_listed_because_inference_is_its_training_behaviour():
     model, layer = small(keras.layers.BatchNormalization(name="bn"))
     layer.trainable = False
@@ -291,6 +307,8 @@ def test_a_resnet_run_says_not_judged_and_says_what_was_measured(runs):
     assert summary["initial_loss_ratio"] > INITIAL_LOSS_WARN_FACTOR  # the baseline is kept
     notes = [n for n in summary["notes"] if n.startswith("`init_scale_warning` is null")]
     assert len(notes) == 1 and "inference mode" in notes[0] and "batch statistics" in notes[0]
+    # Review-iter-2 concern 12: the note says what the withheld verdict costs.
+    assert "a really mis-scaled BatchNorm model is NOT caught here" in notes[0]
     log = (run_dir / "run.log").read_text()
     assert "far too large" not in log
     assert "No verdict on the initialization is given" in log

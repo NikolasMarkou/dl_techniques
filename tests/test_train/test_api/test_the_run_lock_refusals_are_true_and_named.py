@@ -354,11 +354,22 @@ def test_a_resume_replaces_a_longer_earlier_payload_whole(tmp_path):
         assert read_lock(tmp_path)["pid"] == os.getpid()
 
 
-def test_a_held_lock_whose_label_cannot_be_read_is_still_refused_as_held(tmp_path):
-    """A read failure of the LABEL must not replace the fact that someone holds the lock."""
-    (tmp_path / LOCK_NAME).mkdir()  # reading it fails; the kernel lock on it still works
+def test_a_held_lock_whose_label_cannot_be_read_is_still_refused_as_held(tmp_path, monkeypatch):
+    """A read failure of the LABEL must not replace the fact that someone holds the lock.
+
+    Changed in step 22.4 (D-067): the lock used to be a DIRECTORY here, which "fails to read" and
+    still takes a ``flock``. A directory is no longer a lock the code opens at all (it is refused as
+    not a regular file, ``test_the_run_lock_is_a_regular_file.py``), so the contrivance is gone and the
+    thing this test is about, ``_holder_text`` tolerating a label that raises, is pinned on a held
+    REGULAR lock whose ``read_lock`` raises."""
+    (tmp_path / LOCK_NAME).write_text("")
     descriptor = os.open(tmp_path / LOCK_NAME, os.O_RDONLY)
     run_dir_module.fcntl.flock(descriptor, run_dir_module.fcntl.LOCK_EX | run_dir_module.fcntl.LOCK_NB)
+
+    def unreadable(run_dir):
+        raise ConfigError(f"Cannot read {run_dir / LOCK_NAME}: Input/output error")
+
+    monkeypatch.setattr(run_dir_module, "read_lock", unreadable)
     try:
         with pytest.raises(ConfigError, match=r"another process holds run\.lock"):
             refuse_live_holder(tmp_path)

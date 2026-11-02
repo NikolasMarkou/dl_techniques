@@ -2042,7 +2042,9 @@ class TaskTrainer:
                 "`initial_loss_ratio` is that evaluation's loss over ln(C), kept as the "
                 "baseline, and it is not the loss of the first training step (which uses batch "
                 "statistics). No training-mode pass was run to measure it: it would move the "
-                "moving statistics and the random generators"
+                "moving statistics and the random generators. The verdict is withheld for every "
+                "such model, so a really mis-scaled BatchNorm model is NOT caught here: only its "
+                "first epochs show it"
             )
         complete = None if resume is None else self._training_complete_reason(resume, config)
         if complete is not None:

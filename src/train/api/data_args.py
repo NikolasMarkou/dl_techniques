@@ -443,12 +443,20 @@ def builtin_facts(data: BuiltinImageData, requested_image_size: Optional[int]) -
 def _tfds_data_dir() -> Path:
     """Return the directory TFDS reads when no ``data_dir`` is given, without importing it.
 
-    ``$TFDS_DATA_DIR`` when the variable is set (even empty, as TFDS reads it), else
-    ``~/tensorflow_datasets``.
+    ``$TFDS_DATA_DIR`` when the variable is set, EVEN EMPTY (TFDS then reads ``.``), with a leading
+    ``~`` expanded as TFDS expands it (``TFDS_DATA_DIR='~/t'`` is ``$HOME/t``); else
+    ``~/tensorflow_datasets``. TFDS's own answer is pinned in
+    ``test_the_pre_claim_tfds_directory_is_the_one_tfds_reads.py``.
     """
+    # DECISION plan-2026-10-31T180033-2faf890a/D-065
+    # `expanduser`, and `is not None` rather than a truthiness test: TFDS reads `~/t` as
+    # `$HOME/t` and `''` as `.` (list_data_dirs). Do NOT return `Path(given)` for a tilde (a
+    # false refusal of a layout the loader reads, review-iter-2 concern 3) and do NOT treat an
+    # empty variable as unset (mutant da_empty_var: the default directory is then looked in,
+    # which TFDS does not do).
     given = os.environ.get("TFDS_DATA_DIR")
     if given is not None:
-        return Path(given)
+        return Path(os.path.expanduser(given))
     return Path(os.path.expanduser("~")) / "tensorflow_datasets"
 
 
@@ -495,6 +503,7 @@ def _check_imagenet_tree(data: BuiltinImageData) -> None:
                 f"the ImageNet root {root!r}{origin} must hold {split}/ "
                 "(every run reads train for the classes and val as the test split)"
             )
+    _check_imagenet_not_empty(root, key)
     devkit = data.devkit_dir if data.devkit_dir is not None else os.path.join(root, "devkit")
     missing = [
         name
@@ -510,21 +519,89 @@ def _check_imagenet_tree(data: BuiltinImageData) -> None:
         )
 
 
+def _holds_an_image(directory: str, suffixes: Tuple[str, ...]) -> bool:
+    """Whether ``directory`` has a file with one of ``suffixes`` directly in it (stops at the first)."""
+    with os.scandir(directory) as entries:
+        return any(entry.is_file() and entry.name.lower().endswith(suffixes) for entry in entries)
+
+
+def _check_imagenet_not_empty(root: str, key: str) -> None:
+    """Refuse an ImageNet ``train/`` with no class folder or no image, and a ``val/`` with no image.
+
+    The loader's own first failures (``_list_classes``: "No class folders under train";
+    ``_load_or_build_index``: "No images found under ..."), seen here before the claim. It looks only
+    as far as the loader's scan would have to: ``train/`` needs one class folder and ONE image in
+    some class folder, ``val/`` one image directly in it (a subfolder is not scanned), found by
+    ``os.scandir`` that stops at the first. An unreadable directory is named, not a raw
+    ``PermissionError``.
+    """
+    # DECISION plan-2026-10-31T180033-2faf890a/D-065
+    # The loader's own first failures, seen before the claim, and no further: ONE class folder, ONE
+    # image in some class folder, ONE image in val/. Do NOT count images or classes (a false refusal
+    # of the real tree is the worst failure, and `os.scandir` that stops at the first hit costs one
+    # directory listing), and do NOT look inside sub-folders of val/ (the loader's scan does not).
+    from dl_techniques.datasets.vision import imagenet2012 as loader
+
+    suffixes = loader._IMAGE_SUFFIXES
+    train, val = os.path.join(root, "train"), os.path.join(root, "val")
+    try:
+        with os.scandir(train) as entries:
+            classes = sorted(entry.name for entry in entries if entry.is_dir())
+        if not classes:
+            raise ConfigError(
+                f"Invalid value for {key!r}: {train!r} has no class folder; the loader takes the "
+                "sorted wnid folders under train/ as the classes"
+            )
+        if not any(_holds_an_image(os.path.join(train, name), suffixes) for name in classes):
+            raise ConfigError(
+                f"Invalid value for {key!r}: none of the class folders under {train!r} holds an "
+                f"image ({', '.join(suffixes)}), so there is no training data: no image was found"
+            )
+        if not _holds_an_image(val, suffixes):
+            raise ConfigError(
+                f"Invalid value for {key!r}: {val!r} holds no image ({', '.join(suffixes)}) directly "
+                "in it, and the validation images are the test split; no image was found"
+            )
+    except OSError as exc:
+        raise ConfigError(
+            f"Invalid value for {key!r}: {exc.filename or root!r} cannot be read "
+            f"({exc.strerror or exc}); the ImageNet tree must be readable"
+        ) from exc
+
+
 def _check_imagenette_records() -> None:
     """Refuse an Imagenette ``320px-v2`` record set that is not under the TFDS directory."""
     # DECISION plan-2026-10-31T180033-2faf890a/D-034: look for a version directory that holds
     # ``dataset_info.json`` and do NOT name a version: the builder's version is only known by
     # importing TFDS, which this check must not do. The loader still checks the exact one.
-    from dl_techniques.datasets.vision.imagenette import find_prepared_records
+    from dl_techniques.datasets.vision.imagenette import (
+        IMAGENETTE_TFDS_VERSION,
+        find_prepared_records,
+    )
 
     root = _tfds_data_dir()
-    here, found = find_prepared_records(root)
+    origin = (
+        f"TFDS directory {str(root)!r} from "
+        f"{'$TFDS_DATA_DIR' if 'TFDS_DATA_DIR' in os.environ else 'the default ~/tensorflow_datasets'}"
+    )
+    try:
+        here, found = find_prepared_records(root)
+    except OSError as exc:
+        raise ConfigError(
+            f"Invalid value for 'data.dataset': imagenette reads TFDS records, and "
+            f"{exc.filename or str(root)!r} cannot be read ({exc.strerror or exc}) ({origin}); "
+            "fix the permission, or set TFDS_DATA_DIR to a directory you can read"
+        ) from exc
     if not found:
+        try:
+            holds = sorted(child.name for child in here.iterdir()) if here.is_dir() else []
+        except OSError:
+            holds = []
+        present = f"; that directory holds {', '.join(holds)}" if holds else ""
         raise ConfigError(
             f"Invalid value for 'data.dataset': imagenette reads the TFDS records of "
-            f"{here.relative_to(root).as_posix()}, and none are under {str(here)!r} "
-            f"(TFDS directory {str(root)!r} from "
-            f"{'$TFDS_DATA_DIR' if 'TFDS_DATA_DIR' in os.environ else 'the default ~/tensorflow_datasets'}); "
+            f"{here.relative_to(root).as_posix()} version {IMAGENETTE_TFDS_VERSION}, and none are "
+            f"under {str(here / IMAGENETTE_TFDS_VERSION)!r}{present} ({origin}); "
             "nothing is downloaded. Set TFDS_DATA_DIR to the directory that holds imagenette/"
         )
 

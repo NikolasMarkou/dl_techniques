@@ -13,7 +13,18 @@ against the real code (review-iter-1 concern 7; every plant listed in ``PLANTS``
   of the three data classes); a backticked ``<name>_args`` alone must be a group; a ``<group>``
   that is not a group is refused; digits count in a field name;
 * an ``=value`` suffix (``analysis_args.conformal_alpha=0.1``) must be JSON of the field's real
-  type, and, when the sentence also says "default", equal to the field's real default;
+  type, must pass the group's own ``problems`` rule for that field (``checkpoint_args.backup_every_steps=1``
+  and ``analysis_args.eval_batch_size=-3`` are refused by the code, so a document may not suggest
+  them), and, when the sentence also says "default", equal to the field's real default;
+* a TOP-LEVEL key of the task config (``epochs``, ``batch_size``, ``seed``, ``out``, ...) written as
+  a ``name=value`` token of a fenced ``python -m train`` command must be a field (``learning_rate=3``
+  is not; ``config=<file>`` and ``task=<name>`` are the command line's own keys) and its value of the field's type (a
+  backticked ``name=value`` in PROSE is not checked: the documents also write keyword arguments of
+  library functions that way, ``analyzer_first_epoch=True``), and a sentence that says
+  "default" about exactly one such backticked field and gives ``is <value>`` must give the real
+  default (``auto`` for the fields a recipe fills);
+* ``model_args.<anything>`` is a keyword of the model factory, a free mapping: it is NOT checked
+  (it used to crash the checker with a ``TypeError``, review-iter-2 concern 16);
 * a sentence that says "default", names one key and a ``true``, ``false``, ``null`` or number after
   "is" or "=", states that key's default, and it must equal the real one (JSON spelling);
 * a table whose second column is ``Default`` must hold, for every key in its first column, the
@@ -37,8 +48,12 @@ against the real code (review-iter-1 concern 7; every plant listed in ``PLANTS``
 What is NOT checked, and therefore must not be read as checked: the words of a description (what a
 knob "writes", "costs nothing", "needs a test split"), any number that is not a duration, a
 dotted name rooted at something the resolver does not know (``foo.bar``), a default stated in a
-form the "default ... is" rule does not match, the contents of a file a name points to, and the
-evidence file itself (a copy of one measurement; this test does not re-measure it).
+form the "default ... is" rule does not match, a RECIPE claim (``cliffordnet trains at batch 64 on
+ImageNet``: the recipes are data in ``recipes.py`` and no sentence is parsed for them), the keys of
+``model_args``, a hyphenated group (``analysis-args.figures`` is not a key reference to this
+checker), the contents of a file a name points to, an output file name that the sources spell
+differently than the document, and the evidence file itself (a copy of one measurement; this test
+does not re-measure it).
 
 A region that is missing or empty fails: the test must not pass for want of text.
 """
@@ -88,6 +103,9 @@ LAZY_CLASSES = {
     "ModelAnalyzer": "dl_techniques.analyzer.model_analyzer:ModelAnalyzer",
 }
 
+#: A backticked bare word, a candidate top-level key in a sentence about a default.
+_TICKED_NAME = re.compile(r"`([a-z][a-z_0-9]*)`")
+
 KEY = re.compile(
     r"(?<![\w./-])((?:[a-z]+_)+args|data)\.([A-Za-z0-9_]+)(?:=([^\s`|,;)]+))?"
 )
@@ -130,8 +148,44 @@ def _field(group: str, name: str) -> Optional[dataclasses.Field]:
     if group not in top or top[group].default_factory is dataclasses.MISSING:
         return None
     cls = type(top[group].default_factory())
+    if not dataclasses.is_dataclass(cls):
+        return None  # a free mapping (model_args): see _free_groups
     inner = {f.name: f for f in dataclasses.fields(cls)}
     return inner.get(name)
+
+
+def _free_groups() -> set:
+    """The ``*_args`` groups of the task config that are free mappings, not dataclasses (``model_args``)."""
+    return {
+        f.name for f in dataclasses.fields(ImageClassificationConfig)
+        if f.name.endswith("_args") and f.default_factory is not dataclasses.MISSING
+        and not dataclasses.is_dataclass(type(f.default_factory()))
+    }
+
+
+def _top_level_fields() -> Dict[str, dataclasses.Field]:
+    """The fields of the task config that are not groups (``epochs``, ``seed``, ``out``, ...)."""
+    return {f.name: f for f in dataclasses.fields(ImageClassificationConfig)
+            if not f.name.endswith("_args") and f.name != "data"}
+
+
+def _rule_problem(group: str, name: str, value: Any) -> Optional[str]:
+    """The group's own refusal of ``value`` for ``name``, or ``None``.
+
+    Builds the group with that one field changed and keeps the lines of ``problems`` that name the
+    field, so a rule about another field (a combination the document does not state) is not blamed.
+    """
+    top = {f.name: f for f in dataclasses.fields(ImageClassificationConfig)}
+    cls = type(top[group].default_factory())
+    try:
+        instance = dataclasses.replace(cls(), **{name: value})
+    except (TypeError, ValueError):
+        return "the group refuses it at construction"
+    check = getattr(instance, "problems", None)
+    if check is None:
+        return None
+    lines = [line for line in check("") if name in line]
+    return lines[0] if lines else None
 
 
 def _owner(group: str, name: str) -> Any:
@@ -265,6 +319,8 @@ def _key_problems(text: str) -> List[str]:
         if group not in groups:
             found.append(f"`{key}`: `{group}` is not a group of the task config")
             continue
+        if group in _free_groups():
+            continue  # a keyword of the model factory: unchecked, and stated as such above
         field = _field(group, name)
         if field is None:
             found.append(f"`{key}` is not a field of the task config")
@@ -274,9 +330,45 @@ def _key_problems(text: str) -> List[str]:
             hint = typing.get_type_hints(_owner(group, name)).get(name, Any)
             if not _accepts(hint, value):
                 found.append(f"`{key}={shown}`: the value is not of the field's type")
+            elif group != "data" and (rule := _rule_problem(group, name, value)) is not None:
+                found.append(f"`{key}={shown}`: the code refuses this value ({rule.strip()})")
     for group in GROUP_ONLY.findall(text):
         if group not in groups:
             found.append(f"`{group}` is not a group of the task config")
+    found.extend(_top_level_problems(text))
+    return found
+
+
+#: A ``name=value`` token of a fenced command. ``config=<file>`` and ``task=<name>`` (``list_models``)
+#: are keys of the command line itself, not fields of a task config.
+TOP_TOKEN = re.compile(r"^([a-z][a-z_0-9]*)=(\S+)$")
+COMMAND_LINE_KEYS = ("config", "task")
+
+
+def _command_tokens(text: str) -> List[str]:
+    """The whitespace tokens of every fenced block that holds a ``python -m train`` command."""
+    tokens: List[str] = []
+    for block in re.findall(r"```[^\n]*\n(.*?)```", text, flags=re.S):
+        if "python -m train" in block:
+            tokens.extend(block.replace("\\\n", " ").split())
+    return tokens
+
+
+def _top_level_problems(text: str) -> List[str]:
+    """Unknown top-level keys and values of the wrong type or the wrong rule."""
+    found: List[str] = []
+    fields = _top_level_fields()
+    shown_pairs = {m.groups() for m in map(TOP_TOKEN.match, _command_tokens(text)) if m}
+    for name, shown in sorted(shown_pairs):
+        if name in COMMAND_LINE_KEYS:
+            continue
+        if name not in fields:
+            found.append(f"`{name}={shown}`: `{name}` is not a field of the task config")
+            continue
+        value = _literal(shown)
+        hint = typing.get_type_hints(ImageClassificationConfig).get(name, Any)
+        if not _accepts(hint, value) and value != "auto":
+            found.append(f"`{name}={shown}`: the value is not of the field's type")
     return found
 
 
@@ -295,15 +387,17 @@ def _default_claims(text: str) -> List[str]:
         if not re.search(r"\bdefault\b", sentence, re.I):
             continue
         keys = {(g, n) for g, n, _ in KEY.findall(sentence) if _field(g, n) is not None}
+        keys |= {("", n) for n in _TICKED_NAME.findall(sentence) if n in _top_level_fields()}
         if len(keys) != 1:
             continue  # not attributable to one key: unchecked (see the module docstring)
         group, name = next(iter(keys))
-        real = _default_text(_field(group, name))
+        real = _default_text(_top_level_fields()[name] if not group else _field(group, name))
         claimed = re.search(
             r"default.*?(?:\bis\b|=)\s*`?(true|false|null|-?\d+(?:\.\d+)?|\{\})`?(?![\w.]*\w)", sentence, re.I
-        ) or re.search(rf"{re.escape(group)}\.{re.escape(name)}=`?([^\s`.,;)]+)", sentence)
+        ) or re.search(rf"{re.escape(group + '.') if group else ''}{re.escape(name)}=`?([^\s`.,;)]+)", sentence)
         if claimed and real is not None and _literal(claimed.group(1).lower()) != json.loads(real):
-            found.append(f"`{group}.{name}` is said to default to {claimed.group(1)}, the code has {real}")
+            shown_key = f"{group}.{name}" if group else name
+            found.append(f"`{shown_key}` is said to default to {claimed.group(1)}, the code has {real}")
     return found
 
 
@@ -492,6 +586,23 @@ PLANTS = {
     "hook of another class": "`ImageClassificationTrainer.no_such_hook(config)`",
     "row default without backticks": "| `analysis_args.figures` | false | text |",
     "row with a false Read at cell": "| `analysis_args.figures` | `true` | read at src/train/nowhere.py |",
+    # review-iter-2 concern 16: planted and found passing, now flagged
+    "value the group refuses": "Set `checkpoint_args.backup_every_steps=1` to back up every batch.",
+    "value out of range": "Set `analysis_args.eval_batch_size=-3` for a smaller batch.",
+    "false top-level default": "The default of `batch_size` is 7.",
+    "unknown key in a fenced command": "```\npython -m train image_classification nope=1\n```",
+    "wrong type in a fenced command": "```\npython -m train image_classification epochs=abc\n```",
+}
+
+#: What the checker is KNOWN not to catch (the module docstring says so); each is a plant that must
+#: PASS, so the docstring stays true: extending the checker to one of them fails this list and asks
+#: for the sentence to change.
+LIMITS = {
+    "a recipe claim": "cliffordnet trains at batch 64 on ImageNet.",
+    "a top-level key in prose": "Set `learning_rate=3` here.",
+    "a default stated in another form": "`epochs` is 7 by default.",
+    "a hyphenated group": "Set `analysis-args.figures` here.",
+    "a key of the model factory": "Set `model_args.nope` here.",
 }
 
 
@@ -508,6 +619,27 @@ def test_every_plant_is_flagged(name):
     if name == "row with a false Read at cell":
         text = good.replace(END, "\n| Key | Default | Read at |\n|---|---|---|\n" + PLANTS[name] + "\n" + END)
     assert problems(text), f"the plant {name!r} passes the checker"
+
+
+@pytest.mark.parametrize("name", sorted(LIMITS))
+def test_each_stated_limit_of_the_checker_is_still_a_limit(name):
+    """Concern 16: a limit is stated in the module docstring, and this keeps the statement true."""
+    good = _good_region()
+    assert problems(_with(good, LIMITS[name])) == []
+
+
+def test_a_model_args_key_does_not_crash_the_checker():
+    """It raised ``TypeError: must be called with a dataclass type or instance``: ``model_args`` is a dict."""
+    assert "model_args" in _free_groups()
+    assert problems(_with(_good_region(), "`model_args.nope` and `model_args.stochastic_depth_rate=0.1`")) == []
+
+
+def test_a_fenced_command_with_real_keys_is_clean():
+    good = _good_region()
+    command = ("```\npython -m train image_classification out=x model=vit/vit_pico epochs=3 \\\n"
+               "    analysis_args.figures=false config=run.yaml\n```")
+    assert problems(_with(good, command)) == []
+    assert problems(_with(good, "`python -m train list_models task=image_classification`")) == []
 
 
 def test_a_bad_key_outside_the_markers_is_flagged():

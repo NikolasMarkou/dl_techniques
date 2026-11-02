@@ -41,15 +41,26 @@ from train.api.errors import ConfigError
 REPO_ROOT = Path(__file__).resolve().parents[3]
 REAL_IMAGENET = Path("/media/arxwn/data0_4tb/datasets/imagenet2012")
 REAL_TFDS = Path("/media/arxwn/data0_4tb/datasets/tensorflow_datasets")
+NOT_ROOT = pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
 
 
-def imagenet_tree(root: Path, *, train=True, val=True, devkit="devkit", meta=True, truth=True) -> Path:
-    """Lay out the files the loader looks for (empty ones: only their presence is read)."""
+def imagenet_tree(
+    root: Path, *, train=True, val=True, devkit="devkit", meta=True, truth=True, images=True
+) -> Path:
+    """Lay out the files the loader looks for (empty ones: only their presence is read).
+
+    ``images`` puts one image file in the first class folder and one in ``val/``: since review-iter-2
+    concern 10 the check reads the first entry of each, as the loader's scan does.
+    """
     root.mkdir(parents=True)
     if train:
         (root / "train" / "n01440764").mkdir(parents=True)
+        if images:
+            (root / "train" / "n01440764" / "n01440764_1.JPEG").write_bytes(b"")
     if val:
         (root / "val").mkdir()
+        if images:
+            (root / "val" / "ILSVRC2012_val_00000001.JPEG").write_bytes(b"")
     if devkit:
         place = root / devkit
         place.mkdir(parents=True)
@@ -152,6 +163,70 @@ def test_an_explicit_devkit_dir_is_the_one_looked_at(tmp_path):
 
 
 # ---------------------------------------------------------------------
+# Review-iter-2 concern 10: layouts that passed and then failed after the claim, or reached the user raw
+# ---------------------------------------------------------------------
+
+
+def test_a_train_directory_without_a_class_folder_is_refused_naming_it(tmp_path):
+    """The loader's ``_list_classes``: "No class folders under train" was a ``FileNotFoundError`` after the claim."""
+    root = imagenet_tree(tmp_path / "r", train=False)
+    (root / "train").mkdir()
+    (root / "train" / "stray.txt").write_text("a file is not a class")
+    with pytest.raises(ConfigError) as caught:
+        check_builtin_sources(imagenet(root))
+    assert "'data.imagenet_root'" in str(caught.value) and str(root / "train") in str(caught.value)
+    # The first message, not the second ("none of the class folders ... holds an image"): with the
+    # emptiness test removed (mutant ine_no_class_folder) the second one fired and a looser phrase
+    # ("no class folder") matched it by accident.
+    assert "has no class folder" in str(caught.value) and "none of the class folders" not in str(caught.value)
+
+
+def test_class_folders_without_any_image_are_refused_naming_train(tmp_path):
+    root = imagenet_tree(tmp_path / "r", images=False)
+    with pytest.raises(ConfigError) as caught:
+        check_builtin_sources(imagenet(root))
+    assert str(root / "train") in str(caught.value) and "no image" in str(caught.value)
+    assert "none of the class folders" in str(caught.value) and "has no class folder" not in str(caught.value)
+
+
+def test_a_val_directory_without_an_image_is_refused_naming_it(tmp_path):
+    """The loader's ``_scan`` of ``val`` takes only the image files directly in it."""
+    root = imagenet_tree(tmp_path / "r", images=False)
+    (root / "train" / "n01440764" / "n01440764_1.JPEG").write_bytes(b"")
+    (root / "val" / "notes.txt").write_text("not an image")
+    (root / "val" / "sub").mkdir()
+    (root / "val" / "sub" / "ILSVRC2012_val_00000001.JPEG").write_bytes(b"")  # a subfolder is not scanned
+    with pytest.raises(ConfigError) as caught:
+        check_builtin_sources(imagenet(root))
+    assert str(root / "val") in str(caught.value) and "no image" in str(caught.value)
+
+
+def test_the_first_class_folder_with_an_image_is_enough_and_a_later_empty_one_is_not_a_refusal(tmp_path):
+    """A real tree has an empty-looking folder now and then: only the lack of ANY image is a refusal."""
+    root = imagenet_tree(tmp_path / "r")
+    (root / "train" / "n00000001").mkdir()  # sorts before the folder that holds the image
+    check_builtin_sources(imagenet(root))
+
+
+@NOT_ROOT
+@pytest.mark.parametrize("which", ["train", "val"])
+def test_an_unreadable_imagenet_directory_is_refused_naming_it_not_a_raw_permission_error(tmp_path, which):
+    root = imagenet_tree(tmp_path / "r")
+    os.chmod(root / which, 0)
+    try:
+        with pytest.raises(ConfigError) as caught:
+            check_builtin_sources(imagenet(root))
+    finally:
+        os.chmod(root / which, 0o755)
+    assert str(root / which) in str(caught.value) and "cannot be read" in str(caught.value)
+
+
+def test_the_unrefused_tree_is_the_one_the_loader_reads(tmp_path):
+    """Control for the refusals above: one image in the first class folder and one in val/ is a pass."""
+    check_builtin_sources(imagenet(imagenet_tree(tmp_path / "r")))
+
+
+# ---------------------------------------------------------------------
 # Imagenette
 # ---------------------------------------------------------------------
 
@@ -178,8 +253,11 @@ def test_the_default_directory_is_read_when_the_variable_is_unset(tmp_path, monk
         lambda root: root.mkdir(),  # nothing under it
         lambda root: tfds_records(root, info=False),  # a version folder with no dataset_info.json
         lambda root: (root / "imagenette" / "full-size-v2" / "1.0.0").mkdir(parents=True),  # the other config
+        # review-iter-2 concern 10: these two passed the check and died after the claim (FileNotFoundError, exit 1)
+        lambda root: tfds_records(root, version="9.9.9"),  # another version only
+        lambda root: tfds_records(root, version="incomplete.ABC123_1.0.0"),  # a preparation that never finished
     ],
-    ids=["empty", "no_dataset_info", "other_config_only"],
+    ids=["empty", "no_dataset_info", "other_config_only", "other_version_only", "incomplete_only"],
 )
 def test_records_that_are_not_the_320px_set_are_refused_with_the_key_and_the_path(
     tmp_path, monkeypatch, build
@@ -386,3 +464,68 @@ def test_the_control_real_records_pass_the_check_and_the_run_is_claimed_up_to_se
     assert seen["code"] == "stopped at setup_gpu", (seen, stderr[-2000:])
     assert out.exists() and seen["setup_gpu_reached"] is True
     assert seen["tfds_used"] is False and seen["devices_created"] is False
+
+
+def test_the_version_the_check_looks_for_is_the_one_the_tfds_builder_reads(tmp_path):
+    """Review-iter-2 concern 10: the check names ONE version, a second copy of what the builder says.
+    The builder (no data read: the directory is empty) must say the same, or TFDS moved and the check
+    would refuse a layout the loader reads (or accept one it does not)."""
+    import tensorflow_datasets as tfds
+
+    from dl_techniques.datasets.vision import imagenette
+
+    builder = tfds.builder(imagenette.IMAGENETTE_TFDS_NAME, data_dir=str(tmp_path))
+    assert str(builder.version) == imagenette.IMAGENETTE_TFDS_VERSION
+    assert Path(builder.data_dir) == tmp_path / imagenette.IMAGENETTE_TFDS_NAME / imagenette.IMAGENETTE_TFDS_VERSION
+
+
+def test_the_refusal_for_another_version_says_which_one_is_there_and_which_is_read(tmp_path, monkeypatch):
+    root = tfds_records(tmp_path / "tfds", version="9.9.9")
+    monkeypatch.setenv("TFDS_DATA_DIR", str(root))
+    with pytest.raises(ConfigError) as caught:
+        check_builtin_sources(BuiltinImageData(dataset="imagenette"))
+    text = str(caught.value)
+    assert "1.0.0" in text and "9.9.9" in text and str(root / "imagenette" / "320px-v2") in text
+
+
+@NOT_ROOT
+def test_an_unreadable_imagenette_directory_is_refused_naming_the_path_not_a_raw_permission_error(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "tfds"
+    (root / "imagenette").mkdir(parents=True)
+    os.chmod(root / "imagenette", 0)
+    monkeypatch.setenv("TFDS_DATA_DIR", str(root))
+    try:
+        with pytest.raises(ConfigError) as caught:
+            check_builtin_sources(BuiltinImageData(dataset="imagenette"))
+    finally:
+        os.chmod(root / "imagenette", 0o755)
+    assert str(root / "imagenette") in str(caught.value) and "cannot be read" in str(caught.value)
+
+
+def test_a_tilde_in_the_variable_is_expanded_as_tfds_expands_it(tmp_path, monkeypatch):
+    """Review-iter-2 concern 3: ``TFDS_DATA_DIR='~/t'`` was a false refusal."""
+    home = tmp_path / "home"
+    tfds_records(home / "t")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("TFDS_DATA_DIR", "~/t")
+    assert data_args._tfds_data_dir() == home / "t"
+    check_builtin_sources(BuiltinImageData(dataset="imagenette"))
+
+
+def test_an_empty_variable_is_a_set_variable_and_means_the_current_directory(tmp_path, monkeypatch):
+    """Mutant ``da_empty_var``: TFDS reads ``.`` for ``TFDS_DATA_DIR=''`` (its own answer is pinned in
+    ``test_the_pre_claim_tfds_directory_is_the_one_tfds_reads.py``), so records in the DEFAULT directory
+    are not the ones it reads, and records in the working directory are."""
+    home = tmp_path / "home"
+    tfds_records(home / "tensorflow_datasets")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("TFDS_DATA_DIR", "")
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    with pytest.raises(ConfigError, match="TFDS_DATA_DIR"):
+        check_builtin_sources(BuiltinImageData(dataset="imagenette"))
+    tfds_records(work)
+    check_builtin_sources(BuiltinImageData(dataset="imagenette"))

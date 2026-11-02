@@ -504,7 +504,8 @@ The default `run_analysis` passes the run's `seed` as the analyzer's `random_sta
 `pl_pvalue` is reproducible between runs of one seed; the legacy trainers stay unseeded.
 <!-- knobs:end -->
 
-- **Parity with the legacy trainer is measured for `vit_pico` on CIFAR-10 only.** Do not claim it for
-  another family without a run.
+- **Parity with the legacy trainer is measured for `vit_pico` on CIFAR-10 and for `cliffordnet/nano` on Imagenette
+  at batch 32 and 128 px, and not for the shipped `cliffordnet` recipe (batch 8 at 224 px, lr 1e-3 unscaled).** Do not
+  claim it for another family or recipe without a run.
 - Tests: `tests/test_train/test_api/`. Scope pytest to that directory; the whole of it takes a long
   time (the export-per-family file alone is minutes).

@@ -568,14 +568,19 @@ class AnalysisArgs(StrictConfig):
     eval_batch_size: Auto[int] = dataclasses.field(
         default=AUTO,
         metadata={
-            "help": "images per pass of every evaluation and prediction that is not training: "
-            "the in-memory (CIFAR, MNIST) validation and test splits, the figures' predictions, "
-            "the model analyzer's predictions (when below its own 32) and the final-model load "
-            "check. auto is the recipe's value, and 256 where the recipe says nothing; the "
-            "cliffordnet recipes on ImageNet and Imagenette set the batch they train at (8 or "
-            "16), because 256 images at 224 px ask for 18 GB. ImageNet, Imagenette, folder and "
-            "csv splits are evaluated at the training batch_size and ignore it. It changes no "
-            "weight; it can change an evaluation number in the last digits"
+            "help": "images per pass of the predictions made after training: the figures' "
+            "predictions (every dataset), the model analyzer's predictions (it caps its own 32 at "
+            "this value when this is lower; its information-flow pass sizes its own batch from the "
+            "analyzer's memory budget and does not read it) and the final-model load check (the "
+            "same cap), and the validation and test splits of the in-memory datasets (CIFAR, "
+            "MNIST). The validation and test splits of ImageNet, Imagenette, folder and csv data "
+            "are batched at batch_size and ignore it. auto is the recipe's value, and 256 where "
+            "the recipe says nothing; the cliffordnet recipes on ImageNet and Imagenette set the "
+            "batch they train at (8 or 16), because 256 images at 224 px ask for 18 GB. Those "
+            "recipe values are keyed to the dataset: folder and csv data take 256 whatever the "
+            "family or the image size, so a cliffordnet run on files of 224 px should set it (and "
+            "batch_size) itself. It changes no weight; it can change an evaluation number in the "
+            "last digits"
         },
     )
 

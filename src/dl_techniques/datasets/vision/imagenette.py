@@ -38,6 +38,18 @@ from dl_techniques.utils.logger import logger
 
 #: Verified present offline at ``$TFDS_DATA_DIR``: 9469 train / 3925 validation, 10 classes.
 IMAGENETTE_TFDS_NAME = "imagenette/320px-v2"
+# DECISION plan-2026-10-31T180033-2faf890a/D-065
+# The version is NAMED, in one place. Do NOT go back to "any version directory with a
+# dataset_info.json" in the pre-claim check: a layout that holds only another version, or only
+# `incomplete.*`, passed it and died with FileNotFoundError after the run was claimed
+# (review-iter-2 concern 10). Do NOT let the check and the loader each spell the version.
+#: The version directory under ``<data_dir>/imagenette/320px-v2`` the records are read at. ONE home:
+#: :func:`read_imagenette_records` asks the builder for exactly this version and
+#: :func:`find_prepared_records` looks for exactly this directory, so a layout that holds another
+#: version only (or a preparation that never finished, ``incomplete.*``) is the same "not prepared"
+#: to both. ``tests/test_train/test_api/test_the_builtin_sources_are_refused_before_the_claim.py``
+#: holds it equal to the version the installed TFDS builder says.
+IMAGENETTE_TFDS_VERSION = "1.0.0"
 IMAGENETTE_NUM_CLASSES = 10
 IMAGENETTE_TRAIN_SIZE = 9469
 IMAGENETTE_VALIDATION_SIZE = 3925
@@ -73,18 +85,19 @@ def find_prepared_records(data_dir: Union[str, "os.PathLike[str]"]) -> Tuple[Pat
     Interface contract: ``data_dir`` is a TFDS data directory (``$TFDS_DATA_DIR`` or
     ``~/tensorflow_datasets``). Imports neither TFDS nor TensorFlow, reads no record and creates
     nothing, so a caller can refuse a missing record set before it claims a run directory. It
-    names no version: the builder's version is only known by importing TFDS, and
-    :func:`read_imagenette_records` still checks the exact one.
+    looks for ONE directory, ``<data_dir>/imagenette/320px-v2/<IMAGENETTE_TFDS_VERSION>``, because
+    that is the version :func:`read_imagenette_records` asks the builder for: a directory that
+    holds another version, or only ``incomplete.*`` (a preparation that never finished), is not
+    prepared.
 
     :param data_dir: the TFDS data directory.
-    :return: ``(directory looked at, found)``; ``found`` is ``True`` when that directory
-        (``<data_dir>/imagenette/320px-v2``) holds a version directory with ``dataset_info.json``.
+    :return: ``(directory looked at, found)``; ``found`` is ``True`` when
+        ``<data_dir>/imagenette/320px-v2/<version>/dataset_info.json`` is a file. The directory
+        returned is ``<data_dir>/imagenette/320px-v2``, so a caller can say what it holds instead.
+    :raises OSError: a directory on the way cannot be read (permission); a caller names the path.
     """
     here = Path(data_dir) / IMAGENETTE_TFDS_NAME
-    found = here.is_dir() and any(
-        (child / "dataset_info.json").is_file() for child in here.iterdir() if child.is_dir()
-    )
-    return here, found
+    return here, (here / IMAGENETTE_TFDS_VERSION / "dataset_info.json").is_file()
 
 
 def read_imagenette_records(
@@ -103,7 +116,7 @@ def read_imagenette_records(
     # Imported lazily: tfds pulls in a heavy import chain.
     import tensorflow_datasets as tfds
 
-    builder = tfds.builder(IMAGENETTE_TFDS_NAME, data_dir=data_dir)
+    builder = tfds.builder(f"{IMAGENETTE_TFDS_NAME}:{IMAGENETTE_TFDS_VERSION}", data_dir=data_dir)
     if not Path(builder.data_dir).is_dir():
         raise FileNotFoundError(
             f"{IMAGENETTE_TFDS_NAME} records are not prepared at {builder.data_dir}; "

@@ -187,6 +187,35 @@ def _export_saved_model(model: Any, directory: Path, spec: Any) -> None:
     archive.write_out(str(directory), verbose=False)
 
 
+def _formats_but(name: str) -> str:
+    """The other formats in a sentence: ``keras, saved_model or onnx``."""
+    names = [f for f in FORMATS if f != name]
+    return ", ".join(names[:-1]) + " or " + names[-1]
+
+
+def _refuse_bfloat16_tflite(model: Any) -> None:
+    """Refuse, before anything is written, a model that computes in bfloat16.
+
+    :raises ConfigError: naming the format, the precision and the formats that carry the model.
+    """
+    # DECISION plan-2026-10-31T180033-2faf890a/D-066
+    # A refusal, not an export, and BEFORE the SavedModel is written. The graph casts to bfloat16
+    # and the interpreter of the tensorflow package has no kernel for CAST version 7 (reproduced
+    # on a GPU, XLA auto-jit off and on: the check of the converted file died with a ValueError,
+    # exit 1, and `<out>.saved_model` was left behind). Do NOT trace the model in float32 to get
+    # a file: the variables are float32 whichever policy the layers compute in, but the graph
+    # that was trained and checked is the bfloat16 one, and a file of another graph is not the
+    # model. mixed_float16 and float32 export (measured, review-iter-2 concern 9).
+    if getattr(model, "compute_dtype", None) == "bfloat16":
+        raise ConfigError(
+            "Invalid value for 'format': 'tflite' cannot carry a model that computes in bfloat16 "
+            "(precision mixed_bfloat16): its graph casts to bfloat16 and the TFLite interpreter of "
+            "the tensorflow package has no kernel for that cast, so the file could be neither "
+            f"checked nor run. Nothing was written; choose {_formats_but('tflite')}, or train in "
+            "float32 or mixed_float16"
+        )
+
+
 def _what_failed(error: BaseException) -> str:
     """Return a short sentence about a converter failure: the operators it names, else its first line."""
     text = str(error)
@@ -232,7 +261,21 @@ def _check_tflite_against_keras(blob: bytes, model: Any, spec: Any, out: Path) -
     # must still refuse a file that is really wrong (the mutation test breaks the file).
     with tf.device("/CPU:0"):
         expected = np.asarray(model(batch, training=False), np.float64)
-    got = _tflite_logits(blob, batch)
+    try:
+        got = _tflite_logits(blob, batch)
+    except ValueError as exc:
+        # DECISION plan-2026-10-31T180033-2faf890a/D-066
+        # The interpreter raises ValueError for an operator it has no kernel for ("Didn't find
+        # op for builtin opcode 'CAST' version '7'" for a bfloat16 model). Do NOT let it reach
+        # the user as a traceback and exit 1: the request (this model as tflite) cannot be
+        # honoured, which is exit 2, and the SavedModel the converter read is still on disk.
+        first = next((line.strip() for line in str(exc).splitlines() if line.strip()), type(exc).__name__)
+        raise ConfigError(
+            f"Invalid value for 'format': the 'tflite' file converted from this model cannot be run "
+            f"by the TFLite interpreter ({first[:_CONVERTER_LINE]}), so {out} was not written. Its "
+            f"SavedModel was kept at {out.with_name(out.name + TFLITE_SIBLING)}; move it away before "
+            f"trying again, or choose {_formats_but('tflite')}"
+        ) from None
     scale = max(1.0, float(np.abs(expected).max()))
     worst = float("inf") if got.shape != expected.shape else float(np.abs(got - expected).max())
     if not worst <= TFLITE_CHECK_RTOL * scale:
@@ -369,6 +412,8 @@ def export(
             f"called or loaded), got {type(model).__name__}"
         )
     spec = None if format == "keras" else _input_spec(model, input_shape)
+    if format == "tflite":
+        _refuse_bfloat16_tflite(model)
 
     from dl_techniques.utils.logger import logger
 

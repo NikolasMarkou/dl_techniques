@@ -118,6 +118,9 @@ from ..data_args import (
 from ..predictor import build_task_record, overrides_of_variant
 from ..trainer import Evaluation, FitState, TaskTrainer, TrainResult, config_problems
 
+#: The side (px) the cliffordnet batches of D-036 were measured at: what ImageNet and Imagenette run at.
+LARGE_IMAGE_SIDE = 224
+
 # ---------------------------------------------------------------------
 
 TASK = recipes.TASK
@@ -428,6 +431,30 @@ class ImageClassificationTrainer(TaskTrainer):
                     "statistics come from one pass over the fit split",
                 )
             )
+            # DECISION plan-2026-10-31T180033-2faf890a/D-068
+            # A WARNING, not a changed default. Do NOT copy the ImageNet overlay's batch to folder
+            # and csv data: the review could not reproduce a death (nano finished at 256 after a
+            # 12.27 GiB allocation failure), the values were measured on one card with ImageNet-shaped
+            # data, and a recipe keyed by image size is a design change. The numbers are read from
+            # the registry, never typed here.
+            measured = registry.MODELS[family].defaults.get("per_dataset", {}).get("imagenet", {})
+            if "batch_size" in measured and facts.image_size >= LARGE_IMAGE_SIDE:
+                from train.common.classification_data import EVAL_BATCH_SIZE
+
+                notices.append(
+                    (
+                        "warning",
+                        f"{family} on {facts.dataset} data of {facts.image_size} px: the batch of "
+                        f"{measured['batch_size']} (batch_size) and the evaluation batch "
+                        "(analysis_args.eval_batch_size) that fit a 24 GB card at 224 px were "
+                        "measured on imagenet and imagenette and are keyed to those datasets, so "
+                        "unless you set them this run trains at the base recipe's batch and "
+                        f"evaluates at {EVAL_BATCH_SIZE} (cliffordnet/nano at 224 px and "
+                        f"{EVAL_BATCH_SIZE}: the allocator logged an out-of-memory request of "
+                        "12.27 GiB for the figures and recovered); set both, or use "
+                        "transform_args.image_size=128"
+                    )
+                )
         elif facts.dataset not in registry.MODELS[family].defaults.get("per_dataset", {}):
             notices.append(
                 (

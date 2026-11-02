@@ -111,6 +111,7 @@ import json
 import math
 import numbers
 import os
+import stat
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -406,6 +407,47 @@ def process_stamp(pid: int) -> Optional[str]:
     return f"{boot}:{stat[1]}"
 
 
+def _open_regular(lock: Path, flags: int, mode: int = 0o666) -> int:
+    """Open ``lock`` without following a link or waiting on a peer; return the descriptor of a regular file.
+
+    Interface contract: ``flags`` are the ``os.open`` access and creation flags; ``O_NOFOLLOW`` and
+    ``O_NONBLOCK`` are added. The result is checked with ``fstat``.
+
+    :raises FileNotFoundError: the lock is absent (and ``flags`` do not create it).
+    :raises ConfigError: the lock is a symbolic link (dangling or not) or is not a regular file (a
+        FIFO, a directory, a device), naming the lock.
+    :raises OSError: any other refusal of the operating system, for the caller to word.
+    """
+    # DECISION plan-2026-10-31T180033-2faf890a/D-067
+    # The lock trusted its path (review-iter-2 concern 17). A symlinked `run.lock` had the payload
+    # written THROUGH it over the target; a FIFO blocked the read-only open forever; a directory
+    # opened read-only and let a resume go on. Do NOT drop `O_NOFOLLOW` (the write follows the
+    # link) or `O_NONBLOCK` (the open of a FIFO waits for a peer) or the `fstat` (a directory or a
+    # device opens). The package deletes nothing (invariant 5), so the answer is a refusal.
+    try:
+        descriptor = os.open(lock, flags | os.O_NOFOLLOW | os.O_NONBLOCK, mode)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ConfigError(
+                f"Cannot open {lock}: it is a symbolic link, and the run lock is never written "
+                "through a link. Move the link away, or choose another 'out'"
+            ) from exc
+        if exc.errno in (errno.EISDIR, errno.ENXIO):
+            raise _not_regular(lock) from exc
+        raise
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise _not_regular(lock)
+    return descriptor
+
+
+def _not_regular(lock: Path) -> ConfigError:
+    return ConfigError(
+        f"Cannot open {lock}: it is not a regular file (a FIFO, a directory or a device), and the "
+        "run lock is a plain file that holds a label. Move it away, or choose another 'out'"
+    )
+
+
 def read_lock(run_dir: Path) -> Optional[dict]:
     """Return the parsed ``run.lock`` of ``run_dir``; ``None`` if absent; ``{}`` if unreadable text.
 
@@ -417,9 +459,14 @@ def read_lock(run_dir: Path) -> Optional[dict]:
     """
     lock = run_dir / LOCK_NAME
     try:
-        data = lock.read_bytes()
+        descriptor = _open_regular(lock, os.O_RDONLY)
     except FileNotFoundError:
         return None
+    except OSError as exc:
+        raise _lock_unusable(lock, "read", exc) from exc
+    try:
+        with os.fdopen(descriptor, "rb") as handle:
+            data = handle.read()
     except OSError as exc:
         raise _lock_unusable(lock, "read", exc) from exc
     try:
@@ -482,7 +529,7 @@ def refuse_live_holder(run_dir: Path) -> None:
     """
     lock = run_dir / LOCK_NAME
     try:
-        descriptor = os.open(lock, os.O_RDONLY)
+        descriptor = _open_regular(lock, os.O_RDONLY)
     except FileNotFoundError:
         return
     except OSError as exc:
@@ -541,10 +588,10 @@ def _open_lock(run_dir: Path, resume: bool) -> int:
     try:
         if resume:
             try:
-                return os.open(lock, os.O_WRONLY)
+                return _open_regular(lock, os.O_WRONLY)
             except FileNotFoundError:
                 pass
-        return os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        return _open_regular(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
     except FileExistsError as exc:
         raise ConfigError(
             f"Invalid value for 'out': {run_dir} was claimed by another run just now "
