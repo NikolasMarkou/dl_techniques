@@ -34,7 +34,6 @@ def main(spec: dict) -> None:
     tf.config.threading.set_inter_op_parallelism_threads(1)
 
     import keras
-    from keras.src.utils import file_utils
 
     import train.api.recipes as recipes
     import train.common.classification_data as classification_data
@@ -55,6 +54,9 @@ def main(spec: dict) -> None:
         time.sleep(3600)
 
     metadata_writes = {"count": 0}
+    # The module the callback calls ``File`` through: keras.callbacks.BackupAndRestore's own
+    # module global, reached by the class's ``__module__`` (keras has no public file_utils).
+    file_utils = sys.modules[keras.callbacks.BackupAndRestore.__module__].file_utils
     real_file = file_utils.File
     if spec.get("stop_at_meta_write"):
 
