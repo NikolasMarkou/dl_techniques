@@ -855,9 +855,35 @@ def test_run_and_its_steps_hold_no_except_clause():
         }
 
     methods = methods_of(trainer_module, "TaskTrainer")
-    for name in ("run", "_train", "_resolve", "_callbacks", "_notes", "_write_diverged_summary"):
+    for name in ("run", "_resolve", "_callbacks", "_notes", "_write_diverged_summary"):
         handlers = [n for n in ast.walk(methods[name]) if isinstance(n, ast.ExceptHandler)]
         assert not handlers, name
+    # Step 22.5 (D-070): `_train` became the stages of `run_sequence`, so the census follows it. The
+    # three context managers of that module are the only handlers on the path (each named in its own
+    # test); every stage, `execute` included, holds none. The callbacks' module holds none at all.
+    from train.api import fit_callbacks, run_sequence
+
+    def functions_of(module):
+        tree = ast.parse(Path(module.__file__).read_text())
+        return {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+
+    stages = functions_of(run_sequence)
+    for name in ("execute", "announce", "load_data", "build_model", "epoch_zero", "train_or_restore", "report"):
+        handlers = [n for n in ast.walk(stages[name]) if isinstance(n, ast.ExceptHandler)]
+        assert not handlers, name
+    assert [n for n in ast.walk(ast.parse(Path(fit_callbacks.__file__).read_text()))
+            if isinstance(n, ast.ExceptHandler)] == []
+    handlers_in = {
+        name: [n for n in ast.walk(node) if isinstance(n, ast.ExceptHandler)] for name, node in stages.items()
+    }
+    # `_a_failure_is_logged` holds one: the narrow `(ConfigError, OSError, ValueError)` around the
+    # hint's own file reads, so a hint that cannot be computed never replaces the failure being
+    # logged. The BLOCK it wraps is guarded by a `finally` and `sys.exc_info()`, not by a handler.
+    assert sorted(name for name, found in handlers_in.items() if found) == [
+        "_a_corrupt_file_is_named", "_a_failure_is_logged", "_bad_value_is_a_config_error",
+    ], "a handler appeared on the path of the sequence"
+    hint_handlers = [n for n in ast.walk(stages["_a_failure_is_logged"]) if isinstance(n, ast.ExceptHandler)]
+    assert [ast.unparse(h.type) for h in hint_handlers] == ["(ConfigError, OSError, ValueError)"]
     # The reporting sequence is the classification task's since the hooks moved (step 10).
     from train.api.tasks import image_classification
 

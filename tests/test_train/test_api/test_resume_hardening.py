@@ -38,6 +38,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from train.api import resume_decisions
 from train.api.errors import ConfigError
 from train.api.run_dir import (
     LOCK_NAME,
@@ -226,7 +227,7 @@ def test_a_zip_that_keras_cannot_load_is_a_config_error_not_a_traceback(tmp_path
     with zipfile.ZipFile(run_dir / "best_model.keras", "w") as archive:
         archive.writestr("note.txt", "a zip, but not a Keras archive")
     with pytest.raises(ConfigError, match=r"best_model\.keras cannot be loaded"):
-        ImageClassificationTrainer._best_weights_of(run_dir, SimpleNamespace(best=0.5))
+        resume_decisions.best_weights_of(run_dir, SimpleNamespace(best=0.5))
 
 
 def test_check_model_file_names_a_missing_a_cut_and_a_damaged_file(tmp_path):

@@ -143,33 +143,33 @@ def test_a_resume_after_epoch_one_is_not_a_stopped_early_run_even_at_patience_ze
     differ only at ``early_stopping_patience`` 0, which is in range (an int >= 0). Since D-064 the
     rule does not refuse the run, it ROUTES it to the reporting-only checks: a run with nothing
     left to train is resumed to report, or refused there for what the report needs."""
-    from train.api.trainer import TaskTrainer
+    from train.api import resume_decisions
 
     point = _point(start=1, wait=0)
-    assert TaskTrainer._training_complete_reason(point, _resolved(0)) is None
-    assert TaskTrainer._check_resume_point(tmp_path, _resolved(0), point) is point
-    reason = TaskTrainer._training_complete_reason(_point(start=2, wait=0), _resolved(0))
+    assert resume_decisions.training_complete_reason(point, _resolved(0)) is None
+    assert resume_decisions.check_resume_point(tmp_path, _resolved(0), point) is point
+    reason = resume_decisions.training_complete_reason(_point(start=2, wait=0), _resolved(0))
     assert reason == "after epoch 2 EarlyStopping had waited 0 epochs (patience 0) and had decided to stop"
     # Routed, not refused for "already decided to stop": the point holds no epochs in its sidecar, which
     # only the reporting-only checks look at.
     with pytest.raises(ConfigError, match="number of epochs that ran is unknown"):
-        TaskTrainer._check_resume_point(tmp_path, _resolved(0), _point(start=2, wait=0))
+        resume_decisions.check_resume_point(tmp_path, _resolved(0), _point(start=2, wait=0))
     # The same rule at an ordinary patience: complete once the wait reaches it, not below it.
-    assert "EarlyStopping had waited 3 epochs (patience 3)" in TaskTrainer._training_complete_reason(
+    assert "EarlyStopping had waited 3 epochs (patience 3)" in resume_decisions.training_complete_reason(
         _point(start=5, wait=3), _resolved(3))
     with pytest.raises(ConfigError, match="number of epochs that ran is unknown"):
-        TaskTrainer._check_resume_point(tmp_path, _resolved(3), _point(start=5, wait=3))
-    assert TaskTrainer._training_complete_reason(_point(start=5, wait=2), _resolved(3)) is None
-    assert TaskTrainer._check_resume_point(tmp_path, _resolved(3), _point(start=5, wait=2))
+        resume_decisions.check_resume_point(tmp_path, _resolved(3), _point(start=5, wait=3))
+    assert resume_decisions.training_complete_reason(_point(start=5, wait=2), _resolved(3)) is None
+    assert resume_decisions.check_resume_point(tmp_path, _resolved(3), _point(start=5, wait=2))
 
 
 def test_every_way_a_run_has_no_epoch_left_has_a_reason_and_only_those(tmp_path):
     """The three states (D-064): ``fit_finished``; every epoch ended; EarlyStopping decided."""
     from types import SimpleNamespace
 
-    from train.api.trainer import TaskTrainer
+    from train.api import resume_decisions
 
-    complete = TaskTrainer._training_complete_reason
+    complete = resume_decisions.training_complete_reason
     assert complete(_point(start=0, wait=0), _resolved(3)) is None
     assert complete(_point(start=8, wait=0), _resolved(3)) is None
     assert complete(_point(start=9, wait=0), _resolved(3)) == "all 9 of its epochs ended"
@@ -184,19 +184,20 @@ def test_every_way_a_run_has_no_epoch_left_has_a_reason_and_only_those(tmp_path)
 def test_a_backup_that_settles_on_a_complete_point_is_refused_not_entered_as_a_normal_resume(
     tmp_path, monkeypatch
 ):
-    """``_train`` chose a NORMAL resume (the latest pair said an epoch was left); if the previous
-    pair, re-read, says there is none, the files disagree: the back door into the reporting-only
-    path (which `_train` did not take, so it would run ``fit`` with ``initial_epoch >= epochs``) is shut."""
-    from train.api import trainer as module
-    from train.api.trainer import TaskTrainer
+    """``run_sequence.load_data`` chose a NORMAL resume (the latest pair said an epoch was left); if
+    the previous pair, re-read, says there is none, the files disagree: the back door into the
+    reporting-only path (which the sequence did not take, so it would run ``fit`` with
+    ``initial_epoch >= epochs``) is shut.
+
+    Step 22.5 (D-070) moved this from ``TaskTrainer._settle_backup`` to
+    ``resume_decisions.settle_backup_pair``: it takes the request it used to read from ``self.config``."""
+    from train.api import resume_decisions
 
     monkeypatch.setattr("train.common.resume_state.settle_backup", lambda directory, steps: ("previous", 9))
-    monkeypatch.setattr(module, "load_resume_point", lambda directory, config: _point(start=9, wait=0))
-    monkeypatch.setattr(TaskTrainer, "_check_resume_point", staticmethod(lambda d, r, p: p))
-    trainer = TaskTrainer.__new__(TaskTrainer)
-    trainer.config = None
+    monkeypatch.setattr(resume_decisions, "load_resume_point", lambda directory, request: _point(start=9, wait=0))
+    monkeypatch.setattr(resume_decisions, "check_resume_point", lambda d, r, p: p)
     with pytest.raises(ConfigError, match=r"previous one records epoch 9, where all 9 of its epochs ended"):
-        trainer._settle_backup(tmp_path, _resolved(3), _point(start=10, wait=0), 4)
+        resume_decisions.settle_backup_pair(tmp_path, _resolved(3), None, _point(start=10, wait=0), 4)
     # A previous pair that still has an epoch left is the ordinary fallback, returned as read.
-    monkeypatch.setattr(module, "load_resume_point", lambda directory, config: _point(start=7, wait=0))
-    assert trainer._settle_backup(tmp_path, _resolved(3), _point(start=8, wait=0), 4).start == 7
+    monkeypatch.setattr(resume_decisions, "load_resume_point", lambda directory, request: _point(start=7, wait=0))
+    assert resume_decisions.settle_backup_pair(tmp_path, _resolved(3), None, _point(start=8, wait=0), 4).start == 7

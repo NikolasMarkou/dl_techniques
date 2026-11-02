@@ -114,7 +114,7 @@ Reporting-only resume (D-041, D-064)
 A run with no epoch left to train and no ``results_summary.json`` died after its training:
 its sidecar says ``fit_finished`` (the ImageNet gate's nano run died while reporting: 256 images of
 224 px asked 18 GB), or every epoch ended, or ``EarlyStopping`` had waited out its patience after the
-last epoch that ended, and the process died before ``fit`` returned (``_training_complete_reason``;
+last epoch that ended, and the process died before ``fit`` returned (``resume_decisions.training_complete_reason``;
 the window holds the dashboard draw and the restore of the best weights). Its training is
 whole, so a resume of it does not train: ``fit`` is skipped, no callback is built, and
 ``training_log.csv`` is read and never written (no ``pre_resume`` copy either). Everything after
@@ -150,6 +150,18 @@ epoch that is then trained again; never an earlier one, D-021, D-069), and the s
 ``epoch_times`` and ``fit_wall_seconds`` cover the resumed epochs only. ``ReduceLROnPlateau``'s
 best, wait and cooldown come back through the sidecar and the learning rate through the
 optimizer (D-069); the best checkpoint is written atomically.
+
+Where the sequence lives
+------------------------
+This module holds the hooks, ``run`` (resolve, claim, lock, device) and the pieces the hooks feed
+(``_resolve``, the summary head and notes, the diverged summary). The rest was cut out of it in step
+22.5 (D-070) because ``_train`` (345 lines) and the class (1,518 lines, 46 methods) had passed
+D-030's triggers: ``train.api.run_sequence`` holds the stages that run once the directory is
+claimed (``execute``, ``announce``, ``load_data``, ``build_model``, ``epoch_zero``,
+``train_or_restore``, ``report``) and the three handlers on that path;
+``train.api.resume_decisions`` holds what a resume refuses, proves and restores;
+``train.api.fit_callbacks`` builds the callback list (``_callbacks`` below is its seam). A task
+overrides hooks, never stages.
 
 Hooks (override in a task)
 --------------------------
@@ -260,43 +272,18 @@ Module scope imports only the standard library and ``train.api`` (D-012); every
 """
 
 import collections.abc
-import contextlib
 import dataclasses
-import json
 import os
-import sys
-import time
 from pathlib import Path
-from typing import Any, Callable, ClassVar, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple
 
-from . import registry
-from .args import (
-    AnalysisArgs,
-    AutoContext,
-    CheckpointArgs,
-    DebugArgs,
-    LoggerArgs,
-    MetricArgs,
-    OptimArgs,
-)
-from .config import AUTO, StrictConfig, assert_resolved, join_path, to_json
+from . import registry, resume_decisions
+from .args import AutoContext, DebugArgs, MetricArgs, OptimArgs
+from .config import AUTO, StrictConfig, assert_resolved, join_path
 from .data_args import DataFacts
 from .errors import ConfigError, ConfigValidationError
-from .optim import build_optimizer_and_schedule, check_optim_args
-from .run_dir import (
-    BACKUP_DIR,
-    CHECKPOINTS_DIR,
-    TASK_FILE,
-    TRAINING_LOG_NAME,
-    check_model_file,
-    load_resume_point,
-    open_run,
-    resolve_out,
-    take_run_lock,
-    write_requested,
-    write_resolved,
-    write_task,
-)
+from .optim import check_optim_args
+from .run_dir import open_run, resolve_out, take_run_lock
 
 # ---------------------------------------------------------------------
 
@@ -388,36 +375,6 @@ class Evaluation:
     load_check: Optional[bool]
 
 
-def _data_counts(data: Any) -> Dict[str, int]:
-    """The sizes of the three splits a run trained and was selected and tested on (D-069)."""
-    return {
-        "n_train": int(data.n_train),
-        "n_select": int(data.n_select),
-        "n_test": int(data.n_test),
-    }
-
-
-def _data_fingerprint_field(config: Any, data: Any) -> Dict[str, str]:
-    """The sidecar's fingerprint keys of a file-based data record, ``{}`` for one with none (D-070).
-
-    ``data_fingerprint`` is the digest and ``data_fingerprint_mode`` the ``data.fingerprint``
-    value that made it (``listing`` or ``content``), so a resume can say which of the two
-    changed. ``data_fingerprint_scheme`` is how the rows were ordered and hashed
-    (``classification_data.FINGERPRINT_SCHEME``): a sidecar without it, or with another one,
-    was written by a fingerprint that could not tell a reordered CSV, and is refused.
-    """
-    fingerprint = getattr(data, "fingerprint", None)
-    if fingerprint is None:
-        return {}
-    from train.common.classification_data import FINGERPRINT_SCHEME
-
-    return {
-        "data_fingerprint": fingerprint,
-        "data_fingerprint_mode": getattr(config.data, "fingerprint", None),
-        "data_fingerprint_scheme": FINGERPRINT_SCHEME,
-    }
-
-
 def _is_auto(value: Any) -> bool:
     return isinstance(value, str) and value == AUTO
 
@@ -489,83 +446,6 @@ def _monitor_choices(names: List[str]) -> List[str]:
     return [*reported, *(f"val_{name}" for name in reported)]
 
 
-def _claimed_note(run_dir: Path) -> str:
-    """Return the sentence that tells a user a refused run still used ``out``."""
-    return (
-        f"The run directory {run_dir} was claimed before this failed, so 'out' is now "
-        "used; choose a new 'out' ('out=auto' picks a new timestamped directory) after "
-        "fixing the value."
-    )
-
-
-@contextlib.contextmanager
-def _bad_value_is_a_config_error(run_dir: Path, step: str) -> Iterator[None]:
-    """Turn a ``ValueError`` or ``TypeError`` of ``step`` into a ``ConfigError``.
-
-    :param run_dir: the claimed run directory, named in the message.
-    :param step: what ran, e.g. ``"the data loader"``.
-    :raises ConfigError: carrying the original message and :func:`_claimed_note`.
-    """
-    # DECISION plan-2026-10-30T132432-a865fa08/D-046: the data loader and the model
-    # factory refuse a bad value with a ValueError or a TypeError. Do NOT let it
-    # reach the user as a traceback and exit 1, the code for a failed run: the
-    # request was wrong, which is exit 2. The handler is HERE and not in ``run``,
-    # ``_train`` or ``_resolve``, which hold no ``except`` (their census), and
-    # it wraps only these two calls (review-iter-2 concern 5).
-    try:
-        yield
-    except (ValueError, TypeError) as exc:
-        # DECISION plan-2026-10-30T132432-a865fa08/D-053: a genuine bug that raises
-        # ``TypeError`` or ``ValueError`` here is reported as a configuration error, and
-        # the command line prints only the message. Do NOT drop the original traceback:
-        # ``-v`` (DEBUG) must show where it was raised, in ``run.log`` too.
-        from dl_techniques.utils.logger import logger
-
-        logger.debug(f"Original error of {step}:", exc_info=True)
-        raise ConfigError(
-            f"Invalid argument for {step}: {exc}. {_claimed_note(run_dir)}"
-        ) from exc
-
-
-@contextlib.contextmanager
-def _a_corrupt_file_is_named(
-    run_dir: Path, files: Optional[Sequence[str]], step: str
-) -> Iterator[None]:
-    """Turn TensorFlow's ``InvalidArgumentError`` of an undecodable image into a ``ConfigError``.
-
-    Wraps the first evaluation and ``fit``, the calls that run the data pipelines. When the
-    error is raised the ``files`` are decoded one by one to find the culprit; if one is found
-    it is named, if none is, the original error propagates unchanged (an
-    ``InvalidArgumentError`` that is not about a file is somebody else's bug).
-
-    :param run_dir: the claimed run directory, named in the message.
-    :param files: the files the data pipelines read (the task's
-        :meth:`TaskTrainer.files_to_scan`); ``None`` or empty, as for the built-in datasets,
-        has nothing to scan.
-    :param step: what ran, e.g. ``"fit"``.
-    :raises ConfigError: naming the file, and that the run directory is used.
-    """
-    import tensorflow as tf
-
-    # DECISION plan-2026-10-30T132432-a865fa08/D-070: ONE narrow class is caught, here and
-    # nowhere else in the run. Do NOT add ``tf.data``'s ``ignore_errors`` (a skipped image
-    # changes the epoch, the statistics and the split with nothing said) and do NOT catch
-    # ``Exception``: an error that is not a decode failure of a listed file is re-raised
-    # as it came. The scan costs a decode pass only when a file has already failed.
-    try:
-        yield
-    except tf.errors.InvalidArgumentError as exc:
-        from train.common.classification_data import scan_for_undecodable
-
-        found = scan_for_undecodable(files) if files else None
-        if found is None:
-            raise
-        raise ConfigError(
-            f"The image {found[0]!r} cannot be decoded ({found[1]}); it stopped {step}. Repair "
-            f"or remove the file. {_claimed_note(run_dir)}"
-        ) from exc
-
-
 def _eval_batch_size_of(config: Any) -> Optional[int]:
     """Return the config's resolved ``analysis_args.eval_batch_size``, or ``None`` when it has none.
 
@@ -574,47 +454,6 @@ def _eval_batch_size_of(config: Any) -> Optional[int]:
     """
     size = getattr(getattr(config, "analysis_args", None), "eval_batch_size", None)
     return size if isinstance(size, int) and not isinstance(size, bool) else None
-
-
-@contextlib.contextmanager
-def _a_failure_is_logged(
-    stage: str, hint: Optional[Callable[[], str]] = None
-) -> Iterator[None]:
-    """Write an exception raised inside the block to ``run.log`` as an ERROR, then let it go.
-
-    Interface contract: wraps ``fit`` and the reporting of ``_train`` (``evaluate_and_report``,
-    the summary and its write), inside ``attach_run_log``. It has no ``except`` clause: the
-    exception is read from ``sys.exc_info()`` in a ``finally`` and keeps propagating, so it
-    cannot be swallowed, narrowed or replaced, the exit code stays the interpreter's 1 for an
-    uncaught exception and stderr still gets the traceback. ``SystemExit`` and
-    ``KeyboardInterrupt`` are not ``Exception`` and are not logged as failures.
-
-    :param stage: ``"Training"`` or ``"Reporting"``, the first word of the line.
-    :param hint: called only when an exception is on its way; returns the sentence appended
-        after the exception (``""`` for none). A hint that raises ``ConfigError``, ``OSError``
-        or ``ValueError`` gives no sentence and never replaces the failure being logged.
-    """
-    # DECISION plan-2026-10-31T180033-2faf890a/D-041
-    # `finally` + `sys.exc_info()`, NOT `except Exception: ...; raise`. The API source rule
-    # `no_broad_handler` forbids any broad handler under src/train/api (a re-raising one
-    # included, test_the_api_source_rules.py), and `_train` holds no `except` (its census).
-    # Do NOT turn this into a handler: the log line is a side effect of an exception already
-    # on its way, and a `finally` cannot change where it goes. Before this the OOM of the
-    # gate's nano run was in stderr only and run.log ended on its last INFO line. D-064 puts
-    # `fit` under the same context (an exception in `on_train_end` was in stderr only).
-    try:
-        yield
-    finally:
-        failure = sys.exc_info()[1]
-        if isinstance(failure, Exception):
-            from dl_techniques.utils.logger import logger
-
-            try:
-                again = hint() if hint is not None else ""
-            except (ConfigError, OSError, ValueError):
-                again = ""
-            what = f"{stage} failed: {type(failure).__name__}: {failure}".rstrip()
-            logger.error(what + ("" if what.endswith(".") else ".") + again)
 
 
 class TaskTrainer:
@@ -848,6 +687,10 @@ class TaskTrainer:
         from train.common.gpu import setup_gpu, setup_mixed_precision
         from train.common.seed import set_seeds
 
+        # Imported here, not at module scope: `run_sequence` imports this module for `FitState`,
+        # `TrainResult` and `_monitor_choices`.
+        from . import run_sequence
+
         config = self.config
         debug_cfg: DebugArgs = config.debug_args
         if debug_cfg.smoke and not _is_auto(config.epochs):
@@ -870,7 +713,10 @@ class TaskTrainer:
         )
         # Reading the earlier run's files is plain file I/O: no TensorFlow op, so it may
         # come before `setup_gpu` (D-055). Loading its best weights may not, and waits.
-        resume = self._resume_point(run_dir, resolved) if config.resume_interrupted else None
+        resume = (
+            resume_decisions.resume_point(run_dir, resolved, config)
+            if config.resume_interrupted else None
+        )
         # The run lock (D-011 of this plan): a kernel flock held for the life of the run, so a
         # fresh run and a resume exclude each other, and the descriptor is released when the
         # `with` ends (also on an exception) or the process dies. After every refusal that
@@ -881,7 +727,9 @@ class TaskTrainer:
             previous_policy = keras.mixed_precision.global_policy().name
             setup_mixed_precision(config.precision != "float32", config.precision)
             try:
-                return self._train(family, variant, run_dir, facts, resolved, context, resume)
+                return run_sequence.execute(
+                    self, family, variant, run_dir, facts, resolved, context, resume
+                )
             finally:
                 keras.mixed_precision.set_global_policy(previous_policy)
 
@@ -1044,747 +892,11 @@ class TaskTrainer:
         except ValueError as exc:
             raise ConfigError(f"Invalid value for 'devices': {exc}") from exc
 
-    def _resume_point(self, run_dir: Path, resolved: StrictConfig) -> Any:
-        """Read where the killed run stopped, or refuse to resume it.
-
-        :param run_dir: the directory :func:`open_run` accepted for a resume.
-        :param resolved: this call's config, every ``"auto"`` filled.
-        :return: the :class:`~train.common.resume_state.ResumePoint`.
-        :raises ConfigError: see the module contract, "Resume".
-        """
-        return self._check_resume_point(run_dir, resolved, load_resume_point(run_dir, self.config))
-
-    @staticmethod
-    def _training_complete_reason(point: Any, resolved: StrictConfig) -> Optional[str]:
-        """Say why ``point``'s run has no epoch left to train, or return ``None`` when it has one.
-
-        Interface contract: ``point`` is a resume point (``start``, ``wait``, ``state``),
-        ``resolved`` the resolved config (``epochs``, ``checkpoint_args``). Pure, reads no
-        file. The reason is a phrase for a log line or a note. A run is complete when its fit
-        returned (the sidecar says ``fit_finished``), or every epoch ended, or EarlyStopping
-        had already waited out its patience after the last epoch that ended (it decides in
-        ``on_epoch_end`` and the process died before ``fit`` returned). A complete run is
-        never trained again: its resume is a REPORTING-ONLY one (D-041, D-064). The patience
-        rule applies from epoch 2 on: epoch 1 always improves on nothing, so a run killed
-        after it had decided nothing.
-        """
-        if point.state.get("fit_finished"):
-            return "its fit returned (fit_state.json says fit_finished)"
-        if point.start >= resolved.epochs:
-            return f"all {resolved.epochs} of its epochs ended"
-        patience = resolved.checkpoint_args.early_stopping_patience
-        if point.start > 1 and point.wait >= patience:
-            return (
-                f"after epoch {point.start} EarlyStopping had waited {point.wait} epochs "
-                f"(patience {patience}) and had decided to stop"
-            )
-        return None
-
-    @staticmethod
-    def _check_resume_point(run_dir: Path, resolved: StrictConfig, point: Any) -> Any:
-        """Apply the refusals of :meth:`_resume_point` to ``point`` and return it.
-
-        Called again when the backup settles on its previous copy (one epoch earlier).
-        """
-        from train.common.callbacks import best_checkpoint_path
-
-        checkpoint_cfg: CheckpointArgs = resolved.checkpoint_args
-        if not checkpoint_cfg.save_best:
-            raise ConfigError(
-                f"Cannot resume {run_dir}: checkpoint_args.save_best is false, so the best "
-                "weights of the killed segment were never written and a resumed run could "
-                "not return to them"
-            )
-        # DECISION plan-2026-10-31T180033-2faf890a/D-064 (supersedes plan-2026-10-30T132432-a865fa08/D-058)
-        # A run with nothing left to train is NOT refused and NOT sent to `fit`: it is a
-        # REPORTING-ONLY resume, whether its sidecar says `fit_finished` or the process died
-        # between the last epoch and `fit` returning (all epochs ended; EarlyStopping had
-        # waited out its patience). Do NOT let it reach `fit`: with `start >= epochs` no epoch
-        # ends, `LastEpochWeights` holds nothing and the post-fit steps fail on `None`, and one
-        # more epoch that improves would carry on past the stop an uninterrupted run made. Do NOT
-        # refuse it either: the training is the expensive part (a refusal sent the review's
-        # reproduction back to train again). What the reporting evaluates as the final model is
-        # proven by `final_copy_problem`, or the resume is refused.
-        if TaskTrainer._training_complete_reason(point, resolved) is not None:
-            return TaskTrainer._check_finished_fit(run_dir, point)
-        if point.best is not None and not Path(best_checkpoint_path(str(run_dir))).is_file():
-            raise ConfigError(
-                f"Cannot resume {run_dir}: the sidecar records a best value but "
-                f"{best_checkpoint_path(str(run_dir))} does not exist"
-            )
-        if point.best is not None:
-            # Plain file I/O, so before the GPU: a best checkpoint cut short by a kill is
-            # named here, not met as a Keras traceback after the model is built (D-069).
-            check_model_file(Path(best_checkpoint_path(str(run_dir))), f"Cannot resume {run_dir}")
-        if "initial" not in point.state:
-            raise ConfigError(
-                f"Cannot resume {run_dir}: the sidecar holds no epoch-0 evaluation"
-            )
-        return point
-
-    @staticmethod
-    def _check_finished_fit(run_dir: Path, point: Any) -> Any:
-        """Apply the refusals of a REPORTING-ONLY resume to ``point`` and return it.
-
-        A run with no epoch left (:meth:`_training_complete_reason`: its sidecar says
-        ``fit_finished``, or every epoch ended, or EarlyStopping had decided to stop) and no
-        ``results_summary.json`` crashed or was killed while reporting, or between its last
-        epoch and ``fit`` returning. Its training is whole, so there is no epoch left to
-        refuse for by design, and EarlyStopping having decided to stop is how most runs end.
-        What the reporting needs is refused here, before anything is written: the best
-        checkpoint (the model after ``fit`` held the best weights), the epoch-0 evaluation,
-        and a sidecar and a backup that agree on how many epochs ran. Plain file reading.
-
-        :raises ConfigError: naming the file and the fact, and that the training is kept.
-        """
-        from train.common.callbacks import best_checkpoint_path
-
-        recorded = sorted(int(key) for key in point.state.get("epochs", {}))
-        epochs_run = len(recorded)
-        if epochs_run == 0 or recorded != list(range(epochs_run)):
-            raise ConfigError(
-                f"Cannot resume {run_dir}: the training has no epoch left to run, but "
-                f"fit_state.json holds the epochs {recorded}, not 0..n-1, so the number of epochs "
-                "that ran is unknown. Choose a new 'out'"
-            )
-        if point.start != epochs_run:
-            raise ConfigError(
-                f"Cannot resume {run_dir}: fit_state.json says {epochs_run} epochs ran but the "
-                f"backup's latest metadata says {point.start}; the files do not agree on where "
-                "the training ended, so the last epoch's weights are not known. Choose a new "
-                "'out'"
-            )
-        best_path = Path(best_checkpoint_path(str(run_dir)))
-        if point.best is None or not best_path.is_file():
-            raise ConfigError(
-                f"Cannot resume {run_dir}: the reporting needs the best weights and "
-                f"{best_path} does not exist (no epoch had a finite best). Choose a new 'out'"
-            )
-        check_model_file(best_path, f"Cannot resume {run_dir}")
-        if "initial" not in point.state:
-            raise ConfigError(
-                f"Cannot resume {run_dir}: the sidecar holds no epoch-0 evaluation"
-            )
-        return point
-
-    @staticmethod
-    def _check_final_weights(run_dir: Path, resume: Any, steps_per_epoch: int) -> None:
-        """Refuse a reporting-only resume whose last epoch's weights cannot be shown to be right.
-
-        The LAST epoch's weights are not in ``best_model.keras``; the only copy is the epoch-end
-        backup ``checkpoints/backup/latest.weights.h5`` (``LastEpochWeights`` was in memory and
-        died with the process). It is used only when it is the pair the run's own end wrote:
-        metadata ``epoch`` equal to the epochs that ran and ``batch`` 0 (an epoch-end copy), and
-        an optimizer step count equal to ``epochs x steps_per_epoch``
-        (``resume_state.final_copy_problem``). The previous copy (``.bkp``) is NEVER used here: it is
-        one epoch or some batches behind, and ``settle_backup`` (which would put it in place)
-        is not called, so nothing in the backup is changed.
-
-        :raises ConfigError: naming ``latest.weights.h5`` and what is wrong with it, and that
-            ``best_model.keras`` is untouched.
-        """
-        from train.common.resume_state import final_copy_problem
-
-        backup = run_dir / BACKUP_DIR
-        problem = final_copy_problem(backup, resume.start, steps_per_epoch)
-        if problem is not None:
-            raise ConfigError(
-                f"Cannot resume {run_dir}: its training is complete but the last epoch's weights "
-                f"cannot be recovered ({problem}). They exist only in "
-                f"{backup / 'latest.weights.h5'}, and the reporting evaluates them as the "
-                "final model, so it will not run on any other weights. best_model.keras is "
-                "untouched and can be loaded by hand. Choose a new 'out' to train again"
-            )
-
-    @staticmethod
-    def _restore_finished_fit(
-        model: Any, run_dir: Path, resume: Any, best_weights: List[Any]
-    ) -> Tuple[Any, Any]:
-        """Put the model where ``fit`` left it, from the files, and return ``(history, last)``.
-
-        After ``fit`` the in-memory model holds the BEST weights (EarlyStopping restores them)
-        and ``LastEpochWeights`` holds the last epoch's. Here the best weights are
-        ``best_model.keras``'s (``best_weights``, read by :meth:`_best_weights_of`) and the last
-        epoch's are ``checkpoints/backup/latest.weights.h5`` (verified by
-        :meth:`_check_final_weights`). The history is ``training_log.csv``'s rows.
-
-        :return: ``(History, LastEpochWeights)``; the model holds the best weights.
-        """
-        import keras
-
-        from train.common import classification_run
-        from train.common.resume_state import BACKUP_WEIGHTS_NAME, rows_as_history
-
-        # DECISION plan-2026-10-31T180033-2faf890a/D-064
-        # The optimizer is BUILT before the load, so `load_weights` restores its variables (the
-        # moments and the step count) with the model's, and `final_model.keras` carries the
-        # optimizer state of the last epoch as a whole run's does. Do NOT drop the build: an
-        # unbuilt optimizer skips them and the file held 1 optimizer variable (step count 0)
-        # against 161 (step count 36) (review-iter-2 concern 13).
-        model.optimizer.build(model.trainable_variables)
-        model.load_weights(str(run_dir / BACKUP_DIR / BACKUP_WEIGHTS_NAME))
-        last = classification_run.LastEpochWeights()
-        last.weights = model.get_weights()
-        model.set_weights(best_weights)
-        history = keras.callbacks.History()
-        history.history = rows_as_history(resume.rows)
-        history.epoch = [epoch for epoch, _ in resume.rows]
-        return history, last
-
-    def _resume_hint(
-        self, run_dir: Path, resolved: StrictConfig, epochs_run: int, steps_per_epoch: int
-    ) -> str:
-        """Return the sentence a failed reporting ends with: can ``resume_interrupted=true`` run it again?
-
-        Interface contract: called from a ``finally`` while the reporting's exception is on its
-        way; reads files only. The answer is the resume's own: the checks a resume applies
-        before it trains or reports anything (:meth:`_resume_point`, then
-        :meth:`_check_final_weights`) are applied to the files as they are now, so the hint
-        cannot promise a resume that would be refused (``checkpoint_args.save_best`` false, a
-        best checkpoint or a last-epoch backup that is missing or torn). ``""`` when the run
-        has its summary (a resume of a finished run is refused, and nothing failed to report).
-        A refusal is worded as the resume would word it.
-
-        :param epochs_run: the epochs that trained, named in the sentence.
-        :param steps_per_epoch: the data's batches per epoch (the proof of the final weights).
-        """
-        from train.common.run_artifacts import RESULTS_SUMMARY_NAME
-
-        if (run_dir / RESULTS_SUMMARY_NAME).exists():
-            return ""
-        kept = f" The training is kept ({epochs_run} epochs, best_model.keras, checkpoints/backup)"
-        # DECISION plan-2026-10-31T180033-2faf890a/D-064
-        # The hint is worded from the resume's OWN checks. Do NOT make it a constant: with
-        # `checkpoint_args.save_best` false the old line promised a resume that exited 2
-        # ("could not return to them"), and a hint that is not true is worse than none.
-        try:
-            point = self._resume_point(run_dir, resolved)
-            self._check_final_weights(run_dir, point, steps_per_epoch)
-        except ConfigError as refusal:
-            return f"{kept}, but resume_interrupted=true would be refused: {refusal}"
-        return (
-            f"{kept}: run the same request with resume_interrupted=true to run only the "
-            "reporting again"
-        )
-
-    @staticmethod
-    def _older_analysis_note(
-        path: Path, modified_before: Optional[int], analysis: Dict[str, Any]
-    ) -> Optional[str]:
-        """Return a note when a reporting-only resume's ``analyzer.path`` is a file it did not write.
-
-        ``modified_before`` is the file's modification time (ns) before the reporting began,
-        ``None`` when it did not exist. The analyzer writes ``analysis_results.json`` before its
-        first figure, so a file whose time did not change was not touched by this segment's
-        analyzer (it raised before writing, say) and the status read back from it is the earlier
-        segment's. ``None`` when the analyzer was skipped, or the file is new or rewritten.
-        """
-        if not analysis.get("path") or modified_before is None or not path.exists():
-            return None
-        if path.stat().st_mtime_ns != modified_before:
-            return None
-        return (
-            f"`analyzer.path` names {path}, which this reporting did not write (its modification "
-            "time is unchanged: the analyzer of this segment wrote nothing there, see "
-            "`failed_analyses` and run.log), so the analyzer's status and numbers in this summary "
-            "are those of the earlier segment's file"
-        )
-
-    def _train(
-        self,
-        family: str,
-        variant: str,
-        run_dir: Path,
-        facts: DataFacts,
-        config: StrictConfig,
-        context: AutoContext,
-        resume: Any = None,
-    ) -> TrainResult:
-        from dl_techniques.utils.logger import logger
-        from train.common import classification_run, run_summary
-        from train.common.gpu import log_gpu_peak_memory
-        from train.common.resume_state import (
-            FIT_STATE_NAME,
-            copy_log_aside,
-            merge_history,
-            update_fit_state,
-        )
-        from train.common.run_artifacts import attach_run_log, write_summary_json
-        from train.common.run_io import save_training_history_json
-
-        if resume is None:
-            write_requested(run_dir, self.config)
-        sidecar_path = run_dir / CHECKPOINTS_DIR / FIT_STATE_NAME
-        with attach_run_log(run_dir, mode="w" if resume is None else "a"):
-            logger.info(f"Run directory: {run_dir}")
-            complete = (
-                None if resume is None else self._training_complete_reason(resume, config)
-            )
-            reporting_only = complete is not None
-            if reporting_only:
-                # DECISION plan-2026-10-31T180033-2faf890a/D-041 (D-064: the same for a run whose
-                # process died between its last epoch and `fit` returning)
-                # A run whose `fit` returned and whose reporting died is NOT retrained: `fit`
-                # is skipped, the weights come from the files, and only the reporting runs
-                # again. Do NOT send it through `fit` with nothing left to train (no epoch
-                # ends, so nothing is reported) and do NOT refuse it (the days of training
-                # were the cost of a reporting bug, the gate's nano run). training_log.csv is
-                # not copied or rewritten: it must be byte-for-byte what the training wrote.
-                logger.info(
-                    f"Resuming a run whose training is complete ({resume.start} epochs of "
-                    f"{config.epochs}: {complete}) and whose reporting did not finish: fit is "
-                    "NOT run again. The best weights come from best_model.keras, the last epoch's from "
-                    "checkpoints/backup/latest.weights.h5, the history from training_log.csv; "
-                    "config_requested.json, config.json and training_log.csv stay as they are, "
-                    "run.log continues"
-                )
-            elif resume is not None:
-                logger.info(
-                    (f"Resuming after epoch {resume.start} of {config.epochs}: "
-                     if resume.start else
-                     f"Resuming inside epoch 0 of {config.epochs} (a backup_every_steps copy): ")
-                    + "config_requested.json and config.json stay as they are, run.log and "
-                    "training_log.csv continue"
-                )
-            logger.info(f"Args:\n{to_json(self.config)}")
-            devices = run_summary.describe_devices()
-            logger.info(
-                f"Devices: CUDA_VISIBLE_DEVICES={devices['cuda_visible_devices']!r}, "
-                f"TensorFlow sees {devices['tf_visible_devices']} ({devices['gpu_names']})"
-            )
-
-            # DECISION plan-2026-10-30T132432-a865fa08/D-041: the data is DESCRIBED
-            # (in ``run``) and LOADED after ``resolve_auto``. Do NOT load first and
-            # resolve from the loaded data (the plan's order): the augmentation hook
-            # and the recipe's ``loader`` arguments are arguments of the loader, and
-            # both are decided by the recipe, which needs the class count and image size.
-            logger.info(f"Resolved args:\n{to_json(config)}")
-            with _bad_value_is_a_config_error(run_dir, "the model arguments"):
-                used = self.used_arguments(config, context)
-            if used:
-                logger.info(f"Used args:\n{json.dumps(used, indent=2)}")
-            if resume is None:
-                write_resolved(run_dir, config, used)
-            for level, text in self._notices:
-                (logger.warning if level == "warning" else logger.info)(text)
-
-            optim_cfg: OptimArgs = config.optim_args
-            metric_cfg: MetricArgs = config.metric_args
-            checkpoint_cfg: CheckpointArgs = config.checkpoint_args
-            analysis_cfg: AnalysisArgs = config.analysis_args
-            debug_cfg: DebugArgs = config.debug_args
-            epochs = config.epochs
-            monitor = metric_cfg.watch_metric
-            experiment_name = run_dir.name
-
-            with _bad_value_is_a_config_error(run_dir, "the data loader"):
-                data = self.build_data(config, context)
-            self.input_check(facts, data)
-            steps_per_epoch = data.steps_per_epoch
-            every = checkpoint_cfg.backup_every_steps
-            if every is not None and every >= steps_per_epoch:
-                # The key needs the length of an epoch, known only now. Refuse, do not run
-                # with a key that saves nothing inside an epoch (it would look like it worked).
-                # The key's smallest value is 2, so the values that work are 2 .. steps - 1.
-                if steps_per_epoch > 3:
-                    choice = f"Choose a value from 2 to {steps_per_epoch - 1} or null"
-                elif steps_per_epoch == 3:
-                    choice = "Choose 2 or null"
-                else:
-                    choice = (
-                        f"An epoch of {steps_per_epoch} steps has no value from 2 up that is below "
-                        "it, so choose null"
-                    )
-                raise ConfigError(
-                    f"Invalid value for 'checkpoint_args.backup_every_steps': {every} is not below "
-                    f"the {steps_per_epoch} steps of an epoch of this data, so no batch inside an "
-                    f"epoch would be backed up (each epoch end always is). {choice}. "
-                    f"{_claimed_note(run_dir)}"
-                )
-            if resume is not None:
-                # Before anything of the earlier run is touched (the CSV is copied aside
-                # below): the data is the killed run's data, and the backup is a pair that
-                # belongs together (D-069).
-                self._check_data_unchanged(run_dir, config, context, data, resume)
-                if reporting_only:
-                    self._check_final_weights(run_dir, resume, steps_per_epoch)
-                else:
-                    resume = self._settle_backup(run_dir, config, resume, steps_per_epoch)
-
-            with _bad_value_is_a_config_error(run_dir, "the model factory"):
-                model = self.build_model(config, context, data)
-                if not model.built:
-                    model.build((None, *data.input_shape))
-            if config.checkpoint is not None:
-                self._load_checkpoint(model, config.checkpoint)
-            optimizer, _schedule = build_optimizer_and_schedule(
-                optim_cfg, steps_per_epoch, epochs
-            )
-            # DECISION plan-2026-10-30T132432-a865fa08/D-052: do NOT wrap the optimizer in
-            # ``LossScaleOptimizer`` here. ``compile`` does it under ``mixed_float16``
-            # (keras/src/trainers/trainer.py wraps a plain optimizer when the policy asks
-            # for loss scaling), and a second wrap is a second place to get it wrong.
-            loss, metrics = self.build_loss_and_metrics(config, data)
-            model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
-            params = int(model.count_params())
-            logger.info(
-                f"  {family}/{variant}: params {params:,}, {steps_per_epoch} steps/epoch, "
-                f"batch {config.batch_size}, {epochs} epochs"
-            )
-
-            # DECISION plan-2026-09-19T040641-db6932ec/D-014: the epoch-0 numbers (the
-            # summary's initial-loss ratio AND the dashboard baseline) come from THIS one
-            # evaluation. Do NOT let the dashboard call ``model.evaluate`` itself.
-            best_weights = None
-            if resume is None:
-                with _a_corrupt_file_is_named(
-                    run_dir, self.files_to_scan(data), "the first evaluation"
-                ):
-                    baseline, initial_ratio, init_warning = self.initial_loss_check(
-                        config, model, data
-                    )
-                # The sidecar keeps the epoch-0 numbers: a resumed model is not an untrained
-                # one, so a resume reads them here and evaluates nothing (D-058).
-                update_fit_state(
-                    sidecar_path,
-                    initial={
-                        "metrics": baseline,
-                        "ratio": float(initial_ratio),
-                        "warned": None if init_warning is None else bool(init_warning),
-                    },
-                    data_counts=_data_counts(data),
-                    **_data_fingerprint_field(config, data),
-                )
-            else:
-                initial = resume.state["initial"]
-                baseline = initial["metrics"]
-                initial_ratio, init_warning = initial["ratio"], initial["warned"]
-                best_weights = self._best_weights_of(run_dir, resume)
-                if reporting_only:
-                    logger.info(
-                        f"Resume: {TRAINING_LOG_NAME} is read and not written (epochs "
-                        f"0..{resume.start - 1})"
-                    )
-                else:
-                    kept = copy_log_aside(run_dir / TRAINING_LOG_NAME)
-                    logger.info(
-                        f"Resume: " + (f"epochs 0..{resume.start - 1} come back from {TRAINING_LOG_NAME}"
-                                       if resume.start else "no epoch had finished, so no row comes back")
-                        + f"; the file as it was is kept as {kept.name}"
-                    )
-            if monitor not in _monitor_choices([k for k in baseline if k != "loss"]):
-                # The pre-claim check compares the monitor with the names the task
-                # NAMED; this one with the names ``compile`` produced, so a task whose
-                # list and metrics disagree is stopped before ``fit`` and not after it.
-                raise ConfigError(
-                    f"Invalid value for 'metric_args.watch_metric': {monitor!r} is not a "
-                    f"metric the compiled model reports ({', '.join(sorted(baseline))}). "
-                    f"{_claimed_note(run_dir)}"
-                )
-            self._check_success_metric(
-                _monitor_choices([k for k in baseline if k != "loss"]),
-                "the compiled model reports", _claimed_note(run_dir),
-            )
-            summary_head = self._summary_head(
-                config, family, variant, run_dir, data, params, baseline,
-                initial_ratio, init_warning, devices,
-            )
-
-            vis_dir = run_dir / "visualizations"
-            if analysis_cfg.figures:
-                vis_dir.mkdir(parents=True, exist_ok=True)
-            last_weights = classification_run.LastEpochWeights()
-            if reporting_only:
-                # No callbacks (they would open `training_log.csv` for writing), no `fit`, no
-                # `task.json` (it was written before the training and is left as it is).
-                history, last_weights = self._restore_finished_fit(
-                    model, run_dir, resume, best_weights
-                )
-                epoch_times = [float("nan")] * len(resume.rows)
-                fit_wall_seconds = float("nan")
-                update_fit_state(
-                    sidecar_path,
-                    reporting_resumes=int(resume.state.get("reporting_resumes", 0)) + 1,
-                )
-            else:
-                epoch_line, callbacks = self._callbacks(
-                    config, data, run_dir, vis_dir, baseline, experiment_name, last_weights,
-                    resume, best_weights,
-                )
-
-                # DECISION plan-2026-10-30T132432-a865fa08/D-061: task.json is written BEFORE `fit`, and a resume
-                # leaves an existing one as it is. Do NOT move it after `fit` or into the
-                # post-fit reporting: a run killed in training would leave models that cannot
-                # be used, and do NOT rewrite it on a resume: the earlier epochs trained on
-                # the statistics it holds, and a rewrite would state others.
-                record = self.task_record(config, context, data)
-                if record is not None:
-                    if not write_task(run_dir, record):
-                        logger.info("task.json is already in the run directory: left as it is")
-
-                started = time.perf_counter()
-                with _a_failure_is_logged("Training"), _a_corrupt_file_is_named(
-                    run_dir, self.files_to_scan(data), "fit"
-                ):
-                    history = model.fit(
-                        data.train_ds,
-                        validation_data=data.select_ds,
-                        epochs=epochs,
-                        callbacks=callbacks,
-                        verbose=1,
-                    )
-                fit_wall_seconds = time.perf_counter() - started
-                update_fit_state(sidecar_path, fit_finished=True)
-                if resume is not None:
-                    merge_history(resume.rows, history)
-                epoch_times = epoch_line.epoch_times
-                log_gpu_peak_memory()
-            hist, epochs_run, non_finite, lr_reductions = classification_run.summarize_fit(
-                history, monitor, constant_lr=optim_cfg.schedule == "constant"
-            )
-            if non_finite:
-                message = self._write_diverged_summary(
-                    run_dir, summary_head, hist, epochs_run, non_finite,
-                    lr_reductions, epoch_times, fit_wall_seconds, initial_ratio,
-                )
-                # The history is written HERE, in the function that calls ``fit`` with its
-                # checkpoint callbacks: the history-write census accepts a write that follows
-                # a ``fit(callbacks=...)`` in the same function and nothing else.
-                save_training_history_json(history, str(run_dir))
-                raise RuntimeError(message)
-            if epochs_run < epochs:
-                logger.info(
-                    f"EarlyStopping: stopped after epoch {epochs_run} of {epochs} "
-                    f"(patience {checkpoint_cfg.early_stopping_patience} on {monitor}); "
-                    "the best weights were restored"
-                )
-            # DECISION plan-2026-10-30T132432-a865fa08/D-048: the epoch reported is
-            # chosen with the SAME direction the checkpoint callbacks were given
-            # (``watch_mode``, resolved). Do NOT call ``best_epoch(hist, monitor)``
-            # alone: it re-derives the direction from the name, so an explicit
-            # ``watch_mode`` saved one epoch and the summary named another.
-            best_epoch = run_summary.best_epoch(hist, monitor, metric_cfg.watch_mode)
-
-            analysis_file = run_dir / "model_analysis" / "analysis_results.json"
-            analysis_before = analysis_file.stat().st_mtime_ns if analysis_file.exists() else None
-            with _a_failure_is_logged(
-                "Reporting",
-                lambda: self._resume_hint(run_dir, config, epochs_run, steps_per_epoch),
-            ):
-                fit = FitState(
-                    model=model,
-                    history=history,
-                    last_weights=last_weights,
-                    epochs_run=epochs_run,
-                    run_dir=run_dir,
-                    vis_dir=vis_dir,
-                    experiment_name=experiment_name,
-                )
-                evaluated = self.evaluate_and_report(config, data, fit)
-
-                reached = self.success_value(hist)
-                smoke = debug_cfg.smoke
-                # Under smoke one epoch on at most 512 samples cannot reach twice chance, so
-                # the bar is not applied: the run is a success when it finished, and the
-                # summary says "not applicable" rather than a miss (review-iter-2 concern 6).
-                threshold = None if smoke else self.success_threshold(config)
-                success = True if smoke else bool(reached >= threshold)
-                summary = classification_run.base_summary(
-                    summary_head, hist, epochs_run, epochs, best_epoch, lr_reductions,
-                    evaluated.test_metrics_best, evaluated.test_metrics_final,
-                    evaluated.best_load_error, evaluated.checkpoint_max_diff,
-                    epoch_times, fit_wall_seconds, evaluated.visualizations,
-                    evaluated.load_check, evaluated.conformal, evaluated.analysis,
-                    notes=self._notes(config, baseline, initial_ratio, init_warning, data, resume),
-                )
-                if reporting_only:
-                    stale = self._older_analysis_note(
-                        analysis_file, analysis_before, evaluated.analysis
-                    )
-                    if stale is not None:
-                        summary["notes"].append(stale)
-                if resume is not None:
-                    summary["resumed_after_epochs"] = resume.start
-                if reporting_only:
-                    summary["reporting_resumed"] = True
-                summary.update(
-                    success=None if smoke else success,
-                    success_metric=self.success_metric,
-                    success_threshold=threshold,
-                    success_value=reached,
-                )
-                write_summary_json(run_dir, summary)
-                run_summary.fail_on_best_load_error(run_dir, evaluated.best_load_error)
-            if reporting_only:
-                log_gpu_peak_memory()
-            if smoke:
-                logger.info(
-                    f"success_threshold not applicable under debug_args.smoke: best "
-                    f"{self.success_metric} {reached:.4f}"
-                )
-            else:
-                logger.info(
-                    f"{'Reached' if success else 'Missed'} success_threshold {threshold:g} "
-                    f"on {self.success_metric}: best {reached:.4f}"
-                )
-            return TrainResult(
-                run_dir=run_dir,
-                success=success,
-                best_metric=float(hist[monitor][best_epoch - 1]),
-                test_metrics_best=evaluated.test_metrics_best,
-                test_metrics_final=evaluated.test_metrics_final,
-                summary_path=run_dir / "results_summary.json",
-            )
 
     # -----------------------------------------------------------------
     # Pieces
     # -----------------------------------------------------------------
 
-    def _check_data_unchanged(
-        self, run_dir: Path, config: StrictConfig, context: AutoContext, data: Any, resume: Any
-    ) -> None:
-        """Refuse a resume whose data is not the data the killed run trained on.
-
-        Compares the class names, the geometry, the normalization and the per-channel
-        statistics the loader reports now with the run's ``task.json``, and the split
-        sizes with the sidecar's ``data_counts``. The loader has already made its one
-        statistics pass by this point, so the check costs nothing more.
-
-        :raises ConfigError: naming each difference as ``key: earlier -> now``, and that
-            the run cannot be continued on other data.
-        """
-        from .predictor import read_record, record_differences
-
-        # DECISION plan-2026-10-30T132432-a865fa08/D-069
-        # Class names and statistics against `task.json`, split sizes against the sidecar.
-        # Do NOT compare the statistics alone: a renamed class leaves them unchanged when
-        # its images keep their pixels, and an added image moves them by less than the
-        # tolerance in a large set; the names and the sizes catch what they miss. The
-        # statistics catch a swap of two class folders (same names, same sizes). A swap
-        # that leaves the fit split's statistics equal is caught by the data fingerprint
-        # (D-070, D-025): relative path, class and file size of every listed file IN LISTING
-        # ORDER (a reordered CSV splits differently), no pixel read; a swap
-        # of two same-sized files is caught only by data.fingerprint=content, which hashes bytes.
-        lines: List[str] = []
-        record = self.task_record(config, context, data)
-        task_path = run_dir / TASK_FILE
-        if record is not None and task_path.is_file():
-            lines.extend(record_differences(read_record(task_path), record))
-        earlier_counts = resume.state.get("data_counts")
-        if not isinstance(earlier_counts, dict):
-            raise ConfigError(
-                f"Cannot resume {run_dir}: the sidecar holds no record of the data's size, so "
-                "it cannot be shown that the data is unchanged. Choose a new 'out'"
-            )
-        now_counts = _data_counts(data)
-        for key in sorted(set(earlier_counts) | set(now_counts)):
-            if earlier_counts.get(key) != now_counts.get(key):
-                lines.append(f"{key}: {earlier_counts.get(key)} -> {now_counts.get(key)}")
-        earlier_print = resume.state.get("data_fingerprint")
-        now_print = getattr(data, "fingerprint", None)
-        now_fields = _data_fingerprint_field(config, data)
-        earlier_mode = resume.state.get("data_fingerprint_mode")
-        now_mode = now_fields.get("data_fingerprint_mode")
-        earlier_scheme = resume.state.get("data_fingerprint_scheme")
-        now_scheme = now_fields.get("data_fingerprint_scheme")
-        if earlier_scheme != now_scheme:
-            # DECISION plan-2026-10-31T180033-2faf890a/D-025
-            # A sidecar of another scheme is refused, and its digest is NOT compared: the
-            # earlier scheme sorted the rows, so it equals nothing the loader computes now and
-            # a "fallback to the old comparison" would pass exactly the reordered CSV this
-            # exists to refuse. No legacy path (user rule).
-            lines.append(
-                f"data_fingerprint_scheme: {earlier_scheme or 'none'} -> {now_scheme or 'none'} "
-                "(the run recorded its files by a rule that could not tell a reordered CSV, so "
-                "it cannot be shown that the split is the same)")
-        elif earlier_mode != now_mode:
-            lines.append(
-                f"data_fingerprint_mode: {earlier_mode or 'none'} -> {now_mode or 'none'} (the "
-                "run recorded its data by another rule, so the two digests cannot be compared)")
-        if earlier_scheme == now_scheme and earlier_print != now_print:
-            lines.append(
-                "data_fingerprint: "
-                f"{'none' if earlier_print is None else str(earlier_print)[:12]} -> "
-                f"{'none' if now_print is None else str(now_print)[:12]} (a file, its class, "
-                "its size, the order of the files or, with data.fingerprint=content, its bytes is "
-                "not the one the run started with)")
-        if lines:
-            raise ConfigError(
-                f"Cannot resume {run_dir}: the data is not the data the run started with ("
-                + "; ".join(lines)
-                + "). The earlier epochs trained on the earlier data, and a resume would "
-                "standardize, split and label differently; restore the data as it was, or "
-                "choose a new 'out'"
-            )
-
-    def _settle_backup(
-        self, run_dir: Path, resolved: StrictConfig, resume: Any, steps_per_epoch: int
-    ) -> Any:
-        """Make the backup a consistent pair, or refuse; see ``resume_state.settle_backup``.
-
-        :return: ``resume``, or, when the previous copy had to be chosen (so the run goes
-            back one epoch), the resume point re-read for that epoch with every refusal of
-            :meth:`_resume_point` applied to it again: the CSV rows, the sidecar entry and
-            the best value are those of the epoch ``fit`` will start at.
-        :raises ConfigError: when neither the latest nor the previous copy is sound,
-            naming both files. Nothing has been changed then.
-        """
-        from train.common.resume_state import settle_backup
-
-        try:
-            label, epoch = settle_backup(run_dir / BACKUP_DIR, steps_per_epoch)
-        except ValueError as exc:
-            raise ConfigError(
-                f"Cannot resume {run_dir}: {exc}. The run cannot be continued from its "
-                "backup; choose a new 'out'"
-            ) from exc
-        if label == "latest" and epoch == resume.start:
-            return resume
-        # DECISION plan-2026-10-30T132432-a865fa08/D-069
-        # When the previous pair is the one that is sound, the run goes back to ITS epoch
-        # and the resume point is read AGAIN (CSV rows, sidecar entry, best, wait) for that
-        # epoch, with every refusal applied to it. Do NOT keep the point read from the
-        # latest metadata: its rows include the epoch `fit` is about to train again, so the
-        # CSV would hold that epoch twice (the duplicate row a harness copy of Keras's
-        # steps produced in review-iter-3). The point is read again for the previous pair
-        # even when its epoch is the same: its `batch` (how much of the epoch the copy had
-        # taken, D-063) is the one the resumed epoch is shortened by.
-        again = self._check_resume_point(
-            run_dir, resolved, load_resume_point(run_dir, self.config)
-        )
-        complete = self._training_complete_reason(again, resolved)
-        if complete is not None:
-            # The latest pair said an epoch was left; the pair that is sound says there is none.
-            # That is a reporting-only resume, which `_train` did not choose and must not be
-            # entered by the back door: the files disagree on where the training stopped.
-            raise ConfigError(
-                f"Cannot resume {run_dir}: the latest backup copy is unusable and the previous "
-                f"one records epoch {again.start}, where {complete}; the files do not agree on "
-                "where the training stopped. Choose a new 'out'"
-            )
-        return again
-
-    @staticmethod
-    def _best_weights_of(run_dir: Path, resume: Any) -> Optional[List[Any]]:
-        """Return the weights of ``best_model.keras`` (``get_weights`` order), or ``None``.
-
-        ``None`` when the killed segment had no finite best, so no checkpoint was
-        written. Loaded AFTER ``setup_gpu``: it creates tensors.
-        """
-        import keras
-
-        from train.common.callbacks import best_checkpoint_path
-
-        if resume.best is None:
-            return None
-        path = best_checkpoint_path(str(run_dir))
-        try:
-            return keras.models.load_model(path, compile=False).get_weights()
-        except (OSError, ValueError, KeyError) as exc:
-            raise ConfigError(
-                f"Cannot resume {run_dir}: {path} cannot be loaded ({str(exc).splitlines()[0][:150]}); "
-                "the best weights of the killed segment are unreadable. Choose a new 'out'"
-            ) from exc
 
     def _load_checkpoint(self, model: Any, checkpoint: str) -> None:
         """Copy weights from ``checkpoint`` into the built ``model``, or refuse."""
@@ -1821,150 +933,19 @@ class TaskTrainer:
     ) -> Tuple[Any, List[Any]]:
         """Return the epoch-line callback and the full callback list, in the D-022 order.
 
+        The list is built by :func:`train.api.fit_callbacks.build_callbacks`; this method is
+        the seam a task or a test overrides (call ``super()`` and edit the list it returns).
+
         :param resume: the :class:`~train.common.resume_state.ResumePoint` of a resumed
             run, else ``None``.
         :param best_weights: the best epoch's weights of a resumed run, else ``None``.
         """
-        import keras
+        from . import fit_callbacks
 
-        from train.common.callbacks import EpochLogLine, LearningRateLogger, create_callbacks
-        from train.common.classification_viz import TrainingDashboardCallback
-        from train.common.resume_state import (
-            FIT_STATE_NAME,
-            FitStateSidecar,
-            RestoreFitState,
-            StepBackupAndRestore,
-            rows_as_history,
+        return fit_callbacks.build_callbacks(
+            self, config, data, run_dir, vis_dir, baseline, experiment_name, last_weights,
+            resume, best_weights,
         )
-
-        optim_cfg: OptimArgs = config.optim_args
-        metric_cfg: MetricArgs = config.metric_args
-        checkpoint_cfg: CheckpointArgs = config.checkpoint_args
-        logger_cfg: LoggerArgs = config.logger_args
-        analysis_cfg: AnalysisArgs = config.analysis_args
-        debug_cfg: DebugArgs = config.debug_args
-        every = analysis_cfg.epoch_analysis_every
-        resumed: Dict[str, Any] = {}
-        if resume is not None:
-            # The earlier segment's epoch-0 analysis and epoch-1 analysis are on disk; the
-            # analyzer would otherwise redo both, on the weights of a model BackupAndRestore
-            # has not yet restored, and overwrite them.
-            resumed = dict(
-                initial_value_threshold=resume.best,
-                csv_initial_rows=resume.rows,
-                analyzer_on_train_begin=False,
-                # A resume inside epoch 0 (a `backup_every_steps` copy) has not yet reached
-                # the epoch-1 analysis; any later resume is past it.
-                analyzer_first_epoch=resume.start == 0,
-            )
-
-        callbacks, _ = create_callbacks(
-            model_name=experiment_name,
-            results_dir_prefix=self.task,
-            run_dir=str(run_dir),
-            monitor=metric_cfg.watch_metric,
-            monitor_mode=metric_cfg.watch_mode,
-            patience=checkpoint_cfg.early_stopping_patience,
-            use_lr_schedule=optim_cfg.schedule != "constant",
-            analyzer_epoch_frequency=max(every, 1),
-            include_tensorboard=logger_cfg.tensorboard is not None,
-            include_terminate_on_nan=debug_cfg.terminate_on_nan,
-            include_analyzer=every > 0,
-            analyzer_start_epoch=max(every, 1),
-            atomic_best_checkpoint=True,
-            **resumed,
-        )
-        if not checkpoint_cfg.save_best:
-            callbacks = [
-                callback
-                for callback in callbacks
-                if not isinstance(callback, keras.callbacks.ModelCheckpoint)
-            ]
-        # Index 0: `lr` must be in `logs` before the CSV logger reads it, and it is the
-        # rate at the START of the epoch (plan-2026-09-19T040641-db6932ec/D-020: the
-        # default reads the NEXT epoch's first-step rate under a per-step schedule).
-        callbacks.insert(0, LearningRateLogger(at_epoch_start=True))
-        callbacks.append(last_weights)
-        callbacks.extend(self.extra_callbacks(config, data))
-        epoch_line = EpochLogLine(self.epoch_line_metrics(config))
-        # After every callback that edits `logs`, before the dashboard (whose redraw
-        # must stay outside this line's clock).
-        callbacks.append(epoch_line)
-        if analysis_cfg.figures:
-            # The task's own per-epoch figures: after every callback that edits `logs`,
-            # before the dashboard (`SegmentationGridCallback` in
-            # `train.convunext.segmentation_viz` documents the same order).
-            callbacks.extend(self.figure_callbacks(config, data, vis_dir))
-            # DECISION plan-2026-10-31T180033-2faf890a/D-022: the dashboard stays HERE, not
-            # behind `figure_callbacks`. It reads only the keys the logs hold (`loss`,
-            # `accuracy`, `miou`, `lr`, ...) and draws a panel per key found, so a task
-            # without `accuracy` needs nothing; and it needs the baseline, the experiment
-            # name and the resumed rows, which the hook's signature does not carry. Do NOT
-            # move it into the classification task: a second task would then have to
-            # remember it, and its position (last, after `EpochLogLine`) would be each
-            # task's to get right.
-            # Last: it reads `logs['lr']`, written by LearningRateLogger above.
-            callbacks.append(
-                TrainingDashboardCallback(
-                    out_path=vis_dir / "training_dashboard.png",
-                    baseline_fn=lambda _model: dict(baseline),
-                    title=f"{experiment_name} (seed {config.seed})",
-                    initial_history=None if resume is None else rows_as_history(resume.rows),
-                    initial_baseline=None if resume is None else dict(baseline),
-                )
-            )
-        # The resume trio goes last, in the order `train.common.resume_state` documents:
-        # the sidecar after EarlyStopping (it reads its best and wait), the backup after
-        # the sidecar, so a kill at any instant leaves a sidecar entry for every epoch the
-        # backup claims.
-        stopper = next(c for c in callbacks if isinstance(c, keras.callbacks.EarlyStopping))
-        plateau = next(
-            (c for c in callbacks if isinstance(c, keras.callbacks.ReduceLROnPlateau)), None
-        )
-        if resume is not None:
-            callbacks.append(
-                RestoreFitState(
-                    stopper, resume.best, resume.wait, best_weights, resume.best_epoch,
-                    reduce_lr=plateau, reduce_lr_state=resume.reduce_lr,
-                )
-            )
-        callbacks.append(
-            FitStateSidecar(stopper, run_dir / CHECKPOINTS_DIR / FIT_STATE_NAME, reduce_lr=plateau)
-        )
-        # DECISION plan-2026-10-30T132432-a865fa08/D-069
-        # `double_checkpoint=True`: the backup keeps the previous pair as `*.bkp`. Do NOT
-        # drop it to save the second copy's disk space: a kill inside the weights write
-        # leaves the only copy torn, and the run can never be resumed (review-iter-3
-        # concern 4, measured exposure 0.6 to 3.3 s of every epoch). `settle_backup`
-        # chooses between the pair before `fit`; Keras's own fallback (on `OSError` only)
-        # stays as the second line.
-        # DECISION plan-2026-10-31T180033-2faf890a/D-038
-        # `backup_every_steps` swaps in `StepBackupAndRestore`; unset, the stock callback is
-        # built exactly as before (the golden). Do NOT pass `save_freq=N` to the stock one:
-        # it skips the epoch end, records the wrong epoch after a resume and reruns the whole
-        # killed epoch (resume_state.StepBackupAndRestore says what was measured; D-063 for
-        # what the resume runs instead).
-        if checkpoint_cfg.backup_every_steps is None:
-            callbacks.append(
-                keras.callbacks.BackupAndRestore(
-                    str(run_dir / BACKUP_DIR), double_checkpoint=True, delete_checkpoint=False
-                )
-            )
-        else:
-            backup = StepBackupAndRestore(
-                str(run_dir / BACKUP_DIR),
-                save_every_steps=checkpoint_cfg.backup_every_steps,
-                steps_per_epoch=data.steps_per_epoch,
-            )
-            callbacks.append(backup)
-            # DECISION plan-2026-10-31T180033-2faf890a/D-063
-            # `FinishKilledEpoch` goes directly BEFORE `EarlyStopping` (so after `TerminateOnNaN`,
-            # which `create_callbacks` put in front of it). Its batch-end half must see a stop request
-            # `TerminateOnNaN` made, and its epoch-end half must give the stop flag back before
-            # `EarlyStopping` decides, or a request of EarlyStopping's would be undone or an
-            # unrelated one kept. Do NOT append it with the others.
-            callbacks.insert(callbacks.index(stopper), backup.finish)
-        return epoch_line, callbacks
 
     def _summary_head(
         self,
@@ -2046,7 +1027,7 @@ class TaskTrainer:
                 "such model, so a really mis-scaled BatchNorm model is NOT caught here: only its "
                 "first epochs show it"
             )
-        complete = None if resume is None else self._training_complete_reason(resume, config)
+        complete = None if resume is None else resume_decisions.training_complete_reason(resume, config)
         if complete is not None:
             notes.append(
                 f"the training was complete ({resume.start} epochs: {complete}) and the earlier "

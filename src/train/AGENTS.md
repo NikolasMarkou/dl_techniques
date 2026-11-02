@@ -440,6 +440,12 @@ per-model scripts (usage, keys, run directory, resume, `predict`, `export`, exit
 `api/trainer.py:TaskTrainer`, which calls the same `train.common.classification_run` helpers as
 `train.convnext.common` in the same order.
 
+- **Where the sequence lives** (D-070): `api/trainer.py:TaskTrainer` is the hooks, `run` (resolve, claim, lock,
+  device) and the summary pieces; `api/run_sequence.py` is the sequence once the directory is claimed (`execute` and
+  the stages `announce`, `load_data`, `build_model`, `epoch_zero`, `train_or_restore`, `report`); `api/resume_decisions.py`
+  is what a resume refuses, proves and restores; `api/fit_callbacks.py` builds the callback list (`TaskTrainer._callbacks`
+  is its one-call seam). A task overrides hooks, never stages; `fit` and the diverged run's history write stay in
+  `train_or_restore` because the history-write census wants them in one function.
 - **One table drives dispatch and help**: `api/cli.py:COMMANDS` plus `api/registry.py:TASKS`.
   `cli.main(argv) -> int` registers the built-in families and tasks itself (`train.api.main([...])`
   from Python and `python -m train` are the same), and `__main__.py` is only
@@ -468,12 +474,12 @@ per-model scripts (usage, keys, run directory, resume, `predict`, `export`, exit
 <!-- knobs:begin -->
 | Key | Default | Read at |
 |---|---|---|
-| `analysis_args.figures` | `true` | `TaskTrainer._callbacks` (dashboard and `figure_callbacks`), `_train` (creates `visualizations/`), the task's `evaluate_and_report` |
+| `analysis_args.figures` | `true` | `train.api.fit_callbacks.build_callbacks` (dashboard and `figure_callbacks`; `TaskTrainer._callbacks` calls it), `train.api.run_sequence.train_or_restore` (creates `visualizations/`), the task's `evaluate_and_report` |
 | `analysis_args.model_analysis` | `true` | the task's `evaluate_and_report`, which calls `TaskTrainer.run_analysis` through `classification_run.report_best_weights` |
-| `analysis_args.epoch_analysis_every` | `0` | `TaskTrainer._callbacks`: `create_callbacks(include_analyzer=N > 0, analyzer_epoch_frequency=max(N, 1), analyzer_start_epoch=max(N, 1))`; a resume passes `analyzer_on_train_begin=False, analyzer_first_epoch=False` |
+| `analysis_args.epoch_analysis_every` | `0` | `train.api.fit_callbacks.build_callbacks`: `create_callbacks(include_analyzer=N > 0, analyzer_epoch_frequency=max(N, 1), analyzer_start_epoch=max(N, 1))`; a resume passes `analyzer_on_train_begin=False, analyzer_first_epoch=False` |
 | `analysis_args.conformal_alpha` | `null` | the task's `evaluate_and_report`, `train.common.conformal.run_conformal` |
 | `analysis_args.eval_batch_size` | `"auto"` | `AnalysisArgs.resolve_auto` (the recipe's `analysis_args` entry, else `EVAL_BATCH_SIZE`); the task's `build_data` (in-memory splits), `evaluate_and_report` (`report_best_weights` figures, `finalize_last_epoch` load check) and `TaskTrainer.run_analysis` (`predict_batch_cap`) |
-| `logger_args.tensorboard` | `{}` | `TaskTrainer._callbacks` (`include_tensorboard=... is not None`); `LoggerArgs.problems` refuses a non-empty dict |
+| `logger_args.tensorboard` | `{}` | `train.api.fit_callbacks.build_callbacks` (`include_tensorboard=... is not None`); `LoggerArgs.problems` refuses a non-empty dict |
 
 The hooks a task author touches for these outputs (all on `TaskTrainer`, documented at their definitions
 and in the module docstring of `api/trainer.py`):

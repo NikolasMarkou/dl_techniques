@@ -44,7 +44,7 @@ import train.common.classification_data as data_module
 from train.api.data_args import CsvImageData, FolderImageData, image_facts
 from train.api.errors import ConfigError
 from train.api.tasks.image_classification import ImageClassificationTrainer
-from train.api.trainer import _a_corrupt_file_is_named
+from train.api.run_sequence import _a_corrupt_file_is_named  # moved from trainer.py in step 22.5 (D-070)
 from train.common.classification_data import (
     DataSourceError,
     listing_fingerprint,
