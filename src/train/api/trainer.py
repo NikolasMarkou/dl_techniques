@@ -175,7 +175,9 @@ Hooks (override in a task)
 ``initial_loss_check(config, model, data)``
     ``(baseline, ratio, warned)``: the epoch-0 evaluation of the compiled, untrained model
     (the dashboard's baseline and the summary's initial-loss ratio come from this one
-    evaluation); raises ``RuntimeError`` for a non-finite loss. Required.
+    evaluation); ``warned`` is the summary's ``init_scale_warning``, a bool, or ``None`` (not
+    judged) when the evaluation was not a measurement of the initialization (BatchNorm
+    statistics still unset, D-045); raises ``RuntimeError`` for a non-finite loss. Required.
 ``success_value(hist)`` / ``success_threshold(config)``
     The number the run is judged by (read from ``hist``, the history of ``summarize_fit``, under
     the ``success_metric`` class variable) and the bar it must reach. Required, and a task must
@@ -783,12 +785,14 @@ class TaskTrainer:
 
     def initial_loss_check(
         self, config: StrictConfig, model: Any, data: Any
-    ) -> Tuple[Dict[str, float], float, bool]:
+    ) -> Tuple[Dict[str, float], float, Optional[bool]]:
         """Return ``(baseline, ratio, warned)`` of the untrained, compiled ``model``; required.
 
         ``baseline`` maps each metric name (``loss`` included) to its epoch-0 value on the
         selection split, ``ratio`` is the number the summary reports as
-        ``initial_loss_ratio`` and ``warned`` the summary's ``init_scale_warning``. Raise
+        ``initial_loss_ratio`` and ``warned`` the summary's ``init_scale_warning``: a bool,
+        or ``None`` when the epoch-0 pass was not a measurement of the initialization (a
+        model whose BatchNorm statistics are unset) and no verdict is given. Raise
         ``RuntimeError`` for a non-finite loss.
         """
         raise NotImplementedError
@@ -1346,7 +1350,7 @@ class TaskTrainer:
                     initial={
                         "metrics": baseline,
                         "ratio": float(initial_ratio),
-                        "warned": bool(init_warning),
+                        "warned": None if init_warning is None else bool(init_warning),
                     },
                     data_counts=_data_counts(data),
                     **_data_fingerprint_field(config, data),
@@ -1484,7 +1488,7 @@ class TaskTrainer:
                     evaluated.best_load_error, evaluated.checkpoint_max_diff,
                     epoch_times, fit_wall_seconds, evaluated.visualizations,
                     evaluated.load_check, evaluated.conformal, evaluated.analysis,
-                    notes=self._notes(config, baseline, initial_ratio, data, resume),
+                    notes=self._notes(config, baseline, initial_ratio, init_warning, data, resume),
                 )
                 if resume is not None:
                     summary["resumed_after_epochs"] = resume.start
@@ -1839,7 +1843,7 @@ class TaskTrainer:
         params: int,
         baseline: Dict[str, float],
         initial_ratio: float,
-        init_warning: bool,
+        init_warning: Optional[bool],
         devices: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Keys every summary carries, whether the run finished or diverged."""
@@ -1891,11 +1895,22 @@ class TaskTrainer:
         config: StrictConfig,
         baseline: Dict[str, float],
         ratio: float,
+        init_warning: Optional[bool],
         data: Any,
         resume: Any = None,
     ) -> List[str]:
         """Return the summary's ``notes``: the task's, then the lines of the sequence itself."""
         notes = list(self.task_notes(config, baseline, ratio, data))
+        if init_warning is None:
+            notes.append(
+                "`init_scale_warning` is null (not judged): the model has BatchNorm layers whose "
+                "moving statistics were still at mean 0 and variance 1 for the epoch-0 "
+                "evaluation, which ran in inference mode and so normalized nothing; "
+                "`initial_loss_ratio` is that evaluation's loss over ln(C), kept as the "
+                "baseline, and it is not the loss of the first training step (which uses batch "
+                "statistics). No training-mode pass was run to measure it: it would move the "
+                "moving statistics and the random generators"
+            )
         if resume is not None and resume.state.get("fit_finished"):
             notes.append(
                 f"the training finished ({resume.start} epochs) and an earlier reporting died, "

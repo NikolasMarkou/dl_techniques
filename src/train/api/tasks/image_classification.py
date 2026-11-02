@@ -371,7 +371,7 @@ class ImageClassificationTrainer(TaskTrainer):
 
     def initial_loss_check(
         self, config: ImageClassificationConfig, model: Any, data: Any
-    ) -> Tuple[Dict[str, float], float, bool]:
+    ) -> Tuple[Dict[str, float], float, Optional[bool]]:
         """Return the epoch-0 numbers; the ratio is the loss over ``ln(num_classes)``."""
         from train.common import classification_run
 

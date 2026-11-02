@@ -148,16 +148,59 @@ class LastEpochWeights(keras.callbacks.Callback):
 # H2: the epoch-0 evaluation
 # ---------------------------------------------------------------------
 
+def unset_batch_statistics(model: keras.Model) -> List[str]:
+    """Names of the layers whose moving statistics are still the ones they were built with.
+
+    Interface contract. A layer counts when it is trainable and holds a
+    ``moving_variance`` (Keras ``BatchNormalization`` and its subclasses) or a
+    ``running_var`` (``BiasFreeBatchNorm``), the variance is all ones and, when the layer
+    has a ``moving_mean``, the mean is all zeros. A frozen layer (``trainable`` false)
+    never uses batch statistics, so an inference-mode pass IS its training behaviour and
+    it is not listed. Only variables are read: nothing is assigned, nothing is run, so
+    neither a moving statistic nor a random generator moves.
+
+    :param model: A BUILT model (a layer not built yet has no statistics and is not listed).
+    :return: The listed layers' names in graph order; empty for a model without
+        batch normalization or one whose statistics have moved.
+    """
+    names = []
+    for layer in model._flatten_layers(include_self=False, recursive=True):
+        variance = getattr(layer, "moving_variance", None)
+        if variance is None:
+            variance = getattr(layer, "running_var", None)
+        if variance is None or not layer.trainable:
+            continue
+        mean = getattr(layer, "moving_mean", None)
+        at_init = bool(np.all(variance.numpy() == 1.0))
+        if mean is not None:
+            at_init = at_init and bool(np.all(mean.numpy() == 0.0))
+        if at_init:
+            names.append(layer.name)
+    return names
+
+
 def check_initial_loss(
         model: keras.Model, dataset: "tf.data.Dataset", n_samples: int, num_classes: int,
         evaluate: Evaluate, hint: str,
-) -> Tuple[Dict[str, float], float, bool]:
+) -> Tuple[Dict[str, float], float, Optional[bool]]:
     """Evaluate the untrained model; refuse a non-finite loss, warn on a huge one.
 
     The single epoch-0 measurement: both the summary's initial-loss ratio and the
     dashboard's baseline marker come from THIS result, so the two cannot disagree. A
     LayerNorm-only model has no training-mode statistics, so a plain inference-mode
     ``evaluate`` is the true loss of the first training step's starting point.
+
+    A model with BatchNorm layers whose moving statistics are still at their initial
+    mean 0 and variance 1 is NOT that case: the inference-mode pass applies no
+    normalization at all, while the first training step normalizes with batch
+    statistics (measured on resnet18, ImageNet shapes, same weights: 120.4 in inference
+    mode, 7.15 in training mode). The pass is kept as the epoch-0 baseline (the
+    dashboard's marker is what the evaluate measured), but it says nothing about the
+    initialization, so no verdict is given: ``warned`` is ``None`` and the log says what
+    was measured. No training-mode pass is run to get a verdict: it would move the
+    moving statistics and every dropout generator, which a diagnostic must not do
+    (:func:`unset_batch_statistics` only reads). A badly scaled BatchNorm model is
+    therefore not caught here; its first epochs show it.
 
     :param model: Built and compiled model.
     :param dataset: The batched validation (selection) split.
@@ -167,11 +210,14 @@ def check_initial_loss(
     :param hint: The remedy sentence appended to the refusal, naming the caller's own
         options (a command-line flag, a config key).
     :return: ``(metrics, ratio, warned)``: the evaluate dict, ``loss / ln(num_classes)``
-        and whether the ratio is STRICTLY above :data:`INITIAL_LOSS_WARN_FACTOR`.
+        and whether the ratio is STRICTLY above :data:`INITIAL_LOSS_WARN_FACTOR`;
+        ``None`` instead of a bool when the model has unset BatchNorm statistics (not
+        judged, see above).
     :raises RuntimeError: If the loss is NaN or infinite (raising, not returning, so no
         empty run directory is left behind as a "finished" run).
     """
     metrics = evaluate(model, dataset)
+    unset = unset_batch_statistics(model)  # after the pass: a lazily built model is built now
     loss = metrics["loss"]
     uniform_loss = float(np.log(num_classes))
     logger.info(
@@ -183,6 +229,21 @@ def check_initial_loss(
             f"Initial validation loss is {loss}: the model diverges before training. {hint}"
         )
     ratio = loss / uniform_loss
+    # DECISION plan-2026-10-31T180033-2faf890a/D-045: a model with BatchNorm statistics still at
+    # their initial values gets NO verdict (``None``), and no training-mode pass is run to get
+    # one. Do NOT call the model with ``training=True`` here (it assigns the moving statistics
+    # and advances every dropout generator, which a diagnostic must not do), and do NOT go back
+    # to ``ratio > INITIAL_LOSS_WARN_FACTOR`` for these models: that told every ResNet its
+    # initialization was wrong (17x ln C in inference mode, 1.04x in training mode).
+    if unset:
+        logger.info(
+            f"Initial loss is {ratio:.1f}x ln(num_classes): measured in inference mode with "
+            f"the moving statistics of {len(unset)} BatchNorm layer(s) (first: {unset[0]}) "
+            "still at mean 0 and variance 1, which normalizes nothing, so it is not the "
+            "first training step's starting point (that step uses batch statistics). No "
+            "verdict on the initialization is given (init_scale_warning is null)."
+        )
+        return metrics, ratio, None
     warned = ratio > INITIAL_LOSS_WARN_FACTOR
     if warned:
         logger.warning(
