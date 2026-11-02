@@ -162,7 +162,7 @@ class BuiltinImageData(StrictConfig):
             "second were measured in training runs (44 to 115 for cold single-file reads), so "
             "one epoch of its 1,271,167 images takes 3 to 4 hours and the 50-epoch recipe "
             "about a week (100 epochs about two). A killed epoch is lost; "
-            "checkpoint_args.backup_every_steps bounds the loss to that many batches of weights. "
+            "checkpoint_args.backup_every_steps bounds the loss to that many batches of training. "
             "src/train/README.md has the numbers and the exact 50 and 100 epoch commands, which "
             "were not run"
         }

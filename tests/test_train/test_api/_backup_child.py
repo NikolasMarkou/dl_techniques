@@ -3,14 +3,20 @@
 Run as ``python _backup_child.py '<json>'`` on the CPU. The JSON holds
 
 * ``out``: the run directory;
-* ``epochs``, ``seed`` (default 7), ``every`` (``checkpoint_args.backup_every_steps``, ``null``
-  for the stock callback) and ``resume`` (``resume_interrupted``);
+* ``epochs``, ``seed`` (default 7), ``precision`` (default ``float32``), ``every``
+  (``checkpoint_args.backup_every_steps``, ``null`` for the stock callback) and ``resume``
+  (``resume_interrupted``);
 * ``stop_at``: ``[epoch, done]`` makes the child print ``@@AT <epoch> <done>`` and sleep
   when ``done`` batches of ``epoch`` have finished and every callback of the last one
   (the backup included) has run, so a SIGKILL from the parent lands between two batches;
 * ``stop_at_meta_write``: ``k`` makes it print ``@@AT_META <k>`` and sleep at the ``k``-th
   write of ``training_metadata.json`` of this process, which is AFTER ``save_weights`` of that
-  save returned and BEFORE the metadata is written: the window between the two writes.
+  save returned and BEFORE the metadata is written: the window between the two writes;
+* ``trace``: a file; the child appends one line ``<epoch> <batch> <steps_before> <lr>`` per
+  finished batch (``batch`` is the index inside the pass, ``steps_before`` the optimizer's
+  step count before it, ``lr`` the learning rate that step used), flushed at the batch end and
+  before the backup callback, so a SIGKILL at any marker leaves exactly the batches that ran:
+  the number of lines over all the processes of a run is its REAL update count.
 
 The data is the fake CIFAR-10 of ``tests/classification_fakes``; determinism is the golden
 run's (op determinism, one thread per pool). Prints ``@@DONE`` when the fit returned.
@@ -86,9 +92,33 @@ def main(spec: dict) -> None:
             if self.target == (self.epoch, batch) and batch > 0:
                 stop(f"AT {self.epoch} {batch}")
 
+    class Trace(keras.callbacks.Callback):
+        """One line per finished batch: what the step used, and where it was."""
+
+        def __init__(self, path: str) -> None:
+            super().__init__()
+            self.path, self.epoch, self.before = path, 0, (0, 0.0)
+
+        def on_epoch_begin(self, epoch, logs=None):
+            self.epoch = epoch
+
+        def on_train_batch_begin(self, batch, logs=None):
+            optimizer = self.model.optimizer
+            inner = getattr(optimizer, "inner_optimizer", optimizer)
+            self.before = (
+                int(keras.ops.convert_to_numpy(inner.iterations)),
+                float(keras.ops.convert_to_numpy(inner.learning_rate)),
+            )
+
+        def on_train_batch_end(self, batch, logs=None):
+            with open(self.path, "a") as handle:
+                handle.write(f"{self.epoch} {batch} {self.before[0]} {self.before[1]!r}\n")
+
     class Child(ImageClassificationTrainer):
         def _callbacks(self, *arguments):
             epoch_line, callbacks = super()._callbacks(*arguments)
+            if spec.get("trace"):
+                callbacks.insert(len(callbacks) - 1, Trace(spec["trace"]))
             if spec.get("stop_at"):
                 callbacks.append(Stopper(*spec["stop_at"]))
             return epoch_line, callbacks
@@ -100,6 +130,7 @@ def main(spec: dict) -> None:
         "batch_size": 4,
         "epochs": spec["epochs"],
         "seed": spec.get("seed", 7),
+        "precision": spec.get("precision", "float32"),
         "resume_interrupted": bool(spec.get("resume")),
         "analysis_args": {"model_analysis": False, "figures": False, "epoch_analysis_every": 0},
         "metric_args": {"success_threshold": 0.0},

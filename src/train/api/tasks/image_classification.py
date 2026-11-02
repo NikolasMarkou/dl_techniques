@@ -48,10 +48,11 @@ Interface contract
         may differ). Rows, the
         best checkpoint, early-stopping and ``ReduceLROnPlateau`` state, the learning rate
         and the history are kept. Limits: the training data order replays the order of
-        epoch 0; an epoch killed midway is trained again from its start (on the weights of the
-        last ``checkpoint_args.backup_every_steps`` backup when that is set, with the examples
-        seen since then seen again and the optimizer's step count put back to the epoch's
-        start); a kill between the
+        epoch 0; an epoch killed midway is trained again from its start, or, when
+        ``checkpoint_args.backup_every_steps`` is set, continued from the last backup taken
+        inside it: only the batches that backup had not taken run, from a fresh pass of the data
+        (some examples of that epoch repeat and some are missed), and the optimizer's step count
+        and learning rate are the unkilled run's; a kill between the
         best checkpoint's save and the backup can leave ``best_model.keras`` one epoch LATER
         than the resumed state's best (the epoch that is then trained again; never an earlier
         one). A run whose training finished and whose reporting died (no
@@ -169,8 +170,9 @@ class ImageClassificationConfig(StrictConfig):
             "may differ); the data order replays epoch 0's; a killed epoch is lost and a "
             "half-done epoch is trained again from its first batch (an ImageNet epoch is "
             "hours; checkpoint_args.backup_every_steps bounds the loss to that many batches "
-            "of weights, and the epoch is then trained again from its first batch on the "
-            "weights of the last backup); the learning rate, ReduceLROnPlateau and early stopping come back; a kill "
+            "of training, and the epoch is then continued from the last backup: only the "
+            "batches that backup had not taken run, from a fresh pass of the data, so some "
+            "examples of that epoch repeat and some are missed); the learning rate, ReduceLROnPlateau and early stopping come back; a kill "
             "between the best checkpoint's save and the backup can leave best_model.keras one "
             "epoch LATER than the resumed state's best (the epoch that is then trained again; "
             "never an earlier one); a run whose training finished and whose reporting died "

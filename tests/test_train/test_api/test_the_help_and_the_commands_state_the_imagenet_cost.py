@@ -84,9 +84,12 @@ def test_the_resume_help_says_a_killed_epoch_is_lost(help_text):
 
 def test_both_helps_name_the_key_that_bounds_the_lost_epoch(help_text):
     assert ("A killed epoch is lost; checkpoint_args.backup_every_steps bounds the loss to that many "
-            "batches of weights") in help_text
-    assert ("checkpoint_args.backup_every_steps bounds the loss to that many batches of weights, and the "
-            "epoch is then trained again from its first batch on the weights of the last backup") in help_text
+            "batches of training") in help_text
+    assert ("checkpoint_args.backup_every_steps bounds the loss to that many batches of training, and the "
+            "epoch is then continued from the last backup: only the batches that backup had not taken run, "
+            "from a fresh pass of the data, so some examples of that epoch repeat and some are missed") in help_text
+    assert "epoch is then trained again from its first batch on the weights of the last backup" not in help_text, (
+        "D-038's sentence, false since the review of iteration 2 (D-063)")
     assert help_text.count("checkpoint_args.backup_every_steps") >= 3, "the key's own help is the third"
 
 

@@ -82,7 +82,7 @@ docstring lists what is unchecked.
 | `analysis_args.epoch_analysis_every` | `0` | `N > 0` runs the data-free epoch analyzer (weights and spectral only) before training into `epoch_analysis/epoch_000/` (the untrained model), after epoch 1 into `epoch_001/`, then at epochs N, 2N, ... into `epoch_NNN/`. `0` is off. A failure on a built model stops the fit, so no snapshot is silently missing. A resumed run does not redo `epoch_000` and `epoch_001` |
 | `analysis_args.conformal_alpha` | `null` | A level strictly between 0 and 1 (0.1 aims at 90% coverage) writes `conformal.json` and `conformal_model.keras` (outputs logits, probabilities and set membership), calibrated on the test split. `null` skips it and the summary's `conformal` is null. A level with no test split is skipped with a note |
 | `analysis_args.eval_batch_size` | `"auto"` | Images per pass of every evaluation and prediction that is not training: the in-memory (CIFAR, MNIST) validation and test splits, the figures' predictions, the model analyzer's predictions (when below its own 32) and the final-model load check. `auto` is the recipe's value, and 256 where the recipe says nothing, so a default run evaluates exactly as before. The cliffordnet recipes on ImageNet and Imagenette set the batch they train at (8 for `cliffordnet`, 16 for `cliffordnet_hier`), because 256 images of 224 px ask 18 GB. ImageNet, Imagenette, folder and csv splits are evaluated at the training `batch_size` and ignore it. It changes no weight, and it may differ when a run is resumed |
-| `checkpoint_args.backup_every_steps` | `null` | `N >= 2` (and below the steps of an epoch) also writes the resume backup after every N-th batch inside an epoch, so a killed epoch loses at most N batches of weights; `null` backs up at each epoch end only. A resume trains the killed epoch again from its first batch on the weights of the last copy and puts the optimizer's step count back to the epoch's start. Each copy writes the weights and optimizer state twice (the previous copy is kept); the cost per save is in the backup table of the ImageNet section |
+| `checkpoint_args.backup_every_steps` | `null` | `N >= 2` (and below the steps of an epoch) also writes the resume backup after every N-th batch inside an epoch, so a kill loses at most N batches of training; `null` backs up at each epoch end only. A resume continues the killed epoch on the weights of the last copy and runs only the batches that copy had not taken, from a fresh pass of the data (some examples of that epoch repeat and some are missed); the optimizer's step count and the learning rate of every step are the unkilled run's, and that epoch's row holds the train metrics of its remaining batches only. Each copy writes the weights and optimizer state twice (the previous copy is kept); the cost per save is in the backup table of the ImageNet section |
 | `logger_args.tensorboard` | `{}` | `{}` writes TensorBoard event files into `tensorboard/` (`train/` and `validation/`); `null` turns them off; a dict with keys is refused, because no TensorBoard option is wired |
 
 Measured cost, one run each, so a difference of a few seconds is inside the noise. Setup: `vit/vit_pico` on 240 fake
@@ -361,7 +361,7 @@ and a run of E epochs takes (validation not counted):
 
 So the 50-epoch ImageNet recipe (`vit`) takes about a week, and the 100-epoch ones (`resnet`, `convnext`) about two. A
 killed epoch is lost: the run goes back to the start of the epoch it was in (`resume_interrupted=true` trains it again), and
-at these rates an epoch is hours; `checkpoint_args.backup_every_steps` bounds the loss (next section). A shorter trial is
+at these rates an epoch is hours; `checkpoint_args.backup_every_steps` bounds the loss to that many batches (next section). A shorter trial is
 `data.max_samples` (it caps the train pool and the test split; it does NOT cap the selection set, which is
 `data.holdout_per_class` images per class, 10 by default, so 10,000 images of the 1,000 classes whatever the cap: the bounded
 gate with `data.max_samples=20000` trained on 20,000 images, selected on 10,000 and tested on 20,000 official validation images
@@ -369,26 +369,58 @@ gate with `data.max_samples=20000` trained on 20,000 images, selected on 10,000 
 
 **Backing up inside an epoch.** `checkpoint_args.backup_every_steps` set to N (an integer from 2 to one below the steps of an epoch;
 `null`, the default, backs up at each epoch end only, as before) also writes the resume backup (`checkpoints/backup/`, the
-previous copy kept beside it) after every N-th batch of an epoch, so a kill loses at most N batches of weights instead of the
+previous copy kept beside it) after every N-th batch of an epoch, so a kill loses at most N batches of training instead of the
 epoch. A value that is not below the steps of an epoch of the loaded data is refused (exit 2, before the model is built). What a
 resume from such a copy is, measured with real `SIGKILL`s of a child process
-(`tests/test_train/test_api/test_backup_every_steps.py`):
+(`tests/test_train/test_api/test_backup_every_steps.py`, which counts every batch each process ran):
 
-* the killed epoch restarts from its **first** batch on the weights, Adam moments and loss scale of the last copy, so the
-  examples seen since that copy (up to N batches) are seen again, in the data order epoch 0 had (the data iterator of a resumed
-  run is new and its position is not stored: measured, a fresh process with the same seed reshuffles from the start, so the
-  first epoch it trains has epoch 0's order, the next epoch 1's, and so on);
-* the optimizer's step count goes back to the epoch's start, so the run ends on exactly `epochs * steps_per_epoch` steps and
-  every epoch's learning rate is the unkilled run's. Under `mixed_float16` the counter rewound is the loss-scale optimizer's
-  inner one, which lags the batches by the steps skipped for non-finite gradients; the rewind keeps that lag;
-* the CSV, the sidecar and the best checkpoint hold finished epochs only, so a resume reads those of the epoch before the killed
-  one; a kill inside the **first** epoch resumes too, from its first copy;
-* a kill between the weights and the metadata of a copy is answered by the previous copy (N batches older): the pair is
-  checked against the optimizer's step count before `fit`, and a resume that cannot verify a pair refuses it by name;
-* a resumed run is a valid run of the same recipe, not the unkilled run's trajectory: in the test setup (`vit/vit_pico`, 3
-  epochs of 18 batches, a copy every 5) the final weights differ from the unkilled run's by about 1% of their norm, against
-  about 70% for another seed, and Adam's moments differ more (they follow the data order). An unkilled run with the key set
-  is weight for weight the run without it.
+* the epoch that was killed, after S batches in all and `done` of them taken by the last copy, continues on the weights, Adam
+  moments, loss scale and optimizer step count of that copy and runs only the R = S - `done` batches the copy had not taken;
+  the epochs after it run in full. The review reproduction: killed after 15 of 18 batches with a copy every 5, the resume ran
+  3 + 18 = 21 batches (36 without the key), and the run executed 54 updates, the counter's 54 (69 without the key). The updates a
+  run executes are always `epochs * steps_per_epoch` plus the batches each kill lost since the copy it resumed from (13 in the
+  test's five-kill chain, 3 for a kill in the epoch-end write, 5 for a torn newest copy);
+* the examples are the epoch's first `done` batches of the killed process and the first R batches of a **fresh** pass of the data:
+  the iterator of a resumed run is new and its position is not stored (measured: a fresh process with the same seed starts at
+  epoch 0's order). So in that one epoch some examples are seen twice and some not at all. With two independent orders the
+  expected share of the epoch's examples seen twice is R(S - R)/S^2, and the share seen not at all is the same; it is at most 25% (R = S/2). Worked
+  example, the `vit/vit_pico` ImageNet run at batch 128: after 7,200 of the 9,930 steps of an epoch the last copy is after step 7,000, the resume
+  runs the 2,930 steps that copy had not taken (not 9,930), and 20.8% of that epoch's examples are seen twice and the same share not at all. Measured exactly in the test setup (a script over the test child's
+  data, not kept in the repository: 72 examples, 18 steps of 4): copy after 15 steps, 10 of its 72 examples twice and 10 not at all (13.9%, the formula's 0.139); after 10 steps, 21 and 21
+  (29.2%, the formula's 24.7%). Every other epoch sees every example once. `skip` is not used to fast-forward: on the real Imagenette
+  pipeline `skip(200).take(20)` decoded 7,055 images (220 batches) and took 2.2 s, `take(20)` of a fresh pass decoded 664 and
+  took 0.28 s (a one-off measurement, not kept in the repository);
+* the optimizer's step count is not touched: it continues from the copy's `epoch * steps_per_epoch + done` and the run ends on exactly
+  `epochs * steps_per_epoch`, and every step uses the learning rate the unkilled run used at that step (compared step by step in each of
+  the test's 12 other runs). Under `mixed_float16` the counter is the loss-scale optimizer's inner one, which lags the batches by the steps skipped
+  for non-finite gradients; the resume keeps that lag;
+* that epoch's row in `training_log.csv`, `training_history.json`, TensorBoard and the dashboard is written once, by the resumed
+  process, and its **train** metrics (loss, accuracy, ...), its `lr` (the rate of the first remaining step) and its `epoch_times`
+  entry cover the R remaining batches only, while its validation metrics are the whole validation set's. A `metric_args.watch_metric` that is a train metric
+  (not `val_*`) is therefore judged on R batches in that epoch; the summary's `notes` say so. The CSV, the sidecar and the best checkpoint
+  hold finished epochs only before it; a kill inside the **first** epoch resumes too, from its first copy;
+* a kill between the weights and the metadata of a copy, or a torn newest copy, is answered by the previous copy (N batches older): the
+  pair is checked against the optimizer's step count before `fit`, and a resume that cannot verify a pair refuses it by name. A kill in
+  the shortened epoch, just after its process began, in the write of its epoch-end copy, in the epoch after it, and as that epoch began,
+  each resumes to the same 54 steps (`RAN` in the test);
+* a resumed run is a valid run of the same recipe, not the unkilled run's trajectory: in the test setup (`vit/vit_pico`, 3 epochs of 18
+  batches, a copy every 5) the final weights differ from the unkilled run's by 1.1% to 2.0% of their norm (1.34% for the review
+  reproduction; max absolute difference 0.0031), against 70.6% for another seed, and Adam's moments differ by more than their own norm
+  (they follow the data order). An unkilled run with the key set is weight for weight the run without it. The run with the key unset
+  is unchanged.
+
+Time, measured (`tests/test_train/test_api/backup_resume_evidence.json`, recomputed by the test). A resume saves the batches it does
+not run and pays for the copies it writes. CPU, `vit/vit_pico`, 225 steps an epoch, 2 epochs, a copy every 75 batches, killed after 160
+batches of epoch 1 (last copy after batch 150), real `SIGKILL`, two repetitions: with the key the resume ran 75 batches (`fit` 33.0 and 32.1 s,
+the whole process 46.3 and 44.6 s) against 225 without it (57.1 and 57.4 s; 69.4 and 69.8 s): 24.7 s of `fit` saved, 43% of it, and the run
+executed 460 updates against 610 for the 450 asked. GPU (RTX 4090, Imagenette, batch 64, 133 steps an epoch, 3 epochs, the recorded PID killed
+when the trace showed the batches below, 399 updates asked): `resnet/resnet50` with a copy every 40 (last copy after batch 120) resumed with
+13 + 133 = 146 batches against 266 without the key, `fit` took 76.8 s against 85.6 s (8.8 s saved) and the run executed 404 updates against 524;
+`resnet/resnet18` with a copy every 30 (last copy after batch 90) resumed with 176 batches against 266 and `fit` took 38.7 s against 37.7 s (no
+saving). A resnet18 epoch on this pipeline takes 8 s and a copy 0.8 s: the key's five extra copies cost about 4 s of the 5.6 s the 90 batches
+saved, and a new process spends 20 to 50 s compiling in its first epoch whatever it trains (the two first-epoch times differ by 2.5 s the other
+way), so that difference is inside the noise. The key pays where an epoch is long against a copy (ImageNet: hours of batches against the
+seconds of the table below), not on a toy.
 
 A save writes `latest.weights.h5` (the weights and the optimizer state) after copying the previous pair to `*.bkp`, so the disk
 holds two files of the size below. Measured (CPU, no data, the ImageNet recipe's shapes and optimizers, the disk of `results/`
@@ -408,7 +440,8 @@ which is an SSD; the cost is the write into the page cache, nothing is flushed):
 
 At `backup_every_steps=500`, `vit/vit_pico` at batch 128 (9,930 steps an epoch) takes 19 copies of 0.38 s inside an epoch (7.2 s)
 and a kill loses at most 10.0 to 11.1 minutes of training; `resnet/resnet18` at batch 256 (4,965 steps) takes 9 copies of 0.67 s
-(6.0 s) and loses at most 20.0 to 22.2 minutes. The epoch-end copy is written in either case. The numbers come from the rates
+(6.0 s) and loses at most 20.0 to 22.2 minutes (the restart itself (process start, data load, compilation) comes on top and is not
+included). The epoch-end copy is written in either case. The numbers come from the rates
 above and the table; `test_backup_every_steps.py` recomputes them.
 
 The exact commands for a full 50-epoch and a full 100-epoch run, from the repo root with the project virtual environment.
@@ -428,7 +461,7 @@ MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m train image_classifica
     out=results/imagenet_resnet18_100ep model=resnet/resnet18 data.dataset=imagenet epochs=100 \
     checkpoint_args.backup_every_steps=500
 
-# NOT RUN. After a kill, the same line with resume_interrupted=true continues it (the killed epoch is trained again from its first batch).
+# NOT RUN. After a kill, the same line with resume_interrupted=true continues it (the killed epoch runs only the batches the last copy had not taken).
 MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m train image_classification \
     out=results/imagenet_resnet18_100ep model=resnet/resnet18 data.dataset=imagenet epochs=100 \
     checkpoint_args.backup_every_steps=500 resume_interrupted=true

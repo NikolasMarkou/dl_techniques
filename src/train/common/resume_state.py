@@ -23,15 +23,18 @@ the primitives that put those back:
   place when the latest is torn or from a different epoch than its metadata.
 * :class:`StepBackupAndRestore` is ``BackupAndRestore`` that also saves INSIDE an epoch
   (``checkpoint_args.backup_every_steps``), which stock Keras 3.8 cannot do coherently
-  (its ``save_freq=N`` skips the epoch end, forgets the epoch after a resume, and leaves the
-  optimizer's step count advanced); the section below the class says what a resume from
-  such a backup is.
+  (its ``save_freq=N`` skips the epoch end and forgets the epoch after a resume); with its
+  companion :class:`FinishKilledEpoch` a resume from such a copy runs only the batches of the
+  killed epoch the copy had not taken. The class docstring says what that resume is.
 
 Callback order for a resumable run (every position is load-bearing)::
 
-    EarlyStopping, ModelCheckpoint, EpochCSVLogger, ..., RestoreFitState,
-    FitStateSidecar, BackupAndRestore
+    [TerminateOnNaN, FinishKilledEpoch,] EarlyStopping, ModelCheckpoint, EpochCSVLogger, ...,
+    RestoreFitState, FitStateSidecar, BackupAndRestore
 
+``FinishKilledEpoch`` (only with ``checkpoint_args.backup_every_steps``) comes after
+``TerminateOnNaN`` and directly before ``EarlyStopping``: it ends a resumed epoch early at
+the batch end and gives the stop flag back at the epoch end, before ``EarlyStopping`` decides.
 ``RestoreFitState.on_train_begin`` must come after ``EarlyStopping``'s
 (Keras resets ``best``, ``wait`` and ``best_weights`` there);
 ``FitStateSidecar.on_epoch_end`` must come after ``EarlyStopping``'s and before
@@ -264,6 +267,9 @@ class ResumePoint:
         :func:`update_fit_state` (such as the epoch-0 evaluation).
     :ivar reduce_lr: ``ReduceLROnPlateau``'s ``{"best", "wait", "cooldown_counter"}``
         after epoch ``start - 1``, or ``None`` when the run had none.
+    :ivar batch: ``0`` when the backup was written at an epoch end; otherwise the zero-based index
+        of the last batch of epoch ``start`` the backup had taken (the epoch was killed inside it,
+        :class:`StepBackupAndRestore`), so ``batch + 1`` of its batches are done.
     """
 
     start: int
@@ -273,6 +279,7 @@ class ResumePoint:
     rows: Tuple[Tuple[int, Dict[str, float]], ...]
     state: Dict[str, Any]
     reduce_lr: Optional[Dict[str, Any]] = None
+    batch: int = 0
 
 
 def read_resume_point(
@@ -332,6 +339,7 @@ def read_resume_point(
         rows=tuple(rows),
         state=state,
         reduce_lr=entry.get("reduce_lr"),
+        batch=batch,
     )
 
 
@@ -426,7 +434,9 @@ def _inspect_copy(
     and the optimizer's step count is what that position implies: ``epoch * steps_per_epoch``
     for a copy written at an epoch end (``batch`` 0), and ``epoch * steps_per_epoch + batch + 1``
     for one written inside the epoch after ``batch + 1`` of its batches
-    (:class:`StepBackupAndRestore`). Under a loss-scaling optimizer the count may be LOWER
+    (:class:`StepBackupAndRestore`; a resumed epoch continues the copy's count and records its
+    position in the WHOLE epoch, so the form holds for the copies it writes too, D-063). Under a
+    loss-scaling optimizer the count may be LOWER
     (it skips steps with non-finite gradients), never higher. The two forms cannot be
     confused: a mid-epoch copy has ``batch >= 1`` and ``batch + 1 < steps_per_epoch``, so
     it never equals an epoch-end count of the same epoch, and a weights file written one
@@ -727,36 +737,49 @@ class StepBackupAndRestore(keras.callbacks.BackupAndRestore):
     ``save_every_steps`` is an int ``>= 2`` and ``< steps_per_epoch``;
     ``steps_per_epoch`` is the run's batches per epoch (the same number
     :func:`settle_backup` is given). It takes the stock callback's place in the
-    documented order (last). Failure mode: a bad argument raises ``ValueError`` at
-    construction; a write error raises ``OSError`` out of ``fit``, like the stock save.
+    documented order (last), and its companion :attr:`finish` (a
+    :class:`FinishKilledEpoch`) goes into the SAME callback list directly BEFORE
+    ``EarlyStopping`` (after ``TerminateOnNaN`` when there is one): without it a resume from a
+    mid-epoch copy would run the killed epoch in full. Failure mode: a bad argument raises
+    ``ValueError`` at construction; a write error raises ``OSError`` out of ``fit``, like the
+    stock save; a resume from a mid-epoch copy under ``steps_per_execution`` above 1 whose
+    remaining batches are not a multiple of it raises ``ValueError`` out of ``on_train_begin``
+    (an execution takes ``steps_per_execution`` batches, so the epoch could not end where the
+    copy says).
 
     Stock ``save_freq=N`` is not usable alone (MEASURED, Keras 3.8, plan-2026-10-31T180033-2faf890a
     ``scratch_step19``): it does not save at an epoch end; its batch counter runs on across
-    epochs, so a save may land on batch 0 and look like an epoch-end one; a FRESH process
+    epochs, so a save may land on batch 0 and look like an epoch-end one; and a FRESH process
     keeps ``_current_epoch`` at 0 until its first epoch ends, so the first mid-epoch save of
     a resumed run records epoch 0 over weights of epoch k (a second kill then resumes from
-    epoch 0); and the restored optimizer keeps the step count of the killed batch, so every
-    later epoch trains with the schedule ahead of its epoch. This subclass
+    epoch 0). This subclass
 
     (a) saves at every epoch end too, and counts batches within the epoch (saves follow
         batch ``N``, ``2N``, ... of each epoch, never the last batch, which the epoch-end
         save covers), so a mid-epoch copy always has ``batch >= 1``;
     (b) sets ``_current_epoch`` from the restored metadata, so a resumed segment's mid-epoch
         saves name the epoch they are in;
-    (c) rewinds the optimizer's step count by the ``batch + 1`` batches the restored copy had
-        taken inside its epoch, so the epoch restarts from batch 0 with the schedule on its
-        nominal step (``epoch * steps_per_epoch``) and the run ends on
-        ``epochs * steps_per_epoch`` steps. Under a loss-scaling optimizer the counter that
-        is rewound is the inner optimizer's (the outer one stays 0), the result is clamped
-        at 0, and it keeps the steps skipped before the killed epoch.
+    (c) makes the resumed epoch run only the batches the copy had not taken (D-063, which
+        supersedes D-038's rewind): the optimizer's step count is NOT touched, it continues
+        from the copy's ``epoch * steps_per_epoch + batch + 1``, and :attr:`finish` ends the
+        epoch after the remaining ``steps_per_epoch - batch - 1`` batches. Every later copy
+        of that epoch records its position in the WHOLE epoch (the batches of the killed
+        process plus the new ones), so a second kill resumes from it the same way, and the
+        step count of every copy is ``epoch * steps_per_epoch + batch + 1`` exactly as for an
+        unresumed run. The run ends on ``epochs * steps_per_epoch`` steps with the learning
+        rate of every step the unkilled run's.
 
-    What a resume from a mid-epoch copy is: the killed epoch restarts from its FIRST batch
-    on the weights (and Adam moments, and loss scale) of batch ``k``; the ``k`` examples
-    already seen are seen again, in the order of an epoch-0 pass (the data iterator is new
-    and nothing about its position is stored). The CSV, the sidecar and the best checkpoint
-    hold completed epochs only, so they are those of the epoch before the killed one. Adam's
-    moments have seen ``k`` steps more than the rewound step count, which makes its bias
-    correction differ slightly from an unkilled run's for the first steps of that epoch.
+    What a resume from a mid-epoch copy is: the epoch ``e`` that was killed after ``k`` of its
+    ``S`` batches continues on the weights, Adam moments and loss scale of the copy, runs ``S - k``
+    batches (the copy's ``k`` counted) from a FRESH pass of the data iterator (the iterator is new
+    and its position is not stored), and ends; the epochs after it run in full. The fresh pass
+    is the first pass of a new process, so the batches it draws are the first of the order epoch
+    0 had, not the ones epoch ``e`` had not yet shown: some examples of epoch ``e`` are seen twice
+    and some not at all. The row of epoch ``e`` in ``training_log.csv`` and the history is
+    written once, by the resumed process: its train metrics (loss, accuracy, ...) and its time
+    cover the remaining batches only (the first ones ran in the killed process, whose running
+    averages are lost), its validation metrics are the full validation set's, and its ``lr`` is
+    the rate of the first remaining step.
 
     The save is the stock one: weights, then metadata, the previous pair kept as ``*.bkp``;
     a kill between the two writes leaves a weights file newer than its metadata, which
@@ -798,49 +821,72 @@ class StepBackupAndRestore(keras.callbacks.BackupAndRestore):
         self.steps_per_epoch = steps_per_epoch
         self._saved_at = 0
         self._save_seconds: List[float] = []
-        self.rewound_from: Optional[int] = None
+        #: Batches of the epoch the restored copy had taken, until the epoch begins; then 0.
+        self._owed = 0
+        #: Batches of the CURRENT epoch taken before this process (the copy's); 0 for a whole epoch.
+        self._offset = 0
+        #: ``(epoch, batches done in the killed process)`` of the mid-epoch copy restored, else None.
+        self.resumed_inside: Optional[Tuple[int, int]] = None
+        self.finish = FinishKilledEpoch(self)
+
+    @property
+    def steps_left(self) -> Optional[int]:
+        """Batches the CURRENT epoch still has to run, or ``None`` when it is a whole epoch."""
+        return self.steps_per_epoch - self._offset if self._offset else None
 
     def on_train_begin(self, logs: Optional[Dict[str, Any]] = None) -> None:
-        """Restore as stock Keras does, then fix the epoch and the step count (b, c)."""
+        """Restore as stock Keras does, then name the epoch (b) and note what the first epoch owes (c)."""
         super().on_train_begin(logs)
         path = Path(self._training_metadata_path)
+        self._owed, self._offset, self.resumed_inside = 0, 0, None
         if not path.exists():
             return
         epoch, batch = read_backup_position(path.parent)
         self._current_epoch = epoch
-        if batch < 1 or self.model.optimizer is None:
+        if batch < 1:
             return
-        # DECISION plan-2026-10-31T180033-2faf890a/D-038
-        # The step count goes back by the batches the copy had taken in its epoch. Do NOT
-        # leave it advanced (the stock behaviour): the epoch restarts from batch 0, so every
-        # later epoch would run with the schedule `batch + 1` steps ahead and the run would
-        # end on more steps than `epochs * steps_per_epoch`. Do NOT set it to
-        # `epoch * steps_per_epoch` outright: under a loss-scaling optimizer the counter lags
-        # that by the steps skipped for non-finite gradients, and `settle_backup` accepts it.
+        # DECISION plan-2026-10-31T180033-2faf890a/D-063
+        # The optimizer's step count is left where the copy had it and the epoch is SHORTENED
+        # (`FinishKilledEpoch`). Do NOT put the count back and run the epoch in full (D-038): the
+        # killed batches were then trained twice and the review measured 69 real updates against a
+        # counter of 54, with no time saved. Do NOT end the epoch with a second `fit(steps_per_epoch=)`:
+        # each `fit` fires `on_train_begin` again (EarlyStopping, ReduceLROnPlateau and
+        # `RestoreFitState` go back to the epoch before, `EpochCSVLogger` rewrites the file without the
+        # epoch, the returned History lacks it; scratch_step22_2/logs/base_A_*).
+        self._owed = batch + 1
+        self.resumed_inside = (epoch, self._owed)
+        remaining = self.steps_per_epoch - self._owed
+        spe = int(self.model.steps_per_execution)
+        if remaining % spe:
+            raise ValueError(
+                f"the backup was taken after batch {self._owed} of {self.steps_per_epoch} and "
+                f"steps_per_execution is {spe}: the {remaining} batches left are not a multiple of it, "
+                "so the epoch could not end where the copy says (an execution takes steps_per_execution batches)")
         optimizer = self.model.optimizer
-        counter = getattr(optimizer, "inner_optimizer", optimizer).iterations
-        before = int(keras.ops.convert_to_numpy(counter))
-        counter.assign(max(0, before - (batch + 1)))
-        self.rewound_from = before
+        steps = "" if optimizer is None else (
+            "; the optimizer's step count stays at "
+            f"{int(keras.ops.convert_to_numpy(getattr(optimizer, 'inner_optimizer', optimizer).iterations))}")
         logger.info(
-            f"Resume: the backup was taken after batch {batch + 1} of epoch {epoch}; that epoch "
-            f"restarts from its first batch on those weights, and the optimizer's step count "
-            f"goes from {before} back to {int(keras.ops.convert_to_numpy(counter))}")
+            f"Resume: the backup was taken after batch {self._owed} of {self.steps_per_epoch} of epoch "
+            f"{epoch}; that epoch runs its remaining {remaining} batches from a fresh pass of the data "
+            f"(some examples of it repeat and some are missed) and ends{steps}")
 
     def on_epoch_begin(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
-        """A new epoch counts its batches from 0."""
-        self._saved_at = 0
+        """A new epoch counts its batches from 0, the restored one from what the copy had taken."""
+        self._offset, self._owed = self._owed, 0
+        self._saved_at = self._offset
         self._save_seconds = []
 
     def _should_save_on_batch(self, batch: int) -> bool:
-        """True after every ``save_every_steps``-th batch of the epoch, except its last (a).
+        """True after every ``save_every_steps``-th batch since the last copy, except the epoch's last (a).
 
-        ``batch`` is the index of the first batch of the execution that just ended
-        (``steps_per_execution`` above 1 reports the group's first index), so the batches
-        done are ``min(batch + steps_per_execution, steps_per_epoch)``; ``_last_batch_seen``
-        is set to the index of the last of them, the number the metadata records.
+        ``batch`` is the index, inside this pass, of the first batch of the execution that just
+        ended (``steps_per_execution`` above 1 reports the group's first index), so the batches of
+        the whole epoch done are the copy's (:attr:`_offset`) plus ``min(batch + steps_per_execution,
+        steps_left)``; ``_last_batch_seen`` is set to the index of the last of them, the number the
+        metadata records.
         """
-        done = min(batch + int(self.model.steps_per_execution), self.steps_per_epoch)
+        done = self._offset + min(batch + int(self.model.steps_per_execution), self.steps_per_epoch - self._offset)
         self._last_batch_seen = done - 1
         if done >= self.steps_per_epoch or done - self._saved_at < self.save_every_steps:
             return False
@@ -863,3 +909,58 @@ class StepBackupAndRestore(keras.callbacks.BackupAndRestore):
                 f"Backup: epoch {epoch}: {inside} saves inside the epoch took "
                 f"{sum(self._save_seconds[:inside]):.2f} s ({sum(self._save_seconds[:inside]) / inside:.2f} s "
                 f"each), the epoch-end save {self._save_seconds[-1]:.2f} s")
+
+
+class FinishKilledEpoch(keras.callbacks.Callback):
+    """End the epoch a mid-epoch copy was taken in after the batches the copy had not taken.
+
+    Interface contract: made by :class:`StepBackupAndRestore` (``backup.finish``), never built
+    alone. It must sit in the callback list directly BEFORE ``EarlyStopping`` (and so after
+    ``TerminateOnNaN`` when there is one), and nowhere else: its two halves rely on that place.
+
+    * ``on_train_batch_end``: when the batches this epoch has run reach the backup's
+      :attr:`~StepBackupAndRestore.steps_left` it sets ``model.stop_training``, which makes Keras
+      leave the batch loop and run the epoch-end callbacks, validation included, as for any epoch.
+      It does nothing when ``stop_training`` is already set (``TerminateOnNaN`` sits before it, so
+      that request is seen and kept).
+    * ``on_epoch_end``: when it set the flag it puts it back to ``False`` BEFORE ``EarlyStopping``
+      decides, so the training goes on with the next epoch, which Keras starts from a new pass of
+      the whole dataset. ``EarlyStopping`` runs after this, so its request to stop is not undone.
+
+    MEASURED (Keras 3.8, ``scratch_step22_2/logs/k_stop.txt``): the cut epoch ends after the asked
+    batches, the next ones run in full, no "ran out of data" warning, ``History`` holds every epoch
+    once, the train function is traced as often as in an uncut fit under ``jit_compile``, and an
+    ``EarlyStopping`` that fires at the cut epoch still stops the fit. Failure mode: none of its
+    own; misplaced, it is wrong in a named way. Behind ``EarlyStopping`` its reset undoes the stop
+    request ``EarlyStopping`` just made; in front of ``TerminateOnNaN`` it cannot see that callback's
+    request at the batch end and undoes it; appended last, it hands the flag back too late for
+    ``EarlyStopping`` to decide on a clean one, so a run that was not stopping ends after the cut epoch.
+    """
+
+    def __init__(self, backup: StepBackupAndRestore) -> None:
+        super().__init__()
+        self._backup = backup
+        self._ran = 0
+        self._owns_the_stop = False
+
+    def on_epoch_begin(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
+        self._ran = 0
+        self._owns_the_stop = False
+
+    def on_train_batch_end(self, batch: int, logs: Optional[Dict[str, Any]] = None) -> None:
+        left = self._backup.steps_left
+        if left is None or self.model.stop_training:
+            return
+        self._ran = min(batch + int(self.model.steps_per_execution), left)
+        if self._ran >= left:
+            self.model.stop_training = True
+            self._owns_the_stop = True
+
+    def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
+        # DECISION plan-2026-10-31T180033-2faf890a/D-063
+        # The flag is given back HERE, in front of EarlyStopping. Do NOT reset it in the backup
+        # callback (last in the list): `stop_training` is then True either because this callback set
+        # it or because EarlyStopping just did, and the two cannot be told apart.
+        if self._owns_the_stop:
+            self.model.stop_training = False
+            self._owns_the_stop = False

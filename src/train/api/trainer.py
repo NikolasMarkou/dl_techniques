@@ -132,8 +132,10 @@ logged as ``ERROR`` in ``run.log`` (type and message) before it propagates (exit
 
 Residuals, stated in ``resume_interrupted``'s help (a test pins the text): the training
 data order replays the order of epoch 0 (the pipeline is seeded, not resumed), an epoch
-killed midway is trained again from its start (with ``checkpoint_args.backup_every_steps``,
-on the weights of the last copy taken inside it, ``resume_state.StepBackupAndRestore``, D-038),
+killed midway is trained again from its start (with ``checkpoint_args.backup_every_steps`` it
+is continued from the last copy taken inside it, ``resume_state.StepBackupAndRestore``, D-063: only
+the batches that copy had not taken run, from a fresh pass of the data, so some examples of that
+epoch repeat and some are missed, and its row holds the train metrics of those batches only),
 a kill between the best checkpoint's save and
 the backup can leave ``best_model.keras`` one epoch LATER than the resumed state's best (the
 epoch that is then trained again; never an earlier one, D-021, D-069), and the summary's
@@ -1619,13 +1621,13 @@ class TaskTrainer:
         from train.common.resume_state import settle_backup
 
         try:
-            _label, epoch = settle_backup(run_dir / BACKUP_DIR, steps_per_epoch)
+            label, epoch = settle_backup(run_dir / BACKUP_DIR, steps_per_epoch)
         except ValueError as exc:
             raise ConfigError(
                 f"Cannot resume {run_dir}: {exc}. The run cannot be continued from its "
                 "backup; choose a new 'out'"
             ) from exc
-        if epoch == resume.start:
+        if label == "latest" and epoch == resume.start:
             return resume
         # DECISION plan-2026-10-30T132432-a865fa08/D-069
         # When the previous pair is the one that is sound, the run goes back to ITS epoch
@@ -1633,7 +1635,9 @@ class TaskTrainer:
         # epoch, with every refusal applied to it. Do NOT keep the point read from the
         # latest metadata: its rows include the epoch `fit` is about to train again, so the
         # CSV would hold that epoch twice (the duplicate row a harness copy of Keras's
-        # steps produced in review-iter-3).
+        # steps produced in review-iter-3). The point is read again for the previous pair
+        # even when its epoch is the same: its `batch` (how much of the epoch the copy had
+        # taken, D-063) is the one the resumed epoch is shortened by.
         return self._check_resume_point(
             run_dir, resolved, load_resume_point(run_dir, self.config)
         )
@@ -1815,8 +1819,9 @@ class TaskTrainer:
         # DECISION plan-2026-10-31T180033-2faf890a/D-038
         # `backup_every_steps` swaps in `StepBackupAndRestore`; unset, the stock callback is
         # built exactly as before (the golden). Do NOT pass `save_freq=N` to the stock one:
-        # it skips the epoch end, records the wrong epoch after a resume and leaves the
-        # step count advanced (resume_state.StepBackupAndRestore says what was measured).
+        # it skips the epoch end, records the wrong epoch after a resume and reruns the whole
+        # killed epoch (resume_state.StepBackupAndRestore says what was measured; D-063 for
+        # what the resume runs instead).
         if checkpoint_cfg.backup_every_steps is None:
             callbacks.append(
                 keras.callbacks.BackupAndRestore(
@@ -1824,13 +1829,19 @@ class TaskTrainer:
                 )
             )
         else:
-            callbacks.append(
-                StepBackupAndRestore(
-                    str(run_dir / BACKUP_DIR),
-                    save_every_steps=checkpoint_cfg.backup_every_steps,
-                    steps_per_epoch=data.steps_per_epoch,
-                )
+            backup = StepBackupAndRestore(
+                str(run_dir / BACKUP_DIR),
+                save_every_steps=checkpoint_cfg.backup_every_steps,
+                steps_per_epoch=data.steps_per_epoch,
             )
+            callbacks.append(backup)
+            # DECISION plan-2026-10-31T180033-2faf890a/D-063
+            # `FinishKilledEpoch` goes directly BEFORE `EarlyStopping` (so after `TerminateOnNaN`,
+            # which `create_callbacks` put in front of it). Its batch-end half must see a stop request
+            # `TerminateOnNaN` made, and its epoch-end half must give the stop flag back before
+            # `EarlyStopping` decides, or a request of EarlyStopping's would be undone or an
+            # unrelated one kept. Do NOT append it with the others.
+            callbacks.insert(callbacks.index(stopper), backup.finish)
         return epoch_line, callbacks
 
     def _summary_head(
@@ -1935,6 +1946,16 @@ class TaskTrainer:
                 "epochs replays the order of epoch 0, and `epoch_times` and "
                 "`fit_wall_seconds` cover the resumed epochs only"
             )
+            if resume.batch:
+                left = data.steps_per_epoch - resume.batch - 1
+                notes.append(
+                    f"epoch {resume.start} was killed after {resume.batch + 1} of its "
+                    f"{data.steps_per_epoch} batches; the resume ran its remaining {left} from a "
+                    "fresh pass of the data, so some of its examples were seen twice and some not "
+                    f"at all, and the epoch's row (index {resume.start}) holds the train metrics "
+                    "(loss, accuracy, ...), `lr` and `epoch_times` entry of those "
+                    f"{left} batches only and the validation metrics of the whole validation set"
+                )
         if config.debug_args.smoke:
             notes.append(
                 "debug_args.smoke is true: the success threshold is not applied, so "

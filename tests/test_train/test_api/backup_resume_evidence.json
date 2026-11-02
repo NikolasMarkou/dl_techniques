@@ -1,0 +1,127 @@
+{
+ "about": "step 22.2, D-063: wall clock and executed updates of a resume with and without checkpoint_args.backup_every_steps, same kill. cpu: vit/vit_pico, fake CIFAR-10, batch 4, n_train 1000 (225 steps an epoch), 2 epochs, 1 thread, killed after 160 batches of epoch 1, N=75 (last copy after batch 150). gpu: RTX 4090, Imagenette, batch 64 (133 steps an epoch), 3 epochs, SIGKILL of the recorded PID when the trace showed the given number of batches. Sources: plans/plan-2026-10-31T180033-2faf890a/scratch_step22_2/logs/time_rows.json and gpu/result_*.json; the GPU run directories are under results/.",
+ "cpu": {
+  "steps_per_epoch": 225,
+  "epochs": 2,
+  "backup_every_steps": 75,
+  "steps_asked": 450,
+  "rows": [
+   {
+    "config": "key",
+    "repetition": 0,
+    "resumed_batches": 75,
+    "fit_wall_seconds": 33.0,
+    "process_seconds": 46.3,
+    "updates_executed": 460
+   },
+   {
+    "config": "nokey",
+    "repetition": 0,
+    "resumed_batches": 225,
+    "fit_wall_seconds": 57.1,
+    "process_seconds": 69.4,
+    "updates_executed": 610
+   },
+   {
+    "config": "key",
+    "repetition": 1,
+    "resumed_batches": 75,
+    "fit_wall_seconds": 32.1,
+    "process_seconds": 44.6,
+    "updates_executed": 460
+   },
+   {
+    "config": "nokey",
+    "repetition": 1,
+    "resumed_batches": 225,
+    "fit_wall_seconds": 57.4,
+    "process_seconds": 69.8,
+    "updates_executed": 610
+   }
+  ]
+ },
+ "gpu": {
+  "device": "NVIDIA GeForce RTX 4090",
+  "steps_per_epoch": 133,
+  "epochs": 3,
+  "steps_asked": 399,
+  "rows": [
+   {
+    "model": "resnet/resnet18",
+    "config": "key",
+    "backup_every_steps": 30,
+    "killed_with_batches_run": 240,
+    "backup_metadata_after_kill": {
+     "epoch": 1,
+     "batch": 89
+    },
+    "resumed_batches": 176,
+    "fit_wall_seconds": 38.7,
+    "process_seconds": 72.2,
+    "updates_executed": 416,
+    "out": "train_api_step22_key_20261102_144451",
+    "epoch_times": [
+     25.0,
+     11.5
+    ]
+   },
+   {
+    "model": "resnet/resnet18",
+    "config": "nokey",
+    "backup_every_steps": null,
+    "killed_with_batches_run": 240,
+    "backup_metadata_after_kill": {
+     "epoch": 1,
+     "batch": 0
+    },
+    "resumed_batches": 266,
+    "fit_wall_seconds": 37.7,
+    "process_seconds": 70.7,
+    "updates_executed": 506,
+    "out": "train_api_step22_nokey_20261102_144711",
+    "epoch_times": [
+     27.5,
+     8.2
+    ]
+   },
+   {
+    "model": "resnet/resnet50",
+    "config": "key",
+    "backup_every_steps": 40,
+    "killed_with_batches_run": 258,
+    "backup_metadata_after_kill": {
+     "epoch": 1,
+     "batch": 119
+    },
+    "resumed_batches": 146,
+    "fit_wall_seconds": 76.8,
+    "process_seconds": 123.4,
+    "updates_executed": 404,
+    "out": "train_api_step22_resnet50_key_20261102_144947",
+    "epoch_times": [
+     49.8,
+     22.6
+    ]
+   },
+   {
+    "model": "resnet/resnet50",
+    "config": "nokey",
+    "backup_every_steps": null,
+    "killed_with_batches_run": 258,
+    "backup_metadata_after_kill": {
+     "epoch": 1,
+     "batch": 0
+    },
+    "resumed_batches": 266,
+    "fit_wall_seconds": 85.6,
+    "process_seconds": 132.1,
+    "updates_executed": 524,
+    "out": "train_api_step22_resnet50_nokey_20261102_145341",
+    "epoch_times": [
+     62.1,
+     19.5
+    ]
+   }
+  ]
+ }
+}
