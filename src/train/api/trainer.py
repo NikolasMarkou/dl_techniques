@@ -90,10 +90,9 @@ epoch-0 evaluation, and ``fit_finished`` once ``fit`` returned). A resume:
   (``results_summary.json``), a run a live process holds
   (``run.lock``), a request that differs from ``config_requested.json``
   (``resume_interrupted``, ``out``, ``devices`` and ``analysis_args.eval_batch_size`` may
-  differ), a run with ``checkpoint_args.save_best`` false, a ``best_model.keras`` cut short
-  by a kill, and a run with no epoch left that did NOT finish its ``fit`` (all trained, or
-  ``EarlyStopping`` had already decided to stop, and the process died before ``fit``
-  returned);
+  differ), a run with ``checkpoint_args.save_best`` false, and a ``best_model.keras`` cut short
+  by a kill; a run with no epoch left (see the next section) is not refused for that, it is
+  resumed to report;
 * after the data is loaded and before the CSV is touched, refuses data that is not the run's
   (class names, geometry, mean and std against ``task.json``; split sizes against the
   sidecar) and settles the backup (``resume_state.settle_backup``: the latest pair when the
@@ -110,10 +109,13 @@ epoch-0 evaluation, and ``fit_finished`` once ``fit`` returned). A resume:
   step (summary, history file, figures) sees all epochs;
 * writes neither ``config_requested.json`` nor ``config.json`` again.
 
-Reporting-only resume (D-041, supersedes D-021)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-A run whose sidecar says ``fit_finished`` and which has no ``results_summary.json`` died while
-reporting (the ImageNet gate's nano run: 256 images of 224 px asked 18 GB). Its training is
+Reporting-only resume (D-041, D-064)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+A run with no epoch left to train and no ``results_summary.json`` died after its training:
+its sidecar says ``fit_finished`` (the ImageNet gate's nano run died while reporting: 256 images of
+224 px asked 18 GB), or every epoch ended, or ``EarlyStopping`` had waited out its patience after the
+last epoch that ended, and the process died before ``fit`` returned (``_training_complete_reason``;
+the window holds the dashboard draw and the restore of the best weights). Its training is
 whole, so a resume of it does not train: ``fit`` is skipped, no callback is built, and
 ``training_log.csv`` is read and never written (no ``pre_resume`` copy either). Everything after
 ``fit`` runs as in a fresh run, on weights taken from the files: the BEST weights from
@@ -124,11 +126,17 @@ latest backup copy is the epoch-end copy of the epochs that ran, with the optimi
 that implies (``resume_state.final_copy_problem``); a missing, torn, mid-epoch or older copy is
 a refusal (exit 2) that names ``latest.weights.h5``, and the previous ``.bkp`` copy is never
 substituted: a final model that was one epoch old would look like the final model. An existing
-``final_model.keras`` is written over (atomically), never read. The data checks are those of any
-resume. The summary says ``reporting_resumed: true``, ``resumed_after_epochs`` is the epoch count,
+``final_model.keras`` is written over (atomically), never read; it holds the last epoch's weights AND
+its optimizer state (the optimizer is built before ``latest.weights.h5`` is loaded), as a whole
+run's does. The data checks are those of any resume. The summary says ``reporting_resumed: true``, ``resumed_after_epochs`` is the epoch count,
 ``epoch_times`` and ``fit_wall_seconds`` are null, the sidecar counts ``reporting_resumes``, and
-the GPU peak of the pass is logged (it is the reporting's own). A reporting exception is
-logged as ``ERROR`` in ``run.log`` (type and message) before it propagates (exit code 1).
+the GPU peak of the pass is logged (it is the reporting's own). An exception of ``fit`` or of the
+reporting is logged as ``ERROR`` in ``run.log`` (``Training failed:`` / ``Reporting failed:``, type
+and message) before it propagates (exit code 1; ``SystemExit`` and ``KeyboardInterrupt`` are not
+logged as failures); a reporting failure ends with a sentence that says whether ``resume_interrupted=true``
+can run the reporting again, worded from the checks the resume applies. If the analyzer of a
+reporting-only resume writes nothing, the summary says that ``analyzer.path`` names the earlier
+segment's file.
 
 Residuals, stated in ``resume_interrupted``'s help (a test pins the text): the training
 data order replays the order of epoch 0 (the pipeline is seeded, not resumed), an epoch
@@ -259,7 +267,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, ClassVar, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, ClassVar, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from . import registry
 from .args import (
@@ -569,19 +577,22 @@ def _eval_batch_size_of(config: Any) -> Optional[int]:
 
 
 @contextlib.contextmanager
-def _a_reporting_failure_is_logged(run_dir: Path, epochs_run: int) -> Iterator[None]:
+def _a_failure_is_logged(
+    stage: str, hint: Optional[Callable[[], str]] = None
+) -> Iterator[None]:
     """Write an exception raised inside the block to ``run.log`` as an ERROR, then let it go.
 
-    Interface contract: wraps the reporting of ``_train`` (``evaluate_and_report``, the summary
-    and its write), inside ``attach_run_log``. It has no ``except`` clause: the exception is
-    read from ``sys.exc_info()`` in a ``finally`` and keeps propagating, so it cannot be
-    swallowed, narrowed or replaced, the exit code stays the interpreter's 1 for an uncaught
-    exception and stderr still gets the traceback. ``SystemExit`` and ``KeyboardInterrupt`` are
-    not logged as failures.
+    Interface contract: wraps ``fit`` and the reporting of ``_train`` (``evaluate_and_report``,
+    the summary and its write), inside ``attach_run_log``. It has no ``except`` clause: the
+    exception is read from ``sys.exc_info()`` in a ``finally`` and keeps propagating, so it
+    cannot be swallowed, narrowed or replaced, the exit code stays the interpreter's 1 for an
+    uncaught exception and stderr still gets the traceback. ``SystemExit`` and
+    ``KeyboardInterrupt`` are not ``Exception`` and are not logged as failures.
 
-    :param run_dir: the run directory; a summary in it means a resume is refused, so the hint
-        to resume is given only while there is none.
-    :param epochs_run: the epochs that trained, named in the hint.
+    :param stage: ``"Training"`` or ``"Reporting"``, the first word of the line.
+    :param hint: called only when an exception is on its way; returns the sentence appended
+        after the exception (``""`` for none). A hint that raises ``ConfigError``, ``OSError``
+        or ``ValueError`` gives no sentence and never replaces the failure being logged.
     """
     # DECISION plan-2026-10-31T180033-2faf890a/D-041
     # `finally` + `sys.exc_info()`, NOT `except Exception: ...; raise`. The API source rule
@@ -589,23 +600,20 @@ def _a_reporting_failure_is_logged(run_dir: Path, epochs_run: int) -> Iterator[N
     # included, test_the_api_source_rules.py), and `_train` holds no `except` (its census).
     # Do NOT turn this into a handler: the log line is a side effect of an exception already
     # on its way, and a `finally` cannot change where it goes. Before this the OOM of the
-    # gate's nano run was in stderr only and run.log ended on its last INFO line.
+    # gate's nano run was in stderr only and run.log ended on its last INFO line. D-064 puts
+    # `fit` under the same context (an exception in `on_train_end` was in stderr only).
     try:
         yield
     finally:
         failure = sys.exc_info()[1]
         if isinstance(failure, Exception):
             from dl_techniques.utils.logger import logger
-            from train.common.run_artifacts import RESULTS_SUMMARY_NAME
 
-            again = (
-                ""
-                if (run_dir / RESULTS_SUMMARY_NAME).exists()
-                else f" The training is kept ({epochs_run} epochs, best_model.keras, "
-                "checkpoints/backup): run the same request with resume_interrupted=true to "
-                "run only the reporting again"
-            )
-            what = f"Reporting failed: {type(failure).__name__}: {failure}".rstrip()
+            try:
+                again = hint() if hint is not None else ""
+            except (ConfigError, OSError, ValueError):
+                again = ""
+            what = f"{stage} failed: {type(failure).__name__}: {failure}".rstrip()
             logger.error(what + ("" if what.endswith(".") else ".") + again)
 
 
@@ -1047,6 +1055,32 @@ class TaskTrainer:
         return self._check_resume_point(run_dir, resolved, load_resume_point(run_dir, self.config))
 
     @staticmethod
+    def _training_complete_reason(point: Any, resolved: StrictConfig) -> Optional[str]:
+        """Say why ``point``'s run has no epoch left to train, or return ``None`` when it has one.
+
+        Interface contract: ``point`` is a resume point (``start``, ``wait``, ``state``),
+        ``resolved`` the resolved config (``epochs``, ``checkpoint_args``). Pure, reads no
+        file. The reason is a phrase for a log line or a note. A run is complete when its fit
+        returned (the sidecar says ``fit_finished``), or every epoch ended, or EarlyStopping
+        had already waited out its patience after the last epoch that ended (it decides in
+        ``on_epoch_end`` and the process died before ``fit`` returned). A complete run is
+        never trained again: its resume is a REPORTING-ONLY one (D-041, D-064). The patience
+        rule applies from epoch 2 on: epoch 1 always improves on nothing, so a run killed
+        after it had decided nothing.
+        """
+        if point.state.get("fit_finished"):
+            return "its fit returned (fit_state.json says fit_finished)"
+        if point.start >= resolved.epochs:
+            return f"all {resolved.epochs} of its epochs ended"
+        patience = resolved.checkpoint_args.early_stopping_patience
+        if point.start > 1 and point.wait >= patience:
+            return (
+                f"after epoch {point.start} EarlyStopping had waited {point.wait} epochs "
+                f"(patience {patience}) and had decided to stop"
+            )
+        return None
+
+    @staticmethod
     def _check_resume_point(run_dir: Path, resolved: StrictConfig, point: Any) -> Any:
         """Apply the refusals of :meth:`_resume_point` to ``point`` and return it.
 
@@ -1061,27 +1095,18 @@ class TaskTrainer:
                 "weights of the killed segment were never written and a resumed run could "
                 "not return to them"
             )
-        if point.state.get("fit_finished"):
+        # DECISION plan-2026-10-31T180033-2faf890a/D-064 (supersedes plan-2026-10-30T132432-a865fa08/D-058)
+        # A run with nothing left to train is NOT refused and NOT sent to `fit`: it is a
+        # REPORTING-ONLY resume, whether its sidecar says `fit_finished` or the process died
+        # between the last epoch and `fit` returning (all epochs ended; EarlyStopping had
+        # waited out its patience). Do NOT let it reach `fit`: with `start >= epochs` no epoch
+        # ends, `LastEpochWeights` holds nothing and the post-fit steps fail on `None`, and one
+        # more epoch that improves would carry on past the stop an uninterrupted run made. Do NOT
+        # refuse it either: the training is the expensive part (a refusal sent the review's
+        # reproduction back to train again). What the reporting evaluates as the final model is
+        # proven by `final_copy_problem`, or the resume is refused.
+        if TaskTrainer._training_complete_reason(point, resolved) is not None:
             return TaskTrainer._check_finished_fit(run_dir, point)
-        # DECISION plan-2026-10-30T132432-a865fa08/D-058
-        # A fit with nothing left to train is REFUSED, not run. Do NOT let it reach
-        # `fit`: with `start >= epochs` no epoch ends, `LastEpochWeights` holds nothing
-        # and the post-fit steps fail on `None`; with EarlyStopping's patience already
-        # reached (it decides in `on_epoch_end`, which the kill outran) one more epoch
-        # that improves would carry on past the stop an uninterrupted run made.
-        if point.start >= resolved.epochs:
-            raise ConfigError(
-                f"Cannot resume {run_dir}: all {point.start} of its {resolved.epochs} epochs "
-                "were trained and the run died after the last one; a run that crashed while "
-                "reporting is not finished by a resume (D-021). Choose a new 'out'"
-            )
-        if point.start > 1 and point.wait >= checkpoint_cfg.early_stopping_patience:
-            raise ConfigError(
-                f"Cannot resume {run_dir}: after epoch {point.start} EarlyStopping had waited "
-                f"{point.wait} epochs (patience {checkpoint_cfg.early_stopping_patience}) and "
-                "had already decided to stop; the run died before 'fit' returned. Choose a "
-                "new 'out'"
-            )
         if point.best is not None and not Path(best_checkpoint_path(str(run_dir))).is_file():
             raise ConfigError(
                 f"Cannot resume {run_dir}: the sidecar records a best value but "
@@ -1101,13 +1126,14 @@ class TaskTrainer:
     def _check_finished_fit(run_dir: Path, point: Any) -> Any:
         """Apply the refusals of a REPORTING-ONLY resume to ``point`` and return it.
 
-        A run whose sidecar says ``fit_finished`` and which has no ``results_summary.json``
-        crashed (or was killed) while reporting. Its training is whole, so nothing of
-        :meth:`_check_resume_point`'s "no epoch left" rules applies: there is none left by
-        design, and EarlyStopping having decided to stop is how most runs end. What the
-        reporting needs is refused here, before anything is written: the best checkpoint (the
-        model after ``fit`` held the best weights), the epoch-0 evaluation, and a sidecar,
-        a backup and a CSV that agree on how many epochs ran. Plain file reading.
+        A run with no epoch left (:meth:`_training_complete_reason`: its sidecar says
+        ``fit_finished``, or every epoch ended, or EarlyStopping had decided to stop) and no
+        ``results_summary.json`` crashed or was killed while reporting, or between its last
+        epoch and ``fit`` returning. Its training is whole, so there is no epoch left to
+        refuse for by design, and EarlyStopping having decided to stop is how most runs end.
+        What the reporting needs is refused here, before anything is written: the best
+        checkpoint (the model after ``fit`` held the best weights), the epoch-0 evaluation,
+        and a sidecar and a backup that agree on how many epochs ran. Plain file reading.
 
         :raises ConfigError: naming the file and the fact, and that the training is kept.
         """
@@ -1117,9 +1143,9 @@ class TaskTrainer:
         epochs_run = len(recorded)
         if epochs_run == 0 or recorded != list(range(epochs_run)):
             raise ConfigError(
-                f"Cannot resume {run_dir}: fit_state.json is marked fit_finished but holds the "
-                f"epochs {recorded}, not 0..n-1, so the number of epochs that ran is unknown. "
-                "Choose a new 'out'"
+                f"Cannot resume {run_dir}: the training has no epoch left to run, but "
+                f"fit_state.json holds the epochs {recorded}, not 0..n-1, so the number of epochs "
+                "that ran is unknown. Choose a new 'out'"
             )
         if point.start != epochs_run:
             raise ConfigError(
@@ -1163,7 +1189,7 @@ class TaskTrainer:
         problem = final_copy_problem(backup, resume.start, steps_per_epoch)
         if problem is not None:
             raise ConfigError(
-                f"Cannot resume {run_dir}: its training finished but the last epoch's weights "
+                f"Cannot resume {run_dir}: its training is complete but the last epoch's weights "
                 f"cannot be recovered ({problem}). They exist only in "
                 f"{backup / 'latest.weights.h5'}, and the reporting evaluates them as the "
                 "final model, so it will not run on any other weights. best_model.keras is "
@@ -1184,20 +1210,19 @@ class TaskTrainer:
 
         :return: ``(History, LastEpochWeights)``; the model holds the best weights.
         """
-        import warnings
-
         import keras
 
         from train.common import classification_run
         from train.common.resume_state import BACKUP_WEIGHTS_NAME, rows_as_history
 
-        with warnings.catch_warnings():
-            # `load_weights` reads the optimizer's variables too and skips them with a warning
-            # when the optimizer is not built; only the model's weights are wanted here.
-            warnings.filterwarnings(
-                "ignore", message="Skipping variable loading for optimizer", category=UserWarning
-            )
-            model.load_weights(str(run_dir / BACKUP_DIR / BACKUP_WEIGHTS_NAME))
+        # DECISION plan-2026-10-31T180033-2faf890a/D-064
+        # The optimizer is BUILT before the load, so `load_weights` restores its variables (the
+        # moments and the step count) with the model's, and `final_model.keras` carries the
+        # optimizer state of the last epoch as a whole run's does. Do NOT drop the build: an
+        # unbuilt optimizer skips them and the file held 1 optimizer variable (step count 0)
+        # against 161 (step count 36) (review-iter-2 concern 13).
+        model.optimizer.build(model.trainable_variables)
+        model.load_weights(str(run_dir / BACKUP_DIR / BACKUP_WEIGHTS_NAME))
         last = classification_run.LastEpochWeights()
         last.weights = model.get_weights()
         model.set_weights(best_weights)
@@ -1205,6 +1230,65 @@ class TaskTrainer:
         history.history = rows_as_history(resume.rows)
         history.epoch = [epoch for epoch, _ in resume.rows]
         return history, last
+
+    def _resume_hint(
+        self, run_dir: Path, resolved: StrictConfig, epochs_run: int, steps_per_epoch: int
+    ) -> str:
+        """Return the sentence a failed reporting ends with: can ``resume_interrupted=true`` run it again?
+
+        Interface contract: called from a ``finally`` while the reporting's exception is on its
+        way; reads files only. The answer is the resume's own: the checks a resume applies
+        before it trains or reports anything (:meth:`_resume_point`, then
+        :meth:`_check_final_weights`) are applied to the files as they are now, so the hint
+        cannot promise a resume that would be refused (``checkpoint_args.save_best`` false, a
+        best checkpoint or a last-epoch backup that is missing or torn). ``""`` when the run
+        has its summary (a resume of a finished run is refused, and nothing failed to report).
+        A refusal is worded as the resume would word it.
+
+        :param epochs_run: the epochs that trained, named in the sentence.
+        :param steps_per_epoch: the data's batches per epoch (the proof of the final weights).
+        """
+        from train.common.run_artifacts import RESULTS_SUMMARY_NAME
+
+        if (run_dir / RESULTS_SUMMARY_NAME).exists():
+            return ""
+        kept = f" The training is kept ({epochs_run} epochs, best_model.keras, checkpoints/backup)"
+        # DECISION plan-2026-10-31T180033-2faf890a/D-064
+        # The hint is worded from the resume's OWN checks. Do NOT make it a constant: with
+        # `checkpoint_args.save_best` false the old line promised a resume that exited 2
+        # ("could not return to them"), and a hint that is not true is worse than none.
+        try:
+            point = self._resume_point(run_dir, resolved)
+            self._check_final_weights(run_dir, point, steps_per_epoch)
+        except ConfigError as refusal:
+            return f"{kept}, but resume_interrupted=true would be refused: {refusal}"
+        return (
+            f"{kept}: run the same request with resume_interrupted=true to run only the "
+            "reporting again"
+        )
+
+    @staticmethod
+    def _older_analysis_note(
+        path: Path, modified_before: Optional[int], analysis: Dict[str, Any]
+    ) -> Optional[str]:
+        """Return a note when a reporting-only resume's ``analyzer.path`` is a file it did not write.
+
+        ``modified_before`` is the file's modification time (ns) before the reporting began,
+        ``None`` when it did not exist. The analyzer writes ``analysis_results.json`` before its
+        first figure, so a file whose time did not change was not touched by this segment's
+        analyzer (it raised before writing, say) and the status read back from it is the earlier
+        segment's. ``None`` when the analyzer was skipped, or the file is new or rewritten.
+        """
+        if not analysis.get("path") or modified_before is None or not path.exists():
+            return None
+        if path.stat().st_mtime_ns != modified_before:
+            return None
+        return (
+            f"`analyzer.path` names {path}, which this reporting did not write (its modification "
+            "time is unchanged: the analyzer of this segment wrote nothing there, see "
+            "`failed_analyses` and run.log), so the analyzer's status and numbers in this summary "
+            "are those of the earlier segment's file"
+        )
 
     def _train(
         self,
@@ -1233,9 +1317,13 @@ class TaskTrainer:
         sidecar_path = run_dir / CHECKPOINTS_DIR / FIT_STATE_NAME
         with attach_run_log(run_dir, mode="w" if resume is None else "a"):
             logger.info(f"Run directory: {run_dir}")
-            reporting_only = resume is not None and bool(resume.state.get("fit_finished"))
+            complete = (
+                None if resume is None else self._training_complete_reason(resume, config)
+            )
+            reporting_only = complete is not None
             if reporting_only:
-                # DECISION plan-2026-10-31T180033-2faf890a/D-041
+                # DECISION plan-2026-10-31T180033-2faf890a/D-041 (D-064: the same for a run whose
+                # process died between its last epoch and `fit` returning)
                 # A run whose `fit` returned and whose reporting died is NOT retrained: `fit`
                 # is skipped, the weights come from the files, and only the reporting runs
                 # again. Do NOT send it through `fit` with nothing left to train (no epoch
@@ -1243,9 +1331,9 @@ class TaskTrainer:
                 # were the cost of a reporting bug, the gate's nano run). training_log.csv is
                 # not copied or rewritten: it must be byte-for-byte what the training wrote.
                 logger.info(
-                    f"Resuming a run whose fit had finished ({resume.start} epochs of "
-                    f"{config.epochs}) and whose reporting did not: fit is NOT run again. The "
-                    "best weights come from best_model.keras, the last epoch's from "
+                    f"Resuming a run whose training is complete ({resume.start} epochs of "
+                    f"{config.epochs}: {complete}) and whose reporting did not finish: fit is "
+                    "NOT run again. The best weights come from best_model.keras, the last epoch's from "
                     "checkpoints/backup/latest.weights.h5, the history from training_log.csv; "
                     "config_requested.json, config.json and training_log.csv stay as they are, "
                     "run.log continues"
@@ -1297,11 +1385,21 @@ class TaskTrainer:
             if every is not None and every >= steps_per_epoch:
                 # The key needs the length of an epoch, known only now. Refuse, do not run
                 # with a key that saves nothing inside an epoch (it would look like it worked).
+                # The key's smallest value is 2, so the values that work are 2 .. steps - 1.
+                if steps_per_epoch > 3:
+                    choice = f"Choose a value from 2 to {steps_per_epoch - 1} or null"
+                elif steps_per_epoch == 3:
+                    choice = "Choose 2 or null"
+                else:
+                    choice = (
+                        f"An epoch of {steps_per_epoch} steps has no value from 2 up that is below "
+                        "it, so choose null"
+                    )
                 raise ConfigError(
                     f"Invalid value for 'checkpoint_args.backup_every_steps': {every} is not below "
                     f"the {steps_per_epoch} steps of an epoch of this data, so no batch inside an "
-                    f"epoch would be backed up (each epoch end always is). Choose a value from 2 to "
-                    f"{max(steps_per_epoch - 1, 2)} or null. {_claimed_note(run_dir)}"
+                    f"epoch would be backed up (each epoch end always is). {choice}. "
+                    f"{_claimed_note(run_dir)}"
                 )
             if resume is not None:
                 # Before anything of the earlier run is touched (the CSV is copied aside
@@ -1425,7 +1523,9 @@ class TaskTrainer:
                         logger.info("task.json is already in the run directory: left as it is")
 
                 started = time.perf_counter()
-                with _a_corrupt_file_is_named(run_dir, self.files_to_scan(data), "fit"):
+                with _a_failure_is_logged("Training"), _a_corrupt_file_is_named(
+                    run_dir, self.files_to_scan(data), "fit"
+                ):
                     history = model.fit(
                         data.train_ds,
                         validation_data=data.select_ds,
@@ -1465,7 +1565,12 @@ class TaskTrainer:
             # ``watch_mode`` saved one epoch and the summary named another.
             best_epoch = run_summary.best_epoch(hist, monitor, metric_cfg.watch_mode)
 
-            with _a_reporting_failure_is_logged(run_dir, epochs_run):
+            analysis_file = run_dir / "model_analysis" / "analysis_results.json"
+            analysis_before = analysis_file.stat().st_mtime_ns if analysis_file.exists() else None
+            with _a_failure_is_logged(
+                "Reporting",
+                lambda: self._resume_hint(run_dir, config, epochs_run, steps_per_epoch),
+            ):
                 fit = FitState(
                     model=model,
                     history=history,
@@ -1492,6 +1597,12 @@ class TaskTrainer:
                     evaluated.load_check, evaluated.conformal, evaluated.analysis,
                     notes=self._notes(config, baseline, initial_ratio, init_warning, data, resume),
                 )
+                if reporting_only:
+                    stale = self._older_analysis_note(
+                        analysis_file, analysis_before, evaluated.analysis
+                    )
+                    if stale is not None:
+                        summary["notes"].append(stale)
                 if resume is not None:
                     summary["resumed_after_epochs"] = resume.start
                 if reporting_only:
@@ -1638,9 +1749,20 @@ class TaskTrainer:
         # steps produced in review-iter-3). The point is read again for the previous pair
         # even when its epoch is the same: its `batch` (how much of the epoch the copy had
         # taken, D-063) is the one the resumed epoch is shortened by.
-        return self._check_resume_point(
+        again = self._check_resume_point(
             run_dir, resolved, load_resume_point(run_dir, self.config)
         )
+        complete = self._training_complete_reason(again, resolved)
+        if complete is not None:
+            # The latest pair said an epoch was left; the pair that is sound says there is none.
+            # That is a reporting-only resume, which `_train` did not choose and must not be
+            # entered by the back door: the files disagree on where the training stopped.
+            raise ConfigError(
+                f"Cannot resume {run_dir}: the latest backup copy is unusable and the previous "
+                f"one records epoch {again.start}, where {complete}; the files do not agree on "
+                "where the training stopped. Choose a new 'out'"
+            )
+        return again
 
     @staticmethod
     def _best_weights_of(run_dir: Path, resume: Any) -> Optional[List[Any]]:
@@ -1922,14 +2044,17 @@ class TaskTrainer:
                 "statistics). No training-mode pass was run to measure it: it would move the "
                 "moving statistics and the random generators"
             )
-        if resume is not None and resume.state.get("fit_finished"):
+        complete = None if resume is None else self._training_complete_reason(resume, config)
+        if complete is not None:
             notes.append(
-                f"the training finished ({resume.start} epochs) and an earlier reporting died, "
+                f"the training was complete ({resume.start} epochs: {complete}) and the earlier "
+                "process died after its last epoch, in `fit`'s return or in the reporting, "
                 "so this reporting ran again from the files and `fit` did not run: the best "
                 "weights are best_model.keras's and `best_checkpoint_max_abs_diff` compares that "
                 "file with itself; the last epoch's weights are checkpoints/backup/"
                 "latest.weights.h5 (the epoch-end copy, checked against the epoch count and the "
-                "optimizer's step count); `epoch_times` and `fit_wall_seconds` are null (no "
+                "optimizer's step count), and so is the optimizer state saved in "
+                "final_model.keras; `epoch_times` and `fit_wall_seconds` are null (no "
                 "epoch ran in this segment); training_log.csv was not touched"
             )
         elif resume is not None:

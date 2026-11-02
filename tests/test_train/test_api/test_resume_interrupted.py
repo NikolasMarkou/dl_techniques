@@ -418,6 +418,8 @@ def test_a_changed_request_is_refused_naming_the_key(world, killed, tmp_path, ca
     assert resume_by_cli(run_dir, epochs=EPOCHS + 1) == 2
     error = capsys.readouterr().err
     assert "in epochs: 6 -> 7. Resume with the request" in error  # that key and no other
+    # Review-iter-2 concern 15: the list of keys that may change is the real one, not "resume_interrupted and out".
+    assert "(only resume_interrupted, out, devices, analysis_args.eval_batch_size may change)" in error
     with pytest.raises(ConfigError, match="optim_args.lr: 'auto' -> 0.01"):
         Scripted(make_config(run_dir, resume_interrupted=True, **REQUEST,
                              **{"optim_args.lr": 0.01})).run()
@@ -485,9 +487,11 @@ def plant_run(run_dir, config, *, start=2, wait=1, best=0.9, rows=None, best_mod
     "overrides, plant, message",
     [
         ({"checkpoint_args.save_best": False}, {}, "save_best is false"),
-        ({"epochs": 2}, {"start": 2}, "all 2 of its 2 epochs"),
-        ({"checkpoint_args.early_stopping_patience": 1}, {"start": 2, "wait": 1},
-         "had already decided to stop"),
+        # D-064: a run with no epoch left is not refused for that, it is resumed to report, and
+        # refused there for what the report needs (here, a best checkpoint that is missing).
+        ({"epochs": 2}, {"start": 2, "best_model": False}, "the reporting needs the best weights"),
+        ({"checkpoint_args.early_stopping_patience": 1}, {"start": 2, "wait": 1, "best_model": False},
+         "the reporting needs the best weights"),
         ({}, {"best_model": False}, "best_model.keras does not exist"),
         ({}, {"sidecar_entries": False}, "holds no entry for epoch 1"),
         ({}, {"rows": 1}, "holds 1 complete epoch rows"),

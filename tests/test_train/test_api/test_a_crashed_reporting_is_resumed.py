@@ -22,7 +22,13 @@ arms copy it, resume the copy and read the files. What they pin:
   ``latest.weights.h5`` is a refusal (exit 2) that names it and changes NOTHING, the ``.bkp``
   copy included;
 * a missing ``best_model.keras`` and other data are refusals; ``analysis_args.eval_batch_size``
-  alone may differ from the earlier request.
+  alone may differ from the earlier request;
+* the sentence a failed reporting ends with is the resume's own answer (D-064): it promises a
+  resume only when the resume would run, and says it would be refused, and why, when it would not;
+* ``final_model.keras`` holds the last epoch's optimizer state too, as a whole run's does;
+* a resume whose analyzer writes nothing says its ``analyzer.path`` is the earlier segment's file;
+* an exception of ``fit`` is an ``ERROR`` line of ``run.log`` as well, and a ``SystemExit`` or a
+  ``KeyboardInterrupt`` of either is not logged as a failure.
 
 Tests write only under ``tmp_path``.
 """
@@ -47,6 +53,7 @@ from .test_existing_run_is_refused import snapshot
 from .test_resume_hardening import quiet_snapshot
 from .test_resume_interrupted import (  # noqa: F401  (fixtures)
     REQUEST,
+    killed,
     STOP_AFTER,
     TOKENS,
     Scripted,
@@ -370,3 +377,198 @@ def test_only_the_evaluation_batch_may_differ_from_the_earlier_request(world, co
 def test_the_tokens_of_the_cli_helper_are_the_requests_of_this_file():
     """Guard for ``resume_by_cli``: its tokens must describe the same run as ``REQUEST``."""
     assert "model=vit/vit_pico" in TOKENS and "analysis_args.model_analysis=false" in TOKENS
+
+
+# ---------------------------------------------------------------------
+# The sentence a failed reporting ends with (review-iter-2 concern 4, D-064)
+# ---------------------------------------------------------------------
+
+
+def error_lines(run_dir):
+    return [line for line in (run_dir / "run.log").read_text().splitlines() if " ERROR " in line]
+
+
+class DamagedThenCrash(Scripted):
+    """The real task whose reporting damages ``latest.weights.h5`` (or not) and then dies."""
+
+    damage = None
+
+    def evaluate_and_report(self, config, data, fit):
+        if self.damage == "unlink":
+            (self.run_dir_of(config) / "checkpoints" / "backup" / BACKUP_WEIGHTS_NAME).unlink()
+        raise ResourceExhausted(MESSAGE)
+
+    @staticmethod
+    def run_dir_of(config):
+        return Path(config.out)
+
+
+def test_the_hint_of_a_run_without_a_best_checkpoint_does_not_promise_a_resume(world, tmp_path):
+    """Mutant ``rep_hint_always``: with ``save_best`` false the old line promised a resume that exited 2."""
+    run_dir = tmp_path / "run"
+    config = make_config(run_dir, **REQUEST, **{"checkpoint_args.save_best": False})
+    with pytest.raises(ResourceExhausted):
+        DamagedThenCrash(config).run()
+    errors = error_lines(run_dir)
+    assert len(errors) == 1 and "Reporting failed: ResourceExhausted" in errors[0]
+    assert "would be refused" in errors[0] and "save_best is false" in errors[0]
+    assert "run the same request with resume_interrupted=true" not in errors[0]
+    # ... and the resume does refuse, for the reason the line gave.
+    with pytest.raises(ConfigError, match="save_best is false"):
+        Scripted(make_config(run_dir, resume_interrupted=True, **REQUEST,
+                             **{"checkpoint_args.save_best": False})).run()
+
+
+def test_the_hint_of_a_run_whose_last_epoch_backup_is_gone_says_the_resume_is_refused_and_names_the_file(
+    world, tmp_path
+):
+    run_dir = tmp_path / "run"
+
+    class Unlinks(DamagedThenCrash):
+        damage = "unlink"
+
+    with pytest.raises(ResourceExhausted):
+        Unlinks(make_config(run_dir, **REQUEST)).run()
+    (line,) = error_lines(run_dir)
+    assert "would be refused" in line and BACKUP_WEIGHTS_NAME in line
+    assert "run the same request with resume_interrupted=true" not in line
+    with pytest.raises(ConfigError, match=BACKUP_WEIGHTS_NAME):
+        Scripted(make_config(run_dir, resume_interrupted=True, **REQUEST)).run()
+
+
+def test_the_hint_of_a_run_that_can_be_resumed_promises_it_and_the_resume_works(crashed, copy_of_crashed):
+    """Control for both: the same sentence, and it is true."""
+    (line,) = error_lines(crashed[0])
+    assert "run the same request with resume_interrupted=true to run only the reporting again" in line
+    assert "would be refused" not in line
+    assert resume_by_cli(copy_of_crashed, epochs=6) == 0
+
+
+# ---------------------------------------------------------------------
+# SystemExit and KeyboardInterrupt are not failures; an exception of fit is logged too (concern 18)
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("leaving", [SystemExit, KeyboardInterrupt])
+def test_a_system_exit_in_the_reporting_is_not_logged_as_a_failure(world, tmp_path, leaving):
+    """Mutant ``rep_logs_systemexit``: the context logged any exception, ``SystemExit`` included."""
+
+    class Leaves(Scripted):
+        def evaluate_and_report(self, config, data, fit):
+            raise leaving(3)
+
+    run_dir = tmp_path / "run"
+    with pytest.raises(leaving):
+        Leaves(make_config(run_dir, **REQUEST)).run()
+    assert error_lines(run_dir) == []
+
+
+@pytest.mark.parametrize("leaving", [SystemExit, KeyboardInterrupt])
+def test_a_system_exit_in_fit_is_not_logged_as_a_failure(world, tmp_path, leaving):
+    class Leaves(Scripted):
+        def extra_callbacks(self, config, data):
+            class Raises(keras.callbacks.Callback):
+                def on_epoch_begin(self, epoch, logs=None):
+                    raise leaving(3)
+
+            return [Raises()]
+
+    run_dir = tmp_path / "run"
+    with pytest.raises(leaving):
+        Leaves(make_config(run_dir, **REQUEST)).run()
+    assert error_lines(run_dir) == []
+
+
+def test_an_exception_of_fit_is_an_error_line_of_run_log_with_its_type_and_message(world, killed):
+    """The review's reproduction: an exception in ``fit`` (there, ``on_train_end``) was in stderr only,
+    0 lines of ``run.log`` against 2 of stderr. No hint: whether a resume works is another question."""
+    (line,) = error_lines(killed)
+    assert "Training failed: RuntimeError: killed" in line
+    assert "resume_interrupted" not in line
+
+
+# ---------------------------------------------------------------------
+# What the resume writes that a whole run writes (concerns 13 and 14)
+# ---------------------------------------------------------------------
+
+
+def optimizer_variables(path):
+    """``{name: array}`` of the optimizer's variables in a ``.keras`` archive or a ``.weights.h5`` file."""
+    import io
+    import zipfile
+
+    import h5py
+
+    path = Path(path)
+    source = io.BytesIO(zipfile.ZipFile(path).read("model.weights.h5")) if path.suffix == ".keras" else path
+    found = {}
+    with h5py.File(source, "r") as handle:
+        def visit(name, node):
+            if name.startswith("optimizer") and isinstance(node, h5py.Dataset):
+                found[name] = node[()]
+
+        handle.visititems(visit)
+    return found
+
+
+def test_final_model_keras_of_a_reporting_resume_has_the_optimizer_state_of_the_last_epoch(crashed, resumed, whole):
+    """Review-iter-2 concern 13: 1 optimizer variable and step count 0 against a whole run's 161 and 36."""
+    _, run_dir, _ = resumed
+    final = optimizer_variables(run_dir / "final_model.keras")
+    backup = optimizer_variables(run_dir / "checkpoints" / "backup" / BACKUP_WEIGHTS_NAME)
+    whole_final = optimizer_variables(whole[1] / "final_model.keras")
+    assert len(final) > 1, "only the step count was saved: the optimizer was not built before the load"
+    assert sorted(final) == sorted(whole_final) == sorted(backup)
+    for name in final:
+        assert np.array_equal(final[name], backup[name]), name
+    steps = int(final["optimizer/vars/0"])
+    assert steps > 0 and steps == int(whole_final["optimizer/vars/0"])
+
+
+@pytest.fixture(scope="module")
+def crashed_after_the_analysis(world, tmp_path_factory):
+    """A run whose analyzer ran and wrote ``analysis_results.json`` before the reporting died."""
+
+    class DiesAfter(Scripted):
+        def evaluate_and_report(self, config, data, fit):
+            super().evaluate_and_report(config, data, fit)
+            raise ResourceExhausted(MESSAGE)
+
+    run_dir = tmp_path_factory.mktemp("after_analysis") / "run"
+    with pytest.raises(ResourceExhausted):
+        DiesAfter(make_config(run_dir, **REQUEST, **{"analysis_args.model_analysis": True})).run()
+    assert (run_dir / "model_analysis" / "analysis_results.json").is_file()
+    return run_dir
+
+
+def resume_with_analysis(crashed_run, tmp_path, analyzer_raises):
+    run_dir = tmp_path / "run"
+    shutil.copytree(crashed_run, run_dir)
+    config = make_config(run_dir, resume_interrupted=True, **REQUEST, **{"analysis_args.model_analysis": True})
+    with pytest.MonkeyPatch.context() as patch:
+        if analyzer_raises:
+            from train.common import evaluation
+
+            def refuse(self, *arguments, **keywords):
+                raise RuntimeError("injected analyzer failure")
+
+            patch.setattr(evaluation.ModelAnalyzer, "analyze", refuse)
+        Scripted(config).run()
+    return read_json(run_dir, "results_summary.json")
+
+
+def test_a_failed_analyzer_in_a_reporting_resume_says_its_path_is_the_earlier_segments(
+    crashed_after_the_analysis, tmp_path
+):
+    """Review-iter-2 concern 14: ``status: partial`` and a ``path`` written before the resume began,
+    with nothing saying it was older."""
+    summary = resume_with_analysis(crashed_after_the_analysis, tmp_path, analyzer_raises=True)
+    assert summary["analyzer"]["status"] in ("partial", "missing") or summary["analyzer"].get("failed_analyses")
+    (note,) = [n for n in summary["notes"] if "which this reporting did not write" in n]
+    assert summary["analyzer"]["path"] in note and "earlier segment" in note
+
+
+def test_a_reporting_resume_whose_analyzer_wrote_its_file_has_no_such_note(crashed_after_the_analysis, tmp_path):
+    summary = resume_with_analysis(crashed_after_the_analysis, tmp_path, analyzer_raises=False)
+    assert summary["analyzer"]["status"] == "success"
+    assert not [n for n in summary["notes"] if "which this reporting did not write" in n]

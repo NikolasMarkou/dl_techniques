@@ -839,6 +839,24 @@ def test_a_value_not_below_the_steps_of_an_epoch_is_refused_before_anything_trai
     assert not (out / "final_model.keras").exists()
 
 
+@pytest.mark.parametrize("batch_size, every, offered, not_offered", [
+    (4, 9, "Choose a value from 2 to 8 or null", None),
+    (12, 3, "Choose 2 or null", "from 2 to 2"),
+    (16, 2, "has no value from 2 up that is below it, so choose null", "from 2 to 2"),
+], ids=["nine_steps", "three_steps", "two_steps"])
+def test_the_refusal_offers_only_values_that_would_work(world, tmp_path, batch_size, every, offered, not_offered):
+    """Review-iter-2 concern 15: at 2 steps an epoch the refusal read "Choose a value from 2 to 2 or null",
+    offering the value it had just refused. The data of ``world`` is 36 training rows, so the batch sets
+    the steps of an epoch: 4 gives 9, 12 gives 3, 16 gives 2."""
+    out = tmp_path / "run"
+    with pytest.raises(ConfigError) as caught:
+        ImageClassificationTrainer(make_config(
+            out, batch_size=batch_size, **{"checkpoint_args.backup_every_steps": every})).run()
+    assert offered in str(caught.value)
+    if not_offered:
+        assert not_offered not in str(caught.value)
+
+
 # ---------------------------------------------------------------------
 # 4. Real SIGKILL
 # ---------------------------------------------------------------------

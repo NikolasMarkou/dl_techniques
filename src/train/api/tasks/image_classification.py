@@ -55,13 +55,14 @@ Interface contract
         and learning rate are the unkilled run's; a kill between the
         best checkpoint's save and the backup can leave ``best_model.keras`` one epoch LATER
         than the resumed state's best (the epoch that is then trained again; never an earlier
-        one). A run whose training finished and whose reporting died (no
-        ``results_summary.json``, ``fit_finished``) is not trained again: only the reporting
-        runs, from ``best_model.keras``, ``checkpoints/backup/latest.weights.h5`` and
-        ``training_log.csv`` (which is not written); it is refused if the last epoch's weights
-        cannot be shown to be the backup's latest epoch-end copy. ``analysis_args.eval_batch_size``
-        may also differ from the earlier request. A finished run (with a summary), a run with no
-        epoch left that never finished ``fit``, one with ``save_best`` false, one
+        one). A run with no epoch left to train and no ``results_summary.json`` (its
+        reporting died, or the process died between the last epoch and ``fit`` returning:
+        ``fit_finished``, or every epoch ended, or ``EarlyStopping`` had decided to stop) is not
+        trained again: only the reporting runs, from ``best_model.keras``,
+        ``checkpoints/backup/latest.weights.h5`` and ``training_log.csv`` (which is not
+        written); it is refused if the last epoch's weights cannot be shown to be the backup's
+        latest epoch-end copy. ``analysis_args.eval_batch_size`` may also differ from the earlier
+        request. A finished run (with a summary), one with ``save_best`` false, one
         whose data (class names, statistics, split sizes) is no longer the data it started
         with, one a live process holds (``run.lock``) and one whose backup has no sound copy
         are refused (exit 2).
@@ -175,8 +176,9 @@ class ImageClassificationConfig(StrictConfig):
             "examples of that epoch repeat and some are missed); the learning rate, ReduceLROnPlateau and early stopping come back; a kill "
             "between the best checkpoint's save and the backup can leave best_model.keras one "
             "epoch LATER than the resumed state's best (the epoch that is then trained again; "
-            "never an earlier one); a run whose training finished and whose reporting died "
-            "(fit_finished, no results_summary.json) is not trained again: only the reporting "
+            "never an earlier one); a run with no epoch left to train and no results_summary.json "
+            "(its reporting died, or the process died after the last epoch: fit_finished, all "
+            "epochs ended, or early stopping had decided) is not trained again: only the reporting "
             "runs, from best_model.keras, checkpoints/backup/latest.weights.h5 and "
             "training_log.csv (not written), and it is refused if that backup is not the last "
             "epoch's; analysis_args.eval_batch_size may differ; refused: a finished run (with "

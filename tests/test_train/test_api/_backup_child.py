@@ -12,6 +12,13 @@ Run as ``python _backup_child.py '<json>'`` on the CPU. The JSON holds
 * ``stop_at_meta_write``: ``k`` makes it print ``@@AT_META <k>`` and sleep at the ``k``-th
   write of ``training_metadata.json`` of this process, which is AFTER ``save_weights`` of that
   save returned and BEFORE the metadata is written: the window between the two writes;
+* ``stop_at_train_end``: ``true`` makes it print ``@@AT_TRAIN_END`` and sleep in the ``on_train_end``
+  of a callback that sits LAST in the list, i.e. after every epoch ended and every other
+  callback ended its training, before ``fit`` returns and the sidecar records ``fit_finished``:
+  the window of a kill after the last epoch;
+* ``script``: a list of ``val_accuracy`` values, one per epoch, written into the epoch logs before
+  EarlyStopping reads them (a run that improves once and then stops early at ``patience``);
+  ``patience`` (default 50) is ``checkpoint_args.early_stopping_patience``;
 * ``trace``: a file; the child appends one line ``<epoch> <batch> <steps_before> <lr>`` per
   finished batch (``batch`` is the index inside the pass, ``steps_before`` the optimizer's
   step count before it, ``lr`` the learning rate that step used), flushed at the batch end and
@@ -92,6 +99,18 @@ def main(spec: dict) -> None:
             if self.target == (self.epoch, batch) and batch > 0:
                 stop(f"AT {self.epoch} {batch}")
 
+    class TrainEnd(keras.callbacks.Callback):
+        """Block in the last ``on_train_end``: every epoch ended, ``fit`` has not returned."""
+
+        def on_train_end(self, logs=None):
+            stop("AT_TRAIN_END")
+
+    class ScriptedMonitor(keras.callbacks.Callback):
+        """Write the scripted ``val_accuracy`` into the epoch logs (sits before EarlyStopping)."""
+
+        def on_epoch_end(self, epoch, logs=None):
+            logs["val_accuracy"] = spec["script"][epoch]
+
     class Trace(keras.callbacks.Callback):
         """One line per finished batch: what the step used, and where it was."""
 
@@ -119,8 +138,12 @@ def main(spec: dict) -> None:
             epoch_line, callbacks = super()._callbacks(*arguments)
             if spec.get("trace"):
                 callbacks.insert(len(callbacks) - 1, Trace(spec["trace"]))
+            if spec.get("script"):
+                callbacks.insert(1, ScriptedMonitor())
             if spec.get("stop_at"):
                 callbacks.append(Stopper(*spec["stop_at"]))
+            if spec.get("stop_at_train_end"):
+                callbacks.append(TrainEnd())
             return epoch_line, callbacks
 
     mapping = {
@@ -135,7 +158,7 @@ def main(spec: dict) -> None:
         "analysis_args": {"model_analysis": False, "figures": False, "epoch_analysis_every": 0},
         "metric_args": {"success_threshold": 0.0},
         "checkpoint_args": {
-            "early_stopping_patience": 50,
+            "early_stopping_patience": spec.get("patience", 50),
             "backup_every_steps": spec.get("every"),
         },
     }

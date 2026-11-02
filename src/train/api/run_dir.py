@@ -37,7 +37,7 @@ Interface contract
         ``results_summary.json`` present (a finished run has nothing to resume, D-016), an
         unreadable sidecar, or whose ``run.lock`` names a live process (D-069). A sidecar
         that records ``fit_finished`` with no summary is accepted: that run crashed while
-        reporting and the trainer re-runs its reporting (D-041, which supersedes D-021); a resume of a run killed before
+        reporting and the trainer re-runs its reporting (D-041); a resume of a run killed before
         its first epoch ended says so and to choose a new ``out``; any ``OSError`` met
         on the way. Nothing is created before a refusal.
         The text names ``out``.
@@ -843,7 +843,7 @@ def load_resume_point(run_dir: Path, mapping: Any) -> Any:
         raise ConfigError(
             f"Cannot resume {run_dir}: the request differs from {REQUESTED_CONFIG_NAME} "
             "in " + "; ".join(lines) + ". Resume with the request the run started "
-            "with (only resume_interrupted and out may change)"
+            "with (only " + ", ".join(RESUME_UNCOMPARED_KEYS) + " may change)"
         )
     try:
         return read_resume_point(

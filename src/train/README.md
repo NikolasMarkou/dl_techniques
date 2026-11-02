@@ -48,17 +48,25 @@ run. It is refused for a finished run (one with a `results_summary.json`), anoth
 process holding the run, or a torn backup; `devices` and `analysis_args.eval_batch_size` may differ. The training data
 order replays epoch 0's and a half-done epoch is trained again (the key's help lists the rest).
 A run whose **training finished and whose reporting died** (the sidecar says `fit_finished`, there is no summary: the
-figures, the analyzer, the conformal sets or the final evaluation raised, for example out of memory) is not trained
-again: the same command with `resume_interrupted=true` skips `fit` and runs only the reporting, from
+figures, the analyzer, the conformal sets or the final evaluation raised, for example out of memory), or whose
+**process died between the last epoch and `fit` returning** (every epoch ended, or early stopping had waited out its
+patience; no `fit_finished` yet: the window holds the dashboard's last draw and the restore of the best weights), is
+not trained again: the same command with `resume_interrupted=true` skips `fit` and runs only the reporting, from
 `best_model.keras` (the best weights), `checkpoints/backup/latest.weights.h5` (the last epoch's weights, which were
 only in memory) and `training_log.csv` (read, never written: its sha256 is the same before and after). The last
 epoch's weights are used only when that backup is the epoch-end copy of the epochs that ran (metadata epoch and
 batch 0, optimizer step count epochs times steps); a missing, torn, mid-epoch or older copy is refused with exit 2
 naming `latest.weights.h5`, nothing is changed, and the previous `.bkp` copy is never put in its place, because a
-final model one epoch old would look like the final model. An existing `final_model.keras` is written over. The
-summary says `reporting_resumed: true`, `epoch_times` and `fit_wall_seconds` are null (no epoch ran in that segment),
+final model one epoch old would look like the final model. An existing `final_model.keras` is written over, and
+it holds what a whole run's holds: the last epoch's weights and the last epoch's optimizer state (moments and step
+count, restored from the same backup copy). The summary says `reporting_resumed: true`, `epoch_times` and `fit_wall_seconds` are null (no epoch ran in that segment),
 `best_checkpoint_max_abs_diff` compares `best_model.keras` with itself, and a second resume is refused. The reason a
-reporting died is an `ERROR` line of `run.log` (exception type and message), and the command exits 1. For folder and CSV data the sidecar holds a fingerprint of the
+reporting died is an `ERROR` line of `run.log` (exception type and message) that ends with a sentence saying
+whether `resume_interrupted=true` can run the reporting again, worded from the checks the resume applies (a run
+with `checkpoint_args.save_best=false` has no best checkpoint, so the line says the resume would be refused and
+why); an exception of `fit` is logged the same way (`Training failed: ...`), a `SystemExit` or `KeyboardInterrupt`
+is not logged as a failure, and the command exits 1. If the analyzer of a reporting-only resume writes nothing, the
+summary says that `analyzer.path` names the earlier segment's file. For folder and CSV data the sidecar holds a fingerprint of the
 files: `data.fingerprint=listing` (the default) hashes every file's relative path, class and size, in listing
 order, and opens no file (a CSV whose rows were reordered splits differently, so it is another listing), so two
 same-sized files swapped, or a pixel edited, go unseen; `data.fingerprint=content` also hashes every
