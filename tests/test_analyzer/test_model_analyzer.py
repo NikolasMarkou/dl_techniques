@@ -848,8 +848,13 @@ class TestTheConfigsPrivateStateIsDeclared:
         # The two per-pixel fields (plan 2faf890a D-020) reach the artifact only when the
         # per-pixel path ran, so a rank-2 artifact is what it was before they existed;
         # test_per_pixel_calibration.py pins the other half (they ARE there after a mask run).
-        from dl_techniques.analyzer.model_analyzer import PER_PIXEL_CONFIG_FIELDS
-        assert set(payload["config"]) == _config_field_names() - PER_PIXEL_CONFIG_FIELDS
+        # `prediction_batch_size` (plan 2faf890a D-040) is published only when it is set.
+        from dl_techniques.analyzer.model_analyzer import (
+            PER_PIXEL_CONFIG_FIELDS,
+            SET_ONLY_CONFIG_FIELDS,
+        )
+        assert set(payload["config"]) == (
+            _config_field_names() - PER_PIXEL_CONFIG_FIELDS - SET_ONLY_CONFIG_FIELDS)
 
 
 # =====================================================================

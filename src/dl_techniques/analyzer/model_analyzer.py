@@ -211,6 +211,10 @@ PER_PIXEL_BATCH_SIZE: int = 16
 # block only when that path ran, so an artifact of a rank-2 model is byte-for-byte what it
 # was before the fields existed.
 PER_PIXEL_CONFIG_FIELDS: frozenset = frozenset({'ignore_label', 'max_pixels'})
+# `AnalysisConfig` fields that reach the published `config` block only when they are set
+# (plan-2026-10-31T180033-2faf890a/D-040): an artifact of a run that never set one is what it
+# was before the field existed.
+SET_ONLY_CONFIG_FIELDS: frozenset = frozenset({'prediction_batch_size'})
 
 
 def _training_metrics_hold(results: AnalysisResults, model_name: str) -> bool:
@@ -889,7 +893,8 @@ class ModelAnalyzer:
                     continue
 
                 # Run prediction
-                predictions = model.predict(x_data, verbose=0)
+                predictions = model.predict(
+                    x_data, batch_size=self.config.prediction_batch_size, verbose=0)
 
                 # Calibration needs probabilities, so a logit head must be
                 # softmaxed. Which head this is comes from the config when the user
@@ -1295,6 +1300,7 @@ class ModelAnalyzer:
             # plan-2026-10-31T180033-2faf890a/D-020: the per-pixel fields appear only when
             # the per-pixel path ran, so a rank-2 artifact is unchanged.
             and (f.name not in PER_PIXEL_CONFIG_FIELDS or self._per_pixel_models)
+            and (f.name not in SET_ONLY_CONFIG_FIELDS or getattr(self.config, f.name) is not None)
         }
 
         # Compile all results into a single dictionary structure

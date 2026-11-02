@@ -356,13 +356,17 @@ def test_resume_leaves_a_whole_unfinished_run_tree_byte_identical(tmp_path):
     assert snapshot(tmp_path) == before
 
 
-def test_resume_of_a_run_whose_fit_returned_is_refused_though_it_has_no_summary(tmp_path):
+def test_resume_of_a_run_whose_fit_returned_and_has_no_summary_is_accepted(tmp_path):
+    """D-041 (supersedes D-021): a run that crashed while reporting is resumed to report again.
+
+    ``open_run`` opens it and touches nothing; the trainer's own checks (the backup, the best
+    checkpoint, the data) decide the rest. The summary is what says a run finished.
+    """
     run_dir = tmp_path / "run"
     plant(run_dir, "checkpoints/backup")
     (run_dir / "checkpoints" / "fit_state.json").write_text('{"epochs": {}, "fit_finished": true}')
     before = snapshot(tmp_path)
-    with pytest.raises(ConfigError, match="fit_finished"):
-        open_run(run_dir, resume=True)
+    assert open_run(run_dir, resume=True) == run_dir
     assert snapshot(tmp_path) == before
 
 

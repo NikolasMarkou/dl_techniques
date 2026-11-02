@@ -34,9 +34,10 @@ Interface contract
     :raises ConfigError: a new run into a non-empty directory, into a directory
         holding any artifact, or under an ancestor directory holding one; a lost
         claim; a resume without ``checkpoints/backup``, with
-        ``results_summary.json`` present, or whose sidecar records
-        ``fit_finished`` (a finished run has nothing to resume, D-016, D-021), or
-        whose ``run.lock`` names a live process (D-069); a resume of a run killed before
+        ``results_summary.json`` present (a finished run has nothing to resume, D-016), an
+        unreadable sidecar, or whose ``run.lock`` names a live process (D-069). A sidecar
+        that records ``fit_finished`` with no summary is accepted: that run crashed while
+        reporting and the trainer re-runs its reporting (D-041, which supersedes D-021); a resume of a run killed before
         its first epoch ended says so and to choose a new ``out``; any ``OSError`` met
         on the way. Nothing is created before a refusal.
         The text names ``out``.
@@ -153,8 +154,17 @@ LOCK_NAME = "run.lock"
 #: asks for the resume, ``out`` (the directory was found from it, and a run
 #: started with ``out=auto`` or moved since is resumed by its real path) and
 #: ``devices`` (the weights and the optimizer do not depend on which GPU holds
-#: them, so a run may move to another one; D-069).
-RESUME_UNCOMPARED_KEYS = ("resume_interrupted", "out", "devices")
+#: them, so a run may move to another one; D-069), and ``analysis_args.eval_batch_size``
+#: (D-040: how many images a pass of an evaluation takes is a fit-to-the-card choice that
+#: changes no weight, and the run that crashed while reporting because of it must be able to
+#: ask for fewer; a name with a dot is matched whole, a name without one by its first segment).
+# DECISION plan-2026-10-31T180033-2faf890a/D-040
+# Only this ONE analysis key may differ. Do NOT widen it to `analysis_args` as a group:
+# `figures`, `model_analysis` and `conformal_alpha` change what the run writes, and the
+# comparison exists to refuse a request that is another run.
+RESUME_UNCOMPARED_KEYS = (
+    "resume_interrupted", "out", "devices", "analysis_args.eval_batch_size",
+)
 
 # ---------------------------------------------------------------------
 
@@ -339,25 +349,21 @@ def _fit_state_path(run_dir: Path) -> Path:
     return run_dir / CHECKPOINTS_DIR / FIT_STATE_NAME
 
 
-def _refuse_finished_fit(run_dir: Path) -> None:
-    """Refuse a resume of a run whose ``fit`` already returned (D-021).
+def _check_fit_state_readable(run_dir: Path) -> None:
+    """Refuse a resume whose sidecar cannot be read.
 
-    A run that crashed after ``fit`` but before its summary has no summary to
-    show it finished; the sidecar's ``fit_finished`` marker does.
+    A run whose ``fit`` returned and whose reporting then crashed has ``fit_finished`` in the
+    sidecar and no summary. That is NOT refused any more (D-041): the resume skips ``fit`` and
+    runs the reporting again (``trainer.py``, "Resume"). Only an unreadable sidecar is, because
+    nothing then says which of the two a resume would be.
     """
     from train.common.resume_state import read_fit_state
 
     path = _fit_state_path(run_dir)
     try:
-        finished = read_fit_state(path)["fit_finished"]
+        read_fit_state(path)
     except ValueError as exc:
         raise ConfigError(f"Cannot resume: {path} is unreadable ({exc})") from exc
-    if finished:
-        raise ConfigError(
-            f"Cannot resume: {run_dir} is marked fit_finished, so its training "
-            "ended (it was stopped early or crashed while reporting); choose a new "
-            "'out' to train again"
-        )
 
 
 def _first_epoch_message(run_dir: Path) -> str:
@@ -681,7 +687,7 @@ def open_run(run_dir: Path, resume: bool) -> Path:
                     f"Cannot resume: {run_dir} holds {RESULTS_SUMMARY_NAME}, so the run "
                     "has finished; choose a new 'out' to train again"
                 )
-            _refuse_finished_fit(run_dir)
+            _check_fit_state_readable(run_dir)
             return run_dir
 
         _refuse_links(run_dir)
@@ -787,7 +793,7 @@ def request_differences(earlier: Any, mapping: Any) -> List[str]:
     _leaves(now, "", now_leaves)
     lines = []
     for key in sorted(set(before_leaves) | set(now_leaves)):
-        if key.split(".")[0] in RESUME_UNCOMPARED_KEYS:
+        if key in RESUME_UNCOMPARED_KEYS or key.split(".")[0] in RESUME_UNCOMPARED_KEYS:
             continue
         old, new = before_leaves.get(key, _ABSENT), now_leaves.get(key, _ABSENT)
         if old != new or type(old) is not type(new):

@@ -220,16 +220,18 @@ def _train_pipeline(
 def _eval_pipeline(
         x: np.ndarray, y: np.ndarray, normalize: Callable[[tf.Tensor], tf.Tensor],
         resize: Callable[[tf.Tensor], tf.Tensor] = lambda image: image,
+        batch_size: int = EVAL_BATCH_SIZE,
 ) -> "tf.data.Dataset":
     """Un-augmented, un-shuffled, normalized, batched pipeline (selection and test).
 
     Batched explicitly: ``fit`` evaluates numpy ``validation_data`` at Keras' small default
-    batch when the train data is a dataset.
+    batch when the train data is a dataset. ``batch_size`` is the rows per pass; the default
+    is :data:`EVAL_BATCH_SIZE`, so a caller that passes nothing is unchanged.
     """
     return (
         array_examples(x, y, training=False, seed=0, augment=None,
                        normalize=normalize, resize=resize)
-        .batch(EVAL_BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
+        .batch(batch_size).prefetch(tf.data.AUTOTUNE)
     )
 
 
@@ -376,6 +378,7 @@ def load_classification_data(
         devkit_dir: Optional[str] = None,
         image_size: Optional[int] = None,
         max_samples_flag: str = "--max-samples",
+        eval_batch_size: int = EVAL_BATCH_SIZE,
 ) -> ClassificationData:
     """Load ``name`` as ``(train, select, test)`` with the one selection protocol.
 
@@ -415,6 +418,11 @@ def load_classification_data(
     :param max_samples_flag: What the caller's user calls ``max_samples``, named in the
         too-large-batch refusal of the in-memory datasets (``"--max-samples"`` for the
         legacy trainers, the API passes its own key).
+    :param eval_batch_size: In-memory datasets only: rows per batch of the selection and test
+        pipelines (default :data:`EVAL_BATCH_SIZE`, the legacy value). ImageNet, Imagenette and
+        the file loaders batch those splits at ``batch_size``, which is at most the batch the
+        model was measured to train at, so an evaluation there cannot need more memory than the
+        training did; the argument is ignored for them.
     :raises ValueError: An option that does not apply to ``name``, an unknown mode, a
         selection split holding out zero samples, a batch larger than the train split.
     :raises FileNotFoundError: The ImageNet tree or its devkit, or the Imagenette records,
@@ -433,7 +441,7 @@ def load_classification_data(
             )
         return _load_in_memory(
             spec, batch_size, seed, validation_split, normalize, labels, channels, augment,
-            resize, max_samples, max_samples_flag)
+            resize, max_samples, max_samples_flag, eval_batch_size)
     if resize is not None:
         raise ValueError(f"resize applies to in-memory datasets; {spec.name} takes image_size")
     if channels not in (None, 3):
@@ -522,7 +530,7 @@ def _load_in_memory(
         spec: DatasetSpec, batch_size: int, seed: int, validation_split: Optional[float],
         normalize: str, labels: str, channels: Optional[int], augment: Optional[Augment],
         resize: Optional[int], max_samples: Optional[int],
-        max_samples_flag: str = "--max-samples",
+        max_samples_flag: str = "--max-samples", eval_batch_size: int = EVAL_BATCH_SIZE,
 ) -> ClassificationData:
     arrays = load_split_arrays(
         spec.name, seed=seed, validation_split=validation_split, labels=labels,
@@ -547,8 +555,10 @@ def _load_in_memory(
     return ClassificationData(
         train_ds=_train_pipeline(arrays.x_train, arrays.y_train, batch_size, seed, augment,
                                  norm, resizer(resize)),
-        select_ds=_eval_pipeline(arrays.x_select, arrays.y_select, norm, resizer(resize)),
-        test_ds=_eval_pipeline(arrays.x_test, arrays.y_test, norm, resizer(resize)),
+        select_ds=_eval_pipeline(arrays.x_select, arrays.y_select, norm, resizer(resize),
+                                 eval_batch_size),
+        test_ds=_eval_pipeline(arrays.x_test, arrays.y_test, norm, resizer(resize),
+                               eval_batch_size),
         steps_per_epoch=steps,
         n_train=int(len(arrays.x_train)), n_select=int(len(arrays.x_select)),
         n_test=int(len(arrays.x_test)),

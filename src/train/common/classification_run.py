@@ -32,7 +32,7 @@ from dl_techniques.utils.logger import logger
 from train.common import run_summary
 from train.common.callbacks import partial_path, promote_partial
 from train.common.classification_data import EVAL_BATCH_SIZE, ClassificationData
-from train.common.evaluation import validate_model_loading
+from train.common.evaluation import predict_batch_cap, validate_model_loading
 from train.common.run_io import save_training_history_json
 
 # ---------------------------------------------------------------------
@@ -278,6 +278,7 @@ def report_best_weights(
         run_dir: Path, vis_dir: Path, experiment_name: str, model_analysis: bool,
         run_analysis: Callable[..., Any], figures: bool = True,
         analysis_off_hint: str = "--no-model-analysis", name_failed_analyses: bool = False,
+        eval_batch_size: int = EVAL_BATCH_SIZE,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Write the figures and run the analyzer for the BEST (selected) weights.
 
@@ -304,11 +305,15 @@ def report_best_weights(
         seam must then return what ``run_model_analysis`` returns), and a status of
         ``success`` becomes ``partial``. Off by default: the legacy trainers' summaries keep
         their keys and values. With nothing failed the key is absent either way.
+    :param eval_batch_size: Rows per pass of the figures' ``predict`` (default
+        :data:`~train.common.classification_data.EVAL_BATCH_SIZE`, the legacy value). The API
+        passes ``analysis_args.eval_batch_size``: 256 images of a 224 px cliffordnet ask for
+        18 GB, which is how the reporting of the ImageNet gate run died.
     :return: ``(visualizations, analysis)``: the figure record (it carries ``ece``) and
         the analyzer status read back from disk, or the skipped status.
     """
     if figures:
-        logits = model.predict(data.x_fig, batch_size=EVAL_BATCH_SIZE, verbose=0)
+        logits = model.predict(data.x_fig, batch_size=eval_batch_size, verbose=0)
         probs = keras.ops.convert_to_numpy(keras.ops.softmax(logits, axis=-1))
         visualizations = run_summary.write_classification_figures(
             vis_dir, data.x_fig, data.y_fig, probs, data.class_names,
@@ -341,6 +346,7 @@ def finalize_last_epoch(
         model: keras.Model, last_weights: LastEpochWeights, data: ClassificationData,
         run_dir: Path, history: keras.callbacks.History, epochs_run: int,
         evaluate: Evaluate, save: bool = True, atomic: bool = False,
+        eval_batch_size: Optional[int] = None,
 ) -> Tuple[Optional[Dict[str, float]], Optional[bool]]:
     """Restore the last epoch's weights, score them, save them, write the history, reload.
 
@@ -364,6 +370,9 @@ def finalize_last_epoch(
         ``final_model.keras`` with :func:`train.common.callbacks.promote_partial`, so a kill
         inside the save never leaves a torn ``final_model.keras``. ``False`` (the default, the
         legacy trainers) saves in place.
+    :param eval_batch_size: The run's evaluation batch, or ``None`` (the legacy trainers).
+        The load check's two ``predict`` calls run at Keras' 32 unless this is lower
+        (:func:`~train.common.evaluation.predict_batch_cap`).
     :return: ``(test_metrics_final, load_check)``; ``load_check`` is ``None`` when
         ``save`` is ``False``, ``test_metrics_final`` when there is no test split.
     """
@@ -398,8 +407,12 @@ def finalize_last_epoch(
             sample = next(iter(data.select_ds.take(1)))[0].numpy()[:LOAD_CHECK_SAMPLES]
         else:
             sample = data.x_fig[:LOAD_CHECK_SAMPLES]
+        cap = predict_batch_cap(eval_batch_size)
+        # The keyword is passed only when there is one: tests of the legacy trainers patch
+        # `validate_model_loading` with the three-argument signature it always had.
         load_check = bool(validate_model_loading(
-            str(final_path), sample, model.predict(sample, verbose=0)
+            str(final_path), sample, model.predict(sample, batch_size=cap, verbose=0),
+            **({} if cap is None else {"batch_size": cap}),
         ))
     return test_metrics_final, load_check
 

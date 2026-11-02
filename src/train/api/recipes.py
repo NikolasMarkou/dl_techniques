@@ -77,8 +77,9 @@ SMALL_IMAGE_SIZE = 32
 
 #: Keys a recipe may hold. ``model_args`` is the data half of the model-argument
 #: rule, ``loader`` the arguments of ``load_classification_data`` the recipe
-#: decides (read by the data step), and the four group keys are those of the
-#: task config.
+#: decides (read by the data step), and the five group keys are those of the
+#: task config (``analysis_args`` only in a ``per_dataset`` overlay: no family's base recipe
+#: has one, D-040).
 RECIPE_KEYS = (
     "epochs",
     "batch_size",
@@ -86,6 +87,7 @@ RECIPE_KEYS = (
     "transform_args",
     "metric_args",
     "checkpoint_args",
+    "analysis_args",
     "model_args",
     "loader",
     "per_dataset",
@@ -343,7 +345,18 @@ def _cliffordnet_per_dataset(large_image_batch: int) -> Dict[str, Any]:
             for name in ("cifar10", "cifar100")
         },
         **{
-            name: {"batch_size": large_image_batch, "transform_args": {"augment": "none"}}
+            name: {
+                "batch_size": large_image_batch,
+                "transform_args": {"augment": "none"},
+                # DECISION plan-2026-10-31T180033-2faf890a/D-040
+                # The evaluation batch is the batch step 17 measured to TRAIN at, so every
+                # prediction after `fit` (figures, analyzer, load check) is bounded by a
+                # number already shown to fit. Inference needs a fraction of training memory
+                # (nano, real weights, 224 px: 924 MiB at 8, 2,555 at 32, 17,775 at 256).
+                # Do NOT drop this entry: `EVAL_BATCH_SIZE` is 256, which asked 18 GB of a
+                # 24 GB card for the figures and killed the reporting of the gate's nano run.
+                "analysis_args": {"eval_batch_size": large_image_batch},
+            }
             for name in ("imagenet", "imagenette")
         },
     }

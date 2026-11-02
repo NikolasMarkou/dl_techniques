@@ -127,6 +127,7 @@ ROWS: Tuple[Row, ...] = (
     Row("analysis_args.model_analysis", "false", False),
     Row("analysis_args.figures", "false", False),
     Row("analysis_args.conformal_alpha", "0.12", 0.12),
+    Row("analysis_args.eval_batch_size", "24", 24),
     Row("debug_args.terminate_on_nan", "false", False),
     Row("debug_args.smoke", "true", True),
 )

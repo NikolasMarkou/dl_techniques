@@ -47,6 +47,16 @@ class AnalysisConfig:
     ignore_label: Optional[int] = None
     max_pixels: int = 100_000
 
+    # Rows per ``model.predict`` of the analyzer's cached predictions (calibration) and of the
+    # build call of the information-flow analysis. ``None`` passes nothing, so Keras' own
+    # default of 32 applies. A caller sets it BELOW 32 to bound memory for a large input:
+    # 32 images of a 224 px cliffordnet need about 2.5 GB, a figure the run's recipe can lower.
+    # DECISION plan-2026-10-31T180033-2faf890a/D-040
+    # Published in the artifact's `config` block only when it is set (not None), so the
+    # artifact of a run that never set it is byte-for-byte what it was before the field
+    # existed. Do NOT default it to 32: that would add a key to every published artifact.
+    prediction_batch_size: Optional[int] = None
+
     # Calibration options
     calibration_bins: int = 10
     # DECISION plan-2026-10-05-analyzer-audit/F-044

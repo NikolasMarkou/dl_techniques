@@ -44,9 +44,21 @@ life of the run and released when the process ends, a SIGKILL included, so two r
 and a reused pid blocks nobody; the pid in the file is a label for the refusal message.
 
 **Resume**: `resume_interrupted=true` with the same `out` and the same request continues a killed
-run. It is refused for a finished run, another request, other data, a live process holding the
-run, or a torn backup; `devices` may differ. The training data order replays epoch 0's and a half-done epoch is
-trained again (the key's help lists the rest). For folder and CSV data the sidecar holds a fingerprint of the
+run. It is refused for a finished run (one with a `results_summary.json`), another request, other data, a live
+process holding the run, or a torn backup; `devices` and `analysis_args.eval_batch_size` may differ. The training data
+order replays epoch 0's and a half-done epoch is trained again (the key's help lists the rest).
+A run whose **training finished and whose reporting died** (the sidecar says `fit_finished`, there is no summary: the
+figures, the analyzer, the conformal sets or the final evaluation raised, for example out of memory) is not trained
+again: the same command with `resume_interrupted=true` skips `fit` and runs only the reporting, from
+`best_model.keras` (the best weights), `checkpoints/backup/latest.weights.h5` (the last epoch's weights, which were
+only in memory) and `training_log.csv` (read, never written: its sha256 is the same before and after). The last
+epoch's weights are used only when that backup is the epoch-end copy of the epochs that ran (metadata epoch and
+batch 0, optimizer step count epochs times steps); a missing, torn, mid-epoch or older copy is refused with exit 2
+naming `latest.weights.h5`, nothing is changed, and the previous `.bkp` copy is never put in its place, because a
+final model one epoch old would look like the final model. An existing `final_model.keras` is written over. The
+summary says `reporting_resumed: true`, `epoch_times` and `fit_wall_seconds` are null (no epoch ran in that segment),
+`best_checkpoint_max_abs_diff` compares `best_model.keras` with itself, and a second resume is refused. The reason a
+reporting died is an `ERROR` line of `run.log` (exception type and message), and the command exits 1. For folder and CSV data the sidecar holds a fingerprint of the
 files: `data.fingerprint=listing` (the default) hashes every file's relative path, class and size, in listing
 order, and opens no file (a CSV whose rows were reordered splits differently, so it is another listing), so two
 same-sized files swapped, or a pixel edited, go unseen; `data.fingerprint=content` also hashes every
@@ -69,6 +81,7 @@ docstring lists what is unchecked.
 | `analysis_args.model_analysis` | `true` | Runs the full model analyzer once, after training, on the best weights, into `model_analysis/` (`analysis_results.json` and seven PNGs: weights, spectral, information flow, calibration, training dynamics and the summary dashboard). Needs a test split. `false` leaves `analyzer.status` at `skipped` |
 | `analysis_args.epoch_analysis_every` | `0` | `N > 0` runs the data-free epoch analyzer (weights and spectral only) before training into `epoch_analysis/epoch_000/` (the untrained model), after epoch 1 into `epoch_001/`, then at epochs N, 2N, ... into `epoch_NNN/`. `0` is off. A failure on a built model stops the fit, so no snapshot is silently missing. A resumed run does not redo `epoch_000` and `epoch_001` |
 | `analysis_args.conformal_alpha` | `null` | A level strictly between 0 and 1 (0.1 aims at 90% coverage) writes `conformal.json` and `conformal_model.keras` (outputs logits, probabilities and set membership), calibrated on the test split. `null` skips it and the summary's `conformal` is null. A level with no test split is skipped with a note |
+| `analysis_args.eval_batch_size` | `"auto"` | Images per pass of every evaluation and prediction that is not training: the in-memory (CIFAR, MNIST) validation and test splits, the figures' predictions, the model analyzer's predictions (when below its own 32) and the final-model load check. `auto` is the recipe's value, and 256 where the recipe says nothing, so a default run evaluates exactly as before. The cliffordnet recipes on ImageNet and Imagenette set the batch they train at (8 for `cliffordnet`, 16 for `cliffordnet_hier`), because 256 images of 224 px ask 18 GB. ImageNet, Imagenette, folder and csv splits are evaluated at the training `batch_size` and ignore it. It changes no weight, and it may differ when a run is resumed |
 | `checkpoint_args.backup_every_steps` | `null` | `N >= 2` (and below the steps of an epoch) also writes the resume backup after every N-th batch inside an epoch, so a killed epoch loses at most N batches of weights; `null` backs up at each epoch end only. A resume trains the killed epoch again from its first batch on the weights of the last copy and puts the optimizer's step count back to the epoch's start. Each copy writes the weights and optimizer state twice (the previous copy is kept); the cost per save is in the backup table of the ImageNet section |
 | `logger_args.tensorboard` | `{}` | `{}` writes TensorBoard event files into `tensorboard/` (`train/` and `validation/`); `null` turns them off; a dict with keys is refused, because no TensorBoard option is wired |
 
@@ -290,9 +303,17 @@ What the table settles, in the recipes:
   form `--image-size 128 --batch-size 32` is `transform_args.image_size=128 batch_size=32` here, and it was measured: `cliffordnet/nano` fits at 32 there
   (peak 14,315 MiB, 174 images per second against 60 at 224 px), and `cliffordnet/lite` fits at 16. A parity run against the
   legacy trainer sets both keys itself.
+* **The evaluation batch is a recipe key too.** The training batches above leave the passes AFTER `fit` at the module constant
+  256 images, and 256 images of 224 px asked 18 GB of the same card: the gate's `cliffordnet/nano` trained and then died in the
+  figures' `predict`. `analysis_args.eval_batch_size` is now the batch of those passes; the `cliffordnet` and
+  `cliffordnet_hier` ImageNet and Imagenette recipes set it to the batch they train at (8 and 16). Measured with that run's
+  weights, 512 images, allocator peak: 924 MiB at batch 8, 1,468 at 16, 2,555 at 32, 5,043 at 64, 17,775 at 256; the real
+  reporting pass of that run (20,000 test images, figures, analyzer, final evaluation, load check) at batch 8 peaked at
+  4,681.5 MiB. `cliffordnet` on CIFAR at 224 px is not reachable: `transform_args.image_size` is refused for in-memory data.
 
 Not covered by a recipe, and measured: `resnet/resnet50` on ImageNet completes at the recipe's batch 256 but with a garbage
-collection and the device at 22,591 MiB (no margin); batch 128 fits (peak 10,579 MiB), with `optim_args.lr=0.05` by the same
+collection and the device at 22,591 MiB (no margin), and a bounded whole run of it (`data.max_samples=2560`, one epoch)
+also reported to exit 0 with the evaluation batch left at 256 (the figures' `predict` alone peaks at 4,487 MiB); batch 128 fits (peak 10,579 MiB), with `optim_args.lr=0.05` by the same
 linear rule. `cliffordnet/cn_64_5` does not fit at 8 or 4 on Imagenette and fits at 2 (peak 18,166 MiB); it was not run on
 ImageNet (the tensors are the same but for the 1,000-way head). A recipe is per family and `per_variant` applies to every
 dataset, so changing the batch for these two would change their CIFAR recipes; they are left, and

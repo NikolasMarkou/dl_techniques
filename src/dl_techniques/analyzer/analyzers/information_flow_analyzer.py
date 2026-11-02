@@ -150,7 +150,8 @@ class InformationFlowAnalyzer(BaseAnalyzer):
         for model_name, model in self.models.items():
             if not model.built:
                 try:
-                    model.predict(x_sample, verbose=0)
+                    model.predict(
+                        x_sample, batch_size=self.config.prediction_batch_size, verbose=0)
                     logger.info(f"Built model '{model_name}' for analysis.")
                 except Exception as e:
                     logger.error(
@@ -319,7 +320,8 @@ class InformationFlowAnalyzer(BaseAnalyzer):
         for model_name, model in self.models.items():
             if not model.built:
                 try:
-                    model.predict(x_sample, verbose=0)
+                    model.predict(
+                        x_sample, batch_size=self.config.prediction_batch_size, verbose=0)
                 except Exception as e:
                     # The per-model loop reports and skips this model; the budget
                     # pre-pass simply does not get a vote for it.

@@ -63,7 +63,7 @@ Interface contract
         the train and the test split, or two csv labels of one integer value (``01`` and
         ``1``).
 
-``load_image_data(data, *, batch_size, seed, augment, augment_from_mean, normalize, image_size, loader)``
+``load_image_data(data, *, batch_size, seed, augment, augment_from_mean, normalize, image_size, loader, eval_batch_size)``
     :param data: any of the three configs.
     :param batch_size: batch size of the three pipelines.
     :param seed: seed of the split, the shuffle and the augmentation.
@@ -79,6 +79,9 @@ Interface contract
     :param loader: the recipe's ``loader`` mapping, whose keys are arguments of
         ``load_classification_data`` the family decides (``channels``,
         ``imagenet_augment_color``); file data takes none.
+    :param eval_batch_size: ``None`` (the loader's default, 256) or the rows per batch of the
+        selection and test splits of the in-memory datasets (``analysis_args.eval_batch_size``).
+        ImageNet, Imagenette and file data batch those splits at ``batch_size`` and ignore it.
     :return: the ``ClassificationData`` of the shared loader.
     :raises ConfigError: for a ``loader`` key that is not in :data:`LOADER_KEYS`
         (a typo in a recipe) or that file data cannot take, or an option the
@@ -538,8 +541,14 @@ def load_builtin_data(
     normalize: str,
     image_size: int,
     loader: Optional[Mapping[str, Any]] = None,
+    eval_batch_size: Optional[int] = None,
 ) -> Any:
-    """Load ``data`` through the shared ingestion path; see the module contract."""
+    """Load ``data`` through the shared ingestion path; see the module contract.
+
+    :param eval_batch_size: rows per batch of the selection and test splits of the in-memory
+        datasets (``analysis_args.eval_batch_size``); ``None`` keeps the loader's default. The
+        other datasets batch those splits at ``batch_size`` and ignore it.
+    """
     from train.common.classification_data import DEFAULT_EVAL_SAMPLES, load_classification_data
 
     options = dict(loader or {})
@@ -563,6 +572,8 @@ def load_builtin_data(
         )
     else:
         extra["validation_split"] = data.validation_split
+    if data.dataset in IN_MEMORY_DATASETS and eval_batch_size is not None:
+        extra["eval_batch_size"] = eval_batch_size
     return load_classification_data(
         data.dataset,
         batch_size=batch_size,
@@ -681,6 +692,7 @@ def load_image_data(
     image_size: int,
     loader: Optional[Mapping[str, Any]] = None,
     augment_from_mean: Any = None,
+    eval_batch_size: Optional[int] = None,
 ) -> Any:
     """Load any data config through the shared ingestion path; see the module contract."""
     if data.format == "builtin":
@@ -697,6 +709,7 @@ def load_image_data(
             normalize=normalize,
             image_size=image_size,
             loader=loader,
+            eval_batch_size=eval_batch_size,
         )
     return load_file_data(
         data,

@@ -562,10 +562,26 @@ class AnalysisArgs(StrictConfig):
             "help": "miscoverage level in (0, 1) for conformal prediction sets; null skips it"
         },
     )
+    eval_batch_size: Auto[int] = dataclasses.field(
+        default=AUTO,
+        metadata={
+            "help": "images per pass of every evaluation and prediction that is not training: "
+            "the in-memory (CIFAR, MNIST) validation and test splits, the figures' predictions, "
+            "the model analyzer's predictions (when below its own 32) and the final-model load "
+            "check. auto is the recipe's value, and 256 where the recipe says nothing; the "
+            "cliffordnet recipes on ImageNet and Imagenette set the batch they train at (8 or "
+            "16), because 256 images at 224 px ask for 18 GB. ImageNet, Imagenette, folder and "
+            "csv splits are evaluated at the training batch_size and ignore it. It changes no "
+            "weight; it can change an evaluation number in the last digits"
+        },
+    )
 
     def problems(self, prefix: str) -> List[str]:
-        """Name an analysis period below 0 and a miscoverage level outside (0, 1)."""
+        """Name an analysis period below 0, a miscoverage level outside (0, 1), a batch below 1."""
         lines: List[str] = []
+        batch = self.eval_batch_size
+        if not _is_auto(batch) and (isinstance(batch, bool) or batch < 1):
+            lines.append(_range_line(prefix, "eval_batch_size", "an int >= 1", batch))
         if self.epoch_analysis_every < 0:
             lines.append(
                 _range_line(prefix, "epoch_analysis_every", "an int >= 0 (0 is off)", self.epoch_analysis_every)
@@ -576,6 +592,35 @@ class AnalysisArgs(StrictConfig):
                 _range_line(prefix, "conformal_alpha", "null or a level strictly between 0 and 1", alpha)
             )
         return lines
+
+    def resolve_auto(self, context: AutoContext) -> "AnalysisArgs":
+        """Fill ``eval_batch_size``: the recipe's ``analysis_args`` entry, else the shared 256.
+
+        The fallback is :data:`train.common.classification_data.EVAL_BATCH_SIZE`, the constant
+        the in-memory pipelines and the figure prediction used before the key existed, so a
+        run whose recipe says nothing evaluates exactly as it did.
+        """
+        # DECISION plan-2026-10-31T180033-2faf890a/D-040
+        # The one source of the fallback is the legacy constant, imported here and NOT copied:
+        # a second 256 would have to be kept equal by hand. Do NOT make ``auto`` the training
+        # batch: CIFAR trains at 128 and has always evaluated at 256, and a different batch can
+        # move an evaluation number in the last digits (the golden would no longer be exact).
+        from train.common.classification_data import EVAL_BATCH_SIZE
+
+        found = _recipe_values(self, context, "analysis_args")
+        if not _is_auto(self.eval_batch_size):
+            return self
+        value = found.get("eval_batch_size", EVAL_BATCH_SIZE)
+        # Not `_with_values`: it validates the WHOLE group again and words any error as the
+        # recipe's, so a hand-built group with a bad `conformal_alpha` would be reported as
+        # "Family recipe for 'analysis_args'" (test_a_bad_request_is_refused_before_the_run_is_claimed).
+        # Only the recipe's own value is checked here.
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ConfigValidationError([
+                "Family recipe for 'analysis_args': "
+                + _range_line("", "eval_batch_size", "an int >= 1", value)
+            ])
+        return dataclasses.replace(self, eval_batch_size=value)
 
 
 @dataclasses.dataclass(frozen=True)

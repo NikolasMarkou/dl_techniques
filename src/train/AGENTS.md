@@ -472,6 +472,7 @@ per-model scripts (usage, keys, run directory, resume, `predict`, `export`, exit
 | `analysis_args.model_analysis` | `true` | the task's `evaluate_and_report`, which calls `TaskTrainer.run_analysis` through `classification_run.report_best_weights` |
 | `analysis_args.epoch_analysis_every` | `0` | `TaskTrainer._callbacks`: `create_callbacks(include_analyzer=N > 0, analyzer_epoch_frequency=max(N, 1), analyzer_start_epoch=max(N, 1))`; a resume passes `analyzer_on_train_begin=False, analyzer_first_epoch=False` |
 | `analysis_args.conformal_alpha` | `null` | the task's `evaluate_and_report`, `train.common.conformal.run_conformal` |
+| `analysis_args.eval_batch_size` | `"auto"` | `AnalysisArgs.resolve_auto` (the recipe's `analysis_args` entry, else `EVAL_BATCH_SIZE`); the task's `build_data` (in-memory splits), `evaluate_and_report` (`report_best_weights` figures, `finalize_last_epoch` load check) and `TaskTrainer.run_analysis` (`predict_batch_cap`) |
 | `logger_args.tensorboard` | `{}` | `TaskTrainer._callbacks` (`include_tensorboard=... is not None`); `LoggerArgs.problems` refuses a non-empty dict |
 
 The hooks a task author touches for these outputs (all on `TaskTrainer`, documented at their definitions

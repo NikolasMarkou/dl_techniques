@@ -459,6 +459,40 @@ def _inspect_copy(
     )
 
 
+def final_copy_problem(
+        backup_dir: PathLike, epochs_run: int, steps_per_epoch: int
+) -> Optional[str]:
+    """Why the LATEST backup copy is not the last epoch's weights, or ``None`` when it is.
+
+    Interface contract: ``backup_dir`` is the run's ``BackupAndRestore`` directory,
+    ``epochs_run`` the number of epochs that trained and ``steps_per_epoch`` the batches per
+    epoch. Pure file work, no TensorFlow, and READ ONLY (``settle_backup`` copies the previous
+    pair over the latest; this never does, because a reporting pass that evaluated the previous
+    pair would call earlier weights the final ones). The latest copy is the last epoch's
+    weights exactly when its metadata is an epoch-end copy of ``epochs_run`` (``epoch ==
+    epochs_run``, ``batch == 0``) and its optimizer took ``epochs_run * steps_per_epoch`` steps
+    (a loss-scaling optimizer may have taken fewer, never more: :func:`_inspect_copy`).
+
+    :return: ``None``, or a one-line reason naming the file.
+    """
+    # DECISION plan-2026-10-31T180033-2faf890a/D-041
+    # The LATEST copy or nothing. Do NOT fall back to the previous pair as `settle_backup` does
+    # and do NOT call `settle_backup` for a finished fit: its fallback copies the `.bkp` pair over
+    # the latest, and a reporting that evaluated it would call an earlier epoch's weights the final
+    # model. A reporting-only resume that cannot prove the latest copy is the last epoch's is refused.
+    backup_dir = Path(backup_dir)
+    epoch, problem = _inspect_copy(backup_dir, False, steps_per_epoch)
+    if problem is not None:
+        return problem
+    epoch, batch = read_backup_position(backup_dir)
+    if epoch != epochs_run or batch != 0:
+        return (
+            f"{BACKUP_METADATA_NAME} records epoch {epoch} batch {batch}, not the end of "
+            f"epoch {epochs_run} (batch 0)"
+        )
+    return None
+
+
 def _copy_atomically(source: Path, target: Path) -> None:
     """Copy ``source`` over ``target`` through a temp file in ``target``'s directory and ``os.replace``."""
     temp = target.with_name(target.name + ".restoring")

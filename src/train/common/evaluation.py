@@ -27,6 +27,38 @@ from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
 
 
 # ---------------------------------------------------------------------
+# The prediction batch of a reporting pass
+# ---------------------------------------------------------------------
+
+#: The batch Keras ``predict`` uses when none is passed. The analyzer and the load check of
+#: ``final_model.keras`` call ``predict`` without one, so this is the batch they have always
+#: run at; :func:`predict_batch_cap` leaves it alone unless the run asks for fewer.
+KERAS_PREDICT_BATCH_SIZE = 32
+
+
+def predict_batch_cap(eval_batch_size: Optional[int]) -> Optional[int]:
+    """The ``batch_size`` for a ``predict`` that has always run at Keras' default of 32.
+
+    Interface contract: ``eval_batch_size`` is the run's ``analysis_args.eval_batch_size`` (an
+    int >= 1) or ``None`` for "no request". Pure; no TensorFlow call.
+
+    :param eval_batch_size: the evaluation batch the run asks for, or ``None``.
+    :return: ``eval_batch_size`` when it is BELOW :data:`KERAS_PREDICT_BATCH_SIZE`, else
+        ``None`` (pass nothing: Keras' own 32, so a run that asks for 256 or nothing predicts
+        exactly as it did, and its numbers cannot change).
+    """
+    # DECISION plan-2026-10-31T180033-2faf890a/D-040
+    # A CAP, not a copy of the evaluation batch. Do NOT pass ``eval_batch_size`` through as it
+    # is: the analyzer and the load check predicted at 32 before the key existed, a default
+    # recipe's 256 would make them predict at 256 (a different batch can move the last digits
+    # of a probability, and the golden would stop being exact), and 256 images of a 224 px
+    # cliffordnet is the 18 GB that broke the reporting of the gate run.
+    if eval_batch_size is not None and eval_batch_size < KERAS_PREDICT_BATCH_SIZE:
+        return int(eval_batch_size)
+    return None
+
+
+# ---------------------------------------------------------------------
 # The test split, once
 # ---------------------------------------------------------------------
 
@@ -52,6 +84,7 @@ def validate_model_loading(
         expected_output: np.ndarray,
         custom_objects: Optional[Dict[str, Any]] = None,
         tolerance: float = 1e-5,
+        batch_size: Optional[int] = None,
 ) -> bool:
     """
     Validate that a saved model loads correctly and produces expected outputs.
@@ -68,6 +101,9 @@ def validate_model_loading(
         Custom objects dict for model loading.
     tolerance : float
         Absolute tolerance for output comparison.
+    batch_size : Optional[int]
+        Rows per ``predict`` pass of the reloaded model; ``None`` is Keras' default
+        (:data:`KERAS_PREDICT_BATCH_SIZE`).
 
     Returns
     -------
@@ -96,7 +132,7 @@ def validate_model_loading(
     if isinstance(test_sample, tf.Tensor):
         test_sample = test_sample.numpy()
 
-    loaded_output = loaded_model.predict(test_sample, verbose=0)
+    loaded_output = loaded_model.predict(test_sample, batch_size=batch_size, verbose=0)
 
     if isinstance(expected_output, dict) or isinstance(loaded_output, dict):
         if not (isinstance(expected_output, dict) and isinstance(loaded_output, dict)):
@@ -583,6 +619,7 @@ def analysis_config_for(
         ignore_label: Optional[int] = None,
         sample: Optional[Any] = None,
         random_state: Optional[int] = None,
+        prediction_batch_size: Optional[int] = None,
 ) -> Optional[AnalysisConfig]:
     """The analyzer configuration a model needs beyond the default, or ``None``.
 
@@ -594,6 +631,11 @@ def analysis_config_for(
             with no static output shape, a subclassed one, whose output rank is then taken
             from one real call.
         random_state: The run's seed, or ``None`` (the legacy, unseeded configuration).
+        prediction_batch_size: ``AnalysisConfig.prediction_batch_size`` (see
+            :func:`predict_batch_cap`), or ``None`` for the analyzer's own batch. A value
+            needs a configuration to live in, so it forces the stock one just as a seed does.
+            Read on the rank-2 path only: a per-pixel model predicts in the analyzer's own
+            ``PER_PIXEL_BATCH_SIZE`` slices and this value is not passed there.
 
     Returns:
         With ``random_state`` ``None``: ``None`` for a model that is not per-pixel (output
@@ -605,7 +647,9 @@ def analysis_config_for(
         pixel is dropped before calibration) and the seed.
     """
     if not ModelAnalyzer.outputs_per_pixel(model, sample=sample):
-        return None if random_state is None else stock_analysis_config(random_state)
+        if random_state is None and prediction_batch_size is None:
+            return None
+        return stock_analysis_config(random_state, prediction_batch_size=prediction_batch_size)
     return stock_analysis_config(
         random_state, memory_limit_mb=PER_PIXEL_MEMORY_LIMIT_MB, ignore_label=ignore_label)
 

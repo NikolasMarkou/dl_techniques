@@ -96,16 +96,19 @@ def test_a_second_process_on_a_live_run_is_told_a_live_process_holds_it(tmp_path
         finish(holder)
 
 
-@pytest.mark.parametrize(
-    "build, expected",
-    [(first_epoch_run, FIRST_EPOCH), (reporting_run, REPORTING)],
-    ids=["first_epoch_window", "reporting_window"],
-)
-def test_the_same_run_with_no_holder_keeps_its_own_refusal(tmp_path, build, expected):
+def test_the_same_first_epoch_run_with_no_holder_keeps_its_own_refusal(tmp_path):
     """The control: asking the lock first changes nothing when nobody holds it."""
-    run_dir = build(tmp_path / "run")
-    with pytest.raises(ConfigError, match=expected):
+    run_dir = first_epoch_run(tmp_path / "run")
+    with pytest.raises(ConfigError, match=FIRST_EPOCH):
         open_run(run_dir, resume=True)
+
+
+def test_the_same_reporting_run_with_no_holder_is_opened_for_a_reporting_resume(tmp_path):
+    """D-041: with nobody holding the lock a run that crashed while reporting is no longer
+    refused, so the live-process refusal above is the only thing that stops a second process
+    from reporting over a run that is still reporting."""
+    run_dir = reporting_run(tmp_path / "run")
+    assert open_run(run_dir, resume=True) == run_dir
 
 
 def test_a_resume_of_a_directory_that_does_not_exist_is_still_the_missing_backup_refusal(tmp_path):

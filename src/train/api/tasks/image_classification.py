@@ -44,7 +44,8 @@ Interface contract
         an int in ``[0, 2**32 - 1]``.
     :param precision: ``"float32"``, ``"mixed_float16"`` or ``"mixed_bfloat16"``.
     :param resume_interrupted: continue a killed run of the same ``out`` with the same
-        request (only ``resume_interrupted``, ``out`` and ``devices`` may differ). Rows, the
+        request (only ``resume_interrupted``, ``out``, ``devices`` and ``analysis_args.eval_batch_size``
+        may differ). Rows, the
         best checkpoint, early-stopping and ``ReduceLROnPlateau`` state, the learning rate
         and the history are kept. Limits: the training data order replays the order of
         epoch 0; an epoch killed midway is trained again from its start (on the weights of the
@@ -53,7 +54,13 @@ Interface contract
         start); a kill between the
         best checkpoint's save and the backup can leave ``best_model.keras`` one epoch LATER
         than the resumed state's best (the epoch that is then trained again; never an earlier
-        one). A finished run, a run with no epoch left, one with ``save_best`` false, one
+        one). A run whose training finished and whose reporting died (no
+        ``results_summary.json``, ``fit_finished``) is not trained again: only the reporting
+        runs, from ``best_model.keras``, ``checkpoints/backup/latest.weights.h5`` and
+        ``training_log.csv`` (which is not written); it is refused if the last epoch's weights
+        cannot be shown to be the backup's latest epoch-end copy. ``analysis_args.eval_batch_size``
+        may also differ from the earlier request. A finished run (with a summary), a run with no
+        epoch left that never finished ``fit``, one with ``save_best`` false, one
         whose data (class names, statistics, split sizes) is no longer the data it started
         with, one a live process holds (``run.lock``) and one whose backup has no sound copy
         are refused (exit 2).
@@ -166,8 +173,13 @@ class ImageClassificationConfig(StrictConfig):
             "weights of the last backup); the learning rate, ReduceLROnPlateau and early stopping come back; a kill "
             "between the best checkpoint's save and the backup can leave best_model.keras one "
             "epoch LATER than the resumed state's best (the epoch that is then trained again; "
-            "never an earlier one); refused: a finished run, other data than the run's, a live "
-            "process holding the run, a backup neither of whose copies is sound"
+            "never an earlier one); a run whose training finished and whose reporting died "
+            "(fit_finished, no results_summary.json) is not trained again: only the reporting "
+            "runs, from best_model.keras, checkpoints/backup/latest.weights.h5 and "
+            "training_log.csv (not written), and it is refused if that backup is not the last "
+            "epoch's; analysis_args.eval_batch_size may differ; refused: a finished run (with "
+            "a summary), other data than the run's, a live process holding the run, a backup "
+            "neither of whose copies is sound"
         },
     )
     checkpoint: Optional[str] = dataclasses.field(
@@ -246,6 +258,7 @@ class ImageClassificationTrainer(TaskTrainer):
             normalize=transform_cfg.normalize,
             image_size=transform_cfg.image_size,
             loader=context.defaults.get("loader"),
+            eval_batch_size=config.analysis_args.eval_batch_size,
         )
 
     def build_model(
@@ -533,6 +546,7 @@ class ImageClassificationTrainer(TaskTrainer):
                 if analysis_cfg.model_analysis
                 else "analysis_args.model_analysis=false"
             ),
+            eval_batch_size=analysis_cfg.eval_batch_size,
         )
         # The last epoch's weights replace the best ones here.
         test_final, load_check = classification_run.finalize_last_epoch(
@@ -545,6 +559,7 @@ class ImageClassificationTrainer(TaskTrainer):
             evaluate=classification_run.evaluate_dict,
             save=checkpoint_cfg.save_last,
             atomic=True,
+            eval_batch_size=analysis_cfg.eval_batch_size,
         )
         return Evaluation(
             test_metrics_best=test_best,

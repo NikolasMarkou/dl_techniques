@@ -395,16 +395,20 @@ def test_a_finished_run_is_refused_with_exit_2_and_left_alone(world, whole, tmp_
     assert snapshot(run_dir) == before
 
 
-def test_a_run_whose_fit_returned_is_refused_though_it_has_no_summary(world, whole, tmp_path, capsys):
-    """An early-stopped run that crashed while reporting: only ``fit_finished`` says so (D-021)."""
+def test_a_run_whose_fit_returned_and_has_no_summary_is_reported_again_not_refused(
+    world, whole, tmp_path
+):
+    """An early-stopped run whose reporting died: only ``fit_finished`` says so. D-021 refused it
+    (the training was lost); D-041 resumes it to report (``test_a_crashed_reporting_is_resumed.py``
+    has the arms). The CSV is the training's, byte for byte."""
     _, whole_dir = whole
     run_dir = tmp_path / "crashed_after_fit"
     shutil.copytree(whole_dir, run_dir)
     (run_dir / "results_summary.json").unlink()
-    before = snapshot(run_dir)
-    assert resume_by_cli(run_dir) == 2
-    assert "fit_finished" in capsys.readouterr().err
-    assert snapshot(run_dir) == before
+    csv_before = sha(run_dir / "training_log.csv")
+    assert resume_by_cli(run_dir) == 0
+    assert json.loads((run_dir / "results_summary.json").read_text())["reporting_resumed"] is True
+    assert sha(run_dir / "training_log.csv") == csv_before
 
 
 def test_a_changed_request_is_refused_naming_the_key(world, killed, tmp_path, capsys):
@@ -423,14 +427,20 @@ def test_a_changed_request_is_refused_naming_the_key(world, killed, tmp_path, ca
     assert snapshot(run_dir) == before
 
 
-def test_a_resume_compares_every_key_but_the_three_it_names():
+def test_a_resume_compares_every_key_but_the_four_it_names():
     from train.api.run_dir import RESUME_UNCOMPARED_KEYS
 
-    assert RESUME_UNCOMPARED_KEYS == ("resume_interrupted", "out", "devices")
-    earlier = {"out": "x", "resume_interrupted": False, "devices": 0, "seed": 42, "epochs": 3}
-    moved = {"out": "y", "resume_interrupted": True, "devices": 1, "seed": 42, "epochs": 3}
-    assert request_differences(earlier, moved) == []
+    assert RESUME_UNCOMPARED_KEYS == (
+        "resume_interrupted", "out", "devices", "analysis_args.eval_batch_size")
+    earlier = {"out": "x", "resume_interrupted": False, "devices": 0, "seed": 42, "epochs": 3,
+               "analysis_args": {"figures": True}}
+    moved = {"out": "y", "resume_interrupted": True, "devices": 1, "seed": 42, "epochs": 3,
+             "analysis_args": {"figures": True, "eval_batch_size": 8}}
+    assert request_differences(earlier, moved) == []  # the fourth key may be absent earlier (D-040)
     assert request_differences(earlier, {**moved, "seed": 43}) == ["seed: 42 -> 43"]
+    # ... and only that key of its group: a sibling is a different run
+    assert request_differences(earlier, {**moved, "analysis_args": {"figures": False}}) == [
+        "analysis_args.figures: True -> False"]
 
 
 def test_resume_ignores_out_and_the_flag_and_reads_json_normal_form():

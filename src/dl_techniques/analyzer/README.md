@@ -94,6 +94,7 @@ attributes.
 | `json_include_raw_esds` | `False` | emit `spectral_esds` / `spectral_rand_esds` (the full per-layer eigenvalue spectra) into the artifact — very bulky |
 | `max_layers_heatmap` / `max_layers_info_flow` | `12` / `8` | plot truncation |
 | `pareto_analysis_threshold` | `2` | minimum models for Pareto plots |
+| `prediction_batch_size` | `None` | rows per `model.predict` of the cached predictions (calibration) and of the build call of the information-flow analysis; `None` passes nothing, so Keras' own default of 32 applies. Set it BELOW 32 to bound memory for a large input (32 images of a 224 px `cliffordnet/nano` need about 2.5 GB, 8 need 0.9 GB, measured). It is a batch, not a sample count: a smaller one gives the same function of the same images. It reaches the published `config` block only when it is set, so an artifact of a run that never set it is the artifact it always was. The per-pixel path predicts in its own slices of 16 and does not read it |
 | `memory_limit_mb` | `2048` | budget for the activations `InformationFlowAnalyzer` holds at once; `None` is explicitly unbounded. The resulting batch is shared by every model in the run (the minimum over them) — see the information-flow section for why |
 | `random_state` | `None` | seeds every stochastic site the analyzer reaches (data subsampling, spectral randomization, the goodness-of-fit bootstrap); `None` is unseeded and NOT reproducible. It does **not** reach `_power_iteration` — see [notes](#notes) |
 | `verbose` | `True` | |
