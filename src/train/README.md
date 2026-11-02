@@ -132,7 +132,20 @@ is the required end-of-run sequence that calls them. `src/train/AGENTS.md` has t
 
 **Predict**: `python -m train predict model=<run dir or .keras> data=<image or directory> out=pred.json`
 writes a new JSON list of `{"path", "labels", "scores"}`, every class best first. A directory is
-searched recursively. `out` must not exist. Through the Python `Predictor`, a colour array or PIL image given to a
+searched recursively. `out` must not exist. **On ImageNet the `labels` are WordNet ids** such as `n01806143`, not
+words, and so are the `class_names` of `task.json`. The loader sorts the 1,000 ids and takes the position as the class
+index; the devkit's `meta.mat` maps an id to its words:
+
+```python
+from scipy.io import loadmat
+rows = [r for r in loadmat("<imagenet_root>/devkit/meta.mat", squeeze_me=True)["synsets"] if int(r["num_children"]) == 0]
+words = {str(r["WNID"]): str(r["words"]) for r in rows}      # "n02012849" -> "crane"
+```
+
+The names stay ids because the words repeat, and the predictor refuses a record whose class names repeat (`'class_names'
+repeats ...`). Measured on the real devkit (`meta.mat`, 1,000 leaf synsets): 998 distinct first words; `crane` is two classes
+(`n02012849`, the bird, and `n03126707`, the machine; their whole `words` strings are equal too) and `maillot` is two
+(`n03710637` and `n03710721`, whose strings differ: `maillot` and `maillot, tank suit`). Use the id as the key. Through the Python `Predictor`, a colour array or PIL image given to a
 grey model (MNIST) is made grey on its 8-bit pixels with the loader's own rule, `(9797 R + 19234 G + 3737 B) >> 15`
 (libpng's weights as `tf.io.decode_image(channels=1)` uses them), so a PNG gives the loader's pixels exactly (checked
 within 1e-5, measured 0). **Measured limit:** a JPEG given as a path is read by the loader's decoder and is exact, but
@@ -166,7 +179,14 @@ unchanged: 1e-4 of the logits' scale, and a file that really differs is still re
 computation from the CPU's**: it differs from the CPU's by about 1e-3 in the logits. Measured on the ImageNet gate's `cliffordnet/nano`, the same weights run on the GPU and on the CPU: up to 1.1e-3 on logits of scale 3.6 for 16 real validation images (5.8e-4 on scale 3.0 for 16 noise images), argmaxes equal on all 16 of each. No export format changes that.
 
 **Exit codes**: 0 success; 2 a request that cannot be honoured (bad key, value, path, data,
-resume), found before TensorFlow loads when it can be; 1 a run that finished without reaching its
+resume), found before the run directory is claimed whenever it can be seen without loading the data (the few that need
+the loaded data, such as a `checkpoint_args.backup_every_steps` not below the steps of an epoch, come after the claim and
+say so), and before TensorFlow is imported only for the checks the command line makes itself (an unknown key, a value out
+of range, a missing path of `predict` or `export`: 0.04 s). Everything that needs the model name or the data comes after
+the import, because naming a model imports its family's module and that imports TensorFlow (measured, one run each, no
+GPU: a missing `data.imagenet_root` exits 2 after 3.2 s, a bad `metric_args.watch_metric` after 4.0 s, a resume of a missing
+run after 3.9 s). Checking the model name without importing the family was judged not worth the registry change. 1 a run
+that finished without reaching its
 success threshold, or any unexpected failure (a traceback). `data.dataset=imagenet` and `imagenette` look at
 the disk before the run directory is made, with path tests only: a missing `data.imagenet_root`, a root
 without `train/` or `val/`, a devkit (`data.devkit_dir`, or `devkit/` under the root) without `meta.mat` or
@@ -342,7 +362,10 @@ and a run of E epochs takes (validation not counted):
 So the 50-epoch ImageNet recipe (`vit`) takes about a week, and the 100-epoch ones (`resnet`, `convnext`) about two. A
 killed epoch is lost: the run goes back to the start of the epoch it was in (`resume_interrupted=true` trains it again), and
 at these rates an epoch is hours; `checkpoint_args.backup_every_steps` bounds the loss (next section). A shorter trial is
-`data.max_samples` (it caps the train pool and the test split; the selection set is `data.holdout_per_class` images per class).
+`data.max_samples` (it caps the train pool and the test split; it does NOT cap the selection set, which is
+`data.holdout_per_class` images per class, 10 by default, so 10,000 images of the 1,000 classes whatever the cap: the bounded
+gate with `data.max_samples=20000` trained on 20,000 images, selected on 10,000 and tested on 20,000 official validation images
+(`fit_state.json` `data_counts`: `n_train` 20000, `n_select` 10000, `n_test` 20000); set `data.holdout_per_class` to shrink it).
 
 **Backing up inside an epoch.** `checkpoint_args.backup_every_steps` set to N (an integer from 2 to one below the steps of an epoch;
 `null`, the default, backs up at each epoch end only, as before) also writes the resume backup (`checkpoints/backup/`, the
