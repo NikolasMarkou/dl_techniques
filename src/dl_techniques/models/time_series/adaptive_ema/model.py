@@ -36,7 +36,7 @@ from typing import Any, Dict, Optional, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.time_series.ema_layer import ExponentialMovingAverage
-from dl_techniques.layers.heads.time_series.quantile_head_variable_io import QuantileSequenceHead
+from dl_techniques.layers.heads.time_series import TimeSeriesTaskType, create_time_series_head
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -215,7 +215,8 @@ class AdaptiveEMASlopeFilterModel(keras.Model):
                 activation="gelu",
                 name="slope_featurizer",
             )
-            self.quantile_head = QuantileSequenceHead(
+            self.quantile_head = create_time_series_head(
+                TimeSeriesTaskType.QUANTILE_SEQUENCE,
                 num_quantiles=quantile_head_config["num_quantiles"],
                 dropout_rate=quantile_head_config.get("dropout_rate", 0.1),
                 enforce_monotonicity=quantile_head_config.get(

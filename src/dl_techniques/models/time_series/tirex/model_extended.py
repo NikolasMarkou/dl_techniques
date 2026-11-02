@@ -48,7 +48,7 @@ from typing import Optional, List, Any, Dict, Tuple
 # ---------------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.heads.time_series.quantile_head_variable_io import QuantileSequenceHead
+from dl_techniques.layers.heads.time_series import TimeSeriesTaskType, create_time_series_head
 
 from .model import BlockType, DEFAULT_QUANTILES, TiRexCore
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -134,7 +134,8 @@ class TiRexExtended(TiRexCore):
         # Learnable query tokens are created in build() — see the D-037 anchor there.
         self.query_tokens = None
 
-        self.quantile_head = QuantileSequenceHead(
+        self.quantile_head = create_time_series_head(
+            TimeSeriesTaskType.QUANTILE_SEQUENCE,
             num_quantiles=len(self.quantile_levels),
             # Capped rather than the global dropout_rate directly.
             dropout_rate=min(self.dropout_rate, 0.1),

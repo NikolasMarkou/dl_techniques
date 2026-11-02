@@ -42,7 +42,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.time_series.prism_blocks import PRISMLayer, PRISMTimeTree
-from dl_techniques.layers.heads.time_series.quantile_head_fixed_io import QuantileHead
+from dl_techniques.layers.heads.time_series import TimeSeriesTaskType, create_time_series_head
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -397,7 +397,8 @@ class PRISM(keras.Model, ForecastMixin):
 
         if use_quantile_head:
             # dropout_rate=0.0: dropout is already applied by head_dropout above.
-            self.forecast_head = QuantileHead(
+            self.forecast_head = create_time_series_head(
+                TimeSeriesTaskType.QUANTILE_FORECAST,
                 num_quantiles=self.num_quantiles,
                 output_length=self.num_features,
                 dropout_rate=0.0,

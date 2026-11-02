@@ -50,7 +50,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.time_series.xlstm_blocks import mLSTMBlock, sLSTMBlock
-from dl_techniques.layers.heads.time_series.quantile_head_fixed_io import QuantileHead
+from dl_techniques.layers.heads.time_series import TimeSeriesTaskType, create_time_series_head
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -327,7 +327,8 @@ class xLSTMForecaster(keras.Model, ForecastMixin):
         )
 
         if self.use_quantile_head:
-            self.head = QuantileHead(
+            self.head = create_time_series_head(
+                TimeSeriesTaskType.QUANTILE_FORECAST,
                 num_quantiles=len(self.quantile_levels),
                 output_length=self.prediction_length,
                 dropout_rate=min(self.dropout_rate, 0.1),

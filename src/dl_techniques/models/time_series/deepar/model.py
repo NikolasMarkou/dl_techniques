@@ -44,10 +44,7 @@ from typing import Optional, Union, Literal, Dict, Any
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tensors import log_gamma
 from dl_techniques.layers.time_series.deepar_blocks import ScaleLayer
-from dl_techniques.layers.heads.time_series.likelihood_heads import (
-    GaussianLikelihoodHead,
-    NegativeBinomialLikelihoodHead,
-)
+from dl_techniques.layers.heads.time_series import TimeSeriesTaskType, create_time_series_head
 from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -240,12 +237,14 @@ class DeepAR(keras.Model, ForecastMixin):
             self.lstm_layers.append(lstm)
 
         if likelihood == 'gaussian':
-            self.likelihood_head = GaussianLikelihoodHead(
+            self.likelihood_head = create_time_series_head(
+                TimeSeriesTaskType.GAUSSIAN_LIKELIHOOD,
                 units=target_dim,
                 name='gaussian_head'
             )
         else:  # negative_binomial
-            self.likelihood_head = NegativeBinomialLikelihoodHead(
+            self.likelihood_head = create_time_series_head(
+                TimeSeriesTaskType.NEGATIVE_BINOMIAL_LIKELIHOOD,
                 units=target_dim,
                 name='negbin_head'
             )

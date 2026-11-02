@@ -5,11 +5,11 @@ a forecast. Nothing here knows which backbone produced them: every input width
 comes from the shape handed to ``build``, except the Timestral head, which
 takes ``d_model`` because it owns a residual projection of that width.
 
-Five names are exported, one registered head class per module. A sixth class,
-the private ``_LikelihoodHead``, is the shared base of the two likelihood
-heads and is not registered. There is no factory or dispatcher: the
-forecasting models build their heads directly, so import the class you want by
-name.
+Seven names are exported: the five registered head classes, the task enum and
+the factory. A sixth class, the private ``_LikelihoodHead``, is the shared base
+of the two likelihood heads and is not registered. ``create_time_series_head``
+builds one from a task type, and the forecasting models build theirs with it.
+The table from task type to class is importable from ``dispatch`` only.
 
 Classes
 -------
@@ -37,8 +37,12 @@ from .likelihood_heads import (
     NegativeBinomialLikelihoodHead,
 )
 from .timestral_quantile_head import TimestralQuantileHead
+from .task_types import TimeSeriesTaskType
+from .factory import create_time_series_head
 
 __all__ = [
+    "TimeSeriesTaskType",
+    "create_time_series_head",
     "QuantileHead",
     "QuantileSequenceHead",
     "GaussianLikelihoodHead",

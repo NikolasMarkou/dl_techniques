@@ -1,7 +1,7 @@
 """Tests for the top-level ``create_head`` dispatch facade (D-004).
 
 The facade is the user-requested deliverable contract surface; per LESSONS the
-factory gets its own test file. It is a *thin dispatcher* over the three
+factory gets its own test file. It is a *thin dispatcher* over the four
 per-domain single-head factories with no signature unification — each domain
 keeps its native calling convention, forwarded verbatim.
 """
@@ -12,6 +12,9 @@ import keras
 from dl_techniques.layers.heads import create_head
 from dl_techniques.layers.heads.nlp import (
     NLPTaskType, NLPTaskConfig, TextClassificationHead,
+)
+from dl_techniques.layers.heads.time_series import (
+    TimeSeriesTaskType, QuantileHead, GaussianLikelihoodHead,
 )
 from dl_techniques.layers.heads.vision import VisionTaskType, ClassificationHead
 from dl_techniques.layers.heads.vision_language import (
@@ -53,9 +56,31 @@ class TestCreateHeadDispatch:
         assert isinstance(head, ImageTextMatchingHead)
         assert isinstance(head, keras.layers.Layer)
 
+    def test_time_series_dispatch(self) -> None:
+        head = create_head(
+            "time_series",
+            TimeSeriesTaskType.QUANTILE_FORECAST,
+            num_quantiles=3,
+            output_length=24,
+            dropout_rate=0.0,
+            name="forecast",
+        )
+        assert isinstance(head, QuantileHead)
+        assert (head.num_quantiles, head.output_length) == (3, 24)
+        assert head.dropout_rate == 0.0 and head.name == "forecast"
+
+    def test_time_series_dispatch_takes_a_string_task_type(self) -> None:
+        head = create_head("time_series", "gaussian_likelihood", units=2)
+        assert isinstance(head, GaussianLikelihoodHead)
+        assert head.units == 2
+
     def test_bogus_domain_raises_valueerror(self) -> None:
         with pytest.raises(ValueError, match="Unknown head domain"):
             create_head("bogus", num_classes=3)
+
+    def test_the_unknown_domain_message_lists_time_series(self) -> None:
+        with pytest.raises(ValueError, match="time_series"):
+            create_head("bogus")
 
     def test_nlp_dispatch_forwards_a_dict_config_and_head_kwargs(self) -> None:
         """Every argument reaches create_nlp_head unchanged (plan step 11.3, D-067)."""

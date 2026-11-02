@@ -51,7 +51,7 @@ from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.ffn.residual_block import ResidualBlock
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding1D
-from dl_techniques.layers.heads.time_series.quantile_head_fixed_io import QuantileHead
+from dl_techniques.layers.heads.time_series import TimeSeriesTaskType, create_time_series_head
 from dl_techniques.layers.time_series.mixed_sequential_block import MixedSequentialBlock
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -319,7 +319,8 @@ class TiRexCore(keras.Model, ForecastMixin):
             # Lambda identity, which serializes as a non-portable pickled Python callable.
             self.output_norm = keras.layers.Identity(name="output_norm")
 
-        self.quantile_head = QuantileHead(
+        self.quantile_head = create_time_series_head(
+            TimeSeriesTaskType.QUANTILE_FORECAST,
             num_quantiles=len(self.quantile_levels),
             output_length=self.prediction_length,
             # Capped rather than the global dropout_rate directly.

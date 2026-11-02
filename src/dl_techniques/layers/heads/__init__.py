@@ -23,14 +23,14 @@ Domains
   VQA, visual grounding, image-text matching and multi-task.
 - :mod:`~dl_techniques.layers.heads.time_series` — forecasting heads: fixed and
   variable horizon quantile heads, Gaussian and negative-binomial likelihood
-  heads, and the Timestral quantile head. No factory: the forecasting models
-  build these directly.
+  heads, and the Timestral quantile head. ``create_time_series_head`` builds one
+  from a task type, and the forecasting models build theirs with it.
 
 Facade
 ------
 - :func:`create_head` — ``create_head(domain, *args, **kwargs)`` calls the
   domain's own ``create_*_head`` factory. It forwards every argument unchanged
-  and does not unify the three signatures.
+  and does not unify the four signatures.
 
 Task-type vocabulary
 --------------------
@@ -105,6 +105,8 @@ from .vision_language import (
 # Time-series heads
 # =========================================================================
 from .time_series import (
+    TimeSeriesTaskType,
+    create_time_series_head,
     QuantileHead,
     QuantileSequenceHead,
     GaussianLikelihoodHead,
@@ -164,6 +166,8 @@ __all__ = [
     "ImageTextMatchingHead",
     "MultiTaskVLMHead",
     # --- Time series ---
+    "TimeSeriesTaskType",
+    "create_time_series_head",
     "QuantileHead",
     "QuantileSequenceHead",
     "GaussianLikelihoodHead",

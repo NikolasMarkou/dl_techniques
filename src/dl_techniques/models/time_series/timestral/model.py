@@ -30,7 +30,7 @@ from typing import Optional, Tuple, List, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.heads.time_series.timestral_quantile_head import TimestralQuantileHead
+from dl_techniques.layers.heads.time_series import TimeSeriesTaskType, create_time_series_head
 from dl_techniques.layers.time_series.residual_projection_block import ResidualProjectionBlock
 from dl_techniques.models.time_series.timestral import config as config_module
 from dl_techniques.models.time_series.timestral.config import TimestralConfig
@@ -197,7 +197,8 @@ class TimestralModel(keras.Model):
             name="transformer",
             dtype=self.dtype_policy,
         )
-        self.head = TimestralQuantileHead(
+        self.head = create_time_series_head(
+            TimeSeriesTaskType.TIMESTRAL_QUANTILE,
             d_model=c.d_model,
             patch_size=c.patch_size,
             quantile_levels=c.quantile_knots,

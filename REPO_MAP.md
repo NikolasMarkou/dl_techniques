@@ -126,13 +126,13 @@ other shapes:
   constructor arguments.
 - **Dispatchers with no dict at all.** `src/dl_techniques/layers/memory/factory.py` exposes
   two named constructors, `create_mann` and `create_som_2d`, and nothing else.
-- **A three-tier dispatcher.** `src/dl_techniques/layers/heads/factory.py` defines a thin
+- **A four-domain dispatcher.** `src/dl_techniques/layers/heads/factory.py` defines a thin
   `create_head(domain, ...)` shim that forwards to one per-domain factory each:
-  `heads/nlp/factory.py`, `heads/vision/factory.py`, `heads/vision_language/factory.py`. Each domain is a
+  `heads/nlp/factory.py`, `heads/vision/factory.py`, `heads/vision_language/factory.py`,
+  `heads/time_series/factory.py`. Each domain is a
   package of one module per head plus `dispatch.py` (task type to class) and a thin
-  `factory.py`. Task heads are selected by *domain first*, then by key. A fourth domain,
-  `heads/time_series/` (quantile, likelihood and Timestral heads), has no factory and is not a
-  `create_head` domain: the forecasting models import its classes directly.
+  `factory.py`. Task heads are selected by *domain first*, then by key. The forecasting models call
+  `create_time_series_head` from `heads/time_series/` (quantile, likelihood and Timestral heads).
 
 Two deliberate absences. **`src/dl_techniques/layers/dynamic_chunking/` has no factory and
 no registry** — its three layers (`RoutingModule`, `ChunkLayer`, `DeChunkLayer`) are H-Net's
