@@ -515,17 +515,14 @@ def _check_imagenette_records() -> None:
     # DECISION plan-2026-10-31T180033-2faf890a/D-034: look for a version directory that holds
     # ``dataset_info.json`` and do NOT name a version: the builder's version is only known by
     # importing TFDS, which this check must not do. The loader still checks the exact one.
-    from dl_techniques.datasets.vision.imagenette import IMAGENETTE_TFDS_NAME
+    from dl_techniques.datasets.vision.imagenette import find_prepared_records
 
     root = _tfds_data_dir()
-    here = root / IMAGENETTE_TFDS_NAME
-    found = here.is_dir() and any(
-        (child / "dataset_info.json").is_file() for child in here.iterdir() if child.is_dir()
-    )
+    here, found = find_prepared_records(root)
     if not found:
         raise ConfigError(
             f"Invalid value for 'data.dataset': imagenette reads the TFDS records of "
-            f"{IMAGENETTE_TFDS_NAME}, and none are under {str(here)!r} "
+            f"{here.relative_to(root).as_posix()}, and none are under {str(here)!r} "
             f"(TFDS directory {str(root)!r} from "
             f"{'$TFDS_DATA_DIR' if 'TFDS_DATA_DIR' in os.environ else 'the default ~/tensorflow_datasets'}); "
             "nothing is downloaded. Set TFDS_DATA_DIR to the directory that holds imagenette/"

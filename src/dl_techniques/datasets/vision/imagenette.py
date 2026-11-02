@@ -15,8 +15,9 @@ repeated off the disk. :func:`imagenette_examples` is the unbatched stage undern
 """
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
-from typing import Callable, List, NamedTuple, Optional, Tuple
+from typing import Callable, List, NamedTuple, Optional, Tuple, Union
 
 import numpy as np
 import tensorflow as tf
@@ -65,6 +66,26 @@ CROP_POLICIES: Tuple[str, ...] = ("resize", "random_resized_crop")
 # ---------------------------------------------------------------------
 # Records
 # ---------------------------------------------------------------------
+
+def find_prepared_records(data_dir: Union[str, "os.PathLike[str]"]) -> Tuple[Path, bool]:
+    """Say whether the Imagenette TFDS records are prepared under ``data_dir``, by path tests only.
+
+    Interface contract: ``data_dir`` is a TFDS data directory (``$TFDS_DATA_DIR`` or
+    ``~/tensorflow_datasets``). Imports neither TFDS nor TensorFlow, reads no record and creates
+    nothing, so a caller can refuse a missing record set before it claims a run directory. It
+    names no version: the builder's version is only known by importing TFDS, and
+    :func:`read_imagenette_records` still checks the exact one.
+
+    :param data_dir: the TFDS data directory.
+    :return: ``(directory looked at, found)``; ``found`` is ``True`` when that directory
+        (``<data_dir>/imagenette/320px-v2``) holds a version directory with ``dataset_info.json``.
+    """
+    here = Path(data_dir) / IMAGENETTE_TFDS_NAME
+    found = here.is_dir() and any(
+        (child / "dataset_info.json").is_file() for child in here.iterdir() if child.is_dir()
+    )
+    return here, found
+
 
 def read_imagenette_records(
         split: str, data_dir: Optional[str] = None
