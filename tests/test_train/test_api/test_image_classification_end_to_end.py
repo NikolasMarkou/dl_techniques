@@ -440,7 +440,8 @@ def test_the_function_registers_the_families_before_it_validates(world, tmp_path
     with pytest.raises(ConfigValidationError):
         run_function(tmp_path / "run", epochs="5")
     assert sorted(registry.MODELS) == [
-        "cliffordnet", "cliffordnet_hier", "convnext_v1", "convnext_v2", "resnet", "vit",
+        "accunet", "cliffordnet", "cliffordnet_hier", "convnext_v1", "convnext_v2",
+        "convunext", "resnet", "vit",
     ]
 
 
@@ -453,8 +454,8 @@ def test_the_function_is_keyword_only_and_strict(world, tmp_path):
 
 
 def test_the_built_in_task_rows_are_what_the_package_registers(world):
-    assert [spec.name for spec in BUILTIN_TASKS] == ["image_classification"]
+    assert [spec.name for spec in BUILTIN_TASKS] == ["image_classification", "image_segmentation"]
     register_builtin_tasks()
     register_builtin_tasks()
-    assert sorted(registry.TASKS) == ["image_classification"]
+    assert sorted(registry.TASKS) == ["image_classification", "image_segmentation"]
     assert recipes.TASK == "image_classification"

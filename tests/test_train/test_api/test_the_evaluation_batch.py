@@ -166,16 +166,17 @@ def test_no_other_recipe_sets_the_key_so_every_other_run_keeps_256(table):
 
 def test_a_segmentation_run_evaluates_at_the_batch_it_trains_at(world):
     """The shared 256 would put 256 full-size masks and logits in one pass (D-077)."""
-    for family in ("convunext", "accunet"):
+    # AccUNet trains at 8: 16 runs out of memory on the 24 GB card in legacy too (D-088).
+    for family, batch in (("convunext", 16), ("accunet", 8)):
         spec = registry.MODELS[family]
         assert spec.tasks == (SEGMENTATION,)
         for dataset in ("oxford_pet", "folder", "csv"):
             recipe = spec.recipe(dataset, sorted(spec.load_variants())[0])
-            assert recipe["batch_size"] == 16
-            assert recipe["analysis_args"] == {"eval_batch_size": 16}, (family, dataset)
+            assert recipe["batch_size"] == batch
+            assert recipe["analysis_args"] == {"eval_batch_size": batch}, (family, dataset)
             ctx = AutoContext(family=family, variant="v", dataset=dataset, num_classes=3,
                               image_size=None, defaults=recipe)
-            assert AnalysisArgs().resolve_auto(ctx).eval_batch_size == 16
+            assert AnalysisArgs().resolve_auto(ctx).eval_batch_size == batch
 
 
 def test_the_resolved_value_of_each_real_pair(table):
