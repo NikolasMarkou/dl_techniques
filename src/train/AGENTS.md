@@ -430,6 +430,11 @@ train, and the TEST split never selects.
   means weighted by images, so it is not the pooled pixel cross-entropy, and the legacy README measured the final weights
   beating the `val_loss` checkpoint in all three seeds. `ImageSegmentationTrainer.analysis_ignore_label` hands the
   void value to the analyzer's per-pixel calibration. A recipe has no `image_size` for file data: the caller states it.
+  Figures (D-079): `ImageSegmentationTrainer.figure_callbacks` attaches `segmentation_viz.SegmentationGridCallback` (after
+  `EpochLogLine`, before the dashboard; uint8 images of the test pairs held in memory, none without a test split), and `_figures` calls
+  `segmentation_figures.write_segmentation_figures` for the best weights after `segmentation_run.confusion_from_dataset`.
+  The drawing functions of `segmentation_viz` take `palette` (default the three-colour `PALETTE`) and `ignore_index`
+  (default `None`), so the Pet trainer's calls and pixels are what they were; `extended_palette(C)` is additive.
 
 For text use `train.common.nlp`; for MegaDepth RGB+depth pairs `train.common.megadepth`
 (yielding `(rgb, y_true)` with `y_true = [disparity, mask]` on the last axis, the disparity

@@ -34,6 +34,13 @@ Interface contract
     :return: ``int64`` ``(num_classes,)``: the pixels of each class, void left out.
     :raises ValueError: for a mask value that is neither a class nor ``ignore_index``.
 
+``confusion_from_dataset(model, dataset, num_classes, ignore_index)``
+    :param model: a model whose call returns per-pixel logits ``(B, H, W, C)``.
+    :param dataset: a batched dataset of ``(image, mask)``; every batch is read once.
+    :return: ``int64`` ``(C, C)``, entry ``[t, p]`` the pixels of true class ``t`` predicted ``p`` (argmax of
+        the logits, the model run with ``training=False``), pooled over the whole dataset, void left out. Its
+        mIoU and pixel accuracy are the ones Keras' ``MeanIoU`` and ``VoidAwareAccuracy`` report for the same pixels.
+
 ``majority_class_baseline(counts, class_names)``
     :param counts: the result of :func:`class_pixel_counts`.
     :return: the scores of predicting the most frequent class (the lowest id on a tie) for every
@@ -98,6 +105,24 @@ def class_pixel_counts(
             )
         counts += np.bincount(flat, minlength=num_classes)
     return counts
+
+
+def confusion_from_dataset(
+    model: keras.Model, dataset: "tf.data.Dataset", num_classes: int, ignore_index: Optional[int]
+) -> np.ndarray:
+    """The pooled pixel confusion of ``model`` over a batched ``(image, mask)`` dataset; see the module contract."""
+    confusion = np.zeros((num_classes, num_classes), dtype=np.int64)
+    for images, masks in dataset.as_numpy_iterator():
+        logits = keras.ops.convert_to_numpy(model(images, training=False))
+        predicted = logits.argmax(axis=-1).reshape(-1).astype(np.int64)
+        truth = masks.reshape(-1).astype(np.int64)
+        if ignore_index is not None:
+            keep = truth != ignore_index
+            truth, predicted = truth[keep], predicted[keep]
+        confusion += np.bincount(truth * num_classes + predicted, minlength=num_classes**2).reshape(
+            num_classes, num_classes
+        )
+    return confusion
 
 
 def majority_class_baseline(counts: np.ndarray, class_names: Sequence[str]) -> Dict[str, Any]:

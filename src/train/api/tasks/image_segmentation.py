@@ -108,6 +108,13 @@ from ..segmentation_args import (
 from ..segmentation_models import TASK, check_image_size, sides_of
 from ..trainer import Evaluation, FitState, TaskTrainer, TrainResult, config_problems
 
+#: The per-epoch grid draws this many fixed test pairs, every this many epochs (the legacy trainer's
+#: ``--viz-samples`` and ``--viz-freq`` defaults; they are not keys of a run), and the end-of-run grid
+#: of the best weights draws the first :data:`FINAL_GRID_ROWS` test pairs.
+GRID_SAMPLES = 4
+GRID_EVERY = 1
+FINAL_GRID_ROWS = 6
+
 # ---------------------------------------------------------------------
 
 
@@ -363,6 +370,36 @@ class ImageSegmentationTrainer(TaskTrainer):
     def epoch_line_metrics(self, config: ImageSegmentationConfig) -> Tuple[str, ...]:
         return ("loss", "accuracy", "miou", "val_loss", "val_accuracy", "val_miou")
 
+    def figure_callbacks(self, config: ImageSegmentationConfig, data: Any, vis_dir: Path) -> List[Any]:
+        """Return the per-epoch grid of the first test pairs held in memory; none without a test split.
+
+        The callback wants ``uint8`` images and divides them by 255; ``data.x_fig`` holds the pipeline's own
+        bytes divided by 255, so the conversion is exact and the grid shows what the model was given. The
+        colour table is the run's (``extended_palette``) and the void value is the data's.
+        """
+        import numpy as np
+
+        from train.convunext import segmentation_viz as viz
+
+        if len(data.x_fig) == 0:
+            return []
+        return [
+            viz.SegmentationGridCallback(
+                np.rint(np.asarray(data.x_fig) * 255.0).astype(np.uint8),
+                data.y_fig,
+                vis_dir,
+                data.class_names,
+                GRID_EVERY,
+                GRID_SAMPLES,
+                config.seed,
+                title=vis_dir.parent.name,
+                palette=viz.extended_palette(len(data.class_names)),
+                ignore_index=data.ignore_index,
+                # The grid draws TEST pairs and `val_miou` is scored on the selection split: say so.
+                val_population=f"all {data.n_select} selection pairs; the pairs shown are test pairs",
+            )
+        ]
+
     def summary_fields(self, config: ImageSegmentationConfig, data: Any) -> Dict[str, Any]:
         return {
             "figure_samples": int(len(data.x_fig)),
@@ -449,11 +486,15 @@ class ImageSegmentationTrainer(TaskTrainer):
             )
         if not analysis_cfg.model_analysis:
             notes.append("analysis_args.model_analysis is false: `analyzer.status` is 'skipped'")
-        notes.append(
-            "no segmentation figure is written by this version of the task; "
-            "analysis_args.figures draws the training dashboard only (`visualizations.files` "
-            "is empty)"
-        )
+        if not analysis_cfg.figures:
+            notes.append("analysis_args.figures is false: no figure was written")
+        elif data.test_ds is not None:
+            notes.append(
+                f"figures are drawn on the first {len(data.x_fig)} test pairs held in memory "
+                "(`data.eval_samples`); `per_class_scores.png` and `segmentation_report.json` are the "
+                "pooled confusion of the best weights over every pixel of the test split, void left "
+                "out, and their mIoU and pixel accuracy equal `test_metrics_best`'s"
+            )
         return notes
 
     # -- the reporting --------------------------------------------------
@@ -461,6 +502,36 @@ class ImageSegmentationTrainer(TaskTrainer):
     def analysis_ignore_label(self, config: ImageSegmentationConfig) -> Optional[int]:
         # Oxford-IIIT Pet has no void label and no such key.
         return getattr(config.data, "ignore_index", None)
+
+    def _figures(self, config: ImageSegmentationConfig, data: Any, fit: FitState) -> Dict[str, Any]:
+        """Draw the end-of-run figures of the BEST weights (still in the model) and return the record.
+
+        One prediction pass over the whole test split builds the pooled confusion; the grid of
+        predictions is the first :data:`FINAL_GRID_ROWS` test pairs.
+        """
+        import numpy as np
+
+        from train.common import run_summary, segmentation_figures, segmentation_run
+
+        metric_cfg: SegMetricArgs = config.metric_args
+        hist = {key: [float(v) for v in values] for key, values in fit.history.history.items()}
+        best_epoch = run_summary.best_epoch(hist, metric_cfg.watch_metric, metric_cfg.watch_mode)
+        rows = min(FINAL_GRID_ROWS, len(data.x_fig))
+        logits = fit.model(np.asarray(data.x_fig[:rows]), training=False)
+        return segmentation_figures.write_segmentation_figures(
+            fit.vis_dir,
+            data.x_fig[:rows],
+            data.y_fig[:rows],
+            np.asarray(logits).argmax(axis=-1),
+            segmentation_run.confusion_from_dataset(
+                fit.model, data.test_ds, data.num_classes, data.ignore_index
+            ),
+            hist,
+            best_epoch,
+            list(data.class_names),
+            data.ignore_index,
+            metric_cfg.watch_metric,
+        )
 
     def evaluate_and_report(
         self, config: ImageSegmentationConfig, data: Any, fit: FitState
@@ -489,6 +560,16 @@ class ImageSegmentationTrainer(TaskTrainer):
                 split_label="Test results" if has_test else "Selection results (reload check only)",
             )
             test_best = reloaded if has_test else None
+        # DECISION plan-2026-10-31T180033-2faf890a/D-079
+        # The figures and the confusion are drawn from the BEST weights, so they come BEFORE
+        # `finalize_last_epoch`, which puts the last epoch's weights in the model. Do NOT move them
+        # after it, and do NOT build the confusion from `x_fig` (200 pairs): the report is the
+        # pooled confusion of every test pixel, so its mIoU equals `test_metrics_best`'s.
+        figures = (
+            self._figures(config, data, fit)
+            if analysis_cfg.figures and has_test
+            else {"files": [], "failed": [], "skipped": True}
+        )
         record, analysis = classification_run.report_best_weights(
             fit.model,
             data,
@@ -507,9 +588,6 @@ class ImageSegmentationTrainer(TaskTrainer):
             ),
             eval_batch_size=analysis_cfg.eval_batch_size,
         )
-        # The classification figure record carries ``ece``; a segmentation one has no such key
-        # (``base_summary`` then writes no top-level ``ece`` either).
-        visualizations = {key: value for key, value in record.items() if key != "ece"}
         # The last epoch's weights replace the best ones here.
         test_final, load_check = classification_run.finalize_last_epoch(
             fit.model,
@@ -528,7 +606,7 @@ class ImageSegmentationTrainer(TaskTrainer):
             best_load_error=load_error,
             checkpoint_max_diff=max_diff,
             conformal=None,
-            visualizations=visualizations,
+            visualizations=figures,
             analysis=analysis,
             test_metrics_final=test_final,
             load_check=load_check,

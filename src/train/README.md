@@ -62,7 +62,15 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   predicting the majority class of the selection split for every valid pixel, stated in the summary as
   `majority_class_baseline`. A run that cannot beat a constant has not learned a segmentation.
 * A conformal level (`analysis_args.conformal_alpha`) is refused: a segmentation run has no set of classes per image.
-  Figures for segmentation arrive in a later step; `analysis_args.figures` draws the training dashboard only.
+* **Figures** (`analysis_args.figures`, and only with a test split): `visualizations/` gets a grid of four fixed
+  test pairs after every epoch (`epoch_NNN_seg_grid.png`, NNN 000 being the untrained model: image, ground truth,
+  prediction), the training dashboard, and at the end, for the BEST weights, `predictions_best.png`, `miou_curve.png`,
+  `per_class_scores.png` and `segmentation_report.json`, the last two being the pooled confusion over every pixel of
+  the test split (its mIoU and pixel accuracy equal `test_metrics_best`'s). Void is drawn grey, listed as `void` in the
+  legend and left out of every row's pixel accuracy. More than three classes get a longer palette whose first three
+  colours are the Pet trainer's; a legend of more than 24 classes lists the first ones shown and says how many more;
+  more than 12 classes draw IoU bars only. The model analysis takes the per-pixel path: void is dropped before the
+  calibration, which reads a uniform sample of at most 100,000 pixels.
 
 **Keys**: `key=value` tokens; a dot reaches a group (`optim_args.lr=3e-4`, `data.dataset=cifar10`);
 `config=run.yaml` loads a file first and the command line wins over it. A value is read by

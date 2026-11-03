@@ -119,6 +119,10 @@ _OPTIONAL_OUTPUT = {
         ('write_classification_figures', 'classification_report.json', "with open(vis_dir / 'classification_report.js",
          'classification_report.json, recorded in failed'),
     ],
+    'train/common/segmentation_figures.py': [
+        ('attempt', 'Visualization', 'draw()',
+         'a segmentation figure or the per-class report, recorded in failed (plan 2faf890a step 29, D-079)'),
+    ],
     'train/common/step_checkpoint.py': [
         ('_plot_metrics', 'Step plot failed at step', 'plot_step_metrics(self._csv_path, self._save_',
          'step metric figures'),
@@ -555,8 +559,8 @@ def test_the_census_counts_are_pinned():
     counts = {kind: verdicts.count(kind)
               for kind in ("raises", "exits", "records", "optional", "exempt", None)}
     assert counts == {"raises": 9, "exits": 4, "records": 2,
-                      "optional": 58, "exempt": 48, None: 0}
-    assert sum(len(entries) for entries in _OPTIONAL_OUTPUT.values()) == 58
+                      "optional": 59, "exempt": 48, None: 0}
+    assert sum(len(entries) for entries in _OPTIONAL_OUTPUT.values()) == 59
     assert sum(len(entries) for entries in _EXEMPT.values()) == 48
 
 

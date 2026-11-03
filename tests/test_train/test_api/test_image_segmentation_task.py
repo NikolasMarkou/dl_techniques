@@ -182,7 +182,7 @@ def test_the_verdict_is_val_miou_against_the_baseline(finished):
 
 
 def test_the_summary_says_what_it_trained_and_what_val_loss_is(finished):
-    model, kind, size, _, _, summary, _ = finished
+    model, kind, size, analysis, _, summary, _ = finished
     family, variant = model.split("/")
     assert summary["task"] == "image_segmentation"
     assert (summary["model_family"], summary["variant"]) == (family, variant)
@@ -202,7 +202,14 @@ def test_the_summary_says_what_it_trained_and_what_val_loss_is(finished):
     # A segmentation summary has no calibration error of a classifier: neither the top-level `ece` nor
     # the one inside the figure record that `base_summary` would copy up.
     assert "ece" not in summary and "ece" not in summary["visualizations"]
-    assert summary["visualizations"] == {"files": [], "failed": [], "skipped": True}
+    # Step 29: the figures are drawn where the run asks for them (convunext, with a test split) and the record
+    # of a run that did not is the skipped one (accunet here: its figures are off).
+    if analysis:
+        assert sorted(summary["visualizations"]["files"]) == [
+            "miou_curve.png", "per_class_scores.png", "predictions_best.png", "segmentation_report.json"]
+        assert summary["visualizations"]["failed"] == [] and summary["visualizations"]["skipped"] is False
+    else:
+        assert summary["visualizations"] == {"files": [], "failed": [], "skipped": True}
     assert summary["conformal"] is None
 
 
