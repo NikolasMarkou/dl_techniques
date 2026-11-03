@@ -255,7 +255,16 @@ or resumed (its files are not touched, and `best_model.keras` still loads in Ker
 writes one new file (a directory for `saved_model`) and `<out>.task.json` beside it, and prints
 only the path on stdout. Input contract: float32 `(batch, height, width, channels)` pixels scaled
 to `[0, 1]` then standardized, `(x - mean) / std`, with the mean and std in `<out>.task.json`;
-the output is raw logits, one per class name in that file. Other pixel ranges give numbers and
+the output is raw logits, one per class name in that file for a classifier, `(batch, classes)`. **A segmentation run**
+(D-081) exports the same four formats and the output is one score per class per pixel, `(batch, height, width, classes)`,
+at the `input_size` of `<out>.task.json` (a version 2 record, the run's own, byte for byte): height and width are fixed
+to it and may differ, only the batch is free, and the mask is the argmax over the last axis after the caller resizes the
+scores to the picture (`python -m train predict` does that). Measured on CPU, ConvUNext `tiny` and AccUNet at 32x64 in
+all four formats: 2e-6 at most against Keras on scores of scale 1, two calls of an artifact equal, `tflite` with built-in
+operators only (no Flex); ConvUNext `tiny` with the real Oxford-IIIT Pet weights of the step-28 run on 16 real test
+images at 128x128 and, the same weights in a copy built at 128x256, at 128x256: 5e-6 at most on scores of scale 7, every
+argmax equal in all four formats. Serving on a GPU is again a different computation: Keras on the GPU against the CPU files, same weights and images, differs by up to 8.2e-3 on scores of scale 7.7 and 1 pixel in 9,400 has another argmax (agreement 0.999893); no format changes that. A `mixed_float16` run returns half-precision scores (Keras does), and a model that
+computes in `bfloat16` is refused as `tflite` by name, as a classifier is. Other pixel ranges give numbers and
 no error. A `tflite` file of a CliffordNet needs the Flex delegate (a WARNING says so). The check `export` makes of such a
 file runs the Keras model on the CPU, as the interpreter does, so a GPU machine compares CPU with CPU (the tolerance is
 unchanged: 1e-4 of the logits' scale, and a file that really differs is still refused). **Serving on a GPU is a different

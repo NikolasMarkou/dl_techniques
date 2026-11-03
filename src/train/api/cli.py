@@ -254,8 +254,12 @@ EXPORT_OPTIONS = (
 EXPORT_NOTES = (
     "input contract: the exported model takes float32 images (batch, height, width, channels)",
     "with pixels scaled to [0, 1] and then standardized, (x - mean) / std, using the mean and",
-    "std in <out>.task.json; it returns raw logits (no softmax), one score per class name in",
-    "that file. mixed_float16 runs differ from Keras by up to about 1e-4 in onnx.",
+    "std in <out>.task.json; it returns raw logits (no softmax). A classification model gives one",
+    "score per class name in that file for each image: (batch, classes). A segmentation model gives",
+    "one score per class per pixel: (batch, height, width, classes), at the input_size in that file",
+    "(height and width are fixed to it, the batch is free); the mask is the argmax over the last",
+    "axis, after the caller resizes the scores to the picture. mixed_float16 runs differ from Keras",
+    "by up to about 1e-4 in onnx.",
 )
 PREDICT_OPTIONS = (
     Option("model", "a run directory (its best_model.keras) or a .keras file beside its task.json"),

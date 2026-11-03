@@ -14,19 +14,27 @@ What goes in and what comes out
 Every format takes the input the run's model was TRAINED on, not a raw image: a float32
 batch ``(batch, height, width, channels)`` whose pixels were scaled to ``[0, 1]`` and then
 standardized, ``(pixels - mean) / std``, with the per-channel ``mean`` and ``std`` the run
-recorded in ``task.json`` (``unit`` runs record zeros and ones). It returns the RAW LOGITS,
-one row of class scores per image, with no softmax; the class names are in ``task.json``
-too. Feeding ``[0, 255]`` or unstandardized ``[0, 1]`` pixels gives numbers and no error.
+recorded in ``task.json`` (``unit`` runs record zeros and ones). It returns the RAW LOGITS
+with no softmax; the class names are in ``task.json`` too. A classification model gives one
+row of class scores per image, ``(batch, classes)``. A SEGMENTATION model gives one score per
+class per pixel, ``(batch, height, width, classes)``, at the record's ``input_size`` (height and
+width are fixed to it, not necessarily equal; only the batch is free), and the mask is the argmax
+over the last axis after the caller has resized the scores to the picture (D-081; a model of a
+``mixed_float16`` run returns half-precision scores, as Keras does). Feeding ``[0, 255]`` or
+unstandardized ``[0, 1]`` pixels gives numbers and no error.
 The command line therefore writes ``<out>.task.json`` beside every export (:func:`export`'s
 ``record``), and its log says so.
 
 Numerical agreement: float32 models match Keras to about 1e-6 in ``keras``, ``saved_model`` and
-``tflite``, and in ``onnx``, with Keras run on the CPU (the check ``export`` makes of a ``tflite``
+``tflite``, and in ``onnx`` (the two segmentation families, ConvUNext ``tiny`` and AccUNet, in all four
+formats at 32x64, and ConvUNext ``tiny`` with real Oxford-IIIT Pet weights at 128x128 and 128x256 on 16 real
+images: 5e-6 at most on scores of scale 7, every argmax equal, D-081), with Keras run on the CPU (the check ``export`` makes of a ``tflite``
 file written with select operators runs the Keras side on the CPU too, so a GPU machine compares
 CPU with CPU). Serving a model on a GPU is a different computation: it differs from the CPU by about
 1e-3 in the logits (measured on ``cliffordnet/nano`` of the ImageNet gate, GPU against CPU on the same
 weights: up to 1.1e-3 on logits of scale 3.6 for 16 real validation images and 5.8e-4 on scale 3.0 for 16
-noise images; the argmaxes were equal on all 16 of each), which no export format changes. A ``mixed_float16`` model matches in ``keras``, ``saved_model``
+noise images; the argmaxes were equal on all 16 of each), which no export format changes. The same holds for a segmentation model: ConvUNext ``tiny`` with the real Pet weights, Keras on the GPU against the CPU
+files (or Keras on the CPU), 16 real images: up to 8.2e-3 on scores of scale 7.7, 1 pixel in 9,400 with another argmax (0.999893 agree). A ``mixed_float16`` model matches in ``keras``, ``saved_model``
 and ``tflite``, but its ``onnx`` export differs from Keras by up to about 1e-4 (9.0e-05
 measured on ``vit_pico``): ONNX Runtime rounds the half-precision steps its own way.
 
@@ -183,6 +191,12 @@ def _export_saved_model(model: Any, directory: Path, spec: Any) -> None:
     # ``training=None``, and a layer that only skips its randomness on ``training is False``
     # (stochastic depth) keeps it live in ``serve``, so the artifact is random at inference
     # and reports success (CliffordNet, review-iter-3 concern 1).
+    # DECISION plan-2026-10-31T180033-2faf890a/D-081
+    # The segmentation U-Nets take this path unchanged: ConvUNext's StochasticDepth is live under
+    # ``training=None`` too (8e-5 of spread against scores of scale 1). Do NOT check it with two FRESH
+    # loads of the artifact: a fresh load restarts the random generator, so both loads draw the same
+    # noise and the check passes on a random graph (the first version of the test did). Hold ONE runtime
+    # object and call it twice, and scan the graph for random ops.
     archive = keras.export.ExportArchive()
     archive.track(model)
     archive.add_endpoint("serve", lambda batch: model(batch, training=False), [spec])
