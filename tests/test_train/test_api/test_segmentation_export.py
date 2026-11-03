@@ -12,8 +12,8 @@ scores have a scale near 1 (AccUNet's untrained logits are 3e-5, and a tolerance
 file against them):
 
 * every (family, format) exports through ``export(..., record=)`` and the artifact, read by its own
-  runtime, gives Keras' ``training=False`` scores to ``ATOL`` (1e-4; the largest difference measured over
-  the run is in D-081), with the input's height and width and one score per class;
+  runtime, gives Keras' ``training=False`` scores to ``ATOL`` (1e-4 at a scale of 1; the tolerance is
+  relative to the scale, ``RTOL`` times the largest score, D-088, which corrects D-081), with the input's height and width and one score per class;
 * two calls of an artifact give the same bytes of answer;
 * a ``saved_model`` of ConvUNext, which has stochastic depth that is live under ``training=True`` (a
   control asserts it), serves the same answer every time, matches Keras for another batch size, and holds
@@ -44,7 +44,16 @@ from train.api.predictor import (
 )
 from train.api.segmentation_predictor import SegmentationPredictor
 
-ATOL = 1e-4
+#: The tolerance is RELATIVE to the largest score (D-088, which corrects D-081): 1e-4 absolute was measured on
+#: scores of scale 1 (the scale these models are built to, below). On TRAINED weights (Oxford-IIIT Pet, CPU,
+#: 16 real test images, `load_check_evidence`'s sibling `scratch_step33/logs/export_*.json`) the same exports
+#: differ by more than that in absolute terms and by less than 1e-4 of the scale: AccUNet (scores up to 220)
+#: saved_model 9.2e-4 (4.2e-6 of the scale), tflite 2.8e-3 (1.3e-5), onnx 1.1e-2 (4.9e-5); ConvUNext (scale 9.8)
+#: 3.8e-6, 8.3e-6, 6.2e-6. Argmax agreement 0.99999 or better in every cell.
+RTOL = 1e-4
+ATOL = RTOL  # the tolerance at a scale of 1
+#: The scale of a trained AccUNet's scores, which `test_a_trained_scale_accunet_matches_in_every_format` builds to.
+TRAINED_SCALE = 220.0
 SIZE = (32, 64)  # height != width
 SHAPE = (*SIZE, 3)
 CLASSES = 3
@@ -71,8 +80,8 @@ def batch():
     return np.random.default_rng(0).random((3, *SHAPE)).astype(np.float32)
 
 
-def build(family):
-    """The family's model with its weights moved off the initial ones and its scores at a scale near 1."""
+def build(family, target=1.0):
+    """The family's model with its weights moved off the initial ones and its scores at a scale of ``target``."""
     variant, args, head, _ = FAMILIES[family]
     model = recipes.build_model(registry.MODELS[family], variant, CLASSES, SHAPE, args)
     rng = np.random.default_rng(1)
@@ -85,7 +94,7 @@ def build(family):
         l for l in model._flatten_layers(include_self=False, recursive=True)
         if l.name == head and getattr(l, "filters", None) == CLASSES
     ]
-    layer.set_weights([w / scale for w in layer.get_weights()])
+    layer.set_weights([w * (target / scale) for w in layer.get_weights()])
     return model
 
 
@@ -115,13 +124,14 @@ class Workshop:
         self.root = Path(root)
         self.models, self.written, self.records = {}, {}, {}
 
-    def model(self, family):
-        if family not in self.models:
-            self.models[family] = build(family)
-        return self.models[family]
+    def model(self, family, target=1.0):
+        key = family if target == 1.0 else (family, target)
+        if key not in self.models:
+            self.models[key] = build(family, target)
+        return self.models[key]
 
-    def artifact(self, family, format):
-        key = (family, format)
+    def artifact(self, family, format, target=1.0):
+        key = (family, format) if target == 1.0 else (family, format, target)
         if key not in self.written:
             if format == "onnx":
                 pytest.importorskip("tf2onnx")
@@ -131,7 +141,8 @@ class Workshop:
             logger.addHandler(handler)
             try:
                 self.written[key] = export(
-                    model=self.model(family), out=self.root / family / NAMES[format], format=format,
+                    model=self.model(family, target),
+                    out=self.root / (family if target == 1.0 else f"{family}_{target:g}") / NAMES[format], format=format,
                     input_shape=SHAPE, record=record_of(family),
                 )
             finally:
@@ -210,6 +221,31 @@ def test_each_family_exports_each_format_and_matches_keras_at_a_non_square_size(
     worst = np.abs(got - expected).max()
     assert worst <= ATOL, f"{family} {format}: {worst:.3g}"
     assert (got.argmax(-1) == expected.argmax(-1)).mean() > 0.999
+
+
+@pytest.mark.parametrize("format", ["saved_model", "tflite", "onnx"])
+def test_a_trained_scale_accunet_matches_in_every_format_to_a_relative_tolerance(format, workshop, batch):
+    """Review-iter-3 concern 4: D-081's 1e-4 was measured on scores of scale 1. Trained AccUNet scores reach 220.
+
+    The model here is the small fixture with its head lifted to a scale of 220, so the exports are compared
+    where a trained model puts them. What is compared: the largest absolute difference between the artifact's
+    scores and Keras' (CPU) against ``RTOL`` times the largest Keras score, and, for ``tflite`` and ``onnx``, that the same difference
+    is above the absolute ``ATOL`` (the control: an absolute tolerance would have refused a correct file).
+    The measured numbers on trained weights are in the comment of ``RTOL``.
+    """
+    if format == "onnx":
+        pytest.importorskip("tf2onnx")
+        pytest.importorskip("onnxruntime")
+    model = workshop.model("accunet", TRAINED_SCALE)
+    expected = reference(model, batch)
+    scale = float(np.abs(expected).max())
+    assert 0.5 * TRAINED_SCALE < scale < 2 * TRAINED_SCALE  # the head was lifted on another probe: the order of magnitude
+    got = np.asarray(read_back(format, workshop.artifact("accunet", format, TRAINED_SCALE), batch), np.float64)
+    worst = float(np.abs(got - expected).max())
+    assert worst <= RTOL * scale, f"{format}: {worst:.3g} of scale {scale:.3g} ({worst / scale:.2g})"
+    assert (got.argmax(-1) == expected.argmax(-1)).mean() > 0.999
+    if format != "saved_model":  # the SavedModel runs Keras' own kernels: exactly equal on the CPU
+        assert worst > ATOL, f"{format}: {worst:.3g} is under the absolute 1e-4, so this case would not have shown the defect"
 
 
 @pytest.mark.parametrize("format", FORMATS)

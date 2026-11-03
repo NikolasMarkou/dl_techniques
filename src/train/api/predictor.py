@@ -870,6 +870,13 @@ def check_model_against_record(
     ``variant_overrides`` (D-032, which replaces the refusal D-028 accepted for it); a model
     that differs from its variant in a key the record does not list is refused. Two variants that
     differ only in keys the record overrides are the same architecture and cannot be told apart.
+
+    A family whose models are functional (the two segmentation families: no class to be an instance of,
+    no table keys in ``get_config()``) is checked by what its layers show: ``spec.observe(model)`` names
+    the table keys the layers carry, or ``None`` for a model that holds no layer of the family, and
+    each key it returns must equal the expected table's. The keys a layer does not show
+    (ConvUNext's ``drop_path_rate``) and a model that differs in one the record does not list are not
+    seen; two variants that differ only there are not told apart (D-088).
     """
     # DECISION plan-2026-10-31T180033-2faf890a/D-028
     # The family and the variant of the record are compared with the MODEL, not only with each
@@ -889,13 +896,18 @@ def check_model_against_record(
     # DECISION plan-2026-10-31T180033-2faf890a/D-080
     # A family whose table is a module-level mapping (``module:TABLE``, no class: the functional
     # U-Nets of the segmentation task) has no class to be an instance of and no table keys in its
-    # ``get_config()`` (a functional model reports its layers), so its model's family and variant
-    # cannot be compared with the record's. Do NOT rebuild the variant and compare weight shapes
-    # (a ``model_args`` key that is not a table key, ``kernel_size`` say, changes the shapes and the
-    # record does not carry it: D-032's failure, a run trained for hours that cannot ``predict``),
-    # and do NOT compare ``model.name`` (``model_args.model_name`` renames the model). What is checked
-    # for such a family: the variant is in the table, each override is a table key, and the model
-    # takes ``input_size`` and gives one score per class per pixel (``load_model`` runs it on zeros).
+    # ``get_config()`` (a functional model reports its layers). Do NOT rebuild the variant and
+    # compare weight shapes (a ``model_args`` key that is not a table key, ``kernel_size`` say,
+    # changes the shapes and the record does not carry it: D-032's failure, a run trained for hours
+    # that cannot ``predict``), and do NOT compare ``model.name`` (``model_args.model_name`` renames
+    # the model).
+    # DECISION plan-2026-10-31T180033-2faf890a/D-088
+    # D-080 stopped there and README.md said the family "cannot be checked". It can: the two
+    # families share no layer class (ConvUNext: ConvStem, DownsampleAndSkip, ConvNextV2Block; AccUNet:
+    # AccUNet), so `spec.observe(model)` reads the family and the table keys the layers show, and a
+    # mismatch is refused. Do NOT go back to "the variant is in the table and the model takes the
+    # size": a convunext/tiny file loaded under records naming convunext/base, convunext/xlarge and
+    # accunet/base, and `export` wrote the wrong record beside the export (review-iter-3 concern 3).
     owner = load_attr(f"{module_name}:{attr_path.rsplit('.', 1)[0]}") if "." in attr_path else None
     if owner is not None and not isinstance(model, owner):
         raise ConfigError(
@@ -924,6 +936,7 @@ def check_model_against_record(
                 f"which {variant!r} of {family!r} does not have (it has {', '.join(map(repr, wanted))})"
             )
         if owner is None:
+            _check_observed(model, spec, {**wanted, **overrides}, overrides, record, model_file, task_file)
             return
         built = model.get_config()
         unreported = [key for key in overrides if key not in built]
@@ -945,6 +958,46 @@ def check_model_against_record(
                 f"{model_file} is not that variant ({'; '.join(differing)}); the file and the "
                 "model are not from one run"
             )
+
+
+def _check_observed(
+    model: Any, spec: "registry.ModelSpec", expected: Mapping[str, Any], overrides: Mapping[str, Any],
+    record: Mapping[str, Any], model_file: Path, task_file: Path,
+) -> None:
+    """Refuse a functional ``model`` whose layers are not the family and variant of ``record``.
+
+    Interface contract: ``expected`` is the variant's table updated by the record's overrides,
+    ``spec.observe`` the family's reader (``None``: nothing can be read, no check). The reader's keys
+    that are also in ``expected`` must be equal. Raises :class:`ConfigError` naming the file, the
+    family or the differing keys; the file and the model are "not from one run".
+    """
+    observer = spec.load_observer()
+    if observer is None:
+        return
+    family, variant = record["family"], record["variant"]
+    seen = observer(model)
+    if seen is None:
+        own = sorted({
+            type(layer).__name__ for layer in getattr(model, "layers", None) or []
+            if not type(layer).__module__.startswith(("keras", "tensorflow"))
+        })
+        raise ConfigError(
+            f"Invalid {TASK_FILE} {task_file}: it names the family {family!r} but {model_file} holds "
+            f"no layer of that family (its own layers: {', '.join(own[:8]) or 'none'}); the file and "
+            "the model are not from one run"
+        )
+    differing = [
+        f"{key} is {_shown(_plain(value))} in the model, {_shown(_plain(expected[key]))} in "
+        f"{variant!r}{' with the recorded overrides' if overrides else ''}"
+        for key, value in seen.items()
+        if key in expected and _plain(value) != _plain(expected[key])
+    ]
+    if differing:
+        raise ConfigError(
+            f"Invalid {TASK_FILE} {task_file}: it names the variant {variant!r} of {family!r} but "
+            f"{model_file} is not that variant ({'; '.join(differing)}); the file and the model are "
+            "not from one run"
+        )
 
 
 def _run_on_zeros(model: Any, record: Mapping[str, Any], model_file: Path, task_file: Path) -> Any:

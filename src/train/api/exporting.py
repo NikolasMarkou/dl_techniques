@@ -25,7 +25,13 @@ unstandardized ``[0, 1]`` pixels gives numbers and no error.
 The command line therefore writes ``<out>.task.json`` beside every export (:func:`export`'s
 ``record``), and its log says so.
 
-Numerical agreement: float32 models match Keras to about 1e-6 in ``keras``, ``saved_model`` and
+Numerical agreement is RELATIVE to the scale of the scores (D-088, which corrects D-081): the 2e-6 and
+the 1e-4 below were measured on scores of scale 1 (an AccUNet's untrained logits are 3e-5, so its head was lifted
+to 1). On TRAINED weights (Oxford-IIIT Pet, CPU, 16 real test images, 128x128) AccUNet's scores reach 220 and the
+same exports differ from Keras by up to 9.2e-4 in ``saved_model`` (4.2e-6 of the scale), 2.8e-3 in ``tflite``
+(1.3e-5) and 1.1e-2 in ``onnx`` (4.9e-5), with 99.999% of the argmaxes equal; ConvUNext's (scale 9.8) by 3.8e-6, 8.3e-6
+and 6.2e-6. Read every absolute figure below as a figure at a scale of 1, and expect up to 1e-4 of the largest
+score. Float32 models match Keras to about 1e-6 in ``keras``, ``saved_model`` and
 ``tflite``, and in ``onnx`` (the two segmentation families, ConvUNext ``tiny`` and AccUNet, in all four
 formats at 32x64, and ConvUNext ``tiny`` with real Oxford-IIIT Pet weights at 128x128 and 128x256 on 16 real
 images: 5e-6 at most on scores of scale 7, every argmax equal, D-081), with Keras run on the CPU (the check ``export`` makes of a ``tflite``

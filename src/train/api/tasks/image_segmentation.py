@@ -443,6 +443,14 @@ class ImageSegmentationTrainer(TaskTrainer):
                     "that trainer's (D-077)",
                 )
             )
+            notices.append(
+                (
+                    "info",
+                    "accunet: the recipe's batch is 8, the legacy trainer's 16 halved: batch 16 runs "
+                    "out of memory at the first step on a 24 GB card (D-088); the learning rate is "
+                    "not scaled",
+                )
+            )
         return notices
 
     def task_notes(
@@ -610,6 +618,12 @@ class ImageSegmentationTrainer(TaskTrainer):
             eval_batch_size=analysis_cfg.eval_batch_size,
         )
         # The last epoch's weights replace the best ones here.
+        # DECISION plan-2026-10-31T180033-2faf890a/D-088
+        # The reload check is the EXACT one here (`exact_reload`): equal weights, and outputs within a
+        # tolerance relative to the largest score. Do NOT go back to `validate_model_loading`'s absolute
+        # 1e-5: AccUNet's logits reach 220 and a correct file differed by 0.3 under TF32 on the GPU
+        # (`model_loading_validated` false for a correct file, no note), review-iter-3 concern 4.
+        load_detail: Dict[str, Any] = {}
         test_final, load_check = classification_run.finalize_last_epoch(
             fit.model,
             fit.last_weights,
@@ -621,6 +635,8 @@ class ImageSegmentationTrainer(TaskTrainer):
             save=checkpoint_cfg.save_last,
             atomic=True,
             eval_batch_size=analysis_cfg.eval_batch_size,
+            exact_reload=True,
+            load_detail=load_detail,
         )
         return Evaluation(
             test_metrics_best=test_best,
@@ -631,6 +647,7 @@ class ImageSegmentationTrainer(TaskTrainer):
             analysis=analysis,
             test_metrics_final=test_final,
             load_check=load_check,
+            load_detail=load_detail or None,
         )
 
 

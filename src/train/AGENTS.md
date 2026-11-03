@@ -446,8 +446,12 @@ train, and the TEST split never selects.
   the argmax (`resize_argmax`, in pieces of classes); its decoder is `segmentation_data.image_to_rgb`, the training one.
   `python -m train predict` of a segmentation run writes a new directory of `<stem>.png` plus `index.json` last.
   `predictor.input_shape_of(record)` is the model input of either task and `record_beside(path)` reads the record without
-  loading the model. `check_model_against_record` cannot compare a functional family (a `module:TABLE` `variants_attr`
-  with no class) with the record; the anchor at that function says why and what is checked instead.
+  loading the model. `check_model_against_record` compares a functional family (a `module:TABLE` `variants_attr`
+  with no class) by its layers: `ModelSpec.observe` (`segmentation_models.observe_convunext`, `observe_accunet`) returns the
+  variant-table keys the layers show, or `None` for a model without a layer of the family, and a mismatch is refused (D-088);
+  the anchor at that function says what it cannot see. A segmentation run's reload check is `finalize_last_epoch(exact_reload=True)`:
+  equal weights and scores within `1e-5 + rtol * max|scores|` (`evaluation.LOAD_RTOL`, `LOAD_RTOL_TF32`), written as
+  `model_loading_check`; a false one makes the status `ok_reload_unverified` and adds a note.
 
 For text use `train.common.nlp`; for MegaDepth RGB+depth pairs `train.common.megadepth`
 (yielding `(rgb, y_true)` with `y_true = [disparity, mask]` on the last axis, the disparity

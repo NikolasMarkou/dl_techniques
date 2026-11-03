@@ -64,6 +64,16 @@ Interface contract
     :raises ConfigError: naming ``transform_args.image_size`` for a value that is no positive int
         or pair of positive ints (a bool is no int here).
 
+``observe_convunext(model)`` / ``observe_accunet(model)``
+    :param model: a loaded functional model.
+    :return: the variant-table keys the model's own layers show, or ``None`` when it holds no layer of
+        that family. ConvUNext: ``depth`` (the count of ``DownsampleAndSkip``), ``initial_filters`` (the
+        width of ``ConvStem``), ``blocks_per_level`` (the ConvNeXt blocks over ``2 * depth + 1``, the
+        blocks of both paths and the bottleneck) and ``convnext_version`` (``v1`` or ``v2``, from the
+        block class); ``drop_path_rate`` is not shown by a layer and is not checked. AccUNet:
+        ``base_filters`` and ``mlfc_iterations`` from the ``AccUNet`` layer's config. Nothing is rebuilt
+        (D-088, which supersedes the limit D-080 accepted for a segmentation record).
+
 ``builtin_segmentation_models()``
     :return: the two :class:`~train.api.registry.ModelSpec` rows (``convunext``, ``accunet``),
         freshly built, each with its recipe (``defaults``) and ``resolve_segmentation_args``.
@@ -86,11 +96,16 @@ Recipes
 warmup, per-variable ``clipnorm`` 1.0, a cosine over all epochs to 1% of the peak, 30 epochs, batch
 16, patience 10, a horizontal flip, Oxford-IIIT Pet at 128 px. ``ACCUNET`` is
 ``train.accunet.train_accunet.AccUNetTrainingConfig``'s: lr 1e-4, weight decay 1e-4, 2 warmup
-epochs, ``global_clipnorm`` 1.0, patience 15. Two values are NOT the legacy ones, on purpose and
-stated: the monitor is ``val_miou`` (both legacy trainers default to ``val_loss``; D-077), and the
+epochs, ``global_clipnorm`` 1.0, patience 15. Three values are NOT the legacy ones, on purpose and
+stated: the monitor is ``val_miou`` (both legacy trainers default to ``val_loss``; D-077), the
 loss is cross-entropy (the AccUNet trainer's default is ``combo``, which this task offers from
-step 35 on). The evaluation batch is the training batch (16), as the legacy trainer evaluates;
-the shared 256 would put 256 full-size masks and logits in one pass.
+step 35 on), and AccUNet's batch is 8, not the legacy 16 (D-088): batch 16 runs out of memory at the
+first step on the 24 GB reference card in the legacy trainer and in this task alike (measured, 17.4 GB
+free with another tenant's 6.6 GB on the card; ``tests/test_train/test_api/accunet_memory_evidence.json``),
+batch 8 peaks at 7.6 GB. The learning rate is NOT scaled (D-036's rule: the legacy trainer has no batch rule
+and a scaled AdamW rate would be an invented number; the 3-epoch smoke at batch 8 and lr 1e-4 learned, val_miou
+0.31, 0.41, 0.47). The evaluation batch is the training batch (16 for ConvUNext, 8 for AccUNet), as the legacy
+trainer evaluates; the shared 256 would put 256 full-size masks and logits in one pass.
 
 Measured (``plans/.../scratch_step23/logs/p1_build.txt``, CPU)
 --------------------------------------------------------------
@@ -109,7 +124,8 @@ Import rule
 Module scope imports the standard library and ``train.api`` only (D-012).
 """
 
-from typing import Any, Dict, Mapping, Sequence, Tuple, Union
+import collections
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
 
 from . import recipes
 from .args import AutoContext, OptimArgs
@@ -222,6 +238,47 @@ def convunext_stride(variant: str, model_args: Mapping[str, Any]) -> int:
             f"got {depth!r}"
         )
     return 2**depth
+
+
+def _layers_of(model: Any) -> Any:
+    """Yield every layer of ``model``, depth first through the layers that hold layers."""
+    for layer in getattr(model, "layers", None) or []:
+        yield layer
+        yield from _layers_of(layer)
+
+
+def observe_convunext(model: Any) -> Optional[Dict[str, Any]]:
+    """Return the variant keys ConvUNext's layers show, ``None`` for a model without them; see the module contract."""
+    # DECISION plan-2026-10-31T180033-2faf890a/D-088
+    # The family and variant of a segmentation record are checked by what the layers show, not
+    # left unchecked (D-080's limit: review-iter-3 concern 3 loaded a convunext/tiny file under
+    # records naming convunext/base, convunext/xlarge and accunet/base, and `export` wrote the lie).
+    # Do NOT rebuild the variant and compare weight shapes (a `model_args` key outside the table,
+    # `kernel_size` say, changes the shapes: D-032's failure) and do NOT compare `model.name`
+    # (`model_args.model_name` renames it). Read only keys a layer shows and a record would carry.
+    classes = collections.Counter(type(layer).__name__ for layer in _layers_of(model))
+    if not classes["DownsampleAndSkip"] or not classes["ConvStem"]:
+        return None
+    stem = next(layer for layer in _layers_of(model) if type(layer).__name__ == "ConvStem")
+    depth = classes["DownsampleAndSkip"]
+    blocks = classes["ConvNextV1Block"] + classes["ConvNextV2Block"]
+    observed: Dict[str, Any] = {
+        "depth": depth,
+        "initial_filters": int(stem.get_config()["filters"]),
+        "convnext_version": "v2" if classes["ConvNextV2Block"] else "v1",
+    }
+    if blocks % (2 * depth + 1) == 0:
+        observed["blocks_per_level"] = blocks // (2 * depth + 1)
+    return observed
+
+
+def observe_accunet(model: Any) -> Optional[Dict[str, Any]]:
+    """Return the variant keys AccUNet's layer shows, ``None`` for a model without it; see the module contract."""
+    for layer in _layers_of(model):
+        if type(layer).__name__ == "AccUNet":
+            config = layer.get_config()
+            return {key: config[key] for key in ("base_filters", "mlfc_iterations")}
+    return None
 
 
 def sides_of(image_size: Union[int, Sequence[int]]) -> Tuple[int, int]:
@@ -345,12 +402,21 @@ CONVUNEXT = _segmentation_recipe(
 # :100, warmup :101 (2.0), gradient_clipping :103 (optimizer_builder "gradient_clipping_by_norm", a
 # GLOBAL norm), patience :106, image size :87. Its loss is `combo` (:104) and its monitor val_loss
 # (:105); this recipe trains cross-entropy and monitors val_miou (D-077).
+# DECISION plan-2026-10-31T180033-2faf890a/D-088
+# AccUNet's batch is 8, NOT the legacy trainer's 16. Do NOT restore 16 "for parity": the first
+# training step of `batch_size=16` runs out of memory ([16,128,128,128] in `decoder_l3_block2`) in the
+# legacy trainer and through this task alike on the 24 GB card (17.4 GB free beside another process's
+# 6.6 GB), and the review's smoke is the only GPU run of the family that has completed. D-036's
+# procedure: halve until the rule holds (20 steps, no OOM, no allocator collection, peak <= 20,000 MiB,
+# device <= 23,000 MiB) -> 8 (peak 7,621 MiB). The learning rate stays 1e-4 (D-036: no batch rule in the
+# source, no invented scaling); 3 epochs at 8 and 1e-4 learned.
 ACCUNET = _segmentation_recipe(
     optim_args=recipes.optim_recipe(
         optimizer="adamw", lr=1e-4, weight_decay=1e-4, warmup_epochs=2, decay_over="total",
         global_clipnorm=1.0,
     ),
     patience=15,
+    batch_size=8,
 )
 
 
@@ -365,6 +431,7 @@ def builtin_segmentation_models() -> Tuple[ModelSpec, ...]:
             defaults=CONVUNEXT,
             resolve_model_args=f"{_HERE}:resolve_segmentation_args",
             stride=f"{_HERE}:convunext_stride",
+            observe=f"{_HERE}:observe_convunext",
         ),
         ModelSpec(
             family="accunet",
@@ -374,5 +441,6 @@ def builtin_segmentation_models() -> Tuple[ModelSpec, ...]:
             defaults=ACCUNET,
             resolve_model_args=f"{_HERE}:resolve_segmentation_args",
             stride=ACCUNET_STRIDE,
+            observe=f"{_HERE}:observe_accunet",
         ),
     )

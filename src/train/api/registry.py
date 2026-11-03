@@ -132,6 +132,14 @@ class ModelSpec:
         rule that depends on the variant or on a ``model_args`` key. ``None``
         (the default) is no rule: the classifiers keep their square ``image_size``
         and their own checks.
+    :param observe: for a family whose models are functional (no class to be an
+        instance of, no table keys in ``get_config()``): ``"module:callable"`` of
+        ``f(model) -> Optional[Mapping[str, Any]]``. It reads the family's own layers
+        and returns the variant-table keys they show (``{"depth": 3, ...}``), or
+        ``None`` when the model holds no layer this family builds (a model of another
+        family). ``train.api.predictor.check_model_against_record`` refuses ``None``
+        and any key that differs from the record's variant. ``None`` (the default):
+        the family is checked by its class and ``get_config()``.
     """
 
     family: str
@@ -141,6 +149,7 @@ class ModelSpec:
     defaults: Mapping[str, Any] = field(default_factory=dict)
     resolve_model_args: Optional[str] = None
     stride: Optional[Union[int, str]] = None
+    observe: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not self.family or "/" in self.family:
@@ -151,6 +160,8 @@ class ModelSpec:
             _require_attr_path("ModelSpec", "resolve_model_args", self.resolve_model_args)
         if not isinstance(self.tasks, tuple) or not self.tasks:
             raise ValueError(f"ModelSpec.tasks must be a non-empty tuple, got {self.tasks!r}")
+        if self.observe is not None:
+            _require_attr_path("ModelSpec", "observe", self.observe)
         if isinstance(self.stride, str):
             _require_attr_path("ModelSpec", "stride", self.stride)
         elif self.stride is not None and (
@@ -206,6 +217,12 @@ class ModelSpec:
         if self.resolve_model_args is None:
             return None
         return load_attr(self.resolve_model_args)
+
+    def load_observer(self) -> Optional[Any]:
+        """Import and return ``observe``, or ``None`` when unset."""
+        if self.observe is None:
+            return None
+        return load_attr(self.observe)
 
     def stride_of(
         self, variant: str, model_args: Optional[Mapping[str, Any]] = None

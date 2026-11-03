@@ -1,0 +1,194 @@
+{
+ "what": "Step 33.2 of plan-2026-10-31T180033-2faf890a (D-088): the reload check of a segmentation run measured on GPU 0 (RTX 4090) with trained weights. A = the run's final_model.keras compiled as the API compiles (jit auto), expected = A.predict(x, batch_size=16); B = load_model(final_model.keras, compile=False).predict(x, batch_size=16); x = four disjoint sets of 64 Oxford-IIIT Pet test images at 128x128; rel = max|A - B| / max|A|. Wrong files are B with its weights replaced (noise of the stated fraction of each tensor's std, the largest tensor times 1.01, another run's weights). Copied from the untracked plans/plan-2026-10-31T180033-2faf890a/scratch_step33/logs/tf32_*.json (probes/m_tf32.py); this file does not re-measure.",
+ "card": "RTX 4090, 24564 MiB, another process holding about 6.6 GiB",
+ "rows": [
+  {
+   "family": "accunet",
+   "tf32": true,
+   "run": "train_api_review3_accunet_pet_b8",
+   "batch": 16,
+   "sets_of_64_images": 4,
+   "scale_of_scores": [
+    218.999,
+    4.274,
+    57.281,
+    117.9
+   ],
+   "correct_file_worst_rel": 0.03221666514919674,
+   "correct_file_worst_abs": 3.7983362674713135,
+   "correct_file_worst_argmax_disagreement": 0.0014753341674804688,
+   "eager_vs_predict_worst_rel": 0.1546273258104453,
+   "predict_twice_rel": 0.0,
+   "wrong_files": {
+    "noise_0.001": {
+     "min_rel": 0.2863208854207313,
+     "max_rel": 0.60154747747004,
+     "nan_sets": 0,
+     "worst_argmax_agreement": 0.9544343948364258
+    },
+    "noise_0.01": {
+     "min_rel": 0.7741686367891397,
+     "max_rel": 1.091229994131835,
+     "nan_sets": 0,
+     "worst_argmax_agreement": 0.9010162353515625
+    },
+    "noise_0.1": {
+     "min_rel": null,
+     "max_rel": null,
+     "nan_sets": 4,
+     "worst_argmax_agreement": 0.2891721725463867
+    },
+    "largest_tensor_x1.01": {
+     "min_rel": 0.04923412639090011,
+     "max_rel": 0.08136346161487014,
+     "nan_sets": 0,
+     "worst_argmax_agreement": 0.9979114532470703
+    }
+   }
+  },
+  {
+   "family": "accunet",
+   "tf32": false,
+   "run": "train_api_review3_accunet_pet_b8",
+   "batch": 16,
+   "sets_of_64_images": 4,
+   "scale_of_scores": [
+    220.494,
+    4.247,
+    57.703,
+    116.047
+   ],
+   "correct_file_worst_rel": 9.55421131489484e-05,
+   "correct_file_worst_abs": 0.011087417602539062,
+   "correct_file_worst_argmax_disagreement": 8.58306884765625e-06,
+   "eager_vs_predict_worst_rel": 0.0003013315900922656,
+   "predict_twice_rel": 0.0,
+   "wrong_files": {
+    "noise_0.001": {
+     "min_rel": 0.2939132129828139,
+     "max_rel": 0.579492813366671,
+     "nan_sets": 0,
+     "worst_argmax_agreement": 0.9547128677368164
+    },
+    "noise_0.01": {
+     "min_rel": 0.7699013909406419,
+     "max_rel": 1.0889860039372907,
+     "nan_sets": 0,
+     "worst_argmax_agreement": 0.9015836715698242
+    },
+    "noise_0.1": {
+     "min_rel": null,
+     "max_rel": null,
+     "nan_sets": 4,
+     "worst_argmax_agreement": 0.28926563262939453
+    },
+    "largest_tensor_x1.01": {
+     "min_rel": 0.03102287073984064,
+     "max_rel": 0.0660629458392567,
+     "nan_sets": 0,
+     "worst_argmax_agreement": 0.9987039566040039
+    }
+   }
+  },
+  {
+   "family": "convunext",
+   "tf32": true,
+   "run": "train_api_seggate_api_s42",
+   "batch": 16,
+   "sets_of_64_images": 4,
+   "scale_of_scores": [
+    9.985,
+    9.79,
+    10.64,
+    9.735
+   ],
+   "correct_file_worst_rel": 0.0,
+   "correct_file_worst_abs": 0.0,
+   "correct_file_worst_argmax_disagreement": 0.0,
+   "eager_vs_predict_worst_rel": 0.004839149087762561,
+   "predict_twice_rel": 0.0,
+   "wrong_files": {
+    "noise_0.001": {
+     "min_rel": 0.0034212280414054456,
+     "max_rel": 0.004332659480206131,
+     "nan_sets": 0,
+     "worst_argmax_agreement": 0.9997177124023438
+    },
+    "noise_0.01": {
+     "min_rel": 0.038125388375615875,
+     "max_rel": 0.06731002925622191,
+     "nan_sets": 0,
+     "worst_argmax_agreement": 0.9969301223754883
+    },
+    "noise_0.1": {
+     "min_rel": 0.2523913585736441,
+     "max_rel": 0.5505573278435671,
+     "nan_sets": 0,
+     "worst_argmax_agreement": 0.9729852676391602
+    },
+    "largest_tensor_x1.01": {
+     "min_rel": 0.01997654486890662,
+     "max_rel": 0.03372993820110178,
+     "nan_sets": 0,
+     "worst_argmax_agreement": 0.9985618591308594
+    },
+    "another_run": {
+     "min_rel": 0.5896809970605194,
+     "max_rel": 0.7466017867210157,
+     "nan_sets": 0,
+     "worst_argmax_agreement": 0.9151115417480469
+    }
+   }
+  },
+  {
+   "family": "convunext",
+   "tf32": false,
+   "run": "train_api_seggate_api_s42",
+   "batch": 16,
+   "sets_of_64_images": 4,
+   "scale_of_scores": [
+    9.985,
+    9.79,
+    10.64,
+    9.735
+   ],
+   "correct_file_worst_rel": 0.0,
+   "correct_file_worst_abs": 0.0,
+   "correct_file_worst_argmax_disagreement": 0.0,
+   "eager_vs_predict_worst_rel": 4.062949214261378e-05,
+   "predict_twice_rel": 0.0,
+   "wrong_files": {
+    "noise_0.001": {
+     "min_rel": 0.0034212280414054456,
+     "max_rel": 0.004332659480206131,
+     "nan_sets": 0,
+     "worst_argmax_agreement": 0.9997177124023438
+    },
+    "noise_0.01": {
+     "min_rel": 0.038125388375615875,
+     "max_rel": 0.06731002925622191,
+     "nan_sets": 0,
+     "worst_argmax_agreement": 0.9969301223754883
+    },
+    "noise_0.1": {
+     "min_rel": 0.2523913585736441,
+     "max_rel": 0.5505573278435671,
+     "nan_sets": 0,
+     "worst_argmax_agreement": 0.9729852676391602
+    },
+    "largest_tensor_x1.01": {
+     "min_rel": 0.01997654486890662,
+     "max_rel": 0.03372993820110178,
+     "nan_sets": 0,
+     "worst_argmax_agreement": 0.9985618591308594
+    },
+    "another_run": {
+     "min_rel": 0.5896809970605194,
+     "max_rel": 0.7466017867210157,
+     "nan_sets": 0,
+     "worst_argmax_agreement": 0.9151115417480469
+    }
+   }
+  }
+ ]
+}

@@ -32,7 +32,14 @@ from dl_techniques.utils.logger import logger
 from train.common import run_summary
 from train.common.callbacks import partial_path, promote_partial
 from train.common.classification_data import EVAL_BATCH_SIZE, ClassificationData
-from train.common.evaluation import predict_batch_cap, validate_model_loading
+from train.common.evaluation import (
+    LOAD_RTOL,
+    LOAD_RTOL_TF32,
+    check_model_loading,
+    predict_batch_cap,
+    tf32_active,
+    validate_model_loading,
+)
 from train.common.run_io import save_training_history_json
 
 # ---------------------------------------------------------------------
@@ -52,6 +59,9 @@ INITIAL_LOSS_WARN_FACTOR = 10.0
 # ``results_summary.json["status"]``.
 STATUS_OK = "ok"
 STATUS_DIVERGED = "diverged"
+#: The run finished and its numbers stand, but ``final_model.keras`` did not reload to the model that
+#: wrote it (``model_loading_validated`` is false): the file is not known to be the one that was trained.
+STATUS_RELOAD_UNVERIFIED = "ok_reload_unverified"
 
 #: The three lines of a finished run's ``notes`` that describe the CSV and the two test scores; they
 #: hold for every task that runs this sequence (classification, segmentation), so there is one copy.
@@ -416,7 +426,8 @@ def finalize_last_epoch(
         model: keras.Model, last_weights: LastEpochWeights, data: ClassificationData,
         run_dir: Path, history: keras.callbacks.History, epochs_run: int,
         evaluate: Evaluate, save: bool = True, atomic: bool = False,
-        eval_batch_size: Optional[int] = None,
+        eval_batch_size: Optional[int] = None, exact_reload: bool = False,
+        load_detail: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[Dict[str, float]], Optional[bool]]:
     """Restore the last epoch's weights, score them, save them, write the history, reload.
 
@@ -443,6 +454,14 @@ def finalize_last_epoch(
     :param eval_batch_size: The run's evaluation batch, or ``None`` (the legacy trainers).
         The load check's two ``predict`` calls run at Keras' 32 unless this is lower
         (:func:`~train.common.evaluation.predict_batch_cap`).
+    :param exact_reload: ``True`` (the segmentation task) runs the check that is honest about large
+        scores and TF32 (D-088): the weights of the reloaded model must EQUAL the model's, and the
+        outputs differ by at most ``1e-5 + rtol * max|scores|`` with ``rtol``
+        :data:`~train.common.evaluation.LOAD_RTOL` (or ``LOAD_RTOL_TF32`` when a GPU runs TF32).
+        ``False`` (the default) is the absolute ``validate_model_loading`` every classification run makes.
+    :param load_detail: a dict that is filled with the check's measurements
+        (:meth:`~train.common.evaluation.LoadCheck.as_record`) when ``exact_reload`` is true and
+        ``save`` is true; left alone otherwise.
     :return: ``(test_metrics_final, load_check)``; ``load_check`` is ``None`` when
         ``save`` is ``False``, ``test_metrics_final`` when there is no test split.
     """
@@ -480,16 +499,49 @@ def finalize_last_epoch(
         cap = predict_batch_cap(eval_batch_size)
         # The keyword is passed only when there is one: tests of the legacy trainers patch
         # `validate_model_loading` with the three-argument signature it always had.
-        load_check = bool(validate_model_loading(
-            str(final_path), sample, model.predict(sample, batch_size=cap, verbose=0),
-            **({} if cap is None else {"batch_size": cap}),
-        ))
+        expected = model.predict(sample, batch_size=cap, verbose=0)
+        if exact_reload:
+            checked = check_model_loading(
+                str(final_path), sample, expected, batch_size=cap,
+                relative_tolerance=LOAD_RTOL_TF32 if tf32_active() else LOAD_RTOL,
+                reference_weights=model.get_weights(),
+            )
+            load_check = checked.ok
+            if load_detail is not None:
+                load_detail.update(checked.as_record())
+        else:
+            load_check = bool(validate_model_loading(
+                str(final_path), sample, expected,
+                **({} if cap is None else {"batch_size": cap}),
+            ))
     return test_metrics_final, load_check
 
 
 # ---------------------------------------------------------------------
 # H7: the keys every finished summary carries
 # ---------------------------------------------------------------------
+
+def reload_note(detail: Optional[Dict[str, Any]]) -> str:
+    """The note of a summary whose ``model_loading_validated`` is false; ``detail`` as ``LoadCheck.as_record``."""
+    head = (
+        "`model_loading_validated` is false: final_model.keras did not reload to the model that "
+        f"wrote it, so the status is {STATUS_RELOAD_UNVERIFIED!r} and not {STATUS_OK!r}"
+    )
+    if not detail:
+        return head + " (the run log has the comparison)"
+    if detail.get("max_abs_diff") is None:
+        return head + ": the reloaded outputs have another structure or shape than the model's"
+    parts = [
+        f"largest output difference {detail['max_abs_diff']:.6g} against {detail['tolerance']:.6g} allowed "
+        f"(1e-5 + {detail['relative_tolerance']:g} of the largest score {detail['scale']:.6g})",
+        f"TF32 was {'on' if detail['tf32'] else 'off'}",
+    ]
+    if detail.get("weights_equal") is not None:
+        parts.append(f"the reloaded weights are {'equal to' if detail['weights_equal'] else 'NOT equal to'} the model's")
+    if detail.get("argmax_agreement") is not None:
+        parts.append(f"argmax agreement {detail['argmax_agreement']:.5f}")
+    return head + ": " + "; ".join(parts)
+
 
 def base_summary(
         summary_head: Dict[str, Any], hist: Dict[str, List[float]], epochs_run: int,
@@ -499,6 +551,7 @@ def base_summary(
         checkpoint_max_diff: Optional[float], epoch_times: List[float],
         fit_wall_seconds: float, visualizations: Dict[str, Any], load_check: Optional[bool],
         conformal: Optional[Dict[str, Any]], analysis: Dict[str, Any], notes: List[str],
+        load_detail: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """The summary of a finished (``status: "ok"``) run, as one dict.
 
@@ -524,12 +577,22 @@ def base_summary(
     :param conformal: The conformal record, or ``None``.
     :param analysis: From :func:`report_best_weights`.
     :param notes: Plain-language lines, in the caller's order.
+    :param load_detail: The measurements of the round-trip check (``finalize_last_epoch``'s
+        ``load_detail``), written as ``model_loading_check`` when given. A false ``load_check`` is
+        never left unexplained: the status is :data:`STATUS_RELOAD_UNVERIFIED` and a note says what
+        was measured (D-088).
     :return: A strict-JSON-ready dict.
     """
     best_i, final_i = best_epoch - 1, epochs_run - 1
+    # DECISION plan-2026-10-31T180033-2faf890a/D-088
+    # A reload check that is false is never left as `status: "ok"` with no word said: the AccUNet run
+    # of review-iter-3 had `model_loading_validated` false, `status` ok, `success` true and no note.
+    # Do NOT fold it into `ok` or into a log line only; the run's other numbers stand, the file does not.
+    if load_check is False:
+        notes = [*notes, reload_note(load_detail)]
     val_keys = [k for k in hist if k.startswith("val_")]
     return {
-        "status": STATUS_OK,
+        "status": STATUS_OK if load_check is not False else STATUS_RELOAD_UNVERIFIED,
         **summary_head,
         "epochs_run": epochs_run,
         "stopped_early": epochs_run < epochs_requested,
@@ -551,6 +614,7 @@ def base_summary(
         **({"ece": visualizations["ece"]} if "ece" in visualizations else {}),
         "visualizations": visualizations,
         "model_loading_validated": load_check,
+        **({"model_loading_check": load_detail} if load_detail else {}),
         "conformal": conformal,
         "analyzer": analysis,
         "notes": notes,

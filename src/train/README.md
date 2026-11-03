@@ -60,9 +60,13 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   the collision), and a declared class that has no pixel in any mask of the fit split (named, with the usual cause:
   `data.class_names`, a void value that is also a class, or a `data.max_samples` cut).
 * **Recipes** are the legacy trainers' defaults (`train.convunext`, `train.accunet`): AdamW, 30 epochs, batch 16, a
-  horizontal flip; ConvUNext lr 1e-3, AccUNet lr 1e-4 with 2 warmup epochs. Two values differ on purpose. The monitor is
-  `val_miou`, a maximum; both legacy trainers default to `val_loss`. And AccUNet trains the cross-entropy, where its
-  legacy trainer trains `combo`, which this task offers later; the run log says so.
+  horizontal flip; ConvUNext lr 1e-3, AccUNet lr 1e-4 with 2 warmup epochs. Three values differ on purpose. The monitor is
+  `val_miou`, a maximum; both legacy trainers default to `val_loss`. AccUNet trains the cross-entropy, where its
+  legacy trainer trains `combo`, which this task offers later; the run log says so. And **AccUNet's batch is 8**: batch
+  16 runs out of memory at the first step on a 24 GB card (RTX 4090 with 17.4 GB free) in the legacy trainer and in this
+  task alike, batch 8 peaks at 7.6 GB (20 steps, no allocator collection; `tests/test_train/test_api/accunet_memory_evidence.json`).
+  The learning rate stays 1e-4, not scaled for the batch: the legacy trainer has no batch rule, and the batch-8
+  smoke (3 epochs) learned, `val_miou` 0.31, 0.41, 0.47.
 * **What `val_loss` is**: Keras averages the cross-entropy of a batch over its valid pixels and then averages the
   batches weighted by images, so `loss` and `val_loss` are NOT the cross-entropy pooled over every valid pixel; with a void
   label the two differ whenever the void share differs between batches. `accuracy` and `miou` ARE pooled over every valid
@@ -74,6 +78,18 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   compared in `float32` (Keras' dtype) with a band of 16 `float32` steps of the baseline (about 1e-6): a bare `>=` of
   the `float32` metric against the `float64` baseline called such a model a success in 8 of 20 measured cases. The
   summary's notes say so.
+* **The reload check** (`model_loading_validated`, and `model_loading_check` for what it measured) reloads
+  `final_model.keras` and compares it with the model that wrote it: the weights must be EQUAL array by array, and the
+  scores must differ by at most `1e-5 + rtol * (the largest score)`, with `rtol` 1e-3, or 0.07 when a GPU runs TF32 (the
+  default of an Ampere or newer card). The absolute 1e-5 of the classification check is wrong for scores of scale 220:
+  AccUNet's correct file differed by 0.3 on the RTX 4090 and was reported false with a true `success` and no note.
+  Measured on trained weights (`tests/test_train/test_api/load_check_evidence.json`): a correct file differs by up to
+  9.6e-5 of the largest score without TF32 and 3.2e-2 with it (AccUNet; ConvUNext 0.0 in both), so TF32 costs the
+  output comparison a factor of 330, and a wrong file only 3e-3 (ConvUNext, noise of 1e-3 of the weights' spread) to 0.29
+  and 0.59 (another run's weights): the output tolerance cannot see a wrong file below 7% under TF32, which is why the
+  weights are compared exactly. The summary's `model_loading_check` says the largest difference, the tolerance, whether
+  the weights were equal, the argmax agreement and whether TF32 was on. **Whenever the check is false** the status is
+  `ok_reload_unverified` (not `ok`) and a note says what was measured; the run's other numbers stand.
 * A conformal level (`analysis_args.conformal_alpha`) is refused: a segmentation run has no set of classes per image.
 * **Figures** (`analysis_args.figures`, and only with a test split): `visualizations/` gets a grid of four fixed
   test pairs after every epoch (`epoch_NNN_seg_grid.png`, NNN 000 being the untrained model: image, ground truth,
@@ -226,8 +242,8 @@ sample's high byte, and is equal to the loader on it; PIL's `I` and `F` (32-bit 
 `ConfigError` naming the mode, because the loader reads no file of that depth. A 16-bit RGB or RGBA PNG opens in PIL as
 8-bit, which cannot be told from an 8-bit file, so for a grey model it is within 1 level of 255 of the loader (measured; a
 path is exact). `load_model` refuses, at load, a `task.json` whose `task` is not one this reader knows or that its family
-does not train, whose family or variant is not the model's (a classification family; see the segmentation paragraph for
-the limit of that check there), or whose `input_shape` (`input_size` for a segmentation run) the model does not take, whose `mean` is outside 0 to 1 or whose `std` is
+does not train, whose family or variant is not the model's (a classification family by its class and `get_config()`, a segmentation
+family by its layers; see the segmentation paragraph), or whose `input_shape` (`input_size` for a segmentation run) the model does not take, whose `mean` is outside 0 to 1 or whose `std` is
 outside 1e-6 to 1 (the images are standardized from the range 0 to 1; a `mean` of 1e30 used to predict NaN without an error),
 and a `.keras` zip with no `config.json` or no weights, each with a `ConfigError` naming the problem. **Limit:** the class
 names are checked for their count and for repeats, never for their order, so a `task.json` whose names are a permutation of
@@ -250,13 +266,18 @@ the pieces give the answer of one piece. From Python, `SegmentationPredictor.pre
 array (RGBA loses its alpha, grey is repeated, a floating array must lie in [0, 1] and is rounded to its byte) or a list
 of them, and returns `{"masks": [...], "class_names": [...]}` ALWAYS as a list (a mask is already 2-D). A run that fails
 half way leaves the PNGs it wrote and no `index.json`; two images with one stem (`a/cat.png`, `b/cat.jpg`) and a record
-whose `output` is `logits` are refused before the model is loaded. **Limit, stated because it cannot be checked:** the
-segmentation families are functional models with no class and no table keys in their config, so `load_model` cannot
-compare the model with the family and variant the record names (a classification family is compared); it checks that the
-variant is in the table, that each `variant_overrides` key is a table key, and that the model takes `input_size` and
-gives one score per class name per pixel at that size. Rebuilding the variant to compare weight shapes was rejected (a
-`model_args` key that is not a table key changes the shapes and the record does not carry it) and so was comparing
-`model.name` (`model_args.model_name` renames it).
+whose `output` is `logits` are refused before the model is loaded. **What `load_model` checks of a segmentation file (D-088, which replaces the limit D-080 stated):** the two
+families are functional models with no class and no table keys in their config, but they share no layer class, so
+`ModelSpec.observe` reads the layers. A file that holds no layer of the family the record names (a `convunext/tiny`
+file under an `accunet/base` record, or the reverse) is refused naming the layers it does hold, and the variant keys
+the layers show must equal the record's table plus its recorded `variant_overrides`: ConvUNext's `depth` (the count of
+`DownsampleAndSkip`), `initial_filters` (the width of `ConvStem`), `blocks_per_level` and `convnext_version`; AccUNet's
+`base_filters` and `mlfc_iterations`. It also checks that the variant is in the table, that each override is a table
+key, and that the model takes `input_size` and gives one score per class name per pixel at that size. What it cannot see:
+ConvUNext's `drop_path_rate` (no layer shows it) and a `model_args` key outside the table (`kernel_size`), because
+rebuilding the variant to compare weight shapes was rejected (such a key changes the shapes and the record does not carry
+it) and so was comparing `model.name` (`model_args.model_name` renames it); two variants that differ only there are not
+told apart, and neither are two runs of one family and variant with the same class count.
 
 **`task.json` is schema version 2** (D-073, `train.api.predictor`): a classification record has the keys and the order
 of version 1 and only `schema_version` changed; a segmentation record has `input_size` as `[height, width]` (not

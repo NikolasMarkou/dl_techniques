@@ -378,6 +378,9 @@ class Evaluation:
     analysis: Dict[str, Any]
     test_metrics_final: Dict[str, float]
     load_check: Optional[bool]
+    #: The measurements behind ``load_check`` when the task makes the exact reload check
+    #: (``finalize_last_epoch(exact_reload=True)``): the summary's ``model_loading_check``.
+    load_detail: Optional[Dict[str, Any]] = None
 
 
 def _is_auto(value: Any) -> bool:

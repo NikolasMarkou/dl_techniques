@@ -1,0 +1,60 @@
+{
+ "what": "Step 33.2 of plan-2026-10-31T180033-2faf890a (D-088): AccUNet/base on Oxford-IIIT Pet at 128 px, the recipe batch against the 24 GB card, judged by the rule of D-036 (memory_fit_evidence.json): a batch fits when 20 real train steps complete, with no out-of-memory error and no allocator garbage collection, the allocator peak at or under 20,000 MiB and the device at or under 23,000 MiB. Copied from the untracked plans/.../scratch_step33/logs (ladder_b*.txt, ladder_b*_smi.txt, legacy_b16.txt, legacy_b16_smi.txt, run_ladder.sh, run_legacy_b16.sh); this file does not re-measure.",
+ "card_mib": 24564,
+ "idle_device_mib": 6669,
+ "idle_note": "another session's headless browser held 5.9 to 6.6 GiB; free memory 17.4 GiB",
+ "rule": {
+  "peak_limit_mib": 20000,
+  "device_limit_mib": 23000,
+  "no_allocator_gc_or_oom_line": true,
+  "min_steps": 20
+ },
+ "rows": [
+  {
+   "arm": "api",
+   "batch": 16,
+   "image": 128,
+   "model": "accunet/base",
+   "params": 13426282,
+   "steps": 0,
+   "completed": false,
+   "oom": true,
+   "oom_request": "shape[16,128,128,128] float in decoder_l3_block1 / hanc",
+   "allocator_gc_lines": null,
+   "peak_mib": null,
+   "device_mib": 23849,
+   "fits": false
+  },
+  {
+   "arm": "legacy",
+   "batch": 16,
+   "image": 128,
+   "model": "train.accunet.train_accunet, synthetic data, 3 classes, cross_entropy",
+   "params": 13426282,
+   "steps": 0,
+   "completed": false,
+   "oom": true,
+   "oom_request": "shape[16,128,128,128] float in the first train step",
+   "allocator_gc_lines": null,
+   "peak_mib": null,
+   "device_mib": 22559,
+   "fits": false
+  },
+  {
+   "arm": "api",
+   "batch": 8,
+   "image": 128,
+   "model": "accunet/base",
+   "params": 13426282,
+   "steps": 21,
+   "completed": true,
+   "oom": false,
+   "oom_request": null,
+   "allocator_gc_lines": 0,
+   "peak_mib": 7621.1,
+   "device_mib": 21305,
+   "fits": true
+  }
+ ],
+ "earlier_evidence": "review-iter-3: batch 16 OOM with 15,308 MiB visible; batch 8 three epochs, val_miou 0.3119, 0.4129, 0.4668 at lr 1e-4"
+}

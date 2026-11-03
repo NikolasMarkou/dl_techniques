@@ -1,5 +1,6 @@
 """Common evaluation, visualization, and analysis utilities for training scripts."""
 
+import dataclasses
 import os
 import keras
 import numpy as np
@@ -78,16 +79,70 @@ def evaluate_on_test(model: keras.Model, test_ds: tf.data.Dataset) -> Dict[str, 
 
 # ---------------------------------------------------------------------
 
-def validate_model_loading(
+#: Relative tolerance of the round-trip check of a model whose scores can be large (a segmentation
+#: model's logits reach 220): the allowed difference is ``tolerance + LOAD_RTOL * max|expected|``.
+#: Measured on trained weights, RTX 4090, TF32 OFF, a correct ``final_model.keras`` against the model
+#: that wrote it (both ``predict``, batch 16, four sets of 64 Oxford-IIIT Pet test images): AccUNet
+#: 9.6e-5 of the largest score at worst (ConvUNext 0.0); a wrong file (1e-3 of the weights' spread added
+#: as noise) 3.4e-3 (ConvUNext) and 0.29 (AccUNet). 1e-3 is 10 times the worst correct file and under
+#: every wrong one (D-088, ``scratch_step33/logs/tf32_*.json``).
+LOAD_RTOL = 1e-3
+#: The same with TF32 in effect (a GPU with TF32 execution on, TensorFlow's default on Ampere and
+#: later): AccUNet's correct file differs by up to 3.2e-2 of the largest score (14 times more than
+#: without TF32: its dense convolutions round to 10 bits), ConvUNext's by 0.0. Twice the worst.
+#: It is blind to a wrong file below 7%, which is why the weights are compared exactly as well.
+LOAD_RTOL_TF32 = 0.07
+
+
+def tf32_active() -> bool:
+    """Whether a GPU is visible and TensorFlow runs its matmuls and convolutions in TF32."""
+    return bool(
+        tf.config.experimental.tensor_float_32_execution_enabled()
+        and tf.config.list_physical_devices("GPU")
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class LoadCheck:
+    """What :func:`check_model_loading` measured.
+
+    :param ok: the verdict (outputs within ``tolerance`` and, when given, equal weights).
+    :param max_abs_diff: largest absolute output difference, ``None`` for an output structure mismatch.
+    :param scale: largest absolute value of the expected output, ``None`` for a structure mismatch.
+    :param tolerance: the absolute difference allowed (``atol + rtol * scale``), ``None`` as above.
+    :param relative_tolerance: the ``rtol`` used.
+    :param weights_equal: ``True`` / ``False`` when reference weights were compared, else ``None``.
+    :param argmax_agreement: share of positions whose ``argmax`` over the last axis is equal (not part
+        of the verdict), ``None`` for a structure mismatch.
+    :param tf32: whether TF32 was in effect (:func:`tf32_active`).
+    """
+
+    ok: bool
+    max_abs_diff: Optional[float]
+    scale: Optional[float]
+    tolerance: Optional[float]
+    relative_tolerance: float
+    weights_equal: Optional[bool]
+    argmax_agreement: Optional[float]
+    tf32: bool
+
+    def as_record(self) -> Dict[str, Any]:
+        """The check as the plain dict the summary's ``model_loading_check`` holds."""
+        return dataclasses.asdict(self)
+
+
+def check_model_loading(
         model_path: str,
         test_sample: Any,
         expected_output: np.ndarray,
         custom_objects: Optional[Dict[str, Any]] = None,
         tolerance: float = 1e-5,
         batch_size: Optional[int] = None,
-) -> bool:
+        relative_tolerance: float = 0.0,
+        reference_weights: Optional[List[np.ndarray]] = None,
+) -> LoadCheck:
     """
-    Validate that a saved model loads correctly and produces expected outputs.
+    Reload a saved model, run it on ``test_sample`` and compare with ``expected_output``.
 
     Parameters
     ----------
@@ -96,7 +151,7 @@ def validate_model_loading(
     test_sample : Any
         Input sample for prediction (numpy array or tensor).
     expected_output : np.ndarray
-        Expected output from the original model.
+        Expected output from the original model (a dict for a model with named outputs).
     custom_objects : Optional[Dict[str, Any]]
         Custom objects dict for model loading.
     tolerance : float
@@ -104,12 +159,20 @@ def validate_model_loading(
     batch_size : Optional[int]
         Rows per ``predict`` pass of the reloaded model; ``None`` is Keras' default
         (:data:`KERAS_PREDICT_BATCH_SIZE`).
+    relative_tolerance : float
+        Added to the allowed difference as ``relative_tolerance * max|expected|``; ``0.0`` (the
+        default) is the absolute check every classification run has always made.
+    reference_weights : Optional[List[np.ndarray]]
+        The in-memory model's ``get_weights()``. When given, the reloaded weights must be EQUAL to
+        them, array by array, whatever the outputs say: a stored file round-trips floats exactly, and
+        the outputs of two correct models differ by rounding under TF32, so the weights are the
+        comparison that has no noise and no blind spot.
 
     Returns
     -------
-    bool
-        True if the reloaded outputs match ``expected_output`` within
-        ``tolerance``; False (with a warning) if they do not. A mismatch is a
+    LoadCheck
+        ``ok`` is True if the reloaded outputs match ``expected_output`` within the tolerance (and the
+        weights are equal, if compared); False (with a warning) if they do not. A mismatch is a
         verdict the caller records.
 
     Raises
@@ -133,6 +196,18 @@ def validate_model_loading(
         test_sample = test_sample.numpy()
 
     loaded_output = loaded_model.predict(test_sample, batch_size=batch_size, verbose=0)
+    tf32 = tf32_active()
+    weights_equal: Optional[bool] = None
+    if reference_weights is not None:
+        # DECISION plan-2026-10-31T180033-2faf890a/D-088
+        # The weights are compared EXACTLY, beside the outputs. Do NOT drop this and widen the output
+        # tolerance instead: under TF32 two correct executions of one set of weights differ by 3% of
+        # the largest score (AccUNet, measured), so an output tolerance honest on a correct file is
+        # blind to a wrong one below 7%, while a stored file round-trips floats bit for bit.
+        reloaded = loaded_model.get_weights()
+        weights_equal = len(reloaded) == len(reference_weights) and all(
+            a.shape == b.shape and np.array_equal(a, b) for a, b in zip(reloaded, reference_weights)
+        )
 
     if isinstance(expected_output, dict) or isinstance(loaded_output, dict):
         if not (isinstance(expected_output, dict) and isinstance(loaded_output, dict)):
@@ -141,35 +216,79 @@ def validate_model_loading(
                 f"(expected={type(expected_output).__name__}, "
                 f"loaded={type(loaded_output).__name__})"
             )
-            return False
+            return LoadCheck(False, None, None, None, relative_tolerance, weights_equal, None, tf32)
         if set(expected_output.keys()) != set(loaded_output.keys()):
             logger.warning(
                 "Model output keys differ after loading "
                 f"(expected={sorted(expected_output.keys())}, "
                 f"loaded={sorted(loaded_output.keys())})"
             )
-            return False
-        max_diff = 0.0
-        for k in expected_output:
-            diff = np.max(np.abs(
-                np.asarray(loaded_output[k]) - np.asarray(expected_output[k])
-            ))
-            max_diff = max(max_diff, float(diff))
-        if max_diff <= tolerance:
-            logger.info("Model loading validation passed")
-            return True
-        logger.warning(
-            f"Model outputs differ after loading (max_diff={max_diff:.6f})"
-        )
-        return False
-
-    if np.allclose(expected_output, loaded_output, atol=tolerance):
-        logger.info("Model loading validation passed")
-        return True
+            return LoadCheck(False, None, None, None, relative_tolerance, weights_equal, None, tf32)
+        pairs = [(np.asarray(expected_output[k]), np.asarray(loaded_output[k])) for k in expected_output]
     else:
-        max_diff = np.max(np.abs(loaded_output - expected_output))
-        logger.warning(f"Model outputs differ after loading (max_diff={max_diff:.6f})")
-        return False
+        pairs = [(np.asarray(expected_output), np.asarray(loaded_output))]
+
+    # The absolute check keeps numpy's own `allclose` for a single array (its default rtol of 1e-5 of the
+    # reloaded value is part of what every classification run has always been judged by) and a plain
+    # max difference for a dict; the relative check is `max_diff <= tolerance + rtol * scale`.
+    legacy_allclose = not relative_tolerance and not isinstance(expected_output, dict)
+    max_diff = 0.0
+    scale = 0.0
+    for expected, loaded in pairs:
+        if expected.shape != loaded.shape:
+            logger.warning(
+                f"Model output shape differs after loading (expected={expected.shape}, loaded={loaded.shape})"
+            )
+            return LoadCheck(False, None, None, None, relative_tolerance, weights_equal, None, tf32)
+        diff = np.abs(loaded - expected)
+        max_diff = max(max_diff, float(np.max(diff)) if diff.size else 0.0)
+        scale = max(scale, float(np.max(np.abs(expected))) if expected.size else 0.0)
+    allowed = tolerance + relative_tolerance * scale
+    if legacy_allclose:
+        outputs_ok = bool(np.allclose(pairs[0][0], pairs[0][1], atol=tolerance))
+    else:
+        outputs_ok = bool(max_diff <= allowed)
+    agreement = None
+    first_expected, first_loaded = pairs[0]
+    if first_expected.ndim >= 2 and first_expected.shape[-1] > 1:
+        agreement = float(np.mean(first_expected.argmax(-1) == first_loaded.argmax(-1)))
+    ok = outputs_ok and weights_equal is not False
+    if ok:
+        logger.info("Model loading validation passed")
+    elif not outputs_ok:
+        logger.warning(
+            f"Model outputs differ after loading (max_diff={max_diff:.6f}, allowed {allowed:.6f}"
+            f"{' = atol + rtol * scale' if relative_tolerance else ''}; TF32 {'on' if tf32 else 'off'})"
+        )
+    else:
+        logger.warning("Model weights differ after loading: the reloaded weights are not the in-memory ones")
+    return LoadCheck(ok, max_diff, scale, allowed, relative_tolerance, weights_equal, agreement, tf32)
+
+
+def validate_model_loading(
+        model_path: str,
+        test_sample: Any,
+        expected_output: np.ndarray,
+        custom_objects: Optional[Dict[str, Any]] = None,
+        tolerance: float = 1e-5,
+        batch_size: Optional[int] = None,
+) -> bool:
+    """
+    Validate that a saved model loads correctly and produces expected outputs.
+
+    The absolute check the classification trainers have always made: :func:`check_model_loading`
+    with no relative tolerance and no weights comparison, reduced to its verdict. Parameters and
+    raises are those of :func:`check_model_loading`.
+
+    Returns
+    -------
+    bool
+        True if the reloaded outputs match ``expected_output`` within ``tolerance``; False (with a
+        warning) if they do not.
+    """
+    return check_model_loading(
+        model_path, test_sample, expected_output, custom_objects, tolerance, batch_size
+    ).ok
 
 
 # ---------------------------------------------------------------------

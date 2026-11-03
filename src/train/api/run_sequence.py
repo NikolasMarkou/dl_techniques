@@ -640,6 +640,7 @@ def report(run: Run) -> TrainResult:
             notes=trainer._notes(
                 config, run.baseline, run.initial_ratio, run.init_warning, data, resume
             ),
+            load_detail=evaluated.load_detail,
         )
         if run.reporting_only:
             stale = resume_decisions.older_analysis_note(

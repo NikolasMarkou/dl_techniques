@@ -218,6 +218,15 @@ def test_the_summary_says_what_it_trained_and_what_val_loss_is(finished):
     else:
         assert summary["visualizations"] == {"files": [], "failed": [], "skipped": True}
     assert summary["conformal"] is None
+    # D-088: the reload check is the exact one (equal weights, a tolerance relative to the largest score)
+    # and its measurements are in the summary; a true check leaves the status plain `ok` and adds no note.
+    from train.common.evaluation import LOAD_RTOL
+
+    check = summary["model_loading_check"]
+    assert summary["model_loading_validated"] is True and summary["status"] == "ok"
+    assert check["ok"] is True and check["weights_equal"] is True and check["tf32"] is False  # these tests run on the CPU
+    assert check["relative_tolerance"] == LOAD_RTOL and check["max_abs_diff"] <= check["tolerance"]
+    assert not any("model_loading_validated" in note for note in summary["notes"])
 
 
 def test_a_void_label_is_dropped_from_the_analysis_and_named_in_the_notes(finished):
@@ -484,10 +493,14 @@ def test_the_convunext_recipe_is_the_legacy_trainers_defaults_but_for_the_monito
     assert (metric.watch_metric, metric.watch_mode) == ("val_miou", "max")
 
 
-def test_the_accunet_recipe_is_its_trainers_defaults_but_for_the_monitor_and_the_loss(world):
+def test_the_accunet_recipe_is_its_trainers_defaults_but_for_the_monitor_the_loss_and_the_batch(world):
     _, accunet = legacy_defaults()
     recipe, optim, metric, checkpoint = resolved_recipe("accunet", "base")
-    assert (recipe["epochs"], recipe["batch_size"]) == (accunet.epochs, accunet.batch_size)
+    # The batch is the legacy trainer's 16 halved (D-088: 16 runs out of memory on the 24 GB card, in the
+    # legacy trainer too; accunet_memory_evidence.json), the epochs are its own, the lr is NOT scaled.
+    assert recipe["epochs"] == accunet.epochs
+    assert (accunet.batch_size, recipe["batch_size"]) == (16, 8)
+    assert recipe["analysis_args"] == {"eval_batch_size": 8}
     assert optim.optimizer == "adamw" and optim.lr == accunet.lr and optim.weight_decay == accunet.weight_decay
     assert optim.warmup_epochs == accunet.warmup_epochs == 2
     assert optim.global_clipnorm == accunet.gradient_clipping == 1.0 and optim.clipnorm is None
@@ -498,6 +511,7 @@ def test_the_accunet_recipe_is_its_trainers_defaults_but_for_the_monitor_and_the
     stub = object.__new__(ImageSegmentationTrainer)
     notices = stub.recipe_notices(type("F", (), {"dataset": "oxford_pet"})(), "accunet")
     assert any("combo" in text for _, text in notices)
+    assert any("batch is 8" in text and "24 GB" in text for _, text in notices)
 
 
 def test_the_adapters_build_what_the_legacy_trainers_build(world):
