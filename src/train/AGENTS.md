@@ -404,10 +404,15 @@ train, and the TEST split never selects.
   padding, so void stays void and no value appears that the file did not hold. `scan_segmentation_folder` (two directories
   joined by file stem) and `read_segmentation_csv` (`image`, `mask` columns) list pairs and refuse an unpaired stem, a file
   listed twice and an image or MASK in both splits; `check_pairs` checks every mask value against the classes and the
-  stated `ignore_index` (a mask whose values are exactly 0 and 255 is refused with a pointer at `data.mask_threshold`);
+  stated `ignore_index` (a mask whose values are exactly 0 and 255 is refused with a pointer at the reserved `mask_threshold` key of the segmentation data configs);
   `pair_fingerprint` hashes the pair rows in listing order (mask path and size included; `content` also the bytes).
   `train.api.segmentation_args` holds the config classes and runs the listing plus a PIL-only sample of 32 pairs before the
   claim; the loaders check every pair they use before `fit` and log the duration. Pipelines assert their cardinality.
+  The train augmentation (`build_segmentation_augment`, presets `none`, `flip`, `dihedral`; D-075) draws ONE flip or quarter turn
+  from the element's seed and applies it to the image and the mask stacked as a fourth channel, so a mask that is a function of
+  the image stays one; `dihedral` is refused on a non-square size, nothing is padded, photometric ops are absent, and the
+  selection and test splits are never augmented. `SegTransformArgs` has `image_size` (an int or `[height, width]`) and `augment`;
+  there is no `normalize` key (inputs are in [0, 1], the record stores zeros and ones).
   Oxford-IIIT Pet is read through `load_oxford_pet_arrays`, the one TFDS seam, byte-equal to `train.convunext.common.load_oxford_pet`.
 
 For text use `train.common.nlp`; for MegaDepth RGB+depth pairs `train.common.megadepth`

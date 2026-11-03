@@ -57,6 +57,13 @@ Interface contract
     :raises ValueError: when ``spec`` has no ``stride`` (a classifier was passed: a bug in the
         caller, not a request).
 
+``sides_of(image_size)``
+    :param image_size: an int (a square) or a pair ``[height, width]``.
+    :return: ``(height, width)``, the one reading of a segmentation ``image_size`` that
+        :func:`check_image_size` and ``train.api.segmentation_args.SegTransformArgs`` share.
+    :raises ConfigError: naming ``transform_args.image_size`` for a value that is no positive int
+        or pair of positive ints (a bool is no int here).
+
 ``builtin_segmentation_models()``
     :return: the two :class:`~train.api.registry.ModelSpec` rows (``convunext``, ``accunet``),
         freshly built. NOT registered by :func:`train.api.recipes.register_builtin_models`: the
@@ -179,7 +186,7 @@ def convunext_stride(variant: str, model_args: Mapping[str, Any]) -> int:
     return 2**depth
 
 
-def _sides_of(image_size: Union[int, Sequence[int]]) -> Tuple[int, int]:
+def sides_of(image_size: Union[int, Sequence[int]]) -> Tuple[int, int]:
     """Return ``(height, width)`` of an int or a pair of ints above zero (a bool is no int here)."""
     sides = (
         [image_size, image_size]
@@ -216,7 +223,7 @@ def check_image_size(
             f"the family {spec.family!r} has no stride rule; check_image_size is for "
             "segmentation families"
         )
-    height, width = _sides_of(image_size)
+    height, width = sides_of(image_size)
     for name, side in (("height", height), ("width", width)):
         if side % stride:
             below = side // stride * stride

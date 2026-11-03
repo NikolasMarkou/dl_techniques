@@ -1,4 +1,4 @@
-"""The segmentation arguments of ``python -m train``: data configs (and, later, transform, metric and loss groups).
+"""The segmentation arguments of ``python -m train``: data configs and the transform group (metric and loss groups follow).
 
 ``BuiltinSegData`` names Oxford-IIIT Pet from the local TFDS cache; ``FolderSegData`` (two
 directories, images and masks, joined by file stem) and ``CsvSegData`` (a CSV file with an
@@ -26,6 +26,16 @@ Interface contract
 
 ``SegData``
     The union of the three; the type of the segmentation task config's ``data`` field.
+
+``SegTransformArgs``
+    ``image_size`` (a positive int, a square, or ``[height, width]``; ``"auto"`` is the family
+    recipe's) and ``augment`` (``none``, ``flip`` or ``dihedral``; ``"auto"`` is the recipe's).
+    There is no ``normalize`` key: segmentation inputs are in [0, 1], no statistics pass runs, and the
+    run records ``normalize`` as zeros and ones. ``resolve_auto(context)`` fills the ``"auto"``
+    fields from the recipe (``context.defaults["transform_args"]``) and leaves one the recipe has
+    no entry for as ``"auto"``, which ``assert_resolved`` reports by dotted path.
+    :raises ConfigError: from ``resolve_auto`` for an ``augment`` that is no preset, and for
+        ``dihedral`` with a non-square ``image_size`` (a quarter turn swaps the sides).
 
 ``load_seg_data_config(data)``
     :param data: a config (returned as is), a mapping, or the path of a YAML file holding one. A
@@ -70,9 +80,11 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Mapping, Optional, Tuple, Type, Union
 
-from .config import StrictConfig, join_path, validate
+from .args import AutoContext, _is_auto, _recipe_values, _with_values
+from .config import AUTO, Auto, StrictConfig, join_path, validate
 from .data_args import _tfds_data_dir, read_data_file
 from .errors import ConfigError, ConfigValidationError
+from .segmentation_models import sides_of
 
 # ---------------------------------------------------------------------
 
@@ -357,6 +369,70 @@ def load_seg_data_config(data: Any) -> SegData:
         if not source:
             raise
         raise ConfigValidationError([source + line for line in exc.errors]) from exc
+
+
+# ---------------------------------------------------------------------
+# The transform group
+# ---------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class SegTransformArgs(StrictConfig):
+    """Input size and augmentation of a segmentation run; read by the segmentation task."""
+
+    image_size: Auto[Union[int, List[int]]] = dataclasses.field(
+        default=AUTO,
+        metadata={
+            "help": "size every image and mask is resized to: one int (a square) or [height, width]; "
+            "each side must be a multiple of the family's stride (2**depth for convunext, 16 for "
+            "accunet); auto is the family recipe's. The image is resized bilinearly, the mask by "
+            "nearest neighbour, and nothing is padded"
+        },
+    )
+    augment: Auto[str] = dataclasses.field(
+        default=AUTO,
+        metadata={
+            "help": "none, flip (horizontal) or dihedral (flips and quarter turns, square sizes "
+            "only), applied to the image and the mask together; auto is the family recipe's"
+        },
+    )
+
+    def problems(self, prefix: str) -> List[str]:
+        """Name an explicit ``image_size`` that is no positive int or pair of them."""
+        size = self.image_size
+        if _is_auto(size):
+            return []
+
+        def side(value: Any) -> bool:
+            return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+        if side(size) or (isinstance(size, (list, tuple)) and len(size) == 2 and all(map(side, size))):
+            return []
+        return [
+            f"Invalid value for {join_path(prefix, 'image_size')!r}: expected one positive int "
+            f"(a square) or [height, width] of two, got {size!r}"
+        ]
+
+    def resolve_auto(self, context: AutoContext) -> "SegTransformArgs":
+        """Fill ``"auto"`` fields from the recipe; see the module contract."""
+        from train.common.segmentation_data import SEG_AUGMENTS
+
+        found = _recipe_values(self, context, "transform_args")
+        resolved = _with_values(self, "transform_args", found)
+        if not _is_auto(resolved.augment) and resolved.augment not in SEG_AUGMENTS:
+            raise ConfigError(
+                f"Invalid value for 'transform_args.augment': {resolved.augment!r} is not a "
+                f"segmentation preset; choose one of {', '.join(SEG_AUGMENTS)}."
+            )
+        if resolved.augment == "dihedral" and not _is_auto(resolved.image_size):
+            height, width = sides_of(resolved.image_size)
+            if height != width:
+                raise ConfigError(
+                    f"Invalid value for 'transform_args.augment': dihedral turns the image by "
+                    f"quarter turns, which swaps the sides of a {height}x{width} (height x width) "
+                    "image; use flip, or a square transform_args.image_size"
+                )
+        return resolved
 
 
 # ---------------------------------------------------------------------

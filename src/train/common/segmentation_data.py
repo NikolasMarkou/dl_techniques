@@ -50,6 +50,19 @@ Interface contract
     void pixels keep their ``ignore_index`` (the mask is resized by nearest neighbour only and
     nothing is padded, so no pixel gets a class the file did not give it).
 
+``build_segmentation_augment(preset, size)``
+    :param preset: one of :data:`SEG_AUGMENTS`: ``none``, ``flip`` (horizontal) or ``dihedral``
+        (independent horizontal and vertical flips and a quarter turn).
+    :param size: ``(height, width)`` of the images the hook will see.
+    :return: ``None`` for ``none``, else a seeded hook ``(seed, image, mask) -> (image, mask)`` that
+        draws ONE geometric transform from the element's seed and applies it to the image and the
+        mask together, so the mask stays the function of the image it was (stateless: the draw is
+        a function of the loader's seed and the element's seed pair). Nothing is padded and no
+        pixel is interpolated, so no class appears that the mask did not hold and void stays void;
+        photometric ops are absent, because they would be image-only ops.
+    :raises ValueError: for another preset, or ``dihedral`` with ``height != width`` (a quarter turn
+        swaps the sides of a non-square image).
+
 ``resize_pair(image, mask, size)``
     The one resize: bilinear with antialiasing for the image (rounded to a byte, as the legacy
     trainer's Pet loader does), nearest for the mask.
@@ -76,7 +89,7 @@ import numpy as np
 import tensorflow as tf
 from PIL import Image, ImageOps
 
-from dl_techniques.datasets.vision.augment_hook import Augment, with_hook
+from dl_techniques.datasets.vision.augment_hook import Augment, seeded, with_hook
 from dl_techniques.datasets.vision.splits import seeded_split_indices
 from dl_techniques.utils.logger import logger
 from train.common.classification_data import (
@@ -101,9 +114,8 @@ PET_DECODE_BATCH = 128
 DEFAULT_EVAL_SAMPLES = 200
 #: Pairs the pre-claim check reads (evenly spaced over the train list).
 PRE_CLAIM_PAIRS = 32
-#: Pairs in the Pet train and test splits of the TFDS 4.x cache.
+#: Pairs in the Pet train split of the TFDS 4.x cache (the test split holds 3669).
 PET_TRAIN_SIZE = 3680
-PET_TEST_SIZE = 3669
 #: Bytes of the in-memory Pet image array above which TensorFlow cannot embed it in a graph (2 GB limit).
 PET_MAX_BYTES = 1_900_000_000
 #: The only value pair of a binary mask stored as black and white.
@@ -647,6 +659,53 @@ def _batched(dataset: "tf.data.Dataset", count: int, batch_size: int, *, drop_re
     dataset = dataset.apply(tf.data.experimental.assert_cardinality(count))
     dataset = dataset.batch(batch_size, drop_remainder=drop_remainder)
     return dataset.prefetch(tf.data.AUTOTUNE)
+
+
+# ---------------------------------------------------------------------
+# The augmentation of a pair
+# ---------------------------------------------------------------------
+
+#: The ``transform_args.augment`` presets of a segmentation run.
+SEG_AUGMENTS = ("none", "flip", "dihedral")
+
+
+def pair_hook(op: Callable[[tf.Tensor, tf.Tensor], tf.Tensor]) -> Augment:
+    """The seeded ``(seed, image, mask)`` hook that applies the geometric ``op`` to both at once.
+
+    :param op: ``op(seed, tensor) -> tensor`` on a ``(H, W, C)`` float tensor (a
+        ``train.common.image_augment`` op): it must move pixels and change no value.
+    """
+    # DECISION plan-2026-10-31T180033-2faf890a/D-075
+    # ONE call of `op` on the image and the mask stacked as a fourth channel, split afterwards:
+    # a flip or a quarter turn is a pure permutation of pixels, so the class ids survive exactly
+    # (float32 holds every id below 2**24). Do NOT call `op` twice, once per tensor: even with the
+    # same seed that is two draws by contract only, and a bilinear or padded op would invent
+    # class ids. The test that holds this is "a mask that is a function of the image stays that
+    # function", over 200 seeds.
+    @seeded
+    def hook(seed: tf.Tensor, image: tf.Tensor, mask: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
+        stacked = tf.concat([image, tf.cast(mask, tf.float32)[..., None]], axis=-1)
+        stacked = op(seed, stacked)
+        return stacked[..., :3], tf.cast(stacked[..., 3], tf.int32)
+
+    return hook
+
+
+def build_segmentation_augment(preset: str, size: Tuple[int, int]) -> Optional[Augment]:
+    """The train hook of a segmentation augmentation preset; see the module contract."""
+    from train.common.image_augment import random_dihedral, random_flip
+
+    if preset not in SEG_AUGMENTS:
+        raise ValueError(f"Unknown segmentation augmentation {preset!r}; known: {list(SEG_AUGMENTS)}")
+    if preset == "none":
+        return None
+    if preset == "dihedral":
+        if size[0] != size[1]:
+            raise ValueError(
+                f"dihedral turns the image by quarter turns, which swaps the sides of a "
+                f"{size[0]}x{size[1]} (height x width) image; use flip, or a square size")
+        return pair_hook(random_dihedral())
+    return pair_hook(random_flip())
 
 
 # ---------------------------------------------------------------------
