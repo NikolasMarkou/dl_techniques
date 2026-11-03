@@ -1,4 +1,4 @@
-"""The segmentation arguments of ``python -m train``: data configs and the transform group (metric and loss groups follow).
+"""The segmentation arguments of ``python -m train``: data configs, the transform group and the metric group.
 
 ``BuiltinSegData`` names Oxford-IIIT Pet from the local TFDS cache; ``FolderSegData`` (two
 directories, images and masks, joined by file stem) and ``CsvSegData`` (a CSV file with an
@@ -36,6 +36,14 @@ Interface contract
     no entry for as ``"auto"``, which ``assert_resolved`` reports by dotted path.
     :raises ConfigError: from ``resolve_auto`` for an ``augment`` that is no preset, and for
         ``dihedral`` with a non-square ``image_size`` (a quarter turn swaps the sides).
+
+``SegMetricArgs``
+    ``watch_metric`` (the metric that picks the best epoch: ``val_miou``, ``val_accuracy`` or
+    ``val_loss``; ``"auto"`` is the recipe's), ``watch_mode`` (``min`` or ``max``; ``"auto"`` is read
+    from the metric's name) and ``success_threshold`` (a best ``val_miou`` at or above it counts as
+    success; ``null``, the default, is the mIoU of predicting the majority class on the selection
+    set, which the task works out once the data is loaded). There is no ``top_k``: a segmentation
+    run reports ``accuracy`` and ``miou`` only.
 
 ``load_seg_data_config(data)``
     :param data: a config (returned as is), a mapping, or the path of a YAML file holding one. A
@@ -433,6 +441,52 @@ class SegTransformArgs(StrictConfig):
                     "image; use flip, or a square transform_args.image_size"
                 )
         return resolved
+
+
+# ---------------------------------------------------------------------
+# The metric group
+# ---------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class SegMetricArgs(StrictConfig):
+    """The metric that selects the best epoch and the success bar; read by the trainer and the segmentation task."""
+
+    watch_metric: Auto[str] = dataclasses.field(
+        default=AUTO,
+        metadata={"help": "metric that picks the best epoch: val_miou (the default recipe), val_accuracy or val_loss"},
+    )
+    watch_mode: Auto[Literal["min", "max"]] = dataclasses.field(
+        default=AUTO, metadata={"help": "min or max; auto is read from the metric's name"}
+    )
+    success_threshold: Optional[float] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "a best val_miou at or above this counts as success; null is the mIoU of "
+            "predicting the majority class of the selection set for every pixel, worked out after "
+            "the data is loaded and stated in the run summary"
+        },
+    )
+
+    def problems(self, prefix: str) -> List[str]:
+        """Name an explicit ``success_threshold`` outside [0, 1]."""
+        threshold = self.success_threshold
+        if threshold is not None and not 0 <= threshold <= 1:
+            return [
+                f"Invalid value for {join_path(prefix, 'success_threshold')!r}: expected a fraction "
+                f"in [0, 1] (an mIoU), got {threshold!r}"
+            ]
+        return []
+
+    def resolve_auto(self, context: AutoContext) -> "SegMetricArgs":
+        """Fill ``"auto"`` fields: ``watch_metric`` from the recipe, ``watch_mode`` from its name."""
+        from train.common.callbacks import resolve_monitor_mode
+
+        found = _recipe_values(self, context, "metric_args", skip=("watch_mode",))
+        metric = found.get("watch_metric", self.watch_metric)
+        if _is_auto(self.watch_mode) and not _is_auto(metric):
+            found["watch_mode"] = resolve_monitor_mode(metric)
+        return _with_values(self, "metric_args", found)
 
 
 # ---------------------------------------------------------------------

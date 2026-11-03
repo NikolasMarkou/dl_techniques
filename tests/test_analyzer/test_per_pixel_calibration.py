@@ -235,9 +235,9 @@ def test_a_cap_above_the_pixel_count_keeps_everything():
 def test_model_metrics_come_from_the_compile_with_a_stock_ignore_class_loss(tmp_path):
     """``model_metrics`` is ``model.evaluate``: with ``ignore_class`` it is the loss over the kept pixels.
 
-    Steps 27 and 35 owe the arm for the void-aware metrics (accuracy, mIoU): a stock
-    ``SparseCategoricalAccuracy`` scores a void pixel as wrong and stock ``MeanIoU`` raises on a
-    255 label, so no stock metric is compiled here.
+    No metric is compiled here: a stock ``SparseCategoricalAccuracy`` scores a void pixel as wrong
+    and a stock ``MeanIoU`` raises on a 255 label. The next test is the arm with the metrics a
+    segmentation run compiles (step 27; the sparse losses of step 35 add theirs).
     """
     loss = keras.losses.SparseCategoricalCrossentropy(ignore_class=VOID)
     model = _fixed_probability_model(loss=loss)
@@ -248,6 +248,40 @@ def test_model_metrics_come_from_the_compile_with_a_stock_ignore_class_loss(tmp_
     hand = float(-np.log(p_correct).mean())
     assert metrics["status"] == "success"
     assert metrics["loss"] == pytest.approx(hand, abs=1e-5)
+
+
+def test_model_metrics_come_from_the_compile_with_the_void_aware_metrics_of_a_segmentation_run(tmp_path):
+    """The compiled-metric arm (iteration 1's open debt, paid by step 27): loss, accuracy and mIoU over the kept pixels.
+
+    The compile is what ``train.common.segmentation_run`` builds: stock cross-entropy and ``MeanIoU``
+    with ``ignore_class=255`` and ``VoidAwareAccuracy``. Pixel H is void, so 7 pixels are kept and 5 of
+    them are right (A, B, C, F, G; D and E are wrong): accuracy 5/7. The confusion matrix of the kept
+    pixels is ``[[2, 1], [1, 3]]`` (rows are the label), so IoU is 2/4 for class 0 and 3/5 for class 1
+    and the mean 0.55. A stock accuracy would say 5/8 (the contrast below).
+    """
+    from dl_techniques.metrics.void_aware_accuracy import VoidAwareAccuracy
+
+    def compiled(accuracy):
+        model = _fixed_probability_model()
+        model.compile(
+            optimizer="adam",
+            loss=keras.losses.SparseCategoricalCrossentropy(ignore_class=VOID),
+            metrics=[accuracy, keras.metrics.MeanIoU(
+                num_classes=2, sparse_y_true=True, sparse_y_pred=False, ignore_class=VOID, name="miou")])
+        return model
+
+    kept = Y_VOID != VOID
+    p_correct = np.where(Y_VOID == 1, P1, 1.0 - P1)[kept]
+    config = _calibration_config(ignore_label=VOID)
+    _, results = _analyze(tmp_path / "ours", compiled(VoidAwareAccuracy(VOID, name="accuracy")), _x(), Y_VOID, config)
+    metrics = results.model_metrics["fixed"]
+    assert metrics["status"] == "success"
+    assert metrics["loss"] == pytest.approx(float(-np.log(p_correct).mean()), abs=1e-5)
+    assert metrics["accuracy"] == pytest.approx(5 / 7, abs=1e-6)
+    assert metrics["miou"] == pytest.approx(0.55, abs=1e-6)
+    _, stock = _analyze(tmp_path / "stock", compiled(keras.metrics.SparseCategoricalAccuracy(name="accuracy")),
+                        _x(), Y_VOID, config)
+    assert stock.model_metrics["fixed"]["accuracy"] == pytest.approx(5 / 8, abs=1e-6), "void counted as wrong"
 
 
 # ---------------------------------------------------------------------

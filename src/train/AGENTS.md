@@ -413,6 +413,12 @@ train, and the TEST split never selects.
   the image stays one; `dihedral` is refused on a non-square size, nothing is padded, photometric ops are absent, and the
   selection and test splits are never augmented. `SegTransformArgs` has `image_size` (an int or `[height, width]`) and `augment`;
   there is no `normalize` key (inputs are in [0, 1], the record stores zeros and ones).
+  The compile of a segmentation run is `train.common.segmentation_run` (D-076): stock `SparseCategoricalCrossentropy(from_logits=True,
+  ignore_class=)` and `MeanIoU(sparse_y_true=True, sparse_y_pred=False, ignore_class=, name="miou")`, plus `accuracy`, which is the
+  stock metric without a void label and `dl_techniques.metrics.void_aware_accuracy.VoidAwareAccuracy` with one (the stock accuracy
+  scores each void pixel as wrong). The loss of a run is a mean of per-batch valid-pixel means weighted by images, so `val_loss` is not
+  the pooled cross-entropy once the void share differs between batches; `accuracy` and `miou` pool pixels. `SegMetricArgs` has
+  `watch_metric` (`val_miou`, a maximum), `watch_mode` and `success_threshold` (null: the task's majority-class baseline); no `top_k`.
   Oxford-IIIT Pet is read through `load_oxford_pet_arrays`, the one TFDS seam, byte-equal to `train.convunext.common.load_oxford_pet`.
 
 For text use `train.common.nlp`; for MegaDepth RGB+depth pairs `train.common.megadepth`
