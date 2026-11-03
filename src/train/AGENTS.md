@@ -399,8 +399,10 @@ train, and the TEST split never selects.
 - **Image and mask pairs for segmentation** (D-074): `train.common.segmentation_data` decodes every image and every mask
   with ONE PIL function (`decode_image`, `decode_mask`, `ImageOps.exif_transpose` applied to both; `tf.io.decode_image`
   ignores the EXIF orientation, and 119 of the 130 SUT-Crack photographs are stored sideways beside upright masks), so a
-  pair is never rotated against its mask. A palette PNG is read as its INDICES, a 1-bit PNG as 0 and 255, a JPEG, RGB or
-  RGBA mask is refused; the resize is bilinear (antialiased, byte-rounded) for the image and nearest for the mask, with no
+  pair is never rotated against its mask. A palette PNG is read as its INDICES, a 1-bit PNG as 0 and 255 (so a 1-bit mask with
+  `ignore_index=255` is refused before the claim: every foreground pixel would be void), a JPEG, RGB or RGBA mask is refused,
+  and a declared class with no pixel in the fit split is refused before `fit` (D-087). A 16-bit grey IMAGE keeps its high byte
+  in `image_to_rgb` (PIL's own conversion clipped it to white); mode `F` and a 32-bit `I` outside 0..65535 are refused by name; the resize is bilinear (antialiased, byte-rounded) for the image and nearest for the mask, with no
   padding, so void stays void and no value appears that the file did not hold. `scan_segmentation_folder` (two directories
   joined by file stem) and `read_segmentation_csv` (`image`, `mask` columns) list pairs and refuse an unpaired stem, a file
   listed twice and an image or MASK in both splits; `check_pairs` checks every mask value against the classes and the
@@ -419,13 +421,16 @@ train, and the TEST split never selects.
   scores each void pixel as wrong). The loss of a run is a mean of per-batch valid-pixel means weighted by images, so `val_loss` is not
   the pooled cross-entropy once the void share differs between batches; `accuracy` and `miou` pool pixels. `SegMetricArgs` has
   `watch_metric` (`val_miou`, a maximum), `watch_mode` and `success_threshold` (null: the task's majority-class baseline); no `top_k`.
-  Oxford-IIIT Pet is read through `load_oxford_pet_arrays`, the one TFDS seam, byte-equal to `train.convunext.common.load_oxford_pet`.
+  Oxford-IIIT Pet is read through `load_oxford_pet_arrays`, the one TFDS seam, byte-equal to `train.convunext.common.load_oxford_pet`,
+  at the ONE version `PET_TFDS_VERSION` (4.0.0) that the pre-claim check also looks for.
 - **The `image_segmentation` task** (D-077): `api/tasks/image_segmentation.py` supplies the hooks and nothing else, so the
   sequence is the shared one (D-070). Its config is the classification one with `SegTransformArgs`, `SegMetricArgs` and a
   segmentation `data`; a conformal level is refused. The verdict is `val_miou` (`success_metric`) against the mIoU of
   predicting the majority class of the selection split for every valid pixel (`majority_class_baseline` in the summary:
   `segmentation_run.class_pixel_counts` and `majority_class_baseline`, which reuse the one IoU implementation of
-  `train.convunext.segmentation_viz.class_scores`); `metric_args.success_threshold` overrides it. The monitor defaults to
+  `train.convunext.segmentation_viz.class_scores`); the best `val_miou` must be STRICTLY above it, compared in `float32` with a band of
+  `segmentation_run.TIE_ULPS` steps (`TaskTrainer.bar_is_met`, D-087: the constant majority model scores the baseline and a bare
+  `>=` of `float32` against `float64` passed it in 8 of 20 cases); `metric_args.success_threshold` overrides it and keeps `>=`. The monitor defaults to
   `val_miou`, NOT to the legacy trainers' `val_loss`: the loss Keras reports is a mean over batches of per-batch valid-pixel
   means weighted by images, so it is not the pooled pixel cross-entropy, and the legacy README measured the final weights
   beating the `val_loss` checkpoint in all three seeds. `ImageSegmentationTrainer.analysis_ignore_label` hands the

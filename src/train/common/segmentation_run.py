@@ -50,6 +50,16 @@ Interface contract
         the one implementation of that rule). It is the floor a segmenter must clear, and the
         default ``metric_args.success_threshold`` of the segmentation task.
     :raises ValueError: when ``counts`` holds no pixel (every pixel void, or no pixel).
+
+``beats_baseline(reached, baseline)``
+    :param reached: the best ``val_miou`` of a run (Keras' ``float32``).
+    :param baseline: the ``miou`` of :func:`majority_class_baseline` (``float64``).
+    :return: whether ``reached`` is STRICTLY above ``baseline``, both taken to ``float32`` and the
+        baseline raised by :data:`TIE_ULPS` ``float32`` steps of its own size. A model that predicts
+        the majority class everywhere IS the baseline, and Keras' pooled ``float32`` result for it
+        differs from the ``float64`` figure by up to 0.91 ``float32`` steps (measured over 200
+        random selection sets, 2 to 150 classes), so a bare ``>=`` called it a success in 8 of 20
+        cases and a bare ``>`` would in some. ``NaN`` is not above anything.
 """
 
 from typing import Any, Dict, List, Optional, Sequence
@@ -62,6 +72,12 @@ from dl_techniques.metrics.void_aware_accuracy import VoidAwareAccuracy
 
 #: The names of the compiled metrics, whatever the ignore index.
 SEGMENTATION_METRIC_NAMES = ("accuracy", "miou")
+
+#: ``float32`` steps (``numpy.spacing`` of the baseline) by which ``val_miou`` must clear the
+#: majority-class baseline. Measured: Keras' ``float32`` mIoU of the constant majority predictor
+#: lies within 0.91 steps of the exact value; 16 steps leave room for the ``float32`` accumulation of
+#: pixel counts above 2**24 and are still about 1e-6 of an mIoU, far below any learning.
+TIE_ULPS = 16
 
 
 def segmentation_loss(ignore_index: Optional[int]) -> keras.losses.Loss:
@@ -150,3 +166,14 @@ def majority_class_baseline(counts: np.ndarray, class_names: Sequence[str]) -> D
         "per_class_iou": scores["per_class_iou"],
         "pixels": int(counts.sum()),
     }
+
+
+def beats_baseline(reached: float, baseline: float) -> bool:
+    """Whether ``reached`` is strictly above ``baseline`` in ``float32``; see the module contract."""
+    # DECISION plan-2026-10-31T180033-2faf890a/D-087
+    # The constant majority predictor scores exactly the baseline, so a tie must be a "no". Do NOT
+    # compare Keras' float32 against the float64 baseline with `>=` (8 of 20 constant models
+    # passed) or with a bare `>` (a 1-step difference of rounding decides): compare in ONE dtype
+    # and demand TIE_ULPS steps.
+    reached32, baseline32 = np.float32(reached), np.float32(baseline)
+    return bool(reached32 > baseline32 + np.float32(TIE_ULPS) * np.spacing(baseline32))

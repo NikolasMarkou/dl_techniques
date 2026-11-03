@@ -142,6 +142,94 @@ def test_a_sixteen_bit_png_is_read_as_itself(tmp_path):
     assert np.array_equal(sd.decode_mask(str(path)), values.astype(np.int32))
 
 
+def write_rgb16_png(path: Path, array: np.ndarray) -> None:
+    """Write a 16-bit RGB PNG by hand (Pillow cannot): ``array`` is ``uint16`` ``(H, W, 3)``."""
+    import struct
+    import zlib
+
+    height, width, _ = array.shape
+    raw = b"".join(b"\x00" + array[row].astype(">u2").tobytes() for row in range(height))
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        body = tag + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+
+    header = struct.pack(">IIBBBBB", width, height, 16, 2, 0, 0, 0)
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header)
+                     + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+def test_a_sixteen_bit_grey_image_is_scaled_to_bytes_not_clipped_to_white(tmp_path):
+    """Review-iter-3 concern 2: PIL's convert("RGB") clipped an I;16 image at 255 (17 levels, 99.6% white)."""
+    ramp = np.linspace(0, 65535, 64 * 64).reshape(64, 64).astype(np.uint16)
+    path = tmp_path / "grey16.png"
+    Image.fromarray(ramp).save(path)
+    assert Image.open(path).mode.startswith("I")
+    decoded = sd.decode_image(str(path))
+    assert decoded.dtype == np.uint8 and decoded.shape == (64, 64, 3)
+    expected = (ramp >> 8).astype(np.uint8)  # the high byte
+    assert np.array_equal(decoded[..., 0], expected)
+    assert np.array_equal(decoded[..., 0], decoded[..., 1]) and np.array_equal(decoded[..., 0], decoded[..., 2])
+    assert len(np.unique(decoded)) == 256 and float((decoded == 255).mean()) < 0.01
+    edges = np.asarray([[0, 128, 129, 32768, 65535]], np.uint16)
+    Image.fromarray(edges).save(tmp_path / "edges.png")
+    assert sd.decode_image(str(tmp_path / "edges.png"))[0, :, 0].tolist() == [0, 0, 0, 128, 255]
+
+
+def test_a_sixteen_bit_rgb_image_keeps_its_range(tmp_path):
+    ramp = np.linspace(0, 65535, 64 * 64).reshape(64, 64).astype(np.uint16)
+    array = np.stack([ramp, ramp[::-1], ramp.T], axis=-1)
+    path = tmp_path / "rgb16.png"
+    write_rgb16_png(path, array)
+    decoded = sd.decode_image(str(path))
+    assert decoded.shape == (64, 64, 3)
+    assert np.array_equal(decoded, (array >> 8).astype(np.uint8)), "PIL keeps the high byte; so does the grey rule"
+    assert len(np.unique(decoded)) >= 250 and float((decoded == 255).mean()) < 0.01
+
+
+def test_a_thirty_two_bit_integer_image_is_scaled_when_it_is_16_bit_and_refused_when_it_is_not():
+    in_range = Image.fromarray(np.asarray([[0, 256, 65535]], np.int32), mode="I")
+    assert sd.image_to_rgb(in_range)[0, :, 0].tolist() == [0, 1, 255]
+    for values in ([[0, 70000]], [[-5, 3]]):
+        with pytest.raises(sd.PairError, match="mode I.*outside the 16-bit range"):
+            sd.image_to_rgb(Image.fromarray(np.asarray(values, np.int32), mode="I"))
+
+
+def test_a_floating_point_image_is_refused_by_name_at_the_header_and_at_the_decode(tmp_path):
+    path = tmp_path / "f.tif"
+    Image.fromarray(np.linspace(0, 1, 16, dtype=np.float32).reshape(4, 4), mode="F").save(path)
+    with pytest.raises(sd.PairError, match="mode F"):
+        sd.decode_image(str(path))
+    with pytest.raises(sd.PairError, match="mode F"):
+        sd.image_size_of(str(path))
+
+
+def test_training_and_predict_decode_a_sixteen_bit_image_alike(tmp_path):
+    from train.api.segmentation_predictor import SegmentationPredictor
+
+    ramp = np.linspace(0, 65535, 32 * 32).reshape(32, 32).astype(np.uint16)
+    path = tmp_path / "g.png"
+    Image.fromarray(ramp).save(path)
+    trained_on = sd.decode_image(str(path))
+    predictor = object.__new__(SegmentationPredictor)
+    assert np.array_equal(predictor._rgb_of(str(path)), trained_on)
+    assert np.array_equal(predictor._rgb_of(Image.open(path)), trained_on)
+
+
+def test_the_pipeline_feeds_a_sixteen_bit_image_at_its_range(tmp_path):
+    images, masks = tmp_path / "i", tmp_path / "m"
+    images.mkdir(), masks.mkdir()
+    ramp = np.linspace(0, 65535, 24 * 32).reshape(24, 32).astype(np.uint16)
+    for index in range(8):
+        Image.fromarray(ramp).save(images / f"p{index}.png")
+        Image.fromarray(blocks(24, 32, classes=3, seed=index)).save(masks / f"p{index}.png")
+    data = load(sd.scan_segmentation_folder(str(images), str(masks)), size=(24, 32))
+    batch = next(iter(data.train_ds))[0].numpy()
+    assert 0.0 <= batch.min() and batch.max() <= 1.0
+    assert len(np.unique(np.round(batch * 255))) > 200, "17 levels is the clipped decode"
+    assert float((batch > 0.99).mean()) < 0.02
+
+
 @pytest.mark.parametrize("kind", ["rgb", "rgba", "jpeg"])
 def test_a_colour_or_jpeg_mask_is_refused_by_name(tmp_path, kind):
     path = tmp_path / ("m.jpg" if kind == "jpeg" else "m.png")
@@ -321,6 +409,116 @@ def test_a_black_and_white_mask_points_at_the_threshold_key(tmp_path):
     # 255 as the declared void value is a legitimate mask of class 0 and void: no refusal.
     scan = sd.check_pairs(listing.train_images, listing.train_masks, num_classes=2, ignore_index=255, image_key="train_images", mask_key="train_masks")
     assert scan.values == (0, 255) and scan.pairs == 4
+
+
+def one_bit_folder(root: Path, count: int = 8):
+    images, masks = root / "i", root / "m"
+    images.mkdir(), masks.mkdir()
+    for index in range(count):
+        foreground = np.zeros((16, 16), bool)
+        foreground[4:12, 4:12] = True
+        Image.fromarray(picture(foreground.astype(np.uint8))).save(images / f"p{index}.png")
+        Image.fromarray(foreground).save(masks / f"p{index}.png")
+        assert Image.open(masks / f"p{index}.png").mode == "1"
+    return sd.scan_segmentation_folder(str(images), str(masks))
+
+
+def test_one_bit_masks_with_the_void_value_255_are_refused_naming_the_collision(tmp_path):
+    """Review-iter-3 concern 5: every foreground pixel became void and the run trained on one class."""
+    listing = one_bit_folder(tmp_path)
+    with pytest.raises(DataSourceError) as caught:
+        sd.check_pairs(listing.train_images, listing.train_masks, num_classes=2, ignore_index=255,
+                       image_key="train_images", mask_key="train_masks")
+    text = str(caught.value)
+    assert listing.train_masks[0] in text and "1-bit mask" in text and "ignore_index is 255" in text
+    assert "foreground" in text and "void" in text
+    # The same refusal comes before the claim, from the sample the facts read ...
+    with pytest.raises(DataSourceError, match="1-bit mask"):
+        sd.check_listing_sample(listing, num_classes=2, ignore_index=255)
+    # ... and a 1-bit mask with another void value, or none, keeps its own black-and-white message.
+    with pytest.raises(DataSourceError, match="data.mask_threshold"):
+        sd.check_pairs(listing.train_images, listing.train_masks, num_classes=2, ignore_index=None,
+                       image_key="train_images", mask_key="train_masks")
+
+
+def test_an_eight_bit_mask_of_0_and_255_with_void_255_is_not_the_one_bit_collision(tmp_path):
+    images, masks = tmp_path / "i", tmp_path / "m"
+    images.mkdir(), masks.mkdir()
+    for index in range(4):
+        grey = np.where(blocks(16, 16, classes=2, seed=index) == 1, 255, 0).astype(np.uint8)
+        Image.fromarray(picture(np.zeros((16, 16), np.uint8))).save(images / f"p{index}.png")
+        Image.fromarray(grey).save(masks / f"p{index}.png")
+        assert Image.open(masks / f"p{index}.png").mode == "L"
+    listing = sd.scan_segmentation_folder(str(images), str(masks))
+    scan = sd.check_pairs(listing.train_images, listing.train_masks, num_classes=2, ignore_index=255,
+                          image_key="train_images", mask_key="train_masks")
+    assert scan.values == (0, 255)
+
+
+def test_the_value_equal_to_the_class_count_is_refused_not_taken_for_a_class(tmp_path):
+    """The 1-based-ids mistake: masks holding 1..C with C classes. Mutant `upper_bound_le` accepted C."""
+    listing = listing_of(tmp_path, count=4, classes=3)
+    bad = np.asarray(Image.open(listing.train_masks[1])).copy()
+    bad[0, 0] = 3
+    Image.fromarray(bad).save(listing.train_masks[1])
+    with pytest.raises(DataSourceError) as caught:
+        sd.check_pairs(listing.train_images, listing.train_masks, num_classes=3, ignore_index=None,
+                       image_key="train_images", mask_key="train_masks")
+    assert "value 3" in str(caught.value) and listing.train_masks[1] in str(caught.value)
+    assert "0 to 2" in str(caught.value)
+    # With a void value the class count is still no class.
+    with pytest.raises(DataSourceError, match="value 3"):
+        sd.check_pairs(listing.train_images, listing.train_masks, num_classes=3, ignore_index=255,
+                       image_key="train_images", mask_key="train_masks")
+
+
+def write_class_masks(listing, present, rest=0):
+    """Rewrite every mask as ``rest`` with the classes in ``present[path]`` painted in one block each."""
+    for path in listing.train_masks:
+        mask = np.full((24, 32), rest, np.uint8)
+        for offset, value in enumerate(present.get(path, ())):
+            mask[:, offset * 4:offset * 4 + 4] = value
+        Image.fromarray(mask).save(path)
+
+
+def test_a_declared_class_with_no_pixel_in_the_fit_split_is_refused_naming_it(tmp_path):
+    """Review-iter-3 concern 5, the general case: the run knew before `fit` that a class had no pixel."""
+    listing = listing_of(tmp_path, count=12)
+    write_class_masks(listing, {path: (1,) for path in listing.train_masks})
+    with pytest.raises(DataSourceError) as caught:
+        load(listing, num_classes=3, class_names=["road", "car", "sky"])
+    text = str(caught.value)
+    assert "class 2 ('sky')" in text and "fit split" in text and "data.class_names" in text
+    assert "class 0" not in text, "class 0 is the rest, present everywhere"
+    # The message points at void as the usual cause when a void value is declared.
+    with pytest.raises(DataSourceError, match="data.ignore_index=255"):
+        load(listing, num_classes=3, class_names=["road", "car", "sky"], ignore_index=255)
+
+
+def test_a_class_that_only_the_selection_split_holds_is_still_absent_from_the_fit_split(tmp_path):
+    from dl_techniques.datasets.vision.splits import seeded_split_indices
+
+    listing = listing_of(tmp_path, count=12)
+    fit_idx, select_idx, _ = seeded_split_indices(12, 0, 0, 0.25, None)
+    painted = {path: (1,) for path in listing.train_masks}
+    painted.update({listing.train_masks[i]: (1, 2) for i in select_idx})
+    write_class_masks(listing, painted)
+    with pytest.raises(DataSourceError, match=r"class 2 \('c'\) has no pixel"):
+        load(listing)
+    # Control: the same class in ONE fit mask is enough.
+    painted[listing.train_masks[fit_idx[0]]] = (1, 2)
+    write_class_masks(listing, painted)
+    assert load(listing).n_train == 9
+
+
+def test_many_absent_classes_are_named_with_the_first_five(tmp_path):
+    listing = listing_of(tmp_path, count=12)
+    write_class_masks(listing, {})
+    names = [f"c{i}" for i in range(9)]
+    with pytest.raises(DataSourceError) as caught:
+        load(listing, num_classes=9, class_names=names)
+    text = str(caught.value)
+    assert "classes 1 ('c1'), 2 ('c2'), 3 ('c3'), 4 ('c4'), 5 ('c5') and others have no pixel" in text
 
 
 def test_every_pair_the_run_will_use_is_checked_before_fit(tmp_path):
@@ -771,6 +969,61 @@ def test_the_pet_cache_is_looked_for_where_tfds_reads(tmp_path, monkeypatch):
     (tmp_path / "oxford_iiit_pet" / "4.0.0" / "dataset_info.json").write_text("{}")
     facts = sa.seg_facts(config, None)
     assert facts == sa.SegFacts("oxford_pet", 3, ("pet", "background", "border"), None, None)
+
+
+def test_the_pet_check_looks_for_the_one_version_the_loader_reads(tmp_path, monkeypatch):
+    """Review-iter-3 concern 7: a directory that held only 4.9.9 passed the check; the loader then died."""
+    config = sa.load_seg_data_config({"dataset": "oxford_pet"})
+    monkeypatch.setenv("TFDS_DATA_DIR", str(tmp_path))
+    other = tmp_path / "oxford_iiit_pet" / "4.9.9"
+    other.mkdir(parents=True)
+    (other / "dataset_info.json").write_text("{}")
+    with pytest.raises(ConfigError) as caught:
+        sa.seg_facts(config, None)
+    text = str(caught.value)
+    assert sd.PET_TFDS_VERSION in text and "4.9.9" in text
+    assert str(tmp_path / "oxford_iiit_pet" / sd.PET_TFDS_VERSION) in text
+    (tmp_path / "oxford_iiit_pet" / sd.PET_TFDS_VERSION).mkdir()
+    ((tmp_path / "oxford_iiit_pet" / sd.PET_TFDS_VERSION) / "dataset_info.json").write_text("{}")
+    assert sa.seg_facts(config, None).num_classes == 3
+
+
+def test_the_pet_version_is_one_constant_that_the_loader_and_the_builder_agree_on(tmp_path, monkeypatch):
+    import tensorflow_datasets as tfds
+
+    builder = tfds.builder(sd.PET_TFDS_DIRECTORY, data_dir=str(tmp_path))
+    assert str(builder.version) == sd.PET_TFDS_VERSION, "TFDS moved: change PET_TFDS_VERSION and read the new records"
+    assert Path(builder.data_dir) == tmp_path / sd.PET_TFDS_DIRECTORY / sd.PET_TFDS_VERSION
+    assert sd.PET_TFDS_NAME == f"{sd.PET_TFDS_DIRECTORY}:{sd.PET_TFDS_VERSION}" and "*" not in sd.PET_TFDS_NAME
+    asked = []
+
+    def refuse(name, **kwargs):
+        asked.append(name)
+        raise FileNotFoundError("no records")
+
+    monkeypatch.setattr(tfds, "load", refuse)
+    with pytest.raises(RuntimeError, match="no records"):
+        sd.load_oxford_pet_arrays((8, 8))
+    assert asked == [sd.PET_TFDS_NAME]
+
+
+def test_a_pet_cache_of_another_version_exits_2_before_the_claim(tmp_path):
+    import subprocess
+    import sys
+
+    fake = tmp_path / "tfds" / "oxford_iiit_pet" / "4.9.9"
+    fake.mkdir(parents=True)
+    (fake / "dataset_info.json").write_text("{}")
+    out = tmp_path / "out"
+    env = {**os.environ, "MPLBACKEND": "Agg", "TF_CPP_MIN_LOG_LEVEL": "3", "CUDA_VISIBLE_DEVICES": "-1",
+           "TFDS_DATA_DIR": str(tmp_path / "tfds")}
+    done = subprocess.run(
+        [sys.executable, "-m", "train", "image_segmentation", "model=convunext/tiny", f"out={out}",
+         "data.dataset=oxford_pet"],
+        capture_output=True, text=True, timeout=600, cwd=tmp_path, env=env)
+    assert done.returncode == 2, done.stderr[-2000:]
+    assert "4.9.9" in done.stderr and sd.PET_TFDS_VERSION in done.stderr
+    assert not out.exists(), "a refusal before the claim leaves no run directory"
 
 
 def test_pet_refuses_a_size_whose_arrays_a_graph_cannot_hold(tmp_path, monkeypatch):

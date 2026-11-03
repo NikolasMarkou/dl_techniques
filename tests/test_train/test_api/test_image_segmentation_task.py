@@ -6,8 +6,10 @@ recomputed by hand rather than read back from the code under test:
 
 * every mask is 20 columns of class 0, 8 of class 1 and 4 of class 2 (62.5%, 25%, 12.5%), whatever
   the random split picks, so the majority-class baseline is class 0 with mIoU ``0.625 / 3`` (three
-  classes present); with the last four columns void (255) it is class 0 with ``(20/28) / 2`` (class 2
-  never appears: Keras' ``MeanIoU`` leaves a class with an empty union out of the mean);
+  classes present); in the void masks the columns are 18 of class 0, 8 of class 1, 2 of class 2 and the
+  last four void (255), so it is class 0 with ``(18/28) / 3`` (every declared class occurs: a class
+  with no pixel in the fit split is refused before ``fit``, D-087; ``test_an_absent_class_has_no_iou``
+  holds the rule that a class with an empty union is left out of the mean);
 * the verdict is keyed on ``val_miou`` (a run whose ``val_accuracy`` is higher than its ``val_miou``,
   as these are, would report another number if it were keyed on accuracy), against the baseline;
 * the function and ``python -m train image_segmentation`` write the same ``config.json`` bytes, for
@@ -49,8 +51,9 @@ from . import _segmentation_fixtures as fx
 
 VOID = 255
 SIZE = 32
-#: Columns of class 0, 1 and 2 in every mask (the last four are void when a run says so).
+#: Columns of class 0, 1 and 2 in every mask; a void mask has 18, 8 and 2 and four void columns.
 COLUMNS = (20, 8, 4)
+VOID_COLUMNS = (18, 8, 2)
 
 
 @pytest.fixture(scope="module")
@@ -65,9 +68,12 @@ def world():
 
 
 def one_mask(void: bool) -> np.ndarray:
+    columns = VOID_COLUMNS if void else COLUMNS
     mask = np.zeros((SIZE, SIZE), np.uint8)
-    mask[:, COLUMNS[0]:COLUMNS[0] + COLUMNS[1]] = 1
-    mask[:, COLUMNS[0] + COLUMNS[1]:] = VOID if void else 2
+    mask[:, columns[0]:columns[0] + columns[1]] = 1
+    mask[:, columns[0] + columns[1]:] = 2
+    if void:
+        mask[:, sum(columns):] = VOID
     return mask
 
 
@@ -163,10 +169,10 @@ def test_the_baseline_is_the_hand_counted_majority_class(finished):
         assert baseline["pixel_accuracy"] == pytest.approx(0.625, abs=1e-12)
         assert baseline["per_class_iou"] == pytest.approx([0.625, 0.0, 0.0], abs=1e-12)
     else:
-        # Void is left out: 28 valid columns, class 2 absent from the truth and from the prediction.
-        assert baseline["miou"] == pytest.approx((20 / 28) / 2, abs=1e-12)
-        assert baseline["pixel_accuracy"] == pytest.approx(20 / 28, abs=1e-12)
-        assert baseline["per_class_iou"][2] is None
+        # Void is left out: 28 valid columns, 18 of them class 0.
+        assert baseline["miou"] == pytest.approx((18 / 28) / 3, abs=1e-12)
+        assert baseline["pixel_accuracy"] == pytest.approx(18 / 28, abs=1e-12)
+        assert baseline["per_class_iou"] == pytest.approx([18 / 28, 0.0, 0.0], abs=1e-12)
 
 
 def test_the_verdict_is_val_miou_against_the_baseline(finished):
@@ -177,7 +183,8 @@ def test_the_verdict_is_val_miou_against_the_baseline(finished):
     # The control for "keyed on val_accuracy": the two maxima are different numbers here.
     assert max(hist["val_accuracy"]) != max(hist["val_miou"])
     assert summary["success_threshold"] == summary["majority_class_baseline"]["miou"]
-    assert summary["success"] is bool(summary["success_value"] >= summary["success_threshold"])
+    assert summary["success"] is segmentation_run.beats_baseline(
+        summary["success_value"], summary["success_threshold"])
     assert result.success is summary["success"]
 
 
@@ -190,7 +197,7 @@ def test_the_summary_says_what_it_trained_and_what_val_loss_is(finished):
     assert summary["input_size"] == [height, width] and summary["input_shape"] == [height, width, 3]
     assert summary["num_classes"] == 3 and summary["class_names"] == ["0", "1", "2"]
     assert summary["ignore_index"] == (VOID if kind == "void" else None)
-    assert summary["mask_values"] == ([0, 1, VOID] if kind == "void" else [0, 1, 2])
+    assert summary["mask_values"] == ([0, 1, 2, VOID] if kind == "void" else [0, 1, 2])
     assert summary["n_train"] + summary["n_val"] == 40 and summary["n_test"] == 8
     text = " ".join(summary["notes"])
     # D-076, D-077: the number a reader will compare must be named for what it is.
@@ -322,7 +329,7 @@ def test_a_killed_run_resumes_to_the_same_bar_and_the_same_row_count(world, fold
     summary = read_json(resumed.summary_path)
     assert summary["resumed_after_epochs"] == 2 and summary["epochs_run"] == 3
     # `build_data` runs again on a resume, so the bar is there and is the hand-counted one.
-    assert summary["success_threshold"] == pytest.approx((20 / 28) / 2, abs=1e-12)
+    assert summary["success_threshold"] == pytest.approx((18 / 28) / 3, abs=1e-12)
     rows = (out / "training_log.csv").read_text().strip().splitlines()
     assert len(rows) == 1 + 3
     assert len(history_of(out)["val_miou"]) == 3
@@ -545,6 +552,13 @@ def test_the_baseline_equals_keras_mean_iou_of_the_constant_prediction(ignore):
     metric.update_state(masks, logits)
     assert baseline["miou"] == pytest.approx(float(metric.result()), abs=1e-7)
     assert baseline["class_name"] == "abc"[baseline["class"]]
+
+
+def test_an_absent_class_has_no_iou():
+    """Keras leaves a class with an empty union out of the mean; the baseline reports it as null."""
+    baseline = segmentation_run.majority_class_baseline(np.asarray([5, 3, 0]), ["a", "b", "c"])
+    assert baseline["per_class_iou"][2] is None
+    assert baseline["miou"] == pytest.approx((5 / 8) / 2, abs=1e-12)
 
 
 def test_a_tie_goes_to_the_lowest_class_and_all_void_is_refused():

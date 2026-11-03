@@ -204,6 +204,10 @@ Hooks (override in a task)
     The number the run is judged by (read from ``hist``, the history of ``summarize_fit``, under
     the ``success_metric`` class variable) and the bar it must reach. Required, and a task must
     set ``success_metric`` (it is written to the summary). Smoke runs apply no bar.
+``bar_is_met(config, reached, threshold)``
+    Whether ``reached`` (``success_value``) clears ``threshold`` (``success_threshold``). Default:
+    ``reached >= threshold``. A task whose bar is the score of a constant predictor overrides it
+    to say STRICTLY above in one dtype (``image_segmentation``, D-087).
 ``extra_callbacks(config, data)``
     Callbacks inserted after ``LastEpochWeights``. Default: none.
 ``figure_callbacks(config, data, vis_dir)``
@@ -535,6 +539,10 @@ class TaskTrainer:
 
     def build_loss_and_metrics(self, config: StrictConfig, data: Any) -> Tuple[Any, List[Any]]:
         raise NotImplementedError
+
+    def bar_is_met(self, config: StrictConfig, reached: float, threshold: float) -> bool:
+        """Return whether ``reached`` clears ``threshold``; default: ``reached >= threshold``."""
+        return bool(reached >= threshold)
 
     def extra_callbacks(self, config: StrictConfig, data: Any) -> List[Any]:
         return []

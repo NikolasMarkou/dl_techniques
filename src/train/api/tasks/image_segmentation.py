@@ -365,6 +365,19 @@ class ImageSegmentationTrainer(TaskTrainer):
             )
         return float(self._baseline["miou"])
 
+    def bar_is_met(self, config: ImageSegmentationConfig, reached: float, threshold: float) -> bool:
+        # DECISION plan-2026-10-31T180033-2faf890a/D-087
+        # Against the majority-class baseline the best `val_miou` must be STRICTLY above it,
+        # compared in float32 with a tie band (`segmentation_run.beats_baseline`): the constant
+        # majority model scores the baseline exactly, and `reached >= threshold` called it a
+        # success in 8 of 20 measured cases. A bar the caller STATED
+        # (`metric_args.success_threshold`) keeps the shared "reached" rule, `>=`.
+        if config.metric_args.success_threshold is not None:
+            return bool(reached >= threshold)
+        from train.common import segmentation_run
+
+        return segmentation_run.beats_baseline(reached, threshold)
+
     # -- the log and the summary ---------------------------------------
 
     def epoch_line_metrics(self, config: ImageSegmentationConfig) -> Tuple[str, ...]:
@@ -442,7 +455,7 @@ class ImageSegmentationTrainer(TaskTrainer):
         """Return the segmentation lines of ``results_summary.json``'s ``notes``."""
         import numpy as np
 
-        from train.common import classification_run
+        from train.common import classification_run, segmentation_run
 
         checkpoint_cfg: CheckpointArgs = config.checkpoint_args
         analysis_cfg: AnalysisArgs = config.analysis_args
@@ -463,6 +476,14 @@ class ImageSegmentationTrainer(TaskTrainer):
             f"{majority.get('miou')}, pixel accuracy {majority.get('pixel_accuracy')}); "
             "`majority_class_baseline` holds its numbers",
         ]
+        if metric_cfg.success_threshold is None:
+            notes.append(
+                "`success` needs the best `val_miou` STRICTLY above that baseline: compared in "
+                f"float32 and cleared by {segmentation_run.TIE_ULPS} float32 steps of the baseline "
+                "(about 1e-6), because a model that predicts the majority class everywhere scores "
+                "the baseline and Keras' float32 figure for it differs from the float64 baseline "
+                "by rounding"
+            )
         if data.ignore_index is not None:
             notes.append(
                 f"mask value {data.ignore_index} is void (`ignore_index`): it is left out of the "

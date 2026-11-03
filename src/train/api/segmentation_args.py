@@ -10,7 +10,7 @@ Interface contract
 ------------------
 ``BuiltinSegData``
     Frozen :class:`~train.api.config.StrictConfig`; ``dataset`` is ``oxford_pet`` (the TFDS record
-    ``oxford_iiit_pet:4.*.*``, mask minus 1, classes ``pet, background, border``, no void). It has
+    ``oxford_iiit_pet:4.0.0`` (``segmentation_data.PET_TFDS_NAME``), mask minus 1, classes ``pet, background, border``, no void). It has
     no class, ignore, threshold or fingerprint key: Pet fixes them.
 
 ``FolderSegData`` / ``CsvSegData``
@@ -69,7 +69,7 @@ Interface contract
         not be embedded in a TensorFlow graph. Every message names the dotted key.
 
 ``check_seg_sources(data)``
-    Pet only: ``Path`` tests for ``dataset_info.json`` under ``$TFDS_DATA_DIR/oxford_iiit_pet/4.*.*``.
+    Pet only: ``Path`` tests for ``dataset_info.json`` under ``$TFDS_DATA_DIR/oxford_iiit_pet/4.0.0`` (the one version the loader reads).
     No TFDS import, nothing opened or written; other sources return.
 
 ``load_seg_data(data, *, batch_size, seed, image_size, augment, eval_batch_size)``
@@ -103,8 +103,6 @@ SEG_DATASETS: Tuple[str, ...] = ("oxford_pet",)
 #: made absolute against the file).
 SEG_PATH_KEYS = ("train_images", "train_masks", "test_images", "test_masks", "train_csv", "test_csv")
 
-#: The TFDS directory and version glob of Oxford-IIIT Pet (``train.common.segmentation_data.PET_TFDS_NAME``).
-PET_TFDS_DIRECTORY = "oxford_iiit_pet"
 
 _SegDatasetName = Literal[SEG_DATASETS]  # type: ignore[valid-type]
 
@@ -160,7 +158,7 @@ class BuiltinSegData(StrictConfig):
 
     dataset: _SegDatasetName = dataclasses.field(
         metadata={
-            "help": "oxford_pet: the TFDS record oxford_iiit_pet 4.x read from TFDS_DATA_DIR "
+            "help": "oxford_pet: the TFDS record oxford_iiit_pet 4.0.0 read from TFDS_DATA_DIR "
             "(never downloaded), 3 classes (pet, background, border), no void, 3680 train and "
             "3669 test images"
         }
@@ -494,13 +492,10 @@ class SegMetricArgs(StrictConfig):
 # ---------------------------------------------------------------------
 
 def _pet_records(root: Path) -> bool:
-    """Whether a version directory of Pet with ``dataset_info.json`` is under ``root``."""
-    here = root / PET_TFDS_DIRECTORY
-    if not here.is_dir():
-        return False
-    return any(
-        child.is_dir() and child.name.startswith("4.") and (child / "dataset_info.json").is_file()
-        for child in here.iterdir())
+    """Whether the ONE version of Pet the loader reads (``PET_TFDS_VERSION``) is prepared under ``root``."""
+    from train.common.segmentation_data import PET_TFDS_DIRECTORY, PET_TFDS_VERSION
+
+    return (root / PET_TFDS_DIRECTORY / PET_TFDS_VERSION / "dataset_info.json").is_file()
 
 
 def check_seg_sources(data: SegData) -> None:
@@ -522,9 +517,18 @@ def check_seg_sources(data: SegData) -> None:
             f"{exc.filename or str(root)!r} cannot be read ({exc.strerror or exc}); fix the "
             "permission, or set TFDS_DATA_DIR to a directory you can read") from exc
     if not found:
+        from train.common.segmentation_data import PET_TFDS_DIRECTORY, PET_TFDS_VERSION
+
+        here = root / PET_TFDS_DIRECTORY
+        try:
+            present = sorted(child.name for child in here.iterdir()) if here.is_dir() else []
+        except OSError:
+            present = []
+        held = f" (it holds {', '.join(present)})" if present else ""
         raise ConfigError(
             f"Invalid value for 'data.dataset': oxford_pet reads the TFDS records of "
-            f"{PET_TFDS_DIRECTORY} version 4.x, and none are under {str(root / PET_TFDS_DIRECTORY)!r} "
+            f"{PET_TFDS_DIRECTORY} version {PET_TFDS_VERSION}, and none are under "
+            f"{str(here / PET_TFDS_VERSION)!r}{held} "
             "(TFDS directory from "
             f"{'$TFDS_DATA_DIR' if 'TFDS_DATA_DIR' in os.environ else 'the default ~/tensorflow_datasets'}); "
             "nothing is downloaded. Set TFDS_DATA_DIR to the directory that holds oxford_iiit_pet/")

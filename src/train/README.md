@@ -49,7 +49,16 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   void), a `folder` of two directories joined by file stem, or a `csv` with an `image` and a `mask` column. Masks are
   single-channel PNGs of class ids; `data.ignore_index` names the void value, which is left out of the loss, `accuracy`,
   `miou`, the baseline and the analyzer. File data needs `transform_args.image_size` (files have no native size); Pet
-  takes 128 from the recipe. The EXIF orientation is applied to images and masks alike.
+  takes 128 from the recipe. The EXIF orientation is applied to images and masks alike. Pet is read at ONE TFDS version,
+  `oxford_iiit_pet/4.0.0` (`segmentation_data.PET_TFDS_VERSION`, held equal to the installed builder's by a test): a
+  directory that holds only another version is refused before the run directory is claimed. A 16-bit grey image keeps
+  its high byte (`value >> 8`: 0..65535 becomes 0..255, a 12-bit image therefore reaches only 0..15, since the scale is
+  fixed and never the image's own range) in training and in `predict` alike, a 16-bit RGB PNG is read by PIL with its
+  high byte, and a mode `F` image, or a 32-bit `I` image with a value outside 0..65535, is refused by name: PIL's own
+  conversion clipped them to white. **Refused before `fit`:** a 1-bit mask with `data.ignore_index=255` (a 1-bit PNG
+  reads as 0 and 255, so every foreground pixel would be void and the run would train on one class; the message names
+  the collision), and a declared class that has no pixel in any mask of the fit split (named, with the usual cause:
+  `data.class_names`, a void value that is also a class, or a `data.max_samples` cut).
 * **Recipes** are the legacy trainers' defaults (`train.convunext`, `train.accunet`): AdamW, 30 epochs, batch 16, a
   horizontal flip; ConvUNext lr 1e-3, AccUNet lr 1e-4 with 2 warmup epochs. Two values differ on purpose. The monitor is
   `val_miou`, a maximum; both legacy trainers default to `val_loss`. And AccUNet trains the cross-entropy, where its
@@ -58,9 +67,13 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   batches weighted by images, so `loss` and `val_loss` are NOT the cross-entropy pooled over every valid pixel; with a void
   label the two differ whenever the void share differs between batches. `accuracy` and `miou` ARE pooled over every valid
   pixel. That is why the best epoch is chosen by `val_miou`, and the summary says it in `notes`.
-* **Success** is the best `val_miou` at or above `metric_args.success_threshold`, which is null by default: the mIoU of
-  predicting the majority class of the selection split for every valid pixel, stated in the summary as
-  `majority_class_baseline`. A run that cannot beat a constant has not learned a segmentation.
+* **Success** is the best `val_miou` strictly above the bar, which is `metric_args.success_threshold` when you give one
+  (then reaching it is enough) and else the mIoU of predicting the majority class of the selection split for every valid
+  pixel, stated in the summary as `majority_class_baseline`. A run that cannot beat a constant has not learned a
+  segmentation, and a model that predicts the majority class everywhere scores exactly that baseline, so "above" is
+  compared in `float32` (Keras' dtype) with a band of 16 `float32` steps of the baseline (about 1e-6): a bare `>=` of
+  the `float32` metric against the `float64` baseline called such a model a success in 8 of 20 measured cases. The
+  summary's notes say so.
 * A conformal level (`analysis_args.conformal_alpha`) is refused: a segmentation run has no set of classes per image.
 * **Figures** (`analysis_args.figures`, and only with a test split): `visualizations/` gets a grid of four fixed
   test pairs after every epoch (`epoch_NNN_seg_grid.png`, NNN 000 being the untrained model: image, ground truth,
@@ -74,7 +87,9 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
 
 **Keys**: `key=value` tokens; a dot reaches a group (`optim_args.lr=3e-4`, `data.dataset=cifar10`);
 `config=run.yaml` loads a file first and the command line wins over it. A value is read by
-the field's type (`true`/`false`, `3e-4`, `null`, JSON for a list or mapping; a string is verbatim). An unknown key, a wrong type or a bad choice is refused with the list of all
+the field's type (`true`/`false`, `3e-4`, `null`, JSON for a list or mapping; a string is verbatim). A list is JSON with every text
+quoted, and the whole token goes in single quotes for the shell (the list `["pet","background"]` for `data.class_names`);
+`[pet,background]` is refused with that sentence in the message, for every list and mapping key of every task. An unknown key, a wrong type or a bad choice is refused with the list of all
 problems and a "did you mean". `auto` asks for the family's recipe default.
 `data.format` is `builtin` (the library's datasets), `folder` (`data.train_dir`, one directory of
 images per class, optional `data.test_dir`) or `csv` (`data.train_csv`, columns `path` and `label`).

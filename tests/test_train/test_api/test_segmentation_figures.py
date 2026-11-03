@@ -276,7 +276,8 @@ def test_the_report_is_the_test_confusion_of_the_best_weights_and_agrees_with_ke
     assert confusion.sum() == 8 * 32 * 28
     assert report["miou"] == pytest.approx(summary["test_metrics_best"]["miou"], abs=1e-6)
     assert report["pixel_accuracy"] == pytest.approx(summary["test_metrics_best"]["accuracy"], abs=1e-6)
-    assert confusion.sum(axis=1).tolist()[2] == 0, "class 2 is void in every mask of this fixture"
+    # The void fixture: 18 columns of class 0, 8 of class 1, 2 of class 2 and 4 void (the class counts are by construction).
+    assert confusion.sum(axis=1).tolist() == [8 * 32 * 18, 8 * 32 * 8, 8 * 32 * 2]
 
 
 def test_the_miou_curve_is_given_the_epoch_and_the_metric_the_run_kept(world, folders, tmp_path, monkeypatch):  # noqa: F811

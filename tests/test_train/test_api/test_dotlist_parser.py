@@ -237,6 +237,26 @@ def test_a_list_refuses_non_json_non_lists_and_non_finite_numbers(text):
     assert "expected a list" in coerce_error(List[float], text, "betas")
 
 
+def test_an_unquoted_bracketed_list_says_that_a_list_is_json(tmp_path):
+    """Review-iter-3 concern 8: `data.class_names=[pet,background]` was refused with no way out."""
+    import typing
+
+    from train.api.segmentation_args import FolderSegData
+
+    annotation = typing.get_type_hints(FolderSegData)["class_names"]
+    message = coerce_error(annotation, "[pet,background]", "data.class_names")
+    assert "expected a list" in message and "'[pet,background]'" in message
+    assert "written as JSON" in message and '\'["a","b"]\'' in message
+    assert coerce(annotation, '["pet","background"]', "data.class_names") == ["pet", "background"]
+    # The same wording for every list and mapping key, whatever the task (the rule is the CLI's).
+    assert "written as JSON" in coerce_error(List[int], "[1,2", "layers")
+    assert "written as JSON" in coerce_error(Dict[str, Any], "{a: 1}", "model_args")
+    # And none where a list is not the question.
+    assert "written as JSON" not in coerce_error(float, "[1]", "lr")
+    assert "written as JSON" not in coerce_error(List[int], "abc", "layers")
+    assert "written as JSON" in "; ".join(mapping_errors({"layers": "[1,2"}))
+
+
 def test_nan_inside_json_names_the_reason():
     assert "NaN is not allowed" in coerce_error(List[float], "[NaN]", "betas")
 

@@ -630,7 +630,7 @@ def report(run: Run) -> TrainResult:
         # the bar is not applied: the run is a success when it finished, and the
         # summary says "not applicable" rather than a miss (review-iter-2 concern 6).
         threshold = None if smoke else trainer.success_threshold(config)
-        success = True if smoke else bool(reached >= threshold)
+        success = True if smoke else trainer.bar_is_met(config, reached, threshold)
         summary = classification_run.base_summary(
             run.summary_head, hist, run.epochs_run, config.epochs, run.best_epoch,
             run.lr_reductions, evaluated.test_metrics_best, evaluated.test_metrics_final,

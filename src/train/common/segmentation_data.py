@@ -14,8 +14,13 @@ Interface contract
 ``decode_image(path)``
     :param path: an image file.
     :return: ``uint8`` ``(H, W, 3)`` after ``ImageOps.exif_transpose`` and PIL's conversion to RGB
-        (an RGBA image loses its alpha, a grey one is repeated over the channels).
-    :raises PairError: for a file that cannot be decoded.
+        (an RGBA image loses its alpha, a grey one is repeated over the channels). A 16-bit grey
+        image (PIL ``I;16*``, or ``I`` with values in 0..65535) keeps its high byte, ``value >> 8``, so
+        0..65535 becomes 0..255 (the rule of a 16-bit RGB PNG, which PIL opens with its high byte, and of
+        the classification decoder); PIL's own conversion would clip it to 255. A 12-bit image
+        (0..4095) therefore reaches only 0..15: the scale is fixed, never the image's own range.
+    :raises PairError: for a file that cannot be decoded, or an image whose mode has no byte scale
+        (float ``F``, or ``I`` holding values outside 0..65535): never a silent clip.
 
 ``decode_mask(path)``
     :param path: a mask file.
@@ -43,6 +48,14 @@ Interface contract
     The scan of the masks (the value check) and of the sizes. ``train.api`` calls it on a sample
     before the run directory is claimed (PIL only, no TensorFlow op) and the loaders call it on every
     file they use before ``fit``, logging the duration.
+
+    Also refused: a 1-bit mask while ``ignore_index`` is 255 (a 1-bit PNG reads as 0 and 255, so the
+    foreground would be void; D-087). The :class:`PairScan` it returns counts the pixels of each class.
+
+``refuse_absent_classes(scan, class_names, *, mask_key, where, ignore_index)``
+    :param scan: the :class:`PairScan` of the masks the model will be fit on.
+    :raises DataSourceError: naming the first five declared classes with no pixel in ``scan`` (D-087).
+        ``load_pair_data`` calls it on the FIT split's scan, before any pipeline is built.
 
 ``pair_fingerprint(listing, mode)``
     A sha256 over ``(split, relative image path, relative mask path, both sizes)`` in listing
@@ -110,7 +123,18 @@ from train.common.classification_data import (
 )
 
 #: Oxford-IIIT Pet as the legacy trainer reads it (``train.convunext.common``): TFDS mask minus 1.
-PET_TFDS_NAME = "oxford_iiit_pet:4.*.*"
+# DECISION plan-2026-10-31T180033-2faf890a/D-087
+# The version is NAMED, in one place, as D-065 did for Imagenette. Do NOT go back to "any 4.*
+# directory with a dataset_info.json" in the pre-claim check (`segmentation_args._pet_records`) or
+# to the glob ``4.*.*`` in the loader: a TFDS directory that holds only ``4.9.9`` passed the check,
+# the run directory was claimed, and the loader died with a traceback (review-iter-3 concern 7).
+#: The TFDS directory of Oxford-IIIT Pet under ``TFDS_DATA_DIR``.
+PET_TFDS_DIRECTORY = "oxford_iiit_pet"
+#: The ONE version the loader reads and the pre-claim check looks for.
+#: ``tests/test_train/test_api/test_the_builtin_sources_are_refused_before_the_claim.py`` holds it
+#: equal to the installed TFDS builder's default version.
+PET_TFDS_VERSION = "4.0.0"
+PET_TFDS_NAME = f"{PET_TFDS_DIRECTORY}:{PET_TFDS_VERSION}"
 PET_CLASS_NAMES: Tuple[str, ...] = ("pet", "background", "border")
 #: Images per decode batch of :func:`load_oxford_pet_arrays`.
 PET_DECODE_BATCH = 128
@@ -130,6 +154,9 @@ _SWAPPING_ORIENTATIONS = (5, 6, 7, 8)
 _ORIENTATION_TAG = 0x0112
 #: PIL modes of a single-channel mask.
 _MASK_MODES = ("1", "L", "P", "I;16", "I;16L", "I;16B", "I")
+#: PIL modes that hold a 16-bit grey image (``I`` is PIL's 32-bit integer mode, which older Pillow
+#: used for a 16-bit PNG); PIL's conversion to RGB clips all of them at 255.
+_SIXTEEN_BIT_MODES = ("I;16", "I;16L", "I;16B", "I;16N", "I")
 
 
 class PairError(ValueError):
@@ -161,7 +188,25 @@ def image_to_rgb(image: Image.Image) -> np.ndarray:
     conversion to RGB. :func:`decode_image` (a file) and the segmentation predictor (a PIL image given
     by the caller) both end here, so a file and the same image opened by hand give the same pixels.
     """
-    return np.asarray(ImageOps.exif_transpose(image).convert("RGB"), dtype=np.uint8)
+    image = ImageOps.exif_transpose(image)
+    if image.mode in _SIXTEEN_BIT_MODES:
+        # DECISION plan-2026-10-31T180033-2faf890a/D-087
+        # PIL's `convert("RGB")` CLIPS a 16-bit grey image at 255 (0.4% of a 0..65535 ramp survives).
+        # Do NOT call it on these modes and do NOT rescale by the image's own min and max (the
+        # decode would then depend on the image, so training and `predict` could disagree).
+        values = np.asarray(image).astype(np.int64)
+        if image.mode == "I" and values.size and (values.min() < 0 or values.max() > 65535):
+            raise PairError(
+                f"an image of PIL mode I holds values from {int(values.min())} to {int(values.max())}, "
+                "outside the 16-bit range 0..65535, so there is no byte scale for it; convert it to "
+                "an 8-bit or a 16-bit PNG")
+        grey = (values >> 8).astype(np.uint8)
+        return np.repeat(grey[..., None], 3, axis=-1)
+    if image.mode == "F":
+        raise PairError(
+            "an image of PIL mode F (floating point) has no fixed value range, so there is no byte "
+            "scale for it; convert it to an 8-bit or a 16-bit PNG")
+    return np.asarray(image.convert("RGB"), dtype=np.uint8)
 
 
 def decode_image(path: str) -> np.ndarray:
@@ -171,6 +216,11 @@ def decode_image(path: str) -> np.ndarray:
 
 def decode_mask(path: str) -> np.ndarray:
     """One mask file as ``int32`` ``(H, W)`` of its stored values; see the module contract."""
+    return _decode_mask_and_mode(path)[0]
+
+
+def _decode_mask_and_mode(path: str) -> Tuple[np.ndarray, str]:
+    """:func:`decode_mask` and the PIL mode the file was stored in (``"1"`` is the 1-bit case)."""
     mask = _open(path, "mask")
     if mask.format in ("JPEG", "MPO"):
         raise PairError(
@@ -181,11 +231,12 @@ def decode_mask(path: str) -> np.ndarray:
             f"{path!r} is a {mask.mode} image; a mask is one channel of class ids (an 8-bit grey "
             "or palette PNG, or a 1-bit PNG), not a picture; an RGB mask cannot be read as ids",
             "mask")
+    mode = mask.mode
     mask = ImageOps.exif_transpose(mask)
     values = np.asarray(mask)
-    if mask.mode == "1":
+    if mode == "1":
         values = values.astype(np.int32) * 255
-    return values.astype(np.int32)
+    return values.astype(np.int32), mode
 
 
 def image_size_of(path: str) -> Tuple[int, int]:
@@ -194,8 +245,14 @@ def image_size_of(path: str) -> Tuple[int, int]:
         with Image.open(path) as image:
             width, height = image.size
             orientation = image.getexif().get(_ORIENTATION_TAG)
+            mode = image.mode
     except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as exc:
         raise PairError(f"{path!r} cannot be decoded as an image ({exc})") from exc
+    if mode == "F":
+        # The mode is in the header, so the refusal can come before the run directory is claimed.
+        raise PairError(f"{path!r} is a PIL mode F (floating point) image: it has no fixed value "
+                        "range, so there is no byte scale for it; convert it to an 8-bit or a "
+                        "16-bit PNG")
     return (width, height) if orientation in _SWAPPING_ORIENTATIONS else (height, width)
 
 
@@ -460,11 +517,14 @@ class PairScan:
     :param pairs: pairs checked.
     :param values: the distinct mask values seen, sorted.
     :param seconds: wall time.
+    :param class_pixels: pixels seen of each class ``0 .. num_classes - 1`` (void and any other value
+        not counted); :func:`refuse_absent_classes` reads it.
     """
 
     pairs: int
     values: Tuple[int, ...]
     seconds: float
+    class_pixels: Tuple[int, ...] = ()
 
 
 def _allowed(num_classes: int, ignore_index: Optional[int]) -> Callable[[int], bool]:
@@ -496,16 +556,30 @@ def check_pairs(
     started = time.perf_counter()
     union: Set[int] = set()
     first_bad: Optional[Tuple[str, int]] = None
+    class_pixels = np.zeros(num_classes, dtype=np.int64)
     for image_path, mask_path in zip(images, masks):
         try:
-            mask = decode_mask(mask_path)
+            mask, mode = _decode_mask_and_mode(mask_path)
             image_hw = (decode_image(image_path).shape[:2] if image_pixels
                         else image_size_of(image_path))
             _refuse_unequal(image_path, mask_path, tuple(image_hw), mask.shape)
         except PairError as exc:
             raise DataSourceError(mask_key if exc.which == "mask" else image_key, str(exc)) from exc
-        present = np.flatnonzero(np.bincount(mask.reshape(-1))).tolist()
+        if mode == "1" and ignore_index == BINARY_PAIR[1]:
+            # DECISION plan-2026-10-31T180033-2faf890a/D-087
+            # The decoder reads a 1-bit PNG as 0 and 255 (D-074), and 255 is the conventional void
+            # value. Do NOT let the pair through to `fit`: every foreground pixel becomes void, the
+            # run trains on one class and reports "best 1.0000" against a baseline of 1.0000.
+            raise DataSourceError(
+                mask_key, f"{mask_path!r} is a 1-bit mask, which is read as the values 0 and "
+                     f"{BINARY_PAIR[1]} (white is {BINARY_PAIR[1]}), and data.ignore_index is "
+                     f"{ignore_index}: every white (foreground) pixel would be void and the run "
+                     "would train on one class; save the masks as 8-bit PNGs holding the class ids "
+                     f"0 and 1, or give data.ignore_index another value")
+        counts = np.bincount(mask.reshape(-1))
+        present = np.flatnonzero(counts).tolist()
         union.update(present)
+        class_pixels += np.pad(counts[:num_classes], (0, max(0, num_classes - len(counts))))
         if first_bad is None:
             bad = [value for value in present if not allowed(value)]
             if bad:
@@ -523,7 +597,39 @@ def check_pairs(
                  f"(0 to {num_classes - 1}) nor the ignore index ({ignore_index!r}); if {first_bad[1]} "
                  "marks pixels to leave out, set data.ignore_index to it, otherwise fix the mask "
                  f"(values seen in the {len(images)} mask(s) checked: {list(values)[:12]})")
-    return PairScan(len(images), values, time.perf_counter() - started)
+    return PairScan(len(images), values, time.perf_counter() - started,
+                    tuple(int(n) for n in class_pixels))
+
+
+def refuse_absent_classes(scan: PairScan, class_names: Sequence[str], *, mask_key: str, where: str,
+                          ignore_index: Optional[int]) -> None:
+    """Refuse a declared class that no pixel of the scanned masks belongs to.
+
+    :param scan: the :class:`PairScan` of the masks the model will be fit on.
+    :param class_names: the declared classes, in id order.
+    :param mask_key: the :class:`DataSourceError` key to name.
+    :param where: what ``scan`` covers, in words, for the message ("the 12 masks of the fit split").
+    :param ignore_index: the void value, named in the message as the usual cause.
+    :raises DataSourceError: naming the first class with no pixel and the count of such classes.
+    """
+    # DECISION plan-2026-10-31T180033-2faf890a/D-087
+    # A declared class with no pixel in the FIT split is refused before `fit`, not warned: the run
+    # knew (review-iter-3 concern 5: 1-bit masks with ignore_index 255 trained a whole run on one class
+    # and reported "best 1.0000" against a baseline of 1.0000). Do NOT test the union of fit and
+    # selection pixels: a class only the selection split holds cannot be learned from the fit split.
+    absent = [index for index, pixels in enumerate(scan.class_pixels) if pixels == 0]
+    if not absent:
+        return
+    named = ", ".join(f"{index} ({class_names[index]!r})" for index in absent[:5])
+    raise DataSourceError(
+        mask_key, f"{'class' if len(absent) == 1 else 'classes'} {named}"
+             f"{' and others' if len(absent) > 5 else ''} {'has' if len(absent) == 1 else 'have'} "
+             f"no pixel in {where}, "
+             "so the model would be fit on fewer classes than data.class_names declares and a "
+             "verdict on it would be about the others; fix data.class_names (or the mask values), "
+             + (f"and check that data.ignore_index={ignore_index} is not the value that marks "
+                "one of these classes, " if ignore_index is not None else "")
+             + "or give a larger data.max_samples")
 
 
 def sample_indices(count: int, sample: int) -> List[int]:
@@ -846,10 +952,14 @@ def load_pair_data(
         test_images = np.asarray(listing.test_images)[test_order]
         test_masks = np.asarray(listing.test_masks)[test_order]
     started = time.perf_counter()
-    scan = check_pairs(train_images[used_train].tolist(), train_masks[used_train].tolist(),
-                       num_classes=num_classes, ignore_index=ignore_index,
-                       image_key=keys["train_image"], mask_key=keys["train_mask"])
-    values = set(scan.values)
+    scans = [check_pairs(train_images[part].tolist(), train_masks[part].tolist(),
+                         num_classes=num_classes, ignore_index=ignore_index,
+                         image_key=keys["train_image"], mask_key=keys["train_mask"])
+             for part in (fit_idx, select_idx)]
+    values = set(scans[0].values) | set(scans[1].values)
+    refuse_absent_classes(
+        scans[0], class_names, mask_key=keys["train_mask"], ignore_index=ignore_index,
+        where=f"any of the {len(fit_idx)} masks of the fit split")
     if test_images is not None:
         test_scan = check_pairs(test_images.tolist(), test_masks.tolist(), num_classes=num_classes,
                                 ignore_index=ignore_index, image_key=keys["test_image"],
@@ -884,7 +994,7 @@ def load_pair_data(
 # ---------------------------------------------------------------------
 
 def load_oxford_pet_arrays(size: Tuple[int, int]) -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]:
-    """Decode ``oxford_iiit_pet`` 4.x from the local TFDS cache into ``uint8`` arrays; the one TFDS seam.
+    """Decode ``oxford_iiit_pet`` (:data:`PET_TFDS_VERSION`) from the local TFDS cache into ``uint8`` arrays; the one TFDS seam.
 
     Images are resized to ``size`` (:func:`resize_pair`, the legacy Pet loader's arithmetic) and
     the label is the TFDS mask minus 1 (1 pet, 2 background, 3 border become 0, 1, 2). The order is
@@ -910,7 +1020,7 @@ def load_oxford_pet_arrays(size: Tuple[int, int]) -> Tuple[Tuple[np.ndarray, np.
             raise RuntimeError(
                 f"Could not read {PET_TFDS_NAME!r} split {name!r} from the local TFDS cache with "
                 f"download=False: {type(exc).__name__}: {exc}. Set TFDS_DATA_DIR to the directory "
-                "that holds oxford_iiit_pet/4.0.0 (nothing is downloaded).") from exc
+                f"that holds {PET_TFDS_DIRECTORY}/{PET_TFDS_VERSION} (nothing is downloaded).") from exc
         batches = tfds.as_numpy(dataset.map(convert, num_parallel_calls=tf.data.AUTOTUNE).batch(PET_DECODE_BATCH))
         images, labels = zip(*batches)
         x, y = np.concatenate(images), np.concatenate(labels)

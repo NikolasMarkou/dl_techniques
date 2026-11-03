@@ -754,6 +754,36 @@ def _convert(annotation: Any, text: str) -> _Converted:
     )
 
 
+def _takes_json(annotation: Any) -> bool:
+    """Whether some member of ``annotation`` is a list, mapping or group, which the command line writes as JSON."""
+    return any(
+        typing.get_origin(member) in (list, tuple, dict, collections.abc.Sequence, collections.abc.Mapping)
+        or (isinstance(member, type) and issubclass(member, StrictConfig))
+        for member in _members(annotation)
+    )
+
+
+def _json_hint(annotation: Any, text: str, note: str) -> str:
+    """Return ``note`` plus how a list or mapping is written, for a token that looks like one but is not JSON.
+
+    JSON of the wrong shape (a mapping for a list) keeps its own reason and gets no hint.
+
+    ``class_names=[pet,background]`` is the usual attempt: the list is JSON (``'["pet","background"]'``,
+    quoted for the shell) for every key of every task, a string inside it is quoted.
+    """
+    # DECISION plan-2026-10-31T180033-2faf890a/D-087
+    # The rule stays "a list is JSON" for every key of every task; classification has no list-of-text
+    # key at all. Do NOT teach the coercer to read `[a,b]` as a list of text: `[1,2]` and `[a,b]` would
+    # follow different rules and a text that holds a comma could not be written. The message says how
+    # (review-iter-3 concern 8: step 32 lost an attempt to it).
+    if text.lstrip()[:1] in ("[", "{") and _takes_json(annotation) and parse_json(text)[1] is not None:
+        return (
+            f"{note}; a list or a mapping is written as JSON, with every text quoted, e.g. "
+            "'[\"a\",\"b\"]' (single quotes around it for the shell)"
+        )
+    return note
+
+
 def coerce(annotation: Any, text: str, dotted_path: str) -> Any:
     """Convert ``text`` as ``annotation`` demands.
 
@@ -764,7 +794,9 @@ def coerce(annotation: Any, text: str, dotted_path: str) -> Any:
     """
     value, note = _convert(annotation, text)
     if note is not None:
-        raise ConfigError(invalid_value_message(dotted_path, annotation, text, note))
+        raise ConfigError(
+            invalid_value_message(dotted_path, annotation, text, _json_hint(annotation, text, note))
+        )
     return value
 
 
@@ -781,7 +813,9 @@ def _coerce_value(
     if isinstance(raw, str):
         value, note = _convert(annotation, raw)
         if note is not None:
-            errors.append(invalid_value_message(path, annotation, raw, note))
+            errors.append(
+                invalid_value_message(path, annotation, raw, _json_hint(annotation, raw, note))
+            )
         return value
     groups = [
         member
