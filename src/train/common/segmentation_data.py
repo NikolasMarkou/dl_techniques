@@ -25,6 +25,10 @@ Interface contract
     :raises PairError: for a JPEG (lossy, the stored value is not the class), an RGB, RGBA or
         other multi-channel mask, or a file that cannot be decoded.
 
+``image_to_rgb(image)``
+    :param image: an opened ``PIL.Image.Image``.
+    :return: what :func:`decode_image` returns for a file holding that image.
+
 ``read_pair(image_path, mask_path)``
     :return: ``(image, mask)`` as above.
     :raises PairError: when the two differ in size after the EXIF orientation, naming both files.
@@ -150,10 +154,19 @@ def _open(path: str, which: str) -> Image.Image:
         raise PairError(f"{path!r} cannot be decoded as an image ({exc})", which) from exc
 
 
+def image_to_rgb(image: Image.Image) -> np.ndarray:
+    """One opened PIL image as ``uint8`` ``(H, W, 3)``; see the module contract.
+
+    The one place an image becomes the model's colour space: the EXIF orientation applied, then PIL's
+    conversion to RGB. :func:`decode_image` (a file) and the segmentation predictor (a PIL image given
+    by the caller) both end here, so a file and the same image opened by hand give the same pixels.
+    """
+    return np.asarray(ImageOps.exif_transpose(image).convert("RGB"), dtype=np.uint8)
+
+
 def decode_image(path: str) -> np.ndarray:
     """One image file as ``uint8`` ``(H, W, 3)``; see the module contract."""
-    image = _open(path, "image")
-    return np.asarray(ImageOps.exif_transpose(image).convert("RGB"), dtype=np.uint8)
+    return image_to_rgb(_open(path, "image"))
 
 
 def decode_mask(path: str) -> np.ndarray:

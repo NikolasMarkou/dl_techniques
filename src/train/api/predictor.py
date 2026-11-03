@@ -64,8 +64,8 @@ from the OPTIONAL ``variant_overrides``.
     ``null``, or the finite number that turns a grey mask into two classes. It needs exactly two
     ``class_names`` and no ``ignore_index`` (D-014: an explicit number, two classes).
 ``output`` (segmentation only)
-    ``"masks"`` or ``"logits"``: what the predictor returns for an image. The record only names it;
-    the segmentation predictor (step 30) reads it.
+    ``"masks"`` or ``"logits"``: what the predictor returns for an image
+    (:class:`~train.api.segmentation_predictor.SegmentationPredictor` reads it).
 
 ``variant_overrides`` (OPTIONAL)
     ``{table key: value}``: the keys of the variant's table (``MODEL_VARIANTS[variant]``) that the
@@ -119,15 +119,26 @@ from the OPTIONAL ``variant_overrides``.
         ``.keras`` file reads the first record that exists of ``<file>.task.json`` (what
         ``export`` writes beside its output), ``<stem>.task.json``, and ``task.json`` in its
         directory.
-    :return: a :class:`Predictor`. Compiles nothing. The model is called once on zeros, so
-        a model whose output width is not the number of class names is refused here.
+    :return: a :class:`Predictor` for an ``image_classification`` record, a
+        :class:`~train.api.segmentation_predictor.SegmentationPredictor` for an
+        ``image_segmentation`` one (dispatch on ``record["task"]``). Compiles nothing. The model is
+        called once on zeros, so a model whose output width (classification) or output map
+        (segmentation: ``input_size`` and the class count) does not match the record is refused here.
     :raises ConfigError: for a missing path, ``task.json`` or model file, a model file that
         is not an intact ``.keras`` archive (one cut short by a kill, or a zip with no
         ``config.json`` or no weights, is named, not a Keras traceback), a bad record, a
-        ``task`` other than ``image_classification``, a family that is not registered, a
-        family or variant the model is not (:func:`check_model_against_record`), an
-        ``input_shape`` or ``channels`` the model does not take, or a class-count mismatch.
-        All of them are raised by ``load_model``, none waits for the first prediction.
+        ``task`` this reader does not know, a family that is not registered or does not train the
+        record's task, a family or variant the model is not (:func:`check_model_against_record`),
+        an ``input_shape`` / ``input_size`` or ``channels`` the model does not take, or a
+        class-count mismatch. All of them are raised by ``load_model``, none waits for the first
+        prediction.
+
+``record_beside(path)`` / ``input_shape_of(record)``
+    :param path: what ``load_model`` takes.
+    :return: the checked record of that run or file, without loading the model (the command line
+        reads the task before it loads anything); and the model input a record names,
+        ``(height, width, channels)``: ``input_shape`` for classification, ``input_size`` and
+        ``channels`` for segmentation.
 
 ``Predictor.predict(x, top_k=None, threshold=None)``
     :param x: one image or several. A single image is a path (``str`` or ``Path``), a
@@ -202,12 +213,13 @@ from .run_dir import TASK_FILE, TASK_SUFFIX, check_model_file
 #: against legacy readers).
 SCHEMA_VERSION = 2
 
-#: The task this predictor serves; a record of another task is refused at load until the
-#: segmentation predictor (step 30) dispatches on ``record["task"]``.
-SERVED_TASK = "image_classification"
-
 CLASSIFICATION = "image_classification"
 SEGMENTATION = "image_segmentation"
+
+#: The task :class:`Predictor` serves; ``load_model`` returns a
+#: :class:`~train.api.segmentation_predictor.SegmentationPredictor` for a segmentation record, so
+#: a record of any other task is refused by the class that does not serve it.
+SERVED_TASK = CLASSIFICATION
 
 #: The keys of a record per task, in the order they are written. The classification tuple is the
 #: version 1 tuple: byte-identical output apart from ``schema_version`` is a standing requirement.
@@ -777,6 +789,18 @@ def _model_files(path: Path) -> Tuple[Path, Path]:
     raise ConfigError(f"Invalid value for 'model': {path} is neither a run directory nor a file")
 
 
+def record_beside(path: Union[str, Path]) -> Dict[str, Any]:
+    """Return the checked record of a run directory or ``.keras`` file; see the module contract."""
+    return read_record(_model_files(Path(path))[1])
+
+
+def input_shape_of(record: Mapping[str, Any]) -> Tuple[int, ...]:
+    """Return ``(height, width, channels)``, the model input a checked record names."""
+    if record["task"] == SEGMENTATION:
+        return (*record["input_size"], record["channels"])
+    return tuple(record["input_shape"])
+
+
 def load_model(path: Union[str, Path]) -> "Predictor":
     """Load a trained model and its ``task.json``; see the module contract."""
     import keras
@@ -785,11 +809,6 @@ def load_model(path: Union[str, Path]) -> "Predictor":
 
     model_file, task_file = _model_files(Path(path))
     record = read_record(task_file)
-    if record["task"] != SERVED_TASK:
-        raise ConfigError(
-            f"Invalid {TASK_FILE} {task_file}: the task is {record['task']!r} but this predictor "
-            f"serves {SERVED_TASK!r} only"
-        )
     # The family's model code is imported BEFORE the Keras file is read, so the classes
     # the archive names are registered whatever the caller imported (D-051).
     recipes.register_builtin_models()
@@ -815,7 +834,13 @@ def load_model(path: Union[str, Path]) -> "Predictor":
     check_model_file(model_file, "Invalid value for 'model'")
     model = keras.models.load_model(str(model_file), compile=False)
     check_model_against_record(model, record, spec, model_file, task_file)
-    _check_width(_run_on_zeros(model, record, model_file, task_file), record)
+    output = _run_on_zeros(model, record, model_file, task_file)
+    if record["task"] == SEGMENTATION:
+        from .segmentation_predictor import SegmentationPredictor, check_output
+
+        check_output(output, record)
+        return SegmentationPredictor(model, record)
+    _check_width(output, record)
     return Predictor(model, record)
 
 
@@ -860,9 +885,19 @@ def check_model_against_record(
     from .registry import load_attr
 
     module_name, _, attr_path = spec.variants_attr.partition(":")
-    owner = load_attr(f"{module_name}:{attr_path.rsplit('.', 1)[0]}")
     family, variant = record["family"], record["variant"]
-    if not isinstance(model, owner):
+    # DECISION plan-2026-10-31T180033-2faf890a/D-080
+    # A family whose table is a module-level mapping (``module:TABLE``, no class: the functional
+    # U-Nets of the segmentation task) has no class to be an instance of and no table keys in its
+    # ``get_config()`` (a functional model reports its layers), so its model's family and variant
+    # cannot be compared with the record's. Do NOT rebuild the variant and compare weight shapes
+    # (a ``model_args`` key that is not a table key, ``kernel_size`` say, changes the shapes and the
+    # record does not carry it: D-032's failure, a run trained for hours that cannot ``predict``),
+    # and do NOT compare ``model.name`` (``model_args.model_name`` renames the model). What is checked
+    # for such a family: the variant is in the table, each override is a table key, and the model
+    # takes ``input_size`` and gives one score per class per pixel (``load_model`` runs it on zeros).
+    owner = load_attr(f"{module_name}:{attr_path.rsplit('.', 1)[0]}") if "." in attr_path else None
+    if owner is not None and not isinstance(model, owner):
         raise ConfigError(
             f"Invalid {TASK_FILE} {task_file}: it names the family {family!r} ({owner.__name__}) "
             f"but {model_file} holds a {type(model).__name__}; the file and the model are not "
@@ -882,13 +917,15 @@ def check_model_against_record(
             f"{family!r} has no table of keys to override"
         )
     if isinstance(wanted, Mapping):
-        built = model.get_config()
         foreign = [key for key in overrides if key not in wanted]
         if foreign:
             raise ConfigError(
                 f"Invalid {TASK_FILE} {task_file}: variant_overrides names {', '.join(map(repr, foreign))}, "
                 f"which {variant!r} of {family!r} does not have (it has {', '.join(map(repr, wanted))})"
             )
+        if owner is None:
+            return
+        built = model.get_config()
         unreported = [key for key in overrides if key not in built]
         if unreported:
             raise ConfigError(
@@ -923,9 +960,10 @@ def _run_on_zeros(model: Any, record: Mapping[str, Any], model_file: Path, task_
         return model(_zeros_of(record), training=False)
     except (ValueError, tf.errors.InvalidArgumentError) as exc:
         first = (str(exc).strip().splitlines() or [type(exc).__name__])[0]
+        key = "input_size" if record["task"] == SEGMENTATION else "input_shape"
         raise ConfigError(
-            f"Invalid {TASK_FILE} {task_file}: {model_file} does not take the input_shape "
-            f"{record['input_shape']} it names ({type(exc).__name__}: {first[:150]}); the file "
+            f"Invalid {TASK_FILE} {task_file}: {model_file} does not take the {key} "
+            f"{record[key]} it names ({type(exc).__name__}: {first[:150]}); the file "
             "and the model are not from one run"
         ) from exc
 
@@ -934,7 +972,7 @@ def _zeros_of(record: Mapping[str, Any]) -> Any:
     """Return one all-zero input of the record's shape, to ask a loaded model its output width."""
     import numpy as np
 
-    return np.zeros((1, *record["input_shape"]), np.float32)
+    return np.zeros((1, *input_shape_of(record)), np.float32)
 
 
 def _check_width(logits: Any, record: Mapping[str, Any]) -> None:

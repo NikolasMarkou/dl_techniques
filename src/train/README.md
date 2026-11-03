@@ -210,8 +210,9 @@ A 16-bit grey PIL image (`I;16` and its byte-order variants) is converted as the
 sample's high byte, and is equal to the loader on it; PIL's `I` and `F` (32-bit integers and floats) are refused with a
 `ConfigError` naming the mode, because the loader reads no file of that depth. A 16-bit RGB or RGBA PNG opens in PIL as
 8-bit, which cannot be told from an 8-bit file, so for a grey model it is within 1 level of 255 of the loader (measured; a
-path is exact). `load_model` refuses, at load, a `task.json` whose `task` is not `image_classification`, whose family or
-variant is not the model's, or whose `input_shape` the model does not take, whose `mean` is outside 0 to 1 or whose `std` is
+path is exact). `load_model` refuses, at load, a `task.json` whose `task` is not one this reader knows or that its family
+does not train, whose family or variant is not the model's (a classification family; see the segmentation paragraph for
+the limit of that check there), or whose `input_shape` (`input_size` for a segmentation run) the model does not take, whose `mean` is outside 0 to 1 or whose `std` is
 outside 1e-6 to 1 (the images are standardized from the range 0 to 1; a `mean` of 1e30 used to predict NaN without an error),
 and a `.keras` zip with no `config.json` or no weights, each with a `ConfigError` naming the problem. **Limit:** the class
 names are checked for their count and for repeats, never for their order, so a `task.json` whose names are a permutation of
@@ -220,6 +221,27 @@ the right ones loads and reports the wrong name for the swapped classes; nothing
 optional `variant_overrides` object of `task.json`, written only when there is one; `predict` and `export` then compare
 the model with the variant plus those changes (and `export` copies the object into `<out>.task.json`). A ViT's `scale`
 cannot be overridden: choose the variant (`model=vit/vit_tiny`); the request is refused before the run directory is made.
+
+**Predict for a segmentation run** (D-080, `train.api.segmentation_predictor`): `load_model` returns a
+`SegmentationPredictor` when the record's `task` is `image_segmentation`, and `predict model=<run dir or .keras>
+data=<image or directory> out=<new directory>` writes `<stem>.png` for each image, the class id of every pixel
+(8 bit; 16 bit above 255 classes), and, LAST, `index.json` (`{"class_names", "masks": [{"path", "mask", "size"}]}`). A
+mask has the size of its image after the EXIF orientation is applied, not the model's: the decoder is the training
+pipeline's (`segmentation_data.image_to_rgb`, one function for a path and a PIL image), the image is resized to
+`input_size` bilinearly as in training, and the model's logits are resized BILINEARLY to the image's size before the
+argmax (a nearest-neighbour resize of the argmax is blocky and drops the margin between classes; a hand fixture whose
+two answers differ pins it). The resize runs in pieces of classes when `height * width * classes` passes 2^26 floats and
+the pieces give the answer of one piece. From Python, `SegmentationPredictor.predict(x)` takes a path, a PIL image or an
+array (RGBA loses its alpha, grey is repeated, a floating array must lie in [0, 1] and is rounded to its byte) or a list
+of them, and returns `{"masks": [...], "class_names": [...]}` ALWAYS as a list (a mask is already 2-D). A run that fails
+half way leaves the PNGs it wrote and no `index.json`; two images with one stem (`a/cat.png`, `b/cat.jpg`) and a record
+whose `output` is `logits` are refused before the model is loaded. **Limit, stated because it cannot be checked:** the
+segmentation families are functional models with no class and no table keys in their config, so `load_model` cannot
+compare the model with the family and variant the record names (a classification family is compared); it checks that the
+variant is in the table, that each `variant_overrides` key is a table key, and that the model takes `input_size` and
+gives one score per class name per pixel at that size. Rebuilding the variant to compare weight shapes was rejected (a
+`model_args` key that is not a table key changes the shapes and the record does not carry it) and so was comparing
+`model.name` (`model_args.model_name` renames it).
 
 **`task.json` is schema version 2** (D-073, `train.api.predictor`): a classification record has the keys and the order
 of version 1 and only `schema_version` changed; a segmentation record has `input_size` as `[height, width]` (not

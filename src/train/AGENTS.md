@@ -435,6 +435,14 @@ train, and the TEST split never selects.
   `segmentation_figures.write_segmentation_figures` for the best weights after `segmentation_run.confusion_from_dataset`.
   The drawing functions of `segmentation_viz` take `palette` (default the three-colour `PALETTE`) and `ignore_index`
   (default `None`), so the Pet trainer's calls and pixels are what they were; `extended_palette(C)` is additive.
+- **Predicting a segmentation run** (D-080): `predictor.load_model` dispatches on `record["task"]`;
+  `api/segmentation_predictor.py:SegmentationPredictor.predict` returns `{"masks": [...], "class_names": [...]}` (always a
+  list, `uint8`, or `uint16` above 255 classes) at each image's EXIF-applied size, from logits resized bilinearly BEFORE
+  the argmax (`resize_argmax`, in pieces of classes); its decoder is `segmentation_data.image_to_rgb`, the training one.
+  `python -m train predict` of a segmentation run writes a new directory of `<stem>.png` plus `index.json` last.
+  `predictor.input_shape_of(record)` is the model input of either task and `record_beside(path)` reads the record without
+  loading the model. `check_model_against_record` cannot compare a functional family (a `module:TABLE` `variants_attr`
+  with no class) with the record; the anchor at that function says why and what is checked instead.
 
 For text use `train.common.nlp`; for MegaDepth RGB+depth pairs `train.common.megadepth`
 (yielding `(rgb, y_true)` with `y_true = [disparity, mask]` on the last axis, the disparity

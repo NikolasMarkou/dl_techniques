@@ -32,6 +32,13 @@ help word, prints its config keys; any other arguments go to ``run_task``.
     existing ``out`` (a dangling symlink included), or one under a file, is refused before
     the model is loaded. Exit 0, else 2.
 
+    For a SEGMENTATION run (the record's ``task``) ``out`` is a new DIRECTORY instead: one
+    ``<stem>.png`` per image (the class id of every pixel, at the size of that image after its EXIF
+    orientation; 8 bit, 16 bit above 255 classes) and, written last, ``index.json`` with the class
+    names and one ``{"path", "mask", "size"}`` per image
+    (:func:`train.api.segmentation_predictor.write_predictions`). Two images with one stem are
+    refused before the model is loaded, naming both; so is a record whose ``output`` is ``logits``.
+
 Both commands take exactly their keys (no ``config=``, no nested key), a bare command or
 a lone help word prints them, and the help path imports no TensorFlow.
 
@@ -253,7 +260,7 @@ EXPORT_NOTES = (
 PREDICT_OPTIONS = (
     Option("model", "a run directory (its best_model.keras) or a .keras file beside its task.json"),
     Option("data", "an image file, or a directory of images (searched recursively)"),
-    Option("out", "a new .json file; it must not exist"),
+    Option("out", "a new .json file; it must not exist (a segmentation model writes a new directory of PNG masks and an index.json there)"),
 )
 
 
@@ -328,7 +335,7 @@ def _export(args: List[str]) -> int:
     # comes first: ``check_target`` imports tf2onnx (and so TensorFlow) for ``onnx``.
     model_path = _existing_model_path(values["model"])
     target = check_target(values["out"], values["format"], with_record=True)
-    from .predictor import load_model
+    from .predictor import input_shape_of, load_model
 
     # DECISION plan-2026-10-30T132432-a865fa08/D-068: stdout carries ONLY the written path, so
     # ``OUT=$(python -m train export ...)`` works. Keras prints "Saved artifact at ..." and the
@@ -340,7 +347,7 @@ def _export(args: List[str]) -> int:
             model=loaded.model,
             out=target,
             format=values["format"],
-            input_shape=loaded.record["input_shape"],
+            input_shape=input_shape_of(loaded.record),
             record=loaded.record,
         )
     sys.stdout.write(f"{written}\n")
@@ -386,9 +393,14 @@ def _predict(args: List[str]) -> int:
     data = Path(values["data"])
     if not data.exists():
         raise ConfigError(f"Invalid value for 'data': {data} does not exist")
-    from .predictor import CHUNK, load_model
+    from .predictor import CHUNK, SEGMENTATION, load_model, record_beside
 
     files = _image_files(data)
+    # The task is read from the record alone, so what only the files and the record decide is refused
+    # before the model is loaded (D-064): a stem two images share, an output a PNG cannot hold.
+    record = record_beside(model_path)
+    if record["task"] == SEGMENTATION:
+        return _predict_masks(model_path, record, files, out)
     predictor = load_model(model_path)
     entries: List[Dict[str, Any]] = []
     for start in range(0, len(files), CHUNK):
@@ -402,6 +414,18 @@ def _predict(args: List[str]) -> int:
     with open(out, "x") as handle:
         json.dump(entries, handle, indent=2)
         handle.write("\n")
+    sys.stdout.write(f"{out}\n")
+    return 0
+
+
+def _predict_masks(model_path: Path, record: Mapping[str, Any], files: List[Path], out: Path) -> int:
+    """Write the masks of ``files`` as PNGs and an index into the new directory ``out``."""
+    from .predictor import load_model
+    from .segmentation_predictor import check_png_output, mask_names, write_predictions
+
+    check_png_output(record)
+    mask_names(files)
+    write_predictions(load_model(model_path), files, out)
     sys.stdout.write(f"{out}\n")
     return 0
 
