@@ -40,7 +40,12 @@ CPU with CPU). Serving a model on a GPU is a different computation: it differs f
 1e-3 in the logits (measured on ``cliffordnet/nano`` of the ImageNet gate, GPU against CPU on the same
 weights: up to 1.1e-3 on logits of scale 3.6 for 16 real validation images and 5.8e-4 on scale 3.0 for 16
 noise images; the argmaxes were equal on all 16 of each), which no export format changes. The same holds for a segmentation model: ConvUNext ``tiny`` with the real Pet weights, Keras on the GPU against the CPU
-files (or Keras on the CPU), 16 real images: up to 8.2e-3 on scores of scale 7.7, 1 pixel in 9,400 with another argmax (0.999893 agree). A ``mixed_float16`` model matches in ``keras``, ``saved_model``
+files (or Keras on the CPU), 16 real images: up to 8.2e-3 on scores of scale 7.7, 1 pixel in 9,400 with another argmax (0.999893 agree). A trained AccUNet (scores up to 220) shows how much the device matters: ONE ``saved_model`` of its real Pet
+weights, written by a CPU process and by a GPU process alike, differs from Keras in the same regime by 9.2e-4 on the CPU
+(4.2e-6 of the scale, argmax agreement 1.0), by 9.3 to 9.4 on a GPU with TF32 on (4.2% to 4.3% of the scale, agreement
+0.9957 to 0.9963) and by 2.5e-3 on a GPU with TF32 off (1.1e-5); against Keras on the CPU the TF32 file is 2.6 to 2.8 away
+(1.2% to 1.3%, plan 98b866fb step 1, ``scratch_step1/accunet_export_regimes.json``). The file is not at fault: compare an
+export with Keras on the CPU. A ``mixed_float16`` model matches in ``keras``, ``saved_model``
 and ``tflite``, but its ``onnx`` export differs from Keras by up to about 1e-4 (9.0e-05
 measured on ``vit_pico``): ONNX Runtime rounds the half-precision steps its own way.
 
