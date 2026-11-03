@@ -525,6 +525,14 @@ def load_model(path: Union[str, Path]) -> "Predictor":
             f"Invalid {TASK_FILE} {task_file}: the family {record['family']!r} is not registered "
             f"(registered: {', '.join(sorted(registry.MODELS)) or 'none'})"
         )
+    if record["task"] not in spec.tasks:
+        # A record whose family trains another task is not one a run wrote (the trainer refuses the
+        # pair before it claims the directory, D-072); say so here rather than let the family check
+        # below compare a model with a variants table that is not its own.
+        raise ConfigError(
+            f"Invalid {TASK_FILE} {task_file}: the family {record['family']!r} trains "
+            f"{' and '.join(spec.tasks)}, not {record['task']!r}; the file is not from one run"
+        )
     spec.load_factory()
     # DECISION plan-2026-10-30T132432-a865fa08/D-061: ``compile=False``. Do NOT load the compile config: a
     # predictor needs no loss or metric, and a metric class the archive names (the

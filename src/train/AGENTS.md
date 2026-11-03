@@ -451,6 +451,13 @@ per-model scripts (usage, keys, run directory, resume, `predict`, `export`, exit
   from Python and `python -m train` are the same), and `__main__.py` is only
   `sys.exit(main(sys.argv[1:]))`. A new task is a `TaskSpec` row in `api/tasks/__init__.py` (strings,
   imported on use), and a new family a `ModelSpec` in `api/recipes.py`.
+- **A family trains the tasks in `ModelSpec.tasks`** (D-072): `registry.parse_model_name(name, task=)` refuses another
+  one, in both directions, before the variants table is imported, and `TaskTrainer.run` passes its `task` as its first
+  act; `load_model` refuses a record whose family does not train the record's task. `ModelSpec.stride` (an int, or
+  `"module:callable"` of `f(variant, model_args) -> int`, or `None` for the classifiers) is the multiple each side of a
+  segmentation `image_size` must be; `api/segmentation_models.py` holds the two adapters (`convunext`, `accunet`),
+  `check_image_size` and the specs. `recipes.register_builtin_models` registers the six classifiers only, and the guards
+  that enumerate `registry.MODELS` rely on it: the segmentation task registers its own families.
 - **The help path imports no TensorFlow, Keras or yaml and stays under 1 s**:
   `tests/test_train/test_api/test_cli_help_allocates_nothing.py`. Heavy imports go inside functions.
   A request that can be refused without loading data is refused before `setup_gpu` and before the

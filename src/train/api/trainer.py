@@ -700,7 +700,7 @@ class TaskTrainer:
                 f"epochs, got {config.epochs!r}; remove one of them"
             )
 
-        family, variant = registry.parse_model_name(config.model)
+        family, variant = registry.parse_model_name(config.model, task=self.task)
         # DECISION plan-2026-10-30T132432-a865fa08/D-042: the request is RESOLVED
         # before the run directory is claimed. Do NOT move this below ``open_run``:
         # a request that cannot resolve is a configuration error, and refusing it

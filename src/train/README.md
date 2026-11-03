@@ -27,6 +27,17 @@ main(["list_tasks"])      # the same as the command line; returns the exit code
 **Commands**: `help`, `list_tasks`, `list_models`, `export`, `predict`, and each registered task.
 `-v` anywhere logs at DEBUG. `<command> help` prints that command's keys.
 
+**A family trains one task**: each family lists the task it trains, and `model=` is checked against the task
+before the data, the recipe or the run directory: `python -m train image_classification model=<a segmentation
+family>/<variant>` exits 2 with the task the family trains and the families of this one, and the same holds the other
+way round. The two segmentation families, `convunext` and `accunet` (`train/api/segmentation_models.py`), are adapters
+and a size rule so far; the task that trains them, `image_segmentation`, registers them, and until then the command
+line does not list them. Their `image_size` will be an int (a square) or `[height, width]`, each side a multiple of the
+family's stride: `2 ** depth` for ConvUNext (8 for `tiny` and `small`, 16 for `base` and `large`, 32 for `xlarge`,
+following a `depth` in `model_args`) and 16 for AccUNet. Measured on CPU: both build at 128x256 and return the input's
+size. AccUNet itself refuses a side that is not a multiple of 16; ConvUNext does not (it resizes its decoder to its
+skips), so for it the rule is the task's choice, made so that the skips meet the upsampled maps.
+
 **Keys**: `key=value` tokens; a dot reaches a group (`optim_args.lr=3e-4`, `data.dataset=cifar10`);
 `config=run.yaml` loads a file first and the command line wins over it. A value is read by
 the field's type (`true`/`false`, `3e-4`, `null`, JSON for a list or mapping; a string is verbatim). An unknown key, a wrong type or a bad choice is refused with the list of all

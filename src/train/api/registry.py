@@ -16,12 +16,18 @@ Interface contract
         a :class:`~train.api.errors.DLTrainError` and reaches the user as a
         traceback.
 
-``parse_model_name(name)``
+``parse_model_name(name, task=None)``
     :param name: ``"family/variant"``, e.g. ``"vit/vit_pico"``.
+    :param task: the task the model is for; ``None`` skips the task check.
     :return: ``(family, variant)``.
     :raises UnknownModelError: for a missing slash, an unknown family or an
         unknown variant; the message carries a ``difflib`` suggestion. The
         variant check imports the family's variants table.
+    :raises ConfigError: when ``task`` is given and is not in the family's
+        ``tasks``, in either direction (a segmentation family under the
+        classifier, a classifier under the segmenter). The message names the
+        key, the tasks the family trains and the families of ``task``. It is
+        raised before the variants table is imported.
 
 ``list_models(task=None)``
     :param task: keep only families that list this task; ``None`` keeps all.
@@ -31,6 +37,16 @@ Interface contract
 
 ``list_tasks()``
     :return: the registered :class:`TaskSpec` rows, sorted by name.
+
+``ModelSpec.stride_of(variant, model_args=None)``
+    :param variant: variant name.
+    :param model_args: the caller's ``model_args`` mapping, for a rule that a
+        key of it changes (ConvUNext's ``depth``).
+    :return: the number every side of a segmentation ``image_size`` must be a
+        multiple of for this family (``None`` for a family with no such rule:
+        the classifiers, whose ``image_size`` stays one square side, D-007).
+    :raises ConfigError: from a stride function, for a ``model_args`` value it
+        cannot use.
 
 ``ModelSpec.recipe(dataset, variant)``
     :return: a deep copy of the family's ``defaults`` with the ``per_dataset``
@@ -48,7 +64,7 @@ import difflib
 import importlib
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 from .errors import ConfigError, UnknownModelError
 
@@ -110,6 +126,12 @@ class ModelSpec:
         ``f(context, optim_args, model_args)`` (an ``AutoContext``, the
         resolved ``OptimArgs`` and the caller's free mapping) that returns the
         factory keyword arguments; see :mod:`train.api.recipes`.
+    :param stride: the size rule of a segmentation family: every side of its
+        ``image_size`` must be a multiple of this. A positive int, or
+        ``"module:callable"`` text of ``f(variant, model_args) -> int`` for a
+        rule that depends on the variant or on a ``model_args`` key. ``None``
+        (the default) is no rule: the classifiers keep their square ``image_size``
+        and their own checks.
     """
 
     family: str
@@ -118,6 +140,7 @@ class ModelSpec:
     tasks: Tuple[str, ...]
     defaults: Mapping[str, Any] = field(default_factory=dict)
     resolve_model_args: Optional[str] = None
+    stride: Optional[Union[int, str]] = None
 
     def __post_init__(self) -> None:
         if not self.family or "/" in self.family:
@@ -128,6 +151,15 @@ class ModelSpec:
             _require_attr_path("ModelSpec", "resolve_model_args", self.resolve_model_args)
         if not isinstance(self.tasks, tuple) or not self.tasks:
             raise ValueError(f"ModelSpec.tasks must be a non-empty tuple, got {self.tasks!r}")
+        if isinstance(self.stride, str):
+            _require_attr_path("ModelSpec", "stride", self.stride)
+        elif self.stride is not None and (
+            isinstance(self.stride, bool) or not isinstance(self.stride, int) or self.stride < 1
+        ):
+            raise ValueError(
+                f"ModelSpec.stride must be a positive int, 'module:callable' text or None, "
+                f"got {self.stride!r}"
+            )
 
     def recipe(self, dataset: str, variant: str) -> Dict[str, Any]:
         """Return the recipe for one dataset and variant, overlays applied.
@@ -174,6 +206,14 @@ class ModelSpec:
         if self.resolve_model_args is None:
             return None
         return load_attr(self.resolve_model_args)
+
+    def stride_of(
+        self, variant: str, model_args: Optional[Mapping[str, Any]] = None
+    ) -> Optional[int]:
+        """Return the multiple each side of a segmentation ``image_size`` must be; see the module contract."""
+        if self.stride is None or isinstance(self.stride, int):
+            return self.stride
+        return int(load_attr(self.stride)(variant, dict(model_args or {})))
 
 
 @dataclass(frozen=True)
@@ -253,7 +293,7 @@ def _variant_names(spec: ModelSpec) -> List[str]:
     return sorted(spec.load_variants())
 
 
-def parse_model_name(name: str) -> Tuple[str, str]:
+def parse_model_name(name: str, task: Optional[str] = None) -> Tuple[str, str]:
     """Split ``"family/variant"`` and check both halves; see the module contract."""
     family, slash, variant = name.partition("/")
     if not slash or not family or not variant or "/" in variant:
@@ -267,6 +307,17 @@ def parse_model_name(name: str) -> Tuple[str, str]:
         raise UnknownModelError(
             f"Unknown model family {family!r} in {name!r} (families: {known})."
             f"{_suggest(family, sorted(MODELS))}"
+        )
+    # DECISION plan-2026-10-31T180033-2faf890a/D-072: the task is checked HERE, before the variants
+    # table is imported and so before any model code is. Do NOT leave it to the task's own
+    # resolver: a segmentation family handed to the classifier would reach its build as "an
+    # unknown key" or a shape error, after the user has waited for the data.
+    if task is not None and task not in spec.tasks:
+        siblings = sorted(other for other, row in MODELS.items() if task in row.tasks)
+        raise ConfigError(
+            f"Invalid value for 'model': the family {family!r} trains {' and '.join(spec.tasks)}, "
+            f"not {task!r}; the families of {task!r} are "
+            f"{', '.join(siblings) if siblings else 'none registered'}"
         )
     variants = _variant_names(spec)
     if variant not in variants:
