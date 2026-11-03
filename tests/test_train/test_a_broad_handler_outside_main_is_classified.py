@@ -544,11 +544,17 @@ def test_the_census_counts_are_pinned():
     That commit dropped their two ``_EXEMPT`` rows and left the pin at 50, so this test was red
     from cc5199915 until plan-2026-10-31T180033-2faf890a step 5, which measured the difference
     (the table at 8b94188fd against HEAD, 50 rows against 48, exactly those two rows) and
-    corrected the pin. No other count moved and no handler is unclassified."""
+    corrected the pin. No other count moved and no handler is unclassified.
+
+    Raises 8 -> 9 at plan-2026-10-31T180033-2faf890a step 25: ``train/common/segmentation_data.py``
+    ``load_oxford_pet_arrays`` wraps ``tfds.load(..., download=False)`` in the legacy Pet loader's
+    ``except Exception`` and re-raises a ``RuntimeError`` that names the cache directory (TFDS
+    raises assorted types for a missing cache); the census classifies it as ``raises`` by itself,
+    and the file has no other handler."""
     verdicts = [verdict for rows in CENSUS.values() for _l, _n, verdict, _e in rows]
     counts = {kind: verdicts.count(kind)
               for kind in ("raises", "exits", "records", "optional", "exempt", None)}
-    assert counts == {"raises": 8, "exits": 4, "records": 2,
+    assert counts == {"raises": 9, "exits": 4, "records": 2,
                       "optional": 58, "exempt": 48, None: 0}
     assert sum(len(entries) for entries in _OPTIONAL_OUTPUT.values()) == 58
     assert sum(len(entries) for entries in _EXEMPT.values()) == 48

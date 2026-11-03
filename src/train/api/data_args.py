@@ -380,14 +380,16 @@ FORMATS: Dict[str, Type[StrictConfig]] = {
 ImageData = Union[BuiltinImageData, FolderImageData, CsvImageData]
 
 
-def read_data_file(path: Union[str, Path]) -> Dict[str, Any]:
+def read_data_file(path: Union[str, Path], path_keys: Tuple[str, ...] = PATH_KEYS) -> Dict[str, Any]:
     """Return the mapping in the YAML file ``path``, its relative paths anchored to the file.
 
+    :param path_keys: the keys that name a path; the segmentation data classes pass their own
+        (``train.api.segmentation_args.SEG_PATH_KEYS``).
     :raises ConfigError: from ``load_yaml_mapping`` (unreadable, malformed, not a mapping).
     """
     mapping = dict(load_yaml_mapping(path))
     base = Path(path).resolve().parent
-    for key in PATH_KEYS:
+    for key in path_keys:
         value = mapping.get(key)
         if isinstance(value, str) and value and not os.path.isabs(value):
             mapping[key] = os.path.normpath(base / value)

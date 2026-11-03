@@ -396,6 +396,20 @@ train, and the TEST split never selects.
   DINO's per-epoch k-NN probe queries the selection slice, and `KNNEvalCallback.evaluate_split`
   scores the test split once after training (`knn_test.json`).
 
+- **Image and mask pairs for segmentation** (D-074): `train.common.segmentation_data` decodes every image and every mask
+  with ONE PIL function (`decode_image`, `decode_mask`, `ImageOps.exif_transpose` applied to both; `tf.io.decode_image`
+  ignores the EXIF orientation, and 119 of the 130 SUT-Crack photographs are stored sideways beside upright masks), so a
+  pair is never rotated against its mask. A palette PNG is read as its INDICES, a 1-bit PNG as 0 and 255, a JPEG, RGB or
+  RGBA mask is refused; the resize is bilinear (antialiased, byte-rounded) for the image and nearest for the mask, with no
+  padding, so void stays void and no value appears that the file did not hold. `scan_segmentation_folder` (two directories
+  joined by file stem) and `read_segmentation_csv` (`image`, `mask` columns) list pairs and refuse an unpaired stem, a file
+  listed twice and an image or MASK in both splits; `check_pairs` checks every mask value against the classes and the
+  stated `ignore_index` (a mask whose values are exactly 0 and 255 is refused with a pointer at `data.mask_threshold`);
+  `pair_fingerprint` hashes the pair rows in listing order (mask path and size included; `content` also the bytes).
+  `train.api.segmentation_args` holds the config classes and runs the listing plus a PIL-only sample of 32 pairs before the
+  claim; the loaders check every pair they use before `fit` and log the duration. Pipelines assert their cardinality.
+  Oxford-IIIT Pet is read through `load_oxford_pet_arrays`, the one TFDS seam, byte-equal to `train.convunext.common.load_oxford_pet`.
+
 For text use `train.common.nlp`; for MegaDepth RGB+depth pairs `train.common.megadepth`
 (yielding `(rgb, y_true)` with `y_true = [disparity, mask]` on the last axis, the disparity
 per-map normalized to `[0, 1]`); for image-file denoiser/restoration/matching data
