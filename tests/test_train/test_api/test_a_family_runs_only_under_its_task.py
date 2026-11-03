@@ -12,8 +12,11 @@ Three rules, each observed where a user meets it:
 * The two adapters build the model the legacy trainers build, and each family really builds at a
   non-square size with the output the size of the input.
 
-The segmentation families are NOT in ``recipes.register_builtin_models`` (the task that trains them
-registers them), so the fixture below adds them to an isolated registry.
+``recipes.register_builtin_models`` registers the two segmentation families with the six classifiers
+and ``register_builtin_tasks`` both tasks (step 28, D-077). Step 23 held the families back, so this
+fixture added them to an isolated registry by hand and put a stand-in row for the task; both are
+gone now, and the assertions that depend on them (``world`` holds eight families, the task row is the
+real one) are unchanged.
 """
 
 import json
@@ -22,7 +25,7 @@ import numpy as np
 import pytest
 
 import train.api.recipes as recipes
-from train.api import cli, registry, segmentation_models
+from train.api import cli, registry
 from train.api.errors import ConfigError, UnknownModelError
 from train.api.registry import ModelSpec
 from train.api.segmentation_models import (
@@ -51,13 +54,7 @@ def world():
         patch.setattr(registry, "MODELS", {})
         patch.setattr(registry, "TASKS", {})
         recipes.register_builtin_models()
-        for spec in segmentation_models.builtin_segmentation_models():
-            registry.register_model(spec)
         register_builtin_tasks()
-        # The segmentation task itself is step 28's; a stand-in row lets `list_models(task=)` name it.
-        registry.register_task(
-            registry.TaskSpec(name=SEGMENTATION, config_class="m:C", function="m:f", summary="stand-in")
-        )
         yield registry.MODELS
 
 

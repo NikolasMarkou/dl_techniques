@@ -14,7 +14,8 @@ Interface contract
     :param variant: variant name, e.g. ``"vit_pico"``.
     :param dataset: dataset name, e.g. ``"cifar10"``.
     :param num_classes: number of classes the data has.
-    :param image_size: side length of the (square) input image.
+    :param image_size: side length of the (square) input image; ``None`` for a segmentation run
+        (its size is a ``[height, width]`` pair and lives in the task's own facts).
     :param defaults: the family recipe as a nested mapping,
         ``{"optim_args": {"lr": 3e-4, ...}, "metric_args": {...}, ...}``, one
         entry per group, keyed by the group's field name in the task config.
@@ -92,7 +93,7 @@ class AutoContext:
     variant: str
     dataset: str
     num_classes: int
-    image_size: int
+    image_size: Optional[int]
     defaults: Mapping[str, Any]
 
 
@@ -562,7 +563,9 @@ class AnalysisArgs(StrictConfig):
     conformal_alpha: Optional[float] = dataclasses.field(
         default=None,
         metadata={
-            "help": "miscoverage level in (0, 1) for conformal prediction sets; null skips it"
+            "help": "miscoverage level in (0, 1) for the conformal prediction sets of a classifier; "
+            "null skips it; image_segmentation refuses a value (a set of classes for a whole image "
+            "is not a segmentation output)"
         },
     )
     eval_batch_size: Auto[int] = dataclasses.field(
@@ -580,7 +583,8 @@ class AnalysisArgs(StrictConfig):
             "recipe values are keyed to the dataset: folder and csv data take 256 whatever the "
             "family or the image size, so a cliffordnet run on files of 224 px should set it (and "
             "batch_size) itself. It changes no weight; it can change an evaluation number in the "
-            "last digits"
+            "last digits. image_segmentation batches the selection and test splits of every source at "
+            "it (its recipes set the training batch, 16)"
         },
     )
 

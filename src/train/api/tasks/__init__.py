@@ -22,6 +22,12 @@ BUILTIN_TASKS = (
         function="train.api.tasks.image_classification:train_image_classification",
         summary="train an image classifier on a built-in dataset",
     ),
+    registry.TaskSpec(
+        name="image_segmentation",
+        config_class="train.api.tasks.image_segmentation:ImageSegmentationConfig",
+        function="train.api.tasks.image_segmentation:train_image_segmentation",
+        summary="train a semantic segmenter on Oxford-IIIT Pet or on image and mask files",
+    ),
 )
 
 

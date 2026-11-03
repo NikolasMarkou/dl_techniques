@@ -65,6 +65,7 @@ import json
 import math
 import re
 import typing
+from pathlib import Path
 from typing import (
     Any,
     Dict,
@@ -103,6 +104,94 @@ DEFAULT_SEED = 42
 #: ``reader(path) -> mapping`` that reads it its own way (``data``'s anchors the
 #: relative paths it holds to the file).
 PATH_FORM = "path_form"
+
+#: The precision policies a run can ask for.
+PRECISIONS = ("float32", "mixed_float16", "mixed_bfloat16")
+
+Precision = Literal[PRECISIONS]  # type: ignore[valid-type]
+
+#: The help of the fields every task config shares, one text for all tasks (D-077: the
+#: segmentation config was about to be the second copy of a thirty-line paragraph that
+#: ``test_the_help_and_the_commands_state_the_imagenet_cost`` pins word for word).
+RUN_HELP: Dict[str, str] = {
+    "out": "run directory (a relative path starts at the repo root); auto names one under results/",
+    "epochs": "epochs to train; auto takes the family's",
+    "batch_size": "batch size; auto takes the family's",
+    "seed": "seed of the weights, the split and the augmentation",
+    "devices": "GPU index inside the visible devices; auto or null leaves every visible GPU",
+    "precision": "float32, mixed_float16 or mixed_bfloat16",
+    "checkpoint": "a .keras model whose same-named layers give their weights to this one",
+    "model_args": "keywords of the model factory; they win over the family's",
+}
+
+
+def resume_help(epoch_cost: str) -> str:
+    """Return the help of ``resume_interrupted``; ``epoch_cost`` is the parenthesis' first clause.
+
+    :param epoch_cost: what an epoch costs on the task's data, e.g. ``"an ImageNet epoch is hours"``.
+    """
+    return (
+        "continue a killed run of the same out with the same request (devices "
+        "may differ); the data order replays epoch 0's; a killed epoch is lost and a "
+        f"half-done epoch is trained again from its first batch ({epoch_cost}; "
+        "checkpoint_args.backup_every_steps bounds the loss to that many batches "
+        "of training, and the epoch is then continued from the last backup: only the "
+        "batches that backup had not taken run, from a fresh pass of the data, so some "
+        "examples of that epoch repeat and some are missed); the learning rate, ReduceLROnPlateau and early stopping come back; a kill "
+        "between the best checkpoint's save and the backup can leave best_model.keras one "
+        "epoch LATER than the resumed state's best (the epoch that is then trained again; "
+        "never an earlier one); a run with no epoch left to train and no results_summary.json "
+        "(its reporting died, or the process died after the last epoch: fit_finished, all "
+        "epochs ended, or early stopping had decided) is not trained again: only the reporting "
+        "runs, from best_model.keras, checkpoints/backup/latest.weights.h5 and "
+        "training_log.csv (not written), and it is refused if that backup is not the last "
+        "epoch's; analysis_args.eval_batch_size may differ; refused: a finished run (with "
+        "a summary), other data than the run's, a live process holding the run, a backup "
+        "neither of whose copies is sound"
+    )
+
+
+def run_request(
+    *,
+    out: Any,
+    model: str,
+    data: Any,
+    epochs: Any,
+    batch_size: Any,
+    seed: int,
+    devices: Any,
+    precision: str,
+    resume_interrupted: bool,
+    checkpoint: Any,
+    model_args: Optional[Mapping[str, Any]],
+    groups: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Return the mapping a task function hands to :func:`validate`.
+
+    Interface contract: ``out`` and ``checkpoint`` may be a ``Path`` (stored as text);
+    ``model_args`` ``None`` is ``{}``; ``groups`` maps each group's field name to a mapping, a
+    group instance or ``None``, and a ``None`` is left out so the config's default stands. The
+    two task functions (classification and segmentation) differ in their ``data`` and group
+    types and in nothing else, so this is the one place the other fifteen keys are assembled.
+
+    :return: the mapping; no key is checked here (``validate`` does that, all at once).
+    """
+    given: Dict[str, Any] = {
+        "out": str(out) if isinstance(out, Path) else out,
+        "model": model,
+        "data": data,
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "seed": seed,
+        "devices": devices,
+        "precision": precision,
+        "resume_interrupted": resume_interrupted,
+        "checkpoint": str(checkpoint) if isinstance(checkpoint, Path) else checkpoint,
+        "model_args": {} if model_args is None else model_args,
+    }
+    given.update({name: value for name, value in groups.items() if value is not None})
+    return given
+
 
 #: The pattern of an integer, shared by the command line and the YAML loader so
 #: ``010`` means 10 from both doors (D-034).

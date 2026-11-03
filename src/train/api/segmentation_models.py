@@ -66,9 +66,31 @@ Interface contract
 
 ``builtin_segmentation_models()``
     :return: the two :class:`~train.api.registry.ModelSpec` rows (``convunext``, ``accunet``),
-        freshly built. NOT registered by :func:`train.api.recipes.register_builtin_models`: the
-        task that trains them registers them (step 28), and the classification registry, which
-        a dozen guards enumerate, holds the six classifiers only.
+        freshly built, each with its recipe (``defaults``) and ``resolve_segmentation_args``.
+        :func:`train.api.recipes.register_builtin_models` registers them with the six classifiers
+        (D-077: they were held back in step 23 for want of a recipe and a task, and both exist now).
+
+``resolve_segmentation_args(context, optim_args, model_args)``
+    The ``resolve_model_args`` of both families.
+
+    :return: the factory keywords: the recipe's ``model_args`` (none), then the caller's.
+    :raises ConfigError: when ``model_args`` names a key the adapter sets itself
+        (``use_bias``, ``final_activation``, ``output_channels`` for ConvUNext, ``input_channels``
+        for AccUNet) or one the library supplies (``variant``, ``num_classes``, ``input_shape``).
+        The task reaches this before the run directory is claimed (``check_model_args``).
+
+Recipes
+-------
+``CONVUNEXT`` is ``train.convunext.common.SegTrainingConfig``'s defaults, read from it by
+``test_the_segmentation_recipes_are_the_legacy_trainers``: AdamW lr 1e-3, weight decay 1e-4, no
+warmup, per-variable ``clipnorm`` 1.0, a cosine over all epochs to 1% of the peak, 30 epochs, batch
+16, patience 10, a horizontal flip, Oxford-IIIT Pet at 128 px. ``ACCUNET`` is
+``train.accunet.train_accunet.AccUNetTrainingConfig``'s: lr 1e-4, weight decay 1e-4, 2 warmup
+epochs, ``global_clipnorm`` 1.0, patience 15. Two values are NOT the legacy ones, on purpose and
+stated: the monitor is ``val_miou`` (both legacy trainers default to ``val_loss``; D-077), and the
+loss is cross-entropy (the AccUNet trainer's default is ``combo``, which this task offers from
+step 35 on). The evaluation batch is the training batch (16), as the legacy trainer evaluates;
+the shared 256 would put 256 full-size masks and logits in one pass.
 
 Measured (``plans/.../scratch_step23/logs/p1_build.txt``, CPU)
 --------------------------------------------------------------
@@ -89,6 +111,8 @@ Module scope imports the standard library and ``train.api`` only (D-012).
 
 from typing import Any, Dict, Mapping, Sequence, Tuple, Union
 
+from . import recipes
+from .args import AutoContext, OptimArgs
 from .errors import ConfigError
 from .registry import ModelSpec
 
@@ -115,15 +139,29 @@ _CONVUNEXT_FIXED = ("use_bias", "final_activation", "output_channels")
 #: Keys of ``create_acc_unet_multiclass`` this adapter supplies from the data.
 _ACCUNET_FIXED = ("input_channels",)
 
+#: The keys of ``model_args`` each family's adapter sets itself.
+FIXED_MODEL_ARGS: Dict[str, Tuple[str, ...]] = {
+    "convunext": _CONVUNEXT_FIXED,
+    "accunet": _ACCUNET_FIXED,
+}
 
-def _refuse_fixed(family: str, model_args: Mapping[str, Any], fixed: Sequence[str]) -> None:
-    clash = [key for key in fixed if key in model_args]
-    if clash:
-        raise ValueError(
-            f"{', '.join(map(repr, clash))} is set by the {family!r} adapter from model=, the "
-            "data and transform_args (a softmax or biased-off head would break the logits loss); "
-            "remove it from model_args"
-        )
+
+def _fixed_clash(family: str, model_args: Mapping[str, Any]) -> str:
+    """Return the sentence for the adapter-set keys ``model_args`` names, ``""`` for none."""
+    clash = [key for key in FIXED_MODEL_ARGS[family] if key in model_args]
+    if not clash:
+        return ""
+    return (
+        f"{', '.join(map(repr, clash))} is set by the {family!r} adapter from model=, the "
+        "data and transform_args (a softmax or biased-off head would break the logits loss); "
+        "remove it from model_args"
+    )
+
+
+def _refuse_fixed(family: str, model_args: Mapping[str, Any]) -> None:
+    message = _fixed_clash(family, model_args)
+    if message:
+        raise ValueError(message)
 
 
 def _three_sides(input_shape: Sequence[int]) -> Tuple[int, int, int]:
@@ -137,7 +175,7 @@ def create_convunext(
     *, variant: str, num_classes: int, input_shape: Sequence[int], **model_args: Any
 ) -> Any:
     """Build a ConvUNext segmenter; see the module contract."""
-    _refuse_fixed("convunext", model_args, _CONVUNEXT_FIXED)
+    _refuse_fixed("convunext", model_args)
     height, width, channels = _three_sides(input_shape)
     from dl_techniques.models.vision.convunext.model import create_convunext_variant
 
@@ -155,7 +193,7 @@ def create_accunet(
     *, variant: str, num_classes: int, input_shape: Sequence[int], **model_args: Any
 ) -> Any:
     """Build an AccUNet segmenter; see the module contract."""
-    _refuse_fixed("accunet", model_args, _ACCUNET_FIXED)
+    _refuse_fixed("accunet", model_args)
     if variant not in ACCUNET_VARIANTS:
         raise ValueError(
             f"Unknown variant {variant!r}. Available variants: {sorted(ACCUNET_VARIANTS)}"
@@ -236,6 +274,86 @@ def check_image_size(
     return height, width
 
 
+def resolve_segmentation_args(
+    context: AutoContext, optim_args: OptimArgs, model_args: Mapping[str, Any]
+) -> Dict[str, Any]:
+    """Return the adapter's keywords: the recipe's, then the caller's; see the module contract."""
+    message = _fixed_clash(context.family, model_args)
+    if message:
+        raise ConfigError(f"Invalid value for 'model_args': {message}")
+    return recipes.merge_model_args(context, optim_args, model_args, {})
+
+
+# ---------------------------------------------------------------------
+# The recipes
+# ---------------------------------------------------------------------
+
+#: The monitor and the success metric of a segmentation run (D-077).
+MONITOR = "val_miou"
+
+#: Side of the Oxford-IIIT Pet images both legacy trainers resize to (``SegTrainingConfig.image_size``
+#: 128, ``AccUNetTrainingConfig.image_size`` 128).
+PET_IMAGE_SIZE = 128
+
+
+def _segmentation_recipe(
+    *, optim_args: Dict[str, Any], patience: int, epochs: int = 30, batch_size: int = 16
+) -> Dict[str, Any]:
+    """Return a segmentation recipe: every AUTO key of the groups the task resolves.
+
+    ``image_size`` is given for Oxford-IIIT Pet only: files have no native size, so the caller
+    states one (``seg_facts`` refuses file data without it, before the recipe is read).
+    """
+    # DECISION plan-2026-10-31T180033-2faf890a/D-077
+    # The monitor is `val_miou`, NOT the legacy trainers' `val_loss`. Do NOT copy their default
+    # "for parity": Keras' `val_loss` is a mean of per-batch valid-pixel means weighted by IMAGES
+    # (D-076), not the pooled pixel cross-entropy, and `train.convunext`'s own README measured the
+    # final weights beating the `val_loss` checkpoint in all three seeds (the `val_miou` peak came 8
+    # to 9 epochs after the `val_loss` best). The success verdict is `val_miou` too, so the epoch
+    # kept and the number judged are one metric. The parity gate (step 32) runs the legacy trainer
+    # with `--monitor val_miou` for the same reason. The evaluation batch is the training batch
+    # (the legacy trainer evaluates at its batch); the shared 256 would put 256 full-size masks
+    # and logits in one pass.
+    return {
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "optim_args": optim_args,
+        "transform_args": {"augment": "flip"},
+        "metric_args": {"watch_metric": MONITOR},
+        "checkpoint_args": {"early_stopping_patience": patience},
+        "analysis_args": {"eval_batch_size": batch_size},
+        "model_args": {},
+        "per_dataset": {"oxford_pet": {"transform_args": {"image_size": PET_IMAGE_SIZE}}},
+        "per_variant": {},
+    }
+
+
+# train/convunext/common.py SegTrainingConfig: epochs :194, batch :195, lr :196, weight decay :197,
+# warmup :198, patience :199, image size :187; AdamW with clipnorm GRADIENT_CLIP_NORM (:680, the
+# ConvNeXt trainer's 1.0, per variable); cosine over all epochs (build_lr_schedule, alpha 0.01);
+# the train pipeline flips left-right (_random_flip). Its monitor is val_loss (:202), which this
+# recipe does NOT copy (D-077, the anchor in `_segmentation_recipe`).
+CONVUNEXT = _segmentation_recipe(
+    optim_args=recipes.optim_recipe(
+        optimizer="adamw", lr=1e-3, weight_decay=1e-4, warmup_epochs=0, decay_over="total",
+        clipnorm=1.0,
+    ),
+    patience=10,
+)
+
+# train/accunet/train_accunet.py AccUNetTrainingConfig: epochs :97, batch :98, lr :99, weight decay
+# :100, warmup :101 (2.0), gradient_clipping :103 (optimizer_builder "gradient_clipping_by_norm", a
+# GLOBAL norm), patience :106, image size :87. Its loss is `combo` (:104) and its monitor val_loss
+# (:105); this recipe trains cross-entropy and monitors val_miou (D-077).
+ACCUNET = _segmentation_recipe(
+    optim_args=recipes.optim_recipe(
+        optimizer="adamw", lr=1e-4, weight_decay=1e-4, warmup_epochs=2, decay_over="total",
+        global_clipnorm=1.0,
+    ),
+    patience=15,
+)
+
+
 def builtin_segmentation_models() -> Tuple[ModelSpec, ...]:
     """Return the segmentation family specs, freshly built; see the module contract."""
     return (
@@ -244,6 +362,8 @@ def builtin_segmentation_models() -> Tuple[ModelSpec, ...]:
             factory=f"{_HERE}:create_convunext",
             variants_attr=f"{_CONVUNEXT}:CONVUNEXT_CONFIGS",
             tasks=(TASK,),
+            defaults=CONVUNEXT,
+            resolve_model_args=f"{_HERE}:resolve_segmentation_args",
             stride=f"{_HERE}:convunext_stride",
         ),
         ModelSpec(
@@ -251,6 +371,8 @@ def builtin_segmentation_models() -> Tuple[ModelSpec, ...]:
             factory=f"{_HERE}:create_accunet",
             variants_attr=f"{_HERE}:ACCUNET_VARIANTS",
             tasks=(TASK,),
+            defaults=ACCUNET,
+            resolve_model_args=f"{_HERE}:resolve_segmentation_args",
             stride=ACCUNET_STRIDE,
         ),
     )

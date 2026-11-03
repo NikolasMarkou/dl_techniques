@@ -226,7 +226,8 @@ Hooks (override in a task)
     Returns what ``run_model_analysis`` returns. The default picks the analyzer configuration
     by the model's output rank: a classifier (rank 2) gets the stock one, a per-pixel model
     the pixel path (D-020) and a 256 MB budget for information flow. A task with void labels
-    overrides it to pass ``ignore_label``. A failed analysis is named in the ``analyzer``
+    overrides ``analysis_ignore_label(config)`` (default ``None``), which this passes as the
+    analyzer's ``ignore_label``. A failed analysis is named in the ``analyzer``
     block of the summary as ``failed_analyses`` (a ``{name: reason}`` object, present only
     when non-empty), and ``analyzer.status`` then reads ``partial`` instead of ``success``.
 ``task_metadata(config, data)``
@@ -551,6 +552,15 @@ class TaskTrainer:
     def task_metadata(self, config: StrictConfig, data: Any) -> Dict[str, Any]:
         return {}
 
+    def analysis_ignore_label(self, config: StrictConfig) -> Optional[int]:
+        """Return the label value the model analyzer must drop as void, or ``None``; default ``None``.
+
+        Read by :meth:`run_analysis`. A task whose masks mark void pixels returns that value: the
+        calibration analyzer then drops those pixels before it counts (without it the void label
+        is a class the model never predicts, and it raises).
+        """
+        return None
+
     def task_record(
         self, config: StrictConfig, context: AutoContext, data: Any
     ) -> Optional[Dict[str, Any]]:
@@ -596,9 +606,9 @@ class TaskTrainer:
         run's ``seed`` as the analyzer's ``random_state`` (step 14.3, D-027), so the bootstrap
         ``pl_pvalue`` of the spectral analysis is reproducible between runs of one seed. A
         subclassed model, whose output rank is only known from a call, is given one image to
-        be probed with. A task whose labels mark void pixels overrides this and passes
-        ``ignore_label``; without it a void label is not dropped and the calibration analyzer
-        raises on it, which ``failed_analyses`` then names.
+        be probed with. A task whose labels mark void pixels overrides
+        :meth:`analysis_ignore_label`; without it a void label is not dropped and the calibration
+        analyzer raises on it, which ``failed_analyses`` then names.
 
         The analyzer's own predictions run at Keras' 32 images a pass unless
         ``analysis_args.eval_batch_size`` is lower (``evaluation.predict_batch_cap``), in which
@@ -614,6 +624,7 @@ class TaskTrainer:
             run_dir,
             config=evaluation.analysis_config_for(
                 model,
+                ignore_label=self.analysis_ignore_label(config),
                 sample=evaluation.first_sample(test_data),
                 random_state=getattr(config, "seed", None),
                 prediction_batch_size=evaluation.predict_batch_cap(

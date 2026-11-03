@@ -53,6 +53,15 @@ INITIAL_LOSS_WARN_FACTOR = 10.0
 STATUS_OK = "ok"
 STATUS_DIVERGED = "diverged"
 
+#: The three lines of a finished run's ``notes`` that describe the CSV and the two test scores; they
+#: hold for every task that runs this sequence (classification, segmentation), so there is one copy.
+RUN_NOTES = (
+    "CSV `epoch` is 0-based, `best_epoch` is 1-based (`best_epoch_csv_index` = `best_epoch` - 1)",
+    "CSV `lr` is the rate at the START of the epoch (its first step)",
+    "`test_metrics_best` is the reloaded best_model.keras, `test_metrics_final` "
+    "the last epoch's weights; the test set never influenced selection",
+)
+
 # Signature of the ``evaluate`` seam: a model and a batched dataset to ``{metric: float}``.
 Evaluate = Callable[[keras.Model, "tf.data.Dataset"], Dict[str, float]]
 

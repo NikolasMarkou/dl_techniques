@@ -124,11 +124,24 @@ SMALL = ("cifar10", "cifar100")
 FAMILIES = ("vit", "resnet", "convnext_v1", "convnext_v2", "cliffordnet", "cliffordnet_hier")
 
 
+CLASSIFICATION = "image_classification"
+SEGMENTATION = "image_segmentation"
+
+
 @pytest.fixture(scope="module")
 def table(world):
+    """The recipe of every (CLASSIFIER family, dataset) pair.
+
+    Step 28 (D-077): the registry also holds the two segmentation families, whose recipes set the
+    key in their BASE recipe (the evaluation batch is the training batch, 16) and are checked in
+    :func:`test_a_segmentation_run_evaluates_at_the_batch_it_trains_at`; this table, and the claims
+    that "every other run keeps 256", are about the classifiers.
+    """
     out = {}
     for family in registry.MODELS:
         spec = registry.MODELS[family]
+        if spec.tasks != (CLASSIFICATION,):
+            continue
         variant = sorted(spec.load_variants())[0]
         for dataset in LARGE + SMALL:
             out[(family, dataset)] = spec.recipe(dataset, variant)
@@ -149,6 +162,20 @@ def test_no_other_recipe_sets_the_key_so_every_other_run_keeps_256(table):
     assert sorted(others) == sorted(
         (family, dataset) for family in ("cliffordnet", "cliffordnet_hier") for dataset in LARGE
     )
+
+
+def test_a_segmentation_run_evaluates_at_the_batch_it_trains_at(world):
+    """The shared 256 would put 256 full-size masks and logits in one pass (D-077)."""
+    for family in ("convunext", "accunet"):
+        spec = registry.MODELS[family]
+        assert spec.tasks == (SEGMENTATION,)
+        for dataset in ("oxford_pet", "folder", "csv"):
+            recipe = spec.recipe(dataset, sorted(spec.load_variants())[0])
+            assert recipe["batch_size"] == 16
+            assert recipe["analysis_args"] == {"eval_batch_size": 16}, (family, dataset)
+            ctx = AutoContext(family=family, variant="v", dataset=dataset, num_classes=3,
+                              image_size=None, defaults=recipe)
+            assert AnalysisArgs().resolve_auto(ctx).eval_batch_size == 16
 
 
 def test_the_resolved_value_of_each_real_pair(table):

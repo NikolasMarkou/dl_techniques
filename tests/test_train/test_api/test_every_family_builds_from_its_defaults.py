@@ -45,7 +45,10 @@ from ._groups import task_class
 # The listing
 # ---------------------------------------------------------------------
 
-#: Every variant of every family, by name. 6 + 5 + 6 + 9 + 9 + 1 = 36.
+#: Every variant of every CLASSIFICATION family, by name. 6 + 5 + 6 + 9 + 9 + 1 = 36. The rest of this
+#: file (recipes, overlays, builds at 32x32 with ten classes) is about these six; the two segmentation
+#: families are listed in :data:`SEGMENTATION_VARIANTS` and have their own file
+#: (``test_image_segmentation_task.py``).
 VARIANTS = {
     "vit": ["vit_pico", "vit_tiny", "vit_small", "vit_base", "vit_large", "vit_huge"],
     "resnet": ["resnet18", "resnet34", "resnet50", "resnet101", "resnet152"],
@@ -60,6 +63,15 @@ VARIANTS = {
     "cliffordnet_hier": ["hier_345"],
 }
 TASK = "image_classification"
+SEGMENTATION = "image_segmentation"
+
+#: The two segmentation families (step 28, D-077: ``register_builtin_models`` registers them, so the
+#: registry-wide listings below hold 36 + 6 = 42 names). ``convunext`` follows ``CONVUNEXT_CONFIGS``.
+SEGMENTATION_VARIANTS = {
+    "convunext": ["base", "large", "small", "tiny", "xlarge"],
+    "accunet": ["base"],
+}
+ALL_VARIANTS = {**VARIANTS, **SEGMENTATION_VARIANTS}
 
 
 @pytest.fixture
@@ -84,19 +96,26 @@ def context(family, variant, dataset, image_size=32, num_classes=10):
 
 
 def test_the_listing_is_the_literal_variant_tables(builtin):
-    assert sorted(builtin) == sorted(VARIANTS)
-    expected = sorted(f"{f}/{v}" for f, names in VARIANTS.items() for v in names)
-    assert len(expected) == 36
+    assert sorted(builtin) == sorted(ALL_VARIANTS)
+    expected = sorted(f"{f}/{v}" for f, names in ALL_VARIANTS.items() for v in names)
+    assert len(expected) == 42
     assert registry.list_models() == expected
-    for spec in builtin.values():
-        assert spec.tasks == (TASK,)
+    for family, spec in builtin.items():
+        assert spec.tasks == ((SEGMENTATION,) if family in SEGMENTATION_VARIANTS else (TASK,)), family
 
 
-def test_the_task_filter_keeps_every_family(builtin):
+def test_the_task_filter_keeps_every_family_of_the_task(builtin):
     registry.register_task(
         registry.TaskSpec(TASK, "x.y:Config", "x.y:run", "image classification")
     )
-    assert registry.list_models(TASK) == registry.list_models()
+    registry.register_task(
+        registry.TaskSpec(SEGMENTATION, "x.y:Config", "x.y:run", "image segmentation")
+    )
+    classifiers = sorted(f"{f}/{v}" for f, names in VARIANTS.items() for v in names)
+    segmenters = sorted(f"{f}/{v}" for f, names in SEGMENTATION_VARIANTS.items() for v in names)
+    assert registry.list_models(TASK) == classifiers
+    assert registry.list_models(SEGMENTATION) == segmenters
+    assert sorted(classifiers + segmenters) == registry.list_models()
     # Control: a family that lists another task drops out of the filter.
     other = dataclasses.replace(builtin["vit"], family="other_vit", tasks=("else",))
     registry.register_model(other)
@@ -116,7 +135,7 @@ def test_the_command_line_lists_them_in_a_fresh_process(tmp_path):
         cwd=tmp_path, capture_output=True, text=True, timeout=180,
     )
     assert result.returncode == 0, result.stderr[-2000:]
-    expected = sorted(f"{f}/{v}" for f, names in VARIANTS.items() for v in names)
+    expected = sorted(f"{f}/{v}" for f, names in ALL_VARIANTS.items() for v in names)
     assert result.stdout.split() == expected
 
 

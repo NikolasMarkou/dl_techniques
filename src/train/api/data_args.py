@@ -138,11 +138,16 @@ _DatasetName = Literal[DATASETS]  # type: ignore[valid-type]
 
 @dataclasses.dataclass(frozen=True)
 class DataFacts:
-    """What is known about the data before it is loaded."""
+    """What is known about the data before it is loaded.
+
+    :param image_size: the side of a classification image; ``None`` for a segmentation run, whose
+        size is a ``(height, width)`` pair that the task keeps (``AutoContext.image_size`` is then
+        ``None`` too, and nothing the segmentation recipes resolve reads it).
+    """
 
     dataset: str
     num_classes: int
-    image_size: int
+    image_size: Optional[int]
 
 
 @dataclasses.dataclass(frozen=True)

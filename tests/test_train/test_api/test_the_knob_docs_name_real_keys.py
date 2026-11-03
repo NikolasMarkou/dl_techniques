@@ -9,8 +9,10 @@ against the real code (review-iter-1 concern 7; every plant listed in ``PLANTS``
 * the region is unique: exactly one begin and one matching end marker per document, never two;
 * a key of the task config, anywhere in the DOCUMENT (inside the region or outside it, in backticks
   or not): ``<group>_args.<field>`` and ``data.<field>`` must be a field of the real
-  :class:`~train.api.tasks.image_classification.ImageClassificationConfig` (``data`` is the union
-  of the three data classes); a backticked ``<name>_args`` alone must be a group; a ``<group>``
+  :class:`~train.api.tasks.image_classification.ImageClassificationConfig` or of the real
+  :class:`~train.api.tasks.image_segmentation.ImageSegmentationConfig` (step 28: a document now
+  describes two tasks, so a name must exist in at least one and a value after ``=`` must be valid
+  in the first that has the field; ``data`` is the union of the six data classes); a backticked ``<name>_args`` alone must be a group; a ``<group>``
   that is not a group is refused; digits count in a field name;
 * an ``=value`` suffix (``analysis_args.conformal_alpha=0.1``) must be JSON of the field's real
   type, must pass the group's own ``problems`` rule for that field (``checkpoint_args.backup_every_steps=1``
@@ -32,7 +34,7 @@ against the real code (review-iter-1 concern 7; every plant listed in ``PLANTS``
 * a table whose third column is ``Read at``: every ``src/`` or ``tests/`` path in the region must
   exist, and every backticked ``Class.attr`` or ``module.function`` rooted at a class or module this
   file knows (``CLASSES``, ``MODULES``, a ``train.`` or ``dl_techniques.`` dotted path) must resolve;
-* ``TaskTrainer.<name>`` and ``ImageClassificationTrainer.<name>``, with or without parentheses,
+* ``TaskTrainer.<name>``, ``ImageClassificationTrainer.<name>`` and ``ImageSegmentationTrainer.<name>``, with or without parentheses,
   must be real attributes, and with parentheses their parameter names must be the real ones;
 * ``summary.analyzer.<key>`` must be a key of the analyzer block of ``results_summary.json``;
 * every backticked output file name (``.png``, ``.json``, ``.keras``, ``.csv``, ``.log``,
@@ -72,7 +74,9 @@ import pytest
 
 from train.api.args import AnalysisArgs, LoggerArgs
 from train.api.data_args import BuiltinImageData, CsvImageData, FolderImageData
+from train.api.segmentation_args import BuiltinSegData, CsvSegData, FolderSegData
 from train.api.tasks.image_classification import ImageClassificationConfig, ImageClassificationTrainer
+from train.api.tasks.image_segmentation import ImageSegmentationConfig, ImageSegmentationTrainer
 from train.api.trainer import TaskTrainer
 from train.common.run_summary import skipped_analysis_status
 
@@ -86,9 +90,11 @@ EVIDENCE = Path(__file__).with_name("knob_cost_evidence.json")
 CLASSES = {
     "TaskTrainer": TaskTrainer,
     "ImageClassificationTrainer": ImageClassificationTrainer,
+    "ImageSegmentationTrainer": ImageSegmentationTrainer,
     "AnalysisArgs": AnalysisArgs,
     "LoggerArgs": LoggerArgs,
     "ImageClassificationConfig": ImageClassificationConfig,
+    "ImageSegmentationConfig": ImageSegmentationConfig,
 }
 #: Module aliases the docs use for ``module.function``; a ``train.`` or ``dl_techniques.`` path is
 #: imported as written.
@@ -111,7 +117,9 @@ KEY = re.compile(
 )
 GROUP_ONLY = re.compile(r"`((?:[a-z]+_)+args)`")
 SUMMARY = re.compile(r"`summary\.analyzer\.([A-Za-z0-9_]+)`")
-HOOK = re.compile(r"`(TaskTrainer|ImageClassificationTrainer)\.([A-Za-z_]\w*)(?:\(([^`]*)\))?`")
+HOOK = re.compile(
+    r"`(TaskTrainer|ImageClassificationTrainer|ImageSegmentationTrainer)\.([A-Za-z_]\w*)(?:\(([^`]*)\))?`"
+)
 DOTTED = re.compile(r"`([A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)+)(?:\([^`]*\))?`")
 PATH = re.compile(r"\b((?:src|tests)/[\w/.\-]+\.(?:py|md|json))\b")
 FILE_NAME = re.compile(r"`([\w\-]+(?:\.[\w\-]+)*\.(?:png|json|keras|csv|log|lock))`")
@@ -128,55 +136,84 @@ ANALYZER_BLOCK_KEYS = set(skipped_analysis_status()) | {"failed_analyses"}
 # ---------------------------------------------------------------------
 
 
+#: The task configs a document may name a key of (step 28: the segmentation task is the second). A key
+#: reference is checked against the FIRST config that has the group and the field; a name a document
+#: writes must exist in at least one task, and a value it writes after ``=`` must be valid there.
+CONFIGS = (ImageClassificationConfig, ImageSegmentationConfig)
+
+#: Every data class of those configs, in the order of :data:`CONFIGS`.
+DATA_CLASSES = (BuiltinImageData, FolderImageData, CsvImageData, BuiltinSegData, FolderSegData, CsvSegData)
+
+
+def _top(config: Any) -> Dict[str, dataclasses.Field]:
+    return {f.name: f for f in dataclasses.fields(config)}
+
+
 def _group_names() -> List[str]:
-    return [f.name for f in dataclasses.fields(ImageClassificationConfig) if f.name.endswith("_args") or f.name == "data"]
+    names: List[str] = []
+    for config in CONFIGS:
+        for f in dataclasses.fields(config):
+            if (f.name.endswith("_args") or f.name == "data") and f.name not in names:
+                names.append(f.name)
+    return names
 
 
 def _data_fields() -> Dict[str, dataclasses.Field]:
     found: Dict[str, dataclasses.Field] = {}
-    for cls in (BuiltinImageData, FolderImageData, CsvImageData):
+    for cls in DATA_CLASSES:
         for field in dataclasses.fields(cls):
             found.setdefault(field.name, field)
     return found
 
 
+def _group_classes(group: str, name: str) -> List[type]:
+    """Return the group dataclass of EVERY task config that has the field ``group.name``."""
+    found: List[type] = []
+    for config in CONFIGS:
+        top = _top(config)
+        if group not in top or top[group].default_factory is dataclasses.MISSING:
+            continue
+        cls = type(top[group].default_factory())
+        if dataclasses.is_dataclass(cls) and name in {f.name for f in dataclasses.fields(cls)}:
+            found.append(cls)
+    return found
+
+
 def _field(group: str, name: str) -> Optional[dataclasses.Field]:
-    """Return the dataclass field ``group.name`` of the task config, or ``None``."""
+    """Return the dataclass field ``group.name`` of the first task config that has it, or ``None``."""
     if group == "data":
         return _data_fields().get(name)
-    top = {f.name: f for f in dataclasses.fields(ImageClassificationConfig)}
-    if group not in top or top[group].default_factory is dataclasses.MISSING:
-        return None
-    cls = type(top[group].default_factory())
-    if not dataclasses.is_dataclass(cls):
-        return None  # a free mapping (model_args): see _free_groups
-    inner = {f.name: f for f in dataclasses.fields(cls)}
-    return inner.get(name)
+    classes = _group_classes(group, name)
+    if not classes:
+        return None  # not a field of any task, or a free mapping (model_args): see _free_groups
+    return {f.name: f for f in dataclasses.fields(classes[0])}[name]
 
 
 def _free_groups() -> set:
-    """The ``*_args`` groups of the task config that are free mappings, not dataclasses (``model_args``)."""
+    """The ``*_args`` groups of the task configs that are free mappings, not dataclasses (``model_args``)."""
     return {
-        f.name for f in dataclasses.fields(ImageClassificationConfig)
+        f.name for config in CONFIGS for f in dataclasses.fields(config)
         if f.name.endswith("_args") and f.default_factory is not dataclasses.MISSING
         and not dataclasses.is_dataclass(type(f.default_factory()))
     }
 
 
 def _top_level_fields() -> Dict[str, dataclasses.Field]:
-    """The fields of the task config that are not groups (``epochs``, ``seed``, ``out``, ...)."""
-    return {f.name: f for f in dataclasses.fields(ImageClassificationConfig)
-            if not f.name.endswith("_args") and f.name != "data"}
+    """The fields of the task configs that are not groups (``epochs``, ``seed``, ``out``, ...)."""
+    found: Dict[str, dataclasses.Field] = {}
+    for config in CONFIGS:
+        for f in dataclasses.fields(config):
+            if not f.name.endswith("_args") and f.name != "data":
+                found.setdefault(f.name, f)
+    return found
 
 
-def _rule_problem(group: str, name: str, value: Any) -> Optional[str]:
-    """The group's own refusal of ``value`` for ``name``, or ``None``.
+def _rule_problem(cls: type, name: str, value: Any) -> Optional[str]:
+    """The group ``cls``'s own refusal of ``value`` for ``name``, or ``None``.
 
     Builds the group with that one field changed and keeps the lines of ``problems`` that name the
     field, so a rule about another field (a combination the document does not state) is not blamed.
     """
-    top = {f.name: f for f in dataclasses.fields(ImageClassificationConfig)}
-    cls = type(top[group].default_factory())
     try:
         instance = dataclasses.replace(cls(), **{name: value})
     except (TypeError, ValueError):
@@ -188,12 +225,11 @@ def _rule_problem(group: str, name: str, value: Any) -> Optional[str]:
     return lines[0] if lines else None
 
 
-def _owner(group: str, name: str) -> Any:
+def _owners(group: str, name: str) -> List[type]:
+    """Every class that declares the field ``group.name``, in the order of :data:`CONFIGS`."""
     if group == "data":
-        return next(c for c in (BuiltinImageData, FolderImageData, CsvImageData)
-                    if name in {f.name for f in dataclasses.fields(c)})
-    top = {f.name: f for f in dataclasses.fields(ImageClassificationConfig)}
-    return type(top[group].default_factory())
+        return [c for c in DATA_CLASSES if name in {f.name for f in dataclasses.fields(c)}]
+    return _group_classes(group, name)
 
 
 def _default_text(field: dataclasses.Field) -> Optional[str]:
@@ -317,21 +353,26 @@ def _key_problems(text: str) -> List[str]:
     for group, name, shown in KEY.findall(text):
         key = f"{group}.{name}"
         if group not in groups:
-            found.append(f"`{key}`: `{group}` is not a group of the task config")
+            found.append(f"`{key}`: `{group}` is not a group of a task config")
             continue
         if group in _free_groups():
             continue  # a keyword of the model factory: unchecked, and stated as such above
         field = _field(group, name)
         if field is None:
-            found.append(f"`{key}` is not a field of the task config")
+            found.append(f"`{key}` is not a field of a task config")
             continue
         if shown:
             value = _literal(shown)
-            hint = typing.get_type_hints(_owner(group, name)).get(name, Any)
-            if not _accepts(hint, value):
+            # A value must be valid in at least one task that has the field (two tasks may type the
+            # same name differently: `data.dataset` is a classification dataset or `oxford_pet`).
+            owners = [o for o in _owners(group, name)
+                      if _accepts(typing.get_type_hints(o).get(name, Any), value)]
+            if not owners:
                 found.append(f"`{key}={shown}`: the value is not of the field's type")
-            elif group != "data" and (rule := _rule_problem(group, name, value)) is not None:
-                found.append(f"`{key}={shown}`: the code refuses this value ({rule.strip()})")
+            elif group != "data":
+                rules = [_rule_problem(o, name, value) for o in owners]
+                if all(rule is not None for rule in rules):
+                    found.append(f"`{key}={shown}`: the code refuses this value ({rules[0].strip()})")
     for group in GROUP_ONLY.findall(text):
         if group not in groups:
             found.append(f"`{group}` is not a group of the task config")
@@ -447,7 +488,7 @@ def _reference_problems(region: str) -> List[str]:
     for token in sorted(set(DOTTED.findall(region))):
         if token.split(".")[0] == "summary" or re.match(r"(?:[a-z]+_)*args\.", token):
             continue
-        if token.split(".")[0] in ("TaskTrainer", "ImageClassificationTrainer"):
+        if token.split(".")[0] in ("TaskTrainer", "ImageClassificationTrainer", "ImageSegmentationTrainer"):
             continue  # the hook rule below owns these, with or without parentheses
         if token.rsplit(".", 1)[1] in FILE_SUFFIXES:
             continue  # a file name, checked against the sources below
@@ -460,7 +501,7 @@ def _reference_problems(region: str) -> List[str]:
             found.append(f"`{cls_name}.{name}` is not a method of {cls_name}")
     # With parentheses, the parameter names must be the real ones (without them only the name is).
     for cls_name, name, params in re.findall(
-        r"`(TaskTrainer|ImageClassificationTrainer)\.([A-Za-z_]\w*)\(([^`]*)\)`", region
+        r"`(TaskTrainer|ImageClassificationTrainer|ImageSegmentationTrainer)\.([A-Za-z_]\w*)\(([^`]*)\)`", region
     ):
         real = _hook_params(CLASSES[cls_name], name)
         shown = [p.strip() for p in params.split(",") if p.strip()]

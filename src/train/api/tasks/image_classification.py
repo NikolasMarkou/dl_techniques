@@ -93,7 +93,7 @@ config's keys and must stay free of TensorFlow. Every ``keras`` and
 import dataclasses
 import functools
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Literal, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .. import recipes, registry
 from ..args import (
@@ -106,7 +106,18 @@ from ..args import (
     OptimArgs,
     TransformArgs,
 )
-from ..config import AUTO, DEFAULT_SEED, PATH_FORM, Auto, StrictConfig, validate
+from ..config import (
+    AUTO,
+    DEFAULT_SEED,
+    PATH_FORM,
+    RUN_HELP,
+    Precision,
+    Auto,
+    StrictConfig,
+    resume_help,
+    run_request,
+    validate,
+)
 from ..data_args import (
     DataFacts,
     ImageData,
@@ -125,11 +136,6 @@ LARGE_IMAGE_SIDE = 224
 
 TASK = recipes.TASK
 
-#: The precision policies a run can ask for.
-PRECISIONS = ("float32", "mixed_float16", "mixed_bfloat16")
-
-_Precision = Literal[PRECISIONS]  # type: ignore[valid-type]
-
 # ---------------------------------------------------------------------
 
 
@@ -137,9 +143,7 @@ _Precision = Literal[PRECISIONS]  # type: ignore[valid-type]
 class ImageClassificationConfig(StrictConfig):
     """Everything a classification run is told; see the module contract."""
 
-    out: str = dataclasses.field(
-        metadata={"help": "run directory (a relative path starts at the repo root); auto names one under results/"}
-    )
+    out: str = dataclasses.field(metadata={"help": RUN_HELP["out"]})
     model: str = dataclasses.field(
         metadata={"help": "family/variant, e.g. vit/vit_pico; python -m train list_models lists them"}
     )
@@ -151,51 +155,24 @@ class ImageClassificationConfig(StrictConfig):
             PATH_FORM: read_data_file,
         }
     )
-    epochs: Auto[int] = dataclasses.field(
-        default=AUTO, metadata={"help": "epochs to train; auto takes the family's"}
-    )
-    batch_size: Auto[int] = dataclasses.field(
-        default=AUTO, metadata={"help": "batch size; auto takes the family's"}
-    )
-    seed: int = dataclasses.field(
-        default=DEFAULT_SEED, metadata={"help": "seed of the weights, the split and the augmentation"}
-    )
+    epochs: Auto[int] = dataclasses.field(default=AUTO, metadata={"help": RUN_HELP["epochs"]})
+    batch_size: Auto[int] = dataclasses.field(default=AUTO, metadata={"help": RUN_HELP["batch_size"]})
+    seed: int = dataclasses.field(default=DEFAULT_SEED, metadata={"help": RUN_HELP["seed"]})
     devices: Auto[Optional[int]] = dataclasses.field(
-        default=AUTO,
-        metadata={"help": "GPU index inside the visible devices; auto or null leaves every visible GPU"},
+        default=AUTO, metadata={"help": RUN_HELP["devices"]}
     )
-    precision: _Precision = dataclasses.field(
-        default="float32", metadata={"help": "float32, mixed_float16 or mixed_bfloat16"}
+    precision: Precision = dataclasses.field(
+        default="float32", metadata={"help": RUN_HELP["precision"]}
     )
     resume_interrupted: bool = dataclasses.field(
         default=False,
-        metadata={
-            "help": "continue a killed run of the same out with the same request (devices "
-            "may differ); the data order replays epoch 0's; a killed epoch is lost and a "
-            "half-done epoch is trained again from its first batch (an ImageNet epoch is "
-            "hours; checkpoint_args.backup_every_steps bounds the loss to that many batches "
-            "of training, and the epoch is then continued from the last backup: only the "
-            "batches that backup had not taken run, from a fresh pass of the data, so some "
-            "examples of that epoch repeat and some are missed); the learning rate, ReduceLROnPlateau and early stopping come back; a kill "
-            "between the best checkpoint's save and the backup can leave best_model.keras one "
-            "epoch LATER than the resumed state's best (the epoch that is then trained again; "
-            "never an earlier one); a run with no epoch left to train and no results_summary.json "
-            "(its reporting died, or the process died after the last epoch: fit_finished, all "
-            "epochs ended, or early stopping had decided) is not trained again: only the reporting "
-            "runs, from best_model.keras, checkpoints/backup/latest.weights.h5 and "
-            "training_log.csv (not written), and it is refused if that backup is not the last "
-            "epoch's; analysis_args.eval_batch_size may differ; refused: a finished run (with "
-            "a summary), other data than the run's, a live process holding the run, a backup "
-            "neither of whose copies is sound"
-        },
+        metadata={"help": resume_help("an ImageNet epoch is hours")},
     )
     checkpoint: Optional[str] = dataclasses.field(
-        default=None,
-        metadata={"help": "a .keras model whose same-named layers give their weights to this one"},
+        default=None, metadata={"help": RUN_HELP["checkpoint"]}
     )
     model_args: Dict[str, Any] = dataclasses.field(
-        default_factory=dict,
-        metadata={"help": "keywords of the model factory; they win over the family's"},
+        default_factory=dict, metadata={"help": RUN_HELP["model_args"]}
     )
     optim_args: OptimArgs = dataclasses.field(default_factory=OptimArgs)
     transform_args: TransformArgs = dataclasses.field(default_factory=TransformArgs)
@@ -476,16 +453,14 @@ class ImageClassificationTrainer(TaskTrainer):
         """Return the classification lines of ``results_summary.json``'s ``notes``."""
         import numpy as np
 
+        from train.common import classification_run
+
         checkpoint_cfg: CheckpointArgs = config.checkpoint_args
         analysis_cfg: AnalysisArgs = config.analysis_args
         notes = [
             f"initial loss {baseline['loss']:.4f} vs ln(C)={np.log(data.num_classes):.4f} "
             f"(ratio {ratio:.2f}), a plain evaluate on the validation split",
-            "CSV `epoch` is 0-based, `best_epoch` is 1-based (`best_epoch_csv_index` = "
-            "`best_epoch` - 1)",
-            "CSV `lr` is the rate at the START of the epoch (its first step)",
-            "`test_metrics_best` is the reloaded best_model.keras, `test_metrics_final` "
-            "the last epoch's weights; the test set never influenced selection",
+            *classification_run.RUN_NOTES,
         ]
         if data.test_ds is None:
             notes.append(
@@ -629,28 +604,19 @@ def train_image_classification(
     recipes.register_builtin_models()
     if isinstance(data, (str, Path)):
         data = load_data_config(data)
-    given = {
-        "out": str(out) if isinstance(out, Path) else out,
-        "model": model,
-        "data": data,
-        "epochs": epochs,
-        "batch_size": batch_size,
-        "seed": seed,
-        "devices": devices,
-        "precision": precision,
-        "resume_interrupted": resume_interrupted,
-        "checkpoint": str(checkpoint) if isinstance(checkpoint, Path) else checkpoint,
-        "model_args": {} if model_args is None else model_args,
-    }
-    groups = {
-        "optim_args": optim_args,
-        "transform_args": transform_args,
-        "metric_args": metric_args,
-        "checkpoint_args": checkpoint_args,
-        "logger_args": logger_args,
-        "analysis_args": analysis_args,
-        "debug_args": debug_args,
-    }
-    given.update({name: value for name, value in groups.items() if value is not None})
+    given = run_request(
+        out=out, model=model, data=data, epochs=epochs, batch_size=batch_size, seed=seed,
+        devices=devices, precision=precision, resume_interrupted=resume_interrupted,
+        checkpoint=checkpoint, model_args=model_args,
+        groups={
+            "optim_args": optim_args,
+            "transform_args": transform_args,
+            "metric_args": metric_args,
+            "checkpoint_args": checkpoint_args,
+            "logger_args": logger_args,
+            "analysis_args": analysis_args,
+            "debug_args": debug_args,
+        },
+    )
     config = validate(ImageClassificationConfig, given)
     return ImageClassificationTrainer(config).run()

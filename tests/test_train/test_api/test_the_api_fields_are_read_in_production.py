@@ -35,7 +35,15 @@ import pytest
 
 from train.api import args as args_module
 from train.api.data_args import BuiltinImageData, CsvImageData, FolderImageData
+from train.api.segmentation_args import (
+    BuiltinSegData,
+    CsvSegData,
+    FolderSegData,
+    SegMetricArgs,
+    SegTransformArgs,
+)
 from train.api.tasks.image_classification import ImageClassificationConfig
+from train.api.tasks.image_segmentation import ImageSegmentationConfig
 
 from ._groups import args_groups
 
@@ -134,8 +142,13 @@ def production_reads() -> Dict[str, List[str]]:
 
 
 def classes_checked() -> List[type]:
-    """The seven groups (found by looking), the task config and the three data configs."""
-    return [*args_groups(), ImageClassificationConfig, BuiltinImageData, FolderImageData, CsvImageData]
+    """The seven groups (found by looking), the classification config and its three data configs,
+    then the segmentation task's: its config, its three data configs and its two own groups (step 28:
+    a field of a class this list lacks is a field no guard asks about)."""
+    return [
+        *args_groups(), ImageClassificationConfig, BuiltinImageData, FolderImageData, CsvImageData,
+        ImageSegmentationConfig, BuiltinSegData, FolderSegData, CsvSegData, SegTransformArgs, SegMetricArgs,
+    ]
 
 
 def fields_of(cls: type) -> List[str]:
@@ -184,9 +197,11 @@ def test_no_exemption_is_stale(reads):
         )
 
 
-def test_the_scan_covers_the_eleven_classes_and_the_files_it_names():
+def test_the_scan_covers_the_seventeen_classes_and_the_files_it_names():
     assert len(args_groups()) == 7, "the brief names seven groups; a new one is a new row to review"
-    assert len(classes_checked()) == 11
+    assert len(classes_checked()) == 17
+    assert SRC / "train" / "api" / "tasks" / "image_segmentation.py" in SCANNED
+    assert SRC / "train" / "api" / "segmentation_args.py" in SCANNED
     assert all(fields_of(cls) for cls in classes_checked())
     assert all(path.is_file() for path in SCANNED)
     assert SRC / "train" / "api" / "trainer.py" in SCANNED

@@ -28,11 +28,28 @@ Interface contract
         when ``ignore_index`` is ``None`` and ``VoidAwareAccuracy(ignore_index)`` otherwise: the stock
         metric would score each void pixel as wrong.
     :raises ValueError: from Keras, for ``num_classes`` below 2.
+
+``class_pixel_counts(dataset, num_classes, ignore_index)``
+    :param dataset: a batched dataset of ``(image, mask)``; every batch is read once.
+    :return: ``int64`` ``(num_classes,)``: the pixels of each class, void left out.
+    :raises ValueError: for a mask value that is neither a class nor ``ignore_index``.
+
+``majority_class_baseline(counts, class_names)``
+    :param counts: the result of :func:`class_pixel_counts`.
+    :return: the scores of predicting the most frequent class (the lowest id on a tie) for every
+        valid pixel: ``{"class", "class_name", "miou", "pixel_accuracy", "per_class_iou",
+        "pixels"}``. ``miou`` is ``keras.metrics.MeanIoU``'s, which leaves a class with no true and
+        no predicted pixel out of the mean (``train.convunext.segmentation_viz.class_scores`` is
+        the one implementation of that rule). It is the floor a segmenter must clear, and the
+        default ``metric_args.success_threshold`` of the segmentation task.
+    :raises ValueError: when ``counts`` holds no pixel (every pixel void, or no pixel).
 """
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import keras
+import numpy as np
+import tensorflow as tf
 
 from dl_techniques.metrics.void_aware_accuracy import VoidAwareAccuracy
 
@@ -62,3 +79,49 @@ def segmentation_metrics(num_classes: int, ignore_index: Optional[int]) -> List[
         num_classes=num_classes, sparse_y_true=True, sparse_y_pred=False,
         ignore_class=ignore_index, name="miou")
     return [accuracy, miou]
+
+
+def class_pixel_counts(
+    dataset: "tf.data.Dataset", num_classes: int, ignore_index: Optional[int]
+) -> np.ndarray:
+    """The pixels of each class in a batched ``(image, mask)`` dataset, void left out."""
+    counts = np.zeros(num_classes, dtype=np.int64)
+    for masks in dataset.map(lambda image, mask: mask).as_numpy_iterator():
+        flat = masks.reshape(-1).astype(np.int64)
+        if ignore_index is not None:
+            flat = flat[flat != ignore_index]
+        if flat.size and (flat.min() < 0 or flat.max() >= num_classes):
+            raise ValueError(
+                f"a mask holds the value {int(flat.min() if flat.min() < 0 else flat.max())}, "
+                f"which is neither a class (0..{num_classes - 1}) nor the ignore index "
+                f"{ignore_index!r}"
+            )
+        counts += np.bincount(flat, minlength=num_classes)
+    return counts
+
+
+def majority_class_baseline(counts: np.ndarray, class_names: Sequence[str]) -> Dict[str, Any]:
+    """The scores of the constant majority-class predictor; see the module contract."""
+    # DECISION plan-2026-10-31T180033-2faf890a/D-077
+    # Imported here: train.convunext.segmentation_viz is a standalone module (keras, numpy and
+    # matplotlib only) that holds the ONE implementation of IoU in the package (its docstring).
+    # Do NOT re-derive the formula (`n_majority / N / C` is wrong whenever a class is absent from
+    # the selection split): Keras leaves a class with an empty union out of the mean, and
+    # `test_the_baseline_equals_keras_mean_iou_of_the_constant_prediction` holds the two equal.
+    from train.convunext.segmentation_viz import class_scores
+
+    counts = np.asarray(counts, dtype=np.int64)
+    if counts.sum() == 0:
+        raise ValueError("no valid pixel: every pixel is void, so there is no majority class")
+    majority = int(np.argmax(counts))
+    confusion = np.zeros((len(counts), len(counts)), dtype=np.int64)
+    confusion[:, majority] = counts
+    scores = class_scores(confusion)
+    return {
+        "class": majority,
+        "class_name": str(class_names[majority]),
+        "miou": scores["miou"],
+        "pixel_accuracy": scores["pixel_accuracy"],
+        "per_class_iou": scores["per_class_iou"],
+        "pixels": int(counts.sum()),
+    }

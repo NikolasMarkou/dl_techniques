@@ -6,9 +6,9 @@ guards, `REPO_MAP.md` at the repo root for which trainer trains which model). Mo
 
 ## `python -m train` and `train.api`
 
-A key=value command line over strict configs. It currently has one task, `image_classification`
-(families `vit`, `resnet`, `convnext_v1`, `convnext_v2`, `cliffordnet`, `cliffordnet_hier`), and the
-same code is a Python function. Run it from the repo root with `.venv`, with
+A key=value command line over strict configs. It has two tasks, `image_classification`
+(families `vit`, `resnet`, `convnext_v1`, `convnext_v2`, `cliffordnet`, `cliffordnet_hier`) and
+`image_segmentation` (families `convunext`, `accunet`), and the same code is a Python function. Run it from the repo root with `.venv`, with
 `MPLBACKEND=Agg` on a headless machine.
 
 ```bash
@@ -30,13 +30,39 @@ main(["list_tasks"])      # the same as the command line; returns the exit code
 **A family trains one task**: each family lists the task it trains, and `model=` is checked against the task
 before the data, the recipe or the run directory: `python -m train image_classification model=<a segmentation
 family>/<variant>` exits 2 with the task the family trains and the families of this one, and the same holds the other
-way round. The two segmentation families, `convunext` and `accunet` (`train/api/segmentation_models.py`), are adapters
-and a size rule so far; the task that trains them, `image_segmentation`, registers them, and until then the command
-line does not list them. Their `image_size` will be an int (a square) or `[height, width]`, each side a multiple of the
+way round. The two segmentation families, `convunext` and `accunet` (`train/api/segmentation_models.py`), train
+`image_segmentation`. Their `image_size` is an int (a square) or `[height, width]`, each side a multiple of the
 family's stride: `2 ** depth` for ConvUNext (8 for `tiny` and `small`, 16 for `base` and `large`, 32 for `xlarge`,
 following a `depth` in `model_args`) and 16 for AccUNet. Measured on CPU: both build at 128x256 and return the input's
 size. AccUNet itself refuses a side that is not a multiple of 16; ConvUNext does not (it resizes its decoder to its
 skips), so for it the rule is the task's choice, made so that the skips meet the upsampled maps.
+
+**`image_segmentation`**: pairs of an image and a mask of class ids.
+
+```bash
+python -m train image_segmentation out=auto model=convunext/tiny data.dataset=oxford_pet epochs=30
+python -m train image_segmentation out=auto model=accunet/base data.format=folder \
+    data.train_images=imgs data.train_masks=masks data.num_classes=2 transform_args.image_size=128
+```
+
+* **Data**: `oxford_pet` (the local TFDS cache, never downloaded; three classes `pet`, `background`, `border`; no
+  void), a `folder` of two directories joined by file stem, or a `csv` with an `image` and a `mask` column. Masks are
+  single-channel PNGs of class ids; `data.ignore_index` names the void value, which is left out of the loss, `accuracy`,
+  `miou`, the baseline and the analyzer. File data needs `transform_args.image_size` (files have no native size); Pet
+  takes 128 from the recipe. The EXIF orientation is applied to images and masks alike.
+* **Recipes** are the legacy trainers' defaults (`train.convunext`, `train.accunet`): AdamW, 30 epochs, batch 16, a
+  horizontal flip; ConvUNext lr 1e-3, AccUNet lr 1e-4 with 2 warmup epochs. Two values differ on purpose. The monitor is
+  `val_miou`, a maximum; both legacy trainers default to `val_loss`. And AccUNet trains the cross-entropy, where its
+  legacy trainer trains `combo`, which this task offers later; the run log says so.
+* **What `val_loss` is**: Keras averages the cross-entropy of a batch over its valid pixels and then averages the
+  batches weighted by images, so `loss` and `val_loss` are NOT the cross-entropy pooled over every valid pixel; with a void
+  label the two differ whenever the void share differs between batches. `accuracy` and `miou` ARE pooled over every valid
+  pixel. That is why the best epoch is chosen by `val_miou`, and the summary says it in `notes`.
+* **Success** is the best `val_miou` at or above `metric_args.success_threshold`, which is null by default: the mIoU of
+  predicting the majority class of the selection split for every valid pixel, stated in the summary as
+  `majority_class_baseline`. A run that cannot beat a constant has not learned a segmentation.
+* A conformal level (`analysis_args.conformal_alpha`) is refused: a segmentation run has no set of classes per image.
+  Figures for segmentation arrive in a later step; `analysis_args.figures` draws the training dashboard only.
 
 **Keys**: `key=value` tokens; a dot reaches a group (`optim_args.lr=3e-4`, `data.dataset=cifar10`);
 `config=run.yaml` loads a file first and the command line wins over it. A value is read by

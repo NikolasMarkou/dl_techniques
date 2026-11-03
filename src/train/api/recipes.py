@@ -9,9 +9,10 @@ legacy line it was read from.
 Interface contract
 ------------------
 ``register_builtin_models()``
-    Register the six families into :data:`train.api.registry.MODELS`.
-    Idempotent: a family already registered is left alone. Imports no model
-    code.
+    Register the six classification families and the two segmentation ones
+    (:func:`train.api.segmentation_models.builtin_segmentation_models`) into
+    :data:`train.api.registry.MODELS`. Idempotent: a family already registered is
+    left alone. Imports no model code.
 
 ``resolve_<family>_args(context, optim_args, model_args)``
     The ``ModelSpec.resolve_model_args`` of each family.
@@ -100,7 +101,7 @@ _SUPPLIED = ("variant", "num_classes", "input_shape")
 _MODELS = "dl_techniques.models.vision"
 
 
-def _optim(
+def optim_recipe(
     *,
     optimizer: str,
     lr: float,
@@ -115,6 +116,10 @@ def _optim(
     global_clipnorm: Any = None,
 ) -> Dict[str, Any]:
     """Return a complete ``optim_args`` recipe: all 14 fields, none left out.
+
+    Public because the segmentation families build their recipes with it
+    (:mod:`train.api.segmentation_models`); a second table of the 14 fields would have to be
+    kept equal to this one by hand.
 
     The schedule is cosine to 1% of the peak from 1e-8 in every legacy trainer
     (``alpha`` 0.01, ``warmup_start_lr`` the builder's default), so those
@@ -190,7 +195,7 @@ def _recipe(
 VIT = _recipe(
     epochs=50,
     batch_size=128,
-    optim_args=_optim(
+    optim_args=optim_recipe(
         optimizer="adamw", lr=3e-4, weight_decay=0.05, warmup_epochs=5,
         decay_over="total", global_clipnorm=1.0,
     ),
@@ -226,7 +231,7 @@ VIT = _recipe(
 RESNET = _recipe(
     epochs=100,
     batch_size=256,
-    optim_args=_optim(
+    optim_args=optim_recipe(
         optimizer="sgd", lr=0.1, weight_decay=1e-4, warmup_epochs=5,
         decay_over="total", momentum=0.9, global_clipnorm=1.0,
     ),
@@ -294,7 +299,7 @@ def _convnext_recipe() -> Dict[str, Any]:
     return _recipe(
         epochs=100,
         batch_size=64,
-        optim_args=_optim(
+        optim_args=optim_recipe(
             optimizer="adamw", lr=1e-3, weight_decay=1e-4, warmup_epochs=0,
             decay_over="post_warmup", clipnorm=1.0,
         ),
@@ -368,7 +373,7 @@ def _cliffordnet_recipe(
     return _recipe(
         epochs=200,
         batch_size=128,
-        optim_args=_optim(
+        optim_args=optim_recipe(
             optimizer="adamw", lr=1e-3, weight_decay=0.1, warmup_epochs=0,
             decay_over="post_warmup", beta_1=0.9, beta_2=0.999, epsilon=1e-8,
         ),
@@ -415,7 +420,7 @@ def _weight_decay_regularizer(optim_args: OptimArgs) -> Any:
     return keras.regularizers.L2(decay)
 
 
-def _merged(
+def merge_model_args(
     context: AutoContext,
     optim_args: OptimArgs,
     model_args: Mapping[str, Any],
@@ -473,7 +478,7 @@ def resolve_vit_args(
     ``kernel_regularizer`` is always passed, as the legacy trainer does.
     """
     patch = 4 if context.image_size == SMALL_IMAGE_SIZE else 16
-    return _merged(
+    return merge_model_args(
         context,
         optim_args,
         model_args,
@@ -491,7 +496,7 @@ def resolve_resnet_args(
     The CIFAR stem is new behaviour (D-003): the legacy trainer never passed it.
     """
     stem = "cifar" if context.image_size == SMALL_IMAGE_SIZE else "imagenet"
-    return _merged(
+    return merge_model_args(
         context,
         optim_args,
         model_args,
@@ -510,7 +515,7 @@ def _resolve_regularizer_on_request(
     """
     regularizer = _weight_decay_regularizer(optim_args)
     computed = {} if regularizer is None else {"kernel_regularizer": regularizer}
-    return _merged(context, optim_args, model_args, computed)
+    return merge_model_args(context, optim_args, model_args, computed)
 
 
 def resolve_convnext_args(
@@ -585,7 +590,7 @@ _HERE = "train.api.recipes"
 
 
 def builtin_models() -> Tuple[ModelSpec, ...]:
-    """Return the six family specs, freshly built.
+    """Return the six classification family specs, freshly built.
 
     The cliffordnet family is two model classes with disjoint variant tables,
     so it is two families, as the legacy trainer routes them (D-003).
@@ -647,7 +652,11 @@ def builtin_models() -> Tuple[ModelSpec, ...]:
 
 
 def register_builtin_models() -> None:
-    """Register the six families that are not registered yet; see the module contract."""
-    for spec in builtin_models():
+    """Register the built-in families that are not registered yet; see the module contract."""
+    # Imported here: segmentation_models imports this module (``optim_recipe``,
+    # ``merge_model_args``), so a module-scope import would be a cycle.
+    from .segmentation_models import builtin_segmentation_models
+
+    for spec in (*builtin_models(), *builtin_segmentation_models()):
         if spec.family not in registry.MODELS:
             registry.register_model(spec)

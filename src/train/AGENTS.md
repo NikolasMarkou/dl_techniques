@@ -420,6 +420,16 @@ train, and the TEST split never selects.
   the pooled cross-entropy once the void share differs between batches; `accuracy` and `miou` pool pixels. `SegMetricArgs` has
   `watch_metric` (`val_miou`, a maximum), `watch_mode` and `success_threshold` (null: the task's majority-class baseline); no `top_k`.
   Oxford-IIIT Pet is read through `load_oxford_pet_arrays`, the one TFDS seam, byte-equal to `train.convunext.common.load_oxford_pet`.
+- **The `image_segmentation` task** (D-077): `api/tasks/image_segmentation.py` supplies the hooks and nothing else, so the
+  sequence is the shared one (D-070). Its config is the classification one with `SegTransformArgs`, `SegMetricArgs` and a
+  segmentation `data`; a conformal level is refused. The verdict is `val_miou` (`success_metric`) against the mIoU of
+  predicting the majority class of the selection split for every valid pixel (`majority_class_baseline` in the summary:
+  `segmentation_run.class_pixel_counts` and `majority_class_baseline`, which reuse the one IoU implementation of
+  `train.convunext.segmentation_viz.class_scores`); `metric_args.success_threshold` overrides it. The monitor defaults to
+  `val_miou`, NOT to the legacy trainers' `val_loss`: the loss Keras reports is a mean over batches of per-batch valid-pixel
+  means weighted by images, so it is not the pooled pixel cross-entropy, and the legacy README measured the final weights
+  beating the `val_loss` checkpoint in all three seeds. `ImageSegmentationTrainer.analysis_ignore_label` hands the
+  void value to the analyzer's per-pixel calibration. A recipe has no `image_size` for file data: the caller states it.
 
 For text use `train.common.nlp`; for MegaDepth RGB+depth pairs `train.common.megadepth`
 (yielding `(rgb, y_true)` with `y_true = [disparity, mask]` on the last axis, the disparity
@@ -481,8 +491,9 @@ per-model scripts (usage, keys, run directory, resume, `predict`, `export`, exit
   act; `load_model` refuses a record whose family does not train the record's task. `ModelSpec.stride` (an int, or
   `"module:callable"` of `f(variant, model_args) -> int`, or `None` for the classifiers) is the multiple each side of a
   segmentation `image_size` must be; `api/segmentation_models.py` holds the two adapters (`convunext`, `accunet`),
-  `check_image_size` and the specs. `recipes.register_builtin_models` registers the six classifiers only, and the guards
-  that enumerate `registry.MODELS` rely on it: the segmentation task registers its own families.
+  `check_image_size`, the recipes (`CONVUNEXT`, `ACCUNET`) and the specs. `recipes.register_builtin_models` registers the
+  six classifiers and the two segmentation families (D-077; step 23 held them back until a task and a recipe existed), so
+  a guard that walks `registry.MODELS` meets eight families and reads `ModelSpec.tasks` to tell them apart.
 - **`task.json` is schema version 2 and per task** (D-073): `predictor.RECORD_KEYS[task]` and `DATA_KEYS[task]`; a
   classification record equals a version 1 record but for `schema_version`; a segmentation record has `input_size`,
   `ignore_index`, `mask_threshold`, `output` and no `input_shape`. A new task is a new row of both tables and a
