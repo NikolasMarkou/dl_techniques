@@ -25,15 +25,11 @@ import keras
 import numpy as np
 import pytest
 
-import train.api.recipes as recipes
-from train.api import registry
 from train.api.config import validate
-from train.api.tasks import register_builtin_tasks
 from train.api.tasks.image_segmentation import ImageSegmentationConfig, ImageSegmentationTrainer
 from train.common import segmentation_run
 from train.convunext import segmentation_viz as viz
 
-from . import _segmentation_fixtures as fx
 from .test_image_segmentation_task import (
     SIZE,
     VOID,
@@ -41,7 +37,6 @@ from .test_image_segmentation_task import (
     folders,  # noqa: F401  (fixture)
     read_json,
     world,  # noqa: F401  (fixture)
-    write_set,
 )
 
 NAMES = ["pet", "background", "border"]

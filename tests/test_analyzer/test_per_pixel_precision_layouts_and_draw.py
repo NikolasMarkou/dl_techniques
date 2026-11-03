@@ -22,7 +22,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.analyzer import AnalysisConfig, DataInput, ModelAnalyzer
+from dl_techniques.analyzer import DataInput, ModelAnalyzer
 from dl_techniques.analyzer.utils import (
     OutputStatistics, classify_output_activation, reduced_precision_epsilon, to_full_precision)
 from tests.test_analyzer.test_per_pixel_calibration import (

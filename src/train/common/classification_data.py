@@ -831,6 +831,15 @@ def _resolver() -> Callable[[str], str]:
 
 
 def _examples(items: Sequence[str], total: int) -> str:
+    """Return up to three examples of a list of problems, for a refusal message.
+
+    Interface contract (``segmentation_data`` is the second consumer).
+
+    :param items: the strings to show; only the first three are used.
+    :param total: the full count of problems (``items`` may already be a prefix of them).
+    :return: ``"a; b; c"`` for up to three, ``"a; b; c; and N more"`` when ``total`` exceeds three
+        (``N = total - 3``), ``""`` for no items. Never raises.
+    """
     shown = "; ".join(items[:3])
     return shown + (f"; and {total - 3} more" if total > 3 else "")
 

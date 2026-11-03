@@ -71,10 +71,7 @@ from train.api import registry
 from train.api.args import CheckpointArgs
 from train.api.errors import ConfigError, ConfigValidationError
 from train.api.tasks import register_builtin_tasks
-from train.api.tasks.image_classification import (
-    ImageClassificationConfig,
-    ImageClassificationTrainer,
-)
+from train.api.tasks.image_classification import ImageClassificationTrainer
 from train.common.resume_state import (
     BACKUP_METADATA_NAME,
     BACKUP_WEIGHTS_NAME,

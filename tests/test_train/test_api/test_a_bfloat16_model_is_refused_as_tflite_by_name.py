@@ -21,7 +21,6 @@ Tests write only under ``tmp_path``.
 """
 
 import keras
-import numpy as np
 import pytest
 import tensorflow as tf
 

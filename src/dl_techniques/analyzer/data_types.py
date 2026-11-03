@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any, Tuple, Union, NamedTuple, Set
+from typing import Dict, List, Optional, Any, Tuple, Union, NamedTuple
 
 
 class DataInput(NamedTuple):

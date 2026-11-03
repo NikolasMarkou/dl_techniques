@@ -69,7 +69,7 @@ stay free of TensorFlow. Every ``keras`` and ``train.common`` name is imported i
 import dataclasses
 import functools
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 from .. import recipes, registry
 from ..args import (
@@ -94,7 +94,6 @@ from ..config import (
     validate,
 )
 from ..data_args import DataFacts
-from ..errors import ConfigError
 from ..predictor import build_segmentation_record, overrides_of_variant
 from ..segmentation_args import (
     SegData,

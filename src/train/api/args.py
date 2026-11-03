@@ -98,6 +98,11 @@ class AutoContext:
 
 
 def _is_auto(value: Any) -> bool:
+    """Whether ``value`` is the string ``"auto"`` (the one definition; ``trainer`` and ``segmentation_args`` import it).
+
+    :param value: any field value; a non-string (``None``, a number, a list) is never ``"auto"``.
+    :return: ``True`` only for the exact string :data:`~train.api.config.AUTO`. Never raises.
+    """
     return isinstance(value, str) and value == AUTO
 
 

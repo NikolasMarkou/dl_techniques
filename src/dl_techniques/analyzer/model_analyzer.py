@@ -99,11 +99,10 @@ import matplotlib.pyplot as plt
 from .config import AnalysisConfig
 from .data_types import DataInput, AnalysisResults
 from .utils import (find_pareto_front, normalize_metric, DataSampler, make_rng,
-                    recursively_get_layers, classify_output_activation,
+                    recursively_get_layers,
                     OutputStatistics, to_full_precision, reduced_precision_epsilon,
                     OUTPUT_ACTIVATION_SOFTMAX, OUTPUT_ACTIVATION_SIGMOID,
-                    OUTPUT_ACTIVATION_LOGITS, PROBABILITY_RANGE_TOLERANCE,
-                    PROBABILITY_SUM_TOLERANCE)
+                    OUTPUT_ACTIVATION_LOGITS)
 from . import spectral_metrics, spectral_utils
 from .constants import ACC_PATTERNS, SmoothingMethod
 
@@ -1722,8 +1721,8 @@ class ModelAnalyzer:
         # Add text annotations to heatmap cells
         for i in range(3):
             for j in range(len(models)):
-                text = ax2.text(j, i, f'{metrics_matrix[i, j]:.2f}',
-                               ha='center', va='center', color='black', fontsize=8)
+                ax2.text(j, i, f'{metrics_matrix[i, j]:.2f}',
+                         ha='center', va='center', color='black', fontsize=8)
 
         # Add colorbar for normalized scores
         cbar2 = plt.colorbar(im, ax=ax2)

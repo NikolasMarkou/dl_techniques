@@ -19,7 +19,6 @@ no other file observes.
 """
 
 import json
-from pathlib import Path
 
 import keras
 import numpy as np

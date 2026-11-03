@@ -43,10 +43,8 @@ import keras
 import numpy as np
 import pytest
 
-from train.api import cli
 from train.api.errors import ConfigError
 from train.api.run_dir import request_differences
-from train.api.tasks.image_classification import ImageClassificationTrainer
 from train.common.resume_state import BACKUP_METADATA_NAME, BACKUP_WEIGHTS_NAME, FIT_STATE_NAME
 
 from .test_existing_run_is_refused import snapshot

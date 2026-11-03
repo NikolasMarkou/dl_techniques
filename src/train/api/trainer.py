@@ -283,8 +283,8 @@ from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple
 
 from . import registry, resume_decisions
-from .args import AutoContext, DebugArgs, MetricArgs, OptimArgs
-from .config import AUTO, StrictConfig, assert_resolved, join_path
+from .args import AutoContext, DebugArgs, MetricArgs, OptimArgs, _is_auto
+from .config import StrictConfig, assert_resolved, join_path
 from .data_args import DataFacts
 from .errors import ConfigError, ConfigValidationError
 from .optim import check_optim_args
@@ -381,10 +381,6 @@ class Evaluation:
     #: The measurements behind ``load_check`` when the task makes the exact reload check
     #: (``finalize_last_epoch(exact_reload=True)``): the summary's ``model_loading_check``.
     load_detail: Optional[Dict[str, Any]] = None
-
-
-def _is_auto(value: Any) -> bool:
-    return isinstance(value, str) and value == AUTO
 
 
 def _non_json_values(value: Any, path: str, found: List[Tuple[str, str]]) -> None:
