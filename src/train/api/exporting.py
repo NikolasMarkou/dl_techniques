@@ -71,12 +71,14 @@ Interface contract
         (a subclassed model such as the ViT); a functional model supplies it. ``keras``
         ignores it.
     :param record: a checked ``task.json`` record (:mod:`train.api.predictor`), or ``None``.
-        When given it is written, last, to ``<out>.task.json`` (``out`` plus
+        When given it is checked again with ``check_record`` (a record of an older layout is a
+        ``ConfigError`` naming the retraining) and written, last, to ``<out>.task.json`` (``out`` plus
         :data:`~train.api.run_dir.TASK_SUFFIX`), which must not exist, and the log says where.
     :return: the :class:`pathlib.Path` written.
-    :raises ConfigError: for an unknown format, a model that is not a built Keras model, a
-        name of the wrong kind, an ``out`` (or ``<out>.saved_model``, or ``<out>.task.json``
-        with a ``record``) that exists or cannot be created, a missing ``input_shape``,
+    :raises ConfigError: for an unknown format, a ``record`` that fails ``check_record``, a model
+        that is not a built Keras model, a name of the wrong kind, an ``out`` (or
+        ``<out>.saved_model``, or ``<out>.task.json`` with a ``record``) that exists or cannot be
+        created, a missing ``input_shape``,
         ``onnx`` without ``tf2onnx``, or a ``tflite`` conversion that fails or disagrees with
         Keras. Any other converter failure propagates, and leaves no ``out`` behind (a file is
         written last, in one piece).
@@ -406,6 +408,12 @@ def export(
     import keras
 
     path = check_target(out, format, with_record=record is not None)
+    if record is not None:
+        # A record this package's reader would refuse (an older version, a missing key) is not
+        # written beside a fresh model (D-073); nothing has been written yet.
+        from .predictor import check_record
+
+        check_record(dict(record), "<given>")
     if not isinstance(model, keras.Model) or not model.built:
         raise ConfigError(
             "Invalid value for 'model': export needs a built keras.Model (one that has been "

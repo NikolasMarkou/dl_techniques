@@ -735,7 +735,8 @@ def test_unchanged_data_resumes_and_a_resume_leaves_task_json_alone(folder_run, 
 def test_the_record_comparison_tolerates_float_noise_and_names_every_difference():
     from train.api.predictor import record_differences
 
-    base = {"class_names": ["a", "b"], "input_shape": [16, 16, 3], "normalize": "standardize",
+    base = {"task": "image_classification", "class_names": ["a", "b"], "input_shape": [16, 16, 3],
+            "normalize": "standardize",
             "eval_transform": {"kind": "resize", "source_channels": 3},
             "mean": [0.5, 0.4, 0.3], "std": [0.2, 0.2, 0.2]}
     assert record_differences(base, {**base, "mean": [0.5 + 1e-9, 0.4, 0.3]}) == []

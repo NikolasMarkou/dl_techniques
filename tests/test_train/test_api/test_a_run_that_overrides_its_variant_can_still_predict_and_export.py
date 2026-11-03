@@ -116,8 +116,8 @@ def test_the_run_records_exactly_the_keys_it_overrode(run):
     record = record_of(out)
     assert record["variant_overrides"] == model_args
     check_record(record, out)  # the record the trainer wrote is valid
-    assert list(record)[: len(RECORD_KEYS)] == list(RECORD_KEYS)
-    assert list(record)[len(RECORD_KEYS):] == ["variant_overrides"]
+    assert list(record)[: len(RECORD_KEYS["image_classification"])] == list(RECORD_KEYS["image_classification"])
+    assert list(record)[len(RECORD_KEYS["image_classification"]):] == ["variant_overrides"]
 
 
 def test_a_run_that_overrides_its_variant_predicts_and_exports(run, tree, tmp_path):
@@ -168,11 +168,11 @@ def test_an_override_the_model_does_not_have_is_refused(run, tmp_path):
 def test_a_run_with_no_override_writes_no_variant_overrides_key(world, tree, tmp_path):
     train(tmp_path / "run", tree, "resnet/resnet18", {})
     record = record_of(tmp_path / "run")
-    assert list(record) == list(RECORD_KEYS)
+    assert list(record) == list(RECORD_KEYS["image_classification"])
     assert "variant_overrides" not in record
     # Restating a table value, or setting a key that is not in the table, is not an override either.
     train(tmp_path / "again", tree, "resnet/resnet18", {"blocks_per_stage": [2, 2, 2, 2], "stem_type": "cifar"})
-    assert list(record_of(tmp_path / "again")) == list(RECORD_KEYS)
+    assert list(record_of(tmp_path / "again")) == list(RECORD_KEYS["image_classification"])
 
 
 def test_a_vit_scale_is_refused_before_the_directory_is_claimed(world, tree, tmp_path):

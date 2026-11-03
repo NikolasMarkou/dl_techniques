@@ -11,12 +11,20 @@ probabilities.
 
 Interface contract
 ------------------
-``task.json`` (schema version 1), a JSON object with exactly these keys:
+``task.json`` (schema version 2), a JSON object. Its keys depend on its ``task`` (the record
+carries the task word, so a reader dispatches on it and needs no second source). A classification
+record has EXACTLY the keys and order of a version 1 record; only ``schema_version`` moved.
+:data:`RECORD_KEYS` lists them per task. Every key of the task must be there, and no other, apart
+from the OPTIONAL ``variant_overrides``.
 
 ``schema_version``
-    ``1``. Any other value is refused: a reader never guesses at a newer layout.
+    ``2``. Any other value is refused: a reader never guesses at a newer layout, and there is no
+    reader for version 1 (D-004). A version 1 record gets one sentence naming the file and saying
+    the run has to be trained again; ``predict``, ``export`` and ``resume`` all reach it
+    (:func:`check_record`, :func:`refuse_old_record`).
 ``task``, ``model``, ``family``, ``variant``
-    The task word, ``"family/variant"``, and its two halves.
+    The task word (``image_classification`` or ``image_segmentation``), ``"family/variant"``, and
+    its two halves. A task this reader does not know is named and refused.
 ``class_names``
     One text per class, in the order of the model's outputs. **Limit, stated because it cannot
     be checked:** the reader verifies the COUNT (against the model's output width) and that no
@@ -25,8 +33,11 @@ Interface contract
     wrong name for those classes; no property of the model or of the record tells the two apart.
     Trust the file only as far as you trust its writer; ``export`` and a training run write it
     from the data they loaded.
-``input_shape``, ``channels``
-    ``[height, width, channels]`` of the model's input; ``channels`` repeats the last.
+``input_shape`` (classification), ``input_size`` (segmentation), ``channels``
+    Classification: ``input_shape`` is ``[side, side, channels]`` of the model's input and
+    ``channels`` repeats the last. Segmentation: ``input_size`` is ``[height, width]``, each above
+    zero and not necessarily equal, and ``channels`` is the model's input channel count; there is
+    no ``input_shape``, so the two cannot disagree.
 ``normalize``
     ``"standardize"`` or ``"unit"`` (what the run asked for).
 ``mean``, ``std``
@@ -40,11 +51,21 @@ Interface contract
     is not a statistic of such images, and the predictor would divide by it: a ``mean`` of 1e30
     turns every input into -1e30 and the probabilities into NaN, with no error. It is refused
     at load.
-``eval_transform``
+``eval_transform`` (classification only)
     ``{"kind", "source_channels"}``: how an image of any size becomes the model's
     input before standardization (:data:`EVAL_KINDS`, the evaluation pipelines of the
     loader), and the channel count the files are read with (``1`` for MNIST, whose
     single channel is repeated up to ``channels``).
+``ignore_index`` (segmentation only)
+    ``null``, or a whole number of 0 or more that is not a class index (outside
+    ``0 .. len(class_names) - 1``): the mask value that marks a pixel as void. A mask file cannot
+    hold a negative, and a class index would be a class the model cannot learn.
+``mask_threshold`` (segmentation only)
+    ``null``, or the finite number that turns a grey mask into two classes. It needs exactly two
+    ``class_names`` and no ``ignore_index`` (D-014: an explicit number, two classes).
+``output`` (segmentation only)
+    ``"masks"`` or ``"logits"``: what the predictor returns for an image. The record only names it;
+    the segmentation predictor (step 30) reads it.
 
 ``variant_overrides`` (OPTIONAL)
     ``{table key: value}``: the keys of the variant's table (``MODEL_VARIANTS[variant]``) that the
@@ -55,26 +76,43 @@ Interface contract
     variant's table updated by it, so an override is honoured and a wrong variant or an override the
     model does not have is still refused. ``export`` carries it into ``<out>.task.json``.
 
-``build_task_record(...)``
-    :return: the record for a finished data load (not checked; see its docstring).
+``build_task_record(...)`` / ``build_segmentation_record(...)``
+    :return: the record for a finished data load (not checked; see their docstrings). The first
+        writes a classification record, the second a segmentation record.
 
 ``check_record(record, source)``
     :param record: a parsed ``task.json``.
     :param source: its path, for the messages.
-    :raises ConfigError: for a wrong ``schema_version``, a missing or unknown key,
-        a value of the wrong kind (``variant_overrides`` included: a non-empty object of text
-        keys and JSON values), repeated class names, a ``model`` that is not
-        ``family/variant``, a ``mean`` or ``std`` of the wrong length, a ``std`` that is not
-        positive, a ``mean`` or ``std`` outside the bounds above, ``normalize`` of ``unit`` with a ``mean`` that is not zeros or a ``std`` that
-        is not ones, or an ``eval_transform`` whose kind is not in :data:`EVAL_KINDS`.
+    :raises ConfigError: for a wrong ``schema_version`` (an older one in the sentence described
+        above), a ``task`` this reader does not know, a missing or unknown key for that task, a
+        value of the wrong kind (``variant_overrides`` included: a non-empty object of text keys
+        and JSON values), repeated class names, a ``model`` that is not ``family/variant``, a
+        ``mean`` or ``std`` of the wrong length, a ``std`` that is not positive, a ``mean`` or
+        ``std`` outside the bounds above, ``normalize`` of ``unit`` with a ``mean`` that is not
+        zeros or a ``std`` that is not ones, and the task's own keys: a classification record's
+        ``input_shape`` that is not square or an ``eval_transform`` whose kind is not in
+        :data:`EVAL_KINDS`; a segmentation record's ``input_size``, ``channels``, ``ignore_index``,
+        ``mask_threshold`` (with its two-class and no-void conditions) or ``output``.
+
+``refuse_old_record(path, prefix)``
+    :param path: a ``task.json`` on disk.
+    :param prefix: how the message begins (``"Cannot resume <dir>"``).
+    :raises ConfigError: when the file is JSON whose ``schema_version`` is a whole number below
+        :data:`SCHEMA_VERSION`; returns for a missing file, a file that is not JSON (the reader
+        names that) and any other version (the reader refuses those). One sentence naming the
+        file and the retraining. ``resume`` calls it before it loads the data.
 
 ``record_differences(earlier, now)``
     :param earlier: a checked record (a run's ``task.json``).
-    :param now: a record built from the data loaded now (:func:`build_task_record`).
-    :return: one ``"<key>: <earlier> -> <now>"`` line per key of :data:`DATA_KEYS` that
-        differs: the class names (as a list, in order), the geometry, the normalization and
-        the per-channel ``mean`` and ``std`` (within a relative ``1e-5``). A resume compares
-        with this before it trains on the data (D-069).
+    :param now: a record built from the data loaded now (:func:`build_task_record` or
+        :func:`build_segmentation_record`).
+    :return: one ``"<key>: <earlier> -> <now>"`` line per key of ``DATA_KEYS[task]`` that
+        differs: for classification the class names (as a list, in order), the geometry, the
+        normalization and the per-channel ``mean`` and ``std`` (within a relative ``1e-5``); for
+        segmentation the class names, ``input_size``, the normalization, ``mean`` and ``std``,
+        ``ignore_index`` and ``mask_threshold``. ``output`` is how the predictor answers, not what
+        the run trained on, and is not compared. Records of two tasks differ in ``task`` alone.
+        A resume compares with this before it trains on the data (D-069).
 
 ``load_model(path)``
     :param path: a run directory (its ``best_model.keras``) or a ``.keras`` file. A
@@ -152,27 +190,62 @@ from .run_dir import TASK_FILE, TASK_SUFFIX, check_model_file
 
 # ---------------------------------------------------------------------
 
-#: The only ``schema_version`` this module reads and writes.
-SCHEMA_VERSION = 1
+# DECISION plan-2026-10-31T180033-2faf890a/D-073: a record has the keys of ITS task and no others, and
+# version 1 is not read. Do NOT make one flat record with every key and a null for the other task's
+# (a key nothing reads is a lie in the file), do NOT keep ``input_shape`` beside ``input_size`` in a
+# segmentation record (one fact held twice, and a square-only check on one of them), and do NOT add a
+# version 1 reader "for the old runs": D-004 priced that, every old run directory loses predict,
+# export and resume, and the standing rule is no legacy loaders.
+#: The only ``schema_version`` this module reads and writes. Version 1 (classification only, one
+#: layout) is not read: the number moved when segmentation records were added, a v1 run is
+#: refused at predict, export and resume, and there is no converter (D-004, the standing rule
+#: against legacy readers).
+SCHEMA_VERSION = 2
 
-#: The one task this predictor serves; a record of another task is refused at load.
+#: The task this predictor serves; a record of another task is refused at load until the
+#: segmentation predictor (step 30) dispatches on ``record["task"]``.
 SERVED_TASK = "image_classification"
 
-#: The keys of a record, in the order they are written.
-RECORD_KEYS = (
-    "schema_version",
-    "task",
-    "model",
-    "family",
-    "variant",
-    "class_names",
-    "input_shape",
-    "channels",
-    "normalize",
-    "mean",
-    "std",
-    "eval_transform",
-)
+CLASSIFICATION = "image_classification"
+SEGMENTATION = "image_segmentation"
+
+#: The keys of a record per task, in the order they are written. The classification tuple is the
+#: version 1 tuple: byte-identical output apart from ``schema_version`` is a standing requirement.
+RECORD_KEYS: Dict[str, Tuple[str, ...]] = {
+    CLASSIFICATION: (
+        "schema_version",
+        "task",
+        "model",
+        "family",
+        "variant",
+        "class_names",
+        "input_shape",
+        "channels",
+        "normalize",
+        "mean",
+        "std",
+        "eval_transform",
+    ),
+    SEGMENTATION: (
+        "schema_version",
+        "task",
+        "model",
+        "family",
+        "variant",
+        "class_names",
+        "input_size",
+        "channels",
+        "normalize",
+        "mean",
+        "std",
+        "ignore_index",
+        "mask_threshold",
+        "output",
+    ),
+}
+
+#: What ``output`` may say in a segmentation record.
+SEGMENTATION_OUTPUTS = ("masks", "logits")
 
 #: Keys a record MAY carry (written only when they hold something); every other key is required.
 OPTIONAL_RECORD_KEYS = ("variant_overrides",)
@@ -226,6 +299,20 @@ GREY16_MODES = ("I;16", "I;16L", "I;16B", "I;16N")
 WIDE_MODES = ("I", "F")
 
 
+def _record_of(
+    task: str, values: Mapping[str, Any], variant_overrides: Optional[Mapping[str, Any]]
+) -> Dict[str, Any]:
+    """Return the record of ``task``: ``values`` in the order of ``RECORD_KEYS[task]``, plus the optional key."""
+    record = {key: values[key] for key in RECORD_KEYS[task]}
+    if variant_overrides:
+        record["variant_overrides"] = _plain(dict(variant_overrides))
+    return record
+
+
+def _statistics(mean: Any, std: Any) -> Dict[str, Any]:
+    return {"mean": [float(value) for value in mean], "std": [float(value) for value in std]}
+
+
 def build_task_record(
     *,
     task: str,
@@ -241,8 +328,10 @@ def build_task_record(
     source_channels: int,
     variant_overrides: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Return the ``task.json`` record of a run; see the module contract.
+    """Return the ``task.json`` record of a classification run; see the module contract.
 
+    :param task: written as given (the classification task passes ``image_classification``);
+        the LAYOUT is the classification one whatever the word.
     :param variant_overrides: the output of :func:`overrides_of_variant`; the record gets the
         ``variant_overrides`` key only when this is not empty.
 
@@ -253,26 +342,72 @@ def build_task_record(
         truthfully; every kind it can hold is one :func:`check_record` accepts.
     """
     shape = [int(side) for side in input_shape]
-    record = {
-        "schema_version": SCHEMA_VERSION,
-        "task": task,
-        "model": model,
-        "family": family,
-        "variant": variant,
-        "class_names": [str(name) for name in class_names],
-        "input_shape": shape,
-        "channels": shape[2],
-        "normalize": normalize,
-        "mean": [float(value) for value in mean],
-        "std": [float(value) for value in std],
-        "eval_transform": {
-            "kind": EVAL_KIND_OF_DATA[data_kind],
-            "source_channels": int(source_channels),
+    return _record_of(
+        CLASSIFICATION,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "task": task,
+            "model": model,
+            "family": family,
+            "variant": variant,
+            "class_names": [str(name) for name in class_names],
+            "input_shape": shape,
+            "channels": shape[2],
+            "normalize": normalize,
+            **_statistics(mean, std),
+            "eval_transform": {
+                "kind": EVAL_KIND_OF_DATA[data_kind],
+                "source_channels": int(source_channels),
+            },
         },
-    }
-    if variant_overrides:
-        record["variant_overrides"] = _plain(dict(variant_overrides))
-    return record
+        variant_overrides,
+    )
+
+
+def build_segmentation_record(
+    *,
+    model: str,
+    family: str,
+    variant: str,
+    class_names: Sequence[Any],
+    input_size: Sequence[int],
+    channels: int,
+    normalize: str,
+    mean: Any,
+    std: Any,
+    ignore_index: Optional[int] = None,
+    mask_threshold: Optional[float] = None,
+    output: str = "masks",
+    variant_overrides: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Return the ``task.json`` record of a segmentation run; see the module contract.
+
+    :param input_size: ``(height, width)`` of the model's input, not necessarily equal.
+    :param channels: the model's input channels.
+    :param ignore_index: the void value of the masks, or ``None``.
+    :param mask_threshold: the grey-mask threshold of a two-class run, or ``None``.
+    :param output: one of :data:`SEGMENTATION_OUTPUTS`.
+    :return: the record. It is NOT checked (:func:`check_record` does that).
+    """
+    return _record_of(
+        SEGMENTATION,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "task": SEGMENTATION,
+            "model": model,
+            "family": family,
+            "variant": variant,
+            "class_names": [str(name) for name in class_names],
+            "input_size": [int(side) for side in input_size],
+            "channels": int(channels),
+            "normalize": normalize,
+            **_statistics(mean, std),
+            "ignore_index": ignore_index,
+            "mask_threshold": mask_threshold,
+            "output": output,
+        },
+        variant_overrides,
+    )
 
 
 def _is_number(value: Any) -> bool:
@@ -313,22 +448,49 @@ def overrides_of_variant(table_row: Mapping[str, Any], kwargs: Mapping[str, Any]
     }
 
 
-def record_problems(record: Mapping[str, Any]) -> List[str]:
-    """Return one line per way ``record`` is not a valid version-1 record (empty when valid)."""
+def _is_whole(value: Any) -> bool:
+    """Whether ``value`` is an int and not a bool."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def older_record_reason(version: Any) -> Optional[str]:
+    """Return the clause for a record of an older layout, or ``None`` when ``version`` is not one.
+
+    Interface contract: ``version`` is a ``schema_version`` as parsed from JSON. An older layout is
+    a whole number from 1 up to (not including) :data:`SCHEMA_VERSION`; anything else (a newer
+    number, a bool, text, a missing value) is ``None`` and keeps the plain refusal. The clause is
+    the one place the sentence is worded, so ``predict``, ``export`` and ``resume`` say the same.
+    """
+    if _is_whole(version) and 1 <= version < SCHEMA_VERSION:
+        return (
+            f"an older layout; this reader understands {SCHEMA_VERSION} only and cannot upgrade it, "
+            "so the run has to be trained again"
+        )
+    return None
+
+
+def _version_line(version: Any) -> str:
+    older = older_record_reason(version)
+    if older is not None:
+        return f"'schema_version' is {version}, {older}"
+    return f"'schema_version' is {version!r}; this reader understands {SCHEMA_VERSION} only"
+
+
+def _header_problems(record: Mapping[str, Any], keys: Tuple[str, ...]) -> Tuple[List[str], bool]:
+    """Return ``(lines, complete)``: the key-set problems, and whether no key is missing."""
+    missing = [key for key in keys if key not in record]
+    unknown = sorted(set(record) - set(keys) - set(OPTIONAL_RECORD_KEYS))
     lines: List[str] = []
-    version = record.get("schema_version")
-    if version != SCHEMA_VERSION or isinstance(version, bool):
-        return [
-            f"'schema_version' is {version!r}; this reader understands {SCHEMA_VERSION} only"
-        ]
-    missing = [key for key in RECORD_KEYS if key not in record]
-    unknown = sorted(set(record) - set(RECORD_KEYS) - set(OPTIONAL_RECORD_KEYS))
     if missing:
         lines.append(f"missing key(s) {', '.join(map(repr, missing))}")
     if unknown:
         lines.append(f"unknown key(s) {', '.join(map(repr, unknown))}")
-    if missing:
-        return lines
+    return lines, not missing
+
+
+def _identity_problems(record: Mapping[str, Any]) -> List[str]:
+    """Return the problems of ``task``, ``model``, ``family``, ``variant`` and ``class_names``."""
+    lines: List[str] = []
     for key in ("task", "model", "family", "variant"):
         if not isinstance(record[key], str) or not record[key]:
             lines.append(f"{key!r} must be a non-empty text, got {record[key]!r}")
@@ -344,20 +506,43 @@ def record_problems(record: Mapping[str, Any]) -> List[str]:
                 f"'model' is {record['model']!r} but 'family' and 'variant' give "
                 f"{record['family'] + '/' + record['variant']!r}"
             )
+    return lines
+
+
+def _classification_geometry(record: Mapping[str, Any]) -> Tuple[List[str], Optional[int]]:
+    """Return ``(lines, channels)`` for ``input_shape`` and ``channels`` (``None`` when unusable)."""
     shape = record["input_shape"]
     shape_ok = (
         isinstance(shape, list)
         and len(shape) == 3
-        and all(isinstance(side, int) and not isinstance(side, bool) and side > 0 for side in shape)
+        and all(_is_whole(side) and side > 0 for side in shape)
         and shape[0] == shape[1]
     )
     if not shape_ok:
-        lines.append(f"'input_shape' must be [side, side, channels] of positive ints, got {shape!r}")
-    elif record["channels"] != shape[2]:
-        lines.append(f"'channels' is {record['channels']!r} but 'input_shape' has {shape[2]}")
+        return [f"'input_shape' must be [side, side, channels] of positive ints, got {shape!r}"], None
+    if record["channels"] != shape[2]:
+        return [f"'channels' is {record['channels']!r} but 'input_shape' has {shape[2]}"], shape[2]
+    return [], shape[2]
+
+
+def _segmentation_geometry(record: Mapping[str, Any]) -> Tuple[List[str], Optional[int]]:
+    """Return ``(lines, channels)`` for ``input_size`` and ``channels`` (``None`` when unusable)."""
+    lines: List[str] = []
+    size = record["input_size"]
+    if not (isinstance(size, list) and len(size) == 2 and all(_is_whole(side) and side > 0 for side in size)):
+        lines.append(f"'input_size' must be [height, width] of positive ints, got {size!r}")
+    channels = record["channels"]
+    if not (_is_whole(channels) and channels > 0):
+        lines.append(f"'channels' must be a positive int, got {channels!r}")
+        return lines, None
+    return lines, channels
+
+
+def _statistics_problems(record: Mapping[str, Any], width: Optional[int]) -> List[str]:
+    """Return the problems of ``normalize``, ``mean`` and ``std`` against ``width`` channels."""
+    lines: List[str] = []
     if record["normalize"] not in _NORMALIZE:
         lines.append(f"'normalize' must be one of {', '.join(_NORMALIZE)}, got {record['normalize']!r}")
-    width = shape[2] if shape_ok else None
     for key in ("mean", "std"):
         values = record[key]
         if not (isinstance(values, list) and values and all(_is_number(v) for v in values)):
@@ -385,41 +570,121 @@ def record_problems(record: Mapping[str, Any]) -> List[str]:
                 f"'normalize' is 'unit' (no standardization) but 'mean' is {mean!r} and 'std' is "
                 f"{std!r}; unit means zeros and ones"
             )
-    if "variant_overrides" in record:
-        overrides = record["variant_overrides"]
-        if not (
-            isinstance(overrides, dict)
-            and overrides
-            and all(isinstance(key, str) and key and _is_json_plain(value) for key, value in overrides.items())
-        ):
-            lines.append(
-                "'variant_overrides' must be a non-empty object of text keys and JSON values "
-                f"(it is written only when a model_args key changed a key of the variant's table), "
-                f"got {_shown(overrides)}"
-            )
+    return lines
+
+
+def _overrides_problems(record: Mapping[str, Any]) -> List[str]:
+    if "variant_overrides" not in record:
+        return []
+    overrides = record["variant_overrides"]
+    if (
+        isinstance(overrides, dict)
+        and overrides
+        and all(isinstance(key, str) and key and _is_json_plain(value) for key, value in overrides.items())
+    ):
+        return []
+    return [
+        "'variant_overrides' must be a non-empty object of text keys and JSON values "
+        f"(it is written only when a model_args key changed a key of the variant's table), "
+        f"got {_shown(overrides)}"
+    ]
+
+
+def _eval_transform_problems(record: Mapping[str, Any]) -> List[str]:
+    lines: List[str] = []
     transform = record["eval_transform"]
     if not isinstance(transform, dict) or set(transform) != {"kind", "source_channels"}:
         lines.append(
             f"'eval_transform' must be an object with 'kind' and 'source_channels', got {transform!r}"
         )
-    else:
-        if transform["kind"] not in EVAL_KINDS:
-            lines.append(
-                f"'eval_transform.kind' is {transform['kind']!r}, which this predictor does not "
-                f"reproduce (it reproduces {', '.join(EVAL_KINDS)})"
-            )
-        if transform["source_channels"] not in (1, 3) or isinstance(transform["source_channels"], bool):
-            lines.append(
-                f"'eval_transform.source_channels' must be 1 or 3, got {transform['source_channels']!r}"
-            )
+        return lines
+    if transform["kind"] not in EVAL_KINDS:
+        lines.append(
+            f"'eval_transform.kind' is {transform['kind']!r}, which this predictor does not "
+            f"reproduce (it reproduces {', '.join(EVAL_KINDS)})"
+        )
+    if transform["source_channels"] not in (1, 3) or isinstance(transform["source_channels"], bool):
+        lines.append(
+            f"'eval_transform.source_channels' must be 1 or 3, got {transform['source_channels']!r}"
+        )
+    return lines
+
+
+def _segmentation_tail_problems(record: Mapping[str, Any]) -> List[str]:
+    """Return the problems of ``ignore_index``, ``mask_threshold`` and ``output``."""
+    lines: List[str] = []
+    names = record["class_names"]
+    classes = len(names) if isinstance(names, list) and names else None
+    ignore = record["ignore_index"]
+    if ignore is not None and not (_is_whole(ignore) and ignore >= 0):
+        lines.append(f"'ignore_index' must be null or a whole number of 0 or more, got {ignore!r}")
+    elif ignore is not None and classes is not None and ignore < classes:
+        lines.append(
+            f"'ignore_index' is {ignore}, a class index; it must lie outside the class indices "
+            f"0..{classes - 1}"
+        )
+    threshold = record["mask_threshold"]
+    if threshold is not None:
+        if not _is_number(threshold):
+            lines.append(f"'mask_threshold' must be null or a finite number, got {threshold!r}")
+        else:
+            if classes is not None and classes != 2:
+                lines.append(f"'mask_threshold' needs exactly 2 classes, the record names {classes}")
+            if ignore is not None:
+                lines.append(
+                    "'mask_threshold' and 'ignore_index' cannot both be set: a thresholded mask "
+                    "has two classes and no void"
+                )
+    if record["output"] not in SEGMENTATION_OUTPUTS:
+        lines.append(
+            f"'output' must be one of {', '.join(SEGMENTATION_OUTPUTS)}, got {record['output']!r}"
+        )
+    return lines
+
+
+def record_problems(record: Mapping[str, Any]) -> List[str]:
+    """Return one line per way ``record`` is not a valid version-2 record (empty when valid)."""
+    version = record.get("schema_version")
+    if version != SCHEMA_VERSION or isinstance(version, bool):
+        return [_version_line(version)]
+    task = record.get("task")
+    keys = RECORD_KEYS.get(task) if isinstance(task, str) else None
+    if keys is None:
+        return [f"'task' is {task!r}; this reader knows {', '.join(RECORD_KEYS)}"]
+    lines, complete = _header_problems(record, keys)
+    if not complete:
+        return lines
+    lines += _identity_problems(record)
+    geometry, width = (
+        _classification_geometry(record) if task == CLASSIFICATION else _segmentation_geometry(record)
+    )
+    lines += geometry
+    lines += _statistics_problems(record, width)
+    lines += _overrides_problems(record)
+    lines += (
+        _eval_transform_problems(record) if task == CLASSIFICATION else _segmentation_tail_problems(record)
+    )
     return lines
 
 
 def check_record(record: Any, source: Union[str, Path]) -> None:
-    """Raise :class:`ConfigError` unless ``record`` is a valid version-1 record; see the module contract."""
+    """Raise :class:`ConfigError` unless ``record`` is a valid version-2 record; see the module contract."""
     lines = ["not a JSON object"] if not isinstance(record, dict) else record_problems(record)
     if lines:
         raise ConfigError(f"Invalid {TASK_FILE} {source}: " + "; ".join(lines))
+
+
+def refuse_old_record(path: Path, prefix: str) -> None:
+    """Raise :class:`ConfigError` when ``path`` is a record of an older layout; see the module contract."""
+    try:
+        record = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return
+    older = older_record_reason(record.get("schema_version")) if isinstance(record, dict) else None
+    if older is not None:
+        raise ConfigError(
+            f"{prefix}: {path} has 'schema_version' {record['schema_version']}, {older}"
+        )
 
 
 def read_record(path: Path) -> Dict[str, Any]:
@@ -440,8 +705,15 @@ def read_record(path: Path) -> Dict[str, Any]:
     return record
 
 
-#: The keys of a record that describe the DATA a run was trained on (a resume compares them).
-DATA_KEYS = ("class_names", "input_shape", "normalize", "eval_transform", "mean", "std")
+#: The keys of a record that describe the DATA a run was trained on, per task (a resume compares
+#: them). A segmentation run adds the void and the threshold: a different ``ignore_index`` is
+#: other labels. ``output`` is how the predictor answers, not what the run saw.
+DATA_KEYS: Dict[str, Tuple[str, ...]] = {
+    CLASSIFICATION: ("class_names", "input_shape", "normalize", "eval_transform", "mean", "std"),
+    SEGMENTATION: (
+        "class_names", "input_size", "normalize", "mean", "std", "ignore_index", "mask_threshold",
+    ),
+}
 
 
 def _shown(value: Any) -> str:
@@ -450,9 +722,11 @@ def _shown(value: Any) -> str:
 
 
 def record_differences(earlier: Mapping[str, Any], now: Mapping[str, Any]) -> List[str]:
-    """List the :data:`DATA_KEYS` where ``now`` differs from ``earlier``; see the module contract."""
+    """List the ``DATA_KEYS`` where ``now`` differs from ``earlier``; see the module contract."""
+    if earlier["task"] != now["task"]:
+        return [f"task: {_shown(earlier['task'])} -> {_shown(now['task'])}"]
     lines = []
-    for key in DATA_KEYS:
+    for key in DATA_KEYS[now["task"]]:
         before, after = earlier[key], now[key]
         if key in ("mean", "std"):
             same = len(before) == len(after) and all(
@@ -690,6 +964,11 @@ class Predictor:
 
     def __init__(self, model: Any, record: Mapping[str, Any]) -> None:
         check_record(dict(record), "<given>")
+        if record["task"] != SERVED_TASK:
+            raise ConfigError(
+                f"Invalid {TASK_FILE} <given>: the task is {record['task']!r} but this predictor "
+                f"serves {SERVED_TASK!r} only"
+            )
         self.model = model
         self.record = dict(record)
         self.class_names: List[str] = list(record["class_names"])

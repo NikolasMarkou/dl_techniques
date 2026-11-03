@@ -187,8 +187,8 @@ def in_class_order(result, names=CLASS_NAMES):
 
 def test_task_json_holds_the_schema_and_what_the_loader_reports(run_dir, truth):
     record = read_task(run_dir)
-    assert list(record) == list(RECORD_KEYS)
-    assert record["schema_version"] == SCHEMA_VERSION == 1
+    assert list(record) == list(RECORD_KEYS["image_classification"])
+    assert record["schema_version"] == SCHEMA_VERSION == 2
     assert (record["task"], record["model"], record["family"], record["variant"]) == (
         "image_classification",
         "vit/vit_pico",
@@ -711,7 +711,7 @@ def test_a_keras_file_reads_its_name_task_json_then_its_stem_task_json_then_task
 
 def test_a_record_built_by_the_trainer_passes_its_own_check():
     check_record(record(), "<test>")
-    assert list(record()) == list(RECORD_KEYS)
+    assert list(record()) == list(RECORD_KEYS["image_classification"])
 
 
 def test_the_mean_and_std_of_the_loader_survive_json_exactly():
@@ -729,7 +729,8 @@ def without(key):
 
 
 BAD_RECORDS = [
-    (record(schema_version=2), r"'schema_version' is 2; this reader understands 1 only"),
+    (record(schema_version=3), r"'schema_version' is 3; this reader understands 2 only"),
+    (record(schema_version=1), r"'schema_version' is 1, an older layout; this reader understands 2 only and cannot upgrade it, so the run has to be trained again"),
     (record(schema_version=True), "schema_version"),
     (record(schema_version="1"), "schema_version"),
     (without("schema_version"), "schema_version"),
@@ -859,8 +860,8 @@ def test_a_run_directory_without_a_best_model_points_at_the_final_one(run_dir, t
 
 
 def test_an_unknown_schema_version_in_the_file_is_refused(run_dir, tmp_path):
-    path = copy_with_record(run_dir, tmp_path / "v2", schema_version=2)
-    with pytest.raises(ConfigError, match=r"schema_version.*understands 1 only"):
+    path = copy_with_record(run_dir, tmp_path / "v3", schema_version=3)
+    with pytest.raises(ConfigError, match=r"schema_version.*understands 2 only"):
         load_model(path)
 
 

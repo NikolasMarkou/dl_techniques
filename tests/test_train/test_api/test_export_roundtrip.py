@@ -194,7 +194,15 @@ def test_a_task_json_that_appears_after_the_check_is_never_overwritten(tmp_path,
     """Mutant ``xp_record_w`` (review-iter-1 concern 10): the record beside the export is opened
     exclusively, so a ``<out>.task.json`` written by someone else while the model was converting
     is an error and not a truncation."""
+    from train.api.predictor import build_task_record
     from train.api.run_dir import TASK_SUFFIX
+
+    def a_record():
+        return build_task_record(
+            task="image_classification", model="vit/vit_pico", family="vit", variant="vit_pico",
+            class_names=["a", "b", "c", "d"], input_shape=(6, 6, 3), normalize="unit", mean=[0.0] * 3,
+            std=[1.0] * 3, data_kind="folder", source_channels=3,
+        )
 
     inputs = keras.Input((6, 5, 3))
     net = keras.Model(inputs, keras.layers.Dense(4)(keras.layers.Flatten()(inputs)))
@@ -210,7 +218,7 @@ def test_a_task_json_that_appears_after_the_check_is_never_overwritten(tmp_path,
 
     monkeypatch.setattr(net, "save", save_then_they_write)
     with pytest.raises(FileExistsError):
-        export(model=net, out=out, format="keras", record={"schema_version": 1})
+        export(model=net, out=out, format="keras", record=a_record())
     assert sibling.read_text() == theirs
 
 

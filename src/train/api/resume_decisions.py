@@ -15,7 +15,8 @@ which load Keras models and therefore run after ``setup_gpu``. A refusal is a
 written to, and says whether ``out`` is still usable.
 
 ``resume_point(run_dir, resolved, request)``
-    The :class:`~train.common.resume_state.ResumePoint` of a killed run, every refusal applied.
+    The :class:`~train.common.resume_state.ResumePoint` of a killed run, every refusal applied; a
+    ``task.json`` of an older layout (version 1) is refused first, naming the file and the retraining.
 ``training_complete_reason(point, resolved)``
     ``None`` while an epoch is left, else the phrase for why none is (D-064): the fit returned, all
     epochs ended, or EarlyStopping had decided to stop. A complete run is resumed to REPORT only.
@@ -62,6 +63,11 @@ def resume_point(run_dir: Path, resolved: StrictConfig, request: Any) -> Any:
     :return: the :class:`~train.common.resume_state.ResumePoint`.
     :raises ConfigError: see the module contract, "Resume" in ``trainer.py``.
     """
+    # A record of an older layout is refused FIRST, before the sidecar is read and long before the
+    # data is loaded: `check_data_unchanged` would refuse it too, but only after both (D-073).
+    from .predictor import refuse_old_record
+
+    refuse_old_record(run_dir / TASK_FILE, f"Cannot resume {run_dir}")
     return check_resume_point(run_dir, resolved, load_resume_point(run_dir, request))
 
 

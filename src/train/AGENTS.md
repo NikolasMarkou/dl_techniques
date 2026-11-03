@@ -458,6 +458,11 @@ per-model scripts (usage, keys, run directory, resume, `predict`, `export`, exit
   segmentation `image_size` must be; `api/segmentation_models.py` holds the two adapters (`convunext`, `accunet`),
   `check_image_size` and the specs. `recipes.register_builtin_models` registers the six classifiers only, and the guards
   that enumerate `registry.MODELS` rely on it: the segmentation task registers its own families.
+- **`task.json` is schema version 2 and per task** (D-073): `predictor.RECORD_KEYS[task]` and `DATA_KEYS[task]`; a
+  classification record equals a version 1 record but for `schema_version`; a segmentation record has `input_size`,
+  `ignore_index`, `mask_threshold`, `output` and no `input_shape`. A new task is a new row of both tables and a
+  builder, not a null in the old record. Version 1 has no reader: `older_record_reason` is the one sentence, said by
+  `check_record` (predict, export), `refuse_old_record` (`resume_decisions.resume_point`, first) and `export`.
 - **The help path imports no TensorFlow, Keras or yaml and stays under 1 s**:
   `tests/test_train/test_api/test_cli_help_allocates_nothing.py`. Heavy imports go inside functions.
   A request that can be refused without loading data is refused before `setup_gpu` and before the

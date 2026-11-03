@@ -22,7 +22,7 @@ import pytest
 
 from train.api import recipes, registry
 from train.api.errors import ConfigError
-from train.api.predictor import Predictor, build_task_record, load_model
+from train.api.predictor import Predictor, build_segmentation_record, build_task_record, load_model
 
 #: The smallest variant of each family, and a second variant of the same family whose table
 #: differs from it in a key the model's config also holds (None where the family has one).
@@ -124,8 +124,15 @@ def test_another_registered_family_is_refused_naming_both(built, tmp_path):
 
 
 def test_a_record_of_another_task_is_refused_naming_the_task(built, tmp_path):
+    """A real segmentation record (version 2 has one; the predictor for it is step 30's)."""
+    directory = place(built, "vit", tmp_path)
+    segmentation = build_segmentation_record(
+        model="vit/vit_pico", family="vit", variant="vit_pico", class_names=CLASSES,
+        input_size=(SIDE, SIDE), channels=3, normalize="unit", mean=[0.0] * 3, std=[1.0] * 3,
+    )
+    (directory / "task.json").write_text(json.dumps(segmentation))
     with pytest.raises(ConfigError, match=r"the task is 'image_segmentation' but this predictor serves 'image_classification'"):
-        load_model(place(built, "vit", tmp_path, task="image_segmentation"))
+        load_model(directory)
 
 
 def test_a_wrong_input_side_is_refused_at_load_naming_input_shape(built, tmp_path):

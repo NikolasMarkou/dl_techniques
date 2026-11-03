@@ -187,6 +187,14 @@ optional `variant_overrides` object of `task.json`, written only when there is o
 the model with the variant plus those changes (and `export` copies the object into `<out>.task.json`). A ViT's `scale`
 cannot be overridden: choose the variant (`model=vit/vit_tiny`); the request is refused before the run directory is made.
 
+**`task.json` is schema version 2** (D-073, `train.api.predictor`): a classification record has the keys and the order
+of version 1 and only `schema_version` changed; a segmentation record has `input_size` as `[height, width]` (not
+necessarily square), `channels`, `ignore_index`, `mask_threshold` and `output` where a classification record has
+`input_shape` and `eval_transform`. A record of version 1 is refused, in one sentence that names the file and says the
+run has to be trained again, by `predict`, by `export` and by `resume_interrupted=true` (the last before the data is
+loaded). There is no converter and no reader: a run directory made before this change cannot be predicted from, exported
+or resumed (its files are not touched, and `best_model.keras` still loads in Keras).
+
 **Export**: `python -m train export model=<run dir or .keras> out=<path> format=keras|saved_model|tflite|onnx`
 writes one new file (a directory for `saved_model`) and `<out>.task.json` beside it, and prints
 only the path on stdout. Input contract: float32 `(batch, height, width, channels)` pixels scaled
