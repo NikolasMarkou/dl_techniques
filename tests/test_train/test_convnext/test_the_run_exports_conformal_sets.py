@@ -131,8 +131,9 @@ def test_an_array_dataset_calibrates_on_its_test_split_too(tmp_path) -> None:
         )
         summary = common.train(config)
     record = json.loads((tmp_path / "cifar" / CONFORMAL_JSON_NAME).read_text())
-    # --max-samples caps the test split as well; the record covers all of what is left.
-    assert record["n_calibration"] == summary["n_test"] == MAX_SAMPLES < N_TEST
+    # --max-samples caps the train pool only (D-022); the record covers the whole test split.
+    assert MAX_SAMPLES < N_TEST
+    assert record["n_calibration"] == summary["n_test"] == N_TEST
     assert record["model_selected_on_calibration_set"] is False
     assert "validation_split=0.1" in record["weights"]
 
