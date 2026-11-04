@@ -116,6 +116,50 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   `hair drier`, has no pixel in the fit split and the run is refused), `convunext/tiny`, 256 px, batch 16, 5 epochs: best
   `val_miou` 0.0118 against a majority-class baseline of 0.0091, test mIoU 0.0106, test pixel accuracy 0.722 (predicting
   background everywhere scores 0.723): the model learned the background and `person` (IoU 0.125) and 5 other classes above 0.
+* **SUT-Crack** (pavement cracks, `pavement_defect/SUT-Crack/segmentation/{Original Image,Ground Truth}`; plan 98b866fb step 7,
+  D-007). **Measured**: 130 pairs joined by the stem (`1` to `130`), JPEG photographs and 1-bit PNG masks of 3024 by 4032 pixels
+  holding exactly {0, 255}. 119 JPEGs are stored 4032 by 3024 with EXIF orientation 6 (the loader turns them upright, so
+  image and mask are both portrait, 3024 wide by 4032 high) and 11 are stored upright. After `data.mask_threshold=127` the crack
+  is 1.32% of all pixels (0.32% to 9.36% per image, no image without a crack), so predicting background everywhere scores a
+  mIoU of about 0.49 and a pixel accuracy of about 0.987. There is no test split in the folder, so a `folder` run has the
+  selection split only (no test metrics, no figures, no analyzer):
+  ```bash
+  python -m train image_segmentation out=auto model=convunext/tiny data.format=folder \
+      data.train_images="<root>/Original Image" data.train_masks="<root>/Ground Truth" \
+      'data.class_names=["background","crack"]' data.mask_threshold=127 'transform_args.image_size=[512,384]' \
+      epochs=20 batch_size=4
+  ```
+  For a held-out test split, list one: **the stems divisible by 5 (every fifth in numeric order, 26 pairs) are the test listing and
+  the other 104 are train**, with no random state; `validation_split` 0.1 of train is the selection split (10 pairs, so 94 fit
+  pairs), and the test split never selects. The listing is two CSV files, by absolute path:
+  ```python
+  import csv, pathlib
+  src, out = pathlib.Path("<root>"), pathlib.Path("sut_crack")  # <root> holds "Original Image" and "Ground Truth"
+  out.mkdir()
+  stems = sorted(int(p.stem) for p in (src / "Original Image").glob("*.jpg"))
+  for name, keep in (("train", lambda s: s % 5 != 0), ("test", lambda s: s % 5 == 0)):
+      with open(out / f"{name}.csv", "w", newline="") as f:
+          w = csv.writer(f)
+          w.writerow(["image", "mask"])
+          w.writerows((src / "Original Image" / f"{s}.jpg", src / "Ground Truth" / f"{s}.png") for s in stems if keep(s))
+  ```
+  ```bash
+  python -m train image_segmentation out=auto model=convunext/tiny data.format=csv \
+      data.train_csv=sut_crack/train.csv data.test_csv=sut_crack/test.csv \
+      'data.class_names=["background","crack"]' data.mask_threshold=127 'transform_args.image_size=[512,384]' \
+      epochs=20 batch_size=4
+  ```
+  `[512,384]` is `[height, width]`: the portrait 4:3 shape at about 1/8 of the photograph. **Batch 4 is measured** (D-036's rule: 20
+  real steps on this data, GPU 0, the recipe's other values): 16 runs out of memory (it asks for 27.6 GB), 8 completes 22 steps
+  with a peak of 18,014 MiB but with one allocator garbage collection (so it does not fit by the rule), 4 completes 23 steps at
+  9,888 MiB with none (0.27 s per step). **Measured, untuned, one seed** (`convunext/tiny`, 1.94M parameters, 20 epochs
+  asked, the recipe's learning rate 1e-3 left alone, RTX 4090): early stopping ended it after 15 epochs (patience 10) and the best
+  epoch was 5; best `val_miou` 0.6666 against a majority-class baseline of 0.4903 on the 10 selection pairs (the curve is noisy:
+  0.59 to 0.67 from epoch 4 on, ten images), **test mIoU 0.7155** (best weights; 0.7071 final weights) and test pixel accuracy
+  0.9907 against 0.9872 for predicting background everywhere. Test IoU per class: background 0.9907, **crack 0.4403** (precision
+  0.657, recall 0.571; the prediction follows the long cracks and adds small spots, see `visualizations/predictions_best.png`).
+  405 s of `fit`. A one-seed result on 26 test photographs of a 94-pair fit split, not a benchmark: the split rule is this
+  repository's own, so it is not comparable to a published SUT-Crack number.
 * **Recipes** are the legacy trainers' defaults (`train.convunext`, `train.accunet`): AdamW, 30 epochs, batch 16, a
   horizontal flip; ConvUNext lr 1e-3, AccUNet lr 1e-4 with 2 warmup epochs. Three values differ on purpose. The monitor is
   `val_miou`, a maximum; both legacy trainers default to `val_loss`. AccUNet trains the cross-entropy, where its

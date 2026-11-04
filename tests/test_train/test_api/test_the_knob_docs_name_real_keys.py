@@ -112,8 +112,12 @@ LAZY_CLASSES = {
 #: A backticked bare word, a candidate top-level key in a sentence about a default.
 _TICKED_NAME = re.compile(r"`([a-z][a-z_0-9]*)`")
 
+#: ``<group>.<field>`` with an optional ``=value``. A value is ONE token: a JSON list written without
+#: a space (``transform_args.image_size=[512,384]``, a command a README must be able to show) or a run
+#: of characters up to a space, backtick, ``|``, ``,``, ``;`` or ``)``, so that a sentence listing
+#: ``a=1``, ``b=2`` is read as two values.
 KEY = re.compile(
-    r"(?<![\w./-])((?:[a-z]+_)+args|data)\.([A-Za-z0-9_]+)(?:=([^\s`|,;)]+))?"
+    r"(?<![\w./-])((?:[a-z]+_)+args|data)\.([A-Za-z0-9_]+)(?:=(\[[^\]\s`]*\]|[^\s`|,;)]+))?"
 )
 GROUP_ONLY = re.compile(r"`((?:[a-z]+_)+args)`")
 SUMMARY = re.compile(r"`summary\.analyzer\.([A-Za-z0-9_]+)`")
@@ -719,6 +723,20 @@ def test_a_value_suffix_is_checked_against_the_fields_type_and_a_claimed_default
     # A sentence that says "default" and gives the real default is clean; the wrong one is not.
     assert problems(_with(good, "The default of `analysis_args.figures` is true.")) == []
     assert any("default to" in p for p in problems(_with(good, "The default of `analysis_args.epoch_analysis_every` is 3.")))
+
+
+def test_a_bracketed_list_value_is_read_whole_and_checked_as_a_value():
+    # A README command shows a rectangle as `transform_args.image_size=[512,384]`; cut at the comma that
+    # read as `[512`, which is no value of any type (the guard refused a correct example).
+    good = _good_region()
+    assert KEY.findall("`transform_args.image_size=[512,384]`") == [("transform_args", "image_size", "[512,384]")]
+    assert KEY.findall("'transform_args.image_size=[512,384]' epochs=20") == [
+        ("transform_args", "image_size", "[512,384]")]
+    assert problems(_with(good, "`transform_args.image_size=[512,384]`")) == []
+    # still checked: a list is no value of an int field, and a sentence listing two values stays two.
+    assert any("not of the field's type" in p for p in problems(_with(good, "`data.max_samples=[512,384]`")))
+    assert KEY.findall("`data.max_samples=1`, `data.eval_samples=2`") == [
+        ("data", "max_samples", "1"), ("data", "eval_samples", "2")]
 
 
 def test_a_row_is_compared_wherever_it_sits_and_a_default_column_is_compared_whatever_it_holds():
