@@ -94,6 +94,13 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   release's 25,574 images (25,258 `ADE_train_` and 316 `ADE_frame_` video frames; the benchmark's is 20,210) at full size,
   where the benchmark rescaled every image to a short side of at most 512, and the annotations are the release's own; an
   mIoU measured on it is not comparable to published numbers. A class has to have a pixel in the fit split (`data.max_samples` cuts it), or the run is refused before `fit`.
+  **Measured, untuned** (plan 98b866fb step 8, D-019; the real conversion took 3 min 11 s with 8 workers for 27,574 images and
+  250 MB of masks): `data.max_samples=4000` (fit 3,600, selection 400, test the 2,000 `val.csv` images; the cap also applies to
+  the test split), `convunext/tiny`, 256 by 256 px, batch 16, 10 epochs on one RTX 4090: best `val_miou`
+  0.0343 at epoch 10 (still rising; the majority-class baseline is 0.0012), test mIoU 0.0320, test pixel accuracy 0.465; 32 of the
+  150 classes have a test IoU above 0 (`sky` 0.776, `road` 0.449, `grass` 0.430). 9.7 minutes of `fit`. A smoke-scale result of
+  a 1.9M-parameter model on 14% of the training images, not a score. The cap has a floor: class 106 (`canopy`) has no pixel in the
+  fit split of `max_samples=1000` (seed 42), which the run refuses before `fit` naming the class; 2000 and above hold all 150.
 * **Converting COCO** (plan 98b866fb step 6, D-018): the COCO 2017 on disk has instance annotations only (no stuff, no panoptic file),
   so `python -m train convert coco root=<coco_2017> out=<new dir>` can write semantic masks of `background` (class 0, every
   pixel that is no annotated thing, stuff included), the 80 things (1 to 80, in category-id order) and void 255, with the same
@@ -104,6 +111,11 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   not depend on the order of the annotations. Images with no annotation are kept as all-background masks. `val2017` is the
   TEST split of the data file, as in ADE20K. **This is not COCO-Stuff (171 classes) or COCO panoptic**: its mIoU is not
   comparable to published numbers, and most of its pixels are class 0.
+  **Measured, untuned** (step 8, D-019; the real conversion took 39 min 1 s with 8 workers for 123,287 images and 427 MB of
+  masks): `data.max_samples=4000` (fit 3,600, selection 400, test 4,000 of the 5,000 `val.csv` images; below 3,000 class 79,
+  `hair drier`, has no pixel in the fit split and the run is refused), `convunext/tiny`, 256 px, batch 16, 5 epochs: best
+  `val_miou` 0.0118 against a majority-class baseline of 0.0091, test mIoU 0.0106, test pixel accuracy 0.722 (predicting
+  background everywhere scores 0.723): the model learned the background and `person` (IoU 0.125) and 5 other classes above 0.
 * **Recipes** are the legacy trainers' defaults (`train.convunext`, `train.accunet`): AdamW, 30 epochs, batch 16, a
   horizontal flip; ConvUNext lr 1e-3, AccUNet lr 1e-4 with 2 warmup epochs. Three values differ on purpose. The monitor is
   `val_miou`, a maximum; both legacy trainers default to `val_loss`. AccUNet trains the cross-entropy, where its
