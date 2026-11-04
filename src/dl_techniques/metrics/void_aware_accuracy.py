@@ -35,9 +35,12 @@ Interface contract
     with a last axis of 1 fails in the comparison with Keras' shape error.
 """
 
+import keras
 from typing import Any, Dict, Optional
 
-import keras
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.keras_registration import register_dl_technique
 

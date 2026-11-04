@@ -89,10 +89,13 @@ References:
 """
 
 import re
+import numpy as np
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
-import numpy as np
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 

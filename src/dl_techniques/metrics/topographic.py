@@ -51,9 +51,8 @@ References:
       NeurIPS 2021. (https://arxiv.org/abs/2109.01394)
 """
 
-from typing import Optional, Tuple
-
 import numpy as np
+from typing import Optional, Tuple
 
 # ---------------------------------------------------------------------
 # local imports

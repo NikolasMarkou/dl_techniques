@@ -1,4 +1,5 @@
-"""Brier Score metrics for Keras 3.
+"""
+Brier Score metrics.
 
 A proper scoring rule for probabilistic classification: the mean squared error
 between predicted probabilities and one-hot / binary targets.  Complements
@@ -34,12 +35,14 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 import keras
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------------
-# BrierScore — binary / multi-label
-# ---------------------------------------------------------------------------
-
 
 @register_dl_technique("dl_techniques.metrics.brier_score")
 class BrierScore(keras.metrics.Metric):
@@ -253,3 +256,5 @@ class CategoricalBrierScore(keras.metrics.Metric):
             }
         )
         return config
+
+# ---------------------------------------------------------------------

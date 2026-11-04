@@ -176,11 +176,17 @@ Troubleshooting:
     - No improvement: Verify similarity scaling (temperature parameter in loss)
 """
 
-from typing import Optional, Dict, Any
 import keras
 from keras import ops
+from typing import Optional, Dict, Any
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.metrics.clip_accuracy")
 class CLIPAccuracy(keras.metrics.Metric):
@@ -427,6 +433,7 @@ class CLIPAccuracy(keras.metrics.Metric):
 
         return config
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.metrics.clip_accuracy")
 class CLIPRecallAtK(keras.metrics.Metric):
@@ -707,3 +714,5 @@ class CLIPRecallAtK(keras.metrics.Metric):
         })
 
         return config
+
+# ---------------------------------------------------------------------

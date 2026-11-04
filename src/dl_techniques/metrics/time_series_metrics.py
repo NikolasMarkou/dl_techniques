@@ -2,13 +2,14 @@ import keras
 from keras import ops
 import numpy as np
 from typing import Any, Dict, List, Optional
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-
 # ---------------------------------------------------------------------
-# Metrics
-# ---------------------------------------------------------------------
-
 
 @register_dl_technique("dl_techniques.metrics.time_series_metrics")
 class SMAPE(keras.metrics.Metric):
@@ -305,3 +306,5 @@ def calculate_comprehensive_metrics(
         "rMAE": rmae,
         "MASE": mase,
     }
+
+# ---------------------------------------------------------------------

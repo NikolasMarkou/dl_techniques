@@ -27,8 +27,14 @@ import keras
 from keras import ops
 import tensorflow as tf
 from typing import Any, Dict, Optional
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.metrics.ssim_metric")
 class SsimMetric(keras.metrics.Metric):
@@ -90,3 +96,5 @@ class SsimMetric(keras.metrics.Metric):
             "max_val": self.max_val,
         })
         return config
+
+# ---------------------------------------------------------------------

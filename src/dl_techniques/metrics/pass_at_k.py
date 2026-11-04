@@ -417,3 +417,5 @@ def per_problem_pass_at_k(
     return _unbiased_pass_at_k(
         n_samples, counts, np.asarray([k_int], dtype=np.int64)
     )[:, 0]
+
+# ---------------------------------------------------------------------

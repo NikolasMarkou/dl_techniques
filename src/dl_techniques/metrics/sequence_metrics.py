@@ -23,8 +23,14 @@ Example::
 import keras
 from keras import ops
 from typing import Any, Dict, Optional
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.metrics.sequence_metrics")
 class SequenceAccuracy(keras.metrics.Metric):
@@ -155,3 +161,5 @@ class BitErrorRate(keras.metrics.Metric):
         config = super().get_config()
         config.update({"threshold": self.threshold})
         return config
+
+# ---------------------------------------------------------------------
