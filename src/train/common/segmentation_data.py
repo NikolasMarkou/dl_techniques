@@ -22,19 +22,23 @@ Interface contract
     :raises PairError: for a file that cannot be decoded, or an image whose mode has no byte scale
         (float ``F``, or ``I`` holding values outside 0..65535): never a silent clip.
 
-``decode_mask(path)``
+``decode_mask(path, mask_threshold=None)``
     :param path: a mask file.
+    :param mask_threshold: ``None`` for the stored values; else ``T``, and the result is ``1`` where the
+        stored value is ABOVE ``T`` (strictly) and ``0`` elsewhere. ``T`` is expected in ``0 < T < 255``
+        (the config checks it); a 1-bit PNG reads as 0 and 255 first.
     :return: ``int32`` ``(H, W)`` of the raw stored values, after ``exif_transpose``: palette
         indices for a palette PNG (the palette is never applied), the grey value for a grey one,
-        ``0`` and ``255`` for a 1-bit PNG, the value for a 16-bit grey PNG.
+        ``0`` and ``255`` for a 1-bit PNG, the value for a 16-bit grey PNG; with a threshold, 0 and 1.
     :raises PairError: for a JPEG (lossy, the stored value is not the class), an RGB, RGBA or
-        other multi-channel mask, or a file that cannot be decoded.
+        other multi-channel mask, or a file that cannot be decoded; with a threshold also for a
+        palette or a 16-bit mask (an index is not an intensity, a 16-bit scale is not known).
 
 ``image_to_rgb(image)``
     :param image: an opened ``PIL.Image.Image``.
     :return: what :func:`decode_image` returns for a file holding that image.
 
-``read_pair(image_path, mask_path)``
+``read_pair(image_path, mask_path, mask_threshold=None)``
     :return: ``(image, mask)`` as above.
     :raises PairError: when the two differ in size after the EXIF orientation, naming both files.
 
@@ -44,8 +48,9 @@ Interface contract
     in one split, and a file in both splits (image or mask, compared by resolved path and by file
     identity). Both return a :class:`PairListing`.
 
-``check_pairs(images, masks, *, num_classes, ignore_index, ...)``
-    The scan of the masks (the value check) and of the sizes. ``train.api`` calls it on a sample
+``check_pairs(images, masks, *, num_classes, ignore_index, mask_threshold=None, ...)``
+    The scan of the masks (the value check) and of the sizes; with a threshold the values and the class
+    pixel counts are those of the thresholded masks. ``train.api`` calls it on a sample
     before the run directory is claimed (PIL only, no TensorFlow op) and the loaders call it on every
     file they use before ``fit``, logging the duration.
 
@@ -57,9 +62,10 @@ Interface contract
     :raises DataSourceError: naming the first five declared classes with no pixel in ``scan`` (D-087).
         ``load_pair_data`` calls it on the FIT split's scan, before any pipeline is built.
 
-``pair_fingerprint(listing, mode)``
+``pair_fingerprint(listing, mode, mask_threshold=None)``
     A sha256 over ``(split, relative image path, relative mask path, both sizes)`` in listing
-    order, or with ``mode="content"`` also both files' bytes, so a change in a mask alone is seen.
+    order, or with ``mode="content"`` also both files' bytes, so a change in a mask alone is seen;
+    a threshold is mixed in when there is one, since it changes the classes of the same files.
 
 ``load_pair_data(listing, ...)`` / ``load_pet_data(...)``
     Build the :class:`SegmentationData` of a listing, or of the local Oxford-IIIT Pet cache. The
@@ -95,6 +101,7 @@ This module imports TensorFlow (as ``classification_data`` does) and is imported
 from __future__ import annotations
 
 import csv
+import functools
 import hashlib
 import json
 import os
@@ -157,6 +164,9 @@ _MASK_MODES = ("1", "L", "P", "I;16", "I;16L", "I;16B", "I")
 #: PIL modes that hold a 16-bit grey image (``I`` is PIL's 32-bit integer mode, which older Pillow
 #: used for a 16-bit PNG); PIL's conversion to RGB clips all of them at 255.
 _SIXTEEN_BIT_MODES = ("I;16", "I;16L", "I;16B", "I;16N", "I")
+#: PIL modes ``data.mask_threshold`` can read: 1-bit (0 and 255) and 8-bit grey. Not a palette (an index
+#: is not an intensity) and not a 16-bit grey (its scale is not known).
+THRESHOLD_MODES = ("1", "L")
 
 
 class PairError(ValueError):
@@ -214,12 +224,12 @@ def decode_image(path: str) -> np.ndarray:
     return image_to_rgb(_open(path, "image"))
 
 
-def decode_mask(path: str) -> np.ndarray:
-    """One mask file as ``int32`` ``(H, W)`` of its stored values; see the module contract."""
-    return _decode_mask_and_mode(path)[0]
+def decode_mask(path: str, mask_threshold: Optional[float] = None) -> np.ndarray:
+    """One mask file as ``int32`` ``(H, W)``, raw or thresholded; see the module contract."""
+    return _decode_mask_and_mode(path, mask_threshold)[0]
 
 
-def _decode_mask_and_mode(path: str) -> Tuple[np.ndarray, str]:
+def _decode_mask_and_mode(path: str, mask_threshold: Optional[float] = None) -> Tuple[np.ndarray, str]:
     """:func:`decode_mask` and the PIL mode the file was stored in (``"1"`` is the 1-bit case)."""
     mask = _open(path, "mask")
     if mask.format in ("JPEG", "MPO"):
@@ -232,10 +242,24 @@ def _decode_mask_and_mode(path: str) -> Tuple[np.ndarray, str]:
             "or palette PNG, or a 1-bit PNG), not a picture; an RGB mask cannot be read as ids",
             "mask")
     mode = mask.mode
+    if mask_threshold is not None and mode not in THRESHOLD_MODES:
+        raise PairError(
+            f"{path!r} is {'a palette' if mode == 'P' else 'a 16-bit grey'} mask, and "
+            f"data.mask_threshold={mask_threshold} reads the intensity of an 8-bit grey or 1-bit mask: "
+            + ("an index of a palette is not an intensity (index 1 may be the darker colour)"
+               if mode == "P" else "the scale of a 16-bit mask (65535, 4095, ...) is not known")
+            + "; save the mask as an 8-bit grey PNG, or as class ids and drop the key", "mask")
     mask = ImageOps.exif_transpose(mask)
     values = np.asarray(mask)
     if mode == "1":
         values = values.astype(np.int32) * 255
+    if mask_threshold is not None:
+        # DECISION plan-2026-11-03T221936-98b866fb/D-016
+        # `value > T` is class 1, the rest class 0, STRICTLY (a pixel equal to T is background), in this
+        # one decoder, so the pre-claim sample, the checks, the pipelines and the fingerprint all see
+        # the same classes. Do NOT threshold in the `tf.data` map or after the resize (the checks
+        # would then see raw 0 and 255), and do NOT read a palette or a 16-bit mask this way.
+        return (values > mask_threshold).astype(np.int32), mode
     return values.astype(np.int32), mode
 
 
@@ -266,9 +290,11 @@ def _refuse_unequal(image_path: str, mask_path: str, image_hw: Tuple[int, int],
             "the usual cause: re-save the mask in the photograph's orientation)", "mask")
 
 
-def read_pair(image_path: str, mask_path: str) -> Tuple[np.ndarray, np.ndarray]:
+def read_pair(
+        image_path: str, mask_path: str, mask_threshold: Optional[float] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
     """Both files of a pair, decoded and size-checked; see the module contract."""
-    image, mask = decode_image(image_path), decode_mask(mask_path)
+    image, mask = decode_image(image_path), decode_mask(mask_path, mask_threshold)
     _refuse_unequal(image_path, mask_path, image.shape[:2], mask.shape)
     return image, mask
 
@@ -534,7 +560,7 @@ def _allowed(num_classes: int, ignore_index: Optional[int]) -> Callable[[int], b
 def check_pairs(
         images: Sequence[str], masks: Sequence[str], *, num_classes: int, ignore_index: Optional[int],
         image_key: str, mask_key: str, image_pixels: bool = False,
-        mask_threshold_key: str = "data.mask_threshold",
+        mask_threshold_key: str = "data.mask_threshold", mask_threshold: Optional[float] = None,
 ) -> PairScan:
     """Decode every mask, compare the size of every pair and check the values against the classes.
 
@@ -546,6 +572,8 @@ def check_pairs(
     :param image_pixels: decode each image fully (a corrupt file is found now) instead of reading
         its header; masks are always decoded, because their values are what is checked.
     :param mask_threshold_key: the key the binary-mask message points at.
+    :param mask_threshold: ``data.mask_threshold``: the masks are read as ``value > T`` (class 1) before
+        any check, so ``values``, ``class_pixels`` and the value check are those of the classes.
     :return: the :class:`PairScan`.
     :raises DataSourceError: a file that cannot be decoded, a pair of two sizes, a JPEG or colour
         mask (all naming the file), a mask whose values are exactly ``{0, 255}`` while 255 is no
@@ -559,7 +587,7 @@ def check_pairs(
     class_pixels = np.zeros(num_classes, dtype=np.int64)
     for image_path, mask_path in zip(images, masks):
         try:
-            mask, mode = _decode_mask_and_mode(mask_path)
+            mask, mode = _decode_mask_and_mode(mask_path, mask_threshold)
             image_hw = (decode_image(image_path).shape[:2] if image_pixels
                         else image_size_of(image_path))
             _refuse_unequal(image_path, mask_path, tuple(image_hw), mask.shape)
@@ -589,9 +617,9 @@ def check_pairs(
         if values == BINARY_PAIR:
             raise DataSourceError(
                 mask_key, f"every mask holds only the values 0 and 255 (e.g. {first_bad[0]!r}): a black "
-                     f"and white mask, whose white is not a class id; {mask_threshold_key} is the "
-                     "key that maps such a mask to two classes (this version does not accept it "
-                     "yet), or save the masks with the class ids 0 and 1")
+                     f"and white mask, whose white is not a class id; set {mask_threshold_key}=T "
+                     "(0 < T < 255, with 2 classes and no ignore_index) to read a value above T as "
+                     "class 1 and the rest as class 0, or save the masks with the class ids 0 and 1")
         raise DataSourceError(
             mask_key, f"{first_bad[0]!r} holds the value {first_bad[1]}, which is neither a class "
                  f"(0 to {num_classes - 1}) nor the ignore index ({ignore_index!r}); if {first_bad[1]} "
@@ -639,14 +667,17 @@ def sample_indices(count: int, sample: int) -> List[int]:
     return sorted({int(i * count / sample) for i in range(sample)})
 
 
-def check_listing_sample(listing: PairListing, *, num_classes: int, ignore_index: Optional[int]) -> PairScan:
+def check_listing_sample(
+        listing: PairListing, *, num_classes: int, ignore_index: Optional[int],
+        mask_threshold: Optional[float] = None,
+) -> PairScan:
     """The pre-claim check: :data:`PRE_CLAIM_PAIRS` train pairs, PIL only, no TensorFlow op."""
     keys = source_keys(listing.source)
     picks = sample_indices(len(listing.train_masks), PRE_CLAIM_PAIRS)
     return check_pairs(
         [listing.train_images[i] for i in picks], [listing.train_masks[i] for i in picks],
         num_classes=num_classes, ignore_index=ignore_index, image_key=keys["train_image"],
-        mask_key=keys["train_mask"])
+        mask_key=keys["train_mask"], mask_threshold=mask_threshold)
 
 
 # ---------------------------------------------------------------------
@@ -656,8 +687,11 @@ def check_listing_sample(listing: PairListing, *, num_classes: int, ignore_index
 _HASH_CHUNK = 1 << 20
 
 
-def pair_fingerprint(listing: PairListing, mode: str = "listing") -> str:
+def pair_fingerprint(listing: PairListing, mode: str = "listing", mask_threshold: Optional[float] = None) -> str:
     """A sha256 over the rows of a listing, in listing order; see the module contract.
+
+    A ``mask_threshold`` is part of the digest (a threshold changes the classes of the same files; the
+    digest of a source without one is what it was).
 
     A row is ``(split, relative image path, relative mask path, image size in bytes, mask size in
     bytes)``. The rows are hashed in LISTING ORDER, not sorted, for the reason
@@ -683,6 +717,8 @@ def pair_fingerprint(listing: PairListing, mode: str = "listing") -> str:
     digest.update(b"\x00" + FINGERPRINT_SCHEME.encode("utf-8"))
     if mode == "content":
         digest.update(b"\x00content")
+    if mask_threshold is not None:
+        digest.update(b"\x00mask_threshold=" + repr(float(mask_threshold)).encode("utf-8"))
     started = time.perf_counter()
     total = 0
     for row in rows:
@@ -721,13 +757,19 @@ def resize_pair(image: tf.Tensor, mask: tf.Tensor, size: Tuple[int, int]) -> Tup
     return resize_image_bytes(image, size) / 255.0, labels
 
 
-def _decode_pair_py(image_path: bytes, mask_path: bytes) -> Tuple[np.ndarray, np.ndarray]:
-    return read_pair(os.fsdecode(image_path), os.fsdecode(mask_path))
+def _decode_pair_py(
+        image_path: bytes, mask_path: bytes, mask_threshold: Optional[float] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    return read_pair(os.fsdecode(image_path), os.fsdecode(mask_path), mask_threshold)
 
 
-def decode_pair(image_path: tf.Tensor, mask_path: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
+def decode_pair(
+        image_path: tf.Tensor, mask_path: tf.Tensor, mask_threshold: Optional[float] = None,
+) -> Tuple[tf.Tensor, tf.Tensor]:
     """:func:`read_pair` as a ``tf.data`` map: ``uint8`` ``(H, W, 3)`` and ``int32`` ``(H, W)``, sizes unknown."""
-    image, mask = tf.numpy_function(_decode_pair_py, [image_path, mask_path], [tf.uint8, tf.int32])
+    image, mask = tf.numpy_function(
+        functools.partial(_decode_pair_py, mask_threshold=mask_threshold), [image_path, mask_path],
+        [tf.uint8, tf.int32])
     image.set_shape([None, None, 3])
     mask.set_shape([None, None])
     return image, mask
@@ -735,7 +777,7 @@ def decode_pair(image_path: tf.Tensor, mask_path: tf.Tensor) -> Tuple[tf.Tensor,
 
 def pair_examples(
         images: Sequence[str], masks: Sequence[str], *, training: bool, seed: int,
-        augment: Optional[Augment], size: Tuple[int, int],
+        augment: Optional[Augment], size: Tuple[int, int], mask_threshold: Optional[float] = None,
 ) -> "tf.data.Dataset":
     """The unbatched ``(image, mask)`` examples of a list of pairs.
 
@@ -746,7 +788,7 @@ def pair_examples(
     dataset = tf.data.Dataset.from_tensor_slices((list(images), list(masks)))
     if training:
         dataset = dataset.shuffle(len(images), seed=seed, reshuffle_each_iteration=True)
-    dataset = dataset.map(lambda i, m: resize_pair(*decode_pair(i, m), size),
+    dataset = dataset.map(lambda i, m: resize_pair(*decode_pair(i, m, mask_threshold), size),
                           num_parallel_calls=tf.data.AUTOTUNE)
     if training:
         dataset = with_hook(dataset, augment, seed)
@@ -923,6 +965,7 @@ def load_pair_data(
         validation_split: Optional[float], eval_samples: Optional[int], max_samples: Optional[int],
         fingerprint: str = "listing", augment: Optional[Augment] = None,
         eval_batch_size: Optional[int] = None, max_samples_flag: str = "data.max_samples",
+        mask_threshold: Optional[float] = None,
 ) -> SegmentationData:
     """The record of a listed folder or CSV source.
 
@@ -936,6 +979,8 @@ def load_pair_data(
     :param augment: the train hook ``(seed, image, mask) -> (image, mask)`` (marked with
         ``dl_techniques.datasets.vision.augment_hook.seeded``), or ``None``.
     :param eval_batch_size: rows per batch of the selection and test pipelines, ``None`` is ``batch_size``.
+    :param mask_threshold: ``data.mask_threshold``: every mask is read as ``value > T`` (class 1), by the
+        checks, the pipelines and the fingerprint alike; ``None`` reads the stored values.
     :raises DataSourceError: a file or a mask value that cannot be used.
     :raises ValueError: a bad split, or a batch larger than the fit split.
     """
@@ -954,7 +999,8 @@ def load_pair_data(
     started = time.perf_counter()
     scans = [check_pairs(train_images[part].tolist(), train_masks[part].tolist(),
                          num_classes=num_classes, ignore_index=ignore_index,
-                         image_key=keys["train_image"], mask_key=keys["train_mask"])
+                         image_key=keys["train_image"], mask_key=keys["train_mask"],
+                         mask_threshold=mask_threshold)
              for part in (fit_idx, select_idx)]
     values = set(scans[0].values) | set(scans[1].values)
     refuse_absent_classes(
@@ -963,7 +1009,8 @@ def load_pair_data(
     if test_images is not None:
         test_scan = check_pairs(test_images.tolist(), test_masks.tolist(), num_classes=num_classes,
                                 ignore_index=ignore_index, image_key=keys["test_image"],
-                                mask_key=keys["test_mask"], image_pixels=True)
+                                mask_key=keys["test_mask"], image_pixels=True,
+                                mask_threshold=mask_threshold)
         values.update(test_scan.values)
     logger.info(
         f"{listing.source}: checked {len(used_train)} train and {0 if test_images is None else len(test_images)} "
@@ -973,7 +1020,7 @@ def load_pair_data(
 
     def examples(images, masks, training):
         return pair_examples(images, masks, training=training, seed=seed if training else 0,
-                             augment=augment, size=size)
+                             augment=augment, size=size, mask_threshold=mask_threshold)
 
     test = None if test_images is None else examples(test_images.tolist(), test_masks.tolist(), False)
     return _finish(
@@ -986,7 +1033,7 @@ def load_pair_data(
         selection_split=f"validation_split={split} of the train pairs (seeded permutation)",
         test_split="none: the data has no test split" if test is None else "the test pairs",
         image_files=tuple(fit_images) + tuple(sel_images), mask_files=tuple(fit_masks) + tuple(sel_masks),
-        fingerprint=pair_fingerprint(listing, fingerprint), mask_values=tuple(sorted(values)))
+        fingerprint=pair_fingerprint(listing, fingerprint, mask_threshold), mask_values=tuple(sorted(values)))
 
 
 # ---------------------------------------------------------------------

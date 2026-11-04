@@ -20,8 +20,10 @@ Interface contract
     ``class_names`` (one name per class) or ``num_classes`` (named ``"0"``, ``"1"``, ...), both
     allowed when they agree. ``ignore_index`` is the void value (a whole number outside the
     classes) or null. A relative path is relative to the directory of the YAML file that holds it,
-    or to the working directory for a mapping or the command line. ``mask_threshold`` is reserved
-    and refused in this version. ``transform_args.image_size`` must be set: files have no native
+    or to the working directory for a mapping or the command line. ``mask_threshold`` (``0 < T < 255``)
+    reads a black and white or grey mask as ``value > T`` (class 1) and the rest as class 0, for an
+    8-bit grey or 1-bit PNG; it needs exactly 2 classes, no ``ignore_index``, and is refused for a
+    palette or 16-bit mask; without it a mask of exactly 0 and 255 is refused with a pointer at it. ``transform_args.image_size`` must be set: files have no native
     size.
 
 ``SegData``
@@ -226,9 +228,21 @@ def _class_problems(data: Any, prefix: str) -> List[str]:
             bad("ignore_index", "expected a whole number of 0 or more (a mask value)")
         elif classes is not None and ignore < classes:
             bad("ignore_index", f"it must lie outside the classes 0 to {classes - 1}")
-    if data.mask_threshold is not None:
-        bad("mask_threshold", "it is reserved: this version does not accept it, so a mask stored "
-                              "as 0 and 255 cannot be used yet")
+    threshold = data.mask_threshold
+    if threshold is not None:
+        # DECISION plan-2026-11-03T221936-98b866fb/D-016
+        # The threshold turns a grey mask into TWO classes with no void: 3 classes cannot come out of one
+        # cut, and a void value would be a third kind of pixel the cut cannot make. Do NOT relax either to
+        # "ignore it": a quiet no-op key is how a 255 mask trains the wrong classes.
+        if isinstance(threshold, bool) or not 0 < threshold < 255:
+            bad("mask_threshold", "expected a number between 0 and 255 (exclusive): a value above it is "
+                                  "class 1 and the rest class 0")
+        if classes is not None and classes != 2:
+            bad("mask_threshold", f"it needs exactly 2 classes (value > T is class 1, the rest class 0) "
+                                  f"and {classes} are stated")
+        if ignore is not None:
+            bad("mask_threshold", f"it cannot be used with data.ignore_index (a thresholded mask has "
+                                  f"two classes and no void), and ignore_index is {ignore}")
     return lines
 
 
@@ -248,7 +262,9 @@ _CLASS_HELP = {
     "num_classes": "number of classes (mask values 0 to N-1, named '0', '1', ...); state this or class_names",
     "ignore_index": "the mask value that marks void pixels (a whole number outside the classes): "
     "left out of the loss, mIoU and accuracy; null means every pixel is a class",
-    "mask_threshold": "reserved, not accepted in this version (maps a 0/255 mask to two classes)",
+    "mask_threshold": "T, 0 < T < 255: read an 8-bit grey or 1-bit mask as value > T = class 1, the rest "
+    "class 0 (a black and white mask stored as 0 and 255); needs 2 classes and no ignore_index; null "
+    "reads the stored values",
 }
 
 
@@ -658,7 +674,8 @@ def seg_facts(data: SegData, requested_image_size: Optional[Tuple[int, int]]) ->
     names = _class_names_of(data)
     listing = list_pairs(data)
     try:
-        check_listing_sample(listing, num_classes=len(names), ignore_index=data.ignore_index)
+        check_listing_sample(listing, num_classes=len(names), ignore_index=data.ignore_index,
+                             mask_threshold=data.mask_threshold)
     except DataSourceError as exc:
         raise ConfigError(f"Invalid value for {join_path('data', exc.key)!r}: {exc}") from exc
     return SegFacts(data.format, len(names), names, data.ignore_index, requested_image_size)
@@ -691,6 +708,7 @@ def load_seg_data(
     try:
         return loader.load_pair_data(
             list_pairs(data), num_classes=len(names), class_names=names,
-            ignore_index=data.ignore_index, fingerprint=data.fingerprint, **shared)
+            ignore_index=data.ignore_index, fingerprint=data.fingerprint,
+            mask_threshold=data.mask_threshold, **shared)
     except DataSourceError as exc:
         raise ConfigError(f"Invalid value for {join_path('data', exc.key)!r}: {exc}") from exc

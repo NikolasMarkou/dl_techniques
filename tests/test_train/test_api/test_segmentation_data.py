@@ -902,7 +902,7 @@ def test_the_classes_must_be_stated_and_agree(tmp_path):
             ({"num_classes": 3, "max_samples": 0}, "positive int"),
             ({"num_classes": 3, "eval_samples": -1}, ">= 0"),
             ({"num_classes": 3, "test_images": "t"}, "go together"),
-            ({"num_classes": 3, "mask_threshold": 128}, "reserved"),
+            ({"num_classes": 3, "mask_threshold": 128}, "needs exactly 2 classes"),
             ({"num_classes": 3, "train_images": " "}, "non-empty")):
         with pytest.raises(ConfigValidationError) as caught:
             sa.load_seg_data_config({**base, **bad})

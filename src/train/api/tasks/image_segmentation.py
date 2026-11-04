@@ -291,6 +291,7 @@ class ImageSegmentationTrainer(TaskTrainer):
             mean=data.mean,
             std=data.std,
             ignore_index=data.ignore_index,
+            mask_threshold=getattr(config.data, "mask_threshold", None),
             variant_overrides=overrides_of_variant(
                 registry.MODELS[context.family].load_variants()[context.variant],
                 self._model_kwargs(config, context),
@@ -556,6 +557,14 @@ class ImageSegmentationTrainer(TaskTrainer):
                 "(about 1e-6), because a model that predicts the majority class everywhere scores "
                 "the baseline and Keras' float32 figure for it differs from the float64 baseline "
                 "by rounding"
+            )
+        threshold = getattr(config.data, "mask_threshold", None)
+        if threshold is not None:
+            notes.append(
+                f"`data.mask_threshold` is {threshold:g}: every mask pixel above it is class 1 and the "
+                "rest class 0 (8-bit grey or 1-bit masks), read by the one decoder that the pre-claim "
+                "sample, the checks and the pipelines share; `task.json` carries it and a resume with "
+                "another value is refused"
             )
         if data.ignore_index is not None:
             notes.append(

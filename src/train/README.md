@@ -62,6 +62,15 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   reads as 0 and 255, so every foreground pixel would be void and the run would train on one class; the message names
   the collision), and a declared class that has no pixel in any mask of the fit split (named, with the usual cause:
   `data.class_names`, a void value that is also a class, or a `data.max_samples` cut).
+* **Black and white masks** (plan 98b866fb step 4, D-016): a mask stored as exactly 0 and 255 is refused by default, and the
+  message points at `data.mask_threshold` (`T`, `0 < T < 255`), which reads a pixel ABOVE `T` (strictly: a pixel equal to `T` is
+  background) as class 1 and the rest as class 0, for an 8-bit grey and a 1-bit PNG alike (equal classes, tested). It needs
+  exactly 2 classes and no `data.ignore_index`, and is refused by key before the run directory is claimed for a palette mask
+  (an index is not an intensity) and a 16-bit mask (its scale is unknown). The one decoder applies it, so the pre-claim sample,
+  the checks, the pipelines and the class counts all see the classes; `task.json` records it, the data fingerprint includes it,
+  and a resume with another value is refused naming `mask_threshold`. `predict` is unaffected (the key is for masks only).
+  Example: `python -m train image_segmentation model=convunext/tiny data.format=folder data.train_images=... data.train_masks=...
+  data.num_classes=2 data.mask_threshold=127 transform_args.image_size=128`.
 * **Recipes** are the legacy trainers' defaults (`train.convunext`, `train.accunet`): AdamW, 30 epochs, batch 16, a
   horizontal flip; ConvUNext lr 1e-3, AccUNet lr 1e-4 with 2 warmup epochs. Three values differ on purpose. The monitor is
   `val_miou`, a maximum; both legacy trainers default to `val_loss`. AccUNet trains the cross-entropy, where its

@@ -406,7 +406,7 @@ train, and the TEST split never selects.
   padding, so void stays void and no value appears that the file did not hold. `scan_segmentation_folder` (two directories
   joined by file stem) and `read_segmentation_csv` (`image`, `mask` columns) list pairs and refuse an unpaired stem, a file
   listed twice and an image or MASK in both splits; `check_pairs` checks every mask value against the classes and the
-  stated `ignore_index` (a mask whose values are exactly 0 and 255 is refused with a pointer at the reserved `mask_threshold` key of the segmentation data configs);
+  stated `ignore_index` (a mask whose values are exactly 0 and 255 is refused with a pointer at the `mask_threshold` key of the segmentation data configs, which reads an 8-bit grey or 1-bit mask as `value > T` = class 1 in the one decoder (D-016): 2 classes, no `ignore_index`, a palette or 16-bit mask refused, the threshold part of the record, the fingerprint and a resume check);
   `pair_fingerprint` hashes the pair rows in listing order (mask path and size included; `content` also the bytes).
   `train.api.segmentation_args` holds the config classes and runs the listing plus a PIL-only sample of 32 pairs before the
   claim; the loaders check every pair they use before `fit` and log the duration. Pipelines assert their cardinality.
