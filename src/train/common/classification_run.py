@@ -34,10 +34,8 @@ from train.common.callbacks import partial_path, promote_partial
 from train.common.classification_data import EVAL_BATCH_SIZE, ClassificationData
 from train.common.evaluation import (
     LOAD_RTOL,
-    LOAD_RTOL_TF32,
     check_model_loading,
     predict_batch_cap,
-    tf32_active,
     validate_model_loading,
 )
 from train.common.run_io import save_training_history_json
@@ -457,7 +455,8 @@ def finalize_last_epoch(
     :param exact_reload: ``True`` (the segmentation task) runs the check that is honest about large
         scores and TF32 (D-088): the weights of the reloaded model must EQUAL the model's, and the
         outputs differ by at most ``1e-5 + rtol * max|scores|`` with ``rtol``
-        :data:`~train.common.evaluation.LOAD_RTOL` (or ``LOAD_RTOL_TF32`` when a GPU runs TF32).
+        :data:`~train.common.evaluation.LOAD_RTOL`, the reloaded model predicting through the in-memory
+        model's own call path (D-029: ``jit_compile``), so a GPU's TF32 is not a tolerance.
         ``False`` (the default) is the absolute ``validate_model_loading`` every classification run makes.
     :param load_detail: a dict that is filled with the check's measurements
         (:meth:`~train.common.evaluation.LoadCheck.as_record`) when ``exact_reload`` is true and
@@ -503,8 +502,7 @@ def finalize_last_epoch(
         if exact_reload:
             checked = check_model_loading(
                 str(final_path), sample, expected, batch_size=cap,
-                relative_tolerance=LOAD_RTOL_TF32 if tf32_active() else LOAD_RTOL,
-                reference_weights=model.get_weights(),
+                relative_tolerance=LOAD_RTOL, reference_model=model,
             )
             load_check = checked.ok
             if load_detail is not None:

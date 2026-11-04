@@ -233,15 +233,21 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   summary's notes say so.
 * **The reload check** (`model_loading_validated`, and `model_loading_check` for what it measured) reloads
   `final_model.keras` and compares it with the model that wrote it: the weights must be EQUAL array by array, and the
-  scores must differ by at most `1e-5 + rtol * (the largest score)`, with `rtol` 1e-3, or 0.07 when a GPU runs TF32 (the
-  default of an Ampere or newer card). The absolute 1e-5 of the classification check is wrong for scores of scale 220:
-  AccUNet's correct file differed by 0.3 on the RTX 4090 and was reported false with a true `success` and no note.
-  Measured on trained weights (`tests/test_train/test_api/load_check_evidence.json`): a correct file differs by up to
-  9.6e-5 of the largest score without TF32 and 3.2e-2 with it (AccUNet; ConvUNext 0.0 in both), so TF32 costs the
-  output comparison a factor of 330, and a wrong file only 3e-3 (ConvUNext, noise of 1e-3 of the weights' spread) to 0.29
-  and 0.59 (another run's weights): the output tolerance cannot see a wrong file below 7% under TF32, which is why the
-  weights are compared exactly. The summary's `model_loading_check` says the largest difference, the tolerance, whether
-  the weights were equal, the argmax agreement and whether TF32 was on. **Whenever the check is false** the status is
+  scores must differ by at most `1e-5 + rtol * (the largest score)`, with `rtol` 3e-4, the reloaded model predicting through
+  the SAME call path as the one in memory. The absolute 1e-5 of the classification check is wrong for scores of scale 220
+  (AccUNet's correct file differed by 0.3 on the RTX 4090 and was reported false with a true `success` and no note). The
+  difference that remained after a relative tolerance was a difference of call paths, not of rounding: `load_model(compile=False)`
+  runs no `compile`, so Keras resolves `jit_compile="auto"` to XLA on a GPU, while AccUNet's own `compile` forces XLA off (its
+  backward pass cannot compile), and under TF32 the same weights differed by 1.7% to 15% of the largest score between the two
+  paths (2 of the 4 AccUNet loss cells of the iteration 1 gate reported `ok_reload_unverified` with equal weights). The check now
+  copies the in-memory model's `jit_compile` and `run_eagerly` onto the reloaded one before it predicts. Measured on the RTX 4090 with
+  short real fits (`tests/test_train/test_api/reload_call_path_evidence.json`): a correct file differs by exactly 0.0 through one path in
+  all seven probes (AccUNet with TF32 on and off, ConvUNext, `resnet_seg`, `convnext_seg`), against up to 5.5e-2 through the old two
+  paths; of the 27 cells of the gate that were not AccUNet, and so already on one path, 26 show 0.0 and one 2.8e-5 (XLA's autotuning
+  between two compilations). 3e-4 is ten times that worst, and 6.7 times under the smallest wrong file seen, ONE kernel scaled by 1.01
+  (0.0020 of the largest score); every planted wrong file (that, noise, a fresh initialisation) is false by its outputs and by its weights, and the
+  weights are compared exactly because no output tolerance sees a change under its own size. The summary's `model_loading_check` says the largest difference, the tolerance, whether
+  the weights were equal, the argmax agreement, whether TF32 was on and the `jit_compile` both models used. **Whenever the check is false** the status is
   `ok_reload_unverified` (not `ok`) and a note says what was measured; the run's other numbers stand.
 * A conformal level (`analysis_args.conformal_alpha`) is refused: a segmentation run has no set of classes per image.
 * **Figures** (`analysis_args.figures`, and only with a test split): `visualizations/` gets a grid of four fixed

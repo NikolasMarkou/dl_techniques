@@ -81,17 +81,17 @@ def evaluate_on_test(model: keras.Model, test_ds: tf.data.Dataset) -> Dict[str, 
 
 #: Relative tolerance of the round-trip check of a model whose scores can be large (a segmentation
 #: model's logits reach 220): the allowed difference is ``tolerance + LOAD_RTOL * max|expected|``.
-#: Measured on trained weights, RTX 4090, TF32 OFF, a correct ``final_model.keras`` against the model
-#: that wrote it (both ``predict``, batch 16, four sets of 64 Oxford-IIIT Pet test images): AccUNet
-#: 9.6e-5 of the largest score at worst (ConvUNext 0.0); a wrong file (1e-3 of the weights' spread added
-#: as noise) 3.4e-3 (ConvUNext) and 0.29 (AccUNet). 1e-3 is 10 times the worst correct file and under
-#: every wrong one (D-088, ``scratch_step33/logs/tf32_*.json``).
-LOAD_RTOL = 1e-3
-#: The same with TF32 in effect (a GPU with TF32 execution on, TensorFlow's default on Ampere and
-#: later): AccUNet's correct file differs by up to 3.2e-2 of the largest score (14 times more than
-#: without TF32: its dense convolutions round to 10 bits), ConvUNext's by 0.0. Twice the worst.
-#: It is blind to a wrong file below 7%, which is why the weights are compared exactly as well.
-LOAD_RTOL_TF32 = 0.07
+#: Set from the measurements of D-029 (plan 98b866fb fix 9.3), taken after the cause of the 9% to 15% that D-088's
+#: TF32 tolerance (0.07) was sized for was found: the in-memory AccUNet predicts WITHOUT XLA (its ``compile`` forces
+#: ``jit_compile=False``) and ``load_model(compile=False)`` leaves ``jit_compile`` unset, which Keras resolves to XLA on a
+#: GPU. With the reloaded model on the in-memory model's own call path (:func:`_align_predict_path`) a correct file differs
+#: by exactly 0.0 on the RTX 4090 in all seven probes (AccUNet with TF32 on and off, ConvUNext, ResNet-seg, ConvNeXt-seg;
+#: ``reload_call_path_evidence.json``), and by at most 2.8e-5 of the largest score in the 27 non-AccUNet cells of the iteration 1
+#: gate, which were already on one path (``gate_cells`` of the same file: 26 of them 0.0, the one that is not is XLA's own
+#: autotuning between two compilations of one model). 3e-4 is 10 times that worst, and 6.7 times under the smallest file with ONE kernel 1% off
+#: (0.0020 of the largest score, ConvUNext): never widen it past that. The same files through the old two paths differ by up to
+#: 5.5e-2 (AccUNet, TF32 on).
+LOAD_RTOL = 3e-4
 
 
 def tf32_active() -> bool:
@@ -115,6 +115,8 @@ class LoadCheck:
     :param argmax_agreement: share of positions whose ``argmax`` over the last axis is equal (not part
         of the verdict), ``None`` for a structure mismatch.
     :param tf32: whether TF32 was in effect (:func:`tf32_active`).
+    :param jit_compile: the ``jit_compile`` both models predicted with when a ``reference_model`` was
+        given (:func:`_align_predict_path`), else ``None``.
     """
 
     ok: bool
@@ -125,10 +127,35 @@ class LoadCheck:
     weights_equal: Optional[bool]
     argmax_agreement: Optional[float]
     tf32: bool
+    jit_compile: Optional[bool] = None
 
     def as_record(self) -> Dict[str, Any]:
         """The check as the plain dict the summary's ``model_loading_check`` holds."""
         return dataclasses.asdict(self)
+
+
+def _align_predict_path(loaded_model: keras.Model, reference_model: keras.Model) -> bool:
+    """Make ``loaded_model`` predict through the same call path as ``reference_model``; return its ``jit_compile``.
+
+    Interface contract: both are built Keras models; ``loaded_model`` was loaded with ``compile=False``.
+    Mutates ``loaded_model`` (its ``jit_compile`` and ``run_eagerly``) and nothing else. Returns the
+    ``jit_compile`` the reloaded model will use; it differs from the reference's only when Keras' setter
+    refuses XLA for the reloaded model. Cannot fail for a model that predicts.
+    """
+    # DECISION plan-2026-11-03T221936-98b866fb/D-029
+    # The two models of the round-trip check must predict through ONE call path. ``compile()`` is what
+    # settles ``jit_compile`` (and ``run_eagerly``), and ``load_model(compile=False)`` does not run it, so
+    # the reloaded model resolves ``jit_compile="auto"`` by itself: XLA on a GPU, whatever the model that
+    # wrote the file does. AccUNet forces ``jit_compile=False`` in its ``compile`` (XLA cannot compile its
+    # backward pass), so its in-memory predict ran without XLA and the reloaded one with it, and under TF32
+    # the two differed by 1.7% to 15% of the largest score on a file whose weights were equal (measured, the
+    # iteration 1 gate; copying the flag made the difference exactly 0.0). Do NOT answer that with a wider
+    # output tolerance (D-088's 0.07 did, and was blind to a wrong file below 7%), and do NOT reload with
+    # ``compile=True`` to get the flag (it restores the optimizer and loss, and warns for a model saved
+    # before any fit).
+    loaded_model.jit_compile = bool(reference_model.jit_compile)
+    loaded_model.run_eagerly = bool(reference_model.run_eagerly)
+    return bool(loaded_model.jit_compile)  # what the reloaded model will use (Keras' setter refuses XLA for a model that cannot)
 
 
 def check_model_loading(
@@ -139,7 +166,7 @@ def check_model_loading(
         tolerance: float = 1e-5,
         batch_size: Optional[int] = None,
         relative_tolerance: float = 0.0,
-        reference_weights: Optional[List[np.ndarray]] = None,
+        reference_model: Optional[keras.Model] = None,
 ) -> LoadCheck:
     """
     Reload a saved model, run it on ``test_sample`` and compare with ``expected_output``.
@@ -162,11 +189,13 @@ def check_model_loading(
     relative_tolerance : float
         Added to the allowed difference as ``relative_tolerance * max|expected|``; ``0.0`` (the
         default) is the absolute check every classification run has always made.
-    reference_weights : Optional[List[np.ndarray]]
-        The in-memory model's ``get_weights()``. When given, the reloaded weights must be EQUAL to
-        them, array by array, whatever the outputs say: a stored file round-trips floats exactly, and
-        the outputs of two correct models differ by rounding under TF32, so the weights are the
-        comparison that has no noise and no blind spot.
+    reference_model : Optional[keras.Model]
+        The in-memory model that wrote the file and produced ``expected_output``. When given, (1) the
+        reloaded weights must be EQUAL to its ``get_weights()``, array by array, whatever the outputs
+        say: a stored file round-trips floats exactly, so the weights are the comparison that has no
+        noise and no blind spot; and (2) the reloaded model predicts through the same call path as
+        this one (:func:`_align_predict_path`), so that what a device does differently between two
+        paths (XLA against none, under TF32) cannot read as a reload difference.
 
     Returns
     -------
@@ -195,15 +224,19 @@ def check_model_loading(
     if isinstance(test_sample, tf.Tensor):
         test_sample = test_sample.numpy()
 
+    jit_compile: Optional[bool] = None
+    if reference_model is not None:
+        jit_compile = _align_predict_path(loaded_model, reference_model)
     loaded_output = loaded_model.predict(test_sample, batch_size=batch_size, verbose=0)
     tf32 = tf32_active()
     weights_equal: Optional[bool] = None
-    if reference_weights is not None:
+    if reference_model is not None:
         # DECISION plan-2026-10-31T180033-2faf890a/D-088
-        # The weights are compared EXACTLY, beside the outputs. Do NOT drop this and widen the output
-        # tolerance instead: under TF32 two correct executions of one set of weights differ by 3% of
-        # the largest score (AccUNet, measured), so an output tolerance honest on a correct file is
-        # blind to a wrong one below 7%, while a stored file round-trips floats bit for bit.
+        # The weights are compared EXACTLY, beside the outputs. Do NOT drop this for an output tolerance
+        # alone: a stored file round-trips floats bit for bit, so this comparison has no noise and no
+        # blind spot, while an output tolerance cannot see a change under its own size (one kernel x1.01
+        # is 2% of the largest score, and a TF32 device's two paths differ by more than that).
+        reference_weights = reference_model.get_weights()
         reloaded = loaded_model.get_weights()
         weights_equal = len(reloaded) == len(reference_weights) and all(
             a.shape == b.shape and np.array_equal(a, b) for a, b in zip(reloaded, reference_weights)
@@ -216,14 +249,14 @@ def check_model_loading(
                 f"(expected={type(expected_output).__name__}, "
                 f"loaded={type(loaded_output).__name__})"
             )
-            return LoadCheck(False, None, None, None, relative_tolerance, weights_equal, None, tf32)
+            return LoadCheck(False, None, None, None, relative_tolerance, weights_equal, None, tf32, jit_compile)
         if set(expected_output.keys()) != set(loaded_output.keys()):
             logger.warning(
                 "Model output keys differ after loading "
                 f"(expected={sorted(expected_output.keys())}, "
                 f"loaded={sorted(loaded_output.keys())})"
             )
-            return LoadCheck(False, None, None, None, relative_tolerance, weights_equal, None, tf32)
+            return LoadCheck(False, None, None, None, relative_tolerance, weights_equal, None, tf32, jit_compile)
         pairs = [(np.asarray(expected_output[k]), np.asarray(loaded_output[k])) for k in expected_output]
     else:
         pairs = [(np.asarray(expected_output), np.asarray(loaded_output))]
@@ -239,7 +272,7 @@ def check_model_loading(
             logger.warning(
                 f"Model output shape differs after loading (expected={expected.shape}, loaded={loaded.shape})"
             )
-            return LoadCheck(False, None, None, None, relative_tolerance, weights_equal, None, tf32)
+            return LoadCheck(False, None, None, None, relative_tolerance, weights_equal, None, tf32, jit_compile)
         diff = np.abs(loaded - expected)
         max_diff = max(max_diff, float(np.max(diff)) if diff.size else 0.0)
         scale = max(scale, float(np.max(np.abs(expected))) if expected.size else 0.0)
@@ -262,7 +295,7 @@ def check_model_loading(
         )
     else:
         logger.warning("Model weights differ after loading: the reloaded weights are not the in-memory ones")
-    return LoadCheck(ok, max_diff, scale, allowed, relative_tolerance, weights_equal, agreement, tf32)
+    return LoadCheck(ok, max_diff, scale, allowed, relative_tolerance, weights_equal, agreement, tf32, jit_compile)
 
 
 def validate_model_loading(

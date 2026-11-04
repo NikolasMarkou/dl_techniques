@@ -1,36 +1,31 @@
-"""The reload check of a segmentation run is honest on a correct file and blind to no wrong one (D-088).
+"""The reload check of a segmentation run is honest on a correct file and blind to no wrong one (D-088, D-029).
 
 Review-iter-3 concern 4. A correct AccUNet ``final_model.keras`` was reported ``model_loading_validated:
 false`` on the RTX 4090 (``max_diff=0.308`` on scores of scale 220) while ``status`` was ``ok`` and
 ``success`` true, with no note: the absolute 1e-5 of ``validate_model_loading`` cannot hold on scores that
-large, and under TF32 (TensorFlow's default on Ampere and later) two correct executions of one set of
-weights differ by 3% of the largest score. Measured first on the GPU with trained weights
-(``load_check_evidence.json``, a copy of ``scratch_step33/logs/tf32_*.json``):
+large. D-088 answered with an output tolerance of 7% of the largest score under TF32, blind to a wrong file
+below it. The iteration 1 gate (plan 98b866fb) found two correct AccUNet files still 9.4% and 15.3% apart
+with EQUAL weights, and fix 9.3 (D-029) found the cause, which no tolerance should hide: the in-memory model
+and the reloaded one did not predict through the same call path. AccUNet's ``compile`` forces
+``jit_compile=False`` (XLA cannot compile its backward pass), so ``model.predict`` ran without XLA, while
+``load_model(compile=False)`` runs no ``compile`` and Keras resolves ``jit_compile="auto"`` to XLA on a GPU.
+Copying the in-memory model's ``jit_compile`` onto the reloaded one made the difference EXACTLY 0.0 on the GPU
+with TF32 on, for every correct file, and a planted wrong file still fails. So the check has one tolerance,
+``LOAD_RTOL``, no TF32 branch, and compares the weights exactly as well.
 
-========= ===== ================ ===================== ===========================
-family    TF32  correct file     wrong file, smallest   wrong files below LOAD_RTOL*
-========= ===== ================ ===================== ===========================
-AccUNet   off   9.6e-5           0.031 (x1.01 tensor)   none
-AccUNet   on    3.2e-2           0.049                  none below 0.07 but one
-ConvUNext off   0.0              3.4e-3 (noise 1e-3)    none
-ConvUNext on    0.0              3.4e-3                 noise 1e-3, noise 1e-2, x1.01
-========= ===== ================ ===================== ===========================
+What is claimed, on small models on the CPU (``reload_call_path_evidence.json`` holds the GPU numbers):
 
-(relative differences of the scores, to the largest score; ``LOAD_RTOL*`` is ``LOAD_RTOL`` without TF32
-and ``LOAD_RTOL_TF32`` with it.) So the output tolerance is relative to the scale, and under TF32 it
-cannot see a wrong file below 7% of the scale: the weights of the reloaded model are compared EXACTLY as
-well, which no execution noise touches.
-
-What is claimed, on small models on the CPU (the evidence holds the GPU numbers):
-
-* the constants sit where the evidence puts them: ``LOAD_RTOL`` at least 10 times the worst correct
-  file without TF32 and below every wrong file; ``LOAD_RTOL_TF32`` at least twice the worst correct
-  file with TF32;
+* the constant sits where the evidence puts it: ``LOAD_RTOL`` at least 10 times the worst correct file through
+  one call path (GPU, TF32 on and off, the families of the gate) and under every planted wrong file, at least five
+  times under the smallest of the files with ONE kernel 1% off; the old two-path comparison of the same files
+  is above it (the defect, kept as a control);
 * scores of scale 200 that differ by 0.02% of it are a correct file for the relative check and a wrong one
   for the absolute check (the review's defect), and a wrong file (other weights) fails the relative one;
-* a file whose one kernel is 1% off passes the TF32 output tolerance and fails on its weights, and the
-  weights check is the only thing that sees it;
-* ``tf32_active`` is a GPU with TF32 on, nothing else;
+* a file whose one kernel is 1% off fails on its outputs AND on its weights, each alone; a file whose one
+  weight differs by a hair passes the outputs and fails the weights (the weights check is the one with no blind spot);
+* the reloaded model predicts through the in-memory model's call path (``jit_compile``, ``run_eagerly``),
+  set BEFORE it predicts, for both values of the flag;
+* ``tf32_active`` is a GPU with TF32 on, nothing else, and TF32 is recorded, not a tolerance;
 * ``finalize_last_epoch(exact_reload=True)`` fills the detail and a wrong file is reported false; the
   default (classification) path is untouched;
 * a false check is never silent: status ``ok_reload_unverified``, a note with the numbers, the detail in
@@ -51,44 +46,76 @@ import tensorflow as tf
 from train.common import classification_run, evaluation
 from train.common.evaluation import (
     LOAD_RTOL,
-    LOAD_RTOL_TF32,
     check_model_loading,
     tf32_active,
     validate_model_loading,
 )
 
-EVIDENCE = json.loads((Path(__file__).resolve().parent / "load_check_evidence.json").read_text())["rows"]
+HERE = Path(__file__).resolve().parent
+#: D-088's measurement: the two paths of a correct file, and the wrong files, on trained weights.
+EVIDENCE = json.loads((HERE / "load_check_evidence.json").read_text())["rows"]
+#: D-029's measurement: the same files through ONE call path (the repo's own check, GPU, TF32 on).
+CALL_PATH = json.loads((HERE / "reload_call_path_evidence.json").read_text())
 
 
 # ---------------------------------------------------------------------
-# The constants against the measurement
+# The constant against the measurement
 # ---------------------------------------------------------------------
 
-def rows(tf32):
-    return [row for row in EVIDENCE if row["tf32"] is tf32]
+def one_path_rows():
+    return CALL_PATH["rows"]
 
 
-def wrong_rels(row):
-    return {name: entry["min_rel"] for name, entry in row["wrong_files"].items() if entry["min_rel"] is not None}
+def test_the_evidence_is_the_gpu_with_tf32_on_and_covers_the_family_that_showed_the_defect():
+    assert CALL_PATH["rows"], "no rows"
+    for row in one_path_rows():
+        assert row["gpu"] is True, row["run"]
+        assert row["correct_new_path_ok"] is True, f"{row['run']}: a correct file was reported false through one call path"
+    assert any(row["tf32_active"] for row in one_path_rows()), "no row with TF32 on, the setting the defect appeared under"
+    assert {row["family"] for row in one_path_rows()} >= {"accunet", "convunext"}
+    assert any(row["model_jit"] is False for row in one_path_rows()), "no row of a model that predicts without XLA"
+    assert any(row["model_jit"] is True for row in one_path_rows()), "no row of a model that predicts with XLA"
 
 
-def test_the_relative_tolerance_without_tf32_is_ten_times_the_worst_correct_file_and_under_every_wrong_one():
-    worst = max(row["correct_file_worst_rel"] for row in rows(False))
-    assert worst > 0 and LOAD_RTOL >= 10 * worst
-    for row in rows(False):
-        for name, rel in wrong_rels(row).items():
-            assert rel > LOAD_RTOL, f"{row['family']} {name}: {rel} is under the tolerance"
+def test_the_tolerance_is_ten_times_the_worst_correct_file_of_one_call_path():
+    worst = max(row["correct_new_path_worst_rel"] for row in one_path_rows())
+    assert LOAD_RTOL >= 10 * worst, f"{LOAD_RTOL} against a worst correct file of {worst}"
 
 
-def test_the_relative_tolerance_with_tf32_is_twice_the_worst_correct_file():
-    worst = max(row["correct_file_worst_rel"] for row in rows(True))
-    assert LOAD_RTOL_TF32 >= 2 * worst
-    # The TF32 noise is what the evidence says it is: hundreds of times the noise without it.
-    without = max(row["correct_file_worst_rel"] for row in rows(False))
-    assert worst > 100 * without
-    # And the tolerance is blind to a wrong file below it, which the weights comparison is for.
-    blind = [(row["family"], name) for row in rows(True) for name, rel in wrong_rels(row).items() if rel < LOAD_RTOL_TF32]
-    assert blind, "if no wrong file is under the TF32 tolerance the weights comparison would be redundant"
+def test_the_tolerance_is_under_every_planted_wrong_file_of_one_call_path():
+    seen = [
+        (row["run"], name, rel)
+        for row in one_path_rows() for name, rel in row["wrong_file_smallest_rel"].items()
+    ]
+    kernels = [rel for _, name, rel in seen if name.startswith("kernel_x1.01")]
+    assert kernels, "the 1% kernel is the planted file the claim is about"
+    for run, name, rel in seen:
+        assert rel > LOAD_RTOL, f"{run} {name}: {rel} is not above the tolerance {LOAD_RTOL}"
+    # D-029: never widened past a planted 1% change of one kernel: at least five times under the smallest of them.
+    assert LOAD_RTOL <= min(kernels) / 5, f"{LOAD_RTOL} is not five times under the smallest 1% kernel file ({min(kernels)})"
+    # And the weights say it anyway: every planted file was reported false, and none of them has equal weights.
+    assert all(not equal for row in one_path_rows() for equal in row["wrong_file_weights_equal"].values())
+    assert all(flag for row in one_path_rows() for flag in row["wrong_file_reported_false"].values())
+
+
+def test_the_one_percent_kernel_of_the_older_trained_weights_is_also_five_times_above():
+    """D-088's own measurement (other trained weights, 64-image sets, GPU), an independent check of the smallest wrong file."""
+    rels = [row["wrong_files"]["largest_tensor_x1.01"]["min_rel"] for row in EVIDENCE]
+    assert len(rels) == 4 and all(rel >= 5 * LOAD_RTOL for rel in rels), rels
+
+
+def test_the_two_paths_of_the_same_correct_file_are_the_defect_the_one_path_removes():
+    """The control: through two paths the AccUNet files are above the tolerance (and above D-088's 0.07 in
+    the gate); through one they are under a hundredth of it."""
+    accunet = [row for row in one_path_rows() if row["model_jit"] is False]
+    assert accunet and all(row["correct_old_two_path_worst_rel"] > LOAD_RTOL for row in accunet if row["tf32_active"])
+    assert all(row["correct_new_path_worst_rel"] <= LOAD_RTOL / 10 for row in one_path_rows())
+    gate = CALL_PATH["gate_cells"]
+    accunet_cells = [cell for cell in gate if cell["family"] == "accunet"]
+    assert len(accunet_cells) == 4 and sum(not cell["ml_ok"] for cell in accunet_cells) == 2
+    assert all(cell["rel"] > LOAD_RTOL for cell in accunet_cells)
+    for cell in (c for c in gate if c["family"] != "accunet"):
+        assert cell["rel"] <= LOAD_RTOL / 10, cell["run"]
 
 
 # ---------------------------------------------------------------------
@@ -125,7 +152,7 @@ def test_scores_of_scale_200_that_differ_by_a_hair_are_a_correct_file_for_the_re
     nudged = expected + 2e-4 * scale  # 0.02% of the scale: what a different convolution algorithm does
     path = saved(model, tmp_path)
     assert validate_model_loading(path, sample, nudged) is False, "the absolute 1e-5 of the review's defect"
-    check = check_model_loading(path, sample, nudged, relative_tolerance=LOAD_RTOL, reference_weights=model.get_weights())
+    check = check_model_loading(path, sample, nudged, relative_tolerance=LOAD_RTOL, reference_model=model)
     assert check.ok and check.weights_equal is True
     seen = float(np.abs(nudged).max())  # the scale is the EXPECTED output's
     assert 0 < check.max_abs_diff <= check.tolerance and check.scale == pytest.approx(seen, rel=1e-6)
@@ -136,31 +163,42 @@ def test_a_file_with_other_weights_fails_the_relative_check_by_its_outputs(sampl
     model, other = scores_model(0), scores_model(1)
     expected = model.predict(sample, verbose=0)
     check = check_model_loading(
-        saved(other, tmp_path), sample, expected, relative_tolerance=LOAD_RTOL, reference_weights=model.get_weights())
+        saved(other, tmp_path), sample, expected, relative_tolerance=LOAD_RTOL, reference_model=model)
     assert check.ok is False and check.max_abs_diff > check.tolerance and check.weights_equal is False
 
 
-def test_a_one_percent_error_in_one_kernel_passes_the_tf32_outputs_and_fails_the_weights(sample, tmp_path):
+def test_a_one_percent_error_in_one_kernel_fails_on_its_outputs_and_on_its_weights_each_alone(sample, tmp_path):
     model = scores_model()
     expected = model.predict(sample, verbose=0)
     off = scores_model()
     kernel, bias = off.get_weights()
     off.set_weights([kernel * 1.01, bias])
     path = saved(off, tmp_path)
-    outputs_only = check_model_loading(path, sample, expected, relative_tolerance=LOAD_RTOL_TF32)
-    assert outputs_only.ok is True and outputs_only.weights_equal is None, "blind: 1% is under the 7% tolerance"
-    exact = check_model_loading(
-        path, sample, expected, relative_tolerance=LOAD_RTOL_TF32, reference_weights=model.get_weights())
-    assert exact.ok is False and exact.weights_equal is False
-    assert check_model_loading(
-        path, sample, expected, relative_tolerance=LOAD_RTOL, reference_weights=model.get_weights()).ok is False
+    outputs_only = check_model_loading(path, sample, expected, relative_tolerance=LOAD_RTOL)
+    assert outputs_only.ok is False and outputs_only.weights_equal is None, "no reference model: the outputs alone see 1%"
+    assert outputs_only.max_abs_diff > outputs_only.tolerance
+    exact = check_model_loading(path, sample, expected, relative_tolerance=LOAD_RTOL, reference_model=model)
+    assert exact.ok is False and exact.weights_equal is False and exact.max_abs_diff > exact.tolerance
+
+
+def test_one_weight_off_by_a_hair_passes_the_outputs_and_fails_the_weights(sample, tmp_path):
+    """The blind spot of any output tolerance, and the reason the weights are compared exactly."""
+    model = scores_model()
+    expected = model.predict(sample, verbose=0)
+    off = scores_model()
+    kernel, bias = off.get_weights()
+    kernel[0, 0] = kernel[0, 0] * (1 + 1e-6)
+    off.set_weights([kernel, bias])
+    check = check_model_loading(saved(off, tmp_path), sample, expected, relative_tolerance=LOAD_RTOL, reference_model=model)
+    assert check.max_abs_diff <= check.tolerance, "the outputs cannot see it"
+    assert check.weights_equal is False and check.ok is False
 
 
 def test_the_same_model_is_a_true_check_with_equal_weights(sample, tmp_path):
     model = scores_model()
     check = check_model_loading(
         saved(model, tmp_path), sample, model.predict(sample, verbose=0), relative_tolerance=LOAD_RTOL,
-        reference_weights=model.get_weights())
+        reference_model=model)
     assert check.ok and check.weights_equal is True and check.max_abs_diff == 0.0
     assert check.argmax_agreement == 1.0 and check.relative_tolerance == LOAD_RTOL
 
@@ -182,6 +220,72 @@ def test_a_dict_of_outputs_and_a_shape_mismatch_are_verdicts_not_crashes(sample,
     assert check_model_loading(path, sample, {"a": expected}).ok is False
     assert check_model_loading(path, sample, expected[:, :3]).ok is False
     assert check_model_loading(path, sample, expected[:, :3]).max_abs_diff is None
+
+
+# ---------------------------------------------------------------------
+# One call path (D-029)
+# ---------------------------------------------------------------------
+
+class SpyOnPredict:
+    """Wraps ``load_model`` so the reloaded model reports the flags it has WHEN it predicts."""
+
+    def __init__(self, monkeypatch, reloaded_jit):
+        self.seen = []
+        real = keras.models.load_model
+
+        def load(path, **kwargs):
+            loaded = real(path, **kwargs)
+            loaded.jit_compile = reloaded_jit  # what Keras resolves for a model that was never compiled, forced
+            real_predict = loaded.predict
+
+            def predict(*args, **kw):
+                self.seen.append((loaded.jit_compile, loaded.run_eagerly))
+                return real_predict(*args, **kw)
+
+            loaded.predict = predict
+            return loaded
+
+        monkeypatch.setattr(keras.models, "load_model", load)
+
+
+@pytest.mark.parametrize("model_jit", [False, True])
+def test_the_reloaded_model_predicts_with_the_in_memory_models_jit_compile(model_jit, sample, tmp_path, monkeypatch):
+    """AccUNet compiles with ``jit_compile=False`` and ``load_model(compile=False)`` leaves ``auto`` (XLA on a GPU)."""
+    model = scores_model()
+    model.compile(loss="mse", jit_compile=model_jit)
+    assert model.jit_compile is model_jit
+    spy = SpyOnPredict(monkeypatch, reloaded_jit=not model_jit)  # the reloaded one starts on the OTHER setting
+    check = check_model_loading(
+        saved(model, tmp_path), sample, model.predict(sample, verbose=0), relative_tolerance=LOAD_RTOL, reference_model=model)
+    assert spy.seen == [(model_jit, False)], "the flag must be the model's at the moment of the predict"
+    assert check.jit_compile is model_jit and check.as_record()["jit_compile"] is model_jit and check.ok
+
+
+def test_the_reloaded_model_runs_eagerly_when_the_in_memory_model_does(sample, tmp_path, monkeypatch):
+    model = scores_model()
+    model.compile(loss="mse", run_eagerly=True)
+    spy = SpyOnPredict(monkeypatch, reloaded_jit=False)
+    check_model_loading(
+        saved(model, tmp_path), sample, model.predict(sample, verbose=0), relative_tolerance=LOAD_RTOL, reference_model=model)
+    assert spy.seen == [(False, True)]
+
+
+def test_without_a_reference_model_nothing_of_the_reloaded_model_is_touched(sample, tmp_path, monkeypatch):
+    """The classification check (and a caller with no model in memory) keeps Keras' own resolution."""
+    model = scores_model()
+    spy = SpyOnPredict(monkeypatch, reloaded_jit=True)
+    check = check_model_loading(saved(model, tmp_path), sample, model.predict(sample, verbose=0))
+    assert spy.seen == [(True, False)] and check.jit_compile is None
+
+
+def test_the_run_passes_its_own_model_as_the_reference(tmp_path, monkeypatch):
+    """``finalize_last_epoch(exact_reload=True)`` hands the model to the check, so the path is the model's."""
+    model = scores_model()
+    model.compile(loss="mse", jit_compile=False)
+    spy = SpyOnPredict(monkeypatch, reloaded_jit=True)
+    detail = {}
+    _, ok = finalize(model, tmp_path, exact_reload=True, load_detail=detail)
+    assert ok is True and spy.seen == [(False, False)] and detail["jit_compile"] is False
 
 
 # ---------------------------------------------------------------------
@@ -228,11 +332,13 @@ def test_finalize_last_epoch_fills_the_detail_for_the_exact_check_only(tmp_path)
     assert ok is True and legacy == {}, "the classification path asks for nothing and gets nothing"
 
 
-def test_a_run_under_tf32_gets_the_tf32_tolerance(tmp_path, monkeypatch):
-    monkeypatch.setattr(classification_run, "tf32_active", lambda: True)
+def test_a_run_under_tf32_gets_the_same_tolerance_and_says_it_was_under_tf32(tmp_path, monkeypatch):
+    """D-029: TF32 is recorded, not a tolerance (D-088's 0.07 hid a difference of call paths)."""
+    monkeypatch.setattr(evaluation, "tf32_active", lambda: True)
     detail = {}
     finalize(scores_model(), tmp_path, exact_reload=True, load_detail=detail)
-    assert detail["relative_tolerance"] == LOAD_RTOL_TF32 > LOAD_RTOL
+    assert detail["relative_tolerance"] == LOAD_RTOL and detail["tf32"] is True
+    assert not hasattr(evaluation, "LOAD_RTOL_TF32")
 
 
 def test_a_wrong_final_file_is_reported_false_by_the_exact_check(tmp_path, monkeypatch):
@@ -253,7 +359,7 @@ def summary_of(load_check, load_detail):
 
 
 DETAIL = {"ok": False, "max_abs_diff": 0.308, "scale": 220.0, "tolerance": 0.22, "relative_tolerance": 1e-3,
-          "weights_equal": True, "argmax_agreement": 0.9985, "tf32": True}
+          "weights_equal": True, "argmax_agreement": 0.9985, "tf32": True, "jit_compile": False}
 
 
 def test_a_false_check_is_never_silent():

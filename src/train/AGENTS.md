@@ -456,8 +456,10 @@ train, and the TEST split never selects.
   with no class) by its layers: `ModelSpec.observe` (`segmentation_models.observe_convunext`, `observe_accunet`) returns the
   variant-table keys the layers show, or `None` for a model without a layer of the family, and a mismatch is refused (D-088);
   the anchor at that function says what it cannot see. A segmentation run's reload check is `finalize_last_epoch(exact_reload=True)`:
-  equal weights and scores within `1e-5 + rtol * max|scores|` (`evaluation.LOAD_RTOL`, `LOAD_RTOL_TF32`), written as
-  `model_loading_check`; a false one makes the status `ok_reload_unverified` and adds a note.
+  equal weights and scores within `1e-5 + rtol * max|scores|` (`evaluation.LOAD_RTOL`, one value, no TF32 branch), the
+  reloaded model predicting through the in-memory model's own call path (`evaluation._align_predict_path` copies `jit_compile`
+  and `run_eagerly`, because `load_model(compile=False)` runs no `compile` and Keras resolves `auto` to XLA on a GPU, while AccUNet's
+  `compile` forces it off: D-029), written as `model_loading_check`; a false one makes the status `ok_reload_unverified` and adds a note.
 
 For text use `train.common.nlp`; for MegaDepth RGB+depth pairs `train.common.megadepth`
 (yielding `(rgb, y_true)` with `y_true = [disparity, mask]` on the last axis, the disparity
