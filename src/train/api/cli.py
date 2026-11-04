@@ -84,7 +84,13 @@ Coercion rules (the text is the whole token after the first ``=``):
   text that does not open a JSON object is the path of a YAML file holding the
   group, from the command line and from a ``config=`` file alike (the Python
   function accepts the same form); ``run_task`` reads the file, and an
-  unreadable file or a bad key in it is a ``ConfigError``.
+  unreadable file or a bad key in it is a ``ConfigError``. The file and dotted
+  keys are LAYERS of the one group (``layer_command_line``, one rule for every task):
+  ``data=data.yaml data.max_samples=100`` takes the file and puts the dotted keys
+  over it, key by key; the file's ``format`` reads the keys when they state none;
+  a ``config=`` file's ``data: path`` layers the same way, and a command-line file
+  replaces the config file's group. A key given twice on the command line, a file
+  twice, or a file with a JSON object for the group, is a repeated key.
 * untyped (``Any``) values: JSON, then ``null`` or ``none`` (any case) as
   ``None``, then a finite float (``.5``, ``010``), else the text. Write
   ``'"none"'`` for the string.
@@ -116,6 +122,7 @@ from pathlib import Path
 from typing import (
     Any,
     Callable,
+    Collection,
     Dict,
     List,
     Literal,
@@ -133,6 +140,7 @@ from dl_techniques.utils.logger import logger
 from . import registry
 from .config import (
     PATH_FORM,
+    TAG,
     StrictConfig,
     candidate_groups,
     describe_annotation,
@@ -596,6 +604,18 @@ def _unknown_command_message(name: str) -> str:
 CONFIG_KEY = "config"
 
 
+class FileLayer(dict):
+    """The raw tree of a path-form group given as a FILE and, perhaps, with dotted keys.
+
+    ``data=data.yaml data.max_samples=100`` is one group in two layers: the file (``.file``, its
+    path as typed) is the base and the items (the dotted keys, raw text) are what the command line
+    puts over it. :func:`parse_dotlist` builds it only for the names it is given in ``file_keys``;
+    :func:`layer_command_line` unwraps it and nothing else ever sees one.
+    """
+
+    file: str = ""
+
+
 def _insert(
     tree: Dict[str, Any], key: str, text: str, errors: List[str]
 ) -> None:
@@ -618,6 +638,10 @@ def _insert(
     existing = node.get(last)
     if existing is None:
         node[last] = text
+    elif isinstance(existing, FileLayer):
+        errors.append(
+            f"Repeated key {key!r}: it is given as a file and also as a JSON object."
+        )
     elif isinstance(existing, dict):
         errors.append(
             f"Repeated key {key!r}: it is given a value and also with "
@@ -627,13 +651,39 @@ def _insert(
         errors.append(f"Repeated key {key!r}: give each key once.")
 
 
-def parse_dotlist(tokens: Sequence[str]) -> Tuple[Optional[str], Dict[str, Any]]:
+def _is_file_text(text: str) -> bool:
+    """Whether the text of a path-form key names a file: it does not open a JSON object."""
+    return not text.lstrip().startswith("{")
+
+
+def _insert_file(tree: Dict[str, Any], key: str, text: str, errors: List[str]) -> None:
+    """Place the file ``text`` of the path-form ``key`` under its dotted keys, or append to ``errors``."""
+    existing = tree.get(key)
+    if existing is None or (isinstance(existing, dict) and not isinstance(existing, FileLayer)):
+        layer = FileLayer(existing or {})
+        layer.file = text
+        tree[key] = layer
+    elif isinstance(existing, FileLayer):
+        errors.append(f"Repeated key {key!r}: give each key once.")
+    else:
+        errors.append(f"Repeated key {key!r}: it is given as a JSON object and also as a file.")
+
+
+def parse_dotlist(
+    tokens: Sequence[str], file_keys: Collection[str] = ()
+) -> Tuple[Optional[str], Dict[str, Any]]:
     """Split ``key=value`` tokens into a ``config=`` path and a nested dict.
 
     A token is split at its first ``=``, so a value may hold further ``=``.
     Every value stays a raw string; :func:`coerce_mapping` types them.
 
+    A key named in ``file_keys`` (a path-form group such as ``data``) may be given a FILE (a value
+    that does not open a JSON object) AND dotted keys (``data=data.yaml data.max_samples=100``):
+    its entry is then a :class:`FileLayer`. Without ``file_keys`` every such pair is a repeated key,
+    which is what a caller that has no file groups wants.
+
     :param tokens: the arguments after the command name.
+    :param file_keys: the top-level keys that take a file as well as dotted keys.
     :return: ``(config_path or None, nested dict of raw strings)``.
     :raises ConfigValidationError: naming every bad token.
     """
@@ -655,6 +705,8 @@ def parse_dotlist(tokens: Sequence[str]) -> Tuple[Optional[str], Dict[str, Any]]
                 errors.append(f"{CONFIG_KEY!r} needs a file path.")
             else:
                 config_path = text
+        elif key in file_keys and _is_file_text(text):
+            _insert_file(tree, key, text, errors)
         else:
             _insert(tree, key, text, errors)
     if errors:
@@ -902,12 +954,10 @@ def _expand_path_forms(cls: Type[StrictConfig], mapping: Mapping[str, Any]) -> D
     :raises ConfigError: for a file that cannot be read, from ``load_yaml_mapping``.
     """
     expanded = dict(mapping)
-    for field in dataclasses.fields(cls):
+    for field in path_form_fields(cls):
         value = expanded.get(field.name)
-        reader = field.metadata.get(PATH_FORM)
-        if reader and isinstance(value, str):
-            # ``PATH_FORM`` is ``True`` (read the YAML as it is) or the field's own reader.
-            expanded[field.name] = reader(value) if callable(reader) else load_yaml_mapping(value)
+        if isinstance(value, str):
+            expanded[field.name] = _read_path_form(field, value)
     return expanded
 
 
@@ -931,6 +981,78 @@ def coerce_mapping(cls: Type[StrictConfig], raw: Mapping[str, Any]) -> Dict[str,
 # ---------------------------------------------------------------------
 
 
+def path_form_fields(cls: Type[StrictConfig]) -> List[dataclasses.Field]:
+    """Return the fields of ``cls`` that take a file as well as dotted keys (``data``)."""
+    return [field for field in dataclasses.fields(cls) if field.metadata.get(PATH_FORM)]
+
+
+def _read_path_form(field: dataclasses.Field, path: str) -> Dict[str, Any]:
+    """Return the mapping in ``path``, read as ``field`` says (its own reader, or plain YAML)."""
+    reader = field.metadata[PATH_FORM]
+    return reader(path) if callable(reader) else load_yaml_mapping(path)
+
+
+def layer_command_line(
+    cls: Type[StrictConfig], config_path: Optional[str], raw: Mapping[str, Any]
+) -> Dict[str, Any]:
+    """Put the command line over the ``config=`` file, one rule for every group that takes a file.
+
+    The layers, lowest first: the ``config=`` file; a group's FILE (``data: data.yaml`` in the
+    config file, then ``data=data.yaml`` on the command line, which replaces the config file's
+    whole group); the command line's dotted keys (``data.max_samples=100``), which win key by
+    key. A group's ``format`` that the dotted keys do not state is the one the lower layers
+    have, so ``data=data.yaml data.max_samples=100`` reads the ``100`` as the file's format does.
+    A key given twice on the command line is already refused by :func:`parse_dotlist`.
+
+    :param cls: the task's config class.
+    :param config_path: the ``config=`` path or ``None``.
+    :param raw: the nested dict of :func:`parse_task_arguments`.
+    :return: the typed mapping, still to be validated.
+    :raises ConfigError: for an unreadable file, an unknown key, or a value of the wrong type.
+    """
+    # DECISION plan-2026-11-03T221936-98b866fb/D-021
+    # One merge for the config file, a group's file and the dotted keys, here and nowhere else.
+    # Do NOT make parse_dotlist read the file (it is the help path's parser and does no I/O), do
+    # NOT coerce the dotted keys before the lower layers are read (a group that is a tagged union is
+    # told apart by its `format`, and a coercion that does not know the file's format reads the keys
+    # as the FIRST member and refuses `data.train_csv` as unknown), and do NOT let the command line's
+    # text replace the file's mapping (the pre-D-021 merge dropped a config file's `data: path` for
+    # any dotted key).
+    mapping = load_yaml_mapping(config_path) if config_path is not None else {}
+    overrides = dict(raw)
+    fields = path_form_fields(cls)
+    for field in fields:
+        if isinstance(overrides.get(field.name), FileLayer):
+            mapping.pop(field.name, None)  # replaced as a whole: its file is never read
+    mapping = _expand_path_forms(cls, mapping)
+    for field in fields:
+        layer = overrides.get(field.name)
+        if isinstance(layer, FileLayer):
+            mapping[field.name] = _read_path_form(field, layer.file)
+            overrides[field.name] = dict(layer)
+        below = mapping.get(field.name)
+        keys = overrides.get(field.name)
+        if isinstance(keys, dict) and TAG not in keys and isinstance(below, Mapping) and isinstance(below.get(TAG), str):
+            overrides[field.name] = {TAG: below[TAG], **keys}
+    return merge(mapping, coerce_mapping(cls, overrides))
+
+
+def parse_task_arguments(
+    config_class: Type[StrictConfig], args: Sequence[str]
+) -> Tuple[Optional[str], Dict[str, Any]]:
+    """Split the arguments of a task command: :func:`parse_dotlist` with the file groups of ``config_class``.
+
+    This is the ONE parser of a task's command line: :func:`run_task` calls it, and so does the guard
+    that holds every README command to the same rule (``test_the_knob_docs_name_real_keys``).
+
+    :param config_class: the task's config class; its path-form groups take a file and dotted keys.
+    :param args: the arguments after the command name.
+    :return: ``(config_path or None, nested dict of raw strings)``, to :func:`layer_command_line`.
+    :raises ConfigValidationError: naming every bad token and every key given twice.
+    """
+    return parse_dotlist(args, [field.name for field in path_form_fields(config_class)])
+
+
 def run_task(
     config_class: Type[StrictConfig],
     function: Callable[..., Any],
@@ -938,7 +1060,8 @@ def run_task(
 ) -> int:
     """Run one task command line.
 
-    ``config=path.yaml`` loads first and the dotlist overrides merge on top.
+    ``config=path.yaml`` loads first and the command line merges on top
+    (:func:`layer_command_line`: a group's file, then its dotted keys).
 
     :param config_class: the task's config class; it types the dotlist.
     :param function: the keyword-only task function, called with the merged mapping.
@@ -946,17 +1069,14 @@ def run_task(
     :return: 0 when ``result.success`` is true, else 1.
     :raises ConfigError: for a bad token, key, value or config file.
     """
-    config_path, raw = parse_dotlist(args)
-    mapping = coerce_mapping(config_class, raw)
-    if config_path is not None:
-        mapping = merge(load_yaml_mapping(config_path), mapping)
+    config_path, raw = parse_task_arguments(config_class, args)
     # DECISION plan-2026-10-30T132432-a865fa08/D-034: a file is not coerced, so
     # it can hold an unknown key, a missing required key or a non-string key.
     # Do NOT leave that to the keyword-only signature: it raises TypeError,
     # which exits 1, the code for a failed run.
     # A path-form field (``data=data.yaml``, or ``data: data.yaml`` in a config file) is
-    # read here, so a bad file or key is refused with exit 2 like any other.
-    mapping = _expand_path_forms(config_class, mapping)
+    # read in `layer_command_line`, so a bad file or key is refused with exit 2 like any other.
+    mapping = layer_command_line(config_class, config_path, raw)
     validate(config_class, mapping)
     result = function(**mapping)
     return 0 if result.success else 1

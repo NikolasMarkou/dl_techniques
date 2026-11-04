@@ -20,11 +20,16 @@ against the real code (review-iter-1 concern 7; every plant listed in ``PLANTS``
   them), and, when the sentence also says "default", equal to the field's real default;
 * a TOP-LEVEL key of the task config (``epochs``, ``batch_size``, ``seed``, ``out``, ...) written as
   a ``name=value`` token of a fenced ``python -m train`` command must be a field (``learning_rate=3``
-  is not; ``config=<file>`` and ``task=<name>`` are the command line's own keys) and its value of the field's type (a
+  is not; ``config=<file>`` and ``task=<name>`` are the command line's own keys; ``data=<file>`` is the file
+  form of the data group and is not type-checked) and its value of the field's type (a
   backticked ``name=value`` in PROSE is not checked: the documents also write keyword arguments of
   library functions that way, ``analyzer_first_epoch=True``), and a sentence that says
   "default" about exactly one such backticked field and gives ``is <value>`` must give the real
   default (``auto`` for the fields a recipe fills);
+* every fenced ``python -m train image_classification`` or ``image_segmentation`` command, shell-split, goes through
+  the REAL ``train.api.cli.parse_task_arguments`` that ``run_task`` uses, so a command the command line refuses at its
+  first step (a key twice, a data file beside a JSON object, a token with no ``=``) cannot stand in the document: the
+  README once showed a shape the parser refused and nothing noticed (plan 98b866fb 7.1, D-021);
 * ``model_args.<anything>`` is a keyword of the model factory, a free mapping: it is NOT checked
   (it used to crash the checker with a ``TypeError``, review-iter-2 concern 16);
 * a sentence that says "default", names one key and a ``true``, ``false``, ``null`` or number after
@@ -66,6 +71,7 @@ import importlib
 import inspect
 import json
 import re
+import shlex
 import typing
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -73,6 +79,8 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from train.api.args import AnalysisArgs, LoggerArgs
+from train.api.cli import parse_task_arguments
+from train.api.errors import ConfigError
 from train.api.data_args import BuiltinImageData, CsvImageData, FolderImageData
 from train.api.segmentation_args import BuiltinSegData, CsvSegData, FolderSegData
 from train.api.tasks.image_classification import ImageClassificationConfig, ImageClassificationTrainer
@@ -381,6 +389,7 @@ def _key_problems(text: str) -> List[str]:
         if group not in groups:
             found.append(f"`{group}` is not a group of the task config")
     found.extend(_top_level_problems(text))
+    found.extend(_command_problems(text))
     return found
 
 
@@ -407,6 +416,8 @@ def _top_level_problems(text: str) -> List[str]:
     for name, shown in sorted(shown_pairs):
         if name in COMMAND_LINE_KEYS:
             continue
+        if name == "data":
+            continue  # a file path, or a JSON object: the group's own checks read it (_command_problems)
         if name not in fields:
             found.append(f"`{name}={shown}`: `{name}` is not a field of the task config")
             continue
@@ -414,6 +425,46 @@ def _top_level_problems(text: str) -> List[str]:
         hint = typing.get_type_hints(ImageClassificationConfig).get(name, Any)
         if not _accepts(hint, value) and value != "auto":
             found.append(f"`{name}={shown}`: the value is not of the field's type")
+    return found
+
+
+#: The task a fenced command names, and the config its arguments are parsed for.
+TASK_CONFIGS = {"image_classification": ImageClassificationConfig, "image_segmentation": ImageSegmentationConfig}
+
+
+def _commands(text: str) -> List[List[str]]:
+    """Every fenced ``python -m train <task> ...`` command, shell-split, one token list per command.
+
+    A command may continue over lines with a trailing backslash. A line that does not shell-split
+    (an unclosed quote) is returned as ``["<task>", "<the line>"]`` so that the parser names it.
+    """
+    commands: List[List[str]] = []
+    for block in re.findall(r"```[^\n]*\n(.*?)```", text, flags=re.S):
+        for line in block.replace("\\\n", " ").splitlines():
+            if "python -m train " not in line:
+                continue
+            rest = line.split("python -m train ", 1)[1]
+            try:
+                tokens = shlex.split(rest, comments=True)
+            except ValueError:
+                tokens = rest.split(None, 1)[:1] + [rest]
+            commands.append(tokens)
+    return commands
+
+
+def _command_problems(text: str) -> List[str]:
+    """What the real command-line parser refuses in a fenced task command, one line per command."""
+    found: List[str] = []
+    for tokens in _commands(text):
+        config = TASK_CONFIGS.get(tokens[0]) if tokens else None
+        if config is None:
+            continue  # help, list_tasks, export, predict, convert: other commands, other rules
+        try:
+            parse_task_arguments(config, tokens[1:])
+        except ConfigError as error:
+            reasons = getattr(error, "errors", None) or [str(error)]
+            found.append(f"the command `python -m train {' '.join(tokens)}` is refused by the command line: "
+                         + "; ".join(reasons))
     return found
 
 
@@ -637,6 +688,12 @@ PLANTS = {
     "false top-level default": "The default of `batch_size` is 7.",
     "unknown key in a fenced command": "```\npython -m train image_classification nope=1\n```",
     "wrong type in a fenced command": "```\npython -m train image_classification epochs=abc\n```",
+    # plan 98b866fb 7.1: a command the real parser refuses
+    "key twice in a fenced command": "```\npython -m train image_classification epochs=1 epochs=2\n```",
+    "data file twice in a fenced command": "```\npython -m train image_segmentation data=a.yaml data=b.yaml\n```",
+    "data file beside a JSON object": "```\npython -m train image_classification data=a.yaml 'data={\"dataset\": \"mnist\"}'\n```",
+    "dotted key twice after a data file": "```\npython -m train image_classification data=a.yaml data.max_samples=1 data.max_samples=2\n```",
+    "a token with no equals sign": "```\npython -m train image_segmentation model=convunext/tiny cpu\n```",
 }
 
 #: What the checker is KNOWN not to catch (the module docstring says so); each is a plant that must
@@ -723,6 +780,23 @@ def test_a_value_suffix_is_checked_against_the_fields_type_and_a_claimed_default
     # A sentence that says "default" and gives the real default is clean; the wrong one is not.
     assert problems(_with(good, "The default of `analysis_args.figures` is true.")) == []
     assert any("default to" in p for p in problems(_with(good, "The default of `analysis_args.epoch_analysis_every` is 3.")))
+
+
+def test_a_data_file_with_dotted_keys_is_a_good_command_and_the_parser_decides():
+    good = _good_region()
+    layered = "```bash\npython -m train image_segmentation out=auto model=convunext/tiny data=<out>/data.yaml \\\n" \
+              "    data.max_samples=4000 'transform_args.image_size=[256,256]'\n```"
+    assert problems(_with(good, layered)) == []
+    assert problems(_with(good, layered.replace("image_segmentation", "image_classification"))) == []
+    # The same command through the continuation join and a quoted list is ONE command, and `export`,
+    # `convert` and `help` are other commands with other rules.
+    assert [c[0] for c in _commands(layered)] == ["image_segmentation"]
+    assert _commands("```\npython -m train export model=m out=o format=onnx\n```") == [
+        ["export", "model=m", "out=o", "format=onnx"]]
+    assert _command_problems("```\npython -m train convert ade20k root=r out=o out=p\n```") == []
+    # What it refuses is named with its tokens, and a file layer is not a repeated key.
+    refused = problems(_with(good, "```\npython -m train image_segmentation data=a.yaml data=b.yaml\n```"))
+    assert any("Repeated key 'data'" in p and "data=a.yaml data=b.yaml" in p for p in refused), refused
 
 
 def test_a_bracketed_list_value_is_read_whole_and_checked_as_a_value():

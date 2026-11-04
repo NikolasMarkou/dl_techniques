@@ -151,7 +151,8 @@ class ImageClassificationConfig(StrictConfig):
         metadata={
             "help": "the data and its split options: data.dataset=cifar10, or "
             "data.format=folder data.train_dir=..., or data.format=csv data.train_csv=...; "
-            "or the path of a YAML file holding them (data=data.yaml)",
+            "or the path of a YAML file holding them (data=data.yaml), over which dotted keys win "
+            "(data=data.yaml data.max_samples=100)",
             PATH_FORM: read_data_file,
         }
     )

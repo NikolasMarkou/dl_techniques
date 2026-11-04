@@ -78,8 +78,8 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   never copied), `mapping.json` (every class with its release ids and names, its pixels and images in train and val, the
   coverage) and a YAML data file that `python -m train image_segmentation data=<out>/data.yaml model=convunext/tiny
   transform_args.image_size=256` reads (`val.csv`, the benchmark's 2,000 validation images, is the TEST split; the selection
-  split is a slice of train). `data=<file>` cannot be combined with a `data.<key>=` token, so a capped run (`max_samples`) is a
-  copy of the data file with that key added. `mapping=official` (the default) is the MIT SceneParse150 class set
+  split is a slice of train). A capped run is `data=<out>/data.yaml data.max_samples=4000` (the command line wins over the file,
+  see Keys above). `mapping=official` (the default) is the MIT SceneParse150 class set
   through the benchmark's own id table (`objectInfo150.txt` and `convertFromADE/mapFromADE.txt` of CSAILVision/sceneparsing,
   held in `dl_techniques.datasets.vision.ade20k.SCENE_PARSE_150`), checked against the release's `objects.txt`: it is refused,
   naming the class, if a class's release names share no synonym with the benchmark's. Class 0 of the benchmark ("other
@@ -262,6 +262,16 @@ quoted, and the whole token goes in single quotes for the shell (the list `["pet
 problems and a "did you mean". `auto` asks for the family's recipe default.
 `data.format` is `builtin` (the library's datasets), `folder` (`data.train_dir`, one directory of
 images per class, optional `data.test_dir`) or `csv` (`data.train_csv`, columns `path` and `label`).
+**A data file and dotted keys are two layers of one group** (plan 98b866fb 7.1, D-021): `data=<file>` is the path of a YAML
+file holding the group, and `data.<key>=` tokens put over it, key by key, so a capped or tweaked run needs no copy of the file.
+The same rule holds for both tasks and for the `data: <file>` of a `config=` file; the lowest layer is the `config=` file, then
+the group's file, then the dotted keys, and the file's `format` reads dotted keys that state none (`data.path_column=` after a
+csv file). A key given twice on the command line, a file twice, or a file together with a JSON object for the group is still
+refused as a repeated key. `config.json` records the resolved values, as for every key, and not which layer a value came from.
+```bash
+python -m train image_classification out=auto model=vit/vit_pico data=cifar_100.yaml data.max_samples=2000
+python -m train image_segmentation out=auto model=convunext/tiny data=<out>/data.yaml data.max_samples=4000 'transform_args.image_size=[256,256]'
+```
 
 **The run directory**: `out=auto` makes `results/<timestamp>...`; an existing `out` is refused,
 nothing is overwritten or deleted. A run writes `config_requested.json` (what was asked),

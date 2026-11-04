@@ -135,7 +135,8 @@ class ImageSegmentationConfig(StrictConfig):
         metadata={
             "help": "the image and mask pairs and their split options: data.dataset=oxford_pet, or "
             "data.format=folder data.train_images=... data.train_masks=..., or data.format=csv "
-            "data.train_csv=...; or the path of a YAML file holding them (data=data.yaml)",
+            "data.train_csv=...; or the path of a YAML file holding them (data=data.yaml), over which "
+            "dotted keys win (data=data.yaml data.max_samples=100)",
             PATH_FORM: read_seg_data_file,
         }
     )
