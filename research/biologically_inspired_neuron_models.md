@@ -2,7 +2,9 @@
 
 ## Executive Summary
 
-This document outlines the implementation plan for adding biologically-inspired neuron models to the dl_techniques framework. The implementation will follow the established architectural patterns, maintain backward compatibility, and provide a progressive complexity hierarchy from simple LIF neurons to full Hodgkin-Huxley models.
+This document outlines the implementation plan for adding biologically-inspired neuron models to the dl_techniques
+framework. The implementation will follow the established architectural patterns, maintain backward compatibility, and
+provide a progressive complexity hierarchy from simple LIF neurons to full Hodgkin-Huxley models.
 
 ## 1. Framework Integration Architecture
 
@@ -108,6 +110,7 @@ class LIFNeuron(keras.layers.Layer):
 ```
 
 **Key Features:**
+
 - Learnable membrane parameters (τ, R, V_th, V_reset)
 - Multiple surrogate gradient options
 - Batched processing for efficiency
@@ -279,12 +282,14 @@ def create_spiking_resnet(
 ### 3.1 Core Design Principles
 
 #### 3.1.1 Keras 3 Compatibility
+
 - Full compatibility with Keras 3.8.0 and TensorFlow 2.18.0 backend
 - Proper serialization with `@keras.saving.register_keras_serializable()`
 - Modern layer patterns with sub-layer creation in `__init__()`
 - Type hints and comprehensive documentation
 
 #### 3.1.2 Performance Optimization
+
 ```python
 # Efficient batched spike processing
 @tf.function
@@ -302,6 +307,7 @@ def batched_lif_dynamics(
 ```
 
 #### 3.1.3 Biological Parameter Management
+
 ```python
 # layers/biological/base_biological_layer.py
 @keras.saving.register_keras_serializable()
@@ -323,6 +329,7 @@ class BaseBiologicalLayer(keras.layers.Layer):
 ### 3.2 Memory and Computational Optimization
 
 #### 3.2.1 Temporal Processing Strategies
+
 ```python
 # Memory-efficient temporal processing
 class TemporalProcessor:
@@ -347,6 +354,7 @@ class TemporalProcessor:
 ```
 
 #### 3.2.2 Hardware Acceleration Support
+
 ```python
 # Neuromorphic hardware abstraction
 class NeuromorphicBackend:
@@ -632,11 +640,11 @@ print(f"Test accuracy: {test_acc:.4f}")
 
 ### 8.1 Performance Targets
 
-| Model Type | Target Training Speed | Target Inference Speed | Memory Efficiency | Energy Efficiency |
-|------------|----------------------|------------------------|-------------------|-------------------|
-| LIF Networks | 0.8x of standard ANN | 1.2x sparse speedup | 1.5x due to sparsity | 10x improvement |
-| Liquid Networks | 5x faster than ODE | 20x parameter efficiency | 0.1x memory usage | 100x improvement |
-| Multi-compartment | 0.1x of simplified | 0.05x of simplified | 10x memory usage | Variable |
+| Model Type        | Target Training Speed | Target Inference Speed   | Memory Efficiency    | Energy Efficiency |
+|-------------------|-----------------------|--------------------------|----------------------|-------------------|
+| LIF Networks      | 0.8x of standard ANN  | 1.2x sparse speedup      | 1.5x due to sparsity | 10x improvement   |
+| Liquid Networks   | 5x faster than ODE    | 20x parameter efficiency | 0.1x memory usage    | 100x improvement  |
+| Multi-compartment | 0.1x of simplified    | 0.05x of simplified      | 10x memory usage     | Variable          |
 
 ### 8.2 Validation Benchmarks
 
@@ -655,10 +663,12 @@ class BiologicalBenchmarks:
         """Energy consumption comparison."""
 ```
 
-
-
 ## Conclusion
 
-This implementation plan provides a comprehensive roadmap for integrating biologically-inspired neuron models into the dl_techniques framework. The phased approach ensures systematic development while maintaining framework quality and backward compatibility. The design prioritizes both biological accuracy and computational efficiency, enabling users to choose the appropriate complexity level for their specific applications.
+This implementation plan provides a comprehensive roadmap for integrating biologically-inspired neuron models into the
+dl_techniques framework. The phased approach ensures systematic development while maintaining framework quality and
+backward compatibility. The design prioritizes both biological accuracy and computational efficiency, enabling users to
+choose the appropriate complexity level for their specific applications.
 
-The integration will position dl_techniques as a leading framework for neuromorphic computing research and applications, bridging the gap between traditional deep learning and biologically-plausible neural computation.
+The integration will position dl_techniques as a leading framework for neuromorphic computing research and applications,
+bridging the gap between traditional deep learning and biologically-plausible neural computation.

@@ -46,6 +46,10 @@ from typing import Any, Dict
 
 import keras
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.losses.masked_causal_lm_loss import MaskedCausalLMLoss
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -142,3 +146,5 @@ class HarmonicCausalLMLoss(MaskedCausalLMLoss):
         config = super().get_config()
         config.pop("from_logits", None)
         return config
+
+# ---------------------------------------------------------------------

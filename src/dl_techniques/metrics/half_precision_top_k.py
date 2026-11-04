@@ -25,9 +25,12 @@ Interface contract
     index, a ``k`` above the class count).
 """
 
+import keras
 from typing import Any, Optional
 
-import keras
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.keras_registration import register_dl_technique
 

@@ -1,6 +1,7 @@
 # Dynamic Routing by Agreement: A Complete Guide
 
 ## Table of Contents
+
 1. [Introduction](#introduction)
 2. [The Core Problem](#the-core-problem)
 3. [Algorithm Overview](#algorithm-overview)
@@ -19,15 +20,23 @@
 
 ## Introduction
 
-**Dynamic Routing by Agreement** is an iterative algorithm introduced by Sabour, Frosst, and Hinton in their seminal 2017 paper "Dynamic Routing Between Capsules" (NeurIPS 2017). It represents a paradigm shift from traditional neural network architectures by introducing a mechanism for routing information between groups of neurons (capsules) based on agreement rather than fixed weights.
+**Dynamic Routing by Agreement** is an iterative algorithm introduced by Sabour, Frosst, and Hinton in their seminal
+2017 paper "Dynamic Routing Between Capsules" (NeurIPS 2017). It represents a paradigm shift from traditional neural
+network architectures by introducing a mechanism for routing information between groups of neurons (capsules) based on
+agreement rather than fixed weights.
 
 ### Key Innovation
 
-Unlike traditional neural networks where routing (which neurons connect to which) is determined during training and remains fixed during inference, dynamic routing computes routing weights **dynamically** at inference time based on the actual input. This allows the network to adapt its information flow based on what it's seeing.
+Unlike traditional neural networks where routing (which neurons connect to which) is determined during training and
+remains fixed during inference, dynamic routing computes routing weights **dynamically** at inference time based on the
+actual input. This allows the network to adapt its information flow based on what it's seeing.
 
 ### Why "By Agreement"?
 
-The algorithm iteratively adjusts routing weights by measuring how much lower-level capsules "agree" with higher-level capsules. If a prediction from a lower-level capsule agrees well with the actual activation of a higher-level capsule, the routing weight between them is strengthened. This implements a form of iterative attention mechanism with geometric interpretation.
+The algorithm iteratively adjusts routing weights by measuring how much lower-level capsules "agree" with higher-level
+capsules. If a prediction from a lower-level capsule agrees well with the actual activation of a higher-level capsule,
+the routing weight between them is strengthened. This implements a form of iterative attention mechanism with geometric
+interpretation.
 
 ---
 
@@ -36,6 +45,7 @@ The algorithm iteratively adjusts routing weights by measuring how much lower-le
 ### Traditional Neural Networks: Fixed Routing
 
 In standard feedforward networks:
+
 ```
 Layer i:  [n₁] [n₂] [n₃] [n₄]  (neurons)
            \  |  /  \  |  /
@@ -43,11 +53,13 @@ Layer i:  [n₁] [n₂] [n₃] [n₄]  (neurons)
              [n₅]    [n₆]        (next layer)
 ```
 
-Every neuron in layer i connects to every neuron in layer i+1 with fixed weights learned during training. The routing is **static**.
+Every neuron in layer i connects to every neuron in layer i+1 with fixed weights learned during training. The routing is
+**static**.
 
 ### Capsule Networks: Dynamic Routing
 
 In capsule networks:
+
 ```
 Capsules i:  [c₁] [c₂] [c₃]  (8D vectors)
               ↓    ↓    ↓
@@ -60,7 +72,8 @@ Capsules i:  [c₁] [c₂] [c₃]  (8D vectors)
                [capsule₁]  (16D vector)
 ```
 
-Each input capsule makes a **prediction** for each output capsule. The routing weights determine how much each prediction contributes, and these weights are computed at runtime based on agreement.
+Each input capsule makes a **prediction** for each output capsule. The routing weights determine how much each
+prediction contributes, and these weights are computed at runtime based on agreement.
 
 ---
 
@@ -109,15 +122,15 @@ Output Capsules (vⱼ)
 
 ### Notation
 
-| Symbol | Meaning | Shape |
-|--------|---------|-------|
-| `uᵢ` | Input capsule i | `(input_dim,)` |
-| `vⱼ` | Output capsule j | `(output_dim,)` |
-| `Wᵢⱼ` | Transformation matrix from capsule i to j | `(output_dim, input_dim)` |
-| `ûⱼ|ᵢ` | Prediction vector: what capsule i predicts for j | `(output_dim,)` |
-| `bᵢⱼ` | Routing logit from capsule i to j | scalar |
-| `cᵢⱼ` | Coupling coefficient (routing weight) | scalar in [0,1] |
-| `sⱼ` | Weighted sum input to capsule j | `(output_dim,)` |
+| Symbol | Meaning                                   | Shape                                            |
+|--------|-------------------------------------------|--------------------------------------------------|
+| `uᵢ`   | Input capsule i                           | `(input_dim,)`                                   |
+| `vⱼ`   | Output capsule j                          | `(output_dim,)`                                  |
+| `Wᵢⱼ`  | Transformation matrix from capsule i to j | `(output_dim, input_dim)`                        |
+| `ûⱼ    | ᵢ`                                        | Prediction vector: what capsule i predicts for j | `(output_dim,)` |
+| `bᵢⱼ`  | Routing logit from capsule i to j         | scalar                                           |
+| `cᵢⱼ`  | Coupling coefficient (routing weight)     | scalar in [0,1]                                  |
+| `sⱼ`   | Weighted sum input to capsule j           | `(output_dim,)`                                  |
 
 ### Step-by-Step Equations
 
@@ -130,11 +143,13 @@ Each input capsule makes a prediction for what each output capsule should be:
 ```
 
 Where:
+
 - `Wᵢⱼ ∈ ℝ^(output_dim × input_dim)` is a learnable transformation matrix
 - `bⱼ ∈ ℝ^(output_dim)` is an optional bias vector
 - Each input-output pair has its own transformation
 
 **Dimensions:**
+
 - Input: `uᵢ` has shape `(input_dim,)`
 - Output: `ûⱼ|ᵢ` has shape `(output_dim,)`
 - There are `num_input × num_output` such transformations
@@ -158,6 +173,7 @@ cᵢⱼ = exp(bᵢⱼ) / Σₖ exp(bᵢₖ)
 ```
 
 Properties:
+
 - `cᵢⱼ ∈ [0, 1]` for all i, j
 - `Σⱼ cᵢⱼ = 1` for each input capsule i
 - Represents "how much of capsule i's output goes to capsule j"
@@ -191,6 +207,7 @@ bᵢⱼ ← bᵢⱼ + ûⱼ|ᵢ · vⱼ
 ```
 
 Where `·` denotes dot product. This is the **key innovation**:
+
 - If `ûⱼ|ᵢ` and `vⱼ` point in similar directions → dot product is large → bᵢⱼ increases
 - If they point in different directions → dot product is small/negative → bᵢⱼ decreases
 - This strengthens routes where there's agreement
@@ -202,6 +219,7 @@ Where `·` denotes dot product. This is the **key innovation**:
 ### Example Setup
 
 Let's trace through a concrete example:
+
 - 3 input capsules (8-dimensional)
 - 2 output capsules (16-dimensional)
 - 3 routing iterations
@@ -290,7 +308,8 @@ For u₂: [c₂₁, c₂₂] = softmax([3.7, 9.2]) ≈ [0.004, 0.996]
 For u₃: [c₃₁, c₃₂] = softmax([7.8, 1.5]) ≈ [0.998, 0.002]
 ```
 
-Now routing is much more decisive! 
+Now routing is much more decisive!
+
 - u₁ and u₃ route almost entirely to output₁
 - u₂ routes almost entirely to output₂
 
@@ -301,10 +320,12 @@ The algorithm continues with the new coupling coefficients, further refining the
 ### Key Insight from the Example
 
 After just one iteration, the routing has already specialized:
+
 - Capsules u₁ and u₃ discovered they agree well with v₁
 - Capsule u₂ discovered it agrees well with v₂
 
-This happened **automatically** through the agreement mechanism, without explicit supervision about which inputs should route where.
+This happened **automatically** through the agreement mechanism, without explicit supervision about which inputs should
+route where.
 
 ---
 
@@ -315,7 +336,8 @@ This happened **automatically** through the agreement mechanism, without explici
 The squash function serves two critical roles:
 
 1. **Normalization**: Maps vector magnitudes to [0, 1]
-2. **Probability Interpretation**: The magnitude represents the probability that the entity represented by the capsule exists
+2. **Probability Interpretation**: The magnitude represents the probability that the entity represented by the capsule
+   exists
 
 ### Mathematical Definition
 
@@ -324,6 +346,7 @@ squash(s) = (||s||² / (1 + ||s||²)) · (s / ||s||)
 ```
 
 Breaking this down:
+
 - `||s||² = s₁² + s₂² + ... + sₙ²` (squared L2 norm)
 - `||s||² / (1 + ||s||²)` (scaling factor, approaches 1 as ||s|| → ∞)
 - `s / ||s||` (unit vector in direction of s)
@@ -332,17 +355,18 @@ Breaking this down:
 
 The squash function maps input magnitudes to output magnitudes in [0, 1]:
 
-| Input Magnitude (norm of s) | Output Magnitude (norm of v) | Calculation | Interpretation |
-|------------------------------|------------------------------|-------------|----------------|
-| 0 | 0 | 0²/(1+0²) = 0 | No entity present |
-| 0.5 | 0.2 | 0.25/(1+0.25) = 0.2 | Low confidence |
-| 1.0 | 0.5 | 1/(1+1) = 0.5 | Moderate confidence |
-| 2.0 | 0.8 | 4/(1+4) = 0.8 | High confidence |
-| 3.0 | 0.9 | 9/(1+9) = 0.9 | Very high confidence |
-| 10.0 | 0.99 | 100/(1+100) ≈ 0.99 | Nearly certain |
-| ∞ | 1.0 | lim = 1 | Maximum confidence (asymptote) |
+| Input Magnitude (norm of s) | Output Magnitude (norm of v) | Calculation         | Interpretation                 |
+|-----------------------------|------------------------------|---------------------|--------------------------------|
+| 0                           | 0                            | 0²/(1+0²) = 0       | No entity present              |
+| 0.5                         | 0.2                          | 0.25/(1+0.25) = 0.2 | Low confidence                 |
+| 1.0                         | 0.5                          | 1/(1+1) = 0.5       | Moderate confidence            |
+| 2.0                         | 0.8                          | 4/(1+4) = 0.8       | High confidence                |
+| 3.0                         | 0.9                          | 9/(1+9) = 0.9       | Very high confidence           |
+| 10.0                        | 0.99                         | 100/(1+100) ≈ 0.99  | Nearly certain                 |
+| ∞                           | 1.0                          | lim = 1             | Maximum confidence (asymptote) |
 
-**Key Insight**: The squash function has a "soft" saturation - it asymptotically approaches 1 but never quite reaches it, similar to a sigmoid but operating on vector magnitudes rather than individual scalars.
+**Key Insight**: The squash function has a "soft" saturation - it asymptotically approaches 1 but never quite reaches
+it, similar to a sigmoid but operating on vector magnitudes rather than individual scalars.
 
 ### Comparison with Standard Activations
 
@@ -360,7 +384,9 @@ Key difference: **Squash operates on the entire vector**, preserving direction w
 
 ### Why Not Softmax?
 
-Softmax enforces `Σ vᵢ = 1`, meaning only one element can be large. Squash allows **multiple dimensions to be active simultaneously**, which is crucial for representing multiple properties of an entity (e.g., position, orientation, color).
+Softmax enforces `Σ vᵢ = 1`, meaning only one element can be large. Squash allows **multiple dimensions to be active
+simultaneously**, which is crucial for representing multiple properties of an entity (e.g., position, orientation,
+color).
 
 ---
 
@@ -370,17 +396,20 @@ Softmax enforces `Σ vᵢ = 1`, meaning only one element can be large. Squash al
 
 Think of routing by agreement as a voting process:
 
-1. **Initial State**: Each low-level feature (input capsule) doesn't know which high-level concept (output capsule) it belongs to, so it votes equally for all.
+1. **Initial State**: Each low-level feature (input capsule) doesn't know which high-level concept (output capsule) it
+   belongs to, so it votes equally for all.
 
-2. **First Vote**: Based on equal weights, we compute what the high-level concepts look like (weighted average of predictions).
+2. **First Vote**: Based on equal weights, we compute what the high-level concepts look like (weighted average of
+   predictions).
 
-3. **Check Agreement**: Each low-level feature checks: "Do my predictions match what actually got activated?" 
-   - If yes: "I'll vote more strongly for that concept next time"
-   - If no: "I'll reduce my vote for that concept"
+3. **Check Agreement**: Each low-level feature checks: "Do my predictions match what actually got activated?"
+    - If yes: "I'll vote more strongly for that concept next time"
+    - If no: "I'll reduce my vote for that concept"
 
 4. **Iterate**: Repeat the voting process, with votes becoming more concentrated on high-agreement paths.
 
-5. **Convergence**: After a few iterations, the routing stabilizes with each low-level feature strongly connected to its most appropriate high-level concept.
+5. **Convergence**: After a few iterations, the routing stabilizes with each low-level feature strongly connected to its
+   most appropriate high-level concept.
 
 ### Visual Analogy: Parsing a Face
 
@@ -402,17 +431,20 @@ Output (Face Part Capsules):
 **Iteration 1**: All edges route equally to all parts (0.33 each)
 
 **After Agreement Check**:
+
 - Capsule 1's prediction agrees well with Eye → increase routing to Eye
-- Capsule 2's prediction agrees well with Nose → increase routing to Nose  
+- Capsule 2's prediction agrees well with Nose → increase routing to Nose
 - Capsule 3's prediction agrees well with Mouth → increase routing to Mouth
 - Capsule 4's prediction agrees well with Eye → increase routing to Eye
 
 **Iteration 2**: Routing is now specialized
+
 - Capsules 1 & 4 → Eye (curved edges form eye outline)
 - Capsule 2 → Nose (vertical line is nose bridge)
 - Capsule 3 → Mouth (horizontal line is mouth)
 
-The network **discovered** this part-whole relationship through agreement, without being explicitly told which edges form which parts!
+The network **discovered** this part-whole relationship through agreement, without being explicitly told which edges
+form which parts!
 
 ---
 
@@ -464,12 +496,12 @@ Cons: More complex, even slower
 
 ### Performance Comparison
 
-| Method | Speed | Accuracy | Interpretability | Ease of Implementation |
-|--------|-------|----------|------------------|----------------------|
-| **Fixed Routing** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐ | ⭐⭐⭐⭐⭐ |
-| **Dynamic Routing** | ⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ |
-| **Self-Attention** | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐ |
-| **EM Routing** | ⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐ |
+| Method              | Speed      | Accuracy | Interpretability | Ease of Implementation |
+|---------------------|------------|----------|------------------|------------------------|
+| **Fixed Routing**   | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐             | ⭐⭐⭐⭐⭐             |
+| **Dynamic Routing** | ⭐⭐⭐     | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐       | ⭐⭐⭐                 |
+| **Self-Attention**  | ⭐⭐⭐⭐   | ⭐⭐⭐⭐ | ⭐⭐⭐           | ⭐⭐⭐⭐               |
+| **EM Routing**      | ⭐⭐       | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐       | ⭐⭐                   |
 
 ---
 
@@ -478,6 +510,7 @@ Cons: More complex, even slower
 ### Per-Layer Complexity
 
 Let:
+
 - `n` = number of input capsules
 - `m` = number of output capsules
 - `d_in` = input capsule dimension
@@ -487,13 +520,13 @@ Let:
 
 ### Breakdown by Operation
 
-| Operation | Complexity | Explanation |
-|-----------|------------|-------------|
-| **Prediction Transform** | O(b × n × m × d_in × d_out) | Matrix multiplication for each input-output pair |
-| **Softmax (per iteration)** | O(b × n × m) | Normalize routing weights for each input capsule |
-| **Weighted Sum (per iteration)** | O(b × n × m × d_out) | Compute weighted average for each output |
-| **Squash (per iteration)** | O(b × m × d_out) | Normalize each output capsule |
-| **Agreement Update (per iteration)** | O(b × n × m × d_out) | Dot product for each input-output pair |
+| Operation                            | Complexity                  | Explanation                                      |
+|--------------------------------------|-----------------------------|--------------------------------------------------|
+| **Prediction Transform**             | O(b × n × m × d_in × d_out) | Matrix multiplication for each input-output pair |
+| **Softmax (per iteration)**          | O(b × n × m)                | Normalize routing weights for each input capsule |
+| **Weighted Sum (per iteration)**     | O(b × n × m × d_out)        | Compute weighted average for each output         |
+| **Squash (per iteration)**           | O(b × m × d_out)            | Normalize each output capsule                    |
+| **Agreement Update (per iteration)** | O(b × n × m × d_out)        | Dot product for each input-output pair           |
 
 ### Total Per-Layer Complexity
 
@@ -501,20 +534,21 @@ Let:
 O(b × n × m × d_in × d_out) + r × O(b × n × m × d_out)
 ```
 
-Typically `d_in × d_out` >> `r × d_out`, so the transformation dominates, but the iterative routing adds a significant multiplicative factor.
+Typically `d_in × d_out` >> `r × d_out`, so the transformation dominates, but the iterative routing adds a significant
+multiplicative factor.
 
 ### Comparison with Dense Layer
 
-**Dense Layer**: O(b × n × d_in × d_out)
-**Dynamic Routing**: O(b × n × m × d_in × d_out × r)
+**Dense Layer**: O (b × n × d_in × d_out)
+**Dynamic Routing**: O (b × n × m × d_in × d_out × r)
 
 The extra `m × r` factor makes dynamic routing significantly more expensive.
 
 ### Memory Complexity
 
-- **Weights**: O(n × m × d_in × d_out) for transformation matrices
-- **Activations**: O(b × n × m × d_out) for storing predictions
-- **Routing Logits**: O(b × n × m) maintained across iterations
+- **Weights**: O (n × m × d_in × d_out) for transformation matrices
+- **Activations**: O (b × n × m × d_out) for storing predictions
+- **Routing Logits**: O (b × n × m) maintained across iterations
 
 ---
 
@@ -524,23 +558,26 @@ The extra `m × r` factor makes dynamic routing significantly more expensive.
 
 #### Number of Routing Iterations
 
-| Iterations | Effect | Use Case |
-|------------|--------|----------|
-| 1 | Minimal routing refinement | Baseline comparison |
-| 3 | **Standard choice** | Most applications |
-| 5 | Slight improvement, more cost | High-accuracy requirements |
-| 7+ | Diminishing returns | Usually not worth it |
+| Iterations | Effect                        | Use Case                   |
+|------------|-------------------------------|----------------------------|
+| 1          | Minimal routing refinement    | Baseline comparison        |
+| 3          | **Standard choice**           | Most applications          |
+| 5          | Slight improvement, more cost | High-accuracy requirements |
+| 7+         | Diminishing returns           | Usually not worth it       |
 
-**Empirical Finding**: Performance typically saturates after 3-5 iterations. More iterations help slightly but cost increases linearly.
+**Empirical Finding**: Performance typically saturates after 3-5 iterations. More iterations help slightly but cost
+increases linearly.
 
 #### Capsule Dimensions
 
 **Input Capsule Dimension** (typical: 8-16):
+
 - Too small (4): Insufficient capacity to represent complex features
-- Sweet spot (8-16): Good balance of capacity and efficiency  
+- Sweet spot (8-16): Good balance of capacity and efficiency
 - Too large (32+): Overfitting, computational cost
 
 **Output Capsule Dimension** (typical: 16-32):
+
 - Should be ≥ input dimension
 - Higher dimensions allow more expressive representations
 - Trade-off with computational cost
@@ -548,7 +585,7 @@ The extra `m × r` factor makes dynamic routing significantly more expensive.
 ### Training Tips
 
 1. **Initialization**: Use Xavier/Glorot initialization for transformation matrices
-   
+
 2. **Learning Rate**: Capsule networks often need lower learning rates (1e-4 to 1e-3)
 
 3. **Batch Size**: Larger batches (128-256) help stabilize routing dynamics
@@ -564,6 +601,7 @@ The extra `m × r` factor makes dynamic routing significantly more expensive.
 **Symptoms**: Coupling coefficients remain near uniform across iterations
 
 **Solutions**:
+
 - Increase number of iterations (try 5 instead of 3)
 - Check if predictions have sufficient variance
 - Verify squash function is implemented correctly
@@ -574,7 +612,8 @@ The extra `m × r` factor makes dynamic routing significantly more expensive.
 **Symptoms**: Training takes much longer than standard networks
 
 **Solutions**:
-- Reduce number of routing iterations  
+
+- Reduce number of routing iterations
 - Use self-attention routing instead (non-iterative)
 - Profile code to ensure efficient tensor operations
 - Use mixed precision training
@@ -584,6 +623,7 @@ The extra `m × r` factor makes dynamic routing significantly more expensive.
 **Symptoms**: All output capsules have near-zero magnitude
 
 **Solutions**:
+
 - Check squash function implementation (epsilon for stability)
 - Reduce regularization strength
 - Verify proper initialization of transformation matrices
@@ -594,6 +634,7 @@ The extra `m × r` factor makes dynamic routing significantly more expensive.
 **Symptoms**: Out-of-memory errors during training
 
 **Solutions**:
+
 - Reduce batch size
 - Reduce number of capsules or capsule dimensions
 - Use gradient checkpointing
@@ -623,7 +664,8 @@ def squash_stable(s, epsilon=1e-7):
 
 #### Softmax Stability
 
-Use framework-provided softmax implementations which handle numerical stability automatically (subtracting max before exponential).
+Use framework-provided softmax implementations which handle numerical stability automatically (subtracting max before
+exponential).
 
 ### Efficient Tensor Operations
 
@@ -758,43 +800,45 @@ Beyond 5 iterations, improvements are minimal while computational cost keeps inc
 ### Original Papers
 
 1. **Sabour, S., Frosst, N., & Hinton, G. E.** (2017). *Dynamic Routing Between Capsules*. NeurIPS 2017.
-   - Introduced the dynamic routing algorithm
-   - Original capsule network architecture
-   - Demonstrated effectiveness on MNIST
+    - Introduced the dynamic routing algorithm
+    - Original capsule network architecture
+    - Demonstrated effectiveness on MNIST
 
 2. **Hinton, G. E., Sabour, S., & Frosst, N.** (2018). *Matrix Capsules with EM Routing*. ICLR 2018.
-   - Extended routing to EM algorithm
-   - Matrix capsules instead of vector capsules
-   - More principled probabilistic framework
+    - Extended routing to EM algorithm
+    - Matrix capsules instead of vector capsules
+    - More principled probabilistic framework
 
 ### NLP Applications
 
-3. **Zhao, W., et al.** (2018). *Investigating Capsule Networks with Dynamic Routing for Text Classification*. EMNLP 2018.
-   - First application to text classification
-   - Capsule-A and Capsule-B architectures
-   - Achieved 93.8% on subject classification
+3. **Zhao, W., et al.** (2018). *Investigating Capsule Networks with Dynamic Routing for Text Classification*. EMNLP
+   2018.
+    - First application to text classification
+    - Capsule-A and Capsule-B architectures
+    - Achieved 93.8% on subject classification
 
-4. **Xiao, L., et al.** (2019). *NLP-Capsule: A Scalable Capsule Network for Multi-label Text Classification*. 
-   - Addressed scalability issues
-   - Adaptive routing mechanisms
-   - 80.20% P@1 on EUR-Lex dataset
+4. **Xiao, L., et al.** (2019). *NLP-Capsule: A Scalable Capsule Network for Multi-label Text Classification*.
+    - Addressed scalability issues
+    - Adaptive routing mechanisms
+    - 80.20% P@1 on EUR-Lex dataset
 
 ### Modern Improvements
 
 5. **Yu, J., et al.** (2024). *SA-CapsNet: Self-Attention Capsule Network for Text Classification*.
-   - Non-iterative self-attention routing
-   - 84.72% accuracy with only 3.45M parameters
-   - Significantly faster than iterative routing
+    - Non-iterative self-attention routing
+    - 84.72% accuracy with only 3.45M parameters
+    - Significantly faster than iterative routing
 
 ### Theoretical Analysis
 
 6. **Peer, D., et al.** (2018). *On the Information Bottleneck Theory of Deep Learning*.
-   - Analysis of routing as information flow
-   - Theoretical justification for agreement mechanism
+    - Analysis of routing as information flow
+    - Theoretical justification for agreement mechanism
 
 ### Implementation Resources
 
-- **Official TensorFlow Implementation**: [github.com/Sarasra/models/tree/master/research/capsules](https://github.com/Sarasra/models/tree/master/research/capsules)
+- **Official TensorFlow
+  Implementation**: [github.com/Sarasra/models/tree/master/research/capsules](https://github.com/Sarasra/models/tree/master/research/capsules)
 - **PyTorch CapsNet Library**: Multiple community implementations available
 - **Keras 3 Implementation**: Modern implementations using Keras 3 API
 
@@ -802,7 +846,9 @@ Beyond 5 iterations, improvements are minimal while computational cost keeps inc
 
 ## Conclusion
 
-Dynamic routing by agreement represents a significant departure from traditional neural network architectures. By computing routing weights dynamically based on agreement between predictions and activations, it enables networks to discover part-whole relationships without explicit supervision.
+Dynamic routing by agreement represents a significant departure from traditional neural network architectures. By
+computing routing weights dynamically based on agreement between predictions and activations, it enables networks to
+discover part-whole relationships without explicit supervision.
 
 ### Key Takeaways
 
@@ -810,7 +856,8 @@ Dynamic routing by agreement represents a significant departure from traditional
 
 2. **Iterative Refinement**: Multiple routing iterations allow the network to progressively specialize connections
 
-3. **Geometric Interpretation**: Agreement is measured via dot product, strengthening routes where predictions align with outputs
+3. **Geometric Interpretation**: Agreement is measured via dot product, strengthening routes where predictions align
+   with outputs
 
 4. **Squash Activation**: Vector-wise activation preserves direction while normalizing magnitude to [0, 1]
 
@@ -819,6 +866,7 @@ Dynamic routing by agreement represents a significant departure from traditional
 ### When to Use Dynamic Routing
 
 **Good Fit**:
+
 - Part-whole relationship modeling
 - Few-shot learning scenarios
 - Interpretable AI requirements
@@ -826,9 +874,11 @@ Dynamic routing by agreement represents a significant departure from traditional
 - Parameter-efficient models
 
 **Consider Alternatives**:
+
 - Large-scale production systems (use self-attention routing)
 - Real-time inference requirements (use standard networks)
 - When computational budget is tight
 - When transformer architectures already work well
 
-Dynamic routing by agreement remains an active area of research with potential for significant impact, particularly in domains where explicit modeling of hierarchical relationships and geometric properties is beneficial.
+Dynamic routing by agreement remains an active area of research with potential for significant impact, particularly in
+domains where explicit modeling of hierarchical relationships and geometric properties is beneficial.

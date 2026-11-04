@@ -72,6 +72,11 @@ from typing import Any, Dict, Optional, Tuple
 
 import keras
 from keras import ops
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------------
@@ -292,3 +297,5 @@ class LPIPSLoss(keras.losses.Loss):
             config = dict(config)
             config["input_range"] = tuple(ir)
         return cls(**config)
+
+# ---------------------------------------------------------------------

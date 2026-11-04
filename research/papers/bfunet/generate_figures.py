@@ -31,6 +31,7 @@ import argparse
 import warnings
 
 import matplotlib
+
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
@@ -162,7 +163,8 @@ def fig_qualitative(model, sigmas255):
         # Column 0: clean reference.
         ax = axes[i, 0]
         ax.imshow(_disp(_crop(clean, y0, x0, CROP_SIZE)), vmin=0.0, vmax=1.0)
-        ax.set_xticks([]); ax.set_yticks([])
+        ax.set_xticks([]);
+        ax.set_yticks([])
         if i == 0:
             ax.set_title("Clean")
         ax.set_ylabel(ex["label"])
@@ -185,7 +187,8 @@ def fig_qualitative(model, sigmas255):
             for j, panel in ((jn, noisy), (jd, denoised)):
                 ax = axes[i, j]
                 ax.imshow(_disp(_crop(panel, y0, x0, CROP_SIZE)), vmin=0.0, vmax=1.0)
-                ax.set_xticks([]); ax.set_yticks([])
+                ax.set_xticks([]);
+                ax.set_yticks([])
             if i == 0:
                 axes[i, jn].set_title(f"Noisy $\\sigma$={sigma255:.0f}{tag}")
                 axes[i, jd].set_title("Denoised")

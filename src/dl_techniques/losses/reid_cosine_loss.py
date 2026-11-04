@@ -44,6 +44,7 @@ from typing import Any, Dict, Tuple
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 def _pairwise_squared_distance(
     features: keras.KerasTensor, eps: float = 1e-5
@@ -169,3 +170,6 @@ def magnet_loss_fn(
     b = np.sum((1.0 - y_mat) * exp_shifted, axis=1)
     loss = np.maximum(0.0, -np.log(1e-4 + a / (1e-4 + b)))
     return float(np.mean(loss)), class_means.astype(np.float32), variance
+
+# ---------------------------------------------------------------------
+

@@ -1,10 +1,29 @@
 """
-Sequence Metrics
-================
+Metrics for sequence-level predictions and binary algorithmic tasks.
 
-Metrics for evaluating sequence-level predictions, commonly used in
-memory-augmented neural networks, sequence-to-sequence models, and
-binary sequence tasks.
+In standard sequence or multi-label classification, metrics like
+:class:keras.metrics.BinaryAccuracy evaluate predictions on a strict
+element-by-element or token-by-token basis. If a model correctly predicts 99 out
+of 100 bits in a sequence, standard binary accuracy reports 99%.
+
+Algorithmic reasoning tasks, Memory-Augmented Neural Networks (like Neural
+Turing Machines or Differentiable Neural Computers), and digital signal
+processing tasks evaluate success differently. For these tasks, a sequence is
+often only useful if it is reproduced perfectly.
+
+This module provides metrics that differ from standard accuracy in two ways:
+
+1.  Strict Sequence-Level Accuracy: :class:SequenceAccuracy performs an
+    all-or-nothing evaluation. It applies a logical AND across all temporal and
+    feature dimensions for a given sample. A sequence scores 100% only if every
+    single element matches the ground truth after binarization. In the
+    99-out-of-100 example above, SequenceAccuracy would report 0%. This is the
+    standard metric for evaluating algorithmic copy, sort, or recall tasks.
+
+2.  Domain-Specific Nomenclature: While mathematically the complement of
+    standard binary accuracy, :class:BitErrorRate (BER) provides the standard
+    telecommunications and signal processing formulation: the fraction of bits
+    that are incorrect. Lower is better.
 
 Example::
 
@@ -18,13 +37,23 @@ Example::
         loss='binary_crossentropy',
         metrics=[SequenceAccuracy(), BitErrorRate()],
     )
+
+References:
+    - Graves, A., Wayne, G., & Danihelka, I. (2014). Neural Turing Machines. (https://arxiv.org/abs/1410.5401)
+    - Graves, A., et al. (2016). Hybrid computing using a neural network with dynamic external memory (DNC). Nature.
 """
 
 import keras
 from keras import ops
 from typing import Any, Dict, Optional
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.metrics.sequence_metrics")
 class SequenceAccuracy(keras.metrics.Metric):
@@ -155,3 +184,5 @@ class BitErrorRate(keras.metrics.Metric):
         config = super().get_config()
         config.update({"threshold": self.threshold})
         return config
+
+# ---------------------------------------------------------------------

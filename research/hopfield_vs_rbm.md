@@ -4,21 +4,21 @@
 
 1. [Introduction to Energy-Based Networks](#introduction)
 2. [The Hopfield Network](#hopfield-network)
-   - [Core Concepts](#hopfield-core)
-   - [Architecture](#hopfield-architecture)
-   - [Mathematical Foundation](#hopfield-math)
-   - [Training with Hebbian Learning](#hopfield-training)
-   - [Dynamics and Convergence](#hopfield-dynamics)
-   - [Use Cases and Applications](#hopfield-use-cases)
-   - [Limitations](#hopfield-limitations)
+    - [Core Concepts](#hopfield-core)
+    - [Architecture](#hopfield-architecture)
+    - [Mathematical Foundation](#hopfield-math)
+    - [Training with Hebbian Learning](#hopfield-training)
+    - [Dynamics and Convergence](#hopfield-dynamics)
+    - [Use Cases and Applications](#hopfield-use-cases)
+    - [Limitations](#hopfield-limitations)
 3. [The Restricted Boltzmann Machine](#rbm)
-   - [Core Concepts](#rbm-core)
-   - [Architecture](#rbm-architecture)
-   - [Mathematical Foundation](#rbm-math)
-   - [Training with Contrastive Divergence](#rbm-training)
-   - [Sampling and Inference](#rbm-inference)
-   - [Use Cases and Applications](#rbm-use-cases)
-   - [Limitations](#rbm-limitations)
+    - [Core Concepts](#rbm-core)
+    - [Architecture](#rbm-architecture)
+    - [Mathematical Foundation](#rbm-math)
+    - [Training with Contrastive Divergence](#rbm-training)
+    - [Sampling and Inference](#rbm-inference)
+    - [Use Cases and Applications](#rbm-use-cases)
+    - [Limitations](#rbm-limitations)
 4. [Head-to-Head Comparison](#comparison)
 5. [Historical Context and Impact](#history)
 6. [Practical Implementation Considerations](#practical)
@@ -27,13 +27,18 @@
 ---
 
 <a name="introduction"></a>
+
 ## 1. Introduction to Energy-Based Networks
 
-In the evolution of neural networks, before the dominance of backpropagation and deep feed-forward architectures, a fascinating class of models known as **energy-based networks** laid critical groundwork for understanding computation through the lens of physics and optimization.
+In the evolution of neural networks, before the dominance of backpropagation and deep feed-forward architectures, a
+fascinating class of models known as **energy-based networks** laid critical groundwork for understanding computation
+through the lens of physics and optimization.
 
 ### The Energy Perspective
 
-Energy-based networks view computation not as a sequential flow of information through layers, but as a **physical system settling into a low-energy, stable state**. Imagine a ball rolling on a hilly landscape—it naturally settles into valleys (local minima) where the energy is lowest.
+Energy-based networks view computation not as a sequential flow of information through layers, but as a **physical
+system settling into a low-energy, stable state**. Imagine a ball rolling on a hilly landscape—it naturally settles into
+valleys (local minima) where the energy is lowest.
 
 ```ascii
 Energy Landscape Visualization:
@@ -67,35 +72,41 @@ This guide explores two influential energy-based architectures:
 
 While both use energy functions, they serve fundamentally different purposes:
 
-| Aspect | Hopfield Network | RBM |
-|--------|------------------|-----|
-| **Goal** | Pattern completion/recall | Feature learning/generation |
-| **Paradigm** | Deterministic memory | Stochastic modeling |
+| Aspect        | Hopfield Network               | RBM                          |
+|---------------|--------------------------------|------------------------------|
+| **Goal**      | Pattern completion/recall      | Feature learning/generation  |
+| **Paradigm**  | Deterministic memory           | Stochastic modeling          |
 | **Operation** | "What does this remind me of?" | "What rules generated this?" |
 
 ---
 
 <a name="hopfield-network"></a>
+
 ## 2. The Hopfield Network - The Content-Addressable Memory
 
 <a name="hopfield-core"></a>
+
 ### 2.1 Core Concepts
 
-The **Hopfield Network**, introduced by John Hopfield in 1982, revolutionized our understanding of neural computation by demonstrating how a network could function as a **content-addressable memory**.
+The **Hopfield Network**, introduced by John Hopfield in 1982, revolutionized our understanding of neural computation by
+demonstrating how a network could function as a **content-addressable memory**.
 
 #### What is Content-Addressable Memory?
 
 Unlike traditional computer memory (RAM) where you access data using an address:
+
 ```
 Memory[0x1A2F] → Returns stored value
 ```
 
 A content-addressable memory accesses data using **partial content**:
+
 ```
 Partial/Noisy Pattern → Returns complete stored pattern
 ```
 
-**Real-world analogy**: When you try to remember a song but only recall a few notes, your brain reconstructs the entire melody. The Hopfield network does this computationally.
+**Real-world analogy**: When you try to remember a song but only recall a few notes, your brain reconstructs the entire
+melody. The Hopfield network does this computationally.
 
 #### The Energy Landscape Metaphor
 
@@ -122,6 +133,7 @@ Starting States and Convergence:
 ```
 
 <a name="hopfield-architecture"></a>
+
 ### 2.2 Architecture
 
 The Hopfield network consists of a **single layer** of fully interconnected neurons.
@@ -158,9 +170,10 @@ Connection Matrix W:
       [ w₁₄  w₂₄  w₃₄   0  ]
 ```
 
-For N neurons, there are $\frac{N(N-1)}{2}$ unique connections.
+For N neurons, there are $\frac{N (N-1)}{2}$ unique connections.
 
 <a name="hopfield-math"></a>
+
 ### 2.3 Mathematical Foundation
 
 #### State Representation
@@ -172,13 +185,14 @@ For N neurons, there are $\frac{N(N-1)}{2}$ unique connections.
 
 The network's energy for a given state $\mathbf{s}$ is defined as:
 
-$$E(\mathbf{s}) = -\frac{1}{2} \sum_{i=1}^{N} \sum_{j=1}^{N} W_{ij} s_i s_j - \sum_{i=1}^{N} b_i s_i$$
+$$E (\mathbf{s}) = -\frac{1}{2} \sum_{i=1}^{N} \sum_{j=1}^{N} W_{ij} s_i s_j - \sum_{i=1}^{N} b_i s_i$$
 
 Or in matrix notation:
 
-$$E(\mathbf{s}) = -\frac{1}{2} \mathbf{s}^T \mathbf{W} \mathbf{s} - \mathbf{b}^T \mathbf{s}$$
+$$E (\mathbf{s}) = -\frac{1}{2} \mathbf{s}^T \mathbf{W} \mathbf{s} - \mathbf{b}^T \mathbf{s}$$
 
 Where:
+
 - $W_{ij}$ = weight connecting unit $i$ to unit $j$
 - $b_i$ = bias (threshold) for unit $i$
 - The factor $\frac{1}{2}$ corrects for double-counting in symmetric matrices
@@ -193,7 +207,7 @@ $$h_i = \sum_{j=1}^{N} W_{ij} s_j + b_i$$
 
 Update the state:
 
-$$s_i^{(t+1)} = \text{sgn}(h_i) = \begin{cases} 
+$$s_i^{ (t+1)} = \text{sgn} (h_i) = \begin{cases}
 +1 & \text{if } h_i \geq 0 \\
 -1 & \text{if } h_i < 0
 \end{cases}$$
@@ -204,9 +218,9 @@ $$s_i^{(t+1)} = \text{sgn}(h_i) = \begin{cases}
 
 **Theorem**: Asynchronous updates with symmetric weights always decrease or maintain energy:
 
-$$E(\mathbf{s}^{(t+1)}) \leq E(\mathbf{s}^{(t)})$$
+$$E (\mathbf{s}^{ (t+1)}) \leq E (\mathbf{s}^{ (t)})$$
 
-**Proof Sketch**: 
+**Proof Sketch**:
 When unit $i$ flips from $s_i$ to $s_i'$, the energy change is:
 
 $$\Delta E = -\Delta s_i \sum_{j} W_{ij} s_j = -\Delta s_i \cdot h_i$$
@@ -214,6 +228,7 @@ $$\Delta E = -\Delta s_i \sum_{j} W_{ij} s_j = -\Delta s_i \cdot h_i$$
 The update rule only flips $s_i$ when it aligns with the sign of $h_i$, ensuring $\Delta E \leq 0$.
 
 <a name="hopfield-training"></a>
+
 ### 2.4 Training with Hebbian Learning
 
 Training a Hopfield network is remarkably simple—no backpropagation or iterative optimization needed!
@@ -227,9 +242,10 @@ If two units are frequently active together across stored patterns, strengthen t
 
 #### The Outer Product Rule
 
-To store a set of $P$ patterns $\{\mathbf{p}^{(1)}, \mathbf{p}^{(2)}, ..., \mathbf{p}^{(P)}\}$, where each pattern is a vector of $N$ binary values:
+To store a set of $P$ patterns $\{\mathbf{p}^{ (1)}, \mathbf{p}^{ (2)}, ..., \mathbf{p}^{ (P)}\}$, where each pattern is
+a vector of $N$ binary values:
 
-$$W_{ij} = \frac{1}{N} \sum_{\mu=1}^{P} p_i^{(\mu)} p_j^{(\mu)} \quad \text{for } i \neq j$$
+$$W_{ij} = \frac{1}{N} \sum_{\mu=1}^{P} p_i^{ (\mu)} p_j^{ (\mu)} \quad \text{for } i \neq j$$
 
 Set $W_{ii} = 0$ (no self-connections).
 
@@ -248,6 +264,7 @@ Pattern 2:  ● ○ ● ○
 ```
 
 Calculate weights:
+
 ```
 W₁₂ = 1/4 [(+1)(+1) + (+1)(-1)] = 0
 W₁₃ = 1/4 [(+1)(-1) + (+1)(+1)] = 0
@@ -273,9 +290,10 @@ Output: Weight matrix W
 4. Ensure symmetry: W_ij = W_ji
 ```
 
-**Computational Complexity**: $O(P \cdot N^2)$ — extremely fast, one-pass training!
+**Computational Complexity**: $O (P \cdot N^2)$ — extremely fast, one-pass training!
 
 <a name="hopfield-dynamics"></a>
+
 ### 2.5 Dynamics and Convergence
 
 #### Recall Process
@@ -303,14 +321,16 @@ Recall Algorithm:
 
 #### Convergence Properties
 
-**Lyapunov Function**: The energy $E(\mathbf{s})$ acts as a Lyapunov function:
+**Lyapunov Function**: The energy $E (\mathbf{s})$ acts as a Lyapunov function:
+
 - Decreases monotonically with asynchronous updates
 - Bounded below (finite state space)
 - Guarantees convergence to local minimum
 
-**Convergence Time**: 
-- Theoretical: $O(N^2)$ updates worst case
-- Practical: Often converges in $O(N)$ updates
+**Convergence Time**:
+
+- Theoretical: $O (N^2)$ updates worst case
+- Practical: Often converges in $O (N)$ updates
 
 #### Energy Dynamics Visualization
 
@@ -335,6 +355,7 @@ Energy
 ```
 
 <a name="hopfield-use-cases"></a>
+
 ### 2.6 Use Cases and Applications
 
 #### 1. Pattern Completion and Error Correction
@@ -369,7 +390,8 @@ Output: Complete record:
          Lives in Boston..."
 ```
 
-**Real-world use**: 
+**Real-world use**:
+
 - Face recognition from partial features
 - DNA sequence matching
 - Biometric identification
@@ -379,11 +401,12 @@ Output: Complete record:
 **Application**: Traveling Salesman Problem (TSP)
 
 Map TSP onto Hopfield network:
+
 - Units represent cities and visit order
 - Energy function encodes constraints:
-  - Each city visited exactly once
-  - Valid tour structure
-  - Minimize total distance
+    - Each city visited exactly once
+    - Valid tour structure
+    - Minimize total distance
 
 ```ascii
 TSP Mapping:
@@ -401,6 +424,7 @@ Solution: A→B→C→D (tour order)
 ```
 
 **Other optimization problems**:
+
 - Graph coloring
 - Maximum clique
 - Resource allocation
@@ -438,11 +462,13 @@ Raw Input        Feature           Selected
 ```
 
 **Neuroscience applications**:
+
 - Modeling hippocampal memory
 - Understanding pattern completion in brain
 - Studying attractor dynamics in cortex
 
 <a name="hopfield-limitations"></a>
+
 ### 2.7 Limitations and Challenges
 
 #### 1. Limited Storage Capacity
@@ -493,6 +519,7 @@ The network can converge to states that were never stored!
 **Asynchronous updates**: Guaranteed convergence
 
 **Synchronous updates** (all units update simultaneously):
+
 - Can create limit cycles
 - May oscillate indefinitely
 - No convergence guarantee
@@ -534,12 +561,15 @@ Result: Patterns 1-10 partially corrupted
 ---
 
 <a name="rbm"></a>
+
 ## 3. The Restricted Boltzmann Machine - The Generative Feature Learner
 
 <a name="rbm-core"></a>
+
 ### 3.1 Core Concepts
 
-The **Restricted Boltzmann Machine** (RBM), developed by Paul Smolensky (1986) and significantly advanced by Geoffrey Hinton (2006), represents a paradigm shift from memory to **generative modeling**.
+The **Restricted Boltzmann Machine** (RBM), developed by Paul Smolensky (1986) and significantly advanced by Geoffrey
+Hinton (2006), represents a paradigm shift from memory to **generative modeling**.
 
 #### From Memory to Generation
 
@@ -579,6 +609,7 @@ Unrestricted Boltzmann Machine:    Restricted Boltzmann Machine:
 ```
 
 **Key restriction**: No connections within a layer
+
 - No visible-to-visible connections
 - No hidden-to-hidden connections
 - Only visible-to-hidden connections
@@ -586,6 +617,7 @@ Unrestricted Boltzmann Machine:    Restricted Boltzmann Machine:
 **Benefit**: Conditional independence enables efficient computation
 
 <a name="rbm-architecture"></a>
+
 ### 3.2 Architecture
 
 #### Two-Layer Structure
@@ -626,38 +658,40 @@ v₄  │ w₄₁  w₄₂  w₄₃  w₄₄ │
 #### Components
 
 1. **Visible Layer ($\mathbf{v}$)**:
-   - Represents observable data
-   - Dimension: $N_v$ units
-   - Types: Binary ${0,1}$ or Gaussian (real-valued)
+    - Represents observable data
+    - Dimension: $N_v$ units
+    - Types: Binary ${0,1}$ or Gaussian (real-valued)
 
 2. **Hidden Layer ($\mathbf{h}$)**:
-   - Represents latent features
-   - Dimension: $N_h$ units
-   - Typically binary ${0,1}$
+    - Represents latent features
+    - Dimension: $N_h$ units
+    - Typically binary ${0,1}$
 
 3. **Weights ($\mathbf{W}$)**:
-   - Matrix shape: $(N_v \times N_h)$
-   - No symmetry requirement (unlike Hopfield)
-   - Each $W_{ij}$ connects visible unit $i$ to hidden unit $j$
+    - Matrix shape: $(N_v \times N_h)$
+    - No symmetry requirement (unlike Hopfield)
+    - Each $W_{ij}$ connects visible unit $i$ to hidden unit $j$
 
 4. **Biases**:
-   - $\mathbf{b}$: Visible layer biases (length $N_v$)
-   - $\mathbf{c}$: Hidden layer biases (length $N_h$)
+    - $\mathbf{b}$: Visible layer biases (length $N_v$)
+    - $\mathbf{c}$: Hidden layer biases (length $N_h$)
 
 <a name="rbm-math"></a>
+
 ### 3.3 Mathematical Foundation
 
 #### Energy Function
 
 The energy of a joint configuration $(\mathbf{v}, \mathbf{h})$ is:
 
-$$E(\mathbf{v}, \mathbf{h}) = -\sum_{i=1}^{N_v} b_i v_i - \sum_{j=1}^{N_h} c_j h_j - \sum_{i=1}^{N_v}\sum_{j=1}^{N_h} v_i W_{ij} h_j$$
+$$E (\mathbf{v}, \mathbf{h}) = -\sum_{i=1}^{N_v} b_i v_i - \sum_{j=1}^{N_h} c_j h_j - \sum_{i=1}^{N_v}\sum_{j=1}^{N_h} v_i W_{ij} h_j$$
 
 In matrix form:
 
-$$E(\mathbf{v}, \mathbf{h}) = -\mathbf{b}^T\mathbf{v} - \mathbf{c}^T\mathbf{h} - \mathbf{v}^T\mathbf{W}\mathbf{h}$$
+$$E (\mathbf{v}, \mathbf{h}) = -\mathbf{b}^T\mathbf{v} - \mathbf{c}^T\mathbf{h} - \mathbf{v}^T\mathbf{W}\mathbf{h}$$
 
 **Interpretation**:
+
 - Low energy = High probability configuration
 - Biases: Intrinsic tendency for units to activate
 - Weights: Correlation between visible and hidden units
@@ -666,11 +700,11 @@ $$E(\mathbf{v}, \mathbf{h}) = -\mathbf{b}^T\mathbf{v} - \mathbf{c}^T\mathbf{h} -
 
 The joint probability is given by the **Boltzmann distribution**:
 
-$$P(\mathbf{v}, \mathbf{h}) = \frac{1}{Z} e^{-E(\mathbf{v}, \mathbf{h})}$$
+$$P (\mathbf{v}, \mathbf{h}) = \frac{1}{Z} e^{-E (\mathbf{v}, \mathbf{h})}$$
 
 Where $Z$ is the **partition function**:
 
-$$Z = \sum_{\mathbf{v}, \mathbf{h}} e^{-E(\mathbf{v}, \mathbf{h})}$$
+$$Z = \sum_{\mathbf{v}, \mathbf{h}} e^{-E (\mathbf{v}, \mathbf{h})}$$
 
 **Problem**: $Z$ requires summing over $2^{N_v + N_h}$ states—intractable!
 
@@ -680,13 +714,13 @@ Due to the bipartite structure, conditionals are tractable:
 
 **Hidden given visible**:
 
-$$P(h_j = 1 | \mathbf{v}) = \sigma\left(c_j + \sum_{i=1}^{N_v} W_{ij} v_i\right)$$
+$$P (h_j = 1 | \mathbf{v}) = \sigma\left (c_j + \sum_{i=1}^{N_v} W_{ij} v_i\right)$$
 
-Where $\sigma(x) = \frac{1}{1 + e^{-x}}$ is the sigmoid function.
+Where $\sigma (x) = \frac{1}{1 + e^{-x}}$ is the sigmoid function.
 
 **Visible given hidden**:
 
-$$P(v_i = 1 | \mathbf{h}) = \sigma\left(b_i + \sum_{j=1}^{N_h} W_{ij} h_j\right)$$
+$$P (v_i = 1 | \mathbf{h}) = \sigma\left (b_i + \sum_{j=1}^{N_h} W_{ij} h_j\right)$$
 
 **Key insight**: All hidden units are **conditionally independent** given visible units, and vice versa!
 
@@ -706,24 +740,26 @@ This enables parallel sampling!
 
 To get the probability of visible data alone:
 
-$$P(\mathbf{v}) = \sum_{\mathbf{h}} P(\mathbf{v}, \mathbf{h}) = \frac{1}{Z} \sum_{\mathbf{h}} e^{-E(\mathbf{v}, \mathbf{h})}$$
+$$P (\mathbf{v}) = \sum_{\mathbf{h}} P (\mathbf{v}, \mathbf{h}) = \frac{1}{Z} \sum_{\mathbf{h}} e^{-E (\mathbf{v}, \mathbf{h})}$$
 
 Still intractable, but we can approximate it!
 
 <a name="rbm-training"></a>
+
 ### 3.4 Training with Contrastive Divergence
 
 Training an RBM means maximizing the log-likelihood of the training data:
 
-$$\mathcal{L} = \sum_{\mathbf{v} \in \mathcal{D}} \log P(\mathbf{v})$$
+$$\mathcal{L} = \sum_{\mathbf{v} \in \mathcal{D}} \log P (\mathbf{v})$$
 
 #### The Gradient (Ideal but Intractable)
 
 The gradient of log-likelihood with respect to weights:
 
-$$\frac{\partial \log P(\mathbf{v})}{\partial W_{ij}} = \langle v_i h_j \rangle_{\text{data}} - \langle v_i h_j \rangle_{\text{model}}$$
+$$\frac{\partial \log P (\mathbf{v})}{\partial W_{ij}} = \langle v_i h_j \rangle_{\text{data}} - \langle v_i h_j \rangle_{\text{model}}$$
 
 **Interpretation**:
+
 - $\langle v_i h_j \rangle_{\text{data}}$: Expected correlation in training data
 - $\langle v_i h_j \rangle_{\text{model}}$: Expected correlation under model's distribution
 - **Goal**: Make model's statistics match data's statistics
@@ -840,6 +876,7 @@ Model samples now match data distribution!
 - **Persistent CD (PCD)**: Maintain chains across updates (better for difficult problems)
 
 <a name="rbm-inference"></a>
+
 ### 3.5 Sampling and Inference
 
 #### Gibbs Sampling
@@ -904,11 +941,13 @@ Use for classification/clustering
 ```
 
 **Benefits**:
+
 - Dimensionality reduction (784 → 500)
 - Learned features (not hand-crafted)
 - Captures statistical structure of data
 
 <a name="rbm-use-cases"></a>
+
 ### 3.6 Use Cases and Applications
 
 #### 1. Collaborative Filtering (Recommender Systems)
@@ -933,6 +972,7 @@ Predict unrated movies!
 ```
 
 **How it works**:
+
 1. Visible units = movie ratings (multi-state: 1-5 stars)
 2. Hidden units = user preference factors
 3. Train on all users' ratings
@@ -959,6 +999,7 @@ Compression ratio: ~15:1
 ```
 
 **Advantages over PCA**:
+
 - Nonlinear dimensionality reduction
 - Learns hierarchical features
 - Binary codes (useful for hashing)
@@ -992,6 +1033,7 @@ Historical Impact (2006):
 ```
 
 **Why it worked**:
+
 - Unsupervised pre-training initialized weights well
 - Avoided vanishing gradient problem
 - Provided good feature representations
@@ -1011,6 +1053,7 @@ Noisy Image:         RBM Process:         Restored:
 ```
 
 **Method**:
+
 1. Clamp observed (non-noisy) pixels
 2. Run Gibbs sampling on corrupted pixels
 3. Sample converges to most probable clean image
@@ -1051,6 +1094,7 @@ Audio Signal:
 ```
 
 **Benefits**:
+
 - Learns acoustic features automatically
 - Robust to speaker variation
 - Improves recognition accuracy 5-15%
@@ -1083,11 +1127,13 @@ Low error            Flagged!
 ```
 
 <a name="rbm-limitations"></a>
+
 ### 3.7 Limitations and Challenges
 
 #### 1. Training Difficulty
 
 **Issues**:
+
 - **Slow convergence**: Requires many epochs
 - **Sensitive hyperparameters**: Learning rate, momentum
 - **CD-k bias**: Approximate gradient can be inaccurate
@@ -1110,7 +1156,8 @@ Loss  ↑
 #### 2. No Direct Log-Likelihood
 
 Unlike VAEs or normalizing flows, RBMs don't provide tractable likelihood:
-- Can't directly evaluate $P(\mathbf{v})$
+
+- Can't directly evaluate $P (\mathbf{v})$
 - Hard to compare models
 - Use proxies: reconstruction error, pseudo-likelihood
 
@@ -1131,6 +1178,7 @@ True Data Distribution:        RBM's Distribution:
 #### 4. Limited Expressiveness
 
 Single-layer RBMs have limited modeling capacity:
+
 - Can't capture complex hierarchies
 - Need stacking (DBNs) for deeper representations
 - Even DBNs limited compared to modern deep nets
@@ -1138,12 +1186,14 @@ Single-layer RBMs have limited modeling capacity:
 #### 5. Superseded by Better Methods
 
 **Modern alternatives**:
+
 - **VAEs**: Better generation, tractable likelihood
 - **GANs**: Superior image generation
 - **Transformers**: Better for sequences
 - **Diffusion Models**: State-of-the-art generation
 
 **When to still use RBMs**:
+
 - Simple generative modeling
 - Feature learning for small datasets
 - Educational purposes
@@ -1152,34 +1202,35 @@ Single-layer RBMs have limited modeling capacity:
 ---
 
 <a name="comparison"></a>
+
 ## 4. Head-to-Head Comparison: Hopfield vs. RBM
 
 ### Comprehensive Feature Comparison
 
-| Aspect | Hopfield Network | Restricted Boltzmann Machine |
-|--------|------------------|------------------------------|
-| **Primary Purpose** | Associative memory (pattern storage/recall) | Generative modeling & feature learning |
-| **Year Introduced** | 1982 | 1986 (popularized 2006) |
-| **Creator** | John Hopfield | Paul Smolensky & Geoffrey Hinton |
-| **Architecture** | Single layer, fully connected | Two layers, bipartite graph |
-| **Connectivity** | All-to-all ($N^2$ connections) | Visible ↔ Hidden only |
-| **Weight Symmetry** | Required ($W_{ij} = W_{ji}$) | Not required |
-| **Self-Connections** | Forbidden ($W_{ii} = 0$) | N/A (different layers) |
-| **Unit Types** | One type (all visible) | Two types (visible & hidden) |
-| **State Space** | Typically binary ${-1, +1}$ | Binary ${0, 1}$ or Gaussian |
-| **Training Method** | Hebbian learning (one-shot) | Contrastive Divergence (iterative) |
-| **Training Complexity** | $O(PN^2)$ (P patterns, N units) | $O(TNK)$ per batch (T epochs) |
-| **Inference** | Attractor dynamics (deterministic) | Gibbs sampling (stochastic) |
-| **Convergence** | Guaranteed to local minimum | Samples from distribution |
-| **Stochasticity** | Usually deterministic | Inherently stochastic |
-| **Energy Function** | $E = -\frac{1}{2}\mathbf{s}^T\mathbf{W}\mathbf{s}$ | $E = -\mathbf{b}^T\mathbf{v} - \mathbf{c}^T\mathbf{h} - \mathbf{v}^T\mathbf{W}\mathbf{h}$ |
-| **Capacity** | ~0.14N patterns | Depends on hidden units |
-| **Generative Power** | Recalls stored patterns only | Generates novel samples |
-| **Feature Learning** | No (direct pattern matching) | Yes (learns latent features) |
-| **Noise Robustness** | Good for pattern completion | Good for denoising |
-| **Scalability** | Limited ($O(N^2)$ weights) | Better (flexible hidden size) |
-| **Deep Extensions** | Rare | Yes (Deep Belief Networks) |
-| **Modern Relevance** | Mostly educational | Historical (superseded by VAEs/GANs) |
+| Aspect                  | Hopfield Network                                   | Restricted Boltzmann Machine                                                              |
+|-------------------------|----------------------------------------------------|-------------------------------------------------------------------------------------------|
+| **Primary Purpose**     | Associative memory (pattern storage/recall)        | Generative modeling & feature learning                                                    |
+| **Year Introduced**     | 1982                                               | 1986 (popularized 2006)                                                                   |
+| **Creator**             | John Hopfield                                      | Paul Smolensky & Geoffrey Hinton                                                          |
+| **Architecture**        | Single layer, fully connected                      | Two layers, bipartite graph                                                               |
+| **Connectivity**        | All-to-all ($N^2$ connections)                     | Visible ↔ Hidden only                                                                     |
+| **Weight Symmetry**     | Required ($W_{ij} = W_{ji}$)                       | Not required                                                                              |
+| **Self-Connections**    | Forbidden ($W_{ii} = 0$)                           | N/A (different layers)                                                                    |
+| **Unit Types**          | One type (all visible)                             | Two types (visible & hidden)                                                              |
+| **State Space**         | Typically binary ${-1, +1}$                        | Binary ${0, 1}$ or Gaussian                                                               |
+| **Training Method**     | Hebbian learning (one-shot)                        | Contrastive Divergence (iterative)                                                        |
+| **Training Complexity** | $O(PN^2)$ (P patterns, N units)                    | $O(TNK)$ per batch (T epochs)                                                             |
+| **Inference**           | Attractor dynamics (deterministic)                 | Gibbs sampling (stochastic)                                                               |
+| **Convergence**         | Guaranteed to local minimum                        | Samples from distribution                                                                 |
+| **Stochasticity**       | Usually deterministic                              | Inherently stochastic                                                                     |
+| **Energy Function**     | $E = -\frac{1}{2}\mathbf{s}^T\mathbf{W}\mathbf{s}$ | $E = -\mathbf{b}^T\mathbf{v} - \mathbf{c}^T\mathbf{h} - \mathbf{v}^T\mathbf{W}\mathbf{h}$ |
+| **Capacity**            | ~0.14N patterns                                    | Depends on hidden units                                                                   |
+| **Generative Power**    | Recalls stored patterns only                       | Generates novel samples                                                                   |
+| **Feature Learning**    | No (direct pattern matching)                       | Yes (learns latent features)                                                              |
+| **Noise Robustness**    | Good for pattern completion                        | Good for denoising                                                                        |
+| **Scalability**         | Limited ($O(N^2)$ weights)                         | Better (flexible hidden size)                                                             |
+| **Deep Extensions**     | Rare                                               | Yes (Deep Belief Networks)                                                                |
+| **Modern Relevance**    | Mostly educational                                 | Historical (superseded by VAEs/GANs)                                                      |
 
 ### Operational Philosophy
 
@@ -1207,18 +1258,18 @@ RBM Philosophy:
 
 ### Use Case Comparison
 
-| Task | Hopfield Network | RBM | Winner |
-|------|------------------|-----|--------|
-| **Pattern Completion** | ✓ Excellent | ○ Possible | **Hopfield** |
-| **Error Correction** | ✓ Excellent | ○ Possible | **Hopfield** |
-| **Associative Recall** | ✓ Designed for this | ○ Not primary use | **Hopfield** |
-| **Feature Learning** | ✗ No hidden features | ✓ Excellent | **RBM** |
-| **Generative Modeling** | ✗ Limited | ✓ Excellent | **RBM** |
-| **Dimensionality Reduction** | ✗ No | ✓ Yes | **RBM** |
-| **Deep Learning Pre-training** | ✗ No | ✓ Historical importance | **RBM** |
-| **Collaborative Filtering** | ○ Possible | ✓ State-of-art (2007) | **RBM** |
-| **Fast Training** | ✓ One-shot | ✗ Iterative | **Hopfield** |
-| **Theoretical Guarantees** | ✓ Convergence proven | ○ Approximations | **Hopfield** |
+| Task                           | Hopfield Network      | RBM                      | Winner       |
+|--------------------------------|-----------------------|--------------------------|--------------|
+| **Pattern Completion**         | ✓ Excellent          | ○ Possible               | **Hopfield** |
+| **Error Correction**           | ✓ Excellent          | ○ Possible               | **Hopfield** |
+| **Associative Recall**         | ✓ Designed for this  | ○ Not primary use        | **Hopfield** |
+| **Feature Learning**           | ✗ No hidden features | ✓ Excellent             | **RBM**      |
+| **Generative Modeling**        | ✗ Limited            | ✓ Excellent             | **RBM**      |
+| **Dimensionality Reduction**   | ✗ No                 | ✓ Yes                   | **RBM**      |
+| **Deep Learning Pre-training** | ✗ No                 | ✓ Historical importance | **RBM**      |
+| **Collaborative Filtering**    | ○ Possible            | ✓ State-of-art (2007)   | **RBM**      |
+| **Fast Training**              | ✓ One-shot           | ✗ Iterative             | **Hopfield** |
+| **Theoretical Guarantees**     | ✓ Convergence proven | ○ Approximations         | **Hopfield** |
 
 ### Mathematical Perspective
 
@@ -1282,6 +1333,7 @@ RBM:
 ### When to Choose Which?
 
 **Choose Hopfield Network when:**
+
 - You need **exact pattern recall**
 - Training data is small and discrete
 - You want guaranteed convergence
@@ -1289,6 +1341,7 @@ RBM:
 - You're doing theoretical research or education
 
 **Choose RBM when:**
+
 - You need **feature learning**
 - You want to **generate new samples**
 - You have continuous or high-dimensional data
@@ -1296,6 +1349,7 @@ RBM:
 - You're building generative models (pre-2014)
 
 **Choose Neither (Modern Alternatives) when:**
+
 - Building production systems (use VAEs, GANs, Transformers)
 - Need state-of-the-art performance
 - Working with large-scale data
@@ -1304,6 +1358,7 @@ RBM:
 ---
 
 <a name="history"></a>
+
 ## 5. Historical Context and Impact
 
 ### Timeline of Development
@@ -1363,14 +1418,14 @@ RBM:
 #### Hopfield Network's Legacy
 
 1. **Theoretical Foundation**:
-   - Formalized energy-based computation
-   - Inspired recurrent neural networks
-   - Influenced optimization theory
+    - Formalized energy-based computation
+    - Inspired recurrent neural networks
+    - Influenced optimization theory
 
 2. **Modern Connections**:
-   - **Transformers**: Attention mechanism similar to Hopfield retrieval
-   - **Hopfield Networks 2.0** (2020): Continuous states, exponential capacity
-   - **Memory Networks**: Explicit memory storage like Hopfield
+    - **Transformers**: Attention mechanism similar to Hopfield retrieval
+    - **Hopfield Networks 2.0** (2020): Continuous states, exponential capacity
+    - **Memory Networks**: Explicit memory storage like Hopfield
 
 3. **Recent Revival** (2020-present):
    ```
@@ -1384,30 +1439,31 @@ RBM:
 #### RBM's Legacy
 
 1. **Launched Deep Learning**:
-   - Broke the "deep network training" barrier (2006)
-   - Enabled first successful 5+ layer networks
-   - Won ImageNet 2012 (AlexNet used RBM-inspired ideas)
+    - Broke the "deep network training" barrier (2006)
+    - Enabled first successful 5+ layer networks
+    - Won ImageNet 2012 (AlexNet used RBM-inspired ideas)
 
 2. **Influenced Modern Architectures**:
-   - **VAEs**: Latent variable models with better training
-   - **Energy-Based Models**: Renewed interest in energy functions
-   - **Contrastive Learning**: CD inspired modern contrastive methods
+    - **VAEs**: Latent variable models with better training
+    - **Energy-Based Models**: Renewed interest in energy functions
+    - **Contrastive Learning**: CD inspired modern contrastive methods
 
 3. **Conceptual Contributions**:
-   - Layer-wise pre-training (still used occasionally)
-   - Unsupervised feature learning
-   - Generative modeling principles
+    - Layer-wise pre-training (still used occasionally)
+    - Unsupervised feature learning
+    - Generative modeling principles
 
 ### Awards and Recognition
 
 - **2018**: Geoffrey Hinton, Yoshua Bengio, Yann LeCun win **Turing Award**
-  - Citation includes work on RBMs and Deep Belief Networks
+    - Citation includes work on RBMs and Deep Belief Networks
 - **2001**: John Hopfield wins **Dirac Medal**
-  - For contributions to neural networks and complex systems
+    - For contributions to neural networks and complex systems
 
 ---
 
 <a name="practical"></a>
+
 ## 6. Practical Implementation Considerations
 
 ### Hopfield Network Implementation Tips
@@ -1537,26 +1593,27 @@ def reconstruction_error(data, rbm):
 
 #### Hopfield Networks
 
-| Problem | Cause | Solution |
-|---------|-------|----------|
-| **Spurious attractors** | Too many patterns | Reduce pattern count to < 0.14N |
-| **Poor recall** | Similar patterns | Orthogonalize patterns first |
-| **Oscillations** | Synchronous updates | Use asynchronous updates |
-| **Slow convergence** | Bad initialization | Initialize closer to target |
+| Problem                 | Cause               | Solution                        |
+|-------------------------|---------------------|---------------------------------|
+| **Spurious attractors** | Too many patterns   | Reduce pattern count to < 0.14N |
+| **Poor recall**         | Similar patterns    | Orthogonalize patterns first    |
+| **Oscillations**        | Synchronous updates | Use asynchronous updates        |
+| **Slow convergence**    | Bad initialization  | Initialize closer to target     |
 
 #### RBMs
 
-| Problem | Cause | Solution |
-|---------|-------|----------|
-| **Divergence** | Learning rate too high | Lower LR, use momentum |
-| **No learning** | Learning rate too low | Increase LR gradually |
-| **Poor reconstruction** | Too few hidden units | Increase hidden layer size |
-| **Overfitting** | Too many hidden units | Add L2 regularization |
-| **Slow training** | Large k in CD-k | Use CD-1 or PCD |
+| Problem                 | Cause                  | Solution                   |
+|-------------------------|------------------------|----------------------------|
+| **Divergence**          | Learning rate too high | Lower LR, use momentum     |
+| **No learning**         | Learning rate too low  | Increase LR gradually      |
+| **Poor reconstruction** | Too few hidden units   | Increase hidden layer size |
+| **Overfitting**         | Too many hidden units  | Add L2 regularization      |
+| **Slow training**       | Large k in CD-k        | Use CD-1 or PCD            |
 
 ---
 
 <a name="advanced"></a>
+
 ## 7. Advanced Topics
 
 ### Modern Hopfield Networks (2020)
@@ -1632,35 +1689,37 @@ E(v,h) = Σᵢ (vᵢ - bᵢ)²/(2σᵢ²) - Σⱼ cⱼhⱼ - Σᵢⱼ (vᵢ/σ�
 ### Key Takeaways
 
 1. **Hopfield Networks**:
-   - Elegant associative memory model
-   - Simple, interpretable, with theoretical guarantees
-   - Best for: Pattern completion, educational purposes
-   - Limited by capacity and lack of feature learning
+    - Elegant associative memory model
+    - Simple, interpretable, with theoretical guarantees
+    - Best for: Pattern completion, educational purposes
+    - Limited by capacity and lack of feature learning
 
 2. **Restricted Boltzmann Machines**:
-   - Powerful generative feature learner
-   - Historical importance in launching deep learning
-   - Best for: Feature learning, collaborative filtering (legacy systems)
-   - Superseded by modern generative models (VAEs, GANs, Diffusion)
+    - Powerful generative feature learner
+    - Historical importance in launching deep learning
+    - Best for: Feature learning, collaborative filtering (legacy systems)
+    - Superseded by modern generative models (VAEs, GANs, Diffusion)
 
 3. **Philosophical Difference**:
-   - **Hopfield**: "What stored memory does this resemble?"
-   - **RBM**: "What latent factors explain this data?"
+    - **Hopfield**: "What stored memory does this resemble?"
+    - **RBM**: "What latent factors explain this data?"
 
 4. **Modern Relevance**:
-   - **Hopfield**: Theoretical interest, recent revivals (attention connection)
-   - **RBM**: Mostly historical, occasional niche applications
-   - Both provide foundational understanding of energy-based models
+    - **Hopfield**: Theoretical interest, recent revivals (attention connection)
+    - **RBM**: Mostly historical, occasional niche applications
+    - Both provide foundational understanding of energy-based models
 
 ### When to Study These Models
 
 **Yes, study them if**:
+
 - Learning machine learning history
 - Understanding energy-based models
 - Exploring theoretical neuroscience
 - Building intuition for modern architectures (attention, VAEs)
 
 **Skip to modern methods if**:
+
 - Need production-ready systems
 - Want state-of-the-art performance
 - Prioritizing practical applications over theory
@@ -1668,18 +1727,23 @@ E(v,h) = Σᵢ (vᵢ - bᵢ)²/(2σᵢ²) - Σⱼ cⱼhⱼ - Σᵢⱼ (vᵢ/σ�
 ### Further Reading
 
 **Hopfield Networks**:
+
 - Hopfield (1982): "Neural networks and physical systems with emergent collective computational abilities"
 - Ramsauer et al. (2020): "Hopfield Networks is All You Need"
 
 **RBMs**:
+
 - Hinton (2010): "A Practical Guide to Training Restricted Boltzmann Machines"
 - Hinton et al. (2006): "A Fast Learning Algorithm for Deep Belief Nets"
 
 **Modern Alternatives**:
+
 - Kingma & Welling (2014): "Auto-Encoding Variational Bayes" (VAEs)
 - Goodfellow et al. (2014): "Generative Adversarial Networks" (GANs)
 - Ho et al. (2020): "Denoising Diffusion Probabilistic Models"
 
 ---
 
-*This guide provides a comprehensive foundation for understanding energy-based neural networks. While these models are largely historical, the concepts—energy minimization, generative modeling, and unsupervised feature learning—remain central to modern machine learning.*
+*This guide provides a comprehensive foundation for understanding energy-based neural networks. While these models are
+largely historical, the concepts—energy minimization, generative modeling, and unsupervised feature learning—remain
+central to modern machine learning.*

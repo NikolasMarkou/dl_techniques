@@ -33,6 +33,11 @@ task and the task of learning when to halt.
 """
 
 import keras
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------

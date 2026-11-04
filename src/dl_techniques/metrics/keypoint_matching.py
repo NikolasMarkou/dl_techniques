@@ -23,6 +23,7 @@ from dl_techniques.losses.lightglue_loss import unpack_matches
 
 _MODES = ("precision", "recall", "f1")
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.metrics.keypoint_matching")
 class KeypointMatchMetric(keras.metrics.Metric):
@@ -149,3 +150,5 @@ class KeypointMatchMetric(keras.metrics.Metric):
         config = super().get_config()
         config.update({"mode": self.mode, "threshold": self.threshold})
         return config
+
+# ---------------------------------------------------------------------

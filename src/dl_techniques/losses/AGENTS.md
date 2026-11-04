@@ -1,157 +1,200 @@
 # Losses Package
 
-Specialized loss functions for diverse deep learning tasks, all implemented as serializable Keras 3 loss objects.
+Serializable Keras 3 loss objects, plus the plain-function helpers some of them need.
 
 ## Public API
 
-All losses are exported from `__init__.py`. Key imports:
+Everything in `__all__` is importable from `dl_techniques.losses`:
 
 ```python
 from dl_techniques.losses import (
-    # Robust regression
-    HuberLoss, MASELoss, SMAPELoss, QuantileLoss,
-    # Imbalanced classification
-    AnyLoss, F1Loss, FBetaLoss, FocalUncertaintyLoss,
-    # Self-supervised learning
-    CLIPContrastiveLoss, DINOLoss, SigLIPContrastiveLoss,
-    SymmetricInfoNCELoss, create_symmetric_infonce_loss,
-    # Calibration (binary only)
+    # Regression / forecasting
+    HuberLoss, MASELoss, SMAPELoss, MQLoss, QuantileLoss, MultistepLoss,
+    # Metric-as-loss and calibration
+    AnyLoss, F1Loss, FBetaLoss, MCCLoss,
     BrierScoreLoss, SpiegelhalterZLoss, CombinedCalibrationLoss,
-    BrierScoreMetric, SpiegelhalterZMetric,
+    # Self-supervised and contrastive
+    CLIPContrastiveLoss, SigLIPContrastiveLoss, SymmetricInfoNCELoss,
+    DINOLoss, iBOTPatchLoss, KoLeoLoss,
     # Generative
-    WassersteinLoss, TopographicVAELoss,
-    # Specialized
-    CapsuleMarginLoss, SegmentationLosses, SegmentationWrapperLoss,
-    # Confidence-penalty / information-theoretic regularizers
-    GoodhartAwareLoss, analyze_loss_components, DecoupledInformationLoss,
+    WassersteinLoss, DDPMHybridLoss, TopographicVAELoss,
+    # Segmentation and SAM
+    SegmentationWrapperLoss, SAMMaskLoss, SAM2GatedMaskLoss, Sam3DetectionLoss,
+    # Confidence regularizers
+    GoodhartAwareLoss, DecoupledInformationLoss, FocalUncertaintyLoss,
 )
 ```
 
+The README table is the full inventory, grouped by domain.
+
+**Module-only symbols.** These are NOT exported from the package; import them from their own module:
+
+- `jacobian_symmetry.jacobian_symmetry_penalty`
+- `thera_jacobian_tv.thera_tv_penalty`
+- `thera_jacobian_tv.thera_total_loss`
+- `segmentation_metrics.*`
+- `sam2_video_loss.SAM2ObjectScoreLoss`
+- `sam2_video_loss.SAM2IoULoss`
+- `sam2_video_loss.select_lowest_loss_mask`
+- the `sam3_detection_loss` pack constants and helpers
+
 ## Modules
 
-- `any_loss.py` — AnyLoss framework: differentiable approximations of non-differentiable metrics (F1, accuracy, balanced accuracy, G-mean)
-- `clifford_detection_loss.py` — CliffordNet detection loss
-- `affine_invariant_loss.py` — Affine-invariant distance loss
-- `brier_spiegelhalters_ztest_loss.py` — Binary calibration losses + metrics. Ships BOTH
-  calibration z-statistics under an explicit `statistic=` knob: Spiegelhalter's (1986)
-  `(1-2p)`-weighted Z (the default) and the strictly weaker calibration-in-the-large test,
-  which is what this module computed under the Spiegelhalter name before 2026-09-02. The
-  penalty is chance-corrected (`relu(Z²-1)`, since `E[Z²]=1` not 0) and divided by `N`, and
-  it decomposes per row so `sample_weight` still selects rows
-- `capsule_margin_loss.py` — Capsule network margin loss with analysis utilities
-- `chamfer_loss.py` — Chamfer distance for point clouds
-- `clip_contrastive_loss.py` / `siglip_contrastive_loss.py` — Contrastive losses for CLIP/SigLIP
-- `clustering_loss.py` — Clustering loss + metrics
-- `colbert_loss.py` — ColBERT retrieval losses: v1 pairwise/listwise softmax cross-entropy and v2 cross-encoder KL distillation
-- `decoupled_information_loss.py` — Information-theoretic regularization
-- `dino_loss.py` — DINO/iBOT self-supervised loss
-- `doc_scanner_flow_sequence_loss.py` — DocScanner's progressive-rectification objective (arXiv:2110.14968v2 Eq. 9-14): an iteration-weighted `gamma**(K-k)` sum over the `(B, K, H, W, 2)` refinement sequence, each term an L1 on the backward flow plus `alpha` times a circle-consistency (line-straightness) penalty on the two-step composed warp. **The only module in `losses/` that imports from `models/`** — it reuses the doc_scanner port's single pixel-coordinate sampler rather than minting a second sampling convention; see the D-031 anchor at the import
-- `feature_alignment_loss.py` — Feature alignment for knowledge distillation
-- `flow_matching_velocity_loss.py` — Rectified-flow / flow-matching velocity-regression loss
-- `focal_causal_lm_loss.py` — Focal loss variant for causal LM training
-- `focal_uncertainty_loss.py` — Focal loss with uncertainty estimation
-- `goodhart_loss.py` — Cross-entropy plus a per-sample confidence penalty (Pereyra et al. 2017), with an optional off-by-default `prior_weight * KL(class_prior || mean_p)` anti-collapse term. Also exports `analyze_loss_components`. The `prior_weight` term is irreducibly BATCH-LEVEL: at `prior_weight > 0` the loss no longer decomposes per row. It does NOT compute `I(X; Y_hat)` — `call(y_true, y_pred)` never sees `X`
-- `harmonic_loss.py` — Harmonic loss (arXiv:2502.01628): `harmonic_logits(x, w, n, eps)` returns `-(n/2) log(||x-w||^2 + eps)` in >=float32 (softmax of it is harmonic max `d^-n`), and `HarmonicCausalLMLoss` is the masked CE over those logits (`from_logits` fixed True). `n` is the paper's exponent on `d`, not on `d^2`
-- `hrm_loss.py` — Hierarchical reasoning model loss
-- `huber_loss.py` — Robust Huber loss
-- `image_restoration_loss.py` — Multi-component image restoration loss
-- `infonce_loss.py` — Single-tower symmetric InfoNCE over two views of one batch (SimCSE-style dropout pairs); positives are positional, the batch size is the negative count
-- `jacobian_symmetry.py` — Stochastic Jacobian-symmetry penalty (double-VJP) pushing a denoiser toward a conservative field
-- `lightglue_loss.py` — LightGlue per-layer balanced assignment NLL plus token-confidence BCE (packed-label `call`, full `compute` for `add_loss`)
-- `lpips_loss.py` — LPIPS-flavored perceptual loss over a frozen ImageNet VGG16 backbone
-- `mambalct_loss.py` — `MambaLCTBoxLoss`: `l1_weight * L1 + giou_weight * (1 - GIoU)` over per-frame boxes, per-sample `(batch,)` semantics (averaged over the clip length inside each row)
-- `mase_loss.py` — Mean Absolute Scaled Error
-- `mean_shift_instance_loss.py` — `MeanShiftInstanceLoss`: per-row pull (mean squared distance over same-instance pairs) plus push (mean squared hinge to `margin`, default `2 * bandwidth`, over different-instance pairs) on `(B, N, D)` embeddings with ids `(B, N)`; `ignore_label=-1` points take no part, rows over `max_points` are subsampled at evenly spaced indices only when `N` is static (an unknown `N` is not, so the value can differ), and `call()` returns `(B,)` with no cross-row term. Imports `pairwise_sq_dist` from `layers/mixtures/mean_shift_ops.py`
-- `masked_causal_lm_loss.py` — Masked causal LM loss (skip ignore-tokens during NTP)
-- `multistep_loss.py` — ADAM h-steps-ahead losses (`mseh`/`tmse`/`gtmse`/`msce`) over the
-  horizon axis. `gtmse` is the one non-decomposable member: its per-sample form is a
-  first-order expansion about the DETACHED batch mean, exact in both value and gradient
-- `multi_labels_loss.py` — Multi-label classification loss
-- `multi_task_loss.py` — Multi-task loss aggregator with per-task weighting
-- `nano_vlm_loss.py` — NanoVLM vision-language loss
-- `quantile_loss.py` — Quantile regression loss
-- `sam2_video_loss.py` — Ground-truth-gated mask supervision for the SAM 2 video trainer
-- `sam3_detection_loss.py` — SAM 3 Hungarian matcher + six-term detection loss, and the packed-tensor layout both speak
-- `sam_mask_loss.py` — SAM mask losses: `SAMMaskLoss` (focal + dice) and `SAMIoULoss` (MSE); a deliberate containment for two measured `SegmentationLosses` reuse defects
-- `scaled_mse_loss.py` — Scaled mean-squared-error loss
-- `segmentation_loss.py` — Segmentation loss (Dice, Tversky, focal)
-- `segmentation_wrapper_loss.py` — Serializable name-dispatched wrapper around `SegmentationLosses` for use as a compile/save/load-friendly Keras `Loss`
-- `sparse_segmentation_loss.py` — `SparseDiceLoss`, `SparseFocalLoss`, `SparseCeDiceLoss`: segmentation losses on LOGITS `(B,H,W,C)` and SPARSE integer targets `(B,H,W)` with an `ignore_index` (void) that changes neither the value nor the gradient. They hold no math of their own: they one-hot the targets and call `segmentation_metrics.dice_per_sample` / `focal_per_sample` (MONAI-style per-image Dice with 1e-5 smoothing in both terms; Lin et al. softmax focal, `gamma=0` is CE, no `alpha`). `call()` returns `(batch,)` per image, so Keras averages images; the stock `SparseCategoricalCrossentropy(ignore_class=)` instead divides by the batch's valid-pixel count. An image with no valid pixel is exactly 0 with a zero gradient. Definitions and sources: D-014 of plan-2026-11-03T221936-98b866fb
-- `smape_loss.py` — Symmetric MAPE
-- `sparsemax_loss.py` — Sparsemax loss
-- `superpoint_loss.py` — SuperPoint detector (65-class grid softmax CE) and descriptor losses
-- `siamese_tracking_loss.py` — SiamFC radius-based logistic loss (packed
-  ignore-ring label via `create_siamfc_label`) plus DaSiamRPN per-anchor
-  classification (2-way softmax CE) and regression (smooth-L1) losses with
-  packed valid/positive masks; cls-vs-reg balance stays at compile time via
-  `loss_weights`
-- `reid_cosine_loss.py` — batch-hard softmargin triplet loss (Hermans et
-  al., 2017) as serializable `SoftmarginTripletLoss`, plus the batch-level
-  unimodal magnet loss (Rippel et al., 2016) as the plain function
-  `magnet_loss_fn` (deliberately not a `keras.losses.Loss`: it couples the
-  whole batch). Cosine-softmax needs no class (stock sparse CE over the
-  `CosineClassifier` logits)
-- `tabm_loss.py` — TabM model loss
-- `topographic_vae_loss.py` — `TopographicVAELoss`, the ELBO of the Topographic VAE (Keller & Welling 2022 Eq. 12): a Bernoulli reconstruction term plus **two** Gaussian KL terms, over a model's dict output. `call()` returns `(batch,)`. The `u` pair (`VARIANCE_PREDICTION_KEYS`) is **conditional** — a model built with `use_variance_variables=False` emits neither key and its `KL_u` is absent rather than zero, which is what lets the paper's plain-VAE baseline be trained with this loss; HALF the pair raises. `kl_loss_weight` is **not** the literature's `beta` under the default mean-over-pixels reduction; `effective_beta` reports the corrected value and the trainer logs both
-- `thera_jacobian_tv.py` — THERA aliasing TV penalty over the exact analytic spatial Jacobian
-- `utilization_loss.py` — Utilization / load-balancing loss (e.g. MoE routing)
-- `wasserstein_loss.py` — Wasserstein/WGAN-GP loss
-- `yolo12_multitask_loss.py` — YOLOv12 multi-task detection loss
+- `affine_invariant_loss.py`: Scale- and shift-invariant L1 after median/MAD normalization. `masked=True` reads a validity mask from the last channel of `y_true` (Depth Anything V1, eq. 1-3).
+- `any_loss.py`: AnyLoss framework. A differentiable confusion matrix via `A(p) = sigmoid(L * (p - 0.5))`, plus 16 metric losses and `WeightedCrossEntropyWithAnyLoss`. The confusion matrix is global over the batch, so every class returns a scalar.
+- `brier_spiegelhalters_ztest_loss.py`: Binary-only calibration losses and metrics. Ships both Z-statistics behind `statistic=`: Spiegelhalter's `(1-2p)`-weighted Z (the default) and calibration-in-the-large (the pre-2026-09-02 behavior). The penalty is chance-corrected (`relu(Z^2 - 1)`), divided by `N`, and decomposed per row.
+- `capsule_margin_loss.py`: CapsNet margin loss, plus an analysis helper.
+- `chamfer_loss.py`: Symmetric Chamfer distance. Builds an O(N*M) pairwise matrix.
+- `clifford_detection_loss.py`: `YOLOv12ObjectDetectionLoss` with configurable strides. Overrides `from_config` to drop the duplicate `reduction` key.
+- `clip_contrastive_loss.py`: Symmetric CLIP loss over a dict or tuple of logit matrices. Direct call only; see Conventions.
+- `clustering_loss.py`: Intra-cluster MSE plus a batch-level uniform-distribution penalty, a metrics dataclass, and a callback.
+- `colbert_loss.py`: ColBERT v1 pairwise softmax CE over `nway` MaxSim scores (positive at index 0), and v2 log-target KL distillation with batchmean semantics.
+- `ddpm_hybrid_loss.py`: DDPM `LEARNED_RANGE` objective: epsilon MSE plus a variational bound with a frozen mean. `y_true` packs noise, `x_start` and `t` on the channel axis. `x_t` is re-derived from `DDPMSchedule`.
+- `decoupled_information_loss.py`: CE minus per-sample conditional entropy minus a batch-marginal entropy, plus an analysis helper.
+- `dino_loss.py`: `DINOLoss` / `iBOTPatchLoss` (center EMA inside `call`, schedulable `teacher_temp` Variable, center carried in `get_config`) and `KoLeoLoss`. `pack_student_teacher` is the single source of truth for the packed layout.
+- `doc_scanner_flow_sequence_loss.py`: DocScanner Eq. 9-14. **The only module in `losses/` that imports from `models/`**; see the D-031 anchor.
+- `feature_alignment_loss.py`: Margin-thresholded cosine alignment for distillation.
+- `flow_matching_velocity_loss.py`: Velocity MSE for rectified flow. Time weighting belongs in the trainer.
+- `focal_causal_lm_loss.py`: Focal token CE with an ignore index. Rows are scaled so the batch mean equals the token-pool mean.
+- `focal_uncertainty_loss.py`: Categorical focal loss minus per-sample entropy, plus an analysis helper.
+- `goodhart_loss.py`: CE plus a per-sample confidence penalty (Pereyra 2017), and an optional batch-level `KL(class_prior || mean_p)` term. Arguments after `entropy_weight` are keyword-only; the removed `mi_weight` raises.
+- `harmonic_loss.py`: `harmonic_logits(x, w, n, eps) = -(n/2) * log(||x - w||^2 + eps)` computed in at least float32, and `HarmonicCausalLMLoss` (`from_logits` fixed to `True`).
+- `hrm_loss.py`: HRM loss: LM term plus Q-halt and Q-continue BCE terms. `StableMaxCrossEntropy` is per-token by design (D-002), and the `reduction="none"` on its sub-loss is load-bearing (D-001).
+- `huber_loss.py`: Huber loss, reduced over all non-batch axes.
+- `image_restoration_loss.py`: `CharbonnierLoss`, `FrequencyLoss`, `EdgeLoss`, `VGGLoss`, `EnhanceLoss`, `DarkIRCompositeLoss`. SSIM is gated on its weight because `tf.image.ssim` raises below 11x11 (D-044).
+- `infonce_loss.py`: Single-tower symmetric InfoNCE. Positives are positional; a static batch of 1 raises.
+- `jacobian_symmetry.py`: Stochastic double-VJP Jacobian-asymmetry penalty. Forces float32 and uses `training=False` (D-005). No TF context is opened at import time (D-015).
+- `lightglue_loss.py`: LightGlue layer-weighted balanced NLL (`call`, from packed labels) plus token-confidence BCE in logit space (`compute`, for `add_loss`).
+- `lpips_loss.py`: LPIPS-flavored perceptual distance over a frozen VGG16/19. The extractor is built lazily on first call.
+- `mambalct_loss.py`: `l1_weight * L1 + giou_weight * (1 - GIoU)` over per-frame boxes, averaged over the clip inside each row.
+- `mase_loss.py`: MASE with a per-row numerator over a batch-global naive denominator (deliberately not per row).
+- `masked_causal_lm_loss.py`: Masked token CE and its prefix alias. Rows are scaled so the batch mean equals the token-pool mean.
+- `mean_shift_instance_loss.py`: Per-row pull/push instance-embedding loss. Subsamples to `max_points` only when `N` is static.
+- `multi_labels_loss.py`: `PerChannelBinaryLoss` (adaptive per-channel weighting), element-wise `WeightedBinaryFocalLoss`, `DiceLossPerChannel`, and a factory.
+- `multi_task_loss.py`: Weighted per-task MSE over dict outputs.
+- `multistep_loss.py`: ADAM `mseh` / `tmse` / `gtmse` / `msce` over the horizon axis. `gtmse` is a first-order surrogate about the detached batch mean, exact in value and gradient. The factory raises on unknown kwargs.
+- `nano_vlm_loss.py`: Shifted next-token CE scored on the trailing label-length positions (drops the vision prefix). Reimplements reduction internally.
+- `omnipoint_losses.py`: OmniPoint ray / distance / scale decoupling, finite-difference normal and Laplacian consistency (D-004), mask BCE, `compute_optimal_scale`, and the tuple-in `OmniPointCombinedLoss` callable. Scale alignment uses the ground-truth ray (D-026).
+- `quantile_loss.py`: Single-quantile `MQLoss` and vectorized multi-quantile `QuantileLoss` (optionally normalized, with the scale floored at 1.0).
+- `reid_cosine_loss.py`: Batch-hard softmargin triplet loss, and NumPy `magnet_loss_fn` (batch-level, deliberately not a `Loss`).
+- `sam2_video_loss.py`: Ground-truth-gated SAM 2 mask loss with focal in logit space (D-072), object-score BCE, IoU loss, and `frame_sum` (D-285).
+- `sam3_detection_loss.py`: SAM 3 Hungarian matcher plus the six-term detection loss. Owns the packed layout constants. Uses `tf.py_function`, so it is incompatible with XLA.
+- `sam_mask_loss.py`: `SAMMaskLoss` (focal + dice through layout adapters that refuse the raw mask stack) and `SAMIoULoss`. `match_mask_axis` is the single owner of the GT / round alignment.
+- `scaled_mse_loss.py`: MSE after resizing `y_true` to each prediction scale.
+- `segmentation_loss.py`: `LossConfig` and the `SegmentationLosses` calculator (scalar returns, kept for SAM 1). `create_loss_function` is deprecated.
+- `segmentation_metrics.py`: Per-sample and scalar IoU, Dice, Tversky, focal-Tversky, focal and CE backends.
+- `segmentation_wrapper_loss.py`: Serializable name-dispatched wrapper over `SegmentationLosses` (D-002).
+- `sparse_segmentation_loss.py`: `SparseDiceLoss`, `SparseFocalLoss`, `SparseCeDiceLoss` on logits `(B,H,W,C)` and sparse integer targets with an `ignore_index` that changes neither value nor gradient. They one-hot the targets and call `segmentation_metrics.dice_per_sample` / `focal_per_sample` (MONAI-style per-image Dice, 1e-5 smoothing in both terms; Lin et al. softmax focal, `gamma=0` is CE, no `alpha`). `call()` returns `(batch,)` per image; the stock `SparseCategoricalCrossentropy(ignore_class=)` divides by the batch's valid-pixel count instead. Sources: D-014 and D-024 of plan-2026-11-03T221936-98b866fb.
+- `siamese_tracking_loss.py`: SiamFC logistic loss with an ignore ring, DaSiamRPN classification / regression with packed masks, and `create_siamfc_label`.
+- `siglip_contrastive_loss.py`: SigLIP, adaptive SigLIP, and a hybrid with a cross-modal denoising penalty (not score matching). The factory default for learnable temperature differs from the class default, deliberately.
+- `smape_loss.py`: SMAPE in `[0, 200]`, per sample.
+- `sparsemax_loss.py`: Fenchel-Young sparsemax loss. The boundary cast to `self.dtype` is load-bearing (D-015).
+- `superpoint_loss.py`: 65-class detector CE and the descriptor double hinge (`compute()` takes the real correspondence; `call()` assumes identity).
+- `tabm_loss.py`: TabM ensemble loss, returning one value per input row in both sharing modes (D-027, D-064).
+- `thera_jacobian_tv.py`: THERA `mean(|J|)` aliasing penalty and the `recon + tv_weight * TV` combiner.
+- `topographic_vae_loss.py`: Topographic VAE ELBO with two KL terms. The `u` pair is conditional; half a pair raises. Read `effective_beta`.
+- `utilization_loss.py`: MANN and GNN anti-collapse regularizers (scalar returns).
+- `wasserstein_loss.py`: WGAN critic / generator losses, `compute_gradient_penalty` (rank 4 only), a 1-D Wasserstein divergence, and factories.
+- `yolo12_multitask_loss.py`: YOLOv12 detection (TAL + CIoU + DFL), Dice+Focal segmentation, classification focal, and the rank-routed multi-task orchestrator. Re-keyed with `legacy_packages=("yolov12_losses",)` (D-005).
 
 ## Conventions
 
-Each number below carries the command that re-derives it. Re-run rather than trust — this section
-has gone stale before.
+### Base class
 
-- **Base class.** All losses inherit from `keras.losses.Loss` and implement
-  `call(self, y_true, y_pred)` and `get_config()`. Some modules also export companion metric
-  classes or analysis functions.
+Every loss inherits `keras.losses.Loss` and implements `call(self, y_true, y_pred)` and `get_config()`.
 
-- **`call()` returns ONE VALUE PER SAMPLE, shape `(batch,)` — never a scalar.**
-  This is the rule most often broken here, and the failure is silent. Keras'
-  `reduce_weighted_values` computes `values * sample_weight` **before** reducing, so a scalar
-  return does not *ignore* `sample_weight` — it BROADCASTS against it and yields
-  `whole_batch_loss * mean(sample_weight)`, charging every row the batch aggregate and discarding
-  which rows were weighted. It also makes `reduction=` a dead knob. A plausible wrong number, not
-  an error. `goodhart_loss.py` and `focal_uncertainty_loss.py` are correct exemplars **of the SHAPE
-  rule only**. Correct shape is necessary, not sufficient: the pinned predicate is
-  `weighted == unweighted * mean(w)`, and it is structurally BLIND to a batch-level term added into
-  an already-correctly-shaped `(batch,)` vector. `goodhart_loss.py` passed that predicate on
-  2026-09-02 while two rank-0 regularizers were broadcast into every row, so a `w=0` row still
-  charged its entropy and its probabilities to the batch. If your loss carries a term that is a
-  function of the WHOLE batch, the family predicate will not catch it — write a per-loss arm that
-  asserts `loss(w=[1,..,1,0]) * B/(B-1) == loss(batch[:-1])`, as
-  `tests/test_losses/test_goodhart_loss.py` does.
-  **Which modules still violate this is recorded executably, not in prose:**
-  `tests/test_losses/test_the_premature_scalar_family_is_pinned.py` MEASURES the defect per class
-  and goes red the day one is fixed. Do not duplicate that list here — a prose list rots; the test
-  cannot.
+**Exceptions.** Plain functions (`jacobian_symmetry`, `thera_jacobian_tv`, `segmentation_metrics`, `magnet_loss_fn`) and `OmniPointCombinedLoss`, a registered plain callable over tuples.
 
-- **Registration.** Every `Loss` subclass carries
-  `@register_dl_technique("dl_techniques.losses.<module>")` from
-  `dl_techniques.utils.keras_registration` — never a bare
-  `@keras.saving.register_keras_serializable()`. 50 of 52 modules register something; the
-  non-registering ones export plain functions only.
-  `grep -rl register_dl_technique src/dl_techniques/losses --include=*.py | wc -l`
+### `call()` returns `(batch,)`, never a scalar
 
-- **Import style.** NEW files use `import keras` and qualify at the call site (`keras.ops.matmul`).
-  31 of 52 existing modules use the superseded `from keras import ops`; that majority is **neither a
-  pattern to extend nor a migration target** — leave them alone.
-  `grep -rl "^from keras import ops" src/dl_techniques/losses --include=*.py | wc -l`
+Keras computes `values * sample_weight` before reducing. A scalar return therefore yields `batch_loss * mean(sample_weight)` and makes `reduction=` dead. The result is a plausible wrong number, not an error.
 
-- **Docstring style is Google-majority, and that is a fact, not a mandate.**
-  38 of 52 carry a Google `Args:` block, 14 carry Sphinx `:param `, 2 carry both.
-  **Match the file you are editing; never convert a file wholesale.** The newest modules
-  (`colbert_loss.py`, `infonce_loss.py`) are Sphinx, so both styles are live and growing —
-  an earlier claim that "Sphinx is the losses/ convention" was an overstatement the tree does not
-  support.
-  `grep -rlE "^ +Args:$" src/dl_techniques/losses --include=*.py | wc -l`
-  `grep -rl ":param " src/dl_techniques/losses --include=*.py | wc -l`
+The modules that still violate this are recorded by `tests/test_losses/test_the_premature_scalar_family_is_pinned.py`, which goes red when one is fixed. Do not copy that list into prose.
 
-- **Documenting a loss.** A row in the tables above asserts the symbol is IMPORTABLE from
-  `dl_techniques.losses`. Verify with `hasattr`, not by reading the module — several modules ship
-  classes that `__init__.py` does not export, and a row promising an import that raises is worse
-  than no row at all.
+### A correct shape is not enough
+
+The family predicate `weighted == unweighted * mean(w)` cannot see a batch-level term added into an already-`(batch,)` vector. Any loss with a whole-batch term needs a per-loss test asserting:
+
+```
+loss(w=[1, ..., 1, 0]) * B / (B - 1) == loss(batch[:-1])
+```
+
+`tests/test_losses/test_goodhart_loss.py` shows the pattern. Document the coupling in the docstring.
+
+### One loss object sees one tensor
+
+`compile(loss=obj)` with a dict model output broadcasts `obj` across the leaves and raises `KeyError` (measured, Keras 3.8). A loss that needs several tensors takes ONE packed tensor, and its pack / unpack helpers live in the loss module as the single source of truth. The packing reference implementations are:
+
+- `pack_student_teacher`
+- `pack_matches`
+- the `PACKED_*` constants in `sam3_detection_loss`
+- `DDPMHybridLoss`'s `y_true`
+
+Never pass side information through `sample_weight`; Keras multiplies by it.
+
+### Serialization round-trips
+
+`Loss.get_config()` emits `name` and `reduction`, so `cls.from_config(loss.get_config())` must work. That gives two rules:
+
+- A constructor that does not accept `reduction` (or `**kwargs`) breaks the round trip.
+- A constructor that hard-codes `reduction` in `super().__init__` must override `from_config` to pop the key, as `CliffordDetectionLoss` does.
+
+Test every new loss with this round trip.
+
+Store float hyperparameters as Python floats. Do not round-trip them through a float32 tensor, which changes `0.05` to `0.0500000007`; `dino_loss` uses float64 storage for exactly this reason.
+
+### State on a loss
+
+- **Not checkpointed.** Variables owned by a `Loss` are not saved by `.keras` checkpoints (measured in `dino_loss`, D-007). Carry required state in `get_config()`.
+- **Not trained.** Do not expect a `trainable=True` variable on a `Loss` to be optimized by `fit()`: the loss is not a tracked layer. Put learnable parameters in the model.
+- **Updated on validation.** State assigned inside `call()` also updates on validation batches. Document this, as `DINOLoss` does.
+- **Schedulable scalars.** A Python float read inside `call()` is constant-folded into the traced step. A scalar meant to change during `fit()` must be a `keras.Variable` with a setter (D-022).
+
+### Graph safety
+
+- Never branch in Python on a tensor value. Branch only on static shapes or config.
+- Keep constant tables as NumPy and convert them inside `call()`. A tensor materialized during tracing binds to that `FuncGraph`.
+
+### Numerics
+
+- **Compute dtype.** `Loss.__call__` casts inputs to `floatx()`, but a direct `.call()` does not. Compute `log`, `exp` and large sums in at least float32.
+- **Dtype names.** Read a dtype name with `getattr(dtype, "name", None) or str(dtype)`, never with `keras.backend.standardize_dtype` (banned repo-wide).
+- **Stay in logit space.** Prefer `softplus(-x) + x * (1 - t)` and `log_softmax` over clipping probabilities. `ops.clip` has zero gradient outside its range; that killed the SAM 2 mask head (D-072). The textbook `max(x, 0) - x*t + log1p(exp(-|x|))` autodiffs wrongly at exactly `x = 0`.
+- **Pretrained feature extractors.** Use the backbone's own `preprocess_input`. Keras VGG weights expect caffe preprocessing, not torch mean/std.
+
+### Registration
+
+Every `Loss` subclass carries `@register_dl_technique("dl_techniques.losses.<module>")`, never a bare `register_keras_serializable`. Re-keying an explicitly-packaged class requires `legacy_packages=(...)`, or old archives stop loading.
+
+### Factories
+
+Raise on unknown keyword arguments (the house rule; see `create_multistep_loss`).
+
+### Imports
+
+- New files use `import keras` and qualify at the call site. Leave existing `from keras import ops` files alone.
+- `losses/` must not import from `models/`, except `doc_scanner_flow_sequence_loss.py` (D-031).
+- `import tensorflow` only where a module documents why: `jacobian_symmetry`, `wasserstein_loss`, `image_restoration_loss` (SSIM), `sam3_detection_loss` (`py_function`).
+
+### Docstrings
+
+Both Google `Args:` and Sphinx `:param` styles are live. Match the file you edit; never convert a file wholesale. Cite the reference implementation and paper equation for every transcribed formula, and sign every divergence from it.
+
+### Documentation
+
+Before adding a symbol to a README row, check it with `hasattr(dl_techniques.losses, name)`. Keep the README table and `__all__` in sync.
+
+## Re-deriving counts
+
+Run these instead of trusting any number in a doc:
+
+```bash
+ls src/dl_techniques/losses/*.py | grep -v __init__ | wc -l
+grep -rl register_dl_technique src/dl_techniques/losses --include=*.py | wc -l
+grep -rl "^from keras import ops" src/dl_techniques/losses --include=*.py | wc -l
+grep -rlE "^ +Args:$" src/dl_techniques/losses --include=*.py | wc -l
+grep -rl ":param " src/dl_techniques/losses --include=*.py | wc -l
+```
 
 ## Testing
 

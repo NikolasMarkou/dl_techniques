@@ -27,8 +27,14 @@ Example::
 import keras
 from keras import ops
 from typing import Any, Dict, List, Optional, Union
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.metrics.primary_output_metrics")
 class PrimaryOutputAccuracy(keras.metrics.Metric):
@@ -192,3 +198,5 @@ class PrimaryOutputTopKAccuracy(keras.metrics.Metric):
             "k": self.k,
         })
         return config
+
+# ---------------------------------------------------------------------

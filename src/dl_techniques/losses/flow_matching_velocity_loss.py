@@ -38,9 +38,14 @@ import keras
 from keras import ops
 from typing import Any, Dict
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.losses.flow_matching_velocity_loss")
 class FlowMatchingVelocityLoss(keras.losses.Loss):
@@ -114,3 +119,5 @@ class FlowMatchingVelocityLoss(keras.losses.Loss):
             "time_weighting": self.time_weighting,
         })
         return config
+
+# ---------------------------------------------------------------------

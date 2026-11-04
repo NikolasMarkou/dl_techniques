@@ -21,7 +21,9 @@
 
 ### What Are These Metrics?
 
-When building predictive models, especially for binary classification, we need to evaluate not just *whether* our model makes correct predictions, but *how confident* it should be in those predictions. Two fundamental metrics for this purpose are:
+When building predictive models, especially for binary classification, we need to evaluate not just *whether* our model
+makes correct predictions, but *how confident* it should be in those predictions. Two fundamental metrics for this
+purpose are:
 
 - **Brier Score (BS)**: Measures the quality of probabilistic predictions
 - **Brier Skill Score (BSS)**: Measures the improvement over a baseline
@@ -48,10 +50,12 @@ When building predictive models, especially for binary classification, we need t
 
 ### Level 1: The Core Idea
 
-**What It Is:** The Brier Score measures the accuracy of probability predictions by calculating the mean squared error between predicted probabilities and actual outcomes.
+**What It Is:** The Brier Score measures the accuracy of probability predictions by calculating the mean squared error
+between predicted probabilities and actual outcomes.
 
-**The Golden Rule:** 
-- **Lower is better** 
+**The Golden Rule:**
+
+- **Lower is better**
 - A score of **0** is perfect
 - Range: **[0, 1]** for binary classification, **[0, 2]** for multi-class
 
@@ -61,9 +65,9 @@ When building predictive models, especially for binary classification, we need t
 
 Think of the Brier Score as a stricter grading system than simple accuracy:
 
-| Metric | Question Asked |
-|--------|----------------|
-| **Accuracy** | "Did you predict the right outcome?" (Binary: Yes/No) |
+| Metric          | Question Asked                                                     |
+|-----------------|--------------------------------------------------------------------|
+| **Accuracy**    | "Did you predict the right outcome?" (Binary: Yes/No)              |
 | **Brier Score** | "How confident were you, and were you right to be that confident?" |
 
 #### The Penalty Structure
@@ -96,6 +100,7 @@ Key Insight: Being wrong with high confidence is severely punished!
 $$BS = \frac{1}{N} \sum_{i=1}^{N} (p_i - o_i)^2$$
 
 Where:
+
 - **N**: Total number of predictions
 - **p_i**: Predicted probability for instance *i* (between 0 and 1)
 - **o_i**: Actual outcome for instance *i* (0 or 1)
@@ -104,31 +109,33 @@ Where:
 
 A spam filter makes predictions on three emails:
 
-| Email | Predicted P(Spam) | Actual | Error | Squared Error |
-|-------|------------------|--------|-------|---------------|
-| 1 | 0.9 | 1 (spam) | -0.1 | 0.01 |
-| 2 | 0.2 | 0 (not spam) | 0.2 | 0.04 |
-| 3 | 0.8 | 0 (not spam) | 0.8 | **0.64** |
+| Email | Predicted P(Spam) | Actual       | Error | Squared Error |
+|-------|-------------------|--------------|-------|---------------|
+| 1     | 0.9               | 1 (spam)     | -0.1  | 0.01          |
+| 2     | 0.2               | 0 (not spam) | 0.2   | 0.04          |
+| 3     | 0.8               | 0 (not spam) | 0.8   | **0.64**      |
 
 **Calculation:**
 
 $$BS = \frac{0.01 + 0.04 + 0.64}{3} = \frac{0.69}{3} = 0.23$$
 
-**Interpretation:** 
+**Interpretation:**
+
 - Email 1: High confidence, correct → small penalty
-- Email 2: Low confidence (predicted not spam), correct → small penalty  
+- Email 2: Low confidence (predicted not spam), correct → small penalty
 - Email 3: High confidence, **wrong** → **large penalty** (dominates the score!)
 
 ### Level 4: Context and Comparison
 
 #### Score Ranges
 
-| Classification Type | Range | Perfect | Worst | Uninformed |
-|-------------------|-------|---------|-------|------------|
-| **Binary** | [0, 1] | 0 | 1 | 0.25 |
-| **Multi-Class** | [0, 2] | 0 | 2 | varies |
+| Classification Type | Range  | Perfect | Worst | Uninformed |
+|---------------------|--------|---------|-------|------------|
+| **Binary**          | [0, 1] | 0       | 1     | 0.25       |
+| **Multi-Class**     | [0, 2] | 0       | 2     | varies     |
 
-> **Critical Insight:** A model that always predicts 0.5 (maximum uncertainty) achieves a Brier Score of 0.25 in binary classification. Any score worse than this means the model is worse than guessing!
+> **Critical Insight:** A model that always predicts 0.5 (maximum uncertainty) achieves a Brier Score of 0.25 in binary
+> classification. Any score worse than this means the model is worse than guessing!
 
 #### Comparison with Other Metrics
 
@@ -154,17 +161,17 @@ Accuracy    │ Final Label   │   Poor       │   ★★★★★
 
 **Key Differences:**
 
-| **Brier Score vs. Log Loss** |
-|-------------------------------|
-| • **Quadratic penalty** (x²) vs. logarithmic penalty (log x) |
+| **Brier Score vs. Log Loss**                                               |
+|----------------------------------------------------------------------------|
+| • **Quadratic penalty** (x²) vs. logarithmic penalty (log x)               |
 | • More interpretable for evaluation vs. better for gradient-based training |
-| • Less harsh on extreme errors vs. punishes extreme errors more |
+| • Less harsh on extreme errors vs. punishes extreme errors more            |
 
-| **Brier Score vs. ROC-AUC** |
-|-----------------------------|
+| **Brier Score vs. ROC-AUC**                                        |
+|--------------------------------------------------------------------|
 | • Evaluates calibration AND discrimination vs. only discrimination |
-| • Sensitive to probability values vs. only cares about ordering |
-| • Can detect overconfidence vs. cannot detect overconfidence |
+| • Sensitive to probability values vs. only cares about ordering    |
+| • Can detect overconfidence vs. cannot detect overconfidence       |
 
 ### Level 5: Mastery and Application
 
@@ -190,6 +197,7 @@ Solution: Monitor Brier Score during training!
 ```
 
 **Example:**
+
 - Model predicts 0.999 for "benign tumor"
 - Actual outcome: malignant (1)
 - The model was catastrophically wrong but extremely confident
@@ -203,24 +211,28 @@ The Brier Score can be mathematically decomposed into three interpretable compon
 $$\text{Brier Score} = \underbrace{\text{Reliability}}_{\text{minimize}} - \underbrace{\text{Resolution}}_{\text{maximize}} + \underbrace{\text{Uncertainty}}_{\text{irreducible}}$$
 
 **1. Uncertainty (Irreducible)**
+
 - The inherent randomness in the data
 - Represents the best possible Brier Score given the base rate
 - For a dataset with 30% positive cases: Uncertainty = 0.3 × 0.7 = 0.21
 - **You cannot improve this** – it's a property of the data
 
 **2. Resolution (Discrimination Ability)**
+
 - Measures how well the model separates positive and negative cases
 - Higher resolution = better discrimination
 - Perfect resolution: assign different probabilities to different classes
 - **Maximize this** through better features and model architecture
 
 **3. Reliability (Calibration Error)**
+
 - How well predicted probabilities match observed frequencies
 - A reliable model that predicts "80%" is correct 80% of the time
 - Poor calibration = high reliability error
 - **Minimize this** through calibration techniques
 
 **Interpretation:**
+
 ```
 Good Model = Low Uncertainty (can't control) 
            + High Resolution (good discrimination)
@@ -231,14 +243,14 @@ Good Model = Low Uncertainty (can't control)
 
 The Brier Score is essential when **the cost of a confident mistake is high**:
 
-| Domain | Why It Matters |
-|--------|----------------|
-| **Medical Diagnosis** | Doctors need trustworthy confidence estimates for treatment decisions |
-| **Finance** | Risk assessment requires accurate probabilities for portfolio optimization |
-| **Autonomous Systems** | Self-driving cars must know when they're uncertain about obstacles |
-| **Weather Forecasting** | Original use case – "70% chance of rain" must be reliable |
-| **Credit Scoring** | Loan approval confidence affects financial decisions |
-| **Fraud Detection** | False alarms cost money; need to know real probability of fraud |
+| Domain                  | Why It Matters                                                             |
+|-------------------------|----------------------------------------------------------------------------|
+| **Medical Diagnosis**   | Doctors need trustworthy confidence estimates for treatment decisions      |
+| **Finance**             | Risk assessment requires accurate probabilities for portfolio optimization |
+| **Autonomous Systems**  | Self-driving cars must know when they're uncertain about obstacles         |
+| **Weather Forecasting** | Original use case – "70% chance of rain" must be reliable                  |
+| **Credit Scoring**      | Loan approval confidence affects financial decisions                       |
+| **Fraud Detection**     | False alarms cost money; need to know real probability of fraud            |
 
 ---
 
@@ -248,13 +260,15 @@ The Brier Score is essential when **the cost of a confident mistake is high**:
 
 **What It Is:** A score that measures the *improvement* of your model over a simple baseline guess.
 
-**The Golden Rule:** 
+**The Golden Rule:**
+
 - **Higher is better**
 - A score of **1** is perfect skill
 - A score of **0** means no improvement over baseline
 - **Negative** scores mean worse than baseline
 
-**Why It Matters:** It provides context by answering: *"Is my complex model actually better than just guessing the average?"*
+**Why It Matters:** It provides context by answering: *"Is my complex model actually better than just guessing the
+average?"*
 
 ### Level 2: The Intuition
 
@@ -292,12 +306,14 @@ to:
 $$BSS = 1 - \frac{BS_{\text{model}}}{BS_{\text{baseline}}}$$
 
 Where:
+
 - **BS_model**: The Brier Score of your trained model
 - **BS_baseline**: The Brier Score of a reference model (usually climatology/base rate)
 
 #### Worked Example: Employee Churn Prediction
 
 **Scenario:** Predicting employee churn in a company
+
 - Dataset: 1,000 employees
 - Churned: 100 employees (10% base rate)
 - Stayed: 900 employees (90%)
@@ -307,11 +323,13 @@ Where:
 The baseline model is naive – it ignores all features and predicts 10% (0.1) probability for everyone.
 
 For employees who **churned** (outcome = 1):
+
 - Error per person: (0.1 - 1)² = 0.81
 - Total error: 100 × 0.81 = 81
 
 For employees who **stayed** (outcome = 0):
-- Error per person: (0.1 - 0)² = 0.01  
+
+- Error per person: (0.1 - 0)² = 0.01
 - Total error: 900 × 0.01 = 9
 
 **BS_baseline:**
@@ -326,8 +344,9 @@ $$BS_{\text{model}} = 0.06$$
 
 $$BSS = 1 - \frac{0.06}{0.09} = 1 - 0.667 = 0.333$$
 
-**Interpretation:** 
-Your model has **33.3% skill**. It eliminated one-third of the error from just guessing the base rate. This is meaningful improvement, but there's room for further optimization.
+**Interpretation:**
+Your model has **33.3% skill**. It eliminated one-third of the error from just guessing the base rate. This is
+meaningful improvement, but there's room for further optimization.
 
 ### Level 4: Context and Interpretation
 
@@ -363,27 +382,27 @@ BSS Interpretation Guide
       │
 ```
 
-| BSS Value | Interpretation | Action |
-|-----------|----------------|--------|
-| **1.0** | Perfect Skill | Validate – likely overfitting or data leakage |
-| **(0.5, 1.0)** | Excellent Skill | Deploy with confidence |
-| **(0.3, 0.5)** | Good Skill | Deploy, monitor performance |
-| **(0.1, 0.3)** | Modest Skill | Consider cost-benefit of deployment |
-| **(0, 0.1)** | Minimal Skill | Improve features, try different approach |
-| **0** | No Skill | Model is worthless, equivalent to baseline |
-| **< 0** | Negative Skill | **CRITICAL**: Model is actively harmful! |
+| BSS Value      | Interpretation  | Action                                        |
+|----------------|-----------------|-----------------------------------------------|
+| **1.0**        | Perfect Skill   | Validate – likely overfitting or data leakage |
+| **(0.5, 1.0)** | Excellent Skill | Deploy with confidence                        |
+| **(0.3, 0.5)** | Good Skill      | Deploy, monitor performance                   |
+| **(0.1, 0.3)** | Modest Skill    | Consider cost-benefit of deployment           |
+| **(0, 0.1)**   | Minimal Skill   | Improve features, try different approach      |
+| **0**          | No Skill        | Model is worthless, equivalent to baseline    |
+| **< 0**        | Negative Skill  | **CRITICAL**: Model is actively harmful!      |
 
 #### Brier Score vs. Brier Skill Score
 
-| Feature | Brier Score (BS) | Brier Skill Score (BSS) |
-|---------|-----------------|------------------------|
-| **Question** | "How accurate are my probabilities?" | "How much better than a simple guess?" |
-| **Best Value** | 0 (no error) | 1 (perfect improvement) |
-| **Worst Value** | 1 (binary) or 2 (multi-class) | -∞ (theoretically) |
-| **Range** | [0, 1] or [0, 2] | (-∞, 1] |
-| **Type** | Absolute performance | Relative performance |
-| **Insight** | Calibration quality | Value added by model |
-| **Use Case** | Model diagnostics | Model comparison |
+| Feature         | Brier Score (BS)                     | Brier Skill Score (BSS)                |
+|-----------------|--------------------------------------|----------------------------------------|
+| **Question**    | "How accurate are my probabilities?" | "How much better than a simple guess?" |
+| **Best Value**  | 0 (no error)                         | 1 (perfect improvement)                |
+| **Worst Value** | 1 (binary) or 2 (multi-class)        | -∞ (theoretically)                     |
+| **Range**       | [0, 1] or [0, 2]                     | (-∞, 1]                                |
+| **Type**        | Absolute performance                 | Relative performance                   |
+| **Insight**     | Calibration quality                  | Value added by model                   |
+| **Use Case**    | Model diagnostics                    | Model comparison                       |
 
 ### Level 5: Mastery and Application
 
@@ -397,10 +416,12 @@ The BSS is **essential** for imbalanced data where accuracy is misleading.
 - Total patients: 10,000
 
 **Naive Model:** Always predicts "no disease" (probability = 0%)
+
 - Accuracy: 99% (looks great!)
 - Brier Score: 0.01 (looks great!)
 
 **Baseline Model:** Always predicts base rate (probability = 1%)
+
 - Brier Score: ≈ 0.01
 
 **BSS Calculation:**
@@ -428,13 +449,13 @@ BSS            │      0        │  Revealing! ✓
 
 While the base rate (climatology) is standard, you can use other baselines:
 
-| Baseline Type | When to Use | Example |
-|--------------|-------------|---------|
-| **Base Rate** | Default choice | Always predict 10% churn rate |
-| **Previous Model** | Benchmarking improvements | Is new deep learning better than logistic regression? |
-| **Feature Subset** | Feature engineering evaluation | Does adding customer sentiment improve predictions? |
-| **Random Guess** | Sanity check | Is model better than random? |
-| **Domain Expert** | Human vs. AI comparison | Can model beat human forecasters? |
+| Baseline Type      | When to Use                    | Example                                               |
+|--------------------|--------------------------------|-------------------------------------------------------|
+| **Base Rate**      | Default choice                 | Always predict 10% churn rate                         |
+| **Previous Model** | Benchmarking improvements      | Is new deep learning better than logistic regression? |
+| **Feature Subset** | Feature engineering evaluation | Does adding customer sentiment improve predictions?   |
+| **Random Guess**   | Sanity check                   | Is model better than random?                          |
+| **Domain Expert**  | Human vs. AI comparison        | Can model beat human forecasters?                     |
 
 **Advanced Example: Model Evolution Tracking**
 
@@ -482,8 +503,9 @@ This combination tells the complete story: **what** the performance is (BS) and 
 $$BS = \frac{1}{N} \sum_{i=1}^{N} (f_i - o_i)^2$$
 
 where:
+
 - N = number of instances
-- f_i = forecast probability for instance i  
+- f_i = forecast probability for instance i
 - o_i ∈ {0, 1} = actual outcome for instance i
 
 #### Brier Skill Score
@@ -502,6 +524,7 @@ For K classes:
 $$BS = \frac{1}{N} \sum_{i=1}^{N} \sum_{k=1}^{K} (f_{ik} - o_{ik})^2$$
 
 where:
+
 - f_ik = forecast probability for class k, instance i
 - o_ik ∈ {0, 1} = indicator for class k, instance i
 - Range: [0, 2] (not [0, 1] like binary case)
@@ -511,6 +534,7 @@ where:
 #### Proper Scoring Rule
 
 The Brier Score is a **strictly proper scoring rule**:
+
 - A forecaster maximizes their expected score by reporting true probabilities
 - Cannot "game" the metric by manipulating predictions
 - However, BSS is **not strictly proper** (but asymptotically proper with large samples)
@@ -520,11 +544,12 @@ The Brier Score is a **strictly proper scoring rule**:
 $$BS = \text{REL} - \text{RES} + \text{UNC}$$
 
 where:
+
 - **REL (Reliability)**: Calibration error – should be minimized
-- **RES (Resolution)**: Discriminatory power – should be maximized  
+- **RES (Resolution)**: Discriminatory power – should be maximized
 - **UNC (Uncertainty)**: Data entropy – irreducible
 
-$$\text{UNC} = \bar{o}(1 - \bar{o})$$
+$$\text{UNC} = \bar{o} (1 - \bar{o})$$
 
 where $\bar{o}$ is the base rate (mean outcome).
 
@@ -807,6 +832,7 @@ grid_search = GridSearchCV(
 ### 1. Calibration and the Brier Score
 
 A model can have good Brier Score in two ways:
+
 1. **Good discrimination** (Resolution): Separates classes well
 2. **Good calibration** (Reliability): Predicted probabilities match observed frequencies
 
@@ -826,6 +852,7 @@ Both have AUC = 0.85, but Model A is much better!
 ```
 
 **Calibration Techniques:**
+
 - Platt Scaling (Logistic Regression on outputs)
 - Isotonic Regression
 - Temperature Scaling (for neural networks)
@@ -834,6 +861,7 @@ Both have AUC = 0.85, but Model A is much better!
 ### 2. Sample Size Considerations
 
 **Critical insight from Wilks (2010):**
+
 - For rare events (< 5% frequency): Need n > 1,000 for reliable BSS
 - For common events: n > 100 often sufficient
 - Small samples can give misleading BSS values
@@ -853,15 +881,18 @@ Event Frequency │ Minimum Sample Size │ Recommended
 
 ### 3. The BSS Paradox for Well-Calibrated Models
 
-**Surprising fact:** A perfectly calibrated model on inherently noisy data will have BSS < 1, even when predictions are "correct."
+**Surprising fact:** A perfectly calibrated model on inherently noisy data will have BSS < 1, even when predictions are
+"correct."
 
 **Example:**
+
 - Coin flip prediction: 50% probability for heads
 - This is perfectly calibrated
 - But BS = 0.25 (not 0) because outcomes are still random
 - BSS relative to baseline ≈ 0
 
-**Implication:** Don't expect BSS close to 1 for truly probabilistic phenomena. BSS measures **reducible uncertainty**, not all uncertainty.
+**Implication:** Don't expect BSS close to 1 for truly probabilistic phenomena. BSS measures **reducible uncertainty**,
+not all uncertainty.
 
 ### 4. Multi-Class Extensions
 
@@ -870,6 +901,7 @@ For K classes, use the ranked probability score (RPS) or multi-class Brier Score
 $$BS_{\text{multi}} = \frac{1}{N} \sum_{i=1}^{N} \sum_{k=1}^{K} (p_{ik} - o_{ik})^2$$
 
 Key differences:
+
 - Range is [0, 2] not [0, 1]
 - Accounts for ordinal relationships (RPS version)
 - Decomposition is more complex
@@ -1046,6 +1078,7 @@ model.compile(loss='binary_crossentropy')  # or brier_score_loss
 **Context:** Recent research (2024) shows Brier Score is effective for assessing medical students' diagnostic reasoning.
 
 **Application:**
+
 ```python
 def evaluate_diagnostic_reasoning(
     diagnosis_probs: dict,
@@ -1241,13 +1274,13 @@ Start: Need to evaluate probabilistic predictions?
 
 ### Metric Comparison Table
 
-| Need | Use | Interpretation | Range |
-|------|-----|----------------|-------|
-| Absolute calibration quality | **Brier Score** | Lower is better | [0, 1] |
-| Relative skill vs. baseline | **Brier Skill Score** | Higher is better | (-∞, 1] |
-| Ranking ability only | ROC-AUC | Higher is better | [0, 1] |
-| Training loss (gradient-based) | Log Loss | Lower is better | [0, ∞) |
-| Simple interpretability | Accuracy | Higher is better | [0, 1] |
+| Need                           | Use                   | Interpretation   | Range   |
+|--------------------------------|-----------------------|------------------|---------|
+| Absolute calibration quality   | **Brier Score**       | Lower is better  | [0, 1]  |
+| Relative skill vs. baseline    | **Brier Skill Score** | Higher is better | (-∞, 1] |
+| Ranking ability only           | ROC-AUC               | Higher is better | [0, 1]  |
+| Training loss (gradient-based) | Log Loss              | Lower is better  | [0, ∞)  |
+| Simple interpretability        | Accuracy              | Higher is better | [0, 1]  |
 
 ### Key Formulas
 
@@ -1278,25 +1311,26 @@ Baseline (Climatology): BS_base = (1/N) Σ(p̄ - o_i)²
 ### Seminal Papers
 
 1. **Brier, G. W. (1950)** - "Verification of forecasts expressed in terms of probability"
-   - *Monthly Weather Review*, 78, 1-3
-   - The original paper introducing the Brier Score
+    - *Monthly Weather Review*, 78, 1-3
+    - The original paper introducing the Brier Score
 
 2. **Murphy, A. H. (1973)** - "A new vector partition of the probability score"
-   - *Journal of Applied Meteorology*, 12, 595-600
-   - Introduces the Brier Score decomposition
+    - *Journal of Applied Meteorology*, 12, 595-600
+    - Introduces the Brier Score decomposition
 
 3. **Wilks, D. S. (2010)** - "Sample size requirements for evaluating probabilistic forecasts"
-   - Guidance on statistical significance of BSS
+    - Guidance on statistical significance of BSS
 
 ### Recent Applications
 
-4. **Stehouwer et al. (2024)** - "Validity and reliability of Brier scoring for assessment of probabilistic diagnostic reasoning"
-   - *Diagnosis*, 12(1), 53-60
-   - Modern medical education application
+4. **Stehouwer et al. (2024)** - "Validity and reliability of Brier scoring for assessment of probabilistic diagnostic
+   reasoning"
+    - *Diagnosis*, 12 (1), 53-60
+    - Modern medical education application
 
 5. **Mason, S. J. (2004)** - "On using 'climatology' as a reference strategy"
-   - *Monthly Weather Review*, 132, 1891-1895
-   - Critical discussion of baseline selection
+    - *Monthly Weather Review*, 132, 1891-1895
+    - Critical discussion of baseline selection
 
 ### Online Resources
 
@@ -1317,12 +1351,14 @@ The Brier Score and Brier Skill Score are indispensable tools for evaluating pro
 ✓ **Insights** into both calibration and discrimination
 
 By mastering these metrics, you can:
+
 - Build more trustworthy models
 - Make better model selection decisions
 - Communicate model performance clearly to stakeholders
 - Identify when "high accuracy" is misleading
 
-Remember: **A high-accuracy model with poor Brier Score is dangerous.** Always evaluate probabilistic calibration, not just binary correctness.
+Remember: **A high-accuracy model with poor Brier Score is dangerous.** Always evaluate probabilistic calibration, not
+just binary correctness.
 
 ---
 

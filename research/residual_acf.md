@@ -2,24 +2,32 @@
 
 ## Overview
 
-The `ResidualACFLayer` is a Keras layer designed to monitor and regularize the autocorrelation function (ACF) of residuals in time series forecasting models. It addresses a critical but often overlooked aspect of forecasting: ensuring that model residuals approximate white noise, which indicates that the model has captured all systematic patterns in the data.
+The `ResidualACFLayer` is a Keras layer designed to monitor and regularize the autocorrelation function (ACF) of
+residuals in time series forecasting models. It addresses a critical but often overlooked aspect of forecasting:
+ensuring that model residuals approximate white noise, which indicates that the model has captured all systematic
+patterns in the data.
 
 ## Motivation
 
 In time series forecasting, a well-specified model should produce residuals that are:
+
 - Uncorrelated across time (no autocorrelation)
 - Centered around zero (unbiased)
 - Homoscedastic (constant variance)
 
-The presence of significant autocorrelation in residuals indicates that the model has failed to capture some temporal structure in the data. This layer helps detect and optionally penalize such patterns during training.
+The presence of significant autocorrelation in residuals indicates that the model has failed to capture some temporal
+structure in the data. This layer helps detect and optionally penalize such patterns during training.
 
 ## Key Features
 
-1. **ACF Computation**: Efficiently computes the autocorrelation function of residuals up to a specified maximum lag using Keras operations.
+1. **ACF Computation**: Efficiently computes the autocorrelation function of residuals up to a specified maximum lag
+   using Keras operations.
 
-2. **Monitoring Mode**: Can be used purely for diagnostic purposes without affecting model training, allowing you to track residual patterns.
+2. **Monitoring Mode**: Can be used purely for diagnostic purposes without affecting model training, allowing you to
+   track residual patterns.
 
-3. **Regularization Mode**: Optionally adds a regularization term to the loss function that penalizes autocorrelation at specified lags.
+3. **Regularization Mode**: Optionally adds a regularization term to the loss function that penalizes autocorrelation at
+   specified lags.
 
 4. **Flexible Targeting**: Allows focusing on specific lags (e.g., daily, weekly patterns) rather than all lags equally.
 
@@ -34,11 +42,12 @@ ACF(k) = Cov(r_t, r_{t-k}) / Var(r_t)
 ```
 
 Where:
+
 - `r_t` are the residuals at time t
 - `Cov` is the covariance
 - `Var` is the variance
 
-For white noise, ACF(k) ≈ 0 for all k > 0.
+For white noise, ACF (k) ≈ 0 for all k > 0.
 
 The layer computes this efficiently using vectorized operations and adds a regularization term:
 
@@ -87,13 +96,17 @@ model.fit(data, callbacks=[acf_callback])
 
 ## Parameters
 
-- **max_lag** (int): Maximum lag to compute ACF for. Higher values capture longer-range dependencies but increase computation.
+- **max_lag** (int): Maximum lag to compute ACF for. Higher values capture longer-range dependencies but increase
+  computation.
 
-- **regularization_weight** (float or None): Weight for the ACF regularization loss. If None, the layer only monitors without affecting training.
+- **regularization_weight** (float or None): Weight for the ACF regularization loss. If None, the layer only monitors
+  without affecting training.
 
-- **target_lags** (list or None): Specific lags to target for regularization. Useful for focusing on known patterns (e.g., [7, 14] for weekly patterns).
+- **target_lags** (list or None): Specific lags to target for regularization. Useful for focusing on known patterns
+  (e.g., [7, 14] for weekly patterns).
 
-- **acf_threshold** (float): Threshold above which ACF values are considered significant and penalized more heavily. Default is 0.1.
+- **acf_threshold** (float): Threshold above which ACF values are considered significant and penalized more heavily.
+  Default is 0.1.
 
 - **use_absolute_acf** (bool): Whether to penalize both positive and negative autocorrelations. Default is True.
 
@@ -105,9 +118,11 @@ model.fit(data, callbacks=[acf_callback])
 
 2. **Target Known Patterns**: If you know your data has weekly seasonality, target lags 7, 14, 21, etc.
 
-3. **Balance Regularization**: Too much weight on ACF regularization might hurt predictive performance. Start with small weights (0.01-0.1).
+3. **Balance Regularization**: Too much weight on ACF regularization might hurt predictive performance. Start with small
+   weights (0.01-0.1).
 
-4. **Combine with Other Diagnostics**: ACF is one diagnostic among many. Also check residual distributions, heteroscedasticity, etc.
+4. **Combine with Other Diagnostics**: ACF is one diagnostic among many. Also check residual distributions,
+   heteroscedasticity, etc.
 
 5. **Computational Considerations**: For very long sequences, consider using a smaller max_lag to reduce memory usage.
 
@@ -133,15 +148,20 @@ model_with_acf = keras.Model([inputs, targets], regularized_predictions)
 
 ## Theoretical Justification
 
-The Box-Jenkins methodology emphasizes that residual analysis is crucial for model validation. The Ljung-Box test, commonly used for testing autocorrelation, essentially tests whether the sum of squared ACF values is significantly different from zero. This layer implements a differentiable version of this concept, allowing gradient-based optimization to directly minimize residual autocorrelation.
+The Box-Jenkins methodology emphasizes that residual analysis is crucial for model validation. The Ljung-Box test,
+commonly used for testing autocorrelation, essentially tests whether the sum of squared ACF values is significantly
+different from zero. This layer implements a differentiable version of this concept, allowing gradient-based
+optimization to directly minimize residual autocorrelation.
 
 ## Limitations and Considerations
 
 1. **Computational Cost**: Computing ACF adds overhead, especially for long sequences and large batches.
 
-2. **Trade-offs**: Minimizing ACF might sometimes conflict with minimizing prediction error. The regularization weight controls this trade-off.
+2. **Trade-offs**: Minimizing ACF might sometimes conflict with minimizing prediction error. The regularization weight
+   controls this trade-off.
 
-3. **Non-stationarity**: The layer assumes stationarity within each sequence. For highly non-stationary data, consider detrending first.
+3. **Non-stationarity**: The layer assumes stationarity within each sequence. For highly non-stationary data, consider
+   detrending first.
 
 4. **Interpretation**: Low ACF doesn't guarantee a good model—it's necessary but not sufficient for model adequacy.
 
@@ -155,4 +175,6 @@ The Box-Jenkins methodology emphasizes that residual analysis is crucial for mod
 
 ## Conclusion
 
-The `ResidualACFLayer` brings classical time series diagnostics into the deep learning era, enabling neural networks to not just minimize prediction error but also produce statistically well-behaved residuals. This is particularly important in domains where forecast reliability and uncertainty quantification matter as much as point accuracy.
+The `ResidualACFLayer` brings classical time series diagnostics into the deep learning era, enabling neural networks to
+not just minimize prediction error but also produce statistically well-behaved residuals. This is particularly important
+in domains where forecast reliability and uncertainty quantification matter as much as point accuracy.

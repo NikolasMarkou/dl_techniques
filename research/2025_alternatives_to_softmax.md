@@ -1,4 +1,5 @@
 # Alternatives to Softmax for Cross Entropy Loss in High Dimensions
+
 ## A Comprehensive Technical Guide (Keras 3.8.0 Edition)
 
 **Last Updated:** November 2025  
@@ -13,21 +14,21 @@
 1. [Executive Summary](#executive-summary)
 2. [Core Problems with Softmax](#core-problems-with-softmax)
 3. [Sparse Alternatives](#sparse-alternatives)
-   - [Sparsemax](#sparsemax)
-   - [Entmax (α-entmax)](#entmax-α-entmax)
+    - [Sparsemax](#sparsemax)
+    - [Entmax (α-entmax)](#entmax-α-entmax)
 4. [Hierarchical & Clustering Approaches](#hierarchical--clustering-approaches)
-   - [Adaptive Softmax](#adaptive-softmax)
-   - [Hierarchical Softmax](#hierarchical-softmax)
+    - [Adaptive Softmax](#adaptive-softmax)
+    - [Hierarchical Softmax](#hierarchical-softmax)
 5. [Spherical & Geometric Methods](#spherical--geometric-methods)
-   - [Spherical Softmax Family](#spherical-softmax-family)
-   - [Hyperspherical Learning](#hyperspherical-learning)
+    - [Spherical Softmax Family](#spherical-softmax-family)
+    - [Hyperspherical Learning](#hyperspherical-learning)
 6. [Regularization Techniques](#regularization-techniques)
-   - [Label Smoothing](#label-smoothing)
+    - [Label Smoothing](#label-smoothing)
 7. [Sampling-Based Approximations](#sampling-based-approximations)
-   - [Noise Contrastive Estimation (NCE)](#noise-contrastive-estimation-nce)
-   - [Sampled Softmax](#sampled-softmax)
+    - [Noise Contrastive Estimation (NCE)](#noise-contrastive-estimation-nce)
+    - [Sampled Softmax](#sampled-softmax)
 8. [Task-Specific Alternatives](#task-specific-alternatives)
-   - [Focal Loss](#focal-loss)
+    - [Focal Loss](#focal-loss)
 9. [Comparative Analysis](#comparative-analysis)
 10. [Implementation Recommendations](#implementation-recommendations)
 11. [Emerging Trends](#emerging-trends)
@@ -40,11 +41,12 @@
 Softmax combined with cross-entropy loss faces significant challenges in high-dimensional settings:
 
 - **Numerical instability**: Overflow/underflow issues with large logits
-- **Computational expense**: O(V×d) scaling with vocabulary size
+- **Computational expense**: O (V×d) scaling with vocabulary size
 - **Dense distributions**: Non-zero probability mass assigned to all classes
 - **Memory requirements**: Full V×d weight matrices
 
 Modern alternatives address these issues through:
+
 - **Sparsity-inducing transformations** (Sparsemax, Entmax)
 - **Hierarchical clustering** (Adaptive Softmax, Hierarchical Softmax)
 - **Sampling-based approximations** (NCE, Sampled Softmax)
@@ -122,6 +124,7 @@ def stable_softmax(x: keras.KerasTensor) -> keras.KerasTensor:
 #### 2. **Computational Bottleneck**
 
 For a vocabulary of **100,000 tokens** and hidden dimension **2,048**:
+
 - Weight matrix: 100,000 × 2,048 = **204.8 million parameters**
 - Forward pass: 204.8M multiplications + 100K exponentiations
 - Backward pass: Similar complexity
@@ -147,7 +150,8 @@ Problem: Assigns probability to irrelevant classes
 
 ### Sparsemax
 
-**Paper**: "From Softmax to Sparsemax: A Sparse Model of Attention and Multi-Label Classification" (Martins & Astudillo, 2016)
+**Paper**: "From Softmax to Sparsemax: A Sparse Model of Attention and Multi-Label Classification" (Martins & Astudillo,
+2016)
 
 **Key Insight**: Project onto probability simplex using Euclidean distance instead of KL divergence.
 
@@ -356,13 +360,13 @@ class SparsemaxLoss(keras.losses.Loss):
 ✅ **Exact sparsity**: Produces true zeros, not just small values  
 ✅ **Interpretability**: Clear feature selection for attention mechanisms  
 ✅ **Differentiability**: Smooth gradients despite piecewise nature  
-✅ **Performance**: Competitive with softmax on many tasks  
+✅ **Performance**: Competitive with softmax on many tasks
 
 #### Limitations
 
-⚠️ **GPU efficiency**: Requires sorting operations (O(K log K))  
+⚠️ **GPU efficiency**: Requires sorting operations (O (K log K))  
 ⚠️ **Implementation**: More complex than softmax  
-⚠️ **Adoption**: Less widespread library support  
+⚠️ **Adoption**: Less widespread library support
 
 #### Use Cases
 
@@ -374,7 +378,8 @@ class SparsemaxLoss(keras.losses.Loss):
 
 ### Entmax (α-entmax)
 
-**Papers**: 
+**Papers**:
+
 - "Sparse Sequence-to-Sequence Models" (Peters et al., 2019)
 - "Adaptively Sparse Transformers" (Correia et al., 2019)
 
@@ -639,21 +644,21 @@ class AdaptiveEntmax(keras.layers.Layer):
 
 #### Computational Complexity
 
-| Method | Time | Space | Sparsity |
-|--------|------|-------|----------|
-| Softmax | O(K) | O(K) | None |
-| Sparsemax | O(K log K) | O(K) | High |
-| Entmax-1.5 | O(K) | O(K) | Moderate |
-| Generic α | O(K log K) | O(K) | Variable |
+| Method     | Time       | Space | Sparsity |
+|------------|------------|-------|----------|
+| Softmax    | O(K)       | O(K)  | None     |
+| Sparsemax  | O(K log K) | O(K)  | High     |
+| Entmax-1.5 | O(K)       | O(K)  | Moderate |
+| Generic α  | O(K log K) | O(K)  | Variable |
 
-**Note**: Efficient O(K) algorithms exist for α = 1.5
+**Note**: Efficient O (K) algorithms exist for α = 1.5
 
 #### Advantages
 
 ✅ **Flexibility**: Single framework for different sparsity levels  
 ✅ **Adaptivity**: Can learn optimal α during training  
 ✅ **Gradients**: Differentiable w.r.t. both inputs and α  
-✅ **Performance**: Often outperforms fixed softmax/sparsemax  
+✅ **Performance**: Often outperforms fixed softmax/sparsemax
 
 #### Use Cases
 
@@ -669,7 +674,8 @@ class AdaptiveEntmax(keras.layers.Layer):
 
 **Paper**: "Efficient softmax approximation for GPUs" (Grave et al., 2017)
 
-**Key Insight**: Exploit word frequency imbalance by clustering vocabulary and using different capacities for each cluster.
+**Key Insight**: Exploit word frequency imbalance by clustering vocabulary and using different capacities for each
+cluster.
 
 #### Architecture Design
 
@@ -983,14 +989,14 @@ class AdaptiveSoftmax(keras.layers.Layer):
 ✅ **GPU-optimized**: Designed for matrix operations  
 ✅ **Minimal accuracy loss**: Perplexity close to full softmax  
 ✅ **Automatic clustering**: Frequency-based, no manual tuning  
-✅ **Plug-and-play**: Drop-in replacement for softmax layer  
+✅ **Plug-and-play**: Drop-in replacement for softmax layer
 
 #### Limitations
 
 ⚠️ **Zipfian assumption**: Works best with skewed distributions  
 ⚠️ **Small vocabularies**: Less benefit for V < 10K  
 ⚠️ **Inference**: Speed advantage primarily during training  
-⚠️ **Memory**: Still needs to store all embeddings  
+⚠️ **Memory**: Still needs to store all embeddings
 
 ---
 
@@ -998,7 +1004,7 @@ class AdaptiveSoftmax(keras.layers.Layer):
 
 **Paper**: "A Scalable Hierarchical Distributed Language Model" (Morin & Bengio, 2005)
 
-**Key Insight**: Organize classes in a binary tree, reducing complexity from O(V) to O(log V).
+**Key Insight**: Organize classes in a binary tree, reducing complexity from O (V) to O (log V).
 
 #### Tree Structure
 
@@ -1233,17 +1239,17 @@ class HierarchicalSoftmax(keras.layers.Layer):
 
 #### Advantages
 
-✅ **Logarithmic complexity**: O(log V) vs O(V)  
+✅ **Logarithmic complexity**: O (log V) vs O (V)  
 ✅ **Large vocabulary scaling**: Benefits increase with V  
-✅ **Memory efficiency**: Same as standard softmax  
+✅ **Memory efficiency**: Same as standard softmax
 
 #### Limitations
 
 ⚠️ **Tree quality**: Performance depends heavily on tree structure  
-⚠️ **Imbalanced trees**: Can degrade to O(V) in worst case  
+⚠️ **Imbalanced trees**: Can degrade to O (V) in worst case  
 ⚠️ **Poor calibration**: Probabilities not well-calibrated  
 ⚠️ **Implementation**: More complex than alternatives  
-⚠️ **Modern context**: Often outperformed by adaptive softmax  
+⚠️ **Modern context**: Often outperformed by adaptive softmax
 
 ---
 
@@ -1513,10 +1519,10 @@ class LearnableLabelSmoothing(keras.losses.Loss):
 ✅ **Simple**: Built-in support in Keras  
 ✅ **Well-calibrated**: Better uncertainty estimates  
 ✅ **Faster convergence**: Improved optimization landscape  
-✅ **Minimal cost**: No computational overhead  
+✅ **Minimal cost**: No computational overhead
 
 ❌ **Hyperparameter**: Need to tune ε (but 0.1 works well)  
-❌ **Not interpretable**: Blurs class boundaries slightly  
+❌ **Not interpretable**: Blurs class boundaries slightly
 
 **Recommendation**: Use label smoothing by default for classification tasks unless you have a specific reason not to.
 
@@ -1526,9 +1532,11 @@ class LearnableLabelSmoothing(keras.losses.Loss):
 
 ### Noise Contrastive Estimation (NCE)
 
-**Paper**: "Noise-contrastive estimation: A new estimation principle for unnormalized statistical models" (Gutmann & Hyvärinen, 2010)
+**Paper**: "Noise-contrastive estimation: A new estimation principle for unnormalized statistical models" (Gutmann &
+Hyvärinen, 2010)
 
-**Key Insight**: Convert expensive multi-class classification into cheap binary classification by contrasting true data with noise samples.
+**Key Insight**: Convert expensive multi-class classification into cheap binary classification by contrasting true data
+with noise samples.
 
 #### Implementation
 
@@ -1716,7 +1724,7 @@ class NCELoss(keras.losses.Loss):
 ✅ **Scalable**: Works with millions of classes  
 ✅ **Flexible**: Can use any noise distribution  
 ✅ **Theoretically grounded**: Converges to MLE  
-✅ **Widely used**: Proven in practice (Word2Vec, etc.)  
+✅ **Widely used**: Proven in practice (Word2Vec, etc.)
 
 #### Limitations
 
@@ -1724,7 +1732,7 @@ class NCELoss(keras.losses.Loss):
 ⚠️ **Hyperparameters**: k and noise distribution matter  
 ⚠️ **Biased estimator**: For finite k  
 ⚠️ **Sampling overhead**: Can dominate for small k  
-⚠️ **Not a probability**: Doesn't output normalized probabilities  
+⚠️ **Not a probability**: Doesn't output normalized probabilities
 
 ---
 
@@ -1921,14 +1929,14 @@ class SampledSoftmaxLoss(keras.losses.Loss):
 ✅ **Good approximation**: Close to full softmax  
 ✅ **Faster training**: 2-5× speedup typical  
 ✅ **Probabilistic**: Outputs proper distributions  
-✅ **Flexible sampling**: Can optimize sample strategy  
+✅ **Flexible sampling**: Can optimize sample strategy
 
 #### Limitations
 
 ⚠️ **Biased gradients**: Not exact unless corrected  
 ⚠️ **Sample size**: Need large samples for accuracy  
 ⚠️ **Inference**: Still need full softmax at test time  
-⚠️ **Implementation**: More complex than NCE  
+⚠️ **Implementation**: More complex than NCE
 
 ---
 
@@ -2273,11 +2281,11 @@ class AdaptiveFocalLoss(keras.losses.Loss):
 ✅ **Class imbalance**: Best-in-class for imbalanced data  
 ✅ **Easy to implement**: Drop-in replacement for CE  
 ✅ **Hyperparameter robust**: γ=2 works for most cases  
-✅ **Widely adopted**: Standard in object detection  
+✅ **Widely adopted**: Standard in object detection
 
 ⚠️ **Calibration**: May need post-hoc temperature scaling  
 ⚠️ **Balanced data**: No advantage over cross-entropy  
-⚠️ **Hyperparameters**: γ and α need tuning for optimal performance  
+⚠️ **Hyperparameters**: γ and α need tuning for optimal performance
 
 ---
 
@@ -2561,26 +2569,34 @@ class UniversalLoss(keras.losses.Loss):
 ### Foundational Papers
 
 **Sparse Alternatives:**
-1. Martins & Astudillo (2016). "From Softmax to Sparsemax: A Sparse Model of Attention and Multi-Label Classification". ICML.
+
+1. Martins & Astudillo (2016). "From Softmax to Sparsemax: A Sparse Model of Attention and Multi-Label Classification".
+   ICML.
 2. Peters et al. (2019). "Sparse Sequence-to-Sequence Models". ACL.
 3. Correia et al. (2019). "Adaptively Sparse Transformers". EMNLP.
 
 **Hierarchical Methods:**
+
 4. Grave et al. (2017). "Efficient softmax approximation for GPUs". ICML.
 5. Morin & Bengio (2005). "A Scalable Hierarchical Distributed Language Model". NIPS.
 
 **Geometric Methods:**
+
 6. de Brébisson & Vincent (2015). "An Exploration of Softmax Alternatives Belonging to the Spherical Loss Family". ICLR.
 7. Liu et al. (2017). "SphereFace: Deep Hypersphere Embedding for Face Recognition". CVPR.
 
 **Sampling Methods:**
-8. Gutmann & Hyvärinen (2010). "Noise-contrastive estimation: A new estimation principle for unnormalized statistical models". JMLR.
+
+8. Gutmann & Hyvärinen (2010). "Noise-contrastive estimation: A new estimation principle for unnormalized statistical
+   models". JMLR.
 9. Jean et al. (2015). "On Using Very Large Target Vocabulary for Neural Machine Translation". ACL.
 
 **Regularization:**
+
 10. Szegedy et al. (2016). "Rethinking the Inception Architecture for Computer Vision". CVPR.
 
 **Task-Specific:**
+
 11. Lin et al. (2017). "Focal Loss for Dense Object Detection". ICCV.
 
 ### Keras Resources
@@ -2593,7 +2609,8 @@ class UniversalLoss(keras.losses.Loss):
 
 ## Conclusion
 
-The landscape of softmax alternatives is rich and diverse, with no single "best" solution. The optimal choice depends on:
+The landscape of softmax alternatives is rich and diverse, with no single "best" solution. The optimal choice depends
+on:
 
 1. **Vocabulary size**: Large vocabularies benefit from adaptive/hierarchical methods
 2. **Data balance**: Imbalanced datasets need focal loss or reweighting
@@ -2605,7 +2622,8 @@ The landscape of softmax alternatives is rich and diverse, with no single "best"
 
 **For High Dimensions**: Adaptive softmax + NCE during training provides best speed/accuracy trade-off.
 
-**Stay Updated**: This is an active research area with new developments regularly. Follow keras.io and arxiv.org for latest updates.
+**Stay Updated**: This is an active research area with new developments regularly. Follow keras.io and arxiv.org for
+latest updates.
 
 ---
 

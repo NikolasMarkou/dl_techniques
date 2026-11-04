@@ -23,16 +23,20 @@
 
 ### The Problem Space
 
-Neural networks learn by encoding correlations from training data into their weight matrices. **Correlation Traps** represent a pathological failure mode where this encoding process breaks down, creating spurious large-magnitude weights that harm generalization rather than help it.
+Neural networks learn by encoding correlations from training data into their weight matrices. **Correlation Traps**
+represent a pathological failure mode where this encoding process breaks down, creating spurious large-magnitude weights
+that harm generalization rather than help it.
 
 ### SETOL Theory Overview
 
 **SETOL** (Semi-Empirical Theory of Deep Learning) combines:
+
 - **Statistical Mechanics** (from physics)
 - **Random Matrix Theory (RMT)** (from mathematics)
 - **Heavy-Tailed Self-Regularization (HTSR)** (phenomenological theory)
 
-The core insight: Well-trained neural networks exhibit **self-organization** where weight matrices develop characteristic heavy-tailed eigenvalue distributions following **Power Laws** with specific exponents.
+The core insight: Well-trained neural networks exhibit **self-organization** where weight matrices develop
+characteristic heavy-tailed eigenvalue distributions following **Power Laws** with specific exponents.
 
 ### The Self-Organization Principle
 
@@ -82,11 +86,13 @@ X = (1/N) · W^T · W
 ```
 
 Where:
+
 - **X** is the **N × N** correlation matrix
 - **W^T** is the transpose of W
 - Factor **1/N** normalizes the matrix
 
 **Properties:**
+
 - X is symmetric: X^T = X
 - X is positive semi-definite
 - Eigenvalues λ_i ≥ 0 for all i
@@ -124,7 +130,8 @@ Frequency
 
 **The Random Matrix Baseline:**
 
-For a **random** matrix with i.i.d. entries (mean 0, variance σ²), the ESD converges to the **Marchenko-Pastur distribution** as N, M → ∞.
+For a **random** matrix with i.i.d. entries (mean 0, variance σ²), the ESD converges to the **Marchenko-Pastur
+distribution** as N, M → ∞.
 
 **MP Distribution Formula:**
 
@@ -176,13 +183,15 @@ Density ρ
     └─> Point mass at 0
 ```
 
-**Critical Insight:** If a weight matrix were **purely random** (untrained), its ESD would follow the MP distribution. Deviations from MP indicate **learned structure**.
+**Critical Insight:** If a weight matrix were **purely random** (untrained), its ESD would follow the MP distribution.
+Deviations from MP indicate **learned structure**.
 
 ### 2.4 Tracy-Widom Distribution
 
 **Fluctuations at the Edge:**
 
-Even for truly random matrices, the **largest eigenvalue** doesn't sit exactly at λ_+, but fluctuates according to the **Tracy-Widom (TW)** distribution.
+Even for truly random matrices, the **largest eigenvalue** doesn't sit exactly at λ_+, but fluctuates according to the
+**Tracy-Widom (TW)** distribution.
 
 **Scaling:**
 
@@ -214,6 +223,7 @@ Std(TW_β=1)  ≈ 1.607
 **Why This Matters:**
 
 To detect a **Correlation Trap**, we need to distinguish between:
+
 1. **Normal fluctuations** (Tracy-Widom, expected)
 2. **Abnormal spikes** (Correlation Traps, pathological)
 
@@ -239,7 +249,8 @@ Eigenvalue
 
 **A Correlation Trap is characterized by:**
 
-One or more large eigenvalues **λ_trap** in the **randomized** weight matrix **W^rand** that extend significantly beyond the theoretical MP bulk + TW fluctuations.
+One or more large eigenvalues **λ_trap** in the **randomized** weight matrix **W^rand** that extend significantly beyond
+the theoretical MP bulk + TW fluctuations.
 
 **Key Point:** The trap is detected in **W^rand**, NOT in the original W!
 
@@ -339,6 +350,7 @@ Extract: W with shape (M, N)
 ```
 
 **Implementation Note:**
+
 ```python
 # For Keras/TensorFlow
 W = layer.get_weights()[0]  # Shape: (N_in, N_out) → (N, M)
@@ -365,10 +377,12 @@ Output: W^rand (M × N matrix)
 ```
 
 **Critical Properties Preserved:**
+
 - Element value distribution (histogram)
 - Matrix dimensions (M, N)
 
 **Properties Destroyed:**
+
 - Spatial relationships between elements
 - Learned correlation structure
 - Block structure / patterns
@@ -392,6 +406,7 @@ X^rand = (1/N) · (W^rand)^T · W^rand
 ```
 
 **Dimensions:**
+
 - W^rand: M × N
 - (W^rand)^T: N × M
 - Product: N × N
@@ -413,6 +428,7 @@ Sort: λ_1 ≥ λ_2 ≥ ... ≥ λ_N ≥ 0
 ```
 
 **Numerical Considerations:**
+
 - Use SVD for better numerical stability
 - For large matrices, compute only largest eigenvalues
 - Eigenvalues must be non-negative (up to numerical precision)
@@ -504,6 +520,7 @@ where:
 ### 5.2 Detailed Calculation Example
 
 **Given:**
+
 - Layer weight matrix W: 512 × 256 (M=512, N=256)
 - After randomization: W^rand
 
@@ -574,6 +591,7 @@ Best: α ≈ 2
 ```
 
 **When a trap exists:**
+
 - The Power Law fit becomes unreliable
 - Alpha may be artificially inflated (α > 6)
 - The ESD looks nearly random
@@ -1322,14 +1340,16 @@ optimizer = Adam(clipnorm=1.0)  # ← Prevents exploding gradients
 **Information Theory Perspective:**
 
 Original matrix W encodes:
-- Mutual information I(W; Data)
+
+- Mutual information I (W; Data)
 - Spatial correlations
 - Learned patterns
 
 Randomized W^rand:
-- Preserves marginal distribution P(w_ij)
-- Destroys joint distribution P(W)
-- I(W^rand; Data) ≈ 0
+
+- Preserves marginal distribution P (w_ij)
+- Destroys joint distribution P (W)
+- I (W^rand; Data) ≈ 0
 
 **Key Insight:**
 
@@ -1431,25 +1451,32 @@ Number of Spikes:
 
 ## Summary
 
-**Correlation Traps are spectral anomalies in randomized weight matrices that indicate training failures.** They manifest as eigenvalue spikes extending beyond the Marchenko-Pastur bulk + Tracy-Widom fluctuations, and signal:
+**Correlation Traps are spectral anomalies in randomized weight matrices that indicate training failures.** They
+manifest as eigenvalue spikes extending beyond the Marchenko-Pastur bulk + Tracy-Widom fluctuations, and signal:
 
 1. **Unstable training dynamics** (LR too high, batch size too small)
 2. **Failed self-organization** (correlations trapped, not flowing)
 3. **Poor generalization** (model relying on spurious large weights)
 
 **Detection requires:**
+
 - Element-wise randomization of W → W^rand
 - Comparison to Random Matrix Theory predictions (MP + TW)
 - Careful threshold computation
 
-**The key insight:** Well-trained networks develop heavy-tailed weight distributions (α ≈ 2) that are **dramatically different** from random matrices. Traps indicate this process has failed, leaving the network in a near-random state with a few outlier elements dominating the spectrum.
+**The key insight:** Well-trained networks develop heavy-tailed weight distributions (α ≈ 2) that are **dramatically
+different** from random matrices. Traps indicate this process has failed, leaving the network in a near-random state
+with a few outlier elements dominating the spectrum.
 
-**Use WeightWatcher** for practical implementation—it automates this entire analysis and provides actionable metrics for model quality assessment without requiring test data.
+**Use WeightWatcher** for practical implementation—it automates this entire analysis and provides actionable metrics for
+model quality assessment without requiring test data.
 
 ---
 
 **References:**
+
 - Martin, C.H. & Hinrichs, C. (2025). "SETOL: A Semi-Empirical Theory of (Deep) Learning." arXiv:2507.17912
-- Martin, C.H. & Mahoney, M.W. (2021). "Implicit Self-Regularization in Deep Neural Networks." JMLR 22(165):1−73
-- Martin, C.H., Peng, T.S. & Mahoney, M.W. (2021). "Predicting trends in the quality of state-of-the-art neural networks without access to training or testing data." Nature Communications 12(4122)
+- Martin, C.H. & Mahoney, M.W. (2021). "Implicit Self-Regularization in Deep Neural Networks." JMLR 22 (165):1−73
+- Martin, C.H., Peng, T.S. & Mahoney, M.W. (2021). "Predicting trends in the quality of state-of-the-art neural networks
+  without access to training or testing data." Nature Communications 12 (4122)
 - WeightWatcher: https://weightwatcher.ai/

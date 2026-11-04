@@ -1,15 +1,19 @@
 # Ontology-Augmented Generation 2.0
+
 ## Complete Architecture Specification
 
 **Version**: 2.0  
 **Date**: January 2026  
-**Classification**: Technical Architecture Document  
+**Classification**: Technical Architecture Document
 
 ---
 
 ## Executive Summary
 
-OAG 2.0 is a next-generation enterprise AI architecture that extends Ontology-Augmented Generation with hypergraph knowledge representation, multi-agent orchestration, recursive query planning, inline quality evaluation, and comprehensive failsafe mechanisms. This specification provides complete system design including all subsystem diagrams, interface contracts, failure modes, and recovery procedures.
+OAG 2.0 is a next-generation enterprise AI architecture that extends Ontology-Augmented Generation with hypergraph
+knowledge representation, multi-agent orchestration, recursive query planning, inline quality evaluation, and
+comprehensive failsafe mechanisms. This specification provides complete system design including all subsystem diagrams,
+interface contracts, failure modes, and recovery procedures.
 
 ---
 
@@ -17,50 +21,74 @@ OAG 2.0 is a next-generation enterprise AI architecture that extends Ontology-Au
 
 ## Background
 
-The integration of Large Language Models (LLMs) into enterprise systems has progressed through several architectural paradigms. Early approaches relied on direct prompting—feeding business context into model prompts and hoping for accurate responses. This proved unreliable for mission-critical applications due to hallucination, lack of auditability, and inability to execute actions.
+The integration of Large Language Models (LLMs) into enterprise systems has progressed through several architectural
+paradigms. Early approaches relied on direct prompting—feeding business context into model prompts and hoping for
+accurate responses. This proved unreliable for mission-critical applications due to hallucination, lack of auditability,
+and inability to execute actions.
 
-**Retrieval-Augmented Generation (RAG)** emerged as the first major improvement. RAG systems retrieve relevant document chunks via vector similarity search and inject them into the LLM context window before generation. This grounds responses in actual data, reducing hallucination rates significantly. However, RAG architectures suffer from fundamental limitations:
+**Retrieval-Augmented Generation (RAG)** emerged as the first major improvement. RAG systems retrieve relevant document
+chunks via vector similarity search and inject them into the LLM context window before generation. This grounds
+responses in actual data, reducing hallucination rates significantly. However, RAG architectures suffer from fundamental
+limitations:
 
 - **Flat retrieval**: Vector similarity over unstructured chunks ignores relationships between entities
 - **No schema awareness**: Retrieved content lacks type information, leading to context pollution
 - **Read-only**: RAG systems cannot close operational loops by executing actions
 - **Weak provenance**: Citations point to document chunks, not authoritative business objects
 
-**Ontology-Augmented Generation (OAG)**, pioneered by Palantir's AIP platform, addresses these gaps by grounding LLMs in structured enterprise ontologies rather than raw document stores. In OAG, the knowledge layer consists of typed objects with defined properties, explicit relationships (links), and callable logic tools. The LLM reasons over this structured context and can execute actions that write back to source systems.
+**Ontology-Augmented Generation (OAG)**, pioneered by Palantir's AIP platform, addresses these gaps by grounding LLMs in
+structured enterprise ontologies rather than raw document stores. In OAG, the knowledge layer consists of typed objects
+with defined properties, explicit relationships (links), and callable logic tools. The LLM reasons over this structured
+context and can execute actions that write back to source systems.
 
 ## Problem Statement
 
-Despite OAG's advances over RAG, current implementations exhibit architectural limitations that constrain their effectiveness in complex enterprise scenarios:
+Despite OAG's advances over RAG, current implementations exhibit architectural limitations that constrain their
+effectiveness in complex enterprise scenarios:
 
-1. **Retrieval Granularity**: Object-level retrieval returns entire entities when only specific properties are relevant, wasting context window capacity.
+1. **Retrieval Granularity**: Object-level retrieval returns entire entities when only specific properties are relevant,
+   wasting context window capacity.
 
-2. **Reasoning Depth**: Single-pass tool selection cannot handle queries requiring multi-step decomposition or recursive planning.
+2. **Reasoning Depth**: Single-pass tool selection cannot handle queries requiring multi-step decomposition or recursive
+   planning.
 
-3. **Model Rigidity**: Uniform model application across heterogeneous tasks leads to cost inefficiency (expensive models for simple queries) and capability mismatch (general models for specialized reasoning).
+3. **Model Rigidity**: Uniform model application across heterogeneous tasks leads to cost inefficiency (expensive models
+   for simple queries) and capability mismatch (general models for specialized reasoning).
 
-4. **Quality Assurance Gap**: Post-hoc evaluation catches errors after they reach users; no inline quality gating exists to prevent low-quality responses.
+4. **Quality Assurance Gap**: Post-hoc evaluation catches errors after they reach users; no inline quality gating exists
+   to prevent low-quality responses.
 
-5. **Factual Fragmentation**: Binary relationships (links) cannot represent multi-entity facts atomically, forcing reconstruction from multiple retrievals.
+5. **Factual Fragmentation**: Binary relationships (links) cannot represent multi-entity facts atomically, forcing
+   reconstruction from multiple retrievals.
 
 ## Solution Overview
 
 OAG 2.0 addresses these limitations through five architectural innovations:
 
 ### 1. Hypergraph Ontology
-Extends the traditional object-link model with **hyperedges**—n-ary relationships that cluster multiple entities into atomic factual units. A hyperedge like `Acquisition(Microsoft, Activision, $69B, 2023-10-13)` can be retrieved as a single unit rather than reconstructed from separate object queries. This approach, validated by OG-RAG research (arXiv:2412.15235), improves retrieval precision for complex multi-entity queries.
+
+Extends the traditional object-link model with **hyperedges**—n-ary relationships that cluster multiple entities into
+atomic factual units. A hyperedge like `Acquisition(Microsoft, Activision, $69B, 2023-10-13)` can be retrieved as a
+single unit rather than reconstructed from separate object queries. This approach, validated by OG-RAG research (arXiv:
+2412.15235), improves retrieval precision for complex multi-entity queries.
 
 ### 2. Multi-Agent Architecture with Model Arbitrage
+
 Deploys specialized agents optimized for specific task categories:
+
 - **Data Agent** (DeepSeek R1): Retrieval, filtering, aggregation
 - **Logic Agent** (DeepSeek R1): Forecasting, optimization, calculation
 - **Action Agent** (Claude Sonnet): Write operations with safety constraints
 - **Validation Agent** (GPT-5): Fact-checking on critical paths
 - **Synthesis Agent** (Claude Sonnet): Response composition
 
-By routing queries to cost-appropriate models based on task type, OAG 2.0 achieves ~70% cost reduction compared to uniform premium model usage while maintaining quality.
+By routing queries to cost-appropriate models based on task type, OAG 2.0 achieves ~70% cost reduction compared to
+uniform premium model usage while maintaining quality.
 
 ### 3. Recursive Query Planning
+
 Complex queries are decomposed into execution plans before agent invocation. The planner:
+
 - Analyzes query complexity (score 1-10)
 - Decomposes multi-hop queries into dependent steps
 - Identifies parallelization opportunities
@@ -70,7 +98,9 @@ Complex queries are decomposed into execution plans before agent invocation. The
 This enables autonomous handling of novel complex queries without manual workflow design.
 
 ### 4. Inline Quality Evaluation
+
 Every response passes through a quality evaluator before delivery. The evaluator scores:
+
 - Factual grounding (35%): Are claims traceable to retrieved context?
 - Logical consistency (25%): Does the reasoning chain contain contradictions?
 - Completeness (20%): Are all aspects of the query addressed?
@@ -79,28 +109,32 @@ Every response passes through a quality evaluator before delivery. The evaluator
 Responses below threshold trigger automatic retry with increased reasoning budget or human escalation.
 
 ### 5. Hybrid Retrieval
+
 Combines three retrieval methods via reciprocal rank fusion:
+
 - **BM25**: Keyword matching for domain jargon and exact terms
 - **Dense vectors**: Semantic similarity for conceptual queries
 - **Graph traversal**: Relationship-aware entity discovery
 
-Optional HyDE (Hypothetical Document Embeddings) query expansion bridges vocabulary gaps between user queries and ontology terminology.
+Optional HyDE (Hypothetical Document Embeddings) query expansion bridges vocabulary gaps between user queries and
+ontology terminology.
 
 ## Scope
 
 This specification defines:
 
-| In Scope | Out of Scope |
-|----------|--------------|
+| In Scope                                                              | Out of Scope                                          |
+|-----------------------------------------------------------------------|-------------------------------------------------------|
 | Four-layer architecture (Governance, Knowledge, Agent, Orchestration) | Infrastructure provisioning (Kubernetes, cloud setup) |
-| Component interfaces and data models | Specific vendor integrations (Salesforce, SAP) |
-| Failure modes and recovery procedures | User interface design |
-| Performance targets and benchmarks | Training data pipelines |
-| Design decisions with rationale | Model fine-tuning procedures |
+| Component interfaces and data models                                  | Specific vendor integrations (Salesforce, SAP)        |
+| Failure modes and recovery procedures                                 | User interface design                                 |
+| Performance targets and benchmarks                                    | Training data pipelines                               |
+| Design decisions with rationale                                       | Model fine-tuning procedures                          |
 
 ## Audience
 
 This document is intended for:
+
 - **Solution Architects**: Designing enterprise AI systems
 - **Engineering Teams**: Implementing OAG 2.0 components
 - **Technical Leadership**: Evaluating architecture decisions
@@ -108,11 +142,11 @@ This document is intended for:
 
 ## Document Structure
 
-| Part | Content |
-|------|---------|
-| **Part I: System Overview** | High-level architecture, design principles |
-| **Part II: Layer Specifications** | Detailed design of all four layers with subsystem diagrams |
-| **Part III: Cross-Cutting Concerns** | End-to-end flows, failsafe matrix, performance specs |
+| Part                                 | Content                                                    |
+|--------------------------------------|------------------------------------------------------------|
+| **Part I: System Overview**          | High-level architecture, design principles                 |
+| **Part II: Layer Specifications**    | Detailed design of all four layers with subsystem diagrams |
+| **Part III: Cross-Cutting Concerns** | End-to-end flows, failsafe matrix, performance specs       |
 
 ---
 
@@ -179,14 +213,14 @@ This document is intended for:
 
 ## 2. Design Principles
 
-| Principle | Description | Implementation |
-|-----------|-------------|----------------|
-| **Defense in Depth** | Multiple validation layers before any output or action | Evaluator + Compliance + RBAC gates |
-| **Graceful Degradation** | System remains functional under partial failure | Circuit breakers, fallback models |
-| **Observability First** | All operations instrumented for debugging | Distributed tracing, structured logs |
-| **Cost Awareness** | Resource consumption tracked and bounded | Token budgets, compute quotas |
-| **Auditability** | Complete provenance for all decisions | Immutable audit trail |
-| **Model Agnosticism** | No hard dependency on specific LLM vendors | Unified model interface |
+| Principle                | Description                                            | Implementation                       |
+|--------------------------|--------------------------------------------------------|--------------------------------------|
+| **Defense in Depth**     | Multiple validation layers before any output or action | Evaluator + Compliance + RBAC gates  |
+| **Graceful Degradation** | System remains functional under partial failure        | Circuit breakers, fallback models    |
+| **Observability First**  | All operations instrumented for debugging              | Distributed tracing, structured logs |
+| **Cost Awareness**       | Resource consumption tracked and bounded               | Token budgets, compute quotas        |
+| **Auditability**         | Complete provenance for all decisions                  | Immutable audit trail                |
+| **Model Agnosticism**    | No hard dependency on specific LLM vendors             | Unified model interface              |
 
 ---
 
@@ -196,7 +230,9 @@ This document is intended for:
 
 ### 3.1 Purpose
 
-The Governance Layer is the foundational security and compliance substrate. All operations in upper layers are subject to governance checks. This layer enforces organizational policies, records audit trails, controls costs, and ensures regulatory compliance.
+The Governance Layer is the foundational security and compliance substrate. All operations in upper layers are subject
+to governance checks. This layer enforces organizational policies, records audit trails, controls costs, and ensures
+regulatory compliance.
 
 ### 3.2 Subsystem Diagram
 
@@ -277,17 +313,20 @@ The Governance Layer is the foundational security and compliance substrate. All 
 **Purpose**: Evaluate access permissions for all system operations.
 
 **Inputs**:
+
 - User identity (JWT/session token)
 - Requested operation (read/write/execute/approve)
 - Target resource (ontology object, tool, action)
 - Request context (IP, device, time)
 
 **Outputs**:
+
 - Decision: ALLOW | DENY | REQUIRE_MFA | REQUIRE_APPROVAL
 - Effective permissions set
 - Audit record
 
 **Permission Model**:
+
 ```
 Organization
   └── Workspace (isolated tenant boundary)
@@ -313,12 +352,12 @@ Organization
 
 **Rule Categories**:
 
-| Category | Examples | Action |
-|----------|----------|--------|
-| PII Detection | SSN, credit card, health records | Redact or block |
-| Content Safety | Harmful instructions, illegal content | Block with log |
-| Industry Regulations | HIPAA, GDPR, SOX | Context-specific gates |
-| Organizational Policies | Competitor mentions, confidential data | Warn or block |
+| Category                | Examples                               | Action                 |
+|-------------------------|----------------------------------------|------------------------|
+| PII Detection           | SSN, credit card, health records       | Redact or block        |
+| Content Safety          | Harmful instructions, illegal content  | Block with log         |
+| Industry Regulations    | HIPAA, GDPR, SOX                       | Context-specific gates |
+| Organizational Policies | Competitor mentions, confidential data | Warn or block          |
 
 #### 3.3.3 Audit Logger
 
@@ -326,33 +365,33 @@ Organization
 
 **Record Schema**:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| record_id | UUID | Unique identifier |
-| timestamp | ISO8601 | Event time (UTC) |
-| trace_id | UUID | Distributed trace correlation |
-| session_id | UUID | User session |
-| user_id | string | Authenticated user |
-| operation_type | enum | query, tool_call, action, evaluation |
-| operation_input | JSON | Sanitized input (PII redacted) |
-| operation_output | JSON | Sanitized output |
-| duration_ms | int | Processing time |
-| tokens_consumed | int | LLM tokens used |
-| cost_incurred | decimal | Computed cost |
-| resources_accessed | array | Ontology refs, tools, models |
-| governance_decision | enum | allowed, denied, escalated |
-| quality_score | float | Evaluator score (0-1) |
+| Field               | Type    | Description                          |
+|---------------------|---------|--------------------------------------|
+| record_id           | UUID    | Unique identifier                    |
+| timestamp           | ISO8601 | Event time (UTC)                     |
+| trace_id            | UUID    | Distributed trace correlation        |
+| session_id          | UUID    | User session                         |
+| user_id             | string  | Authenticated user                   |
+| operation_type      | enum    | query, tool_call, action, evaluation |
+| operation_input     | JSON    | Sanitized input (PII redacted)       |
+| operation_output    | JSON    | Sanitized output                     |
+| duration_ms         | int     | Processing time                      |
+| tokens_consumed     | int     | LLM tokens used                      |
+| cost_incurred       | decimal | Computed cost                        |
+| resources_accessed  | array   | Ontology refs, tools, models         |
+| governance_decision | enum    | allowed, denied, escalated           |
+| quality_score       | float   | Evaluator score (0-1)                |
 
 **Retention**: 7 years for regulated industries; configurable otherwise.
 
 ### 3.4 Layer 1 Failsafes
 
-| Failure Mode | Detection | Response | Recovery |
-|--------------|-----------|----------|----------|
-| RBAC service unavailable | Health check timeout | Deny all requests (fail-closed) | Automatic retry with backoff |
-| Audit log write failure | Write acknowledgment timeout | Queue to local buffer | Replay from buffer on recovery |
-| Cost controller desync | Drift detection (actual vs tracked) | Pause new requests | Reconciliation job |
-| Compliance service overload | Queue depth threshold | Shed load, return "try later" | Auto-scale or rate limit |
+| Failure Mode                | Detection                           | Response                        | Recovery                       |
+|-----------------------------|-------------------------------------|---------------------------------|--------------------------------|
+| RBAC service unavailable    | Health check timeout                | Deny all requests (fail-closed) | Automatic retry with backoff   |
+| Audit log write failure     | Write acknowledgment timeout        | Queue to local buffer           | Replay from buffer on recovery |
+| Cost controller desync      | Drift detection (actual vs tracked) | Pause new requests              | Reconciliation job             |
+| Compliance service overload | Queue depth threshold               | Shed load, return "try later"   | Auto-scale or rate limit       |
 
 ---
 
@@ -360,7 +399,9 @@ Organization
 
 ### 4.1 Purpose
 
-The Knowledge Layer provides the semantic foundation for all reasoning. It stores structured enterprise knowledge in a hypergraph ontology, maintains retrieval indices for efficient access, and exposes deterministic logic tools for computation. This layer is the "source of truth" that grounds LLM reasoning.
+The Knowledge Layer provides the semantic foundation for all reasoning. It stores structured enterprise knowledge in a
+hypergraph ontology, maintains retrieval indices for efficient access, and exposes deterministic logic tools for
+computation. This layer is the "source of truth" that grounds LLM reasoning.
 
 ### 4.2 Subsystem Diagram
 
@@ -460,6 +501,7 @@ The Knowledge Layer provides the semantic foundation for all reasoning. It store
 ### 4.3 Hypergraph Data Model
 
 **Objects** (Nodes):
+
 ```
 Object {
   id: UUID
@@ -472,6 +514,7 @@ Object {
 ```
 
 **Links** (Binary Edges):
+
 ```
 Link {
   id: UUID
@@ -485,6 +528,7 @@ Link {
 ```
 
 **Hyperedges** (N-ary Factual Clusters) — KEY INNOVATION:
+
 ```
 Hyperedge {
   id: UUID
@@ -500,11 +544,11 @@ Hyperedge {
 
 **Hyperedge Examples**:
 
-| Type | Members | Fact |
-|------|---------|------|
-| Acquisition | Microsoft, Activision, $69B, 2023-10-13 | "Microsoft acquired Activision for $69B on 2023-10-13" |
-| Employment | Satya Nadella, Microsoft, CEO, 2014-02-04 | "Satya Nadella has served as CEO of Microsoft since Feb 2014" |
-| Funding_Round | Anthropic, Google, $2B, Series C | "Anthropic raised $2B Series C from Google" |
+| Type          | Members                                   | Fact                                                          |
+|---------------|-------------------------------------------|---------------------------------------------------------------|
+| Acquisition   | Microsoft, Activision, $69B, 2023-10-13   | "Microsoft acquired Activision for $69B on 2023-10-13"        |
+| Employment    | Satya Nadella, Microsoft, CEO, 2014-02-04 | "Satya Nadella has served as CEO of Microsoft since Feb 2014" |
+| Funding_Round | Anthropic, Google, $2B, Series C          | "Anthropic raised $2B Series C from Google"                   |
 
 ### 4.4 Hybrid Retrieval Algorithm
 
@@ -541,13 +585,13 @@ function hybrid_retrieve(query, config):
 
 ### 4.5 Layer 2 Failsafes
 
-| Failure Mode | Detection | Response | Recovery |
-|--------------|-----------|----------|----------|
-| Graph store unavailable | Connection timeout | Serve from read replica | Reconnect with backoff |
-| Index stale | Version mismatch | Flag results as stale | Background reindex |
-| Tool timeout | Timeout exceeded | Return partial/error | Mark unhealthy, use fallback |
-| Tool invalid output | Schema validation failure | Reject result, log | Alert tool owner |
-| Embedding service down | Health check | Fall back to BM25-only | Auto-recovery |
+| Failure Mode            | Detection                 | Response                | Recovery                     |
+|-------------------------|---------------------------|-------------------------|------------------------------|
+| Graph store unavailable | Connection timeout        | Serve from read replica | Reconnect with backoff       |
+| Index stale             | Version mismatch          | Flag results as stale   | Background reindex           |
+| Tool timeout            | Timeout exceeded          | Return partial/error    | Mark unhealthy, use fallback |
+| Tool invalid output     | Schema validation failure | Reject result, log      | Alert tool owner             |
+| Embedding service down  | Health check              | Fall back to BM25-only  | Auto-recovery                |
 
 ---
 
@@ -555,7 +599,9 @@ function hybrid_retrieve(query, config):
 
 ### 5.1 Purpose
 
-The Agent Execution Layer contains specialized AI agents optimized for specific task categories. Each agent encapsulates model selection, prompt template, tool access policy, and output format. Complex queries are decomposed and routed to the most capable agent for each subtask.
+The Agent Execution Layer contains specialized AI agents optimized for specific task categories. Each agent encapsulates
+model selection, prompt template, tool access policy, and output format. Complex queries are decomposed and routed to
+the most capable agent for each subtask.
 
 ### 5.2 Subsystem Diagram
 
@@ -651,25 +697,26 @@ The Agent Execution Layer contains specialized AI agents optimized for specific 
 
 ### 5.3 Model Selection Rationale
 
-| Model | Strength | Cost/1M tokens | Primary Use |
-|-------|----------|----------------|-------------|
-| **DeepSeek R1** | Math (97.3% MATH-500), Cost | $4.40 | Data, Logic agents |
-| **Claude Sonnet** | Instructions (93.2%), Code | $15.00 | Action, Synthesis, Explain |
-| **GPT-5** | Reasoning (89.4% GPQA) | $60.00 | Validation (critical path only) |
-| **Claude Haiku** | Speed, Low cost | $1.25 | Fallback, simple queries |
+| Model             | Strength                    | Cost/1M tokens | Primary Use                     |
+|-------------------|-----------------------------|----------------|---------------------------------|
+| **DeepSeek R1**   | Math (97.3% MATH-500), Cost | $4.40          | Data, Logic agents              |
+| **Claude Sonnet** | Instructions (93.2%), Code  | $15.00         | Action, Synthesis, Explain      |
+| **GPT-5**         | Reasoning (89.4% GPQA)      | $60.00         | Validation (critical path only) |
+| **Claude Haiku**  | Speed, Low cost             | $1.25          | Fallback, simple queries        |
 
-**Cost Optimization**: Routing ~60% of queries to DeepSeek R1 achieves ~70% cost reduction vs uniform premium model usage.
+**Cost Optimization**: Routing ~60% of queries to DeepSeek R1 achieves ~70% cost reduction vs uniform premium model
+usage.
 
 ### 5.4 Layer 3 Failsafes
 
-| Failure Mode | Detection | Response | Recovery |
-|--------------|-----------|----------|----------|
-| Model API error | HTTP error / timeout | Failover to backup model | Monitor for recovery |
-| Model malformed output | Schema validation | Retry with explicit format | If persistent, fail task |
-| Context window exceeded | Token count | Truncate by priority | Warn user |
-| Agent infinite loop | Iteration/token limit | Force terminate | Return partial |
-| Thinking budget exhausted | Token counter | Stop, generate best-effort | Flag low-confidence |
-| Tool invocation fails | Error response | Retry with backoff | Proceed without tool |
+| Failure Mode              | Detection             | Response                   | Recovery                 |
+|---------------------------|-----------------------|----------------------------|--------------------------|
+| Model API error           | HTTP error / timeout  | Failover to backup model   | Monitor for recovery     |
+| Model malformed output    | Schema validation     | Retry with explicit format | If persistent, fail task |
+| Context window exceeded   | Token count           | Truncate by priority       | Warn user                |
+| Agent infinite loop       | Iteration/token limit | Force terminate            | Return partial           |
+| Thinking budget exhausted | Token counter         | Stop, generate best-effort | Flag low-confidence      |
+| Tool invocation fails     | Error response        | Retry with backoff         | Proceed without tool     |
 
 ---
 
@@ -677,7 +724,9 @@ The Agent Execution Layer contains specialized AI agents optimized for specific 
 
 ### 6.1 Purpose
 
-The Orchestration Layer is the control plane for query processing. It receives requests, plans execution strategies, routes tasks to agents, evaluates output quality, and manages session state. This layer implements recursive planning, quality gating, and adaptive resource allocation.
+The Orchestration Layer is the control plane for query processing. It receives requests, plans execution strategies,
+routes tasks to agents, evaluates output quality, and manages session state. This layer implements recursive planning,
+quality gating, and adaptive resource allocation.
 
 ### 6.2 Subsystem Diagram
 
@@ -830,15 +879,15 @@ function recursive_plan(analysis, budget, depth):
 
 ### 6.4 Layer 4 Failsafes
 
-| Failure Mode | Detection | Response | Recovery |
-|--------------|-----------|----------|----------|
-| Planner timeout | Timeout exceeded | Use template/single-step fallback | Log for analysis |
-| Planning loop | Depth counter | Force terminate at MAX_DEPTH | Return partial plan |
-| Agent empty response | Empty check | Retry, then synthesize available | Flag incomplete |
-| Quality oscillation | Retries with no improvement | Accept best with warning | Escalate to human |
-| All models unavailable | All breakers open | Queue with wait estimate | Auto-retry on recovery |
-| Session corruption | Consistency check | Rebuild from audit | Log for debugging |
-| Budget exhausted mid-query | Token counter | Complete current step only | Return partial |
+| Failure Mode               | Detection                   | Response                          | Recovery               |
+|----------------------------|-----------------------------|-----------------------------------|------------------------|
+| Planner timeout            | Timeout exceeded            | Use template/single-step fallback | Log for analysis       |
+| Planning loop              | Depth counter               | Force terminate at MAX_DEPTH      | Return partial plan    |
+| Agent empty response       | Empty check                 | Retry, then synthesize available  | Flag incomplete        |
+| Quality oscillation        | Retries with no improvement | Accept best with warning          | Escalate to human      |
+| All models unavailable     | All breakers open           | Queue with wait estimate          | Auto-retry on recovery |
+| Session corruption         | Consistency check           | Rebuild from audit                | Log for debugging      |
+| Budget exhausted mid-query | Token counter               | Complete current step only        | Return partial         |
 
 ---
 
@@ -892,19 +941,19 @@ USER ← ⑱ Receive Response
 
 ## 8. Complete Failsafe Matrix
 
-| Layer | Component | Failure | Severity | Detection | Response | Recovery |
-|-------|-----------|---------|----------|-----------|----------|----------|
-| L1 | RBAC | Down | Critical | Health probe | Deny all (fail-closed) | Auto-restart |
-| L1 | Audit | Write fail | High | Ack timeout | Buffer locally | Replay buffer |
-| L1 | Cost | Desync | Medium | Drift check | Pause requests | Reconcile |
-| L2 | Graph | Unavailable | Critical | Connection | Read replica | Reconnect |
-| L2 | Index | Stale | Medium | Version check | Flag stale | Reindex |
-| L2 | Tool | Timeout | Medium | Timeout | Partial/error | Mark unhealthy |
-| L3 | Model | API error | High | HTTP error | Failover model | Monitor |
-| L3 | Agent | Loop | High | Token limit | Force terminate | Return partial |
-| L4 | Planner | Timeout | Medium | Timeout | Template plan | Log |
-| L4 | Evaluator | Crash | Medium | Process monitor | Skip eval, warn | Restart |
-| ALL | Full outage | Down | Critical | Synthetic probes | Error page | Full restart |
+| Layer | Component   | Failure     | Severity | Detection        | Response               | Recovery       |
+|-------|-------------|-------------|----------|------------------|------------------------|----------------|
+| L1    | RBAC        | Down        | Critical | Health probe     | Deny all (fail-closed) | Auto-restart   |
+| L1    | Audit       | Write fail  | High     | Ack timeout      | Buffer locally         | Replay buffer  |
+| L1    | Cost        | Desync      | Medium   | Drift check      | Pause requests         | Reconcile      |
+| L2    | Graph       | Unavailable | Critical | Connection       | Read replica           | Reconnect      |
+| L2    | Index       | Stale       | Medium   | Version check    | Flag stale             | Reindex        |
+| L2    | Tool        | Timeout     | Medium   | Timeout          | Partial/error          | Mark unhealthy |
+| L3    | Model       | API error   | High     | HTTP error       | Failover model         | Monitor        |
+| L3    | Agent       | Loop        | High     | Token limit      | Force terminate        | Return partial |
+| L4    | Planner     | Timeout     | Medium   | Timeout          | Template plan          | Log            |
+| L4    | Evaluator   | Crash       | Medium   | Process monitor  | Skip eval, warn        | Restart        |
+| ALL   | Full outage | Down        | Critical | Synthetic probes | Error page             | Full restart   |
 
 ---
 
@@ -912,27 +961,27 @@ USER ← ⑱ Receive Response
 
 ### 9.1 Latency Targets
 
-| Query Type | P50 | P95 | P99 |
-|------------|-----|-----|-----|
-| Simple retrieval | 400ms | 800ms | 1.2s |
-| Complex multi-step | 2s | 4s | 6s |
-| Action with confirm | 1s | 2s | 3s |
+| Query Type          | P50   | P95   | P99  |
+|---------------------|-------|-------|------|
+| Simple retrieval    | 400ms | 800ms | 1.2s |
+| Complex multi-step  | 2s    | 4s    | 6s   |
+| Action with confirm | 1s    | 2s    | 3s   |
 
 ### 9.2 Quality Targets
 
-| Metric | Target |
-|--------|--------|
-| Factual grounding | >95% |
-| Hallucination rate | <5% |
-| Action success | >98% |
-| Mean quality score | >0.82 |
+| Metric             | Target |
+|--------------------|--------|
+| Factual grounding  | >95%   |
+| Hallucination rate | <5%    |
+| Action success     | >98%   |
+| Mean quality score | >0.82  |
 
 ### 9.3 Cost Targets
 
-| Query Type | Target |
-|------------|--------|
-| Simple | <$0.02 |
-| Complex | <$0.15 |
+| Query Type  | Target |
+|-------------|--------|
+| Simple      | <$0.02 |
+| Complex     | <$0.15 |
 | Blended avg | <$0.06 |
 
 ---
@@ -940,18 +989,21 @@ USER ← ⑱ Receive Response
 ## 10. References
 
 ### Research
+
 1. OG-RAG: arXiv:2412.15235v1 (Dec 2024)
 2. DRAGON-AI: J. Biomedical Semantics (Oct 2024)
 3. DeepSeek R1: Technical Report (Jan 2025)
 4. Claude 3.7 Sonnet: Anthropic (Feb 2025)
 
 ### Industry
+
 5. Palantir AIP: palantir.com/docs/foundry/aip
 6. Palantir Ontology: palantir.com/docs/foundry/ontology
 7. Palantir Blog: RAG/OAG series (2024-2025)
 8. NVIDIA Partnership: nvidianews.nvidia.com (Oct 2025)
 
 ### Architecture Patterns
+
 9. AWS Agentic AI Patterns
 10. Azure AI Agent Design Patterns
 11. Google Cloud Agentic Design
@@ -959,6 +1011,7 @@ USER ← ⑱ Receive Response
 13. InfoQ Agentic Framework (Jul 2025)
 
 ### Benchmarks
+
 14. LLM Leaderboard 2025: vellum.ai
 15. LMArena: LMSYS (Jan 2026)
 16. Sebastian Raschka: State of LLMs 2025

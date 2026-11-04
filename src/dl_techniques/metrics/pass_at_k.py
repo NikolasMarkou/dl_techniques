@@ -1,4 +1,5 @@
-"""Sampling coverage metrics: ``pass@k`` over a pool of candidate solutions.
+"""
+Sampling coverage metrics: ``pass@k`` over a pool of candidate solutions.
 
 **Why this module exists.** Every method that samples several candidate solutions per
 input and checks them against a verifier has one obvious summary statistic, and it
@@ -417,3 +418,5 @@ def per_problem_pass_at_k(
     return _unbiased_pass_at_k(
         n_samples, counts, np.asarray([k_int], dtype=np.int64)
     )[:, 0]
+
+# ---------------------------------------------------------------------

@@ -57,8 +57,8 @@ means "this run's endpoint minus THIS run's own random-init control".
 ## 1. The headline: improved config vs shipped default
 
 **Scope of this whole section**: 2 arms x 2 seeds x 60 epochs, smoke scale (`tiny` backbone,
-96 px, `dino_out_dim=4096`, 4 local crops, batch 32), imagenette, fully controlled
-(bit-identical) training stream, GPU 1 (RTX 4070, 12 GB), runs strictly serial. Nothing in this
+96 px, `dino_out_dim=4096`, 4 local crops, batch 32), imagenette, fully controlled (bit-identical) training stream, GPU
+1 (RTX 4070, 12 GB), runs strictly serial. Nothing in this
 section is a claim about any other scale, dataset, backbone or batch size.
 
 ### The pre-committed decision rule, verbatim
@@ -73,12 +73,12 @@ rule, as the comparison the rule alone cannot make.
 
 ### The result
 
-| arm | seed | own control | endpoint (mean last 3 evaluated epochs) | delta | verdict |
-|---|---|---|---|---|---|
-| **improved** | 42 | 0.2900 | 0.4326 | **+0.1426** | **IMPROVED** |
-| **improved** | 1337 | 0.2969 | 0.4661 | **+0.1693** | (both seeds >3x the 0.04 threshold) |
-| **baseline** (the shipped default at the time of measurement) | 42 | 0.2900 | 0.3363 | **+0.0462** | **INCONCLUSIVE** |
-| **baseline** | 1337 | 0.2969 | 0.3285 | **+0.0316** | (one seed clears 0.04, one does not) |
+| arm                                                           | seed | own control | endpoint (mean last 3 evaluated epochs) | delta       | verdict                              |
+|---------------------------------------------------------------|------|-------------|-----------------------------------------|-------------|--------------------------------------|
+| **improved**                                                  | 42   | 0.2900      | 0.4326                                  | **+0.1426** | **IMPROVED**                         |
+| **improved**                                                  | 1337 | 0.2969      | 0.4661                                  | **+0.1693** | (both seeds >3x the 0.04 threshold)  |
+| **baseline** (the shipped default at the time of measurement) | 42   | 0.2900      | 0.3363                                  | **+0.0462** | **INCONCLUSIVE**                     |
+| **baseline**                                                  | 1337 | 0.2969      | 0.3285                                  | **+0.0316** | (one seed clears 0.04, one does not) |
 
 The secondary endpoint `dino_knn_top1_k10` agrees, at the same 2 arms x 2 seeds x 60 epochs:
 improved **+0.1364** (s42) and **+0.1517** (s1337); baseline **+0.0488** (s42) and **+0.0296**
@@ -111,10 +111,10 @@ inference, not something the artifact states.)
 
 The improved arm differs from the baseline arm in **exactly two config keys**:
 
-| key | baseline (shipped default at measurement time) | improved |
-|---|---|---|
-| `ema_warmup_steps` | `0` | `295` |
-| `teacher_temp_final` | `0.07` | `0.04` |
+| key                  | baseline (shipped default at measurement time) | improved |
+|----------------------|------------------------------------------------|----------|
+| `ema_warmup_steps`   | `0`                                            | `295`    |
+| `teacher_temp_final` | `0.07`                                         | `0.04`   |
 
 `teacher_temp` was `0.04` in BOTH arms — that is already the shipped dataclass default, so the
 improved arm's invocation string `--teacher-temp 0.04 --teacher-temp-final 0.04
@@ -139,8 +139,8 @@ actually run to its end rather than stopped early.
 
 ### Why `295` is not a portable constant
 
-`295` is `num_train // batch_size` for the imagenette training split at `batch_size=32`. It is
-**one epoch at that dataset and that batch size only**. At `batch_size=64` the same literal would
+`295` is `num_train // batch_size` for the imagenette training split at `batch_size=32`. It is **one epoch at that
+dataset and that batch size only**. At `batch_size=64` the same literal would
 mean roughly two epochs; on a different dataset it means whatever that dataset's cardinality makes
 it.
 
@@ -159,29 +159,29 @@ default is the one that transfers and the literal is the one that silently does 
 random-init control: the model gets measurably worse before it gets better. A prior brief named two
 suspects. Neither is the mechanism.
 
-**Scope of this whole section**: 8 epochs per run, smoke scale, imagenette, GPU 1, 2 seeds
-(42, 1337). Everything here is measured at the *early* part of training only, and none of it is a
+**Scope of this whole section**: 8 epochs per run, smoke scale, imagenette, GPU 1, 2 seeds (42, 1337). Everything here
+is measured at the *early* part of training only, and none of it is a
 claim about the 60-epoch endpoint in section 1.
 
 ### The three-candidate verdict
 
-| candidate | flag tested | verdict |
-|---|---|---|
-| centering-EMA lag | `--center-momentum 0.0` | **CLEARED** — effect **-0.0063** in the dip matrix |
-| teacher-TEMPERATURE warmup | `--teacher-temp 0.04 --teacher-temp-final 0.04` | **structurally cannot cause it** — inert at the epoch-0 endpoint by construction; returned an **exactly-zero** null at both seeds on the controlled stream |
-| teacher-WEIGHT EMA warmup (absent from the brief) | `--ema-warmup-steps 295` | **IMPLICATED** in both matrices: dip matrix **+0.0445**, confirm matrix **+0.0498** |
+| candidate                                         | flag tested                                     | verdict                                                                                                                                                    |
+|---------------------------------------------------|-------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| centering-EMA lag                                 | `--center-momentum 0.0`                         | **CLEARED** — effect **-0.0063** in the dip matrix                                                                                                         |
+| teacher-TEMPERATURE warmup                        | `--teacher-temp 0.04 --teacher-temp-final 0.04` | **structurally cannot cause it** — inert at the epoch-0 endpoint by construction; returned an **exactly-zero** null at both seeds on the controlled stream |
+| teacher-WEIGHT EMA warmup (absent from the brief) | `--ema-warmup-steps 295`                        | **IMPLICATED** in both matrices: dip matrix **+0.0445**, confirm matrix **+0.0498**                                                                        |
 
 ### Dip matrix: 4 arms x 2 seeds, 8 epochs, UNSEEDED stream
 
 Endpoint = `dino_knn_top1_k20` at the first evaluated epoch minus that run's own control; effect =
 `mean_seeds(arm) - mean_seeds(A)`.
 
-| arm | mean dip | effect vs A | verdict |
-|---|---|---|---|
-| A baseline | -0.0601 | — | REFERENCE |
-| B no temp warmup | -0.0371 | +0.0229 | AMBIGUOUS |
-| C no center lag | -0.0664 | **-0.0063** | **CLEARED** |
-| D EMA warmup | -0.0156 | **+0.0445** | **IMPLICATED** |
+| arm              | mean dip | effect vs A | verdict        |
+|------------------|----------|-------------|----------------|
+| A baseline       | -0.0601  | —           | REFERENCE      |
+| B no temp warmup | -0.0371  | +0.0229     | AMBIGUOUS      |
+| C no center lag  | -0.0664  | **-0.0063** | **CLEARED**    |
+| D EMA warmup     | -0.0156  | **+0.0445** | **IMPLICATED** |
 
 The dip reproduces: on this matrix the baseline arm's dip is **-0.0601** below its own random-init
 control. That figure is a MEAN OVER THE TWO SEEDS (the `mean dip` column); this table records no
@@ -210,18 +210,18 @@ than inert.
 The instrument check first. Arm B' is inert at epoch 0, so `A' - B'` at a fixed seed must be
 exactly zero if the stream is genuinely controlled:
 
-| seed | A' epoch-0 k20 | B' epoch-0 k20 | delta |
-|---|---|---|---|
-| 42 | 0.2294921875 | 0.2294921875 | **0.0** |
-| 1337 | 0.234375 | 0.234375 | **0.0** |
+| seed | A' epoch-0 k20 | B' epoch-0 k20 | delta   |
+|------|----------------|----------------|---------|
+| 42   | 0.2294921875   | 0.2294921875   | **0.0** |
+| 1337 | 0.234375       | 0.234375       | **0.0** |
 
 The null went to exactly zero at both seeds. That is what makes the effects below readable at all.
 
-| arm | effect vs A' (pre-registered endpoint) | verdict | exploratory (last-3) |
-|---|---|---|---|
-| B' no temp warmup | **0.0000** at both seeds | **CLEARED** | +0.0387 |
-| D' EMA warmup | **+0.0498** (per-seed: +0.0625 at s42, +0.0371 at s1337) | **IMPLICATED** | **+0.0550** |
-| E' `--source-image-size 224` | +0.0024 | NO-DIFFERENCE | +0.0028 |
+| arm                          | effect vs A' (pre-registered endpoint)                   | verdict        | exploratory (last-3) |
+|------------------------------|----------------------------------------------------------|----------------|----------------------|
+| B' no temp warmup            | **0.0000** at both seeds                                 | **CLEARED**    | +0.0387              |
+| D' EMA warmup                | **+0.0498** (per-seed: +0.0625 at s42, +0.0371 at s1337) | **IMPLICATED** | **+0.0550**          |
+| E' `--source-image-size 224` | +0.0024                                                  | NO-DIFFERENCE  | +0.0028              |
 
 Note the teacher-temperature arm's exploratory effect **shrank from +0.0518 (unseeded dip matrix)
 to +0.0387 (controlled confirm matrix)** once the training stream was controlled. Its
@@ -232,8 +232,8 @@ in [section 8](#8-open-questions).
 
 `--ema-warmup-steps 295` does two things at once:
 
-1. it freezes the teacher-weight EMA for the first 295 optimizer steps
-   (`TeacherEMACallback.on_train_batch_end` increments a counter and returns early, so
+1. it freezes the teacher-weight EMA for the first 295 optimizer steps (`TeacherEMACallback.on_train_batch_end`
+   increments a counter and returns early, so
    `update_teacher_ema` is genuinely never called during the warmup); **and**
 2. it re-bases the cosine EMA ramp 295 steps later, because the post-warmup step index restarts at
    0 while `total_steps` is unchanged.
@@ -246,10 +246,10 @@ ramp-re-basing have never been separated by any measurement in this repository.
 At the 60-epoch improved arm (section 1's config), the epoch-0 reading relative to that run's own
 control is:
 
-| seed | improved arm epoch-0 vs own control | baseline arm epoch-0 vs own control |
-|---|---|---|
-| 42 | **+0.0020** (above control: no dip at this seed) | -0.0605 |
-| 1337 | **-0.0273** (below control: a real dip remains at this seed) | -0.0625 |
+| seed | improved arm epoch-0 vs own control                          | baseline arm epoch-0 vs own control |
+|------|--------------------------------------------------------------|-------------------------------------|
+| 42   | **+0.0020** (above control: no dip at this seed)             | -0.0605                             |
+| 1337 | **-0.0273** (below control: a real dip remains at this seed) | -0.0625                             |
 
 The correct statement is: **the improved configuration removes the dip at seed 42 and roughly
 halves it at seed 1337**, and improves the 60-epoch endpoint decisively at both. An earlier draft
@@ -267,11 +267,11 @@ form.
 `train_dino.build_dataset` output and took the sha1 of the first 3 batches. No model was
 constructed; no GPU was involved. Total cost about 6 CPU-minutes.
 
-| flags | run 1 sha1 | run 2 sha1 | identical? |
-|---|---|---|---|
-| `--seed-training-stream` alone | `49bf308a` | `4fbd3a6e` | **no** (batch-0 mean 0.0999388 vs 0.0002119) |
-| `--stateless-augmentation` alone | `e70e2ad2` | `5f968198` | **no** |
-| **both** | `2ce84c18` | `2ce84c18` | **yes**, on all 3 batches, to every printed digit of mean and std |
+| flags                            | run 1 sha1 | run 2 sha1 | identical?                                                        |
+|----------------------------------|------------|------------|-------------------------------------------------------------------|
+| `--seed-training-stream` alone   | `49bf308a` | `4fbd3a6e` | **no** (batch-0 mean 0.0999388 vs 0.0002119)                      |
+| `--stateless-augmentation` alone | `e70e2ad2` | `5f968198` | **no**                                                            |
+| **both**                         | `2ce84c18` | `2ce84c18` | **yes**, on all 3 batches, to every printed digit of mean and std |
 
 `--seed` alone does not make two DINO runs comparable, and neither flag is redundant.
 `--seed-training-stream` reaches the TFDS training-file interleave;
@@ -294,10 +294,10 @@ by wrapping `tf.image.crop_to_bounding_box` in the module namespace, rather than
 geometry), N=2000 draws per cell, `out_size=96`, `local_scale=(0.05, 0.4)`, `ratio=(3/4, 4/3)`.
 Upsample factor = `out_size / sqrt(crop_w * crop_h)`.
 
-| source | local crop side (px) | mean upsample | worst | % of local views upsampled |
-|---|---|---|---|---|
-| 96 px | 21.4-61.0 (mean 44.1) | **2.35x** | 4.50x | **100%** |
-| 224 px | 50.1-141.9 (mean 102.9) | **1.006** | 1.92x | **39%** |
+| source | local crop side (px)    | mean upsample | worst | % of local views upsampled |
+|--------|-------------------------|---------------|-------|----------------------------|
+| 96 px  | 21.4-61.0 (mean 44.1)   | **2.35x**     | 4.50x | **100%**                   |
+| 224 px | 50.1-141.9 (mean 102.9) | **1.006**     | 1.92x | **39%**                    |
 
 Global views at a 224 px source: 0.53x mean, never above 1.0.
 
@@ -310,8 +310,8 @@ docstring numbers to within rounding, so those inherited numbers are sound.
 ### The k-NN effect of `--source-image-size 224`: none measurable
 
 Arm E' isolated exactly one differing config key (`source_image_size: None -> 224`) at 8 epochs,
-smoke scale, controlled stream, 2 seeds. Effect **+0.0024** on the pre-registered endpoint,
-**+0.0028** on the exploratory last-3 endpoint, and **+0.0044** at a separate final-epoch endpoint
+smoke scale, controlled stream, 2 seeds. Effect **+0.0024** on the pre-registered endpoint, **+0.0028** on the
+exploratory last-3 endpoint, and **+0.0044** at a separate final-epoch endpoint
 where the signs disagree. Verdict: **NO DIFFERENCE**.
 
 Read that correctly. It means: *a 2.3x reduction in mean local-crop interpolation buys no
@@ -334,8 +334,8 @@ directory does not ship.
    epochs.
 3. **`improved - baseline` is NOT a pre-registered endpoint.** It is descriptive only.
 4. **n = 2 seeds.** No confidence interval is claimed anywhere in this file or in its sources.
-5. **One scale only** — smoke: `tiny` / 96 px / `dino_out_dim=4096` / 4 local crops / batch 32.
-   **Paper scale was never run, because it OOMs**: `small` / 224 px / `out_dim=65536` at
+5. **One scale only** — smoke: `tiny` / 96 px / `dino_out_dim=4096` / 4 local crops / batch 32. **Paper scale was never
+   run, because it OOMs**: `small` / 224 px / `out_dim=65536` at
    `batch_size=32` requested a single 10.13 GB allocation against 10001 MiB usable and the process
    was aborted by the BFC allocator. An inherited "15-25x" cost extrapolation to paper scale is
    RETIRED, not refined — there is no comparable step time to divide.
@@ -370,8 +370,8 @@ later changed to 2 arms x 2 seeds and the reader was not re-verified: baseline r
 overwritten by improved rows (identical seed keys) and all four deltas were pooled into one list as
 though they were four seeds of one arm. Because `baseline/s1337 = +0.0316` fails the `>= 0.04`
 test, the pooled judgement returned **INCONCLUSIVE for a phase in which both arms are internally
-consistent**. Fixed by keying on `(arm, seed)`; no run was re-executed and no threshold was moved.
-**It was caught only because a hand-check contradicted the machine.** The session that produced it
+consistent**. Fixed by keying on `(arm, seed)`; no run was re-executed and no threshold was moved. **It was caught only
+because a hand-check contradicted the machine.** The session that produced it
 spent nine steps insisting that verdicts be computed mechanically rather than by eye, and the
 mechanical computation was the thing that was wrong. The argument that survives is for keeping
 both, not for trusting either alone.
@@ -421,14 +421,14 @@ test went red, and the thing under test was still unproven.
 
 **Scope**: smoke scale, imagenette, GPU 1 (RTX 4070, 12 GB), one process at a time.
 
-| quantity | measured |
-|---|---|
-| end-to-end step time, real trainer | **0.200 s/step** |
+| quantity                                                                  | measured          |
+|---------------------------------------------------------------------------|-------------------|
+| end-to-end step time, real trainer                                        | **0.200 s/step**  |
 | compute-only step time, synthetic batch, 20 `train_on_batch` after warmup | **0.0526 s/step** |
-| peak GPU memory, smoke scale | **1534 MiB** |
-| pure training epoch | 59.0 s |
-| one k-NN eval at bank 64 / query 32 | 35.7 s |
-| fixed per-run overhead | 155.5 s |
+| peak GPU memory, smoke scale                                              | **1534 MiB**      |
+| pure training epoch                                                       | 59.0 s            |
+| one k-NN eval at bank 64 / query 32                                       | 35.7 s            |
+| fixed per-run overhead                                                    | 155.5 s           |
 
 **The model is INPUT-BOUND at smoke scale.** End-to-end costs 3.8x the pure GPU compute: JPEG
 decode plus multi-crop augmentation on the CPU dominates. A budget taken from a compute-only probe
@@ -446,8 +446,8 @@ to within 1%.
 One config per PROCESS: the peak is a non-resetting high-water mark, so a second config measured in
 the same process reports the maximum over both. Polling `nvidia-smi` while `train_dino.py` runs
 does NOT measure this — in that trainer's import order TF is initialized before
-`train.common.setup_gpu`, so `set_memory_growth` fails and TF pre-allocates ~85% of the device
-(~10 400 MiB polled). That number is TF's ARENA, not the working set. The three pre-committed
+`train.common.setup_gpu`, so `set_memory_growth` fails and TF pre-allocates ~85% of the device (~10 400 MiB polled).
+That number is TF's ARENA, not the working set. The three pre-committed
 memory reductions (`n_local_crops` 4 -> 2, crop 96 -> 64, `batch_size` 32 -> 16) are measured to be
 unnecessary at this scale; applying them "to be safe" costs coverage for nothing.
 
@@ -466,8 +466,8 @@ Each of these is a question this repository has NOT answered. They are written h
 
 ### 8.1 Attribution: the improved arm changes two things
 
-The 60-epoch IMPROVED verdict in section 1 belongs to the PAIR
-(`ema_warmup_steps 0 -> 295`, `teacher_temp_final 0.07 -> 0.04`). The two mechanisms were
+The 60-epoch IMPROVED verdict in section 1 belongs to the PAIR (`ema_warmup_steps 0 -> 295`,
+`teacher_temp_final 0.07 -> 0.04`). The two mechanisms were
 separated at 8 epochs and never at 60. A positive joint result does not apportion credit.
 
 **Concretely what would settle it**: 3 arms x 2 seeds x 60 epochs — EMA-only, temp-only, both —
@@ -531,15 +531,15 @@ noise data are the two-seed spread and the single 0.0020 cross-process datum in 
 
 ## 9. Provenance
 
-| item | value |
-|---|---|
-| plan that built `models/vision/dino/`, `losses/dino_loss.py`, `src/train/dino/` | `plan-2026-08-01T105809-dc0c402e` |
-| plan that produced every measurement in this file | `plan-2026-08-01T195746-12a1f2db` |
-| commit range of the measurement plan | `355c70d5..3bca113d` (10 commits) |
-| plan that promoted these numbers into this git-tracked file | `plan-2026-08-02T132301-93deeae2` |
-| hardware | GPU 1, RTX 4070, 12 GB; all training runs strictly serial |
-| dataset | imagenette (TFDS), training split |
-| raw artifacts | `results/*/` and `plans/*/` — **both gitignored**, not recoverable from a checkout |
+| item                                                                            | value                                                                              |
+|---------------------------------------------------------------------------------|------------------------------------------------------------------------------------|
+| plan that built `models/vision/dino/`, `losses/dino_loss.py`, `src/train/dino/` | `plan-2026-08-01T105809-dc0c402e`                                                  |
+| plan that produced every measurement in this file                               | `plan-2026-08-01T195746-12a1f2db`                                                  |
+| commit range of the measurement plan                                            | `355c70d5..3bca113d` (10 commits)                                                  |
+| plan that promoted these numbers into this git-tracked file                     | `plan-2026-08-02T132301-93deeae2`                                                  |
+| hardware                                                                        | GPU 1, RTX 4070, 12 GB; all training runs strictly serial                          |
+| dataset                                                                         | imagenette (TFDS), training split                                                  |
+| raw artifacts                                                                   | `results/*/` and `plans/*/` — **both gitignored**, not recoverable from a checkout |
 
 The training-run directories, the per-run `random_init_control.json` files, the verdict JSONs, the
 sha1 determinism probe output and the crop-geometry probe output all live under those two

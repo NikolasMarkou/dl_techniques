@@ -1,10 +1,11 @@
 # Simplex Diffusion Models (SDM) — Integration Research
 
 **Paper:** Deschenaux et al., *Simplex Diffusion Models*, arXiv:2609.35553v1 [cs.LG] 28 Sep 2026 (CC BY 4.0).
-**Status:** research-only, no code written. Target: new model family properly integrated into `dl_techniques`.
-**Date:** 2026-10-14. **Author:** integration investigation (no implementation).
+**Status:** research-only, no code written. Target: new model family properly integrated into `dl_techniques`. **Date:**
+2026-10-14. **Author:** integration investigation (no implementation).
 
-> House rules that govern everything below: `research/2026_keras_custom_models_instructions_v2.md` (mandatory authoring guide),
+> House rules that govern everything below: `research/2026_keras_custom_models_instructions_v2.md` (mandatory authoring
+> guide),
 > `src/dl_techniques/models/AGENTS.md` (authoring contract), `src/dl_techniques/models/GUIDE.md` (measured defects),
 > `REPO_MAP.md` (model/trainer/test triangle), per-package `AGENTS.md` files.
 
@@ -31,8 +32,8 @@ Three claims structure the paper:
    discrete baseline; 8-step distilled SDM 32.1% GSM8K > 128-step distilled discrete 21.4%;
    Sudoku 99.1% w/ SC (≈ best 99.3%); OWT 17.0 GenPPL / 5.46 H1 in 64 steps.
 
-Scope for us: **phase 1 = forward + reverse + CE + DiT denoiser + sampler**. Defer distillation
-(App. G), auto-guidance (K.4), CFG (C.2), logit-shaping stack (K.5) to phase 2.
+Scope for us: **phase 1 = forward + reverse + CE + DiT denoiser + sampler**. Defer distillation (App. G), auto-guidance
+(K.4), CFG (C.2), logit-shaping stack (K.5) to phase 2.
 
 ---
 
@@ -93,8 +94,8 @@ usable SDM. Gaussian fluctuation (E.7): `√ε(P_t−P̄_t) → N(0,(1−α_t)²
 
 **Dirichlet sampling (App. D):** Gamma-construction `Y_i ~ Gamma(α_i,1)`,
 `P = Y/ΣY` (Eq. 26/44). Paper uses Marsaglia–Tsang (Alg. 3) with boosting for `α<1`,
-rejects JAX-native vmap key-splitting (memory overhead) for counter-based vectorized PRNG
-(3.8× speedup note). For us: **check `keras`/`tf.random.gamma` first**; only hand-roll if
+rejects JAX-native vmap key-splitting (memory overhead) for counter-based vectorized PRNG (3.8× speedup note). For us:
+**check `keras`/`tf.random.gamma` first**; only hand-roll if
 measured slow/biased. `keras.random.gamma` exists but verify dtype + graph-mode + XLA
 before committing (see §10 hazards).
 
@@ -163,8 +164,8 @@ corrupt target half only, keep prompt clean; OWT corrupts all 1024.
 
 **Loss placement:** plain CE needs no packed-`y_true` trick. If we later need `t`-dependent
 weighting, do it at the **sampling level** (cf. `FlowMatchingVelocityLoss` docstring:
-time-weighting deliberately not in loss). Keep `call()` returning `(B,)` per-sample
-(losses/AGENTS.md shape rule + `test_the_premature_scalar_family_is_pinned.py`).
+time-weighting deliberately not in loss). Keep `call()` returning `(B,)` per-sample (losses/AGENTS.md shape rule +
+`test_the_premature_scalar_family_is_pinned.py`).
 
 ### 4.2 Inference (Alg. 2)
 
@@ -196,10 +197,10 @@ LN scale+shift = 0.
 ### 4.4 Schedules: training sampler vs inference grid (J.1)
 
 - **Time sampler:** uniform (†) vs adaptive (‡, `q(t) ∝ dL_t/dt`, 50-bin piecewise-linear
-  + EMA 0.9, refit every 50 steps after 1k warmup, inverse-CDF via 1k-point lookup).
+    + EMA 0.9, refit every 50 steps after 1k warmup, inverse-CDF via 1k-point lookup).
 - **Inference grid:** linear `i/n`, cosine `cos(π/2·(1−i/n))`, adaptive `t_i = F̂^{−1}(i/n)`.
-Adaptive needs adaptive-trained checkpoint. Paper: adaptive helps expectation-input most
-(+9–11 pts @512 steps, +18–19 @64); can hurt argmax + UDM+PC; MDM+SC benefits.
+  Adaptive needs adaptive-trained checkpoint. Paper: adaptive helps expectation-input most (+9–11 pts @512 steps, +18–19
+  @64); can hurt argmax + UDM+PC; MDM+SC benefits.
 
 ### 4.5 Extensions (phase 2, do not build now)
 
@@ -215,14 +216,14 @@ Adaptive needs adaptive-trained checkpoint. Paper: adaptive helps expectation-in
 
 ## 5. Empirical anchors (what "working" means)
 
-| Task | Setup | SDM | Baseline |
-|---|---|---|---|
-| Sudoku 180 steps | DiT 8L/512d/8h 28.6M, 50k steps | 88.4% (κ=1, no SC) / **99.1%** (+SC) | MDM+SC 99.3, UDM+PC 95.8, DFM 76.7 |
-| TinyGSM 512 steps | DiT 12L/768d/12h 167.9M, 250k×512 | T=1 **45.8%** / T=0.1 **49.0%** (expectation, no SC) | UDM+PC 36.8 / MDM+SC 45.8; Argmax+SC 57.0% @8k NFE |
-| TinyGSM 64 steps | same, adaptive grid | 32.7% T=1 / 39.5% T=0.1 | UDM+PC 23.7 / 38.3 |
-| GSM8K distilled 8 NFE | SDM-DMD | **32.1%** | IDLM 21.4% @128 NFE |
-| OWT 64 steps | DiT 12L/768d, 1M×512, L=1024 | 17.0/5.46 ≈ val (15.2/5.46) w/ 4-stage shaping | MDM/UDM same frontier; AR better than data (benchmark warning) |
-| Molecules | BERT 12L/768, SAFE 1880 vocab, L=256 | quality≈87% + diversity 0.857 (conf. sampling) | MDM 92.8 / UDM 92.0 (higher quality, lower diversity) |
+| Task                  | Setup                                | SDM                                                  | Baseline                                                       |
+|-----------------------|--------------------------------------|------------------------------------------------------|----------------------------------------------------------------|
+| Sudoku 180 steps      | DiT 8L/512d/8h 28.6M, 50k steps      | 88.4% (κ=1, no SC) / **99.1%** (+SC)                 | MDM+SC 99.3, UDM+PC 95.8, DFM 76.7                             |
+| TinyGSM 512 steps     | DiT 12L/768d/12h 167.9M, 250k×512    | T=1 **45.8%** / T=0.1 **49.0%** (expectation, no SC) | UDM+PC 36.8 / MDM+SC 45.8; Argmax+SC 57.0% @8k NFE             |
+| TinyGSM 64 steps      | same, adaptive grid                  | 32.7% T=1 / 39.5% T=0.1                              | UDM+PC 23.7 / 38.3                                             |
+| GSM8K distilled 8 NFE | SDM-DMD                              | **32.1%**                                            | IDLM 21.4% @128 NFE                                            |
+| OWT 64 steps          | DiT 12L/768d, 1M×512, L=1024         | 17.0/5.46 ≈ val (15.2/5.46) w/ 4-stage shaping       | MDM/UDM same frontier; AR better than data (benchmark warning) |
+| Molecules             | BERT 12L/768, SAFE 1880 vocab, L=256 | quality≈87% + diversity 0.857 (conf. sampling)       | MDM 92.8 / UDM 92.0 (higher quality, lower diversity)          |
 
 Invariants: `κ=1` best everywhere without SC (73.9→88.4 Sudoku, 12.6→45.8 TinyGSM T=1);
 `κ=0.2` sometimes < `κ=0` for argmax @64 steps (non-monotone — sweep `{0,0.2,1.0}` min).
@@ -233,50 +234,51 @@ Invariants: `κ=1` best everywhere without SC (73.9→88.4 Sudoku, 12.6→45.8 T
 
 ### 6.1 Model template — copy `vision/dit/`, do not re-derive
 
-| Asset | Path | Reuse |
-|---|---|---|
-| House model shape | `src/dl_techniques/models/vision/dit/model.py` (`DiT`, `create_dit`, `from_variant`, `MODEL_VARIANTS`, `get_config`, `pretrained=True→NotImplementedError`) | Template for `SimplexDiT` class + factory; BERT (`models/language/bert/model.py`) is normative Sphinx exemplar |
-| Block pattern | `models/vision/dit/blocks.py` (`DiTBlock`, `DiTFinalLayer`, explicit names, build-only-what-call-runs) | Reuse, not fork: SDM DiT needs bidirectional (non-causal) blocks; DiT already non-causal |
-| Sampler pattern | `models/vision/dit/diffusion.py` (`GaussianDiffusion`: `q_sample`, `p_mean_variance`, `p_sample`/`ddim_sample` + loops, respacing, explicit `seed`, eager loops + traceable steps, nonzero-mask + `eta=0` pins) | Mirror as `SimplexDiffusion` sampler: `dirichlet_sample`, `bridge_step`, `sample_loop_progressive` + `sample_loop`; keep explicit-seed + call-count test |
-| Schedule value-object | `src/dl_techniques/utils/ddpm_schedule.py` (`DDPMSchedule` frozen dataclass float64 + `space_timesteps` + `respaced`) | Precedent for `SimplexSchedule` (α/ν/c tables float64, NumPy-owned, cast at use); lives in `utils/`, **not** in model pkg (D-030: three consumers across packages) |
-| Config | `models/vision/dit/config.py` (`DIT_VARIANTS`, `DiffusionConfig`) | Add `SIMPLEX_VARIANTS` (Sudoku-28M, TinyGSM/OWT-168M rows) + `SimplexConfig(α, ν, π, κ, grid)` |
-| Loss pattern | `src/dl_techniques/losses/ddpm_hybrid_loss.py` (packed-`y_true` contract, stop-grad, `(B,)` return, float64 tables→cast-in-call) | SDM CE is simpler (no packing); copy `(B,)` + dtype + validation discipline |
-| Bridge precedent | `models/vision_language/bit_diffusion/{sde.py,bridge_process.py,blocks.py,config.py}` (`BridgeSDE`, `bridge_math_dtype` never-narrow, `_expand_like` broadcast, `TIME_EPS` clamping, score targets + DSM weights, golden float64 pins) | Closest math cousin; copy never-narrow dtype + expand + eps-clamp habits; **do not** import from it (models→models import noted as hazard in `layers/embedding/sincos_pos_embed_2d.py`) |
-| Flow baseline | `models/vision_language/{ideogram4/scheduler.py,sd3_mmdit/}` + `losses/flow_matching_velocity_loss.py` | Scheduler + velocity-loss conventions if we later add DFM baseline |
+| Asset                 | Path                                                                                                                                                                                                                                   | Reuse                                                                                                                                                                                   |
+|-----------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| House model shape     | `src/dl_techniques/models/vision/dit/model.py` (`DiT`, `create_dit`, `from_variant`, `MODEL_VARIANTS`, `get_config`, `pretrained=True→NotImplementedError`)                                                                            | Template for `SimplexDiT` class + factory; BERT (`models/language/bert/model.py`) is normative Sphinx exemplar                                                                          |
+| Block pattern         | `models/vision/dit/blocks.py` (`DiTBlock`, `DiTFinalLayer`, explicit names, build-only-what-call-runs)                                                                                                                                 | Reuse, not fork: SDM DiT needs bidirectional (non-causal) blocks; DiT already non-causal                                                                                                |
+| Sampler pattern       | `models/vision/dit/diffusion.py` (`GaussianDiffusion`: `q_sample`, `p_mean_variance`, `p_sample`/`ddim_sample` + loops, respacing, explicit `seed`, eager loops + traceable steps, nonzero-mask + `eta=0` pins)                        | Mirror as `SimplexDiffusion` sampler: `dirichlet_sample`, `bridge_step`, `sample_loop_progressive` + `sample_loop`; keep explicit-seed + call-count test                                |
+| Schedule value-object | `src/dl_techniques/utils/ddpm_schedule.py` (`DDPMSchedule` frozen dataclass float64 + `space_timesteps` + `respaced`)                                                                                                                  | Precedent for `SimplexSchedule` (α/ν/c tables float64, NumPy-owned, cast at use); lives in `utils/`, **not** in model pkg (D-030: three consumers across packages)                      |
+| Config                | `models/vision/dit/config.py` (`DIT_VARIANTS`, `DiffusionConfig`)                                                                                                                                                                      | Add `SIMPLEX_VARIANTS` (Sudoku-28M, TinyGSM/OWT-168M rows) + `SimplexConfig(α, ν, π, κ, grid)`                                                                                          |
+| Loss pattern          | `src/dl_techniques/losses/ddpm_hybrid_loss.py` (packed-`y_true` contract, stop-grad, `(B,)` return, float64 tables→cast-in-call)                                                                                                       | SDM CE is simpler (no packing); copy `(B,)` + dtype + validation discipline                                                                                                             |
+| Bridge precedent      | `models/vision_language/bit_diffusion/{sde.py,bridge_process.py,blocks.py,config.py}` (`BridgeSDE`, `bridge_math_dtype` never-narrow, `_expand_like` broadcast, `TIME_EPS` clamping, score targets + DSM weights, golden float64 pins) | Closest math cousin; copy never-narrow dtype + expand + eps-clamp habits; **do not** import from it (models→models import noted as hazard in `layers/embedding/sincos_pos_embed_2d.py`) |
+| Flow baseline         | `models/vision_language/{ideogram4/scheduler.py,sd3_mmdit/}` + `losses/flow_matching_velocity_loss.py`                                                                                                                                 | Scheduler + velocity-loss conventions if we later add DFM baseline                                                                                                                      |
 
 ### 6.2 Backbone pieces — factory-first (layers/AGENTS.md § Layer Reuse Policy)
 
-| Domain | Entry point | Keys to use |
-|---|---|---|
-| Embeddings | `layers/embedding/factory.py::create_embedding_layer` (`EMBEDDING_REGISTRY`, 15 types) | `timestep` (DiT/GLIDE cos-first, `hidden_size` req.), `scalar_sinusoidal` (Ideogram4 `[0,1]` scalar, NOT interchangeable with `timestep`), `bert_embeddings` / `modern_bert_embeddings` for token tables, `class_label` for CFG null row |
-| Norms | `layers/norms/factory.py::create_normalization_layer` | Route all norms here; factory eps `1e-6` vs Keras default `1e-3` (1000× hazard, GUIDE §5). Pass `epsilon=` explicitly with citation |
-| Attention/FFN | `layers/attention/factory.py`, `layers/ffn/factory.py` (`gelu_tanh` = DiT's tanh-GELU) | `TransformerLayer` (`layers/transformers/transformer.py`, direct import, no factory) covers most; `text_encoder.py`/`vision_encoder.py` preset builders |
-| AdaLN | `layers/transformers/sd3_adaln.py` (`AdaLayerNormZero` 6-way, `AdaLayerNormContinuous` 2-way, `modulate`) | Direct reuse for simplex DiT conditioning `c = t_emb (+ y_emb)`; DiT `blocks.py` shows composition |
-| Masking | `utils/masking/strategies.py`, `dl_techniques.utils.masking` (canonical mask factory) + `layers/attention/common.py::apply_attention_mask` | Use for padding/conditional-prefix handling; **never** hand-roll additive `−1e9` mask (fp16 `0·−inf=NaN`, GUIDE §4) |
-| Heads | `layers/heads/factory.py::create_head(domain,…)` + `layers/heads/nlp/` | Denoiser output head = logits over vocab; follow `common/lm_pretraining` head conventions (untied by default for model-agnostic wrapper) |
-| Activations | `layers/activations/common.py` trio + `utils/activation_serialization.py` | Canonical `(de)serialization`; Layer-rejecting contract |
+| Domain        | Entry point                                                                                                                                | Keys to use                                                                                                                                                                                                                              |
+|---------------|--------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Embeddings    | `layers/embedding/factory.py::create_embedding_layer` (`EMBEDDING_REGISTRY`, 15 types)                                                     | `timestep` (DiT/GLIDE cos-first, `hidden_size` req.), `scalar_sinusoidal` (Ideogram4 `[0,1]` scalar, NOT interchangeable with `timestep`), `bert_embeddings` / `modern_bert_embeddings` for token tables, `class_label` for CFG null row |
+| Norms         | `layers/norms/factory.py::create_normalization_layer`                                                                                      | Route all norms here; factory eps `1e-6` vs Keras default `1e-3` (1000× hazard, GUIDE §5). Pass `epsilon=` explicitly with citation                                                                                                      |
+| Attention/FFN | `layers/attention/factory.py`, `layers/ffn/factory.py` (`gelu_tanh` = DiT's tanh-GELU)                                                     | `TransformerLayer` (`layers/transformers/transformer.py`, direct import, no factory) covers most; `text_encoder.py`/`vision_encoder.py` preset builders                                                                                  |
+| AdaLN         | `layers/transformers/sd3_adaln.py` (`AdaLayerNormZero` 6-way, `AdaLayerNormContinuous` 2-way, `modulate`)                                  | Direct reuse for simplex DiT conditioning `c = t_emb (+ y_emb)`; DiT `blocks.py` shows composition                                                                                                                                       |
+| Masking       | `utils/masking/strategies.py`, `dl_techniques.utils.masking` (canonical mask factory) + `layers/attention/common.py::apply_attention_mask` | Use for padding/conditional-prefix handling; **never** hand-roll additive `−1e9` mask (fp16 `0·−inf=NaN`, GUIDE §4)                                                                                                                      |
+| Heads         | `layers/heads/factory.py::create_head(domain,…)` + `layers/heads/nlp/`                                                                     | Denoiser output head = logits over vocab; follow `common/lm_pretraining` head conventions (untied by default for model-agnostic wrapper)                                                                                                 |
+| Activations   | `layers/activations/common.py` trio + `utils/activation_serialization.py`                                                                  | Canonical `(de)serialization`; Layer-rejecting contract                                                                                                                                                                                  |
 
 ### 6.3 Training wrappers — do not invent a new one
 
-| Asset | Path | Note |
-|---|---|---|
-| MLM/CLM wrappers | `models/common/lm_pretraining/{mlm.py,clm.py,utils.py}` + `models/language/AGENTS.md` | `MaskedLanguageModel` (bidirectional, dynamic masking in `train_step`, TF-only) / `CausalLanguageModel` (`skip_head`, `pre_shifted`, `loss_fn`, `aggregate_backbone_losses`, `output_key`, causality probe). SDM denoiser is **bidirectional non-causal** → MLM-shaped wrapper is the closer cousin, but SDM needs simplex-state input + Dirichlet corruption, so **new wrapper**, same head discipline (`task_head/` prefix, byte-identical headless output) |
-| NLP pipeline | `src/train/common/nlp.py` (`create_tokenizer`, `preprocess_{mlm,clm}_dataset`, `estimate_clm_steps_per_epoch`, warmup schedule, `build_headed_model_from_encoder`) + `src/train/AGENTS.md` Pattern 3 | Reuse tokenization/dataset/steps helpers; byte path uses `datasets/byte_lm.py` (vocab 256 cannot use tiktoken pipeline) |
-| Trainer scaffold | `src/train/dit/{train_dit.py,synthetic_data.py,ema_callback.py}` | Copy CLI→config map (`CLI_TO_CONFIG` + `test_cli_contract`), explicit `model.build()` before `fit` (EMA correctness), stock `fit` assertion (`train_step is keras.Model.train_step`), timestamped run dirs, `create_callbacks` + `WeightEMACallback(0.9999)` |
-| Common trainer lib | `src/train/common/{callbacks.py,args.py,run_io.py,stats.py,optimizer.py}` | `create_callbacks`, `resolve_monitor_mode`, `set_seeds`, `setup_gpu`, `optimizer_builder` (note renamed clipping keys + hardcoded `AdamW` name) |
-| Losses on hand | `losses/{masked_causal_lm_loss.py (MaskedCausalLMLoss, (B,) token-mean-preserving), flow_matching_velocity_loss.py, any_loss.py}` | SDM-CE should mirror `MaskedCausalLMLoss` `(B,)` semantics; register via `@register_dl_technique("dl_techniques.losses.<module>")`, export from `losses/__init__.py` |
-| Utils | `utils/{logger.py, keras_registration.py, weight_transfer.py, sequence_length_guard.py, tensors.py, dtype_policy.py}` | Central logger (no print, no logging in `call`); stripped registration key `dl_techniques.models.<name>.<module>`; `load_backbone_from_checkpoint` for future warm-starts; `RecordedBuildShapeMixin` + int64 tables for XLA/GPU |
-| Datasets | `datasets/{nlp.py, byte_lm.py}` | Wikipedia/HF conventions (`min_article_length`, `num_shards`, `return_counts`); same corpus, different tokenizer for byte vs BPE |
+| Asset              | Path                                                                                                                                                                                                 | Note                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+|--------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| MLM/CLM wrappers   | `models/common/lm_pretraining/{mlm.py,clm.py,utils.py}` + `models/language/AGENTS.md`                                                                                                                | `MaskedLanguageModel` (bidirectional, dynamic masking in `train_step`, TF-only) / `CausalLanguageModel` (`skip_head`, `pre_shifted`, `loss_fn`, `aggregate_backbone_losses`, `output_key`, causality probe). SDM denoiser is **bidirectional non-causal** → MLM-shaped wrapper is the closer cousin, but SDM needs simplex-state input + Dirichlet corruption, so **new wrapper**, same head discipline (`task_head/` prefix, byte-identical headless output) |
+| NLP pipeline       | `src/train/common/nlp.py` (`create_tokenizer`, `preprocess_{mlm,clm}_dataset`, `estimate_clm_steps_per_epoch`, warmup schedule, `build_headed_model_from_encoder`) + `src/train/AGENTS.md` Pattern 3 | Reuse tokenization/dataset/steps helpers; byte path uses `datasets/byte_lm.py` (vocab 256 cannot use tiktoken pipeline)                                                                                                                                                                                                                                                                                                                                       |
+| Trainer scaffold   | `src/train/dit/{train_dit.py,synthetic_data.py,ema_callback.py}`                                                                                                                                     | Copy CLI→config map (`CLI_TO_CONFIG` + `test_cli_contract`), explicit `model.build()` before `fit` (EMA correctness), stock `fit` assertion (`train_step is keras.Model.train_step`), timestamped run dirs, `create_callbacks` + `WeightEMACallback(0.9999)`                                                                                                                                                                                                  |
+| Common trainer lib | `src/train/common/{callbacks.py,args.py,run_io.py,stats.py,optimizer.py}`                                                                                                                            | `create_callbacks`, `resolve_monitor_mode`, `set_seeds`, `setup_gpu`, `optimizer_builder` (note renamed clipping keys + hardcoded `AdamW` name)                                                                                                                                                                                                                                                                                                               |
+| Losses on hand     | `losses/{masked_causal_lm_loss.py (MaskedCausalLMLoss, (B,) token-mean-preserving), flow_matching_velocity_loss.py, any_loss.py}`                                                                    | SDM-CE should mirror `MaskedCausalLMLoss` `(B,)` semantics; register via `@register_dl_technique("dl_techniques.losses.<module>")`, export from `losses/__init__.py`                                                                                                                                                                                                                                                                                          |
+| Utils              | `utils/{logger.py, keras_registration.py, weight_transfer.py, sequence_length_guard.py, tensors.py, dtype_policy.py}`                                                                                | Central logger (no print, no logging in `call`); stripped registration key `dl_techniques.models.<name>.<module>`; `load_backbone_from_checkpoint` for future warm-starts; `RecordedBuildShapeMixin` + int64 tables for XLA/GPU                                                                                                                                                                                                                               |
+| Datasets           | `datasets/{nlp.py, byte_lm.py}`                                                                                                                                                                      | Wikipedia/HF conventions (`min_article_length`, `num_shards`, `return_counts`); same corpus, different tokenizer for byte vs BPE                                                                                                                                                                                                                                                                                                                              |
 
 ### 6.4 Tests to mirror
 
 `tests/test_models/test_dit/` (surface, config, diffusion incl. nonzero-mask/`eta=0`/respacing-map,
 blocks attribution, identity-at-init, CFG 3-channel, variance-logit, null-row, frozen pos-embed,
 unpatchify orientation, build-parity, gradient flow) + `tests/test_models/test_lm_pretraining/`
+
 + `tests/test_losses/test_ddpm_hybrid_loss.py` + `test_the_premature_scalar_family_is_pinned.py`
 + `test_package_api_contract.py` + `test_the_legacy_alias_namespace_has_no_collisions.py`
 + tree-wide `pytest tests/test_models/ -q --collect-only` (~3 s) after public-surface changes.
-Scoped runs only (full suite ≈1.5 h, no parallel pytest, `CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg`).
+  Scoped runs only (full suite ≈1.5 h, no parallel pytest, `CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg`).
 
 ---
 
@@ -374,8 +376,8 @@ the tensor shapes, boundary cases, and phase-2 equations that §4.5 had only sum
 - `π`: full support required (else `P_t` reveals `x0` a.s. for `t < 1`). Default uniform `1/N`.
 - `a_t = c_t α_t`, `b_t = c_t(1−α_t)`, `β_t = a_t·e_{x0} + b_t·π` per position.
 - `r_{s,t} = min(1, b_s / b_t)` (`b_t > 0` for `t < 1`; `t = 1` is the `Dir(c_1 π)` endpoint).
-  `ρ^κ_{s,t} = (1−κ)·r_{s,t}`. Clamp `t ∈ [TIME_EPS, 1−TIME_EPS]`-style epsilons at both ends
-  (cf. `bit_diffusion` `TIME_EPS`): at `t = 0`, `β_0` degenerates to a vertex; treat only via limit.
+  `ρ^κ_{s,t} = (1−κ)·r_{s,t}`. Clamp `t ∈ [TIME_EPS, 1−TIME_EPS]`-style epsilons at both ends (cf. `bit_diffusion`
+  `TIME_EPS`): at `t = 0`, `β_0` degenerates to a vertex; treat only via limit.
 - Denoiser I/O: `P̂^θ(t, P_t) : (B, L, N)` softmax rows; `t : (B,)` or scalar broadcast.
 
 ### 11.2 Dirichlet / Beta / Gamma primitives (App. A + D)

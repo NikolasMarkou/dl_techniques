@@ -11,10 +11,10 @@ a 1.6T-total / 49B-active (Pro) and 284B / 13B (Flash) Mixture-of-Experts (MoE) 
 trained on 15.5T tokens for agentic intelligence; **MAI-Thinking-1 / MAI-Base-1** (Microsoft AI), a 1T-total
 / 35B-active MoE trained from scratch on 30T + 3.55T mid-training tokens with no third-party distillation;
 and **Mellum 2** (JetBrains), a 12B-total / 2.5B-active MoE specialized for in-IDE software engineering,
-trained on 10.6T tokens under a fixed single-GPU inference budget. The four programs differ in hardware
-(GB200/GB300, H800, H200), optimizer (Muon, MuonClip, AdamW), data philosophy (synthetic-heavy vs
-strictly human), attention design (MLA, hybrid compressed-sparse, GQA, GQA+SWA), and serving target
-(1M-token frontier reasoning vs commodity-GPU code completion).
+trained on 10.6T tokens under a fixed single-GPU inference budget. The four programs differ in hardware (GB200/GB300,
+H800, H200), optimizer (Muon, MuonClip, AdamW), data philosophy (synthetic-heavy vs
+strictly human), attention design (MLA, hybrid compressed-sparse, GQA, GQA+SWA), and serving target (1M-token frontier
+reasoning vs commodity-GPU code completion).
 
 The methodological premise is that **agreement across independently-motivated recipes is the reliable
 signal**, while disagreement localizes the design axes that are genuinely scale-, data-, or
@@ -50,21 +50,21 @@ signal rests only on the two DeepSeek-lineage systems we say so explicitly and d
 
 ### System cards
 
-| Axis | DeepSeek-V4 (Pro) | Kimi K2 | MAI-Thinking-1 | Mellum 2 |
-|---|---|---|---|---|
-| Total / active params | 1.6T / 49B | 1.04T / 32B | 1T / 35B | 12B / 2.5B |
-| Pre-train tokens | 33T | 15.5T | 30T + 3.55T mid | 10.6T |
-| Experts (total / active / shared) | 384 / 6 / 1 | 384 / 8 / 1 | 512 / 8 / 0 (interleaved w/ dense FFN) | 64 / 8 / 0 |
-| Attention | Hybrid CSA+HCA (compressed + sparse), shared-KV MQA | MLA, 64 heads | GQA-8, 5:1 local(SWA):global(NoPE) | GQA-4, 3:1 SWA:full |
-| Attention-logit control | RMSNorm on Q/KV | QK-Clip (MuonClip) | QK-RMSNorm | QK-Norm |
-| Optimizer | Muon (+ AdamW for embed/head/norm) | MuonClip | AdamW | Muon (+ Adam for embed/out) |
-| Precision | BF16 + FP8 + FP4 (MXFP4 QAT) | BF16 + FP8 (storage) | BF16 + FP8 | BF16 + FP8 |
-| LR shape / peak | warmup-const-cosine / 2.0e-4 | WSD / 2e-4 | warmup-cosine / 2e-4 | WHD / 3e-4 |
-| Weight decay | 0.1 | 0.1 | 0.1 | 0.1 |
-| MTP | yes (depth 1) | no | no | yes (1 head, spec-decode draft) |
-| Context extension | 4K->16K->64K->1M | 4K->32K->128K (YaRN) | 16K->64K->256K | 8K->128K (layer-selective YaRN) |
-| Post-train | specialists -> on-policy distillation | SFT -> joint RL (K1.5) | specialists -> consolidation SFT -> RL | SFT (instruct/think) -> RLVR (GRPO) |
-| Reward for hard-to-verify | Generative Reward Model | self-critique rubric | AI judge + RM | LLM-as-judge |
+| Axis                              | DeepSeek-V4 (Pro)                                   | Kimi K2                | MAI-Thinking-1                         | Mellum 2                            |
+|-----------------------------------|-----------------------------------------------------|------------------------|----------------------------------------|-------------------------------------|
+| Total / active params             | 1.6T / 49B                                          | 1.04T / 32B            | 1T / 35B                               | 12B / 2.5B                          |
+| Pre-train tokens                  | 33T                                                 | 15.5T                  | 30T + 3.55T mid                        | 10.6T                               |
+| Experts (total / active / shared) | 384 / 6 / 1                                         | 384 / 8 / 1            | 512 / 8 / 0 (interleaved w/ dense FFN) | 64 / 8 / 0                          |
+| Attention                         | Hybrid CSA+HCA (compressed + sparse), shared-KV MQA | MLA, 64 heads          | GQA-8, 5:1 local(SWA):global(NoPE)     | GQA-4, 3:1 SWA:full                 |
+| Attention-logit control           | RMSNorm on Q/KV                                     | QK-Clip (MuonClip)     | QK-RMSNorm                             | QK-Norm                             |
+| Optimizer                         | Muon (+ AdamW for embed/head/norm)                  | MuonClip               | AdamW                                  | Muon (+ Adam for embed/out)         |
+| Precision                         | BF16 + FP8 + FP4 (MXFP4 QAT)                        | BF16 + FP8 (storage)   | BF16 + FP8                             | BF16 + FP8                          |
+| LR shape / peak                   | warmup-const-cosine / 2.0e-4                        | WSD / 2e-4             | warmup-cosine / 2e-4                   | WHD / 3e-4                          |
+| Weight decay                      | 0.1                                                 | 0.1                    | 0.1                                    | 0.1                                 |
+| MTP                               | yes (depth 1)                                       | no                     | no                                     | yes (1 head, spec-decode draft)     |
+| Context extension                 | 4K->16K->64K->1M                                    | 4K->32K->128K (YaRN)   | 16K->64K->256K                         | 8K->128K (layer-selective YaRN)     |
+| Post-train                        | specialists -> on-policy distillation               | SFT -> joint RL (K1.5) | specialists -> consolidation SFT -> RL | SFT (instruct/think) -> RLVR (GRPO) |
+| Reward for hard-to-verify         | Generative Reward Model                             | self-critique rubric   | AI judge + RM                          | LLM-as-judge                        |
 
 ---
 
@@ -141,11 +141,11 @@ Adam betas 0.9/0.95 and Muon momentum 0.95; MAI AdamW beta1 0.95, beta2 0.925. T
 beta2 regime is shared.
 
 **[C4] FP8 training with BF16 master and FP32 in the sensitive path.** All four run FP8 (DeepSeek-V4 pushes
-to FP4/MXFP4 for routed-expert weights and the indexer QK path during QAT; Kimi uses FP8 for activation
-*storage* but deliberately not for compute; MAI and Mellum use FP8 in the GEMMs). Three of four keep the
+to FP4/MXFP4 for routed-expert weights and the indexer QK path during QAT; Kimi uses FP8 for activation *storage* but
+deliberately not for compute; MAI and Mellum use FP8 in the GEMMs). Three of four keep the
 router and pre-softmax logits in FP32 (MAI is most explicit: FP32 for router logits, output logits, MoE
-combine, and the full residual stream); gradient reduction / accumulation is FP32 across the set. Two
-(MAI, DeepSeek-V4) add stochastic rounding on the high-to-low downcast.
+combine, and the full residual stream); gradient reduction / accumulation is FP32 across the set. Two (MAI, DeepSeek-V4)
+add stochastic rounding on the high-to-low downcast.
 
 **[C4] Learning-rate shape: warmup -> long stable/hold -> decay at the very end.** Despite different names
 (cosine-after-constant, WSD, WHD), all four use a short warmup, a long plateau at peak, and a decay
@@ -259,8 +259,8 @@ the router does not enter a vicious cycle.
 
 **[C4] Two-stage post-training: SFT then RL.** Universal. No system relies on SFT alone.
 
-**[C4] Verifiable rewards (RLVR) are the backbone of RL.** DeepSeek-V4 (rule/test verifiers + GRPO), Kimi
-(a "Verifiable Rewards Gym" spanning math/STEM/logic, instruction-following with hybrid rule + hack-check,
+**[C4] Verifiable rewards (RLVR) are the backbone of RL.** DeepSeek-V4 (rule/test verifiers + GRPO), Kimi (a "Verifiable
+Rewards Gym" spanning math/STEM/logic, instruction-following with hybrid rule + hack-check,
 coding sandboxes, safety), MAI (RLVR across STEM/agentic), and Mellum (RLVR explicitly chosen over RLHF
 "because every prompt admits an unambiguous programmatic check") all anchor RL on programmatically
 checkable reward. Train on what you can verify first.
@@ -371,18 +371,18 @@ hardware failure.
 
 These are the choices the four split on. Each is governed by a variable, not by taste.
 
-| Axis | Split | Governing variable |
-|---|---|---|
-| Optimizer | Muon (DeepSeek-V4, Kimi, Mellum) vs AdamW (MAI) | 3:1 toward Muon for token efficiency; MAI's AdamW is the conservative-stability choice. Lean Muon + a QK control. |
-| Attention-logit control | QK-Norm (DeepSeek-V4, MAI, Mellum) vs QK-Clip (Kimi) | Attention type: MLA cannot materialize K at inference, forcing QK-Clip. Use QK-Norm unless you run MLA. |
-| Shared expert | yes (DeepSeek-V4, Kimi) vs none (Mellum) / conditional (MAI) | MoE layout and scale: MAI finds shared experts help only in every-layer-MoE, not interleaved; Mellum finds no gain and an inference cost at 12B. Add a shared expert at frontier scale with uniform MoE; skip it for small or interleaved designs. |
-| Synthetic data in pre-training | embrace (Kimi, Mellum) vs reject (MAI), filter-then-synth-later (DeepSeek-V4) | Data-scarcity pressure vs factual-drift tolerance. |
-| Position encoding | partial RoPE (DeepSeek-V4), RoPE (Kimi, Mellum), NoPE on global layers (MAI) | Whether global layers are expected to extrapolate; NoPE-global is a Gemma-lineage bet. |
-| MTP | yes (DeepSeek-V4, Mellum) vs no (Kimi, MAI) | Whether you want a speculative-decoding draft for free; useful, not required. |
-| Tied embeddings | tied (MAI) vs untied (Mellum) | Small-model parameter economy vs capacity; weak signal. |
-| Dropout | 0.15 (MAI) vs none (others) | MAI's AdamW-only, no-synthetic regime; idiosyncratic. |
-| Decay endpoint | ~0.1x peak (DeepSeek-V4, MAI, Kimi) vs 0 (Mellum) | Both report it tuned against post-training; tune it, do not default it. |
-| DualPipe | used/adjusted (DeepSeek-V4) vs rejected (Kimi) | Parameter scale: Kimi rejects DualPipe's 2x parameter/gradient memory at 1T and uses interleaved 1F1B. |
+| Axis                           | Split                                                                         | Governing variable                                                                                                                                                                                                                                 |
+|--------------------------------|-------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Optimizer                      | Muon (DeepSeek-V4, Kimi, Mellum) vs AdamW (MAI)                               | 3:1 toward Muon for token efficiency; MAI's AdamW is the conservative-stability choice. Lean Muon + a QK control.                                                                                                                                  |
+| Attention-logit control        | QK-Norm (DeepSeek-V4, MAI, Mellum) vs QK-Clip (Kimi)                          | Attention type: MLA cannot materialize K at inference, forcing QK-Clip. Use QK-Norm unless you run MLA.                                                                                                                                            |
+| Shared expert                  | yes (DeepSeek-V4, Kimi) vs none (Mellum) / conditional (MAI)                  | MoE layout and scale: MAI finds shared experts help only in every-layer-MoE, not interleaved; Mellum finds no gain and an inference cost at 12B. Add a shared expert at frontier scale with uniform MoE; skip it for small or interleaved designs. |
+| Synthetic data in pre-training | embrace (Kimi, Mellum) vs reject (MAI), filter-then-synth-later (DeepSeek-V4) | Data-scarcity pressure vs factual-drift tolerance.                                                                                                                                                                                                 |
+| Position encoding              | partial RoPE (DeepSeek-V4), RoPE (Kimi, Mellum), NoPE on global layers (MAI)  | Whether global layers are expected to extrapolate; NoPE-global is a Gemma-lineage bet.                                                                                                                                                             |
+| MTP                            | yes (DeepSeek-V4, Mellum) vs no (Kimi, MAI)                                   | Whether you want a speculative-decoding draft for free; useful, not required.                                                                                                                                                                      |
+| Tied embeddings                | tied (MAI) vs untied (Mellum)                                                 | Small-model parameter economy vs capacity; weak signal.                                                                                                                                                                                            |
+| Dropout                        | 0.15 (MAI) vs none (others)                                                   | MAI's AdamW-only, no-synthetic regime; idiosyncratic.                                                                                                                                                                                              |
+| Decay endpoint                 | ~0.1x peak (DeepSeek-V4, MAI, Kimi) vs 0 (Mellum)                             | Both report it tuned against post-training; tune it, do not default it.                                                                                                                                                                            |
+| DualPipe                       | used/adjusted (DeepSeek-V4) vs rejected (Kimi)                                | Parameter scale: Kimi rejects DualPipe's 2x parameter/gradient memory at 1T and uses interleaved 1F1B.                                                                                                                                             |
 
 ---
 
@@ -391,26 +391,29 @@ These are the choices the four split on. Each is governed by a variable, not by 
 The high-confidence intersection, as an actionable default recipe for a new mid-to-large MoE.
 
 **Architecture (C4 unless noted).**
+
 - Fine-grained MoE, top-k 8 (6 acceptable). Sparsity scaled to model size: ~8x at ~10B, 48-64x at
   trillion scale. Add one shared expert only at frontier scale with a uniform-MoE layout (contested).
-- Reduce KV cache aggressively and pick the attention design against serving cost: GQA with few KV heads
-  (4-8) and a local:global or SWA:full interleave (3:1 to 5:1) for most budgets; MLA or learned KV
+- Reduce KV cache aggressively and pick the attention design against serving cost: GQA with few KV heads (4-8) and a
+  local:global or SWA:full interleave (3:1 to 5:1) for most budgets; MLA or learned KV
   compression at the frontier.
 - Mandatory attention-logit control: QK-Norm (default) or QK-Clip (if MLA).
 - RMSNorm, gated-SiLU/SwiGLU, RoPE (partial if attention is compressed). MTP head optional (adds a
   spec-decode draft cheaply).
 
 **Optimizer and precision (C4 / C3).**
+
 - Muon for hidden layers; AdamW for embeddings, head, and norms; RMS-match rescale ~0.2; Newton-Schulz
   orthogonalization. (AdamW-throughout is the conservative fallback.)
 - Weight decay 0.1; momentum / beta2 ~0.95; gradient clip 1.0.
 - BF16 master, FP8 GEMMs, FP32 for the router, pre-softmax logits, and all reductions/accumulation;
   stochastic rounding on downcasts. FP4 only for post-training QAT of expert weights if you have the
   kernels.
-- LR: short warmup -> long plateau at peak ~2-3e-4 -> decay over the final 10-20%; tune the endpoint
-  (0 to 0.1x) against your post-training objective.
+- LR: short warmup -> long plateau at peak ~2-3e-4 -> decay over the final 10-20%; tune the endpoint (0 to 0.1x) against
+  your post-training objective.
 
 **Data and curriculum (C4 / C3).**
+
 - Phase the mixture: diverse web early, upweight code/math/curated in a late phase aligned with LR decay.
 - Deduplicate hard (exact + MinHash-fuzzy + semantic) and screen out low-entropy / degenerate sequences;
   treat both as stability measures.
@@ -418,11 +421,13 @@ The high-confidence intersection, as an actionable default recipe for a new mid-
 - Best-fit pack to minimize intra-document truncation.
 
 **Long context (C4 / C2).**
+
 - Pre-train short (4K-16K); reach the target window in a short, dedicated late extension (it converges in
   ~30B tokens / the first ~10% of iterations).
 - Use YaRN, applied only to the global/full-attention layers.
 
 **Post-training (C4 / C3).**
+
 - SFT, then RL. Anchor RL on verifiable rewards; use group-relative policy optimization (GRPO family).
 - For hard-to-verify tasks, prefer generative judges / self-critique grounded in the verifiable signal
   over scalar reward models.
@@ -433,10 +438,11 @@ The high-confidence intersection, as an actionable default recipe for a new mid-
   models.
 
 **Infrastructure (C4 / C3).**
+
 - Select architecture against an explicit inference-cost budget, not training FLOPs alone.
 - Validate decisions on a scaling ladder, checking the trend (not the single-scale winner).
-- For RL: asynchronous rollout with an optimized weight-sync path; force train/inference numeric agreement
-  (bf16 both sides, routing replay, or import-side truncation) because the MoE router is the main mismatch
+- For RL: asynchronous rollout with an optimized weight-sync path; force train/inference numeric agreement (bf16 both
+  sides, routing replay, or import-side truncation) because the MoE router is the main mismatch
   source; deterministic kernels and fault-tolerant rollout pay off at scale.
 
 ---

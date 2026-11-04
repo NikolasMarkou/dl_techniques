@@ -1,6 +1,7 @@
 # DL-Techniques Experiment Guidelines
 
 ## Table of Contents
+
 1. [Overview](#overview)
 2. [Experiment Structure](#experiment-structure)
 3. [Documentation Standards](#documentation-standards)
@@ -15,7 +16,8 @@
 
 ## Overview
 
-This guide establishes standards for creating high-quality, reproducible experiments in the DL-Techniques library. All experiments should follow these patterns to ensure consistency, maintainability, and scientific rigor.
+This guide establishes standards for creating high-quality, reproducible experiments in the DL-Techniques library. All
+experiments should follow these patterns to ensure consistency, maintainability, and scientific rigor.
 
 ### Key Principles
 
@@ -153,7 +155,6 @@ if __name__ == "__main__":
 > `VisualizationManager` is `dl_techniques.visualization.VisualizationManager`, and its config
 > class is `PlotConfig`, not `VisualizationConfig`. Its constructor differs: it takes a required
 > `experiment_name`, and `timestamp=""` replaces the old `timestamp_dirs=False`.
-
 
 ## Documentation Standards
 
@@ -1047,33 +1048,39 @@ if __name__ == "__main__":
 ## Best Practices
 
 ### 1. Scientific Rigor
+
 - **Clear Hypothesis**: State what you expect to find and why
 - **Control Variables**: Keep everything constant except what you're testing
 - **Statistical Significance**: Use appropriate sample sizes and statistical tests
 - **Reproducibility**: Document everything needed to reproduce results
 
 ### 2. Code Organization
+
 - **Modular Design**: Break complex functions into smaller, testable components
 - **Type Hints**: Use type hints throughout for better code documentation
 - **Error Handling**: Gracefully handle failures without crashing the entire experiment
 - **Memory Management**: Explicitly manage memory for large experiments
 
 ### 3. Documentation
+
 - **Comprehensive Docstrings**: Explain the scientific rationale, not just the code
 - **Usage Examples**: Include clear examples of how to run and configure
 - **Parameter Explanation**: Document what each configuration parameter does
 - **Results Interpretation**: Explain how to interpret the outputs
 
 ### 4. Integration
+
 - **Use Library Tools**: Leverage ModelAnalyzer, TrainingConfig, and VisualizationManager
 - **Standard Patterns**: Follow established patterns for consistency
 - **Extensibility**: Make it easy to add new variants or configurations
 - **Reusability**: Write components that can be reused in other experiments
 
 ### 5. Output Management
+
 - **Structured Directories**: Organize outputs logically
 - **Multiple Formats**: Save results in both human-readable and machine-readable formats
 - **Versioning**: Include timestamps and configuration snapshots
 - **Visualization**: Generate publication-ready plots and summaries
 
-This guide ensures that all experiments in the DL-Techniques library maintain high standards of scientific rigor, code quality, and reproducibility while being easy to understand, extend, and reuse.
+This guide ensures that all experiments in the DL-Techniques library maintain high standards of scientific rigor, code
+quality, and reproducibility while being easy to understand, extend, and reuse.

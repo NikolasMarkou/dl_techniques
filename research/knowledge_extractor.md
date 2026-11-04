@@ -2,10 +2,15 @@
 
 ## Executive Summary
 
-This architecture extracts exactly N+1 fixed-capacity semantic concepts from variable-length token sequences using Slot Attention mechanisms, constructs stable relational graphs between concepts through iterative transformer-based refinement with adjacency matrices, and uses cross-attention conditioning to ground text generation in structured knowledge. The system uses multi-phase pretraining on knowledge graph triplets (subject, relation, object) with TransE-style embedding learning for factual consistency and real-world entity alignment.
+This architecture extracts exactly N+1 fixed-capacity semantic concepts from variable-length token sequences using Slot
+Attention mechanisms, constructs stable relational graphs between concepts through iterative transformer-based
+refinement with adjacency matrices, and uses cross-attention conditioning to ground text generation in structured
+knowledge. The system uses multi-phase pretraining on knowledge graph triplets (subject, relation, object) with
+TransE-style embedding learning for factual consistency and real-world entity alignment.
 
 **Key Technical Choices:**
-- Adjacency matrices (N+1 × N+1) as graph representation 
+
+- Adjacency matrices (N+1 × N+1) as graph representation
 - Existing MultiHeadAttention layers for all graph reasoning
 - Zero sink embedding as trainable null concept absorber
 - Configurable iteration count with early convergence stopping
@@ -14,6 +19,7 @@ This architecture extracts exactly N+1 fixed-capacity semantic concepts from var
 ## Core Architecture Overview
 
 ### Information Flow Pipeline
+
 ```
 Variable Tokens (B, L, D) → [Slot Attention] → N+1 Fixed Concepts (B, N+1, C)
                                                         ↓
@@ -25,8 +31,9 @@ Concepts + Adjacency → [Cross-Attention Decoder] → Generated Tokens (B, L', 
 ```
 
 ### Technical Implementation Stack
+
 - **Slot Attention**: `dl_techniques.layers.attention.multi_head_attention.MultiHeadAttention`
-- **Graph Construction**: `keras.layers.Dense` → `keras.ops.reshape` 
+- **Graph Construction**: `keras.layers.Dense` → `keras.ops.reshape`
 - **Graph Stabilization**: `dl_techniques.layers.transformer.TransformerLayer` with adjacency masking
 - **Decoder Integration**: Cross-attention using `MultiHeadAttention(query=tokens, key=concepts, value=concepts)`
 - **Convergence Detection**: L2 norm of adjacency differences with configurable threshold
@@ -34,11 +41,13 @@ Concepts + Adjacency → [Cross-Attention Decoder] → Generated Tokens (B, L', 
 ### Key Mathematical Formulations
 
 **Concept Extraction:**
+
 ```
 concepts, zero_sink = SlotAttention(tokens)  # (B,L,D) → (B,N+1,C)
 ```
 
 **Graph Construction:**
+
 ```
 graph_logits = Dense(N+1 × N+1)(concept_features)  # (B,N+1,C) → (B,(N+1)²)
 adjacency = reshape(graph_logits, (B, N+1, N+1))   # Soft adjacency matrix
@@ -46,6 +55,7 @@ adjacency = (adjacency + transpose(adjacency)) / 2  # Enforce symmetry
 ```
 
 **Iterative Stabilization:**
+
 ```
 for step in range(max_iterations):
     attention_mask = adjacency_to_mask(adjacency)
@@ -58,8 +68,10 @@ for step in range(max_iterations):
 ## Design Decisions
 
 ### 1. Graph Representation Choice
+
 **Decision**: Symmetric adjacency matrices (N+1 × N+1) with continuous edge weights  
-**Implementation**: 
+**Implementation**:
+
 ```python
 # Graph construction
 graph_dense = keras.layers.Dense((N+1) * (N+1), activation='sigmoid')
@@ -67,15 +79,19 @@ adjacency = keras.ops.reshape(graph_dense(concept_features), (batch, N+1, N+1))
 # Enforce symmetry: A = (A + A^T) / 2
 symmetric_adjacency = (adjacency + keras.ops.transpose(adjacency, axes=[0, 2, 1])) / 2
 ```
-**Rationale**: 
+
+**Rationale**:
+
 - Reuses `keras.layers.Dense` and `keras.ops` - no new graph primitives
 - Symmetric matrices for undirected concept relationships
 - Continuous weights allow soft attention patterns
 - Direct conversion to attention masks via thresholding
 
 ### 2. Concept Capacity Architecture
+
 **Decision**: Slot Attention with N learnable concept queries + 1 trainable zero sink  
 **Implementation**:
+
 ```python
 # Learnable concept queries
 concept_queries = self.add_weight(shape=(N, concept_dim), name='concept_queries')
@@ -85,15 +101,18 @@ all_queries = keras.ops.concatenate([concept_queries, zero_sink_query], axis=0)
 # Cross-attention extraction
 concepts = MultiHeadAttention()(query=all_queries, key=tokens, value=tokens)
 ```
-**Rationale**: 
+
+**Rationale**:
+
 - Fixed (N+1) output regardless of input sequence length
 - Zero sink learned to represent "no meaningful concept"
 - Enables efficient batching of variable-length sequences
 - Prevents concept overflow through sink absorption
 
-### 3. Graph Stabilization Strategy  
-**Decision**: Transformer layers with adjacency-masked attention + momentum updates
-**Implementation**:
+### 3. Graph Stabilization Strategy
+
+**Decision**: Transformer layers with adjacency-masked attention + momentum updates **Implementation**:
+
 ```python
 def adjacency_to_attention_mask(adjacency, threshold=0.5):
     # Convert soft adjacency to binary attention mask
@@ -107,15 +126,18 @@ def stabilization_step(concepts, adjacency):
     new_adjacency = compute_new_adjacency(updated_concepts)
     return new_adjacency
 ```
+
 **Rationale**:
+
 - Leverages existing `TransformerLayer` implementation
 - Adjacency matrix controls which concepts can attend to each other
 - Momentum prevents oscillations: `adj_t+1 = α × adj_t + (1-α) × new_adj`
 - Early stopping via convergence detection
 
 ### 4. Knowledge Grounding Foundation
-**Decision**: Multi-phase pretraining with TransE knowledge graph embeddings
-**Implementation**:
+
+**Decision**: Multi-phase pretraining with TransE knowledge graph embeddings **Implementation**:
+
 ```python
 # Phase 1: KG triplet embeddings
 entity_embeddings = keras.layers.Embedding(num_entities, embed_dim)
@@ -129,7 +151,9 @@ def transe_loss(head, relation, tail):
 def alignment_loss(extracted_concepts, linked_entity_embeddings):
     return keras.losses.cosine_similarity(extracted_concepts, linked_entity_embeddings)
 ```
+
 **Rationale**:
+
 - TransE provides proven KG embedding foundation
 - Entity-concept alignment creates grounding bridge
 - Multi-phase curriculum builds complexity gradually
@@ -138,10 +162,12 @@ def alignment_loss(extracted_concepts, linked_entity_embeddings):
 ## Detailed Component Specifications
 
 ### Component 1: Concept Extraction Layer
+
 **Input**: Variable-length token sequences `(batch_size, seq_len, embed_dim)`  
-**Output**: Fixed concept embeddings `(batch_size, N+1, concept_dim)`  
+**Output**: Fixed concept embeddings `(batch_size, N+1, concept_dim)`
 
 **Implementation Architecture**:
+
 ```python
 class ConceptExtractor(keras.layers.Layer):
     def __init__(self, num_concepts=32, concept_dim=768):
@@ -188,15 +214,18 @@ class ConceptExtractor(keras.layers.Layer):
 ```
 
 **Technical Constraints**:
+
 - Always outputs exactly N+1 embeddings regardless of input length
 - Zero sink embedding (index N) learns to absorb unused semantic capacity
 - Slot attention ensures concept specialization through competition
 
 ### Component 2: Graph Construction Layer
+
 **Input**: Fixed concept embeddings `(batch_size, N+1, concept_dim)`  
-**Output**: Initial adjacency matrix `(batch_size, N+1, N+1)`  
+**Output**: Initial adjacency matrix `(batch_size, N+1, N+1)`
 
 **Implementation Architecture**:
+
 ```python
 class GraphConstructor(keras.layers.Layer):
     def __init__(self, num_concepts=32, hidden_dim=256):
@@ -235,16 +264,19 @@ class GraphConstructor(keras.layers.Layer):
 ```
 
 **Technical Properties**:
+
 - Symmetric adjacency matrices: `A[i,j] = A[j,i]`
 - Self-connections allowed (diagonal elements)
 - Soft edge weights in [0,1] range via sigmoid activation
 - Pairwise interaction modeling for principled edge prediction
 
 ### Component 3: Iterative Graph Stabilization
+
 **Input**: Initial adjacency + concept embeddings  
-**Output**: Stable adjacency matrix after convergence  
+**Output**: Stable adjacency matrix after convergence
 
 **Implementation Architecture**:
+
 ```python
 class GraphStabilizer(keras.layers.Layer):
     def __init__(self, num_concepts=32, max_iterations=5, convergence_threshold=1e-4):
@@ -314,16 +346,19 @@ class GraphStabilizer(keras.layers.Layer):
 ```
 
 **Technical Features**:
+
 - Graph-aware attention using adjacency as attention mask
 - Residual adjacency updates with momentum smoothing
 - L2-norm based convergence detection with early stopping
 - Symmetry enforcement at each iteration step
 
 ### Component 4: Graph-Conditioned Transformer Decoder
+
 **Input**: Generation tokens + stable graph + concept embeddings  
-**Output**: Generated token sequences  
+**Output**: Generated token sequences
 
 **Implementation Architecture**:
+
 ```python
 class GraphConditionedDecoder(keras.layers.Layer):
     def __init__(self, vocab_size=50000, num_layers=12, embed_dim=768):
@@ -377,14 +412,17 @@ class GraphConditionedDecoder(keras.layers.Layer):
 ```
 
 **Integration Strategies**:
+
 1. **Cross-attention conditioning**: Concepts as external memory attended by tokens
-2. **Graph-weighted attention**: Adjacency matrix weights concept contributions  
+2. **Graph-weighted attention**: Adjacency matrix weights concept contributions
 3. **Residual integration**: Additive conditioning preserves base transformer capability
 
 ### Component 5: Knowledge Graph Pretraining
-**Foundation**: Multi-phase curriculum with TransE embeddings and entity alignment  
+
+**Foundation**: Multi-phase curriculum with TransE embeddings and entity alignment
 
 **Implementation Architecture**:
+
 ```python
 class KGPretraining(keras.layers.Layer):
     def __init__(self, num_entities=1000000, num_relations=1000, embed_dim=768):
@@ -428,19 +466,20 @@ class KGPretraining(keras.layers.Layer):
 ```
 
 **Training Phases**:
+
 1. **KG Triplet Learning**: TransE loss on (subject, relation, object) triplets
 2. **Entity-Concept Alignment**: Cosine similarity between concepts and linked entities
 3. **Graph Structure Supervision**: Predict KG relations from concept pairs
 4. **End-to-End Fine-tuning**: Joint optimization with generation objectives
 
-
-
 ## Training Strategy
 
 ### Multi-Phase Curriculum Implementation
+
 **Sequential Training Pipeline**: Each phase builds on previous phase outputs
 
 **Phase 1: KG Foundation Learning** (30% of total training time)
+
 ```python
 def phase1_kg_embedding_training():
     # TransE loss implementation
@@ -464,6 +503,7 @@ def phase1_kg_embedding_training():
 ```
 
 **Phase 2: Entity-Concept Alignment** (25% of total training time)
+
 ```python
 def phase2_alignment_training():
     # Freeze KG embeddings, train concept extractor + alignment
@@ -487,7 +527,8 @@ def phase2_alignment_training():
         optimizer.apply_gradients(zip(gradients, model.concept_extractor.trainable_weights))
 ```
 
-**Phase 3: Graph Structure Learning** (25% of total training time)  
+**Phase 3: Graph Structure Learning** (25% of total training time)
+
 ```python
 def phase3_graph_structure_training():
     # Train graph constructor + stabilizer with KG supervision
@@ -518,6 +559,7 @@ def phase3_graph_structure_training():
 ```
 
 **Phase 4: End-to-End Generation Training** (20% of total training time)
+
 ```python
 def phase4_end_to_end_training():
     # Unfreeze all components, joint optimization
@@ -559,6 +601,7 @@ def phase4_end_to_end_training():
 ### Loss Function Implementations
 
 **Primary Loss Functions**:
+
 ```python
 def transe_loss(head_embeds, relation_embeds, tail_embeds, negative_tail_embeds, margin=1.0):
     """TransE embedding loss with margin ranking"""
@@ -597,6 +640,7 @@ def graph_regularization_loss(adjacency_matrix, sparsity_weight=0.01, connectivi
 ```
 
 ### Training Configuration Parameters
+
 ```python
 training_config = {
     # Data parameters
@@ -632,10 +676,13 @@ training_config = {
 ```
 
 ### Technical Training Optimizations
+
 - **Mixed Precision**: Use `keras.mixed_precision.set_global_policy('mixed_float16')` for 40% memory savings
-- **Gradient Checkpointing**: Apply to transformer layers for memory efficiency  
+- **Gradient Checkpointing**: Apply to transformer layers for memory efficiency
 - **Gradient Accumulation**: Simulate larger batch sizes on limited hardware
 - **Dynamic Loss Scaling**: Automatic handling of fp16 training instabilities
 - **Learning Rate Scheduling**: Cosine decay with linear warmup for each phase
 
-This architecture represents a novel approach to structured reasoning in language models, combining the flexibility of transformers with the structured reasoning capabilities of graph neural networks, all grounded in real-world knowledge from knowledge graphs.
+This architecture represents a novel approach to structured reasoning in language models, combining the flexibility of
+transformers with the structured reasoning capabilities of graph neural networks, all grounded in real-world knowledge
+from knowledge graphs.

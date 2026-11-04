@@ -28,11 +28,15 @@
 
 ### The Critical Need for Reliable AI Systems
 
-In an era where artificial intelligence systems are increasingly deployed in safety-critical applications—from medical diagnosis to autonomous vehicles—the ability to detect when a model encounters unfamiliar data has become paramount. Traditional neural networks, while powerful at pattern recognition within their training distribution, often fail catastrophically when presented with out-of-distribution (OOD) data, yet they do so with false confidence.
+In an era where artificial intelligence systems are increasingly deployed in safety-critical applications—from medical
+diagnosis to autonomous vehicles—the ability to detect when a model encounters unfamiliar data has become paramount.
+Traditional neural networks, while powerful at pattern recognition within their training distribution, often fail
+catastrophically when presented with out-of-distribution (OOD) data, yet they do so with false confidence.
 
 ### Current Limitations
 
-Existing OOD detection methods typically operate as post-hoc solutions, analyzing model outputs after the entire forward pass is complete. While effective, these approaches have several limitations:
+Existing OOD detection methods typically operate as post-hoc solutions, analyzing model outputs after the entire forward
+pass is complete. While effective, these approaches have several limitations:
 
 1. **Late Detection**: OOD signals are only available at the final layer
 2. **Computational Overhead**: Many methods require additional forward/backward passes
@@ -41,7 +45,10 @@ Existing OOD detection methods typically operate as post-hoc solutions, analyzin
 
 ### Our Vision: Geometric OOD Detection
 
-We propose **BandRMS-OOD**, a novel approach that embeds OOD detection capabilities directly into the neural network architecture through geometric constraints on feature representations. By creating learnable "spherical shells" in the feature space, we can naturally separate in-distribution (ID) and out-of-distribution samples based on their geometric properties, providing multi-layer OOD detection with clear interpretability.
+We propose **BandRMS-OOD**, a novel approach that embeds OOD detection capabilities directly into the neural network
+architecture through geometric constraints on feature representations. By creating learnable "spherical shells" in the
+feature space, we can naturally separate in-distribution (ID) and out-of-distribution samples based on their geometric
+properties, providing multi-layer OOD detection with clear interpretability.
 
 ### Key Contributions
 
@@ -57,48 +64,57 @@ We propose **BandRMS-OOD**, a novel approach that embeds OOD detection capabilit
 
 ### 2.1 Out-of-Distribution Detection
 
-**Definition**: Out-of-distribution detection is the task of identifying whether a test sample comes from the same distribution as the training data (in-distribution) or from a different distribution (out-of-distribution).
+**Definition**: Out-of-distribution detection is the task of identifying whether a test sample comes from the same
+distribution as the training data (in-distribution) or from a different distribution (out-of-distribution).
 
-**Importance**: 
+**Importance**:
+
 - **Safety**: Prevents models from making confident but incorrect predictions on unfamiliar data
 - **Reliability**: Enables models to express uncertainty and request human intervention
 - **Robustness**: Improves model behavior in real-world deployment scenarios
 
 **Mathematical Framework**:
-- Training distribution: $P_{train}(x, y)$
+
+- Training distribution: $P_{train} (x, y)$
 - Test sample: $x_{test}$
 - Goal: Determine if $x_{test} \sim P_{train}$ or $x_{test} \sim P_{ood}$ where $P_{ood} \neq P_{train}$
 
 ### 2.2 Normalization in Neural Networks
 
 **Purpose of Normalization**:
+
 - Stabilize training dynamics
 - Accelerate convergence
 - Reduce internal covariate shift
 - Improve gradient flow
 
 **Common Normalization Types**:
+
 - **Batch Normalization**: Normalizes across batch dimension
 - **Layer Normalization**: Normalizes across feature dimension
 - **RMS Normalization**: Uses root mean square for scaling
 
 **Mathematical Foundation**:
-For RMS normalization: $\text{RMSNorm}(x) = \frac{x}{\sqrt{\frac{1}{d}\sum_{i=1}^{d} x_i^2 + \epsilon}}$
+For RMS normalization: $\text{RMSNorm} (x) = \frac{x}{\sqrt{\frac{1}{d}\sum_{i=1}^{d} x_i^2 + \epsilon}}$
 
 ### 2.3 Feature Space Geometry
 
-**Geometric Interpretation**: Neural network features can be viewed as points in high-dimensional space, where similar inputs cluster together and different inputs are separated.
+**Geometric Interpretation**: Neural network features can be viewed as points in high-dimensional space, where similar
+inputs cluster together and different inputs are separated.
 
-**Spherical Constraints**: Many normalization techniques implicitly or explicitly constrain features to lie on or near spherical surfaces in the feature space.
+**Spherical Constraints**: Many normalization techniques implicitly or explicitly constrain features to lie on or near
+spherical surfaces in the feature space.
 
-**Distance Metrics**: The geometric relationship between features can be measured using various distance metrics (Euclidean, cosine, etc.), which can provide insights into data relationships.
+**Distance Metrics**: The geometric relationship between features can be measured using various distance metrics
+(Euclidean, cosine, etc.), which can provide insights into data relationships.
 
 ### 2.4 Confidence and Uncertainty in Neural Networks
 
-**Aleatoric Uncertainty**: Inherent randomness in the data
-**Epistemic Uncertainty**: Model uncertainty due to limited training data
+**Aleatoric Uncertainty**: Inherent randomness in the data **Epistemic Uncertainty**: Model uncertainty due to limited
+training data
 
 **Confidence Indicators**:
+
 - Maximum softmax probability
 - Prediction entropy
 - Feature magnitude
@@ -110,9 +126,12 @@ For RMS normalization: $\text{RMSNorm}(x) = \frac{x}{\sqrt{\frac{1}{d}\sum_{i=1}
 
 ### 3.1 Problem Statement
 
-**Challenge**: How can we design a neural network architecture that naturally separates in-distribution and out-of-distribution samples in the feature space, enabling early and reliable OOD detection without compromising classification performance?
+**Challenge**: How can we design a neural network architecture that naturally separates in-distribution and
+out-of-distribution samples in the feature space, enabling early and reliable OOD detection without compromising
+classification performance?
 
 **Desired Properties**:
+
 1. **Geometric Separation**: Clear spatial distinction between ID and OOD samples
 2. **Multi-Layer Detection**: OOD signals available at multiple network depths
 3. **Training Efficiency**: No additional training data or computational overhead
@@ -124,38 +143,47 @@ For RMS normalization: $\text{RMSNorm}(x) = \frac{x}{\sqrt{\frac{1}{d}\sum_{i=1}
 #### 3.2.1 Output-Based Methods
 
 **Maximum Softmax Probability (MSP)**:
+
 - Uses the maximum softmax probability as a confidence score
 - **Limitation**: Softmax can be overconfident on OOD data
 
 **MaxLogit**:
+
 - Uses the maximum logit value before softmax
 - **Limitation**: Only available at the final layer
 
 **Temperature Scaling**:
+
 - Calibrates confidence using temperature parameter
 - **Limitation**: Requires additional validation data for tuning
 
 #### 3.2.2 Feature-Based Methods
 
 **Mahalanobis Distance**:
+
 - Measures distance to training data in feature space
 - **Limitation**: Requires storing training statistics, computational overhead
 
 **Deep Ensembles**:
+
 - Uses multiple models to estimate uncertainty
 - **Limitation**: High computational cost, memory requirements
 
 #### 3.2.3 Gradient-Based Methods
 
 **ODIN**:
+
 - Uses input preprocessing and temperature scaling
 - **Limitation**: Requires backward pass, computational overhead
 
 ### 3.3 The Insight: Leveraging Geometric Structure
 
-**Key Observation**: In-distribution samples, having been seen during training, tend to produce more organized, confident feature representations with higher magnitudes. Out-of-distribution samples, being unfamiliar, tend to produce less organized, uncertain features with lower magnitudes.
+**Key Observation**: In-distribution samples, having been seen during training, tend to produce more organized,
+confident feature representations with higher magnitudes. Out-of-distribution samples, being unfamiliar, tend to produce
+less organized, uncertain features with lower magnitudes.
 
-**Our Hypothesis**: If we can create a geometric structure in the feature space that naturally captures this confidence-magnitude relationship, we can achieve effective OOD detection throughout the network.
+**Our Hypothesis**: If we can create a geometric structure in the feature space that naturally captures this
+confidence-magnitude relationship, we can achieve effective OOD detection throughout the network.
 
 ---
 
@@ -163,11 +191,14 @@ For RMS normalization: $\text{RMSNorm}(x) = \frac{x}{\sqrt{\frac{1}{d}\sum_{i=1}
 
 ### 4.1 Core Concept: BandRMS-OOD
 
-**Central Idea**: Extend the BandRMS normalization layer to create learnable "spherical shells" in the feature space, where:
+**Central Idea**: Extend the BandRMS normalization layer to create learnable "spherical shells" in the feature space,
+where:
+
 - **In-distribution samples** are encouraged to lie near the **outer shell** (high confidence region)
 - **Out-of-distribution samples** naturally fall toward the **inner core** (low confidence region)
 
 **Geometric Metaphor**: Imagine a series of concentric spheres in high-dimensional space:
+
 - **Outer Shell** [radius ≈ 1.0]: High-confidence, familiar patterns
 - **Middle Band** [radius ≈ 0.8]: Medium-confidence patterns
 - **Inner Core** [radius ≈ 0.6]: Low-confidence, unfamiliar patterns
@@ -177,12 +208,14 @@ For RMS normalization: $\text{RMSNorm}(x) = \frac{x}{\sqrt{\frac{1}{d}\sum_{i=1}
 #### 4.2.1 Confidence-Driven Shell Placement
 
 Instead of uniform distribution within the allowed band, we bias the placement based on model confidence:
+
 - High prediction confidence → push toward outer shell
 - Low prediction confidence → allow drift toward inner core
 
 #### 4.2.2 Multi-Layer Shell Hierarchy
 
 Different layers capture different levels of abstraction:
+
 - **Early layers**: Basic pattern detection (wide shells)
 - **Middle layers**: Feature combination (medium shells)
 - **Late layers**: High-level concepts (tight shells)
@@ -190,6 +223,7 @@ Different layers capture different levels of abstraction:
 #### 4.2.3 Geometric OOD Detection
 
 Use distance from the outer shell as an OOD indicator:
+
 ```
 shell_distance = |feature_norm - target_shell_radius|
 ood_score = shell_distance  # Higher distance → more likely OOD
@@ -213,25 +247,26 @@ ood_score = shell_distance  # Higher distance → more likely OOD
 #### 5.1.1 Standard RMS Normalization
 
 For an input vector $x \in \mathbb{R}^d$:
-$$\text{RMSNorm}(x) = \frac{x}{\sqrt{\frac{1}{d}\sum_{i=1}^{d} x_i^2 + \epsilon}}$$
+$$\text{RMSNorm} (x) = \frac{x}{\sqrt{\frac{1}{d}\sum_{i=1}^{d} x_i^2 + \epsilon}}$$
 
 This constrains the output to have unit RMS value.
 
 #### 5.1.2 BandRMS Extension
 
 BandRMS allows the RMS value to vary within a learned band $[1-\alpha, 1]$:
-$$\text{BandRMS}(x) = \frac{x}{\sqrt{\frac{1}{d}\sum_{i=1}^{d} x_i^2 + \epsilon}} \cdot s$$
+$$\text{BandRMS} (x) = \frac{x}{\sqrt{\frac{1}{d}\sum_{i=1}^{d} x_i^2 + \epsilon}} \cdot s$$
 
 where $s \in [1-\alpha, 1]$ is a learnable scaling parameter.
 
 #### 5.1.3 BandRMS-OOD: Confidence-Driven Scaling
 
 We modify the scaling to depend on model confidence:
-$$s = (1-\alpha) + \alpha \cdot \sigma(5 \cdot \theta + c(x))$$
+$$s = (1-\alpha) + \alpha \cdot \sigma (5 \cdot \theta + c (x))$$
 
 where:
+
 - $\theta$ is the learnable band parameter
-- $c(x)$ is a confidence score for input $x$
+- $c (x)$ is a confidence score for input $x$
 - $\sigma$ is the sigmoid function
 - $\alpha$ is the maximum band width
 
@@ -240,38 +275,39 @@ where:
 #### 5.2.1 Prediction Entropy
 
 For a classification model with softmax output $p$:
-$$H(p) = -\sum_{i=1}^{K} p_i \log p_i$$
+$$H (p) = -\sum_{i=1}^{K} p_i \log p_i$$
 
 Lower entropy indicates higher confidence.
 
 #### 5.2.2 Maximum Softmax Probability
 
-$$c_{MSP}(x) = \max_i p_i$$
+$$c_{MSP} (x) = \max_i p_i$$
 
 Higher maximum probability indicates higher confidence.
 
 #### 5.2.3 Feature Magnitude
 
-$$c_{mag}(x) = \|f(x)\|_2$$
+$$c_{mag} (x) = \|f (x)\|_2$$
 
-where $f(x)$ are the features before normalization.
+where $f (x)$ are the features before normalization.
 
 ### 5.3 Geometric Analysis
 
 #### 5.3.1 Shell Structure
 
 In the normalized feature space, we create concentric shells:
-- **Shell radius**: $r = \|BandRMS(x)\|_2$
+
+- **Shell radius**: $r = \|BandRMS (x)\|_2$
 - **Target shell**: $r_{target} = 1.0$ (outer shell)
 - **Minimum shell**: $r_{min} = 1 - \alpha$ (inner boundary)
 
 #### 5.3.2 OOD Detection Criterion
 
 For a test sample $x_{test}$:
-$$OOD(x_{test}) = \mathbb{I}[\text{shell\_distance}(x_{test}) > \tau]$$
+$$OOD (x_{test}) = \mathbb{I}[\text{shell\_distance} (x_{test}) > \tau]$$
 
 where:
-$$\text{shell\_distance}(x_{test}) = |r(x_{test}) - r_{target}|$$
+$$\text{shell\_distance} (x_{test}) = |r (x_{test}) - r_{target}|$$
 
 and $\tau$ is a learned threshold.
 
@@ -279,15 +315,19 @@ and $\tau$ is a learned threshold.
 
 #### 5.4.1 Representation Quality
 
-**Theorem 1**: *Under mild conditions, BandRMS-OOD preserves the representational capacity of the original network while adding geometric structure.*
+**Theorem 1**: *Under mild conditions, BandRMS-OOD preserves the representational capacity of the original network while
+adding geometric structure.*
 
-**Proof Sketch**: The confidence-driven scaling is a smooth, invertible transformation that preserves the relative ordering of features while adding geometric constraints.
+**Proof Sketch**: The confidence-driven scaling is a smooth, invertible transformation that preserves the relative
+ordering of features while adding geometric constraints.
 
 #### 5.4.2 OOD Detection Capability
 
-**Theorem 2**: *If in-distribution samples have systematically higher confidence than out-of-distribution samples, BandRMS-OOD will create geometric separation between ID and OOD samples.*
+**Theorem 2**: *If in-distribution samples have systematically higher confidence than out-of-distribution samples,
+BandRMS-OOD will create geometric separation between ID and OOD samples.*
 
-**Proof Sketch**: Higher confidence leads to larger scaling factors, pushing samples toward the outer shell. Lower confidence results in smaller scaling factors, keeping samples in the inner regions.
+**Proof Sketch**: Higher confidence leads to larger scaling factors, pushing samples toward the outer shell. Lower
+confidence results in smaller scaling factors, keeping samples in the inner regions.
 
 ---
 
@@ -306,10 +346,10 @@ and $\tau$ is a learned threshold.
 $$X_{norm} = \frac{X}{\sqrt{\frac{1}{D}\sum_{d=1}^{D} X_d^2 + \epsilon}}$$
 
 **Step 2: Confidence Estimation**
-$$c = \text{confidence\_function}(X, \text{model\_state})$$
+$$c = \text{confidence\_function} (X, \text{model\_state})$$
 
 **Step 3: Shell Scaling**
-$$s = (1 - \alpha) + \alpha \cdot \sigma(5 \cdot \theta + \beta \cdot c)$$
+$$s = (1 - \alpha) + \alpha \cdot \sigma (5 \cdot \theta + \beta \cdot c)$$
 
 **Step 4: Output**
 $$Y = X_{norm} \cdot s$$
@@ -319,19 +359,19 @@ $$Y = X_{norm} \cdot s$$
 #### 6.2.1 Entropy-Based Confidence
 
 For intermediate features, we can estimate confidence using feature entropy:
-$$c_{entropy}(x) = 1 - \frac{H(|x|)}{H_{max}}$$
+$$c_{entropy} (x) = 1 - \frac{H (|x|)}{H_{max}}$$
 
-where $H(|x|)$ is the entropy of the absolute feature values.
+where $H (|x|)$ is the entropy of the absolute feature values.
 
 #### 6.2.2 Magnitude-Based Confidence
 
-$$c_{magnitude}(x) = \text{sigmoid}\left(\frac{\|x\|_2 - \mu}{\sigma}\right)$$
+$$c_{magnitude} (x) = \text{sigmoid}\left (\frac{\|x\|_2 - \mu}{\sigma}\right)$$
 
 where $\mu$ and $\sigma$ are running statistics of feature magnitudes.
 
 #### 6.2.3 Prediction-Based Confidence (Final Layer)
 
-$$c_{prediction}(x) = \max_i \text{softmax}(\text{classifier}(x))_i$$
+$$c_{prediction} (x) = \max_i \text{softmax} (\text{classifier} (x))_i$$
 
 ### 6.3 Training Objective
 
@@ -349,7 +389,7 @@ where $r_i = \|Y_i\|_2$ is the shell radius for sample $i$.
 #### 6.3.3 Shell Separation Loss
 
 Encourage separation between high and low confidence samples:
-$$\mathcal{L}_{sep} = \max(0, \gamma - (r_{high} - r_{low}))$$
+$$\mathcal{L}_{sep} = \max (0, \gamma - (r_{high} - r_{low}))$$
 
 where $r_{high}$ and $r_{low}$ are average radii for high and low confidence samples.
 
@@ -362,18 +402,18 @@ $$\mathcal{L}_{total} = \mathcal{L}_{cls} + \lambda_1 \mathcal{L}_{shell} + \lam
 #### 6.4.1 Multi-Layer Shell Distances
 
 For a test sample $x$, compute shell distances at each BandRMS-OOD layer $l$:
-$$d_l = |r_l(x) - 1.0|$$
+$$d_l = |r_l (x) - 1.0|$$
 
 #### 6.4.2 Consensus OOD Score
 
 Combine signals from multiple layers:
-$$\text{OOD\_score}(x) = \sum_{l=1}^{L} w_l \cdot d_l$$
+$$\text{OOD\_score} (x) = \sum_{l=1}^{L} w_l \cdot d_l$$
 
 where $w_l$ are learned or fixed weights for each layer.
 
 #### 6.4.3 Detection Decision
 
-$$\text{is\_OOD}(x) = \mathbb{I}[\text{OOD\_score}(x) > \tau]$$
+$$\text{is\_OOD} (x) = \mathbb{I}[\text{OOD\_score} (x) > \tau]$$
 
 where $\tau$ is a threshold determined from validation data.
 
@@ -432,9 +472,8 @@ Residual Block:
 
 #### 7.2.1 Band Width Progression
 
-**Early Layers**: Larger band widths (α=0.3-0.4) to allow exploration
-**Middle Layers**: Medium band widths (α=0.2-0.3) for organization
-**Late Layers**: Smaller band widths (α=0.1-0.2) for discrimination
+**Early Layers**: Larger band widths (α=0.3-0.4) to allow exploration **Middle Layers**: Medium band widths (α=0.2-0.3)
+for organization **Late Layers**: Smaller band widths (α=0.1-0.2) for discrimination
 
 #### 7.2.2 Confidence Function Selection
 
@@ -447,6 +486,7 @@ Residual Block:
 #### 7.3.1 Hierarchical Shell Structure
 
 Different layers capture different aspects of OOD:
+
 - **Low-level layers**: Texture and edge patterns
 - **Mid-level layers**: Object parts and shapes
 - **High-level layers**: Semantic concepts and categories
@@ -454,6 +494,7 @@ Different layers capture different aspects of OOD:
 #### 7.3.2 Layer Weight Assignment
 
 Assign different importance to different layers:
+
 - **Task-specific**: Weight layers based on task requirements
 - **Data-driven**: Learn weights from validation data
 - **Uniform**: Equal weighting as baseline
@@ -672,13 +713,14 @@ class ShellMonitor:
 
 #### 9.1.1 Stage 1: Standard Training (Epochs 1-40)
 
-**Objective**: Establish basic classification capability
-**Configuration**:
+**Objective**: Establish basic classification capability **Configuration**:
+
 - Standard cross-entropy loss only
 - All BandRMS-OOD layers active but with minimal shell preference
 - Focus on learning good feature representations
 
 **Pseudocode**:
+
 ```
 for epoch in range(1, 41):
     for batch in training_data:
@@ -694,13 +736,14 @@ for epoch in range(1, 41):
 
 #### 9.1.2 Stage 2: Shell Structure Learning (Epochs 41-70)
 
-**Objective**: Develop shell-based organization
-**Configuration**:
+**Objective**: Develop shell-based organization **Configuration**:
+
 - Add shell preference loss
 - Gradually increase shell preference weight
 - Monitor shell distance distributions
 
 **Pseudocode**:
+
 ```
 for epoch in range(41, 71):
     shell_weight = (epoch - 40) / 30 * target_shell_weight  # Gradual increase
@@ -718,13 +761,14 @@ for epoch in range(41, 71):
 
 #### 9.1.3 Stage 3: Shell Refinement (Epochs 71-100)
 
-**Objective**: Fine-tune shell boundaries and OOD detection
-**Configuration**:
+**Objective**: Fine-tune shell boundaries and OOD detection **Configuration**:
+
 - Add separation loss
 - Fine-tune layer weights
 - Optimize detection thresholds
 
 **Pseudocode**:
+
 ```
 for epoch in range(71, 101):
     for batch in training_data:
@@ -751,6 +795,7 @@ for epoch in range(71, 101):
 **Concept**: Start with loose constraints and gradually tighten the shells as training progresses.
 
 **Implementation**:
+
 ```python
 def compute_adaptive_band_width(epoch, initial_width=0.4, final_width=0.1, total_epochs=100):
     # Exponential decay from initial to final width
@@ -778,11 +823,11 @@ for epoch in range(total_epochs):
 
 #### 9.3.1 Easy-to-Hard Progression
 
-**Phase 1**: Train on high-confidence samples first
-**Phase 2**: Gradually include lower-confidence samples
-**Phase 3**: Full dataset with shell organization
+**Phase 1**: Train on high-confidence samples first **Phase 2**: Gradually include lower-confidence samples **Phase 3**:
+Full dataset with shell organization
 
 **Implementation**:
+
 ```python
 def confidence_curriculum(epoch, dataset, confidence_scores):
     # Start with top 50% most confident samples, gradually include all
@@ -800,12 +845,14 @@ def confidence_curriculum(epoch, dataset, confidence_scores):
 **Approach**: Generate synthetic OOD samples during training to improve shell separation.
 
 **Methods**:
+
 1. **Gaussian Noise**: Add noise to ID samples
 2. **Mixup with Far Classes**: Mix samples from distant classes
 3. **Feature Interpolation**: Interpolate between random features
 4. **Adversarial Examples**: Generate adversarial perturbations
 
 **Training Integration**:
+
 ```python
 def augmented_training_step(id_batch, model):
     # Generate synthetic OOD samples
@@ -832,31 +879,37 @@ def augmented_training_step(id_batch, model):
 #### 10.1.1 Standard Detection Metrics
 
 **Area Under ROC Curve (AUROC)**:
+
 - Measures overall detection performance across all thresholds
 - Higher values indicate better discrimination
 - Threshold-independent metric
 
 **False Positive Rate at 95% True Positive Rate (FPR@95)**:
+
 - Practical metric for deployment scenarios
 - Measures false alarm rate when catching 95% of OOD samples
 - Lower values are better
 
 **Area Under Precision-Recall Curve (AUPR)**:
+
 - Useful when OOD samples are rare (imbalanced scenarios)
 - Focuses on precision at high recall
 
 #### 10.1.2 Multi-Layer Detection Metrics
 
 **Layer-wise AUROC**:
+
 - Evaluate detection performance at each network layer
 - Understand which layers contribute most to OOD detection
 - Identify optimal layer combinations
 
 **Consensus Accuracy**:
+
 - Measure how often different layers agree on OOD detection
 - Higher consensus indicates more robust detection
 
 **Early Detection Rate**:
+
 - Fraction of OOD samples detected in early vs late layers
 - Important for computational efficiency
 
@@ -865,24 +918,29 @@ def augmented_training_step(id_batch, model):
 #### 10.2.1 Shell Organization Metrics
 
 **Shell Utilization**:
+
 - Measure how well the full shell space is utilized
 - Avoid collapse to single shell radius
 
 **ID/OOD Shell Separation**:
+
 - Distance between average shell radii for ID and OOD samples
 - Larger separation indicates better geometric organization
 
 **Shell Consistency**:
+
 - Variance in shell placement for samples from same class
 - Lower variance indicates more stable representations
 
 #### 10.2.2 Confidence-Shell Correlation
 
 **Confidence-Radius Correlation**:
+
 - Pearson correlation between prediction confidence and shell radius
 - Should be positive for effective shell organization
 
 **Calibration Analysis**:
+
 - Reliability diagram for shell-based confidence estimates
 - Compare shell distance to actual correctness probability
 
@@ -890,17 +948,18 @@ def augmented_training_step(id_batch, model):
 
 #### 10.3.1 Standard Accuracy Metrics
 
-**Top-1 Accuracy**: Standard classification accuracy
-**Top-5 Accuracy**: Useful for large-scale datasets
-**Per-Class Accuracy**: Identify potential bias in shell organization
+**Top-1 Accuracy**: Standard classification accuracy **Top-5 Accuracy**: Useful for large-scale datasets **Per-Class
+Accuracy**: Identify potential bias in shell organization
 
 #### 10.3.2 Robustness Metrics
 
-**Accuracy Under Shell Constraints**: 
+**Accuracy Under Shell Constraints**:
+
 - Ensure shell organization doesn't hurt classification
 - Compare to baseline without shell constraints
 
 **Training Stability**:
+
 - Convergence rate and final performance
 - Variance across multiple training runs
 
@@ -909,20 +968,24 @@ def augmented_training_step(id_batch, model):
 #### 10.4.1 Inference Speed
 
 **Forward Pass Time**:
+
 - Additional overhead from shell computations
 - Compare to standard normalization layers
 
 **Memory Usage**:
+
 - Additional memory for storing shell distances
 - Impact on batch size and model capacity
 
 #### 10.4.2 Training Efficiency
 
 **Training Time**:
+
 - Additional time for shell-related loss computations
 - Multi-stage training overhead
 
 **Convergence Speed**:
+
 - Number of epochs to reach target performance
 - Compare to baseline training
 
@@ -931,11 +994,13 @@ def augmented_training_step(id_batch, model):
 #### 10.5.1 Dataset Selection
 
 **In-Distribution Datasets**:
+
 - CIFAR-10/100: Basic computer vision benchmark
 - ImageNet: Large-scale natural images
 - SVHN: Street view house numbers
 
 **Out-of-Distribution Datasets**:
+
 - Texture: Describable Textures Dataset
 - SVHN (when CIFAR is ID): Different domain
 - Places365: Different scene categories
@@ -944,16 +1009,19 @@ def augmented_training_step(id_batch, model):
 #### 10.5.2 Experimental Setup
 
 **Model Architectures**:
+
 - ResNet variants (ResNet-18, ResNet-50)
 - Vision Transformers (ViT-Base, ViT-Large)
 - MobileNet variants for efficiency analysis
 
 **Training Configuration**:
+
 - Standard data augmentation
 - Consistent hyperparameters across methods
 - Multiple random seeds for statistical significance
 
 **Evaluation Protocol**:
+
 ```python
 def evaluate_ood_detection(model, id_test_data, ood_test_data):
     # Compute OOD scores
@@ -986,16 +1054,19 @@ def evaluate_ood_detection(model, id_test_data, ood_test_data):
 #### 11.1.1 Maximum Softmax Probability (MSP)
 
 **Strengths**:
+
 - Simple and fast
 - No additional training required
 - Wide applicability
 
 **Weaknesses**:
+
 - Can be overconfident on OOD data
 - Only uses final layer information
 - Poor calibration
 
 **Comparison with BandRMS-OOD**:
+
 - BandRMS-OOD provides multi-layer detection
 - Better calibration through geometric constraints
 - More interpretable confidence estimates
@@ -1003,16 +1074,19 @@ def evaluate_ood_detection(model, id_test_data, ood_test_data):
 #### 11.1.2 MaxLogit and MaxLogitNorm
 
 **Strengths**:
+
 - Better than MSP in many cases
 - Theoretically grounded
 - Scale-invariant (MaxLogitNorm)
 
 **Weaknesses**:
+
 - Still limited to final layer
 - No training-time optimization for OOD
 - Threshold sensitivity
 
 **Comparison with BandRMS-OOD**:
+
 - BandRMS-OOD can be combined with MaxLogit methods
 - Provides earlier detection signals
 - Training-time optimization for better boundaries
@@ -1020,16 +1094,19 @@ def evaluate_ood_detection(model, id_test_data, ood_test_data):
 #### 11.1.3 Mahalanobis Distance
 
 **Strengths**:
+
 - Uses feature-level information
 - Theoretically motivated
 - Good performance on many benchmarks
 
 **Weaknesses**:
+
 - Requires storing training statistics
 - Computational overhead during inference
 - Assumes Gaussian feature distributions
 
 **Comparison with BandRMS-OOD**:
+
 - No need to store training statistics
 - Lower computational overhead
 - More flexible distribution assumptions
@@ -1037,16 +1114,19 @@ def evaluate_ood_detection(model, id_test_data, ood_test_data):
 #### 11.1.4 Deep Ensembles
 
 **Strengths**:
+
 - Excellent OOD detection performance
 - Provides well-calibrated uncertainty
 - Can improve classification accuracy
 
 **Weaknesses**:
+
 - High computational cost (N× models)
 - Large memory requirements
 - Training complexity
 
 **Comparison with BandRMS-OOD**:
+
 - Single model vs ensemble
 - Lower computational requirements
 - Faster inference and training
@@ -1056,16 +1136,19 @@ def evaluate_ood_detection(model, id_test_data, ood_test_data):
 #### 11.2.1 ODIN (Out-of-Distribution Detector for Neural Networks)
 
 **Strengths**:
+
 - Uses input preprocessing and temperature scaling
 - Significant improvement over MSP
 - Applicable to existing models
 
 **Weaknesses**:
+
 - Requires backward pass (slow)
 - Hyperparameter sensitive
 - May not work with all architectures
 
 **Comparison with BandRMS-OOD**:
+
 - No backward pass required
 - Integrated into architecture
 - More stable across architectures
@@ -1073,16 +1156,19 @@ def evaluate_ood_detection(model, id_test_data, ood_test_data):
 #### 11.2.2 Gramian Matrices
 
 **Strengths**:
+
 - Uses higher-order feature statistics
 - Can capture complex feature relationships
 - Good performance on visual tasks
 
 **Weaknesses**:
+
 - High computational complexity
 - Memory intensive
 - Limited to certain layer types
 
 **Comparison with BandRMS-OOD**:
+
 - Lower computational complexity
 - Memory efficient
 - General applicability
@@ -1092,16 +1178,19 @@ def evaluate_ood_detection(model, id_test_data, ood_test_data):
 #### 11.3.1 Outlier Exposure
 
 **Strengths**:
+
 - Trains explicitly on OOD data
 - Can significantly improve detection
 - Flexible OOD data sources
 
 **Weaknesses**:
+
 - Requires auxiliary OOD dataset
 - May not generalize to unseen OOD types
 - Additional training complexity
 
 **Comparison with BandRMS-OOD**:
+
 - No additional OOD data required
 - Learns from ID data structure alone
 - Can be combined with outlier exposure
@@ -1109,16 +1198,19 @@ def evaluate_ood_detection(model, id_test_data, ood_test_data):
 #### 11.3.2 Self-Supervised Learning Approaches
 
 **Strengths**:
+
 - Can leverage unlabeled data
 - Learn rich representations
 - Good generalization
 
 **Weaknesses**:
+
 - Complex training procedures
 - May not focus on OOD detection
 - Architecture specific
 
 **Comparison with BandRMS-OOD**:
+
 - Simpler training procedure
 - Explicit OOD focus
 - Architecture agnostic
@@ -1127,27 +1219,27 @@ def evaluate_ood_detection(model, id_test_data, ood_test_data):
 
 #### 11.4.1 Performance Comparison Table
 
-| Method | CIFAR-10 vs SVHN |  | CIFAR-10 vs Texture |  | ImageNet vs Places |  |
-|--------|:---------:|:---------:|:---------:|:---------:|:---------:|:---------:|
-|        | AUROC | FPR@95 | AUROC | FPR@95 | AUROC | FPR@95 |
-| MSP | 85.3 | 42.1 | 81.7 | 48.9 | 84.2 | 39.4 |
-| MaxLogit | 87.9 | 36.8 | 84.1 | 42.3 | 86.7 | 34.2 |
-| Mahalanobis | 89.4 | 31.2 | 87.3 | 35.7 | 88.9 | 29.8 |
-| ODIN | 88.7 | 33.9 | 85.8 | 38.4 | 87.5 | 31.6 |
-| **BandRMS-OOD** | **92.1** | **24.7** | **89.6** | **28.3** | **91.3** | **22.4** |
+| Method          | CIFAR-10 vs SVHN |          | CIFAR-10 vs Texture |          | ImageNet vs Places |          |
+|-----------------|:----------------:|:--------:|:-------------------:|:--------:|:------------------:|:--------:|
+|                 |      AUROC       |  FPR@95  |        AUROC        |  FPR@95  |       AUROC        |  FPR@95  |
+| MSP             |       85.3       |   42.1   |        81.7         |   48.9   |        84.2        |   39.4   |
+| MaxLogit        |       87.9       |   36.8   |        84.1         |   42.3   |        86.7        |   34.2   |
+| Mahalanobis     |       89.4       |   31.2   |        87.3         |   35.7   |        88.9        |   29.8   |
+| ODIN            |       88.7       |   33.9   |        85.8         |   38.4   |        87.5        |   31.6   |
+| **BandRMS-OOD** |     **92.1**     | **24.7** |      **89.6**       | **28.3** |      **91.3**      | **22.4** |
 
 *Note: Numbers are illustrative and would need experimental validation*
 
 #### 11.4.2 Computational Efficiency Comparison
 
-| Method | Inference Time | Memory Overhead | Training Overhead |
-|--------|:-------------:|:---------------:|:----------------:|
-| MSP | 1.0× (baseline) | 0% | 0% |
-| MaxLogit | 1.0× | 0% | 0% |
-| Mahalanobis | 1.8× | +15% | 0% |
-| ODIN | 2.3× | +5% | 0% |
-| Deep Ensembles | 5.0× | +400% | +400% |
-| **BandRMS-OOD** | **1.1×** | **+2%** | **+10%** |
+| Method          | Inference Time  | Memory Overhead | Training Overhead |
+|-----------------|:---------------:|:---------------:|:-----------------:|
+| MSP             | 1.0× (baseline) |       0%        |        0%         |
+| MaxLogit        |      1.0×       |       0%        |        0%         |
+| Mahalanobis     |      1.8×       |      +15%       |        0%         |
+| ODIN            |      2.3×       |       +5%       |        0%         |
+| Deep Ensembles  |      5.0×       |      +400%      |       +400%       |
+| **BandRMS-OOD** |    **1.1×**     |     **+2%**     |     **+10%**      |
 
 ### 11.5 Combination Strategies
 
@@ -1156,6 +1248,7 @@ def evaluate_ood_detection(model, id_test_data, ood_test_data):
 **Approach**: Use shell-based detection throughout the network and MaxLogit at the final layer.
 
 **Benefits**:
+
 - Multi-layer + final layer signals
 - Complementary information sources
 - Robust detection
@@ -1165,6 +1258,7 @@ def evaluate_ood_detection(model, id_test_data, ood_test_data):
 **Approach**: Apply temperature scaling to final predictions while using shell-based detection.
 
 **Benefits**:
+
 - Improved calibration
 - Better threshold setting
 - Enhanced reliability
@@ -1178,16 +1272,19 @@ def evaluate_ood_detection(model, id_test_data, ood_test_data):
 #### 12.1.1 Critical Hyperparameters
 
 **Max Band Width (α)**:
+
 - **Range**: 0.05 - 0.5
 - **Effect**: Controls shell thickness and constraint strength
 - **Tuning**: Start with 0.1-0.2, adjust based on task complexity
 
 **Shell Preference Weight (λ₁)**:
+
 - **Range**: 0.001 - 0.1
 - **Effect**: Controls how strongly high-confidence samples are pushed to shell
 - **Tuning**: Increase if shell organization is weak, decrease if hurting classification
 
 **Confidence Weight (β)**:
+
 - **Range**: 0.1 - 2.0
 - **Effect**: Controls sensitivity to confidence signals
 - **Tuning**: Higher values for more confidence-dependent shell placement
@@ -1195,6 +1292,7 @@ def evaluate_ood_detection(model, id_test_data, ood_test_data):
 #### 12.1.2 Hyperparameter Search Strategy
 
 **Grid Search**:
+
 ```python
 param_grid = {
     'max_band_width': [0.05, 0.1, 0.2, 0.3],
@@ -1206,6 +1304,7 @@ best_params = grid_search(param_grid, validation_data, metric='auroc')
 ```
 
 **Bayesian Optimization**:
+
 - More efficient for high-dimensional parameter spaces
 - Can handle non-linear parameter interactions
 - Provides uncertainty estimates for parameter importance
@@ -1215,11 +1314,13 @@ best_params = grid_search(param_grid, validation_data, metric='auroc')
 #### 12.2.1 Vision Transformers
 
 **Integration Points**:
+
 - After self-attention layers
 - After feed-forward networks
 - Before residual connections
 
 **Considerations**:
+
 - Attention patterns may affect confidence estimation
 - Position embeddings interaction with shell structure
 - Layer normalization compatibility
@@ -1227,11 +1328,13 @@ best_params = grid_search(param_grid, validation_data, metric='auroc')
 #### 12.2.2 Convolutional Networks
 
 **Integration Points**:
+
 - After convolutional layers
 - Before/after activation functions
 - In residual blocks
 
 **Considerations**:
+
 - Channel-wise vs spatial normalization
 - Interaction with batch normalization
 - Feature map size effects
@@ -1239,11 +1342,13 @@ best_params = grid_search(param_grid, validation_data, metric='auroc')
 #### 12.2.3 Large Language Models
 
 **Potential Applications**:
+
 - Sentence-level OOD detection
 - Token-level uncertainty estimation
 - Cross-lingual robustness
 
 **Challenges**:
+
 - Variable sequence lengths
 - Attention mechanism interactions
 - Computational scaling
@@ -1253,20 +1358,24 @@ best_params = grid_search(param_grid, validation_data, metric='auroc')
 #### 12.3.1 Common Training Issues
 
 **Shell Collapse**:
+
 - **Problem**: All samples collapse to same shell radius
 - **Solution**: Increase separation loss weight, use curriculum learning
 
 **Classification Degradation**:
+
 - **Problem**: Shell constraints hurt classification performance
 - **Solution**: Reduce shell weight, use gradual ramp-up
 
 **Unstable Shell Formation**:
+
 - **Problem**: Shell structure changes dramatically during training
 - **Solution**: Add momentum to shell parameter updates
 
 #### 12.3.2 Monitoring and Debugging
 
 **Training Metrics to Track**:
+
 ```python
 def training_step_metrics(model, batch):
     predictions, shell_distances, confidences = model(batch, training=True)
@@ -1282,6 +1391,7 @@ def training_step_metrics(model, batch):
 ```
 
 **Visualization Tools**:
+
 - Shell distance histograms
 - Confidence vs shell radius scatter plots
 - Layer-wise shell organization evolution
@@ -1292,6 +1402,7 @@ def training_step_metrics(model, batch):
 #### 12.4.1 Production Integration
 
 **Real-Time Inference**:
+
 ```python
 class ProductionOODModel:
     def __init__(self, model, threshold_config):
@@ -1323,11 +1434,13 @@ class ProductionOODModel:
 #### 12.4.2 Monitoring and Maintenance
 
 **Distribution Drift Detection**:
+
 - Monitor shell distance distributions over time
 - Alert when distributions shift significantly
 - Automatic retraining triggers
 
 **Performance Tracking**:
+
 - Track OOD detection rates
 - Monitor false positive/negative rates
 - A/B testing for threshold optimization
@@ -1337,11 +1450,13 @@ class ProductionOODModel:
 #### 12.5.1 Large-Scale Datasets
 
 **Memory Management**:
+
 - Batch size limitations due to shell distance storage
 - Gradient accumulation strategies
 - Mixed precision training considerations
 
 **Computational Scaling**:
+
 - Shell computation parallelization
 - Layer-wise vs batch-wise processing
 - Distributed training compatibility
@@ -1349,11 +1464,13 @@ class ProductionOODModel:
 #### 12.5.2 Multi-Task Learning
 
 **Shared Shell Structure**:
+
 - Use common shell organization across tasks
 - Task-specific confidence estimation
 - Shared vs separate thresholds
 
 **Task-Specific Adaptation**:
+
 - Fine-tune shell parameters per task
 - Transfer shell knowledge between tasks
 - Meta-learning for shell initialization
@@ -1366,19 +1483,20 @@ class ProductionOODModel:
 
 #### 13.1.1 Problem Setting
 
-**Scenario**: Deploy AI system for chest X-ray diagnosis in hospitals
-**Challenge**: Detect when unusual cases (rare diseases, poor image quality) require radiologist review
-**Dataset**: ChestX-ray14 (ID) vs external datasets and corrupted images (OOD)
+**Scenario**: Deploy AI system for chest X-ray diagnosis in hospitals **Challenge**: Detect when unusual cases (rare
+diseases, poor image quality) require radiologist review **Dataset**: ChestX-ray14 (ID) vs external datasets and
+corrupted images (OOD)
 
 #### 13.1.2 BandRMS-OOD Implementation
 
-**Architecture**: ResNet-50 with BandRMS-OOD layers
-**Shell Configuration**:
+**Architecture**: ResNet-50 with BandRMS-OOD layers **Shell Configuration**:
+
 - Early layers: Wide shells (α=0.3) for texture/quality assessment
 - Middle layers: Medium shells (α=0.2) for anatomical structure detection
 - Late layers: Tight shells (α=0.1) for disease-specific features
 
 **Training Protocol**:
+
 ```python
 # Stage 1: Standard medical image classification
 model = MedicalResNet50WithShells(num_diseases=14)
@@ -1395,16 +1513,19 @@ optimize_thresholds(model, external_validation_data, target_fpr=0.05)
 #### 13.1.3 Results and Analysis
 
 **OOD Detection Performance**:
+
 - **Corrupted Images**: 95.2% AUROC (vs 87.3% for MaxLogit)
 - **Different Scanner Types**: 89.7% AUROC (vs 82.1% for Mahalanobis)
 - **Rare Diseases**: 78.4% AUROC (challenging but clinically useful)
 
 **Clinical Impact**:
+
 - **Reduced Radiologist Workload**: 23% fewer cases requiring review
 - **Improved Safety**: 94% of missed diagnoses were flagged as OOD
 - **Faster Turnaround**: 15% reduction in average reporting time
 
 **Shell Organization Analysis**:
+
 - **Early Layers**: Effective at detecting image quality issues
 - **Middle Layers**: Good at identifying unusual anatomical presentations
 - **Late Layers**: Specialized for specific disease patterns
@@ -1413,19 +1534,19 @@ optimize_thresholds(model, external_validation_data, target_fpr=0.05)
 
 #### 13.2.1 Problem Setting
 
-**Scenario**: Deploy object detection system for autonomous vehicles
-**Challenge**: Detect novel objects, weather conditions, or camera malfunctions
-**Dataset**: KITTI/nuScenes (ID) vs adverse weather, novel objects (OOD)
+**Scenario**: Deploy object detection system for autonomous vehicles **Challenge**: Detect novel objects, weather
+conditions, or camera malfunctions **Dataset**: KITTI/nuScenes (ID) vs adverse weather, novel objects (OOD)
 
 #### 13.2.2 BandRMS-OOD Implementation
 
-**Architecture**: Vision Transformer backbone with detection head
-**Multi-Scale Shell Detection**:
+**Architecture**: Vision Transformer backbone with detection head **Multi-Scale Shell Detection**:
+
 - **Patch Level**: Detect unusual textures or lighting
 - **Object Level**: Identify novel object types
 - **Scene Level**: Recognize unusual environmental conditions
 
 **Training Strategy**:
+
 ```python
 # Multi-task training with detection + shell organization
 class AutonomousDrivingModel(keras.Model):
@@ -1452,16 +1573,19 @@ class AutonomousDrivingModel(keras.Model):
 #### 13.2.3 Results and Safety Analysis
 
 **OOD Detection Performance**:
+
 - **Novel Objects**: 87.9% AUROC (construction equipment, unusual vehicles)
 - **Weather Conditions**: 92.3% AUROC (fog, heavy rain, snow)
 - **Sensor Issues**: 96.7% AUROC (camera malfunctions, lens obstruction)
 
 **Safety Metrics**:
+
 - **False Positive Rate**: 3.2% (acceptable for safety-critical application)
 - **Response Time**: <50ms additional latency (within real-time constraints)
 - **System Reliability**: 99.7% uptime with automated OOD handling
 
 **Deployment Strategy**:
+
 - **Level 1 Alert**: Low OOD score → Reduce confidence in detections
 - **Level 2 Alert**: Medium OOD score → Request human attention
 - **Level 3 Alert**: High OOD score → Transfer control to human driver
@@ -1470,19 +1594,19 @@ class AutonomousDrivingModel(keras.Model):
 
 #### 13.3.1 Problem Setting
 
-**Scenario**: Automated quality inspection for electronics manufacturing
-**Challenge**: Detect defects not seen during training, new product variants
-**Dataset**: PCB inspection images (ID) vs novel defects, product changes (OOD)
+**Scenario**: Automated quality inspection for electronics manufacturing **Challenge**: Detect defects not seen during
+training, new product variants **Dataset**: PCB inspection images (ID) vs novel defects, product changes (OOD)
 
 #### 13.3.2 BandRMS-OOD Implementation
 
-**Architecture**: EfficientNet with shell-based quality assessment
-**Hierarchical Detection**:
+**Architecture**: EfficientNet with shell-based quality assessment **Hierarchical Detection**:
+
 - **Component Level**: Individual electronic components
 - **Connection Level**: Solder joints and connections
 - **Board Level**: Overall PCB structure
 
 **Adaptive Learning System**:
+
 ```python
 class AdaptiveQualitySystem:
     def __init__(self):
@@ -1515,16 +1639,19 @@ class AdaptiveQualitySystem:
 #### 13.3.3 Industrial Impact
 
 **Quality Improvement**:
+
 - **Defect Detection Rate**: 98.7% (vs 94.2% without OOD detection)
 - **False Positive Reduction**: 45% fewer good products flagged as defective
 - **Novel Defect Discovery**: 23 new defect types identified and added to training
 
 **Operational Efficiency**:
+
 - **Human Inspector Workload**: 67% reduction in manual inspections
 - **Production Throughput**: 12% increase due to faster processing
 - **Cost Savings**: $2.3M annually from reduced waste and inspection costs
 
 **System Evolution**:
+
 - **Continuous Learning**: Shell boundaries adapt to new product variants
 - **Predictive Maintenance**: Shell degradation indicates need for model updates
 - **Quality Trending**: Shell distance distributions predict production issues
@@ -1533,19 +1660,19 @@ class AdaptiveQualitySystem:
 
 #### 13.4.1 Problem Setting
 
-**Scenario**: Automated content moderation for social media platform
-**Challenge**: Detect harmful content types not seen during training
-**Dataset**: Moderated posts (ID) vs emerging harmful content patterns (OOD)
+**Scenario**: Automated content moderation for social media platform **Challenge**: Detect harmful content types not
+seen during training **Dataset**: Moderated posts (ID) vs emerging harmful content patterns (OOD)
 
 #### 13.4.2 BandRMS-OOD Implementation
 
-**Architecture**: BERT-based transformer with shell-enhanced representations
-**Multi-Level Analysis**:
+**Architecture**: BERT-based transformer with shell-enhanced representations **Multi-Level Analysis**:
+
 - **Token Level**: Unusual words or phrases
 - **Sentence Level**: Abnormal sentence structures
 - **Document Level**: Overall content coherence
 
 **Shell-Enhanced Attention**:
+
 ```python
 class ShellEnhancedBERT(keras.Model):
     def __init__(self, config):
@@ -1583,16 +1710,19 @@ class ShellEnhancedBERT(keras.Model):
 #### 13.4.3 Content Moderation Results
 
 **Detection Performance**:
+
 - **New Hate Speech Patterns**: 91.4% AUROC
-- **Emerging Misinformation**: 88.7% AUROC  
+- **Emerging Misinformation**: 88.7% AUROC
 - **Novel Spam Techniques**: 94.2% AUROC
 
 **Platform Impact**:
+
 - **Faster Response**: New harmful content detected within hours vs weeks
 - **Reduced Human Moderation**: 34% fewer posts requiring human review
 - **User Safety**: 78% reduction in harmful content exposure
 
 **Linguistic Analysis**:
+
 - **Early Layers**: Detect unusual vocabulary and linguistic patterns
 - **Middle Layers**: Identify abnormal semantic combinations
 - **Late Layers**: Recognize novel argumentative structures
@@ -1606,16 +1736,19 @@ class ShellEnhancedBERT(keras.Model):
 #### 14.1.1 Theoretical Limitations
 
 **Confidence Estimation Challenges**:
+
 - Current confidence measures may not always correlate with true uncertainty
 - Different confidence sources (magnitude, entropy, prediction) may conflict
 - Theoretical guarantees limited to specific assumptions about data distributions
 
 **Shell Structure Assumptions**:
+
 - Assumes spherical geometry is optimal for all data types
 - May not work well for naturally clustered or manifold-structured data
 - Limited theoretical analysis of optimal shell configurations
 
 **Multi-Layer Interaction**:
+
 - Complex interactions between shell constraints at different layers
 - Potential for gradient flow interference
 - Limited understanding of optimal layer placement
@@ -1623,16 +1756,19 @@ class ShellEnhancedBERT(keras.Model):
 #### 14.1.2 Practical Limitations
 
 **Hyperparameter Sensitivity**:
+
 - Requires careful tuning of shell weights and band widths
 - Performance may degrade significantly with poor hyperparameter choices
 - Limited automated methods for hyperparameter optimization
 
 **Training Complexity**:
+
 - Multi-stage training protocol more complex than standard training
 - Requires monitoring of additional metrics during training
 - May require domain expertise for optimal configuration
 
 **Computational Overhead**:
+
 - Additional computation for shell distance calculations
 - Memory overhead for storing multi-layer shell information
 - May not scale well to very large models or datasets
@@ -1640,11 +1776,13 @@ class ShellEnhancedBERT(keras.Model):
 #### 14.1.3 Data-Dependent Limitations
 
 **Distribution Assumptions**:
+
 - Works best when ID data has clear confidence structure
 - May struggle with naturally uncertain or ambiguous datasets
 - Performance depends on quality of confidence estimation
 
 **Domain Transfer**:
+
 - Shell structure learned on one domain may not transfer well
 - May require retraining or fine-tuning for new domains
 - Limited analysis of cross-domain robustness
@@ -1654,16 +1792,19 @@ class ShellEnhancedBERT(keras.Model):
 #### 14.2.1 Theoretical Advances
 
 **Optimal Shell Geometry**:
+
 - Investigate non-spherical shell structures (ellipsoidal, manifold-based)
 - Develop theory for optimal shell configuration given data characteristics
 - Analyze relationship between shell structure and generalization bounds
 
 **Confidence Theory**:
+
 - Develop better theoretical understanding of confidence in neural networks
 - Study relationship between different confidence measures
 - Provide guarantees for confidence-shell correlation
 
 **Multi-Layer Optimization**:
+
 - Theoretical analysis of gradient flow through shell constraints
 - Optimal placement and configuration of shell layers
 - Understanding of layer interaction effects
@@ -1671,6 +1812,7 @@ class ShellEnhancedBERT(keras.Model):
 #### 14.2.2 Methodological Improvements
 
 **Adaptive Shell Structure**:
+
 ```python
 class AdaptiveShellStructure:
     def __init__(self):
@@ -1690,11 +1832,13 @@ class AdaptiveShellStructure:
 ```
 
 **Meta-Learning for Shell Configuration**:
+
 - Learn to adapt shell structure for new tasks quickly
 - Few-shot learning for shell parameter optimization
 - Transfer of shell knowledge across domains
 
 **Uncertainty-Aware Shell Learning**:
+
 - Incorporate multiple uncertainty types (aleatoric, epistemic)
 - Bayesian approaches to shell parameter learning
 - Probabilistic shell boundaries
@@ -1702,16 +1846,19 @@ class AdaptiveShellStructure:
 #### 14.2.3 Application Extensions
 
 **Time Series and Sequential Data**:
+
 - Extend shell concepts to temporal sequences
 - Dynamic shell boundaries that evolve over time
 - Applications to speech recognition, video analysis
 
 **Graph Neural Networks**:
+
 - Shell structures for graph-structured data
 - Node-level and graph-level OOD detection
 - Applications to social networks, molecular analysis
 
 **Reinforcement Learning**:
+
 - Use shell structures for action uncertainty estimation
 - Safe exploration based on shell-based confidence
 - Transfer learning across RL environments
@@ -1719,6 +1866,7 @@ class AdaptiveShellStructure:
 #### 14.2.4 Large-Scale Systems
 
 **Distributed Shell Learning**:
+
 ```python
 class DistributedShellSystem:
     def __init__(self, num_workers):
@@ -1739,6 +1887,7 @@ class DistributedShellSystem:
 ```
 
 **Real-Time Adaptation**:
+
 - Online learning for shell boundaries
 - Streaming data processing with shell adaptation
 - Edge computing deployment considerations
@@ -1748,11 +1897,13 @@ class DistributedShellSystem:
 #### 14.3.1 Evaluation Challenges
 
 **Benchmark Development**:
+
 - Need for standardized OOD detection benchmarks with shell-based methods
 - Evaluation protocols for multi-layer detection
 - Metrics that capture geometric interpretability
 
 **Comparison Fairness**:
+
 - Ensuring fair comparison with existing methods
 - Accounting for additional training complexity
 - Standardizing hyperparameter selection procedures
@@ -1760,11 +1911,13 @@ class DistributedShellSystem:
 #### 14.3.2 Theoretical Understanding
 
 **Shell Dynamics**:
+
 - Mathematical analysis of shell formation during training
 - Convergence guarantees for shell-based training
 - Relationship between shell structure and model capacity
 
 **Generalization Theory**:
+
 - How shell constraints affect generalization bounds
 - Trade-offs between shell organization and classification performance
 - Optimal shell complexity for given data characteristics
@@ -1772,11 +1925,13 @@ class DistributedShellSystem:
 #### 14.3.3 Practical Deployment
 
 **Robustness Analysis**:
+
 - Sensitivity to adversarial attacks on shell structure
 - Robustness to distribution shift during deployment
 - Long-term stability of shell boundaries
 
 **Integration Challenges**:
+
 - Compatibility with existing ML pipelines
 - Integration with model compression techniques
 - Deployment in resource-constrained environments
@@ -1801,81 +1956,110 @@ class DistributedShellSystem:
 
 ### 15.1 Summary of Contributions
 
-This document has presented **BandRMS-OOD**, a novel approach to out-of-distribution detection that embeds geometric constraints directly into neural network architectures. Our key contributions include:
+This document has presented **BandRMS-OOD**, a novel approach to out-of-distribution detection that embeds geometric
+constraints directly into neural network architectures. Our key contributions include:
 
 1. **Geometric Framework**: A principled approach to OOD detection based on learnable spherical shells in feature space
 
-2. **Multi-Layer Detection**: OOD signals available throughout the network, enabling early detection and improved interpretability
+2. **Multi-Layer Detection**: OOD signals available throughout the network, enabling early detection and improved
+   interpretability
 
-3. **Training Integration**: Seamless integration with standard supervised learning, requiring no additional OOD training data
+3. **Training Integration**: Seamless integration with standard supervised learning, requiring no additional OOD
+   training data
 
-4. **Theoretical Foundation**: Mathematical formulation connecting model confidence to geometric structure in feature space
+4. **Theoretical Foundation**: Mathematical formulation connecting model confidence to geometric structure in feature
+   space
 
-5. **Practical Implementation**: Complete implementation guide with training protocols, evaluation metrics, and deployment considerations
+5. **Practical Implementation**: Complete implementation guide with training protocols, evaluation metrics, and
+   deployment considerations
 
 ### 15.2 Key Insights
 
 #### 15.2.1 Geometric Separation Works
 
-The core insight that in-distribution and out-of-distribution samples can be separated geometrically in feature space has proven effective across multiple domains. By constraining feature representations to lie within learnable spherical shells, we create natural boundaries that separate familiar from unfamiliar data.
+The core insight that in-distribution and out-of-distribution samples can be separated geometrically in feature space
+has proven effective across multiple domains. By constraining feature representations to lie within learnable spherical
+shells, we create natural boundaries that separate familiar from unfamiliar data.
 
 #### 15.2.2 Multi-Layer Detection Provides Robustness
 
-Unlike methods that rely solely on final layer outputs, BandRMS-OOD provides detection signals throughout the network. This multi-layer approach offers several advantages:
+Unlike methods that rely solely on final layer outputs, BandRMS-OOD provides detection signals throughout the network.
+This multi-layer approach offers several advantages:
+
 - **Early Detection**: OOD samples can be identified before full processing
 - **Robustness**: Multiple independent detection signals reduce false negatives
 - **Interpretability**: Understanding which layers contribute to OOD detection
 
 #### 15.2.3 Training-Time Optimization Crucial
 
-The ability to optimize shell structures during training, rather than relying on post-hoc analysis, provides significant performance improvements. The training protocol that gradually develops shell organization while maintaining classification performance is crucial for practical success.
+The ability to optimize shell structures during training, rather than relying on post-hoc analysis, provides significant
+performance improvements. The training protocol that gradually develops shell organization while maintaining
+classification performance is crucial for practical success.
 
 #### 15.2.4 Confidence-Geometry Connection
 
-The connection between model confidence and geometric structure in feature space provides both theoretical insight and practical utility. High-confidence predictions naturally organize toward shell boundaries, while uncertain predictions remain in inner regions.
+The connection between model confidence and geometric structure in feature space provides both theoretical insight and
+practical utility. High-confidence predictions naturally organize toward shell boundaries, while uncertain predictions
+remain in inner regions.
 
 ### 15.3 Impact and Applications
 
 #### 15.3.1 Safety-Critical Systems
 
-BandRMS-OOD addresses a critical need in safety-critical applications where false confidence can have severe consequences. The geometric interpretability and multi-layer detection provide additional safety assurances beyond traditional methods.
+BandRMS-OOD addresses a critical need in safety-critical applications where false confidence can have severe
+consequences. The geometric interpretability and multi-layer detection provide additional safety assurances beyond
+traditional methods.
 
 #### 15.3.2 Production ML Systems
 
-The method's efficiency and integration with existing architectures make it practical for production deployment. The minimal computational overhead and clear interpretability support industrial adoption.
+The method's efficiency and integration with existing architectures make it practical for production deployment. The
+minimal computational overhead and clear interpretability support industrial adoption.
 
 #### 15.3.3 Research Tool
 
-The geometric framework provides researchers with new tools for understanding neural network behavior and developing improved architectures for reliable AI systems.
+The geometric framework provides researchers with new tools for understanding neural network behavior and developing
+improved architectures for reliable AI systems.
 
 ### 15.4 Broader Implications
 
 #### 15.4.1 Reliable AI
 
-This work contributes to the broader goal of developing reliable AI systems that can recognize their limitations and express uncertainty appropriately. The geometric approach provides a new perspective on uncertainty quantification in neural networks.
+This work contributes to the broader goal of developing reliable AI systems that can recognize their limitations and
+express uncertainty appropriately. The geometric approach provides a new perspective on uncertainty quantification in
+neural networks.
 
 #### 15.4.2 Interpretable ML
 
-The clear geometric interpretation of shell-based detection offers advantages over black-box approaches. Understanding why a sample is classified as OOD based on its position in feature space provides valuable insights for model development and debugging.
+The clear geometric interpretation of shell-based detection offers advantages over black-box approaches. Understanding
+why a sample is classified as OOD based on its position in feature space provides valuable insights for model
+development and debugging.
 
 #### 15.4.3 Architecture Design
 
-The success of geometric constraints in BandRMS-OOD suggests new directions for neural network architecture design. Incorporating geometric structure directly into layer design may benefit other aspects of model performance and interpretability.
+The success of geometric constraints in BandRMS-OOD suggests new directions for neural network architecture design.
+Incorporating geometric structure directly into layer design may benefit other aspects of model performance and
+interpretability.
 
 ### 15.5 Final Thoughts
 
-BandRMS-OOD represents a step toward more reliable and interpretable neural networks through geometric constraints on feature representations. While challenges remain, the approach demonstrates the value of embedding reliability considerations directly into model architectures rather than treating them as post-hoc additions.
+BandRMS-OOD represents a step toward more reliable and interpretable neural networks through geometric constraints on
+feature representations. While challenges remain, the approach demonstrates the value of embedding reliability
+considerations directly into model architectures rather than treating them as post-hoc additions.
 
-The geometric perspective on OOD detection opens new research directions and provides practical tools for developing safer AI systems. As neural networks continue to be deployed in critical applications, methods like BandRMS-OOD that provide interpretable uncertainty estimation will become increasingly important.
+The geometric perspective on OOD detection opens new research directions and provides practical tools for developing
+safer AI systems. As neural networks continue to be deployed in critical applications, methods like BandRMS-OOD that
+provide interpretable uncertainty estimation will become increasingly important.
 
-**The future of reliable AI lies not just in more powerful models, but in models that understand their own limitations and can communicate uncertainty in meaningful ways. BandRMS-OOD takes a significant step in this direction by making the invisible geometry of neural networks visible and actionable for OOD detection.**
+**The future of reliable AI lies not just in more powerful models, but in models that understand their own limitations
+and can communicate uncertainty in meaningful ways. BandRMS-OOD takes a significant step in this direction by making the
+invisible geometry of neural networks visible and actionable for OOD detection.**
 
 ---
 
 ## References and Further Reading
 
 1. **Root Mean Square Layer Normalization** - Zhang & Sennrich (2019)
-2. **A Simple Unified Framework for Detecting Out-of-Distribution Samples** - Lee et al. (2018)  
+2. **A Simple Unified Framework for Detecting Out-of-Distribution Samples** - Lee et al. (2018)
 3. **Enhancing The Reliability of Out-of-distribution Image Detection** - Liang et al. (2018)
 4. **Deep Mahalanobis Detector for Out-of-Distribution Detection** - Lee et al. (2018)
 5. **Likelihood Ratios and Generative Models for Out-of-Distribution Detection** - Ren et al. (2019)
@@ -1887,4 +2071,5 @@ The geometric perspective on OOD detection opens new research directions and pro
 
 ---
 
-*This document provides a comprehensive foundation for understanding and implementing BandRMS-OOD. For the latest updates and implementation details, please refer to the project repository and associated publications.*
+*This document provides a comprehensive foundation for understanding and implementing BandRMS-OOD. For the latest
+updates and implementation details, please refer to the project repository and associated publications.*

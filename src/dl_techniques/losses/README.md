@@ -1,260 +1,191 @@
 # Losses Module
 
-The `dl_techniques.losses` module provides a comprehensive collection of advanced and specialized loss functions for Keras 3, designed for a wide range of deep learning tasks. Each loss is implemented as a self-contained, serializable Keras object for seamless integration into any deep learning workflow.
+`dl_techniques.losses` is a collection of Keras 3 loss functions. Every `keras.losses.Loss` subclass is registered with `register_dl_technique`, so a model compiled with one saves and reloads without `custom_objects`.
 
-## Overview
+## Contracts shared by every loss
 
-This module includes a diverse set of loss functions covering tasks such as robust regression, imbalanced classification, self-supervised learning, generative modeling, and multi-task computer vision. Many losses also include helper functions for analysis or factory functions for easy instantiation.
+**One value per sample.** `call()` returns shape `(batch,)`. Keras multiplies `call()`'s output by `sample_weight` before reducing, so a scalar return charges every row the batch aggregate and makes `reduction=` a dead knob. Losses that still return a scalar are pinned by `tests/test_losses/test_the_premature_scalar_family_is_pinned.py`.
 
-## Available Losses
+**Batch-coupled terms.** Some losses carry a term computed over the whole batch. Setting a row's `sample_weight` to 0 removes that row's own contribution, but the row still shifts every other row through the batch term. These losses are:
 
-The following loss functions are available in this module:
+- the `DINOLoss` / `iBOTPatchLoss` center;
+- `KoLeoLoss`;
+- `GoodhartAwareLoss` at `prior_weight > 0`;
+- the `DecoupledInformationLoss` diversity term;
+- `MultistepLoss("gtmse")`;
+- the calibration Z-statistics;
+- `ClusteringLoss`;
+- the utilization losses.
 
-| Name/Group | Class(es) / Function(s) | Description | Use Case |
-|---|---|---|---|
-| **Affine Invariant** | `AffineInvariantLoss` | A loss invariant to scale and shift, normalizing predictions and targets before computing L1 distance. | Self-supervised monocular depth estimation where scale is ambiguous. |
-| **AnyLoss Framework** | `AnyLoss`, `F1Loss`, `FBetaLoss`, `AccuracyLoss`, `GeometricMeanLoss`, `BalancedAccuracyLoss`, `PrecisionLoss`, `RecallLoss`, `SpecificityLoss`, `YoudenJLoss`, `MCCLoss`, `CohenKappaLoss`, `WeightedCrossEntropyWithAnyLoss` | A framework to convert any confusion-matrix-based metric into a differentiable loss function. | Directly optimizing metrics like F1-score or G-Mean for imbalanced classification. |
-| **Calibration** | `BrierScoreLoss`, `SpiegelhalterZLoss`, `CombinedCalibrationLoss`, `BrierScoreMetric`, `SpiegelhalterZMetric` | BINARY ONLY. The Brier score (a proper scoring rule), plus two batch-level calibration z-statistics: Spiegelhalter's (1986) `(1-2p)`-weighted Z, and the weaker calibration-in-the-large test. A calibration statistic is NOT a proper scoring rule and is only sound as a small-weight regularizer -- `CombinedCalibrationLoss` is that anchored form. | Adding a chance-corrected, batch-size-invariant calibration penalty to a proper base loss; monitoring `\|Z\| > 1.96` during training. |
-| **Capsule Networks** | `CapsuleMarginLoss` | Margin-based loss that encourages long vectors for correct classes and short vectors for incorrect ones. | Training Capsule Networks for object presence detection. |
-| **Clustering** | `ClusteringLoss` | A dual-objective loss combining intra-cluster distance with a cluster distribution penalty. | Deep unsupervised clustering to learn compact and balanced clusters. |
-| **Contrastive (Single-Tower)** | `SymmetricInfoNCELoss`, `create_symmetric_infonce_loss` | Symmetric InfoNCE over two views of ONE encoder (SimCSE-style dropout pairs). Positives are positional; the batch size IS the negative count (batch N gives N-1 negatives), with no memory bank. | Self-supervised sentence/embedding training from two augmented or dropout views of the same batch. |
-| **Contrastive (Vision-Language)** | `CLIPContrastiveLoss`, `SigLIPContrastiveLoss` | Symmetric contrastive losses for learning joint image-text embedding spaces. SigLIP is a more scalable sigmoid-based alternative. | Training vision-language models like CLIP or SigLIP from image-text pairs. |
-| **Dense Retrieval (Late Interaction)** | `ColBERTPairwiseSoftmaxLoss`, `ColBERTDistillationLoss` | ColBERT v1 pairwise softmax cross-entropy over `nway` MaxSim scores (positive at index 0), and v2 KL distillation against a cross-encoder teacher's distribution. | Training ColBERT v1/v2 late-interaction retrievers. |
-| **DINO Framework** | `DINOLoss`, `iBOTPatchLoss`, `KoLeoLoss` | Losses for self-supervised learning via knowledge distillation (DINO), masked patch prediction (iBOT), and entropic regularization (KoLeo). | Self-supervised pre-training of Vision Transformers without labels. |
-| **Document Rectification (DocScanner)** | `DocScannerFlowSequenceLoss` | DocScanner's progressive-rectification objective (arXiv:2110.14968v2, Eq. 9-14) over the whole `(B, K, H, W, 2)` refinement sequence: `sum_k gamma**(K-k) * (L1(f_gt, f_k) + alpha * L_line)`, so the LAST iteration carries weight exactly 1. `L_line` is the circle-consistency term -- a straight row of the flat page, carried into the distorted image by the PREDICTED backward flow and back by the GROUND-TRUTH forward flow, must come back straight. `y_true` is the packed 4-channel `[f_gt(2), g(2)]` stack, which is what lets the whole objective run under stock `fit()` with no `train_step` override. The upstream release ships no training code at all; every constant here is the paper's. | Training the DocScanner rectification module (and any RAFT-style iterative dense-flow refiner needing a last-iteration-weighted sequence loss). |
-| **Feature Alignment** | `FeatureAlignmentLoss` | A margin-based cosine similarity loss to align student and teacher feature representations. | Knowledge distillation and semantic feature transfer between models. |
-| **Generative (Diffusion, DDPM)** | `DDPMHybridLoss` | The published DDPM/DiT training objective for a `LEARNED_RANGE` model: epsilon-prediction MSE plus a variational bound (in bits) whose mean prediction is `stop_gradient`-frozen, so the bound trains the variance channels only. `y_true` is PACKED -- `[0:C]` noise, `[C:2C]` `x_start`, `[2C:2C+1]` the timestep broadcast over the spatial grid -- which is what lets the full objective run under stock `fit()` with no `train_step` override. | Training class-conditional latent diffusion transformers (DiT) and any DDPM that learns its reverse-process variance. |
-| **Generative (Flow Matching)** | `FlowMatchingVelocityLoss` | Rectified-flow / flow-matching velocity regression: the model predicts the velocity field transporting a data sample to noise along a straight path. | Training rectified-flow and flow-matching generative models. |
-| **Harmonic (Distance-Based) Output** | `HarmonicCausalLMLoss`, `harmonic_logits` | Harmonic max (Baek et al. 2025, arXiv:2502.01628): token `i` is scored by `d_i = ||h - w_i||`, `p_i = d_i^-n / sum_j d_j^-n`. Implemented as a softmax over `-(n/2) log(d_i^2 + eps)`, so the loss is the masked cross-entropy over `harmonic_logits(...)`. Pair with `GPT2(head_type="harmonic")`. | Language models whose output embeddings should act as class centres (scale invariance, faster convergence, interpretable weights). |
-| **Image Quality / Perceptual** | `LPIPSLoss` | LPIPS-flavored perceptual distance over a frozen ImageNet VGG16 backbone, per-channel-normalized and weighted per layer. Dependency-free. | Perceptual supervision for restoration, super-resolution and generative image models. |
-| **Confidence & Diversity Regularized** | `DecoupledInformationLoss`, `FocalUncertaintyLoss`, `GoodhartAwareLoss` | Losses that combine a task objective (e.g., cross-entropy) with entropy-based regularizers acting on the PREDICTIONS: a per-sample confidence penalty, and an optional batch-marginal diversity/anti-collapse term. None of them observes the input `X`, so none computes an input-prediction mutual information. | Improving calibration and preventing overconfidence, and — where the batch-marginal term is enabled — preventing predictive collapse onto a few classes. |
-| **Language Modeling** | `NanoVLMLoss`, `HRMLoss`, `StableMaxCrossEntropy`, `MaskedCausalLMLoss`, `PrefixMaskedCausalLMLoss`, `FocalCausalLMLoss` | Autoregressive cross-entropy losses for next-token prediction, with support for masking and multi-task Q-learning (HRM). The masked variants skip an ignore-index (e.g. padding) so only real positions contribute; the focal variant down-weights easy tokens. `NanoVLMLoss` scores only the trailing label-length positions of its logits, so NanoVLM's `[vision; text]` output trains against text labels under a stock `compile`. | Training generative language models or the language component of VLMs. |
-| **Keypoints** | `SuperPointDetectorLoss`, `SuperPointDescriptorLoss`, `LightGlueLoss` | SuperPoint's two objectives (65-class grid softmax CE, descriptor loss), and LightGlue's per-layer balanced assignment NLL over matched/dustbin/ignored labels plus a token-confidence BCE. | Interest-point detection and description; learned keypoint matching. |
-| **Metric Learning / Clustering (Mean Shift)** | `MeanShiftInstanceLoss` | Per-row instance-embedding loss over `(B, N, D)` points with ids `(B, N)`: mean squared distance over same-instance pairs (pull) plus mean squared hinge `max(0, margin - distance)` over different-instance pairs (push), margin default `2 * bandwidth`. Ids equal to `ignore_label` (default `-1`) are skipped; rows with more than `max_points` points are subsampled deterministically when `N` is static (an unknown `N` is not subsampled, so the value can differ). Returns `(B,)`, so `sample_weight` selects rows. | Training an embedding that `MeanShiftLayer` and `assign_clusters` turn into instances (instance segmentation, point-set grouping). |
-| **Promptable Segmentation (SAM)** | `SAMMaskLoss`, `SAMIoULoss` | SAM mask supervision (focal + dice) and IoU regression. SAM 2's ground-truth-gated video variant and SAM 3's Hungarian matcher + six-term detection loss ship in `sam2_video_loss.py` / `sam3_detection_loss.py` but are NOT exported from `dl_techniques.losses`; import them from their modules. | Training SAM-family promptable segmentation and detection heads. |
-| **Regularizers (Jacobian)** | `jacobian_symmetry_penalty`, `thera_tv_penalty`, `thera_total_loss` — **module-level functions, NOT exported from `dl_techniques.losses`**; import from `dl_techniques.losses.jacobian_symmetry` / `.thera_jacobian_tv` | A stochastic double-VJP penalty pushing a denoiser's Jacobian toward symmetry (a conservative field), and THERA's aliasing TV penalty over the exact analytic spatial Jacobian. | Enforcing conservativeness in bias-free denoisers; anti-aliasing in THERA super-resolution. |
-| **Robust Regression** | `HuberLoss` | A hybrid loss that behaves like MSE for small errors and MAE for large errors, making it robust to outliers. | Regression tasks with noisy data or significant outliers. |
-| **Scaled / Multi-Scale Regression** | `ScaledMseLoss` | Multi-scale MSE with automatic target resizing. | Deeply-supervised dense-prediction models whose heads emit several resolutions. |
-| **Segmentation** | `SegmentationWrapperLoss`, `SegmentationLosses`, `DiceLoss`, `TverskyLoss`, `FocalTverskyLoss`, `IoULoss`, `create_segmentation_loss_function` | Serializable Keras `Loss` dispatching by name over Dice, Focal, Tversky, Lovász, and combined losses. Save/load round-trips without `custom_objects`. | Semantic segmentation tasks, especially with class imbalance. |
-| **Tabular Ensembles** | `TabMLoss` | Per-row loss for TabM ensemble training; the batch axis it returns tracks `share_training_batches`, keeping `sample_weight`/`class_weight` correct in both modes. | Training TabM tabular ensembles. |
-| **Time Series Forecasting** | `MASELoss`, `SMAPELoss`, `MQLoss`, `QuantileLoss` | Scale-free error metrics (MASE, SMAPE) and quantile loss (MQL) for probabilistic forecasting. | Evaluating and training forecasting models across series with different scales and for generating prediction intervals. |
-| **Time Series (Multistep)** | `MultistepLoss`, `create_multistep_loss`, `MULTISTEP_AGGREGATIONS` | ADAM's h-steps-ahead estimators over the horizon axis: `mseh` (step h only), `tmse` (trace), `gtmse` (geometric trace), `msce` (cumulative error). `error_power=1.0` gives the MAE analogues. | Aligning the objective with the decision horizon -- a lead time, a planning quarter -- instead of the one-step-ahead error nobody acts on. |
-| **Vision-Language (Sigmoid / Hybrid)** | `AdaptiveSigLIPLoss`, `HybridContrastiveLoss` | An adaptive SigLIP variant, and a hybrid combining the SigLIP objective with a cross-modal denoising penalty (noise injection + squared error; NOT score matching). | Scaling vision-language contrastive training beyond softmax-normalized batches. |
-| **Utilization / Load Balancing** | `MANNUtilizationLoss`, `GNNUtilizationLoss` | Load-balancing penalties that discourage collapse onto a few memory slots or expert/routing branches. | Memory-augmented networks and MoE-style routing where capacity must stay spread. |
-| **Wasserstein GANs** | `WassersteinLoss`, `WassersteinGradientPenaltyLoss`, `WassersteinDivergence`, `create_wgan_gp_losses` | Losses based on the Wasserstein distance for stable training of Generative Adversarial Networks. | Training WGANs and WGAN-GP for high-quality generative modeling. |
-| **YOLOv12 Multi-Task** | `YOLOv12MultiTaskLoss`, `create_yolov12_multitask_loss` | An advanced multi-task loss orchestrator for object detection, segmentation, and classification, with optional uncertainty weighting. | Training complex, multi-headed computer vision models like YOLOv12. |
+**One loss, one tensor.** A single loss object given a dict model output fails under `compile(loss=...)`. Keras broadcasts the object across every leaf and raises `KeyError`. Losses that need several tensors therefore take one packed tensor:
 
-### Multistep (h-steps-ahead) losses
+| Loss | Packing |
+|---|---|
+| `DINOLoss` | `pack_student_teacher` |
+| `LightGlueLoss` | `pack_matches` |
+| `DDPMHybridLoss` | noise, `x_start` and `t` packed in `y_true` |
+| `DocScannerFlowSequenceLoss` | `[f_gt, g]` packed in `y_true` |
+| `Sam3DetectionLoss` | packed query and target rows |
+| `SAMIoULoss` | `iou_supervision` |
+| Siamese tracking losses | values and masks packed in `y_true` |
+
+**Stateful losses update on every call, validation included.** This covers `DINOLoss`, `iBOTPatchLoss`, `AdaptiveSigLIPLoss` and the `TopographicVAELoss` trackers. Loss-owned variables are not saved in `.keras` checkpoints; `DINOLoss` carries its center in `get_config()` for that reason.
+
+## Available losses
+
+Symbols in the table are importable from `dl_techniques.losses` unless the row says otherwise.
+
+| Domain | Symbols | Notes |
+|---|---|---|
+| Robust regression | `HuberLoss`, `ScaledMseLoss` | `ScaledMseLoss` resizes `y_true` to each deep-supervision output. |
+| Forecasting | `MASELoss`, `mase_metric`, `SMAPELoss`, `smape_metric`, `MQLoss`, `QuantileLoss` | MASE uses a batch-global naive scale (an approximation of canonical MASE). `QuantileLoss(normalize=True)` floors the scale at 1.0. |
+| Multistep forecasting | `MultistepLoss`, `create_multistep_loss`, `MULTISTEP_AGGREGATIONS` | ADAM `mseh` / `tmse` / `gtmse` / `msce` over the horizon axis. See [Multistep](#multistep-losses). |
+| Metric-as-loss (AnyLoss) | `AnyLoss`, `ApproximationFunction`, `AccuracyLoss`, `PrecisionLoss`, `RecallLoss`, `SpecificityLoss`, `F1Loss`, `FBetaLoss`, `BalancedAccuracyLoss`, `GeometricMeanLoss`, `YoudenJLoss`, `MCCLoss`, `CohenKappaLoss`, `IoULoss`, `DiceLoss`, `TverskyLoss`, `FocalTverskyLoss`, `WeightedCrossEntropyWithAnyLoss` | Differentiable confusion matrix (Han et al. 2024). The confusion matrix is global over the batch, so these return a scalar. `IoULoss` / `DiceLoss` / `TverskyLoss` belong here, not to `SegmentationWrapperLoss`. |
+| Calibration (binary only) | `BrierScoreLoss`, `SpiegelhalterZLoss`, `CombinedCalibrationLoss`, `BrierScoreMetric`, `SpiegelhalterZMetric` | A calibration Z-statistic is not a proper scoring rule. Use it only as a small-weight regularizer, which `CombinedCalibrationLoss` provides. |
+| Confidence regularizers | `GoodhartAwareLoss`, `analyze_loss_components`, `DecoupledInformationLoss`, `analyze_decoupled_information_loss`, `FocalUncertaintyLoss`, `analyze_focal_uncertainty_loss` | Entropy penalties on the predictions. None of them observes the input `X`. |
+| Other classification | `SparsemaxLoss`, `CapsuleMarginLoss`, `capsule_margin_loss`, `analyze_margin_loss_components`, `MultiTaskLoss` | `SparsemaxLoss` requires `from_logits=True`. `MultiTaskLoss` takes dicts; see Known issues. |
+| Language modeling | `MaskedCausalLMLoss`, `PrefixMaskedCausalLMLoss`, `FocalCausalLMLoss`, `HarmonicCausalLMLoss`, `harmonic_logits`, `StableMaxCrossEntropy`, `HRMLoss`, `create_hrm_loss`, `NanoVLMLoss` | Masked variants skip `ignore_index` (default `-1`; `NanoVLMLoss` defaults to `0`). Per-row values are scaled so the batch mean equals the token-pool mean. `StableMaxCrossEntropy` returns per-token values by design. |
+| Contrastive (two towers) | `CLIPContrastiveLoss`, `SigLIPContrastiveLoss`, `AdaptiveSigLIPLoss`, `HybridContrastiveLoss`, `create_siglip_loss`, `create_adaptive_siglip_loss`, `create_hybrid_loss` | `create_siglip_loss` defaults `use_learnable_temperature=True`; the class defaults to `False`. `HybridContrastiveLoss` adds a cross-modal denoising penalty, not score matching. |
+| Contrastive (one tower) | `SymmetricInfoNCELoss`, `create_symmetric_infonce_loss` | Positives are positional. Batch `N` gives `N - 1` negatives. Use `drop_remainder=True`. |
+| Late-interaction retrieval | `ColBERTPairwiseSoftmaxLoss`, `ColBERTDistillationLoss` | v1: the positive is at index 0 of each `nway` group, and `y_true` is ignored. v2: KL divergence between log-distributions, batch-mean. |
+| Self-supervised / distillation | `DINOLoss`, `iBOTPatchLoss`, `KoLeoLoss`, `FeatureAlignmentLoss` | See [DINO](#dino-loss). |
+| Metric learning / clustering | `SoftmarginTripletLoss`, `magnet_loss_fn`, `MeanShiftInstanceLoss`, `ClusteringLoss`, `ClusteringMetrics`, `ClusteringMetricsCallback`, `compute_clustering_metrics` | `magnet_loss_fn` is NumPy and batch-level by design. `MeanShiftInstanceLoss` subsamples only when `N` is static. |
+| Semantic segmentation | `SegmentationWrapperLoss`, `create_segmentation_wrapper_loss`, `SegmentationLosses`, `SegmentationLossConfig`, `create_segmentation_loss_function` (deprecated) | Name-dispatched over `cross_entropy`, `dice`, `focal`, `tversky`, `focal_tversky`, `lovasz`, `combo`, `boundary`, `hausdorff`. `boundary` and `hausdorff` are heuristics. |
+| Multi-label segmentation | `PerChannelBinaryLoss`, `WeightedBinaryFocalLoss`, `DiceLossPerChannel`, `create_multilabel_segmentation_loss` | Adaptive per-channel weighting from batch class presence. |
+| SAM family | `SAMMaskLoss`, `SAMIoULoss`, `to_dice_layout`, `to_focal_layout`, `SAM2GatedMaskLoss`, `mask_presence_gate`, `Sam3DetectionLoss` | Module-only: `match_mask_axis`, `SAM2ObjectScoreLoss`, `SAM2IoULoss`, `select_lowest_loss_mask` and the SAM 3 pack helpers. `Sam3DetectionLoss` uses `scipy` via `tf.py_function` and needs `jit_compile=False`. |
+| Detection | `YOLOv12MultiTaskLoss`, `create_yolov12_multitask_loss`, `create_yolov12_coco_loss`, `create_yolov12_crack_loss`, `CliffordDetectionLoss` | YOLOv12 routes each output to a sub-loss by tensor rank (2 classification, 3 detection, 4 segmentation). |
+| Tracking | `SiamFCLogisticLoss`, `create_siamfc_label`, `DaSiamRPNClsLoss`, `DaSiamRPNRegLoss`, `MambaLCTBoxLoss` | The classification / regression balance belongs in `compile(loss_weights=...)`. |
+| Keypoints | `SuperPointDetectorLoss`, `SuperPointDescriptorLoss`, `LightGlueLoss`, `lightglue_nll`, `lightglue_confidence_loss`, `pack_matches`, `unpack_matches` | `LightGlueLoss.call` covers the NLL only. `compute()` adds the confidence BCE, for use with `add_loss`. |
+| Depth and 3D geometry | `AffineInvariantLoss`, `ChamferLoss`, `RayDirectionLoss`, `PointDistanceLoss`, `MetricScaleLoss`, `MaskLoss`, `NormalConsistencyLoss`, `LocalConsistencyLoss`, `OmniPointCombinedLoss`, `compute_optimal_scale` | `OmniPointCombinedLoss` is a plain callable over tuples. Its scale alignment uses the ground-truth ray, never the predicted one. |
+| Document rectification | `DocScannerFlowSequenceLoss` | Eq. 9-14 of arXiv:2110.14968v2. The last iteration has weight 1. Needs `training=True` outputs. |
+| Image restoration / perceptual | `CharbonnierLoss`, `FrequencyLoss`, `EdgeLoss`, `VGGLoss`, `EnhanceLoss`, `DarkIRCompositeLoss`, `LPIPSLoss` | SSIM uses `tf.image.ssim`, which raises below 11x11; set `ssim_weight=0` for small maps. See Known issues for VGG preprocessing. |
+| Generative | `WassersteinLoss`, `WassersteinGradientPenaltyLoss`, `WassersteinDivergence`, `compute_gradient_penalty`, `create_wgan_losses`, `create_wgan_gp_losses`, `DDPMHybridLoss`, `FlowMatchingVelocityLoss`, `TopographicVAELoss`, `REQUIRED_PREDICTION_KEYS`, `VARIANCE_PREDICTION_KEYS` | `DDPMHybridLoss` freezes the mean prediction inside the variational bound. In `TopographicVAELoss`, `kl_loss_weight` is not the literature's `beta`; read `effective_beta`. |
+| Tabular / utilization | `TabMLoss`, `MANNUtilizationLoss`, `GNNUtilizationLoss` | `TabMLoss` returns one value per input row in both `share_training_batches` modes. |
+| Module-only regularizers | `jacobian_symmetry.jacobian_symmetry_penalty`, `thera_jacobian_tv.thera_tv_penalty`, `thera_jacobian_tv.thera_total_loss` | Plain functions, not exported. The Jacobian penalty forces float32 and runs the model with `training=False`. |
+| Module-only metrics backend | `segmentation_metrics` (`*_per_sample`, `*_scalar`) | Backend for `SegmentationLosses` and `DiceLossPerChannel`. |
+
+## Usage
+
+### Basic
 
 ```python
-from dl_techniques.losses import MultistepLoss, create_multistep_loss
+from dl_techniques.losses import F1Loss, HuberLoss
 
-# Optimise the whole 12-step horizon, short and long steps weighted comparably.
-model.compile(optimizer="adam", loss=MultistepLoss("gtmse", h=12))
-
-# Optimise the CUMULATIVE error over a 4-period lead time (inventory decisions).
-model.compile(optimizer="adam", loss=create_multistep_loss("msce", h=4))
+model.compile(optimizer="adam", loss=F1Loss(amplifying_scale=73.0), metrics=["accuracy"])
+model.compile(optimizer="adam", loss=HuberLoss(delta=1.5), metrics=["mae"])
 ```
 
-Inputs are `(batch, horizon)` or `(batch, horizon, features)`; axis 1 is the horizon.
-Quantile outputs (`[B, H, F, Q]`) are not supported -- a pinball objective is a
-different loss, not a reduction of this one.
+### AnyLoss
 
-**`mseh` starves a direct model.** In ADAM these losses constrain a *recursive*
-model, so step `h`'s error still moves every shared parameter. Most forecasters in
-`models/time_series/` are *direct*: they emit the whole `[B, H, F]` block from
-per-step heads in one pass. Under `mseh` every column other than `h` receives
-**exactly zero gradient** and those heads ship untrained, with no shape symptom and
-no warning. Pinned by `tests/test_losses/test_the_mseh_starves_other_horizons.py`.
-
-**No shrinkage is claimed here.** The result these losses are famous for -- that
-minimising h-step errors shrinks a model's smoothing parameters toward zero -- is
-proven for pure additive ETS/ARIMA and arises through *recursive* error
-accumulation (Svetunkov, Kourentzes & Killick 2023). On a direct model these are a
-principled horizon reweighting; there is no smoothing parameter to shrink.
-
-**`gtmse` is batch-size sensitive** by construction: it takes the log of a
-*batch*-level mean error, the batch standing in for the sample of forecast origins.
-Its per-sample form is a first-order expansion about the detached batch mean whose
-batch mean and gradient both match the exact estimator exactly -- see
-`tests/test_losses/test_the_gtmse_surrogate_matches_the_exact_form.py`.
-
-## Basic Usage
-
-Most loss functions can be directly imported and used in `model.compile()`.
+The key parameters are `amplifying_scale` (default 73.0) and `from_logits` (default `False`). `FBetaLoss` adds `beta`; `TverskyLoss` adds `alpha` and `beta`.
 
 ```python
-import keras
-from dl_techniques.losses import F1Loss, HuberLoss, CLIPContrastiveLoss
+from dl_techniques.losses import FBetaLoss, WeightedCrossEntropyWithAnyLoss, F1Loss
 
-# Example for imbalanced classification
-model.compile(
-    optimizer='adam',
-    loss=F1Loss(amplifying_scale=73.0),
-    metrics=['accuracy']
-)
+f2 = FBetaLoss(beta=2.0)
 
-# Example for robust regression
-model.compile(
-    optimizer='adam',
-    loss=HuberLoss(delta=1.5),
-    metrics=['mae']
+# from_logits must be set on BOTH the wrapper and the wrapped loss.
+combined = WeightedCrossEntropyWithAnyLoss(
+    anyloss=F1Loss(from_logits=True), alpha=0.7, from_logits=True
 )
 ```
 
-## Loss-Specific Parameters & Usage
+### Contrastive losses
 
-### AnyLoss Framework (`F1Loss`, `FBetaLoss`, etc.)
-**Key Params:** `amplifying_scale` (float, default: 73.0), `from_logits` (bool, default: False). `FBetaLoss` also takes `beta`.
-
-```python
-from dl_techniques.losses import F1Loss, FBetaLoss
-
-# Directly optimize F1-score
-f1_loss = F1Loss()
-
-# Optimize F2-score (weights recall higher than precision)
-f2_loss = FBetaLoss(beta=2.0)
-
-model.compile(optimizer='adam', loss=f2_loss)
-```
-
-### Contrastive Losses (`CLIPContrastiveLoss`, `SigLIPContrastiveLoss`)
-These losses are self-supervised and expect predictions as a dictionary or tuple of logits.
-
-**Key Params:** `temperature` (float), `label_smoothing` (float).
+`CLIPContrastiveLoss` and `SigLIPContrastiveLoss` take a dict with `logits_per_image` and `logits_per_text`. Call them directly; do not pass them to `compile` for a dict-output model.
 
 ```python
 from dl_techniques.losses import CLIPContrastiveLoss
 
-# Called directly, on the two (batch, batch) similarity matrices:
-outputs = {'logits_per_image': image_logits, 'logits_per_text': text_logits}
-per_sample = CLIPContrastiveLoss().call(None, outputs)  # y_true is ignored
+per_sample = CLIPContrastiveLoss().call(
+    None, {"logits_per_image": image_logits, "logits_per_text": text_logits}
+)
 ```
 
-Do not pass it to `model.compile` for a model whose output is that dict: Keras
-hands each loss one leaf of the output. For stock `compile`/`fit`, use
-`compile_for_contrastive_training` and `as_contrastive_fit_batches` from
-`src/train/clip/train_clip.py` (one stacked `(N, 2, N)` output, a dummy `y`).
+For stock `fit()`, the CLIP trainer stacks the two matrices into one `(N, 2, N)` output and unstacks them inside the loss. Use the helpers named in `CLIPContrastiveLoss`'s docstring.
 
-### DINO Loss
-`DINOLoss` (and `iBOTPatchLoss`) maintain their centering EMA **inside
-`call()`**, on a non-trainable `keras.Variable`. There is no `update_center()`
-method and no custom `train_step` is needed.
+### DINO loss
 
-**Do NOT follow `CLIPContrastiveLoss`'s structured-dict `y_pred` here.** These
-losses do accept a `Dict[str, Tensor]` `y_pred`, but that form is **direct
-invocation only** — it does not work under stock `compile(loss=...)` / `fit()`
-on Keras 3.8. Measured: `CompileLoss.build` broadcasts one `Loss` object across
-every leaf of a nested `y_pred` and then raises
-`KeyError: "The path: ('student_logits',) in the 'loss' argument, can't be found
-in either the model's output ('y_pred') or in the labels ('y_true')."`
-(`CLIPContrastiveLoss` is not a counterexample: under stock `fit()` it gets a
-single tensor too. `src/train/clip/train_clip.py` stacks the two logit matrices
-into one `(N, 2, N)` output and its `StackedCLIPContrastiveLoss` unstacks them.)
-
-Under stock `fit()` the model must return a **single rank-2 tensor** in the
-**packed** layout — last dimension `2 * out_dim`, holding
-`concatenate([student_logits, teacher_logits], axis=-1)`. Build it with
-`pack_student_teacher` from `src/dl_techniques/losses/dino_loss.py`, which is
-the single source of truth for that layout. `y_true` is ignored.
-`src/dl_techniques/models/vision/dino/training.py::DINOTrainingModel` already
-returns this shape; see `src/dl_techniques/models/vision/dino/README.md` § "Rule 3"
-for the full derivation and the two measured constraints on the packed form.
+The model must return ONE rank-2 tensor of width `2 * out_dim`, built with `pack_student_teacher` from `dino_loss.py`. `y_true` is ignored. The centering EMA runs inside `call()`, so no custom `train_step` is needed.
 
 ```python
 from dl_techniques.losses import DINOLoss
 
 dino_loss = DINOLoss(out_dim=65536)
-
-# The model returns ONE tensor of width 2 * out_dim; y_true is ignored.
-# outputs = pack_student_teacher(student_logits, teacher_logits)
-model.compile(optimizer='adam', loss=dino_loss)
-model.fit(train_ds, epochs=100)      # NOTE: no validation_data — see below
+model.compile(optimizer="adam", loss=dino_loss)
+model.fit(train_ds, epochs=100)  # no validation_data
+dino_loss.set_teacher_temp(0.07)  # takes effect inside the running fit
 ```
 
-**Two rules these losses impose** (both MEASURED, both silent if violated):
+Rules, each measured and each silent if broken:
 
-1. **Do not pass `validation_data`.** The centering EMA fires on every
-   invocation of `call()`, including validation batches, and
-   `validation_batch_size` defaults to `batch_size` — so a validation pass
-   inflates the number of centering updates per epoch and corrupts the
-   statistic proportionally to the validation batch count. Use an evaluation
-   callback (k-NN on frozen features) instead.
-2. **The center's value is carried in `get_config()`.** Keras does not
-   checkpoint loss-owned variables, so without this the centering statistic
-   silently resets to zeros on every resume. The cost is a config blob
-   proportional to `out_dim` (~1.3 MiB of JSON at `out_dim=65536`).
+1. Do not pass `validation_data`. Validation batches also advance the center EMA. Evaluate with a callback instead, for example k-NN on frozen features.
+2. Change the teacher temperature only through `set_teacher_temp()`. A plain attribute assignment raises on purpose.
+3. The center is serialized through `get_config()` (about 1.3 MiB of JSON at `out_dim=65536`).
 
-### Segmentation Losses
-Recommended path: construct `SegmentationWrapperLoss` directly. The legacy
-factory `create_segmentation_loss_function` still works and now delegates
-to the same class.
-
-**Key Params:** `loss_name` (str), `config` (`SegmentationLossConfig` / `LossConfig`).
+### Segmentation
 
 ```python
 import keras
 from dl_techniques.losses import SegmentationWrapperLoss, SegmentationLossConfig
 
-# Configure parameters for segmentation
-seg_config = SegmentationLossConfig(num_classes=19, focal_gamma=2.5)
-
-# Recommended: construct the loss directly.
-focal_tversky_loss = SegmentationWrapperLoss('focal_tversky', seg_config)
-
-model.compile(optimizer='adam', loss=focal_tversky_loss)
-
-# Save and reload — no custom_objects, no compile=False.
-model.save('seg.keras')
-reloaded = keras.models.load_model('seg.keras')
-assert type(reloaded.loss).__name__ == 'SegmentationWrapperLoss'
-
-# Legacy factory still works (delegates to SegmentationWrapperLoss):
-# from dl_techniques.losses import create_segmentation_loss_function
-# focal_tversky_loss = create_segmentation_loss_function('focal_tversky', seg_config)
+loss = SegmentationWrapperLoss(
+    "focal_tversky", SegmentationLossConfig(num_classes=19, focal_gamma=2.5)
+)
+model.compile(optimizer="adam", loss=loss)
+model.save("seg.keras")
+reloaded = keras.models.load_model("seg.keras")  # no custom_objects
 ```
 
-### Wasserstein GAN Losses
-WGAN-GP requires a custom training loop to compute the gradient penalty.
+`create_segmentation_loss_function` emits a `DeprecationWarning` and delegates to `SegmentationWrapperLoss`.
+
+### Multistep losses
 
 ```python
+from dl_techniques.losses import MultistepLoss, create_multistep_loss
+
+model.compile(optimizer="adam", loss=MultistepLoss("gtmse", h=12))
+model.compile(optimizer="adam", loss=create_multistep_loss("msce", h=4))
+```
+
+Inputs are `(batch, horizon)` or `(batch, horizon, features)`. Quantile outputs are not supported.
+
+- **`mseh` starves direct models.** On a model that emits all horizons in one pass, every horizon column except `h` receives exactly zero gradient. Pinned by `tests/test_losses/test_the_mseh_starves_other_horizons.py`.
+- **No shrinkage claim.** The parameter-shrinkage result is proven for recursive additive ETS/ARIMA only.
+- **`gtmse` depends on the batch.** It takes the log of a batch-level mean. Its per-sample surrogate matches the exact value and gradient (`tests/test_losses/test_the_gtmse_surrogate_matches_the_exact_form.py`).
+
+### Wasserstein GAN
+
+WGAN-GP needs a hand-written training loop, not a `train_step` override.
+
+```python
+import tensorflow as tf
 from dl_techniques.losses import create_wgan_gp_losses, compute_gradient_penalty
 
 critic_loss_fn, generator_loss_fn = create_wgan_gp_losses(lambda_gp=10.0)
 
-# Inside your custom train_step for the critic...
 with tf.GradientTape() as tape:
-    # ... get real_pred and fake_pred from critic ...
-    
-    # 1. Compute Wasserstein loss component
-    w_loss = critic_loss_fn(y_true, y_pred) # y_true indicates real/fake
-    
-    # 2. Compute gradient penalty
-    gp = compute_gradient_penalty(critic, real_images, fake_images)
-    
-    # 3. Combine losses
-    total_critic_loss = w_loss + gp
-
-# ... apply gradients ...
+    w_loss = critic_loss_fn(labels, critic_scores)  # labels: 1 real, 0 fake
+    gp = compute_gradient_penalty(critic, real_images, fake_images)  # rank-4 inputs only
+    total = w_loss + gp
+grads = tape.gradient(total, critic.trainable_variables)
+optimizer.apply_gradients(zip(grads, critic.trainable_variables))
 ```
 
-### YOLOv12 Multi-Task Loss
-This is a single "orchestrator" loss for models with multiple named outputs.
+`lambda_gp` is stored on the loss but applied only by `compute_gradient_penalty`.
+
+### YOLOv12 multi-task
 
 ```python
 from dl_techniques.losses import create_yolov12_multitask_loss
 
-# Configure for detection and segmentation on COCO
-yolo_loss = create_yolov12_multitask_loss(
-    tasks=['detection', 'segmentation'],
+loss = create_yolov12_multitask_loss(
+    tasks=["detection", "segmentation"],
     num_detection_classes=80,
     num_segmentation_classes=80,
     input_shape=(640, 640),
-    use_uncertainty_weighting=True # Automatically balance task losses
 )
-
-# Keras handles routing the correct y_true/y_pred to the loss
-# based on the model's output names.
-model.compile(optimizer='adam', loss=yolo_loss)
+model.compile(optimizer="adam", loss=loss)
 ```
+
+One loss object is applied to every output. It picks the sub-loss by tensor rank, not by output name. An output of any other rank silently contributes 0.

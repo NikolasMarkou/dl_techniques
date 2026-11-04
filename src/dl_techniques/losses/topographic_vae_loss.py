@@ -63,10 +63,9 @@ References:
       (https://arxiv.org/abs/1312.6114)
 """
 
-from typing import Any, Dict, Optional, Tuple
-
 import keras
 from keras import ops
+from typing import Any, Dict, Optional
 
 # ---------------------------------------------------------------------
 # local imports

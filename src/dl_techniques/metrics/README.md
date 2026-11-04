@@ -1,162 +1,157 @@
 # Metrics Module
 
-The `dl_techniques.metrics` module provides a collection of specialized Keras metrics for evaluating a wide range of advanced deep learning models, from language models and capsule networks to multimodal and multi-output architectures.
+The `dl_techniques.metrics` module provides a comprehensive collection of specialized metrics for evaluating advanced deep learning architectures. It covers language modeling, vision-language contrastive alignment, generative text evaluation, time-series forecasting, depth estimation, and probabilistic calibration.
 
-## Overview
+## Architectural Design
 
-This module offers stateful Keras `Metric` subclasses that are fully serializable and integrate seamlessly with `model.compile()`. These metrics provide more insightful performance measures than standard accuracy, especially for tasks like language modeling, vision-language alignment, and image restoration.
+The module is divided into two strict paradigms:
+1. **Streaming Keras Metrics:** Subclasses of `keras.metrics.Metric`. These implement `update_state` and `result`, use backend-agnostic `keras.ops`, and are designed directly for `model.compile()`. They are fully serializable via `@register_dl_technique`.
+2. **Pool-Level / Batch-Agnostic Evaluators:** Pure Python/NumPy functions. These are used when a metric is a functional of the entire dataset (e.g., SVD for embedding geometry, corpus-level IDF for CIDEr, or subset counting for `pass@k`) and cannot be expressed as a streaming accumulation.
 
 ## Available Metrics
 
-| Name | Class | Description | Use Case |
-|------|-------|-------------|----------|
-| `perplexity` | `Perplexity` | Measures prediction uncertainty in language models, defined as `exp(cross_entropy)`. A lower value is better. | Evaluating language models, neural machine translation, and speech recognition systems. |
-| `clip_accuracy` | `CLIPAccuracy` | Measures top-k retrieval accuracy for contrastive vision-language models by checking similarity matrix predictions. | Evaluating the alignment quality of multimodal models like CLIP. |
-| `capsule_accuracy` | `CapsuleAccuracy` | Computes classification accuracy based on the length of output capsule vectors, not probabilities. | Evaluating Capsule Networks where vector magnitude indicates presence. |
-| `psnr` | `PsnrMetric` | Computes Peak Signal-to-Noise Ratio (PSNR), specifically for the primary output of multi-output models. | Evaluating image quality in restoration/super-resolution tasks with deep supervision. |
-| `keypoint_matching` | `KeypointMatchMetric` | Precision, recall or F1 of mutual-nearest keypoint matches extracted from a final-layer log assignment, scored against homography labels (ignored and padded keypoints excluded). | Evaluating LightGlue-style matchers; pass via `compile(metrics={"log_assignments": [...]})`. |
-| `half_precision_top_k` | `HalfPrecisionTopKAccuracy` | Sparse top-k accuracy that casts the logits to `float32` first, since the stock metric raises on `float16` logits. | A `mixed_float16` / `mixed_bfloat16` classifier; a float32 model uses `keras.metrics.SparseTopKCategoricalAccuracy`. |
-| `void_aware_accuracy` | `VoidAwareAccuracy` | Pixel accuracy over the pixels whose label is not `ignore_index`, pooled over every batch; `0` (never `NaN`) before a non-void pixel. Named `accuracy` by default. The stock `SparseCategoricalAccuracy` has no `ignore_class` and scores each void pixel as wrong. | A segmentation model whose masks carry a void label (255, say), next to stock `SparseCategoricalCrossentropy(ignore_class=)` and `MeanIoU(ignore_class=)`; with no void label the stock accuracy is the same number. |
-| `hrm_metrics` | `HRMMetrics` | A container for a suite of metrics for the Hierarchical Reasoning Model, including accuracy, Q-halt accuracy, and step counts. | Custom evaluation within the training loop of an HRM model. |
+| Name | Type | Description | Primary Use Case |
+|------|------|-------------|------------------|
+| `Perplexity` | Streaming | `exp(cross_entropy)`. Measures prediction uncertainty. | Language modeling, NMT, speech recognition. |
+| `BitsPerToken` | Streaming | `log2(perplexity)`. AMP-safe float32 cross-entropy accumulator. | LLM evaluation. |
+| `BrierScore` | Streaming | Proper scoring rule for probabilistic calibration. | Binary/Multi-label classification confidence. |
+| `CategoricalBrierScore`| Streaming | Multi-class Brier score with a sparse algebraic fast path. | Segmentation mask calibration. |
+| `CLIPAccuracy` | Streaming | Top-k retrieval accuracy via similarity matrix diagonal. | Vision-language contrastive models (CLIP). |
+| `CLIPRecallAtK` | Streaming | Measures if correct match appears in top-K predictions. | Multimodal retrieval tasks. |
+| `CoverageMetric` | Streaming | Empirical interval coverage for quantile forecasts. | Probabilistic time-series forecasting. |
+| `PsnrMetric` | Streaming | Peak Signal-to-Noise Ratio evaluated only on primary output. | Image restoration with deep supervision. |
+| `SsimMetric` | Streaming | Structural Similarity Index. (TensorFlow backend required). | Image quality assessment. |
+| `VoidAwareAccuracy` | Streaming | Pixel accuracy safely ignoring a specific void class index. | Semantic segmentation with ignore masks. |
+| `HalfPrecisionTopK` | Streaming | Top-k accuracy safely casting `float16` logits to `float32`. | Mixed-precision classifiers. |
+| `KeypointMatchMetric` | Streaming | Precision/Recall/F1 of mutual-nearest matches vs homography. | LightGlue-style local feature matching. |
+| `AbsRelMetric` (etc) | Streaming | Depth estimation metrics masking invalid ground truth pixels. | Monocular depth estimation. |
+| `generation_report` | Pool-level | Unified BLEU, ROUGE, chrF, METEOR, and CIDEr metrics. | Corpus-level text generation evaluation. |
+| `ranking_metrics` | Pool-level | MRR, nDCG, and Recall@K with pessimistic tie-breaking. | Text embedding retrieval evaluation. |
+| `anisotropy` (etc) | Pool-level | Embedding geometry diagnostics (uniformity, alignment, rank). | Diagnosing embedding space collapse. |
+| `pass_at_k` | Pool-level | Unbiased coverage estimator (probability of success in k draws). | Code generation, best-of-k verifiers. |
+| `morans_i_grid` | Pool-level | Spatial autocorrelation (Queen contiguity) without dense matrices. | Topographic map evaluation. |
 
-## `pass@k` (plain functions, not a `Metric`)
+## Pool-Level Coverage: `pass@k`
 
-`pass_at_k` measures **coverage** — "does a correct solution exist in my candidate pool"
-— which is a different question from "how good is my first guess". It is the quantity
-the Spectrum phase of the Spectrum-to-Signal Principle scores checkpoints by.
+`pass_at_k` measures **coverage**—whether a correct solution exists in a candidate pool. This is distinct from mean success rate and requires the entire outcome matrix to evaluate correctly without bias. It is not a `keras.metrics.Metric`.
 
 ```python
 import numpy as np
 from dl_techniques.metrics.pass_at_k import pass_at_k, pass_at_k_curve
 
-# (n_problems, n_samples); > 0 marks a sample solved.
+# (n_problems, n_samples); > 0 marks a sample as solved.
 outcomes = np.array([[1, 0, 1, 0],
                      [0, 0, 0, 0]], dtype=float)
-pass_at_k(outcomes, k=1)   # 0.25   mean single-sample success rate
-pass_at_k(outcomes, k=2)   # 0.4167 unbiased coverage; the plug-in would say 0.5
+
+# Mean single-sample success rate
+pass_at_k(outcomes, k=1)   # 0.25
+
+# Unbiased coverage estimate (Chen et al. 2021)
+pass_at_k(outcomes, k=2)   # 0.4167 (The plug-in estimator would overreport as 0.5)
+
+# Vectorized computation across a ladder of k values
 pass_at_k_curve(outcomes)  # {1: 0.25, 2: 0.4167, 4: 1.0}
 ```
 
-`estimator="unbiased"` (the default) is Chen et al. 2021's `1 - C(n-c, k)/C(n, k)`;
-`"plug_in"` is the naive any-of-`n`. **Quote one, not both** — for `k < n` the plug-in
-is an upper bound, so quoting both invites a false comparison. Threshold partial
-credit upstream (`outcomes > 0.5`); the `> 0` rule is blunt on purpose.
+By default, it uses the `unbiased` estimator. Always threshold partial credit upstream (e.g., `outcomes > 0.5`) before passing to this function.
 
-Consumed by `dl_techniques.optimization.ssp`; see that package's `README.md`.
+## Basic Keras Integration
 
-## Basic Usage
-
-Most metrics can be directly added to the `metrics` list in `model.compile()`.
+Streaming metrics are natively compatible with `model.compile()`. Because they are registered via `@register_dl_technique`, models saved in the `.keras` format will automatically restore these metrics upon loading, provided the library is importable.
 
 ```python
 import keras
-from dl_techniques.metrics import Perplexity, CapsuleAccuracy
+from dl_techniques.metrics import Perplexity, BitsPerToken
 
-# For a language model
 model.compile(
-    optimizer='adam',
+    optimizer='adamw',
     loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
     metrics=[
         'accuracy',
-        Perplexity(from_logits=True, name='perplexity')
+        Perplexity(from_logits=True, ignore_class=-100, name='perplexity'),
+        BitsPerToken(from_logits=True, ignore_class=-100, name='bpt')
     ]
-)
-
-# For a Capsule Network
-capsule_model.compile(
-    optimizer='adam',
-    loss=CapsuleMarginLoss(), # from dl_techniques.losses
-    metrics=[CapsuleAccuracy()]
 )
 ```
 
 ## Metric-Specific Parameters & Usage
 
-### Perplexity Metric
-Calculates perplexity, the exponentiated cross-entropy loss. It supports masking of padding tokens.
+### Contrastive Vision-Language Alignment (CLIP)
 
-**Key Params:** `from_logits` (bool, default: True), `ignore_class` (int, default: None).
-
-```python
-from dl_techniques.metrics import Perplexity
-
-# Standard perplexity for a model outputting logits
-perplexity_metric = Perplexity(from_logits=True)
-
-# Perplexity that ignores the padding token with ID 0
-masked_perplexity = Perplexity(from_logits=True, ignore_class=0)
-
-model.compile(
-    optimizer='adam',
-    loss='sparse_categorical_crossentropy',
-    metrics=[masked_perplexity]
-)
-```
-
-A stateless functional version, `perplexity()`, is also available for use in custom training loops.
-
-### CLIP Accuracy Metric
-Measures the retrieval accuracy for CLIP-style models. It expects the model to output a dictionary or tuple containing `logits_per_image` and `logits_per_text` similarity matrices.
-
-**Key Params:** `top_k` (int, default: 1), `track_directions` (bool, default: False), `average_directions` (bool, default: True).
+The CLIP metrics evaluate dual-encoder similarity matrices. They expect a dictionary output containing `logits_per_image` and `logits_per_text`. Ground truth is implicit (the matrix diagonal).
 
 ```python
-from dl_techniques.metrics import CLIPAccuracy
+from dl_techniques.metrics import CLIPAccuracy, CLIPRecallAtK
 
-# Top-1 accuracy, averaged across image-to-text and text-to-image
-acc_top1 = CLIPAccuracy(top_k=1)
+# I2T = Image-to-Text retrieval, T2I = Text-to-Image retrieval
+metrics = [
+    CLIPAccuracy(direction='i2t', name='i2t_acc'),
+    CLIPAccuracy(direction='t2i', name='t2i_acc'),
+    CLIPRecallAtK(k=5, direction='i2t', name='i2t_r@5'),
+    CLIPRecallAtK(k=10, direction='t2i', name='t2i_r@10')
+]
 
-# Top-5 accuracy, with separate tracking for each direction
-acc_top5_directional = CLIPAccuracy(top_k=5, track_directions=True)
-
-# --- In your model definition ---
-# The model must output the similarity matrices
-outputs = {
-    "logits_per_image": image_to_text_sim,
-    "logits_per_text": text_to_image_sim
-}
-clip_model = keras.Model(inputs=[...], outputs=outputs)
-
-# --- In model compilation ---
-# Note: y_true is ignored by this metric
+# The model must output the similarity matrices as a dictionary
 clip_model.compile(
-    optimizer='adam',
-    loss=CLIPContrastiveLoss(), # from dl_techniques.losses
-    metrics=[acc_top1, acc_top5_directional]
+    optimizer='adamw',
+    loss=CLIPContrastiveLoss(), 
+    metrics=metrics
 )
 ```
 
-When `track_directions=True`, you can access the directional accuracies during or after training:
-```python
-# After fitting the model
-print(f"I2T Top-5 Accuracy: {acc_top5_directional.i2t_accuracy.numpy():.4f}")
-print(f"T2I Top-5 Accuracy: {acc_top5_directional.t2i_accuracy.numpy():.4f}")
-```
+### Probabilistic Calibration (Brier Score)
 
-### PSNR Metric for Multi-Output Models
-Computes PSNR on only the *first* output of a model that returns a list of tensors. This is ideal for deep supervision architectures where intermediate outputs are used for loss calculation but only the final output's quality is of interest.
+The Brier Score complements Cross-Entropy by explicitly measuring calibration (mean squared error between probabilities and targets). Lower is better.
 
 ```python
-from dl_techniques.metrics import PsnrMetric
+from dl_techniques.metrics import CategoricalBrierScore, BrierScore
 
-# The model returns a list of images [output_main, output_aux1, output_aux2]
-multi_output_model = ...
+# For multi-label classification (e.g., 80 classes, Sigmoid output)
+multi_label_metric = BrierScore(from_logits=True, name="brier")
 
-# The PsnrMetric will automatically use only output_main for evaluation
-multi_output_model.compile(
-    optimizer='adam',
-    loss=custom_multi_output_loss,
-    metrics=[PsnrMetric(name='final_psnr')]
+# For dense semantic segmentation masks, use the sparse fast-path
+# to avoid OOM errors from one-hot tensor expansion.
+segmentation_metric = CategoricalBrierScore(
+    from_logits=True, 
+    sparse_labels=True, 
+    name="seg_brier"
 )
 ```
 
-### HRM Metrics
-`HRMMetrics` is a helper class, not a standard Keras `Metric`. It's designed to be used inside a custom training loop to manage multiple metrics specific to the Hierarchical Reasoning Model.
+### Text Generation Reporting (Pool-Level)
+
+Metrics like CIDEr, METEOR, and corpus-BLEU cannot be computed sequentially per-batch. CIDEr requires a global document-frequency index, and BLEU requires corpus-wide length ratios for the brevity penalty.
+
+```python
+from dl_techniques.metrics.generation_metrics import generation_report
+
+candidates = ["the cat is on the mat", "there is a cat"]
+references = [
+    ["the cat sits on the mat", "a feline rests"],
+    ["a cat is right here"]
+]
+
+# Computes all metrics in a single pass
+report = generation_report(
+    candidates=candidates,
+    references=references,
+    max_order=4,
+    cider_variant="d"
+)
+
+print(f"Corpus BLEU: {report['scaled']['bleu']:.2f}")
+print(f"CIDEr-D: {report['scaled']['cider']:.2f}")
+print(f"ROUGE-Lsum: {report['scaled']['rougeLsum']:.2f}")
+```
+
+### Custom Training Loops & Nested Metrics
+
+The `HRMMetrics` class acts as a container for managing multiple related metrics in custom training steps (e.g., Hierarchical Reasoning Models).
 
 ```python
 from dl_techniques.metrics import HRMMetrics
+import tensorflow as tf
 
-# Instantiate the metrics container
 hrm_metrics = HRMMetrics(ignore_index=-100)
 
 class HRMModel(keras.Model):
@@ -166,17 +161,15 @@ class HRMModel(keras.Model):
             y_pred = self(x, training=True)
             loss = self.compute_loss(y=y_true, y_pred=y_pred)
         
-        # ... apply gradients ...
+        # Apply gradients (omitted for brevity)
         
-        # Update the suite of HRM metrics
+        # Update state directly
         hrm_metrics.update_state(y_true, y_pred)
         
-        # Return results
         results = {"loss": loss}
         results.update(hrm_metrics.result())
         return results
 
     def on_epoch_begin(self, epoch, logs=None):
-        # Reset metrics at the start of each epoch
         hrm_metrics.reset_state()
 ```

@@ -1,4 +1,5 @@
-"""Probabilistic forecast metrics: interval coverage and sharpness.
+"""
+Probabilistic forecast metrics: interval coverage and sharpness.
 
 This module provides two Keras metrics for evaluating probabilistic
 (quantile) forecasts:
@@ -29,12 +30,14 @@ and fully serializable. They mirror the ``SMAPE`` conventions in
 import keras
 from keras import ops
 from typing import Any, Dict, Optional
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
-# Probabilistic forecast metrics
-# ---------------------------------------------------------------------
-
 
 @register_dl_technique("dl_techniques.metrics.probabilistic_forecast_metrics")
 class CoverageMetric(keras.metrics.Metric):
@@ -130,6 +133,7 @@ class CoverageMetric(keras.metrics.Metric):
         )
         return config
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.metrics.probabilistic_forecast_metrics")
 class SharpnessMetric(keras.metrics.Metric):
@@ -220,3 +224,5 @@ class SharpnessMetric(keras.metrics.Metric):
             }
         )
         return config
+
+# ---------------------------------------------------------------------

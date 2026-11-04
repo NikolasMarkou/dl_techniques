@@ -1,6 +1,7 @@
 # Knowledge Distillation for Small Specialized Language Models
 
-A comprehensive guide to training task-specific small language models using knowledge distillation from large teacher models.
+A comprehensive guide to training task-specific small language models using knowledge distillation from large teacher
+models.
 
 ---
 
@@ -26,28 +27,31 @@ A comprehensive guide to training task-specific small language models using know
 ### The Problem
 
 Large Language Models (LLMs) excel at general tasks but come with significant costs:
+
 - High inference latency (100ms-10s per request)
 - API costs at scale ($0.01-$0.10+ per request)
 - Data privacy concerns (sensitive data leaves your infrastructure)
 - Network dependency (offline use impossible)
 
-Small Language Models (SLMs) in the 0.5B-3B parameter range solve these problems but suffer from poor performance on specialized tasks requiring exact outputs.
+Small Language Models (SLMs) in the 0.5B-3B parameter range solve these problems but suffer from poor performance on
+specialized tasks requiring exact outputs.
 
 ### The Solution
 
-**Knowledge Distillation** compresses the capabilities of a large teacher model into a small student model for a specific task domain. The result: a tiny specialist that runs locally with near-teacher performance on the target task.
+**Knowledge Distillation** compresses the capabilities of a large teacher model into a small student model for a
+specific task domain. The result: a tiny specialist that runs locally with near-teacher performance on the target task.
 
 ### When to Use This Approach
 
-| Use Case | Suitability |
-|----------|-------------|
-| High-volume production inference | Excellent |
-| Latency-critical applications | Excellent |
-| Offline/edge deployment | Excellent |
-| Data privacy requirements | Excellent |
-| Rapidly changing task requirements | Poor |
-| Tasks requiring broad knowledge | Poor |
-| One-off or low-volume tasks | Poor |
+| Use Case                           | Suitability |
+|------------------------------------|-------------|
+| High-volume production inference   | Excellent   |
+| Latency-critical applications      | Excellent   |
+| Offline/edge deployment            | Excellent   |
+| Data privacy requirements          | Excellent   |
+| Rapidly changing task requirements | Poor        |
+| Tasks requiring broad knowledge    | Poor        |
+| One-off or low-volume tasks        | Poor        |
 
 ---
 
@@ -55,7 +59,8 @@ Small Language Models (SLMs) in the 0.5B-3B parameter range solve these problems
 
 ### What is Knowledge Distillation?
 
-Knowledge distillation transfers learned behavior from a large "teacher" model to a smaller "student" model. The student learns to imitate the teacher's outputs rather than learning from raw data directly.
+Knowledge distillation transfers learned behavior from a large "teacher" model to a smaller "student" model. The student
+learns to imitate the teacher's outputs rather than learning from raw data directly.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -79,17 +84,18 @@ Knowledge distillation transfers learned behavior from a large "teacher" model t
 
 > Distillation amplifies **both** competence **and** incompetence.
 
-If the teacher makes systematic errors, the student will learn those errors with high fidelity. This makes teacher validation critical.
+If the teacher makes systematic errors, the student will learn those errors with high fidelity. This makes teacher
+validation critical.
 
 ### Distillation vs Fine-Tuning
 
-| Aspect | Traditional Fine-Tuning | Knowledge Distillation |
-|--------|------------------------|------------------------|
-| Data Source | Human-labeled data | Teacher model outputs |
-| Data Volume | Typically 1K-100K examples | Can generate unlimited |
-| Data Quality | Limited by labeling quality | Limited by teacher quality |
-| Iteration Speed | Slow (relabeling required) | Fast (regenerate from teacher) |
-| Task Adaptation | Requires new labels | Requires new prompts |
+| Aspect          | Traditional Fine-Tuning     | Knowledge Distillation         |
+|-----------------|-----------------------------|--------------------------------|
+| Data Source     | Human-labeled data          | Teacher model outputs          |
+| Data Volume     | Typically 1K-100K examples  | Can generate unlimited         |
+| Data Quality    | Limited by labeling quality | Limited by teacher quality     |
+| Iteration Speed | Slow (relabeling required)  | Fast (regenerate from teacher) |
+| Task Adaptation | Requires new labels         | Requires new prompts           |
 
 ---
 
@@ -134,10 +140,12 @@ If the teacher makes systematic errors, the student will learn those errors with
 #### Step 1: Seed Data Collection (10-100 examples)
 
 Collect representative examples of your task. These serve two purposes:
+
 - Validate teacher model performance
 - Provide templates for synthetic generation
 
 **Quality requirements:**
+
 - Cover edge cases and variations
 - Include both easy and hard examples
 - Representative of production distribution
@@ -149,6 +157,7 @@ Before any training, validate that the teacher model can actually perform the ta
 **Minimum threshold:** 80% accuracy on seed data
 
 If the teacher fails this gate:
+
 - Try a different teacher model
 - Improve task prompting
 - Reconsider if the task is well-defined
@@ -156,6 +165,7 @@ If the teacher fails this gate:
 #### Step 3: Synthetic Data Generation
 
 Use the teacher to generate training pairs from:
+
 - Seed examples (direct generation)
 - Augmented examples (variations of seeds)
 - Novel examples (teacher generates new inputs and outputs)
@@ -169,6 +179,7 @@ Train the small model to imitate teacher outputs using standard supervised learn
 #### Step 5: Evaluation
 
 Compare student performance against:
+
 - Base model (no training) - the improvement baseline
 - Teacher model - the performance ceiling
 - Production requirements - the deployment threshold
@@ -284,6 +295,7 @@ def validate_synthetic_data(data: list[dict], validator_fn) -> dict:
 ```
 
 **Validation checks for Text2SQL:**
+
 - SQL parses without syntax errors
 - Referenced tables exist in schema
 - Column names are valid
@@ -295,13 +307,13 @@ def validate_synthetic_data(data: list[dict], validator_fn) -> dict:
 
 ### Recommended Teacher Models
 
-| Model | Parameters | Best For | Considerations |
-|-------|------------|----------|----------------|
-| Claude 3.5 Sonnet | ~70B (est.) | Complex reasoning, code | High quality, API-only |
-| GPT-4o | ~200B (est.) | General tasks | High quality, expensive |
-| DeepSeek-V3 | 671B MoE | Technical tasks, code | Open weights available |
-| Llama 3.1 70B | 70B | Self-hosted needs | Run locally if resources permit |
-| Qwen2.5-72B | 72B | Multilingual, code | Strong on structured outputs |
+| Model             | Parameters   | Best For                | Considerations                  |
+|-------------------|--------------|-------------------------|---------------------------------|
+| Claude 3.5 Sonnet | ~70B (est.)  | Complex reasoning, code | High quality, API-only          |
+| GPT-4o            | ~200B (est.) | General tasks           | High quality, expensive         |
+| DeepSeek-V3       | 671B MoE     | Technical tasks, code   | Open weights available          |
+| Llama 3.1 70B     | 70B          | Self-hosted needs       | Run locally if resources permit |
+| Qwen2.5-72B       | 72B          | Multilingual, code      | Strong on structured outputs    |
 
 ### Teacher Validation Protocol
 
@@ -384,14 +396,14 @@ Respond with ONLY "CORRECT" or "INCORRECT" followed by a brief explanation.
 
 ### Recommended Base Models
 
-| Model | Parameters | Context | Use Case |
-|-------|------------|---------|----------|
-| Qwen2.5-0.5B | 0.5B | 32K | Ultra-lightweight, edge |
-| Qwen2.5-1.5B | 1.5B | 32K | Balanced size/performance |
-| Qwen2.5-3B | 3B | 32K | Higher quality needs |
-| Phi-3.5-mini | 3.8B | 128K | Long context requirements |
-| Llama-3.2-1B | 1B | 128K | Meta ecosystem |
-| Llama-3.2-3B | 3B | 128K | Meta ecosystem, higher quality |
+| Model        | Parameters | Context | Use Case                       |
+|--------------|------------|---------|--------------------------------|
+| Qwen2.5-0.5B | 0.5B       | 32K     | Ultra-lightweight, edge        |
+| Qwen2.5-1.5B | 1.5B       | 32K     | Balanced size/performance      |
+| Qwen2.5-3B   | 3B         | 32K     | Higher quality needs           |
+| Phi-3.5-mini | 3.8B       | 128K    | Long context requirements      |
+| Llama-3.2-1B | 1B         | 128K    | Meta ecosystem                 |
+| Llama-3.2-3B | 3B         | 128K    | Meta ecosystem, higher quality |
 
 ### Model Selection Criteria
 
@@ -403,6 +415,7 @@ Respond with ONLY "CORRECT" or "INCORRECT" followed by a brief explanation.
 ### Architecture Considerations
 
 For structured output tasks (SQL, JSON, code), models with:
+
 - Strong instruction following
 - Good tokenizer coverage for target domain
 - Pretrained on similar data distributions
@@ -454,14 +467,14 @@ loss = kl_divergence(
 
 ### Training Hyperparameters
 
-| Parameter | Recommended Range | Notes |
-|-----------|-------------------|-------|
-| Learning Rate | 1e-5 to 5e-5 | Lower for smaller datasets |
-| Batch Size | 4-32 | Larger batches more stable |
-| Epochs | 3-10 | Monitor for overfitting |
-| Warmup Ratio | 0.03-0.1 | Gradual learning rate increase |
-| Weight Decay | 0.01-0.1 | Regularization |
-| Max Sequence Length | Task-dependent | Pad/truncate consistently |
+| Parameter           | Recommended Range | Notes                          |
+|---------------------|-------------------|--------------------------------|
+| Learning Rate       | 1e-5 to 5e-5      | Lower for smaller datasets     |
+| Batch Size          | 4-32              | Larger batches more stable     |
+| Epochs              | 3-10              | Monitor for overfitting        |
+| Warmup Ratio        | 0.03-0.1          | Gradual learning rate increase |
+| Weight Decay        | 0.01-0.1          | Regularization                 |
+| Max Sequence Length | Task-dependent    | Pad/truncate consistently      |
 
 ### Training Configuration Example
 
@@ -502,16 +515,17 @@ training_config = {
 
 ### LoRA vs Full Fine-Tuning
 
-| Aspect | LoRA | Full Fine-Tuning |
-|--------|------|------------------|
-| Memory | 10-20% of full | 100% |
-| Training Speed | Faster | Slower |
-| Performance | ~95% of full | 100% |
-| Export Size | Small adapter | Full model |
-| Deployment | Base + adapter | Single model |
-| Iteration Speed | Fast | Slow |
+| Aspect          | LoRA           | Full Fine-Tuning |
+|-----------------|----------------|------------------|
+| Memory          | 10-20% of full | 100%             |
+| Training Speed  | Faster         | Slower           |
+| Performance     | ~95% of full   | 100%             |
+| Export Size     | Small adapter  | Full model       |
+| Deployment      | Base + adapter | Single model     |
+| Iteration Speed | Fast           | Slow             |
 
-**Recommendation:** Start with LoRA for rapid iteration, use full fine-tuning for final production model if performance gap is significant.
+**Recommendation:** Start with LoRA for rapid iteration, use full fine-tuning for final production model if performance
+gap is significant.
 
 ---
 
@@ -521,12 +535,12 @@ training_config = {
 
 #### Task-Specific Metrics
 
-| Task | Primary Metric | Secondary Metrics |
-|------|----------------|-------------------|
-| Text2SQL | Execution Accuracy | Valid SQL %, Exact Match |
-| Classification | F1 Score | Precision, Recall, Accuracy |
-| Extraction | Exact Match | Partial Match, Character F1 |
-| Generation | BLEU/ROUGE | Human Evaluation |
+| Task           | Primary Metric     | Secondary Metrics           |
+|----------------|--------------------|-----------------------------|
+| Text2SQL       | Execution Accuracy | Valid SQL %, Exact Match    |
+| Classification | F1 Score           | Precision, Recall, Accuracy |
+| Extraction     | Exact Match        | Partial Match, Character F1 |
+| Generation     | BLEU/ROUGE         | Human Evaluation            |
 
 #### Model Comparison Framework
 
@@ -566,13 +580,14 @@ def comprehensive_evaluation(
 
 A successful distillation should show:
 
-| Model | Expected Performance |
-|-------|---------------------|
-| Base (untrained) | 20-40% |
-| Distilled Student | 70-90% |
-| Teacher | 80-95% |
+| Model             | Expected Performance |
+|-------------------|----------------------|
+| Base (untrained)  | 20-40%               |
+| Distilled Student | 70-90%               |
+| Teacher           | 80-95%               |
 
 **Red flags:**
+
 - Student < 50% → Training issues or data quality problems
 - Student > Teacher → Likely overfitting to test set
 - Student = Base → Training didn't work
@@ -640,13 +655,13 @@ model.save_pretrained("./distilled-adapter")
 
 ### Inference Deployment Options
 
-| Platform | Use Case | Setup Complexity |
-|----------|----------|------------------|
-| llama.cpp | Local CLI, C++ integration | Low |
-| Ollama | Local with API | Very Low |
-| vLLM | High-throughput server | Medium |
-| TensorRT-LLM | NVIDIA optimized | High |
-| ONNX Runtime | Cross-platform | Medium |
+| Platform     | Use Case                   | Setup Complexity |
+|--------------|----------------------------|------------------|
+| llama.cpp    | Local CLI, C++ integration | Low              |
+| Ollama       | Local with API             | Very Low         |
+| vLLM         | High-throughput server     | Medium           |
+| TensorRT-LLM | NVIDIA optimized           | High             |
+| ONNX Runtime | Cross-platform             | Medium           |
 
 ### Sample Deployment Script (Ollama)
 
@@ -675,39 +690,39 @@ ollama run sql-assistant "List all customers from Germany"
 
 ### Overview
 
-| Metric | Value |
-|--------|-------|
-| Task | Natural language → SQL |
-| Base Model | Qwen2.5-0.5B |
-| Teacher | DeepSeek-V3 |
-| Seed Examples | ~100 |
-| Synthetic Examples | ~5,000 |
-| Training Time | ~2 hours (single GPU) |
-| Final Model Size | 2.2GB (GGUF q4_k_m) |
+| Metric             | Value                  |
+|--------------------|------------------------|
+| Task               | Natural language → SQL |
+| Base Model         | Qwen2.5-0.5B           |
+| Teacher            | DeepSeek-V3            |
+| Seed Examples      | ~100                   |
+| Synthetic Examples | ~5,000                 |
+| Training Time      | ~2 hours (single GPU)  |
+| Final Model Size   | 2.2GB (GGUF q4_k_m)    |
 
 ### Results
 
-| Model | Execution Accuracy |
-|-------|-------------------|
-| Base Qwen2.5-0.5B | 36% |
-| Teacher (DeepSeek-V3) | 80% |
-| **Distilled 0.5B** | **74%** |
+| Model                 | Execution Accuracy |
+|-----------------------|--------------------|
+| Base Qwen2.5-0.5B     | 36%                |
+| Teacher (DeepSeek-V3) | 80%                |
+| **Distilled 0.5B**    | **74%**            |
 
 ### Before/After Examples
 
 **Query:** "Which artists have albums with over 1M sales?"
 
-| Model | Output | Valid? |
-|-------|--------|--------|
-| Base | `SELECT * FROM artists WHERE genre IS NULL` | No |
-| Distilled | `SELECT DISTINCT a.name FROM artists a JOIN albums al ON a.id = al.artist_id WHERE al.sales > 1000000` | Yes |
+| Model     | Output                                                                                                 | Valid? |
+|-----------|--------------------------------------------------------------------------------------------------------|--------|
+| Base      | `SELECT * FROM artists WHERE genre IS NULL`                                                            | No     |
+| Distilled | `SELECT DISTINCT a.name FROM artists a JOIN albums al ON a.id = al.artist_id WHERE al.sales > 1000000` | Yes    |
 
 **Query:** "Average order value by customer country"
 
-| Model | Output | Valid? |
-|-------|--------|--------|
-| Base | `SELECT AVG(total) FROM orders` | Partial |
-| Distilled | `SELECT c.country, AVG(o.total) as avg_order FROM customers c JOIN orders o ON c.id = o.customer_id GROUP BY c.country` | Yes |
+| Model     | Output                                                                                                                  | Valid?  |
+|-----------|-------------------------------------------------------------------------------------------------------------------------|---------|
+| Base      | `SELECT AVG(total) FROM orders`                                                                                         | Partial |
+| Distilled | `SELECT c.country, AVG(o.total) as avg_order FROM customers c JOIN orders o ON c.id = o.customer_id GROUP BY c.country` | Yes     |
 
 ---
 
@@ -728,6 +743,7 @@ ollama run sql-assistant "List all customers from Germany"
 **Symptom:** Student fails on common variations not in seed set.
 
 **Solution:** Systematically sample seeds to cover:
+
 - Difficulty levels (easy, medium, hard)
 - Input variations (phrasing, terminology)
 - Edge cases (nulls, empty results, errors)
@@ -739,6 +755,7 @@ ollama run sql-assistant "List all customers from Germany"
 **Symptom:** Student learns incorrect patterns.
 
 **Solution:** Validate all synthetic data before training:
+
 - Parse/compile outputs
 - Execute and verify results
 - Sample manual review
@@ -750,6 +767,7 @@ ollama run sql-assistant "List all customers from Germany"
 **Symptom:** High train accuracy, low test accuracy.
 
 **Solution:**
+
 - Use held-out test set from seed data (not synthetic)
 - Increase synthetic data diversity
 - Apply regularization (dropout, weight decay)
@@ -761,6 +779,7 @@ ollama run sql-assistant "List all customers from Germany"
 **Symptom:** Training plateaus at low accuracy.
 
 **Solution:** Verify base model has:
+
 - Sufficient vocabulary coverage
 - Basic instruction following
 - Relevant pretraining
@@ -772,6 +791,7 @@ ollama run sql-assistant "List all customers from Germany"
 **Symptom:** Good training metrics, poor production results.
 
 **Solution:** Match exactly:
+
 - Tokenizer settings
 - System prompt (if any)
 - Generation parameters (temperature, top_p)
@@ -783,34 +803,34 @@ ollama run sql-assistant "List all customers from Germany"
 
 ### Distillation Frameworks
 
-| Tool | Description | Link |
-|------|-------------|------|
-| distil-cli | Claude Code skill for distillation | [GitHub](https://github.com/distil-labs/distil-cli-skill) |
-| axolotl | General fine-tuning framework | [GitHub](https://github.com/OpenAccess-AI-Collective/axolotl) |
-| unsloth | Fast fine-tuning for Llama/Mistral | [GitHub](https://github.com/unslothai/unsloth) |
-| LLaMA-Factory | Unified fine-tuning framework | [GitHub](https://github.com/hiyouga/LLaMA-Factory) |
+| Tool          | Description                        | Link                                                          |
+|---------------|------------------------------------|---------------------------------------------------------------|
+| distil-cli    | Claude Code skill for distillation | [GitHub](https://github.com/distil-labs/distil-cli-skill)     |
+| axolotl       | General fine-tuning framework      | [GitHub](https://github.com/OpenAccess-AI-Collective/axolotl) |
+| unsloth       | Fast fine-tuning for Llama/Mistral | [GitHub](https://github.com/unslothai/unsloth)                |
+| LLaMA-Factory | Unified fine-tuning framework      | [GitHub](https://github.com/hiyouga/LLaMA-Factory)            |
 
 ### Inference Runtimes
 
-| Tool | Description | Link |
-|------|-------------|------|
-| llama.cpp | CPU/GPU inference, GGUF format | [GitHub](https://github.com/ggerganov/llama.cpp) |
-| Ollama | Local LLM runner | [ollama.ai](https://ollama.ai) |
-| vLLM | High-throughput inference | [GitHub](https://github.com/vllm-project/vllm) |
-| TGI | HuggingFace inference server | [GitHub](https://github.com/huggingface/text-generation-inference) |
+| Tool      | Description                    | Link                                                               |
+|-----------|--------------------------------|--------------------------------------------------------------------|
+| llama.cpp | CPU/GPU inference, GGUF format | [GitHub](https://github.com/ggerganov/llama.cpp)                   |
+| Ollama    | Local LLM runner               | [ollama.ai](https://ollama.ai)                                     |
+| vLLM      | High-throughput inference      | [GitHub](https://github.com/vllm-project/vllm)                     |
+| TGI       | HuggingFace inference server   | [GitHub](https://github.com/huggingface/text-generation-inference) |
 
 ### Evaluation Tools
 
-| Tool | Description | Link |
-|------|-------------|------|
+| Tool                  | Description             | Link                                                          |
+|-----------------------|-------------------------|---------------------------------------------------------------|
 | lm-evaluation-harness | Standard LLM benchmarks | [GitHub](https://github.com/EleutherAI/lm-evaluation-harness) |
-| sql-eval | Text2SQL evaluation | Various implementations |
-| MTEB | Embedding benchmarks | [GitHub](https://github.com/embeddings-benchmark/mteb) |
+| sql-eval              | Text2SQL evaluation     | Various implementations                                       |
+| MTEB                  | Embedding benchmarks    | [GitHub](https://github.com/embeddings-benchmark/mteb)        |
 
 ### Example Projects
 
-| Project | Description | Link |
-|---------|-------------|------|
+| Project              | Description                   | Link                                                                         |
+|----------------------|-------------------------------|------------------------------------------------------------------------------|
 | Text2SQL with Claude | Complete distillation example | [GitHub](https://github.com/distil-labs/distil-example-text2sql-with-claude) |
 
 ---
@@ -832,25 +852,25 @@ ollama run sql-assistant "List all customers from Germany"
 
 ### Expected Timeline
 
-| Phase | Duration |
-|-------|----------|
-| Seed data collection | 1-3 days |
-| Teacher validation | 1-2 hours |
-| Synthetic generation | 2-8 hours |
-| Data validation | 2-4 hours |
-| Training | 2-8 hours |
-| Evaluation | 1-2 hours |
-| Deployment setup | 1-4 hours |
-| **Total** | **2-5 days** |
+| Phase                | Duration     |
+|----------------------|--------------|
+| Seed data collection | 1-3 days     |
+| Teacher validation   | 1-2 hours    |
+| Synthetic generation | 2-8 hours    |
+| Data validation      | 2-4 hours    |
+| Training             | 2-8 hours    |
+| Evaluation           | 1-2 hours    |
+| Deployment setup     | 1-4 hours    |
+| **Total**            | **2-5 days** |
 
 ### Cost Estimation
 
-| Component | Estimated Cost |
-|-----------|---------------|
-| Teacher API calls (5K generations) | $10-50 |
-| GPU training (A100, 4 hours) | $10-20 |
-| Iteration cycles (3-5x) | 3-5x above |
-| **Total** | **$50-300** |
+| Component                          | Estimated Cost |
+|------------------------------------|----------------|
+| Teacher API calls (5K generations) | $10-50         |
+| GPU training (A100, 4 hours)       | $10-20         |
+| Iteration cycles (3-5x)            | 3-5x above     |
+| **Total**                          | **$50-300**    |
 
 ---
 
@@ -859,9 +879,11 @@ ollama run sql-assistant "List all customers from Germany"
 - [Knowledge Distillation: A Survey](https://arxiv.org/abs/2006.05525) - Gou et al., 2020
 - [Distilling Step-by-Step](https://arxiv.org/abs/2305.02301) - Hsieh et al., 2023
 - [Textbooks Are All You Need](https://arxiv.org/abs/2306.11644) - Gunasekar et al., 2023
-- [Orca: Progressive Learning from Complex Explanation Traces](https://arxiv.org/abs/2306.02707) - Mukherjee et al., 2023
+- [Orca: Progressive Learning from Complex Explanation Traces](https://arxiv.org/abs/2306.02707) - Mukherjee et al.,
+  2023
 - [TinyLlama](https://arxiv.org/abs/2401.02385) - Zhang et al., 2024
 
 ---
 
-*Guide compiled from [@TheAhmadOsman](https://x.com/TheAhmadOsman) Twitter thread (Jan 2026) and expanded with general best practices.*
+*Guide compiled from [@TheAhmadOsman](https://x.com/TheAhmadOsman) Twitter thread (Jan 2026) and expanded with general
+best practices.*

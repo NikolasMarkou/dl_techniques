@@ -1,4 +1,5 @@
 # Efficient Multi-Modal LLMs for Low-Resource Dialect Adaptation
+
 ## A Complete Technical Guide for English-Greek-Cypriot Speech & Text Systems (2024-2025)
 
 ---
@@ -22,9 +23,11 @@
 
 ## Executive Summary
 
-This guide covers the complete pipeline for building an efficient multi-modal LLM handling text and audio for English, Greek, and Cypriot Greek dialects. Target: models <100B parameters suitable for local deployment.
+This guide covers the complete pipeline for building an efficient multi-modal LLM handling text and audio for English,
+Greek, and Cypriot Greek dialects. Target: models <100B parameters suitable for local deployment.
 
 **Key Recommendations:**
+
 - **Primary ASR**: Whisper-large-v3 (1.55B) or NVIDIA Canary-1B-v2
 - **Multi-modal**: Qwen2-Audio (8.2B) for audio understanding
 - **Low-resource adaptation**: XLS-R-300M with LoRA finetuning
@@ -46,6 +49,7 @@ This guide covers the complete pipeline for building an efficient multi-modal LL
 ### Multi-Modal LLM Architecture Patterns
 
 #### Pattern 1: Encoder-Decoder Fusion
+
 ```
 ┌───────────────────────────────────────────────────────────────────┐
 │                    ENCODER-DECODER FUSION                         │
@@ -66,6 +70,7 @@ This guide covers the complete pipeline for building an efficient multi-modal LL
 **Examples**: Qwen2-Audio, LLaMA-Omni, Ultravox
 
 #### Pattern 2: Dual-Encoder Architecture
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    DUAL-ENCODER (SALMONN)                   │
@@ -85,6 +90,7 @@ This guide covers the complete pipeline for building an efficient multi-modal LL
 **Examples**: SALMONN, Pengi
 
 #### Pattern 3: Unified Multimodal (Speech + Text Translation)
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                 UNIFIED MULTIMODAL (SeamlessM4T)            │
@@ -108,12 +114,12 @@ This guide covers the complete pipeline for building an efficient multi-modal LL
 
 ### Component Specifications
 
-| Component | Options | Parameters | Purpose |
-|-----------|---------|------------|---------|
-| Audio Encoder | Whisper, Wav2Vec2, Conformer | 300M-1.5B | Feature extraction |
-| Projection | Linear, Q-Former, Adapter | 10M-100M | Modality alignment |
-| LLM Backbone | Llama-3, Qwen-2, Mistral | 7B-70B | Language understanding |
-| Output Head | LM Head, Vocoder, CTC | 10M-500M | Task-specific output |
+| Component     | Options                      | Parameters | Purpose                |
+|---------------|------------------------------|------------|------------------------|
+| Audio Encoder | Whisper, Wav2Vec2, Conformer | 300M-1.5B  | Feature extraction     |
+| Projection    | Linear, Q-Former, Adapter    | 10M-100M   | Modality alignment     |
+| LLM Backbone  | Llama-3, Qwen-2, Mistral     | 7B-70B     | Language understanding |
+| Output Head   | LM Head, Vocoder, CTC        | 10M-500M   | Task-specific output   |
 
 ---
 
@@ -122,9 +128,11 @@ This guide covers the complete pipeline for building an efficient multi-modal LL
 ### Tier 1: Multi-Modal Audio-Language Models (<100B params)
 
 #### Qwen2-Audio (8.2B parameters)
+
 **Architecture**: Whisper-large-v3 encoder → Qwen-7B decoder
 
 **Capabilities**:
+
 - Voice chat and audio analysis modes
 - ASR, speech translation, emotion recognition
 - Sound event detection, music understanding
@@ -165,9 +173,11 @@ conversation = [
 ---
 
 #### SeamlessM4T v2 (~2.3B parameters)
+
 **Architecture**: Conformer encoder + NLLB decoder + speech vocoder
 
 **Capabilities**:
+
 - Speech-to-text (101 languages)
 - Text-to-speech (35 languages)
 - Speech-to-speech translation
@@ -207,9 +217,11 @@ transcribed_text, _, _ = translator.predict(
 ---
 
 #### SALMONN (7B/13B parameters)
+
 **Architecture**: Whisper-large-v2 + BEATs → Window Q-Former → Vicuna
 
 **Unique Features**:
+
 - Dual audio encoder (speech + general audio)
 - Window-level Q-Former for temporal alignment
 - LoRA-based training (highly adaptable)
@@ -230,6 +242,7 @@ transcribed_text, _, _ = translator.predict(
 ---
 
 #### LLaMA-Omni (8B parameters)
+
 **Architecture**: Whisper encoder → Speech Adapter → Llama-3.1-8B → Streaming Vocoder
 
 **Key Innovation**: ~226ms response latency for real-time interaction
@@ -248,9 +261,11 @@ transcribed_text, _, _ = translator.predict(
 ---
 
 #### Ultravox (8B parameters)
+
 **Architecture**: Whisper encoder → Llama-3.1-8B (merged audio-text embeddings)
 
 **Features**:
+
 - Real-time voice chat
 - No separate ASR step (end-to-end)
 - Supports interruption handling
@@ -263,12 +278,12 @@ transcribed_text, _, _ = translator.predict(
 
 ### Tier 2: Compact Models for Edge Deployment
 
-| Model | Parameters | Specialty | License |
-|-------|------------|-----------|---------|
-| Mini-Omni | 500M | Edge deployment | Apache 2.0 |
-| Whisper-tiny | 39M | Fastest ASR | MIT |
-| Distil-Whisper | 756M | 6x faster, English | MIT |
-| mHuBERT-147 | 95M | Few-shot champion | MIT |
+| Model          | Parameters | Specialty          | License    |
+|----------------|------------|--------------------|------------|
+| Mini-Omni      | 500M       | Edge deployment    | Apache 2.0 |
+| Whisper-tiny   | 39M        | Fastest ASR        | MIT        |
+| Distil-Whisper | 756M       | 6x faster, English | MIT        |
+| mHuBERT-147    | 95M        | Few-shot champion  | MIT        |
 
 ---
 
@@ -278,17 +293,18 @@ transcribed_text, _, _ = translator.predict(
 
 #### OpenAI Whisper Family
 
-| Variant | Parameters | VRAM | Speed | WER (en) | Greek Support |
-|---------|------------|------|-------|----------|---------------|
-| tiny | 39M | 1GB | 32x | 7.6% | ✓ (limited) |
-| base | 74M | 1GB | 16x | 5.0% | ✓ |
-| small | 244M | 2GB | 6x | 3.4% | ✓ |
-| medium | 769M | 5GB | 2x | 2.5% | ✓ |
-| large-v2 | 1.55B | 10GB | 1x | 2.1% | ✓ |
-| large-v3 | 1.55B | 10GB | 1x | 1.8% | ✓ |
-| large-v3-turbo | 809M | 6GB | 8x | 1.9% | ✓ |
+| Variant        | Parameters | VRAM | Speed | WER (en) | Greek Support |
+|----------------|------------|------|-------|----------|---------------|
+| tiny           | 39M        | 1GB  | 32x   | 7.6%     | ✓ (limited)  |
+| base           | 74M        | 1GB  | 16x   | 5.0%     | ✓            |
+| small          | 244M       | 2GB  | 6x    | 3.4%     | ✓            |
+| medium         | 769M       | 5GB  | 2x    | 2.5%     | ✓            |
+| large-v2       | 1.55B      | 10GB | 1x    | 2.1%     | ✓            |
+| large-v3       | 1.55B      | 10GB | 1x    | 1.8%     | ✓            |
+| large-v3-turbo | 809M       | 6GB  | 8x    | 1.9%     | ✓            |
 
-**Key Finding**: Greek Podcast Corpus research (Interspeech 2024) showed finetuned Whisper-small/medium outperform Whisper-large-v2 on Greek domain-specific content.
+**Key Finding**: Greek Podcast Corpus research (Interspeech 2024) showed finetuned Whisper-small/medium outperform
+Whisper-large-v2 on Greek domain-specific content.
 
 ```python
 # Whisper with HuggingFace
@@ -326,6 +342,7 @@ transcription = processor.batch_decode(predicted_ids, skip_special_tokens=True)
 **Architecture**: FastConformer encoder + Transformer decoder
 
 **Specifications**:
+
 - 1B parameters
 - 25 European languages (including Greek)
 - Up to 24 minutes audio with dynamic chunking
@@ -400,11 +417,13 @@ transcription = processor.decode(ids)
 | XLS-R-2B | 2B | 436K hours, 128 languages |
 
 **Greek-Specific Results**:
+
 - XLS-R-53 finetuned: **10.5% WER on Greek CommonVoice**
 - Training time: 8 hours on single RTX 3080
 - Works with as little as **10 minutes** of labeled data
 
 **Why Choose XLS-R for Cypriot**:
+
 1. Strong cross-lingual transfer from Greek
 2. Few-shot learning capability
 3. Adapter-based finetuning support
@@ -425,6 +444,7 @@ transcription = processor.decode(ids)
 ### Optimized Inference Runtimes
 
 #### faster-whisper (CTranslate2)
+
 ```bash
 pip install faster-whisper
 ```
@@ -459,6 +479,7 @@ for segment in segments:
 ---
 
 #### whisper.cpp (CPU/Edge)
+
 ```bash
 git clone https://github.com/ggerganov/whisper.cpp
 cd whisper.cpp && make
@@ -485,17 +506,20 @@ cd whisper.cpp && make
 ### Primary ASR Metrics
 
 #### Word Error Rate (WER)
+
 The standard metric for ASR evaluation.
 
 $$WER = \frac{S + D + I}{N} \times 100\%$$
 
 Where:
+
 - $S$ = Substitutions (wrong words)
 - $D$ = Deletions (missing words)
 - $I$ = Insertions (extra words)
 - $N$ = Total words in reference
 
 **Calculation Example**:
+
 ```
 Reference: "Καλημέρα σας πώς είστε"
 Hypothesis: "Καλημέρα σου πώς είσαι"
@@ -525,11 +549,13 @@ wer = jiwer.wer(reference, hypothesis)
 ---
 
 #### Character Error Rate (CER)
+
 Better for morphologically rich languages like Greek.
 
 $$CER = \frac{S_c + D_c + I_c}{N_c} \times 100\%$$
 
 **When to use CER over WER**:
+
 - Agglutinative/inflected languages (Greek)
 - Languages without clear word boundaries
 - Dialect evaluation with spelling variations
@@ -542,23 +568,25 @@ cer = jiwer.cer(reference, hypothesis)
 
 #### Additional Metrics
 
-| Metric | Formula | Use Case |
-|--------|---------|----------|
-| **MER** (Match Error Rate) | $(S+D+I)/(S+D+C)$ | Normalized by matches |
-| **WIL** (Word Information Lost) | $1 - (C/N \times C/P)$ | Information theoretic |
-| **WIP** (Word Information Preserved) | $C/N \times C/P$ | Complement of WIL |
-| **SER** (Sentence Error Rate) | $E_{sent}/N_{sent}$ | Utterance-level |
+| Metric                               | Formula                | Use Case              |
+|--------------------------------------|------------------------|-----------------------|
+| **MER** (Match Error Rate)           | $(S+D+I)/(S+D+C)$      | Normalized by matches |
+| **WIL** (Word Information Lost)      | $1 - (C/N \times C/P)$ | Information theoretic |
+| **WIP** (Word Information Preserved) | $C/N \times C/P$       | Complement of WIL     |
+| **SER** (Sentence Error Rate)        | $E_{sent}/N_{sent}$    | Utterance-level       |
 
 ---
 
 ### Translation Metrics
 
 #### BLEU Score
+
 For speech translation tasks (S2TT).
 
-$$BLEU = BP \cdot \exp\left(\sum_{n=1}^{N} w_n \log p_n\right)$$
+$$BLEU = BP \cdot \exp\left (\sum_{n=1}^{N} w_n \log p_n\right)$$
 
 Where:
+
 - $BP$ = Brevity penalty
 - $p_n$ = Modified n-gram precision
 - $w_n$ = Weights (typically uniform 1/N)
@@ -573,6 +601,7 @@ print(f"BLEU: {bleu.score:.1f}")
 ---
 
 #### COMET Score
+
 Neural metric correlating better with human judgment.
 
 ```python
@@ -589,24 +618,24 @@ scores = model.predict(data, batch_size=8)
 
 ### Audio Quality Metrics
 
-| Metric | Range | Description |
-|--------|-------|-------------|
-| **MOS** (Mean Opinion Score) | 1-5 | Human quality rating |
-| **PESQ** | -0.5 to 4.5 | Perceptual quality |
-| **STOI** | 0-1 | Speech intelligibility |
-| **SI-SDR** | dB | Source separation quality |
+| Metric                       | Range       | Description               |
+|------------------------------|-------------|---------------------------|
+| **MOS** (Mean Opinion Score) | 1-5         | Human quality rating      |
+| **PESQ**                     | -0.5 to 4.5 | Perceptual quality        |
+| **STOI**                     | 0-1         | Speech intelligibility    |
+| **SI-SDR**                   | dB          | Source separation quality |
 
 ---
 
 ### Benchmark Datasets for Evaluation
 
-| Dataset | Languages | Hours | Domain | Metrics |
-|---------|-----------|-------|--------|---------|
-| LibriSpeech | English | 960 | Audiobooks | WER |
-| FLEURS | 102 | 12/lang | Read speech | WER, BLEU |
-| CommonVoice | 100+ | Varies | Crowdsourced | WER |
-| VoxPopuli | 16 EU | 1800 | Parliament | WER |
-| CoVoST2 | 21→English | 2880 | Translation | BLEU |
+| Dataset     | Languages  | Hours   | Domain       | Metrics   |
+|-------------|------------|---------|--------------|-----------|
+| LibriSpeech | English    | 960     | Audiobooks   | WER       |
+| FLEURS      | 102        | 12/lang | Read speech  | WER, BLEU |
+| CommonVoice | 100+       | Varies  | Crowdsourced | WER       |
+| VoxPopuli   | 16 EU      | 1800    | Parliament   | WER       |
+| CoVoST2     | 21→English | 2880    | Translation  | BLEU      |
 
 **Greek-Specific Benchmarks**:
 | Dataset | Size | WER Baseline |
@@ -625,15 +654,17 @@ Used by: Wav2Vec2, MMS, XLS-R, Conformer-CTC
 
 **Mathematical Formulation**:
 
-$$\mathcal{L}_{CTC} = -\log P(Y|X) = -\log \sum_{\pi \in \mathcal{B}^{-1}(Y)} P(\pi|X)$$
+$$\mathcal{L}_{CTC} = -\log P (Y|X) = -\log \sum_{\pi \in \mathcal{B}^{-1} (Y)} P (\pi|X)$$
 
 Where:
+
 - $Y$ = Target label sequence
 - $X$ = Input features
 - $\pi$ = Alignment path
 - $\mathcal{B}^{-1}$ = Inverse of collapsing function
 
 **Key Properties**:
+
 - No explicit alignment required
 - Handles variable-length sequences
 - Assumes conditional independence
@@ -657,12 +688,12 @@ loss = ctc_loss(log_probs, targets, input_lengths, target_lengths)
 
 Used by: Whisper, SeamlessM4T decoder, LLM components
 
-$$\mathcal{L}_{CE} = -\sum_{t=1}^{T} \log P(y_t | y_{<t}, X)$$
+$$\mathcal{L}_{CE} = -\sum_{t=1}^{T} \log P (y_t | y_{<t}, X)$$
 
 **With Label Smoothing**:
-$$\mathcal{L}_{LS} = (1-\epsilon)\mathcal{L}_{CE} + \epsilon \cdot H(u)$$
+$$\mathcal{L}_{LS} = (1-\epsilon)\mathcal{L}_{CE} + \epsilon \cdot H (u)$$
 
-Where $\epsilon$ is smoothing factor (typically 0.1) and $H(u)$ is uniform distribution entropy.
+Where $\epsilon$ is smoothing factor (typically 0.1) and $H (u)$ is uniform distribution entropy.
 
 ```python
 loss_fn = nn.CrossEntropyLoss(
@@ -682,9 +713,10 @@ loss = loss_fn(logits.view(-1, vocab_size), labels.view(-1))
 Used by: Wav2Vec2, HuBERT, XLS-R pretraining
 
 **InfoNCE Loss**:
-$$\mathcal{L}_{NCE} = -\log \frac{\exp(sim(z_t, c_t)/\tau)}{\sum_{k} \exp(sim(z_t, c_k)/\tau)}$$
+$$\mathcal{L}_{NCE} = -\log \frac{\exp (sim (z_t, c_t)/\tau)}{\sum_{k} \exp (sim (z_t, c_k)/\tau)}$$
 
 Where:
+
 - $z_t$ = Contextualized representation
 - $c_t$ = Quantized target
 - $\tau$ = Temperature (typically 0.1)
@@ -735,9 +767,10 @@ class MultiTaskLoss(nn.Module):
 ### Specialized Losses for Low-Resource Adaptation
 
 #### Knowledge Distillation Loss
+
 Transfer from large teacher to smaller student:
 
-$$\mathcal{L}_{KD} = \alpha \cdot T^2 \cdot KL(p_s || p_t) + (1-\alpha) \cdot \mathcal{L}_{CE}$$
+$$\mathcal{L}_{KD} = \alpha \cdot T^2 \cdot KL (p_s || p_t) + (1-\alpha) \cdot \mathcal{L}_{CE}$$
 
 ```python
 def distillation_loss(student_logits, teacher_logits, labels, T=2.0, alpha=0.5):
@@ -752,9 +785,10 @@ def distillation_loss(student_logits, teacher_logits, labels, T=2.0, alpha=0.5):
 ```
 
 #### Focal Loss (Class Imbalance)
+
 For rare phonemes/words in dialect data:
 
-$$\mathcal{L}_{focal} = -\alpha_t (1-p_t)^\gamma \log(p_t)$$
+$$\mathcal{L}_{focal} = -\alpha_t (1-p_t)^\gamma \log (p_t)$$
 
 ```python
 class FocalLoss(nn.Module):
@@ -782,9 +816,10 @@ class FocalLoss(nn.Module):
 
 $$W' = W + \Delta W = W + BA$$
 
-Where $B \in \mathbb{R}^{d \times r}$, $A \in \mathbb{R}^{r \times k}$, and $r \ll \min(d,k)$
+Where $B \in \mathbb{R}^{d \times r}$, $A \in \mathbb{R}^{r \times k}$, and $r \ll \min (d,k)$
 
 **Recommended Configuration for ASR**:
+
 ```python
 from peft import LoraConfig, get_peft_model
 
@@ -1011,6 +1046,7 @@ for sentence in cypriot_sentences:
 ```
 
 **Reported Improvements**:
+
 - LLM+TTS synthetic data: **14.3% absolute WER reduction** on extremely low-resource languages
 - Voice cloning: **12.1% relative WER improvement** on in-domain data
 
@@ -1020,20 +1056,20 @@ for sentence in cypriot_sentences:
 
 ### Greek Speech Datasets
 
-| Dataset | Hours | Type | Access | Link |
-|---------|-------|------|--------|------|
-| VoxPopuli Greek | 17.7K unlabeled / 1.8K labeled | Parliament | Free | github.com/facebookresearch/voxpopuli |
-| CommonVoice Greek | 100+ | Crowdsourced | Free | commonvoice.mozilla.org |
-| Greek Podcast Corpus | 800 | Podcasts (silver labels) | Research | Contact authors |
-| CSS10 Greek | 24 | Single speaker TTS | Free | github.com/Kyubyong/css10 |
+| Dataset              | Hours                          | Type                     | Access   | Link                                  |
+|----------------------|--------------------------------|--------------------------|----------|---------------------------------------|
+| VoxPopuli Greek      | 17.7K unlabeled / 1.8K labeled | Parliament               | Free     | github.com/facebookresearch/voxpopuli |
+| CommonVoice Greek    | 100+                           | Crowdsourced             | Free     | commonvoice.mozilla.org               |
+| Greek Podcast Corpus | 800                            | Podcasts (silver labels) | Research | Contact authors                       |
+| CSS10 Greek          | 24                             | Single speaker TTS       | Free     | github.com/Kyubyong/css10             |
 
 ### Cypriot Greek Resources
 
-| Resource | Size | Type | Status |
-|----------|------|------|--------|
-| Voice of Cyprus | ~300 hrs (growing) | Community collected | voiceofcyprus.org |
-| Orientel Cypriot DB | 1000 speakers | Telephone (8kHz) | Academic request |
-| YouTube Cypriot | Varies | Unlabeled | Requires scraping |
+| Resource            | Size               | Type                | Status            |
+|---------------------|--------------------|---------------------|-------------------|
+| Voice of Cyprus     | ~300 hrs (growing) | Community collected | voiceofcyprus.org |
+| Orientel Cypriot DB | 1000 speakers      | Telephone (8kHz)    | Academic request  |
+| YouTube Cypriot     | Varies             | Unlabeled           | Requires scraping |
 
 ### Dataset Loading
 
@@ -1073,35 +1109,37 @@ def load_cypriot_data(audio_dir, transcript_file):
 
 ### Hardware Requirements by Model Size
 
-| Model Size | Min VRAM | Recommended | Quantized |
-|------------|----------|-------------|-----------|
-| <1B (Whisper) | 4GB | 8GB | 2GB (INT8) |
-| 7-8B | 16GB | 24GB | 8GB (4-bit) |
-| 13B | 32GB | 48GB | 16GB (4-bit) |
-| 70B | 140GB | 160GB | 40GB (4-bit) |
+| Model Size    | Min VRAM | Recommended | Quantized    |
+|---------------|----------|-------------|--------------|
+| <1B (Whisper) | 4GB      | 8GB         | 2GB (INT8)   |
+| 7-8B          | 16GB     | 24GB        | 8GB (4-bit)  |
+| 13B           | 32GB     | 48GB        | 16GB (4-bit) |
+| 70B           | 140GB    | 160GB       | 40GB (4-bit) |
 
 ### VRAM Estimation Formula
 
 $$VRAM \approx P \times \frac{Q}{8} \times 1.2$$
 
 Where:
+
 - $P$ = Parameters in billions
 - $Q$ = Precision bits (32, 16, 8, 4)
 - 1.2 = Overhead factor
 
 **Examples**:
+
 - Whisper-large (1.55B) @ FP16: $1.55 \times 2 \times 1.2 = 3.7GB$
 - Qwen2-Audio (8.2B) @ FP16: $8.2 \times 2 \times 1.2 = 19.7GB$
 - Llama-3-70B @ INT4: $70 \times 0.5 \times 1.2 = 42GB$
 
 ### Apple Silicon Deployment
 
-| Chip | Unified Memory | Max Model Size | Recommended Framework |
-|------|----------------|----------------|----------------------|
-| M2/M3 | 24GB | 13B (4-bit) | MLX |
-| M2/M3 Pro | 36GB | 30B (4-bit) | MLX |
-| M2/M3 Max | 128GB | 70B (4-bit) | MLX |
-| M2/M3 Ultra | 192GB | 70B+ (FP16) | MLX |
+| Chip        | Unified Memory | Max Model Size | Recommended Framework |
+|-------------|----------------|----------------|-----------------------|
+| M2/M3       | 24GB           | 13B (4-bit)    | MLX                   |
+| M2/M3 Pro   | 36GB           | 30B (4-bit)    | MLX                   |
+| M2/M3 Max   | 128GB          | 70B (4-bit)    | MLX                   |
+| M2/M3 Ultra | 192GB          | 70B+ (FP16)    | MLX                   |
 
 ```python
 # MLX Whisper inference (Apple Silicon)
@@ -1116,17 +1154,18 @@ result = mlx_whisper.transcribe(
 
 ### Quantization Comparison
 
-| Method | Backend | Precision | Speed | Quality Loss |
-|--------|---------|-----------|-------|--------------|
-| BitsAndBytes | GPU | 4/8-bit | 1x | Minimal |
-| GPTQ | GPU | 4-bit | 1.5x | <1% |
-| AWQ | GPU | 4-bit | 2x | <0.5% |
-| GGUF | CPU/Mac | 2-8 bit | Varies | Varies |
-| CTranslate2 | GPU/CPU | INT8/FP16 | 4x | None |
+| Method       | Backend | Precision | Speed  | Quality Loss |
+|--------------|---------|-----------|--------|--------------|
+| BitsAndBytes | GPU     | 4/8-bit   | 1x     | Minimal      |
+| GPTQ         | GPU     | 4-bit     | 1.5x   | <1%          |
+| AWQ          | GPU     | 4-bit     | 2x     | <0.5%        |
+| GGUF         | CPU/Mac | 2-8 bit   | Varies | Varies       |
+| CTranslate2  | GPU/CPU | INT8/FP16 | 4x     | None         |
 
 ### Deployment Frameworks
 
 #### Ollama (Simplest)
+
 ```bash
 # Install
 curl -fsSL https://ollama.com/install.sh | sh
@@ -1137,6 +1176,7 @@ ollama run llama3.2
 ```
 
 #### vLLM (Production)
+
 ```python
 from vllm import LLM, SamplingParams
 
@@ -1150,6 +1190,7 @@ outputs = llm.generate(prompts, SamplingParams(temperature=0.7))
 ```
 
 #### llama.cpp (CPU/Edge)
+
 ```bash
 # Build
 git clone https://github.com/ggerganov/llama.cpp
@@ -1431,31 +1472,31 @@ with sd.InputStream(samplerate=16000, channels=1, callback=audio_callback):
 
 #### ASR Benchmarks
 
-| Model | LibriSpeech Clean | LibriSpeech Other | FLEURS (avg) | Greek WER |
-|-------|-------------------|-------------------|--------------|-----------|
-| Whisper-large-v3 | 1.8% | 3.5% | ~10% | 12-15% |
-| Whisper-large-v3-turbo | 1.9% | 3.7% | ~10.5% | 12-16% |
-| Qwen2-Audio | 1.83% | 3.47% | - | ~12% |
-| NVIDIA Canary-1B-v2 | 5.8% | - | - | 8-12% |
-| SeamlessM4T v2 | - | - | 45% lower | ~10% |
-| MMS-1B | - | - | 50% lower | - |
+| Model                  | LibriSpeech Clean | LibriSpeech Other | FLEURS (avg) | Greek WER |
+|------------------------|-------------------|-------------------|--------------|-----------|
+| Whisper-large-v3       | 1.8%              | 3.5%              | ~10%         | 12-15%    |
+| Whisper-large-v3-turbo | 1.9%              | 3.7%              | ~10.5%       | 12-16%    |
+| Qwen2-Audio            | 1.83%             | 3.47%             | -            | ~12%      |
+| NVIDIA Canary-1B-v2    | 5.8%              | -                 | -            | 8-12%     |
+| SeamlessM4T v2         | -                 | -                 | 45% lower    | ~10%      |
+| MMS-1B                 | -                 | -                 | 50% lower    | -         |
 
 #### Translation Benchmarks (BLEU)
 
-| Model | En→De | En→Fr | En→El | El→En |
-|-------|-------|-------|-------|-------|
-| SeamlessM4T v2 | 31.2 | 38.5 | 28.1 | 32.4 |
-| Whisper + NLLB | 28.7 | 35.2 | 25.3 | 29.8 |
-| Qwen2-Audio | 29.4 | - | - | - |
+| Model          | En→De | En→Fr | En→El | El→En |
+|----------------|-------|-------|-------|-------|
+| SeamlessM4T v2 | 31.2  | 38.5  | 28.1  | 32.4  |
+| Whisper + NLLB | 28.7  | 35.2  | 25.3  | 29.8  |
+| Qwen2-Audio    | 29.4  | -     | -     | -     |
 
 #### Efficiency Benchmarks
 
-| Model | RTF (GPU) | RTF (CPU) | Memory (FP16) | Memory (INT8) |
-|-------|-----------|-----------|---------------|---------------|
-| Whisper-large-v3 | 0.05x | 0.8x | 10GB | 5GB |
-| faster-whisper large | 0.01x | 0.2x | 4.5GB | 2.9GB |
-| whisper.cpp large | 0.03x | 0.3x | 3GB | 1.5GB |
-| Canary-1B | 0.008x | 0.15x | 3GB | 1.5GB |
+| Model                | RTF (GPU) | RTF (CPU) | Memory (FP16) | Memory (INT8) |
+|----------------------|-----------|-----------|---------------|---------------|
+| Whisper-large-v3     | 0.05x     | 0.8x      | 10GB          | 5GB           |
+| faster-whisper large | 0.01x     | 0.2x      | 4.5GB         | 2.9GB         |
+| whisper.cpp large    | 0.03x     | 0.3x      | 3GB           | 1.5GB         |
+| Canary-1B            | 0.008x    | 0.15x     | 3GB           | 1.5GB         |
 
 *RTF = Real-Time Factor (lower is faster)*
 
@@ -1463,22 +1504,22 @@ with sd.InputStream(samplerate=16000, channels=1, callback=audio_callback):
 
 From Greek Podcast Corpus (Interspeech 2024):
 
-| Model | Domain-Specific WER | General WER |
-|-------|---------------------|-------------|
-| Whisper-large-v2 (base) | 15.2% | 12.8% |
-| Whisper-medium (finetuned) | 9.4% | 10.1% |
-| Whisper-small (finetuned) | 10.8% | 11.3% |
+| Model                      | Domain-Specific WER | General WER |
+|----------------------------|---------------------|-------------|
+| Whisper-large-v2 (base)    | 15.2%               | 12.8%       |
+| Whisper-medium (finetuned) | 9.4%                | 10.1%       |
+| Whisper-small (finetuned)  | 10.8%               | 11.3%       |
 
 **Key Finding**: Finetuned smaller models outperform larger base models on Greek.
 
 ### Low-Resource Adaptation Results
 
-| Starting Model | Target Language | Data Size | Final WER |
-|----------------|-----------------|-----------|-----------|
-| XLS-R-300M | Greek (CommonVoice) | 8 hrs | 10.5% |
-| XLS-R-300M | Maltese | 7 hrs | 18.2% |
-| MMS-1B | Various low-resource | 1 hr | 25-35% |
-| mHuBERT-147 | ML-SUPERB langs | 10 min | 15-25% |
+| Starting Model | Target Language      | Data Size | Final WER |
+|----------------|----------------------|-----------|-----------|
+| XLS-R-300M     | Greek (CommonVoice)  | 8 hrs     | 10.5%     |
+| XLS-R-300M     | Maltese              | 7 hrs     | 18.2%     |
+| MMS-1B         | Various low-resource | 1 hr      | 25-35%    |
+| mHuBERT-147    | ML-SUPERB langs      | 10 min    | 15-25%    |
 
 ---
 
@@ -1487,54 +1528,54 @@ From Greek Podcast Corpus (Interspeech 2024):
 ### Key Papers (2024-2025)
 
 1. **Qwen2-Audio Technical Report** (2024)
-   - arxiv.org/abs/2407.10759
+    - arxiv.org/abs/2407.10759
 
 2. **SeamlessM4T: Massively Multilingual & Multimodal Translation** (2023-2024)
-   - arxiv.org/abs/2308.11596
-   - nature.com/articles/s41586-024-08359-z
+    - arxiv.org/abs/2308.11596
+    - nature.com/articles/s41586-024-08359-z
 
 3. **The Greek Podcast Corpus** (Interspeech 2024)
-   - isca-archive.org/interspeech_2024/paraskevopoulos24_interspeech.pdf
+    - isca-archive.org/interspeech_2024/paraskevopoulos24_interspeech.pdf
 
 4. **Scaling Speech Technology to 1000+ Languages (MMS)** (2023)
-   - arxiv.org/abs/2305.13516
+    - arxiv.org/abs/2305.13516
 
 5. **Practical Tips for Finetuning LLMs Using LoRA** (2024)
-   - Sebastian Raschka's Magazine
+    - Sebastian Raschka's Magazine
 
 ### Model Repositories
 
-| Model | Repository |
-|-------|------------|
-| Whisper | github.com/openai/whisper |
-| faster-whisper | github.com/SYSTRAN/faster-whisper |
-| whisper.cpp | github.com/ggerganov/whisper.cpp |
-| Qwen2-Audio | github.com/QwenLM/Qwen2-Audio |
-| SeamlessM4T | github.com/facebookresearch/seamless_communication |
-| SALMONN | github.com/bytedance/SALMONN |
-| LLaMA-Omni | github.com/ictnlp/LLaMA-Omni |
-| MMS | huggingface.co/facebook/mms-1b-all |
-| XLS-R | huggingface.co/facebook/wav2vec2-xls-r-300m |
+| Model          | Repository                                         |
+|----------------|----------------------------------------------------|
+| Whisper        | github.com/openai/whisper                          |
+| faster-whisper | github.com/SYSTRAN/faster-whisper                  |
+| whisper.cpp    | github.com/ggerganov/whisper.cpp                   |
+| Qwen2-Audio    | github.com/QwenLM/Qwen2-Audio                      |
+| SeamlessM4T    | github.com/facebookresearch/seamless_communication |
+| SALMONN        | github.com/bytedance/SALMONN                       |
+| LLaMA-Omni     | github.com/ictnlp/LLaMA-Omni                       |
+| MMS            | huggingface.co/facebook/mms-1b-all                 |
+| XLS-R          | huggingface.co/facebook/wav2vec2-xls-r-300m        |
 
 ### Tools & Frameworks
 
-| Tool | Purpose | Link |
-|------|---------|------|
-| HuggingFace Transformers | Model hub & training | huggingface.co |
-| PEFT | Parameter-efficient finetuning | github.com/huggingface/peft |
-| Ollama | Local LLM deployment | ollama.com |
-| vLLM | Production inference | github.com/vllm-project/vllm |
-| MLX | Apple Silicon inference | github.com/ml-explore/mlx |
-| NeMo | NVIDIA ASR toolkit | github.com/NVIDIA/NeMo |
+| Tool                     | Purpose                        | Link                         |
+|--------------------------|--------------------------------|------------------------------|
+| HuggingFace Transformers | Model hub & training           | huggingface.co               |
+| PEFT                     | Parameter-efficient finetuning | github.com/huggingface/peft  |
+| Ollama                   | Local LLM deployment           | ollama.com                   |
+| vLLM                     | Production inference           | github.com/vllm-project/vllm |
+| MLX                      | Apple Silicon inference        | github.com/ml-explore/mlx    |
+| NeMo                     | NVIDIA ASR toolkit             | github.com/NVIDIA/NeMo       |
 
 ### Datasets
 
-| Dataset | Link |
-|---------|------|
-| CommonVoice | commonvoice.mozilla.org |
-| VoxPopuli | github.com/facebookresearch/voxpopuli |
-| FLEURS | huggingface.co/datasets/google/fleurs |
-| Voice of Cyprus | voiceofcyprus.org |
+| Dataset         | Link                                  |
+|-----------------|---------------------------------------|
+| CommonVoice     | commonvoice.mozilla.org               |
+| VoxPopuli       | github.com/facebookresearch/voxpopuli |
+| FLEURS          | huggingface.co/datasets/google/fleurs |
+| Voice of Cyprus | voiceofcyprus.org                     |
 
 ---
 

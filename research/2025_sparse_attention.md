@@ -2,7 +2,9 @@
 
 ## Overview
 
-This guide covers practical methods to force transformer attention mechanisms to be sparse (5-10% active weights), reducing computational complexity from O(nÂ²) to near-linear while maintaining model performance. These techniques achieve sparsity through mathematical transformations, selection mechanisms, learned routing, or regularization.
+This guide covers practical methods to force transformer attention mechanisms to be sparse (5-10% active weights),
+reducing computational complexity from O (nÂ²) to near-linear while maintaining model performance. These techniques
+achieve sparsity through mathematical transformations, selection mechanisms, learned routing, or regularization.
 
 ---
 
@@ -13,17 +15,20 @@ This guide covers practical methods to force transformer attention mechanisms to
 **Concept**: Replaces softmax with Euclidean projection onto the probability simplex, naturally producing exact zeros.
 
 **Mathematical Formulation**:
+
 ```
 sparsemax(z) = argmin_p ||p - z||Â² 
                subject to: p âˆˆ Î”^d (probability simplex)
 ```
 
 **Properties**:
+
 - Typical sparsity: 40-70%
 - Differentiable via implicit differentiation
 - GPU-friendly through parallel partial sort algorithms
 
 **Implementation Strategy**:
+
 ```python
 import torch
 
@@ -97,11 +102,13 @@ class SparsemaxAttention(torch.nn.Module):
 ```
 
 **Advantages**:
+
 - Produces exact zeros (hard sparsity)
 - Maintains differentiability
 - No hyperparameters to tune
 
 **Disadvantages**:
+
 - Requires sorting operations (slower than softmax)
 - Less GPU-optimized than top-k methods
 
@@ -112,6 +119,7 @@ class SparsemaxAttention(torch.nn.Module):
 **Concept**: Generalizes sparsemax with tunable Î± parameter controlling sparsity-smoothness tradeoff.
 
 **Mathematical Formulation**:
+
 ```
 entmax_Î±(z) = argmax_p [Î©_Î±(p) + pÂ·z]
 
@@ -122,11 +130,13 @@ where Î©_Î±(p) is the Tsallis Î±-entropy:
 ```
 
 **Properties**:
+
 - Î±=1.5 (entmax15): 60-80% sparsity with minimal accuracy loss
 - Smooth interpolation between softmax and sparsemax
 - Well-tested on NMT tasks (+0.5 BLEU over softmax)
 
 **Implementation**:
+
 ```python
 # Using the entmax library
 from entmax import entmax15, sparsemax, entmax_bisect
@@ -147,11 +157,13 @@ output = attention_weights @ value
 **Library**: `pip install entmax` (github.com/deep-spin/entmax)
 
 **Advantages**:
+
 - Tunable sparsity via Î± parameter
 - Excellent empirical results on seq2seq tasks
 - Can make Î± learnable per head/layer
 
 **Disadvantages**:
+
 - Slower than top-k (10Ã— slower for arbitrary Î±)
 - Requires bisection for non-standard Î± values
 
@@ -162,17 +174,20 @@ output = attention_weights @ value
 **Concept**: Replace softmax with ReLU for automatic sparsity through negative value elimination.
 
 **Mathematical Formulation**:
+
 ```
 ReLA(Q, K, V) = (ReLU(Q @ K^T) @ V) / sum(ReLU(Q @ K^T), dim=-1)
 ```
 
 **Properties**:
+
 - Achieves 70-85% sparsity automatically
 - 2Ã— faster training than sparsemax
 - No hyperparameters needed
 - Works well with RMSNorm (not LayerNorm)
 
 **Implementation**:
+
 ```python
 import torch
 import torch.nn.functional as F
@@ -236,11 +251,13 @@ class RMSNorm(torch.nn.Module):
 ```
 
 **Advantages**:
+
 - Zero hyperparameters
 - Very fast (native GPU operations)
 - Automatic sparsity learning
 
 **Disadvantages**:
+
 - Sensitive to input normalization (requires RMSNorm)
 - Less control over exact sparsity level
 
@@ -252,16 +269,18 @@ class RMSNorm(torch.nn.Module):
 
 **Concept**: Select k highest-scoring attention positions before applying softmax, masking out the rest.
 
-**For 5% sparsity**: k = max(1, 0.05 Ã— seq_len)  
-**For 10% sparsity**: k = max(1, 0.10 Ã— seq_len)
+**For 5% sparsity**: k = max (1, 0.05 Ã— seq_len)  
+**For 10% sparsity**: k = max (1, 0.10 Ã— seq_len)
 
 **Properties**:
+
 - Simplest to implement
 - 2Ã— faster than sparsemax
 - 10Ã— faster than entmax-Î± during inference
 - No gradient issues
 
 **Implementation**:
+
 ```python
 import torch
 import torch.nn.functional as F
@@ -326,11 +345,13 @@ class TopKSparseAttention(torch.nn.Module):
 ```
 
 **Advantages**:
+
 - Extremely simple and fast
 - Exact control over sparsity level
 - Compatible with existing transformer code
 
 **Disadvantages**:
+
 - Fixed sparsity (not adaptive per query)
 - May lose important long-range dependencies
 
@@ -341,6 +362,7 @@ class TopKSparseAttention(torch.nn.Module):
 **Concept**: Learn different k values per head or layer based on task requirements.
 
 **Implementation**:
+
 ```python
 class AdaptiveTopKAttention(torch.nn.Module):
     def __init__(self, d_model, num_heads, k_min=0.05, k_max=0.20):
@@ -404,6 +426,7 @@ class AdaptiveTopKAttention(torch.nn.Module):
 ```
 
 **Advantages**:
+
 - Each head learns optimal sparsity
 - Better accuracy than fixed k
 - Still very fast
@@ -417,6 +440,7 @@ class AdaptiveTopKAttention(torch.nn.Module):
 **Concept**: Use Gumbel noise for stochastic selection with straight-through gradients for discrete sampling.
 
 **Mathematical Formulation**:
+
 ```
 # Forward (discrete):
 y_hard = one_hot(argmax((log Ï€ + g) / Ï„))
@@ -428,11 +452,13 @@ where g ~ Gumbel(0, 1)
 ```
 
 **Properties**:
+
 - Temperature Ï„: high (1.0) â†’ soft, low (0.1) â†’ hard
 - Produces exactly one active element (100% - 1/n sparsity)
 - Useful for discrete architecture search
 
 **Implementation**:
+
 ```python
 import torch
 import torch.nn.functional as F
@@ -524,11 +550,13 @@ for epoch in range(100):
 ```
 
 **Advantages**:
+
 - Differentiable discrete selection
 - Good for architecture search
 - Stochasticity helps exploration
 
 **Disadvantages**:
+
 - Requires temperature annealing
 - Only selects one position per query (extreme sparsity)
 - Higher variance gradients
@@ -540,6 +568,7 @@ for epoch in range(100):
 **Concept**: Learn binary attention masks with Gumbel-Softmax, allowing multiple active positions.
 
 **Implementation**:
+
 ```python
 class BernoulliGumbelAttention(torch.nn.Module):
     def __init__(self, d_model, num_heads, tau=1.0):
@@ -632,11 +661,13 @@ def compute_loss_with_sparsity(model_output, target, attention_mask, sparsity_we
 ```
 
 **Advantages**:
+
 - Learn which positions to attend
 - Multiple selections per query
 - Content-aware sparsity
 
 **Disadvantages**:
+
 - Requires careful sparsity regularization
 - Additional mask prediction overhead
 
@@ -646,19 +677,22 @@ def compute_loss_with_sparsity(model_output, target, attention_mask, sparsity_we
 
 ### BigBird Pattern (Google, 2020)
 
-**Concept**: Combines global tokens, local sliding window, and random sparse connections for O(n) complexity.
+**Concept**: Combines global tokens, local sliding window, and random sparse connections for O (n) complexity.
 
 **Pattern Components**:
+
 1. **Global tokens**: First g tokens attend to all, all attend to first g
 2. **Local window**: Each token attends to w neighbors
 3. **Random**: Each token attends to r random positions
 
 **Sparsity Calculation**:
+
 - Dense attention: nÂ² connections
 - BigBird: n Ã— (g + 2w + r) connections
 - For n=1024, g=32, w=64, r=32: ~13% density
 
 **Implementation**:
+
 ```python
 import torch
 
@@ -774,11 +808,13 @@ print(f"Sparsity: {sparsity:.2%}, Density: {density:.2%}")
 ```
 
 **Advantages**:
-- O(n) complexity
+
+- O (n) complexity
 - Predictable memory usage
 - Proven effective on long sequences
 
 **Disadvantages**:
+
 - Fixed pattern (not adaptive)
 - Requires careful hyperparameter tuning
 - Random connections not deterministic
@@ -792,6 +828,7 @@ print(f"Sparsity: {sparsity:.2%}, Density: {density:.2%}")
 **Concept**: Learn to select important keys based on content similarity, not just position.
 
 **Implementation**:
+
 ```python
 import torch
 import torch.nn.functional as F
@@ -858,11 +895,13 @@ class ContentBasedSparseAttention(torch.nn.Module):
 ```
 
 **Advantages**:
+
 - Content-aware selection
 - Significant memory savings (only store k keys/values)
 - Can handle variable-length inputs efficiently
 
 **Disadvantages**:
+
 - Additional importance network overhead
 - May miss important but low-scoring positions
 
@@ -872,9 +911,11 @@ class ContentBasedSparseAttention(torch.nn.Module):
 
 ### GECO Constrained Sparsity (2024)
 
-**Concept**: Post-train a model to maximize attention sparsity while maintaining original task performance via constrained optimization.
+**Concept**: Post-train a model to maximize attention sparsity while maintaining original task performance via
+constrained optimization.
 
 **Mathematical Formulation**:
+
 ```
 minimize: -Sparsity(attention)
 subject to: Loss(model) â‰¤ target_loss
@@ -884,6 +925,7 @@ L = task_loss + Î» * sparsity_regularization
 ```
 
 **Implementation**:
+
 ```python
 import torch
 import torch.nn.functional as F
@@ -1004,16 +1046,19 @@ class AttentionWithWeights(torch.nn.Module):
 ```
 
 **Results from Research**:
+
 - Achieves 0.3% connectivity (99.7% sparse) on 1B parameter models
 - Maintains original pretraining loss
 - Requires 2-5 epochs of fine-tuning
 
 **Advantages**:
+
 - Extreme sparsity achievable
 - Preserves model performance
 - Exposes interpretable circuit structure
 
 **Disadvantages**:
+
 - Requires pre-trained model
 - Additional training time
 - Complex optimization dynamics
@@ -1025,16 +1070,19 @@ class AttentionWithWeights(torch.nn.Module):
 ### Concept
 
 **Observation**: Attention weights naturally decompose into:
+
 - **Critical** (5-10%): Large weights, high-rank, dominate output
 - **Marginal** (15-30%): Medium weights, low-rank, contribute slightly
 - **Negligible** (60-80%): Near-zero weights, can be skipped
 
 **Strategy**: Apply different computation to each class:
-- Critical: Full sparse attention O(NÂ²)
-- Marginal: Linear attention O(N)
+
+- Critical: Full sparse attention O (NÂ²)
+- Marginal: Linear attention O (N)
 - Negligible: Skip entirely
 
 **Implementation**:
+
 ```python
 import torch
 import torch.nn.functional as F
@@ -1148,16 +1196,19 @@ class SparseLinearAttention(torch.nn.Module):
 ```
 
 **Performance** (from paper):
+
 - 95% sparsity with lossless quality
 - 2Ã— faster than 90% sparse-only attention
 - Linear attention costs <0.5% of full attention
 
 **Advantages**:
+
 - Best of both worlds: sparse precision + linear speed
 - Adaptive classification per input
 - Proven on large-scale video generation
 
 **Disadvantages**:
+
 - More complex implementation
 - Requires fine-tuning for threshold selection
 
@@ -1165,18 +1216,18 @@ class SparseLinearAttention(torch.nn.Module):
 
 ## Comparison Table
 
-| Method | Sparsity | Speed | Training | Accuracy | Hyperparams |
-|--------|----------|-------|----------|----------|-------------|
-| **Sparsemax** | 40-70% | 0.5Ã— | Stable | -0.1 BLEU | None |
-| **1.5-Entmax** | 60-80% | 0.1Ã— | Stable | +0.5 BLEU | Î±=1.5 |
-| **ReLA** | 70-85% | 0.5Ã— | Requires RMSNorm | â‰ˆBaseline | None |
-| **Top-k** | Exact (5-10%) | 2.0Ã— | Very stable | -0.2 BLEU | k_ratio |
-| **Adaptive Top-k** | Learned | 1.5Ã— | Stable | â‰ˆBaseline | k_min, k_max |
-| **Gumbel-Softmax** | 90-99% | 1.0Ã— | Unstable (annealing) | Variable | Ï„ schedule |
-| **BigBird** | ~87% | 1.5Ã— | Stable | â‰ˆBaseline | g, w, r |
-| **Content-Based** | 90-95% | 1.5Ã— | Stable | +0.1 BLEU | k_ratio |
-| **GECO Post-train** | 99.7% | N/A | Complex | Preserved | target_loss |
-| **SLA Hybrid** | 95% | 2.0Ã— | Requires FT | Lossless | k_crit, k_marg |
+| Method              | Sparsity      | Speed | Training             | Accuracy    | Hyperparams    |
+|---------------------|---------------|-------|----------------------|-------------|----------------|
+| **Sparsemax**       | 40-70%        | 0.5Ã— | Stable               | -0.1 BLEU   | None           |
+| **1.5-Entmax**      | 60-80%        | 0.1Ã— | Stable               | +0.5 BLEU   | Î±=1.5         |
+| **ReLA**            | 70-85%        | 0.5Ã— | Requires RMSNorm     | â‰ˆBaseline | None           |
+| **Top-k**           | Exact (5-10%) | 2.0Ã— | Very stable          | -0.2 BLEU   | k_ratio        |
+| **Adaptive Top-k**  | Learned       | 1.5Ã— | Stable               | â‰ˆBaseline | k_min, k_max   |
+| **Gumbel-Softmax**  | 90-99%        | 1.0Ã— | Unstable (annealing) | Variable    | Ï„ schedule    |
+| **BigBird**         | ~87%          | 1.5Ã— | Stable               | â‰ˆBaseline | g, w, r        |
+| **Content-Based**   | 90-95%        | 1.5Ã— | Stable               | +0.1 BLEU   | k_ratio        |
+| **GECO Post-train** | 99.7%         | N/A   | Complex              | Preserved   | target_loss    |
+| **SLA Hybrid**      | 95%           | 2.0Ã— | Requires FT          | Lossless    | k_crit, k_marg |
 
 ---
 
@@ -1185,39 +1236,49 @@ class SparseLinearAttention(torch.nn.Module):
 ### For 5-10% Target Sparsity
 
 #### 1. **Training from Scratch** â†’ Top-k Pre-Softmax
+
 ```python
 model = TopKSparseAttention(d_model=512, num_heads=8, k_ratio=0.05)
 ```
+
 **Why**: Simplest, fastest, most stable training.
 
 #### 2. **Best Accuracy** â†’ 1.5-Entmax
+
 ```python
 from entmax import entmax15
 attention_weights = entmax15(scores, dim=-1)
 ```
+
 **Why**: Well-tested, proven BLEU improvements, smooth gradients.
 
 #### 3. **Extreme Sparsity** â†’ Gumbel-Softmax
+
 ```python
 model = GumbelSoftmaxAttention(d_model=512, num_heads=8, tau=1.0, hard=True)
 scheduler = GumbelScheduler(tau_start=1.0, tau_end=0.1, num_epochs=100)
 ```
+
 **Why**: Can achieve near-100% sparsity with temperature annealing.
 
 #### 4. **Post-Training Sparsification** â†’ GECO Regularization
+
 ```python
 geco = GECOSparsityRegularizer(target_loss=pretrain_loss)
 # Fine-tune for 2-5 epochs
 ```
+
 **Why**: Convert existing models to sparse without full retraining.
 
 #### 5. **Production Inference** â†’ BigBird Fixed Patterns
+
 ```python
 model = BigBirdAttention(
     d_model=512, num_heads=8,
     num_global=32, window_size=64, num_random=32
 )
 ```
+
 **Why**: Predictable memory, no dynamic decisions, hardware-friendly.
 
 ---
@@ -1225,25 +1286,30 @@ model = BigBirdAttention(
 ## Hyperparameter Guidelines
 
 ### Top-k Sparsity
+
 - **k_ratio**: 0.05 (5%), 0.10 (10%)
 - **Adaptive range**: k_min=0.03, k_max=0.15
 
 ### Entmax
+
 - **Î±**: 1.2 (mild), 1.5 (recommended), 2.0 (sparsemax)
 - Can be learned per head/layer
 
 ### Gumbel-Softmax
-- **Ï„ schedule**: 
-  - Start: 1.0 (soft)
-  - End: 0.1 (hard)
-  - Annealing: exponential or linear over epochs
+
+- **Ï„ schedule**:
+    - Start: 1.0 (soft)
+    - End: 0.1 (hard)
+    - Annealing: exponential or linear over epochs
 
 ### BigBird
+
 - **num_global**: 16-64 (start with 32)
 - **window_size**: 32-128 (start with 64)
 - **num_random**: 16-64 (start with 32)
 
 ### GECO Sparsity
+
 - **target_loss**: Set to pre-trained model's loss
 - **lambda_init**: 1.0
 - **alpha (EMA)**: 0.99
@@ -1393,6 +1459,7 @@ for batch in data_loader:
 **Problem**: All attention scores masked out, leading to NaN after softmax.
 
 **Solution**:
+
 ```python
 # Always ensure at least one position is unmasked
 k = max(1, int(k_ratio * seq_len))
@@ -1407,6 +1474,7 @@ attention_weights = torch.nan_to_num(attention_weights, 0.0)
 **Problem**: Temperature too high or annealing too fast.
 
 **Solution**:
+
 ```python
 # Slower annealing schedule
 def slow_anneal(epoch, total_epochs):
@@ -1422,6 +1490,7 @@ if val_loss_plateau:
 **Problem**: Lagrange multiplier updates too aggressive.
 
 **Solution**:
+
 ```python
 # Smoother EMA
 self.alpha = 0.99  # Higher = smoother
@@ -1438,6 +1507,7 @@ self.tol = 0.05  # Instead of 0.01
 **Problem**: Non-optimized implementation or small k.
 
 **Solution**:
+
 ```python
 # Use FlashAttention with custom mask
 from flash_attn import flash_attn_func

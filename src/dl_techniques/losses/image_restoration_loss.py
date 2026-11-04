@@ -104,6 +104,11 @@ Notes
 
 import keras
 import tensorflow as tf
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------

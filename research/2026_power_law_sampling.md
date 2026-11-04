@@ -2,23 +2,35 @@
 
 ## Abstract
 
-Power sampling is an inference-time technique that reweights immediate choices by their estimated long-term consequences. Unlike greedy methods that optimize locally, power sampling uses Monte Carlo rollouts to approximate the quality of future trajectories, then adjusts current decision probabilities accordingly. This document provides a self-contained treatment of power sampling, its theoretical foundations, relationship to other sequential decision methods, and applications across diverse domains.
+Power sampling is an inference-time technique that reweights immediate choices by their estimated long-term
+consequences. Unlike greedy methods that optimize locally, power sampling uses Monte Carlo rollouts to approximate the
+quality of future trajectories, then adjusts current decision probabilities accordingly. This document provides a
+self-contained treatment of power sampling, its theoretical foundations, relationship to other sequential decision
+methods, and applications across diverse domains.
 
 ---
 
 ## 1. Introduction
 
-Sequential generation problems share a common structure: at each step, an agent selects from available choices, and these choices compound to form a complete output. Whether generating text, designing molecules, planning robot trajectories, or denoising images, the fundamental challenge remains the same—**locally attractive choices often lead to globally poor outcomes**.
+Sequential generation problems share a common structure: at each step, an agent selects from available choices, and
+these choices compound to form a complete output. Whether generating text, designing molecules, planning robot
+trajectories, or denoising images, the fundamental challenge remains the same— **locally attractive choices often lead
+to globally poor outcomes**.
 
-Consider a chess player evaluating moves. A move that captures a pawn might look optimal when considering only the immediate board state, yet could expose the queen three moves later. Expert players evaluate moves not by immediate gain but by the quality of positions they lead to. Power sampling formalizes this intuition for probabilistic generative systems.
+Consider a chess player evaluating moves. A move that captures a pawn might look optimal when considering only the
+immediate board state, yet could expose the queen three moves later. Expert players evaluate moves not by immediate gain
+but by the quality of positions they lead to. Power sampling formalizes this intuition for probabilistic generative
+systems.
 
 ### 1.1 The Local-Global Mismatch
 
 Most generative models are trained to predict the next element given context:
 
-$$P(x_t | x_{<t})$$
+$$P (x_t | x_{<t})$$
 
-This local objective does not guarantee globally coherent outputs. During inference, methods like greedy decoding or low-temperature sampling amplify this mismatch by selecting tokens that maximize immediate probability, potentially committing to trajectories that become incoherent or suboptimal downstream.
+This local objective does not guarantee globally coherent outputs. During inference, methods like greedy decoding or
+low-temperature sampling amplify this mismatch by selecting tokens that maximize immediate probability, potentially
+committing to trajectories that become incoherent or suboptimal downstream.
 
 ### 1.2 Document Scope
 
@@ -36,19 +48,20 @@ This document covers:
 
 ### 2.1 Markov Decision Processes
 
-A **Markov Decision Process (MDP)** provides the formal framework for sequential decision problems. An MDP is defined by the tuple $(S, A, T, R, \gamma)$:
+A **Markov Decision Process (MDP)** provides the formal framework for sequential decision problems. An MDP is defined by
+the tuple $(S, A, T, R, \gamma)$:
 
-| Symbol | Definition |
-|--------|------------|
-| $S$ | State space |
-| $A$ | Action space |
+| Symbol            | Definition             |
+|-------------------|------------------------|
+| $S$               | State space            |
+| $A$               | Action space           |
 | $T(s' \mid s, a)$ | Transition probability |
-| $R(s, a)$ | Reward function |
-| $\gamma$ | Discount factor |
+| $R(s, a)$         | Reward function        |
+| $\gamma$          | Discount factor        |
 
 The **Markov property** states that the future depends only on the current state, not the history:
 
-$$P(s_{t+1} | s_t, a_t, s_{t-1}, a_{t-1}, \ldots) = P(s_{t+1} | s_t, a_t)$$
+$$P (s_{t+1} | s_t, a_t, s_{t-1}, a_{t-1}, \ldots) = P (s_{t+1} | s_t, a_t)$$
 
 ### 2.2 Trajectory and Return
 
@@ -58,38 +71,41 @@ $$\tau = (s_0, a_0, s_1, a_1, \ldots, s_T)$$
 
 The **return** (cumulative reward) of a trajectory is:
 
-$$G(\tau) = \sum_{t=0}^{T} \gamma^t R(s_t, a_t)$$
+$$G (\tau) = \sum_{t=0}^{T} \gamma^t R (s_t, a_t)$$
 
 ### 2.3 Policy and Value Functions
 
-A **policy** $\pi(a|s)$ defines the probability of taking action $a$ in state $s$.
+A **policy** $\pi (a|s)$ defines the probability of taking action $a$ in state $s$.
 
 The **state-value function** estimates expected return from a state:
 
-$$V^\pi(s) = \mathbb{E}_{\tau \sim \pi}\left[G(\tau) | s_0 = s\right]$$
+$$V^\pi (s) = \mathbb{E}_{\tau \sim \pi}\left[G (\tau) | s_0 = s\right]$$
 
 The **action-value function** (Q-function) estimates expected return from a state-action pair:
 
-$$Q^\pi(s, a) = \mathbb{E}_{\tau \sim \pi}\left[G(\tau) | s_0 = s, a_0 = a\right]$$
+$$Q^\pi (s, a) = \mathbb{E}_{\tau \sim \pi}\left[G (\tau) | s_0 = s, a_0 = a\right]$$
 
 ### 2.4 The Bellman Equation
 
 Value functions satisfy a recursive relationship:
 
-$$V^\pi(s) = \sum_a \pi(a|s) \left[ R(s,a) + \gamma \sum_{s'} T(s'|s,a) V^\pi(s') \right]$$
+$$V^\pi (s) = \sum_a \pi (a|s) \left[ R (s,a) + \gamma \sum_{s'} T (s'|s,a) V^\pi (s') \right]$$
 
-This recursion—current value depends on immediate reward plus discounted future value—is central to understanding why lookahead improves decisions.
+This recursion—current value depends on immediate reward plus discounted future value—is central to understanding why
+lookahead improves decisions.
 
 ### 2.5 Monte Carlo Estimation
 
-When transition dynamics are unknown or state spaces are intractable, **Monte Carlo methods** estimate expectations through sampling:
+When transition dynamics are unknown or state spaces are intractable, **Monte Carlo methods** estimate expectations
+through sampling:
 
-$$\mathbb{E}[f(X)] \approx \frac{1}{N} \sum_{i=1}^{N} f(x_i), \quad x_i \sim P(X)$$
+$$\mathbb{E}[f (X)] \approx \frac{1}{N} \sum_{i=1}^{N} f (x_i), \quad x_i \sim P (X)$$
 
 Monte Carlo estimation is:
+
 - **Unbiased**: Expected value of estimate equals true expectation
 - **Consistent**: Converges to true value as $N \to \infty$
-- **Variance**: Decreases as $O(1/N)$
+- **Variance**: Decreases as $O (1/N)$
 
 ---
 
@@ -99,10 +115,11 @@ Monte Carlo estimation is:
 
 **Definition**: Select the highest-probability choice at each step.
 
-$$a_t = \arg\max_a P(a | s_t)$$
+$$a_t = \arg\max_a P (a | s_t)$$
 
 **Properties**:
-- Computationally cheap: $O(|A|)$ per step
+
+- Computationally cheap: $O (|A|)$ per step
 - Deterministic output
 - No lookahead—purely local optimization
 
@@ -124,11 +141,13 @@ return best(beam)
 ```
 
 **Properties**:
+
 - Explores multiple paths simultaneously
 - Hard pruning: discarded paths cannot be recovered
-- Complexity: $O(k \cdot |A|)$ per step
+- Complexity: $O (k \cdot |A|)$ per step
 
-**Limitation**: Beam search optimizes cumulative log-probability, which may not correlate with task quality. Pruning is irreversible—good trajectories with weak prefixes are lost.
+**Limitation**: Beam search optimizes cumulative log-probability, which may not correlate with task quality. Pruning is
+irreversible—good trajectories with weak prefixes are lost.
 
 ### 3.3 Viterbi Algorithm
 
@@ -136,16 +155,18 @@ return best(beam)
 
 For HMM with states $S$, observations $O$, transition matrix $A$, emission matrix $B$:
 
-$$\delta_t(j) = \max_{i} \left[ \delta_{t-1}(i) \cdot A_{ij} \right] \cdot B_j(o_t)$$
+$$\delta_t (j) = \max_{i} \left[ \delta_{t-1} (i) \cdot A_{ij} \right] \cdot B_j (o_t)$$
 
-where $\delta_t(j)$ is the probability of the most likely path ending in state $j$ at time $t$.
+where $\delta_t (j)$ is the probability of the most likely path ending in state $j$ at time $t$.
 
 **Properties**:
+
 - Exact solution for tractable state spaces
-- Complexity: $O(T \cdot |S|^2)$
+- Complexity: $O (T \cdot |S|^2)$
 - Requires enumerable state space and known transition probabilities
 
 **Why Viterbi fails for neural generative models**:
+
 1. State space (vocabulary × context) is astronomically large
 2. Transition probabilities are context-dependent (no fixed transition matrix)
 3. Finds single best path—no diversity
@@ -168,20 +189,22 @@ MCTS operates in four phases:
 ```
 
 **Properties**:
+
 - Balances exploration (UCB1 term) and exploitation (Q-value)
 - Builds explicit search tree
 - Anytime algorithm: improves with more iterations
 
 **Relationship to power sampling**:
 
-| Aspect | MCTS | Power Sampling |
-|--------|------|----------------|
-| Structure | Explicit tree | Implicit (no tree stored) |
-| Selection | Hard (UCB1 chooses one path) | Soft (reweighted distribution) |
-| Output | Best action from root | Sample from adjusted distribution |
-| Memory | $O(\text{tree size})$ | $O(1)$ beyond rollouts |
+| Aspect    | MCTS                         | Power Sampling                    |
+|-----------|------------------------------|-----------------------------------|
+| Structure | Explicit tree                | Implicit (no tree stored)         |
+| Selection | Hard (UCB1 chooses one path) | Soft (reweighted distribution)    |
+| Output    | Best action from root        | Sample from adjusted distribution |
+| Memory    | $O(\text{tree size})$        | $O(1)$ beyond rollouts            |
 
-Power sampling can be viewed as "soft MCTS" that maintains a probability distribution rather than building a discrete tree.
+Power sampling can be viewed as "soft MCTS" that maintains a probability distribution rather than building a discrete
+tree.
 
 ---
 
@@ -189,11 +212,12 @@ Power sampling can be viewed as "soft MCTS" that maintains a probability distrib
 
 ### 4.1 The Power Distribution
 
-Given a base distribution $P(x)$ and temperature parameter $\beta > 0$, the **power distribution** is:
+Given a base distribution $P (x)$ and temperature parameter $\beta > 0$, the **power distribution** is:
 
-$$P_\beta(x) = \frac{P(x)^\beta}{\sum_{x'} P(x')^\beta}$$
+$$P_\beta (x) = \frac{P (x)^\beta}{\sum_{x'} P (x')^\beta}$$
 
 Effect of $\beta$:
+
 - $\beta = 1$: Original distribution
 - $\beta > 1$: Sharper (concentrates on high-probability outcomes)
 - $\beta < 1$: Flatter (more uniform)
@@ -203,35 +227,36 @@ Effect of $\beta$:
 
 For a trajectory $\tau = (x_1, \ldots, x_T)$ with probability:
 
-$$P(\tau) = \prod_{t=1}^{T} P(x_t | x_{<t})$$
+$$P (\tau) = \prod_{t=1}^{T} P (x_t | x_{<t})$$
 
 The trajectory-level power distribution is:
 
-$$P_\beta(\tau) \propto P(\tau)^\beta$$
+$$P_\beta (\tau) \propto P (\tau)^\beta$$
 
-**Problem**: Sampling from $P_\beta(\tau)$ requires evaluating all possible trajectories—computationally intractable.
+**Problem**: Sampling from $P_\beta (\tau)$ requires evaluating all possible trajectories—computationally intractable.
 
 ### 4.3 The Decomposition Insight
 
-The key insight enabling practical power sampling is that trajectory-level reweighting can be decomposed into local corrections.
+The key insight enabling practical power sampling is that trajectory-level reweighting can be decomposed into local
+corrections.
 
 Define the **future value** of choosing token $x_t$ as:
 
-$$V(x_t) = \mathbb{E}_{\tau_{>t} \sim P}\left[ P(\tau)^{\beta-1} | x_t \right]$$
+$$V (x_t) = \mathbb{E}_{\tau_{>t} \sim P}\left[ P (\tau)^{\beta-1} | x_t \right]$$
 
 Then the power distribution can be expressed as:
 
-$$P_\beta(x_t | x_{<t}) \propto P(x_t | x_{<t}) \cdot V(x_t)$$
+$$P_\beta (x_t | x_{<t}) \propto P (x_t | x_{<t}) \cdot V (x_t)$$
 
 This factorization means: **reweight the base probability by estimated future trajectory quality**.
 
 ### 4.4 Monte Carlo Estimation of Future Value
 
-Since $V(x_t)$ involves an expectation over future trajectories, we estimate it via Monte Carlo:
+Since $V (x_t)$ involves an expectation over future trajectories, we estimate it via Monte Carlo:
 
-$$\hat{V}(x_t) = \frac{1}{N} \sum_{i=1}^{N} \text{score}(\tau^{(i)}), \quad \tau^{(i)} \sim P(\cdot | x_{\leq t})$$
+$$\hat{V} (x_t) = \frac{1}{N} \sum_{i=1}^{N} \text{score} (\tau^{ (i)}), \quad \tau^{ (i)} \sim P (\cdot | x_{\leq t})$$
 
-where $\tau^{(i)}$ is a rollout starting from context $x_{\leq t}$.
+where $\tau^{ (i)}$ is a rollout starting from context $x_{\leq t}$.
 
 ### 4.5 Bias Correction with Jackknife Estimator
 
@@ -239,8 +264,8 @@ Ratio estimators (which arise when normalizing scores) exhibit bias. The **jackk
 
 Given samples $\{y_1, \ldots, y_n\}$:
 
-1. Compute full estimate: $\hat{\theta} = g(y_1, \ldots, y_n)$
-2. Compute leave-one-out estimates: $\hat{\theta}_{-i} = g(y_1, \ldots, y_{i-1}, y_{i+1}, \ldots, y_n)$
+1. Compute full estimate: $\hat{\theta} = g (y_1, \ldots, y_n)$
+2. Compute leave-one-out estimates: $\hat{\theta}_{-i} = g (y_1, \ldots, y_{i-1}, y_{i+1}, \ldots, y_n)$
 3. Jackknife estimate: $\hat{\theta}_{\text{jack}} = n\hat{\theta} - (n-1)\bar{\theta}_{-i}$
 
 where $\bar{\theta}_{-i} = \frac{1}{n}\sum_i \hat{\theta}_{-i}$.
@@ -314,13 +339,13 @@ FUNCTION power_sample_sequence(model, prompt, max_length, config):
 The scoring function is task-dependent. Common approaches:
 
 **Perplexity-based (general)**:
-$$\text{score}(\tau) = \exp\left( \frac{1}{|\tau|} \sum_{t} \log P(x_t | x_{<t}) \right)$$
+$$\text{score} (\tau) = \exp\left (\frac{1}{|\tau|} \sum_{t} \log P (x_t | x_{<t}) \right)$$
 
 **Self-consistency (verifiable tasks)**:
-$$\text{score}(\tau) = \frac{\text{count}(\text{answer}(\tau))}{\text{total rollouts}}$$
+$$\text{score} (\tau) = \frac{\text{count} (\text{answer} (\tau))}{\text{total rollouts}}$$
 
 **Task-specific reward**:
-$$\text{score}(\tau) = R(\tau)$$
+$$\text{score} (\tau) = R (\tau)$$
 
 where $R$ is a domain-specific reward function (validity, quality, etc.).
 
@@ -337,21 +362,25 @@ where $R$ is a domain-specific reward function (validity, quality, etc.).
 **Rollouts**: Continue generation for $L$ additional tokens.
 
 **Scoring strategies**:
+
 - Perplexity (coherence proxy)
 - Answer consistency (for QA/math)
 - Format compliance (structured output)
 
 **Empirical findings** (from arXiv:2601.21590):
+
 - Matches or exceeds GRPO post-training on reasoning benchmarks
 - 10x+ faster than MCMC-based power sampling
 - Largest gains on multi-step reasoning tasks
 
 **When to use**:
+
 - Complex reasoning (math, logic, planning)
 - Code generation requiring structural coherence
 - Tasks where greedy decoding produces incomplete/rushed answers
 
 **When to avoid**:
+
 - Simple factual recall
 - Real-time latency requirements
 - Tasks where base model already excels
@@ -360,7 +389,7 @@ where $R$ is a domain-specific reward function (validity, quality, etc.).
 
 **Setting**: Iterative denoising for image/video generation.
 
-**Decision point**: Noise prediction $\epsilon_\theta(x_t, t)$ at each timestep.
+**Decision point**: Noise prediction $\epsilon_\theta (x_t, t)$ at each timestep.
 
 **Adaptation**: Rather than discrete token selection, perturb the denoising direction:
 
@@ -382,12 +411,14 @@ FOR each denoising step t:
 ```
 
 **Scoring functions**:
+
 - CLIP alignment with prompt
 - Aesthetic predictors
 - Structural coherence metrics
 - Human preference models
 
 **Challenge**: High-dimensional continuous space makes enumeration impractical. Solutions include:
+
 - Discrete perturbation directions
 - Learned candidate proposal networks
 - Gradient-based approximations
@@ -400,11 +431,11 @@ FOR each denoising step t:
 
 **Relationship to existing methods**:
 
-| Method | Lookahead | Selection |
-|--------|-----------|-----------|
-| Policy gradient | None (single-step) | Sample from $\pi(a|s)$ |
-| MCTS | Tree search | UCB1 + visit counts |
-| Power sampling | Monte Carlo rollouts | Soft reweighting |
+| Method          | Lookahead            | Selection           |
+|-----------------|----------------------|---------------------|
+| Policy gradient | None (single-step)   | Sample from $\pi(a  |s)$ |
+| MCTS            | Tree search          | UCB1 + visit counts |
+| Power sampling  | Monte Carlo rollouts | Soft reweighting    |
 
 **Implementation**:
 
@@ -428,11 +459,13 @@ FUNCTION power_sample_action(policy, environment, state, config):
 ```
 
 **Advantages over MCTS**:
+
 - No explicit tree storage
 - Softer exploration (probability vs hard selection)
 - Natural integration with neural policies
 
 **Use cases**:
+
 - Game playing with neural policies
 - Robotics planning
 - Resource allocation
@@ -443,9 +476,11 @@ FUNCTION power_sample_action(policy, environment, state, config):
 
 **Decision point**: Atom/bond addition at each step.
 
-**Critical importance**: Local validity does not guarantee global validity. A nitrogen atom might validly bond at position 5, but completing the molecule may violate valence rules or create unstable structures.
+**Critical importance**: Local validity does not guarantee global validity. A nitrogen atom might validly bond at
+position 5, but completing the molecule may violate valence rules or create unstable structures.
 
 **Scoring functions**:
+
 - Validity (syntactic correctness, chemical feasibility)
 - Drug-likeness (QED score)
 - Synthesizability (SA score)
@@ -490,12 +525,14 @@ FUNCTION generate_molecule(model, config):
 **Decision point**: Layer type, size, connectivity at each position.
 
 **Scoring**:
+
 - Proxy accuracy (few epochs of training)
 - Latency estimates
 - Parameter count
 - FLOPs
 
 **Challenge**: Rollout evaluation is expensive (requires training). Mitigations:
+
 - Weight sharing across candidates
 - Accuracy predictors trained on architecture-performance pairs
 - Early stopping in proxy evaluation
@@ -507,12 +544,14 @@ FUNCTION generate_molecule(model, config):
 **Decision point**: Amino acid selection (sequence) or torsion angle prediction (structure).
 
 **Scoring functions**:
+
 - Predicted structure confidence (pLDDT from AlphaFold)
 - Energy functions
 - Stability predictors
 - Function-specific metrics
 
-**High stakes**: Wet lab validation is expensive. Computational filtering via power sampling reduces wasted synthesis attempts.
+**High stakes**: Wet lab validation is expensive. Computational filtering via power sampling reduces wasted synthesis
+attempts.
 
 ### 6.7 Symbolic Reasoning / Theorem Proving
 
@@ -521,11 +560,13 @@ FUNCTION generate_molecule(model, config):
 **Decision point**: Which tactic to apply at each proof state.
 
 **Scoring functions**:
+
 - Proof completion (binary)
 - Proof length (shorter = better)
 - Subgoal complexity reduction
 
-**Synergy with language models**: LLMs can generate tactic candidates; power sampling selects among them based on provability of resulting subgoals.
+**Synergy with language models**: LLMs can generate tactic candidates; power sampling selects among them based on
+provability of resulting subgoals.
 
 ### 6.8 Time Series Forecasting
 
@@ -534,11 +575,13 @@ FUNCTION generate_molecule(model, config):
 **Decision point**: Each timestep's prediction (especially for discretized or categorical time series).
 
 **Scoring functions**:
+
 - Physical plausibility
 - Consistency with constraints
 - Forecast confidence calibration
 
-**Application**: Trajectory prediction for autonomous vehicles—local predictions must compose into physically feasible paths.
+**Application**: Trajectory prediction for autonomous vehicles—local predictions must compose into physically feasible
+paths.
 
 ---
 
@@ -548,7 +591,7 @@ FUNCTION generate_molecule(model, config):
 
 As the number of rollouts $N \to \infty$, the estimated future values converge to true expectations:
 
-$$\hat{V}(x_t) \xrightarrow{N \to \infty} V(x_t)$$
+$$\hat{V} (x_t) \xrightarrow{N \to \infty} V (x_t)$$
 
 The adjusted distribution converges to the true local marginalization of the trajectory-level power distribution.
 
@@ -556,7 +599,7 @@ The adjusted distribution converges to the true local marginalization of the tra
 
 Variance of the Monte Carlo estimate decreases as:
 
-$$\text{Var}(\hat{V}) = O(1/N)$$
+$$\text{Var} (\hat{V}) = O (1/N)$$
 
 Jackknife correction reduces bias without increasing variance order.
 
@@ -564,9 +607,10 @@ Jackknife correction reduces bias without increasing variance order.
 
 Per-step complexity:
 
-$$O(k \cdot N \cdot L \cdot C_{\text{model}})$$
+$$O (k \cdot N \cdot L \cdot C_{\text{model}})$$
 
 where:
+
 - $k$ = number of candidate tokens
 - $N$ = number of rollouts per candidate
 - $L$ = rollout length
@@ -574,7 +618,7 @@ where:
 
 **Total sequence generation**:
 
-$$O(T \cdot k \cdot N \cdot L \cdot C_{\text{model}})$$
+$$O (T \cdot k \cdot N \cdot L \cdot C_{\text{model}})$$
 
 ### 7.4 Approximation Quality
 
@@ -591,12 +635,12 @@ The quality of power sampling depends on:
 
 ### 8.1 Hyperparameter Selection
 
-| Parameter | Range | Guidance |
-|-----------|-------|----------|
-| `top_k` | 5-20 | Higher for diverse/creative tasks |
-| `num_rollouts` | 4-16 | More = better estimates, higher cost |
-| `rollout_length` | 16-64 | Task-dependent; longer for complex reasoning |
-| `temperature` | 0.6-1.0 | Base sampling temperature |
+| Parameter        | Range   | Guidance                                     |
+|------------------|---------|----------------------------------------------|
+| `top_k`          | 5-20    | Higher for diverse/creative tasks            |
+| `num_rollouts`   | 4-16    | More = better estimates, higher cost         |
+| `rollout_length` | 16-64   | Task-dependent; longer for complex reasoning |
+| `temperature`    | 0.6-1.0 | Base sampling temperature                    |
 
 **Configuration presets**:
 
@@ -614,6 +658,7 @@ Quality (offline/batch):
 ### 8.2 Parallelization
 
 Rollouts are embarrassingly parallel:
+
 - Batch all rollouts for all candidates
 - Single batched forward pass per rollout step
 - GPU utilization scales with batch size
@@ -643,11 +688,12 @@ For transformer models, cache key-value pairs:
 2. Fork cache for each candidate token
 3. Continue rollouts from forked caches
 
-Memory cost: $O(k \cdot N \cdot L \cdot d_{\text{model}})$
+Memory cost: $O (k \cdot N \cdot L \cdot d_{\text{model}})$
 
 ### 8.4 Early Termination
 
 Terminate rollouts early when:
+
 - Confidence in ranking is high (statistically significant differences)
 - Rollout reaches terminal state (EOS, invalid state)
 - Quality estimate stabilizes
@@ -669,6 +715,7 @@ FUNCTION adaptive_rollouts(candidate, min_rollouts, max_rollouts, threshold):
 ### 8.5 Caching Across Steps
 
 When generating sequences, subsequent steps share prefixes with prior rollouts. Opportunities:
+
 - Cache completed rollout trajectories
 - Reuse rollouts that match current context prefix
 - Amortize rollout cost across generation
@@ -677,14 +724,14 @@ When generating sequences, subsequent steps share prefixes with prior rollouts. 
 
 ## 9. Comparison Summary
 
-| Method | Lookahead | Selection | Memory | Parallelizable |
-|--------|-----------|-----------|--------|----------------|
-| Greedy | None | Deterministic (argmax) | O(1) | N/A |
-| Sampling | None | Stochastic | O(1) | N/A |
-| Beam Search | Implicit (score accumulation) | Hard pruning | O(k) | Limited |
-| Viterbi | Exact DP | Deterministic | O(S) | Limited |
-| MCTS | Explicit tree | UCB1 | O(tree) | Moderate |
-| **Power Sampling** | Monte Carlo rollouts | Soft reweighting | O(k·N·L) | High |
+| Method             | Lookahead                     | Selection              | Memory   | Parallelizable |
+|--------------------|-------------------------------|------------------------|----------|----------------|
+| Greedy             | None                          | Deterministic (argmax) | O(1)     | N/A            |
+| Sampling           | None                          | Stochastic             | O(1)     | N/A            |
+| Beam Search        | Implicit (score accumulation) | Hard pruning           | O(k)     | Limited        |
+| Viterbi            | Exact DP                      | Deterministic          | O(S)     | Limited        |
+| MCTS               | Explicit tree                 | UCB1                   | O(tree)  | Moderate       |
+| **Power Sampling** | Monte Carlo rollouts          | Soft reweighting       | O(k·N·L) | High           |
 
 ---
 
@@ -692,7 +739,7 @@ When generating sequences, subsequent steps share prefixes with prior rollouts. 
 
 ### 10.1 Current Limitations
 
-1. **Computational overhead**: Rollouts multiply inference cost by $O(k \cdot N \cdot L)$
+1. **Computational overhead**: Rollouts multiply inference cost by $O (k \cdot N \cdot L)$
 2. **Scorer dependence**: Quality limited by scorer's correlation with true objective
 3. **Base model ceiling**: Cannot create capabilities absent from base model
 4. **Latency**: Unsuitable for real-time applications without approximations
@@ -715,11 +762,16 @@ When generating sequences, subsequent steps share prefixes with prior rollouts. 
 
 ## 11. Conclusion
 
-Power sampling provides a principled framework for incorporating future trajectory quality into current decisions. By decomposing global trajectory optimization into local corrections estimated via Monte Carlo rollouts, it achieves the benefits of lookahead planning without the intractability of exact methods.
+Power sampling provides a principled framework for incorporating future trajectory quality into current decisions. By
+decomposing global trajectory optimization into local corrections estimated via Monte Carlo rollouts, it achieves the
+benefits of lookahead planning without the intractability of exact methods.
 
-The technique is broadly applicable: any sequential generation process where local choices impact global quality is a candidate for power sampling. As inference-time compute becomes increasingly important for model capability, methods like power sampling represent a key tool for extracting maximum performance from fixed model weights.
+The technique is broadly applicable: any sequential generation process where local choices impact global quality is a
+candidate for power sampling. As inference-time compute becomes increasingly important for model capability, methods
+like power sampling represent a key tool for extracting maximum performance from fixed model weights.
 
-The core insight—**evaluate choices by where they lead, not just how they look locally**—is fundamental to intelligent decision-making across domains.
+The core insight— **evaluate choices by where they lead, not just how they look locally**—is fundamental to intelligent
+decision-making across domains.
 
 ---
 
@@ -739,29 +791,29 @@ The core insight—**evaluate choices by where they lead, not just how they look
 
 For distribution $P$ and power $\beta$:
 
-$$Z_\beta = \sum_x P(x)^\beta$$
+$$Z_\beta = \sum_x P (x)^\beta$$
 
-$$P_\beta(x) = \frac{P(x)^\beta}{Z_\beta}$$
+$$P_\beta (x) = \frac{P (x)^\beta}{Z_\beta}$$
 
 ### A.2 Trajectory Factorization
 
 For trajectory $\tau = (x_1, \ldots, x_T)$:
 
-$$P(\tau) = \prod_{t=1}^T P(x_t | x_{<t})$$
+$$P (\tau) = \prod_{t=1}^T P (x_t | x_{<t})$$
 
-$$P(\tau)^\beta = \prod_{t=1}^T P(x_t | x_{<t})^\beta$$
+$$P (\tau)^\beta = \prod_{t=1}^T P (x_t | x_{<t})^\beta$$
 
 The marginal at position $t$:
 
-$$P_\beta(x_t | x_{<t}) = \frac{\sum_{\tau: \tau_t = x_t} P(\tau)^\beta}{\sum_{\tau} P(\tau)^\beta}$$
+$$P_\beta (x_t | x_{<t}) = \frac{\sum_{\tau: \tau_t = x_t} P (\tau)^\beta}{\sum_{\tau} P (\tau)^\beta}$$
 
 ### A.3 Local-Global Decomposition
 
 Define:
-$$V_t(x) = \mathbb{E}_{\tau_{>t}}\left[ P(\tau_{>t} | x_t = x)^{\beta - 1} \right]$$
+$$V_t (x) = \mathbb{E}_{\tau_{>t}}\left[ P (\tau_{>t} | x_t = x)^{\beta - 1} \right]$$
 
 Then:
-$$P_\beta(x_t | x_{<t}) = \frac{P(x_t | x_{<t}) \cdot V_t(x_t)}{\sum_{x'} P(x' | x_{<t}) \cdot V_t(x')}$$
+$$P_\beta (x_t | x_{<t}) = \frac{P (x_t | x_{<t}) \cdot V_t (x_t)}{\sum_{x'} P (x' | x_{<t}) \cdot V_t (x')}$$
 
 This shows the power distribution equals base probability times future value, normalized.
 

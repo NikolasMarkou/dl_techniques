@@ -18,8 +18,14 @@ Example::
 import keras
 from keras import ops
 from typing import Any, Dict
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.losses.utilization_loss")
 class MANNUtilizationLoss(keras.losses.Loss):
@@ -202,3 +208,5 @@ class GNNUtilizationLoss(keras.losses.Loss):
             "activation_weight": self.activation_weight,
         })
         return config
+
+# ---------------------------------------------------------------------

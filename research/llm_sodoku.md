@@ -2,7 +2,10 @@
 
 ## Overview
 
-This comprehensive guide presents a progressive methodology for training both Language Models (LLMs) and Vision-Language Models (VLMs) to perform genuine abstract reasoning. Beginning with foundational logical operations and building up to complex constraint satisfaction problems, we develop models that learn generalizable problem-solving skills across both symbolic and visual domains.
+This comprehensive guide presents a progressive methodology for training both Language Models (LLMs) and Vision-Language
+Models (VLMs) to perform genuine abstract reasoning. Beginning with foundational logical operations and building up to
+complex constraint satisfaction problems, we develop models that learn generalizable problem-solving skills across both
+symbolic and visual domains.
 
 ---
 
@@ -10,13 +13,14 @@ This comprehensive guide presents a progressive methodology for training both La
 
 ### Core Philosophy: Building Logical Primitives
 
-Before tackling complex constraint satisfaction, models must master fundamental logical operations. These primitives form the building blocks of all higher-order reasoning.
+Before tackling complex constraint satisfaction, models must master fundamental logical operations. These primitives
+form the building blocks of all higher-order reasoning.
 
 ### Operation 1: Boolean Logic (AND, OR, NOT)
 
 #### Conceptual Foundation
-**AND**: True only when all inputs are true
-**OR**: True when at least one input is true  
+
+**AND**: True only when all inputs are true **OR**: True when at least one input is true  
 **NOT**: Inverts the truth value
 
 #### Training Methodology
@@ -63,10 +67,8 @@ Result: Only Shape 3 satisfies both conditions
 
 #### Progressive Complexity Scaling
 
-**Level 1**: Single condition evaluation
-**Level 2**: Two conditions with basic AND/OR
-**Level 3**: Three conditions with nested operations
-**Level 4**: Complex nested boolean expressions
+**Level 1**: Single condition evaluation **Level 2**: Two conditions with basic AND/OR **Level 3**: Three conditions
+with nested operations **Level 4**: Complex nested boolean expressions
 
 ```
 LEVEL 4 EXAMPLE:
@@ -92,6 +94,7 @@ Solution chain:
 ### Operation 2: Extended Boolean Logic (XOR, NAND)
 
 #### Conceptual Foundation
+
 **XOR**: True when inputs differ (exclusive or)
 **NAND**: False only when all inputs are true (NOT AND)
 
@@ -124,11 +127,13 @@ Result: All conditions are true, so NAND is false
 ### Operation 3: Counting Operations
 
 #### Conceptual Foundation
+
 Quantitative reasoning about collections and frequencies.
 
 #### Training Framework
 
 **Basic Counting**:
+
 ```
 SIMPLE COUNT:
 Task: "Count objects matching condition"
@@ -141,6 +146,7 @@ Result: 3 red objects
 ```
 
 **Conditional Counting**:
+
 ```
 COMPLEX COUNT:
 Task: "Count objects satisfying multiple conditions"
@@ -157,6 +163,7 @@ Result: 2 objects satisfy the complex condition
 ```
 
 **Comparative Counting**:
+
 ```
 COMPARISON COUNT:
 Task: "Compare quantities across categories"
@@ -172,11 +179,13 @@ Result: Yes, more red than blue objects
 ### Operation 4: Set Operations and Uniqueness (UNIQUE)
 
 #### Conceptual Foundation
+
 Understanding collections, membership, and uniqueness constraints.
 
 #### Training Examples
 
 **Basic Set Operations**:
+
 ```
 SET MEMBERSHIP:
 Task: "Determine if element belongs to set"
@@ -201,6 +210,7 @@ Result: Intersection = {circle, square}
 ```
 
 **Uniqueness Constraints**:
+
 ```
 UNIQUENESS CHECK:
 Task: "Verify all elements in collection are unique"
@@ -334,24 +344,28 @@ FINAL VERIFICATION:
 ### Progressive Training Curriculum
 
 #### Stage 1: Single Operations (Weeks 1-4)
+
 - Master individual boolean operations (AND, OR, NOT)
 - Basic counting on simple collections
 - Simple set membership and uniqueness checks
 - Text-only examples with clear ground truth
 
 #### Stage 2: Combined Operations (Weeks 5-8)
+
 - Nested boolean expressions
 - Conditional counting with logical filters
 - Set operations (union, intersection, difference)
 - Introduction of visual examples
 
 #### Stage 3: Multi-Modal Integration (Weeks 9-12)
+
 - Visual boolean logic on image collections
 - Spatial counting with geometric constraints
 - Cross-modal verification (text description → visual validation)
 - Complex logical expressions across modalities
 
 #### Stage 4: Dynamic and Adaptive Logic (Weeks 13-16)
+
 - Context-dependent logical operations
 - Temporal logic (operations over sequences)
 - Meta-logical reasoning (reasoning about reasoning)
@@ -364,14 +378,17 @@ FINAL VERIFICATION:
 ### Text-Based Reasoning (LLMs)
 
 #### 1. Constraint Satisfaction Reasoning
+
 **Building on Foundations**: Combines boolean logic, counting, and set operations
 
 **Enhanced Understanding**:
+
 - **Rule Comprehension**: Uses AND/OR logic to understand compound constraints
 - **State Management**: Employs set operations to track valid/invalid placements
 - **Constraint Propagation**: Applies logical deduction chains using foundational operations
 
 **Example Integration**:
+
 ```
 SUDOKU CONSTRAINT CHECK:
 Cell (2,3) candidate evaluation for number 7:
@@ -392,17 +409,21 @@ All counts = 0, confirming uniqueness constraint satisfied
 ```
 
 #### 2. Symbolic and Logical Reasoning
+
 **Building on Foundations**: Extends boolean logic to symbol manipulation
 
 **Enhanced Capabilities**:
+
 - **Complex Deduction**: Multi-step logical chains using AND/OR/NOT combinations
 - **Symbol Set Operations**: Applying UNIQUE and set membership to symbol placement
 - **Conditional Logic**: Using XOR for mutually exclusive conditions
 
 #### 3. Algorithmic and Procedural Reasoning
+
 **Building on Foundations**: Systematizes counting and logic operations
 
 **Algorithm Integration**:
+
 ```
 NAKED SINGLE ALGORITHM:
 For each empty cell:
@@ -424,9 +445,11 @@ This algorithm combines:
 ### Visual-Spatial Reasoning (VLMs)
 
 #### 5. Visual-Spatial Constraint Reasoning
+
 **Building on Foundations**: Applies logical operations to spatial relationships
 
 **Spatial Boolean Logic**:
+
 ```
 ADJACENCY CONSTRAINT CHECK:
 For patch placement at position (x,y):
@@ -448,6 +471,7 @@ Evaluation: A=TRUE, B=TRUE → TRUE AND TRUE → TRUE ✓
 ```
 
 **Visual Counting with Constraints**:
+
 ```
 PATTERN COUNTING:
 Task: "Count visual elements satisfying spatial and color constraints"
@@ -472,12 +496,14 @@ Final count represents elements satisfying all constraints
 **Enhanced Parameterization** building on logical primitives:
 
 **Logical Constraint Variations**:
+
 - **Boolean Compound Rules**: (row unique) AND (column unique) AND (box unique)
 - **Conditional Rules**: IF cell in region A, THEN additional constraint X applies
 - **Counting Rules**: Each symbol must appear EXACTLY N times in specified regions
 - **Set Rules**: Symbol placement must maintain uniqueness across defined sets
 
 **Example Enhanced Training**:
+
 ```
 LOGICAL SUDOKU VARIANT:
 Grid: 4×4, Symbols: {A, B, C, D}
@@ -522,6 +548,7 @@ Result: 'A' is valid for position (1,1)
 **Enhanced Format Examples**:
 
 **Logic-Explicit Format**:
+
 ```
 CONSTRAINT_SET {
   boolean_rules: [
@@ -548,6 +575,7 @@ SOLVE_REQUEST: "Apply constraint set to find valid completion"
 ### Step 3: Enhanced Chain-of-Thought with Logic Foundations
 
 **Comprehensive CoT Template**:
+
 ```
 LOGICAL REASONING CHAIN:
 
@@ -586,6 +614,7 @@ SOLUTION VERIFICATION:
 #### Visual Boolean Operations
 
 **Complex Visual Logic Puzzles**:
+
 ```
 MULTI-CONDITION VISUAL PUZZLE:
 Input: [Grid of colored geometric shapes]
@@ -621,6 +650,7 @@ VISUAL REASONING CHAIN:
 #### Visual Counting with Logical Constraints
 
 **Spatial Counting Algorithms**:
+
 ```
 CONDITIONAL SPATIAL COUNT:
 Task: "Count objects in overlapping regions with logical conditions"
@@ -650,6 +680,7 @@ ALGORITHM:
 ### Enhanced Multi-Modal Sudoku
 
 **Logic-Integrated Visual Sudoku**:
+
 ```
 VISUAL-LOGICAL SUDOKU:
 Grid: 4×4 with abstract visual symbols
@@ -717,21 +748,25 @@ SOLUTION SYNTHESIS:
 **Foundational Logic Complexity Levels**:
 
 **Level 1: Single Primitive Operations**
+
 - Individual boolean operations (A AND B)
 - Simple counting (COUNT objects with property P)
 - Basic set membership (X in SET_S)
 
 **Level 2: Combined Primitive Operations**
+
 - Nested boolean logic ((A OR B) AND (C OR D))
 - Conditional counting (COUNT objects WHERE condition)
 - Set operations (SET_A ∩ SET_B)
 
 **Level 3: Multi-Modal Primitive Integration**
+
 - Cross-modal boolean logic (visual_condition AND text_condition)
 - Spatial counting with logical filters
 - Visual set operations with symbolic verification
 
 **Level 4: Complex Logic Networks**
+
 - Multi-layer constraint networks with foundational operations
 - Dynamic logical rule modification based on context
 - Meta-logical reasoning about logical operation selection
@@ -743,6 +778,7 @@ SOLUTION SYNTHESIS:
 ### Logic Foundation Assessment
 
 **Boolean Logic Evaluation**:
+
 ```
 TEST CATEGORY: Complex Boolean Expressions
 Example: "Evaluate ((A XOR B) AND (C OR NOT D)) NAND (E AND F)"
@@ -760,6 +796,7 @@ GENERALIZATION TESTS:
 ```
 
 **Counting Logic Evaluation**:
+
 ```
 TEST CATEGORY: Complex Conditional Counting
 Example: "Count objects satisfying ((red OR blue) AND circular) XOR (large AND metallic)"
@@ -777,6 +814,7 @@ GENERALIZATION TESTS:
 ```
 
 **Set Operation Evaluation**:
+
 ```
 TEST CATEGORY: Complex Set Manipulations
 Example: "Find (SET_A ∪ SET_B) ∩ (SET_C - SET_D) where sets defined by visual properties"
@@ -798,6 +836,7 @@ GENERALIZATION TESTS:
 **Foundation-Integrated Puzzle Evaluation**:
 
 **Test 1: Logic-Rich Sudoku Variants**
+
 ```
 Train: 4×4 boolean constraint Sudoku
 Test: 6×6 with compound logical rules: 
@@ -811,6 +850,7 @@ Assessment:
 ```
 
 **Test 2: Multi-Layer Visual Logic Puzzles**
+
 ```
 Train: Simple spatial boolean operations
 Test: Complex visual arrangement with logic:
@@ -826,17 +866,21 @@ Assessment:
 ### Success Metrics for Foundation Operations
 
 **Quantitative Measures**:
+
 - **Boolean Accuracy**: Truth table correctness across all operations
 - **Counting Precision**: Exact enumeration under complex conditions
-- **Set Operation Validity**: Correct membership and uniqueness handling  
+- **Set Operation Validity**: Correct membership and uniqueness handling
 - **Logic Chain Coherence**: Valid step-by-step reasoning progression
 - **Cross-Modal Consistency**: Agreement between visual and symbolic logic
 
 **Qualitative Assessment**:
+
 - **Primitive Operation Fluency**: Seamless use of foundational operations
 - **Logic Composition Ability**: Combining primitives into complex expressions
 - **Error Detection and Correction**: Identifying logical inconsistencies
 - **Systematic Reasoning**: Consistent methodological approach
 - **Transfer Learning**: Applying logic foundations to novel domains
 
-This enhanced methodology provides a solid foundation in logical reasoning primitives before advancing to complex constraint satisfaction problems. Models trained on this curriculum develop robust logical reasoning capabilities that transfer effectively to diverse problem domains across both text and visual modalities.
+This enhanced methodology provides a solid foundation in logical reasoning primitives before advancing to complex
+constraint satisfaction problems. Models trained on this curriculum develop robust logical reasoning capabilities that
+transfer effectively to diverse problem domains across both text and visual modalities.

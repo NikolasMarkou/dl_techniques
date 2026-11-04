@@ -14,18 +14,18 @@ Built as `src/dl_techniques/optimization/ssp/` (+ `src/dl_techniques/metrics/pas
 
 Decouple SFT and RL into two phases with *different* objectives:
 
-| Phase | Stage | Objective | Metric |
-|---|---|---|---|
-| **Spectrum** | SFT | maximise `Pass@K` — build a broad candidate space | coverage, not accuracy |
-| **Signal** | RL | maximise probability of the correct paths *within* that space | reward on an existing spectrum |
+| Phase        | Stage | Objective                                                     | Metric                         |
+|--------------|-------|---------------------------------------------------------------|--------------------------------|
+| **Spectrum** | SFT   | maximise `Pass@K` — build a broad candidate space             | coverage, not accuracy         |
+| **Signal**   | RL    | maximise probability of the correct paths *within* that space | reward on an existing spectrum |
 
 The paper's argument is that the prevailing implicit convention — pick the SFT
 checkpoint with the best `Pass@1`, then RL the same metric — artificially caps what RL
 can achieve, because it narrows the candidate space before the amplification stage has
 anything to amplify.
 
-Reported outcome: a 1.5B dense model (Qwen2.5-Math-1.5B base) beating DeepSeek-R1-0120
-(671B) on AIME24 (80.3 vs 79.8), AIME25 (74.4 vs 70.0) and HMMT25 (50.4 vs 41.7), for
+Reported outcome: a 1.5B dense model (Qwen2.5-Math-1.5B base) beating DeepSeek-R1-0120 (671B) on AIME24 (80.3 vs 79.8),
+AIME25 (74.4 vs 70.0) and HMMT25 (50.4 vs 41.7), for
 ~$7,800 in post-training (3.9K H800-hours).
 
 ## 2. What the paper specifies, in full
@@ -124,11 +124,11 @@ D_ME(p ‖ 0.5) = log 2 − H(p)        w_ME(p) = 2^(−λ) · e^(λ·H(p))
 `w_ME` is therefore **strictly monotone increasing in binary entropy**, with three exact
 properties the test suite pins:
 
-| | |
-|---|---|
-| `w_ME(0.5)` | `= 1.0` — maximum weight at maximum uncertainty |
-| `w_ME(0) = w_ME(1)` | `= 2^(−λ)` — exponentially separated floor |
-| `λ = 0` | `≡ 1` — weighting vanishes, plain GRPO recovered bit-for-bit |
+|                     |                                                              |
+|---------------------|--------------------------------------------------------------|
+| `w_ME(0.5)`         | `= 1.0` — maximum weight at maximum uncertainty              |
+| `w_ME(0) = w_ME(1)` | `= 2^(−λ)` — exponentially separated floor                   |
+| `λ = 0`             | `≡ 1` — weighting vanishes, plain GRPO recovered bit-for-bit |
 
 This is not a transcription detail — it is what makes the weight cheap (two transcendentals
 and an `exp`), monotone by inspection, and diagnosable. Nothing in the paper derives it.
@@ -179,11 +179,11 @@ together to float32 precision on identical inputs.
 
 The contrast with the two naive modes is the argument for the criterion:
 
-| `mode` | peaks at | effect |
-|---|---|---|
-| `proportional` | coverage 1.0 | up-weights what the model already solves best |
-| `inverse` | coverage 0.0 | points at the unreachable, where reward is noise |
-| `max_entropy` | coverage 0.5 | the ambiguous middle |
+| `mode`         | peaks at     | effect                                           |
+|----------------|--------------|--------------------------------------------------|
+| `proportional` | coverage 1.0 | up-weights what the model already solves best    |
+| `inverse`      | coverage 0.0 | points at the unreachable, where reward is noise |
+| `max_entropy`  | coverage 0.5 | the ambiguous middle                             |
 
 ### 4.3 Fusion: two better-known siblings
 
@@ -215,8 +215,8 @@ for every group, for every `λ`, including `λ = 0`. Consequences:
 
 * a logged MGPO loss pinned at `0.000` is **not broken**;
 * `normalize_weights` cannot change the batch mean, only the scale;
-* the reweighting is invisible in any batch-mean scalar and shows up only in the
-  **gradient** — in how strongly each group pulls relative to the others.
+* the reweighting is invisible in any batch-mean scalar and shows up only in the **gradient** — in how strongly each
+  group pulls relative to the others.
 
 So log the per-response vector (`loss.call(...)`, which returns `(B,)`) or the weights.
 `MGPOObjective.__call__` reduces to a scalar; `call` does not.
@@ -260,8 +260,8 @@ Consequences for the design:
   pipeline concern;
 * Pass@K evaluation against real benchmarks.
 
-**Not validated:** every function here is arithmetic whose behaviour is pinned by tests
-(300 in `test_ssp/`, 63 in `test_pass_at_k.py`). Whether the principle *improves a
+**Not validated:** every function here is arithmetic whose behaviour is pinned by tests (300 in `test_ssp/`, 63 in
+`test_pass_at_k.py`). Whether the principle *improves a
 downstream metric* is the paper's empirical claim, and **it has not been reproduced
 here**. No benchmark, A/B run, or performance number is claimed anywhere in this
 package. `enable=False` exists precisely so that claim can be measured against itself
@@ -269,17 +269,17 @@ when someone runs it.
 
 ## 7. Files
 
-| Path | Contents |
-|---|---|
-| `src/dl_techniques/metrics/pass_at_k.py` | `pass_at_k`, `pass_at_k_curve`, `per_problem_pass_at_k`, `solved_counts` |
-| `src/dl_techniques/optimization/ssp/spectrum.py` | `spectrum_profile`, `select_specialists`, `spectrum_sampling_weights` |
-| `src/dl_techniques/optimization/ssp/fusion.py` | `fuse_specialists`, `fusion_weights_from_scores`, `uniform_weights`, `score_softmax_weights`, `greedy_soup` |
-| `src/dl_techniques/optimization/ssp/signal.py` | entropy, `max_entropy_deviation`, `max_entropy_weight`, advantages, `mgpo_surrogate`, `MGPOObjective` |
-| `src/dl_techniques/optimization/ssp/config.py` | `SSPStrategyConfig`, `SSPStrategy`, `ssp_builder` |
-| `src/dl_techniques/optimization/ssp/README.md` | principle, closed forms, gotchas |
-| `src/dl_techniques/optimization/ssp/AGENTS.md` | module map, structural properties, authoring rules |
-| `tests/test_optimization/test_ssp/` | 300 tests, with RED proofs per file |
-| `tests/test_metrics/test_pass_at_k.py` | 63 tests |
+| Path                                             | Contents                                                                                                    |
+|--------------------------------------------------|-------------------------------------------------------------------------------------------------------------|
+| `src/dl_techniques/metrics/pass_at_k.py`         | `pass_at_k`, `pass_at_k_curve`, `per_problem_pass_at_k`, `solved_counts`                                    |
+| `src/dl_techniques/optimization/ssp/spectrum.py` | `spectrum_profile`, `select_specialists`, `spectrum_sampling_weights`                                       |
+| `src/dl_techniques/optimization/ssp/fusion.py`   | `fuse_specialists`, `fusion_weights_from_scores`, `uniform_weights`, `score_softmax_weights`, `greedy_soup` |
+| `src/dl_techniques/optimization/ssp/signal.py`   | entropy, `max_entropy_deviation`, `max_entropy_weight`, advantages, `mgpo_surrogate`, `MGPOObjective`       |
+| `src/dl_techniques/optimization/ssp/config.py`   | `SSPStrategyConfig`, `SSPStrategy`, `ssp_builder`                                                           |
+| `src/dl_techniques/optimization/ssp/README.md`   | principle, closed forms, gotchas                                                                            |
+| `src/dl_techniques/optimization/ssp/AGENTS.md`   | module map, structural properties, authoring rules                                                          |
+| `tests/test_optimization/test_ssp/`              | 300 tests, with RED proofs per file                                                                         |
+| `tests/test_metrics/test_pass_at_k.py`           | 63 tests                                                                                                    |
 
 ## References
 

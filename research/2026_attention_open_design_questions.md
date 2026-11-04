@@ -19,25 +19,37 @@
 2. [How to read this brief](#2-how-to-read-this-brief)
 3. [Question index](#3-question-index)
 4. [Group A — Mask support that does not exist](#group-a--mask-support-that-does-not-exist)
-   - [Q1 — `mobile_mqa` accepts `attention_mask` and ignores it](#q1--mobile_mqa-accepts-attention_mask-and-ignores-it)
-   - [Q2 — `shared_weights_cross_attention` accepts `attention_mask` and never reads it](#q2--shared_weights_cross_attention-accepts-attention_mask-and-never-reads-it)
-   - [Q3 — `anchor_attention` has no mask, so left-padding poisons the anchor set](#q3--anchor_attention-has-no-mask-so-left-padding-poisons-the-anchor-set)
-   - [Q4 — `TransformerLayer` silently DROPS a caller's mask for three attention types (NEW)](#q4--transformerlayer-silently-drops-a-callers-mask-for-three-attention-types-new)
+    - [Q1 — `mobile_mqa` accepts `attention_mask` and ignores it](#q1--mobile_mqa-accepts-attention_mask-and-ignores-it)
+    - [Q2 — `shared_weights_cross_attention` accepts
+      `attention_mask` and never reads it](#q2--shared_weights_cross_attention-accepts-attention_mask-and-never-reads-it)
+    - [Q3 —
+      `anchor_attention` has no mask, so left-padding poisons the anchor set](#q3--anchor_attention-has-no-mask-so-left-padding-poisons-the-anchor-set)
+    - [Q4 —
+      `TransformerLayer` silently DROPS a caller's mask for three attention types (NEW)](#q4--transformerlayer-silently-drops-a-callers-mask-for-three-attention-types-new)
 5. [Group B — Numerical conditioning and backend limits](#group-b--numerical-conditioning-and-backend-limits)
-   - [Q5 — `rpc_attention` cannot run under `mixed_float16` at all](#q5--rpc_attention-cannot-run-under-mixed_float16-at-all)
-   - [Q6 — `MASK_BIAS_VALUE = -1e9` costs `rpc_attention` ~6% accuracy](#q6--mask_bias_value---1e9-costs-rpc_attention-6-accuracy)
-   - [Q7 — `performer_attention` mis-scales odd `nb_features`](#q7--performer_attention-mis-scales-odd-nb_features)
-   - [Q8 — `wave_field_attention.scale` uses the inverse of the package convention](#q8--wave_field_attentionscale-uses-the-inverse-of-the-package-convention)
+    - [Q5 — `rpc_attention` cannot run under
+      `mixed_float16` at all](#q5--rpc_attention-cannot-run-under-mixed_float16-at-all)
+    - [Q6 — `MASK_BIAS_VALUE = -1e9` costs
+      `rpc_attention` ~6% accuracy](#q6--mask_bias_value---1e9-costs-rpc_attention-6-accuracy)
+    - [Q7 — `performer_attention` mis-scales odd `nb_features`](#q7--performer_attention-mis-scales-odd-nb_features)
+    - [Q8 —
+      `wave_field_attention.scale` uses the inverse of the package convention](#q8--wave_field_attentionscale-uses-the-inverse-of-the-package-convention)
 6. [Group C — Design ambiguities inherited from the source papers](#group-c--design-ambiguities-inherited-from-the-source-papers)
-   - [Q9 — TripSE branch combination: sum vs average (2-vs-2, not 1-vs-2)](#q9--tripse-branch-combination-sum-vs-average-2-vs-2-not-1-vs-2)
-   - [Q10 — `hopfield_attention` feeds back `A K` but returns `A V`](#q10--hopfield_attention-feeds-back-a-k-but-returns-a-v)
-   - [Q11 — `rpc_attention` `return_attention_scores=True` returns weights that did not produce the output](#q11--rpc_attention-return_attention_scorestrue-returns-weights-that-did-not-produce-the-output)
+    - [Q9 — TripSE branch combination: sum vs average (2-vs-2, not 1-vs-2)](#q9--tripse-branch-combination-sum-vs-average-2-vs-2-not-1-vs-2)
+    - [Q10 — `hopfield_attention` feeds back `A K` but returns
+      `A V`](#q10--hopfield_attention-feeds-back-a-k-but-returns-a-v)
+    - [Q11 — `rpc_attention`
+      `return_attention_scores=True` returns weights that did not produce the output](#q11--rpc_attention-return_attention_scorestrue-returns-weights-that-did-not-produce-the-output)
 7. [Group D — Framework-level questions](#group-d--framework-level-questions)
-   - [Q12 — Should explicit `training=` forwarding be a package-wide rule?](#q12--should-explicit-training-forwarding-be-a-package-wide-rule)
-   - [Q13 — `perceiver_attention.build` forwards a container its sibling rejects](#q13--perceiver_attentionbuild-forwards-a-container-its-sibling-rejects)
+    - [Q12 — Should explicit
+      `training=` forwarding be a package-wide rule?](#q12--should-explicit-training-forwarding-be-a-package-wide-rule)
+    - [Q13 —
+      `perceiver_attention.build` forwards a container its sibling rejects](#q13--perceiver_attentionbuild-forwards-a-container-its-sibling-rejects)
 8. [Group E — Deferred by tier, recorded here so they are not lost](#group-e--deferred-by-tier-recorded-here-so-they-are-not-lost)
-   - [Q14 — Dead constructor parameters that are also `get_config()` keys](#q14--dead-constructor-parameters-that-are-also-get_config-keys)
-   - [Q15 — `LighthouseAttention` is the package's known-red pair](#q15--lighthouseattention-is-the-packages-known-red-pair)
+    - [Q14 — Dead constructor parameters that are also
+      `get_config()` keys](#q14--dead-constructor-parameters-that-are-also-get_config-keys)
+    - [Q15 —
+      `LighthouseAttention` is the package's known-red pair](#q15--lighthouseattention-is-the-packages-known-red-pair)
 9. [Corrections to prior findings](#9-corrections-to-prior-findings)
 10. [Worked example — a measurement that read as a defect and was not](#10-worked-example--a-measurement-that-read-as-a-defect-and-was-not)
 
@@ -49,8 +61,8 @@ A future reader needs the baseline, because several questions below only make se
 against it. `plan-2026-07-27T183600-b4ef45f0` did three things.
 
 **Tier 1 — the `mixed_float16` mask-NaN family (10 modules, fixed).** Every masked
-attention layer in the package applied its mask bias arithmetically
-(`logits + (1 - keep) * -1e9`) in the compute dtype. Under `mixed_float16` the constant
+attention layer in the package applied its mask bias arithmetically (`logits + (1 - keep) * -1e9`) in the compute dtype.
+Under `mixed_float16` the constant
 becomes `-inf`, and at every *unmasked* position `0 * -inf = NaN` — so an all-ones mask
 that masks nothing NaN'd the entire batch. One shared helper now exists:
 
@@ -59,23 +71,23 @@ that masks nothing NaN'd the entire batch. One shared helper now exists:
 apply_attention_mask(logits, keep, *, out_dtype=None, rescue_axis=-1)
 ```
 
-It builds the bias with `ops.where` inside `mask_dtype(...)` (`>= float32`), takes the
-**keep predicate** from the caller so polarity is never inferred, and by default rescues
+It builds the bias with `ops.where` inside `mask_dtype(...)` (`>= float32`), takes the **keep predicate** from the
+caller so polarity is never inferred, and by default rescues
 a fully-masked softmax slice ("keeps nothing" is treated as "keeps everything") so a
 degenerate row is finite garbage rather than `NaN`. Adopted at `rpc`, `capsule_routing`,
 `gated`, `group_query`, `multi_head_cross`, `hopfield`, `single_window`,
 `multi_head_latent`, `differential` and `ring`.
 
-**Tier 2 — six non-mask defects (fixed).** `ring_attention` rank-2 mask
-(`UnboundLocalError`), `perceiver_attention.compute_output_shape` returning `None`,
+**Tier 2 — six non-mask defects (fixed).** `ring_attention` rank-2 mask (`UnboundLocalError`),
+`perceiver_attention.compute_output_shape` returning `None`,
 `SpatialAttention.build` missing its rank check, `attention_routing_capsule`
 initializer/regularizer plumbing, `capsule_routing_attention`'s misplaced static-`seq_len`
 guard, and `tripse_attention`'s missing `training=` forwarding.
 
 **In-flight (fixed).** Two dtype defects surfaced during testing:
 `differential_attention.get_lambda()` (could not run under `mixed_float16` *or*
-`float64`, mask or no mask) and `RotaryPositionEmbedding`'s float32-pinned cos/sin cache
-(took `gated`, `group_query` and `multi_head_latent` down under `float64`).
+`float64`, mask or no mask) and `RotaryPositionEmbedding`'s float32-pinned cos/sin cache (took `gated`, `group_query`
+and `multi_head_latent` down under `float64`).
 
 **What it deliberately did NOT do.** Tier 3 (dead `get_config()` parameters — the user
 excluded it; see [Q14](#q14--dead-constructor-parameters-that-are-also-get_config-keys)),
@@ -89,14 +101,14 @@ Tier 4 (this document — a written deliverable only, zero source edits), and th
 
 Each question carries six fields, in a fixed order:
 
-| Field | What it means |
-|---|---|
-| **Today** | The current behavior, with a `file.py:line` verified at HEAD. |
-| **Why it matters** | A concrete input → wrong output/crash. Not an abstraction. |
-| **Options** | At least two, each written as *"X **at the cost of** Y"*. |
-| **Blast radius** | Actual consumers, derived by grepping `src/` and `tests/` for the class name **and** for the `factory.py` registry string, because two consumers in this package are reached only through a factory string. |
-| **Pinned by a test?** | The test id, or "no". Most of these are *unguarded* — an in-source comment is a comment, not a guard. |
-| **Recommendation** | One option, plus what would change the author's mind. |
+| Field                 | What it means                                                                                                                                                                                               |
+|-----------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Today**             | The current behavior, with a `file.py:line` verified at HEAD.                                                                                                                                               |
+| **Why it matters**    | A concrete input → wrong output/crash. Not an abstraction.                                                                                                                                                  |
+| **Options**           | At least two, each written as *"X **at the cost of** Y"*.                                                                                                                                                   |
+| **Blast radius**      | Actual consumers, derived by grepping `src/` and `tests/` for the class name **and** for the `factory.py` registry string, because two consumers in this package are reached only through a factory string. |
+| **Pinned by a test?** | The test id, or "no". Most of these are *unguarded* — an in-source comment is a comment, not a guard.                                                                                                       |
+| **Recommendation**    | One option, plus what would change the author's mind.                                                                                                                                                       |
 
 A note on blast radius that cost real time to learn: a name grep is **not sufficient** in
 this package. `create_attention_layer(attention_type='anchor', ...)` and
@@ -110,30 +122,30 @@ registry key too.
 
 ## 3. Question index
 
-| # | Question | Group | Severity | Pinned? |
-|---|---|---|---|---|
-| Q1 | `mobile_mqa` ignores `attention_mask` | A | medium (production consumer) | no |
-| Q2 | `shared_weights_cross_attention` ignores `attention_mask` | A | low (no consumer) | no |
-| Q3 | `anchor_attention` left-padding corrupts the anchor set | A | **high** (silent, consumed) | no |
-| Q4 | `TransformerLayer` drops the mask for 3 attention types | A | **high** (silent, NEW) | no |
-| Q5 | `rpc_attention` has no fp16 path (`Svd[T=DT_HALF]` absent) | B | low (library-only) | **yes** |
-| Q6 | `MASK_BIAS_VALUE = -1e9` costs rpc ~6% | B | medium (package-wide constant) | **yes** |
-| Q7 | `performer_attention` odd `nb_features` mis-scale | B | low (library-only) | no |
-| Q8 | `wave_field_attention.scale` inverse convention | B | low (naming) | no |
-| Q9 | TripSE sum vs average | C | low (library-only) | no |
-| Q10 | `hopfield` feeds back `A K`, returns `A V` | C | low (library-only) | no |
-| Q11 | rpc `return_attention_scores` is ~2x cost AND unmasked | C | medium (correctness of a returned value) | partial |
-| Q12 | Package-wide explicit `training=` forwarding | D | policy question | **yes** |
-| Q13 | `perceiver.build` forwards a container its sibling rejects | D | low (one consumer) | **yes** |
-| Q14 | Dead `get_config()` parameters (Tier 3) | E | low (documentation) | no |
-| Q15 | `LighthouseAttention` known-red pair | E | medium (2 red tests) | **yes (red)** |
+| #   | Question                                                   | Group | Severity                                 | Pinned?       |
+|-----|------------------------------------------------------------|-------|------------------------------------------|---------------|
+| Q1  | `mobile_mqa` ignores `attention_mask`                      | A     | medium (production consumer)             | no            |
+| Q2  | `shared_weights_cross_attention` ignores `attention_mask`  | A     | low (no consumer)                        | no            |
+| Q3  | `anchor_attention` left-padding corrupts the anchor set    | A     | **high** (silent, consumed)              | no            |
+| Q4  | `TransformerLayer` drops the mask for 3 attention types    | A     | **high** (silent, NEW)                   | no            |
+| Q5  | `rpc_attention` has no fp16 path (`Svd[T=DT_HALF]` absent) | B     | low (library-only)                       | **yes**       |
+| Q6  | `MASK_BIAS_VALUE = -1e9` costs rpc ~6%                     | B     | medium (package-wide constant)           | **yes**       |
+| Q7  | `performer_attention` odd `nb_features` mis-scale          | B     | low (library-only)                       | no            |
+| Q8  | `wave_field_attention.scale` inverse convention            | B     | low (naming)                             | no            |
+| Q9  | TripSE sum vs average                                      | C     | low (library-only)                       | no            |
+| Q10 | `hopfield` feeds back `A K`, returns `A V`                 | C     | low (library-only)                       | no            |
+| Q11 | rpc `return_attention_scores` is ~2x cost AND unmasked     | C     | medium (correctness of a returned value) | partial       |
+| Q12 | Package-wide explicit `training=` forwarding               | D     | policy question                          | **yes**       |
+| Q13 | `perceiver.build` forwards a container its sibling rejects | D     | low (one consumer)                       | **yes**       |
+| Q14 | Dead `get_config()` parameters (Tier 3)                    | E     | low (documentation)                      | no            |
+| Q15 | `LighthouseAttention` known-red pair                       | E     | medium (2 red tests)                     | **yes (red)** |
 
 ---
 
 # Group A — Mask support that does not exist
 
-Three layers accept an `attention_mask` argument and do nothing with it, and one
-*consumer* silently discards a mask the caller supplied. In all four cases the failure is
+Three layers accept an `attention_mask` argument and do nothing with it, and one *consumer* silently discards a mask the
+caller supplied. In all four cases the failure is
 the same shape: **a caller who masks gets an unmasked result, with no exception, no
 warning, and no shape error.** That is the most dangerous failure class in this package,
 which is why it leads the brief.
@@ -142,8 +154,7 @@ which is why it leads the brief.
 
 **Today.** `MobileMQA.call` takes `attention_mask` at
 `mobile_mqa.py:254`, documents it as "Currently **IGNORED**" at `mobile_mqa.py:265-272`,
-and the forward path carries only a comment where masking would go
-(`mobile_mqa.py:333-335`):
+and the forward path carries only a comment where masking would go (`mobile_mqa.py:333-335`):
 
 ```python
 # Note: Masking is typically not used in standard MobileMQA vision contexts,
@@ -167,18 +178,18 @@ defined restriction to 64 positions.
 **Options.**
 
 - **(a) Wire it up with an explicit downsampling contract** — define that the mask is
-  max-pooled onto the key grid with the same stride as K/V (a key block is masked only if
-  *every* source position in it is masked). *Buys* real masking for the vision-transformer
+  max-pooled onto the key grid with the same stride as K/V (a key block is masked only if *every* source position in it
+  is masked). *Buys* real masking for the vision-transformer
   use case **at the cost of** inventing a semantic that no paper specifies, and of a
   mask-shape contract that changes meaning when `downsampling_factor` changes — i.e. a
   config key silently reinterprets a caller's mask.
 - **(b) Raise on a non-`None` mask** — turn the silent no-op into a loud
-  `NotImplementedError`. *Buys* the elimination of the entire silent-wrong-answer class
-  **at the cost of** breaking any caller who currently passes a mask harmlessly (e.g. a
+  `NotImplementedError`. *Buys* the elimination of the entire silent-wrong-answer class **at the cost of** breaking any
+  caller who currently passes a mask harmlessly (e.g. a
   generic wrapper that forwards `attention_mask` unconditionally), and of a signature
   that advertises a capability it refuses to provide.
-- **(c) Support masking only when `downsampling_factor == 1`, raise otherwise** —
-  *buys* correct masking on the unambiguous path **at the cost of** a capability that
+- **(c) Support masking only when `downsampling_factor == 1`, raise otherwise** — *buys* correct masking on the
+  unambiguous path **at the cost of** a capability that
   depends on an unrelated constructor argument, which is exactly the kind of conditional
   API that surprises people.
 - **(d) Leave as-is (documented dead)** — *buys* zero risk **at the cost of** keeping a
@@ -222,15 +233,15 @@ plausible-looking outputs, degraded training.
 
 - **(a) Thread the mask through both helpers, slicing it with the same `split_sizes`
   the inputs use.** *Buys* correct masking with the slicing rule already established by
-  the layer's own input handling **at the cost of** deciding the 4-way anchor semantics
-  (does an anchor sub-slice mask apply to the query sub-slice's read of it? — yes, but
+  the layer's own input handling **at the cost of** deciding the 4-way anchor semantics (does an anchor sub-slice mask
+  apply to the query sub-slice's read of it? — yes, but
   that is a decision, not a derivation), plus a real behavior change for anyone currently
   passing a mask and getting a no-op.
 - **(b) Remove the parameter.** *Buys* an honest signature **at the cost of** a public
   API break for a layer registered in the factory (`'shared_weights_cross'`,
   `factory.py:662`) with `optional_params` that a config might name.
 - **(c) Raise `NotImplementedError` on non-`None`.** *Buys* loudness with no semantic
-  invention **at the cost of** the same "advertises then refuses" awkwardness as Q1(b).
+  invention **at the cost of** the same "advertises then refuses" awkwardness as Q1 (b).
 - **(d) Leave as-is.** *Buys* nothing beyond zero risk.
 
 **Blast radius.** **None outside the package.** Grep for `SharedWeightsCrossAttention`
@@ -308,8 +319,8 @@ the honest way to add the capability. But regardless of which is chosen, the *fi
 of work here should be the RED test described above — right now the entire mitigation is a
 docstring paragraph, and this package has already learned that an anchor is a comment, not
 a guard. **What would change my mind:** if `TransformerLayer` grows a general
-"mask-capable attention type" contract for other reasons, folding anchor into it (option
-(a)) becomes cheaper than maintaining two layers — and Q4 below is a reason that contract
+"mask-capable attention type" contract for other reasons, folding anchor into it (option (a)) becomes cheaper than
+maintaining two layers — and Q4 below is a reason that contract
 might be needed anyway.
 
 ---
@@ -372,8 +383,8 @@ The three types are not equivalent cases, and the fix differs per type:
   anchor, a new design question for fnet, and Q15-adjacent work for lighthouse) and
   delete the frozen set. *Buys* a uniform contract **at the cost of** three separate
   design decisions and a much larger blast radius.
-- **(d) Leave as-is, document loudly in `TransformerLayer`'s docstring.** *Buys* zero risk
-  **at the cost of** the status quo.
+- **(d) Leave as-is, document loudly in `TransformerLayer`'s docstring.** *Buys* zero risk **at the cost of** the status
+  quo.
 
 **Blast radius.** `TransformerLayer` is one of the most widely consumed classes in the
 library. Option (a) is scoped narrowly — it only fires when a caller passes a **non-`None`**
@@ -406,8 +417,8 @@ TF 2.18 / CUDA / RTX 4070, an fp16 forward raises `NotFoundError: Could not find
 for node: {{node Svd}} = Svd[T=DT_HALF, ...]`. The full kernel table is quoted in the
 class docstring's `.. warning::` block at `rpc_attention.py:107-136`.
 
-**Why it matters — and the part that is genuinely backwards.** A **masked** fp16 forward
-*succeeds*. A **no-mask** fp16 forward *raises*. The reason is that
+**Why it matters — and the part that is genuinely backwards.** A **masked** fp16 forward *succeeds*. A **no-mask** fp16
+forward *raises*. The reason is that
 `apply_attention_mask`'s default `out_dtype` promotes the biased scores to
 `mask_dtype(...)` (`>= float32`) before the SVD sees them, so masking is what
 accidentally rescues the layer. Supplying a mask is therefore a **prerequisite** for the
@@ -428,8 +439,8 @@ package, where masking is the risky path.
 - **(c) Raise a named error in `build()`/`call()` when the compute dtype is float16.**
   *Buys* a diagnostic that names the missing kernel instead of a raw TF `NotFoundError`
   **at the cost of** refusing the masked fp16 path that currently works.
-- **(d) Require `jit_compile=True` for fp16** and document it. *Buys* a real fp16 path
-  (XLA has the kernel) **at the cost of** a layer whose supported dtypes depend on the
+- **(d) Require `jit_compile=True` for fp16** and document it. *Buys* a real fp16 path (XLA has the kernel) **at the
+  cost of** a layer whose supported dtypes depend on the
   caller's compilation mode, which is not expressible in the layer's own contract.
 
 **Blast radius.** **None.** `RPCAttention` has no consumer anywhere in `src/` outside
@@ -443,9 +454,9 @@ float32/float64 are unaffected. It fails loudly if TF ever ships the kernel.
 
 **Recommendation: (b).** The asymmetry is indefensible as a contract, the "no-mask
 numerics must not change" objection does not apply when the no-mask fp16 path does not
-execute at all, and zero consumers means the cost is bounded to this file plus its tests.
-**What would change my mind:** if someone is running this layer under fp16 in float32
-*compute* with a policy where `mask_dtype` widening would materially change the *float32*
+execute at all, and zero consumers means the cost is bounded to this file plus its tests. **What would change my mind:**
+if someone is running this layer under fp16 in float32 *compute* with a policy where `mask_dtype` widening would
+materially change the *float32*
 result — it would not; `ops.cast` to a tensor's own dtype is the identity, which is what
 makes (b) safe for float32 and float64 callers. Verify that identity holds before landing
 anything, per the D-005 pattern.
@@ -496,8 +507,8 @@ made locally at `rpc`.
   that `common.py`'s docstring warns against.
 - **(d) Fix it structurally at `rpc`** — do the PCP decomposition on the *unmasked* scores
   and apply the mask bias to the reconstructed `L + S` afterwards. *Buys* an SVD that
-  never sees a badly-conditioned matrix at all **at the cost of** a real semantic change
-  (the low-rank/sparse split would no longer be computed over masked scores, which is
+  never sees a badly-conditioned matrix at all **at the cost of** a real semantic change (the low-rank/sparse split
+  would no longer be computed over masked scores, which is
   arguably *more* correct but is a different algorithm), plus a restructuring of
   `_compute_attention` — the same restructuring Q11 needs.
 
@@ -626,8 +637,8 @@ not a guard.
 
 - **(a) Rename and re-base to the package convention** — `self.scale =
   compute_attention_scale(head_dim)` **and** `q * self.scale` at `:630`, in the same
-  commit. *Buys* one convention across the package, so `scale` never means two things
-  **at the cost of** touching a layer with three production consumers on a path where the
+  commit. *Buys* one convention across the package, so `scale` never means two things **at the cost of** touching a
+  layer with three production consumers on a path where the
   only guard is a code comment, for a purely cosmetic gain.
 - **(b) Rename the attribute instead** — e.g. `self._inv_temperature_denominator` or
   simply `self._sqrt_head_dim` — leaving the arithmetic untouched. *Buys* removal of the
@@ -635,8 +646,8 @@ not a guard.
   a name that is not the package convention either, and one `get_config`-irrelevant
   attribute rename (`scale` is not a config key here).
 - **(c) Write the missing test first and defer the rename** — a one-line
-  `assert layer.scale == math.sqrt(head_dim)`. *Buys* the guard the HONESTY NOTE asks for
-  **at the cost of** leaving the confusing name in place.
+  `assert layer.scale == math.sqrt(head_dim)`. *Buys* the guard the HONESTY NOTE asks for **at the cost of** leaving the
+  confusing name in place.
 - **(d) Leave as-is.** *Buys* nothing beyond zero risk.
 
 **Blast radius.** Three production consumers:
@@ -681,12 +692,12 @@ combined = ops.add(ops.add(out_hw, out_cw), out_hc)
 # We'll use sum as per the prompt's implied logic, SE handles magnitude.
 ```
 
-| class | class line | combination | line |
-|---|---|---|---|
-| `TripSE1` | `:340` | **sum** | `:479` |
-| `TripSE2` | `:505` | average (`ops.divide(total, 3.0)`) | `:697-698` |
-| `TripSE3` | `:720` | average (`ops.divide(total, 3.0)`) | `:897-898` |
-| `TripSE4` | `:1092` | **sum** | `:1301` |
+| class     | class line | combination                        | line       |
+|-----------|------------|------------------------------------|------------|
+| `TripSE1` | `:340`     | **sum**                            | `:479`     |
+| `TripSE2` | `:505`     | average (`ops.divide(total, 3.0)`) | `:697-698` |
+| `TripSE3` | `:720`     | average (`ops.divide(total, 3.0)`) | `:897-898` |
+| `TripSE4` | `:1092`    | **sum**                            | `:1301`    |
 
 > **Correction to the prior findings.** Every earlier write-up of this item describes it
 > as "`TripSE1` sums while `TripSE2`/`TripSE3` average" — a 1-vs-2 split. It is **2-vs-2**:
@@ -753,9 +764,9 @@ consequence plainly at `hopfield_attention.py:84-87`: "the loop feeds back `A K`
 while the returned output is `A V` (values). The two coincide in the self-attention case
 ... a heuristic generalization, not the energy descent above."
 
-**Why it matters.** With `K == V` (self-attention) the two are identical and the iteration
-*is* the Ramsauer et al. modern-Hopfield energy descent the docstring's ASCII diagram
-(`hopfield_attention.py:25-26`) claims. With `K != V` (cross-attention, or any
+**Why it matters.** With `K == V` (self-attention) the two are identical and the iteration *is* the Ramsauer et al.
+modern-Hopfield energy descent the docstring's ASCII diagram (`hopfield_attention.py:25-26`) claims. With `K != V`
+(cross-attention, or any
 `key_dim != value_dim` configuration) the fixed point of the iteration is a fixed point of
 the *key* dynamics, while the caller receives a *value* readout that is not itself
 converging to anything. Concretely: `HopfieldAttention(key_dim=32, value_dim=64,
@@ -771,8 +782,8 @@ happily report more update steps as if they were converging it.
   the layer does not currently impose.
 - **(b) Keep the behavior, restrict the claim** — raise (or warn) when
   `update_steps_max > 0` **and** the call is genuinely cross-attention, and rewrite the
-  ASCII diagram so it does not describe an energy descent the code does not perform.
-  *Buys* an honest contract with no numerics change **at the cost of** either refusing a
+  ASCII diagram so it does not describe an energy descent the code does not perform. *Buys* an honest contract with no
+  numerics change **at the cost of** either refusing a
   configuration that runs today, or a warning nobody reads.
 - **(c) Make it explicit** — a `feedback_source: {'key', 'value'} = 'key'` constructor
   argument. *Buys* both readings, defaulting to today's **at the cost of** a new
@@ -783,8 +794,8 @@ happily report more update steps as if they were converging it.
   half the layer's configuration space.
 
 **Blast radius.** **None.** `HopfieldAttention` has no consumer in `src/` outside
-`layers/attention/__init__.py` and `factory.py` (key `'hopfield'`, `factory.py:400`).
-**Do not confuse it with `HopfieldNetwork` in
+`layers/attention/__init__.py` and `factory.py` (key `'hopfield'`, `factory.py:400`). **Do not confuse it with
+`HopfieldNetwork` in
 `src/dl_techniques/layers/transformers/energy_transformer.py`** — a different class,
 which *is* consumed (Energy Transformer models) and is not implicated here. A naive
 `grep -i hopfield` matches both; the distinction is called out in `energy_transformer.py`
@@ -859,13 +870,11 @@ at `rpc_attention.py:741`.
   this defect.
 - **(d) Remove the flag.** *Buys* deletion of the whole problem **at the cost of** a
   public `call()` signature change, which is forbidden here: `rpc.call`'s signature is
-  frozen by the standing anchor `plan_2026-06-14_0c5d4a21/D-007` at `factory.py:986-991`.
-  **Not available.**
+  frozen by the standing anchor `plan_2026-06-14_0c5d4a21/D-007` at `factory.py:986-991`. **Not available.**
 
 **Blast radius.** **None outside the package.** No `src/` consumer for `RPCAttention`.
-`_compute_attention` is private (`rpc_attention.py:517`) with exactly one caller
-(`rpc_attention.py:708`). Options
-(a)–(c) are entirely internal; none touches `call()`'s signature, so the D-007 freeze is
+`_compute_attention` is private (`rpc_attention.py:517`) with exactly one caller (`rpc_attention.py:708`). Options (a)–
+(c) are entirely internal; none touches `call()`'s signature, so the D-007 freeze is
 respected.
 
 **Pinned by a test?** **Partially.**
@@ -875,7 +884,7 @@ supply a mask and assert the returned weights are ~zero at masked key positions.
 
 **Recommendation: (b).** It is the only option that fixes both halves without paying
 memory on the common path, and the D-007 freeze does not reach a private method. Do it in
-the same pass as Q6(d), since both want `_compute_attention` restructured and doing them
+the same pass as Q6 (d), since both want `_compute_attention` restructured and doing them
 separately means restructuring the same method twice. Explicitly reject (c): keeping two
 hand-synchronized score computations in one file is how this defect was born. **What would
 change my mind:** if profiling shows the conditional threading in (b) prevents some XLA
@@ -889,8 +898,7 @@ layer already materializes that tensor.
 ## Q12 — Should explicit `training=` forwarding be a package-wide rule?
 
 **Today.** Keras 3 propagates `training` through two channels. The explicit kwarg, and an
-ambient `CallContext` that `Layer.__call__` fills in when the kwarg is absent
-(`keras/src/layers/layer.py:838-853`):
+ambient `CallContext` that `Layer.__call__` fills in when the kwarg is absent (`keras/src/layers/layer.py:838-853`):
 
 ```python
 call_context = self._get_call_context()
@@ -947,8 +955,8 @@ redundancy — but it is also, today, a provable no-op for every current consume
 - **(d) Write the rationale into `AGENTS.md` / the package guide** and forward
   opportunistically. *Buys* the knowledge surviving **at the cost of** no enforcement.
 
-**Blast radius.** Package-wide by construction. Note the fix already landed at two sites
-(`tripse_attention.py:278-299` and `:1058-1065`) with a full injection harness, so the
+**Blast radius.** Package-wide by construction. Note the fix already landed at two sites (`tripse_attention.py:278-299`
+and `:1058-1065`) with a full injection harness, so the
 pattern and its test template already exist.
 
 **Pinned by a test?** **Yes**, and unusually well:
@@ -958,8 +966,8 @@ becoming vacuous) if Keras ever starts restoring the slot. The suite also ships 
 un-poisoned control, so nobody mistakes it for evidence that Keras fails to propagate.
 
 **Recommendation: (a), stated as a rule with the rationale attached, applied
-opportunistically rather than as a big-bang sweep.** The reason to prefer the rule over
-(b)'s judgement call is that the hazard is **non-local** — whether a poisoner exists
+opportunistically rather than as a big-bang sweep.** The reason to prefer the rule over (b)'s judgement call is that the
+hazard is **non-local** — whether a poisoner exists
 depends on layers this file has never heard of, so a per-site judgement is made on
 information the author does not have. But a 40-file mechanical diff to land it at once is
 not worth it; write the rule down (option (d) is a *prerequisite*, not an alternative) and
@@ -1006,8 +1014,8 @@ spell two shapes in Python — fails, while `build([(2, 8, 32), (2, 40, 32)])` s
 difference is invisible from the layer's documented contract.
 
 The reason it is not simply fixed: `perceiver_attention.py:286-292` carries an **R13
-prohibition** on unifying its predicate with the two sibling spellings
-(`multi_head_cross_attention.py:376`, `multi_head_latent_attention.py:412`), because each
+prohibition** on unifying its predicate with the two sibling spellings (`multi_head_cross_attention.py:376`,
+`multi_head_latent_attention.py:412`), because each
 classifies serialized-shape edge cases differently and one shared body would silently
 change two other layers' build paths.
 
@@ -1015,8 +1023,8 @@ change two other layers' build paths.
 
 - **(a) Normalize at the forwarding boundary** — `self.cross_attention.build(
   list(input_shape) if _is_list_of_shapes(input_shape) else input_shape)`. *Buys* the fix
-  with a one-line change confined to `perceiver_attention.py`, honoring R13 completely
-  (no sibling predicate is touched) **at the cost of** a normalization that papers over a
+  with a one-line change confined to `perceiver_attention.py`, honoring R13 completely (no sibling predicate is touched)
+  **at the cost of** a normalization that papers over a
   real disagreement between two files rather than resolving it — the next person to add a
   wrapped layer hits the same thing.
 - **(b) Widen `MultiHeadCrossAttention`'s predicate to accept tuples.** *Buys* the fix at
@@ -1065,10 +1073,10 @@ and R13's warning about silently changing build paths applies in full.
 
 **Today.** Two parameters are validated, stored, serialized, and **never read**:
 
-| parameter | validated | stored | `get_config()` | read by `build`/`call`? |
-|---|---|---|---|---|
-| `FNetFourierTransform.epsilon` | `fnet_fourier_transform.py:233-234` | `:239` | `:478` | **no** |
-| `HopfieldAttention.update_steps_eps` | `hopfield_attention.py:270-271` | `:312` | `:784` | **no** |
+| parameter                            | validated                           | stored | `get_config()` | read by `build`/`call`? |
+|--------------------------------------|-------------------------------------|--------|----------------|-------------------------|
+| `FNetFourierTransform.epsilon`       | `fnet_fourier_transform.py:233-234` | `:239` | `:478`         | **no**                  |
+| `HopfieldAttention.update_steps_eps` | `hopfield_attention.py:270-271`     | `:312` | `:784`         | **no**                  |
 
 `fnet`'s is documented at `fnet_fourier_transform.py:182-187` and `:228-232`; `hopfield`'s
 at `:216-233`, including *why* it went dead — it gated a convergence early-exit that was
@@ -1145,7 +1153,8 @@ preceded by a deprecation cycle that nobody will observe.
 before it. They are the **entire** known-red baseline for
 `tests/test_layers/test_attention/` (`2 failed, 1649 passed, 31 skipped` at `58232e63`):
 
-- `tests/test_layers/test_attention/test_lighthouse_attention.py:42::TestLighthouseAttention::test_initialization_defaults`
+-
+`tests/test_layers/test_attention/test_lighthouse_attention.py:42::TestLighthouseAttention::test_initialization_defaults`
 - `tests/test_layers/test_attention/test_lighthouse_attention.py:148::TestLighthouseAttention::test_causality`
 
 They are two different problems wearing one name:
@@ -1185,8 +1194,8 @@ green is a stop signal, not a win). That is real, recurring overhead on every fu
   and removes a distractor from every future gate comparison **at the cost of** nothing —
   this is strictly cheaper than the status quo.
 - **(c) `pytest.mark.xfail(strict=True)` on `test_causality`.** *Buys* a green gate and,
-  because of `strict=True`, still fails loudly if the defect is ever accidentally fixed
-  **at the cost of** the visibility that a red test provides — an xfail is easy to stop
+  because of `strict=True`, still fails loudly if the defect is ever accidentally fixed **at the cost of** the
+  visibility that a red test provides — an xfail is easy to stop
   seeing.
 - **(d) Leave both red.** Current state.
 
@@ -1217,14 +1226,13 @@ did not survive verification against HEAD. Recorded here because the findings fi
 a gitignored directory and this note is the only copy that survives.
 
 1. **TripSE sum-vs-average is 2-vs-2, not 1-vs-2.** The finding (#10) states "`TripSE1`
-   sums, `TripSE2`/`TripSE3` average". `TripSE4` also sums
-   (`tripse_attention.py:1301`) and was missed. See
+   sums, `TripSE2`/`TripSE3` average". `TripSE4` also sums (`tripse_attention.py:1301`) and was missed. See
    [Q9](#q9--tripse-branch-combination-sum-vs-average-2-vs-2-not-1-vs-2). This matters for
    framing: it is two coexisting conventions, not one outlier.
 
 2. **`mobile_mqa`'s masking gap is not inherited-fixable.** The finding (#7) treats
-   `MobileMQA` as a `GroupedQueryAttention` subclass; it is
-   (`mobile_mqa.py:63`), but it **overrides `call` entirely**, so the Tier-1 mask fix that
+   `MobileMQA` as a `GroupedQueryAttention` subclass; it is (`mobile_mqa.py:63`), but it **overrides `call` entirely**,
+   so the Tier-1 mask fix that
    landed in the parent does not reach it. Anyone reading the blast-radius table and
    assuming "group_query was fixed, so mobile_mqa was too" would be wrong.
 
@@ -1247,8 +1255,8 @@ catalogue.
 ## Q16 — `attention_routing_capsule` shares ONE initializer INSTANCE across three weights
 
 **Current behavior.** `src/dl_techniques/layers/attention/attention_routing_capsule.py`
-stores `self.kernel_initializer = keras.initializers.get(kernel_initializer)` — an
-*object* — in `__init__`, and then hands that same object to three consumers: the routing
+stores `self.kernel_initializer = keras.initializers.get(kernel_initializer)` — an *object* — in `__init__`, and then
+hands that same object to three consumers: the routing
 weight `W`, the query vector `q`, and (since step 6 of this plan, which fixed the
 `prob_head` `Dense` receiving the default initializer instead of the caller's) the
 `prob_head` `Dense`. Keras initializers are callables, not per-variable state, so nothing
@@ -1277,15 +1285,15 @@ no test sees it — and it is why this is a design question rather than a defect
 
 **Blast radius.** `attention_routing_capsule.py` and its `CapsuleBlockV2` wrapper only;
 consumers are the CapsNet v2 model suite (`tests/test_models/test_capsnet/`) and the
-`'attention_routing_capsule'` factory key. No `get_config()` key changes under any option
-(I5 held), so no checkpoint compatibility question arises.
+`'attention_routing_capsule'` factory key. No `get_config()` key changes under any option (I5 held), so no checkpoint
+compatibility question arises.
 
-**Recommendation.** Option 1. The correlated-draw effect requires a caller to pass a
-*seeded instance* — an uncommon, deliberate act — and options 2 and 3 both make the
+**Recommendation.** Option 1. The correlated-draw effect requires a caller to pass a *seeded instance* — an uncommon,
+deliberate act — and options 2 and 3 both make the
 seeding contract *less* predictable than sharing does, while adding a copy at every use
 site. Reported by the step-10 adversarial review as NOTE-level (N10) and explicitly
-carried here rather than fixed, because it is a call about what a shared seed should
-*mean*, not a bug with a right answer.
+carried here rather than fixed, because it is a call about what a shared seed should *mean*, not a bug with a right
+answer.
 
 **Resolved (step 17 of plan-2026-10-26T125959-7af851e5, decision D-051).** The recommendation
 above (leave it and document it) was not kept. The layer now draws `q` and the `prob_head`
@@ -1293,8 +1301,8 @@ kernel from `clone_initializer(self.kernel_initializer)` and keeps `W` on the re
 instance, so the three weights are independent draws; the measured defect was larger than the
 "seeded instance" case this question assumed: with the default `"glorot_uniform"` string the
 CapsNetV2 models still handed ONE seedless instance to every layer, and 3 of 3 weight pairs
-replayed one sample at `dim_capsules=16`. A seeded instance keeps its seed in the clones
-(pinned by the layer's own test), so a caller who passes `seed=42` still gets that one seed at
+replayed one sample at `dim_capsules=16`. A seeded instance keeps its seed in the clones (pinned by the layer's own
+test), so a caller who passes `seed=42` still gets that one seed at
 each of the three sites, which is what asking for a seed means; only the seedless case, the
 default, became independent. The text above is the question as it stood when it was written.
 
@@ -1326,8 +1334,8 @@ break masking; (3) leave unmeasured and documented.
 count is derived mechanically in `common.py`'s module docstring — do not restate it here;
 see the worked example in section 10.) No code change is implied until (1) is done.
 
-**Recommendation.** Option 1, as a small standalone measurement plan. It is cheap
-(one parametrized test file), it is the kind of gap that a finiteness-only suite cannot
+**Recommendation.** Option 1, as a small standalone measurement plan. It is cheap (one parametrized test file), it is
+the kind of gap that a finiteness-only suite cannot
 see, and the plan that introduced `apply_attention_mask` has already demonstrated that
 this exact class of question — "is the claim true for the non-default configuration?" —
 is where its defects have actually been.
@@ -1340,8 +1348,8 @@ This section records an adjudication rather than a question, because the reasoni
 generalizes and the next person to measure a mask is going to hit it.
 
 **What was claimed.** An adversarial review of the `apply_attention_mask` work filed a
-CRITICAL: the package-wide degenerate-row rescue (D-008/D-009) makes a caller's mask
-*vanish*. The evidence looked airtight and was correctly measured. With a `(B, H, Q, 1)`
+CRITICAL: the package-wide degenerate-row rescue (D-008/D-009) makes a caller's mask *vanish*. The evidence looked
+airtight and was correctly measured. With a `(B, H, Q, 1)`
 keep predicate — a mask that varies over QUERIES and is size 1 over KEYS — a float32
 `GatedAttention` forward came back **bit-identical (maxdiff 0.0)** to a forward with a
 no-op all-ones mask, whereas the pre-plan arithmetic bias form gave a **1.849** different
@@ -1352,20 +1360,20 @@ axis is the identity, so the rescue un-masks every row.
 **What was actually true.** Both readings of that pair of numbers were wrong, and
 re-deriving from the mathematics rather than from the delta is what settled it.
 
-1.  **A keep predicate that is constant along the softmax-reduced axis cannot mask
-    anything, in ANY implementation.** Softmax is invariant to a constant shift of the
-    axis it reduces over: `softmax(x - c·1) = softmax(x)`. A `(B, H, Q, 1)` predicate
-    produces a bias of `-1e9` at EVERY key of a "masked" query row, i.e. exactly such a
-    constant shift. Measured on 4x16 random logits, `max|softmax(x - 30) - softmax(x)|`
-    is `1.64e-07`; the same shift-invariance holds for `Sparsemax` (`1.85e-06`) and
-    `ThreshMax` (`2.68e-07`), so it is not a softmax-only accident. The `0.0` was the
-    mathematically correct answer, not a symptom.
-2.  **The `1.849` was not masking either — it was float32 destroying the row.** The ulp of
-    float32 at `1e9` is 64, so `(x - 1e9).astype(float32)` has **one distinct value**
-    across a 16-wide row of ordinary logits, and `max|softmax(x - 1e9) - uniform|` is
-    **exactly 0.0**. The pre-plan code was returning a uniform distribution over all keys
-    on those rows. It looked like masking only because it differed from the unmasked
-    output.
+1. **A keep predicate that is constant along the softmax-reduced axis cannot mask
+   anything, in ANY implementation.** Softmax is invariant to a constant shift of the
+   axis it reduces over: `softmax(x - c·1) = softmax(x)`. A `(B, H, Q, 1)` predicate
+   produces a bias of `-1e9` at EVERY key of a "masked" query row, i.e. exactly such a
+   constant shift. Measured on 4x16 random logits, `max|softmax(x - 30) - softmax(x)|`
+   is `1.64e-07`; the same shift-invariance holds for `Sparsemax` (`1.85e-06`) and
+   `ThreshMax` (`2.68e-07`), so it is not a softmax-only accident. The `0.0` was the
+   mathematically correct answer, not a symptom.
+2. **The `1.849` was not masking either — it was float32 destroying the row.** The ulp of
+   float32 at `1e9` is 64, so `(x - 1e9).astype(float32)` has **one distinct value**
+   across a 16-wide row of ordinary logits, and `max|softmax(x - 1e9) - uniform|` is **exactly 0.0**. The pre-plan code
+   was returning a uniform distribution over all keys
+   on those rows. It looked like masking only because it differed from the unmasked
+   output.
 
 So the delta between "before" and "after" was a delta between two different flavours of
 garbage, and the size of that delta carried no information about whether masking was
@@ -1374,29 +1382,29 @@ happening.
 **What was nonetheless real, and what shipped.** The caller's mask had no effect and
 nothing said so. That is a genuine hazard — a query-axis mask supplied where a key-axis
 mask was expected is a shape-error-free mistake — so `apply_attention_mask` now REJECTS
-it with a named `ValueError` (D-017), and the review's own original recommendation
-("skip the rescue when the axis is size 1") was measured to be worse: skipping re-forms
+it with a named `ValueError` (D-017), and the review's own original recommendation ("skip the rescue when the axis is
+size 1") was measured to be worse: skipping re-forms
 the all-`MASK_BIAS_VALUE` row, which is `-inf` in fp16, whose softmax is the whole-batch
-NaN the work existed to remove. The severity was also wrong: this was a diagnostic gap
-(WARNING), not a correctness regression (CRITICAL). D-018 later generalized the guard to
+NaN the work existed to remove. The severity was also wrong: this was a diagnostic gap (WARNING), not a correctness
+regression (CRITICAL). D-018 later generalized the guard to
 a tuple `rescue_axis`, since `keras.layers.Softmax` accepts one.
 
 **The transferable lessons.**
 
-*   **A predicate that is constant along the axis a normalizer reduces over is a no-op.**
-    Before attributing a masking effect to an implementation, check whether the mask
-    varies along the reduced axis at all. If it does not, no implementation can help,
-    and the correct response is to reject the input rather than to "fix" the math.
-*   **A large before/after delta is not evidence that the "before" was working.** A
-    `-1e9`-scale additive bias in float32 annihilates the row's own information content
-    (ulp 64 at 1e9), and in float16 it is `-inf` outright. When comparing a masking
-    change, add a control that shows the pre-change output was *itself* meaningful —
-    e.g. that its masked-row distribution is not uniform — or the comparison measures
-    nothing. This is the same trap as `plans/LESSONS.md` "guards must be proven RED":
-    a number that moves is not a number that means something.
-*   **Re-derive before escalating.** Both the reviewer and the executor reached the right
-    answer only by working the algebra independently of the measurement that prompted it.
-    The measurement was correct in every digit; the inference from it was not.
+* **A predicate that is constant along the axis a normalizer reduces over is a no-op.**
+  Before attributing a masking effect to an implementation, check whether the mask
+  varies along the reduced axis at all. If it does not, no implementation can help,
+  and the correct response is to reject the input rather than to "fix" the math.
+* **A large before/after delta is not evidence that the "before" was working.** A
+  `-1e9`-scale additive bias in float32 annihilates the row's own information content (ulp 64 at 1e9), and in float16 it
+  is `-inf` outright. When comparing a masking
+  change, add a control that shows the pre-change output was *itself* meaningful —
+  e.g. that its masked-row distribution is not uniform — or the comparison measures
+  nothing. This is the same trap as `plans/LESSONS.md` "guards must be proven RED":
+  a number that moves is not a number that means something.
+* **Re-derive before escalating.** Both the reviewer and the executor reached the right
+  answer only by working the algebra independently of the measurement that prompted it.
+  The measurement was correct in every digit; the inference from it was not.
 
 ---
 

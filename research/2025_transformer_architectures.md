@@ -2,9 +2,14 @@
 
 ## Executive Summary
 
-The Transformer architecture, introduced in "Attention is All You Need" (Vaswani et al., 2017), has spawned three dominant architectural families: **Encoder-Decoder**, **Encoder-Only**, and **Decoder-Only**. Each represents a different trade-off in the computational efficiency vs. representational capacity space. This guide provides a systematic analysis of these architectures, their computational properties, and their optimal deployment contexts.
+The Transformer architecture, introduced in "Attention is All You Need" (Vaswani et al., 2017), has spawned three
+dominant architectural families: **Encoder-Decoder**, **Encoder-Only**, and **Decoder-Only**. Each represents a
+different trade-off in the computational efficiency vs. representational capacity space. This guide provides a
+systematic analysis of these architectures, their computational properties, and their optimal deployment contexts.
 
-**The Fundamental Insight**: The choice of architecture is not arbitrary—it is a direct consequence of the inductive biases required by the target task. There is no universal optimal architecture, only architectures optimized for specific computational objectives.
+**The Fundamental Insight**: The choice of architecture is not arbitrary—it is a direct consequence of the inductive
+biases required by the target task. There is no universal optimal architecture, only architectures optimized for
+specific computational objectives.
 
 ---
 
@@ -12,7 +17,9 @@ The Transformer architecture, introduced in "Attention is All You Need" (Vaswani
 
 ### Historical Context
 
-The original Transformer was designed for **sequence-to-sequence (seq2seq) transduction**—mapping an input sequence to an output sequence of potentially different length. The canonical application was neural machine translation (NMT): translating English text to French.
+The original Transformer was designed for **sequence-to-sequence (seq2seq) transduction**—mapping an input sequence to
+an output sequence of potentially different length. The canonical application was neural machine translation (NMT):
+translating English text to French.
 
 ### Core Architectural Components
 
@@ -49,7 +56,8 @@ OUTPUT SEQUENCE (Target Language)
 
 ### Detailed Encoder Architecture
 
-The encoder processes the entire input sequence in parallel, allowing each token to attend to all other tokens (bidirectional attention).
+The encoder processes the entire input sequence in parallel, allowing each token to attend to all other tokens
+(bidirectional attention).
 
 ```
 Input Tokens: [x₁, x₂, x₃, ..., xₙ]
@@ -90,7 +98,7 @@ Input Tokens: [x₁, x₂, x₃, ..., xₙ]
          ↓
     [Final Encoder Outputs]
 ```
-         
+
 **Attention Pattern Visualization** (Encoder Self-Attention):
 
 ```
@@ -103,11 +111,13 @@ x₄  [ ✓    ✓    ✓    ✓  ]  ← Token 4 attends to all
 Legend: ✓ = Attention allowed (no mask)
 ```
 
-**Key Property**: **Fully Bidirectional Attention**. Every token has access to contextual information from both past and future tokens.
+**Key Property**: **Fully Bidirectional Attention**. Every token has access to contextual information from both past and
+future tokens.
 
 ### Detailed Decoder Architecture
 
-The decoder generates the output sequence autoregressively (one token at a time), using three distinct attention mechanisms:
+The decoder generates the output sequence autoregressively (one token at a time), using three distinct attention
+mechanisms:
 
 ```
 Target Tokens: [y₁, y₂, y₃, ..., yₘ]
@@ -197,10 +207,11 @@ This is the mechanism for conditioning generation on the input.
 For input sequence $X = [x_1, ..., x_n]$:
 
 $$
-\text{SelfAttn}_{\text{enc}}(X) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V
+\text{SelfAttn}_{\text{enc}} (X) = \text{softmax}\left (\frac{QK^T}{\sqrt{d_k}}\right)V
 $$
 
 where:
+
 - $Q = XW_Q$, $K = XW_K$, $V = XW_V$
 - No masking applied (full attention matrix)
 
@@ -209,13 +220,13 @@ where:
 For target sequence $Y = [y_1, ..., y_m]$:
 
 $$
-\text{SelfAttn}_{\text{dec}}(Y) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}} + M\right)V
+\text{SelfAttn}_{\text{dec}} (Y) = \text{softmax}\left (\frac{QK^T}{\sqrt{d_k}} + M\right)V
 $$
 
 where $M$ is the causal mask:
 
 $$
-M_{ij} = \begin{cases} 
+M_{ij} = \begin{cases}
 0 & \text{if } j \leq i \\
 -\infty & \text{if } j > i
 \end{cases}
@@ -224,10 +235,11 @@ $$
 #### Cross-Attention
 
 $$
-\text{CrossAttn}(Y, X) = \text{softmax}\left(\frac{Q_{\text{dec}}K_{\text{enc}}^T}{\sqrt{d_k}}\right)V_{\text{enc}}
+\text{CrossAttn} (Y, X) = \text{softmax}\left (\frac{Q_{\text{dec}}K_{\text{enc}}^T}{\sqrt{d_k}}\right)V_{\text{enc}}
 $$
 
 where:
+
 - $Q_{\text{dec}} = Y W_Q$ (queries from decoder)
 - $K_{\text{enc}} = X W_K$ (keys from encoder)
 - $V_{\text{enc}} = X W_V$ (values from encoder)
@@ -235,34 +247,39 @@ where:
 ### Computational Complexity
 
 **Time Complexity per Layer**:
-- Encoder self-attention: $O(n^2 \cdot d)$ where $n$ = input length, $d$ = model dimension
-- Decoder self-attention: $O(m^2 \cdot d)$ where $m$ = output length
-- Cross-attention: $O(m \cdot n \cdot d)$
 
-**Total Complexity**: $O((n^2 + m^2 + mn) \cdot d \cdot L)$ where $L$ = number of layers
+- Encoder self-attention: $O (n^2 \cdot d)$ where $n$ = input length, $d$ = model dimension
+- Decoder self-attention: $O (m^2 \cdot d)$ where $m$ = output length
+- Cross-attention: $O (m \cdot n \cdot d)$
 
-**Space Complexity**: $O(n^2 + m^2 + mn)$ for attention matrices
+**Total Complexity**: $O ((n^2 + m^2 + mn) \cdot d \cdot L)$ where $L$ = number of layers
+
+**Space Complexity**: $O (n^2 + m^2 + mn)$ for attention matrices
 
 ### Use Cases & Optimal Applications
 
 **Ideal For**:
+
 1. **Machine Translation**: Translating text between languages
 2. **Summarization**: Condensing long documents into short summaries
 3. **Question Answering** (extractive): Given context, generate answer
 4. **Text-to-Text Tasks**: Any task with distinct input/output sequences
 
 **Canonical Models**:
+
 - **T5** (Text-to-Text Transfer Transformer): Frames all NLP tasks as text-to-text
 - **BART** (Bidirectional and Auto-Regressive Transformers): Denoising autoencoder
 - **mBART**: Multilingual BART
 - **mT5**: Multilingual T5
 
 **Advantages**:
+
 - **Separation of concerns**: Encoder handles understanding, decoder handles generation
 - **Flexible length mapping**: Input and output can have different lengths
 - **Cross-attention**: Explicit mechanism for conditioning on input
 
 **Disadvantages**:
+
 - **Increased parameter count**: Two separate stacks to train
 - **Slower inference**: Must run both encoder and decoder
 - **Memory intensive**: Stores attention matrices for both stacks
@@ -273,7 +290,8 @@ where:
 
 ### Philosophical Shift
 
-Encoder-only models abandon generation entirely. They are designed for **discriminative tasks**—understanding and classifying input, not producing new sequences.
+Encoder-only models abandon generation entirely. They are designed for **discriminative tasks**—understanding and
+classifying input, not producing new sequences.
 
 ### Core Architecture
 
@@ -369,14 +387,16 @@ Full context in both directions.
 #### 1. Masked Language Modeling (MLM)
 
 **Procedure**:
+
 1. Randomly mask 15% of input tokens
 2. Of the masked tokens:
-   - 80% replaced with `[MASK]`
-   - 10% replaced with random token
-   - 10% left unchanged
+    - 80% replaced with `[MASK]`
+    - 10% replaced with random token
+    - 10% left unchanged
 3. Predict original token at masked positions
 
 **Example**:
+
 ```
 Original:    "The cat sat on the mat"
 Masked:      "The [MASK] sat on the [MASK]"
@@ -386,7 +406,7 @@ Objective:   Predict "cat" and "mat"
 **Loss Function**:
 
 $$
-\mathcal{L}_{\text{MLM}} = -\sum_{i \in \mathcal{M}} \log P(x_i | x_{\setminus \mathcal{M}})
+\mathcal{L}_{\text{MLM}} = -\sum_{i \in \mathcal{M}} \log P (x_i | x_{\setminus \mathcal{M}})
 $$
 
 where $\mathcal{M}$ = set of masked positions
@@ -394,12 +414,14 @@ where $\mathcal{M}$ = set of masked positions
 #### 2. Next Sentence Prediction (NSP)
 
 **Procedure**:
+
 1. Given two sentences A and B
 2. 50% of time: B actually follows A (label: IsNext)
 3. 50% of time: B is random sentence (label: NotNext)
 4. Predict relationship using `[CLS]` token representation
 
 **Example**:
+
 ```
 Positive: A = "I went to the store."
           B = "I bought some milk."
@@ -413,7 +435,7 @@ Negative: A = "I went to the store."
 **Loss Function**:
 
 $$
-\mathcal{L}_{\text{NSP}} = -\log P(y_{\text{NSP}} | [\text{CLS}])
+\mathcal{L}_{\text{NSP}} = -\log P (y_{\text{NSP}} | [\text{CLS}])
 $$
 
 ### Fine-tuning Paradigm
@@ -449,11 +471,13 @@ Common Task Adaptations:
 
 ### Computational Characteristics
 
-**Time Complexity**: $O(n^2 \cdot d \cdot L)$
+**Time Complexity**: $O (n^2 \cdot d \cdot L)$
+
 - Same as encoder-only portion of Enc-Dec
 - Quadratic in sequence length (attention bottleneck)
 
 **Inference Characteristics**:
+
 - **Single forward pass**: No autoregressive generation
 - **Parallel processing**: All tokens processed simultaneously
 - **Fast**: Typically 10-100× faster than decoder-only models for classification
@@ -461,6 +485,7 @@ Common Task Adaptations:
 ### Use Cases & Optimal Applications
 
 **Ideal For**:
+
 1. **Text Classification**: Sentiment analysis, topic categorization, spam detection
 2. **Named Entity Recognition (NER)**: Identifying people, places, organizations
 3. **Question Answering**: Extractive QA (finding answer span in context)
@@ -468,6 +493,7 @@ Common Task Adaptations:
 5. **Token-level Tasks**: POS tagging, chunking, slot filling
 
 **Canonical Models**:
+
 - **BERT** (Bidirectional Encoder Representations from Transformers)
 - **RoBERTa** (Robustly Optimized BERT): Removes NSP, trains longer
 - **ALBERT** (A Lite BERT): Parameter sharing across layers
@@ -476,12 +502,14 @@ Common Task Adaptations:
 - **DeBERTa**: Disentangled attention + enhanced mask decoder
 
 **Advantages**:
+
 - **Bidirectional context**: Full context for every token
 - **Fast inference**: Single forward pass for classification
 - **Strong transfer learning**: Pre-training → fine-tuning paradigm is very effective
 - **Interpretability**: Attention weights show what model focuses on
 
 **Disadvantages**:
+
 - **No generation capability**: Cannot produce new sequences
 - **Pre-training inefficiency**: MLM only predicts 15% of tokens per sample
 - **Input length limitations**: Quadratic attention complexity
@@ -493,9 +521,11 @@ Common Task Adaptations:
 
 ### Philosophical Foundation
 
-Decoder-only models embrace **autoregressive generation** as the universal learning objective. They are trained to predict the next token given all previous tokens, making them natural generators.
+Decoder-only models embrace **autoregressive generation** as the universal learning objective. They are trained to
+predict the next token given all previous tokens, making them natural generators.
 
-**Key Insight**: By framing all tasks as generation problems, a single architecture can handle classification, generation, translation, reasoning, and more—without task-specific modifications.
+**Key Insight**: By framing all tasks as generation problems, a single architecture can handle classification,
+generation, translation, reasoning, and more—without task-specific modifications.
 
 ### Core Architecture
 
@@ -594,10 +624,11 @@ Lower triangular attention matrix enforces causality.
 **Objective**: Maximize likelihood of next token given all previous tokens
 
 $$
-\mathcal{L} = -\sum_{i=1}^{n} \log P(x_i | x_{<i})
+\mathcal{L} = -\sum_{i=1}^{n} \log P (x_i | x_{<i})
 $$
 
 **Training Example**:
+
 ```
 Input Sequence: "The cat sat on the mat"
 
@@ -612,6 +643,7 @@ All processed in parallel during training via teacher forcing.
 ```
 
 **Teacher Forcing**:
+
 ```
 Training Time (Parallel):
 ┌────────────────────────────────────┐
@@ -653,8 +685,7 @@ Beam 3: [The, cat, was] (score: -3.1)
 At each step, expand all beams and keep top k.
 ```
 
-**Pros**: Better than greedy, explores multiple hypotheses
-**Cons**: Computationally expensive, k× slower than greedy
+**Pros**: Better than greedy, explores multiple hypotheses **Cons**: Computationally expensive, k× slower than greedy
 
 #### 3. Top-k Sampling
 
@@ -694,7 +725,7 @@ Nucleus: {cat, dog, sat} (sum = 0.75 < 0.9)
 Modify softmax temperature to control randomness:
 
 $$
-P(x_i) = \frac{\exp(z_i/T)}{\sum_j \exp(z_j/T)}
+P (x_i) = \frac{\exp (z_i/T)}{\sum_j \exp (z_j/T)}
 $$
 
 - **T < 1**: Sharper distribution (more deterministic)
@@ -711,7 +742,8 @@ T = 2.0 (flat):   [0.31, 0.27, 0.23, 0.19] ← Uniform-ish
 
 ### In-Context Learning
 
-**Emergent Capability**: Large decoder-only models can learn new tasks from examples in the prompt, without parameter updates.
+**Emergent Capability**: Large decoder-only models can learn new tasks from examples in the prompt, without parameter
+updates.
 
 ```
 PROMPT STRUCTURE:
@@ -738,16 +770,19 @@ No gradient updates. Learning happens via attention.
 
 ### Computational Complexity
 
-**Training**: $O(n^2 \cdot d \cdot L)$
+**Training**: $O (n^2 \cdot d \cdot L)$
+
 - Same as encoder-only
 - Quadratic attention still applies
 
 **Inference** (autoregressive generation):
-- **Per token**: $O(n \cdot d \cdot L)$ where $n$ is current sequence length
-- **Total for m tokens**: $O(m \cdot n \cdot d \cdot L)$ where $n$ grows with each token
+
+- **Per token**: $O (n \cdot d \cdot L)$ where $n$ is current sequence length
+- **Total for m tokens**: $O (m \cdot n \cdot d \cdot L)$ where $n$ grows with each token
 - Much slower than encoder-only for equivalent tasks
 
 **KV Cache Optimization**:
+
 ```
 Without cache:
   Generate token 100: Recompute attention for all 100 tokens
@@ -762,6 +797,7 @@ With cache:
 ### Use Cases & Optimal Applications
 
 **Ideal For**:
+
 1. **Text Generation**: Creative writing, code generation, completion
 2. **Dialogue Systems**: Chatbots, conversational AI
 3. **Few-shot Learning**: Tasks with limited labeled data
@@ -770,6 +806,7 @@ With cache:
 6. **Reasoning Tasks**: Chain-of-thought, multi-step problem solving
 
 **Canonical Models**:
+
 - **GPT** series (GPT-2, GPT-3, GPT-4)
 - **LLaMA** (1, 2, 3): Open-source, permissive license
 - **Mistral/Mixtral**: Efficient, high-quality open models
@@ -778,12 +815,14 @@ With cache:
 - **Phi**: Microsoft's small but capable models
 
 **Advantages**:
+
 - **Universal architecture**: One model, many tasks
 - **Few-shot learning**: No fine-tuning needed for new tasks
 - **Generation quality**: Produces fluent, coherent text
 - **Emergent abilities**: Capabilities scale with size (reasoning, tool use)
 
 **Disadvantages**:
+
 - **Slow inference**: Autoregressive generation is sequential
 - **Unidirectional context**: Each token only sees past, not future
 - **Training efficiency**: Predicts one token at a time (vs. BERT's 15% mask)
@@ -824,6 +863,7 @@ INPUT: [Prefix: fully visible] [Suffix: causal]
 **Use Case**: Question answering where question is prefix (bidirectional) and answer is suffix (causal).
 
 **Example**:
+
 ```
 Prefix: "What is the capital of France?"
 Suffix: "The capital is" [Paris]
@@ -922,12 +962,13 @@ MoE Transformer Layer:
 **Routing Mechanism**:
 
 $$
-G(x) = \text{softmax}(x \cdot W_g)
+G (x) = \text{softmax} (x \cdot W_g)
 $$
 
-where $G(x)$ is a vector of routing probabilities over experts.
+where $G (x)$ is a vector of routing probabilities over experts.
 
 **Top-k Routing**:
+
 ```
 For each token:
 1. Compute routing scores for all N experts
@@ -938,6 +979,7 @@ For each token:
 ```
 
 **Sparse Activation**:
+
 ```
 If N=8 experts, k=2:
   - 2 experts activated per token (25%)
@@ -947,11 +989,13 @@ If N=8 experts, k=2:
 ```
 
 **Advantages**:
+
 - Massive parameter count with constant compute per token
 - Specialization: Different experts learn different patterns
 - Scalability: Can scale to trillions of parameters
 
 **Challenges**:
+
 - Load balancing: Ensuring all experts are used
 - Training instability: Routing can collapse (all traffic to one expert)
 - Deployment complexity: Distributed inference required for large MoE
@@ -960,7 +1004,7 @@ If N=8 experts, k=2:
 
 ### E. Sparse Transformer (Sparse Attention Patterns)
 
-**Problem**: Standard attention is $O(n^2)$, prohibitive for very long sequences.
+**Problem**: Standard attention is $O (n^2)$, prohibitive for very long sequences.
 
 **Solution**: Constrain attention to sparse patterns.
 
@@ -982,18 +1026,20 @@ Every token attends to:
 Alternate between two patterns across layers:
 
 **Strided Pattern** (Layer A):
+
 ```
 Position i attends to: {i-n, i-2n, i-3n, ...}
 (Every n-th previous position)
 ```
 
 **Local Pattern** (Layer B):
+
 ```
 Position i attends to: {i-w, i-w+1, ..., i}
 (Local window of width w)
 ```
 
-**Combined**: Alternating layers creates O(n√n) complexity while maintaining long-range connections.
+**Combined**: Alternating layers creates O (n√n) complexity while maintaining long-range connections.
 
 #### 3. Longformer Attention
 
@@ -1057,6 +1103,7 @@ USER QUERY: "What is the capital of Mars?"
 ```
 
 **Variants**:
+
 - **RAG-Sequence**: Retrieve once, generate entire response
 - **RAG-Token**: Retrieve for each generated token (expensive)
 - **REALM**: Retrieval as a pre-training objective
@@ -1188,7 +1235,7 @@ Example: GPT-4, PaLM, LLaMA-3 handle classification,
 
 #### 2. Efficient Attention Mechanisms
 
-**Moving beyond O(n²)**:
+**Moving beyond O (n²)**:
 
 ```
 Linear Attention:
@@ -1259,16 +1306,19 @@ Additional Considerations:
 ### Practical Recommendations (2025)
 
 **For Research**:
+
 - **Encoder-Only**: Still valuable for embedding models, retrieval
 - **Decoder-Only**: Dominant paradigm, most active research area
 - **Encoder-Decoder**: Niche applications, less active development
 
 **For Production**:
+
 - **Classification at scale**: Encoder-only (BERT-family) for speed
 - **General-purpose systems**: Decoder-only (GPT-family) for flexibility
 - **Translation/Summarization**: Encoder-decoder or large decoder-only
 
 **For Startups/Resource-Constrained**:
+
 - Start with pre-trained decoder-only models (LLaMA, Mistral)
 - Fine-tune or use in-context learning
 - Avoid training encoder-decoder from scratch (expensive, diminishing returns)
@@ -1313,13 +1363,15 @@ Encoder   Decoder
 - **Autoregressive generation** (decoder-only): When you need to produce sequences token-by-token
 - **Separation of encoding/decoding** (encoder-decoder): When input and output are fundamentally different
 
-**The Paradigm Shift**: The field is converging on decoder-only as the **universal architecture** not because it's optimal for every task, but because:
+**The Paradigm Shift**: The field is converging on decoder-only as the **universal architecture** not because it's
+optimal for every task, but because:
 
 1. **Scalability**: Scaling laws are most favorable for decoder-only
 2. **Simplicity**: Single architecture, single training objective
 3. **Flexibility**: Can be adapted to any task via prompting
 4. **Emergent capabilities**: In-context learning, reasoning, tool use
 
-The future belongs to architectures that are **sufficiently general** to handle any task, **sufficiently efficient** to scale to massive sizes, and **sufficiently flexible** to adapt without retraining.
+The future belongs to architectures that are **sufficiently general** to handle any task, **sufficiently efficient** to
+scale to massive sizes, and **sufficiently flexible** to adapt without retraining.
 
 **The winner**: Decoder-only Transformers, at least until the next architectural revolution.

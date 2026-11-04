@@ -34,9 +34,8 @@ Reference:
     Neural Heat Fields".
 """
 
-from typing import Any
-
 import keras
+from typing import Any
 
 # ---------------------------------------------------------------------
 

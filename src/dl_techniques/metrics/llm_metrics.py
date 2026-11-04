@@ -84,10 +84,14 @@ Example::
 
 from __future__ import annotations
 
+import keras
 import math
 from typing import List, Optional
 
-import keras
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -457,6 +461,5 @@ def aggregate_probe_metrics(results: dict) -> None:
         logger.warning(
             f"aggregate_probe_metrics: skipped due to error: {exc}",
         )
-
 
 # ---------------------------------------------------------------------

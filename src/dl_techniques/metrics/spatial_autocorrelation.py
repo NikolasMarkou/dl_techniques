@@ -1,4 +1,5 @@
-"""Spatial autocorrelation of a map laid out on a 2-D or 3-D grid or a cortical mesh.
+"""
+Spatial autocorrelation of a map laid out on a 2-D or 3-D grid or a cortical mesh.
 
 What this measures
 ------------------
@@ -108,6 +109,7 @@ _OFFSET_TABLES = {
     (3, "rook"): ROOK_OFFSETS_3D,
 }
 
+# ---------------------------------------------------------------------
 
 def _require_connectivity(connectivity: str) -> None:
     """Raise the shared ``connectivity must be one of`` error for an unknown name."""
@@ -117,6 +119,7 @@ def _require_connectivity(connectivity: str) -> None:
             f"got {connectivity!r}"
         )
 
+# ---------------------------------------------------------------------
 
 def connectivity_structure(ndim: int, connectivity: str = "queen") -> np.ndarray:
     """The boolean structuring element of a contiguity, for any rank.
@@ -681,3 +684,5 @@ def morans_i_summary(
         "num_units": int(t_grid.size),
         "connectivity": connectivity,
     }
+
+# ---------------------------------------------------------------------

@@ -579,3 +579,5 @@ def _interaction_from_means(
     if np.isnan(result.statistic):
         return None
     return result.statistic, result.pvalue
+
+# ---------------------------------------------------------------------

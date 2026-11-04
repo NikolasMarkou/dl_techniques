@@ -5,6 +5,7 @@ import os
 import warnings
 
 import matplotlib
+
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
@@ -73,25 +74,32 @@ def fig_pearson_vs_rank():
     fig, axes = plt.subplots(1, 3, figsize=(10, 3.5))
 
     # (a) linear
-    x = rng.uniform(-2, 2, n); y = 1.5 * x + rng.normal(0, 0.4, n)
-    r = np.corrcoef(x, y)[0, 1]; rho, _ = spearmanr(x, y)
+    x = rng.uniform(-2, 2, n);
+    y = 1.5 * x + rng.normal(0, 0.4, n)
+    r = np.corrcoef(x, y)[0, 1];
+    rho, _ = spearmanr(x, y)
     axes[0].scatter(x, y, s=12, alpha=0.7, color="#1f77b4")
     axes[0].set_title(f"Linear\nPearson r = {r:.2f}, Spearman = {rho:.2f}")
 
     # (b) tanh(2x)
-    x = rng.uniform(-2, 2, n); y = np.tanh(2 * x) + rng.normal(0, 0.08, n)
-    r = np.corrcoef(x, y)[0, 1]; rho, _ = spearmanr(x, y)
+    x = rng.uniform(-2, 2, n);
+    y = np.tanh(2 * x) + rng.normal(0, 0.08, n)
+    r = np.corrcoef(x, y)[0, 1];
+    rho, _ = spearmanr(x, y)
     axes[1].scatter(x, y, s=12, alpha=0.7, color="#2ca02c")
     axes[1].set_title(f"Monotonic nonlinear (tanh)\nPearson r = {r:.2f}, Spearman = {rho:.2f}")
 
     # (c) cubic
-    x = rng.uniform(-2, 2, n); y = x ** 3 + rng.normal(0, 0.3, n)
-    r = np.corrcoef(x, y)[0, 1]; rho, _ = spearmanr(x, y)
+    x = rng.uniform(-2, 2, n);
+    y = x ** 3 + rng.normal(0, 0.3, n)
+    r = np.corrcoef(x, y)[0, 1];
+    rho, _ = spearmanr(x, y)
     axes[2].scatter(x, y, s=12, alpha=0.7, color="#d62728")
     axes[2].set_title(f"Cubic\nPearson r = {r:.2f}, Spearman = {rho:.2f}")
 
     for ax in axes:
-        ax.set_xlabel("x"); ax.set_ylabel("y")
+        ax.set_xlabel("x");
+        ax.set_ylabel("y")
     save(fig, "pearson_vs_rank.png")
 
 
@@ -118,16 +126,22 @@ def fig_correlation_grid():
         panels.append((x, y, f"r ≈ {r:+.1f}"))
 
     # quadratic
-    x = rng.uniform(-2, 2, n); y = x ** 2 + rng.normal(0, 0.1, n)
+    x = rng.uniform(-2, 2, n);
+    y = x ** 2 + rng.normal(0, 0.1, n)
     panels.append((x, y, "quadratic"))
     # sine
-    x = rng.uniform(-np.pi, np.pi, n); y = np.sin(x) + rng.normal(0, 0.1, n)
+    x = rng.uniform(-np.pi, np.pi, n);
+    y = np.sin(x) + rng.normal(0, 0.1, n)
     panels.append((x, y, "sine"))
     # circle
-    t = rng.uniform(0, 2 * np.pi, n); x = np.cos(t) + rng.normal(0, 0.05, n); y = np.sin(t) + rng.normal(0, 0.05, n)
+    t = rng.uniform(0, 2 * np.pi, n);
+    x = np.cos(t) + rng.normal(0, 0.05, n);
+    y = np.sin(t) + rng.normal(0, 0.05, n)
     panels.append((x, y, "circle"))
     # X-shape
-    s = rng.choice([-1, 1], size=n); x = rng.uniform(-1, 1, n); y = s * x + rng.normal(0, 0.05, n)
+    s = rng.choice([-1, 1], size=n);
+    x = rng.uniform(-1, 1, n);
+    y = s * x + rng.normal(0, 0.05, n)
     panels.append((x, y, "X-shape"))
 
     fig, axes = plt.subplots(3, 3, figsize=(7.5, 7.5))
@@ -135,7 +149,8 @@ def fig_correlation_grid():
         ax.scatter(x, y, s=6, alpha=0.6, color="#1f77b4")
         r = np.corrcoef(x, y)[0, 1]
         ax.set_title(f"{label}\nPearson r = {r:.2f}", fontsize=9)
-        ax.set_xticks([]); ax.set_yticks([])
+        ax.set_xticks([]);
+        ax.set_yticks([])
         ax.grid(False)
     # last panel may be unused; we used 9 - good.
     fig.suptitle("Pearson r = 0 does not imply independence", y=1.01)
@@ -170,25 +185,32 @@ def fig_distance_correlation():
     fig, axes = plt.subplots(1, 3, figsize=(10, 3.5))
 
     # linear
-    x = rng.uniform(-2, 2, n); y = 1.2 * x + rng.normal(0, 0.3, n)
-    r = np.corrcoef(x, y)[0, 1]; d = _dcor(x, y)
+    x = rng.uniform(-2, 2, n);
+    y = 1.2 * x + rng.normal(0, 0.3, n)
+    r = np.corrcoef(x, y)[0, 1];
+    d = _dcor(x, y)
     axes[0].scatter(x, y, s=12, alpha=0.7, color="#1f77b4")
     axes[0].set_title(f"Linear\nPearson = {r:.2f}, dCor = {d:.2f}")
 
     # quadratic
-    x = rng.uniform(-2, 2, n); y = x ** 2 + rng.normal(0, 0.2, n)
-    r = np.corrcoef(x, y)[0, 1]; d = _dcor(x, y)
+    x = rng.uniform(-2, 2, n);
+    y = x ** 2 + rng.normal(0, 0.2, n)
+    r = np.corrcoef(x, y)[0, 1];
+    d = _dcor(x, y)
     axes[1].scatter(x, y, s=12, alpha=0.7, color="#2ca02c")
     axes[1].set_title(f"Quadratic\nPearson = {r:.2f}, dCor = {d:.2f}")
 
     # sine
-    x = rng.uniform(-np.pi, np.pi, n); y = np.sin(x) + rng.normal(0, 0.15, n)
-    r = np.corrcoef(x, y)[0, 1]; d = _dcor(x, y)
+    x = rng.uniform(-np.pi, np.pi, n);
+    y = np.sin(x) + rng.normal(0, 0.15, n)
+    r = np.corrcoef(x, y)[0, 1];
+    d = _dcor(x, y)
     axes[2].scatter(x, y, s=12, alpha=0.7, color="#d62728")
     axes[2].set_title(f"Sine\nPearson = {r:.2f}, dCor = {d:.2f}")
 
     for ax in axes:
-        ax.set_xlabel("x"); ax.set_ylabel("y")
+        ax.set_xlabel("x");
+        ax.set_ylabel("y")
     save(fig, "distance_correlation.png")
 
 
@@ -198,7 +220,8 @@ def _chatterjee_xi(x, y):
     ranks. Continuous noisy inputs make ties vanishingly rare; for true tie handling
     the formula is 1 - n * sum|r_{i+1}-r_i| / (2 * sum l_i*(n - l_i)) where
     l_i = #{j : y_j >= y_i}."""
-    x = np.asarray(x); y = np.asarray(y)
+    x = np.asarray(x);
+    y = np.asarray(y)
     n = len(x)
     order = np.argsort(x, kind="mergesort")
     y_sorted = y[order]
@@ -215,19 +238,26 @@ def fig_chatterjee_xi():
 
     # noisy linear
     n = 400
-    x = rng.uniform(0, 1, n); y = 0.8 * x + rng.normal(0, 0.2, n)
-    xi = _chatterjee_xi(x, y); r = np.corrcoef(x, y)[0, 1]; rho, _ = spearmanr(x, y)
+    x = rng.uniform(0, 1, n);
+    y = 0.8 * x + rng.normal(0, 0.2, n)
+    xi = _chatterjee_xi(x, y);
+    r = np.corrcoef(x, y)[0, 1];
+    rho, _ = spearmanr(x, y)
     axes[0].scatter(x, y, s=10, alpha=0.6, color="#1f77b4")
     axes[0].set_title(f"Noisy linear\nPearson = {r:.2f}, Spearman = {rho:.2f}, ξ = {xi:.2f}")
 
     # sin(4 pi x)
-    x = rng.uniform(0, 1, n); y = np.sin(4 * np.pi * x) + rng.normal(0, 0.05, n)
-    xi = _chatterjee_xi(x, y); r = np.corrcoef(x, y)[0, 1]; rho, _ = spearmanr(x, y)
+    x = rng.uniform(0, 1, n);
+    y = np.sin(4 * np.pi * x) + rng.normal(0, 0.05, n)
+    xi = _chatterjee_xi(x, y);
+    r = np.corrcoef(x, y)[0, 1];
+    rho, _ = spearmanr(x, y)
     axes[1].scatter(x, y, s=10, alpha=0.6, color="#d62728")
     axes[1].set_title(f"y = sin(4πx)\nPearson = {r:.2f}, Spearman = {rho:.2f}, ξ = {xi:.2f}")
 
     for ax in axes:
-        ax.set_xlabel("x"); ax.set_ylabel("y")
+        ax.set_xlabel("x");
+        ax.set_ylabel("y")
     save(fig, "chatterjee_xi.png")
 
 
@@ -239,21 +269,24 @@ def fig_mi_vs_pearson():
     fig, axes = plt.subplots(1, 2, figsize=(8, 3.8))
 
     # linear
-    x = rng.uniform(-2, 2, n); y = 1.2 * x + rng.normal(0, 0.3, n)
+    x = rng.uniform(-2, 2, n);
+    y = 1.2 * x + rng.normal(0, 0.3, n)
     r = np.corrcoef(x, y)[0, 1]
     mi = mutual_info_regression(x.reshape(-1, 1), y, random_state=0)[0]
     axes[0].scatter(x, y, s=10, alpha=0.6, color="#1f77b4")
     axes[0].set_title(f"Linear\nPearson = {r:.2f}, MI = {mi:.2f}")
 
     # quadratic
-    x = rng.uniform(-2, 2, n); y = x ** 2 + rng.normal(0, 0.2, n)
+    x = rng.uniform(-2, 2, n);
+    y = x ** 2 + rng.normal(0, 0.2, n)
     r = np.corrcoef(x, y)[0, 1]
     mi = mutual_info_regression(x.reshape(-1, 1), y, random_state=0)[0]
     axes[1].scatter(x, y, s=10, alpha=0.6, color="#2ca02c")
     axes[1].set_title(f"Quadratic\nPearson = {r:.2f}, MI = {mi:.2f}")
 
     for ax in axes:
-        ax.set_xlabel("x"); ax.set_ylabel("y")
+        ax.set_xlabel("x");
+        ax.set_ylabel("y")
     save(fig, "mi_vs_pearson.png")
 
 
@@ -263,7 +296,7 @@ def fig_shap_summary():
     from sklearn.datasets import make_friedman1
     rng = np.random.default_rng(5)
     X, y = make_friedman1(n_samples=800, n_features=8, noise=1.0, random_state=5)
-    feat_names = [f"x{i+1}" for i in range(X.shape[1])]
+    feat_names = [f"x{i + 1}" for i in range(X.shape[1])]
     model = GradientBoostingRegressor(n_estimators=200, max_depth=3, random_state=5)
     model.fit(X, y)
 
@@ -304,7 +337,8 @@ def fig_shap_summary():
     fig, ax = plt.subplots(figsize=(6.5, 4))
     ax.barh(np.arange(len(order)), pi.importances_mean[order],
             xerr=pi.importances_std[order], color="#1f77b4")
-    ax.set_yticks(np.arange(len(order))); ax.set_yticklabels([feat_names[j] for j in order])
+    ax.set_yticks(np.arange(len(order)));
+    ax.set_yticklabels([feat_names[j] for j in order])
     ax.set_xlabel("Permutation importance")
     ax.set_title("Permutation importance (SHAP fallback)")
     save(fig, "shap_summary.png")
@@ -326,7 +360,8 @@ def fig_pdp_ice():
         ax=ax, random_state=0,
     )
     ax.set_title("Partial Dependence + ICE for feature x4 (Friedman1)")
-    ax.set_xlabel("x4"); ax.set_ylabel("partial dependence")
+    ax.set_xlabel("x4");
+    ax.set_ylabel("partial dependence")
     save(fig, "pdp_ice.png")
 
 

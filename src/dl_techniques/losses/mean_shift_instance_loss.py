@@ -31,13 +31,20 @@ from typing import Any, Dict, Optional
 import keras
 import numpy as np
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.layers.mixtures.mean_shift_ops import pairwise_sq_dist
 from dl_techniques.utils.dtype_policy import accumulation_dtype, stability_floor
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.validation import positive_float, positive_int
 
+# ---------------------------------------------------------------------
+
 _SQRT_FLOOR = 1e-12
 
+# ---------------------------------------------------------------------
 
 def _non_negative_float(value: Any, name: str) -> float:
     """Return ``value`` as a Python float after checking it is finite and >= 0.
@@ -247,3 +254,5 @@ class MeanShiftInstanceLoss(keras.losses.Loss):
             }
         )
         return config
+
+# ---------------------------------------------------------------------

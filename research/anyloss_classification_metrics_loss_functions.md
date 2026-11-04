@@ -2,15 +2,21 @@
 
 ## Paper Overview
 
-The paper "AnyLoss: Transforming Classification Metrics into Loss Functions" by Doheon Han, Nuno Moniz, and Nitesh V Chawla introduces a general-purpose method that transforms any confusion matrix-based evaluation metric into a differentiable loss function that can be used directly in neural network training.
+The paper "AnyLoss: Transforming Classification Metrics into Loss Functions" by Doheon Han, Nuno Moniz, and Nitesh V
+Chawla introduces a general-purpose method that transforms any confusion matrix-based evaluation metric into a
+differentiable loss function that can be used directly in neural network training.
 
 ### Key Problem
 
-In binary classification, model evaluation typically uses metrics derived from the confusion matrix (accuracy, F-score, etc.), but these metrics cannot be directly optimized during training because they involve non-differentiable operations on discrete labels.
+In binary classification, model evaluation typically uses metrics derived from the confusion matrix (accuracy, F-score,
+etc.), but these metrics cannot be directly optimized during training because they involve non-differentiable operations
+on discrete labels.
 
 ### Innovation
 
-The authors propose an approximation function that transforms the outputs of a sigmoid function (class probabilities) into near-binary values, which allows a confusion matrix to be constructed in a differentiable form. This enables any confusion matrix-based metric to be directly optimized during training.
+The authors propose an approximation function that transforms the outputs of a sigmoid function (class probabilities)
+into near-binary values, which allows a confusion matrix to be constructed in a differentiable form. This enables any
+confusion matrix-based metric to be directly optimized during training.
 
 ## Core Mechanism
 
@@ -18,20 +24,22 @@ The authors propose an approximation function that transforms the outputs of a s
 
 The approximation function is defined as:
 
-$$A(p_i) = \frac{1}{1 + e^{-L(p_i - 0.5)}}$$
+$$A (p_i) = \frac{1}{1 + e^{-L (p_i - 0.5)}}$$
 
 Where:
+
 - $p_i$ is the class probability from the sigmoid function
 - $L$ is an amplifying scale (the paper recommends $L = 73$ based on analysis)
 
-This function amplifies probabilities to be very close to 0 or 1, but not exactly 0 or 1 (which would make derivatives zero and stop learning).
+This function amplifies probabilities to be very close to 0 or 1, but not exactly 0 or 1 (which would make derivatives
+zero and stop learning).
 
 ### Confusion Matrix Construction
 
 Using the approximated probabilities, a differentiable confusion matrix can be constructed:
 
 - $TN = \sum_{i=1}^{n} (1 - y_i)(1 - yh_i)$
-- $FN = \sum_{i=1}^{n} y_i(1 - yh_i)$
+- $FN = \sum_{i=1}^{n} y_i (1 - yh_i)$
 - $FP = \sum_{i=1}^{n} (1 - y_i)yh_i$
 - $TP = \sum_{i=1}^{n} y_i \cdot yh_i$
 
@@ -41,7 +49,7 @@ Where $y_i$ are the ground truth labels and $yh_i$ are the approximated probabil
 
 The AnyLoss framework enables the creation of loss functions for any confusion matrix-based metric:
 
-$$AnyLoss = 1 - f(TN, FN, FP, TP)$$
+$$AnyLoss = 1 - f (TN, FN, FP, TP)$$
 
 Where $f$ is any evaluation metric function based on confusion matrix entries.
 
@@ -177,26 +185,27 @@ The paper evaluated AnyLoss against baseline models (MSE and BCE) on 102 diverse
 
 #### Results on 102 Datasets (Winning Count)
 
-|  Metric  | MSE | BCE | AnyLoss |
-|----------|-----|-----|---------|
-| Accuracy | 13  | 20  | 69      |
-| F1       | 2   | 10  | 90      |
-| Balanced Acc | 4 | 9 | 89     |
+| Metric       | MSE | BCE | AnyLoss |
+|--------------|-----|-----|---------|
+| Accuracy     | 13  | 20  | 69      |
+| F1           | 2   | 10  | 90      |
+| Balanced Acc | 4   | 9   | 89      |
 
 #### Performance with Increasing Imbalance
 
 AnyLoss showed increasing advantages as dataset imbalance increased:
 
 | Imbalance Ratio | F1 Score Improvement over MSE | F1 Score Improvement over BCE |
-|-----------------|------------------------------|------------------------------|
-| 60:40 ~ 70:30   | +0.081                       | +0.057                       |
-| 70:30 ~ 80:20   | +0.186                       | +0.142                       |
-| 80:20 ~ 90:10   | +0.208                       | +0.122                       |
-| 90:10 ~         | +0.304                       | +0.167                       |
+|-----------------|-------------------------------|-------------------------------|
+| 60:40 ~ 70:30   | +0.081                        | +0.057                        |
+| 70:30 ~ 80:20   | +0.186                        | +0.142                        |
+| 80:20 ~ 90:10   | +0.208                        | +0.122                        |
+| 90:10 ~         | +0.304                        | +0.167                        |
 
 ### Learning Speed
 
 The learning time of AnyLoss was competitive with BCE:
+
 - MSE: ~0.8-1.0x BCE's time
 - AnyLoss: ~0.9-1.0x BCE's time
 - Similar approach (SOL): ~1.1-1.2x BCE's time
@@ -205,7 +214,9 @@ AnyLoss also showed faster convergence, requiring fewer epochs to reach optimal 
 
 ### Optimal L Value
 
-Through mathematical analysis and experiments, the paper determined L=73 as the optimal value for the approximation function, balancing:
+Through mathematical analysis and experiments, the paper determined L=73 as the optimal value for the approximation
+function, balancing:
+
 - Making values close enough to 0 or 1 for accurate confusion matrix representation
 - Avoiding numerical issues with exact 0 or 1 values (which would cause zero gradients)
 
@@ -225,4 +236,6 @@ Through mathematical analysis and experiments, the paper determined L=73 as the 
 
 ## Conclusion
 
-AnyLoss provides a powerful framework that enables direct optimization of any confusion matrix-based evaluation metric during neural network training. It shows particular promise for imbalanced datasets where standard metrics like accuracy can be misleading.
+AnyLoss provides a powerful framework that enables direct optimization of any confusion matrix-based evaluation metric
+during neural network training. It shows particular promise for imbalanced datasets where standard metrics like accuracy
+can be misleading.

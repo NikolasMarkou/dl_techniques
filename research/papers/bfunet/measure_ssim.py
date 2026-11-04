@@ -57,7 +57,7 @@ from train.bfunet.eval_psnr_vs_noise import (
 # --- Fixed protocol (must match results/eval_convunext_20260715_psnr_fullimage) --------
 CHECKPOINT = "results/20260715_convunext_denoiser/best_model.keras"
 SEED = 42
-NUM_SAMPLES = 100          # >= every set's size -> all images loaded, permutation order fixed
+NUM_SAMPLES = 100  # >= every set's size -> all images loaded, permutation order fixed
 SIZE_MULTIPLE = 16
 CHANNELS = 3
 SIGMAS_255: List[float] = [15.0, 25.0, 50.0]

@@ -91,8 +91,8 @@ consequences, decided entirely by where the domain sits.
 `_homogeneity_probe` (informational only, it never raises). It feeds a flat image `c · 1` and
 reports `rel_err = ‖f(c·1) − c·1‖ / ‖c·1‖`. On an **untrained** bias-free ConvUNext:
 
-| `c` | 0.1 | 0.25 | 0.5 | 0.75 | 0.9 |
-|---|---|---|---|---|---|
+| `c`       | 0.1       | 0.25      | 0.5       | 0.75      | 0.9       |
+|-----------|-----------|-----------|-----------|-----------|-----------|
 | `rel_err` | **1.502** | **1.502** | **1.502** | **1.502** | **1.502** |
 
 The value is **identical for every `c`**, which is precisely what degree-1 homogeneity
@@ -124,8 +124,7 @@ property the whole empirical-Bayes construction depends on.
 
 ## 2. INV-2: what did NOT change, and must NEVER be "fixed"
 
-**This migration is a pure DC shift, not a rescale.** The peak-to-peak width is `1.0` in
-**both** domains:
+**This migration is a pure DC shift, not a rescale.** The peak-to-peak width is `1.0` in **both** domains:
 
 ```
 [-0.5, +0.5]   width = 1.0
@@ -134,15 +133,15 @@ property the whole empirical-Bayes construction depends on.
 
 Everything below was **already exactly correct** in the new domain and was left **untouched**:
 
-| Site | Value | Why it is unchanged |
-|---|---|---|
-| `PsnrMetric(max_val=1.0)` | `1.0` | peak-to-peak, not maximum |
-| `SsimMetric(max_val=1.0)` | `1.0` | same |
-| `common.py::_mean_psnr` | `20·log10(1.0 / rmse)` | same |
-| `sigma_255 = sigma * 255` | - | sigma is a std on a unit-width domain |
-| `noise_sigma_min`, `sigma_max_start`, `sigma_max_end` | unchanged | noise stds, not pixel offsets |
-| `solver._DEFAULT_SIGMA_0` | `0.4` | a noise std |
-| `ddnm.sigma_start` | `0.5` | a noise std, **not** a pixel offset |
+| Site                                                  | Value                  | Why it is unchanged                   |
+|-------------------------------------------------------|------------------------|---------------------------------------|
+| `PsnrMetric(max_val=1.0)`                             | `1.0`                  | peak-to-peak, not maximum             |
+| `SsimMetric(max_val=1.0)`                             | `1.0`                  | same                                  |
+| `common.py::_mean_psnr`                               | `20·log10(1.0 / rmse)` | same                                  |
+| `sigma_255 = sigma * 255`                             | -                      | sigma is a std on a unit-width domain |
+| `noise_sigma_min`, `sigma_max_start`, `sigma_max_end` | unchanged              | noise stds, not pixel offsets         |
+| `solver._DEFAULT_SIGMA_0`                             | `0.4`                  | a noise std                           |
+| `ddnm.sigma_start`                                    | `0.5`                  | a noise std, **not** a pixel offset   |
 
 > ### WARNING - the single most likely future mistake
 >
@@ -200,8 +199,8 @@ legacy checkpoint); they auto-re-enable the moment a `[0,1]` checkpoint exists.
 
 ## 4. Restructure, don't swap: three sites where a literal replace would have gone GREEN and been WRONG
 
-These are the most instructive part of the migration. Each of them encodes the zero-center
-**structurally** - in the *shape* of the expression, not in a `-0.5` literal - so a
+These are the most instructive part of the migration. Each of them encodes the zero-center **structurally** - in the
+*shape* of the expression, not in a `-0.5` literal - so a
 grep-driven find-and-replace passes right over them (or "fixes" them into something equally
 wrong) and the suite stays green with wrong semantics.
 
@@ -210,11 +209,11 @@ wrong) and the suite stays green with wrong semantics.
 The old test was one-sided and symmetric-domain: `np.abs(noisy) >= 0.5 - eps`. Measured on one
 real noisy batch:
 
-| Form | Pixels flagged as "saturated" |
-|---|---|
-| Correct two-sided: `(x <= eps) | (x >= 1 - eps)` | **15.30 %** |
-| Legacy one-sided `abs(x) >= 0.48`, run on `[0,1]` data | **50.47 %** - it flags the *entire upper half of the image* |
-| Naive literal swap to `abs(x) >= 0.98` | **5.63 %** - it silently *drops* the 9.67 % of near-black pixels |
+| Form                                                   | Pixels flagged as "saturated"                                    |
+|--------------------------------------------------------|------------------------------------------------------------------|
+| Correct two-sided: `(x <= eps)                         | (x >= 1 - eps)`                                                  | **15.30 %** |
+| Legacy one-sided `abs(x) >= 0.48`, run on `[0,1]` data | **50.47 %** - it flags the *entire upper half of the image*      |
+| Naive literal swap to `abs(x) >= 0.98`                 | **5.63 %** - it silently *drops* the 9.67 % of near-black pixels |
 
 Both wrong forms produce a wrong *statistic*, not a crash. This file has **no test coverage**.
 
@@ -274,8 +273,8 @@ Two things remain genuinely open:
 1. **Is the property learned?** The probe on a converged `[0,1]` model must show `rel_err`
    dropping well below the untrained `1.502`. Not yet measured.
 2. **Is the old dying-neuron concern real?** `miyasawas_theorem.md`'s original worry about
-   dead units and instability on strictly-positive inputs is a real ReLU-family failure mode
-   **in general**, and it has **not** been empirically refuted here. The correction in that
+   dead units and instability on strictly-positive inputs is a real ReLU-family failure mode **in general**, and it has
+   **not** been empirically refuted here. The correction in that
    document refutes its *argument* (which was a misapplied generic heuristic), not this
    specific empirical risk.
 
@@ -306,13 +305,13 @@ plan nor the argument.
 
 ## 8. Quick reference for the next reader
 
-| Question | Answer |
-|---|---|
-| What domain do the denoisers use? | `[0, 1]`. `image / 255.0`. Nothing else. |
-| Where is the domain defined? | `src/train/bfunet/common.py`: `DATA_MIN = 0.0`, `DATA_MAX = 1.0`. One place. |
-| Where does the app enter/exit the domain? | `DenoiserPrior.ingest` / `.denorm`. One place. Do not add a second. |
-| Did sigma / PSNR / SSIM change? | **No.** See §2. Do not "fix" them. |
-| Can I load an old checkpoint? | **No.** `from_pretrained` refuses it. See §3. |
-| Why does `abs(pixel)` show up in a review comment? | It is a zero-center assumption in disguise. See §4. |
-| Are the paper's numbers still valid? | For the **old** model, yes. They must be re-measured. See §5. |
-| Is `[0,1]` proven better here? | **Not yet.** Structurally argued, not empirically demonstrated. See §6. |
+| Question                                           | Answer                                                                       |
+|----------------------------------------------------|------------------------------------------------------------------------------|
+| What domain do the denoisers use?                  | `[0, 1]`. `image / 255.0`. Nothing else.                                     |
+| Where is the domain defined?                       | `src/train/bfunet/common.py`: `DATA_MIN = 0.0`, `DATA_MAX = 1.0`. One place. |
+| Where does the app enter/exit the domain?          | `DenoiserPrior.ingest` / `.denorm`. One place. Do not add a second.          |
+| Did sigma / PSNR / SSIM change?                    | **No.** See §2. Do not "fix" them.                                           |
+| Can I load an old checkpoint?                      | **No.** `from_pretrained` refuses it. See §3.                                |
+| Why does `abs(pixel)` show up in a review comment? | It is a zero-center assumption in disguise. See §4.                          |
+| Are the paper's numbers still valid?               | For the **old** model, yes. They must be re-measured. See §5.                |
+| Is `[0,1]` proven better here?                     | **Not yet.** Structurally argued, not empirically demonstrated. See §6.      |

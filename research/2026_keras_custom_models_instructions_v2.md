@@ -8,13 +8,13 @@ verifiably do what they claim.
 Making a layer construct and serialize is the easy half, and it is not where the defects are. A
 library-wide audit of every model package in a large Keras 3 codebase found this pattern repeatedly:
 
-| Defect | Symptom to the author |
-|---|---|
-| A parameter validated, stored, serialized, documented — and read by no code path | `max\|dy\| = 0.000e+00` across every legal value |
-| A rotary embedding fed the head axis instead of the sequence axis | an **exact algebraic no-op**: `(Rq)·(Rk) = q·k` |
-| `add_weight(zeros)` + `.assign()` in `build()` | table stays all zeros in every real model |
-| A decoder-only LM with no causal mask | bidirectional attention under a next-token objective |
-| A reloaded model that restored **zero** weights | round-trip test passed |
+| Defect                                                                           | Symptom to the author                                |
+|----------------------------------------------------------------------------------|------------------------------------------------------|
+| A parameter validated, stored, serialized, documented — and read by no code path | `max\|dy\| = 0.000e+00` across every legal value     |
+| A rotary embedding fed the head axis instead of the sequence axis                | an **exact algebraic no-op**: `(Rq)·(Rk) = q·k`      |
+| `add_weight(zeros)` + `.assign()` in `build()`                                   | table stays all zeros in every real model            |
+| A decoder-only LM with no causal mask                                            | bidirectional attention under a next-token objective |
+| A reloaded model that restored **zero** weights                                  | round-trip test passed                               |
 
 Every one shipped behind a green suite: shapes matched, parameter counts matched, gradients existed,
 serialization round-tripped, loss curves looked normal.
@@ -25,12 +25,12 @@ optional polish — a guard that cannot fail is the most likely outcome of writi
 
 ## How to read this
 
-| You are | Read |
-|---|---|
-| Writing a new layer | §1–§4, §6–§9, then the checklist in §16 |
-| Writing a new model package | all of it; §5 is the package shape |
-| Fixing a bug | §14 to find the pitfall, §13 to build a guard that can fail |
-| Reviewing | §14 as the code checklist, §13.6 as the test checklist |
+| You are                     | Read                                                        |
+|-----------------------------|-------------------------------------------------------------|
+| Writing a new layer         | §1–§4, §6–§9, then the checklist in §16                     |
+| Writing a new model package | all of it; §5 is the package shape                          |
+| Fixing a bug                | §14 to find the pitfall, §13 to build a guard that can fail |
+| Reviewing                   | §14 as the code checklist, §13.6 as the test checklist      |
 
 Conventions used below: **❌ WRONG / ✅ CORRECT** code pairs; **Measured:** lines carry a figure that
 was observed, not estimated; **Detect:** lines name the probe that catches the defect.
@@ -42,7 +42,7 @@ was observed, not estimated; **Detect:** lines name the probe that catches the d
 1. [Core Design Principles](#1-core-design-principles)
 2. [Essential Setup and Registration](#2-essential-setup-and-registration)
 3. [Layer Implementation Patterns](#3-layer-implementation-patterns)
-4. [Graph-Safe Operations in call()](#4-graph-safe-operations-in-call)
+4. [Graph-Safe Operations in call ()](#4-graph-safe-operations-in-call)
 5. [Model Implementation Patterns](#5-model-implementation-patterns)
 6. [Configuration Management](#6-configuration-management)
 7. [Serialization and Deserialization](#7-serialization-and-deserialization)
@@ -90,24 +90,27 @@ Everything in this document follows from step 3 of the load path:
 
 ### 1.2 The Golden Rule: Create vs. Build
 
-| Method | Runs | What belongs there |
-|--------|------|--------------------|
-| `__init__` | once, at instantiation | CREATE all sub-layers; STORE all configuration |
-| `build` | once, when shapes are known | CREATE this layer's weights; MATERIALIZE the sub-layer tree |
-| `call` | every batch | symbolic operations only |
-| `compute_output_shape` | shape inference | output shape from STORED CONFIG, on an unbuilt layer |
-| `get_config` | serialization | every constructor argument |
+| Method                 | Runs                        | What belongs there                                          |
+|------------------------|-----------------------------|-------------------------------------------------------------|
+| `__init__`             | once, at instantiation      | CREATE all sub-layers; STORE all configuration              |
+| `build`                | once, when shapes are known | CREATE this layer's weights; MATERIALIZE the sub-layer tree |
+| `call`                 | every batch                 | symbolic operations only                                    |
+| `compute_output_shape` | shape inference             | output shape from STORED CONFIG, on an unbuilt layer        |
+| `get_config`           | serialization               | every constructor argument                                  |
 
 **NEVER in `__init__`**
+
 - create weights (`self.add_weight`)
 - inspect `input_shape` or run any shape-dependent operation
 
 **ALWAYS in `build`**
+
 - create this layer's own weights
 - build each sub-layer that `call()` will run — and only those (§8)
 - call `super().build(input_shape)` last
 
 **NEVER in `call`**
+
 - construct a layer, mutate a Python container, call `.numpy()` / `convert_to_numpy`
 - branch a Python `if` on a tensor *value*
 - log
@@ -202,8 +205,8 @@ class MyLayer(keras.layers.Layer):
 **Rule: always pass an explicit `package=`.**
 
 A bare `register_keras_serializable()` produces a key that is **independent of the defining module**,
-so two classes with the same name in different packages claim the same key. Whichever module imports
-**last** silently wins; loading a saved model of the other one is broken, and which one breaks
+so two classes with the same name in different packages claim the same key. Whichever module imports **last** silently
+wins; loading a saved model of the other one is broken, and which one breaks
 depends on import order.
 
 **Measured:** collisions found between unrelated model packages on the generic names `Downsample`,
@@ -211,11 +214,11 @@ depends on import order.
 
 **Corollaries**
 
-| Rule | Reason |
-|---|---|
-| Prefix a generic class name if one already exists (`FastVitRepMixerBlock`, not a second `RepMixerBlock`) | the registry is keyed by name |
-| Key a `custom_objects` dict by `keras.saving.get_registered_name(cls)`, **never** the bare class name | `_retrieve_class_or_fn` never uses a literal class name as a lookup key for classes — a dict keyed that way is decorative and every entry is ignored |
-| Never bind a name in a package `__init__.py` matching one of that package's own **subpackages** | the subpackage is shadowed and `from <pkg>.<sub>.<mod> import ...` stops resolving. **Historical exemplar, no longer reproducible in this tree**: re-exporting the class `SAM2` from the package that then contained a `SAM2/` subpackage broke `from ...SAM.SAM2.model import ...` at collection time. The 2026-08-24 restructure lowercased those subpackages to `sam1/ sam2/ sam3/`, and Python is case-sensitive, so class `SAM2` and package `sam2` now coexist (MEASURED 2026-08-25). The rule stands for any case-EXACT collision |
+| Rule                                                                                                     | Reason                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+|----------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Prefix a generic class name if one already exists (`FastVitRepMixerBlock`, not a second `RepMixerBlock`) | the registry is keyed by name                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Key a `custom_objects` dict by `keras.saving.get_registered_name(cls)`, **never** the bare class name    | `_retrieve_class_or_fn` never uses a literal class name as a lookup key for classes — a dict keyed that way is decorative and every entry is ignored                                                                                                                                                                                                                                                                                                                                                                                     |
+| Never bind a name in a package `__init__.py` matching one of that package's own **subpackages**          | the subpackage is shadowed and `from <pkg>.<sub>.<mod> import ...` stops resolving. **Historical exemplar, no longer reproducible in this tree**: re-exporting the class `SAM2` from the package that then contained a `SAM2/` subpackage broke `from ...SAM.SAM2.model import ...` at collection time. The 2026-08-24 restructure lowercased those subpackages to `sam1/ sam2/ sam3/`, and Python is case-sensitive, so class `SAM2` and package `sam2` now coexist (MEASURED 2026-08-25). The rule stands for any case-EXACT collision |
 
 The subpackage-shadowing break happens at **collection** time, so per-package test runs never see it.
 Run the tree-wide collection gate after any change to a package's public surface:
@@ -402,11 +405,11 @@ def build(self, input_shape):
 
 The trap is **path-dependent**, which is why it survives so long:
 
-| How the layer gets built | Table value |
-|---|---|
-| `layer.build(shape)` called directly | correct |
-| eager `layer(x)` on a top-level layer | correct |
-| `keras.Model(inp, layer(inp))` | correct |
+| How the layer gets built                   | Table value   |
+|--------------------------------------------|---------------|
+| `layer.build(shape)` called directly       | correct       |
+| eager `layer(x)` on a top-level layer      | correct       |
+| `keras.Model(inp, layer(inp))`             | correct       |
 | first reached from a **parent's `call()`** | **all zeros** |
 
 The last row is every real model.
@@ -449,11 +452,11 @@ every mode flag**, including branches no shipped variant reaches.
 
 ### 3.5 Validation Placement
 
-| Check | Where | Why |
-|---|---|---|
-| Argument ranges / types | `__init__` | fail before anything is built |
-| Cross-parameter contracts `call()` relies on | `__init__` | a config that builds but cannot forward is a construction-time error |
-| Static shape contracts | `build()` **and** `call()` | a contract checked only in `build()` is checked once, against whatever shape arrived first |
+| Check                                        | Where                      | Why                                                                                        |
+|----------------------------------------------|----------------------------|--------------------------------------------------------------------------------------------|
+| Argument ranges / types                      | `__init__`                 | fail before anything is built                                                              |
+| Cross-parameter contracts `call()` relies on | `__init__`                 | a config that builds but cannot forward is a construction-time error                       |
+| Static shape contracts                       | `build()` **and** `call()` | a contract checked only in `build()` is checked once, against whatever shape arrived first |
 
 **Measured:** a contract on a singleton axis checked only at build silently accepted a non-singleton
 axis and convolved the wrong dimension, with no error. Separately, a mismatched dimension pair
@@ -474,15 +477,15 @@ is either an error or, worse, silently frozen to whatever the trace saw.
 
 ### 4.1 The Rules
 
-| ❌ Never in `call()` | ✅ Instead |
-|---|---|
+| ❌ Never in `call()`                            | ✅ Instead                       |
+|-------------------------------------------------|----------------------------------|
 | `list(shape)`, `int(x)`, `float(x)` on a tensor | `ops.shape(x)`, index the tensor |
-| `.numpy()`, `convert_to_numpy` | stay symbolic |
-| Python `if` on a tensor *value* | `ops.where`, `ops.cond` |
-| Python `for` over a tensor dimension | vectorize, or `ops.scan` |
-| constructing a layer | construct in `__init__` |
-| appending to a Python list | a `keras.Variable` |
-| `logger.*` | log once in `__init__` |
+| `.numpy()`, `convert_to_numpy`                  | stay symbolic                    |
+| Python `if` on a tensor *value*                 | `ops.where`, `ops.cond`          |
+| Python `for` over a tensor dimension            | vectorize, or `ops.scan`         |
+| constructing a layer                            | construct in `__init__`          |
+| appending to a Python list                      | a `keras.Variable`               |
+| `logger.*`                                      | log once in `__init__`           |
 
 ```python
 def call(self, inputs, training=None):
@@ -509,11 +512,11 @@ shared causal-mask helper.
 
 **Symbolic `training` into `BatchNormalization` or `Dropout`** — measured on Keras 3.8:
 
-| Layer | traced `tf.constant(True)` | traced `tf.constant(False)` |
-|---|---|---|
-| `BatchNormalization` | raises `OperatorNotAllowedInGraphError` | raises |
-| `Dropout` | raises | raises |
-| `LayerNormalization` | fine | fine |
+| Layer                | traced `tf.constant(True)`              | traced `tf.constant(False)` |
+|----------------------|-----------------------------------------|-----------------------------|
+| `BatchNormalization` | raises `OperatorNotAllowedInGraphError` | raises                      |
+| `Dropout`            | raises                                  | raises                      |
+| `LayerNormalization` | fine                                    | fine                        |
 
 `tf.get_static_value` on a traced argument returns `None`, so the value cannot be recovered inside
 the trace. Route through a gate that keeps the Python-bool path byte-identical and sends only a
@@ -521,8 +524,8 @@ tensor flag to `ops.cond` — and gate only the layers that need it.
 
 **`training=` propagation** — Keras 3 propagates `training` through a single mutable `CallContext`
 slot that every nested `__call__` overwrites and only the outermost entry restores. A sibling
-sub-layer forcing a different `training` poisons the ambient value for every later un-forwarded call.
-**Forward `training=` explicitly**, even where omitting it is currently a no-op.
+sub-layer forcing a different `training` poisons the ambient value for every later un-forwarded call. **Forward
+`training=` explicitly**, even where omitting it is currently a no-op.
 
 **NumPy fancy indexing** (`t[batch_idx, item_idx]`) is invalid on a backend tensor and raises
 eagerly — the layer is dead on every forward pass. Use `ops.take_along_axis`.
@@ -547,13 +550,13 @@ not a universal law; the exemptions are in §5.6.
 
 The module docstring is **substantive prose, not a template**:
 
-| # | Element |
-|---|---|
-| 1 | **One opening sentence** naming the architecture and its distinguishing options — a sentence, not a title with an `====` underline |
+| # | Element                                                                                                                                                                         |
+|---|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 1 | **One opening sentence** naming the architecture and its distinguishing options — a sentence, not a title with an `====` underline                                              |
 | 2 | **The principle**: what problem the architecture solves and *why its mechanism resolves it*. Inline math in backticks (`` `y = F(x) + x` ``) where an equation carries the idea |
-| 3 | **The architecture**: stage/block structure, design trade-offs, and the places where the code does something non-obvious, and why |
-| 4 | **Every deliberate behavioural choice**, stated as a choice with its reason (e.g. why `pretrained=True` raises rather than warning) |
-| 5 | **`References:`** as `- Author et al., YEAR. Title. (url)`, including the papers the design actually draws on |
+| 3 | **The architecture**: stage/block structure, design trade-offs, and the places where the code does something non-obvious, and why                                               |
+| 4 | **Every deliberate behavioural choice**, stated as a choice with its reason (e.g. why `pretrained=True` raises rather than warning)                                             |
+| 5 | **`References:`** as `- Author et al., YEAR. Title. (url)`, including the papers the design actually draws on                                                                   |
 
 This **replaces** terse `Model Variants:` / `Usage Examples:` boilerplate that restates the variant
 dict and the factory signature sitting directly below it. Length follows the architecture; do not pad,
@@ -588,12 +591,12 @@ class MyModel(keras.Model):
         # 5. ONE logger.info summarizing what was created
 ```
 
-| Member | Requirement |
-|---|---|
-| `call(self, inputs, training=None)` | **no logging inside** — it fires on every trace |
-| `get_config()` | every constructor argument, complex objects serialized; an initializer is stored as `initializer_spec(...)` (a string or dict), not as the caller's instance; the body is `config = {...}` then `return {**base_config, **config}` |
-| `from_config()` | none by default: `__init__` resolves strings and dicts itself. Add one only when it does measured real work, and never let it write into the dict it receives |
-| `from_variant(cls, variant, ..., pretrained=False, **kwargs)` | raises `ValueError` **listing available keys** on a miss; accepts the overrides its own docstring advertises; does not splat description metadata into the constructor |
+| Member                                                        | Requirement                                                                                                                                                                                                                        |
+|---------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `call(self, inputs, training=None)`                           | **no logging inside** — it fires on every trace                                                                                                                                                                                    |
+| `get_config()`                                                | every constructor argument, complex objects serialized; an initializer is stored as `initializer_spec(...)` (a string or dict), not as the caller's instance; the body is `config = {...}` then `return {**base_config, **config}` |
+| `from_config()`                                               | none by default: `__init__` resolves strings and dicts itself. Add one only when it does measured real work, and never let it write into the dict it receives                                                                      |
+| `from_variant(cls, variant, ..., pretrained=False, **kwargs)` | raises `ValueError` **listing available keys** on a miss; accepts the overrides its own docstring advertises; does not splat description metadata into the constructor                                                             |
 
 **Measured:** several `from_variant` implementations raised `TypeError` on exactly the override their
 docstring advertised.
@@ -630,12 +633,12 @@ from_variant(..., pretrained=)  →  pretrained_path_or_raise(pretrained, label)
                                     local-path alternative
 ```
 
-| Rule | Reason |
-|---|---|
-| No `by_name` on `Model.load_weights` | Keras 3 removed it. Where it survived as a supposed no-op, every call actually **raised**, and the enclosing `except` turned it into a warning and continued with random weights |
-| Never a placeholder URL table + `try/except` that warns and continues | `pretrained=True` then silently returns an untrained model |
-| Never swallow a load failure into a warning | a local-path load that restores nothing, or leaves a layer outside the classifier head unrestored, must raise |
-| No `_download_weights`, `weights_dataset` or `cache_dir` | nothing is hosted: a download branch is the placeholder-URL pattern above under another name |
+| Rule                                                                  | Reason                                                                                                                                                                           |
+|-----------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| No `by_name` on `Model.load_weights`                                  | Keras 3 removed it. Where it survived as a supposed no-op, every call actually **raised**, and the enclosing `except` turned it into a warning and continued with random weights |
+| Never a placeholder URL table + `try/except` that warns and continues | `pretrained=True` then silently returns an untrained model                                                                                                                       |
+| Never swallow a load failure into a warning                           | a local-path load that restores nothing, or leaves a layer outside the classifier head unrestored, must raise                                                                    |
+| No `_download_weights`, `weights_dataset` or `cache_dir`              | nothing is hosted: a download branch is the placeholder-URL pattern above under another name                                                                                     |
 
 **Measured:** nine packages in one codebase shipped the warn-and-continue pattern simultaneously,
 and the documented alternative was broken too.
@@ -662,11 +665,11 @@ logic of its own**. The package `__init__.py` exports the class and the factory 
 
 ### 5.6 When the Shape Does Not Apply
 
-| Case | What to do |
-|---|---|
-| No genuine named variants | do not invent a variant table; apply §5.1, §5.5 only, and say why in the README |
+| Case                                                                          | What to do                                                                               |
+|-------------------------------------------------------------------------------|------------------------------------------------------------------------------------------|
+| No genuine named variants                                                     | do not invent a variant table; apply §5.1, §5.5 only, and say why in the README          |
 | Functional builders returning `keras.Model(inputs, outputs)` with no subclass | keep them functional — converting breaks existing checkpoints. §5.1 and §5.5 still apply |
-| Multi-model families / nested packages | apply the shape per *inner architecture*, not per directory |
+| Multi-model families / nested packages                                        | apply the shape per *inner architecture*, not per directory                              |
 
 Before classifying a package as functional, verify with `grep -n "^class .*(.*Model)" <pkg>/*.py`. A
 grep-based census of this question was wrong about several packages.
@@ -689,10 +692,10 @@ def get_config(self):
     return {**base_config, **config}
 ```
 
-No `from_config` is written: `__init__` resolves a spec or a serialized regularizer itself
-(`initializer_spec(...)`, `regularizers.get(...)`), so the inherited `from_config` rebuilds the
-object. Add one only when it does measured real work, and then copy the dict first
-(`config = dict(config)`): one that writes into the dict it is handed corrupts the caller's
+No `from_config` is written: `__init__` resolves a spec or a serialized regularizer itself (`initializer_spec(...)`,
+`regularizers.get(...)`), so the inherited `from_config` rebuilds the
+object. Add one only when it does measured real work, and then copy the dict first (`config = dict(config)`): one that
+writes into the dict it is handed corrupts the caller's
 config.
 
 ### 6.2 `**kwargs` Is Not a Channel to Your Sub-layers
@@ -760,11 +763,11 @@ def test_serialization_cycle_value_identity(self, sample_input):
 
 Three details are load-bearing:
 
-| Detail | Why |
-|---|---|
-| `rtol=0` | `assert_allclose`'s default `rtol=1e-7` silently contributes to a nominally-`atol` bound. **Measured:** it contributed `1.24e-05` of a `1.53e-05` failure, making the stated `atol` decorative |
-| `training=False`, explicit | a bare `model(x)` is not inference; stochastic-depth layers short-circuit only on `training is False` |
-| Values, never shapes | a shape-only round trip is satisfied by a model that restored **zero** weights |
+| Detail                     | Why                                                                                                                                                                                            |
+|----------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `rtol=0`                   | `assert_allclose`'s default `rtol=1e-7` silently contributes to a nominally-`atol` bound. **Measured:** it contributed `1.24e-05` of a `1.53e-05` failure, making the stated `atol` decorative |
+| `training=False`, explicit | a bare `model(x)` is not inference; stochastic-depth layers short-circuit only on `training is False`                                                                                          |
+| Values, never shapes       | a shape-only round trip is satisfied by a model that restored **zero** weights                                                                                                                 |
 
 A round trip can also fail for an *identity* reason rather than a value one: see §2.2 for registry
 key collisions, which make a saved model load as a different class entirely.
@@ -817,15 +820,15 @@ Both directions are real defects.
  nothing raises
 ```
 
-**Measured (under-build):** a reloaded model with `len(model.weights) == 0`; another matching
-**0 of 16** weights against its donor.
+**Measured (under-build):** a reloaded model with `len(model.weights) == 0`; another matching **0 of 16** weights
+against its donor.
 
 ### 8.2 Two Clarifications That Were Initially Got Wrong
 
-| Claim | Correction |
-|---|---|
-| "Overriding `build()` is the hazard" | It is not. The discriminating property is whether `build()` **materializes the tree**. A model that overrides `build()` and ends it with a concrete dummy forward pass round-trips cleanly. One that overrides `build()` to create two scalars does not |
-| "`Model.build(shape)` builds a subclassed model" | It only marks it built and walks no sub-layers, so `count_params()` returns exactly **0**. Several widely-copied packages do this. It is not a working precedent |
+| Claim                                            | Correction                                                                                                                                                                                                                                              |
+|--------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| "Overriding `build()` is the hazard"             | It is not. The discriminating property is whether `build()` **materializes the tree**. A model that overrides `build()` and ends it with a concrete dummy forward pass round-trips cleanly. One that overrides `build()` to create two scalars does not |
+| "`Model.build(shape)` builds a subclassed model" | It only marks it built and walks no sub-layers, so `count_params()` returns exactly **0**. Several widely-copied packages do this. It is not a working precedent                                                                                        |
 
 ### 8.3 Enforcement
 
@@ -891,10 +894,10 @@ removing tensors. Assert the scalar parameter total too.
 
 **Writing a bespoke layer is the last resort, not the first move.**
 
-| # | Check |
-|---|---|
-| 1 | **A config-driven factory for the domain**, if one exists — normalization, attention, feed-forward, activations, embeddings, pooling. Pass a type string plus config |
-| 2 | **The existing layer surface.** Search before writing |
+| # | Check                                                                                                                                                                                     |
+|---|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 1 | **A config-driven factory for the domain**, if one exists — normalization, attention, feed-forward, activations, embeddings, pooling. Pass a type string plus config                      |
+| 2 | **The existing layer surface.** Search before writing                                                                                                                                     |
 | 3 | **Only then a new layer**, placed in the domain package alongside its siblings and registered in that domain's registry. Do not bury a general-purpose layer inside one model's directory |
 
 ### 9.2 A Registry-Backed Factory MUST Raise on Undeclared Keys
@@ -905,12 +908,12 @@ a default value, and nothing raises, warns or logs.
 
 **Measured consequences of exactly this design:**
 
-| Defect | Effect |
-|---|---|
-| Four call sites spelled `dropout=` where the registry declared `dropout_rate` | positional dropout **dead across every vision encoder that used them** — `Dropout(rate=0.0)` regardless of what the caller passed |
-| One model forwarded `max_seq_len` / `rope_theta` into an attention type declaring no rotary parameter | both keys evaporated; the reasoning stack was exactly permutation-equivariant |
-| `qkv_bias=True` where the declared spelling was `use_bias` | layer built with **zero bias weights** |
-| Hardening one factory | immediately exposed four more live sites silently discarding a normalization choice on every construction |
+| Defect                                                                                                | Effect                                                                                                                            |
+|-------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------|
+| Four call sites spelled `dropout=` where the registry declared `dropout_rate`                         | positional dropout **dead across every vision encoder that used them** — `Dropout(rate=0.0)` regardless of what the caller passed |
+| One model forwarded `max_seq_len` / `rope_theta` into an attention type declaring no rotary parameter | both keys evaporated; the reasoning stack was exactly permutation-equivariant                                                     |
+| `qkv_bias=True` where the declared spelling was `use_bias`                                            | layer built with **zero bias weights**                                                                                            |
+| Hardening one factory                                                                                 | immediately exposed four more live sites silently discarding a normalization choice on every construction                         |
 
 **✅ CORRECT — the reference shape:**
 
@@ -994,9 +997,9 @@ than pinning invariance.
 
 ### 9.6 Normalization Epsilon
 
-| Source | Default |
-|---|---|
-| Keras `LayerNormalization` / `BatchNormalization` | **1e-3** |
+| Source                                            | Default      |
+|---------------------------------------------------|--------------|
+| Keras `LayerNormalization` / `BatchNormalization` | **1e-3**     |
 | Most transformer-family reference implementations | 1e-5 or 1e-6 |
 
 A factor of 100 to 1000 in every denominator, with no shape symptom, no warning and no test failure.
@@ -1018,12 +1021,12 @@ every test green.
 A port's failure mode is not a missing layer. It is a numerically different layer wearing the right
 shape.
 
-| Trap | Rule |
-|---|---|
-| Constructor defaults are not the reference's structure | audit every implicitly-defaulted numeric hyperparameter of every framework primitive the port touches — epsilon, momentum, activation constants. Fix additively (new kwarg, default unchanged) so existing consumers do not move |
+| Trap                                                              | Rule                                                                                                                                                                                                                                                                                                                             |
+|-------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Constructor defaults are not the reference's structure            | audit every implicitly-defaulted numeric hyperparameter of every framework primitive the port touches — epsilon, momentum, activation constants. Fix additively (new kwarg, default unchanged) so existing consumers do not move                                                                                                 |
 | `padding='same'` is **asymmetric** in Keras, symmetric in PyTorch | at stride > 1 two branches of one block with different kernel sizes sample **different input pixels**. Measured with Dirac kernels: a `k=1` branch read one 2x2 patch while the `k=3` branch of the same block read a different one. Shape assertions cannot see it. Apply a symmetric padding mode uniformly at every port site |
-| A hand-transcribed oracle | vendor the reference config or source in the repository, off the import path, and read it with `ast` / `json` (§13.4.3) |
-| A class sharing a name with a reference | is not necessarily that architecture. Check the composition rule, not the name |
+| A hand-transcribed oracle                                         | vendor the reference config or source in the repository, off the import path, and read it with `ast` / `json` (§13.4.3)                                                                                                                                                                                                          |
+| A class sharing a name with a reference                           | is not necessarily that architecture. Check the composition rule, not the name                                                                                                                                                                                                                                                   |
 
 ---
 
@@ -1059,20 +1062,19 @@ entirely.
 
 **Two follow-on traps**
 
-| Trap | Consequence |
-|---|---|
-| **Sub-layers autocast** | a float32 tensor entering a sub-layer under `mixed_float16` is float16 inside that sub-layer's `call()`. A fix that only changes a dtype does not survive the sub-layer boundary — the fix must change the **predicate**. Equally, a claim about a sub-layer's dtype cannot stand in for a claim about the model's |
-| **"Run this reduction in float32" is relative to the input dtype** | under a float64 policy the identical instruction **narrows** it. Measured: worst-case error `1.31e-15` → `1.99e-08`, every test still green. Use a never-narrow guard (`max(input_dtype, float32)`), not a hard-coded literal |
+| Trap                                                               | Consequence                                                                                                                                                                                                                                                                                                        |
+|--------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Sub-layers autocast**                                            | a float32 tensor entering a sub-layer under `mixed_float16` is float16 inside that sub-layer's `call()`. A fix that only changes a dtype does not survive the sub-layer boundary — the fix must change the **predicate**. Equally, a claim about a sub-layer's dtype cannot stand in for a claim about the model's |
+| **"Run this reduction in float32" is relative to the input dtype** | under a float64 policy the identical instruction **narrows** it. Measured: worst-case error `1.31e-15` → `1.99e-08`, every test still green. Use a never-narrow guard (`max(input_dtype, float32)`), not a hard-coded literal                                                                                      |
 
 ### 10.2 Degenerate Lengths Return NaN Instead of Raising
 
-A reduction over a band or window whose length can be 0 or 1 fails silently and
-**execution-mode-dependently**:
+A reduction over a band or window whose length can be 0 or 1 fails silently and **execution-mode-dependently**:
 
-| Op | Eager, zero-length axis | Under `@tf.function` |
-|---|---|---|
-| `ops.min` / `ops.max` | raises | returns `±inf`, no raise |
-| `ops.mean` / `ops.var` | — | returns `NaN` |
+| Op                     | Eager, zero-length axis | Under `@tf.function`     |
+|------------------------|-------------------------|--------------------------|
+| `ops.min` / `ops.max`  | raises                  | returns `±inf`, no raise |
+| `ops.mean` / `ops.var` | —                       | returns `NaN`            |
 
 **Measured:** a model returned an **all-NaN forward pass at initialization** while its test asserted
 only `output.shape == (4, 24, 7)` and was green throughout. A convolutional model whose downsampling
@@ -1104,14 +1106,14 @@ length is known good.
 
 All of the following passed shape-only suites:
 
-| Defect | Measured |
-|---|---|
-| A "reflection" gradient mode returning `x - 2(x·w)w` — a Householder reflection mapping `u → -v` | forward output was **exactly `-q`**; the suite parametrized all four modes and asserted output shape, invariant under a sign flip |
-| A codebook lookup rescaling its row by `x_mag / q_mag` | a "discrete" bottleneck leaked a continuous magnitude channel; `decode(encode(x)) != model(x)` in **2048 of 2048** elements |
-| An EMA codebook as `ema_embeddings / (ema_cluster_size + eps)`, counts starting at zero, numerator at the initializer | step 1 gave roughly `99000 * init`. Debiasing alone made it **worse**; the fix needed zero-initialization too |
-| A forecaster de-normalizing sigma with `sqrt(scale)` while mu used `scale` | the tell: the branch below used the correct form — the `sqrt` had been carried across by copy |
-| A score field fed `denoised - noisy` as an epsilon estimate | cosine with the correct direction measured **-1.0** — gradient *descent* on log p. A bare sign flip would still be wrong: the variance-preserving parameterisation carries a factor the variance-exploding form drops |
-| A decay schedule counted in batches against a counter in samples | **negative** learning rate for **9 of 10** batches; a negative rate moves every neuron *away* from its input, so the map anti-organised |
+| Defect                                                                                                                | Measured                                                                                                                                                                                                              |
+|-----------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| A "reflection" gradient mode returning `x - 2(x·w)w` — a Householder reflection mapping `u → -v`                      | forward output was **exactly `-q`**; the suite parametrized all four modes and asserted output shape, invariant under a sign flip                                                                                     |
+| A codebook lookup rescaling its row by `x_mag / q_mag`                                                                | a "discrete" bottleneck leaked a continuous magnitude channel; `decode(encode(x)) != model(x)` in **2048 of 2048** elements                                                                                           |
+| An EMA codebook as `ema_embeddings / (ema_cluster_size + eps)`, counts starting at zero, numerator at the initializer | step 1 gave roughly `99000 * init`. Debiasing alone made it **worse**; the fix needed zero-initialization too                                                                                                         |
+| A forecaster de-normalizing sigma with `sqrt(scale)` while mu used `scale`                                            | the tell: the branch below used the correct form — the `sqrt` had been carried across by copy                                                                                                                         |
+| A score field fed `denoised - noisy` as an epsilon estimate                                                           | cosine with the correct direction measured **-1.0** — gradient *descent* on log p. A bare sign flip would still be wrong: the variance-preserving parameterisation carries a factor the variance-exploding form drops |
+| A decay schedule counted in batches against a counter in samples                                                      | **negative** learning rate for **9 of 10** batches; a negative rate moves every neuron *away* from its input, so the map anti-organised                                                                               |
 
 **Rule: pin the INVARIANT, not the shape.**
 
@@ -1126,8 +1128,8 @@ All of the following passed shape-only suites:
 
 ### 10.4 Two Producers of the Same Quantity
 
-Where a layer has both a `call()` and a public two-stage API
-(`encode_to_indices → quantize_from_indices → decode`), the two compute the same thing by different
+Where a layer has both a `call()` and a public two-stage API (`encode_to_indices → quantize_from_indices → decode`), the
+two compute the same thing by different
 code. One gets fixed; the other drifts.
 
 **Measured:** the same invariant was violated twice in sibling branches of one file; in a third case
@@ -1152,11 +1154,11 @@ inside the tape, and `LossScaleOptimizer.apply()` divides every gradient by `dyn
 
 **Measured** over 10 SGD steps, total `|dW|`:
 
-| Configuration | total `\|dW\|` |
-|---|---|
-| `mixed_float16`, as shipped | 8.740626e-05 |
-| `mixed_float16`, with `scale_loss` | 2.436617e+00 |
-| float32 control | 2.739021e+00 |
+| Configuration                      | total `\|dW\|` |
+|------------------------------------|----------------|
+| `mixed_float16`, as shipped        | 8.740626e-05   |
+| `mixed_float16`, with `scale_loss` | 2.436617e+00   |
+| float32 control                    | 2.739021e+00   |
 
 A ratio of `2.79e+04`, which is `2^15`. Nothing raises and nothing warns; training simply does not
 move.
@@ -1169,10 +1171,10 @@ re-adds it.
 
 **Two clarifications that were initially got wrong**
 
-| Claim | Correction |
-|---|---|
-| "A custom `train_step` drops regularizer terms" | Keras 3.8's default `compute_loss` **already sums `self.losses`**. The AST predicate "does the body mention `self.losses`" measures the wrong thing |
-| — | A real instance *did* drop them: four overrides summed `self.quantizer.losses` **only**, so a caller's encoder `kernel_regularizer` reached neither the gradient nor the reported loss — identical loss to six digits with and without an `l2(1e-1)` |
+| Claim                                           | Correction                                                                                                                                                                                                                                           |
+|-------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| "A custom `train_step` drops regularizer terms" | Keras 3.8's default `compute_loss` **already sums `self.losses`**. The AST predicate "does the body mention `self.losses`" measures the wrong thing                                                                                                  |
+| —                                               | A real instance *did* drop them: four overrides summed `self.quantizer.losses` **only**, so a caller's encoder `kernel_regularizer` reached neither the gradient nor the reported loss — identical loss to six digits with and without an `l2(1e-1)` |
 
 `model.losses` is often non-empty for reasons unrelated to the regularizer under test — a block
 hardcoding a layer-scale L2 is enough — so `assert model.losses` can always pass. **Assert a delta**
@@ -1196,16 +1198,16 @@ A schedule that sets a Python attribute is never re-read by an already-traced tr
 - Verify by asserting `optimizer.iterations` advances as expected — at accumulation 2 the sequence is
   `0, 1, 1, 2` — not by reading logs.
 
-Related: Keras 3 spells it `reset_state`, not `reset_states`. And an EMA clone made from an
-**unbuilt** subclassed model means `set_weights(model.get_weights())` is `set_weights([])`, which
+Related: Keras 3 spells it `reset_state`, not `reset_states`. And an EMA clone made from an **unbuilt** subclassed model
+means `set_weights(model.get_weights())` is `set_weights([])`, which
 silently succeeds.
 
 ### 11.3 A Zero Gradient Is Not a Freeze
 
-| Mechanism | Effect on a "frozen" weight |
-|---|---|
-| AdamW moment estimates | keep drifting a gradient-masked parameter — **measured `6.8e-3`** over two masked steps at `lr=1e-2` |
-| Decoupled weight decay | moves it by exactly `wd * lr` per step **with no gradient at all** |
+| Mechanism                 | Effect on a "frozen" weight                                                                                                  |
+|---------------------------|------------------------------------------------------------------------------------------------------------------------------|
+| AdamW moment estimates    | keep drifting a gradient-masked parameter — **measured `6.8e-3`** over two masked steps at `lr=1e-2`                         |
+| Decoupled weight decay    | moves it by exactly `wd * lr` per step **with no gradient at all**                                                           |
 | `model.trainable = False` | empties `trainable_variables` but leaves each `tf.Variable.trainable` at `True`, so a `GradientTape` still auto-watches them |
 
 The only exact freeze also zeroes that group's learning-rate variable.
@@ -1220,12 +1222,12 @@ The only exact freeze also zeroes that group's learning-rate variable.
 
 ### 11.4 Optimizer and Callback Traps
 
-| Trap | Detail |
-|---|---|
-| `optimizer.learning_rate` | is the schedule **evaluated at the current `iterations`**, not the schedule object (which lives on `_learning_rate`). Assert liveness by driving `iterations`, not by an `isinstance` check |
-| Direction inferred from a metric name | `mode = 'max' if 'accuracy' in monitor else 'min'` silently selects the **worst** epoch for a metric like `val_box_iou`. Audit both the metric and the direction |
-| `EarlyStopping(restore_best_weights=True)` + `ModelCheckpoint` on the same metric | make "best" and "final" the same epoch **by construction**, so their bit-identity proves nothing |
-| A zero-initialized last projection | back-propagates **exactly zero** gradient into every weight behind it. **Measured: 7 of 9** upstream variables at exactly `0.0`. Normal at init for some architectures, and also how a dead stack looks |
+| Trap                                                                              | Detail                                                                                                                                                                                                  |
+|-----------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `optimizer.learning_rate`                                                         | is the schedule **evaluated at the current `iterations`**, not the schedule object (which lives on `_learning_rate`). Assert liveness by driving `iterations`, not by an `isinstance` check             |
+| Direction inferred from a metric name                                             | `mode = 'max' if 'accuracy' in monitor else 'min'` silently selects the **worst** epoch for a metric like `val_box_iou`. Audit both the metric and the direction                                        |
+| `EarlyStopping(restore_best_weights=True)` + `ModelCheckpoint` on the same metric | make "best" and "final" the same epoch **by construction**, so their bit-identity proves nothing                                                                                                        |
+| A zero-initialized last projection                                                | back-propagates **exactly zero** gradient into every weight behind it. **Measured: 7 of 9** upstream variables at exactly `0.0`. Normal at init for some architectures, and also how a dead stack looks |
 
 ### 11.5 `pretrained=True` Returning Random Weights
 
@@ -1250,8 +1252,8 @@ model has seen the answer.
 
 **Measured:** found in several language models at once; a grep for `causal|triu|tril|j > i` across one
 package returned **docstrings only**. A text tower attended bidirectionally and then pooled "the last
-non-padding token, because it is the only one to have seen the whole sentence" — a statement true of
-*every* position in a bidirectional tower.
+non-padding token, because it is the only one to have seen the whole sentence" — a statement true of *every* position in
+a bidirectional tower.
 
 **Why the obvious test is blind.** `test_attention_mask_functionality` asserts only that masked and
 unmasked outputs differ. Any mask satisfies that. Loss curves look normal.
@@ -1308,22 +1310,22 @@ nothing. The constructed layer is valid; it is just not the one requested.
 
 **Mechanism.** One of:
 
-| Shape | What happens |
-|---|---|
-| The knob is never forwarded to the sub-layer that would consume it | the sub-layer uses its own default |
-| It is read only at build time, but the branch is hardcoded | the value is inspected and discarded |
-| A sibling consumes it and ignores it | no error anywhere |
+| Shape                                                                   | What happens                                  |
+|-------------------------------------------------------------------------|-----------------------------------------------|
+| The knob is never forwarded to the sub-layer that would consume it      | the sub-layer uses its own default            |
+| It is read only at build time, but the branch is hardcoded              | the value is inspected and discarded          |
+| A sibling consumes it and ignores it                                    | no error anywhere                             |
 | It mutates a Python attribute an already-traced function never re-reads | correct in eager, inert under `fit()` (§11.2) |
 
 **Measured instances:**
 
-| Knob | Result |
-|---|---|
-| A normalization-position flag on a model whose encoder block had no such parameter at all | `'pre'` built a post-norm stack |
-| A KV-head count printed by `summary()` | the attention was plain multi-head |
-| An `arch_type` argument accepting three values that no branch consulted | all three gave 612 parameters and `max\|dy\| = 0.000e+00` |
-| A weight-sharing flag | identical parameter counts *and* identical object counts both ways |
-| A reconstruction-weight documented as a penalty | `model.losses` was `[]` |
+| Knob                                                                                      | Result                                                             |
+|-------------------------------------------------------------------------------------------|--------------------------------------------------------------------|
+| A normalization-position flag on a model whose encoder block had no such parameter at all | `'pre'` built a post-norm stack                                    |
+| A KV-head count printed by `summary()`                                                    | the attention was plain multi-head                                 |
+| An `arch_type` argument accepting three values that no branch consulted                   | all three gave 612 parameters and `max\|dy\| = 0.000e+00`          |
+| A weight-sharing flag                                                                     | identical parameter counts *and* identical object counts both ways |
+| A reconstruction-weight documented as a penalty                                           | `model.losses` was `[]`                                            |
 
 **Why the obvious test is blind.** The only assertion was a constructor-attribute echo
 (`assert model.d_state == d_state`) or a shape check. Both are invariant under the defect, and
@@ -1384,12 +1386,12 @@ Architectures whose entire value is *how blocks compose* are the ones where comp
 tested, because shape, parameter count, finiteness and gradient existence are all invariant under a
 broken composition rule.
 
-| Defect | Measured |
-|---|---|
-| **Transform-only blocks called without the external residual.** Some blocks compute a *transform* and document that the *caller* supplies the skip. Calling them as `x = block(x)` drops it | signal collapse of roughly `1e-5` per block; a layer-scale init of 1.0 did **not** rescue it |
-| **A residual block whose `gamma → 0` limit is zero, not identity.** A learnable multiplier applied to the whole block output *after* the block closed its own residuals gives `x = gamma * f(x)` with no skip | `std(out)/std(in) = 4.97e-05`, restored to `1.0000` by the fix |
-| **Sub-blocks sharing an input.** A fractal block applied both depth-`k-1` sub-blocks to the *same* input: `F_k(x) = 0.5*(DP(F_{k-1}(x)) + DP(F_{k-1}(x)))` | every input-to-output path traversed exactly **one** convolution at any depth; `depths=[4,5,5]` was 8/16/16 parallel convolutions instead of a fractal. Twenty tests passed against the broken rule |
-| **A stack that reads only the last block.** A graph transformer computed its local tokens once and handed the same tensor to every block | increasing the block count deepened nothing. The code said so, in a comment and in the module docstring, as though it were a permanent property |
+| Defect                                                                                                                                                                                                        | Measured                                                                                                                                                                                            |
+|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Transform-only blocks called without the external residual.** Some blocks compute a *transform* and document that the *caller* supplies the skip. Calling them as `x = block(x)` drops it                   | signal collapse of roughly `1e-5` per block; a layer-scale init of 1.0 did **not** rescue it                                                                                                        |
+| **A residual block whose `gamma → 0` limit is zero, not identity.** A learnable multiplier applied to the whole block output *after* the block closed its own residuals gives `x = gamma * f(x)` with no skip | `std(out)/std(in) = 4.97e-05`, restored to `1.0000` by the fix                                                                                                                                      |
+| **Sub-blocks sharing an input.** A fractal block applied both depth-`k-1` sub-blocks to the *same* input: `F_k(x) = 0.5*(DP(F_{k-1}(x)) + DP(F_{k-1}(x)))`                                                    | every input-to-output path traversed exactly **one** convolution at any depth; `depths=[4,5,5]` was 8/16/16 parallel convolutions instead of a fractal. Twenty tests passed against the broken rule |
+| **A stack that reads only the last block.** A graph transformer computed its local tokens once and handed the same tensor to every block                                                                      | increasing the block count deepened nothing. The code said so, in a comment and in the module docstring, as though it were a permanent property                                                     |
 
 **Rules**
 
@@ -1420,23 +1422,23 @@ have caught them.
 
 ### 13.1 The Five House Rules
 
-| # | Rule |
-|---|---|
-| 1 | **Every number is measured or derived, and the derivation is written down.** A tolerance carries its measurement — date, device, dtype policy, configuration, the number — and the defect signal it must sit below |
-| 2 | **Every guard is proven RED**, by an injected mutation or a recorded bisect, *in the committed record*. A demonstration in a scratch session that is then discarded leaves nothing a later reader can re-check |
-| 3 | **Every "nothing changed" assertion has a "something changed" twin.** An identity assertion alone is satisfied by a completely dead component |
-| 4 | **Process-global state is owned by exactly one fixture** that captures it, restores it in `finally`, and asserts the restoration — plus a canary that fails the *next* test if it leaked |
+| # | Rule                                                                                                                                                                                                                                |
+|---|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 1 | **Every number is measured or derived, and the derivation is written down.** A tolerance carries its measurement — date, device, dtype policy, configuration, the number — and the defect signal it must sit below                  |
+| 2 | **Every guard is proven RED**, by an injected mutation or a recorded bisect, *in the committed record*. A demonstration in a scratch session that is then discarded leaves nothing a later reader can re-check                      |
+| 3 | **Every "nothing changed" assertion has a "something changed" twin.** An identity assertion alone is satisfied by a completely dead component                                                                                       |
+| 4 | **Process-global state is owned by exactly one fixture** that captures it, restores it in `finally`, and asserts the restoration — plus a canary that fails the *next* test if it leaked                                            |
 | 5 | **A failing guard is never repaired by widening the tolerance**, unless the bound is proven *unattainable in the output dtype*. Unattainable → re-derive. Attainable but flaky → fix the cause. Write the distinction into the test |
 
 ### 13.2 The Instruments
 
 Three instruments are defined where the rule they enforce is stated, not repeated here:
 
-| Instrument | Defined in |
-|---|---|
-| `.keras` round trip on **values** | §7.1 |
-| Weight-value comparison before the loaded model's first call | §8.4 |
-| Build parity by relative weight path, plus its no-sub-layer sibling | §8.3 |
+| Instrument                                                          | Defined in |
+|---------------------------------------------------------------------|------------|
+| `.keras` round trip on **values**                                   | §7.1       |
+| Weight-value comparison before the loaded model's first call        | §8.4       |
+| Build parity by relative weight path, plus its no-sub-layer sibling | §8.3       |
 
 The rest follow.
 
@@ -1522,10 +1524,10 @@ class TestAttentionMaskIsHonoured:
 
 **Two probe-design rules learned the hard way**
 
-| Rule | Measured |
-|---|---|
-| **Never perturb with a DC or uniform per-channel signal** when a per-position normalization precedes the guarded reduction | one such probe measured a leak of `1.9e-06` against a real leak of 0.33–1.07. Use fresh non-DC noise |
-| **Watch for configurations that make the mechanism structurally unobservable** | a single-layer text tower reads its last position, whose causal row is unmasked, so the pin reads exactly `0.0` with and without the mask. A deep tower at small input resolution can collapse its deepest attention stage to **one token**, where softmax is identically 1.0. Cheap detector: `pytest -W error::UserWarning` turns Keras' size-1-softmax warning into a failure |
+| Rule                                                                                                                       | Measured                                                                                                                                                                                                                                                                                                                                                                         |
+|----------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Never perturb with a DC or uniform per-channel signal** when a per-position normalization precedes the guarded reduction | one such probe measured a leak of `1.9e-06` against a real leak of 0.33–1.07. Use fresh non-DC noise                                                                                                                                                                                                                                                                             |
+| **Watch for configurations that make the mechanism structurally unobservable**                                             | a single-layer text tower reads its last position, whose causal row is unmasked, so the pin reads exactly `0.0` with and without the mask. A deep tower at small input resolution can collapse its deepest attention stage to **one token**, where softmax is identically 1.0. Cheap detector: `pytest -W error::UserWarning` turns Keras' size-1-softmax warning into a failure |
 
 #### 13.2.5 Orientation — delta impulses and non-square grids
 
@@ -1534,8 +1536,8 @@ Orientation and direction are invisible to shape, config and serialization tests
 **Measured:** a single sign error in one `ops.roll` survived 249 tests; a fully transposed
 relative-position bias (`bias[h, key, query]`) passed 219; a shifted CLS slice passed **91 of 91**.
 
-**Rule:** use a **delta-impulse probe** — a one-hot input, asserting the destination slot — on a
-**non-square grid**. A square-only test cannot see a transposed stride.
+**Rule:** use a **delta-impulse probe** — a one-hot input, asserting the destination slot — on a **non-square grid**. A
+square-only test cannot see a transposed stride.
 
 #### 13.2.6 Precision arms
 
@@ -1555,11 +1557,11 @@ def dtype_policy(request):
 
 For an fp16 arm to mean anything it needs four parts:
 
-| # | Part |
-|---|---|
-| 1 | **Prove the hazard is real first** — assert `np.float16(-1e9)` really is `-inf` before testing any defence against it |
-| 2 | **Realistic sizes.** `N = 512`, not `N = 7`. An `N=7` test hid an fp16 `-inf` that appeared only at `N >= 512` |
-| 3 | **A float32 or float64 control on the same input**, so "fp16 is noisy" can never masquerade as "the NaN bug is detected" |
+| # | Part                                                                                                                                                                                                                                             |
+|---|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 1 | **Prove the hazard is real first** — assert `np.float16(-1e9)` really is `-inf` before testing any defence against it                                                                                                                            |
+| 2 | **Realistic sizes.** `N = 512`, not `N = 7`. An `N=7` test hid an fp16 `-inf` that appeared only at `N >= 512`                                                                                                                                   |
+| 3 | **A float32 or float64 control on the same input**, so "fp16 is noisy" can never masquerade as "the NaN bug is detected"                                                                                                                         |
 | 4 | **The repair must not weaken what it repairs.** `-1e4` is finite in fp16 but is not `-inf` — assert the masked positions still receive no weight. This arm separates "the sentinel was made survivable" from "the sentinel was made ineffective" |
 
 Build the reference from the **round-tripped bits**, not the float32 original, so there is no fp16
@@ -1654,10 +1656,10 @@ def homogeneity_error(model, x, c) -> float:
 
 Three things this encodes:
 
-| Element | Why |
-|---|---|
-| The **dead-model guard** (`denom == 0 → inf`) | without it, a model that outputs zeros scores a perfect 0.0 |
-| **Fit the model for one step first** | stock `BatchNormalization`'s `moving_mean` is exactly 0 at init, so an untrained model is *exactly* homogeneous at `training=False` and the test passes for a reason unrelated to what it claims |
+| Element                                                 | Why                                                                                                                                                                                                                            |
+|---------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| The **dead-model guard** (`denom == 0 → inf`)           | without it, a model that outputs zeros scores a perfect 0.0                                                                                                                                                                    |
+| **Fit the model for one step first**                    | stock `BatchNormalization`'s `moving_mean` is exactly 0 at init, so an untrained model is *exactly* homogeneous at `training=False` and the test passes for a reason unrelated to what it claims                               |
 | **The tolerance sits between the floor and the defect** | `1e-5` is ~9x above the float32 floor and ~680x below the measured defect signal of `6.8e-03`. Keep models small and fixed: a deeper graph accumulates more round-off, and the headroom is what makes the tolerance meaningful |
 
 Note that layer normalization **breaks** degree-1 homogeneity (81–98% error) while a bias-free batch
@@ -1733,11 +1735,11 @@ def test_the_contract_rejects_a_broken_forward(model):
 
 Choosing the wrong instrument here is the most common way a knob test goes vacuous.
 
-| Knob class | Example | What must change |
-|---|---|---|
-| **structural** | depth, heads, filters | the **weight-shape signature** |
-| **value** | activation, epsilon | outputs, signature **identical** under the same seed |
-| **scoped value** | an initializer honoured in part of the tree | weight **values** of a named subtree |
+| Knob class       | Example                                     | What must change                                     |
+|------------------|---------------------------------------------|------------------------------------------------------|
+| **structural**   | depth, heads, filters                       | the **weight-shape signature**                       |
+| **value**        | activation, epsilon                         | outputs, signature **identical** under the same seed |
+| **scoped value** | an initializer honoured in part of the tree | weight **values** of a named subtree                 |
 
 ```python
 def weight_signature(model):
@@ -1987,9 +1989,9 @@ injection transposed itself back into a causal mask.
 
 Two more ways a RED proof can be structurally unable to fail:
 
-| Cause | Detail |
-|---|---|
-| The effect is achieved by a **different, still-present code path** | deleting a re-export left a class registered, because a sibling import had already run the decorator. Registry **presence** and **name binding** are different contracts; split them |
+| Cause                                                                 | Detail                                                                                                                                                                                                              |
+|-----------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| The effect is achieved by a **different, still-present code path**    | deleting a re-export left a class registered, because a sibling import had already run the decorator. Registry **presence** and **name binding** are different contracts; split them                                |
 | **An earlier guard on the same call path masks the defect behind it** | order fixes by masking, not by size. A RED proof written against the reported bug reproduces the wrong one, and the masked defect's "before" value must be measured at HEAD **plus the unmasking fix**, not at HEAD |
 
 #### 13.4.10 Never `git stash` or `git checkout --` mid-proof
@@ -2013,22 +2015,22 @@ provably correct geometry.
 
 All of these have been found in shipped test suites.
 
-| Anti-pattern | Why it passes |
-|---|---|
-| `assert True` / "if we reach here, the call was successful" | asserts nothing |
-| **Constructor-attribute echo** — `assert model.d_state == d_state` | proves the constructor stored the argument and nothing else |
-| **Shape-only knob sweep** — sweep a semantic knob, assert output shape unchanged | invariant under the knob being dead |
-| **Shape-only mask test** — build a mask, run the model, assert output shape | replace every attention block with an identity and it still passes |
-| Blanket `except Exception: pytest.xfail(...)` around build+forward | a total build break reports green; assertions after the block are unreachable |
-| `pytest.raises(Exception)` in a meta-test | any failure counts, including argument validation |
-| A meta-test that breaks the **arguments** rather than the model | fails before a model exists |
-| Tolerances at `atol=1e-1` | nothing fails |
-| Tolerances **below the dtype noise floor** | permanently RED, measuring nothing — three such assertions were never once green for their whole lifetime |
-| `assert len(x) > 0`, `assert model.weights` | one scalar created in `__init__` satisfies it; a weight-path guard placed right after `keras.Model()` reads `[]` unconditionally |
-| Direct `layer.build(...)` in a unit test | structurally blind to the `StatelessScope` trap |
-| Round-tripping only the config that has **no** sub-layers | exercises the path that builds nothing |
-| Comparing an **unfitted** model across a round trip | round-trips nothing meaningful |
-| A test that pins the **value a defect produces** | goes RED when you fix the bug |
+| Anti-pattern                                                                     | Why it passes                                                                                                                    |
+|----------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------|
+| `assert True` / "if we reach here, the call was successful"                      | asserts nothing                                                                                                                  |
+| **Constructor-attribute echo** — `assert model.d_state == d_state`               | proves the constructor stored the argument and nothing else                                                                      |
+| **Shape-only knob sweep** — sweep a semantic knob, assert output shape unchanged | invariant under the knob being dead                                                                                              |
+| **Shape-only mask test** — build a mask, run the model, assert output shape      | replace every attention block with an identity and it still passes                                                               |
+| Blanket `except Exception: pytest.xfail(...)` around build+forward               | a total build break reports green; assertions after the block are unreachable                                                    |
+| `pytest.raises(Exception)` in a meta-test                                        | any failure counts, including argument validation                                                                                |
+| A meta-test that breaks the **arguments** rather than the model                  | fails before a model exists                                                                                                      |
+| Tolerances at `atol=1e-1`                                                        | nothing fails                                                                                                                    |
+| Tolerances **below the dtype noise floor**                                       | permanently RED, measuring nothing — three such assertions were never once green for their whole lifetime                        |
+| `assert len(x) > 0`, `assert model.weights`                                      | one scalar created in `__init__` satisfies it; a weight-path guard placed right after `keras.Model()` reads `[]` unconditionally |
+| Direct `layer.build(...)` in a unit test                                         | structurally blind to the `StatelessScope` trap                                                                                  |
+| Round-tripping only the config that has **no** sub-layers                        | exercises the path that builds nothing                                                                                           |
+| Comparing an **unfitted** model across a round trip                              | round-trips nothing meaningful                                                                                                   |
+| A test that pins the **value a defect produces**                                 | goes RED when you fix the bug                                                                                                    |
 
 The last one deserves its own note, because it is the most demoralizing. Live examples: an assertion
 that a configurable head's activation was `'sigmoid'`; that a model's feature rank was 2, for a model
@@ -2055,8 +2057,8 @@ Two more, about the shape of the whole gate:
 
 #### 13.6.1 TF32 is the default false model defect
 
-**Measured:** three confirmed instances. A GPU-only RED with a CPU-green counterpart is a TF32 suspect
-**before** it is a bias hunt.
+**Measured:** three confirmed instances. A GPU-only RED with a CPU-green counterpart is a TF32 suspect **before** it is
+a bias hunt.
 
 **The diagnostic:**
 
@@ -2067,8 +2069,8 @@ Two more, about the shape of the whole gate:
  clipping               grows with c
 ```
 
-Confirm by toggling `tf.config.experimental.enable_tensor_float_32_execution` in-process on the
-**same trained object**, reversibly, and with a direct float64 discriminator.
+Confirm by toggling `tf.config.experimental.enable_tensor_float_32_execution` in-process on the **same trained object**,
+reversibly, and with a direct float64 discriminator.
 
 Own the flag in exactly one fixture:
 
@@ -2123,7 +2125,7 @@ change — `4.77e-07`, `4.23e-04` and exactly `0.0` on three models.
 
 The correct control is the **within-version eager-vs-graph delta on unchanged code**.
 
-Related: a `training=False` equivalence probe is blind to operation-**order** divergence. Moving
+Related: a `training=False` equivalence probe is blind to operation- **order** divergence. Moving
 dropout from before a norm to after read "bit-identical" at `0.0`, then `0.3953` max delta at
 `training=True` under an identical Bernoulli mask. Read the two `call()`s side by side.
 
@@ -2143,8 +2145,8 @@ to `0.818`.
 - **Never** tune a synthetic input's sigma until the bar passes.
 
 Note also that Keras 3 hands **one** initializer instance to every same-shaped sibling projection
-inside a layer, and the instance materializes its seed once — so identically-shaped weights get
-**bit-identical** draws. An "untrained control" built this way had `Q == K` exactly, with entirely
+inside a layer, and the instance materializes its seed once — so identically-shaped weights get **bit-identical** draws.
+An "untrained control" built this way had `Q == K` exactly, with entirely
 plausible downstream statistics.
 
 #### 13.6.5 Untrained models cannot answer some questions
@@ -2198,20 +2200,20 @@ assertions over shape and finiteness ones.
 
 #### 13.7.1 Files
 
-| Kind | Convention |
-|---|---|
-| Comprehensive suite for one unit | `test_<layer>.py` / `test_<model>.py` |
-| Single-claim guard | **sentence-named after the claim**, not the unit: `test_the_attention_mask_is_honoured.py`, `test_tables_survive_stateless_build.py`, `test_the_gates_actually_gate.py` |
-| Shared instrument | **no `test_` prefix** so pytest does not collect it: `smoke_contract_oracle.py`, `knob_sensitivity_oracle.py`, `dead_component_oracle.py`. RED proofs live in a mirrored `test_<name>.py` |
-| Package-local `conftest.py` | only when there is shared **instrumentation** |
+| Kind                             | Convention                                                                                                                                                                                |
+|----------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Comprehensive suite for one unit | `test_<layer>.py` / `test_<model>.py`                                                                                                                                                     |
+| Single-claim guard               | **sentence-named after the claim**, not the unit: `test_the_attention_mask_is_honoured.py`, `test_tables_survive_stateless_build.py`, `test_the_gates_actually_gate.py`                   |
+| Shared instrument                | **no `test_` prefix** so pytest does not collect it: `smoke_contract_oracle.py`, `knob_sensitivity_oracle.py`, `dead_component_oracle.py`. RED proofs live in a mirrored `test_<name>.py` |
+| Package-local `conftest.py`      | only when there is shared **instrumentation**                                                                                                                                             |
 
 #### 13.7.2 Names
 
-| Kind | Convention |
-|---|---|
-| Classes | `Test<Unit><Aspect>` — `TestBeitAttentionBiasOrientation`, `TestFloat32IsTheControl`, `TestBuildsExactlyWhatCallRuns`. Guard classes named after the claim |
-| Functions | declarative sentences asserting the claim, not `test_X_works` — `test_masked_tokens_do_not_reach_the_visible_positions`, `test_gamma_zero_is_exact_identity` |
-| Meta / anti-vacuity | `test_the_guard_…`, `test_the_probe_…`, `test_the_contract_…` |
+| Kind                | Convention                                                                                                                                                   |
+|---------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Classes             | `Test<Unit><Aspect>` — `TestBeitAttentionBiasOrientation`, `TestFloat32IsTheControl`, `TestBuildsExactlyWhatCallRuns`. Guard classes named after the claim   |
+| Functions           | declarative sentences asserting the claim, not `test_X_works` — `test_masked_tokens_do_not_reach_the_visible_positions`, `test_gamma_zero_is_exact_identity` |
+| Meta / anti-vacuity | `test_the_guard_…`, `test_the_probe_…`, `test_the_contract_…`                                                                                                |
 
 #### 13.7.3 Module skeleton
 
@@ -2569,29 +2571,29 @@ line — the scaled value must be the one handed to `tape.gradient`.
 
 ### 15.2 Errors and Symptoms
 
-| Symptom | Likely cause | Section |
-|---|---|---|
-| `Unknown layer: MyLayer` | missing registration decorator | §2.2 |
-| Two classes load as each other, depending on import order | bare `register_keras_serializable()` key collision | §2.2 |
-| `Layer was never built and thus has no variables` | sub-layer not built before weight loading | §8 |
-| **Reloaded model has zero weights, or matches 0 of N against its donor** | `build()` does not materialize the sub-layer tree | §8.1 |
-| **`count_params()` returns exactly 0** | `Model.build(shape)` on a subclassed model walks no sub-layers | §8.2 |
-| A constant table is all zeros in training but correct in a unit test | `.assign()` in `build()` discarded by `StatelessScope` | §3.3 |
-| `InaccessibleTensorError` on `fit()` of an unbuilt model | constant materialized with `ops.convert_to_tensor` in `build()` | §3.3 |
-| `TypeError: ('pred must not be a Python bool', True)` under `fit`/`jit` but not eagerly | `ops.tril` / `ops.triu` | §4.2 |
-| `OperatorNotAllowedInGraphError` | symbolic `training` into BN/Dropout, or `ops.cond` on a traced shape value | §4.2, §10.2 |
-| **All-NaN output of the correct shape** | degenerate-length reduction, or an fp16 `-1e9` mask sentinel | §10.2, §10.1 |
-| NaN on the positions the mask is meant to KEEP | `0.0 * -inf` from an additive fp16 sentinel | §10.1 |
-| `cannot compute AddV2 as input #1 was expected to be a half tensor` | one-sided cast under autocast; cast both sides | §10.1 |
-| **Training does not move under `mixed_float16`** | custom `train_step` missing `optimizer.scale_loss` | §11.1 |
-| A knob has no measurable effect | dead knob (§12.5), or silently dropped at a factory | §12.5, §9.2, §13.3.2 |
-| `Structures don't have the same nested structure` from `predict` | `call` echoing a bare `None` in its output dict | §7.3 |
-| A causal model's loss looks fine but generation is poor | no causal mask; or the head pools token 0 | §12.1, §12.2 |
-| Green suite, broken trainer | entry point with zero tests; run the CLI | §13.5 |
-| Test passes alone, fails in the directory gate | global-RNG coupling, or TF32 leaked from an earlier module | §13.6.4, §13.6.1 |
-| GPU red, CPU green, on a precision assertion | TF32 | §13.6.1 |
-| `cudaSetDevice() ... out of memory` at import | another GPU job is running; the failure is contention | §13.6.6 |
-| `RecursionError` during serialization | circular references in config; store parameters explicitly, not `locals()` | §6.1 |
+| Symptom                                                                                 | Likely cause                                                               | Section              |
+|-----------------------------------------------------------------------------------------|----------------------------------------------------------------------------|----------------------|
+| `Unknown layer: MyLayer`                                                                | missing registration decorator                                             | §2.2                 |
+| Two classes load as each other, depending on import order                               | bare `register_keras_serializable()` key collision                         | §2.2                 |
+| `Layer was never built and thus has no variables`                                       | sub-layer not built before weight loading                                  | §8                   |
+| **Reloaded model has zero weights, or matches 0 of N against its donor**                | `build()` does not materialize the sub-layer tree                          | §8.1                 |
+| **`count_params()` returns exactly 0**                                                  | `Model.build(shape)` on a subclassed model walks no sub-layers             | §8.2                 |
+| A constant table is all zeros in training but correct in a unit test                    | `.assign()` in `build()` discarded by `StatelessScope`                     | §3.3                 |
+| `InaccessibleTensorError` on `fit()` of an unbuilt model                                | constant materialized with `ops.convert_to_tensor` in `build()`            | §3.3                 |
+| `TypeError: ('pred must not be a Python bool', True)` under `fit`/`jit` but not eagerly | `ops.tril` / `ops.triu`                                                    | §4.2                 |
+| `OperatorNotAllowedInGraphError`                                                        | symbolic `training` into BN/Dropout, or `ops.cond` on a traced shape value | §4.2, §10.2          |
+| **All-NaN output of the correct shape**                                                 | degenerate-length reduction, or an fp16 `-1e9` mask sentinel               | §10.2, §10.1         |
+| NaN on the positions the mask is meant to KEEP                                          | `0.0 * -inf` from an additive fp16 sentinel                                | §10.1                |
+| `cannot compute AddV2 as input #1 was expected to be a half tensor`                     | one-sided cast under autocast; cast both sides                             | §10.1                |
+| **Training does not move under `mixed_float16`**                                        | custom `train_step` missing `optimizer.scale_loss`                         | §11.1                |
+| A knob has no measurable effect                                                         | dead knob (§12.5), or silently dropped at a factory                        | §12.5, §9.2, §13.3.2 |
+| `Structures don't have the same nested structure` from `predict`                        | `call` echoing a bare `None` in its output dict                            | §7.3                 |
+| A causal model's loss looks fine but generation is poor                                 | no causal mask; or the head pools token 0                                  | §12.1, §12.2         |
+| Green suite, broken trainer                                                             | entry point with zero tests; run the CLI                                   | §13.5                |
+| Test passes alone, fails in the directory gate                                          | global-RNG coupling, or TF32 leaked from an earlier module                 | §13.6.4, §13.6.1     |
+| GPU red, CPU green, on a precision assertion                                            | TF32                                                                       | §13.6.1              |
+| `cudaSetDevice() ... out of memory` at import                                           | another GPU job is running; the failure is contention                      | §13.6.6              |
+| `RecursionError` during serialization                                                   | circular references in config; store parameters explicitly, not `locals()` | §6.1                 |
 
 ---
 
@@ -2600,6 +2602,7 @@ line — the scaled value must be the one handed to `tape.gradient`.
 ### 16.1 A New Layer
 
 **Construction**
+
 - [ ] `@keras.saving.register_keras_serializable(package=...)` with an explicit package
 - [ ] Class name does not collide with an existing registered class; prefixed if generic
 - [ ] All sub-layers created in `__init__`, unconditionally, with explicit `name=`
@@ -2608,14 +2611,16 @@ line — the scaled value must be the one handed to `tape.gradient`.
 - [ ] Cross-parameter contracts that `call()` relies on are re-checked in `__init__`
 
 **Build**
+
 - [ ] `build()` materializes **exactly** the tree `call()` runs — no more, no less
 - [ ] No `.assign()` of a constant table; tables computed inside an `add_weight` initializer
 - [ ] No `ops.convert_to_tensor` on a closed-over constant; NumPy in, convert in `call()`
 - [ ] `super().build(input_shape)` last
 
 **Call**
+
 - [ ] Symbolic only: no `.numpy()`, no Python `if` on a tensor value, no Python loop over a tensor
-      dimension, no layer construction, no list mutation, no logging
+  dimension, no layer construction, no list mutation, no logging
 - [ ] No `ops.tril` / `ops.triu`
 - [ ] `training=` forwarded explicitly to every sub-layer
 - [ ] No possibly-symbolic `training` reaching `BatchNormalization` or `Dropout`
@@ -2623,14 +2628,17 @@ line — the scaled value must be the one handed to `tape.gradient`.
 - [ ] Static shape contracts re-asserted here, not only in `build()`
 
 **Shape and config**
+
 - [ ] `compute_output_shape` implemented, from stored config, working unbuilt
 - [ ] Shape arithmetic in exactly one pure helper shared by `build` / `call` / `compute_output_shape`
 - [ ] `get_config()` returns **every** constructor argument, complex objects serialized
-- [ ] `__init__` resolves spec and serialized arguments; `from_config()` only when it does measured real work, and never writes into the dict it receives or pops base keys
+- [ ] `__init__` resolves spec and serialized arguments; `from_config()` only when it does measured real work, and never
+  writes into the dict it receives or pops base keys
 - [ ] An initializer argument is stored as `initializer_spec(...)` (a string or dict), not as the caller's instance
 - [ ] Normalization epsilon from the factory, or passed explicitly with a cited reference
 
 **Reuse**
+
 - [ ] Checked the domain factory, then the existing layer surface, before authoring
 - [ ] Registered in the domain factory if one exists; the factory raises on undeclared keys
 
@@ -2642,12 +2650,12 @@ Everything above, plus:
 - [ ] A variant registry present; a separate architecture table, if any, not merged into it
 - [ ] Variant values derived from a **named reference**, cited
 - [ ] `from_variant` raises `ValueError` listing available keys, accepts its documented overrides,
-      does not splat description metadata
+  does not splat description metadata
 - [ ] `pretrained=True` raises `NotImplementedError` naming the variant; no placeholder URL table; no
-      `by_name`; no load failure swallowed into a warning
+  `by_name`; no load failure swallowed into a warning
 - [ ] Module-level `create_<name>()` delegating to `from_variant` with no logic of its own
 - [ ] Package `__init__.py` exports class and factory with a curated `__all__`, and binds no name
-      matching one of its own subpackages
+  matching one of its own subpackages
 - [ ] One `logger.info` in `__init__`; none in `call`
 - [ ] No new custom `train_step`
 - [ ] Checkpoint-affecting changes recorded in a shipping document
@@ -2658,10 +2666,10 @@ Everything above, plus:
 - [ ] `.keras` round trip on **values**, `rtol=0`, `training=False` explicit
 - [ ] Weight-value comparison at `atol=0.0` **before** the loaded model's first call
 - [ ] Build parity by relative `w.path`, **plus** a no-sub-layer layout assertion per `None`/`False`
-      config
+  config
 - [ ] Build-through-a-parent probe for every constant table
 - [ ] Per-variable gradient flow: non-`None` **and** non-zero, named by `var.path`, with the
-      `len(trainable_variables) > 0` anti-vacuity assertion
+  `len(trainable_variables) > 0` anti-vacuity assertion
 - [ ] Every constructor knob pinned with the instrument matching its class (§13.3.2)
 - [ ] `ops.all(ops.isfinite(y))` in every forward test
 - [ ] Degenerate lengths (0, 1) swept on the static path **and** a `TensorSpec([None, ...])` trace
@@ -2682,16 +2690,16 @@ Everything above, plus:
 Recorded so they are not re-proposed, and so a rule above is not re-derived from a premise already
 falsified by measurement.
 
-| Claim | Status |
-|---|---|
-| The nested `List[List[Layer]]` weight-loss trap | **Does not reproduce on Keras 3.8.** `_flatten_layers` round-trips every weight regardless of container nesting; a model with a `List[List[Dict[str, Layer]]]` structure restored all 65 weights bit-identically. Check that a code shape still bites before claiming a guard against it is load-bearing |
-| "Overrides `build()`" as the discriminating property for round-trip weight loss | **Wrong property.** Whether `build()` *materializes the sub-layer tree* is. See §8.2 |
-| A structured-dict `y_pred` cannot be used with stock `compile()` / `fit()` | **False on Keras 3.8.** `CompileLoss.build` breaks in exactly one configuration: a **single `Loss` object** handed a dict `y_pred`, where it broadcasts across every leaf then raises `KeyError`. Supply a dict `loss=` keyed to the same output names, plus a dict `y_true` |
-| A custom `train_step` drops regularizer terms | **False.** Keras 3.8's default `compute_loss` already sums `self.losses`. The real instance summed a *sub-layer's* `.losses` explicitly. An AST predicate "does the body mention `self.losses`" measures the wrong thing |
-| `assert model.losses` proves a regularizer is live | **Vacuous** when an unrelated block contributes to it. Assert a delta against a no-regularizer baseline |
-| A large delta after a masking change is a silent un-masking regression | **Was not one.** Softmax is invariant to a constant shift along its reduction axis, and `x - 1e9` in float32 collapses a row to a single value (the ulp at `1e9` is 64). Add a control proving the pre-change output was itself meaningful |
-| A GPU-only homogeneity RED at `5.063e-04` was a bias leak | **It was the TF32 ulp.** See §13.6.1 for the diagnostic |
-| `x + g - stop_gradient(g)` is the identity | **False** under left-to-right float association — about 25% of float64 draws differ by up to 1 ulp. Group it as `x + (g - stop_gradient(g))`: exactly `0.0` forward, gradient unchanged |
+| Claim                                                                           | Status                                                                                                                                                                                                                                                                                                   |
+|---------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| The nested `List[List[Layer]]` weight-loss trap                                 | **Does not reproduce on Keras 3.8.** `_flatten_layers` round-trips every weight regardless of container nesting; a model with a `List[List[Dict[str, Layer]]]` structure restored all 65 weights bit-identically. Check that a code shape still bites before claiming a guard against it is load-bearing |
+| "Overrides `build()`" as the discriminating property for round-trip weight loss | **Wrong property.** Whether `build()` *materializes the sub-layer tree* is. See §8.2                                                                                                                                                                                                                     |
+| A structured-dict `y_pred` cannot be used with stock `compile()` / `fit()`      | **False on Keras 3.8.** `CompileLoss.build` breaks in exactly one configuration: a **single `Loss` object** handed a dict `y_pred`, where it broadcasts across every leaf then raises `KeyError`. Supply a dict `loss=` keyed to the same output names, plus a dict `y_true`                             |
+| A custom `train_step` drops regularizer terms                                   | **False.** Keras 3.8's default `compute_loss` already sums `self.losses`. The real instance summed a *sub-layer's* `.losses` explicitly. An AST predicate "does the body mention `self.losses`" measures the wrong thing                                                                                 |
+| `assert model.losses` proves a regularizer is live                              | **Vacuous** when an unrelated block contributes to it. Assert a delta against a no-regularizer baseline                                                                                                                                                                                                  |
+| A large delta after a masking change is a silent un-masking regression          | **Was not one.** Softmax is invariant to a constant shift along its reduction axis, and `x - 1e9` in float32 collapses a row to a single value (the ulp at `1e9` is 64). Add a control proving the pre-change output was itself meaningful                                                               |
+| A GPU-only homogeneity RED at `5.063e-04` was a bias leak                       | **It was the TF32 ulp.** See §13.6.1 for the diagnostic                                                                                                                                                                                                                                                  |
+| `x + g - stop_gradient(g)` is the identity                                      | **False** under left-to-right float association — about 25% of float64 draws differ by up to 1 ulp. Group it as `x + (g - stop_gradient(g))`: exactly `0.0` forward, gradient unchanged                                                                                                                  |
 
 **The meta-lesson.** A constraint recorded in institutional memory can be a true observation
 over-generalized into a false rule — re-execute the one that is blocking you.
