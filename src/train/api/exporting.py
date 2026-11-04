@@ -25,13 +25,29 @@ unstandardized ``[0, 1]`` pixels gives numbers and no error.
 The command line therefore writes ``<out>.task.json`` beside every export (:func:`export`'s
 ``record``), and its log says so.
 
-Numerical agreement is RELATIVE to the scale of the scores (D-088, which corrects D-081): the 2e-6 and
-the 1e-4 below were measured on scores of scale 1 (an AccUNet's untrained logits are 3e-5, so its head was lifted
-to 1). On TRAINED weights (Oxford-IIIT Pet, CPU, 16 real test images, 128x128) AccUNet's scores reach 220 and the
-same exports differ from Keras by up to 9.2e-4 in ``saved_model`` (4.2e-6 of the scale), 2.8e-3 in ``tflite``
-(1.3e-5) and 1.1e-2 in ``onnx`` (4.9e-5), with 99.999% of the argmaxes equal; ConvUNext's (scale 9.8) by 3.8e-6, 8.3e-6
-and 6.2e-6. Read every absolute figure below as a figure at a scale of 1, and expect up to 1e-4 of the largest
-score. Float32 models match Keras to about 1e-6 in ``keras``, ``saved_model`` and
+Numerical agreement is RELATIVE to the scale of the scores, and for the four segmentation families it is a CONTRACT PER FAMILY
+(D-029, which replaces D-088's one relative 1e-4 for every family, itself a correction of D-081's absolute 1e-4, measured on scores of scale 1:
+an AccUNet's untrained logits are 3e-5, so its head was lifted to 1). For ``saved_model``, ``tflite`` and ``onnx``, read by their own
+runtimes, the largest difference from Keras on the CPU as a share of the largest Keras score is at most (``EXPORT_BAND`` in
+``test_segmentation_export.py``, between 2 and 10 times the largest gap measured for the family, on trained Oxford-IIIT Pet weights, CPU, 16 real
+test images at 128x128, and on the test fixtures; ``tests/test_train/test_api/export_gap_evidence.json`` lists every row):
+
+================= ========= =============================================================
+family            band      largest gap measured (``saved_model``, ``tflite``, ``onnx``)
+================= ========= =============================================================
+``convunext``     5e-6      5.6e-7, 8.5e-7, 7.4e-7
+``accunet``       1e-3      1.4e-4, 2.5e-4, 4.9e-5
+``resnet_seg``    5e-6      3.9e-7, 1.8e-6, 1.4e-6
+``convnext_seg``  5e-6      8.9e-7, 2.1e-6, 7.3e-7
+================= ========= =============================================================
+
+and the argmax agrees at 99.99% of the pixels or more (the worst measured is 99.9954%, an AccUNet ``tflite``). Three families are within a few
+millionths of the scale; AccUNet is two orders of magnitude above them on trained weights (scores of 93 to 834 in the cells measured; why it is above is
+not established here), which is why one number could not serve both: 1e-4 of the scale was too loose for the three and too tight for the file that measured
+2.5e-4 (an AccUNet of the gate, 2 epochs, ``tflite``). The four AccUNet exports of the fix 9.3 reruns (4 epochs at the recipe's rate) are 3e-5 at most. The
+review's AccUNet run (scale 220) differed from Keras by up to 9.2e-4 in ``saved_model`` (4.2e-6 of the scale), 2.8e-3 in ``tflite`` (1.3e-5) and 1.1e-2 in
+``onnx`` (4.9e-5), with 99.999% of the argmaxes equal; ConvUNext's (scale 9.8) by 3.8e-6, 8.3e-6 and 6.2e-6. Read every absolute figure below as a figure
+at a scale of 1, and the table as the contract on trained weights. Float32 models match Keras to about 1e-6 in ``keras``, ``saved_model`` and
 ``tflite``, and in ``onnx`` (the four segmentation families, ConvUNext ``tiny``, AccUNet, ``resnet_seg/resnet18``
 and ``convnext_seg/cifar10``, in all four formats at 32x64, and ConvUNext ``tiny`` with real Oxford-IIIT Pet weights at
 128x128 and 128x256 on 16 real images: 5e-6 at most on scores of scale 7, every argmax equal, D-081), with Keras run on the CPU (the check ``export`` makes of a ``tflite``

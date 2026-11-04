@@ -1,0 +1,1119 @@
+{
+ "what": "Fix 9.3 item 2 of plan 98b866fb (D-029): how far each segmentation export is from Keras (CPU) as a share of the largest Keras score, per family and format. trained: real Oxford-IIIT Pet weights (16 real test images, 128 px, CPU: the gate's cells, step 2's runs, the review's AccUNet and ConvUNext, fix 9.3's reruns); fixture_*: the small models of test_segmentation_export.py (32x64, 3 images; scale1 = head lifted to a scale of 1, trained220 = AccUNet lifted to 220). Copied from the probes' JSON files, listed with sha256 in `sources`; this file does not re-measure.",
+ "sources": [
+  {
+   "file": "scratch_gate_iter1_gpu/exports/cell_accunet_base_ce.json",
+   "sha256": "a1889571f450c2647529bd2bdd12c35cd336738346846c023b3a588737d53708"
+  },
+  {
+   "file": "scratch_gate_iter1_gpu/exports/cell_accunet_base_ce_dice.json",
+   "sha256": "9a3df518fc1e2c9e316667ae6e91c95d848a6344cc57fea02799308126d3aeba"
+  },
+  {
+   "file": "scratch_gate_iter1_gpu/exports/cell_accunet_base_dice.json",
+   "sha256": "690bb27a5eca7ba78af250625175428392cdba5e5dcf5fd637964510ce7dd11f"
+  },
+  {
+   "file": "scratch_gate_iter1_gpu/exports/cell_accunet_base_focal.json",
+   "sha256": "cf536672436a578ce703be39fc58eb339011767381f776d7e4f88eae1827303f"
+  },
+  {
+   "file": "scratch_gate_iter1_gpu/exports/cell_convnext_seg_tiny_ce.json",
+   "sha256": "4d6ee791665695654ade5480aed2cba00d45d3a9b77dba112eb0d99f75c08cbd"
+  },
+  {
+   "file": "scratch_gate_iter1_gpu/exports/cell_convnext_seg_tiny_ce_dice.json",
+   "sha256": "6f05ccf68b28754658090e3057487c54d3831922f07640d10b3f3e15577ae23b"
+  },
+  {
+   "file": "scratch_gate_iter1_gpu/exports/cell_convnext_seg_tiny_dice.json",
+   "sha256": "ee2d1c0724a4e98711b651d22cded92eeac2e1222b297cffa878795e3f125c2c"
+  },
+  {
+   "file": "scratch_gate_iter1_gpu/exports/cell_convnext_seg_tiny_focal.json",
+   "sha256": "ddcf83e3ba365b33e53c9820ca942724c89611855ae3539f3c5b5c2bf250efbb"
+  },
+  {
+   "file": "scratch_gate_iter1_gpu/exports/cell_convunext_tiny_ce.json",
+   "sha256": "4d09bedbcec44b53b82d85939f8d5e9f972874837128eab9d44e7ece4653b632"
+  },
+  {
+   "file": "scratch_gate_iter1_gpu/exports/cell_convunext_tiny_ce_dice.json",
+   "sha256": "0a3cbb312a7e511d3fcfb14324d87cb389c4f267a8c4629a13c1ef6f063dde7c"
+  },
+  {
+   "file": "scratch_gate_iter1_gpu/exports/cell_convunext_tiny_dice.json",
+   "sha256": "42e7a2e36b153cea2e652702ee375e48bac6e349b1ed90fc47b597cc200a49cd"
+  },
+  {
+   "file": "scratch_gate_iter1_gpu/exports/cell_convunext_tiny_focal.json",
+   "sha256": "69e4bbc60817e34b54342d5f07a2f9e3877fb02dc07747759c8ba9ee70cdfd3b"
+  },
+  {
+   "file": "scratch_gate_iter1_gpu/exports/cell_resnet_seg_resnet18_ce.json",
+   "sha256": "326c8ba4837bdffbd65cde59a60f4b5188700ee2747a658a75d99eb8bce7983d"
+  },
+  {
+   "file": "scratch_gate_iter1_gpu/exports/cell_resnet_seg_resnet18_ce_dice.json",
+   "sha256": "8d8dc13c88c02839acd77ae95cf6df7b508c6aa0cba3301eca30533ca065e6db"
+  },
+  {
+   "file": "scratch_gate_iter1_gpu/exports/cell_resnet_seg_resnet18_dice.json",
+   "sha256": "e793f37f5d12da8e29d5111c5930cf91253821f0119da9fbc223342223aeaaa1"
+  },
+  {
+   "file": "scratch_gate_iter1_gpu/exports/cell_resnet_seg_resnet18_focal.json",
+   "sha256": "342791f5ea0999b2e484408c2bcdef3cec5a84bbb5a0b6e99a51d829d797eea5"
+  },
+  {
+   "file": "scratch_step2/export_trained_p4b_s2_pet_convnext_seg_tiny.json",
+   "sha256": "841d96afff419d6facb45d778dbb5c6335151b9f90883a16aac83b39aa596df2"
+  },
+  {
+   "file": "scratch_step2/export_trained_p4b_s2_pet_convnext_seg_tiny_lr1e-4.json",
+   "sha256": "e9a2c54b6d5322924e6ffb3a4ac07c7b728c781a75c6a186c5b61165a9f1feea"
+  },
+  {
+   "file": "scratch_step2/export_trained_p4b_s2_pet_resnet_seg_resnet18.json",
+   "sha256": "acdc0c8ac3c1de8d3f5f74a387bcf485b3ff5cadfcf4bc4d0dc54d8ca68c7f16"
+  },
+  {
+   "file": "scratch_fix93/exports/cell_accunet_base_ce.json",
+   "sha256": "7eda971a314ea46bb61df1d9d1a84eec7af151267b86992495b58a16c5e9bab9"
+  },
+  {
+   "file": "scratch_fix93/exports/cell_accunet_base_ce_dice.json",
+   "sha256": "d41e822d82e06ac7a7068d16ca8efdfd44a166b19d3136190a4570d011a79b7f"
+  },
+  {
+   "file": "scratch_fix93/exports/cell_accunet_base_dice.json",
+   "sha256": "ec7f1f8bc94d1a5960b150fe8790c882ea3b5e4200d99346526d51edf1dbe2d4"
+  },
+  {
+   "file": "scratch_fix93/exports/cell_accunet_base_focal.json",
+   "sha256": "bb8d277507eaadd4d63f0c24fa3ae29669c835f4ffcd080729198105f8715828"
+  },
+  {
+   "file": "scratch_fix93/exports/cell_convnext_seg_cifar10_s44_e30.json",
+   "sha256": "1aafa72f631a5b9800809f90ac8d6eed32baee55dc2730c1e9e1f2add94c2a7d"
+  },
+  {
+   "file": "scratch_fix93/exports/cell_convnext_seg_cifar10_s44_e30_lr1e-4.json",
+   "sha256": "3892510cbc45f4c6831b53a3657eca94a3c9da87b0ff60f08ef37602bbf6a211"
+  },
+  {
+   "file": "scratch_fix93/exports/cell_convunext_tiny_ce_dice.json",
+   "sha256": "f8c498fce9fdeeb100c5ba082959e2abb6bf0639faf983dcdec8b9c8408f74c1"
+  },
+  {
+   "file": "../plan-2026-10-31T180033-2faf890a/scratch_step33/logs/export_accunet.json",
+   "sha256": "d1100eb63695034282a202fa7487aedb36852df873bf9b934d3c3a6ad3de6757"
+  },
+  {
+   "file": "../plan-2026-10-31T180033-2faf890a/scratch_step33/logs/export_convunext.json",
+   "sha256": "b9d364e65b4e6e153dc26abfce7a3c8d1bd53d20df051b90259cb4751ed05b90"
+  },
+  {
+   "file": "scratch_fix93/probes/fixture_export_gaps.json",
+   "sha256": "3dd3a92c6dcda9edca642e169576d1628f766762eb7400357d9f4c5ca9449e07"
+  }
+ ],
+ "rows": [
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_accunet_base_ce.json",
+   "kind": "trained",
+   "family": "accunet",
+   "variant": "base",
+   "run": "cell_accunet_base_ce",
+   "format": "saved_model",
+   "scale": 128.84083557128906,
+   "max_abs_diff": 0.0008020401000976562,
+   "ratio": 6.225045782584036e-06,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_accunet_base_ce.json",
+   "kind": "trained",
+   "family": "accunet",
+   "variant": "base",
+   "run": "cell_accunet_base_ce",
+   "format": "tflite",
+   "scale": 128.84083557128906,
+   "max_abs_diff": 0.00395965576171875,
+   "ratio": 3.073292519534949e-05,
+   "argmax_agreement": 0.9999809265136719
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_accunet_base_ce_dice.json",
+   "kind": "trained",
+   "family": "accunet",
+   "variant": "base",
+   "run": "cell_accunet_base_ce_dice",
+   "format": "saved_model",
+   "scale": 188.0343780517578,
+   "max_abs_diff": 0.02606201171875,
+   "ratio": 0.00013860237680354517,
+   "argmax_agreement": 0.9999961853027344
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_accunet_base_ce_dice.json",
+   "kind": "trained",
+   "family": "accunet",
+   "variant": "base",
+   "run": "cell_accunet_base_ce_dice",
+   "format": "tflite",
+   "scale": 188.0343780517578,
+   "max_abs_diff": 0.04681396484375,
+   "ratio": 0.0002489649250780308,
+   "argmax_agreement": 0.9999542236328125
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_accunet_base_dice.json",
+   "kind": "trained",
+   "family": "accunet",
+   "variant": "base",
+   "run": "cell_accunet_base_dice",
+   "format": "saved_model",
+   "scale": 93.42219543457031,
+   "max_abs_diff": 0.0018711090087890625,
+   "ratio": 2.0028527483059665e-05,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_accunet_base_dice.json",
+   "kind": "trained",
+   "family": "accunet",
+   "variant": "base",
+   "run": "cell_accunet_base_dice",
+   "format": "tflite",
+   "scale": 93.42219543457031,
+   "max_abs_diff": 0.01507568359375,
+   "ratio": 0.00016137154049551843,
+   "argmax_agreement": 0.9999809265136719
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_accunet_base_focal.json",
+   "kind": "trained",
+   "family": "accunet",
+   "variant": "base",
+   "run": "cell_accunet_base_focal",
+   "format": "saved_model",
+   "scale": 226.50265502929688,
+   "max_abs_diff": 0.002315521240234375,
+   "ratio": 1.022293200022258e-05,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_accunet_base_focal.json",
+   "kind": "trained",
+   "family": "accunet",
+   "variant": "base",
+   "run": "cell_accunet_base_focal",
+   "format": "tflite",
+   "scale": 226.50265502929688,
+   "max_abs_diff": 0.008575439453125,
+   "ratio": 3.7860216040363035e-05,
+   "argmax_agreement": 0.9999847412109375
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_convnext_seg_tiny_ce.json",
+   "kind": "trained",
+   "family": "convnext_seg",
+   "variant": "tiny",
+   "run": "cell_convnext_seg_tiny_ce",
+   "format": "saved_model",
+   "scale": 4.445245742797852,
+   "max_abs_diff": 1.1920928955078125e-06,
+   "ratio": 2.681725520887638e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_convnext_seg_tiny_ce.json",
+   "kind": "trained",
+   "family": "convnext_seg",
+   "variant": "tiny",
+   "run": "cell_convnext_seg_tiny_ce",
+   "format": "tflite",
+   "scale": 4.445245742797852,
+   "max_abs_diff": 1.9073486328125e-06,
+   "ratio": 4.290760833420221e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_convnext_seg_tiny_ce_dice.json",
+   "kind": "trained",
+   "family": "convnext_seg",
+   "variant": "tiny",
+   "run": "cell_convnext_seg_tiny_ce_dice",
+   "format": "saved_model",
+   "scale": 4.747084617614746,
+   "max_abs_diff": 1.1920928955078125e-06,
+   "ratio": 2.511210546119989e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_convnext_seg_tiny_ce_dice.json",
+   "kind": "trained",
+   "family": "convnext_seg",
+   "variant": "tiny",
+   "run": "cell_convnext_seg_tiny_ce_dice",
+   "format": "tflite",
+   "scale": 4.747084617614746,
+   "max_abs_diff": 2.1457672119140625e-06,
+   "ratio": 4.52017898301598e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_convnext_seg_tiny_dice.json",
+   "kind": "trained",
+   "family": "convnext_seg",
+   "variant": "tiny",
+   "run": "cell_convnext_seg_tiny_dice",
+   "format": "saved_model",
+   "scale": 17.211889266967773,
+   "max_abs_diff": 3.814697265625e-06,
+   "ratio": 2.2163152495676247e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_convnext_seg_tiny_dice.json",
+   "kind": "trained",
+   "family": "convnext_seg",
+   "variant": "tiny",
+   "run": "cell_convnext_seg_tiny_dice",
+   "format": "tflite",
+   "scale": 17.211889266967773,
+   "max_abs_diff": 1.2874603271484375e-05,
+   "ratio": 7.480063967290733e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_convnext_seg_tiny_focal.json",
+   "kind": "trained",
+   "family": "convnext_seg",
+   "variant": "tiny",
+   "run": "cell_convnext_seg_tiny_focal",
+   "format": "saved_model",
+   "scale": 3.531545639038086,
+   "max_abs_diff": 9.5367431640625e-07,
+   "ratio": 2.700444547181357e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_convnext_seg_tiny_focal.json",
+   "kind": "trained",
+   "family": "convnext_seg",
+   "variant": "tiny",
+   "run": "cell_convnext_seg_tiny_focal",
+   "format": "tflite",
+   "scale": 3.531545639038086,
+   "max_abs_diff": 1.6689300537109375e-06,
+   "ratio": 4.725777957567375e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_convunext_tiny_ce.json",
+   "kind": "trained",
+   "family": "convunext",
+   "variant": "tiny",
+   "run": "cell_convunext_tiny_ce",
+   "format": "saved_model",
+   "scale": 7.054605960845947,
+   "max_abs_diff": 2.1457672119140625e-06,
+   "ratio": 3.041654238129488e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_convunext_tiny_ce.json",
+   "kind": "trained",
+   "family": "convunext",
+   "variant": "tiny",
+   "run": "cell_convunext_tiny_ce",
+   "format": "tflite",
+   "scale": 7.054605960845947,
+   "max_abs_diff": 3.814697265625e-06,
+   "ratio": 5.407385312230202e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_convunext_tiny_ce_dice.json",
+   "kind": "trained",
+   "family": "convunext",
+   "variant": "tiny",
+   "run": "cell_convunext_tiny_ce_dice",
+   "format": "saved_model",
+   "scale": 7.891610145568848,
+   "max_abs_diff": 2.2798776626586914e-06,
+   "ratio": 2.888989218428189e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_convunext_tiny_ce_dice.json",
+   "kind": "trained",
+   "family": "convunext",
+   "variant": "tiny",
+   "run": "cell_convunext_tiny_ce_dice",
+   "format": "tflite",
+   "scale": 7.891610145568848,
+   "max_abs_diff": 4.76837158203125e-06,
+   "ratio": 6.042330391483795e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_convunext_tiny_dice.json",
+   "kind": "trained",
+   "family": "convunext",
+   "variant": "tiny",
+   "run": "cell_convunext_tiny_dice",
+   "format": "saved_model",
+   "scale": 73.88558959960938,
+   "max_abs_diff": 3.0517578125e-05,
+   "ratio": 4.130382973239662e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_convunext_tiny_dice.json",
+   "kind": "trained",
+   "family": "convunext",
+   "variant": "tiny",
+   "run": "cell_convunext_tiny_dice",
+   "format": "tflite",
+   "scale": 73.88558959960938,
+   "max_abs_diff": 5.8650970458984375e-05,
+   "ratio": 7.938079776694974e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_convunext_tiny_focal.json",
+   "kind": "trained",
+   "family": "convunext",
+   "variant": "tiny",
+   "run": "cell_convunext_tiny_focal",
+   "format": "saved_model",
+   "scale": 4.724533557891846,
+   "max_abs_diff": 1.6689300537109375e-06,
+   "ratio": 3.532475816418241e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_convunext_tiny_focal.json",
+   "kind": "trained",
+   "family": "convunext",
+   "variant": "tiny",
+   "run": "cell_convunext_tiny_focal",
+   "format": "tflite",
+   "scale": 4.724533557891846,
+   "max_abs_diff": 2.86102294921875e-06,
+   "ratio": 6.055672828145557e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_resnet_seg_resnet18_ce.json",
+   "kind": "trained",
+   "family": "resnet_seg",
+   "variant": "resnet18",
+   "run": "cell_resnet_seg_resnet18_ce",
+   "format": "saved_model",
+   "scale": 5.987503528594971,
+   "max_abs_diff": 1.9073486328125e-06,
+   "ratio": 3.1855490751753746e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_resnet_seg_resnet18_ce.json",
+   "kind": "trained",
+   "family": "resnet_seg",
+   "variant": "resnet18",
+   "run": "cell_resnet_seg_resnet18_ce",
+   "format": "tflite",
+   "scale": 5.987503528594971,
+   "max_abs_diff": 2.86102294921875e-06,
+   "ratio": 4.778323612763061e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_resnet_seg_resnet18_ce_dice.json",
+   "kind": "trained",
+   "family": "resnet_seg",
+   "variant": "resnet18",
+   "run": "cell_resnet_seg_resnet18_ce_dice",
+   "format": "saved_model",
+   "scale": 6.665525913238525,
+   "max_abs_diff": 1.9073486328125e-06,
+   "ratio": 2.861512591263473e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_resnet_seg_resnet18_ce_dice.json",
+   "kind": "trained",
+   "family": "resnet_seg",
+   "variant": "resnet18",
+   "run": "cell_resnet_seg_resnet18_ce_dice",
+   "format": "tflite",
+   "scale": 6.665525913238525,
+   "max_abs_diff": 3.337860107421875e-06,
+   "ratio": 5.007647034711078e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_resnet_seg_resnet18_dice.json",
+   "kind": "trained",
+   "family": "resnet_seg",
+   "variant": "resnet18",
+   "run": "cell_resnet_seg_resnet18_dice",
+   "format": "saved_model",
+   "scale": 165.279052734375,
+   "max_abs_diff": 3.0517578125e-05,
+   "ratio": 1.8464274582965895e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_resnet_seg_resnet18_dice.json",
+   "kind": "trained",
+   "family": "resnet_seg",
+   "variant": "resnet18",
+   "run": "cell_resnet_seg_resnet18_dice",
+   "format": "tflite",
+   "scale": 165.279052734375,
+   "max_abs_diff": 8.7738037109375e-05,
+   "ratio": 5.308478942602695e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_resnet_seg_resnet18_focal.json",
+   "kind": "trained",
+   "family": "resnet_seg",
+   "variant": "resnet18",
+   "run": "cell_resnet_seg_resnet18_focal",
+   "format": "saved_model",
+   "scale": 4.433941841125488,
+   "max_abs_diff": 1.1920928955078125e-06,
+   "ratio": 2.6885623181859734e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_gate_iter1_gpu/exports/cell_resnet_seg_resnet18_focal.json",
+   "kind": "trained",
+   "family": "resnet_seg",
+   "variant": "resnet18",
+   "run": "cell_resnet_seg_resnet18_focal",
+   "format": "tflite",
+   "scale": 4.433941841125488,
+   "max_abs_diff": 1.9073486328125e-06,
+   "ratio": 4.3016997090975573e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_step2/export_trained_p4b_s2_pet_convnext_seg_tiny.json",
+   "kind": "trained",
+   "family": "convnext_seg",
+   "variant": "tiny",
+   "run": "export_trained_p4b_s2_pet_convnext_seg_tiny",
+   "format": "saved_model",
+   "scale": 3.886384963989258,
+   "max_abs_diff": 1.1920928955078125e-06,
+   "ratio": 3.0673566992297254e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_step2/export_trained_p4b_s2_pet_convnext_seg_tiny.json",
+   "kind": "trained",
+   "family": "convnext_seg",
+   "variant": "tiny",
+   "run": "export_trained_p4b_s2_pet_convnext_seg_tiny",
+   "format": "tflite",
+   "scale": 3.886384963989258,
+   "max_abs_diff": 1.6689300537109375e-06,
+   "ratio": 4.294299378921616e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_step2/export_trained_p4b_s2_pet_convnext_seg_tiny.json",
+   "kind": "trained",
+   "family": "convnext_seg",
+   "variant": "tiny",
+   "run": "export_trained_p4b_s2_pet_convnext_seg_tiny",
+   "format": "onnx",
+   "scale": 3.886384963989258,
+   "max_abs_diff": 1.430511474609375e-06,
+   "ratio": 3.6808280390756706e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_step2/export_trained_p4b_s2_pet_convnext_seg_tiny_lr1e-4.json",
+   "kind": "trained",
+   "family": "convnext_seg",
+   "variant": "tiny",
+   "run": "export_trained_p4b_s2_pet_convnext_seg_tiny_lr1e-4",
+   "format": "saved_model",
+   "scale": 16.157155990600586,
+   "max_abs_diff": 4.76837158203125e-06,
+   "ratio": 2.951244380388013e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_step2/export_trained_p4b_s2_pet_convnext_seg_tiny_lr1e-4.json",
+   "kind": "trained",
+   "family": "convnext_seg",
+   "variant": "tiny",
+   "run": "export_trained_p4b_s2_pet_convnext_seg_tiny_lr1e-4",
+   "format": "tflite",
+   "scale": 16.157155990600586,
+   "max_abs_diff": 1.430511474609375e-05,
+   "ratio": 8.853733141164039e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_step2/export_trained_p4b_s2_pet_convnext_seg_tiny_lr1e-4.json",
+   "kind": "trained",
+   "family": "convnext_seg",
+   "variant": "tiny",
+   "run": "export_trained_p4b_s2_pet_convnext_seg_tiny_lr1e-4",
+   "format": "onnx",
+   "scale": 16.157155990600586,
+   "max_abs_diff": 7.62939453125e-06,
+   "ratio": 4.721991008620821e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_step2/export_trained_p4b_s2_pet_resnet_seg_resnet18.json",
+   "kind": "trained",
+   "family": "resnet_seg",
+   "variant": "resnet18",
+   "run": "export_trained_p4b_s2_pet_resnet_seg_resnet18",
+   "format": "saved_model",
+   "scale": 15.952836036682129,
+   "max_abs_diff": 5.7220458984375e-06,
+   "ratio": 3.586851820754732e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_step2/export_trained_p4b_s2_pet_resnet_seg_resnet18.json",
+   "kind": "trained",
+   "family": "resnet_seg",
+   "variant": "resnet18",
+   "run": "export_trained_p4b_s2_pet_resnet_seg_resnet18",
+   "format": "tflite",
+   "scale": 15.952836036682129,
+   "max_abs_diff": 1.049041748046875e-05,
+   "ratio": 6.575895004717009e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_step2/export_trained_p4b_s2_pet_resnet_seg_resnet18.json",
+   "kind": "trained",
+   "family": "resnet_seg",
+   "variant": "resnet18",
+   "run": "export_trained_p4b_s2_pet_resnet_seg_resnet18",
+   "format": "onnx",
+   "scale": 15.952836036682129,
+   "max_abs_diff": 9.5367431640625e-06,
+   "ratio": 5.978086367924553e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/exports/cell_accunet_base_ce.json",
+   "kind": "trained",
+   "family": "accunet",
+   "variant": "base",
+   "run": "cell_accunet_base_ce",
+   "format": "saved_model",
+   "scale": 140.84413146972656,
+   "max_abs_diff": 0.0008258819580078125,
+   "ratio": 5.863800993265594e-06,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/exports/cell_accunet_base_ce.json",
+   "kind": "trained",
+   "family": "accunet",
+   "variant": "base",
+   "run": "cell_accunet_base_ce",
+   "format": "tflite",
+   "scale": 140.84413146972656,
+   "max_abs_diff": 0.002899169921875,
+   "ratio": 2.0584243671509705e-05,
+   "argmax_agreement": 0.9999961853027344
+  },
+  {
+   "source": "scratch_fix93/exports/cell_accunet_base_ce.json",
+   "kind": "trained",
+   "family": "accunet",
+   "variant": "base",
+   "run": "cell_accunet_base_ce",
+   "format": "onnx",
+   "scale": 140.84413146972656,
+   "max_abs_diff": 0.001964569091796875,
+   "ratio": 1.3948533540562497e-05,
+   "argmax_agreement": 0.9999961853027344
+  },
+  {
+   "source": "scratch_fix93/exports/cell_accunet_base_ce_dice.json",
+   "kind": "trained",
+   "family": "accunet",
+   "variant": "base",
+   "run": "cell_accunet_base_ce_dice",
+   "format": "saved_model",
+   "scale": 225.68048095703125,
+   "max_abs_diff": 0.0007781982421875,
+   "ratio": 3.4482301654420266e-06,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/exports/cell_accunet_base_ce_dice.json",
+   "kind": "trained",
+   "family": "accunet",
+   "variant": "base",
+   "run": "cell_accunet_base_ce_dice",
+   "format": "tflite",
+   "scale": 225.68048095703125,
+   "max_abs_diff": 0.006500244140625,
+   "ratio": 2.8802863734868692e-05,
+   "argmax_agreement": 0.9999961853027344
+  },
+  {
+   "source": "scratch_fix93/exports/cell_accunet_base_ce_dice.json",
+   "kind": "trained",
+   "family": "accunet",
+   "variant": "base",
+   "run": "cell_accunet_base_ce_dice",
+   "format": "onnx",
+   "scale": 225.68048095703125,
+   "max_abs_diff": 0.0032806396484375,
+   "ratio": 1.4536656579804622e-05,
+   "argmax_agreement": 0.9999923706054688
+  },
+  {
+   "source": "scratch_fix93/exports/cell_accunet_base_dice.json",
+   "kind": "trained",
+   "family": "accunet",
+   "variant": "base",
+   "run": "cell_accunet_base_dice",
+   "format": "saved_model",
+   "scale": 834.1488647460938,
+   "max_abs_diff": 0.00225830078125,
+   "ratio": 2.70731146045185e-06,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/exports/cell_accunet_base_dice.json",
+   "kind": "trained",
+   "family": "accunet",
+   "variant": "base",
+   "run": "cell_accunet_base_dice",
+   "format": "tflite",
+   "scale": 834.1488647460938,
+   "max_abs_diff": 0.005889892578125,
+   "ratio": 7.060960971178475e-06,
+   "argmax_agreement": 0.9999885559082031
+  },
+  {
+   "source": "scratch_fix93/exports/cell_accunet_base_dice.json",
+   "kind": "trained",
+   "family": "accunet",
+   "variant": "base",
+   "run": "cell_accunet_base_dice",
+   "format": "onnx",
+   "scale": 834.1488647460938,
+   "max_abs_diff": 0.014068603515625,
+   "ratio": 1.6865818692814905e-05,
+   "argmax_agreement": 0.9999847412109375
+  },
+  {
+   "source": "scratch_fix93/exports/cell_accunet_base_focal.json",
+   "kind": "trained",
+   "family": "accunet",
+   "variant": "base",
+   "run": "cell_accunet_base_focal",
+   "format": "saved_model",
+   "scale": 122.9537124633789,
+   "max_abs_diff": 0.000484466552734375,
+   "ratio": 3.940235256244668e-06,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/exports/cell_accunet_base_focal.json",
+   "kind": "trained",
+   "family": "accunet",
+   "variant": "base",
+   "run": "cell_accunet_base_focal",
+   "format": "tflite",
+   "scale": 122.9537124633789,
+   "max_abs_diff": 0.00341033935546875,
+   "ratio": 2.7736774166005773e-05,
+   "argmax_agreement": 0.9999847412109375
+  },
+  {
+   "source": "scratch_fix93/exports/cell_accunet_base_focal.json",
+   "kind": "trained",
+   "family": "accunet",
+   "variant": "base",
+   "run": "cell_accunet_base_focal",
+   "format": "onnx",
+   "scale": 122.9537124633789,
+   "max_abs_diff": 0.002765655517578125,
+   "ratio": 2.249346898249909e-05,
+   "argmax_agreement": 0.9999847412109375
+  },
+  {
+   "source": "scratch_fix93/exports/cell_convnext_seg_cifar10_s44_e30.json",
+   "kind": "trained",
+   "family": "convnext_seg",
+   "variant": "cifar10",
+   "run": "cell_convnext_seg_cifar10_s44_e30",
+   "format": "saved_model",
+   "scale": 7.673680305480957,
+   "max_abs_diff": 2.6226043701171875e-06,
+   "ratio": 3.4176617551346017e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/exports/cell_convnext_seg_cifar10_s44_e30.json",
+   "kind": "trained",
+   "family": "convnext_seg",
+   "variant": "cifar10",
+   "run": "cell_convnext_seg_cifar10_s44_e30",
+   "format": "tflite",
+   "scale": 7.673680305480957,
+   "max_abs_diff": 5.0067901611328125e-06,
+   "ratio": 6.524626987075149e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/exports/cell_convnext_seg_cifar10_s44_e30.json",
+   "kind": "trained",
+   "family": "convnext_seg",
+   "variant": "cifar10",
+   "run": "cell_convnext_seg_cifar10_s44_e30",
+   "format": "onnx",
+   "scale": 7.673680305480957,
+   "max_abs_diff": 4.649162292480469e-06,
+   "ratio": 6.058582202284067e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/exports/cell_convnext_seg_cifar10_s44_e30_lr1e-4.json",
+   "kind": "trained",
+   "family": "convnext_seg",
+   "variant": "cifar10",
+   "run": "cell_convnext_seg_cifar10_s44_e30_lr1e-4",
+   "format": "saved_model",
+   "scale": 6.7290730476379395,
+   "max_abs_diff": 3.4570693969726562e-06,
+   "ratio": 5.137512065181351e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/exports/cell_convnext_seg_cifar10_s44_e30_lr1e-4.json",
+   "kind": "trained",
+   "family": "convnext_seg",
+   "variant": "cifar10",
+   "run": "cell_convnext_seg_cifar10_s44_e30_lr1e-4",
+   "format": "tflite",
+   "scale": 6.7290730476379395,
+   "max_abs_diff": 6.973743438720703e-06,
+   "ratio": 1.0363601924589967e-06,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/exports/cell_convnext_seg_cifar10_s44_e30_lr1e-4.json",
+   "kind": "trained",
+   "family": "convnext_seg",
+   "variant": "cifar10",
+   "run": "cell_convnext_seg_cifar10_s44_e30_lr1e-4",
+   "format": "onnx",
+   "scale": 6.7290730476379395,
+   "max_abs_diff": 4.5299530029296875e-06,
+   "ratio": 6.731912361272116e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/exports/cell_convunext_tiny_ce_dice.json",
+   "kind": "trained",
+   "family": "convunext",
+   "variant": "tiny",
+   "run": "cell_convunext_tiny_ce_dice",
+   "format": "saved_model",
+   "scale": 7.89231014251709,
+   "max_abs_diff": 2.1457672119140625e-06,
+   "ratio": 2.718807514107288e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/exports/cell_convunext_tiny_ce_dice.json",
+   "kind": "trained",
+   "family": "convunext",
+   "variant": "tiny",
+   "run": "cell_convunext_tiny_ce_dice",
+   "format": "tflite",
+   "scale": 7.89231014251709,
+   "max_abs_diff": 3.814697265625e-06,
+   "ratio": 4.833435580635179e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/exports/cell_convunext_tiny_ce_dice.json",
+   "kind": "trained",
+   "family": "convunext",
+   "variant": "tiny",
+   "run": "cell_convunext_tiny_ce_dice",
+   "format": "onnx",
+   "scale": 7.89231014251709,
+   "max_abs_diff": 3.6954879760742188e-06,
+   "ratio": 4.6823907187403295e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "../plan-2026-10-31T180033-2faf890a/scratch_step33/logs/export_accunet.json",
+   "kind": "trained",
+   "family": "accunet",
+   "variant": "base",
+   "run": "train_api_review3_accunet_pet_b8",
+   "format": "saved_model",
+   "scale": 220.49278259277344,
+   "max_abs_diff": 0.00091552734375,
+   "ratio": 4.152187354997832e-06,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "../plan-2026-10-31T180033-2faf890a/scratch_step33/logs/export_accunet.json",
+   "kind": "trained",
+   "family": "accunet",
+   "variant": "base",
+   "run": "train_api_review3_accunet_pet_b8",
+   "format": "tflite",
+   "scale": 220.49278259277344,
+   "max_abs_diff": 0.002777099609375,
+   "ratio": 1.259496831016009e-05,
+   "argmax_agreement": 0.9999923706054688
+  },
+  {
+   "source": "../plan-2026-10-31T180033-2faf890a/scratch_step33/logs/export_accunet.json",
+   "kind": "trained",
+   "family": "accunet",
+   "variant": "base",
+   "run": "train_api_review3_accunet_pet_b8",
+   "format": "onnx",
+   "scale": 220.49278259277344,
+   "max_abs_diff": 0.0108642578125,
+   "ratio": 4.9272623279307606e-05,
+   "argmax_agreement": 0.9999885559082031
+  },
+  {
+   "source": "../plan-2026-10-31T180033-2faf890a/scratch_step33/logs/export_convunext.json",
+   "kind": "trained",
+   "family": "convunext",
+   "variant": "tiny",
+   "run": "train_api_seggate_api_s42",
+   "format": "saved_model",
+   "scale": 9.827862739562988,
+   "max_abs_diff": 3.814697265625e-06,
+   "ratio": 3.881512559458708e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "../plan-2026-10-31T180033-2faf890a/scratch_step33/logs/export_convunext.json",
+   "kind": "trained",
+   "family": "convunext",
+   "variant": "tiny",
+   "run": "train_api_seggate_api_s42",
+   "format": "tflite",
+   "scale": 9.827862739562988,
+   "max_abs_diff": 8.344650268554688e-06,
+   "ratio": 8.490808723815923e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "../plan-2026-10-31T180033-2faf890a/scratch_step33/logs/export_convunext.json",
+   "kind": "trained",
+   "family": "convunext",
+   "variant": "tiny",
+   "run": "train_api_seggate_api_s42",
+   "format": "onnx",
+   "scale": 9.827862739562988,
+   "max_abs_diff": 6.198883056640625e-06,
+   "ratio": 6.3074579091204e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/probes/fixture_export_gaps.json",
+   "kind": "fixture_scale1",
+   "family": "convunext",
+   "variant": null,
+   "run": "test_segmentation_export fixture",
+   "format": "saved_model",
+   "scale": 1.0090129375457764,
+   "max_abs_diff": 5.662441253662109e-07,
+   "ratio": 5.611861892905827e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/probes/fixture_export_gaps.json",
+   "kind": "fixture_scale1",
+   "family": "convunext",
+   "variant": null,
+   "run": "test_segmentation_export fixture",
+   "format": "tflite",
+   "scale": 1.0090129375457764,
+   "max_abs_diff": 8.456408977508545e-07,
+   "ratio": 8.380872695326465e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/probes/fixture_export_gaps.json",
+   "kind": "fixture_scale1",
+   "family": "convunext",
+   "variant": null,
+   "run": "test_segmentation_export fixture",
+   "format": "onnx",
+   "scale": 1.0090129375457764,
+   "max_abs_diff": 7.450580596923828e-07,
+   "ratio": 7.384028806455035e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/probes/fixture_export_gaps.json",
+   "kind": "fixture_scale1",
+   "family": "accunet",
+   "variant": null,
+   "run": "test_segmentation_export fixture",
+   "format": "saved_model",
+   "scale": 1.0303682088851929,
+   "max_abs_diff": 0.0,
+   "ratio": 0.0,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/probes/fixture_export_gaps.json",
+   "kind": "fixture_scale1",
+   "family": "accunet",
+   "variant": null,
+   "run": "test_segmentation_export fixture",
+   "format": "tflite",
+   "scale": 1.0303682088851929,
+   "max_abs_diff": 9.238719940185547e-07,
+   "ratio": 8.966425653001641e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/probes/fixture_export_gaps.json",
+   "kind": "fixture_scale1",
+   "family": "accunet",
+   "variant": null,
+   "run": "test_segmentation_export fixture",
+   "format": "onnx",
+   "scale": 1.0303682088851929,
+   "max_abs_diff": 7.599592208862305e-07,
+   "ratio": 7.375608198436834e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/probes/fixture_export_gaps.json",
+   "kind": "fixture_scale1",
+   "family": "resnet_seg",
+   "variant": null,
+   "run": "test_segmentation_export fixture",
+   "format": "saved_model",
+   "scale": 0.9913995265960693,
+   "max_abs_diff": 3.8743019104003906e-07,
+   "ratio": 3.9079118019176907e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/probes/fixture_export_gaps.json",
+   "kind": "fixture_scale1",
+   "family": "resnet_seg",
+   "variant": null,
+   "run": "test_segmentation_export fixture",
+   "format": "tflite",
+   "scale": 0.9913995265960693,
+   "max_abs_diff": 1.7657876014709473e-06,
+   "ratio": 1.7811059558740244e-06,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/probes/fixture_export_gaps.json",
+   "kind": "fixture_scale1",
+   "family": "resnet_seg",
+   "variant": null,
+   "run": "test_segmentation_export fixture",
+   "format": "onnx",
+   "scale": 0.9913995265960693,
+   "max_abs_diff": 1.4007091522216797e-06,
+   "ratio": 1.412860420693319e-06,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/probes/fixture_export_gaps.json",
+   "kind": "fixture_scale1",
+   "family": "convnext_seg",
+   "variant": null,
+   "run": "test_segmentation_export fixture",
+   "format": "saved_model",
+   "scale": 1.021374225616455,
+   "max_abs_diff": 9.08970832824707e-07,
+   "ratio": 8.899488649971498e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/probes/fixture_export_gaps.json",
+   "kind": "fixture_scale1",
+   "family": "convnext_seg",
+   "variant": null,
+   "run": "test_segmentation_export fixture",
+   "format": "tflite",
+   "scale": 1.021374225616455,
+   "max_abs_diff": 2.1457672119140625e-06,
+   "ratio": 2.100862894419501e-06,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/probes/fixture_export_gaps.json",
+   "kind": "fixture_scale1",
+   "family": "convnext_seg",
+   "variant": null,
+   "run": "test_segmentation_export fixture",
+   "format": "onnx",
+   "scale": 1.021374225616455,
+   "max_abs_diff": 7.450580596923828e-07,
+   "ratio": 7.294662827845491e-07,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/probes/fixture_export_gaps.json",
+   "kind": "fixture_trained220",
+   "family": "accunet",
+   "variant": null,
+   "run": "test_segmentation_export fixture",
+   "format": "saved_model",
+   "scale": 217.2189178466797,
+   "max_abs_diff": 0.0,
+   "ratio": 0.0,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/probes/fixture_export_gaps.json",
+   "kind": "fixture_trained220",
+   "family": "accunet",
+   "variant": null,
+   "run": "test_segmentation_export fixture",
+   "format": "tflite",
+   "scale": 217.2189178466797,
+   "max_abs_diff": 0.0002593994140625,
+   "ratio": 1.1941842664256006e-06,
+   "argmax_agreement": 1.0
+  },
+  {
+   "source": "scratch_fix93/probes/fixture_export_gaps.json",
+   "kind": "fixture_trained220",
+   "family": "accunet",
+   "variant": null,
+   "run": "test_segmentation_export fixture",
+   "format": "onnx",
+   "scale": 217.2189178466797,
+   "max_abs_diff": 0.000213623046875,
+   "ratio": 9.834458664681417e-07,
+   "argmax_agreement": 1.0
+  }
+ ]
+}

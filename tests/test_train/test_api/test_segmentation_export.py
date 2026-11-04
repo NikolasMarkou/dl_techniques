@@ -18,8 +18,9 @@ scores have a scale near 1 (AccUNet's untrained logits are 3e-5, and a tolerance
 file against them):
 
 * every (family, format) exports through ``export(..., record=)`` and the artifact, read by its own
-  runtime, gives Keras' ``training=False`` scores to ``ATOL`` (1e-4 at a scale of 1; the tolerance is
-  relative to the scale, ``RTOL`` times the largest score, D-088, which corrects D-081), with the input's height and width and one score per class;
+  runtime, gives Keras' ``training=False`` scores to the family's band for that format (``EXPORT_BAND``: a share of the largest
+  score, measured per family on trained weights and on these fixtures, D-029, which replaces the one relative 1e-4 of D-088), with the
+  input's height and width and one score per class;
 * two calls of an artifact give the same bytes of answer;
 * a ``saved_model`` of ConvUNext, which has stochastic depth that is live under ``training=True`` (a
   control asserts it), serves the same answer every time, matches Keras for another batch size, and holds
@@ -50,14 +51,24 @@ from train.api.predictor import (
 )
 from train.api.segmentation_predictor import SegmentationPredictor
 
-#: The tolerance is RELATIVE to the largest score (D-088, which corrects D-081): 1e-4 absolute was measured on
-#: scores of scale 1 (the scale these models are built to, below). On TRAINED weights (Oxford-IIIT Pet, CPU,
-#: 16 real test images, `load_check_evidence`'s sibling `scratch_step33/logs/export_*.json`) the same exports
-#: differ by more than that in absolute terms and by less than 1e-4 of the scale: AccUNet (scores up to 220)
-#: saved_model 9.2e-4 (4.2e-6 of the scale), tflite 2.8e-3 (1.3e-5), onnx 1.1e-2 (4.9e-5); ConvUNext (scale 9.8)
-#: 3.8e-6, 8.3e-6, 6.2e-6. Argmax agreement 0.99999 or better in every cell.
-RTOL = 1e-4
-ATOL = RTOL  # the tolerance at a scale of 1
+#: THE EXPORT CONTRACT (plan 98b866fb fix 9.3, D-029), one band per family: the largest difference between an artifact (read by its own
+#: runtime: ``saved_model``, ``tflite``, ``onnx``) and Keras on the CPU, as a share of the largest Keras score. D-088 had replaced D-081's
+#: absolute 1e-4 by a relative 1e-4 for every family on the strength of the AccUNet files then measured (4.9e-5 at worst); the iteration 1
+#: gate's trained AccUNet cells then showed 1.4e-4 (saved_model) and 2.5e-4 (tflite), every argmax at 0.99995 or better, while the other
+#: three families stayed at 2.1e-6 or less: one number for four families was both too loose for three and too tight for one. Each band is
+#: between 2 and 10 times the largest gap measured for its family, in any of the three formats, on trained Oxford-IIIT Pet weights (CPU,
+#: 16 real test images, 128 px) and on this file's fixtures, all listed in ``export_gap_evidence.json`` (rows copied from the probes,
+#: sha256 of each source); a test holds both sides.
+EXPORT_BAND = {
+    "convunext": 5e-6,
+    "accunet": 1e-3,
+    "resnet_seg": 5e-6,
+    "convnext_seg": 5e-6,
+}
+#: The share of argmaxes that agree with Keras' (the worst measured over the trained cells is 0.99995; the fixtures' is 1.0).
+EXPORT_ARGMAX = 0.9999
+#: Keras itself (the ``keras`` format) and the checks that are not about a format's runtime keep the absolute figure measured at a scale of 1.
+ATOL = 1e-4  # at a scale of 1
 #: The scale of a trained AccUNet's scores, which `test_a_trained_scale_accunet_matches_in_every_format` builds to.
 TRAINED_SCALE = 220.0
 SIZE = (32, 64)  # height != width
@@ -216,6 +227,100 @@ def reference(model, x):
         return np.asarray(model(x, training=False), np.float64)
 
 
+def gap_limit(family, format, scale):
+    """The largest difference the contract allows for ``family`` in ``format`` at the Keras scores' ``scale``."""
+    return ATOL if format == "keras" else EXPORT_BAND[family] * scale
+
+
+def check_within_contract(family, format, got, expected):
+    """Assert that ``got`` (an artifact's scores) is inside the family's band of ``expected`` (Keras', CPU) and agrees on the argmax."""
+    got, expected = np.asarray(got, np.float64), np.asarray(expected, np.float64)
+    assert got.shape == expected.shape, f"{family} {format}: {got.shape} against {expected.shape}"
+    scale = float(np.abs(expected).max())
+    worst = float(np.abs(got - expected).max())
+    limit = gap_limit(family, format, scale)
+    assert worst <= limit, f"{family} {format}: {worst:.3g} ({worst / scale:.2g} of the scale) against {limit:.3g}"
+    assert (got.argmax(-1) == expected.argmax(-1)).mean() >= EXPORT_ARGMAX, f"{family} {format}: the argmax disagrees"
+
+
+# ---------------------------------------------------------------------
+# The contract against the measurement
+# ---------------------------------------------------------------------
+
+EVIDENCE = json.loads((Path(__file__).resolve().parent / "export_gap_evidence.json").read_text())["rows"]
+
+
+def measured(family, format, kind=None):
+    return [row for row in EVIDENCE if row["family"] == family and row["format"] == format and (kind is None or row["kind"].startswith(kind))]
+
+
+def test_the_evidence_has_trained_weights_and_fixtures_for_every_family_and_format():
+    assert set(EXPORT_BAND) == set(FAMILIES)
+    for family in EXPORT_BAND:
+        for format in ("saved_model", "tflite", "onnx"):
+            assert measured(family, format, "trained"), f"no trained-weights row for {family} {format}"
+            assert measured(family, format, "fixture"), f"no fixture row for {family} {format}"
+
+
+@pytest.mark.parametrize("family", FAMILIES)
+def test_each_band_covers_every_measured_gap_of_its_family_and_is_within_ten_times_the_largest(family):
+    worst = max(row["ratio"] for row in EVIDENCE if row["family"] == family)
+    band = EXPORT_BAND[family]
+    assert worst * 2 <= band, f"{family}: the band {band:.3g} is under twice the largest measured gap {worst:.3g}"
+    assert band <= 10 * worst, f"{family}: the band {band:.3g} is more than ten times the largest measured gap {worst:.3g}"
+
+
+@pytest.mark.parametrize("family", FAMILIES)
+def test_every_measured_argmax_agreement_is_inside_the_contract(family):
+    rows = [row for row in EVIDENCE if row["family"] == family]
+    assert rows and all(row["argmax_agreement"] >= EXPORT_ARGMAX for row in rows)
+
+
+def test_accunet_is_the_family_that_needs_a_wider_band_than_the_others():
+    """Why there is a table: the three other families are under 3e-6 of the scale on trained weights, AccUNet is two orders above."""
+    others = max(row["ratio"] for row in EVIDENCE if row["family"] != "accunet" and row["kind"] == "trained")
+    accunet = max(row["ratio"] for row in EVIDENCE if row["family"] == "accunet" and row["kind"] == "trained")
+    assert others < 3e-6 and accunet > 100 * others
+    assert EXPORT_BAND["accunet"] >= 100 * max(band for family, band in EXPORT_BAND.items() if family != "accunet")
+
+
+@pytest.mark.parametrize("family", FAMILIES)
+def test_the_comparison_passes_just_inside_the_band_and_fails_just_outside_it_for_every_family(family):
+    rng = np.random.default_rng(3)
+    expected = rng.normal(0, 40.0, (2, 4, 4, 3))
+    scale = float(np.abs(expected).max())
+    band = EXPORT_BAND[family]
+    direction = np.zeros_like(expected)
+    direction[0, 0, 0, 0] = 1.0  # one score moved, far from any argmax tie: the argmax does not change at these sizes
+    for format in ("saved_model", "tflite", "onnx"):
+        check_within_contract(family, format, expected + 0.9 * band * scale * direction, expected)
+        with pytest.raises(AssertionError, match="against"):
+            check_within_contract(family, format, expected + 1.1 * band * scale * direction, expected)
+    check_within_contract(family, "keras", expected + 0.9 * ATOL * direction, expected)
+    with pytest.raises(AssertionError, match="against"):
+        check_within_contract(family, "keras", expected + 1.1 * ATOL * direction, expected)
+
+
+def test_the_comparison_refuses_another_shape():
+    expected = np.random.default_rng(4).normal(0, 1.0, (1, 4, 4, 3))
+    with pytest.raises(AssertionError, match="against"):
+        check_within_contract("convunext", "tflite", expected[:, :2], expected)
+
+
+@pytest.mark.parametrize("family", FAMILIES)
+def test_the_comparison_refuses_a_flipped_argmax_that_is_inside_the_band(family):
+    """A near tie at one pixel: the scores differ by half a band, the argmax flips, 1 pixel in 32 disagrees."""
+    expected = np.random.default_rng(5).normal(0, 40.0, (2, 4, 4, 3))
+    scale = float(np.abs(expected).max())
+    gap = 0.2 * EXPORT_BAND[family] * scale
+    expected[0, 0, 0] = [0.0, -gap, -30.0]  # class 0 wins by `gap`
+    got = expected.copy()
+    got[0, 0, 0, 1] += 2.5 * gap  # class 1 wins by 1.5 gap, and this moved one score by half a band
+    assert np.abs(got - expected).max() < EXPORT_BAND[family] * scale and got[0, 0, 0].argmax() != expected[0, 0, 0].argmax()
+    with pytest.raises(AssertionError, match="argmax"):
+        check_within_contract(family, "onnx", got, expected)
+
+
 # ---------------------------------------------------------------------
 # The table: family x format
 # ---------------------------------------------------------------------
@@ -228,9 +333,7 @@ def test_each_family_exports_each_format_and_matches_keras_at_a_non_square_size(
     assert np.abs(expected).max() > 0.5  # a model that outputs nothing would match anything
     got = np.asarray(read_back(format, workshop.artifact(family, format), batch), np.float64)
     assert got.shape == expected.shape
-    worst = np.abs(got - expected).max()
-    assert worst <= ATOL, f"{family} {format}: {worst:.3g}"
-    assert (got.argmax(-1) == expected.argmax(-1)).mean() > 0.999
+    check_within_contract(family, format, got, expected)
 
 
 @pytest.mark.parametrize("format", ["saved_model", "tflite", "onnx"])
@@ -239,9 +342,10 @@ def test_a_trained_scale_accunet_matches_in_every_format_to_a_relative_tolerance
 
     The model here is the small fixture with its head lifted to a scale of 220, so the exports are compared
     where a trained model puts them. What is compared: the largest absolute difference between the artifact's
-    scores and Keras' (CPU) against ``RTOL`` times the largest Keras score, and, for ``tflite`` and ``onnx``, that the same difference
-    is above the absolute ``ATOL`` (the control: an absolute tolerance would have refused a correct file).
-    The measured numbers on trained weights are in the comment of ``RTOL``.
+    scores and Keras' (CPU) against AccUNet's ``EXPORT_BAND`` times the largest Keras score, and, for ``tflite`` and
+    ``onnx``, that the same difference is above the absolute ``ATOL`` (the control: an absolute tolerance would have refused a
+    correct file). The measured numbers on trained weights are in ``export_gap_evidence.json``; the fixture sits far under the band
+    (its weights are near-random), the band is the trained cells'.
     """
     if format == "onnx":
         pytest.importorskip("tf2onnx")
@@ -251,9 +355,8 @@ def test_a_trained_scale_accunet_matches_in_every_format_to_a_relative_tolerance
     scale = float(np.abs(expected).max())
     assert 0.5 * TRAINED_SCALE < scale < 2 * TRAINED_SCALE  # the head was lifted on another probe: the order of magnitude
     got = np.asarray(read_back(format, workshop.artifact("accunet", format, TRAINED_SCALE), batch), np.float64)
+    check_within_contract("accunet", format, got, expected)
     worst = float(np.abs(got - expected).max())
-    assert worst <= RTOL * scale, f"{format}: {worst:.3g} of scale {scale:.3g} ({worst / scale:.2g})"
-    assert (got.argmax(-1) == expected.argmax(-1)).mean() > 0.999
     if format != "saved_model":  # the SavedModel runs Keras' own kernels: exactly equal on the CPU
         assert worst > ATOL, f"{format}: {worst:.3g} is under the absolute 1e-4, so this case would not have shown the defect"
 
