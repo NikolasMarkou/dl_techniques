@@ -1,0 +1,181 @@
+{
+ "what": "Fix 9.3 item 3 of plan 98b866fb (D-029): 30-epoch convnext_seg runs on Oxford-IIIT Pet at 128 px, batch 16, RTX 4090, per variant and rate. Read from the run summaries copied under the plan scratch (scratch_step2/runs, scratch_gate_iter1_gpu/runs, scratch_fix93/runs), sha256 of each summary below; this file does not re-measure. test_miou is test_metrics_best.miou.",
+ "rows": [
+  {
+   "run": "p4b_s2_pet_convnext_seg_tiny",
+   "why": "step 2: the family's first 30-epoch run, at ConvUNext's rate",
+   "model": "convnext_seg/tiny",
+   "variant": "tiny",
+   "seed": 42,
+   "lr": 0.001,
+   "epochs_requested": 30,
+   "epochs_run": 13,
+   "best_epoch": 3,
+   "best_val_miou": 0.37332403659820557,
+   "test_miou": 0.3704371452331543,
+   "test_accuracy": 0.690474808216095,
+   "majority_baseline_miou": 0.1993090864540874,
+   "dataset": "oxford_pet",
+   "batch_size": 16,
+   "input_size": [
+    128,
+    128
+   ],
+   "summary_sha256": "ebbe58c3b869215f62d8b20eddd6565f97722b6d207832e409e21e8333897c01"
+  },
+  {
+   "run": "p4b_s2_pet_convnext_seg_tiny_lr1e-4",
+   "why": "step 2: the same at 1e-4",
+   "model": "convnext_seg/tiny",
+   "variant": "tiny",
+   "seed": 42,
+   "lr": 0.0001,
+   "epochs_requested": 30,
+   "epochs_run": 30,
+   "best_epoch": 24,
+   "best_val_miou": 0.5968611836433411,
+   "test_miou": 0.5965831875801086,
+   "test_accuracy": 0.8233239054679871,
+   "majority_baseline_miou": 0.1993090864540874,
+   "dataset": "oxford_pet",
+   "batch_size": 16,
+   "input_size": [
+    128,
+    128
+   ],
+   "summary_sha256": "a081eb699e7300c96aed53b67ba7704059c9222801445f66615cea7b22883109"
+  },
+  {
+   "run": "lr_tiny_lr1e-3_s43",
+   "why": "gate 1 GPU half",
+   "model": "convnext_seg/tiny",
+   "variant": "tiny",
+   "seed": 43,
+   "lr": 0.001,
+   "epochs_requested": 30,
+   "epochs_run": 22,
+   "best_epoch": 12,
+   "best_val_miou": 0.37010493874549866,
+   "test_miou": 0.3695150315761566,
+   "test_accuracy": 0.6928979754447937,
+   "majority_baseline_miou": 0.19345606928286344,
+   "dataset": "oxford_pet",
+   "batch_size": 16,
+   "input_size": [
+    128,
+    128
+   ],
+   "summary_sha256": "ef47acb2d88a54ebf2036aa42b7d34e8333de47798f350194418c89221a630e4"
+  },
+  {
+   "run": "lr_tiny_lr1e-4_s43",
+   "why": "gate 1 GPU half",
+   "model": "convnext_seg/tiny",
+   "variant": "tiny",
+   "seed": 43,
+   "lr": 0.0001,
+   "epochs_requested": 30,
+   "epochs_run": 30,
+   "best_epoch": 22,
+   "best_val_miou": 0.5899857878684998,
+   "test_miou": 0.600828230381012,
+   "test_accuracy": 0.8258596658706665,
+   "majority_baseline_miou": 0.19345606928286344,
+   "dataset": "oxford_pet",
+   "batch_size": 16,
+   "input_size": [
+    128,
+    128
+   ],
+   "summary_sha256": "a2fa38ea14ae9a13aa8c99215a30cc3583dbc769abb6f314f1e8875a470508e8"
+  },
+  {
+   "run": "lr_cifar10_lr1e-3_s42",
+   "why": "gate 1 GPU half",
+   "model": "convnext_seg/cifar10",
+   "variant": "cifar10",
+   "seed": 42,
+   "lr": 0.001,
+   "epochs_requested": 30,
+   "epochs_run": 30,
+   "best_epoch": 25,
+   "best_val_miou": 0.681354820728302,
+   "test_miou": 0.6881540417671204,
+   "test_accuracy": 0.8751530051231384,
+   "majority_baseline_miou": 0.1993090864540874,
+   "dataset": "oxford_pet",
+   "batch_size": 16,
+   "input_size": [
+    128,
+    128
+   ],
+   "summary_sha256": "5cc4c4dc5a5aa3a903fdc09b823636773c0efaa9246e53f48a90ad76b10f968f"
+  },
+  {
+   "run": "lr_cifar10_lr1e-4_s42",
+   "why": "gate 1 GPU half",
+   "model": "convnext_seg/cifar10",
+   "variant": "cifar10",
+   "seed": 42,
+   "lr": 0.0001,
+   "epochs_requested": 30,
+   "epochs_run": 30,
+   "best_epoch": 28,
+   "best_val_miou": 0.6656162142753601,
+   "test_miou": 0.6722476482391357,
+   "test_accuracy": 0.864737868309021,
+   "majority_baseline_miou": 0.1993090864540874,
+   "dataset": "oxford_pet",
+   "batch_size": 16,
+   "input_size": [
+    128,
+    128
+   ],
+   "summary_sha256": "adb23884036352578ff8d85e1863b873dd3d8adb7652570e5c7560333dd6621c"
+  },
+  {
+   "run": "lr_cifar10_lr1e-3_s43",
+   "why": "gate 1 GPU half",
+   "model": "convnext_seg/cifar10",
+   "variant": "cifar10",
+   "seed": 43,
+   "lr": 0.001,
+   "epochs_requested": 30,
+   "epochs_run": 30,
+   "best_epoch": 29,
+   "best_val_miou": 0.6722507476806641,
+   "test_miou": 0.6868336796760559,
+   "test_accuracy": 0.8743616938591003,
+   "majority_baseline_miou": 0.19345606928286344,
+   "dataset": "oxford_pet",
+   "batch_size": 16,
+   "input_size": [
+    128,
+    128
+   ],
+   "summary_sha256": "9c7f2505bdda33dc6f8207a818fa633892d87b8cc1260501d07abc86c86b7316"
+  },
+  {
+   "run": "lr_cifar10_lr1e-4_s43",
+   "why": "gate 1 GPU half",
+   "model": "convnext_seg/cifar10",
+   "variant": "cifar10",
+   "seed": 43,
+   "lr": 0.0001,
+   "epochs_requested": 30,
+   "epochs_run": 30,
+   "best_epoch": 29,
+   "best_val_miou": 0.6584101319313049,
+   "test_miou": 0.6743142008781433,
+   "test_accuracy": 0.866811990737915,
+   "majority_baseline_miou": 0.19345606928286344,
+   "dataset": "oxford_pet",
+   "batch_size": 16,
+   "input_size": [
+    128,
+    128
+   ],
+   "summary_sha256": "50a4e22ce319c31c4f28f3db7c4671074fc8da7ba351f10b213c9694defd3618"
+  }
+ ]
+}

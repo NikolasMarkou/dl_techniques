@@ -554,6 +554,9 @@ def test_the_recipes_are_conv_unexts_optimizer_settings_but_the_convnext_one_has
     assert world["resnet_seg"].recipe("oxford_pet", "resnet18")["optim_args"] == unet
     convnext = world["convnext_seg"].recipe("oxford_pet", "tiny")["optim_args"]
     assert convnext == {**unet, "lr": sm.CONVNEXT_SEG_LR} and sm.CONVNEXT_SEG_LR == 1e-4
+    # D-029: the shallow variant is the exception, per variant (the 30-epoch evidence is held by
+    # test_the_convnext_seg_rate_is_what_the_30_epoch_runs_measured.py).
+    assert world["convnext_seg"].recipe("oxford_pet", "cifar10")["optim_args"] == {**unet, "lr": 1e-3}
     for family, variant in (("resnet_seg", "resnet18"), ("convnext_seg", "tiny")):
         recipe = world[family].recipe("oxford_pet", variant)
         assert recipe["transform_args"] == {"augment": "flip", "image_size": 128}

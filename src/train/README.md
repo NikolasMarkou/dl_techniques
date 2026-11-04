@@ -189,7 +189,7 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   `dims`); a ConvNeXt V2 body under a `convnext_seg` record is refused. **Recipes** have no legacy source: the optimizer
   settings start from ConvUNext's (AdamW, lr 1e-3, weight decay 1e-4, no warmup, per-variable clipnorm 1, cosine to 1%), 30
   epochs, patience 10, a flip, `val_miou`, Pet at 128 px: the same data, loss and pipeline, an untuned starting point and
-  not a result. `resnet_seg` keeps them. **`convnext_seg` has lr 1e-4**: at 1e-3 the `tiny` variant stayed at the pixel
+  not a result. `resnet_seg` keeps them. **`convnext_seg` has lr 1e-4, and 1e-3 for `cifar10`**: at 1e-3 the `tiny` variant stayed at the pixel
   prior (30 epochs: best `val_miou` 0.373 at epoch 3, accuracy 0.70, stopped at epoch 13), and so did 3e-4 and 1e-3 with 2
   warmup epochs in 4 epochs, while 2e-4, 1e-4 and 5e-5 reached 0.397, 0.421 and 0.417 (`scratch_step2/logs/diag_runs.out`).
   **Measured on Oxford-IIIT Pet** (30 epochs, 128 px, batch 16, RTX 4090, the recipes as shipped; majority-class baseline
