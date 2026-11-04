@@ -357,3 +357,138 @@ def test_the_real_releases_names_agree_with_the_benchmark_ids():
     assert len(names) == 1599 and len(mapping.class_names) == 150
     assert mapping.source_names[0] == ("wall",) and mapping.source_names[14] == ("door", "double door")
 
+
+# ---------------------------------------------------------------------
+# convert coco
+# ---------------------------------------------------------------------
+
+coco_mask = pytest.importorskip("pycocotools.mask")
+
+CH, CW = 12, 16
+CATEGORIES = [{"id": 1, "name": "person"}, {"id": 3, "name": "car"}, {"id": 90, "name": "toaster"}]
+
+
+def polygon(x0, y0, x1, y1):
+    return [[x0, y0, x1, y0, x1, y1, x0, y1]]
+
+
+def write_coco(root: Path, train: int = 4, val: int = 2) -> dict:
+    """A tiny COCO 2017 tree; return ``{stem: annotations}`` as written. Image 1 of each split has a person, a car
+    overlapping it and a crowd region; image 2 has two people overlapping; the others have no annotation."""
+    (root / "annotations").mkdir(parents=True)
+    every = {}
+    for split, count in (("train", train), ("val", val)):
+        (root / f"{split}2017").mkdir()
+        images, annotations, held = [], [], {}
+        for number in range(1, count + 1):
+            stem = f"{(100 if split == 'val' else 0) + number:012d}"
+            images.append({"id": int(stem), "file_name": stem + ".jpg", "width": CW, "height": CH})
+            Image.fromarray(np.full((CH, CW, 3), 90 * (number % 3), dtype=np.uint8)).save(root / f"{split}2017" / (stem + ".jpg"))
+            if number == 1:
+                crowd = np.zeros((CH, CW), dtype=np.uint8)
+                crowd[8:12, 10:16] = 1
+                rle = coco_mask.encode(np.asfortranarray(crowd))
+                found = [(1, polygon(0, 0, 8, 8), 0), (3, polygon(5, 4, 12, 10), 0),
+                         (1, {"size": [CH, CW], "counts": rle["counts"].decode("ascii")}, 1)]
+            elif number == 2:
+                found = [(1, polygon(0, 0, 6, 6), 0), (1, polygon(3, 3, 9, 9), 0)]
+            else:
+                found = []
+            held[stem] = [{"category_id": c, "iscrowd": k, "segmentation": s} for c, s, k in found]
+            annotations += [{"id": len(annotations) + i + 1, "image_id": int(stem), "category_id": c, "iscrowd": k,
+                             "segmentation": s, "bbox": [0, 0, 1, 1], "area": 1.0} for i, (c, s, k) in enumerate(found)]
+        (root / "annotations" / f"instances_{split}2017.json").write_text(
+            json.dumps({"images": images, "annotations": annotations, "categories": CATEGORIES}))
+        every.update(held)
+    return every
+
+
+def run_coco(*tokens: str) -> int:
+    return cli.main(["convert", "coco", *tokens])
+
+
+@pytest.fixture
+def coco(tmp_path):
+    root = tmp_path / "coco_2017"
+    return root, write_coco(root)
+
+
+def expected_coco_mask(annotations) -> np.ndarray:
+    from dl_techniques.datasets.vision import coco_semantic as cs
+    return cs.rasterize(CH, CW, annotations, {1: 1, 3: 2, 90: 3})[0]
+
+
+def test_a_coco_run_writes_background_things_and_void(coco, tmp_path, capsys):
+    root, held = coco
+    out = tmp_path / "derived" / "coco"
+    assert run_coco(f"root={root}", f"out={out}", "workers=1") == 0
+    assert capsys.readouterr().out == f"{out}\n"
+    rows = {split: list(csv.DictReader(open(out / f"{split}.csv"))) for split in ("train", "val")}
+    assert [Path(r["image"]).stem for r in rows["train"]] == [f"{n:012d}" for n in range(1, 5)]
+    assert [Path(r["image"]).stem for r in rows["val"]] == ["000000000101", "000000000102"]
+    for row in rows["train"] + rows["val"]:
+        assert f"{os.sep}train2017{os.sep}" in row["image"] or f"{os.sep}val2017{os.sep}" in row["image"]
+        assert np.array_equal(np.asarray(Image.open(out / row["mask"])), expected_coco_mask(held[Path(row["image"]).stem]))
+    first = np.asarray(Image.open(out / rows["train"][0]["mask"]))
+    assert {0, 1, 2, 255} <= set(np.unique(first).tolist()), "background, person, car and void in one image"
+    summary = json.loads((out / "mapping.json").read_text())
+    assert [c["name"] for c in summary["classes"]] == ["background", "person", "car", "toaster"]
+    assert [c["category_id"] for c in summary["classes"]] == [None, 1, 3, 90]
+    assert summary["train"]["images"] == 4 and summary["train"]["images_without_an_annotation"] == 2
+    assert summary["train"]["crowd_pixels"] == 24 and summary["train"]["conflict_pixels"] > 0
+    assert summary["train"]["void_fraction"] == pytest.approx(
+        sum((np.asarray(Image.open(out / r["mask"])) == 255).sum() for r in rows["train"]) / (4 * CH * CW))
+    assert "NOT COCO-Stuff" in summary["note"] and summary["excluded"] == []
+    assert "test split" in summary["splits"]["val"] and yaml.safe_load((out / "data.yaml").read_text())["test_csv"] == "val.csv"
+    facts = sa.seg_facts(sa.load_seg_data_config(str(out / "data.yaml")), (16, 16))
+    assert facts.num_classes == 4 and facts.ignore_index == 255 and facts.class_names[:2] == ("background", "person")
+
+
+def test_coco_with_two_workers_writes_the_same_bytes_as_one_and_a_rerun_rewrites_nothing(coco, tmp_path):
+    root, _ = coco
+    assert run_coco(f"root={root}", f"out={tmp_path / 'one'}", "workers=1") == 0
+    assert run_coco(f"root={root}", f"out={tmp_path / 'two'}", "workers=2") == 0
+    assert tree_digest(tmp_path / "one") == tree_digest(tmp_path / "two")
+    masks = sorted((tmp_path / "one" / "masks").rglob("*.png"))
+    before = {p: (p.stat().st_ino, p.stat().st_mtime_ns) for p in masks}
+    assert run_coco(f"root={root}", f"out={tmp_path / 'one'}", "workers=1") == 0
+    assert {p: (p.stat().st_ino, p.stat().st_mtime_ns) for p in masks} == before
+
+
+def test_a_coco_image_of_another_size_or_with_an_exif_turn_is_excluded(coco, tmp_path):
+    root, _ = coco
+    Image.fromarray(np.zeros((CH + 4, CW, 3), dtype=np.uint8)).save(root / "train2017" / "000000000003.jpg")
+    picture = Image.fromarray(np.zeros((CH, CW, 3), dtype=np.uint8))
+    exif = picture.getexif()
+    exif[0x0112] = 6
+    picture.save(root / "val2017" / "000000000101.jpg", exif=exif)
+    out = tmp_path / "out"
+    assert run_coco(f"root={root}", f"out={out}", "workers=1") == 0
+    reasons = {e["stem"]: e["reason"] for e in json.loads((out / "mapping.json").read_text())["excluded"]}
+    assert set(reasons) == {"000000000003", "000000000101"}
+    assert "width x height" in reasons["000000000003"] and "EXIF orientation 6" in reasons["000000000101"]
+    listed = {Path(r["image"]).stem for name in ("train.csv", "val.csv") for r in csv.DictReader(open(out / name))}
+    assert listed == {"000000000001", "000000000002", "000000000004", "000000000102"}
+
+
+def test_an_out_inside_a_symlinked_source_directory_is_refused(coco, tmp_path, capsys):
+    root, _ = coco
+    real = tmp_path / "elsewhere"
+    (root / "val2017").rename(real)
+    (root / "val2017").symlink_to(real, target_is_directory=True)
+    assert run_coco(f"root={root}", f"out={real / 'out'}") == 2
+    assert "or contains it" in capsys.readouterr().err and not (real / "out").exists()
+
+
+def test_a_root_that_is_not_the_coco_directory_is_refused(tmp_path, capsys):
+    (tmp_path / "empty").mkdir()
+    assert run_coco(f"root={tmp_path / 'empty'}", f"out={tmp_path / 'out'}") == 2
+    assert "is not the COCO 2017 directory" in capsys.readouterr().err and not (tmp_path / "out").exists()
+
+
+def test_the_coco_help_lists_its_keys(capsys):
+    assert cli.main(["convert", "coco", "help"]) == 0
+    text = capsys.readouterr().out
+    assert "root" in text and "out" in text and "workers" in text and "mapping" not in text
+    assert cli.main(["convert"]) == 0
+    assert "coco" in capsys.readouterr().out

@@ -1,11 +1,13 @@
 """``python -m train convert``: write a source dataset as index masks and the listings the segmentation task reads.
 
 ``convert ade20k`` reads the full ADE20K release (3,688 classes coded in RGB ``_seg.png`` files, see
-:mod:`dl_techniques.datasets.vision.ade20k`) and writes, to a NEW directory, one ``uint8`` PNG of class
-indices per image (``255`` is void), ``train.csv`` and ``val.csv`` (columns ``image`` and ``mask``; the image
-is the original JPEG, never copied), ``mapping.json`` (what every class is, its pixels and the coverage) and
-``data.yaml``, which ``python -m train image_segmentation data=<out>/data.yaml`` reads. The result is NOT the
-SceneParse150 benchmark: its mIoU is not comparable to published numbers (README, ``Converting ADE20K``).
+:mod:`dl_techniques.datasets.vision.ade20k`) and ``convert coco`` reads COCO 2017's instance annotations (see
+:mod:`dl_techniques.datasets.vision.coco_semantic`). Each writes, to a NEW directory, one ``uint8`` PNG of
+class indices per image (``255`` is void), ``train.csv`` and ``val.csv`` (columns ``image`` and ``mask``; the
+image is the original JPEG, never copied), ``mapping.json`` (what every class is, its pixels, the coverage)
+and ``data.yaml``, which ``python -m train image_segmentation data=<out>/data.yaml`` reads. Neither result is
+the benchmark its source is known for: its mIoU is not comparable to published numbers (README,
+``Converting ADE20K``, ``Converting COCO``).
 
 Interface contract
 ------------------
@@ -23,19 +25,25 @@ Interface contract
     :param workers: processes; default ``min(8, cpu count)``.
     :return: exit 0 and ONLY ``out`` on stdout; 2 for a bad key, path or release.
 
-    Resumable and never deleting: ``manifest.jsonl`` holds the header of the run (dataset, root, mapping,
-    k) and one line per finished image; a rerun skips an image whose mask file exists at the recorded
-    size, and refuses a changed ``root``, ``mapping`` or ``k`` naming the key. A mask is written to
-    ``<name>.png.tmp`` and moved into place with ``os.replace``, so a killed run leaves whole masks and
-    at most stale ``.tmp`` files (overwritten by the next run, deleted by nobody). An image whose JPEG
-    and ``_seg.png`` differ in size, whose JPEG carries an EXIF orientation, or that cannot be decoded
-    is EXCLUDED: listed in ``mapping.json`` and left out of the CSVs (the segmentation loader would
-    refuse it).
+``convert coco root=<coco_2017> out=<new dir> [workers=N]``
+    :param root: the COCO 2017 directory (``annotations/instances_{train,val}2017.json``, ``train2017``,
+        ``val2017``). Read only; the images are opened for their size and EXIF orientation only.
+    :return: as above. Classes: ``background`` (0, everything that is no annotated thing: COCO's instance files
+        have no stuff), the 80 things (1 to 80, category-id order) and void 255 for crowd regions and for pixels
+        two classes claim. Needs ``pycocotools`` (not a declared dependency; a missing one exits 2 naming it).
+
+Resumable and never deleting: ``manifest.jsonl`` holds the header of the run (dataset, root, mapping, k) and
+one line per finished image; a rerun skips an image whose mask file exists at the recorded size, and refuses a
+changed ``root``, ``mapping`` or ``k`` naming the key. A mask is written to ``<name>.png.tmp`` and moved into
+place with ``os.replace``, so a killed run leaves whole masks and at most stale ``.tmp`` files (overwritten by
+the next run, deleted by nobody). An image whose JPEG and mask (or annotation) differ in size, whose JPEG
+carries an EXIF orientation, or that cannot be decoded is EXCLUDED: listed in ``mapping.json`` and left out of
+the CSVs (the segmentation loader would refuse it).
 
 Import rule
 -----------
 Module scope imports the standard library and ``train.api`` only (D-012); numpy, PIL, ``yaml`` and the
-dataset module are imported inside the functions that need them, so ``convert help`` loads none of them.
+dataset modules are imported inside the functions that need them, so ``convert help`` loads none of them.
 """
 
 import dataclasses
@@ -93,19 +101,40 @@ class ConvertAde20k(StrictConfig):
         return lines
 
 
+@dataclasses.dataclass(frozen=True)
+class ConvertCoco(StrictConfig):
+    """The keys of ``convert coco``."""
+
+    root: str = dataclasses.field(
+        metadata={"help": "the COCO 2017 directory (annotations/instances_train2017.json, train2017, val2017); read only"})
+    out: str = dataclasses.field(
+        metadata={"help": "directory to write (created; empty or an earlier output of this command); not inside root"})
+    workers: Optional[int] = dataclasses.field(
+        default=None, metadata={"help": "processes that rasterize and write; null is min(8, cpu count)"})
+
+    def problems(self, prefix: str) -> List[str]:
+        """Name every key out of range, at its dotted path."""
+        lines = [f"Invalid value for {join_path(prefix, name)!r}: expected a non-empty path"
+                 for name in ("root", "out") if not getattr(self, name).strip()]
+        if self.workers is not None and self.workers < 1:
+            lines.append(f"Invalid value for {join_path(prefix, 'workers')!r}: expected 1 or more, got {self.workers!r}")
+        return lines
+
+
 # ---------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------
 
-def _check_roots(root: str, out: str) -> Tuple[str, str]:
-    """Return the real paths of ``root`` and ``out``; refuse an ``out`` that lies in or around ``root``."""
+def _check_roots(root: str, out: str, sources: Sequence[str] = ()) -> Tuple[str, str]:
+    """Return the real paths of ``root`` and ``out``; refuse an ``out`` in or around ``root`` or a source directory."""
     if not os.path.isdir(root):
         raise ConfigError(f"Invalid value for 'root': {root!r} is not a directory")
     real_root, real_out = os.path.realpath(root), os.path.realpath(out)
-    if os.path.commonpath([real_root, real_out]) in (real_root, real_out):
-        raise ConfigError(
-            f"Invalid value for 'out': {out!r} (real path {real_out!r}) lies inside {real_root!r} or contains it; a "
-            "conversion never writes into the source tree, so give a directory beside it")
+    for real in (real_root, *[os.path.realpath(source) for source in sources]):
+        if os.path.commonpath([real, real_out]) in (real, real_out):
+            raise ConfigError(
+                f"Invalid value for 'out': {out!r} (real path {real_out!r}) lies inside {real!r} or contains it; a "
+                "conversion never writes into the source tree, so give a directory beside it")
     return real_root, real_out
 
 
@@ -434,6 +463,123 @@ def _convert_ade20k(config: ConvertAde20k) -> str:
 
 
 # ---------------------------------------------------------------------
+# COCO
+# ---------------------------------------------------------------------
+
+def _init_coco(index_of: Mapping[int, int], out: str) -> None:
+    _STATE["index_of"], _STATE["out"] = index_of, out
+
+
+def _convert_image(task: Tuple[str, str, str, int, int, List[Dict[str, Any]]]) -> Dict[str, Any]:
+    """Rasterize one COCO image; return its manifest record (``excluded`` set when the image cannot be used)."""
+    import numpy as np
+
+    from dl_techniques.datasets.vision import coco_semantic
+
+    split, stem, image_path, width, height, annotations = task
+    record: Dict[str, Any] = {"split": split, "stem": stem}
+    reason = _unusable(image_path, (width, height), "annotation")
+    if reason:
+        record["excluded"] = reason
+        return record
+    try:
+        mask, crowd, conflict = coco_semantic.rasterize(height, width, annotations, _STATE["index_of"])
+    except coco_semantic.CocoError as exc:
+        if "pycocotools" in str(exc):
+            raise
+        record["excluded"] = f"cannot be rasterized: {exc}"
+        return record
+    counts = np.bincount(mask.ravel(), minlength=256)
+    record.update(bytes=_save_mask(_STATE["out"], split, stem, mask), height=height, width=width,
+                  crowd_pixels=crowd, conflict_pixels=conflict, annotations=len(annotations),
+                  pixels={str(i): int(n) for i, n in enumerate(counts) if n})
+    return record
+
+
+def _coco_summary(names: Sequence[str], category_ids: Sequence[int], records: Sequence[Mapping[str, Any]],
+                  header: Mapping[str, Any]) -> Dict[str, Any]:
+    """The ``mapping.json`` of a COCO conversion: the classes, their pixels and what was made void."""
+    totals = {split: _class_totals(records, split, len(names)) for split in ("train", "val")}
+
+    def detail(split: str) -> Dict[str, Any]:
+        done = [r for r in records if r["split"] == split and "excluded" not in r]
+        pixels, _, void = totals[split]
+        everything = sum(pixels) + void
+        return {"images": len(done), "images_without_an_annotation": sum(1 for r in done if r["annotations"] == 0),
+                "total_pixels": everything, "background_fraction": pixels[0] / everything if everything else None,
+                "void_fraction": void / everything if everything else None,
+                "crowd_pixels": sum(r["crowd_pixels"] for r in done), "conflict_pixels": sum(r["conflict_pixels"] for r in done)}
+
+    classes = [{"index": i, "name": name, "category_id": None if i == 0 else category_ids[i - 1],
+                "train_pixels": totals["train"][0][i], "train_images": totals["train"][1][i],
+                "val_pixels": totals["val"][0][i], "val_images": totals["val"][1][i]} for i, name in enumerate(names)]
+    return {
+        "format_version": FORMAT_VERSION, "dataset": "coco", "mapping": header["mapping"], "k": len(names), "void_index": 255,
+        "release_root": header["root"],
+        "note": "NOT COCO-Stuff or COCO panoptic: the instance files have no stuff, so class 0 is every pixel that is no "
+                "annotated thing; mIoU here is not comparable to published numbers",
+        "rules": "classes 1..80 are the categories in id order; a crowd region is void (255); a pixel two classes claim is "
+                 "void; one class twice keeps the class; the result does not depend on the order of the annotations",
+        "splits": {"train": "train2017", "val": "val2017 (data.yaml uses it as the test split)"},
+        "train": detail("train"), "val": detail("val"), "classes": classes,
+    }
+
+
+def _convert_coco(config: ConvertCoco) -> str:
+    """Run ``convert coco``; return the output directory."""
+    from dl_techniques.datasets.vision import coco_semantic
+
+    folders = [os.path.join(config.root, name) for name in ("annotations", "train2017", "val2017")]
+    root, out = _check_roots(config.root, config.out, [folder for folder in folders if os.path.isdir(folder)])
+    for split in ("train", "val"):
+        path = os.path.join(root, "annotations", f"instances_{split}2017.json")
+        if not os.path.isfile(path) or not os.path.isdir(os.path.join(root, f"{split}2017")):
+            raise ConfigError(f"Invalid value for 'root': {root!r} is not the COCO 2017 directory ({path!r} or "
+                              f"the {split}2017 image directory is missing)")
+    workers = config.workers or min(8, os.cpu_count() or 1)
+    header = {"dataset": "coco", "root": root, "mapping": "instances", "k": 80, "version": FORMAT_VERSION}
+    records = _open_out(out, header)
+    started = time.time()
+    wanted: Dict[Tuple[str, str], Mapping[str, Any]] = {}
+    rows: Dict[str, List[Tuple[str, str, str]]] = {}
+    names: Tuple[str, ...] = ()
+    category_ids: List[int] = []
+    total = 0
+    for split in ("train", "val"):
+        with open(os.path.join(root, "annotations", f"instances_{split}2017.json"), encoding="utf-8") as handle:
+            document = json.load(handle)
+        try:
+            names, index_of = coco_semantic.category_table(document["categories"])
+        except coco_semantic.CocoError as exc:
+            raise ConfigError(f"Invalid value for 'root': {exc}") from exc
+        category_ids = sorted(index_of)
+        by_image: Dict[int, List[Dict[str, Any]]] = {}
+        for annotation in document["annotations"]:
+            by_image.setdefault(annotation["image_id"], []).append(
+                {"category_id": annotation["category_id"], "iscrowd": annotation["iscrowd"],
+                 "segmentation": annotation["segmentation"]})
+        images = sorted(document["images"], key=lambda image: image["id"])
+        del document
+        total += len(images)
+        listing = [(os.path.splitext(image["file_name"])[0], os.path.join(root, f"{split}2017", image["file_name"]), image)
+                   for image in images]
+        tasks = [(split, stem, path, image["width"], image["height"], by_image.get(image["id"], []))
+                 for stem, path, image in listing if not _is_done(records.get((split, stem)), out, split, stem)]
+        logger.info("coco %s: %d images, %d to do (workers=%d)", split, len(listing), len(tasks), workers)
+        _run_tasks(tasks, _convert_image, workers, _init_coco, (index_of, out), records, out, total)
+        wanted.update({(split, stem): records[(split, stem)] for stem, _, _ in listing})
+        rows[split] = _rows([(stem, path) for stem, path, _ in listing], wanted, split)
+        del by_image, tasks, listing, images
+    skipped = [record for record in wanted.values() if "excluded" in record]
+    if skipped:
+        logger.warning("coco: %d image(s) excluded, listed in mapping.json (first: %s %s)",
+                       len(skipped), skipped[0]["stem"], skipped[0]["excluded"])
+    _write_outputs(out, rows, names, _coco_summary(names, category_ids, list(wanted.values()), header))
+    logger.info("coco: wrote %s in %.0f s", out, time.time() - started)
+    return out
+
+
+# ---------------------------------------------------------------------
 # The command
 # ---------------------------------------------------------------------
 
@@ -441,6 +587,8 @@ def _convert_ade20k(config: ConvertAde20k) -> str:
 DATASETS = {
     "ade20k": ("the full ADE20K release to index masks and CSV listings (150 classes, void 255)",
                ConvertAde20k, _convert_ade20k),
+    "coco": ("COCO 2017 instances to semantic masks (background + 80 things, void 255) and CSV listings",
+             ConvertCoco, _convert_coco),
 }
 
 

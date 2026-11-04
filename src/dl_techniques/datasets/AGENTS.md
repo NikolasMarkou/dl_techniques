@@ -58,6 +58,11 @@ Data loading, generation, and preprocessing utilities for various domains.
     names, k)` the `k` classes with most pixels; a `ClassMapping.lut()` sends every other id and 0 to the void value 255
     (mmsegmentation's `reduce_zero_label`). numpy and PIL only, never unpickles, never imports TensorFlow. The command that
     writes masks and CSVs is `python -m train convert ade20k` (`train/api/convert.py`).
+  - `coco_semantic.py` — COCO 2017 INSTANCE annotations rasterized to a semantic mask (background 0, the 80 things 1 to 80 in
+    category-id order, void 255): `category_table`, `annotation_region` (polygon, uncompressed or compressed run lengths, through
+    `pycocotools`, imported on use and not a declared dependency) and `rasterize` (a crowd region is void, a pixel two classes
+    claim is void, one class twice keeps it, the order of the annotations does not matter). Not COCO-Stuff. numpy only
+    otherwise, no TensorFlow. The command is `python -m train convert coco` (`train/api/convert.py`).
   - `augment_hook.py` — the protocol of the loaders' train-augmentation hook: a plain
     `(image, label)` map or a `@seeded` `(seed, image, label)` one, always on the [0, 1] image
     after the crop and before normalization; `with_hook` / `apply_hook` / `seed_stream` give every

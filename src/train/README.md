@@ -94,6 +94,16 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   release's 25,574 images (25,258 `ADE_train_` and 316 `ADE_frame_` video frames; the benchmark's is 20,210) at full size,
   where the benchmark rescaled every image to a short side of at most 512, and the annotations are the release's own; an
   mIoU measured on it is not comparable to published numbers. A class has to have a pixel in the fit split (`data.max_samples` cuts it), or the run is refused before `fit`.
+* **Converting COCO** (plan 98b866fb step 6, D-018): the COCO 2017 on disk has instance annotations only (no stuff, no panoptic file),
+  so `python -m train convert coco root=<coco_2017> out=<new dir>` can write semantic masks of `background` (class 0, every
+  pixel that is no annotated thing, stuff included), the 80 things (1 to 80, in category-id order) and void 255, with the same
+  outputs, manifest, resume and refusals as `convert ade20k`. It needs `pycocotools` (installed in the project environment,
+  NOT a declared dependency; a missing one exits 2 naming it). The rules: a crowd region (`iscrowd=1`) is void, as the COCO
+  evaluation ignores it; a pixel covered by instances of two DIFFERENT classes is void and one class twice keeps its class
+  (the torchvision segmentation reference voids every overlap, and cocostuffapi and panopticapi raise on one); the result does
+  not depend on the order of the annotations. Images with no annotation are kept as all-background masks. `val2017` is the
+  TEST split of the data file, as in ADE20K. **This is not COCO-Stuff (171 classes) or COCO panoptic**: its mIoU is not
+  comparable to published numbers, and most of its pixels are class 0.
 * **Recipes** are the legacy trainers' defaults (`train.convunext`, `train.accunet`): AdamW, 30 epochs, batch 16, a
   horizontal flip; ConvUNext lr 1e-3, AccUNet lr 1e-4 with 2 warmup epochs. Three values differ on purpose. The monitor is
   `val_miou`, a maximum; both legacy trainers default to `val_loss`. AccUNet trains the cross-entropy, where its

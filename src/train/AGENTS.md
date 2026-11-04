@@ -515,7 +515,7 @@ per-model scripts (usage, keys, run directory, resume, `predict`, `export`, exit
   only), `convert.py` holds the command (keys as a `StrictConfig`, the output rules, the manifest, the CSVs). Its rules:
   `out` never inside or around `root`, only an empty directory or an earlier output of the same command, no deletion call
   (the source-rules guard), a resume that changes `root`, `mapping` or `k` refused by key, and a mask written to `.tmp`
-  then `os.replace`d. A second dataset reuses `_open_out`, `_run_tasks`, `_save_mask`, `_unusable` and `_write_outputs`, not a copy.
+  then `os.replace`d. `ade20k` and `coco` share `_open_out`, `_run_tasks` (a windowed pool that appends each record to the manifest as it arrives), `_save_mask`, `_unusable` and `_write_outputs`; a third dataset reuses them, not a copy.
   `cli.main(argv) -> int` registers the built-in families and tasks itself (`train.api.main([...])`
   from Python and `python -m train` are the same), and `__main__.py` is only
   `sys.exit(main(sys.argv[1:]))`. A new task is a `TaskSpec` row in `api/tasks/__init__.py` (strings,

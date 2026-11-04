@@ -41,7 +41,7 @@ help word, prints its config keys; any other arguments go to ``run_task``.
 
 ``convert <dataset> key=value ...``
     Writes a source dataset as index masks and CSV listings the segmentation task reads, outside the
-    source tree, resumably and without deleting (:mod:`train.api.convert`; ``ade20k``). Exit 0 and ONLY
+    source tree, resumably and without deleting (:mod:`train.api.convert`; ``ade20k``, ``coco``). Exit 0 and ONLY
     the output directory on stdout, else 2.
 
 ``export`` and ``predict`` take exactly their keys (no ``config=``, no nested key), a bare command or
@@ -512,7 +512,7 @@ COMMANDS: Dict[str, Command] = {
         Command("list_models", "list family/variant names, task=<name> filters", _list_models),
         Command("export", "write a trained run as keras, saved_model, tflite or onnx", _export),
         Command("predict", "label the images in a file or directory with a trained run", _predict),
-        Command("convert", "write a source dataset (ade20k) as index masks and CSV listings", _convert),
+        Command("convert", "write a source dataset (ade20k, coco) as index masks and CSV listings", _convert),
     )
 }
 
