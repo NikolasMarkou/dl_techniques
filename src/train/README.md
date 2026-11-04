@@ -24,7 +24,7 @@ result = train_image_classification(out="auto", model="vit/vit_pico", data={"dat
 main(["list_tasks"])      # the same as the command line; returns the exit code
 ```
 
-**Commands**: `help`, `list_tasks`, `list_models`, `export`, `predict`, and each registered task.
+**Commands**: `help`, `list_tasks`, `list_models`, `export`, `predict`, `convert`, and each registered task.
 `-v` anywhere logs at DEBUG. `<command> help` prints that command's keys.
 
 **A family trains one task**: each family lists the task it trains, and `model=` is checked against the task
@@ -71,6 +71,29 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   and a resume with another value is refused naming `mask_threshold`. `predict` is unaffected (the key is for masks only).
   Example: `python -m train image_segmentation model=convunext/tiny data.format=folder data.train_images=... data.train_masks=...
   data.num_classes=2 data.mask_threshold=127 transform_args.image_size=128`.
+* **Converting ADE20K** (plan 98b866fb step 5, D-017): the ADE20K on disk is the FULL 2021_17_01 release (3,688 classes in
+  RGB `_seg.png` files coded `(R // 10) * 256 + G`), not the 150-class SceneParse150 benchmark, so it cannot be read as masks.
+  `python -m train convert ade20k root=<release> out=<new dir>` writes, OUTSIDE the source tree, one 8-bit PNG of class
+  indices per image (`255` is void), `train.csv` and `val.csv` (columns `image` and `mask`; `image` is the original JPEG,
+  never copied), `mapping.json` (every class with its release ids and names, its pixels and images in train and val, the
+  coverage) and a YAML data file that `python -m train image_segmentation data=<out>/data.yaml model=convunext/tiny
+  transform_args.image_size=256` reads (`val.csv`, the benchmark's 2,000 validation images, is the TEST split; the selection
+  split is a slice of train). `data=<file>` cannot be combined with a `data.<key>=` token, so a capped run (`max_samples`) is a
+  copy of the data file with that key added. `mapping=official` (the default) is the MIT SceneParse150 class set
+  through the benchmark's own id table (`objectInfo150.txt` and `convertFromADE/mapFromADE.txt` of CSAILVision/sceneparsing,
+  held in `dl_techniques.datasets.vision.ade20k.SCENE_PARSE_150`), checked against the release's `objects.txt`: it is refused,
+  naming the class, if a class's release names share no synonym with the benchmark's. Class 0 of the benchmark ("other
+  objects"), the unlabelled pixels and the 3,538 release classes outside the 150 all become the void value, which is what
+  mmsegmentation's `reduce_zero_label` does to the benchmark's own PNGs. `mapping=frequency k=N` instead takes the `N` classes
+  with the most TRAIN pixels (a counting pass over every train mask comes first, kept in `pixel_counts.json`). The command is
+  resumable and deletes nothing: `manifest.jsonl` records each finished image, a rerun skips a mask whose file exists at the
+  recorded size, every file is written to `<name>.tmp` and moved into place, and `root`, `mapping` or `k` changed on a resume
+  is refused naming the key. An `out` inside `root`, or around it, is refused; so is a non-empty directory that holds no
+  manifest. A pair whose JPEG and mask differ in size, whose JPEG carries an EXIF orientation, or that cannot be decoded is
+  excluded and listed in `mapping.json`. **This is not the SceneParse150 benchmark**: the training split here is the
+  release's 25,574 images (25,258 `ADE_train_` and 316 `ADE_frame_` video frames; the benchmark's is 20,210) at full size,
+  where the benchmark rescaled every image to a short side of at most 512, and the annotations are the release's own; an
+  mIoU measured on it is not comparable to published numbers. A class has to have a pixel in the fit split (`data.max_samples` cuts it), or the run is refused before `fit`.
 * **Recipes** are the legacy trainers' defaults (`train.convunext`, `train.accunet`): AdamW, 30 epochs, batch 16, a
   horizontal flip; ConvUNext lr 1e-3, AccUNet lr 1e-4 with 2 warmup epochs. Three values differ on purpose. The monitor is
   `val_miou`, a maximum; both legacy trainers default to `val_loss`. AccUNet trains the cross-entropy, where its

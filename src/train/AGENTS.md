@@ -510,6 +510,12 @@ per-model scripts (usage, keys, run directory, resume, `predict`, `export`, exit
   is its one-call seam). A task overrides hooks, never stages; `fit` and the diverged run's history write stay in
   `train_or_restore` because the history-write census wants them in one function.
 - **One table drives dispatch and help**: `api/cli.py:COMMANDS` plus `api/registry.py:TASKS`.
+  `convert <dataset>` is a `COMMANDS` row that imports `api/convert.py` only when it runs (D-005, D-017): the dataset
+  logic (id decoding, class mapping, rasterizing) lives in `dl_techniques/datasets/vision/<dataset>.py` (numpy and PIL
+  only), `convert.py` holds the command (keys as a `StrictConfig`, the output rules, the manifest, the CSVs). Its rules:
+  `out` never inside or around `root`, only an empty directory or an earlier output of the same command, no deletion call
+  (the source-rules guard), a resume that changes `root`, `mapping` or `k` refused by key, and a mask written to `.tmp`
+  then `os.replace`d. A second dataset reuses `_open_out`, `_run_tasks`, `_save_mask`, `_unusable` and `_write_outputs`, not a copy.
   `cli.main(argv) -> int` registers the built-in families and tasks itself (`train.api.main([...])`
   from Python and `python -m train` are the same), and `__main__.py` is only
   `sys.exit(main(sys.argv[1:]))`. A new task is a `TaskSpec` row in `api/tasks/__init__.py` (strings,

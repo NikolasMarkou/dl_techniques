@@ -8,7 +8,7 @@ was raised. Any other exception propagates, so Python exits 1 with a
 traceback. Help text goes to stdout, error text to stderr.
 
 Commands are the rows of ``COMMANDS`` (``help``, ``list_tasks``,
-``list_models``, ``export``, ``predict``), then the tasks in
+``list_models``, ``export``, ``predict``, ``convert``), then the tasks in
 :data:`train.api.registry.TASKS`. A task command with no arguments, or with a lone
 help word, prints its config keys; any other arguments go to ``run_task``.
 ``list_*`` commands list instead of printing help, even when given ``help``.
@@ -39,7 +39,12 @@ help word, prints its config keys; any other arguments go to ``run_task``.
     (:func:`train.api.segmentation_predictor.write_predictions`). Two images with one stem are
     refused before the model is loaded, naming both; so is a record whose ``output`` is ``logits``.
 
-Both commands take exactly their keys (no ``config=``, no nested key), a bare command or
+``convert <dataset> key=value ...``
+    Writes a source dataset as index masks and CSV listings the segmentation task reads, outside the
+    source tree, resumably and without deleting (:mod:`train.api.convert`; ``ade20k``). Exit 0 and ONLY
+    the output directory on stdout, else 2.
+
+``export`` and ``predict`` take exactly their keys (no ``config=``, no nested key), a bare command or
 a lone help word prints them, and the help path imports no TensorFlow.
 
 ``parse_dotlist(tokens)``
@@ -358,6 +363,14 @@ def _export(args: List[str]) -> int:
     return 0
 
 
+def _convert(args: List[str]) -> int:
+    """Run ``convert <dataset> key=value ...``; see :mod:`train.api.convert`."""
+    # The module is imported here so the help path loads none of it (D-012).
+    from .convert import run_convert
+
+    return run_convert(args)
+
+
 def _image_files(data: Path) -> List[Path]:
     """Return the image files ``data`` names: the file itself, or a directory's, sorted.
 
@@ -499,6 +512,7 @@ COMMANDS: Dict[str, Command] = {
         Command("list_models", "list family/variant names, task=<name> filters", _list_models),
         Command("export", "write a trained run as keras, saved_model, tflite or onnx", _export),
         Command("predict", "label the images in a file or directory with a trained run", _predict),
+        Command("convert", "write a source dataset (ade20k) as index masks and CSV listings", _convert),
     )
 }
 

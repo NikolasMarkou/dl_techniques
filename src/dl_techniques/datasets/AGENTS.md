@@ -50,6 +50,14 @@ Data loading, generation, and preprocessing utilities for various domains.
     (the ImageNet recipe) or `"resize"`. `read_imagenette_records` is the only TFDS touch and the
     test seam. `imagenette_examples(split, config)` is the unbatched stage under it (the same decode
     and crop path serves `train.common.image_streams`, the self-supervised trainers' loader).
+  - `ade20k.py` — the FULL ADE20K release (2021_17_01, 3,688 classes; not the SceneParse150 benchmark): `decode_class_ids`
+    reads an RGB `_seg.png` as `(R // 10) * 256 + G`, `list_release(root)` pairs the JPEGs and masks (never entering an
+    image's instance directory), `read_object_names` reads `objects.txt` (latin-1; 1,599 of the classes), `class_pixel_counts`
+    counts pixels over files. `official_mapping(names)` is the MIT SceneParse150 set (`SCENE_PARSE_150`: the benchmark's
+    `objectInfo150.txt` names and `mapFromADE.txt` ids, checked against the release's names) and `frequency_mapping(counts,
+    names, k)` the `k` classes with most pixels; a `ClassMapping.lut()` sends every other id and 0 to the void value 255
+    (mmsegmentation's `reduce_zero_label`). numpy and PIL only, never unpickles, never imports TensorFlow. The command that
+    writes masks and CSVs is `python -m train convert ade20k` (`train/api/convert.py`).
   - `augment_hook.py` — the protocol of the loaders' train-augmentation hook: a plain
     `(image, label)` map or a `@seeded` `(seed, image, label)` one, always on the [0, 1] image
     after the crop and before normalization; `with_hook` / `apply_hook` / `seed_stream` give every
