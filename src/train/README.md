@@ -111,10 +111,12 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   TEST split of the data file, as in ADE20K. **This is not COCO-Stuff (171 classes) or COCO panoptic**: its mIoU is not
   comparable to published numbers, and most of its pixels are class 0.
   **Measured, untuned** (step 8, D-019; the real conversion took 39 min 1 s with 8 workers for 123,287 images and 427 MB of
-  masks): `data.max_samples=4000` (fit 3,600, selection 400, test 4,000 of the 5,000 `val.csv` images, because the cap also cut the test split when this was run, before 7.2 (D-022); below 3,000 class 79,
-  `hair drier`, has no pixel in the fit split and the run is refused), `convunext/tiny`, 256 px, batch 16, 5 epochs: best
-  `val_miou` 0.0118 against a majority-class baseline of 0.0091, test mIoU 0.0106, test pixel accuracy 0.722 (predicting
-  background everywhere scores 0.723): the model learned the background and `person` (IoU 0.125) and 5 other classes above 0.
+  masks): `data.max_samples=4000` (fit 3,600, selection 400, test all 5,000 `val.csv` images: the cap bounds the train pool only, D-022,
+  and the run was repeated at the iteration 1 gate for that; below 3,000 class 79, `hair drier`, has no pixel in the fit split and the run is
+  refused), `convunext/tiny`, 256 px, batch 16, 5 epochs: best `val_miou` 0.0118 against a majority-class baseline of 0.0091 (on the
+  selection split), test mIoU 0.0106, test pixel accuracy 0.721 (predicting background everywhere scores 0.719 and a mIoU of
+  0.0089 on the 5,000 test images, 0.723 and 0.0091 on the selection split): the model learned the background and `person` (IoU 0.123)
+  and 5 other classes above 0.
 * **SUT-Crack** (pavement cracks, `pavement_defect/SUT-Crack/segmentation/{Original Image,Ground Truth}`; plan 98b866fb step 7,
   D-007). **Measured**: 130 pairs joined by the stem (`1` to `130`), JPEG photographs and 1-bit PNG masks of 3024 by 4032 pixels
   holding exactly {0, 255}. 119 JPEGs are stored 4032 by 3024 with EXIF orientation 6 (the loader turns them upright, so
