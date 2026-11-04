@@ -408,8 +408,9 @@ def load_classification_data(
         ``resize`` x ``resize`` before the hook (upsampling CIFAR for a model defined at
         227 px). ``input_shape`` is then the resized shape; ``arrays`` and ``x_fig`` keep
         the native resolution (a resized test set would be a very large array).
-    :param max_samples: Smoke-run cap on the train pool and on the test split (ImageNet:
-        ``max_images``; the selection split is never capped there; Imagenette: as for CIFAR).
+    :param max_samples: Smoke-run cap on the train pool, fit and selection together; the test split
+        is never capped (ImageNet: ``max_images`` caps the train split only, the selection split
+        and the official val split are whole; Imagenette: as for CIFAR).
     :param eval_samples: ImageNet and Imagenette: test images kept in memory for the figures; ``0``
         keeps none (``x_fig`` and ``y_fig`` are empty), for a trainer that draws no figures.
     :param imagenet_root, devkit_dir: ImageNet only, ignored otherwise (every parser carries
@@ -488,7 +489,7 @@ def load_split_arrays(
         :data:`DEFAULT_VALIDATION_SPLIT`), strictly inside (0, 1).
     :param labels: ``"sparse"`` or ``"one_hot"``.
     :param channels: MNIST only: ``3`` repeats the channel; ``None`` keeps it native.
-    :param max_samples: Smoke-run cap on the train pool and the test split.
+    :param max_samples: Smoke-run cap on the train pool; the test split is never capped.
     :raises ValueError: ``name`` is not an in-memory dataset, a bad option, or a selection
         split holding out zero samples.
     """
@@ -1449,7 +1450,7 @@ def load_folder_data(
     :param augment_from_mean: Instead of ``augment``: a function of the fit images' per-channel
         mean returning the hook, for an op that needs it (random erasing paints the mean).
         Asking for it makes the statistics pass run even for ``normalize="unit"``.
-    :param max_samples: Smoke-run cap on the train pool and the test split.
+    :param max_samples: Smoke-run cap on the train pool; the test split is never capped.
     :param max_samples_flag: What the caller's user calls ``max_samples``, named in the
         too-large-batch refusal.
     :param fingerprint: ``"listing"`` or ``"content"``, the ``mode`` of
@@ -1528,7 +1529,7 @@ def add_selection_arguments(
         )
     parser.add_argument(
         "--max-samples", type=int, default=None,
-        help="Cap the train pool and the test set at this many samples (smoke runs).",
+        help="Cap the train pool at this many samples (smoke runs); the test set is never capped.",
     )
     if not imagenet:
         return

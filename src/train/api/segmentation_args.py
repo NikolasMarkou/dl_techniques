@@ -185,7 +185,7 @@ class BuiltinSegData(StrictConfig):
         },
     )
     max_samples: Optional[int] = dataclasses.field(
-        default=None, metadata={"help": "cap on the train pool and the test split; null is no cap"}
+        default=None, metadata={"help": "cap on the train pool, fit and selection together; the test split is never capped; null is no cap"}
     )
     eval_samples: Optional[int] = dataclasses.field(
         default=None,
@@ -299,7 +299,7 @@ class FolderSegData(StrictConfig):
         metadata={"help": "fraction of train held out to select the best epoch, in (0, 1); null is the loader's 0.1"},
     )
     max_samples: Optional[int] = dataclasses.field(
-        default=None, metadata={"help": "cap on the train pool and the test split; null is no cap"}
+        default=None, metadata={"help": "cap on the train pool, fit and selection together; the test split is never capped; null is no cap"}
     )
     eval_samples: Optional[int] = dataclasses.field(
         default=None,
@@ -344,7 +344,7 @@ class CsvSegData(StrictConfig):
         metadata={"help": "fraction of train held out to select the best epoch, in (0, 1); null is the loader's 0.1"},
     )
     max_samples: Optional[int] = dataclasses.field(
-        default=None, metadata={"help": "cap on the train pool and the test split; null is no cap"}
+        default=None, metadata={"help": "cap on the train pool, fit and selection together; the test split is never capped; null is no cap"}
     )
     eval_samples: Optional[int] = dataclasses.field(
         default=None,

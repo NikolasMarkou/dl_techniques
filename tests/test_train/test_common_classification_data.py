@@ -101,10 +101,14 @@ def test_the_split_is_deterministic_in_the_seed() -> None:
     assert not np.array_equal(_ids(a.arrays.x_select), _ids(c.arrays.x_select))
 
 
-def test_max_samples_caps_the_train_pool_and_the_test_split() -> None:
+def test_max_samples_caps_the_train_pool_and_never_the_test_split() -> None:
+    # D-022 of plan 98b866fb (7.2): a cap that bounds training cost must not shrink the held-out
+    # split the test numbers are computed on. It used to cut it to 40 of 50.
     data = _load(max_samples=40)
-    assert data.n_test == 40 < N_TEST
+    assert data.n_test == N_TEST == 50
     assert data.n_select + data.n_train == 40 and data.n_select == 4
+    whole = _load(max_samples=None)
+    assert sorted(_ids(data.arrays.x_test).tolist()) == sorted(_ids(whole.arrays.x_test).tolist())
     assert _load(max_samples=500).n_test == N_TEST  # a cap above the size changes nothing
 
 
@@ -447,7 +451,7 @@ def test_imagenette_selects_on_a_seeded_slice_of_train_and_tests_on_the_validati
 def test_imagenette_honours_the_split_the_cap_and_the_seed(imagenette_records) -> None:
     assert _imagenette(validation_split=0.25, batch_size=3).n_select == 15
     capped = _imagenette(max_samples=15, batch_size=3)
-    assert (capped.n_train, capped.n_select, capped.n_test) == (14, 1, 15)
+    assert (capped.n_train, capped.n_select, capped.n_test) == (14, 1, 20)  # D-022: all 20 test records
     first = next(iter(_imagenette(seed=1).select_ds))[0].numpy()
     again = next(iter(_imagenette(seed=1).select_ds))[0].numpy()
     other = next(iter(_imagenette(seed=2).select_ds))[0].numpy()

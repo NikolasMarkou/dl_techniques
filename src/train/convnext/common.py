@@ -16,7 +16,7 @@ TEST set is used only for the final report, inputs are standardized with the dat
 published per-channel statistics (``dl_techniques.datasets.vision.classification``),
 and the train pipeline (tf.data) applies a pad-4 random crop of the [0, 1] image
 (plus a horizontal flip for the CIFAR datasets, never for MNIST) BEFORE standardizing.
-``--max-samples`` caps the train pool and the test set (smoke runs and tests).
+``--max-samples`` caps the train pool only (smoke runs and tests); the test set is whole.
 
 ``imagenet`` reads the extracted ILSVRC2012 tree and keeps the same protocol:
 ``--holdout-per-class`` images per class are taken out of train for early stopping and
@@ -414,8 +414,8 @@ def _build_parser(model_family: str) -> argparse.ArgumentParser:
                            "is only used for the final report. Refused with ImageNet "
                            "(use --holdout-per-class).")
     data.add_argument("--max-samples", type=int, default=defaults.max_samples,
-                      help="Cap the train pool and the test set at this many samples "
-                           "(smoke runs); default: everything.")
+                      help="Cap the train pool at this many samples (smoke runs; the "
+                           "test set is never capped); default: everything.")
     add_imagenet_arguments(data, note="Used only when --dataset imagenet: ")
     add_holdout_argument(data)
     data.add_argument("--image-size", type=int, default=defaults.image_size,

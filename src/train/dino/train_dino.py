@@ -385,7 +385,7 @@ class TrainingConfig:
 
     # Selection is a seeded slice of the train rows (None means the loader's 0.1); the k-NN
     # probe queries it each epoch and the test split is probed once after training.
-    # max_samples caps the train pool and the test split (smoke runs).
+    # max_samples caps the train pool only (smoke runs); the test split is whole.
     validation_split: Optional[float] = None
     max_samples: Optional[int] = None
 

@@ -388,19 +388,18 @@ def test_the_normal_case_decodes_only_the_test_files_once_before_fit(pair, monke
     assert seen == [], "a source with no test split decodes nothing before training"
 
 
-def test_the_decode_check_covers_the_test_files_the_cap_keeps_and_not_the_ones_it_drops(tmp_path):
+def test_the_decode_check_covers_every_test_file_whatever_the_cap(tmp_path):
+    # D-022 of plan 98b866fb (7.2): the cap bounds the train pool only, so no test file is left
+    # unread by the run and a corrupt one anywhere is named before any weight is trained.
     train = make_classes(tmp_path / "train", count=14)
     test = make_classes(tmp_path / "test", count=12, first=40)
     listing = scan_image_folder(str(train), str(test))
     _, _, kept = seeded_split_indices(
         len(listing.train_paths), len(listing.test_paths), SEED, 0.1, 20)
-    assert len(kept) == 20 and len(listing.test_paths) == 24
-    dropped = [p for i, p in enumerate(listing.test_paths) if i not in set(kept.tolist())]
+    assert len(kept) == len(listing.test_paths) == 24
     arguments = dict(batch_size=2, seed=SEED, image_size=8, normalize="unit", eval_samples=0,
                      test_dir=str(test), max_samples=20)
-    corrupt(dropped[0])
-    load_folder_data(str(train), **arguments)  # never read by this run, so not an error
-    corrupt(listing.test_paths[int(kept[0])])
+    corrupt(listing.test_paths[int(kept[-1])])  # the LAST row of the seeded order: a cap of 20 would drop it
     with pytest.raises(DataSourceError, match="cannot be decoded"):
         load_folder_data(str(train), **arguments)
 

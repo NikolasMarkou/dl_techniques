@@ -125,7 +125,7 @@ def load_image_streams(
     :param seed: Seed of the split, the shuffle and the augmentation.
     :param validation_split: Fraction of the train rows held out as the selection split
         (``None`` means :data:`DEFAULT_VALIDATION_SPLIT`), strictly inside (0, 1).
-    :param max_samples: Smoke-run cap on the train pool and on the test split.
+    :param max_samples: Smoke-run cap on the train pool (the test split is never capped).
     :param augment: Train-time augmentation of the ``crop_policy``; ignored by the other two.
     :param crop_policy: One of :data:`CROP_POLICIES`. ``"random_resized_crop"`` is Imagenette only.
     :param element_map_fn: Per-sample ``fn(image, label)`` applied to all three streams.

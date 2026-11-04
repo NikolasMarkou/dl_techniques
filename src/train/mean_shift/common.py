@@ -213,7 +213,7 @@ def load_cell_data(dataset: str, recipe: Recipe, seed: int, max_samples: Optiona
     ``normalize="unit"`` makes the model input equal the pixel domain the corruptions work
     in; the train pipeline gets the ``cifar_light`` augmentation. Selection is the held-out
     slice of train that the loader cuts (``validation_split`` default); the test split only
-    scores. ``max_samples`` caps the train pool and the test split (smoke runs).
+    scores. ``max_samples`` caps the train pool only (smoke runs); the test split is whole.
 
     Returns:
         A ``train.common.classification_data.ClassificationData``; ``data.arrays`` holds the
@@ -549,7 +549,7 @@ def add_run_arguments(parser: argparse.ArgumentParser, default_dataset: str) -> 
     parser.add_argument("--epochs", type=int, required=True,
                         help="epochs of every cell (the shared recipe, no early stopping)")
     parser.add_argument("--max-samples", type=int, default=None,
-                        help="smoke cap on the train pool and the test split")
+                        help="smoke cap on the train pool (the test split is never capped)")
 
 
 def run_extra_args(args: argparse.Namespace) -> Tuple[str, ...]:

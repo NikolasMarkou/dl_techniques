@@ -100,11 +100,12 @@ def test_the_split_is_deterministic_in_the_seed_and_depends_on_it() -> None:
     assert sorted(a) != sorted(c)
 
 
-def test_max_images_caps_the_train_pool_and_the_test_split() -> None:
+def test_max_images_caps_the_train_pool_and_never_the_test_split() -> None:
     config = _config(max_images=15, batch_size=3)
     train, select, test = (load_imagenette(s, config) for s in ("train", "select", "test"))
-    assert (train.num_samples, select.num_samples, test.num_samples) == (14, 1, 15)
-    rows = seeded_test_rows(N_TEST, 3, 15)
+    assert (train.num_samples, select.num_samples, test.num_samples) == (14, 1, N_TEST)
+    rows = seeded_test_rows(N_TEST, 3)
+    assert len(rows) == N_TEST
     assert sorted(_ids("test", config, offset=2)) == sorted(rows.tolist())
 
 

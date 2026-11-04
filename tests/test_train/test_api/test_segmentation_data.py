@@ -707,7 +707,7 @@ def test_a_test_split_is_scored_and_kept_for_figures(tmp_path):
     assert data.x_fig.shape == (3, 16, 24, 3) and data.y_fig.shape == (3, 16, 24)
     assert data.test_split == "the test pairs"
     capped = load(listing, max_samples=4, validation_split=0.5)
-    assert capped.n_test == 4 and capped.n_train + capped.n_select == 4
+    assert capped.n_test == 5 and capped.n_train + capped.n_select == 4  # D-022: the cap leaves the test split whole
 
 
 def test_a_test_image_is_decoded_in_full_before_training(tmp_path):
@@ -833,10 +833,11 @@ def test_the_tfds_seam_shifts_the_labels_and_refuses_a_value_outside_them(monkey
         sd.load_oxford_pet_arrays((4, 6))
 
 
-def test_pet_max_samples_caps_the_train_pool_and_the_test_split(monkeypatch):
+def test_pet_max_samples_caps_the_train_pool_and_never_the_test_split(monkeypatch):
+    # D-022 of plan 98b866fb (7.2): all 7 fake test pairs are scored under a cap of 6 (it was 6).
     fake_pet(monkeypatch)
     data = sd.load_pet_data(batch_size=2, seed=0, size=(8, 8), validation_split=0.5, eval_samples=2, max_samples=6)
-    assert (data.n_train, data.n_select, data.n_test) == (3, 3, 6) and data.x_fig.shape[0] == 2
+    assert (data.n_train, data.n_select, data.n_test) == (3, 3, 7) and data.x_fig.shape[0] == 2
 
 
 def test_pet_is_deterministic_per_seed(monkeypatch):

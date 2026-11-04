@@ -89,7 +89,7 @@ class TrainingConfig:
     batch_size: int = 32
     augment_data: bool = True
     # Selection is a seeded slice of the train rows (None means the loader's 0.1); the test
-    # split never selects. max_samples caps the train pool and the test split (smoke runs).
+    # split never selects. max_samples caps the train pool only (smoke runs); the test split is whole.
     validation_split: Optional[float] = None
     max_samples: Optional[int] = None
 

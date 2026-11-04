@@ -41,10 +41,9 @@ def check_validation_split(validation_split: float) -> None:
         )
 
 
-def seeded_test_rows(n_test: int, seed: int, max_samples: Optional[int] = None) -> np.ndarray:
-    """The test rows in a seeded order, optionally capped (smoke runs)."""
-    order = np.random.default_rng([seed, 1]).permutation(n_test)
-    return order if max_samples is None else order[:max_samples]
+def seeded_test_rows(n_test: int, seed: int) -> np.ndarray:
+    """EVERY test row, in a seeded order (never capped: see :func:`seeded_split_indices`)."""
+    return np.random.default_rng([seed, 1]).permutation(n_test)
 
 
 def seeded_split_indices(
@@ -54,15 +53,22 @@ def seeded_split_indices(
     """Rows of the train and test sets that make up ``(fit, selection, test)``.
 
     A seeded permutation of the train rows is cut into the selection slice (first) and the
-    fit rows (rest); the test rows are an independent seeded permutation. ``max_samples``
-    caps the train pool and the test split (smoke runs).
+    fit rows (rest); the test rows are an independent seeded permutation of the WHOLE test
+    split. ``max_samples`` caps the train pool only (fit and selection together), which is what
+    bounds training cost; the held-out split every reported test number is computed on is never
+    shrunk by it (plan 98b866fb 7.2, D-022).
 
     :return: ``(train_idx, select_idx, test_idx)``, disjoint within the train set.
     :raises ValueError: A bad ``validation_split``, or one that holds out zero samples.
     """
+    # DECISION plan-2026-11-03T221936-98b866fb/D-022
+    # The cap bounds the TRAIN pool only. Do NOT cut the test rows by it again: that made COCO's
+    # held-out test 4,000 of 5,000 pairs and put every test number, figure and analyzer pass on a
+    # subset nobody asked for. A bound on evaluation cost is its own cap (Hugging Face max_eval_samples,
+    # Lightning limit_test_batches), never a side effect of the training cap.
     check_validation_split(validation_split)
     train_order = np.random.default_rng(seed).permutation(n_train)
     if max_samples is not None:
         train_order = train_order[:max_samples]
     _, n_select = split_sizes(n_train, max_samples, validation_split)
-    return train_order[n_select:], train_order[:n_select], seeded_test_rows(n_test, seed, max_samples)
+    return train_order[n_select:], train_order[:n_select], seeded_test_rows(n_test, seed)

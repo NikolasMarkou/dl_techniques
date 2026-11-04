@@ -649,5 +649,5 @@ class DebugArgs(StrictConfig):
     )
     smoke: bool = dataclasses.field(
         default=False,
-        metadata={"help": "one epoch on at most 512 samples; refused with an explicit epochs"},
+        metadata={"help": "one epoch on at most 512 train samples (the test split is whole); refused with an explicit epochs"},
     )

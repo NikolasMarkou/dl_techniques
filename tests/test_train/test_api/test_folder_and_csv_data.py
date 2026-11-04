@@ -283,9 +283,11 @@ def test_the_train_pipeline_drops_a_partial_batch_and_the_evaluation_ones_keep_i
     assert sum(len(l) for _, l in one.train_ds.as_numpy_iterator()) == 32
 
 
-def test_max_samples_caps_the_train_pool_and_the_test_split(tree):
+def test_max_samples_caps_the_train_pool_and_never_the_test_split(tree):
+    # D-022 of plan 98b866fb (7.2): the test files are all scored under a cap that bounds the training cost.
     data = load(tree, max_samples=10)
-    assert (data.n_train, data.n_select, data.n_test) == (8, 2, 10)
+    assert (data.n_train, data.n_select, data.n_test) == (8, 2, tree.n_test)
+    assert tree.n_test > 10
 
 
 def test_the_train_pipeline_reshuffles_and_the_evaluation_pipelines_do_not(tree):

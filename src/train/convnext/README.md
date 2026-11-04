@@ -94,7 +94,7 @@ it). Both wrappers have the same flags; only `--variant` differs.
 | `--image-size` | `224` | ImageNet only: square input side. |
 | `--eval-samples` | `2000` | ImageNet only: test images kept in memory for the figures, `ece` and `model_analysis/`. `test_metrics_*` always use the whole test set. |
 | `--conformal-alpha [ALPHA]` | off | Turns on conformal prediction sets fitted after training, for every dataset; `ALPHA` is the miscoverage level (`0.1` when the flag has no value). The best weights are run once over the WHOLE test split (not the figure subset); an APS threshold is fit on it and its coverage is checked on 20 random half splits. The model was selected on a separate split, so the calibration data did not choose it. Writes `conformal.json` and `conformal_model.keras` (outputs `(logits, probs, in_set)`) into the run directory and a `conformal` block into the summary. |
-| `--max-samples` | none | Cap the train pool and the test set at this many samples (smoke runs). Refused at config time, before any run directory exists, unless the resulting train split (after the `--validation-split` cut, which must hold out at least one sample) holds at least one full `--batch-size` batch: `--max-samples 64` with the default batch 64 and split 0.1 leaves 58 train samples and is refused; lower `--batch-size` or raise `--max-samples`. |
+| `--max-samples` | none | Cap the train pool at this many samples (smoke runs); the test set is never capped. Refused at config time, before any run directory exists, unless the resulting train split (after the `--validation-split` cut, which must hold out at least one sample) holds at least one full `--batch-size` batch: `--max-samples 64` with the default batch 64 and split 0.1 leaves 58 train samples and is refused; lower `--batch-size` or raise `--max-samples`. |
 | `--variant` | `cifar10`; `tiny` for ImageNet | V1: `cifar10, tiny, small, base, large, xlarge`. V2: `cifar10, atto, femto, pico, nano, tiny, base, large, huge`. Sets depths and dims. |
 | `--kernel-size` | `7` | Depthwise convolution kernel size. |
 | `--strides` | `2`; `4` for ImageNet | Stem patch size AND every inter-stage downsample stride (one knob). The default 2 for MNIST and CIFAR is on measured evidence ("Choosing strides"); that measurement is on 32x32 inputs and was not repeated at 224x224, where 4 is the standard ConvNeXt stem. The model classes keep their own default 4. See "Geometry". |
@@ -147,8 +147,8 @@ and were removed; the driver below is how to measure it again.
   `28x28x3`, `channels=3`).
 - **Validation split**: a seeded permutation of the train set; the first
   `int(n * validation_split)` samples are the validation set, the rest is the fit set. With
-  `--max-samples`, the train pool and the test set are first cut to a seeded subset of that
-  size.
+  `--max-samples`, the train pool is first cut to a seeded subset of that size (the test set
+  is never cut).
 - **The test set is used only for reporting**, after training. It never drives early stopping,
   the best checkpoint or `best_epoch`. The old scripts passed the test set as
   `validation_data`, so the reported test number was selected on itself; that leak is gone.

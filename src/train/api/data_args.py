@@ -191,7 +191,7 @@ class BuiltinImageData(StrictConfig):
     )
     max_samples: Optional[int] = dataclasses.field(
         default=None,
-        metadata={"help": "cap on the train pool and the test split; null is no cap"},
+        metadata={"help": "cap on the train pool, fit and selection together; the test split is never capped; null is no cap"},
     )
     eval_samples: Optional[int] = dataclasses.field(
         default=None,
@@ -308,7 +308,7 @@ class FolderImageData(StrictConfig):
     )
     max_samples: Optional[int] = dataclasses.field(
         default=None,
-        metadata={"help": "cap on the train pool and the test split; null is no cap"},
+        metadata={"help": "cap on the train pool, fit and selection together; the test split is never capped; null is no cap"},
     )
     eval_samples: Optional[int] = dataclasses.field(
         default=None,
@@ -356,7 +356,7 @@ class CsvImageData(StrictConfig):
     )
     max_samples: Optional[int] = dataclasses.field(
         default=None,
-        metadata={"help": "cap on the train pool and the test split; null is no cap"},
+        metadata={"help": "cap on the train pool, fit and selection together; the test split is never capped; null is no cap"},
     )
     eval_samples: Optional[int] = dataclasses.field(
         default=None,

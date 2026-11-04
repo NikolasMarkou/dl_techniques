@@ -175,7 +175,8 @@ class TestTheSelectionProtocol:
     def test_the_split_follows_validation_split_and_max_samples(self, dataset) -> None:
         assert _streams(dataset, validation_split=0.25).n_select == 15
         capped = _streams(dataset, max_samples=15, batch_size=3)
-        assert (capped.n_train, capped.n_select, capped.n_test) == (14, 1, 15)
+        # D-022 of plan 98b866fb: the cap bounds the train pool only, all 20 test rows stay.
+        assert (capped.n_train, capped.n_select, capped.n_test) == (14, 1, N_TEST)
 
     def test_the_rows_depend_on_the_seed_and_only_on_it(self, dataset) -> None:
         a, b, c = (_all(dataset, _streams(dataset, seed=s).select_ds, 0) for s in (1, 1, 2))

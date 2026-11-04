@@ -114,8 +114,9 @@ class ImageNet2012Config:
     shuffle: bool = True
 
     seed: int = 0
-    # Random (seeded) subset of the split for quick smoke runs.  The first N
-    # files in order would be one or two classes, so it is not a prefix.
+    # Random (seeded) subset of the TRAIN split for quick smoke runs; the val split (the test
+    # set) is never capped (D-022 of plan 98b866fb).  The first N files in order would be one
+    # or two classes, so it is not a prefix.
     max_images: Optional[int] = None
     drop_remainder: bool = False
     num_parallel_calls: int = tf.data.AUTOTUNE
@@ -483,7 +484,7 @@ def load_imagenet2012(
         devkit = cfg.devkit_dir or os.path.join(cfg.root, "devkit")
         labels = _read_val_labels(devkit, classes, files)
 
-    if split != "holdout" and cfg.max_images is not None and cfg.max_images < len(files):
+    if split == "train" and cfg.max_images is not None and cfg.max_images < len(files):
         keep = np.sort(
             np.random.default_rng(cfg.seed).choice(len(files), cfg.max_images, replace=False)
         )

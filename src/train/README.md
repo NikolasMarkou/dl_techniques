@@ -95,8 +95,7 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   where the benchmark rescaled every image to a short side of at most 512, and the annotations are the release's own; an
   mIoU measured on it is not comparable to published numbers. A class has to have a pixel in the fit split (`data.max_samples` cuts it), or the run is refused before `fit`.
   **Measured, untuned** (plan 98b866fb step 8, D-019; the real conversion took 3 min 11 s with 8 workers for 27,574 images and
-  250 MB of masks): `data.max_samples=4000` (fit 3,600, selection 400, test the 2,000 `val.csv` images; the cap also applies to
-  the test split), `convunext/tiny`, 256 by 256 px, batch 16, 10 epochs on one RTX 4090: best `val_miou`
+  250 MB of masks): `data.max_samples=4000` (fit 3,600, selection 400, test the 2,000 `val.csv` images, which no cap reaches), `convunext/tiny`, 256 by 256 px, batch 16, 10 epochs on one RTX 4090: best `val_miou`
   0.0343 at epoch 10 (still rising; the majority-class baseline is 0.0012), test mIoU 0.0320, test pixel accuracy 0.465; 32 of the
   150 classes have a test IoU above 0 (`sky` 0.776, `road` 0.449, `grass` 0.430). 9.7 minutes of `fit`. A smoke-scale result of
   a 1.9M-parameter model on 14% of the training images, not a score. The cap has a floor: class 106 (`canopy`) has no pixel in the
@@ -112,7 +111,7 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   TEST split of the data file, as in ADE20K. **This is not COCO-Stuff (171 classes) or COCO panoptic**: its mIoU is not
   comparable to published numbers, and most of its pixels are class 0.
   **Measured, untuned** (step 8, D-019; the real conversion took 39 min 1 s with 8 workers for 123,287 images and 427 MB of
-  masks): `data.max_samples=4000` (fit 3,600, selection 400, test 4,000 of the 5,000 `val.csv` images; below 3,000 class 79,
+  masks): `data.max_samples=4000` (fit 3,600, selection 400, test 4,000 of the 5,000 `val.csv` images, because the cap also cut the test split when this was run, before 7.2 (D-022); below 3,000 class 79,
   `hair drier`, has no pixel in the fit split and the run is refused), `convunext/tiny`, 256 px, batch 16, 5 epochs: best
   `val_miou` 0.0118 against a majority-class baseline of 0.0091, test mIoU 0.0106, test pixel accuracy 0.722 (predicting
   background everywhere scores 0.723): the model learned the background and `person` (IoU 0.125) and 5 other classes above 0.
@@ -661,9 +660,9 @@ and a run of E epochs takes (validation not counted):
 So the 50-epoch ImageNet recipe (`vit`) takes about a week, and the 100-epoch ones (`resnet`, `convnext`) about two. A
 killed epoch is lost: the run goes back to the start of the epoch it was in (`resume_interrupted=true` trains it again), and
 at these rates an epoch is hours; `checkpoint_args.backup_every_steps` bounds the loss to that many batches (next section). A shorter trial is
-`data.max_samples` (it caps the train pool and the test split; it does NOT cap the selection set, which is
+`data.max_samples` (it caps the train pool and, since plan 98b866fb 7.2, NOT the test split; it does NOT cap the selection set, which is
 `data.holdout_per_class` images per class, 10 by default, so 10,000 images of the 1,000 classes whatever the cap: the bounded
-gate with `data.max_samples=20000` trained on 20,000 images, selected on 10,000 and tested on 20,000 official validation images
+gate with `data.max_samples=20000` (run BEFORE 7.2, when the cap also cut the test split) trained on 20,000 images, selected on 10,000 and tested on 20,000 official validation images
 (`fit_state.json` `data_counts`: `n_train` 20000, `n_select` 10000, `n_test` 20000); set `data.holdout_per_class` to shrink it).
 
 **Backing up inside an epoch.** `checkpoint_args.backup_every_steps` set to N (an integer from 2 to one below the steps of an epoch;

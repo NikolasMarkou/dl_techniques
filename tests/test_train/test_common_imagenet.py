@@ -146,9 +146,11 @@ class TestSelectionSplits:
         for data in _selection(root, normalize="imagenet"):
             assert _pixels(data).min() < 0.0
 
-    def test_max_images_caps_train_and_test_but_not_selection(self, root):
+    def test_max_images_caps_train_only_not_selection_and_not_the_val_split(self, root):
         train, select, test = _selection(root, max_images=2, batch_size=1)
-        assert (train.num_samples, select.num_samples, test.num_samples) == (2, 3, 2)
+        whole = _selection(root, batch_size=1)[2]
+        assert (train.num_samples, select.num_samples) == (2, 3)
+        assert test.num_samples == whole.num_samples > 2
 
     def test_a_holdout_of_zero_is_refused(self, root):
         with pytest.raises(ValueError, match="holdout_per_class must be positive.*got 0"):

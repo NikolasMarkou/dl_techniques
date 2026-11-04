@@ -232,9 +232,10 @@ def test_the_summary_is_strict_json_with_every_promised_key(e2e) -> None:
     assert summary["gpu_name"] is None or isinstance(summary["gpu_name"], str)
     assert summary["epochs_run"] == EPOCHS and len(summary["epoch_times"]) == EPOCHS
     assert all(t > 0.0 for t in summary["epoch_times"])
-    # 240-sample cap, 10% validation: 216 train / 24 val, 240 test; 216 // 32 = 6 (the
-    # incomplete last batch is dropped, D-021).
-    assert (summary["n_train"], summary["n_val"], summary["n_test"]) == (216, 24, 240)
+    # 240-sample cap on the train pool, 10% validation: 216 train / 24 val; the cap never cuts the
+    # test split (D-022 of plan 98b866fb), so all 400 test samples; 216 // 32 = 6 (the incomplete
+    # last batch is dropped, D-021).
+    assert (summary["n_train"], summary["n_val"], summary["n_test"]) == (216, 24, N_TEST)
     assert summary["steps_per_epoch"] == 6
     # The config never sets strides, so this is the TRAINER default (2, D-033): a run
     # that falls back to the model default 4 would read [[8, 8], [2, 2]] here.
@@ -587,7 +588,7 @@ def test_the_shared_learning_rate_logger_default_still_reads_at_epoch_end() -> N
 def test_the_calibration_figure_is_fed_softmax_probabilities(e2e) -> None:
     """Logits fed as probabilities, or probabilities softmaxed again, both mislead ECE."""
     probs = e2e.calibration_probs
-    assert probs.shape == (240, 10)
+    assert probs.shape == (N_TEST, 10)  # the whole test split, whatever the train cap (D-022)
     assert probs.min() >= 0.0 and probs.max() <= 1.0
     np.testing.assert_allclose(probs.sum(axis=-1), 1.0, atol=1e-4)
     expected = _softmax(e2e.best.predict(e2e.data.x_fig, batch_size=64, verbose=0))

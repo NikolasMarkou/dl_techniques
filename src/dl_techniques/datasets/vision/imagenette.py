@@ -157,7 +157,7 @@ class ImagenetteConfig:
     :param normalize: ``"imagenet"`` ((x/255 - mean) / std) or ``"unit"`` (x/255).
     :param validation_split: Fraction of the train records held out as the selection split.
     :param seed: Seed of the selection permutation, the shuffle and the augmentation.
-    :param max_images: Smoke-run cap on the train pool and on the test split.
+    :param max_images: Smoke-run cap on the train pool (the test split is never capped).
     :param tfds_data_dir: The TFDS data directory; ``None`` inherits ``$TFDS_DATA_DIR``.
     :param num_parallel_calls: ``tf.data`` parallelism of the decode.
     """
@@ -226,7 +226,7 @@ def imagenette_examples(
     # The split rows come from the seeded permutation of the TRAIN records (selection first)
     # and an independent seeded order of the validation records (the test split).
     if split == "test":
-        rows = seeded_test_rows(len(images), config.seed, config.max_images)
+        rows = seeded_test_rows(len(images), config.seed)
     else:
         train_idx, select_idx, _ = seeded_split_indices(
             len(images), 1, config.seed, config.validation_split, config.max_images)
