@@ -32,9 +32,9 @@ same exports differ from Keras by up to 9.2e-4 in ``saved_model`` (4.2e-6 of the
 (1.3e-5) and 1.1e-2 in ``onnx`` (4.9e-5), with 99.999% of the argmaxes equal; ConvUNext's (scale 9.8) by 3.8e-6, 8.3e-6
 and 6.2e-6. Read every absolute figure below as a figure at a scale of 1, and expect up to 1e-4 of the largest
 score. Float32 models match Keras to about 1e-6 in ``keras``, ``saved_model`` and
-``tflite``, and in ``onnx`` (the two segmentation families, ConvUNext ``tiny`` and AccUNet, in all four
-formats at 32x64, and ConvUNext ``tiny`` with real Oxford-IIIT Pet weights at 128x128 and 128x256 on 16 real
-images: 5e-6 at most on scores of scale 7, every argmax equal, D-081), with Keras run on the CPU (the check ``export`` makes of a ``tflite``
+``tflite``, and in ``onnx`` (the four segmentation families, ConvUNext ``tiny``, AccUNet, ``resnet_seg/resnet18``
+and ``convnext_seg/cifar10``, in all four formats at 32x64, and ConvUNext ``tiny`` with real Oxford-IIIT Pet weights at
+128x128 and 128x256 on 16 real images: 5e-6 at most on scores of scale 7, every argmax equal, D-081), with Keras run on the CPU (the check ``export`` makes of a ``tflite``
 file written with select operators runs the Keras side on the CPU too, so a GPU machine compares
 CPU with CPU). Serving a model on a GPU is a different computation: it differs from the CPU by about
 1e-3 in the logits (measured on ``cliffordnet/nano`` of the ImageNet gate, GPU against CPU on the same
@@ -45,7 +45,11 @@ weights, written by a CPU process and by a GPU process alike, differs from Keras
 (4.2e-6 of the scale, argmax agreement 1.0), by 9.3 to 9.4 on a GPU with TF32 on (4.2% to 4.3% of the scale, agreement
 0.9957 to 0.9963) and by 2.5e-3 on a GPU with TF32 off (1.1e-5); against Keras on the CPU the TF32 file is 2.6 to 2.8 away
 (1.2% to 1.3%, plan 98b866fb step 1, ``scratch_step1/accunet_export_regimes.json``). The file is not at fault: compare an
-export with Keras on the CPU. A ``mixed_float16`` model matches in ``keras``, ``saved_model``
+export with Keras on the CPU. The backbone families on real Pet weights (30 epochs, 128x128, 16 real test images, CPU,
+plan 98b866fb step 2, ``scratch_step2/export_trained_*.json``): ``resnet_seg/resnet18`` (scores up to 16.0) differs from
+Keras by 5.7e-6 in ``saved_model``, 1.0e-5 in ``tflite`` and 9.5e-6 in ``onnx``, and ``convnext_seg/tiny`` (scale 16.2) by
+4.8e-6, 1.4e-5 and 7.6e-6, at most 9e-7 of the scale, with every argmax equal and each artifact answering the same twice
+on one runtime object. A ``mixed_float16`` model matches in ``keras``, ``saved_model``
 and ``tflite``, but its ``onnx`` export differs from Keras by up to about 1e-4 (9.0e-05
 measured on ``vit_pico``): ONNX Runtime rounds the half-precision steps its own way.
 

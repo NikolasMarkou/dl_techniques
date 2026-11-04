@@ -46,9 +46,9 @@ from ._groups import task_class
 # ---------------------------------------------------------------------
 
 #: Every variant of every CLASSIFICATION family, by name. 6 + 5 + 6 + 9 + 9 + 1 = 36. The rest of this
-#: file (recipes, overlays, builds at 32x32 with ten classes) is about these six; the two segmentation
-#: families are listed in :data:`SEGMENTATION_VARIANTS` and have their own file
-#: (``test_image_segmentation_task.py``).
+#: file (recipes, overlays, builds at 32x32 with ten classes) is about these six; the segmentation
+#: families are listed in :data:`SEGMENTATION_VARIANTS` and have their own files
+#: (``test_image_segmentation_task.py``, ``test_backbone_segmentation_families.py``).
 VARIANTS = {
     "vit": ["vit_pico", "vit_tiny", "vit_small", "vit_base", "vit_large", "vit_huge"],
     "resnet": ["resnet18", "resnet34", "resnet50", "resnet101", "resnet152"],
@@ -65,11 +65,15 @@ VARIANTS = {
 TASK = "image_classification"
 SEGMENTATION = "image_segmentation"
 
-#: The two segmentation families (step 28, D-077: ``register_builtin_models`` registers them, so the
-#: registry-wide listings below hold 36 + 6 = 42 names). ``convunext`` follows ``CONVUNEXT_CONFIGS``.
+#: The segmentation families (step 28, D-077: ``register_builtin_models`` registers them, so the
+#: registry-wide listings below hold 36 + 6 + 11 = 53 names). ``convunext`` follows ``CONVUNEXT_CONFIGS``;
+#: ``resnet_seg`` and ``convnext_seg`` (plan 98b866fb step 2, D-012) read the classifiers' own tables, so they list
+#: the same variants as ``resnet`` and ``convnext_v1`` above.
 SEGMENTATION_VARIANTS = {
     "convunext": ["base", "large", "small", "tiny", "xlarge"],
     "accunet": ["base"],
+    "resnet_seg": VARIANTS["resnet"],
+    "convnext_seg": VARIANTS["convnext_v1"],
 }
 ALL_VARIANTS = {**VARIANTS, **SEGMENTATION_VARIANTS}
 
@@ -98,7 +102,7 @@ def context(family, variant, dataset, image_size=32, num_classes=10):
 def test_the_listing_is_the_literal_variant_tables(builtin):
     assert sorted(builtin) == sorted(ALL_VARIANTS)
     expected = sorted(f"{f}/{v}" for f, names in ALL_VARIANTS.items() for v in names)
-    assert len(expected) == 42
+    assert len(expected) == 53
     assert registry.list_models() == expected
     for family, spec in builtin.items():
         assert spec.tasks == ((SEGMENTATION,) if family in SEGMENTATION_VARIANTS else (TASK,)), family

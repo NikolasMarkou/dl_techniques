@@ -8,7 +8,7 @@ guards, `REPO_MAP.md` at the repo root for which trainer trains which model). Mo
 
 A key=value command line over strict configs. It has two tasks, `image_classification`
 (families `vit`, `resnet`, `convnext_v1`, `convnext_v2`, `cliffordnet`, `cliffordnet_hier`) and
-`image_segmentation` (families `convunext`, `accunet`), and the same code is a Python function. Run it from the repo root with `.venv`, with
+`image_segmentation` (families `convunext`, `accunet`, `resnet_seg`, `convnext_seg`), and the same code is a Python function. Run it from the repo root with `.venv`, with
 `MPLBACKEND=Agg` on a headless machine.
 
 ```bash
@@ -30,12 +30,15 @@ main(["list_tasks"])      # the same as the command line; returns the exit code
 **A family trains one task**: each family lists the task it trains, and `model=` is checked against the task
 before the data, the recipe or the run directory: `python -m train image_classification model=<a segmentation
 family>/<variant>` exits 2 with the task the family trains and the families of this one, and the same holds the other
-way round. The two segmentation families, `convunext` and `accunet` (`train/api/segmentation_models.py`), train
-`image_segmentation`. Their `image_size` is an int (a square) or `[height, width]`, each side a multiple of the
-family's stride: `2 ** depth` for ConvUNext (8 for `tiny` and `small`, 16 for `base` and `large`, 32 for `xlarge`,
-following a `depth` in `model_args`) and 16 for AccUNet. Measured on CPU: both build at 128x256 and return the input's
-size. AccUNet itself refuses a side that is not a multiple of 16; ConvUNext does not (it resizes its decoder to its
-skips), so for it the rule is the task's choice, made so that the skips meet the upsampled maps.
+way round. The four segmentation families, `convunext`, `accunet`, `resnet_seg` and `convnext_seg`
+(`train/api/segmentation_models.py`), train `image_segmentation`. Their `image_size` is an int (a square) or
+`[height, width]`, each side a multiple of the family's stride: `2 ** depth` for ConvUNext (8 for `tiny` and `small`,
+16 for `base` and `large`, 32 for `xlarge`, following a `depth` in `model_args`), 16 for AccUNet, 32 for `resnet_seg`
+(8 with `model_args.stem_type=cifar`) and 16 for `convnext_seg` (4 for its `cifar10` variant), each measured by building
+the variant. Measured on CPU: all build at a non-square size and return the input's size. AccUNet itself refuses a
+side that is not a multiple of 16; ConvUNext does not (it resizes its decoder to its skips), so for it the rule is the
+task's choice, made so that the skips meet the upsampled maps; the backbone families build at a size that is no
+multiple and return a map of another size (ResNet18 at 50 px gives 64x64), which the rule refuses before the run.
 
 **`image_segmentation`**: pairs of an image and a mask of class ids.
 
@@ -67,6 +70,43 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   task alike, batch 8 peaks at 7.6 GB (20 steps, no allocator collection; `tests/test_train/test_api/accunet_memory_evidence.json`).
   The learning rate stays 1e-4, not scaled for the batch: the legacy trainer has no batch rule, and the batch-8
   smoke (3 epochs) learned, `val_miou` 0.31, 0.41, 0.47.
+* **Backbone families `resnet_seg` and `convnext_seg`** (plan 98b866fb step 2, D-012): the classifier's own factory with
+  `include_top=False` and ONE `SegmentationHead` on its last feature map, in one functional model (`Input -> backbone ->
+  segmentation_head`), an FCN-32s-shaped network (Long et al. 2015, arXiv 1411.4038, section 4.1: a single stream, the
+  classifier's final map predicts, in-network learned upsampling) with no skip connection. They are the coarse baseline of
+  the task, not a competitor of the U-Nets: the paper's own table has FCN-32s at 59.4 mean IU against 62.7 for FCN-8s, and
+  DeepLab v3 (arXiv 1706.05587, section 3.1) states that an output stride of 16 gives coarser maps than 8. The variants are
+  the classifiers' own (`resnet/resnet18` .. `resnet152`; `cifar10`, `tiny` .. `xlarge`; one table, not a copy), the
+  head is the library's `SegmentationHead` with EVERY setting passed (`use_skip_connections=False`, `use_attention=False`,
+  `use_ffn=False`, `dropout_rate=0.0`, `normalization_type=layer_norm`, `activation_type=gelu`,
+  `hidden_dim=min(256, backbone channels)`: 256 is the head's default and the width of DeepLab v3's ASPP; the head's own
+  defaults changed once, `use_ffn=True` and `dropout_rate=0.1`, and a test fails when the head gains a knob). **Stride**,
+  measured by building every variant at 128x256: ResNet 32 (8 with `model_args.stem_type=cifar`); ConvNeXt V1
+  `strides ** len(depths)`, because the model uses ONE `strides` for the patchify stem and every downsampler (the paper
+  uses 4 and 2, a stride of 32): the classifier's `strides=4` gives 256 and a 1x1 map at 128x256, so `convnext_seg` sets
+  `strides=2`, which gives 16 (4 for `cifar10`, which has two stages). A `model_args.strides` whose total is no power of two is
+  refused by name, as are a bad `stem_type` and the keys the adapter sets (`include_top`, `head_config_overrides`,
+  `pretrained`, `name`, and for ResNet `enable_deep_supervision`). `load_model` tells the families and variants apart by the
+  nested backbone's own layers (`ResNet`: `blocks_per_stage`, `filters_per_stage`, `block_type`; `ConvNeXtV1`: `depths`,
+  `dims`); a ConvNeXt V2 body under a `convnext_seg` record is refused. **Recipes** have no legacy source: the optimizer
+  settings start from ConvUNext's (AdamW, lr 1e-3, weight decay 1e-4, no warmup, per-variable clipnorm 1, cosine to 1%), 30
+  epochs, patience 10, a flip, `val_miou`, Pet at 128 px: the same data, loss and pipeline, an untuned starting point and
+  not a result. `resnet_seg` keeps them. **`convnext_seg` has lr 1e-4**: at 1e-3 the `tiny` variant stayed at the pixel
+  prior (30 epochs: best `val_miou` 0.373 at epoch 3, accuracy 0.70, stopped at epoch 13), and so did 3e-4 and 1e-3 with 2
+  warmup epochs in 4 epochs, while 2e-4, 1e-4 and 5e-5 reached 0.397, 0.421 and 0.417 (`scratch_step2/logs/diag_runs.out`).
+  **Measured on Oxford-IIIT Pet** (30 epochs, 128 px, batch 16, RTX 4090, the recipes as shipped; majority-class baseline
+  0.199): `resnet_seg/resnet18` (12.8M parameters, 8 minutes) best `val_miou` 0.631 at epoch 28, test mIoU 0.633;
+  `convnext_seg/tiny` (30.0M, 16 minutes) 0.597 at epoch 24, test 0.597. Both are the coarse baseline, not a U-Net's
+  score. **Batch 16**, measured by D-036's procedure (20 real steps on Pet at 128 px on the 24 GB card, with another
+  session's two `llama-server` processes holding 15.9 GB of it; `tests/test_train/test_api/backbone_seg_memory_evidence.json`):
+  16 fits `resnet18`, `resnet50`, `resnet152`, `convnext_seg/cifar10` and `convnext_seg/tiny` (peaks 1.4 to 2.8 GB);
+  `convnext_seg/base` needs batch 8 (16 completes with an allocator collection) and `convnext_seg/xlarge` did not fit at any
+  batch from 16 down to 1 on the card as it was shared (it asked 9.0 GiB at batch 16 and 5.1 GiB at 8; from batch 4 down the
+  353M parameters, their optimizer state and the workspace had already taken the 8.6 GiB that were free). `checkpoint=` from a
+  classification run of the same backbone loads NO layer (measured: the helper compares the top-level layers, `backbone` and
+  `segmentation_head` against `stem`, `stage1_block1` ..., "No overlapping layers"); the classes' own `pretrained=<path>`
+  does load the backbone (9 layers for `resnet18`, 25 for `convnext_v1/tiny`), which these families refuse as a model
+  argument for now.
 * **What `val_loss` is**: Keras averages the cross-entropy of a batch over its valid pixels and then averages the
   batches weighted by images, so `loss` and `val_loss` are NOT the cross-entropy pooled over every valid pixel; with a void
   label the two differ whenever the void share differs between batches. `accuracy` and `miou` ARE pooled over every valid

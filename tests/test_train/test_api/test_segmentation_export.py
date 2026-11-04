@@ -1,4 +1,10 @@
-"""``export`` on the two segmentation families, in every format, at a non-square size (plan 2faf890a step 31, D-081).
+"""``export`` on the segmentation families, in every format, at a non-square size (plan 2faf890a step 31, D-081).
+
+Plan 98b866fb step 2 (D-012) adds ``resnet_seg`` (``resnet18``) and ``convnext_seg`` (``cifar10``, with a stochastic
+depth of 0.5 so that the drop-path controls below cover a ConvNeXt body too) to the table: their rows run through the
+same relative tolerance, the same repeatability on one runtime object and the same record check, because the head
+they end in (transposed convolutions, a LayerNorm, a 1x1 convolution) and a BatchNorm or LayerNorm backbone are
+operations a converter may translate differently from the U-Nets'.
 
 ``test_export_per_family.py`` pins the formats on the six classifiers. This file is its segmentation
 counterpart: the output of a segmentation model is a score map ``(batch, height, width, classes)``, and
@@ -62,7 +68,11 @@ CLASSES = 3
 FAMILIES = {
     "convunext": ("tiny", {"drop_path_rate": 0.5}, "final_output", True),
     "accunet": ("base", {"base_filters": 8, "mlfc_iterations": 1}, "output_conv", False),
+    "resnet_seg": ("resnet18", {}, "seg_head", False),
+    "convnext_seg": ("cifar10", {"drop_path_rate": 0.5}, "seg_head", True),
 }
+#: The families with a live stochastic depth: the controls that need one run over these.
+STOCHASTIC = [family for family, row in FAMILIES.items() if row[3]]
 NAMES = {"keras": "m.keras", "saved_model": "m_saved_model", "tflite": "m.tflite", "onnx": "m.onnx"}
 
 
@@ -265,22 +275,24 @@ def test_the_stochastic_family_really_is_stochastic_under_training_true(family, 
     assert (spread > 1e-6) == FAMILIES[family][3], f"{family}: training=True spread {spread:.3g}"
 
 
-def test_a_saved_model_with_stochastic_depth_serves_the_same_answer_every_time(workshop, batch):
-    loaded = tf.saved_model.load(str(workshop.artifact("convunext", "saved_model")))
+@pytest.mark.parametrize("family", STOCHASTIC)
+def test_a_saved_model_with_stochastic_depth_serves_the_same_answer_every_time(family, workshop, batch):
+    loaded = tf.saved_model.load(str(workshop.artifact(family, "saved_model")))
     first, second = loaded.serve(batch).numpy(), loaded.serve(batch).numpy()
     np.testing.assert_array_equal(first, second)  # exactly: nothing random is left in the graph
-    np.testing.assert_allclose(first, reference(workshop.model("convunext"), batch), atol=ATOL, rtol=0)
+    np.testing.assert_allclose(first, reference(workshop.model(family), batch), atol=ATOL, rtol=0)
     other = np.random.default_rng(4).random((5, *SHAPE)).astype(np.float32)  # the batch stays free
     np.testing.assert_allclose(
-        loaded.serve(other).numpy(), reference(workshop.model("convunext"), other), atol=ATOL, rtol=0
+        loaded.serve(other).numpy(), reference(workshop.model(family), other), atol=ATOL, rtol=0
     )
 
 
-def test_the_graph_of_a_saved_model_holds_no_random_op(workshop):
+@pytest.mark.parametrize("family", STOCHASTIC)
+def test_the_graph_of_a_saved_model_holds_no_random_op(family, workshop):
     from tensorflow.core.protobuf import saved_model_pb2
 
     proto = saved_model_pb2.SavedModel()
-    proto.ParseFromString((workshop.artifact("convunext", "saved_model") / "saved_model.pb").read_bytes())
+    proto.ParseFromString((workshop.artifact(family, "saved_model") / "saved_model.pb").read_bytes())
     ops = {
         node.op
         for meta in proto.meta_graphs
@@ -306,7 +318,12 @@ def test_the_record_beside_an_export_is_the_runs_version_2_record(family, worksh
     written = json.loads(Path(str(workshop.artifact(family, "keras")) + ".task.json").read_text())
     assert written == record_of(family)
     assert list(written)[:len(RECORD_KEYS[SEGMENTATION])] == list(RECORD_KEYS[SEGMENTATION])
-    assert list(written)[len(RECORD_KEYS[SEGMENTATION]):] == ["variant_overrides"]
+    # ``variant_overrides`` is written when a model argument changes a key of the variant's table (ConvUNext's
+    # ``drop_path_rate``, AccUNet's ``base_filters``); the backbone families' rows touch no table key.
+    table = registry.MODELS[family].load_variants()[FAMILIES[family][0]]
+    overridden = bool(overrides_of_variant(table, FAMILIES[family][1]))
+    assert overridden is (family in ("convunext", "accunet"))
+    assert list(written)[len(RECORD_KEYS[SEGMENTATION]):] == (["variant_overrides"] if overridden else [])
     assert written["schema_version"] == 2 and written["input_size"] == [32, 64] and "input_shape" not in written
 
 

@@ -64,7 +64,7 @@ def world():
 
 
 def test_the_two_segmentation_families_are_segmentation_only_and_the_classifiers_are_not(world):
-    for family in ("convunext", "accunet"):
+    for family in ("convunext", "accunet", "resnet_seg", "convnext_seg"):
         assert world[family].tasks == (SEGMENTATION,)
     for family in ("vit", "resnet", "convnext_v1", "convnext_v2", "cliffordnet", "cliffordnet_hier"):
         assert world[family].tasks == (CLASSIFICATION,)
@@ -86,8 +86,8 @@ def test_no_task_asks_no_question(world):
     [
         ("convunext/tiny", CLASSIFICATION, SEGMENTATION, "cliffordnet, cliffordnet_hier, convnext_v1"),
         ("accunet/base", CLASSIFICATION, SEGMENTATION, "cliffordnet, cliffordnet_hier, convnext_v1"),
-        ("vit/vit_pico", SEGMENTATION, CLASSIFICATION, "accunet, convunext"),
-        ("resnet/resnet18", SEGMENTATION, CLASSIFICATION, "accunet, convunext"),
+        ("vit/vit_pico", SEGMENTATION, CLASSIFICATION, "accunet, convnext_seg, convunext, resnet_seg"),
+        ("resnet/resnet18", SEGMENTATION, CLASSIFICATION, "accunet, convnext_seg, convunext, resnet_seg"),
     ],
 )
 def test_a_family_under_the_wrong_task_is_refused_in_both_directions_naming_the_key(
@@ -174,10 +174,11 @@ def test_the_command_line_exits_2_with_one_line_and_leaves_no_directory(world, t
 
 def test_list_models_with_a_task_lists_that_tasks_families_only(world):
     seg = registry.list_models(SEGMENTATION)
-    assert seg[0].startswith("accunet/") and all(n.partition("/")[0] in ("accunet", "convunext") for n in seg)
-    assert "convunext/xlarge" in seg and "accunet/base" in seg
-    assert not any(n.startswith(("vit/", "resnet/")) for n in seg)
-    assert not any(n.startswith(("convunext/", "accunet/")) for n in registry.list_models(CLASSIFICATION))
+    families = ("accunet", "convnext_seg", "convunext", "resnet_seg")
+    assert seg[0].startswith("accunet/") and all(n.partition("/")[0] in families for n in seg)
+    assert "convunext/xlarge" in seg and "accunet/base" in seg and "resnet_seg/resnet18" in seg and "convnext_seg/tiny" in seg
+    assert not any(n.startswith(("vit/", "resnet/", "convnext_v1/", "convnext_v2/")) for n in seg)
+    assert not any(n.startswith(tuple(f"{f}/" for f in families)) for n in registry.list_models(CLASSIFICATION))
 
 
 def test_a_record_naming_a_family_that_does_not_train_its_task_is_refused_at_load(world, tmp_path):

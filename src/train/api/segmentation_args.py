@@ -391,7 +391,8 @@ class SegTransformArgs(StrictConfig):
         metadata={
             "help": "size every image and mask is resized to: one int (a square) or [height, width]; "
             "each side must be a multiple of the family's stride (2**depth for convunext, 16 for "
-            "accunet); auto is the family recipe's. The image is resized bilinearly, the mask by "
+            "accunet, 32 for resnet_seg and 16 for convnext_seg, fewer with the cifar stem or "
+            "cifar10); auto is the family recipe's. The image is resized bilinearly, the mask by "
             "nearest neighbour, and nothing is padded"
         },
     )

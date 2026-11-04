@@ -7,6 +7,12 @@ variants table. The adapters below close that gap, and nothing else; the models 
 edited. Importing this module imports no model code (D-012): each adapter imports its model
 inside the call.
 
+The two backbone families (``resnet_seg``, ``convnext_seg``) are a classification family's own factory
+with ``include_top=False`` and one single-map ``SegmentationHead`` on its last feature map: a
+fully convolutional network of the FCN-32s kind (Long et al. 2015, section 4.1: one stream, the
+classifier's final map predicts, learned in-network upsampling), with no skip connection. They are
+the coarse baseline of the task, not a competitor of the U-Nets (D-012).
+
 Interface contract
 ------------------
 ``TASK``
@@ -64,6 +70,43 @@ Interface contract
     :raises ConfigError: naming ``transform_args.image_size`` for a value that is no positive int
         or pair of positive ints (a bool is no int here).
 
+``create_resnet_seg(*, variant, num_classes, input_shape, **model_args)`` / ``create_convnext_seg(...)``
+    :param variant: a key of ``ResNet.MODEL_VARIANTS`` (``resnet18`` .. ``resnet152``) or of
+        ``ConvNeXtV1.MODEL_VARIANTS`` (``cifar10``, ``tiny`` .. ``xlarge``).
+    :param num_classes: output channels of the head; the logits have one channel per class.
+    :param input_shape: ``(height, width, channels)``; both sides must be multiples of the family's
+        stride (:func:`check_image_size` says it before a run, this function again).
+    :param model_args: further keywords of ``create_resnet`` / ``create_convnext_v1`` (``stem_type``,
+        ``blocks_per_stage``; ``strides``, ``drop_path_rate``, ``depths`` ...).
+    :return: a functional model, ``Input -> backbone -> SegmentationHead``, linear logits
+        ``(B, H, W, num_classes)``. The backbone is the classification family's model with
+        ``include_top=False`` (one nested model named ``backbone``). The head is built from
+        ``dl_techniques.layers.heads.vision.segmentation`` only, with EVERY stage knob passed
+        (``use_skip_connections=False``, ``use_attention=False``, ``use_ffn=False``,
+        ``dropout_rate=0.0``, ``normalization_type="layer_norm"``, ``activation_type="gelu"``,
+        ``hidden_dim=min(256, backbone channels)``), so a later change of the head's defaults moves
+        neither family (D-012).
+    :raises ValueError: when ``model_args`` names a key the adapter sets (:data:`FIXED_MODEL_ARGS`), the
+        input is no multiple of the stride, or the built output is not the input's size.
+    :raises ConfigError: for a stride that is no power of two (see the stride callables).
+
+``resnet_seg_stride(variant, model_args)`` / ``convnext_seg_stride(variant, model_args)``
+    The multiple each side of the input must be, which is also the head's ``upsampling_factor``.
+    ResNet: 4 for the ImageNet stem (7x7 stride 2, then a stride-2 max pool) or 1 for the CIFAR stem,
+    times 2 for each stage after the first: 32 for four stages, 8 with ``stem_type="cifar"``. ConvNeXt V1:
+    ``strides ** len(depths)``, because the model uses ONE ``strides`` for the patchify stem and for
+    every downsampler (the paper uses 4 and 2): 16 for the four-stage variants and 4 for ``cifar10`` at
+    the family's ``strides=2``, measured by building every variant (D-012). A total that is no power of
+    two is refused by name; so is a non-int ``strides`` or ``stem_type`` that is not one of the two.
+
+``observe_resnet_seg(model)`` / ``observe_convnext_seg(model)``
+    :param model: a loaded functional model.
+    :return: the variant-table keys the nested backbone shows (ResNet: ``blocks_per_stage``,
+        ``filters_per_stage``, ``block_type``; ConvNeXt V1: ``depths``, ``dims``), or ``None`` when the
+        model holds no ``SegmentationHead`` or no layer of that backbone class (ConvNeXt V2 is a different
+        class: a ``convnext_v2`` backbone under a ``convnext_seg`` record is refused). ``stem_type``,
+        ``strides``, ``kernel_size``, ``drop_path_rate`` are not table keys and are not checked.
+
 ``observe_convunext(model)`` / ``observe_accunet(model)``
     :param model: a loaded functional model.
     :return: the variant-table keys the model's own layers show, or ``None`` when it holds no layer of
@@ -75,7 +118,8 @@ Interface contract
         (D-088, which supersedes the limit D-080 accepted for a segmentation record).
 
 ``builtin_segmentation_models()``
-    :return: the two :class:`~train.api.registry.ModelSpec` rows (``convunext``, ``accunet``),
+    :return: the four :class:`~train.api.registry.ModelSpec` rows (``convunext``, ``accunet``,
+        ``resnet_seg``, ``convnext_seg``),
         freshly built, each with its recipe (``defaults``) and ``resolve_segmentation_args``.
         :func:`train.api.recipes.register_builtin_models` registers them with the six classifiers
         (D-077: they were held back in step 23 for want of a recipe and a task, and both exist now).
@@ -125,12 +169,13 @@ Module scope imports the standard library and ``train.api`` only (D-012).
 """
 
 import collections
+import copy
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
 
 from . import recipes
 from .args import AutoContext, OptimArgs
 from .errors import ConfigError
-from .registry import ModelSpec
+from .registry import ModelSpec, load_attr
 
 # ---------------------------------------------------------------------
 
@@ -138,9 +183,24 @@ TASK = "image_segmentation"
 
 _HERE = "train.api.segmentation_models"
 _CONVUNEXT = "dl_techniques.models.vision.convunext.model"
+_RESNET = "dl_techniques.models.vision.resnet.model"
+_CONVNEXT_V1 = "dl_techniques.models.vision.convnext.convnext_v1"
 
 #: AccUNet's four stride-2 max pools (``AccUNet`` requires H and W divisible by 16).
 ACCUNET_STRIDE = 16
+
+#: Width of the backbone families' head: the head's own default and DeepLab v3's ASPP width (256), capped
+#: by the backbone's last-stage channels (``cifar10`` ConvNeXt ends at 192): D-012.
+HEAD_WIDTH = 256
+
+#: ``strides`` of ``convnext_seg``: the model uses one value for its patchify stem and every downsampler
+#: (the paper: 4 and 2). At the classifier's 4 the four-stage variants reach a stride of 256 (measured
+#: 1x1 at 128x256), at 2 they reach 16 (DeepLab's output stride) and ``cifar10`` reaches 4.
+CONVNEXT_SEG_STRIDES = 2
+
+#: Stride of the ResNet stem by ``stem_type``: the 7x7 stride-2 convolution and the stride-2 max pool, or
+#: the CIFAR stem's single 3x3 stride-1 convolution. Each later stage downsamples by 2.
+_RESNET_STEM_STRIDE: Dict[str, int] = {"imagenet": 4, "cifar": 1}
 
 #: What ``train.accunet.train_accunet`` builds by default (``base_filters`` :93, ``mlfc_iterations`` :94).
 ACCUNET_VARIANTS: Dict[str, Dict[str, Any]] = {
@@ -155,10 +215,28 @@ _CONVUNEXT_FIXED = ("use_bias", "final_activation", "output_channels")
 #: Keys of ``create_acc_unet_multiclass`` this adapter supplies from the data.
 _ACCUNET_FIXED = ("input_channels",)
 
+#: Keys of the backbone factories (``create_resnet``, ``create_convnext_v1``) the backbone adapters set
+#: themselves: the classifier's head and its deep supervision have no place in a segmenter, a ``name``
+#: would clash with the nested model's, and ``pretrained`` (a classifier's weights loaded into the backbone,
+#: which the classes do support) is not offered by these families yet: ``checkpoint=`` loads no layer of a
+#: classification run into them (measured, ``scratch_step2/checkpoint_transfer.json``).
+_BACKBONE_FIXED = ("include_top", "head_config_overrides", "pretrained", "name")
+_RESNET_FIXED = _BACKBONE_FIXED + ("enable_deep_supervision",)
+
 #: The keys of ``model_args`` each family's adapter sets itself.
 FIXED_MODEL_ARGS: Dict[str, Tuple[str, ...]] = {
     "convunext": _CONVUNEXT_FIXED,
     "accunet": _ACCUNET_FIXED,
+    "resnet_seg": _RESNET_FIXED,
+    "convnext_seg": _BACKBONE_FIXED,
+}
+
+#: Why each family's adapter keeps those keys; the parenthesis of the refusal.
+_FIXED_WHY: Dict[str, str] = {
+    "convunext": "a softmax or biased-off head would break the logits loss",
+    "accunet": "the input channels are the data's",
+    "resnet_seg": "the segmentation head replaces the classification head, and these families do not load a classifier's weights",
+    "convnext_seg": "the segmentation head replaces the classification head, and these families do not load a classifier's weights",
 }
 
 
@@ -169,8 +247,7 @@ def _fixed_clash(family: str, model_args: Mapping[str, Any]) -> str:
         return ""
     return (
         f"{', '.join(map(repr, clash))} is set by the {family!r} adapter from model=, the "
-        "data and transform_args (a softmax or biased-off head would break the logits loss); "
-        "remove it from model_args"
+        f"data and transform_args ({_FIXED_WHY[family]}); remove it from model_args"
     )
 
 
@@ -225,6 +302,95 @@ def create_accunet(
     )
 
 
+#: Every setting of ``SegmentationHead`` the backbone families pass, so that a change of the head's
+#: defaults (``use_ffn=True``, ``dropout_rate=0.1`` arrived with the heads commits of another session)
+#: moves neither family. ``hidden_dim`` and ``upsampling_factor`` are added per model.
+_HEAD_SETTINGS: Dict[str, Any] = {
+    "use_skip_connections": False,
+    "skip_channel_mode": "auto",
+    "explicit_skip_channels": None,
+    "input_format": "spatial",
+    "patch_grid_size": None,
+    "use_attention": False,
+    "attention_type": None,
+    "use_ffn": False,
+    "ffn_type": None,
+    "ffn_expansion_factor": None,
+    "dropout_rate": 0.0,
+    "normalization_type": "layer_norm",
+    "activation_type": "gelu",
+}
+
+
+def _segmenter(
+    family: str, backbone: Any, input_shape: Tuple[int, int, int], num_classes: int, stride: int
+) -> Any:
+    """Return ``Input -> backbone -> SegmentationHead`` as one functional model; see the module contract."""
+    # DECISION plan-2026-11-03T221936-98b866fb/D-012
+    # The head is imported from its leaf module and nothing else of `layers/heads` is: Do NOT use
+    # `create_head`, `HeadDomain` or `heads.task_types` (the heads package is another session's area
+    # and its facade moved twice; a scan in test_backbone_segmentation_families.py holds this). Every
+    # stage knob is passed, `use_ffn=False` and `dropout_rate=0.0` included: the head's defaults are
+    # `use_ffn=True`, `dropout_rate=0.1` and a change of them must not change a trained family.
+    import keras
+    from dl_techniques.layers.heads.vision.segmentation import SegmentationHead
+
+    height, width, channels = input_shape
+    inputs = keras.Input(shape=(height, width, channels))
+    features = backbone(inputs)
+    head = SegmentationHead(
+        num_classes=num_classes,
+        upsampling_factor=stride,
+        hidden_dim=min(HEAD_WIDTH, int(features.shape[-1])),
+        name="segmentation_head",
+        **_HEAD_SETTINGS,
+    )
+    logits = head(features)
+    if (logits.shape[1], logits.shape[2]) != (height, width):
+        raise ValueError(
+            f"the {family} output is {logits.shape[1]}x{logits.shape[2]} for a {height}x{width} input "
+            f"(output stride {stride}); each side must be a multiple of {stride}"
+        )
+    return keras.Model(inputs, logits, name=family)
+
+
+def _check_aligned(family: str, input_shape: Tuple[int, int, int], stride: int) -> None:
+    height, width, _ = input_shape
+    if height % stride or width % stride:
+        raise ValueError(
+            f"{family} needs each side of input_shape to be a multiple of {stride}, got {height}x{width}"
+        )
+
+
+def create_resnet_seg(
+    *, variant: str, num_classes: int, input_shape: Sequence[int], **model_args: Any
+) -> Any:
+    """Build a ResNet backbone with a single-map segmentation head; see the module contract."""
+    _refuse_fixed("resnet_seg", model_args)
+    shape = _three_sides(input_shape)
+    stride = resnet_seg_stride(variant, model_args)
+    _check_aligned("resnet_seg", shape, stride)
+    from dl_techniques.models.vision.resnet.model import create_resnet
+
+    backbone = create_resnet(variant, include_top=False, input_shape=shape, name="backbone", **model_args)
+    return _segmenter("resnet_seg", backbone, shape, num_classes, stride)
+
+
+def create_convnext_seg(
+    *, variant: str, num_classes: int, input_shape: Sequence[int], **model_args: Any
+) -> Any:
+    """Build a ConvNeXt V1 backbone with a single-map segmentation head; see the module contract."""
+    _refuse_fixed("convnext_seg", model_args)
+    shape = _three_sides(input_shape)
+    model_args = {"strides": CONVNEXT_SEG_STRIDES, **model_args}
+    stride = convnext_seg_stride(variant, model_args)
+    _check_aligned("convnext_seg", shape, stride)
+    from dl_techniques.models.vision.convnext.convnext_v1 import create_convnext_v1
+
+    backbone = create_convnext_v1(variant, include_top=False, input_shape=shape, name="backbone", **model_args)
+    return _segmenter("convnext_seg", backbone, shape, num_classes, stride)
+
+
 def convunext_stride(variant: str, model_args: Mapping[str, Any]) -> int:
     """Return ``2 ** depth`` for a ConvUNext variant; see the module contract."""
     depth = model_args.get("depth")
@@ -238,6 +404,57 @@ def convunext_stride(variant: str, model_args: Mapping[str, Any]) -> int:
             f"got {depth!r}"
         )
     return 2**depth
+
+
+def _variant_row(table_path: str, variant: str) -> Mapping[str, Any]:
+    """Return the variants table row of ``variant`` from ``module:Class.MODEL_VARIANTS``, or raise ``ValueError``."""
+    table = load_attr(table_path)
+    if variant not in table:
+        raise ValueError(f"Unknown variant {variant!r}. Available variants: {sorted(table)}")
+    return table[variant]
+
+
+def _sequence_of(model_args: Mapping[str, Any], key: str, row: Mapping[str, Any]) -> Sequence[Any]:
+    """Return ``model_args[key]`` or the variant row's, a non-empty list; ``ConfigError`` names the key otherwise."""
+    value = model_args.get(key, row[key])
+    if not isinstance(value, (list, tuple)) or not value:
+        raise ConfigError(
+            f"Invalid value for 'model_args.{key}': a non-empty list of stage sizes, got {value!r}"
+        )
+    return value
+
+
+def resnet_seg_stride(variant: str, model_args: Mapping[str, Any]) -> int:
+    """Return the output stride of a ResNet backbone; see the module contract."""
+    stem = model_args.get("stem_type", "imagenet")
+    if stem not in _RESNET_STEM_STRIDE:
+        raise ConfigError(
+            f"Invalid value for 'model_args.stem_type': expected one of {sorted(_RESNET_STEM_STRIDE)}, "
+            f"got {stem!r}"
+        )
+    row = _variant_row(f"{_RESNET}:ResNet.MODEL_VARIANTS", variant)
+    stages = _sequence_of(model_args, "blocks_per_stage", row)
+    return _RESNET_STEM_STRIDE[stem] * 2 ** (len(stages) - 1)
+
+
+def convnext_seg_stride(variant: str, model_args: Mapping[str, Any]) -> int:
+    """Return ``strides ** len(depths)`` of a ConvNeXt V1 backbone, refusing a non power of two; see the module contract."""
+    strides = model_args.get("strides", CONVNEXT_SEG_STRIDES)
+    if isinstance(strides, bool) or not isinstance(strides, int) or strides < 1:
+        raise ConfigError(
+            f"Invalid value for 'model_args.strides': an int of 1 or more, got {strides!r}"
+        )
+    row = _variant_row(f"{_CONVNEXT_V1}:ConvNeXtV1.MODEL_VARIANTS", variant)
+    stages = len(_sequence_of(model_args, "depths", row))
+    total = strides**stages
+    if total & (total - 1):
+        raise ConfigError(
+            f"Invalid value for 'model_args.strides': {strides} over the {stages} stages of "
+            f"convnext_seg/{variant} is an output stride of {total}, which is not a power of two; "
+            "the segmentation head upsamples by powers of two (the default is "
+            f"{CONVNEXT_SEG_STRIDES})"
+        )
+    return total
 
 
 def _layers_of(model: Any) -> Any:
@@ -279,6 +496,30 @@ def observe_accunet(model: Any) -> Optional[Dict[str, Any]]:
             config = layer.get_config()
             return {key: config[key] for key in ("base_filters", "mlfc_iterations")}
     return None
+
+
+def _backbone_table(model: Any, backbone_class: str, keys: Sequence[str]) -> Optional[Dict[str, Any]]:
+    """Return ``keys`` of the nested ``backbone_class`` layer's config, or ``None`` without it or without the head."""
+    classes = {type(layer).__name__: layer for layer in _layers_of(model)}
+    if "SegmentationHead" not in classes or backbone_class not in classes:
+        return None
+    config = classes[backbone_class].get_config()
+    return {key: config[key] for key in keys}
+
+
+def observe_resnet_seg(model: Any) -> Optional[Dict[str, Any]]:
+    """Return the variant keys the nested ResNet shows, ``None`` for a model that is no ResNet plus head; see the module contract."""
+    # DECISION plan-2026-11-03T221936-98b866fb/D-012
+    # `variants_attr` of this family is the classifier's own table (`ResNet.MODEL_VARIANTS`: one source),
+    # and the model is a FUNCTIONAL wrapper, so it is not an instance of `ResNet`: the family and the
+    # variant are read from the nested backbone's layer config, as D-088 did for the U-Nets. Do NOT
+    # copy the table into this module (two tables to keep equal) and do NOT compare model.name.
+    return _backbone_table(model, "ResNet", ("blocks_per_stage", "filters_per_stage", "block_type"))
+
+
+def observe_convnext_seg(model: Any) -> Optional[Dict[str, Any]]:
+    """Return the variant keys the nested ConvNeXt V1 shows, ``None`` for a model that is no ConvNeXt V1 plus head; see the module contract."""
+    return _backbone_table(model, "ConvNeXtV1", ("depths", "dims"))
 
 
 def sides_of(image_size: Union[int, Sequence[int]]) -> Tuple[int, int]:
@@ -354,7 +595,12 @@ PET_IMAGE_SIZE = 128
 
 
 def _segmentation_recipe(
-    *, optim_args: Dict[str, Any], patience: int, epochs: int = 30, batch_size: int = 16
+    *,
+    optim_args: Dict[str, Any],
+    patience: int,
+    epochs: int = 30,
+    batch_size: int = 16,
+    model_args: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Return a segmentation recipe: every AUTO key of the groups the task resolves.
 
@@ -379,7 +625,7 @@ def _segmentation_recipe(
         "metric_args": {"watch_metric": MONITOR},
         "checkpoint_args": {"early_stopping_patience": patience},
         "analysis_args": {"eval_batch_size": batch_size},
-        "model_args": {},
+        "model_args": dict(model_args or {}),
         "per_dataset": {"oxford_pet": {"transform_args": {"image_size": PET_IMAGE_SIZE}}},
         "per_variant": {},
     }
@@ -420,6 +666,31 @@ ACCUNET = _segmentation_recipe(
 )
 
 
+# DECISION plan-2026-11-03T221936-98b866fb/D-012
+# The backbone families have NO legacy trainer, so their optimizer settings start from ConvUNext's, read
+# from `CONVUNEXT` (one source, not four copied numbers): the same dataset, loss and pipeline, the only
+# segmentation recipe measured on Oxford-IIIT Pet. `resnet_seg` keeps them as they are (30 epochs on
+# Pet: val_miou 0.631). `convnext_seg` does NOT keep the learning rate: the `tiny` variant at lr 1e-3
+# (30 epochs: best val_miou 0.373 at epoch 3, early stop at 13, train loss flat at 0.74, accuracy 0.70: the
+# pixel prior), at 3e-4 and at 1e-3 with 2 warmup epochs stayed at 0.37 in 4 epochs; 2e-4 was slow (0.397),
+# 1e-4 and 5e-5 reached 0.421 and 0.417 (`scratch_step2/logs/diag_runs.out`). Do NOT restore ConvUNext's
+# 1e-3 "for parity": it is the value of a different network and measured to stall this one. The values are an untuned starting
+# point (one family-wide rate, chosen from 4-epoch probes), not a result. The batch is the one D-036's
+# procedure measured on the 24 GB card (20 real steps at 128 px, halved from 16 until it fits): 16 fits
+# the default variants (`resnet18`, `convnext_seg/tiny`, and `resnet50`, `resnet152`, `cifar10`),
+# `convnext_seg/base` needs 8 and `xlarge` did not fit at any batch from 16 to 1 beside another session's 15.9 GB
+# (`tests/test_train/test_api/backbone_seg_memory_evidence.json`).
+CONVNEXT_SEG_LR = 1e-4
+
+RESNET_SEG = _segmentation_recipe(
+    optim_args=copy.deepcopy(CONVUNEXT["optim_args"]), patience=10, batch_size=16,
+)
+CONVNEXT_SEG = _segmentation_recipe(
+    optim_args={**copy.deepcopy(CONVUNEXT["optim_args"]), "lr": CONVNEXT_SEG_LR}, patience=10, batch_size=16,
+    model_args={"strides": CONVNEXT_SEG_STRIDES},
+)
+
+
 def builtin_segmentation_models() -> Tuple[ModelSpec, ...]:
     """Return the segmentation family specs, freshly built; see the module contract."""
     return (
@@ -442,5 +713,25 @@ def builtin_segmentation_models() -> Tuple[ModelSpec, ...]:
             resolve_model_args=f"{_HERE}:resolve_segmentation_args",
             stride=ACCUNET_STRIDE,
             observe=f"{_HERE}:observe_accunet",
+        ),
+        ModelSpec(
+            family="resnet_seg",
+            factory=f"{_HERE}:create_resnet_seg",
+            variants_attr=f"{_RESNET}:ResNet.MODEL_VARIANTS",
+            tasks=(TASK,),
+            defaults=RESNET_SEG,
+            resolve_model_args=f"{_HERE}:resolve_segmentation_args",
+            stride=f"{_HERE}:resnet_seg_stride",
+            observe=f"{_HERE}:observe_resnet_seg",
+        ),
+        ModelSpec(
+            family="convnext_seg",
+            factory=f"{_HERE}:create_convnext_seg",
+            variants_attr=f"{_CONVNEXT_V1}:ConvNeXtV1.MODEL_VARIANTS",
+            tasks=(TASK,),
+            defaults=CONVNEXT_SEG,
+            resolve_model_args=f"{_HERE}:resolve_segmentation_args",
+            stride=f"{_HERE}:convnext_seg_stride",
+            observe=f"{_HERE}:observe_convnext_seg",
         ),
     )

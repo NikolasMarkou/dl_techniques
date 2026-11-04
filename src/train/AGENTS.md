@@ -512,10 +512,15 @@ per-model scripts (usage, keys, run directory, resume, `predict`, `export`, exit
   one, in both directions, before the variants table is imported, and `TaskTrainer.run` passes its `task` as its first
   act; `load_model` refuses a record whose family does not train the record's task. `ModelSpec.stride` (an int, or
   `"module:callable"` of `f(variant, model_args) -> int`, or `None` for the classifiers) is the multiple each side of a
-  segmentation `image_size` must be; `api/segmentation_models.py` holds the two adapters (`convunext`, `accunet`),
-  `check_image_size`, the recipes (`CONVUNEXT`, `ACCUNET`) and the specs. `recipes.register_builtin_models` registers the
-  six classifiers and the two segmentation families (D-077; step 23 held them back until a task and a recipe existed), so
-  a guard that walks `registry.MODELS` meets eight families and reads `ModelSpec.tasks` to tell them apart.
+  segmentation `image_size` must be; `api/segmentation_models.py` holds the adapters (`convunext`, `accunet`, and the
+  backbone families `resnet_seg` and `convnext_seg`: the classifier's factory with `include_top=False` plus one
+  single-map `SegmentationHead`, D-012 of plan 98b866fb), `check_image_size`, the recipes (`CONVUNEXT`, `ACCUNET`,
+  `RESNET_SEG`, `CONVNEXT_SEG`) and the specs. `recipes.register_builtin_models` registers the six classifiers and the
+  four segmentation families (D-077; step 23 held them back until a task and a recipe existed), so a guard that walks
+  `registry.MODELS` meets ten families and reads `ModelSpec.tasks` to tell them apart. The backbone families read the
+  classifiers' own variants tables and are checked by `ModelSpec.observe` (a family with an `observe` is checked by its
+  layers even when its table lives on a class), and the adapter passes EVERY setting of `SegmentationHead` (its defaults
+  changed once with another session's commits; a test fails when the head gains a knob).
 - **`task.json` is schema version 2 and per task** (D-073): `predictor.RECORD_KEYS[task]` and `DATA_KEYS[task]`; a
   classification record equals a version 1 record but for `schema_version`; a segmentation record has `input_size`,
   `ignore_index`, `mask_threshold`, `output` and no `input_shape`. A new task is a new row of both tables and a

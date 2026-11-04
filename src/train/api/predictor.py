@@ -871,10 +871,12 @@ def check_model_against_record(
     that differs from its variant in a key the record does not list is refused. Two variants that
     differ only in keys the record overrides are the same architecture and cannot be told apart.
 
-    A family whose models are functional (the two segmentation families: no class to be an instance of,
+    A family whose models are functional (the four segmentation families: no class to be an instance of,
     no table keys in ``get_config()``) is checked by what its layers show: ``spec.observe(model)`` names
     the table keys the layers carry, or ``None`` for a model that holds no layer of the family, and
-    each key it returns must equal the expected table's. The keys a layer does not show
+    each key it returns must equal the expected table's. A family with an ``observe`` is checked this way
+    even when its ``variants_attr`` names a class (``resnet_seg`` reads ``ResNet.MODEL_VARIANTS``; its model
+    wraps a ``ResNet``, it is not one). The keys a layer does not show
     (ConvUNext's ``drop_path_rate``) and a model that differs in one the record does not list are not
     seen; two variants that differ only there are not told apart (D-088).
     """
@@ -908,8 +910,15 @@ def check_model_against_record(
     # mismatch is refused. Do NOT go back to "the variant is in the table and the model takes the
     # size": a convunext/tiny file loaded under records naming convunext/base, convunext/xlarge and
     # accunet/base, and `export` wrote the wrong record beside the export (review-iter-3 concern 3).
+    # DECISION plan-2026-11-03T221936-98b866fb/D-012
+    # A family with `observe` is checked by what its layers show EVEN WHEN its table lives on a class
+    # (`resnet_seg` and `convnext_seg` share the classifier's `ResNet.MODEL_VARIANTS` and
+    # `ConvNeXtV1.MODEL_VARIANTS`: one table, not a copy). Their model is a functional wrapper, so it is not
+    # an instance of that class and `isinstance` would refuse every honest file. Do NOT copy the table into
+    # `segmentation_models` to make `owner` None, and do NOT drop the `isinstance` check for the classifiers.
     owner = load_attr(f"{module_name}:{attr_path.rsplit('.', 1)[0]}") if "." in attr_path else None
-    if owner is not None and not isinstance(model, owner):
+    observed = spec.observe is not None
+    if owner is not None and not observed and not isinstance(model, owner):
         raise ConfigError(
             f"Invalid {TASK_FILE} {task_file}: it names the family {family!r} ({owner.__name__}) "
             f"but {model_file} holds a {type(model).__name__}; the file and the model are not "
@@ -935,7 +944,7 @@ def check_model_against_record(
                 f"Invalid {TASK_FILE} {task_file}: variant_overrides names {', '.join(map(repr, foreign))}, "
                 f"which {variant!r} of {family!r} does not have (it has {', '.join(map(repr, wanted))})"
             )
-        if owner is None:
+        if owner is None or observed:
             _check_observed(model, spec, {**wanted, **overrides}, overrides, record, model_file, task_file)
             return
         built = model.get_config()

@@ -166,8 +166,9 @@ def test_no_other_recipe_sets_the_key_so_every_other_run_keeps_256(table):
 
 def test_a_segmentation_run_evaluates_at_the_batch_it_trains_at(world):
     """The shared 256 would put 256 full-size masks and logits in one pass (D-077)."""
-    # AccUNet trains at 8: 16 runs out of memory on the 24 GB card in legacy too (D-088).
-    for family, batch in (("convunext", 16), ("accunet", 8)):
+    # AccUNet trains at 8: 16 runs out of memory on the 24 GB card in legacy too (D-088). The backbone families
+    # train at 16, which D-036's procedure measured to fit for their default variants (D-012).
+    for family, batch in (("convunext", 16), ("accunet", 8), ("resnet_seg", 16), ("convnext_seg", 16)):
         spec = registry.MODELS[family]
         assert spec.tasks == (SEGMENTATION,)
         for dataset in ("oxford_pet", "folder", "csv"):

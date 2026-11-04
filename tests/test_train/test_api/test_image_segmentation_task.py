@@ -422,13 +422,16 @@ def test_the_recipes_never_give_a_size_to_file_data(world):
 # ---------------------------------------------------------------------
 
 
-def test_the_two_families_train_segmentation_only_and_the_six_classifiers_do_not(world):
-    for family in ("convunext", "accunet"):
+def test_the_segmentation_families_train_segmentation_only_and_the_six_classifiers_do_not(world):
+    # Plan 98b866fb step 2 added resnet_seg and convnext_seg: they sort between accunet and convunext.
+    for family in ("convunext", "accunet", "resnet_seg", "convnext_seg"):
         assert registry.MODELS[family].tasks == ("image_segmentation",)
     assert all(registry.MODELS[f].tasks == ("image_classification",)
                for f in ("vit", "resnet", "convnext_v1", "convnext_v2", "cliffordnet", "cliffordnet_hier"))
-    assert registry.list_models("image_segmentation")[:2] == ["accunet/base", "convunext/base"]
-    assert not [m for m in registry.list_models("image_classification") if m.startswith(("convunext", "accunet"))]
+    assert registry.list_models("image_segmentation")[:3] == ["accunet/base", "convnext_seg/base", "convnext_seg/cifar10"]
+    assert "convunext/base" in registry.list_models("image_segmentation")
+    assert not [m for m in registry.list_models("image_classification")
+                if m.startswith(("convunext", "accunet", "resnet_seg", "convnext_seg"))]
     assert {t.name for t in registry.list_tasks()} == {"image_classification", "image_segmentation"}
 
 

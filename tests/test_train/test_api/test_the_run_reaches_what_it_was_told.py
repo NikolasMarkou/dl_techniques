@@ -198,12 +198,12 @@ def cross_entropy_of_logits(logits: np.ndarray, labels: np.ndarray) -> float:
 
 
 def test_the_families_listed_here_are_the_classification_families_registered():
-    # Step 28 (D-077): the registry also holds the two segmentation families; this file spies on the
+    # Step 28 (D-077, and plan 98b866fb step 2): the registry also holds the four segmentation families; this file spies on the
     # CLASSIFICATION run (cross-entropy on logits, top-k), and the segmentation run's compile is
     # checked in test_image_segmentation_task.py and test_segmentation_metrics.py.
     classifiers = sorted(f for f, spec in registry.MODELS.items() if spec.tasks == ("image_classification",))
     assert sorted(family for family, _ in FAMILIES) == classifiers
-    assert sorted(set(registry.MODELS) - set(classifiers)) == ["accunet", "convunext"]
+    assert sorted(set(registry.MODELS) - set(classifiers)) == ["accunet", "convnext_seg", "convunext", "resnet_seg"]
 
 
 @pytest.mark.parametrize("family, variant", FAMILIES, ids=[f"{f}/{v}" for f, v in FAMILIES])
