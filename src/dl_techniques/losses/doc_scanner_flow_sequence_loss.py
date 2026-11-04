@@ -124,6 +124,10 @@ from typing import Any, Dict, List
 
 import keras
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # DECISION plan-2026-09-10T065432-05fcb6dd/D-031: this loss lives in `losses/`
@@ -466,3 +470,5 @@ class DocScannerFlowSequenceLoss(keras.losses.Loss):
             "line_weight": self.line_weight,
         })
         return config
+
+# ---------------------------------------------------------------------

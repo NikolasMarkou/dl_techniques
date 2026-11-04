@@ -18,9 +18,14 @@ from typing import Any, Dict, List, Sequence, Tuple
 import keras
 from keras import ops
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.losses.yolo12_multitask_loss import YOLOv12ObjectDetectionLoss
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 # Subclass rather than fork. The parent stays intact for
 # YOLOv12-model users; we override only _make_anchors.
@@ -131,3 +136,5 @@ class CliffordDetectionLoss(YOLOv12ObjectDetectionLoss):
         config = dict(config)
         config.pop("reduction", None)
         return cls(**config)
+
+# ---------------------------------------------------------------------

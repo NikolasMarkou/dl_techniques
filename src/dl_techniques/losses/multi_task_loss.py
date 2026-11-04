@@ -21,8 +21,14 @@ Example::
 import keras
 from keras import ops
 from typing import Any, Dict, Optional
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.losses.multi_task_loss")
 class MultiTaskLoss(keras.losses.Loss):
@@ -77,3 +83,6 @@ class MultiTaskLoss(keras.losses.Loss):
             "loss_weights": self.loss_weights,
         })
         return config
+
+# ---------------------------------------------------------------------
+

@@ -70,6 +70,11 @@ import keras
 import warnings
 import numpy as np
 from typing import Any, Dict, Optional, Sequence
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------

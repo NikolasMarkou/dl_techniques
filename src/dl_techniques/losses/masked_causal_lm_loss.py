@@ -39,6 +39,11 @@ References
 
 import keras
 from keras import ops
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -219,3 +224,5 @@ class PrefixMaskedCausalLMLoss(MaskedCausalLMLoss):
             name=name,
             **kwargs,
         )
+
+# ---------------------------------------------------------------------

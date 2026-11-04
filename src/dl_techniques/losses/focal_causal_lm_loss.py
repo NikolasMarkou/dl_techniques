@@ -57,6 +57,11 @@ References
 import keras
 from keras import ops
 from typing import Optional
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -207,3 +212,5 @@ class FocalCausalLMLoss(keras.losses.Loss):
             "from_logits": self.from_logits,
         })
         return config
+
+# ---------------------------------------------------------------------

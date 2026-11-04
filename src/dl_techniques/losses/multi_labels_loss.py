@@ -22,12 +22,12 @@ compatibility). The old ``DiceLossPerChannel`` class was removed as a duplicate.
 import keras
 from keras import ops
 from typing import Optional, List, Union, Dict, Any
-from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.losses.segmentation_metrics import dice_per_sample, dice_scalar
 
 
