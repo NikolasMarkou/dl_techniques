@@ -266,6 +266,7 @@ def test_a_fit_with_each_loss_finishes_with_finite_numbers_and_a_summary_that_na
     assert np.isfinite(history["loss"]).all() and np.isfinite(history["val_loss"]).all()
     assert read_json(Path(result.run_dir) / "config.json")["loss_args"]["name"] == name
     notes = " ".join(summary["notes"])
+    assert "mask_threshold" not in notes  # the note is for a thresholded run only (D-016)
     if name == "ce":
         assert summary["init_scale_warning"] is False
         assert "ln(C)" in notes and "cross-entropy per valid pixel" in notes
@@ -278,6 +279,28 @@ def test_a_fit_with_each_loss_finishes_with_finite_numbers_and_a_summary_that_na
         assert "BatchNorm" not in notes
         assert summary["initial_loss_ratio"] == pytest.approx(
             summary["initial_loss_sanity_eval"]["loss"] / np.log(3), abs=1e-9)
+
+
+@pytest.fixture(scope="module", params=[("dice", {"dice_smooth": 0.5}), ("focal", {"focal_gamma": 0.5})])
+def finished_with_a_knob(world, folders, request, tmp_path_factory):
+    name, knob = request.param
+    out = tmp_path_factory.mktemp("fit_knob_" + name) / "run"
+    result = train_image_segmentation(
+        out=str(out), model="convunext/tiny", data=data_of(folders), epochs=2, batch_size=8,
+        transform_args={"image_size": SIZE}, loss_args={"name": name, **knob},
+        analysis_args={"model_analysis": False, "figures": False},
+    )
+    return name, knob, read_json(result.summary_path)
+
+
+def test_the_reloaded_best_model_is_scored_with_the_knob_the_run_trained_with(finished_with_a_knob):
+    # `run_summary.load_best_metrics` reloads best_model.keras WITH its compile config and evaluates it,
+    # so `test_metrics_best.loss` is the RELOADED loss; `best_checkpoint_max_abs_diff` is its gap to the
+    # in-memory best weights scored by the loss they trained with, loss key included. A reload that
+    # swapped in the default smooth or gamma moves that number by far more than 1e-6.
+    name, knob, summary = finished_with_a_knob
+    assert np.isfinite(summary["test_metrics_best"]["loss"])
+    assert summary["best_checkpoint_max_abs_diff"] <= 1e-6, (name, knob, summary["best_checkpoint_max_abs_diff"])
 
 
 def test_a_non_finite_initial_loss_is_still_refused_for_a_new_loss(world, folders, tmp_path, monkeypatch):

@@ -309,6 +309,8 @@ def test_a_run_on_one_bit_masks_records_the_threshold_and_trains_two_classes(fin
     assert json.loads((out / "config.json").read_text())["data"]["mask_threshold"] == THRESHOLD
     baseline = summary["majority_class_baseline"]
     assert baseline["pixels"] == summary["n_val"] * SIZE[0] * SIZE[1]
+    # D-016: the summary's notes name the key and the value (review-iter-1 concern 2).
+    assert any(note.startswith(f"`data.mask_threshold` is {THRESHOLD:g}:") for note in summary["notes"])
 
 
 def test_a_resume_with_another_threshold_is_refused_naming_the_key_and_the_same_one_resumes(world, sets, tmp_path):

@@ -8,6 +8,7 @@ For each of ``SparseDiceLoss``, ``SparseCeDiceLoss`` and ``SparseFocalLoss``:
   the smoothing, which the RED mutants of the step prove);
 * ``loss(w=[1,..,1,0]) * B/(B-1) == loss(batch[:-1])`` (``losses/AGENTS.md``: one value per image);
 * a ``.keras`` file compiled with the loss reloads in an interpreter that cannot import ``train``;
+* ``get_config`` and a ``.keras`` reload keep a knob that is NOT its default (``smooth=0.5``, ``gamma=0.5``);
 * finite under ``mixed_float16``; one ``fit`` step lowers the loss.
 
 Plus the relations to the references the definitions were fixed from: focal at ``gamma = 0`` is
@@ -311,6 +312,44 @@ def test_the_config_round_trips(name):
     assert clone.get_config() == loss.get_config()
     assert float(clone(TARGET, LOGITS)) == float(loss(TARGET, LOGITS))
     json.dumps(loss.get_config())
+
+
+#: A knob moved off its default: with the default a dropped config field and its default are the same
+#: value, so a round trip on a default-built loss cannot see the field go missing (review-iter-1 concern 1).
+NON_DEFAULT = {
+    "dice": ("smooth", 0.5),
+    "ce_dice": ("smooth", 0.5),
+    "focal": ("gamma", 0.5),
+}
+
+
+@pytest.mark.parametrize("name", sorted(NON_DEFAULT))
+def test_the_config_round_trips_a_knob_that_is_not_its_default(name):
+    field, value = NON_DEFAULT[name]
+    loss = LOSSES[name](**{field: value})
+    config = loss.get_config()
+    assert config[field] == value
+    clone = type(loss).from_config(config)
+    assert getattr(clone, field) == value
+    assert clone.get_config() == config
+    # The knob moves the number: the reloaded loss is this one and not the default-built one.
+    assert float(clone(TARGET, LOGITS)) == float(loss(TARGET, LOGITS))
+    assert float(clone(TARGET, LOGITS)) != pytest.approx(float(LOSSES[name]()(TARGET, LOGITS)), rel=1e-3)
+
+
+@pytest.mark.parametrize("name", sorted(NON_DEFAULT))
+def test_a_compiled_model_reloads_with_the_knob_it_was_compiled_with(name, tmp_path):
+    field, value = NON_DEFAULT[name]
+    model = keras.Sequential([keras.layers.Input((2, 2, 2)), keras.layers.Identity()])
+    model.compile(optimizer="sgd", loss=LOSSES[name](**{field: value}))
+    path = tmp_path / "model.keras"
+    model.save(path)
+    loaded = keras.models.load_model(path)
+    assert type(loaded.loss) is type(model.loss)
+    assert getattr(loaded.loss, field) == value
+    assert loaded.loss.ignore_index == VOID
+    assert float(loaded.loss(TARGET, LOGITS)) == float(model.loss(TARGET, LOGITS))
+    assert float(loaded.evaluate(LOGITS, TARGET, verbose=0)) == pytest.approx(float(model.loss(TARGET, LOGITS)))
 
 
 @pytest.mark.parametrize("name", sorted(LOSSES))

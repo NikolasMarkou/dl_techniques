@@ -203,11 +203,32 @@ def test_the_format_of_the_file_decides_how_the_dotted_keys_are_read(files, tmp_
     assert SEEN[1]["data"]["test_dir"] == str(other) and SEEN[1]["data"]["train_dir"] == str(files["tree"])
 
 
-def test_a_dotted_format_of_another_member_wins_and_the_mixture_is_refused_by_key(files, tmp_path, capsys):
+def test_a_dotted_format_over_a_file_of_another_format_is_refused_naming_both_formats(files, tmp_path, capsys):
+    # The merge would keep the file's keys under the new format and validation would then refuse one of
+    # them as unknown ("Unknown key 'data.train_dir'"), a key the user never typed (review-iter-1 concern 7).
     folder = write(tmp_path / "f.yaml", f"format: folder\ntrain_dir: {files['tree']}\n")
     assert run(CLASSIFICATION, *BASE_C, f"data={folder}", "data.format=csv") == 2
-    assert "train_dir" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert "data.format=csv is given over a folder data" in error
+    assert "train_dir" not in error and "Unknown key" not in error
     assert not SEEN
+
+
+def test_the_same_refusal_for_segmentation_a_csv_file_under_a_folder_format_and_a_config_files_mapping(files, tmp_path, capsys):
+    csv_file = write(
+        tmp_path / "c.yaml", f"format: csv\ntrain_csv: {files['seg_csv']}\nimage_column: pic\nmask_column: lab\n")
+    tokens = ("data.format=folder", f"data.train_images={files['root']}", f"data.train_masks={files['root']}")
+    assert run(SEGMENTATION, *BASE_S, f"data={csv_file}", *tokens) == 2
+    error = capsys.readouterr().err
+    assert "data.format=folder is given over a csv data" in error
+    assert "train_csv" not in error and "Unknown key" not in error
+    config_file = write(
+        tmp_path / "m.yaml", f"out: x\nmodel: convunext/tiny\ndata:\n  format: csv\n  train_csv: {files['seg_csv']}\n")
+    assert run(SEGMENTATION, f"config={config_file}", *tokens) == 2
+    assert "data.format=folder is given over a csv data" in capsys.readouterr().err
+    # The same format restated, and a format over a file that states none, are not this refusal.
+    assert run(SEGMENTATION, *BASE_S, f"data={csv_file}", "data.format=csv", "data.num_classes=2") == 0
+    assert SEEN[0]["data"]["format"] == "csv" and SEEN[0]["data"]["num_classes"] == 2
 
 
 def test_a_config_files_own_data_path_survives_a_dotted_key(files, tmp_path):

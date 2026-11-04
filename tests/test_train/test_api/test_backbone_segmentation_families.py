@@ -299,7 +299,9 @@ def test_the_stem_and_the_depth_move_the_rule_the_user_is_told(world, folder, tm
         ("resnet_seg/resnet18", {"blocks_per_stage": []}, r"model_args\.blocks_per_stage.*non-empty list"),
         ("resnet_seg/resnet18", {"include_top": True}, r"'include_top'.*set by the 'resnet_seg' adapter"),
         ("resnet_seg/resnet18", {"enable_deep_supervision": True}, r"'enable_deep_supervision'.*set by the 'resnet_seg' adapter"),
-        ("resnet_seg/resnet18", {"pretrained": "w.keras"}, r"'pretrained'.*set by the 'resnet_seg' adapter.*do not load a classifier's weights"),
+        # `pretrained` is NOT set by the adapter, which never passes it: the message must not say so.
+        ("resnet_seg/resnet18", {"pretrained": "w.keras"}, r"'pretrained' is not offered by the 'resnet_seg' family yet.*does not load a classifier's weights"),
+        ("convnext_seg/tiny", {"pretrained": False}, r"'pretrained' is not offered by the 'convnext_seg' family yet"),
         ("convnext_seg/tiny", {"head_config_overrides": {}}, r"'head_config_overrides'.*set by the 'convnext_seg' adapter"),
         ("convnext_seg/tiny", {"name": "x"}, r"'name'.*set by the 'convnext_seg' adapter"),
     ],
@@ -309,6 +311,19 @@ def test_a_model_arg_the_family_cannot_take_is_refused_by_name_before_the_claim(
 ):
     refused(tmp_path, folder, match, model, model_args=model_args,
             transform_args={"image_size": [64, 64]})
+
+
+@pytest.mark.parametrize("family", ["resnet_seg", "convnext_seg"])
+def test_pretrained_is_a_key_the_family_does_not_offer_and_never_one_the_adapter_sets(family):
+    # The adapter never passes `pretrained`; the old message said it did (review-iter-1 concern 5).
+    alone = sm._fixed_clash(family, {"pretrained": False})
+    assert f"'pretrained' is not offered by the {family!r} family yet" in alone
+    assert "is set by" not in alone and alone.count("'pretrained'") == 1
+    both = sm._fixed_clash(family, {"pretrained": False, "name": "x"})
+    assert f"'name' is set by the {family!r} adapter" in both
+    assert f"'pretrained' is not offered by the {family!r} family yet" in both
+    assert "'pretrained' is set by" not in both and both.count("'pretrained'") == 1
+    assert sm._fixed_clash(family, {}) == ""
 
 
 def test_the_command_line_exits_2_with_one_line_and_no_directory(world, folder, tmp_path, capsys):

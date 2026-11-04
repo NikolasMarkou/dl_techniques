@@ -208,8 +208,9 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
 * **Losses** (`loss_args.name`, plan 98b866fb step 3, D-014): `ce` (the default, Keras' sparse cross-entropy on logits with
   the void value left out), `dice`, `ce_dice` and `focal` (`dl_techniques.losses.sparse_segmentation_loss`, logits and sparse
   targets, a void pixel changes neither value nor gradient). `dice` is the soft Dice of MONAI's `DiceLoss` at its defaults
-  and of nnU-Net: per image, per class, the mean over ALL classes (background included), a linear denominator and
-  `loss_args.dice_smooth` (default 1e-5, must be positive) in numerator and denominator. `focal` is Lin et al.'s focal loss
+  (and nnU-Net's formula): per image, per class, the mean over ALL classes (background included, which nnU-Net's trainer
+  leaves out with `do_bg=False`), a linear denominator and
+  `loss_args.dice_smooth` (default 1e-5, MONAI's, which nnU-Net's trainer also passes; must be positive) in numerator and denominator. `focal` is Lin et al.'s focal loss
   (arXiv 1708.02002, eq. 4) in its softmax form, `-(1 - p_t)^gamma log p_t`, `loss_args.focal_gamma` default 2 (0 is the
   cross-entropy); there is no `alpha`, which balances the two classes of a sigmoid problem and would only rescale a softmax
   pixel. `ce_dice` is the per-image cross-entropy plus `dice`, weights 1 and 1 (nnU-Net's `DC_and_CE_loss`). **One value per
@@ -265,7 +266,7 @@ images per class, optional `data.test_dir`) or `csv` (`data.train_csv`, columns 
 file holding the group, and `data.<key>=` tokens put over it, key by key, so a capped or tweaked run needs no copy of the file.
 The same rule holds for both tasks and for the `data: <file>` of a `config=` file; the lowest layer is the `config=` file, then
 the group's file, then the dotted keys, and the file's `format` reads dotted keys that state none (`data.path_column=` after a
-csv file). A key given twice on the command line, a file twice, or a file together with a JSON object for the group is still
+csv file); a `data.format=` that differs from the file's is refused naming both formats (give a file of that format, or every key on the command line with no file). A key given twice on the command line, a file twice, or a file together with a JSON object for the group is still
 refused as a repeated key. `config.json` records the resolved values, as for every key, and not which layer a value came from.
 ```bash
 python -m train image_classification out=auto model=vit/vit_pico data=cifar_100.yaml data.max_samples=2000

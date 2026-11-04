@@ -15,7 +15,7 @@ Interface contract
 ``SparseDiceLoss(ignore_index=None, smooth=1e-5, name=..., reduction="sum_over_batch_size")``
     ``loss_b = 1 - mean_c (2 sum_n m g_c p_c + s) / (sum_n m g_c + sum_n m p_c + s)`` per image ``b``,
     ``p = softmax(logits)``, ``g`` the one-hot target, ``m`` the valid-pixel mask, ``s = smooth``.
-    All classes count, background included.
+    All classes count, background included (MONAI's default; nnU-Net's trainer leaves background out).
 
 ``SparseFocalLoss(ignore_index=None, gamma=2.0, ...)``
     ``loss_b = sum_n m (1 - p_t)^gamma (-log p_t) / max(sum_n m, 1)`` per image (Lin et al., eq. 4,
@@ -59,7 +59,13 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
-#: Dice smoothing, in numerator and denominator (MONAI ``smooth_nr = smooth_dr`` and nnU-Net ``smooth``).
+#: Dice smoothing, in numerator and denominator.
+# DECISION plan-2026-11-03T221936-98b866fb/D-024
+# 1e-5 is MONAI's default (``smooth_nr = smooth_dr``) and the value nnU-Net's TRAINER passes. nnU-Net's
+# ``SoftDiceLoss`` class default is ``smooth = 1.0``, and its trainer also sets ``do_bg=False`` (background
+# left out) for its softmax multi-class loss: this module keeps the background (MONAI's default). Do NOT
+# cite nnU-Net's class default for the 1e-5, and do NOT switch to 1.0 or drop the background without a
+# measurement: the formula itself equals nnU-Net's at do_bg=True, batch_dice=False (to 4e-8, D-024).
 DEFAULT_DICE_SMOOTH = 1e-5
 
 #: Focal focusing parameter (Lin et al.: "we found gamma = 2 to work best").

@@ -1001,14 +1001,16 @@ def layer_command_line(
     config file, then ``data=data.yaml`` on the command line, which replaces the config file's
     whole group); the command line's dotted keys (``data.max_samples=100``), which win key by
     key. A group's ``format`` that the dotted keys do not state is the one the lower layers
-    have, so ``data=data.yaml data.max_samples=100`` reads the ``100`` as the file's format does.
+    have, so ``data=data.yaml data.max_samples=100`` reads the ``100`` as the file's format does; a
+    ``format`` the dotted keys state that differs from the lower layer's is refused, naming both.
     A key given twice on the command line is already refused by :func:`parse_dotlist`.
 
     :param cls: the task's config class.
     :param config_path: the ``config=`` path or ``None``.
     :param raw: the nested dict of :func:`parse_task_arguments`.
     :return: the typed mapping, still to be validated.
-    :raises ConfigError: for an unreadable file, an unknown key, or a value of the wrong type.
+    :raises ConfigError: for an unreadable file, an unknown key, a value of the wrong type, or a dotted
+        ``format`` that differs from the one a lower layer states.
     """
     # DECISION plan-2026-11-03T221936-98b866fb/D-021
     # One merge for the config file, a group's file and the dotted keys, here and nowhere else.
@@ -1032,8 +1034,21 @@ def layer_command_line(
             overrides[field.name] = dict(layer)
         below = mapping.get(field.name)
         keys = overrides.get(field.name)
-        if isinstance(keys, dict) and TAG not in keys and isinstance(below, Mapping) and isinstance(below.get(TAG), str):
-            overrides[field.name] = {TAG: below[TAG], **keys}
+        if isinstance(keys, dict) and isinstance(below, Mapping) and isinstance(below.get(TAG), str):
+            if TAG not in keys:
+                overrides[field.name] = {TAG: below[TAG], **keys}
+            elif keys[TAG] != below[TAG]:
+                # DECISION plan-2026-11-03T221936-98b866fb/D-025
+                # A format stated over a lower layer that states another one is refused HERE, naming
+                # both formats. Do NOT let the merge run: the lower layer's keys (`train_csv`) stay in
+                # the group, validation then refuses one of them as unknown, and the message names a
+                # key the user never typed.
+                raise ConfigError(
+                    f"Invalid value for '{field.name}.{TAG}': {field.name}.{TAG}={keys[TAG]} is given over a "
+                    f"{below[TAG]} {field.name} (the file or the config= file), whose keys would stay in "
+                    f"the group; give a {keys[TAG]} {field.name} file, or drop the file and give every "
+                    f"{field.name} key on the command line"
+                )
     return merge(mapping, coerce_mapping(cls, overrides))
 
 

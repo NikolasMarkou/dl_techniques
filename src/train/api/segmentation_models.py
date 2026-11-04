@@ -86,8 +86,9 @@ Interface contract
         ``dropout_rate=0.0``, ``normalization_type="layer_norm"``, ``activation_type="gelu"``,
         ``hidden_dim=min(256, backbone channels)``), so a later change of the head's defaults moves
         neither family (D-012).
-    :raises ValueError: when ``model_args`` names a key the adapter sets (:data:`FIXED_MODEL_ARGS`), the
-        input is no multiple of the stride, or the built output is not the input's size.
+    :raises ValueError: when ``model_args`` names a key the adapter sets (:data:`FIXED_MODEL_ARGS`) or the
+        family does not offer (:data:`NOT_OFFERED_MODEL_ARGS`), the input is no multiple of the stride, or
+        the built output is not the input's size.
     :raises ConfigError: for a stride that is no power of two (see the stride callables).
 
 ``resnet_seg_stride(variant, model_args)`` / ``convnext_seg_stride(variant, model_args)``
@@ -216,12 +217,17 @@ _CONVUNEXT_FIXED = ("use_bias", "final_activation", "output_channels")
 _ACCUNET_FIXED = ("input_channels",)
 
 #: Keys of the backbone factories (``create_resnet``, ``create_convnext_v1``) the backbone adapters set
-#: themselves: the classifier's head and its deep supervision have no place in a segmenter, a ``name``
-#: would clash with the nested model's, and ``pretrained`` (a classifier's weights loaded into the backbone,
-#: which the classes do support) is not offered by these families yet: ``checkpoint=`` loads no layer of a
-#: classification run into them (measured, ``scratch_step2/checkpoint_transfer.json``).
-_BACKBONE_FIXED = ("include_top", "head_config_overrides", "pretrained", "name")
+#: themselves: the classifier's head and its deep supervision have no place in a segmenter, and a ``name``
+#: would clash with the nested model's.
+_BACKBONE_FIXED = ("include_top", "head_config_overrides", "name")
 _RESNET_FIXED = _BACKBONE_FIXED + ("enable_deep_supervision",)
+
+#: Keys of the backbone factories the adapters do NOT set but do not offer either: ``pretrained`` (a
+#: classifier's weights loaded into the backbone, which the classes do support) is not offered by these
+#: families yet, because ``checkpoint=`` loads no layer of a classification run into them (measured,
+#: ``scratch_step2/checkpoint_transfer.json``). The adapter never passes it, so the refusal must not
+#: say the adapter sets it (review-iter-1 concern 5).
+_BACKBONE_NOT_OFFERED = ("pretrained",)
 
 #: The keys of ``model_args`` each family's adapter sets itself.
 FIXED_MODEL_ARGS: Dict[str, Tuple[str, ...]] = {
@@ -231,24 +237,44 @@ FIXED_MODEL_ARGS: Dict[str, Tuple[str, ...]] = {
     "convnext_seg": _BACKBONE_FIXED,
 }
 
+#: The keys of ``model_args`` each family's backbone factory takes and the adapter does not offer.
+NOT_OFFERED_MODEL_ARGS: Dict[str, Tuple[str, ...]] = {
+    "resnet_seg": _BACKBONE_NOT_OFFERED,
+    "convnext_seg": _BACKBONE_NOT_OFFERED,
+}
+
 #: Why each family's adapter keeps those keys; the parenthesis of the refusal.
 _FIXED_WHY: Dict[str, str] = {
     "convunext": "a softmax or biased-off head would break the logits loss",
     "accunet": "the input channels are the data's",
-    "resnet_seg": "the segmentation head replaces the classification head, and these families do not load a classifier's weights",
-    "convnext_seg": "the segmentation head replaces the classification head, and these families do not load a classifier's weights",
+    "resnet_seg": "the segmentation head replaces the classification head",
+    "convnext_seg": "the segmentation head replaces the classification head",
 }
 
 
 def _fixed_clash(family: str, model_args: Mapping[str, Any]) -> str:
-    """Return the sentence for the adapter-set keys ``model_args`` names, ``""`` for none."""
+    """Return the sentence for the keys ``model_args`` names that the adapter sets or does not offer, ``""`` for none.
+
+    Interface contract: ``family`` is a key of :data:`FIXED_MODEL_ARGS`; the result names each refused key
+    once, in its own clause (a key the adapter sets, a key the family does not offer yet), and ends with
+    ``remove it from model_args``. Never raises.
+    """
     clash = [key for key in FIXED_MODEL_ARGS[family] if key in model_args]
-    if not clash:
+    missing = [key for key in NOT_OFFERED_MODEL_ARGS.get(family, ()) if key in model_args]
+    clauses = []
+    if clash:
+        clauses.append(
+            f"{', '.join(map(repr, clash))} is set by the {family!r} adapter from model=, the "
+            f"data and transform_args ({_FIXED_WHY[family]})"
+        )
+    if missing:
+        clauses.append(
+            f"{', '.join(map(repr, missing))} is not offered by the {family!r} family yet "
+            "(it does not load a classifier's weights)"
+        )
+    if not clauses:
         return ""
-    return (
-        f"{', '.join(map(repr, clash))} is set by the {family!r} adapter from model=, the "
-        f"data and transform_args ({_FIXED_WHY[family]}); remove it from model_args"
-    )
+    return "; ".join(clauses) + "; remove it from model_args"
 
 
 def _refuse_fixed(family: str, model_args: Mapping[str, Any]) -> None:

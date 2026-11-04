@@ -544,7 +544,7 @@ per-model scripts (usage, keys, run directory, resume, `predict`, `export`, exit
   run directory is claimed (`TaskTrainer.run`'s docstring lists them).
 - **A group's file and its dotted keys are layers, in ONE place** (D-021 of plan 98b866fb): `cli.layer_command_line` merges
   the `config=` file, a path-form group's file (`data=<file>`, or `data: <file>` in the config file) and the dotted keys
-  (`data.max_samples=100`, which win), and reads dotted keys that state no `format` as the file's. `parse_task_arguments` is
+  (`data.max_samples=100`, which win), and reads dotted keys that state no `format` as the file's (a `data.format=` that differs from the file's is refused naming both, D-025: the file's keys would stay in the group). `parse_task_arguments` is
   the one parser of a task's command line (`run_task` and the README guard both call it). Do NOT read a data file in
   `parse_dotlist`, coerce the dotted keys before the file is read, or let a dotted key replace the file's mapping.
 - **Exit codes**: `DLTrainError` (`ConfigError`, ...) is exit 2, a run with `success` false is 1,

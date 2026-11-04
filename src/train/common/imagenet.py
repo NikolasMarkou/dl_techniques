@@ -125,7 +125,8 @@ def load_imagenet_selection_splits(
         num_parallel_calls: Parallel decode calls (default: autotuned).
         num_classes: When given, the number of class folders under ``train/``
             must equal it.
-        max_images: Smoke-run cap on train and on test; ``select`` is never capped.
+        max_images: Smoke-run cap on the train split only; ``select`` and the official val split
+            (``test``) are never capped (D-022).
         augment_hook: A train augmentation hook run on the [0, 1] image after the crop, flip
             and colour jitter (``dl_techniques.datasets.vision.augment_hook``); needs ``augment``.
 
