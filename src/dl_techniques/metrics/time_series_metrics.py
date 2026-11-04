@@ -1,3 +1,41 @@
+"""
+Time series forecasting evaluation metrics.
+
+In standard regression tasks, metrics like Mean Squared Error (MSE) or Mean
+Absolute Error (MAE) are sufficient. However, evaluating multi-step time series
+forecasting requires specialized metrics due to three fundamental differences:
+
+1.  Scale Independence & Baselines: Time series models often forecast across
+    thousands of distinct series with vastly different magnitudes (e.g.,
+    predicting both single-digit item sales and million-dollar aggregate
+    revenues). Standard MAE/MSE are scale-dependent and cannot be meaningfully
+    averaged across such datasets. Furthermore, a forecast is only useful if it
+    beats a naive baseline (e.g., "tomorrow will equal today"). This module
+    provides scaled metrics (MASE, rMAE) that explicitly require the historical
+    backcast to compute these naive baselines—a requirement that breaks the
+    standard (y_true, y_pred) signature.
+
+2.  Horizon Profiling: Multi-step forecasting predicts a sequence of future
+    steps (from :math:t+1 to :math:t+H). Standard Keras metrics average the
+    error across all dimensions, collapsing the horizon. Because forecasting
+    error naturally degrades over time, an aggregate MAE hides whether a model
+    is excellent at step 1 but terrible at step 12. The :class:PerHorizonError
+    metric explicitly extracts and tracks the error at specific temporal steps,
+    allowing you to profile the degradation curve.
+
+3.  Symmetry: Standard Mean Absolute Percentage Error (MAPE) explodes when
+    targets are near zero and heavily penalizes over-forecasting compared to
+    under-forecasting. :class:SMAPE (Symmetric MAPE) bounds the error in
+    [0, 200] and penalizes both symmetrically.
+
+This module provides both streaming Keras metrics (for tracking during training)
+and comprehensive pool-level NumPy functions (for final evaluation using
+historical data).
+
+References: - Hyndman, R. J., & Koehler, A. B. (2006). Another look at measures
+of forecast accuracy (MASE). International Journal of Forecasting.
+"""
+
 import keras
 from keras import ops
 import numpy as np

@@ -1,4 +1,5 @@
-"""Sampling coverage metrics: ``pass@k`` over a pool of candidate solutions.
+"""
+Sampling coverage metrics: ``pass@k`` over a pool of candidate solutions.
 
 **Why this module exists.** Every method that samples several candidate solutions per
 input and checks them against a verifier has one obvious summary statistic, and it

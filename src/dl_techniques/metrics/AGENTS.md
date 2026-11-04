@@ -1,47 +1,63 @@
 # Metrics Package
 
-Custom Keras metrics for specialized evaluation tasks.
+This directory contains custom Keras metrics and pool-level evaluation functions for specialized deep learning tasks. It covers a wide range of domains including causal language modeling, vision-language contrastive learning, time-series forecasting, topographic capsule networks, and spatial autocorrelation.
 
-## Modules
+## Core Architectural Rules & Conventions
 
-- `capsule_accuracy.py` — Accuracy metric for capsule network outputs
-- `clip_accuracy.py` — CLIP model retrieval accuracy
-- `hrm_metrics.py` — Hierarchical reasoning model metrics
-- `half_precision_top_k.py` — `HalfPrecisionTopKAccuracy`: `keras.metrics.SparseTopKCategoricalAccuracy` whose `update_state` casts the logits to `float32` first, because the stock metric's `in_top_k` op raises on `float16` (`InTopKV2` takes `float32` only) and a `mixed_float16` or `mixed_bfloat16` classifier emits half-precision logits. Use it ONLY for a half-precision model: a float32 model should compile the stock metric, which a plain `load_model` resolves with no registration. The `train.api` image-classification task does exactly that (`train.common.classification_run.classification_metrics(..., half_precision=)`), so a model trained through it reloads by default wherever `dl_techniques` is importable
-- `void_aware_accuracy.py` — `VoidAwareAccuracy(ignore_index, name="accuracy")`: pixel accuracy over the labels that are NOT `ignore_index`, pooled over batches (a pixel count, not a mean of batch means), `0` rather than `NaN` before any valid pixel, `keras.ops` only so it runs under `jit_compile=True` (measured on GPU with stock `SparseCategoricalCrossentropy(ignore_class=)` and `MeanIoU(ignore_class=)`). The stock `SparseCategoricalAccuracy` has no `ignore_class` and scores a void pixel as wrong (0.5 where 2 of 4 pixels are void and the others right). Use it ONLY when the run has a void label; with none, the stock metric is the same number and loads with no registration. What the model emits at a void pixel never enters the value (the test sets it to 1e9). Registered, so a `.keras` model reloads wherever `dl_techniques` is importable
-- `pass_at_k.py` — Sampling **coverage**: `pass_at_k` (unbiased and plug-in estimators), `pass_at_k_curve`, `per_problem_pass_at_k`, `solved_counts`. Plain functions on an `(n_problems, n_samples)` outcome matrix — the shape a verifier-scored sampler produces, not a `keras.metrics.Metric`, because every quantity is a functional of the whole matrix (see Conventions). `> 0` marks a sample solved; threshold partial credit upstream. Consumed by `dl_techniques.optimization.ssp` — do not add a second estimator anywhere else
-- `multi_label_metrics.py` — Multi-label classification metrics (F1, precision, recall per label)
-- `perplexity_metric.py` — Language model perplexity
-- `psnr_metric.py` — Peak Signal-to-Noise Ratio for image quality
-- `keypoint_matching.py` — `KeypointMatchMetric` (`precision` / `recall` / `f1` of LightGlue-style matches vs homography labels; packed labels and `log_assignments` as in `LightGlueLoss`; wire through `compile(metrics={"log_assignments": [...]})`)
-- `time_series_metrics.py` — Time series forecasting metrics (MASE, SMAPE, quantile loss, etc.)
-- `topographic.py` — Topographic-VAE equivariance metrics (Keller & Welling 2022). `equivariance_error` (Eq. 13) and `capcorr_correlation` / `capcorr_per_capsule` (Eq. 15/16), plus `roll_capsules` and `observed_roll`. **Plain NumPy functions, not `keras.metrics.Metric`** — `equivariance_error` compares every timestep pair and `capcorr` cross-correlates a canonical timestep against timestep 0, so both need the whole sequence at once and neither reduces to a streaming `update_state`. Read the module docstring before using `equivariance_error` alone: it is a SMOOTHNESS measure and is low for an INVARIANT representation too, which is exactly why `capcorr` is here beside it
-- `spatial_autocorrelation.py` - Moran's I of a value map (the grid functions take a **2-D `(height, width)` or a 3-D `(depth, height, width)` map** and raise by name for any other rank; `grid_weights_nd` builds the weights for either, with the 2-D results bit-identical to what they were before 3-D support, and `morans_i_grid`, `label_islands`, `islands_morans_i` and `morans_i_summary` read the rank from the array): `morans_i` (general sparse form), `morans_i_grid` (offset-walk, never materialises an `N x N` matrix), `grid_weights` / `mesh_weights` (the mesh path exists because a cortical surface gives each vertex six neighbours, which no rectangular grid can express), `label_islands`, `islands_morans_i` (each island scored on its own mean and its own internal adjacency) and `morans_i_permutation_test`. **Plain NumPy functions, not `keras.metrics.Metric`** - every one needs the whole map. Two rules are load-bearing: take the map **UNTHRESHOLDED** (a patch of zeros is a patch of agreement, so thresholding first manufactures the clustering the statistic measures), and use **queen** contiguity, which is the same l-infinity neighbourhood the spatial loss trains with. Chance is `-1/(N-1)`, not zero. `islands_morans_i` is reported *alongside* the standard value and is **not** a strict improvement: on a small island it is high-variance and sometimes negative (Anselin's queen-contiguity instability)
-- `topographic_selectivity.py` - the post-hoc measurement chain (**2-D or 3-D maps** for the grid steps `label_islands` and `grow_clusters`, which read the rank from the array and raise by name for any other rank; `contrast_tmap` and `fdr_*` act on per-unit arrays): `contrast_tmap` (two-sample t per unit; a unit constant in both conditions is reported `t = 0, p = 1` rather than SciPy's `nan`), `fdr_bh` (delegates to SciPy - do not add a second transcription of the step-up rule), `fdr_across_layers` (**one** correction over every tap, then split back; correcting each tap separately admits ~470 false positives per 784-unit layer), `grow_clusters` (most-selective-cell-first; provably the connected components of the same-sign significant cells when `max_size=None`, pinned against `label_islands`), `cluster_response` and `profile_consistency`. **Plain NumPy functions** - see Conventions below
-- `depth_metrics.py` — Monocular depth estimation metrics (AbsRel, SqRel, RMSE, RMSE log, delta threshold)
-- `generation_metrics.py` — Candidate-vs-reference text-generation metrics: `corpus_bleu` / `sentence_bleu` / `bleu`, `rouge_n` / `corpus_rouge_n`, `rouge_l` / `corpus_rouge_l`, `rouge_lsum`, `chrf` (plain and `++`), `meteor`, `cider` (plain and `-D`), and `generation_report` for all of them at once. **Plain functions on lists of strings, not `keras.metrics.Metric`** — see Conventions below. Owns the tokenizer (`whitespace_tokenize`) and the n-gram extractor (`ngrams`) that `llm_metrics` imports. **`llm_metrics.self_bleu` is a DIVERSITY diagnostic, not corpus BLEU** — it scores probe outputs against *each other* and has no brevity penalty or smoothing; do not substitute one for the other. **These are not SacreBLEU numbers**: only smoothing is pinned, the tokenizer is whitespace, and no signature string is produced, so a value from here is not comparable to a published WMT figure. **The default METEOR is exact-match** (no Porter stemmer, no WordNet — NLTK is not a dependency) and scores lower than a stemmed METEOR; pass `match_fn`. Six rules are load-bearing, and each is pinned by a measured test rather than left to be inferred: **(1)** **a BLEU candidate shorter than `max_order` tokens scores 0.0** — a missing order, not a zero precision, and no smoothing rescues it except `add_k`, which inflates a **missing** order to exactly 1.0 while a present-but-unmatched order only reaches `k/(total+k)`; so `generation_report(['a b c'], ['a b c'])` gives BLEU 0.0 and chrF 1.0 on a perfect match. **(2)** **BLEU pools corpus statistics and is not the mean of sentence BLEU** (measured gap 0.251). **(3)** **chrF averages only over orders the candidate actually has**, which is why the same short match scores 1.0 there. **(4)** **ROUGE-1/2/L are single-reference and take the FIRST reference only**; the other five use every reference, under four different rules — BLEU max-pools per n-gram, chrF takes the best reference per segment (on the **joint** char+word score for chrF++, so `word_order` can change which reference wins), CIDEr averages, METEOR takes the best. Do not unify them. **(5)** **Four metrics pool and METEOR does not**: METEOR's penalty is per sentence, so `generation_report` returns the MEAN of its per-sentence scores. **(6)** **ROUGE-Lsum is sentence-order-insensitive** while `rouge_l` is not (`"a . b ."` vs `"b . a ."`: 1.0 vs 0.5), so a report saying "ROUGE-L" without saying which is unreproducible. ROUGE-Lsum's union is over **reference** positions under a **global per-token hit budget**; without that budget it returns F-measures above 1.0 (measured: 9.8% of random multi-sentence cases, up to 1.333 on a two-token reference), and because the union is over positions rather than lengths the LCS **tie-break** is load-bearing too. Also: **a perfect METEOR is not 1.0** (`1 - 0.5/n**3`, so 0.9815 at n=3 and **0.5** at n=1), - `rouge_lsum` additionally uses a **global per-token hit budget** absent from any description of ROUGE-Lsum in the literature. Removing it lets the hit count exceed the reference token count and the F-measure exceed 1.0. It is a transcription of `rouge_score`, not a design choice — do not "simplify" it away.
-- **CIDEr is 0.0 whenever IDF has no contrast** — on a one-example corpus (weight `log(1/1) = 0`), or on any corpus whose every n-gram is shared by every example (universal n-grams weight exactly 0). There is deliberately no runtime `df <= N` check: the counting loop runs exactly `N` times, so the bound is structural, not an input property
-- `embedding_quality.py` — Pool-level text-embedding metrics: ranking (`rank_of_ground_truth`, `recall_at_k`, `mrr_at_k`, `ndcg_at_k`) and geometry (`anisotropy`, `effective_rank`, `alignment`, `uniformity`, `embedding_norm_stats`). **Plain functions, not `keras.metrics.Metric`** — see Conventions below.
-- `brier_score.py` — Brier Score (proper scoring rule for probabilistic predictions): `BrierScore` for binary / multi-label classification, `CategoricalBrierScore` for multi-class (with sparse-label fast path for segmentation). See `research/brier_score.md` for background.
+Before modifying or adding to this package, agents must adhere to the following strict architectural rules:
 
-## Conventions
+1.  **Streaming vs. Pool-Level Metrics:**
+    *   **Streaming Metrics:** Inherit from `keras.metrics.Metric`. They must implement `update_state()`, `result()`, `reset_state()`, and `get_config()`. They are used for quantities that can be accumulated batch-by-batch.
+    *   **Pool-Level Metrics:** Plain Python/NumPy functions. If a metric requires an SVD, ranking against a whole candidate pool, or cross-correlating entire sequences (e.g., `embedding_quality.py`, `pass_at_k.py`, `generation_metrics.py`, `topographic.py`), it must be a plain function. Do not attempt to force these into a `keras.metrics.Metric` subclass using unbounded state accumulation.
 
-- `__init__.py` is empty — import from submodules directly
-- **Streaming** metrics inherit from `keras.metrics.Metric` and must implement
-  `update_state()`, `result()`, `reset_state()`, and `get_config()`
-- **Pool-level** metrics are plain functions on numpy arrays. Some quantities
-  cannot be expressed as a streaming `update_state` at all: an SVD, a mean over
-  every pair, a ranking against a whole candidate pool all need the complete
-  matrix at once. `embedding_quality.py` is the worked example; the package has
-  always also carried plain functions for this reason (`llm_metrics.self_bleu`,
-  `llm_metrics.distinct_n`, `perplexity_metric.perplexity`,
-  `time_series_metrics.calculate_comprehensive_metrics`). `generation_metrics.py`
-  is the same case in a third shape — its inputs are *lists of strings* rather
-  than arrays, because three of its five metrics are functionals of a whole
-  corpus: CIDEr's IDF weights need every reference, METEOR's penalty applies
-  per sentence before averaging, and BLEU's brevity penalty needs the corpus
-  length ratio rather than a per-batch mean
+2.  **Keras 3 Graph-Mode Compliance:**
+    *   Always use `keras.ops` for tensor operations in `keras.metrics.Metric` subclasses to ensure backend agnosticism (JAX, TensorFlow, PyTorch).
+    *   **Shape Ranks:** To get the rank of a tensor in Keras 3, use `len(tensor.shape)`, never `len(keras.ops.shape(tensor))`. The latter returns a symbolic tensor in graph mode (JAX/TF), which raises a `TypeError` when passed to Python's `len()`.
+    *   Ensure all denominators use `keras.config.epsilon()` or explicit `ops.maximum` clipping to avoid `NaN` results. Use `ops.divide_no_nan` where appropriate.
 
-## Testing
+3.  **Serialization:**
+    *   All Keras metrics must be decorated with `@register_dl_technique("dl_techniques.metrics.[module_name]")`.
+    *   All constructor arguments must be saved as instance attributes before calling `super().__init__()` and exposed in `get_config()`.
 
-Tests in `tests/test_metrics/`.
+## Module Manifest
+
+### Natural Language & Generation
+*   `llm_metrics.py`: Compile-time CLM metrics (`BitsPerToken`, `BitsPerCharacter`). Accumulators use `float32` for AMP safety. Also provides pure-Python, NLTK-free probe helpers (`self_bleu`, `distinct_n`). Note: `self_bleu` measures diversity, not quality.
+*   `perplexity_metric.py`: Language model perplexity (`Perplexity`), defined as `exp(cross_entropy)`. Includes both a stateful Keras metric and a functional interface. Supports padding omission via `ignore_class`.
+*   `generation_metrics.py`: Corpus-level NLP metrics (`bleu`, `rouge`, `chrf`, `meteor`, `cider`). Plain functions, not Keras metrics. 
+    *   *Hard Rules:* Do not introduce NLTK or SacreBLEU dependencies. ROUGE-Lsum uses a global per-token hit budget to prevent F1 > 1.0. A BLEU candidate shorter than `max_order` scores 0.0 (except with `add_k` smoothing). METEOR is exact-match only unless `match_fn` is provided.
+
+### Vision, Retrieval & Multimodal
+*   `clip_accuracy.py`: Contrastive learning metrics (`CLIPAccuracy`, `CLIPRecallAtK`). `update_state` expects `y_pred` to be a dictionary containing `logits_per_image` and `logits_per_text`. Supports directional tracking (`i2t` vs `t2i`).
+*   `depth_metrics.py`: Monocular depth evaluation (`AbsRelMetric`, `DeltaThresholdMetric`, `SqRelMetric`, `RMSEMetric`, `RMSELogMetric`). Expects `y_true` to be a concatenated `[depth, mask]` tensor. Includes a closed-form `align_scale_and_shift` helper.
+*   `keypoint_matching.py`: `KeypointMatchMetric` for LightGlue-style matchers. Computes precision/recall/F1 from log assignments. Excludes ignored/padded keypoints (label `-2`).
+*   `psnr_metric.py`: Peak Signal-to-Noise Ratio. Designed for deep supervision; automatically slices `y_pred[0]` if the model returns a list of outputs.
+*   `ssim_metric.py`: Structural Similarity Index. Currently relies on `tf.image.ssim` and strictly requires the TensorFlow backend.
+
+### Topographic & Spatial
+*   `topographic.py`: Equivariance metrics for Topographic-VAEs. Plain NumPy functions. `equivariance_error` measures smoothness (low for invariant models too). `capcorr_correlation` measures actual correspondence via periodic cross-correlation.
+*   `spatial_autocorrelation.py`: Moran's I computations. Supports 2-D `(H, W)` and 3-D `(D, H, W)` maps. 
+    *   *Hard Rules:* Takes unthresholded maps only. Uses Queen contiguity (l-infinity neighbourhood) exclusively to match spatial loss objectives. Does not construct `N x N` dense matrices.
+*   `topographic_selectivity.py`: Post-hoc measurement chain for spatial models. Includes 2-sample t-maps and Benjamini-Hochberg FDR correction. Correction is applied jointly across all layers, never per-layer, to prevent massive false positive inflation.
+
+### Probabilistic, Classification & Sampling
+*   `brier_score.py`: Proper scoring rules for probability calibration. `BrierScore` (binary/multi-label) and `CategoricalBrierScore` (multi-class). Includes a highly optimized sparse path for segmentation masks using the identity `||p||^2 - 2 p_c + 1`.
+*   `probabilistic_forecast_metrics.py`: Metrics for quantile forecasts (`CoverageMetric`, `SharpnessMetric`). Extracts lower and upper bounds via `low_index` and `high_index` slices on the final tensor axis.
+*   `pass_at_k.py`: Coverage metrics for verifier-scored sampling (`pass_at_k`, `pass_at_k_curve`). 
+    *   *Hard Rule:* The unbiased estimator strictly uses `scipy.special.gammaln`. Do not replace this with integer binomials (`math.comb`), which will overflow `float64` for standard evaluation budgets.
+*   `multi_label_metrics.py`: `MultiLabelMetrics`. Computes precision, recall, and F1 across independent binary classes. Supports background exclusion.
+*   `void_aware_accuracy.py`: Pixel accuracy (`VoidAwareAccuracy`). Explicitly excludes `ignore_index` from the denominator. Standard Keras `SparseCategoricalAccuracy` fails here by scoring void pixels as incorrect.
+
+### Embeddings & Time Series
+*   `embedding_quality.py`: Pool-level text-embedding metrics. Contains Ranking metrics (`ndcg_at_k`, `mrr_at_k`) and Geometry diagnostics (`anisotropy`, `uniformity`, `effective_rank`). 
+    *   *Hard Rule:* Tie-breaking in `rank_of_ground_truth` must be pessimistic to correctly penalize collapsed encoders.
+*   `time_series_metrics.py`: Forecasting metrics. Includes `SMAPE` (symmetric bounding 0-200) and `PerHorizonError` for tracking scalar metrics at specific forecast steps `h`.
+
+### Specialized Utility Metrics
+*   `capsule_accuracy.py`: Evaluates accuracy based on capsule vector L2 lengths rather than softmax probabilities.
+*   `half_precision_top_k.py`: `HalfPrecisionTopKAccuracy`. Casts logits to `float32` before computing top-k. Bypasses a Keras bug where `InTopKV2` operations crash on `float16`/`bfloat16` inputs.
+*   `primary_output_metrics.py`: `PrimaryOutputAccuracy`, `PrimaryOutputTopKAccuracy`. Silently routes only the primary (index 0) output of a multi-output model to the accuracy calculation.
+*   `hrm_metrics.py`: Custom metrics aggregator (`HRMMetrics`) for Hierarchical Reasoning Models. Not a `keras.metrics.Metric` subclass; meant for explicit `update_state()` calls inside custom `train_step` blocks.
+
+## Testing Context
+Unit tests for this module reside in `tests/test_metrics/`. When modifying pool-level metrics, ensure deterministic edge cases (e.g., all-zero matrices, fully collapsed vectors) are explicitly tested against numerical `NaN` / `Inf` outputs.

@@ -622,3 +622,5 @@ def embedding_norm_stats(embeddings: np.ndarray) -> Dict[str, float]:
         "n_zero_norm": float(np.sum(norms == 0.0)),
         "cos_to_centroid_mean": cos_to_centroid,
     }
+
+# ---------------------------------------------------------------------

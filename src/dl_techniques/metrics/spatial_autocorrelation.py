@@ -1,4 +1,5 @@
-"""Spatial autocorrelation of a map laid out on a 2-D or 3-D grid or a cortical mesh.
+"""
+Spatial autocorrelation of a map laid out on a 2-D or 3-D grid or a cortical mesh.
 
 What this measures
 ------------------
