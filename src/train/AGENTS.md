@@ -421,6 +421,12 @@ train, and the TEST split never selects.
   scores each void pixel as wrong). The loss of a run is a mean of per-batch valid-pixel means weighted by images, so `val_loss` is not
   the pooled cross-entropy once the void share differs between batches; `accuracy` and `miou` pool pixels. `SegMetricArgs` has
   `watch_metric` (`val_miou`, a maximum), `watch_mode` and `success_threshold` (null: the task's majority-class baseline); no `top_k`.
+  `segmentation_run.segmentation_loss(name, ignore_index, **knobs)` builds the loss `SegLossArgs` (`loss_args`: `name` `ce`, `dice`,
+  `ce_dice` or `focal`; `dice_smooth`, `focal_gamma`) names (D-014): `ce` is the stock loss, the other three are
+  `dl_techniques.losses.sparse_segmentation_loss` (one value per image, void left out of value and gradient), and
+  the `LOSS_KNOBS` table of `api/segmentation_args.py` says which loss reads which knob (a test holds it equal to the builders); a knob the loss does not
+  read is refused by key. For a loss other than `ce` `initial_loss_check` returns a null verdict and `TaskTrainer.unjudged_note`
+  names the loss in the summary notes.
   Oxford-IIIT Pet is read through `load_oxford_pet_arrays`, the one TFDS seam, byte-equal to `train.convunext.common.load_oxford_pet`,
   at the ONE version `PET_TFDS_VERSION` (4.0.0) that the pre-claim check also looks for.
 - **The `image_segmentation` task** (D-077): `api/tasks/image_segmentation.py` supplies the hooks and nothing else, so the

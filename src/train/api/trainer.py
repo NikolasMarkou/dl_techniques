@@ -242,6 +242,10 @@ Hooks (override in a task)
 ``task_notes(config, baseline, ratio, data)``
     The plain-language lines of ``results_summary.json``'s ``notes`` that belong to the task, in
     order; the trainer appends the resume and smoke lines after them. Default: none.
+``unjudged_note(config)``
+    The line of ``notes`` that says why ``init_scale_warning`` is null, appended only when it is.
+    Default: the BatchNorm sentence (statistics still unset, D-045); a task whose
+    ``initial_loss_check`` withholds the verdict for another reason overrides it.
 ``files_to_scan(data)``
     The files ``fit`` and the first evaluation read, so a decode failure can name the culprit
     (``None`` or empty: nothing to scan, and the original error propagates). Default: ``None``.
@@ -686,6 +690,24 @@ class TaskTrainer:
         """Return the task's lines of the summary's ``notes``, in order; default: none."""
         return []
 
+    def unjudged_note(self, config: StrictConfig) -> str:
+        """Return the note that says why ``init_scale_warning`` is null; default: unset BatchNorm statistics.
+
+        A task whose ``initial_loss_check`` withholds the verdict for another reason (a loss that
+        ``ln(C)`` does not describe) overrides this to say so, so the note is never false.
+        """
+        return (
+            "`init_scale_warning` is null (not judged): the model has BatchNorm layers whose "
+            "moving statistics were still at mean 0 and variance 1 for the epoch-0 "
+            "evaluation, which ran in inference mode and so normalized nothing; "
+            "`initial_loss_ratio` is that evaluation's loss over ln(C), kept as the "
+            "baseline, and it is not the loss of the first training step (which uses batch "
+            "statistics). No training-mode pass was run to measure it: it would move the "
+            "moving statistics and the random generators. The verdict is withheld for every "
+            "such model, so a really mis-scaled BatchNorm model is NOT caught here: only its "
+            "first epochs show it"
+        )
+
     def files_to_scan(self, data: Any) -> Optional[Sequence[str]]:
         """Return the files the pipelines read, to name a corrupt one; default ``None``."""
         return None
@@ -1034,17 +1056,7 @@ class TaskTrainer:
         """Return the summary's ``notes``: the task's, then the lines of the sequence itself."""
         notes = list(self.task_notes(config, baseline, ratio, data))
         if init_warning is None:
-            notes.append(
-                "`init_scale_warning` is null (not judged): the model has BatchNorm layers whose "
-                "moving statistics were still at mean 0 and variance 1 for the epoch-0 "
-                "evaluation, which ran in inference mode and so normalized nothing; "
-                "`initial_loss_ratio` is that evaluation's loss over ln(C), kept as the "
-                "baseline, and it is not the loss of the first training step (which uses batch "
-                "statistics). No training-mode pass was run to measure it: it would move the "
-                "moving statistics and the random generators. The verdict is withheld for every "
-                "such model, so a really mis-scaled BatchNorm model is NOT caught here: only its "
-                "first epochs show it"
-            )
+            notes.append(self.unjudged_note(config))
         complete = None if resume is None else resume_decisions.training_complete_reason(resume, config)
         if complete is not None:
             notes.append(

@@ -65,7 +65,8 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
 * **Recipes** are the legacy trainers' defaults (`train.convunext`, `train.accunet`): AdamW, 30 epochs, batch 16, a
   horizontal flip; ConvUNext lr 1e-3, AccUNet lr 1e-4 with 2 warmup epochs. Three values differ on purpose. The monitor is
   `val_miou`, a maximum; both legacy trainers default to `val_loss`. AccUNet trains the cross-entropy, where its
-  legacy trainer trains `combo`, which this task offers later; the run log says so. And **AccUNet's batch is 8**: batch
+  legacy trainer trains `combo` (0.5 dice + 0.5 cross-entropy, one-hot targets, no void label); `loss_args.name=ce_dice` is
+  the same two terms at weight 1 each, per image, with void left out, and the run log says so. And **AccUNet's batch is 8**: batch
   16 runs out of memory at the first step on a 24 GB card (RTX 4090 with 17.4 GB free) in the legacy trainer and in this
   task alike, batch 8 peaks at 7.6 GB (20 steps, no allocator collection; `tests/test_train/test_api/accunet_memory_evidence.json`).
   The learning rate stays 1e-4, not scaled for the batch: the legacy trainer has no batch rule, and the batch-8
@@ -107,6 +108,20 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   `segmentation_head` against `stem`, `stage1_block1` ..., "No overlapping layers"); the classes' own `pretrained=<path>`
   does load the backbone (9 layers for `resnet18`, 25 for `convnext_v1/tiny`), which these families refuse as a model
   argument for now.
+* **Losses** (`loss_args.name`, plan 98b866fb step 3, D-014): `ce` (the default, Keras' sparse cross-entropy on logits with
+  the void value left out), `dice`, `ce_dice` and `focal` (`dl_techniques.losses.sparse_segmentation_loss`, logits and sparse
+  targets, a void pixel changes neither value nor gradient). `dice` is the soft Dice of MONAI's `DiceLoss` at its defaults
+  and of nnU-Net: per image, per class, the mean over ALL classes (background included), a linear denominator and
+  `loss_args.dice_smooth` (default 1e-5, must be positive) in numerator and denominator. `focal` is Lin et al.'s focal loss
+  (arXiv 1708.02002, eq. 4) in its softmax form, `-(1 - p_t)^gamma log p_t`, `loss_args.focal_gamma` default 2 (0 is the
+  cross-entropy); there is no `alpha`, which balances the two classes of a sigmoid problem and would only rescale a softmax
+  pixel. `ce_dice` is the per-image cross-entropy plus `dice`, weights 1 and 1 (nnU-Net's `DC_and_CE_loss`). **One value per
+  image**: the three new losses average the valid pixels of each image and Keras averages the images, while `ce` is Keras'
+  mean over the BATCH's valid pixels, so with void they weight images against pixels and their values are not comparable
+  to `ce`'s (no void: equal). A knob the chosen loss does not read (`dice_smooth` for `focal`, `focal_gamma` for `dice`,
+  either for `ce`) exits 2 naming the key. For any loss but `ce` the summary's `init_scale_warning` is `null` and a note
+  names the loss: ln(C) is the cross-entropy of a uniform prediction and describes no other loss. The AccUNet recipe stays
+  `ce`; to train what its legacy trainer calls `combo` use `loss_args.name=ce_dice`.
 * **What `val_loss` is**: Keras averages the cross-entropy of a batch over its valid pixels and then averages the
   batches weighted by images, so `loss` and `val_loss` are NOT the cross-entropy pooled over every valid pixel; with a void
   label the two differ whenever the void share differs between batches. `accuracy` and `miou` ARE pooled over every valid

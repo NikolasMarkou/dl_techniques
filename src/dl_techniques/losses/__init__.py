@@ -180,6 +180,13 @@ from .segmentation_wrapper_loss import (
     create_segmentation_wrapper_loss,
 )
 
+# from .sparse_segmentation_loss -- logits + sparse targets with a void label
+from .sparse_segmentation_loss import (
+    SparseDiceLoss,
+    SparseCeDiceLoss,
+    SparseFocalLoss,
+)
+
 # from .sam_mask_loss -- SAM-specific adapters over SegmentationWrapperLoss
 from .sam_mask_loss import (
     SAMMaskLoss,
@@ -403,6 +410,10 @@ __all__ = [
     # segmentation_wrapper_loss
     "SegmentationWrapperLoss",
     "create_segmentation_wrapper_loss",
+    # sparse_segmentation_loss
+    "SparseDiceLoss",
+    "SparseCeDiceLoss",
+    "SparseFocalLoss",
     # sam_mask_loss
     "SAMMaskLoss",
     "SAMIoULoss",

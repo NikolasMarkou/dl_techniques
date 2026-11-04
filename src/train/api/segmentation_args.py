@@ -1,4 +1,4 @@
-"""The segmentation arguments of ``python -m train``: data configs, the transform group and the metric group.
+"""The segmentation arguments of ``python -m train``: data configs, the transform, metric and loss groups.
 
 ``BuiltinSegData`` names Oxford-IIIT Pet from the local TFDS cache; ``FolderSegData`` (two
 directories, images and masks, joined by file stem) and ``CsvSegData`` (a CSV file with an
@@ -44,6 +44,15 @@ Interface contract
     success; ``null``, the default, is the mIoU of predicting the majority class on the selection
     set, which the task works out once the data is loaded). There is no ``top_k``: a segmentation
     run reports ``accuracy`` and ``miou`` only.
+
+``SegLossArgs``
+    ``name`` (``ce`` the default, ``dice``, ``ce_dice`` or ``focal``; the losses of
+    :mod:`dl_techniques.losses.sparse_segmentation_loss`, which take logits and sparse targets, leave the
+    void value out of the value and of the gradient, and score ONE value per image; ``ce`` is Keras'
+    own, pooled over the batch's valid pixels), ``dice_smooth`` (read by ``dice`` and ``ce_dice``;
+    positive; ``null`` is 1e-5) and ``focal_gamma`` (read by ``focal``; at least 0; ``null`` is 2.0).
+    :data:`LOSS_KNOBS` says which loss reads which knob. A knob the chosen loss does not read is
+    REFUSED by its dotted key, never ignored.
 
 ``load_seg_data_config(data)``
     :param data: a config (returned as is), a mapping, or the path of a YAML file holding one. A
@@ -486,6 +495,69 @@ class SegMetricArgs(StrictConfig):
         if _is_auto(self.watch_mode) and not _is_auto(metric):
             found["watch_mode"] = resolve_monitor_mode(metric)
         return _with_values(self, "metric_args", found)
+
+
+#: The segmentation losses and, for each, the ``loss_args`` knobs it reads. The keys are the values of
+#: ``loss_args.name``; ``train.common.segmentation_run`` builds the same four (a test holds the two equal).
+LOSS_KNOBS: Dict[str, Tuple[str, ...]] = {
+    "ce": (),
+    "dice": ("dice_smooth",),
+    "ce_dice": ("dice_smooth",),
+    "focal": ("focal_gamma",),
+}
+
+_SegLossName = Literal[tuple(LOSS_KNOBS)]  # type: ignore[valid-type]
+
+
+@dataclasses.dataclass(frozen=True)
+class SegLossArgs(StrictConfig):
+    """The loss of a segmentation run and the knobs it reads; see the module contract."""
+
+    name: _SegLossName = dataclasses.field(
+        default="ce",
+        metadata={
+            "help": "the loss: ce (Keras' sparse cross-entropy, void left out, pooled over the batch's "
+            "valid pixels), dice, ce_dice (cross-entropy plus dice) or focal; the last three score one "
+            "value per image and leave void out of the value and the gradient"
+        },
+    )
+    dice_smooth: Optional[float] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "smoothing of the dice term, in its numerator and denominator; read by dice and "
+            "ce_dice only; positive; null is 1e-5"
+        },
+    )
+    focal_gamma: Optional[float] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "focusing parameter of the focal loss (0 is the cross-entropy); read by focal "
+            "only; at least 0; null is 2.0"
+        },
+    )
+
+    def problems(self, prefix: str) -> List[str]:
+        """Name a knob out of range, and a knob the chosen loss does not read."""
+        lines: List[str] = []
+        if self.dice_smooth is not None and not self.dice_smooth > 0:
+            lines.append(
+                f"Invalid value for {join_path(prefix, 'dice_smooth')!r}: expected a positive number "
+                f"(it keeps an image with no valid pixel at loss 0), got {self.dice_smooth!r}"
+            )
+        if self.focal_gamma is not None and not self.focal_gamma >= 0:
+            lines.append(
+                f"Invalid value for {join_path(prefix, 'focal_gamma')!r}: expected a number of at "
+                f"least 0, got {self.focal_gamma!r}"
+            )
+        for knob in ("dice_smooth", "focal_gamma"):
+            if getattr(self, knob) is not None and knob not in LOSS_KNOBS[self.name]:
+                readers = [name for name, knobs in LOSS_KNOBS.items() if knob in knobs]
+                lines.append(
+                    f"Invalid value for {join_path(prefix, knob)!r}: the {self.name!r} loss does not "
+                    f"read it ({' and '.join(readers)} do); leave it null or set "
+                    f"{join_path(prefix, 'name')}={readers[0]}"
+                )
+        return lines
 
 
 # ---------------------------------------------------------------------

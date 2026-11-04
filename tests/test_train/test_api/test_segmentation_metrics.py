@@ -61,7 +61,7 @@ def hand_values(logits, labels):
 
 def identity_model(ignore_index=VOID, jit_compile=False, classes=2):
     model = keras.Sequential([keras.layers.Input((2, 2, classes)), keras.layers.Identity()])
-    model.compile(loss=run.segmentation_loss(ignore_index), metrics=run.segmentation_metrics(classes, ignore_index),
+    model.compile(loss=run.segmentation_loss("ce", ignore_index), metrics=run.segmentation_metrics(classes, ignore_index),
                   jit_compile=jit_compile)
     return model
 
@@ -75,7 +75,7 @@ def evaluate(model, logits=LOGITS, labels=LABELS, batch_size=2):
 # ---------------------------------------------------------------------
 
 def test_the_builders_return_stock_keras_and_one_custom_accuracy_only_with_a_void_label():
-    loss = run.segmentation_loss(VOID)
+    loss = run.segmentation_loss("ce", VOID)
     assert isinstance(loss, keras.losses.SparseCategoricalCrossentropy)
     assert loss.get_config()["from_logits"] is True and loss.get_config()["ignore_class"] == VOID
     accuracy, miou = run.segmentation_metrics(3, VOID)
@@ -83,7 +83,7 @@ def test_the_builders_return_stock_keras_and_one_custom_accuracy_only_with_a_voi
     assert type(miou) is keras.metrics.MeanIoU and miou.name == "miou"
     assert miou.get_config()["ignore_class"] == VOID and miou.get_config()["sparse_y_true"] is True
     assert miou.get_config()["sparse_y_pred"] is False and miou.get_config()["num_classes"] == 3
-    plain_loss = run.segmentation_loss(None)
+    plain_loss = run.segmentation_loss("ce", None)
     plain_accuracy, plain_miou = run.segmentation_metrics(3, None)
     assert plain_loss.get_config()["ignore_class"] is None
     assert type(plain_accuracy) is keras.metrics.SparseCategoricalAccuracy and plain_accuracy.name == "accuracy"
@@ -113,7 +113,7 @@ def test_the_compiled_loss_and_metrics_equal_the_hand_counts_through_evaluate():
 
 
 def test_the_loss_object_alone_equals_the_hand_count():
-    assert float(run.segmentation_loss(VOID)(LABELS, LOGITS)) == pytest.approx(CE, abs=1e-5)
+    assert float(run.segmentation_loss("ce", VOID)(LABELS, LOGITS)) == pytest.approx(CE, abs=1e-5)
 
 
 def test_without_a_void_label_the_stock_pieces_are_the_same_numbers():
@@ -171,7 +171,7 @@ def test_the_gradient_at_a_void_pixel_is_zero_and_at_a_valid_pixel_is_not():
         logits_np[VOID_AT] *= scale
         logits = tf.Variable(logits_np)
         with tf.GradientTape() as tape:
-            loss = run.segmentation_loss(VOID)(LABELS, logits)
+            loss = run.segmentation_loss("ce", VOID)(LABELS, logits)
         gradient = tape.gradient(loss, logits).numpy()
         assert np.all(gradient[VOID_AT] == 0.0)
         assert np.all(np.abs(gradient[~VOID_AT]).sum(-1) > 0.0)
@@ -179,7 +179,7 @@ def test_the_gradient_at_a_void_pixel_is_zero_and_at_a_valid_pixel_is_not():
 
 def test_a_fully_void_batch_is_finite_and_does_not_poison_the_next_batch():
     everything = np.full(LABELS.shape, VOID, "int32")
-    assert float(run.segmentation_loss(VOID)(everything, LOGITS)) == 0.0
+    assert float(run.segmentation_loss("ce", VOID)(everything, LOGITS)) == 0.0
     accuracy, miou = run.segmentation_metrics(2, VOID)
     for metric in (accuracy, miou):
         metric.update_state(everything, LOGITS)
@@ -228,7 +228,7 @@ def void_data(n=16, classes=3):
 
 
 def compiled(model, jit_compile=False):
-    model.compile(optimizer=keras.optimizers.AdamW(1e-2), loss=run.segmentation_loss(VOID),
+    model.compile(optimizer=keras.optimizers.AdamW(1e-2), loss=run.segmentation_loss("ce", VOID),
                   metrics=run.segmentation_metrics(3, VOID), jit_compile=jit_compile)
     return model
 

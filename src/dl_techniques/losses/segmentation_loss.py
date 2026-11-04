@@ -246,9 +246,9 @@ class SegmentationLosses:
         negative class term -(1-alpha) * p^gamma * log(1-p).
 
         This version is kept for SAM 1 compatibility (SAMMaskLoss uses it).
-        For the mathematically correct two-sided version, use
-        ``segmentation_metrics.focal_scalar`` or the AnyLoss framework's
-        ``FocalTverskyLoss`` / custom focal wrappers.
+        For Lin et al.'s multi-class focal loss with no ``alpha`` (``gamma = 0`` is
+        the cross-entropy) use ``segmentation_metrics.focal_per_sample`` or the
+        sparse-target ``SparseFocalLoss``.
 
         Args:
             y_true: Ground truth labels (batch_size, height, width, num_classes)

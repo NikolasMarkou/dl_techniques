@@ -12,12 +12,23 @@ Interface contract
     columns) whatever the ignore index is, so ``val_miou`` is the monitor in both cases. Known
     without building a metric, which a task's ``metric_names`` hook needs before the GPU exists.
 
-``segmentation_loss(ignore_index)``
+``segmentation_loss(name, ignore_index, **knobs)``
+    :param name: ``ce``, ``dice``, ``ce_dice`` or ``focal`` (``train.api.segmentation_args.LOSS_KNOBS``
+        has the same four keys; a test holds them equal).
     :param ignore_index: the void label value, or ``None``.
-    :return: ``SparseCategoricalCrossentropy(from_logits=True, ignore_class=ignore_index)``. The model
-        emits LOGITS ``(B, H, W, C)`` (a softmax head would be softmaxed twice) and the targets are
-        sparse ``(B, H, W)`` ids. A void pixel contributes nothing to the value or the gradient;
-        the value of a batch is the mean over its valid pixels, and a batch with none is ``0``.
+    :param knobs: ``dice_smooth`` (read by ``dice`` and ``ce_dice``; default 1e-5) or ``focal_gamma`` (read
+        by ``focal``; default 2.0). Pass only the ones given: which loss reads which is
+        ``train.api.segmentation_args.LOSS_KNOBS``, the config refuses the rest by name.
+    :return: for ``ce``, ``SparseCategoricalCrossentropy(from_logits=True, ignore_class=ignore_index)``;
+        for the others a :mod:`~dl_techniques.losses.sparse_segmentation_loss` loss (``SparseDiceLoss``,
+        ``SparseCeDiceLoss``, ``SparseFocalLoss``). The model emits LOGITS ``(B, H, W, C)`` (a softmax
+        head would be softmaxed twice) and the targets are sparse ``(B, H, W)`` ids. A void pixel
+        contributes nothing to the value or the gradient. The value of a ``ce`` batch is the mean over
+        ITS valid pixels (a batch with none is ``0``); the others are one value per IMAGE, averaged by
+        Keras (an image with none is ``0``).
+    :raises ValueError: for an unknown ``name``.
+    :raises TypeError: for a knob the named loss does not take (Python's own refusal: the task config
+        refuses these first, with the dotted key).
 
 ``segmentation_metrics(num_classes, ignore_index)``
     :param num_classes: classes (void is not one).
@@ -80,9 +91,39 @@ SEGMENTATION_METRIC_NAMES = ("accuracy", "miou")
 TIE_ULPS = 16
 
 
-def segmentation_loss(ignore_index: Optional[int]) -> keras.losses.Loss:
-    """The cross-entropy of logits against sparse targets, void left out; see the module contract."""
+def _ce_loss(ignore_index: Optional[int]) -> keras.losses.Loss:
     return keras.losses.SparseCategoricalCrossentropy(from_logits=True, ignore_class=ignore_index)
+
+
+def _dice_loss(ignore_index: Optional[int], dice_smooth: Optional[float] = None) -> keras.losses.Loss:
+    from dl_techniques.losses.sparse_segmentation_loss import DEFAULT_DICE_SMOOTH, SparseDiceLoss
+
+    return SparseDiceLoss(
+        ignore_index=ignore_index, smooth=DEFAULT_DICE_SMOOTH if dice_smooth is None else dice_smooth)
+
+
+def _ce_dice_loss(ignore_index: Optional[int], dice_smooth: Optional[float] = None) -> keras.losses.Loss:
+    from dl_techniques.losses.sparse_segmentation_loss import DEFAULT_DICE_SMOOTH, SparseCeDiceLoss
+
+    return SparseCeDiceLoss(
+        ignore_index=ignore_index, smooth=DEFAULT_DICE_SMOOTH if dice_smooth is None else dice_smooth)
+
+
+def _focal_loss(ignore_index: Optional[int], focal_gamma: Optional[float] = None) -> keras.losses.Loss:
+    from dl_techniques.losses.sparse_segmentation_loss import DEFAULT_FOCAL_GAMMA, SparseFocalLoss
+
+    return SparseFocalLoss(
+        ignore_index=ignore_index, gamma=DEFAULT_FOCAL_GAMMA if focal_gamma is None else focal_gamma)
+
+
+_LOSS_BUILDERS = {"ce": _ce_loss, "dice": _dice_loss, "ce_dice": _ce_dice_loss, "focal": _focal_loss}
+
+
+def segmentation_loss(name: str, ignore_index: Optional[int], **knobs: float) -> keras.losses.Loss:
+    """The loss of logits against sparse targets, void left out; see the module contract."""
+    if name not in _LOSS_BUILDERS:
+        raise ValueError(f"unknown segmentation loss {name!r}; expected one of {tuple(_LOSS_BUILDERS)}")
+    return _LOSS_BUILDERS[name](ignore_index, **knobs)
 
 
 def segmentation_metrics(num_classes: int, ignore_index: Optional[int]) -> List[keras.metrics.Metric]:

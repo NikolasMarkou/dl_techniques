@@ -130,20 +130,31 @@ def dice_per_sample(
     y_pred: keras.KerasTensor,
     from_logits: bool = False,
     smooth: float = 1e-6,
+    valid: Optional[keras.KerasTensor] = None,
 ) -> keras.KerasTensor:
     """Per-sample Dice loss: 1 - 2*TP / (2*TP + FP + FN).
+
+    Per image and per class, the linear denominator, the smoothing in the numerator and in the
+    denominator, then the mean over classes (MONAI ``DiceLoss`` at its defaults).
 
     Args:
         y_true: Ground truth, shape ``(batch, ..., num_classes)``.
         y_pred: Predicted logits or probabilities, same shape.
         from_logits: Whether ``y_pred`` contains raw logits.
         smooth: Smoothing constant added to numerator and denominator.
+        valid: Optional ``(batch, ...)`` mask, 1 (or True) where a pixel counts and 0 where it is
+            void; a void pixel then adds nothing to TP, FP or FN, so neither the value nor the
+            gradient reads it. ``None`` counts every pixel (the behaviour before this argument).
 
     Returns:
         Loss tensor of shape ``(batch,)``.
     """
     y_true = keras.ops.cast(y_true, "float32")
     probs = _prepare_probs(y_pred, from_logits)
+    if valid is not None:
+        weight = keras.ops.expand_dims(keras.ops.cast(valid, "float32"), -1)
+        y_true = y_true * weight
+        probs = probs * weight
 
     spatial_axes = tuple(range(1, _get_rank(probs) - 1))
     tp = keras.ops.sum(y_true * probs, axis=spatial_axes)
@@ -221,51 +232,68 @@ def focal_tversky_per_sample(
     return keras.ops.power(tversky_loss, gamma)
 
 
+#: Floor of ``1 - p_t`` in the focal modulating factor: ``(1 - p_t) ** gamma`` has an infinite
+#: slope at ``p_t = 1`` for ``0 < gamma < 1``, which times the zero ``log p_t`` of a saturated pixel
+#: is NaN; the floor makes that gradient finite (and zero below it).
+_FOCAL_TINY = 1e-12
+
+
 def focal_per_sample(
     y_true: keras.KerasTensor,
     y_pred: keras.KerasTensor,
-    alpha: float = 0.25,
     gamma: float = 2.0,
     from_logits: bool = False,
+    valid: Optional[keras.KerasTensor] = None,
 ) -> keras.KerasTensor:
-    """Per-sample Focal loss (two-sided, correct version).
+    """Per-sample multi-class focal loss: the mean over pixels of ``-(1 - p_t)^gamma log p_t``.
 
-    FL = -alpha * (1-p_t)^gamma * log(p_t) for positive class
-       - (1-alpha) * p_t^gamma * log(1-p_t) for negative class
-
-    This is the corrected two-sided version (unlike the single-sided
-    ``SegmentationLosses.focal_loss`` which only computes the positive term).
+    Lin et al. 2017 (arXiv 1708.02002) eq. 4, in its softmax form: ``p_t`` is the probability of
+    the TRUE class, so ``gamma = 0`` is the cross-entropy. There is no ``alpha``: Lin's
+    ``alpha_t`` balances the positive against the negative class of a sigmoid problem and a
+    softmax pixel has one term (an earlier version added a ``p_t^gamma log(1 - p_t)`` term for a
+    "negative class", which charged a confident correct pixel; it also returned ``(batch, H, W)``).
 
     Args:
-        y_true: Ground truth, shape ``(batch, ..., num_classes)``, one-hot.
-        y_pred: Predicted logits or probabilities, same shape.
-        alpha: Class weight for positive class.
-        gamma: Focusing parameter.
-        from_logits: Whether ``y_pred`` contains raw logits.
+        y_true: Ground truth, shape ``(batch, ..., num_classes)``, one-hot; a pixel whose one-hot is all
+            zero has no term.
+        y_pred: Predicted logits or probabilities, same shape, at least 2 channels.
+        gamma: Focusing parameter, at least 0.
+        from_logits: Whether ``y_pred`` contains raw logits (read in log space, no clip).
+        valid: Optional ``(batch, ...)`` mask, 1 (or True) where a pixel counts and 0 where it is
+            void. The mean is over the valid pixels of each image, and an image with none is 0.
+            ``None`` averages over every pixel.
 
     Returns:
         Loss tensor of shape ``(batch,)``.
+
+    Raises:
+        ValueError: For a negative ``gamma`` or a single channel.
     """
+    if gamma < 0:
+        raise ValueError(f"gamma must be non-negative, got {gamma}")
+    if y_pred.shape[-1] is None or y_pred.shape[-1] < 2:
+        raise ValueError(
+            f"focal loss needs a static channel count of at least 2, got {y_pred.shape[-1]}"
+        )
     y_true = keras.ops.cast(y_true, "float32")
-    probs = _prepare_probs(y_pred, from_logits)
+    if from_logits:
+        log_p = _log_probs_from_logits(y_pred)
+    else:
+        probs = keras.ops.clip(keras.ops.cast(y_pred, "float32"), 1e-7, 1.0 - 1e-7)
+        log_p = keras.ops.log(probs)
 
-    # Clip for numerical stability in log terms
-    probs = keras.ops.clip(probs, 1e-7, 1.0 - 1e-7)
+    log_pt = keras.ops.sum(y_true * log_p, axis=-1)
+    loss = -log_pt
+    if gamma > 0:
+        one_minus_pt = keras.ops.maximum(-keras.ops.expm1(log_pt), _FOCAL_TINY)
+        loss = keras.ops.power(one_minus_pt, gamma) * loss
 
-    # p_t = prob for the true class, 1-p_t for negative class
-    # y_true is one-hot, so sum over classes gives p_t for each sample
-    p_t = keras.ops.sum(y_true * probs, axis=-1)
-
-    # Focal weight
-    focal_weight_pos = keras.ops.power(1.0 - p_t, gamma)
-    focal_weight_neg = keras.ops.power(p_t, gamma)
-
-    # Log terms
-    log_pos = keras.ops.log(p_t + 1e-8)
-    log_neg = keras.ops.log(1.0 - p_t + 1e-8)
-
-    loss = -alpha * focal_weight_pos * log_pos - (1.0 - alpha) * focal_weight_neg * log_neg
-    return loss  # Already (batch,)
+    spatial_axes = tuple(range(1, _get_rank(loss)))
+    if valid is None:
+        return keras.ops.mean(loss, axis=spatial_axes)
+    weight = keras.ops.cast(valid, "float32")
+    count = keras.ops.sum(weight, axis=spatial_axes)
+    return keras.ops.sum(loss * weight, axis=spatial_axes) / keras.ops.maximum(count, 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -323,12 +351,11 @@ def focal_tversky_scalar(
 def focal_scalar(
     y_true: keras.KerasTensor,
     y_pred: keras.KerasTensor,
-    alpha: float = 0.25,
     gamma: float = 2.0,
     from_logits: bool = False,
 ) -> keras.KerasTensor:
-    """Scalar Focal loss (batch mean, two-sided). For SegmentationLosses."""
-    return keras.ops.mean(focal_per_sample(y_true, y_pred, alpha, gamma, from_logits))
+    """Scalar multi-class focal loss (batch mean); see :func:`focal_per_sample`."""
+    return keras.ops.mean(focal_per_sample(y_true, y_pred, gamma, from_logits))
 
 
 def cross_entropy_scalar(

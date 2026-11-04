@@ -76,6 +76,7 @@ from dl_techniques.losses import (
 - `scaled_mse_loss.py` — Scaled mean-squared-error loss
 - `segmentation_loss.py` — Segmentation loss (Dice, Tversky, focal)
 - `segmentation_wrapper_loss.py` — Serializable name-dispatched wrapper around `SegmentationLosses` for use as a compile/save/load-friendly Keras `Loss`
+- `sparse_segmentation_loss.py` — `SparseDiceLoss`, `SparseFocalLoss`, `SparseCeDiceLoss`: segmentation losses on LOGITS `(B,H,W,C)` and SPARSE integer targets `(B,H,W)` with an `ignore_index` (void) that changes neither the value nor the gradient. They hold no math of their own: they one-hot the targets and call `segmentation_metrics.dice_per_sample` / `focal_per_sample` (MONAI-style per-image Dice with 1e-5 smoothing in both terms; Lin et al. softmax focal, `gamma=0` is CE, no `alpha`). `call()` returns `(batch,)` per image, so Keras averages images; the stock `SparseCategoricalCrossentropy(ignore_class=)` instead divides by the batch's valid-pixel count. An image with no valid pixel is exactly 0 with a zero gradient. Definitions and sources: D-014 of plan-2026-11-03T221936-98b866fb
 - `smape_loss.py` — Symmetric MAPE
 - `sparsemax_loss.py` — Sparsemax loss
 - `superpoint_loss.py` — SuperPoint detector (65-class grid softmax CE) and descriptor losses

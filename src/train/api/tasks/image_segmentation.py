@@ -17,7 +17,9 @@ Interface contract
     Frozen :class:`~train.api.config.StrictConfig`; one field per keyword of the function. ``out``,
     ``model`` and ``data`` are required. The groups are those of classification except
     ``transform_args`` (:class:`~train.api.segmentation_args.SegTransformArgs`) and ``metric_args``
-    (:class:`~train.api.segmentation_args.SegMetricArgs`). ``analysis_args.conformal_alpha`` is
+    (:class:`~train.api.segmentation_args.SegMetricArgs`), plus ``loss_args``
+    (:class:`~train.api.segmentation_args.SegLossArgs`: ``ce``, ``dice``, ``ce_dice`` or ``focal``
+    and the knobs each reads). ``analysis_args.conformal_alpha`` is
     refused: a conformal set is a set of classes per image, and a segmentation run has none.
 
 ``ImageSegmentationTrainer(config)``
@@ -97,6 +99,7 @@ from ..data_args import DataFacts
 from ..predictor import build_segmentation_record, overrides_of_variant
 from ..segmentation_args import (
     SegData,
+    SegLossArgs,
     SegMetricArgs,
     SegTransformArgs,
     load_seg_data,
@@ -158,6 +161,7 @@ class ImageSegmentationConfig(StrictConfig):
     optim_args: OptimArgs = dataclasses.field(default_factory=OptimArgs)
     transform_args: SegTransformArgs = dataclasses.field(default_factory=SegTransformArgs)
     metric_args: SegMetricArgs = dataclasses.field(default_factory=SegMetricArgs)
+    loss_args: SegLossArgs = dataclasses.field(default_factory=SegLossArgs)
     checkpoint_args: CheckpointArgs = dataclasses.field(default_factory=CheckpointArgs)
     logger_args: LoggerArgs = dataclasses.field(default_factory=LoggerArgs)
     analysis_args: AnalysisArgs = dataclasses.field(default_factory=AnalysisArgs)
@@ -314,30 +318,58 @@ class ImageSegmentationTrainer(TaskTrainer):
     ) -> Tuple[Any, Any]:
         from train.common.segmentation_run import segmentation_loss, segmentation_metrics
 
+        loss_cfg: SegLossArgs = config.loss_args
+        knobs = {
+            key: value
+            for key, value in (("dice_smooth", loss_cfg.dice_smooth), ("focal_gamma", loss_cfg.focal_gamma))
+            if value is not None
+        }
         return (
-            segmentation_loss(data.ignore_index),
+            segmentation_loss(loss_cfg.name, data.ignore_index, **knobs),
             segmentation_metrics(data.num_classes, data.ignore_index),
         )
 
     def initial_loss_check(
         self, config: ImageSegmentationConfig, model: Any, data: Any
     ) -> Tuple[Dict[str, float], float, Optional[bool]]:
-        """Return the epoch-0 numbers; the ratio is the cross-entropy over ``ln(num_classes)``.
+        """Return the epoch-0 numbers; the ratio is the loss over ``ln(num_classes)``, judged for ``ce`` only.
 
         ``ln(C)`` is the loss of a model that predicts every class equally at every valid pixel,
-        which holds for the cross-entropy and for no other loss this task will offer (step 35's
-        dice and focal losses have their own scale), so a loss other than ``ce`` states its own
-        reference here instead of reusing this one.
+        which holds for the cross-entropy and for no other loss this task offers (dice is at most 1,
+        focal is a fraction of the cross-entropy), so for a loss other than ``ce`` the verdict is
+        ``None`` (not judged; ``unjudged_note`` says why) and the ratio is only the number the
+        summary has always carried. A non-finite loss is refused for every loss.
         """
         from train.common import classification_run
 
-        return classification_run.check_initial_loss(
+        metrics, ratio, warned = classification_run.check_initial_loss(
             model,
             data.select_ds,
             data.n_select,
             data.num_classes,
             evaluate=classification_run.evaluate_dict,
             hint=self.initial_loss_hint,
+        )
+        # DECISION plan-2026-11-03T221936-98b866fb/D-014
+        # `ln(C)` is the cross-entropy of a uniform prediction and of nothing else: a dice loss is at
+        # most 1 and a focal loss a fraction of the cross-entropy, so a ratio above the warning
+        # factor can never come out of them and a ratio below it says nothing. Do NOT invent a
+        # reference value per loss to keep a verdict: a warning nobody can interpret is worse than
+        # `null` with the reason in the notes.
+        if config.loss_args.name != "ce":
+            warned = None
+        return metrics, ratio, warned
+
+    def unjudged_note(self, config: ImageSegmentationConfig) -> str:
+        """Name the loss when it is the reason ``init_scale_warning`` is null; else the base reason."""
+        name = config.loss_args.name
+        if name == "ce":
+            return super().unjudged_note(config)
+        return (
+            f"`init_scale_warning` is null (not judged): the loss is `{name}`, and the initial-loss "
+            "check compares the epoch-0 loss with ln(C), the value of the cross-entropy of a uniform "
+            f"prediction; `initial_loss_ratio` is that evaluation's `{name}` loss over ln(C), kept as "
+            "the baseline and not comparable to anything"
         )
 
     # -- the verdict ----------------------------------------------------
@@ -437,9 +469,11 @@ class ImageSegmentationTrainer(TaskTrainer):
             notices.append(
                 (
                     "info",
-                    "accunet: the legacy trainer (train.accunet) trains the combo loss, which this "
-                    "task does not offer yet; it trains the cross-entropy, so its numbers are not "
-                    "that trainer's (D-077)",
+                    "accunet: the legacy trainer (train.accunet) trains the combo loss (0.5 dice + "
+                    "0.5 cross-entropy, one-hot targets, no void label); this recipe trains the "
+                    "cross-entropy (loss_args.name=ce), so its numbers are not that trainer's. "
+                    "loss_args.name=ce_dice is the same two terms at weight 1 each, per image, with "
+                    "void left out (D-077, D-014)",
                 )
             )
             notices.append(
@@ -452,6 +486,46 @@ class ImageSegmentationTrainer(TaskTrainer):
             )
         return notices
 
+    @staticmethod
+    def _initial_loss_notes(
+        config: ImageSegmentationConfig, baseline: Dict[str, float], ratio: float, data: Any
+    ) -> List[str]:
+        """Return the note on the epoch-0 loss: the cross-entropy against ln(C), or the other loss's value."""
+        import numpy as np
+
+        name = config.loss_args.name
+        if name == "ce":
+            return [
+                f"initial loss {baseline['loss']:.4f} vs ln(C)={np.log(data.num_classes):.4f} "
+                f"(ratio {ratio:.2f}): the cross-entropy per valid pixel, a plain evaluate on the "
+                "validation split"
+            ]
+        return [
+            f"initial loss {baseline['loss']:.4f} is the `{name}` loss (`loss_args.name`), a plain "
+            "evaluate on the validation split; it is not compared with ln(C), the cross-entropy of a "
+            "uniform prediction, so `init_scale_warning` is null"
+        ]
+
+    @staticmethod
+    def _loss_description_note(config: ImageSegmentationConfig) -> str:
+        """Return the note on what ``loss`` and ``val_loss`` are for the chosen loss."""
+        metric_cfg: SegMetricArgs = config.metric_args
+        name = config.loss_args.name
+        if name == "ce":
+            return (
+                "`loss` and `val_loss` are Keras' mean over batches of each batch's cross-entropy "
+                "per valid pixel, the batches weighted by images, NOT the cross-entropy pooled over "
+                "every valid pixel: with a void label the two differ whenever the void share differs "
+                "between batches. `accuracy` and `miou` are pooled over every valid pixel. The best "
+                f"epoch is chosen by `{metric_cfg.watch_metric}` (`metric_args.watch_metric`)"
+            )
+        return (
+            f"`loss` and `val_loss` are Keras' mean over images of the per-image `{name}` value "
+            "(void pixels left out of each image's value; an image with no valid pixel is 0), the "
+            "batches weighted by images. `accuracy` and `miou` are pooled over every valid pixel. The "
+            f"best epoch is chosen by `{metric_cfg.watch_metric}` (`metric_args.watch_metric`)"
+        )
+
     def task_notes(
         self,
         config: ImageSegmentationConfig,
@@ -460,8 +534,6 @@ class ImageSegmentationTrainer(TaskTrainer):
         data: Any,
     ) -> List[str]:
         """Return the segmentation lines of ``results_summary.json``'s ``notes``."""
-        import numpy as np
-
         from train.common import classification_run, segmentation_run
 
         checkpoint_cfg: CheckpointArgs = config.checkpoint_args
@@ -469,15 +541,9 @@ class ImageSegmentationTrainer(TaskTrainer):
         metric_cfg: SegMetricArgs = config.metric_args
         majority = self._baseline or {}
         notes = [
-            f"initial loss {baseline['loss']:.4f} vs ln(C)={np.log(data.num_classes):.4f} "
-            f"(ratio {ratio:.2f}): the cross-entropy per valid pixel, a plain evaluate on the "
-            "validation split",
+            *self._initial_loss_notes(config, baseline, ratio, data),
             *classification_run.RUN_NOTES,
-            "`loss` and `val_loss` are Keras' mean over batches of each batch's cross-entropy "
-            "per valid pixel, the batches weighted by images, NOT the cross-entropy pooled over "
-            "every valid pixel: with a void label the two differ whenever the void share differs "
-            "between batches. `accuracy` and `miou` are pooled over every valid pixel. The best "
-            f"epoch is chosen by `{metric_cfg.watch_metric}` (`metric_args.watch_metric`)",
+            self._loss_description_note(config),
             f"`success_threshold` is {'metric_args.success_threshold' if metric_cfg.success_threshold is not None else 'the mIoU of the majority-class baseline'}"
             f" ({majority.get('class_name')!r} for every valid pixel of the selection split: mIoU "
             f"{majority.get('miou')}, pixel accuracy {majority.get('pixel_accuracy')}); "
@@ -666,6 +732,7 @@ def train_image_segmentation(
     optim_args: Union[OptimArgs, Mapping[str, Any], None] = None,
     transform_args: Union[SegTransformArgs, Mapping[str, Any], None] = None,
     metric_args: Union[SegMetricArgs, Mapping[str, Any], None] = None,
+    loss_args: Union[SegLossArgs, Mapping[str, Any], None] = None,
     checkpoint_args: Union[CheckpointArgs, Mapping[str, Any], None] = None,
     logger_args: Union[LoggerArgs, Mapping[str, Any], None] = None,
     analysis_args: Union[AnalysisArgs, Mapping[str, Any], None] = None,
@@ -683,6 +750,7 @@ def train_image_segmentation(
             "optim_args": optim_args,
             "transform_args": transform_args,
             "metric_args": metric_args,
+            "loss_args": loss_args,
             "checkpoint_args": checkpoint_args,
             "logger_args": logger_args,
             "analysis_args": analysis_args,
