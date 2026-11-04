@@ -1,6 +1,7 @@
 # Understanding Attention Mechanisms: A Complete Guide
 
 ## Table of Contents
+
 1. [Introduction](#introduction)
 2. [The Core Problem](#the-core-problem)
 3. [The Library Analogy](#the-library-analogy)
@@ -16,9 +17,13 @@
 
 ## Introduction
 
-Self-attention is the fundamental mechanism that powers transformer models. At its heart, attention allows each token in a sequence to dynamically focus on and aggregate information from all other tokens, creating rich, context-aware representations.
+Self-attention is the fundamental mechanism that powers transformer models. At its heart, attention allows each token in
+a sequence to dynamically focus on and aggregate information from all other tokens, creating rich, context-aware
+representations.
 
-The key innovation is the separation of input representations into three distinct roles: **Query (Q)**, **Key (K)**, and **Value (V)**. Understanding why we need all three—rather than just using the input embeddings directly—is crucial to understanding how attention works.
+The key innovation is the separation of input representations into three distinct roles: **Query (Q)**, **Key (K)**, and
+**Value (V)**. Understanding why we need all three—rather than just using the input embeddings directly—is crucial to
+understanding how attention works.
 
 ### Quick Mental Model: The Library
 
@@ -28,18 +33,23 @@ Think of attention as **a researcher writing a report in a library**:
 - **Output tokens (`z`)** = Your final report, where each sentence synthesizes information from multiple books
 
 To write a context-aware sentence, you:
+
 1. **Formulate a question** based on your current focus (Query)
 2. **Compare your question** to each book's index card (Key)
 3. **Take the actual content** from relevant books (Value)
 4. **Write your sentence** as a weighted combination of what you found
 
-**The key insight**: What a book *advertises* (Key) isn't always what you *take from it* (Value). A book labeled "pronouns" might be important to consult (strong Key) but contribute little actual content (weak Value)—it mainly points you to other books. This separation of matching from contribution is why we need three distinct transformations.
+**The key insight**: What a book *advertises* (Key) isn't always what you *take from it* (Value). A book labeled
+"pronouns" might be important to consult (strong Key) but contribute little actual content (weak Value)—it mainly points
+you to other books. This separation of matching from contribution is why we need three distinct transformations.
 
 ---
 
 ## The Core Problem
 
-Given a sequence of tokens `[x₁, x₂, ..., xₙ]`, we want to create a new representation `[z₁, z₂, ..., zₙ]` where each `zᵢ` is a context-aware version of `xᵢ` that has "looked at" and incorporated information from all other tokens in the sequence.
+Given a sequence of tokens `[x₁, x₂, ..., xₙ]`, we want to create a new representation `[z₁, z₂, ..., zₙ]` where each
+`zᵢ` is a context-aware version of `xᵢ` that has "looked at" and incorporated information from all other tokens in the
+sequence.
 
 ```
 Input Sequence:   [x₁]  [x₂]  [x₃]  [x₄]  ...  [xₙ]
@@ -60,10 +70,10 @@ The question is: **How do we determine which tokens should influence each output
 To understand Q, K, and V, imagine **a researcher writing a report in a library**:
 
 - **Input sequence (`x`)**: All the books available in the library
-  - Each book `xᵢ` is a unique source of information (a token)
+    - Each book `xᵢ` is a unique source of information (a token)
 
 - **Output sequence (`z`)**: The final report you're writing
-  - Each sentence `zᵢ` is synthesized by drawing from multiple books
+    - Each sentence `zᵢ` is synthesized by drawing from multiple books
 
 **The Goal**: Write a rich, context-aware sentence (`zᵢ`) by consulting relevant books (`xⱼ`) in the library.
 
@@ -91,13 +101,17 @@ Library Layout:
 ## Query (Q): The Researcher's Question
 
 ### Analogy
-You're about to write the next sentence in your report (`zᵢ`). First, you formulate a specific question based on your current focus.
+
+You're about to write the next sentence in your report (`zᵢ`). First, you formulate a specific question based on your
+current focus.
 
 - If writing about "apples," your question might be: *"What information is relevant to the nutritional value of fruit?"*
 - This question is your **Query**
 
 ### What It Is
-The Query vector `qᵢ` represents the *current* token `xᵢ` we are processing, transformed to express what it's "looking for":
+
+The Query vector `qᵢ` represents the *current* token `xᵢ` we are processing, transformed to express what it's "looking
+for":
 
 ```
 qᵢ = xᵢ @ Wq
@@ -106,7 +120,9 @@ qᵢ = xᵢ @ Wq
 Where `Wq` is a learned weight matrix.
 
 ### Purpose
-The Query's job is to **seek information**. It acts as a probe that will be compared against all other tokens to find which ones are most relevant.
+
+The Query's job is to **seek information**. It acts as a probe that will be compared against all other tokens to find
+which ones are most relevant.
 
 **It answers**: *"From the perspective of this token, what should I be looking for?"*
 
@@ -115,6 +131,7 @@ The Query's job is to **seek information**. It acts as a probe that will be comp
 **Key Insight**: What a token *is* (its identity) differs from what it's *looking for* (its informational need).
 
 **Example**: In "The cat sat on the mat"
+
 - Token: "sat" (a verb)
 - Identity: "I am an action word"
 - Query: "Who is performing this action? Where?"
@@ -134,7 +151,9 @@ Query (qᵢ):                "seeking: subject + location"
 ## Key (K): The Book's Index Card
 
 ### Analogy
-Every book (`xⱼ`) has an index card summarizing its contents. Your Query is compared against these quick, searchable Keys—not the entire book.
+
+Every book (`xⱼ`) has an index card summarizing its contents. Your Query is compared against these quick, searchable
+Keys—not the entire book.
 
 - Book: "Apple Inc. company history" → Key: "technology, business"
 - Book: "Apple pie recipes" → Key: "cooking, desserts, fruit"
@@ -142,6 +161,7 @@ Every book (`xⱼ`) has an index card summarizing its contents. Your Query is co
 Both contain "apple," but have different Keys.
 
 ### What It Is
+
 The Key vector `kⱼ` represents what token `xⱼ` "advertises" about itself:
 
 ```
@@ -151,7 +171,9 @@ kⱼ = xⱼ @ Wk
 Where `Wk` is a learned weight matrix.
 
 ### Purpose
-The Key's job is to be **compared against Queries**. The dot product `qᵢ @ kⱼ` calculates a raw attention score—a measure of relevance between token `i`'s question and token `j`'s advertisement.
+
+The Key's job is to be **compared against Queries**. The dot product `qᵢ @ kⱼ` calculates a raw attention score—a
+measure of relevance between token `i`'s question and token `j`'s advertisement.
 
 **It answers**: *"How well do my contents match what the other token is looking for?"*
 
@@ -160,6 +182,7 @@ The Key's job is to be **compared against Queries**. The dot product `qᵢ @ k�
 The most useful way to summarize a token for matching may differ from its raw meaning.
 
 **Key Points**:
+
 1. `Wk` learns to project embeddings into a space for effective comparison
 2. Q and K project into the *same dimensional space*, making their dot product meaningful
 3. Ensures "language of questions" and "language of advertisements" are compatible
@@ -179,9 +202,12 @@ Key (kⱼ):                   [optimized for matching]
 ## Value (V): The Book's Content
 
 ### Analogy
-Once your Query matches a Key and you determine a book is relevant, you don't take the index card—you take the **actual book** to extract its rich information. This is the **Value**.
+
+Once your Query matches a Key and you determine a book is relevant, you don't take the index card—you take the **actual
+book** to extract its rich information. This is the **Value**.
 
 ### What It Is
+
 The Value vector `vⱼ` represents token `xⱼ`'s actual content or payload:
 
 ```
@@ -191,7 +217,9 @@ vⱼ = xⱼ @ Wv
 Where `Wv` is a learned weight matrix.
 
 ### Purpose
-The Value's job is to **provide information** that will be aggregated. After attention scores are calculated, they weight a sum of all `vⱼ` vectors:
+
+The Value's job is to **provide information** that will be aggregated. After attention scores are calculated, they
+weight a sum of all `vⱼ` vectors:
 
 ```
 zᵢ = Σⱼ attention_score(i,j) × vⱼ
@@ -199,14 +227,17 @@ zᵢ = Σⱼ attention_score(i,j) × vⱼ
 
 ### Why Not Just Use `xⱼ` or `kⱼ`?
 
-**Critical Insight**: Features that make a token a good match (Key) aren't necessarily the features you want to pass on (Value).
+**Critical Insight**: Features that make a token a good match (Key) aren't necessarily the features you want to pass on
+(Value).
 
 **Example**: "It is a great tool."
+
 - "It" is important for grammar (good Key to find its antecedent)
 - But "It" has minimal semantic content
 - When other words attend to "It", they should pull information from what "It" refers to (e.g., "the hammer")
 
 The `Wv` matrix provides flexibility:
+
 - For "It": weak `v` vector (little to contribute) but strong `k` vector (important to attend to)
 - This decouples matching mechanism from information aggregation
 
@@ -362,26 +393,28 @@ Why can't we just use the input embeddings `x` directly? Why do we need three se
 
 ### Reason 1: Separation of Concerns
 
-| Aspect | Query | Key | Value |
-|--------|-------|-----|-------|
-| **Role** | What to seek | What to advertise | What to contribute |
-| **Optimized for** | Asking questions | Being matched | Information content |
-| **Example** | "Show me subjects" | "I'm a subject" | [rich semantic features] |
+| Aspect            | Query              | Key               | Value                    |
+|-------------------|--------------------|-------------------|--------------------------|
+| **Role**          | What to seek       | What to advertise | What to contribute       |
+| **Optimized for** | Asking questions   | Being matched     | Information content      |
+| **Example**       | "Show me subjects" | "I'm a subject"   | [rich semantic features] |
 
 ### Reason 2: Decoupling Match from Contribution
 
 **Scenario**: Pronoun resolution in "The hammer is useful. It works well."
 
 - Token "It":
-  - **Key**: Strong (important to identify and resolve)
-  - **Value**: Weak (minimal standalone meaning)
-  - **Result**: Other tokens attend *to* "It" (strong K) but pull little information *from* it (weak V). Instead, they follow the reference to "hammer"
+    - **Key**: Strong (important to identify and resolve)
+    - **Value**: Weak (minimal standalone meaning)
+    - **Result**: Other tokens attend *to* "It" (strong K) but pull little information *from* it (weak V). Instead, they
+      follow the reference to "hammer"
 
 Without separate K and V, this nuanced behavior is impossible.
 
 ### Reason 3: Flexibility in Learned Representations
 
 Different transformations allow the model to learn:
+
 - **Wq**: "How should I interpret my informational needs?"
 - **Wk**: "How should I advertise my relevance?"
 - **Wv**: "What's the best representation to pass forward?"
@@ -400,11 +433,11 @@ These can be completely different even for the same input token.
 
 ### Quick Reference Table
 
-| Component | Analogy | Mathematical | Role | Key Question |
-|-----------|---------|-------------|------|--------------|
-| **Query (Q)** | Researcher's question | `qᵢ = xᵢ @ Wq` | Seeker/Probe | "What am I looking for?" |
-| **Key (K)** | Book's index card | `kⱼ = xⱼ @ Wk` | Advertiser/Label | "How relevant am I?" |
-| **Value (V)** | Book's content | `vⱼ = xⱼ @ Wv` | Payload/Info | "What should I contribute?" |
+| Component     | Analogy               | Mathematical   | Role             | Key Question                |
+|---------------|-----------------------|----------------|------------------|-----------------------------|
+| **Query (Q)** | Researcher's question | `qᵢ = xᵢ @ Wq` | Seeker/Probe     | "What am I looking for?"    |
+| **Key (K)**   | Book's index card     | `kⱼ = xⱼ @ Wk` | Advertiser/Label | "How relevant am I?"        |
+| **Value (V)** | Book's content        | `vⱼ = xⱼ @ Wv` | Payload/Info     | "What should I contribute?" |
 
 ### Core Insights
 
@@ -437,11 +470,13 @@ INPUT TOKENS
 ### Final Thought
 
 The brilliance of the Q-K-V mechanism lies in its **explicit separation** of three distinct cognitive functions:
+
 - **Seeking** (Q)
-- **Matching** (K)  
+- **Matching** (K)
 - **Contributing** (V)
 
-This separation, combined with learned transformations, gives transformers the flexibility to learn complex, context-dependent relationships that power modern AI systems.
+This separation, combined with learned transformations, gives transformers the flexibility to learn complex,
+context-dependent relationships that power modern AI systems.
 
 ---
 

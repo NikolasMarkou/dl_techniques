@@ -1,6 +1,8 @@
 # Deep Dive: Hierarchical MLP (hMLP) Stem for Vision Transformers
 
-The hierarchical MLP (hMLP) stem is a novel patch pre-processing technique introduced in the paper "Three things everyone should know about Vision Transformers" by Touvron et al. This document provides a comprehensive explanation of the design, implementation, and benefits of this approach.
+The hierarchical MLP (hMLP) stem is a novel patch pre-processing technique introduced in the paper "Three things
+everyone should know about Vision Transformers" by Touvron et al. This document provides a comprehensive explanation of
+the design, implementation, and benefits of this approach.
 
 ## 1. The Problem with Existing Stem Designs
 
@@ -10,13 +12,18 @@ Traditional Vision Transformers (ViTs) use a simple linear projection to transfo
 Image → Split into 16×16 patches → Linear projection → Token embeddings
 ```
 
-Several researchers have proposed replacing this linear projection with convolutional stems to improve performance. However, these convolutional stems have a critical limitation: **they're incompatible with masked self-supervised learning methods like BeiT**.
+Several researchers have proposed replacing this linear projection with convolutional stems to improve performance.
+However, these convolutional stems have a critical limitation: **they're incompatible with masked self-supervised
+learning methods like BeiT**.
 
-**Why?** Convolutional stems cause information leakage between patches. When some patches are masked during self-supervised learning, the convolutions that cross patch boundaries propagate information from unmasked patches to masked ones, undermining the masking mechanism.
+**Why?** Convolutional stems cause information leakage between patches. When some patches are masked during
+self-supervised learning, the convolutions that cross patch boundaries propagate information from unmasked patches to
+masked ones, undermining the masking mechanism.
 
 ## 2. The hMLP Stem Solution
 
-The hierarchical MLP stem solves this problem by processing patches independently while still providing meaningful pre-processing:
+The hierarchical MLP stem solves this problem by processing patches independently while still providing meaningful
+pre-processing:
 
 1. **Independent processing**: Each patch is processed entirely separately from other patches
 2. **Hierarchical structure**: Patches are processed in a progressive, hierarchical manner
@@ -31,6 +38,7 @@ The hMLP stem processes patches through a hierarchical sequence:
 ```
 
 At each level, the following operations are applied:
+
 1. Linear projection (implemented as convolution with matching kernel size and stride)
 2. Normalization (BatchNorm or LayerNorm)
 3. GELU activation
@@ -39,7 +47,8 @@ At each level, the following operations are applied:
 
 ### Implementation Trick
 
-Although the conceptual design processes patches independently, the implementation uses convolution operations with matching kernel size and stride to efficiently achieve the same result:
+Although the conceptual design processes patches independently, the implementation uses convolution operations with
+matching kernel size and stride to efficiently achieve the same result:
 
 ```python
 # Stage 1: 4x4 patches
@@ -52,7 +61,8 @@ self.stage2_conv = keras.layers.Conv2D(filters=dim1, kernel_size=2, strides=2)
 self.stage3_conv = keras.layers.Conv2D(filters=embed_dim, kernel_size=2, strides=2)
 ```
 
-When the kernel size equals the stride, there's no overlap between patches, ensuring that each patch is processed independently.
+When the kernel size equals the stride, there's no overlap between patches, ensuring that each patch is processed
+independently.
 
 ## 4. Key Advantages
 
@@ -72,7 +82,8 @@ hMLP stem:    Image → Split → Mask → Stem → Transformer → ...
               Image → Split → Stem → Mask → Transformer → ...
 ```
 
-With hMLP, masking can be applied either before or after the stem with identical results, since patches are processed independently. This makes it compatible with methods like BeiT or MAE.
+With hMLP, masking can be applied either before or after the stem with identical results, since patches are processed
+independently. This makes it compatible with methods like BeiT or MAE.
 
 ### 4.2 Performance Benefits
 
@@ -91,15 +102,16 @@ The hMLP stem provides performance improvements with minimal computational overh
 ## 5. Performance Comparison
 
 | Model | Stem Type | Training Method | ImageNet Top-1 |
-|-------|-----------|----------------|----------------|
-| ViT-B | Linear    | Supervised     | 82.2% |
-| ViT-B | Conv Stem | Supervised     | 82.6% |
-| ViT-B | hMLP Stem | Supervised     | 82.5% |
-| ViT-B | Linear    | BeiT + FT      | 83.1% |
-| ViT-B | Conv Stem | BeiT + FT      | 83.0% |
-| ViT-B | hMLP Stem | BeiT + FT      | 83.4% |
+|-------|-----------|-----------------|----------------|
+| ViT-B | Linear    | Supervised      | 82.2%          |
+| ViT-B | Conv Stem | Supervised      | 82.6%          |
+| ViT-B | hMLP Stem | Supervised      | 82.5%          |
+| ViT-B | Linear    | BeiT + FT       | 83.1%          |
+| ViT-B | Conv Stem | BeiT + FT       | 83.0%          |
+| ViT-B | hMLP Stem | BeiT + FT       | 83.4%          |
 
 The table shows that:
+
 1. In supervised learning, hMLP performs comparably to convolutional stems
 2. In self-supervised learning (BeiT+FT), hMLP significantly outperforms both linear and convolutional stems
 
@@ -112,7 +124,8 @@ When using hMLP stem with masked self-supervised learning methods like BeiT:
 3. **Stem Processing**: The hMLP stem processes all patches independently
 4. **Transformer**: The transformer tries to predict the visual tokens of masked patches
 
-This maintains the separation between masked and unmasked information that is critical for effective self-supervised learning with masked patch prediction.
+This maintains the separation between masked and unmasked information that is critical for effective self-supervised
+learning with masked patch prediction.
 
 ## 7. Implementation Considerations
 

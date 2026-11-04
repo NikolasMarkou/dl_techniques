@@ -1,4 +1,5 @@
 # Comprehensive Feature Guide for Expenditure Forecasting
+
 ## Business and Individual Spending Prediction
 
 ---
@@ -22,11 +23,14 @@
 
 ## Overview
 
-Expenditure forecasting aims to predict future spending patterns for businesses and individuals based on historical data, external factors, and behavioral patterns. Successful forecasting requires a comprehensive feature set that captures spending dynamics across multiple dimensions.
+Expenditure forecasting aims to predict future spending patterns for businesses and individuals based on historical
+data, external factors, and behavioral patterns. Successful forecasting requires a comprehensive feature set that
+captures spending dynamics across multiple dimensions.
 
 ### Key Principles
 
 **The 95/5 Rule Applied to Features:**
+
 - 5% of features drive 95% of predictive power
 - Focus on high-impact features before adding complexity
 - Domain knowledge beats feature quantity
@@ -57,6 +61,7 @@ LOW IMPACT (Nice-to-Have)
 ### 1. Historical Spending Features
 
 **Raw Historical Data:**
+
 - Total expenditure (daily/weekly/monthly/quarterly)
 - Category-specific spending amounts
 - Transaction counts and frequencies
@@ -64,14 +69,16 @@ LOW IMPACT (Nice-to-Have)
 - Spending volatility (standard deviation)
 
 **Lag Features:**
+
 - Previous period spending (t-1, t-2, ..., t-n)
 - Same period last year (seasonal lag)
 - Key seasonal lags based on business cycle
-  - Monthly data: Lags 1, 12 (year-over-year)
-  - Weekly data: Lags 1, 4, 52 (week, month, year)
-  - Daily data: Lags 1, 7, 30, 365
+    - Monthly data: Lags 1, 12 (year-over-year)
+    - Weekly data: Lags 1, 4, 52 (week, month, year)
+    - Daily data: Lags 1, 7, 30, 365
 
 **Rolling Window Statistics:**
+
 - 7-day/30-day/90-day moving averages
 - 7-day/30-day/90-day moving standard deviations
 - Rolling minimum/maximum (capture spending bounds)
@@ -79,6 +86,7 @@ LOW IMPACT (Nice-to-Have)
 - Exponentially weighted moving averages (recent emphasis)
 
 **Growth and Change Metrics:**
+
 - Period-over-period growth rates
 - Year-over-year growth rates
 - Acceleration/deceleration indicators
@@ -92,6 +100,7 @@ LOW IMPACT (Nice-to-Have)
 ### 1. Operational Features
 
 **Headcount and Human Resources:**
+
 - Total employee count (strongest driver for SaaS/service companies)
 - Headcount by department (Sales, Marketing, Engineering, Operations)
 - New hire counts per period
@@ -101,6 +110,7 @@ LOW IMPACT (Nice-to-Have)
 - Average compensation by role/department
 
 **Procurement and Supply Chain:**
+
 - Raw material prices and trends
 - Supplier diversity (number of active suppliers)
 - Lead times for critical materials
@@ -110,6 +120,7 @@ LOW IMPACT (Nice-to-Have)
 - Volume-based discount thresholds
 
 **Infrastructure and Assets:**
+
 - Facility square footage (rent, utilities scale with space)
 - Number of locations/offices/stores
 - Equipment age and depreciation schedules
@@ -120,6 +131,7 @@ LOW IMPACT (Nice-to-Have)
 ### 2. Financial Planning Features
 
 **Budget and Forecasting:**
+
 - Approved annual/quarterly budgets by department
 - Budget utilization rates (% of budget spent)
 - Variance from budget (historical deviations)
@@ -128,6 +140,7 @@ LOW IMPACT (Nice-to-Have)
 - Revenue-to-expense ratios
 
 **Cash Flow and Liquidity:**
+
 - Cash on hand
 - Accounts payable aging
 - Days payable outstanding (DPO)
@@ -136,6 +149,7 @@ LOW IMPACT (Nice-to-Have)
 - Debt service obligations
 
 **Revenue and Growth Metrics:**
+
 - Revenue (total and by segment)
 - Customer acquisition cost (CAC)
 - Customer lifetime value (LTV)
@@ -147,6 +161,7 @@ LOW IMPACT (Nice-to-Have)
 ### 3. Department-Specific Features
 
 **Sales and Marketing:**
+
 - Marketing spend (absolute and % of revenue)
 - Sales team size and ramp time
 - Lead generation volumes
@@ -157,6 +172,7 @@ LOW IMPACT (Nice-to-Have)
 - Advertising platform spending (Google, Facebook, LinkedIn)
 
 **Travel and Expenses (T&E):**
+
 - Number of travelers per period
 - Average trip cost
 - Hotel/flight price indices
@@ -166,6 +182,7 @@ LOW IMPACT (Nice-to-Have)
 - Remote work adoption rates (inverse correlation with T&E)
 
 **Technology and Software:**
+
 - SaaS subscription counts
 - Software seats/licenses by platform
 - Cloud infrastructure costs (AWS, Azure, GCP)
@@ -174,6 +191,7 @@ LOW IMPACT (Nice-to-Have)
 - User growth rates (drives seat expansion)
 
 **Facilities and Operations:**
+
 - Utility consumption (kWh, therms)
 - Cleaning and maintenance contracts
 - Office supplies procurement
@@ -184,6 +202,7 @@ LOW IMPACT (Nice-to-Have)
 ### 4. External Business Factors
 
 **Industry and Competitive:**
+
 - Industry benchmark spending ratios
 - Competitor funding announcements
 - Market share changes
@@ -191,6 +210,7 @@ LOW IMPACT (Nice-to-Have)
 - Regulatory changes affecting costs
 
 **Economic Indicators:**
+
 - Inflation rates (general and sector-specific)
 - Interest rates (affects borrowing costs)
 - Exchange rates (for international operations)
@@ -205,16 +225,18 @@ LOW IMPACT (Nice-to-Have)
 ### 1. Demographic Features
 
 **Core Demographics:**
-- Age of primary earner(s)
+
+- Age of primary earner (s)
 - Number of adults in household
 - Number of children by age group (0-5, 6-12, 13-17, 18+)
 - Household size
 - Marital/partnership status
-- Education level(s)
-- Occupation(s)
+- Education level (s)
+- Occupation (s)
 - Employment status (full-time, part-time, retired, unemployed)
 
 **Life Stage Indicators:**
+
 - Recent marriage/partnership
 - Recent childbirth
 - Children entering college
@@ -225,6 +247,7 @@ LOW IMPACT (Nice-to-Have)
 ### 2. Income Features
 
 **Primary Income:**
+
 - Monthly gross income
 - After-tax income (disposable income)
 - Income stability (salaried vs. variable)
@@ -232,6 +255,7 @@ LOW IMPACT (Nice-to-Have)
 - Primary income source (employment, self-employment, retirement, investments)
 
 **Additional Income Sources:**
+
 - Bonus/commission income (with seasonality)
 - Investment income (dividends, interest)
 - Rental income
@@ -240,6 +264,7 @@ LOW IMPACT (Nice-to-Have)
 - Alimony/child support
 
 **Income Dynamics:**
+
 - Income growth trend
 - Income volatility
 - Expected income changes (promotions, job changes)
@@ -248,6 +273,7 @@ LOW IMPACT (Nice-to-Have)
 ### 3. Financial Situation Features
 
 **Assets and Savings:**
+
 - Savings account balances
 - Emergency fund adequacy (months of expenses)
 - Investment portfolio values
@@ -255,6 +281,7 @@ LOW IMPACT (Nice-to-Have)
 - Retirement account balances
 
 **Debt and Obligations:**
+
 - Mortgage principal and interest
 - Monthly mortgage payment
 - Loan balances (auto, student, personal)
@@ -264,6 +291,7 @@ LOW IMPACT (Nice-to-Have)
 - Debt-to-income ratio
 
 **Fixed Obligations:**
+
 - Rent or mortgage amount
 - Insurance premiums (health, auto, life, home)
 - Utilities base costs
@@ -275,6 +303,7 @@ LOW IMPACT (Nice-to-Have)
 ### 4. Housing and Location Features
 
 **Housing Characteristics:**
+
 - Own vs. rent
 - Housing size (square footage, bedrooms)
 - Housing type (apartment, house, condo)
@@ -282,6 +311,7 @@ LOW IMPACT (Nice-to-Have)
 - Property value and trends
 
 **Geographic Features:**
+
 - Urban/suburban/rural classification
 - Metro area (MSA)
 - Cost of living index for location
@@ -293,6 +323,7 @@ LOW IMPACT (Nice-to-Have)
 ### 5. Lifestyle and Preference Features
 
 **Transportation:**
+
 - Number of vehicles owned
 - Vehicle types and ages
 - Commute method (drive, public transit, bike, walk)
@@ -301,6 +332,7 @@ LOW IMPACT (Nice-to-Have)
 - Fuel type (gas, electric, hybrid)
 
 **Dietary and Food Preferences:**
+
 - Dietary restrictions (vegetarian, vegan, gluten-free, etc.)
 - Cooking frequency vs. eating out
 - Grocery shopping patterns (weekly vs. daily, bulk buying)
@@ -308,6 +340,7 @@ LOW IMPACT (Nice-to-Have)
 - Restaurant dining frequency
 
 **Health and Wellness:**
+
 - Gym membership
 - Health conditions requiring regular expenses
 - Prescription medication needs
@@ -315,6 +348,7 @@ LOW IMPACT (Nice-to-Have)
 - Health insurance type and coverage
 
 **Entertainment and Hobbies:**
+
 - Streaming subscriptions
 - Gaming habits
 - Sports participation
@@ -328,6 +362,7 @@ LOW IMPACT (Nice-to-Have)
 ### 1. Calendar Features
 
 **Date-Based:**
+
 - Year
 - Quarter
 - Month
@@ -337,6 +372,7 @@ LOW IMPACT (Nice-to-Have)
 - Day of year
 
 **Cyclical Encoding:**
+
 ```
 For periodic features, use sine/cosine transformations:
 
@@ -354,6 +390,7 @@ Hour encoding (for intraday data):
 ```
 
 **Binary Indicators:**
+
 - Is weekend (0/1)
 - Is month start (0/1)
 - Is month end (0/1)
@@ -365,6 +402,7 @@ Hour encoding (for intraday data):
 ### 2. Holiday and Event Features
 
 **Major Holidays:**
+
 - Christmas season (November-December)
 - Thanksgiving week
 - New Year's week
@@ -375,6 +413,7 @@ Hour encoding (for intraday data):
 - Tax season (January-April)
 
 **Special Events:**
+
 - Black Friday/Cyber Monday
 - Prime Day (for Amazon shoppers)
 - Industry-specific events
@@ -383,6 +422,7 @@ Hour encoding (for intraday data):
 - Natural disasters/emergencies
 
 **Days to/from Event:**
+
 ```
 Features for planning behavior:
 - Days until next major holiday
@@ -396,22 +436,26 @@ Features for planning behavior:
 ### 3. Seasonal Patterns
 
 **Quarterly Seasonality:**
+
 - Q1: Tax preparation, lower spending post-holidays
 - Q2: Spring spending, home improvements
 - Q3: Travel peak, back-to-school
 - Q4: Holiday shopping surge
 
 **Monthly Patterns:**
+
 - Beginning of month: Rent, bills, major expenses
 - Mid-month: Discretionary spending peak
 - End of month: Budget constraints, reduced spending
 
 **Weekly Patterns:**
+
 - Weekday vs. weekend spending
 - Payday timing effects
 - Weekly grocery/shopping routines
 
 **Industry-Specific Seasonality:**
+
 - Retail: Heavy Q4, back-to-school surge
 - Manufacturing: Raw material cycles
 - Agriculture: Planting and harvest seasons
@@ -425,12 +469,14 @@ Features for planning behavior:
 ### 1. Transaction Characteristics
 
 **Volume Metrics:**
+
 - Total transaction count per period
 - Transactions by category
 - Average transactions per day/week
 - Transaction frequency changes
 
 **Value Distribution:**
+
 - Mean transaction amount
 - Median transaction amount
 - Standard deviation of transaction amounts
@@ -438,6 +484,7 @@ Features for planning behavior:
 - Ratio of large transactions (> 2 standard deviations)
 
 **Transaction Types:**
+
 - Credit card purchases
 - Debit card purchases
 - ACH transfers
@@ -450,6 +497,7 @@ Features for planning behavior:
 ### 2. Merchant and Vendor Features
 
 **Merchant Categories:**
+
 - Grocery stores
 - Restaurants and dining
 - Gas stations
@@ -462,6 +510,7 @@ Features for planning behavior:
 - Professional services
 
 **Merchant Attributes:**
+
 - Number of unique merchants per period
 - Merchant concentration (% from top vendors)
 - New merchant appearances
@@ -470,6 +519,7 @@ Features for planning behavior:
 - Online vs. in-person transactions
 
 **Vendor Relationships (Business):**
+
 - Vendor payment terms
 - Vendor reliability scores
 - Vendor price changes
@@ -479,6 +529,7 @@ Features for planning behavior:
 ### 3. Payment Patterns
 
 **Payment Method Preferences:**
+
 - Credit card usage rate
 - Debit card usage rate
 - ACH/bank transfer usage
@@ -486,6 +537,7 @@ Features for planning behavior:
 - Buy-now-pay-later (BNPL) usage
 
 **Payment Timing:**
+
 - Days between purchase and payment
 - Paying bills before vs. after due date
 - Automatic payment enrollment
@@ -499,6 +551,7 @@ Features for planning behavior:
 ### 1. Macroeconomic Indicators
 
 **General Economy:**
+
 - GDP growth rate
 - Consumer Price Index (CPI) - overall and by category
 - Producer Price Index (PPI)
@@ -509,6 +562,7 @@ Features for planning behavior:
 - Stock market indices (S&P 500, Dow, Nasdaq)
 
 **Labor Market:**
+
 - Unemployment rate (national and local)
 - Job openings rate
 - Wage growth rates
@@ -516,6 +570,7 @@ Features for planning behavior:
 - Underemployment rate
 
 **Sector-Specific:**
+
 - Industry-specific price indices
 - Commodity prices (oil, metals, food)
 - Real estate price indices
@@ -525,22 +580,26 @@ Features for planning behavior:
 ### 2. Consumer Confidence and Sentiment
 
 **Confidence Indices:**
+
 - Consumer Confidence Index (Conference Board)
 - Index of Consumer Sentiment (University of Michigan)
 - Consumer Expectations Index
 - Current Economic Conditions Index
 
-**Note:** Research shows moderate correlation between sentiment and actual spending. Use cautiously and validate predictive power in your specific context.
+**Note:** Research shows moderate correlation between sentiment and actual spending. Use cautiously and validate
+predictive power in your specific context.
 
 ### 3. Market Conditions
 
 **Supply and Demand:**
+
 - Inventory levels in retail
 - Supply chain disruptions
 - Shortage indicators
 - Price pressure indices
 
 **Competitive Landscape:**
+
 - Competitor pricing changes
 - New competitor entries
 - Market concentration
@@ -553,18 +612,21 @@ Features for planning behavior:
 ### 1. Spending Behavior Patterns
 
 **Regularity Metrics:**
+
 - Spending consistency score (low variance = consistent)
 - Budget adherence rate
 - Impulse purchase frequency (unusual high-value transactions)
 - Planned vs. unplanned spending ratio
 
 **Purchase Timing:**
+
 - Time of day for purchases
 - Day of week shopping patterns
 - Seasonal buying patterns
 - Advance planning indicators (booking travel months ahead)
 
 **Lifestyle Stability:**
+
 - Residential stability (years at address)
 - Employment stability (years at job)
 - Relationship stability
@@ -573,12 +635,14 @@ Features for planning behavior:
 ### 2. Social and Cultural Factors
 
 **Social Influences:**
+
 - Peer spending patterns (when available)
 - Social media engagement levels
 - Purchase intentions expressed online
 - Social media sentiment about brands/products
 
 **Cultural Events:**
+
 - Religious holidays relevant to household
 - Cultural celebrations
 - Local community events
@@ -587,6 +651,7 @@ Features for planning behavior:
 ### 3. Consumer Confidence (Individual Level)
 
 **Personal Financial Outlook:**
+
 - Job security perception
 - Expected income changes
 - Major purchase plans
@@ -594,6 +659,7 @@ Features for planning behavior:
 - Debt reduction progress
 
 **Economic Outlook:**
+
 - Views on national economy
 - Local economic conditions
 - Industry-specific concerns
@@ -608,86 +674,86 @@ Features for planning behavior:
 **Essential Spending Categories:**
 
 1. **Housing:**
-   - Rent/mortgage
-   - Property taxes
-   - Home insurance
-   - HOA fees
-   - Maintenance and repairs
-   - Home improvements
-   - Utilities (electricity, gas, water, sewage)
-   - Internet and cable
+    - Rent/mortgage
+    - Property taxes
+    - Home insurance
+    - HOA fees
+    - Maintenance and repairs
+    - Home improvements
+    - Utilities (electricity, gas, water, sewage)
+    - Internet and cable
 
 2. **Transportation:**
-   - Vehicle payments
-   - Fuel/charging
-   - Vehicle maintenance and repairs
-   - Vehicle insurance
-   - Registration and taxes
-   - Parking and tolls
-   - Public transportation
-   - Ride-sharing services
+    - Vehicle payments
+    - Fuel/charging
+    - Vehicle maintenance and repairs
+    - Vehicle insurance
+    - Registration and taxes
+    - Parking and tolls
+    - Public transportation
+    - Ride-sharing services
 
 3. **Food:**
-   - Groceries
-   - Restaurant dining
-   - Fast food
-   - Coffee shops
-   - Meal delivery services
-   - Alcohol purchases
-   - Dining with friends/entertainment
+    - Groceries
+    - Restaurant dining
+    - Fast food
+    - Coffee shops
+    - Meal delivery services
+    - Alcohol purchases
+    - Dining with friends/entertainment
 
 4. **Healthcare:**
-   - Health insurance premiums
-   - Doctor visits and co-pays
-   - Prescription medications
-   - Over-the-counter medications
-   - Dental care
-   - Vision care
-   - Mental health services
-   - Medical devices and equipment
+    - Health insurance premiums
+    - Doctor visits and co-pays
+    - Prescription medications
+    - Over-the-counter medications
+    - Dental care
+    - Vision care
+    - Mental health services
+    - Medical devices and equipment
 
 5. **Personal and Family:**
-   - Childcare
-   - Child support/alimony
-   - Education expenses (tuition, books, supplies)
-   - Clothing and shoes
-   - Personal care (haircuts, cosmetics)
-   - Dry cleaning and laundry
-   - Pet care (food, veterinary, grooming)
+    - Childcare
+    - Child support/alimony
+    - Education expenses (tuition, books, supplies)
+    - Clothing and shoes
+    - Personal care (haircuts, cosmetics)
+    - Dry cleaning and laundry
+    - Pet care (food, veterinary, grooming)
 
 **Discretionary Spending Categories:**
 
 6. **Entertainment and Recreation:**
-   - Streaming subscriptions
-   - Gaming
-   - Concerts and events
-   - Movies and theater
-   - Sports activities and equipment
-   - Hobbies and crafts
-   - Books and magazines
+    - Streaming subscriptions
+    - Gaming
+    - Concerts and events
+    - Movies and theater
+    - Sports activities and equipment
+    - Hobbies and crafts
+    - Books and magazines
 
 7. **Travel and Vacation:**
-   - Airfare
-   - Hotels and lodging
-   - Rental cars
-   - Vacation activities
-   - Souvenirs and shopping
+    - Airfare
+    - Hotels and lodging
+    - Rental cars
+    - Vacation activities
+    - Souvenirs and shopping
 
 8. **Shopping:**
-   - Electronics
-   - Home furnishings
-   - Appliances
-   - Gifts
-   - General retail
+    - Electronics
+    - Home furnishings
+    - Appliances
+    - Gifts
+    - General retail
 
 **Financial Obligations:**
 
 9. **Debt Payments:**
-   - Credit card payments
-   - Student loans
-   - Personal loans
-   - Auto loans
-   - Medical debt
+    - Credit card payments
+    - Student loans
+    - Personal loans
+    - Auto loans
+    - Medical debt
 
 10. **Savings and Investments:**
     - Emergency fund contributions
@@ -700,6 +766,7 @@ Features for planning behavior:
 For each spending category, create:
 
 **Historical Patterns:**
+
 - Category spending amount (last period)
 - 3-month average
 - 6-month average
@@ -708,12 +775,14 @@ For each spending category, create:
 - Volatility (standard deviation)
 
 **Budget Features:**
+
 - Budget allocation for category
 - % of total budget
 - Budget variance (actual vs. budget)
 - Consistent over/under-spending
 
 **Relationships:**
+
 - Correlation with other categories
 - Category as % of total spending
 - Category rank by amount
@@ -726,6 +795,7 @@ For each spending category, create:
 ### 1. Ratio and Derived Features
 
 **Financial Ratios:**
+
 ```
 Expense-to-Income Ratio = Total Expenses / Income
 Savings Rate = (Income - Expenses) / Income
@@ -736,6 +806,7 @@ Housing Cost Burden = Housing Costs / Income
 ```
 
 **Efficiency Metrics (Business):**
+
 ```
 CAC Efficiency = Revenue per Customer / CAC
 Spend per Employee = Total Spending / Employee Count
@@ -744,6 +815,7 @@ Burn Multiple = Net Burn / Net New ARR
 ```
 
 **Change Indicators:**
+
 ```
 Period-over-Period Change = (Current - Previous) / Previous
 Acceleration = Current Change - Previous Change
@@ -753,12 +825,14 @@ Momentum = Recent Trend / Long-term Trend
 ### 2. Interaction Features
 
 **Multiplicative Interactions:**
+
 - Income × Family Size (captures scale effects)
 - Temperature × Season (heating/cooling costs)
 - Marketing Spend × Sales Team Size
 - Price × Quality Index
 
 **Conditional Features:**
+
 - Spending increase IF new child AND homeowner
 - Marketing efficiency IF high-growth period
 - Seasonal adjustment IF retail business
@@ -766,11 +840,13 @@ Momentum = Recent Trend / Long-term Trend
 ### 3. Aggregation Strategies
 
 **Temporal Aggregations:**
+
 - Daily → Weekly → Monthly → Quarterly → Annual
 - Rolling windows at multiple scales
 - Cumulative sums over periods
 
 **Categorical Aggregations:**
+
 - By vendor, category, department
 - By payment method
 - By necessity vs. discretionary
@@ -779,6 +855,7 @@ Momentum = Recent Trend / Long-term Trend
 ### 4. Text and Description Features
 
 **Transaction Description Mining:**
+
 - Merchant name extraction
 - Product category identification
 - Location parsing
@@ -786,6 +863,7 @@ Momentum = Recent Trend / Long-term Trend
 - One-time vs. recurring classification
 
 **NLP-Based Features:**
+
 - Sentiment in purchase notes/memos
 - Keyword extraction
 - Topic modeling for spending categories
@@ -794,18 +872,21 @@ Momentum = Recent Trend / Long-term Trend
 ### 5. External Data Integration
 
 **Weather Data:**
+
 - Temperature (heating/cooling costs)
 - Precipitation (affects retail traffic)
 - Severe weather events (emergency spending)
 - Seasonal transitions
 
 **Economic Data:**
+
 - Local housing prices
 - Local unemployment rates
 - Regional cost of living indices
 - Industry-specific indicators
 
 **Alternative Data:**
+
 - Web traffic to retailers
 - App usage patterns
 - Social media purchase intent signals
@@ -869,6 +950,7 @@ FEATURE SELECTION WORKFLOW
 **Typical Importance Hierarchy for Expenditure Forecasting:**
 
 **Tier 1 - Critical Features (Highest Impact):**
+
 1. Recent historical spending (lag 1, lag 2)
 2. Income/revenue (current period)
 3. Seasonal indicators (month, quarter)
@@ -876,6 +958,7 @@ FEATURE SELECTION WORKFLOW
 5. Category-specific historical patterns
 
 **Tier 2 - Important Features (High Impact):**
+
 6. Rolling averages (7-day, 30-day)
 7. Budget allocations
 8. Life events/business changes
@@ -883,6 +966,7 @@ FEATURE SELECTION WORKFLOW
 10. Employee count (for businesses)
 
 **Tier 3 - Useful Features (Medium Impact):**
+
 11. Holiday indicators
 12. Demographic characteristics
 13. Economic indicators
@@ -890,6 +974,7 @@ FEATURE SELECTION WORKFLOW
 15. Transaction frequencies
 
 **Tier 4 - Supplementary Features (Low Impact):**
+
 16. Weather conditions
 17. Consumer sentiment indices
 18. Social media signals
@@ -899,6 +984,7 @@ FEATURE SELECTION WORKFLOW
 ### Domain-Specific Importance
 
 **Business (B2B/SaaS):**
+
 ```
 Top 5 Features:
 1. Headcount (explains 40-60% of spending)
@@ -909,6 +995,7 @@ Top 5 Features:
 ```
 
 **Individual/Household:**
+
 ```
 Top 5 Features:
 1. Previous month spending
@@ -919,6 +1006,7 @@ Top 5 Features:
 ```
 
 **Retail Business:**
+
 ```
 Top 5 Features:
 1. Historical sales
@@ -935,54 +1023,60 @@ Top 5 Features:
 ### Features for Different Model Types
 
 **Classical Time Series Models (ARIMA, ETS):**
+
 - Focus on autocorrelation structure
 - Minimal exogenous features (if any)
 - Stationarity required
 - Key features:
-  * Lagged values
-  * Seasonal components
-  * Trend indicators
+    * Lagged values
+    * Seasonal components
+    * Trend indicators
 
 **Tree-Based Models (XGBoost, LightGBM, CatBoost):**
+
 - Handle many features well
 - Automatic feature interactions
 - Robust to outliers and missing values
 - Key features:
-  * All lag features
-  * Rolling statistics
-  * Categorical encodings
-  * Interaction terms (model creates automatically)
-  * Domain-specific features
+    * All lag features
+    * Rolling statistics
+    * Categorical encodings
+    * Interaction terms (model creates automatically)
+    * Domain-specific features
 
 **Neural Networks (LSTM, GRU, Transformers):**
+
 - Sequence modeling strength
 - Can learn complex patterns
 - Require more data
 - Key features:
-  * Sequential historical data
-  * Multiple related time series (multivariate)
-  * External regressors as additional input channels
-  * Embeddings for categorical features
+    * Sequential historical data
+    * Multiple related time series (multivariate)
+    * External regressors as additional input channels
+    * Embeddings for categorical features
 
 **Linear Models (Ridge, Lasso, ElasticNet):**
+
 - Feature scaling critical
 - Handle multicollinearity via regularization
 - Interpretable coefficients
 - Key features:
-  * Normalized features
-  * Polynomial features for non-linearity
-  * Interaction terms (must create explicitly)
-  * Limited feature count (high-dimensional causes issues)
+    * Normalized features
+    * Polynomial features for non-linearity
+    * Interaction terms (must create explicitly)
+    * Limited feature count (high-dimensional causes issues)
 
 ### Feature Engineering by Use Case
 
 **Short-Term Forecasting (1-7 days):**
+
 - Emphasize recent patterns (lags 1-7)
 - Day-of-week effects
 - Recent rolling averages
 - Immediate external factors (weather, events)
 
 **Medium-Term Forecasting (1-3 months):**
+
 - Balance recent and seasonal patterns
 - Monthly and quarterly seasonality
 - Budget and planning information
@@ -990,6 +1084,7 @@ Top 5 Features:
 - Economic indicators
 
 **Long-Term Forecasting (6+ months):**
+
 - Focus on structural factors
 - Annual seasonality
 - Growth rates and trends
@@ -1004,18 +1099,21 @@ Top 5 Features:
 ### Data Collection Priorities
 
 **Phase 1 - Essential (Minimum Viable Features):**
+
 1. Historical spending data (12+ months)
 2. Income/revenue data
 3. Spending categories
 4. Basic temporal features (date components)
 
 **Phase 2 - Important (Early Enhancement):**
+
 5. Demographics/business characteristics
 6. Budget information
 7. Fixed obligations
 8. Payment schedules
 
 **Phase 3 - Advanced (Optimization):**
+
 9. External economic data
 10. Behavioral patterns
 11. Alternative data sources
@@ -1024,6 +1122,7 @@ Top 5 Features:
 ### Quality Checks
 
 **Data Quality Requirements:**
+
 - Completeness: < 5% missing values for critical features
 - Consistency: Same definitions across time periods
 - Accuracy: Validation against known benchmarks
@@ -1031,6 +1130,7 @@ Top 5 Features:
 - Stability: Feature definitions don't change frequently
 
 **Feature Validation Checklist:**
+
 ```
 □ No future information leakage
 □ Consistent time alignment
@@ -1057,6 +1157,7 @@ Successful expenditure forecasting depends on thoughtful feature engineering tha
 5. **Behavioral Signals** - Habits, preferences, and changes
 
 **Best Practices:**
+
 - Start with simple, high-impact features
 - Validate feature importance through cross-validation
 - Balance domain knowledge with data-driven discovery
@@ -1065,7 +1166,8 @@ Successful expenditure forecasting depends on thoughtful feature engineering tha
 - Maintain feature documentation
 - Plan for feature evolution
 
-**Remember:** More features don't always improve forecasts. Focus on quality over quantity, and always validate that added complexity improves out-of-sample performance.
+**Remember:** More features don't always improve forecasts. Focus on quality over quantity, and always validate that
+added complexity improves out-of-sample performance.
 
 ---
 
@@ -1182,4 +1284,5 @@ Successful expenditure forecasting depends on thoughtful feature engineering tha
 - category_necessity_score (fixed vs. discretionary)
 ```
 
-This comprehensive feature guide provides a strong foundation for building robust expenditure forecasting models for both businesses and individuals.
+This comprehensive feature guide provides a strong foundation for building robust expenditure forecasting models for
+both businesses and individuals.

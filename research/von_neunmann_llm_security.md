@@ -2,18 +2,25 @@
 
 ## Executive Summary
 
-Current Large Language Models (LLMs) suffer from prompt injection vulnerabilities that stem from their Von Neumann-like architecture, where instructions and data coexist in the same memory space. This document explores alternative computing architectures and their potential applications to create more secure LLM systems that maintain clear boundaries between system instructions and user input.
+Current Large Language Models (LLMs) suffer from prompt injection vulnerabilities that stem from their Von Neumann-like
+architecture, where instructions and data coexist in the same memory space. This document explores alternative computing
+architectures and their potential applications to create more secure LLM systems that maintain clear boundaries between
+system instructions and user input.
 
 ## The Von Neumann Vulnerability Problem
 
 ### Core Issue
-In traditional Von Neumann architecture, both instructions and data are stored in the same memory space and accessed through the same bus. Similarly, current LLMs process system prompts and user input through the same token stream, creating fundamental security vulnerabilities:
+
+In traditional Von Neumann architecture, both instructions and data are stored in the same memory space and accessed
+through the same bus. Similarly, current LLMs process system prompts and user input through the same token stream,
+creating fundamental security vulnerabilities:
 
 - **Instruction-Data Confusion**: User input can be crafted to resemble system instructions
 - **Context Pollution**: Malicious prompts can alter the model's behavior by injecting new "rules"
 - **Privilege Escalation**: Users can potentially access system-level functions through carefully crafted inputs
 
 ### Real-World Impact
+
 - Data exfiltration through prompt manipulation
 - Behavioral hijacking of AI assistants
 - Bypassing safety constraints and content filters
@@ -24,6 +31,7 @@ In traditional Von Neumann architecture, both instructions and data are stored i
 ### 1. Harvard Architecture Approach
 
 **Traditional Harvard Design**
+
 - Physically separate instruction and data memory
 - Independent buses for instruction fetch and data access
 - Prevents self-modifying code vulnerabilities
@@ -31,6 +39,7 @@ In traditional Von Neumann architecture, both instructions and data are stored i
 **LLM Implementation: Dual-Stream Processing**
 
 #### Architecture Overview
+
 ```
 System Instructions Stream    User Input Stream
         ↓                           ↓
@@ -45,12 +54,14 @@ System Instructions Stream    User Input Stream
 ```
 
 #### Implementation Details
+
 - **Instruction Memory**: Immutable system prompts, rules, and constraints
 - **Data Memory**: User input, conversation history, and dynamic context
 - **Controlled Interaction**: Predefined interfaces where streams can interact
 - **Validation Gates**: Checkpoints that prevent data from becoming instructions
 
 #### Benefits
+
 - System instructions cannot be modified by user input
 - Clear audit trail of instruction vs. data processing
 - Natural immunity to many injection techniques
@@ -59,6 +70,7 @@ System Instructions Stream    User Input Stream
 ### 2. Dataflow Architecture Approach
 
 **Traditional Dataflow Design**
+
 - Computation occurs when data becomes available
 - No program counter; execution driven by data dependencies
 - Inherently parallel and deterministic
@@ -66,6 +78,7 @@ System Instructions Stream    User Input Stream
 **LLM Implementation: Dependency-Driven Processing**
 
 #### Architecture Overview
+
 ```
 [User Input] → [Sanitizer] → [Intent Classifier]
       ↓              ↓              ↓
@@ -77,12 +90,14 @@ System Instructions Stream    User Input Stream
 ```
 
 #### Implementation Details
+
 - **Token Availability**: Processing only occurs when required input tokens are present
 - **Dependency Chains**: Each processing node has explicit prerequisites
 - **Data-Driven Activation**: System functions activate only with proper data provenance
 - **Immutable Flow**: Once a processing path is established, it cannot be altered mid-execution
 
 #### Benefits
+
 - Natural resistance to injection through dependency requirements
 - Transparent processing pipeline for security auditing
 - Parallel processing capabilities for performance
@@ -91,6 +106,7 @@ System Instructions Stream    User Input Stream
 ### 3. Neuromorphic Computing Approach
 
 **Traditional Neuromorphic Design**
+
 - Event-driven, spike-based processing
 - Parallel neural pathways with specialized functions
 - Adaptive but contained learning mechanisms
@@ -98,6 +114,7 @@ System Instructions Stream    User Input Stream
 **LLM Implementation: Multi-Pathway Processing**
 
 #### Architecture Overview
+
 ```
 Input Layer
      ↓
@@ -118,12 +135,14 @@ Input Layer
 ```
 
 #### Implementation Details
+
 - **Pathway Specialization**: Distinct neural pathways for different input types
 - **Event-Driven Processing**: Neurons fire only when appropriate stimuli are present
 - **Contained Learning**: Updates only occur within designated pathway boundaries
 - **Cross-Pathway Isolation**: Communication occurs through controlled interfaces
 
 #### Benefits
+
 - Biological-inspired security through pathway separation
 - Adaptive responses while maintaining security boundaries
 - Efficient processing through event-driven architecture
@@ -132,6 +151,7 @@ Input Layer
 ### 4. Systolic Array Approach
 
 **Traditional Systolic Design**
+
 - Regular array of processing elements
 - Synchronized data flow through predictable patterns
 - High throughput through parallel computation
@@ -139,6 +159,7 @@ Input Layer
 **LLM Implementation: Pipeline Processing Grid**
 
 #### Architecture Overview
+
 ```
 Stage 1: Input Processing Array
 [Tokenizer] [Sanitizer] [Classifier] [Validator]
@@ -154,12 +175,14 @@ Stage 4: Output Array
 ```
 
 #### Implementation Details
+
 - **Synchronized Processing**: All elements process in lockstep
 - **Predictable Data Flow**: Information moves through predetermined paths
 - **Pipeline Stages**: Clear separation between processing phases
 - **Array Redundancy**: Multiple processing elements provide verification
 
 #### Benefits
+
 - High throughput through parallel processing
 - Predictable execution paths enhance security analysis
 - Built-in redundancy enables error detection
@@ -172,12 +195,14 @@ Stage 4: Output Array
 Inspired by capability-based computing architectures:
 
 #### Core Components
+
 - **Capability Tokens**: Each input source receives specific capability tokens
 - **Privilege Hierarchy**: System instructions require elevated capabilities
 - **Token Verification**: All operations checked against capability requirements
 - **Capability Revocation**: Dynamic adjustment of permissions based on behavior
 
 #### Implementation Example
+
 ```python
 class CapabilityToken:
     def __init__(self, source, privileges, constraints):
@@ -204,24 +229,28 @@ class SecureLLMProcessor:
 Implementing defense in depth through multiple processing stages:
 
 #### Stage 1: Input Sanitization
+
 - **Pattern Matching**: Detect known injection patterns
 - **Encoding Verification**: Ensure proper character encoding
 - **Length Validation**: Prevent buffer overflow-style attacks
 - **Content Classification**: Identify input type and source
 
 #### Stage 2: Intent Analysis
+
 - **Semantic Analysis**: Understand user intent vs. instruction intent
 - **Behavioral Prediction**: Assess potential impact of processing input
 - **Risk Assessment**: Assign risk scores to different input components
 - **Context Validation**: Verify input appropriateness for current context
 
 #### Stage 3: Controlled Execution
+
 - **Sandbox Processing**: Execute user input in isolated environment
 - **Resource Limiting**: Constrain computational resources and access
 - **Monitoring**: Real-time analysis of processing behavior
 - **Rollback Capability**: Ability to undo processing if issues detected
 
 #### Stage 4: Output Validation
+
 - **Content Filtering**: Remove potentially harmful output
 - **Information Leak Detection**: Prevent exposure of system information
 - **Consistency Checking**: Ensure output aligns with system rules
@@ -232,12 +261,14 @@ Implementing defense in depth through multiple processing stages:
 Mathematical approaches to ensure security properties:
 
 #### Security Properties
+
 1. **Non-Interference**: User input cannot affect system instruction processing
 2. **Information Flow Control**: Sensitive data cannot leak through user-controlled channels
 3. **Behavioral Consistency**: System behavior remains consistent regardless of user input
 4. **Termination**: All processing operations complete within bounded time
 
 #### Verification Methods
+
 - **Model Checking**: Exhaustive verification of security properties
 - **Type Systems**: Static analysis to prevent privilege escalation
 - **Information Flow Analysis**: Track data provenance through processing
@@ -248,18 +279,21 @@ Mathematical approaches to ensure security properties:
 ### Technical Challenges
 
 #### Performance Overhead
+
 - Multiple processing streams increase computational requirements
 - Validation stages add latency to response generation
 - Memory overhead from maintaining separate processing contexts
 - Synchronization costs in parallel processing architectures
 
 #### Implementation Complexity
+
 - Existing LLM frameworks not designed for architectural separation
 - Significant engineering effort to retrofit security features
 - Potential compatibility issues with current training methods
 - Debugging and maintenance complexity increases
 
 #### Model Training Considerations
+
 - Training data may need restructuring for architectural approaches
 - Fine-tuning processes must respect architectural boundaries
 - Transfer learning from existing models may be limited
@@ -268,12 +302,14 @@ Mathematical approaches to ensure security properties:
 ### Practical Limitations
 
 #### Flexibility vs. Security Trade-offs
+
 - Strict separation may limit model capabilities
 - User experience could be impacted by validation delays
 - Some legitimate use cases may be blocked by security measures
 - Balance needed between usability and security
 
 #### Ecosystem Integration
+
 - API compatibility with existing systems
 - Developer tooling needs updating for new architectures
 - Training infrastructure requires significant changes
@@ -282,24 +318,28 @@ Mathematical approaches to ensure security properties:
 ## Future Research Directions
 
 ### Hybrid Architectures
+
 - Combining multiple alternative architectures for enhanced security
 - Dynamic architecture selection based on input risk assessment
 - Adaptive security measures that adjust to threat landscape
 - Learning-based optimization of architectural parameters
 
 ### Hardware-Software Co-design
+
 - Specialized hardware for secure LLM processing
 - Hardware-enforced separation of instruction and data streams
 - Cryptographic acceleration for validation processes
 - Trusted execution environments for sensitive operations
 
 ### Formal Methods Integration
+
 - Automated verification of LLM architectures
 - Proof-carrying code for LLM components
 - Certified compilation from high-level specifications
 - Runtime verification of security properties
 
 ### Quantum-Resistant Approaches
+
 - Quantum-safe cryptographic methods for LLM security
 - Quantum computing applications to security verification
 - Post-quantum architectural designs
@@ -307,11 +347,18 @@ Mathematical approaches to ensure security properties:
 
 ## Conclusion
 
-The vulnerabilities inherent in current LLM architectures mirror fundamental issues in Von Neumann computing systems. By drawing inspiration from alternative computing architectures—Harvard, dataflow, neuromorphic, and systolic—we can design LLM systems with enhanced security properties.
+The vulnerabilities inherent in current LLM architectures mirror fundamental issues in Von Neumann computing systems. By
+drawing inspiration from alternative computing architectures—Harvard, dataflow, neuromorphic, and systolic—we can design
+LLM systems with enhanced security properties.
 
-The key insight is architectural: separating instructions from data at the system level, rather than relying solely on prompt engineering or content filtering. While implementation challenges exist, the security benefits of these approaches could be transformative for deploying LLMs in high-stakes environments.
+The key insight is architectural: separating instructions from data at the system level, rather than relying solely on
+prompt engineering or content filtering. While implementation challenges exist, the security benefits of these
+approaches could be transformative for deploying LLMs in high-stakes environments.
 
-Future work should focus on practical implementations that balance security, performance, and usability while maintaining the remarkable capabilities that make LLMs so valuable. The path forward requires collaboration between computer architecture experts, AI safety researchers, and systems engineers to create the next generation of secure artificial intelligence systems.
+Future work should focus on practical implementations that balance security, performance, and usability while
+maintaining the remarkable capabilities that make LLMs so valuable. The path forward requires collaboration between
+computer architecture experts, AI safety researchers, and systems engineers to create the next generation of secure
+artificial intelligence systems.
 
 ## References and Further Reading
 

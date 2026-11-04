@@ -1,6 +1,7 @@
 # Kernel PCA in Deep Neural Networks: Complete Guide with SOTA Implementations (2020-2025)
 
 ## Table of Contents
+
 1. [Introduction](#introduction)
 2. [Mathematical Foundations](#mathematical-foundations)
 3. [Preprocessing and Input Transformation](#1-preprocessing-and-input-transformation)
@@ -15,17 +16,24 @@
 
 ## Introduction
 
-Kernel Principal Component Analysis (KPCA) has emerged as a foundational technique in modern deep learning, bridging the gap between classical machine learning and neural architectures. Recent advances from 2020-2025 demonstrate that KPCA principles can be seamlessly integrated into deep networks, achieving linear computational complexity while maintaining or exceeding baseline performance across diverse applications.
+Kernel Principal Component Analysis (KPCA) has emerged as a foundational technique in modern deep learning, bridging the
+gap between classical machine learning and neural architectures. Recent advances from 2020-2025 demonstrate that KPCA
+principles can be seamlessly integrated into deep networks, achieving linear computational complexity while maintaining
+or exceeding baseline performance across diverse applications.
 
-This comprehensive guide presents state-of-the-art implementations, mathematical formulations, and practical results from recent research, covering eight major integration approaches that have transformed how we think about dimensionality reduction, feature learning, and architectural design in deep neural networks.
+This comprehensive guide presents state-of-the-art implementations, mathematical formulations, and practical results
+from recent research, covering eight major integration approaches that have transformed how we think about
+dimensionality reduction, feature learning, and architectural design in deep neural networks.
 
 ## Mathematical Foundations
 
 ### Classical Kernel PCA
-Given input data $X \in \mathbb{R}^{n \times d}$, kernel PCA maps data to a high-dimensional feature space via $\phi: \mathbb{R}^d \rightarrow \mathcal{H}$, where $\mathcal{H}$ is a reproducing kernel Hilbert space (RKHS).
+
+Given input data $X \in \mathbb{R}^{n \times d}$, kernel PCA maps data to a high-dimensional feature space
+via $\phi: \mathbb{R}^d \rightarrow \mathcal{H}$, where $\mathcal{H}$ is a reproducing kernel Hilbert space (RKHS).
 
 The kernel matrix is defined as:
-$$K_{ij} = k(x_i, x_j) = \langle \phi(x_i), \phi(x_j) \rangle_{\mathcal{H}}$$
+$$K_{ij} = k (x_i, x_j) = \langle \phi (x_i), \phi (x_j) \rangle_{\mathcal{H}}$$
 
 Principal components are found by solving:
 $$K\alpha = \lambda \alpha$$
@@ -33,11 +41,12 @@ $$K\alpha = \lambda \alpha$$
 where $\alpha$ are the eigenvectors and $\lambda$ the eigenvalues.
 
 ### Deep Integration Framework
+
 Modern approaches extend this to multilevel hierarchies:
-$$K^{(j)} = \phi^{(j)}(X^{(j-1)})[\phi^{(j)}(X^{(j-1)})]^T$$
+$$K^{ (j)} = \phi^{ (j)} (X^{ (j-1)})[\phi^{ (j)} (X^{ (j-1)})]^T$$
 
 with forward dependencies:
-$$X^{(j)} = K^{(j)}\alpha^{(j)}$$
+$$X^{ (j)} = K^{ (j)}\alpha^{ (j)}$$
 
 and backward coupling through end-to-end optimization.
 
@@ -50,16 +59,19 @@ and backward coupling through end-to-end optimization.
 **Key Innovation**: Multi-level hierarchical feature extraction with forward and backward dependencies.
 
 #### Mathematical Framework
+
 The DKPCA methodology introduces coupled optimization across multiple levels:
 
-$$\min_{\{\alpha^{(j)}\}} \sum_{j=1}^L \|X^{(j)} - K^{(j)}\alpha^{(j)}\|_F^2 + \lambda \sum_{j=1}^L \|\alpha^{(j)}\|_2^2$$
+$$\min_{\{\alpha^{ (j)}\}} \sum_{j=1}^L \|X^{ (j)} - K^{ (j)}\alpha^{ (j)}\|_F^2 + \lambda \sum_{j=1}^L \|\alpha^{ (j)}\|_2^2$$
 
 where:
-- $K^{(j)} = \phi^{(j)}(X^{(j-1)})[\phi^{(j)}(X^{(j-1)})]^T$
-- $X^{(j)}$ represents features at level $j$
-- $\alpha^{(j)}$ are the principal component coefficients
+
+- $K^{ (j)} = \phi^{ (j)} (X^{ (j-1)})[\phi^{ (j)} (X^{ (j-1)})]^T$
+- $X^{ (j)}$ represents features at level $j$
+- $\alpha^{ (j)}$ are the principal component coefficients
 
 #### SOTA Results
+
 - **15-25% improvement** in explained variance vs shallow KPCA
 - **40% fewer components** for equivalent reconstruction quality
 - **ImageNet benchmarks**: 92.3% reconstruction with 50% fewer PCs
@@ -105,14 +117,16 @@ class DeepKernelPCA:
 **Key Innovation**: Solves reconstruction problem through Random Fourier Features approximation.
 
 #### Mathematical Framework
+
 Using RFF approximation:
-$$k(x,y) \approx z(x)^T z(y)$$
+$$k (x,y) \approx z (x)^T z (y)$$
 
-where $z(x) = \sqrt{\frac{2}{D}} \cos(\omega^T x + b)$ with $\omega \sim p(\omega)$.
+where $z (x) = \sqrt{\frac{2}{D}} \cos (\omega^T x + b)$ with $\omega \sim p (\omega)$.
 
-Complexity reduction: $O(n^2) \rightarrow O(Rd)$
+Complexity reduction: $O (n^2) \rightarrow O (Rd)$
 
 #### SOTA Results
+
 - **Constant space complexity** for inference
 - **Comparable accuracy** to supervised reconstruction
 - **Real-time performance** on streaming data
@@ -160,17 +174,20 @@ class InvertibleKernelPCA:
 **Key Innovation**: Replace dense layers with low-rank kernel approximations.
 
 #### Mathematical Framework
+
 Nyström approximation:
 $$K \approx \tilde{K} = C W^{-1} C^T$$
 
 where:
+
 - $C = K[:, :m]$ (first $m$ columns)
 - $W = K[:m, :m]$ (top-left $m \times m$ block)
 
 #### SOTA Results
+
 - **Competitive performance** with standard CNNs on SVHN/CIFAR-100
 - **Particularly effective** for small datasets (5-20 samples/class)
-- **Time complexity**: $O(n^3) \rightarrow O(m^2n)$
+- **Time complexity**: $O (n^3) \rightarrow O (m^2n)$
 
 #### High-Level Implementation
 
@@ -212,10 +229,12 @@ class NystromKernelLayer(torch.nn.Module):
 **Key Innovation**: **1200x memory reduction** while maintaining accuracy.
 
 #### Mathematical Framework
+
 For translation-invariant kernels:
-$$k(x, y) = k(x - y) \approx \frac{1}{D} \sum_{i=1}^D \cos(\omega_i^T x + b_i) \cos(\omega_i^T y + b_i)$$
+$$k (x, y) = k (x - y) \approx \frac{1}{D} \sum_{i=1}^D \cos (\omega_i^T x + b_i) \cos (\omega_i^T y + b_i)$$
 
 #### SOTA Results
+
 - **Memory reduction**: 1200x vs full kernel matrices
 - **Accuracy maintained** on standard benchmarks
 - **Linear scaling** in dataset size
@@ -251,15 +270,17 @@ class RFFKernelLayer(torch.nn.Module):
 
 ### Performer: Linear Attention via FAVOR+
 
-**Key Innovation**: **O(N) complexity** vs **O(N²)** for vanilla attention.
+**Key Innovation**: **O (N) complexity** vs **O (N²)** for vanilla attention.
 
 #### Mathematical Framework
+
 FAVOR+ approximation:
-$$\text{Attention}(Q, K, V) \approx \frac{\phi(Q)(\phi(K)^T V)}{\phi(Q)(\phi(K)^T \mathbf{1})}$$
+$$\text{Attention} (Q, K, V) \approx \frac{\phi (Q)(\phi (K)^T V)}{\phi (Q)(\phi (K)^T \mathbf{1})}$$
 
 where $\phi$ is a positive random feature map.
 
 #### SOTA Results
+
 - **65K token sequences** processed efficiently
 - **4-8x memory reduction**
 - **Comparable accuracy** to full attention
@@ -317,12 +338,14 @@ class PerformerAttention(torch.nn.Module):
 **Key Innovation**: Decompose attention into low-rank and sparse components.
 
 #### Mathematical Framework
+
 Principal Component Pursuit:
 $$\min_{L,S} \|L\|_* + \lambda \|S\|_1 \text{ subject to } A = L + S$$
 
 where $A$ is the attention matrix, $L$ is low-rank, $S$ is sparse.
 
 #### SOTA Results
+
 - **>1% accuracy improvement** on ImageNet-1K
 - **~3 AUPR improvement** on ImageNet-O
 - **15-25% better performance** under adversarial attacks
@@ -385,13 +408,15 @@ class RPCAttention(torch.nn.Module):
 **Key Innovation**: Replace Gaussian posteriors with kernel density estimation.
 
 #### Mathematical Framework
+
 KDE posterior:
-$$q_\phi(z|x) = \frac{1}{n} \sum_{i=1}^n K_h(z - z_i)$$
+$$q_\phi (z|x) = \frac{1}{n} \sum_{i=1}^n K_h (z - z_i)$$
 
 using Epanechnikov kernel:
-$$K_h(u) = \frac{3}{4h}(1 - (u/h)^2) \mathbf{1}_{|u| \leq h}$$
+$$K_h (u) = \frac{3}{4h} (1 - (u/h)^2) \mathbf{1}_{|u| \leq h}$$
 
 #### SOTA Results
+
 - **Better modeling** of non-Gaussian latent distributions
 - **Superior performance** on Iris, Wine, Seed datasets
 - **15-20% improvement** in anomaly detection accuracy
@@ -458,10 +483,12 @@ class KernelVAE(torch.nn.Module):
 **Key Innovation**: Convolutional VAE as learnable kernel for PCA extraction.
 
 #### Mathematical Framework
+
 Learnable kernel PCA transformation:
-$$K_{ij} = \text{VAE}_\theta(\text{distance}(x_i, x_j))$$
+$$K_{ij} = \text{VAE}_\theta (\text{distance} (x_i, x_j))$$
 
 #### SOTA Results
+
 - **Successful recovery** of latent driver parameters in chaotic systems
 - **Climate modeling applications** with improved accuracy
 - **Spatio-temporal pattern discovery** in Earth observation data
@@ -526,13 +553,15 @@ class SupernoVAE(torch.nn.Module):
 **Key Innovation**: View deep CNNs as elements of RKHS with natural regularization.
 
 #### Mathematical Framework
+
 RKHS norm regularization:
 $$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{task}} + \lambda \|f\|_{\mathcal{H}}^2$$
 
 with Lipschitz control:
-$$|f(x) - f(x')| \leq \|f\|_{\mathcal{H}} \cdot \|\Phi(x) - \Phi(x')\|_{\mathcal{H}}$$
+$$|f (x) - f (x')| \leq \|f\|_{\mathcal{H}} \cdot \|\Phi (x) - \Phi (x')\|_{\mathcal{H}}$$
 
 #### SOTA Results
+
 - **CIFAR-10 with 1000 examples**: 55.32% vs 51.32% standard weight decay
 - **Improved generalization bounds**
 - **Better robustness** under adversarial conditions
@@ -580,10 +609,12 @@ class RKHSRegularizedNetwork(torch.nn.Module):
 **Key Innovation**: Reduce distributional differences across network layers.
 
 #### Mathematical Framework
+
 MMD regularization across layers:
-$$\text{MMD}^2(\mathcal{P}, \mathcal{Q}) = \mathbb{E}_{x,x' \sim \mathcal{P}}[k(x,x')] + \mathbb{E}_{y,y' \sim \mathcal{Q}}[k(y,y')] - 2\mathbb{E}_{x \sim \mathcal{P}, y \sim \mathcal{Q}}[k(x,y)]$$
+$$\text{MMD}^2 (\mathcal{P}, \mathcal{Q}) = \mathbb{E}_{x,x' \sim \mathcal{P}}[k (x,x')] + \mathbb{E}_{y,y' \sim \mathcal{Q}}[k (y,y')] - 2\mathbb{E}_{x \sim \mathcal{P}, y \sim \mathcal{Q}}[k (x,y)]$$
 
 #### SOTA Results
+
 - **Improved robustness** against distribution shift
 - **Better domain adaptation** performance
 - **15-20% improvement** over standard methods on Office-31
@@ -650,12 +681,14 @@ class MMDRegularizedNetwork(torch.nn.Module):
 **Key Innovation**: **0.23 dB PSNR improvement** while running **4.8× faster**.
 
 #### Mathematical Framework
+
 Multi-scale kernel attention:
-$$\text{Attention}_{\text{multi}}(Q, K, V) = \sum_{s=1}^S w_s \cdot \text{Attention}_s(Q_s, K_s, V_s)$$
+$$\text{Attention}_{\text{multi}} (Q, K, V) = \sum_{s=1}^S w_s \cdot \text{Attention}_s (Q_s, K_s, V_s)$$
 
 where $s$ indexes different scales and $w_s$ are learnable weights.
 
 #### SOTA Results
+
 - **0.23 dB PSNR improvement** in super-resolution
 - **4.8× faster** than comparable methods
 - **Reduced parameter count** with better performance
@@ -723,11 +756,13 @@ class DualPathLargeKernel(torch.nn.Module):
 **Key Innovation**: Multi-resolution processing capturing different frequency components.
 
 #### Mathematical Framework
+
 Pyramid-style decomposition:
-$$X^{(s)} = \text{Downsample}_s(X), \quad s = 1, 2, \ldots, S$$
-$$K^{(s)} = \text{KPCA}(X^{(s)})$$
+$$X^{ (s)} = \text{Downsample}_s (X), \quad s = 1, 2, \ldots, S$$
+$$K^{ (s)} = \text{KPCA} (X^{ (s)})$$
 
 #### SOTA Results
+
 - **Effective in medical imaging** and remote sensing
 - **Multi-scale pattern discovery** in complex datasets
 - **Better feature hierarchies** than single-scale methods
@@ -807,15 +842,17 @@ class KernelPCALayer(torch.nn.Module):
 **Key Innovation**: Bridge graph kernels and GNNs with **97.2% accuracy on MUTAG** vs **89.4% for GIN**.
 
 #### Mathematical Framework
+
 Multilayer kernel construction:
-$$K^{(l+1)}(G, G') = \sum_{v \in V(G)} \sum_{v' \in V(G')} k^{(l)}(N_v, N_{v'})$$
+$$K^{ (l+1)} (G, G') = \sum_{v \in V (G)} \sum_{v' \in V (G')} k^{ (l)} (N_v, N_{v'})$$
 
 where $N_v$ is the neighborhood of vertex $v$.
 
 #### SOTA Results
+
 - **MUTAG**: 97.2% vs 89.4% (GIN)
 - **PROTEINS**: 76.4% accuracy
-- **PTC**: 70.8% accuracy  
+- **PTC**: 70.8% accuracy
 - **NCI1**: 83.9% accuracy
 
 #### High-Level Implementation
@@ -893,11 +930,13 @@ class GraphKernelLayer(torch.nn.Module):
 **Key Innovation**: **0.01x to 0.25x faster training** while outperforming on 5/8 benchmarks.
 
 #### Mathematical Framework
+
 Message passing with kernel aggregation:
-$$m_{ij}^{(l)} = k(h_i^{(l)}, h_j^{(l)}) \cdot h_j^{(l)}$$
-$$h_i^{(l+1)} = \sigma\left(\sum_{j \in N(i)} m_{ij}^{(l)}\right)$$
+$$m_{ij}^{ (l)} = k (h_i^{ (l)}, h_j^{ (l)}) \cdot h_j^{ (l)}$$
+$$h_i^{ (l+1)} = \sigma\left (\sum_{j \in N (i)} m_{ij}^{ (l)}\right)$$
 
 #### SOTA Results
+
 - **2-5x faster training** vs attention-based graph transformers
 - **10-15% MAE improvement** over standard MPNNs on QM9
 - **5-8% improvement** on ZINC datasets
@@ -974,13 +1013,15 @@ class KernelMessagePassingLayer(torch.nn.Module):
 **Key Innovation**: **91.5% average accuracy on Office-31** through nonlinear correlation alignment.
 
 #### Mathematical Framework
+
 Deep CORAL loss:
 $$\mathcal{L}_{\text{CORAL}} = \frac{1}{4d^2} \|C_S - C_T\|_F^2$$
 
 Extended with kernel mapping:
-$$C_S = \frac{1}{n_S-1}(\phi(D_S)^T \phi(D_S) - \frac{1}{n_S}\mathbf{1}\mathbf{1}^T \phi(D_S)^T \phi(D_S))$$
+$$C_S = \frac{1}{n_S-1} (\phi (D_S)^T \phi (D_S) - \frac{1}{n_S}\mathbf{1}\mathbf{1}^T \phi (D_S)^T \phi (D_S))$$
 
 #### SOTA Results
+
 - **Office-31**: 91.5% average accuracy
 - **Office-Home**: 68.7% accuracy
 - **3-5x faster convergence** than adversarial methods
@@ -1049,13 +1090,15 @@ class DeepCORALKernel(torch.nn.Module):
 **Key Innovation**: **15-20% improvement** over standard MMD through dynamic kernel weighting.
 
 #### Mathematical Framework
+
 Multi-kernel MMD:
-$$\text{MMD}_k^2(\mathcal{P}, \mathcal{Q}) = \left\|\sum_{k=1}^K \beta_k \mu_k(\mathcal{P}) - \sum_{k=1}^K \beta_k \mu_k(\mathcal{Q})\right\|_{\mathcal{H}}^2$$
+$$\text{MMD}_k^2 (\mathcal{P}, \mathcal{Q}) = \left\|\sum_{k=1}^K \beta_k \mu_k (\mathcal{P}) - \sum_{k=1}^K \beta_k \mu_k (\mathcal{Q})\right\|_{\mathcal{H}}^2$$
 
 with optimal kernel weights:
-$$\beta^* = \arg\max_{\beta \geq 0, \|\beta\|_2=1} \text{MMD}_{\beta}(\mathcal{P}, \mathcal{Q})$$
+$$\beta^* = \arg\max_{\beta \geq 0, \|\beta\|_2=1} \text{MMD}_{\beta} (\mathcal{P}, \mathcal{Q})$$
 
 #### SOTA Results
+
 - **Office-31**: 15-20% improvement over standard MMD
 - **Robust performance** across medical imaging, fault diagnosis
 - **Better adaptation** in remote sensing applications
@@ -1135,26 +1178,26 @@ class MultiKernelDomainAdapter(torch.nn.Module):
 
 ### Framework Availability
 
-| Framework | Libraries | Key Features |
-|-----------|-----------|--------------|
-| **PyTorch** | `torch-pca`, `deepkpca` | Fully differentiable, GPU acceleration |
-| **TensorFlow** | `tensorflow-transform`, `tf.signal` | Distributed processing, TFX integration |
-| **JAX** | `jax-sklearn`, custom implementations | JIT compilation, automatic differentiation |
-| **scikit-learn** | `RBFSampler`, `Nystroem` | Standard pipeline integration |
+| Framework        | Libraries                             | Key Features                               |
+|------------------|---------------------------------------|--------------------------------------------|
+| **PyTorch**      | `torch-pca`, `deepkpca`               | Fully differentiable, GPU acceleration     |
+| **TensorFlow**   | `tensorflow-transform`, `tf.signal`   | Distributed processing, TFX integration    |
+| **JAX**          | `jax-sklearn`, custom implementations | JIT compilation, automatic differentiation |
+| **scikit-learn** | `RBFSampler`, `Nystroem`              | Standard pipeline integration              |
 
 ### Performance Benchmarks
 
-| Application | Memory Reduction | Speed Improvement | Accuracy Gain |
-|-------------|------------------|-------------------|---------------|
-| **Attention Mechanisms** | 4-8x | 2-5x (seq >2K) | 1-3% (GLUE) |
-| **Image Classification** | 40% fewer PCs | 15-25% faster | 1-5% accuracy |
-| **Molecular Property** | 10-15% reduction | 2-5x training | 10-25% MAE improvement |
-| **Domain Adaptation** | Standard | 3-5x convergence | 15-20% improvement |
+| Application              | Memory Reduction | Speed Improvement | Accuracy Gain          |
+|--------------------------|------------------|-------------------|------------------------|
+| **Attention Mechanisms** | 4-8x             | 2-5x (seq >2K)    | 1-3% (GLUE)            |
+| **Image Classification** | 40% fewer PCs    | 15-25% faster     | 1-5% accuracy          |
+| **Molecular Property**   | 10-15% reduction | 2-5x training     | 10-25% MAE improvement |
+| **Domain Adaptation**    | Standard         | 3-5x convergence  | 15-20% improvement     |
 
 ### Best Practices
 
 1. **Memory Optimization**: Use Random Fourier Features for large-scale applications
-2. **Computational Efficiency**: Leverage Nyström approximation for moderate datasets  
+2. **Computational Efficiency**: Leverage Nyström approximation for moderate datasets
 3. **Accuracy**: Combine multiple kernel types for robust performance
 4. **Scalability**: Implement hierarchical processing for multi-scale data
 
@@ -1167,4 +1210,6 @@ class MultiKernelDomainAdapter(torch.nn.Module):
 
 ---
 
-This comprehensive guide demonstrates that Kernel PCA has evolved from a classical dimensionality reduction technique into a fundamental component of modern deep learning architectures, offering theoretical rigor, computational efficiency, and superior performance across diverse applications.
+This comprehensive guide demonstrates that Kernel PCA has evolved from a classical dimensionality reduction technique
+into a fundamental component of modern deep learning architectures, offering theoretical rigor, computational
+efficiency, and superior performance across diverse applications.

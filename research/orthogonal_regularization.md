@@ -1,6 +1,9 @@
 # Comprehensive Guide to Orthonormal Regularization in Deep Neural Networks
 
-> **TL;DR**: This guide presents a complete analysis of orthonormal regularization as a principled alternative to L2 regularization in neural networks with normalization layers. We cover the mathematical foundation, auto-adjusting scaling strategies, and introduce the **OrthoBlock** architecture that combines orthonormal weights with intelligent normalization for geometrically stable, directional representations.
+> **TL;DR**: This guide presents a complete analysis of orthonormal regularization as a principled alternative to L2
+> regularization in neural networks with normalization layers. We cover the mathematical foundation, auto-adjusting
+> scaling strategies, and introduce the **OrthoBlock** architecture that combines orthonormal weights with intelligent
+> normalization for geometrically stable, directional representations.
 
 ---
 
@@ -38,7 +41,8 @@ This combination creates a **mathematical contradiction**:
 2. **Normalization**: Compensates by rescaling outputs
    $$\hat{x} = \frac{x - \mathbb{E}[x]}{\sqrt{\text{Var}[x] + \epsilon}} \cdot \gamma + \beta$$
 
-3. **The Paradox**: Networks maintain identical functional behavior even as weights shrink indefinitely, creating an inefficient training dynamic.
+3. **The Paradox**: Networks maintain identical functional behavior even as weights shrink indefinitely, creating an
+   inefficient training dynamic.
 
 ### 1.2 Theoretical Analysis of the Contradiction
 
@@ -53,6 +57,7 @@ After batch normalization:
 $$\hat{z}' = \frac{\alpha z - \alpha\mu_z}{\sqrt{\alpha^2\sigma_z^2 + \epsilon}} \gamma + \beta = \frac{z - \mu_z}{\sqrt{\sigma_z^2 + \epsilon/\alpha^2}} \gamma + \beta$$
 
 **Critical Observation**: As $\alpha \rightarrow 0$ due to L2 regularization:
+
 - Weights decay toward zero
 - BatchNorm's $\gamma$ increases to compensate
 - The effective transformation remains functionally unchanged
@@ -62,16 +67,17 @@ $$\hat{z}' = \frac{\alpha z - \alpha\mu_z}{\sqrt{\alpha^2\sigma_z^2 + \epsilon}}
 
 This inefficiency manifests in several ways:
 
-| Consequence | Impact |
-|-------------|--------|
-| **Wasted Computation** | Optimization energy spent on redundant weight-scale adjustments |
-| **Hyperparameter Sensitivity** | Requires careful tuning of learning rates as weights shrink |
-| **Numerical Instability** | Extremely small weights can lead to underflow issues |
-| **Suboptimal Representations** | Redundant features when weights aren't properly structured |
+| Consequence                    | Impact                                                          |
+|--------------------------------|-----------------------------------------------------------------|
+| **Wasted Computation**         | Optimization energy spent on redundant weight-scale adjustments |
+| **Hyperparameter Sensitivity** | Requires careful tuning of learning rates as weights shrink     |
+| **Numerical Instability**      | Extremely small weights can lead to underflow issues            |
+| **Suboptimal Representations** | Redundant features when weights aren't properly structured      |
 
 ### 1.4 Enter Orthonormal Regularization
 
 Orthonormal regularization offers a **geometrically principled** alternative that:
+
 - Maintains stable weight magnitudes (unit norm)
 - Encourages diverse, non-redundant features (orthogonality)
 - Complements normalization layers instead of fighting them
@@ -83,7 +89,8 @@ Orthonormal regularization offers a **geometrically principled** alternative tha
 
 ### 2.1 Orthonormality Definition
 
-For a weight matrix $W \in \mathbb{R}^{m \times n}$ (where typically $m \leq n$ in neural networks), orthonormality requires:
+For a weight matrix $W \in \mathbb{R}^{m \times n}$ (where typically $m \leq n$ in neural networks), orthonormality
+requires:
 
 $$W W^T = I_m$$
 
@@ -93,6 +100,7 @@ This enforces two critical properties:
 2. **Orthogonality**: Different rows are orthogonal: $w_i \cdot w_j = 0$ for $i \neq j$
 
 **Geometric Interpretation**:
+
 ```
 Standard Weights              Orthonormal Weights
 ┌────────────┐               ┌────────────┐
@@ -113,19 +121,22 @@ The orthonormal regularization loss penalizes deviation from orthonormality:
 $$\mathcal{L}_{\text{ortho}} = \lambda \cdot \|W W^T - I\|_F^2$$
 
 Where:
+
 - $\|\cdot\|_F$ is the Frobenius norm
 - $\lambda$ is the regularization strength
 - $I$ is the identity matrix
 
-**For Convolutional Layers**: Reshape 4D tensor $(k_h, k_w, c_{\text{in}}, c_{\text{out}})$ to 2D matrix $(c_{\text{out}}, k_h \times k_w \times c_{\text{in}})$
+**For Convolutional Layers**: Reshape 4D tensor $(k_h, k_w, c_{\text{in}}, c_{\text{out}})$ to 2D
+matrix $(c_{\text{out}}, k_h \times k_w \times c_{\text{in}})$
 
 ### 2.3 Gradient Analysis
 
 The gradient of orthonormal regularization is:
 
-$$\frac{\partial \mathcal{L}_{\text{ortho}}}{\partial W} = 4\lambda \cdot W(W^T W - I)$$
+$$\frac{\partial \mathcal{L}_{\text{ortho}}}{\partial W} = 4\lambda \cdot W (W^T W - I)$$
 
-**Key Insight**: This gradient pushes $W$ toward the Stiefel manifold (the space of orthonormal matrices), not toward zero.
+**Key Insight**: This gradient pushes $W$ toward the Stiefel manifold (the space of orthonormal matrices), not toward
+zero.
 
 ```
 Gradient Direction Comparison:
@@ -144,13 +155,13 @@ L2 Regularization:            Orthonormal Regularization:
 
 ### 2.4 Mathematical Benefits
 
-| Benefit | Explanation | Impact |
-|---------|-------------|--------|
-| **Stable Magnitude** | No continuous shrinkage | Eliminates contradiction with normalization |
-| **Conditioning** | Condition number = 1 | Optimal gradient flow |
-| **Geometry Preservation** | Orthonormal $\Rightarrow$ angles/distances preserved | Maintains input structure |
-| **Feature Diversity** | Orthogonality $\Rightarrow$ maximally independent | Reduces redundancy |
-| **Efficient Parameters** | Each filter captures unique information | Better capacity utilization |
+| Benefit                   | Explanation                                          | Impact                                      |
+|---------------------------|------------------------------------------------------|---------------------------------------------|
+| **Stable Magnitude**      | No continuous shrinkage                              | Eliminates contradiction with normalization |
+| **Conditioning**          | Condition number = 1                                 | Optimal gradient flow                       |
+| **Geometry Preservation** | Orthonormal $\Rightarrow$ angles/distances preserved | Maintains input structure                   |
+| **Feature Diversity**     | Orthogonality $\Rightarrow$ maximally independent    | Reduces redundancy                          |
+| **Efficient Parameters**  | Each filter captures unique information              | Better capacity utilization                 |
 
 ### 2.5 Decomposition of the Regularization Loss
 
@@ -159,6 +170,7 @@ The Frobenius norm can be decomposed into diagonal and off-diagonal terms:
 $$\|W W^T - I\|_F^2 = \underbrace{\sum_{i=1}^{m} (w_i^T w_i - 1)^2}_{\text{Norm penalty}} + \underbrace{\sum_{i \neq j} (w_i^T w_j)^2}_{\text{Orthogonality penalty}}$$
 
 This decomposition reveals:
+
 - **Norm penalty**: Pushes each filter toward unit length
 - **Orthogonality penalty**: Pushes filters to be perpendicular
 
@@ -168,12 +180,14 @@ This decomposition reveals:
 
 ### 3.1 The Scaling Problem
 
-A critical challenge with orthonormal regularization is that its magnitude **scales with layer size**. Consider two layers:
+A critical challenge with orthonormal regularization is that its magnitude **scales with layer size**. Consider two
+layers:
 
 - Small layer: 16 filters → Gram matrix $16 \times 16$ = 256 elements
 - Large layer: 128 filters → Gram matrix $128 \times 128$ = 16,384 elements
 
 Using the same $\lambda$ causes:
+
 - **Underregularization** of small layers
 - **Overregularization** of large layers
 
@@ -185,39 +199,40 @@ Let $n = $ number of output filters (rows of reshaped $W$).
 
 $$\mathcal{L}_{\text{raw}} = \lambda \cdot \|W^T W - I\|_F^2$$
 
-**Scaling Behavior**: $O(n^2)$ - grows quadratically with layer size
+**Scaling Behavior**: $O (n^2)$ - grows quadratically with layer size
 
 #### Strategy 2: Matrix Scaling (Recommended)
 
 $$\mathcal{L}_{\text{matrix}} = \lambda \cdot \frac{\|W^T W - I\|_F^2}{n^2}$$
 
-**Scaling Behavior**: $O(1)$ - remains constant across layer sizes
+**Scaling Behavior**: $O (1)$ - remains constant across layer sizes
 
 #### Strategy 3: Diagonal Scaling
 
 $$\mathcal{L}_{\text{diagonal}} = \lambda \cdot \frac{\|W^T W - I\|_F^2}{n}$$
 
-**Scaling Behavior**: $O(n)$ - grows linearly with layer size
+**Scaling Behavior**: $O (n)$ - grows linearly with layer size
 
 #### Strategy 4: Off-Diagonal Scaling
 
 $$\mathcal{L}_{\text{off-diagonal}} = \lambda \cdot \frac{\|W^T W - I\|_F^2}{n^2 - n}$$
 
-**Scaling Behavior**: $O(1)$ - similar to matrix scaling for large $n$
+**Scaling Behavior**: $O (1)$ - similar to matrix scaling for large $n$
 
 ### 3.3 Empirical Comparison
 
 Tested on four configurations with increasing dimensions:
 
-| Configuration | Filters | Gram Size | Raw Loss | Matrix | Diagonal | Off-Diag |
-|---------------|---------|-----------|----------|--------|----------|----------|
-| Small         | 16      | 16×16     | 3.245    | 0.0127 | 0.2028   | 0.0135   |
-| Medium        | 32      | 32×32     | 11.872   | 0.0116 | 0.3710   | 0.0120   |
-| Large         | 64      | 64×64     | 43.981   | 0.0107 | 0.6872   | 0.0109   |
-| Very Large    | 128     | 128×128   | 168.254  | 0.0103 | 1.3145   | 0.0104   |
-| **Growth**    | 8×      | 64×       | **51.9×**| **0.81×** | **6.5×** | **0.77×** |
+| Configuration | Filters | Gram Size | Raw Loss  | Matrix    | Diagonal | Off-Diag  |
+|---------------|---------|-----------|-----------|-----------|----------|-----------|
+| Small         | 16      | 16×16     | 3.245     | 0.0127    | 0.2028   | 0.0135    |
+| Medium        | 32      | 32×32     | 11.872    | 0.0116    | 0.3710   | 0.0120    |
+| Large         | 64      | 64×64     | 43.981    | 0.0107    | 0.6872   | 0.0109    |
+| Very Large    | 128     | 128×128   | 168.254   | 0.0103    | 1.3145   | 0.0104    |
+| **Growth**    | 8×      | 64×       | **51.9×** | **0.81×** | **6.5×** | **0.77×** |
 
 **Visualization**:
+
 ```
 Normalized Loss vs. Filter Count
   ^
@@ -243,17 +258,17 @@ Normalized Loss vs. Filter Count
 
 **Why Matrix Scaling Works**:
 
-For randomly initialized weights from $\mathcal{N}(0, \sigma^2)$, the expected Frobenius norm scales as:
+For randomly initialized weights from $\mathcal{N} (0, \sigma^2)$, the expected Frobenius norm scales as:
 
 $$\mathbb{E}[\|W^T W - I\|_F^2] \propto n^2$$
 
 By dividing by $n^2$, we normalize for this natural scaling, maintaining:
 
-$$\mathcal{L}_{\text{matrix}} = \lambda \cdot \frac{O(n^2)}{n^2} = O(1)$$
+$$\mathcal{L}_{\text{matrix}} = \lambda \cdot \frac{O (n^2)}{n^2} = O (1)$$
 
 **Why Diagonal Scaling Fails**:
 
-$$\mathcal{L}_{\text{diagonal}} = \lambda \cdot \frac{O(n^2)}{n} = O(n)$$
+$$\mathcal{L}_{\text{diagonal}} = \lambda \cdot \frac{O (n^2)}{n} = O (n)$$
 
 This only partially accounts for quadratic growth, causing linear scaling with layer size.
 
@@ -281,9 +296,11 @@ Without Matrix Scaling:           With Matrix Scaling:
 
 ### 4.1 Motivation: Beyond Simple Regularization
 
-While orthonormal regularization addresses the L2-normalization conflict, we can design a complete architectural block that maximally exploits orthonormal weights. The key insight:
+While orthonormal regularization addresses the L2-normalization conflict, we can design a complete architectural block
+that maximally exploits orthonormal weights. The key insight:
 
-> **If weights are already well-conditioned through orthonormality, we only need to normalize the mean (not variance) until final L2 projection.**
+> **If weights are already well-conditioned through orthonormality, we only need to normalize the mean (not variance)
+until final L2 projection.**
 
 ### 4.2 Complete Architecture
 
@@ -326,25 +343,27 @@ While orthonormal regularization addresses the L2-normalization conflict, we can
 
 ### 4.3 Component Breakdown
 
-| Stage | Purpose | Mathematical Constraint | Key Property |
-|-------|---------|------------------------|--------------|
-| **Dense + Ortho** | Well-conditioned linear map | $W^T W \approx I$ | Stable magnitudes, no redundancy |
-| **Centering Norm** | Zero-mean activations | $\mu = 0$ | Preserves variance information |
-| **Logit Norm** | Unit-norm activations | $\|z''\|_2 = 1$ | Projects onto hypersphere |
-| **Scale [0,1]** | Sparse, learnable attention | $0 \leq s_c \leq 1$ | Feature selection mechanism |
+| Stage              | Purpose                     | Mathematical Constraint | Key Property                     |
+|--------------------|-----------------------------|-------------------------|----------------------------------|
+| **Dense + Ortho**  | Well-conditioned linear map | $W^T W \approx I$       | Stable magnitudes, no redundancy |
+| **Centering Norm** | Zero-mean activations       | $\mu = 0$               | Preserves variance information   |
+| **Logit Norm**     | Unit-norm activations       | $\|z''\|_2 = 1$         | Projects onto hypersphere        |
+| **Scale [0,1]**    | Sparse, learnable attention | $0 \leq s_c \leq 1$     | Feature selection mechanism      |
 
 ### 4.4 Stage-by-Stage Analysis
 
 #### Stage 1: Dense Layer with Soft Orthonormal Regularization
 
-$$\mathcal{L}_{\text{ortho}} = \lambda(t) \cdot \frac{\|W^T W - I\|_F^2}{n^2}$$
+$$\mathcal{L}_{\text{ortho}} = \lambda (t) \cdot \frac{\|W^T W - I\|_F^2}{n^2}$$
 
 **Key Features**:
+
 - Uses **matrix scaling** for consistent regularization across layer sizes
-- Time-dependent $\lambda(t)$ allows gradual relaxation (strong early, weak late)
+- Time-dependent $\lambda (t)$ allows gradual relaxation (strong early, weak late)
 - "Soft" constraint: guides weights toward orthonormality without hard projection
 
 **Geometric View**:
+
 ```
 Weight Space              Stiefel Manifold
 ┌────────────┐           ┌────────────┐
@@ -357,33 +376,35 @@ Weight Space              Stiefel Manifold
 
 #### Stage 2: Centering Normalization
 
-$$\text{CN}(z) = z - \mu, \quad \mu = \frac{1}{B}\sum_{i=1}^{B} z_i$$
+$$\text{CN} (z) = z - \mu, \quad \mu = \frac{1}{B}\sum_{i=1}^{B} z_i$$
 
 **Why Mean-Only Normalization?**
 
 Traditional Layer Normalization:
-$$\text{LN}(z) = \frac{z - \mu}{\sigma} \cdot \gamma + \beta$$
+$$\text{LN} (z) = \frac{z - \mu}{\sigma} \cdot \gamma + \beta$$
 
 This enforces both $\mu = 0$ and $\sigma = 1$, which is **redundant** with orthonormal weights:
 
-| Property | Orthonormal Weights | Layer Norm | Centering Norm |
-|----------|---------------------|------------|----------------|
-| Controls scale | ✓ (via unit norm) | ✓ (via $\sigma$ normalization) | ✗ |
-| Centers distribution | ✗ | ✓ | ✓ |
-| Preserves variance info | ✓ | ✗ | ✓ |
+| Property                | Orthonormal Weights | Layer Norm                      | Centering Norm |
+|-------------------------|---------------------|---------------------------------|----------------|
+| Controls scale          | ✓ (via unit norm)  | ✓ (via $\sigma$ normalization) | ✗             |
+| Centers distribution    | ✗                  | ✓                              | ✓             |
+| Preserves variance info | ✓                  | ✗                              | ✓             |
 
 **Gradient Characteristics**:
+
 - Jacobian is $(I - \frac{1}{B}\mathbf{1}\mathbf{1}^T)$ - a rank-1 adjustment
 - Ensures $\sum_i \frac{\partial L}{\partial z_i} = 0$ (gradients sum to zero)
 - Milder coupling than full Layer Norm covariance
 
 #### Stage 3: Logit (L2) Normalization
 
-$$\text{LN}_{\text{logit}}(z') = \frac{z'}{\|z'\|_2 + \epsilon}$$
+$$\text{LN}_{\text{logit}} (z') = \frac{z'}{\|z'\|_2 + \epsilon}$$
 
 **Purpose**: Projects centered features onto the unit hypersphere.
 
 **Geometric Interpretation**:
+
 ```
 Before L2 Norm                After L2 Norm
 (centered cloud)              (on unit sphere)
@@ -398,7 +419,8 @@ Before L2 Norm                After L2 Norm
 ```
 
 **Gradient Behavior**:
-- Competitive Jacobian: $\frac{1}{\|z'\|}(I - \frac{z'z'^T}{\|z'\|^2})$
+
+- Competitive Jacobian: $\frac{1}{\|z'\|} (I - \frac{z'z'^T}{\|z'\|^2})$
 - Components perpendicular to $z'$ are preserved
 - Components parallel to $z'$ are suppressed
 - Encourages diverse, angular representations
@@ -408,14 +430,14 @@ Before L2 Norm                After L2 Norm
 Two parameterization options:
 
 **Option A: Sigmoid (Smooth)**
-$$s_c = \sigma(u_c), \quad y_c = s_c \cdot z''_c$$
+$$s_c = \sigma (u_c), \quad y_c = s_c \cdot z''_c$$
 
 - Continuous gradients
 - Asymptotic approach to boundaries
 - Better for gradient-based optimization
 
 **Option B: Hard Clip**
-$$s_c = \text{clip}(u_c, 0, 1), \quad y_c = s_c \cdot z''_c$$
+$$s_c = \text{clip} (u_c, 0, 1), \quad y_c = s_c \cdot z''_c$$
 
 - Can achieve exact zeros (true sparsity)
 - Zero gradients at boundaries
@@ -450,14 +472,14 @@ Additional path for weight regularization:
 
 ### 4.7 Why This Works: LayerNorm vs OrthoBlock
 
-| Aspect | Traditional LayerNorm | OrthoBlock (Centering + Ortho) |
-|--------|----------------------|-------------------------------|
-| **Mean** | Forced to 0 | Forced to 0 |
-| **Variance** | Forced to 1 | Preserved (informative) |
-| **Weight Conditioning** | No explicit control | Enforced via orthonormality |
-| **Redundancy** | Both LN and L2 control scale | Orthogonality for structure, centering for bias |
-| **Gradient Coupling** | Full covariance (complex) | Rank-1 + orthogonal (simpler) |
-| **Parameter Efficiency** | Needs $\gamma, \beta$ | Can work with minimal params |
+| Aspect                   | Traditional LayerNorm        | OrthoBlock (Centering + Ortho)                  |
+|--------------------------|------------------------------|-------------------------------------------------|
+| **Mean**                 | Forced to 0                  | Forced to 0                                     |
+| **Variance**             | Forced to 1                  | Preserved (informative)                         |
+| **Weight Conditioning**  | No explicit control          | Enforced via orthonormality                     |
+| **Redundancy**           | Both LN and L2 control scale | Orthogonality for structure, centering for bias |
+| **Gradient Coupling**    | Full covariance (complex)    | Rank-1 + orthogonal (simpler)                   |
+| **Parameter Efficiency** | Needs $\gamma, \beta$        | Can work with minimal params                    |
 
 ---
 
@@ -1024,6 +1046,7 @@ model.summary()
 ### 6.1 When to Use Orthonormal Regularization
 
 **✓ Strongly Recommended**:
+
 - Networks with BatchNorm, LayerNorm, or GroupNorm
 - Deep architectures prone to gradient issues
 - Transfer learning scenarios (stable features)
@@ -1031,18 +1054,19 @@ model.summary()
 - Networks requiring interpretable representations
 
 **✗ Less Critical**:
+
 - Very shallow networks (2-3 layers)
 - Networks without normalization layers
 - Tasks where redundancy is beneficial (ensembles)
 
 ### 6.2 Hyperparameter Guidelines
 
-| Parameter | Typical Range | Recommendation |
-|-----------|---------------|----------------|
-| **λ (ortho_factor)** | 0.001 - 0.1 | Start at 0.01, tune based on task |
-| **Scaling Strategy** | — | Always use 'matrix' for varying layer sizes |
-| **Schedule Type** | — | 'cosine' for smooth, 'exponential' for aggressive |
-| **λ_max / λ_min ratio** | 10:1 to 100:1 | Higher ratios for stricter initial conditioning |
+| Parameter               | Typical Range | Recommendation                                    |
+|-------------------------|---------------|---------------------------------------------------|
+| **λ (ortho_factor)**    | 0.001 - 0.1   | Start at 0.01, tune based on task                 |
+| **Scaling Strategy**    | —             | Always use 'matrix' for varying layer sizes       |
+| **Schedule Type**       | —             | 'cosine' for smooth, 'exponential' for aggressive |
+| **λ_max / λ_min ratio** | 10:1 to 100:1 | Higher ratios for stricter initial conditioning   |
 
 ### 6.3 Architecture Design Patterns
 
@@ -1088,6 +1112,7 @@ outputs = keras.layers.Dense(num_classes, activation='softmax')(x)
 ### 6.4 Initialization Strategies
 
 **Recommended Initialization**:
+
 ```python
 # Orthogonal initialization brings weights closer to target
 OrthoBlock(
@@ -1098,6 +1123,7 @@ OrthoBlock(
 ```
 
 **Alternative Initializations**:
+
 ```python
 # Glorot/Xavier if you want more initial diversity
 kernel_initializer='glorot_uniform'  # ✓ OK, but slower convergence
@@ -1156,12 +1182,12 @@ model.fit(X_train, y_train, callbacks=[monitor], ...)
 
 #### What to Watch For
 
-| Metric | Healthy Range | Warning Sign |
-|--------|---------------|--------------|
-| Orthogonality Error | < 1.0 | > 5.0 (underregularized) |
-| Weight Magnitude | 0.8 - 1.2 | < 0.5 or > 2.0 (instability) |
-| Singular Value Std | < 0.3 | > 1.0 (poor conditioning) |
-| Scale Parameters | 0.3 - 0.9 | Many near 0 or 1 (saturation) |
+| Metric              | Healthy Range | Warning Sign                  |
+|---------------------|---------------|-------------------------------|
+| Orthogonality Error | < 1.0         | > 5.0 (underregularized)      |
+| Weight Magnitude    | 0.8 - 1.2     | < 0.5 or > 2.0 (instability)  |
+| Singular Value Std  | < 0.3         | > 1.0 (poor conditioning)     |
+| Scale Parameters    | 0.3 - 0.9     | Many near 0 or 1 (saturation) |
 
 ### 6.6 Common Pitfalls and Solutions
 
@@ -1221,14 +1247,14 @@ x = OrthoBlock(256)(x)  # Already includes centering + L2 norm
 
 ### 6.7 Network Architecture Recommendations
 
-| Network Type | Strategy | Rationale |
-|--------------|----------|-----------|
-| **Image Classification** | OrthoBlock in middle layers | Structured features, stable gradients |
-| **Object Detection** | OrthoBlock in backbone | Transfer-friendly representations |
-| **NLP (Transformers)** | Orthonormal in FFN | Complements attention mechanism |
-| **GANs** | Orthonormal in discriminator | Improved stability, robustness |
-| **Autoencoders** | OrthoBlock in encoder | Compact, non-redundant codes |
-| **Metric Learning** | Full OrthoBlock network | Angular relationships preserved |
+| Network Type             | Strategy                     | Rationale                             |
+|--------------------------|------------------------------|---------------------------------------|
+| **Image Classification** | OrthoBlock in middle layers  | Structured features, stable gradients |
+| **Object Detection**     | OrthoBlock in backbone       | Transfer-friendly representations     |
+| **NLP (Transformers)**   | Orthonormal in FFN           | Complements attention mechanism       |
+| **GANs**                 | Orthonormal in discriminator | Improved stability, robustness        |
+| **Autoencoders**         | OrthoBlock in encoder        | Compact, non-redundant codes          |
+| **Metric Learning**      | Full OrthoBlock network      | Angular relationships preserved       |
 
 ### 6.8 Ablation Study Protocol
 
@@ -1272,19 +1298,19 @@ Metrics to Compare:
    *Batch Normalization: Accelerating Deep Network Training by Reducing Internal Covariate Shift.*  
    In *Proceedings of the 32nd International Conference on Machine Learning (ICML)*.  
    [Link](https://proceedings.mlr.press/v37/ioffe15.html)
-   
+
    **Relevance**: Introduces BatchNorm; highlights scaling invariances that can undermine simple weight decay.
 
 2. **Ba, J., Kiros, J. R., & Hinton, G. E. (2016).**  
    *Layer Normalization.*  
    arXiv preprint arXiv:1607.06450.
-   
+
    **Relevance**: Proposes Layer Normalization as alternative; discusses normalization without batch statistics.
 
 3. **Wu, Y., & He, K. (2018).**  
    *Group Normalization.*  
    In *Proceedings of the European Conference on Computer Vision (ECCV)*.
-   
+
    **Relevance**: Shows normalization can work across different granularities; motivates rethinking norm strategies.
 
 #### Weight Normalization and Alternatives
@@ -1293,13 +1319,13 @@ Metrics to Compare:
    *Weight Normalization: A Simple Reparameterization to Accelerate Training of Deep Neural Networks.*  
    In *Proceedings of the 30th Conference on Neural Information Processing Systems (NeurIPS)*.  
    [Link](https://papers.nips.cc/paper/2016/file/ed265bc903a5a097f61d3ec064d96d2e-Paper.pdf)
-   
+
    **Relevance**: Alternative weight parameterization; discusses control of weight norms under normalization.
 
 5. **Qiao, S., Wang, H., Liu, C., Shen, W., & Yuille, A. (2019).**  
    *Weight Standardization.*  
    arXiv preprint arXiv:1903.10520.
-   
+
    **Relevance**: Shows that mean-removal alone (without variance scaling) can provide benefits.
 
 ### 7.2 Orthogonality in Neural Networks
@@ -1310,13 +1336,13 @@ Metrics to Compare:
    *Exact Solutions to the Nonlinear Dynamics of Learning in Deep Linear Neural Networks.*  
    In *International Conference on Learning Representations (ICLR)*.  
    [Link](https://arxiv.org/abs/1312.6120)
-   
+
    **Relevance**: Theoretical analysis of orthogonal initializations; shows benefits for gradient flow.
 
 7. **Pennington, J., Schoenholz, S., & Ganguli, S. (2017).**  
    *Resurrecting the sigmoid in deep learning through dynamical isometry: theory and practice.*  
    In *Proceedings of the 31st Conference on Neural Information Processing Systems (NeurIPS)*.
-   
+
    **Relevance**: Dynamical isometry concept; connects orthogonality to stable gradient propagation.
 
 #### RNNs and Sequential Models
@@ -1325,14 +1351,14 @@ Metrics to Compare:
    *Unitary Evolution Recurrent Neural Networks.*  
    In *Proceedings of the 33rd International Conference on Machine Learning (ICML)*.  
    [Link](https://proceedings.mlr.press/v48/arjovsky16.html)
-   
+
    **Relevance**: Enforces unitary (complex orthonormal) constraints in RNNs for stability.
 
 9. **Vorontsov, E., Trabelsi, C., Thomas, A. W., & Pal, C. (2017).**  
    *On Orthogonality and Learning Recurrent Networks with Long Term Dependencies.*  
    In *Proceedings of the 34th International Conference on Machine Learning (ICML) Workshop*.  
    [Link](https://arxiv.org/abs/1702.00071)
-   
+
    **Relevance**: Investigates trade-offs; notes that full orthogonality can limit capacity if not applied carefully.
 
 #### CNNs and Robustness
@@ -1341,21 +1367,23 @@ Metrics to Compare:
     *Parseval Networks: Improving Robustness to Adversarial Examples.*  
     In *Proceedings of the 34th International Conference on Machine Learning (ICML)*.  
     [Link](https://proceedings.mlr.press/v70/cisse17a.html)
-    
-    **Relevance**: Introduces Parseval regularization (near-orthonormality) to improve robustness; key inspiration for OrthoBlock.
+
+    **Relevance**: Introduces Parseval regularization (near-orthonormality) to improve robustness; key inspiration for
+    OrthoBlock.
 
 11. **Bansal, N., Chen, X., & Wang, Z. (2018).**  
     *Can We Gain More from Orthogonality Regularizations in Training Deep CNNs?*  
     In *Proceedings of the 32nd Conference on Neural Information Processing Systems (NeurIPS)*.  
     [Link](https://proceedings.neurips.cc/paper/2018/hash/60e7ab38f707b20530218487199e8157-Abstract.html)
-    
+
     **Relevance**: Empirical study of orthogonality constraints; finds performance gains with trade-offs.
 
 12. **Huang, L., Liu, X., Lang, B., Yu, A. W., Wang, Y., & Li, B. (2018).**  
-    *Orthogonal Weight Normalization: Solution to Optimization over Multiple Dependent Stiefel Manifolds in Deep Neural Networks.*  
+    *Orthogonal Weight Normalization: Solution to Optimization over Multiple Dependent Stiefel Manifolds in Deep Neural
+    Networks.*  
     In *Proceedings of the AAAI Conference on Artificial Intelligence*.  
     [Link](https://arxiv.org/abs/1709.06079)
-    
+
     **Relevance**: Practical techniques for enforcing orthogonality across layers.
 
 ### 7.3 Recent Advances
@@ -1366,7 +1394,7 @@ Metrics to Compare:
     *High-Performance Large-Scale Image Recognition Without Normalization.*  
     In *International Conference on Machine Learning (ICML)*.  
     [Link](https://proceedings.mlr.press/v139/brock21a.html)
-    
+
     **Relevance**: Explores removing BatchNorm entirely using specialized architectures and regularizers.
 
 #### Spectral Methods
@@ -1374,8 +1402,9 @@ Metrics to Compare:
 14. **Miyato, T., Kataoka, T., Koyama, M., & Yoshida, Y. (2018).**  
     *Spectral Normalization for Generative Adversarial Networks.*  
     In *International Conference on Learning Representations (ICLR)*.
-    
-    **Relevance**: Controls Lipschitz constant via spectral normalization; related approach to controlling weight geometry.
+
+    **Relevance**: Controls Lipschitz constant via spectral normalization; related approach to controlling weight
+    geometry.
 
 #### Low-Precision Training
 
@@ -1383,18 +1412,18 @@ Metrics to Compare:
     *Orthogonality-based Deep Neural Networks for Ultra-Low Precision Image Classification.*  
     In *Proceedings of the AAAI Conference on Artificial Intelligence (AAAI)*.  
     [Link](https://aaai.org/ojs/index.php/AAAI/article/view/4882)
-    
+
     **Relevance**: Shows orthogonality helps low-bit quantized models remain stable.
 
 ### 7.4 Summary of Evidence
 
-| Aspect | Supporting Evidence | Caveats |
-|--------|---------------------|---------|
-| **Gradient Flow** | Saxe et al. (2014), Pennington et al. (2017) | Benefits most pronounced in deep networks |
-| **Robustness** | Cissé et al. (2017), Miyato et al. (2018) | Primarily tested on adversarial examples |
-| **Redundancy Reduction** | Bansal et al. (2018), Huang et al. (2018) | May limit capacity if too strict |
-| **Compatibility with Norms** | Indirect (BatchNorm papers note scale invariance) | Direct studies limited |
-| **Convergence** | Mixed results; some report faster, some slower | Depends on hyperparameters |
+| Aspect                       | Supporting Evidence                               | Caveats                                   |
+|------------------------------|---------------------------------------------------|-------------------------------------------|
+| **Gradient Flow**            | Saxe et al. (2014), Pennington et al. (2017)      | Benefits most pronounced in deep networks |
+| **Robustness**               | Cissé et al. (2017), Miyato et al. (2018)         | Primarily tested on adversarial examples  |
+| **Redundancy Reduction**     | Bansal et al. (2018), Huang et al. (2018)         | May limit capacity if too strict          |
+| **Compatibility with Norms** | Indirect (BatchNorm papers note scale invariance) | Direct studies limited                    |
+| **Convergence**              | Mixed results; some report faster, some slower    | Depends on hyperparameters                |
 
 ---
 
@@ -1402,19 +1431,19 @@ Metrics to Compare:
 
 ### Appendix A: Symbol Reference
 
-| Symbol | Meaning | Typical Shape | Notes |
-|--------|---------|---------------|-------|
-| $W$ | Weight matrix | $[d_{\text{out}}, d_{\text{in}}]$ | After reshaping conv weights |
-| $x$ | Input | $[B, d_{\text{in}}]$ | Batch of samples |
-| $z$ | Pre-normalization output | $[B, d_{\text{out}}]$ | After $Wx$ |
-| $z'$ | Centered output | $[B, d_{\text{out}}]$ | After mean subtraction |
-| $z''$ | L2-normalized output | $[B, d_{\text{out}}]$ | On unit hypersphere |
-| $y$ | Final output | $[B, d_{\text{out}}]$ | After per-channel scaling |
-| $s$ | Scale parameters | $[d_{\text{out}}]$ | Learnable, $\in [0,1]$ |
-| $\mu$ | Mean vector | $[B, d_{\text{out}}]$ or $[d_{\text{out}}]$ | Depends on axis |
-| $\lambda(t)$ | Orthogonal penalty schedule | Scalar | Time-dependent |
-| $I$ | Identity matrix | $[d_{\text{out}}, d_{\text{out}}]$ | Target Gram matrix |
-| $n$ | Number of output dimensions | Scalar | For scaling strategies |
+| Symbol       | Meaning                     | Typical Shape                               | Notes                        |
+|--------------|-----------------------------|---------------------------------------------|------------------------------|
+| $W$          | Weight matrix               | $[d_{\text{out}}, d_{\text{in}}]$           | After reshaping conv weights |
+| $x$          | Input                       | $[B, d_{\text{in}}]$                        | Batch of samples             |
+| $z$          | Pre-normalization output    | $[B, d_{\text{out}}]$                       | After $Wx$                   |
+| $z'$         | Centered output             | $[B, d_{\text{out}}]$                       | After mean subtraction       |
+| $z''$        | L2-normalized output        | $[B, d_{\text{out}}]$                       | On unit hypersphere          |
+| $y$          | Final output                | $[B, d_{\text{out}}]$                       | After per-channel scaling    |
+| $s$          | Scale parameters            | $[d_{\text{out}}]$                          | Learnable, $\in [0,1]$       |
+| $\mu$        | Mean vector                 | $[B, d_{\text{out}}]$ or $[d_{\text{out}}]$ | Depends on axis              |
+| $\lambda(t)$ | Orthogonal penalty schedule | Scalar                                      | Time-dependent               |
+| $I$          | Identity matrix             | $[d_{\text{out}}, d_{\text{out}}]$          | Target Gram matrix           |
+| $n$          | Number of output dimensions | Scalar                                      | For scaling strategies       |
 
 ### Appendix B: Gradient Derivations
 
@@ -1424,16 +1453,16 @@ Given:
 $$\mathcal{L}_{\text{ortho}} = \lambda \cdot \|W^T W - I\|_F^2$$
 
 Expand:
-$$\mathcal{L}_{\text{ortho}} = \lambda \cdot \text{tr}[(W^T W - I)^T(W^T W - I)]$$
+$$\mathcal{L}_{\text{ortho}} = \lambda \cdot \text{tr}[(W^T W - I)^T (W^T W - I)]$$
 $$= \lambda \cdot \text{tr}[(W^T W - I)^2]$$
 
 Using matrix calculus:
 $$\frac{\partial \mathcal{L}_{\text{ortho}}}{\partial W} = \lambda \cdot \frac{\partial}{\partial W}\text{tr}[(W^T W - I)^2]$$
 
 By chain rule:
-$$= \lambda \cdot 2(W^T W - I) \cdot \frac{\partial(W^T W)}{\partial W}$$
-$$= \lambda \cdot 2(W^T W - I) \cdot 2W$$
-$$= 4\lambda \cdot W(W^T W - I)$$
+$$= \lambda \cdot 2 (W^T W - I) \cdot \frac{\partial (W^T W)}{\partial W}$$
+$$= \lambda \cdot 2 (W^T W - I) \cdot 2W$$
+$$= 4\lambda \cdot W (W^T W - I)$$
 
 #### B.2 Centering Normalization Gradient
 
@@ -1454,33 +1483,34 @@ For $z'' = \frac{z'}{\|z'\|}$:
 $$\frac{\partial \mathcal{L}}{\partial z'} = \frac{\partial \mathcal{L}}{\partial z''} \cdot \frac{\partial z''}{\partial z'}$$
 
 The Jacobian is:
-$$\frac{\partial z''}{\partial z'} = \frac{1}{\|z'\|}(I - \frac{z' z'^T}{\|z'\|^2})$$
+$$\frac{\partial z''}{\partial z'} = \frac{1}{\|z'\|} (I - \frac{z' z'^T}{\|z'\|^2})$$
 
 This is a **competitive** Jacobian: gradients parallel to $z'$ are suppressed, perpendicular components preserved.
 
 ### Appendix C: Computational Complexity
 
-| Operation | Time Complexity | Space Complexity | Notes |
-|-----------|-----------------|------------------|-------|
-| Dense forward | $O(Bd_{\text{in}}d_{\text{out}})$ | $O(Bd_{\text{out}})$ | Standard |
-| Ortho regularization | $O(d_{\text{out}}^2 d_{\text{in}})$ | $O(d_{\text{out}}^2)$ | Gram matrix computation |
-| Centering norm | $O(Bd_{\text{out}})$ | $O(d_{\text{out}})$ | Mean calculation |
-| L2 norm | $O(Bd_{\text{out}})$ | $O(B)$ | Norm per sample |
-| Per-channel scale | $O(Bd_{\text{out}})$ | $O(d_{\text{out}})$ | Element-wise |
-| **Total OrthoBlock** | $O(Bd_{\text{in}}d_{\text{out}} + d_{\text{out}}^2 d_{\text{in}})$ | $O(Bd_{\text{out}} + d_{\text{out}}^2)$ | Dominated by ortho reg |
+| Operation            | Time Complexity                                                    | Space Complexity                        | Notes                   |
+|----------------------|--------------------------------------------------------------------|-----------------------------------------|-------------------------|
+| Dense forward        | $O(Bd_{\text{in}}d_{\text{out}})$                                  | $O(Bd_{\text{out}})$                    | Standard                |
+| Ortho regularization | $O(d_{\text{out}}^2 d_{\text{in}})$                                | $O(d_{\text{out}}^2)$                   | Gram matrix computation |
+| Centering norm       | $O(Bd_{\text{out}})$                                               | $O(d_{\text{out}})$                     | Mean calculation        |
+| L2 norm              | $O(Bd_{\text{out}})$                                               | $O(B)$                                  | Norm per sample         |
+| Per-channel scale    | $O(Bd_{\text{out}})$                                               | $O(d_{\text{out}})$                     | Element-wise            |
+| **Total OrthoBlock** | $O(Bd_{\text{in}}d_{\text{out}} + d_{\text{out}}^2 d_{\text{in}})$ | $O(Bd_{\text{out}} + d_{\text{out}}^2)$ | Dominated by ortho reg  |
 
-**Practical Note**: The orthonormal regularization is computed once per backward pass and is typically negligible compared to forward/backward of dense layers in large networks.
+**Practical Note**: The orthonormal regularization is computed once per backward pass and is typically negligible
+compared to forward/backward of dense layers in large networks.
 
 ### Appendix D: Comparison with Related Methods
 
-| Method | Goal | How It Differs from OrthoBlock |
-|--------|------|-------------------------------|
+| Method                     | Goal                       | How It Differs from OrthoBlock                                 |
+|----------------------------|----------------------------|----------------------------------------------------------------|
 | **Spectral Normalization** | Control Lipschitz constant | Only constrains largest singular value, not full orthogonality |
-| **Weight Normalization** | Decouple scale/direction | Doesn't enforce orthogonality between filters |
-| **Parseval Networks** | Bounded operator norm | Similar spirit, but uses hard projection in forward pass |
-| **Unitary RNNs** | Stable gradients in RNNs | Complex-valued unitary matrices, different domain |
-| **Batch Normalization** | Normalize activations | Acts on activations, not weights; creates scale invariance |
-| **Layer Normalization** | Normalize per sample | Full variance normalization (redundant with ortho weights) |
+| **Weight Normalization**   | Decouple scale/direction   | Doesn't enforce orthogonality between filters                  |
+| **Parseval Networks**      | Bounded operator norm      | Similar spirit, but uses hard projection in forward pass       |
+| **Unitary RNNs**           | Stable gradients in RNNs   | Complex-valued unitary matrices, different domain              |
+| **Batch Normalization**    | Normalize activations      | Acts on activations, not weights; creates scale invariance     |
+| **Layer Normalization**    | Normalize per sample       | Full variance normalization (redundant with ortho weights)     |
 
 ### Appendix E: Implementation Checklist
 
@@ -1501,21 +1531,27 @@ Before deploying orthonormal regularization in production:
 
 ## Conclusion
 
-Orthonormal regularization represents a **geometrically principled** alternative to L2 regularization in neural networks with normalization layers. By encouraging weights to form an orthonormal basis rather than shrinking toward zero, it:
+Orthonormal regularization represents a **geometrically principled** alternative to L2 regularization in neural networks
+with normalization layers. By encouraging weights to form an orthonormal basis rather than shrinking toward zero, it:
 
 1. **Eliminates the contradiction** between weight decay and normalization compensation
 2. **Improves conditioning** through near-identity Gram matrices
 3. **Encourages feature diversity** via orthogonality constraints
 4. **Maintains stable magnitudes** throughout training
 
-The **OrthoBlock architecture** extends this further by combining orthonormal weights with intelligent normalization strategies:
+The **OrthoBlock architecture** extends this further by combining orthonormal weights with intelligent normalization
+strategies:
+
 - **Centering normalization** (mean-only) complements orthonormal structure
-- **Logit normalization** projects onto unit hypersphere for directional representations  
+- **Logit normalization** projects onto unit hypersphere for directional representations
 - **Per-channel scaling** provides sparse, interpretable attention mechanisms
 
-With **auto-adjusting matrix scaling**, a single regularization strength $\lambda$ works consistently across all layers, dramatically simplifying hyperparameter tuning and making the approach practical for real-world deep learning.
+With **auto-adjusting matrix scaling**, a single regularization strength $\lambda$ works consistently across all layers,
+dramatically simplifying hyperparameter tuning and making the approach practical for real-world deep learning.
 
-**Key Takeaway**: When using normalization layers, orthonormal regularization offers a more mathematically coherent approach than L2 regularization, with empirical benefits in training stability, gradient flow, and representation quality.
+**Key Takeaway**: When using normalization layers, orthonormal regularization offers a more mathematically coherent
+approach than L2 regularization, with empirical benefits in training stability, gradient flow, and representation
+quality.
 
 ---
 
@@ -1523,11 +1559,14 @@ With **auto-adjusting matrix scaling**, a single regularization strength $\lambd
 
 For deeper dives into specific topics:
 
-- **Stiefel Manifolds**: Edelman, A., Arias, T. A., & Smith, S. T. (1998). *The geometry of algorithms with orthogonality constraints.* SIAM journal on Matrix Analysis and Applications.
+- **Stiefel Manifolds**: Edelman, A., Arias, T. A., & Smith, S. T. (1998). *The geometry of algorithms with
+  orthogonality constraints.* SIAM journal on Matrix Analysis and Applications.
 
-- **Riemannian Optimization**: Absil, P. A., Mahony, R., & Sepulchre, R. (2009). *Optimization algorithms on matrix manifolds.* Princeton University Press.
+- **Riemannian Optimization**: Absil, P. A., Mahony, R., & Sepulchre, R. (2009). *Optimization algorithms on matrix
+  manifolds.* Princeton University Press.
 
-- **Normalization Methods**: Ioffe, S. (2017). *Batch Renormalization: Towards Reducing Minibatch Dependence in Batch-Normalized Models.* NeurIPS.
+- **Normalization Methods**: Ioffe, S. (2017). *Batch Renormalization: Towards Reducing Minibatch Dependence in
+  Batch-Normalized Models.* NeurIPS.
 
 - **Neural Network Geometry**: Amari, S. I. (2016). *Information geometry and its applications.* Springer.
 

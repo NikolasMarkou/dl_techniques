@@ -12,7 +12,8 @@
 
 # Complete Guide to Keras 3 Custom Layers and Models
 
-A comprehensive, authoritative guide for creating robust, serializable, and production-ready custom Layers and Models in Keras 3 for the dl-techniques framework.
+A comprehensive, authoritative guide for creating robust, serializable, and production-ready custom Layers and Models in
+Keras 3 for the dl-techniques framework.
 
 ---
 
@@ -21,7 +22,7 @@ A comprehensive, authoritative guide for creating robust, serializable, and prod
 1. [Core Design Principles](#1-core-design-principles)
 2. [Essential Setup and Registration](#2-essential-setup-and-registration)
 3. [Layer Implementation Patterns](#3-layer-implementation-patterns)
-4. [Graph-Safe Operations in call()](#4-graph-safe-operations-in-call)
+4. [Graph-Safe Operations in call ()](#4-graph-safe-operations-in-call)
 5. [Model Implementation Patterns](#5-model-implementation-patterns)
 6. [Architecture Patterns for Reusable Models](#6-architecture-patterns-for-reusable-models)
 7. [Configuration Management](#7-configuration-management)
@@ -40,7 +41,8 @@ A comprehensive, authoritative guide for creating robust, serializable, and prod
 
 ### 1.1 The Golden Rule: Create vs. Build
 
-This is the **most critical concept** in modern Keras 3. Understanding this separation eliminates 99% of build and serialization errors.
+This is the **most critical concept** in modern Keras 3. Understanding this separation eliminates 99% of build and
+serialization errors.
 
 #### The Serialization Lifecycle
 
@@ -67,29 +69,33 @@ This is the **most critical concept** in modern Keras 3. Understanding this sepa
 
 #### The Rules
 
-| Method | What Happens | What's Allowed |
-|--------|--------------|----------------|
-| `__init__` | Once at instantiation | CREATE all sub-layers, store ALL configuration |
-| `build` | Once when shapes known | CREATE weights via `add_weight()`, BUILD sub-layers |
-| `call` | Every batch | **Must remain symbolic** - only `ops` operations |
-| `compute_output_shape` | Shape inference | Return output shape given input shape (REQUIRED) |
+| Method                 | What Happens           | What's Allowed                                      |
+|------------------------|------------------------|-----------------------------------------------------|
+| `__init__`             | Once at instantiation  | CREATE all sub-layers, store ALL configuration      |
+| `build`                | Once when shapes known | CREATE weights via `add_weight()`, BUILD sub-layers |
+| `call`                 | Every batch            | **Must remain symbolic** - only `ops` operations    |
+| `compute_output_shape` | Shape inference        | Return output shape given input shape (REQUIRED)    |
 
 **CRITICAL**: Every custom layer MUST implement `compute_output_shape()`. This method:
+
 - Enables Keras to infer shapes without running forward pass
 - Is essential for building sub-layers with correct shapes
 - Required for functional API model construction
 - Must work without the layer being built
 
 **NEVER** in `__init__`:
+
 - Create weights directly (`self.add_weight`)
 - Inspect `input_shape` or call operations requiring shapes
 
 **ALWAYS** in `build`:
+
 - Create layer's own weights
 - Explicitly call `build()` on each sub-layer for robust serialization
 - Call `super().build(input_shape)` at the end
 
 **ALWAYS** implement `compute_output_shape`:
+
 - Return the correct output shape tuple given input shape
 - Must work even before the layer is built
 - Use stored configuration (e.g., `self.units`) not weight shapes
@@ -123,6 +129,7 @@ class ProperModel(keras.Model):
 ```
 
 **Why This Matters**:
+
 - All weights exist with consistent names
 - Weight loading works regardless of configuration
 - Models are interchangeable for transfer learning
@@ -584,7 +591,8 @@ class HierarchicalModel(keras.Model):
 
 ### 3.4 Implementing compute_output_shape
 
-**CRITICAL**: Every custom layer MUST implement `compute_output_shape()`. This enables shape inference, sub-layer building, and functional API compatibility.
+**CRITICAL**: Every custom layer MUST implement `compute_output_shape()`. This enables shape inference, sub-layer
+building, and functional API compatibility.
 
 **Pattern 1: Simple Output Shape**
 
@@ -687,7 +695,7 @@ def compute_output_shape(self, input_shape):
 
 ---
 
-## 4. Graph-Safe Operations in call()
+## 4. Graph-Safe Operations in call ()
 
 This section covers the **most common source of runtime bugs**: breaking the computational graph during tracing.
 
@@ -695,13 +703,13 @@ This section covers the **most common source of runtime bugs**: breaking the com
 
 When Keras compiles your model, it runs your Python code **once** with symbolic inputs to generate a graph.
 
-| ❌ Never in `call()` | ✅ Always in `call()` |
-|---------------------|----------------------|
+| ❌ Never in `call()`                        | ✅ Always in `call()`                     |
+|---------------------------------------------|-------------------------------------------|
 | `list()`, `tuple()`, or `int()` on a tensor | Use `ops.shape(x)` for dynamic dimensions |
-| `.numpy()` on a tensor | Use `ops.cast()` for type conversion |
-| Python `if` on tensor values | Use `ops.where()` or `ops.cond()` |
-| `x.shape` for dynamic manipulation | Use `ops.shape(x)` which returns a tensor |
-| Python `for` over tensor dimensions | Use vectorized ops or `ops.scan` |
+| `.numpy()` on a tensor                      | Use `ops.cast()` for type conversion      |
+| Python `if` on tensor values                | Use `ops.where()` or `ops.cond()`         |
+| `x.shape` for dynamic manipulation          | Use `ops.shape(x)` which returns a tensor |
+| Python `for` over tensor dimensions         | Use vectorized ops or `ops.scan`          |
 
 ### 4.2 Handling Shapes (The #1 Source of Bugs)
 
@@ -2359,6 +2367,7 @@ def test_complete_pipeline():
 ### Pitfall 1: Conditional Layer Creation
 
 **❌ WRONG:**
+
 ```python
 def __init__(self, use_feature_a=True):
     super().__init__()
@@ -2367,6 +2376,7 @@ def __init__(self, use_feature_a=True):
 ```
 
 **✅ CORRECT:**
+
 ```python
 def __init__(self, use_feature_a=True):
     super().__init__()
@@ -2383,6 +2393,7 @@ def call(self, inputs):
 ### Pitfall 2: Wrong Build Pattern
 
 **❌ WRONG:**
+
 ```python
 def build(self, input_shape):
     self.dense = layers.Dense(self.units)  # WRONG: Creating in build()!
@@ -2390,6 +2401,7 @@ def build(self, input_shape):
 ```
 
 **✅ CORRECT:**
+
 ```python
 def __init__(self, units, **kwargs):
     super().__init__(**kwargs)
@@ -2404,6 +2416,7 @@ def build(self, input_shape):
 ### Pitfall 3: Missing Registration
 
 **❌ WRONG:**
+
 ```python
 class MyLayer(keras.layers.Layer):  # No decorator
     pass
@@ -2411,6 +2424,7 @@ class MyLayer(keras.layers.Layer):  # No decorator
 ```
 
 **✅ CORRECT:**
+
 ```python
 @keras.saving.register_keras_serializable()
 class MyLayer(keras.layers.Layer):
@@ -2420,12 +2434,14 @@ class MyLayer(keras.layers.Layer):
 ### Pitfall 4: Incomplete Configuration
 
 **❌ WRONG:**
+
 ```python
 def get_config(self):
     return {'units': self.units}  # Missing other parameters!
 ```
 
 **✅ CORRECT:**
+
 ```python
 def get_config(self):
     config = super().get_config()
@@ -2441,6 +2457,7 @@ def get_config(self):
 ### Pitfall 5: Graph-Breaking Shape Operations
 
 **❌ WRONG:**
+
 ```python
 def call(self, inputs):
     shape = ops.shape(inputs)
@@ -2449,6 +2466,7 @@ def call(self, inputs):
 ```
 
 **✅ CORRECT:**
+
 ```python
 def call(self, inputs):
     shape = ops.shape(inputs)
@@ -2460,6 +2478,7 @@ def call(self, inputs):
 ### Pitfall 6: Python Conditionals on Tensors
 
 **❌ WRONG:**
+
 ```python
 def call(self, inputs):
     if ops.mean(inputs) > 0:  # Evaluated at trace time only!
@@ -2468,15 +2487,17 @@ def call(self, inputs):
 ```
 
 **✅ CORRECT:**
+
 ```python
 def call(self, inputs):
     condition = ops.mean(inputs) > 0
     return ops.where(condition, inputs * 2, inputs)
 ```
 
-### Pitfall 7: Using .numpy() in call()
+### Pitfall 7: Using .numpy () in call ()
 
 **❌ WRONG:**
+
 ```python
 def call(self, inputs):
     values = inputs.numpy()  # Cannot execute in graph!
@@ -2484,6 +2505,7 @@ def call(self, inputs):
 ```
 
 **✅ CORRECT:**
+
 ```python
 def call(self, inputs):
     return inputs + 1.0  # Stay in graph
@@ -2492,12 +2514,14 @@ def call(self, inputs):
 ### Pitfall 8: Mutable Default Arguments
 
 **❌ WRONG:**
+
 ```python
 def __init__(self, layer_sizes=[64, 128]):  # Mutable default!
     self.layer_sizes = layer_sizes
 ```
 
 **✅ CORRECT:**
+
 ```python
 def __init__(self, layer_sizes: Optional[List[int]] = None):
     self.layer_sizes = layer_sizes if layer_sizes is not None else [64, 128]
@@ -2506,12 +2530,14 @@ def __init__(self, layer_sizes: Optional[List[int]] = None):
 ### Pitfall 9: Not Building Before Weight Loading
 
 **❌ WRONG:**
+
 ```python
 model = Model(...)
 model.load_weights('weights.h5')  # May fail - model not built
 ```
 
 **✅ CORRECT:**
+
 ```python
 model = Model(...)
 model.build((None, 224, 224, 3))  # Explicit build
@@ -2527,6 +2553,7 @@ model.load_weights('weights.h5')
 ### Pitfall 10: Inconsistent Layer Names
 
 **❌ WRONG:**
+
 ```python
 for i in range(depth):
     layer = Block()  # No name - gets auto-generated names
@@ -2534,6 +2561,7 @@ for i in range(depth):
 ```
 
 **✅ CORRECT:**
+
 ```python
 for i in range(depth):
     layer = Block(name=f'block_{i}')  # Explicit names
@@ -2543,6 +2571,7 @@ for i in range(depth):
 ### Pitfall 11: Missing compute_output_shape
 
 **❌ WRONG:**
+
 ```python
 class MyLayer(keras.layers.Layer):
     def __init__(self, units, **kwargs):
@@ -2558,6 +2587,7 @@ class MyLayer(keras.layers.Layer):
 ```
 
 **✅ CORRECT:**
+
 ```python
 class MyLayer(keras.layers.Layer):
     def __init__(self, units, **kwargs):
@@ -2577,6 +2607,7 @@ class MyLayer(keras.layers.Layer):
 ### Pitfall 12: Accessing Weights in compute_output_shape
 
 **❌ WRONG:**
+
 ```python
 def compute_output_shape(self, input_shape):
     # Fails if layer not built yet!
@@ -2584,6 +2615,7 @@ def compute_output_shape(self, input_shape):
 ```
 
 **✅ CORRECT:**
+
 ```python
 def compute_output_shape(self, input_shape):
     # Use stored config, works before build
@@ -2629,15 +2661,15 @@ When encountering issues, verify in this order:
 
 ### Common Errors and Solutions
 
-| Error | Cause | Solution |
-|-------|-------|----------|
-| `Unknown layer: MyCustomLayer` | Missing registration decorator | Add `@keras.saving.register_keras_serializable()` |
-| `Layer was never built and thus has no variables` | Sub-layer not built before weight loading | Add explicit `sub_layer.build()` calls in parent's `build()` |
-| `RecursionError during serialization` | Circular references in configuration | Store config parameters explicitly, not as `locals()` |
-| `Cannot convert symbolic tensor to numpy` | Using `.numpy()` or Python type conversions in `call()` | Use `ops` functions only; keep all operations symbolic |
-| `Graph execution error` / `InaccessibleTensorError` | Python conditionals on tensor values in `call()` | Use `ops.where()` or `ops.cond()` for runtime conditionals |
-| `Could not compute output shape` | Missing or broken `compute_output_shape()` | Implement method using stored config, not weight shapes |
-| `AttributeError: 'NoneType' has no attribute 'shape'` | Accessing weights in `compute_output_shape()` before build | Use `self.units` etc. instead of `self.kernel.shape` |
+| Error                                                 | Cause                                                      | Solution                                                     |
+|-------------------------------------------------------|------------------------------------------------------------|--------------------------------------------------------------|
+| `Unknown layer: MyCustomLayer`                        | Missing registration decorator                             | Add `@keras.saving.register_keras_serializable()`            |
+| `Layer was never built and thus has no variables`     | Sub-layer not built before weight loading                  | Add explicit `sub_layer.build()` calls in parent's `build()` |
+| `RecursionError during serialization`                 | Circular references in configuration                       | Store config parameters explicitly, not as `locals()`        |
+| `Cannot convert symbolic tensor to numpy`             | Using `.numpy()` or Python type conversions in `call()`    | Use `ops` functions only; keep all operations symbolic       |
+| `Graph execution error` / `InaccessibleTensorError`   | Python conditionals on tensor values in `call()`           | Use `ops.where()` or `ops.cond()` for runtime conditionals   |
+| `Could not compute output shape`                      | Missing or broken `compute_output_shape()`                 | Implement method using stored config, not weight shapes      |
+| `AttributeError: 'NoneType' has no attribute 'shape'` | Accessing weights in `compute_output_shape()` before build | Use `self.units` etc. instead of `self.kernel.shape`         |
 
 ### Debug Helper
 
@@ -3075,40 +3107,47 @@ class WellStructuredModel(keras.Model):
 When designing custom Keras components:
 
 **Configuration Management**
+
 - [ ] All parameters stored as instance attributes
 - [ ] Complete `get_config()` implementation
 - [ ] Working `from_config()` classmethod
 - [ ] Predefined presets for common configurations
 
 **Layer Creation**
+
 - [ ] All layers created in `__init__` (not conditionally)
 - [ ] Systematic, consistent layer naming
 - [ ] Explicit `build()` method with sub-layer building
 - [ ] Usage flags separate from creation
 
 **Shape Handling**
+
 - [ ] `compute_output_shape()` implemented for ALL custom layers
 - [ ] Uses stored config (e.g., `self.units`), not weight shapes
 - [ ] Works before layer is built
 - [ ] Handles `None` dimensions correctly
 
 **Serialization**
+
 - [ ] `@keras.saving.register_keras_serializable()` decorator
 - [ ] Complex objects properly serialized/deserialized
 - [ ] Model can be saved and loaded completely
 
 **Graph Safety**
+
 - [ ] No Python type conversions on tensors in `call()`
 - [ ] Use `ops.where()`/`ops.cond()` for conditionals
 - [ ] Use `ops.shape()` for dynamic shapes
 - [ ] No `.numpy()` calls in `call()`
 
 **Weight Compatibility**
+
 - [ ] Same layers exist regardless of configuration
 - [ ] Consistent layer names across configurations
 - [ ] Support for `skip_mismatch` weight loading
 
 **Testing**
+
 - [ ] Unit tests for creation, forward pass, shapes
 - [ ] Serialization tests
 - [ ] `compute_output_shape()` matches actual output

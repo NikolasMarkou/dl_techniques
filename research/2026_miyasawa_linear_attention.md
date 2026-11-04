@@ -1,4 +1,4 @@
-# Miyasawa-Compliant Linear Attention: A Bias-Free, Degree-1-Homogeneous O(N) Attention Layer
+# Miyasawa-Compliant Linear Attention: A Bias-Free, Degree-1-Homogeneous O (N) Attention Layer
 
 **Author:** Nikolas Markou · **Date:** 2026-07-07 · **Status:** Design/research note (self-contained)
 
@@ -40,8 +40,8 @@ path into the bfunet-family denoiser stack.
 ## 1. The 90-second version
 
 Standard attention is `softmax(Q Kᵀ / √d) V`. It is `O(N²)` in sequence length *and*
-it is **not** degree-1 homogeneous: softmax is temperature-sensitive
-(`softmax(alpha·z) != softmax(z)` for `alpha != 1`), so scaling the input changes the
+it is **not** degree-1 homogeneous: softmax is temperature-sensitive (`softmax(alpha·z) != softmax(z)` for
+`alpha != 1`), so scaling the input changes the
 attention pattern, not just the output magnitude. Inside a bias-free denoiser that
 relies on `f(alpha·x) = alpha·f(x)`, softmax attention silently breaks the property the
 whole architecture is built to preserve.
@@ -65,8 +65,8 @@ this repo checks: **bias-free** (structural) and **degree-1 homogeneous** (numer
 
 The one wart is the denominator epsilon that guards the `0/0` dead-token case. A fixed
 additive epsilon breaks *exact* degree-1 (the same class of problem as the LayerNorm /
-RMSNorm epsilon already documented in this repo's LESSONS). We resolve it with an
-**input-scaled epsilon** that matches the denominator's own degree, restoring exact
+RMSNorm epsilon already documented in this repo's LESSONS). We resolve it with an **input-scaled epsilon** that matches
+the denominator's own degree, restoring exact
 degree-1 (Section 5). The implemented layer measures homogeneity rel-err = **0.0**
 (exact, fp32) across all `{relu, relu_squared, abs} × {alpha=0.5, alpha=2.0}` in its
 37-test suite.
@@ -90,27 +90,26 @@ operationalized as two independently-checked properties of the forward map `f`:
    `x = uniform(-0.5, 0.5)`, forwards `f(x)` and `f(alpha·x)` for `alpha ∈ {0.5, 2.0}`
    at `training=False`, and computes
    `rel = max|f(alpha·x) - alpha·f(x)| / max(|alpha·f(x)|, 1e-8)`, tolerance `1e-2`
-   (fp32). The probe is **informational-only** (it logs, never raises) but is the
-   *trustworthy* Miyasawa signal — more so than any static `use_bias` scan
-   (LESSONS.md:37).
+   (fp32). The probe is **informational-only** (it logs, never raises) but is the *trustworthy* Miyasawa signal — more
+   so than any static `use_bias` scan (LESSONS.md:37).
 
 **Scope of the clean identity.** Only **additive-Gaussian-noise** denoisers get the
 closed-form Miyasawa/Tweedie identity `E[x|y] = y + sigma^2 · ∇_y log p(y)`, i.e. the
 reading `residual = sigma^2 * score`. Signed/per-pixel *multiplicative* or composite
-noise has **no** such clean linear-domain identity
-(`src/dl_techniques/utils/multiplicative_miyasawa.py:12-33`). Everything below is in the
+noise has **no** such clean linear-domain identity (`src/dl_techniques/utils/multiplicative_miyasawa.py:12-33`).
+Everything below is in the
 additive-Gaussian regime.
 
 **Why the usual attention ingredients break degree-1.** These are all forbidden on a
 compliant path (per `miyasawa-constraints.md`, F2):
 
-| Ingredient | Bias-free? | Degree-1? | Why it breaks |
-|---|---|---|---|
-| **Softmax** | n/a | **NO** | Temperature-sensitive: `softmax(alpha·z) != softmax(z)`; sharpens toward one-hot as `alpha` grows, flattens as it shrinks. Attention weights become a non-homogeneous function of `Q,K`. |
-| **LayerNorm / RMSNorm** (even `center=False`) | yes | **NO** | Per-input normalization is scale-**invariant** (degree-0), not degree-1. Dividing by a per-input statistic cancels the scale entirely. |
-| **GELU / sigmoid / tanh / Swish** | yes | **NO** | Saturating nonlinearities are not homogeneous for any nonzero scale. |
-| **`elu(x)+1`** (Katharopoulos map) | yes | **NO** | The `+1` is an additive degree-0 constant → `phi(alpha·z) != alpha^p·phi(z)`. |
-| **Multiplicative gate** `sigmoid(Dense(x))·h` | yes | **NO** | The gate is a nonlinear function of `x`; the product is degree-2, not degree-1 (the Clifford GGR-gate precedent, `clifford_block.py:583-590`). |
+| Ingredient                                    | Bias-free? | Degree-1? | Why it breaks                                                                                                                                                                            |
+|-----------------------------------------------|------------|-----------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Softmax**                                   | n/a        | **NO**    | Temperature-sensitive: `softmax(alpha·z) != softmax(z)`; sharpens toward one-hot as `alpha` grows, flattens as it shrinks. Attention weights become a non-homogeneous function of `Q,K`. |
+| **LayerNorm / RMSNorm** (even `center=False`) | yes        | **NO**    | Per-input normalization is scale-**invariant** (degree-0), not degree-1. Dividing by a per-input statistic cancels the scale entirely.                                                   |
+| **GELU / sigmoid / tanh / Swish**             | yes        | **NO**    | Saturating nonlinearities are not homogeneous for any nonzero scale.                                                                                                                     |
+| **`elu(x)+1`** (Katharopoulos map)            | yes        | **NO**    | The `+1` is an additive degree-0 constant → `phi(alpha·z) != alpha^p·phi(z)`.                                                                                                            |
+| **Multiplicative gate** `sigmoid(Dense(x))·h` | yes        | **NO**    | The gate is a nonlinear function of `x`; the product is degree-2, not degree-1 (the Clifford GGR-gate precedent, `clifford_block.py:583-590`).                                           |
 
 Softmax is structurally the same shape as the rejected Clifford gate: a nonlinear,
 input-dependent reweighting (`softmax(QKᵀ)`) multiplied against a degree-1 stream (`V`)
@@ -177,20 +176,19 @@ choose for expressiveness — it does not affect compliance.
 
 **Admissible (implemented, `_SUPPORTED_FEATURE_MAPS`):**
 
-| `feature_map` | `phi(x)` | degree `p` | note |
-|---|---|---|---|
-| `'relu'` (default) | `relu(x)` | 1 | `relu(alpha·x) = alpha·relu(x)` for `alpha>0`; the canonical positively-homogeneous piecewise-linear map. |
-| `'relu_squared'` | `relu(x)²` | 2 | FLatten/Focused-style focus: sharpens the (otherwise high-entropy) linear-attention distribution while staying homogeneous — `(alpha·relu(x))² = alpha²·relu(x)²`. |
-| `'abs'` | `|x|` | 1 | `|alpha·x| = alpha·|x|` for `alpha>0`; non-negative, keeps sign magnitude. |
+| `feature_map`      | `phi(x)`   | degree `p` | note                                                                                                                                                               |
+|--------------------|------------|------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `'relu'` (default) | `relu(x)`  | 1          | `relu(alpha·x) = alpha·relu(x)` for `alpha>0`; the canonical positively-homogeneous piecewise-linear map.                                                          |
+| `'relu_squared'`   | `relu(x)²` | 2          | FLatten/Focused-style focus: sharpens the (otherwise high-entropy) linear-attention distribution while staying homogeneous — `(alpha·relu(x))² = alpha²·relu(x)²`. |
+| `'abs'`            | `          | x          | `                                                                                                                                                                  | 1 | `|alpha·x| = alpha·|x|` for `alpha>0`; non-negative, keeps sign magnitude. |
 
 **Forbidden (rejected in `__init__`, `_FORBIDDEN_FEATURE_MAPS`):**
 
 - **`'elu_plus_one'`** — Katharopoulos's `elu(x)+1`. The `+1` is an *additive degree-0
   constant*: `phi(alpha·x) != alpha^p·phi(x)`. Even though it is the most common linear-
   attention feature map in the literature, it directly breaks `f(alpha·x) = alpha·f(x)`.
-- **`'exp'` / `'softmax'`** — the exponential kernel is non-homogeneous
-  (`exp(alpha·z) != alpha^p·exp(z)`) and softmax is temperature-sensitive
-  (`softmax(alpha·z) != softmax(z)`). This is exactly what we set out to avoid.
+- **`'exp'` / `'softmax'`** — the exponential kernel is non-homogeneous (`exp(alpha·z) != alpha^p·exp(z)`) and softmax
+  is temperature-sensitive (`softmax(alpha·z) != softmax(z)`). This is exactly what we set out to avoid.
 
 **Homogeneity-preserving expressiveness boosters (in-family, future work).** These stay
 compliant because they are *multiplicative* by input-independent factors, or raise degree
@@ -226,8 +224,8 @@ Performer's bare `+1e-6` (Section 6) is exactly this failure mode.
 
 **The resolution (decisions.md D-001): input-scaled epsilon.** Scale `epsilon` by a
 degree-`2p` quantity derived from the denominator's own scale, so the floor matches `z`'s
-degree. The implementation uses the per-`(B,H)` mean of `z` over tokens
-(`linear_attention.py:385-390`, carrying the `# DECISION plan_2026-07-07_1cab8d7a/D-001`
+degree. The implementation uses the per-`(B,H)` mean of `z` over tokens (`linear_attention.py:385-390`, carrying the
+`# DECISION plan_2026-07-07_1cab8d7a/D-001`
 anchor):
 
 ```
@@ -243,8 +241,8 @@ NaN floor that is active *only* on a fully-dead batch (all `phi` zero → `z_mea
 it is a negligible degree-0 constant and is the single residual non-homogeneous corner,
 absorbed by the probe tolerance.
 
-**Empirical result.** The 37-test suite
-(`tests/test_layers/test_attention/test_linear_attention.py`) measures the homogeneity
+**Empirical result.** The 37-test suite (`tests/test_layers/test_attention/test_linear_attention.py`) measures the
+homogeneity
 rel-err as **0.0 (exact, fp32)** for all `{relu, relu_squared, abs} × {alpha=0.5,
 alpha=2.0}` — not merely under the `1e-2` image-probe tolerance, not merely under the
 tighter `1e-4` seq-probe gate, but bit-exact. The associativity path also matches a naive
@@ -252,8 +250,8 @@ tighter `1e-4` seq-probe gate, but bit-exact. The associativity path also matche
 all-zero-input edge cases return finite outputs.
 
 **Rejected eps alternatives (D-001):** (a) a *fixed additive* eps like Performer's —
-simplest, but breaks exact degree-1 and only passes at the loose image-probe tol;
-(b) *strictly-positive-only `phi` with no eps* — cannot guarantee finiteness on genuinely
+simplest, but breaks exact degree-1 and only passes at the loose image-probe tol; (b) *strictly-positive-only `phi` with
+no eps* — cannot guarantee finiteness on genuinely
 dead tokens.
 
 ---
@@ -265,8 +263,8 @@ repo's only other true `O(N)` attention layer, and it is bias-free by default wi
 LayerNorm. `LinearAttention` **reuses** one thing from it and **rejects** two.
 
 **Reused — the non-causal associativity contraction.** Performer's `_linear_attention`
-non-causal path (`performer_attention.py:301-361`) contracts `phi(K)ᵀ V` first
-(`bhnf,bhnd->bhfd`) into a `(d,d)` state, then multiplies by `phi(Q)`, never materializing
+non-causal path (`performer_attention.py:301-361`) contracts `phi(K)ᵀ V` first (`bhnf,bhnd->bhfd`) into a `(d,d)` state,
+then multiplies by `phi(Q)`, never materializing
 the `N × N` matrix. `LinearAttention` uses the same contraction *style* (with `einsum`
 signatures adapted to its head layout).
 
@@ -328,8 +326,8 @@ lines place attention squarely inside denoising/score theory (F-W7):
   one denoising gradient-descent step on a DAM energy landscape — attention literally *is*
   a denoising operation.
 - **Softmax-free homogeneous denoising (arxiv 2508.02967).** "Towards Robust Image
-  Denoising with Scale Equivariance" builds a first-order-homogeneous denoiser that
-  **explicitly avoids softmax attention**, replacing it with homogeneous
+  Denoising with Scale Equivariance" builds a first-order-homogeneous denoiser that **explicitly avoids softmax
+  attention**, replacing it with homogeneous
   ratio-of-equal-degree gating — e.g. their Interactive Gating Module
   `IG(Fv, Fm) = (Fv ⊙ Fm) / √(σ²(Fv) + σ²(Fm))`: numerator degree-2 over denominator
   degree-2 = degree-1 quotient. This is direct prior-art evidence that a homogeneous
@@ -362,14 +360,14 @@ does. To use it in the bfunet-family bias-free denoisers:
    `_homogeneity_probe` at post-build/post-init checkpoints. **But that probe synthesizes
    a 4D image-shaped input** `(B, H, W, C)`, whereas `LinearAttention` consumes a
    3D token/sequence tensor `(B, N, dim)`. So either:
-   - place `LinearAttention` where the denoiser already exposes a **token/sequence**
-     structure (e.g. a tokenized bottleneck), and adapt the probe input shape accordingly; or
-   - add a small `(B,H,W,C) ↔ (B, H·W, C)` reshape adapter around the attention block so
-     the image-shaped probe flows through unchanged. The layer's own math is spatial-shape
-     agnostic — it only needs a sequence axis.
-   The standalone seq-shaped probe in the test suite is the reference for the 3D case
-   (the plan deliberately did **not** reuse `common.py:_homogeneity_probe` for the unit
-   test precisely because it is 4D image-shaped).
+    - place `LinearAttention` where the denoiser already exposes a **token/sequence**
+      structure (e.g. a tokenized bottleneck), and adapt the probe input shape accordingly; or
+    - add a small `(B,H,W,C) ↔ (B, H·W, C)` reshape adapter around the attention block so
+      the image-shaped probe flows through unchanged. The layer's own math is spatial-shape
+      agnostic — it only needs a sequence axis.
+      The standalone seq-shaped probe in the test suite is the reference for the 3D case (the plan deliberately did
+      **not** reuse `common.py:_homogeneity_probe` for the unit
+      test precisely because it is 4D image-shaped).
 
 3. **Remember the caveat about untrained models.** A homogeneity PASS on an *untrained*
    model does not prove homogeneity for residual-branch architectures (`LayerScale
@@ -379,8 +377,8 @@ does. To use it in the bfunet-family bias-free denoisers:
    block still must be probed **post-training**.
 
 4. **Stay in the additive-Gaussian regime.** The `residual = sigma² · score` reading only
-   holds for additive Gaussian noise; multiplicative/composite noise has no such identity
-   (Section 2). Compliance of the *layer* does not extend the *identity* to other noise
+   holds for additive Gaussian noise; multiplicative/composite noise has no such identity (Section 2). Compliance of the
+   *layer* does not extend the *identity* to other noise
    models.
 
 ---
@@ -395,8 +393,8 @@ full `get_config` round-trip + `.keras` save/load; factory-registered as `'linea
 
 - **`relu_squared` at extreme scale.** Degree-1 is *exact* for `relu` / `abs` (degree
   `p=1`) across a wide input-scale band, but `relu_squared` (`p=2`, degree-4 denominator)
-  degrades at extreme *small* scales (`alpha ≲ 1e-6`): the doubled dynamic range
-  (`num ~ alpha^5` vs `denom ~ alpha^4`) underflows in fp32 and the `1e-20` floor
+  degrades at extreme *small* scales (`alpha ≲ 1e-6`): the doubled dynamic range (`num ~ alpha^5` vs `denom ~ alpha^4`)
+  underflows in fp32 and the `1e-20` floor
   activates, so the property no longer holds bit-exactly there (reviewer probe: rel-err
   ~4e-4 at `alpha ∈ {1e-3, 1e3}`, breaking down at `alpha = 1e-6`). **Use `relu` for the
   strongest guarantee**; keep `relu_squared` to realistic scales.
@@ -436,8 +434,8 @@ External literature grounding the design (from
 - Katharopoulos et al. (2020), *Transformers are RNNs: Fast Autoregressive Transformers
   with Linear Attention* — kernel feature map + associativity; the `elu(x)+1` map (used as
   the FORBIDDEN example here).
-- **cosFormer**, arxiv 2202.08791 — ReLU feature map + cosine positional reweighting
-  (multiplicative, homogeneity-preserving).
+- **cosFormer**, arxiv 2202.08791 — ReLU feature map + cosine positional reweighting (multiplicative,
+  homogeneity-preserving).
 - **FLatten / Focused Linear Attention** — `ReLU(x)^p` focus function (the basis for the
   `relu_squared` map).
 - **PolaFormer**, arxiv 2501.15061 — polarity-aware linear attention.

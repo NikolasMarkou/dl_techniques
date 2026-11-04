@@ -1,6 +1,7 @@
 # Modern Radial Basis Function Neural Networks: A Comprehensive Guide
 
 ## Table of Contents
+
 1. [Introduction](#introduction)
 2. [Classical RBF Networks](#classical-rbf-networks)
 3. [Why RBFs Disappeared from Mainstream Deep Learning](#why-rbfs-disappeared)
@@ -17,7 +18,10 @@
 
 ## Introduction
 
-Radial Basis Function (RBF) networks are experiencing a remarkable renaissance in 2024, particularly through their connection to **Kolmogorov-Arnold Networks (KANs)**. After decades of being relegated to classical machine learning textbooks, RBFs have emerged as a competitive alternative to Multi-Layer Perceptrons (MLPs) in modern deep learning architectures.
+Radial Basis Function (RBF) networks are experiencing a remarkable renaissance in 2024, particularly through their
+connection to **Kolmogorov-Arnold Networks (KANs)**. After decades of being relegated to classical machine learning
+textbooks, RBFs have emerged as a competitive alternative to Multi-Layer Perceptrons (MLPs) in modern deep learning
+architectures.
 
 ### Key Recent Developments
 
@@ -39,6 +43,7 @@ Input Layer → Hidden Layer (RBF Kernels) → Output Layer (Linear)
 ```
 
 **Key Characteristics:**
+
 - Input layer: Direct pass-through (weights = 1)
 - Hidden layer: Distance-based activation using RBF kernels
 - Output layer: Linear combination of hidden activations
@@ -48,10 +53,11 @@ Input Layer → Hidden Layer (RBF Kernels) → Output Layer (Linear)
 The most common RBF is the Gaussian function:
 
 $$
-\phi_i(\mathbf{x}) = \exp\left(-\frac{\|\mathbf{x} - \mathbf{c}_i\|^2}{2\sigma_i^2}\right)
+\phi_i (\mathbf{x}) = \exp\left (-\frac{\|\mathbf{x} - \mathbf{c}_i\|^2}{2\sigma_i^2}\right)
 $$
 
 Where:
+
 - $\mathbf{x}$: Input vector
 - $\mathbf{c}_i$: Center of the $i$-th RBF
 - $\sigma_i$: Width (spread) parameter
@@ -62,7 +68,7 @@ Where:
 The final output is a weighted sum:
 
 $$
-y(\mathbf{x}) = \sum_{i=1}^{N} w_i \phi_i(\mathbf{x})
+y (\mathbf{x}) = \sum_{i=1}^{N} w_i \phi_i (\mathbf{x})
 $$
 
 ### Training Process
@@ -96,11 +102,13 @@ Stage 3: Weight Optimization (Supervised)
   Solution: w = (Φ^T Φ)^(-1) Φ^T y  (pseudo-inverse)
 ```
 
-**Advantage**: The linear nature of the output layer means there's an explicit solution (unlike MLPs that require iterative optimization).
+**Advantage**: The linear nature of the output layer means there's an explicit solution (unlike MLPs that require
+iterative optimization).
 
 ### Universal Approximation
 
-The **Park-Sandberg theorem** (1991) proved that single-layer RBF networks are universal approximators, theoretically making deeper architectures unnecessary.
+The **Park-Sandberg theorem** (1991) proved that single-layer RBF networks are universal approximators, theoretically
+making deeper architectures unnecessary.
 
 ---
 
@@ -111,22 +119,26 @@ The **Park-Sandberg theorem** (1991) proved that single-layer RBF networks are u
 Despite their theoretical elegance, RBF networks fell out of favor for several reasons:
 
 #### 1. **Scalability Issues**
+
 - Number of RBF centers grows with training data size
 - Curse of dimensionality: exponential growth in high dimensions
-- Memory requirements: $O(N \times d)$ for $N$ centers and $d$ dimensions
+- Memory requirements: $O (N \times d)$ for $N$ centers and $d$ dimensions
 
 #### 2. **Instability in Deep Architectures**
+
 - Multi-layered RBF networks were considered unstable
 - Vanishing/exploding gradients with distance-based activations
 - Difficult to train end-to-end with backpropagation
 
 #### 3. **The Deep Learning Revolution**
+
 - MLPs with ReLU activations were easier to train deeply
 - Convolutional Neural Networks (CNNs) dominated computer vision
 - Recurrent Neural Networks (RNNs) and LSTMs excelled at sequences
 - Hardware optimizations focused on matrix multiplications (MLPs)
 
 #### 4. **Theoretical Sufficiency**
+
 - Single-layer RBF networks were universal approximators
 - "Why go deeper if shallow works?" mentality
 - Focus shifted to MLPs that empirically benefited from depth
@@ -138,20 +150,21 @@ Despite their theoretical elegance, RBF networks fell out of favor for several r
 ### Paradigm Shift
 
 Recent research demonstrates that RBFs can be competitive in modern deep learning when:
+
 1. Properly integrated with contemporary architectures
 2. Combined with efficient computational techniques
 3. Leveraged for their unique properties (distance-based, interpretability)
 
 ### Timeline of Recent Breakthroughs
 
-| Date | Development | Significance |
-|------|-------------|--------------|
-| **2022** | RBF classifiers on CNNs | End-to-end training with modern architectures |
-| **April 2024** | Kolmogorov-Arnold Networks | Alternative to MLPs with learnable edge activations |
-| **April 2024** | Deep RBF Networks | Multi-layer RBF with CNN-like partial connections |
-| **May 2024** | FastKAN | Proof that KANs ≈ RBF networks |
-| **June 2024** | KAGNNs | RBF-based Graph Neural Networks |
-| **October 2024** | BSRBF-KAN | Hybrid B-spline and RBF approach |
+| Date             | Development                | Significance                                        |
+|------------------|----------------------------|-----------------------------------------------------|
+| **2022**         | RBF classifiers on CNNs    | End-to-end training with modern architectures       |
+| **April 2024**   | Kolmogorov-Arnold Networks | Alternative to MLPs with learnable edge activations |
+| **April 2024**   | Deep RBF Networks          | Multi-layer RBF with CNN-like partial connections   |
+| **May 2024**     | FastKAN                    | Proof that KANs ≈ RBF networks                      |
+| **June 2024**    | KAGNNs                     | RBF-based Graph Neural Networks                     |
+| **October 2024** | BSRBF-KAN                  | Hybrid B-spline and RBF approach                    |
 
 ---
 
@@ -162,11 +175,13 @@ Recent research demonstrates that RBFs can be competitive in modern deep learnin
 **KANs represent a fundamental rethinking of neural network design.**
 
 **Multi-Layer Perceptrons (MLPs)**:
+
 - Fixed activation functions on **nodes** (neurons)
 - Learnable weights on **edges**
-- Formula: $\text{activation}(W\mathbf{x} + b)$
+- Formula: $\text{activation} (W\mathbf{x} + b)$
 
 **Kolmogorov-Arnold Networks (KANs)**:
+
 - Learnable activation functions on **edges**
 - No traditional weight matrices
 - Formula: Each edge applies a univariate function
@@ -178,7 +193,7 @@ Based on the **Kolmogorov-Arnold Representation Theorem** (1957):
 Any continuous multivariate function $f: [0,1]^n \to \mathbb{R}$ can be represented as:
 
 $$
-f(\mathbf{x}) = \sum_{q=0}^{2n} \Phi_q\left(\sum_{p=1}^{n} \phi_{q,p}(x_p)\right)
+f (\mathbf{x}) = \sum_{q=0}^{2n} \Phi_q\left (\sum_{p=1}^{n} \phi_{q,p} (x_p)\right)
 $$
 
 Where $\Phi_q$ and $\phi_{q,p}$ are continuous univariate functions.
@@ -200,22 +215,24 @@ Each connection `[φ]` is a **learnable univariate function**, not a scalar weig
 **B-Spline Basis**: The original paper used B-splines to represent learnable functions:
 
 $$
-\phi_{i,j}(x) = \sum_{k} c_k^{(i,j)} B_k(x)
+\phi_{i,j} (x) = \sum_{k} c_k^{ (i,j)} B_k (x)
 $$
 
 Where:
-- $B_k(x)$: B-spline basis functions
-- $c_k^{(i,j)}$: Learnable coefficients
+
+- $B_k (x)$: B-spline basis functions
+- $c_k^{ (i,j)}$: Learnable coefficients
 
 ### The RBF Connection: FastKAN
 
 **Major Discovery (May 2024)**: B-splines in KANs can be accurately approximated by Gaussian RBFs!
 
 $$
-B_i(u) \approx \exp\left(-\left(\frac{u - u_i}{h}\right)^2\right)
+B_i (u) \approx \exp\left (-\left (\frac{u - u_i}{h}\right)^2\right)
 $$
 
 This led to **FastKAN**:
+
 - **3.33× faster** than efficient KAN implementations
 - **Simpler** to implement
 - **Proves KANs are RBF networks** (with fixed centers)
@@ -245,6 +262,7 @@ Output: y ∈ ℝ^(B×D_out)
 ```
 
 **Key Insight**: KANs with Gaussian RBFs have:
+
 - **Fixed centers** (on a uniform grid)
 - **Learnable combination weights**
 - **Shared width parameter** (can be per-center too)
@@ -253,14 +271,14 @@ Output: y ∈ ℝ^(B×D_out)
 
 Multiple basis function families have been explored:
 
-| Variant | Basis Function | Performance | Speed |
-|---------|---------------|-------------|-------|
-| **Original KAN** | B-splines (order 3) | Baseline | Baseline |
-| **FastKAN** | Gaussian RBF | Same accuracy | 3.33× faster |
-| **FasterKAN** | RSWAF + RBF | Competitive | 2× slower than MLP |
-| **FourierKAN** | Fourier basis | Good for periodic | Moderate |
-| **ChebyKAN** | Chebyshev polynomials | Stable | Moderate |
-| **BSRBF-KAN** | B-spline + RBF hybrid | 97.55% (MNIST) | Competitive |
+| Variant          | Basis Function        | Performance       | Speed              |
+|------------------|-----------------------|-------------------|--------------------|
+| **Original KAN** | B-splines (order 3)   | Baseline          | Baseline           |
+| **FastKAN**      | Gaussian RBF          | Same accuracy     | 3.33× faster       |
+| **FasterKAN**    | RSWAF + RBF           | Competitive       | 2× slower than MLP |
+| **FourierKAN**   | Fourier basis         | Good for periodic | Moderate           |
+| **ChebyKAN**     | Chebyshev polynomials | Stable            | Moderate           |
+| **BSRBF-KAN**    | B-spline + RBF hybrid | 97.55% (MNIST)    | Competitive        |
 
 ---
 
@@ -300,12 +318,13 @@ For each RBF layer l:
 Instead of Euclidean distance:
 
 $$
-d_M(\mathbf{x}, \mathbf{c}_i) = \sqrt{(\mathbf{x} - \mathbf{c}_i)^T \Sigma_i^{-1} (\mathbf{x} - \mathbf{c}_i)}
+d_M (\mathbf{x}, \mathbf{c}_i) = \sqrt{ (\mathbf{x} - \mathbf{c}_i)^T \Sigma_i^{-1} (\mathbf{x} - \mathbf{c}_i)}
 $$
 
 Where $\Sigma_i$ is the covariance matrix (learnable).
 
 **Advantages**:
+
 - Captures feature correlations
 - Adaptive receptive fields
 - Better geometric modeling
@@ -343,7 +362,7 @@ Stride: S
    where H' = (H-K)/S + 1, W' = (W-K)/S + 1
 ```
 
-This reduces computational complexity from $O(WHC \times N)$ to $O(K^2C \times N)$ where $K$ is patch size.
+This reduces computational complexity from $O (WHC \times N)$ to $O (K^2C \times N)$ where $K$ is patch size.
 
 ### Training Deep RBF Networks
 
@@ -380,11 +399,13 @@ Learning rate schedule:
 ### Performance Results
 
 On MNIST (Deep RBF vs. CNN):
+
 - **Test Accuracy**: 98.9% vs. 99.1% (comparable)
 - **Parameters**: Similar order of magnitude
 - **Training Time**: Competitive on GPU
 
 On CIFAR-10:
+
 - Deep RBF: ~85% accuracy
 - CNN baseline: ~87% accuracy
 - **Gap is closing** with architectural improvements
@@ -397,28 +418,30 @@ On CIFAR-10:
 
 **Traditional neuron** (MLP):
 $$
-h = \sigma(w^T x + b)
+h = \sigma (w^T x + b)
 $$
+
 - Response based on **linear projection**
 - Direction-sensitive
 
 **RBF neuron**:
 $$
-h = \phi(\|\mathbf{x} - \mathbf{c}\|)
+h = \phi (\|\mathbf{x} - \mathbf{c}\|)
 $$
+
 - Response based on **distance**
 - Rotation-invariant (for Euclidean distance)
 - Local receptive field
 
 ### Common RBF Functions
 
-| Name | Formula | Properties |
-|------|---------|-----------|
-| **Gaussian** | $\exp(-r^2/(2\sigma^2))$ | Smooth, infinitely differentiable |
-| **Multiquadric** | $\sqrt{1 + (r/\sigma)^2}$ | Unbounded, good for interpolation |
-| **Inverse Multiquadric** | $1/\sqrt{1 + (r/\sigma)^2}$ | Bounded, smooth decay |
-| **Thin Plate Spline** | $r^2 \log(r)$ | Minimal bending energy |
-| **Compact Support** | $(1-r)_+^4(4r+1)$ | Zero beyond radius |
+| Name                     | Formula                     | Properties                        |
+|--------------------------|-----------------------------|-----------------------------------|
+| **Gaussian**             | $\exp(-r^2/(2\sigma^2))$    | Smooth, infinitely differentiable |
+| **Multiquadric**         | $\sqrt{1 + (r/\sigma)^2}$   | Unbounded, good for interpolation |
+| **Inverse Multiquadric** | $1/\sqrt{1 + (r/\sigma)^2}$ | Bounded, smooth decay             |
+| **Thin Plate Spline**    | $r^2 \log(r)$               | Minimal bending energy            |
+| **Compact Support**      | $(1-r)_+^4(4r+1)$           | Zero beyond radius                |
 
 Where $r = \|\mathbf{x} - \mathbf{c}\|$.
 
@@ -429,7 +452,7 @@ Where $r = \|\mathbf{x} - \mathbf{c}\|$.
 **Solution**: Normalized RBF (NRBF):
 
 $$
-u_i(\mathbf{x}) = \frac{\phi_i(\mathbf{x})}{\sum_{j=1}^{N} \phi_j(\mathbf{x})}
+u_i (\mathbf{x}) = \frac{\phi_i (\mathbf{x})}{\sum_{j=1}^{N} \phi_j (\mathbf{x})}
 $$
 
 This is essentially a **soft clustering** or **attention mechanism**!
@@ -440,17 +463,17 @@ For backpropagation through Gaussian RBFs:
 
 **Gradient w.r.t. input:**
 $$
-\frac{\partial \phi_i}{\partial \mathbf{x}} = -\frac{1}{\sigma^2}(\mathbf{x} - \mathbf{c}_i) \cdot \phi_i(\mathbf{x})
+\frac{\partial \phi_i}{\partial \mathbf{x}} = -\frac{1}{\sigma^2} (\mathbf{x} - \mathbf{c}_i) \cdot \phi_i (\mathbf{x})
 $$
 
 **Gradient w.r.t. center:**
 $$
-\frac{\partial \phi_i}{\partial \mathbf{c}_i} = \frac{1}{\sigma^2}(\mathbf{x} - \mathbf{c}_i) \cdot \phi_i(\mathbf{x})
+\frac{\partial \phi_i}{\partial \mathbf{c}_i} = \frac{1}{\sigma^2} (\mathbf{x} - \mathbf{c}_i) \cdot \phi_i (\mathbf{x})
 $$
 
 **Gradient w.r.t. width:**
 $$
-\frac{\partial \phi_i}{\partial \sigma} = \frac{\|\mathbf{x} - \mathbf{c}_i\|^2}{\sigma^3} \cdot \phi_i(\mathbf{x})
+\frac{\partial \phi_i}{\partial \sigma} = \frac{\|\mathbf{x} - \mathbf{c}_i\|^2}{\sigma^3} \cdot \phi_i (\mathbf{x})
 $$
 
 **Key property**: Gradients naturally vanish far from centers (locality).
@@ -462,12 +485,14 @@ $$
 **Analysis**: Consider gradient through layer $l$:
 
 $$
-\frac{\partial L}{\partial \mathbf{c}_i^{(l)}} = \sum_j \frac{\partial L}{\partial h_j^{(l)}} \frac{\partial h_j^{(l)}}{\partial \mathbf{c}_i^{(l)}}
+\frac{\partial L}{\partial \mathbf{c}_i^{ (l)}} = \sum_j \frac{\partial L}{\partial h_j^{ (l)}} \frac{\partial h_j^{ (l)}}{\partial \mathbf{c}_i^{ (l)}}
 $$
 
-The term $\frac{\partial h_j^{(l)}}{\partial \mathbf{c}_i^{(l)}}$ includes the factor $\phi_i(\mathbf{x})$, which can be very small if $\mathbf{x}$ is far from $\mathbf{c}_i$.
+The term $\frac{\partial h_j^{ (l)}}{\partial \mathbf{c}_i^{ (l)}}$ includes the factor $\phi_i (\mathbf{x})$, which can
+be very small if $\mathbf{x}$ is far from $\mathbf{c}_i$.
 
 **Solutions**:
+
 1. Careful initialization (k-means)
 2. Adaptive learning rates per center
 3. Residual connections in deep architectures
@@ -481,10 +506,10 @@ The term $\frac{\partial h_j^{(l)}}{\partial \mathbf{c}_i^{(l)}}$ includes the f
 
 #### 1. **Number of RBF Centers**
 
-**Too Few**: Underfitting, poor approximation
-**Too Many**: Overfitting, computational cost
+**Too Few**: Underfitting, poor approximation **Too Many**: Overfitting, computational cost
 
 **Heuristics**:
+
 - Start with $\sqrt{N}$ for $N$ training samples
 - Use cross-validation
 - For KANs: 5-10 centers per edge is typical
@@ -521,6 +546,7 @@ $$
 Where $d_{max}$ is maximum distance between centers.
 
 **Learnable width** (modern):
+
 - Initialize as above
 - Allow gradient descent to adjust
 - Can be shared or per-center
@@ -532,7 +558,7 @@ $$
 
 #### 4. **Computational Efficiency**
 
-**Bottleneck**: Distance computation $O(N \times d)$
+**Bottleneck**: Distance computation $O (N \times d)$
 
 **Optimizations**:
 
@@ -662,7 +688,7 @@ Training Loop:
 
 **Neural Scaling**: How accuracy improves with model size.
 
-**MLPs**: 
+**MLPs**:
 $$
 \text{Error} \propto N^{-\alpha}
 $$
@@ -703,30 +729,30 @@ This is much harder with traditional weight matrices in MLPs.
 
 ### Training Speed
 
-| Architecture | Forward Speed | Backward Speed | Total Training |
-|--------------|---------------|----------------|----------------|
-| MLP | 1.0× (baseline) | 1.0× | 1.0× |
-| Original KAN | 0.3× | 0.2× | 0.25× |
-| FastKAN | 0.8× | 0.7× | 0.75× |
-| Deep RBF | 0.6× | 0.5× | 0.55× |
+| Architecture | Forward Speed   | Backward Speed | Total Training |
+|--------------|-----------------|----------------|----------------|
+| MLP          | 1.0× (baseline) | 1.0×           | 1.0×           |
+| Original KAN | 0.3×            | 0.2×           | 0.25×          |
+| FastKAN      | 0.8×            | 0.7×           | 0.75×          |
+| Deep RBF     | 0.6×            | 0.5×           | 0.55×          |
 
 **Note**: Speed comparisons are approximate and hardware-dependent.
 
 ### Memory Footprint
 
-**MLP**: $O(d_{in} \times d_{out})$ per layer
+**MLP**: $O (d_{in} \times d_{out})$ per layer
 
-**KAN/RBF**: $O(d_{in} \times d_{out} \times n_{rbf})$ per layer
+**KAN/RBF**: $O (d_{in} \times d_{out} \times n_{rbf})$ per layer
 
 **Trade-off**: RBF layers need more memory but can be shallower.
 
 **Comparison Table**:
 
-| Model | Parameters | Memory (MB) | FLOPs/sample |
-|-------|-----------|-------------|--------------|
-| MLP [784-256-256-10] | 269K | 1.1 | 536K |
-| KAN [784-64-10, 8 RBF] | 204K | 2.8 | 816K |
-| Deep RBF [784-128-10] | 180K | 2.1 | 720K |
+| Model                  | Parameters | Memory (MB) | FLOPs/sample |
+|------------------------|------------|-------------|--------------|
+| MLP [784-256-256-10]   | 269K       | 1.1         | 536K         |
+| KAN [784-64-10, 8 RBF] | 204K       | 2.8         | 816K         |
+| Deep RBF [784-128-10]  | 180K       | 2.1         | 720K         |
 
 ---
 
@@ -735,6 +761,7 @@ This is much harder with traditional weight matrices in MLPs.
 ### 1. **Scientific Computing & Physics-Informed NNs**
 
 **Why RBFs excel here**:
+
 - Better function approximation for smooth functions
 - Easier to enforce boundary conditions
 - Natural for interpolation problems
@@ -836,6 +863,7 @@ Advantages:
 ```
 
 **Deep RBF CNNs**:
+
 - Image classification (MNIST, CIFAR-10)
 - Object detection (ongoing research)
 - Medical imaging (high interpretability value)
@@ -935,6 +963,7 @@ Advantages:
 #### 1. **Theoretical Understanding**
 
 **Questions**:
+
 - Why do KANs have better scaling laws?
 - What is the approximation capacity of deep RBF networks?
 - Connection to kernel methods and RKHS theory?
@@ -952,6 +981,7 @@ Where $\mathcal{F}$ denotes the function class.
 #### 2. **Efficient Architectures**
 
 **Challenges**:
+
 - Make RBF layers as fast as MLPs
 - Hardware acceleration (TPUs, GPUs)
 - Sparse RBF connections
@@ -1037,6 +1067,7 @@ Challenge: 2× parameters, need efficiency improvements
 ```
 
 **Requirements**:
+
 - Efficient implementations
 - Distributed training strategies
 - Architectural innovations for large models
@@ -1076,12 +1107,14 @@ Open questions:
 ### Industry Adoption Barriers
 
 **Current challenges**:
+
 1. **Ecosystem maturity**: MLPs have decades of optimization
 2. **Training frameworks**: Limited library support for KANs/RBFs
 3. **Practitioner familiarity**: New paradigm requires relearning
 4. **Hardware**: GPUs optimized for dense matrix multiplication
 
 **Potential catalysts**:
+
 1. If KANs show clear wins on major benchmarks (e.g., ImageNet)
 2. Release of efficient, production-ready libraries
 3. Hardware vendors adding RBF-specific operations
@@ -1094,13 +1127,13 @@ Open questions:
 RBF networks are related to **kernel machines**:
 
 $$
-f(\mathbf{x}) = \sum_{i=1}^{N} \alpha_i K(\mathbf{x}, \mathbf{x}_i)
+f (\mathbf{x}) = \sum_{i=1}^{N} \alpha_i K (\mathbf{x}, \mathbf{x}_i)
 $$
 
 **Kernel trick**: Implicitly map to high-dimensional space
 
 $$
-K(\mathbf{x}, \mathbf{x}') = \phi(\mathbf{x})^T \phi(\mathbf{x}')
+K (\mathbf{x}, \mathbf{x}') = \phi (\mathbf{x})^T \phi (\mathbf{x}')
 $$
 
 **Question**: Can we leverage kernel theory for deep RBF networks?
@@ -1112,11 +1145,11 @@ $$
 Normalized RBFs look like attention:
 
 $$
-\text{Attention: } \alpha_i = \frac{\exp(\mathbf{q} \cdot \mathbf{k}_i)}{\sum_j \exp(\mathbf{q} \cdot \mathbf{k}_j)}
+\text{Attention: } \alpha_i = \frac{\exp (\mathbf{q} \cdot \mathbf{k}_i)}{\sum_j \exp (\mathbf{q} \cdot \mathbf{k}_j)}
 $$
 
 $$
-\text{NRBF: } u_i = \frac{\phi(\|\mathbf{x} - \mathbf{c}_i\|)}{\sum_j \phi(\|\mathbf{x} - \mathbf{c}_j\|)}
+\text{NRBF: } u_i = \frac{\phi (\|\mathbf{x} - \mathbf{c}_i\|)}{\sum_j \phi (\|\mathbf{x} - \mathbf{c}_j\|)}
 $$
 
 **Unified view**:
@@ -1124,13 +1157,14 @@ $$
 Both compute weighted combinations based on similarity.
 
 **Difference**:
+
 - Attention: Learned similarity (dot product in learned space)
 - RBF: Fixed similarity metric (distance in input space)
 
 **Hybrid approach**:
 
 $$
-\alpha_i = \frac{\exp(-\|\mathbf{q} - \mathbf{k}_i\|^2 / \tau)}{\sum_j \exp(-\|\mathbf{q} - \mathbf{k}_j\|^2 / \tau)}
+\alpha_i = \frac{\exp (-\|\mathbf{q} - \mathbf{k}_i\|^2 / \tau)}{\sum_j \exp (-\|\mathbf{q} - \mathbf{k}_j\|^2 / \tau)}
 $$
 
 This is **Gaussian attention**, combining both paradigms!
@@ -1270,7 +1304,9 @@ Issue 5: Slow training
 
 ## Conclusion
 
-The resurgence of RBF networks in 2024, particularly through Kolmogorov-Arnold Networks, represents a significant development in deep learning. What was once considered a "solved" classical method has been reimagined with modern techniques, achieving competitive performance with mainstream architectures.
+The resurgence of RBF networks in 2024, particularly through Kolmogorov-Arnold Networks, represents a significant
+development in deep learning. What was once considered a "solved" classical method has been reimagined with modern
+techniques, achieving competitive performance with mainstream architectures.
 
 ### Key Takeaways
 
@@ -1290,6 +1326,7 @@ $$
 $$
 
 This applies to:
+
 - RBF networks (distance-based similarity)
 - Attention mechanisms (dot-product similarity)
 - Kernel methods (implicit similarity)
@@ -1297,17 +1334,22 @@ This applies to:
 ### The Future is Hybrid
 
 Rather than "RBFs vs. MLPs," the future likely involves:
+
 - **Strategic mixing**: Use RBFs where they excel (interpretability, function approximation)
 - **Complementary strengths**: CNNs for vision, RBFs for reasoning
 - **Architectural innovation**: New designs that leverage distance-based computation
 
 ### Final Thoughts
 
-The RBF renaissance demonstrates that **old ideas, when combined with modern techniques, can yield breakthrough results**. As the field matures, we may see RBF/KAN components become as ubiquitous as convolutions and attention are today.
+The RBF renaissance demonstrates that **old ideas, when combined with modern techniques, can yield breakthrough
+results**. As the field matures, we may see RBF/KAN components become as ubiquitous as convolutions and attention are
+today.
 
-The question is no longer "Are RBFs relevant?" but rather "How can we best leverage distance-based learning in modern AI?"
+The question is no longer "Are RBFs relevant?" but rather "How can we best leverage distance-based learning in modern
+AI?"
 
 **Research remains wide open in**:
+
 - Scaling to large models (billions of parameters)
 - Efficient hardware implementations
 - Theoretical guarantees on approximation and generalization
@@ -1329,7 +1371,7 @@ The question is no longer "Are RBFs relevant?" but rather "How can we best lever
 
 3. **Deep RBF Networks (2024)**  
    Roth et al., "Learning in Deep Radial Basis Function Networks"  
-   Entropy 2024, 26(5), 368
+   Entropy 2024, 26 (5), 368
 
 4. **RBF for CNNs (2022)**  
    Hoang & Stenger, "Radial Basis Function Networks for CNN to Learn Similarity Distance Metric"  
@@ -1347,7 +1389,7 @@ The question is no longer "Are RBFs relevant?" but rather "How can we best lever
 
 7. **Universal Approximation (1991)**  
    Park & Sandberg, "Universal Approximation Using RBF Networks"  
-   Neural Computation 3(2)
+   Neural Computation 3 (2)
 
 8. **Broomhead & Lowe (1988)**  
    "Radial Basis Functions, Multi-Variable Functional Interpolation"  
@@ -1355,7 +1397,7 @@ The question is no longer "Are RBFs relevant?" but rather "How can we best lever
 
 9. **Moody & Darken (1989)**  
    "Fast Learning in Networks of Locally-Tuned Processing Units"  
-   Neural Computation 1(2)
+   Neural Computation 1 (2)
 
 ### Mathematical Foundations
 
@@ -1387,28 +1429,29 @@ The question is no longer "Are RBFs relevant?" but rather "How can we best lever
 
 ## Appendix: Mathematical Notation
 
-| Symbol | Meaning |
-|--------|---------|
-| $\mathbf{x}$ | Input vector |
-| $\mathbf{c}_i$ | Center of $i$-th RBF |
-| $\sigma_i$ | Width parameter of $i$-th RBF |
-| $\phi_i(\cdot)$ | $i$-th RBF activation function |
-| $w_i$ | Weight for $i$-th RBF |
-| $N$ | Number of RBF centers |
-| $D$ | Input dimension |
-| $K$ | Output dimension |
-| $B$ | Batch size |
-| $\Sigma$ | Covariance matrix |
-| $L$ | Cholesky factor ($\Sigma = LL^T$) |
-| $\|\cdot\|$ | Euclidean norm |
-| $d_M(\cdot,\cdot)$ | Mahalanobis distance |
-| $\alpha$ | Learning rate |
-| $\lambda$ | Regularization parameter |
+| Symbol             | Meaning                           |
+|--------------------|-----------------------------------|
+| $\mathbf{x}$       | Input vector                      |
+| $\mathbf{c}_i$     | Center of $i$-th RBF              |
+| $\sigma_i$         | Width parameter of $i$-th RBF     |
+| $\phi_i(\cdot)$    | $i$-th RBF activation function    |
+| $w_i$              | Weight for $i$-th RBF             |
+| $N$                | Number of RBF centers             |
+| $D$                | Input dimension                   |
+| $K$                | Output dimension                  |
+| $B$                | Batch size                        |
+| $\Sigma$           | Covariance matrix                 |
+| $L$                | Cholesky factor ($\Sigma = LL^T$) |
+| $\|\cdot\|$        | Euclidean norm                    |
+| $d_M(\cdot,\cdot)$ | Mahalanobis distance              |
+| $\alpha$           | Learning rate                     |
+| $\lambda$          | Regularization parameter          |
 
 ---
 
 **Document Version**: 2.0 (No-Code Edition)  
 **Last Updated**: November 2024  
-**License**: CC BY 4.0  
+**License**: CC BY 4.0
 
-*This guide synthesizes cutting-edge research on RBF networks and KANs. The field is rapidly evolving—check arXiv for the latest developments!*
+*This guide synthesizes cutting-edge research on RBF networks and KANs. The field is rapidly evolving—check arXiv for
+the latest developments!*

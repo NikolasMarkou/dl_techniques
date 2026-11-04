@@ -2,9 +2,13 @@
 
 ## Executive Summary
 
-This guide provides an in-depth analysis of residual unit variations in Deep Residual Networks (ResNets), examining the critical role of **identity mappings** in enabling effective information propagation through very deep architectures. Based on the seminal work "Identity Mappings in Deep Residual Networks" by He et al. (2016), we explore how architectural modifications affect gradient flow, optimization dynamics, and model performance.
+This guide provides an in-depth analysis of residual unit variations in Deep Residual Networks (ResNets), examining the
+critical role of **identity mappings** in enabling effective information propagation through very deep architectures.
+Based on the seminal work "Identity Mappings in Deep Residual Networks" by He et al. (2016), we explore how
+architectural modifications affect gradient flow, optimization dynamics, and model performance.
 
 **Key Findings:**
+
 - Clean identity mappings enable training of 1000+ layer networks
 - Pre-activation residual units outperform post-activation designs
 - Shortcut obstructions (scaling, gating, dropout) harm optimization
@@ -30,7 +34,8 @@ This guide provides an in-depth analysis of residual unit variations in Deep Res
 
 ### 1.1 The Core Hypothesis
 
-**Central Claim:** Information propagation is most effective when both the skip connection and the after-addition activation function are **identity mappings**, creating a "clean" information path through the network.
+**Central Claim:** Information propagation is most effective when both the skip connection and the after-addition
+activation function are **identity mappings**, creating a "clean" information path through the network.
 
 ### 1.2 Dynamical Isometry
 
@@ -53,12 +58,14 @@ J = ∏(l=1 to L) D_l W_l
 ```
 
 Where:
-- D_l = diag(φ'(h_l)) are activation derivatives
+
+- D_l = diag (φ' (h_l)) are activation derivatives
 - W_l are weight matrices
 
 **Condition Number:**
-- With identity mappings: κ(J) ≈ 1
-- With standard initialization: κ(J) = O(L)
+
+- With identity mappings: κ (J) ≈ 1
+- With standard initialization: κ (J) = O (L)
 
 ### 1.3 Gradient Flow Preservation
 
@@ -196,7 +203,8 @@ x_{l+1} = σ(y_l)            (Post-activation)
 ```
 
 Where:
-- F(x_l, W_l) = BN(ReLU(BN(W₂·ReLU(BN(W₁·x_l)))))
+
+- F (x_l, W_l) = BN (ReLU (BN (W₂·ReLU (BN (W₁·x_l)))))
 - σ is the activation function (typically ReLU)
 
 **Recursive Formulation:**
@@ -288,6 +296,7 @@ x_{l+1} = ReLU(F(x_l) + λ·x_l)   where λ = 0.5
 ```
 
 **Results:**
+
 - ❌ Failed to converge or converged to poor solutions
 - ❌ Test error substantially higher than baseline
 - **Insight:** Scaling down the shortcut signal hampers optimization
@@ -344,6 +353,7 @@ x_{l+1} = ReLU(g(x_l)·F(x_l) + (1-g(x_l))·x_l)
 ```
 
 **Results:**
+
 - ⚠️ Lags behind baseline performance
 - ⚠️ Highly sensitive to gate bias initialization
 - **Insight:** Competing signals create optimization difficulties
@@ -388,6 +398,7 @@ x_{l+1} = ReLU(F(x_l) + (1-g(x_l))·x_l)
 ```
 
 **Results:**
+
 - ❌ Poor when gate initialized to halve signal (b_g = 0)
 - ✓ Approaches baseline when initialized to approximate identity (b_g → -∞)
 - **Insight:** Performance depends critically on how close gating is to identity
@@ -428,6 +439,7 @@ x_{l+1} = ReLU(F(x_l) + W_s·x_l)
 ```
 
 **Results:**
+
 - ⚠️ Works reasonably for shallow networks
 - ❌ Higher training AND test error for very deep networks (110+ layers)
 - **Insight:** Parameterized shortcuts add optimization difficulty at scale
@@ -482,6 +494,7 @@ x_{l+1} = ReLU(F(x_l) + x_l)
 ```
 
 **Results:**
+
 - ❌ **Complete failure** to converge to good solution
 - ❌ Training and test error remain very high
 - **Insight:** Stochastically impeding the shortcut is catastrophic
@@ -534,7 +547,9 @@ Results in higher error rates
 
 ### 5.1 The Key Insight
 
-**Observation:** If we move the activation functions to occur *before* the weight layers, we can achieve a truly clean identity mapping for both:
+**Observation:** If we move the activation functions to occur *before* the weight layers, we can achieve a truly clean
+identity mapping for both:
+
 1. The shortcut connection (already identity)
 2. The after-addition activation (removed entirely)
 
@@ -716,6 +731,7 @@ Pre-activation         | 4.92%      | Trains easily!
 ```
 
 **Key Finding:**
+
 ```
 Benefit increases with depth
 ↓
@@ -813,7 +829,7 @@ Lower bound:
 
 ### 6.4 Condition Number Analysis
 
-**Definition:** Condition number κ(M) = σ_max(M) / σ_min(M)
+**Definition:** Condition number κ (M) = σ_max (M) / σ_min (M)
 
 **Standard Network:**
 
@@ -1362,7 +1378,8 @@ Priority Checklist:
 
 ## Conclusion
 
-Identity mappings in deep residual networks represent a fundamental architectural principle that enables training of extremely deep neural networks. The key insights are:
+Identity mappings in deep residual networks represent a fundamental architectural principle that enables training of
+extremely deep neural networks. The key insights are:
 
 1. **Clean shortcut connections** are essential for gradient flow
 2. **Pre-activation structures** outperform post-activation designs
@@ -1377,12 +1394,15 @@ x_{l+1} = x_l + F(BN(ReLU(x_l)))
 ```
 
 represents the current best practice for building deep networks, enabling:
+
 - Training of 1000+ layer networks
 - Stable gradient flow independent of depth
 - Superior regularization through consistent normalization
 - State-of-the-art performance across domains
 
-**Final Recommendation:** When building deep networks, always prefer pre-activation residual units with clean identity shortcuts. This simple design choice can make the difference between a network that trains effectively and one that fails to converge.
+**Final Recommendation:** When building deep networks, always prefer pre-activation residual units with clean identity
+shortcuts. This simple design choice can make the difference between a network that trains effectively and one that
+fails to converge.
 
 ---
 
@@ -1539,10 +1559,13 @@ represents the current best practice for building deep networks, enabling:
 
 1. He, K., Zhang, X., Ren, S., & Sun, J. (2016). Identity Mappings in Deep Residual Networks. *ECCV 2016*.
 2. He, K., Zhang, X., Ren, S., & Sun, J. (2016). Deep Residual Learning for Image Recognition. *CVPR 2016*.
-3. Pennington, J., Schoenholz, S., & Ganguli, S. (2017). Resurrecting the sigmoid in deep learning through dynamical isometry. *NeurIPS 2017*.
+3. Pennington, J., Schoenholz, S., & Ganguli, S. (2017). Resurrecting the sigmoid in deep learning through dynamical
+   isometry. *NeurIPS 2017*.
 4. Xiao, L., et al. (2018). Dynamical Isometry and a Mean Field Theory of CNNs. *ICML 2018*.
 5. Modern Transformer Architectures (2024-2025): Llama, Mistral, Qwen, DeepSeek.
 
 ---
 
-*This guide synthesizes theoretical insights, mathematical analysis, and practical recommendations for designing and training deep residual networks with identity mappings. The pre-activation architecture represents the current state-of-the-art for building extremely deep networks that train effectively and generalize well.*
+*This guide synthesizes theoretical insights, mathematical analysis, and practical recommendations for designing and
+training deep residual networks with identity mappings. The pre-activation architecture represents the current
+state-of-the-art for building extremely deep networks that train effectively and generalize well.*

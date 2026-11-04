@@ -37,9 +37,13 @@
 
 **Validity (calibration/coverage) must precede efficiency (sharpness).**
 
-If a model claims 95% confidence intervals, they must cover approximately 95% of actual observations. Validity is non-negotiable in high-stakes applications (medicine, finance, autonomous systems). Only after achieving validity should efficiency—narrower prediction intervals—be pursued.
+If a model claims 95% confidence intervals, they must cover approximately 95% of actual observations. Validity is
+non-negotiable in high-stakes applications (medicine, finance, autonomous systems). Only after achieving validity should
+efficiency—narrower prediction intervals—be pursued.
 
-**Critical principle:** Validity in finite samples is automatically guaranteed by only one class of uncertainty quantification methods: **Conformal Prediction**. All other alternative methods (Bayesian, bootstrap, Monte Carlo) lack mathematical validity guarantees.
+**Critical principle:** Validity in finite samples is automatically guaranteed by only one class of uncertainty
+quantification methods: **Conformal Prediction**. All other alternative methods (Bayesian, bootstrap, Monte Carlo) lack
+mathematical validity guarantees.
 
 ---
 
@@ -53,17 +57,23 @@ If a model claims 95% confidence intervals, they must cover approximately 95% of
 
 **1. Assumes normality in non-normal data**
 
-Real demand/sales data exhibit skewness, multimodality, and heavy tails—nothing like the normal distribution CoV's interpretability assumes.
+Real demand/sales data exhibit skewness, multimodality, and heavy tails—nothing like the normal distribution CoV's
+interpretability assumes.
 
 **2. Ignores temporal structure entirely**
 
-CoV treats time series as unordered sets. Trend patterns, seasonal swings, and periodic spikes all become indistinguishable "variance" even when these patterns are **perfectly forecastable** with appropriate models.
+CoV treats time series as unordered sets. Trend patterns, seasonal swings, and periodic spikes all become
+indistinguishable "variance" even when these patterns are **perfectly forecastable** with appropriate models.
 
-Example: A steadily rising sales trend yields high standard deviation (early periods low, later periods high) and thus high CoV, causing practitioners to label it "volatile" and "unforecastable" when a simple trend model would capture it completely.
+Example: A steadily rising sales trend yields high standard deviation (early periods low, later periods high) and thus
+high CoV, causing practitioners to label it "volatile" and "unforecastable" when a simple trend model would capture it
+completely.
 
 **3. Scale sensitivity produces misleading comparisons**
 
-Products selling 1 unit/month vs. 1000 units/month can have dramatically different CoVs that exaggerate variability purely due to scale. CoV becomes especially unreliable when means approach zero; for intermittent/sporadic demand, zeroes make the ratio meaningless.
+Products selling 1 unit/month vs. 1000 units/month can have dramatically different CoVs that exaggerate variability
+purely due to scale. CoV becomes especially unreliable when means approach zero; for intermittent/sporadic demand,
+zeroes make the ratio meaningless.
 
 **4. Stability ≠ Predictability**
 
@@ -75,9 +85,11 @@ CoV and entropy-based measures gauge **stability**, not **forecastability**. The
 
 This operational framing has three implications:
 
-1. **Method-dependent**: A series unforecastable by ARIMA might be highly forecastable by a model capturing nonlinear dynamics
+1. **Method-dependent**: A series unforecastable by ARIMA might be highly forecastable by a model capturing nonlinear
+   dynamics
 2. **Requires actual forecasting experiments**: No retrospective statistical summaries suffice
-3. **Connects to business decisions**: If no method significantly beats naive benchmarks, the series has genuinely low forecastability regardless of CoV
+3. **Connects to business decisions**: If no method significantly beats naive benchmarks, the series has genuinely low
+   forecastability regardless of CoV
 
 ### Recommended Alternatives to CoV
 
@@ -88,6 +100,7 @@ This operational framing has three implications:
 Permutation Entropy quantifies predictability by measuring the complexity of ordinal patterns in time series.
 
 **Key advantages:**
+
 - Non-parametric (no restrictive distributional assumptions)
 - Robust to noise
 - Invariant under nonlinear monotonic transformations
@@ -98,17 +111,17 @@ Permutation Entropy quantifies predictability by measuring the complexity of ord
 Two parameters required:
 
 1. **Embedding Dimension (D)**: Consecutive values grouped into vectors to unfold system dynamics
-   - Selection methods: False Nearest Neighbors (FNN) or Cao's method
+    - Selection methods: False Nearest Neighbors (FNN) or Cao's method
 
 2. **Embedding Time Delay (τ)**: Step size for constructing phase-space vectors
-   - Selection methods: Average Mutual Information (AMI) or autocorrelation functions
+    - Selection methods: Average Mutual Information (AMI) or autocorrelation functions
 
 **Interpretation**
 
 - Lower PE → Higher predictability (series contains more regular patterns)
 - Higher PE → Lower predictability (series approaches randomness)
 - PE = 0: Completely deterministic
-- PE = log(D!): Maximum entropy (random walk)
+- PE = log (D!): Maximum entropy (random walk)
 
 #### Forecast Error Benchmarks
 
@@ -130,6 +143,7 @@ Two parameters required:
 **Framework:**
 
 Compare multiple methods including:
+
 - Naive forecasts
 - Seasonal naive
 - Statistical models (ARIMA, ETS)
@@ -148,7 +162,8 @@ FVA = (Naive_Error - Model_Error) / Naive_Error × 100%
 - FVA 0-10%: Marginal improvement
 - FVA < 0: Model destroys value (use naive forecast)
 
-If even best algorithms barely beat naive forecasts, series has low forecastability. If simple model equals complex model, series is inherently easy or complex model is overkill.
+If even best algorithms barely beat naive forecasts, series has low forecastability. If simple model equals complex
+model, series is inherently easy or complex model is overkill.
 
 ---
 
@@ -164,15 +179,15 @@ ARIMA models the temporal dependencies in a time series through three components
 - **I (Integrated)**: Differencing to achieve stationarity
 - **MA (Moving Average)**: Current value depends linearly on past forecast errors
 
-#### Model Specification: ARIMA(p, d, q)
+#### Model Specification: ARIMA (p, d, q)
 
 **Parameters:**
 
-| Parameter | Meaning | Controls |
-|-----------|---------|----------|
-| p | AR order | Number of lagged observations in the model |
-| d | Differencing order | Number of times the series is differenced to achieve stationarity |
-| q | MA order | Number of lagged forecast errors |
+| Parameter | Meaning            | Controls                                                          |
+|-----------|--------------------|-------------------------------------------------------------------|
+| p         | AR order           | Number of lagged observations in the model                        |
+| d         | Differencing order | Number of times the series is differenced to achieve stationarity |
+| q         | MA order           | Number of lagged forecast errors                                  |
 
 **Mathematical Formulation:**
 
@@ -183,6 +198,7 @@ w_t = c + φ₁w_{t-1} + φ₂w_{t-2} + ... + φ_pw_{t-p} + θ₁ε_{t-1} + θ�
 ```
 
 where:
+
 - $φ_i$: AR coefficients
 - $θ_j$: MA coefficients
 - $ε_t$: White noise (zero mean, constant variance σ²)
@@ -194,15 +210,17 @@ Using the backshift operator $B$ (where $By_t = y_{t-1}$):
 φ(B)(1-B)^d y_t = c + θ(B)ε_t
 ```
 
-where $φ(B) = 1 - φ₁B - φ₂B² - ... - φ_pB^p$ and $θ(B) = 1 + θ₁B + θ₂B² + ... + θ_qB^q$.
+where $φ (B) = 1 - φ₁B - φ₂B² - ... - φ_pB^p$ and $θ (B) = 1 + θ₁B + θ₂B² + ... + θ_qB^q$.
 
 #### Stationarity and Invertibility Conditions
 
-**Stationarity (AR component):** All roots of the characteristic polynomial $φ(B) = 0$ must lie outside the unit circle. For AR(1): $|φ₁| < 1$. For AR(2): $φ₁ + φ₂ < 1$, $φ₂ - φ₁ < 1$, $|φ₂| < 1$.
+**Stationarity (AR component):** All roots of the characteristic polynomial $φ (B) = 0$ must lie outside the unit
+circle. For AR (1): $|φ₁| < 1$. For AR (2): $φ₁ + φ₂ < 1$, $φ₂ - φ₁ < 1$, $|φ₂| < 1$.
 
-**Invertibility (MA component):** All roots of $θ(B) = 0$ must lie outside the unit circle. Ensures a unique MA representation exists.
+**Invertibility (MA component):** All roots of $θ (B) = 0$ must lie outside the unit circle. Ensures a unique MA
+representation exists.
 
-#### Seasonal ARIMA: SARIMA(p, d, q)(P, D, Q)[m]
+#### Seasonal ARIMA: SARIMA (p, d, q)(P, D, Q)[m]
 
 Extends ARIMA with seasonal components at lag $m$ (e.g., $m = 12$ for monthly data with annual seasonality):
 
@@ -212,22 +230,22 @@ Extends ARIMA with seasonal components at lag $m$ (e.g., $m = 12$ for monthly da
 
 **Additional parameters:**
 
-| Parameter | Meaning |
-|-----------|---------|
-| P | Seasonal AR order |
-| D | Seasonal differencing order |
-| Q | Seasonal MA order |
-| m | Seasonal period length |
+| Parameter | Meaning                     |
+|-----------|-----------------------------|
+| P         | Seasonal AR order           |
+| D         | Seasonal differencing order |
+| Q         | Seasonal MA order           |
+| m         | Seasonal period length      |
 
 **Common configurations:**
 
-| Data Pattern | Suggested Starting Model |
-|-------------|-------------------------|
+| Data Pattern               | Suggested Starting Model     |
+|----------------------------|------------------------------|
 | Stationary, no seasonality | ARIMA(1,0,1) or ARIMA(2,0,2) |
-| Trending, no seasonality | ARIMA(1,1,1) |
-| Seasonal (monthly) | SARIMA(1,1,1)(1,1,1)[12] |
-| Seasonal (quarterly) | SARIMA(1,1,1)(1,1,1)[4] |
-| Weekly with daily data | SARIMA(1,1,1)(1,1,1)[7] |
+| Trending, no seasonality   | ARIMA(1,1,1)                 |
+| Seasonal (monthly)         | SARIMA(1,1,1)(1,1,1)[12]     |
+| Seasonal (quarterly)       | SARIMA(1,1,1)(1,1,1)[4]      |
+| Weekly with daily data     | SARIMA(1,1,1)(1,1,1)[7]      |
 
 #### Box-Jenkins Methodology
 
@@ -237,29 +255,29 @@ The classical approach to ARIMA model identification, estimation, and diagnostic
 
 1. **Plot the series**: Visual inspection for trend, seasonality, outliers, structural breaks
 2. **Stationarity testing**:
-   - ADF (Augmented Dickey-Fuller) test: $H_0$: unit root present (non-stationary)
-   - KPSS test: $H_0$: series is stationary (use both as cross-check)
-   - If non-stationary → difference (increment $d$) and re-test
+    - ADF (Augmented Dickey-Fuller) test: $H_0$: unit root present (non-stationary)
+    - KPSS test: $H_0$: series is stationary (use both as cross-check)
+    - If non-stationary → difference (increment $d$) and re-test
 3. **ACF/PACF analysis** on the stationary series:
-   - ACF cuts off at lag $q$ → MA(q)
-   - PACF cuts off at lag $p$ → AR(p)
-   - Both decay gradually → ARMA(p,q) — use information criteria
+    - ACF cuts off at lag $q$ → MA (q)
+    - PACF cuts off at lag $p$ → AR (p)
+    - Both decay gradually → ARMA (p,q) — use information criteria
 
 **ACF/PACF Signature Table:**
 
-| Model | ACF Pattern | PACF Pattern |
-|-------|-------------|--------------|
-| AR(p) | Exponential/oscillatory decay | Sharp cutoff after lag p |
-| MA(q) | Sharp cutoff after lag q | Exponential/oscillatory decay |
-| ARMA(p,q) | Decays after lag q | Decays after lag p |
+| Model     | ACF Pattern                   | PACF Pattern                  |
+|-----------|-------------------------------|-------------------------------|
+| AR(p)     | Exponential/oscillatory decay | Sharp cutoff after lag p      |
+| MA(q)     | Sharp cutoff after lag q      | Exponential/oscillatory decay |
+| ARMA(p,q) | Decays after lag q            | Decays after lag p            |
 
 **Step 2: Estimation**
 
 - Maximum Likelihood Estimation (MLE) or Conditional Sum of Squares (CSS)
 - Compare candidate models using information criteria:
-  - **AIC** (Akaike): $AIC = -2\ln(L) + 2k$ — penalizes complexity lightly
-  - **AICc** (corrected): $AICc = AIC + \frac{2k(k+1)}{n-k-1}$ — preferred for small samples
-  - **BIC** (Bayesian): $BIC = -2\ln(L) + k\ln(n)$ — heavier penalty, favors parsimony
+    - **AIC** (Akaike): $AIC = -2\ln (L) + 2k$ — penalizes complexity lightly
+    - **AICc** (corrected): $AICc = AIC + \frac{2k (k+1)}{n-k-1}$ — preferred for small samples
+    - **BIC** (Bayesian): $BIC = -2\ln (L) + k\ln (n)$ — heavier penalty, favors parsimony
 
 **Step 3: Diagnostics**
 
@@ -268,8 +286,8 @@ Residual checks (all must pass for a valid model):
 1. **Zero mean**: $\bar{ε} ≈ 0$
 2. **Constant variance**: No heteroscedasticity in residual plots
 3. **No autocorrelation**: Ljung-Box test at multiple lags
-   - $Q = n(n+2)\sum_{k=1}^{h}\frac{\hat{ρ}_k^2}{n-k}$ ~ $χ²(h - p - q)$
-   - Fail to reject $H_0$ (no autocorrelation) → model adequate
+    - $Q = n (n+2)\sum_{k=1}^{h}\frac{\hat{ρ}_k^2}{n-k}$ ~ $χ² (h - p - q)$
+    - Fail to reject $H_0$ (no autocorrelation) → model adequate
 4. **Normality** (optional but useful): Q-Q plot, Shapiro-Wilk test
 
 **Step 4: Forecasting**
@@ -284,7 +302,8 @@ Prediction intervals (Gaussian assumption):
 
 where $σ_h$ is the h-step-ahead forecast error standard deviation, which grows with horizon.
 
-**Limitation:** These intervals assume Gaussian errors. For valid intervals without distributional assumptions, wrap with conformal prediction (Section 7).
+**Limitation:** These intervals assume Gaussian errors. For valid intervals without distributional assumptions, wrap
+with conformal prediction (Section 7).
 
 #### Auto-ARIMA
 
@@ -349,6 +368,7 @@ conf_int = forecast.conf_int(alpha=0.05)
 #### ARIMA Strengths and Limitations
 
 **Strengths:**
+
 - Well-understood theoretical foundations with decades of refinement
 - Interpretable parameters with clear statistical meaning
 - Excellent for short-to-medium horizon linear forecasting
@@ -357,6 +377,7 @@ conf_int = forecast.conf_int(alpha=0.05)
 - Efficient on small datasets
 
 **Limitations:**
+
 - **Linear assumption**: Cannot capture nonlinear dynamics without transformation
 - **Stationarity requirement**: May over-difference, destroying signal
 - **Fixed seasonal period**: Struggles with evolving or multiple seasonalities
@@ -384,7 +405,8 @@ results = model.fit()
 forecast = results.get_forecast(steps=horizon, exog=X_future)
 ```
 
-**Caution:** Exogenous variables must be available at forecast time. If you must forecast the covariates too, error compounds.
+**Caution:** Exogenous variables must be available at forecast time. If you must forecast the covariates too, error
+compounds.
 
 ---
 
@@ -392,33 +414,35 @@ forecast = results.get_forecast(steps=horizon, exog=X_future)
 
 #### Theoretical Foundation
 
-ETS is a family of models that decompose a time series into three components—Error (E), Trend (T), and Seasonality (S)—each of which can take different forms. Where ARIMA models temporal correlations in the data, ETS models the generative process through smoothing equations.
+ETS is a family of models that decompose a time series into three components—Error (E), Trend (T), and Seasonality (S)
+—each of which can take different forms. Where ARIMA models temporal correlations in the data, ETS models the generative
+process through smoothing equations.
 
-#### Taxonomy: The ETS(E, T, S) Framework
+#### Taxonomy: The ETS (E, T, S) Framework
 
 Each component can assume one of several forms:
 
-| Component | Options | Code |
-|-----------|---------|------|
-| **Error** | Additive, Multiplicative | A, M |
-| **Trend** | None, Additive, Additive Damped, Multiplicative, Multiplicative Damped | N, A, Ad, M, Md |
-| **Seasonality** | None, Additive, Multiplicative | N, A, M |
+| Component       | Options                                                                | Code            |
+|-----------------|------------------------------------------------------------------------|-----------------|
+| **Error**       | Additive, Multiplicative                                               | A, M            |
+| **Trend**       | None, Additive, Additive Damped, Multiplicative, Multiplicative Damped | N, A, Ad, M, Md |
+| **Seasonality** | None, Additive, Multiplicative                                         | N, A, M         |
 
 This produces 30 possible model configurations. The most commonly used:
 
-| Model | ETS Code | Common Name |
-|-------|----------|-------------|
-| ETS(A,N,N) | Simple Exponential Smoothing | SES |
-| ETS(A,A,N) | Holt's Linear Trend | Double Exponential Smoothing |
-| ETS(A,Ad,N) | Damped Trend | Damped Holt's |
-| ETS(A,A,A) | Holt-Winters Additive | — |
-| ETS(A,A,M) | Holt-Winters Multiplicative | — |
-| ETS(M,A,M) | Multiplicative Error, Additive Trend, Multiplicative Season | — |
-| ETS(M,Ad,M) | Damped Multiplicative | Often the best default |
+| Model       | ETS Code                                                    | Common Name                  |
+|-------------|-------------------------------------------------------------|------------------------------|
+| ETS(A,N,N)  | Simple Exponential Smoothing                                | SES                          |
+| ETS(A,A,N)  | Holt's Linear Trend                                         | Double Exponential Smoothing |
+| ETS(A,Ad,N) | Damped Trend                                                | Damped Holt's                |
+| ETS(A,A,A)  | Holt-Winters Additive                                       | —                            |
+| ETS(A,A,M)  | Holt-Winters Multiplicative                                 | —                            |
+| ETS(M,A,M)  | Multiplicative Error, Additive Trend, Multiplicative Season | —                            |
+| ETS(M,Ad,M) | Damped Multiplicative                                       | Often the best default       |
 
 #### Component Equations
 
-**ETS(A,A,A) — Additive Error, Additive Trend, Additive Seasonality:**
+**ETS (A,A,A) — Additive Error, Additive Trend, Additive Seasonality:**
 
 ```
 Forecast equation:    ŷ_{t+h|t} = ℓ_t + hb_t + s_{t+h-m}
@@ -428,7 +452,7 @@ Seasonal:             s_t = s_{t-m} + γε_t
 Error:                ε_t = y_t - ŷ_{t|t-1}
 ```
 
-**ETS(M,A,M) — Multiplicative Error, Additive Trend, Multiplicative Seasonality:**
+**ETS (M,A,M) — Multiplicative Error, Additive Trend, Multiplicative Seasonality:**
 
 ```
 Forecast equation:    ŷ_{t+h|t} = (ℓ_t + hb_t) × s_{t+h-m}
@@ -440,12 +464,12 @@ Error:                ε_t = (y_t - ŷ_{t|t-1}) / ŷ_{t|t-1}
 
 **Smoothing Parameters:**
 
-| Parameter | Controls | Range | Interpretation |
-|-----------|----------|-------|----------------|
-| α (alpha) | Level smoothing | (0, 1) | Higher → more weight on recent data |
-| β (beta) | Trend smoothing | (0, 1) | Higher → trend responds faster to changes |
-| γ (gamma) | Seasonal smoothing | (0, 1) | Higher → seasonal pattern adapts faster |
-| φ (phi) | Trend damping | (0.8, 1.0) | Lower → more aggressive damping toward flat |
+| Parameter | Controls           | Range      | Interpretation                              |
+|-----------|--------------------|------------|---------------------------------------------|
+| α (alpha) | Level smoothing    | (0, 1)     | Higher → more weight on recent data         |
+| β (beta)  | Trend smoothing    | (0, 1)     | Higher → trend responds faster to changes   |
+| γ (gamma) | Seasonal smoothing | (0, 1)     | Higher → seasonal pattern adapts faster     |
+| φ (phi)   | Trend damping      | (0.8, 1.0) | Lower → more aggressive damping toward flat |
 
 #### Damped Trend
 
@@ -455,25 +479,28 @@ The damped trend modification multiplies the trend component by a damping factor
 ŷ_{t+h|t} = ℓ_t + (φ + φ² + ... + φ^h)b_t + s_{t+h-m}
 ```
 
-As $h → ∞$, the cumulative trend approaches $φ/(1-φ) × b_t$, preventing unrealistic long-horizon extrapolation.
+As $h → ∞$, the cumulative trend approaches $φ/ (1-φ) × b_t$, preventing unrealistic long-horizon extrapolation.
 
-**Why it matters:** Damped trend models consistently outperform non-damped alternatives in forecasting competitions (M3, M4). The ETS(M,Ad,M) model is one of the strongest single-model performers across domains.
+**Why it matters:** Damped trend models consistently outperform non-damped alternatives in forecasting competitions (M3,
+M4). The ETS (M,Ad,M) model is one of the strongest single-model performers across domains.
 
 #### Additive vs. Multiplicative Selection
 
-| Criterion | Additive | Multiplicative |
-|-----------|----------|----------------|
-| Seasonal amplitude | Constant regardless of level | Proportional to level |
-| Data values | Can include zeros/negatives | Strictly positive only |
-| Visual diagnostic | Seasonal swings same height | Seasonal swings grow with level |
-| Log transform | Multiplicative → Additive after log | — |
-| Typical domains | Temperature, some financial | Sales, demand, production |
+| Criterion          | Additive                            | Multiplicative                  |
+|--------------------|-------------------------------------|---------------------------------|
+| Seasonal amplitude | Constant regardless of level        | Proportional to level           |
+| Data values        | Can include zeros/negatives         | Strictly positive only          |
+| Visual diagnostic  | Seasonal swings same height         | Seasonal swings grow with level |
+| Log transform      | Multiplicative → Additive after log | —                               |
+| Typical domains    | Temperature, some financial         | Sales, demand, production       |
 
-**Decision rule:** If seasonal fluctuations scale with the level of the series, use multiplicative. If they remain constant, use additive. When uncertain, let information criteria decide.
+**Decision rule:** If seasonal fluctuations scale with the level of the series, use multiplicative. If they remain
+constant, use additive. When uncertain, let information criteria decide.
 
 #### State Space Formulation
 
 ETS models have a state space representation enabling:
+
 - Maximum Likelihood Estimation of parameters
 - AIC/BIC-based model selection
 - Analytical prediction intervals (under Gaussian errors)
@@ -533,6 +560,7 @@ forecasts = sf.predict(h=horizon)
 #### ETS Strengths and Limitations
 
 **Strengths:**
+
 - Intuitive decomposition into level, trend, and seasonality
 - Damped trend variant is one of the most robust single forecasting methods
 - Fast estimation (analytical state space likelihood)
@@ -541,7 +569,9 @@ forecasts = sf.predict(h=horizon)
 - Produces well-calibrated prediction intervals under Gaussian assumption
 
 **Limitations:**
-- **No exogenous variables**: Pure ETS cannot incorporate covariates (use regression with ETS errors, or switch to ARIMAX)
+
+- **No exogenous variables**: Pure ETS cannot incorporate covariates (use regression with ETS errors, or switch to
+  ARIMAX)
 - **Single seasonal period**: Cannot handle dual seasonality (e.g., daily + weekly) natively
 - **Multiplicative models require positive data**: Zeros or negatives break multiplicative error/seasonality
 - **Gaussian interval assumption**: Same limitation as ARIMA — wrap with conformal prediction for valid intervals
@@ -550,16 +580,16 @@ forecasts = sf.predict(h=horizon)
 
 #### ARIMA vs. ETS: When to Use Which
 
-| Scenario | Prefer ARIMA | Prefer ETS |
-|----------|-------------|------------|
-| Exogenous variables available | ✓ (SARIMAX) | ✗ |
-| Multiplicative seasonality | Possible (log transform) | ✓ (native) |
-| Strong autocorrelation in residuals | ✓ | ✗ |
-| Need interpretable components | ✗ | ✓ (level, trend, season) |
-| Very short series (< 30 obs) | ✗ | ✓ (fewer parameters) |
-| Multiple seasonal periods | ✗ (TBATS/MSTL) | ✗ (TBATS/MSTL) |
-| Need best single-model default | Consider | ETS(M,Ad,M) wins competitions |
-| Ensemble/combination | Include both | Include both |
+| Scenario                            | Prefer ARIMA             | Prefer ETS                    |
+|-------------------------------------|--------------------------|-------------------------------|
+| Exogenous variables available       | ✓ (SARIMAX)             | ✗                            |
+| Multiplicative seasonality          | Possible (log transform) | ✓ (native)                   |
+| Strong autocorrelation in residuals | ✓                       | ✗                            |
+| Need interpretable components       | ✗                       | ✓ (level, trend, season)     |
+| Very short series (< 30 obs)        | ✗                       | ✓ (fewer parameters)         |
+| Multiple seasonal periods           | ✗ (TBATS/MSTL)          | ✗ (TBATS/MSTL)               |
+| Need best single-model default      | Consider                 | ETS(M,Ad,M) wins competitions |
+| Ensemble/combination                | Include both             | Include both                  |
 
 **Best practice:** Fit both, select by cross-validated forecast accuracy or combine.
 
@@ -569,27 +599,38 @@ forecasts = sf.predict(h=horizon)
 
 ### Why CatBoost Over Other GBDT Frameworks
 
-CatBoost (Categorical Boosting) by Yandex offers specific advantages for time series forecasting that distinguish it from XGBoost and LightGBM:
+CatBoost (Categorical Boosting) by Yandex offers specific advantages for time series forecasting that distinguish it
+from XGBoost and LightGBM:
 
 **1. Ordered Boosting (Ordered Target Statistics)**
 
-Standard gradient boosting (XGBoost, LightGBM) computes gradients using the entire training set, introducing a subtle but systematic target leakage. CatBoost uses **ordered boosting**: for each training example, the gradient is computed using a model trained only on examples preceding it in a random permutation. This is structurally similar to the temporal ordering constraint in time series — the model never sees future information during training.
+Standard gradient boosting (XGBoost, LightGBM) computes gradients using the entire training set, introducing a subtle
+but systematic target leakage. CatBoost uses **ordered boosting**: for each training example, the gradient is computed
+using a model trained only on examples preceding it in a random permutation. This is structurally similar to the
+temporal ordering constraint in time series — the model never sees future information during training.
 
 **2. Native Categorical Feature Handling**
 
-Time series features frequently include categorical variables (day of week, month, product category, region, holiday type). CatBoost handles these natively using ordered target statistics without requiring manual one-hot encoding or label encoding. XGBoost requires one-hot encoding (curse of dimensionality for high-cardinality features) and LightGBM's native categorical handling is less principled.
+Time series features frequently include categorical variables (day of week, month, product category, region, holiday
+type). CatBoost handles these natively using ordered target statistics without requiring manual one-hot encoding or
+label encoding. XGBoost requires one-hot encoding (curse of dimensionality for high-cardinality features) and LightGBM's
+native categorical handling is less principled.
 
 **3. Symmetric (Oblivious) Decision Trees**
 
-CatBoost uses oblivious trees by default: the same splitting criterion at each level of the tree. This acts as an implicit regularizer, reduces overfitting on noisy time series, and produces faster inference at prediction time — critical for production forecasting systems.
+CatBoost uses oblivious trees by default: the same splitting criterion at each level of the tree. This acts as an
+implicit regularizer, reduces overfitting on noisy time series, and produces faster inference at prediction time —
+critical for production forecasting systems.
 
 **4. Built-in Quantile Regression**
 
-Native support for quantile loss enables direct prediction interval construction and integration with conformal prediction frameworks.
+Native support for quantile loss enables direct prediction interval construction and integration with conformal
+prediction frameworks.
 
 ### Feature Engineering for Time Series
 
-Converting time series to tabular form for CatBoost requires deliberate feature engineering. The quality of features typically matters more than model hyperparameters.
+Converting time series to tabular form for CatBoost requires deliberate feature engineering. The quality of features
+typically matters more than model hyperparameters.
 
 #### Lag Features
 
@@ -606,6 +647,7 @@ df = create_lag_features(df, 'y', lags)
 ```
 
 **Lag selection heuristics:**
+
 - Include lags 1 through p where p is the dominant PACF cutoff
 - Include seasonal lags: m, 2m (e.g., 7, 14 for daily with weekly pattern)
 - For long-range dependencies: m×k for k = 1, 2, 3, ...
@@ -626,7 +668,8 @@ windows = [7, 14, 28, 90]
 df = create_rolling_features(df, 'y', windows)
 ```
 
-**Critical:** Always `shift(1)` before rolling to prevent data leakage. The rolling window must only use information available at forecast time.
+**Critical:** Always `shift(1)` before rolling to prevent data leakage. The rolling window must only use information
+available at forecast time.
 
 #### Calendar Features
 
@@ -772,7 +815,8 @@ upper_bound = model_upper.predict(test[feature_cols])
 point_forecast = model_median.predict(test[feature_cols])
 ```
 
-**Limitation:** Raw quantile regression intervals are NOT guaranteed to achieve the target coverage. Wrap with conformal prediction for valid intervals (see Section 7).
+**Limitation:** Raw quantile regression intervals are NOT guaranteed to achieve the target coverage. Wrap with conformal
+prediction for valid intervals (see Section 7).
 
 #### Multi-Step Forecasting Strategies
 
@@ -796,7 +840,8 @@ def recursive_forecast(model, last_known, feature_cols, horizon):
 
 **2. Direct (One Model per Horizon)**
 
-Train separate CatBoost models for each forecast horizon h = 1, 2, ..., H. No error accumulation but requires H models and H sets of aligned training data.
+Train separate CatBoost models for each forecast horizon h = 1, 2, ..., H. No error accumulation but requires H models
+and H sets of aligned training data.
 
 ```python
 models = {}
@@ -810,21 +855,22 @@ for h in range(1, horizon + 1):
 
 Combines direct and recursive: train direct models but include predictions from previous horizons as features.
 
-**Recommendation:** Direct multi-step for horizons ≤ 12. Recursive for very long horizons where training direct models becomes impractical. Always benchmark both.
+**Recommendation:** Direct multi-step for horizons ≤ 12. Recursive for very long horizons where training direct models
+becomes impractical. Always benchmark both.
 
 #### Hyperparameter Tuning
 
 Key hyperparameters and their typical search ranges:
 
-| Parameter | Range | Effect |
-|-----------|-------|--------|
-| `iterations` | 500–5000 | More = more complex; use early stopping |
-| `learning_rate` | 0.01–0.3 | Lower = slower training, often better generalization |
-| `depth` | 4–10 | Deeper = more interactions captured; risk of overfitting |
-| `l2_leaf_reg` | 1–10 | Higher = stronger regularization |
-| `min_data_in_leaf` | 1–100 | Higher = more conservative splits |
-| `bagging_temperature` | 0–1 | Controls Bayesian bootstrap; higher = more randomization |
-| `random_strength` | 0–10 | Randomization of split scoring |
+| Parameter             | Range    | Effect                                                   |
+|-----------------------|----------|----------------------------------------------------------|
+| `iterations`          | 500–5000 | More = more complex; use early stopping                  |
+| `learning_rate`       | 0.01–0.3 | Lower = slower training, often better generalization     |
+| `depth`               | 4–10     | Deeper = more interactions captured; risk of overfitting |
+| `l2_leaf_reg`         | 1–10     | Higher = stronger regularization                         |
+| `min_data_in_leaf`    | 1–100    | Higher = more conservative splits                        |
+| `bagging_temperature` | 0–1      | Controls Bayesian bootstrap; higher = more randomization |
+| `random_strength`     | 0–10     | Randomization of split scoring                           |
 
 ```python
 from catboost import CatBoostRegressor
@@ -873,6 +919,7 @@ for depth in param_grid['depth']:
 #### CatBoost Strengths and Limitations
 
 **Strengths:**
+
 - Ordered boosting eliminates target leakage during training
 - Native categorical feature support without preprocessing
 - Oblivious trees provide implicit regularization and fast inference
@@ -883,7 +930,9 @@ for depth in param_grid['depth']:
 - Handles missing values natively
 
 **Limitations:**
-- **Requires feature engineering**: Raw time series must be transformed to tabular form; quality of lag/calendar/rolling features determines performance ceiling
+
+- **Requires feature engineering**: Raw time series must be transformed to tabular form; quality of lag/calendar/rolling
+  features determines performance ceiling
 - **No native temporal structure**: Model treats rows as exchangeable; temporal ordering enforced only through features
 - **Recursive forecasting error accumulation**: Multi-step predictions via autoregressive loop degrade with horizon
 - **Large memory footprint**: Feature-rich datasets can become unwieldy
@@ -896,23 +945,28 @@ for depth in param_grid['depth']:
 
 ### Core Principles
 
-Conformal Prediction is a machine learning framework quantifying uncertainty to produce probabilistic predictions with mathematical validity guarantees.
+Conformal Prediction is a machine learning framework quantifying uncertainty to produce probabilistic predictions with
+mathematical validity guarantees.
 
 **Eight Foundational Principles:**
 
-1. **Validity**: Prediction regions encompass actual target values with user-specified confidence level (e.g., 95% confidence → 95% coverage)
+1. **Validity**: Prediction regions encompass actual target values with user-specified confidence level (e.g., 95%
+   confidence → 95% coverage)
 
 2. **Efficiency**: Prediction intervals/regions should be as small as possible while preserving desired confidence level
 
 3. **Adaptivity**: Prediction sets adaptive to individual examples—harder-to-predict examples receive wider intervals
 
-4. **Distribution-free**: No assumptions about underlying data distribution required (only exchangeability, less restrictive than IID)
+4. **Distribution-free**: No assumptions about underlying data distribution required (only exchangeability, less
+   restrictive than IID)
 
 5. **Online adaptivity**: Can adjust to new data points without retraining
 
-6. **Compatibility**: Seamlessly integrates with any existing model (CatBoost, neural networks, random forests, ARIMA, ETS, etc.)
+6. **Compatibility**: Seamlessly integrates with any existing model (CatBoost, neural networks, random forests, ARIMA,
+   ETS, etc.)
 
-7. **Non-intrusive**: Requires no modification to deployed point prediction models—functions as uncertainty quantification layer
+7. **Non-intrusive**: Requires no modification to deployed point prediction models—functions as uncertainty
+   quantification layer
 
 8. **Interpretability**: Produces easily understood prediction sets/intervals with clear uncertainty measures
 
@@ -927,6 +981,7 @@ P(y_new ∈ Prediction_Set) ≥ 1 - ε
 ```
 
 This guarantee holds for:
+
 - **Any** underlying prediction model
 - **Any** data distribution (under exchangeability)
 - **Any** dataset size (including small samples)
@@ -945,22 +1000,26 @@ P(Z₁, Z₂, ..., Zₙ) = P(Z_π(1), Z_π(2), ..., Z_π(n))
 for any permutation π.
 
 **Key distinction:**
+
 - IID → Exchangeability ✓
 - Exchangeability → IID ✗
 
-Exchangeability is weaker than IID, allowing conformal prediction broader applicability. However, time series violate exchangeability—requiring specialized adaptations covered in Section 7.
+Exchangeability is weaker than IID, allowing conformal prediction broader applicability. However, time series violate
+exchangeability—requiring specialized adaptations covered in Section 7.
 
 ### Types of Conformal Predictors
 
 #### Transductive Conformal Prediction (TCP)
 
 **Characteristics:**
+
 - Uses entire training dataset for each test instance
 - Retrains model for each potential label assignment
 - Provides strongest theoretical guarantees
-- Computationally expensive (O(nk) for n calibration points, k classes)
+- Computationally expensive (O (nk) for n calibration points, k classes)
 
 **When to use:**
+
 - Small datasets (< 1000 observations)
 - Critical applications requiring strongest guarantees
 - Research/academic contexts
@@ -968,17 +1027,20 @@ Exchangeability is weaker than IID, allowing conformal prediction broader applic
 #### Inductive Conformal Prediction (ICP)
 
 **Characteristics:**
+
 - Splits data into proper training set and calibration set
 - Trains model once on training set
 - Uses calibration set to compute nonconformity scores
 - Computationally efficient (≈ same speed as base model)
 
 **Standard split:**
+
 - 60-80% proper training
 - 20-40% calibration
 - Minimum 500 calibration points recommended
 
 **When to use:**
+
 - Large datasets (> 1000 observations)
 - Production systems
 - Real-time applications
@@ -988,72 +1050,85 @@ Exchangeability is weaker than IID, allowing conformal prediction broader applic
 
 ## 6. Nonconformity Measures
 
-Nonconformity measures quantify how different a new data point is from existing data. Selection dramatically impacts prediction set efficiency while maintaining validity.
+Nonconformity measures quantify how different a new data point is from existing data. Selection dramatically impacts
+prediction set efficiency while maintaining validity.
 
 ### Classification Nonconformity Measures
 
 #### 1. Hinge Loss (Inverse Probability / LAC Loss)
 
 **Formula:**
+
 ```
 α = 1 - P(y_true)
 ```
 
 **Example:**
+
 - Predicted probabilities: [0.5, 0.3, 0.2] for classes [0, 1, 2]
 - True class: 1
 - Nonconformity score: 1 - 0.3 = 0.7
 
 **Characteristics:**
+
 - Simplest measure
 - Considers only probability of true class
 - Produces narrowest average set sizes (best AvgC)
 - Individual label assessment
 
 **Use when:**
+
 - Minimizing average prediction set size is priority
 - Underlying model produces well-calibrated probabilities
 
 #### 2. Margin
 
 **Formula:**
+
 ```
 α = max_{y ≠ y_true} P(y) - P(y_true)
 ```
 
 **Example:**
+
 - Predicted probabilities: [0.5, 0.3, 0.2] for classes [0, 1, 2]
 - True class: 1
-- Nonconformity score: max(0.5, 0.2) - 0.3 = 0.2
+- Nonconformity score: max (0.5, 0.2) - 0.3 = 0.2
 
 **Characteristics:**
+
 - Considers most likely incorrect class
 - Produces highest proportion singleton predictions (best OneC)
 - Comparison between true and competing classes
 
 **Use when:**
+
 - Maximizing singleton predictions is priority
 - Need to distinguish between close competing classes
 
 #### 3. Brier Score
 
 **Formula:**
+
 ```
 α = Σ(y_pred_i - y_true_i)² / n_classes
 ```
 
 **Example:**
+
 - Predicted probabilities: [0.5, 0.3, 0.2]
 - True class: 1 (one-hot: [0, 1, 0])
 - Nonconformity score: [(0-0.5)² + (1-0.3)² + (0-0.2)²] / 3 = 0.26
 
 **Characteristics:**
+
 - Proper scoring rule
 - Captures both calibration and discrimination
 - Squared error penalization
 - Range: [0, 1] where 0 is perfect
 
 **Use when:**
+
 - Well-calibrated probabilities are essential
 - Need to balance multiple objectives
 - Following proper scoring rule principles
@@ -1063,21 +1138,25 @@ Nonconformity measures quantify how different a new data point is from existing 
 #### 1. Absolute Error
 
 **Formula:**
+
 ```
 α = |y_pred - y_true|
 ```
 
 **Pros:**
+
 - Simple, interpretable
 - Direct measure of prediction error
 - Uniform interpretation across datasets
 
 **Cons:**
+
 - Scale sensitive (large targets → large errors)
 - No consideration for data distribution
 - May produce overly optimistic/pessimistic intervals
 
 **Use when:**
+
 - Target variable scale is consistent
 - Simple interpretation is priority
 - Homoscedastic errors expected
@@ -1085,27 +1164,32 @@ Nonconformity measures quantify how different a new data point is from existing 
 #### 2. Normalized Error
 
 **Formula:**
+
 ```
 α = |y_pred - y_true| / scale_estimate
 ```
 
 where `scale_estimate` can be:
+
 - Mean Absolute Error (MAE)
 - Standard deviation of residuals
 - Other scale measures
 
 **Pros:**
+
 - Scale invariant
 - Accounts for heteroscedasticity
 - Adaptive to local data properties
 - Consistent across different target scales
 
 **Cons:**
+
 - Additional complexity
 - Requires sufficient data for reliable scale estimation
 - Risk of misleading results with poor scale choice
 
 **Use when:**
+
 - Target variable scale varies significantly
 - Heteroscedastic errors present
 - Comparing models across different datasets
@@ -1131,31 +1215,33 @@ where `scale_estimate` can be:
 
 **Theoretical Basis:**
 
-Achieves finite-sample, approximately valid marginal coverage for broad regression functions under mild assumption of **strongly mixing stochastic errors**.
+Achieves finite-sample, approximately valid marginal coverage for broad regression functions under mild assumption of
+**strongly mixing stochastic errors**.
 
 **Algorithm:**
 
 1. **Bootstrap Ensemble Creation**
-   - Draw B bootstrap samples (with replacement) from training data
-   - Train base forecasting model on each bootstrap sample
-   - Results in ensemble {f₁, f₂, ..., f_B}
+    - Draw B bootstrap samples (with replacement) from training data
+    - Train base forecasting model on each bootstrap sample
+    - Results in ensemble {f₁, f₂, ..., f_B}
 
 2. **Out-of-Sample Residual Computation**
-   - For each point t in training data
-   - Compute residuals using only ensemble members that did NOT use point t
-   - Compile all out-of-sample errors into array R = {r₁, r₂, ..., r_T}
+    - For each point t in training data
+    - Compute residuals using only ensemble members that did NOT use point t
+    - Compile all out-of-sample errors into array R = {r₁, r₂, ..., r_T}
 
 3. **Point Prediction Generation**
-   - Aggregate predictions from ensemble (mean, median, or weighted)
-   - ŷ = aggregate({f₁(x), f₂(x), ..., f_B(x)})
+    - Aggregate predictions from ensemble (mean, median, or weighted)
+    - ŷ = aggregate ({f₁ (x), f₂ (x), ..., f_B (x)})
 
 4. **Prediction Interval Construction**
-   - For confidence level (1-α):
-   - Compute quantiles from residual distribution R
-   - Lower bound: ŷ - Q_{1-α/2}(|R|)
-   - Upper bound: ŷ + Q_{1-α/2}(|R|)
+    - For confidence level (1-α):
+    - Compute quantiles from residual distribution R
+    - Lower bound: ŷ - Q_{1-α/2} (|R|)
+    - Upper bound: ŷ + Q_{1-α/2} (|R|)
 
 **Advantages:**
+
 - No data splitting required
 - Computationally efficient (single ensemble training)
 - Avoids overfitting
@@ -1163,6 +1249,7 @@ Achieves finite-sample, approximately valid marginal coverage for broad regressi
 - Works with any regression function (CatBoost, neural networks, etc.)
 
 **Implementation Libraries:**
+
 - Amazon Fortuna
 - MAPIE (Python)
 - PUNCC (Python)
@@ -1176,19 +1263,20 @@ Combines quantile regression with conformal prediction for improved conditional 
 **Algorithm:**
 
 1. **Quantile Regression Training**
-   - Train model to predict lower quantile q_α/2 and upper quantile q_{1-α/2}
-   - Produces initial prediction interval [q̂_α/2(x), q̂_{1-α/2}(x)]
+    - Train model to predict lower quantile q_α/2 and upper quantile q_{1-α/2}
+    - Produces initial prediction interval [q̂_α/2 (x), q̂_{1-α/2} (x)]
 
 2. **Calibration Set Conformity Scores**
-   - For each calibration point (x_i, y_i):
-   - Compute conformity score: α_i = max(q̂_α/2(x_i) - y_i, y_i - q̂_{1-α/2}(x_i))
+    - For each calibration point (x_i, y_i):
+    - Compute conformity score: α_i = max (q̂_α/2 (x_i) - y_i, y_i - q̂_{1-α/2} (x_i))
 
 3. **Adjusted Prediction Intervals**
-   - For test point x:
-   - Compute correction term: Q_{1-α}({α_i})
-   - Final interval: [q̂_α/2(x) - Q, q̂_{1-α/2}(x) + Q]
+    - For test point x:
+    - Compute correction term: Q_{1-α} ({α_i})
+    - Final interval: [q̂_α/2 (x) - Q, q̂_{1-α/2} (x) + Q]
 
 **Advantages:**
+
 - Better conditional coverage than standard methods
 - Adapts interval width to input features
 - Robust to distribution shift
@@ -1241,21 +1329,22 @@ where τ is target quantile.
 **Algorithm:**
 
 1. **Initial Model Training**
-   - Train model f on full training set
+    - Train model f on full training set
 
 2. **Jackknife Predictions**
-   - For each training point i:
-   - Predict using model trained on data with i removed: f_{-i}(x_i)
-   - Compute leave-one-out residual: R_i = y_i - f_{-i}(x_i)
+    - For each training point i:
+    - Predict using model trained on data with i removed: f_{-i} (x_i)
+    - Compute leave-one-out residual: R_i = y_i - f_{-i} (x_i)
 
 3. **Prediction Intervals**
-   - For test point x:
-   - Base prediction: ŷ = f(x)
-   - Interval: [ŷ - Q_{1-α}(|R|), ŷ + Q_{1-α}(|R|)]
+    - For test point x:
+    - Base prediction: ŷ = f (x)
+    - Interval: [ŷ - Q_{1-α} (|R|), ŷ + Q_{1-α} (|R|)]
 
 **Computational Efficiency:**
 
-For linear models and certain tree ensembles, jackknife predictions can be computed without B full retraining runs using influence functions or out-of-bag predictions.
+For linear models and certain tree ensembles, jackknife predictions can be computed without B full retraining runs using
+influence functions or out-of-bag predictions.
 
 ### NeuralProphet Implementation
 
@@ -1264,6 +1353,7 @@ For linear models and certain tree ensembles, jackknife predictions can be compu
 PyTorch-based framework merging interpretability with deep learning scalability.
 
 **Model Components:**
+
 1. Trend module
 2. Seasonality module (Fourier series)
 3. Holiday/event module
@@ -1275,6 +1365,7 @@ PyTorch-based framework merging interpretability with deep learning scalability.
 NeuralProphet implements two approaches:
 
 **1. Quantile Regression Mode**
+
 ```python
 from neuralprophet import NeuralProphet
 
@@ -1287,6 +1378,7 @@ forecast = model.predict(test_df)
 ```
 
 **2. Inductive Conformal Prediction Mode**
+
 ```python
 model = NeuralProphet()
 model.fit(train_df)
@@ -1303,6 +1395,7 @@ conformal_forecast = model.conformal_predict(
 ```
 
 **Data Format Requirements:**
+
 - Time column named `ds`
 - Target column named `y`
 - Standard pandas DataFrame
@@ -1318,6 +1411,7 @@ conformal_forecast = model.conformal_predict(
 **Definition:** Proportion of prediction intervals containing true values.
 
 **Formula:**
+
 ```
 Coverage = (1/n) Σ I(y_i ∈ [L_i, U_i])
 ```
@@ -1327,6 +1421,7 @@ where I is indicator function, L_i and U_i are lower/upper bounds.
 **Target:** Should match specified confidence level (e.g., 95% confidence → ~95% coverage)
 
 **Evaluation:**
+
 - Coverage < Target: Intervals too narrow (validity failure)
 - Coverage ≈ Target: Valid predictor ✓
 - Coverage >> Target: Intervals too wide (inefficient but valid)
@@ -1336,6 +1431,7 @@ where I is indicator function, L_i and U_i are lower/upper bounds.
 **Problem:** Marginal coverage may mask systematic failures in subgroups.
 
 **Evaluation:** Compute coverage separately for:
+
 - Different input feature ranges
 - Different time periods
 - Different classes/categories
@@ -1347,17 +1443,20 @@ where I is indicator function, L_i and U_i are lower/upper bounds.
 #### Average Interval Width
 
 **Formula:**
+
 ```
 Width = (1/n) Σ (U_i - L_i)
 ```
 
 **Interpretation:**
+
 - Lower width = More informative predictions
 - Must be evaluated conditional on achieving validity
 
 #### Prediction Set Size (Classification)
 
 **OneC (Singleton Proportion):**
+
 ```
 OneC = (Count of singleton sets) / (Total prediction sets)
 ```
@@ -1365,6 +1464,7 @@ OneC = (Count of singleton sets) / (Total prediction sets)
 Higher OneC = More decisive predictions
 
 **AvgC (Average Label Count):**
+
 ```
 AvgC = (Total labels across all sets) / (Total prediction sets)
 ```
@@ -1376,6 +1476,7 @@ Lower AvgC = More precise predictions
 #### Reliability Diagram
 
 **Method:**
+
 1. Group predictions by confidence score bins
 2. Compute observed frequency in each bin
 3. Plot observed vs. predicted confidence
@@ -1385,11 +1486,13 @@ Lower AvgC = More precise predictions
 #### Expected Calibration Error (ECE)
 
 **Formula:**
+
 ```
 ECE = Σ (n_b/n) |acc_b - conf_b|
 ```
 
 where:
+
 - n_b: number of predictions in bin b
 - acc_b: accuracy in bin b
 - conf_b: average confidence in bin b
@@ -1600,7 +1703,8 @@ def rolling_window_cv(data, train_size, horizon, model_class):
 
 **Rule:** Every forecasting model must be benchmarked against naive methods before deployment.
 
-**Why:** If sophisticated models cannot beat naive forecasts by meaningful margin (>10%), the series has low inherent forecastability or model is misspecified.
+**Why:** If sophisticated models cannot beat naive forecasts by meaningful margin (>10%), the series has low inherent
+forecastability or model is misspecified.
 
 ### Standard Naive Benchmarks
 
@@ -1705,7 +1809,7 @@ def benchmark_forecasting_models(data, test_size=0.2, horizon=1):
 For a typical forecasting pipeline, evaluate in this order:
 
 1. **Naive baselines** (random walk, seasonal naive, drift)
-2. **ETS** (especially ETS(M,Ad,M) with damped trend)
+2. **ETS** (especially ETS (M,Ad,M) with damped trend)
 3. **ARIMA/SARIMA** (auto_arima for automated selection)
 4. **CatBoost** (with engineered lag/calendar/rolling features)
 5. **Specialized architectures** (N-BEATS, N-HiTS, TSMixer)
@@ -1713,7 +1817,8 @@ For a typical forecasting pipeline, evaluate in this order:
 
 ### Critical Evaluation Metrics
 
-See **Section 11: Forecast Error Metrics** for comprehensive treatment of all point, scaled, probabilistic, and calibration metrics with their strengths, limitations, and selection guidance.
+See **Section 11: Forecast Error Metrics** for comprehensive treatment of all point, scaled, probabilistic, and
+calibration metrics with their strengths, limitations, and selection guidance.
 
 ---
 
@@ -1723,9 +1828,13 @@ See **Section 11: Forecast Error Metrics** for comprehensive treatment of all po
 
 **"Measurement drives conclusion."** (Manokhin, 2025)
 
-The choice of error metric fundamentally determines which model appears best. The Makridakis competitions (M1–M4) relied heavily on MAPE and sMAPE, which systematically biased results toward simple, conservative methods. Only with the M5 competition (2020) did the field begin adopting more robust evaluation frameworks. Manokhin argues this metric dependency created a "cult of simplicity" that delayed exploration of machine learning in forecasting by decades.
+The choice of error metric fundamentally determines which model appears best. The Makridakis competitions (M1–M4) relied
+heavily on MAPE and sMAPE, which systematically biased results toward simple, conservative methods. Only with the M5
+competition (2020) did the field begin adopting more robust evaluation frameworks. Manokhin argues this metric
+dependency created a "cult of simplicity" that delayed exploration of machine learning in forecasting by decades.
 
-**Core principle:** Always evaluate with multiple metrics. If model rankings change under different metrics, investigate why — the disagreement reveals something fundamental about the models or the data.
+**Core principle:** Always evaluate with multiple metrics. If model rankings change under different metrics, investigate
+why — the disagreement reveals something fundamental about the models or the data.
 
 ### Scale-Dependent Metrics
 
@@ -1740,12 +1849,14 @@ MAE = (1/n) Σ |y_i - ŷ_i|
 ```
 
 **Properties:**
+
 - Measures median performance (minimized by the conditional median)
 - Robust to outliers (compared to RMSE)
 - Equal penalty for over- and under-forecasting
 - Interpretable in original units
 
 **Limitations:**
+
 - Scale-dependent: cannot aggregate across series with different magnitudes
 - Does not penalize large errors proportionally more than small ones
 
@@ -1760,19 +1871,23 @@ RMSE = √[(1/n) Σ (y_i - ŷ_i)²]
 ```
 
 **Properties:**
+
 - Measures mean performance (minimized by the conditional mean)
 - Penalizes large errors disproportionately due to squaring
 - Differentiable (useful as optimization objective)
 - RMSE ≥ MAE always; equality only when all errors are identical
 
 **Limitations:**
+
 - Scale-dependent
 - Sensitive to outliers — a single extreme error can dominate the metric
 - Not suitable for intermittent/sparse demand (zero-inflated data)
 
-**When to use:** Contexts where large errors are disproportionately costly (e.g., energy grid balancing, financial risk). When you need a differentiable loss function for model training.
+**When to use:** Contexts where large errors are disproportionately costly (e.g., energy grid balancing, financial
+risk). When you need a differentiable loss function for model training.
 
-**MAE vs. RMSE decision rule:** If the cost of errors grows linearly with error magnitude, use MAE. If cost grows faster than linearly (big misses are catastrophically worse than small misses), use RMSE.
+**MAE vs. RMSE decision rule:** If the cost of errors grows linearly with error magnitude, use MAE. If cost grows faster
+than linearly (big misses are catastrophically worse than small misses), use RMSE.
 
 ### Percentage-Based Metrics
 
@@ -1788,15 +1903,27 @@ MAPE = (100/n) Σ |y_i - ŷ_i| / |y_i|
 
 **Critical Flaws (Manokhin, 2025; Hyndman & Koehler, 2006):**
 
-**1. Undefined at zero, explosive near zero.** When actual values are zero or near-zero, MAPE becomes infinite or astronomically large. A single tiny-actual observation can dominate the entire metric. This makes MAPE unusable for intermittent demand, which is the majority of real-world retail/supply chain data.
+**1. Undefined at zero, explosive near zero.** When actual values are zero or near-zero, MAPE becomes infinite or
+astronomically large. A single tiny-actual observation can dominate the entire metric. This makes MAPE unusable for
+intermittent demand, which is the majority of real-world retail/supply chain data.
 
-**2. Asymmetric — systematically rewards under-forecasting.** Forecasting too low (under-forecast) produces a smaller percentage error than forecasting too high (over-forecast) by the same absolute amount. This is because the denominator (the actual) is smaller when you under-forecast a rising series. The consequence: models that systematically undershoot appear superior on MAPE, even when their absolute errors are worse. Simple, conservative methods inherently benefit from this bias.
+**2. Asymmetric — systematically rewards under-forecasting.** Forecasting too low (under-forecast) produces a smaller
+percentage error than forecasting too high (over-forecast) by the same absolute amount. This is because the denominator
+(the actual) is smaller when you under-forecast a rising series. The consequence: models that systematically undershoot
+appear superior on MAPE, even when their absolute errors are worse. Simple, conservative methods inherently benefit from
+this bias.
 
-**3. Disproportionate penalty for small-volume series.** When averaging MAPE across many series, low-volume series dominate the metric. A 5-unit error on a series averaging 10 units (50% MAPE) counts equally to a 500-unit error on a series averaging 10,000 units (5% MAPE) — even though the latter is far more consequential in business terms.
+**3. Disproportionate penalty for small-volume series.** When averaging MAPE across many series, low-volume series
+dominate the metric. A 5-unit error on a series averaging 10 units (50% MAPE) counts equally to a 500-unit error on a
+series averaging 10,000 units (5% MAPE) — even though the latter is far more consequential in business terms.
 
-**4. No consistent interpretation.** A 20% MAPE has no inherent meaning without context. It could reflect moderate errors everywhere, or near-perfect performance on most series plus one disaster on a tiny series.
+**4. No consistent interpretation.** A 20% MAPE has no inherent meaning without context. It could reflect moderate
+errors everywhere, or near-perfect performance on most series plus one disaster on a tiny series.
 
-**5. Distorted the "simplicity" narrative in forecasting.** Manokhin (2025) argues that MAPE's use as the primary metric in the M1–M3 competitions exaggerated the superiority of simple methods, creating a decades-long bias against complexity in the forecasting field. Optimizing purely for MAPE can lead to systematically biased forecasts that cause real business harm — for example, consistently under-forecasting demand leads to stockouts.
+**5. Distorted the "simplicity" narrative in forecasting.** Manokhin (2025) argues that MAPE's use as the primary metric
+in the M1–M3 competitions exaggerated the superiority of simple methods, creating a decades-long bias against complexity
+in the forecasting field. Optimizing purely for MAPE can lead to systematically biased forecasts that cause real
+business harm — for example, consistently under-forecasting demand leads to stockouts.
 
 **Recommendation:** Avoid MAPE. If stakeholders demand a percentage metric, use WAPE instead.
 
@@ -1810,14 +1937,18 @@ sMAPE = (200/n) Σ |y_i - ŷ_i| / (|y_i| + |ŷ_i|)
 
 **Intended fix:** Addresses MAPE's zero-denominator problem and asymmetry.
 
-**Actual result (Goodwin & Lawton, 1999):** sMAPE introduces the *opposite* asymmetry — it systematically favors over-forecasting. When the forecast is too low, the denominator shrinks (actual + small forecast), inflating the error. When the forecast is too high, the denominator grows (actual + large forecast), deflating the error.
+**Actual result (Goodwin & Lawton, 1999):** sMAPE introduces the *opposite* asymmetry — it systematically favors
+over-forecasting. When the forecast is too low, the denominator shrinks (actual + small forecast), inflating the error.
+When the forecast is too high, the denominator grows (actual + large forecast), deflating the error.
 
 **Additional problems:**
+
 - Range is [0, 200%], not [0, 100%], causing confusion
 - Still distorts rankings when comparing across series with different scales
 - The M4 competition used sMAPE as one component of its OWA metric, perpetuating its influence
 
-**Recommendation:** Avoid sMAPE. Despite its widespread use in competitions, it does not solve MAPE's fundamental problems — it merely reverses them.
+**Recommendation:** Avoid sMAPE. Despite its widespread use in competitions, it does not solve MAPE's fundamental
+problems — it merely reverses them.
 
 #### Weighted Absolute Percentage Error (WAPE / wMAPE)
 
@@ -1828,17 +1959,20 @@ WAPE = Σ |y_i - ŷ_i| / Σ |y_i| × 100
 ```
 
 **Properties:**
+
 - Volume-weighted: high-volume series naturally contribute more to the aggregate error
 - Answers the business question "what percentage of total demand did we miss?"
 - Well-defined when individual actuals are zero (as long as aggregate is non-zero)
-- Equivalent to MAE / Mean(Actuals) × 100
+- Equivalent to MAE / Mean (Actuals) × 100
 
 **Limitations:**
+
 - Still a percentage of actuals, so retains a subtle bias toward under-forecasting at aggregate level
 - Cannot handle the case where total actuals sum to zero
 - Less informative for per-series analysis
 
-**When to use:** Multi-series aggregation where business cares about total error relative to total volume. The best percentage metric available, though still imperfect.
+**When to use:** Multi-series aggregation where business cares about total error relative to total volume. The best
+percentage metric available, though still imperfect.
 
 ### Scaled Metrics
 
@@ -1863,6 +1997,7 @@ with m = 1 for non-seasonal data and m = seasonal period for seasonal data.
 **Proposed by:** Hyndman & Koehler (2006) as a replacement for MAPE.
 
 **Properties:**
+
 - Scale-free: enables cross-series comparison
 - Well-defined for all series (except constant-zero, which are trivial)
 - No directional bias: treats over- and under-forecasting symmetrically
@@ -1870,12 +2005,15 @@ with m = 1 for non-seasonal data and m = seasonal period for seasonal data.
 - Suitable for intermittent demand (unlike MAPE)
 
 **Limitations (Manokhin, 2025):**
-- The naive forecast may not be a meaningful benchmark for all series. In series with high-frequency oscillations, domain-specific constraints, or policy-driven signals, beating a bad baseline is not meaningful progress
+
+- The naive forecast may not be a meaningful benchmark for all series. In series with high-frequency oscillations,
+  domain-specific constraints, or policy-driven signals, beating a bad baseline is not meaningful progress
 - Assumes the naive benchmark is appropriate — in finance or event-driven domains, a naive model may be irrelevant
 - Unstable for short or highly volatile series where small changes in in-sample differences can skew the scaling factor
 - Not intuitive to non-technical stakeholders: "our MASE is 0.8" requires explanation ("20% better than naive")
 
-**When to use:** Multi-series comparison, competition benchmarking, research contexts. Best available scaled metric for point forecasts, but requires domain awareness about whether the naive baseline is sensible.
+**When to use:** Multi-series comparison, competition benchmarking, research contexts. Best available scaled metric for
+point forecasts, but requires domain awareness about whether the naive baseline is sensible.
 
 #### Root Mean Squared Scaled Error (RMSSE)
 
@@ -1886,12 +2024,14 @@ RMSSE = √[(1/h) Σ_{j=1}^{h} e_j² / ((1/(T-m)) Σ_{t=m+1}^{T} (y_t - y_{t-m})
 ```
 
 **Properties:**
+
 - RMSE analogue of MASE: scales squared errors by the squared naive benchmark
 - Penalizes large errors more than MASE (due to squaring)
 - Used as the official accuracy metric in the M5 competition (2020)
 - Well-suited for intermittent/sparse demand data
 
-**When to use:** Contexts where large errors are disproportionately costly AND cross-series comparison is needed. The MASE vs. RMSSE choice mirrors the MAE vs. RMSE decision.
+**When to use:** Contexts where large errors are disproportionately costly AND cross-series comparison is needed. The
+MASE vs. RMSSE choice mirrors the MAE vs. RMSE decision.
 
 ### Relative Metrics
 
@@ -1906,6 +2046,7 @@ rMAE = MAE_model / MAE_benchmark
 ```
 
 **Properties:**
+
 - Direct comparison to any chosen benchmark (naive, seasonal naive, or another model)
 - rMAE < 1: model outperforms benchmark
 - rMAE > 1: model underperforms benchmark
@@ -1928,11 +2069,13 @@ OWA = 0.5 × (sMAPE_model / sMAPE_naive2) + 0.5 × (MASE_model / MASE_naive2)
 where Naive2 is the seasonal naive benchmark.
 
 **Properties:**
+
 - Composite metric combining percentage and scaled components
 - Introduced in M4 to reduce single-metric bias
 - OWA < 1: model beats the Naive2 benchmark overall
 
 **Limitations:**
+
 - Still includes sMAPE, inheriting its asymmetry bias
 - Arbitrary 50/50 weighting of the two components
 - A step forward from pure MAPE, but still imperfect
@@ -1949,16 +2092,19 @@ Point forecasts are insufficient for decision-making. Probabilistic metrics eval
 CRPS = ∫_{-∞}^{∞} [F(x) - 𝟙(x ≥ y)]² dx
 ```
 
-where F(x) is the forecast CDF and y is the observed value.
+where F (x) is the forecast CDF and y is the observed value.
 
 **Properties:**
+
 - Generalizes MAE to probabilistic forecasts: CRPS reduces to MAE for deterministic (point) forecasts
 - Expressed in the same units as the observed variable
 - Evaluates both sharpness (narrowness of the distribution) and calibration (accuracy of probability levels)
 - Proper scoring rule: minimized when the forecast distribution equals the true data-generating distribution
 - Smaller CRPS = better probabilistic forecast
 
-**Interpretation:** CRPS measures the integrated squared difference between the forecast cumulative distribution and the step-function CDF of the observation. A forecast that concentrates probability mass near the true value achieves low CRPS.
+**Interpretation:** CRPS measures the integrated squared difference between the forecast cumulative distribution and the
+step-function CDF of the observation. A forecast that concentrates probability mass near the true value achieves low
+CRPS.
 
 **Implementation:**
 
@@ -1975,7 +2121,8 @@ from skforecast.metrics import crps_from_quantiles
 crps_values = crps_from_quantiles(y_true, quantile_predictions, quantile_levels)
 ```
 
-**When to use:** The gold standard for evaluating probabilistic forecasts. Should be reported alongside coverage and interval width for any system producing prediction intervals or distributional forecasts.
+**When to use:** The gold standard for evaluating probabilistic forecasts. Should be reported alongside coverage and
+interval width for any system producing prediction intervals or distributional forecasts.
 
 #### Pinball Loss (Quantile Loss)
 
@@ -1991,6 +2138,7 @@ L_τ(y, q̂_τ) = {
 where τ is the target quantile level and q̂_τ is the predicted quantile.
 
 **Properties:**
+
 - Asymmetric loss that penalizes errors differently depending on which side of the quantile the observation falls
 - For τ = 0.5, reduces to half the absolute error (equivalent to optimizing for the median)
 - For τ = 0.9, under-predictions are penalized 9× more than over-predictions
@@ -2005,7 +2153,8 @@ WQL = Σ_τ Σ_i L_τ(y_i, q̂_{τ,i}) / Σ_i |y_i|
 
 Scale-normalized version used in production forecasting systems (e.g., Amazon's AutoGluon-TimeSeries).
 
-**When to use:** Evaluating quantile regression models, conformal quantile predictions, and any forecast system producing specific quantile estimates.
+**When to use:** Evaluating quantile regression models, conformal quantile predictions, and any forecast system
+producing specific quantile estimates.
 
 #### Winkler Score
 
@@ -2022,9 +2171,11 @@ W = {
 ```
 
 **Properties:**
+
 - Rewards narrow intervals (smaller U - L)
 - Penalizes intervals that miss the true value, with penalty proportional to the miss distance
-- The penalty factor (2/α) increases for higher confidence levels, making misses at 99% confidence far more costly than at 80%
+- The penalty factor (2/α) increases for higher confidence levels, making misses at 99% confidence far more costly than
+  at 80%
 - Proper scoring rule for interval forecasts
 
 **When to use:** Evaluating prediction intervals directly, comparing interval forecasting methods.
@@ -2042,13 +2193,18 @@ ME = (1/n) Σ (ŷ_i - y_i)
 ```
 
 **Properties:**
+
 - Positive ME: systematic over-forecasting
 - Negative ME: systematic under-forecasting
 - ME ≈ 0: unbiased (but could still have large errors)
 
-**Why it matters:** Bias compounds over time and across products. A model with moderate MAE but zero bias is often preferable to a model with low MAE but persistent bias, because bias creates systematic inventory imbalance, capacity misallocation, or financial misestimation.
+**Why it matters:** Bias compounds over time and across products. A model with moderate MAE but zero bias is often
+preferable to a model with low MAE but persistent bias, because bias creates systematic inventory imbalance, capacity
+misallocation, or financial misestimation.
 
-**MAPE's hidden bias effect (Manokhin, 2025):** Optimizing for MAPE introduces systematic negative bias (under-forecasting), because MAPE penalizes over-forecasts more than under-forecasts. In retail, this directly causes stockouts. Always check ME alongside accuracy metrics.
+**MAPE's hidden bias effect (Manokhin, 2025):** Optimizing for MAPE introduces systematic negative bias
+(under-forecasting), because MAPE penalizes over-forecasts more than under-forecasts. In retail, this directly causes
+stockouts. Always check ME alongside accuracy metrics.
 
 #### Percentage Bias
 
@@ -2064,32 +2220,32 @@ Useful for aggregate bias assessment across a product portfolio.
 
 **Step 1: Single series or multi-series?**
 
-| Context | Recommended Metrics |
-|---------|-------------------|
-| Single series evaluation | MAE, RMSE, ME (bias check) |
-| Multi-series comparison (equal importance) | MASE, RMSSE |
-| Multi-series comparison (volume-weighted) | WAPE, weighted MAE |
-| Competition / benchmarking | MASE, RMSSE, OWA |
+| Context                                    | Recommended Metrics        |
+|--------------------------------------------|----------------------------|
+| Single series evaluation                   | MAE, RMSE, ME (bias check) |
+| Multi-series comparison (equal importance) | MASE, RMSSE                |
+| Multi-series comparison (volume-weighted)  | WAPE, weighted MAE         |
+| Competition / benchmarking                 | MASE, RMSSE, OWA           |
 
 **Step 2: Point forecast or probabilistic?**
 
-| Forecast Type | Recommended Metrics |
-|---------------|-------------------|
-| Point forecast only | MAE/RMSE + MASE/RMSSE + ME |
-| Quantile forecasts | Pinball Loss, WQL |
+| Forecast Type        | Recommended Metrics                    |
+|----------------------|----------------------------------------|
+| Point forecast only  | MAE/RMSE + MASE/RMSSE + ME             |
+| Quantile forecasts   | Pinball Loss, WQL                      |
 | Prediction intervals | Coverage, Average Width, Winkler Score |
-| Full distributional | CRPS |
+| Full distributional  | CRPS                                   |
 
 **Step 3: What business behavior should the metric incentivize?**
 
-| Business Priority | Metric to Use | Metric to Avoid |
-|-------------------|---------------|-----------------|
-| Minimize total units of error | MAE, WAPE | MAPE |
-| Penalize large misses severely | RMSE, RMSSE | MAE |
-| Avoid systematic over/under | ME + MAE | MAPE (introduces bias) |
-| Compare to naive baseline | MASE, FVA | Raw MAE (no context) |
-| Minimize stockout risk | Asymmetric loss, high-quantile pinball | Symmetric metrics |
-| Minimize excess inventory | Asymmetric loss, low-quantile pinball | Symmetric metrics |
+| Business Priority              | Metric to Use                          | Metric to Avoid        |
+|--------------------------------|----------------------------------------|------------------------|
+| Minimize total units of error  | MAE, WAPE                              | MAPE                   |
+| Penalize large misses severely | RMSE, RMSSE                            | MAE                    |
+| Avoid systematic over/under    | ME + MAE                               | MAPE (introduces bias) |
+| Compare to naive baseline      | MASE, FVA                              | Raw MAE (no context)   |
+| Minimize stockout risk         | Asymmetric loss, high-quantile pinball | Symmetric metrics      |
+| Minimize excess inventory      | Asymmetric loss, low-quantile pinball  | Symmetric metrics      |
 
 **Step 4: Always report multiple metrics.** Minimum recommended set:
 
@@ -2098,7 +2254,8 @@ Useful for aggregate bias assessment across a product portfolio.
 3. **ME** (bias detection)
 4. **Coverage + CRPS** (if probabilistic forecasts produced)
 
-**Metrics to avoid in almost all contexts:** MAPE, sMAPE. These are legacy metrics with well-documented biases that distort model selection. They persist primarily due to inertia.
+**Metrics to avoid in almost all contexts:** MAPE, sMAPE. These are legacy metrics with well-documented biases that
+distort model selection. They persist primarily due to inertia.
 
 ### Implementation: Complete Metric Suite
 
@@ -2227,6 +2384,7 @@ class ForecastMetrics:
 ```
 
 **Advantages:**
+
 - Adapts to distribution shift
 - Maintains coverage under non-stationarity
 - Low computational overhead
@@ -2238,15 +2396,18 @@ class ForecastMetrics:
 **Approaches:**
 
 **1. Separate Models per Horizon**
+
 - Train distinct conformal predictors for each horizon
 - Most accurate but computationally expensive
 
 **2. Recursive Forecasting**
+
 - Use 1-step-ahead model recursively
 - Feed predictions back as inputs
 - Error accumulation concern
 
 **3. Direct Multi-Step**
+
 - Train model to predict multiple horizons simultaneously
 - Single conformal calibration across all horizons
 - Simpler but may sacrifice accuracy
@@ -2255,13 +2416,14 @@ class ForecastMetrics:
 
 **Types of Shift:**
 
-1. **Covariate Shift**: P(X) changes, P(Y|X) constant
-2. **Label Shift**: P(Y) changes, P(X|Y) constant
-3. **Concept Drift**: P(Y|X) changes
+1. **Covariate Shift**: P (X) changes, P (Y|X) constant
+2. **Label Shift**: P (Y) changes, P (X|Y) constant
+3. **Concept Drift**: P (Y|X) changes
 
 **Robust Conformal Strategies:**
 
 **1. Weighted Conformal Prediction**
+
 ```python
 # Compute importance weights for calibration points
 weights = p_test(X_calib) / p_train(X_calib)
@@ -2271,6 +2433,7 @@ weighted_quantile = weighted_quantile(calibration_scores, weights, q)
 ```
 
 **2. Sliding Window Calibration**
+
 ```python
 # Use only recent N calibration points
 recent_scores = calibration_scores[-N:]
@@ -2278,6 +2441,7 @@ threshold = np.quantile(recent_scores, q_level)
 ```
 
 **3. Ensemble of Conformal Predictors**
+
 ```python
 # Train multiple conformal predictors on different time windows
 # Aggregate their intervals
@@ -2302,6 +2466,7 @@ threshold = np.quantile(recent_scores, q_level)
 **Purpose:** Improve probability calibration for classification.
 
 **Advantage over Platt Scaling / Isotonic Regression:**
+
 - Provides validity guarantees
 - Non-parametric
 - Works with small calibration sets
@@ -2310,14 +2475,15 @@ threshold = np.quantile(recent_scores, q_level)
 
 1. Train binary classifier on training set
 2. On calibration set, fit two isotonic regression models:
-   - One for class 0 examples
-   - One for class 1 examples
+    - One for class 0 examples
+    - One for class 1 examples
 3. For new test point:
-   - Get probability from both isotonic models
-   - Return calibrated probability pair [p₀, p₁]
-   - p₀ + p₁ may not equal 1 (indicates uncertainty)
+    - Get probability from both isotonic models
+    - Return calibrated probability pair [p₀, p₁]
+    - p₀ + p₁ may not equal 1 (indicates uncertainty)
 
 **Properties:**
+
 - Valid calibration guarantee
 - Adaptive to local regions
 - Indicates prediction uncertainty through interval width
@@ -2328,7 +2494,8 @@ threshold = np.quantile(recent_scores, q_level)
 
 **Core Problem:** Permutation-invariant self-attention
 
-Time series are fundamentally sequential—order carries meaning. Self-attention mechanism treats positions as permutation-invariant set:
+Time series are fundamentally sequential—order carries meaning. Self-attention mechanism treats positions as
+permutation-invariant set:
 
 ```
 Attention(Q, K, V) = softmax(QKᵀ/√d)V
@@ -2351,6 +2518,7 @@ This ignores temporal structure critical to forecasting.
 - **Lag-Llama:** 42% less accurate, 1000× slower than seasonal naive
 
 **Recommendation:** Use transformers as baselines, not defaults. For time series, prioritize:
+
 1. Classical statistical methods (ARIMA, ETS)
 2. CatBoost with engineered features
 3. Specialized architectures (N-BEATS, N-HiTS, TSMixer)
@@ -2415,9 +2583,11 @@ This ignores temporal structure critical to forecasting.
 
 **Final Principle:**
 
-> "Forecastability should refer to the range of forecast errors achievable in the long run, not just the stability of the history."
+> "Forecastability should refer to the range of forecast errors achievable in the long run, not just the stability of
+> the history."
 
-Stop classifying series as "unforecastable" based on CoV thresholds. Start measuring forecastability through actual forecast error benchmarks against naive models—because stability ≠ predictability.
+Stop classifying series as "unforecastable" based on CoV thresholds. Start measuring forecastability through actual
+forecast error benchmarks against naive models—because stability ≠ predictability.
 
 ---
 
@@ -2431,29 +2601,39 @@ Stop classifying series as "unforecastable" based on CoV thresholds. Start measu
 
 3. **Romano, Y., Patterson, E., & Candès, E. (2019).** Conformalized Quantile Regression. NeurIPS 2019.
 
-4. **Barber, R. F., Candès, E. J., Ramdas, A., & Tibshirani, R. J. (2021).** Predictive Inference with the Jackknife+. Annals of Statistics.
+4. **Barber, R. F., Candès, E. J., Ramdas, A., & Tibshirani, R. J. (2021).** Predictive Inference with the Jackknife+.
+   Annals of Statistics.
 
-5. **Angelopoulos, A. N., & Bates, S. (2023).** A Gentle Introduction to Conformal Prediction and Distribution-Free Uncertainty Quantification.
+5. **Angelopoulos, A. N., & Bates, S. (2023).** A Gentle Introduction to Conformal Prediction and Distribution-Free
+   Uncertainty Quantification.
 
 6. **Hyndman, R. J., & Athanasopoulos, G. (2021).** Forecasting: Principles and Practice, 3rd edition. OTexts.
 
-7. **Box, G. E. P., Jenkins, G. M., Reinsel, G. C., & Ljung, G. M. (2015).** Time Series Analysis: Forecasting and Control, 5th edition. Wiley.
+7. **Box, G. E. P., Jenkins, G. M., Reinsel, G. C., & Ljung, G. M. (2015).** Time Series Analysis: Forecasting and
+   Control, 5th edition. Wiley.
 
-8. **Prokhorenkova, L., Gusev, G., Vorobev, A., Dorogush, A. V., & Gulin, A. (2018).** CatBoost: unbiased boosting with categorical features. NeurIPS 2018.
+8. **Prokhorenkova, L., Gusev, G., Vorobev, A., Dorogush, A. V., & Gulin, A. (2018).** CatBoost: unbiased boosting with
+   categorical features. NeurIPS 2018.
 
-9. **Hyndman, R. J., & Koehler, A. B. (2006).** Another look at measures of forecast accuracy. International Journal of Forecasting, 22(4), 679–688.
+9. **Hyndman, R. J., & Koehler, A. B. (2006).** Another look at measures of forecast accuracy. International Journal of
+   Forecasting, 22 (4), 679–688.
 
-10. **Goodwin, P., & Lawton, R. (1999).** On the asymmetry of the symmetric MAPE. International Journal of Forecasting, 15(4), 405–408.
+10. **Goodwin, P., & Lawton, R. (1999).** On the asymmetry of the symmetric MAPE. International Journal of Forecasting,
+    15 (4), 405–408.
 
-11. **Makridakis, S., Spiliotis, E., & Assimakopoulos, V. (2020).** The M4 Competition: 100,000 time series and 61 forecasting methods. International Journal of Forecasting, 36(1), 54–74.
+11. **Makridakis, S., Spiliotis, E., & Assimakopoulos, V. (2020).** The M4 Competition: 100,000 time series and 61
+    forecasting methods. International Journal of Forecasting, 36 (1), 54–74.
 
-12. **Makridakis, S., Spiliotis, E., & Assimakopoulos, V. (2022).** M5 accuracy competition: Results, findings, and conclusions. International Journal of Forecasting, 38(4), 1346–1364.
+12. **Makridakis, S., Spiliotis, E., & Assimakopoulos, V. (2022).** M5 accuracy competition: Results, findings, and
+    conclusions. International Journal of Forecasting, 38 (4), 1346–1364.
 
-13. **Armstrong, J. S., & Collopy, F. (1992).** Error measures for generalizing about forecasting methods: Empirical comparisons. International Journal of Forecasting, 8(1), 69–80.
+13. **Armstrong, J. S., & Collopy, F. (1992).** Error measures for generalizing about forecasting methods: Empirical
+    comparisons. International Journal of Forecasting, 8 (1), 69–80.
 
 14. **Manokhin, V. (2025).** MAPE and the Makridakis Competitions: Why Metrics Matter. Medium.
 
-15. **Manokhin, V. (2025).** The Makridakis Forecasting Competitions: Four Decades of Overhyped Simplicity and Stagnation. Medium.
+15. **Manokhin, V. (2025).** The Makridakis Forecasting Competitions: Four Decades of Overhyped Simplicity and
+    Stagnation. Medium.
 
 16. **Manokhin, V. (2025).** The Coefficient of Variation Has Outlived Its Usefulness: Time for Retirement. Medium.
 

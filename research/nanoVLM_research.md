@@ -49,13 +49,16 @@
 
 ## Overview
 
-This guide provides a comprehensive implementation plan for nanoVLM (nano Vision-Language Model) within the dl-techniques framework. nanoVLM is a compact 222M parameter vision-language model that achieves 35.3% accuracy on MMStar benchmark while maintaining simplicity and efficiency.
+This guide provides a comprehensive implementation plan for nanoVLM (nano Vision-Language Model) within the
+dl-techniques framework. nanoVLM is a compact 222M parameter vision-language model that achieves 35.3% accuracy on
+MMStar benchmark while maintaining simplicity and efficiency.
 
 ## Architecture Summary
 
 nanoVLM consists of three core components:
+
 1. **Vision Encoder**: SigLIP-based Vision Transformer (85M parameters)
-2. **Language Decoder**: SmolLM2-based causal transformer (135M parameters)  
+2. **Language Decoder**: SmolLM2-based causal transformer (135M parameters)
 3. **Modality Projection**: Pixel shuffle + linear projection (2M parameters)
 
 Total: 222M parameters, trained in ~750 lines of code.
@@ -1565,13 +1568,15 @@ NANOVLM_CONFIGS = {
 ## Implementation Checklist
 
 ### Phase 1: Core Layers
+
 - [ ] `PixelShuffle` layer with proper Keras 3.x serialization
 - [ ] `SigLIPVisionTransformer` layer with multi-head attention
-- [ ] `ModalityProjection` layer combining pixel shuffle and projection  
+- [ ] `ModalityProjection` layer combining pixel shuffle and projection
 - [ ] Unit tests for all layers
 - [ ] Serialization tests
 
-### Phase 2: Model Architecture  
+### Phase 2: Model Architecture
+
 - [ ] `NanoVLM` main model class
 - [ ] Multi-optimizer training support
 - [ ] Text generation capabilities
@@ -1579,6 +1584,7 @@ NANOVLM_CONFIGS = {
 - [ ] Memory optimization features
 
 ### Phase 3: Training Infrastructure
+
 - [ ] `NanoVLMLoss` with proper masking
 - [ ] `VQADataProcessor` for dataset handling
 - [ ] Training script with gradient accumulation
@@ -1586,6 +1592,7 @@ NANOVLM_CONFIGS = {
 - [ ] Mixed precision support
 
 ### Phase 4: Evaluation and Optimization
+
 - [ ] Inference optimization
 - [ ] Benchmarking tools
 - [ ] Memory profiling
@@ -1593,6 +1600,7 @@ NANOVLM_CONFIGS = {
 - [ ] Edge deployment preparation
 
 ### Phase 5: Integration
+
 - [ ] Integration with dl-techniques framework
 - [ ] Documentation and examples
 - [ ] Model hub compatibility
@@ -1601,14 +1609,20 @@ NANOVLM_CONFIGS = {
 
 ## Key Technical Decisions
 
-1. **Keras 3.x Compatibility**: All layers follow the new Keras 3.x patterns with proper `build()`, `call()`, and serialization methods.
+1. **Keras 3.x Compatibility**: All layers follow the new Keras 3.x patterns with proper `build()`, `call()`, and
+   serialization methods.
 
-2. **Backend Agnostic**: Using `keras.ops` for all operations to ensure compatibility across TensorFlow, JAX, and PyTorch backends.
+2. **Backend Agnostic**: Using `keras.ops` for all operations to ensure compatibility across TensorFlow, JAX, and
+   PyTorch backends.
 
-3. **Memory Efficiency**: Implementing gradient accumulation and mixed precision to handle large models on limited hardware.
+3. **Memory Efficiency**: Implementing gradient accumulation and mixed precision to handle large models on limited
+   hardware.
 
-4. **Modular Design**: Separating vision encoder, language decoder, and projection components for easy experimentation and fine-tuning.
+4. **Modular Design**: Separating vision encoder, language decoder, and projection components for easy experimentation
+   and fine-tuning.
 
-5. **Training Flexibility**: Supporting different learning rates for different model components and gradient accumulation for effective large batch training.
+5. **Training Flexibility**: Supporting different learning rates for different model components and gradient
+   accumulation for effective large batch training.
 
-This implementation guide provides a complete roadmap for building nanoVLM within the dl-techniques framework, following best practices for modern deep learning model development.
+This implementation guide provides a complete roadmap for building nanoVLM within the dl-techniques framework, following
+best practices for modern deep learning model development.

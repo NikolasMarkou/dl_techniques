@@ -1,6 +1,7 @@
 # Vision Language Model with Hierarchical Reasoning (VLM-HRM) Implementation Guide
 
 ## Table of Contents
+
 1. [Architecture Overview](#architecture-overview)
 2. [Core Components](#core-components)
 3. [Implementation Steps](#implementation-steps)
@@ -17,22 +18,23 @@
 
 ## Architecture Overview
 
-The VLM-HRM combines the adaptive reasoning capabilities of Hierarchical Reasoning Models with multi-modal vision-language understanding. The architecture features:
+The VLM-HRM combines the adaptive reasoning capabilities of Hierarchical Reasoning Models with multi-modal
+vision-language understanding. The architecture features:
 
 ### Core Design Principles
 
 1. **🧠 Dual-Level Reasoning**
-   - **High-Level**: Cross-modal semantics, global context, conceptual relationships
-   - **Low-Level**: Fine-grained visual-textual alignment, specific details, precise grounding
+    - **High-Level**: Cross-modal semantics, global context, conceptual relationships
+    - **Low-Level**: Fine-grained visual-textual alignment, specific details, precise grounding
 
 2. **🔄 Adaptive Computation Time (ACT)**
-   - Simple queries get 2-3 reasoning cycles
-   - Complex multi-modal reasoning gets 8-12+ cycles
-   - Learned halting mechanism via Q-learning
+    - Simple queries get 2-3 reasoning cycles
+    - Complex multi-modal reasoning gets 8-12+ cycles
+    - Learned halting mechanism via Q-learning
 
 3. **🎯 Multi-Task Unified Architecture**
-   - Single model handles VQA, captioning, grounding, retrieval
-   - Task-specific output heads with intelligent routing
+    - Single model handles VQA, captioning, grounding, retrieval
+    - Task-specific output heads with intelligent routing
 
 ### High-Level Architecture Flow
 
@@ -61,6 +63,7 @@ Vision Input + Text Input → Multi-Modal Embeddings
 ## Core Components
 
 ### 1. Vision Language HRM Core
+
 ```python
 @keras.saving.register_keras_serializable()
 class VisionLanguageHRMCore(keras.layers.Layer):
@@ -73,6 +76,7 @@ class VisionLanguageHRMCore(keras.layers.Layer):
 ```
 
 ### 2. Multi-Modal Input Processor
+
 ```python
 class MultiModalInputProcessor(keras.layers.Layer):
     """
@@ -87,6 +91,7 @@ class MultiModalInputProcessor(keras.layers.Layer):
 ```
 
 ### 3. Cross-Modal Reasoning Modules
+
 ```python
 class CrossModalReasoningModule(ReasoningModule):
     """
@@ -100,6 +105,7 @@ class CrossModalReasoningModule(ReasoningModule):
 ```
 
 ### 4. Task-Adaptive Output System
+
 ```python
 class VLMOutputSystem(keras.layers.Layer):
     """
@@ -1984,7 +1990,8 @@ if __name__ == "__main__":
 
 ## Conclusion
 
-This implementation guide provides a complete framework for building Vision Language Models with Hierarchical Reasoning capabilities. The architecture combines:
+This implementation guide provides a complete framework for building Vision Language Models with Hierarchical Reasoning
+capabilities. The architecture combines:
 
 - **🧠 Adaptive Reasoning**: Variable computation depth based on input complexity
 - **🔄 Multi-Modal Fusion**: Sophisticated vision-text integration
@@ -1992,7 +1999,8 @@ This implementation guide provides a complete framework for building Vision Lang
 - **⚡ Efficient Training**: Gradient checkpointing and optimized computation
 - **🔍 Interpretability**: Attention visualization and reasoning analysis
 
-The VLM-HRM represents a significant advancement in multi-modal AI, enabling more intelligent and adaptive vision-language understanding through hierarchical reasoning processes.
+The VLM-HRM represents a significant advancement in multi-modal AI, enabling more intelligent and adaptive
+vision-language understanding through hierarchical reasoning processes.
 
 ### Next Steps
 
@@ -2002,4 +2010,5 @@ The VLM-HRM represents a significant advancement in multi-modal AI, enabling mor
 4. **Task-Specific Optimization**: Fine-tune for specialized applications
 5. **Deployment**: Optimize for production inference scenarios
 
-The architecture is designed to be modular and extensible, allowing for easy customization and improvement based on specific use cases and research directions.
+The architecture is designed to be modular and extensible, allowing for easy customization and improvement based on
+specific use cases and research directions.

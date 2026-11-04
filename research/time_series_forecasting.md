@@ -1,4 +1,5 @@
 # The Visual Guide to Time Series Forecasting
+
 ## A High-Level Framework for Building Production Systems
 
 ---
@@ -3103,20 +3104,28 @@ Probabilistic Forecast (Proper):
 
 This visual guide provides a comprehensive framework for approaching time series forecasting. The key principles:
 
-1. **Process over algorithms** - Most forecasting success comes from rigorous validation and system design, not model sophistication
+1. **Process over algorithms** - Most forecasting success comes from rigorous validation and system design, not model
+   sophistication
 
-2. **Start simple, add complexity judiciously** - Baselines establish performance floors; add complexity only when cross-validation justifies it
+2. **Start simple, add complexity judiciously** - Baselines establish performance floors; add complexity only when
+   cross-validation justifies it
 
-3. **Validate rigorously** - Use time series cross-validation, multiple metrics, and residual diagnostics to ensure models generalize
+3. **Validate rigorously** - Use time series cross-validation, multiple metrics, and residual diagnostics to ensure
+   models generalize
 
 4. **Quantify uncertainty** - Probabilistic forecasts with valid prediction intervals enable risk-aware decisions
 
-5. **Engineer features systematically** - Transform temporal patterns into features that machine learning models can leverage
+5. **Engineer features systematically** - Transform temporal patterns into features that machine learning models can
+   leverage
 
-6. **Build for production** - Monitoring, retraining, and fallback mechanisms separate systems that work from those that merely impress
+6. **Build for production** - Monitoring, retraining, and fallback mechanisms separate systems that work from those that
+   merely impress
 
-7. **Avoid common pitfalls** - Look-ahead bias, overfitting, and poor validation sink more projects than algorithm choice
+7. **Avoid common pitfalls** - Look-ahead bias, overfitting, and poor validation sink more projects than algorithm
+   choice
 
-8. **Remember the 95/5 rule** - Focus effort on validation, metrics, stakeholder communication, and operational robustness, not just model selection
+8. **Remember the 95/5 rule** - Focus effort on validation, metrics, stakeholder communication, and operational
+   robustness, not just model selection
 
-Follow this framework to build forecasting systems that earn stakeholder trust, survive real-world conditions, and deliver measurable business value.
+Follow this framework to build forecasting systems that earn stakeholder trust, survive real-world conditions, and
+deliver measurable business value.

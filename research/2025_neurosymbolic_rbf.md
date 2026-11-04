@@ -1,4 +1,5 @@
 # Extracting Neurosymbols with RBF Neural Networks
+
 ## A Comprehensive Strategic Guide
 
 ---
@@ -11,6 +12,7 @@
 ---
 
 ## Table of Contents
+
 1. [Executive Summary](#executive-summary)
 2. [Conceptual Foundation](#conceptual-foundation)
 3. [RBF Centers as Symbols: The Core Idea](#rbf-centers-as-symbols-the-core-idea)
@@ -29,9 +31,12 @@
 
 ## Executive Summary
 
-**The Core Insight**: Radial Basis Function (RBF) layers naturally perform localized pattern recognition. Each RBF unit's center represents a **prototypical pattern** in the input space. When properly trained, these centers become interpretable **neurosymbols** - discrete, meaningful units that bridge neural representations and symbolic reasoning.
+**The Core Insight**: Radial Basis Function (RBF) layers naturally perform localized pattern recognition. Each RBF
+unit's center represents a **prototypical pattern** in the input space. When properly trained, these centers become
+interpretable **neurosymbols** - discrete, meaningful units that bridge neural representations and symbolic reasoning.
 
 **Why RBFs for Symbol Extraction?**
+
 - ✅ **Localized Receptive Fields**: Each RBF unit responds to specific patterns
 - ✅ **Distance-Based Semantics**: Similar inputs activate the same centers
 - ✅ **Natural Clustering**: Centers self-organize to cover the data manifold
@@ -40,6 +45,7 @@
 - ✅ **Built-in Repulsion**: The layer includes center repulsion to prevent collapse
 
 **Key Applications**:
+
 - Pattern recognition → Discrete concept extraction
 - Time series analysis → Temporal motif discovery
 - Anomaly detection → Normal behavior symbols
@@ -53,6 +59,7 @@
 ### What is a Neurosymbol?
 
 A **neurosymbol** is a learned discrete representation that:
+
 1. **Emerges from continuous neural representations** (grounding)
 2. **Represents a meaningful concept** (interpretability)
 3. **Can be manipulated symbolically** (compositionality)
@@ -86,6 +93,7 @@ A **neurosymbol** is a learned discrete representation that:
 ### Mathematical Framework
 
 **The RBF Activation Function**:
+
 ```
 φᵢ(x) = exp(-γᵢ ||x - cᵢ||²)
 
@@ -97,6 +105,7 @@ Where:
 ```
 
 **Symbol Extraction Principle**:
+
 ```
 Symbol(x) = argmax φᵢ(x)  [Hard assignment]
             i
@@ -134,14 +143,14 @@ Symbol_soft(x) = {(i, φᵢ(x)) | φᵢ(x) > threshold}  [Soft assignment]
 
 ### Properties of RBF-Extracted Symbols
 
-| Property | How RBF Provides It | Benefit for Symbols |
-|----------|---------------------|---------------------|
-| **Discreteness** | Winner-take-all or thresholding | Clear categorical decisions |
-| **Stability** | Gaussian smoothness + repulsion | Robust to noise |
-| **Localization** | Distance-based activation | Each symbol covers specific region |
-| **Interpretability** | Centers are in input space | Can visualize what each symbol represents |
-| **Coverage** | Repulsion mechanism | Prevents redundancy, ensures diversity |
-| **Compositionality** | Multiple layers | Build hierarchies of abstractions |
+| Property             | How RBF Provides It             | Benefit for Symbols                       |
+|----------------------|---------------------------------|-------------------------------------------|
+| **Discreteness**     | Winner-take-all or thresholding | Clear categorical decisions               |
+| **Stability**        | Gaussian smoothness + repulsion | Robust to noise                           |
+| **Localization**     | Distance-based activation       | Each symbol covers specific region        |
+| **Interpretability** | Centers are in input space      | Can visualize what each symbol represents |
+| **Coverage**         | Repulsion mechanism             | Prevents redundancy, ensures diversity    |
+| **Compositionality** | Multiple layers                 | Build hierarchies of abstractions         |
 
 ---
 
@@ -172,6 +181,7 @@ Symbol_soft(x) = {(i, φᵢ(x)) | φᵢ(x) > threshold}  [Soft assignment]
 ### Stage-by-Stage Process
 
 #### Stage 1: Data Preparation & Feature Engineering
+
 ```
 Input: Raw dataset D = {x₁, x₂, ..., xₙ}
 
@@ -184,6 +194,7 @@ Output: Prepared dataset D' with consistent scale
 ```
 
 #### Stage 2: RBF Network Training
+
 ```
 Training objective:
   1. Task-specific loss (e.g., classification, reconstruction)
@@ -199,6 +210,7 @@ Output: Trained RBF layer with N centers
 ```
 
 #### Stage 3: Symbol Extraction
+
 ```
 For each center cᵢ:
   1. Identify which data points it represents
@@ -217,6 +229,7 @@ Output: Symbol catalog S = {(sᵢ, cᵢ, semantics, properties)}
 ```
 
 #### Stage 4: Symbol Validation & Refinement
+
 ```
 Validation metrics:
   ✓ Interpretability: Can humans understand symbols?
@@ -235,6 +248,7 @@ Refinement strategies:
 ## Method 1: Direct Center-Based Symbol Extraction
 
 ### Concept
+
 The simplest approach: **RBF centers directly become symbols**.
 
 ### Architecture Diagram
@@ -262,6 +276,7 @@ The simplest approach: **RBF centers directly become symbols**.
 ### Step-by-Step Process
 
 **Step 1: Initialize RBF Layer**
+
 ```
 Configuration:
   • Number of units N = expected number of concepts
@@ -271,6 +286,7 @@ Configuration:
 ```
 
 **Step 2: Train on Task**
+
 ```
 For classification:
   Loss = CrossEntropy(RBF_output, labels) + repulsion_loss
@@ -283,6 +299,7 @@ For contrastive:
 ```
 
 **Step 3: Extract Symbol Definitions**
+
 ```
 For each center cᵢ:
   
@@ -303,6 +320,7 @@ For each center cᵢ:
 ```
 
 **Step 4: Symbol Assignment Function**
+
 ```
 def get_symbol(x, mode='hard'):
     activations = [φᵢ(x) for all i]
@@ -356,12 +374,14 @@ def get_symbol(x, mode='hard'):
 ### Advantages & Limitations
 
 **Advantages:**
+
 - ✅ Simplest approach - minimal post-processing
 - ✅ Real-time symbol assignment
 - ✅ Centers are directly interpretable
 - ✅ Natural for classification tasks
 
 **Limitations:**
+
 - ⚠️ Limited to proto-symbols (not full compositional symbols)
 - ⚠️ Assumes Euclidean distance is meaningful
 - ⚠️ Struggles with high-dimensional, sparse data
@@ -372,6 +392,7 @@ def get_symbol(x, mode='hard'):
 ## Method 2: Activation Pattern Analysis
 
 ### Concept
+
 Extract symbols by analyzing **patterns of RBF activations** across multiple inputs.
 
 ### Architecture
@@ -406,6 +427,7 @@ Extract symbols by analyzing **patterns of RBF activations** across multiple inp
 ### Analysis Techniques
 
 #### 1. Co-activation Analysis
+
 ```
 Discover which RBF units activate together
 → Reveals compositional structure
@@ -430,6 +452,7 @@ Example:
 ```
 
 #### 2. Activation Sequence Analysis (for temporal data)
+
 ```
 For time series or sequential data:
 
@@ -451,6 +474,7 @@ Applications:
 ```
 
 #### 3. Sparse Coding Analysis
+
 ```
 Find minimal set of symbols to explain each input
 
@@ -511,6 +535,7 @@ Example:
 ## Method 3: Hierarchical Symbol Discovery
 
 ### Concept
+
 Stack multiple RBF layers to build **hierarchies of abstractions**, from low-level features to high-level concepts.
 
 ### Multi-Layer Architecture
@@ -546,6 +571,7 @@ Stack multiple RBF layers to build **hierarchies of abstractions**, from low-lev
 ### Hierarchical Training Strategy
 
 **Bottom-Up Approach**:
+
 ```
 Stage 1: Train Layer 1
   • Input: Raw data
@@ -571,6 +597,7 @@ Symbol Extraction:
 ```
 
 **Top-Down Approach** (with supervision):
+
 ```
 Stage 1: Train all layers jointly
   • Loss = Σ layer_losses + final_task_loss
@@ -669,6 +696,7 @@ Example Trace:
 ## Method 4: Multi-Dataset Symbol Grounding
 
 ### Concept
+
 Train RBF layers on **multiple related datasets** to discover symbols that generalize across domains and modalities.
 
 ### Cross-Modal Architecture
@@ -710,6 +738,7 @@ Train RBF layers on **multiple related datasets** to discover symbols that gener
 ### Training Strategy
 
 **Phase 1: Independent Pre-training**
+
 ```
 For each dataset D:
   1. Train encoder: data → embedding space
@@ -720,6 +749,7 @@ Result: Multiple symbol sets (unaligned)
 ```
 
 **Phase 2: Symbol Alignment**
+
 ```
 Use paired or weak supervision to align symbols:
 
@@ -740,6 +770,7 @@ Method C: Contrastive learning
 ```
 
 **Phase 3: Symbol Fusion & Refinement**
+
 ```
 Merge aligned symbols:
   
@@ -805,6 +836,7 @@ Prune unaligned symbols:
 ### 1. Computer Vision
 
 **Strategy: Spatial RBF Layers**
+
 ```
 Architecture:
   Image → CNN Features → RBF Layer → Symbols
@@ -826,6 +858,7 @@ Training Tips:
 ```
 
 **Example Pipeline**:
+
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │  Image Recognition Symbol Extraction                         │
@@ -848,6 +881,7 @@ Training Tips:
 ### 2. Time Series & Sequential Data
 
 **Strategy: Temporal RBF Analysis**
+
 ```
 Architecture:
   Sequence → RNN/LSTM → Hidden States → RBF Layer → Motif Symbols
@@ -869,6 +903,7 @@ Training Tips:
 ```
 
 **Example Pipeline**:
+
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │  Activity Recognition from Accelerometer                     │
@@ -895,6 +930,7 @@ Training Tips:
 ### 3. Scientific Data Analysis
 
 **Strategy: Physical Law Discovery**
+
 ```
 Architecture:
   Observations → Feature Engineering → RBF Network → Symbolic Formulas
@@ -916,6 +952,7 @@ Training Tips:
 ```
 
 **Example Pipeline**:
+
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │  Discovering Physical Relationships                          │
@@ -944,6 +981,7 @@ Training Tips:
 ### 4. Natural Language Processing
 
 **Strategy: Semantic Clustering**
+
 ```
 Architecture:
   Text → Embedding (BERT/etc.) → RBF Layer → Concept Symbols
@@ -967,6 +1005,7 @@ Training Tips:
 ### 5. Anomaly Detection
 
 **Strategy: Normal Behavior Symbols**
+
 ```
 Architecture:
   Data → Autoencoder → Bottleneck → RBF Layer → Reconstruction
@@ -987,6 +1026,7 @@ Training Tips:
 ```
 
 **Example Pipeline**:
+
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │  Network Intrusion Detection                                 │
@@ -1016,6 +1056,7 @@ Training Tips:
 ### 6. Robotics & Control
 
 **Strategy: Behavioral Primitives**
+
 ```
 Architecture:
   State → RBF Layer → Action Primitives
@@ -1551,7 +1592,6 @@ Solutions:
   ✓ Employ symbol merging post-training
 ```
 
-
 ---
 
 ## Conclusion
@@ -1559,33 +1599,33 @@ Solutions:
 ### Key Takeaways
 
 1. **RBF centers are natural proto-symbols**
-   - Localized receptive fields
-   - Distance-based semantics
-   - Interpretable representations
+    - Localized receptive fields
+    - Distance-based semantics
+    - Interpretable representations
 
 2. **Multiple extraction methods available**
-   - Direct center usage (simplest)
-   - Activation pattern analysis (richer)
-   - Hierarchical discovery (compositional)
-   - Multi-dataset grounding (robust)
+    - Direct center usage (simplest)
+    - Activation pattern analysis (richer)
+    - Hierarchical discovery (compositional)
+    - Multi-dataset grounding (robust)
 
 3. **Domain-specific strategies matter**
-   - Vision: Spatial RBF layers
-   - Time series: Temporal motif discovery
-   - Science: Function approximation & discovery
-   - NLP: Semantic clustering
+    - Vision: Spatial RBF layers
+    - Time series: Temporal motif discovery
+    - Science: Function approximation & discovery
+    - NLP: Semantic clustering
 
 4. **Bridge proto-symbols → full symbols**
-   - Add relational structure
-   - Enable composition
-   - Integrate reasoning
-   - Ground in logic
+    - Add relational structure
+    - Enable composition
+    - Integrate reasoning
+    - Ground in logic
 
 5. **Validation is crucial**
-   - Interpretability metrics
-   - Coverage analysis
-   - Downstream task performance
-   - Human evaluation
+    - Interpretability metrics
+    - Coverage analysis
+    - Downstream task performance
+    - Human evaluation
 
 ### The Promise of RBF-Based Neurosymbolic AI
 

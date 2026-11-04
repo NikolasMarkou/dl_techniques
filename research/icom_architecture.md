@@ -2,7 +2,9 @@
 
 ## Executive Overview
 
-This architecture implements a Third-Wave Cognitive AI system based on the Independent Core Observer Model (ICOM), featuring real-time incremental learning, metacognitive control, and a unified neuro-symbolic knowledge substrate. This document provides implementation-ready specifications for all components.
+This architecture implements a Third-Wave Cognitive AI system based on the Independent Core Observer Model (ICOM),
+featuring real-time incremental learning, metacognitive control, and a unified neuro-symbolic knowledge substrate. This
+document provides implementation-ready specifications for all components.
 
 ---
 
@@ -566,7 +568,8 @@ class Subgraph:
 
 ### 3.1 Salience Calculator
 
-The salience calculator determines which thoughts deserve conscious attention. It's a learned function that balances multiple competing factors.
+The salience calculator determines which thoughts deserve conscious attention. It's a learned function that balances
+multiple competing factors.
 
 ```python
 class SalienceCalculator(keras.Model):
@@ -733,7 +736,8 @@ def compute_salience_heuristic(
 
 ### 3.2 Global Workspace
 
-The Global Workspace is the "spotlight of consciousness" - it broadcasts the winning thought and assembles the relevant context.
+The Global Workspace is the "spotlight of consciousness" - it broadcasts the winning thought and assembles the relevant
+context.
 
 ```python
 class GlobalWorkspace:
@@ -2363,19 +2367,24 @@ class MediatorInterface:
 
 ### 7.1 Why Unified Graph Structure?
 
-Traditional hybrid approaches maintain separate neural and symbolic systems that communicate through fixed interfaces. This creates:
+Traditional hybrid approaches maintain separate neural and symbolic systems that communicate through fixed interfaces.
+This creates:
+
 - **Integration overhead**: Constant translation between representations
 - **Information loss**: Each translation loses fidelity
 - **Rigid boundaries**: Hard to learn which representation to use when
 
 The unified graph solves this by making BOTH representations native:
+
 - Every node has a vector (for similarity) AND symbolic properties (for logic)
 - Edges carry numeric strength (for activation spreading) AND typed relationships (for inference)
 - No translation layer - operations flow naturally across both modalities
 
 ### 7.2 Why Value-Driven Instead of Reward-Driven?
 
-Scalar rewards (RL paradigm) are too impoverished to capture cognitive nuance. The multi-dimensional value system provides:
+Scalar rewards (RL paradigm) are too impoverished to capture cognitive nuance. The multi-dimensional value system
+provides:
+
 - **Richer feedback**: "This is good but uncertain" vs just "reward = 0.7"
 - **Metacognitive signals**: Dissonance and complexity trigger self-correction
 - **Intrinsic motivation**: Novelty and agency drive exploration without external rewards
@@ -2384,11 +2393,13 @@ Scalar rewards (RL paradigm) are too impoverished to capture cognitive nuance. T
 ### 7.3 Why Global Workspace?
 
 Alternatives (distributed attention, parallel processing) struggle with:
+
 - **Coherence**: Multiple independent processes can contradict
 - **Focus**: Without serialization, cognitive resources fragment
 - **Consciousness**: The "serial bottleneck" is a feature, not a bug
 
 Global Workspace provides:
+
 - **Unified context**: One coherent "thought" at a time
 - **Broadcasting**: Selected thought influences entire system
 - **Explainability**: Clear attentional focus for human monitoring
@@ -2397,9 +2408,12 @@ Global Workspace provides:
 
 ## VIII. Conclusion
 
-This architecture represents a complete, implementation-ready specification for a Third-Wave Cognitive AI system. It synthesizes insights from cognitive science, neuroscience, and AI research into a coherent design that addresses the fundamental limitations of current approaches.
+This architecture represents a complete, implementation-ready specification for a Third-Wave Cognitive AI system. It
+synthesizes insights from cognitive science, neuroscience, and AI research into a coherent design that addresses the
+fundamental limitations of current approaches.
 
 The system achieves:
+
 - ✅ Real-time, incremental learning without catastrophic forgetting
 - ✅ Unified neuro-symbolic knowledge representation
 - ✅ Metacognitive self-awareness and strategy selection
@@ -2408,6 +2422,7 @@ The system achieves:
 - ✅ Human oversight through the Mediator Interface
 - ✅ Efficient scaling without exponential compute requirements
 
-The path forward requires careful implementation, rigorous testing, and iterative refinement. Every component has been specified with sufficient detail to begin development, while maintaining flexibility for optimization and enhancement.
+The path forward requires careful implementation, rigorous testing, and iterative refinement. Every component has been
+specified with sufficient detail to begin development, while maintaining flexibility for optimization and enhancement.
 
 This is not just an architecture - it is a blueprint for artificial minds that can truly learn, reason, and adapt.

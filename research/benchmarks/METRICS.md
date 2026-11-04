@@ -1,6 +1,8 @@
 # ML Metrics Reference
 
-Definition reference for every metric name-dropped in `EMBEDDINGS_BENCHMARKS.md`, `LLM_BENCHMARKS.md`, `VISION_BENCHMARKS.md`, and `VLM_BENCHMARKS.md`. Math is plain-text; when in doubt, check the original paper linked at the bottom.
+Definition reference for every metric name-dropped in `EMBEDDINGS_BENCHMARKS.md`, `LLM_BENCHMARKS.md`,
+`VISION_BENCHMARKS.md`, and `VLM_BENCHMARKS.md`. Math is plain-text; when in doubt, check the original paper linked at
+the bottom.
 
 > **Last reviewed**: 2026-05-13
 
@@ -10,7 +12,8 @@ Conventions used in this file:
 - `|S|` means cardinality of set `S`.
 - `1[cond]` is the indicator function (1 if `cond` else 0).
 - `TP / FP / TN / FN` are true positive / false positive / true negative / false negative counts.
-- "Higher is better" / "Lower is better" notes refer to the convention used in leaderboards, not to the sign of any loss function the metric might double as.
+- "Higher is better" / "Lower is better" notes refer to the convention used in leaderboards, not to the sign of any loss
+  function the metric might double as.
 - Where a metric exists in `dl_techniques`, the implementation path is noted under **In `dl_techniques`**.
 
 ---
@@ -19,7 +22,10 @@ Conventions used in this file:
 
 ### Accuracy
 
-**What it measures**: The fraction of examples whose predicted class equals the true class. Simple, intuitive, and the single most over-used metric in ML. Meaningful only when classes are roughly balanced and all confusions are equally costly. On imbalanced data (e.g. fraud, medical screening) accuracy is dominated by the majority class and a constant predictor can post deceptively high scores.
+**What it measures**: The fraction of examples whose predicted class equals the true class. Simple, intuitive, and the
+single most over-used metric in ML. Meaningful only when classes are roughly balanced and all confusions are equally
+costly. On imbalanced data (e.g. fraud, medical screening) accuracy is dominated by the majority class and a constant
+predictor can post deceptively high scores.
 
 **Formula**:
 
@@ -38,7 +44,9 @@ Accuracy = (TP + TN) / (TP + TN + FP + FN)
 
 ### Top-k Accuracy
 
-**What it measures**: Counts a prediction as correct if the ground-truth class appears anywhere in the model's top-`k` highest-probability predictions. Used when the label space is large (1000-class ImageNet) and "the right answer is in the shortlist" is acceptable. Top-5 has been the standard companion to top-1 on ImageNet since 2012.
+**What it measures**: Counts a prediction as correct if the ground-truth class appears anywhere in the model's top-`k`
+highest-probability predictions. Used when the label space is large (1000-class ImageNet) and "the right answer is in
+the shortlist" is acceptable. Top-5 has been the standard companion to top-1 on ImageNet since 2012.
 
 **Formula**:
 
@@ -56,7 +64,9 @@ TopK = (1/N) * sum_i 1[y_true_i in argsort(p_i)[-k:]]
 
 ### Precision
 
-**What it measures**: Of all examples the model called positive, what fraction were actually positive. Punishes false alarms. The metric you optimize when acting on a positive is expensive (sending a takedown notice, prescribing a treatment).
+**What it measures**: Of all examples the model called positive, what fraction were actually positive. Punishes false
+alarms. The metric you optimize when acting on a positive is expensive (sending a takedown notice, prescribing a
+treatment).
 
 **Formula**:
 
@@ -66,7 +76,8 @@ Precision = TP / (TP + FP)
 
 **Edge cases / pitfalls**:
 
-- Undefined when the model never predicts positive (`TP + FP = 0`); conventionally treated as 0 or as NaN depending on the library.
+- Undefined when the model never predicts positive (`TP + FP = 0`); conventionally treated as 0 or as NaN depending on
+  the library.
 - Easily gamed by predicting positive on the single most confident sample only.
 - Multiclass: see "averaging conventions" below.
 
@@ -74,7 +85,8 @@ Precision = TP / (TP + FP)
 
 ### Recall (Sensitivity, True Positive Rate)
 
-**What it measures**: Of all true positives, what fraction the model caught. Punishes misses. The metric you optimize when missing a positive is expensive (disease screening, security scanning).
+**What it measures**: Of all true positives, what fraction the model caught. Punishes misses. The metric you optimize
+when missing a positive is expensive (disease screening, security scanning).
 
 **Formula**:
 
@@ -91,7 +103,8 @@ Recall = TP / (TP + FN)
 
 ### F1
 
-**What it measures**: Harmonic mean of precision and recall. Balances false alarms against misses. Used when classes are imbalanced and you want a single number; preferred over accuracy in retrieval-style and medical-screening settings.
+**What it measures**: Harmonic mean of precision and recall. Balances false alarms against misses. Used when classes are
+imbalanced and you want a single number; preferred over accuracy in retrieval-style and medical-screening settings.
 
 **Formula**:
 
@@ -109,7 +122,8 @@ F1 = 2 * P * R / (P + R)
 
 ### F-beta
 
-**What it measures**: Generalized F-score that weights recall `beta` times as heavily as precision. `beta = 1` recovers F1; `beta = 2` (F2) emphasizes recall (useful for screening); `beta = 0.5` (F0.5) emphasizes precision.
+**What it measures**: Generalized F-score that weights recall `beta` times as heavily as precision. `beta = 1` recovers
+F1; `beta = 2` (F2) emphasizes recall (useful for screening); `beta = 0.5` (F0.5) emphasizes precision.
 
 **Formula**:
 
@@ -126,7 +140,8 @@ F_beta = (1 + beta^2) * P * R / (beta^2 * P + R)
 
 ### Specificity (True Negative Rate)
 
-**What it measures**: Of all true negatives, what fraction the model correctly rejected. Counterpart to recall on the negative class. Critical in screening contexts where false positives drive cost (e.g. confirmatory testing).
+**What it measures**: Of all true negatives, what fraction the model correctly rejected. Counterpart to recall on the
+negative class. Critical in screening contexts where false positives drive cost (e.g. confirmatory testing).
 
 **Formula**:
 
@@ -143,7 +158,8 @@ Specificity = TN / (TN + FP)
 
 ### Balanced Accuracy
 
-**What it measures**: Mean of per-class recall. Equivalent to accuracy on a class-balanced test set, even when the actual test set is imbalanced. The lazy fix for class imbalance when you cannot resample.
+**What it measures**: Mean of per-class recall. Equivalent to accuracy on a class-balanced test set, even when the
+actual test set is imbalanced. The lazy fix for class imbalance when you cannot resample.
 
 **Formula**:
 
@@ -163,7 +179,9 @@ where `K` is the number of classes and `Recall_k` is recall on class `k`.
 
 ### Matthews Correlation Coefficient (MCC)
 
-**What it measures**: A correlation coefficient between observed and predicted binary classifications. Returns +1 for perfect prediction, 0 for random, -1 for total disagreement. Considered the most robust single-number summary for binary classification because it uses all four cells of the confusion matrix and is symmetric under class swapping.
+**What it measures**: A correlation coefficient between observed and predicted binary classifications. Returns +1 for
+perfect prediction, 0 for random, -1 for total disagreement. Considered the most robust single-number summary for binary
+classification because it uses all four cells of the confusion matrix and is symmetric under class swapping.
 
 **Formula**:
 
@@ -173,14 +191,17 @@ MCC = (TP * TN - FP * FN) / sqrt((TP + FP) * (TP + FN) * (TN + FP) * (TN + FN))
 
 **Edge cases / pitfalls**:
 
-- Denominator is 0 if any single row or column of the confusion matrix sums to 0 (e.g., the model never predicts positive, or there are no negatives in the eval set). Conventionally set to 0 in that case.
+- Denominator is 0 if any single row or column of the confusion matrix sums to 0 (e.g., the model never predicts
+  positive, or there are no negatives in the eval set). Conventionally set to 0 in that case.
 - Multiclass MCC is defined (Gorodkin 2004) but rarely reported; macro-F1 dominates instead.
 
-**Typical reporting**: Decimal in [-1, 1]. Higher is better. Standard on imbalanced binary benchmarks (e.g. CoLA in GLUE).
+**Typical reporting**: Decimal in [-1, 1]. Higher is better. Standard on imbalanced binary benchmarks (e.g. CoLA in
+GLUE).
 
 ### Cohen's kappa
 
-**What it measures**: Agreement between two annotators (or model vs ground truth) corrected for agreement expected by chance. Useful when classes are imbalanced because the "by chance" baseline accounts for the marginal class frequencies.
+**What it measures**: Agreement between two annotators (or model vs ground truth) corrected for agreement expected by
+chance. Useful when classes are imbalanced because the "by chance" baseline accounts for the marginal class frequencies.
 
 **Formula**:
 
@@ -188,18 +209,21 @@ MCC = (TP * TN - FP * FN) / sqrt((TP + FP) * (TP + FN) * (TN + FP) * (TN + FN))
 kappa = (p_o - p_e) / (1 - p_e)
 ```
 
-where `p_o` is observed agreement (= accuracy) and `p_e` is expected agreement under independence of the two label marginals.
+where `p_o` is observed agreement (= accuracy) and `p_e` is expected agreement under independence of the two label
+marginals.
 
 **Edge cases / pitfalls**:
 
 - Sensitive to the prevalence and bias of the two raters; the so-called "kappa paradox".
 - Undefined when `p_e = 1` (one rater always predicts the same class with probability 1).
 
-**Typical reporting**: Decimal in [-1, 1]. Higher is better. Common in medical annotation, NLP inter-annotator agreement.
+**Typical reporting**: Decimal in [-1, 1]. Higher is better. Common in medical annotation, NLP inter-annotator
+agreement.
 
 ### Quadratic-weighted kappa
 
-**What it measures**: Cohen's kappa with a quadratic penalty on the distance between predicted and true ordinal labels. Designed for ordinal-regression-style classification (e.g. diabetic-retinopathy grades 0-4, essay scoring).
+**What it measures**: Cohen's kappa with a quadratic penalty on the distance between predicted and true ordinal labels.
+Designed for ordinal-regression-style classification (e.g. diabetic-retinopathy grades 0-4, essay scoring).
 
 **Formula**:
 
@@ -209,7 +233,8 @@ QWKappa = 1 - sum_ij w_ij * O_ij / sum_ij w_ij * E_ij
 w_ij = (i - j)^2 / (K - 1)^2
 ```
 
-where `O` is the observed and `E` the expected confusion matrix, `K` is the number of ordinal levels, and `w_ij` penalizes farther-apart confusions more.
+where `O` is the observed and `E` the expected confusion matrix, `K` is the number of ordinal levels, and `w_ij`
+penalizes farther-apart confusions more.
 
 **Edge cases / pitfalls**:
 
@@ -220,7 +245,10 @@ where `O` is the observed and `E` the expected confusion matrix, `K` is the numb
 
 ### ROC-AUC
 
-**What it measures**: Area under the Receiver Operating Characteristic curve, which plots True Positive Rate (recall) against False Positive Rate (`1 - specificity`) as the decision threshold sweeps from `+inf` to `-inf`. Probabilistic interpretation: ROC-AUC is the probability that a randomly chosen positive scores higher than a randomly chosen negative.
+**What it measures**: Area under the Receiver Operating Characteristic curve, which plots True Positive Rate (recall)
+against False Positive Rate (`1 - specificity`) as the decision threshold sweeps from `+inf` to `-inf`. Probabilistic
+interpretation: ROC-AUC is the probability that a randomly chosen positive scores higher than a randomly chosen
+negative.
 
 **Formula**:
 
@@ -231,15 +259,18 @@ ROC-AUC = P(score(x_pos) > score(x_neg))
 
 **Edge cases / pitfalls**:
 
-- Insensitive to class imbalance, which is sometimes good (compare models across base rates) and sometimes bad (a heavily imbalanced precision-recall regime can look healthy in ROC space).
+- Insensitive to class imbalance, which is sometimes good (compare models across base rates) and sometimes bad (a
+  heavily imbalanced precision-recall regime can look healthy in ROC space).
 - Undefined when there is only one class in `y_true`.
 - Multiclass: typically reported one-vs-rest (OvR) or one-vs-one (OvO), then macro- or weighted-averaged.
 
-**Typical reporting**: Decimal in [0, 1] (random = 0.5). Higher is better. Default eval for binary classification with continuous scores.
+**Typical reporting**: Decimal in [0, 1] (random = 0.5). Higher is better. Default eval for binary classification with
+continuous scores.
 
 ### PR-AUC / Average Precision (binary)
 
-**What it measures**: Area under the Precision-Recall curve. More sensitive than ROC-AUC under severe class imbalance because both axes use only positives. Approximates the expected precision over a range of recall levels.
+**What it measures**: Area under the Precision-Recall curve. More sensitive than ROC-AUC under severe class imbalance
+because both axes use only positives. Approximates the expected precision over a range of recall levels.
 
 **Formula** (binary, sklearn convention):
 
@@ -255,11 +286,13 @@ where `(P_n, R_n)` are the precision and recall at the n-th threshold, sorted by
 - Undefined when no positives exist.
 - Multiclass / multilabel: micro, macro, samples, weighted variants exist; pick deliberately.
 
-**Typical reporting**: Decimal. Higher is better. Standard on imbalanced binary tasks and detection (see Object Detection section).
+**Typical reporting**: Decimal. Higher is better. Standard on imbalanced binary tasks and detection (see Object
+Detection section).
 
 ### Log Loss / Cross-Entropy
 
-**What it measures**: Negative log-likelihood of the true labels under the model's probability distribution. Strictly proper scoring rule: minimized only by reporting the true posterior. Doubles as the training loss for most classifiers.
+**What it measures**: Negative log-likelihood of the true labels under the model's probability distribution. Strictly
+proper scoring rule: minimized only by reporting the true posterior. Doubles as the training loss for most classifiers.
 
 **Formula** (multiclass):
 
@@ -271,14 +304,18 @@ where `y_i_k` is the one-hot true label and `p_i_k` is the predicted probability
 
 **Edge cases / pitfalls**:
 
-- `log(0)` is `-inf`; libraries clip predictions to `[eps, 1 - eps]` (sklearn default `eps = 1e-15`). Different clipping changes the number.
+- `log(0)` is `-inf`; libraries clip predictions to `[eps, 1 - eps]` (sklearn default `eps = 1e-15`). Different clipping
+  changes the number.
 - Highly sensitive to overconfident wrong predictions; a single confident mistake dominates the average.
 
-**Typical reporting**: Lower is better. Reported as is, no percentage. Used as the primary leaderboard metric on Kaggle classification with submission probabilities.
+**Typical reporting**: Lower is better. Reported as is, no percentage. Used as the primary leaderboard metric on Kaggle
+classification with submission probabilities.
 
 ### Brier Score
 
-**What it measures**: Mean squared error between predicted probabilities and one-hot labels. Strictly proper scoring rule. Less aggressive than log loss in penalizing overconfidence and bounded in `[0, 1]` for binary, so easier to interpret. Frequently used to evaluate forecasts of probabilities (weather, medicine).
+**What it measures**: Mean squared error between predicted probabilities and one-hot labels. Strictly proper scoring
+rule. Less aggressive than log loss in penalizing overconfidence and bounded in `[0, 1]` for binary, so easier to
+interpret. Frequently used to evaluate forecasts of probabilities (weather, medicine).
 
 **Formula** (binary):
 
@@ -297,7 +334,9 @@ Multiclass: sum the squared error over all class indicators per example.
 
 ### Confusion Matrix
 
-**What it measures**: A `K x K` table where entry `(i, j)` is the count of examples whose true class is `i` and predicted class is `j`. Diagonal entries are correct predictions; off-diagonal entries identify systematic confusions (e.g. cats predicted as dogs). All scalar classification metrics are derived from it.
+**What it measures**: A `K x K` table where entry `(i, j)` is the count of examples whose true class is `i` and
+predicted class is `j`. Diagonal entries are correct predictions; off-diagonal entries identify systematic confusions
+(e.g. cats predicted as dogs). All scalar classification metrics are derived from it.
 
 **Formula**:
 
@@ -316,12 +355,16 @@ C[i, j] = sum_n 1[y_true_n == i and y_pred_n == j]
 
 Crucial and frequently misreported.
 
-- **Micro**: Pool TP/FP/FN globally across classes, then compute the metric once. For multiclass single-label, micro-precision = micro-recall = micro-F1 = accuracy.
-- **Macro**: Compute the metric per class, then unweighted-mean. Each class contributes equally regardless of support. Penalizes models that ignore rare classes.
-- **Weighted**: Macro but weighted by class support (number of true instances). A compromise between micro and macro; same support-weighting as micro, but per-class computation can still surface rare-class issues.
+- **Micro**: Pool TP/FP/FN globally across classes, then compute the metric once. For multiclass single-label,
+  micro-precision = micro-recall = micro-F1 = accuracy.
+- **Macro**: Compute the metric per class, then unweighted-mean. Each class contributes equally regardless of support.
+  Penalizes models that ignore rare classes.
+- **Weighted**: Macro but weighted by class support (number of true instances). A compromise between micro and macro;
+  same support-weighting as micro, but per-class computation can still surface rare-class issues.
 - **Samples**: For multilabel only. Compute the metric per example over the label set, then mean over examples.
 
-When `dl_techniques` references "F1 macro" or "F1 weighted" in a leaderboard table, this is the convention being invoked.
+When `dl_techniques` references "F1 macro" or "F1 weighted" in a leaderboard table, this is the convention being
+invoked.
 
 ---
 
@@ -329,7 +372,8 @@ When `dl_techniques` references "F1 macro" or "F1 weighted" in a leaderboard tab
 
 ### IoU (Intersection over Union, Jaccard)
 
-**What it measures**: Overlap between predicted and ground-truth bounding boxes (or masks). The atomic matching criterion behind every detection metric. Independent of object size.
+**What it measures**: Overlap between predicted and ground-truth bounding boxes (or masks). The atomic matching
+criterion behind every detection metric. Independent of object size.
 
 **Formula**:
 
@@ -339,14 +383,18 @@ IoU(A, B) = |A intersect B| / |A union B|
 
 **Edge cases / pitfalls**:
 
-- IoU is 0 whenever boxes do not overlap and provides no gradient signal in that regime - which is why GIoU/DIoU/CIoU were invented.
+- IoU is 0 whenever boxes do not overlap and provides no gradient signal in that regime - which is why GIoU/DIoU/CIoU
+  were invented.
 - For rotated boxes IoU is more expensive to compute; libraries vary.
 
-**Typical reporting**: Decimal in [0, 1]. Higher is better. Reported as a per-image diagnostic, or as the threshold underlying mAP.
+**Typical reporting**: Decimal in [0, 1]. Higher is better. Reported as a per-image diagnostic, or as the threshold
+underlying mAP.
 
 ### Average Precision (per class, detection sense)
 
-**What it measures**: Area under the per-class precision-recall curve, where a detection is a true positive only if its IoU with a ground-truth box of the same class exceeds a threshold. Distinct from the binary-classification AP (above) because of the IoU matching step. Each class has its own AP; mAP aggregates across classes.
+**What it measures**: Area under the per-class precision-recall curve, where a detection is a true positive only if its
+IoU with a ground-truth box of the same class exceeds a threshold. Distinct from the binary-classification AP (above)
+because of the IoU matching step. Each class has its own AP; mAP aggregates across classes.
 
 **Formula** (COCO 101-point interpolation):
 
@@ -359,14 +407,16 @@ PASCAL VOC 2007 used 11-point interpolation; VOC 2010+ used the all-points (area
 
 **Edge cases / pitfalls**:
 
-- Greedy matching: detections are sorted by confidence, then matched to the highest-IoU unused ground-truth box above the threshold; subsequent matches to the same GT are false positives.
+- Greedy matching: detections are sorted by confidence, then matched to the highest-IoU unused ground-truth box above
+  the threshold; subsequent matches to the same GT are false positives.
 - Crowd / "iscrowd" annotations in COCO are excluded from FP counting.
 
 **Typical reporting**: Decimal in [0, 100] (COCO multiplies by 100). Higher is better.
 
 ### mAP@0.5, mAP@0.75
 
-**What it measures**: Mean (over classes) of AP computed at a single IoU threshold (0.5 = "PASCAL", 0.75 = "strict"). The 0.5 number is permissive and saturates on modern detectors; 0.75 is the discriminating midpoint.
+**What it measures**: Mean (over classes) of AP computed at a single IoU threshold (0.5 = "PASCAL", 0.75 = "strict").
+The 0.5 number is permissive and saturates on modern detectors; 0.75 is the discriminating midpoint.
 
 **Formula**:
 
@@ -383,7 +433,8 @@ mAP@T = (1 / K) * sum_k AP_k(IoU >= T)
 
 ### mAP@[0.5:0.05:0.95] (COCO "AP")
 
-**What it measures**: The COCO primary metric. Mean of mAP computed at ten IoU thresholds from 0.5 to 0.95 in steps of 0.05. Rewards detectors with tight box localization.
+**What it measures**: The COCO primary metric. Mean of mAP computed at ten IoU thresholds from 0.5 to 0.95 in steps of
+0.05. Rewards detectors with tight box localization.
 
 **Formula**:
 
@@ -400,7 +451,8 @@ AP_coco = (1/10) * sum_{T in {0.50, 0.55, ..., 0.95}} mAP@T
 
 ### AP_small, AP_medium, AP_large
 
-**What it measures**: COCO `AP` restricted to objects whose area is `< 32^2`, in `[32^2, 96^2]`, or `> 96^2` pixels respectively. Diagnoses scale-specific failure modes.
+**What it measures**: COCO `AP` restricted to objects whose area is `< 32^2`, in `[32^2, 96^2]`, or `> 96^2` pixels
+respectively. Diagnoses scale-specific failure modes.
 
 **Formula**: Same as `AP_coco`, restricted to the relevant area bucket.
 
@@ -413,7 +465,8 @@ AP_coco = (1/10) * sum_{T in {0.50, 0.55, ..., 0.95}} mAP@T
 
 ### AR@1, AR@10, AR@100
 
-**What it measures**: Average Recall when at most 1, 10, or 100 detections per image are kept. Probes the recall ceiling and the quality of low-confidence proposals (matters for downstream re-ranking, e.g. two-stage detectors and tracking).
+**What it measures**: Average Recall when at most 1, 10, or 100 detections per image are kept. Probes the recall ceiling
+and the quality of low-confidence proposals (matters for downstream re-ranking, e.g. two-stage detectors and tracking).
 
 **Formula**:
 
@@ -432,7 +485,8 @@ AR@k = 2 * integral_{T = 0.5 to 1.0} recall(T, max_det = k) dT
 
 ### GIoU (Generalized IoU)
 
-**What it measures**: Extension of IoU that remains informative when the two boxes do not overlap. Used primarily as a loss; can also be reported as a quality metric. Penalizes empty space between boxes.
+**What it measures**: Extension of IoU that remains informative when the two boxes do not overlap. Used primarily as a
+loss; can also be reported as a quality metric. Penalizes empty space between boxes.
 
 **Formula**:
 
@@ -451,7 +505,8 @@ where `C` is the smallest axis-aligned enclosing box of `A` and `B`.
 
 ### DIoU (Distance-IoU)
 
-**What it measures**: IoU minus a normalized distance between box centers. Converges faster than GIoU during training because it adds a direct gradient on center-point displacement even when boxes overlap.
+**What it measures**: IoU minus a normalized distance between box centers. Converges faster than GIoU during training
+because it adds a direct gradient on center-point displacement even when boxes overlap.
 
 **Formula**:
 
@@ -459,7 +514,8 @@ where `C` is the smallest axis-aligned enclosing box of `A` and `B`.
 DIoU = IoU - rho^2(b_pred, b_gt) / c^2
 ```
 
-where `rho` is the Euclidean distance between box centers and `c` is the diagonal length of the smallest enclosing box `C`.
+where `rho` is the Euclidean distance between box centers and `c` is the diagonal length of the smallest enclosing box
+`C`.
 
 **Edge cases / pitfalls**:
 
@@ -469,7 +525,8 @@ where `rho` is the Euclidean distance between box centers and `c` is the diagona
 
 ### CIoU (Complete IoU)
 
-**What it measures**: DIoU plus an aspect-ratio consistency penalty. Default regression loss in YOLOv5/v7/v8/v12 and several recent two-stage detectors.
+**What it measures**: DIoU plus an aspect-ratio consistency penalty. Default regression loss in YOLOv5/v7/v8/v12 and
+several recent two-stage detectors.
 
 **Formula**:
 
@@ -488,7 +545,11 @@ alpha = v / ((1 - IoU) + v)
 
 ### FPS / Latency / Params (co-reported)
 
-Detection leaderboards almost always report runtime stats alongside mAP. **FPS** is frames-per-second on a specified device (TRT-FP16 on A100 is the modern default); **Latency** is per-image inference time in ms (`Latency_ms = 1000 / FPS` when batch=1); **Params** is the number of model parameters in millions (not counting EMA copies or auxiliary heads). All three are sensitive to: input resolution, batch size, half-precision vs full-precision, post-processing (NMS) inclusion, and device generation. Always cite the exact configuration.
+Detection leaderboards almost always report runtime stats alongside mAP. **FPS** is frames-per-second on a specified
+device (TRT-FP16 on A100 is the modern default); **Latency** is per-image inference time in ms
+(`Latency_ms = 1000 / FPS` when batch=1); **Params** is the number of model parameters in millions (not counting EMA
+copies or auxiliary heads). All three are sensitive to: input resolution, batch size, half-precision vs full-precision,
+post-processing (NMS) inclusion, and device generation. Always cite the exact configuration.
 
 ---
 
@@ -496,7 +557,8 @@ Detection leaderboards almost always report runtime stats alongside mAP. **FPS**
 
 ### Pixel Accuracy
 
-**What it measures**: Fraction of pixels whose predicted class equals their true class. The segmentation analogue of classification accuracy and shares its weaknesses on imbalanced classes (e.g. road dominates Cityscapes).
+**What it measures**: Fraction of pixels whose predicted class equals their true class. The segmentation analogue of
+classification accuracy and shares its weaknesses on imbalanced classes (e.g. road dominates Cityscapes).
 
 **Formula**:
 
@@ -541,13 +603,15 @@ IoU_i = n_ii / (t_i + sum_j n_ji - n_ii)
 
 **Edge cases / pitfalls**:
 
-- Undefined when class `i` is absent from both prediction and ground truth (denominator = 0); usually skipped in the average.
+- Undefined when class `i` is absent from both prediction and ground truth (denominator = 0); usually skipped in the
+  average.
 
 **Typical reporting**: Decimal or percentage. Higher is better. Per-class column in segmentation papers.
 
 ### mean IoU (mIoU)
 
-**What it measures**: Unweighted mean of per-class IoU. The primary metric on most semantic-segmentation benchmarks (Cityscapes, ADE20K, PASCAL VOC, PASCAL Context).
+**What it measures**: Unweighted mean of per-class IoU. The primary metric on most semantic-segmentation benchmarks
+(Cityscapes, ADE20K, PASCAL VOC, PASCAL Context).
 
 **Formula**:
 
@@ -564,7 +628,8 @@ mIoU = (1 / K) * sum_i IoU_i
 
 ### Frequency-Weighted IoU
 
-**What it measures**: Per-class IoU weighted by the class's pixel frequency. A middle ground between Pixel Accuracy (frequency-dominated) and mIoU (class-uniform).
+**What it measures**: Per-class IoU weighted by the class's pixel frequency. A middle ground between Pixel Accuracy
+(frequency-dominated) and mIoU (class-uniform).
 
 **Formula**:
 
@@ -580,7 +645,9 @@ FW-IoU = (1 / sum_k t_k) * sum_i t_i * IoU_i
 
 ### Dice / F1 (pixel sense)
 
-**What it measures**: Twice the overlap divided by the sum of cardinalities. Equivalent to F1 at the pixel level. Differs from IoU monotonically (`Dice = 2 * IoU / (1 + IoU)`) but the loss-gradient behaviour differs significantly. Standard in medical imaging.
+**What it measures**: Twice the overlap divided by the sum of cardinalities. Equivalent to F1 at the pixel level.
+Differs from IoU monotonically (`Dice = 2 * IoU / (1 + IoU)`) but the loss-gradient behaviour differs significantly.
+Standard in medical imaging.
 
 **Formula**:
 
@@ -598,7 +665,8 @@ Dice = 2 * |A intersect B| / (|A| + |B|)
 
 ### Boundary F1 / BF score
 
-**What it measures**: F1 score on the boundary pixels of the mask, after a distance tolerance is applied. Rewards models that produce crisp object boundaries rather than blobby silhouettes.
+**What it measures**: F1 score on the boundary pixels of the mask, after a distance tolerance is applied. Rewards models
+that produce crisp object boundaries rather than blobby silhouettes.
 
 **Formula**:
 
@@ -609,7 +677,8 @@ P_theta = (1 / |B_pred|) * sum_{x in B_pred} 1[exists y in B_gt with d(x, y) < t
 R_theta = symmetric
 ```
 
-where `B_pred` and `B_gt` are the predicted and ground-truth boundary pixel sets and `theta` is the distance tolerance in pixels.
+where `B_pred` and `B_gt` are the predicted and ground-truth boundary pixel sets and `theta` is the distance tolerance
+in pixels.
 
 **Edge cases / pitfalls**:
 
@@ -624,7 +693,8 @@ where `B_pred` and `B_gt` are the predicted and ground-truth boundary pixel sets
 
 ### Mask AP
 
-**What it measures**: COCO `AP` (mean AP at IoU `[0.5:0.05:0.95]`) where the matching IoU is computed between predicted and ground-truth instance masks rather than bounding boxes. Sometimes called "segm AP" in the COCO API.
+**What it measures**: COCO `AP` (mean AP at IoU `[0.5:0.05:0.95]`) where the matching IoU is computed between predicted
+and ground-truth instance masks rather than bounding boxes. Sometimes called "segm AP" in the COCO API.
 
 **Formula**: Identical to detection `AP` (section 2) with the IoU computed pixelwise.
 
@@ -637,7 +707,9 @@ where `B_pred` and `B_gt` are the predicted and ground-truth boundary pixel sets
 
 ### Panoptic Quality (PQ)
 
-**What it measures**: Single metric for the panoptic task (every pixel gets a class + an instance id). Decomposes into segmentation quality (how well matched segments overlap) times recognition quality (how often segments are detected correctly).
+**What it measures**: Single metric for the panoptic task (every pixel gets a class + an instance id). Decomposes into
+segmentation quality (how well matched segments overlap) times recognition quality (how often segments are detected
+correctly).
 
 **Formula**:
 
@@ -646,7 +718,8 @@ PQ = SQ * RQ
   = (sum_{(p, g) in TP} IoU(p, g)) / (|TP| + 0.5 * |FP| + 0.5 * |FN|)
 ```
 
-where a predicted segment `p` and ground-truth segment `g` of the same class are matched if `IoU(p, g) > 0.5`. This threshold guarantees at most one match per GT.
+where a predicted segment `p` and ground-truth segment `g` of the same class are matched if `IoU(p, g) > 0.5`. This
+threshold guarantees at most one match per GT.
 
 **Edge cases / pitfalls**:
 
@@ -674,7 +747,8 @@ SQ = (sum_{(p, g) in TP} IoU(p, g)) / |TP|
 
 ### Recognition Quality (RQ)
 
-**What it measures**: F1 score over segments (matched / unmatched). Captures detection quality independent of localization tightness.
+**What it measures**: F1 score over segments (matched / unmatched). Captures detection quality independent of
+localization tightness.
 
 **Formula**:
 
@@ -692,7 +766,8 @@ RQ = |TP| / (|TP| + 0.5 * |FP| + 0.5 * |FN|)
 
 ## 5. Depth Estimation
 
-Following the protocol of Eigen et al., 2014 (arXiv:1406.2283). All metrics are computed only over pixels with valid ground-truth depth.
+Following the protocol of Eigen et al., 2014 (arXiv:1406.2283). All metrics are computed only over pixels with valid
+ground-truth depth.
 
 ### AbsRel (Absolute Relative Error)
 
@@ -743,7 +818,8 @@ RMSE = sqrt((1 / N) * sum_i (d_pred_i - d_gt_i)^2)
 
 **Edge cases / pitfalls**:
 
-- Reported in meters (KITTI) or in the dataset's metric unit. Dataset cap matters: KITTI evaluates to 80 m, NYUv2 to 10 m.
+- Reported in meters (KITTI) or in the dataset's metric unit. Dataset cap matters: KITTI evaluates to 80 m, NYUv2 to 10
+  m.
 
 **Typical reporting**: Decimal in meters. Lower is better.
 
@@ -769,7 +845,8 @@ RMSE_log = sqrt((1 / N) * sum_i (log(d_pred_i) - log(d_gt_i))^2)
 
 ### log10 error
 
-**What it measures**: Mean absolute log10 difference between predicted and ground-truth depth. Used in NYUv2 evaluations.
+**What it measures**: Mean absolute log10 difference between predicted and ground-truth depth. Used in NYUv2
+evaluations.
 
 **Formula**:
 
@@ -783,7 +860,8 @@ log10 = (1 / N) * sum_i |log10(d_pred_i) - log10(d_gt_i)|
 
 ### delta_1, delta_2, delta_3 (Threshold accuracies)
 
-**What it measures**: Fraction of pixels whose ratio `max(d_pred / d_gt, d_gt / d_pred)` is below a threshold (1.25, 1.25^2 = 1.5625, 1.25^3 = 1.953125). Coarse, intuitive notion of "how often the depth is within X percent of truth".
+**What it measures**: Fraction of pixels whose ratio `max(d_pred / d_gt, d_gt / d_pred)` is below a threshold (1.25,
+1.25^2 = 1.5625, 1.25^3 = 1.953125). Coarse, intuitive notion of "how often the depth is within X percent of truth".
 
 **Formula**:
 
@@ -802,7 +880,9 @@ delta_n = (1 / N) * sum_i 1[max(d_pred_i / d_gt_i, d_gt_i / d_pred_i) < 1.25^n]
 
 ### Scale-Invariant Logarithmic Error (SILog, Eigen)
 
-**What it measures**: Loss / metric that is invariant to a global multiplicative scale of the prediction. Lets you compare relative-depth predictors against scale-aware ones on a level playing field. The official KITTI online server metric.
+**What it measures**: Loss / metric that is invariant to a global multiplicative scale of the prediction. Lets you
+compare relative-depth predictors against scale-aware ones on a level playing field. The official KITTI online server
+metric.
 
 **Formula**:
 
@@ -811,7 +891,8 @@ SILog(d_pred, d_gt) = (1 / n) * sum_i e_i^2 - (lambda / n^2) * (sum_i e_i)^2
 e_i = log(d_pred_i) - log(d_gt_i)
 ```
 
-`lambda = 1` recovers exact scale invariance; `lambda = 0` is plain L2 in log space. KITTI evaluation reports it multiplied by 100 with `lambda = 1`.
+`lambda = 1` recovers exact scale invariance; `lambda = 0` is plain L2 in log space. KITTI evaluation reports it
+multiplied by 100 with `lambda = 1`.
 
 **Edge cases / pitfalls**:
 
@@ -822,7 +903,8 @@ e_i = log(d_pred_i) - log(d_gt_i)
 
 ### iRMSE (Inverse RMSE)
 
-**What it measures**: RMSE on inverse depth (`1 / d`) in `1 / km` units. Standard on KITTI's depth-completion track because LiDAR is sparser at long range and inverse depth equalizes the cost.
+**What it measures**: RMSE on inverse depth (`1 / d`) in `1 / km` units. Standard on KITTI's depth-completion track
+because LiDAR is sparser at long range and inverse depth equalizes the cost.
 
 **Formula**:
 
@@ -842,7 +924,8 @@ iRMSE = sqrt((1 / N) * sum_i (1 / d_pred_i - 1 / d_gt_i)^2)
 
 ### MAE (Mean Absolute Error)
 
-**What it measures**: Average absolute deviation between predicted and true value. Robust to outliers compared to MSE. Equivalent to L1 loss.
+**What it measures**: Average absolute deviation between predicted and true value. Robust to outliers compared to MSE.
+Equivalent to L1 loss.
 
 **Formula**:
 
@@ -892,7 +975,8 @@ RMSE = sqrt(MSE) = sqrt((1 / N) * sum_i (y_pred_i - y_true_i)^2)
 
 ### MAPE (Mean Absolute Percentage Error)
 
-**What it measures**: Average relative absolute error, expressed as a percentage. Intuitive but pathological when targets are near zero.
+**What it measures**: Average relative absolute error, expressed as a percentage. Intuitive but pathological when
+targets are near zero.
 
 **Formula**:
 
@@ -905,7 +989,8 @@ MAPE = (100 / N) * sum_i |y_pred_i - y_true_i| / |y_true_i|
 - Undefined when any `y_true_i = 0`.
 - Asymmetric: penalizes over-prediction more than under-prediction.
 
-**Typical reporting**: Percentage. Lower is better. Common in business forecasting; discouraged in statistics literature.
+**Typical reporting**: Percentage. Lower is better. Common in business forecasting; discouraged in statistics
+literature.
 
 ### sMAPE (Symmetric MAPE)
 
@@ -919,14 +1004,16 @@ sMAPE = (100 / N) * sum_i 2 * |y_pred_i - y_true_i| / (|y_pred_i| + |y_true_i|)
 
 **Edge cases / pitfalls**:
 
-- Multiple incompatible definitions in the wild; M4 (Makridakis) uses the one above; some use `(|y_pred + y_true|) / 2` denominator.
+- Multiple incompatible definitions in the wild; M4 (Makridakis) uses the one above; some use `(|y_pred + y_true|) / 2`
+  denominator.
 - Undefined when `y_pred = y_true = 0`.
 
 **Typical reporting**: Percentage. Lower is better. Standard on M4 / M5.
 
 ### R^2 (Coefficient of Determination)
 
-**What it measures**: Fraction of variance in the target explained by the model. 1.0 = perfect, 0.0 = predicting the mean, negative = worse than predicting the mean.
+**What it measures**: Fraction of variance in the target explained by the model. 1.0 = perfect, 0.0 = predicting the
+mean, negative = worse than predicting the mean.
 
 **Formula**:
 
@@ -945,7 +1032,8 @@ where `y_bar` is the mean of the true values.
 
 ### Adjusted R^2
 
-**What it measures**: R^2 penalized for the number of features. Adjusts for the fact that adding features cannot decrease R^2.
+**What it measures**: R^2 penalized for the number of features. Adjusts for the fact that adding features cannot
+decrease R^2.
 
 **Formula**:
 
@@ -981,7 +1069,9 @@ ExplVar = 1 - Var(y_true - y_pred) / Var(y_true)
 
 ### Huber Loss
 
-**What it measures**: Quadratic for small residuals and linear for large ones, controlled by `delta`. Robust to outliers while remaining differentiable. Doubles as a regression loss (the default in many RL algorithms and some object-detection regressors).
+**What it measures**: Quadratic for small residuals and linear for large ones, controlled by `delta`. Robust to outliers
+while remaining differentiable. Doubles as a regression loss (the default in many RL algorithms and some
+object-detection regressors).
 
 **Formula**:
 
@@ -1000,7 +1090,8 @@ r = y_pred - y_true
 
 ### Quantile / Pinball Loss
 
-**What it measures**: Asymmetric loss that elicits the conditional quantile at level `tau`. The proper scoring rule for quantile regression and probabilistic forecasting (cf. Time Series section).
+**What it measures**: Asymmetric loss that elicits the conditional quantile at level `tau`. The proper scoring rule for
+quantile regression and probabilistic forecasting (cf. Time Series section).
 
 **Formula**:
 
@@ -1021,7 +1112,8 @@ PinballLoss_tau(y, q) = tau * max(y - q, 0) + (1 - tau) * max(q - y, 0)
 
 ### MASE (Mean Absolute Scaled Error)
 
-**What it measures**: Forecast MAE divided by the in-sample MAE of a naive seasonal forecast. Scale-free, well-defined for intermittent demand, comparable across series. Hyndman & Koehler 2006.
+**What it measures**: Forecast MAE divided by the in-sample MAE of a naive seasonal forecast. Scale-free, well-defined
+for intermittent demand, comparable across series. Hyndman & Koehler 2006.
 
 **Formula** (seasonal, period `m`):
 
@@ -1029,7 +1121,8 @@ PinballLoss_tau(y, q) = tau * max(y - q, 0) + (1 - tau) * max(q - y, 0)
 MASE = (1 / J) * sum_j |e_j| / ((1 / (T - m)) * sum_{t = m+1}^{T} |Y_t - Y_{t-m}|)
 ```
 
-where `e_j` is the out-of-sample forecast error and the denominator is the in-sample MAE of the seasonal-naive forecast `Y_t-hat = Y_{t-m}`. For non-seasonal data set `m = 1` (random-walk denominator).
+where `e_j` is the out-of-sample forecast error and the denominator is the in-sample MAE of the seasonal-naive forecast
+`Y_t-hat = Y_{t-m}`. For non-seasonal data set `m = 1` (random-walk denominator).
 
 **Edge cases / pitfalls**:
 
@@ -1040,7 +1133,8 @@ where `e_j` is the out-of-sample forecast error and the denominator is the in-sa
 
 ### RMSSE (Root Mean Squared Scaled Error)
 
-**What it measures**: RMSE version of MASE - forecast RMSE divided by in-sample RMSE of the naive forecast. Primary metric in M5.
+**What it measures**: RMSE version of MASE - forecast RMSE divided by in-sample RMSE of the naive forecast. Primary
+metric in M5.
 
 **Formula**:
 
@@ -1056,7 +1150,8 @@ RMSSE = sqrt((1 / J) * sum_j e_j^2 / ((1 / (T - 1)) * sum_{t = 2}^{T} (Y_t - Y_{
 
 ### OWA (M4 Overall Weighted Average)
 
-**What it measures**: M4-specific aggregation: arithmetic mean of (forecast sMAPE / naive-2 sMAPE) and (forecast MASE / naive-2 MASE).
+**What it measures**: M4-specific aggregation: arithmetic mean of (forecast sMAPE / naive-2 sMAPE) and (forecast MASE /
+naive-2 MASE).
 
 **Formula**:
 
@@ -1073,7 +1168,8 @@ OWA = 0.5 * (sMAPE / sMAPE_naive2 + MASE / MASE_naive2)
 
 ### WAPE (Weighted Absolute Percentage Error)
 
-**What it measures**: MAE divided by the total absolute target value. Avoids MAPE's blow-up at zeros by aggregating the denominator.
+**What it measures**: MAE divided by the total absolute target value. Avoids MAPE's blow-up at zeros by aggregating the
+denominator.
 
 **Formula**:
 
@@ -1090,7 +1186,8 @@ WAPE = sum_i |y_pred_i - y_true_i| / sum_i |y_true_i|
 
 ### CRPS (Continuous Ranked Probability Score)
 
-**What it measures**: Strictly proper scoring rule for probabilistic forecasts of a univariate continuous variable. Generalizes MAE: CRPS of a deterministic forecast (Dirac mass at the prediction) equals the absolute error.
+**What it measures**: Strictly proper scoring rule for probabilistic forecasts of a univariate continuous variable.
+Generalizes MAE: CRPS of a deterministic forecast (Dirac mass at the prediction) equals the absolute error.
 
 **Formula** (integral form):
 
@@ -1111,11 +1208,14 @@ where `X, X'` are independent samples from `F`.
 - Requires the predicted CDF (or many samples) - point forecasts cannot be scored.
 - For Gaussian `F = N(mu, sigma^2)` a closed form exists in terms of the standard normal pdf/cdf.
 
-**Typical reporting**: Real number in target units. Lower is better. Standard on weather and probabilistic forecasting (M5 Uncertainty, GEFCom).
+**Typical reporting**: Real number in target units. Lower is better. Standard on weather and probabilistic forecasting
+(M5 Uncertainty, GEFCom).
 
 ### Pinball Loss (cross-link)
 
-See section 6 (Regression). In time series the average over multiple quantile levels is sometimes called WQL (Weighted Quantile Loss) and is the de-facto standard for probabilistic forecast evaluation in Amazon's GluonTS and several recent foundation-model TS papers.
+See section 6 (Regression). In time series the average over multiple quantile levels is sometimes called WQL (Weighted
+Quantile Loss) and is the de-facto standard for probabilistic forecast evaluation in Amazon's GluonTS and several recent
+foundation-model TS papers.
 
 ---
 
@@ -1123,7 +1223,8 @@ See section 6 (Regression). In time series the average over multiple quantile le
 
 ### Precision@k
 
-**What it measures**: Fraction of the top-`k` retrieved items that are relevant. Captures the user's experience of "first page of results".
+**What it measures**: Fraction of the top-`k` retrieved items that are relevant. Captures the user's experience of
+"first page of results".
 
 **Formula**:
 
@@ -1135,14 +1236,16 @@ where `rel_j in {0, 1}` is the relevance of the j-th retrieved item.
 
 **Edge cases / pitfalls**:
 
-- Penalizes systems with too few relevant items in the database (cannot reach 1.0 if fewer than `k` relevant items exist).
+- Penalizes systems with too few relevant items in the database (cannot reach 1.0 if fewer than `k` relevant items
+  exist).
 - Insensitive to ordering within the top-`k`.
 
 **Typical reporting**: Decimal. Higher is better.
 
 ### Recall@k
 
-**What it measures**: Fraction of all relevant items that appear in the top-`k`. Captures how much of the relevant set the system can find.
+**What it measures**: Fraction of all relevant items that appear in the top-`k`. Captures how much of the relevant set
+the system can find.
 
 **Formula**:
 
@@ -1159,7 +1262,8 @@ R@k = (number of relevant items in top k) / (total relevant items)
 
 ### MAP (Mean Average Precision)
 
-**What it measures**: Mean of Average Precision (AP) across queries, where AP averages precision at every recall level. Captures both ordering and recall.
+**What it measures**: Mean of Average Precision (AP) across queries, where AP averages precision at every recall level.
+Captures both ordering and recall.
 
 **Formula**:
 
@@ -1179,7 +1283,8 @@ where `R_q` is the total number of relevant items for query `q`.
 
 ### MRR (Mean Reciprocal Rank)
 
-**What it measures**: Mean of `1 / rank_first_relevant`. Captures the position of the first correct answer. Suited to "I want one good answer" tasks (QA, sentence retrieval).
+**What it measures**: Mean of `1 / rank_first_relevant`. Captures the position of the first correct answer. Suited to "I
+want one good answer" tasks (QA, sentence retrieval).
 
 **Formula**:
 
@@ -1198,7 +1303,8 @@ If no relevant item appears in the returned list, the reciprocal rank is 0.
 
 ### nDCG@k (Normalized Discounted Cumulative Gain)
 
-**What it measures**: Position-discounted relevance, normalized by the ideal ordering. Handles graded relevance (not just binary). The standard retrieval metric in MTEB (nDCG@10) and BEIR.
+**What it measures**: Position-discounted relevance, normalized by the ideal ordering. Handles graded relevance (not
+just binary). The standard retrieval metric in MTEB (nDCG@10) and BEIR.
 
 **Formula**:
 
@@ -1220,7 +1326,8 @@ The exponential-gain variant is more common in modern leaderboards (TREC, MS MAR
 
 ### Hit@k (HitRate@k)
 
-**What it measures**: Indicator: whether at least one relevant item appears in the top-`k`. Coarse but interpretable. Used heavily in knowledge-graph completion (Hit@1, Hit@3, Hit@10).
+**What it measures**: Indicator: whether at least one relevant item appears in the top-`k`. Coarse but interpretable.
+Used heavily in knowledge-graph completion (Hit@1, Hit@3, Hit@10).
 
 **Formula**:
 
@@ -1238,7 +1345,8 @@ HitRate@k = (1 / |Q|) * sum_q Hit@k_q
 
 ### R-Precision
 
-**What it measures**: Precision at rank `R`, where `R` is the number of relevant items for the query. Self-normalizing across queries with different relevance-set sizes.
+**What it measures**: Precision at rank `R`, where `R` is the number of relevant items for the query. Self-normalizing
+across queries with different relevance-set sizes.
 
 **Formula**:
 
@@ -1258,7 +1366,8 @@ R-Precision_q = (number of relevant items in top R_q) / R_q
 
 ### Cosine Similarity
 
-**What it measures**: Cosine of the angle between two embedding vectors. The default similarity for normalized embeddings.
+**What it measures**: Cosine of the angle between two embedding vectors. The default similarity for normalized
+embeddings.
 
 **Formula**:
 
@@ -1275,7 +1384,8 @@ cos(u, v) = (u . v) / (||u|| * ||v||)
 
 ### Dot Product
 
-**What it measures**: Raw inner product. Magnitude-sensitive: longer vectors are "more similar" to everything. Used in DPR and some ColBERT-style retrievers that rely on learned magnitudes.
+**What it measures**: Raw inner product. Magnitude-sensitive: longer vectors are "more similar" to everything. Used in
+DPR and some ColBERT-style retrievers that rely on learned magnitudes.
 
 **Formula**:
 
@@ -1290,7 +1400,8 @@ dot(u, v) = sum_i u_i * v_i
 
 ### Euclidean Distance
 
-**What it measures**: L2 distance. Lower is more similar. Less common for normalized embeddings, more common in metric-learning settings (triplet loss).
+**What it measures**: L2 distance. Lower is more similar. Less common for normalized embeddings, more common in
+metric-learning settings (triplet loss).
 
 **Formula**:
 
@@ -1304,7 +1415,8 @@ d(u, v) = sqrt(sum_i (u_i - v_i)^2)
 
 ### Pearson Correlation
 
-**What it measures**: Linear correlation between predicted and true similarities. Default on the older STS benchmarks (STS-12 through STS-16).
+**What it measures**: Linear correlation between predicted and true similarities. Default on the older STS benchmarks
+(STS-12 through STS-16).
 
 **Formula**:
 
@@ -1321,7 +1433,8 @@ r = sum_i (x_i - x_bar) * (y_i - y_bar) / (sqrt(sum_i (x_i - x_bar)^2) * sqrt(su
 
 ### Spearman Correlation
 
-**What it measures**: Pearson correlation of the ranks of the two variables. Captures monotonic but not necessarily linear relationships. The modern default for STS (MTEB and SentEval).
+**What it measures**: Pearson correlation of the ranks of the two variables. Captures monotonic but not necessarily
+linear relationships. The modern default for STS (MTEB and SentEval).
 
 **Formula**: Pearson applied to `rank(x)`, `rank(y)`.
 
@@ -1329,11 +1442,13 @@ r = sum_i (x_i - x_bar) * (y_i - y_bar) / (sqrt(sum_i (x_i - x_bar)^2) * sqrt(su
 
 - Tied ranks reduce to averaged ranks; libraries differ in tie handling.
 
-**Typical reporting**: Decimal in `[-1, 1]`, often multiplied by 100 in MTEB. Higher is better. Default eval for MTEB STS tasks.
+**Typical reporting**: Decimal in `[-1, 1]`, often multiplied by 100 in MTEB. Higher is better. Default eval for MTEB
+STS tasks.
 
 ### V-measure
 
-**What it measures**: External clustering quality. Harmonic mean of homogeneity (each cluster contains a single class) and completeness (each class is grouped together). Default in MTEB clustering.
+**What it measures**: External clustering quality. Harmonic mean of homogeneity (each cluster contains a single class)
+and completeness (each class is grouped together). Default in MTEB clustering.
 
 **Formula**:
 
@@ -1373,7 +1488,8 @@ where `RI` is the Rand Index (agreement on whether each pair belongs together / 
 
 ### Normalized Mutual Information (NMI)
 
-**What it measures**: Mutual information between cluster and class labels, normalized to `[0, 1]`. Multiple normalization choices exist (arithmetic, geometric, max).
+**What it measures**: Mutual information between cluster and class labels, normalized to `[0, 1]`. Multiple
+normalization choices exist (arithmetic, geometric, max).
 
 **Formula** (geometric normalization):
 
@@ -1390,7 +1506,8 @@ NMI(C, K) = I(C; K) / sqrt(H(C) * H(K))
 
 ### Average Precision (pair-classification sense)
 
-**What it measures**: AP applied to pair-classification tasks (given a pair of sentences, predict whether they are paraphrase/entailment). Each pair has a binary label; the model produces a score; AP is computed as in section 1.
+**What it measures**: AP applied to pair-classification tasks (given a pair of sentences, predict whether they are
+paraphrase/entailment). Each pair has a binary label; the model produces a score; AP is computed as in section 1.
 
 **Formula**: Same as binary AP; see section 1.
 
@@ -1407,7 +1524,8 @@ NMI(C, K) = I(C; K) / sqrt(H(C) * H(K))
 
 ### BLEU
 
-**What it measures**: N-gram precision against one or more references, geometric-mean-aggregated across `n = 1..4`, multiplied by a brevity penalty that punishes too-short candidates. The de-facto MT metric since Papineni et al. 2002.
+**What it measures**: N-gram precision against one or more references, geometric-mean-aggregated across `n = 1..4`,
+multiplied by a brevity penalty that punishes too-short candidates. The de-facto MT metric since Papineni et al. 2002.
 
 **Formula**:
 
@@ -1429,7 +1547,10 @@ where `c` is candidate length, `r` is effective reference length, and `w_n = 1/4
 - Method 3: NIST geometric sequence smoothing - replace zero precisions with `1 / 2^k`.
 - Method 4: Method 3 scaled by `1 / ln(len(candidate))` for short sentences.
 
-**SacreBLEU**: Standardized BLEU implementation (Post 2018, arXiv:1804.08771) that pins tokenization, casing, and smoothing into a reproducible signature string (e.g. `BLEU+case.mixed+lang.en-de+numrefs.1+smooth.exp+tok.13a+version.2.x`). Always quote the SacreBLEU signature; raw "BLEU = 28.5" without it is unreproducible.
+**SacreBLEU**: Standardized BLEU implementation (Post 2018, arXiv:1804.08771) that pins tokenization, casing, and
+smoothing into a reproducible signature string (e.g.
+`BLEU+case.mixed+lang.en-de+numrefs.1+smooth.exp+tok.13a+version.2.x`). Always quote the SacreBLEU signature; raw
+"BLEU = 28.5" without it is unreproducible.
 
 **Edge cases / pitfalls**:
 
@@ -1462,7 +1583,8 @@ rescues a missing order, and it does so by manufacturing a perfect precision —
 
 ### ROUGE-1, ROUGE-2
 
-**What it measures**: N-gram recall / F1 of system summaries against reference summaries. ROUGE-N looks at n-grams of length `n`. Recall variants weight recall; F1 variants are the harmonic mean.
+**What it measures**: N-gram recall / F1 of system summaries against reference summaries. ROUGE-N looks at n-grams of
+length `n`. Recall variants weight recall; F1 variants are the harmonic mean.
 
 **Formula** (recall variant):
 
@@ -1487,7 +1609,8 @@ the **first** reference of each group.
 
 ### ROUGE-L
 
-**What it measures**: F1 over the Longest Common Subsequence (LCS) between candidate and reference. LCS allows non-contiguous matches and rewards sentence-level word ordering.
+**What it measures**: F1 over the Longest Common Subsequence (LCS) between candidate and reference. LCS allows
+non-contiguous matches and rewards sentence-level word ordering.
 
 **Formula**:
 
@@ -1497,7 +1620,8 @@ P_lcs = LCS(cand, ref) / |cand|
 F_lcs = (1 + beta^2) * R_lcs * P_lcs / (R_lcs + beta^2 * P_lcs)
 ```
 
-Lin's original used `beta -> inf` (effectively recall); modern implementations report F1 with `beta = 1`. Summary-level ROUGE-L (ROUGE-Lsum) computes LCS per sentence and unions.
+Lin's original used `beta -> inf` (effectively recall); modern implementations report F1 with `beta = 1`. Summary-level
+ROUGE-L (ROUGE-Lsum) computes LCS per sentence and unions.
 
 **Edge cases / pitfalls**:
 
@@ -1513,9 +1637,8 @@ gives **1.0**, because whole-string LCS must be monotone across the sequence
 while Lsum's per-sentence union ignores order. Specify which one you report.
 
 ROUGE-Lsum is a transcription of `rouge_score`'s `_summary_level_lcs`, and all
-three of its structural details are load-bearing: the outer loop is over
-**reference** sentences, the union is over **reference** positions, and a
-**global hit budget** caps how many times a token may be credited across the
+three of its structural details are load-bearing: the outer loop is over **reference** sentences, the union is over
+**reference** positions, and a **global hit budget** caps how many times a token may be credited across the
 whole example. That budget is what keeps the hit count inside
 `[0, min(len(cand), len(ref))]`; an implementation without it returns
 F-measures **above 1.0** — measured at 9.8% of random multi-sentence cases, with
@@ -1533,7 +1656,8 @@ ceiling.
 
 ### METEOR
 
-**What it measures**: Unigram F-mean (harmonic mean weighted toward recall) with stemming and synonym matching, plus a "fragmentation penalty" for word-order differences. Better human correlation than BLEU on MT.
+**What it measures**: Unigram F-mean (harmonic mean weighted toward recall) with stemming and synonym matching, plus a
+"fragmentation penalty" for word-order differences. Better human correlation than BLEU on MT.
 
 **Formula** (sketch):
 
@@ -1567,8 +1691,8 @@ reference, both deliberate and both measured:
   reference behaviour, and a metric that returned 1.0 would be wrong.
 
 Also note the fragmentation rule, which is stricter than it looks: two matches
-form one chunk only when adjacent in BOTH sequences, so `"a x b"` vs `"a b"` is
-**two** chunks. `beta` is exposed, not `alpha` — the reference's `alpha = 0.9`
+form one chunk only when adjacent in BOTH sequences, so `"a x b"` vs `"a b"` is **two** chunks. `beta` is exposed, not
+`alpha` — the reference's `alpha = 0.9`
 IS this F-measure at `beta = 3` (`alpha = beta**2/(1 + beta**2)`), so they are
 not independent parameters.
 
@@ -1580,7 +1704,8 @@ the mean.
 
 ### chrF / chrF++
 
-**What it measures**: Character n-gram F-score, optionally augmented with word n-grams (chrF++). Robust to morphology; performs well on agglutinative and morphologically rich languages where BLEU is weak.
+**What it measures**: Character n-gram F-score, optionally augmented with word n-grams (chrF++). Robust to morphology;
+performs well on agglutinative and morphologically rich languages where BLEU is weak.
 
 **Formula**:
 
@@ -1588,7 +1713,8 @@ the mean.
 chrF_beta = (1 + beta^2) * chrP * chrR / (beta^2 * chrP + chrR)
 ```
 
-`chrF` averages character n-grams up to order 6; `chrF++` adds word n-grams up to order 2. WMT uses `beta = 2` (recall-weighted).
+`chrF` averages character n-grams up to order 6; `chrF++` adds word n-grams up to order 2. WMT uses `beta = 2`
+(recall-weighted).
 
 **Edge cases / pitfalls**:
 
@@ -1610,15 +1736,16 @@ chrF and `word_order=2` for chrF++. Two rules that decide most of the number:
 
 Statistics pool over the corpus, and several references are resolved per
 segment **before** pooling (the reference with the best chrF wins) — the
-opposite of BLEU's per-n-gram max. For **chrF++** the selection uses the
-**joint** character+word score, as the reference does, so switching
+opposite of BLEU's per-n-gram max. For **chrF++** the selection uses the **joint** character+word score, as the
+reference does, so switching
 `word_order` from 0 to 2 can change which reference wins; selecting on the
 character half alone is a divergence that fires on roughly 3 in 20,000 random
 cases and scores a candidate 17% below the reference on those.
 
 ### TER (Translation Edit Rate)
 
-**What it measures**: Minimum number of edits (insertions, deletions, substitutions, shifts) needed to transform the candidate into the reference, normalized by reference length.
+**What it measures**: Minimum number of edits (insertions, deletions, substitutions, shifts) needed to transform the
+candidate into the reference, normalized by reference length.
 
 **Formula**:
 
@@ -1635,7 +1762,9 @@ TER = (edits) / (|reference|)
 
 ### BERTScore
 
-**What it measures**: Token-level cosine similarity between contextual embeddings of candidate and reference, aggregated into P/R/F1 over a greedy alignment. Correlates better with human judgment than n-gram metrics for paraphrase-style generation.
+**What it measures**: Token-level cosine similarity between contextual embeddings of candidate and reference, aggregated
+into P/R/F1 over a greedy alignment. Correlates better with human judgment than n-gram metrics for paraphrase-style
+generation.
 
 **Formula**:
 
@@ -1712,7 +1841,8 @@ no contrast to be had, rather than too few examples to have it.
 
 ### BLEURT
 
-**What it measures**: Learned regression metric: a BERT-derived encoder fine-tuned on human MT-quality ratings. Direct human-likeness score.
+**What it measures**: Learned regression metric: a BERT-derived encoder fine-tuned on human MT-quality ratings. Direct
+human-likeness score.
 
 **Formula**: Model output; no closed form.
 
@@ -1725,7 +1855,9 @@ no contrast to be had, rather than too few examples to have it.
 
 ### COMET / COMETKIWI
 
-**What it measures**: Cross-lingual encoder-decoder model trained to predict human MT quality scores from `<source, candidate, reference>` triples. COMETKIWI is the reference-free variant (predicts quality from `<source, candidate>` only) and is suitable for online MT QA.
+**What it measures**: Cross-lingual encoder-decoder model trained to predict human MT quality scores from
+`<source, candidate, reference>` triples. COMETKIWI is the reference-free variant (predicts quality from
+`<source, candidate>` only) and is suitable for online MT QA.
 
 **Formula**: Model output.
 
@@ -1738,7 +1870,8 @@ no contrast to be had, rather than too few examples to have it.
 
 ### Exact Match (SQuAD-style)
 
-**What it measures**: Fraction of predictions that match the reference answer exactly (after normalization: lowercasing, article removal, punctuation stripping, whitespace collapse). Strict; partial credit goes to Token-level F1.
+**What it measures**: Fraction of predictions that match the reference answer exactly (after normalization: lowercasing,
+article removal, punctuation stripping, whitespace collapse). Strict; partial credit goes to Token-level F1.
 
 **Formula**:
 
@@ -1755,7 +1888,8 @@ EM = (1 / N) * sum_i 1[normalize(pred_i) == normalize(ref_i)]
 
 ### Token-level F1 (SQuAD)
 
-**What it measures**: F1 over the bag of tokens shared between predicted and reference answer. Partial credit for partially correct spans.
+**What it measures**: F1 over the bag of tokens shared between predicted and reference answer. Partial credit for
+partially correct spans.
 
 **Formula**:
 
@@ -1772,7 +1906,8 @@ TokenF1 = 2 * |tokens(pred) intersect tokens(ref)| / (|tokens(pred)| + |tokens(r
 
 ### Perplexity
 
-**What it measures**: Exponentiated average negative log-likelihood per token under the model. Probabilistic measure of how surprised the model is by held-out text. Intrinsic LM eval.
+**What it measures**: Exponentiated average negative log-likelihood per token under the model. Probabilistic measure of
+how surprised the model is by held-out text. Intrinsic LM eval.
 
 **Formula**:
 
@@ -1784,14 +1919,16 @@ where the sum is over tokens.
 
 **Edge cases / pitfalls**:
 
-- Tokenization-dependent; perplexities across models with different tokenizers are not directly comparable. Use bits-per-byte instead.
+- Tokenization-dependent; perplexities across models with different tokenizers are not directly comparable. Use
+  bits-per-byte instead.
 - Sliding-window vs full-context evaluation produces different numbers on long documents.
 
 **Typical reporting**: Real number, often on WikiText-103 or The Pile validation. Lower is better.
 
 ### Bits per Character / Byte (BPC / BPB)
 
-**What it measures**: Tokenization-invariant version of perplexity, expressed in bits per raw character (BPC) or byte (BPB) of the original text.
+**What it measures**: Tokenization-invariant version of perplexity, expressed in bits per raw character (BPC) or byte
+(BPB) of the original text.
 
 **Formula**:
 
@@ -1812,7 +1949,9 @@ BPB = (1 / num_bytes) * sum_i -log2 P(token_i | ...)
 
 ### pass@k
 
-**What it measures**: Probability that at least one of `k` independently sampled completions passes all unit tests. Standard on HumanEval, MBPP, LiveCodeBench. The Codex paper popularized the unbiased estimator below; the naive `1 - (1 - p)^k` is biased.
+**What it measures**: Probability that at least one of `k` independently sampled completions passes all unit tests.
+Standard on HumanEval, MBPP, LiveCodeBench. The Codex paper popularized the unbiased estimator below; the naive
+`1 - (1 - p)^k` is biased.
 
 **Formula** (Chen et al. 2021, unbiased):
 
@@ -1820,26 +1959,32 @@ BPB = (1 / num_bytes) * sum_i -log2 P(token_i | ...)
 pass@k = E_problems [ 1 - C(n - c, k) / C(n, k) ]
 ```
 
-where for each problem `n` samples are drawn, `c` of them are correct, and `C(., .)` is the binomial coefficient. Set to 1.0 if `n - c < k`.
+where for each problem `n` samples are drawn, `c` of them are correct, and `C(., .)` is the binomial coefficient. Set to
+1.0 if `n - c < k`.
 
 **Edge cases / pitfalls**:
 
 - Requires `n >= k`. Conventionally `n = 200` for pass@1 / pass@10 / pass@100.
-- Pass@1 with greedy decoding (n = 1) reduces to a simple accuracy; with sampling at `n > 1` it is the unbiased estimator.
+- Pass@1 with greedy decoding (n = 1) reduces to a simple accuracy; with sampling at `n > 1` it is the unbiased
+  estimator.
 
 **Typical reporting**: Percentage. Higher is better. Source: Chen et al., arXiv:2107.03374.
 
 ### pass@1
 
-**What it measures**: Special case of pass@k. Reported either with greedy decoding (single deterministic sample) or with `n` samples and the unbiased estimator. The two protocols can differ by several points; specify which.
+**What it measures**: Special case of pass@k. Reported either with greedy decoding (single deterministic sample) or with
+`n` samples and the unbiased estimator. The two protocols can differ by several points; specify which.
 
 **Formula**: See pass@k with `k = 1`. With greedy decoding it is binary per problem.
 
-**Typical reporting**: Percentage. Higher is better. Headline number on HumanEval and SWE-bench (where the "agent" generates a patch).
+**Typical reporting**: Percentage. Higher is better. Headline number on HumanEval and SWE-bench (where the "agent"
+generates a patch).
 
 ### Exact Match (code)
 
-**What it measures**: Whether the generated code matches the reference exactly after some normalization (whitespace, comments). Weak proxy for correctness because many correct solutions are not byte-identical to the reference; mostly used in code-completion benchmarks where reference matching is appropriate.
+**What it measures**: Whether the generated code matches the reference exactly after some normalization (whitespace,
+comments). Weak proxy for correctness because many correct solutions are not byte-identical to the reference; mostly
+used in code-completion benchmarks where reference matching is appropriate.
 
 **Formula**: As in section 10.
 
@@ -1847,7 +1992,8 @@ where for each problem `n` samples are drawn, `c` of them are correct, and `C(.,
 
 ### CodeBLEU
 
-**What it measures**: BLEU augmented with syntactic-AST overlap and dataflow-graph overlap, weighted across the four components. Designed to be more code-aware than plain BLEU but still cheap. Auxiliary metric only; pass@k dominates.
+**What it measures**: BLEU augmented with syntactic-AST overlap and dataflow-graph overlap, weighted across the four
+components. Designed to be more code-aware than plain BLEU but still cheap. Auxiliary metric only; pass@k dominates.
 
 **Formula** (sketch):
 
@@ -1870,7 +2016,8 @@ with weights `(a, b, g, d)` typically `(0.25, 0.25, 0.25, 0.25)`.
 
 ### WER (Word Error Rate)
 
-**What it measures**: Edit distance (insertions + deletions + substitutions) between hypothesis and reference word sequences, divided by reference length. Primary ASR metric.
+**What it measures**: Edit distance (insertions + deletions + substitutions) between hypothesis and reference word
+sequences, divided by reference length. Primary ASR metric.
 
 **Formula**:
 
@@ -1881,13 +2028,15 @@ WER = (I + D + S) / N_ref
 **Edge cases / pitfalls**:
 
 - Can exceed 100% (lots of insertions on short references).
-- Sensitive to normalization (punctuation, casing, contractions). Whisper / OpenAI use a custom normalizer; LibriSpeech leaderboards use a strict normalizer.
+- Sensitive to normalization (punctuation, casing, contractions). Whisper / OpenAI use a custom normalizer; LibriSpeech
+  leaderboards use a strict normalizer.
 
 **Typical reporting**: Percentage. Lower is better. Standard on LibriSpeech, CommonVoice, AMI.
 
 ### CER (Character Error Rate)
 
-**What it measures**: Same as WER but at the character level. More appropriate for languages without clear word boundaries (Chinese, Japanese) and for OCR.
+**What it measures**: Same as WER but at the character level. More appropriate for languages without clear word
+boundaries (Chinese, Japanese) and for OCR.
 
 **Formula**:
 
@@ -1904,7 +2053,8 @@ CER = (I + D + S) / N_chars_ref
 
 ### PER (Phoneme Error Rate)
 
-**What it measures**: WER computed at the phoneme level. Used in speech recognition research and in TTS pronunciation evaluation.
+**What it measures**: WER computed at the phoneme level. Used in speech recognition research and in TTS pronunciation
+evaluation.
 
 **Formula**: As WER, with `N_phonemes_ref` in the denominator.
 
@@ -1912,7 +2062,8 @@ CER = (I + D + S) / N_chars_ref
 
 ### MOS (Mean Opinion Score)
 
-**What it measures**: Subjective rating, typically a 1-5 Likert scale collected from crowd-sourced listeners, averaged across raters and utterances. The classical TTS / speech-codec quality metric.
+**What it measures**: Subjective rating, typically a 1-5 Likert scale collected from crowd-sourced listeners, averaged
+across raters and utterances. The classical TTS / speech-codec quality metric.
 
 **Formula**: No closed form. Conventionally:
 
@@ -1934,7 +2085,8 @@ MOS = mean over listener-utterance pairs of integer ratings in {1, 2, 3, 4, 5}
 
 ### PSNR (Peak Signal-to-Noise Ratio)
 
-**What it measures**: Logarithmic ratio of peak signal to mean squared reconstruction error. Standard pixel-level fidelity metric in denoising, super-resolution, compression.
+**What it measures**: Logarithmic ratio of peak signal to mean squared reconstruction error. Standard pixel-level
+fidelity metric in denoising, super-resolution, compression.
 
 **Formula**:
 
@@ -1942,7 +2094,9 @@ MOS = mean over listener-utterance pairs of integer ratings in {1, 2, 3, 4, 5}
 PSNR = 10 * log10(MAX^2 / MSE)
 ```
 
-where `MAX` is the maximum possible pixel value: 255 for uint8 images and 1.0 for float images normalized to `[0, 1]`. **This matters**: PSNR computed with `MAX = 1` for a normalized image is `20 * log10(255)` dB (about 48 dB) below the same image's PSNR with `MAX = 255`. Mixing conventions across papers is a common bug.
+where `MAX` is the maximum possible pixel value: 255 for uint8 images and 1.0 for float images normalized to `[0, 1]`.
+**This matters**: PSNR computed with `MAX = 1` for a normalized image is `20 * log10(255)` dB (about 48 dB) below the
+same image's PSNR with `MAX = 255`. Mixing conventions across papers is a common bug.
 
 **Edge cases / pitfalls**:
 
@@ -1953,7 +2107,8 @@ where `MAX` is the maximum possible pixel value: 255 for uint8 images and 1.0 fo
 
 ### SSIM (Structural Similarity)
 
-**What it measures**: Locally windowed comparison of luminance, contrast, and structure. Designed to track perceptual quality better than PSNR.
+**What it measures**: Locally windowed comparison of luminance, contrast, and structure. Designed to track perceptual
+quality better than PSNR.
 
 **Formula**:
 
@@ -1971,13 +2126,16 @@ Computed with an 11x11 Gaussian window (`sigma = 1.5`) and averaged across the i
 **Edge cases / pitfalls**:
 
 - Constants `C1`, `C2` are scale-dependent through `L` - same uint8-vs-float trap as PSNR.
-- Mean / variance / covariance via Gaussian weighting, not uniform - some libraries use a uniform window and produce slightly different numbers.
+- Mean / variance / covariance via Gaussian weighting, not uniform - some libraries use a uniform window and produce
+  slightly different numbers.
 
-**Typical reporting**: Decimal in `[-1, 1]`, typically `[0.5, 1.0]` for restoration. Higher is better. Source: Wang et al., IEEE TIP 2004.
+**Typical reporting**: Decimal in `[-1, 1]`, typically `[0.5, 1.0]` for restoration. Higher is better. Source: Wang et
+al., IEEE TIP 2004.
 
 ### MS-SSIM (Multi-Scale SSIM)
 
-**What it measures**: SSIM applied at multiple downsampled scales, then geometrically combined. Better correlation with human perception across viewing distances.
+**What it measures**: SSIM applied at multiple downsampled scales, then geometrically combined. Better correlation with
+human perception across viewing distances.
 
 **Formula**:
 
@@ -1995,7 +2153,8 @@ with default weights from Wang et al. 2003 (5 scales) and luminance computed onl
 
 ### LPIPS (Learned Perceptual Image Patch Similarity)
 
-**What it measures**: L2 distance between deep-feature activations of a pretrained network (AlexNet, VGG, or SqueezeNet), with per-channel linear weights learned to match human perceptual judgments.
+**What it measures**: L2 distance between deep-feature activations of a pretrained network (AlexNet, VGG, or
+SqueezeNet), with per-channel linear weights learned to match human perceptual judgments.
 
 **Formula**:
 
@@ -2014,7 +2173,8 @@ where `f_l` is the l-th conv feature map and `w_l` are learned per-channel weigh
 
 ### FID (Frechet Inception Distance)
 
-**What it measures**: Wasserstein-2 distance between two Gaussians fit to Inception-v3 `pool3` features (2048-dim) of real and generated images. The dominant unconditional-generation metric since 2017.
+**What it measures**: Wasserstein-2 distance between two Gaussians fit to Inception-v3 `pool3` features (2048-dim) of
+real and generated images. The dominant unconditional-generation metric since 2017.
 
 **Formula**:
 
@@ -2026,15 +2186,20 @@ where `(mu_r, C_r)` and `(mu_g, C_g)` are the empirical mean and covariance of r
 
 **Edge cases / pitfalls**:
 
-- Highly biased at small sample sizes; report >= 10k samples per side. 50k is the de-facto standard on CIFAR / FFHQ / ImageNet.
-- Numerically unstable matrix-square-root computation - use the off-the-shelf reference implementation (TTUR / clean-fid).
-- Inception-v3 weights and preprocessing differ between TF and PyTorch reference implementations; numbers across implementations can differ by 1-2 points.
+- Highly biased at small sample sizes; report >= 10k samples per side. 50k is the de-facto standard on CIFAR / FFHQ /
+  ImageNet.
+- Numerically unstable matrix-square-root computation - use the off-the-shelf reference implementation (TTUR /
+  clean-fid).
+- Inception-v3 weights and preprocessing differ between TF and PyTorch reference implementations; numbers across
+  implementations can differ by 1-2 points.
 
 **Typical reporting**: Real number. Lower is better. Source: Heusel et al., arXiv:1706.08500.
 
 ### Inception Score (IS)
 
-**What it measures**: Exponentiated KL divergence between conditional class distributions and the marginal class distribution, evaluated with Inception-v3 logits. Rewards images that are both confidently classified and diverse across classes.
+**What it measures**: Exponentiated KL divergence between conditional class distributions and the marginal class
+distribution, evaluated with Inception-v3 logits. Rewards images that are both confidently classified and diverse across
+classes.
 
 **Formula**:
 
@@ -2048,11 +2213,13 @@ IS = exp(E_x KL(p(y | x) || p(y)))
 - Inception-v3-specific - IS is meaningless outside natural-image distributions resembling ImageNet.
 - Numerically split-dependent; the canonical protocol is 10 splits of 5k samples.
 
-**Typical reporting**: Real number. Higher is better. Largely superseded by FID, but co-reported on CIFAR-10 generation. Source: Salimans et al., arXiv:1606.03498.
+**Typical reporting**: Real number. Higher is better. Largely superseded by FID, but co-reported on CIFAR-10 generation.
+Source: Salimans et al., arXiv:1606.03498.
 
 ### KID (Kernel Inception Distance)
 
-**What it measures**: Unbiased estimator of the squared Maximum Mean Discrepancy between Inception features, using a polynomial kernel. Unbiased at any sample size, unlike FID.
+**What it measures**: Unbiased estimator of the squared Maximum Mean Discrepancy between Inception features, using a
+polynomial kernel. Unbiased at any sample size, unlike FID.
 
 **Formula**:
 
@@ -2071,7 +2238,8 @@ estimated with a degree-3 polynomial kernel on Inception features.
 
 ### CLIP score (text-to-image)
 
-**What it measures**: Cosine similarity between CLIP image and text embeddings, averaged across prompts. Standard text-image alignment metric for T2I generation.
+**What it measures**: Cosine similarity between CLIP image and text embeddings, averaged across prompts. Standard
+text-image alignment metric for T2I generation.
 
 **Formula**:
 
@@ -2088,7 +2256,8 @@ CLIP-score = (1 / N) * sum_i max(0, cos(CLIP_img(x_i), CLIP_txt(prompt_i)))
 
 ### NIQE (Natural Image Quality Evaluator)
 
-**What it measures**: No-reference image quality metric based on the deviation of MSCN coefficients from a "naturalness" multivariate Gaussian fit to pristine images.
+**What it measures**: No-reference image quality metric based on the deviation of MSCN coefficients from a "naturalness"
+multivariate Gaussian fit to pristine images.
 
 **Formula**: Mahalanobis distance between MSCN-feature statistics of the test image and a reference natural-image MVG.
 
@@ -2100,7 +2269,8 @@ CLIP-score = (1 / N) * sum_i max(0, cos(CLIP_img(x_i), CLIP_txt(prompt_i)))
 
 ### BRISQUE
 
-**What it measures**: Another no-reference image quality metric using spatial MSCN coefficients passed through a learned SVR regressor trained on human DMOS ratings.
+**What it measures**: Another no-reference image quality metric using spatial MSCN coefficients passed through a learned
+SVR regressor trained on human DMOS ratings.
 
 **Formula**: SVR output on a 36-dim MSCN feature vector.
 
@@ -2117,7 +2287,8 @@ CLIP-score = (1 / N) * sum_i max(0, cos(CLIP_img(x_i), CLIP_txt(prompt_i)))
 
 ### Expected Calibration Error (ECE)
 
-**What it measures**: Average gap between confidence and accuracy across confidence bins. The standard scalar calibration metric.
+**What it measures**: Average gap between confidence and accuracy across confidence bins. The standard scalar
+calibration metric.
 
 **Formula** (equal-width binning):
 
@@ -2129,12 +2300,15 @@ acc   = (1 / |B_m|) * sum_{i in B_m} 1[y_pred_i == y_true_i]
 conf  = (1 / |B_m|) * sum_{i in B_m} p_i
 ```
 
-**Equal-width** uses fixed bin boundaries (default `M = 15`). **Equal-mass** (sometimes "equal-frequency", or "adaptive binning") uses quantile-based bin edges so each bin has the same number of samples, which is more robust under skewed confidence distributions but harder to compare across models.
+**Equal-width** uses fixed bin boundaries (default `M = 15`). **Equal-mass** (sometimes "equal-frequency", or "adaptive
+binning") uses quantile-based bin edges so each bin has the same number of samples, which is more robust under skewed
+confidence distributions but harder to compare across models.
 
 **Edge cases / pitfalls**:
 
 - Number of bins matters: too few hides miscalibration; too many produces noisy per-bin estimates.
-- Equal-width ECE is dominated by the most-populated bin, which is typically the confidence-near-1 bin for modern overconfident classifiers.
+- Equal-width ECE is dominated by the most-populated bin, which is typically the confidence-near-1 bin for modern
+  overconfident classifiers.
 - Reliability of ECE estimates degrades with bin sparsity at small `N`.
 
 **Typical reporting**: Decimal, often * 100. Lower is better. Source: Guo et al., arXiv:1706.04599.
@@ -2157,7 +2331,8 @@ MCE = max_m |acc(B_m) - conf(B_m)|
 
 ### Adaptive Calibration Error (ACE)
 
-**What it measures**: ECE computed with equal-mass (adaptive) bins so each bin has the same number of samples. Robust to confidence-distribution skew.
+**What it measures**: ECE computed with equal-mass (adaptive) bins so each bin has the same number of samples. Robust to
+confidence-distribution skew.
 
 **Formula**:
 
@@ -2165,7 +2340,8 @@ MCE = max_m |acc(B_m) - conf(B_m)|
 ACE = (1 / R * K) * sum_k sum_r |acc(B_r_k) - conf(B_r_k)|
 ```
 
-where `R` is the number of equal-mass bins per class and `K` is the number of classes (Nixon et al. 2019, class-wise adaptive ECE).
+where `R` is the number of equal-mass bins per class and `K` is the number of classes (Nixon et al. 2019, class-wise
+adaptive ECE).
 
 **Edge cases / pitfalls**:
 
@@ -2176,7 +2352,8 @@ where `R` is the number of equal-mass bins per class and `K` is the number of cl
 
 ### Reliability Diagrams
 
-**What it measures**: Visual companion to ECE. Bar plot of `(conf(B_m), acc(B_m))` pairs with the identity line as the perfectly-calibrated reference. Gap above the line indicates underconfidence; gap below indicates overconfidence.
+**What it measures**: Visual companion to ECE. Bar plot of `(conf(B_m), acc(B_m))` pairs with the identity line as the
+perfectly-calibrated reference. Gap above the line indicates underconfidence; gap below indicates overconfidence.
 
 **Formula**: Just the per-bin statistics from ECE; no scalar.
 
@@ -2184,7 +2361,8 @@ where `R` is the number of equal-mass bins per class and `K` is the number of cl
 
 ### Brier Score Decomposition
 
-**What it measures**: Decomposes Brier into three additive terms - reliability (calibration), resolution (separation of classes), and uncertainty (intrinsic label noise).
+**What it measures**: Decomposes Brier into three additive terms - reliability (calibration), resolution (separation of
+classes), and uncertainty (intrinsic label noise).
 
 **Formula**:
 
@@ -2211,7 +2389,9 @@ with `y_bar` the marginal positive rate.
 
 ### AUROC (OOD)
 
-**What it measures**: ROC-AUC where the positive class is OOD (or anomalous) and the score is a model-derived novelty score (max-softmax-probability complement, energy, Mahalanobis distance, etc.). Standard headline metric on OOD-detection benchmarks (CIFAR-10 vs CIFAR-100, ImageNet-1k vs SUN/Places/Textures).
+**What it measures**: ROC-AUC where the positive class is OOD (or anomalous) and the score is a model-derived novelty
+score (max-softmax-probability complement, energy, Mahalanobis distance, etc.). Standard headline metric on
+OOD-detection benchmarks (CIFAR-10 vs CIFAR-100, ImageNet-1k vs SUN/Places/Textures).
 
 **Formula**: As ROC-AUC in section 1.
 
@@ -2224,7 +2404,8 @@ with `y_bar` the marginal positive rate.
 
 ### FPR @ 95% TPR
 
-**What it measures**: False positive rate when the threshold is set to capture 95% of in-distribution samples (true positive rate = 0.95). Captures the cost of high-recall OOD detection.
+**What it measures**: False positive rate when the threshold is set to capture 95% of in-distribution samples (true
+positive rate = 0.95). Captures the cost of high-recall OOD detection.
 
 **Formula**:
 
@@ -2241,7 +2422,8 @@ FPR95 = FPR at threshold tau* where TPR(tau*) = 0.95
 
 ### AUPR (positive vs negative class variant)
 
-**What it measures**: PR-AUC. Two variants depending on whether the positive class is OOD ("AUPR-out") or ID ("AUPR-in"). Useful when classes are extremely imbalanced (e.g. anomaly detection with 0.1% anomalies).
+**What it measures**: PR-AUC. Two variants depending on whether the positive class is OOD ("AUPR-out") or ID (
+"AUPR-in"). Useful when classes are extremely imbalanced (e.g. anomaly detection with 0.1% anomalies).
 
 **Formula**: As binary AP in section 1.
 
@@ -2258,7 +2440,8 @@ FPR95 = FPR at threshold tau* where TPR(tau*) = 0.95
 
 ### Mean Episodic Return
 
-**What it measures**: Average undiscounted (or sometimes discounted) reward summed over an episode, averaged across evaluation episodes. The primary RL metric.
+**What it measures**: Average undiscounted (or sometimes discounted) reward summed over an episode, averaged across
+evaluation episodes. The primary RL metric.
 
 **Formula**:
 
@@ -2275,7 +2458,8 @@ ReturnEpisodic = (1 / N_episodes) * sum_e sum_t r_e_t
 
 ### Success Rate
 
-**What it measures**: Fraction of episodes that achieve the task goal (binary success per episode). Common in goal-conditioned RL, robotics, and game agents.
+**What it measures**: Fraction of episodes that achieve the task goal (binary success per episode). Common in
+goal-conditioned RL, robotics, and game agents.
 
 **Formula**:
 
@@ -2292,7 +2476,8 @@ SR = (1 / N_episodes) * sum_e 1[goal_achieved_e]
 
 ### Sample Efficiency
 
-**What it measures**: Performance per unit of environment interaction (env steps) or per gradient step. Crucial in sparse-reward and physical-robot RL.
+**What it measures**: Performance per unit of environment interaction (env steps) or per gradient step. Crucial in
+sparse-reward and physical-robot RL.
 
 **Formula** (one common operational definition):
 
@@ -2315,7 +2500,8 @@ StepsToTarget = min { T : ReturnEpisodic(T) >= R_target }
 
 ### Atari Human-Normalized Score
 
-**What it measures**: Per-game score linearly normalized to `0 = random policy`, `1 = trained human`. Aggregated across the 26 / 57 / 200 Atari games of the chosen suite via mean or median.
+**What it measures**: Per-game score linearly normalized to `0 = random policy`, `1 = trained human`. Aggregated across
+the 26 / 57 / 200 Atari games of the chosen suite via mean or median.
 
 **Formula**:
 
@@ -2325,14 +2511,17 @@ HumanNormScore_g = (Score_g - Score_random_g) / (Score_human_g - Score_random_g)
 
 **Edge cases / pitfalls**:
 
-- Mean-HNS is dominated by a few games where agents massively exceed human (Atlantis, Video Pinball); median is more robust.
+- Mean-HNS is dominated by a few games where agents massively exceed human (Atlantis, Video Pinball); median is more
+  robust.
 - "Random" and "human" baselines from Mnih et al. 2015 are still in use 11 years later; cite the table you use.
 
 **Typical reporting**: Decimal (1.0 = human level). Higher is better.
 
 ### IQM (Interquartile Mean of Normalized Scores)
 
-**What it measures**: Mean of normalized scores after dropping the bottom 25% and top 25%. Recommended by Agarwal et al. 2021 (Rliable) as a robust aggregate that beats mean (outlier-sensitive) and median (high-variance) on Atari, DM Control, and other RL suites.
+**What it measures**: Mean of normalized scores after dropping the bottom 25% and top 25%. Recommended by Agarwal et al.
+2021 (Rliable) as a robust aggregate that beats mean (outlier-sensitive) and median (high-variance) on Atari, DM
+Control, and other RL suites.
 
 **Formula**:
 
@@ -2355,29 +2544,52 @@ where `x_(i)` is the i-th order statistic.
 
 Failure modes that span every section above. Read this list before believing any leaderboard number.
 
-- **Averaging conventions**: Micro / macro / weighted / samples are not interchangeable. A 10-point gap between micro-F1 and macro-F1 on imbalanced data is normal, not a bug. Always state which is reported.
-- **Train-eval distribution shift**: A model "tuned" on the test set (or on a dataset trained with the same web crawl that surfaces eval samples) inflates every metric in this document. Contamination audits matter; the Big-Bench, MMLU, and SWE-bench leaderboards all carry contamination warnings.
-- **Single-seed reporting**: A 1-point gap on a single seed is almost always within run-to-run noise. Modern RL recommendations (Agarwal et al.) and NLP recommendations (Dodge et al. 2019) call for >=5 seeds and bootstrap CIs. Most leaderboards still report single-seed numbers; treat them as upper bounds.
-- **Floating-point precision in eval**: Some metrics (FID, Inception Score, MMD, KID) involve large-matrix linear algebra that is non-deterministic in fp16/fp32 across hardware. Differences of 0.1-0.3 are common between repeated evaluations on different GPUs.
-- **Top-1 vs top-5 sloppy reporting**: Pre-2018 ImageNet papers sometimes reported top-5 error without saying so; modern reporting is top-1 unless noted. When citing a number, double-check the column header.
-- **"Validation set" is overloaded**: ImageNet-1K val IS the test set used in papers; GLUE dev != test; SQuAD dev != test. Same model can have very different numbers on "val" depending on which dataset you mean.
-- **Eval-time augmentation**: TTA (multi-crop, horizontal-flip averaging) adds 0.3-1.0 ImageNet points "for free" and is sometimes silently enabled. Check the inference protocol.
-- **Ensembling**: Headline numbers are often single-checkpoint; ensembles of 5-10 models add another 0.5-2 points and are usually flagged but not always. Compare like to like.
-- **Tokenizer-dependent metrics**: Perplexity, BLEU (before SacreBLEU), pass@k normalization, and any token-F1 metric depend on tokenization. Cross-model comparisons need fixed tokenization or token-free metrics (BPB, chrF).
-- **Reference set size**: BLEU with 4 references can be 5-10 points higher than BLEU with 1 reference on the same translations. NIST 2008 (4 refs) and WMT (1 ref) are not comparable.
-- **Decoding hyperparameters**: pass@k, BLEU, ROUGE on summarization all shift with temperature, top-p, top-k, beam size, and length penalty. Without these, "we got 80 BLEU" is unreproducible.
-- **Image preprocessing**: ImageNet "224x224" can mean (a) `Resize(256) + CenterCrop(224)` (PyTorch), (b) `Resize(232) + CenterCrop(224)` (timm modern recipe), or (c) `RandomResizedCrop(224)` train-time stats applied at test (wrong). Numbers can differ by 0.5-1.0 points.
-- **Round-trip serialization**: A model that scores X on the trainer's in-memory copy can score X - epsilon after `model.save() / model.load()` if the layer's `get_config()` drops state. Always validate post-load metrics before reporting.
+- **Averaging conventions**: Micro / macro / weighted / samples are not interchangeable. A 10-point gap between micro-F1
+  and macro-F1 on imbalanced data is normal, not a bug. Always state which is reported.
+- **Train-eval distribution shift**: A model "tuned" on the test set (or on a dataset trained with the same web crawl
+  that surfaces eval samples) inflates every metric in this document. Contamination audits matter; the Big-Bench, MMLU,
+  and SWE-bench leaderboards all carry contamination warnings.
+- **Single-seed reporting**: A 1-point gap on a single seed is almost always within run-to-run noise. Modern RL
+  recommendations (Agarwal et al.) and NLP recommendations (Dodge et al. 2019) call for >=5 seeds and bootstrap CIs.
+  Most leaderboards still report single-seed numbers; treat them as upper bounds.
+- **Floating-point precision in eval**: Some metrics (FID, Inception Score, MMD, KID) involve large-matrix linear
+  algebra that is non-deterministic in fp16/fp32 across hardware. Differences of 0.1-0.3 are common between repeated
+  evaluations on different GPUs.
+- **Top-1 vs top-5 sloppy reporting**: Pre-2018 ImageNet papers sometimes reported top-5 error without saying so; modern
+  reporting is top-1 unless noted. When citing a number, double-check the column header.
+- **"Validation set" is overloaded**: ImageNet-1K val IS the test set used in papers; GLUE dev != test; SQuAD dev !=
+  test. Same model can have very different numbers on "val" depending on which dataset you mean.
+- **Eval-time augmentation**: TTA (multi-crop, horizontal-flip averaging) adds 0.3-1.0 ImageNet points "for free" and is
+  sometimes silently enabled. Check the inference protocol.
+- **Ensembling**: Headline numbers are often single-checkpoint; ensembles of 5-10 models add another 0.5-2 points and
+  are usually flagged but not always. Compare like to like.
+- **Tokenizer-dependent metrics**: Perplexity, BLEU (before SacreBLEU), pass@k normalization, and any token-F1 metric
+  depend on tokenization. Cross-model comparisons need fixed tokenization or token-free metrics (BPB, chrF).
+- **Reference set size**: BLEU with 4 references can be 5-10 points higher than BLEU with 1 reference on the same
+  translations. NIST 2008 (4 refs) and WMT (1 ref) are not comparable.
+- **Decoding hyperparameters**: pass@k, BLEU, ROUGE on summarization all shift with temperature, top-p, top-k, beam
+  size, and length penalty. Without these, "we got 80 BLEU" is unreproducible.
+- **Image preprocessing**: ImageNet "224x224" can mean (a) `Resize(256) + CenterCrop(224)` (PyTorch), (b)
+  `Resize(232) + CenterCrop(224)` (timm modern recipe), or (c) `RandomResizedCrop(224)` train-time stats applied at test
+  (wrong). Numbers can differ by 0.5-1.0 points.
+- **Round-trip serialization**: A model that scores X on the trainer's in-memory copy can score X - epsilon after
+  `model.save() / model.load()` if the layer's `get_config()` drops state. Always validate post-load metrics before
+  reporting.
 
 ---
 
 ## Sources
 
-- [scikit-learn model evaluation reference](https://scikit-learn.org/stable/modules/model_evaluation.html) - canonical definitions of classification, regression, clustering metrics
-- [torchmetrics documentation](https://lightning.ai/docs/torchmetrics/stable/) - PyTorch reference implementations covering most metrics in this file
-- [pycocotools / COCO eval](https://cocodataset.org/#detection-eval) - official COCO detection / segmentation / panoptic protocols
-- Muennighoff et al., **MTEB** (arXiv:[2210.07316](https://arxiv.org/abs/2210.07316)) - embedding-model evaluation task taxonomy
-- Eigen et al., **depth estimation evaluation protocol** (arXiv:[1406.2283](https://arxiv.org/abs/1406.2283)) - SILog, threshold accuracies, AbsRel
+- [scikit-learn model evaluation reference](https://scikit-learn.org/stable/modules/model_evaluation.html) - canonical
+  definitions of classification, regression, clustering metrics
+- [torchmetrics documentation](https://lightning.ai/docs/torchmetrics/stable/) - PyTorch reference implementations
+  covering most metrics in this file
+- [pycocotools / COCO eval](https://cocodataset.org/#detection-eval) - official COCO detection / segmentation / panoptic
+  protocols
+- Muennighoff et al., **MTEB** (arXiv:[2210.07316](https://arxiv.org/abs/2210.07316)) - embedding-model evaluation task
+  taxonomy
+- Eigen et al., **depth estimation evaluation protocol** (arXiv:[1406.2283](https://arxiv.org/abs/1406.2283)) - SILog,
+  threshold accuracies, AbsRel
 - Papineni et al., **BLEU** (ACL 2002) - [Original paper](https://aclanthology.org/P02-1040/)
 - Post, **SacreBLEU** (arXiv:[1804.08771](https://arxiv.org/abs/1804.08771)) - reproducible BLEU signature
 - Lin, **ROUGE** (ACL 2004 Workshop) - [paper](https://aclanthology.org/W04-1013/)
@@ -2393,7 +2605,8 @@ Failure modes that span every section above. Read this list before believing any
 - Kirillov et al., **Panoptic Quality** (arXiv:[1801.00868](https://arxiv.org/abs/1801.00868))
 - Guo et al., **calibration / ECE / temperature scaling** (arXiv:[1706.04599](https://arxiv.org/abs/1706.04599))
 - Nixon et al., **Adaptive Calibration Error (ACE)** (arXiv:[1904.01685](https://arxiv.org/abs/1904.01685))
-- Hyndman & Koehler, **MASE** (International Journal of Forecasting 2006) - [paper](https://robjhyndman.com/papers/mase.pdf)
+- Hyndman & Koehler, **MASE** (International Journal of Forecasting
+  2006) - [paper](https://robjhyndman.com/papers/mase.pdf)
 - Gneiting & Raftery, **CRPS / strictly proper scoring rules** (J. Amer. Stat. Assoc. 2007)
 - Chen et al., **Codex / pass@k** (arXiv:[2107.03374](https://arxiv.org/abs/2107.03374))
 - Agarwal et al., **IQM / Rliable** (arXiv:[2108.13264](https://arxiv.org/abs/2108.13264))

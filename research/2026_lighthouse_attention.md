@@ -1,41 +1,61 @@
 # Lighthouse Attention — Long-Context Pretraining via Symmetric Hierarchical Selection
 
-**Paper**: *Long Context Pre-Training with Lighthouse Attention* (Peng, Ghosh, Quesnelle — Nous Research, arXiv:2605.06554v1)
+**Paper**: *Long Context Pre-Training with Lighthouse Attention* (Peng, Ghosh, Quesnelle — Nous Research, arXiv:
+2605.06554v1)
 **Code**: https://github.com/ighoshsubho/lighthouse-attention (patch on top of `pytorch/torchtitan @ 61c25f8d`)
-**Status**: training-only attention substitute, used for pretraining only; the model converts back to dense SDPA via a short resume phase before inference.
+**Status**: training-only attention substitute, used for pretraining only; the model converts back to dense SDPA via a
+short resume phase before inference.
 
 ---
 
 ## 1. TL;DR
 
-Lighthouse Attention is a **training-only**, **selection-based**, **hierarchical** drop-in replacement for full softmax attention. It is designed for **long-context pretraining** (≥100K tokens) where standard SDPA's Θ(N²) cost dominates wall-clock.
+Lighthouse Attention is a **training-only**, **selection-based**, **hierarchical** drop-in replacement for full softmax
+attention. It is designed for **long-context pretraining** (≥100K tokens) where standard SDPA's Θ (N²) cost dominates
+wall-clock.
 
 The construction is unusually clean:
 
-1. **Symmetric pyramid pool**: Average-pool Q, K *and* V by factor `p` across `L` levels. Unlike NSA / HISA / InfLLM-v2 / DSA / MoBA, queries are pooled too. This makes the resulting attention call Θ(S²d) instead of Θ(NSd).
-2. **Parameter-free scoring**: Each pyramid entry gets two scalars: the per-head ℓ₂ norm of its pooled Q projection (`s^QK`) and of its pooled K projection (`s^KQ`). No learned scorer, no auxiliary loss, no Gumbel-softmax, no straight-through estimator.
-3. **Outside-the-kernel selection**: A fused chunked-bitonic top-K kernel picks `k` entries jointly across all levels; rejected coarse entries are retained as causal-boundary filler so the gathered sub-sequence is *contiguous and hole-free*. The actual attention call is **stock FlashAttention** on this dense sub-sequence.
-4. **Two-stage training**: Stage 1 trains for the bulk of the budget with Lighthouse active; Stage 2 (SDPA-resume) disables selection and finetunes briefly under dense SDPA. The resumed checkpoint **matches or beats dense-from-scratch** at the same token budget — the load-bearing correctness claim of the paper.
+1. **Symmetric pyramid pool**: Average-pool Q, K *and* V by factor `p` across `L` levels. Unlike NSA / HISA /
+   InfLLM-v2 / DSA / MoBA, queries are pooled too. This makes the resulting attention call Θ (S²d) instead of Θ (NSd).
+2. **Parameter-free scoring**: Each pyramid entry gets two scalars: the per-head ℓ₂ norm of its pooled Q projection
+   (`s^QK`) and of its pooled K projection (`s^KQ`). No learned scorer, no auxiliary loss, no Gumbel-softmax, no
+   straight-through estimator.
+3. **Outside-the-kernel selection**: A fused chunked-bitonic top-K kernel picks `k` entries jointly across all levels;
+   rejected coarse entries are retained as causal-boundary filler so the gathered sub-sequence is *contiguous and
+   hole-free*. The actual attention call is **stock FlashAttention** on this dense sub-sequence.
+4. **Two-stage training**: Stage 1 trains for the bulk of the budget with Lighthouse active; Stage 2 (SDPA-resume)
+   disables selection and finetunes briefly under dense SDPA. The resumed checkpoint **matches or beats
+   dense-from-scratch** at the same token budget — the load-bearing correctness claim of the paper.
 
 **Headline numbers** (530M Llama-3, 16k optimizer steps, ~50B tokens on C4):
 
 - **17× faster** fwd+bwd at 512K context, single B200 (single-layer microbenchmark)
 - **1.4–1.7× end-to-end** pretraining speedup at 98K context vs dense SDPA baseline
-- Final loss **0.6825–0.7102** (Lighthouse → SDPA) vs **0.7237** (dense SDPA from scratch) — *better* loss at *lower* B200-hours
+- Final loss **0.6825–0.7102** (Lighthouse → SDPA) vs **0.7237** (dense SDPA from scratch) — *better* loss at *lower*
+  B200-hours
 - Scales to **1M-token training** across 32 B200s with context parallelism (CP=8, DP=1, 4 nodes)
 
 ---
 
 ## 2. Why this works (the two prior-art mistakes Lighthouse avoids)
 
-Prior selection-based attention (NSA, HISA, InfLLM-v2, DSA, MoBA) makes two design decisions that are fine for *inference* but quietly bad for *training*:
+Prior selection-based attention (NSA, HISA, InfLLM-v2, DSA, MoBA) makes two design decisions that are fine for
+*inference* but quietly bad for *training*:
 
-1. **Asymmetry**: only K and V are pooled; Q stays at full resolution. The hierarchy becomes a compressed addressable memory rather than a multi-scale representation. Fine for autoregressive decoding (one query at a time); wasteful when all queries co-occur in a training forward.
-2. **Architectural entanglement**: selection lives *inside* the attention kernel as a sparse matmul / per-query gather. This locks out FlashAttention's bit-exact dense kernels and requires a bespoke sparse forward+backward per GPU architecture.
+1. **Asymmetry**: only K and V are pooled; Q stays at full resolution. The hierarchy becomes a compressed addressable
+   memory rather than a multi-scale representation. Fine for autoregressive decoding (one query at a time); wasteful
+   when all queries co-occur in a training forward.
+2. **Architectural entanglement**: selection lives *inside* the attention kernel as a sparse matmul / per-query gather.
+   This locks out FlashAttention's bit-exact dense kernels and requires a bespoke sparse forward+backward per GPU
+   architecture.
 
-There is also a third concern specific to training: an inference-time sparse method is by construction at most as good as its dense backbone. A training-time sparse method has a harder bar — *will the resulting weights still be a competent dense-attention model?* If not, it has trained a specialist of its own approximation.
+There is also a third concern specific to training: an inference-time sparse method is by construction at most as good
+as its dense backbone. A training-time sparse method has a harder bar — *will the resulting weights still be a competent
+dense-attention model?* If not, it has trained a specialist of its own approximation.
 
-Lighthouse's design (symmetric pool + non-differentiable top-K + stock FlashAttention + SDPA-resume) is structured precisely to satisfy that third criterion.
+Lighthouse's design (symmetric pool + non-differentiable top-K + stock FlashAttention + SDPA-resume) is structured
+precisely to satisfy that third criterion.
 
 ---
 
@@ -48,7 +68,8 @@ Q, K, V = H_t @ W_Q, H_t @ W_K, H_t @ W_V          # (N, d) each per head
 O = softmax( Q Kᵀ / √d + M ) V                     # Θ(N²d)
 ```
 
-Lighthouse replaces the softmax call with a 4-stage pipeline; gradients flow only along the trunk (scatter → FA → gather → pool → projections), the green selector branch is non-differentiable.
+Lighthouse replaces the softmax call with a 4-stage pipeline; gradients flow only along the trunk (scatter → FA →
+gather → pool → projections), the green selector branch is non-differentiable.
 
 ### Stage (i) — Pyramid Pool
 
@@ -62,10 +83,11 @@ Q_i^{(l)}   = mean({ Q_j : j ∈ W_i^{(l)} })         # symmetric: same for K, V
 - Level 0 is the original full-resolution sequence (`p^0 = 1`).
 - Level `l` has `N/p^l` entries, each summarising `p^l` base positions.
 - Requirement: `p^{L-1} | N`.
-- Cost: Θ(Nd) (a view + mean, fused via `torch.compile`).
-- Total pyramid entries: Σ N/p^l ≤ N · p/(p−1).
+- Cost: Θ (Nd) (a view + mean, fused via `torch.compile`).
+- Total pyramid entries: Σ N/p^l ≤ N · p/ (p−1).
 
-Pooled queries and pooled keys at level `l` live in the **same representation space**, so summary–summary interactions are well-defined. This is what makes the dense kernel call Θ(S²d) rather than Θ(NSd).
+Pooled queries and pooled keys at level `l` live in the **same representation space**, so summary–summary interactions
+are well-defined. This is what makes the dense kernel call Θ (S²d) rather than Θ (NSd).
 
 ### Stage (ii) — Scoring and Top-K
 
@@ -77,7 +99,8 @@ At level l:   s_{l,i}^QK = max_{0≤j<p^l} s_{0, ip^l + j}^QK    # max-pool from
               s_{l,i}^KQ = max_{0≤j<p^l} s_{0, ip^l + j}^KQ
 ```
 
-**Max-pooling** the coarser-level scores (rather than recomputing norms on pooled projections) lets a coarse span inherit the importance of its strongest constituent token.
+**Max-pooling** the coarser-level scores (rather than recomputing norms on pooled projections) lets a coarse span
+inherit the importance of its strongest constituent token.
 
 Selection runs jointly over the concatenated QK and KQ streams across all levels:
 
@@ -85,11 +108,18 @@ Selection runs jointly over the concatenated QK and KQ streams across all levels
 I = TopK( { s_{l,i}^QK, s_{l,i}^KQ : (l,i) ∈ P },  k )
 ```
 
-An entry chosen via its KQ score still enters the gather as its own `(Q_i^{(l)}, K_i^{(l)}, V_i^{(l)})` triple — the KQ stream just gives keys a *second chance* to surface tokens that are important as receivers but not as senders.
+An entry chosen via its KQ score still enters the gather as its own `(Q_i^{(l)}, K_i^{(l)}, V_i^{(l)})` triple — the KQ
+stream just gives keys a *second chance* to surface tokens that are important as receivers but not as senders.
 
-**Coarsest level is always retained in full**: it is cheap (`N/p^{L-1}` entries) and guarantees at least one contributor at every base position, so the gathered sub-sequence has no holes.
+**Coarsest level is always retained in full**: it is cheap (`N/p^{L-1}` entries) and guarantees at least one contributor
+at every base position, so the gathered sub-sequence has no holes.
 
-**Critical: rejected coarse entries are kept as causal-boundary filler.** If we threw away every rejected coarse entry, the level-1 survivors would no longer tile the base sequence — there would be gaps over positions whose coarse summary didn't make the cut and whose finer descendants weren't selected either. Those gaps would force a sparse-aware causal mask. Lighthouse instead keeps rejected coarse entries (`pk` per level, where the `p` factor is exactly this causal-boundary bookkeeping). After sorting by base-sequence position, the result is **topologically causal with no holes** — the standard lower-triangular causal mask Just Works, and the attention kernel never sees a sparse layout.
+**Critical: rejected coarse entries are kept as causal-boundary filler.** If we threw away every rejected coarse entry,
+the level-1 survivors would no longer tile the base sequence — there would be gaps over positions whose coarse summary
+didn't make the cut and whose finer descendants weren't selected either. Those gaps would force a sparse-aware causal
+mask. Lighthouse instead keeps rejected coarse entries (`pk` per level, where the `p` factor is exactly this
+causal-boundary bookkeeping). After sorting by base-sequence position, the result is **topologically causal with no
+holes** — the standard lower-triangular causal mask Just Works, and the attention kernel never sees a sparse layout.
 
 ### Stage (iii) — Gathered-Sequence Attention
 
@@ -99,9 +129,10 @@ S   = N/p^{L-1} + (L−1)·p·k                    # gathered sequence length
 Õ   = FlashAttention(Q̃, K̃, Ṽ ; M̃)             # ordinary S×S causal mask
 ```
 
-At N=1M, L=4, p=4, k=4096:  S ≈ 6.5×10⁴ ≪ N. Choosing `L = log_p(N/k)` balances the two terms and gives `S = Θ(k log_p(N/k))`.
+At N=1M, L=4, p=4, k=4096:  S ≈ 6.5×10⁴ ≪ N. Choosing `L = log_p(N/k)` balances the two terms and gives
+`S = Θ(k log_p(N/k))`.
 
-This is the only Θ(S²d) call in the layer. Everything else is Θ(Nd) or Θ(N log k).
+This is the only Θ (S²d) call in the layer. Everything else is Θ (Nd) or Θ (N log k).
 
 ### Stage (iv) — Scatter-Back
 
@@ -112,11 +143,15 @@ R(l, i) = [ i·p^l + p^l − 1,  i·p^l + 2·p^l − 2 ]      # range of fan-out
 O_j     = Σ_{ m : j ∈ R(l_m, i_m) } Õ_m                # accumulate
 ```
 
-The shift of `p^l − 1` starts the write at the *last* summarised token — so a coarse summary of positions `[ip^l, (i+1)p^l − 1]` writes to `[(i+1)p^l − 1, (i+2)p^l − 2]`. This preserves causality: base position `j` never receives a summary that contains its own future.
+The shift of `p^l − 1` starts the write at the *last* summarised token — so a coarse summary of positions
+`[ip^l, (i+1)p^l − 1]` writes to `[(i+1)p^l − 1, (i+2)p^l − 2]`. This preserves causality: base position `j` never
+receives a summary that contains its own future.
 
-Within a level, consecutive windows write to disjoint adjacent ranges; across levels, contributions are summed. Per-position fan-in is bounded by `L` regardless of `k`.
+Within a level, consecutive windows write to disjoint adjacent ranges; across levels, contributions are summed.
+Per-position fan-in is bounded by `L` regardless of `k`.
 
 The accumulation is implemented as a custom Triton kernel with two variants:
+
 - **Default**: fp atomic-add (non-deterministic, fast).
 - **Reproducibility**: integer atomic (deterministic, 1.2–2× slower).
 
@@ -142,29 +177,29 @@ return O
 
 ## 5. Complexity
 
-| Stage                       | Primitive               | Cost              |
-|-----------------------------|-------------------------|-------------------|
-| Projections Q,K,V           | GEMM                    | Θ(N · d_model · d)|
-| Pyramid pool                | view+mean               | Θ(N d)            |
-| Scoring (norms, max-pool)   | norm+max                | Θ(N d)            |
-| Top-K selection             | chunked bitonic         | Θ(N log k)        |
-| Gather                      | `torch.gather`          | Θ(S d)            |
-| **Dense sub-seq attention** | FlashAttention          | **Θ(S² d)**       |
-| Scatter-back                | custom atomic           | Θ(N d)            |
+| Stage                       | Primitive       | Cost               |
+|-----------------------------|-----------------|--------------------|
+| Projections Q,K,V           | GEMM            | Θ(N · d_model · d) |
+| Pyramid pool                | view+mean       | Θ(N d)             |
+| Scoring (norms, max-pool)   | norm+max        | Θ(N d)             |
+| Top-K selection             | chunked bitonic | Θ(N log k)         |
+| Gather                      | `torch.gather`  | Θ(S d)             |
+| **Dense sub-seq attention** | FlashAttention  | **Θ(S² d)**        |
+| Scatter-back                | custom atomic   | Θ(N d)             |
 
 With `S = N/p^{L−1} + (L−1)pk` and balanced `L = log_p(N/k)`:
-`S = Θ(k log_p(N/k))`, so attention cost = Θ(k² log²N · d) — polylogarithmic at fixed k.
+`S = Θ(k log_p(N/k))`, so attention cost = Θ (k² log²N · d) — polylogarithmic at fixed k.
 
-Per-layer total at bounded k: **Θ(N · d)** — linear in N (up to a log k factor for top-K).
+Per-layer total at bounded k: **Θ (N · d)** — linear in N (up to a log k factor for top-K).
 
 Comparison:
 
-| Method                          | Per-layer compute |
-|---------------------------------|-------------------|
-| Dense softmax                   | Θ(N² d)           |
-| Log-Linear Attention            | Θ(N log N · d)    |
-| **Lighthouse (bounded k)**      | **Θ(N · d)**      |
-| Linear attention / SSMs         | Θ(N · d)          |
+| Method                     | Per-layer compute |
+|----------------------------|-------------------|
+| Dense softmax              | Θ(N² d)           |
+| Log-Linear Attention       | Θ(N log N · d)    |
+| **Lighthouse (bounded k)** | **Θ(N · d)**      |
+| Linear attention / SSMs    | Θ(N · d)          |
 
 ---
 
@@ -173,59 +208,74 @@ Comparison:
 The trained weights must remain a competent dense-attention model after sparse training. Recipe is two-stage:
 
 - **Stage 1 (Lighthouse)**: train the majority of the budget with selection enabled.
-- **Stage 2 (SDPA-resume)**: resume the Stage-1 checkpoint with selection disabled — same optimizer state, same dataloader continuation, ordinary dense SDPA. A brief tail (4k–6k of 16k total) is enough.
+- **Stage 2 (SDPA-resume)**: resume the Stage-1 checkpoint with selection disabled — same optimizer state, same
+  dataloader continuation, ordinary dense SDPA. A brief tail (4k–6k of 16k total) is enough.
 
-At each resume the loss **transiently spikes** (1.12–1.57 nats) as the model is first asked to use attention it was not trained against, then recovers within ~1–1.5k SDPA steps and crosses below the dense baseline.
+At each resume the loss **transiently spikes** (1.12–1.57 nats) as the model is first asked to use attention it was not
+trained against, then recovers within ~1–1.5k SDPA steps and crosses below the dense baseline.
 
-Across three split points (10k+6k / 11k+5k / 12k+4k of 16k total) **every recovered run matches or beats** dense-from-scratch (final loss 0.6980–0.7102 vs 0.7237). Recovery is robust — the recipe doesn't pivot on a precise schedule.
+Across three split points (10k+6k / 11k+5k / 12k+4k of 16k total) **every recovered run matches or beats**
+dense-from-scratch (final loss 0.6980–0.7102 vs 0.7237). Recovery is robust — the recipe doesn't pivot on a precise
+schedule.
 
 ---
 
 ## 7. Hyperparameters and Ablations (530M Llama-3, ctx=98K, 16k steps, ~50.3B tokens, 8×B200)
 
-| Configuration                              | Scorer  | B200-h ↓ | Tok/s/GPU (k) ↑ | Final Loss ↓ |
-|--------------------------------------------|---------|---------:|-----------------:|-------------:|
-| **SDPA baseline (dense-from-scratch)**     | —       |    303.2 |             45.6 |       0.7237 |
-| LH→SDPA (12k+4k) L=3,p=2,k=6144            | Dilated |    214.7 |             74.7 |       0.7102 |
-| LH→SDPA (11k+5k) L=3,p=2,k=6144            | Dilated |    219.6 |             75.4 |       0.7001 |
-| LH→SDPA (10k+6k) L=3,p=2,k=6144            | Dilated |    228.0 |             75.0 |       0.6980 |
-| L=3, p=2, k=1536                           | Dilated |    203.9 |             93.9 |   **0.6825** |
-| L=3, p=4, k=1536                           | Dilated |    197.2 |             99.5 |       0.6881 |
-| L=3, p=4, k=1536                           | Norm    |    179.6 |        **126.0** |       0.6946 |
-| L=3, p=8, k=1536                           | Dilated |    206.2 |             92.1 |       0.6828 |
-| L=4, p=2, k=1536                           | Dilated |    200.2 |             96.4 |       0.6978 |
-| L=5, p=2, k=1536                           | Dilated |    201.5 |             96.3 |       0.6991 |
-| L=3, p=2, k=2048                           | Dilated |    208.1 |             90.9 |       0.6880 |
-| L=3, p=2, k=4096                           | Dilated |    215.7 |             83.5 |       0.6951 |
-| **CP: k=4096, ctx=256K, CP=8, DP=1**       | Norm    |   1300.3 |             48.9 |   **0.6721** |
+| Configuration                          | Scorer  | B200-h ↓ | Tok/s/GPU (k) ↑ | Final Loss ↓ |
+|----------------------------------------|---------|---------:|----------------:|-------------:|
+| **SDPA baseline (dense-from-scratch)** | —       |    303.2 |            45.6 |       0.7237 |
+| LH→SDPA (12k+4k) L=3,p=2,k=6144        | Dilated |    214.7 |            74.7 |       0.7102 |
+| LH→SDPA (11k+5k) L=3,p=2,k=6144        | Dilated |    219.6 |            75.4 |       0.7001 |
+| LH→SDPA (10k+6k) L=3,p=2,k=6144        | Dilated |    228.0 |            75.0 |       0.6980 |
+| L=3, p=2, k=1536                       | Dilated |    203.9 |            93.9 |   **0.6825** |
+| L=3, p=4, k=1536                       | Dilated |    197.2 |            99.5 |       0.6881 |
+| L=3, p=4, k=1536                       | Norm    |    179.6 |       **126.0** |       0.6946 |
+| L=3, p=8, k=1536                       | Dilated |    206.2 |            92.1 |       0.6828 |
+| L=4, p=2, k=1536                       | Dilated |    200.2 |            96.4 |       0.6978 |
+| L=5, p=2, k=1536                       | Dilated |    201.5 |            96.3 |       0.6991 |
+| L=3, p=2, k=2048                       | Dilated |    208.1 |            90.9 |       0.6880 |
+| L=3, p=2, k=4096                       | Dilated |    215.7 |            83.5 |       0.6951 |
+| **CP: k=4096, ctx=256K, CP=8, DP=1**   | Norm    |   1300.3 |            48.9 |   **0.6721** |
 
 Findings (full grid in §A of paper):
 
-- **Every** Lighthouse configuration matches or beats the dense baseline — recoverability is not specific to any one hyperparameter setting.
-- **Scorer**: projection-norm is within ~0.01 nats of dilated softmax in either direction, but is parameter-free and ~9% cheaper in B200-hours. Default: `norm`.
+- **Every** Lighthouse configuration matches or beats the dense baseline — recoverability is not specific to any one
+  hyperparameter setting.
+- **Scorer**: projection-norm is within ~0.01 nats of dilated softmax in either direction, but is parameter-free and ~9%
+  cheaper in B200-hours. Default: `norm`.
 - **Pool factor p**: ∈ {2, 4, 8} land within ~0.02 nats. Effect is dominated by throughput/memory tradeoffs.
-- **Levels L**: L=3 best; L=4, L=5 monotonically worse (deeper pyramid spreads the budget across more coarse levels, leaving fewer entries at the finest level).
-- **Top-K k**: counter-intuitively, *smaller* k gives lower loss (0.6825 → 0.6880 → 0.6890 → 0.6951 over k ∈ {1536, 2048, 3072, 4096}, dips back at 6144). Plausibly hierarchical selection regularises at this token budget; whether it reverses at much larger budgets is an open question.
+- **Levels L**: L=3 best; L=4, L=5 monotonically worse (deeper pyramid spreads the budget across more coarse levels,
+  leaving fewer entries at the finest level).
+- **Top-K k**: counter-intuitively, *smaller* k gives lower loss (0.6825 → 0.6880 → 0.6890 → 0.6951 over k ∈ {1536,
+  2048, 3072, 4096}, dips back at 6144). Plausibly hierarchical selection regularises at this token budget; whether it
+  reverses at much larger budgets is an open question.
 
-**Stage-1 throughput**: 84–126k tok/s/GPU vs ~46k for dense SDPA — roughly **2× per-step**. Stage-2 (SDPA-resume) matches the dense baseline; all the saving comes from Stage 1.
+**Stage-1 throughput**: 84–126k tok/s/GPU vs ~46k for dense SDPA — roughly **2× per-step**. Stage-2 (SDPA-resume)
+matches the dense baseline; all the saving comes from Stage 1.
 
-**End-to-end 10k+6k recipe**: 22.5–27.0h wall-clock vs 37.9h for dense baseline → **1.40×–1.69× speedup** at matched or lower final loss.
+**End-to-end 10k+6k recipe**: 22.5–27.0h wall-clock vs 37.9h for dense baseline → **1.40×–1.69× speedup** at matched or
+lower final loss.
 
 ### Long-Context Retrieval (NIAH, simplified single-digit passkey)
 
-At 530M params and 16k steps, full-prose NIAH scores near zero (model too small). The paper uses a single-digit variant: hide one of `{0..9}` in alphanumeric filler at depths `{0, 15, 30, 50, 70, 85, 100}%` across contexts `{4, 8, 16, 32, 64, 96}K`; argmax over the 10 digit tokens at the last position; mean over 10 trials.
+At 530M params and 16k steps, full-prose NIAH scores near zero (model too small). The paper uses a single-digit variant:
+hide one of `{0..9}` in alphanumeric filler at depths `{0, 15, 30, 50, 70, 85, 100}%` across contexts
+`{4, 8, 16, 32, 64, 96}K`; argmax over the 10 digit tokens at the last position; mean over 10 trials.
 
 Mean retrieval rate over the grid:
 
-| Config (L=3, p=4)              | Mean |
-|-------------------------------|-----:|
-| k=2048 dilated → SDPA          | 0.76 |
-| k=1536 dilated → SDPA          | 0.73 |
-| k=2048 norm → SDPA             | 0.72 |
-| **Dense SDPA from scratch**    | 0.72 |
-| k=1536 norm → SDPA             | 0.65 |
+| Config (L=3, p=4)           | Mean |
+|-----------------------------|-----:|
+| k=2048 dilated → SDPA       | 0.76 |
+| k=1536 dilated → SDPA       | 0.73 |
+| k=2048 norm → SDPA          | 0.72 |
+| **Dense SDPA from scratch** | 0.72 |
+| k=1536 norm → SDPA          | 0.65 |
 
-Two patterns: (i) larger k is the dominant axis; (ii) `norm` hurts retrieval more than it hurts loss — at fixed k, switching dilated→norm costs 0.04–0.08 retrieval. **Default choice depends on the downstream task**: `norm` for loss/throughput, `dilated` for retrieval.
+Two patterns: (i) larger k is the dominant axis; (ii) `norm` hurts retrieval more than it hurts loss — at fixed k,
+switching dilated→norm costs 0.04–0.08 retrieval. **Default choice depends on the downstream task**: `norm` for
+loss/throughput, `dilated` for retrieval.
 
 ---
 
@@ -233,26 +283,34 @@ Two patterns: (i) larger k is the dominant axis; (ii) `norm` hurts retrieval mor
 
 Single-layer microbench on a single B200 (bf16, B=1, H=8, d=128, L=3, p=4, sparsity ≈ 1:64):
 
-- SDPA scales Θ(N²d); Lighthouse scales Θ(S²d) with S ≪ N.
+- SDPA scales Θ (N²d); Lighthouse scales Θ (S²d) with S ≪ N.
 - At short contexts the two curves track each other (selector overhead dominates).
 - At N=512K: **21× faster forward**, **17.3× faster fwd+bwd**.
 - Equivalently, dense SDPA needs ~113K (fwd) or ~122K (fwd+bwd) of context to match Lighthouse's runtime at 512K.
 
-The Lighthouse curve already includes pyramid pool + scoring + top-K + scatter overhead — it is not just the FlashAttention call.
+The Lighthouse curve already includes pyramid pool + scoring + top-K + scatter overhead — it is not just the
+FlashAttention call.
 
 ---
 
 ## 9. Context Parallelism (CP)
 
-Beyond ~100K context, the 530M model OOMs on a single B200 regardless of attention method (activations + grads + optimizer state). Lighthouse extends cleanly to CP **with no sparse-aware collectives** because its pre-attention primitives are local:
+Beyond ~100K context, the 530M model OOMs on a single B200 regardless of attention method (activations + grads +
+optimizer state). Lighthouse extends cleanly to CP **with no sparse-aware collectives** because its pre-attention
+primitives are local:
 
-1. The coarsest pool window `p^{L−1}` (e.g. 64) is orders of magnitude smaller than the shard size (`N/W = 128K` at N=1M, W=8) → pooling and scoring need no inter-rank communication.
+1. The coarsest pool window `p^{L−1}` (e.g. 64) is orders of magnitude smaller than the shard size (`N/W = 128K` at
+   N=1M, W=8) → pooling and scoring need no inter-rank communication.
 2. Each rank runs the chunked-bitonic top-K on its own pyramid, producing `I_r ⊆ P_r` from tokens it already owns.
-3. The gathered sub-sequence is **dense**, so FlashAttention runs under standard **ring attention** — KV shards rotate through the ring as in a fully dense long-context run. Each rank's queries see the cross-shard context selected by every other rank's Lighthouse pipeline.
+3. The gathered sub-sequence is **dense**, so FlashAttention runs under standard **ring attention** — KV shards rotate
+   through the ring as in a fully dense long-context run. Each rank's queries see the cross-shard context selected by
+   every other rank's Lighthouse pipeline.
 
-This last property is only possible because Lighthouse's selection output is a *contiguous tensor*. Sparse-selection kernels cannot express ring rotation without engineering specific to the sparse layout.
+This last property is only possible because Lighthouse's selection output is a *contiguous tensor*. Sparse-selection
+kernels cannot express ring rotation without engineering specific to the sparse layout.
 
-CP cost: ~10% per-rank throughput overhead vs single-device extrapolation. Validated configs: CP=2/DP=4 at 98K, **CP=8/DP=1 at 256K**, and **1M-token training on 32 B200s (4 nodes, CP=8)**.
+CP cost: ~10% per-rank throughput overhead vs single-device extrapolation. Validated configs: CP=2/DP=4 at 98K,
+**CP=8/DP=1 at 256K**, and **1M-token training on 32 B200s (4 nodes, CP=8)**.
 
 The CP path **requires the `norm` scorer** — the `dilated` and `gla` scorers are refused at construction time:
 
@@ -261,7 +319,9 @@ ValueError: lighthouse_scorer='dilated' is not supported under context paralleli
 The CP path was validated only for 'norm'.
 ```
 
-CP also requires a load-balancing knob to be disabled in the underlying PyTorch CP API (`_cp_options.enable_load_balance = True/False`); the patch threads `enable_load_balance=is_lighthouse_cp` through `create_context_parallel_ctx`.
+CP also requires a load-balancing knob to be disabled in the underlying PyTorch CP API
+(`_cp_options.enable_load_balance = True/False`); the patch threads `enable_load_balance=is_lighthouse_cp` through
+`create_context_parallel_ctx`.
 
 ---
 
@@ -277,11 +337,13 @@ scores_kq = xk.norm(dim=-1)   # (B, S, H)
 # coarser levels: max-pool the level-0 norms
 ```
 
-Parameter-free, Θ(N), no Q–K interaction. Strictly weaker than a learned QK scorer. Any positive result is a *lower bound* on what selection-based training can deliver.
+Parameter-free, Θ (N), no Q–K interaction. Strictly weaker than a learned QK scorer. Any positive result is a *lower
+bound* on what selection-based training can deliver.
 
 ### 10b. `dilated`
 
-Run softmax attention over the pyramid with dilation factor δ at O(N²d/δ). Sub-quadratic but still super-linear; an order of magnitude more expensive than `norm` at long context.
+Run softmax attention over the pyramid with dilation factor δ at O (N²d/δ). Sub-quadratic but still super-linear; an
+order of magnitude more expensive than `norm` at long context.
 
 ```python
 # Reshape to (B, S/δ, δ·H, D); call inner attention twice (QKV and KQV);
@@ -292,15 +354,18 @@ Provides Q–K interaction in the score. Slightly better retrieval; ~9% more wal
 
 ### 10c. `gla` (gated linear attention; requires `flash-linear-attention`)
 
-Uses `chunk_simple_gla` from the `fla` package, with a per-token gate projection `wg : R^{d_model} → R^H` and `gk = log_sigmoid(wg(x)) / 16`. Most expressive scorer; only path that adds learnable parameters (the gate `wg`).
+Uses `chunk_simple_gla` from the `fla` package, with a per-token gate projection `wg : R^{d_model} → R^H` and
+`gk = log_sigmoid(wg(x)) / 16`. Most expressive scorer; only path that adds learnable parameters (the gate `wg`).
 
-The patch's `_build_lighthouse_scorer` dispatches on `lighthouse_scorer ∈ {norm, dilated, gla}`; selecting `gla` flags `needs_gate=True` so the `Attention` module instantiates `self.wg` and threads `gk` through the forward.
+The patch's `_build_lighthouse_scorer` dispatches on `lighthouse_scorer ∈ {norm, dilated, gla}`; selecting `gla` flags
+`needs_gate=True` so the `Attention` module instantiates `self.wg` and threads `gk` through the forward.
 
 ---
 
 ## 11. Architecture / Reference Setup
 
 530M Llama-3-style decoder:
+
 - `d_model = 1024`, `n_layers = 30`, `n_heads = 8`, `n_kv_heads = 8`, head dim 128, FFN hidden 1536
 - `rope_theta = 10000`
 - byte-level tokenizer
@@ -308,13 +373,15 @@ The patch's `_build_lighthouse_scorer` dispatches on `lighthouse_scorer ∈ {nor
 - Inner attention call uses cuDNN-SDPA (PyTorch 2.11.0+cu128, cuDNN 9.19.0, CUDA 12.8)
 
 Training:
+
 - C4 dataset, seq_len **98,304**, global batch **32**
 - AdamW: lr `2e-3`, β₁=0.9, β₂=0.95, weight_decay 0.1
 - linear warmup 2k steps, gradient-norm clip 1.0
 - bfloat16, FSDP only (no TP, no PP for the main ablation grid)
 - 16,000 optimizer steps total (~50.3B tokens)
 
-For 1M-token training: same architecture, `lighthouse_full_attn_layers=[]` (no dense layers), CP=8, DP=1, L=4, p=4, k=4096.
+For 1M-token training: same architecture, `lighthouse_full_attn_layers=[]` (no dense layers), CP=8, DP=1, L=4, p=4,
+k=4096.
 
 ---
 
@@ -324,24 +391,37 @@ The implementation lives in two new files plus ~600 lines of edits on `torchtita
 
 ### 12a. Chunked-Bitonic Top-K (`lighthouse_selection_cuda.py`)
 
-A textbook bitonic top-K sorts the entire score stream in shared memory or registers — fails at k=4096 over a pyramid of ~2N entries. Lighthouse uses a **chunked** design:
+A textbook bitonic top-K sorts the entire score stream in shared memory or registers — fails at k=4096 over a pyramid
+of ~2N entries. Lighthouse uses a **chunked** design:
 
 - Partition the score stream into fixed-size chunks (TOPK_PER_TILE = 128).
-- Each chunk maintains a running top-m buffer (TOPK_HALF = 64 each for QK and KQ streams) via **in-register bitonic merge** using `__shfl_xor_sync` warp shuffles for k≤32 and shared-memory swaps for k>32.
+- Each chunk maintains a running top-m buffer (TOPK_HALF = 64 each for QK and KQ streams) via **in-register bitonic
+  merge** using `__shfl_xor_sync` warp shuffles for k≤32 and shared-memory swaps for k>32.
 - `N/N_chunk` chunks dispatch as independent CTAs (one CTA per `(batch, kv_head)` × `(seq_chunk)`).
 - No thread block ever holds more than `m` scores; the work is fully parallel.
 
-**Coarse-to-fine cascade inside the kernel**: starts at level `num_levels` (coarsest), keeps top-K parents, descends into the `p` children of each parent, runs top-K again, and so on. At level 1 (base) all surviving entries are kept. Rejected entries from coarser levels are emitted to the output buffer alongside selected ones (the causal-boundary filler from §3 stage (ii)).
+**Coarse-to-fine cascade inside the kernel**: starts at level `num_levels` (coarsest), keeps top-K parents, descends
+into the `p` children of each parent, runs top-K again, and so on. At level 1 (base) all surviving entries are kept.
+Rejected entries from coarser levels are emitted to the output buffer alongside selected ones (the causal-boundary
+filler from §3 stage (ii)).
 
-**Output layout — packed uint64 keys**: each output slot stores `(level_ordered_key : uint32) << 32 | (actual_index : uint32)`. The level-ordered key is a float (base position with sub-level shift) encoded so its bit pattern sorts the same way as the float value would. A single global `torch.sort` along the last dim then produces the topologically-causal contiguous sub-sequence in O(N log N) time. The lower 32 bits are masked off to recover the actual indices.
+**Output layout — packed uint64 keys**: each output slot stores
+`(level_ordered_key : uint32) << 32 | (actual_index : uint32)`. The level-ordered key is a float (base position with
+sub-level shift) encoded so its bit pattern sorts the same way as the float value would. A single global `torch.sort`
+along the last dim then produces the topologically-causal contiguous sub-sequence in O (N log N) time. The lower 32 bits
+are masked off to recover the actual indices.
 
-The kernel is compiled at runtime via `torch.cuda._compile_kernel(..., nvcc_options=["--use_fast_math", "--std=c++17"])`. There is also a pure-Triton variant (`LighthouseSelectionQkKqChunkedTopk`) in `lighthouse_selection.py` for portability.
+The kernel is compiled at runtime via
+`torch.cuda._compile_kernel(..., nvcc_options=["--use_fast_math", "--std=c++17"])`. There is also a pure-Triton variant
+(`LighthouseSelectionQkKqChunkedTopk`) in `lighthouse_selection.py` for portability.
 
 **Asserts** (from `LighthouseSelectionQkKqChunkedTopkNvrtc.forward`):
+
 - `topk % 128 == 0`
 - `pooling_factor` is a power of 2
 - `topk // 2 ≥ pooling_factor`
-- `N_CHUNK_COARSEST ≥ TOPK_PER_TILE` (i.e. the coarsest level divided across tiles must leave each tile with ≥128 entries)
+- `N_CHUNK_COARSEST ≥ TOPK_PER_TILE` (i.e. the coarsest level divided across tiles must leave each tile with ≥128
+  entries)
 - `scores_qk.dtype == float32` (selection scores are always upcast to fp32)
 
 ### 12b. Scatter-Back (`_ScatterToBaseAutograd` in `lighthouse_selection.py`)
@@ -349,30 +429,40 @@ The kernel is compiled at runtime via `torch.cuda._compile_kernel(..., nvcc_opti
 A custom `torch.autograd.Function` with a Triton forward and Triton backward.
 
 **Forward** `_scatter_fanout_fwd_kernel`:
-- For each gathered output position `s ∈ [0, S_sel)`, the index `idx` encodes which pyramid level it came from (via cumulative level sizes `N_shard, N_shard/p, N_shard/p², …`).
+
+- For each gathered output position `s ∈ [0, S_sel)`, the index `idx` encodes which pyramid level it came from (via
+  cumulative level sizes `N_shard, N_shard/p, N_shard/p², …`).
 - Compute `base_pos = global_off + local_pos · p^l` and `fan_out = p^l`.
-- Atomic-add the output vector `O_s` to all `p^l` positions `[base_pos + p^l − 1, base_pos + 2·p^l − 2]` in the base sequence.
+- Atomic-add the output vector `O_s` to all `p^l` positions `[base_pos + p^l − 1, base_pos + 2·p^l − 2]` in the base
+  sequence.
 - Uses `tl.atomic_add(..., sem="relaxed", scope="gpu")` for the fp non-deterministic path.
 
 **Backward** `_scatter_fanout_bwd_kernel`:
+
 - Reads `p^l` positions from `grad_output` and sums them into `grad_attn[s]`.
 - No atomic needed (each output is read by exactly one input).
 
 The two key shape parameters baked into the kernel:
+
 - `MAX_PF = pooling_factor ^ (num_levels − 1)` — the maximum fan-out (coarsest level).
 - `BLOCK_D = next_power_of_2(D)` — head dimension rounded up for vectorised loads.
 
-The forward is non-deterministic by default (fp atomic ordering); the deterministic variant uses integer atomics and is 1.2–2× slower (intended only for reproducing results).
+The forward is non-deterministic by default (fp atomic ordering); the deterministic variant uses integer atomics and is
+1.2–2× slower (intended only for reproducing results).
 
 ### 12c. Helper: CP all-to-all primitives
 
 `lighthouse_selection.py` also implements custom `torch.autograd.Function`s for the CP all-to-alls:
 
-- `UnstripeFunction` / `_unstripe_impl`: convert a striped layout (`N_shard` strided across `W` ranks) to a contiguous slice.
+- `UnstripeFunction` / `_unstripe_impl`: convert a striped layout (`N_shard` strided across `W` ranks) to a contiguous
+  slice.
 - `StripeFunction` / `_stripe_impl`: inverse, used in the backward.
-- `SeqToHeadParallel` / `HeadToSeqParallel`: reshape between sequence-parallel and head-parallel layouts for ring attention. Requires `H % world_size == 0`.
+- `SeqToHeadParallel` / `HeadToSeqParallel`: reshape between sequence-parallel and head-parallel layouts for ring
+  attention. Requires `H % world_size == 0`.
 
-The `LighthouseCP` module splits the sequence into a head half and a tail half (`s // 2` each), runs scoring + top-K per half (`topk_per_load = topk // (world_size * 2)` for global-topk-across-load-balanced halves), gathers, calls the inner attention, and scatters each half back independently.
+The `LighthouseCP` module splits the sequence into a head half and a tail half (`s // 2` each), runs scoring + top-K per
+half (`topk_per_load = topk // (world_size * 2)` for global-topk-across-load-balanced halves), gathers, calls the inner
+attention, and scatters each half back independently.
 
 ---
 
@@ -382,16 +472,16 @@ The `LighthouseCP` module splits the sequence into a head half and a tail half (
 
 Top-level classes:
 
-| Class                                   | Role                                                                                 |
-|-----------------------------------------|--------------------------------------------------------------------------------------|
-| `DialatedLighthouseNormScorer`          | `norm` scorer — non-CP. Returns `scores_qk_cat, scores_kq_cat, xq_cat, xk_cat, xv_cat`. |
-| `DialatedLighthouseNormScorerCP`        | `norm` scorer — CP-aware (used per shard).                                            |
-| `DilatedLighthouseScorer`               | `dilated` scorer — runs softmax attention over a dilated pyramid for Q→K and K→Q.    |
-| `DilatedLighthouseGLAScorer`            | `gla` scorer — uses `chunk_simple_gla` from `fla`. Requires gate `gk`.               |
-| `LighthouseLocal`                       | Non-CP wrapper: scorer → top-K → gather → attention → scatter.                       |
-| `LighthouseCP`                          | CP wrapper: head/tail split + per-shard scoring + ring-attention gather.             |
-| `LighthouseSelectionQkKqChunkedTopk`    | Pure-Triton top-K kernel (autotuned, `@torch.compiler.disable`).                     |
-| `_ScatterToBaseAutograd`                | Triton fwd+bwd scatter-back as a custom autograd Function.                           |
+| Class                                | Role                                                                                    |
+|--------------------------------------|-----------------------------------------------------------------------------------------|
+| `DialatedLighthouseNormScorer`       | `norm` scorer — non-CP. Returns `scores_qk_cat, scores_kq_cat, xq_cat, xk_cat, xv_cat`. |
+| `DialatedLighthouseNormScorerCP`     | `norm` scorer — CP-aware (used per shard).                                              |
+| `DilatedLighthouseScorer`            | `dilated` scorer — runs softmax attention over a dilated pyramid for Q→K and K→Q.       |
+| `DilatedLighthouseGLAScorer`         | `gla` scorer — uses `chunk_simple_gla` from `fla`. Requires gate `gk`.                  |
+| `LighthouseLocal`                    | Non-CP wrapper: scorer → top-K → gather → attention → scatter.                          |
+| `LighthouseCP`                       | CP wrapper: head/tail split + per-shard scoring + ring-attention gather.                |
+| `LighthouseSelectionQkKqChunkedTopk` | Pure-Triton top-K kernel (autotuned, `@torch.compiler.disable`).                        |
+| `_ScatterToBaseAutograd`             | Triton fwd+bwd scatter-back as a custom autograd Function.                              |
 
 Triton kernels:
 
@@ -402,24 +492,27 @@ Triton kernels:
 
 ### 13b. `src/lighthouse_selection_cuda.py` (~300 lines)
 
-NVRTC-compiled CUDA variant of the top-K kernel, dispatched via `torch.cuda._compile_kernel`. Lower latency than Triton at the cost of having to recompile per `(pooling_factor, topk_per_tile)`. The class `LighthouseSelectionQkKqChunkedTopkNvrtc` is what the reference `LighthouseLocal` / `LighthouseCP` actually call.
+NVRTC-compiled CUDA variant of the top-K kernel, dispatched via `torch.cuda._compile_kernel`. Lower latency than Triton
+at the cost of having to recompile per `(pooling_factor, topk_per_tile)`. The class
+`LighthouseSelectionQkKqChunkedTopkNvrtc` is what the reference `LighthouseLocal` / `LighthouseCP` actually call.
 
 ### 13c. The torchtitan patch (`lighthouse-attention.patch`)
 
 Touches 8 files; cumulative diff ~3700 lines (most of it is config registration).
 
-| File                                            | Purpose                                                                              |
-|-------------------------------------------------|--------------------------------------------------------------------------------------|
-| `torchtitan/models/llama3/model/args.py`        | Add `dilation`, `hidden_dim`, `use_selection_lighthouse`, `use_lighthouse_cp`, `lighthouse_num_levels`, `lighthouse_pooling_factor`, `lighthouse_topk`, `lighthouse_scorer`, `lighthouse_full_attn_layers` to `TransformerModelArgs`. |
+| File                                            | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+|-------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `torchtitan/models/llama3/model/args.py`        | Add `dilation`, `hidden_dim`, `use_selection_lighthouse`, `use_lighthouse_cp`, `lighthouse_num_levels`, `lighthouse_pooling_factor`, `lighthouse_topk`, `lighthouse_scorer`, `lighthouse_full_attn_layers` to `TransformerModelArgs`.                                                                                                                                                                                                                   |
 | `torchtitan/models/llama3/model/model.py`       | `_build_lighthouse_scorer(model_args, head_dim)` dispatches on scorer name; wires `wg` for GLA; FFN honors explicit `hidden_dim`. `Attention.forward` switches between SDPA and selection paths; `set_use_lighthouse(False)` disables for resume / dense layers; `Attention.set_cp_info(rank, world_size, cp_group)` propagates CP state. `Transformer.__init__` applies `set_use_lighthouse(False)` to the layer ids in `lighthouse_full_attn_layers`. |
-| `torchtitan/models/llama3/__init__.py`          | Registers ~26 ablation flavors (`ablation_270m_lighthouse_topk{K}_pool{P}_lvl{L}[_cp[_1m]]` and dim-matched dense `_sdpa` flavors for resume). |
-| `torchtitan/models/llama3/infra/parallelize.py` | `apply_compile` uses `compile_config.fullgraph` so transformer blocks compile with graph breaks (required by `@torch.compiler.disable` on scorers). |
-| `torchtitan/distributed/utils.py`               | `create_context_parallel_ctx(..., enable_load_balance=True)` knob (toggles `_cp_options.enable_load_balance` on the experimental PyTorch CP API). |
-| `torchtitan/config/job_config.py`               | Adds `fullgraph: bool = False` to `Compile` dataclass.                               |
-| `torchtitan/hf_datasets/text_datasets.py`       | Registers a `c4_local` dataset entry for an on-disk C4 mirror at `/home/c4`.         |
-| `torchtitan/train.py`                           | When CP is enabled and the model has Lighthouse-CP modules: calls `module.set_cp_info(cp_rank, cp_world_size, cp_group)` once on first `forward_backward_step`; threads `enable_load_balance=is_lighthouse_cp` through the CP context. |
+| `torchtitan/models/llama3/__init__.py`          | Registers ~26 ablation flavors (`ablation_270m_lighthouse_topk{K}_pool{P}_lvl{L}[_cp[_1m]]` and dim-matched dense `_sdpa` flavors for resume).                                                                                                                                                                                                                                                                                                          |
+| `torchtitan/models/llama3/infra/parallelize.py` | `apply_compile` uses `compile_config.fullgraph` so transformer blocks compile with graph breaks (required by `@torch.compiler.disable` on scorers).                                                                                                                                                                                                                                                                                                     |
+| `torchtitan/distributed/utils.py`               | `create_context_parallel_ctx(..., enable_load_balance=True)` knob (toggles `_cp_options.enable_load_balance` on the experimental PyTorch CP API).                                                                                                                                                                                                                                                                                                       |
+| `torchtitan/config/job_config.py`               | Adds `fullgraph: bool = False` to `Compile` dataclass.                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `torchtitan/hf_datasets/text_datasets.py`       | Registers a `c4_local` dataset entry for an on-disk C4 mirror at `/home/c4`.                                                                                                                                                                                                                                                                                                                                                                            |
+| `torchtitan/train.py`                           | When CP is enabled and the model has Lighthouse-CP modules: calls `module.set_cp_info(cp_rank, cp_world_size, cp_group)` once on first `forward_backward_step`; threads `enable_load_balance=is_lighthouse_cp` through the CP context.                                                                                                                                                                                                                  |
 
-Two new files (`lighthouse_selection.py`, `lighthouse_selection_cuda.py`) are copied into `torchtitan/models/llama3/model/` *separately* from the patch.
+Two new files (`lighthouse_selection.py`, `lighthouse_selection_cuda.py`) are copied into
+`torchtitan/models/llama3/model/` *separately* from the patch.
 
 ---
 
@@ -430,8 +523,10 @@ Two new files (`lighthouse_selection.py`, `lighthouse_selection_cuda.py`) are co
 - **Python 3.13**, **CUDA 12.8** toolkit on the host
 - **PyTorch 2.11.0+cu128**, cuDNN 9.19.0
 - GPU: NVIDIA B200 (sm_100) — Hopper (H100) will also work but is not what the paper benchmarks
-- `triton==3.6.0`, `einops==0.8.2`, `datasets==4.8.2`, `transformers==5.5.4`, `wandb==0.25.1`, `flash-linear-attention==0.4.2` (only if using `gla` scorer)
-- Optional: FA4 from source (`pip install git+https://github.com/Dao-AILab/flash-attention.git#subdirectory=cute`) — the default cuDNN-SDPA path works fine.
+- `triton==3.6.0`, `einops==0.8.2`, `datasets==4.8.2`, `transformers==5.5.4`, `wandb==0.25.1`,
+  `flash-linear-attention==0.4.2` (only if using `gla` scorer)
+- Optional: FA4 from source (`pip install git+https://github.com/Dao-AILab/flash-attention.git#subdirectory=cute`) — the
+  default cuDNN-SDPA path works fine.
 
 ### 14b. Apply the patch
 
@@ -467,8 +562,10 @@ This trains 10,000 steps with `flavor = ablation_270m_lighthouse_topk1536_pool4_
 ### 14d. Launch Stage 2 (SDPA resume)
 
 Create a second toml pointing at the same `[checkpoint] folder` but with:
+
 - `[training] steps = 16000` (continues to 16k total)
-- `[model] flavor = ablation_270m_topk1536_pool4_lvl3_sdpa` (dim-matched dense variant — same dim, hidden_dim, n_heads, n_kv_heads, no `use_selection_lighthouse`)
+- `[model] flavor = ablation_270m_topk1536_pool4_lvl3_sdpa` (dim-matched dense variant — same dim, hidden_dim, n_heads,
+  n_kv_heads, no `use_selection_lighthouse`)
 
 Run with the same `torchrun` command.
 
@@ -479,43 +576,69 @@ torchrun --nnodes 1 --nproc-per-node 8 ./torchtitan/train.py \
     --job.config_file /path/to/lighthouse-attention/configs/cp/norm_cp2_dp4.toml
 ```
 
-The toml sets `context_parallel_degree = 2` and uses `flavor = ablation_270m_lighthouse_topk1536_pool4_lvl3` (which has `use_lighthouse_cp=True` and `lighthouse_scorer="norm"`). The patch wires `set_cp_info(...)` on first step automatically.
+The toml sets `context_parallel_degree = 2` and uses `flavor = ablation_270m_lighthouse_topk1536_pool4_lvl3` (which has
+`use_lighthouse_cp=True` and `lighthouse_scorer="norm"`). The patch wires `set_cp_info(...)` on first step
+automatically.
 
-For 1M-token: `ablation_270m_lighthouse_topk4096_pool4_lvl4_cp_1m` (L=4, p=4, k=4096, `lighthouse_full_attn_layers=[]`), 4 nodes × 8 GPUs, CP=8, DP=1.
+For 1M-token: `ablation_270m_lighthouse_topk4096_pool4_lvl4_cp_1m` (L=4, p=4, k=4096, `lighthouse_full_attn_layers=[]`),
+4 nodes × 8 GPUs, CP=8, DP=1.
 
 ---
 
 ## 15. Important Implementation Details / Gotchas
 
-1. **Selection runs at `torch.no_grad()`**. Top-K is non-differentiable; indices are int32; gradients carry no information through the selector branch.
-2. **`@torch.compiler.disable` on the top-K and GLA scorer**. The `inductor` backend cannot trace through NVRTC-compiled kernels or `chunk_simple_gla`. This forces the transformer block to compile with `fullgraph=False` (graph breaks allowed) — the patch adds the `compile_config.fullgraph` knob to enable this without breaking other models.
-3. **Scores upcast to fp32** before the top-K kernel. bf16 maxima around the score range can collide and produce non-deterministic selection; the kernel asserts fp32.
-4. **FFN hidden dim**. Lighthouse flavors set `hidden_dim` directly on `TransformerModelArgs`. The patch falls back to upstream's `4 * dim` when `hidden_dim is None`. Ablation flavors use `hidden_dim=1536` (3× smaller than upstream's default 4096), which is a deliberate part of the 530M parameter count.
-5. **Full-attention layers**. The ablation flavors keep layers `[0, 1, 28, 29]` (first two and last two) on dense SDPA. This consistently improves recoverability; the 1M-token config sets `lighthouse_full_attn_layers=[]` because at that scale even four dense layers are too expensive.
-6. **GLA scorer adds a parameter**. `wg : Linear(d_model, n_heads, bias=True)` and `gate_logit_normalizer = 16`. The patch initializes `wg.weight ~ trunc_normal(0, 0.02)`, `wg.bias = 0`.
-7. **CP path requires `norm` scorer**. `_build_lighthouse_scorer` raises `ValueError` if `use_lighthouse_cp and scorer != "norm"`. The CP path has only been validated for that variant.
-8. **CP load balancing**. PyTorch's experimental CP API does ring-attention load balancing by default (cuts each shard in half, pairs head+tail across ranks). Lighthouse CP needs this *on* (`enable_load_balance=True`), which is why `LighthouseCP.forward` always processes `xq[:, :half]` and `xq[:, half:]` separately and uses `topk_per_load = topk // (world_size * 2)`.
-9. **Scatter-back non-determinism**. The default fp-atomic scatter produces different bit-exact output across runs at fixed seed; this is acceptable for training (the accumulated gradient is statistically identical). For reproducibility, swap to the integer-atomic variant at 1.2–2× wall-clock cost.
-10. **Dataset is on-disk C4**. The patch hardcodes `c4_local` to `path="/home/c4"`. Override before running outside the paper's exact environment.
+1. **Selection runs at `torch.no_grad()`**. Top-K is non-differentiable; indices are int32; gradients carry no
+   information through the selector branch.
+2. **`@torch.compiler.disable` on the top-K and GLA scorer**. The `inductor` backend cannot trace through NVRTC-compiled
+   kernels or `chunk_simple_gla`. This forces the transformer block to compile with `fullgraph=False` (graph breaks
+   allowed) — the patch adds the `compile_config.fullgraph` knob to enable this without breaking other models.
+3. **Scores upcast to fp32** before the top-K kernel. bf16 maxima around the score range can collide and produce
+   non-deterministic selection; the kernel asserts fp32.
+4. **FFN hidden dim**. Lighthouse flavors set `hidden_dim` directly on `TransformerModelArgs`. The patch falls back to
+   upstream's `4 * dim` when `hidden_dim is None`. Ablation flavors use `hidden_dim=1536` (3× smaller than upstream's
+   default 4096), which is a deliberate part of the 530M parameter count.
+5. **Full-attention layers**. The ablation flavors keep layers `[0, 1, 28, 29]` (first two and last two) on dense SDPA.
+   This consistently improves recoverability; the 1M-token config sets `lighthouse_full_attn_layers=[]` because at that
+   scale even four dense layers are too expensive.
+6. **GLA scorer adds a parameter**. `wg : Linear(d_model, n_heads, bias=True)` and `gate_logit_normalizer = 16`. The
+   patch initializes `wg.weight ~ trunc_normal(0, 0.02)`, `wg.bias = 0`.
+7. **CP path requires `norm` scorer**. `_build_lighthouse_scorer` raises `ValueError` if
+   `use_lighthouse_cp and scorer != "norm"`. The CP path has only been validated for that variant.
+8. **CP load balancing**. PyTorch's experimental CP API does ring-attention load balancing by default (cuts each shard
+   in half, pairs head+tail across ranks). Lighthouse CP needs this *on* (`enable_load_balance=True`), which is why
+   `LighthouseCP.forward` always processes `xq[:, :half]` and `xq[:, half:]` separately and uses
+   `topk_per_load = topk // (world_size * 2)`.
+9. **Scatter-back non-determinism**. The default fp-atomic scatter produces different bit-exact output across runs at
+   fixed seed; this is acceptable for training (the accumulated gradient is statistically identical). For
+   reproducibility, swap to the integer-atomic variant at 1.2–2× wall-clock cost.
+10. **Dataset is on-disk C4**. The patch hardcodes `c4_local` to `path="/home/c4"`. Override before running outside the
+    paper's exact environment.
 
 ---
 
 ## 16. Limitations
 
-- **Symmetric Q/K/V pooling presumes all queries co-occur in one forward pass.** Autoregressive *decoding* violates this; Lighthouse is **not an inference-time substitute**. The dense-SDPA resume is what converts the checkpoint into a serveable model. Every downstream evaluation in the paper runs after the resume.
-- **Inner attention is Θ(S²d) on the gathered sub-sequence.** Sub-quadratic in N at fixed k, but *not strictly linear*. Regimes where k must scale with N to maintain recall are not characterised in the paper.
-- **All experiments are at 530M params, 16k steps, 50B tokens.** No evidence at frontier scale. The smaller-k-helps trend is plausibly a regularisation artefact at this token budget.
-- **NIAH evaluation is a simplified single-digit passkey**, not the standard prose variant — necessary because of the model size, but limits direct comparison to published NIAH numbers.
+- **Symmetric Q/K/V pooling presumes all queries co-occur in one forward pass.** Autoregressive *decoding* violates
+  this; Lighthouse is **not an inference-time substitute**. The dense-SDPA resume is what converts the checkpoint into a
+  serveable model. Every downstream evaluation in the paper runs after the resume.
+- **Inner attention is Θ (S²d) on the gathered sub-sequence.** Sub-quadratic in N at fixed k, but *not strictly linear*.
+  Regimes where k must scale with N to maintain recall are not characterised in the paper.
+- **All experiments are at 530M params, 16k steps, 50B tokens.** No evidence at frontier scale. The smaller-k-helps
+  trend is plausibly a regularisation artefact at this token budget.
+- **NIAH evaluation is a simplified single-digit passkey**, not the standard prose variant — necessary because of the
+  model size, but limits direct comparison to published NIAH numbers.
 
 ---
 
 ## 17. Open Questions / Future Directions
 
-1. **Asymmetric sparse resumption**. Swap the dense-SDPA resume for an inference-oriented asymmetric sparse target (DSA, NSA, HISA, MoBA) so the converted checkpoint is natively serveable.
+1. **Asymmetric sparse resumption**. Swap the dense-SDPA resume for an inference-oriented asymmetric sparse target (DSA,
+   NSA, HISA, MoBA) so the converted checkpoint is natively serveable.
 2. **Adaptive selection budget**. Per-layer or per-head `k` allocation instead of one fixed `k` across the whole model.
 3. **Beyond text**. Vision, audio, and video have natural multi-scale structure that fits the pyramid.
 4. **Scaling**. Does the smaller-k-helps trend reverse at frontier-scale token budgets?
-5. **Serving integration**. Continuous batching, speculative decoding, KV-cache management for the resumed model — needed to translate the training speedup into deployment speedup.
+5. **Serving integration**. Continuous batching, speculative decoding, KV-cache management for the resumed model —
+   needed to translate the training speedup into deployment speedup.
 
 ---
 
@@ -523,21 +646,29 @@ For 1M-token: `ablation_270m_lighthouse_topk4096_pool4_lvl4_cp_1m` (L=4, p=4, k=
 
 If we wanted to add a Lighthouse layer to this repo, the minimum viable port:
 
-1. **`PyramidPool` layer**: symmetric average-pool Q, K, V into L levels with factor p; output flat-concatenated tensors of shape `(B, S_pyr, H, D)` with `S_pyr = Σ N/p^l`.
-2. **`NormScorer`**: per-head ℓ₂ norms at level 0; `tf.reduce_max` along window dim for coarser levels. Output `(B, S_pyr, H)`.
+1. **`PyramidPool` layer**: symmetric average-pool Q, K, V into L levels with factor p; output flat-concatenated tensors
+   of shape `(B, S_pyr, H, D)` with `S_pyr = Σ N/p^l`.
+2. **`NormScorer`**: per-head ℓ₂ norms at level 0; `tf.reduce_max` along window dim for coarser levels. Output
+   `(B, S_pyr, H)`.
 3. **`ChunkedBitonicTopK`**: this is the hard one. Options:
-   - Wrap the existing CUDA NVRTC kernel via `tf.load_op_library` (requires writing a thin TF custom op).
-   - Reimplement the chunked-bitonic logic in `tf.raw_ops.TopKV2` over fixed-size chunks, then merge — slower but pure TF.
-   - Approximate via `tf.math.top_k` over the flat pyramid plus an explicit causal-boundary pass to insert rejected coarse entries. Loses the stratified selection guarantee.
-4. **`scatter_to_base_sequence`**: a `tf.scatter_nd` with explicit per-level fan-out. Forward is straightforward; backward is `tf.gather` of `grad_output`. Both can be expressed as `tf.function` ops.
+    - Wrap the existing CUDA NVRTC kernel via `tf.load_op_library` (requires writing a thin TF custom op).
+    - Reimplement the chunked-bitonic logic in `tf.raw_ops.TopKV2` over fixed-size chunks, then merge — slower but pure
+      TF.
+    - Approximate via `tf.math.top_k` over the flat pyramid plus an explicit causal-boundary pass to insert rejected
+      coarse entries. Loses the stratified selection guarantee.
+4. **`scatter_to_base_sequence`**: a `tf.scatter_nd` with explicit per-level fan-out. Forward is straightforward;
+   backward is `tf.gather` of `grad_output`. Both can be expressed as `tf.function` ops.
 5. **`LighthouseAttention` Keras layer**:
-   - `__init__`: `n_heads, head_dim, num_levels=3, pooling_factor=2, topk=1536, scorer='norm', full_attention=False`.
-   - `build`: standard `wq, wk, wv, wo` Linear layers; optional `wg` for GLA.
-   - `call`: switch on `full_attention` to choose the dense path (Keras `MultiHeadAttention` or `keras.ops.dot_product_attention`) vs the Lighthouse path.
-   - Serialisable via `get_config()` per repo conventions.
-6. **Two-stage training**: the cleanest expression in this repo is a callback that flips `full_attention=True` on all Lighthouse layers at a configurable step boundary; learning rate, optimizer state, and dataloader continue unchanged.
+    - `__init__`: `n_heads, head_dim, num_levels=3, pooling_factor=2, topk=1536, scorer='norm', full_attention=False`.
+    - `build`: standard `wq, wk, wv, wo` Linear layers; optional `wg` for GLA.
+    - `call`: switch on `full_attention` to choose the dense path (Keras `MultiHeadAttention` or
+      `keras.ops.dot_product_attention`) vs the Lighthouse path.
+    - Serialisable via `get_config()` per repo conventions.
+6. **Two-stage training**: the cleanest expression in this repo is a callback that flips `full_attention=True` on all
+   Lighthouse layers at a configurable step boundary; learning rate, optimizer state, and dataloader continue unchanged.
 
-The challenges in order of difficulty: (1) the custom top-K kernel — Triton/CUDA path doesn't survive in Keras+JAX/TF; (2) keeping the scatter-back differentiable; (3) replicating the exact CP path under TF distribution strategies.
+The challenges in order of difficulty: (1) the custom top-K kernel — Triton/CUDA path doesn't survive in Keras+JAX/TF;
+(2) keeping the scatter-back differentiable; (3) replicating the exact CP path under TF distribution strategies.
 
 ---
 
@@ -546,17 +677,23 @@ The challenges in order of difficulty: (1) the custom top-K kernel — Triton/CU
 - Peng, Ghosh, Quesnelle. *Long Context Pre-Training with Lighthouse Attention*. arXiv:2605.06554v1.
 - Reference implementation: `github.com/ighoshsubho/lighthouse-attention`.
 - Underlying torchtitan commit: `pytorch/torchtitan @ 61c25f8d`.
-- Key prior art: FlashAttention (Dao 2022, 2024; Shah 2024), NSA (Yuan 2025), DSA (DeepSeek 2025), HISA (Zhao 2026), MoBA (Lu 2025), InfLLM-v2 (Zhao 2026), Ring Attention (Liu 2023).
+- Key prior art: FlashAttention (Dao 2022, 2024; Shah 2024), NSA (Yuan 2025), DSA (DeepSeek 2025), HISA (Zhao 2026),
+  MoBA (Lu 2025), InfLLM-v2 (Zhao 2026), Ring Attention (Liu 2023).
 
 ---
 
 ## 20. Verbatim Kernel & Module Reference
 
-This appendix exists so the document is genuinely standalone. Everything below is either the literal reference source (Apache-2.0 / MIT-style upstream) or pseudocode dense enough to reimplement without consulting external files.
+This appendix exists so the document is genuinely standalone. Everything below is either the literal reference source
+(Apache-2.0 / MIT-style upstream) or pseudocode dense enough to reimplement without consulting external files.
 
 ### 20a. The float→ordered-uint encoding trick
 
-The chunked-bitonic top-K outputs `(key : uint32) << 32 | (actual_index : uint32)` and a single global `torch.sort` over the resulting uint64 stream produces the topologically-causal layout. The key field is a float (the level-ordered base position) encoded so its **bit pattern** has the same total order as the float's numeric value, across both positive and negative floats. Standard IEEE-754 ordering doesn't have this property (negative floats sort *reversed* by bit pattern); the fix is a one-bit flip for non-negatives and a bitwise NOT for negatives:
+The chunked-bitonic top-K outputs `(key : uint32) << 32 | (actual_index : uint32)` and a single global `torch.sort` over
+the resulting uint64 stream produces the topologically-causal layout. The key field is a float (the level-ordered base
+position) encoded so its **bit pattern** has the same total order as the float's numeric value, across both positive and
+negative floats. Standard IEEE-754 ordering doesn't have this property (negative floats sort *reversed* by bit pattern);
+the fix is a one-bit flip for non-negatives and a bitwise NOT for negatives:
 
 ```cuda
 __device__ __forceinline__ unsigned int float_to_ordered_uint(float f) {
@@ -597,11 +734,13 @@ unsigned int encode_key_selected(int level_local_idx, int c_l, int level) {
 }
 ```
 
-The `exp2f(1 - level)` shift is what places level-`l` summaries *just before* the last base position they summarise, implementing the causal-shift `p^l − 1` from §3 stage (iv) at the *index* level.
+The `exp2f(1 - level)` shift is what places level-`l` summaries *just before* the last base position they summarise,
+implementing the causal-shift `p^l − 1` from §3 stage (iv) at the *index* level.
 
 ### 20b. In-register bitonic sort (CUDA, descending, SORT_SIZE elements per CTA)
 
-This is the kernel-internal sort used after each batch merge of the chunked-bitonic top-K. Phase 1 is fully intra-warp (uses `__shfl_xor_sync`); phase 2 mixes shared memory for k>32 with intra-warp shuffles for the inner stages.
+This is the kernel-internal sort used after each batch merge of the chunked-bitonic top-K. Phase 1 is fully intra-warp
+(uses `__shfl_xor_sync`); phase 2 mixes shared memory for k>32 with intra-warp shuffles for the inner stages.
 
 ```cuda
 __device__ __forceinline__ void bitonic_sort_descending(
@@ -667,7 +806,11 @@ __device__ __forceinline__ void bitonic_sort_descending(
 
 ### 20c. Chunked-bitonic top-K main loop (CUDA, level-cascade)
 
-The kernel iterates levels coarse-to-fine. Per level, it either consumes the tile span (coarsest) or expands the previous level's surviving parents into `p` children each. At each batch within a level: load `BATCH = TOPK_HALF` new candidates into the upper half of the sort buffer (lower half = running top-m); sort descending; the upper half after sort = rejects (emitted to output for causal boundary), the lower half = new top-m. The QK and KQ streams are merged on the same buffer in alternation.
+The kernel iterates levels coarse-to-fine. Per level, it either consumes the tile span (coarsest) or expands the
+previous level's surviving parents into `p` children each. At each batch within a level: load `BATCH = TOPK_HALF` new
+candidates into the upper half of the sort buffer (lower half = running top-m); sort descending; the upper half after
+sort = rejects (emitted to output for causal boundary), the lower half = new top-m. The QK and KQ streams are merged on
+the same buffer in alternation.
 
 ```cuda
 constexpr int POOLING_FACTOR = <P>;
@@ -900,7 +1043,8 @@ def _scatter_fanout_fwd_kernel(
     tl.atomic_add(ptrs, ao_2d, mask=mask_2d, sem="relaxed", scope="gpu")
 ```
 
-Backward is the dual — read from `grad_output` at the same `[base+fan-1, base+2fan-2]` range, sum across the fan-out dim, store at `grad_attn[s]`. No atomic needed.
+Backward is the dual — read from `grad_output` at the same `[base+fan-1, base+2fan-2]` range, sum across the fan-out
+dim, store at `grad_attn[s]`. No atomic needed.
 
 ### 20f. `LighthouseLocal.forward` (canonical non-CP module, verbatim)
 
@@ -950,7 +1094,9 @@ class LighthouseLocal(nn.Module):
 
 ### 20g. `LighthouseCP.forward` and the head/tail split
 
-PyTorch's experimental CP API does **causal load-balancing**: each rank holds two non-contiguous chunks of the sequence — the first `s/(2W)` tokens of one half and the last `s/(2W)` tokens of the other — so that all ranks see roughly the same amount of work despite the causal mask. Lighthouse mirrors that split exactly:
+PyTorch's experimental CP API does **causal load-balancing**: each rank holds two non-contiguous chunks of the
+sequence — the first `s/(2W)` tokens of one half and the last `s/(2W)` tokens of the other — so that all ranks see
+roughly the same amount of work despite the causal mask. Lighthouse mirrors that split exactly:
 
 ```python
 class LighthouseCP(nn.Module):
@@ -1003,7 +1149,9 @@ class LighthouseCP(nn.Module):
         return torch.cat([out_h, out_t], dim=2)
 ```
 
-The `Attention.forward` only calls `selection_attn(xq, xk, xv)` — the `context_parallel(...)` ctx-mgr around the train step is what gets the underlying `self.attention(...)` call to use ring attention. Lighthouse adds no ring-aware code path.
+The `Attention.forward` only calls `selection_attn(xq, xk, xv)` — the `context_parallel(...)` ctx-mgr around the train
+step is what gets the underlying `self.attention(...)` call to use ring attention. Lighthouse adds no ring-aware code
+path.
 
 ### 20h. The two scorers, verbatim
 
@@ -1073,33 +1221,49 @@ GLA scorer adds the per-token gate `wg(x)` and uses `fla.ops.simple_gla.chunk_si
 
 The two stages are wired together by file-level state, not by code paths. Step-by-step:
 
-1. **Train Stage 1** with the Lighthouse flavor (e.g. `ablation_270m_lighthouse_topk1536_pool4_lvl3`) for 10,000 steps. The flavor has `use_selection_lighthouse=True` and `lighthouse_full_attn_layers=[0, 1, 28, 29]`.
-2. **Checkpoint** at step 10,000. Both model weights *and* optimizer state must be saved (`last_save_model_only = false`).
+1. **Train Stage 1** with the Lighthouse flavor (e.g. `ablation_270m_lighthouse_topk1536_pool4_lvl3`) for 10,000 steps.
+   The flavor has `use_selection_lighthouse=True` and `lighthouse_full_attn_layers=[0, 1, 28, 29]`.
+2. **Checkpoint** at step 10,000. Both model weights *and* optimizer state must be saved
+   (`last_save_model_only = false`).
 3. **Create the Stage 2 toml**: copy the Stage 1 toml and change:
-   - `[model] flavor = ablation_270m_topk1536_pool4_lvl3_sdpa` (the dim-matched dense variant — same `dim`, `hidden_dim`, `n_heads`, `n_kv_heads`, `rope_theta`, but no `use_selection_lighthouse` and no Lighthouse-specific keys).
-   - `[training] steps = 16000` (total step count continues — the trainer counts from the checkpointed step, not from zero).
-   - `[checkpoint] folder` points at the *same* directory as Stage 1.
-   - Optionally lower `[lr_scheduler]` so the resume tail anneals (paper uses the original linear schedule continuation).
-4. **Launch Stage 2** with the same `torchrun` command. The trainer detects the existing checkpoint, restores weights + optimizer state + dataloader position, and continues. Because the new flavor has no `use_selection_lighthouse`, `Attention.forward` falls into the `else` branch and runs ordinary SDPA on all 30 layers.
-5. **Loss spike at resume** (1.12–1.57 nats) recovers within ~1–1.5k SDPA steps. Final loss at step 16,000 matches or beats dense-from-scratch.
+    - `[model] flavor = ablation_270m_topk1536_pool4_lvl3_sdpa` (the dim-matched dense variant — same `dim`,
+      `hidden_dim`, `n_heads`, `n_kv_heads`, `rope_theta`, but no `use_selection_lighthouse` and no Lighthouse-specific
+      keys).
+    - `[training] steps = 16000` (total step count continues — the trainer counts from the checkpointed step, not from
+      zero).
+    - `[checkpoint] folder` points at the *same* directory as Stage 1.
+    - Optionally lower `[lr_scheduler]` so the resume tail anneals (paper uses the original linear schedule
+      continuation).
+4. **Launch Stage 2** with the same `torchrun` command. The trainer detects the existing checkpoint, restores weights +
+   optimizer state + dataloader position, and continues. Because the new flavor has no `use_selection_lighthouse`,
+   `Attention.forward` falls into the `else` branch and runs ordinary SDPA on all 30 layers.
+5. **Loss spike at resume** (1.12–1.57 nats) recovers within ~1–1.5k SDPA steps. Final loss at step 16,000 matches or
+   beats dense-from-scratch.
 
-**Why this works**: the Lighthouse and dense flavors share the same `wq, wk, wv, wo, w1, w2, w3, norm, output, tok_embeddings` parameter names and shapes. The Lighthouse-specific module (`self.selection_attn`) has no learnable parameters in the `norm` scorer case; in the GLA case the `wg` projection is simply ignored on resume and is *not* loaded into the dense flavor (HF checkpoint loader skips missing keys). The model is genuinely a dense Transformer after the toggle.
+**Why this works**: the Lighthouse and dense flavors share the same
+`wq, wk, wv, wo, w1, w2, w3, norm, output, tok_embeddings` parameter names and shapes. The Lighthouse-specific module
+(`self.selection_attn`) has no learnable parameters in the `norm` scorer case; in the GLA case the `wg` projection is
+simply ignored on resume and is *not* loaded into the dense flavor (HF checkpoint loader skips missing keys). The model
+is genuinely a dense Transformer after the toggle.
 
-**Alternative in-process toggle** (not used by the paper but supported by the patch): keep the Lighthouse flavor and call `model.set_use_lighthouse(False)` on every `Attention` module mid-training. This skips the checkpoint round-trip but requires retraining-loop instrumentation; the file-level approach is what the configs ship.
+**Alternative in-process toggle** (not used by the paper but supported by the patch): keep the Lighthouse flavor and
+call `model.set_use_lighthouse(False)` on every `Attention` module mid-training. This skips the checkpoint round-trip
+but requires retraining-loop instrumentation; the file-level approach is what the configs ship.
 
 ### 20j. Minimum tensor-shape contract for a reimplementation
 
-| Tensor                 | Shape                          | Dtype         | Notes                                  |
-|------------------------|--------------------------------|---------------|----------------------------------------|
-| `xq, xk, xv` (input)   | `(B, S, H, D)`                 | bf16          | per-head, post-RoPE                     |
-| `scores_qk_cat`        | `(B, H, S_pyr)`                | bf16 → fp32   | `S_pyr = Σ_{l=0..L-1} N/p^l`            |
-| `xq_cat, xk_cat, xv_cat` | `(B, H, S_pyr, D)`            | bf16          | levels concatenated along seq dim      |
-| `indices` (after kernel) | `(B, H, S_sel)`              | int32         | `S_sel = N/p^{L-1} + (L-1)·p·k`         |
-| `selected_xq/xk/xv`    | `(B, H, S_sel, D)`             | bf16          | output of `torch.gather`                |
-| `attn_out`             | `(B, H, S_sel, D)`             | bf16          | FlashAttention output, causal mask     |
-| `output` (final)       | `(B, H, N, D)`                 | bf16          | scatter-back result; contiguous & dense |
+| Tensor                   | Shape              | Dtype       | Notes                                   |
+|--------------------------|--------------------|-------------|-----------------------------------------|
+| `xq, xk, xv` (input)     | `(B, S, H, D)`     | bf16        | per-head, post-RoPE                     |
+| `scores_qk_cat`          | `(B, H, S_pyr)`    | bf16 → fp32 | `S_pyr = Σ_{l=0..L-1} N/p^l`            |
+| `xq_cat, xk_cat, xv_cat` | `(B, H, S_pyr, D)` | bf16        | levels concatenated along seq dim       |
+| `indices` (after kernel) | `(B, H, S_sel)`    | int32       | `S_sel = N/p^{L-1} + (L-1)·p·k`         |
+| `selected_xq/xk/xv`      | `(B, H, S_sel, D)` | bf16        | output of `torch.gather`                |
+| `attn_out`               | `(B, H, S_sel, D)` | bf16        | FlashAttention output, causal mask      |
+| `output` (final)         | `(B, H, N, D)`     | bf16        | scatter-back result; contiguous & dense |
 
 Constraints:
+
 - `p^{L-1} | N` (coarsest level must tile the sequence).
 - `topk % 128 == 0` and `topk // 2 ≥ p` (kernel asserts).
 - `p` is a power of 2 (kernel uses bit shifts for parent-index decoding).
@@ -1109,8 +1273,15 @@ Constraints:
 
 If a port doesn't preserve these, the recoverability claim falls apart:
 
-1. **Coarsest level is retained in full** — every base position has at least one contributor in the gathered sub-sequence. Without this, scatter-back leaves zeros at positions whose coarse summary was rejected, training is destabilised, and the SDPA-resume diverges.
-2. **Rejected coarse entries are kept as causal-boundary filler** — emit them to the output buffer at `WARMUP_BATCHES` onward, alongside selected ones. Removing this would leave the gathered sub-sequence with holes at level-`l` boundaries.
-3. **Topological sort by base position** after the kernel — the `torch.sort` over uint64 keys is what makes the standard lower-triangular causal mask correct. Skipping it would force a sparse-aware mask.
-4. **Scatter shift of `p^l − 1`** — coarse summaries write to `[base + p^l − 1, base + 2p^l − 2]`, *not* `[base, base + p^l − 1]`. The shift is what stops a base token from receiving a summary that contains its own future.
-5. **Top-K is `torch.no_grad()`** — indices must carry no gradient. Adding a straight-through estimator or Gumbel-softmax breaks the empirical result (the authors specifically call this out as a design choice).
+1. **Coarsest level is retained in full** — every base position has at least one contributor in the gathered
+   sub-sequence. Without this, scatter-back leaves zeros at positions whose coarse summary was rejected, training is
+   destabilised, and the SDPA-resume diverges.
+2. **Rejected coarse entries are kept as causal-boundary filler** — emit them to the output buffer at `WARMUP_BATCHES`
+   onward, alongside selected ones. Removing this would leave the gathered sub-sequence with holes at level-`l`
+   boundaries.
+3. **Topological sort by base position** after the kernel — the `torch.sort` over uint64 keys is what makes the standard
+   lower-triangular causal mask correct. Skipping it would force a sparse-aware mask.
+4. **Scatter shift of `p^l − 1`** — coarse summaries write to `[base + p^l − 1, base + 2p^l − 2]`, *not*
+   `[base, base + p^l − 1]`. The shift is what stops a base token from receiving a summary that contains its own future.
+5. **Top-K is `torch.no_grad()`** — indices must carry no gradient. Adding a straight-through estimator or
+   Gumbel-softmax breaks the empirical result (the authors specifically call this out as a design choice).
