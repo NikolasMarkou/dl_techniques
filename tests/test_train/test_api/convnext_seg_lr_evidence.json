@@ -176,6 +176,50 @@
     128
    ],
    "summary_sha256": "50a4e22ce319c31c4f28f3db7c4671074fc8da7ba351f10b213c9694defd3618"
+  },
+  {
+   "run": "cell_convnext_seg_cifar10_s44_e30",
+   "why": "fix 9.3 rerun at the shipped recipe rate",
+   "model": "convnext_seg/cifar10",
+   "variant": "cifar10",
+   "seed": 44,
+   "lr": 0.001,
+   "epochs_requested": 30,
+   "epochs_run": 30,
+   "best_epoch": 30,
+   "best_val_miou": 0.6673486828804016,
+   "test_miou": 0.6722641587257385,
+   "test_accuracy": 0.8672088384628296,
+   "majority_baseline_miou": 0.19835668370343637,
+   "dataset": "oxford_pet",
+   "batch_size": 16,
+   "input_size": [
+    128,
+    128
+   ],
+   "summary_sha256": "02e9089828c180f83610ca1590bd423e140cf857a974265f245fb12243b827b6"
+  },
+  {
+   "run": "cell_convnext_seg_cifar10_s44_e30_lr1e-4",
+   "why": "seed-44 pair of the fix 9.3 rerun, at the family rate",
+   "model": "convnext_seg/cifar10",
+   "variant": "cifar10",
+   "seed": 44,
+   "lr": 0.0001,
+   "epochs_requested": 30,
+   "epochs_run": 30,
+   "best_epoch": 30,
+   "best_val_miou": 0.6616590619087219,
+   "test_miou": 0.6710473895072937,
+   "test_accuracy": 0.8648257851600647,
+   "majority_baseline_miou": 0.19835668370343637,
+   "dataset": "oxford_pet",
+   "batch_size": 16,
+   "input_size": [
+    128,
+    128
+   ],
+   "summary_sha256": "0b5aac7d8fde0c1429009c20542fcfce45eb4d156e0a24ac71a5155da6f697d7"
   }
  ]
 }

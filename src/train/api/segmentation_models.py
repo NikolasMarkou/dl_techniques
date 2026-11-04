@@ -708,13 +708,14 @@ ACCUNET = _segmentation_recipe(
 # `convnext_seg/base` needs 8 and `xlarge` did not fit at any batch from 16 to 1 beside another session's 15.9 GB
 # (`tests/test_train/test_api/backbone_seg_memory_evidence.json`).
 # DECISION plan-2026-11-03T221936-98b866fb/D-029
-# The rate is PER VARIANT: 1e-4 for the family and 1e-3 for `cifar10`. Measured over 30 epochs on Pet at 128 px, seeds 42
-# and 43 (`tests/test_train/test_api/convnext_seg_lr_evidence.json`, held by a test): `cifar10` reaches test mIoU 0.688 and
-# 0.687 at 1e-3 against 0.672 and 0.674 at 1e-4 (+0.016, +0.012), while `tiny` stays at the pixel prior at 1e-3 (0.370 and
-# 0.370, early stop at epoch 13 and 22) and reaches 0.597 and 0.601 at 1e-4. `small`, `base`, `large` and `xlarge` were
+# The rate is PER VARIANT: 1e-4 for the family and 1e-3 for `cifar10`. Measured over 30 epochs on Pet at 128 px
+# (`tests/test_train/test_api/convnext_seg_lr_evidence.json`, held by a test): `cifar10` reaches test mIoU 0.688, 0.687 and
+# 0.672 at 1e-3 (seeds 42, 43, 44) against 0.672, 0.674 and 0.671 at 1e-4: ahead on all three seeds, by 0.016, 0.012 and 0.001
+# (mean 0.010), a modest gain and not a large one; `tiny` stays at the pixel prior at 1e-3 (0.370 and 0.370, early stop at epoch
+# 13 and 22, seeds 42 and 43) and reaches 0.597 and 0.601 at 1e-4. `small`, `base`, `large` and `xlarge` were
 # NOT measured at either rate and keep the family's 1e-4, the rate that worked for the deeper `tiny`; a deeper variant
 # may want something else. Do NOT make 1e-3 the family rate again for `cifar10`'s sake (it stalls `tiny`) and do NOT make 1e-4
-# the rate of `cifar10` for the family's sake (it costs it 0.012 to 0.016 of mIoU).
+# the rate of `cifar10` for the family's sake (it was behind on all three seeds).
 CONVNEXT_SEG_LR = 1e-4
 CONVNEXT_SEG_CIFAR10_LR = 1e-3
 

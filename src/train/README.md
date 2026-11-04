@@ -194,8 +194,9 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   not a result. `resnet_seg` keeps them. **`convnext_seg` has lr 1e-4, and 1e-3 for `cifar10`**: at 1e-3 the `tiny` variant stayed at the pixel
   prior (30 epochs: best `val_miou` 0.373 at epoch 3, accuracy 0.70, stopped at epoch 13), and so did 3e-4 and 1e-3 with 2
   warmup epochs in 4 epochs, while 2e-4, 1e-4 and 5e-5 reached 0.397, 0.421 and 0.417 (`scratch_step2/logs/diag_runs.out`).
-  Over 30 epochs and two seeds (42, 43) `tiny` gives test mIoU 0.370 and 0.370 at 1e-3 (stopped at epochs 13 and 22) against 0.597
-  and 0.601 at 1e-4, and `cifar10` gives 0.688 and 0.687 at 1e-3 against 0.672 and 0.674 at 1e-4, so the rate is per variant
+  Over 30 epochs `tiny` gives test mIoU 0.370 and 0.370 at 1e-3 (stopped at epochs 13 and 22) against 0.597
+  and 0.601 at 1e-4 (seeds 42, 43), and `cifar10` gives 0.688, 0.687 and 0.672 at 1e-3 against 0.672, 0.674 and 0.671 at 1e-4 (seeds
+  42, 43, 44): ahead on all three seeds, by 0.016, 0.012 and 0.001, so the gain is modest and uneven, and the rate is per variant
   (`tests/test_train/test_api/convnext_seg_lr_evidence.json`, held by a test). `small`, `base`, `large` and `xlarge` have been
   measured at neither rate and take the family's 1e-4: a rate for them is a guess, and the first run of one should try another.
   **Measured on Oxford-IIIT Pet** (30 epochs, 128 px, batch 16, RTX 4090, the recipes as shipped; majority-class baseline
