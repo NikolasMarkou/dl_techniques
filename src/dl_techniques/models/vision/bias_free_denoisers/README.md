@@ -87,7 +87,7 @@ The **Bias-Free U-Net** applies the bias-free constraint to the classic U-Net ar
     -   **GRN (Global Response Norm)**: Enhances channel contrast for better feature learning.
     -   **Stochastic Depth**: Regularization for deep models.
 
-> **Strict bias-freedom**: pass `convnext_version='v1'` for a strictly bias-free model. ConvNeXt **V2** blocks add a Global Response Norm whose additive `beta` is trainable, so V2 is only approximately bias-free (zero-initialized beta) — prefer **V1** when scaling-invariant generalization across noise levels matters.
+> **Bias-freedom on the V2 arm**: with `use_bias=False` (what every function in this package pins) a ConvNeXt **V2** block builds its Global Response Norm without the additive `beta`, and so does the `global_response_norm` stem, so V1 and V2 both hold no additive parameter in their blocks (D-039 of plan 98b866fb; before it V2 kept a trainable `beta` and trained V2 denoisers read a degree-1 error of 1e-2 to 3e-2, 1e-6 with every `beta` zeroed). A bias-free V2 archive written before that change holds the betas and is **refused at load**, by layer name (`Layer 'global_response_norm' expected 1 variables, but received 2`); retrain it.
 
 > ### ⚠️ Degree-1 homogeneity is NOT automatic — it needs THREE things, and it is worth a lot
 >
@@ -97,7 +97,7 @@ The **Bias-Free U-Net** applies the bias-free constraint to the classic U-Net ar
 > |---|---|---|
 > | `block_normalization='batchnorm'` → `BiasFreeBatchNorm` (`gamma` + `running_var`, **no beta**) | at inference it divides by a **fixed** statistic, so the map stays linear | `'layernorm'` is a **per-input** normalization ⇒ scale-**invariant**, not scale-**equivariant** ⇒ **81–98% homogeneity error** |
 > | `block_activation` **positively homogeneous** (`relu`, `leaky_relu`) | `f(αx) = αf(x)` for α>0 | the factory default **`gelu` makes exact homogeneity mathematically IMPOSSIBLE** |
-> | `use_bias=False` everywhere, `convnext_version='v1'` | no additive constants anywhere | GRN's trainable `beta` (V2) breaks it |
+> | `use_bias=False` everywhere (V1 or V2: a V2 block drops its GRN `beta` with it) | no additive constants anywhere | a bias, a LayerNorm `center` or a GRN `beta` breaks it |
 >
 > Get all three right and homogeneity is **exact to float32**: rel. err `2.5e-05`, **flat**
 > across `α ∈ [0.12, 9.9]` (an 80× range — flat means rounding noise, not violation; a real violation

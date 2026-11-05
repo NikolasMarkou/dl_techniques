@@ -51,7 +51,9 @@ class ConvNextV2Block(keras.layers.Layer):
     GRN -> Dropout -> Conv1x1(reduce)``, followed by ``gamma * x`` only when
     ``use_gamma=True``. Following the paper and ``facebookresearch/ConvNeXt-V2``
     the GRN ``gamma`` and ``beta`` start at zero, so GRN is the identity at
-    initialization and the branch starts as a plain inverted MLP.
+    initialization and the branch starts as a plain inverted MLP. With
+    ``use_bias=False`` the GRN has no ``beta`` (only ``gamma``), so the block
+    carries no additive weight.
 
     Architecture:
 
@@ -125,7 +127,10 @@ class ConvNextV2Block(keras.layers.Layer):
     :type activation: Union[str, keras.layers.Activation]
     :param kernel_regularizer: Optional regularizer for convolution kernels.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
-    :param use_bias: Whether to include bias terms. Defaults to ``True``.
+    :param use_bias: Whether to include bias terms. Defaults to ``True``. ``False``
+        also drops the GRN offset: the block's ``grn.beta`` is ``None`` and the
+        block has no additive weight at all (the bias-free arm, degree-1
+        homogeneous with a homogeneous activation and a variance-only norm).
     :type use_bias: bool
     :param dropout_rate: Standard dropout rate. Defaults to 0.0.
     :type dropout_rate: Optional[float]
@@ -336,9 +341,18 @@ class ConvNextV2Block(keras.layers.Layer):
         # do NOT change that default instead: it is the layer's documented choice and the
         # norms factory, the ConvUNext stem and every other GRN user would move with it for no
         # paper claim on them. The block is where the paper puts the zero init.
+        # DECISION plan-2026-11-03T221936-98b866fb/D-039: the GRN offset `beta` follows the
+        # block's `use_bias`. A block built with `use_bias=False` has NO `beta` weight, because
+        # `beta` is an additive constant and a model that holds one is not bias-free
+        # (f(a*x) != a*f(x)), documented exception or not. Do NOT keep a trainable beta on the
+        # bias-free arm and list it as an exception (that was D-GAP-1; trained V2 denoisers read
+        # a degree-1 error of 1e-2 to 3e-2 through it), and do NOT add a separate `use_beta`
+        # argument (a second switch for the same fact, kept in step by hand). With `use_bias=True`
+        # the block is the paper's: gamma and beta both at zero.
         self.grn = GlobalResponseNormalization(
             eps=self.GRN_EPSILON,
             gamma_initializer="zeros",
+            use_beta=self.use_bias,
             name="global_response_norm"
         )
 

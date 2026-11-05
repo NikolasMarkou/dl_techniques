@@ -23,7 +23,7 @@ registrar (see [§8](#8-relationship-to-bfconvunext)). There is no subclassed
 
 1. [Quick start](#1-quick-start)
 2. [Architecture](#2-architecture)
-3. [`use_bias` and the three documented asymmetries](#3-use_bias-and-the-three-documented-asymmetries)
+3. [`use_bias` and the two documented asymmetries](#3-use_bias-and-the-two-documented-asymmetries)
 4. [The bias-free guardrails](#4-the-bias-free-guardrails)
 5. [`block_normalization` — the default rule](#5-block_normalization--the-default-rule)
 6. [Knobs absorbed from the deleted subclass](#6-knobs-absorbed-from-the-deleted-subclass)
@@ -102,27 +102,33 @@ Optional structure, all off by default and all contributing zero layers when off
 Each parameter is documented in full on `create_convunext`'s docstring — that
 docstring, not this file, is the reference.
 
-## 3. `use_bias` and the three documented asymmetries
+## 3. `use_bias` and the two documented asymmetries
 
 ```python
 bf = create_convunext(input_shape=(64, 64, 1), use_bias=False, depth=3, initial_filters=16)
 on = create_convunext(input_shape=(64, 64, 1), use_bias=True,  depth=3, initial_filters=16)
 print('bias adds', on.count_params() - bf.count_params(), 'parameters')
-# bias adds 5281 parameters
+# bias adds 8113 parameters
 ```
 
 `use_bias` is threaded into the stem conv, every channel-adjust conv, every ConvNeXt
 block, every deep-supervision head, the final projection, and the `strided_conv`
-junction. **Three sites are deliberately NOT threaded**, and `use_bias=False`
-therefore does not mean "provably, strictly bias-free":
+junction. It also decides the V2 line's other additive weight: a `ConvNextV2Block`
+built with `use_bias=False` builds its `GlobalResponseNormalization` without `beta`
+(the block reads its own `use_bias`; there is no separate switch), and so does the
+`'global_response_norm'` stem, so a V2 bias-free model holds no additive parameter in
+its blocks or its GRN stem (D-039 of plan 98b866fb; 2,832 of the 8,113 parameters (the old difference was 5,281)
+above are those betas). A bias-free V2 archive written before that change holds the
+betas and is refused at load by layer name; nothing restores them. **Two sites are
+deliberately NOT threaded**, and `use_bias=False` therefore still does not mean
+"provably, strictly bias-free":
 
 | Site | Behaviour | Why |
 |---|---|---|
-| `GlobalResponseNormalization`'s `beta` | stays trainable (`use_beta` is never passed) | Threading it would change the bias-free arm's parameter count and numerics. Nothing in the repo enforces its absence; the trainer's `verify_bias_free` logs it and does not raise. |
 | `SpatialLinearAttention`'s internal attention | hardcoded `use_bias=False` | No knob is exposed there by design. It is bias-free on BOTH arms. |
 | The Gabor warm-start stem | hardcoded `use_bias=False` (`trainable=True`) | The bias-free arm needs `D(a*x) == a*D(x)`, and that comes from the absence of bias, not from the stem's form. A bias there would break it for every caller, so no knob is offered. `trainable=True` is likewise not threaded: a Gabor-initialized-then-refined stem is the intended default. Callers who want it frozen flip `trainable` on the built, not-yet-compiled model — `train.bfunet.common.freeze_gabor_stem_if_requested`, exposed by the bfunet U-Net trainers as `--freeze-gabor-stem`. That freezes this cross-channel `Conv2D`; it does not restore the older depthwise per-channel bank. |
 
-A fourth asymmetry is about activations rather than bias: `block_activation`,
+A third asymmetry is about activations rather than bias: `block_activation`,
 `stem_activation` and `supervision_activation` all default to `'gelu'`, which is NOT
 positively homogeneous, and they are **deliberately exempt** from the guardrails below.
 Guarding them would make the shipped default configuration raise. Consequence, stated

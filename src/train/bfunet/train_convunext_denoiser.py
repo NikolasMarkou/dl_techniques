@@ -15,9 +15,9 @@ Design notes (plan_2026-06-19_ed071c02):
 - The noise function reads a captured ``tf.Variable`` (validated: a Variable read
   inside ``tf.data.map`` reflects per-epoch ``.assign``). This is a DELIBERATE
   Variable-backed variant of ``add_noise_to_patch`` (D-003), not a 4th blind copy.
-- ConvNeXt V1 blocks are the default (strict bias-freedom: LayerNorm center=False).
-  ConvNeXt V2 is opt-in but its GRN beta is trainable, so V2 is not strictly
-  Mohan-compliant.
+- ConvNeXt V1 blocks are the default (LayerNorm center=False). ConvNeXt V2 is opt-in
+  and is bias-free too: with ``use_bias=False`` every block and the GRN stem are built
+  without the GRN ``beta`` (D-039 of plan 98b866fb), so no additive weight remains.
 - Weighted COCO+DIV2K sourcing via ``select_weighted_image_paths`` prevents COCO's
   ~118K images from drowning DIV2K's ~800 (D-002 of plan_2026-06-18_1cca4fc1).
 
@@ -150,7 +150,7 @@ class TrainingConfig(BFUnetTrainingConfig):
     experiment_prefix = "convunext_denoiser_"
 
     # ConvNeXt-specific model fields.
-    convnext_version: str = "v1"    # v1 = strict bias-free; v2 opt-in (GRN beta trains)
+    convnext_version: str = "v1"    # v1 default; v2 opt-in (bias-free too: no GRN beta)
     # DEPTHWISE Gabor stem (opt-in, ConvUNeXt only). None (default) = the shared
     # cross-channel Conv2D warm start from BFUnetTrainingConfig, byte-identical to every
     # existing run. When set (>= 1) the stem becomes a bias-free DepthwiseConv2D bank
@@ -424,8 +424,8 @@ def verify_bias_free(model: keras.Model) -> None:
             offenders.append(f"{layer.name} (GRN beta - bias-like offset)")
     if offenders:
         logger.warning(
-            f"Bias-free check: {len(offenders)} layer(s) carry bias/centering "
-            f"(expected for ConvNeXt V2 GRN beta): {offenders[:10]}"
+            f"Bias-free check: {len(offenders)} layer(s) carry bias/centering: "
+            f"{offenders[:10]}"
         )
     else:
         logger.info("Bias-free check: PASSED - all layers are bias-free")

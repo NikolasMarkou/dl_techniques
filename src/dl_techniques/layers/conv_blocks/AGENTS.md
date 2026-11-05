@@ -97,7 +97,7 @@ Bias-free:
 ConvNeXt:
 
 - `ConvNextV1Block(kernel_size, filters, activation="gelu", kernel_regularizer=None, use_bias=True, dropout_rate=0.0, spatial_dropout_rate=0.0, use_gamma=True, gamma_initial_value=1e-6, use_softorthonormal_regularizer=False, depthwise_initializer=None, depthwise_regularizer=None, normalization_type="layernorm")`. `normalization_type` is `'layernorm'` or `'batchnorm'` (the latter builds `BiasFreeBatchNorm`). Input width is not checked against `filters`; the output has `filters` channels.
-- `ConvNextV2Block(...)` same arguments except `use_gamma=False` (the V2 paper removes the layer scale; `use_gamma=True` builds V1's, starting at `gamma_initial_value=1e-6`), plus `GlobalResponseNormalization(eps=1e-6, gamma_initializer="zeros")` between activation and dropout, so GRN is exactly the identity at initialization.
+- `ConvNextV2Block(...)` same arguments except `use_gamma=False` (the V2 paper removes the layer scale; `use_gamma=True` builds V1's, starting at `gamma_initial_value=1e-6`), plus `GlobalResponseNormalization(eps=1e-6, gamma_initializer="zeros", use_beta=use_bias)` between activation and dropout, so GRN is exactly the identity at initialization. The GRN offset follows the block's `use_bias`: `use_bias=False` builds no `beta` (D-039 of plan 98b866fb; a block that holds an additive weight is not bias-free), and an archive that holds a `beta` for such a block fails to load by layer name.
 
 Efficient blocks:
 

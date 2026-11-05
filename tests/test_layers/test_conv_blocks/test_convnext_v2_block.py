@@ -626,6 +626,104 @@ def test_a_live_grn_gamma_keeps_the_block_degree_one_homogeneous_and_a_live_beta
     assert max(relative_gap(0.5), relative_gap(3.0)) > 1e-2
 
 
+def test_a_bias_free_block_has_no_grn_beta_and_a_biased_block_keeps_it() -> None:
+    """D-039: the GRN offset follows the block's `use_bias`; no second switch exists."""
+    free = ConvNextV2Block(kernel_size=7, filters=16, use_bias=False)
+    free.build((None, 8, 8, 16))
+    assert free.grn.use_beta is False and free.grn.beta is None
+    assert [w.path for w in free.weights if w.path.endswith("beta")] == []
+    assert not any(w.path.endswith("/bias") for w in free.weights)
+    assert free.get_config()["use_bias"] is False
+    assert "use_beta" not in free.get_config()
+
+    rebuilt = ConvNextV2Block.from_config(free.get_config())
+    rebuilt.build((None, 8, 8, 16))
+    assert rebuilt.grn.beta is None
+
+    biased = ConvNextV2Block(kernel_size=7, filters=16)
+    biased.build((None, 8, 8, 16))
+    assert biased.grn.use_beta is True and biased.grn.beta is not None
+
+
+def _bias_free_block(**overrides) -> ConvNextV2Block:
+    params = dict(
+        kernel_size=7, filters=16, use_bias=False, normalization_type="batchnorm",
+        activation=keras.layers.LeakyReLU(negative_slope=0.1),
+    )
+    params.update(overrides)
+    block = ConvNextV2Block(**params)
+    block.build((None, 8, 8, 16))
+    return block
+
+
+def _move_every_weight(block: ConvNextV2Block, seed: int) -> None:
+    """Live weights (I8): every kernel perturbed, GRN gamma away from its zero init."""
+    rng = np.random.default_rng(seed)
+    for w in block.trainable_weights:
+        value = keras.ops.convert_to_numpy(w)
+        if w is block.grn.gamma:
+            value = rng.uniform(0.3, 1.0, size=value.shape).astype("float32")
+        else:
+            value = value + rng.normal(0.0, 0.2 * (np.std(value) + 1e-3), value.shape).astype("float32")
+        w.assign(value)
+
+
+def _homogeneity_gap(block: ConvNextV2Block, x: np.ndarray, alpha: float) -> float:
+    fx = keras.ops.convert_to_numpy(block(x, training=False))
+    f_ax = keras.ops.convert_to_numpy(block(alpha * x, training=False))
+    return float(np.max(np.abs(f_ax - alpha * fx)) / np.max(np.abs(alpha * fx)))
+
+
+def test_a_bias_free_block_on_live_weights_is_homogeneous_and_a_planted_beta_breaks_it() -> None:
+    """I8 on LIVE weights (not the zero init, which passes for any reason), RED control beside it."""
+    block = _bias_free_block()
+    rng = np.random.default_rng(3)
+    for _ in range(10):  # moves the variance-only norm's running statistic
+        block((rng.standard_normal((4, 8, 8, 16)) * 2.0).astype("float32"), training=True)
+    _move_every_weight(block, seed=5)
+    assert float(np.min(np.abs(keras.ops.convert_to_numpy(block.grn.gamma)))) >= 0.3
+    x = (rng.standard_normal((2, 8, 8, 16)) * 2.0).astype("float32")
+
+    assert max(_homogeneity_gap(block, x, a) for a in (0.5, 3.0)) < 1e-4
+
+    block.grn.beta = np.full((1, 1, 1, 64), 0.3, dtype="float32")  # the additive term the old block built
+    assert max(_homogeneity_gap(block, x, a) for a in (0.5, 3.0)) > 1e-2
+
+
+def test_an_archive_that_holds_a_grn_beta_for_a_bias_free_block_is_refused_by_layer_name(tmp_path) -> None:
+    """D-039, I9, I10: a file written when every V2 block had a beta cannot load into the fixed block.
+
+    The archive is made the way the old code made it: a bias-free block whose GRN was built with
+    its beta (the weights hold a `beta`, the recorded config says `use_bias: false`). Loading it
+    must fail naming the GRN layer, never load into a graph without the weight, and no flag
+    restores the beta.
+    """
+    from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization
+
+    inputs = keras.Input(shape=(8, 8, 16))
+    block = ConvNextV2Block(kernel_size=7, filters=16, use_bias=False, name="blk")
+    block.grn = GlobalResponseNormalization(
+        eps=block.GRN_EPSILON, gamma_initializer="zeros", use_beta=True, name="global_response_norm")
+    path = str(tmp_path / "old_bias_free_v2.keras")
+    keras.Model(inputs, block(inputs)).save(path)
+
+    with pytest.raises(ValueError, match=r"global_response_norm.*expected 1 variables, but received 2"):
+        keras.models.load_model(path, compile=False)
+
+
+def test_an_archive_written_by_the_fixed_block_loads_exactly(tmp_path) -> None:
+    inputs = keras.Input(shape=(8, 8, 16))
+    model = keras.Model(inputs, ConvNextV2Block(kernel_size=7, filters=16, use_bias=False, name="blk")(inputs))
+    _move_every_weight(model.get_layer("blk"), seed=1)
+    x = np.random.default_rng(2).normal(size=(2, 8, 8, 16)).astype("float32")
+    path = str(tmp_path / "fixed.keras")
+    model.save(path)
+
+    loaded = keras.models.load_model(path, compile=False)
+
+    assert np.array_equal(keras.ops.convert_to_numpy(model(x)), keras.ops.convert_to_numpy(loaded(x)))
+
+
 def test_the_optional_layer_scale_takes_the_papers_values() -> None:
     """`use_gamma=True` starts at 1e-6 with no constraint and no penalty (V1's values, D-031)."""
     block = ConvNextV2Block(kernel_size=7, filters=16, use_gamma=True)

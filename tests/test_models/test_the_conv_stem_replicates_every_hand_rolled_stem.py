@@ -760,7 +760,12 @@ def _convunext_original(
         kernel_regularizer=keras.regularizers.L2(_CONVUNEXT_KERNEL_REG),
         name="stem_conv",
     )
-    norm = create_normalization_layer(norm_type, name="stem_norm")
+    # One deliberate difference from the deleted wrapper (D-039 of plan 98b866fb): on the
+    # bias-free arm the builder's GRN stem has no `beta`, where the wrapper built the layer
+    # with its default (gamma and beta). The original is built the way the builder now
+    # does, so every other part of the stem is still compared exactly.
+    norm_kwargs = {"use_beta": False} if norm_type == "global_response_norm" and not use_bias else {}
+    norm = create_normalization_layer(norm_type, name="stem_norm", **norm_kwargs)
     act = keras.layers.Activation(activation, name="stem_activation")
 
     def forward(x, training):

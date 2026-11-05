@@ -702,8 +702,12 @@ def create_convunext(
         attention block j             rate * j / attention_blocks
 
     Bias-free arm. ``use_bias=False`` drops the bias from the threaded
-    convolutions. It does not make the graph degree-1 homogeneous on its own,
-    because three sites sit outside the flag:
+    convolutions and every additive weight of the V2 line with it: the
+    ``ConvNextV2Block`` GRN is built without its ``beta`` (the block follows its own
+    ``use_bias``), and so is the ``'global_response_norm'`` stem's GRN, so a V2 bias-free
+    model has no additive parameter in its blocks or its GRN stem (D-039 of plan
+    98b866fb). It does not make the graph degree-1 homogeneous on its own, because two
+    sites sit outside the flag:
 
     1. ``block_activation``, ``stem_activation`` and ``supervision_activation``
        default to ``'gelu'``, which is not positively homogeneous, and are
@@ -714,15 +718,10 @@ def create_convunext(
        ``SpatialLinearAttention``'s inner ``create_attention_layer('linear', ...)``
        and the trainable Gabor stem. Both stay bias-free even when
        ``use_bias=True``.
-    3. ``GlobalResponseNormalization``'s ``use_beta`` is not threaded, so a
-       trainable additive beta exists in every V2 block and in the
-       ``'global_response_norm'`` stem on both arms (D-GAP-1). Since the V2 block
-       lost its layer scale (D-036 of plan 98b866fb) nothing damps that beta's
-       gradient any more: on a batchnorm V2 denoiser it leaves zero after one SGD
-       step (degree-1 error 9e-5 against a 1e-5 bar). A tiny V2 denoiser trained for 8
-       epochs reads 2.8e-2 and 1.9e-2 (2.2e-2 and 1.4e-2 before that change) and 1e-6
-       to 3e-6 with every beta set to zero (``scratch_step10c/homogeneity_*.json``).
-       A strictly homogeneous bias-free model needs ``convnext_version='v1'``.
+
+    An archive written before D-039 holds a GRN ``beta`` for every V2 bias-free block;
+    loading it fails by layer name (``Layer 'global_response_norm' expected 1 variables,
+    but received 2``), and nothing restores the beta.
 
     Guardrails, from :func:`_validate_bias_free_arguments`. On the bias-off arm
     ``final_activation``, and ``gabor_activation`` when ``use_gabor_stem=True``,
@@ -765,7 +764,8 @@ def create_convunext(
         through ``create_normalization_layer``. Defaults to
         ``'global_response_norm'`` (the ConvNeXt-V2 / bias-free choice);
         ``'layer_norm'`` reproduces the standard ConvNeXt stem. Only used when the
-        standard stem is built, i.e. ``use_gabor_stem=False``.
+        standard stem is built, i.e. ``use_gabor_stem=False``. With ``use_bias=False``
+        the ``'global_response_norm'`` stem is built without its ``beta``.
     :type stem_normalization: str
     :param use_gabor_stem: If True prepend a trainable, bias-free cross-channel
         ``Conv2D`` Gabor stem, warm started with a Gabor filter bank per Ozbulak &
@@ -1163,6 +1163,16 @@ def create_convunext(
 
     ConvNextBlock = ConvNextV2Block if convnext_version == 'v2' else ConvNextV1Block
 
+    # DECISION plan-2026-11-03T221936-98b866fb/D-039: on the bias-free arm the stem's GRN is
+    # built without its additive `beta`, as every V2 block is (the block follows its own
+    # `use_bias`). Do NOT leave the stem's beta trainable and list it as an exception: a
+    # model built with use_bias=False that holds an additive parameter is not bias-free.
+    # Only the GRN stem needs this; another stem normalization takes no `use_beta`.
+    stem_normalization_kwargs = (
+        {'use_beta': False}
+        if (not use_bias and stem_normalization == 'global_response_norm') else None
+    )
+
     inputs = keras.Input(shape=input_shape, name='input_images')
 
     if use_gabor_stem:
@@ -1316,6 +1326,7 @@ def create_convunext(
                 use_bias=use_bias,
                 num_convs=1,
                 normalization_type=stem_normalization,
+                normalization_kwargs=stem_normalization_kwargs,
                 activation_type=substitute_exact(deserialize_activation(stem_activation)),
                 use_pooling=False,
                 kernel_initializer=kernel_initializer,

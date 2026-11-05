@@ -1192,57 +1192,108 @@ class TestBlockNormalization:
 
     @staticmethod
     def _grn_variables(model: keras.Model, name: str):
-        """Every block's GRN variable called ``name`` (``gamma`` or ``beta``)."""
-        return [w for w in model.weights if w.path.endswith(f'global_response_norm/{name}')]
+        """Every GRN variable called ``name`` (``gamma`` or ``beta``): the blocks' and the stem's.
 
-    def test_v2_batchnorm_model_is_homogeneous_with_a_live_grn_gamma_and_no_beta(self) -> None:
-        # I8 of plan 98b866fb step 10c. A V2 block now starts with no layer scale and GRN gamma
-        # at zero, so GRN is the identity: the homogeneity bar passes on a fresh model for a
-        # reason that says nothing about GRN. Set every GRN gamma live (0.5) and read the shared
-        # probe at its shared bar. gamma * (x * norm') is degree-1 homogeneous because
-        # norm' = norm / mean(norm) is degree-0. The offset `beta` is the other GRN weight: it is
-        # an additive constant (D-GAP-1: `use_beta` is not threaded, so it exists in every V2
-        # block on both arms), it is NOT zero after any training step, and the next test pins
-        # what it does. Here it is held at its initial zero, which is the claim being tested.
-        model = create_convunext_denoiser(
-            **self._homog_cfg(block_normalization='batchnorm', convnext_version='v2'))
+        Read off the GRN layers, not off a weight path: the stem's GRN is not named like a block's.
+        """
+        from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization
+        found = [getattr(l, name) for l in model._flatten_layers() if isinstance(l, GlobalResponseNormalization)]
+        return [w for w in found if w is not None]
+
+    @staticmethod
+    def _v2_bias_free_cfg(**overrides) -> Dict[str, Any]:
+        # The V2 bias-free arm with every component homogeneous: batchnorm blocks, LeakyReLU, a
+        # linear head. `grn_stem=True` swaps the GRN-free Gabor stem for the GRN stem, so the one
+        # extra GRN outside the blocks is covered too.
+        grn_stem = overrides.pop('grn_stem', False)
+        act = keras.layers.LeakyReLU(negative_slope=0.1)
+        cfg = dict(
+            input_shape=(64, 64, 3), depth=3, initial_filters=16, blocks_per_level=1,
+            convnext_version='v2', filter_multiplier=2, use_gabor_stem=not grn_stem,
+            block_activation=act, stem_activation=act, final_activation='linear',
+            drop_path_rate=0.0, block_normalization='batchnorm',
+        )
+        cfg.update(overrides)
+        return cfg
+
+    @staticmethod
+    def _move_every_trainable_weight(model: keras.Model, seed: int = 7) -> int:
+        """Move EVERY trainable weight off its initial value (D-039, I8).
+
+        A fresh V2 model passes the homogeneity probe vacuously: GRN gamma starts at zero, so the
+        branch is a plain MLP. Each trainable weight (GRN gamma, every kernel, the Gabor bank)
+        gets seeded noise of the size of its own spread, and each GRN gamma is set to 0.5 so the
+        response branch is live. Returns how many weights were moved.
+        """
+        rng = np.random.default_rng(seed)
+        grn_gammas = {id(w) for w in TestBlockNormalization._grn_variables(model, 'gamma')}
+        moved = 0
+        for w in model.trainable_weights:
+            value = keras.ops.convert_to_numpy(w)
+            if id(w) in grn_gammas:
+                value = np.full_like(value, 0.5)
+            else:
+                value = value + rng.normal(0.0, 0.2 * (np.std(value) + 1e-3), value.shape).astype(value.dtype)
+            w.assign(value)
+            moved += 1
+        return moved
+
+    @pytest.mark.parametrize('grn_stem', [False, True], ids=['gabor_stem', 'grn_stem'])
+    def test_the_v2_bias_free_arm_holds_no_additive_grn_weight(self, grn_stem: bool) -> None:
+        # D-039: a model built with use_bias=False has NO GRN beta, in any block and in the stem.
+        bias_free = create_convunext_denoiser(**self._v2_bias_free_cfg(grn_stem=grn_stem))
+        assert self._grn_variables(bias_free, 'beta') == []
+        gammas = self._grn_variables(bias_free, 'gamma')
+        assert len(gammas) == (8 if grn_stem else 7), len(gammas)
+        for block in (l for l in bias_free._flatten_layers() if isinstance(l, ConvNextV2Block)):
+            assert block.grn.use_beta is False and block.grn.beta is None
+
+    def test_a_model_that_keeps_its_bias_keeps_its_grn_beta(self) -> None:
+        # The other side of the rule: use_bias=True is the paper's V2 (gamma and beta both).
+        from dl_techniques.models.vision.convunext.model import create_convunext
+        cfg = self._v2_bias_free_cfg(grn_stem=True)
+        cfg.pop('final_activation')
+        with_bias = create_convunext(use_bias=True, enable_deep_supervision=False,
+                                     final_activation='linear', **cfg)
+        assert len(self._grn_variables(with_bias, 'beta')) == 8
+        assert len(self._grn_variables(with_bias, 'gamma')) == 8
+
+    @pytest.mark.parametrize('grn_stem', [False, True], ids=['gabor_stem', 'grn_stem'])
+    def test_v2_batchnorm_model_is_homogeneous_with_every_weight_live(self, grn_stem: bool) -> None:
+        # I8 of plan 98b866fb, 10c.1 (D-039). On LIVE weights, not the fresh zero init: one fit
+        # step moves the running statistics, then every trainable weight is moved off its init
+        # and every GRN gamma set to 0.5. gamma * (x * norm') is degree-1 homogeneous because
+        # norm' = norm / mean(norm) is degree-0, and there is no beta to break it.
+        model = create_convunext_denoiser(**self._v2_bias_free_cfg(grn_stem=grn_stem))
         fit_one_step(model)
-        assert self._set_layer_scales(model, 0.5) == 0, 'a V2 block has no layer scale by default'
-        gammas, betas = self._grn_variables(model, 'gamma'), self._grn_variables(model, 'beta')
-        assert len(gammas) == 7 and len(betas) == 7
-        for w in gammas:
-            w.assign(keras.ops.full_like(w, 0.5))
-        for w in betas:
-            w.assign(keras.ops.zeros_like(w))
+        assert self._move_every_trainable_weight(model) > 20
 
         x = (np.random.default_rng(4).standard_normal((2, 64, 64, 3)) * 1.5).astype('float32')
         for scale in HOMOGENEITY_SCALES:
             assert homogeneity_error(model, x, scale) <= HOMOGENEITY_RTOL, scale
 
-    def test_the_probe_sees_a_live_grn_beta_as_the_break_it_is(self) -> None:
-        # LIVENESS ARM for the test above and the documented D-GAP-1: `beta` is an additive
-        # offset inside every V2 block. With it at zero the probe passes; set to 0.3 it reads
-        # far above the bar, so the zero reading was not a probe blind to GRN. One SGD step
-        # already moves it off zero now that no layer scale of 1e-4 damps its gradient.
-        model = create_convunext_denoiser(
-            **self._homog_cfg(block_normalization='batchnorm', convnext_version='v2'))
+    @pytest.mark.parametrize('grn_stem', [False, True], ids=['gabor_stem', 'grn_stem'])
+    def test_the_probe_sees_a_planted_grn_beta_as_the_break_it_is(self, grn_stem: bool) -> None:
+        # RED CONTROL for the test above. The same live model passes; plant ONE beta of
+        # 0.3 into one block's GRN (or the stem's), the additive term the unfixed code built into every
+        # GRN, and the probe reads far above the bar. So the pass was not a probe blind to GRN.
+        from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization
+
+        model = create_convunext_denoiser(**self._v2_bias_free_cfg(grn_stem=grn_stem))
         fit_one_step(model)
-        betas = self._grn_variables(model, 'beta')
-        assert any(np.any(keras.ops.convert_to_numpy(w) != 0.0) for w in betas), \
-            'one fit step should have moved a beta that no layer scale damps'
-        for w in self._grn_variables(model, 'gamma'):
-            w.assign(keras.ops.full_like(w, 0.5))
+        self._move_every_trainable_weight(model)
         x = (np.random.default_rng(4).standard_normal((2, 64, 64, 3)) * 1.5).astype('float32')
+        clean = [homogeneity_error(model, x, scale) for scale in HOMOGENEITY_SCALES]
+        assert all(error <= HOMOGENEITY_RTOL for error in clean), clean
 
-        for w in betas:
-            w.assign(keras.ops.zeros_like(w))
-        zero_beta = [homogeneity_error(model, x, scale) for scale in HOMOGENEITY_SCALES]
-        assert all(error <= HOMOGENEITY_RTOL for error in zero_beta), zero_beta
-
-        for w in betas:
-            w.assign(keras.ops.full_like(w, 0.3))
-        live = [homogeneity_error(model, x, scale) for scale in HOMOGENEITY_SCALES]
-        assert all(error > 100 * HOMOGENEITY_RTOL for error in live), live
+        owner = (model.get_layer('encoder_level_0_stem').norm1 if grn_stem else None)
+        if owner is None:
+            owner = next(l for l in model._flatten_layers() if isinstance(l, ConvNextV2Block)).grn
+        # A built layer cannot grow a variable, so the offset is planted as a constant of the
+        # shape `beta` has; `call` adds `self.beta` whenever it is not None.
+        owner.beta = np.full(keras.ops.convert_to_numpy(owner.gamma).shape, 0.3, dtype='float32')
+        planted = [homogeneity_error(model, x, scale) for scale in HOMOGENEITY_SCALES]
+        assert all(error > 100 * HOMOGENEITY_RTOL for error in planted), planted
 
     def test_default_layernorm_byte_identical(self) -> None:
         # SC2: omitting block_normalization == explicit 'layernorm'. Byte-identity is

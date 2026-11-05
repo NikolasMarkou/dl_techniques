@@ -17,8 +17,10 @@ The bias-free design gives scaling invariance: scaling the input by alpha
 scales the output by alpha, which lets one denoiser generalize across noise
 levels and enables the Miyasawa/Tweedie residual-as-score reading.
 ``create_convunext``'s docstring names the exceptions that survive: the
-non-homogeneous default activations, two hardcoded bias-free sites, and
-GRN's ``beta``.
+non-homogeneous default activations and two hardcoded bias-free sites. GRN's
+``beta`` is not among them: a V2 block built with ``use_bias=False`` (and the GRN
+stem) has no ``beta``, so a bias-free archive written before that change, which
+holds one, is refused at load by layer name.
 
 References:
     - Mohan et al., 2020. Robust and Interpretable Blind Image Denoising via
