@@ -20,6 +20,10 @@ from typing import Any, Dict, List, Optional
 import keras
 import numpy as np
 
+# ------------------------------------------------------------------------------
+# local imports
+# ------------------------------------------------------------------------------
+
 from dl_techniques.metrics.depth_metrics import align_scale_and_shift
 from dl_techniques.utils.logger import logger
 # Lazy-import matplotlib to avoid import-time side effects; the shared importer
@@ -27,11 +31,7 @@ from dl_techniques.utils.logger import logger
 # when the caller set one.
 from dl_techniques.utils.matplotlib_backend import import_pyplot
 
-
-# =====================================================================
-# DepthPredictionGridCallback
-# =====================================================================
-
+# ------------------------------------------------------------------------------
 
 class DepthPredictionGridCallback(keras.callbacks.Callback):
     """Save RGB | GT depth | predicted depth comparison grids.
@@ -201,11 +201,7 @@ class DepthPredictionGridCallback(keras.callbacks.Callback):
         except Exception as e:
             logger.warning(f"Failed to save depth grid: {e}")
 
-
-# =====================================================================
-# DepthMetricsCurveCallback
-# =====================================================================
-
+# ------------------------------------------------------------------------------
 
 class DepthMetricsCurveCallback(keras.callbacks.Callback):
     """Plot training/validation metric curves during training.
@@ -298,3 +294,6 @@ class DepthMetricsCurveCallback(keras.callbacks.Callback):
             gc.collect()
         except Exception as e:
             logger.warning(f"Failed to create metric curve plots: {e}")
+
+# ------------------------------------------------------------------------------
+

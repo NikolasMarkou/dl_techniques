@@ -202,3 +202,5 @@ class SpatialLossLogger(keras.callbacks.Callback):
             "verbose": self.verbose,
         })
         return config
+
+# ------------------------------------------------------------------------------

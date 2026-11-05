@@ -18,9 +18,14 @@ from typing import List, Optional
 
 import keras
 
+# ------------------------------------------------------------------------------
+# local imports
+# ------------------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ------------------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.callbacks.temperature_annealing")
 class TemperatureAnnealingCallback(keras.callbacks.Callback):
@@ -126,3 +131,6 @@ class TemperatureAnnealingCallback(keras.callbacks.Callback):
             "total_epochs": self.total_epochs,
             "layer_names": self.layer_names,
         }
+
+# ------------------------------------------------------------------------------
+

@@ -21,8 +21,14 @@ from typing import List, Optional, Sequence, Union
 
 import keras
 
+# ------------------------------------------------------------------------------
+# local imports
+# ------------------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+
+# ------------------------------------------------------------------------------
 
 
 @register_dl_technique("dl_techniques.callbacks.harmonic_exponent_annealing")
@@ -64,7 +70,7 @@ class HarmonicExponentAnnealingCallback(keras.callbacks.Callback):
         self.total_epochs = int(total_epochs)
         self.layer_names = layer_names
 
-    # ------------------------------------------------------------------
+
     @staticmethod
     def _as_list(
         value: Union[float, Sequence[float]], depth: int, name: str
@@ -134,7 +140,6 @@ class HarmonicExponentAnnealingCallback(keras.callbacks.Callback):
                 continue
             yield layer
 
-    # ------------------------------------------------------------------
     def on_epoch_begin(self, epoch: int, logs: Optional[dict] = None) -> None:
         touched = 0
         for layer in self._iter_target_layers():
@@ -159,3 +164,5 @@ class HarmonicExponentAnnealingCallback(keras.callbacks.Callback):
             "total_epochs": self.total_epochs,
             "layer_names": self.layer_names,
         }
+
+# ------------------------------------------------------------------------------

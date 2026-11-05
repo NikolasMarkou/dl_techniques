@@ -31,12 +31,18 @@ from typing import Callable, Optional, Union
 
 import keras
 
+# ------------------------------------------------------------------------------
+# local imports
+# ------------------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.models.vision.depth_anything.teacher_ema import (
     cosine_ema_schedule,
     linear_ema_schedule,
 )
+
+# ------------------------------------------------------------------------------
 
 # Re-exported for convenience -- callers of EMAShadowCallback should not need
 # a separate import from teacher_ema.py to build a schedule.

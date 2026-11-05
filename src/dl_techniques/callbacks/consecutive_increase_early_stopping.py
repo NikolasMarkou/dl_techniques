@@ -230,3 +230,5 @@ class ConsecutiveIncreaseEarlyStopping(keras.callbacks.Callback):
             "verbose": self.verbose,
         })
         return config
+
+# ------------------------------------------------------------------------------

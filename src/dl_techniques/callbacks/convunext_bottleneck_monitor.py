@@ -42,9 +42,14 @@ from typing import Any, Dict, List, Optional, Union
 import keras
 import numpy as np
 
+# ------------------------------------------------------------------------------
+# local imports
+# ------------------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.matplotlib_backend import import_pyplot
 
+# ------------------------------------------------------------------------------
 
 # DECISION plan-2026-08-10T130454-3649c19e/D-011
 # This is now the ONLY bottleneck-monitor callback in the repo. Its sibling
@@ -360,3 +365,5 @@ class ConvUnextBottleneckMonitorCallback(keras.callbacks.Callback):
                 f"{self.name_prefix}: monitor failed on train end: {exc}",
                 exc_info=True,
             )
+
+# ------------------------------------------------------------------------------
