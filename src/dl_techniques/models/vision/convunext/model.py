@@ -719,10 +719,10 @@ def create_convunext(
        ``'global_response_norm'`` stem on both arms (D-GAP-1). Since the V2 block
        lost its layer scale (D-036 of plan 98b866fb) nothing damps that beta's
        gradient any more: on a batchnorm V2 denoiser it leaves zero after one SGD
-       step, and a 40-step Adam run read a homogeneity error of 1e-1 against 2e-3
-       before (``scratch_step10c/homogeneity_*.json``). With beta held at zero the
-       same model reads 3e-6 to 4e-6. A strictly homogeneous bias-free model needs
-       ``convnext_version='v1'``.
+       step (degree-1 error 9e-5 against a 1e-5 bar). A tiny V2 denoiser trained for 8
+       epochs reads 2.8e-2 and 1.9e-2 (2.2e-2 and 1.4e-2 before that change) and 1e-6
+       to 3e-6 with every beta set to zero (``scratch_step10c/homogeneity_*.json``).
+       A strictly homogeneous bias-free model needs ``convnext_version='v1'``.
 
     Guardrails, from :func:`_validate_bias_free_arguments`. On the bias-off arm
     ``final_activation``, and ``gabor_activation`` when ``use_gabor_stem=True``,

@@ -146,6 +146,13 @@ rebuilds the layer scale its own config recorded (`use_gamma: true`) and predict
 default without recording it is refused at load by the layer's name, and the model's `pretrained=` path refuses it naming
 `use_gamma`. Fine-tuning such a file trains under the current rule (no cap, no floor, no L2).
 
+Measured cost of the V2 change at this trainer's short schedule: `train_convnext_v2 --dataset cifar10 --variant cifar10` for 20
+epochs (the first 30-epoch run projected above the protocol's 0.40 hour per run and was cut to 20 in every arm), seeds 42 and 43,
+best `val_accuracy` on the 5,000-image selection split 0.842 and 0.846 with the old block (layer scale 1.0, capped, L2, GRN gamma
+ones), 0.847 and 0.834 with the paper's, so +0.5 and -1.1 points (mean -0.3, the two signs differ: not attributable at the
+1-point rule); test accuracy of the best weights 0.840 and 0.833 against 0.836 and 0.818. Unlike V1 (above), V2 pays nothing
+measurable for dropping the layer scale, which is the paper's finding for V2. Evidence: plan `scratch_step10c/gpu_effect_legacy.txt`.
+
 ### `stochastic_mode`: `depth` vs `gradient`
 
 Both are threaded to the model constructor and are two different regularizers, not two

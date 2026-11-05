@@ -96,9 +96,10 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   mIoU measured on it is not comparable to published numbers. A class has to have a pixel in the fit split (`data.max_samples` cuts it), or the run is refused before `fit`.
   **Measured, untuned** (plan 98b866fb step 8, D-019; the real conversion took 3 min 11 s with 8 workers for 27,574 images and
   250 MB of masks): `data.max_samples=4000` (fit 3,600, selection 400, test the 2,000 `val.csv` images, which no cap reaches), `convunext/tiny`, 256 by 256 px, batch 16, 10 epochs on one RTX 4090: best `val_miou`
-  0.0343 at epoch 10 (still rising; the majority-class baseline is 0.0012), test mIoU 0.0320, test pixel accuracy 0.465; 32 of the
-  150 classes have a test IoU above 0 (`sky` 0.776, `road` 0.449, `grass` 0.430). 9.7 minutes of `fit`. A smoke-scale result of
-  a 1.9M-parameter model on 14% of the training images, not a score. The cap has a floor: class 106 (`canopy`) has no pixel in the
+  0.0572 at epoch 10 (the curve flattens: 0.0568 at epoch 9; the majority-class baseline is 0.0012), test mIoU 0.0521, test pixel accuracy 0.534; 55 of the
+  150 classes have a test IoU above 0 and 23 above 0.1 (`sky` 0.820, `road` 0.523, `building` 0.506, `grass` 0.472). 9.7 minutes of `fit`. A smoke-scale result of
+  a 1.9M-parameter model on 14% of the training images, not a score. **Re-run on the corrected ConvNeXt V2 block** (plan 98b866fb step 10c, D-037; the run
+  of step 8 measured 0.0343, 0.0320, 0.465 and 32 classes above 0 on the old block, whose layer scale started at 1e-4 under an L2 and a cap and whose GRN started at ones): same command, same seed. The cap has a floor: class 106 (`canopy`) has no pixel in the
   fit split of `max_samples=1000` (seed 42), which the run refuses before `fit` naming the class; 2000 and above hold all 150.
 * **Converting COCO** (plan 98b866fb step 6, D-018): the COCO 2017 on disk has instance annotations only (no stuff, no panoptic file),
   so `python -m train convert coco root=<coco_2017> out=<new dir>` can write semantic masks of `background` (class 0, every
@@ -113,10 +114,11 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   **Measured, untuned** (step 8, D-019; the real conversion took 39 min 1 s with 8 workers for 123,287 images and 427 MB of
   masks): `data.max_samples=4000` (fit 3,600, selection 400, test all 5,000 `val.csv` images: the cap bounds the train pool only, D-022,
   and the run was repeated at the iteration 1 gate for that; below 3,000 class 79, `hair drier`, has no pixel in the fit split and the run is
-  refused), `convunext/tiny`, 256 px, batch 16, 5 epochs: best `val_miou` 0.0118 against a majority-class baseline of 0.0091 (on the
-  selection split), test mIoU 0.0106, test pixel accuracy 0.721 (predicting background everywhere scores 0.719 and a mIoU of
-  0.0089 on the 5,000 test images, 0.723 and 0.0091 on the selection split): the model learned the background and `person` (IoU 0.123)
-  and 5 other classes above 0.
+  refused), `convunext/tiny`, 256 px, batch 16, 5 epochs: best `val_miou` 0.0138 against a majority-class baseline of 0.0091 (on the
+  selection split), test mIoU 0.0122, test pixel accuracy 0.727 (predicting background everywhere scores 0.719 and a mIoU of
+  0.0089 on the 5,000 test images, 0.723 and 0.0091 on the selection split): the model learned the background and `person` (IoU 0.214)
+  and 9 other classes above 0 (`zebra` 0.016, `banana` 0.014). **Re-run on the corrected ConvNeXt V2 block** (step 10c, D-037; the old block gave 0.0118, 0.0106, 0.721,
+  `person` 0.123 and 5 other classes above 0): same command, same seed.
 * **SUT-Crack** (pavement cracks, `pavement_defect/SUT-Crack/segmentation/{Original Image,Ground Truth}`; plan 98b866fb step 7,
   D-007). **Measured**: 130 pairs joined by the stem (`1` to `130`), JPEG photographs and 1-bit PNG masks of 3024 by 4032 pixels
   holding exactly {0, 255}. 119 JPEGs are stored 4032 by 3024 with EXIF orientation 6 (the loader turns them upright, so
@@ -154,13 +156,14 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   real steps on this data, GPU 0, the recipe's other values): 16 runs out of memory (it asks for 27.6 GB), 8 completes 22 steps
   with a peak of 18,014 MiB but with one allocator garbage collection (so it does not fit by the rule), 4 completes 23 steps at
   9,888 MiB with none (0.27 s per step). **Measured, untuned, one seed** (`convunext/tiny`, 1.94M parameters, 20 epochs
-  asked, the recipe's learning rate 1e-3 left alone, RTX 4090): early stopping ended it after 15 epochs (patience 10) and the best
-  epoch was 5; best `val_miou` 0.6666 against a majority-class baseline of 0.4903 on the 10 selection pairs (the curve is noisy:
-  0.59 to 0.67 from epoch 4 on, ten images), **test mIoU 0.7155** (best weights; 0.7071 final weights) and test pixel accuracy
-  0.9907 against 0.9872 for predicting background everywhere. Test IoU per class: background 0.9907, **crack 0.4403** (precision
-  0.657, recall 0.571; the prediction follows the long cracks and adds small spots, see `visualizations/predictions_best.png`).
-  405 s of `fit`. A one-seed result on 26 test photographs of a 94-pair fit split, not a benchmark: the split rule is this
-  repository's own, so it is not comparable to a published SUT-Crack number.
+  asked, the recipe's learning rate 1e-3 left alone, RTX 4090): all 20 epochs ran (patience 10 did not fire) and the best
+  epoch was 11; best `val_miou` 0.6548 against a majority-class baseline of 0.4903 on the 10 selection pairs (the curve is noisy:
+  0.61 to 0.65 from epoch 5 on, ten images), **test mIoU 0.7072** (best weights; 0.7121 final weights) and test pixel accuracy
+  0.9910 against 0.9872 for predicting background everywhere. Test IoU per class: background 0.9909, **crack 0.4234** (precision
+  0.699, recall 0.518; the prediction follows the long cracks and adds small spots, see `visualizations/predictions_best.png`).
+  460 s of `fit`. A one-seed result on 26 test photographs of a 94-pair fit split, not a benchmark: the split rule is this
+  repository's own, so it is not comparable to a published SUT-Crack number. **Re-run on the corrected ConvNeXt V2 block** (step 10c, D-037); the step 7 run on the
+  old block stopped after 15 epochs (best epoch 5) with `val_miou` 0.6666, test mIoU 0.7155 (0.7071 final), pixel accuracy 0.9907 and crack IoU 0.4403.
 * **Recipes** are the legacy trainers' defaults (`train.convunext`, `train.accunet`): AdamW, 30 epochs, batch 16, a
   horizontal flip; ConvUNext lr 1e-3, AccUNet lr 1e-4 with 2 warmup epochs. Three values differ on purpose. The monitor is
   `val_miou`, a maximum; both legacy trainers default to `val_loss`. AccUNet trains the cross-entropy, where its
@@ -200,13 +203,17 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   at its best rate (`tiny` 0.55 against 0.60, `cifar10` 0.67 against 0.67 at 1e-3, 0.63 against 0.67 at 1e-4). The rows are in
   `tests/test_train/test_api/convnext_seg_lr_evidence.json`, held by a test. `small`, `base`, `large` and `xlarge` have been
   measured at neither rate and take the same 1e-3: a first run of one that stalls at the pixel prior should try a lower rate.
-  The tables of numbers in this section that were measured before step 10b are on the old layer scale and are re-measured by
-  step 10c.
+  Every `convnext_seg` number in this section was measured on the paper's layer scale in step 10b. Step 10c changes ConvNeXt V2 only
+  and `convnext_seg` is V1: built at the same seed, `convnext_seg/cifar10` and `convnext_seg/tiny` give identical weights and identical
+  outputs before and after it (`scratch_step10c/convnext_seg_unchanged_{head,fix}.json`), so those runs were not repeated. The ConvUNext
+  numbers below (Pet, SUT-Crack, ADE20K, COCO) are V2 and were re-measured by step 10c.
   **Measured on Oxford-IIIT Pet** (30 epochs, 128 px, batch 16, RTX 4090, the recipes as shipped; majority-class baseline
   0.199): `resnet_seg/resnet18` (12.8M parameters, 8 minutes) best `val_miou` 0.631 at epoch 28, test mIoU 0.633;
   `convnext_seg/tiny` (30.0M, 15 minutes) 0.544 at epoch 28, test 0.550 (seed 42, the paper's layer scale at lr 1e-3; the old
   layer scale at 1e-4 gave 0.597 and 0.597). Both are the coarse baseline, not a U-Net's
-  score. **Batch 16**, measured by D-036's procedure (20 real steps on Pet at 128 px on the 24 GB card, with another
+  score: `convunext/tiny` through the same task (1.94M parameters, 12 minutes, seed 42) reaches best `val_miou` 0.720 at epoch 23,
+  test mIoU 0.725 (the pristine fcf2866d8 code, whose V2 block had the old layer scale and GRN init, gave 0.715 and 0.720 on the
+  same command: +0.005 and +0.004, not attributable at the 0.01 rule; step 10c, D-037). **Batch 16**, measured by D-036's procedure (20 real steps on Pet at 128 px on the 24 GB card, with another
   session's two `llama-server` processes holding 15.9 GB of it; `tests/test_train/test_api/backbone_seg_memory_evidence.json`):
   16 fits `resnet18`, `resnet50`, `resnet152`, `convnext_seg/cifar10` and `convnext_seg/tiny` (peaks 1.4 to 2.8 GB);
   `convnext_seg/base` needs batch 8 (16 completes with an allocator collection) and `convnext_seg/xlarge` did not fit at any

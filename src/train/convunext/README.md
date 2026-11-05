@@ -244,6 +244,13 @@ repo-root `results/`.
 
 ## Measured runs
 
+**Loops 1 to 4 below were measured on the old ConvNeXt V2 block and on GPU 1 (RTX 4070); "Loop 5" re-measures them on the corrected block.**
+Until plan 98b866fb step 10c (D-036) the V2 block that `create_convunext` builds by default started a layer scale at 1e-4 (the
+model passes that value), clipped it to `[1e-6, 1.0]`, added an L2 of `1e-5` to it, and started its GRN `gamma` at ones; the paper and the reference
+code have no layer scale and start GRN at zero. The numbers in Loops 1 to 4 are kept as the record of those runs and of what each audit
+found, not as the current behaviour of the recipe. The headline of every loop is repeated on the corrected block in Loop 5, on GPU 0 (RTX 4090), and where
+the two disagree Loop 5 is the number.
+
 ### Loop 1 (before the loop-2 fixes)
 
 Two runs, audited in plan step 5 (`plans/plan-2026-09-19T224205-49c8bf80/findings/audit-loop-1-seg.md`),
@@ -442,14 +449,54 @@ The gaps are 0.0097, 0.0200 and 0.0049 (mean 0.0115, smallest 1.6 times the thre
 
 **Final confirmation of the loop-2 command at seed 42 (two-epoch runs, same-seed floor).** `convunext_audit_seg_l4` (code before the flag): test mIoU 0.428131, IoU pet / background / border 0.494730 / 0.702678 / 0.086985, test loss 0.660195, epochs 79.72 and 9.52 s, fit 92.66 s, `test_eval_seconds` 24.57. `convunext_audit_seg_l4b` (the code with the flag, default monitor): 0.428122, 0.494720 / 0.702670 / 0.086978, 0.660209. Against the expected 0.428110 +/- 0.00003 (twice the same-seed range of 1.4e-5) both pass (+0.000021 and +0.000012); they differ from each other by 8.5e-6, so the flag does not move the default. The six seed-42 runs of the fixed code (`convunext_audit_seg_l3` and its two repeats, `_l4`, `_l4b`, `_l4_monitor`) span 0.428109 to 0.428131 (0.000022). `analyzer.seconds` is 6.99, 6.54 and 6.65 s in these runs and 6.57 to 6.75 s in the two 30-epoch runs (16.06 to 18.01 s in the three loop-3 two-epoch runs before the one-thread limit). All: `status` ok, `visualizations.failed` empty, `analyzer.removed` `["summary_dashboard.png"]`, 68 keys, `image_range` `[0.0, 1.0]`.
 
+### Loop 5 (the corrected ConvNeXt V2 block, plan 98b866fb step 10c)
+
+Every number below was read from the named run's `results_summary.json` or `training_log.csv` (copies with sha256 in the plan's
+`scratch_step10c/runs/`; the directories are `results/p4b_s10c_legseg_*`). Same commands as Loops 2 to 4 (tiny, 128 px, batch 16, `--viz-freq 1`,
+`--max-samples 1600` for the 2-epoch runs), the code at commit `3a63e7bb7`, **GPU 0 (RTX 4090) one job at a time**, so a number is not comparable
+to a Loop 1 to 4 number at the second decimal: the SAME old code on this card gives a different mIoU than it gave on GPU 1 (the control below).
+
+**The 2-epoch command, three seeds** (1440 fit / 160 validation images, the 3669-image test split):
+
+| Run | Seed | Test mIoU | Pixel acc. | IoU pet / background / border | `fit_wall_seconds` |
+|---|---|---|---|---|---|
+| `legseg_l2_s42` | 42 | 0.4449 | 0.7412 | 0.5202 / 0.7170 / 0.0977 | 87.2 |
+| `legseg_l2_s1` | 1 | 0.4711 | 0.7501 | 0.5309 / 0.7244 / 0.1582 | 87.0 |
+| `legseg_l2_s2` | 2 | 0.4528 | 0.7398 | 0.5148 / 0.7139 / 0.1297 | 88.3 |
+
+The seed spread is 0.0262 (Loop 2, old block, GPU 1: 0.0174). **Same-seed control on this card:** the OLD code (the pristine export of `fcf2866d8`) gives
+0.438084, 0.438086 and 0.438091 at seed 42 (range 1.0e-5, the Loop 3 floor of 1.4e-5), against 0.4281 on GPU 1, so the device moves this
+command by 0.01 and the block by +0.0068 at seed 42 (0.4449 against 0.4381), well inside the seed spread: **not attributable**. **The same-seed floor is no longer
+1e-5 on the corrected block**: three runs of the command at seed 42 give 0.444933, 0.443914 and 0.444914 (range 0.00102; two of the three agree to 2e-5). The old layer scale
+(1e-4) damped every residual branch, and with it the GPU kernel non-determinism of "Open items"; the V2 branch now starts at full scale, so the same
+non-determinism reaches the output. A difference below about 0.001 mIoU on a fixed
+seed is not attributable in a 2-epoch run on the corrected block (it was 1e-4 before).
+
+**The 10-epoch probe** (`legseg_10ep_s42`, whole train split, seed 42): test mIoU 0.6818 (Loop 2: 0.6579), pixel accuracy 0.8743, IoU pet / background / border
+0.7682 / 0.8692 / 0.4081 (0.7446 / 0.8519 / 0.3771), `val_miou` 0.4535 at epoch 1 to 0.6767 at epoch 10, flattening at the end (0.6762 at epoch 9).
+
+**The default recipe at three seeds** (`legseg_default_s42`, `_s43`, `_s44`: `--variant tiny --image-size 128 --batch-size 16`, nothing else; 30 epochs planned, patience 10 on
+`val_loss`, whole train split, the full test split; no `--deterministic-data`):
+
+| Seed | Epochs run / best epoch | Test mIoU best checkpoint / final weights | Gap (final minus best) | Border IoU best / final | `val_loss` best -> last | `val_miou` peak |
+|---|---|---|---|---|---|---|
+| 42 | 26 / 16, early stop | 0.7182 / 0.7290 | +0.0108 | 0.4643 / 0.4823 | 0.2903 -> 0.3402 | 0.7226 at epoch 25 |
+| 43 | 28 / 18, early stop | 0.7100 / 0.7229 | +0.0128 | 0.4525 / 0.4710 | 0.3060 -> 0.3561 | 0.7169 at epoch 25 |
+| 44 | 28 / 18, early stop | 0.7233 / 0.7253 | +0.0020 | 0.4830 / 0.4760 | 0.2950 -> 0.3503 | 0.7201 at epoch 24 |
+
+Mean test mIoU 0.7172 for the `val_loss` checkpoint and 0.7257 for the final weights (Loop 4, old block: 0.7073 and 0.7188). The Loop 4 rule (the direction repeats iff the final weights beat the
+checkpoint by at least 0.003 in all three seeds, the mean gap is at least 0.005 and `val_miou` peaks after the `val_loss` best in all three) **is met by two seeds and a mean (+0.0085,
+the `val_miou` peak 9, 7 and 6 epochs after the `val_loss` best) but not by seed 44 (+0.0020, and its border IoU gap is -0.0070)**: the final weights beat the checkpoint in
+all three seeds, by less than before and by an amount that varies 6-fold between seeds. The monitor stays `val_loss`; `--monitor val_miou` is still unmeasured on 30 epochs. Run times: `fit_wall_seconds` 432.5, 422.8 and 430.6 (Loop 4: 675 to 797 on the RTX 4070).
+
 ## Open items
 
 - The training defaults are the ConvNeXt trainer's, untuned for segmentation. `border` is not stuck:
   the 10-epoch probe reaches test IoU 0.3771 (2-epoch runs 0.087 to 0.122), so no class weight or
-  Dice term is justified by the evidence. The 30-epoch default was measured once ("Loop 3"): it
-  stops at epoch 28, ends at test mIoU 0.7100 (best weights) and 0.7197 (final), above the probe's
-  0.6579, with `border` IoU 0.4593 and 0.4726. The final weights beat the `val_loss` checkpoint in three of three seeds
-  (gaps 0.0097, 0.0200, 0.0049; "Loop 4"); whether `--monitor val_miou` gains test mIoU is unmeasured
+  Dice term is justified by the evidence. On the corrected V2 block ("Loop 5") the 30-epoch default stops at epoch 26 to 28,
+  ends at test mIoU 0.7100 to 0.7233 (best weights) and 0.7229 to 0.7290 (final), above the 10-epoch probe's 0.6818, with `border` IoU 0.4525 to 0.4830
+  (best) and 0.4710 to 0.4823 (final). The final weights beat the `val_loss` checkpoint in three of three seeds
+  (gaps 0.0108, 0.0128, 0.0020; old block, "Loop 4": 0.0097, 0.0200, 0.0049); whether `--monitor val_miou` gains test mIoU is unmeasured
   (no checkpoint is saved at the `val_miou` peak and no 30-epoch run uses the flag).
 - `--deep-supervision`, a Dice or focal loss and a softmax head are not offered: the stock
   sparse cross-entropy on logits is the whole loss (the library's `SegmentationLosses` need
@@ -458,8 +505,9 @@ The gaps are 0.0097, 0.0200 and 0.0049 (mean 0.0115, smallest 1.6 times the thre
   measurement on this model (20 steps from one seed on the SAME numpy batches, two builds, GPU 1)
   left 172 of 172 weight tensors not bit-identical, largest absolute difference 3.6e-6 to 4.4e-6:
   GPU kernel non-determinism (convolution backward / XLA), not investigated further. The
-  same-seed spread of the current code is 0.000014 test mIoU (n = 3, "Loop 3"); the seed spread is
-  0.0174 (n = 3).
+  same-seed spread was 0.000014 test mIoU on the old V2 block (n = 3, "Loop 3"; 1.0e-5 again on GPU 0, "Loop 5") and is
+  0.00102 on the corrected block (n = 3, "Loop 5"), because the corrected branch is no longer damped by a layer scale of 1e-4;
+  the seed spread is 0.0262 (n = 3, "Loop 5"; 0.0174 on the old block).
 - `visualizations.seconds` counts the per-epoch grids and the end-of-run figures, not the
   dashboard redraw (the shared callback has no clock); `fit_wall_seconds` minus the sum of
   `epoch_times` is the only account of it.
