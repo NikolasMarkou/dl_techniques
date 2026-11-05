@@ -539,13 +539,23 @@ can change it). Other values of the six recipes: ViT uses patch 16 at 224 with d
 (`vit/train_vit.py:79-80,451-453`); the sgd weight decay of `resnet` is an L2 penalty on the model, of strength `wd / 2`
 because Keras' `L2(l)` has the gradient `2 * l * w` and He et al.'s SGD weight decay `wd` adds `wd * w` to it (before step 10e of plan 98b866fb
 the penalty was `L2(wd)`, twice the paper's decay), and it reaches convolution and dense kernels only, where torchvision's reference
-trainer decays every parameter by default (BatchNorm scale and shift and the dense bias, 0.09 percent of `resnet18`'s parameters, get none);
+trainer decays every parameter by default (BatchNorm scale and shift and the dense bias, 0.09 percent of `resnet18`'s parameters, get none: the "no bias decay" rule of Bag of Tricks, arXiv 1812.01187);
 `resnet` has no gradient clip (the legacy trainer's global clip of 1.0 is deleted from both arms: neither He et al. 2015 nor torchvision's
 reference trainer clips); adamw decays in the optimizer; `convnext_v1` and `convnext_v2` use strides 4, drop path 0.1 and dropout 0 on both datasets; stochastic
 depth is 0.3 for `cliffordnet` (0.4 for `cn_64_5`) and 0.1 for `cliffordnet_hier`. The cliffordnet batches are measured, not
 legacy (Memory fit, below). The table is pinned, value by value, by
 `tests/test_train/test_api/test_the_imagenet_and_imagenette_recipes.py`, which also reads the legacy trainers'
 own defaults and compares.
+
+**What the `resnet` decay and clip changes did to a run** (step 10e of plan 98b866fb; `resnet/resnet18`, Imagenette at 128 px,
+`transform_args.image_size=128 epochs=30`, the recipe otherwise, RTX 4090, 30 epochs, a selection split of 946 images so one image is
+0.11 points; before = the recipe with `L2(1e-4)` and a global clip of 1.0, after = `L2(5e-5)` and no clip). Best selection accuracy,
+seeds 42 and 43: before 0.8150 and 0.8224, after 0.8478 and 0.8404 (+3.3 and +1.8 points); test accuracy at the best epoch 0.7997 and
+0.8196 before, 0.8270 and 0.8316 after. The same tree with one old setting put back through `optim_args` shows where it came from: the old
+clip alone (`optim_args.global_clipnorm=1.0`) costs 3.4 and 1.4 points against the new recipe, the doubled decay alone
+(`optim_args.weight_decay=2e-4`) changes it by -1.3 and +0.3 points (not attributable), and both put back reproduce the old run (seed 42:
+0.8150 against 0.8150). So at this length the doubled decay cost nothing measurable, and the clip cost about two points; a 30-epoch run
+of a small model is not a statement about the 100-epoch ImageNet recipe.
 
 **The four Imagenette pairs that have no legacy trainer** (`vit`, `resnet`, `convnext_v1`, `convnext_v2`) get values
 from these rules, each a derivation from a legacy value or a cited recipe, not from a run: no run of these four pairs
