@@ -79,6 +79,12 @@ model-specific arguments on top of it.
 > pass `kernel_regularizer=L2(weight_decay)` — the penalty inflates the loss and the optimizer
 > decays the parameter again. Use `AdamW(weight_decay=...)` alone (preferred, matches most paper
 > recipes) or `Adam` + `kernel_regularizer=L2(...)`, never both.
+>
+> **`L2(wd)` is twice the SGD weight decay `wd`.** Keras `L2(l)` adds `l * sum(w^2)` to the loss, whose gradient is
+> `2 * l * w`; the SGD weight decay of He et al. 2015 and of `torch.optim.SGD(weight_decay=wd)` adds `wd * w`. To give an SGD
+> model the paper's decay, pass `kernel_regularizer=L2(wd / 2)` (`train_resnet.py` and `api/recipes.py:_weight_decay_regularizer`
+> do, D-042 of plan 98b866fb, which measured a real SGD step shrinking a weight 2.0000 times as far under `L2(wd)`). `vit` and `rbf_protonet` with `--optimizer sgd` (not their
+> default) still pass `L2(weight_decay)`: the same doubling, outside that plan.
 
 > **A failed run does not exit 0, and that includes a failure one call below `main`.** A broad
 > `except` (bare, `Exception`, `BaseException`) anywhere under `src/train` re-raises, exits

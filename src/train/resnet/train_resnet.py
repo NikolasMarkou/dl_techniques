@@ -77,12 +77,10 @@ class TrainingConfig:
     lr_schedule_type: str = 'cosine_decay'
     warmup_epochs: int = 5
     weight_decay: float = 1e-4
-    gradient_clipping: float = 1.0
     momentum: float = 0.9
 
     # Augmentation
     augment_data: bool = True
-    label_smoothing: float = 0.1
 
     # Monitoring
     monitor_every_n_epochs: int = 5
@@ -359,11 +357,19 @@ def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) 
 
     # Model
     input_shape = (config.image_size, config.image_size, 3)
+    # DECISION plan-2026-11-03T221936-98b866fb/D-042
+    # The penalty is `L2(weight_decay / 2)`, NOT `L2(weight_decay)`. Keras `L2(l)` adds `l * sum(w^2)` to the loss, whose
+    # gradient is `2 * l * w`; the SGD weight decay of He et al. 2015 (section 3.4, `weight_decay` 1e-4) and of
+    # `torch.optim.SGD` adds `weight_decay * w` to the gradient. `L2(weight_decay)` therefore decayed twice as hard as
+    # the paper (measured in D-042: a real SGD step shrinks a weight 2.0000 times as far). Do NOT go back to `L2(weight_decay)`
+    # "because the number matches the flag", and do NOT also pass a decay to the sgd optimizer: the penalty is the only one.
+    # It reaches convolution and dense KERNELS only; BatchNorm gamma and beta and the dense bias (0.09 percent of
+    # resnet18's parameters) get none, where torchvision decays every parameter by default (stated in the README).
     model = create_resnet(
         variant=config.model_variant, num_classes=config.num_classes,
         input_shape=input_shape, pretrained=config.pretrained,
         enable_deep_supervision=config.enable_deep_supervision,
-        kernel_regularizer=keras.regularizers.L2(config.weight_decay) if config.weight_decay > 0 else None
+        kernel_regularizer=keras.regularizers.L2(config.weight_decay / 2) if config.weight_decay > 0 else None
     )
     model.summary()
 
@@ -386,7 +392,9 @@ def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) 
         'warmup_steps': steps_per_epoch * config.warmup_epochs, 'alpha': 0.01
     })
 
-    opt_config = {'type': config.optimizer_type, 'gradient_clipping_by_norm': config.gradient_clipping}
+    # No gradient clip: He et al. 2015 and torchvision's reference trainer (`--clip-grad-norm` default None) have none
+    # (D-042). Do NOT put back a `gradient_clipping_by_norm` key; the builder then clips the global norm at that value.
+    opt_config = {'type': config.optimizer_type}
     if config.optimizer_type.lower() == 'sgd':
         opt_config['momentum'] = config.momentum
 
@@ -475,7 +483,6 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument('--weight-decay', type=float, default=1e-4)
 
     parser.add_argument('--no-augmentation', dest='augment_data', action='store_false')
-    parser.add_argument('--label-smoothing', type=float, default=0.1)
 
     parser.add_argument('--output-dir', type=str, default='results')
     parser.add_argument('--experiment-name', type=str, default=None)
@@ -505,7 +512,7 @@ def main() -> None:
         epochs=args.epochs, learning_rate=args.learning_rate,
         optimizer_type=args.optimizer, lr_schedule_type=args.lr_schedule,
         warmup_epochs=args.warmup_epochs, weight_decay=args.weight_decay,
-        augment_data=args.augment_data, label_smoothing=args.label_smoothing,
+        augment_data=args.augment_data,
         monitor_every_n_epochs=args.monitor_every,
         early_stopping_patience=args.early_stopping_patience,
         conformal_alpha=None if args.no_conformal else args.conformal_alpha,

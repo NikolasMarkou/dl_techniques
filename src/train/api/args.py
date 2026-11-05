@@ -79,7 +79,8 @@ _OPTIMIZER_OPTIONS = ("beta_1", "beta_2", "epsilon", "momentum", "weight_decay")
 
 #: Options two different optimizers both take, keyed by the pair of names.
 #: ``weight_decay`` is not here: for adamw it is decoupled decay, for sgd it is
-#: the strength of an L2 regularizer on the model, two different quantities.
+#: the SGD weight decay (the update adds ``wd * w`` to the gradient), which is applied as an L2 penalty of strength
+#: ``wd / 2`` on the model (D-042 of plan 98b866fb), two different quantities.
 _SHARED_OPTIONS = {frozenset(("adam", "adamw")): ("beta_1", "beta_2", "epsilon")}
 
 # ---------------------------------------------------------------------
@@ -186,8 +187,8 @@ class OptimArgs(StrictConfig):
     weight_decay: Auto[Optional[float]] = dataclasses.field(
         default=AUTO,
         metadata={
-            "help": "weight decay: decoupled decay for adamw, the strength of an L2 "
-            "regularizer on the model for sgd, refused for adam; null for none"
+            "help": "weight decay: decoupled decay for adamw, the SGD weight decay (gradient wd * w, "
+            "applied as an L2 penalty of wd / 2 on the model) for sgd, refused for adam; null for none"
         },
     )
     momentum: Auto[Optional[float]] = dataclasses.field(

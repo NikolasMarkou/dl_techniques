@@ -160,10 +160,12 @@ DEFAULTS = {
         min_lr_ratio=0.01, decay_over="total", clipnorm=None, global_clipnorm=1.0,
         watch_metric="val_accuracy", watch_mode="max", patience=15,
     ),
+    # No clip: the legacy trainer's global clip of 1.0 was unsourced (He et al. 2015 and torchvision's reference trainer have none)
+    # and is deleted from both arms (D-042 of plan 98b866fb).
     "resnet": dict(
         epochs=100, batch_size=256, optimizer="sgd", lr=0.1, weight_decay=1e-4,
         momentum=0.9, betas=(None, None, None), warmup_epochs=5,
-        min_lr_ratio=0.01, decay_over="total", clipnorm=None, global_clipnorm=1.0,
+        min_lr_ratio=0.01, decay_over="total", clipnorm=None, global_clipnorm=None,
         watch_metric="val_loss", watch_mode="min", patience=15,
     ),
     "convnext_v1": dict(
@@ -385,6 +387,8 @@ def test_an_explicit_autoaugment_gets_the_erasing_probability_the_legacy_trainer
 
 
 def l2_strength(regularizer):
+    """The ``l`` of a Keras ``L2(l)``. The recipes give the model ``wd / 2`` for an sgd weight decay ``wd``: ``L2(l)`` has the
+    gradient ``2 * l * w`` and the SGD weight decay ``wd * w`` (D-042 of plan 98b866fb), so every number below is half the decay."""
     import keras
 
     assert isinstance(regularizer, keras.regularizers.L2)
@@ -410,7 +414,8 @@ def test_adamw_gets_no_model_regularizer(builtin):
 def test_resnet_with_sgd_gets_an_l2_and_its_optimizer_gets_no_decay(builtin):
     kwargs, optim = resolved("resnet", "resnet18")
     assert optim.optimizer == "sgd"
-    assert l2_strength(kwargs["kernel_regularizer"]) == pytest.approx(1e-4)
+    assert optim.weight_decay == 1e-4
+    assert l2_strength(kwargs["kernel_regularizer"]) == pytest.approx(1e-4 / 2)
     optimizer, _ = build_optimizer_and_schedule(optim, 10, 5)
     assert optimizer.weight_decay is None
 
@@ -436,7 +441,7 @@ def test_the_decay_is_in_exactly_one_place(builtin):
             assert in_model != in_optimizer, (family, name)
             assert in_model == (name == "sgd")
             if in_model:
-                assert l2_strength(kwargs["kernel_regularizer"]) == pytest.approx(0.03)
+                assert l2_strength(kwargs["kernel_regularizer"]) == pytest.approx(0.03 / 2)
 
 
 def test_sgd_on_an_adamw_family_takes_no_decay_from_the_recipe(builtin):
@@ -484,7 +489,7 @@ def test_sgd_on_a_family_without_a_regularizer_path_still_decays(family, variant
     kwargs, _ = resolved(
         family, variant, optimizer="sgd", lr=0.05, weight_decay=0.01, momentum=0.9
     )
-    assert l2_strength(kwargs["kernel_regularizer"]) == pytest.approx(0.01)
+    assert l2_strength(kwargs["kernel_regularizer"]) == pytest.approx(0.01 / 2)
     plain, _ = resolved(family, variant)
     assert "kernel_regularizer" not in plain
 

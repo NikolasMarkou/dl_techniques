@@ -41,7 +41,9 @@ injection was reverted immediately afterwards.
 
 1. ``test_every_cli_value_reaches_the_config``. Injection: delete
    ``label_smoothing=args.label_smoothing`` from the ``TrainingConfig(...)``
-   construction at ``train_resnet.py:370-383``. Observed (1 failed, 7 passed)::
+   construction at ``train_resnet.py:370-383``. Observed (1 failed, 7 passed;
+   the field it was measured on, ``label_smoothing``, was a dead field that
+   D-042 of plan 98b866fb deleted, the mechanism is unchanged)::
 
        AssertionError: --label-smoothing never reached
        TrainingConfig.label_smoothing: argv asked for 0.037, config holds 0.1.
@@ -104,7 +106,6 @@ DEST_TO_FIELD: Dict[str, str] = {
     "warmup_epochs": "warmup_epochs",
     "weight_decay": "weight_decay",
     "augment_data": "augment_data",
-    "label_smoothing": "label_smoothing",
     "conformal_alpha": "conformal_alpha",
     "output_dir": "output_dir",
     "experiment_name": "experiment_name",
@@ -123,7 +124,6 @@ UNMAPPED_DESTS: Dict[str, str] = {
 # their dataclass defaults, so the value assertions cannot pass by looking at a
 # config object that is not the one ``main()`` built.
 FIELDS_WITH_NO_FLAG: Tuple[str, ...] = (
-    "gradient_clipping",
     "momentum",
 )
 
@@ -145,7 +145,6 @@ EXPECTED: Dict[str, Any] = {
     "warmup_epochs": 2,
     "weight_decay": 0.0009,
     "augment_data": False,
-    "label_smoothing": 0.037,
     "conformal_alpha": 0.05,
     "experiment_name": "cli_contract_probe",
     "monitor_every_n_epochs": 11,
@@ -255,7 +254,6 @@ def _argv(tmp_path: Path) -> List[str]:
         "--warmup-epochs", str(EXPECTED["warmup_epochs"]),
         "--weight-decay", str(EXPECTED["weight_decay"]),
         "--no-augmentation",
-        "--label-smoothing", str(EXPECTED["label_smoothing"]),
         "--conformal-alpha", str(EXPECTED["conformal_alpha"]),
         "--output-dir", str(tmp_path / "run_output"),
         "--experiment-name", EXPECTED["experiment_name"],
@@ -494,3 +492,40 @@ def test_a_missing_imagenet_root_is_refused_without_side_effects(
 
     reached = {name: s.calls for name, s in sentinels.items() if s.calls}
     assert reached == {}, f"a rejected argv still performed side effects: {reached}"
+
+
+# ---------------------------------------------------------------------
+# the two settings nothing sourced, and the field nothing read (D-042)
+# ---------------------------------------------------------------------
+
+
+def _spelled(*words: str) -> str:
+    """A name assembled from its words, never typed whole.
+
+    ``tests/test_train/test_config_fields_are_live.py`` counts a string constant EQUAL to a field name (or to its ``--flag``) in a
+    file that imports the config class as a read of that field. A test that asserts a field is GONE and types its name would
+    therefore make the guard report the field live if somebody put it back unread (measured: the mutant "field back, unread"
+    survived the guard while this test typed the names).
+    """
+    return "_".join(words)
+
+
+DELETED_FIELDS = (_spelled("label", "smoothing"), _spelled("gradient", "clipping"))
+DELETED_FLAG = "--" + "-".join(("label", "smoothing"))
+
+
+def test_the_dead_smoothing_field_and_the_unsourced_clip_are_gone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The smoothing field (default 0.1) was read by no code: the loss is a plain sparse cross-entropy, so the flag changed
+    nothing but the ``config.json`` it was written to. The clip field (default 1.0) was a global clip that neither He et al.
+    2015 nor torchvision's reference trainer has. Both are deleted, with the flag; a flag that is typed now is refused,
+    never ignored (no shim)."""
+    names = {field.name for field in dataclass_fields(TrainingConfig)}
+    assert not names & set(DELETED_FIELDS), sorted(names & set(DELETED_FIELDS))
+    monkeypatch.setattr(sys, "argv", ["train_resnet.py", DELETED_FLAG, "0.1"])
+    with pytest.raises(SystemExit) as refused:
+        train_resnet.parse_arguments()
+    assert refused.value.code == 2
+    monkeypatch.setattr(sys, "argv", _argv(tmp_path))
+    assert not set(DELETED_FIELDS) & set(vars(train_resnet.parse_arguments()))

@@ -66,8 +66,12 @@ def row(*, epochs, batch_size, patience, watch, optim, loader=None, model_args, 
 
 VIT_MODEL = {"dropout_rate": 0.1, "attention_dropout_rate": 0.1, "patch_size": 16}
 VIT_OPTIM = dict(lr=3e-4, weight_decay=0.05, decay_over="total", global_clipnorm=1.0)
+#: The penalty strength the recipe hands the model: Keras `L2(l)` has the gradient `2 * l * w`, SGD weight decay `wd` has the
+#: gradient `wd * w`, so the model gets `wd / 2` (D-042).
+RESNET_L2 = 1e-4 / 2
+# No clip: He et al. 2015 and torchvision's reference train.py (`--clip-grad-norm` default None) have none (D-042).
 RESNET_OPTIM = dict(
-    optimizer="sgd", lr=0.1, weight_decay=1e-4, decay_over="total", momentum=0.9, global_clipnorm=1.0,
+    optimizer="sgd", lr=0.1, weight_decay=1e-4, decay_over="total", momentum=0.9,
 )
 CONVNEXT_OPTIM = dict(lr=1e-3, weight_decay=1e-4, warmup_epochs=0, decay_over="post_warmup", clipnorm=1.0)
 CONVNEXT_MODEL = {"strides": 4, "drop_path_rate": 0.1, "dropout_rate": 0.0}
@@ -91,13 +95,13 @@ RECIPES = {
     ("resnet", "imagenet"): row(
         epochs=100, batch_size=256, patience=15, watch="val_loss",
         optim={**RESNET_OPTIM, "warmup_epochs": 5}, loader={"imagenet_augment_color": True},
-        model_args={"stem_type": "imagenet"}, l2=1e-4),
+        model_args={"stem_type": "imagenet"}, l2=RESNET_L2),
     # resnet/imagenette: NEW. Goyal et al.'s linear rule at half the batch (0.1 * 128 / 256), warmup 5% of the schedule;
     # the loader refuses imagenet_augment_color for Imagenette.
     ("resnet", "imagenette"): row(
         epochs=200, batch_size=128, patience=15, watch="val_loss",
         optim={**RESNET_OPTIM, "lr": 0.05, "warmup_epochs": 10},
-        model_args={"stem_type": "imagenet"}, l2=1e-4),
+        model_args={"stem_type": "imagenet"}, l2=RESNET_L2),
     # convnext_v1 and v2 /imagenet: convnext/common.py (100, 64, 1e-3, 1e-4, 0, patience 50, strides 4, 0.1, 0.0).
     ("convnext_v1", "imagenet"): row(
         epochs=100, batch_size=64, patience=50, watch="val_loss", optim=CONVNEXT_OPTIM, model_args=CONVNEXT_MODEL),
@@ -205,6 +209,65 @@ def test_the_control_a_pair_whose_entry_is_deleted_warns_again(builtin, family, 
 
 
 # ---------------------------------------------------------------------
+# The sgd weight decay is the paper's, and nothing clips (D-042)
+# ---------------------------------------------------------------------
+
+#: SGD weight decays: the ResNet recipe's, AlexNet's 5e-4 (Krizhevsky et al.), and a large one.
+WEIGHT_DECAYS = [1e-4, 5e-4, 0.05]
+
+
+def penalty_gradient(regularizer, weights):
+    """The gradient of ``regularizer(w)`` with respect to ``w``, by ``GradientTape``."""
+    import tensorflow as tf
+
+    variable = tf.Variable(weights)
+    with tf.GradientTape() as tape:
+        penalty = regularizer(variable)
+    return tape.gradient(penalty, variable).numpy()
+
+
+@pytest.mark.parametrize("decay", WEIGHT_DECAYS)
+def test_the_sgd_penalty_has_the_gradient_of_the_sgd_weight_decay(decay):
+    """Keras ``L2(l)`` is ``l * sum(w^2)``, whose gradient is ``2 * l * w``; SGD weight decay ``wd`` adds ``wd * w`` to the
+    gradient (He et al. 2015 section 3.4; torch.optim.SGD; torchvision's reference). With ``w = 1`` the gradient of the
+    recipe's penalty is therefore ``wd`` exactly, and ``2 * wd`` was the doubled decay."""
+    regularizer = recipes._weight_decay_regularizer(OptimArgs(optimizer="sgd", weight_decay=decay))
+    ones = np.ones((4, 3), "float32")
+    assert (penalty_gradient(regularizer, ones) == np.float32(decay)).all()
+    weights = np.random.default_rng(0).normal(size=(4, 3)).astype("float32")
+    assert (penalty_gradient(regularizer, weights) == (np.float32(decay) * weights)).all()
+
+
+@pytest.mark.parametrize("decay", WEIGHT_DECAYS)
+def test_one_sgd_step_on_the_penalty_alone_shrinks_the_weights_by_one_minus_lr_wd(decay):
+    """The recipe's regularizer under a real Keras ``SGD`` step, with a data loss that is exactly 0: the weights end at
+    ``w * (1 - lr * wd)``, which is what ``torch.optim.SGD(weight_decay=wd)`` does to a parameter with a zero gradient."""
+    import keras
+
+    lr = 0.1
+    regularizer = recipes._weight_decay_regularizer(OptimArgs(optimizer="sgd", weight_decay=decay))
+    layer = keras.layers.Dense(3, use_bias=False, kernel_regularizer=regularizer)
+    inputs = keras.Input((4,))
+    model = keras.Model(inputs, keras.layers.Lambda(lambda t: t * 0.0)(layer(inputs)))
+    start = np.random.default_rng(1).normal(size=(4, 3)).astype("float32")
+    layer.kernel.assign(start)
+    model.compile(optimizer=keras.optimizers.SGD(learning_rate=lr), loss="mse")
+    model.train_on_batch(np.ones((2, 4), "float32"), np.zeros((2, 3), "float32"))
+    np.testing.assert_allclose(
+        keras.ops.convert_to_numpy(layer.kernel), start * (1.0 - lr * decay), rtol=1e-5, atol=1e-8)
+
+
+@pytest.mark.parametrize("family, dataset", [pair for pair in PAIRS if pair[0] == "resnet"], ids=lambda v: str(v))
+def test_the_resnet_recipe_hands_the_model_the_penalty_of_its_weight_decay_and_builds_an_unclipped_optimizer(
+    builtin, family, dataset
+):
+    context, optim, _, kwargs = resolve(builtin, family, dataset)
+    assert (penalty_gradient(kwargs["kernel_regularizer"], np.ones((2, 2), "float32")) == np.float32(optim.weight_decay)).all()
+    optimizer, _ = build_optimizer_and_schedule(optim, TRAIN_IMAGES[dataset] // context.defaults["batch_size"], 2)
+    assert (optimizer.clipnorm, optimizer.global_clipnorm, optimizer.clipvalue) == (None, None, None)
+
+
+# ---------------------------------------------------------------------
 # Legacy sources
 # ---------------------------------------------------------------------
 
@@ -231,15 +294,18 @@ def test_vit_on_imagenet_is_the_legacy_trainers_default(builtin):
 
 def test_resnet_on_imagenet_is_the_legacy_trainers_default(builtin):
     legacy = legacy_defaults("train.resnet.train_resnet")
-    context, optim, _, _ = resolve(builtin, "resnet", "imagenet")
+    context, optim, _, kwargs = resolve(builtin, "resnet", "imagenet")
     assert (context.defaults["epochs"], context.defaults["batch_size"]) == (legacy["epochs"], legacy["batch_size"])
-    assert (optim.optimizer, optim.lr, optim.weight_decay, optim.warmup_epochs, optim.momentum,
-            optim.global_clipnorm) == (
+    assert (optim.optimizer, optim.lr, optim.weight_decay, optim.warmup_epochs, optim.momentum) == (
         legacy["optimizer_type"], legacy["learning_rate"], legacy["weight_decay"], legacy["warmup_epochs"],
-        legacy["momentum"], legacy["gradient_clipping"])
+        legacy["momentum"])
     assert context.defaults["checkpoint_args"]["early_stopping_patience"] == legacy["early_stopping_patience"]
-    # The legacy 0.1 never reaches the loss (README, D-003), so the recipe carries none.
-    assert legacy["label_smoothing"] == 0.1
+    # Neither arm clips (the paper and torchvision's reference do not) and neither has a smoothing field: the legacy 0.1
+    # never reached the loss (README, D-003) and the field is gone (D-042). The recipe carries no clip.
+    assert optim.clipnorm is None and optim.global_clipnorm is None
+    assert "gradient_clipping" not in legacy and "label_smoothing" not in legacy
+    # Both arms give the model the same penalty: wd / 2, whose gradient is the SGD weight decay (D-042).
+    assert float(kwargs["kernel_regularizer"].l2) == legacy["weight_decay"] / 2
 
 
 @pytest.mark.parametrize("family", ["convnext_v1", "convnext_v2"])

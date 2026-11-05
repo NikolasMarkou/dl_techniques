@@ -21,7 +21,7 @@ def _config(root, out, name, **kw):
     return train_resnet.TrainingConfig(
         imagenet_root=root, image_size=32, batch_size=4, model_variant="resnet18",
         num_classes=3, enable_deep_supervision=True, epochs=1, warmup_epochs=0,
-        augment_data=False, label_smoothing=0.0, output_dir=str(out),
+        augment_data=False, output_dir=str(out),
         experiment_name=name, holdout_per_class=1, **kw,
     )
 

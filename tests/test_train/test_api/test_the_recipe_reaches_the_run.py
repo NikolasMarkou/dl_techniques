@@ -141,7 +141,7 @@ def test_the_sgd_l2_is_recorded_as_a_serialized_regularizer(tmp_path):
     )
     regularizer = record["used"]["model_args"]["kernel_regularizer"]
     assert regularizer["class_name"] == "L2"
-    assert regularizer["config"] == {"l2": 0.01}
+    assert regularizer["config"] == {"l2": 0.005}  # wd / 2: the penalty whose gradient is the SGD weight decay 0.01 (D-042)
     # The adamw run above records None: the optimizer decays, the model does not.
     assert failing_run(tmp_path / "other")["used"]["model_args"]["kernel_regularizer"] is None
 

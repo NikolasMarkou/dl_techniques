@@ -61,8 +61,8 @@ DECAYS = ("total", "post_warmup")
 _BETAS = ("beta_1", "beta_2", "epsilon")
 
 #: Options each optimizer refuses to be given. ``weight_decay`` is refused for
-#: adam (use adamw) but not for sgd: sgd's value is the strength of an L2
-#: regularizer on the model, which the optimizer never sees and never gets.
+#: adam (use adamw) but not for sgd: sgd's value is the SGD weight decay, which the
+#: model carries as an ``L2(wd / 2)`` penalty and the optimizer never sees and never gets.
 _REFUSED_OPTIONS = {
     "adamw": ("momentum",),
     "adam": ("momentum", "weight_decay"),

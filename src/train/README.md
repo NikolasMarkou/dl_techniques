@@ -521,8 +521,8 @@ these pairs resolves to, with every value `auto`:
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | vit | imagenet | 50 | 128 | adamw | 3e-4 | 0.05 | 5 | none | 0 | 224 | 15 | legacy: `vit/train_vit.py:67,83-89,99,103` |
 | vit | imagenette | 200 | 128 | adamw | 3e-4 | 0.05 | 20 | none | 0 | 224 | 15 | new: rules E, W below |
-| resnet | imagenet | 100 | 256 | sgd | 0.1 | 1e-4 as L2 | 5 | none, loader colour jitter | 0 | 224 | 15 | legacy: `resnet/train_resnet.py:61,74-81,89,347` |
-| resnet | imagenette | 200 | 128 | sgd | 0.05 | 1e-4 as L2 | 10 | none | 0 | 224 | 15 | new: rules E, B, L, W |
+| resnet | imagenet | 100 | 256 | sgd | 0.1 | 1e-4 as `L2(5e-5)` | 5 | none, loader colour jitter | 0 | 224 | 15 | legacy: `resnet/train_resnet.py:61,74-80,87,345` |
+| resnet | imagenette | 200 | 128 | sgd | 0.05 | 1e-4 as `L2(5e-5)` | 10 | none | 0 | 224 | 15 | new: rules E, B, L, W |
 | convnext_v1, convnext_v2 | imagenet | 100 | 64 | adamw | 1e-3 | 1e-4 | 0 | none | 0 | 224 | 50 | legacy: `convnext/common.py:155,160-165,258-265` |
 | convnext_v1, convnext_v2 | imagenette | 100 | 64 | adamw | 1e-3 | 1e-4 | 0 | none | 0 | 224 | 50 | new (the legacy trainer refuses Imagenette): rules E, M |
 | cliffordnet | imagenet | 200 | 8 | adamw | 1e-3 | 0.1 | 0 | none | 0 | 224 | 30 | legacy except the batch (legacy 128): `cliffordnet/train_cliffordnet.py:241-246,611,652-664,681`, `common/args.py:345`; batch measured, see Memory fit |
@@ -533,11 +533,15 @@ these pairs resolves to, with every value `auto`:
 "Augment none" adds nothing to the loader's own random-resized-crop and flip, which every ImageNet and Imagenette
 run has (`resnet` on ImageNet adds the loader's colour jitter through `imagenet_augment_color`, which the loader
 refuses for Imagenette). "Smoothing" is the label smoothing of the loss, 0 everywhere: the task builds a plain sparse
-cross-entropy, `vit` refuses a nonzero value (`vit/train_vit.py:125`), the 0.1 of `resnet/train_resnet.py` never
-reaches its loss, and the other two trainers default to 0. "Image size" is the dataset's own 224 (`transform_args.image_size`
+cross-entropy, `vit` refuses a nonzero value (`vit/train_vit.py:125`), the `label_smoothing` field of `resnet/train_resnet.py`
+(default 0.1, never read by its loss) is deleted with its flag, and the other two trainers default to 0. "Image size" is the dataset's own 224 (`transform_args.image_size`
 can change it). Other values of the six recipes: ViT uses patch 16 at 224 with dropout 0.1 and attention dropout 0.1
-(`vit/train_vit.py:79-80,451-453`); the sgd weight decay of `resnet` is an L2 on the model, adamw decays in the
-optimizer; `convnext_v1` and `convnext_v2` use strides 4, drop path 0.1 and dropout 0 on both datasets; stochastic
+(`vit/train_vit.py:79-80,451-453`); the sgd weight decay of `resnet` is an L2 penalty on the model, of strength `wd / 2`
+because Keras' `L2(l)` has the gradient `2 * l * w` and He et al.'s SGD weight decay `wd` adds `wd * w` to it (before step 10e of plan 98b866fb
+the penalty was `L2(wd)`, twice the paper's decay), and it reaches convolution and dense kernels only, where torchvision's reference
+trainer decays every parameter by default (BatchNorm scale and shift and the dense bias, 0.09 percent of `resnet18`'s parameters, get none);
+`resnet` has no gradient clip (the legacy trainer's global clip of 1.0 is deleted from both arms: neither He et al. 2015 nor torchvision's
+reference trainer clips); adamw decays in the optimizer; `convnext_v1` and `convnext_v2` use strides 4, drop path 0.1 and dropout 0 on both datasets; stochastic
 depth is 0.3 for `cliffordnet` (0.4 for `cn_64_5`) and 0.1 for `cliffordnet_hier`. The cliffordnet batches are measured, not
 legacy (Memory fit, below). The table is pinned, value by value, by
 `tests/test_train/test_api/test_the_imagenet_and_imagenette_recipes.py`, which also reads the legacy trainers'
@@ -553,7 +557,7 @@ has been made, so read them as starting points. Only `cliffordnet` has an Imagen
 | B, batch | `vit` 128 and `convnext` 64 unchanged; `resnet` 128 | `resnet`'s 256 is 33 steps an epoch on this split (`resnet/train_resnet.py:61`) |
 | L, learning rate | `resnet` 0.05; the others unchanged | linear scaling of the SGD rate with the batch, 0.1 x 128 / 256 (Goyal et al. 2017, "Accurate, Large Minibatch SGD"); the adamw rates are the legacy ones at the legacy batch |
 | W, warmup | `vit` 20 epochs, `resnet` 10, `convnext` 0 | the legacy share of the schedule: `vit` 5 of 50 epochs (`vit/train_vit.py:83,87`), `resnet` 5 of 100 (`resnet/train_resnet.py:74,78`), `convnext` none (`convnext/common.py:264`) |
-| Weight decay, clipping, patience, dropout | the legacy values | no cited recipe changes them with the size of the data |
+| Weight decay, patience, dropout | the legacy values (`resnet`: `wd` 1e-4 applied as `L2(wd / 2)`, the paper's strength) | no cited recipe changes them with the size of the data |
 | M, `convnext` model arguments | strides 4, drop path 0.1, dropout 0 | the legacy table's only 224 px row (`convnext/common.py:155,160-165`), the ConvNeXt-T values; without an entry the factory would apply drop path 0 |
 
 **Memory fit** (measured, GPU 0): for the smallest variant of each of the six families on both datasets, for

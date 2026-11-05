@@ -61,6 +61,21 @@ Why each arm is not satisfied by construction:
 ``test_the_scheduler_refuses_to_be_built_without_its_variables``
     Pins the fix's own failure mode: the schedule can no longer be silently
     disconnected. Passing ``None`` is what the OLD wiring effectively did.
+
+A third defect (D-042 of plan 98b866fb), found by checking the trainer against
+He et al. 2015 and torchvision's reference trainer, lives in what the real
+``train_resnet_imagenet`` hands the model and the optimizer, so the last two arms
+RUN it (SGD, deep supervision, the fake 3-class tree, one epoch, CPU):
+
+``test_the_trainer_penalty_has_the_gradient_of_the_sgd_weight_decay``
+    ``L2(weight_decay)`` has the gradient ``2 * weight_decay * w``; the paper's SGD
+    weight decay adds ``weight_decay * w``, so the trainer doubled it. The arm reads
+    the regularizer of every convolution and dense layer of the TRAINED model and
+    differentiates it at ``w = 1`` (exactly ``weight_decay``).
+``test_the_trainer_optimizer_clips_nothing_and_decays_nothing_itself``
+    The trainer used to set a global clip of 1.0 that neither the paper nor
+    torchvision's trainer has, and the penalty is the ONLY decay (a decay in the
+    optimizer too would apply it twice).
 """
 
 import keras
@@ -347,3 +362,62 @@ def test_create_callbacks_forwards_the_loss_weight_variables(monkeypatch, tmp_pa
         "create_callbacks built the scheduler around a DIFFERENT weight list "
         "than the one compiled into the loss"
     )
+
+
+# ---------------------------------------------------------------------------
+# Defect 3 -- the decay and the clip the real trainer builds (D-042)
+# ---------------------------------------------------------------------------
+
+WEIGHT_DECAY = 3e-4
+
+
+@pytest.fixture(scope="module")
+def sgd_run(tmp_path_factory):
+    """One real ``train_resnet_imagenet`` run, SGD, on the fake tree: ``(config, trained model)``."""
+    from tests.imagenet_fake_tree import build_fake_imagenet, use_the_fake_tree_class_count
+
+    root = build_fake_imagenet(tmp_path_factory.mktemp("tree") / "imagenet2012")
+    out = tmp_path_factory.mktemp("resnet_sgd")
+    patch = pytest.MonkeyPatch()
+    use_the_fake_tree_class_count(patch)
+    patch.setattr(train_resnet, "setup_gpu", lambda *a, **k: None)
+    # The checkpoint, analyzer and plotting callbacks are not under test and cost minutes.
+    patch.setattr(train_resnet, "create_callbacks", lambda *a, **k: ([], None))
+    # The fake tree has 3 classes, so top-k needs k <= 3.
+    real_topk = train_resnet.PrimaryOutputTopKAccuracy
+    patch.setattr(train_resnet, "PrimaryOutputTopKAccuracy", lambda *a, **k: real_topk(*a, **{**k, "k": 2}))
+    config = TrainingConfig(
+        imagenet_root=root, image_size=32, batch_size=4, model_variant="resnet18", num_classes=3,
+        enable_deep_supervision=True, epochs=1, warmup_epochs=0, augment_data=False,
+        weight_decay=WEIGHT_DECAY, output_dir=str(out), experiment_name="sgd", holdout_per_class=1,
+        conformal_alpha=None,
+    )
+    try:
+        model = train_resnet.train_resnet_imagenet(config)
+    finally:
+        patch.undo()
+    return config, model
+
+
+def test_the_trainer_penalty_has_the_gradient_of_the_sgd_weight_decay(sgd_run):
+    import tensorflow as tf
+
+    config, model = sgd_run
+    regularized = [
+        layer for layer in model._flatten_layers() if getattr(layer, "kernel_regularizer", None) is not None
+    ]
+    assert len(regularized) >= 20, len(regularized)  # resnet18 and its supervision heads: every conv and dense layer
+    for layer in regularized:
+        ones = tf.Variable(np.ones((3, 3), "float32"))
+        with tf.GradientTape() as tape:
+            penalty = layer.kernel_regularizer(ones)
+        gradient = tape.gradient(penalty, ones).numpy()
+        assert (gradient == np.float32(config.weight_decay)).all(), (layer.name, gradient.flat[0], config.weight_decay)
+
+
+def test_the_trainer_optimizer_clips_nothing_and_decays_nothing_itself(sgd_run):
+    _, model = sgd_run
+    optimizer = model.optimizer
+    assert type(optimizer).__name__ == "SGD", type(optimizer).__name__
+    assert (optimizer.clipnorm, optimizer.global_clipnorm, optimizer.clipvalue) == (None, None, None)
+    assert not optimizer.weight_decay, optimizer.weight_decay

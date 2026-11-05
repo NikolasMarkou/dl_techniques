@@ -221,11 +221,13 @@ VIT = _recipe(
 )
 
 # resnet/train_resnet.py: epochs :74, batch :61, sgd :76, lr :75, warmup :78,
-# wd :79 (an L2 regularizer on the model, :366; the optimizer gets none),
-# momentum :81, clip :80 (GLOBAL), patience :89, monitor val_loss :307, schedule
-# decay_steps = spe * epochs :385 with alpha 0.01 :386. Its label_smoothing 0.1 is a
-# dead field (the loss never reads it) and is NOT copied (D-003).
-# ImageNet uses the loader's crop and flip plus colour jitter :347. The legacy
+# wd :79 (an L2 penalty on the model, `L2(wd / 2)`, :372; the optimizer gets none),
+# momentum :80, patience :87, monitor val_loss :305, schedule decay_steps = spe * epochs
+# :391 with alpha 0.01. The legacy trainer had a label_smoothing field the loss never read
+# (not copied, D-003; deleted from the trainer, D-042) and a global clip of 1.0 that neither
+# He et al. 2015 nor torchvision's reference trainer has (deleted from both arms, D-042):
+# the recipe has no clip.
+# ImageNet uses the loader's crop and flip plus colour jitter :345. The legacy
 # trainer cannot run on CIFAR at all; CIFAR here is new behaviour with the CIFAR
 # stem (resolve_resnet_args) and no augmentation, as nothing legacy says otherwise.
 RESNET = _recipe(
@@ -233,7 +235,7 @@ RESNET = _recipe(
     batch_size=256,
     optim_args=optim_recipe(
         optimizer="sgd", lr=0.1, weight_decay=1e-4, warmup_epochs=5,
-        decay_over="total", momentum=0.9, global_clipnorm=1.0,
+        decay_over="total", momentum=0.9,
     ),
     watch_metric="val_loss",
     patience=15,
@@ -392,7 +394,11 @@ def _cliffordnet_recipe(
 
 
 def _weight_decay_regularizer(optim_args: OptimArgs) -> Any:
-    """Return ``L2(weight_decay)`` for sgd with a decay, else ``None``.
+    """Return ``L2(weight_decay / 2)`` for sgd with a decay, else ``None``.
+
+    The penalty is half of ``weight_decay`` because Keras' ``L2(l)`` is ``l * sum(w^2)``, whose gradient is
+    ``2 * l * w``, and the SGD weight decay ``wd`` (He et al. 2015, ``torch.optim.SGD``) adds ``wd * w`` to the gradient:
+    ``optim_args.weight_decay`` for sgd IS that ``wd``.
 
     :param optim_args: the resolved optimizer arguments.
     :raises UnresolvedAutoError: when ``optimizer`` or ``weight_decay`` is ``"auto"``.
@@ -404,6 +410,11 @@ def _weight_decay_regularizer(optim_args: OptimArgs) -> Any:
     # that reaches a layer scale); sgd has no decoupled decay, so the same number becomes an L2
     # regularizer on the model and optim.py gives the optimizer none. Do NOT
     # return an L2 for adamw "as well": the decay would apply twice.
+    # DECISION plan-2026-11-03T221936-98b866fb/D-042: the sgd penalty is `L2(decay / 2)`, NOT
+    # `L2(decay)`. Keras' L2 gradient is `2 * l * w`, the SGD weight decay's is `decay * w`, so
+    # `L2(decay)` decayed twice as hard as the paper (measured in D-042, ratio 2.0000). Every
+    # family that reaches this rule with sgd (resnet by recipe, the others only when asked) moves
+    # with it. Do NOT go back to `L2(decay)` to keep an old run's number.
     for name in ("optimizer", "weight_decay"):
         value = getattr(optim_args, name)
         if isinstance(value, str) and value == AUTO:
@@ -418,7 +429,7 @@ def _weight_decay_regularizer(optim_args: OptimArgs) -> Any:
         return None
     import keras
 
-    return keras.regularizers.L2(decay)
+    return keras.regularizers.L2(decay / 2)
 
 
 def merge_model_args(
