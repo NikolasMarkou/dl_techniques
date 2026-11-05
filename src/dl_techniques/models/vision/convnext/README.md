@@ -110,7 +110,7 @@ The inverted bottleneck that carries the V1 network. Its `call` is, in order:
 3.  **Pointwise `1x1` convolution** expanding the channels 4x, then the activation (GELU by default).
 4.  **Dropout and spatial dropout** (both no-ops at the default rate 0).
 5.  **Pointwise `1x1` convolution** projecting back down.
-6.  **Learnable per-channel `gamma` scaling** (`use_gamma`).
+6.  **Learnable per-channel `gamma` scaling** (`use_gamma`): the layer scale of the ConvNeXt paper. It starts at `1e-6`, so a fresh block is close to the identity, and it has no constraint and no penalty of its own (the block adds nothing to `losses`). A probe that compares outputs on a fresh model has to set `gamma` to a live value first.
 
 The residual add is not inside the block; the model applies it around the block's output.
 

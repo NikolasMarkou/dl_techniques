@@ -24,6 +24,19 @@ from ..knob_sensitivity_oracle import (
 from tests.optimizer_state import build_optimizer_state
 
 
+def _layer_scale_weights(model: keras.Model):
+    """Return the model's per-block layer-scale variables (``.../gamma_scale/gamma``)."""
+    return [w for w in model.weights if w.path.endswith("gamma_scale/gamma")]
+
+
+def _set_layer_scales(model: keras.Model, value: float) -> int:
+    """Assign ``value`` to every layer-scale variable and return how many there are."""
+    weights = _layer_scale_weights(model)
+    for w in weights:
+        w.assign(keras.ops.full_like(w, value))
+    return len(weights)
+
+
 class TestConvNeXtV1:
     """Test suite for ConvNeXt V1 model implementation."""
 
@@ -270,6 +283,9 @@ class TestConvNeXtV1:
                 input_shape=cifar_input_shape  # Specify correct input shape
             )
             model(tf.zeros_like(cifar_sample_data[:1]))
+            # Every residual branch starts at the paper's layer scale of 1e-6, so on a fresh
+            # model the activation's effect is scaled below the bar: make the branches live.
+            _set_layer_scales(model, 1.0)
             return model
 
         builders = {a: (lambda a=a: _build(a)) for a in activations}
@@ -346,6 +362,59 @@ class TestConvNeXtV1:
         # Stochastic (training) path — shape only, no numerical assertion
         outputs_train = model(dummy_input, training=True)
         assert outputs_train.shape == (2, num_classes)
+
+    def test_every_block_starts_at_the_papers_layer_scale_with_no_penalty(
+            self, num_classes, cifar_input_shape, cifar_sample_data):
+        """Layer scale 1e-6 in every block, unconstrained, and no loss term from the blocks."""
+        model = ConvNeXtV1(
+            num_classes=num_classes,
+            depths=[1, 1, 2, 1],
+            dims=[32, 64, 128, 256],
+            input_shape=cifar_input_shape,
+        )
+        model(cifar_sample_data)
+
+        scales = _layer_scale_weights(model)
+        assert len(scales) == 5
+        for w in scales:
+            assert np.all(keras.ops.convert_to_numpy(w) == np.float32(1e-6)), w.path
+            assert w.constraint is None, w.path
+        assert model.losses == []
+
+    def test_a_trained_layer_scale_survives_a_keras_round_trip_exactly(
+            self, num_classes, cifar_input_shape, cifar_sample_data, tmp_path):
+        """Live layer scales (away from 1e-6) come back unchanged and predict exactly.
+
+        The model's config stores `use_gamma` and not the block's `gamma_initial_value`, so a
+        file written before the init changed rebuilds blocks whose default is now 1e-6: only
+        the restored weights can make the outputs equal, and a fresh-model comparison would
+        pass vacuously at 1e-6.
+        """
+        model = ConvNeXtV1(
+            num_classes=num_classes,
+            depths=[1, 1, 2, 1],
+            dims=[32, 64, 128, 256],
+            input_shape=cifar_input_shape,
+        )
+        model(cifar_sample_data)
+        rng = np.random.default_rng(5)
+        for w in _layer_scale_weights(model):
+            w.assign(rng.uniform(0.2, 1.5, size=w.shape).astype("float32"))
+        expected = keras.ops.convert_to_numpy(model(cifar_sample_data, training=False))
+
+        path = str(tmp_path / "live_scale.keras")
+        model.save(path)
+        reloaded = keras.models.load_model(
+            path, custom_objects={"ConvNeXtV1": ConvNeXtV1, "ConvNextV1Block": ConvNextV1Block}
+        )
+
+        assert np.array_equal(
+            keras.ops.convert_to_numpy(reloaded(cifar_sample_data, training=False)), expected
+        )
+        for before, after in zip(_layer_scale_weights(model), _layer_scale_weights(reloaded)):
+            assert np.array_equal(
+                keras.ops.convert_to_numpy(before), keras.ops.convert_to_numpy(after)
+            ), before.path
 
     def test_stochastic_mode_invalid(self, num_classes):
         """Test that an invalid stochastic_mode raises ValueError."""

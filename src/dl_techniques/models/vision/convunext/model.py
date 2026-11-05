@@ -319,11 +319,11 @@ def _apply_residual_convnext_block(
     :rtype: keras.KerasTensor
 
     Note:
-        Layer-scale ``gamma`` starts at 1e-4, small enough for a near-identity
+        Layer-scale ``gamma`` starts at 1e-4 (this function passes it; the block's own
+        default is the ConvNeXt paper's 1e-6), small enough for a near-identity
         prior and large enough to pass gradient from step 0, since the gradient
-        into the branch weights is proportional to gamma.
-        ``ConvNext*Block.GAMMA_MIN_VALUE`` floors it at 1e-6 so a branch cannot
-        reach gamma 0 and stop learning.
+        into the branch weights is proportional to gamma. ``ConvNextV1Block`` puts no
+        constraint and no penalty on gamma (D-033 of plan 98b866fb).
     """
     residual = x
     # DECISION plan-2026-08-11T201945-91938f65/D-002 + D-004: the block is the branch

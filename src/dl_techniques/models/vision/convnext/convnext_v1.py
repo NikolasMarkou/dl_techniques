@@ -136,7 +136,7 @@ class ConvNeXtV1(_ConvNeXtBase):
               └─ inverted bottleneck; one act, one norm per block
                         │
                         ▼
-              × gamma  (layer scale, use_gamma; floored at 1e-6)
+              × gamma  (layer scale, use_gamma; starts at 1e-6, unconstrained)
                         │
                         ▼
                       F(x)   ── residual added by the caller
@@ -201,7 +201,8 @@ class ConvNeXtV1(_ConvNeXtBase):
         convolution. Defaults to 4.
     :type strides: int
     :param use_gamma: Whether blocks apply the learnable per-channel layer
-        scale. Defaults to True.
+        scale (starts at 1e-6 as in the ConvNeXt paper, no constraint, no
+        penalty). Defaults to True.
     :type use_gamma: bool
     :param use_softorthonormal_regularizer: Whether blocks use soft orthonormal
         regularization. Defaults to False.

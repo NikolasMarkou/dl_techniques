@@ -1113,20 +1113,22 @@ class TestTrainingStep:
         """The dead-component control. Without it a green partition above
         proves nothing.
 
-        MEASURED, and it corrects the oracle's own docstring for this model:
-        with every output detached, Keras 3.8 does NOT raise
-        ``"%s"`` here -- it emits a
-        ``UserWarning`` naming every variable and completes the step. So the
-        observable is the PARTITION (nothing moved), not the raise.
+        With every output detached no variable has a gradient, so Keras 3.8
+        raises ``"%s"``, which is the oracle's canonical dead-path signal.
+        Before step 10b of plan 98b866fb this test measured the opposite (a
+        ``UserWarning`` and a completed step): the fuser's ConvNeXt blocks
+        carried an L2 penalty on their layer scale, a loss term that is not
+        detached, so the layer-scale variables still had a gradient. The paper's
+        block has no such penalty and neither does this one now.
         """ % NO_GRADIENTS_MESSAGE
         model = compiled_tiny()
         x, y = fit_payload()
         with outputs_stop_gradient(model):
-            report = fit_one_step_moved_variables(model, x, y)
-        assert report.moved == (), (
-            f"variables moved with every output detached: {report.summary()}"
-        )
-        assert len(report.unmoved) == report.total
+            with pytest.raises(ValueError, match=NO_GRADIENTS_MESSAGE):
+                fit_one_step_moved_variables(model, x, y)
+        # The same model, undetached, does train: the raise above is the injection, not the model.
+        report = fit_one_step_moved_variables(model, x, y)
+        assert report.moved, f"nothing moved without the injection: {report.summary()}"
 
 
 # ---------------------------------------------------------------------

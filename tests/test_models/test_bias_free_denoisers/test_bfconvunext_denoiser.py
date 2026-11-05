@@ -30,6 +30,13 @@ from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import (
 from dl_techniques.layers.conv_blocks.convnext_v1_block import ConvNextV1Block
 from dl_techniques.layers.conv_blocks.convnext_v2_block import ConvNextV2Block
 
+from .conftest import (
+    HOMOGENEITY_RTOL,
+    HOMOGENEITY_SCALES,
+    fit_one_step,
+    homogeneity_error,
+)
+
 
 # ---------------------------------------------------------------------
 # Fixtures
@@ -1146,6 +1153,42 @@ class TestBlockNormalization:
             f"gabor+LeakyReLU+batchnorm model not degree-1 homogeneous at "
             f"inference: max rel_err={max_rel:.3e} (D-005(b))"
         )
+
+    @staticmethod
+    def _set_layer_scales(model: keras.Model, value: float) -> int:
+        """Assign ``value`` to every block's layer scale and return how many there are."""
+        scales = [w for w in model.weights if 'gamma_scale' in w.path]
+        for w in scales:
+            w.assign(keras.ops.full_like(w, value))
+        return len(scales)
+
+    def test_batchnorm_model_stays_homogeneous_with_live_branches(self) -> None:
+        # I8 of plan 98b866fb step 10b: the existing homogeneity test above runs on the builder's
+        # own gamma (1e-4), which scales every residual branch to almost nothing, so it cannot see
+        # a break inside a branch. Set the layer scales to 0.5 (live) after one fit step moved the
+        # running statistics, then read the shared probe at its shared bar.
+        model = create_convunext_denoiser(**self._homog_cfg(block_normalization='batchnorm'))
+        fit_one_step(model)
+        assert self._set_layer_scales(model, 0.5) == 7
+
+        x = (np.random.default_rng(4).standard_normal((2, 64, 64, 3)) * 1.5).astype('float32')
+        for scale in HOMOGENEITY_SCALES:
+            assert homogeneity_error(model, x, scale) <= HOMOGENEITY_RTOL, scale
+
+    def test_the_probe_sees_a_non_homogeneous_branch_only_when_the_branch_is_live(self) -> None:
+        # LIVENESS ARM for the test above. The layernorm block is not degree-1 homogeneous
+        # (D-005): the same probe on the same model class reads below the bar while the layer
+        # scale is the builder's 1e-4 (vacuous) and far above it once the scale is 0.5.
+        model = create_convunext_denoiser(**self._homog_cfg(block_normalization='layernorm'))
+        fit_one_step(model)
+        x = (np.random.default_rng(4).standard_normal((2, 64, 64, 3)) * 1.5).astype('float32')
+
+        fresh = [homogeneity_error(model, x, scale) for scale in HOMOGENEITY_SCALES]
+        assert all(error <= HOMOGENEITY_RTOL for error in fresh), fresh
+
+        self._set_layer_scales(model, 0.5)
+        live = [homogeneity_error(model, x, scale) for scale in HOMOGENEITY_SCALES]
+        assert all(error > 100 * HOMOGENEITY_RTOL for error in live), live
 
     def test_default_layernorm_byte_identical(self) -> None:
         # SC2: omitting block_normalization == explicit 'layernorm'. Byte-identity is

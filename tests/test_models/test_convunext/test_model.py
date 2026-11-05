@@ -2093,13 +2093,32 @@ class TestEdgeCases:
             f'{len(baseline.losses)} without it')
 
     def test_no_regularizer_leaves_only_the_blocks_own_gamma_penalty(self) -> None:
-        """CONTROL for the test above, and a pin on what the baseline IS."""
-        model = create_convunext(**_cfg())
+        """CONTROL for the test above, and a pin on what the baseline IS.
+
+        The default build uses V2 blocks, which still carry their own gamma L2 until step
+        10c of plan 98b866fb; the V1 blocks carry none (next test).
+        """
+        model = create_convunext(**_cfg(convnext_version='v2'))
         assert model.get_layer(name='final_output').kernel_regularizer is None
         assert model.get_layer(
             name='encoder_level_0_stem').kernel_regularizer is None
         # One per ConvNeXt block (their gamma L2 is not configurable here).
         assert len(model.losses) == len(_convnext_block_layers(model))
+
+    def test_the_v1_blocks_add_no_gamma_penalty_and_no_constraint(self) -> None:
+        """V1 blocks: no loss term of their own, an unconstrained gamma that starts at 1e-4.
+
+        1e-4 is ConvUNext's own choice (it passes it to every block); the paper's 1e-6 is the
+        block's default. What step 10b removed is the L2 and the [1e-6, 1.0] constraint.
+        """
+        model = create_convunext(**_cfg(convnext_version='v1'))
+        blocks = _convnext_block_layers(model)
+        assert blocks and all(isinstance(block, ConvNextV1Block) for block in blocks)
+        assert model.losses == []
+        for block in blocks:
+            assert block.gamma.constraint is None
+            assert block.gamma.regularizer is None
+            assert np.allclose(keras.ops.convert_to_numpy(block.gamma.gamma), 1e-4)
 
     @pytest.mark.parametrize('activation', ['sigmoid', 'tanh', 'relu'])
     def test_final_activation_reaches_the_final_conv_on_the_bias_on_arm(

@@ -399,8 +399,9 @@ def _weight_decay_regularizer(optim_args: OptimArgs) -> Any:
     """
     # DECISION plan-2026-10-30T132432-a865fa08/D-040: weight decay lives in
     # exactly one place. AdamW decays inside the optimizer, so the recipe adds NO
-    # model regularizer (a convnext block sets its own gamma L2, as legacy does,
-    # D-052); sgd has no decoupled decay, so the same number becomes an L2
+    # model regularizer (the convnext V1 block no longer adds a gamma L2 of its
+    # own, D-033 of plan 98b866fb, so AdamW's decay is the only one that reaches
+    # a layer scale); sgd has no decoupled decay, so the same number becomes an L2
     # regularizer on the model and optim.py gives the optimizer none. Do NOT
     # return an L2 for adamw "as well": the decay would apply twice.
     for name in ("optimizer", "weight_decay"):

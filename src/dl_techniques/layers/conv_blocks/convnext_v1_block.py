@@ -19,7 +19,6 @@ from typing import Optional, Dict, Union, Tuple, Any
 
 from dl_techniques.layers.activations.exact_activations import substitute_exact
 from dl_techniques.layers.regularization.layer_scale import LayerScale
-from ...constraints.value_range_constraint import ValueRangeConstraint
 from ...regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
 from ...initializers.hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
 from dl_techniques.utils.activation_serialization import (
@@ -116,6 +115,11 @@ class ConvNextV1Block(keras.layers.Layer):
     :type spatial_dropout_rate: Optional[float]
     :param use_gamma: Whether to use learnable gamma scaling. Defaults to ``True``.
     :type use_gamma: bool
+    :param gamma_initial_value: Initial value of every per-channel gamma. Defaults to
+        ``1e-6``, the layer-scale value of the ConvNeXt paper (Table 5) and of
+        ``facebookresearch/ConvNeXt``. Gamma is a plain trainable vector: no constraint,
+        no regularizer, so the block contributes no term to ``losses`` of its own.
+    :type gamma_initial_value: float
     :param use_softorthonormal_regularizer: Whether to apply soft orthonormal
         regularization. Defaults to ``False``.
     :type use_softorthonormal_regularizer: bool
@@ -145,12 +149,6 @@ class ConvNextV1Block(keras.layers.Layer):
     INITIALIZER_STDDEV = 0.02
     LAYERNORM_EPSILON = 1e-6
     POINTWISE_KERNEL_SIZE = 1
-    GAMMA_L2_REGULARIZATION = 1e-5
-    GAMMA_INITIAL_VALUE = 1.0
-    # Floor keeps gamma from reaching 0, which would zero the branch gradient
-    # and leave the block permanently dead.
-    GAMMA_MIN_VALUE = 1e-6
-    GAMMA_MAX_VALUE = 1.0
     STRIDES = (1, 1)
 
     def __init__(
@@ -163,7 +161,7 @@ class ConvNextV1Block(keras.layers.Layer):
             dropout_rate: Optional[float] = 0.0,
             spatial_dropout_rate: Optional[float] = 0.0,
             use_gamma: bool = True,
-            gamma_initial_value: float = 1.0,
+            gamma_initial_value: float = 1e-6,
             use_softorthonormal_regularizer: bool = False,
             depthwise_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
             depthwise_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
@@ -335,14 +333,21 @@ class ConvNextV1Block(keras.layers.Layer):
 
         # Learnable multiplier (gamma scaling)
         if self.use_gamma:
+            # DECISION plan-2026-11-03T221936-98b866fb/D-033: the layer scale is the paper's
+            # (arXiv 2201.03545 Table 5: 1e-6; facebookresearch/ConvNeXt models/convnext.py:
+            # `nn.Parameter(1e-6 * torch.ones(dim))`): it starts at 1e-6 and has NO constraint
+            # and NO regularizer (the reference gives every 1-D parameter weight decay 0).
+            # Do NOT put back the [1e-6, 1.0] ValueRangeConstraint, the L2 of 1e-5 or the
+            # init of 1.0. The floor was there so that gamma could not reach 0 and kill the
+            # branch; it does not need one, because the gradient into gamma is the branch
+            # output itself, which stays non-zero at gamma = 0. The cap and the penalty held
+            # every layer scale in a range the paper never enforced. Constraint=None must be
+            # explicit: LayerScale's own default is "non_neg".
             self.gamma = LayerScale(
                 multiplier_type="CHANNEL",
-                regularizer=keras.regularizers.L2(self.GAMMA_L2_REGULARIZATION),
+                regularizer=None,
                 initializer=keras.initializers.Constant(self.gamma_initial_value),
-                constraint=ValueRangeConstraint(
-                    min_value=self.GAMMA_MIN_VALUE,
-                    max_value=self.GAMMA_MAX_VALUE
-                ),
+                constraint=None,
                 name="gamma_scale"
             )
         else:

@@ -86,10 +86,123 @@ def test_block_constants() -> None:
     assert ConvNextV1Block.INITIALIZER_STDDEV == 0.02
     assert ConvNextV1Block.LAYERNORM_EPSILON == 1e-6
     assert ConvNextV1Block.POINTWISE_KERNEL_SIZE == 1
-    assert ConvNextV1Block.GAMMA_L2_REGULARIZATION == 1e-5
-    assert ConvNextV1Block.GAMMA_INITIAL_VALUE == 1.0
-    assert ConvNextV1Block.GAMMA_MIN_VALUE == 1e-6
-    assert ConvNextV1Block.GAMMA_MAX_VALUE == 1.0
+
+
+# The layer scale of the ConvNeXt paper (arXiv 2201.03545, Table 5: "layer scale 1e-6") and of
+# facebookresearch/ConvNeXt models/convnext.py: `self.gamma = nn.Parameter(1e-6 * torch.ones(dim))`,
+# no clamp, no penalty, and optim_factory.py gives every 1-D parameter weight decay 0. Plan
+# plan-2026-11-03T221936-98b866fb step 10b (D-033).
+PAPER_LAYER_SCALE = 1e-6
+
+
+def _gamma_values(block: ConvNextV1Block) -> np.ndarray:
+    """Return the block's built layer-scale vector as a float32 array."""
+    return keras.ops.convert_to_numpy(block.gamma.gamma)
+
+
+def test_the_layer_scale_starts_at_the_papers_value() -> None:
+    """The default init is 1e-6, in the attribute, in the config and in the built weights."""
+    block = ConvNextV1Block(kernel_size=7, filters=16)
+    block.build((None, 8, 8, 16))
+
+    assert block.gamma_initial_value == PAPER_LAYER_SCALE
+    assert block.get_config()["gamma_initial_value"] == PAPER_LAYER_SCALE
+    values = _gamma_values(block)
+    assert values.shape == (16,)
+    assert np.all(values == np.float32(PAPER_LAYER_SCALE))
+
+
+def test_an_explicit_layer_scale_value_is_still_honoured() -> None:
+    """`gamma_initial_value` stays a knob: a caller's own value reaches the weights."""
+    block = ConvNextV1Block(kernel_size=7, filters=16, gamma_initial_value=0.25)
+    block.build((None, 8, 8, 16))
+
+    assert np.all(_gamma_values(block) == np.float32(0.25))
+
+
+def test_the_layer_scale_has_no_constraint_and_no_penalty(sample_inputs: tf.Tensor) -> None:
+    """No `ValueRangeConstraint` and no L2 on gamma, and no loss term from the block."""
+    block = ConvNextV1Block(kernel_size=7, filters=64)
+    block(sample_inputs)
+
+    assert block.gamma.constraint is None
+    assert block.gamma.regularizer is None
+    assert block.gamma.gamma.constraint is None
+    assert block.losses == []
+
+
+def test_the_optimizer_may_take_the_layer_scale_outside_the_old_range() -> None:
+    """Behavioural twin of the previous test: no step is clipped to [1e-6, 1].
+
+    SGD with lr 1 and a gradient of -2 moves 0.9 to 2.9, and a gradient of 5 moves 0.9
+    to -4.1. The removed constraint clipped these to 1.0 and 1e-6.
+    """
+    block = ConvNextV1Block(kernel_size=7, filters=8, gamma_initial_value=0.9)
+    block.build((None, 4, 4, 8))
+    variable = block.gamma.gamma
+    optimizer = keras.optimizers.SGD(learning_rate=1.0)
+    ones = keras.ops.ones_like(variable)
+
+    optimizer.apply([-2.0 * ones], [variable])
+    assert np.allclose(_gamma_values(block), 2.9)
+
+    variable.assign(0.9 * ones)
+    optimizer.apply([5.0 * ones], [variable])
+    assert np.allclose(_gamma_values(block), -4.1)
+
+
+@pytest.mark.parametrize(
+    "removed", ["GAMMA_L2_REGULARIZATION", "GAMMA_INITIAL_VALUE", "GAMMA_MIN_VALUE", "GAMMA_MAX_VALUE"]
+)
+def test_the_old_layer_scale_constants_are_gone(removed: str) -> None:
+    """Nothing keeps the cap, the floor, the penalty or the old init reachable (no shim)."""
+    assert not hasattr(ConvNextV1Block, removed)
+
+
+# What a block saved before step 10b wrote into its archive: every constructor argument,
+# `gamma_initial_value` included, at the value the old default had (1.0).
+OLD_ARCHIVE_BLOCK_CONFIG = {
+    "kernel_size": 7,
+    "filters": 8,
+    "activation": "gelu",
+    "kernel_regularizer": None,
+    "use_bias": True,
+    "dropout_rate": 0.0,
+    "spatial_dropout_rate": 0.0,
+    "use_gamma": True,
+    "gamma_initial_value": 1.0,
+    "use_softorthonormal_regularizer": False,
+    "depthwise_initializer": None,
+    "depthwise_regularizer": None,
+    "normalization_type": "layernorm",
+}
+
+
+def test_an_old_archive_reloads_its_own_graph_and_predicts_exactly(tmp_path) -> None:
+    """A model saved with the old recorded values rebuilds them and gives the same outputs.
+
+    The archive's config carries `gamma_initial_value: 1.0`; the fix changes only the default,
+    so the recorded value wins and the weights (set away from any init) restore exactly. No flag
+    brings the old default back for a config that does not record it.
+    """
+    rng = np.random.default_rng(3)
+    inputs = keras.Input(shape=(8, 8, 8))
+    block = ConvNextV1Block.from_config(dict(OLD_ARCHIVE_BLOCK_CONFIG, name="blk"))
+    model = keras.Model(inputs, block(inputs))
+    for variable in model.weights:
+        variable.assign(rng.normal(scale=0.3, size=variable.shape).astype("float32"))
+
+    batch = rng.normal(size=(2, 8, 8, 8)).astype("float32")
+    expected = keras.ops.convert_to_numpy(model(batch, training=False))
+    path = str(tmp_path / "old.keras")
+    model.save(path)
+    reloaded = keras.models.load_model(path)
+
+    reloaded_block = reloaded.get_layer("blk")
+    assert reloaded_block.gamma_initial_value == 1.0
+    assert reloaded_block.gamma.constraint is None
+    assert np.array_equal(keras.ops.convert_to_numpy(reloaded(batch, training=False)), expected)
+    assert not np.allclose(_gamma_values(reloaded_block), PAPER_LAYER_SCALE)
 
 
 def test_block_output_shape(sample_inputs: tf.Tensor, default_block_params: Dict[str, Any]) -> None:
@@ -401,7 +514,6 @@ def test_model_save_load_keras_format(sample_inputs: tf.Tensor, default_block_pa
     # Import all necessary custom objects
     from dl_techniques.layers.regularization.layer_scale import LayerScale
     from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
-    from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
 
     # Load model with custom objects
     loaded_model = keras.models.load_model(
@@ -410,7 +522,6 @@ def test_model_save_load_keras_format(sample_inputs: tf.Tensor, default_block_pa
             "ConvNextV1Block": ConvNextV1Block,
             "LayerScale": LayerScale,
             "SoftOrthonormalConstraintRegularizer": SoftOrthonormalConstraintRegularizer,
-            "ValueRangeConstraint": ValueRangeConstraint,
         }
     )
 
@@ -594,6 +705,9 @@ class TestActivationSerialization:
 
         block_a.build((None, 8, 8, self.CHANNELS))
         block_b.build((None, 8, 8, self.CHANNELS))
+        # The layer scale starts at the paper's 1e-6, which scales the branch to below the
+        # comparison tolerance, so the probe would be vacuous on a fresh block: make it live.
+        block_a.gamma.gamma.assign(keras.ops.ones_like(block_a.gamma.gamma))
         # Identical weights -> any output difference is due to the activation slope alone.
         block_b.set_weights(block_a.get_weights())
 
