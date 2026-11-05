@@ -361,7 +361,8 @@ train, and the TEST split never selects.
   randomness from the `int32` seed pair: `random_flip`, `flip_pad_crop`, `random_crop`,
   `random_affine`, `photometric`, `random_erasing` (fill = the dataset mean in [0, 1] space, the
   same as 0 after normalization), `random_dihedral`, `autoaugment` (PIL, a numpy generator from the
-  seed) and `compose`. `build_augment(preset)` returns the loader hook (`as_hook`), `build_op` the
+  seed; `cifar10` is torchvision's `AutoAugmentPolicy.CIFAR10`: its 25 sub-policies, 10 magnitude bins
+  per operation, fill 0, pinned by literals in the test) and `compose`. `build_augment(preset)` returns the loader hook (`as_hook`), `build_op` the
   bare op, `unseeded(op)` an `image -> image` map for a pipeline with no per-element seed (CLIP
   image-text, DTD), `add_augmentation_arguments` declares `--augment`. Presets: `none`, `flip`,
   `flip_pad_crop`, `cifar_light` (vit), `cifar_autoaugment` (cliffordnet, the paper recipe, with

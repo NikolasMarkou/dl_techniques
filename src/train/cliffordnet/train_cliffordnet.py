@@ -7,12 +7,12 @@ The CIFAR recipe follows the protocol from
 arXiv:2601.06793v2 and its authors' train.py (github.com/ParaMind2025/CAN):
 200 epochs, batch 128, AdamW (lr 1e-3, weight decay 0.1), cosine decay with NO
 warm-up ("without using warm-up training epochs"), DropPath 0.3 (0.4 for cn_64_5),
-AutoAugment (CIFAR-10 policy), random flip/crop, per-channel normalisation, and
-random erasing 0.25. Remaining differences from the authors' run: the cosine here
-decays per step and ends at 1e-5 (alpha 0.01), theirs per epoch to 0.
+AutoAugment (torchvision's CIFAR-10 policy: 25 sub-policies, 10 magnitude bins, fill 0),
+random flip/crop, per-channel normalisation, random erasing 0.25. Remaining differences from
+the authors' run: the cosine here decays per step and ends at 1e-5, theirs per epoch to 0.
 
 The augmentation is ``train.common.image_augment``'s (``--augment``, default
-``cifar_autoaugment`` on CIFAR: flip, pad-4 crop, the CIFAR-10 AutoAugment policy, random
+``cifar_autoaugment`` on CIFAR: flip, pad-4 crop, that AutoAugment policy, random
 erasing), seeded from ``--seed`` and applied to the [0, 1] image before standardization.
 It is a hook of ``load_classification_data``, so ``--augment`` also works on ImageNet and
 Imagenette on top of their random-resized-crop.

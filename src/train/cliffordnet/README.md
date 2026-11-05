@@ -69,7 +69,7 @@ The defaults are the recipe of arXiv:2601.06793v2 and its authors' `train.py`
 | warm-up | none | none (`--warmup-epochs 0`) |
 | schedule | cosine annealing to 0, per epoch | cosine to 1e-5 (alpha 0.01), per step |
 | DropPath | 0.3; 0.4 for `cn_64_5` | same (`--stochastic-depth-rate`) |
-| augmentation | AutoAugment CIFAR-10, crop pad 4, flip, random erasing 0.25 | `--augment cifar_autoaugment` (CIFAR default) |
+| augmentation | AutoAugment CIFAR-10, crop pad 4, flip, random erasing 0.25 | `--augment cifar_autoaugment` (CIFAR default): torchvision's `AutoAugmentPolicy.CIFAR10` (the authors' call), 25 sub-policies, 10 magnitude bins, fill 0 |
 | loss | cross-entropy, no label smoothing | same (`--label-smoothing 0`) |
 
 The optimizer and schedule come from `optimizer_builder` and `learning_rate_schedule_builder`.

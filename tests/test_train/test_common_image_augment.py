@@ -2,12 +2,16 @@
 
 The operations used to live (unseeded and hard-coded to 32 px) in ``train_cliffordnet``, with
 siblings in vit, alexnet, the SOM and the CLIP paths. Nothing pinned the ops themselves, so
-these tests do: the AutoAugment tables and magnitude mapping against torchvision's, the
-erasing geometry, the photometric ranges, determinism per seed, and the presets.
+these tests do: the AutoAugment table, magnitude mapping and fill against LITERALS copied from
+torchvision's ``AutoAugment(AutoAugmentPolicy.CIFAR10)`` (D-040: ``transforms/autoaugment.py``,
+sha256 11b61381b9aff782f45bdc408f8453e21a2cd8e013a1bcb46039bf5b70c0d7e5, whose 25 rows are Table 7
+of Cubuk et al., arXiv:1805.09501), the erasing geometry, the photometric ranges, determinism per
+seed, and the presets.
 """
 
 import argparse
 import os
+from pathlib import Path
 
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
@@ -38,55 +42,225 @@ class _Positive:
         return 0.0
 
 
+class _Negative:
+    """A stand-in generator whose coin always lands on the negative sign (``random() > 0.5``)."""
+
+    def random(self):
+        return 0.9
+
+
+class _Scripted:
+    """A generator that replays a list of draws: ``integers`` pops the sub-policy, ``random`` the rest."""
+
+    def __init__(self, row, *draws):
+        self.row, self.draws = row, list(draws)
+
+    def integers(self, n):
+        return self.row
+
+    def random(self):
+        return self.draws.pop(0)
+
+
 # ---------------------------------------------------------------------
 # AutoAugment
 # ---------------------------------------------------------------------
 
 
-def test_the_cifar10_policy_is_the_published_25_subpolicies() -> None:
-    policy = ia.CIFAR10_POLICY
-    assert len(policy) == 25 and all(len(sub) == 2 for sub in policy)
-    known = {"Invert", "AutoContrast", "Equalize", "Posterize", "Solarize", "ShearX", "ShearY",
-             "TranslateX", "TranslateY", "Rotate", "Brightness", "Color", "Contrast", "Sharpness"}
-    for sub in policy:
+# torchvision's ``AutoAugmentPolicy.CIFAR10`` (``_get_policies``), copied as a literal: the same 25
+# rows as Table 7 of arXiv:1805.09501, an operation without a magnitude carrying ``None``.
+TORCHVISION_CIFAR10_POLICY = (
+    (("Invert", 0.1, None), ("Contrast", 0.2, 6)),
+    (("Rotate", 0.7, 2), ("TranslateX", 0.3, 9)),
+    (("Sharpness", 0.8, 1), ("Sharpness", 0.9, 3)),
+    (("ShearY", 0.5, 8), ("TranslateY", 0.7, 9)),
+    (("AutoContrast", 0.5, None), ("Equalize", 0.9, None)),
+    (("ShearY", 0.2, 7), ("Posterize", 0.3, 7)),
+    (("Color", 0.4, 3), ("Brightness", 0.6, 7)),
+    (("Sharpness", 0.3, 9), ("Brightness", 0.7, 9)),
+    (("Equalize", 0.6, None), ("Equalize", 0.5, None)),
+    (("Contrast", 0.6, 7), ("Sharpness", 0.6, 5)),
+    (("Color", 0.7, 7), ("TranslateX", 0.5, 8)),
+    (("Equalize", 0.3, None), ("AutoContrast", 0.4, None)),
+    (("TranslateY", 0.4, 3), ("Sharpness", 0.2, 6)),
+    (("Brightness", 0.9, 6), ("Color", 0.2, 8)),
+    (("Solarize", 0.5, 2), ("Invert", 0.0, None)),
+    (("Equalize", 0.2, None), ("AutoContrast", 0.6, None)),
+    (("Equalize", 0.2, None), ("Equalize", 0.6, None)),
+    (("Color", 0.9, 9), ("Equalize", 0.6, None)),
+    (("AutoContrast", 0.8, None), ("Solarize", 0.2, 8)),
+    (("Brightness", 0.1, 3), ("Color", 0.7, 0)),
+    (("Solarize", 0.4, 5), ("AutoContrast", 0.9, None)),
+    (("TranslateY", 0.9, 9), ("TranslateY", 0.7, 9)),
+    (("AutoContrast", 0.9, None), ("Solarize", 0.8, 3)),
+    (("Equalize", 0.8, None), ("Invert", 0.1, None)),
+    (("TranslateY", 0.7, 9), ("AutoContrast", 0.9, None)),
+)
+
+# torchvision's ``_augmentation_space(10, (height=32, width=48))``, printed from torchvision 0.29.2
+# (float32 tensors, nine significant digits): (magnitude of bin 0 ... bin 9, signed).
+TORCHVISION_SPACE_H32_W48 = {
+    "ShearX": ((0, 0.0333333351, 0.0666666701, 0.100000009, 0.13333334, 0.166666672, 0.200000003, 0.233333349, 0.266666681, 0.300000012), True),
+    "ShearY": ((0, 0.0333333351, 0.0666666701, 0.100000009, 0.13333334, 0.166666672, 0.200000003, 0.233333349, 0.266666681, 0.300000012), True),
+    "TranslateX": ((0, 2.41691852, 4.83383703, 7.25075531, 9.66767406, 12.0845919, 14.5015106, 16.9184284, 19.3353481, 21.7522659), True),
+    "TranslateY": ((0, 1.61127901, 3.22255802, 4.83383703, 6.44511604, 8.05639458, 9.66767311, 11.2789526, 12.8902321, 14.5015106), True),
+    "Rotate": ((0, 3.33333325, 6.66666651, 10, 13.333333, 16.6666679, 20, 23.333334, 26.666666, 30), True),
+    "Brightness": ((0, 0.099999994, 0.199999988, 0.299999982, 0.399999976, 0.5, 0.600000024, 0.699999988, 0.799999952, 0.899999976), True),
+    "Color": ((0, 0.099999994, 0.199999988, 0.299999982, 0.399999976, 0.5, 0.600000024, 0.699999988, 0.799999952, 0.899999976), True),
+    "Contrast": ((0, 0.099999994, 0.199999988, 0.299999982, 0.399999976, 0.5, 0.600000024, 0.699999988, 0.799999952, 0.899999976), True),
+    "Sharpness": ((0, 0.099999994, 0.199999988, 0.299999982, 0.399999976, 0.5, 0.600000024, 0.699999988, 0.799999952, 0.899999976), True),
+    "Posterize": ((8, 8, 7, 7, 6, 6, 5, 5, 4, 4), False),
+    "Solarize": ((255, 226.666672, 198.333328, 170, 141.666656, 113.333336, 85, 56.6666679, 28.333334, 0), False),
+}
+
+
+def test_the_cifar10_policy_is_torchvisions_25_rows_and_the_bins_are_10() -> None:
+    assert ia.CIFAR10_POLICY == TORCHVISION_CIFAR10_POLICY
+    assert ia.NUM_MAGNITUDE_BINS == 10
+    assert ia.AUTOAUGMENT_POLICIES["cifar10"] is ia.CIFAR10_POLICY
+    no_magnitude = {"Invert", "AutoContrast", "Equalize"}
+    for sub in ia.CIFAR10_POLICY:
+        assert len(sub) == 2
         for name, probability, magnitude in sub:
-            assert name in known and 0.0 <= probability <= 1.0
-            assert 0 <= magnitude < ia.NUM_MAGNITUDE_BINS
-    assert policy[0] == (("Invert", 0.1, 7), ("Contrast", 0.2, 6))
-    assert policy[-1] == (("ShearX", 0.7, 5), ("Equalize", 0.8, 5))
+            assert 0.0 <= probability <= 1.0
+            if name in no_magnitude:
+                assert magnitude is None, "an operation without a magnitude carries None"
+            else:
+                assert 0 <= magnitude < ia.NUM_MAGNITUDE_BINS
+
+
+def test_the_magnitude_of_every_operation_at_every_bin_is_torchvisions() -> None:
+    space = ia._augmentation_space(width=48, height=32)
+    assert set(space) == set(TORCHVISION_SPACE_H32_W48)
+    for name, (expected, signed) in TORCHVISION_SPACE_H32_W48.items():
+        magnitudes, got_signed = space[name]
+        assert got_signed is signed, name
+        assert len(magnitudes) == 10, name
+        # torchvision's tensors are float32: agree to its precision.
+        np.testing.assert_allclose(magnitudes, expected, rtol=2e-7, atol=1e-7, err_msg=name)
+
+
+def test_translation_is_a_fraction_of_the_side_of_its_own_axis_and_truncated() -> None:
+    # TranslateX takes the WIDTH and TranslateY the HEIGHT (torchvision: image_size[1], image_size[0]),
+    # and the pixel count is int(magnitude), truncated towards zero, never rounded. A positive
+    # magnitude moves content towards larger x or y, as torchvision's does; what leaves is lost.
+    width, height = 64, 16
+    columns = (20, 40)
+    pixels = np.zeros((height, width, 3), np.uint8)
+    pixels[:, list(columns)] = 255
+    image = Image.fromarray(pixels)
+    for bin_index, moved in ((9, 29), (8, 25), (1, 3)):
+        assert int(150.0 / 331.0 * width * bin_index / 9) == moved
+        out = np.asarray(ia._apply_autoaugment_op(image, "TranslateX", bin_index, _Positive()))
+        assert np.flatnonzero(out[0, :, 0] == 255).tolist() == [
+            c + moved for c in columns if c + moved < width]
+        assert (out[0, :moved, 0] == 0).all(), "the uncovered strip is black"
+        out = np.asarray(ia._apply_autoaugment_op(image, "TranslateX", bin_index, _Negative()))
+        assert np.flatnonzero(out[0, :, 0] == 255).tolist() == [
+            c - moved for c in columns if c - moved >= 0]
+    rows = (4, 11)
+    pixels = np.zeros((height, width, 3), np.uint8)
+    pixels[list(rows), :] = 255
+    image = Image.fromarray(pixels)
+    moved = int(150.0 / 331.0 * height)
+    assert moved == 7, "the height, not the width (which would give 29)"
+    out = np.asarray(ia._apply_autoaugment_op(image, "TranslateY", 9, _Positive()))
+    assert np.flatnonzero(out[:, 0, 0] == 255).tolist() == [r + moved for r in rows if r + moved < height]
+    out = np.asarray(ia._apply_autoaugment_op(image, "TranslateY", 9, _Negative()))
+    assert np.flatnonzero(out[:, 0, 0] == 255).tolist() == [r - moved for r in rows if r - moved >= 0]
 
 
 def test_solarize_and_posterize_follow_torchvisions_magnitude_mapping() -> None:
-    ramp = Image.fromarray(np.arange(256, dtype=np.uint8).reshape(16, 16))
-    solar = np.asarray(ia._apply_autoaugment_op(ramp, "Solarize", 15, _Positive()))
-    threshold = int(255 - 15 / 30 * 255)
     original = np.arange(256, dtype=np.uint8).reshape(16, 16)
-    np.testing.assert_array_equal(solar[original < threshold], original[original < threshold])
-    np.testing.assert_array_equal(solar[original >= threshold],
-                                  255 - original[original >= threshold])
-    post = np.asarray(ia._apply_autoaugment_op(ramp, "Posterize", 30, _Positive()))
-    assert len(np.unique(post)) <= 2 ** 4, "magnitude 30 keeps 8 - round(30 / 7.5) = 4 bits"
+    ramp = Image.fromarray(original)
+    # bin 5 of 10: the threshold is 255 * (1 - 5 / 9) = 113.33, a float: pixel 113 is below it and kept.
+    solar = np.asarray(ia._apply_autoaugment_op(ramp, "Solarize", 5, _Positive()))
+    np.testing.assert_array_equal(solar[original <= 113], original[original <= 113])
+    np.testing.assert_array_equal(solar[original >= 114], 255 - original[original >= 114])
+    # bin 0 is the threshold 255: only the pixel 255 is inverted (PIL's ``i < threshold`` is kept).
+    first = np.asarray(ia._apply_autoaugment_op(ramp, "Solarize", 0, _Positive()))
+    np.testing.assert_array_equal(first[original < 255], original[original < 255])
+    assert first[original == 255].tolist() == [0]
+    # Posterize keeps 8 - round(bin / 2.25) bits: 8, 8, 7, 7, 6, 6, 5, 5, 4, 4.
+    for bin_index, bits in enumerate((8, 8, 7, 7, 6, 6, 5, 5, 4, 4)):
+        post = np.asarray(ia._apply_autoaugment_op(ramp, "Posterize", bin_index, _Positive()))
+        assert len(np.unique(post)) == 2 ** bits, bin_index
 
 
-def test_translate_moves_by_150_over_331_of_the_width_and_fills_grey() -> None:
-    width = 64
-    pixels = np.zeros((8, width, 3), np.uint8)
-    pixels[:, 40] = 255
-    out = np.asarray(ia._apply_autoaugment_op(
-        Image.fromarray(pixels), "TranslateX", 30, _Positive()))
-    moved = int(round(150.0 / 331.0 * width))
-    assert moved == 29
-    assert np.flatnonzero(out[0, :, 0] == 255).tolist() == [40 - moved]
-    assert (out[0, width - moved:, 0] == 128).all(), "the uncovered strip is mid-grey"
+def test_what_a_rotation_shear_or_translation_uncovers_is_black() -> None:
+    constant = np.full((32, 32, 3), 200, np.uint8)
+    assert ia._AUTOAUGMENT_FILL == 0
+    for name in ("Rotate", "ShearX", "ShearY", "TranslateX", "TranslateY"):
+        for coin in (_Positive(), _Negative()):
+            out = np.asarray(ia._apply_autoaugment_op(Image.fromarray(constant), name, 9, coin))
+            assert set(np.unique(out)) == {0, 200}, f"{name}: {np.unique(out)}"
+            assert (out == 0).all(axis=-1).any(), f"{name} uncovered nothing"
+    grey = np.asarray(ia._apply_autoaugment_op(
+        Image.fromarray(constant[..., 0]), "Rotate", 9, _Positive()))
+    assert grey[0, 0] == 0 and grey[16, 16] == 200, "an L image is filled with 0 as well"
 
 
-def test_rotate_shear_and_enhancers_keep_the_size_and_unknown_ops_raise() -> None:
+def test_rotation_turns_counter_clockwise_by_the_binned_degrees() -> None:
+    pixels = np.zeros((33, 33), np.uint8)
+    pixels[16, 25] = 255            # right of the centre
+    out = np.asarray(ia._apply_autoaugment_op(Image.fromarray(pixels), "Rotate", 9, _Positive()))
+    row, col = np.argwhere(out == 255)[0]
+    assert row < 16 and col < 25, "30 degrees counter-clockwise lifts a point on the right"
+    out = np.asarray(ia._apply_autoaugment_op(Image.fromarray(pixels), "Rotate", 9, _Negative()))
+    row, col = np.argwhere(out == 255)[0]
+    assert row > 16 and col < 25
+
+
+def test_an_operation_is_applied_when_its_draw_is_at_most_its_probability() -> None:
+    # torchvision: ``if probs[i] <= p``. A draw equal to the probability applies; above it skips.
+    policy = ((("Invert", 0.5, None), ("Rotate", 0.5, 9)),)
+    image = np.full((8, 8, 3), 0.25, np.float32)
+    out = ia._autoaugment_array(image, policy, _Scripted(0, 0.5, 0.5001))
+    np.testing.assert_allclose(out, 0.75, atol=1 / 255)
+    out = ia._autoaugment_array(image, policy, _Scripted(0, 0.5001, 0.5001))
+    np.testing.assert_allclose(out, 0.25, atol=1 / 255)
+    # a signed operation draws its sign after its probability, an unsigned one draws none
+    spent = _Scripted(0, 0.0, 0.0, 0.9)
+    ia._autoaugment_array(image, policy, spent)
+    assert spent.draws == []
+
+
+def test_rotate_shear_and_enhancers_keep_the_size_and_a_bad_operation_or_bin_raises() -> None:
     img = Image.fromarray((np.random.default_rng(0).random((20, 30, 3)) * 255).astype(np.uint8))
-    for name in ("Rotate", "ShearX", "ShearY", "TranslateY", "Brightness", "Color",
-                 "Contrast", "Sharpness", "Invert", "AutoContrast", "Equalize"):
-        assert ia._apply_autoaugment_op(img, name, 9, np.random.default_rng(0)).size == img.size
+    for name in ("Rotate", "ShearX", "ShearY", "TranslateX", "TranslateY", "Brightness", "Color",
+                 "Contrast", "Sharpness", "Solarize", "Posterize"):
+        for bin_index in (0, 9):
+            assert ia._apply_autoaugment_op(
+                img, name, bin_index, np.random.default_rng(0)).size == img.size
+    for name in ("Invert", "AutoContrast", "Equalize"):
+        assert ia._apply_autoaugment_op(img, name, None, np.random.default_rng(0)).size == img.size
     with pytest.raises(ValueError, match="Unknown AutoAugment operation"):
         ia._apply_autoaugment_op(img, "Cutout", 3, _Positive())
+    for bad in (None, -1, ia.NUM_MAGNITUDE_BINS):
+        with pytest.raises(ValueError, match="magnitude index"):
+            ia._apply_autoaugment_op(img, "Rotate", bad, _Positive())
+
+
+CIFAR_CACHE = Path.home() / ".keras" / "datasets" / "cifar-10-batches-py-target"
+
+
+@pytest.mark.skipif(not CIFAR_CACHE.exists(), reason="CIFAR-10 is not in the local Keras cache")
+def test_the_policy_changes_cifar10_images_as_strongly_as_torchvisions_does() -> None:
+    # Measured with torchvision's table, 10 bins and fill 0 on these 3,000 images:
+    # scratch_explore_parity/logs/measure_autoaugment_strength.out, 0.1293 mean absolute pixel
+    # change (this module, six seed sets: 0.1274 to 0.1367, sd 0.0038). The earlier table, 31 bins and
+    # grey fill read 0.1091, torchvision's table with 31 bins and grey fill 0.0731, the earlier table
+    # with 10 bins and fill 0 0.1752: the band below tells all three from it.
+    import keras
+
+    (train_images, _), _ = keras.datasets.cifar10.load_data()
+    images = train_images[:3000].astype(np.float32) / 255.0
+    change = [
+        float(np.abs(ia._autoaugment_array(image, ia.CIFAR10_POLICY, np.random.default_rng([i, 7]))
+                     - image).mean())
+        for i, image in enumerate(images)
+    ]
+    assert 0.121 < float(np.mean(change)) < 0.137, float(np.mean(change))
 
 
 def test_an_unknown_policy_is_refused() -> None:

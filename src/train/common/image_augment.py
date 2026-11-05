@@ -35,112 +35,161 @@ ImageOp = Callable[[tf.Tensor, tf.Tensor], tf.Tensor]
 
 # ---------------------------------------------------------------------
 # AutoAugment policies
-# Each sub-policy is a tuple of (op_name, probability, magnitude_index); magnitude indices map
-# to operation-specific ranges over NUM_MAGNITUDE_BINS bins (torchvision's mapping).
+# Each sub-policy is a pair of (op_name, probability, magnitude_index); a magnitude index picks one
+# of NUM_MAGNITUDE_BINS values of the operation's range (:func:`_augmentation_space`), and an
+# operation that takes no magnitude (Invert, AutoContrast, Equalize) carries ``None``.
 # ---------------------------------------------------------------------
 
-CIFAR10_POLICY: Tuple[Tuple[Tuple[str, float, int], ...], ...] = (
-    (("Invert", 0.1, 7), ("Contrast", 0.2, 6)),
+# DECISION plan-2026-11-03T221936-98b866fb/D-040
+# The policy, the bin count, the range of every operation and the fill are torchvision's
+# ``AutoAugment(AutoAugmentPolicy.CIFAR10)`` (transforms/autoaugment.py, sha256 11b61381...), which
+# is the call of the CliffordNet authors' train.py. Its 25 sub-policies are Table 7 of Cubuk et al.
+# (arXiv:1805.09501), row for row. Do NOT go back to the earlier table (5 of its 25 rows were the
+# paper's), to 31 bins (rotate id 2 was 2.0 degrees where the paper's 10 values give 6.7), to a
+# mid-grey fill (torchvision's default is 0), or to the original TensorFlow code's 11 levels and
+# 10-pixel translation: this module reproduces torchvision, and tests/test_train/
+# test_common_image_augment.py pins each of the four against a literal.
+CIFAR10_POLICY: Tuple[Tuple[Tuple[str, float, Optional[int]], ...], ...] = (
+    (("Invert", 0.1, None), ("Contrast", 0.2, 6)),
     (("Rotate", 0.7, 2), ("TranslateX", 0.3, 9)),
     (("Sharpness", 0.8, 1), ("Sharpness", 0.9, 3)),
     (("ShearY", 0.5, 8), ("TranslateY", 0.7, 9)),
-    (("AutoContrast", 0.5, 8), ("Equalize", 0.9, 2)),
-    (("ShearY", 0.7, 2), ("Invert", 0.4, 7)),
-    (("Color", 0.6, 1), ("Equalize", 1.0, 2)),
-    (("Invert", 0.6, 4), ("Rotate", 0.6, 4)),
-    (("Solarize", 0.3, 5), ("AutoContrast", 0.1, 12)),
-    (("Equalize", 0.2, 4), ("Rotate", 0.6, 8)),
-    (("Color", 0.1, 0), ("Brightness", 0.7, 2)),
-    (("Sharpness", 0.4, 7), ("TranslateX", 0.9, 9)),
-    (("ShearX", 0.6, 5), ("Rotate", 0.7, 2)),
-    (("AutoContrast", 0.8, 4), ("Solarize", 0.4, 5)),
+    (("AutoContrast", 0.5, None), ("Equalize", 0.9, None)),
+    (("ShearY", 0.2, 7), ("Posterize", 0.3, 7)),
+    (("Color", 0.4, 3), ("Brightness", 0.6, 7)),
+    (("Sharpness", 0.3, 9), ("Brightness", 0.7, 9)),
+    (("Equalize", 0.6, None), ("Equalize", 0.5, None)),
+    (("Contrast", 0.6, 7), ("Sharpness", 0.6, 5)),
+    (("Color", 0.7, 7), ("TranslateX", 0.5, 8)),
+    (("Equalize", 0.3, None), ("AutoContrast", 0.4, None)),
+    (("TranslateY", 0.4, 3), ("Sharpness", 0.2, 6)),
+    (("Brightness", 0.9, 6), ("Color", 0.2, 8)),
+    (("Solarize", 0.5, 2), ("Invert", 0.0, None)),
+    (("Equalize", 0.2, None), ("AutoContrast", 0.6, None)),
+    (("Equalize", 0.2, None), ("Equalize", 0.6, None)),
+    (("Color", 0.9, 9), ("Equalize", 0.6, None)),
+    (("AutoContrast", 0.8, None), ("Solarize", 0.2, 8)),
+    (("Brightness", 0.1, 3), ("Color", 0.7, 0)),
+    (("Solarize", 0.4, 5), ("AutoContrast", 0.9, None)),
     (("TranslateY", 0.9, 9), ("TranslateY", 0.7, 9)),
-    (("AutoContrast", 0.9, 2), ("Solarize", 0.8, 3)),
-    (("Equalize", 0.8, 8), ("Invert", 0.1, 3)),
-    (("TranslateY", 0.7, 9), ("AutoContrast", 0.9, 1)),
-    (("Solarize", 0.4, 5), ("AutoContrast", 0.9, 3)),
-    (("TranslateY", 0.7, 9), ("TranslateY", 0.7, 9)),
-    (("AutoContrast", 0.9, 0), ("Solarize", 0.4, 3)),
-    (("Equalize", 0.7, 5), ("Invert", 0.1, 3)),
-    (("Equalize", 0.7, 8), ("TranslateY", 0.3, 9)),
-    (("Rotate", 0.8, 7), ("TranslateY", 0.7, 9)),
-    (("ShearX", 0.7, 5), ("Equalize", 0.8, 5)),
+    (("AutoContrast", 0.9, None), ("Solarize", 0.8, 3)),
+    (("Equalize", 0.8, None), ("Invert", 0.1, None)),
+    (("TranslateY", 0.7, 9), ("AutoContrast", 0.9, None)),
 )
 
-
-NUM_MAGNITUDE_BINS = 31
+#: Values per operation range (torchvision's ``num_bins``; the paper discretizes each range into 10
+#: values with uniform spacing).
+NUM_MAGNITUDE_BINS = 10
 
 #: The AutoAugment policies by name.
-AUTOAUGMENT_POLICIES: Dict[str, Tuple[Tuple[Tuple[str, float, int], ...], ...]] = {
+AUTOAUGMENT_POLICIES: Dict[str, Tuple[Tuple[Tuple[str, float, Optional[int]], ...], ...]] = {
     "cifar10": CIFAR10_POLICY,
 }
 
-#: Fill of the area a rotation, shear or translation uncovers (mid-grey, as torchvision).
-_AUTOAUGMENT_FILL = 128
+#: Fill of the area a rotation, shear or translation uncovers (black, torchvision's ``fill=None``).
+_AUTOAUGMENT_FILL = 0
 
 # ---------------------------------------------------------------------
 # AutoAugment (PIL, seeded numpy generator)
 # ---------------------------------------------------------------------
 
 
-def _apply_autoaugment_op(
-        pil_img: Image.Image, op_name: str, magnitude_idx: int, rng: np.random.Generator,
-) -> Image.Image:
-    """Apply one AutoAugment operation to a PIL image.
+def _augmentation_space(width: int, height: int) -> Dict[str, Tuple[np.ndarray, bool]]:
+    """The magnitudes of every parameterised operation: torchvision's ``_augmentation_space``.
 
-    The magnitude mapping is torchvision's AutoAugment with ``NUM_MAGNITUDE_BINS`` bins; the
-    sign of a signed operation is drawn from ``rng``.
+    :param width: Width of the image in pixels (the range of ``TranslateX``).
+    :param height: Height of the image in pixels (the range of ``TranslateY``).
+    :return: ``{operation: (magnitude of each of NUM_MAGNITUDE_BINS indices, signed)}``. Shear is a
+        rate, translation pixels (``150 / 331`` of the side, the paper's 150 pixels at 331), rotation
+        degrees, the enhancers an offset from the factor 1, Posterize a bit count and Solarize a
+        threshold. A signed magnitude is negated by a coin flip.
     """
-    n = NUM_MAGNITUDE_BINS - 1
-    m = magnitude_idx
-    width = pil_img.size[0]
-    fill = _AUTOAUGMENT_FILL if pil_img.mode == "L" else (_AUTOAUGMENT_FILL,) * 3
+    bins = NUM_MAGNITUDE_BINS
+    return {
+        "ShearX": (np.linspace(0.0, 0.3, bins), True),
+        "ShearY": (np.linspace(0.0, 0.3, bins), True),
+        "TranslateX": (np.linspace(0.0, 150.0 / 331.0 * width, bins), True),
+        "TranslateY": (np.linspace(0.0, 150.0 / 331.0 * height, bins), True),
+        "Rotate": (np.linspace(0.0, 30.0, bins), True),
+        "Brightness": (np.linspace(0.0, 0.9, bins), True),
+        "Color": (np.linspace(0.0, 0.9, bins), True),
+        "Contrast": (np.linspace(0.0, 0.9, bins), True),
+        "Sharpness": (np.linspace(0.0, 0.9, bins), True),
+        "Posterize": (8 - np.round(np.arange(bins) / ((bins - 1) / 4.0)), False),
+        "Solarize": (np.linspace(255.0, 0.0, bins), False),
+    }
 
-    # Operations with no sign.
+
+def _apply_autoaugment_op(
+        pil_img: Image.Image, op_name: str, magnitude_idx: Optional[int], rng: np.random.Generator,
+) -> Image.Image:
+    """Apply one AutoAugment operation to a PIL image, as torchvision's ``_apply_op`` does.
+
+    :param pil_img: An ``L`` or ``RGB`` image.
+    :param op_name: A key of :func:`_augmentation_space`, or ``Invert``, ``AutoContrast`` or
+        ``Equalize``.
+    :param magnitude_idx: Index into the operation's magnitudes, in ``[0, NUM_MAGNITUDE_BINS)``;
+        ignored (``None``) for the three operations that take none.
+    :param rng: Only ``rng.random()`` is called, once, for the sign of a signed operation (above
+        0.5 is negative). A positive magnitude translates content towards larger x or y and rotates
+        counter-clockwise, as torchvision's does.
+    :raises ValueError: Unknown ``op_name``, or a ``magnitude_idx`` outside the bins.
+    """
+    # Operations with no magnitude.
     if op_name == "Invert":
         return ImageOps.invert(pil_img)
     if op_name == "AutoContrast":
         return ImageOps.autocontrast(pil_img)
     if op_name == "Equalize":
         return ImageOps.equalize(pil_img)
-    if op_name == "Posterize":
-        return ImageOps.posterize(pil_img, max(1, int(8 - round(m / (n / 4.0)))))
-    if op_name == "Solarize":
-        return ImageOps.solarize(pil_img, int(255 - m / n * 255))
 
-    if op_name in ("ShearX", "ShearY"):
-        magnitude = m / n * 0.3
-    elif op_name in ("TranslateX", "TranslateY"):
-        magnitude = m / n * (150.0 / 331.0 * width)
-    elif op_name == "Rotate":
-        magnitude = m / n * 30.0
-    elif op_name in ("Brightness", "Color", "Contrast", "Sharpness"):
-        magnitude = m / n * 0.9
-    else:
+    width, height = pil_img.size
+    space = _augmentation_space(width, height)
+    if op_name not in space:
         raise ValueError(f"Unknown AutoAugment operation {op_name!r}")
-    if rng.random() > 0.5:
+    if magnitude_idx is None or not 0 <= magnitude_idx < NUM_MAGNITUDE_BINS:
+        raise ValueError(
+            f"AutoAugment operation {op_name!r} needs a magnitude index in "
+            f"[0, {NUM_MAGNITUDE_BINS}), got {magnitude_idx!r}")
+    magnitudes, signed = space[op_name]
+    magnitude = float(magnitudes[magnitude_idx])
+    if signed and rng.random() > 0.5:
         magnitude = -magnitude
 
+    if op_name == "Posterize":
+        return ImageOps.posterize(pil_img, int(magnitude))
+    if op_name == "Solarize":
+        return ImageOps.solarize(pil_img, magnitude)
     enhancers = {"Brightness": ImageEnhance.Brightness, "Color": ImageEnhance.Color,
                  "Contrast": ImageEnhance.Contrast, "Sharpness": ImageEnhance.Sharpness}
     if op_name in enhancers:
         return enhancers[op_name](pil_img).enhance(1.0 + magnitude)
+
+    fill = _AUTOAUGMENT_FILL if pil_img.mode == "L" else (_AUTOAUGMENT_FILL,) * 3
     if op_name == "Rotate":
-        return pil_img.rotate(magnitude, fillcolor=fill)
+        return pil_img.rotate(magnitude, resample=Image.NEAREST, fillcolor=fill)
+    # PIL maps an OUTPUT pixel to the INPUT pixel it samples, so a shift of t samples at -t.
+    # The translation is truncated towards zero, as torchvision's ``int(magnitude)``.
     affine = {
         "ShearX": (1, magnitude, 0, 0, 1, 0),
         "ShearY": (1, 0, 0, magnitude, 1, 0),
-        "TranslateX": (1, 0, int(round(magnitude)), 0, 1, 0),
-        "TranslateY": (1, 0, 0, 0, 1, int(round(magnitude))),
+        "TranslateX": (1, 0, -int(magnitude), 0, 1, 0),
+        "TranslateY": (1, 0, 0, 0, 1, -int(magnitude)),
     }[op_name]
-    return pil_img.transform(pil_img.size, Image.AFFINE, affine, fillcolor=fill)
+    return pil_img.transform(
+        pil_img.size, Image.AFFINE, affine, resample=Image.NEAREST, fillcolor=fill)
 
 
 def _autoaugment_array(
-        image: np.ndarray, policy: Sequence[Sequence[Tuple[str, float, int]]],
+        image: np.ndarray, policy: Sequence[Sequence[Tuple[str, float, Optional[int]]]],
         rng: np.random.Generator,
 ) -> np.ndarray:
-    """One random sub-policy of ``policy`` on a float32 ``[0, 1]`` HWC array."""
+    """One random sub-policy of ``policy`` on a float32 ``[0, 1]`` HWC array.
+
+    Draws, in order, from ``rng``: the sub-policy (``integers``), then per operation its probability
+    (applied when ``random() <= probability``, torchvision's ``probs[i] <= p``) and, for a signed
+    operation that is applied, its sign.
+    """
     channels = image.shape[-1]
     pixels = np.clip(image * 255.0, 0, 255).astype(np.uint8)
     pil_img = Image.fromarray(pixels[..., 0] if channels == 1 else pixels)
@@ -159,6 +208,9 @@ def _generator(seed: np.ndarray) -> np.random.Generator:
 
 def autoaugment(policy: str = "cifar10") -> ImageOp:
     """AutoAugment: one random sub-policy of ``policy`` per image (PIL, 1 or 3 channels).
+
+    ``"cifar10"`` is torchvision's ``AutoAugment(AutoAugmentPolicy.CIFAR10)``: 25 sub-policies,
+    :data:`NUM_MAGNITUDE_BINS` magnitude values per operation, uncovered area filled with 0.
 
     :param policy: A key of :data:`AUTOAUGMENT_POLICIES`.
     :raises ValueError: Unknown ``policy``.
@@ -416,8 +468,9 @@ def build_op(
     * ``flip_pad_crop``: flip, then a ``pad``-pixel zero pad and a random crop back.
     * ``cifar_light``: flip, ``pad``-pixel REFLECT pad-crop, brightness 0.1, contrast 0.9-1.1
       (``train_vit``'s CIFAR recipe).
-    * ``cifar_autoaugment``: flip, ``pad``-pixel zero pad-crop, the CIFAR-10 AutoAugment policy,
-      then random erasing with ``random_erasing_prob`` and ``fill`` (arXiv:2601.06793v2's recipe).
+    * ``cifar_autoaugment``: flip, ``pad``-pixel zero pad-crop, torchvision's CIFAR-10 AutoAugment
+      policy (25 sub-policies, 10 magnitude bins, fill 0), then random erasing with
+      ``random_erasing_prob`` and ``fill`` (arXiv:2601.06793v2's recipe).
     * ``photometric``: flip, brightness 0.1, contrast 0.9-1.1, saturation 0.9-1.1, hue 0.05.
 
     :param name: One of :data:`PRESETS`.
