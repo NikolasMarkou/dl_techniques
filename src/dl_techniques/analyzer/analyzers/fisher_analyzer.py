@@ -73,8 +73,6 @@ class FisherAnalyzer(BaseAnalyzer):
         """Fisher is an expectation over inputs, so it needs data."""
         return True
 
-    # ------------------------------------------------------------------
-
     def analyze(self, results: AnalysisResults, data: Optional[DataInput] = None,
                 cache: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
         """Compute the Fisher outputs and publish them on ``results``.
@@ -116,7 +114,6 @@ class FisherAnalyzer(BaseAnalyzer):
         failures.update(run_failures)
         self._publish(results, outputs, failures, plan, fcfg, persistence_names)
 
-    # ------------------------------------------------------------------
 
     def _persistence_names(self) -> Optional[List[str]]:
         """Validate ``fisher_persistence_indices`` against the model names."""
@@ -214,8 +211,6 @@ class FisherAnalyzer(BaseAnalyzer):
             outputs[name] = out
         return outputs, failures
 
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _table(name: str, out: fm.FisherOutput) -> pd.DataFrame:
         """The per-parameter table of one model, in the canonical coordinate order."""
@@ -284,3 +279,5 @@ class FisherAnalyzer(BaseAnalyzer):
                     outputs[persistence_names[0]],
                     {n: outputs[n] for n in persistence_names[1:]}, fcfg)
                 results.fisher_persistence = pd.DataFrame(records)
+
+# ------------------------------------------------------------------
