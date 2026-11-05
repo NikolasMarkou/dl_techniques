@@ -1,9 +1,10 @@
 {
- "what": "Fix 9.3 item 3 of plan 98b866fb (D-029): 30-epoch convnext_seg runs on Oxford-IIIT Pet at 128 px, batch 16, RTX 4090, per variant and rate. Read from the run summaries copied under the plan scratch (scratch_step2/runs, scratch_gate_iter1_gpu/runs, scratch_fix93/runs), sha256 of each summary below; this file does not re-measure. test_miou is test_metrics_best.miou.",
+ "what": "Steps 9.3 and 10b of plan 98b866fb (D-029, D-034): 30-epoch convnext_seg runs on Oxford-IIIT Pet at 128 px, batch 16, RTX 4090, per variant, rate and layer scale. Rows with `block` 'before step 10b' were measured on the V1 block that started its layer scale at 1.0 with a cap and an L2; rows with the paper's layer scale were measured after step 10b. Read from the run summaries copied under the plan scratch, sha256 of each summary below; this file does not re-measure. test_miou is test_metrics_best.miou.",
  "rows": [
   {
    "run": "p4b_s2_pet_convnext_seg_tiny",
    "why": "step 2: the family's first 30-epoch run, at ConvUNext's rate",
+   "block": "before step 10b (layer scale 1.0, capped to [1e-6, 1.0], L2 1e-5)",
    "model": "convnext_seg/tiny",
    "variant": "tiny",
    "seed": 42,
@@ -26,6 +27,7 @@
   {
    "run": "p4b_s2_pet_convnext_seg_tiny_lr1e-4",
    "why": "step 2: the same at 1e-4",
+   "block": "before step 10b (layer scale 1.0, capped to [1e-6, 1.0], L2 1e-5)",
    "model": "convnext_seg/tiny",
    "variant": "tiny",
    "seed": 42,
@@ -48,6 +50,7 @@
   {
    "run": "lr_tiny_lr1e-3_s43",
    "why": "gate 1 GPU half",
+   "block": "before step 10b (layer scale 1.0, capped to [1e-6, 1.0], L2 1e-5)",
    "model": "convnext_seg/tiny",
    "variant": "tiny",
    "seed": 43,
@@ -70,6 +73,7 @@
   {
    "run": "lr_tiny_lr1e-4_s43",
    "why": "gate 1 GPU half",
+   "block": "before step 10b (layer scale 1.0, capped to [1e-6, 1.0], L2 1e-5)",
    "model": "convnext_seg/tiny",
    "variant": "tiny",
    "seed": 43,
@@ -92,6 +96,7 @@
   {
    "run": "lr_cifar10_lr1e-3_s42",
    "why": "gate 1 GPU half",
+   "block": "before step 10b (layer scale 1.0, capped to [1e-6, 1.0], L2 1e-5)",
    "model": "convnext_seg/cifar10",
    "variant": "cifar10",
    "seed": 42,
@@ -114,6 +119,7 @@
   {
    "run": "lr_cifar10_lr1e-4_s42",
    "why": "gate 1 GPU half",
+   "block": "before step 10b (layer scale 1.0, capped to [1e-6, 1.0], L2 1e-5)",
    "model": "convnext_seg/cifar10",
    "variant": "cifar10",
    "seed": 42,
@@ -136,6 +142,7 @@
   {
    "run": "lr_cifar10_lr1e-3_s43",
    "why": "gate 1 GPU half",
+   "block": "before step 10b (layer scale 1.0, capped to [1e-6, 1.0], L2 1e-5)",
    "model": "convnext_seg/cifar10",
    "variant": "cifar10",
    "seed": 43,
@@ -158,6 +165,7 @@
   {
    "run": "lr_cifar10_lr1e-4_s43",
    "why": "gate 1 GPU half",
+   "block": "before step 10b (layer scale 1.0, capped to [1e-6, 1.0], L2 1e-5)",
    "model": "convnext_seg/cifar10",
    "variant": "cifar10",
    "seed": 43,
@@ -180,6 +188,7 @@
   {
    "run": "cell_convnext_seg_cifar10_s44_e30",
    "why": "fix 9.3 rerun at the shipped recipe rate",
+   "block": "before step 10b (layer scale 1.0, capped to [1e-6, 1.0], L2 1e-5)",
    "model": "convnext_seg/cifar10",
    "variant": "cifar10",
    "seed": 44,
@@ -202,6 +211,7 @@
   {
    "run": "cell_convnext_seg_cifar10_s44_e30_lr1e-4",
    "why": "seed-44 pair of the fix 9.3 rerun, at the family rate",
+   "block": "before step 10b (layer scale 1.0, capped to [1e-6, 1.0], L2 1e-5)",
    "model": "convnext_seg/cifar10",
    "variant": "cifar10",
    "seed": 44,
@@ -220,6 +230,144 @@
     128
    ],
    "summary_sha256": "0b5aac7d8fde0c1429009c20542fcfce45eb4d156e0a24ac71a5155da6f697d7"
+  },
+  {
+   "run": "seg_cx_cifar10_lr1e-3_after10b_s44",
+   "why": "step 10b re-measurement, cifar10 at 1e-3",
+   "block": "paper layer scale (step 10b: 1e-6, no cap, no L2)",
+   "model": "convnext_seg/cifar10",
+   "variant": "cifar10",
+   "seed": 44,
+   "lr": 0.001,
+   "epochs_requested": 30,
+   "epochs_run": 30,
+   "best_epoch": 30,
+   "best_val_miou": 0.6629132628440857,
+   "test_miou": 0.6725618839263916,
+   "test_accuracy": 0.8670920133590698,
+   "majority_baseline_miou": 0.19835668370343637,
+   "dataset": "oxford_pet",
+   "batch_size": 16,
+   "input_size": [
+    128,
+    128
+   ],
+   "summary_sha256": "0bf660a081a58423575e92186211ee9b479f03decc63a9d05401d55f65fe24b6"
+  },
+  {
+   "run": "seg_cx_cifar10_lr1e-4_after10b_s44",
+   "why": "step 10b re-measurement, cifar10 at 1e-4",
+   "block": "paper layer scale (step 10b: 1e-6, no cap, no L2)",
+   "model": "convnext_seg/cifar10",
+   "variant": "cifar10",
+   "seed": 44,
+   "lr": 0.0001,
+   "epochs_requested": 30,
+   "epochs_run": 30,
+   "best_epoch": 30,
+   "best_val_miou": 0.6152138710021973,
+   "test_miou": 0.6276946663856506,
+   "test_accuracy": 0.839153528213501,
+   "majority_baseline_miou": 0.19835668370343637,
+   "dataset": "oxford_pet",
+   "batch_size": 16,
+   "input_size": [
+    128,
+    128
+   ],
+   "summary_sha256": "042cfac3908e151797231bc92f495ecf9a421d499573cc9c31d1e076cc0f958a"
+  },
+  {
+   "run": "seg_cx_tiny_lr1e-3_after10b_s42",
+   "why": "step 10b re-measurement, tiny at 1e-3",
+   "block": "paper layer scale (step 10b: 1e-6, no cap, no L2)",
+   "model": "convnext_seg/tiny",
+   "variant": "tiny",
+   "seed": 42,
+   "lr": 0.001,
+   "epochs_requested": 30,
+   "epochs_run": 30,
+   "best_epoch": 28,
+   "best_val_miou": 0.544204592704773,
+   "test_miou": 0.5501753687858582,
+   "test_accuracy": 0.8034942150115967,
+   "majority_baseline_miou": 0.1993090864540874,
+   "dataset": "oxford_pet",
+   "batch_size": 16,
+   "input_size": [
+    128,
+    128
+   ],
+   "summary_sha256": "2d15915a0e6030226bac89640fd7b9d8e21b73f60ea5b1841dffd6409b52a872"
+  },
+  {
+   "run": "seg_cx_tiny_lr1e-4_after10b_s42",
+   "why": "step 10b re-measurement, tiny at 1e-4",
+   "block": "paper layer scale (step 10b: 1e-6, no cap, no L2)",
+   "model": "convnext_seg/tiny",
+   "variant": "tiny",
+   "seed": 42,
+   "lr": 0.0001,
+   "epochs_requested": 30,
+   "epochs_run": 30,
+   "best_epoch": 30,
+   "best_val_miou": 0.5081015229225159,
+   "test_miou": 0.5073865652084351,
+   "test_accuracy": 0.7997925877571106,
+   "majority_baseline_miou": 0.1993090864540874,
+   "dataset": "oxford_pet",
+   "batch_size": 16,
+   "input_size": [
+    128,
+    128
+   ],
+   "summary_sha256": "cdf6fa5efc0517ce27c43210c3264e355cdbeadd447d16b0379138a39c9e50cf"
+  },
+  {
+   "run": "seg_cx_tiny_lr1e-3_after10b_s43",
+   "why": "step 10b re-measurement, tiny at 1e-3",
+   "block": "paper layer scale (step 10b: 1e-6, no cap, no L2)",
+   "model": "convnext_seg/tiny",
+   "variant": "tiny",
+   "seed": 43,
+   "lr": 0.001,
+   "epochs_requested": 30,
+   "epochs_run": 30,
+   "best_epoch": 27,
+   "best_val_miou": 0.5211465954780579,
+   "test_miou": 0.5373634696006775,
+   "test_accuracy": 0.7965154647827148,
+   "majority_baseline_miou": 0.19345606928286344,
+   "dataset": "oxford_pet",
+   "batch_size": 16,
+   "input_size": [
+    128,
+    128
+   ],
+   "summary_sha256": "f15c6d9abe95035cf845da567c5ef8d25d2e4f4fc93523ea8cf3e96d83e47d78"
+  },
+  {
+   "run": "seg_cx_tiny_lr1e-4_after10b_s43",
+   "why": "step 10b re-measurement, tiny at 1e-4",
+   "block": "paper layer scale (step 10b: 1e-6, no cap, no L2)",
+   "model": "convnext_seg/tiny",
+   "variant": "tiny",
+   "seed": 43,
+   "lr": 0.0001,
+   "epochs_requested": 30,
+   "epochs_run": 30,
+   "best_epoch": 30,
+   "best_val_miou": 0.5162497162818909,
+   "test_miou": 0.5286586880683899,
+   "test_accuracy": 0.8022763133049011,
+   "majority_baseline_miou": 0.19345606928286344,
+   "dataset": "oxford_pet",
+   "batch_size": 16,
+   "input_size": [
+    128,
+    128
+   ],
+   "summary_sha256": "d3d80931c4b7443b4a15e44b556592da767fd7b092ff1660308870390ad8152d"
   }
  ]
 }

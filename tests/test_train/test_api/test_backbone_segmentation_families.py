@@ -546,17 +546,17 @@ def test_every_setting_the_head_takes_is_passed_so_a_new_default_or_knob_moves_n
 # ---------------------------------------------------------------------
 
 
-def test_the_recipes_are_conv_unexts_optimizer_settings_but_the_convnext_one_has_a_tenth_of_the_rate(world):
-    """ConvUNext's lr 1e-3 stalls ``convnext_seg/tiny`` at the pixel prior (val_miou 0.37 at 1e-3, at 3e-4 and at 1e-3
-    with warmup in 4 epochs; 0.397 at 2e-4); 1e-4 reached 0.421. The readings are in ``scratch_step2/logs/diag_runs.out``."""
+def test_the_recipes_are_conv_unexts_optimizer_settings(world):
+    """Both backbone families take ConvUNext's optimizer settings, learning rate 1e-3 included, for every variant.
+
+    ``convnext_seg`` had a tenth of that rate (and 1e-3 for ``cifar10`` only) while the V1 block's layer scale started at 1.0:
+    ``tiny`` stayed at the pixel prior at 1e-3 then. With the paper's layer scale it trains at 1e-3 and beats 1e-4 on both seeds
+    (D-034, held by test_the_convnext_seg_rate_is_what_the_30_epoch_runs_measured.py)."""
     unet = world["convunext"].recipe("oxford_pet", "tiny")["optim_args"]
     assert unet["lr"] == 1e-3
     assert world["resnet_seg"].recipe("oxford_pet", "resnet18")["optim_args"] == unet
-    convnext = world["convnext_seg"].recipe("oxford_pet", "tiny")["optim_args"]
-    assert convnext == {**unet, "lr": sm.CONVNEXT_SEG_LR} and sm.CONVNEXT_SEG_LR == 1e-4
-    # D-029: the shallow variant is the exception, per variant (the 30-epoch evidence is held by
-    # test_the_convnext_seg_rate_is_what_the_30_epoch_runs_measured.py).
-    assert world["convnext_seg"].recipe("oxford_pet", "cifar10")["optim_args"] == {**unet, "lr": 1e-3}
+    for variant in ("cifar10", "tiny", "small", "base", "large", "xlarge"):
+        assert world["convnext_seg"].recipe("oxford_pet", variant)["optim_args"] == unet, variant
     for family, variant in (("resnet_seg", "resnet18"), ("convnext_seg", "tiny")):
         recipe = world[family].recipe("oxford_pet", variant)
         assert recipe["transform_args"] == {"augment": "flip", "image_size": 128}

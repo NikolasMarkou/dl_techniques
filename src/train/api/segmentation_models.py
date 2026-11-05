@@ -627,7 +627,6 @@ def _segmentation_recipe(
     epochs: int = 30,
     batch_size: int = 16,
     model_args: Optional[Dict[str, Any]] = None,
-    per_variant: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Return a segmentation recipe: every AUTO key of the groups the task resolves.
 
@@ -654,7 +653,7 @@ def _segmentation_recipe(
         "analysis_args": {"eval_batch_size": batch_size},
         "model_args": dict(model_args or {}),
         "per_dataset": {"oxford_pet": {"transform_args": {"image_size": PET_IMAGE_SIZE}}},
-        "per_variant": copy.deepcopy(per_variant or {}),
+        "per_variant": {},
     }
 
 
@@ -696,36 +695,28 @@ ACCUNET = _segmentation_recipe(
 # DECISION plan-2026-11-03T221936-98b866fb/D-012
 # The backbone families have NO legacy trainer, so their optimizer settings start from ConvUNext's, read
 # from `CONVUNEXT` (one source, not four copied numbers): the same dataset, loss and pipeline, the only
-# segmentation recipe measured on Oxford-IIIT Pet. `resnet_seg` keeps them as they are (30 epochs on
-# Pet: val_miou 0.631). `convnext_seg` does NOT keep the learning rate: the `tiny` variant at lr 1e-3
-# (30 epochs: best val_miou 0.373 at epoch 3, early stop at 13, train loss flat at 0.74, accuracy 0.70: the
-# pixel prior), at 3e-4 and at 1e-3 with 2 warmup epochs stayed at 0.37 in 4 epochs; 2e-4 was slow (0.397),
-# 1e-4 and 5e-5 reached 0.421 and 0.417 (`scratch_step2/logs/diag_runs.out`). Do NOT restore ConvUNext's
-# 1e-3 "for parity": it is the value of a different network and measured to stall this one. The values are an untuned starting
-# point (chosen from 4-epoch probes, then 30-epoch runs of two variants), not a result. The batch is the one D-036's
+# segmentation recipe measured on Oxford-IIIT Pet. `resnet_seg` and `convnext_seg` keep them as they are (30 epochs on
+# Pet: `resnet_seg` val_miou 0.631). The values are an untuned starting point, not a result. The batch is the one D-036's
 # procedure measured on the 24 GB card (20 real steps on Pet at 128 px, halved from 16 until it fits): 16 fits
 # the default variants (`resnet18`, `convnext_seg/tiny`, and `resnet50`, `resnet152`, `cifar10`),
 # `convnext_seg/base` needs 8 and `xlarge` did not fit at any batch from 16 to 1 beside another session's 15.9 GB
 # (`tests/test_train/test_api/backbone_seg_memory_evidence.json`).
-# DECISION plan-2026-11-03T221936-98b866fb/D-029
-# The rate is PER VARIANT: 1e-4 for the family and 1e-3 for `cifar10`. Measured over 30 epochs on Pet at 128 px
-# (`tests/test_train/test_api/convnext_seg_lr_evidence.json`, held by a test): `cifar10` reaches test mIoU 0.688, 0.687 and
-# 0.672 at 1e-3 (seeds 42, 43, 44) against 0.672, 0.674 and 0.671 at 1e-4: ahead on all three seeds, by 0.016, 0.012 and 0.001
-# (mean 0.010), a modest gain and not a large one; `tiny` stays at the pixel prior at 1e-3 (0.370 and 0.370, early stop at epoch
-# 13 and 22, seeds 42 and 43) and reaches 0.597 and 0.601 at 1e-4. `small`, `base`, `large` and `xlarge` were
-# NOT measured at either rate and keep the family's 1e-4, the rate that worked for the deeper `tiny`; a deeper variant
-# may want something else. Do NOT make 1e-3 the family rate again for `cifar10`'s sake (it stalls `tiny`) and do NOT make 1e-4
-# the rate of `cifar10` for the family's sake (it was behind on all three seeds).
-CONVNEXT_SEG_LR = 1e-4
-CONVNEXT_SEG_CIFAR10_LR = 1e-3
-
+# DECISION plan-2026-11-03T221936-98b866fb/D-034
+# `convnext_seg` takes ConvUNext's learning rate, 1e-3, for EVERY variant (it had a per-variant rate, D-029: 1e-3 for `cifar10`
+# and 1e-4 for the rest). The 1e-4 existed because `tiny` at 1e-3 stayed at the pixel prior (test mIoU 0.370 and 0.370 over
+# seeds 42 and 43, early stop at epoch 13 and 22), and that was a property of the V1 block's old layer scale (init 1.0, capped,
+# L2), not of the rate: with the paper's layer scale (step 10b) `tiny` at 1e-3 trains and is ahead of 1e-4 on both seeds
+# (test mIoU 0.550 against 0.507 and 0.537 against 0.529), and `cifar10` is ahead at 1e-3 (0.673 against 0.628, seed 44). Do NOT
+# bring the per-variant rate back for `tiny`'s sake and do NOT make 1e-4 the family rate "because it was the safe one": on the
+# paper's layer scale it is behind at both measured variants (`tests/test_train/test_api/convnext_seg_lr_evidence.json`,
+# held by a test). `small`, `base`, `large` and `xlarge` were NOT measured at either rate and take the same 1e-3; a first run
+# of one that stalls at the pixel prior should try a lower rate.
+CONVNEXT_SEG = _segmentation_recipe(
+    optim_args=copy.deepcopy(CONVUNEXT["optim_args"]), patience=10, batch_size=16,
+    model_args={"strides": CONVNEXT_SEG_STRIDES},
+)
 RESNET_SEG = _segmentation_recipe(
     optim_args=copy.deepcopy(CONVUNEXT["optim_args"]), patience=10, batch_size=16,
-)
-CONVNEXT_SEG = _segmentation_recipe(
-    optim_args={**copy.deepcopy(CONVUNEXT["optim_args"]), "lr": CONVNEXT_SEG_LR}, patience=10, batch_size=16,
-    model_args={"strides": CONVNEXT_SEG_STRIDES},
-    per_variant={"cifar10": {"optim_args": {"lr": CONVNEXT_SEG_CIFAR10_LR}}},
 )
 
 

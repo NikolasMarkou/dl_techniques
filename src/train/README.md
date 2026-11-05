@@ -189,19 +189,23 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   `pretrained`, `name`, and for ResNet `enable_deep_supervision`). `load_model` tells the families and variants apart by the
   nested backbone's own layers (`ResNet`: `blocks_per_stage`, `filters_per_stage`, `block_type`; `ConvNeXtV1`: `depths`,
   `dims`); a ConvNeXt V2 body under a `convnext_seg` record is refused. **Recipes** have no legacy source: the optimizer
-  settings start from ConvUNext's (AdamW, lr 1e-3, weight decay 1e-4, no warmup, per-variable clipnorm 1, cosine to 1%), 30
+  settings are ConvUNext's (AdamW, lr 1e-3, weight decay 1e-4, no warmup, per-variable clipnorm 1, cosine to 1%), 30
   epochs, patience 10, a flip, `val_miou`, Pet at 128 px: the same data, loss and pipeline, an untuned starting point and
-  not a result. `resnet_seg` keeps them. **`convnext_seg` has lr 1e-4, and 1e-3 for `cifar10`**: at 1e-3 the `tiny` variant stayed at the pixel
-  prior (30 epochs: best `val_miou` 0.373 at epoch 3, accuracy 0.70, stopped at epoch 13), and so did 3e-4 and 1e-3 with 2
-  warmup epochs in 4 epochs, while 2e-4, 1e-4 and 5e-5 reached 0.397, 0.421 and 0.417 (`scratch_step2/logs/diag_runs.out`).
-  Over 30 epochs `tiny` gives test mIoU 0.370 and 0.370 at 1e-3 (stopped at epochs 13 and 22) against 0.597
-  and 0.601 at 1e-4 (seeds 42, 43), and `cifar10` gives 0.688, 0.687 and 0.672 at 1e-3 against 0.672, 0.674 and 0.671 at 1e-4 (seeds
-  42, 43, 44): ahead on all three seeds, by 0.016, 0.012 and 0.001, so the gain is modest and uneven, and the rate is per variant
-  (`tests/test_train/test_api/convnext_seg_lr_evidence.json`, held by a test). `small`, `base`, `large` and `xlarge` have been
-  measured at neither rate and take the family's 1e-4: a rate for them is a guess, and the first run of one should try another.
+  not a result. Both backbone families keep them, `convnext_seg` included, for every variant. **The `convnext_seg` rate was
+  1e-4 (1e-3 for `cifar10`) while the V1 block's layer scale started at 1.0, and is 1e-3 now** (plan 98b866fb step 10b, D-034):
+  on that old layer scale `tiny` stayed at the pixel prior at 1e-3 (test mIoU 0.370 and 0.370, seeds 42 and 43), and reached 0.597
+  and 0.601 at 1e-4. With the paper's layer scale (start 1e-6, no cap, no penalty) `tiny` trains at 1e-3 and is ahead of 1e-4 on both
+  seeds, test mIoU 0.550 against 0.507 (seed 42) and 0.537 against 0.529 (seed 43), and `cifar10` is ahead at 1e-3, 0.673
+  against 0.628 (seed 44): modest and uneven margins (0.043, 0.009, 0.045), and every number is lower than on the old layer scale
+  at its best rate (`tiny` 0.55 against 0.60, `cifar10` 0.67 against 0.67 at 1e-3, 0.63 against 0.67 at 1e-4). The rows are in
+  `tests/test_train/test_api/convnext_seg_lr_evidence.json`, held by a test. `small`, `base`, `large` and `xlarge` have been
+  measured at neither rate and take the same 1e-3: a first run of one that stalls at the pixel prior should try a lower rate.
+  The tables of numbers in this section that were measured before step 10b are on the old layer scale and are re-measured by
+  step 10c.
   **Measured on Oxford-IIIT Pet** (30 epochs, 128 px, batch 16, RTX 4090, the recipes as shipped; majority-class baseline
   0.199): `resnet_seg/resnet18` (12.8M parameters, 8 minutes) best `val_miou` 0.631 at epoch 28, test mIoU 0.633;
-  `convnext_seg/tiny` (30.0M, 16 minutes) 0.597 at epoch 24, test 0.597. Both are the coarse baseline, not a U-Net's
+  `convnext_seg/tiny` (30.0M, 15 minutes) 0.544 at epoch 28, test 0.550 (seed 42, the paper's layer scale at lr 1e-3; the old
+  layer scale at 1e-4 gave 0.597 and 0.597). Both are the coarse baseline, not a U-Net's
   score. **Batch 16**, measured by D-036's procedure (20 real steps on Pet at 128 px on the 24 GB card, with another
   session's two `llama-server` processes holding 15.9 GB of it; `tests/test_train/test_api/backbone_seg_memory_evidence.json`):
   16 fits `resnet18`, `resnet50`, `resnet152`, `convnext_seg/cifar10` and `convnext_seg/tiny` (peaks 1.4 to 2.8 GB);
