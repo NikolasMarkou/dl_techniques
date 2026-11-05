@@ -3,15 +3,16 @@
 V1 was designed for supervised training, and carrying it directly into masked-autoencoder
 pretraining underperforms: many channels of the inverted bottleneck's expanded `4F`
 representation collapse onto near-duplicates of each other. Global Response Normalization
-(GRN) is the fix, and the only structural change from V1. GRN sits after the GELU inside
+(GRN) is the fix, and the only structural addition to V1 (the other change is a removal, below). GRN sits after the GELU inside
 the expanded part of the block: it computes each channel's L2 norm over the spatial
 dimensions, divides by the mean across channels, and rescales each channel by that ratio,
 suppressing channels that are quiet relative to their peers and amplifying ones that carry
 signal. It is computed from a global statistic, so it costs almost nothing and adds only
-two learnable per-channel parameters. Everything else matches V1: a depthwise `KxK`
-convolution, a 1x1 expansion to `4F`, GELU, now GRN, a 1x1 reduction back to `F`, and a
-learnable `gamma` layer scale, with the block transform-only and the residual/drop-path
-wiring owned by `call`. The variant table spans a wider range than V1's, from Atto (4.5M
+two learnable per-channel parameters, which start at zero so that GRN is the identity at
+initialization. Everything else matches V1: a depthwise `KxK` convolution, a 1x1 expansion
+to `4F`, GELU, now GRN, and a 1x1 reduction back to `F`, with the block transform-only and the
+residual/drop-path wiring owned by `call`. The V1 layer scale is gone by default: the paper
+finds it "unnecessary when GRN is applied" (`use_gamma=True` brings back V1's, starting at 1e-6). The variant table spans a wider range than V1's, from Atto (4.5M
 parameters) to Huge (723M), since GRN's benefit is most visible at the small end. Those counts
 are `count_params()` at 224x224 with 1000 classes; the paper's 3.7M and 660M assume 2x2 stride-2
 downsamplers, while here every downsampler is `strides x strides` (4x4 stride 4 by default),
@@ -53,8 +54,8 @@ class ConvNeXtV2(_ConvNeXtBase):
     is the only structural change from :class:`ConvNeXtV1`: a patchify stem
     feeds ``len(depths)`` stages of :class:`ConvNextV2Block` -- depthwise
     ``KxK`` convolution, LayerNorm, ``F -> 4F`` expansion, GELU, GRN, ``4F ->
-    F`` reduction, and a learnable ``gamma`` -- separated by LayerNorm +
-    strided-convolution downsample layers. The block is transform-only: it
+    F`` reduction, and an optional ``gamma`` layer scale that is off by default --
+    separated by LayerNorm + strided-convolution downsample layers. The block is transform-only: it
     returns ``F(x)``, and the residual add plus the optional drop-path are
     owned by :meth:`call`. The drop-path ramp is global across ``sum(depths)``
     blocks, not per stage. The model is fully convolutional and global-pools
@@ -171,8 +172,11 @@ class ConvNeXtV2(_ConvNeXtBase):
         convolution. Defaults to 4.
     :type strides: int
     :param use_gamma: Whether blocks apply the learnable per-channel layer
-        scale. Defaults to True.
-    :type use_gamma: bool
+        scale. ``None`` (default) takes the block's own default, which is off:
+        the V2 paper removes LayerScale as redundant once GRN is applied. When
+        on, it starts at 1e-6 with no constraint and no penalty, as in V1. The
+        resolved bool is stored and written to the config.
+    :type use_gamma: Optional[bool]
     :param use_softorthonormal_regularizer: Whether blocks use soft orthonormal
         regularization. Defaults to False.
     :type use_softorthonormal_regularizer: bool

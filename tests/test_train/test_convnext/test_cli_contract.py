@@ -42,10 +42,11 @@ from .._cli_contract import (  # noqa: TID252 -- shared driver, one level up
 )
 
 
-def _rows(variant_probe: str) -> Tuple[Row, ...]:
+def _rows(variant_probe: str, use_gamma_probe: bool) -> Tuple[Row, ...]:
     """One row per declared flag. Probes differ from the defaults (cifar10 / None / None /
     k=7 / 100 epochs / ...) and from each other. ``variant_probe`` is the one
-    value that has to be a member of the family's own variant table."""
+    value that has to be a member of the family's own variant table. ``use_gamma_probe`` is
+    the opposite of the family's own layer-scale default (on for V1, off for V2)."""
     return (
         Row(("--dataset",), ("--dataset", "cifar100"), "dataset", "cifar100"),
         Row(("--validation-split",), ("--validation-split", "0.25"), "validation_split", 0.25),
@@ -62,8 +63,10 @@ def _rows(variant_probe: str) -> Tuple[Row, ...]:
         Row(("--drop-path-rate",), ("--drop-path-rate", "0.35"), "drop_path_rate", 0.35),
         Row(("--stochastic-mode",), ("--stochastic-mode", "gradient"), "stochastic_mode", "gradient"),
         Row(("--dropout-rate",), ("--dropout-rate", "0.15"), "dropout_rate", 0.15),
-        # BooleanOptionalAction: one row accounts for both spellings; default True.
-        Row(("--use-gamma", "--no-use-gamma"), ("--no-use-gamma",), "use_gamma", False),
+        # BooleanOptionalAction: one row accounts for both spellings. The default is the
+        # family's (V1 True, V2 False), so the probe is the other spelling.
+        Row(("--use-gamma", "--no-use-gamma"),
+            ("--use-gamma",) if use_gamma_probe else ("--no-use-gamma",), "use_gamma", use_gamma_probe),
         Row(("--epochs",), ("--epochs", "7"), "epochs", 7),
         Row(("--batch-size",), ("--batch-size", "96"), "batch_size", 96),
         Row(("--learning-rate",), ("--learning-rate", "1.5e-3"), "learning_rate", 1.5e-3),
@@ -90,7 +93,7 @@ def _rows(variant_probe: str) -> Tuple[Row, ...]:
     )
 
 
-def _contract(family: str, variant_probe: str) -> Contract:
+def _contract(family: str, variant_probe: str, use_gamma_probe: bool) -> Contract:
     return Contract(
         name=f"train.convnext.train_convnext_{family}",
         build_parser=lambda monkeypatch: common._build_parser(family),
@@ -98,12 +101,14 @@ def _contract(family: str, variant_probe: str) -> Contract:
             common.parse_arguments(None, family), family),
         # `--lr-schedule exponential` cannot carry the 3 warmup epochs the warmup row
         # sets, and each row runs alone against otherwise-default argv, so both stand.
-        modes=(Mode(id="plain", required_argv=(), rows=_rows(variant_probe)),),
+        modes=(Mode(id="plain", required_argv=(), rows=_rows(variant_probe, use_gamma_probe)),),
     )
 
 
 # The probe variants differ from the default "cifar10" and exist in each table.
-CONTRACTS: Tuple[Contract, ...] = (_contract("v1", "tiny"), _contract("v2", "atto"))
+CONTRACTS: Tuple[Contract, ...] = (
+    _contract("v1", "tiny", use_gamma_probe=False), _contract("v2", "atto", use_gamma_probe=True),
+)
 _CASES, _IDS = cases(CONTRACTS)
 
 
@@ -182,6 +187,20 @@ def test_parser_defaults_equal_the_config_defaults() -> None:
             assert getattr(config, name) == getattr(default, name), (family, name)
         assert config.model_family == family
         assert config.experiment_name.startswith(f"convnext_{family}_cifar10_cifar10_")
+
+
+def test_the_layer_scale_default_is_the_models_own_and_a_typed_value_wins() -> None:
+    """`--use-gamma` is left unset by the parser and resolved per family (V1 on, V2 off), so
+    a typed value is told apart from the parser's. The resolved bool is what `config.json` records."""
+    def resolved(family, *argv):
+        return common.config_from_args(common.parse_arguments(list(argv), family), family).use_gamma
+
+    assert resolved("v1") is True and resolved("v2") is False
+    assert resolved("v1", "--no-use-gamma") is False
+    assert resolved("v2", "--use-gamma") is True
+    assert resolved("v1", "--use-gamma") is True and resolved("v2", "--no-use-gamma") is False
+    assert common.ConvNeXtV1.default_use_gamma() is True
+    assert common.ConvNeXtV2.default_use_gamma() is False
 
 
 def test_per_dataset_regularization_defaults_are_filled_when_the_flag_is_absent() -> None:

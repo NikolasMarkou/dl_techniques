@@ -76,8 +76,9 @@ SHAPE = (64, 64, 1)
 DESCRIPTOR_DIM = 32
 BUILD_SEED = 0
 
-#: Measured 2026-08-21, one Adam step, ramp loss.
-GF_WEIGHTS = 55
+#: Measured 2026-08-21, one Adam step, ramp loss: 55. It is 52 since plan 98b866fb step 10c:
+#: the ConvNeXt V2 encoder no longer builds a layer scale (its paper removes it), one vector per block.
+GF_WEIGHTS = 52
 
 #: The two weights D-060 was about, as path SUFFIXES.
 #:

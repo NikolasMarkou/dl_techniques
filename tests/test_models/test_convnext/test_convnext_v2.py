@@ -24,6 +24,16 @@ from ..knob_sensitivity_oracle import (
 from tests.optimizer_state import build_optimizer_state
 
 
+def _layer_scale_weights(model: keras.Model):
+    """Return the model's per-block layer-scale variables (``.../gamma_scale/gamma``)."""
+    return [w for w in model.weights if w.path.endswith("gamma_scale/gamma")]
+
+
+def _grn_weights(model: keras.Model, name: str):
+    """Return the model's GRN variables called ``name`` (``gamma`` or ``beta``), one per block."""
+    return [w for w in model.weights if w.path.endswith(f"global_response_norm/{name}")]
+
+
 class TestConvNeXtV2:
     """Test suite for ConvNeXt V2 model implementation."""
 
@@ -79,7 +89,7 @@ class TestConvNeXtV2:
         assert model.kernel_regularizer is None
         assert model.dropout_rate == 0.0
         assert model.spatial_dropout_rate == 0.0
-        assert model.use_gamma is True
+        assert model.use_gamma is False  # ConvNeXt V2 removes the layer scale (arXiv 2301.00808)
         assert model.use_softorthonormal_regularizer is False
         assert model.include_top is True
 
@@ -389,6 +399,76 @@ class TestConvNeXtV2:
 
             outputs = model(cifar_sample_data)
             assert outputs.shape == (cifar_sample_data.shape[0], num_classes)
+
+    def test_no_block_has_a_layer_scale_unless_asked_for(self, num_classes, cifar_input_shape,
+                                                          cifar_sample_data):
+        """The paper removes LayerScale from V2: the default builds none, V1's default builds one."""
+        from dl_techniques.models.vision.convnext.convnext_v1 import ConvNeXtV1
+
+        model = ConvNeXtV2(num_classes=num_classes, depths=[1, 1, 2, 1], dims=[32, 64, 128, 256],
+                           input_shape=cifar_input_shape)
+        model(cifar_sample_data)
+
+        assert model.use_gamma is False
+        assert model.get_config()["use_gamma"] is False
+        assert _layer_scale_weights(model) == []
+        assert ConvNeXtV2.default_use_gamma() is False
+        assert ConvNeXtV1.default_use_gamma() is True
+
+    def test_a_requested_layer_scale_takes_the_papers_values(self, num_classes, cifar_input_shape,
+                                                               cifar_sample_data):
+        """`use_gamma=True`: 1e-6 in every block, unconstrained, and no loss term of its own."""
+        model = ConvNeXtV2(num_classes=num_classes, depths=[1, 1, 2, 1], dims=[32, 64, 128, 256],
+                           use_gamma=True, input_shape=cifar_input_shape)
+        model(cifar_sample_data)
+
+        scales = _layer_scale_weights(model)
+        assert len(scales) == 5
+        for w in scales:
+            assert np.all(keras.ops.convert_to_numpy(w) == np.float32(1e-6)), w.path
+            assert w.constraint is None, w.path
+        assert model.losses == []
+
+    def test_every_grn_starts_as_the_identity(self, num_classes, cifar_input_shape, cifar_sample_data):
+        """GRN gamma and beta are zeros in every block (reference `models/utils.py` GRN)."""
+        model = ConvNeXtV2(num_classes=num_classes, depths=[1, 1, 2, 1], dims=[32, 64, 128, 256],
+                           input_shape=cifar_input_shape)
+        model(cifar_sample_data)
+
+        gammas, betas = _grn_weights(model, "gamma"), _grn_weights(model, "beta")
+        assert len(gammas) == 5 and len(betas) == 5
+        for w in gammas + betas:
+            assert np.all(keras.ops.convert_to_numpy(w) == 0.0), w.path
+
+    def test_a_model_saved_with_a_layer_scale_rebuilds_it_and_predicts_exactly(
+            self, num_classes, cifar_input_shape, cifar_sample_data, tmp_path):
+        """A file written when the default was `use_gamma=True` records it in its config.
+
+        The config literal below is what the old default wrote. Live scales and live GRN gammas
+        (away from every init) come back unchanged, so equal outputs cannot be a vacuous match
+        of two near-identity graphs.
+        """
+        old_config = ConvNeXtV2(num_classes=num_classes, depths=[1, 1, 2, 1], dims=[32, 64, 128, 256],
+                                input_shape=cifar_input_shape).get_config()
+        old_config["use_gamma"] = True
+        model = ConvNeXtV2.from_config(old_config)
+        model(cifar_sample_data)
+        rng = np.random.default_rng(5)
+        for w in _layer_scale_weights(model) + _grn_weights(model, "gamma"):
+            w.assign(rng.uniform(0.2, 1.5, size=w.shape).astype("float32"))
+        expected = keras.ops.convert_to_numpy(model(cifar_sample_data, training=False))
+
+        path = str(tmp_path / "old_v2.keras")
+        model.save(path)
+        reloaded = keras.models.load_model(
+            path, custom_objects={"ConvNeXtV2": ConvNeXtV2, "ConvNextV2Block": ConvNextV2Block}
+        )
+
+        assert reloaded.use_gamma is True
+        assert len(_layer_scale_weights(reloaded)) == 5
+        assert np.array_equal(
+            keras.ops.convert_to_numpy(reloaded(cifar_sample_data, training=False)), expected
+        )
 
     def test_regularization_options(self, num_classes, cifar_input_shape):
         """Test different regularization options."""

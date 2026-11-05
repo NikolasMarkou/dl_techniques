@@ -82,7 +82,7 @@ def test_block_minimal_initialization(minimal_params: Dict[str, Any]) -> None:
     assert block.use_bias is True
     assert block.dropout_rate == 0.0
     assert block.spatial_dropout_rate == 0.0
-    assert block.use_gamma is True
+    assert block.use_gamma is False
     assert block.use_softorthonormal_regularizer is False
 
 
@@ -491,10 +491,6 @@ def test_constants() -> None:
     assert ConvNextV2Block.LAYERNORM_EPSILON == 1e-6
     assert ConvNextV2Block.GRN_EPSILON == 1e-6
     assert ConvNextV2Block.POINTWISE_KERNEL_SIZE == 1
-    assert ConvNextV2Block.GAMMA_L2_REGULARIZATION == 1e-5
-    assert ConvNextV2Block.GAMMA_INITIAL_VALUE == 1.0
-    assert ConvNextV2Block.GAMMA_MIN_VALUE == 1e-6
-    assert ConvNextV2Block.GAMMA_MAX_VALUE == 1.0
 
 
 def test_global_response_normalization_feature(sample_inputs: tf.Tensor) -> None:
@@ -537,17 +533,209 @@ def test_grn_vs_no_grn_difference(sample_inputs: tf.Tensor) -> None:
 
     # Outputs should not be identical to inputs (transformation occurred)
     assert not np.allclose(output.numpy(), sample_inputs.numpy())
-    """Test that all constants are properly defined."""
-    assert ConvNextV2Block.EXPANSION_FACTOR == 4
-    assert ConvNextV2Block.INITIALIZER_MEAN == 0.0
-    assert ConvNextV2Block.INITIALIZER_STDDEV == 0.02
-    assert ConvNextV2Block.LAYERNORM_EPSILON == 1e-6
-    assert ConvNextV2Block.GRN_EPSILON == 1e-6
-    assert ConvNextV2Block.POINTWISE_KERNEL_SIZE == 1
-    assert ConvNextV2Block.GAMMA_L2_REGULARIZATION == 1e-5
-    assert ConvNextV2Block.GAMMA_INITIAL_VALUE == 1.0
-    assert ConvNextV2Block.GAMMA_MIN_VALUE == 1e-6
-    assert ConvNextV2Block.GAMMA_MAX_VALUE == 1.0
+
+
+
+# ConvNeXt V2 (arXiv 2301.00808, "ConvNeXt V2 / Impact of GRN"): "LayerScale becomes unnecessary when
+# GRN is applied and can be removed". facebookresearch/ConvNeXt-V2 models/convnextv2.py Block has no
+# gamma, and models/utils.py GRN starts `gamma` and `beta` at zeros, so GRN is the identity at
+# initialization. Plan plan-2026-11-03T221936-98b866fb step 10c (D-036). The optional layer scale
+# (`use_gamma=True`) takes the ConvNeXt V1 values (D-031 item 2): 1e-6, no cap, no penalty.
+PAPER_LAYER_SCALE = 1e-6
+
+
+def _grn_weights(block: ConvNextV2Block):
+    """Return the built GRN's (gamma, beta) as float32 arrays."""
+    return (keras.ops.convert_to_numpy(block.grn.gamma),
+            keras.ops.convert_to_numpy(block.grn.beta))
+
+
+def test_a_block_has_no_layer_scale_by_default() -> None:
+    """The default builds no `LayerScale`, no `gamma_scale` weight, and says so in its config."""
+    from dl_techniques.layers.regularization.layer_scale import LayerScale
+
+    block = ConvNextV2Block(kernel_size=7, filters=16)
+    block.build((None, 8, 8, 16))
+
+    assert block.use_gamma is False
+    assert block.get_config()["use_gamma"] is False
+    assert not any(isinstance(layer, LayerScale) for layer in block._flatten_layers())
+    assert [w.path for w in block.weights if "gamma_scale" in w.path] == []
+
+
+def test_the_grn_gamma_and_beta_start_at_zero() -> None:
+    """The block builds its GRN the way the reference does: gamma zeros, beta zeros."""
+    block = ConvNextV2Block(kernel_size=7, filters=16)
+    block.build((None, 8, 8, 16))
+    gamma, beta = _grn_weights(block)
+
+    assert gamma.shape == (1, 1, 1, 64) and beta.shape == (1, 1, 1, 64)
+    assert np.all(gamma == 0.0)
+    assert np.all(beta == 0.0)
+
+
+def test_a_fresh_grn_returns_its_input_exactly() -> None:
+    """With gamma and beta at zero, GRN adds `0 * (x * norm) + 0` to `x`: identical, atol 0.
+
+    The liveness arm sets gamma away from zero and the same call stops being the identity, so
+    the equality above cannot be a probe that cannot see the GRN term.
+    """
+    block = ConvNextV2Block(kernel_size=7, filters=16)
+    block.build((None, 8, 8, 16))
+    rng = np.random.default_rng(11)
+    x = (rng.normal(size=(2, 8, 8, 64)) * 5.0).astype("float32")
+
+    fresh = keras.ops.convert_to_numpy(block.grn(x))
+    assert np.array_equal(fresh, x)
+
+    block.grn.gamma.assign(np.full((1, 1, 1, 64), 0.5, dtype="float32"))
+    live = keras.ops.convert_to_numpy(block.grn(x))
+    assert not np.allclose(live, x, rtol=0.0, atol=1e-3)
+
+
+def test_the_grn_layer_default_is_left_alone() -> None:
+    """D-031 item 1: the zero init is the block's choice; the layer's own default stays ones."""
+    from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization
+
+    layer = GlobalResponseNormalization()
+    layer.build((None, 4, 4, 8))
+
+    assert np.all(keras.ops.convert_to_numpy(layer.gamma) == 1.0)
+
+
+def test_a_live_grn_gamma_keeps_the_block_degree_one_homogeneous_and_a_live_beta_does_not() -> None:
+    """Bias-free property of the zeros init (I8): `GRN(a * x) == a * GRN(x)` at beta = 0.
+
+    Fresh GRN is the identity, which is homogeneous for any reason, so the check sets gamma live.
+    Liveness arm: a non-zero beta is an additive offset, and the same probe reads a large gap.
+    """
+    block = ConvNextV2Block(kernel_size=7, filters=16)
+    block.build((None, 8, 8, 16))
+    rng = np.random.default_rng(12)
+    x = rng.normal(size=(2, 8, 8, 64)).astype("float32")
+    block.grn.gamma.assign(rng.uniform(0.3, 1.0, size=(1, 1, 1, 64)).astype("float32"))
+
+    def relative_gap(alpha: float) -> float:
+        fx = keras.ops.convert_to_numpy(block.grn(x))
+        f_ax = keras.ops.convert_to_numpy(block.grn(alpha * x))
+        return float(np.max(np.abs(f_ax - alpha * fx)) / np.max(np.abs(alpha * fx)))
+
+    assert max(relative_gap(0.5), relative_gap(3.0)) < 1e-4
+
+    block.grn.beta.assign(np.full((1, 1, 1, 64), 0.3, dtype="float32"))
+    assert max(relative_gap(0.5), relative_gap(3.0)) > 1e-2
+
+
+def test_the_optional_layer_scale_takes_the_papers_values() -> None:
+    """`use_gamma=True` starts at 1e-6 with no constraint and no penalty (V1's values, D-031)."""
+    block = ConvNextV2Block(kernel_size=7, filters=16, use_gamma=True)
+    block.build((None, 8, 8, 16))
+
+    assert block.gamma_initial_value == PAPER_LAYER_SCALE
+    assert block.get_config()["gamma_initial_value"] == PAPER_LAYER_SCALE
+    scale = keras.ops.convert_to_numpy(block.gamma.gamma)
+    assert scale.shape == (16,) and np.all(scale == np.float32(PAPER_LAYER_SCALE))
+    assert block.gamma.constraint is None
+    assert block.gamma.regularizer is None
+    assert block.gamma.gamma.constraint is None
+    assert block.losses == []
+
+
+def test_an_explicit_layer_scale_value_is_still_honoured() -> None:
+    block = ConvNextV2Block(kernel_size=7, filters=16, use_gamma=True, gamma_initial_value=0.25)
+    block.build((None, 8, 8, 16))
+
+    assert np.all(keras.ops.convert_to_numpy(block.gamma.gamma) == np.float32(0.25))
+
+
+@pytest.mark.parametrize(
+    "removed", ["GAMMA_L2_REGULARIZATION", "GAMMA_INITIAL_VALUE", "GAMMA_MIN_VALUE", "GAMMA_MAX_VALUE"]
+)
+def test_the_old_layer_scale_constants_are_gone(removed: str) -> None:
+    """Nothing keeps the cap, the floor, the penalty or the old init reachable (no shim)."""
+    assert not hasattr(ConvNextV2Block, removed)
+
+
+# What a V2 block saved before step 10c wrote into its archive: every constructor argument at the
+# value the old default had (layer scale on, started at 1.0).
+OLD_ARCHIVE_BLOCK_CONFIG = {
+    "kernel_size": 7,
+    "filters": 8,
+    "activation": "gelu",
+    "kernel_regularizer": None,
+    "use_bias": True,
+    "dropout_rate": 0.0,
+    "spatial_dropout_rate": 0.0,
+    "use_gamma": True,
+    "gamma_initial_value": 1.0,
+    "use_softorthonormal_regularizer": False,
+    "depthwise_initializer": None,
+    "depthwise_regularizer": None,
+    "normalization_type": "layernorm",
+}
+
+
+def _old_archive_model(tmp_path):
+    """Build, fill with non-initial weights and save a one-block model from the old config."""
+    rng = np.random.default_rng(3)
+    inputs = keras.Input(shape=(8, 8, 8))
+    block = ConvNextV2Block.from_config(dict(OLD_ARCHIVE_BLOCK_CONFIG, name="blk"))
+    model = keras.Model(inputs, block(inputs))
+    for variable in model.weights:
+        variable.assign(rng.normal(scale=0.3, size=variable.shape).astype("float32"))
+    batch = rng.normal(size=(2, 8, 8, 8)).astype("float32")
+    expected = keras.ops.convert_to_numpy(model(batch, training=False))
+    path = str(tmp_path / "old.keras")
+    model.save(path)
+    return path, batch, expected
+
+
+def test_an_old_archive_reloads_its_own_graph_and_predicts_exactly(tmp_path) -> None:
+    """The archive's config records `use_gamma: true` and `gamma_initial_value: 1.0`: it rebuilds
+    that graph, restores the layer scale and the GRN gamma (non-zero, away from both inits), and
+    predicts the same numbers. The default changed; a recorded value still wins."""
+    path, batch, expected = _old_archive_model(tmp_path)
+    reloaded = keras.models.load_model(path)
+    block = reloaded.get_layer("blk")
+
+    assert block.use_gamma is True and block.gamma_initial_value == 1.0
+    assert block.gamma.constraint is None
+    assert not np.allclose(keras.ops.convert_to_numpy(block.grn.gamma), 0.0)
+    assert np.array_equal(keras.ops.convert_to_numpy(reloaded(batch, training=False)), expected)
+
+
+def test_an_archive_that_needs_the_layer_scale_but_does_not_record_it_is_refused_by_layer_name(
+        tmp_path) -> None:
+    """A model that depended on the old default `use_gamma=True` without recording it would
+    rebuild without a layer scale. Its weight file still holds one: the load fails naming the
+    layer, and nothing falls back to the old default (I9, I10)."""
+    import json
+    import zipfile
+
+    path, _, _ = _old_archive_model(tmp_path)
+    stripped = str(tmp_path / "stripped.keras")
+    with zipfile.ZipFile(path) as source, zipfile.ZipFile(stripped, "w") as target:
+        for name in source.namelist():
+            data = source.read(name)
+            if name == "config.json":
+                config = json.loads(data)
+
+                def drop(node):
+                    if isinstance(node, dict):
+                        if node.get("class_name", "").endswith("ConvNextV2Block"):
+                            node["config"]["use_gamma"] = False
+                        for value in node.values():
+                            drop(value)
+                    elif isinstance(node, list):
+                        for value in node:
+                            drop(value)
+
+                drop(config)
+                data = json.dumps(config)
+            target.writestr(name, data)
+
+    with pytest.raises(ValueError, match="no_gamma"):
+        keras.models.load_model(stripped)
 
 
 class TestDepthwiseInitRegularizer:
@@ -739,8 +927,8 @@ class TestNormalizationTypeOption:
     untouched by this param. Covers: build/forward, ``get_config`` round-trip,
     byte-identical default (LayerNormalization named "layer_norm"), invalid-value
     ValueError, INFERENCE homogeneity of a LeakyReLU(0.1) + use_bias=False
-    batchnorm block (V2 GRN has beta=0 / gamma=1 at init -> stays homogeneous),
-    and a ``.keras`` round-trip. All homogeneity / round-trip checks run at
+    batchnorm block (the GRN is set live first: it starts at gamma=0, beta=0, the
+    identity, which would make the probe vacuous), and a ``.keras`` round-trip. All homogeneity / round-trip checks run at
     ``training=False`` on CPU.
     """
 
@@ -795,6 +983,8 @@ class TestNormalizationTypeOption:
         )
         shape = (4, 8, 8, self.CHANNELS)
         rng = np.random.default_rng(4)
+        # A fresh GRN is the identity (gamma 0): a live gamma makes the probe see the GRN term.
+        block.grn.gamma.assign(np.full(block.grn.gamma.shape, 0.5, dtype="float32"))
         # Populate running_var so the inference statistic is data-meaningful.
         for _ in range(20):
             block((rng.standard_normal(shape) * 2.0).astype("float32"), training=True)

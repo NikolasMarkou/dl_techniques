@@ -323,7 +323,10 @@ def _apply_residual_convnext_block(
         default is the ConvNeXt paper's 1e-6), small enough for a near-identity
         prior and large enough to pass gradient from step 0, since the gradient
         into the branch weights is proportional to gamma. ``ConvNextV1Block`` puts no
-        constraint and no penalty on gamma (D-033 of plan 98b866fb).
+        constraint and no penalty on gamma (D-033 of plan 98b866fb). That is the V1
+        block. A ``ConvNextV2Block`` builds no layer scale by default (its paper removes
+        it, D-036), so the 1e-4 reaches no weight there and the V2 branch starts at full
+        scale with an identity GRN.
     """
     residual = x
     # DECISION plan-2026-08-11T201945-91938f65/D-002 + D-004: the block is the branch
@@ -713,7 +716,13 @@ def create_convunext(
        ``use_bias=True``.
     3. ``GlobalResponseNormalization``'s ``use_beta`` is not threaded, so a
        trainable additive beta exists in every V2 block and in the
-       ``'global_response_norm'`` stem on both arms (D-GAP-1).
+       ``'global_response_norm'`` stem on both arms (D-GAP-1). Since the V2 block
+       lost its layer scale (D-036 of plan 98b866fb) nothing damps that beta's
+       gradient any more: on a batchnorm V2 denoiser it leaves zero after one SGD
+       step, and a 40-step Adam run read a homogeneity error of 1e-1 against 2e-3
+       before (``scratch_step10c/homogeneity_*.json``). With beta held at zero the
+       same model reads 3e-6 to 4e-6. A strictly homogeneous bias-free model needs
+       ``convnext_version='v1'``.
 
     Guardrails, from :func:`_validate_bias_free_arguments`. On the bias-off arm
     ``final_activation``, and ``gabor_activation`` when ``use_gabor_stem=True``,

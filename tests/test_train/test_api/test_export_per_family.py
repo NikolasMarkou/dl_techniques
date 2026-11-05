@@ -87,6 +87,22 @@ def batch():
     return np.random.default_rng(0).random((3, *SHAPE)).astype(np.float32)
 
 
+def wake_the_branches(net):
+    """Set the ConvNeXt layer scales and GRN gammas live, the way the CliffordNet rows use ``layer_scale_init=1.0``.
+
+    At their initial values the branches are invisible: V1's layer scale starts at the paper's 1e-6
+    (a live drop path moved the logits by 2e-7, plan 98b866fb step 10b) and V2's GRN gamma starts at
+    zero, so GRN is the identity (step 10c). A drop path, an export or a runtime that got the branch
+    wrong could not show on such a model. The reference and the artifact are both made from the
+    woken model.
+    """
+    for w in net.weights:
+        if w.path.endswith("gamma_scale/gamma"):
+            w.assign(keras.ops.ones_like(w))
+        elif w.path.endswith("global_response_norm/gamma"):
+            w.assign(0.5 * keras.ops.ones_like(w))
+
+
 class Collected(logging.Handler):
     """Collects the library logger's records while an export runs."""
 
@@ -111,6 +127,8 @@ class Workshop:
         if family not in self.models:
             net = FAMILIES[family][0]()
             net(np.zeros((1, *SHAPE), np.float32))
+            if family in ("convnext_v1", "convnext_v2"):
+                wake_the_branches(net)
             self.models[family] = net
         return self.models[family]
 

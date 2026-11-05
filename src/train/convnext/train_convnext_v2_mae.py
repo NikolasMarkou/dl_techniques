@@ -27,7 +27,7 @@ def create_convnext_encoder(
     encoder = create_convnext_v2(
         variant=variant, num_classes=0, input_shape=input_shape,
         include_top=False, strides=strides, kernel_size=kernel_size,
-        drop_path_rate=0.1, dropout_rate=0.0, use_gamma=True,
+        drop_path_rate=0.1, dropout_rate=0.0,
         stochastic_mode=stochastic_mode,
         use_softorthonormal_regularizer=True
     )

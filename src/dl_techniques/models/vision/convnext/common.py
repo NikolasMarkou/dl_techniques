@@ -16,13 +16,17 @@ docstring and sets two class attributes:
   ``activation``, ``kernel_regularizer``, ``use_bias``, ``dropout_rate``,
   ``spatial_dropout_rate``, ``use_gamma``, ``use_softorthonormal_regularizer`` and ``name``, and
   returns ``F(x)`` (the model adds the residual and the drop path). A leaf without one raises
-  ``TypeError`` naming the attribute when it is constructed.
+  ``TypeError`` naming the attribute when it is constructed. The block's own ``use_gamma``
+  default is the model's: ``use_gamma=None`` resolves to it (:meth:`_ConvNeXtBase.default_use_gamma`),
+  on for V1 and off for V2, whose paper removes the layer scale. The model stores and reports the
+  resolved bool, so a saved config never depends on a default.
 
 The base is never built itself. Its callers are ``ConvNeXtV1`` and ``ConvNeXtV2``; the
 registration key, the class docstring and the ``create_*`` factory stay in the leaf file.
 """
 
 import copy
+import inspect
 import keras
 from typing import List, Optional, Union, Tuple, Dict, Any
 
@@ -122,7 +126,7 @@ class _ConvNeXtBase(keras.Model):
             dropout_rate: float = 0.0,
             spatial_dropout_rate: float = 0.0,
             strides: int = 4,
-            use_gamma: bool = True,
+            use_gamma: Optional[bool] = None,
             use_softorthonormal_regularizer: bool = False,
             include_top: bool = True,
             input_shape: Optional[Tuple[int, ...]] = (None, None, 3),
@@ -135,6 +139,13 @@ class _ConvNeXtBase(keras.Model):
             raise TypeError(
                 f"{type(self).__name__} must set BLOCK_CLASS to its block layer class"
             )
+
+        # DECISION plan-2026-11-03T221936-98b866fb/D-036: `None` takes the BLOCK's own default
+        # (V1 on, V2 off) and the resolved bool is what the model stores and `get_config` writes.
+        # Do NOT write `use_gamma: bool = True` back here: it gave ConvNeXt V2 a layer scale its
+        # paper removes, and a stored `None` would make a saved model depend on a default.
+        if use_gamma is None:
+            use_gamma = self.default_use_gamma()
 
         include_top = coerce_include_top(include_top)
         if include_top and num_classes <= 0:
@@ -216,6 +227,22 @@ class _ConvNeXtBase(keras.Model):
             f"Created {type(self).__name__} for input {input_shape} "
             f"with {sum(depths)} blocks"
         )
+
+    @classmethod
+    def default_use_gamma(cls) -> bool:
+        """Return the layer-scale default of this model: its block's own ``use_gamma`` default.
+
+        Interface contract. No parameters. Returns ``True`` for a block that builds a layer scale
+        unless told not to (ConvNeXt V1) and ``False`` for one that builds it only on request
+        (ConvNeXt V2). The trainers read it so that their ``--use-gamma`` default is the model's,
+        not a second copy of the fact.
+
+        :return: The default of the ``use_gamma`` argument of ``BLOCK_CLASS``.
+        :raises TypeError: If the class sets no ``BLOCK_CLASS``.
+        """
+        if cls.BLOCK_CLASS is None:
+            raise TypeError(f"{cls.__name__} must set BLOCK_CLASS to its block layer class")
+        return inspect.signature(cls.BLOCK_CLASS.__init__).parameters["use_gamma"].default
 
     def _build_stem(self) -> None:
         """Build the patchify stem via :class:`ConvStem`.

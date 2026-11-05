@@ -192,16 +192,21 @@ class ModelFamily:
         label: Human name used in logs and titles.
         factory: ``create_convnext_v1`` / ``create_convnext_v2``.
         variants: The keys of the class's ``MODEL_VARIANTS`` table.
+        use_gamma: The family's layer-scale default, read from the model class (on for V1,
+            off for V2, whose paper removes the layer scale as redundant once GRN is applied).
     """
 
     label: str
     factory: Callable[..., keras.Model]
     variants: Tuple[str, ...]
+    use_gamma: bool
 
 
 MODEL_FAMILIES: Dict[str, ModelFamily] = {
-    "v1": ModelFamily("ConvNeXt V1", create_convnext_v1, tuple(ConvNeXtV1.MODEL_VARIANTS)),
-    "v2": ModelFamily("ConvNeXt V2", create_convnext_v2, tuple(ConvNeXtV2.MODEL_VARIANTS)),
+    "v1": ModelFamily("ConvNeXt V1", create_convnext_v1, tuple(ConvNeXtV1.MODEL_VARIANTS),
+                      ConvNeXtV1.default_use_gamma()),
+    "v2": ModelFamily("ConvNeXt V2", create_convnext_v2, tuple(ConvNeXtV2.MODEL_VARIANTS),
+                      ConvNeXtV2.default_use_gamma()),
 }
 
 
@@ -234,7 +239,10 @@ class TrainingConfig:
     drop_path_rate: Optional[float] = None
     stochastic_mode: str = "depth"
     dropout_rate: Optional[float] = None
-    use_gamma: bool = True
+    # None -> the family's own default (V1 on, V2 off), resolved in ``__post_init__`` so that
+    # ``config.json`` records the bool that was used. Do NOT default this to True: the V2 paper
+    # removes the layer scale (plan 98b866fb step 10c, D-036).
+    use_gamma: Optional[bool] = None
 
     # Data
     dataset: str = "cifar10"
@@ -286,6 +294,8 @@ class TrainingConfig:
             raise ValueError(f"dataset must be one of {DATASETS}, got {self.dataset!r}")
         if self.variant is None:
             self.variant = DEFAULT_VARIANTS[self.dataset]
+        if self.use_gamma is None:
+            self.use_gamma = family.use_gamma
         if self.strides is None:
             self.strides = DEFAULT_STRIDES[self.dataset]
         if self.dataset == IMAGENET:
@@ -447,7 +457,9 @@ def _build_parser(model_family: str) -> argparse.ArgumentParser:
                             "and cifar10, 0.2 for cifar100, 0 for imagenet).")
     model.add_argument("--use-gamma", action=argparse.BooleanOptionalAction,
                        default=defaults.use_gamma,
-                       help="Learnable per-channel layer scale in each block.")
+                       help="Learnable per-channel layer scale in each block. The default is the "
+                            "model's own: on for V1 (starts at 1e-6), off for V2, whose paper "
+                            "removes it once GRN is applied.")
 
     train = parser.add_argument_group("training")
     train.add_argument("--epochs", type=int, default=defaults.epochs,

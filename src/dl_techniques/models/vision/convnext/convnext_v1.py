@@ -202,8 +202,9 @@ class ConvNeXtV1(_ConvNeXtBase):
     :type strides: int
     :param use_gamma: Whether blocks apply the learnable per-channel layer
         scale (starts at 1e-6 as in the ConvNeXt paper, no constraint, no
-        penalty). Defaults to True.
-    :type use_gamma: bool
+        penalty). ``None`` (default) takes the block's own default, which is
+        on; the resolved bool is stored and written to the config.
+    :type use_gamma: Optional[bool]
     :param use_softorthonormal_regularizer: Whether blocks use soft orthonormal
         regularization. Defaults to False.
     :type use_softorthonormal_regularizer: bool

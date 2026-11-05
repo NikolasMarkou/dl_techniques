@@ -120,7 +120,8 @@ class GlobalResponseNormalization(keras.layers.Layer):
     :param gamma_initializer: Initializer for the ``gamma`` scale weight.
         Defaults to ``'ones'``. The ConvNeXt V2 paper initializes gamma to zero,
         which makes GRN an identity at initialization; pass ``'zeros'`` to
-        reproduce that.
+        reproduce that. ``ConvNextV2Block`` does (D-036 of plan 98b866fb), so the
+        block follows the paper while this layer's default is unchanged.
     :type gamma_initializer: Union[str, keras.initializers.Initializer]
     :param beta_initializer: Initializer for the ``beta`` offset weight. Defaults
         to ``'zeros'``. Ignored when ``use_beta=False``.

@@ -187,16 +187,21 @@ class TestTheHomogeneityClaimTheWarningIsAbout:
 
     @staticmethod
     def _wake_the_residual_branches(model, seed=1):
-        """MANDATORY: an untrained ConvNeXt V2 cannot answer this question.
+        """MANDATORY for a model whose residual branch is damped at initialization.
 
-        MEASURED over five seeds: at initialization the LAYERNORM stack scores
-        1.2e-06 .. 2.8e-06 -- the float32 floor, i.e. it looks perfectly
-        degree-1 -- because ConvNeXt V2's GRN ``gamma`` is ZERO-initialized, so
-        the residual branch that contains the LayerNorm contributes nothing and
-        the model is its skip path. The very defect under test is invisible at
-        init. After perturbing the kernels and gammas the same stack scores
-        4.3e-01 .. 5.5e-01 while batchnorm stays at 1.2e-06 .. 2.6e-06: a
-        ~250,000x separation that only exists once the branch is awake.
+        MEASURED over five seeds, when this file was written: at initialization the
+        LAYERNORM stack scored 1.2e-06 .. 2.8e-06 -- the float32 floor, i.e. it looked
+        perfectly degree-1 -- because the branch that contains the LayerNorm contributed
+        almost nothing and the model was its skip path (the builder's layer scale of 1e-4
+        times a V2 block). The very defect under test was invisible at init. After
+        perturbing the kernels and gammas the same stack scored 4.3e-01 .. 5.5e-01 while
+        batchnorm stayed at 1.2e-06 .. 2.6e-06: a ~250,000x separation that only exists
+        once the branch is awake.
+
+        Since plan 98b866fb step 10c a V2 block has NO layer scale (the paper removes it),
+        so its branch is awake at initialization even though its GRN gamma is zero (an
+        identity, not a damper). The trap now belongs to the V1 arm (layer scale 1e-4);
+        both facts are pinned below.
         """
         rng = np.random.RandomState(seed)
         for var in model.weights:
@@ -223,13 +228,27 @@ class TestTheHomogeneityClaimTheWarningIsAbout:
             self._woken(block_normalization="batchnorm")) < 1e-4
 
     @pytest.mark.parametrize("norm", ["layernorm", "batchnorm"])
-    def test_at_initialization_the_two_are_INDISTINGUISHABLE(self, norm):
+    def test_at_initialization_the_two_are_INDISTINGUISHABLE_on_the_v1_arm(self, norm):
         """The trap, pinned so nobody re-derives the wrong conclusion.
 
-        Without the perturbation both stacks sit at the float32 floor and a
-        naive probe concludes the default is fine.
+        Without the perturbation both V1 stacks (layer scale 1e-4) sit at the float32
+        floor and a naive probe concludes the default is fine.
         """
-        assert self._homogeneity_error(self._raw(block_normalization=norm)) < 1e-4
+        assert self._homogeneity_error(
+            self._raw(block_normalization=norm, convnext_version="v1")) < 1e-4
+
+    def test_at_initialization_a_v2_layernorm_stack_is_already_not_degree_one(self):
+        """Step 10c: the V2 branch has no layer scale to hide behind.
+
+        Measured: 7.4e-03 for layernorm against 3.5e-07 for batchnorm, on an untouched model
+        (GRN gamma and beta are zero, so the GRN is the identity and the branch is a plain
+        inverted MLP at full scale). The same probe read 1.2e-06 .. 2.8e-06 for both before
+        the layer scale was removed.
+        """
+        layernorm = self._homogeneity_error(self._raw(block_normalization="layernorm"))
+        batchnorm = self._homogeneity_error(self._raw(block_normalization="batchnorm"))
+        assert layernorm > 1e-3
+        assert batchnorm < 1e-4
 
     def test_the_activation_is_the_OTHER_precondition(self):
         """Guard against reading the norm result as the whole story.

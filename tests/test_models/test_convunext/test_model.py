@@ -1324,16 +1324,19 @@ class TestResidualAndDropPathWiring:
     def _zero_every_branch(model: keras.Model) -> int:
         """Force every ConvNeXt residual branch to output exactly zero.
 
-        Each block ends in ``gamma * x`` (``LayerScale`` named
-        ``gamma_scale``), so zeroing that variable annihilates the branch while
-        leaving the rest of the graph -- stem, junctions, channel adjusts,
-        upsamples, final projection -- untouched. Returns the count zeroed.
+        Every block's branch ends in its ``reduce_conv`` 1x1 convolution (V1 then
+        multiplies by the layer scale ``gamma_scale``; a V2 block has none by
+        default), so zeroing that kernel and bias annihilates the branch whatever
+        the version while leaving the rest of the graph -- stem, junctions, channel
+        adjusts, upsamples, final projection -- untouched. Returns the number of
+        blocks zeroed.
         """
         zeroed = 0
         for w in model.weights:
-            if 'gamma_scale' in w.path:
-                w.assign(keras.ops.zeros_like(w))
+            if w.path.endswith('reduce_conv/kernel'):
                 zeroed += 1
+            if w.path.endswith('reduce_conv/kernel') or w.path.endswith('reduce_conv/bias'):
+                w.assign(keras.ops.zeros_like(w))
         return zeroed
 
     def test_residual_skip_is_present_at_every_block(self) -> None:
@@ -1355,7 +1358,7 @@ class TestResidualAndDropPathWiring:
 
         zeroed = self._zero_every_branch(model)
         # depth=3, bpl=2 -> 6 encoder + 2 bottleneck + 6 decoder blocks.
-        assert zeroed == 14, f'expected 14 gamma_scale weights, zeroed {zeroed}'
+        assert zeroed == 14, f'expected 14 reduce_conv kernels, zeroed {zeroed}'
 
         y1 = keras.ops.convert_to_numpy(model(x1, training=False))
         y2 = keras.ops.convert_to_numpy(model(x2, training=False))
@@ -2092,18 +2095,32 @@ class TestEdgeCases:
             f'kernel_regularizer added no loss term: {len(model.losses)} vs '
             f'{len(baseline.losses)} without it')
 
-    def test_no_regularizer_leaves_only_the_blocks_own_gamma_penalty(self) -> None:
+    def test_no_regularizer_leaves_no_loss_term_at_all(self) -> None:
         """CONTROL for the test above, and a pin on what the baseline IS.
 
-        The default build uses V2 blocks, which still carry their own gamma L2 until step
-        10c of plan 98b866fb; the V1 blocks carry none (next test).
+        Neither block adds a loss of its own any more (step 10b removed V1's gamma L2, step
+        10c V2's), so a build with no regularizer has an empty ``losses``.
         """
         model = create_convunext(**_cfg(convnext_version='v2'))
         assert model.get_layer(name='final_output').kernel_regularizer is None
         assert model.get_layer(
             name='encoder_level_0_stem').kernel_regularizer is None
-        # One per ConvNeXt block (their gamma L2 is not configurable here).
-        assert len(model.losses) == len(_convnext_block_layers(model))
+        assert model.losses == []
+
+    def test_the_v2_blocks_have_no_layer_scale_and_start_with_an_identity_grn(self) -> None:
+        """The default arm (V2): the paper's block, no LayerScale, GRN gamma and beta at zero.
+
+        ConvUNext still passes ``gamma_initial_value=1e-4`` to every block, but a V2 block
+        builds a layer scale only when asked, so that value has no weight to start.
+        """
+        model = create_convunext(**_cfg(convnext_version='v2'))
+        blocks = _convnext_block_layers(model)
+        assert blocks and all(isinstance(block, ConvNextV2Block) for block in blocks)
+        assert not [w.path for w in model.weights if 'gamma_scale' in w.path]
+        for block in blocks:
+            assert block.use_gamma is False
+            assert np.all(keras.ops.convert_to_numpy(block.grn.gamma) == 0.0)
+            assert np.all(keras.ops.convert_to_numpy(block.grn.beta) == 0.0)
 
     def test_the_v1_blocks_add_no_gamma_penalty_and_no_constraint(self) -> None:
         """V1 blocks: no loss term of their own, an unconstrained gamma that starts at 1e-4.

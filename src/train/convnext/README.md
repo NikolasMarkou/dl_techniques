@@ -101,7 +101,7 @@ it). Both wrappers have the same flags; only `--variant` differs.
 | `--drop-path-rate` | per dataset | Maximum stochastic-depth rate. `0.1` for mnist, cifar10 and imagenet, `0.2` for cifar100. |
 | `--stochastic-mode {depth,gradient}` | `depth` | `depth` = `StochasticDepth`, `gradient` = `StochasticGradient` (see below). |
 | `--dropout-rate` | per dataset | Dropout inside each block. `0.1` for mnist and cifar10, `0.2` for cifar100, `0` for imagenet. |
-| `--use-gamma` / `--no-use-gamma` | on | Learnable per-channel layer scale in each block. The V1 block starts it at `1e-6` (the paper's value) with no cap and no penalty; see "Layer scale". |
+| `--use-gamma` / `--no-use-gamma` | V1 on, V2 off | Learnable per-channel layer scale in each block. The default is the model's own: V1 builds it (starting at `1e-6`, the paper's value, with no cap and no penalty), V2 does not, because the V2 paper removes it once GRN is applied; `--use-gamma` on V2 builds V1's. `config.json` records the resolved bool. See "Layer scale". |
 | `--epochs` | `100` | Maximum epochs. The cosine spans exactly this many. |
 | `--batch-size` | `64` | Training batch size. |
 | `--learning-rate` | `0.001` | Peak learning rate. |
@@ -134,7 +134,17 @@ the 5,000-image selection split 0.855 and 0.850 with the old block, 0.817 and 0.
 0.95 before: the paper's initial value is meant for a 300-epoch schedule with a 20-epoch warmup, and a 20-epoch cosine
 at `1e-3` has not grown them yet. The paper's setting is kept and nothing restores the old one. A checkpoint saved
 before the change loads and predicts exactly as before; fine-tuning it trains under the current rule (no cap, no
-floor, no L2). Evidence: plan `scratch_step10b/gpu_effect_legacy.txt`. The V2 block is unchanged by this step.
+floor, no L2). Evidence: plan `scratch_step10b/gpu_effect_legacy.txt`.
+
+The V2 block has no layer scale by default (plan 98b866fb step 10c): the ConvNeXt V2 paper (arXiv 2301.00808, "LayerScale becomes
+unnecessary when GRN is applied and can be removed") and `facebookresearch/ConvNeXt-V2` `models/convnextv2.py` have none, and
+the GRN `gamma` and `beta` start at zero (`models/utils.py`), so a fresh GRN returns its input exactly and a fresh V2 branch is a plain
+inverted MLP. Before the change the V2 block started a layer scale at 1.0, clipped it to `[1e-6, 1.0]`, added an L2 of `1e-5` to
+it and started the GRN `gamma` at ones. `--use-gamma` on `train_convnext_v2` builds V1's layer scale (starts at `1e-6`, no cap, no
+penalty). `config.json` and `results_summary.json` record the resolved `use_gamma`. A V2 checkpoint saved before the change
+rebuilds the layer scale its own config recorded (`use_gamma: true`) and predicts exactly as before; one that depended on the old
+default without recording it is refused at load by the layer's name, and the model's `pretrained=` path refuses it naming
+`use_gamma`. Fine-tuning such a file trains under the current rule (no cap, no floor, no L2).
 
 ### `stochastic_mode`: `depth` vs `gradient`
 

@@ -5,7 +5,9 @@ The block runs a depthwise convolution, LayerNorm, a 4x channel expansion,
 GELU, then Global Response Normalization (GRN) before reducing back down.
 GRN computes a per-channel L2 norm across the spatial dimensions and rescales
 each channel with it, sharpening channel competition that plain LayerNorm
-cannot express. That is the one change from ConvNeXt V1.
+cannot express. That is the change from ConvNeXt V1, together with dropping
+the layer scale: the V2 paper found LayerScale "unnecessary when GRN is
+applied and can be removed", so this block has none unless ``use_gamma=True``.
 
 This block is only the residual branch: it does not add the skip connection
 or apply stochastic depth. See the class docstring for the wiring a caller
@@ -27,7 +29,6 @@ from typing import Optional, Dict, Union, Tuple, Any
 from dl_techniques.layers.activations.exact_activations import substitute_exact
 from dl_techniques.layers.regularization.layer_scale import LayerScale
 from ..norms.global_response_norm import GlobalResponseNormalization
-from ...constraints.value_range_constraint import ValueRangeConstraint
 from ...regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
 from dl_techniques.utils.activation_serialization import (
     serialize_activation,
@@ -47,7 +48,10 @@ class ConvNextV2Block(keras.layers.Layer):
     computes per-channel L2 norms across spatial dimensions and applies
     learnable scaling to enhance inter-channel feature competition. The
     computation is ``DepthwiseConv -> LayerNorm -> Conv1x1(4x) -> GELU ->
-    GRN -> Dropout -> Conv1x1(reduce) -> gamma * x``.
+    GRN -> Dropout -> Conv1x1(reduce)``, followed by ``gamma * x`` only when
+    ``use_gamma=True``. Following the paper and ``facebookresearch/ConvNeXt-V2``
+    the GRN ``gamma`` and ``beta`` start at zero, so GRN is the identity at
+    initialization and the branch starts as a plain inverted MLP.
 
     Architecture:
 
@@ -86,7 +90,7 @@ class ConvNextV2Block(keras.layers.Layer):
         └────────────────┬──────────────────┘
                          ▼
         ┌───────────────────────────────────┐
-        │  gamma * x  (learnable scale)     │
+        │  gamma * x  (optional, off)       │
         └────────────────┬──────────────────┘
                          ▼
         ┌───────────────────────────────────┐
@@ -127,8 +131,16 @@ class ConvNextV2Block(keras.layers.Layer):
     :type dropout_rate: Optional[float]
     :param spatial_dropout_rate: Spatial dropout rate. Defaults to 0.0.
     :type spatial_dropout_rate: Optional[float]
-    :param use_gamma: Whether to use learnable gamma scaling. Defaults to ``True``.
+    :param use_gamma: Whether to add the ConvNeXt V1 layer scale after the reduction.
+        Defaults to ``False``: the V2 paper (arXiv 2301.00808, Figure 5) drops it as
+        redundant once GRN is present, and the reference block has none.
     :type use_gamma: bool
+    :param gamma_initial_value: Initial value of every per-channel layer scale, read only
+        when ``use_gamma=True``. Defaults to ``1e-6``, the ConvNeXt V1 value (Table 5 of
+        arXiv 2201.03545), the only layer scale the ConvNeXt line specifies. Gamma is a
+        plain trainable vector: no constraint, no regularizer, so the block contributes no
+        term to ``losses`` of its own.
+    :type gamma_initial_value: float
     :param use_softorthonormal_regularizer: Whether to apply soft orthonormal
         regularization. Defaults to ``False``.
     :type use_softorthonormal_regularizer: bool
@@ -159,12 +171,6 @@ class ConvNextV2Block(keras.layers.Layer):
     LAYERNORM_EPSILON = 1e-6
     GRN_EPSILON = 1e-6
     POINTWISE_KERNEL_SIZE = 1
-    GAMMA_L2_REGULARIZATION = 1e-5
-    GAMMA_INITIAL_VALUE = 1.0
-    # Floor keeps gamma from reaching 0, which would zero the branch gradient
-    # and leave the block permanently dead.
-    GAMMA_MIN_VALUE = 1e-6
-    GAMMA_MAX_VALUE = 1.0
     STRIDES = (1, 1)
 
     def __init__(
@@ -176,8 +182,8 @@ class ConvNextV2Block(keras.layers.Layer):
             use_bias: bool = True,
             dropout_rate: Optional[float] = 0.0,
             spatial_dropout_rate: Optional[float] = 0.0,
-            use_gamma: bool = True,
-            gamma_initial_value: float = 1.0,
+            use_gamma: bool = False,
+            gamma_initial_value: float = 1e-6,
             use_softorthonormal_regularizer: bool = False,
             depthwise_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
             depthwise_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
@@ -323,8 +329,16 @@ class ConvNextV2Block(keras.layers.Layer):
         )
 
         # Global Response Normalization (GRN) - key feature of ConvNeXt V2
+        # DECISION plan-2026-11-03T221936-98b866fb/D-036: gamma starts at ZERO, as in the
+        # reference (facebookresearch/ConvNeXt-V2 models/utils.py GRN: `self.gamma =
+        # nn.Parameter(torch.zeros(1, 1, 1, dim))`, beta zeros too), so GRN is exactly the
+        # identity at initialization. Do NOT leave the layer's own default of 'ones' here, and
+        # do NOT change that default instead: it is the layer's documented choice and the
+        # norms factory, the ConvUNext stem and every other GRN user would move with it for no
+        # paper claim on them. The block is where the paper puts the zero init.
         self.grn = GlobalResponseNormalization(
             eps=self.GRN_EPSILON,
+            gamma_initializer="zeros",
             name="global_response_norm"
         )
 
@@ -351,16 +365,15 @@ class ConvNextV2Block(keras.layers.Layer):
                 name="no_spatial_dropout"
             )
 
-        # Learnable multiplier (gamma scaling)
+        # Optional layer scale (off by default: the V2 paper removes it). When asked for
+        # it is ConvNextV1Block's: 1e-6, no constraint, no regularizer (D-033, D-036).
+        # Constraint=None must be explicit: LayerScale's own default is "non_neg".
         if self.use_gamma:
             self.gamma = LayerScale(
                 multiplier_type="CHANNEL",
-                regularizer=keras.regularizers.L2(self.GAMMA_L2_REGULARIZATION),
+                regularizer=None,
                 initializer=keras.initializers.Constant(self.gamma_initial_value),
-                constraint=ValueRangeConstraint(
-                    min_value=self.GAMMA_MIN_VALUE,
-                    max_value=self.GAMMA_MAX_VALUE
-                ),
+                constraint=None,
                 name="gamma_scale"
             )
         else:

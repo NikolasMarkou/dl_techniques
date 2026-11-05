@@ -1190,6 +1190,60 @@ class TestBlockNormalization:
         live = [homogeneity_error(model, x, scale) for scale in HOMOGENEITY_SCALES]
         assert all(error > 100 * HOMOGENEITY_RTOL for error in live), live
 
+    @staticmethod
+    def _grn_variables(model: keras.Model, name: str):
+        """Every block's GRN variable called ``name`` (``gamma`` or ``beta``)."""
+        return [w for w in model.weights if w.path.endswith(f'global_response_norm/{name}')]
+
+    def test_v2_batchnorm_model_is_homogeneous_with_a_live_grn_gamma_and_no_beta(self) -> None:
+        # I8 of plan 98b866fb step 10c. A V2 block now starts with no layer scale and GRN gamma
+        # at zero, so GRN is the identity: the homogeneity bar passes on a fresh model for a
+        # reason that says nothing about GRN. Set every GRN gamma live (0.5) and read the shared
+        # probe at its shared bar. gamma * (x * norm') is degree-1 homogeneous because
+        # norm' = norm / mean(norm) is degree-0. The offset `beta` is the other GRN weight: it is
+        # an additive constant (D-GAP-1: `use_beta` is not threaded, so it exists in every V2
+        # block on both arms), it is NOT zero after any training step, and the next test pins
+        # what it does. Here it is held at its initial zero, which is the claim being tested.
+        model = create_convunext_denoiser(
+            **self._homog_cfg(block_normalization='batchnorm', convnext_version='v2'))
+        fit_one_step(model)
+        assert self._set_layer_scales(model, 0.5) == 0, 'a V2 block has no layer scale by default'
+        gammas, betas = self._grn_variables(model, 'gamma'), self._grn_variables(model, 'beta')
+        assert len(gammas) == 7 and len(betas) == 7
+        for w in gammas:
+            w.assign(keras.ops.full_like(w, 0.5))
+        for w in betas:
+            w.assign(keras.ops.zeros_like(w))
+
+        x = (np.random.default_rng(4).standard_normal((2, 64, 64, 3)) * 1.5).astype('float32')
+        for scale in HOMOGENEITY_SCALES:
+            assert homogeneity_error(model, x, scale) <= HOMOGENEITY_RTOL, scale
+
+    def test_the_probe_sees_a_live_grn_beta_as_the_break_it_is(self) -> None:
+        # LIVENESS ARM for the test above and the documented D-GAP-1: `beta` is an additive
+        # offset inside every V2 block. With it at zero the probe passes; set to 0.3 it reads
+        # far above the bar, so the zero reading was not a probe blind to GRN. One SGD step
+        # already moves it off zero now that no layer scale of 1e-4 damps its gradient.
+        model = create_convunext_denoiser(
+            **self._homog_cfg(block_normalization='batchnorm', convnext_version='v2'))
+        fit_one_step(model)
+        betas = self._grn_variables(model, 'beta')
+        assert any(np.any(keras.ops.convert_to_numpy(w) != 0.0) for w in betas), \
+            'one fit step should have moved a beta that no layer scale damps'
+        for w in self._grn_variables(model, 'gamma'):
+            w.assign(keras.ops.full_like(w, 0.5))
+        x = (np.random.default_rng(4).standard_normal((2, 64, 64, 3)) * 1.5).astype('float32')
+
+        for w in betas:
+            w.assign(keras.ops.zeros_like(w))
+        zero_beta = [homogeneity_error(model, x, scale) for scale in HOMOGENEITY_SCALES]
+        assert all(error <= HOMOGENEITY_RTOL for error in zero_beta), zero_beta
+
+        for w in betas:
+            w.assign(keras.ops.full_like(w, 0.3))
+        live = [homogeneity_error(model, x, scale) for scale in HOMOGENEITY_SCALES]
+        assert all(error > 100 * HOMOGENEITY_RTOL for error in live), live
+
     def test_default_layernorm_byte_identical(self) -> None:
         # SC2: omitting block_normalization == explicit 'layernorm'. Byte-identity is
         # proven by (a) identical layer-name SET (graph topology) and (b) identical
