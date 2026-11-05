@@ -101,7 +101,7 @@ it). Both wrappers have the same flags; only `--variant` differs.
 | `--drop-path-rate` | per dataset | Maximum stochastic-depth rate. `0.1` for mnist, cifar10 and imagenet, `0.2` for cifar100. |
 | `--stochastic-mode {depth,gradient}` | `depth` | `depth` = `StochasticDepth`, `gradient` = `StochasticGradient` (see below). |
 | `--dropout-rate` | per dataset | Dropout inside each block. `0.1` for mnist and cifar10, `0.2` for cifar100, `0` for imagenet. |
-| `--use-gamma` / `--no-use-gamma` | on | Learnable per-channel layer scale in each block. |
+| `--use-gamma` / `--no-use-gamma` | on | Learnable per-channel layer scale in each block. The V1 block starts it at `1e-6` (the paper's value) with no cap and no penalty; see "Layer scale". |
 | `--epochs` | `100` | Maximum epochs. The cosine spans exactly this many. |
 | `--batch-size` | `64` | Training batch size. |
 | `--learning-rate` | `0.001` | Peak learning rate. |
@@ -122,6 +122,19 @@ measured for this model, and some are arguable (a weight decay of `1e-4` is smal
 ConvNeXt, a patience of 50 cannot fire in a short run, there is no warmup by default). They are
 kept unchanged so the first audited runs measure what a user actually gets; a change to any
 default belongs to a measured comparison, not to this file.
+
+### Layer scale
+
+The V1 block's layer scale starts at `1e-6`, as in the ConvNeXt paper (arXiv 2201.03545, Table 5) and in
+`facebookresearch/ConvNeXt`, and has no constraint and no penalty (before plan 98b866fb step 10b it started at
+1.0, was clipped to `[1e-6, 1.0]` and carried an L2 of `1e-5`). Measured cost at this trainer's short schedule:
+`train_convnext_v1 --dataset cifar10 --variant cifar10` for 20 epochs, seeds 42 and 43, best `val_accuracy` on
+the 5,000-image selection split 0.855 and 0.850 with the old block, 0.817 and 0.815 with the paper's, so 3.8 and
+3.5 points lower (test accuracy 2.5 and 1.0 points lower). The final mean layer scales per block are 0.06 to 0.18 against 0.57 to
+0.95 before: the paper's initial value is meant for a 300-epoch schedule with a 20-epoch warmup, and a 20-epoch cosine
+at `1e-3` has not grown them yet. The paper's setting is kept and nothing restores the old one. A checkpoint saved
+before the change loads and predicts exactly as before; fine-tuning it trains under the current rule (no cap, no
+floor, no L2). Evidence: plan `scratch_step10b/gpu_effect_legacy.txt`. The V2 block is unchanged by this step.
 
 ### `stochastic_mode`: `depth` vs `gradient`
 
