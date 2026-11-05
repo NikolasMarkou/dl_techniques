@@ -32,7 +32,46 @@ from dl_techniques.metrics.clip_accuracy import CLIPAccuracy, CLIPRecallAtK
 # =============================================================================
 
 
-def create_perfect_similarity_matrix(batch_size: int) -> Dict[str, keras.KerasTensor]:
+def forced_rows(batch_size: int, correct_fraction: float) -> int:
+    """
+    Number of rows that `create_partial_match_matrix` makes correct by construction.
+
+    Args:
+        batch_size: Size of batch.
+        correct_fraction: Fraction of samples that should be correct (0-1).
+
+    Returns:
+        How many leading diagonal entries are set to 10.0, far above every
+        other score in the matrix (all lie in [-1, 1]).
+    """
+    return int(batch_size * correct_fraction)
+
+
+def reference_hits(logits: keras.KerasTensor, k: int) -> int:
+    """
+    Count rows whose own column is among the k largest scores, with NumPy only.
+
+    This is the retrieval recall@k of CLIP-style evaluation (one positive per
+    query: the diagonal), computed without any code of the metrics under test.
+    The fixtures draw continuous scores, so no two scores in a row tie.
+
+    Args:
+        logits: Square similarity matrix.
+        k: Cutoff; capped at the number of columns.
+
+    Returns:
+        The number of rows with a hit.
+    """
+    scores = ops.convert_to_numpy(logits)
+    size = scores.shape[0]
+    top_k = np.argsort(-scores, axis=1)[:, :min(k, size)]
+    return int((top_k == np.arange(size)[:, None]).any(axis=1).sum())
+
+
+def create_perfect_similarity_matrix(
+        batch_size: int,
+        seed: int = 0
+) -> Dict[str, keras.KerasTensor]:
     """
     Create a perfect similarity matrix where diagonal is highest.
 
@@ -41,12 +80,13 @@ def create_perfect_similarity_matrix(batch_size: int) -> Dict[str, keras.KerasTe
 
     Args:
         batch_size: Size of batch (N x N similarity matrix).
+        seed: Seed of the random draw; the same seed gives the same matrix.
 
     Returns:
         Dictionary with 'logits_per_image' and 'logits_per_text' keys.
     """
     # Create base random similarities (negative for off-diagonal)
-    base = keras.random.uniform((batch_size, batch_size), -5.0, -1.0)
+    base = keras.random.uniform((batch_size, batch_size), -5.0, -1.0, seed=seed)
 
     # Make diagonal elements much larger (correct matches)
     identity = ops.eye(batch_size) * 10.0
@@ -61,7 +101,10 @@ def create_perfect_similarity_matrix(batch_size: int) -> Dict[str, keras.KerasTe
     }
 
 
-def create_random_similarity_matrix(batch_size: int) -> Dict[str, keras.KerasTensor]:
+def create_random_similarity_matrix(
+        batch_size: int,
+        seed: int = 0
+) -> Dict[str, keras.KerasTensor]:
     """
     Create a random similarity matrix with no preference.
 
@@ -69,11 +112,12 @@ def create_random_similarity_matrix(batch_size: int) -> Dict[str, keras.KerasTen
 
     Args:
         batch_size: Size of batch (N x N similarity matrix).
+        seed: Seed of the random draw; the same seed gives the same matrix.
 
     Returns:
         Dictionary with 'logits_per_image' and 'logits_per_text' keys.
     """
-    logits_i2t = keras.random.normal((batch_size, batch_size))
+    logits_i2t = keras.random.normal((batch_size, batch_size), seed=seed)
     logits_t2i = ops.transpose(logits_i2t)
 
     return {
@@ -84,22 +128,28 @@ def create_random_similarity_matrix(batch_size: int) -> Dict[str, keras.KerasTen
 
 def create_partial_match_matrix(
         batch_size: int,
-        correct_fraction: float = 0.5
+        correct_fraction: float = 0.5,
+        seed: int = 0
 ) -> Dict[str, keras.KerasTensor]:
     """
     Create similarity matrix with controlled accuracy.
 
+    The first `forced_rows(batch_size, correct_fraction)` rows are correct by
+    construction. The other rows are random, so each is correct only by
+    chance: the accuracy is at least the forced fraction and not equal to it.
+
     Args:
         batch_size: Size of batch.
         correct_fraction: Fraction of samples that should be correct (0-1).
+        seed: Seed of the random draw; the same seed gives the same matrix.
 
     Returns:
         Dictionary with 'logits_per_image' and 'logits_per_text' keys.
     """
-    num_correct = int(batch_size * correct_fraction)
+    num_correct = forced_rows(batch_size, correct_fraction)
 
     # Start with random matrix
-    logits = keras.random.uniform((batch_size, batch_size), -1.0, 1.0)
+    logits = keras.random.uniform((batch_size, batch_size), -1.0, 1.0, seed=seed)
     logits_np = ops.convert_to_numpy(logits)
 
     # Make first num_correct diagonal elements highest in their row
@@ -207,16 +257,22 @@ def test_clip_accuracy_partial_match():
 
     batch_size = 10
     target_accuracy = 0.7
-    outputs = create_partial_match_matrix(batch_size, target_accuracy)
+    outputs = create_partial_match_matrix(batch_size, target_accuracy, seed=3)
 
     metric = CLIPAccuracy(direction='i2t')
     metric.update_state(y_pred=outputs)
     accuracy = float(metric.result())
 
-    # Should be close to target accuracy
-    assert abs(accuracy - target_accuracy) < 0.15, \
-        f"Expected ~{target_accuracy}, got {accuracy}"
-    print(f"✓ Accuracy: {accuracy:.4f} (target: {target_accuracy:.4f})")
+    # The forced rows are correct for any draw; each remaining row is correct
+    # only by chance, so the accuracy is exactly what the drawn matrix holds.
+    floor = forced_rows(batch_size, target_accuracy) / batch_size
+    expected = reference_hits(outputs['logits_per_image'], k=1) / batch_size
+    assert abs(accuracy - expected) < 1e-6, \
+        f"Expected {expected} from the drawn matrix, got {accuracy}"
+    # The metric is float32: 7 / 10 comes back as 0.69999999, just under the float64 0.7.
+    assert floor - 1e-6 <= accuracy <= 1.0, \
+        f"Accuracy {accuracy} must lie in [{floor}, 1.0]"
+    print(f"✓ Accuracy: {accuracy:.4f} (forced: {floor:.4f}, drawn: {expected:.4f})")
 
     print("✓ Partial match test passed")
 
@@ -271,7 +327,9 @@ def test_clip_accuracy_accumulation():
 
     accuracies = []
     for i in range(num_batches):
-        outputs = create_partial_match_matrix(batch_size, correct_fraction=0.75)
+        outputs = create_partial_match_matrix(
+            batch_size, correct_fraction=0.75, seed=i
+        )
         metric.update_state(y_pred=outputs)
         acc = float(metric.result())
         accuracies.append(acc)
@@ -407,7 +465,7 @@ def test_clip_accuracy_error_handling():
 
     # Test missing key
     try:
-        metric.update_state(y_pred={'wrong_key': keras.random.normal((4, 4))})
+        metric.update_state(y_pred={'wrong_key': keras.random.normal((4, 4), seed=0)})
         raise AssertionError("Should raise ValueError for missing key")
     except ValueError as e:
         assert 'logits_per_image' in str(e)
@@ -415,7 +473,7 @@ def test_clip_accuracy_error_handling():
 
     # Test wrong shape
     try:
-        metric.update_state(y_pred={'logits_per_image': keras.random.normal((4,))})
+        metric.update_state(y_pred={'logits_per_image': keras.random.normal((4,), seed=0)})
         raise AssertionError("Should raise ValueError for 1D tensor")
     except ValueError as e:
         assert '2D tensor' in str(e)
@@ -644,7 +702,7 @@ def test_clip_recall_error_handling():
 
     # Test missing key
     try:
-        metric.update_state(y_pred={'wrong_key': keras.random.normal((4, 4))})
+        metric.update_state(y_pred={'wrong_key': keras.random.normal((4, 4), seed=0)})
         raise AssertionError("Should raise ValueError for missing key")
     except ValueError as e:
         assert 'logits_per_image' in str(e)
@@ -652,7 +710,7 @@ def test_clip_recall_error_handling():
 
     # Test wrong shape
     try:
-        metric.update_state(y_pred={'logits_per_image': keras.random.normal((4,))})
+        metric.update_state(y_pred={'logits_per_image': keras.random.normal((4,), seed=0)})
         raise AssertionError("Should raise ValueError for 1D tensor")
     except ValueError as e:
         assert '2D tensor' in str(e)
@@ -715,6 +773,7 @@ def test_multi_epoch_training_simulation():
     batch_size = 8
     batches_per_epoch = 5
     num_epochs = 3
+    ks = {'i2t_acc': 1, 'i2t_r@5': 5}
 
     metrics = [
         CLIPAccuracy(direction='i2t', name='i2t_acc'),
@@ -722,6 +781,7 @@ def test_multi_epoch_training_simulation():
     ]
 
     epoch_results = []
+    epoch_floors = []
 
     for epoch in range(num_epochs):
         print(f"\nEpoch {epoch + 1}/{num_epochs}")
@@ -730,33 +790,52 @@ def test_multi_epoch_training_simulation():
         for metric in metrics:
             metric.reset_state()
 
-        # Process batches
+        # Process batches, counting the hits independently of the metrics
+        hits = {name: 0 for name in ks}
+        correct_fraction = 0.4 + (epoch * 0.15)
         for batch in range(batches_per_epoch):
-            # Simulate improving performance over epochs
-            correct_fraction = 0.4 + (epoch * 0.15)
-            outputs = create_partial_match_matrix(batch_size, correct_fraction)
+            # Simulate improving performance over epochs: the forced rows grow
+            outputs = create_partial_match_matrix(
+                batch_size, correct_fraction, seed=epoch * batches_per_epoch + batch
+            )
 
             for metric in metrics:
                 metric.update_state(y_pred=outputs)
+            for name, k in ks.items():
+                hits[name] += reference_hits(outputs['logits_per_image'], k)
 
         # Collect epoch results
+        total = batch_size * batches_per_epoch
         epoch_result = {}
         for metric in metrics:
             value = float(metric.result())
             epoch_result[metric.name] = value
             print(f"  {metric.name}: {value:.4f}")
 
-        epoch_results.append(epoch_result)
+            # The metric is exactly the share of hits in the drawn matrices
+            expected = hits[metric.name] / total
+            assert abs(value - expected) < 1e-6, \
+                f"{metric.name}: expected {expected} from the drawn matrices, got {value}"
 
-    # Verify improvement over epochs (with some tolerance for randomness)
-    for metric_name in ['i2t_acc', 'i2t_r@5']:
+        # What the simulation guarantees for any draw: the forced rows are
+        # always hits, the rest of the rows are random.
+        floor = forced_rows(batch_size, correct_fraction) / batch_size
+        for name, value in epoch_result.items():
+            assert floor - 1e-6 <= value <= 1.0, \
+                f"{name} {value} must lie in [{floor}, 1.0] at epoch {epoch + 1}"
+
+        epoch_results.append(epoch_result)
+        epoch_floors.append(floor)
+
+    # The simulated performance improves: the guaranteed share rises every epoch
+    # and each epoch's metric is at least its guarantee. The metric values
+    # themselves are draws, so no ordering of them is asserted.
+    assert all(a < b for a, b in zip(epoch_floors, epoch_floors[1:])), \
+        f"Guaranteed share should rise every epoch, got {epoch_floors}"
+    for metric_name in ks:
         values = [result[metric_name] for result in epoch_results]
         print(f"\n✓ {metric_name} progression: {[f'{v:.3f}' for v in values]}")
-
-        # Generally should improve, but allow for some variance
-        # Check that last epoch is better than first
-        assert values[-1] > values[0] - 0.1, \
-            f"{metric_name} should generally improve over epochs"
+        print(f"  guaranteed share: {[f'{f:.3f}' for f in epoch_floors]}")
 
     print("\n✓ Multi-epoch training simulation passed")
 
