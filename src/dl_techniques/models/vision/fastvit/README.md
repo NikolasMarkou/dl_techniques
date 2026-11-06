@@ -153,12 +153,17 @@ out = tower(
 out.shape                     # (2, 512)
 ```
 
-> **Pass `training=False` explicitly for a deterministic forward.**
+> **`training=False` is the explicit spelling of what `training=None` already does.**
 > `StochasticDepth` is the identity unless `training` is truthy (plan
-> 98b866fb D-044; before it, `training=None` ran its stochastic path), so the
-> explicit flag is now for clarity and for the BatchNormalization behaviour the
-> tower is documented to have at `training=None` (batch statistics and moving
-> averages updated; not re-measured by that plan).
+> 98b866fb D-044; before it, `training=None` ran its stochastic path), and
+> Keras 3.8's `BatchNormalization.call` takes batch statistics only under
+> `if training and self.trainable` (`keras/src/layers/normalization/batch_normalization.py:254`),
+> so at `training=None` every BatchNorm of the tower uses its moving statistics and
+> updates none. Measured (CPU, Keras 3.8.0, `mci0`, 114 BatchNorm layers):
+> `tower(x)` equals `tower(x, training=False)` exactly, repeats exactly, and
+> leaves every moving mean unchanged; only `training=True` normalizes with batch
+> statistics and updates the moving ones (plan 98b866fb step 10,
+> `scratch_step10/bn_training_none.out`).
 
 ## 5. Component reference
 
@@ -437,8 +442,9 @@ which is likewise not the FastViT stem.
 
 **My forward pass is not reproducible.** Pass `training=False` explicitly.
 `StochasticDepth` is the identity at `training=None` since plan 98b866fb D-044
-(before it, it dropped paths there); the documented BatchNormalization behaviour at
-`training=None` (batch-statistics mode) was not re-measured by that plan.
+(before it, it dropped paths there), and BatchNormalization uses its moving
+statistics at `training=None` (Keras 3.8 `if training and self.trainable`), so a
+plain `tower(x)` equals `tower(x, training=False)` exactly.
 
 **Should I add a projection head on top of the tower?** No. The tower's terminal
 `Dense` already is the CLIP image projection. Use `projection_dim=None` only

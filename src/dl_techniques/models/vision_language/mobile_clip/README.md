@@ -130,10 +130,11 @@ from dl_techniques.models.vision_language.mobile_clip import MobileClipV2Model
 
 model = MobileClipV2Model.from_variant('mobileclip2_s0')
 
-# Pass training=False explicitly. StochasticDepth is the identity unless training
-# is truthy (plan 98b866fb D-044; it dropped paths at training=None before), and the
-# BatchNormalization behaviour at training=None documented here (batch statistics,
-# moving averages updated) was not re-measured by that plan.
+# training=False is the explicit spelling of what training=None already does.
+# StochasticDepth is the identity unless training is truthy (plan 98b866fb D-044; it
+# dropped paths at training=None before), and Keras 3.8's BatchNormalization takes
+# batch statistics only under `if training and self.trainable`, so at training=None
+# every BatchNorm uses its moving statistics and updates none.
 outputs = model(
     {'image': np.zeros((2, 256, 256, 3), dtype='float32'),
      'text':  np.zeros((2, 77), dtype='int32')},
@@ -402,8 +403,7 @@ def test_forward_pass_shapes():
 
 ## 13. Troubleshooting & FAQs
 
-**My forward pass is not reproducible.** Pass `training=False` explicitly. `StochasticDepth` is the identity at `training=None` since plan 98b866fb D-044 (before it, it dropped paths there); the documented BatchNormalization behaviour at `training=None` (batch statistics, moving averages updated) was not re-measured by that plan.
-
+**My forward pass is not reproducible.** Pass `training=False` explicitly (it is the spelling of what `training=None` already does). `StochasticDepth` is the identity at `training=None` since plan 98b866fb D-044 (before it, it dropped paths there), and BatchNormalization uses its moving statistics at `training=None` and updates none (Keras 3.8 `BatchNormalization.call`, `if training and self.trainable`; measured on the FastViT tower of this model family, `plans/plan-2026-11-03T221936-98b866fb/scratch_step10/bn_training_none.out`: `tower(x)` equals `tower(x, training=False)` exactly).
 **The loss becomes `nan`.** Either the learning rate or a diverging `logit_scale`. The temperature is already clipped at `logit_scale_max`, which prevents the `inf`-logit mode but not a badly scaled optimizer.
 
 **`ValueError: All per-stage tuples must have one entry per stage`.** A 4-stage vs 5-stage mixup: `mci0`/`mci1`/`mci2` need 4 entries in every per-stage tuple, `mci3`/`mci4` need 5.
