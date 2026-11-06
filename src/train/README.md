@@ -194,7 +194,11 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   `dims`); a ConvNeXt V2 body under a `convnext_seg` record is refused. **Recipes** have no legacy source: the optimizer
   settings are ConvUNext's (AdamW, lr 1e-3, weight decay 1e-4, no warmup, per-variable clipnorm 1, cosine to 1%), 30
   epochs, patience 10, a flip, `val_miou`, Pet at 128 px: the same data, loss and pipeline, an untuned starting point and
-  not a result. Both backbone families keep them, `convnext_seg` included, for every variant. **The `convnext_seg` rate was
+  not a result. **`optim_args.optimizer=sgd` with a positive `optim_args.weight_decay` is refused for every segmentation family**
+  (exit 2 before `open_run`, the message names both keys): sgd's decay is an L2 penalty on the model's kernels, the
+  segmentation task builds none, and the two backbone families end in a head that takes no kernel regularizer, so the number would
+  be dropped without a word (it was, before plan 98b866fb D-047); use `optim_args.weight_decay=null` or the AdamW the recipes use.
+  Both backbone families keep them, `convnext_seg` included, for every variant. **The `convnext_seg` rate was
   1e-4 (1e-3 for `cifar10`) while the V1 block's layer scale started at 1.0, and is 1e-3 now** (plan 98b866fb step 10b, D-034):
   on that old layer scale `tiny` stayed at the pixel prior at 1e-3 (test mIoU 0.370 and 0.370, seeds 42 and 43), and reached 0.597
   and 0.601 at 1e-4. With the paper's layer scale (start 1e-6, no cap, no penalty) `tiny` trains at 1e-3 and is ahead of 1e-4 on both

@@ -394,6 +394,39 @@ def test_a_key_the_adapter_sets_is_refused_by_name(world, folders, tmp_path):
             model_args={"input_channels": 1}, transform_args={"image_size": SIZE})
 
 
+#: One variant of each segmentation family: (model, the variant of its AutoContext).
+SEGMENTATION_FAMILIES = ["convunext/tiny", "accunet/base", "resnet_seg/resnet18", "convnext_seg/tiny"]
+
+
+@pytest.mark.parametrize("model", SEGMENTATION_FAMILIES)
+def test_an_sgd_weight_decay_is_refused_by_name_because_no_segmentation_family_applies_it(world, folders, tmp_path, model):
+    """D-047: sgd's decay is an L2 penalty on the kernels, a segmentation family builds none, and the run used to train with no
+    decay and say nothing. Both keys are named, and no run directory is left behind."""
+    refused(tmp_path, folders, r"optim_args\.weight_decay.*optim_args\.optimizer=sgd.*dropped without a word",
+            model=model, optim_args={"optimizer": "sgd", "lr": 0.05, "weight_decay": 1e-4},
+            transform_args={"image_size": SIZE})
+
+
+@pytest.mark.parametrize("model", SEGMENTATION_FAMILIES)
+@pytest.mark.parametrize(
+    "optim", [
+        {"optimizer": "sgd", "weight_decay": None},
+        {"optimizer": "sgd", "weight_decay": 0.0},
+        {"optimizer": "adamw", "weight_decay": 0.01},
+        {"optimizer": "adamw", "weight_decay": None},
+    ], ids=["sgd_null", "sgd_zero", "adamw_decay", "adamw_null"],
+)
+def test_the_neighbours_of_the_refused_sgd_decay_are_accepted_and_build_no_penalty(world, model, optim):
+    """The other half of the rule: no decay under sgd, and any decay under adamw (the optimizer's), are not refused, and the
+    adapter is handed no ``kernel_regularizer`` either way."""
+    from train.api.args import OptimArgs
+
+    family, variant = registry.parse_model_name(model)
+    context = AutoContext(family=family, variant=variant, dataset="folder", num_classes=3, image_size=SIZE, defaults={})
+    kwargs = registry.MODELS[family].load_resolver()(context, OptimArgs(lr=0.05, **optim), {})
+    assert "kernel_regularizer" not in kwargs
+
+
 def test_a_conformal_level_is_refused_because_a_segmentation_run_has_no_set_of_classes(world, folders, tmp_path):
     refused(tmp_path, folders, r"analysis_args\.conformal_alpha.*does not produce",
             analysis_args={"conformal_alpha": 0.1}, transform_args={"image_size": SIZE})

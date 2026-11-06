@@ -188,7 +188,8 @@ class OptimArgs(StrictConfig):
         default=AUTO,
         metadata={
             "help": "weight decay: decoupled decay for adamw, the SGD weight decay (gradient wd * w, "
-            "applied as an L2 penalty of wd / 2 on the model) for sgd, refused for adam; null for none"
+            "applied as an L2 penalty of wd / 2 on the model) for sgd, refused for adam and, with sgd, by the "
+            "segmentation families; null for none"
         },
     )
     momentum: Auto[Optional[float]] = dataclasses.field(

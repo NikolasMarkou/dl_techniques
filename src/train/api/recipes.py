@@ -393,12 +393,36 @@ def _cliffordnet_recipe(
 # ---------------------------------------------------------------------
 
 
+def sgd_weight_decay(optim_args: OptimArgs) -> Optional[float]:
+    """Return the SGD weight decay ``wd`` the run asks for, or ``None`` when it asks for none.
+
+    ``None`` unless ``optimizer`` is sgd and ``weight_decay`` is a positive number: adamw decays inside the optimizer,
+    and sgd with ``weight_decay=null`` or ``0`` asks for no decay. ``optim_args.weight_decay`` for sgd IS the ``wd`` of
+    He et al. 2015 and of ``torch.optim.SGD``, whose update adds ``wd * w`` to the gradient.
+
+    :param optim_args: the resolved optimizer arguments.
+    :raises UnresolvedAutoError: when ``optimizer`` or ``weight_decay`` is ``"auto"``.
+    """
+    for name in ("optimizer", "weight_decay"):
+        value = getattr(optim_args, name)
+        if isinstance(value, str) and value == AUTO:
+            raise UnresolvedAutoError(
+                f"optim_args.{name} is still {AUTO!r}; resolve_auto must run "
+                "before the model arguments are resolved"
+            )
+    if str(optim_args.optimizer).strip().lower() != "sgd":
+        return None
+    decay = optim_args.weight_decay
+    if decay is None or decay <= 0:
+        return None
+    return decay
+
+
 def _weight_decay_regularizer(optim_args: OptimArgs) -> Any:
     """Return ``L2(weight_decay / 2)`` for sgd with a decay, else ``None``.
 
     The penalty is half of ``weight_decay`` because Keras' ``L2(l)`` is ``l * sum(w^2)``, whose gradient is
-    ``2 * l * w``, and the SGD weight decay ``wd`` (He et al. 2015, ``torch.optim.SGD``) adds ``wd * w`` to the gradient:
-    ``optim_args.weight_decay`` for sgd IS that ``wd``.
+    ``2 * l * w``, and the SGD weight decay ``wd`` adds ``wd * w`` to the gradient (:func:`sgd_weight_decay`).
 
     :param optim_args: the resolved optimizer arguments.
     :raises UnresolvedAutoError: when ``optimizer`` or ``weight_decay`` is ``"auto"``.
@@ -415,17 +439,8 @@ def _weight_decay_regularizer(optim_args: OptimArgs) -> Any:
     # `L2(decay)` decayed twice as hard as the paper (measured in D-042, ratio 2.0000). Every
     # family that reaches this rule with sgd (resnet by recipe, the others only when asked) moves
     # with it. Do NOT go back to `L2(decay)` to keep an old run's number.
-    for name in ("optimizer", "weight_decay"):
-        value = getattr(optim_args, name)
-        if isinstance(value, str) and value == AUTO:
-            raise UnresolvedAutoError(
-                f"optim_args.{name} is still {AUTO!r}; resolve_auto must run "
-                "before the model arguments are resolved"
-            )
-    if str(optim_args.optimizer).strip().lower() != "sgd":
-        return None
-    decay = optim_args.weight_decay
-    if decay is None or decay <= 0:
+    decay = sgd_weight_decay(optim_args)
+    if decay is None:
         return None
     import keras
 
