@@ -25,6 +25,7 @@ from typing import Tuple, List, Optional, Dict, Any, Union
 from train.common import setup_gpu, set_seeds, create_callbacks as create_common_callbacks, convert_keras_history_to_training_history, EpochMetricsPlotCallback
 from train.common.conformal import DEFAULT_ALPHA, add_conformal_arguments, run_conformal
 from train.common.classification_data import add_selection_arguments, load_classification_data
+from train.common.optimizer import sgd_weight_decay_regularizer
 from train.common.imagenet import require_imagenet_root
 from train.common.run_io import prepare_run_dir, save_training_history_json
 from dl_techniques.metrics.primary_output_metrics import (
@@ -358,18 +359,19 @@ def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) 
     # Model
     input_shape = (config.image_size, config.image_size, 3)
     # DECISION plan-2026-11-03T221936-98b866fb/D-042
-    # The penalty is `L2(weight_decay / 2)`, NOT `L2(weight_decay)`. Keras `L2(l)` adds `l * sum(w^2)` to the loss, whose
-    # gradient is `2 * l * w`; the SGD weight decay of He et al. 2015 (section 3.4, `weight_decay` 1e-4) and of
-    # `torch.optim.SGD` adds `weight_decay * w` to the gradient. `L2(weight_decay)` therefore decayed twice as hard as
-    # the paper (measured in D-042: a real SGD step shrinks a weight 2.0000 times as far). Do NOT go back to `L2(weight_decay)`
-    # "because the number matches the flag", and do NOT also pass a decay to the sgd optimizer: the penalty is the only one.
+    # The penalty is `sgd_weight_decay_regularizer(weight_decay)` = `L2(weight_decay / 2)`, NOT `L2(weight_decay)` (the rule and its
+    # measurement are at that function, D-042, D-048): `L2(weight_decay)` decayed twice as hard as the paper (He et al. 2015, section 3.4,
+    # `weight_decay` 1e-4). Do NOT go back to an inline `L2(weight_decay)` "because the number matches the flag", and do NOT also
+    # pass a decay to the sgd optimizer: the penalty is the only one.
     # It reaches convolution and dense KERNELS only; BatchNorm gamma and beta and the dense bias (0.09 percent of
-    # resnet18's parameters) get none, where torchvision decays every parameter by default (stated in the README).
+    # resnet18's parameters) get none, where torchvision decays every parameter by default. That set is a sourced choice (D-043 c):
+    # Goyal et al. 2017 (arXiv 1706.02677, section 4.2) apply no decay to the BatchNorm coefficients gamma and beta, and He et al.
+    # 2019, Bag of Tricks (arXiv 1812.01187, "No bias decay"), decay only the weights of convolution and fully connected layers.
     model = create_resnet(
         variant=config.model_variant, num_classes=config.num_classes,
         input_shape=input_shape, pretrained=config.pretrained,
         enable_deep_supervision=config.enable_deep_supervision,
-        kernel_regularizer=keras.regularizers.L2(config.weight_decay / 2) if config.weight_decay > 0 else None
+        kernel_regularizer=sgd_weight_decay_regularizer(config.weight_decay),
     )
     model.summary()
 

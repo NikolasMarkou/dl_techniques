@@ -374,14 +374,10 @@ def train_alexnet(
     model.summary()
     logger.info(f"Total parameters: {model.count_params():,}")
 
-    # LESSONS L72 (double-weight-decay guard): AdamW applies decoupled weight decay
-    # internally, so passing kernel_regularizer as well would penalize the loss AND
-    # decay the parameter a second time. Choose one, never both.
-    use_adamw = config.optimizer_type.lower() == "adamw"
-    kernel_reg = (
-        None if use_adamw
-        else (keras.regularizers.L2(config.weight_decay) if config.weight_decay > 0 else None)
-    )
+    # LESSONS L72 (double-weight-decay guard): the decay of this trainer is the OPTIMIZER's (`optimizer_builder` below forwards
+    # `weight_decay` to every optimizer type), so the model gets no kernel_regularizer. Do NOT add an L2 as well: the weights would
+    # decay twice. (An `L2(config.weight_decay)` that was computed and only logged, never applied, was deleted by D-048: it
+    # claimed a penalty that did not exist and an AST guard would have read it as one.)
 
     # ---- Optimization ----
     # The schedule names are dl_techniques.optimization's, NOT Keras's: the
@@ -416,9 +412,6 @@ def train_alexnet(
         loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
         metrics=["accuracy"],
     )
-    # `kernel_reg` is reported rather than applied: the AdamW branch above is the
-    # correct one, and re-attaching an L2 here would undo it.
-    logger.info(f"Kernel regularizer: {kernel_reg}")
 
     callbacks, results_dir = create_callbacks(config, output_dir)
 

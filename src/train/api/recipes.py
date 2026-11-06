@@ -227,6 +227,10 @@ VIT = _recipe(
 # (not copied, D-003; deleted from the trainer, D-042) and a global clip of 1.0 that neither
 # He et al. 2015 nor torchvision's reference trainer has (deleted from both arms, D-042):
 # the recipe has no clip.
+# The decay reaches convolution and dense KERNELS only (BatchNorm gamma and beta and the dense bias get none), where
+# torchvision's reference trainer decays every parameter: a sourced choice, not a defect (D-043 c). Goyal et al. 2017
+# (arXiv 1706.02677, section 4.2) apply no decay to the BatchNorm coefficients; He et al. 2019, Bag of Tricks (arXiv
+# 1812.01187, "No bias decay"), decay only the weights of convolution and fully connected layers.
 # ImageNet uses the loader's crop and flip plus colour jitter :345. The legacy
 # trainer cannot run on CIFAR at all; CIFAR here is new behaviour with the CIFAR
 # stem (resolve_resnet_args) and no augmentation, as nothing legacy says otherwise.
@@ -439,12 +443,9 @@ def _weight_decay_regularizer(optim_args: OptimArgs) -> Any:
     # `L2(decay)` decayed twice as hard as the paper (measured in D-042, ratio 2.0000). Every
     # family that reaches this rule with sgd (resnet by recipe, the others only when asked) moves
     # with it. Do NOT go back to `L2(decay)` to keep an old run's number.
-    decay = sgd_weight_decay(optim_args)
-    if decay is None:
-        return None
-    import keras
+    from train.common.optimizer import sgd_weight_decay_regularizer
 
-    return keras.regularizers.L2(decay / 2)
+    return sgd_weight_decay_regularizer(sgd_weight_decay(optim_args))
 
 
 def merge_model_args(

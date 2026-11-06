@@ -13,7 +13,7 @@ call sites, so it was promoted here; ``train.energy_transformer.common`` re-expo
 that path still resolves to the SAME OBJECT.
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import keras
 
@@ -23,7 +23,7 @@ from dl_techniques.optimization import (
     learning_rate_schedule_builder,
 )
 
-__all__ = ["build_optimizer"]
+__all__ = ["build_optimizer", "sgd_weight_decay_regularizer"]
 
 
 # ---------------------------------------------------------------------
@@ -83,4 +83,26 @@ def build_optimizer(config: Any, steps_per_epoch: int) -> keras.optimizers.Optim
         f"clip_by_norm={config.gradient_clipping}, weight_decay={config.weight_decay}"
     )
     return optimizer_builder(opt_config, lr_schedule)
+
+
+def sgd_weight_decay_regularizer(weight_decay: Optional[float]) -> Optional[keras.regularizers.Regularizer]:
+    """Return ``L2(weight_decay / 2)``, the Keras penalty that IS the SGD weight decay ``weight_decay``; ``None`` for none.
+
+    Interface contract: ``weight_decay`` is the ``wd`` of He et al. 2015 (section 3.4) and of ``torch.optim.SGD(weight_decay=wd)``,
+    whose update adds ``wd * w`` to the gradient; ``None``, zero and a negative number mean no decay and give ``None``. The result
+    goes to a model's ``kernel_regularizer`` and is then the ONLY decay: the optimizer gets none (an optimizer with decoupled decay,
+    AdamW, must not be paired with this at all: the weights would decay twice). The same rule serves Adam without the W, whose
+    coupled decay adds ``wd * w`` to the gradient as well. Callers: ``train.api.recipes._weight_decay_regularizer``,
+    ``train.resnet.train_resnet``, ``train.vit.train_vit``, ``train.rbf_protonet.train_rbf_protonet``;
+    ``tests/test_train/test_the_sgd_weight_decay_has_one_rule.py`` finds, by AST, any other module under ``src/train`` or
+    ``src/applications`` that builds an ``L2`` from a decay. Failure mode: none (a plain number in, a regularizer or ``None`` out).
+    """
+    # DECISION plan-2026-11-03T221936-98b866fb/D-042 (the rule, step 10e) and D-048 (one function for it, step 10f)
+    # The penalty is `L2(weight_decay / 2)`, NOT `L2(weight_decay)`. Keras `L2(l)` adds `l * sum(w^2)` to the loss, whose
+    # gradient is `2 * l * w`; the SGD weight decay adds `wd * w`. `L2(wd)` decayed twice as hard as the number says (measured in
+    # D-042: a real SGD step shrinks a weight 2.0000 times as far). `train_vit` and `train_rbf_protonet` kept `L2(config.weight_decay)`
+    # under `--optimizer sgd` until D-048. Do NOT build an `L2` from a decay inline in a trainer: call this function.
+    if weight_decay is None or weight_decay <= 0:
+        return None
+    return keras.regularizers.L2(weight_decay / 2)
 

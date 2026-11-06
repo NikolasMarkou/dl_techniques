@@ -543,7 +543,7 @@ can change it). Other values of the six recipes: ViT uses patch 16 at 224 with d
 (`vit/train_vit.py:79-80,451-453`); the sgd weight decay of `resnet` is an L2 penalty on the model, of strength `wd / 2`
 because Keras' `L2(l)` has the gradient `2 * l * w` and He et al.'s SGD weight decay `wd` adds `wd * w` to it (before step 10e of plan 98b866fb
 the penalty was `L2(wd)`, twice the paper's decay), and it reaches convolution and dense kernels only, where torchvision's reference
-trainer decays every parameter by default (BatchNorm scale and shift and the dense bias, 0.09 percent of `resnet18`'s parameters, get none: the "no bias decay" rule of Bag of Tricks, arXiv 1812.01187);
+trainer decays every parameter by default (BatchNorm scale and shift and the dense bias, 0.09 percent of `resnet18`'s parameters, get none: Goyal et al. 2017, arXiv 1706.02677 section 4.2, apply no decay to the BatchNorm coefficients, and the "no bias decay" rule of Bag of Tricks, He et al. 2019, arXiv 1812.01187, decays only the weights of convolution and fully connected layers, which is this rule);
 `resnet` has no gradient clip (the legacy trainer's global clip of 1.0 is deleted from both arms: neither He et al. 2015 nor torchvision's
 reference trainer clips); adamw decays in the optimizer; `convnext_v1` and `convnext_v2` use strides 4, drop path 0.1 and dropout 0 on both datasets; stochastic
 depth is 0.3 for `cliffordnet` (0.4 for `cn_64_5`) and 0.1 for `cliffordnet_hier`. The cliffordnet batches are measured, not

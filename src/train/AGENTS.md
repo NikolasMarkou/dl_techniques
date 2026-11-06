@@ -82,9 +82,13 @@ model-specific arguments on top of it.
 >
 > **`L2(wd)` is twice the SGD weight decay `wd`.** Keras `L2(l)` adds `l * sum(w^2)` to the loss, whose gradient is
 > `2 * l * w`; the SGD weight decay of He et al. 2015 and of `torch.optim.SGD(weight_decay=wd)` adds `wd * w`. To give an SGD
-> model the paper's decay, pass `kernel_regularizer=L2(wd / 2)` (`train_resnet.py` and `api/recipes.py:_weight_decay_regularizer`
-> do, D-042 of plan 98b866fb, which measured a real SGD step shrinking a weight 2.0000 times as far under `L2(wd)`). `vit` and `rbf_protonet` with `--optimizer sgd` (not their
-> default) still pass `L2(weight_decay)`: the same doubling, outside that plan.
+> model the paper's decay, pass `kernel_regularizer=train.common.optimizer.sgd_weight_decay_regularizer(wd)`, which is `L2(wd / 2)`:
+> `train_resnet.py`, `train_vit.py`, `train_rbf_protonet.py` and `api/recipes.py:_weight_decay_regularizer` do (D-042 and D-048 of plan
+> 98b866fb; D-042 measured a real SGD step shrinking a weight 2.0000 times as far under `L2(wd)`; `vit` and `rbf_protonet` passed
+> `L2(weight_decay)` under `--optimizer sgd` until D-048). Do not build an `L2` from a decay inline:
+> `tests/test_train/test_the_sgd_weight_decay_has_one_rule.py` fails any module under `src/train` or `src/applications` that does.
+> The `image_segmentation` task builds no such penalty, so it refuses `optim_args.optimizer=sgd` with a positive `optim_args.weight_decay`
+> (D-047).
 
 > **A failed run does not exit 0, and that includes a failure one call below `main`.** A broad
 > `except` (bare, `Exception`, `BaseException`) anywhere under `src/train` re-raises, exits

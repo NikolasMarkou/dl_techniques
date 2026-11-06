@@ -36,6 +36,7 @@ from train.common.classification_data import add_selection_arguments, load_class
 from train.common.image_augment import build_augment
 from train.common.conformal import DEFAULT_ALPHA, add_conformal_arguments, run_conformal
 from train.common.imagenet import require_imagenet_root
+from train.common.optimizer import sgd_weight_decay_regularizer
 from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
 from dl_techniques.utils.logger import logger
 from dl_techniques.datasets.vision.imagenet2012 import IMAGENET2012_DEFAULT_ROOT
@@ -260,13 +261,11 @@ def train_vit(
     # ---- Model ----
     # LESSONS L72 (Double Weight Decay guard): when optimizer is AdamW, pass
     # weight_decay to optimizer_builder ONLY and leave kernel_regularizer=None.
-    # When optimizer is SGD, use kernel_regularizer=L2(weight_decay) instead.
+    # When optimizer is SGD, use the penalty `sgd_weight_decay_regularizer(weight_decay)` = `L2(weight_decay / 2)` instead.
+    # DECISION plan-2026-11-03T221936-98b866fb/D-048: NOT `L2(config.weight_decay)`, which is twice the SGD weight decay the flag
+    # names (D-042). Do NOT build the L2 inline here; the shared function carries the rule and its measurement.
     use_adamw = config.optimizer_type.lower() == "adamw"
-    kernel_reg = (
-        None
-        if use_adamw
-        else (keras.regularizers.L2(config.weight_decay) if config.weight_decay > 0 else None)
-    )
+    kernel_reg = None if use_adamw else sgd_weight_decay_regularizer(config.weight_decay)
 
     model = create_vit(
         variant=config.model_variant,

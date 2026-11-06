@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from typing import Tuple, List, Optional, Dict, Any
 
 from train.common import setup_gpu, set_seeds, create_callbacks as create_common_callbacks
+from train.common.optimizer import sgd_weight_decay_regularizer
 from train.common.classification_data import (
     ClassificationData,
     add_selection_arguments,
@@ -217,13 +218,11 @@ def train_rbf_protonet(
     # ---- Model ----
     # LESSONS L72 (Double Weight Decay guard): when optimizer is AdamW, pass
     # weight_decay to optimizer_builder ONLY and leave kernel_regularizer=None.
-    # When optimizer is SGD, use kernel_regularizer=L2(weight_decay) instead.
+    # When optimizer is SGD, use the penalty `sgd_weight_decay_regularizer(weight_decay)` = `L2(weight_decay / 2)` instead.
+    # DECISION plan-2026-11-03T221936-98b866fb/D-048: NOT `L2(config.weight_decay)`, which is twice the SGD weight decay the flag
+    # names (D-042). Do NOT build the L2 inline here; the shared function carries the rule and its measurement.
     use_adamw = config.optimizer_type.lower() == "adamw"
-    kernel_reg = (
-        None
-        if use_adamw
-        else (keras.regularizers.L2(config.weight_decay) if config.weight_decay > 0 else None)
-    )
+    kernel_reg = None if use_adamw else sgd_weight_decay_regularizer(config.weight_decay)
 
     if config.model_variant == "rbf_protonet":
         model = create_rbf_protonet(
