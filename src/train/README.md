@@ -816,4 +816,38 @@ was lower on both statistics, by 0.0106 and 0.0088 against tolerances of 0.0137 
 images: "no difference larger than the machine's own repeat noise", not "equal"). **Parity does not cover the shipped
 `cliffordnet` recipe**: batch 8 (16 for `cliffordnet_hier`) at 224 px with a learning rate of 1e-3 that is not scaled for
 that batch (Memory fit, above), which nobody has trained to an accuracy, so whether it learns on Imagenette or ImageNet is
-unknown. The other families' recipes are pinned by tests that build them, not by a run. The legacy `train.<model>` scripts remain.
+unknown. The other families' recipes are pinned by tests that build them, not by a run, **except the five below**. The legacy `train.<model>` scripts remain.
+
+**Parity on CIFAR-10 for `convnext_v1`, `convnext_v2`, `cliffordnet` (`nano`) and `cliffordnet_hier` (`hier_345`), and on Oxford-IIIT Pet for
+`convunext` (`tiny`), against the legacy trainers as corrected by plan 98b866fb** (step 10, D-050 to D-056, commit 197c16d5d, RTX 4090). The
+protocol is `scratch_parity_classification/protocol.md` of that plan, sha256
+`17593391dee83f658788dfbca84e1eb7d0c2b208a421a0fb325a13bb00d96ffc`, with addenda 1 to 5a (the Pet pair is addendum 5). Every arm of a family
+ran 20 epochs (the first epoch of each CIFAR family projected 30 epochs above the protocol's 0.40 h per run; Pet ran 20 epochs and patience
+20 on both arms, the parent plan's gate, so early stopping cannot fire), with the settings the protocol's checklist resolved through each
+trainer's own parser: 45,000 images to fit and a 5,000-image selection split for CIFAR-10, 3,312 to fit and 368 selection for Pet. The
+rule is the parent plan's D-005: legacy seeds 42, 43, 44 and 42 again, API seeds 42, 43, 44; the scalars are the best and the last epoch's
+`val_accuracy` (`val_miou` for Pet) on the selection split; `T = max(range of the three legacy seeds, |L42 - L42r2|)` per scalar, written
+before the family's first API run; PASS iff the means differ by at most `T` on both. Legacy seeds 42 and 43 are the fix steps' "after" runs,
+because a CPU same-seed one-epoch fit at the parity commit gave exactly the weights it gave at each fix commit (102, 112, 190 and 208 arrays);
+seed 44 and the repeat of 42 ran at the parity commit.
+
+| family (20 epochs) | `T` best / last | mean legacy best / last | mean API best / last | API minus legacy | verdict |
+|---|---|---|---|---|---|
+| `convnext_v1/cifar10` | 0.0120 / 0.0162 | 0.8123 / 0.8107 | 0.8098 / 0.8093 | -0.0025 / -0.0015 | PASS |
+| `convnext_v2/cifar10` | 0.0128 / 0.0116 | 0.8423 / 0.8417 | 0.8483 / 0.8477 | +0.0061 / +0.0059 | PASS |
+| `cliffordnet/nano` | 0.0170 / 0.0156 | 0.8749 / 0.8734 | 0.8716 / 0.8714 | -0.0033 / -0.0020 | PASS |
+| `cliffordnet_hier/hier_345` | 0.0074 / 0.0076 | 0.8815 / 0.8814 | 0.8819 / 0.8818 | +0.0004 / +0.0004 | PASS |
+| `convunext/tiny`, Pet (`val_miou`) | 0.0102 / 0.0098 | 0.7072 / 0.7067 | 0.7041 / 0.7035 | -0.0031 / -0.0032 | PASS |
+
+Read each PASS as "no difference larger than the legacy trainer's own spread over three seeds and one repeat", not as "equal": the CIFAR-10
+selection split is 5,000 images (one image is 0.02 points), the Pet selection split 368, and `T` from three seeds is a noisy range (it was
+0.007 to 0.017 here, never near the 0.03 at which the protocol refuses to judge). Test accuracy, reported and not in the rule, differs
+between the arms' means by -0.0025, +0.0039, +0.0016 and -0.0024 (CIFAR-10, in the table's order) and by -0.0019 test mIoU on Pet. The
+numbers are of the corrected legacy: the fixes of this plan moved the CIFAR-10 mean best `val_accuracy` of the legacy `convnext_v1` by about
+-3.7 points (step 10b, the layer scale; both seeds) and of `cliffordnet_hier` by about -0.8 points (step 10d, the AutoAugment table; not
+attributable by that plan's rule), so these means are not comparable with any run made before them. The earlier verdicts stand for the code they measured: `vit_pico` on CIFAR-10 is not on the path of any fix of this plan (it trains with
+`cifar_light`, not the AutoAugment policy, and the API classification golden, a `vit_pico` fit on CPU, compares exactly with its baseline at
+every fix commit, final weights included); `cliffordnet/nano` on Imagenette is not on the policy of the AutoAugment fix either (the
+Imagenette recipe uses no augmentation preset) and the `StochasticDepth` fix leaves a `fit` exactly unchanged. The Pet pair replaces the
+parent plan's PASS for `convunext`, which was a verdict on the old ConvNeXt V2 block. The segmentation families other than `convunext`,
+the other classification families, and the shipped `cliffordnet` recipe on Imagenette have no parity run.

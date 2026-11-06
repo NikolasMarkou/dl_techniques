@@ -615,8 +615,12 @@ The default `run_analysis` passes the run's `seed` as the analyzer's `random_sta
 `pl_pvalue` is reproducible between runs of one seed; the legacy trainers stay unseeded.
 <!-- knobs:end -->
 
-- **Parity with the legacy trainer is measured for `vit_pico` on CIFAR-10 and for `cliffordnet/nano` on Imagenette
-  at batch 32 and 128 px, and not for the shipped `cliffordnet` recipe (batch 8 at 224 px, lr 1e-3 unscaled).** Do not
-  claim it for another family or recipe without a run.
+- **Parity with the legacy trainer is measured for `vit_pico` on CIFAR-10, for `cliffordnet/nano` on Imagenette
+  at batch 32 and 128 px, and, against the legacy trainers as corrected by plan 98b866fb (step 10, 20 epochs, protocol sha256
+  `17593391dee83f658788dfbca84e1eb7d0c2b208a421a0fb325a13bb00d96ffc`), for `convnext_v1`, `convnext_v2`, `cliffordnet/nano` and
+  `cliffordnet_hier/hier_345` on CIFAR-10 and for `convunext/tiny` on Oxford-IIIT Pet: all five PASS (table in
+  `src/train/README.md`). It is not measured for the shipped `cliffordnet` recipe (batch 8 at 224 px, lr 1e-3 unscaled).** Do not
+  claim it for another family or recipe without a run. A parity number made before the fixes of that plan (the layer scale, the
+  GRN, the AutoAugment table) is a number of the old legacy trainer.
 - Tests: `tests/test_train/test_api/`. Scope pytest to that directory; the whole of it takes a long
   time (the export-per-family file alone is minutes).
