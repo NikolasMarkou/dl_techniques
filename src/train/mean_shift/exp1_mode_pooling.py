@@ -127,16 +127,16 @@ def run_worker(args: argparse.Namespace) -> int:
     # The weights scored below are the FINAL epoch's: do NOT restore a best epoch picked on any split.
     history = common.fit_cell(model, data, recipe)
 
-    arrays = data.arrays
-    accuracy = {name: common.top1(model, images, arrays.y_test)
-                for name, images in corrupted_test_sets(arrays.x_test, args.seed)}
+    x_test, y_test = common.test_split(data, args.max_samples)
+    accuracy = {name: common.top1(model, images, y_test)
+                for name, images in corrupted_test_sets(x_test, args.seed)}
     x_select, y_select = common.selection_split(data)
     metrics = {
         "experiment": EXPERIMENT, "arm": args.arm, "dataset": args.dataset,
         "epochs": args.epochs, "max_samples": args.max_samples, "seed": args.seed,
         "accuracy": accuracy,
         "select_accuracy": common.top1(model, x_select, y_select),
-        "n_select": int(len(x_select)), "n_test": int(len(arrays.x_test)),
+        "n_select": int(len(x_select)), "n_test": int(len(x_test)),
         "dtype_policy": "float32", "patch_size": PATCH_SIZE,
     }
     result = common.build_result(

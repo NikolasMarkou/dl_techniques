@@ -213,7 +213,8 @@ def load_cell_data(dataset: str, recipe: Recipe, seed: int, max_samples: Optiona
     ``normalize="unit"`` makes the model input equal the pixel domain the corruptions work
     in; the train pipeline gets the ``cifar_light`` augmentation. Selection is the held-out
     slice of train that the loader cuts (``validation_split`` default); the test split only
-    scores. ``max_samples`` caps the train pool only (smoke runs); the test split is whole.
+    scores. ``max_samples`` caps the train pool only (smoke runs); the test split is whole here, and
+    a cell that wants a cheaper smoke caps what it SCORES with :func:`test_split`.
 
     Returns:
         A ``train.common.classification_data.ClassificationData``; ``data.arrays`` holds the
@@ -257,6 +258,25 @@ def selection_split(data) -> Tuple[np.ndarray, np.ndarray]:
     The only split any ranking or choice may read; the test split only scores.
     """
     return data.arrays.x_select, data.arrays.y_select
+
+
+def test_split(data, max_samples: Optional[int]) -> Tuple[np.ndarray, np.ndarray]:
+    """``(images, labels)`` a cell scores: the loader's test split, or its first ``max_samples`` rows (smoke runs).
+
+    Interface contract: ``data`` is what :func:`load_cell_data` returns; ``max_samples`` is the ``--max-samples`` of
+    the cell, ``None`` for the whole split. The rows are the loader's seeded test order, so a cap keeps the rows the
+    loader returned for the same cap before ``237ed68f5`` (byte-identical, measured on CIFAR-10 and CIFAR-100, seeds
+    0 and 3). ``n_test`` in a cell's result is the length of what this returns.
+    """
+    # DECISION plan-2026-11-03T221936-98b866fb/D-046
+    # The CELL caps its test images; the loader does not (D-022: ``data.max_samples`` caps the train pool only). Do NOT
+    # score the whole split under ``--max-samples``: a smoke cell then takes 366 s instead of 50 s on CPU (scoring
+    # 321 s instead of 11 s: 10,000 images through 11 corruption conditions), and this flag's own help text said it
+    # capped the test split as well. Do NOT ask the loader for the cap again either; that is what D-022 removed.
+    x_test, y_test = data.arrays.x_test, data.arrays.y_test
+    if max_samples is None:
+        return x_test, y_test
+    return x_test[:max_samples], y_test[:max_samples]
 
 
 def top1(model, x: np.ndarray, y: np.ndarray, batch_size: int = 256) -> float:
@@ -549,7 +569,8 @@ def add_run_arguments(parser: argparse.ArgumentParser, default_dataset: str) -> 
     parser.add_argument("--epochs", type=int, required=True,
                         help="epochs of every cell (the shared recipe, no early stopping)")
     parser.add_argument("--max-samples", type=int, default=None,
-                        help="smoke cap on the train pool (the test split is never capped)")
+                        help="smoke cap on the train pool and on the test images a cell scores (its first N, in the "
+                             "loader's seeded order); default: both whole")
 
 
 def run_extra_args(args: argparse.Namespace) -> Tuple[str, ...]:

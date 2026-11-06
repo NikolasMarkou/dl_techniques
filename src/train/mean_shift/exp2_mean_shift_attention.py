@@ -270,18 +270,18 @@ def run_worker(args: argparse.Namespace) -> int:
                 f"{recipe.epochs} epochs")
     history = common.fit_cell(model, data, recipe)
 
-    arrays = data.arrays
+    x_test, y_test = common.test_split(data, args.max_samples)
     x_select, y_select = common.selection_split(data)
     select_accuracy = common.top1(model, x_select, y_select)
-    test_accuracy = common.top1(model, arrays.x_test, arrays.y_test)
+    test_accuracy = common.top1(model, x_test, y_test)
     metrics = {
         "experiment": EXPERIMENT, "attention_type": args.arm, "config": args.config,
         "config_args": dict(spec["attention_args"]), "dataset": args.dataset,
         "epochs": args.epochs, "max_samples": args.max_samples, "seed": args.seed,
         "select_accuracy": select_accuracy, "test_accuracy": test_accuracy,
-        "throughput_images_per_s": measure_throughput(model, arrays.x_test),
+        "throughput_images_per_s": measure_throughput(model, x_test),
         "bandwidths": learned_bandwidths(model, x_select[:PROBE_IMAGES]),
-        "n_select": int(len(x_select)), "n_test": int(len(arrays.x_test)),
+        "n_select": int(len(x_select)), "n_test": int(len(x_test)),
         "dtype_policy": "float32",
     }
     result = common.build_result(
