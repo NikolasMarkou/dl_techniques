@@ -711,6 +711,12 @@ and a run of E epochs takes (validation not counted):
 | 200 | 30.6 | 27.5 |
 <!-- imagenet-time:end -->
 
+The one longer measurement on the whole train set (step 12 of plan 98b866fb, `resnet/resnet18`, batch 256, 150 steps through the API path,
+12 minutes, with another process holding 11 GB of the card) read **52 images per second over steps 1 to 50 and 79 and 76 over steps 50 to 100
+and 100 to 150**, so a steady rate near 77 images per second puts one epoch at 4.6 hours of training, and about 5 hours with its
+evaluation, figures and analysis. The one full ImageNet epoch was not run (it exceeded the 4.5 GPU hours this plan allowed for the family); at
+77 images per second the table above is 9.6 days for 50 epochs and 19.1 for 100.
+
 So the 50-epoch ImageNet recipe (`vit`) takes about a week, and the 100-epoch ones (`resnet`, `convnext`) about two. A
 killed epoch is lost: the run goes back to the start of the epoch it was in (`resume_interrupted=true` trains it again), and
 at these rates an epoch is hours; `checkpoint_args.backup_every_steps` bounds the loss to that many batches (next section). A shorter trial is
