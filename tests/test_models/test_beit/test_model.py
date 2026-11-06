@@ -33,8 +33,9 @@ Two costs are traded deliberately:
   is left to the ``base`` path, which exercises the identical code with different
   numbers -- a 1.2 GB build in a unit test buys nothing the ``base`` build does not.
 * Everything that must be deterministic passes ``training=False`` EXPLICITLY.
-  ``training=None`` is NOT inference for ``StochasticDepth`` -- it short-circuits only
-  on ``training is False`` -- and every block here carries a non-zero drop-path rate.
+  ``training=None`` WAS NOT inference for ``StochasticDepth`` (it short-circuited only
+  on ``training is False``; fixed by plan 98b866fb D-044), and every block here carries
+  a non-zero drop-path rate, so the explicit flag stays.
 """
 
 import json

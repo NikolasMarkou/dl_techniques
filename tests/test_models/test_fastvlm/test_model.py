@@ -959,8 +959,8 @@ class TestFastVLMStochasticDepthWiring:
     def test_inference_is_bit_identical_across_regularization_rates(self) -> None:
         """(c) INFERENCE IDENTITY: both mechanisms are identity at training=False.
 
-        `StochasticDepth.call` short-circuits on `training is False`
-        (stochastic_depth.py:144-146) and `Dropout` likewise, so with the SAME
+        `StochasticDepth.call` returns its input unless `training` is truthy
+        (stochastic_depth.py, plan 98b866fb D-044) and `Dropout` likewise, so with the SAME
         weights a heavily-regularized model and an un-regularized one must agree
         EXACTLY at inference. This is measured, not assumed.
         """

@@ -211,9 +211,12 @@ That silence is the reason they are written down here.
 
   Pick the pooling to match the padding side. Decoders pool `last` under
   `head_attention_mask(input_ids, attention_mask, pad_token_id)`.
-- **`training=None` is not inference.** `layers/regularization/stochastic_depth.py` only
-  short-circuits on `training is False`, so a plain `model(x)` drops paths. Two calls can still
-  agree by luck.
+- **`training=None` is inference for the drop-path layers, since D-044 of plan-2026-11-03T221936-98b866fb.**
+  `layers/regularization/stochastic_depth.py` (and `StochasticGradient`, and the join of
+  `fractal_block.py`) act only when `training` is truthy, as Keras `Dropout` does. Before it they
+  tested `training is False`, so a plain `model(x)` dropped paths and two calls agreed only by luck.
+  A layer you write must use `if not training` too; `tests/test_layers/test_regularization/test_a_drop_layer_is_identity_without_a_training_flag.py`
+  fails on any layer under `layers/` that tests `training is False`.
 - **Norm epsilon differs between frameworks.** Keras BatchNorm, LayerNorm and GroupNorm default
   to 1e-3, PyTorch uses 1e-5, and `create_normalization_layer` sets 1e-6. In one port, 86 of 114
   norms were 100x off. Histogram `layer.epsilon` over `model._flatten_layers()` after a port.

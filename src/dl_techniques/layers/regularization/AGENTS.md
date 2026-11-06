@@ -50,8 +50,8 @@ Training-mode behaviour per layer:
 | Layer | Condition for the effect | Inference |
 | --- | --- | --- |
 | `ScheduledDropout` | `training` truthy | identity, counter not advanced |
-| `StochasticDepth` | not (`training is False` or rate == 0) | identity |
-| `StochasticGradient` | not (`training is False` or rate == 0) | identity |
+| `StochasticDepth` | `training` truthy and rate > 0 | identity (`training` falsy or `None`) |
+| `StochasticGradient` | `training` truthy and rate > 0 | identity (`training` falsy or `None`) |
 | `SelectiveGradientMask` | `training` truthy | returns `signal` |
 | `SpatialSmoothness` | `training is True`, `alpha > 0`, input not a `KerasTensor` | identity, no loss |
 | `ConditionalOutputLayer`, `LayerScale`, `GaussianReadout` | `training` ignored | same computation |
@@ -193,7 +193,7 @@ External: `keras` (3.x, `keras.ops` and `keras.random`), `numpy` (layout and tab
 - `SpatialSmoothness.__init__` raises `ValueError` for `alpha < 0`, `radius < 1`, `num_neighborhoods < 1`, unknown `distance`, `eps <= 0`, bad `grid_dim`, `max_samples < 2`. `build` raises on a `None` last axis, a `grid_shape` whose product is not `num_units`, or a grid shorter than `2 * radius + 1` on any axis.
 - `build_patch_tables` raises `ValueError` if the inverse-distance vector is constant.
 - `GaussianReadout` raises `ValueError` for non-positive `fwhm` or `unit_spacing`, an even or non-positive `kernel_size`, an unknown `padding_mode`, a `None` last axis, or a three-entry `grid_shape`.
-- Silent behaviours worth knowing: `RouterLayer` with a non-multiplicative mask gives wrong logits with no error; `ScheduledDropout` accepts out-of-range schedules and relies on the call-time clip; `StochasticDepth`/`StochasticGradient` act when `training=None`.
+- Silent behaviours worth knowing: `RouterLayer` with a non-multiplicative mask gives wrong logits with no error; `ScheduledDropout` accepts out-of-range schedules and relies on the call-time clip; `StochasticDepth`/`StochasticGradient` are inert when `training=None` (plan-2026-11-03T221936-98b866fb D-044; before it they dropped paths on a plain `model(x)`).
 
 ## Working here
 

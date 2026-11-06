@@ -598,12 +598,13 @@ class TestConvNeXtV1:
             assert original_outputs.shape == loaded_outputs.shape
             assert loaded_model.count_params() == model.count_params()
 
-            # `training=False` is load-bearing and must NOT be relaxed to a bare
-            # `model(x)`: SYSTEM.md framework behaviour 3 records that `training=None` is
-            # not inference here — the shared `StochasticDepth` short-circuits on
-            # `training is False` only, so a plain call runs the stochastic path and
-            # produces round-trip deltas of 0.2-2.2 that look exactly like reinitialized
-            # weights.
+            # `training=False` is kept explicit: SYSTEM.md framework behaviour 3 records
+            # that `training=None` was not inference here — the shared `StochasticDepth`
+            # short-circuited on `training is False` only, so a plain call ran the
+            # stochastic path and produced round-trip deltas of 0.2-2.2 that look exactly
+            # like reinitialized weights. Plan 98b866fb D-044 made the layer inert unless
+            # `training` is truthy; the flag stays explicit so the assertion does not
+            # depend on that predicate.
             np.testing.assert_allclose(
                 keras.ops.convert_to_numpy(original_outputs),
                 keras.ops.convert_to_numpy(loaded_outputs),

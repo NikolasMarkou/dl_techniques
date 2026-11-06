@@ -100,7 +100,7 @@ Tests live in `tests/test_layers/test_regularization/`. Run them with `.venv/bin
 
 ## Things to know
 
-- `StochasticDepth` and `StochasticGradient` only skip their effect when `training is False` (or the rate is 0). With `training=None` they behave as in training.
+- `StochasticDepth` and `StochasticGradient` act only when `training` is truthy (and the rate is above 0), like Keras `Dropout`. With `training=None`, which is what a plain `layer(x)` or `model(x)` passes down, and with `training=False`, they return the input unchanged. (Before plan-2026-11-03T221936-98b866fb D-044 they dropped paths on `training=None`.)
 - `ScheduledDropout` counts its own training-mode calls, not optimizer steps. Calling it twice per step, sharing one instance, or running `model(x, training=True)` for Monte Carlo sampling advances the schedule faster than expected. The counter is saved with the model; the random stream position is not.
 - A `ScheduledDropout` schedule that leaves `[0, 1)` is not rejected at construction. Only the call-time clip protects against it.
 - `RouterLayer` computes all three paths on every call (about two transformer applications of cost), so it does not save compute. The router MLP gets no gradient from the task loss, because choosing the action is an argmax. It trains only if you attach a loss to the returned logits. Passing `layer_decision` does not train it: that argument only forces which path is taken (teacher forcing), in place of the argmax, so a loss on the returned logits is still needed.

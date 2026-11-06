@@ -130,9 +130,10 @@ from dl_techniques.models.vision_language.mobile_clip import MobileClipV2Model
 
 model = MobileClipV2Model.from_variant('mobileclip2_s0')
 
-# Pass training=False EXPLICITLY. StochasticDepth short-circuits to the identity
-# only when `training is False`, and at training=None every BatchNormalization
-# uses batch statistics and updates its moving averages.
+# Pass training=False explicitly. StochasticDepth is the identity unless training
+# is truthy (plan 98b866fb D-044; it dropped paths at training=None before), and the
+# BatchNormalization behaviour at training=None documented here (batch statistics,
+# moving averages updated) was not re-measured by that plan.
 outputs = model(
     {'image': np.zeros((2, 256, 256, 3), dtype='float32'),
      'text':  np.zeros((2, 77), dtype='int32')},
@@ -401,7 +402,7 @@ def test_forward_pass_shapes():
 
 ## 13. Troubleshooting & FAQs
 
-**My forward pass is not reproducible.** `training=None`. `StochasticDepth` short-circuits to the identity only at `training is False`, and every BatchNormalization otherwise uses batch statistics and updates its moving averages. Pass `training=False` explicitly.
+**My forward pass is not reproducible.** Pass `training=False` explicitly. `StochasticDepth` is the identity at `training=None` since plan 98b866fb D-044 (before it, it dropped paths there); the documented BatchNormalization behaviour at `training=None` (batch statistics, moving averages updated) was not re-measured by that plan.
 
 **The loss becomes `nan`.** Either the learning rate or a diverging `logit_scale`. The temperature is already clipped at `logit_scale_max`, which prevents the `inf`-logit mode but not a badly scaled optimizer.
 

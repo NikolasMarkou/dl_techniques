@@ -738,9 +738,9 @@ class FastVitRepMixerBlock(keras.layers.Layer):
         └──────────────────────────────────────────────┘
 
     .. note::
-       ``StochasticDepth`` short-circuits to the identity only when ``training is
-       False`` (or the rate is exactly 0.0); ``training=None`` runs the stochastic
-       path. Deterministic tests must pass ``training=False`` EXPLICITLY.
+       ``StochasticDepth`` is the identity unless ``training`` is truthy (plan
+       98b866fb D-044; before it ``training=None`` ran the stochastic path).
+       Deterministic tests may still pass ``training=False`` explicitly.
 
     :param dim: Number of channels. The block preserves it. Must be positive.
     :type dim: int
@@ -1294,9 +1294,9 @@ class FastVitAttentionBlock(keras.layers.Layer):
         └──────────────────────────────────────────────┘
 
     .. note::
-       ``StochasticDepth`` short-circuits to the identity only when ``training is
-       False`` (or the rate is exactly 0.0); ``training=None`` runs the stochastic
-       path. Deterministic tests must pass ``training=False`` EXPLICITLY.
+       ``StochasticDepth`` is the identity unless ``training`` is truthy (plan
+       98b866fb D-044; before it ``training=None`` ran the stochastic path).
+       Deterministic tests may still pass ``training=False`` explicitly.
 
     **The rank-4 <-> rank-3 conversion is load-bearing.** The tower is
     channels-last rank-4, but the shared attention layer accepts ONLY rank-3
@@ -1711,9 +1711,9 @@ class FastVitStage(keras.layers.Layer):
         └──────────────────────────────────────────────────┘
 
     .. note::
-       ``StochasticDepth`` short-circuits to the identity only when ``training is
-       False`` (or the rate is exactly 0.0); ``training=None`` runs the stochastic
-       path. Deterministic tests must pass ``training=False`` EXPLICITLY.
+       ``StochasticDepth`` is the identity unless ``training`` is truthy (plan
+       98b866fb D-044; before it ``training=None`` ran the stochastic path).
+       Deterministic tests may still pass ``training=False`` explicitly.
 
     **The stage does NOT compute its own drop-path schedule.** The reference
     computes it ONCE, globally, across every block of every stage

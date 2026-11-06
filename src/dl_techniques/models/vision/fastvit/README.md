@@ -153,11 +153,12 @@ out = tower(
 out.shape                     # (2, 512)
 ```
 
-> **Always pass `training=False` explicitly for a deterministic forward.**
-> `StochasticDepth` short-circuits to the identity only when `training is
-> False`; at `training=None` it runs its stochastic path, and every
-> BatchNormalization in the tower uses batch statistics and updates its moving
-> averages.
+> **Pass `training=False` explicitly for a deterministic forward.**
+> `StochasticDepth` is the identity unless `training` is truthy (plan
+> 98b866fb D-044; before it, `training=None` ran its stochastic path), so the
+> explicit flag is now for clarity and for the BatchNormalization behaviour the
+> tower is documented to have at `training=None` (batch statistics and moving
+> averages updated; not re-measured by that plan).
 
 ## 5. Component reference
 
@@ -435,8 +436,9 @@ which is likewise not the FastViT stem.
 ## 10. Troubleshooting & FAQs
 
 **My forward pass is not reproducible.** Pass `training=False` explicitly.
-`StochasticDepth` short-circuits only on `training is False`, and `training=None`
-also puts every BatchNormalization into batch-statistics mode.
+`StochasticDepth` is the identity at `training=None` since plan 98b866fb D-044
+(before it, it dropped paths there); the documented BatchNormalization behaviour at
+`training=None` (batch-statistics mode) was not re-measured by that plan.
 
 **Should I add a projection head on top of the tower?** No. The tower's terminal
 `Dense` already is the CLIP image projection. Use `projection_dim=None` only

@@ -112,13 +112,21 @@ class StochasticDepth(keras.layers.Layer):
 
         :param inputs: Input tensor with shape ``(batch_size, ...)``.
         :type inputs: keras.KerasTensor
-        :param training: Whether in training mode. When training, each of the
-            ``batch_size`` samples is dropped or kept by its own independent draw.
+        :param training: Whether in training mode. Only a truthy value drops
+            paths, each of the ``batch_size`` samples by its own independent
+            draw; ``False``, ``None`` (a plain ``layer(x)`` or ``model(x)``) and
+            an absent flag all return the input unchanged, as Keras
+            ``Dropout`` does.
         :type training: bool or None
         :return: Output tensor with same shape as input.
         :rtype: keras.KerasTensor
         """
-        if training is False or self.drop_path_rate == 0.0:
+        # DECISION plan-2026-11-03T221936-98b866fb/D-044
+        # Inert unless `training` is truthy. Do NOT test `training is False`: a direct `model(x)` hands
+        # `training=None` down, and that predicate kept dropping paths there (outputs moved by 0.093 on a
+        # ConvNeXt V1 model between two identical calls). Keras Dropout is `if training and self.rate > 0`,
+        # timm drop_path is `if drop_prob == 0. or not training`.
+        if not training or self.drop_path_rate == 0.0:
             return inputs
 
         # One draw per sample, broadcast across that sample's other dims.

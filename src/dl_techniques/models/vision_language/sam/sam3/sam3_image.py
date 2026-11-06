@@ -224,7 +224,7 @@ class Sam3Image(keras.Model):
             "pretrain_img_size": 112,
             # DECISION plan-2026-08-05T124709-6c4fac48/D-018: 0.0 for all
             # three rates here, not the reference's 0.1.
-            # StochasticDepth drops paths under training=None (D-123), and `small` is the variant that gets fit()/round-trip/A-B comparisons this would corrupt. See decisions.md.
+            # StochasticDepth dropped paths under training=None (D-123; fixed by plan 98b866fb D-044), and `small` is the variant that gets fit()/round-trip/A-B comparisons this corrupted. The 0.0 is kept by design. See decisions.md.
             "drop_path_rate": 0.0, "dropout_rate": 0.0,
             "prompt_mlp_dropout_rate": 0.0,
             # DIVERGENCE +16 on R7 (embed_dim/4 = 48). 48 forces either a
@@ -269,9 +269,10 @@ class Sam3Image(keras.Model):
             "num_heads": 2, "mlp_ratio": 4.0, "window_size": 4,
             "global_att_blocks": (1,), "pretrain_img_size": 16,
             # DECISION plan-2026-08-04T044628-4c240b4c/D-123: 0.0 here, 0.1 in
-            # `sam3` -- StochasticDepth drops paths under training=None, so a
-            # non-zero rate makes .keras round trips differ by O(1) with
-            # every weight bit-identical. See decisions.md.
+            # `sam3` -- StochasticDepth dropped paths under training=None (fixed by
+            # plan 98b866fb D-044), so a non-zero rate made .keras round trips differ
+            # by O(1) with every weight bit-identical. The 0.0 is kept by design.
+            # See decisions.md.
             "drop_path_rate": 0.0,
             "d_model": 8, "scale_factors": (4.0, 2.0, 1.0, 0.5),
             "add_sam2_neck": False, "scalp": 1,
@@ -607,13 +608,13 @@ class Sam3Image(keras.Model):
             optional; omitting it treats every token as valid.
         :type inputs: Dict[str, Any]
         :param training: Keras training flag, forwarded to every component.
-            **Pass ``False`` explicitly for inference on the ``sam3`` variant.**
-            That variant carries the reference's ``drop_path_rate=0.1`` and the
-            shared ``StochasticDepth`` short-circuits on ``training is False``
-            ONLY, so the ``training=None`` a plain ``model(inputs)`` passes down
-            drops paths and the call is NOT deterministic (D-123; the trap is
-            executed by ``test_model.py::TestTrainingFlagTrap``). ``tiny`` sets
-            the rate to 0.0 and is unaffected.
+            The ``sam3`` variant carries the reference's ``drop_path_rate=0.1``;
+            the shared ``StochasticDepth`` is the identity unless ``training``
+            is truthy (plan 98b866fb D-044), so a plain ``model(inputs)`` is
+            deterministic. Before that fix the ``training=None`` a plain call
+            passes down dropped paths (D-123; both halves of the rule are
+            executed by ``test_model.py::TestTrainingFlagTrap``). ``tiny`` and
+            ``small`` set the rate to 0.0 by design.
         :type training: Optional[bool]
         :return: ``pred_logits`` ``(B, num_queries, 1)``, ``pred_boxes``
             ``(B, num_queries, 4)`` normalized ``cxcywh``, ``pred_masks``

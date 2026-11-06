@@ -15,7 +15,8 @@ The claims:
   measured over the run is printed in D-066);
 * a ``saved_model`` of a family with stochastic depth is REPEATABLE: two ``serve`` calls are
   equal, and equal Keras (the traced call is ``training=False``; ``model.export`` traced
-  ``training=None``, which left drop path live and made ``serve`` random);
+  ``training=None``, which left drop path live and made ``serve`` random until plan 98b866fb
+  D-044 made stochastic depth inert unless ``training`` is truthy);
 * the ``onnx`` arm on the same families fails if the function is traced ``training=True``;
 * a model that needs ``Roll`` converts to TFLite only through select ops, the result is
   checked against Keras, and a WARNING says it needs the Flex runtime; a converter that fails

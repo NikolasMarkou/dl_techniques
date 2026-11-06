@@ -130,13 +130,14 @@ outputs["pred_boxes"]    # (B, num_queries, 4)   cxcywh, normalized
 outputs["pred_masks"]    # (B, num_queries, h, w)
 ```
 
-> **Pass `training=False` explicitly on the `sam3` variant.** It carries the
-> reference's `drop_path_rate=0.1`, and the shared `StochasticDepth` layer
-> short-circuits on `training is False` **only** — so the `training=None` that
-> a plain `model(inputs)` passes down **drops paths**. At `training=None` a
-> *correct* `.keras` round trip measures value deltas of 0.2-2.2, which look
-> exactly like reinitialized weights. `tiny` uses `drop_path_rate=0.0` and is
-> unaffected.
+> **A plain `model(inputs)` is deterministic on every variant.** The `sam3`
+> variant carries the reference's `drop_path_rate=0.1`; the shared
+> `StochasticDepth` layer is the identity unless `training` is truthy (plan
+> 98b866fb D-044), so the `training=None` that a plain call passes down drops
+> nothing. Before that fix it did, and a *correct* `.keras` round trip measured
+> value deltas of 0.2-2.2 that looked exactly like reinitialized weights.
+> `training=True` still drops paths. `tiny` and `small` keep
+> `drop_path_rate=0.0`.
 
 ## 4. Component Reference
 

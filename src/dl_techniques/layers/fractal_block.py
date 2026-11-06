@@ -273,11 +273,11 @@ class FractalBlock(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Mean-join the two branches under local drop-path.
 
-        The plain mean of both branches is returned when ``training`` is
-        exactly ``False`` or ``drop_path_rate`` is zero. Any other value of
-        ``training``, including the default ``None``, takes the stochastic
-        path: each branch gets its own per-sample Bernoulli draw and the mean
-        covers only the survivors. Both branches drop together at rate
+        The plain mean of both branches is returned unless ``training`` is
+        truthy (``False``, ``None`` and an absent flag all give the mean) or
+        when ``drop_path_rate`` is zero. A truthy ``training`` takes the
+        stochastic path: each branch gets its own per-sample Bernoulli draw
+        and the mean covers only the survivors. Both branches drop together at rate
         ``drop_path_rate ** 2``, about 2.3% at the 0.15 default, and that case
         revives one branch with a fair coin, so the block never emits a zero
         map.
@@ -291,7 +291,10 @@ class FractalBlock(keras.layers.Layer):
         :return: The joined tensor.
         :rtype: keras.KerasTensor
         """
-        if training is False or self.drop_path_rate == 0.0:
+        # DECISION plan-2026-11-03T221936-98b866fb/D-044
+        # Same predicate as StochasticDepth: the stochastic join needs a truthy `training`. Do NOT test
+        # `training is False`; a plain `block(x)` hands down `training=None` and then dropped branches.
+        if not training or self.drop_path_rate == 0.0:
             return keras.ops.multiply(keras.ops.add(deep, shallow), 0.5)
 
         batch_size = keras.ops.shape(deep)[0]

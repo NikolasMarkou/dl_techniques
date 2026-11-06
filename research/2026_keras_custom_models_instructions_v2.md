@@ -766,7 +766,7 @@ Three details are load-bearing:
 | Detail                     | Why                                                                                                                                                                                            |
 |----------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `rtol=0`                   | `assert_allclose`'s default `rtol=1e-7` silently contributes to a nominally-`atol` bound. **Measured:** it contributed `1.24e-05` of a `1.53e-05` failure, making the stated `atol` decorative |
-| `training=False`, explicit | a bare `model(x)` is not inference; stochastic-depth layers short-circuit only on `training is False`                                                                                          |
+| `training=False`, explicit | a bare `model(x)` passes `training=None`. The repository's drop-path layers (`StochasticDepth`, `StochasticGradient`, the `FractalBlock` join) are inert there since plan 98b866fb D-044 (`if not training`, as Keras `Dropout`); before it they short-circuited only on `training is False`. A layer you write must gate its random op on a truthy `training`; assertions still pass `training=False` |
 | Values, never shapes       | a shape-only round trip is satisfied by a model that restored **zero** weights                                                                                                                 |
 
 A round trip can also fail for an *identity* reason rather than a value one: see §2.2 for registry

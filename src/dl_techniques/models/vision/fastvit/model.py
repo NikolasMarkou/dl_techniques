@@ -721,10 +721,12 @@ class FastVitImageEncoder(keras.Model):
         """Encode a batch of images.
 
         :param inputs: Image tensor ``(B, H, W, C)``.
-        :param training: Keras training flag. Pass ``False`` explicitly for a
-            deterministic forward; ``training=None`` runs the stochastic
-            path of every stochastic-depth branch and uses batch statistics
-            in every BatchNormalization.
+        :param training: Keras training flag. Stochastic depth is the identity
+            unless it is truthy (plan 98b866fb D-044; before it ``training=None``
+            ran every stochastic-depth branch). Pass ``False`` explicitly for a
+            deterministic forward; the BatchNormalization behaviour at
+            ``training=None`` stated here earlier (batch statistics) was not
+            re-measured by that plan.
 
         :return: ``(B, projection_dim)``, the CLIP image embedding (un-normalized), or
             ``(B, final_features)`` when ``projection_dim`` is ``None``.

@@ -228,6 +228,9 @@ def _export_saved_model(model: Any, directory: Path, spec: Any) -> None:
     # loads of the artifact: a fresh load restarts the random generator, so both loads draw the same
     # noise and the check passes on a random graph (the first version of the test did). Hold ONE runtime
     # object and call it twice, and scan the graph for random ops.
+    # Plan 98b866fb D-044 made StochasticDepth and StochasticGradient inert unless ``training`` is truthy, so
+    # ``training=None`` no longer leaves them live; the explicit ``training=False`` stays so that the artifact
+    # does not depend on any layer's predicate. Do NOT drop it because the two layers were fixed.
     archive = keras.export.ExportArchive()
     archive.track(model)
     archive.add_endpoint("serve", lambda batch: model(batch, training=False), [spec])

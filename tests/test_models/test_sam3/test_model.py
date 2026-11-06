@@ -673,9 +673,10 @@ class TestForwardStackExtraction:
       confusion would be INVISIBLE in `pred_boxes`. Every test here randomizes
       the head first, and `test_the_row_check_is_not_vacuous_...` executes the
       per-layer difference rather than assuming it.
-    - `training=None` is NOT inference on this stack (D-123). Every call below
-      passes `training=False` explicitly, so a bit-equality assertion cannot be
-      reading two different stochastic draws.
+    - `training=None` WAS NOT inference on this stack (D-123, fixed by plan
+      98b866fb D-044). Every call below still passes `training=False`
+      explicitly, so a bit-equality assertion cannot be reading two different
+      stochastic draws whatever a layer's predicate is.
 
     The `.keras` round-trip max-abs-delta-`0.0` floor is NOT re-asserted here:
     `TestSerialization::test_full_keras_roundtrip_preserves_output_VALUES`
@@ -1020,20 +1021,21 @@ class TestSmallVariant:
         assert rebuilt.count_params() == small.count_params()
 
     def test_small_pins_every_stochastic_rate_to_zero_deliberately(self):
-        """D-123's trap, and why this variant refuses to inherit 0.1.
+        """D-123's trap, and why this variant keeps 0.0 rather than inheriting 0.1.
 
-        The repository's shared `StochasticDepth` short-circuits on
-        `training is False` ONLY, so `training=None` -- what a plain
-        `model(inputs)` passes down -- DROPS PATHS. At a non-zero rate two
-        `.keras` round-trip outputs then differ by up to 2.22 with every weight
-        bit-identical, which is indistinguishable from a reinitialization
-        defect. `small` is the variant that gets `fit()`, round trips and a
-        frozen-vs-joint A/B run on it -- the three places where silent
-        stochasticity corrupts a COMPARISON rather than merely adding noise.
-        Do NOT "match the shipped variant" here: `sam3` keeps 0.1 because that
-        is the reference's number, and any caller who wants regularization
-        passes `drop_path_rate=0.1` explicitly AND then owes an explicit
-        `training=` at every call site (H-9). See decisions.md D-018.
+        Until plan 98b866fb D-044 the repository's shared `StochasticDepth`
+        short-circuited on `training is False` ONLY, so `training=None` -- what
+        a plain `model(inputs)` passes down -- DROPPED PATHS. At a non-zero rate
+        two `.keras` round-trip outputs then differed by up to 2.22 with every
+        weight bit-identical, which was indistinguishable from a
+        reinitialization defect. `small` is the variant that gets `fit()`, round
+        trips and a frozen-vs-joint A/B run on it -- the three places where
+        silent stochasticity corrupts a COMPARISON rather than merely adding
+        noise. D-044 made the layer inert unless `training` is truthy
+        (`TestTrainingFlagTrap` below executes both halves), so the trap is
+        gone; the variant's 0.0 is a design choice that D-044 did not change.
+        `sam3` keeps 0.1 because that is the reference's number. See
+        decisions.md D-018.
         """
         table = Sam3Image.MODEL_VARIANTS["small"]
         assert table["drop_path_rate"] == 0.0
@@ -1134,13 +1136,16 @@ class TestSerialization:
 
 
 class TestTrainingFlagTrap:
-    """`training=None` is NOT inference for this model, and that is measured.
+    """`training=None` IS inference for this model's drop path, and that is measured.
 
-    The repository's shared `StochasticDepth` short-circuits on
-    `training is False` ONLY, so a plain `model(inputs)` -- which passes
-    `training=None` down -- drops residual paths at any non-zero drop-path rate.
-    The `tiny` variant therefore pins its rate to 0.0; the shipped variant keeps
-    the reference's 0.1 and IS stochastic under `model(inputs)`.
+    Until plan 98b866fb D-044 the repository's shared `StochasticDepth`
+    short-circuited on `training is False` ONLY, so a plain `model(inputs)` --
+    which passes `training=None` down -- dropped residual paths at any non-zero
+    drop-path rate (the trap this class was written to execute). The layer is
+    now inert unless `training` is truthy, as Keras `Dropout` is. The `tiny`
+    variant still pins its rate to 0.0 and the shipped variant keeps the
+    reference's 0.1; the last test below executes both halves of the new rule
+    on a model with a non-zero rate.
     """
 
     def test_the_tiny_variant_is_deterministic_under_a_plain_call(self, model,
@@ -1153,40 +1158,36 @@ class TestTrainingFlagTrap:
         assert Sam3Image.MODEL_VARIANTS["tiny"]["drop_path_rate"] == 0.0
         assert Sam3Image.MODEL_VARIANTS["sam3"]["drop_path_rate"] == 0.1
 
-    def test_a_nonzero_drop_path_makes_a_plain_call_non_deterministic(self,
-                                                                     batch):
-        # The trap itself, executed rather than described. This is the arm that
-        # would have caught the round-trip "failure" that cost this step an hour.
+    def test_a_nonzero_drop_path_is_inert_under_a_plain_call_and_live_under_training_true(
+            self, batch):
+        # Both halves of the rule, executed on a model whose rate is 0.9: a plain
+        # call and `training=False` return the same masks EXACTLY, `training=True`
+        # does not repeat itself. The plain and `training=False` calls come first:
+        # `training=True` also moves BatchNormalization's moving statistics, which
+        # would change the inference reference.
         #
-        # SEED-PINNED, for the reason D-015/D-016 already found once in
-        # `test_seg_head.py`: both the weights and the six drop-path draws come
-        # from the KERAS GLOBAL RNG, so this reading is a function of whatever
-        # ran BEFORE it. It was observed to flip to `spread == 0.0` when a test
-        # in an EARLIER-collected file failed and therefore consumed a different
-        # amount of that stream -- under a source mutation that does not touch
-        # drop path at all. Pinning the stream here keeps the test measuring
-        # StochasticDepth rather than its neighbours.
-        #
-        # RE-MEASURED 2026-09-04 after further unrelated import-graph churn
-        # shifted the process-global seed stream (the same hazard the
-        # paragraph above already names): seed 3 now reads `spread == 0.0`.
-        # Across seeds 0..11 the spread now reads 3.18 / 4.01 / 7.10 / 0.0 /
-        # 4.47 / 3.68 / 0.0 / 4.69 / 4.29 / 4.21 / 5.22 / 2.86 -- reseeded to
-        # 0, comfortably clear of the `> 0.0` bar. Expect this to need
-        # re-picking again after a future import-graph change.
+        # SEED-PINNED, for the reason D-015/D-016 found in `test_seg_head.py`: the
+        # weights and the six drop-path draws come from the KERAS GLOBAL RNG, so
+        # the `training=True` spread is a function of whatever ran BEFORE it.
+        # The spread arm needs `> 0.0`, which fails only if every one of six
+        # draws kept every path.
         keras.utils.set_random_seed(0)
         stochastic = Sam3Image.from_variant("tiny", drop_path_rate=0.9)
         stochastic.build(None)
-        draws = [np.array(stochastic(batch)["pred_masks"]) for _ in range(6)]
+        reference = np.array(stochastic(batch, training=False)["pred_masks"])
+        for _ in range(3):
+            np.testing.assert_array_equal(
+                np.array(stochastic(batch)["pred_masks"]), reference)
+            np.testing.assert_array_equal(
+                np.array(stochastic(batch, training=False)["pred_masks"]),
+                reference)
+        draws = [np.array(stochastic(batch, training=True)["pred_masks"])
+                 for _ in range(6)]
         spread = max(float(np.max(np.abs(draws[0] - other)))
                      for other in draws[1:])
         assert spread > 0.0, (
-            "StochasticDepth no longer treats training=None as training -- "
+            "StochasticDepth no longer drops paths under training=True -- "
             "re-check the drop-path rates in MODEL_VARIANTS")
-        pinned = [np.array(stochastic(batch, training=False)["pred_masks"])
-                  for _ in range(3)]
-        assert max(float(np.max(np.abs(pinned[0] - other)))
-                   for other in pinned[1:]) == 0.0
 
 
 # ---------------------------------------------------------------------

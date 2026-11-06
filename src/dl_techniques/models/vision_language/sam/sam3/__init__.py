@@ -11,10 +11,11 @@ configuration; ``'small'`` and ``'tiny'`` are this repository's own
 development geometries, and ``'tiny'`` uses ``drop_path_rate=0.0`` where
 ``'sam3'`` uses the reference's ``0.1``.
 
-Pass ``training=False`` explicitly for the ``sam3`` variant: the shared
-``StochasticDepth`` layer only short-circuits when ``training`` is exactly
-``False``, so a plain ``model(inputs)`` call, which passes ``training=None``,
-silently drops paths.
+A plain ``model(inputs)`` call is deterministic on every variant: the shared
+``StochasticDepth`` layer is the identity unless ``training`` is truthy (plan
+98b866fb D-044). Before that fix it dropped paths on the ``training=None`` a
+plain call passes down, and the ``sam3`` variant needed ``training=False``
+passed explicitly.
 
 Out of scope in this phase: the vision-language fusion encoder the reference
 runs between neck and decoder, the exemplar and geometry prompt path

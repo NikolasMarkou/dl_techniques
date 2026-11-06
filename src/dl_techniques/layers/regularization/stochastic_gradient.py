@@ -107,12 +107,17 @@ class StochasticGradient(keras.layers.Layer):
 
         :param inputs: Input tensor.
         :type inputs: keras.KerasTensor
-        :param training: Whether in training mode.
+        :param training: Whether in training mode. Only a truthy value can
+            stop the gradient; ``False``, ``None`` and an absent flag return
+            the input unchanged.
         :type training: bool or None
         :return: Output tensor (same as input; gradient may be stopped during training).
         :rtype: keras.KerasTensor
         """
-        if training is False or self.drop_path_rate == 0.0:
+        # DECISION plan-2026-11-03T221936-98b866fb/D-044
+        # Same predicate as StochasticDepth: inert unless `training` is truthy. Do NOT test
+        # `training is False`; a direct `model(x)` passes `training=None` and then severed gradients.
+        if not training or self.drop_path_rate == 0.0:
             return inputs
 
         keep_prob =1.0 - self.drop_path_rate
