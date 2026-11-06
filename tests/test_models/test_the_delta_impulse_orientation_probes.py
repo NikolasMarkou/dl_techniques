@@ -23,6 +23,7 @@ import numpy as np
 import pytest
 
 from .delta_impulse_orientation_oracle import (
+    DEFAULT_MIN_RATIO,
     assert_impulse_support_box,
     assert_orientation_is_diagonal,
     impulse_energy_map,
@@ -274,6 +275,14 @@ def _bfd_builders():
     }
 
 
+#: ``bfconvunext``'s diagonal-to-off-diagonal ratio of a FRESH model depends on its random draw: over 30 seeds of the V2 arm
+#: (step 10c: no layer scale, GRN gamma starting at zero) the valid model reads 12.2 at the lowest, 57.8 at the median and 638 at
+#: the highest, 8 of 30 below the oracle's 20, and the test's own seed (20260820) reads 13.7; the one-sided transposed injection
+#: reads 0.001 at the highest (scratch_step10f2/delta_seeds_head.json of plan 98b866fb). 10 sits under every valid draw and
+#: four orders above every transposed one. The other two denoisers keep the oracle's 20.
+MIN_RATIO = {"bfconvunext": 10.0}
+
+
 class TestBiasFreeDenoiserStridePaths:
     """All three bias-free denoisers, probed at their native non-square input."""
 
@@ -287,6 +296,7 @@ class TestBiasFreeDenoiserStridePaths:
             (28, 12),
             8,
             label=f"bias_free_denoisers {name}",
+            min_ratio=MIN_RATIO.get(name, DEFAULT_MIN_RATIO),
         )
 
     @pytest.mark.parametrize("name", ["bfunet", "bfconvunext", "bfcnn"])
@@ -301,6 +311,7 @@ class TestBiasFreeDenoiserStridePaths:
                 (28, 12),
                 8,
                 label=f"bias_free_denoisers {name} (transposed)",
+                min_ratio=MIN_RATIO.get(name, DEFAULT_MIN_RATIO),
             )
 
     def test_the_denoisers_preserve_the_non_square_shape(self):
