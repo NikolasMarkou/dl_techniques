@@ -314,6 +314,10 @@ and a reused pid blocks nobody; the pid in the file is a label for the refusal m
 run. It is refused for a finished run (one with a `results_summary.json`), another request, other data, a live
 process holding the run, or a torn backup; `devices` and `analysis_args.eval_batch_size` may differ. The training data
 order replays epoch 0's and a half-done epoch is trained again (the key's help lists the rest).
+A run killed **before** a code change that alters training (step 10b of plan 98b866fb: the ConvNeXt V1 layer scale starts at 1e-6 and is
+no longer clamped or decayed; step 10c: ConvNeXt V2 blocks have no layer scale by default and a zero GRN gamma; step 10d: the CIFAR-10
+AutoAugment policy; step 10e: the ResNet decay and clip) and resumed **after** it continues under the new rules: its early epochs trained
+under the old ones and its later epochs train under the new ones, and nothing in the run records which epoch changed. Start such a run again.
 A run whose **training finished and whose reporting died** (the sidecar says `fit_finished`, there is no summary: the
 figures, the analyzer, the conformal sets or the final evaluation raised, for example out of memory), or whose
 **process died between the last epoch and `fit` returning** (every epoch ended, or early stopping had waited out its
