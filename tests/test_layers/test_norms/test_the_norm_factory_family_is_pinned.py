@@ -78,7 +78,9 @@ SRC_ROOT = os.path.join(os.path.dirname(_TESTS_DIR), "src")
 #: dynamic, 45 literal; then ``layers/fastvit/`` dissolved (its three files' sites move unchanged to
 #: ``conv_blocks/reparam_large_kernel_conv.py`` and ``models/vision/fastvit/components.py``): 195 sites,
 #: 99 files, 150 dynamic, 45 literal; then the ``layers/time_series`` de-dup (78bba4525) left
-#: ``mixed_sequential_block.py`` with one site instead of three: 193 sites, 99 files, 148 dynamic, 45 literal.
+#: ``mixed_sequential_block.py`` with one site instead of three: 193 sites, 99 files, 148 dynamic, 45 literal;
+#: then the NAM model, its trainers and tests were removed (cc5199915), taking two files and three dynamic sites out of the
+#: table but leaving the totals pin below at the old numbers: 190 sites, 97 files, 145 dynamic, 45 literal (step 13.9 of plan 98b866fb).
 #: Edit it in the commit that adds or removes a site.
 NORM_CALL_SITES: Dict[str, Tuple[int, int]] = {
     "dl_techniques/layers/attention/area_attention.py": (2, 0),
@@ -273,7 +275,7 @@ class TestTheNormFactoryCallSitePopulationIsPinned:
     def test_the_totals_match_the_census(self, norm_call_sites):
         dynamic = sum(pair[0] for pair in NORM_CALL_SITES.values())
         literal = sum(pair[1] for pair in NORM_CALL_SITES.values())
-        assert (dynamic, literal, len(NORM_CALL_SITES)) == (148, 45, 99), (
+        assert (dynamic, literal, len(NORM_CALL_SITES)) == (145, 45, 97), (
             "the census's own totals moved; re-derive the module docstring's numbers"
         )
 

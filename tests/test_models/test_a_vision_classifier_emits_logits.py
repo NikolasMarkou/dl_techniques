@@ -1085,6 +1085,35 @@ def test_every_classification_head_owner_has_a_census_row() -> None:
     # at 3a89046f8.
     assert len(owners) >= 16, sorted(owners)
     rows = {name.split("_")[0] for name in SUBJECTS}
-    assert owners <= rows, (
+    # An exemption is stated, and its premise is checked below; a stale name (the class no longer builds the head) fails here.
+    assert EMBEDDING_PROJECTIONS <= owners, (
+        f"exempt embedding projections that no longer own a classification head: {sorted(EMBEDDING_PROJECTIONS - owners)}")
+    assert owners - EMBEDDING_PROJECTIONS <= rows, (
         f"classification-head owners with no SUBJECTS row: "
-        f"{sorted(owners - rows)}; add one so the logits arms reach them")
+        f"{sorted(owners - EMBEDDING_PROJECTIONS - rows)}; add one so the logits arms reach them")
+
+
+#: Classes that build a ``ClassificationHead`` as a PROJECTION into an embedding space, not to score classes. The reference-head
+#: and knob tables of the census describe classifiers, so these are exempt by name, and
+#: ``test_an_exempt_embedding_projection_is_linear_and_unnormalized`` checks the premise (step 13.8 of plan 98b866fb: the
+#: MobileCLIP image encoder had no row and the census was red since it was written).
+EMBEDDING_PROJECTIONS = {"MobileClipImageEncoder"}
+
+
+def test_an_exempt_embedding_projection_is_linear_and_unnormalized() -> None:
+    from dl_techniques.models.vision_language.mobile_clip.components import MobileClipImageEncoder
+
+    keras.utils.set_random_seed(0)
+    encoder = MobileClipImageEncoder(backbone_name="MobileNetV2", image_size=32, projection_dim=NUM_CLASSES,
+                                     backbone_weights=None)
+    x = _images((32, 32, 3))
+    out = keras.ops.convert_to_numpy(encoder(x, training=False)).astype(np.float64)
+    assert out.shape == (BATCH, NUM_CLASSES), out.shape
+    classifier = encoder.projection_head.classifier
+    # The census's own bias-shift arm: a linear tail moves by exactly the shift; a softmax, sigmoid or ReLU tail does not.
+    original = keras.ops.convert_to_numpy(classifier.bias)
+    classifier.bias.assign(original - 50.0)
+    moved = keras.ops.convert_to_numpy(encoder(x, training=False)).astype(np.float64)
+    classifier.bias.assign(original)
+    assert np.abs(moved - out + 50.0).max() < 1e-4, np.abs(moved - out + 50.0).max()
+    assert classifier.activation is keras.activations.linear, classifier.activation

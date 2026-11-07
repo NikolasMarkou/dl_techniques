@@ -1115,8 +1115,11 @@ class TestFactoryKnobsAreForwarded:
     def test_the_sweep_found_call_sites(self):
         """The parameterization must not silently collapse to nothing."""
         dropped, dynamic = _sweep_factory_call_sites()
-        assert len(dropped) + len(dynamic) >= 20, (
-            "expected the factory call-site sweep to reach dozens of sites; it "
+        # The floor was 20 when set (2026-08-18). Refactors since moved call sites onto shared helpers and the sweep measures
+        # 19 on 2026-11-07 (6 dropped-parameter hits, 13 dynamic sites); the walk itself is proven live by the injected-defect
+        # tests of this class, so the floor is re-set under the measurement, not removed (step 13.9 of plan 98b866fb).
+        assert len(dropped) + len(dynamic) >= 15, (
+            "expected the factory call-site sweep to reach many sites; it "
             f"found {len(dropped)} dropped-param hits and {len(dynamic)} dynamic "
             "sites, which means the AST walk stopped seeing the tree"
         )
