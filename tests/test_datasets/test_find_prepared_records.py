@@ -7,7 +7,7 @@ which ``test_the_image_classification_trainers_share_one_ingestion_path`` forbid
 
 from pathlib import Path
 
-from dl_techniques.datasets.vision.imagenette import IMAGENETTE_TFDS_NAME, find_prepared_records
+from dl_techniques.datasets.vision.imagenette import IMAGENETTE_TFDS_NAME, IMAGENETTE_TFDS_VERSION, find_prepared_records
 
 
 def test_a_directory_with_no_records_is_not_found_and_nothing_is_created(tmp_path):
@@ -21,12 +21,24 @@ def test_a_version_directory_without_dataset_info_is_not_found(tmp_path):
     assert find_prepared_records(tmp_path)[1] is False
 
 
-def test_a_version_directory_with_dataset_info_is_found_whatever_the_version(tmp_path):
-    version = tmp_path / IMAGENETTE_TFDS_NAME / "9.9.9"
+def test_the_version_the_loader_reads_with_dataset_info_is_found(tmp_path):
+    """The function looks for ONE version, ``IMAGENETTE_TFDS_VERSION``, because that is the one ``read_imagenette_records`` asks for."""
+    version = tmp_path / IMAGENETTE_TFDS_NAME / IMAGENETTE_TFDS_VERSION
     version.mkdir(parents=True)
     (version / "dataset_info.json").write_text("{}")
     here, found = find_prepared_records(str(tmp_path))
     assert found is True and isinstance(here, Path)
+
+
+def test_another_version_with_dataset_info_is_not_found(tmp_path):
+    """Its docstring: a directory that holds another version is not prepared (the old test asserted the opposite, red since
+    the parent plan's step 22.4 made the lookup exact; step 13.1 of plan 98b866fb states the contract)."""
+    assert IMAGENETTE_TFDS_VERSION != "9.9.9"
+    other = tmp_path / IMAGENETTE_TFDS_NAME / "9.9.9"
+    other.mkdir(parents=True)
+    (other / "dataset_info.json").write_text("{}")
+    here, found = find_prepared_records(str(tmp_path))
+    assert found is False and here == tmp_path / IMAGENETTE_TFDS_NAME
 
 
 def test_a_file_where_the_directory_should_be_is_not_found(tmp_path):
