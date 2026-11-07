@@ -211,6 +211,53 @@ def test_rotation_turns_counter_clockwise_by_the_binned_degrees() -> None:
     assert row > 16 and col < 25
 
 
+def _where(op_name, coin, row=20, col=16, size=33):
+    """``(row, col)`` of the one lit pixel after ``op_name`` at bin 9 (magnitude 0.3 for a shear), or ``None`` when it left the image."""
+    pixels = np.zeros((size, size), np.uint8)
+    pixels[row, col] = 255
+    out = np.asarray(ia._apply_autoaugment_op(Image.fromarray(pixels), op_name, 9, coin))
+    lit = np.argwhere(out == 255)
+    return None if len(lit) == 0 else tuple(int(v) for v in lit[0])
+
+
+def test_shear_x_moves_a_point_along_the_row_and_shear_y_along_the_column() -> None:
+    """Which axis a shear acts on, and in which direction (review of iteration 2, WARNING 2: swapping the two affine matrices
+    survived every test, and the CIFAR-10 policy holds ShearY rows only).  PIL samples the input at ``(x + m*y, y)`` for ShearX and
+    at ``(x, m*x + y)`` for ShearY, so the point at (row 20, col 16) lands at col ``16 - 0.3 * 20 = 10`` with its row kept
+    (ShearX), or at row ``20 - 0.3 * 16 = 15.2 -> 15`` with its column kept (ShearY); the negative sign mirrors both."""
+    assert _where("ShearX", _Positive()) == (20, 10)
+    assert _where("ShearX", _Negative()) == (20, 22)
+    assert _where("ShearY", _Positive()) == (15, 16)
+    assert _where("ShearY", _Negative()) == (25, 16)
+
+
+class _Counting:
+    """A seeded generator that remembers every ``random()`` draw, so the sign an operation took can be read back."""
+
+    def __init__(self, seed):
+        self.rng, self.draws = np.random.default_rng(seed), []
+
+    def random(self):
+        self.draws.append(self.rng.random())
+        return self.draws[-1]
+
+
+def test_a_signed_operation_goes_negative_half_of_the_time() -> None:
+    """torchvision flips the sign with probability 0.5 (``torch.randint(2)``); a biased coin bends every rotation, shear and
+    translation of the policy one way (review of iteration 2, WARNING 2: a coin at 0.2 survived).  4,000 draws have a standard
+    deviation of 0.0079 on the share, so the bound 0.5 +- 0.04 is five of them."""
+    coin = _Counting(12345)
+    went_down = 0
+    for _ in range(4000):
+        pixels = np.zeros((33, 33), np.uint8)
+        pixels[16, 25] = 255
+        out = np.asarray(ia._apply_autoaugment_op(Image.fromarray(pixels), "Rotate", 9, coin))
+        went_down += int(np.argwhere(out == 255)[0][0] > 16)    # a negative angle turns clockwise: a point on the right goes down
+    assert len(coin.draws) == 4000, "one coin per signed operation"
+    assert went_down == sum(1 for draw in coin.draws if draw > 0.5), "the sign is the coin's"
+    assert abs(went_down / 4000 - 0.5) < 0.04, went_down / 4000
+
+
 def test_an_operation_is_applied_when_its_draw_is_at_most_its_probability() -> None:
     # torchvision: ``if probs[i] <= p``. A draw equal to the probability applies; above it skips.
     policy = ((("Invert", 0.5, None), ("Rotate", 0.5, 9)),)
