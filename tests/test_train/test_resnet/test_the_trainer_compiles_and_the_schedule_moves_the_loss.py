@@ -421,3 +421,47 @@ def test_the_trainer_optimizer_clips_nothing_and_decays_nothing_itself(sgd_run):
     assert type(optimizer).__name__ == "SGD", type(optimizer).__name__
     assert (optimizer.clipnorm, optimizer.global_clipnorm, optimizer.clipvalue) == (None, None, None)
     assert not optimizer.weight_decay, optimizer.weight_decay
+    # He et al. 2015, section 3.4: momentum 0.9. A Keras SGD built without it runs with momentum 0 (review of iteration 2, NOTE 5).
+    assert optimizer.momentum == 0.9, optimizer.momentum
+
+
+@pytest.fixture(scope="module")
+def adamw_run(tmp_path_factory):
+    """One real ``train_resnet_imagenet`` run, AdamW with a typed decay, on the fake tree: ``(config, trained model)``."""
+    from tests.imagenet_fake_tree import build_fake_imagenet, use_the_fake_tree_class_count
+
+    root = build_fake_imagenet(tmp_path_factory.mktemp("tree_adamw") / "imagenet2012")
+    out = tmp_path_factory.mktemp("resnet_adamw")
+    patch = pytest.MonkeyPatch()
+    use_the_fake_tree_class_count(patch)
+    patch.setattr(train_resnet, "setup_gpu", lambda *a, **k: None)
+    patch.setattr(train_resnet, "create_callbacks", lambda *a, **k: ([], None))
+    real_topk = train_resnet.PrimaryOutputTopKAccuracy
+    patch.setattr(train_resnet, "PrimaryOutputTopKAccuracy", lambda *a, **k: real_topk(*a, **{**k, "k": 2}))
+    config = TrainingConfig(
+        imagenet_root=root, image_size=32, batch_size=4, model_variant="resnet18", num_classes=3,
+        enable_deep_supervision=True, epochs=1, warmup_epochs=0, augment_data=False,
+        optimizer_type="adamw", weight_decay=WEIGHT_DECAY, output_dir=str(out), experiment_name="adamw",
+        holdout_per_class=1, conformal_alpha=None,
+    )
+    try:
+        model = train_resnet.train_resnet_imagenet(config)
+    finally:
+        patch.undo()
+    return config, model
+
+
+def test_a_trainer_under_adamw_hands_its_model_no_penalty(adamw_run):
+    """The decay is the optimizer's; a penalty as well would apply it twice (review of iteration 2, WARNING 1, D-062)."""
+    _, model = adamw_run
+    penalized = [layer.name for layer in model._flatten_layers() if getattr(layer, "kernel_regularizer", None) is not None]
+    assert penalized == [], penalized
+    assert len(model.losses) == 0, len(model.losses)
+
+
+def test_a_trainer_under_adamw_hands_its_optimizer_the_typed_decay(adamw_run):
+    """Without it AdamW falls back to its own 0.004 and the typed number never arrives."""
+    config, model = adamw_run
+    optimizer = model.optimizer
+    assert type(optimizer).__name__ == "AdamW", type(optimizer).__name__
+    assert optimizer.weight_decay == config.weight_decay == WEIGHT_DECAY, optimizer.weight_decay

@@ -367,11 +367,17 @@ def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) 
     # resnet18's parameters) get none, where torchvision decays every parameter by default. That set is a sourced choice (D-043 c):
     # Goyal et al. 2017 (arXiv 1706.02677, section 4.2) apply no decay to the BatchNorm coefficients gamma and beta, and He et al.
     # 2019, Bag of Tricks (arXiv 1812.01187, "No bias decay"), decay only the weights of convolution and fully connected layers.
+    # DECISION plan-2026-11-03T221936-98b866fb/D-062
+    # Under `--optimizer adamw` the model gets NO penalty and the optimizer gets the typed `weight_decay` (below): AdamW's decay is
+    # decoupled and is the optimizer's, so a penalty as well would apply it twice, and an optimizer built without the typed decay
+    # falls back to its own 0.004 that the user never asked for. Do NOT pass `sgd_weight_decay_regularizer` unconditionally again
+    # (the review of iteration 2 found exactly that); the rule is the one of `train_vit` and `train_rbf_protonet`.
+    use_adamw = config.optimizer_type.lower() == 'adamw'
     model = create_resnet(
         variant=config.model_variant, num_classes=config.num_classes,
         input_shape=input_shape, pretrained=config.pretrained,
         enable_deep_supervision=config.enable_deep_supervision,
-        kernel_regularizer=sgd_weight_decay_regularizer(config.weight_decay),
+        kernel_regularizer=None if use_adamw else sgd_weight_decay_regularizer(config.weight_decay),
     )
     model.summary()
 
@@ -397,7 +403,9 @@ def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) 
     # No gradient clip: He et al. 2015 and torchvision's reference trainer (`--clip-grad-norm` default None) have none
     # (D-042). Do NOT put back a `gradient_clipping_by_norm` key; the builder then clips the global norm at that value.
     opt_config = {'type': config.optimizer_type}
-    if config.optimizer_type.lower() == 'sgd':
+    if use_adamw:
+        opt_config['weight_decay'] = config.weight_decay
+    elif config.optimizer_type.lower() == 'sgd':
         opt_config['momentum'] = config.momentum
 
     optimizer = optimizer_builder(opt_config, lr_schedule)
