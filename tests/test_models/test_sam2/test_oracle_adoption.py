@@ -116,10 +116,14 @@ EXPECTED_OFF_GRAPH = tuple(sorted(
     # 2: no-object / empty-memory embeddings
     + ["/no_mem_pos_enc", "/no_obj_ptr", "/no_obj_embed_spatial"]
     # 3: prompt branches this clip does not supply
-    + [f"mask_downscaling/conv{i}/{w}"
-       for i in (1, 2, 3) for w in ("kernel", "bias")]
-    + [f"mask_downscaling/norm{i}/{w}"
+    # (conv1/conv2 and norm1/norm2 live in the prompt encoder's ConvStem, so their paths read ``stem/stem_convN`` and
+    # ``stem/stem_normN``; only the final 1x1 ``conv3`` kept its own path.  The waiver named the old paths and matched
+    # nothing: step 13.7 of plan 98b866fb renames the patterns, the count of 40 off-graph weights is unchanged.)
+    + [f"mask_downscaling/stem/stem_conv{i}/{w}"
+       for i in (1, 2) for w in ("kernel", "bias")]
+    + [f"mask_downscaling/stem/stem_norm{i}/{w}"
        for i in (1, 2) for w in ("gamma", "beta")]
+    + [f"mask_downscaling/conv3/{w}" for w in ("kernel", "bias")]
     + [f"point_embedding_{i}/embeddings" for i in (0, 2, 3)]
     # 4: mask tokens the wrapper's single-mask path never returns
     + [f"hypernetwork_mlp_{m}/hyper_dense{i}_{m}/{w}"
