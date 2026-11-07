@@ -573,8 +573,10 @@ only: `TrainingConfig.imagenet_root` is checked by `require_imagenet_root` and `
 (11,699,112), on the sha256 of the images and labels of the first four batches, and on the untrained inference-mode loss (104.9541, 15.2 times ln 1000,
 both with the BatchNorm moving statistics still at their start values); the running training loss of the 50 steps differs by at most 0.008
 (a repeat of the legacy arm differs from the first by 0.009), and after the epoch the training loss is 7.6176 and 7.6150 (legacy, twice) against
-7.6148 (API). The selection loss is 7.577 and 7.651 (legacy, twice) against 7.827 (API), selection accuracy 0.0026 and 0.0020 against 0.0026: a
-gap two runs of the legacy arm cannot place inside or outside its own spread, at an accuracy that is chance. One epoch of 50 steps cannot rank the paths.
+7.6148 (API). The selection loss is 7.577 and 7.651 (legacy, twice) against 7.827 (API), selection accuracy 0.0026 and 0.0020 against 0.0026:
+the API value is 0.213 above the mean of the two legacy runs (7.614) and 0.176 above the higher one, 2.4 times their spread of 0.074, so it
+lies outside both, and the cause is not established (only the first four of the 50 training batches were hashed, so the equality of the data
+covers those and the 5,000 selection images). The model is at chance, so the gap says nothing about which path trains better. One epoch of 50 steps cannot rank the paths.
 
 **The four Imagenette pairs that have no legacy trainer** (`vit`, `resnet`, `convnext_v1`, `convnext_v2`) get values
 from these rules, each a derivation from a legacy value or a cited recipe, not from a run: no run of these four pairs
