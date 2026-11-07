@@ -827,9 +827,11 @@ def test_multi_epoch_training_simulation():
         epoch_results.append(epoch_result)
         epoch_floors.append(floor)
 
-    # The simulated performance improves: the guaranteed share rises every epoch
-    # and each epoch's metric is at least its guarantee. The metric values
-    # themselves are draws, so no ordering of them is asserted.
+    # This guards the FIXTURE, not the metric: the floors are computed from the constants
+    # `0.4 + epoch * 0.15`, so their rise is true by construction (review of iteration 2, NOTE).
+    # The metric is pinned by the exact equality to the NumPy reference on every epoch above and by
+    # each epoch's value being at least its guarantee. The metric values themselves are draws, so no
+    # ordering of them is asserted.
     assert all(a < b for a, b in zip(epoch_floors, epoch_floors[1:])), \
         f"Guaranteed share should rise every epoch, got {epoch_floors}"
     for metric_name in ks:

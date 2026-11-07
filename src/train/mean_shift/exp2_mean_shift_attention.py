@@ -270,7 +270,7 @@ def run_worker(args: argparse.Namespace) -> int:
                 f"{recipe.epochs} epochs")
     history = common.fit_cell(model, data, recipe)
 
-    x_test, y_test = common.test_split(data, args.max_samples)
+    x_test, y_test = common.scored_test_split(data, args.max_samples)
     x_select, y_select = common.selection_split(data)
     select_accuracy = common.top1(model, x_select, y_select)
     test_accuracy = common.top1(model, x_test, y_test)

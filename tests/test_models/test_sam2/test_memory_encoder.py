@@ -1004,3 +1004,15 @@ class TestDeadComponentPartition:
         assert float(np.abs(memory).max()) == 0.0
         assert int(position.shape[-1]) == OUT_DIM
         assert float(np.abs(position).max()) > 0.0
+
+
+def test_the_fuser_blocks_start_at_the_reference_layer_scale_and_carry_no_penalty():
+    """The reference SAM 2 ``CXBlock`` starts its layer scale at 1e-6 and neither clamps nor decays it; since step 10b of plan 98b866fb
+    the V1 block the fuser is made of does the same (step 13.4, review of iteration 2: nothing pinned this consumer)."""
+    fuser = SAM2Fuser(dim=IN_DIM, num_layers=2)
+    fuser(keras.random.normal((1, 8, 8, IN_DIM)))
+    scales = [w for w in fuser.weights if w.path.endswith("gamma_scale/gamma")]
+    assert len(scales) == 2, [w.path for w in fuser.weights][:8]
+    for w in scales:
+        np.testing.assert_array_equal(keras.ops.convert_to_numpy(w), np.full(w.shape, 1e-6, "float32"))
+    assert len(fuser.losses) == 0, len(fuser.losses)

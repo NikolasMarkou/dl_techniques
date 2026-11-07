@@ -214,7 +214,7 @@ def load_cell_data(dataset: str, recipe: Recipe, seed: int, max_samples: Optiona
     in; the train pipeline gets the ``cifar_light`` augmentation. Selection is the held-out
     slice of train that the loader cuts (``validation_split`` default); the test split only
     scores. ``max_samples`` caps the train pool only (smoke runs); the test split is whole here, and
-    a cell that wants a cheaper smoke caps what it SCORES with :func:`test_split`.
+    a cell that wants a cheaper smoke caps what it SCORES with :func:`scored_test_split`.
 
     Returns:
         A ``train.common.classification_data.ClassificationData``; ``data.arrays`` holds the
@@ -260,7 +260,7 @@ def selection_split(data) -> Tuple[np.ndarray, np.ndarray]:
     return data.arrays.x_select, data.arrays.y_select
 
 
-def test_split(data, max_samples: Optional[int]) -> Tuple[np.ndarray, np.ndarray]:
+def scored_test_split(data, max_samples: Optional[int]) -> Tuple[np.ndarray, np.ndarray]:
     """``(images, labels)`` a cell scores: the loader's test split, or its first ``max_samples`` rows (smoke runs).
 
     Interface contract: ``data`` is what :func:`load_cell_data` returns; ``max_samples`` is the ``--max-samples`` of

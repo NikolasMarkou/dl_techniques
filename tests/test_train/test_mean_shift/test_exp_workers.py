@@ -37,7 +37,7 @@ REPO = Path(__file__).resolve().parents[3]
 CIFAR_CACHE = Path.home() / ".keras" / "datasets" / "cifar-10-batches-py-target"
 MAX_SAMPLES = 256
 #: The fake CIFAR the in-process workers read. The loader caps the TRAIN pool only (plan 98b866fb D-022); the CELL caps the
-#: test images it scores (``common.test_split``, D-046). ``N_TEST`` must exceed ``MAX_SAMPLES`` for ``n_test == MAX_SAMPLES`` to
+#: test images it scores (``common.scored_test_split``, D-046). ``N_TEST`` must exceed ``MAX_SAMPLES`` for ``n_test == MAX_SAMPLES`` to
 #: tell a capped test split from a whole one (with ``N_TEST`` at or below the cap both would read the same number).
 N_TRAIN, N_TEST = 400, 300
 assert N_TEST > MAX_SAMPLES
@@ -242,20 +242,20 @@ def test_every_arm_scores_the_same_corrupted_images(exp1_runs, split_arrays):
 
 def test_a_smoke_cell_caps_the_train_pool_in_the_loader_and_the_scored_test_images_itself(split_arrays):
     """``max_samples`` bounds a smoke cell on both sides, each by its own owner: the loader cuts the train pool and never the
-    test split (D-022, 237ed68f5), the cell scores the first ``max_samples`` test rows (``common.test_split``, D-046).
+    test split (D-022, 237ed68f5), the cell scores the first ``max_samples`` test rows (``common.scored_test_split``, D-046).
 
     Before 237ed68f5 the loader cut both and a smoke cell scored 256 images; after it a smoke cell scored all 10,000 CIFAR
     images through 11 corruption conditions (366 s instead of 50 s on CPU, measured) and the 8 worker cases that asserted
     ``n_test == 256`` failed (7.2.1, D-041). The rows kept are the old ones: the first 256 of the loader's seeded order."""
     assert len(split_arrays.x_test) == N_TEST and 0 < len(split_arrays.x_select) < MAX_SAMPLES
     data = common.load_cell_data("cifar10", common.Recipe.for_epochs(1), 0, MAX_SAMPLES)
-    x, y = common.test_split(data, MAX_SAMPLES)
+    x, y = common.scored_test_split(data, MAX_SAMPLES)
     assert len(x) == len(y) == MAX_SAMPLES
     np.testing.assert_array_equal(x, split_arrays.x_test[:MAX_SAMPLES])
     np.testing.assert_array_equal(y, split_arrays.y_test[:MAX_SAMPLES])
-    whole_x, whole_y = common.test_split(data, None)
+    whole_x, whole_y = common.scored_test_split(data, None)
     assert len(whole_x) == len(whole_y) == N_TEST
-    assert len(common.test_split(data, N_TEST + 100)[0]) == N_TEST, "a cap above the split keeps the split"
+    assert len(common.scored_test_split(data, N_TEST + 100)[0]) == N_TEST, "a cap above the split keeps the split"
 
 
 def test_the_scored_conditions_really_differ_from_the_clean_images(split_arrays):

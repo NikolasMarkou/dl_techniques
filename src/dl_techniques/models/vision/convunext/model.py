@@ -252,8 +252,9 @@ def _apply_residual_convnext_block(
     """Apply a ConvNeXt block as a residual branch with stochastic depth.
 
     ``ConvNextV1Block`` and ``ConvNextV2Block`` implement the residual branch
-    alone: they end at the layer-scale multiply and add neither the skip nor
-    drop-path. This helper supplies both, giving the canonical wiring
+    alone and add neither the skip nor drop-path: the V1 block ends at its
+    layer-scale multiply, the V2 block (the default) at its global response
+    normalization reduction, and only with ``use_gamma=True`` at a layer scale. This helper supplies both, giving the canonical wiring
 
         x = x + StochasticDepth(drop_path_rate)(block(x))
 

@@ -299,3 +299,20 @@ def test_tailplus_contract_message():
     tail = TheraTailPlus()
     with pytest.raises(ValueError, match="in_channels"):
         tail.build((None, 8, 8, 32))  # 32 != default 64
+
+
+# ---------------------------------------------------------------------
+# 6. the layer scale of the ConvNeXt V1 blocks inside the tails (step 13.4, review of iteration 2)
+# ---------------------------------------------------------------------
+
+
+def test_plus_tail_convnext_blocks_start_at_the_papers_layer_scale_and_carry_no_penalty():
+    """The tails build ``ConvNextV1Block(kernel_size, filters)`` with the block's own defaults; since step 10b of plan 98b866fb that
+    is the paper's layer scale 1e-6, no constraint, no L2 (nothing pinned it for this consumer before)."""
+    tail = TheraTailPlus()
+    tail(keras.random.normal((2, 16, 16, 64)), training=False)
+    scales = [w for w in tail.weights if w.path.endswith("gamma_scale/gamma")]
+    assert len(scales) >= 1, [w.path for w in tail.weights][:8]
+    for w in scales:
+        np.testing.assert_array_equal(keras.ops.convert_to_numpy(w), np.full(w.shape, 1e-6, "float32"))
+    assert len(tail.losses) == 0, len(tail.losses)
