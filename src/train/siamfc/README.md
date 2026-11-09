@@ -41,8 +41,8 @@ MPLBACKEND=Agg .venv/bin/python -m train.siamfc.train_siamfc \
 | `--pos-radius-px` / `--neg-radius-px` | 25.0 / 50.0 | Reference label radii (search pixels) |
 | `--batch-size` / `--epochs` | 8 / 10 | |
 | `--learning-rate` | 1e-3 | AdamW default; the paper used SGD 1e-2→1e-5 |
-| `--optimizer` | `adamw` | `adamw` or `sgd` (momentum honored for `sgd`) |
-| `--lr-schedule` | `cosine_decay` | Plus `--warmup-epochs`, `--weight-decay` (AdamW only, never doubled with a kernel regularizer), `--gradient-clipping`, `--momentum` (`sgd` only) |
+| `--optimizer` | `adamw` | `adamw` or `sgd` (momentum honored for `sgd`; `sgd` with a positive `--weight-decay`, default 5e-4, is refused: pass `--weight-decay 0`) |
+| `--lr-schedule` | `cosine_decay` | Plus `--warmup-epochs`, `--weight-decay` (AdamW only, a positive value beside `sgd` raises, never doubled with a kernel regularizer), `--gradient-clipping`, `--momentum` (`sgd` only) |
 | `--early-stopping-patience` | 10 | Monitor is `val_loss` |
 | `--output-dir` / `--experiment-name` | `results` / auto | Run dir holds `config.json`, `training_log.csv`, `best_model.keras`, `final_model.keras` |
 | `--gpu` | None | Passed to `setup_gpu`, not a config field |

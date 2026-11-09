@@ -70,6 +70,7 @@ def build_optimizer(config: Any, steps_per_epoch: int) -> keras.optimizers.Optim
         "alpha": 0.01,
     })
 
+    refuse_a_dropped_weight_decay(config.optimizer_type, config.weight_decay, trainer="train.common.build_optimizer")
     opt_config: Dict[str, Any] = {
         "type": config.optimizer_type,
         "gradient_clipping_by_norm": config.gradient_clipping,
@@ -83,6 +84,28 @@ def build_optimizer(config: Any, steps_per_epoch: int) -> keras.optimizers.Optim
         f"clip_by_norm={config.gradient_clipping}, weight_decay={config.weight_decay}"
     )
     return optimizer_builder(opt_config, lr_schedule)
+
+
+def refuse_a_dropped_weight_decay(optimizer_type: str, weight_decay: Optional[float], *, trainer: str) -> None:
+    """Raise when ``weight_decay`` is a positive number the named optimizer would be handed no part of.
+
+    Interface contract: ``optimizer_type`` is the trainer's ``--optimizer`` value, ``weight_decay`` its ``--weight-decay``
+    (``None``, zero and negative mean no decay), ``trainer`` names the caller for the message. Only AdamW takes the decay
+    (decoupled, inside the optimizer); an SGD, Adam or RMSprop run needs the decay as an L2 penalty on the model's kernels,
+    built by :func:`sgd_weight_decay_regularizer` where the model factory takes a ``kernel_regularizer``. A trainer that does
+    neither used to train with NO decay and say nothing. Failure mode: ``ValueError`` naming the flag to change.
+    """
+    # DECISION plan-2026-11-03T221936-98b866fb/D-063
+    # REFUSE, do not apply and do not ignore (D-043's rule). Applying Keras' decoupled decay to SGD would be a third meaning of
+    # "weight decay" next to the paper's coupled one; ignoring it is the defect this function exists for. Do NOT turn this into a
+    # warning, and do NOT make a trainer's default decay silently 0 under sgd: the user typed the optimizer, the flag says what to do.
+    if weight_decay is None or weight_decay <= 0 or str(optimizer_type).lower() == "adamw":
+        return
+    raise ValueError(
+        f"{trainer}: weight_decay={weight_decay!r} would be dropped without a word, because optimizer {optimizer_type!r} "
+        "is handed no decay (only adamw applies it, inside the optimizer; an sgd decay is an L2 penalty on the model's kernels "
+        "that this trainer does not build). Pass --weight-decay 0 for no decay, or --optimizer adamw."
+    )
 
 
 def sgd_weight_decay_regularizer(weight_decay: Optional[float]) -> Optional[keras.regularizers.Regularizer]:

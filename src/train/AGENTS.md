@@ -89,6 +89,14 @@ model-specific arguments on top of it.
 > `tests/test_train/test_the_sgd_weight_decay_has_one_rule.py` fails any module under `src/train` or `src/applications` that does.
 > The `image_segmentation` task builds no such penalty, so it refuses `optim_args.optimizer=sgd` with a positive `optim_args.weight_decay`
 > (D-047).
+>
+> **A decay only AdamW would receive is refused, not dropped.** A trainer that hands `weight_decay` to the optimizer for AdamW only
+> (`if adamw: opt_config["weight_decay"] = ...`) and builds no sgd penalty trained `--optimizer sgd --weight-decay 5e-4` with no decay
+> and said nothing (`dasiamrpn`, `deepsort`, `mambalct`, `siamfc`, `yolo12/train_coco`, `yolo12/train_multitask`, `dit`, and
+> `train.common.build_optimizer` for every trainer behind it; D-049, D-063 of plan 98b866fb). Such a function calls
+> `train.common.optimizer.refuse_a_dropped_weight_decay(optimizer_type, weight_decay, trainer=...)`, which raises for a positive decay
+> beside any other optimizer; `tests/test_train/test_the_sgd_weight_decay_has_one_rule.py` finds, by AST, any function with that shape
+> that neither refuses nor builds the sgd penalty (`api/optim.py` is waived there, with its reason: it hands the decay to the model).
 
 > **A failed run does not exit 0, and that includes a failure one call below `main`.** A broad
 > `except` (bare, `Exception`, `BaseException`) anywhere under `src/train` re-raises, exits

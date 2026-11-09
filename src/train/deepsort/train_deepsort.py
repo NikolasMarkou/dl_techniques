@@ -44,6 +44,7 @@ import numpy as np
 import tensorflow as tf
 
 from train.common import setup_gpu, create_callbacks as create_common_callbacks
+from train.common.optimizer import refuse_a_dropped_weight_decay
 from train.common.run_io import (
     default_experiment_name,
     prepare_run_dir,
@@ -353,6 +354,7 @@ def train_deepsort(
             "alpha": 0.01,
         })
 
+    refuse_a_dropped_weight_decay(config.optimizer_type, config.weight_decay, trainer="deepsort.train_deepsort")
     opt_config: Dict[str, Any] = {
         "type": config.optimizer_type,
         "gradient_clipping_by_norm": config.gradient_clipping,

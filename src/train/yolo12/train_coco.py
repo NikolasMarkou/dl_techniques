@@ -15,6 +15,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from train.common import setup_gpu, create_callbacks as create_common_callbacks, set_seeds
+from train.common.optimizer import refuse_a_dropped_weight_decay
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import learning_rate_schedule_builder
 from dl_techniques.layers.heads.vision.task_types import VisionTaskType
@@ -589,6 +590,7 @@ def main():
     model.summary(print_fn=logger.info)
     logger.info(f"Total parameters: {model.count_params():,}")
 
+    refuse_a_dropped_weight_decay(args.optimizer, args.weight_decay, trainer="yolo12.train_coco")
     if args.optimizer.lower() == 'adamw':
         optimizer = keras.optimizers.AdamW(
             learning_rate=lr_schedule, weight_decay=args.weight_decay, clipnorm=1.0

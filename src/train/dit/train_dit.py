@@ -121,6 +121,7 @@ from train.common import (
     set_seeds,
     setup_gpu,
 )
+from train.common.optimizer import refuse_a_dropped_weight_decay
 from train.dit.ema_callback import DEFAULT_EMA_DECAY, WeightEMACallback
 from train.dit.synthetic_data import (
     build_dit_dataset,
@@ -688,6 +689,7 @@ def build_dit_optimizer(
         steps_per_epoch=steps_per_epoch,
         warmup_steps=config.warmup_epochs * steps_per_epoch,
     )
+    refuse_a_dropped_weight_decay(config.optimizer_type, config.weight_decay, trainer="dit.train_dit")
     optimizer_config: Dict[str, Any] = {"type": config.optimizer_type}
     if config.gradient_clipping > 0.0:
         # `optimizer_builder` RENAMES the clipping keys: a literal "clipnorm"

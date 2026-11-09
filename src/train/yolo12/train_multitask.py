@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 
 from train.common import setup_gpu, set_seeds
+from train.common.optimizer import refuse_a_dropped_weight_decay
 from train.common.callbacks import EpochCSVLogger
 from dl_techniques.utils.logger import logger
 from dl_techniques.datasets.sut import OptimizedSUTDataset
@@ -621,6 +622,7 @@ def train_model(args: argparse.Namespace) -> None:
     model.summary(print_fn=logger.info)
     logger.info(f"Total parameters: {model.count_params():,}")
 
+    refuse_a_dropped_weight_decay(args.optimizer, args.weight_decay, trainer="yolo12.train_multitask")
     if args.optimizer.lower() == 'adamw':
         optimizer = keras.optimizers.AdamW(
             learning_rate=args.learning_rate, weight_decay=args.weight_decay, clipnorm=1.0

@@ -52,7 +52,7 @@ MPLBACKEND=Agg .venv/bin/python -m train.deepsort.train_deepsort \
 | `--learning-rate` | 1e-3 | Reference Adam default |
 | `--optimizer` | `adam` | `adam`, `adamw` or `sgd` (momentum honored for `sgd`) |
 | `--lr-schedule` | `constant` | Reference trains at fixed LR; cosine/exponential available |
-| `--warmup-epochs` / `--weight-decay` | 0 / 0.0 | Weight decay is AdamW-only (never doubled) |
+| `--warmup-epochs` / `--weight-decay` | 0 / 0.0 | Weight decay is AdamW-only (never doubled); a positive value beside `sgd` or `adam` raises |
 | `--momentum` | 0.9 | Honored for `--optimizer sgd` only |
 | `--gradient-clipping` | 1.0 | Global norm via `optimizer_builder` |
 | `--early-stopping-patience` | 10 | Monitor is `val_loss` |

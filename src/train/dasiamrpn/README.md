@@ -42,8 +42,8 @@ MPLBACKEND=Agg .venv/bin/python -m train.dasiamrpn.train_dasiamrpn \
 | `--huber-delta` | 1.0 | Smooth-L1 knee |
 | `--batch-size` / `--epochs` | 2 / 5 | RPN forwards are heavy; raise deliberately |
 | `--learning-rate` | 1e-3 | AdamW default |
-| `--optimizer` | `adamw` | `adamw` or `sgd` |
-| `--lr-schedule` | `cosine_decay` | Plus `--warmup-epochs` / `--weight-decay` (AdamW only) / `--gradient-clipping` / `--momentum` (`sgd` only) |
+| `--optimizer` | `adamw` | `adamw` or `sgd`; `sgd` with a positive `--weight-decay` (the default is 5e-4) is refused, pass `--weight-decay 0` |
+| `--lr-schedule` | `cosine_decay` | Plus `--warmup-epochs` / `--weight-decay` (AdamW only; a positive value beside another optimizer raises) / `--gradient-clipping` / `--momentum` (`sgd` only) |
 | `--early-stopping-patience` | 10 | Monitor is `val_loss` |
 | `--output-dir` / `--experiment-name` | `results` / auto | Standard run-directory contract |
 | `--gpu` | None | Passed to `setup_gpu`, not a config field |

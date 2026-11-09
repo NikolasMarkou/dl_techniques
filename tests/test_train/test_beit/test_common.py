@@ -228,10 +228,12 @@ class TestBuildOptimizer:
         assert float(optimizer.weight_decay) == pytest.approx(0.05)
         assert float(optimizer.global_clipnorm) == pytest.approx(1.0)
 
-    def test_a_non_adamw_optimizer_does_not_get_a_weight_decay(self):
-        config = _OptimConfig(optimizer_type="adam", weight_decay=0.05)
-        optimizer = build_optimizer(config, steps_per_epoch=10)
+    def test_a_non_adamw_optimizer_gets_no_weight_decay_and_a_decay_beside_it_is_refused(self):
+        """D-063: a positive decay beside adam used to be dropped silently; it raises now, and a decay of 0 builds."""
+        optimizer = build_optimizer(_OptimConfig(optimizer_type="adam", weight_decay=0.0), steps_per_epoch=10)
         assert getattr(optimizer, "weight_decay", None) in (None, 0.0)
+        with pytest.raises(ValueError, match="dropped without a word"):
+            build_optimizer(_OptimConfig(optimizer_type="adam", weight_decay=0.05), steps_per_epoch=10)
 
 
 # ---------------------------------------------------------------------
