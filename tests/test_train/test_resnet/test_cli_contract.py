@@ -499,19 +499,10 @@ def test_a_missing_imagenet_root_is_refused_without_side_effects(
 # ---------------------------------------------------------------------
 
 
-def _spelled(*words: str) -> str:
-    """A name assembled from its words, never typed whole.
-
-    ``tests/test_train/test_config_fields_are_live.py`` counts a string constant EQUAL to a field name (or to its ``--flag``) in a
-    file that imports the config class as a read of that field. A test that asserts a field is GONE and types its name would
-    therefore make the guard report the field live if somebody put it back unread (measured: the mutant "field back, unread"
-    survived the guard while this test typed the names).
-    """
-    return "_".join(words)
-
-
-DELETED_FIELDS = (_spelled("label", "smoothing"), _spelled("gradient", "clipping"))
-DELETED_FLAG = "--" + "-".join(("label", "smoothing"))
+# Typed whole: the config-live guard no longer searches `tests/` (step 13.10 of plan 98b866fb), so a test that names a
+# deleted field cannot make it read as live (this file assembled the names from their words while the guard did).
+DELETED_FIELDS = ("label_smoothing", "gradient_clipping")
+DELETED_FLAG = "--label-smoothing"
 
 
 def test_the_dead_smoothing_field_and_the_unsourced_clip_are_gone(

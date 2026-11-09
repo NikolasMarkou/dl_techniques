@@ -280,12 +280,9 @@ def main() -> None:
     if wd_o is not None:
         args.weight_decay = wd_o
     cfg = ExperimentConfig(
-        experiment_name="e1",
         norm_type=args.norm_type,
         seed=args.seed,
         mode=args.mode,
-        model_variant=args.variant,
-        dataset="cifar10",
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,

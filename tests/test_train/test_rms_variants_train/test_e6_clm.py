@@ -47,11 +47,9 @@ _SMOKE_KWARGS = dict(
 
 def _make_cfg(tmp_dir: str, norm_type: str = "rms_norm", mode: str = "oob") -> ExperimentConfig:
     return ExperimentConfig(
-        experiment_name="e6",
         norm_type=norm_type,
         seed=0,
         mode=mode,
-        dataset="wikipedia_10k",
         epochs=1,
         batch_size=2,
         learning_rate=3e-4,

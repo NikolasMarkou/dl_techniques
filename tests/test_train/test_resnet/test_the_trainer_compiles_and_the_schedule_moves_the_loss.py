@@ -364,6 +364,29 @@ def test_create_callbacks_forwards_the_loss_weight_variables(monkeypatch, tmp_pa
     )
 
 
+@pytest.mark.parametrize("every_n", [3, 7])
+def test_the_monitor_flag_sets_the_plot_cadence(monkeypatch, tmp_path, every_n):
+    """``--monitor-every`` (``monitor_every_n_epochs``) is the plot cadence.
+
+    ``create_callbacks`` built the plot callback with a literal ``every_n=5``, so
+    the flag parsed, reached the config and changed nothing; the config-live
+    guard saw it only once the field's own flag and constructor keyword stopped
+    counting as reads (step 13.10 of plan 98b866fb). Two values, both not 5.
+    """
+    monkeypatch.setattr(
+        train_resnet, "create_common_callbacks", lambda **kw: ([], str(tmp_path))
+    )
+    config = TrainingConfig(
+        imagenet_root=str(tmp_path),
+        output_dir=str(tmp_path / "run_output"),
+        experiment_name="guard",
+        monitor_every_n_epochs=every_n,
+    )
+    callbacks, _ = train_resnet.create_callbacks(config, 1)
+    plots = [c for c in callbacks if isinstance(c, train_resnet.EpochMetricsPlotCallback)]
+    assert [c.every_n for c in plots] == [every_n]
+
+
 # ---------------------------------------------------------------------------
 # Defect 3 -- the decay and the clip the real trainer builds (D-042)
 # ---------------------------------------------------------------------------

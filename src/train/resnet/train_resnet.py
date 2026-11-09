@@ -316,7 +316,7 @@ def create_callbacks(
     callbacks.append(EpochMetricsPlotCallback(
         str(viz_dir),
         PLOTTED_METRIC_NAMES,
-        every_n=5,
+        every_n=config.monitor_every_n_epochs,
     ))
 
     return callbacks, results_dir

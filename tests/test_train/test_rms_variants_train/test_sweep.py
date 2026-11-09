@@ -8,7 +8,11 @@ subprocess), and verify the build-time contract.
 """
 from __future__ import annotations
 
+import dataclasses
+import logging
 import os
+import sys
+import time
 from typing import List
 
 import pytest
@@ -20,6 +24,7 @@ from train.rms_variants_train.sweep import (
     RunSpec,
     VARIANT_SUPPORTS_PARAM_MATCHED,
     build_run_specs,
+    run_one,
 )
 from train.rms_variants_train.config import NORM_VARIANTS
 
@@ -198,3 +203,38 @@ class TestExperimentRegimes:
                 f"EXPERIMENT_REGIMES — sweep would default to ('default',) "
                 f"and silently skip the trainer's real regime options."
             )
+
+
+class _Lines(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.lines: List[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.lines.append(record.getMessage())
+
+
+def test_two_cells_that_differ_only_in_regime_log_two_names(tmp_path):
+    """The regime is part of a cell's name in the FAIL line (and ``failures.log``).
+
+    The label named experiment, norm, mode and seed only, so the ``default`` and
+    ``bs_32`` cells of one seed failed under the same line; ``RunSpec.regime`` was
+    read by nothing (step 13.10 of plan 98b866fb). One real subprocess per cell, a
+    module that does not exist, so each exits 1 at once.
+    """
+    specs = build_run_specs(
+        experiments=["e5"], norms=["rms_norm"], modes=["oob"], seeds=[0],
+        sweep_root=str(tmp_path), epochs_override=None, regimes=("default", "bs_32"),
+    )
+    specs = [dataclasses.replace(s, module="no_such_module_for_this_test") for s in specs]
+    handler = _Lines()
+    logging.getLogger("dl").addHandler(handler)
+    try:
+        for spec in specs:
+            ok, _ = run_one(spec, python_exe=sys.executable, cell_timeout_s=60,
+                            deadline_s=time.time() + 60, visible_devices="-1")
+            assert not ok
+    finally:
+        logging.getLogger("dl").removeHandler(handler)
+    failed = [line for line in handler.lines if line.startswith("[sweep] FAIL")]
+    assert len(failed) == 2 and "regime_default" in failed[0] and "regime_bs_32" in failed[1], failed

@@ -215,12 +215,9 @@ def main() -> None:
     # Apply regime override (Phase 3). E2 only supports 'default' — no-op.
     _ = _REGIME_MAP[args.regime]
     cfg = ExperimentConfig(
-        experiment_name="e2",
         norm_type=args.norm_type,
         seed=args.seed,
         mode=args.mode,
-        model_variant=args.variant,
-        dataset="cifar100",
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,

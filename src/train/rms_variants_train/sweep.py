@@ -135,6 +135,15 @@ class RunSpec:
     out_dir: str
     regime: str = "default"
 
+    @property
+    def label(self) -> str:
+        """The cell's name in the OK / FAIL / TIMEOUT log lines and ``failures.log``.
+
+        Every dimension of the cell, the regime included: without it, two cells of a
+        ``--regimes`` sweep that differ only in regime logged the same line.
+        """
+        return f"{self.experiment}/{self.norm_type}/{self.mode}/regime_{self.regime}/seed_{self.seed}"
+
 
 def build_run_specs(
     *,
@@ -311,20 +320,17 @@ def run_one(
                 with open(log_path) as f:
                     tail = f.read()[-1500:]
                 logger.error(
-                    f"[sweep] FAIL {run_cfg.experiment}/{run_cfg.norm_type}/{run_cfg.mode}"
-                    f"/seed_{run_cfg.seed} rc={res.returncode} in {wall_s:.1f}s"
+                    f"[sweep] FAIL {run_cfg.label} rc={res.returncode} in {wall_s:.1f}s"
                 )
                 return False, tail
             logger.info(
-                f"[sweep] OK   {run_cfg.experiment}/{run_cfg.norm_type}/{run_cfg.mode}"
-                f"/seed_{run_cfg.seed} in {wall_s:.1f}s"
+                f"[sweep] OK   {run_cfg.label} in {wall_s:.1f}s"
             )
             return True, ""
         except subprocess.TimeoutExpired:
             wall_s = time.time() - t0
             logger.error(
-                f"[sweep] TIMEOUT {run_cfg.experiment}/{run_cfg.norm_type}/{run_cfg.mode}"
-                f"/seed_{run_cfg.seed} after {wall_s:.1f}s (cap={timeout}s)"
+                f"[sweep] TIMEOUT {run_cfg.label} after {wall_s:.1f}s (cap={timeout}s)"
             )
             return False, f"cell timeout after {timeout}s"
 
@@ -474,7 +480,7 @@ def main() -> int:
         with open(os.path.join(args.out_dir, "failures.log"), "w") as f:
             for run_cfg, tail in failures:
                 f.write(
-                    f"=== {run_cfg.experiment}/{run_cfg.norm_type}/{run_cfg.mode}/seed_{run_cfg.seed} ===\n"
+                    f"=== {run_cfg.label} ===\n"
                 )
                 f.write(tail + "\n\n")
 

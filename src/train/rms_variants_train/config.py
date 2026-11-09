@@ -157,15 +157,14 @@ class ExperimentConfig:
     """
 
     # --- Identity ----------------------------------------------------------
-    experiment_name: str
+    # The experiment, its dataset and its model variant are not fields: each
+    # experiment module fixes the first two and hands the variant to its own
+    # ``run()``; ``experiment_name``, ``dataset`` and ``model_variant`` were
+    # filled and read by nothing (deleted, step 13.10 of plan 98b866fb).
     norm_type: str  # one of NORM_VARIANTS (or any factory key for ablations)
     seed: int = 42
     # OOB | param_matched. See ``build_norm_kwargs``.
     mode: str = "oob"
-
-    # --- Model / data -----------------------------------------------------
-    model_variant: str = "default"  # e.g. "vit_pico" / "resnet18" / "tiny"
-    dataset: str = "synthetic"
 
     # --- Training ---------------------------------------------------------
     epochs: int = 50

@@ -270,7 +270,6 @@ def main() -> None:
     if wd_o is not None:
         args.weight_decay = wd_o
     cfg = ExperimentConfig(
-        experiment_name="e5",
         norm_type=args.norm_type,
         seed=args.seed,
         mode=args.mode,

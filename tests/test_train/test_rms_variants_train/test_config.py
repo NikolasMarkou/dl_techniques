@@ -184,7 +184,7 @@ def test_oob_mode_d_param_variants_have_d_params(variant: str) -> None:
 
 
 def test_experiment_config_defaults_roundtrip() -> None:
-    cfg = ExperimentConfig(experiment_name="e5", norm_type="rms_norm")
+    cfg = ExperimentConfig(norm_type="rms_norm")
     d = cfg.to_dict()
     assert d["norm_type"] == "rms_norm"
     assert d["seed"] == DEFAULT_SEED
@@ -193,7 +193,6 @@ def test_experiment_config_defaults_roundtrip() -> None:
 
 def test_experiment_config_norm_kwargs_oob() -> None:
     cfg = ExperimentConfig(
-        experiment_name="e5",
         norm_type="rms_norm",
         mode="oob",
         use_scale=True,
@@ -204,7 +203,6 @@ def test_experiment_config_norm_kwargs_oob() -> None:
 
 def test_experiment_config_norm_kwargs_param_matched_drops_scale() -> None:
     cfg = ExperimentConfig(
-        experiment_name="e5",
         norm_type="rms_norm",
         mode="param_matched",
         use_scale=True,  # mode overrides this
@@ -215,7 +213,6 @@ def test_experiment_config_norm_kwargs_param_matched_drops_scale() -> None:
 
 def test_experiment_config_norm_kwargs_param_matched_doesnt_touch_band() -> None:
     cfg = ExperimentConfig(
-        experiment_name="e5",
         norm_type="band_rms",
         mode="param_matched",
     )
@@ -289,7 +286,6 @@ def test_new_variants_param_matched_mode_is_noop(variant: str) -> None:
     include a ``use_scale`` key.
     """
     cfg = ExperimentConfig(
-        experiment_name="e5",
         norm_type=variant,
         mode="param_matched",
     )

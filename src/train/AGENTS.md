@@ -513,8 +513,14 @@ A declared config field that nothing reads is a knob that silently does nothing 
 a CLI argument `main()` forgets to forward. **Serialization is not consumption**: reaching
 `save_config_json` / `asdict` / `prepare_run_dir` and nothing else does not make a field live.
 DELETE such a field rather than wiring it, unless a caller actually wants the behaviour.
+**Plumbing is not consumption either**: the field's own `--flag` and its keyword in the config's own
+constructor (`TrainingConfig(x=args.x)`) only fill it, and a test that reads it is not the program
+reading it. That is how ResNet's `label_smoothing` and `--monitor-every` shipped dead.
 `tests/test_train/test_config_fields_are_live.py` enforces this for the classes in its `REGISTERED`
-list — add a row when you add a config class; never add an exemption to green a newly dead field.
+list, searching `src/` only; it follows the config one call into a `src/` function it is handed to
+(`prepare_run_dir(config)`), and a field read back by name from the saved `config.json` is declared
+with its reader in `READ_BACK_FROM_THE_SAVED_CONFIG`. Add a row when you add a config class; never
+add an exemption to green a newly dead field.
 
 ## `python -m train` and `train.api`
 
