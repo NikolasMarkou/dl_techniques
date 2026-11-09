@@ -720,8 +720,19 @@ and a run of E epochs takes (validation not counted):
 The one longer measurement on the whole train set (step 12 of plan 98b866fb, `resnet/resnet18`, batch 256, 150 steps through the API path,
 12 minutes, with another process holding 11 GB of the card) read **52 images per second over steps 1 to 50 and 79 and 76 over steps 50 to 100
 and 100 to 150**, so a steady rate near 77 images per second puts one epoch at 4.6 hours of training, and about 5 hours with its
-evaluation, figures and analysis. The one full ImageNet epoch was not run (it exceeded the 4.5 GPU hours this plan allowed for the family); at
-77 images per second the table above is 9.6 days for 50 epochs and 19.1 for 100.
+evaluation, figures and analysis; at 77 images per second the table above is 9.6 days for 50 epochs and 19.1 for 100.
+
+**One full ImageNet epoch, measured** (step 12 of plan 98b866fb, D-061, D-064, D-066): `python -m train image_classification
+model=resnet/resnet18 data.dataset=imagenet epochs=1 optim_args.warmup_epochs=0 checkpoint_args.backup_every_steps=500 seed=42`
+(the corrected recipe: `L2(wd/2)` on the kernels, no clip), the whole pool of 1,271,167 fit images, 4,965 steps at batch 256. The run
+was killed by a logout at step 4,223 and continued with `resume_interrupted=true` from the copy taken after step 4,000, so its last 965
+steps came from a fresh pass of the data (some images seen twice, some not at all); the reporting ran in a second resume. After the
+epoch: selection split (10,000 held-out train images) `val_accuracy` **0.2597**, top-5 0.5008, `val_loss` 4.047; official
+validation set (50,000 images, the test split) accuracy **0.2418**, top-5 **0.4803**, loss 4.130. One epoch at a constant
+learning rate of 0.0099 (a 1-epoch cosine with no warmup) is a check that the path learns, not a point on the 100-epoch curve.
+Both passes shared the host with CPU test jobs and ran slower than the probe: 4.7 s per step (55 images per second) over the first
+pass's 4,223 steps, 5.6 s per step (46 images per second) over the resumed 965 steps and the selection evaluation, about 6.7 hours of
+training for the epoch; the 77 images per second above was measured with no such jobs.
 
 So the 50-epoch ImageNet recipe (`vit`) takes about a week, and the 100-epoch ones (`resnet`, `convnext`) about two. A
 killed epoch is lost: the run goes back to the start of the epoch it was in (`resume_interrupted=true` trains it again), and
