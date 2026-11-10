@@ -158,15 +158,20 @@ class BuiltinImageData(StrictConfig):
     # lost epoch, `checkpoint_args.backup_every_steps` (D-038 added it; the knob guard refuses a
     # key the config lacks, so do NOT name a `checkpoint_args.*` key here that is not a field).
     # The rates are the lowest and highest cold ImageNet training row of
-    # tests/test_train/test_api/memory_fit_evidence.json, pinned by
+    # tests/test_train/test_api/memory_fit_evidence.json; the 4.6 and 6.7 hours, the 9.6 and 19.1
+    # days are the README's probe and its one measured epoch. All are pinned by
     # test_the_help_and_the_commands_state_the_imagenet_cost.py: change them together.
     dataset: _DatasetName = dataclasses.field(
         metadata={
             "help": "mnist, cifar10, cifar100, imagenette or imagenet. imagenet is read from "
             "the data disk, a spinning disk on the development machine: 96 to 107 images per "
-            "second were measured in training runs (44 to 115 for cold single-file reads), so "
-            "one epoch of its 1,271,167 images takes 3 to 4 hours and the 50-epoch recipe "
-            "about a week (100 epochs about two). A killed epoch is lost; "
+            "second were measured for the first read of files in training runs (44 to 115 for "
+            "cold single-file reads), a disk-read bound of 3 to 4 hours for one epoch of its "
+            "1,271,167 images, at which the 50-epoch recipe takes about a week (100 epochs about "
+            "two). The whole-train-set runs of resnet18 were slower: a 150-step probe projected "
+            "4.6 hours of training per epoch (9.6 days for 50 epochs, 19.1 for 100), and the one "
+            "measured epoch took about 6.7 hours of training on the RTX 4090 with CPU test jobs "
+            "sharing the host. A killed epoch is lost; "
             "checkpoint_args.backup_every_steps bounds the loss to that many batches of training. "
             "src/train/README.md has the numbers and the exact 50 and 100 epoch commands, which "
             "were not run"

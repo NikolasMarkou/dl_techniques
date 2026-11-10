@@ -69,13 +69,39 @@ def test_the_help_states_the_disk_the_rate_the_week_and_the_lost_epoch(help_text
     for phrase in (
         "spinning disk",
         f"{low:.0f} to {high:.0f} images per second",
-        "one epoch of its 1,271,167 images takes 3 to 4 hours",
-        "the 50-epoch recipe about a week",
+        "a disk-read bound of 3 to 4 hours for one epoch of its 1,271,167 images",
+        "the 50-epoch recipe takes about a week",
+        "a 150-step probe projected 4.6 hours of training per epoch (9.6 days for 50 epochs, 19.1 for 100)",
+        "the one measured epoch took about 6.7 hours of training on the RTX 4090 with CPU test jobs sharing the host",
         "A killed epoch is lost",
         "src/train/README.md",
         "which were not run",
     ):
         assert phrase in help_text, phrase
+
+
+def test_the_measured_epoch_hours_in_the_help_are_the_readmes():
+    """Step 12.2 of plan 98b866fb: the help said only the disk-read bound (3 to 4 hours), while the README measured a slower
+    epoch. The help's probe and measured-epoch figures are the README's own sentences."""
+    readme = " ".join(README.split())
+    assert "puts one epoch at 4.6 hours of training" in readme
+    assert "at 77 images per second the table above is 9.6 days for 50 epochs and 19.1 for 100" in readme
+    assert "about 6.7 hours of training for the epoch" in readme
+    assert "with CPU test jobs" in readme
+
+
+def test_the_readme_states_the_measured_schedule_of_the_one_epoch():
+    """review-iter-2-pass2 WARNING 3: the README called the epoch's rate a constant 0.0099; ``run.log`` of the run shows a
+    ``CosineDecay`` from 0.1 with ``decay_steps`` 4965 and ``alpha`` 0.01, and 0.0099 is its value at step 4,000."""
+    import math
+
+    readme = " ".join(README.split())
+    assert "constant learning rate of 0.0099" not in readme and "a 1-epoch cosine" not in readme
+    assert "a cosine decay from 0.1 to 0.001 over the 4,965 steps with no warmup" in readme
+    assert "The 0.0099 in `training_log.csv`'s `lr` column" in readme and "value at step 4,000" in readme
+    rate = lambda step: 0.1 * ((1 - 0.01) * 0.5 * (1 + math.cos(math.pi * step / 4965)) + 0.01)
+    assert f"{rate(4000):.4f}" == "0.0099" and abs(rate(4000) - 0.009944482706487179) < 1e-8  # results_summary.json lr_first_epoch
+    assert (round(rate(0), 6), round(rate(4965), 6)) == (0.1, 0.001)
 
 
 def test_the_resume_help_says_a_killed_epoch_is_lost(help_text):

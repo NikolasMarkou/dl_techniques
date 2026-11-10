@@ -728,8 +728,12 @@ model=resnet/resnet18 data.dataset=imagenet epochs=1 optim_args.warmup_epochs=0 
 was killed by a logout at step 4,223 and continued with `resume_interrupted=true` from the copy taken after step 4,000, so its last 965
 steps came from a fresh pass of the data (some images seen twice, some not at all); the reporting ran in a second resume. After the
 epoch: selection split (10,000 held-out train images) `val_accuracy` **0.2597**, top-5 0.5008, `val_loss` 4.047; official
-validation set (50,000 images, the test split) accuracy **0.2418**, top-5 **0.4803**, loss 4.130. One epoch at a constant
-learning rate of 0.0099 (a 1-epoch cosine with no warmup) is a check that the path learns, not a point on the 100-epoch curve.
+validation set (50,000 images, the test split) accuracy **0.2418**, top-5 **0.4803**, loss 4.130. The learning rate was a cosine
+decay from 0.1 to 0.001 over the 4,965 steps with no warmup (`run.log`: `CosineDecay`, `decay_steps` 4965, `alpha` 0.01, 0 warmup
+steps). The 0.0099 in `training_log.csv`'s `lr` column and in `results_summary.json`'s `lr_first_epoch` and `lr_last_epoch` is its
+value at step 4,000, where the resumed pass started (the optimizer's step count was restored, not reset): those fields record the
+rate at the first step of the segment that wrote them, not a constant rate. One epoch is a check that the path learns, not a point
+on the 100-epoch curve.
 Both passes shared the host with CPU test jobs and ran slower than the probe: 4.7 s per step (55 images per second) over the first
 pass's 4,223 steps, 5.6 s per step (46 images per second) over the resumed 965 steps and the selection evaluation, about 6.7 hours of
 training for the epoch; the 77 images per second above was measured with no such jobs.
