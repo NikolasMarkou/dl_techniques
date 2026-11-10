@@ -54,8 +54,6 @@ def _make_cfg(tmp_dir: str, norm_type: str = "rms_norm", mode: str = "oob") -> E
         batch_size=2,
         learning_rate=3e-4,
         weight_decay=0.01,
-        warmup_epochs=0,
-        mixed_precision=False,
         max_band_width=0.1,
         out_dir=tmp_dir,
         extras={"regime": "default"},

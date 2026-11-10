@@ -171,8 +171,9 @@ class ExperimentConfig:
     batch_size: int = 128
     learning_rate: float = 3e-4
     weight_decay: float = 0.05
-    warmup_epochs: int = 5
-    mixed_precision: bool = False
+    # The warmup length and the mixed-precision policy are not fields: each experiment hands its warmup to its own
+    # ``run()`` and sets the policy from its regime or flag; ``warmup_epochs`` and ``mixed_precision`` were filled and
+    # read by nothing (deleted, step 13.10.1 of plan 98b866fb).
 
     # --- Norm-specific (consumed by build_norm_kwargs) --------------------
     use_scale: bool = True

@@ -502,7 +502,7 @@ def resolve_vit_args(
 ) -> Dict[str, Any]:
     """Return the ``create_vit`` keywords; see the module contract.
 
-    ``patch_size`` is 4 on 32 px images and 16 otherwise (train_vit.py:451-453, by dataset there).
+    ``patch_size`` is 4 on 32 px images and 16 otherwise (train_vit.py:426-428, by dataset there).
     ``kernel_regularizer`` is always passed, as the legacy trainer does.
     """
     patch = 4 if context.image_size == SMALL_IMAGE_SIZE else 16

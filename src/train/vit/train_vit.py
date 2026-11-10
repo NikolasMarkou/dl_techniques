@@ -92,12 +92,6 @@ class TrainingConfig:
 
     # Augmentation
     augment_data: bool = True
-    # DECISION plan-2026-09-17T032714-403de954/D-003: default is 0.0, not the
-    # previous 0.1. Keras' SparseCategoricalCrossentropy (used below) has no
-    # label_smoothing support, so a non-zero value can never be honored on
-    # this trainer's sparse-label pipeline -- see __post_init__'s hard raise.
-    # Do not silently re-introduce a non-zero default; see decisions.md D-003.
-    label_smoothing: float = 0.0
 
     # Monitoring
     monitor_every_n_epochs: int = 5
@@ -123,15 +117,6 @@ class TrainingConfig:
 
         if self.image_size <= 0:
             raise ValueError("Invalid image_size: must be positive")
-        if self.label_smoothing != 0.0:
-            raise ValueError(
-                f"label_smoothing={self.label_smoothing} is not supported: "
-                "this trainer uses SparseCategoricalCrossentropy on sparse "
-                "integer labels, and Keras' SparseCategoricalCrossentropy "
-                "has no label_smoothing parameter (only CategoricalCrossentropy "
-                "does, which requires one-hot labels). Pass --label-smoothing "
-                "0.0 (the default), or omit the flag."
-            )
         if self.num_classes <= 0:
             raise ValueError("Invalid num_classes: must be positive")
         if self.dataset == "imagenet":
@@ -302,9 +287,6 @@ def train_vit(
     optimizer = optimizer_builder(opt_config, lr_schedule)
 
     # ---- Loss + metrics ----
-    # config.label_smoothing is guaranteed 0.0 here: __post_init__ hard-raises
-    # on any non-zero value (DECISION plan-2026-09-17T032714-403de954/D-003),
-    # since SparseCategoricalCrossentropy has no label_smoothing parameter.
     loss_fn = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 
     metrics = [
@@ -403,12 +385,6 @@ def parse_arguments() -> argparse.Namespace:
 
     # Augmentation
     parser.add_argument("--no-augmentation", dest="augment_data", action="store_false")
-    parser.add_argument(
-        "--label-smoothing", type=float, default=0.0,
-        help="Must be 0.0 (default): SparseCategoricalCrossentropy has no "
-             "label_smoothing support; a non-zero value raises at config-"
-             "validation time rather than being silently ignored.",
-    )
 
     # Output
     parser.add_argument(
@@ -475,7 +451,6 @@ def main() -> None:
         warmup_epochs=args.warmup_epochs,
         weight_decay=args.weight_decay,
         augment_data=args.augment_data,
-        label_smoothing=args.label_smoothing,
         monitor_every_n_epochs=args.monitor_every,
         early_stopping_patience=args.early_stopping_patience,
         conformal_alpha=None if args.no_conformal else args.conformal_alpha,

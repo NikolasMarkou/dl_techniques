@@ -527,7 +527,7 @@ these pairs resolves to, with every value `auto`:
 
 | Family | Dataset | Epochs | Batch | Optimizer | Peak lr | Weight decay | Warmup epochs | Augment | Smoothing | Image size | Patience | Source |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| vit | imagenet | 50 | 128 | adamw | 3e-4 | 0.05 | 5 | none | 0 | 224 | 15 | legacy: `vit/train_vit.py:67,83-89,99,103` |
+| vit | imagenet | 50 | 128 | adamw | 3e-4 | 0.05 | 5 | none | 0 | 224 | 15 | legacy: `vit/train_vit.py:67,83-89,98,290` |
 | vit | imagenette | 200 | 128 | adamw | 3e-4 | 0.05 | 20 | none | 0 | 224 | 15 | new: rules E, W below |
 | resnet | imagenet | 100 | 256 | sgd | 0.1 | 1e-4 as `L2(5e-5)` | 5 | none, loader colour jitter | 0 | 224 | 15 | legacy: `resnet/train_resnet.py:61,74-80,87,345` |
 | resnet | imagenette | 200 | 128 | sgd | 0.05 | 1e-4 as `L2(5e-5)` | 10 | none | 0 | 224 | 15 | new: rules E, B, L, W |
@@ -541,10 +541,10 @@ these pairs resolves to, with every value `auto`:
 "Augment none" adds nothing to the loader's own random-resized-crop and flip, which every ImageNet and Imagenette
 run has (`resnet` on ImageNet adds the loader's colour jitter through `imagenet_augment_color`, which the loader
 refuses for Imagenette). "Smoothing" is the label smoothing of the loss, 0 everywhere: the task builds a plain sparse
-cross-entropy, `vit` refuses a nonzero value (`vit/train_vit.py:125`), the `label_smoothing` field of `resnet/train_resnet.py`
+cross-entropy, `vit` has no smoothing (`vit/train_vit.py:290`; its `label_smoothing` field, which only refused a nonzero value, is deleted with its flag), the `label_smoothing` field of `resnet/train_resnet.py`
 (default 0.1, never read by its loss) is deleted with its flag, and the other two trainers default to 0. "Image size" is the dataset's own 224 (`transform_args.image_size`
 can change it). Other values of the six recipes: ViT uses patch 16 at 224 with dropout 0.1 and attention dropout 0.1
-(`vit/train_vit.py:79-80,451-453`); the sgd weight decay of `resnet` is an L2 penalty on the model, of strength `wd / 2`
+(`vit/train_vit.py:79-80,426-428`); the sgd weight decay of `resnet` is an L2 penalty on the model, of strength `wd / 2`
 because Keras' `L2(l)` has the gradient `2 * l * w` and He et al.'s SGD weight decay `wd` adds `wd * w` to it (before step 10e of plan 98b866fb
 the penalty was `L2(wd)`, twice the paper's decay), and it reaches convolution and dense kernels only, where torchvision's reference
 trainer decays every parameter by default (BatchNorm scale and shift and the dense bias, 0.09 percent of `resnet18`'s parameters, get none: Goyal et al. 2017, arXiv 1706.02677 section 4.2, apply no decay to the BatchNorm coefficients, and the "no bias decay" rule of Bag of Tricks, He et al. 2019, arXiv 1812.01187, decays only the weights of convolution and fully connected layers, which is this rule);

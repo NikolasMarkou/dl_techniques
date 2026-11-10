@@ -288,8 +288,9 @@ def test_vit_on_imagenet_is_the_legacy_trainers_default(builtin):
     assert context.defaults["checkpoint_args"]["early_stopping_patience"] == legacy["early_stopping_patience"]
     assert (kwargs["dropout_rate"], kwargs["attention_dropout_rate"]) == (
         legacy["dropout_rate"], legacy["attention_dropout_rate"])
-    assert kwargs["patch_size"] == 16 and legacy["patch_size"] == 4  # the ImageNet branch of main(), :451-453
-    assert legacy["label_smoothing"] == 0.0
+    assert kwargs["patch_size"] == 16 and legacy["patch_size"] == 4  # the ImageNet branch of main(), :426-428
+    # Its loss is a plain sparse cross-entropy; the `label_smoothing` field, which only refused a nonzero value, is gone.
+    assert "label_smoothing" not in legacy
 
 
 def test_resnet_on_imagenet_is_the_legacy_trainers_default(builtin):

@@ -289,8 +289,6 @@ def main() -> None:
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
-        warmup_epochs=args.warmup_epochs,
-        mixed_precision=bool(mp_o),
         max_band_width=args.max_band_width,
         out_dir=args.out_dir,
         extras={"regime": args.regime},

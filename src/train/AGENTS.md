@@ -513,14 +513,19 @@ A declared config field that nothing reads is a knob that silently does nothing 
 a CLI argument `main()` forgets to forward. **Serialization is not consumption**: reaching
 `save_config_json` / `asdict` / `prepare_run_dir` and nothing else does not make a field live.
 DELETE such a field rather than wiring it, unless a caller actually wants the behaviour.
-**Plumbing is not consumption either**: the field's own `--flag` and its keyword in the config's own
-constructor (`TrainingConfig(x=args.x)`) only fill it, and a test that reads it is not the program
-reading it. That is how ResNet's `label_smoothing` and `--monitor-every` shipped dead.
+**Plumbing is not consumption either**: the field's own `--flag`, its keyword in the config's own
+constructor (`TrainingConfig(x=args.x)`), a write onto the config (`config.x = ...`, `setattr`), its
+name in a CLI-to-config map, a range check of it alone in `__post_init__` and a log line or JSON dump
+only fill, check or report it; a keyword argument merely named like it (`f(x=OTHER)`) is not a read
+of it; and a test that reads it is not the program reading it. That is how
+ResNet's `label_smoothing` and `--monitor-every` shipped dead.
 `tests/test_train/test_config_fields_are_live.py` enforces this for the classes in its `REGISTERED`
-list, searching `src/` only; it follows the config one call into a `src/` function it is handed to
-(`prepare_run_dir(config)`), and a field read back by name from the saved `config.json` is declared
-with its reader in `READ_BACK_FROM_THE_SAVED_CONFIG`. Add a row when you add a config class; never
-add an exemption to green a newly dead field.
+list, searching `src/` only. `self.x` counts only inside the config class or its bases. It follows
+the config one call into a `src/` function it is handed to (`prepare_run_dir(config)`), on the
+branches that call reaches, and a field read by a reader that never imports the class is declared
+with that reader (file and function) in `READ_BACK_FROM_THE_SAVED_CONFIG` or
+`READ_BY_A_READER_THAT_DOES_NOT_IMPORT_THE_CLASS`. Add a row when you add a config class; never add
+an exemption to green a newly dead field.
 
 ## `python -m train` and `train.api`
 
