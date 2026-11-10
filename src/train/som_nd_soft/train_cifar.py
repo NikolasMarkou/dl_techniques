@@ -56,6 +56,7 @@ class CIFARSOMConfig:
     optimizer_type: str = 'adamw'
     weight_decay: float = 1e-4
     gradient_clip_norm: float = 1.0
+    patience: int = 20
 
     monitor_every_n_epochs: int = 5
     num_reconstruction_samples: int = 16
@@ -611,7 +612,7 @@ def train_cifar_som_autoencoder(config: CIFARSOMConfig) -> keras.Model:
         results_dir_prefix="cifar_softsom",
         output_root=config.output_dir,
         monitor="val_loss",
-        patience=20,
+        patience=config.patience,
         use_lr_schedule=True,
     )
     # Update config output paths to match common results dir
@@ -646,6 +647,8 @@ def main() -> None:
     parser.add_argument('--grid-size', type=int, default=16)
     parser.add_argument('--som-temperature', type=float, default=1.0)
     parser.add_argument('--no-augmentation', action='store_true')
+    # This trainer's own early-stopping default; the base parser's is 50.
+    parser.set_defaults(patience=CIFARSOMConfig.patience)
     add_selection_arguments(parser, imagenet=False)
     parser.add_argument('--seed', type=int, default=42, help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
     args = parser.parse_args()
@@ -662,6 +665,8 @@ def main() -> None:
         epochs=args.epochs,
         learning_rate=args.learning_rate,
         lr_schedule=args.lr_schedule,
+        weight_decay=args.weight_decay,
+        patience=args.patience,
         validation_split=args.validation_split,
         max_samples=args.max_samples,
         seed=args.seed,
