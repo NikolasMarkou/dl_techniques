@@ -82,9 +82,24 @@ Interface contract
     named and skipped): ``held_out[set][sigma] = {input_psnr, best_psnr, final_psnr, n}`` and ``held_out_info``. Without
     ``test_dirs``, ``held_out`` is ``{"status": "skipped", "reason", "sigmas_255"}``. No key averages over sets.
 
-    NOT YET WRITTEN, hooks left at their defaults (each is a later step of the plan, named in the summary's
-    ``notes``): ``task_record`` (no ``task.json``, so ``predict`` and ``export`` refuse such a run) and
-    ``config_stamps`` (no legacy-reader stamps).
+    ``task.json`` (``task_record``, schema in :mod:`train.api.predictor`): the family, the variant, the channels, the
+    ``size_multiple`` (the family's stride, 1 for ``bfcnn`` and ``scunet``), ``data_range`` ``"[0,1]"`` and ``output``
+    ``images``, plus ``variant_overrides`` when the recipe sets a key of the variant's table to another value. It has
+    no input size (the model's input is ``(None, None, channels)``) and no statistics (the pixels are not
+    standardized). Written once before ``fit``; a resume leaves it as it is and compares ``channels`` and
+    ``data_range`` with the data it loads (D-027: not the held-out sets).
+
+    The provenance stamps (``config_stamps``, D-011). ``config.json`` gets, at its top level beside the config's own
+    fields, the keys the pre-API readers look for: ``data_range`` (the gate of ``denoiser_provenance``: without it
+    ``eval_psnr_vs_noise``, ``eval_per_pixel_uncertainty``, ``DenoiserPrior`` and ``--init-from`` refuse the
+    checkpoint), ``patch_size``, ``channels``, ``val_image_dirs`` (what ``eval_per_pixel_uncertainty`` builds its
+    clean batch from; without it that script falls back to ITS OWN default directories without an error),
+    ``noise_type``, ``noise_sigma_min``, ``sigma_max_end`` and, for ``bfconvunext`` only, ``convnext_version`` (the
+    one bit ``DenoiserPrior`` reads to allow ``resolution="dynamic"``). Each is a copy of a value the config holds,
+    written by a fresh run only. Limits, stated because they cannot be checked: a ``.keras`` file copied away from its
+    ``config.json`` is refused by those readers (the gate reads the file beside it), and
+    ``eval_per_pixel_uncertainty`` clips its noise always, so on a run trained with ``data.noise_clip=false`` its
+    numbers describe clipped noise, not the run's.
 
 ``train_image_denoising(*, out, model, data, ...)``
     :param out: run directory (a ``str`` or a ``Path``), or ``"auto"``.
@@ -152,6 +167,7 @@ from ..denoising_args import (
 )
 from ..denoising_models import TASK, compile_options_for
 from ..errors import ConfigError
+from ..predictor import build_denoising_record, overrides_of_variant, unit_domain_stamp
 from ..segmentation_models import check_image_size
 from ..trainer import Evaluation, FitState, TaskTrainer, TrainResult, config_problems
 
@@ -306,12 +322,17 @@ class ImageDenoisingTrainer(TaskTrainer):
             spec, context.variant, None, (None, None, data.input_shape[-1]),
             self._model_kwargs(config, context),
         )
-        # The family's stride (None for a family with none: bfcnn, and scunet which pads inside): the multiple a whole
-        # image is reflect-padded to for the held-out cells.
-        self._size_multiple = spec.stride_of(context.variant, config.model_args) or 1
+        # The multiple a whole image is reflect-padded to for the held-out cells.
+        self._size_multiple = self._size_multiple_of(spec, config, context)
         if "bias_free" in spec.properties:
             self._homogeneity = self._check_before_fit(model, data, config.precision)
         return model
+
+    @staticmethod
+    def _size_multiple_of(spec: registry.ModelSpec, config: ImageDenoisingConfig, context: AutoContext) -> int:
+        """Return the family's stride, the multiple a whole image is padded to (1 for ``bfcnn`` and ``scunet``, which
+        have none: ``stride_of`` says ``None``)."""
+        return spec.stride_of(context.variant, config.model_args) or 1
 
     @staticmethod
     def _check_before_fit(model: Any, data: Any, precision: str) -> Dict[str, Any]:
@@ -357,6 +378,59 @@ class ImageDenoisingTrainer(TaskTrainer):
     def used_arguments(self, config: ImageDenoisingConfig, context: AutoContext) -> Dict[str, Any]:
         """Return what the run was built with, for ``config.json``: the model keywords."""
         return {"model_args": recipes.serialize_model_args(self._model_kwargs(config, context))}
+
+    def task_record(
+        self, config: ImageDenoisingConfig, context: AutoContext, data: Any
+    ) -> Dict[str, Any]:
+        """Return the denoising ``task.json`` record (schema in :mod:`train.api.predictor`).
+
+        Called before ``build_model`` on a resume, so the size multiple comes from the registry and the config and not
+        from ``self._size_multiple``.
+        """
+        spec = registry.MODELS[context.family]
+        return build_denoising_record(
+            model=config.model,
+            family=context.family,
+            variant=context.variant,
+            channels=data.input_shape[-1],
+            size_multiple=self._size_multiple_of(spec, config, context),
+            variant_overrides=overrides_of_variant(
+                spec.load_variants()[context.variant], self._model_kwargs(config, context)
+            ),
+        )
+
+    def config_stamps(self, config: ImageDenoisingConfig, spec: registry.ModelSpec) -> Dict[str, Any]:
+        """Return the top-level ``config.json`` keys the pre-API denoiser readers look for (D-011).
+
+        Every value is a copy of one the config holds (``test_denoising_provenance`` holds them equal);
+        ``val_image_dirs`` is as given, so a relative directory is read relative to the working directory of the
+        script that reads it (a stated limit: use absolute directories for a run an eval script will read). The
+        ``convnext_version`` of ``bfconvunext`` is the RESOLVED one: the recipe's model arguments (what
+        ``context.defaults`` holds) with the caller's ``model_args`` over them, as the resolver merges them.
+        """
+        # DECISION plan-2026-11-10T095307-d483ffab/D-011
+        # These keys are the contract with four readers that predate the API; each one removed breaks the path it
+        # serves, and `val_image_dirs` breaks it SILENTLY (`eval_per_pixel_uncertainty._load_eval_config` falls back
+        # to the legacy default directories). Do NOT trim a stamp as "a duplicate of the config", do NOT move the
+        # readers to the API's keys (they are not ours to edit, and an old run would stop loading), and do NOT stamp
+        # `convnext_version` for another family: `DenoiserPrior` sniffs its PRESENCE to allow the dynamic loader.
+        data_cfg: DenoisingData = config.data
+        transform_cfg: DenoiseTransformArgs = config.transform_args
+        stamps: Dict[str, Any] = {
+            "data_range": unit_domain_stamp(),
+            "patch_size": transform_cfg.patch_size,
+            "channels": transform_cfg.channels,
+            "val_image_dirs": list(data_cfg.val_dirs),
+            "noise_type": data_cfg.noise_kind,
+            "noise_sigma_min": data_cfg.noise_sigma_min,
+            "sigma_max_end": data_cfg.noise_sigma_max,
+        }
+        if "bias_free" in spec.properties:
+            variant = registry.parse_model_name(config.model, TASK)[1]
+            model_args = {**spec.recipe(data_cfg.format, variant).get("model_args", {}), **config.model_args}
+            if "convnext_version" in model_args:  # the bias-free ConvUNext (bfcnn and bfunet hold no such key)
+                stamps["convnext_version"] = model_args["convnext_version"]
+        return stamps
 
     def check_model_args(self, config: ImageDenoisingConfig, context: AutoContext) -> None:
         # Before the claim: the adapter's own refusals (a key a bias-free family may not take, a layer that would put
@@ -593,7 +667,8 @@ class ImageDenoisingTrainer(TaskTrainer):
             "`test_metrics_best` and `test_metrics_final` are null: the data has no test split; the best_model.keras "
             "reload check ran on the validation patches (`best_checkpoint_max_abs_diff`); the held-out images are "
             "scored separately (see `held_out`)",
-            "no task.json was written, so `predict` and `export` refuse this run",
+            "`task.json` and the `config.json` stamps for the pre-API eval scripts are written; the denoising predictor "
+            "is not part of this version yet, so `predict` and `export` refuse this run",
         ]
         if data_cfg.test_dirs:
             notes.append(

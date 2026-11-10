@@ -23,8 +23,8 @@ from the OPTIONAL ``variant_overrides``.
     the run has to be trained again; ``predict``, ``export`` and ``resume`` all reach it
     (:func:`check_record`, :func:`refuse_old_record`).
 ``task``, ``model``, ``family``, ``variant``
-    The task word (``image_classification`` or ``image_segmentation``), ``"family/variant"``, and
-    its two halves. A task this reader does not know is named and refused.
+    The task word (``image_classification``, ``image_segmentation`` or ``image_denoising``),
+    ``"family/variant"``, and its two halves. A task this reader does not know is named and refused.
 ``class_names``
     One text per class, in the order of the model's outputs. **Limit, stated because it cannot
     be checked:** the reader verifies the COUNT (against the model's output width) and that no
@@ -67,6 +67,17 @@ from the OPTIONAL ``variant_overrides``.
     ``"masks"`` or ``"logits"``: what the predictor returns for an image
     (:class:`~train.api.segmentation_predictor.SegmentationPredictor` reads it).
 
+``channels``, ``size_multiple``, ``data_range``, ``output`` (denoising only)
+    A denoising record has no ``class_names``, no ``normalize``, ``mean`` or ``std`` and no input size:
+    the model's input is ``(None, None, channels)`` and its pixels lie in ``[0, 1]``, unstandardized.
+    ``channels`` is 1 or 3. ``size_multiple`` is a positive int, the multiple each side of an image is
+    reflect-padded to for a whole-image pass (the family's stride, 1 for a family with none).
+    ``data_range`` is the text ``"[0,1]"`` and nothing else (``unit_domain_stamp``, the one definition the
+    provenance gate of the legacy eval scripts reads from ``config.json``). ``output`` is ``"images"``
+    (:data:`DENOISING_OUTPUTS`): the predictor returns the denoised image, raw, at each input's size.
+    The zero image a loaded denoiser is checked with is ``input_shape_of``: ``DENOISING_PROBE_SIDE``
+    rounded up to a multiple of ``size_multiple``, on each side.
+
 ``variant_overrides`` (OPTIONAL)
     ``{table key: value}``: the keys of the variant's table (``MODEL_VARIANTS[variant]``) that the
     run's resolved ``model_args`` set to another value, so the model is the variant WITH these
@@ -76,9 +87,9 @@ from the OPTIONAL ``variant_overrides``.
     variant's table updated by it, so an override is honoured and a wrong variant or an override the
     model does not have is still refused. ``export`` carries it into ``<out>.task.json``.
 
-``build_task_record(...)`` / ``build_segmentation_record(...)``
+``build_task_record(...)`` / ``build_segmentation_record(...)`` / ``build_denoising_record(...)``
     :return: the record for a finished data load (not checked; see their docstrings). The first
-        writes a classification record, the second a segmentation record.
+        writes a classification record, the second a segmentation record, the third a denoising one.
 
 ``check_record(record, source)``
     :param record: a parsed ``task.json``.
@@ -92,7 +103,8 @@ from the OPTIONAL ``variant_overrides``.
         zeros or a ``std`` that is not ones, and the task's own keys: a classification record's
         ``input_shape`` that is not square or an ``eval_transform`` whose kind is not in
         :data:`EVAL_KINDS`; a segmentation record's ``input_size``, ``channels``, ``ignore_index``,
-        ``mask_threshold`` (with its two-class and no-void conditions) or ``output``.
+        ``mask_threshold`` (with its two-class and no-void conditions) or ``output``; a denoising
+        record's ``channels``, ``size_multiple``, ``data_range`` or ``output``.
 
 ``refuse_old_record(path, prefix)``
     :param path: a ``task.json`` on disk.
@@ -110,7 +122,8 @@ from the OPTIONAL ``variant_overrides``.
         differs: for classification the class names (as a list, in order), the geometry, the
         normalization and the per-channel ``mean`` and ``std`` (within a relative ``1e-5``); for
         segmentation the class names, ``input_size``, the normalization, ``mean`` and ``std``,
-        ``ignore_index`` and ``mask_threshold``. ``output`` is how the predictor answers, not what
+        ``ignore_index`` and ``mask_threshold``; for denoising ``channels`` and ``data_range``
+        (not the held-out sets: D-027). ``output`` is how the predictor answers, not what
         the run trained on, and is not compared. Records of two tasks differ in ``task`` alone.
         A resume compares with this before it trains on the data (D-069).
 
@@ -123,7 +136,10 @@ from the OPTIONAL ``variant_overrides``.
         :class:`~train.api.segmentation_predictor.SegmentationPredictor` for an
         ``image_segmentation`` one (dispatch on ``record["task"]``). Compiles nothing. The model is
         called once on zeros, so a model whose output width (classification) or output map
-        (segmentation: ``input_size`` and the class count) does not match the record is refused here.
+        (segmentation: ``input_size`` and the class count; denoising: ONE tensor of the probe image's
+        size and the record's channels) does not match the record is refused here. A ``image_denoising``
+        record is read and checked, then refused with one sentence: its predictor is a later step of
+        the plan (the ``PREDICTORS`` row raises).
     :raises ConfigError: for a missing path, ``task.json`` or model file, a model file that
         is not an intact ``.keras`` archive (one cut short by a kill, or a zip with no
         ``config.json`` or no weights, is named, not a Keras traceback), a bad record, a
@@ -138,7 +154,7 @@ from the OPTIONAL ``variant_overrides``.
     :return: the checked record of that run or file, without loading the model (the command line
         reads the task before it loads anything); and the model input a record names,
         ``(height, width, channels)``: ``input_shape`` for classification, ``input_size`` and
-        ``channels`` for segmentation.
+        ``channels`` for segmentation, the probe side (see above) twice and ``channels`` for denoising.
 
 ``Predictor.predict(x, top_k=None, threshold=None)``
     :param x: one image or several. A single image is a path (``str`` or ``Path``), a
@@ -215,6 +231,7 @@ SCHEMA_VERSION = 2
 
 CLASSIFICATION = "image_classification"
 SEGMENTATION = "image_segmentation"
+DENOISING = "image_denoising"
 
 #: The task :class:`Predictor` serves; ``load_model`` returns a
 #: :class:`~train.api.segmentation_predictor.SegmentationPredictor` for a segmentation record, so
@@ -254,10 +271,28 @@ RECORD_KEYS: Dict[str, Tuple[str, ...]] = {
         "mask_threshold",
         "output",
     ),
+    DENOISING: (
+        "schema_version",
+        "task",
+        "model",
+        "family",
+        "variant",
+        "channels",
+        "size_multiple",
+        "data_range",
+        "output",
+    ),
 }
 
 #: What ``output`` may say in a segmentation record.
 SEGMENTATION_OUTPUTS = ("masks", "logits")
+
+#: What ``output`` may say in a denoising record: ``images``, the denoised image at each input's size.
+DENOISING_OUTPUTS = ("images",)
+
+#: The side of the zero image a loaded denoiser is called on to check its output, rounded UP to a multiple of
+#: the record's ``size_multiple`` (a U-Net refuses a side off its stride; the model's own input is flexible).
+DENOISING_PROBE_SIDE = 32
 
 #: Keys a record MAY carry (written only when they hold something); every other key is required.
 OPTIONAL_RECORD_KEYS = ("variant_overrides",)
@@ -417,6 +452,52 @@ def build_segmentation_record(
             "ignore_index": ignore_index,
             "mask_threshold": mask_threshold,
             "output": output,
+        },
+        variant_overrides,
+    )
+
+
+def unit_domain_stamp() -> str:
+    """Return the text ``data_range`` holds for a denoiser trained on ``[0, 1]`` pixels (``"[0,1]"``).
+
+    Interface contract: no parameters; returns the one definition the provenance gate of the legacy readers
+    compares with (``dl_techniques.utils.denoiser_provenance.UNIT_DOMAIN_STAMP``), so a denoising record and
+    ``config.json`` cannot disagree with it. The import is lazy and light (no TensorFlow).
+    """
+    from dl_techniques.utils.denoiser_provenance import UNIT_DOMAIN_STAMP
+
+    return UNIT_DOMAIN_STAMP
+
+
+def build_denoising_record(
+    *,
+    model: str,
+    family: str,
+    variant: str,
+    channels: int,
+    size_multiple: int,
+    variant_overrides: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Return the ``task.json`` record of a denoising run; see the module contract.
+
+    :param channels: the model's input and output channels (1 or 3).
+    :param size_multiple: the multiple each side of an image is padded to for a whole-image pass (the
+        family's stride; 1 for a family with none).
+    :return: the record; ``data_range`` is the unit-domain stamp and ``output`` is ``images``. It is NOT checked
+        (:func:`check_record` does that).
+    """
+    return _record_of(
+        DENOISING,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "task": DENOISING,
+            "model": model,
+            "family": family,
+            "variant": variant,
+            "channels": int(channels),
+            "size_multiple": int(size_multiple),
+            "data_range": unit_domain_stamp(),
+            "output": DENOISING_OUTPUTS[0],
         },
         variant_overrides,
     )
@@ -655,6 +736,35 @@ def _segmentation_tail_problems(record: Mapping[str, Any]) -> List[str]:
     return lines
 
 
+def _denoising_geometry(record: Mapping[str, Any]) -> Tuple[List[str], Optional[int]]:
+    """Return ``(lines, channels)`` for ``channels`` and ``size_multiple`` (``None`` when ``channels`` is unusable)."""
+    from .denoising_args import CHANNEL_COUNTS
+
+    lines: List[str] = []
+    channels = record["channels"]
+    usable = _is_whole(channels) and channels in CHANNEL_COUNTS
+    if not usable:
+        lines.append(f"'channels' must be one of {', '.join(map(str, CHANNEL_COUNTS))}, got {channels!r}")
+    multiple = record["size_multiple"]
+    if not (_is_whole(multiple) and multiple > 0):
+        lines.append(f"'size_multiple' must be a positive int, got {multiple!r}")
+    return lines, channels if usable else None
+
+
+def _denoising_tail_problems(record: Mapping[str, Any]) -> List[str]:
+    """Return the problems of ``data_range`` and ``output``."""
+    lines: List[str] = []
+    stamp = unit_domain_stamp()
+    if record["data_range"] != stamp:
+        lines.append(
+            f"'data_range' must be {stamp!r} (the only pixel domain a denoiser of this task is trained "
+            f"on), got {record['data_range']!r}"
+        )
+    if record["output"] not in DENOISING_OUTPUTS:
+        lines.append(f"'output' must be one of {', '.join(DENOISING_OUTPUTS)}, got {record['output']!r}")
+    return lines
+
+
 # DECISION plan-2026-11-10T095307-d483ffab/D-006: the per-task work of reading a record is a ROW of
 # a table keyed by task, not a branch. Do NOT add a third ``elif task == ...`` here or in
 # ``input_shape_of``, ``load_model`` or ``_run_on_zeros`` (a third task would be one more branch in
@@ -733,12 +843,21 @@ def read_record(path: Path) -> Dict[str, Any]:
 
 #: The keys of a record that describe the DATA a run was trained on, per task (a resume compares
 #: them). A segmentation run adds the void and the threshold: a different ``ignore_index`` is
-#: other labels. ``output`` is how the predictor answers, not what the run saw.
+#: other labels; a denoising run holds the channel count its files are decoded to and the pixel domain.
+#: ``output`` is how the predictor answers, not what the run saw.
+# DECISION plan-2026-11-10T095307-d483ffab/D-027
+# A denoising resume compares ``channels`` and ``data_range`` and NOTHING about the held-out sets
+# (``data.test_dirs``). Do NOT add a ``test_dirs`` or a held-out fingerprint key: the sets weigh on no
+# weight (they are listed and scored once, after ``fit``, best and final model together, in whichever
+# process finishes the run), the request comparison already refuses another ``test_dirs`` value, and the
+# files of train and validation are covered by ``data_counts`` and ``data_fingerprint``. A held-out file
+# added between a kill and a resume changes the ``n`` the cells report, and the report states it.
 DATA_KEYS: Dict[str, Tuple[str, ...]] = {
     CLASSIFICATION: ("class_names", "input_shape", "normalize", "eval_transform", "mean", "std"),
     SEGMENTATION: (
         "class_names", "input_size", "normalize", "mean", "std", "ignore_index", "mask_threshold",
     ),
+    DENOISING: ("channels", "data_range"),
 }
 
 
@@ -1305,6 +1424,30 @@ def _segmentation_output_check(output: Any, record: Mapping[str, Any]) -> None:
     check_output(output, record)
 
 
+def _denoising_input_shape(record: Mapping[str, Any]) -> Tuple[int, ...]:
+    """Return ``(side, side, channels)`` of the zero image a denoiser is called on (its own input is flexible)."""
+    # DECISION plan-2026-11-10T095307-d483ffab/D-028
+    # A denoising record has NO input size: the model is saved with a flexible input, and a size in the record would
+    # be a number nothing reads (and a lie for every other size). Do NOT add ``input_size`` or ``input_shape`` to it.
+    # The row returns a PROBE size, a multiple of the stride, so ``load_model`` can call the model once on zeros.
+    multiple = record["size_multiple"]
+    side = -(-DENOISING_PROBE_SIDE // multiple) * multiple
+    return (side, side, record["channels"])
+
+
+def _denoising_output_check(output: Any, record: Mapping[str, Any]) -> None:
+    """Raise :class:`ConfigError` unless ``output`` is ONE image tensor of the probe's size and the record's channels."""
+    side, _, channels = _denoising_input_shape(record)
+    shape = tuple(output.shape) if not isinstance(output, (list, tuple)) else None
+    if shape != (1, side, side, channels):
+        seen = f"{len(output)} outputs" if shape is None else str(shape)
+        raise ConfigError(
+            f"The model outputs {seen} for one {side}x{side}x{channels} image but {TASK_FILE} names a denoiser "
+            f"of {channels} channels (one output of shape (1, {side}, {side}, {channels})); the file and the "
+            "model are not from one run"
+        )
+
+
 def _classification_predictor(model: Any, record: Mapping[str, Any]) -> "Predictor":
     return Predictor(model, record)
 
@@ -1315,35 +1458,54 @@ def _segmentation_predictor(model: Any, record: Mapping[str, Any]) -> Any:
     return SegmentationPredictor(model, record)
 
 
+def _denoising_predictor(model: Any, record: Mapping[str, Any]) -> Any:
+    """Refuse: no denoising predictor exists yet (plan d483ffab step 12 replaces this row with the real class)."""
+    # DECISION plan-2026-11-10T095307-d483ffab/D-028
+    # The record, the model checks and the output check are real; only the predictor is missing, and this row says so
+    # in one sentence. Do NOT return the classification ``Predictor`` here (it would standardize and softmax an image)
+    # and do NOT leave the row out (``TASK_TABLES`` would then refuse the whole record as an unknown task, and the
+    # record would never be checked against its model).
+    raise ConfigError(
+        f"This version cannot predict with a {record['task']} run yet: its models and {TASK_FILE} are written and "
+        "valid, but the denoising predictor is not part of it"
+    )
+
+
 #: Geometry keys and the channel count, per task (see the contract above).
 GEOMETRY_CHECKS: Dict[str, Callable[[Mapping[str, Any]], Tuple[List[str], Optional[int]]]] = {
     CLASSIFICATION: _classification_geometry,
     SEGMENTATION: _segmentation_geometry,
+    DENOISING: _denoising_geometry,
 }
 
 #: The keys only one task holds (classification's ``eval_transform``, segmentation's void,
-#: threshold and ``output``), per task.
+#: threshold and ``output``, denoising's ``data_range`` and ``output``), per task.
 TAIL_CHECKS: Dict[str, Callable[[Mapping[str, Any]], List[str]]] = {
     CLASSIFICATION: _eval_transform_problems,
     SEGMENTATION: _segmentation_tail_problems,
+    DENOISING: _denoising_tail_problems,
 }
 
+#: A denoiser's own input is flexible, so its row gives the zero image it is probed with.
 INPUT_SHAPE_OF: Dict[str, Callable[[Mapping[str, Any]], Tuple[int, ...]]] = {
     CLASSIFICATION: _classification_input_shape,
     SEGMENTATION: _segmentation_input_shape,
+    DENOISING: _denoising_input_shape,
 }
 
-#: The record key that holds the input geometry, per task.
-INPUT_KEY: Dict[str, str] = {CLASSIFICATION: "input_shape", SEGMENTATION: "input_size"}
+#: The record key that holds the input geometry, per task (a denoiser's is its channel count).
+INPUT_KEY: Dict[str, str] = {CLASSIFICATION: "input_shape", SEGMENTATION: "input_size", DENOISING: "channels"}
 
 OUTPUT_CHECKS: Dict[str, Callable[[Any, Mapping[str, Any]], None]] = {
     CLASSIFICATION: _check_width,
     SEGMENTATION: _segmentation_output_check,
+    DENOISING: _denoising_output_check,
 }
 
 PREDICTORS: Dict[str, Callable[[Any, Mapping[str, Any]], Any]] = {
     CLASSIFICATION: _classification_predictor,
     SEGMENTATION: _segmentation_predictor,
+    DENOISING: _denoising_predictor,
 }
 
 #: Every per-task table by name. A task is KNOWN to this reader only when it has a row in all of

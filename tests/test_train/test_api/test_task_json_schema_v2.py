@@ -46,6 +46,7 @@ from tests.classification_fakes import use_tiny_raw
 
 CLASSIFICATION = "image_classification"
 SEGMENTATION = "image_segmentation"
+DENOISING = "image_denoising"
 
 #: The keys and order of a version 1 classification record, written out (not read from the module).
 V1_KEYS = [
@@ -86,10 +87,10 @@ def without(value, *keys):
 # ---------------------------------------------------------------------
 
 
-def test_the_version_is_two_and_the_tables_are_the_two_tasks():
+def test_the_version_is_two_and_the_tables_are_the_three_tasks():
     assert SCHEMA_VERSION == 2
-    assert sorted(RECORD_KEYS) == [CLASSIFICATION, SEGMENTATION]
-    assert sorted(DATA_KEYS) == [CLASSIFICATION, SEGMENTATION]
+    assert sorted(RECORD_KEYS) == sorted([CLASSIFICATION, SEGMENTATION, DENOISING])
+    assert sorted(DATA_KEYS) == sorted(RECORD_KEYS)
     assert OPTIONAL_RECORD_KEYS == ("variant_overrides",)
 
 

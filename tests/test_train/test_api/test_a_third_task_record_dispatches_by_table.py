@@ -40,6 +40,7 @@ from train.api.data_args import DataFacts
 from train.api.errors import ConfigError
 from train.api.predictor import (
     CLASSIFICATION,
+    DENOISING,
     PREDICTORS,
     SCHEMA_VERSION,
     SEGMENTATION,
@@ -163,12 +164,16 @@ def test_the_fake_has_a_row_for_every_table():
     assert set(FAKE_ROWS) == set(TASK_TABLES)
 
 
+REAL_TASKS = [CLASSIFICATION, SEGMENTATION, DENOISING]
+
+
 @pytest.mark.parametrize("name", sorted(TASK_TABLES))
-def test_the_two_real_tasks_have_a_row_in_every_table(name):
-    assert sorted(TASK_TABLES[name]) == sorted([CLASSIFICATION, SEGMENTATION]), name
+def test_the_real_tasks_have_a_row_in_every_table(name):
+    assert sorted(TASK_TABLES[name]) == sorted(REAL_TASKS), name
 
 
-def test_the_predict_writers_are_the_two_real_tasks():
+def test_the_predict_writers_are_the_two_tasks_that_can_predict():
+    # The denoising task has a record and a load row; its predictor and its writer are a later step of the plan.
     assert sorted(cli.PREDICT_WRITERS) == sorted([CLASSIFICATION, SEGMENTATION])
 
 
@@ -278,7 +283,7 @@ def test_the_real_tasks_keep_their_predictors():
 def test_a_task_missing_from_a_table_is_refused_naming_the_known_tasks(fake_task, monkeypatch, name):
     monkeypatch.delitem(TASK_TABLES[name], FAKE)
     knows = re.escape(", ".join(TASK_TABLES[name]))
-    assert sorted(TASK_TABLES[name]) == sorted([CLASSIFICATION, SEGMENTATION])
+    assert sorted(TASK_TABLES[name]) == sorted(REAL_TASKS)
     with pytest.raises(ConfigError, match=rf"'task' is '{FAKE}'; this reader knows {knows}$"):
         check_record(fake_record(), "task.json")
 
@@ -295,7 +300,8 @@ def test_a_task_missing_from_the_predict_writers_is_refused_naming_the_known_tas
 
 def test_a_task_in_no_table_is_refused_with_the_record_tasks(fake_task, monkeypatch):
     monkeypatch.delitem(TASK_TABLES["RECORD_KEYS"], FAKE)
-    with pytest.raises(ConfigError, match=r"this reader knows image_classification, image_segmentation$"):
+    knows = re.escape(", ".join(TASK_TABLES["RECORD_KEYS"]))
+    with pytest.raises(ConfigError, match=rf"this reader knows {knows}$"):
         check_record(fake_record(), "task.json")
 
 
