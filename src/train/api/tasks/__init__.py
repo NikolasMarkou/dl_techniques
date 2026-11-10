@@ -28,6 +28,12 @@ BUILTIN_TASKS = (
         function="train.api.tasks.image_segmentation:train_image_segmentation",
         summary="train a semantic segmenter on Oxford-IIIT Pet or on image and mask files",
     ),
+    registry.TaskSpec(
+        name="image_denoising",
+        config_class="train.api.tasks.image_denoising:ImageDenoisingConfig",
+        function="train.api.tasks.image_denoising:train_image_denoising",
+        summary="train a blind image denoiser on folders of clean images with noise added on the fly",
+    ),
 )
 
 

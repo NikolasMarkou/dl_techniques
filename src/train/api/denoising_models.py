@@ -79,6 +79,11 @@ Interface contract
     no layer of the family. The ConvUNext families reuse
     :func:`train.api.segmentation_models.observe_convunext`.
 
+``compile_options_for(family, precision)``
+    :return: ``{"jit_compile": False}`` for ``bfunet``, ``bfconvunext`` and ``convunext_biased`` under
+        ``mixed_float16`` (XLA rejects their gradient there, measured in step 2) and ``{}`` everywhere else; the
+        task's ``compile_options`` hook returns it.
+
 ``builtin_denoising_models()``
     :return: the five :class:`~train.api.registry.ModelSpec` rows, freshly built.
     :func:`train.api.recipes.register_builtin_models` registers them with the others.
@@ -87,11 +92,13 @@ Recipes
 -------
 Every family trains the legacy denoiser's optimizer (``train.bfunet.common.TrainingConfig``): AdamW, lr 1e-3, weight
 decay 4e-3, cosine over all epochs, a GLOBAL clip norm of 1.0 (``gradient_clipping_by_norm``), 10 warmup epochs (10 percent
-of the 100 epochs of the recipe), batch 16 (4 for the ``base`` U-Nets at 256 px, the legacy README's 24 GB note). The
+of the 100 epochs of the recipe; the task derives ``max(1, round(0.1 * epochs))`` for any other length,
+``train.api.denoising_args.DenoiseOptimArgs``), batch 16 (4 for the ``base`` U-Nets at 256 px, the legacy README's 24 GB note). The
 bias-free families build what the legacy trainers build: v1 blocks (ConvUNext only), ``batchnorm`` (the variance-only
 bias-free layer), LeakyReLU(0.1), the trainable Gabor stem (U-Nets), ``final_projection_groups=1``. Early stopping is
 off in the legacy trainers (the curriculum makes the monitor non-monotonic); the API has no off switch, so the recipe's
-patience is its 100 epochs. The ``convunext_biased`` recipe keeps the library defaults (the table's v2 blocks, layernorm,
+patience is its 100 epochs, counted only from the end of the curriculum (``selection_start_epoch``): a run of at most 100
+epochs never stops early, and a longer one stops after 100 epochs without a better ``val_psnr`` (D-023). The ``convunext_biased`` recipe keeps the library defaults (the table's v2 blocks, layernorm,
 GELU): the bias-free choices exist to keep ``f(a x) = a f(x)`` and a biased family has no use for them.
 
 Import rule
@@ -635,6 +642,7 @@ def _denoising_recipe(
         "epochs": EPOCHS,
         "batch_size": batch_size,
         "optim_args": dict(_OPTIM),
+        "metric_args": {"watch_metric": "val_psnr"},
         "checkpoint_args": {"early_stopping_patience": EPOCHS},
         "model_args": dict(model_args),
         "per_dataset": {},
@@ -670,6 +678,32 @@ CONVUNEXT_BIASED = _denoising_recipe({}, per_variant=_BASE_BATCH)
 #: SCUNet tiny peaks at 4,385 MB at 256 px and batch 8 (step 2(d)); batch 16 was measured at 128 px only. Small and base
 #: are not measured at any size.
 SCUNET = _denoising_recipe({}, batch_size=8)
+
+
+#: The families whose training XLA REJECTS under ``mixed_float16`` (step 2(a), measured on an RTX 4090 with the real
+#: recipe: an f32 gradient of the bilinear ``UpSampling2D`` meets an f16 operand, "mixed precision is disallowed").
+#: ``bfcnn`` and ``scunet`` have no bilinear upsampling and train under XLA at both precisions.
+XLA_REJECTS_MIXED_FLOAT16 = ("bfunet", "bfconvunext", "convunext_biased")
+
+
+def compile_options_for(family: str, precision: str) -> Dict[str, Any]:
+    """Return the extra ``compile`` keywords of ``family`` under ``precision``: ``{}`` or ``{"jit_compile": False}``.
+
+    :param family: a denoising family name.
+    :param precision: the run's ``precision`` (``float32``, ``mixed_float16`` or ``mixed_bfloat16``).
+    :return: ``{"jit_compile": False}`` for a family of :data:`XLA_REJECTS_MIXED_FLOAT16` under ``mixed_float16``;
+        ``{}`` otherwise, which makes Keras' own ``"auto"`` (XLA on a GPU). ``mixed_bfloat16`` was not measured and
+        gets the default.
+    """
+    # DECISION plan-2026-11-10T095307-d483ffab/D-012
+    # `jit_compile=False` only on the (family, precision) cells step 2 MEASURED as rejected, never for float32 and
+    # never for a family that trains under XLA: it costs speed (33 percent slower on bfconvunext base, measured), and
+    # an unconditional False would charge every cell for three. Do NOT take the cells from the legacy comment
+    # (`bfunet/common.py` "XLA rejects the bilinear gradient"): it named the effect and no cell. Do NOT pass
+    # `jit_compile=None` for "no option": Keras reads None as a value.
+    if precision == "mixed_float16" and family in XLA_REJECTS_MIXED_FLOAT16:
+        return {"jit_compile": False}
+    return {}
 
 
 def builtin_denoising_models() -> Tuple[ModelSpec, ...]:

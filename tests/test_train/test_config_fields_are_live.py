@@ -186,6 +186,13 @@ REGISTERED: List[Tuple[str, str]] = [
     ("train/api/data_args.py", "BuiltinImageData"),
     ("train/api/data_args.py", "FolderImageData"),
     ("train/api/data_args.py", "CsvImageData"),
+    # The denoising task (step 8 of plan d483ffab): its config, its data config and its four own groups.
+    ("train/api/tasks/image_denoising.py", "ImageDenoisingConfig"),
+    ("train/api/denoising_args.py", "DenoisingData"),
+    ("train/api/denoising_args.py", "DenoiseTransformArgs"),
+    ("train/api/denoising_args.py", "DenoiseMetricArgs"),
+    ("train/api/denoising_args.py", "DenoiseLossArgs"),
+    ("train/api/denoising_args.py", "DenoiseOptimArgs"),
 ]
 
 # Fields known to be dead but OUT OF SCOPE of the sweep that introduced this
@@ -235,6 +242,16 @@ READ_BY_A_READER_THAT_DOES_NOT_IMPORT_THE_CLASS: Dict[Tuple[str, str], Dict[str,
         "out": ("train/api/trainer.py", "TaskTrainer.run"),
         "resume_interrupted": ("train/api/trainer.py", "TaskTrainer.run"),
         "epochs": ("train/api/run_sequence.py", "train_or_restore"),
+    },
+    # The same five task-agnostic reads for the denoising task, plus ``model`` (``TaskTrainer.run`` parses it into the
+    # family and the variant; the denoising trainer takes both from the context and reads no ``config.model`` itself
+    # until its ``task_record`` is written).
+    ("train/api/tasks/image_denoising.py", "ImageDenoisingConfig"): {
+        "debug_args": ("train/api/trainer.py", "TaskTrainer.run"),
+        "logger_args": ("train/api/fit_callbacks.py", "build_callbacks"),
+        "out": ("train/api/trainer.py", "TaskTrainer.run"),
+        "resume_interrupted": ("train/api/trainer.py", "TaskTrainer.run"),
+        "model": ("train/api/trainer.py", "TaskTrainer.run"),
     },
 }
 

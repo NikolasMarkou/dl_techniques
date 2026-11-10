@@ -453,8 +453,8 @@ def test_the_function_is_keyword_only_and_strict(world, tmp_path):
 
 
 def test_the_built_in_task_rows_are_what_the_package_registers(world):
-    assert [spec.name for spec in BUILTIN_TASKS] == ["image_classification", "image_segmentation"]
+    assert [spec.name for spec in BUILTIN_TASKS] == ["image_classification", "image_segmentation", "image_denoising"]
     register_builtin_tasks()
     register_builtin_tasks()
-    assert sorted(registry.TASKS) == ["image_classification", "image_segmentation"]
+    assert sorted(registry.TASKS) == ["image_classification", "image_denoising", "image_segmentation"]
     assert recipes.TASK == "image_classification"

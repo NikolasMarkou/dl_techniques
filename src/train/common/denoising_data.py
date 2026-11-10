@@ -74,6 +74,12 @@ noise, val_seed, max_train_files, max_val_files, max_samples, fingerprint, augme
     :raises DataSourceError: for a source that cannot be used (naming the key and the file).
     :raises ValueError: for a number out of range.
 
+``PATCH_AUGMENTS`` / ``build_patch_augment(preset)``
+    ``("none", "flip", "dihedral")`` and the seeded ``(seed, patch) -> patch`` hook of one of them (``None`` for
+    ``"none"``), built from ``train.common.image_augment``: a random horizontal flip, or flips and quarter turns (a
+    patch is square, so a turn never changes its shape). The hook is the ``augment`` argument of
+    :func:`load_denoising_data`; the validation set is never augmented. :raises ValueError: for another name.
+
 ``denoising_fingerprint(selection, mode)``
     A sha256 over ``(split, directory index, path relative to its directory, size)`` of every used file in
     listing order, or with ``mode="content"`` also every file's bytes (streamed); the scheme is
@@ -149,6 +155,23 @@ Entry = Tuple[int, str]
 
 #: A seeded hook ``(seed, patch) -> patch`` applied to a clean training patch (a flip, a quarter turn).
 PatchAugment = Callable[[tf.Tensor, tf.Tensor], tf.Tensor]
+
+#: The training-patch augmentations a run may ask for: none, a random horizontal flip, or the dihedral group (flips and
+#: quarter turns; a patch is square, so a turn never changes its shape). ``train.api.denoising_args`` holds the same
+#: tuple and a test holds the two equal.
+PATCH_AUGMENTS = ("none", "flip", "dihedral")
+
+
+def build_patch_augment(preset: str) -> Optional[PatchAugment]:
+    """The seeded ``(seed, patch) -> patch`` hook of ``preset`` (one of :data:`PATCH_AUGMENTS`), or ``None`` for ``"none"``.
+
+    :raises ValueError: for a name that is no preset.
+    """
+    from train.common.image_augment import random_dihedral, random_flip
+
+    if preset not in PATCH_AUGMENTS:
+        raise ValueError(f"Unknown patch augmentation {preset!r}; known: {list(PATCH_AUGMENTS)}")
+    return {"none": None, "flip": random_flip(), "dihedral": random_dihedral()}[preset]
 
 
 # ---------------------------------------------------------------------

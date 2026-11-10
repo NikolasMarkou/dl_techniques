@@ -63,6 +63,10 @@ _LAZY: Dict[str, str] = {
     "load_seg_data_config": ".segmentation_args",
     "ImageSegmentationConfig": ".tasks.image_segmentation",
     "train_image_segmentation": ".tasks.image_segmentation",
+    "DenoisingData": ".denoising_args",
+    "load_denoising_data_config": ".denoising_args",
+    "ImageDenoisingConfig": ".tasks.image_denoising",
+    "train_image_denoising": ".tasks.image_denoising",
 }
 
 __all__ = sorted(_LAZY)

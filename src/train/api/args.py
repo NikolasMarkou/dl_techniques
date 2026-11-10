@@ -96,6 +96,10 @@ class AutoContext:
     num_classes: Optional[int]
     image_size: Optional[int]
     defaults: Mapping[str, Any]
+    #: The epochs the run will train (the request's, else the recipe's, else the smoke run's one), for a
+    #: group whose ``"auto"`` depends on the length of the run (a denoiser's curriculum and warmup);
+    #: ``None`` when nothing says, which no earlier task's group reads.
+    epochs: Optional[int] = None
 
 
 def _is_auto(value: Any) -> bool:

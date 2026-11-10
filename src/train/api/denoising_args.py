@@ -1,14 +1,12 @@
-"""The denoising arguments of ``python -m train``: the data group and what is read from it.
+"""The denoising arguments of ``python -m train``: the data group, the transform, metric, loss and optimizer groups.
 
 ``DenoisingData`` names the image folders a denoiser trains and validates on, how many files of them
 it uses, the noise it adds and the curriculum of that noise. A denoiser has no labels: the clean image
 is the target, so there is no class, mask or test split here; the noise is added by the pipeline
 (``train.common.denoising_data``), on the fly, from a seed. Every option that cannot apply is REFUSED, never
-ignored.
-
-This module is the first of the denoising task's argument modules; the transform, metric and loss groups
-and the task config that holds them are added with the task. The group is not yet a field of any
-task config.
+ignored. ``DenoiseTransformArgs``, ``DenoiseMetricArgs``, ``DenoiseLossArgs`` and ``DenoiseOptimArgs`` are the
+groups of the ``image_denoising`` task config (``train.api.tasks.image_denoising``) that differ from the shared
+ones.
 
 Interface contract
 ------------------
@@ -18,7 +16,9 @@ Interface contract
     defines what the model sees, so there is one home for it; ``noise_clip`` is the one that is a decision
     the user may overrule). ``format`` is always ``"folder"``: the shared run sequence reads it. A relative path is
     relative to the directory of the YAML file that holds it, or to the working directory for a mapping or
-    the command line. ``problems(prefix)`` names every option that is out of range or contradicts another.
+    the command line. ``problems(prefix)`` names every option that is out of range or contradicts another;
+    ``resolve_auto(context)`` fills ``curriculum_epochs`` ``"auto"`` with :func:`auto_curriculum_epochs` of the run's
+    epochs (``AutoContext.epochs``).
 
 ``load_denoising_data_config(data)``
     :param data: a config (returned as is), a mapping, or the path of a YAML file holding one.
@@ -50,6 +50,30 @@ Interface contract
         over ``curriculum_epochs`` with ``curriculum_schedule``.
     :raises ConfigError: while ``curriculum_epochs`` is still ``"auto"`` (the task resolves it from the epochs).
 
+``DenoiseTransformArgs``
+    ``patch_size`` (the side of the square crops the model trains and validates on, at least 16: SSIM's window is 11),
+    ``patches_per_image`` (crops cut from each decoded image), ``augment`` (``none``, ``flip`` or ``dihedral``; auto is
+    the recipe's, which for folder data is the flip of ``registry.FILE_DATA_OVERLAY``) and ``channels`` (1 or 3).
+
+``DenoiseMetricArgs``
+    ``watch_metric`` (auto is the recipe's ``val_psnr``), ``watch_mode`` (auto is read from the name),
+    ``success_gain_db`` (auto is :data:`SUCCESS_GAIN_DB`: the run succeeds when its best ``val_psnr`` inside the
+    selection window beats the PSNR of the noisy input by this many dB) and ``test_sigmas_255`` (the noise levels,
+    on the 0-255 scale, of the held-out cells).
+
+``DenoiseLossArgs``
+    ``name``: ``mse``, ``mae`` or ``charbonnier``. A bias-free family accepts only ``mse`` (the task refuses the
+    others before the run directory is claimed): an L1-type loss estimates something other than the conditional
+    mean, which is what the bias-free denoiser's residual-as-score reading needs.
+
+``DenoiseOptimArgs``
+    :class:`~train.api.args.OptimArgs` whose ``warmup_epochs`` ``"auto"`` is :func:`auto_warmup_epochs` of the run's
+    epochs (the legacy rule) instead of the recipe's fixed number.
+
+``auto_curriculum_epochs(epochs)`` / ``auto_warmup_epochs(epochs)``
+    ``max(1, round(0.8 * epochs))`` and ``max(1, round(0.1 * epochs))``: what ``data.curriculum_epochs`` and
+    ``optim_args.warmup_epochs`` resolve to when they are ``"auto"``.
+
 Import rule
 -----------
 Module scope imports only the standard library and ``train.api`` (D-012); the data module and its
@@ -61,6 +85,7 @@ import os
 from pathlib import Path
 from typing import Any, List, Literal, Mapping, Optional, Tuple, Union
 
+from .args import AutoContext, OptimArgs, _is_auto, _recipe_values, _with_values
 from .config import AUTO, Auto, StrictConfig, join_path, validate
 from .data_args import DataFacts, read_data_file
 from .errors import ConfigError, ConfigValidationError
@@ -77,8 +102,49 @@ CURRICULUM_SCHEDULES: Tuple[str, ...] = ("linear", "cosine", "exp")
 #: against the file.
 DENOISING_PATH_KEYS = ("train_dirs", "val_dirs")
 
+#: The training-patch augmentations; ``test_common_denoising_data`` holds it equal to ``train.common.denoising_data.PATCH_AUGMENTS``.
+PATCH_AUGMENTS: Tuple[str, ...] = ("none", "flip", "dihedral")
+
+#: The losses of ``loss_args.name``; ``test_image_denoising_task`` holds it equal to ``train.common.denoising_run.LOSS_NAMES``.
+LOSS_NAMES: Tuple[str, ...] = ("mse", "mae", "charbonnier")
+
+#: The smallest ``patch_size``: SSIM's window is 11 pixels, so a smaller patch has no SSIM to report.
+MIN_PATCH_SIZE = 16
+
+#: The channel counts a denoiser reads and writes: grey or RGB.
+CHANNEL_COUNTS = (1, 3)
+
+#: ``metric_args.test_sigmas_255`` when the caller gives none: the three levels every denoising paper reports.
+DEFAULT_TEST_SIGMAS_255: Tuple[float, ...] = (15.0, 25.0, 50.0)
+
+# DECISION plan-2026-11-10T095307-d483ffab/D-013
+# `metric_args.success_gain_db` auto is 1.0 dB: an INFERRED number, not a literature value. A trained denoiser
+# beats its noisy input by 5 to 15 dB over the range U(0, 0.25) (the legacy run: 23.6 dB after one epoch against 20.7
+# dB of input), so 1 dB is a bar a model that learned anything clears with room and one that learned nothing (an
+# untrained U-Net sits well below its input) cannot. Do NOT make it an absolute PSNR: the input PSNR moves with the
+# sigma range, so a fixed number would pass or fail the same model by the noise it was given.
+SUCCESS_GAIN_DB = 1.0
+
+#: ``data.curriculum_epochs`` auto is this fraction of the epochs (D-013): the last fifth trains at the full range.
+CURRICULUM_FRACTION = 0.8
+
+#: ``optim_args.warmup_epochs`` auto is this fraction of the epochs (the legacy ``max(1, round(0.1 * epochs))``).
+WARMUP_FRACTION = 0.1
+
 _NoiseKind = Literal[NOISE_KINDS]  # type: ignore[valid-type]
 _Schedule = Literal[CURRICULUM_SCHEDULES]  # type: ignore[valid-type]
+_Augment = Literal[PATCH_AUGMENTS]  # type: ignore[valid-type]
+_LossName = Literal[LOSS_NAMES]  # type: ignore[valid-type]
+
+
+def auto_curriculum_epochs(epochs: int) -> int:
+    """Return what ``data.curriculum_epochs`` ``"auto"`` is for a run of ``epochs``: ``max(1, round(0.8 * epochs))``."""
+    return max(1, round(CURRICULUM_FRACTION * epochs))
+
+
+def auto_warmup_epochs(epochs: int) -> int:
+    """Return what ``optim_args.warmup_epochs`` ``"auto"`` is for a run of ``epochs``: ``max(1, round(0.1 * epochs))``."""
+    return max(1, round(WARMUP_FRACTION * epochs))
 
 _FINGERPRINT_HELP = (
     "what the run records to tell, at a resume, that the files are the same: 'listing' is every used file's "
@@ -276,6 +342,17 @@ class DenoisingData(StrictConfig):
             bad("val_seed", "expected an int of at least 0")
         return lines
 
+    def resolve_auto(self, context: AutoContext) -> "DenoisingData":
+        """Fill ``curriculum_epochs`` ``"auto"`` with :func:`auto_curriculum_epochs` of the run's epochs."""
+        if not _is_auto(self.curriculum_epochs):
+            return self
+        epochs = context.epochs
+        if not isinstance(epochs, int) or isinstance(epochs, bool) or epochs < 1:
+            raise ConfigError(
+                f"Invalid value for 'data.curriculum_epochs': auto is {CURRICULUM_FRACTION:g} x the epochs, and the "
+                f"run's epochs are {epochs!r}; set data.curriculum_epochs or epochs")
+        return dataclasses.replace(self, curriculum_epochs=auto_curriculum_epochs(epochs))
+
 
 # ---------------------------------------------------------------------
 # The config from a mapping or a file
@@ -380,3 +457,156 @@ def curriculum_callback(data: DenoisingData, sigma_max_var: Any) -> Any:
         sigma_max_var=sigma_max_var, sigma_max_start=data.noise_sigma_max_start,
         sigma_max_end=data.noise_sigma_max, total_epochs=data.curriculum_epochs,
         schedule=data.curriculum_schedule)
+
+
+# ---------------------------------------------------------------------
+# The groups of the task config
+# ---------------------------------------------------------------------
+
+@dataclasses.dataclass(frozen=True)
+class DenoiseTransformArgs(StrictConfig):
+    """The crops a denoiser trains on and how they are augmented; read by the denoising task."""
+
+    patch_size: int = dataclasses.field(
+        default=256,
+        metadata={
+            "help": f"side of the square crops (at least {MIN_PATCH_SIZE}: SSIM's window is 11 pixels); the training "
+            "crops, the fixed validation crops and the model's training input are this size; a U-Net family needs a "
+            "multiple of 2**depth (8 for tiny and small, 16 for base and large, 32 for xlarge), which is refused "
+            "before the run directory is claimed; an image with a side below it is upscaled, as the legacy trainers do"
+        },
+    )
+    patches_per_image: int = dataclasses.field(
+        default=4,
+        metadata={
+            "help": "crops cut from each decoded image per epoch (and fixed crops per validation image); an epoch "
+            "is the used train files x this many patches"
+        },
+    )
+    augment: Auto[_Augment] = dataclasses.field(
+        default=AUTO,
+        metadata={
+            "help": "none, flip (horizontal) or dihedral (flips and quarter turns), applied to the clean training "
+            "crop before the noise is added; validation is never augmented; auto is the family recipe's, a flip "
+            "for folder data"
+        },
+    )
+    channels: int = dataclasses.field(
+        default=3,
+        metadata={"help": "1 (grey) or 3 (RGB): every image is decoded to this many channels and the model reads and writes them"},
+    )
+
+    def problems(self, prefix: str) -> List[str]:
+        """Name a ``patch_size`` below the SSIM window, a count below 1 and a channel count other than 1 or 3."""
+        lines: List[str] = []
+        if self.patch_size < MIN_PATCH_SIZE:
+            lines.append(
+                f"Invalid value for {join_path(prefix, 'patch_size')!r}: expected an int of at least {MIN_PATCH_SIZE} "
+                f"(SSIM's window is 11 pixels), got {self.patch_size!r}")
+        if self.patches_per_image < 1:
+            lines.append(
+                f"Invalid value for {join_path(prefix, 'patches_per_image')!r}: expected an int of at least 1, "
+                f"got {self.patches_per_image!r}")
+        if self.channels not in CHANNEL_COUNTS:
+            lines.append(
+                f"Invalid value for {join_path(prefix, 'channels')!r}: expected one of {list(CHANNEL_COUNTS)}, "
+                f"got {self.channels!r}")
+        return lines
+
+    def resolve_auto(self, context: AutoContext) -> "DenoiseTransformArgs":
+        """Fill ``augment`` from the recipe; a recipe that says nothing is ``none``."""
+        found = _recipe_values(self, context, "transform_args")
+        if _is_auto(self.augment):
+            found.setdefault("augment", "none")
+        return _with_values(self, "transform_args", found)
+
+
+@dataclasses.dataclass(frozen=True)
+class DenoiseMetricArgs(StrictConfig):
+    """The metric that selects the checkpoint, the success bar and the held-out noise levels; read by the denoising task."""
+
+    watch_metric: Auto[str] = dataclasses.field(
+        default=AUTO,
+        metadata={
+            "help": "metric that picks the best epoch among those from the end of the curriculum on: val_psnr (the "
+            "default recipe), val_ssim, val_mae or val_loss"
+        },
+    )
+    watch_mode: Auto[Literal["min", "max"]] = dataclasses.field(
+        default=AUTO, metadata={"help": "min or max; auto is read from the metric's name"}
+    )
+    success_gain_db: Auto[float] = dataclasses.field(
+        default=AUTO,
+        metadata={
+            "help": f"the run succeeds when its best val_psnr from the end of the curriculum on beats the PSNR of the "
+            f"noisy validation set by at least this many dB; auto is {SUCCESS_GAIN_DB:g} dB, an inferred number, "
+            "not a literature value: a model that learned anything clears it and an untrained one does not"
+        },
+    )
+    test_sigmas_255: List[float] = dataclasses.field(
+        default_factory=lambda: list(DEFAULT_TEST_SIGMAS_255),
+        metadata={
+            "help": "noise levels on the 0-255 scale (sigma_255 = 255 x sigma) of the held-out cells, each scored for "
+            "the best and the final model; 15, 25 and 50 are the levels denoising papers report"
+        },
+    )
+
+    def problems(self, prefix: str) -> List[str]:
+        """Name a negative ``success_gain_db`` and a ``test_sigmas_255`` that is empty, repeats or leaves (0, 255]."""
+        lines: List[str] = []
+        gain = self.success_gain_db
+        if not _is_auto(gain) and gain < 0:
+            lines.append(
+                f"Invalid value for {join_path(prefix, 'success_gain_db')!r}: expected auto or a number of at "
+                f"least 0, got {gain!r}")
+        sigmas = self.test_sigmas_255
+        if not sigmas or len(set(sigmas)) != len(sigmas) or any(not 0 < value <= 255 for value in sigmas):
+            lines.append(
+                f"Invalid value for {join_path(prefix, 'test_sigmas_255')!r}: expected a non-empty list of distinct "
+                f"numbers in (0, 255], got {sigmas!r}")
+        return lines
+
+    def resolve_auto(self, context: AutoContext) -> "DenoiseMetricArgs":
+        """Fill ``watch_metric`` from the recipe, ``watch_mode`` from its name and ``success_gain_db`` with :data:`SUCCESS_GAIN_DB`."""
+        from train.common.callbacks import resolve_monitor_mode
+
+        found = _recipe_values(self, context, "metric_args", skip=("watch_mode", "success_gain_db"))
+        metric = found.get("watch_metric", self.watch_metric)
+        if _is_auto(self.watch_mode) and not _is_auto(metric):
+            found["watch_mode"] = resolve_monitor_mode(metric)
+        if _is_auto(self.success_gain_db):
+            found["success_gain_db"] = SUCCESS_GAIN_DB
+        return _with_values(self, "metric_args", found)
+
+
+@dataclasses.dataclass(frozen=True)
+class DenoiseLossArgs(StrictConfig):
+    """The loss of a denoising run; read by the denoising task."""
+
+    name: _LossName = dataclasses.field(
+        default="mse",
+        metadata={
+            "help": "mse (the mean squared error: the loss whose minimiser is the conditional mean, which a bias-free "
+            "denoiser's residual-as-score reading needs), mae, or charbonnier (a smooth L1, epsilon 1e-3); mae and "
+            "charbonnier are refused for a bias-free family (bfcnn, bfunet, bfconvunext)"
+        },
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class DenoiseOptimArgs(OptimArgs):
+    """The shared optimizer group with a warmup that follows the length of the run."""
+
+    # DECISION plan-2026-11-10T095307-d483ffab/D-024
+    # `warmup_epochs` auto is `max(1, round(0.1 * epochs))`, the legacy rule (`bfunet/common.py` `warmup_epochs`),
+    # NOT the recipe's 10: the recipe's number is that rule at its 100 epochs, and a fixed 10 against a 5-epoch run
+    # (the length of a smoke run or a short parity run) never leaves its warmup, so the run trains at a fraction of
+    # `lr` throughout. Do NOT put the derivation in `OptimArgs.resolve_auto` (the other tasks' recipes name their own
+    # numbers and the goldens pin them) and do NOT drop `warmup_epochs` from the recipe (it documents the 100-epoch
+    # value and the run still logs "Recipe value not used" when the derived number differs, which is true).
+    def resolve_auto(self, context: AutoContext) -> "DenoiseOptimArgs":
+        """Fill the shared fields, then an ``"auto"`` warmup from the run's epochs unless the schedule is constant."""
+        resolved = super().resolve_auto(context)
+        if _is_auto(self.warmup_epochs) and resolved.schedule != "constant" and isinstance(context.epochs, int):
+            return dataclasses.replace(resolved, warmup_epochs=auto_warmup_epochs(context.epochs))
+        return resolved

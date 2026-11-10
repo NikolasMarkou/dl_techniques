@@ -827,6 +827,15 @@ class TaskTrainer:
         """Return the config with every ``"auto"`` filled, and the context that did it."""
         config = self.config
         recipe = registry.MODELS[family].recipe(facts.dataset, variant)
+        # DECISION plan-2026-11-10T095307-d483ffab/D-024
+        # The epochs the run WILL train go into the context, because a group's "auto" may depend on them (the
+        # curriculum is round(0.8 * epochs), the warmup round(0.1 * epochs)) and the groups are resolved before
+        # `epochs` itself is filled below. Do NOT read `recipe["epochs"]` in a group: an explicit `epochs=30`
+        # would then be ignored and the curriculum would be 80 epochs long.
+        if config.debug_args.smoke:
+            epochs = SMOKE_EPOCHS
+        else:
+            epochs = recipe.get("epochs") if _is_auto(config.epochs) else config.epochs
         context = AutoContext(
             family=family,
             variant=variant,
@@ -834,6 +843,7 @@ class TaskTrainer:
             num_classes=facts.num_classes,
             image_size=facts.image_size,
             defaults=recipe,
+            epochs=epochs,
         )
         changes: Dict[str, Any] = {}
         for field in dataclasses.fields(config):
