@@ -25,9 +25,14 @@ from typing import Any, Dict, List, Optional
 
 import keras
 
+# ------------------------------------------------------------------------------
+# local imports
+# ------------------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.matplotlib_backend import import_pyplot
 
+# ------------------------------------------------------------------------------
 
 def _group_metrics(keys: List[str]) -> Dict[str, List[str]]:
     """Bucket metric keys into semantic groups based on name prefixes.
@@ -187,3 +192,6 @@ class TrainingCurvesCallback(keras.callbacks.Callback):
         fig.savefig(path, dpi=100)
         plt.close(fig)
         logger.info(f"Saved {group_name} curves → {path}")
+
+# ------------------------------------------------------------------------------
+

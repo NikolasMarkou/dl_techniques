@@ -110,6 +110,8 @@ from .mmdit_joint_attention import MMDiTJointAttention
 # models/vision/capsnet/model_v2.py.
 from .attention_routing_capsule import AttentionRoutingCapsule, CapsuleBlockV2
 
+from .kimi_delta_attention import KimiDeltaAttention
+
 __all__ = [
     # Factory Interface
     "create_attention_from_config",
@@ -163,6 +165,7 @@ __all__ = [
     "PerformerAttention",
     "RingAttention",
     "RPCAttention",
+    'KimiDeltaAttention',
 
     # Additional specialized, mixed factory coverage — see the per-name
     # comments above each import. Comments here sit on their own line.

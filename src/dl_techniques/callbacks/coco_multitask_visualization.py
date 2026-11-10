@@ -23,9 +23,14 @@ from typing import Any, Dict, List, Optional, Tuple
 import keras
 import numpy as np
 
+# ------------------------------------------------------------------------------
+# local imports
+# ------------------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.matplotlib_backend import import_pyplot
 
+# ------------------------------------------------------------------------------
 
 # COCO 80 category names (classification index 0..79; seg index 0=bg, k+1=class k).
 COCO_CLASS_NAMES: List[str] = [
@@ -296,3 +301,5 @@ class COCOMultiTaskPredictionGridCallback(keras.callbacks.Callback):
             del out, pred_seg, pred_cls
         finally:
             gc.collect()
+
+# ------------------------------------------------------------------------------

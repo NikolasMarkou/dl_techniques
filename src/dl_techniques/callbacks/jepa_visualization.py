@@ -35,9 +35,14 @@ import keras
 import keras.ops as ops
 import numpy as np
 
+# ------------------------------------------------------------------------------
+# local imports
+# ------------------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.matplotlib_backend import import_pyplot
 
+# ------------------------------------------------------------------------------
 
 def _normalize_pixels(eval_pixels: Any) -> np.ndarray:
     """Coerce ``eval_pixels`` to a numpy array of shape ``(B, T, H, W, C)``.
@@ -390,3 +395,6 @@ class PatchPredictionErrorCallback(keras.callbacks.Callback):
                     plt.close(fig)
                 except Exception:  # noqa: BLE001
                     pass
+
+# ------------------------------------------------------------------------------
+

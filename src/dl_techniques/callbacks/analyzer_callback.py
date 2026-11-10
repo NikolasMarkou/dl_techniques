@@ -174,3 +174,5 @@ class EpochAnalyzerCallback(keras.callbacks.Callback):
         )
         if on_cadence or (self.analyze_first_epoch and current_epoch == 1):
             self._analyze(current_epoch)
+
+# ------------------------------------------------------------------------------

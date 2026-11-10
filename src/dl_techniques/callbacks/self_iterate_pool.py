@@ -41,9 +41,14 @@ from typing import Callable, Dict, List, Optional
 import keras
 import numpy as np
 
+# ------------------------------------------------------------------------------
+# local imports
+# ------------------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ------------------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.callbacks.self_iterate_pool")
 class SelfIteratePoolCallback(keras.callbacks.Callback):
@@ -234,3 +239,6 @@ class SelfIteratePoolCallback(keras.callbacks.Callback):
         # no live arrays/sigma attached. The instance is non-functional until
         # clean_pool/current_input/get_sigma are re-attached at construction.
         return cls(**config)
+
+# ------------------------------------------------------------------------------
+

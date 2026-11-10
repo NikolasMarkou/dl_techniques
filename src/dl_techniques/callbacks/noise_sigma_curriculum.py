@@ -30,9 +30,14 @@ from typing import Optional
 
 import keras
 
+# ------------------------------------------------------------------------------
+# local imports
+# ------------------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ------------------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.callbacks.noise_sigma_curriculum")
 class NoiseSigmaCurriculumCallback(keras.callbacks.Callback):
@@ -158,3 +163,6 @@ class NoiseSigmaCurriculumCallback(keras.callbacks.Callback):
         # keras.callbacks.Callback provides no default from_config; reconstruct with
         # no live Variable attached (the trainer re-supplies it at construction).
         return cls(**config)
+
+# ------------------------------------------------------------------------------
+

@@ -172,6 +172,7 @@ from .window_attention import (
     create_grid_window_attention,
     create_band_window_attention
 )
+from .kimi_delta_attention import KimiDeltaAttention
 
 # ---------------------------------------------------------------------
 # Type Definitions
@@ -190,6 +191,7 @@ AttentionType = Literal[
     'gated',
     'group_query',
     'hopfield',
+    'kimi_delta',
     'lighthouse',
     'linear',
     'mean_shift',
@@ -213,7 +215,7 @@ AttentionType = Literal[
     'wave_field',
     'window',
     'window_zigzag',
-    'window_band'
+    'window_band',
 ]
 
 # ---------------------------------------------------------------------
@@ -1535,6 +1537,43 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         ),
         'complexity': 'O(n²d) plus iterative PCP/SVD refinement overhead per call',
         'paper': 'Robust PCA Attention (low-rank + sparse decomposition)'
+    },
+
+    'kimi_delta': {
+        'class': KimiDeltaAttention,
+        'description': (
+            'Kimi Delta Attention: gated delta-rule linear attention with '
+            'channel-wise (diagonal) decay and a fixed-size per-head state'
+        ),
+        'required_params': ['dim', 'num_heads'],
+        'optional_params': {
+            'head_dim': None,
+            'value_head_dim': None,
+            'conv_size': 4,
+            'gate_low_rank_dim': None,
+            'use_output_gate': True,
+            'output_norm_type': 'rms_norm',
+            'output_norm_kwargs': None,
+            'chunk_size': 64,
+            'mode': 'chunk',
+            'a_init_range': (1.0, 16.0),
+            'dt_min': 0.001,
+            'dt_max': 0.1,
+            'dt_init_floor': 1e-4,
+            'dropout_rate': 0.0,
+            'use_bias': False,
+            'eps': 1e-6,
+            'kernel_initializer': 'glorot_uniform',
+            'bias_initializer': 'zeros',
+            'kernel_regularizer': None,
+            'bias_regularizer': None,
+        },
+        'use_case': (
+            'Long-context causal language modelling; interleave with full '
+            'attention (3 KDA : 1 MLA in Kimi Linear)'
+        ),
+        'complexity': 'O(N * C * d_k) time, O(d_k * d_v) state per head',
+        'paper': 'Kimi Team, 2025. Kimi Linear (https://arxiv.org/abs/2510.26692)',
     }
 }
 """

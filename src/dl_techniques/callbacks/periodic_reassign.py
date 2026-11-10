@@ -21,9 +21,14 @@ import numpy as np
 
 import keras
 
+# ------------------------------------------------------------------------------
+# local imports
+# ------------------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
+# ------------------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.callbacks.periodic_reassign")
 class PeriodicReassignCallback(keras.callbacks.Callback):
@@ -165,3 +170,6 @@ class PeriodicReassignCallback(keras.callbacks.Callback):
             "start_epoch": self.start_epoch,
             "batch_size": self.batch_size,
         }
+
+# ------------------------------------------------------------------------------
+

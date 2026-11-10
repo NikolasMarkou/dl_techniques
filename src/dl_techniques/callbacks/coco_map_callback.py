@@ -24,6 +24,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import keras
 import numpy as np
 
+# ------------------------------------------------------------------------------
+# local imports
+# ------------------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.yolo_decode import (
     decode_predictions,
@@ -31,6 +35,7 @@ from dl_techniques.utils.yolo_decode import (
     nms_per_class,
 )
 
+# ------------------------------------------------------------------------------
 
 try:
     from pycocotools.coco import COCO
@@ -283,3 +288,5 @@ class COCOMAPCallback(keras.callbacks.Callback):
         if np.isnan(ap5095) or ap5095 < 0:
             ap5095 = 0.0
         return ap50, ap5095
+
+# ------------------------------------------------------------------------------
