@@ -311,7 +311,7 @@ Table 2), SAME test sets, full-image protocol (`--full-image`, reflect-pad ×16)
 convention (`max_val=1.0`, output clipped in-domain). Model:
 `convunext_denoiser_base_20260707_122133` (3.39M params, SINGLE blind model, no noise-level
 input). σ on the 0–255 scale; all within the training band (σ255≈6→127). Test sets on disk:
-`data0_4tb/datasets/{cbsd68_src/CBSD68/original (68 jpg), kodak24 (24), mcmaster_src/color/data/McMaster (18), urban100/Urban100_HR (100)}`.
+`data0_4tb/datasets/{CBSD68/original (68 jpg), kodak24 (24), mcmaster/color (18), urban100/Urban100_HR (100)}`.
 Result dirs: `results/sota_{kodak24,urban100,cbsd68_mcmaster}_convunext/`.
 
 PSNR (dB) — Ours | DnCNN | FFDNet | DRUNet | SwinIR | Restormer | SCUNet:

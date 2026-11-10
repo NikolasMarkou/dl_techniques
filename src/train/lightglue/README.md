@@ -188,9 +188,9 @@ synthetic shapes, then `homographic_adaptation` to pseudo-label real photographs
 `train_superpoint --data-mode pseudo --pseudo-labels-dir <the adaptation run>` with
 `--magicpoint-checkpoint` for the weight handoff. Only the synthetic-shapes command above has
 been run in this work; the chain is described in the scripts' docstrings and was not run
-here. Note that `homographic_adaptation` defaults to `/media/arxwn/data0_4tb/datasets/COCO/train2017`
-(capital letters) while this trainer defaults to `.../coco_2017/train2017`; pass
-`--image-dirs` explicitly.
+here. Note that `homographic_adaptation` defaults to `/media/arxwn/data0_4tb/datasets/coco_2017/train2017`
+(the same directory this trainer defaults to; it was spelled `COCO/train2017` before the dataset
+directories were renamed), plus `div2k/train`; pass `--image-dirs` explicitly to choose.
 
 ## 6. Full training: long GPU jobs, NOT RUN HERE
 

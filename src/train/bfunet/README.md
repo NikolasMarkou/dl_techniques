@@ -89,13 +89,17 @@ are in "Run-directory contract" and "Refusals" below.
 
 Training data directories are **hardcoded** in `BFUnetTrainingConfig` (not CLI flags):
 
-- **Train:** `COCO/train2017` + `div2k/train`. `dataset_weights` defaults to equal weight per
+- **Train:** `coco_2017/train2017` + `div2k/train`. `dataset_weights` defaults to equal weight per
   directory, so each directory gets an equal share of the `--max-train-files` list and a
   directory with fewer images than its share wraps around (its images repeat) rather than
   letting COCO drown DIV2K.
 - **Validation:** `div2k/validation`, capped at `--max-val-files`.
 - **Held-out test sets** (end-of-run evaluation only, see `test_eval` below): `kodak24` and
-  `cbsd68_src/CBSD68/original`, hard-coded as `TEST_DATASETS` in `common.py`.
+  `CBSD68/original`, hard-coded as `TEST_DATASETS` in `common.py`. The CBSD68 directory was
+  `cbsd68_src/CBSD68/original` until the dataset directories were renamed, and `TEST_DATASETS`
+  kept the old path, so a run made after the rename (late October 2026) and before this fix
+  recorded CBSD68 as `skipped` (`no image found`) and has no CBSD68 cell in `test_eval`, only
+  kodak24; earlier runs read the directory under its old name.
 
 To train on other data, edit `train_image_dirs` / `val_image_dirs` in the config, or construct
 the `TrainingConfig` programmatically.

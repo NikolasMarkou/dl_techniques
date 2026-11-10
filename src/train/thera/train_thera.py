@@ -306,14 +306,15 @@ class TheraTrainingModel(keras.Model):
 class TheraConfig:
     """All hyperparameters for one THERA training run.
 
-    DIV2K subdir defaults mirror THERA (``DIV2K_train`` /
-    ``DIV2K_dev_val``); any subdir name is accepted.
+    DIV2K subdir defaults are the names of the local ``div2k`` copy (``train`` /
+    ``validation``); the THERA names (``DIV2K_train`` / ``DIV2K_dev_val``) are
+    accepted through ``--train-subdir`` / ``--val-subdir``, as is any subdir name.
     """
 
     # Data
-    data_dir: str = "/media/arxwn/data0_4tb/datasets/DIV2K"
-    train_subdir: str = "DIV2K_train"
-    val_subdir: str = "DIV2K_dev_val"
+    data_dir: str = "/media/arxwn/data0_4tb/datasets/div2k"
+    train_subdir: str = "train"
+    val_subdir: str = "validation"
     source_size: int = 48
     target_samples: int = 48
     scale_range: Tuple[float, float] = (1.2, 4.0)

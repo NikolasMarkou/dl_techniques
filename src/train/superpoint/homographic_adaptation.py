@@ -38,7 +38,7 @@ Usage::
 
     MPLBACKEND=Agg python -m train.superpoint.homographic_adaptation \\
         --checkpoint results/magicpoint_tiny_*/final_model.keras \\
-        --image-dirs /media/arxwn/data0_4tb/datasets/COCO/train2017 \\
+        --image-dirs /media/arxwn/data0_4tb/datasets/coco_2017/train2017 \\
                      /media/arxwn/data0_4tb/datasets/div2k/train \\
         --dataset-weights 0.5 0.5 \\
         --n-homographies 100 --num-images 5000 --gpu 1
@@ -94,7 +94,7 @@ class HomographicAdaptationConfig:
     # so DIV2K's ~800 images are not drowned by COCO's ~118K. See D-002.
     image_dirs: List[str] = field(
         default_factory=lambda: [
-            "/media/arxwn/data0_4tb/datasets/COCO/train2017",
+            "/media/arxwn/data0_4tb/datasets/coco_2017/train2017",
             "/media/arxwn/data0_4tb/datasets/div2k/train",
         ]
     )
@@ -690,7 +690,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--image-dirs", type=str, nargs="+",
         default=[
-            "/media/arxwn/data0_4tb/datasets/COCO/train2017",
+            "/media/arxwn/data0_4tb/datasets/coco_2017/train2017",
             "/media/arxwn/data0_4tb/datasets/div2k/train",
         ],
         help="One or more real-image directories sourced simultaneously.",

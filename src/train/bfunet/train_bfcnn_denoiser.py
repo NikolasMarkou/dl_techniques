@@ -88,18 +88,17 @@ class BFCNNTrainingConfig(BFUnetTrainingConfig):
     # base's COCO+DIV2K (2+1). Do NOT drop these back to the base default_factory.
     train_image_dirs: List[str] = field(
         default_factory=lambda: [
-            "/media/arxwn/data0_4tb/datasets/Megadepth",
+            "/media/arxwn/data0_4tb/datasets/megadepth",
             "/media/arxwn/data0_4tb/datasets/div2k/train",
-            "/media/arxwn/data0_4tb/datasets/WFLW/images",
-            "/media/arxwn/data0_4tb/datasets/bdd_data/train",
-            "/media/arxwn/data0_4tb/datasets/COCO/train2017",
+            "/media/arxwn/data0_4tb/datasets/bdd100k/train/frame-10s",
+            "/media/arxwn/data0_4tb/datasets/coco_2017/train2017",
             "/media/arxwn/data0_4tb/datasets/VGG-Face2/data/train",
         ]
     )
     val_image_dirs: List[str] = field(
         default_factory=lambda: [
             "/media/arxwn/data0_4tb/datasets/div2k/validation",
-            "/media/arxwn/data0_4tb/datasets/COCO/val2017",
+            "/media/arxwn/data0_4tb/datasets/coco_2017/val2017",
         ]
     )
 

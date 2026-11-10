@@ -19,7 +19,7 @@ Usage:
     # Full BDD100K sanity (GPU 0):
     MPLBACKEND=Agg .venv/bin/python -m train.video_jepa.train_video_jepa \\
         --dataset bdd100k --gpu 0 \\
-        --videos-root /media/arxwn/data0_4tb/datasets/bdd_data/train/videos \\
+        --videos-root /media/arxwn/data0_4tb/datasets/bdd100k/train/videos \\
         --output-dir results/video_jepa_sanity_bdd100k
 
 Loss is added via ``self.add_loss`` inside :meth:`VideoJEPA.call` so we
@@ -313,7 +313,7 @@ def parse_args() -> argparse.Namespace:
 
     # --- BDD100K data source ---
     p.add_argument("--videos-root", type=str,
-                   default="/media/arxwn/data0_4tb/datasets/bdd_data/train/videos",
+                   default="/media/arxwn/data0_4tb/datasets/bdd100k/train/videos",
                    help="Root directory for BDD100K .mov files (flat layout).")
 
     # --- SIGReg (full-spec default: 1024 projections) ---

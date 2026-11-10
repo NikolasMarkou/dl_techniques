@@ -139,7 +139,7 @@ machine.
 
 | Flag                          | Default                                   | Notes |
 |-------------------------------|-------------------------------------------|-------|
-| `--megadepth-root`            | `/media/arxwn/data0_4tb/datasets/Megadepth` | Path to MegaDepth root. |
+| `--megadepth-root`            | `/media/arxwn/data0_4tb/datasets/megadepth` | Path to MegaDepth root. |
 | `--train-split`               | `0.9`                                     | Labeled train/val split fraction. |
 | `--min-valid-ratio`           | `0.1`                                     | Minimum fraction of valid depth pixels for a pair to be kept. |
 | `--max-train-files`           | `10000`                                   | Cap on training pairs. |

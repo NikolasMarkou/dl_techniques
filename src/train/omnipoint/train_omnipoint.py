@@ -117,7 +117,7 @@ class OmniPointTrainingConfig:
 
     # Data
     kitti_root: Optional[str] = "/media/arxwn/data0_4tb/datasets/KITTI/data/depth"
-    megadepth_root: Optional[str] = "/media/arxwn/data0_4tb/datasets/Megadepth"
+    megadepth_root: Optional[str] = "/media/arxwn/data0_4tb/datasets/megadepth"
     image_size: int = 224
     train_split: float = 0.9
     max_kitti_files: Optional[int] = None
@@ -666,7 +666,7 @@ def parse_arguments(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     data_group.add_argument(
         "--megadepth-root", type=str,
-        default="/media/arxwn/data0_4tb/datasets/Megadepth",
+        default="/media/arxwn/data0_4tb/datasets/megadepth",
         help="Path to the MegaDepth dataset root, or 'none' to skip MegaDepth.",
     )
     data_group.add_argument(

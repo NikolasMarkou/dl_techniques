@@ -58,7 +58,7 @@ class TrainingConfig:
     """Resolved LeVJEPA training configuration."""
 
     dataset: str = "synthetic_drone"
-    videos_root: str = "/media/arxwn/data0_4tb/datasets/bdd_data/train/videos"
+    videos_root: str = "/media/arxwn/data0_4tb/datasets/bdd100k/train/videos"
     num_frames: int = 8
     img_size: int = 64
     img_channels: int = 3
@@ -183,7 +183,7 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--videos-root", type=str,
-        default="/media/arxwn/data0_4tb/datasets/bdd_data/train/videos",
+        default="/media/arxwn/data0_4tb/datasets/bdd100k/train/videos",
         help="Root directory for BDD100K .mov files (flat layout). Required "
              "for --dataset bdd100k.",
     )

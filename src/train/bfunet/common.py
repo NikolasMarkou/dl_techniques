@@ -2429,7 +2429,7 @@ SUMMARY_READING_NOTES: List[str] = [
 # every run, or two runs would be compared on different test sets.
 TEST_DATASETS: Dict[str, str] = {
     "kodak24": "/media/arxwn/data0_4tb/datasets/kodak24",
-    "cbsd68": "/media/arxwn/data0_4tb/datasets/cbsd68_src/CBSD68/original",
+    "cbsd68": "/media/arxwn/data0_4tb/datasets/CBSD68/original",
 }
 TEST_SIGMAS_255: Tuple[int, ...] = (15, 25, 50)
 TEST_EVAL_SEED = 42

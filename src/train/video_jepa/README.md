@@ -28,7 +28,7 @@ MPLBACKEND=Agg .venv/bin/python -m train.video_jepa.train_video_jepa \
 # Real BDD100K run with validation and EarlyStopping (many hours)
 MPLBACKEND=Agg .venv/bin/python -m train.video_jepa.train_video_jepa \
     --dataset bdd100k \
-    --videos-root /media/arxwn/data0_4tb/datasets/bdd_data/train/videos \
+    --videos-root /media/arxwn/data0_4tb/datasets/bdd100k/train/videos \
     --gpu 0 \
     --epochs 100 --steps-per-epoch 1000 \
     --val-steps 100 --val-fraction 0.1 --early-stopping-patience 15 \

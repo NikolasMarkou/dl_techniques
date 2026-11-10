@@ -192,7 +192,7 @@ class DepthAnythingTrainingConfig:
     """Configuration for DepthAnything depth estimation training on MegaDepth."""
 
     # Data
-    megadepth_root: str = "/media/arxwn/data0_4tb/datasets/Megadepth"
+    megadepth_root: str = "/media/arxwn/data0_4tb/datasets/megadepth"
     train_split: float = 0.9
     #: Crop side; a multiple of the DINOv2 patch 14 (the reference's 518).
     patch_size: int = 518
@@ -784,7 +784,7 @@ def parse_arguments() -> argparse.Namespace:
     # Data
     parser.add_argument(
         "--megadepth-root", type=str,
-        default="/media/arxwn/data0_4tb/datasets/Megadepth",
+        default="/media/arxwn/data0_4tb/datasets/megadepth",
         help="Path to MegaDepth dataset root",
     )
     parser.add_argument(
