@@ -75,6 +75,12 @@ _ATTR_PATH = re.compile(r"^[A-Za-z_][\w.]*:[A-Za-z_][\w.]*$")
 #: Keys of ``ModelSpec.defaults`` that hold overlays, not recipe values.
 OVERLAY_KEYS = ("per_dataset", "per_variant")
 
+#: The properties a ``ModelSpec`` may declare in ``properties``. A property is a promise a task checks
+#: about the family's models, not a capability the sequence switches on: ``"bias_free"`` is read by
+#: the denoising task, which then verifies it on the built model (statically and numerically).
+#: Adding a name here is the only way to let a spec declare one.
+KNOWN_PROPERTIES = ("bias_free",)
+
 #: The ``DataFacts.dataset`` names of file-based data (the ``format`` of a folder or
 #: csv config). ``test_folder_and_csv_data`` holds them equal to the non-builtin
 #: formats of ``train.api.data_args``, which this module does not import.
@@ -140,6 +146,9 @@ class ModelSpec:
         family). ``train.api.predictor.check_model_against_record`` refuses ``None``
         and any key that differs from the record's variant. ``None`` (the default):
         the family is checked by its class and ``get_config()``.
+    :param properties: promises about the family's models that a task reads and verifies,
+        drawn from :data:`KNOWN_PROPERTIES` (a tuple of distinct names). ``()`` (the default):
+        none, and no task reads anything here. Nothing in the shared sequence switches on it.
     """
 
     family: str
@@ -150,6 +159,7 @@ class ModelSpec:
     resolve_model_args: Optional[str] = None
     stride: Optional[Union[int, str]] = None
     observe: Optional[str] = None
+    properties: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.family or "/" in self.family:
@@ -162,6 +172,15 @@ class ModelSpec:
             raise ValueError(f"ModelSpec.tasks must be a non-empty tuple, got {self.tasks!r}")
         if self.observe is not None:
             _require_attr_path("ModelSpec", "observe", self.observe)
+        if (
+            not isinstance(self.properties, tuple)
+            or any(name not in KNOWN_PROPERTIES for name in self.properties)
+            or len(set(self.properties)) != len(self.properties)
+        ):
+            raise ValueError(
+                f"ModelSpec.properties must be a tuple of distinct names from "
+                f"{KNOWN_PROPERTIES}, got {self.properties!r}"
+            )
         if isinstance(self.stride, str):
             _require_attr_path("ModelSpec", "stride", self.stride)
         elif self.stride is not None and (

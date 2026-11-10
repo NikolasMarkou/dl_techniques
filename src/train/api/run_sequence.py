@@ -53,7 +53,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
 
-from . import resume_decisions
+from . import registry, resume_decisions
 from .args import AnalysisArgs, CheckpointArgs, MetricArgs, OptimArgs
 from .config import StrictConfig, to_json
 from .data_args import DataFacts
@@ -341,7 +341,9 @@ def announce(run: Run) -> None:
     if used:
         logger.info(f"Used args:\n{json.dumps(used, indent=2)}")
     if resume is None:
-        write_resolved(run.run_dir, config, used)
+        with _bad_value_is_a_config_error(run.run_dir, "the config stamps"):
+            stamps = trainer.config_stamps(config, registry.MODELS[run.family])
+        write_resolved(run.run_dir, config, used, stamps)
     for level, text in trainer._notices:
         (logger.warning if level == "warning" else logger.info)(text)
 
@@ -411,7 +413,22 @@ def build_model(run: Run) -> None:
     # (keras/src/trainers/trainer.py wraps a plain optimizer when the policy asks
     # for loss scaling), and a second wrap is a second place to get it wrong.
     loss, metrics = trainer.build_loss_and_metrics(config, data)
-    run.model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
+    # DECISION plan-2026-11-10T095307-d483ffab/D-012
+    # The task's compile options are spread into THIS call and nowhere else; the default is ``{}``, so
+    # a task that says nothing makes the three-argument call it always made (a spy in
+    # ``test_the_sequence_seams_default_to_nothing`` proves it). Do NOT override ``compile`` in a model
+    # class instead (a plain functional model has no class, and a ``compile`` override also needs
+    # ``compile_from_config``), and do NOT pass ``jit_compile=None`` for "no option": Keras reads
+    # None as a value.
+    with _bad_value_is_a_config_error(run.run_dir, "the compile options"):
+        options = dict(trainer.compile_options(config, registry.MODELS[run.family]))
+    reserved = sorted(set(options) & {"optimizer", "loss", "metrics"})
+    if reserved:
+        raise ConfigError(
+            f"compile_options of {type(trainer).__name__} names {reserved}, which the run passes "
+            f"itself. {_claimed_note(run.run_dir)}"
+        )
+    run.model.compile(optimizer=optimizer, loss=loss, metrics=metrics, **options)
     run.params = int(run.model.count_params())
     logger.info(
         f"  {run.family}/{run.variant}: params {run.params:,}, {run.steps_per_epoch} steps/epoch, "
@@ -590,7 +607,15 @@ def train_or_restore(run: Run) -> None:
     # (``watch_mode``, resolved). Do NOT call ``best_epoch(hist, monitor)``
     # alone: it re-derives the direction from the name, so an explicit
     # ``watch_mode`` saved one epoch and the summary named another.
-    run.best_epoch = run_summary.best_epoch(run.hist, monitor, metric_cfg.watch_mode)
+    # DECISION plan-2026-11-10T095307-d483ffab/D-013
+    # The epoch reported is chosen from the task's selection window on, the one the checkpoint and
+    # ``EarlyStopping`` were given: with a window, the best epoch of the whole run was never saved, so
+    # naming it would say a file holds weights it does not. Do NOT call ``best_epoch`` over every epoch
+    # when ``selection_start_epoch`` is above 0 (``first_epoch`` is 0, the whole run, by default).
+    run.best_epoch = run_summary.best_epoch(
+        run.hist, monitor, metric_cfg.watch_mode,
+        first_epoch=trainer.selection_start_epoch(config),
+    )
 
 
 def report(run: Run) -> TrainResult:
@@ -630,7 +655,14 @@ def report(run: Run) -> TrainResult:
         # the bar is not applied: the run is a success when it finished, and the
         # summary says "not applicable" rather than a miss (review-iter-2 concern 6).
         threshold = None if smoke else trainer.success_threshold(config)
-        success = True if smoke else trainer.bar_is_met(config, reached, threshold)
+        met = True if smoke else trainer.bar_is_met(config, reached, threshold)
+        # DECISION plan-2026-11-10T095307-d483ffab/D-004
+        # A check that failed after training blocks the verdict whatever the bar says, and the run is
+        # kept: ``success`` false, ``success_blocked_by`` names the checks, the exit code is 1 (not 2).
+        # Do NOT raise for it (the models and the summary would not be written) and do NOT fold it into
+        # ``bar_is_met`` (the bar would then read "missed" for a run that reached it).
+        blocked = tuple(evaluated.failed_checks)
+        success = False if blocked else met
         summary = classification_run.base_summary(
             run.summary_head, hist, run.epochs_run, config.epochs, run.best_epoch,
             run.lr_reductions, evaluated.test_metrics_best, evaluated.test_metrics_final,
@@ -653,11 +685,25 @@ def report(run: Run) -> TrainResult:
         if run.reporting_only:
             summary["reporting_resumed"] = True
         summary.update(
-            success=None if smoke else success,
+            success=None if smoke and not blocked else success,
             success_metric=trainer.success_metric,
             success_threshold=threshold,
             success_value=reached,
         )
+        if blocked:
+            summary["success_blocked_by"] = list(blocked)
+        # DECISION plan-2026-11-10T095307-d483ffab/D-004
+        # The task's post-fit keys come through the VALUE ``evaluate_and_report`` returns, merged last
+        # and never over a key the summary holds. Do NOT stash them on the trainer during
+        # ``evaluate_and_report`` and read them here (a hidden coupling), and do NOT let an extra
+        # replace a key (``success`` or ``task`` would then lie about the run).
+        taken = sorted(set(evaluated.extras) & set(summary))
+        if taken:
+            raise ConfigError(
+                f"Evaluation.extras of {type(trainer).__name__} names {taken}, which the summary "
+                "already holds; give each task-specific key a name of its own"
+            )
+        summary.update(evaluated.extras)
         write_summary_json(run_dir, summary)
         run_summary.fail_on_best_load_error(run_dir, evaluated.best_load_error)
     if run.reporting_only:
@@ -669,9 +715,11 @@ def report(run: Run) -> TrainResult:
         )
     else:
         logger.info(
-            f"{'Reached' if success else 'Missed'} success_threshold {threshold:g} "
+            f"{'Reached' if met else 'Missed'} success_threshold {threshold:g} "
             f"on {trainer.success_metric}: best {reached:.4f}"
         )
+    if blocked:
+        logger.warning(f"The run is not a success: failed checks {list(blocked)}")
     return TrainResult(
         run_dir=run_dir,
         success=success,

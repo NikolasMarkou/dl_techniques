@@ -90,12 +90,14 @@ Interface contract
         keys are named); or when the backup, the CSV and the sidecar do not agree on where
         the run stopped (D-058).
 
-``write_requested(run_dir, mapping)`` / ``write_resolved(run_dir, config)``
+``write_requested(run_dir, mapping)`` / ``write_resolved(run_dir, config, used=None, stamps=None)``
     Write ``config_requested.json`` (replacing the claim; the mapping as the
     caller gave it, AUTO values included, group instances turned into plain
     values) and ``config.json`` (the resolved config). ``write_requested`` raises
     ``ConfigError`` for a NaN or an infinity, and writes nothing then; both raise
-    ``OSError`` or ``TypeError`` on a failed write, which neither wraps.
+    ``OSError`` or ``TypeError`` on a failed write, which neither wraps. ``stamps`` (the task's
+    ``config_stamps``) are added at the top level beside the fields and ``used``; one named like
+    a key the file holds, or ``used``, raises ``ConfigError`` and writes nothing (D-011).
 
 ``write_task(run_dir, record)``
     :param record: the ``task.json`` record (:mod:`train.api.predictor`).
@@ -908,7 +910,12 @@ def load_resume_point(run_dir: Path, mapping: Any) -> Any:
         ) from exc
 
 
-def write_resolved(run_dir: Path, config: Any, used: Optional[Mapping[str, Any]] = None) -> str:
+def write_resolved(
+    run_dir: Path,
+    config: Any,
+    used: Optional[Mapping[str, Any]] = None,
+    stamps: Optional[Mapping[str, Any]] = None,
+) -> str:
     """Write ``config.json``: the configuration after AUTO resolution.
 
     :param run_dir: an existing run directory.
@@ -916,11 +923,30 @@ def write_resolved(run_dir: Path, config: Any, used: Optional[Mapping[str, Any]]
     :param used: what the run was built with beyond the config's fields (the
         model keywords its resolver produced, the loader mapping); written under
         the key ``used``. ``None`` or empty adds no key.
+    :param stamps: top-level keys added beside the config's fields (the task's
+        ``config_stamps``: values older readers of ``config.json`` look for). ``None`` or
+        empty adds none.
     :return: the path written, as text.
+    :raises ConfigError: when a stamp is named like a key the file would hold anyway (a config
+        field or ``used``); nothing is written then, and no stamp ever replaces a value.
     """
     from train.common.config_io import save_config_json
 
     payload = dataclasses.asdict(config) if dataclasses.is_dataclass(config) else config
+    # DECISION plan-2026-11-10T095307-d483ffab/D-011
+    # A stamp is a DUPLICATE of a value the config holds, in the place a legacy reader looks. Do NOT
+    # let one win over a config key, and do NOT drop the collision silently: the file would then say
+    # something the run was not configured with, or lose a stamp a reader needs. The check runs
+    # before any write so a refusal leaves ``config.json`` absent.
+    if stamps:
+        taken = sorted(set(stamps) & (set(payload) | {"used"}))
+        if taken:
+            raise ConfigError(
+                f"config_stamps may not name a key config.json already holds: {taken}. "
+                "A stamp duplicates a config value for a reader that predates the API; give it "
+                "another name"
+            )
+        payload = {**payload, **stamps}
     # DECISION plan-2026-10-30T132432-a865fa08/D-050: what the run was built with goes
     # under its OWN key, ``used``. Do NOT overwrite the config's ``model_args`` with the
     # resolver's output: that field is what the caller typed (and what a replay of this

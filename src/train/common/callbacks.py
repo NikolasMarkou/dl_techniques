@@ -279,10 +279,21 @@ class AtomicModelCheckpoint(keras.callbacks.ModelCheckpoint):
     not improve writes nothing and replaces nothing, so a ``.partial.keras`` left by
     an earlier killed process is never promoted.
 
+    ``start_from_epoch`` (default 0, the stock behaviour): an epoch index below it saves nothing and
+    does not move ``best``, so the file at ``filepath`` can only hold an epoch from it on; a negative
+    value raises ``ValueError``. The index is the 0-based absolute epoch Keras passes, also after a
+    resume.
+
     Failure mode: an ``OSError`` from the save, the flush or the rename propagates
     out of ``fit``, as the stock callback's does. The log line Keras prints for an
     improvement names the ``.partial`` file; the file at ``filepath`` is the result.
     """
+
+    def __init__(self, *args, start_from_epoch: int = 0, **kwargs):
+        super().__init__(*args, **kwargs)
+        if start_from_epoch < 0:
+            raise ValueError(f"start_from_epoch must be >= 0, got {start_from_epoch!r}")
+        self.start_from_epoch = int(start_from_epoch)
 
     def _get_file_path(self, epoch, batch, logs):
         # DECISION plan-2026-10-30T132432-a865fa08/D-069
@@ -295,6 +306,14 @@ class AtomicModelCheckpoint(keras.callbacks.ModelCheckpoint):
         return partial_path(final)
 
     def _save_model(self, epoch, batch, logs):
+        # DECISION plan-2026-11-10T095307-d483ffab/D-013
+        # An epoch before ``start_from_epoch`` is skipped HERE, before the stock callback compares it
+        # with ``best``, so it can never enter ``best``. Do NOT stand in for a window by seeding
+        # ``initial_value_threshold`` or lowering ``monitor``: the first epoch inside the window must
+        # save whatever it scores, and a seeded threshold could reject it. The window is the epochs
+        # the model has trained on the full noise range (decisions.md D-013).
+        if epoch < self.start_from_epoch:
+            return
         before = self.best
         super()._save_model(epoch, batch, logs)
         if self.save_best_only and self.best == before:
@@ -322,6 +341,7 @@ def create_callbacks(
         initial_value_threshold: Optional[float] = None,
         csv_initial_rows: Sequence[Tuple[int, Dict[str, Any]]] = (),
         atomic_best_checkpoint: bool = False,
+        selection_start_epoch: int = 0,
 ) -> Tuple[List, str]:
     """
     Create standard training callbacks.
@@ -382,6 +402,12 @@ def create_callbacks(
         Use :class:`AtomicModelCheckpoint` for ``best_model.keras``: written to a
         temporary name in the same directory and moved into place, so a kill never
         leaves a torn file. ``False`` (default) is the legacy in-place write.
+    selection_start_epoch : int
+        0-based absolute epoch from which a checkpoint may be saved and ``EarlyStopping`` counts
+        (``EarlyStopping(start_from_epoch=...)`` and ``AtomicModelCheckpoint(start_from_epoch=...)``).
+        0 (default) is the legacy behaviour. A positive value needs ``atomic_best_checkpoint=True``
+        (the stock ``ModelCheckpoint`` has no such argument) and raises ``ValueError`` otherwise;
+        a negative value raises ``ValueError``.
 
     Returns
     -------
@@ -396,6 +422,19 @@ def create_callbacks(
     os.makedirs(results_dir, exist_ok=True)
 
     monitor_mode = resolve_monitor_mode(monitor, monitor_mode)
+    if selection_start_epoch < 0:
+        raise ValueError(f"selection_start_epoch must be >= 0, got {selection_start_epoch!r}")
+    if selection_start_epoch and not atomic_best_checkpoint:
+        raise ValueError(
+            "selection_start_epoch > 0 needs atomic_best_checkpoint=True: the stock ModelCheckpoint "
+            "cannot skip epochs, and an early-stopping window with a checkpoint outside it would "
+            "name an epoch that was not saved"
+        )
+    # DECISION plan-2026-11-10T095307-d483ffab/D-013
+    # Both callbacks get the SAME start: a window applied to the stopper alone restores best weights
+    # the checkpoint never saved (and the reverse selects a file the stopper never counted). Passed
+    # only for the atomic checkpoint, which owns the skip; the stock callback is built exactly as before.
+    checkpoint_kwargs = {"start_from_epoch": selection_start_epoch} if atomic_best_checkpoint else {}
 
     callbacks = [
         keras.callbacks.EarlyStopping(
@@ -404,6 +443,7 @@ def create_callbacks(
             restore_best_weights=True,
             verbose=1,
             mode=monitor_mode,
+            start_from_epoch=selection_start_epoch,
         ),
         (AtomicModelCheckpoint if atomic_best_checkpoint else keras.callbacks.ModelCheckpoint)(
             filepath=best_checkpoint_path(results_dir),
@@ -412,6 +452,7 @@ def create_callbacks(
             verbose=1,
             mode=monitor_mode,
             initial_value_threshold=initial_value_threshold,
+            **checkpoint_kwargs,
         ),
         EpochCSVLogger(
             filename=os.path.join(results_dir, 'training_log.csv'),

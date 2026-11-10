@@ -16,7 +16,8 @@ Interface contract
     :ivar success: the task's ``success_value`` (the best ``success_metric``) reached
         its ``success_threshold``; ``True`` for a ``debug_args.smoke``
         run that finished, where no threshold applies (the summary's ``success``
-        is then ``null``).
+        is then ``null``); ``False`` whenever ``Evaluation.failed_checks`` is non-empty (the summary
+        then names them in ``success_blocked_by``, and ``success`` is ``false`` under smoke too).
     :ivar best_metric: the best value of ``metric_args.watch_metric``
         (lowest or highest as the metric's direction says).
     :ivar test_metrics_best: the reloaded ``best_model.keras`` on the test split;
@@ -246,6 +247,20 @@ Hooks (override in a task)
     The line of ``notes`` that says why ``init_scale_warning`` is null, appended only when it is.
     Default: the BatchNorm sentence (statistics still unset, D-045); a task whose
     ``initial_loss_check`` withholds the verdict for another reason overrides it.
+``compile_options(config, spec)``
+    Extra keyword arguments for the one ``compile`` call (``jit_compile=False`` for a family and
+    precision XLA rejects), a mapping that may not name ``optimizer``, ``loss`` or
+    ``metrics`` (``ConfigError``). ``spec`` is the family's :class:`~train.api.registry.ModelSpec`.
+    Default: ``{}``, and the call is exactly the three-argument call of every earlier task (D-012).
+``selection_start_epoch(config)``
+    The 0-based epoch from which the best checkpoint may be saved and ``EarlyStopping`` counts
+    (a denoiser trained on a noise curriculum selects only once the curriculum has reached its last
+    value, D-013). An int from 0 to ``epochs - 1``, else ``ValueError`` before ``fit``. The summary's
+    ``best_epoch`` is the best epoch FROM it on. Default: ``0``, the whole run.
+``config_stamps(config, spec)``
+    Top-level keys added to ``config.json`` beside the config's fields and ``used``, for readers
+    that predate the API (D-011). Written once, by a fresh run only; a key equal to one the file
+    already holds raises ``ConfigError`` and nothing is written. Default: ``{}``.
 ``files_to_scan(data)``
     The files ``fit`` and the first evaluation read, so a decode failure can name the culprit
     (``None`` or empty: nothing to scan, and the original error propagates). Default: ``None``.
@@ -385,6 +400,14 @@ class Evaluation:
     #: The measurements behind ``load_check`` when the task makes the exact reload check
     #: (``finalize_last_epoch(exact_reload=True)``): the summary's ``model_loading_check``.
     load_detail: Optional[Dict[str, Any]] = None
+    #: Task-specific keys for ``results_summary.json`` that only exist after ``fit`` (a denoiser's
+    #: held-out PSNR per dataset, its homogeneity report). Merged after every other key; a key the
+    #: summary already holds raises ``ConfigError`` (D-004). Default: none.
+    extras: Dict[str, Any] = dataclasses.field(default_factory=dict)
+    #: Names of checks that failed AFTER training (a bias-free model whose trained weights fail the
+    #: homogeneity probe). Any entry makes the run's ``success`` false whatever the bar says and is
+    #: written as the summary's ``success_blocked_by``; the training is kept (D-004). Default: none.
+    failed_checks: Tuple[str, ...] = ()
 
 
 def _non_json_values(value: Any, path: str, found: List[Tuple[str, str]]) -> None:
@@ -549,6 +572,31 @@ class TaskTrainer:
 
     def extra_callbacks(self, config: StrictConfig, data: Any) -> List[Any]:
         return []
+
+    def compile_options(self, config: StrictConfig, spec: registry.ModelSpec) -> Dict[str, Any]:
+        """Return extra keyword arguments for the ``compile`` call; default ``{}`` (none).
+
+        :param spec: the registered :class:`~train.api.registry.ModelSpec` of the run's family.
+        :return: a mapping spread into ``model.compile(optimizer=..., loss=..., metrics=...)``;
+            it may not name those three.
+        """
+        return {}
+
+    def selection_start_epoch(self, config: StrictConfig) -> int:
+        """Return the 0-based epoch from which the best checkpoint is selected; default ``0``.
+
+        Read once when the callbacks are built (:func:`train.api.fit_callbacks.build_callbacks`):
+        the checkpoint saves nothing and ``EarlyStopping`` counts nothing before it.
+        """
+        return 0
+
+    def config_stamps(self, config: StrictConfig, spec: registry.ModelSpec) -> Dict[str, Any]:
+        """Return top-level keys to add to ``config.json``; default ``{}`` (none).
+
+        Called by a fresh run only, after ``used_arguments``. A key the file already holds raises
+        ``ConfigError`` in :func:`train.api.run_dir.write_resolved`.
+        """
+        return {}
 
     def figure_callbacks(self, config: StrictConfig, data: Any, vis_dir: Path) -> List[Any]:
         """Return the task's per-epoch figure callbacks; see the module contract.

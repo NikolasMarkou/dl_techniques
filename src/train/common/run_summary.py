@@ -55,13 +55,18 @@ from train.common.evaluation import run_model_analysis
 
 
 def best_epoch(
-    history: Dict[str, List[float]], monitor: str, mode: Optional[str] = None
+    history: Dict[str, List[float]], monitor: str, mode: Optional[str] = None, first_epoch: int = 0
 ) -> int:
     """1-based epoch that is best under ``monitor`` (direction from ``resolve_monitor_mode``).
 
     ``mode`` is the direction the checkpoint callbacks were given (``"min"`` or ``"max"``); ``None``
     reads it from the metric's name, as the legacy trainers do. A caller that lets the user override
     the direction passes the resolved one, so the epoch reported is the epoch saved.
+
+    ``first_epoch`` is the 0-based epoch from which the checkpoint callbacks were allowed to save
+    (``create_callbacks(selection_start_epoch=...)``); only the epochs from it on compete, and the
+    result still counts from epoch 1 of the whole run. 0 (the default) is every epoch. A value past
+    the last epoch raises ``ValueError``.
 
     Raises:
         ValueError: If any monitored value is NaN or infinite. ``np.argmin`` of a
@@ -72,7 +77,10 @@ def best_epoch(
     if not np.all(np.isfinite(values)):
         raise ValueError(f"cannot pick a best epoch: {monitor} has non-finite values {values.tolist()}")
     mode = resolve_monitor_mode(monitor, mode)
-    return int(np.argmin(values) if mode == "min" else np.argmax(values)) + 1
+    if not 0 <= first_epoch < len(values):
+        raise ValueError(f"first_epoch {first_epoch} leaves no epoch of {len(values)} to choose from")
+    window = values[first_epoch:]
+    return int(np.argmin(window) if mode == "min" else np.argmax(window)) + first_epoch + 1
 
 
 def non_finite_metrics(history: Dict[str, List[float]], monitor: str) -> List[str]:

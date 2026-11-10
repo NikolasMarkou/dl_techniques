@@ -19,7 +19,8 @@ resume=None, best_weights=None)``
         ``best_weights`` the best epoch's weights then.
     :return: ``(epoch_line, callbacks)``: the ``EpochLogLine`` (its ``epoch_times`` is read after the
         fit) and the list, in this order: ``LearningRateLogger`` first; ``create_callbacks``' list
-        (EarlyStopping, ModelCheckpoint unless ``save_best`` is false, CSV logger, TerminateOnNaN, ...);
+        (EarlyStopping, ModelCheckpoint unless ``save_best`` is false, CSV logger, TerminateOnNaN, ...;
+        the first two start at ``trainer.selection_start_epoch(config)``, default 0);
         ``last_weights``; the task's ``extra_callbacks``; ``EpochLogLine``; the task's
         ``figure_callbacks`` and the dashboard while ``analysis_args.figures``; the resume trio last
         (``RestoreFitState`` on a resume only, ``FitStateSidecar``, the backup callback, and
@@ -93,6 +94,22 @@ def build_callbacks(
             analyzer_first_epoch=resume.start == 0,
         )
 
+    # DECISION plan-2026-11-10T095307-d483ffab/D-013
+    # The task's selection window is read ONCE here and handed to ``create_callbacks``, which gives the
+    # same start to ``EarlyStopping`` and to the checkpoint. Do NOT apply it to one of them in the task's
+    # ``extra_callbacks``: the stopper restores the weights of its own best epoch and the checkpoint
+    # holds the file the reload check reads, so the two must agree on which epochs count.
+    selection_start = trainer.selection_start_epoch(config)
+    if (
+        isinstance(selection_start, bool)
+        or not isinstance(selection_start, int)
+        or not 0 <= selection_start < config.epochs
+    ):
+        raise ValueError(
+            f"{type(trainer).__name__}.selection_start_epoch returned {selection_start!r}: "
+            f"an int from 0 to epochs - 1 ({config.epochs - 1}) is required, or no epoch could "
+            "ever be selected"
+        )
     callbacks, _ = create_callbacks(
         model_name=experiment_name,
         results_dir_prefix=trainer.task,
@@ -107,6 +124,7 @@ def build_callbacks(
         include_analyzer=every > 0,
         analyzer_start_epoch=max(every, 1),
         atomic_best_checkpoint=True,
+        selection_start_epoch=selection_start,
         **resumed,
     )
     if not checkpoint_cfg.save_best:
