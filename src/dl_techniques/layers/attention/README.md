@@ -1,6 +1,6 @@
 # attention
 
-Keras 3 attention and token-mixing layers for the `dl_techniques` library, plus a factory that builds any of 36 registered types from a string key and a keyword dictionary. Import path: `dl_techniques.layers.attention`.
+Keras 3 attention and token-mixing layers for the `dl_techniques` library, plus a factory that builds any of 37 registered types from a string key and a keyword dictionary. Import path: `dl_techniques.layers.attention`.
 
 ## What it is for
 
@@ -34,8 +34,8 @@ Shared building blocks live in `common.py`: an attention-mask helper (`apply_att
 
 ## Files
 
-- `__init__.py` - re-exports 7 factory-interface names (6 functions and the `AttentionType` alias) and 38 layer classes, 45 names in `__all__`. Import order fixes Keras registration order.
-- `factory.py` - `ATTENTION_REGISTRY` (36 entries with metadata), `AttentionType` literal, the six re-exported functions, and `assemble_attention_config` (not re-exported).
+- `__init__.py` - re-exports 7 factory-interface names (6 functions and the `AttentionType` alias) and 39 layer classes, 46 names in `__all__`. Import order fixes Keras registration order.
+- `factory.py` - `ATTENTION_REGISTRY` (37 entries with metadata), `AttentionType` literal, the six re-exported functions, and `assemble_attention_config` (not re-exported).
 - `common.py` - `MASK_BIAS_VALUE`, `mask_dtype`, `apply_attention_mask`, `validate_head_divisibility`, `compute_attention_scale`. Not re-exported.
 - `GUIDE.md` - authoring guide for new attention layers.
 - `multi_head_attention.py` - `MultiHeadAttention`, a thin self-attention wrapper around `MultiHeadCrossAttention`.
@@ -54,6 +54,7 @@ Shared building blocks live in `common.py`: an attention-mask helper (`apply_att
 - `attention_routing_capsule.py` - `AttentionRoutingCapsule` and `CapsuleBlockV2`, single-pass capsule routing layers.
 - `energy_attention.py` - `EnergyAttention`, Energy Transformer attention with no value matrix.
 - `linear_attention.py` - `LinearAttention`, bias-free degree-1-homogeneous O(N) attention.
+- `kimi_delta_attention.py` - `KimiDeltaAttention`, Kimi Delta Attention: a gated delta-rule linear attention with a per-channel decay, a causal short convolution on q, k and v, and one `(head_dim, value_head_dim)` state per head. Causal, O(N), with a carried state for prefill and decode.
 - `performer_attention.py` - `PerformerAttention`, FAVOR+ random-feature attention.
 - `ring_attention.py` - `RingAttention`, exact blockwise attention with an online softmax.
 - `rpc_attention.py` - `RPCAttention`, attention scores split into low-rank plus sparse parts.
@@ -99,7 +100,7 @@ from dl_techniques.layers.attention import (
     validate_attention_config,
 )
 
-list_attention_types()                      # 36 keys, sorted
+list_attention_types()                      # 37 keys, sorted
 get_attention_requirements('window')        # one entry's metadata
 validate_attention_config('window', dim=96, window_size=7, num_heads=4)  # raises on a bad config
 ```
@@ -129,6 +130,7 @@ win = WindowAttention(dim=96, window_size=7, num_heads=4, partition_mode='zigzag
 | `gated` | `GatedAttention` | QK-norm, partial RoPE, output gate | `dim`, `num_heads` |
 | `group_query` | `GroupedQueryAttention` | Fewer K/V heads than Q heads | `dim`, `num_heads`, `num_kv_heads` |
 | `hopfield` | `HopfieldAttention` | Hopfield retrieval; `update_steps_max=0` is plain attention | `num_heads`, `key_dim` |
+| `kimi_delta` | `KimiDeltaAttention` | Gated delta-rule linear attention with per-channel decay; causal, O(N), carries state between calls | `dim`, `num_heads` |
 | `lighthouse` | `LighthouseAttention` | Pooled pyramid, top-K, causal | `dim`, `num_heads` |
 | `linear` | `LinearAttention` | Bias-free O(N) attention | `dim` |
 | `mean_shift` | `MeanShiftAttention` | Mean-shift steps on tied Q=K=V tokens; `num_steps=1` is tied-QKV softmax attention | `dim` |
@@ -155,10 +157,11 @@ Everything not listed as required is optional with a registry default. Read the 
 
 ## Things to know
 
-- Call signatures differ. Most mask-taking layers are `call(inputs, attention_mask=None, training=None)`. Exceptions: `group_query`, `ring` and `mobile_mqa` put `training` before `attention_mask`; `differential` has an extra `layer_idx` argument before `training`; `hopfield` puts `return_attention_scores` before `training` and also accepts `[query, key, value]`; `mean_shift` has the same `return_attention_scores` position and accepts `[query, key_value]` with `blurring=False`; `energy` adds `mask` and `adjacency_weight` after `training`; `single_window` adds `pad_to_window`; `rpc` names its mask `mask=`; `linear` takes `training` then an ignored `mask=`; `shared_weights_cross` requires `split_sizes` positionally; `multi_head_cross`, `multi_head_latent` and `perceiver` take `query_input` and an optional `kv_input`. Layers with no mask argument at all: `channel`, `cbam` and `multi_dconv_head_transposed` take only `(inputs, training=None)`, as do `lighthouse` and `tripse*`; `performer` adds `return_attention_scores`; `anchor` takes `(x, num_anchor_tokens=None, training=None)`; `ideogram4` takes `(x, segment_ids, cos, sin, training=None)`; `mmdit_joint` takes one list `[hidden_states, encoder_hidden_states]`. `WindowAttention.call` is plain `(inputs, attention_mask=None, training=None)`. Pass `attention_mask` and `training` by keyword.
+- Call signatures differ. Most mask-taking layers are `call(inputs, attention_mask=None, training=None)`. Exceptions: `group_query`, `ring` and `mobile_mqa` put `training` before `attention_mask`; `differential` has an extra `layer_idx` argument before `training`; `hopfield` puts `return_attention_scores` before `training` and also accepts `[query, key, value]`; `mean_shift` has the same `return_attention_scores` position and accepts `[query, key_value]` with `blurring=False`; `energy` adds `mask` and `adjacency_weight` after `training`; `kimi_delta` adds `initial_state` and `return_state` after `training`, and returns `(output, state)` when `return_state=True`; `single_window` adds `pad_to_window`; `rpc` names its mask `mask=`; `linear` takes `training` then an ignored `mask=`; `shared_weights_cross` requires `split_sizes` positionally; `multi_head_cross`, `multi_head_latent` and `perceiver` take `query_input` and an optional `kv_input`. Layers with no mask argument at all: `channel`, `cbam` and `multi_dconv_head_transposed` take only `(inputs, training=None)`, as do `lighthouse` and `tripse*`; `performer` adds `return_attention_scores`; `anchor` takes `(x, num_anchor_tokens=None, training=None)`; `ideogram4` takes `(x, segment_ids, cos, sin, training=None)`; `mmdit_joint` takes one list `[hidden_states, encoder_hidden_states]`. `WindowAttention.call` is plain `(inputs, attention_mask=None, training=None)`. Pass `attention_mask` and `training` by keyword.
 - Masks are not uniform. Most layers treat `attention_mask` as a keep mask (nonzero means attend). `non_local` instead takes an additive mask (0 keeps, a large negative value masks). `spatial`, `mobile_mqa` and `shared_weights_cross` accept the argument and never use it. `linear` silently discards `mask=`. `fnet` only zeroes padded rows after mixing.
 - `window` folds a 1-D sequence into a square grid. For text use `window_band`. `window_band` refuses `use_relative_position_bias=True`. The class allows `window_size=0` for the band, but the factory rejects any `window_size <= 0`.
 - `lighthouse` needs a statically known sequence length (else `RuntimeError` in `call`), and its causality is block-granular, not per position.
+- `kimi_delta` is causal and takes only a rank-2 keep mask `(B, N)`. Its state is the 4-tuple `(S, conv_q, conv_k, conv_v)`: the delta-rule state plus the last `conv_size - 1` pre-convolution inputs of q, k and v. Feeding a returned state back as `initial_state` is exact: a split call and a token-by-token decode equal one full call up to float rounding. A masked token neither writes nor decays the state, and the carried window holds the last `conv_size - 1` KEPT inputs, so left padding, right padding and an all-padding segment act as deleted tokens. An interior hole (a masked token between two kept ones) is exact only at `conv_size` 0 or 1, because the short convolution still spans the hole's zero. `mode='chunk'` (default) solves one triangular system per chunk and is for training and prefill; `mode='recurrent'` scans token by token, gives the same result and suits decoding. Chunk mode holds a `(B, H, N/C, C, C, head_dim)` decay tensor, so its memory grows linearly with `chunk_size` (about +1.4 GB forward at `B=1, H=8, head_dim=128, N=1024, C=64` on CPU); lower `chunk_size`, which does not change the result, or use `mode='recurrent'`. Exclude `A_log` and `dt_bias` from weight decay (fla marks both no-weight-decay).
 - `wave_field` is causal on its internal field grid, but token-level causality depends on `field_size` and `max_seq_len`. Check before using it in a decoder.
 - `fnet` with `implementation='fft'` warns and falls back to the matrix DFT. `performer`'s `ortho_scaling` is a plain scalar multiply, not FAVOR+ orthogonalization. `rpc`'s `lambda_sparse` is a positive weight, not a 0-1 rate.
 - `energy` returns an update to add to the residual stream, not a contextualized value, so it is not a drop-in for `multi_head`.

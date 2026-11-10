@@ -1,7 +1,7 @@
 # attention
 
 Path: `src/dl_techniques/layers/attention`
-Purpose: Keras 3 attention and token-mixing layers plus a strict-kwargs factory (`create_attention_layer`) over 36 registered keys.
+Purpose: Keras 3 attention and token-mixing layers plus a strict-kwargs factory (`create_attention_layer`) over 37 registered keys.
 
 ## Scope
 
@@ -14,7 +14,7 @@ Not in: feed-forward blocks, norms, embeddings and RoPE (sibling packages `layer
 ```mermaid
 flowchart TD
     I["__init__.py (re-exports)"] --> F["factory.py: ATTENTION_REGISTRY, AttentionType"]
-    F --> L["36 keys -> layer classes (33) or builder functions (3 window keys)"]
+    F --> L["37 keys -> layer classes (34) or builder functions (3 window keys)"]
     L --> C["common.py helpers"]
     L --> X["MultiHeadCrossAttention engine"]
     X --> W1["MultiHeadAttention (facade)"]
@@ -33,8 +33,8 @@ flowchart TD
 
 | File | Role | Notes |
 | --- | --- | --- |
-| `__init__.py` | Public surface | 45 names in `__all__`: 7 factory-interface names (6 functions plus the `AttentionType` alias) + 38 classes. Import order fixes Keras registration order, do not sort. |
-| `factory.py` | Registry and factory | `ATTENTION_REGISTRY` (36), `AttentionType` Literal (36), `STRICT_DROPPED_KEY_MARKER`, `assemble_attention_config` (the 7th public function, not re-exported). |
+| `__init__.py` | Public surface | 46 names in `__all__`: 7 factory-interface names (6 functions plus the `AttentionType` alias) + 39 classes. Import order fixes Keras registration order, do not sort. |
+| `factory.py` | Registry and factory | `ATTENTION_REGISTRY` (37), `AttentionType` Literal (37), `STRICT_DROPPED_KEY_MARKER`, `assemble_attention_config` (the 7th public function, not re-exported). |
 | `common.py` | Shared primitives | Flat: no classes, no registration. Not re-exported from `__init__.py`. |
 | `multi_head_cross_attention.py` | Engine | Self- and cross-attention; `shared_qk_projections=True` fuses `Dense(3*dim)` and is rejected with `kv_input` and with `kv_kernel_initializer`. |
 | `window_attention.py` | `WindowAttention` + 5 builder functions | Three registered; `create_kan_key_window_attention` and `create_adaptive_softmax_window_attention` are not registered or exported. |
@@ -77,6 +77,7 @@ Call signatures (frozen; renaming or reordering breaks serialized configs and ca
 | `group_query`, `mobile_mqa`, `ring` | `(inputs, training=None, attention_mask=None, return_attention_weights=False)`; `ring` returns `(output, None)` when asked for weights |
 | `hopfield` | `(inputs, attention_mask=None, return_attention_scores=False, training=None)`; `inputs` may be a list/tuple `[query, key, value]` |
 | `mean_shift` | `(inputs, attention_mask=None, return_attention_scores=False, training=None)`; `inputs` may be a list `[query, key_value]` only with `blurring=False`; rank 4 raises in `build` |
+| `kimi_delta` | `(inputs, attention_mask=None, training=None, initial_state=None, return_state=False)`; with `return_state=True` returns `(output, (S, conv_q, conv_k, conv_v))`; `attention_mask` is rank 2 only |
 | `energy` | `(inputs, attention_mask=None, training=None, mask=None, adjacency_weight=None)`; `mask` is the Keras-propagated rank-2 mask, `supports_masking=True` |
 | `multi_head_cross`, `multi_head_latent`, `perceiver` | `(query_input, kv_input=None, attention_mask=None, training=None)` |
 | `shared_weights_cross` | `(inputs, split_sizes, attention_mask=None, training=None)` |
@@ -113,7 +114,7 @@ Call signatures (frozen; renaming or reordering breaks serialized configs and ca
   - Derive `rescue_axis` from the layer's `probability_config` axis where the softmax is configurable. `beit`, `capsule_routing`, `mean_shift` and `ring` have their own reasons not to derive it.
   - `ring` must pass `rescue_axis=None` per tile and rescue once over the full key axis before the block loop; a per-tile rescue un-masks the future under a causal mask.
   - Do not add a second masking helper to `common.py`.
-- Adopters of `apply_attention_mask` in this package: 13 (`area`, `beit`, `capsule_routing`, `differential`, `gated`, `group_query`, `hopfield`, `mean_shift`, `multi_head_cross`, `multi_head_latent`, `ring`, `rpc`, `single_window`). Outside the package it is also imported by `layers/matching/`, `layers/heads/masking.py`, `layers/heads/nlp/question_answering.py`, `layers/sequence_pooling/sequence_pooling.py`, `models/world_models/levjepa/blocks.py`. Importer counts of `validate_head_divisibility` (15) and `compute_attention_scale` (17) over `layers/` are stated in the `common.py` docstring as mechanical: derive them with an AST walk matching `ImportFrom` modules whose last component is `common`, not a text search.
+- Adopters of `apply_attention_mask` in this package: 13 (`area`, `beit`, `capsule_routing`, `differential`, `gated`, `group_query`, `hopfield`, `mean_shift`, `multi_head_cross`, `multi_head_latent`, `ring`, `rpc`, `single_window`). Outside the package it is also imported by `layers/matching/`, `layers/heads/masking.py`, `layers/heads/nlp/question_answering.py`, `layers/sequence_pooling/sequence_pooling.py`, `models/world_models/levjepa/blocks.py`. Importer counts of `validate_head_divisibility` (16) and `compute_attention_scale` (18) over `layers/` are stated in the `common.py` docstring as mechanical: derive them with an AST walk matching `ImportFrom` modules whose last component is `common`, not a text search.
 - `compute_attention_scale` is the reciprocal (`1/sqrt(d)`). Do not adopt it where a layer stores `sqrt(head_dim)` and divides (`wave_field_attention.py`), and probe bit-identity before swapping `x ** -0.5`.
 - `validate_head_divisibility` is not adopted where the local check is conditional on `head_dim is None` or the message carries a fix hint (`gated_attention.py`, `linear_attention.py`, `capsule_routing_attention.py`).
 - Initializers: a layer resolves one initializer instance; the first projection keeps it, every other projection gets `clone_initializer(...)`, otherwise a seeded initializer replays identical draws at every projection. `multi_head` and `multi_head_cross` deliberately keep the shared default; separate their projections with `output_kernel_initializer` (and `kv_kernel_initializer`). Weight paths must not change. Guard: `tests/test_layers/test_attention/test_the_attention_projections_draw_independently.py`.
@@ -144,14 +145,15 @@ Call signatures (frozen; renaming or reordering breaks serialized configs and ca
 - `ideogram4`: no padding mask; a padding token needs its own segment id.
 - `beit`: wrong sequence length raises `ValueError` in `build()`.
 - `hopfield`: `update_steps_eps` is stored for serialization and never read; the loop always runs `update_steps_max + 1` steps.
-- Stale text: the `create_attention_layer` docstring says "all 33 registered types"; the registry has 36.
+- `kimi_delta`: `attention_mask` must be rank 2 (`ValueError` otherwise) and `initial_state` must be the 4-tuple `(S, conv_q, conv_k, conv_v)` a previous call returned (`ValueError` otherwise). State carry and decode are exact; the carried window holds the last `conv_size - 1` kept inputs, so padding acts as deleted tokens, but an interior hole is exact only at `conv_size` 0 or 1. Chunk-mode memory grows linearly with `chunk_size` (`(B, H, N/C, C, C, head_dim)` decay tensor); lower it or use `mode='recurrent'`. `A_log` and `dt_bias` are drawn with the global NumPy RNG in `build()` and should be excluded from weight decay. Not implemented from fla: `allow_neg_eigval`, `safe_gate`, grouped value heads, `cu_seqlens` packing, a short-conv bias.
+- Tracing traps (Keras 3.8, TensorFlow backend), both hit by `kimi_delta`: `keras.ops.tril` / `triu` raise `TypeError: pred must not be a Python bool` inside `tf.function`, `predict` or `fit`; build triangles from an `ops.arange` comparison (`idx[:, None] >= idx[None, :]`) instead. `keras.ops.scan` builds a `tf.while_loop` without `maximum_iterations`, so `fit` under `jit_compile=True` (the `'auto'` default on a GPU) fails with "XLA compilation requires a fixed tensor list size"; use `ops.while_loop(..., maximum_iterations=n)` writing each step with `ops.scatter_update` (`_scan_with_outputs` in `kimi_delta_attention.py`). Eager tests pass with both traps; test `predict` and `jit_compile=True`.
 
 ## Working here
 
 - Docstrings: Sphinx/reST (`:param:`, `:type:`, `:return:`, `:raises:`) is the convention in this package; match the file you edit and never convert a file wholesale. Parameter names: `dim`, `num_heads`, `head_dim`, `dropout_rate`; `channels` stays on CNN-family layers by design.
 - Compose, do not re-implement: score normalization through `ProbabilityOutput`, Q/K norm through `create_normalization_layer`, RoPE through the embedding factory, masks and scale through `common.py`. Create sub-layers in `__init__`, build them explicitly in `build()`, execute in `call()`.
-- Add a layer: (1) new `<name>_attention.py` with `@register_dl_technique("dl_techniques.layers.attention.<name>_attention")` and full `get_config()`; (2) import and `__all__` entry in `__init__.py`; (3) if factory-constructible, add the literal to `AttentionType` and an `ATTENTION_REGISTRY` entry with `class`, `description`, `required_params`, `optional_params`, `use_case`, `complexity`, `paper`; every constructor argument the factory should reach must appear in the entry; (4) update the counts in the `factory.py` and `__init__.py` module docstrings (36 keys, 38 classes, 33 reachable as classes), the `common.py` docstring if adopters change, and this file; (5) add `tests/test_layers/test_attention/test_<name>_attention.py`, and update the drift test expectations if the registry changed.
+- Add a layer: (1) new `<name>_attention.py` with `@register_dl_technique("dl_techniques.layers.attention.<name>_attention")` and full `get_config()`; (2) import and `__all__` entry in `__init__.py`; (3) if factory-constructible, add the literal to `AttentionType` and an `ATTENTION_REGISTRY` entry with `class`, `description`, `required_params`, `optional_params`, `use_case`, `complexity`, `paper`; every constructor argument the factory should reach must appear in the entry; (4) update the counts in the `factory.py` and `__init__.py` module docstrings (37 keys, 39 classes, 34 reachable as classes), the `common.py` docstring if adopters change, and this file; (5) add `tests/test_layers/test_attention/test_<name>_attention.py`, and update the drift test expectations if the registry changed.
 - Do not rename call parameters or reorder them for uniformity; serialized configs and callers depend on the current signatures.
 - Tests: scope to this package, for example `.venv/bin/python -m pytest tests/test_layers/test_attention/ -q` or one file such as `tests/test_layers/test_attention/test_attention_factory.py`. Also run `tests/test_layers/test_factory_registry_drift.py` after any registry change, and `tests/test_layers/test_transformers/` if you touch a layer `TransformerLayer` builds. Never run the full suite (about 1.5 hours) and never run pytest jobs in parallel. Tests and probes that use a GPU: one job at a time.
-- Notable guard tests in `tests/test_layers/test_attention/`: `test_common.py`, `test_the_attention_projections_draw_independently.py`, `test_the_defining_mechanisms_are_live.py`, `test_the_remaining_mechanisms_are_live.py`, `test_the_window_slot_layout_is_pinned.py`, `test_the_lighthouse_mask_value_contract.py`, `test_the_non_local_mask_survives_fp16.py`, `test_the_performer_runs_in_mixed_precision.py`.
+- Notable guard tests in `tests/test_layers/test_attention/`: `test_common.py`, `test_the_attention_projections_draw_independently.py`, `test_the_attention_scale_is_load_bearing.py`, `test_the_defining_mechanisms_are_live.py`, `test_the_remaining_mechanisms_are_live.py` (includes the `kimi_delta` delta-rule, decay, gate and short-conv rows), `test_kimi_delta_attention.py` (`TestTracedGraphs`: `predict` and `jit_compile=True` in both modes), `test_the_window_slot_layout_is_pinned.py`, `test_the_lighthouse_mask_value_contract.py`, `test_the_non_local_mask_survives_fp16.py`, `test_the_performer_runs_in_mixed_precision.py`.
 - Write numerics that must stay finite under `mixed_float16`: run the masked softmax chain in `mask_dtype(...)`.

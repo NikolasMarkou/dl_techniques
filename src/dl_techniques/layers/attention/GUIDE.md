@@ -329,7 +329,7 @@ scores = apply_attention_mask(scores, mask, out_dtype=scores_dtype)
 If your layer is a variation of standard attention (e.g., specific masking, cross-modal setup), wrap `MultiHeadCrossAttention` or standard `keras.layers.MultiHeadAttention`.
 
 ### Pattern B: The Monolith (For Novel Architectures)
-If the mathematical operation is fundamentally different (e.g., `RingAttention`, `LinearAttention`), implement from scratch using `keras.ops`.
+If the mathematical operation is fundamentally different (e.g., `RingAttention`, `LinearAttention`, `KimiDeltaAttention`), implement from scratch using `keras.ops`.
 
 **Example:**
 ```python

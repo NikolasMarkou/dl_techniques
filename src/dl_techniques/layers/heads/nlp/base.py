@@ -506,7 +506,7 @@ class BaseNLPHead(keras.layers.Layer):
             # create_attention_layer raises on an undeclared key, and 14 of the
             # 33 registered types declare neither `dim` nor `dropout_rate`, or
             # only one. Do NOT declare `dim` on those entries. See D-023.
-            # NOTE 2026-11-02: re-measured 15 of 36 lacking at least one of them.
+            # NOTE 2026-11-10: re-measured 15 of 37 lacking at least one of them.
             attn_defaults = {'dim': self._stage_width}
             # 'sliding_window' was dropped from both tuples below on 2026-08-27.
             # It is not an ATTENTION_REGISTRY key and never has been, so

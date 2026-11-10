@@ -296,7 +296,7 @@ class BaseVisionHead(keras.layers.Layer):
                 # 'cbam' (handled above), 'channel', 'spatial', the four
                 # 'tripseN', 'capsule_routing', 'fnet', 'hopfield', 'non_local'.
                 # Do NOT pass `dim` unconditionally. See decisions.md D-023.
-                # NOTE 2026-11-02: the registry now has 36 types; still 11 lack `dim`.
+                # NOTE 2026-11-10: the registry now has 37 types; still 11 lack `dim`.
                 self.attention = create_attention_layer(
                     self.attention_type,
                     name=f'{self.name}_attention',
