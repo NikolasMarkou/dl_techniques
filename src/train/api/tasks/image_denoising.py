@@ -60,10 +60,31 @@ Interface contract
     validation patches and returns ``extras["homogeneity"] = {status, static, numeric: {init, best, final}}``; a failed
     best or final reading enters ``Evaluation.failed_checks`` (exit 1, the run and its models are kept).
 
-    NOT YET WRITTEN, hooks left at their defaults or returning an explicit empty value (each is a later step of the
-    plan, named in the summary's ``notes``): ``task_record`` (no ``task.json``, so ``predict`` and ``export`` refuse
-    such a run), ``config_stamps`` (no legacy-reader stamps), ``run_analysis`` (the analyzer is skipped),
-    ``figure_callbacks`` (no figure) and the held-out cells (``held_out`` says why it is empty).
+    The analysis (``run_analysis``, D-014). Data-free: the weights and spectral analyses only. The stock analysis
+    reads the output as class probabilities (calibration, information flow, training dynamics: a denoiser's RGB is not
+    that), so the task replaces its configuration with
+    :func:`train.common.run_summary.data_free_analysis_config` and reads the status back with the data-free reader (the
+    stock one calls an analysis that leaves ``model_metrics`` empty "missing"). The summary has no ``ece``; per-pixel
+    uncertainty, the Jacobian asymmetry and the PSNR-over-sigma sweep of many models stay the ``train.bfunet`` eval
+    scripts.
+
+    The figures (``analysis_args.figures``). ``figure_callbacks`` is a per-epoch triptych
+    (:class:`~train.common.denoising_run.DenoisingTriptychCallback`: noisy, denoised, clean and the removed residual of
+    a fixed batch); at the end ``psnr_vs_sigma.png`` (one panel per held-out set) and ``residual_whiteness.png`` (the
+    autocorrelation of the residual of the best weights) are drawn, and the dashboard of ``fit_callbacks`` has an
+    additive PSNR panel. With the switch false none is written and ``visualizations`` says ``skipped``.
+
+    The held-out cells (``data.test_dirs``, ``metric_args.test_sigmas_255``). Every set is listed and decoded once
+    before ``fit`` (a leak into train or validation is refused before the claim). After ``fit`` the BEST weights, then
+    the FINAL weights, score every whole image of every set at every sigma through
+    :mod:`train.common.denoising_run` (reflect pad to the family's size multiple, the run's noise kind and clip, noise
+    from a fixed constant seed that is not ``seed``, the same noisy image for both models, an image past the memory rule
+    named and skipped): ``held_out[set][sigma] = {input_psnr, best_psnr, final_psnr, n}`` and ``held_out_info``. Without
+    ``test_dirs``, ``held_out`` is ``{"status": "skipped", "reason", "sigmas_255"}``. No key averages over sets.
+
+    NOT YET WRITTEN, hooks left at their defaults (each is a later step of the plan, named in the summary's
+    ``notes``): ``task_record`` (no ``task.json``, so ``predict`` and ``export`` refuse such a run) and
+    ``config_stamps`` (no legacy-reader stamps).
 
 ``train_image_denoising(*, out, model, data, ...)``
     :param out: run directory (a ``str`` or a ``Path``), or ``"auto"``.
@@ -124,6 +145,7 @@ from ..denoising_args import (
     DenoiseTransformArgs,
     curriculum_callback,
     denoising_facts,
+    held_out_sets,
     load_denoising,
     load_denoising_data_config,
     read_denoising_data_file,
@@ -226,6 +248,10 @@ class ImageDenoisingTrainer(TaskTrainer):
         #: ``{"static", "init"}`` of :func:`train.common.denoising_homogeneity.check_before_fit`, set by ``build_model``
         #: for a bias-free family (a resume builds the model again, so the report has it too), else ``None``.
         self._homogeneity: Optional[Dict[str, Any]] = None
+        #: ``{name: [image files]}`` of ``data.test_dirs``, listed and decoded once by ``build_data`` (empty without it).
+        self._held_out_sets: Dict[str, List[str]] = {}
+        #: The multiple each side of an image is padded to for a whole-image forward pass, set by ``build_model``.
+        self._size_multiple: int = 1
 
     # -- data and model -------------------------------------------------
 
@@ -252,6 +278,9 @@ class ImageDenoisingTrainer(TaskTrainer):
             # asked 18 GB of a classifier once. The key still sets the batch of the load check and the analysis.
             eval_batch_size=None,
         )
+        # Listed and decoded here, before `fit`, so a held-out file that cannot be read is named at the start of the run
+        # and not after hours of training (the leak into train or validation was refused in `describe_data`).
+        self._held_out_sets = held_out_sets(config.data, channels=transform_cfg.channels)
         started = time.perf_counter()
         identity = denoising_run.identity_scores(data.select_ds, config.loss_args.name)
         if not identity["loss"] > 0:
@@ -277,6 +306,9 @@ class ImageDenoisingTrainer(TaskTrainer):
             spec, context.variant, None, (None, None, data.input_shape[-1]),
             self._model_kwargs(config, context),
         )
+        # The family's stride (None for a family with none: bfcnn, and scunet which pads inside): the multiple a whole
+        # image is reflect-padded to for the held-out cells.
+        self._size_multiple = spec.stride_of(context.variant, config.model_args) or 1
         if "bias_free" in spec.properties:
             self._homogeneity = self._check_before_fit(model, data, config.precision)
         return model
@@ -443,6 +475,13 @@ class ImageDenoisingTrainer(TaskTrainer):
         # the ABSOLUTE epoch, so a resume needs no state of its own).
         return [curriculum_callback(config.data, data.sigma_max_var)]
 
+    def figure_callbacks(self, config: ImageDenoisingConfig, data: Any, vis_dir: Path) -> List[Any]:
+        """Return the per-epoch triptych of the first fixed validation patches (noisy, denoised, clean, residual)."""
+        from train.common import denoising_run
+
+        noisy, clean = denoising_run.first_pairs(data.select_ds, denoising_run.TRIPTYCH_PATCHES)
+        return [denoising_run.DenoisingTriptychCallback(noisy, clean, vis_dir, title=vis_dir.parent.name)]
+
     def success_value(self, hist: Dict[str, List[float]]) -> float:
         """Return the best ``val_psnr`` of the selection window minus the PSNR of the noisy input, in dB."""
         if self._identity is None or self._window_start is None:
@@ -552,11 +591,27 @@ class ImageDenoisingTrainer(TaskTrainer):
             f"epochs from that one on, and `best_epoch` is the best of them (`selection` has the window and "
             "`final_is_best`)",
             "`test_metrics_best` and `test_metrics_final` are null: the data has no test split; the best_model.keras "
-            "reload check ran on the validation patches (`best_checkpoint_max_abs_diff`); `held_out` says why no "
-            "held-out cell was scored",
-            "no model analysis or figure ran: the denoising task does not write them yet "
-            "(`analyzer.status` is 'skipped'), and no task.json was written, so `predict` and `export` refuse this run",
+            "reload check ran on the validation patches (`best_checkpoint_max_abs_diff`); the held-out images are "
+            "scored separately (see `held_out`)",
+            "no task.json was written, so `predict` and `export` refuse this run",
         ]
+        if data_cfg.test_dirs:
+            notes.append(
+                "`held_out[set][sigma]` is the mean over the images of that set of each image's PSNR (max_val 1, the "
+                "whole image, reflect-padded to the family's size multiple and cropped back) of the noisy input "
+                "(`input_psnr`), the best model (`best_psnr`) and the final model (`final_psnr`), `n` images, with the "
+                f"run's noise kind ({data_cfg.noise_kind}) and clip ({data_cfg.noise_clip}) and the SAME noisy image "
+                "for both models (a fixed seed that is not `seed`: see `held_out_info`); a set is a row of its own, "
+                "no key averages sets, and an image past the memory rule is named in `held_out_info.skipped_images`"
+            )
+        else:
+            notes.append("`held_out` is skipped: data.test_dirs is not set, so no whole image was scored")
+        if analysis_cfg.model_analysis:
+            notes.append(
+                "the model analysis is data-free (weights and spectral only; `analyzer.analyzers` lists them): the "
+                "stock calibration, information-flow and training-dynamics analyses read class probabilities, which a "
+                "denoiser's image output is not, so there is no `ece`"
+            )
         if self._homogeneity is not None:
             notes.append(
                 "`homogeneity` reads max|f(a x) - a f(x)| / max|a f(x)| at alphas 0.3, 1.3, 3.7, 6.1 (TF32 off, "
@@ -583,11 +638,47 @@ class ImageDenoisingTrainer(TaskTrainer):
 
     # -- the reporting --------------------------------------------------
 
+    def run_analysis(
+        self,
+        config: ImageDenoisingConfig,
+        model: Any,
+        test_data: Tuple[Any, Any],
+        history: Any,
+        experiment_name: str,
+        run_dir: str,
+    ) -> Any:
+        """Run the data-free analysis (weights and spectral only); see the module contract."""
+        from threadpoolctl import threadpool_limits
+
+        from train.common import evaluation, run_summary
+
+        # DECISION plan-2026-11-10T095307-d483ffab/D-014
+        # The analysis of a denoiser is DATA-FREE. The default `run_analysis` picks its configuration by the output
+        # rank, and a denoiser's per-pixel output (`outputs_per_pixel(bfcnn)` is true) gets calibration, information
+        # flow and training dynamics, which read the RGB image as class probabilities and the clean image as labels:
+        # numbers that mean nothing and cost minutes. Do NOT fall back to `evaluation.analysis_config_for` here, and do
+        # NOT add calibration to this configuration (`test_image_denoising_task` runs both on one model: the control
+        # through `analysis_config_for` produces an ECE, this one leaves `calibration_metrics` empty). Per-pixel
+        # uncertainty, the Jacobian asymmetry and the PSNR sweep stay the `train.bfunet` eval scripts. The BLAS limit
+        # is `run_data_free_analysis`'s (D-243 of plan 81938e81), the seed the default `run_analysis`'s (D-027).
+        analysis_config = dataclasses.replace(run_summary.data_free_analysis_config(), random_state=config.seed)
+        with threadpool_limits(limits=run_summary.DATA_FREE_ANALYSIS_BLAS_THREADS):
+            results = evaluation.run_model_analysis(
+                model, test_data, history, experiment_name, run_dir, config=analysis_config
+            )
+        if results is not None:
+            # The library's own four-panel dashboard reads "No data available" for a data-free analysis.
+            run_summary.remove_empty_summary_dashboard(Path(run_dir), results)
+        return results
+
     def evaluate_and_report(
         self, config: ImageDenoisingConfig, data: Any, fit: FitState
     ) -> Evaluation:
         """Run the denoising reporting sequence; see the module contract."""
-        from train.common import classification_run, run_summary
+        import keras
+        import numpy as np
+
+        from train.common import classification_run, denoising_run, run_summary
         from train.common import denoising_homogeneity as homogeneity
 
         checkpoint_cfg: CheckpointArgs = config.checkpoint_args
@@ -612,26 +703,35 @@ class ImageDenoisingTrainer(TaskTrainer):
                 evaluate=classification_run.evaluate_dict,
                 split_label="Selection results (reload check only)",
             )
-        # The analysis and the figures of a denoiser (a data-free analysis, a triptych, PSNR over sigma) are a later
-        # step of the plan: nothing runs here, and the status says so rather than "missing".
+        # DECISION plan-2026-11-10T095307-d483ffab/D-026
+        # Everything that describes the BEST weights is taken HERE, before `finalize_last_epoch` puts the last
+        # epoch's weights in the model: the residual of the whiteness figure, the best held-out pass and the analysis.
+        # The final held-out pass comes after it, on the same noisy images (`pair_held_out` refuses the pair otherwise).
+        # Do NOT move any of them after the swap (the "best" numbers would be the final model's).
+        noisy_fig, clean_fig = denoising_run.first_pairs(data.select_ds, denoising_run.WHITENESS_PATCHES)
+        residual = None
+        if analysis_cfg.figures:
+            residual = noisy_fig - np.asarray(keras.ops.convert_to_numpy(fit.model(noisy_fig, training=False)))
+        held_spec = self._held_out_spec(config)
+        best_scores = self._score_held_out(fit.model, held_spec) if self._held_out_sets else None
         _, analysis = classification_run.report_best_weights(
             fit.model,
-            data,
+            denoising_run.AnalysisSample(noisy_fig, clean_fig),
             fit.history,
             fit.run_dir,
             fit.vis_dir,
             fit.experiment_name,
-            False,
+            analysis_cfg.model_analysis,
             run_analysis=functools.partial(self.run_analysis, config),
             name_failed_analyses=True,
             figures=False,
-            analysis_off_hint=(
-                "the denoising task does not run an analysis yet"
-                if analysis_cfg.model_analysis
-                else "analysis_args.model_analysis=false"
-            ),
+            analysis_off_hint="analysis_args.model_analysis=false",
             eval_batch_size=analysis_cfg.eval_batch_size,
+            read_status=run_summary.read_data_free_analysis_status,
         )
+        if analysis.get("failed_analyses") and analysis["status"] == "ok":
+            # `report_best_weights` marks only the stock reader's "success" partial; this reader's good status is "ok".
+            analysis["status"] = run_summary.PARTIAL_ANALYSIS_STATUS
         # The last epoch's weights replace the best ones here.
         load_detail: Dict[str, Any] = {}
         test_final, load_check = classification_run.finalize_last_epoch(
@@ -648,6 +748,12 @@ class ImageDenoisingTrainer(TaskTrainer):
             exact_reload=True,
             load_detail=load_detail,
         )
+        held_out, held_out_info, cells = self._held_out_block(config, fit, held_spec, best_scores)
+        visualizations: Dict[str, Any] = {"files": [], "failed": [], "skipped": True}
+        if analysis_cfg.figures:
+            visualizations = denoising_run.write_end_figures(
+                fit.vis_dir, cells=cells, residual=residual, title=fit.experiment_name
+            )
         report, failed = self._homogeneity_report(config, fit, best_reading, probe_inputs)
         hist = {key: [float(v) for v in values] for key, values in fit.history.history.items()}
         start = self.selection_start_epoch(config)
@@ -659,27 +765,96 @@ class ImageDenoisingTrainer(TaskTrainer):
             "best_epoch": best,
             "final_is_best": best == fit.epochs_run,
         }
+        extras: Dict[str, Any] = {"selection": selection, "homogeneity": report, "held_out": held_out}
+        if held_out_info is not None:
+            extras["held_out_info"] = held_out_info
         return Evaluation(
             test_metrics_best=None,
             best_load_error=load_error,
             checkpoint_max_diff=max_diff,
             conformal=None,
-            visualizations={"files": [], "failed": [], "skipped": True},
+            visualizations=visualizations,
             analysis=analysis,
             test_metrics_final=test_final,
             load_check=load_check,
             load_detail=load_detail or None,
-            extras={
-                "selection": selection,
-                "homogeneity": report,
-                "held_out": {
-                    "status": "skipped",
-                    "reason": "the denoising task does not score held-out images yet: it has no data.test_dirs key",
-                    "sigmas_255": [float(value) for value in metric_cfg.test_sigmas_255],
-                },
-            },
+            extras=extras,
             failed_checks=failed,
         )
+
+    def _held_out_spec(self, config: ImageDenoisingConfig) -> Any:
+        """Return the :class:`~train.common.denoising_run.HeldOutSpec` of this run: its noise, channels and multiple."""
+        from train.common import denoising_run
+        from train.common.denoising_data import DEFAULT_COMPOSITE_RATIO
+
+        data_cfg: DenoisingData = config.data
+        ratio = DEFAULT_COMPOSITE_RATIO if data_cfg.noise_composite_ratio is None else data_cfg.noise_composite_ratio
+        return denoising_run.HeldOutSpec(
+            sigmas_255=tuple(float(value) for value in config.metric_args.test_sigmas_255),
+            noise_kind=data_cfg.noise_kind,
+            composite_ratio=ratio,
+            clip=data_cfg.noise_clip,
+            channels=config.transform_args.channels,
+            size_multiple=self._size_multiple,
+        )
+
+    def _score_held_out(self, model: Any, spec: Any) -> Any:
+        """Score ``model`` as it is (whole images, eager forward pass) on every held-out set."""
+        from train.common import denoising_run
+
+        return denoising_run.score_held_out(
+            lambda noisy: denoising_run.denoise_whole_image(model, noisy, spec.size_multiple, eager=True),
+            self._held_out_sets,
+            spec,
+        )
+
+    def _held_out_block(
+        self, config: ImageDenoisingConfig, fit: FitState, spec: Any, best_scores: Any
+    ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """Return ``(held_out, held_out_info, cells)``: the summary blocks and the cells for the figure.
+
+        Called after ``finalize_last_epoch``: ``fit.model`` holds the FINAL weights, ``best_scores`` is the pass
+        taken on the best ones (``None`` when no set was asked for).
+        """
+        from dl_techniques.utils.logger import logger
+        from train.common import denoising_run
+
+        if best_scores is None:
+            return (
+                {
+                    "status": "skipped",
+                    "reason": "data.test_dirs is not set: no held-out image was scored",
+                    "sigmas_255": [float(value) for value in spec.sigmas_255],
+                },
+                None,
+                None,
+            )
+        cells = denoising_run.pair_held_out(best_scores, self._score_held_out(fit.model, spec))
+        for name, per_sigma in cells.items():
+            for key, cell in per_sigma.items():
+                if cell["n"]:
+                    logger.info(
+                        f"Held-out {name} sigma_255 {key} (n={cell['n']}): input {cell['input_psnr']:.2f} dB, best "
+                        f"{cell['best_psnr']:.2f} dB, final {cell['final_psnr']:.2f} dB"
+                    )
+        info = {
+            "sigmas_255": [float(value) for value in spec.sigmas_255],
+            "noise": {
+                "kind": spec.noise_kind,
+                "composite_ratio": spec.composite_ratio if spec.noise_kind == "composite" else None,
+                "clip": spec.clip,
+            },
+            "seed": spec.seed,
+            "size_multiple": spec.size_multiple,
+            "channels": spec.channels,
+            "psnr": "mean over the images of each whole image's PSNR at max_val 1.0 (MSE floored at 1e-12)",
+            "memory_rule": {
+                "gb_per_megapixel": denoising_run.HELD_OUT_GB_PER_MEGAPIXEL,
+                "budget_gb": spec.budget_gb,
+            },
+            "skipped_images": {name: rows for name, rows in best_scores.skipped.items() if rows},
+        }
+        return cells, info, cells
 
     def _homogeneity_report(
         self, config: ImageDenoisingConfig, fit: FitState, best_reading: Optional[Dict[str, Any]], probe_inputs: Any

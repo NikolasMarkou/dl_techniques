@@ -685,3 +685,47 @@ def test_the_dashboard_callback_records_miou_when_the_logs_carry_it(tmp_path, mo
     plain.on_epoch_begin(0)
     plain.on_epoch_end(0, {"loss": 1.0, "val_loss": 1.1})
     assert "miou" not in plain.history and "val_miou" not in plain.history
+
+
+# ---------------------------------------------------------------------
+# The opt-in PSNR panel (denoising task, plan d483ffab step 10; absent for every history without the columns)
+# ---------------------------------------------------------------------
+
+
+def _psnr_history(**extra):
+    history = {key: value for key, value in _history().items() if key in ("loss", "val_loss")}
+    history.update(psnr=[20.0, 22.0, 23.0, 23.5, 24.0], val_psnr=[19.0, 21.0, 22.5, 22.9, 23.0], **extra)
+    return history
+
+
+def test_the_psnr_panel_exists_only_when_the_history_has_psnr_columns(tmp_path, figures) -> None:
+    """Classification and segmentation histories carry no ``psnr``: their panel lists are what they were."""
+    assert viz.render_training_dashboard(_history(), tmp_path / "plain.png", "t") == [
+        "Loss", "Accuracy", "Generalization gap"]
+    assert viz.render_training_dashboard(_miou_history(), tmp_path / "seg.png", "t") == [
+        "Loss", "Accuracy", "mIoU", "Generalization gap"]
+    assert viz.render_training_dashboard(_psnr_history(), tmp_path / "den.png", "t") == [
+        "Loss", "PSNR", "Generalization gap"]
+    only_val = {**_history(), "val_psnr": [1.0, 2.0, 3.0, 4.0, 5.0]}
+    assert "PSNR" in viz.render_training_dashboard(only_val, tmp_path / "val.png", "t")
+
+
+def test_the_psnr_panel_draws_both_curves_in_db_the_best_epoch_and_the_baseline(tmp_path, figures) -> None:
+    ax = _panel(_dashboard(tmp_path, figures, _psnr_history(), best_epoch=4, baseline={"psnr": 10.0}), "PSNR")
+    curves = {ln.get_label(): ln for ln in ax.get_lines()}
+    np.testing.assert_allclose(curves["train"].get_ydata(), [20.0, 22.0, 23.0, 23.5, 24.0])
+    np.testing.assert_allclose(curves["val"].get_ydata(), [19.0, 21.0, 22.5, 22.9, 23.0])
+    assert ax.get_ylabel() == "PSNR (dB)" and _best_marks(ax) == [4]
+    assert viz.BASELINE_LABEL in [t.get_text() for t in ax.get_legend().get_texts()]
+
+
+def test_the_dashboard_callback_records_psnr_when_the_logs_carry_it(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(viz, "render_training_dashboard", lambda *args, **kwargs: [])
+    callback = viz.TrainingDashboardCallback(tmp_path / "d.png")
+    callback.on_epoch_begin(0)
+    callback.on_epoch_end(0, {"loss": 1.0, "val_loss": 1.1, "psnr": 21.0, "val_psnr": 20.0})
+    assert callback.history["psnr"] == [21.0] and callback.history["val_psnr"] == [20.0]
+    plain = viz.TrainingDashboardCallback(tmp_path / "e.png")
+    plain.on_epoch_begin(0)
+    plain.on_epoch_end(0, {"loss": 1.0, "val_loss": 1.1, "accuracy": 0.5})
+    assert "psnr" not in plain.history and "val_psnr" not in plain.history

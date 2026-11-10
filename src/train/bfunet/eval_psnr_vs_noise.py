@@ -62,6 +62,16 @@ from train.common import setup_gpu, collect_image_paths, set_seeds
 # re-implements the *decode* path (it needs a no-crop full-image variant and an EvalConfig,
 # not a BFUnetTrainingConfig) but must NOT re-declare the bounds: import them.
 from train.bfunet.common import DATA_MIN, DATA_MAX
+# The pure helpers shared with the image_denoising task live in `train.common.denoising_run` (plan d483ffab D-017):
+# one implementation of the noise, the per-image PSNR, the padded whole-image forward pass and `MAX_VAL`; the old names
+# stay importable from here (`ev.add_awgn`, `ev.psnr_per_image`, `ev._predict_denoised`, `ev._denoise_full`, `ev.MAX_VAL`).
+from train.common.denoising_run import (  # noqa: F401
+    MAX_VAL,
+    add_awgn,
+    denoise_whole_image as _denoise_full,
+    predict_denoised as _predict_denoised,
+    psnr_per_image,
+)
 
 # Importing the model module registers every custom layer / initializer the saved
 # denoiser needs (ConvNeXt blocks, Gabor stem, Laplacian pyramid, LayerScale, ...) so
@@ -75,10 +85,6 @@ import dl_techniques.models.vision.bias_free_denoisers.bfconvunext  # noqa: F401
 # Benchmark-convention noise stds on the [0, 255] pixel scale. Spans the classic
 # 15/25/50 AWGN regimes plus the edges of this trainer's curriculum (sigma_255 ~6.4..63.75).
 DEFAULT_SIGMAS_255: List[float] = [5.0, 10.0, 15.0, 25.0, 35.0, 50.0, 65.0]
-# Images live in [0, 1] -> peak-to-peak range = 1.0. This value is domain-INVARIANT (it was
-# also 1.0 on the legacy [-0.5,+0.5] domain, whose peak-to-peak width is likewise 1.0). Do
-# NOT "fix" it to match the new domain -- see common.py D-001 / plan INV-2.
-MAX_VAL: float = 1.0
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tiff", ".bmp", ".webp"}
 
 # Published color AWGN full-image PSNR (dB) reference points, keyed by dataset (lowercase)
@@ -184,19 +190,6 @@ def _to_flexible_input(model: keras.Model) -> keras.Model:
     return flex
 
 
-def _predict_denoised(model: keras.Model, noisy: np.ndarray, batch_size: int) -> np.ndarray:
-    """Run the denoiser; reduce multi-output models to output 0 (final denoised image)."""
-    # DECISION plan-2026-09-19T224205-49c8bf80/D-057: pad to a multiple of ``batch_size``, crop back. A
-    # short last batch is a second trace per model and TF counts traces across all models: the
-    # ``retracing`` warning. Do NOT drop the padding; guard: ``TestPredictTracesOncePerModel``.
-    n = len(noisy)
-    padded = noisy[np.arange(-(-n // batch_size) * batch_size) % n]
-    pred = model.predict(padded, batch_size=batch_size, verbose=0)
-    if isinstance(pred, (list, tuple)):
-        pred = pred[0]  # deep supervision / exposed bottleneck -> final denoised output
-    return np.asarray(pred)[:n]
-
-
 # ---------------------------------------------------------------------
 # Data sampling (clean patches in [0, 1])
 # ---------------------------------------------------------------------
@@ -290,33 +283,9 @@ def sample_full_images(cfg: EvalConfig, paths: List[str], rng: np.random.RandomS
     return images
 
 
-def _denoise_full(model: keras.Model, noisy: np.ndarray, size_multiple: int) -> np.ndarray:
-    """Denoise one whole image: reflect-pad H,W to a multiple of ``size_multiple`` (the
-    U-Net downsample factor), run a single forward pass, then crop back to the original size."""
-    h, w = noisy.shape[:2]
-    ph = (size_multiple - h % size_multiple) % size_multiple
-    pw = (size_multiple - w % size_multiple) % size_multiple
-    padded = np.pad(noisy, ((0, ph), (0, pw), (0, 0)), mode="reflect")
-    out = _predict_denoised(model, padded[None, ...], batch_size=1)[0]
-    return out[:h, :w, :]
-
-
 # ---------------------------------------------------------------------
 # Noise + PSNR
 # ---------------------------------------------------------------------
-
-def add_awgn(clean: np.ndarray, sigma_norm: float, clip: bool, rng: np.random.RandomState) -> np.ndarray:
-    """Additive white Gaussian noise ``y = x + N(0, sigma^2)`` in normalized space."""
-    noisy = clean + rng.standard_normal(clean.shape).astype(np.float32) * np.float32(sigma_norm)
-    return np.clip(noisy, DATA_MIN, DATA_MAX) if clip else noisy
-
-
-def psnr_per_image(denoised: np.ndarray, clean: np.ndarray, max_val: float = MAX_VAL) -> np.ndarray:
-    """Per-image PSNR (dB): ``10 * log10(max_val^2 / MSE)`` -- matches PsnrMetric."""
-    mse = np.mean((denoised - clean) ** 2, axis=(1, 2, 3))
-    mse = np.maximum(mse, 1e-12)  # guard against perfect reconstruction / log(0)
-    return 10.0 * np.log10((max_val ** 2) / mse)
-
 
 def mean_ci(values: np.ndarray, confidence: float) -> Tuple[float, float, float]:
     """Return ``(mean, ci_low, ci_high)`` using a Student-t interval on the mean."""

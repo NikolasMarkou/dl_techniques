@@ -30,12 +30,25 @@ Interface contract
     :return: the mapping in a YAML file with its relative ``train_dirs`` and ``val_dirs`` entries made
         absolute against the file.
 
+``split_test_dir(entry)`` / ``test_named_dirs(data)``
+    A ``data.test_dirs`` entry is a directory (named by its last component) or ``name=directory`` (the name is what
+    the summary's ``held_out`` is keyed by; ``CBSD68/original`` would otherwise be "original"). ``test_named_dirs``
+    is ``[(name, directory), ...]`` of a data config, ``[]`` without ``test_dirs``.
+
 ``denoising_facts(data)``
     :return: the :class:`~train.api.data_args.DataFacts` (dataset ``"folder"``, no classes, no image size).
         Every directory is LISTED (no pixel is read, no TensorFlow op runs), so it runs before ``setup_gpu``
         and before the run directory is claimed.
-    :raises ConfigError: naming ``data.train_dirs`` or ``data.val_dirs`` and the directory, for one that does
-        not exist, holds no image, cannot be listed, or shares a file with the other list.
+    :raises ConfigError: naming ``data.train_dirs``, ``data.val_dirs`` or ``data.test_dirs`` and the directory, for
+        one that does not exist, holds no image, cannot be listed, or shares a file with another list (a held-out
+        image that is also a train or validation image is refused).
+
+``held_out_sets(data, channels=None)``
+    :param channels: when given, every held-out file is decoded once (as a channel count) so an unreadable one is named
+        before ``fit``; ``None`` only lists (no TensorFlow op).
+    :return: ``{name: image files}`` of ``data.test_dirs`` (``{}`` without it).
+    :raises ConfigError: as :func:`denoising_facts` for a directory that cannot be listed, and naming the file for one
+        that cannot be decoded.
 
 ``load_denoising(data, *, patch_size, channels, patches_per_image, batch_size, seed, augment, eval_batch_size)``
     :return: the :class:`~train.common.denoising_data.DenoisingBatches` of the shared loader. Every file the run
@@ -82,6 +95,7 @@ TensorFlow import are inside the functions.
 
 import dataclasses
 import os
+import re
 from pathlib import Path
 from typing import Any, List, Literal, Mapping, Optional, Tuple, Union
 
@@ -100,7 +114,14 @@ CURRICULUM_SCHEDULES: Tuple[str, ...] = ("linear", "cosine", "exp")
 
 #: Keys of a denoising data config that name directories; a YAML file's relative ones are made absolute
 #: against the file.
-DENOISING_PATH_KEYS = ("train_dirs", "val_dirs")
+DENOISING_PATH_KEYS = ("train_dirs", "val_dirs", "test_dirs")
+
+#: The keys of ``results_summary.json``'s ``held_out`` block of a run that scored nothing (``status``, ``reason``,
+#: ``sigmas_255``): a held-out set may not be called one of them, so a reader can tell the two shapes apart.
+RESERVED_HELD_OUT_NAMES = ("status", "reason", "sigmas_255")
+
+#: What a held-out set's name may be: it is a JSON key and a figure panel title.
+_TEST_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 #: The training-patch augmentations; ``test_common_denoising_data`` holds it equal to ``train.common.denoising_data.PATCH_AUGMENTS``.
 PATCH_AUGMENTS: Tuple[str, ...] = ("none", "flip", "dihedral")
@@ -164,6 +185,22 @@ def _nested(first: str, second: str) -> bool:
     return os.path.commonpath([first, second]) in (first, second)
 
 
+def _explicit_name(entry: str) -> Optional[Tuple[str, str]]:
+    """``(name, directory)`` of an entry written ``name=directory``, else ``None``.
+
+    The name is taken only when it holds no path separator, so a directory with an ``=`` in a parent's name stays bare.
+    """
+    name, separator, directory = entry.partition("=")
+    if separator and name and "/" not in name and os.sep not in name:
+        return name, directory
+    return None
+
+
+def split_test_dir(entry: str) -> Tuple[str, str]:
+    """``(name, directory)`` of a ``data.test_dirs`` entry: ``name=directory``, or a bare directory named by its last part."""
+    return _explicit_name(entry) or (os.path.basename(os.path.normpath(entry)), entry)
+
+
 @dataclasses.dataclass(frozen=True)
 class DenoisingData(StrictConfig):
     """Image folders for a denoiser, its noise and the curriculum of that noise."""
@@ -189,6 +226,14 @@ class DenoisingData(StrictConfig):
     )
     format: Literal["folder"] = dataclasses.field(
         default="folder", metadata={"help": "where the data comes from; the only value"}
+    )
+    test_dirs: Optional[List[str]] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "held-out image sets, scored on WHOLE images at the end of the run with the run's noise at "
+            "metric_args.test_sigmas_255, for the best and the final model: each entry is a directory (named by its "
+            "last component) or name=directory; a file may not also be in train_dirs or val_dirs; null scores nothing"
+        },
     )
     max_train_files: Optional[int] = dataclasses.field(
         default=10000,
@@ -302,6 +347,7 @@ class DenoisingData(StrictConfig):
                             f"directory as, or lies inside or around, train directory {trained!r}; the "
                             "listing is recursive, so a validation image the model trained on says nothing "
                             "about it")
+        lines.extend(self._test_dir_problems(prefix))
         for name in ("max_train_files", "max_val_files", "max_samples"):
             value = getattr(self, name)
             if value is not None and value < 1:
@@ -342,6 +388,49 @@ class DenoisingData(StrictConfig):
             bad("val_seed", "expected an int of at least 0")
         return lines
 
+    def _test_dir_problems(self, prefix: str) -> List[str]:
+        """Name a ``test_dirs`` that is empty, badly named, repeated, or the same directory as, or inside, another one."""
+        entries = self.test_dirs
+        if entries is None:
+            return []
+        key = join_path(prefix, "test_dirs")
+        if not entries:
+            return [f"Invalid value for {key!r}: expected at least one directory or null, got []"]
+        if any(not entry.strip() for entry in entries):
+            return [f"Invalid value for {key!r}: expected non-empty entries, got {entries!r}"]
+        lines: List[str] = []
+        named = [split_test_dir(entry) for entry in entries]
+        for name, directory in named:
+            if not _TEST_NAME.match(name) or name in RESERVED_HELD_OUT_NAMES:
+                lines.append(
+                    f"Invalid value for {key!r}: the held-out set name {name!r} (entry {directory!r}) must start with a "
+                    "letter or digit, hold only letters, digits, '_', '.' and '-', and not be one of "
+                    f"{list(RESERVED_HELD_OUT_NAMES)}; give it as name=directory")
+            if not directory.strip():
+                lines.append(f"Invalid value for {key!r}: the entry for {name!r} names no directory")
+        names = [name for name, _ in named]
+        for name in sorted({name for name in names if names.count(name) > 1}):
+            lines.append(
+                f"Invalid value for {key!r}: two held-out sets are named {name!r}; the summary is keyed by name, so "
+                "give each as name=directory")
+        if lines:
+            return lines
+        real = [(name, _real(directory)) for name, directory in named]
+        for index, (name, path) in enumerate(real):
+            for other, other_path in real[index + 1:]:
+                if _nested(path, other_path):
+                    lines.append(
+                        f"Invalid value for {key!r}: {name!r} and {other!r} are the same directory or one lies inside "
+                        "the other; the listing is recursive, so their images would be scored twice")
+            for role in ("train_dirs", "val_dirs"):
+                for used in getattr(self, role):
+                    if used.strip() and _nested(path, _real(used)):
+                        lines.append(
+                            f"Invalid value for {key!r}: {name!r} is the same directory as, or lies inside or around, "
+                            f"{join_path(prefix, role)} entry {used!r}; the listing is recursive, so a held-out image "
+                            "the model trained or selected on says nothing about it")
+        return lines
+
     def resolve_auto(self, context: AutoContext) -> "DenoisingData":
         """Fill ``curriculum_epochs`` ``"auto"`` with :func:`auto_curriculum_epochs` of the run's epochs."""
         if not _is_auto(self.curriculum_epochs):
@@ -362,14 +451,20 @@ def read_denoising_data_file(path: Union[str, Path]) -> dict:
     """Return the mapping in the YAML file ``path``, its relative directory entries anchored to the file."""
     mapping = read_data_file(path, ())
     base = Path(path).resolve().parent
+    def anchored(key: str, entry: Any) -> Any:
+        if not isinstance(entry, str) or not entry:
+            return entry
+        explicit = _explicit_name(entry) if key == "test_dirs" else None
+        if explicit is not None:
+            # `name=directory`: only the directory is relative to the file.
+            name, directory = explicit
+            return f"{name}={directory if os.path.isabs(directory) else os.path.normpath(base / directory)}"
+        return entry if os.path.isabs(entry) else os.path.normpath(base / entry)
+
     for key in DENOISING_PATH_KEYS:
         value = mapping.get(key)
         if isinstance(value, list):
-            mapping[key] = [
-                os.path.normpath(base / entry) if isinstance(entry, str) and entry and not os.path.isabs(entry)
-                else entry
-                for entry in value
-            ]
+            mapping[key] = [anchored(key, entry) for entry in value]
     return mapping
 
 
@@ -402,11 +497,33 @@ def denoising_facts(data: DenoisingData) -> DataFacts:
     from train.common.classification_data import DataSourceError
     from train.common.denoising_data import list_sources
 
+    from train.common.denoising_data import list_test_sets
+
     try:
-        list_sources(data.train_dirs, data.val_dirs)
+        train, val = list_sources(data.train_dirs, data.val_dirs)
+        list_test_sets(test_named_dirs(data), train, val)
     except DataSourceError as exc:
         raise ConfigError(f"Invalid value for {join_path('data', exc.key)!r}: {exc}") from exc
     return DataFacts(dataset=data.format, num_classes=None, image_size=None)
+
+
+def test_named_dirs(data: DenoisingData) -> List[Tuple[str, str]]:
+    """Return ``[(name, directory), ...]`` of ``data.test_dirs`` (empty without it); see the module contract."""
+    return [split_test_dir(entry) for entry in (data.test_dirs or [])]
+
+
+def held_out_sets(data: DenoisingData, *, channels: Optional[int] = None) -> dict:
+    """List (and, with ``channels``, decode once) the held-out sets of a data config; see the module contract."""
+    from train.common.classification_data import DataSourceError
+    from train.common.denoising_data import list_test_sets, scan_images
+
+    try:
+        sets = list_test_sets(test_named_dirs(data))
+        if channels is not None and sets:
+            scan_images([path for files in sets.values() for path in files], channels=channels, key="test_dirs")
+        return sets
+    except DataSourceError as exc:
+        raise ConfigError(f"Invalid value for {join_path('data', exc.key)!r}: {exc}") from exc
 
 
 def noise_spec(data: DenoisingData) -> Any:

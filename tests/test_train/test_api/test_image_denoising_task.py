@@ -20,10 +20,18 @@ so every number the summary reports can be recomputed here by hand instead of re
   through training fails at the end with exit 1 and keeps its models; and the probes do not move the run (same seed,
   probes on and off, equal weights to the bit).
 
+* analysis, figures and held-out cells (step 10, D-014, D-026): the task's analysis is data-free (no calibration, no
+  ECE) where the control through ``analysis_config_for`` on the same model produces an ECE; the held-out cells are per
+  dataset and sigma, hand recomputed, with the unclipped input PSNR at sigma_255 15, 25, 50 reading 24.61, 20.17,
+  14.15 dB, the best and the final model on the same noisy images, no key averaging datasets, an image past the memory
+  rule named and skipped, the figure files following ``analysis_args.figures``, ``data.test_dirs`` refused when it leaks
+  into train or validation, and the pure helpers moved out of ``train.bfunet`` unchanged.
+
 The tests write only under ``tmp_path``. Every real run sets ``max_train_files`` and ``max_val_files`` to the number of
 files: the default of 10,000 repeats a small folder to fill an epoch (the DIV2K rule), which is 5,000 steps here.
 """
 
+import dataclasses
 import json
 import math
 import os
@@ -35,6 +43,7 @@ from pathlib import Path
 import keras
 import numpy as np
 import pytest
+import tensorflow as tf
 from PIL import Image
 
 import train.api.recipes as recipes
@@ -49,6 +58,8 @@ from train.api.tasks.image_denoising import (
     ImageDenoisingTrainer,
     train_image_denoising,
 )
+from train.bfunet import common as bunet_common
+from train.bfunet import eval_psnr_vs_noise as ev
 from train.common import classification_run
 from train.common import denoising_data as dd
 from train.common import denoising_homogeneity as dh
@@ -283,7 +294,12 @@ def test_the_run_directory_holds_the_contract_files(finished):
                  "training_history.json", "best_model.keras", "final_model.keras", "run.log"):
         assert (run_dir / name).is_file(), name
     assert summary["model_loading_validated"] is True
-    assert summary["analyzer"]["status"] == "skipped"
+    # The analysis of a denoiser is data-free (D-014): weights and spectral, read back with the data-free reader, and the
+    # summary has no calibration number.
+    assert summary["analyzer"]["status"] == "ok" and summary["analyzer"]["analyzers"] == ["weights", "spectral"]
+    assert "failed_analyses" not in summary["analyzer"] and "ece" not in summary
+    assert (run_dir / "model_analysis" / "analysis_results.json").is_file()
+    assert not (run_dir / "model_analysis" / "summary_dashboard.png").exists(), "the empty library dashboard is removed"
 
 
 def test_the_resolved_config_holds_the_derived_values_and_the_request_keeps_auto(finished):
@@ -1152,3 +1168,609 @@ def test_a_half_precision_run_scans_but_reads_nothing_numerically_and_says_so(wo
         trainer._homogeneity["static"], trainer._homogeneity["init"],
         dh.skipped_reading("mixed_float16"), dh.skipped_reading("mixed_float16"))
     assert report["status"] == "passed_static_only" and dh.failed_checks(report) == ()
+
+
+# ---------------------------------------------------------------------
+# Step 10: held-out cells, analysis, figures, data.test_dirs (D-014, D-026)
+# ---------------------------------------------------------------------
+
+SIGMAS = (15.0, 25.0, 50.0)
+#: ``-20 log10(sigma_255 / 255)``: what an unclipped additive noisy image scores against its clean one.
+INPUT_PSNR = {"15": 24.61, "25": 20.17, "50": 14.15}
+
+
+def write_sized(root: Path, sizes, seed: int, value=None) -> Path:
+    """Write one smooth RGB PNG per ``(height, width)`` (or a constant image of ``value`` when it is given)."""
+    root.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(seed)
+    for index, (height, width) in enumerate(sizes):
+        if value is not None:
+            pixels = np.full((height, width, 3), round(value * 255), np.uint8)
+        else:
+            rows, columns = np.mgrid[0:height, 0:width]
+            tint = rng.uniform(0.25, 0.75, (1, 1, 3))
+            wave = 0.2 * np.sin(columns / 9.0 + index)[..., None] * np.cos(rows / 7.0)[..., None]
+            pixels = (np.clip(tint + wave, 0, 1) * 255).astype(np.uint8)
+        Image.fromarray(pixels).save(root / f"h{index:02d}.png")
+    return root
+
+
+def files_of(root: Path):
+    return sorted(str(path) for path in root.glob("*.png"))
+
+
+@pytest.fixture(scope="module")
+def held_sets(tmp_path_factory):
+    """Two held-out sets of images whose sides are not multiples of 8 (``bfunet``'s stride), of different sizes."""
+    root = tmp_path_factory.mktemp("held_sets")
+    return {
+        "alpha": write_sized(root / "alpha", [(50, 70), (45, 38), (64, 64)], 10),
+        "beta": write_sized(root / "beta", [(33, 47), (40, 40)], 11),
+    }
+
+
+def held_request(out, folders, held_sets, family="bfunet", epochs=EPOCHS, **analysis):
+    """A run that scores both sets with additive unclipped noise (so the input PSNR is the textbook one)."""
+    request = mapping(out, folders, family, epochs=epochs)
+    request["data"].update(noise_kind="additive", noise_clip=False)
+    request["data"].pop("noise_composite_ratio", None)
+    request["data"]["test_dirs"] = [f"alpha={held_sets['alpha']}", str(held_sets["beta"])]
+    request["analysis_args"] = {"figures": False, "model_analysis": False, **analysis}
+    return request
+
+
+@pytest.fixture(scope="module")
+def held_run(world, folders, held_sets, tmp_path_factory):
+    """One real ``bfunet`` run with the analysis, the figures and both held-out sets on."""
+    out = tmp_path_factory.mktemp("run_held") / "run"
+    asked = held_request(out, folders, held_sets, figures=True, model_analysis=True)
+    result = train_image_denoising(**asked)
+    return asked, result, read_json(result.summary_path)
+
+
+# -- the cells -----------------------------------------------------------------------------------------------------
+
+
+def hand_cell(model_path, files, dataset_index, sigma_255, size_multiple):
+    """The held-out cell of one set at one sigma, recomputed with numpy: pad, ``model.predict``, crop, PSNR."""
+    model = keras.models.load_model(model_path, compile=False)
+    noisy_psnr, restored_psnr = [], []
+    for image_index, path in enumerate(files):
+        clean = np.asarray(Image.open(path).convert("RGB"), dtype=np.float32) / 255.0
+        noisy = dd.add_noise(
+            tf.constant(clean), tf.constant(sigma_255 / 255.0, tf.float32),
+            dr.held_out_noise_seed(dr.HELD_OUT_SEED, dataset_index, image_index, sigma_255),
+            kind="additive", composite_ratio=0.5, clip=False,
+        ).numpy()
+        height, width = clean.shape[:2]
+        padded = np.pad(noisy, ((0, -height % size_multiple), (0, -width % size_multiple), (0, 0)), mode="reflect")
+        out = model.predict(padded[None], verbose=0)[0][:height, :width]
+        for target, image in ((noisy_psnr, noisy), (restored_psnr, out)):
+            target.append(10.0 * math.log10(1.0 / np.mean((image.astype(np.float64) - clean.astype(np.float64)) ** 2)))
+    return float(np.mean(noisy_psnr)), float(np.mean(restored_psnr))
+
+
+def test_the_held_out_cells_are_per_dataset_and_sigma_and_recomputed_by_hand(held_run, held_sets):
+    _, result, summary = held_run
+    held = summary["held_out"]
+    assert list(held) == ["alpha", "beta"], "one row per set, named as the entry says (a bare directory by its name)"
+    run_dir = Path(result.run_dir)
+    for index, name in enumerate(held):
+        files = files_of(held_sets[name])
+        assert list(held[name]) == ["15", "25", "50"]
+        for sigma in SIGMAS:
+            cell = held[name][dr.sigma_key(sigma)]
+            assert set(cell) == {"input_psnr", "best_psnr", "final_psnr", "n"} and cell["n"] == len(files)
+            hand_input, hand_final = hand_cell(run_dir / "final_model.keras", files, index, sigma, 8)
+            _, hand_best = hand_cell(run_dir / "best_model.keras", files, index, sigma, 8)
+            assert cell["input_psnr"] == pytest.approx(hand_input, abs=1e-4)
+            assert cell["final_psnr"] == pytest.approx(hand_final, abs=5e-3)
+            assert cell["best_psnr"] == pytest.approx(hand_best, abs=5e-3)
+            # The input of an unclipped additive run reads the textbook number within the sampling error of a few
+            # small images (about 0.04 dB each); stated bound 0.3 dB.
+            assert cell["input_psnr"] == pytest.approx(INPUT_PSNR[dr.sigma_key(sigma)], abs=0.3)
+    # A 2-epoch run's best epoch is its last: the two models are the same weights, so their cells agree; the
+    # test that they are scored on the same noise when they differ is `test_the_two_models_see_the_same_noisy_images`.
+    assert summary["selection"]["final_is_best"] is True
+    assert all(cell["best_psnr"] == cell["final_psnr"] for per_sigma in held.values() for cell in per_sigma.values())
+
+
+def test_the_held_out_block_names_its_protocol(held_run, held_sets):
+    _, _, summary = held_run
+    info = summary["held_out_info"]
+    assert info["sigmas_255"] == [15.0, 25.0, 50.0] and info["seed"] == dr.HELD_OUT_SEED
+    assert info["noise"] == {"kind": "additive", "composite_ratio": None, "clip": False}
+    assert info["size_multiple"] == 8 and info["channels"] == 3 and info["skipped_images"] == {}
+    assert info["memory_rule"] == {"gb_per_megapixel": dr.HELD_OUT_GB_PER_MEGAPIXEL, "budget_gb": dr.HELD_OUT_MEMORY_BUDGET_GB}
+    assert any("held_out[set][sigma]" in note and "no key averages sets" in note for note in summary["notes"])
+
+
+def test_no_key_of_the_held_out_blocks_averages_datasets(held_run):
+    _, _, summary = held_run
+
+    def keys(value):
+        if isinstance(value, dict):
+            for key, inner in value.items():
+                yield key
+                yield from keys(inner)
+
+    names = [key.lower() for block in ("held_out", "held_out_info") for key in keys(summary[block])]
+    assert not [name for name in names if any(word in name for word in ("mean", "average", "overall", "total", "pooled"))]
+    # And the control for the scan: the keys it read are the real ones.
+    assert {"alpha", "beta", "input_psnr", "best_psnr", "final_psnr", "n"} <= set(names)
+
+
+def test_a_run_without_test_dirs_says_held_out_is_skipped_with_the_reason(finished):
+    _, _, _, summary, _ = finished
+    assert summary["held_out"] == {
+        "status": "skipped", "reason": "data.test_dirs is not set: no held-out image was scored",
+        "sigmas_255": [15.0, 25.0, 50.0],
+    }
+    assert "held_out_info" not in summary
+    assert any("`held_out` is skipped" in note for note in summary["notes"])
+
+
+# -- the scoring functions, on fixtures with known answers ----------------------------------------------------------
+
+
+def spec_for(size_multiple=1, **changes):
+    values = dict(
+        sigmas_255=SIGMAS, noise_kind="additive", composite_ratio=0.5, clip=False, channels=3,
+        size_multiple=size_multiple,
+    )
+    values.update(changes)
+    return dr.HeldOutSpec(**values)
+
+
+def test_psnr_of_a_known_fixture_is_hand_computed(tmp_path):
+    files = files_of(write_sized(tmp_path / "flat", [(40, 40), (48, 24)], 0, value=0.5))
+    clean = np.asarray(Image.open(files[0]), dtype=np.float64) / 255.0
+    level = float(clean[0, 0, 0])
+    # A denoiser that returns black: the MSE is level^2, the PSNR -20 log10(level).
+    # (The decoder returns float32, so the level of the image is 128 / 255 to within 6e-8; the PSNR to 6e-7 dB.)
+    black = dr.score_held_out(lambda noisy: np.zeros_like(noisy), {"flat": files}, spec_for())
+    np.testing.assert_allclose(black.output_psnr["flat"]["25"], -20.0 * math.log10(level), atol=1e-5)
+    # A denoiser that is off by exactly 0.1 everywhere: MSE 0.01, PSNR 20 dB (float32 rounding is below 1e-4 dB).
+    off = dr.score_held_out(
+        lambda noisy: np.full_like(noisy, level + 0.1), {"flat": files}, spec_for())
+    np.testing.assert_allclose(off.output_psnr["flat"]["25"], 20.0, atol=1e-4)
+    cells = dr.pair_held_out(black, off)
+    assert cells["flat"]["25"]["best_psnr"] == pytest.approx(-20.0 * math.log10(level), abs=1e-5)
+    assert cells["flat"]["25"]["final_psnr"] == pytest.approx(20.0, abs=1e-4) and cells["flat"]["25"]["n"] == 2
+    # The identity restores nothing: its PSNR is the input's, cell for cell.
+    same = dr.score_held_out(lambda noisy: noisy, {"flat": files}, spec_for())
+    np.testing.assert_array_equal(same.output_psnr["flat"]["25"], same.input_psnr["flat"]["25"])
+
+
+def test_the_helper_psnr_matches_the_formula_on_a_batch():
+    clean = np.zeros((2, 4, 4, 1))
+    denoised = np.stack([np.full((4, 4, 1), 0.1), np.full((4, 4, 1), 0.5)])
+    np.testing.assert_allclose(dr.psnr_per_image(denoised, clean), [20.0, 10.0 * math.log10(4.0)], atol=1e-9)
+    assert dr.psnr_per_image(clean, clean)[0] == pytest.approx(120.0)  # the 1e-12 floor of the MSE
+
+
+def test_the_unclipped_input_psnr_reads_the_textbook_numbers_and_clip_moves_it(tmp_path):
+    files = files_of(write_sized(tmp_path / "gray", [(128, 128)] * 4, 0, value=0.5))
+    dark = files_of(write_sized(tmp_path / "dark", [(128, 128)] * 4, 0, value=0.1))
+    scored = dr.score_held_out(lambda noisy: noisy, {"gray": files}, spec_for())
+    for key, expected in INPUT_PSNR.items():
+        # 4 images of 49,152 samples: the PSNR of one is -10 log10(mean n^2), about 0.03 dB of sampling error; the bound
+        # is 0.1 dB, and the values the issue states (24.61, 20.17, 14.15) are -20 log10(sigma_255 / 255).
+        assert float(np.mean(scored.input_psnr["gray"][key])) == pytest.approx(expected, abs=0.1), key
+    # The control: on a dark image clipping at 0 removes the negative half of the noise, so the clipped run reads a
+    # different (higher) input PSNR, and the run's `clip` is what the held-out noise obeys.
+    free = dr.score_held_out(lambda noisy: noisy, {"dark": dark}, spec_for())
+    clipped = dr.score_held_out(lambda noisy: noisy, {"dark": dark}, spec_for(clip=True))
+    assert np.mean(clipped.input_psnr["dark"]["50"]) > np.mean(free.input_psnr["dark"]["50"]) + 1.0
+
+
+@pytest.mark.parametrize("kind", ["multiplicative", "composite"])
+def test_the_held_out_noise_follows_the_runs_noise_kind(tmp_path, kind):
+    files = files_of(write_sized(tmp_path / "gray", [(96, 96)] * 2, 0, value=0.5))
+    additive = dr.score_held_out(lambda noisy: noisy, {"gray": files}, spec_for())
+    other = dr.score_held_out(lambda noisy: noisy, {"gray": files}, spec_for(noise_kind=kind))
+    # On a 0.5 image multiplicative noise has half the additive amplitude (6.0 dB more input PSNR) and composite noise
+    # (ratio 0.5) has variance sigma^2 (0.25 + 0.25), half the additive power (3.0 dB more).
+    gain = float(np.mean(other.input_psnr["gray"]["25"] - additive.input_psnr["gray"]["25"]))
+    assert gain == pytest.approx({"multiplicative": 6.0, "composite": 3.0}[kind], abs=0.3)
+
+
+def test_the_two_models_see_the_same_noisy_images(tmp_path, monkeypatch):
+    files_a = files_of(write_sized(tmp_path / "a", [(40, 40), (33, 47)], 1))
+    files_b = files_of(write_sized(tmp_path / "b", [(36, 36)], 2))
+    seen = []
+    real = dr.add_noise
+
+    def spy(clean, sigma, seed, **kwargs):
+        seen.append((tuple(int(v) for v in seed.numpy()), round(float(sigma), 6), hash(clean.numpy().tobytes())))
+        return real(clean, sigma, seed, **kwargs)
+
+    monkeypatch.setattr(dr, "add_noise", spy)
+    sets = {"a": files_a, "b": files_b}
+    first = dr.score_held_out(lambda noisy: noisy * 0.9, sets, spec_for())
+    second = dr.score_held_out(lambda noisy: noisy * 0.5, sets, spec_for())
+    half = len(seen) // 2
+    assert len(seen) == 2 * 3 * 3 and seen[:half] == seen[half:], "every image at every sigma gets one seed, per model"
+    assert len({entry[0] for entry in seen[:half]}) == half, "and the seeds of the cells are all different"
+    cells = dr.pair_held_out(first, second)
+    assert cells["a"]["25"]["best_psnr"] != cells["a"]["25"]["final_psnr"], "different models, different outputs"
+    assert cells["a"]["25"]["input_psnr"] == pytest.approx(float(np.mean(first.input_psnr["a"]["25"])))
+    # The control: a second scoring on other noise is refused, not averaged into a difference that is part noise.
+    other_noise = dr.score_held_out(lambda noisy: noisy * 0.5, sets, spec_for(seed=dr.HELD_OUT_SEED + 1))
+    with pytest.raises(ValueError, match="different noisy inputs"):
+        dr.pair_held_out(first, other_noise)
+    # Nor is a scoring of other images.
+    fewer = dr.score_held_out(lambda noisy: noisy, {"a": files_a}, spec_for())
+    with pytest.raises(ValueError, match="same images"):
+        dr.pair_held_out(first, fewer)
+
+
+def test_the_seed_is_a_constant_of_the_image_place_never_of_the_run(tmp_path):
+    first = dr.held_out_noise_seed(dr.HELD_OUT_SEED, 2, 7, 25.0)
+    assert [int(v) for v in first.numpy()] == [dr.HELD_OUT_SEED, (2 * 10 ** 6 + 7) * 10 ** 6 + 25000]
+    assert dr.HELD_OUT_SEED != 42, "not the default `seed` of a run"
+    for bad in ((1000, 0, 25.0), (0, 10 ** 6, 25.0), (0, 0, 0.0), (0, 0, 256.0), (0, -1, 25.0)):
+        with pytest.raises(ValueError, match="out of range"):
+            dr.held_out_noise_seed(dr.HELD_OUT_SEED, *bad)
+
+
+def test_no_cell_averages_over_datasets_and_each_set_equals_its_own_scoring(tmp_path):
+    files_a = files_of(write_sized(tmp_path / "a", [(40, 40), (33, 47)], 3))
+    files_b = files_of(write_sized(tmp_path / "b", [(36, 36), (64, 48), (30, 30)], 4))
+    both = dr.pair_held_out(*(dr.score_held_out(fn, {"a": files_a, "b": files_b}, spec_for())
+                              for fn in (lambda noisy: noisy * 0.9, lambda noisy: noisy * 0.8)))
+    alone = dr.pair_held_out(*(dr.score_held_out(fn, {"a": files_a}, spec_for())
+                               for fn in (lambda noisy: noisy * 0.9, lambda noisy: noisy * 0.8)))
+    assert list(both) == ["a", "b"], "no pooled row"
+    assert both["a"] == alone["a"], "a set's cell does not depend on the other sets"
+    assert both["a"]["25"]["n"] == 2 and both["b"]["25"]["n"] == 3, "each cell counts its own images"
+    for key in ("15", "25", "50"):
+        assert both["a"][key]["final_psnr"] != both["b"][key]["final_psnr"]
+        pooled_input = (2 * both["a"][key]["input_psnr"] + 3 * both["b"][key]["input_psnr"]) / 5
+        assert both["a"][key]["input_psnr"] != pytest.approx(pooled_input, abs=1e-6)
+
+
+def test_an_image_past_the_memory_rule_is_named_and_skipped_in_both_passes(tmp_path):
+    small = write_sized(tmp_path / "set", [(40, 40)], 5)
+    big = write_sized(tmp_path / "big", [(100, 60)], 6)
+    files = files_of(small) + files_of(big)
+    # 40 x 40 is 0.00256 GB at 1.6 GB per Mpx; 100 x 60 padded to a multiple of 8 (104 x 64) is 0.0106 GB.
+    spec = spec_for(size_multiple=8, budget_gb=0.005)
+    assert dr.whole_image_peak_gb(40, 40, 8) == pytest.approx(0.00256) and dr.whole_image_peak_gb(100, 60, 8) == pytest.approx(0.0106496)
+    first = dr.score_held_out(lambda noisy: noisy, {"set": files}, spec)
+    second = dr.score_held_out(lambda noisy: noisy, {"set": files}, spec)
+    assert [row["path"] for row in first.skipped["set"]] == [files_of(big)[0]]
+    row = first.skipped["set"][0]
+    assert (row["height"], row["width"], row["budget_gb"]) == (100, 60, 0.005) and row["estimate_gb"] == 0.01
+    cells = dr.pair_held_out(first, second)
+    assert cells["set"]["25"]["n"] == 1, "the skipped image is not in the mean"
+    # With nothing left to score, the cell says so instead of a number.
+    nothing = dr.score_held_out(lambda noisy: noisy, {"set": files_of(big)}, spec)
+    assert dr.pair_held_out(nothing, nothing)["set"]["25"] == {
+        "input_psnr": None, "best_psnr": None, "final_psnr": None, "n": 0}
+    # The default rule: the largest DIV2K validation image (2040 x 2040, padded to 2048) is inside it, a 6 Mpx image is not.
+    assert dr.whole_image_peak_gb(2040, 2040, 16) < dr.HELD_OUT_MEMORY_BUDGET_GB < dr.whole_image_peak_gb(2448, 2448, 1)
+    assert dr.whole_image_size(files[0]) == (40, 40)
+
+
+def test_the_eager_whole_image_pass_equals_predict(tmp_path):
+    model = keras.Sequential([keras.layers.Input((None, None, 3)), keras.layers.Conv2D(3, 3, padding="same")])
+    noisy = np.random.default_rng(0).uniform(0, 1, (37, 45, 3)).astype("float32")
+    eager = dr.denoise_whole_image(model, noisy, 8, eager=True)
+    legacy = dr.denoise_whole_image(model, noisy, 8)
+    assert eager.shape == legacy.shape == (37, 45, 3)
+    np.testing.assert_allclose(eager, legacy, atol=1e-5)
+
+
+# -- the task's run ---------------------------------------------------------------------------------------------------
+
+
+def test_the_two_models_of_a_real_run_see_the_same_noisy_images(world, folders, held_sets, tmp_path, monkeypatch):
+    """A run whose best and final weights differ: the cells pair on the noise (`pair_held_out` would refuse otherwise)."""
+    seen = []
+    real = dr.add_noise
+
+    def spy(clean, sigma, seed, **kwargs):
+        seen.append((tuple(int(v) for v in seed.numpy()), round(float(sigma), 6)))
+        return real(clean, sigma, seed, **kwargs)
+
+    monkeypatch.setattr(dr, "add_noise", spy)
+    # The final model is made unlike the best one (its weights halved after the shared finalisation has saved and
+    # reloaded them), because a 2-epoch run's best epoch is its last; the cells must still pair on the noise.
+    finalize = classification_run.finalize_last_epoch
+
+    def finalize_then_change(model, *args, **kwargs):
+        returned = finalize(model, *args, **kwargs)
+        model.set_weights([0.5 * weight for weight in model.get_weights()])
+        return returned
+
+    monkeypatch.setattr(classification_run, "finalize_last_epoch", finalize_then_change)
+    result = train_image_denoising(**held_request(tmp_path / "run", folders, held_sets, family="bfcnn"))
+    summary = read_json(result.summary_path)
+    images = len(files_of(held_sets["alpha"])) + len(files_of(held_sets["beta"]))
+    half = images * len(SIGMAS)
+    assert len(seen) == 2 * half and seen[:half] == seen[half:]
+    cell = summary["held_out"]["alpha"]["25"]
+    assert cell["best_psnr"] != cell["final_psnr"], "the control: the two models differ, the noise they saw did not"
+    assert all(cell["input_psnr"] is not None for per_sigma in summary["held_out"].values() for cell in per_sigma.values())
+
+
+def test_the_task_analysis_has_no_calibration_where_the_control_through_analysis_config_for_has_an_ece(
+    world, folders, tmp_path
+):
+    from dl_techniques.models.vision.bias_free_denoisers.bfcnn import create_bfcnn_variant
+    from train.common import evaluation
+
+    config = config_of(tmp_path / "unused", folders, "bfcnn")
+    model = create_bfcnn_variant("tiny", input_shape=(None, None, 3))
+    rng = np.random.default_rng(0)
+    x = rng.uniform(0, 1, (8, SIZE, SIZE, 3)).astype("float32")
+    labels = rng.integers(0, 3, (8, SIZE, SIZE))
+    history = keras.callbacks.History()
+    history.history = {"loss": [1.0, 0.5], "val_loss": [1.1, 0.6]}
+    task = ImageDenoisingTrainer(config).run_analysis(config, model, (x, labels), history, "task", str(tmp_path / "task"))
+    assert task is not None and task.calibration_metrics == {} and not task.analysis_failures
+    assert task.weight_stats and task.spectral_summary_per_model
+    assert not (tmp_path / "task" / "model_analysis" / "summary_dashboard.png").exists()
+    # The control, on the same model and data: the rank rule's configuration reads the image as class probabilities and
+    # produces an ECE (a number about nothing a denoiser is).
+    control = evaluation.run_model_analysis(
+        model, (x, labels), history, "control", str(tmp_path / "control"),
+        config=evaluation.analysis_config_for(model, sample=x[:1], random_state=0),
+    )
+    assert isinstance(control.calibration_metrics["control"]["ece"], float)
+    assert config.analysis_args.model_analysis is True
+
+
+def test_the_analysis_block_of_a_run_is_data_free_with_no_ece(held_run):
+    _, result, summary = held_run
+    assert summary["analyzer"]["status"] == "ok" and summary["analyzer"]["analyzers"] == ["weights", "spectral"]
+    assert "ece" not in summary and "ece" not in summary["visualizations"]
+    results = read_json(Path(result.run_dir) / "model_analysis" / "analysis_results.json")
+    assert results["calibration_metrics"] == {} and results["model_metrics"] == {}
+    assert results["weight_stats"] and results["spectral_summary_per_model"]
+
+
+def test_the_figures_switch_on_writes_the_triptychs_the_sigma_panel_and_the_whiteness(held_run):
+    _, result, summary = held_run
+    visualizations = Path(result.run_dir) / "visualizations"
+    names = sorted(path.name for path in visualizations.iterdir())
+    assert names == [
+        "epoch_001_triptych.png", "epoch_002_triptych.png", "psnr_vs_sigma.png", "residual_whiteness.png",
+        "training_dashboard.png",
+    ]
+    assert summary["visualizations"] == {
+        "files": ["psnr_vs_sigma.png", "residual_whiteness.png"], "failed": [], "skipped": False, "not_drawn": {},
+    }
+    for name in names:
+        assert (visualizations / name).stat().st_size > 2000, name
+
+
+def test_the_figures_switch_off_writes_none_of_the_tasks_figures_for_every_family(finished):
+    _, _, finished_result, finished_summary, _ = finished
+    left = [path.name for path in (Path(finished_result.run_dir) / "visualizations").glob("*")]
+    assert not [name for name in left if "triptych" in name or name in ("psnr_vs_sigma.png", "residual_whiteness.png")]
+    assert finished_summary["visualizations"] == {"files": [], "failed": [], "skipped": True}
+
+
+def test_a_run_with_figures_on_and_no_test_dirs_draws_the_whiteness_and_names_the_missing_psnr_figure(
+    world, folders, tmp_path
+):
+    request = mapping(tmp_path / "run", folders, "bfcnn", epochs=1)
+    request["analysis_args"] = {"figures": True, "model_analysis": False}
+    result = train_image_denoising(**request)
+    visualizations = read_json(result.summary_path)["visualizations"]
+    assert visualizations["files"] == ["residual_whiteness.png"] and visualizations["failed"] == []
+    assert visualizations["not_drawn"] == {
+        "psnr_vs_sigma.png": "no held-out set was scored (data.test_dirs is not set)"}
+    assert (Path(result.run_dir) / "visualizations" / "epoch_001_triptych.png").is_file()
+
+
+# -- the figure functions -------------------------------------------------------------------------------------------
+
+
+def test_white_noise_reads_inside_its_band_and_a_correlated_residual_does_not():
+    rng = np.random.default_rng(0)
+    white = rng.standard_normal((8, 32, 32, 3))
+    read = dr.residual_autocorrelation(white, 8)
+    band = 1.96 / math.sqrt(32 * 32 * 24)
+    assert np.max(np.abs(read["horizontal"])) < 2.5 * band and np.max(np.abs(read["vertical"])) < 2.5 * band
+    assert list(read["lags"]) == list(range(1, 9)) and int(read["planes"]) == 24
+    smooth = np.cumsum(white, axis=2) / 4.0  # a horizontal random walk: strongly correlated along the width
+    structured = dr.residual_autocorrelation(smooth, 8)
+    assert structured["horizontal"][0] > 0.8 and structured["horizontal"][0] > 10 * abs(structured["vertical"][0])
+    for bad in (0, 32):
+        with pytest.raises(ValueError, match="max_lag"):
+            dr.residual_autocorrelation(white, bad)
+    with pytest.raises(ValueError, match="N, H, W, C"):
+        dr.residual_autocorrelation(white[0], 4)
+
+
+def test_the_end_figures_are_independent_and_a_failing_one_is_listed(tmp_path, monkeypatch):
+    cells = {name: {"15": {"input_psnr": 24.6, "best_psnr": 30.0, "final_psnr": 29.8, "n": 2},
+                    "50": {"input_psnr": 14.1, "best_psnr": 25.0, "final_psnr": 24.9, "n": 2}}
+             for name in ("a", "b", "c", "d", "e")}
+    residual = np.random.default_rng(1).standard_normal((4, 24, 24, 3))
+    record = dr.write_end_figures(tmp_path, cells=cells, residual=residual, title="t")
+    assert record == {"files": ["psnr_vs_sigma.png", "residual_whiteness.png"], "failed": [], "skipped": False, "not_drawn": {}}
+    with pytest.raises(ValueError, match="no dataset"):
+        dr.plot_psnr_vs_sigma({}, tmp_path / "x.png")
+    monkeypatch.setattr(dr, "plot_psnr_vs_sigma", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+    failed = dr.write_end_figures(tmp_path / "again", cells=cells, residual=residual)
+    assert failed["failed"] == ["psnr_vs_sigma.png"] and failed["files"] == ["residual_whiteness.png"]
+
+
+def test_the_triptych_is_four_columns_of_a_fixed_batch_and_reports_each_rows_psnr(tmp_path):
+    rng = np.random.default_rng(2)
+    clean = rng.uniform(0.2, 0.8, (3, 16, 16, 3)).astype("float32")
+    noisy = clean + 0.1
+    scores = dr.plot_triptych(noisy, clean, clean, tmp_path / "t.png", "title")
+    assert scores == pytest.approx([120.0, 120.0, 120.0]), "the denoised column is the clean image: the 1e-12 floor"
+    scores = dr.plot_triptych(noisy, noisy, clean, tmp_path / "u.png")
+    assert scores == pytest.approx([20.0] * 3, abs=1e-4)
+    assert (tmp_path / "t.png").stat().st_size > 1000
+    with pytest.raises(ValueError, match="three equal"):
+        dr.plot_triptych(noisy, clean[:2], clean, tmp_path / "v.png")
+
+
+def test_the_triptych_callback_draws_on_its_cadence_never_stops_a_run_and_lists_failures(tmp_path):
+    rng = np.random.default_rng(3)
+    clean = rng.uniform(0.2, 0.8, (2, 16, 16, 3)).astype("float32")
+    model = keras.Sequential([keras.layers.Input((16, 16, 3)), keras.layers.Conv2D(3, 1)])
+    callback = dr.DenoisingTriptychCallback(clean + 0.1, clean, tmp_path / "figs", "run")
+    callback.set_model(model)
+    callback.set_params({"epochs": 40})  # a figure every 2 epochs
+    for epoch in range(5):
+        callback.on_epoch_end(epoch, {"val_psnr": 20.0 + epoch})
+    callback.on_train_end()
+    assert callback.written == ["epoch_001_triptych.png", "epoch_002_triptych.png", "epoch_004_triptych.png",
+                                "epoch_005_triptych.png"] and callback.failed == {}
+    assert sorted(path.name for path in (tmp_path / "figs").iterdir()) == sorted(callback.written)
+    class Broken:
+        def __call__(self, *args, **kwargs):
+            raise RuntimeError("the model cannot predict")
+
+    broken = dr.DenoisingTriptychCallback(clean + 0.1, clean, tmp_path / "broken")
+    broken.set_model(Broken())
+    broken.on_epoch_end(0, {})
+    assert list(broken.failed) == ["epoch_001_triptych.png"] and broken.written == []
+    with pytest.raises(ValueError, match="equal, non-zero"):
+        dr.DenoisingTriptychCallback(clean, clean[:1], tmp_path)
+
+
+# -- data.test_dirs ---------------------------------------------------------------------------------------------------
+
+
+def test_a_test_dirs_entry_is_a_directory_or_name_equals_directory():
+    assert dargs.split_test_dir("/data/kodak24") == ("kodak24", "/data/kodak24")
+    assert dargs.split_test_dir("/data/CBSD68/original/") == ("original", "/data/CBSD68/original/")
+    assert dargs.split_test_dir("cbsd68=/data/CBSD68/original") == ("cbsd68", "/data/CBSD68/original")
+    assert dargs.split_test_dir("/data/a=b/set") == ("set", "/data/a=b/set"), "an '=' in a parent's name is not a name"
+    assert dargs.split_test_dir("a=b=c") == ("a", "b=c")
+
+
+def data_with(tmp_path, **changes):
+    request = {"train_dirs": [str(tmp_path / "train")], "val_dirs": [str(tmp_path / "val")], **changes}
+    return validate(dargs.DenoisingData, request)
+
+
+@pytest.mark.parametrize(
+    "test_dirs, expected",
+    [
+        ([], "expected at least one directory or null"),
+        (["  "], "expected non-empty entries"),
+        (["x=/a", "x=/b"], "two held-out sets are named 'x'"),
+        (["status=/a"], "not be one of ['status', 'reason', 'sigmas_255']"),
+        (["bad name=/a"], "must start with a letter or digit"),
+        (["/a/set", "/b/set"], "two held-out sets are named 'set'"),
+        (["a=/data/x", "b=/data/x/inner"], "the same directory or one lies inside the other"),
+        (["a=%(train)s/inner"], "lies inside or around, train_dirs entry"),
+        (["a=%(val)s"], "lies inside or around, val_dirs entry"),
+        (["a="], "names no directory"),
+    ],
+)
+def test_test_dirs_refusals_name_the_key_and_the_reason(tmp_path, test_dirs, expected):
+    entries = [entry % {"train": str(tmp_path / "train"), "val": str(tmp_path / "val")} for entry in test_dirs]
+    with pytest.raises(ConfigValidationError) as raised:
+        data_with(tmp_path, test_dirs=entries)
+    message = "\n".join(raised.value.errors)
+    assert "data.test_dirs" in message or "'test_dirs'" in message
+    assert expected in message
+
+
+def test_test_dirs_defaults_to_nothing_and_a_yaml_file_anchors_only_the_directory(tmp_path):
+    assert data_with(tmp_path).test_dirs is None
+    (tmp_path / "data.yaml").write_text(
+        "train_dirs: [train]\nval_dirs: [val]\ntest_dirs: [held/kodak, 'cb=held/cbsd', '/abs/one']\n")
+    mapping_ = dargs.read_denoising_data_file(tmp_path / "data.yaml")
+    assert mapping_["test_dirs"] == [
+        str(tmp_path / "held/kodak"), f"cb={tmp_path / 'held/cbsd'}", "/abs/one"]
+    assert mapping_["train_dirs"] == [str(tmp_path / "train")]
+
+
+def test_held_out_sets_lists_without_a_tensorflow_op_and_names_the_failing_directory(tmp_path, held_sets):
+    data = data_with(tmp_path, test_dirs=[f"alpha={held_sets['alpha']}", str(held_sets["beta"])])
+    sets = dargs.held_out_sets(data)
+    assert list(sets) == ["alpha", "beta"] and [len(files) for files in sets.values()] == [3, 2]
+    assert dargs.held_out_sets(data_with(tmp_path)) == {}
+    with pytest.raises(ConfigError, match=r"data\.test_dirs.*is not a directory"):
+        dargs.held_out_sets(data_with(tmp_path, test_dirs=[str(tmp_path / "absent")]))
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(ConfigError, match=r"data\.test_dirs.*holds no images"):
+        dargs.held_out_sets(data_with(tmp_path, test_dirs=[str(empty)]))
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    (bad / "broken.png").write_bytes(b"this is not an image")
+    with pytest.raises(ConfigError, match=r"data\.test_dirs.*broken\.png"):
+        dargs.held_out_sets(data_with(tmp_path, test_dirs=[str(bad)]), channels=3)
+    assert dargs.held_out_sets(data_with(tmp_path, test_dirs=[str(bad)])) == {"bad": [str(bad / "broken.png")]}
+
+
+def test_a_held_out_file_that_is_also_a_train_file_is_refused_before_the_claim(world, folders, held_sets, tmp_path, capsys):
+    leaked = tmp_path / "leaky"
+    leaked.mkdir()
+    (leaked / "linked.png").symlink_to(next(iter(sorted(folders[0].glob("*.png")))))
+    out = tmp_path / "run"
+    request = held_request(out, folders, held_sets)
+    request["data"]["test_dirs"] = [f"leaky={leaked}"]
+    code = cli.main(["image_denoising", *flatten("", request, [])])
+    assert code == 2
+    message = capsys.readouterr().err
+    assert "data.test_dirs" in message and "also in data.train_dirs or data.val_dirs" in message
+    assert "i00.png" in message, "the file is named by its resolved path, the train file the link leads to"
+    assert not out.exists(), "refused before the run directory is claimed"
+    # The control: the same request with a clean directory starts (it stops at build_data, after config.json).
+    request["data"]["test_dirs"] = [f"alpha={held_sets['alpha']}"]
+    config = validate(ImageDenoisingConfig, request)
+    trainer = ImageDenoisingTrainer(config)
+    assert trainer.describe_data(config).dataset == "folder"
+
+
+def test_an_undecodable_held_out_file_is_named_before_fit(world, folders, held_sets, tmp_path, capsys):
+    broken = tmp_path / "broken_set"
+    broken.mkdir()
+    (broken / "bad.png").write_bytes(b"not an image")
+    out = tmp_path / "run"
+    request = held_request(out, folders, held_sets)
+    request["data"]["test_dirs"] = [f"broken={broken}"]
+    code = cli.main(["image_denoising", *flatten("", request, [])])
+    assert code == 2
+    message = capsys.readouterr().err
+    assert "data.test_dirs" in message and "bad.png" in message
+    nothing_was_trained(out)
+
+
+# -- the helpers that moved out of train.bfunet (D-017) -------------------------------------------------------------
+
+
+def test_the_moved_helpers_have_one_implementation_and_the_legacy_names_still_resolve():
+    for name, legacy in (("add_awgn", "add_awgn"), ("psnr_per_image", "psnr_per_image"),
+                         ("predict_denoised", "_predict_denoised"), ("denoise_whole_image", "_denoise_full")):
+        assert getattr(ev, legacy) is getattr(dr, name), name
+    assert ev.MAX_VAL is dr.MAX_VAL and dr.MAX_VAL == 1.0
+    for name in ("expected_noise_variance", "expected_input_psnr"):
+        assert getattr(bunet_common, name) is getattr(dr, name), name
+    # This module cannot import `train.bfunet` (layering), so the pixel domain is stated twice and held equal here.
+    assert (dr.DATA_MIN, dr.DATA_MAX) == (bunet_common.DATA_MIN, bunet_common.DATA_MAX) == (0.0, 1.0)
+
+
+def test_the_moved_helpers_return_the_legacy_numbers():
+    # Hand values: E[sigma^2] of U(0, 0.25) is 0.25^2 / 3; the mean input PSNR is -20/ln(10) (ln 0.25 - 1) = 20.727 dB
+    # (the number the data tests read as "about 20.73").
+    assert dr.expected_noise_variance(0.0, 0.25) == pytest.approx(0.25 ** 2 / 3)
+    assert dr.expected_noise_variance(0.25, 0.0) == pytest.approx(0.25 ** 2 / 3), "bounds in either order"
+    assert dr.expected_input_psnr(0.0, 0.25) == pytest.approx(20.727089, abs=1e-5)
+    assert dr.expected_input_psnr(0.1, 0.1) == pytest.approx(20.0, abs=1e-9) and math.isnan(dr.expected_input_psnr(0.0, 0.0))
+    rng = np.random.RandomState(5)
+    clean = np.full((2, 8, 8, 3), 0.5, np.float32)
+    noisy = dr.add_awgn(clean, 25 / 255, False, rng)
+    again = dr.add_awgn(clean, 25 / 255, False, np.random.RandomState(5))
+    np.testing.assert_array_equal(noisy, again)
+    assert noisy.dtype == np.float32 and float(np.std(noisy - clean)) == pytest.approx(25 / 255, rel=0.05)
+    assert float(dr.add_awgn(clean, 5.0, True, np.random.RandomState(1)).max()) <= 1.0
+    # Reflect-pad, one forward pass, crop: the identity "model" returns its (padded then cropped) input.
+    identity = keras.Sequential([keras.layers.Input((None, None, 3)), keras.layers.Identity()])
+    image = np.random.default_rng(4).uniform(0, 1, (21, 30, 3)).astype("float32")
+    np.testing.assert_array_equal(ev._denoise_full(identity, image, 16), image)
+    np.testing.assert_array_equal(dr.denoise_whole_image(identity, image, 16, eager=True), image)

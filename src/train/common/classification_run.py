@@ -357,6 +357,7 @@ def report_best_weights(
         run_analysis: Callable[..., Any], figures: bool = True,
         analysis_off_hint: str = "--no-model-analysis", name_failed_analyses: bool = False,
         eval_batch_size: int = EVAL_BATCH_SIZE,
+        read_status: Optional[Callable[[Path, str], Dict[str, Any]]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Write the figures and run the analyzer for the BEST (selected) weights.
 
@@ -387,6 +388,10 @@ def report_best_weights(
         :data:`~train.common.classification_data.EVAL_BATCH_SIZE`, the legacy value). The API
         passes ``analysis_args.eval_batch_size``: 256 images of a 224 px cliffordnet ask for
         18 GB, which is how the reporting of the ImageNet gate run died.
+    :param read_status: ``(run_dir, experiment_name) -> status`` reader of what the analyzer left on disk; ``None`` (the
+        default) is :func:`train.common.run_summary.read_analysis_status`, which reads ``model_metrics`` and so calls a
+        data-free analysis (weights and spectral only, which leaves ``model_metrics`` empty) "missing". A task that
+        runs the data-free configuration passes :func:`train.common.run_summary.read_data_free_analysis_status`.
     :return: ``(visualizations, analysis)``: the figure record (it carries ``ece``) and
         the analyzer status read back from disk, or the skipped status.
     """
@@ -401,7 +406,7 @@ def report_best_weights(
         visualizations = {"files": [], "ece": None, "failed": [], "skipped": True}
     if model_analysis:
         results = run_analysis(model, (data.x_fig, data.y_fig), history, experiment_name, str(run_dir))
-        analysis = run_summary.read_analysis_status(run_dir, experiment_name)
+        analysis = (run_summary.read_analysis_status if read_status is None else read_status)(run_dir, experiment_name)
         if name_failed_analyses:
             failed = run_summary.failed_analyses(results, experiment_name, run_dir)
             if failed:

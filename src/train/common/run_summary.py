@@ -431,6 +431,27 @@ def data_free_analysis_config() -> AnalysisConfig:
 DATA_FREE_ANALYSIS_BLAS_THREADS = 4
 
 
+def remove_empty_summary_dashboard(run_dir: Path, results: Any) -> Optional[str]:
+    """Delete the library's empty ``model_analysis/summary_dashboard.png`` of a data-free analysis; return its name.
+
+    :param results: what ``run_model_analysis`` returned (an ``AnalysisResults``).
+    :return: ``"summary_dashboard.png"`` when the file existed and was deleted, else ``None`` (no file, or one of the four
+        sections its panels read has data, in which case it is kept).
+    """
+    # DECISION plan-2026-09-19T224205-49c8bf80/D-027: the library always writes
+    # ``summary_dashboard.png`` and, with weights + spectral only, all four panels read "No ...
+    # data available" (194,788 B in every run). Delete THAT file, ours, in this run's own
+    # ``model_analysis/``, after an "ok" read-back, and say so in ``removed``, but (D-040) only
+    # while none of the four sections its panels read has data. Do NOT turn the analyzer's own
+    # dashboard off (library layout) and do NOT delete by pattern or by file name alone.
+    empty_dashboard = run_dir / "model_analysis" / "summary_dashboard.png"
+    if empty_dashboard.is_file() and not any(
+            (results.model_metrics, results.calibration_metrics, results.confidence_metrics, results.weight_pca)):
+        empty_dashboard.unlink()
+        return empty_dashboard.name
+    return None
+
+
 def run_data_free_analysis(
         model: keras.Model, sample: np.ndarray, labels: np.ndarray,
         history: "keras.callbacks.History", model_name: str, run_dir: Path, enabled: bool = True,
@@ -475,17 +496,10 @@ def run_data_free_analysis(
         block = read_data_free_analysis_status(run_dir, model_name)
         if results is None and block["status"] != "ok":
             block["error"] = f"run_model_analysis failed (its exception is in run.log); {block['error']}"
-        # DECISION plan-2026-09-19T224205-49c8bf80/D-027: the library always writes
-        # ``summary_dashboard.png`` and, with weights + spectral only, all four panels read "No ...
-        # data available" (194,788 B in every run). Delete THAT file, ours, in this run's own
-        # ``model_analysis/``, after an "ok" read-back, and say so in ``removed``, but (D-040) only
-        # while none of the four sections its panels read has data. Do NOT turn the analyzer's own
-        # dashboard off (library layout) and do NOT delete by pattern or by file name alone.
-        empty_dashboard = run_dir / "model_analysis" / "summary_dashboard.png"
-        if block["status"] == "ok" and empty_dashboard.is_file() and results is not None and not any(
-                (results.model_metrics, results.calibration_metrics, results.confidence_metrics, results.weight_pca)):
-            empty_dashboard.unlink()
-            block["removed"] = [empty_dashboard.name]
+        if block["status"] == "ok" and results is not None:
+            removed = remove_empty_summary_dashboard(run_dir, results)
+            if removed is not None:
+                block["removed"] = [removed]
     except Exception as e:  # noqa: BLE001 - the analysis must not fail a finished run
         logger.warning(f"Analyzer raised: {type(e).__name__}: {e}")
         block = {"status": "error", "analyzers": [], "error": f"{type(e).__name__}: {e}", "path": None}

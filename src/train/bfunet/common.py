@@ -30,6 +30,9 @@ from train.common import run_summary
 from train.common.args import resolved_run_dir
 from train.common.callbacks import EpochLogLine, LearningRateLogger
 from train.common.config_io import save_config_json
+# The two pure noise-floor helpers live with the denoising task's other run pieces (plan d483ffab D-017): one
+# implementation, imported here and by `eval_psnr_vs_noise`.
+from train.common.denoising_run import expected_input_psnr, expected_noise_variance  # noqa: F401
 from train.common.run_artifacts import attach_run_log, refuse_existing_run, write_summary_json
 from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
 from train.superpoint.homographic_adaptation import select_weighted_image_paths
@@ -449,46 +452,6 @@ def _denorm(img: np.ndarray) -> np.ndarray:
     ONE denormalizer so display call sites never inline their own conversion.
     """
     return np.clip(img, DATA_MIN, DATA_MAX)
-
-
-def expected_noise_variance(sigma_min: float, sigma_max: float) -> float:
-    """``E[sigma^2]`` for ``sigma ~ U(sigma_min, sigma_max)`` = ``(a^2 + ab + b^2)/3``.
-
-    This is the per-epoch NOISE FLOOR: the MSE a do-nothing identity denoiser would
-    score against the clean target. It is the natural difficulty normalizer for the
-    curriculum (the training noise fn draws a fresh ``sigma`` per image from exactly
-    this uniform range -- see ``make_curriculum_noise_fn``).
-
-    Slight over-estimate in practice: the pipeline clips the noisy patch to
-    ``[DATA_MIN, DATA_MAX]``, which removes a little noise energy near the boundaries.
-    So the reported denoising gain is a mild UNDER-estimate. Additive noise only.
-    """
-    a, b = float(sigma_min), float(sigma_max)
-    if b < a:
-        a, b = b, a
-    return (a * a + a * b + b * b) / 3.0
-
-
-def expected_input_psnr(sigma_min: float, sigma_max: float) -> float:
-    """Mean per-image PSNR (dB) of the NOISY INPUT for ``sigma ~ U(sigma_min, sigma_max)``.
-
-    Per-image PSNR at ``max_val=1`` is ``-20*log10(sigma)``, and ``PsnrMetric`` averages
-    per-image PSNR, so the reference is ``E[-20*log10(sigma)]``, NOT ``-20*log10(E[sigma])``
-    (Jensen -- the two differ). With ``E[ln s] = (b(ln b - 1) - a(ln a - 1)) / (b - a)``.
-
-    The ``a = 0`` case is finite even though a single ``sigma -> 0`` image has infinite
-    PSNR: the limit of ``a*ln(a)`` is 0, giving ``E[ln s] -> ln(b) - 1``.
-    """
-    a, b = float(sigma_min), float(sigma_max)
-    if b <= 0.0:
-        return float("nan")
-    if a <= 0.0:
-        mean_ln = float(np.log(b)) - 1.0
-    elif abs(b - a) < 1e-12:
-        mean_ln = float(np.log(a))
-    else:
-        mean_ln = (b * (np.log(b) - 1.0) - a * (np.log(a) - 1.0)) / (b - a)
-    return float(-20.0 / np.log(10.0) * mean_ln)
 
 
 def _ratio_or_nan(num: List[float], den: List[float]) -> List[float]:

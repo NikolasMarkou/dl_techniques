@@ -23,6 +23,15 @@ Interface contract
     :raises DataSourceError: as above, and for a file (compared by resolved path) in both a train
         and a validation directory (``key`` ``val_dirs``).
 
+``list_test_sets(named_dirs, train_pools=(), val_pools=())``
+    :param named_dirs: ``[(dataset name, directory), ...]``, the held-out sets of ``data.test_dirs``.
+    :param train_pools, val_pools: the file lists of :func:`list_sources`; when given, a held-out file (compared by
+        resolved path) that is also a train or a validation file is refused.
+    :return: ``{name: image files}`` in the order given, each listed as :func:`list_images` does (``key``
+        ``"test_dirs"``). The task passes the pools in ``describe_data``, before the run directory is claimed, and passes
+        none from ``build_data`` (the same listing a moment later; the check has been made).
+    :raises DataSourceError: as :func:`list_images`, and for the shared file (``key`` ``test_dirs``).
+
 ``select_train_files(pools, max_files, seed)``
     The files an epoch is made of. With ``max_files`` the directories weigh EQUALLY: each gets
     ``max_files // len(pools)`` files (the first ``max_files % len(pools)`` one more), drawn from its
@@ -232,6 +241,25 @@ def list_sources(train_dirs: Sequence[str], val_dirs: Sequence[str]) -> Tuple[Li
                         f"({_examples([repr(path) for path in shared], len(shared))}); a validation image "
                         "the model trained on says nothing about it")
     return train, val
+
+
+def list_test_sets(
+        named_dirs: Sequence[Tuple[str, str]], train_pools: Sequence[Sequence[str]] = (),
+        val_pools: Sequence[Sequence[str]] = (),
+) -> "dict[str, List[str]]":
+    """The files of every held-out set, refusing one that is also a train or validation file."""
+    sets = {name: list_images(directory, "test_dirs") for name, directory in named_dirs}
+    if train_pools or val_pools:
+        resolve = _resolver()
+        used = {resolve(path) for pool in (*train_pools, *val_pools) for path in pool}
+        for name, files in sets.items():
+            shared = sorted({resolve(path) for path in files} & used)
+            if shared:
+                raise DataSourceError(
+                    "test_dirs", f"held-out set {name!r} has {len(shared)} file(s) that are also in data.train_dirs or "
+                                 f"data.val_dirs ({_examples([repr(path) for path in shared], len(shared))}); a held-out "
+                                 "image the model trained or selected on says nothing about it")
+    return sets
 
 
 def select_train_files(pools: Sequence[Sequence[str]], max_files: Optional[int], seed: int) -> List[Entry]:

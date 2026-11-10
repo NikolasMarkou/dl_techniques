@@ -93,6 +93,12 @@ _OPTIONAL_OUTPUT = {
         ('on_epoch_end', 'Dashboard accumulation failed at epoch', 'self.epoch_times.append(time.perf_counter() -',
          'dashboard history'),
     ],
+    'train/common/denoising_run.py': [
+        ('_draw', 'Triptych', 'denoised = self.model(self.noisy, training=Fa',
+         'the per-epoch denoising triptych, recorded in failed (plan d483ffab step 10)'),
+        ('attempt', 'Visualization', 'draw()',
+         'a denoising end-of-run figure, recorded in failed (plan d483ffab step 10)'),
+    ],
     'train/common/evaluation.py': [
         ('run_model_analysis', 'Model analysis failed:', 'if isinstance(test_data[0], tf.data.Dataset):',
          'the analyzer report'),
@@ -550,6 +556,11 @@ def test_the_census_counts_are_pinned():
     (the table at 8b94188fd against HEAD, 50 rows against 48, exactly those two rows) and
     corrected the pin. No other count moved and no handler is unclassified.
 
+    Optional 59 -> 61 at plan-2026-11-10T095307-d483ffab step 10: ``train/common/denoising_run.py``, the
+    denoising task's per-epoch triptych callback (``_draw``, whose try body is one forward pass and one
+    figure) and its end-of-run figure writer (``attempt``, the segmentation figures' shape: a failed figure is
+    listed in ``failed``); neither try body calls ``fit``, ``evaluate`` or a save.
+
     Raises 8 -> 9 at plan-2026-10-31T180033-2faf890a step 25: ``train/common/segmentation_data.py``
     ``load_oxford_pet_arrays`` wraps ``tfds.load(..., download=False)`` in the legacy Pet loader's
     ``except Exception`` and re-raises a ``RuntimeError`` that names the cache directory (TFDS
@@ -559,8 +570,8 @@ def test_the_census_counts_are_pinned():
     counts = {kind: verdicts.count(kind)
               for kind in ("raises", "exits", "records", "optional", "exempt", None)}
     assert counts == {"raises": 9, "exits": 4, "records": 2,
-                      "optional": 59, "exempt": 48, None: 0}
-    assert sum(len(entries) for entries in _OPTIONAL_OUTPUT.values()) == 59
+                      "optional": 61, "exempt": 48, None: 0}
+    assert sum(len(entries) for entries in _OPTIONAL_OUTPUT.values()) == 61
     assert sum(len(entries) for entries in _EXEMPT.values()) == 48
 
 
