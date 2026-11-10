@@ -39,6 +39,7 @@ from train.qwen3_embeddings.common import (
     build_optimizer,
     embedding_steps_per_epoch,
 )
+from train.common.optimizer import refuse_a_dropped_weight_decay
 
 __all__ = ["build_parser", "main", "train_qwen3_embedding"]
 
@@ -77,6 +78,9 @@ def train_qwen3_embedding(
     :param config: Fully resolved configuration.
     :returns: `(model, history, results_dir)`.
     """
+    # Refused before the run directory, the data or the model exist: `build_optimizer` refuses too (the backstop),
+    # but it runs after this function has built the data, the model or the run directory (D-063, step 13.9.2).
+    refuse_a_dropped_weight_decay(config.optimizer_type, config.weight_decay, trainer="qwen3_embeddings.train_qwen3_embedding")
     logger.info("=" * 70)
     logger.info("Qwen3EmbeddingModel -- in-batch-negative InfoNCE on SYNTHETIC data")
     logger.info("WIRING RESULT ONLY: no pretrained weights, no IR corpus.")

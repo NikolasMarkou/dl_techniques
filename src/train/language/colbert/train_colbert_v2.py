@@ -75,6 +75,7 @@ from train.language.colbert.common import (
     build_model,
     steps_per_epoch_for,
 )
+from train.common.optimizer import refuse_a_dropped_weight_decay
 
 __all__ = [
     "V2_CLI_TO_CONFIG",
@@ -151,6 +152,9 @@ def train_colbert_v2(
         of truth for artifact paths.
     :rtype: Tuple[ColBERT, keras.callbacks.History, str]
     """
+    # Refused before the run directory, the data or the model exist: `build_optimizer` refuses too (the backstop),
+    # but it runs after this function has built the data, the model or the run directory (D-063, step 13.9.2).
+    refuse_a_dropped_weight_decay(config.optimizer_type, config.weight_decay, trainer="colbert.train_colbert_v2")
     logger.info("=" * 70)
     logger.info("ColBERT v2 -- KL distillation on SYNTHETIC data")
     logger.info(

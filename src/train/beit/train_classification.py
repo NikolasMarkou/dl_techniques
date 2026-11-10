@@ -60,6 +60,7 @@ from train.common.run_io import default_experiment_name, prepare_run_dir, save_t
 from train.beit.common import (
     build_optimizer,
 )
+from train.common.optimizer import refuse_a_dropped_weight_decay
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import (
     TransferReport,
@@ -333,6 +334,9 @@ def train_classification(config: TrainingConfig) -> Dict[str, Any]:
         ``run_dir``, ``transfer_report`` (``None`` without ``--pretrained-encoder``),
         ``history``.
     """
+    # Refused before the run directory, the data or the model exist: `build_optimizer` refuses too (the backstop),
+    # but it runs after this function has built the data, the model or the run directory (D-063, step 13.9.2).
+    refuse_a_dropped_weight_decay(config.optimizer_type, config.weight_decay, trainer="beit.train_classification")
     setup_gpu(config.gpu)
     set_seeds(config.seed)
 

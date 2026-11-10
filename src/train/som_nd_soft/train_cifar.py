@@ -609,6 +609,7 @@ def train_cifar_som_autoencoder(config: CIFARSOMConfig) -> keras.Model:
     callbacks, results_dir = create_callbacks(
         model_name=config.experiment_name,
         results_dir_prefix="cifar_softsom",
+        output_root=config.output_dir,
         monitor="val_loss",
         patience=20,
         use_lr_schedule=True,

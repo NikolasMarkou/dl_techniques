@@ -65,6 +65,7 @@ from train.language.colbert.common import (
     build_model,
     steps_per_epoch_for,
 )
+from train.common.optimizer import refuse_a_dropped_weight_decay
 
 __all__ = ["build_parser", "main", "train_colbert_v1"]
 
@@ -111,6 +112,9 @@ def train_colbert_v1(
         of truth for artifact paths.
     :rtype: Tuple[ColBERT, keras.callbacks.History, str]
     """
+    # Refused before the run directory, the data or the model exist: `build_optimizer` refuses too (the backstop),
+    # but it runs after this function has built the data, the model or the run directory (D-063, step 13.9.2).
+    refuse_a_dropped_weight_decay(config.optimizer_type, config.weight_decay, trainer="colbert.train_colbert_v1")
     logger.info("=" * 70)
     logger.info("ColBERT v1 -- pairwise softmax CE on SYNTHETIC data")
     logger.info("WIRING RESULT ONLY: no pretrained weights, no IR corpus.")

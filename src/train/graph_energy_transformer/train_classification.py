@@ -57,6 +57,7 @@ from train.common import (
 )
 from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
 from train.graph_energy_transformer.common import build_optimizer
+from train.common.optimizer import refuse_a_dropped_weight_decay
 from dl_techniques.utils.logger import logger
 from dl_techniques.datasets.graphs import build_tudataset_graph_dataset
 from dl_techniques.models.graph.graph_energy_transformer import create_graph_classifier
@@ -275,6 +276,9 @@ def train_classification(config: TrainingConfig) -> Dict[str, Any]:
         Dict with ``model``, ``best_val_accuracy``, ``first_loss``, ``final_loss``, ``run_dir``,
         ``num_classes``, ``jit_compile``, ``history``.
     """
+    # Refused before the run directory, the data or the model exist: `build_optimizer` refuses too (the backstop),
+    # but it runs after this function has built the data, the model or the run directory (D-063, step 13.9.2).
+    refuse_a_dropped_weight_decay(config.optimizer_type, config.weight_decay, trainer="graph_energy_transformer.train_classification")
     if config.mixed_precision:
         # The graph backbone replicates the image ET's variable_dtype fix (D-002), so a
         # mixed_float16 policy runs the ET block in float32 while the head stays fp16-safe.

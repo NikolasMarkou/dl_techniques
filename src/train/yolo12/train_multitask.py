@@ -586,7 +586,7 @@ def train_model(args: argparse.Namespace) -> None:
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     tasks_str = "_".join(task_config.get_task_names())
-    results_dir = f"results/yolov12_multitask_{args.scale}_{tasks_str}_{timestamp}"
+    results_dir = os.path.join(args.output_dir, f"yolov12_multitask_{args.scale}_{tasks_str}_{timestamp}")
     os.makedirs(results_dir, exist_ok=True)
     logger.info(f"Results will be saved to: {results_dir}")
 
@@ -993,6 +993,8 @@ def main():
 
     parser.add_argument('--no-evaluate', action='store_true')
     parser.add_argument('--run-eagerly', action='store_true')
+    parser.add_argument('--output-dir', type=str, default='results',
+                        help='Root under which the run directory yolov12_multitask_<scale>_<tasks>_<timestamp> is made')
     parser.add_argument('--seed', type=int, default=42,
                         help='Seed for Python, NumPy and Keras (train.common.set_seeds)')
 

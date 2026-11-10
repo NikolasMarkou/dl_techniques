@@ -92,6 +92,7 @@ from train.bit_diffusion.synthetic_data import (
     synthetic_records,
     validate_records,
 )
+from train.common.optimizer import refuse_a_dropped_weight_decay
 
 __all__ = [
     "CLI_TO_CONFIG",
@@ -714,6 +715,9 @@ def train_bit_diffusion(config: TrainingConfig) -> Tuple[DiTXA, Any, Path]:
     :return: The trained model, the ``fit()`` history, and the run directory.
     :rtype: Tuple[DiTXA, Any, Path]
     """
+    # Refused before the run directory, the data or the model exist: `build_optimizer` refuses too (the backstop),
+    # but it runs after this function has built the data, the model or the run directory (D-063, step 13.9.2).
+    refuse_a_dropped_weight_decay(config.optimizer_type, config.weight_decay, trainer="bit_diffusion.train_bit_diffusion")
     run_dir = prepare_run_dir(config, output_dir=resolved_run_dir(config))
     logger.info(
         "bit_diffusion run '%s' -> %s", config.experiment_name, run_dir

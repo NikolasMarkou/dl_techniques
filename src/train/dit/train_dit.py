@@ -782,6 +782,9 @@ def train_dit(config: TrainingConfig) -> Tuple[DiT, Any, Path]:
     :return: The trained model, the ``fit()`` history, and the run directory.
     :rtype: Tuple[DiT, Any, Path]
     """
+    # Refused before the run directory, the data or the model exist: `build_dit_optimizer` refuses too (the backstop),
+    # but it runs after this function has built the data, the model or the run directory (D-063, step 13.9.2).
+    refuse_a_dropped_weight_decay(config.optimizer_type, config.weight_decay, trainer="dit.train_dit")
     run_dir = prepare_run_dir(config, output_dir=resolved_run_dir(config))
     logger.info("dit run '%s' -> %s", config.experiment_name, run_dir)
 

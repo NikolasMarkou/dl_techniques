@@ -57,6 +57,7 @@ from train.beit.common import (
     build_optimizer,
     load_frozen_tokenizer,
 )
+from train.common.optimizer import refuse_a_dropped_weight_decay
 from dl_techniques.utils.logger import logger
 from dl_techniques.datasets.vision.beit_masking import (
     BEIT_MIN_MASK_PATCHES_PER_BLOCK,
@@ -259,6 +260,9 @@ def train_mim(config: TrainingConfig) -> Dict[str, Any]:
         Dict with ``model``, ``best_val_loss``, ``first_loss``, ``final_loss``,
         ``run_dir``, ``vocab_size``, ``patch_grid``, ``history``.
     """
+    # Refused before the run directory, the data or the model exist: `build_optimizer` refuses too (the backstop),
+    # but it runs after this function has built the data, the model or the run directory (D-063, step 13.9.2).
+    refuse_a_dropped_weight_decay(config.optimizer_type, config.weight_decay, trainer="beit.train_mim")
     setup_gpu(config.gpu)
     set_seeds(config.seed)
 

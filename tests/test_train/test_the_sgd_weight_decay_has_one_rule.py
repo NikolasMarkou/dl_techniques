@@ -19,6 +19,7 @@ What is pinned, each against a gradient and not against a spelling:
 import argparse
 import ast
 import importlib
+import inspect
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -181,7 +182,8 @@ def _shared_config(optimizer_type, decay):
 
 
 def test_the_shared_build_optimizer_refuses_what_it_would_drop_and_still_builds_adamw():
-    """Serves energy_transformer, beit, graph_energy_transformer, dino, colbert, qwen3_embeddings and mean_shift (D-049)."""
+    """Serves energy_transformer, beit, graph_energy_transformer, dino, colbert, qwen3_embeddings, bit_diffusion and mean_shift
+    (D-049); each of those trainers also refuses first, before its run directory (``test_a_refused_decay_leaves_nothing_behind``)."""
     with pytest.raises(ValueError, match="train.common.build_optimizer"):
         build_optimizer(_shared_config("sgd", 1e-4), steps_per_epoch=10)
     adamw = build_optimizer(_shared_config("adamw", 0.03), steps_per_epoch=10)
@@ -226,14 +228,13 @@ def _run_yolo12_coco(monkeypatch, out):
 
 
 def _run_yolo12_multitask(monkeypatch, out):
-    """``train_model`` writes to the cwd-relative ``results/yolov12_multitask_...`` (it has no output flag), so the cwd is
-    ``out``; ``main`` would turn the ValueError into ``sys.exit(1)``, so its training function is called."""
+    """``train_model`` makes ``<--output-dir>/yolov12_multitask_...``; ``main`` would turn the ValueError into
+    ``sys.exit(1)``, so its training function is called."""
     module = _trainer(monkeypatch, "train.yolo12.train_multitask")
     for name in ("create_dataset_splits", "create_model_and_loss"):
         monkeypatch.setattr(module, name, _reached(name))
-    monkeypatch.chdir(out)
     module.train_model(argparse.Namespace(optimizer="sgd", weight_decay=5e-4, tasks=["detection"], scale="n",
-                                          data_dir=str(out / "data"), patch_size=64, seed=0))
+                                          data_dir=str(out / "data"), patch_size=64, seed=0, output_dir=str(out)))
 
 
 def _run_som_cifar(monkeypatch, out):
@@ -243,7 +244,65 @@ def _run_som_cifar(monkeypatch, out):
     module.train_cifar_som_autoencoder(module.CIFARSOMConfig(optimizer_type="sgd", weight_decay=5e-4, output_dir=str(out)))
 
 
+def _run_cli(name, flags, spies, extra=lambda out: ()):
+    """Run ``name``'s ``main`` on ``extra(out)`` and ``flags`` followed by the output root, with ``spies`` (its data and model
+    factories) raising. ``flags`` ends with the trainer's output-root flag; a ``main`` without an ``argv`` reads ``sys.argv``."""
+    def run(monkeypatch, out):
+        module = _trainer(monkeypatch, name)
+        for spy in spies:
+            monkeypatch.setattr(module, spy, _reached(spy))
+        tokens = [*extra(out), *flags, str(out)]
+        if inspect.signature(module.main).parameters:
+            module.main(tokens)
+        else:
+            monkeypatch.setattr(sys, "argv", [name, *tokens])
+            module.main()
+    return run
+
+
+#: The CLI tokens of a refused run, by the spelling of the trainer's optimizer and output-root flags.
+_SGD_OUTPUT_DIR = ("--optimizer", "sgd", "--weight-decay", "5e-4", "--output-dir")
+_SGD_TYPE_OUTPUT_DIR = ("--optimizer-type", "sgd", "--weight-decay", "5e-4", "--output-dir")
+_SGD_TYPE_OUTPUT_ROOT = ("--optimizer-type", "sgd", "--weight-decay", "5e-4", "--output-root")
+
+
+def _a_tokenizer_checkpoint(out):
+    """beit MIM's config refuses a missing ``--tokenizer-checkpoint``; an empty file beside the output root passes that check
+    (``load_frozen_tokenizer``, which would read it, is a spy)."""
+    path = out.parent / "tokenizer.keras"
+    path.touch()
+    return "--tokenizer-checkpoint", str(path)
+
+#: Every trainer behind the shared ``train.common.optimizer.build_optimizer``, and dit (its own ``build_dit_optimizer``):
+#: both builders refuse, but only after the run directory or the data exist, so each trainer refuses first (step 13.9.2).
+#: mean_shift is the one other caller of the shared builder and is not here: its ``Recipe.for_epochs`` is the only recipe
+#: any entry builds, always adamw (pinned by ``tests/test_train/test_mean_shift/test_cells.py``), and no flag changes it.
+_SHARED_BUILDER_TRAINERS = [
+    ("train.beit.train_classification", _SGD_OUTPUT_DIR, ("build_datasets", "create_beit_classifier")),
+    ("train.beit.train_mim", _SGD_OUTPUT_DIR, ("load_frozen_tokenizer", "build_datasets", "create_beit_mim"),
+     _a_tokenizer_checkpoint),
+    ("train.beit.train_tokenizer", _SGD_OUTPUT_DIR, ("build_datasets", "build_tokenizer")),
+    ("train.energy_transformer.train_classification", _SGD_OUTPUT_DIR,
+     ("build_datasets", "create_energy_transformer_classifier")),
+    ("train.energy_transformer.train_masked_completion", _SGD_OUTPUT_DIR,
+     ("build_datasets", "create_energy_transformer_mim")),
+    ("train.graph_energy_transformer.train_anomaly", _SGD_OUTPUT_DIR, ("build_datasets", "create_graph_anomaly_detector")),
+    ("train.graph_energy_transformer.train_classification", _SGD_OUTPUT_DIR, ("build_datasets", "create_graph_classifier")),
+    ("train.dino.train_dino", _SGD_OUTPUT_DIR, ("build_dataset", "build_model_and_loss")),
+    ("train.bit_diffusion.train_bit_diffusion", _SGD_TYPE_OUTPUT_DIR, ("build_sde", "create_model", "create_datasets")),
+    ("train.dit.train_dit", _SGD_TYPE_OUTPUT_DIR, ("create_model", "create_datasets")),
+    ("train.language.colbert.train_colbert_v1", _SGD_TYPE_OUTPUT_ROOT, ("build_datasets", "build_model")),
+    ("train.language.colbert.train_colbert_v2", _SGD_TYPE_OUTPUT_ROOT, ("build_datasets", "build_model")),
+    ("train.qwen3_embeddings.train_qwen3_embedding", _SGD_TYPE_OUTPUT_ROOT,
+     ("build_embedding_datasets", "build_embedding_model")),
+    ("train.qwen3_embeddings.train_qwen3_reranker", _SGD_TYPE_OUTPUT_ROOT,
+     ("build_reranker_datasets", "build_reranker_model")),
+]
+
+
 @pytest.mark.parametrize("run", [
+    *[pytest.param(_run_cli(*row), id=row[0].rsplit(".", 2)[-2] + "_" + row[0].rsplit(".", 1)[-1])
+      for row in _SHARED_BUILDER_TRAINERS],
     pytest.param(_run_siamfc_family("train.siamfc.train_siamfc", "create_pair_dataset"), id="siamfc"),
     pytest.param(_run_siamfc_family("train.dasiamrpn.train_dasiamrpn", "create_pair_dataset"), id="dasiamrpn"),
     pytest.param(_run_siamfc_family("train.deepsort.train_deepsort", "load_split_arrays"), id="deepsort"),
@@ -319,15 +378,31 @@ def _assigned(fn) -> dict:
     return values
 
 
+def _receivers(node) -> set:
+    """``id`` of every expression under ``node`` that is only the object a field or an item is read from: ``config`` in
+    ``config.optimizer_type`` or ``args["optimizer"]``. A method's receiver is NOT one: in ``config.optimizer_type.lower()``
+    the value tested is ``config.optimizer_type`` itself."""
+    called = {id(n.func) for n in ast.walk(node) if isinstance(n, ast.Call)}
+    return {id(n.value) for n in ast.walk(node)
+            if isinstance(n, ast.Subscript) or (isinstance(n, ast.Attribute) and id(n) not in called)}
+
+
 def _expressions(nodes, values) -> set:
-    """Source text of every expression in ``nodes`` and in the value assigned to any name they read (one level)."""
+    """Source text of every value expression in ``nodes`` and in the value assigned to any name they read (one level),
+    without the objects those values are read from (:func:`_receivers`): a refusal handed ``config`` is handed no value
+    the gate tests, only the object it reads one from (review of step 13.9.1: ``refuse_a_dropped_weight_decay(config, ...)``
+    was credited because ``config`` appears in ``config.optimizer_type == "adamw"``)."""
     found = set()
     for node in nodes:
+        skip = _receivers(node)
         for n in ast.walk(node):
-            if isinstance(n, ast.expr):
-                found.add(ast.unparse(n))
+            if not isinstance(n, ast.expr) or id(n) in skip:
+                continue
+            found.add(ast.unparse(n))
             if isinstance(n, ast.Name):
-                found |= {ast.unparse(m) for value in values.get(n.id, ()) for m in ast.walk(value) if isinstance(m, ast.expr)}
+                for value in values.get(n.id, ()):
+                    inner = _receivers(value)
+                    found |= {ast.unparse(m) for m in ast.walk(value) if isinstance(m, ast.expr) and id(m) not in inner}
     return found
 
 
@@ -395,6 +470,7 @@ def _siamfc_gate_as(decay_entry: str) -> tuple:
     pytest.param(_siamfc_gate_as('None if config.optimizer_type != "adamw" else config.weight_decay'), id="mirrored_ifexp"),
     pytest.param(((SIAMFC_REFUSAL, SIAMFC_REFUSAL.replace("(config.optimizer_type,", '("adamw",')),), id="call_hardcoded_adamw"),
     pytest.param(((SIAMFC_REFUSAL, SIAMFC_REFUSAL.replace("config.weight_decay,", "0,")),), id="call_hardcoded_decay"),
+    pytest.param(((SIAMFC_REFUSAL, SIAMFC_REFUSAL.replace("(config.optimizer_type,", "(config,")),), id="call_handed_the_config"),
 ])
 def test_the_decay_gate_scan_fails_the_siamfc_mutants_that_survived_review_iter_2_pass2(edits):
     """The real trainer passes; each mutant of it (two survived the 13.9 guard, D-063) is caught."""
@@ -426,6 +502,24 @@ def test_the_decay_gate_scan_finds_a_planted_drop_and_skips_the_covered_shapes()
         == ["build"], "a refusal handed literals covers nothing"
     assert uncovered_decay_gates(refused.replace("(config.optimizer_type,", "(other.optimizer_type,")) == ["build"], \
         "a refusal handed another object's optimizer covers nothing"
+    # The optimizer argument is the VALUE the gate tests (or its one-assignment alias), not the object it reads one from.
+    assert uncovered_decay_gates(refused.replace("(config.optimizer_type,", "(config,")) == ["build"], \
+        "a refusal handed the config object covers nothing: config.optimizer_type is what the gate tests"
+    assert uncovered_decay_gates(refused.replace("config.weight_decay, trainer", "config, trainer")) == ["build"], \
+        "a refusal handed the config object as the decay covers nothing"
+    by_item = ("def build(args):\n    refuse_a_dropped_weight_decay(args, args['weight_decay'], trainer='t')\n"
+               "    if args['optimizer'] == 'adamw':\n        return {'weight_decay': args['weight_decay']}\n")
+    assert uncovered_decay_gates(by_item) == ["build"], "the mapping an item is read from is not the item"
+    assert uncovered_decay_gates(by_item.replace("(args, ", "(args['optimizer'], ")) == []
+    aliased_object = aliased.replace("    use_adamw = config.", "    cfg = config\n    use_adamw = cfg.").replace(
+        "(config.optimizer_type,", "(cfg.optimizer_type,")
+    assert uncovered_decay_gates(aliased_object) == []
+    assert uncovered_decay_gates(aliased_object.replace("(cfg.optimizer_type,", "(cfg,")) == ["build"], \
+        "an alias of the config object is still the object"
+    method_alias = ("def build(config):\n    opt = config.optimizer_type.lower()\n"
+                    "    refuse_a_dropped_weight_decay(opt, config.weight_decay, trainer='t')\n"
+                    "    if opt == 'adamw':\n        return {'weight_decay': config.weight_decay}\n")
+    assert uncovered_decay_gates(method_alias) == [], "a method's receiver is the value tested, and its alias names it"
 
 
 def test_no_trainer_gates_its_weight_decay_on_adamw_without_refusing_the_rest():

@@ -43,6 +43,7 @@ from train.energy_transformer.common import (
     build_optimizer,
     EnergyTraceCallback,
 )
+from train.common.optimizer import refuse_a_dropped_weight_decay
 from dl_techniques.utils.logger import logger
 from dl_techniques.datasets.vision.masked_patches import make_masked_patch_map_fn
 from dl_techniques.models.vision.energy_transformer import create_energy_transformer_mim
@@ -176,6 +177,9 @@ def train_masked_completion(config: TrainingConfig) -> Dict[str, Any]:
         Dict with ``model``, ``best_val_loss``, ``first_loss``, ``final_loss``, ``run_dir``,
         ``history``.
     """
+    # Refused before the run directory, the data or the model exist: `build_optimizer` refuses too (the backstop),
+    # but it runs after this function has built the data, the model or the run directory (D-063, step 13.9.2).
+    refuse_a_dropped_weight_decay(config.optimizer_type, config.weight_decay, trainer="energy_transformer.train_masked_completion")
     setup_gpu(config.gpu)
     set_seeds(config.seed)
 

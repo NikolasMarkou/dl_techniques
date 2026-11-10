@@ -252,6 +252,7 @@ from train.dino.knn_eval import (
     DEFAULT_KNN_TEMPERATURE,
     KNNEvalCallback,
 )
+from train.common.optimizer import refuse_a_dropped_weight_decay
 
 # ---------------------------------------------------------------------
 # constants
@@ -959,6 +960,9 @@ def train_dino(config: TrainingConfig) -> Dict[str, Any]:
         ``run_dir``, ``history`` and ``knn_test`` (the one post-training k-NN probe of the
         test split, ``None`` when the probe is off; also written to ``knn_test.json``).
     """
+    # Refused before the run directory, the data or the model exist: `build_optimizer` refuses too (the backstop),
+    # but it runs after this function has built the data, the model or the run directory (D-063, step 13.9.2).
+    refuse_a_dropped_weight_decay(config.optimizer_type, config.weight_decay, trainer="dino.train_dino")
     setup_gpu(config.gpu)
     set_seeds(config.seed)
 
