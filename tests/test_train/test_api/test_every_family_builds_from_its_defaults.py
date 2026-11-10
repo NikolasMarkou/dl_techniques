@@ -75,7 +75,20 @@ SEGMENTATION_VARIANTS = {
     "resnet_seg": VARIANTS["resnet"],
     "convnext_seg": VARIANTS["convnext_v1"],
 }
-ALL_VARIANTS = {**VARIANTS, **SEGMENTATION_VARIANTS}
+
+#: The denoising families (plan-2026-11-10T095307-d483ffab step 7: ``recipes.register_builtin_models`` registers
+#: them, so the registry-wide listings below hold 36 + 17 + 23 = 76 names). Four read the library's five-name tables
+#: (``BFCNN_CONFIGS``, ``BFUNET_CONFIGS``, ``CONVUNEXT_CONFIGS`` twice); ``scunet`` has the three of its own
+#: ``SCUNET_VARIANTS``. Their builds and refusals are in ``test_denoising_families.py``.
+DENOISING_VARIANTS = {
+    "bfcnn": ["base", "large", "small", "tiny", "xlarge"],
+    "bfunet": ["base", "large", "small", "tiny", "xlarge"],
+    "bfconvunext": ["base", "large", "small", "tiny", "xlarge"],
+    "convunext_biased": ["base", "large", "small", "tiny", "xlarge"],
+    "scunet": ["base", "small", "tiny"],
+}
+DENOISING = "image_denoising"
+ALL_VARIANTS = {**VARIANTS, **SEGMENTATION_VARIANTS, **DENOISING_VARIANTS}
 
 
 @pytest.fixture
@@ -102,10 +115,15 @@ def context(family, variant, dataset, image_size=32, num_classes=10):
 def test_the_listing_is_the_literal_variant_tables(builtin):
     assert sorted(builtin) == sorted(ALL_VARIANTS)
     expected = sorted(f"{f}/{v}" for f, names in ALL_VARIANTS.items() for v in names)
-    assert len(expected) == 53
+    assert len(expected) == 76
     assert registry.list_models() == expected
     for family, spec in builtin.items():
-        assert spec.tasks == ((SEGMENTATION,) if family in SEGMENTATION_VARIANTS else (TASK,)), family
+        if family in SEGMENTATION_VARIANTS:
+            assert spec.tasks == (SEGMENTATION,), family
+        elif family in DENOISING_VARIANTS:
+            assert spec.tasks == (DENOISING,), family
+        else:
+            assert spec.tasks == (TASK,), family
 
 
 def test_the_task_filter_keeps_every_family_of_the_task(builtin):
@@ -115,11 +133,16 @@ def test_the_task_filter_keeps_every_family_of_the_task(builtin):
     registry.register_task(
         registry.TaskSpec(SEGMENTATION, "x.y:Config", "x.y:run", "image segmentation")
     )
+    registry.register_task(
+        registry.TaskSpec(DENOISING, "x.y:Config", "x.y:run", "image denoising")
+    )
     classifiers = sorted(f"{f}/{v}" for f, names in VARIANTS.items() for v in names)
     segmenters = sorted(f"{f}/{v}" for f, names in SEGMENTATION_VARIANTS.items() for v in names)
+    denoisers = sorted(f"{f}/{v}" for f, names in DENOISING_VARIANTS.items() for v in names)
     assert registry.list_models(TASK) == classifiers
     assert registry.list_models(SEGMENTATION) == segmenters
-    assert sorted(classifiers + segmenters) == registry.list_models()
+    assert registry.list_models(DENOISING) == denoisers
+    assert sorted(classifiers + segmenters + denoisers) == registry.list_models()
     # Control: a family that lists another task drops out of the filter.
     other = dataclasses.replace(builtin["vit"], family="other_vit", tasks=("else",))
     registry.register_model(other)

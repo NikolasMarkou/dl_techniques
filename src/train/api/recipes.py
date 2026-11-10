@@ -9,8 +9,9 @@ legacy line it was read from.
 Interface contract
 ------------------
 ``register_builtin_models()``
-    Register the six classification families and the two segmentation ones
-    (:func:`train.api.segmentation_models.builtin_segmentation_models`) into
+    Register the six classification families, the four segmentation ones
+    (:func:`train.api.segmentation_models.builtin_segmentation_models`) and the five denoising ones
+    (:func:`train.api.denoising_models.builtin_denoising_models`) into
     :data:`train.api.registry.MODELS`. Idempotent: a family already registered is
     left alone. Imports no model code.
 
@@ -682,10 +683,11 @@ def builtin_models() -> Tuple[ModelSpec, ...]:
 
 def register_builtin_models() -> None:
     """Register the built-in families that are not registered yet; see the module contract."""
-    # Imported here: segmentation_models imports this module (``optim_recipe``,
+    # Imported here: segmentation_models and denoising_models import this module (``optim_recipe``,
     # ``merge_model_args``), so a module-scope import would be a cycle.
+    from .denoising_models import builtin_denoising_models
     from .segmentation_models import builtin_segmentation_models
 
-    for spec in (*builtin_models(), *builtin_segmentation_models()):
+    for spec in (*builtin_models(), *builtin_segmentation_models(), *builtin_denoising_models()):
         if spec.family not in registry.MODELS:
             registry.register_model(spec)

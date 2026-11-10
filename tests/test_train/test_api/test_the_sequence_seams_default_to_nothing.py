@@ -196,7 +196,10 @@ def test_the_known_properties_are_pinned():
 def test_a_spec_has_no_property_unless_it_names_one(world):
     assert spec().properties == ()
     assert registry.MODELS, "vacuity guard: the built-in families are registered"
-    assert {family: s.properties for family, s in registry.MODELS.items() if s.properties} == {}
+    # Step 7 (plan d483ffab): the three bias-free denoisers name the property; no classifier, segmenter or biased family does.
+    assert {family: s.properties for family, s in registry.MODELS.items() if s.properties} == {
+        "bfcnn": ("bias_free",), "bfunet": ("bias_free",), "bfconvunext": ("bias_free",),
+    }
 
 
 def test_a_known_property_is_accepted():

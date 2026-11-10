@@ -51,13 +51,15 @@ Interface contract
     is the variant's (3 for ``tiny`` and ``small``, 4 for ``base`` and ``large``, 5 for
     ``xlarge``) unless ``model_args`` sets it; 16 for AccUNet (four stride-2 pools).
 
-``check_image_size(spec, variant, model_args, image_size)``
+``check_image_size(spec, variant, model_args, image_size, key="transform_args.image_size")``
     :param spec: the family's :class:`~train.api.registry.ModelSpec`; it must have a ``stride``.
     :param variant: variant name.
     :param model_args: the caller's ``model_args`` (a ConvUNext ``depth`` changes the stride).
     :param image_size: an int (a square) or ``[height, width]``.
+    :param key: the dotted config key the refusal names; the denoising task passes
+        ``transform_args.patch_size`` (its patches are the sizes a model sees).
     :return: ``(height, width)``.
-    :raises ConfigError: naming ``transform_args.image_size``, the side, the stride and the two
+    :raises ConfigError: naming ``key``, the side, the stride and the two
         nearest sizes that satisfy it; also for a value that is not an int or a pair of ints
         above zero.
     :raises ValueError: when ``spec`` has no ``stride`` (a classifier was passed: a bug in the
@@ -112,7 +114,8 @@ Interface contract
     :param model: a loaded functional model.
     :return: the variant-table keys the model's own layers show, or ``None`` when it holds no layer of
         that family. ConvUNext: ``depth`` (the count of ``DownsampleAndSkip``), ``initial_filters`` (the
-        width of ``ConvStem``), ``blocks_per_level`` (the ConvNeXt blocks over ``2 * depth + 1``, the
+        width of ``ConvStem``, or of the first ConvNeXt block when the model has the Gabor stem and so no
+        ``ConvStem``: the denoising families), ``blocks_per_level`` (the ConvNeXt blocks over ``2 * depth + 1``, the
         blocks of both paths and the bottleneck) and ``convnext_version`` (``v1`` or ``v2``, from the
         block class); ``drop_path_rate`` is not shown by a layer and is not checked. AccUNet:
         ``base_filters`` and ``mlfc_iterations`` from the ``AccUNet`` layer's config. Nothing is rebuilt
@@ -499,12 +502,18 @@ def observe_convunext(model: Any) -> Optional[Dict[str, Any]]:
     # Do NOT rebuild the variant and compare weight shapes (a `model_args` key outside the table,
     # `kernel_size` say, changes the shapes: D-032's failure) and do NOT compare `model.name`
     # (`model_args.model_name` renames it). Read only keys a layer shows and a record would carry.
-    classes = collections.Counter(type(layer).__name__ for layer in _layers_of(model))
-    if not classes["DownsampleAndSkip"] or not classes["ConvStem"]:
-        return None
-    stem = next(layer for layer in _layers_of(model) if type(layer).__name__ == "ConvStem")
-    depth = classes["DownsampleAndSkip"]
+    layers = list(_layers_of(model))
+    classes = collections.Counter(type(layer).__name__ for layer in layers)
     blocks = classes["ConvNextV1Block"] + classes["ConvNextV2Block"]
+    if not classes["DownsampleAndSkip"] or not blocks:
+        return None
+    # The width of level 0 is the ConvStem's; a model built with the Gabor stem (the denoising families'
+    # recipe) has a Conv2D bank and a 1x1 projection instead and no ConvStem, so its level-0 width is the one
+    # of its first ConvNeXt block, which sits on the stem's output (measured: 32 on both, tiny).
+    stem = next((layer for layer in layers if type(layer).__name__ == "ConvStem"), None)
+    if stem is None:
+        stem = next(layer for layer in layers if type(layer).__name__ in ("ConvNextV1Block", "ConvNextV2Block"))
+    depth = classes["DownsampleAndSkip"]
     observed: Dict[str, Any] = {
         "depth": depth,
         "initial_filters": int(stem.get_config()["filters"]),
@@ -572,6 +581,7 @@ def check_image_size(
     variant: str,
     model_args: Mapping[str, Any],
     image_size: Union[int, Sequence[int]],
+    key: str = "transform_args.image_size",
 ) -> Tuple[int, int]:
     """Return ``(height, width)`` or refuse a side the family cannot take; see the module contract."""
     # DECISION plan-2026-10-31T180033-2faf890a/D-072: the rule is `side % stride == 0` for EVERY
@@ -591,7 +601,7 @@ def check_image_size(
             below = side // stride * stride
             nearest = f"{below} or {below + stride}" if below else str(stride)
             raise ConfigError(
-                f"Invalid value for 'transform_args.image_size': the {name} {side} is not a multiple "
+                f"Invalid value for {key!r}: the {name} {side} is not a multiple "
                 f"of {stride}, which {spec.family}/{variant} needs so that its skip connections "
                 f"meet the upsampled maps; use {nearest}"
             )

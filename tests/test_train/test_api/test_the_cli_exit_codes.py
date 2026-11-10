@@ -313,9 +313,10 @@ def test_a_list_command_accepts_every_help_word(command, word, cwd):
         assert not any(
             line.startswith("error:") for line in result.stderr.splitlines()
         )
-        # 36 classifier variants and the 17 of the four segmentation families (D-077; plan 98b866fb step 2 added
-        # the 11 of resnet_seg and convnext_seg, which read the classifiers' own tables).
-        assert len(result.stdout.split()) == 53
+        # 36 classifier variants, the 17 of the four segmentation families (D-077; plan 98b866fb step 2 added
+        # the 11 of resnet_seg and convnext_seg, which read the classifiers' own tables) and the 23 of the five
+        # denoising families (plan d483ffab step 7: four with five variants each, scunet with three).
+        assert len(result.stdout.split()) == 76
 
 
 # A task that raises a DLTrainError of its own is a user-fixable failure, not a
