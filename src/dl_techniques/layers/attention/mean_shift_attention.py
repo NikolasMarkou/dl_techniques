@@ -102,14 +102,14 @@ class MeanShiftAttention(keras.layers.Layer):
         split heads [B, H, N, d]; vMF: L2-normalise per head
                        │
                        ▼   z = queries, keys0 = projected key tokens
-        ┌─ repeat num_steps times ─────────────────────────────┐
+        ┌─ repeat num_steps times ──────────────────────────────┐
         │  keys = z (blurring)  or  keys0 (non-blurring)        │
         │          │                                            │
         │          ▼                                            │
         │  logits = kernel_logits(z, keys, h)   [B, H, N, Nk]   │
         │          │       h: global / per_head / per_token     │
         │          ▼                                            │
-        │  shift to kept max, mask (1 = keep), softmax, dropout   │
+        │  shift to kept max, mask (1 = keep), softmax, dropout │
         │          │                                            │
         │          ▼                                            │
         │  z = (1 - eta) z + eta * weights @ keys               │
@@ -119,9 +119,9 @@ class MeanShiftAttention(keras.layers.Layer):
         zero the rows with no kept key; merge heads [B, N, H * d]
                                │
                                ▼
-        ┌─────────────────────────────┐
+        ┌──────────────────────────────┐
         │ output_projection: Dense(dim)│
-        └──────────────┬──────────────┘
+        └──────────────┬───────────────┘
                        ▼
         output [B, N, dim]   (+ last-step weights [B, H, N, Nk])
 

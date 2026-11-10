@@ -73,6 +73,10 @@ import functools
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .. import recipes, registry
 from ..args import (
     AnalysisArgs,
@@ -725,6 +729,7 @@ class ImageSegmentationTrainer(TaskTrainer):
             load_detail=load_detail or None,
         )
 
+# ---------------------------------------------------------------------
 
 def train_image_segmentation(
     *,
@@ -769,3 +774,5 @@ def train_image_segmentation(
     )
     config = validate(ImageSegmentationConfig, given)
     return ImageSegmentationTrainer(config).run()
+
+# ---------------------------------------------------------------------
