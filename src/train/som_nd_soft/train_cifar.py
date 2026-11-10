@@ -13,6 +13,7 @@ from typing import Tuple, Optional, Dict, Any, List
 from train.common import setup_gpu, set_seeds, create_base_argument_parser, create_callbacks, save_config_json
 from train.common.classification_data import SplitArrays, add_selection_arguments, load_split_arrays
 from train.common.run_io import default_experiment_name
+from train.common.optimizer import refuse_a_dropped_weight_decay
 from train.common.image_augment import as_hook, compose, photometric, random_affine, random_flip
 from dl_techniques.datasets.vision.augment_hook import Augment, with_hook
 from dl_techniques.utils.logger import logger
@@ -571,6 +572,9 @@ class ComprehensiveMonitoringCallback(keras.callbacks.Callback):
 
 def train_cifar_som_autoencoder(config: CIFARSOMConfig) -> keras.Model:
     """Train CIFAR autoencoder with SoftSOM topological bottleneck."""
+    # The CLI never sets optimizer_type (always adamw, the decay applied); a config built in code with another optimizer
+    # used to get Adam with the decay dropped. Refused before the data, the model or the run directory exist (D-063).
+    refuse_a_dropped_weight_decay(config.optimizer_type, config.weight_decay, trainer="som_nd_soft.train_cifar")
     logger.info(f"Starting training: {config.experiment_name}")
 
     arrays = load_cifar_data(config)
@@ -593,8 +597,8 @@ def train_cifar_som_autoencoder(config: CIFARSOMConfig) -> keras.Model:
     # than assigned onto the optimizer afterwards.
     optimizer_config = (
         {"type": "adamw", "weight_decay": config.weight_decay}
-        if config.optimizer_type == 'adamw'
-        else {"type": "adam"}
+        if config.optimizer_type.lower() == 'adamw'
+        else {"type": config.optimizer_type}
     )
     if config.gradient_clip_norm > 0:
         optimizer_config["gradient_clipping_by_norm_local"] = config.gradient_clip_norm

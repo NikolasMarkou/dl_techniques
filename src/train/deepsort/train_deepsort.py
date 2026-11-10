@@ -309,6 +309,8 @@ def train_deepsort(
         Dict with keys ``model``, ``best_val_loss``, ``rank1``, ``map``,
         ``epochs_run``, ``total_epochs`` and ``history``.
     """
+    # Refused before the run directory, the data or the model exist: a refused run leaves nothing in results/.
+    refuse_a_dropped_weight_decay(config.optimizer_type, config.weight_decay, trainer="deepsort.train_deepsort")
     setup_gpu(gpu_id)
     set_seeds(config.seed)
 
@@ -354,7 +356,6 @@ def train_deepsort(
             "alpha": 0.01,
         })
 
-    refuse_a_dropped_weight_decay(config.optimizer_type, config.weight_decay, trainer="deepsort.train_deepsort")
     opt_config: Dict[str, Any] = {
         "type": config.optimizer_type,
         "gradient_clipping_by_norm": config.gradient_clipping,

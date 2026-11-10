@@ -113,7 +113,7 @@ class TrainingConfig:
     optimizer_type: str = "adamw"  # Table 9: AdamW (decoupled weight decay)
     lr_schedule_type: str = "cosine_decay"  # cosine schedule with warmup (Table 9)
     warmup_epochs: int = 5
-    weight_decay: float = 1e-4  # only consumed when optimizer_type == 'adamw'
+    weight_decay: float = 1e-4  # AdamW only; a positive value beside another optimizer is refused (D-063)
     label_smoothing: float = 0.05  # Table 9; applied via one-hot + CategoricalCrossentropy
     # LOAD-BEARING: the backward pass composes S*T Jacobians through the unrolled energy descent
     # and the gradient norm spikes. Clip by global norm (same rationale as the image ET trainer).
@@ -454,7 +454,8 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
                         choices=["cosine_decay", "exponential_decay", "constant"])
     parser.add_argument("--warmup-epochs", type=int, default=5)
     parser.add_argument("--weight-decay", type=float, default=1e-4,
-                        help="Only consumed when --optimizer adamw.")
+                        help="AdamW decoupled weight decay; a positive value beside another "
+                             "--optimizer is refused (pass 0 for none).")
     parser.add_argument("--label-smoothing", type=float, default=0.05,
                         help="Applied via one-hot labels + CategoricalCrossentropy (Table 9).")
     parser.add_argument("--gradient-clipping", type=float, default=1.0,

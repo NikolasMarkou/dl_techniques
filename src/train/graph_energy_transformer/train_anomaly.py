@@ -94,7 +94,7 @@ class TrainingConfig:
     optimizer_type: str = "adam"  # Table 6: plain Adam (no decoupled weight decay)
     lr_schedule_type: str = "cosine_decay"
     warmup_epochs: int = 0
-    weight_decay: float = 0.0  # only consumed when optimizer_type == 'adamw'
+    weight_decay: float = 0.0  # AdamW only; a positive value beside another optimizer is refused (D-063)
     # LOAD-BEARING: the backward pass composes T Jacobians through the unrolled energy descent
     # and the gradient norm spikes. Clip by global norm (same rationale as the image ET trainer).
     gradient_clipping: float = 1.0
@@ -424,7 +424,8 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
                         choices=["cosine_decay", "exponential_decay", "constant"])
     parser.add_argument("--warmup-epochs", type=int, default=0)
     parser.add_argument("--weight-decay", type=float, default=0.0,
-                        help="Only consumed when --optimizer adamw.")
+                        help="AdamW decoupled weight decay; a positive value beside another "
+                             "--optimizer is refused (pass 0 for none).")
     parser.add_argument("--gradient-clipping", type=float, default=1.0,
                         help="Clip by global norm; the unrolled descent spikes the gradient norm.")
 

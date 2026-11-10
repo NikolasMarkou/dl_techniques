@@ -576,6 +576,8 @@ def create_callbacks(
 
 def train_model(args: argparse.Namespace) -> None:
     """Main training function for YOLOv12 multi-task with Named Outputs."""
+    # Refused before the run directory, the data or the model exist: a refused run leaves nothing in results/.
+    refuse_a_dropped_weight_decay(args.optimizer, args.weight_decay, trainer="yolo12.train_multitask")
     logger.info("Starting YOLOv12 Multi-Task training")
     logger.info(f"Arguments: {vars(args)}")
 
@@ -622,7 +624,6 @@ def train_model(args: argparse.Namespace) -> None:
     model.summary(print_fn=logger.info)
     logger.info(f"Total parameters: {model.count_params():,}")
 
-    refuse_a_dropped_weight_decay(args.optimizer, args.weight_decay, trainer="yolo12.train_multitask")
     if args.optimizer.lower() == 'adamw':
         optimizer = keras.optimizers.AdamW(
             learning_rate=args.learning_rate, weight_decay=args.weight_decay, clipnorm=1.0

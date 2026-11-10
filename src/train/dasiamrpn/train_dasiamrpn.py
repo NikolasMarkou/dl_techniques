@@ -264,6 +264,8 @@ def train_dasiamrpn(
         Dict with keys ``model``, ``best_val_loss``, ``epochs_run``,
         ``total_epochs`` and ``history``.
     """
+    # Refused before the run directory, the data or the model exist: a refused run leaves nothing in results/.
+    refuse_a_dropped_weight_decay(config.optimizer_type, config.weight_decay, trainer="dasiamrpn.train_dasiamrpn")
     setup_gpu(gpu_id)
     set_seeds(config.seed)
 
@@ -308,7 +310,6 @@ def train_dasiamrpn(
         })
 
     use_adamw = config.optimizer_type.lower() == "adamw"
-    refuse_a_dropped_weight_decay(config.optimizer_type, config.weight_decay, trainer="dasiamrpn.train_dasiamrpn")
     opt_config: Dict[str, Any] = {
         "type": config.optimizer_type,
         "gradient_clipping_by_norm": config.gradient_clipping,

@@ -517,6 +517,8 @@ def main():
     parser.add_argument('--gpu', type=int, default=None, help='GPU device index')
 
     args = parser.parse_args()
+    # Refused before the run directory, the data or the model exist: a refused run leaves nothing in results/.
+    refuse_a_dropped_weight_decay(args.optimizer, args.weight_decay, trainer="yolo12.train_coco")
 
     if not check_dependencies():
         return
@@ -590,7 +592,6 @@ def main():
     model.summary(print_fn=logger.info)
     logger.info(f"Total parameters: {model.count_params():,}")
 
-    refuse_a_dropped_weight_decay(args.optimizer, args.weight_decay, trainer="yolo12.train_coco")
     if args.optimizer.lower() == 'adamw':
         optimizer = keras.optimizers.AdamW(
             learning_rate=lr_schedule, weight_decay=args.weight_decay, clipnorm=1.0

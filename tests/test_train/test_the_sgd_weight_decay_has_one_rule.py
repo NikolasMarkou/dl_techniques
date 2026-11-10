@@ -16,7 +16,10 @@ What is pinned, each against a gradient and not against a spelling:
   the shared function itself (the guard's own positive control is a planted source).
 """
 
+import argparse
 import ast
+import importlib
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -187,13 +190,91 @@ def test_the_shared_build_optimizer_refuses_what_it_would_drop_and_still_builds_
     assert type(sgd).__name__ == "SGD" and not sgd.weight_decay
 
 
+class Reached(Exception):
+    """Raised by a data or model factory spy: the trainer got past the point where the refusal must already have fired."""
+
+
+def _reached(name):
+    def spy(*args, **kwargs):
+        raise Reached(name)
+    return spy
+
+
+def _trainer(monkeypatch, name):
+    """Import the trainer module with its ``setup_gpu`` stubbed (the test sets no device)."""
+    module = importlib.import_module(name)
+    monkeypatch.setattr(module, "setup_gpu", lambda *a, **k: None)
+    return module
+
+
+def _run_siamfc_family(name, data_factory):
+    def run(monkeypatch, out):
+        module = _trainer(monkeypatch, name)
+        monkeypatch.setattr(module, data_factory, _reached(data_factory))
+        module.main(["--optimizer", "sgd", "--weight-decay", "5e-4", "--output-dir", str(out), "--experiment-name", "refused"])
+    return run
+
+
+def _run_yolo12_coco(monkeypatch, out):
+    """``--save-dir`` is the root under which ``main`` makes ``yolov12_<scale>_coco_pretrain_<timestamp>``."""
+    module = _trainer(monkeypatch, "train.yolo12.train_coco")
+    for name in ("COCODatasetBuilder", "create_coco_model_and_loss"):
+        monkeypatch.setattr(module, name, _reached(name))
+    monkeypatch.setattr(module, "check_dependencies", lambda: True)
+    monkeypatch.setattr(sys, "argv", ["train_coco", "--optimizer", "sgd", "--weight-decay", "5e-4", "--save-dir", str(out)])
+    module.main()
+
+
+def _run_yolo12_multitask(monkeypatch, out):
+    """``train_model`` writes to the cwd-relative ``results/yolov12_multitask_...`` (it has no output flag), so the cwd is
+    ``out``; ``main`` would turn the ValueError into ``sys.exit(1)``, so its training function is called."""
+    module = _trainer(monkeypatch, "train.yolo12.train_multitask")
+    for name in ("create_dataset_splits", "create_model_and_loss"):
+        monkeypatch.setattr(module, name, _reached(name))
+    monkeypatch.chdir(out)
+    module.train_model(argparse.Namespace(optimizer="sgd", weight_decay=5e-4, tasks=["detection"], scale="n",
+                                          data_dir=str(out / "data"), patch_size=64, seed=0))
+
+
+def _run_som_cifar(monkeypatch, out):
+    """No CLI flag picks the optimizer (always adamw); a config built in code could ask for another and lost its decay."""
+    module = _trainer(monkeypatch, "train.som_nd_soft.train_cifar")
+    monkeypatch.setattr(module, "load_cifar_data", _reached("load_cifar_data"))
+    module.train_cifar_som_autoencoder(module.CIFARSOMConfig(optimizer_type="sgd", weight_decay=5e-4, output_dir=str(out)))
+
+
+@pytest.mark.parametrize("run", [
+    pytest.param(_run_siamfc_family("train.siamfc.train_siamfc", "create_pair_dataset"), id="siamfc"),
+    pytest.param(_run_siamfc_family("train.dasiamrpn.train_dasiamrpn", "create_pair_dataset"), id="dasiamrpn"),
+    pytest.param(_run_siamfc_family("train.deepsort.train_deepsort", "load_split_arrays"), id="deepsort"),
+    pytest.param(_run_siamfc_family("train.mambalct.train_mambalct", "create_clip_dataset"), id="mambalct"),
+    pytest.param(_run_yolo12_coco, id="yolo12_train_coco"),
+    pytest.param(_run_yolo12_multitask, id="yolo12_train_multitask"),
+    pytest.param(_run_som_cifar, id="som_nd_soft_train_cifar"),
+])
+def test_a_refused_decay_leaves_nothing_behind(monkeypatch, tmp_path, run):
+    """``--optimizer sgd --weight-decay 5e-4`` is refused BEFORE the run directory, the data or the model exist (review-iter-2-pass2
+    NOTE 6: the refusal used to fire after ``prepare_run_dir`` and the model build, leaving a run directory in ``results/`` with a
+    config of a run that never happened). The output root is a fresh ``tmp_path`` directory, never the repo's ``results/``."""
+    out = tmp_path / "out"
+    out.mkdir()
+    try:
+        run(monkeypatch, out)
+        raised = None
+    except Exception as error:  # the type is asserted below, after the output root
+        raised = error
+    left = sorted(p.relative_to(out).as_posix() for p in out.rglob("*"))
+    assert not left, f"a refused run left {left} in its output root (raised {raised!r})"
+    assert isinstance(raised, ValueError) and "dropped without a word" in str(raised), f"expected the refusal, got {raised!r}"
+
+
 #: Functions that gate a weight decay on AdamW and are deliberately not covered by the refusal, with the reason.
 WAIVED_DECAY_GATES = {
     ("train/api/optim.py", "build_optimizer_and_schedule"):
         "the API hands an sgd decay to the MODEL as an L2 penalty (recipes._weight_decay_regularizer) and refuses it where a "
         "family builds none (segmentation_models.resolve_segmentation_args, D-047); the optimizer is given none on purpose",
 }
-_COVERING_CALLS = {"refuse_a_dropped_weight_decay", "sgd_weight_decay_regularizer"}
+_REFUSAL, _PENALTY = "refuse_a_dropped_weight_decay", "sgd_weight_decay_regularizer"
 
 
 def _mentions(nodes, needle):
@@ -208,32 +289,143 @@ def _mentions(nodes, needle):
 
 def _tests_for_adamw(test):
     return any((isinstance(n, ast.Name) and "adamw" in n.id.lower())
+               or (isinstance(n, ast.Attribute) and "adamw" in n.attr.lower())
                or (isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value.lower() == "adamw")
                for n in ast.walk(test))
 
 
+def _decay_gates(fn) -> list:
+    """``(gate, branch)`` of every ``if`` statement or conditional expression that tests for AdamW and carries ``weight_decay``
+    in exactly one branch, in either order: ``if adamw: <decay>``, ``if not adamw: ... else: <decay>``, ``wd if adamw else None``
+    and ``None if not adamw else wd``. ``branch`` is the side that carries the decay."""
+    gates = []
+    for node in ast.walk(fn):
+        if isinstance(node, (ast.If, ast.IfExp)) and _tests_for_adamw(node.test):
+            body, orelse = (node.body, node.orelse) if isinstance(node, ast.If) else ([node.body], [node.orelse])
+            in_body, in_else = _mentions(body, "weight_decay"), _mentions(orelse, "weight_decay")
+            if in_body != in_else:
+                gates.append((node, body if in_body else orelse))
+    return gates
+
+
+def _assigned(fn) -> dict:
+    """``name -> [value]`` of the plain assignments in ``fn`` (``use_adamw = config.optimizer_type.lower() == "adamw"``)."""
+    values = {}
+    for node in ast.walk(fn):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            for target in node.targets if isinstance(node, ast.Assign) else [node.target]:
+                if isinstance(target, ast.Name):
+                    values.setdefault(target.id, []).append(node.value)
+    return values
+
+
+def _expressions(nodes, values) -> set:
+    """Source text of every expression in ``nodes`` and in the value assigned to any name they read (one level)."""
+    found = set()
+    for node in nodes:
+        for n in ast.walk(node):
+            if isinstance(n, ast.expr):
+                found.add(ast.unparse(n))
+            if isinstance(n, ast.Name):
+                found |= {ast.unparse(m) for value in values.get(n.id, ()) for m in ast.walk(value) if isinstance(m, ast.expr)}
+    return found
+
+
+def _is_the_value_of(argument, nodes, values) -> bool:
+    """``argument`` reads the program (a literal such as ``"adamw"`` or ``0`` reads no name) and is, or names, an expression of
+    ``nodes``."""
+    if argument is None or not any(isinstance(n, ast.Name) for n in ast.walk(argument)):
+        return False
+    texts = {ast.unparse(argument)} | {ast.unparse(v) for v in values.get(getattr(argument, "id", None), ())}
+    return bool(texts & _expressions(nodes, values))
+
+
+def _argument(call, position, keyword):
+    if len(call.args) > position:
+        return call.args[position]
+    return next((k.value for k in call.keywords if k.arg == keyword), None)
+
+
+def _covers(call, gate, branch, values) -> bool:
+    """The refusal is handed the gate's OWN optimizer value (read in its test) and its OWN decay (read in the decay branch);
+    the sgd penalty is built from that decay. A call that names the function but is handed a literal, or another object's
+    value, covers nothing (the review-iter-2-pass2 mutant ``refuse_a_dropped_weight_decay("adamw", ...)`` survived that)."""
+    name = getattr(call.func, "id", None) or getattr(call.func, "attr", None)
+    if name == _PENALTY:
+        return _is_the_value_of(_argument(call, 0, "weight_decay"), branch, values)
+    return name == _REFUSAL and _is_the_value_of(_argument(call, 1, "weight_decay"), branch, values) and \
+        _is_the_value_of(_argument(call, 0, "optimizer_type"), [gate.test], values)
+
+
 def uncovered_decay_gates(source: str) -> list:
-    """Names of functions with the dropped-decay shape: ``if <adamw>:`` carries ``weight_decay`` and no other branch does,
-    in a function that neither refuses (``refuse_a_dropped_weight_decay``) nor builds the sgd penalty."""
+    """Names of functions with the dropped-decay shape (see :func:`_decay_gates`) where some gate is neither refused
+    (``refuse_a_dropped_weight_decay`` handed that gate's optimizer value and decay) nor turned into the sgd penalty."""
     found = []
-    for fn in [n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.FunctionDef)]:
-        shaped = any(isinstance(n, ast.If) and _tests_for_adamw(n.test) and _mentions(n.body, "weight_decay")
-                     and not _mentions(n.orelse, "weight_decay") for n in ast.walk(fn))
-        calls = {getattr(c.func, "id", None) or getattr(c.func, "attr", None) for c in ast.walk(fn) if isinstance(c, ast.Call)}
-        if shaped and not (calls & _COVERING_CALLS):
+    for fn in [n for n in ast.walk(ast.parse(source)) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        values = _assigned(fn)
+        calls = [c for c in ast.walk(fn) if isinstance(c, ast.Call)]
+        if any(not any(_covers(c, gate, branch, values) for c in calls) for gate, branch in _decay_gates(fn)):
             found.append(fn.name)
     return found
+
+
+SIAMFC = SRC / "train/siamfc/train_siamfc.py"
+SIAMFC_REFUSAL = 'refuse_a_dropped_weight_decay(config.optimizer_type, config.weight_decay, trainer="siamfc.train_siamfc")'
+SIAMFC_GATE = ('        "gradient_clipping_by_norm": config.gradient_clipping,\n    }\n    if use_adamw:\n'
+               '        opt_config["weight_decay"] = config.weight_decay\n    elif')
+
+
+def _mutated(text: str, *edits) -> str:
+    for old, new in edits:
+        assert text.count(old) == 1, f"the planted mutant no longer matches the trainer: {old[:70]!r}"
+        text = text.replace(old, new)
+    return text
+
+
+def _siamfc_gate_as(decay_entry: str) -> tuple:
+    """The two edits of review-iter-2-pass2 mutant ``139_siamfc_ifexp_no_call``: the refusal deleted, the decay moved into
+    the dict as a conditional expression."""
+    return ((f"    {SIAMFC_REFUSAL}\n", ""),
+            (SIAMFC_GATE, SIAMFC_GATE.replace('    }\n    if use_adamw:\n        opt_config["weight_decay"] = config.weight_decay\n',
+                                              f'        "weight_decay": {decay_entry},\n    }}\n    if False:\n        pass\n')))
+
+
+@pytest.mark.parametrize("edits", [
+    pytest.param(_siamfc_gate_as('config.weight_decay if config.optimizer_type == "adamw" else None'), id="ifexp_no_call"),
+    pytest.param(_siamfc_gate_as('None if config.optimizer_type != "adamw" else config.weight_decay'), id="mirrored_ifexp"),
+    pytest.param(((SIAMFC_REFUSAL, SIAMFC_REFUSAL.replace("(config.optimizer_type,", '("adamw",')),), id="call_hardcoded_adamw"),
+    pytest.param(((SIAMFC_REFUSAL, SIAMFC_REFUSAL.replace("config.weight_decay,", "0,")),), id="call_hardcoded_decay"),
+])
+def test_the_decay_gate_scan_fails_the_siamfc_mutants_that_survived_review_iter_2_pass2(edits):
+    """The real trainer passes; each mutant of it (two survived the 13.9 guard, D-063) is caught."""
+    source = SIAMFC.read_text(encoding="utf-8")
+    assert uncovered_decay_gates(source) == []
+    assert uncovered_decay_gates(_mutated(source, *edits)) == ["train_siamfc"]
 
 
 def test_the_decay_gate_scan_finds_a_planted_drop_and_skips_the_covered_shapes():
     planted = ("def build(config):\n    cfg = {}\n    if config.optimizer_type == 'adamw':\n"
                "        cfg['weight_decay'] = config.weight_decay\n    return cfg\n")
-    refused = "from x import refuse_a_dropped_weight_decay\n" + planted.replace("    cfg = {}", "    refuse_a_dropped_weight_decay(1, 2, trainer='t')\n    cfg = {}")
+    refused = planted.replace("    cfg = {}", "    refuse_a_dropped_weight_decay(config.optimizer_type, config.weight_decay, trainer='t')"
+                                              "\n    cfg = {}")
+    aliased = ("def build(config):\n    use_adamw = config.optimizer_type.lower() == 'adamw'\n    wd = config.weight_decay\n"
+               "    refuse_a_dropped_weight_decay(config.optimizer_type, wd, trainer='t')\n    if use_adamw:\n"
+               "        return {'weight_decay': wd}\n")
+    mirrored_if = ("def build(config):\n    if config.optimizer_type != 'adamw':\n        return {}\n    else:\n"
+                   "        return {'weight_decay': config.weight_decay}\n")
+    penalty = "def build(config, use_adamw):\n    return None if use_adamw else sgd_weight_decay_regularizer(config.weight_decay)\n"
     both_branches = ("def build(config):\n    if config.optimizer_type == 'adamw':\n        a = config.weight_decay\n"
                      "    else:\n        b = config.weight_decay\n")
     assert uncovered_decay_gates(planted) == ["build"]
+    assert uncovered_decay_gates(mirrored_if) == ["build"]
     assert uncovered_decay_gates(refused) == []
+    assert uncovered_decay_gates(aliased) == []
+    assert uncovered_decay_gates(penalty) == []
     assert uncovered_decay_gates(both_branches) == []
+    assert uncovered_decay_gates(planted.replace("    cfg = {}", "    refuse_a_dropped_weight_decay(1, 2, trainer='t')\n    cfg = {}")) \
+        == ["build"], "a refusal handed literals covers nothing"
+    assert uncovered_decay_gates(refused.replace("(config.optimizer_type,", "(other.optimizer_type,")) == ["build"], \
+        "a refusal handed another object's optimizer covers nothing"
 
 
 def test_no_trainer_gates_its_weight_decay_on_adamw_without_refusing_the_rest():

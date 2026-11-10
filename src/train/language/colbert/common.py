@@ -285,7 +285,8 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
     parser.add_argument("--warmup-epochs", type=int, default=default.warmup_epochs,
                         help="Warmup epochs for the LR schedule.")
     parser.add_argument("--weight-decay", type=float, default=default.weight_decay,
-                        help="AdamW weight decay (ignored by other optimizers).")
+                        help="AdamW decoupled weight decay; a positive value beside another "
+                             "--optimizer-type is refused (pass 0 for none).")
     parser.add_argument("--gradient-clipping", type=float,
                         default=default.gradient_clipping,
                         help="Global gradient clip norm.")
