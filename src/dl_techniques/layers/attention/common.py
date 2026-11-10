@@ -13,8 +13,8 @@ everything rather than producing a NaN softmax (``rescue_axis=None`` opts
 out). Adoption of these helpers across sibling modules is partial; a module
 that declines one says so in a comment naming what it measured instead.
 
-``validate_head_divisibility`` (15 importers) and ``compute_attention_scale``
-(17 importers) are consolidated here. **Those two counts are MECHANICAL.
+``validate_head_divisibility`` (16 importers) and ``compute_attention_scale``
+(18 importers) are consolidated here. **Those two counts are MECHANICAL.
 Re-derive them before editing either**, from the repository root, with an AST
 walk over ``layers/`` matching ``ast.ImportFrom`` whose last dotted module
 component is ``common`` — a text search over-counts, since both names also
@@ -31,7 +31,7 @@ appear in prose (including in this docstring)::
     print(c["validate_head_divisibility"], c["compute_attention_scale"])
     PY
 
-It prints ``15 17``.
+It prints ``16 18``.
 
 ``apply_attention_mask``'s ``rescue_axis`` names the axis the CALLER's softmax
 reduces over — never inferred, for the same reason polarity is never inferred.

@@ -6,6 +6,12 @@ Completes the set begun in ``test_the_defining_mechanisms_are_live.py``:
     wave_field_attention    disable the FFT wave convolution           3 / 64
     capsule_routing         force routing_iterations to 1              0 / 65
 
+``kimi_delta_attention`` is not blind: its NumPy oracle catches each deletion
+(``beta = 0`` 21 / 109, decay forced to 1 9 / 109, output gate bypassed
+13 / 109, short convolution bypassed 14 / 109). Its rows below pin each
+mechanism by name, so a failure says which one broke rather than only that the
+output moved off the oracle.
+
 Same principle throughout: assert a property derivable without reading the
 implementation, and copy weights whenever two separately-constructed layers are
 compared -- otherwise the delta measures initialization rather than mechanism
@@ -18,6 +24,9 @@ import pytest
 
 from dl_techniques.layers.attention.capsule_routing_attention import (
     CapsuleRoutingSelfAttention,
+)
+from dl_techniques.layers.attention.kimi_delta_attention import (
+    KimiDeltaAttention,
 )
 from dl_techniques.layers.attention.tripse_attention import (
     TripSE1,
@@ -139,4 +148,132 @@ def test_more_routing_iterations_change_the_result():
     assert delta > 1e-3, (
         f"1 and 3 routing iterations differ by only {delta}: the routing loop is "
         "not refining the coupling coefficients"
+    )
+
+
+# --------------------------------------------------------------------------
+# KimiDeltaAttention -- the delta rule, the decay, the gate and the short conv
+# --------------------------------------------------------------------------
+def _kimi(tokens, mode="chunk", **kwargs):
+    """A built ``KimiDeltaAttention`` at a fixed seed; weights are edited in place."""
+    keras.utils.set_random_seed(0)
+    layer = KimiDeltaAttention(dim=64, num_heads=4, mode=mode, **kwargs)
+    layer(tokens, training=False)
+    return layer
+
+
+def _kimi_tokens():
+    return np.random.default_rng(0).normal(size=(2, 32, 64)).astype("float32")
+
+
+def test_the_kimi_delta_rule_writes_the_error_not_the_value():
+    """The delta rule writes ``beta * (v - S^T k)``, so a repeated write saturates.
+
+    Feed one token 64 times with the decay switched off (``A_log = -30``, so
+    ``alpha = 1``), ``beta = 1/2`` on every head (zero ``b_proj`` kernel) and no
+    output norm. Per head the state is ``c_t k v^T`` with
+    ``c_t = c_{t-1} + beta (1 - c_{t-1})``, which converges to 1: the readout
+    after 64 writes equals the readout after 32 (relative change 0.5 ** 28).
+    A Hebbian write (``beta * v``, no error term) grows ``c_t = t * beta``,
+    doubling the readout; ``beta = 0`` writes nothing and reads zero. Both
+    modes, since each has its own state update.
+
+    Measured on HEAD: the readout at token 31 is 0.045 in both modes, and the
+    relative change from token 31 to token 63 is 1.2e-7 (chunk) and 4.1e-8
+    (recurrent).
+    """
+    constant = np.repeat(_kimi_tokens()[:, :1, :], 64, axis=1)
+    for mode in ("chunk", "recurrent"):
+        layer = _kimi(constant, mode=mode, output_norm_type=None)
+        layer.A_log.assign(np.full(layer.A_log.shape, -30.0, "float32"))
+        layer.b_proj.kernel.assign(np.zeros(layer.b_proj.kernel.shape, "float32"))
+        out = np.asarray(layer(constant, training=False))
+
+        early = np.abs(out[:, 31]).max()
+        assert early > 1e-3, (
+            f"{mode}: the readout after 32 identical writes is {early}: nothing "
+            "was written to the state, so beta never reaches it"
+        )
+        change = np.abs(out[:, 63] - out[:, 31]).max() / early
+        assert change < 1e-3, (
+            f"{mode}: 32 more writes of the same association moved the readout "
+            f"by {change:.3f} of its size. The delta rule writes only the error "
+            "v - S^T k, which is zero once the association is stored; a write "
+            "that keeps growing is a Hebbian (plain linear attention) write"
+        )
+
+
+def test_the_kimi_decay_forgets_and_both_of_its_parameters_reach_it():
+    """``alpha_t = exp(-exp(A_log) * softplus(f + dt_bias))`` makes the state forget.
+
+    Perturb token 0 and read the last token, 31 steps later. With the decay off
+    (``A_log = -30``) the perturbation is still there; with a strong decay
+    (``A_log = 5``) it has decayed away. ``dt_bias`` is the other half of the
+    same rate, so moving it must move the output. With the decay forced to 1
+    the two arms are equal and ``dt_bias`` is inert.
+
+    Measured on HEAD, max|delta| at token 31: 1.23 (decay off), 0.0039
+    (A_log = 5); ``dt_bias + 3`` moves the output by 1.75.
+    """
+    tokens = _kimi_tokens()
+    perturbed = tokens.copy()
+    perturbed[:, 0, :] += 20.0
+
+    reach = {}
+    for a_log in (-30.0, 5.0):
+        layer = _kimi(tokens)
+        layer.A_log.assign(np.full(layer.A_log.shape, a_log, "float32"))
+        before = np.asarray(layer(tokens, training=False))
+        after = np.asarray(layer(perturbed, training=False))
+        reach[a_log] = np.abs(after[:, -1] - before[:, -1]).max()
+
+    assert reach[-30.0] > 0.1, (
+        f"with the decay off, token 0 moved token 31 by only {reach[-30.0]}: "
+        "the state is not carrying information along the sequence"
+    )
+    assert reach[5.0] < 0.05 * reach[-30.0], (
+        f"a strong decay left token 0's effect on token 31 at {reach[5.0]} "
+        f"against {reach[-30.0]} with the decay off: A_log does not reach the "
+        "state, so the layer never forgets"
+    )
+
+    layer = _kimi(tokens)
+    before = np.asarray(layer(tokens, training=False))
+    layer.dt_bias.assign(layer.dt_bias.numpy() + 3.0)
+    delta = np.abs(np.asarray(layer(tokens, training=False)) - before).max()
+    assert delta > 1e-3, (
+        f"moving dt_bias by 3 moved the output by only {delta}: dt_bias does "
+        "not reach the decay"
+    )
+
+
+def test_the_kimi_output_gate_and_short_conv_are_live():
+    """The sigmoid output gate and the q/k/v short convolutions reach the output.
+
+    Raising the gate bias, or reversing the three convolution kernels in time,
+    must move the output. With the gate multiply or the convolution bypassed,
+    that weight is decorative and the delta is exactly 0.0.
+
+    Measured on HEAD: gate bias + 3 moves the output by 1.61, the reversed
+    kernels by 2.72.
+    """
+    tokens = _kimi_tokens()
+
+    layer = _kimi(tokens)
+    before = np.asarray(layer(tokens, training=False))
+    layer.g_up.bias.assign(layer.g_up.bias.numpy() + 3.0)
+    gate_delta = np.abs(np.asarray(layer(tokens, training=False)) - before).max()
+    assert gate_delta > 1e-3, (
+        f"raising the output gate bias moved the output by only {gate_delta}: "
+        "the gate is computed and never applied"
+    )
+
+    layer = _kimi(tokens)
+    before = np.asarray(layer(tokens, training=False))
+    for conv in (layer.q_conv, layer.k_conv, layer.v_conv):
+        conv.kernel.assign(np.flip(conv.kernel.numpy(), axis=0).copy())
+    conv_delta = np.abs(np.asarray(layer(tokens, training=False)) - before).max()
+    assert conv_delta > 1e-3, (
+        f"reversing the short-convolution kernels moved the output by only "
+        f"{conv_delta}: q, k and v are not passing through the convolution"
     )

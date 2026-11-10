@@ -34,6 +34,7 @@ Measured deltas on HEAD for a x2 perturbation:
     single_window         0.378
     ideogram4             0.567
     lighthouse            1.335
+    kimi_delta            0.258   (scales L2-normalized q, before the state readout)
 """
 
 import keras
@@ -41,6 +42,9 @@ import numpy as np
 import pytest
 
 from dl_techniques.layers.attention.ideogram4_attention import Ideogram4Attention
+from dl_techniques.layers.attention.kimi_delta_attention import (
+    KimiDeltaAttention,
+)
 from dl_techniques.layers.attention.lighthouse_attention import (
     LighthouseAttention,
 )
@@ -103,11 +107,18 @@ def _lighthouse():
     ), "_scale"
 
 
+def _kimi_delta():
+    return KimiDeltaAttention(dim=DIM, num_heads=HEADS), (
+        lambda layer: layer(_sequence(), training=False)
+    ), "scale"
+
+
 LAYERS = {
     "multi_head_cross": _multi_head_cross,
     "single_window": _single_window,
     "ideogram4": _ideogram4,
     "lighthouse": _lighthouse,
+    "kimi_delta": _kimi_delta,
 }
 
 

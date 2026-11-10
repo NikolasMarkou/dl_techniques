@@ -1,7 +1,7 @@
 """
 Attention layer factory: one registry, one construction path, strict kwargs.
 
-``ATTENTION_REGISTRY`` maps 36 string keys to the callable that builds each
+``ATTENTION_REGISTRY`` maps 37 string keys to the callable that builds each
 attention layer, plus that layer's metadata. ``create_attention_layer`` is
 the single construction path: it looks the key up, rejects any keyword the
 target type does not declare, fills in the registry defaults, and
@@ -95,6 +95,7 @@ Registered types:
     gated                 GatedAttention
     group_query           GroupedQueryAttention
     hopfield              HopfieldAttention
+    kimi_delta            KimiDeltaAttention
     lighthouse            LighthouseAttention
     linear                LinearAttention
     mean_shift            MeanShiftAttention
@@ -121,7 +122,7 @@ Registered types:
     window_zigzag         create_zigzag_window_attention
 
 This table is generated from ``ATTENTION_REGISTRY`` below, not transcribed.
-``README.md`` carries the same 36 keys with the instance type in its Class
+``README.md`` carries the same 37 keys with the instance type in its Class
 column, so the three window keys read ``WindowAttention`` there and name
 the builder function here. The registry is the source of truth for both.
 """
@@ -147,6 +148,7 @@ from .fnet_fourier_transform import FNetFourierTransform
 from .gated_attention import GatedAttention
 from .group_query_attention import GroupedQueryAttention
 from .hopfield_attention import HopfieldAttention
+from .kimi_delta_attention import KimiDeltaAttention
 from .lighthouse_attention import LighthouseAttention
 from .linear_attention import LinearAttention
 from .mean_shift_attention import MeanShiftAttention
@@ -172,7 +174,6 @@ from .window_attention import (
     create_grid_window_attention,
     create_band_window_attention
 )
-from .kimi_delta_attention import KimiDeltaAttention
 
 # ---------------------------------------------------------------------
 # Type Definitions
@@ -1852,7 +1853,7 @@ def create_attention_layer(
 ) -> keras.layers.Layer:
     """Build one attention layer. An undeclared keyword raises.
 
-    The single construction path for all 33 registered types. It looks
+    The single construction path for all 37 registered types. It looks
     ``attention_type`` up, rejects any keyword that type does not declare, fills
     the registry defaults in under the caller's values, and constructs. The
     module docstring's architecture diagram draws the full ordering, including

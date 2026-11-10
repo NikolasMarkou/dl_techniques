@@ -548,17 +548,6 @@ SENTINEL_RESOLUTIONS = {
         "(layers/activations/adaptive_softmax.py:181). The registry declares the resolved value "
         "explicitly so `get_activation_info()` reports something useful; effect is identical.",
     ),
-    ("logic", "circuit_depth", "gate_entropy_coefficient"): (
-        0.0,
-        "The ctor default is None because gate_entropy_coefficient supersedes the deprecated "
-        "load_balance_coefficient; the resolver returns `float(load_balance_coefficient or 0.0)` "
-        "when both are None (layers/logic/neural_circuit.py:82), i.e. 0.0. Registry declares 0.0.",
-    ),
-    ("logic", "neural_circuit", "gate_entropy_coefficient"): (
-        0.0,
-        "Same class and same resolver as logic:circuit_depth "
-        "(layers/logic/neural_circuit.py:82): both None -> float(None or 0.0) -> 0.0.",
-    ),
 }
 
 # (factory, type_name, param) -> (expected_registry_value, reason)

@@ -5,8 +5,8 @@ interface that builds them from a config dict. Import a class directly, or
 call `create_attention_layer(type=...)` when the type comes from
 configuration.
 
-`factory.py` registers 36 keys; this package re-exports 38 layer classes,
-33 of them reachable through `create_attention_layer(type=...)`. The other
+`factory.py` registers 37 keys; this package re-exports 39 layer classes,
+34 of them reachable through `create_attention_layer(type=...)`. The other
 5 are direct-import only: `Ideogram4Attention`, `MMDiTJointAttention`,
 `AttentionRoutingCapsule`, `CapsuleBlockV2`, `WindowAttention`.
 
@@ -86,9 +86,10 @@ from .mean_shift_attention import MeanShiftAttention
 from .perceiver_attention import PerceiverAttention
 
 # Efficient / linear-complexity attention (all factory-registered:
-# 'energy', 'gated', 'linear', 'performer', 'ring', 'rpc')
+# 'energy', 'gated', 'kimi_delta', 'linear', 'performer', 'ring', 'rpc')
 from .energy_attention import EnergyAttention
 from .gated_attention import GatedAttention
+from .kimi_delta_attention import KimiDeltaAttention
 from .linear_attention import LinearAttention
 from .performer_attention import PerformerAttention
 from .ring_attention import RingAttention
@@ -109,8 +110,6 @@ from .mmdit_joint_attention import MMDiTJointAttention
 # composite block, not a bare attention layer; it is consumed by
 # models/vision/capsnet/model_v2.py.
 from .attention_routing_capsule import AttentionRoutingCapsule, CapsuleBlockV2
-
-from .kimi_delta_attention import KimiDeltaAttention
 
 __all__ = [
     # Factory Interface
@@ -161,11 +160,11 @@ __all__ = [
     # Efficient / linear-complexity (all factory-registered)
     "EnergyAttention",
     "GatedAttention",
+    "KimiDeltaAttention",
     "LinearAttention",
     "PerformerAttention",
     "RingAttention",
     "RPCAttention",
-    'KimiDeltaAttention',
 
     # Additional specialized, mixed factory coverage — see the per-name
     # comments above each import. Comments here sit on their own line.

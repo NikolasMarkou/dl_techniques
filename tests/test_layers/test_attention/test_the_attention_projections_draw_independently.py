@@ -106,6 +106,15 @@ ROWS: Dict[str, Row] = {
          ("q2_dense", "kernel_initializer"), ("k2_dense", "kernel_initializer"),
          ("v_dense", "kernel_initializer"), ("proj", "kernel_initializer")],
         ["lambda_param"] + _dense_paths("q1", "k1", "q2", "k2", "v", "proj")),
+    # Built clean: one instance at q_proj, a clone at every later projection. The oracle compares all 12
+    # kernels (66 pairs); the sites stop at v_proj because the three short-conv kernels take their own
+    # VarianceScaling between v_proj and f_down, spending three default seeds there.
+    "kimi_delta": Row(
+        "kimi_delta", {"dim": 64, "num_heads": 4}, _TOKENS, 66,
+        [("q_proj", "kernel_initializer"), ("k_proj", "kernel_initializer"), ("v_proj", "kernel_initializer")],
+        ["A_log", "dt_bias", "q_proj/kernel", "k_proj/kernel", "v_proj/kernel", "q_conv/kernel", "k_conv/kernel",
+         "v_conv/kernel", "f_down/kernel", "f_up/kernel", "b_proj/kernel", "g_down/kernel", "g_up/kernel",
+         "g_up/bias", "o_norm/scale", "o_proj/kernel"]),
     "lighthouse": Row(
         "lighthouse", {"dim": 64, "num_heads": 4}, _TOKENS, 6,
         [("wq", "kernel_initializer"), ("wk", "kernel_initializer"), ("wv", "kernel_initializer"),

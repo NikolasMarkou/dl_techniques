@@ -45,6 +45,7 @@ MINIMAL_PARAMS = {
     'gated': {'dim': 64, 'num_heads': 4},
     'group_query': {'dim': 64, 'num_heads': 4, 'num_kv_heads': 2},
     'hopfield': {'num_heads': 4, 'key_dim': 16},
+    'kimi_delta': {'dim': 64, 'num_heads': 4},
     'lighthouse': {'dim': 64, 'num_heads': 4},
     'linear': {'dim': 64},
     'mean_shift': {'dim': 64},
@@ -90,7 +91,7 @@ def _ctor_param_names(cls_or_fn):
 
 
 class TestRegistryIntegrity:
-    """The registry must describe exactly 36 types and stay in sync with classes."""
+    """The registry must describe exactly 37 types and stay in sync with classes."""
 
     def test_registry_has_expected_types(self):
         # DECISION plan_2026-07-13_57c9833e/D-003
@@ -100,8 +101,8 @@ class TestRegistryIntegrity:
         # registry + MINIMAL_PARAMS below + __init__ export); a `>=` assertion passes
         # while `MINIMAL_PARAMS` silently drifts out of sync and the new type ships with
         # zero factory coverage. See decisions.md D-003 / LESSONS [I:3].
-        assert len(ATTENTION_REGISTRY) == 36
-        assert len(list_attention_types()) == 36
+        assert len(ATTENTION_REGISTRY) == 37
+        assert len(list_attention_types()) == 37
 
     def test_literal_members_match_registry_keys(self):
         literal_members = set(typing.get_args(AttentionType))
@@ -338,7 +339,7 @@ class TestFactoryHelpers:
 
     def test_get_attention_info_complete(self):
         info = get_attention_info()
-        assert len(info) == 36
+        assert len(info) == 37
 
     def test_get_requirements_roundtrip(self):
         req = get_attention_requirements('anchor')
