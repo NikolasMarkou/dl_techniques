@@ -50,6 +50,7 @@ References:
 
 import math
 import keras
+import numpy as np
 from typing import Any, Dict, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -71,30 +72,41 @@ from .common import (
 
 _MODES: Tuple[str, ...] = ("chunk", "recurrent")
 
+# Default epsilon of the per-head output RMSNorm: fla ``norm_eps``
+# (``fla/layers/kda.py``) and HF Kimi-Linear ``rms_norm_eps`` (``config.json``).
+_O_NORM_EPSILON: float = 1e-5
+
 # ---------------------------------------------------------------------
 
 
 def _scan_with_outputs(step, state, xs, y_init):
-    """``keras.ops.scan`` that tolerates a per-step output unlike the carry.
+    """A scan over the leading axis of ``xs`` that XLA can differentiate.
 
-    The TensorFlow backend of ``keras.ops.scan`` requires every step's output
-    to have the carry's structure and shapes. The output is therefore carried
-    alongside the state and emitted as the full carry. The stacked copy of
-    the state is discarded; backpropagation through the scan keeps one state
-    per step anyway.
+    ``keras.ops.while_loop`` with ``maximum_iterations`` set to the exact trip
+    count, not ``keras.ops.scan``: on the Keras 3.8 TensorFlow backend
+    ``ops.scan`` builds a ``tf.while_loop`` without ``maximum_iterations``, so
+    ``fit`` under ``jit_compile=True`` (the default ``'auto'`` on a GPU) fails
+    with "XLA compilation requires a fixed tensor list size", at static and
+    dynamic lengths alike. ``layers/transformers/gated_linear_attention_block.py``
+    and ``layers/dynamic_chunking/dechunk_layer.py`` use the same form.
 
     :param step: ``step(state, x) -> (state, y)``.
     :param state: Initial state.
-    :param xs: Pytree of tensors scanned along their leading axis.
+    :param xs: Tuple of tensors scanned along their leading axis.
     :param y_init: Zeros with the shape and dtype of one step's ``y``.
     :return: ``(final_state, ys)`` with ``ys`` stacked along axis 0.
     """
+    ops = keras.ops
+    n = ops.shape(xs[0])[0]
+    ys = ops.repeat(ops.expand_dims(y_init, 0), n, axis=0)
 
-    def wrapped(carry, x):
-        s, y = step(carry[0], x)
-        return (s, y), (s, y)
+    def body(i, s, out):
+        s, y = step(s, tuple(ops.take(t, i, axis=0) for t in xs))
+        return i + 1, s, ops.scatter_update(out, ops.reshape(i, (1, 1)), y[None])
 
-    (state, _), (_, ys) = keras.ops.scan(wrapped, (state, y_init), xs)
+    _, state, ys = ops.while_loop(
+        lambda i, s, out: i < n, body, (0, state, ys), maximum_iterations=n
+    )
     return state, ys
 
 # ---------------------------------------------------------------------
@@ -171,17 +183,78 @@ class KimiDeltaAttention(keras.layers.Layer):
         memory grows linearly in chunk_size. Lower chunk_size if it
         does not fit; the result does not depend on it.
 
+    **Chunk-mode memory** is ``O(B * H * (N/C) * C * C * d_k)``, i.e.
+    ``O(B * H * N * C * d_k)``, for the pairwise-decay tensors (fla avoids
+    them with block-wise Triton kernels). Measured on CPU, forward only,
+    float32, ``B=1, H=8, d_k=128``: ``C=64`` costs a peak of +1.4 GB at
+    ``N=1024`` (one such tensor is 256 MB) and +2.8 GB at ``N=2048``;
+    ``C=16`` at ``N=1024`` costs +0.44 GB. The backward pass keeps more.
+    Lower ``chunk_size``, or use ``mode='recurrent'`` (3 to 5 times slower
+    per token on CPU), when it does not fit.
+
     The recurrence runs in ``mask_dtype(compute_dtype)`` (at least float32),
     so the layer is safe under ``mixed_float16``.
 
     ``call()`` is ``(inputs, attention_mask=None, training=None,
-    initial_state=None, return_state=False)``. ``attention_mask`` is a rank-2
-    keep mask ``(B, N)``. A masked position neither writes to the state nor
-    decays it (``beta = 0``, ``alpha = 1``) and is zeroed before the short
-    convolution, so left and right padding both leave the kept outputs and
-    the final state exactly as for the unpadded sequence; its own output row
-    is zero. Masks of rank 3 or more are rejected: the layer is causal by
-    construction and has no pairwise score to mask.
+    initial_state=None, return_state=False)``.
+
+    **Carried state.** With ``return_state=True`` the call returns
+    ``(output, state)`` where ``state = (S, conv_q, conv_k, conv_v)``:
+
+    - ``S``, shape ``(B, num_heads, head_dim, value_head_dim)``, the
+      delta-rule state, in ``mask_dtype(compute_dtype)`` (at least float32);
+    - ``conv_q`` and ``conv_k``, shape ``(B, conv_size - 1, num_heads *
+      head_dim)``, and ``conv_v``, shape ``(B, conv_size - 1, num_heads *
+      value_head_dim)``: the last ``conv_size - 1`` projected inputs BEFORE
+      the short convolution, in the compute dtype. This is the conv cache of
+      fla ``ShortConvolution`` (``fla/layers/kda.py``) and of HF
+      ``modeling_kimi.py``.
+
+    With ``conv_size`` 0 or 1 nothing needs carrying and the three windows
+    have length 0; the tuple has four entries for every configuration.
+    Passing the tuple back as ``initial_state`` continues the sequence: the
+    windows are prepended before the convolution and ``S`` seeds the
+    recurrence, so a split call and a token-by-token decode equal one full
+    call up to float rounding, in both modes. ``initial_state=None`` means
+    all zeros, which is what the causal zero padding of a first call sees.
+    Anything other than a 4-tuple (or list) raises ``ValueError``.
+
+    **Masks.** ``attention_mask`` is a rank-2 keep mask ``(B, N)``. A masked
+    position neither writes to ``S`` nor decays it (``beta = 0``,
+    ``alpha = 1``), is zeroed before the short convolution, is never taken
+    into a returned window (the window holds the last ``conv_size - 1``
+    KEPT inputs), and has a zero output row. Masked positions therefore act
+    exactly as deleted tokens for left padding, right padding, and any
+    sequence of calls (a right-padded or an all-padding segment followed by
+    a continuation included): the kept outputs, ``S`` and the windows equal
+    those of the unpadded sequence. The one exception is an interior hole, a
+    masked position between two kept positions of the same row, within a
+    call or across calls once a kept input sits in the carried window: the
+    short convolution's window still spans the hole's zero, so for
+    ``conv_size > 1`` the kept outputs after it differ from deleting the
+    token (fla unpads such batches instead). With ``conv_size`` 0 or 1 holes
+    are exact too. Masks of rank 3 or more are rejected: the layer is causal
+    by construction and has no pairwise score to mask.
+
+    **Not implemented** from fla ``KimiDeltaAttention``: ``allow_neg_eigval``
+    (``beta`` in ``(0, 2)``), ``safe_gate`` / ``lower_bound`` (a clamp on the
+    decay gate), grouped value attention (``num_v_heads > num_heads``),
+    ``cu_seqlens`` variable-length packing, and a bias on the short
+    convolution. fla's ``use_short_conv=False`` corresponds to
+    ``conv_size=0``, where SiLU is still applied.
+
+    **Weight decay.** ``A_log`` and ``dt_bias`` parameterize the decay; fla
+    marks both ``_no_weight_decay``. Exclude them in the optimizer config of
+    ``dl_techniques.optimization.optimizer.optimizer_builder``, e.g.
+    ``exclude_from_weight_decay=["A_log", "dt_bias", ...]`` (patterns matched
+    against variable names with ``re.search``).
+
+    **Initialization.** ``A_log`` and ``dt_bias`` are drawn with the global
+    NumPy RNG (reseeded by ``keras.utils.set_random_seed``), as fla does in
+    torch. The short-convolution kernels use torch's default ``Conv1d`` init
+    that fla keeps, ``U(-1/sqrt(conv_size), 1/sqrt(conv_size))``, not
+    ``kernel_initializer``. The output RMSNorm epsilon defaults to ``1e-5``
+    (fla ``norm_eps``, HF ``rms_norm_eps``).
 
     :param dim: Input and output dimension. Must be positive.
     :type dim: int
@@ -209,6 +282,7 @@ class KimiDeltaAttention(keras.layers.Layer):
         disables it. Defaults to ``'rms_norm'``.
     :type output_norm_type: Optional[str]
     :param output_norm_kwargs: Extra arguments for the output normalization.
+        ``epsilon`` defaults to ``1e-5`` unless given here.
     :type output_norm_kwargs: Optional[Dict[str, Any]]
     :param chunk_size: Tokens per chunk in ``'chunk'`` mode. Must be positive.
         Changes memory and speed only, not the result. Defaults to 64.
@@ -238,9 +312,10 @@ class KimiDeltaAttention(keras.layers.Layer):
     :param eps: Stability constant of the q/k L2 normalization. Defaults to
         1e-6.
     :type eps: float
-    :param kernel_initializer: Initializer for projection and convolution
-        kernels. The first projection uses the instance, every other site a
-        clone. Defaults to ``'glorot_uniform'``.
+    :param kernel_initializer: Initializer for the projection kernels (not the
+        short convolution, see Initialization above). The first projection
+        uses the instance, every other site a clone. Defaults to
+        ``'glorot_uniform'``.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param bias_initializer: Initializer for projection biases. Defaults to
         ``'zeros'``.
@@ -258,15 +333,23 @@ class KimiDeltaAttention(keras.layers.Layer):
         ``[0, 1]`` or ``eps`` is not positive.
     :raises ValueError: From ``build()``, if the input is not 3D or its last
         dimension is not ``dim``.
-    :raises ValueError: From ``call()``, if ``attention_mask`` is not rank 2.
+    :raises ValueError: From ``call()``, if ``attention_mask`` is not rank 2,
+        or ``initial_state`` is not the 4-tuple described above.
 
     Example:
+        >>> import keras
+        >>> from dl_techniques.layers.attention.kimi_delta_attention import (
+        ...     KimiDeltaAttention)
         >>> layer = KimiDeltaAttention(dim=256, num_heads=4)
-        >>> y = layer(keras.random.normal((2, 100, 256)))          # (2, 100, 256)
-        >>>
-        >>> # Prefill, then continue from the carried state
-        >>> y1, s = layer(x[:, :64], return_state=True)
-        >>> y2 = layer(x[:, 64:], initial_state=s)
+        >>> x = keras.random.normal((2, 100, 256))
+        >>> y = layer(x)
+        >>> tuple(y.shape)
+        (2, 100, 256)
+        >>> # Prefill, then continue from the carried state: y2 equals y[:, 64:]
+        >>> y1, state = layer(x[:, :64], return_state=True)
+        >>> len(state)
+        4
+        >>> y2 = layer(x[:, 64:], initial_state=state)
     """
 
     def __init__(
@@ -406,9 +489,17 @@ class KimiDeltaAttention(keras.layers.Layer):
         self.k_proj = dense(self.key_dim, "k_proj", self.use_bias)
         self.v_proj = dense(self.value_dim, "v_proj", self.use_bias)
 
+        # Pre-convolution inputs carried between calls: the short
+        # convolution's receptive field minus the current token.
+        self.conv_window = max(self.conv_size - 1, 0)
+
         if self.conv_size > 0:
             def conv(channels: int, name: str) -> keras.layers.Conv1D:
-                """Causal depthwise convolution over the sequence axis.
+                """Depthwise convolution over the sequence axis, ``'valid'`` padding.
+
+                Causality comes from :meth:`call`, which prepends the carried
+                ``conv_size - 1`` inputs (zeros on a first call) instead of
+                letting the convolution zero-pad.
 
                 :param channels: Number of channels, one group per channel.
                 :type channels: int
@@ -420,10 +511,16 @@ class KimiDeltaAttention(keras.layers.Layer):
                 return keras.layers.Conv1D(
                     filters=channels,
                     kernel_size=self.conv_size,
-                    padding="causal",
+                    padding="valid",
                     groups=channels,
                     use_bias=False,
-                    kernel_initializer=clone_initializer(self.kernel_initializer),
+                    # torch's default Conv1d init, kept by fla ShortConvolution:
+                    # U(+-1/sqrt(fan_in)) with fan_in = conv_size for a
+                    # depthwise kernel (std 0.29 at conv_size=4). A fresh
+                    # instance per site, so the three kernels draw independently.
+                    kernel_initializer=keras.initializers.VarianceScaling(
+                        scale=1.0 / 3.0, mode="fan_in", distribution="uniform"
+                    ),
                     kernel_regularizer=self.kernel_regularizer,
                     name=name,
                 )
@@ -451,10 +548,12 @@ class KimiDeltaAttention(keras.layers.Layer):
             self.g_up = None
 
         if self.output_norm_type is not None:
+            norm_kwargs = dict(self.output_norm_kwargs or {})
+            norm_kwargs.setdefault("epsilon", _O_NORM_EPSILON)
             self.o_norm = create_normalization_layer(
                 self.output_norm_type,
                 name="o_norm",
-                **(self.output_norm_kwargs or {}),
+                **norm_kwargs,
             )
         else:
             self.o_norm = None
@@ -476,25 +575,40 @@ class KimiDeltaAttention(keras.layers.Layer):
         )
 
     # -----------------------------------------------------------------
-    # initializers for the layer's own weights
+    # initial values of the layer's own weights
     # -----------------------------------------------------------------
 
-    def _a_log_initializer(self, shape, dtype=None):
-        """``log(U(a_low, a_high))``, one decay rate per head."""
-        low, high = self.a_init_range
-        a = keras.random.uniform(shape, minval=low, maxval=high, dtype="float32")
-        return keras.ops.cast(keras.ops.log(a), dtype or "float32")
+    # DECISION plan-2026-11-10T082801-e036869a/D-001: draw A_log/dt_bias with
+    # the global NumPy RNG and hand them over as Constant initializers, as
+    # layers/ssm/mamba2.py does. Do NOT go back to keras.random: an unseeded
+    # draw creates the global SeedGenerator lazily, which fails ('NoneType'
+    # object has no attribute 'assign') when the layer is first built inside a
+    # traced graph (a cold subclassed model in fit). np.random is reseeded by
+    # keras.utils.set_random_seed, so a seeded build stays reproducible.
 
-    def _dt_bias_initializer(self, shape, dtype=None):
-        """Inverse softplus of a log-uniform ``dt`` in ``[dt_min, dt_max]``."""
-        u = keras.random.uniform(shape, dtype="float32")
-        dt = keras.ops.exp(
+    def _initial_a_log(self) -> np.ndarray:
+        """``log(U(a_low, a_high))``, one decay rate per head.
+
+        :return: float32 array of shape ``(num_heads,)``.
+        :rtype: np.ndarray
+        """
+        low, high = self.a_init_range
+        a = np.random.uniform(low, high, size=self.num_heads)
+        return np.log(a).astype("float32")
+
+    def _initial_dt_bias(self) -> np.ndarray:
+        """Inverse softplus of a log-uniform ``dt`` in ``[dt_min, dt_max]``.
+
+        :return: float32 array of shape ``(num_heads * head_dim,)``.
+        :rtype: np.ndarray
+        """
+        u = np.random.uniform(0.0, 1.0, size=self.key_dim)
+        dt = np.exp(
             u * (math.log(self.dt_max) - math.log(self.dt_min)) + math.log(self.dt_min)
         )
-        dt = keras.ops.maximum(dt, self.dt_init_floor)
+        dt = np.maximum(dt, self.dt_init_floor)
         # softplus^{-1}(dt) = dt + log(1 - exp(-dt))
-        inv = dt + keras.ops.log(-keras.ops.expm1(-dt))
-        return keras.ops.cast(inv, dtype or "float32")
+        return (dt + np.log(-np.expm1(-dt))).astype("float32")
 
     # -----------------------------------------------------------------
 
@@ -524,14 +638,14 @@ class KimiDeltaAttention(keras.layers.Layer):
         self.A_log = self.add_weight(
             name="A_log",
             shape=(self.num_heads,),
-            initializer=self._a_log_initializer,
+            initializer=keras.initializers.Constant(self._initial_a_log()),
             trainable=True,
             dtype="float32",
         )
         self.dt_bias = self.add_weight(
             name="dt_bias",
             shape=(self.key_dim,),
-            initializer=self._dt_bias_initializer,
+            initializer=keras.initializers.Constant(self._initial_dt_bias()),
             trainable=True,
             dtype="float32",
         )
@@ -540,9 +654,11 @@ class KimiDeltaAttention(keras.layers.Layer):
         for layer in (self.q_proj, self.k_proj, self.v_proj, self.f_down, self.b_proj):
             layer.build(input_shape)
         if self.q_conv is not None:
-            self.q_conv.build((batch, seq_len, self.key_dim))
-            self.k_conv.build((batch, seq_len, self.key_dim))
-            self.v_conv.build((batch, seq_len, self.value_dim))
+            # The convolution sees the carried window in front of the sequence.
+            conv_len = None if seq_len is None else seq_len + self.conv_window
+            self.q_conv.build((batch, conv_len, self.key_dim))
+            self.k_conv.build((batch, conv_len, self.key_dim))
+            self.v_conv.build((batch, conv_len, self.value_dim))
         self.f_up.build((batch, seq_len, self.gate_low_rank_dim))
         if self.g_down is not None:
             self.g_down.build(input_shape)
@@ -557,42 +673,117 @@ class KimiDeltaAttention(keras.layers.Layer):
 
     # -----------------------------------------------------------------
 
+    def _split_initial_state(
+            self, initial_state: Any
+    ) -> Tuple[keras.KerasTensor, Tuple[keras.KerasTensor, ...]]:
+        """Unpack and check an incoming ``(S, conv_q, conv_k, conv_v)``.
+
+        :param initial_state: The tuple a previous call returned with
+            ``return_state=True``.
+        :type initial_state: Any
+        :raises ValueError: If it is not a 4-element tuple or list, or a
+            window's static length is not ``conv_size - 1``.
+        :return: ``(S, (conv_q, conv_k, conv_v))``.
+        :rtype: Tuple[keras.KerasTensor, Tuple[keras.KerasTensor, ...]]
+        """
+        if not isinstance(initial_state, (tuple, list)) or len(initial_state) != 4:
+            raise ValueError(
+                "KimiDeltaAttention: initial_state must be the 4-tuple "
+                "(S, conv_q, conv_k, conv_v) returned with return_state=True, "
+                f"got {type(initial_state).__name__}"
+                + (f" of length {len(initial_state)}"
+                   if isinstance(initial_state, (tuple, list)) else "")
+            )
+        state, *windows = initial_state
+        for name, window in zip(("conv_q", "conv_k", "conv_v"), windows):
+            width = window.shape[1] if len(window.shape) == 3 else -1
+            if width is not None and width != self.conv_window:
+                raise ValueError(
+                    f"KimiDeltaAttention: initial_state {name} must have shape "
+                    f"(batch, {self.conv_window}, channels) for conv_size="
+                    f"{self.conv_size}, got {tuple(window.shape)}"
+                )
+        return state, tuple(windows)
+
+    def _last_kept_inputs(
+            self,
+            extended: keras.KerasTensor,
+            keep_extended: Optional[keras.KerasTensor],
+    ) -> keras.KerasTensor:
+        """The last ``conv_size - 1`` kept rows of ``extended``, in order.
+
+        ``extended`` is the carried window followed by this call's
+        pre-convolution inputs; the window rows always count as kept, so there
+        are at least ``conv_size - 1`` kept rows. Selecting kept rows only is
+        what deleting the masked tokens would leave in the window. Called only
+        when ``conv_size - 1 > 0``.
+
+        :param extended: ``(batch, conv_size - 1 + seq_len, channels)``.
+        :type extended: keras.KerasTensor
+        :param keep_extended: ``(batch, conv_size - 1 + seq_len)`` keep mask, or
+            None when every row is kept.
+        :type keep_extended: Optional[keras.KerasTensor]
+        :return: ``(batch, conv_size - 1, channels)``.
+        :rtype: keras.KerasTensor
+        """
+        ops = keras.ops
+        w = self.conv_window
+        if keep_extended is None:
+            return extended[:, -w:]
+        kept = ops.cast(keep_extended > 0, "int32")
+        # Kept rows at or after each position; the last kept row has 1.
+        rank = ops.sum(kept, axis=1, keepdims=True) - ops.cumsum(kept, axis=1) + kept
+        slot_rank = w - ops.arange(w, dtype="int32")                   # w, ..., 1
+        pick = ops.logical_and(
+            ops.equal(rank[:, None, :], slot_rank[None, :, None]),
+            ops.greater(kept[:, None, :], 0),
+        )                                                              # (B, w, L)
+        # A one-hot contraction, exact: one product per output, the rest zeros.
+        return ops.einsum("bjl,blc->bjc", ops.cast(pick, extended.dtype), extended)
+
     def call(
             self,
             inputs: keras.KerasTensor,
             attention_mask: Optional[keras.KerasTensor] = None,
             training: Optional[bool] = None,
-            initial_state: Optional[keras.KerasTensor] = None,
+            initial_state: Optional[Tuple[keras.KerasTensor, ...]] = None,
             return_state: bool = False,
-    ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]:
+    ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, Tuple[keras.KerasTensor, ...]]]:
         """Run the KDA recurrence over the sequence.
 
         :param inputs: Tensor of shape ``(batch, seq_len, dim)``.
         :type inputs: keras.KerasTensor
         :param attention_mask: Optional rank-2 keep mask ``(batch, seq_len)``;
             nonzero means the token is real. Masked tokens are skipped by the
-            recurrence and get a zero output row.
+            recurrence, kept out of the carried convolution window and get a
+            zero output row (see the class docstring for the exact semantics).
         :type attention_mask: Optional[keras.KerasTensor]
         :param training: Training flag, forwarded to dropout.
         :type training: Optional[bool]
-        :param initial_state: Optional incoming state
-            ``(batch, num_heads, head_dim, value_head_dim)``. ``None`` is zeros.
-            The short convolution does not carry its own history across calls,
-            so continuing from a state is exact only with ``conv_size=0``.
-        :type initial_state: Optional[keras.KerasTensor]
-        :param return_state: If True, also return the final state.
+        :param initial_state: Optional incoming state, the 4-tuple
+            ``(S, conv_q, conv_k, conv_v)`` a previous call returned with
+            ``return_state=True``. ``None`` is all zeros.
+        :type initial_state: Optional[Tuple[keras.KerasTensor, ...]]
+        :param return_state: If True, also return the final state tuple.
         :type return_state: bool
 
-        :raises ValueError: If ``attention_mask`` is not rank 2.
+        :raises ValueError: If ``attention_mask`` is not rank 2, or
+            ``initial_state`` is not a 4-tuple with windows of length
+            ``conv_size - 1``.
 
-        :return: Output ``(batch, seq_len, dim)``, or ``(output, final_state)``
-            when ``return_state`` is True. The state is in at least float32.
-        :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]
+        :return: Output ``(batch, seq_len, dim)``, or
+            ``(output, (S, conv_q, conv_k, conv_v))`` when ``return_state`` is
+            True. ``S`` is in at least float32, the windows in the compute dtype.
+        :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, Tuple[keras.KerasTensor, ...]]]
         """
         ops = keras.ops
         batch_size = ops.shape(inputs)[0]
         seq_len = ops.shape(inputs)[1]
         H, dk, dv = self.num_heads, self.head_dim, self.value_head_dim
+
+        state0, windows0 = None, (None, None, None)
+        if initial_state is not None:
+            state0, windows0 = self._split_initial_state(initial_state)
 
         keep = None
         x = inputs
@@ -615,10 +806,40 @@ class KimiDeltaAttention(keras.layers.Layer):
             # leak into its kept neighbours.
             keep3 = keep[..., None]
             q, k, v = q * keep3, k * keep3, v * keep3
+
+        # DECISION plan-2026-11-10T082801-e036869a/D-001: the short convolution
+        # carries its last conv_size-1 PRE-conv inputs between calls, as fla
+        # ShortConvolution / HF Kimi-Linear do. The window (zeros on a first
+        # call) is prepended and the convolution runs 'valid', which is the
+        # causal convolution of the whole stream. Do NOT carry only S: a split
+        # call then differed from a full call by 2.5 to 4.2 at conv_size=4. The
+        # outgoing window takes the last KEPT rows, never the last rows, so a
+        # right-padded segment carries what deleting the pads would carry.
+        windows = []
         if self.q_conv is not None:
-            q = self.q_conv(q)
-            k = self.k_conv(k)
-            v = self.v_conv(v)
+            w = self.conv_window
+            keep_ext = None
+            if keep is not None and return_state and w > 0:
+                keep_ext = ops.concatenate(
+                    [ops.ones((batch_size, w), dtype=keep.dtype), keep], axis=1
+                )
+            convolved = []
+            for t, conv, window0 in zip(
+                    (q, k, v), (self.q_conv, self.k_conv, self.v_conv), windows0
+            ):
+                if window0 is None:
+                    window0 = ops.zeros((batch_size, w, t.shape[-1]), dtype=t.dtype)
+                extended = ops.concatenate([ops.cast(window0, t.dtype), t], axis=1)
+                convolved.append(conv(extended))
+                if return_state:
+                    windows.append(
+                        self._last_kept_inputs(extended, keep_ext) if w > 0
+                        else extended[:, :0]
+                    )
+            q, k, v = convolved
+        elif return_state:
+            windows = [ops.zeros((batch_size, 0, t.shape[-1]), dtype=t.dtype)
+                       for t in (q, k, v)]
         q, k, v = ops.silu(q), ops.silu(k), ops.silu(v)
 
         f = self.f_up(self.f_down(x))
@@ -652,10 +873,10 @@ class KimiDeltaAttention(keras.layers.Layer):
         log_alpha = ops.transpose(log_alpha, (0, 2, 1, 3))
         beta = ops.transpose(beta, (0, 2, 1))
 
-        if initial_state is None:
+        if state0 is None:
             state = ops.zeros((batch_size, H, dk, dv), dtype=rd)
         else:
-            state = ops.cast(initial_state, rd)
+            state = ops.cast(state0, rd)
 
         if self.mode == "chunk":
             o, state = self._chunk_delta_rule(q, k, v, log_alpha, beta, state)
@@ -678,7 +899,7 @@ class KimiDeltaAttention(keras.layers.Layer):
             output = output * ops.cast(keep, output.dtype)[..., None]
 
         if return_state:
-            return output, state
+            return output, (state, *windows)
         return output
 
     # -----------------------------------------------------------------
@@ -778,12 +999,15 @@ class KimiDeltaAttention(keras.layers.Layer):
         # Pairwise decay exp(g_r - g_i) for i <= r, zero above the diagonal.
         # The `where` inside the exp keeps the masked (positive) exponents
         # from overflowing and from poisoning the gradient.
-        incl = ops.cast(ops.tril(ops.ones((C, C))), "bool")
+        # Triangles from an arange comparison: ops.tril raises under tracing
+        # on Keras 3.8 ('pred must not be a Python bool').
+        idx = ops.arange(C)
+        incl = ops.greater_equal(idx[:, None], idx[None, :])  # i <= r
         incl5 = ops.reshape(incl, (1, 1, 1, C, C, 1))
         diff = g[:, :, :, :, None, :] - g[:, :, :, None, :, :]  # (B,H,m,C,C,dk)
         decay = ops.where(incl5, ops.exp(ops.where(incl5, diff, 0.0)), 0.0)
 
-        strict = ops.cast(ops.tril(ops.ones((C, C)), k=-1), q.dtype)
+        strict = ops.cast(ops.greater(idx[:, None], idx[None, :]), q.dtype)  # i < r
         a_kk = ops.einsum("bhmrc,bhmic,bhmric->bhmri", k, k, decay) * strict
         p_qk = ops.einsum("bhmrc,bhmic,bhmric->bhmri", q, k, decay)
 
@@ -833,6 +1057,49 @@ class KimiDeltaAttention(keras.layers.Layer):
         :rtype: Tuple[Optional[int], ...]
         """
         return tuple(input_shape)
+
+    def compute_output_spec(
+            self,
+            inputs: keras.KerasTensor,
+            attention_mask: Optional[keras.KerasTensor] = None,
+            training: Optional[bool] = None,
+            initial_state: Optional[Tuple[keras.KerasTensor, ...]] = None,
+            return_state: bool = False,
+    ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, Tuple[keras.KerasTensor, ...]]]:
+        """Symbolic output, with the state tuple when ``return_state`` is True.
+
+        Overridden because :meth:`compute_output_shape` cannot see
+        ``return_state``: a ``keras.Input`` call must return the same
+        structure as an eager call.
+
+        :param inputs: Symbolic ``(batch, seq_len, dim)`` input.
+        :type inputs: keras.KerasTensor
+        :param attention_mask: Unused here; part of the call signature.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Unused here; part of the call signature.
+        :type training: Optional[bool]
+        :param initial_state: Unused here; part of the call signature.
+        :type initial_state: Optional[Tuple[keras.KerasTensor, ...]]
+        :param return_state: Whether the state tuple is returned too.
+        :type return_state: bool
+        :return: The output spec, or ``(output, (S, conv_q, conv_k, conv_v))``.
+        :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, Tuple[keras.KerasTensor, ...]]]
+        """
+        output = keras.KerasTensor(
+            self.compute_output_shape(inputs.shape), dtype=self.compute_dtype
+        )
+        if not return_state:
+            return output
+        batch = inputs.shape[0]
+        state = keras.KerasTensor(
+            (batch, self.num_heads, self.head_dim, self.value_head_dim),
+            dtype=mask_dtype(self.compute_dtype),
+        )
+        windows = tuple(
+            keras.KerasTensor((batch, self.conv_window, channels), dtype=self.compute_dtype)
+            for channels in (self.key_dim, self.key_dim, self.value_dim)
+        )
+        return output, (state, *windows)
 
     def get_config(self) -> Dict[str, Any]:
         """Return every constructor argument for serialization.
