@@ -1,7 +1,11 @@
 """Test suite for the KimiDeltaAttention (KDA) layer.
 
-Covers the traced-graph paths (``fit``, ``predict``, ``jit_compile``), a lazy
-build inside ``fit`` in a cold process, the carried state
+Covers initialization and argument validation, output shapes, float64
+equality of the chunk form, the recurrent form and an independent NumPy
+oracle of paper Eq. 1, gradients, causality, padding masks, ``mixed_float16``,
+``get_config`` and the ``.keras`` round trip, factory construction, the
+traced-graph paths (``fit``, ``predict``, ``jit_compile``), a lazy build
+inside ``fit`` in a cold process, the carried state
 ``(S, conv_q, conv_k, conv_v)`` (split calls, token-by-token decode, padding
 masks across calls), the symbolic ``return_state`` structure, and the fla
 defaults for the short-convolution kernel and the output-norm epsilon.
@@ -10,6 +14,7 @@ All tests run on CPU with tiny dimensions.
 """
 
 import doctest
+import inspect
 import os
 import subprocess
 import sys
@@ -19,7 +24,12 @@ from typing import Any, Dict
 import keras
 import numpy as np
 import pytest
+import tensorflow as tf
 
+from dl_techniques.layers.attention.factory import (
+    ATTENTION_REGISTRY,
+    create_attention_layer,
+)
 from dl_techniques.layers.attention.kimi_delta_attention import KimiDeltaAttention
 
 # ---------------------------------------------------------------------
@@ -432,3 +442,442 @@ class TestReferenceDefaults:
             dim=32, num_heads=2, output_norm_kwargs={"epsilon": 1e-3}
         )
         assert layer.o_norm.epsilon == 1e-3
+
+
+# ---------------------------------------------------------------------
+# Initialization and validation
+# ---------------------------------------------------------------------
+
+
+class TestInitialization:
+    """Derived defaults and argument refusals."""
+
+    def test_derived_defaults(self):
+        layer = KimiDeltaAttention(dim=64, num_heads=4)
+        assert (layer.head_dim, layer.value_head_dim, layer.gate_low_rank_dim) == (16, 16, 16)
+        assert (layer.key_dim, layer.value_dim) == (64, 64)
+        assert layer.mode == "chunk" and layer.chunk_size == 64 and layer.conv_size == 4
+        assert layer.conv_window == 3
+        assert layer.scale == pytest.approx(0.25)
+        assert layer.a_init_range == (1.0, 16.0)
+
+    def test_explicit_head_dims_need_no_divisibility(self):
+        layer = KimiDeltaAttention(dim=30, num_heads=4, head_dim=8, value_head_dim=5)
+        assert (layer.key_dim, layer.value_dim) == (32, 20)
+
+    def test_optional_sublayers_are_absent_when_disabled(self):
+        layer = KimiDeltaAttention(
+            dim=16, num_heads=2, conv_size=0, use_output_gate=False,
+            output_norm_type=None, dropout_rate=0.0,
+        )
+        assert layer.q_conv is None and layer.k_conv is None and layer.v_conv is None
+        assert layer.g_up is None and layer.g_down is None
+        assert layer.o_norm is None and layer.dropout_layer is None
+        assert layer.conv_window == 0
+
+    @pytest.mark.parametrize("kwargs", [
+        dict(dim=0, num_heads=2),
+        dict(dim=32, num_heads=0),
+        dict(dim=30, num_heads=4),
+        dict(dim=32, num_heads=4, head_dim=0),
+        dict(dim=32, num_heads=4, value_head_dim=0),
+        dict(dim=32, num_heads=4, conv_size=-1),
+        dict(dim=32, num_heads=4, gate_low_rank_dim=0),
+        dict(dim=32, num_heads=4, chunk_size=0),
+        dict(dim=32, num_heads=4, mode="parallel"),
+        dict(dim=32, num_heads=4, a_init_range=(0.0, 1.0)),
+        dict(dim=32, num_heads=4, a_init_range=(5.0, 2.0)),
+        dict(dim=32, num_heads=4, dt_min=0.0),
+        dict(dim=32, num_heads=4, dt_min=0.2, dt_max=0.1),
+        dict(dim=32, num_heads=4, dt_init_floor=0.0),
+        dict(dim=32, num_heads=4, dropout_rate=1.5),
+        dict(dim=32, num_heads=4, eps=0.0),
+    ])
+    def test_invalid_arguments_raise(self, kwargs):
+        with pytest.raises(ValueError):
+            KimiDeltaAttention(**kwargs)
+
+    def test_build_refuses_a_wrong_input(self):
+        with pytest.raises(ValueError, match="3D"):
+            KimiDeltaAttention(dim=16, num_heads=2).build((2, 16))
+        with pytest.raises(ValueError, match="must match"):
+            KimiDeltaAttention(dim=16, num_heads=2).build((2, 5, 12))
+
+    def test_a_rank_3_mask_is_refused(self):
+        layer = KimiDeltaAttention(dim=16, num_heads=2)
+        x = _inputs(0, (2, 5, 16))
+        with pytest.raises(ValueError, match="rank-2"):
+            layer(x, attention_mask=np.ones((2, 5, 5), "float32"))
+
+
+# ---------------------------------------------------------------------
+# Shapes
+# ---------------------------------------------------------------------
+
+
+class TestShapes:
+    """Output shape equals the input shape for assorted head geometries."""
+
+    @pytest.mark.parametrize("mode", MODES)
+    @pytest.mark.parametrize("batch, n, dim, heads, head_dim, value_head_dim", [
+        (1, 1, 16, 2, None, None),
+        (2, 13, 32, 4, None, None),
+        (3, 9, 24, 3, 16, 4),
+        (2, 70, 32, 1, 8, 8),
+    ])
+    def test_output_shape_and_finite(self, mode, batch, n, dim, heads, head_dim, value_head_dim):
+        layer = KimiDeltaAttention(
+            dim=dim, num_heads=heads, head_dim=head_dim,
+            value_head_dim=value_head_dim, chunk_size=8, mode=mode,
+        )
+        y = np.asarray(layer(_inputs(0, (batch, n, dim))))
+        assert y.shape == (batch, n, dim)
+        assert np.all(np.isfinite(y))
+        assert layer.compute_output_shape((batch, n, dim)) == (batch, n, dim)
+
+    def test_disabled_options_still_give_the_input_shape(self):
+        layer = KimiDeltaAttention(
+            dim=16, num_heads=2, conv_size=0, use_output_gate=False,
+            output_norm_type=None, use_bias=True,
+        )
+        assert np.asarray(layer(_inputs(1, (2, 6, 16)))).shape == (2, 6, 16)
+
+
+# ---------------------------------------------------------------------
+# Independent float64 NumPy oracle of paper Eq. 1 and Eq. 10
+# ---------------------------------------------------------------------
+# Shares no code with the layer: explicit S_t = (I - b k k^T) Diag(a) S_{t-1}
+# + b k v^T, o_t = S_t^T q_t, one token, batch row and head at a time. It
+# reads the layer's weights and nothing else.
+
+
+def _np_silu(x):
+    return x / (1.0 + np.exp(-x))
+
+
+def _np_softplus(x):
+    return np.log1p(np.exp(-np.abs(x))) + np.maximum(x, 0.0)
+
+
+def _np_sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-x))
+
+
+def _np_dense(sub, x):
+    y = x @ np.asarray(sub.kernel, dtype=np.float64)
+    if sub.use_bias:
+        y = y + np.asarray(sub.bias, dtype=np.float64)
+    return y
+
+
+def _np_causal_depthwise_conv(conv, x):
+    # Keras grouped Conv1D kernel (k, 1, C); causal = k-1 zeros in front;
+    # cross-correlation.
+    kernel = np.asarray(conv.kernel, dtype=np.float64)[:, 0, :]
+    k = kernel.shape[0]
+    b, n, c = x.shape
+    padded = np.concatenate([np.zeros((b, k - 1, c)), x], axis=1)
+    return sum(padded[:, j:j + n, :] * kernel[j] for j in range(k))
+
+
+def _np_oracle(layer, x, keep=None):
+    """Output ``(B, N, dim)`` and final ``S`` of ``layer`` on ``x``, float64."""
+    x = np.asarray(x, dtype=np.float64)
+    b, n, _ = x.shape
+    h, dk, dv = layer.num_heads, layer.head_dim, layer.value_head_dim
+    if keep is not None:
+        keep = np.asarray(keep, dtype=np.float64)
+        x = x * keep[..., None]
+    q, k, v = (_np_dense(layer.q_proj, x), _np_dense(layer.k_proj, x),
+               _np_dense(layer.v_proj, x))
+    if keep is not None:
+        q, k, v = q * keep[..., None], k * keep[..., None], v * keep[..., None]
+    if layer.q_conv is not None:
+        q = _np_causal_depthwise_conv(layer.q_conv, q)
+        k = _np_causal_depthwise_conv(layer.k_conv, k)
+        v = _np_causal_depthwise_conv(layer.v_conv, v)
+    q, k, v = _np_silu(q), _np_silu(k), _np_silu(v)
+    f = _np_dense(layer.f_up, _np_dense(layer.f_down, x)).reshape(b, n, h, dk)
+    beta = _np_sigmoid(_np_dense(layer.b_proj, x))
+    q, k, v = q.reshape(b, n, h, dk), k.reshape(b, n, h, dk), v.reshape(b, n, h, dv)
+    rate = np.exp(np.asarray(layer.A_log, dtype=np.float64))
+    dt_bias = np.asarray(layer.dt_bias, dtype=np.float64).reshape(h, dk)
+    alpha = np.exp(-rate[None, None, :, None] * _np_softplus(f + dt_bias))
+    q = q / np.sqrt((q ** 2).sum(-1, keepdims=True) + layer.eps) / np.sqrt(dk)
+    k = k / np.sqrt((k ** 2).sum(-1, keepdims=True) + layer.eps)
+    if keep is not None:
+        beta = beta * keep[..., None]
+        alpha = np.where(keep[..., None, None] > 0, alpha, 1.0)
+    state = np.zeros((b, h, dk, dv))
+    o = np.zeros((b, n, h, dv))
+    eye = np.eye(dk)
+    for t in range(n):
+        for i in range(b):
+            for j in range(h):
+                kt = k[i, t, j][:, None]
+                transition = (eye - beta[i, t, j] * (kt @ kt.T)) @ np.diag(alpha[i, t, j])
+                state[i, j] = transition @ state[i, j] + beta[i, t, j] * (kt @ v[i, t, j][None, :])
+                o[i, t, j] = state[i, j].T @ q[i, t, j]
+    if layer.o_norm is not None:
+        scale = np.asarray(layer.o_norm.scale, dtype=np.float64)
+        o = o / np.sqrt((o ** 2).mean(-1, keepdims=True) + layer.o_norm.epsilon) * scale
+    if layer.g_up is not None:
+        o = o * _np_sigmoid(_np_dense(layer.g_up, _np_dense(layer.g_down, x))).reshape(b, n, h, dv)
+    out = _np_dense(layer.o_proj, o.reshape(b, n, h * dv))
+    if keep is not None:
+        out = out * keep[..., None]
+    return out, state
+
+
+class TestFloat64Equivalence:
+    """Chunk form == recurrent form == NumPy oracle, float64, to 1e-12."""
+
+    @pytest.mark.parametrize("n", (1, 17))
+    @pytest.mark.parametrize("overrides", [
+        dict(),
+        dict(chunk_size=3),
+        dict(conv_size=0),
+        dict(use_bias=True, output_norm_type=None),
+        dict(use_output_gate=False, head_dim=16, value_head_dim=4, num_heads=2),
+    ], ids=["base", "chunk3", "conv0", "bias_nonorm", "nogate_dk16_dv4"])
+    def test_chunk_recurrent_and_oracle_agree(self, float64_policy, overrides, n):
+        layer = _built(10, n, **overrides)
+        x = _inputs(10, (2, n, 32), dtype="float64")
+        y_chunk, s_chunk = layer(x, return_state=True)
+        layer.mode = "recurrent"
+        y_rec, s_rec = layer(x, return_state=True)
+        y_ref, s_ref = _np_oracle(layer, x)
+        assert np.asarray(y_chunk).dtype == np.float64
+        _close(y_chunk, y_rec, atol=1e-12)
+        _close(y_chunk, y_ref, atol=1e-12)
+        _close(y_rec, y_ref, atol=1e-12)
+        _close(s_chunk[0], s_ref, atol=1e-12)
+        _close(s_rec[0], s_ref, atol=1e-12)
+
+    def test_strong_decay_stays_exact(self, float64_policy):
+        # exp(A_log) in 50..100: the chunk form's exponents are all <= 0.
+        layer = _make(a_init_range=(50.0, 100.0), chunk_size=16)
+        layer.build((2, 40, 32))
+        a_log, dt_bias = np.asarray(layer.A_log), np.asarray(layer.dt_bias)
+        _randomize(layer, 11)
+        layer.A_log.assign(a_log)
+        layer.dt_bias.assign(dt_bias)
+        x = _inputs(11, (2, 40, 32), dtype="float64")
+        y_chunk = layer(x)
+        layer.mode = "recurrent"
+        _close(y_chunk, layer(x), atol=1e-12)
+        _close(y_chunk, _np_oracle(layer, x)[0], atol=1e-12)
+
+    def test_masked_run_matches_the_oracle(self, float64_policy):
+        layer = _built(12, 13)
+        x = _inputs(12, (2, 13, 32), dtype="float64")
+        keep = np.ones((2, 13))
+        keep[0, 9:] = 0.0
+        keep[1, :4] = 0.0
+        y, s = layer(x, attention_mask=keep, return_state=True)
+        y_ref, s_ref = _np_oracle(layer, x, keep=keep)
+        _close(y, y_ref, atol=1e-12)
+        _close(s[0], s_ref, atol=1e-12)
+
+
+# ---------------------------------------------------------------------
+# Gradients
+# ---------------------------------------------------------------------
+
+
+class TestGradients:
+    """Every trainable variable gets a finite gradient; both modes agree."""
+
+    @staticmethod
+    def _gradients(layer, x):
+        x = tf.convert_to_tensor(x)
+        with tf.GradientTape() as tape:
+            tape.watch(x)
+            loss = tf.reduce_sum(tf.square(layer(x, training=True)))
+        return tape.gradient(loss, [x] + layer.trainable_variables)
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_gradients_are_finite_and_complete(self, mode):
+        layer = _built(13, 11, mode=mode, use_bias=True)
+        grads = self._gradients(layer, _inputs(13, (2, 11, 32)))
+        assert len(layer.trainable_variables) == 21
+        for grad, var in zip(grads[1:], layer.trainable_variables):
+            assert grad is not None, var.path
+            assert np.all(np.isfinite(np.asarray(grad))), var.path
+            assert np.any(np.asarray(grad) != 0.0), var.path
+
+    def test_chunk_and_recurrent_gradients_agree_in_float64(self, float64_policy):
+        layer = _built(14, 19)
+        x = _inputs(14, (2, 19, 32), dtype="float64")
+        g_chunk = self._gradients(layer, x)
+        layer.mode = "recurrent"
+        g_rec = self._gradients(layer, x)
+        for a, b in zip(g_chunk, g_rec):
+            a, b = np.asarray(a), np.asarray(b)
+            assert np.abs(a - b).max() <= 1e-10 * max(np.abs(b).max(), 1.0)
+
+
+# ---------------------------------------------------------------------
+# Causality and padding
+# ---------------------------------------------------------------------
+
+
+class TestCausalityAndPadding:
+    """Earlier outputs ignore later tokens; padding acts as deletion."""
+
+    @pytest.mark.parametrize("mode", MODES)
+    @pytest.mark.parametrize("n, p", [(20, 11), (20, 7), (17, 16)])
+    def test_a_later_token_never_moves_an_earlier_output(self, mode, n, p):
+        layer = _built(15, n, mode=mode)
+        x = _inputs(15, (2, n, 32))
+        y0 = np.asarray(layer(x))
+        x2 = x.copy()
+        x2[:, p] += _inputs(16, (2, 32), scale=5.0)
+        y1 = np.asarray(layer(x2))
+        np.testing.assert_array_equal(y1[:, :p], y0[:, :p])
+        assert np.abs(y1[:, p:] - y0[:, p:]).max() > 1e-3
+
+    @pytest.mark.parametrize("mode", MODES)
+    @pytest.mark.parametrize("use_bias", (False, True))
+    def test_left_and_right_padding_equal_the_unpadded_run(self, mode, use_bias):
+        n, pads = 11, 6
+        layer = _built(17, n + pads, mode=mode, use_bias=use_bias)
+        real = _inputs(17, (2, n, 32))
+        y_ref, s_ref = layer(real, return_state=True)
+        garbage = _inputs(18, (2, pads, 32), scale=3.0)
+        keep = np.concatenate([np.ones((2, n)), np.zeros((2, pads))], 1).astype("float32")
+        cases = {
+            "right": (np.concatenate([real, garbage], 1), keep, slice(0, n), slice(n, None)),
+            "left": (np.concatenate([garbage, real], 1), keep[:, ::-1].copy(),
+                     slice(pads, None), slice(0, pads)),
+        }
+        for name, (x, mask, kept, padded) in cases.items():
+            y, s = layer(x, attention_mask=mask, return_state=True)
+            y = np.asarray(y)
+            _close(y[:, kept], y_ref, atol=1e-5)
+            assert np.all(y[:, padded] == 0.0), name
+            for part, whole in zip(s, s_ref):
+                _close(part, whole, atol=1e-5)
+
+    @pytest.mark.parametrize("conv_size, exact", [(0, True), (4, False)])
+    def test_an_interior_hole_is_exact_only_without_a_conv_window(self, conv_size, exact):
+        # Documented: a masked position between kept ones still occupies a
+        # slot of the short convolution's window.
+        layer = _built(19, 9, mode="recurrent", conv_size=conv_size)
+        x = _inputs(19, (1, 9, 32))
+        keep = np.ones((1, 9), "float32")
+        keep[0, 4] = 0.0
+        y_hole = np.delete(np.asarray(layer(x, attention_mask=keep)), 4, axis=1)
+        y_deleted = np.asarray(layer(np.delete(x, 4, axis=1)))
+        _close(y_hole[:, :4], y_deleted[:, :4], atol=1e-5)
+        gap = np.abs(y_hole[:, 4:] - y_deleted[:, 4:]).max()
+        assert (gap <= 1e-5) if exact else (gap > 1e-2), gap
+
+    def test_a_boolean_mask_equals_a_float_mask(self):
+        layer = _built(20, 8)
+        x = _inputs(20, (2, 8, 32))
+        keep = np.ones((2, 8), "float32")
+        keep[:, 6:] = 0.0
+        np.testing.assert_array_equal(
+            np.asarray(layer(x, attention_mask=keep > 0)),
+            np.asarray(layer(x, attention_mask=keep)),
+        )
+
+
+# ---------------------------------------------------------------------
+# Mixed precision
+# ---------------------------------------------------------------------
+
+
+class TestMixedPrecision:
+    """Under mixed_float16 the recurrence and S stay float32, all finite."""
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_mixed_float16_is_finite(self, mixed_float16_policy, mode):
+        layer = KimiDeltaAttention(dim=32, num_heads=2, chunk_size=8, mode=mode)
+        x = _inputs(21, (2, 19, 32), scale=30.0)
+        y, (s, conv_q, conv_k, conv_v) = layer(x, return_state=True)
+        assert layer.compute_dtype == "float16"
+        assert y.dtype == "float16" and conv_q.dtype == "float16"
+        assert s.dtype == "float32"
+        for t in (y, s, conv_q, conv_k, conv_v):
+            assert np.all(np.isfinite(np.asarray(t, dtype=np.float32)))
+        y2 = layer(x[:, 15:], initial_state=(s, conv_q, conv_k, conv_v))
+        assert np.all(np.isfinite(np.asarray(y2, dtype=np.float32)))
+
+
+# ---------------------------------------------------------------------
+# Serialization
+# ---------------------------------------------------------------------
+
+
+class TestSerialization:
+    """get_config covers every argument; .keras round trips exactly."""
+
+    NON_DEFAULT: Dict[str, Any] = dict(
+        dim=24, num_heads=3, head_dim=4, value_head_dim=6, conv_size=3,
+        gate_low_rank_dim=5, use_output_gate=False, output_norm_type="rms_norm",
+        output_norm_kwargs={"epsilon": 1e-4}, chunk_size=5, mode="recurrent",
+        a_init_range=(2.0, 8.0), dt_min=0.002, dt_max=0.05, dt_init_floor=2e-4,
+        dropout_rate=0.1, use_bias=True, eps=1e-5,
+        kernel_initializer="he_normal", bias_initializer="ones",
+        kernel_regularizer=keras.regularizers.L2(1e-4),
+        bias_regularizer=keras.regularizers.L1(1e-5),
+    )
+
+    def test_get_config_covers_every_init_argument(self):
+        params = {
+            name for name in inspect.signature(KimiDeltaAttention.__init__).parameters
+            if name not in ("self", "kwargs")
+        }
+        config = KimiDeltaAttention(**self.NON_DEFAULT).get_config()
+        assert params <= set(config), sorted(params - set(config))
+        assert set(self.NON_DEFAULT) == params
+
+    def test_from_config_rebuilds_the_same_config(self):
+        layer = KimiDeltaAttention(**self.NON_DEFAULT)
+        rebuilt = KimiDeltaAttention.from_config(layer.get_config())
+        assert rebuilt.get_config() == layer.get_config()
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_keras_round_trip_gives_identical_outputs(self, tmp_path, mode):
+        inp = keras.Input((None, 32))
+        layer = KimiDeltaAttention(dim=32, num_heads=4, chunk_size=4, mode=mode, use_bias=True)
+        model = keras.Model(inp, layer(inp))
+        _randomize(layer, 22)
+        x = _inputs(22, (2, 9, 32))
+        path = tmp_path / "kda.keras"
+        model.save(path)
+        loaded = keras.models.load_model(path)
+        _close(loaded(x), model(x), atol=1e-6)
+        for a, b in zip(loaded.get_weights(), model.get_weights()):
+            np.testing.assert_array_equal(a, b)
+        assert loaded.layers[1].get_config() == layer.get_config()
+
+
+# ---------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------
+
+
+class TestFactory:
+    """``create_attention_layer('kimi_delta', ...)`` builds this layer."""
+
+    def test_factory_builds_the_layer(self):
+        layer = create_attention_layer("kimi_delta", dim=32, num_heads=4)
+        assert isinstance(layer, KimiDeltaAttention)
+        assert layer.dim == 32 and layer.num_heads == 4
+        assert np.asarray(layer(_inputs(23, (2, 7, 32)))).shape == (2, 7, 32)
+
+    def test_factory_forwards_optional_arguments(self):
+        layer = create_attention_layer(
+            "kimi_delta", name="kda", dim=32, num_heads=4, mode="recurrent", conv_size=0,
+        )
+        assert layer.name == "kda" and layer.mode == "recurrent" and layer.conv_size == 0
+
+    def test_registry_defaults_match_the_constructor(self):
+        signature = inspect.signature(KimiDeltaAttention.__init__).parameters
+        entry = ATTENTION_REGISTRY["kimi_delta"]
+        assert entry["required_params"] == ["dim", "num_heads"]
+        for name, default in entry["optional_params"].items():
+            assert signature[name].default == default, name
