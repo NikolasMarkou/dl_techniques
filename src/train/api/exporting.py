@@ -25,6 +25,17 @@ unstandardized ``[0, 1]`` pixels gives numbers and no error.
 The command line therefore writes ``<out>.task.json`` beside every export (:func:`export`'s
 ``record``), and its log says so.
 
+A DENOISING model (``image_denoising``) takes ``(batch, height, width, channels)`` float32 pixels in ``[0, 1]``: no
+mean, no standard deviation and no sigma input (it is blind to the noise level). It returns the denoised image RAW,
+at the input's size, NOT clipped to ``[0, 1]`` (the PNGs of ``predict`` are clipped at the byte boundary and
+nowhere else), and a pad to the record's ``size_multiple`` (reflect, at the end of each side) before the call and a
+crop after are the caller's, as ``DenoisingPredictor`` does them. The command line exports it with a FREE height and
+width (``input_shape=(None, None, channels)``, which ``export`` accepts only for a model whose own input is free);
+a fixed ``input_shape`` is a fixed-size file. The task refuses the cells of its table that do not hold, each
+with its measured reason (:data:`train.api.denoising_predictor.EXPORT_REFUSALS`): a fixed-shape ``tflite`` of a U-Net
+family and an ``onnx`` of SCUNet with a free height and width. Every other cell matches Keras to 2.3e-6 of the
+scale at two sizes (``test_denoising_predictor_and_export.py``).
+
 Numerical agreement is RELATIVE to the scale of the scores, and for the four segmentation families it is a CONTRACT PER FAMILY
 (D-029, which replaces D-088's one relative 1e-4 for every family, itself a correction of D-081's absolute 1e-4, measured on scores of scale 1:
 an AccUNet's untrained logits are 3e-5, so its head was lifted to 1). For ``saved_model``, ``tflite`` and ``onnx``, read by their own
@@ -108,11 +119,13 @@ Interface contract
     :param input_shape: ``(height, width, channels)`` without the batch. Needed by
         ``saved_model``, ``tflite`` and ``onnx`` when the model has no ``inputs`` of its own
         (a subclassed model such as the ViT); a functional model supplies it. ``keras``
-        ignores it.
+        ignores it. A height or width may be ``None`` (a free size) only where the model's own input
+        is ``None`` there (a denoiser); any other ``None`` is refused.
     :param record: a checked ``task.json`` record (:mod:`train.api.predictor`), or ``None``.
         When given it is checked again with ``check_record`` (a record of an older layout is a
-        ``ConfigError`` naming the retraining) and written, last, to ``<out>.task.json`` (``out`` plus
-        :data:`~train.api.run_dir.TASK_SUFFIX`), which must not exist, and the log says where.
+        ``ConfigError`` naming the retraining), the task's ``EXPORT_RULES`` row refuses the cells of its table
+        that do not hold (before anything is written), and the record is written, last, to ``<out>.task.json``
+        (``out`` plus :data:`~train.api.run_dir.TASK_SUFFIX`), which must not exist; the log says where.
     :return: the :class:`pathlib.Path` written.
     :raises ConfigError: for an unknown format, a ``record`` that fails ``check_record``, a model
         that is not a built Keras model, a name of the wrong kind, an ``out`` (or
@@ -191,25 +204,43 @@ def check_free(path: Path, key: str, command: str = "export") -> None:
             return
 
 
-def _input_spec(model: Any, input_shape: Optional[Sequence[int]]) -> Any:
-    """Return the ``tf.TensorSpec`` ``(None, H, W, C)`` float32 the converters trace the model with."""
+def _input_spec(model: Any, input_shape: Optional[Sequence[Optional[int]]]) -> Any:
+    """Return the ``tf.TensorSpec`` ``(None, H, W, C)`` float32 the converters trace the model with.
+
+    A height or width may be ``None`` (a free side, ``dynamic`` export) only where the model's own input has
+    ``None`` there; the channel count is always a positive int.
+    """
     import tensorflow as tf
 
+    inputs = getattr(model, "inputs", None)
+    own = tuple(inputs[0].shape[1:]) if inputs and len(inputs) == 1 else None
     if input_shape is None:
-        inputs = getattr(model, "inputs", None)
-        if not inputs or len(inputs) != 1:
+        if own is None:
             raise ConfigError(
                 "Invalid value for 'input_shape': this model does not report one input, so "
                 "pass input_shape=(height, width, channels)"
             )
-        input_shape = tuple(inputs[0].shape[1:])
+        input_shape = own
     shape = tuple(input_shape)
+
+    def positive(side: Any) -> bool:
+        return isinstance(side, int) and not isinstance(side, bool) and side > 0
+
+    # DECISION plan-2026-11-10T095307-d483ffab/D-031
+    # A free side is accepted ONLY where the model's own input is free there (a denoiser is built and saved at
+    # (None, None, C)). Do NOT accept ``None`` for any model: a classifier traced at a free size fails inside the
+    # trace with a message about a layer, and the other tasks' exports must refuse what they always refused.
+    def free(index: int) -> bool:
+        return own is not None and len(own) == 3 and own[index] is None
+
     if not (
-        len(shape) == 3 and all(isinstance(side, int) and not isinstance(side, bool) and side > 0 for side in shape)
+        len(shape) == 3
+        and positive(shape[2])
+        and all(positive(shape[i]) or (shape[i] is None and free(i)) for i in (0, 1))
     ):
         raise ConfigError(
             f"Invalid value for 'input_shape': expected (height, width, channels) of positive "
-            f"ints, got {input_shape!r}"
+            f"ints, got {input_shape!r} (a height or width may be None only for a model that itself takes any size)"
         )
     return tf.TensorSpec((None, *shape), tf.float32, name="input")
 
@@ -468,6 +499,11 @@ def export(
             f"called or loaded), got {type(model).__name__}"
         )
     spec = None if format == "keras" else _input_spec(model, input_shape)
+    if record is not None and spec is not None:
+        # The task's own refusals (a cell of its export table, a size its model cannot be traced at): before any write.
+        from .predictor import EXPORT_RULES
+
+        EXPORT_RULES[record["task"]].check(record, format, tuple(spec.shape.as_list()[1:]))
     if format == "tflite":
         _refuse_bfloat16_tflite(model)
 
@@ -488,8 +524,7 @@ def export(
         with open(beside, "x") as handle:
             json.dump(dict(record), handle, indent=2)
             handle.write("\n")
-        logger.info(
-            f"Wrote {beside}: the exported model takes inputs standardized with the run's "
-            "mean and std (pixels in [0, 1], then (x - mean) / std) and returns raw logits"
-        )
+        from .predictor import EXPORT_RULES
+
+        logger.info(f"Wrote {beside}: {EXPORT_RULES[record['task']].note(record)}")
     return path

@@ -138,8 +138,7 @@ from the OPTIONAL ``variant_overrides``.
         called once on zeros, so a model whose output width (classification) or output map
         (segmentation: ``input_size`` and the class count; denoising: ONE tensor of the probe image's
         size and the record's channels) does not match the record is refused here. A ``image_denoising``
-        record is read and checked, then refused with one sentence: its predictor is a later step of
-        the plan (the ``PREDICTORS`` row raises).
+        record gives a :class:`~train.api.denoising_predictor.DenoisingPredictor`.
     :raises ConfigError: for a missing path, ``task.json`` or model file, a model file that
         is not an intact ``.keras`` archive (one cut short by a kill, or a zip with no
         ``config.json`` or no weights, is named, not a Keras traceback), a bad record, a
@@ -155,6 +154,13 @@ from the OPTIONAL ``variant_overrides``.
         reads the task before it loads anything); and the model input a record names,
         ``(height, width, channels)``: ``input_shape`` for classification, ``input_size`` and
         ``channels`` for segmentation, the probe side (see above) twice and ``channels`` for denoising.
+
+``EXPORT_RULES[task]`` (an :class:`ExportRule`)
+    What ``export`` asks the task: ``shape_of(record)`` is the shape the command line traces (the record's input
+    shape; a denoiser's is ``(None, None, channels)``, a free height and width), ``check(record, format, shape)``
+    raises a :class:`ConfigError` for a cell of the task's export table that is refused (denoising only,
+    :data:`train.api.denoising_predictor.EXPORT_REFUSALS`) and ``note(record)`` is the sentence logged beside an
+    export. A row in every table of :data:`TASK_TABLES`, this one included.
 
 ``Predictor.predict(x, top_k=None, threshold=None)``
     :param x: one image or several. A single image is a path (``str`` or ``Path``), a
@@ -209,7 +215,7 @@ import json
 import math
 import os
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple, Union
 
 from . import registry
 from .errors import ConfigError
@@ -1413,7 +1419,8 @@ class Predictor:
 #       an input-shape complaint names;
 #   OUTPUT_CHECKS[task](output, record) -> None, raising ConfigError when the model's output on one
 #       zero input is not what the record names;
-#   PREDICTORS[task](model, record) -> the object ``load_model`` returns.
+#   PREDICTORS[task](model, record) -> the object ``load_model`` returns;
+#   EXPORT_RULES[task] -> an :class:`ExportRule` (the traced shape, the refused cells, the logged sentence).
 # A row that imports TensorFlow does it inside the callable, never at module scope.
 # ---------------------------------------------------------------------
 
@@ -1459,16 +1466,55 @@ def _segmentation_predictor(model: Any, record: Mapping[str, Any]) -> Any:
 
 
 def _denoising_predictor(model: Any, record: Mapping[str, Any]) -> Any:
-    """Refuse: no denoising predictor exists yet (plan d483ffab step 12 replaces this row with the real class)."""
-    # DECISION plan-2026-11-10T095307-d483ffab/D-028
-    # The record, the model checks and the output check are real; only the predictor is missing, and this row says so
-    # in one sentence. Do NOT return the classification ``Predictor`` here (it would standardize and softmax an image)
-    # and do NOT leave the row out (``TASK_TABLES`` would then refuse the whole record as an unknown task, and the
-    # record would never be checked against its model).
-    raise ConfigError(
-        f"This version cannot predict with a {record['task']} run yet: its models and {TASK_FILE} are written and "
-        "valid, but the denoising predictor is not part of it"
+    from .denoising_predictor import DenoisingPredictor
+
+    return DenoisingPredictor(model, record)
+
+
+class ExportRule(NamedTuple):
+    """One task's part of ``export``, a row of :data:`EXPORT_RULES`.
+
+    :param shape_of: ``f(record) -> (height, width, channels)`` the command line traces the export with; a side
+        is ``None`` when the model takes any size (``export`` accepts that only when the model's own input does).
+    :param check: ``f(record, format, shape) -> None`` raising :class:`ConfigError` for a cell of the task's
+        export table that is refused; it runs before anything is written. ``shape`` is what the export traces.
+    :param note: ``f(record) -> str``, the sentence the command line logs beside the exported model.
+    """
+
+    shape_of: Callable[[Mapping[str, Any]], Tuple[Optional[int], ...]]
+    check: Callable[[Mapping[str, Any], str, Tuple[Optional[int], ...]], None]
+    note: Callable[[Mapping[str, Any]], str]
+
+
+def _no_export_check(record: Mapping[str, Any], format: str, shape: Tuple[Optional[int], ...]) -> None:
+    """The export rule of a task whose every cell exports: nothing is refused."""
+
+
+def _standardized_logits_note(record: Mapping[str, Any]) -> str:
+    return (
+        "the exported model takes inputs standardized with the run's mean and std (pixels in [0, 1], then "
+        "(x - mean) / std) and returns raw logits"
     )
+
+
+def _denoising_export_shape(record: Mapping[str, Any]) -> Tuple[Optional[int], ...]:
+    # DECISION plan-2026-11-10T095307-d483ffab/D-031
+    # A denoiser is exported with a FREE height and width. Do NOT trace it at the probe size (the shape of
+    # ``INPUT_SHAPE_OF``): a fixed-shape tflite of a U-Net returns wrong numbers at any other size WITHOUT an error
+    # (measured, step 2(b)), and the record holds no size to fix it at (D-028).
+    return (None, None, record["channels"])
+
+
+def _denoising_export_check(record: Mapping[str, Any], format: str, shape: Tuple[Optional[int], ...]) -> None:
+    from .denoising_predictor import check_export
+
+    check_export(record, format, shape)
+
+
+def _denoising_export_note(record: Mapping[str, Any]) -> str:
+    from .denoising_predictor import export_note
+
+    return export_note(record)
 
 
 #: Geometry keys and the channel count, per task (see the contract above).
@@ -1508,6 +1554,14 @@ PREDICTORS: Dict[str, Callable[[Any, Mapping[str, Any]], Any]] = {
     DENOISING: _denoising_predictor,
 }
 
+#: What ``export`` does per task (see :class:`ExportRule`). Classification and segmentation trace at the record's
+#: own input shape, refuse no cell and say the exported model takes standardized inputs and returns logits.
+EXPORT_RULES: Dict[str, ExportRule] = {
+    CLASSIFICATION: ExportRule(_classification_input_shape, _no_export_check, _standardized_logits_note),
+    SEGMENTATION: ExportRule(_segmentation_input_shape, _no_export_check, _standardized_logits_note),
+    DENOISING: ExportRule(_denoising_export_shape, _denoising_export_check, _denoising_export_note),
+}
+
 #: Every per-task table by name. A task is KNOWN to this reader only when it has a row in all of
 #: them; ``record_problems`` refuses any other, naming the tasks of the first table it is absent
 #: from. ``tests/test_train/test_api/test_a_third_task_record_dispatches_by_table.py`` walks this.
@@ -1520,4 +1574,5 @@ TASK_TABLES: Dict[str, Mapping[str, Any]] = {
     "INPUT_KEY": INPUT_KEY,
     "OUTPUT_CHECKS": OUTPUT_CHECKS,
     "PREDICTORS": PREDICTORS,
+    "EXPORT_RULES": EXPORT_RULES,
 }

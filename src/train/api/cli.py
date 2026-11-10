@@ -20,7 +20,9 @@ help word, prints its config keys; any other arguments go to ``run_task``.
     the model is loaded and before TensorFlow is imported: the keys (none empty), that
     ``model`` exists, ``format``, the suffix of ``out``, and that ``out`` and
     ``<out>.task.json`` are free. The exported model takes inputs standardized with the run's
-    mean and std and returns raw logits (D-068); ``<out>.task.json`` is written beside it and
+    mean and std and returns raw logits (D-068); a denoising model takes ``[0, 1]`` pixels at any size
+    and returns the raw denoised image (``EXPORT_RULES`` of ``train.api.predictor``, which also
+    refuses the cells of its table that do not hold); ``<out>.task.json`` is written beside it and
     the log says so. Exit 0 and ONLY the written path on stdout (whatever Keras prints while
     exporting goes to stderr, failed runs too), else 2.
 
@@ -38,6 +40,13 @@ help word, prints its config keys; any other arguments go to ``run_task``.
     names and one ``{"path", "mask", "size"}`` per image
     (:func:`train.api.segmentation_predictor.write_predictions`). Two images with one stem are
     refused before the model is loaded, naming both; so is a record whose ``output`` is ``logits``.
+
+    For a DENOISING run ``out`` is a new DIRECTORY too: one ``<stem>.png`` per image, at the size of that
+    image (8 bit, grey or RGB as the model's channels), the raw denoised output clipped to ``[0, 1]`` and
+    rounded to a byte (the one place it is clipped), and, written last, ``index.json`` with one
+    ``{"path", "image", "size"}`` per image (:func:`train.api.denoising_predictor.write_predictions`). The
+    whole image goes through the model in one pass; tiling (``tile``, ``tile_overlap``) is an argument of
+    ``DenoisingPredictor.predict`` from Python, and a pass that runs out of memory says so.
 
 ``convert <dataset> key=value ...``
     Writes a source dataset as index masks and CSV listings the segmentation task reads, outside the
@@ -154,7 +163,7 @@ from .config import (
     validate,
 )
 from .errors import ConfigError, ConfigValidationError, DLTrainError
-from .predictor import CLASSIFICATION, SEGMENTATION, known_tasks_line, record_beside
+from .predictor import CLASSIFICATION, DENOISING, SEGMENTATION, known_tasks_line, record_beside
 
 # ---------------------------------------------------------------------
 
@@ -274,11 +283,19 @@ EXPORT_NOTES = (
     "(height and width are fixed to it, the batch is free); the mask is the argmax over the last",
     "axis, after the caller resizes the scores to the picture. mixed_float16 runs differ from Keras",
     "by up to about 1e-4 in onnx.",
+    "",
+    "a denoising model takes float32 images (batch, height, width, channels) with pixels in [0, 1]:",
+    "no mean, no std and no sigma input (it is blind to the noise level), and the file's height and width",
+    "are free. It returns the denoised image RAW, at the input's size, NOT clipped to [0, 1] (clip it",
+    "yourself where a picture is made). Pad each side to a multiple of size_multiple (in <out>.task.json;",
+    "reflect padding) before calling and crop the result after: a U-Net family fails on another size.",
+    "Refused with the reason: a tflite file of a U-Net family (a fixed-shape file is silently wrong at",
+    "another size), and an onnx file of scunet with a free height and width (it runs only at multiples of 64).",
 )
 PREDICT_OPTIONS = (
     Option("model", "a run directory (its best_model.keras) or a .keras file beside its task.json"),
     Option("data", "an image file, or a directory of images (searched recursively)"),
-    Option("out", "a new .json file; it must not exist (a segmentation model writes a new directory of PNG masks and an index.json there)"),
+    Option("out", "a new .json file; it must not exist (a segmentation model writes a new directory of PNG masks and an index.json there; a denoising model a directory of PNG images and an index.json)"),
 )
 
 
@@ -353,7 +370,7 @@ def _export(args: List[str]) -> int:
     # comes first: ``check_target`` imports tf2onnx (and so TensorFlow) for ``onnx``.
     model_path = _existing_model_path(values["model"])
     target = check_target(values["out"], values["format"], with_record=True)
-    from .predictor import input_shape_of, load_model
+    from .predictor import EXPORT_RULES, load_model
 
     # DECISION plan-2026-10-30T132432-a865fa08/D-068: stdout carries ONLY the written path, so
     # ``OUT=$(python -m train export ...)`` works. Keras prints "Saved artifact at ..." and the
@@ -365,7 +382,7 @@ def _export(args: List[str]) -> int:
             model=loaded.model,
             out=target,
             format=values["format"],
-            input_shape=input_shape_of(loaded.record),
+            input_shape=EXPORT_RULES[loaded.record["task"]].shape_of(loaded.record),
             record=loaded.record,
         )
     sys.stdout.write(f"{written}\n")
@@ -464,6 +481,18 @@ def _predict_masks(model_path: Path, record: Mapping[str, Any], files: List[Path
     return 0
 
 
+def _predict_images(model_path: Path, record: Mapping[str, Any], files: List[Path], out: Path) -> int:
+    """Write the denoised images of ``files`` as PNGs and an index into the new directory ``out``."""
+    from .denoising_predictor import check_png_output, png_names, write_predictions
+    from .predictor import load_model
+
+    check_png_output(record)
+    png_names(files)
+    write_predictions(load_model(model_path), files, out)
+    sys.stdout.write(f"{out}\n")
+    return 0
+
+
 #: What ``predict`` writes, per task: ``writer(model_path, record, files, out) -> exit code``. A task
 #: that can be loaded (a row in every table of ``train.api.predictor.TASK_TABLES``) and predicted
 #: with has one row here; the keys are the task words of ``train.api.predictor``, which imports no
@@ -471,6 +500,7 @@ def _predict_masks(model_path: Path, record: Mapping[str, Any], files: List[Path
 PREDICT_WRITERS: Dict[str, Callable[[Path, Mapping[str, Any], List[Path], Path], int]] = {
     CLASSIFICATION: _predict_labels,
     SEGMENTATION: _predict_masks,
+    DENOISING: _predict_images,
 }
 
 

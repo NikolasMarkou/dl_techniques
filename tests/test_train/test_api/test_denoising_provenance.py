@@ -7,7 +7,7 @@ stamp that is dropped shows), then:
 
 * ``task.json`` is the record of the task (:data:`train.api.predictor.RECORD_KEYS`), passes its own gate, and
   ``load_model`` reads it, checks the model against it (a wrong variant and a wrong channel count are refused) and
-  stops at the one thing this version does not have, the denoising predictor (step 12 replaces that arm);
+  returns the denoising predictor (step 12 replaced the refusing stub of step 11);
 * ``config.json`` holds the stamps beside the config's own fields, each equal to the value the config holds, and
   ``convnext_version`` for ``bfconvunext`` alone;
 * the four legacy load paths, called for real on every run: ``eval_psnr_vs_noise.load_denoiser`` (and a PSNR from
@@ -199,11 +199,13 @@ def test_the_task_json_is_the_denoising_record_of_the_run(finished):
     assert read_record(finished.dir / "task.json") == record
 
 
-def test_load_model_reads_the_record_and_stops_only_at_the_missing_predictor(finished):
-    # Step 12 replaces this arm with the predictor itself. Reaching THIS message means the record passed its gate, the
-    # model is the family and variant it names, takes its channels and answers with one image tensor.
-    with pytest.raises(ConfigError, match=r"cannot predict with a image_denoising run yet"):
-        load_model(finished.dir)
+def test_load_model_reads_the_record_and_returns_the_denoising_predictor(finished):
+    # Step 12 replaced the refusing stub: the record passed its gate, the model is the family and variant it names,
+    # takes its channels and answers with one image tensor, and `load_model` hands back the predictor of the task.
+    from train.api.denoising_predictor import DenoisingPredictor
+
+    loaded = load_model(finished.dir)
+    assert type(loaded) is DenoisingPredictor and loaded.record == read_record(finished.dir / "task.json")
 
 
 def test_load_model_refuses_a_record_that_is_not_the_model(finished, tmp_path):

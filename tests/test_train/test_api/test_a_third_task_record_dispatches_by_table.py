@@ -100,6 +100,11 @@ FAKE_ROWS = {
     "INPUT_KEY": "frame_size",
     "OUTPUT_CHECKS": fake_output_check,
     "PREDICTORS": FakePredictor,
+    "EXPORT_RULES": predictor.ExportRule(
+        shape_of=lambda record: (None, None, record["channels"]),
+        check=lambda record, format, shape: CALLS.append(("EXPORT_RULES.check", record["task"], format, shape)),
+        note=lambda record: "the fake export note",
+    ),
 }
 
 # The family the fake task trains: a module-level table and a factory this module defines, named by
@@ -172,9 +177,9 @@ def test_the_real_tasks_have_a_row_in_every_table(name):
     assert sorted(TASK_TABLES[name]) == sorted(REAL_TASKS), name
 
 
-def test_the_predict_writers_are_the_two_tasks_that_can_predict():
-    # The denoising task has a record and a load row; its predictor and its writer are a later step of the plan.
-    assert sorted(cli.PREDICT_WRITERS) == sorted([CLASSIFICATION, SEGMENTATION])
+def test_the_predict_writers_are_the_three_tasks_that_can_predict():
+    # Denoising's writer arrived with its predictor (plan d483ffab step 12): one row per task that can be predicted.
+    assert sorted(cli.PREDICT_WRITERS) == sorted(REAL_TASKS)
 
 
 # ---------------------------------------------------------------------
@@ -272,6 +277,27 @@ def test_predict_writes_through_the_tasks_writer(run_dir, tmp_path, capsys):
 def test_the_real_tasks_keep_their_predictors():
     assert PREDICTORS[CLASSIFICATION].__name__ == "_classification_predictor"
     assert PREDICTORS[SEGMENTATION].__name__ == "_segmentation_predictor"
+    assert PREDICTORS[DENOISING].__name__ == "_denoising_predictor"
+
+
+def test_export_reaches_the_tasks_rule_for_its_shape_its_refusals_and_its_note(run_dir, tmp_path, monkeypatch):
+    """``export`` is not a classification function with a segmentation branch: it asks the task's ``EXPORT_RULES`` row."""
+    from train.api.exporting import export
+
+    record = fake_record()
+    model = keras.models.load_model(run_dir / "best_model.keras", compile=False)
+    shape = predictor.EXPORT_RULES[FAKE].shape_of(record)
+    assert shape == (None, None, 1)
+    CALLS.clear()
+    export(model=model, out=tmp_path / "m_saved_model", format="saved_model", input_shape=(8, 8, 1), record=record)
+    assert [call for call in CALLS if call[0] == "EXPORT_RULES.check"] == [("EXPORT_RULES.check", FAKE, "saved_model", (8, 8, 1))]
+    # A row that refuses stops the export before anything is written.
+    refusing = predictor.ExportRule(fake_input_shape, lambda *_: (_ for _ in ()).throw(ConfigError("the fake refuses")),
+                                    lambda record: "x")
+    monkeypatch.setitem(predictor.EXPORT_RULES, FAKE, refusing)
+    with pytest.raises(ConfigError, match="the fake refuses"):
+        export(model=model, out=tmp_path / "n_saved_model", format="saved_model", input_shape=(8, 8, 1), record=record)
+    assert not (tmp_path / "n_saved_model").exists() and not (tmp_path / "n_saved_model.task.json").exists()
 
 
 # ---------------------------------------------------------------------
