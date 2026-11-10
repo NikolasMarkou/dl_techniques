@@ -13,7 +13,7 @@ Interface contract
     :param family: model family name, e.g. ``"vit"``.
     :param variant: variant name, e.g. ``"vit_pico"``.
     :param dataset: dataset name, e.g. ``"cifar10"``.
-    :param num_classes: number of classes the data has.
+    :param num_classes: number of classes the data has; ``None`` for a task whose data has none (D-005).
     :param image_size: side length of the (square) input image; ``None`` for a segmentation run
         (its size is a ``[height, width]`` pair and lives in the task's own facts).
     :param defaults: the family recipe as a nested mapping,
@@ -93,7 +93,7 @@ class AutoContext:
     family: str
     variant: str
     dataset: str
-    num_classes: int
+    num_classes: Optional[int]
     image_size: Optional[int]
     defaults: Mapping[str, Any]
 

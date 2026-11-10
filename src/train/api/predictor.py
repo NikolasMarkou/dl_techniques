@@ -193,7 +193,7 @@ import json
 import math
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from . import registry
 from .errors import ConfigError
@@ -500,18 +500,19 @@ def _header_problems(record: Mapping[str, Any], keys: Tuple[str, ...]) -> Tuple[
     return lines, not missing
 
 
-def _identity_problems(record: Mapping[str, Any]) -> List[str]:
-    """Return the problems of ``task``, ``model``, ``family``, ``variant`` and ``class_names``."""
+def _identity_problems(record: Mapping[str, Any], keys: Tuple[str, ...]) -> List[str]:
+    """Return the problems of ``task``, ``model``, ``family``, ``variant`` and, where ``keys`` hold it, ``class_names``."""
     lines: List[str] = []
     for key in ("task", "model", "family", "variant"):
         if not isinstance(record[key], str) or not record[key]:
             lines.append(f"{key!r} must be a non-empty text, got {record[key]!r}")
-    names = record["class_names"]
-    if not (isinstance(names, list) and names and all(isinstance(n, str) for n in names)):
-        lines.append(f"'class_names' must be a non-empty list of texts, got {names!r}")
-    elif len(set(names)) != len(names):
-        repeated = sorted({n for n in names if names.count(n) > 1})
-        lines.append(f"'class_names' repeats {', '.join(map(repr, repeated))}; each class needs its own name")
+    if "class_names" in keys:
+        names = record["class_names"]
+        if not (isinstance(names, list) and names and all(isinstance(n, str) for n in names)):
+            lines.append(f"'class_names' must be a non-empty list of texts, got {names!r}")
+        elif len(set(names)) != len(names):
+            repeated = sorted({n for n in names if names.count(n) > 1})
+            lines.append(f"'class_names' repeats {', '.join(map(repr, repeated))}; each class needs its own name")
     if all(isinstance(record[key], str) and record[key] for key in ("model", "family", "variant")):
         if record["model"] != f"{record['family']}/{record['variant']}":
             lines.append(
@@ -654,28 +655,41 @@ def _segmentation_tail_problems(record: Mapping[str, Any]) -> List[str]:
     return lines
 
 
+# DECISION plan-2026-11-10T095307-d483ffab/D-006: the per-task work of reading a record is a ROW of
+# a table keyed by task, not a branch. Do NOT add a third ``elif task == ...`` here or in
+# ``input_shape_of``, ``load_model`` or ``_run_on_zeros`` (a third task would be one more branch in
+# five places), and do NOT run the identity (``class_names``) and statistics (``normalize``,
+# ``mean``, ``std``) checks for every task: they run only where the task's ``RECORD_KEYS`` hold
+# those keys, so a task whose record has no class count is checked by its own rows alone. A task
+# missing from any table in ``TASK_TABLES`` is refused naming the tasks that table knows.
+_STATISTICS_KEYS = ("normalize", "mean", "std")
+
+
+def known_tasks_line(task: Any, table: Mapping[str, Any], subject: str = "this reader") -> str:
+    """Return the sentence that refuses ``task`` and names the tasks ``table`` knows (its keys)."""
+    return f"'task' is {task!r}; {subject} knows {', '.join(table)}"
+
+
 def record_problems(record: Mapping[str, Any]) -> List[str]:
     """Return one line per way ``record`` is not a valid version-2 record (empty when valid)."""
     version = record.get("schema_version")
     if version != SCHEMA_VERSION or isinstance(version, bool):
         return [_version_line(version)]
     task = record.get("task")
-    keys = RECORD_KEYS.get(task) if isinstance(task, str) else None
-    if keys is None:
-        return [f"'task' is {task!r}; this reader knows {', '.join(RECORD_KEYS)}"]
+    for table in TASK_TABLES.values():
+        if not isinstance(task, str) or task not in table:
+            return [known_tasks_line(task, table)]
+    keys = RECORD_KEYS[task]
     lines, complete = _header_problems(record, keys)
     if not complete:
         return lines
-    lines += _identity_problems(record)
-    geometry, width = (
-        _classification_geometry(record) if task == CLASSIFICATION else _segmentation_geometry(record)
-    )
+    lines += _identity_problems(record, keys)
+    geometry, width = GEOMETRY_CHECKS[task](record)
     lines += geometry
-    lines += _statistics_problems(record, width)
+    if all(key in keys for key in _STATISTICS_KEYS):
+        lines += _statistics_problems(record, width)
     lines += _overrides_problems(record)
-    lines += (
-        _eval_transform_problems(record) if task == CLASSIFICATION else _segmentation_tail_problems(record)
-    )
+    lines += TAIL_CHECKS[task](record)
     return lines
 
 
@@ -794,11 +808,17 @@ def record_beside(path: Union[str, Path]) -> Dict[str, Any]:
     return read_record(_model_files(Path(path))[1])
 
 
+def _classification_input_shape(record: Mapping[str, Any]) -> Tuple[int, ...]:
+    return tuple(record["input_shape"])
+
+
+def _segmentation_input_shape(record: Mapping[str, Any]) -> Tuple[int, ...]:
+    return (*record["input_size"], record["channels"])
+
+
 def input_shape_of(record: Mapping[str, Any]) -> Tuple[int, ...]:
     """Return ``(height, width, channels)``, the model input a checked record names."""
-    if record["task"] == SEGMENTATION:
-        return (*record["input_size"], record["channels"])
-    return tuple(record["input_shape"])
+    return INPUT_SHAPE_OF[record["task"]](record)
 
 
 def load_model(path: Union[str, Path]) -> "Predictor":
@@ -835,13 +855,8 @@ def load_model(path: Union[str, Path]) -> "Predictor":
     model = keras.models.load_model(str(model_file), compile=False)
     check_model_against_record(model, record, spec, model_file, task_file)
     output = _run_on_zeros(model, record, model_file, task_file)
-    if record["task"] == SEGMENTATION:
-        from .segmentation_predictor import SegmentationPredictor, check_output
-
-        check_output(output, record)
-        return SegmentationPredictor(model, record)
-    _check_width(output, record)
-    return Predictor(model, record)
+    OUTPUT_CHECKS[record["task"]](output, record)
+    return PREDICTORS[record["task"]](model, record)
 
 
 def _plain(value: Any) -> Any:
@@ -1022,7 +1037,7 @@ def _run_on_zeros(model: Any, record: Mapping[str, Any], model_file: Path, task_
         return model(_zeros_of(record), training=False)
     except (ValueError, tf.errors.InvalidArgumentError) as exc:
         first = (str(exc).strip().splitlines() or [type(exc).__name__])[0]
-        key = "input_size" if record["task"] == SEGMENTATION else "input_shape"
+        key = INPUT_KEY[record["task"]]
         raise ConfigError(
             f"Invalid {TASK_FILE} {task_file}: {model_file} does not take the {key} "
             f"{record[key]} it names ({type(exc).__name__}: {first[:150]}); the file "
@@ -1264,3 +1279,83 @@ class Predictor:
         if several:
             return {"labels": labels, "scores": scores}
         return {"labels": labels[0], "scores": scores[0]}
+
+
+# ---------------------------------------------------------------------
+# The per-task tables (D-006). Each is keyed by the task word; ``RECORD_KEYS`` and ``DATA_KEYS``
+# are above. A row is a callable that does ONE task's part of the work, and a task that is read,
+# loaded and predicted with has a row in every table of ``TASK_TABLES``.
+#
+# Interface contract for a new task's rows:
+#   GEOMETRY_CHECKS[task](record) -> (lines, channels or None): problems of the geometry keys, and
+#       the channel count the statistics are checked against (``None`` when unusable);
+#   TAIL_CHECKS[task](record) -> lines: problems of the keys only this task holds;
+#   INPUT_SHAPE_OF[task](record) -> (height, width, channels); INPUT_KEY[task] -> the record key
+#       an input-shape complaint names;
+#   OUTPUT_CHECKS[task](output, record) -> None, raising ConfigError when the model's output on one
+#       zero input is not what the record names;
+#   PREDICTORS[task](model, record) -> the object ``load_model`` returns.
+# A row that imports TensorFlow does it inside the callable, never at module scope.
+# ---------------------------------------------------------------------
+
+
+def _segmentation_output_check(output: Any, record: Mapping[str, Any]) -> None:
+    from .segmentation_predictor import check_output
+
+    check_output(output, record)
+
+
+def _classification_predictor(model: Any, record: Mapping[str, Any]) -> "Predictor":
+    return Predictor(model, record)
+
+
+def _segmentation_predictor(model: Any, record: Mapping[str, Any]) -> Any:
+    from .segmentation_predictor import SegmentationPredictor
+
+    return SegmentationPredictor(model, record)
+
+
+#: Geometry keys and the channel count, per task (see the contract above).
+GEOMETRY_CHECKS: Dict[str, Callable[[Mapping[str, Any]], Tuple[List[str], Optional[int]]]] = {
+    CLASSIFICATION: _classification_geometry,
+    SEGMENTATION: _segmentation_geometry,
+}
+
+#: The keys only one task holds (classification's ``eval_transform``, segmentation's void,
+#: threshold and ``output``), per task.
+TAIL_CHECKS: Dict[str, Callable[[Mapping[str, Any]], List[str]]] = {
+    CLASSIFICATION: _eval_transform_problems,
+    SEGMENTATION: _segmentation_tail_problems,
+}
+
+INPUT_SHAPE_OF: Dict[str, Callable[[Mapping[str, Any]], Tuple[int, ...]]] = {
+    CLASSIFICATION: _classification_input_shape,
+    SEGMENTATION: _segmentation_input_shape,
+}
+
+#: The record key that holds the input geometry, per task.
+INPUT_KEY: Dict[str, str] = {CLASSIFICATION: "input_shape", SEGMENTATION: "input_size"}
+
+OUTPUT_CHECKS: Dict[str, Callable[[Any, Mapping[str, Any]], None]] = {
+    CLASSIFICATION: _check_width,
+    SEGMENTATION: _segmentation_output_check,
+}
+
+PREDICTORS: Dict[str, Callable[[Any, Mapping[str, Any]], Any]] = {
+    CLASSIFICATION: _classification_predictor,
+    SEGMENTATION: _segmentation_predictor,
+}
+
+#: Every per-task table by name. A task is KNOWN to this reader only when it has a row in all of
+#: them; ``record_problems`` refuses any other, naming the tasks of the first table it is absent
+#: from. ``tests/test_train/test_api/test_a_third_task_record_dispatches_by_table.py`` walks this.
+TASK_TABLES: Dict[str, Mapping[str, Any]] = {
+    "RECORD_KEYS": RECORD_KEYS,
+    "DATA_KEYS": DATA_KEYS,
+    "GEOMETRY_CHECKS": GEOMETRY_CHECKS,
+    "TAIL_CHECKS": TAIL_CHECKS,
+    "INPUT_SHAPE_OF": INPUT_SHAPE_OF,
+    "INPUT_KEY": INPUT_KEY,
+    "OUTPUT_CHECKS": OUTPUT_CHECKS,
+    "PREDICTORS": PREDICTORS,
+}

@@ -18,6 +18,7 @@ The anti-vacuity arms: the control of each refusal is the same file at version 2
 import copy
 import hashlib
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -208,9 +209,12 @@ def test_a_classification_record_does_not_take_the_segmentation_keys_and_the_rev
                       "task": CLASSIFICATION}, "task.json")
 
 
-@pytest.mark.parametrize("task", ["image_denoising", "", None, 3, ["image_classification"]])
+# A name no task will ever take (the task this literal used to be, image_denoising, is a real task
+# by now); the tasks the reader names are read from the table, never typed here.
+@pytest.mark.parametrize("task", ["a_task_no_one_will_take", "", None, 3, ["image_classification"]])
 def test_a_task_this_reader_does_not_know_is_named_and_never_crashes(task):
-    with pytest.raises(ConfigError, match=r"'task' is .*; this reader knows image_classification, image_segmentation"):
+    knows = re.escape(", ".join(RECORD_KEYS))
+    with pytest.raises(ConfigError, match=rf"'task' is .*; this reader knows {knows}"):
         check_record(classification(task=task), "task.json")
 
 

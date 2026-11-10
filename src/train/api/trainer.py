@@ -1063,7 +1063,10 @@ class TaskTrainer:
             "has_test_split": data.test_ds is not None,
             "params": params,
             "input_shape": list(data.input_shape),
-            "num_classes": data.num_classes,
+            # DECISION plan-2026-11-10T095307-d483ffab/D-005: a task whose data has no classes holds
+            # ``num_classes = None`` and the summary then has no such key. Do NOT write a stand-in
+            # (the channel count, 0, 1): an analyzer or a reader would take it for a class count.
+            **({} if data.num_classes is None else {"num_classes": data.num_classes}),
             "optim_args": dataclasses.asdict(optim_cfg),
             "steps_per_epoch": data.steps_per_epoch,
             "batch_size": config.batch_size,

@@ -154,6 +154,7 @@ from .config import (
     validate,
 )
 from .errors import ConfigError, ConfigValidationError, DLTrainError
+from .predictor import CLASSIFICATION, SEGMENTATION, known_tasks_line, record_beside
 
 # ---------------------------------------------------------------------
 
@@ -418,14 +419,22 @@ def _predict(args: List[str]) -> int:
     data = Path(values["data"])
     if not data.exists():
         raise ConfigError(f"Invalid value for 'data': {data} does not exist")
-    from .predictor import CHUNK, SEGMENTATION, load_model, record_beside
-
     files = _image_files(data)
     # The task is read from the record alone, so what only the files and the record decide is refused
     # before the model is loaded (D-064): a stem two images share, an output a PNG cannot hold.
     record = record_beside(model_path)
-    if record["task"] == SEGMENTATION:
-        return _predict_masks(model_path, record, files, out)
+    # DECISION plan-2026-11-10T095307-d483ffab/D-006: one writer per task, found in PREDICT_WRITERS.
+    # Do NOT branch on the task here (``if task == SEGMENTATION``): a third task is one more row.
+    writer = PREDICT_WRITERS.get(record["task"])
+    if writer is None:
+        raise ConfigError(known_tasks_line(record["task"], PREDICT_WRITERS, "predict"))
+    return writer(model_path, record, files, out)
+
+
+def _predict_labels(model_path: Path, record: Mapping[str, Any], files: List[Path], out: Path) -> int:
+    """Write the class names and scores of ``files`` as one JSON list into the new file ``out``."""
+    from .predictor import CHUNK, load_model
+
     predictor = load_model(model_path)
     entries: List[Dict[str, Any]] = []
     for start in range(0, len(files), CHUNK):
@@ -453,6 +462,16 @@ def _predict_masks(model_path: Path, record: Mapping[str, Any], files: List[Path
     write_predictions(load_model(model_path), files, out)
     sys.stdout.write(f"{out}\n")
     return 0
+
+
+#: What ``predict`` writes, per task: ``writer(model_path, record, files, out) -> exit code``. A task
+#: that can be loaded (a row in every table of ``train.api.predictor.TASK_TABLES``) and predicted
+#: with has one row here; the keys are the task words of ``train.api.predictor``, which imports no
+#: TensorFlow at module scope.
+PREDICT_WRITERS: Dict[str, Callable[[Path, Mapping[str, Any], List[Path], Path], int]] = {
+    CLASSIFICATION: _predict_labels,
+    SEGMENTATION: _predict_masks,
+}
 
 
 def _field_help_lines(cls: Type[StrictConfig], prefix: str = "") -> List[str]:

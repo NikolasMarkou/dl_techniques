@@ -143,10 +143,13 @@ class DataFacts:
     :param image_size: the side of a classification image; ``None`` for a segmentation run, whose
         size is a ``(height, width)`` pair that the task keeps (``AutoContext.image_size`` is then
         ``None`` too, and nothing the segmentation recipes resolve reads it).
+    :param num_classes: the class count; ``None`` for a task whose data has no classes (D-005:
+        never a stand-in such as the channel count, which a ``ln(C)`` check or a reader would take
+        for a class count).
     """
 
     dataset: str
-    num_classes: int
+    num_classes: Optional[int]
     image_size: Optional[int]
 
 

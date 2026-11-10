@@ -38,7 +38,8 @@ Interface contract
 ``build_model(spec, variant, num_classes, input_shape, kwargs)``
     :param spec: the family's :class:`~train.api.registry.ModelSpec`.
     :param variant: variant name.
-    :param num_classes: output classes.
+    :param num_classes: output classes; ``None`` for a task whose data has none (D-005), which
+        a factory of that task must accept and a classifier's never receives.
     :param input_shape: ``(height, width, channels)``.
     :param kwargs: the output of a resolver.
     :return: the model the factory returns (built or not, as the factory leaves it).
@@ -584,7 +585,7 @@ def serialize_model_args(kwargs: Mapping[str, Any]) -> Dict[str, Any]:
 def build_model(
     spec: ModelSpec,
     variant: str,
-    num_classes: int,
+    num_classes: Optional[int],
     input_shape: Tuple[int, ...],
     kwargs: Mapping[str, Any],
 ) -> Any:
