@@ -49,6 +49,38 @@ Interface contract
     A context manager: TF32 matmul and convolution off inside, the prior setting restored on exit and on
     raise (never assumed ``True``).
 
+The run-level helpers (``train.api``'s denoising task calls these, and only for a ``bias_free`` family)
+-------------------------------------------------------------------------------------------------------
+``probe_batch(dataset, count=PROBE_PATCHES)``
+    :param dataset: a batched ``(noisy, clean)`` pipeline; its FIRST batch is read (the validation pipeline is a
+        pure function of the files and ``val_seed``, so the same patches come back every time).
+    :return: the first ``count`` noisy inputs as a ``float32`` array.
+    :raises ValueError: for a pipeline that yields no batch.
+
+``check_before_fit(model, inputs, precision="float32")``
+    The refusals of a model that was just built: :func:`scan_static` on ``model`` itself, then
+    :func:`probe_numeric` on :func:`init_probe_clone` of it (the model is never probed, never forwarded).
+    :param precision: the run's ``precision``; anything but ``"float32"`` skips the numeric probe (no clone is built).
+    :return: ``{"static": scan report, "init": probe report}``; each probe report also carries ``patches``, and
+        ``init`` is :func:`skipped_reading` for a skipped probe.
+    :raises ValueError: naming every static offender, or the numbers of a failed init probe.
+
+``read_weights(model, inputs, precision="float32")``
+    :func:`probe_numeric` on the model as it is (trained weights), with ``patches`` added; :func:`skipped_reading`
+    for a ``precision`` other than ``"float32"``. Never raises for a failed reading: the caller records it.
+
+``skipped_reading(precision)``
+    The stand-in for a reading that was not taken: ``{"status": "skipped", "passed": None, "reason"}``. The
+    tolerance was measured at float32 only (D-019), and a clean model under ``mixed_float16`` reads 1.3e-3 to
+    2.4e-3 on CPU (the float16 rounding of the compute, above the 1e-3 tolerance), so a numeric reading of a
+    half-precision model would refuse every clean run.
+
+``homogeneity_report(static, init, best, final)`` / ``failed_checks(report)``
+    The summary's ``homogeneity`` block ``{status, static, numeric: {init, best, final}}`` and the names of its
+    failed parts (``homogeneity_static``, ``homogeneity_init``, ``homogeneity_best``, ``homogeneity_final``), in that
+    order; ``status`` is ``"failed"`` when any taken reading or the static scan failed, ``"passed_static_only"``
+    when none failed and a numeric reading was skipped, else ``"passed"``.
+
 Import rule
 -----------
 Nothing imports TensorFlow or Keras at import time (``train.api`` imports this module before the GPU is
@@ -420,3 +452,101 @@ def init_probe_clone(model: Any, seed: int = 0) -> Any:
         return _build_probe_clone(model, seed)
     finally:
         _restore_random_state(state)
+
+
+# ---------------------------------------------------------------------
+# What a run does with the instrument
+# ---------------------------------------------------------------------
+
+#: How many noisy validation patches each probe of a run reads. The reading is a maximum over pixels, so a few
+#: real patches are enough, and a probe of a base-size model on the whole validation batch would cost a forward
+#: pass of it at five scales.
+PROBE_PATCHES = 8
+
+
+def probe_batch(dataset: Any, count: int = PROBE_PATCHES) -> np.ndarray:
+    """The first ``count`` noisy inputs of a batched ``(noisy, clean)`` dataset (see the module docstring)."""
+    if count < 1:
+        raise ValueError(f"count must be a positive int, got {count!r}")
+    for noisy, _clean in dataset.take(1):
+        return np.asarray(noisy, dtype=np.float32)[:count]
+    raise ValueError("the validation pipeline yielded no batch, so there is nothing to probe the model on")
+
+
+def read_weights(model: Any, inputs: Any, precision: str = "float32") -> Dict[str, Any]:
+    """:func:`probe_numeric` of ``model`` as it is, with the number of patches read (see the module docstring)."""
+    if precision != "float32":
+        return skipped_reading(precision)
+    report = probe_numeric(model, inputs)
+    report["patches"] = int(len(inputs))
+    return report
+
+
+def _static_text(static: Dict[str, Any]) -> str:
+    rows = [f"{row['kind']} in layer {row['layer']!r} ({row['detail']})" for row in static["offenders"]]
+    return f"{len(rows)} offender(s): " + "; ".join(rows)
+
+
+def _numeric_text(report: Dict[str, Any]) -> str:
+    per_alpha = ", ".join(f"{a:g}: {v:.3g}" for a, v in zip(report["alphas"], report["per_alpha"]))
+    return (
+        f"max|f(a x) - a f(x)| / max|a f(x)| is {report['max_rel']:.3g} (per alpha {per_alpha}) on "
+        f"{report['patches']} validation patches, above the tolerance {report['tolerance']:g}"
+    )
+
+
+def skipped_reading(precision: str) -> Dict[str, Any]:
+    """The stand-in for a numeric reading not taken under ``precision`` (see the module docstring)."""
+    return {
+        "status": "skipped",
+        "passed": None,
+        "reason": f"precision {precision!r}: the tolerance {PROBE_TOLERANCE:g} was measured at float32 only, and the "
+        "float16 rounding of the compute alone reads above it for a clean model; the static scan still ran",
+    }
+
+
+def check_before_fit(model: Any, inputs: Any, precision: str = "float32") -> Dict[str, Any]:
+    """The refusals of a freshly built bias-free model (see the module docstring for the contract)."""
+    static = scan_static(model)
+    if not static["passed"]:
+        raise ValueError(
+            "the model is declared bias-free (degree-1 homogeneous) but its layers say otherwise: "
+            f"{_static_text(static)}; a bias-free family may hold no additive term, no scale-invariant "
+            "normalisation and no activation outside the positively homogeneous ones"
+        )
+    if precision != "float32":
+        return {"static": static, "init": skipped_reading(precision)}
+    # The clone is probed, never the model: it carries layer scales at 1 and a random running variance, the
+    # only state in which a LayerNorm or a muted branch shows, and it restores every random state it moved.
+    init = read_weights(init_probe_clone(model), inputs)
+    if not init["passed"]:
+        raise ValueError(
+            "the model is declared bias-free (degree-1 homogeneous) but fails the numeric probe at its "
+            f"initial weights (layer scales 1, running variances redrawn): {_numeric_text(init)}"
+        )
+    return {"static": static, "init": init}
+
+
+def homogeneity_report(
+    static: Dict[str, Any], init: Dict[str, Any], best: Dict[str, Any], final: Dict[str, Any]
+) -> Dict[str, Any]:
+    """The summary's ``homogeneity`` block (see the module docstring)."""
+    numeric = {"init": init, "best": best, "final": final}
+    if not static["passed"] or any(reading["passed"] is False for reading in numeric.values()):
+        status = "failed"
+    elif any(reading["passed"] is None for reading in numeric.values()):
+        status = "passed_static_only"
+    else:
+        status = "passed"
+    return {
+        "status": status,
+        "static": {"passed": static["passed"], "counts": static["counts"], "offenders": static["offenders"]},
+        "numeric": numeric,
+    }
+
+
+def failed_checks(report: Dict[str, Any]) -> Tuple[str, ...]:
+    """The names of the parts of ``report`` that failed, in the order static, init, best, final."""
+    failed = [] if report["static"]["passed"] else ["homogeneity_static"]
+    failed += [f"homogeneity_{name}" for name, reading in report["numeric"].items() if reading["passed"] is False]
+    return tuple(failed)

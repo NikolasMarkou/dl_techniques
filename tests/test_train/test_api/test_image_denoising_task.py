@@ -14,6 +14,11 @@ so every number the summary reports can be recomputed here by hand instead of re
 * the short-run table: the curriculum, the selection start and the warmup of runs of 1, 2, 3, 5, 10, 30 and 100 epochs;
 * ``compile_options``: float32 passes no ``jit_compile`` for any family, ``mixed_float16`` passes ``False`` for the
   three families XLA rejects (measured in step 2) and nothing for the two it accepts; a spy on ``compile`` shows it.
+* the bias-free contract (step 9, D-015, D-025): the static scan and the numeric probes run for the three bias-free
+  families and never for the other two; a planted LayerNorm and a planted constant offset are refused before ``fit``
+  with exit 2; the summary holds real ``init``, ``best`` and ``final`` readings; a model whose break appears only
+  through training fails at the end with exit 1 and keeps its models; and the probes do not move the run (same seed,
+  probes on and off, equal weights to the bit).
 
 The tests write only under ``tmp_path``. Every real run sets ``max_train_files`` and ``max_val_files`` to the number of
 files: the default of 10,000 repeats a small folder to fill an epoch (the DIV2K rule), which is 5,000 steps here.
@@ -22,6 +27,7 @@ files: the default of 10,000 repeats a small folder to fill an epoch (the DIV2K 
 import json
 import math
 import os
+import random
 import subprocess
 import sys
 from pathlib import Path
@@ -45,6 +51,7 @@ from train.api.tasks.image_denoising import (
 )
 from train.common import classification_run
 from train.common import denoising_data as dd
+from train.common import denoising_homogeneity as dh
 from train.common import denoising_run as dr
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -774,3 +781,374 @@ def test_the_identity_scores_are_float32_and_independent_of_the_dtype_policy():
         keras.mixed_precision.set_global_policy("float32")
     assert mixed == plain, "a half-precision copy of the input would move the PSNR"
     assert plain["psnr"] == pytest.approx(60.0, abs=0.05)
+
+
+# ---------------------------------------------------------------------
+# The bias-free contract in a run (step 9, D-015, D-025)
+# ---------------------------------------------------------------------
+
+TOLERANCE = dh.PROBE_TOLERANCE
+
+
+@pytest.fixture
+def spy(monkeypatch):
+    """Counting wrappers around the three instruments, in call order, installed on the module the task reads."""
+    calls = []
+
+    def wrap(name):
+        original = getattr(dh, name)
+
+        def wrapper(*arguments, **keywords):
+            calls.append(name)
+            return original(*arguments, **keywords)
+
+        monkeypatch.setattr(dh, name, wrapper)
+
+    for name in ("scan_static", "init_probe_clone", "probe_numeric"):
+        wrap(name)
+    return calls
+
+
+@pytest.mark.parametrize("family", FAMILIES)
+def test_the_check_runs_for_the_three_bias_free_families_and_never_for_the_other_two(family, spy, world, folders, tmp_path):
+    result = train_image_denoising(**mapping(tmp_path / "run", folders, family, epochs=1))
+    report = read_json(result.summary_path)["homogeneity"]
+    if family in BIAS_FREE:
+        # One scan, one clone, and three readings: the init clone, the best weights and the final weights.
+        assert spy == ["scan_static", "init_probe_clone", "probe_numeric", "probe_numeric", "probe_numeric"]
+        assert report["status"] == "passed"
+    else:
+        assert spy == [], f"{family} is not bias-free, so the instrument is never called for it"
+        assert report["status"] == "not_applicable" and "not bias-free" in report["reason"]
+        assert set(report) == {"status", "reason"}
+
+
+# -- planted models: a test-only family registered straight into the registry, so the resolver's refusal tables never
+#    see them (the tables refuse the KEYS that break homogeneity; these break it from inside the factory).
+
+
+@keras.saving.register_keras_serializable(package="test_denoising_step9")
+class Shift(keras.layers.Layer):
+    """Adds one scalar weight named ``shift`` (not a name the static scan lists) to its input."""
+
+    def __init__(self, initial=0.0, learn=False, **kwargs):
+        super().__init__(**kwargs)
+        self.initial, self.learn = float(initial), bool(learn)
+
+    def build(self, input_shape):
+        self.shift = self.add_weight(
+            shape=(1,), initializer=keras.initializers.Constant(self.initial), trainable=self.learn, name="shift")
+
+    def call(self, x):
+        return x + keras.ops.cast(self.shift, x.dtype)
+
+    def get_config(self):
+        return {**super().get_config(), "initial": self.initial, "learn": self.learn}
+
+
+@keras.saving.register_keras_serializable(package="test_denoising_step9")
+class MutedOffset(keras.layers.Layer):
+    """A constant 0.5 behind a layer scale at 1e-6, named so its weight path ends ``gamma_scale/gamma`` like the real ones."""
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("name", "gamma_scale")
+        super().__init__(**kwargs)
+
+    def build(self, input_shape):
+        self.gamma = self.add_weight(shape=(1,), initializer=keras.initializers.Constant(1e-6), name="gamma")
+
+    def call(self, x):
+        return x + keras.ops.cast(self.gamma, x.dtype) * 0.5
+
+
+def _planted(variant, num_classes, input_shape, tail):
+    from train.api.denoising_models import create_bfcnn
+
+    base = create_bfcnn(variant=variant, num_classes=num_classes, input_shape=input_shape)
+    return keras.Model(base.input, tail(base.output), name="planted")
+
+
+def create_planted_layernorm(*, variant, num_classes=None, input_shape=(None, None, 3), **model_args):
+    return _planted(variant, num_classes, input_shape, keras.layers.LayerNormalization())
+
+
+def create_planted_offset(*, variant, num_classes=None, input_shape=(None, None, 3), **model_args):
+    return _planted(variant, num_classes, input_shape, Shift(initial=0.05, learn=False))
+
+
+def create_planted_drift(*, variant, num_classes=None, input_shape=(None, None, 3), **model_args):
+    return _planted(variant, num_classes, input_shape, Shift(initial=0.0, learn=True))
+
+
+def create_planted_muted(*, variant, num_classes=None, input_shape=(None, None, 3), **model_args):
+    return _planted(variant, num_classes, input_shape, MutedOffset())
+
+
+def create_planted_still(*, variant, num_classes=None, input_shape=(None, None, 3), **model_args):
+    """The control: the same wrapper with a shift that starts at 0 and never learns, so it is homogeneous."""
+    return _planted(variant, num_classes, input_shape, Shift(initial=0.0, learn=False))
+
+
+def resolve_planted(context, optim_args, model_args):
+    return dict(model_args)
+
+
+PLANTED = {
+    "planted_layernorm": create_planted_layernorm,
+    "planted_offset": create_planted_offset,
+    "planted_drift": create_planted_drift,
+    "planted_muted": create_planted_muted,
+    "planted_still": create_planted_still,
+}
+
+
+@pytest.fixture
+def planted(world, monkeypatch):
+    template = registry.MODELS["bfcnn"]
+    for family, factory in PLANTED.items():
+        monkeypatch.setitem(registry.MODELS, family, registry.ModelSpec(
+            family=family, factory=f"{__name__}:{factory.__name__}", variants_attr=template.variants_attr,
+            tasks=template.tasks, defaults=template.defaults, resolve_model_args=f"{__name__}:resolve_planted",
+            properties=("bias_free",),
+        ))
+
+
+def nothing_was_trained(out):
+    """The run directory of a refusal after the claim holds no history, no model and no summary."""
+    for name in ("training_log.csv", "training_history.json", "best_model.keras", "final_model.keras",
+                 "results_summary.json"):
+        assert not (out / name).exists(), name
+
+
+def test_a_planted_layernorm_is_refused_statically_before_fit_with_exit_2(planted, folders, tmp_path, capsys):
+    out = tmp_path / "run"
+    code = cli.main(["image_denoising", *flatten("", mapping(out, folders, "planted_layernorm"), [])])
+    assert code == 2
+    message = capsys.readouterr().err
+    assert "layernorm" in message and "LayerNormalization" in message and "declared bias-free" in message
+    # The model cannot be built before the claim without initialising TensorFlow before `setup_gpu` (D-025), so this
+    # refusal comes after it: `out` is used, says so, and holds no training.
+    assert "'out' is now used" in message and out.is_dir()
+    nothing_was_trained(out)
+
+
+def test_a_planted_constant_offset_passes_the_scan_and_is_refused_by_the_init_probe_with_the_numbers(
+    planted, folders, tmp_path, capsys
+):
+    out = tmp_path / "run"
+    code = cli.main(["image_denoising", *flatten("", mapping(out, folders, "planted_offset"), [])])
+    assert code == 2
+    message = capsys.readouterr().err
+    assert "numeric probe at its initial weights" in message and "per alpha" in message
+    assert f"above the tolerance {TOLERANCE:g}" in message
+    assert "offender" not in message, "the scan is blind to a weight named shift; the numeric probe is what refuses"
+    nothing_was_trained(out)
+
+
+def test_a_break_muted_by_a_layer_scale_is_invisible_at_init_and_refused_on_the_clone(planted, folders, tmp_path, capsys):
+    # The constant sits behind a layer scale of 1e-6, as a real layer scale starts: the model as built reads clean, the
+    # clone (scale 1) reads the offset. Probing the model itself would start this run.
+    inputs = np.random.default_rng(0).uniform(0, 1, (4, SIZE, SIZE, 3)).astype("float32")
+    model = create_planted_muted(variant="tiny")
+    assert dh.scan_static(model)["passed"] is True and dh.scan_static(model)["layer_scales"] == ["gamma_scale/gamma"]
+    assert dh.probe_numeric(model, inputs)["passed"] is True, "liveness: as built, the break is invisible"
+    assert dh.probe_numeric(dh.init_probe_clone(model), inputs)["passed"] is False, "the clone shows it"
+    out = tmp_path / "run"
+    code = cli.main(["image_denoising", *flatten("", mapping(out, folders, "planted_muted"), [])])
+    assert code == 2
+    assert "numeric probe at its initial weights" in capsys.readouterr().err
+    nothing_was_trained(out)
+
+
+def test_the_control_with_a_shift_that_starts_at_zero_and_never_learns_is_not_refused(planted, folders, tmp_path):
+    # The control of the two refusals above: the registered-test-family path is not what refuses them.
+    result = train_image_denoising(**mapping(tmp_path / "run", folders, "planted_still", epochs=1))
+    report = read_json(result.summary_path)["homogeneity"]
+    assert report["status"] == "passed" and report["numeric"]["final"]["max_rel"] < TOLERANCE / 10
+
+
+# -- real readings --------------------------------------------------------------------------------------------------
+
+
+def numeric_of(summary):
+    return summary["homogeneity"]["numeric"]
+
+
+@pytest.mark.parametrize("finished", BIAS_FREE, indirect=True)
+def test_a_two_epoch_model_has_real_init_best_and_final_readings(finished, world, folders):
+    family, asked, result, summary, _ = finished
+    report = summary["homogeneity"]
+    assert report["status"] == "passed"
+    assert report["static"] == {"passed": True, "counts": {}, "offenders": []}
+    readings = report["numeric"]
+    assert set(readings) == {"init", "best", "final"}
+    for name, reading in readings.items():
+        assert reading["passed"] is True and reading["tf32"] is False, name
+        assert reading["tolerance"] == TOLERANCE and reading["alphas"] == [0.3, 1.3, 3.7, 6.1], name
+        assert reading["patches"] == min(dh.PROBE_PATCHES, BATCH) and len(reading["per_alpha"]) == 4, name
+        # A real reading: finite, above float zero (a power-of-two alpha or a placeholder reads exactly 0), and under
+        # the tolerance with room to spare (the clean side measured at most 1e-5).
+        assert 0.0 < reading["max_rel"] < TOLERANCE / 10, (name, reading["max_rel"])
+        assert reading["max_rel"] == max(reading["per_alpha"]), name
+    # The best weights of a 2-epoch run ARE the final weights (the window is the last epoch), the init clone is not
+    # the trained model: the three readings are taken at two different sets of weights.
+    assert summary["selection"]["final_is_best"] is True
+    assert readings["init"]["max_rel"] != readings["final"]["max_rel"]
+    # The best reading is the probe of the saved best weights on the same patches, taken again here from the file.
+    config = config_of(Path(result.run_dir).parent / "reread", folders, family)
+    trainer = ImageDenoisingTrainer(config)
+    resolved, context = trainer._resolve(trainer.describe_data(config), family, "tiny")
+    inputs = dh.probe_batch(trainer.build_data(resolved, context).select_ds)
+    again = dh.probe_numeric(keras.models.load_model(Path(result.run_dir) / "best_model.keras", compile=False), inputs)
+    assert again["max_rel"] == pytest.approx(readings["best"]["max_rel"], rel=1e-3, abs=1e-9)
+    assert readings["best"]["max_rel"] == pytest.approx(readings["final"]["max_rel"], rel=1e-3, abs=1e-9)
+
+
+def running_variances(path):
+    model = keras.models.load_model(path, compile=False)
+    return [np.array(w) for w in model.weights if w.path.rpartition("/")[2] in dh._RUNNING_VAR_NAMES]
+
+
+@pytest.mark.parametrize("finished", ["bfconvunext"], indirect=True)
+def test_batchnorm_running_variance_moved_by_training_leaves_the_trained_reading_clean(finished):
+    # The edge case: a batch norm's running variance starts at 1 and training moves it; the probe reads the trained
+    # weights as they are (no clone), and a bias-free batch norm stays homogeneous whatever its statistics.
+    _, _, result, summary, _ = finished
+    variances = running_variances(Path(result.run_dir) / "final_model.keras")
+    assert variances, "the family holds batch norms with a running variance"
+    assert any(not np.allclose(v, 1.0) for v in variances), "liveness: training moved at least one running variance"
+    assert numeric_of(summary)["final"]["passed"] is True
+
+
+@pytest.mark.parametrize("finished", ["bfunet"], indirect=True)
+def test_non_additive_noise_leaves_a_bias_free_network_homogeneous_and_the_summary_says_the_identity_does_not_hold(
+    finished,
+):
+    # The fixture's bfunet run trains on clipped MULTIPLICATIVE noise: homogeneity is a property of the network, so
+    # it passes, and `score_identity` (a statement about the noise) is what says the residual is not the score.
+    _, _, _, summary, _ = finished
+    assert summary["noise"]["kind"] == "multiplicative" and summary["noise"]["clip"] is True
+    assert summary["homogeneity"]["status"] == "passed"
+    assert summary["score_identity"]["holds"] is False
+    assert any("multiplicative" in note and "homogeneity" in note for note in summary["notes"])
+
+
+def test_the_best_and_the_final_reading_are_taken_at_different_weights_when_they_are_different_weights(windowed):
+    # The scripted run of the selection tests: best epoch 3 of 4, so the best and the final weights differ.
+    _, _, summary, _ = windowed
+    assert summary["selection"]["final_is_best"] is False
+    readings = numeric_of(summary)
+    assert readings["best"]["max_rel"] != readings["final"]["max_rel"]
+    assert all(reading["passed"] is True for reading in readings.values())
+
+
+# -- a break that appears only through training ----------------------------------------------------------------------
+
+
+def test_a_break_that_appears_only_after_training_fails_at_the_end_with_exit_1_and_keeps_the_run(planted, folders, tmp_path):
+    out = tmp_path / "run"
+    asked = mapping(out, folders, "planted_drift", optim_args={"lr": 1e-2})
+    code = cli.main(["image_denoising", *flatten("", asked, [])])
+    assert code == 1, "a failed check after training is a failed run (exit 1), not a refusal (exit 2)"
+    summary = read_json(out / "results_summary.json")
+    readings = numeric_of(summary)
+    # Born clean: the scan and the init probe passed (the shift starts at 0), so the run started.
+    assert summary["homogeneity"]["static"]["passed"] is True and readings["init"]["passed"] is True
+    assert readings["init"]["max_rel"] < TOLERANCE / 10
+    # Broken by training: the learned offset is read at the best and the final weights.
+    assert readings["best"]["passed"] is False and readings["final"]["passed"] is False
+    assert readings["best"]["max_rel"] > 2 * TOLERANCE and readings["final"]["max_rel"] > 2 * TOLERANCE
+    assert summary["homogeneity"]["status"] == "failed"
+    assert summary["success"] is False
+    assert summary["success_blocked_by"] == ["homogeneity_best", "homogeneity_final"]
+    # The training is kept: models, history, log.
+    for name in ("best_model.keras", "final_model.keras", "training_log.csv", "training_history.json"):
+        assert (out / name).is_file(), name
+    assert len(read_json(out / "training_history.json")["loss"]) == EPOCHS
+    log = (out / "run.log").read_text()
+    assert "not degree-1 homogeneous" in log and "homogeneity_best" in log
+
+
+# -- the diagnostic does not move the run ----------------------------------------------------------------------------
+
+
+def inert_probes(monkeypatch):
+    """The three instruments replaced by stand-ins that read nothing, so a run with them is the run without a probe."""
+    clean = {"passed": True, "counts": {}, "offenders": [], "layer_scales": []}
+    monkeypatch.setattr(dh, "check_before_fit", lambda model, inputs, precision="float32": {
+        "static": clean, "init": dh.skipped_reading(precision)})
+    monkeypatch.setattr(dh, "read_weights", lambda model, inputs, precision="float32": dh.skipped_reading(precision))
+
+
+@pytest.mark.parametrize("family", ["bfcnn", "bfconvunext"])
+def test_the_same_seed_with_the_probes_on_and_off_gives_equal_weights_to_the_bit(family, world, folders, tmp_path):
+    with pytest.MonkeyPatch.context() as patch:
+        inert_probes(patch)
+        off = train_image_denoising(**mapping(tmp_path / "off", folders, family))
+    assert read_json(off.summary_path)["homogeneity"]["status"] == "passed_static_only", "liveness: the stand-ins ran"
+    on = train_image_denoising(**mapping(tmp_path / "on", folders, family))
+    assert read_json(on.summary_path)["homogeneity"]["status"] == "passed"
+    for name in ("final_model.keras", "best_model.keras"):
+        assert same_weights(saved_weights(Path(on.run_dir) / name), saved_weights(Path(off.run_dir) / name)), name
+    assert read_json(Path(on.run_dir) / "training_history.json") == read_json(Path(off.run_dir) / "training_history.json")
+
+
+def random_snapshot(model):
+    """Every random state a diagnostic could move: the model's generators, Keras' global one, Python's and NumPy's."""
+    global_generator = keras.src.backend.common.global_state.get_global_attribute("global_seed_generator")
+    return {
+        "generators": [np.array(g.state.numpy()) for g in dh._seed_generators(model)],
+        "global": None if global_generator is None else np.array(global_generator.state.numpy()),
+        "python": random.getstate(),
+        "numpy_keys": np.random.get_state()[1].copy(),
+        "numpy_pos": np.random.get_state()[2],
+    }
+
+
+def assert_snapshots_equal(left, right):
+    assert len(left["generators"]) == len(right["generators"])
+    assert all(np.array_equal(a, b) for a, b in zip(left["generators"], right["generators"]))
+    assert (left["global"] is None) == (right["global"] is None)
+    if left["global"] is not None:
+        assert np.array_equal(left["global"], right["global"])
+    assert left["python"] == right["python"]
+    assert np.array_equal(left["numpy_keys"], right["numpy_keys"]) and left["numpy_pos"] == right["numpy_pos"]
+
+
+@pytest.mark.parametrize("family", BIAS_FREE)
+def test_the_checks_before_and_after_fit_leave_every_random_state_where_they_found_it(family, world, folders, tmp_path):
+    keras.utils.set_random_seed(7)
+    config = config_of(tmp_path / "a", folders, family)
+    trainer = ImageDenoisingTrainer(config)
+    resolved, context = trainer._resolve(trainer.describe_data(config), family, "tiny")
+    data = trainer.build_data(resolved, context)
+    model = trainer.build_model(resolved, context, data)
+    keras.random.normal((1,))                         # make sure Keras' global generator exists and has moved
+    random.random()
+    np.random.random()
+    before = random_snapshot(model)
+    trainer._check_before_fit(model, data, "float32")
+    assert_snapshots_equal(before, random_snapshot(model))
+    dh.read_weights(model, dh.probe_batch(data.select_ds))
+    assert_snapshots_equal(before, random_snapshot(model))
+
+
+def test_a_half_precision_run_scans_but_reads_nothing_numerically_and_says_so(world, folders, tmp_path, spy):
+    # The tolerance is a float32 number (D-019, D-025): under mixed_float16 a clean model reads above it from the
+    # rounding of its compute alone, so the numeric readings are skipped and the report says so; the scan still runs.
+    # A mixed_float16 run on the CPU is slow, so this goes as far as the pre-fit check, which `build_model` runs.
+    keras.mixed_precision.set_global_policy("mixed_float16")
+    try:
+        config = config_of(tmp_path / "a", folders, "bfcnn", precision="mixed_float16")
+        trainer = ImageDenoisingTrainer(config)
+        resolved, context = trainer._resolve(trainer.describe_data(config), "bfcnn", "tiny")
+        data = trainer.build_data(resolved, context)
+        trainer.build_model(resolved, context, data)
+    finally:
+        keras.mixed_precision.set_global_policy("float32")
+    assert spy == ["scan_static"], "the scan ran; no clone was built and no reading was taken"
+    assert trainer._homogeneity["init"]["status"] == "skipped" and "float32 only" in trainer._homogeneity["init"]["reason"]
+    report = dh.homogeneity_report(
+        trainer._homogeneity["static"], trainer._homogeneity["init"],
+        dh.skipped_reading("mixed_float16"), dh.skipped_reading("mixed_float16"))
+    assert report["status"] == "passed_static_only" and dh.failed_checks(report) == ()

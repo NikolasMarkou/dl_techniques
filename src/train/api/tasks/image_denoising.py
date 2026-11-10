@@ -50,11 +50,20 @@ Interface contract
     Compile. ``compile_options`` returns ``{"jit_compile": False}`` for the families XLA rejects under
     ``mixed_float16`` (:func:`train.api.denoising_models.compile_options_for`) and nothing otherwise.
 
+    The bias-free contract (``ModelSpec.properties`` holds ``"bias_free"``: ``bfcnn``, ``bfunet``, ``bfconvunext``; no
+    other family is ever checked, and its summary says ``homogeneity: {"status": "not_applicable"}``). ``build_model``
+    runs :func:`train.common.denoising_homogeneity.check_before_fit` on the model it just built, before ``compile`` and
+    ``fit``: a static scan of the layers and a numeric probe of an init-probe CLONE (the model itself is never forwarded
+    and no random state moves). Either failing is a ``ValueError`` the sequence reports as a ``ConfigError`` (exit 2)
+    carrying the offenders or the numbers; a model that a family's own refusal tables let through but that is not
+    homogeneous cannot start training. ``evaluate_and_report`` then probes the BEST and the FINAL weights on the first
+    validation patches and returns ``extras["homogeneity"] = {status, static, numeric: {init, best, final}}``; a failed
+    best or final reading enters ``Evaluation.failed_checks`` (exit 1, the run and its models are kept).
+
     NOT YET WRITTEN, hooks left at their defaults or returning an explicit empty value (each is a later step of the
     plan, named in the summary's ``notes``): ``task_record`` (no ``task.json``, so ``predict`` and ``export`` refuse
     such a run), ``config_stamps`` (no legacy-reader stamps), ``run_analysis`` (the analyzer is skipped),
-    ``figure_callbacks`` (no figure), the held-out cells (``held_out`` says why it is empty) and the homogeneity check
-    of the three bias-free families (``homogeneity`` is not written).
+    ``figure_callbacks`` (no figure) and the held-out cells (``held_out`` says why it is empty).
 
 ``train_image_denoising(*, out, model, data, ...)``
     :param out: run directory (a ``str`` or a ``Path``), or ``"auto"``.
@@ -214,6 +223,9 @@ class ImageDenoisingTrainer(TaskTrainer):
         self._identity: Optional[Dict[str, float]] = None
         #: The 0-based epoch the selection window opens at, set by ``build_data`` from the RESOLVED config.
         self._window_start: Optional[int] = None
+        #: ``{"static", "init"}`` of :func:`train.common.denoising_homogeneity.check_before_fit`, set by ``build_model``
+        #: for a bias-free family (a resume builds the model again, so the report has it too), else ``None``.
+        self._homogeneity: Optional[Dict[str, Any]] = None
 
     # -- data and model -------------------------------------------------
 
@@ -261,10 +273,48 @@ class ImageDenoisingTrainer(TaskTrainer):
     def build_model(self, config: ImageDenoisingConfig, context: AutoContext, data: Any) -> Any:
         spec = registry.MODELS[context.family]
         # A flexible input: the model trains on patch_size crops and is saved ready for an image of any size.
-        return recipes.build_model(
+        model = recipes.build_model(
             spec, context.variant, None, (None, None, data.input_shape[-1]),
             self._model_kwargs(config, context),
         )
+        if "bias_free" in spec.properties:
+            self._homogeneity = self._check_before_fit(model, data, config.precision)
+        return model
+
+    @staticmethod
+    def _check_before_fit(model: Any, data: Any, precision: str) -> Dict[str, Any]:
+        """Scan and probe a freshly built bias-free model; a refusal is a ``ValueError`` (see the class contract)."""
+        from dl_techniques.utils.logger import logger
+        from train.common import denoising_homogeneity as homogeneity
+
+        # DECISION plan-2026-11-10T095307-d483ffab/D-025
+        # Both checks run HERE, after the claim and setup_gpu, and not before the claim as the plan's step text says.
+        # A model cannot be built before the claim: building any Keras model (all five families, also inside a
+        # StatelessScope, measured) initialises TensorFlow's devices, and `setup_gpu(devices)` has to come first
+        # (invariant 5). A throwaway build in `check_model_args` would break every bias-free run's device choice to
+        # catch a defect no key can cause: every key that breaks homogeneity is already refused before the claim by
+        # the family's refusal tables (`api/denoising_models.py`, D-015). Do NOT add that build; the cost of this
+        # placement is one claimed `out` (the refusal says so) for a factory that ships a non-homogeneous layer.
+        # A ValueError becomes the ConfigError of exit 2 in `run_sequence.build_model`. The probe reads a CLONE:
+        # do NOT forward the live model here (see `init_probe_clone`).
+        # DECISION plan-2026-11-10T095307-d483ffab/D-025
+        # The numeric readings are taken only at float32: the tolerance is a float32 number (D-019), and a clean
+        # bfcnn or bfunet built under mixed_float16 reads 1.3e-3 and 2.2e-3 on CPU (float16 rounding), so a
+        # reading there would refuse every half-precision run D-012 keeps working. Do NOT widen the tolerance for
+        # them (no measurement stands behind a wider number) and do NOT probe a float32 copy cloned from the
+        # mixed model (tried: it still reads 4e-4 for a clean bfcnn). The static scan runs at every precision.
+        checked = homogeneity.check_before_fit(model, homogeneity.probe_batch(data.select_ds), precision)
+        if checked["init"]["passed"] is not None:
+            logger.info(
+                f"Bias-free check before fit: static scan clean, init probe max_rel {checked['init']['max_rel']:.3g} "
+                f"(tolerance {checked['init']['tolerance']:g}, {checked['init']['patches']} validation patches)"
+            )
+        else:
+            logger.warning(
+                f"Bias-free check before fit: static scan clean; the numeric probe is skipped at precision "
+                f"{precision!r} ({checked['init']['reason']})"
+            )
+        return checked
 
     @staticmethod
     def _model_kwargs(config: ImageDenoisingConfig, context: AutoContext) -> Dict[str, Any]:
@@ -504,9 +554,20 @@ class ImageDenoisingTrainer(TaskTrainer):
             "`test_metrics_best` and `test_metrics_final` are null: the data has no test split; the best_model.keras "
             "reload check ran on the validation patches (`best_checkpoint_max_abs_diff`); `held_out` says why no "
             "held-out cell was scored",
-            "no model analysis, figure or homogeneity check ran: the denoising task does not write them yet "
+            "no model analysis or figure ran: the denoising task does not write them yet "
             "(`analyzer.status` is 'skipped'), and no task.json was written, so `predict` and `export` refuse this run",
         ]
+        if self._homogeneity is not None:
+            notes.append(
+                "`homogeneity` reads max|f(a x) - a f(x)| / max|a f(x)| at alphas 0.3, 1.3, 3.7, 6.1 (TF32 off, "
+                "inference mode) on the first validation patches: `init` on a clone of the untrained model with layer "
+                "scales at 1 and random running variances, `best` and `final` on the weights as trained (all three "
+                "are `skipped`, with the reason, at a precision other than float32: the tolerance is a float32 "
+                "number, and the static scan still ran); a failed "
+                "`best` or `final` reading makes `success` false and names `homogeneity_best` or `homogeneity_final` "
+                "in `success_blocked_by`. The reading is a property of the network, whatever the noise "
+                f"(this run's noise is {data_cfg.noise_kind}: see `score_identity` for what the residual means)"
+            )
         if not checkpoint_cfg.save_best:
             notes.append(
                 "checkpoint_args.save_best is false: no best_model.keras was written, so the reload check did not run"
@@ -527,12 +588,19 @@ class ImageDenoisingTrainer(TaskTrainer):
     ) -> Evaluation:
         """Run the denoising reporting sequence; see the module contract."""
         from train.common import classification_run, run_summary
+        from train.common import denoising_homogeneity as homogeneity
 
         checkpoint_cfg: CheckpointArgs = config.checkpoint_args
         analysis_cfg: AnalysisArgs = config.analysis_args
         metric_cfg: DenoiseMetricArgs = config.metric_args
         load_error: Optional[str] = None
         max_diff: Optional[float] = None
+        # The bias-free probes read the same first validation patches the pre-fit check read. The in-memory model
+        # holds the BEST weights until `finalize_last_epoch` swaps the last epoch's in, so the best reading comes
+        # first and the final one after it.
+        bias_free = self._homogeneity is not None
+        probe_inputs = homogeneity.probe_batch(data.select_ds) if bias_free else None
+        best_reading = homogeneity.read_weights(fit.model, probe_inputs, config.precision) if bias_free else None
         if checkpoint_cfg.save_best:
             # The in-memory model holds the BEST weights here (EarlyStopping restored them). There is no test split
             # (the held-out images are scored by the task from their own directories), so the reload check runs on
@@ -580,6 +648,7 @@ class ImageDenoisingTrainer(TaskTrainer):
             exact_reload=True,
             load_detail=load_detail,
         )
+        report, failed = self._homogeneity_report(config, fit, best_reading, probe_inputs)
         hist = {key: [float(v) for v in values] for key, values in fit.history.history.items()}
         start = self.selection_start_epoch(config)
         best = run_summary.best_epoch(hist, metric_cfg.watch_metric, metric_cfg.watch_mode, first_epoch=start)
@@ -602,13 +671,54 @@ class ImageDenoisingTrainer(TaskTrainer):
             load_detail=load_detail or None,
             extras={
                 "selection": selection,
+                "homogeneity": report,
                 "held_out": {
                     "status": "skipped",
                     "reason": "the denoising task does not score held-out images yet: it has no data.test_dirs key",
                     "sigmas_255": [float(value) for value in metric_cfg.test_sigmas_255],
                 },
             },
+            failed_checks=failed,
         )
+
+    def _homogeneity_report(
+        self, config: ImageDenoisingConfig, fit: FitState, best_reading: Optional[Dict[str, Any]], probe_inputs: Any
+    ) -> Tuple[Dict[str, Any], Tuple[str, ...]]:
+        """Return the summary's ``homogeneity`` block and the failed checks (``()`` for a family never checked).
+
+        Called after ``finalize_last_epoch``: ``fit.model`` holds the FINAL weights, ``best_reading`` is the probe
+        taken on the best ones.
+        """
+        from dl_techniques.utils.logger import logger
+        from train.common import denoising_homogeneity as homogeneity
+
+        if self._homogeneity is None:
+            return (
+                {
+                    "status": "not_applicable",
+                    "reason": "the family is not bias-free (its ModelSpec has no 'bias_free' property): no "
+                    "homogeneity check ran and none was asked for",
+                },
+                (),
+            )
+        report = homogeneity.homogeneity_report(
+            self._homogeneity["static"],
+            self._homogeneity["init"],
+            best_reading,
+            homogeneity.read_weights(fit.model, probe_inputs, config.precision),
+        )
+        failed = homogeneity.failed_checks(report)
+        readings = ", ".join(
+            f"{name} {reading['max_rel']:.3g}" if reading["passed"] is not None else f"{name} skipped"
+            for name, reading in report["numeric"].items()
+        )
+        logger.info(f"Bias-free check after fit: {report['status']} (max_rel {readings})")
+        if failed:
+            logger.warning(
+                f"The trained weights are not degree-1 homogeneous: failed {list(failed)}; the run and its models "
+                "are kept and `success` is false"
+            )
+        return report, failed
 
 
 def train_image_denoising(
