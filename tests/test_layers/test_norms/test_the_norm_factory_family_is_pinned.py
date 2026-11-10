@@ -80,7 +80,7 @@ SRC_ROOT = os.path.join(os.path.dirname(_TESTS_DIR), "src")
 #: 99 files, 150 dynamic, 45 literal; then the ``layers/time_series`` de-dup (78bba4525) left
 #: ``mixed_sequential_block.py`` with one site instead of three: 193 sites, 99 files, 148 dynamic, 45 literal;
 #: then the NAM model, its trainers and tests were removed (cc5199915), taking two files and three dynamic sites out of the
-#: table but leaving the totals pin below at the old numbers: 190 sites, 97 files, 145 dynamic, 45 literal (step 13.9 of plan 98b866fb).
+#: table but leaving the totals pin below at the old numbers: 190 sites, 97 files, 145 dynamic, 45 literal (re-pinned in step 13.8 of plan 98b866fb).
 #: Edit it in the commit that adds or removes a site.
 NORM_CALL_SITES: Dict[str, Tuple[int, int]] = {
     "dl_techniques/layers/attention/area_attention.py": (2, 0),
