@@ -21,6 +21,7 @@ requests
 h5py # MATLAB v7.3 / HDF5 readers: datasets/pusht_hdf5.py, datasets/document_rectification/uvdoc.py
 safetensors # official DINOv2 checkpoints: models/vision/dino/official_weights.py
 huggingface_hub # Timestral Hub checkpoints: models/time_series/timestral/loading.py
+pycocotools # COCOeval and COCO mask decoding: callbacks/coco_map_callback.py, datasets/vision/coco_multitask_local.py, datasets/vision/coco_semantic.py
 python-dotenv
 streamlit~=1.58 # applications/anomaly_detection web GUI
 streamlit-webrtc~=0.72 # live webcam streaming for anomaly_detection

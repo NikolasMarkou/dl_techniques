@@ -22,6 +22,15 @@ evaluation with the lowest value of the streak, which is not the best value seen
 over the run -- deliberately, and differently from
 ``restore_best_weights=True``.
 
+Non-finite values and ``min_delta``
+-----------------------------------
+A NaN or infinite monitored value stops training at once. It takes no snapshot
+and does not move the reference value, so ``on_train_end`` restores the last
+FINITE snapshot rather than diverged weights. With ``min_delta > 0`` a rise
+inside the slack is neither an increase nor a snapshot-eligible evaluation: the
+reference value stays where it was, so slow drift accumulates against it instead
+of being forgiven one step at a time (``# DECISION`` in ``_classify``).
+
 Snapshot storage is a choice, not an implementation detail. In-memory
 ``model.get_weights()`` is the default because it is exact and needs no
 filesystem; ``checkpoint_path`` switches to ``model.save_weights`` per snapshot,
@@ -33,6 +42,7 @@ References:
       validation loss. (https://arxiv.org/abs/2410.11516)
 """
 
+import math
 import os
 from typing import Any, Dict, Optional
 
@@ -51,7 +61,7 @@ class ConsecutiveIncreaseEarlyStopping(keras.callbacks.Callback):
     """Stop after ``patience`` evaluations whose monitored value strictly rises.
 
     The streak is broken -- and a fresh snapshot taken -- by any evaluation whose
-    value did not increase, including an exact repeat. A single flat evaluation
+    value is not worse than the reference value, including an exact repeat. A single flat evaluation
     resets the count, which is the rule's whole content: three rises are evidence
     of a trend, and rise-flat-rise is not.
 
@@ -62,7 +72,9 @@ class ConsecutiveIncreaseEarlyStopping(keras.callbacks.Callback):
     :type patience: int
     :param min_delta: Slack below which an increase is not counted. Default
         ``0.0``, so any rise counts; a positive value makes the rule tolerant of
-        numerical noise at a fine cadence.
+        numerical noise at a fine cadence. A rise inside the slack neither
+        counts nor snapshots and leaves the reference value where it was, so
+        drift accumulates against it.
     :type min_delta: float
     :param mode: ``'min'`` or ``'max'``, naming the good direction.
     :type mode: str
@@ -134,17 +146,34 @@ class ConsecutiveIncreaseEarlyStopping(keras.callbacks.Callback):
             return
 
         value = float(logs[self.monitor])
-        increased = self._is_increase(value)
+
+        # DECISION plan-2026-11-11T131349-13b28b37/D-017: a diverged run has
+        # nothing left to measure: stop now, snapshot nothing and leave
+        # `_previous` alone, so `on_train_end` restores the last
+        # finite evaluation. Do not count NaN as an increase (three diverged
+        # epochs wasted) or as "not an increase" (the old behaviour: NaN weights
+        # snapshotted every epoch, never stopped). Pinned by the NaN/inf tests.
+        if not math.isfinite(value):
+            self.stopped_at_evaluation = int(epoch)
+            logger.warning(
+                f"[consecutive-increase] {self.monitor}={value} is not "
+                f"finite at evaluation {epoch}; stopping."
+            )
+            self.model.stop_training = True
+            return
+
+        verdict = self._classify(value)
+        increased = verdict == "increase"
 
         # Snapshot FIRST, and only when this evaluation did not increase. The
         # order is load-bearing: snapshotting before deciding overwrites the
         # pre-streak weights with the first rising evaluation's, so the restore
         # lands on the value the streak started from rather than the value before
         # it -- which is a different model, silently.
-        if not increased:
+        if verdict == "improved":
             self._streak = 0
             self._snapshot()
-        else:
+        elif increased:
             self._streak += 1
 
         if self.verbose:
@@ -182,15 +211,38 @@ class ConsecutiveIncreaseEarlyStopping(keras.callbacks.Callback):
 
     # -- internals ------------------------------------------------------
 
-    def _is_increase(self, value: float) -> bool:
-        """Whether ``value`` counts as an increase over the previous evaluation."""
+    def _classify(self, value: float) -> str:
+        """Compare a finite ``value`` with the reference and move the reference.
+
+        Returns ``"improved"`` (not worse than the reference: the streak resets
+        and a snapshot is taken), ``"increase"`` (worse by more than
+        ``min_delta``: the streak grows) or ``"slack"`` (worse, but within
+        ``min_delta``).
+        """
+        # DECISION plan-2026-11-11T131349-13b28b37/D-017: the reference
+        # (``_previous``) advances on "improved" and "increase" but NOT on
+        # "slack". Do not advance it on every evaluation as the old
+        # ``previous, self._previous = self._previous, value`` did: with
+        # ``min_delta=0.05`` a drift of +0.04 per epoch then never counted, and
+        # each slack epoch took a snapshot, so the restore target ratcheted to
+        # 1.16 from a start of 1.0. Pinned by
+        # ``test_topographic_callbacks.py::TestNonFiniteValuesAndTheMinDeltaAnchor``.
         if self._previous is None:
             self._previous = value
-            return False
-        previous, self._previous = self._previous, value
-        if self.mode == "min":
-            return value > previous + self.min_delta
-        return value < previous - self.min_delta
+            return "improved"
+        # In ``mode='max'`` the good direction is up, so compare the negation.
+        worse_by = (
+            value - self._previous
+            if self.mode == "min"
+            else self._previous - value
+        )
+        if worse_by > self.min_delta:
+            self._previous = value
+            return "increase"
+        if worse_by > 0.0:
+            return "slack"
+        self._previous = value
+        return "improved"
 
     def _snapshot(self) -> None:
         """Take the snapshot a future restore will come from.

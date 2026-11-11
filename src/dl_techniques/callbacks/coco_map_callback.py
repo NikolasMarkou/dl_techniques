@@ -10,9 +10,14 @@ TrainingCurvesCallback all pick them up:
 - ``val_map50``    — mAP at IoU 0.50 (COCOeval stats[1])
 - ``val_map5095``  — mean mAP over IoU 0.50..0.95 step 0.05 (COCOeval stats[0])
 
-pycocotools is required (installed during an earlier plan).  The callback is
-safe to use even when the model emits zero detections — pycocotools gracefully
-produces mAP=0 and we catch its "No annotation to evaluate" edge case.
+pycocotools is required (declared in the ``data`` extra of ``pyproject.toml``).
+A model that really emits zero detections on images that have ground truth
+scores a true 0.0.  Every other outcome that is not a measurement (the model
+raising, the output missing the detection key, ``loadRes`` rejecting the
+results, no ground truth among the evaluated images) logs NaN, never 0.0: a
+fabricated zero is saved by ``ModelCheckpoint(save_best_only, mode="max")`` as
+the best epoch, while NaN counts as a non-improvement for both Keras monitors
+and keeps the History and CSV columns stable (D-017).
 """
 
 from __future__ import annotations
@@ -54,7 +59,10 @@ class COCOMAPCallback(keras.callbacks.Callback):
         ``emit_boxes=True``.  Must expose ``coco`` (a pycocotools
         :class:`pycocotools.coco.COCO`), ``image_ids`` (ordered list), and
         ``idx_to_cat_id`` (``Dict[int, int]`` mapping model-class-index →
-        COCO category id).  ``config.shuffle`` should be ``False`` on val.
+        COCO category id).  ``image_ids`` is read live on every epoch, so a
+        loader that reorders itself between epochs (``PyDataset.on_epoch_end``)
+        is still scored against the images it actually served.  Do not shuffle
+        within an evaluation.
     :param image_size: Training-time square image size ``(H == W)``.  Anchors
         are generated at this size; strides divide it evenly.
     :param num_classes: Number of detection classes emitted by the model.
@@ -112,7 +120,6 @@ class COCOMAPCallback(keras.callbacks.Callback):
                     f"val_loader is missing required attribute {attr!r}"
                 )
         self.coco: COCO = val_loader.coco
-        self.image_ids: List[int] = list(val_loader.image_ids)
         self.idx_to_cat_id: Dict[int, int] = dict(val_loader.idx_to_cat_id)
 
         # Pre-compute anchors once.
@@ -122,12 +129,12 @@ class COCOMAPCallback(keras.callbacks.Callback):
 
         # Cache original image (H, W) lookup.
         self._img_hw: Dict[int, Tuple[int, int]] = {}
-        for img_id in self.image_ids:
+        for img_id in val_loader.image_ids:
             info = self.coco.loadImgs(img_id)[0]
             self._img_hw[img_id] = (int(info["height"]), int(info["width"]))
 
         logger.info(
-            f"COCOMAPCallback: {len(self.image_ids)} val images, "
+            f"COCOMAPCallback: {len(val_loader.image_ids)} val images, "
             f"num_classes={num_classes}, reg_max={reg_max}, strides={self.strides}, "
             f"frequency={self.frequency}"
         )
@@ -144,8 +151,13 @@ class COCOMAPCallback(keras.callbacks.Callback):
         try:
             ap50, ap5095 = self._run_eval()
         except Exception as e:
-            logger.warning(f"COCOMAPCallback: eval failed: {e}")
-            ap50, ap5095 = 0.0, 0.0
+            # DECISION plan-2026-11-11T131349-13b28b37/D-017: NaN, never 0.0.
+            # Do not "fall back to a safe score": ModelCheckpoint saves a 0.0 as
+            # the first best.  Pinned by TestAFailedEvaluationIsNotAScore.
+            logger.warning(
+                f"COCOMAPCallback: eval failed: {e}", exc_info=True
+            )
+            ap50, ap5095 = float("nan"), float("nan")
         logs["val_map50"] = float(ap50)
         logs["val_map5095"] = float(ap5095)
         logger.info(
@@ -176,11 +188,10 @@ class COCOMAPCallback(keras.callbacks.Callback):
             # plan-2026-08-14T233721-d4f9beb2), so accept both shapes.
             det = preds.get(self.detection_head_key) if isinstance(preds, dict) else preds
             if det is None:
-                logger.warning(
-                    f"COCOMAPCallback: model output missing "
-                    f"'{self.detection_head_key}' key — aborting eval."
+                raise RuntimeError(
+                    f"model output is missing the "
+                    f"'{self.detection_head_key}' key"
                 )
-                return 0.0, 0.0
             det_np = np.asarray(keras.ops.convert_to_numpy(det))
 
             per_image = decode_predictions(
@@ -193,7 +204,7 @@ class COCOMAPCallback(keras.callbacks.Callback):
             )
 
             for i, (boxes_px, scores, classes) in enumerate(per_image):
-                image_id = self.image_ids[cursor + i]
+                image_id = self.val_loader.image_ids[cursor + i]
                 evaluated_ids.append(int(image_id))
                 # Per-class NMS (operates on training-image pixel coords)
                 kept_b, kept_s, kept_c = nms_per_class(
@@ -249,11 +260,18 @@ class COCOMAPCallback(keras.callbacks.Callback):
     ) -> Tuple[float, float]:
         """Run pycocotools COCOeval on a list of detection dicts.
 
-        pycocotools complains when passed an empty detection list; we return
-        ``(0, 0)`` in that case.
+        pycocotools complains when passed an empty detection list.  With no
+        detections the score is a true ``(0.0, 0.0)`` when the evaluated images
+        (all images when ``evaluated_ids`` is empty) carry ground truth, and
+        ``(nan, nan)`` when they carry none.  A failure inside pycocotools
+        propagates to ``on_epoch_end``, which logs NaN.
         """
+        nan = float("nan")
         if not results:
-            return 0.0, 0.0
+            has_gt = bool(
+                self.coco.getAnnIds(imgIds=sorted(set(evaluated_ids)))
+            )
+            return (0.0, 0.0) if has_gt else (nan, nan)
 
         stream = io.StringIO() if self.suppress_stdout else None
         ctx = (
@@ -262,12 +280,7 @@ class COCOMAPCallback(keras.callbacks.Callback):
             else contextlib.nullcontext()
         )
         with ctx:
-            try:
-                coco_dt = self.coco.loadRes(results)
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"COCOMAPCallback: loadRes failed: {e}")
-                return 0.0, 0.0
-
+            coco_dt = self.coco.loadRes(results)
             coco_eval = COCOeval(self.coco, coco_dt, "bbox")
             # Restrict evaluation to the image ids we ran on — important when
             # max_eval_batches truncates val set.
@@ -280,13 +293,14 @@ class COCOMAPCallback(keras.callbacks.Callback):
         # COCOeval.stats layout (per pycocotools):
         #   stats[0] = mAP @ IoU 0.50:0.95
         #   stats[1] = mAP @ IoU 0.50
-        ap5095 = float(coco_eval.stats[0]) if coco_eval.stats is not None else 0.0
-        ap50 = float(coco_eval.stats[1]) if coco_eval.stats is not None else 0.0
-        # Negative values (-1) indicate "no GT for this metric" — clamp to 0 for logging.
+        ap5095 = float(coco_eval.stats[0]) if coco_eval.stats is not None else nan
+        ap50 = float(coco_eval.stats[1]) if coco_eval.stats is not None else nan
+        # Negative values (-1) mean "no ground truth for this metric": that is
+        # not a measured zero, so it is NaN.
         if np.isnan(ap50) or ap50 < 0:
-            ap50 = 0.0
+            ap50 = nan
         if np.isnan(ap5095) or ap5095 < 0:
-            ap5095 = 0.0
+            ap5095 = nan
         return ap50, ap5095
 
 # ------------------------------------------------------------------------------

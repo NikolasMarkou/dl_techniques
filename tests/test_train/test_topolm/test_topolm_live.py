@@ -800,11 +800,11 @@ def _force_an_early_stop_at_the_second_evaluation(monkeypatch):
     def forced(self, value):
         if self._previous is None:
             self._previous = value
-            return False
-        return True
+            return "improved"
+        return "increase"
 
     monkeypatch.setattr(
-        stopping.ConsecutiveIncreaseEarlyStopping, "_is_increase", forced
+        stopping.ConsecutiveIncreaseEarlyStopping, "_classify", forced
     )
 
 

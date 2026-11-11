@@ -237,6 +237,75 @@ class TestConsecutiveIncreaseRestore:
         assert (tmp_path / "snapshots" / "consecutive_increase_best.weights.h5").exists()
 
 
+def _drive(stopper, model, values):
+    """Write each monitored value into the probe weight, then evaluate it."""
+    for epoch, value in enumerate(values):
+        _write(model, value)
+        stopper.on_epoch_end(epoch, {"val_loss": value})
+        if getattr(model, "stop_training", False):
+            break
+    stopper.on_train_end()
+
+
+class TestNonFiniteValuesAndTheMinDeltaAnchor:
+    """D-017: a non-finite value stops at once; slow drift is not hidden."""
+
+    def test_nan_stops_training_and_restores_the_last_finite_snapshot(self):
+        model, stopper = _model_and_callback()
+        _drive(stopper, model, [1.0, 0.9, float("nan"), float("nan"), float("nan")])
+        assert stopper.stopped_at_evaluation == 2
+        assert model.stop_training is True
+        assert _read(model) == pytest.approx(0.9), "restored the NaN weights"
+
+    def test_inf_stops_training_the_same_way(self):
+        model, stopper = _model_and_callback()
+        _drive(stopper, model, [1.0, 0.9, float("inf"), float("inf")])
+        assert stopper.stopped_at_evaluation == 2
+        assert _read(model) == pytest.approx(0.9)
+
+    def test_a_non_finite_value_takes_no_snapshot_and_does_not_move_the_anchor(self):
+        model, stopper = _model_and_callback()
+        stopper.on_epoch_end(0, {"val_loss": 1.0})
+        _write(model, 1.0)
+        stopper._snapshot()
+        _write(model, float("nan"))
+        stopper.on_epoch_end(1, {"val_loss": float("nan")})
+        assert stopper._previous == 1.0
+        assert stopper.streak == 0
+        stopper.on_train_end()
+        assert _read(model) == pytest.approx(1.0)
+
+    def test_min_delta_drift_accumulates_and_restores_the_epoch_zero_weight(self):
+        """+0.04 per epoch under ``min_delta=0.05`` is invisible step to step.
+
+        Old rule advanced its reference on every sub-threshold rise, so the
+        drift never counted and the snapshot ratcheted to each drifted epoch.
+        """
+        model = _probe_model()
+        stopper = ConsecutiveIncreaseEarlyStopping(patience=3, min_delta=0.05)
+        stopper.set_model(model)
+        _drive(stopper, model, [1.0, 1.04, 1.08, 1.12, 1.16, 1.3, 1.5, 1.7])
+        assert stopper.stopped_at_evaluation is not None
+        assert _read(model) == pytest.approx(1.0), "restored a drifted weight"
+
+    def test_pure_slow_drift_is_eventually_stopped(self):
+        model = _probe_model()
+        stopper = ConsecutiveIncreaseEarlyStopping(patience=3, min_delta=0.05)
+        stopper.set_model(model)
+        _drive(stopper, model, [1.0 + 0.04 * i for i in range(10)])
+        assert stopper.stopped_at_evaluation is not None
+        assert _read(model) == pytest.approx(1.0)
+
+    def test_a_genuine_non_increase_still_snapshots_after_a_sub_threshold_rise(self):
+        """The both-ways twin: only the SUB-threshold rise is denied a snapshot."""
+        model = _probe_model()
+        stopper = ConsecutiveIncreaseEarlyStopping(patience=2, min_delta=0.05)
+        stopper.set_model(model)
+        _drive(stopper, model, [1.0, 1.04, 0.9, 1.0, 1.1, 1.2])
+        assert stopper.stopped_at_evaluation == 4
+        assert _read(model) == pytest.approx(0.9)
+
+
 class _TappedModel(keras.Model):
     """A tap behind a projection, so the spatial loss is a real gradient path.
 

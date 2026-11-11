@@ -41,7 +41,6 @@ UNDECLARED = {
     "cv2": "datasets/bdd100k_video.py, datasets/synthetic_shapes.py",
     "ml_dtypes": "utils/dtype_policy.py; installed by TensorFlow as its own dependency",
     "psutil": "utils/inference.py; listed in requirements.txt only",
-    "pycocotools": "callbacks/coco_map_callback.py, datasets/vision/coco_multitask_local.py",
     "tensorflow_probability": "utils/alignment/metrics.py; falls back without it",
 }
 

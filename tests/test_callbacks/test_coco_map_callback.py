@@ -8,6 +8,7 @@ Three test levels:
 
 from __future__ import annotations
 
+import math
 import os
 from typing import Any, Dict, List
 from unittest.mock import MagicMock
@@ -182,6 +183,132 @@ class TestOnEpochEnd:
         cb.on_epoch_end(0, logs)
         assert logs["val_map50"] == pytest.approx(0.0)
         assert logs["val_map5095"] == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# D-017: a failed evaluation is NaN, never a fabricated 0.0
+# ---------------------------------------------------------------------------
+
+
+class TestAFailedEvaluationIsNotAScore:
+    """``ModelCheckpoint(save_best_only, mode='max')`` saves a 0.0 as the first best.
+
+    NaN counts as a non-improvement for both Keras monitors (measured in the
+    plan's findings), so NaN is the only value that leaves the History column
+    stable and saves nothing.
+    """
+
+    _setup = TestOnEpochEnd._setup
+
+    def test_a_model_that_raises_logs_nan_and_a_traceback(self, tmp_path, caplog):
+        cb = self._setup(tmp_path)
+        cb.set_model(MagicMock(side_effect=RuntimeError("boom")))
+        logs: Dict[str, Any] = {}
+        with caplog.at_level("WARNING", logger="dl"):
+            cb.on_epoch_end(0, logs)
+        assert math.isnan(logs["val_map50"])
+        assert math.isnan(logs["val_map5095"])
+        failures = [r for r in caplog.records if "eval failed" in r.getMessage()]
+        assert failures and failures[0].exc_info is not None
+
+    def test_a_missing_detection_key_logs_nan(self, tmp_path):
+        cb = self._setup(tmp_path)
+        cb.set_model(MagicMock(return_value={"segmentation": np.zeros((1, 2))}))
+        logs: Dict[str, Any] = {}
+        cb.on_epoch_end(0, logs)
+        assert math.isnan(logs["val_map50"])
+        assert math.isnan(logs["val_map5095"])
+
+    def test_a_loadres_failure_is_nan(self, tmp_path):
+        cb = self._setup(tmp_path)
+        bad = [{"image_id": 999, "category_id": 1, "bbox": [0, 0, 4, 4], "score": 0.9}]
+        # image 999 is not in the ground truth, so pycocotools rejects the results
+        cb._run_eval = lambda: cb._score_results(bad, [1])
+        logs: Dict[str, Any] = {}
+        cb.on_epoch_end(0, logs)
+        assert math.isnan(logs["val_map50"])
+
+    def test_detections_on_images_without_ground_truth_are_nan_not_zero(self, tmp_path):
+        cb = self._setup(tmp_path)
+        cb.coco.dataset["images"].append(
+            {"id": 2, "height": 32, "width": 32, "file_name": "y.jpg"}
+        )
+        cb.coco.createIndex()
+        det = [{"image_id": 2, "category_id": 1, "bbox": [0, 0, 4, 4], "score": 0.9}]
+        ap50, ap5095 = cb._score_results(det, [2])
+        assert math.isnan(ap50) and math.isnan(ap5095)
+
+    def test_no_detections_and_no_ground_truth_is_nan(self, tmp_path):
+        cb = self._setup(tmp_path)
+        cb.coco.dataset["images"].append(
+            {"id": 2, "height": 32, "width": 32, "file_name": "y.jpg"}
+        )
+        cb.coco.createIndex()
+        ap50, ap5095 = cb._score_results([], [2])
+        assert math.isnan(ap50) and math.isnan(ap5095)
+
+    def test_no_detections_with_ground_truth_stays_a_true_zero(self, tmp_path):
+        """The both-ways twin: the model really found nothing, so 0.0 is correct."""
+        cb = self._setup(tmp_path)
+        ap50, ap5095 = cb._score_results([], [1])
+        assert ap50 == 0.0 and ap5095 == 0.0
+
+
+class TestImageIdsAreReadLive:
+    def test_a_loader_that_reorders_after_construction_is_scored_in_its_live_order(
+        self, tmp_path
+    ):
+        """``PyDataset.on_epoch_end`` reshuffles the real loader after the
+        callback copied ``image_ids``; scoring against the stale copy turned a
+        perfect 1.0 into 0.0 (measured in the plan's findings)."""
+        import json
+        from pycocotools.coco import COCO
+        from dl_techniques.callbacks.coco_map_callback import COCOMAPCallback
+
+        gt = {
+            "images": [
+                {"id": 1, "height": 32, "width": 32, "file_name": "a.jpg"},
+                {"id": 2, "height": 32, "width": 32, "file_name": "b.jpg"},
+            ],
+            "annotations": [
+                {"id": 1, "image_id": 1, "category_id": 1,
+                 "bbox": [4, 4, 8, 8], "area": 64, "iscrowd": 0},
+            ],
+            "categories": [{"id": 1, "name": "a"}],
+        }
+        path = os.path.join(str(tmp_path), "gt.json")
+        with open(path, "w") as f:
+            json.dump(gt, f)
+        fake = MagicMock()
+        fake.coco = COCO(path)
+        fake.image_ids = [1, 2]
+        fake.idx_to_cat_id = {0: 1}
+        fake.config = MagicMock()
+        fake.__len__ = lambda self=None: 1
+        fake.__getitem__ = lambda self=None, i=0: (
+            np.zeros((2, 32, 32, 3), dtype=np.float32), {},
+        )
+        cb = COCOMAPCallback(
+            val_loader=fake, image_size=32, num_classes=1, reg_max=4,
+            strides=(4, 8, 16), score_threshold=0.99,
+        )
+        anchors = sum((32 // s) ** 2 for s in (4, 8, 16))
+        model = MagicMock()
+        model.return_value = {
+            "detection": keras.ops.convert_to_tensor(
+                np.zeros((2, anchors, 4 * 4 + 1), dtype=np.float32)
+            )
+        }
+        cb.set_model(model)
+
+        seen: List[List[int]] = []
+        cb._score_results = lambda results, ids: (seen.append(list(ids)) or (0.0, 0.0))
+
+        cb.on_epoch_end(0, {})
+        assert seen[-1] == [1, 2]
+        fake.image_ids = [2, 1]  # the loader reshuffled after construction
+        cb.on_epoch_end(1, {})
+        assert seen[-1] == [2, 1]
 
 
 # ---------------------------------------------------------------------------
