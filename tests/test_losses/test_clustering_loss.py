@@ -167,7 +167,7 @@ class TestClusteringLoss:
 
         loss = loss_fn(y_true, y_pred)
 
-        assert loss.shape == ()  # Loss should be a scalar
+        assert loss.shape == ()  # the default reduction turns call()'s (batch,) rows into a scalar
         assert not tf.math.is_nan(loss)  # Loss should not be NaN
         assert not tf.math.is_inf(loss)  # Loss should not be infinite
 
@@ -215,7 +215,7 @@ class TestClusteringLoss:
 
             loss = loss_fn(y_true, y_pred)
 
-            assert loss.shape == ()  # Loss should be a scalar
+            assert loss.shape == ()  # the default reduction turns call()'s (batch,) rows into a scalar
             assert not tf.math.is_nan(loss)
             assert not tf.math.is_inf(loss)
 

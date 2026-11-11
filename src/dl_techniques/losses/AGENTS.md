@@ -41,13 +41,13 @@ The README table is the full inventory, grouped by domain.
 ## Modules
 
 - `affine_invariant_loss.py`: Scale- and shift-invariant L1 after median/MAD normalization. `masked=True` reads a validity mask from the last channel of `y_true` (Depth Anything V1, eq. 1-3).
-- `any_loss.py`: AnyLoss framework. A differentiable confusion matrix via `A(p) = sigmoid(L * (p - 0.5))`, plus 16 metric losses and `WeightedCrossEntropyWithAnyLoss`. The confusion matrix is global over the batch, so every class returns a scalar.
+- `any_loss.py`: AnyLoss framework. A differentiable confusion matrix via `A(p) = sigmoid(L * (p - 0.5))`, plus 15 metric losses and `WeightedCrossEntropyWithAnyLoss`. The confusion matrix is global over the batch, so every class returns a scalar.
 - `brier_spiegelhalters_ztest_loss.py`: Binary-only calibration losses and metrics. Ships both Z-statistics behind `statistic=`: Spiegelhalter's `(1-2p)`-weighted Z (the default) and calibration-in-the-large (the pre-2026-09-02 behavior). The penalty is chance-corrected (`relu(Z^2 - 1)`), divided by `N`, and decomposed per row.
 - `capsule_margin_loss.py`: CapsNet margin loss, plus an analysis helper.
 - `chamfer_loss.py`: Symmetric Chamfer distance. Builds an O(N*M) pairwise matrix.
 - `clifford_detection_loss.py`: `YOLOv12ObjectDetectionLoss` with configurable strides. Inherits the `reduction`-dropping `from_config` from `yolo12_multitask_loss.py`.
 - `clip_contrastive_loss.py`: Symmetric CLIP loss over a dict or tuple of logit matrices. Direct call only; see Conventions.
-- `clustering_loss.py`: Intra-cluster MSE plus a batch-level uniform-distribution penalty, a metrics dataclass, and a callback.
+- `clustering_loss.py`: `ClusteringLoss` returns `(batch,)`: each row is its intra-cluster MSE plus the batch-level uniform-distribution penalty, which is one constant repeated in every row (batch-coupled: a `sample_weight` scales that term by `mean(w)` and a zero-weighted row keeps its share of it). Also a metrics dataclass and a callback.
 - `colbert_loss.py`: ColBERT v1 pairwise softmax CE over `nway` MaxSim scores (positive at index 0), and v2 log-target KL distillation with batchmean semantics.
 - `confidence_penalty_loss.py`: `ConfidencePenaltyLoss`, CE (explicit `-sum(y * log p)`, not Keras's fused op) minus a per-sample entropy bonus (Pereyra 2017), plus `analyze_confidence_penalty_loss`. A uniform `1/K` target row is an outlier-exposure row (Hendrycks 2019); an all-zero row is ignored with exactly zero value and gradient. Nothing couples the rows. It replaced `GoodhartAwareLoss`: `prior_weight`, `class_prior` and `mi_weight` are gone and raise `TypeError`, and a `.keras` archive compiled with the old loss no longer loads with `compile=True` (it loads with `compile=False`; an exploration scan found 0 of 68 archives under `results/` carrying it). The post-hoc temperature fit lives in `utils/temperature_scaling.py`.
 - `ddpm_hybrid_loss.py`: DDPM `LEARNED_RANGE` objective: epsilon MSE plus a variational bound with a frozen mean. `y_true` packs noise, `x_start` and `t` on the channel axis. `x_t` is re-derived from `DDPMSchedule`.
@@ -70,7 +70,7 @@ The README table is the full inventory, grouped by domain.
 - `mase_loss.py`: MASE with a per-row numerator over a batch-global naive denominator (deliberately not per row).
 - `masked_causal_lm_loss.py`: Masked token CE and its prefix alias. Rows are scaled so the batch mean equals the token-pool mean, which couples them through the batch-wide token count: a zero `sample_weight` is not a row drop.
 - `mean_shift_instance_loss.py`: Per-row pull/push instance-embedding loss. Subsamples to `max_points` only when `N` is static.
-- `multi_labels_loss.py`: `PerChannelBinaryLoss` (adaptive per-channel weighting; base must be `'binary_crossentropy'` or element-wise), element-wise `WeightedBinaryFocalLoss` and `WeightedBinaryCrossEntropyLoss`, `DiceLossPerChannel`, and a factory.
+- `multi_labels_loss.py`: `PerChannelBinaryLoss` (adaptive per-channel weighting; base must be `'binary_crossentropy'` or element-wise; returns `(batch,)` but is batch-coupled, because the channel weights come from the class-presence counts of the whole batch), element-wise `WeightedBinaryFocalLoss` and `WeightedBinaryCrossEntropyLoss`, `DiceLossPerChannel` (returns `(batch,)` through `segmentation_metrics.dice_per_sample`, row-local), and a factory.
 - `multistep_loss.py`: ADAM `mseh` / `tmse` / `gtmse` / `msce` over the horizon axis. `gtmse` is a first-order surrogate about the detached batch mean, exact in value and gradient. The factory raises on unknown kwargs.
 - `nano_vlm_loss.py`: Shifted next-token CE scored on the trailing label-length positions (drops the vision prefix). Reimplements reduction internally. Same row coupling as `MaskedCausalLMLoss` (a zero `sample_weight` keeps the row's tokens in the denominator).
 - `omnipoint_losses.py`: OmniPoint ray / distance / scale decoupling, finite-difference normal and Laplacian consistency (D-004), mask BCE, `compute_optimal_scale`, and the tuple-in `OmniPointCombinedLoss` callable. Scale alignment uses the ground-truth ray (D-026).
@@ -92,7 +92,7 @@ The README table is the full inventory, grouped by domain.
 - `tabm_loss.py`: TabM ensemble loss, returning one value per input row in both sharing modes (D-027, D-064).
 - `thera_jacobian_tv.py`: THERA `mean(|J|)` aliasing penalty and the `recon + tv_weight * TV` combiner.
 - `topographic_vae_loss.py`: Topographic VAE ELBO with two KL terms. The `u` pair is conditional; half a pair raises. Read `effective_beta`.
-- `utilization_loss.py`: MANN and GNN anti-collapse regularizers (scalar returns).
+- `utilization_loss.py`: MANN and GNN anti-collapse regularizers; both return `(batch,)`. `GNNUtilizationLoss` is row-local. `MANNUtilizationLoss` couples rows only through its temporal-variance term (a detached first-order surrogate, as in `MultistepLoss`'s `gtmse`).
 - `wasserstein_loss.py`: WGAN critic / generator losses, `compute_gradient_penalty` (sums every non-batch axis, any rank of 2 or more), a 1-D Wasserstein divergence, and factories.
 - `yolo12_multitask_loss.py`: YOLOv12 detection (TAL + CIoU + DFL), Dice+Focal segmentation, classification focal, and the rank-routed multi-task orchestrator. Re-keyed with `legacy_packages=("yolov12_losses",)` (D-005).
 
@@ -108,7 +108,7 @@ Every loss inherits `keras.losses.Loss` and implements `call(self, y_true, y_pre
 
 Keras computes `values * sample_weight` before reducing. A scalar return therefore yields `batch_loss * mean(sample_weight)` and makes `reduction=` dead. The result is a plausible wrong number, not an error.
 
-The modules that still violate this are recorded by `tests/test_losses/test_the_premature_scalar_family_is_pinned.py`, which goes red when one is fixed. Do not copy that list into prose.
+`tests/test_losses/test_the_premature_scalar_family_is_pinned.py` accounts for every `Loss` subclass in `losses/` by a closure census that fails when a class is in no bucket or in two. The four buckets are `KNOWN_GOOD` (measured by the defect predicate and found per-sample; `STILL_BROKEN` is empty, and a floor on the total keeps a measured row from disappearing), `DOCUMENTED_SCALAR` (the `any_loss.py` metric losses, scalar by design), `KNOWN_SCALAR_NOT_YET_FIXED` and `NOT_PINNED` (each entry carries the reason nothing measures it; this is not a clearance). `SAMMaskLoss` and `SAM2GatedMaskLoss` are the two classes measured to be premature scalars that are still unfixed. Fixing one moves it to `KNOWN_GOOD` with a builder row. Do not copy the bucket lists into prose.
 
 ### A correct shape is not enough
 
@@ -119,6 +119,14 @@ loss(w=[1, ..., 1, 0]) * B / (B - 1) == loss(batch[:-1])
 ```
 
 `tests/test_losses/test_confidence_penalty_loss.py` shows the pattern (`test_zeroing_a_sample_weight_equals_dropping_the_row`). Document the coupling in the docstring.
+
+Three per-sample losses are coupled through one batch term and have their own documented form of that identity, which holds with the batch statistic computed over the FULL batch (not over the kept rows):
+
+- `PerChannelBinaryLoss`: `loss(w=[1, ..., 1, 0]) * B / (B - 1)` is the mean of the first `B - 1` rows scored with channel weights from all `B` images, and it differs from `loss(batch[:-1])`. Pin: `test_a_zero_sample_weight_keeps_the_row_s_class_counts_in_the_weights` in `tests/test_losses/test_multi_labels_loss.py`.
+- `ClusteringLoss`: the same expression equals the kept rows' mean distance term plus the balance penalty of the full batch (each row carries the same constant, so `sample_weight` scales it by `mean(w)`). Pin: `test_a_zero_sample_weight_does_not_drop_the_row_s_share_of_the_balance_penalty` in `tests/test_losses/test_clustering_loss.py`.
+- `MANNUtilizationLoss`: the same expression equals the kept rows scored against the full-batch temporal variance and mean. With `variance_weight=0` the plain identity does hold. Pin: `test_with_the_variance_term_the_drop_a_row_identity_does_not_hold` in `tests/test_losses/test_utilization_loss.py`.
+
+`GNNUtilizationLoss` and `DiceLossPerChannel` are fully row-local and satisfy the plain identity.
 
 The token-mean language-model losses (`NanoVLMLoss`, `MaskedCausalLMLoss` and its subclasses, `FocalCausalLMLoss`, the `HRMLoss` LM term) are such losses, and the identity above does NOT hold for them: each row is `S_i / N * B` with `N` the batch-wide valid-token count, and `call()` never sees `sample_weight`, so a zero weight keeps the row's tokens in `N`. The pin for them is `loss(w) == loss(batch without row d) * (N - n_d) / N`, written against an independent float64 reference (`tests/test_losses/test_the_nano_vlm_loss_scores_the_text_positions.py`). Never write "`sample_weight` selects rows" in these docstrings.
 

@@ -52,6 +52,11 @@ the helper itself, and **25** others (all 10 of ``analyzer/``, all 6 of
 ``losses/clustering_loss.py``, ``models/memory/som/model.py``,
 ``utils/{visualization,visualization_manager,inference,alignment/alignment,
 masking/factory}.py``). None of the 25 is a Keras callback.
+(Correction, plan-2026-11-11-64d1b401: the grep now returns 28 files, 24 of them
+outside ``callbacks/`` and the helper, and one of those IS a Keras callback:
+``losses/clustering_loss.py`` defines ``ClusteringMetricsCallback``, which imports
+pyplot lazily in ``_create_visualizations``. ``utils/AGENTS.md`` carries the
+current breakdown.)
 
 ONE of them is nevertheless a callback-driven consumer and is reported rather
 than silently swept in: ``callbacks/analyzer_callback.py`` imports
