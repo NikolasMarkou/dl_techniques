@@ -181,6 +181,21 @@ def _mambalct_pair():
     )
 
 
+def _seg_pair():
+    """Binary masks and probabilities, both ``(B, 5, 5, 3)``, for the segmentation losses.
+
+    The N(0,1) builders above do not work here: ``PerChannelBinaryLoss`` takes the
+    ``sqrt`` of a class-presence count (NaN for a negative one) and a Dice
+    denominator needs non-negative probabilities. Measured at HEAD b4831ec33 the
+    predicate accepts ``DiceLossPerChannel`` on this fixture (ratio 0.750000).
+    """
+    r = _rng()
+    return (
+        _t(r.random((BATCH, 5, 5, 3)) > 0.6),
+        _t(r.uniform(0.05, 0.95, size=(BATCH, 5, 5, 3))),
+    )
+
+
 # ---------------------------------------------------------------------
 # the pinned membership, derived by execution 2026-08-31
 # ---------------------------------------------------------------------
@@ -318,6 +333,11 @@ KNOWN_GOOD = [
     # constructor kwargs beyond the paper weights; the default-weighted
     # fixture rejects the scalar predicate (measured margin ~2e-02).
     ("mambalct_loss", "MambaLCTBoxLoss", {}, _mambalct_pair),
+    # DiceLossPerChannel returns `dice_per_sample` (one value per image, mean over
+    # channels) since plan-2026-11-11T223825-64d1b401 step 1; it was a member
+    # (`dice_scalar`, shape ()) before. Fully row-local: the drop-a-row identity
+    # lives in tests/test_losses/test_multi_labels_loss.py.
+    ("multi_labels_loss", "DiceLossPerChannel", {}, _seg_pair),
 ]
 
 

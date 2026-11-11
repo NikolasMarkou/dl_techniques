@@ -8,11 +8,13 @@ import keras
 from keras import ops
 
 from dl_techniques.losses.multi_labels_loss import (
+    DiceLossPerChannel,
     PerChannelBinaryLoss,
     WeightedBinaryCrossEntropyLoss,
     WeightedBinaryFocalLoss,
     create_multilabel_segmentation_loss,
 )
+from dl_techniques.losses.segmentation_metrics import dice_scalar
 from tests.optimizer_state import build_optimizer_state
 
 
@@ -388,7 +390,9 @@ class TestNumericalStability:
 
         loss_val = loss_fn.call(y_true, y_pred)
 
-        assert not np.isnan(float(loss_val))
+        # One value per sample since plan-2026-11-11T223825-64d1b401 step 1.
+        assert tuple(loss_val.shape) == (2,)
+        assert not np.isnan(float(keras.ops.mean(loss_val)))
 
     def test_large_batch_size(self):
         """Test with larger batch size."""
@@ -590,3 +594,150 @@ class TestWeightedBinaryCrossEntropyLoss:
         loaded = keras.models.load_model(path)
         assert isinstance(loaded.loss.base_loss, WeightedBinaryCrossEntropyLoss)
         assert loaded.loss.base_loss.pos_weight == pytest.approx(4.0)
+
+
+# ---------------------------------------------------------------------
+# DiceLossPerChannel returns one value per sample
+# (plan-2026-11-11T223825-64d1b401, step 1)
+# ---------------------------------------------------------------------
+
+DICE_BATCH = 4
+# float64 reference vs a float32 sum over 25 pixels: measured max error 6e-8.
+DICE_ROW_ATOL = 2e-7
+# Default-reduction value of `DiceLossPerChannel()(y, p)` on `_ragged_seg_batch()`
+# measured at HEAD b4831ec33, BEFORE the return became `(batch,)`
+# (plans/plan-2026-11-11T223825-64d1b401/scratch_golden_head.json, case dice/ragged).
+DICE_HEAD_GOLDEN = 0.5451357364654541
+DICE_SMOOTH = 1.0
+
+
+def _ragged_seg_batch():
+    """Binary masks with a DIFFERENT foreground density per row (0.15 to 0.8).
+
+    Rows must differ: if every row scored the same, a scalar broadcast to every
+    row would be indistinguishable from a per-row value.
+    """
+    r = np.random.default_rng(7)
+    density = np.array([0.15, 0.35, 0.55, 0.8])[:, None, None, None]
+    y_true = (r.random((DICE_BATCH, 5, 5, 3)) < density).astype("float32")
+    y_pred = r.uniform(0.05, 0.95, (DICE_BATCH, 5, 5, 3)).astype("float32")
+    return y_true, y_pred
+
+
+def _dice_rows_float64(y_true, y_pred, smooth=DICE_SMOOTH):
+    """Independent reference: 1 - mean_c (2 TP + s) / (2 TP + FP + FN + s), per image."""
+    yt = y_true.astype("float64")
+    yp = y_pred.astype("float64")
+    tp = (yt * yp).sum(axis=(1, 2))
+    fp = ((1.0 - yt) * yp).sum(axis=(1, 2))
+    fn = (yt * (1.0 - yp)).sum(axis=(1, 2))
+    return 1.0 - ((2.0 * tp + smooth) / (2.0 * tp + fp + fn + smooth)).mean(axis=-1)
+
+
+def _drop_last_row_gap(make_loss):
+    """``|loss(w=[1,..,1,0]) * B/(B-1) - loss(batch[:B-1])|`` for a loss factory.
+
+    Zero for a loss whose rows are independent; the scalar-broadcast defect leaves
+    it at the batch-versus-subset difference.
+    """
+    y_true, y_pred = _ragged_seg_batch()
+    w = np.array([1.0, 1.0, 1.0, 0.0], "float32")
+    weighted = float(make_loss()(y_true, y_pred, sample_weight=w))
+    dropped = float(make_loss()(y_true[:-1], y_pred[:-1]))
+    return abs(weighted * DICE_BATCH / (DICE_BATCH - 1) - dropped)
+
+
+class _ScalarDice(DiceLossPerChannel):
+    """The defect re-injected: the batch mean returned instead of `(batch,)`."""
+
+    def call(self, y_true, y_pred):
+        return keras.ops.mean(super().call(y_true, y_pred))
+
+
+class TestDiceLossPerChannelIsPerSample:
+    """`DiceLossPerChannel` charges each image its own Dice loss.
+
+    ``keras.losses.Loss.__call__`` multiplies ``call()`` by ``sample_weight`` and only
+    then reduces, so a scalar return discards WHICH rows were weighted.
+    """
+
+    def test_call_returns_one_value_per_sample(self):
+        y_true, y_pred = _ragged_seg_batch()
+        out = DiceLossPerChannel(smooth=DICE_SMOOTH).call(y_true, y_pred)
+        assert tuple(out.shape) == (DICE_BATCH,)
+
+    def test_reduction_none_returns_one_value_per_sample(self):
+        y_true, y_pred = _ragged_seg_batch()
+        out = DiceLossPerChannel(smooth=DICE_SMOOTH, reduction="none")(y_true, y_pred)
+        assert tuple(out.shape) == (DICE_BATCH,)
+
+    def test_rows_equal_an_independent_float64_reference(self):
+        y_true, y_pred = _ragged_seg_batch()
+        got = keras.ops.convert_to_numpy(
+            DiceLossPerChannel(smooth=DICE_SMOOTH, reduction="none")(y_true, y_pred)
+        )
+        ref = _dice_rows_float64(y_true, y_pred)
+        # The rows must differ, or a broadcast scalar would pass this test.
+        assert np.ptp(ref) > 0.05, ref
+        np.testing.assert_allclose(got, ref, atol=DICE_ROW_ATOL, rtol=0.0)
+
+    def test_default_value_is_unchanged(self):
+        """The default reduction is the batch mean it always was (passes before AND after)."""
+        y_true, y_pred = _ragged_seg_batch()
+        value = float(DiceLossPerChannel(smooth=DICE_SMOOTH)(y_true, y_pred))
+        assert abs(value - DICE_HEAD_GOLDEN) < 1e-6, (value, DICE_HEAD_GOLDEN)
+        assert abs(value - _dice_rows_float64(y_true, y_pred).mean()) < 1e-6
+
+    def test_default_gradient_is_unchanged(self):
+        """Gradient of the default value equals that of `dice_scalar`, the old return."""
+        import tensorflow as tf
+
+        y_true, y_pred = _ragged_seg_batch()
+        grads = []
+        for fn in (
+            lambda v: DiceLossPerChannel(smooth=DICE_SMOOTH)(y_true, v),
+            lambda v: dice_scalar(y_true, v, from_logits=False, smooth=DICE_SMOOTH),
+        ):
+            v = tf.Variable(y_pred)
+            with tf.GradientTape() as tape:
+                loss = fn(v)
+            grads.append(tape.gradient(loss, v).numpy())
+        np.testing.assert_allclose(grads[0], grads[1], atol=1e-9, rtol=0.0)
+
+    def test_sample_weight_charges_each_row_its_own_weight(self):
+        y_true, y_pred = _ragged_seg_batch()
+        w = np.array([1.0, 0.5, 2.0, 0.0], "float32")
+        got = float(DiceLossPerChannel(smooth=DICE_SMOOTH)(y_true, y_pred, sample_weight=w))
+        want = float((w * _dice_rows_float64(y_true, y_pred)).sum() / DICE_BATCH)
+        assert abs(got - want) < 1e-6, (got, want)
+
+    def test_zeroing_a_sample_weight_equals_dropping_the_row(self):
+        """No batch term: `loss(w=[1,1,1,0]) * B/(B-1) == loss(batch[:3])`."""
+        gap = _drop_last_row_gap(lambda: DiceLossPerChannel(smooth=DICE_SMOOTH))
+        assert gap < 1e-6, gap
+
+    def test_sum_reduction_is_batch_times_the_default(self):
+        y_true, y_pred = _ragged_seg_batch()
+        default = float(DiceLossPerChannel(smooth=DICE_SMOOTH)(y_true, y_pred))
+        total = float(DiceLossPerChannel(smooth=DICE_SMOOTH, reduction="sum")(y_true, y_pred))
+        assert abs(total - DICE_BATCH * default) < 1e-6, (total, default)
+
+    def test_a_zero_weighted_row_gets_exactly_zero_gradient(self):
+        import tensorflow as tf
+
+        y_true, y_pred = _ragged_seg_batch()
+        w = np.array([1.0, 1.0, 1.0, 0.0], "float32")
+        v = tf.Variable(y_pred)
+        with tf.GradientTape() as tape:
+            loss = DiceLossPerChannel(smooth=DICE_SMOOTH)(y_true, v, sample_weight=w)
+        grad = tape.gradient(loss, v).numpy()
+        assert np.abs(grad[:3]).max() > 0.0
+        assert np.abs(grad[3]).max() == 0.0
+
+    def test_the_scalar_return_is_caught_by_these_arms(self):
+        """ANTI-VACUITY: the defect re-injected must fail the shape and identity arms."""
+        y_true, y_pred = _ragged_seg_batch()
+        scalar = _ScalarDice(smooth=DICE_SMOOTH)
+        assert tuple(scalar.call(y_true, y_pred).shape) == ()
+        assert tuple(_ScalarDice(smooth=DICE_SMOOTH, reduction="none")(y_true, y_pred).shape) == ()
+        assert _drop_last_row_gap(lambda: _ScalarDice(smooth=DICE_SMOOTH)) > 1e-3

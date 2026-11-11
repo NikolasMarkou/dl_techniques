@@ -19,8 +19,9 @@ behind the factory's ``weighted_bce`` option (a registered class, so it saves
 and loads).
 
 ``DiceLossPerChannel`` is a thin serializable ``Loss`` over the shared backend in
-``segmentation_metrics.dice_per_sample`` (``dice_scalar`` for the batch mean); it
-does not go through ``PerChannelBinaryLoss``.
+``segmentation_metrics.dice_per_sample``; ``call`` returns one value per image and the
+framework reduction takes the batch mean. It does not go through
+``PerChannelBinaryLoss``.
 """
 
 import keras
@@ -32,7 +33,7 @@ from typing import Optional, List, Union, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.keras_registration import register_dl_technique
-from dl_techniques.losses.segmentation_metrics import dice_per_sample, dice_scalar
+from dl_techniques.losses.segmentation_metrics import dice_per_sample
 
 
 # ---------------------------------------------------------------------
@@ -433,15 +434,19 @@ class DiceLossPerChannel(keras.losses.Loss):
     """
     Dice Loss for multi-label segmentation using the shared backend.
 
-    This is a thin wrapper around ``segmentation_metrics.dice_scalar`` that
-    provides a serializable Keras Loss class.
+    This is a thin wrapper around ``segmentation_metrics.dice_per_sample`` that
+    provides a serializable Keras Loss class. ``call`` returns one value per image
+    (the mean over channels of the per-channel Dice loss), so ``sample_weight`` and
+    ``reduction`` act on images; nothing in it is a batch statistic, so zeroing an
+    image's weight equals dropping that image.
 
     Parameters
     ----------
     smooth : float, default=1.0
         Smoothing factor (Laplace smoothing) to avoid division by zero.
     reduction : str, default='sum_over_batch_size'
-        Standard Keras loss reduction argument.
+        Standard Keras loss reduction argument. It acts on the per-image values
+        returned by ``call``.
     name : str, default='dice_loss_per_channel'
         Name of the loss.
     """
@@ -470,9 +475,9 @@ class DiceLossPerChannel(keras.losses.Loss):
         Returns
         -------
         keras.KerasTensor
-            Scalar loss value.
+            Dice loss per image, shape ``(Batch,)``.
         """
-        return dice_scalar(y_true, y_pred, from_logits=False, smooth=self.smooth)
+        return dice_per_sample(y_true, y_pred, from_logits=False, smooth=self.smooth)
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
