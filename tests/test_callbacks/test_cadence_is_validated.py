@@ -21,7 +21,6 @@ import numpy as np
 import pytest
 from unittest.mock import MagicMock
 
-from dl_techniques.callbacks import coco_map_callback  # noqa: F401  (needs pycocotools)
 from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
 from dl_techniques.callbacks.coco_map_callback import COCOMAPCallback
 from dl_techniques.callbacks.coco_multitask_visualization import (
