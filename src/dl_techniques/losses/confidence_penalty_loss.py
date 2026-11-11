@@ -56,11 +56,8 @@ References:
         Detection with Outlier Exposure." ICLR 2019. arXiv:1812.04606.
 """
 
-import math
-import numbers
 import warnings
 import keras
-import numpy as np
 from typing import Any, Dict, Optional, Tuple
 
 # ---------------------------------------------------------------------
@@ -69,37 +66,9 @@ from typing import Any, Dict, Optional, Tuple
 
 from dl_techniques.utils.dtype_policy import stability_floor
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.utils.validation import non_negative_float
 
 # ---------------------------------------------------------------------
-
-
-# DECISION plan-2026-11-11T131349-13b28b37/D-041
-# The stored value is `float(value)`, not the value as passed. The validator
-# accepts NumPy scalars (the old `isinstance(x, (int, float))` refused
-# `np.float32(0.1)` and `np.int64(1)`), and a `np.float32` left in the config
-# makes plain `json.dumps(loss.get_config())` raise "Object of type float32 is
-# not JSON serializable". `bool` is refused on purpose (`True` passed the old
-# check and meant 1.0) and so are nan/inf (`inf` produced a loss of -inf).
-# Do not store the argument verbatim and do not relax the bool check. See
-# decisions.md D-041.
-def _check_real(name: str, value: Any) -> float:
-    """Validate a non-negative finite real and return it as a Python float.
-
-    :param name: Argument name, used in the error message.
-    :param value: Candidate value. ``int``, ``float`` and the NumPy scalar types
-        are accepted; ``bool`` (also ``np.bool_``), ``nan``, ``inf``, negative
-        numbers and non-numbers are not.
-    :return: ``float(value)``.
-    :raises ValueError: If ``value`` is not a finite, non-negative real number.
-    """
-    if isinstance(value, (bool, np.bool_)) or not isinstance(value, numbers.Real):
-        raise ValueError(f"{name} must be a real number, got {value!r}.")
-    result = float(value)
-    if not math.isfinite(result) or result < 0.0:
-        raise ValueError(
-            f"{name} must be finite and non-negative, got {value!r}."
-        )
-    return result
 
 
 @register_dl_technique("dl_techniques.losses.confidence_penalty_loss")
@@ -199,13 +168,29 @@ class ConfidencePenaltyLoss(keras.losses.Loss):
             or is outside its range.
         :raises TypeError: On any unknown keyword argument.
         """
-        label_smoothing = _check_real("label_smoothing", label_smoothing)
+        # DECISION plan-2026-11-11T131349-13b28b37/D-041
+        # The stored value is `float(value)`, not the value as passed. The
+        # validator accepts NumPy scalars (the old `isinstance(x, (int, float))`
+        # refused `np.float32(0.1)` and `np.int64(1)`), and a `np.float32` left
+        # in the config makes plain `json.dumps(loss.get_config())` raise
+        # "Object of type float32 is not JSON serializable". `bool` is refused
+        # on purpose (`True` passed the old check and meant 1.0) and so are
+        # nan/inf (`inf` produced a loss of -inf). The rule lives in
+        # `utils.validation.non_negative_float` (it replaced a private twin of
+        # `positive_float` here): do not re-spell it in this file, do not store
+        # the argument verbatim and do not relax the bool check. See
+        # decisions.md D-041.
+        label_smoothing = non_negative_float(
+            label_smoothing, "label_smoothing", "ConfidencePenaltyLoss"
+        )
         if label_smoothing >= 1.0:
             raise ValueError(
                 f"label_smoothing must be in [0, 1), got {label_smoothing}."
             )
-        entropy_weight = _check_real("entropy_weight", entropy_weight)
-        epsilon = _check_real("epsilon", epsilon)
+        entropy_weight = non_negative_float(
+            entropy_weight, "entropy_weight", "ConfidencePenaltyLoss"
+        )
+        epsilon = non_negative_float(epsilon, "epsilon", "ConfidencePenaltyLoss")
         if not 0.0 < epsilon < 0.1:
             raise ValueError(f"epsilon must be in (0, 0.1), got {epsilon}.")
         if entropy_weight > 0.5:

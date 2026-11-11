@@ -1,12 +1,14 @@
 """Argument checks shared across packages.
 
-Two helpers: :func:`positive_int`, the single rule for a count argument, and
+Three helpers: :func:`positive_int`, the single rule for a count argument,
 :func:`positive_float`, its sibling for a scale argument such as a softmax
-temperature. ``positive_int`` replaced three private copies with three
+temperature, and :func:`non_negative_float`, the same rule for a weight that may
+be exactly 0. ``positive_int`` replaced three private copies with three
 different refusal sets (``layers/adapters/factory.py``, ``layers/moe/config.py``
 and ``layers/heads/validation.py``; plan-2026-10-14T062616-81938e81 D-061,
 D-088). ``positive_float`` replaced three missing checks in
-``layers/sequence_pooling`` (D-203).
+``layers/sequence_pooling`` (D-203). ``non_negative_float`` replaced the private
+``_check_real`` of ``losses/confidence_penalty_loss.py``.
 """
 
 import math
@@ -131,4 +133,52 @@ def positive_float(value: Any, name: str, owner: Optional[str] = None) -> float:
     value = float(value)
     if not math.isfinite(value) or value <= 0.0:
         raise ValueError(f"{who}{name} must be a positive finite number, got {value}")
+    return value
+
+
+def non_negative_float(value: Any, name: str, owner: Optional[str] = None) -> float:
+    """
+    Check that a weight argument is a non-negative finite number, and return it as one.
+
+    The sibling of :func:`positive_float` for an argument where ``0`` is a
+    meaningful setting (``entropy_weight=0`` switches a term off,
+    ``label_smoothing=0`` is no smoothing).
+
+    Interface contract (callers: ``ConfidencePenaltyLoss`` in
+    ``losses/confidence_penalty_loss`` for ``label_smoothing``, ``entropy_weight``
+    and ``epsilon``; its range checks stay at the caller):
+
+    * An ``int``, ``float`` or numpy real number that is finite and ``>= 0`` is
+      returned as a plain Python ``float``, so ``get_config`` stays JSON-safe (a
+      stored ``np.float32`` makes ``json.dumps`` raise at save time).
+    * Anything else raises ``ValueError`` naming ``owner`` (when given) and
+      ``name``, in the message family of :func:`positive_float`: ``bool`` and
+      ``np.bool_`` (``True`` would pass as ``1.0``), a string, ``None``, a list,
+      NaN, an infinity and negatives.
+
+    :param value: The caller's value.
+    :type value: Any
+    :param name: Argument name, for the error message.
+    :type name: str
+    :param owner: Class or function name, for the error message.
+    :type owner: Optional[str]
+    :return: ``value`` as a Python ``float``.
+    :rtype: float
+    :raises ValueError: If ``value`` is not a non-negative finite number.
+    """
+    who = f"{owner}: " if owner else ""
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(
+            f"{who}{name} must be a non-negative number, got bool ({value!r})."
+        )
+    if not isinstance(value, numbers.Real):
+        raise ValueError(
+            f"{who}{name} must be a non-negative number, got "
+            f"{type(value).__name__} ({value!r})"
+        )
+    value = float(value)
+    if not math.isfinite(value) or value < 0.0:
+        raise ValueError(
+            f"{who}{name} must be a non-negative finite number, got {value}"
+        )
     return value
