@@ -21,7 +21,7 @@ from dl_techniques.losses import (
     # Segmentation and SAM
     SegmentationWrapperLoss, SAMMaskLoss, SAM2GatedMaskLoss, Sam3DetectionLoss,
     # Confidence regularizers
-    GoodhartAwareLoss, DecoupledInformationLoss, FocalUncertaintyLoss,
+    ConfidencePenaltyLoss, DecoupledInformationLoss, FocalUncertaintyLoss,
 )
 ```
 
@@ -49,6 +49,7 @@ The README table is the full inventory, grouped by domain.
 - `clip_contrastive_loss.py`: Symmetric CLIP loss over a dict or tuple of logit matrices. Direct call only; see Conventions.
 - `clustering_loss.py`: Intra-cluster MSE plus a batch-level uniform-distribution penalty, a metrics dataclass, and a callback.
 - `colbert_loss.py`: ColBERT v1 pairwise softmax CE over `nway` MaxSim scores (positive at index 0), and v2 log-target KL distillation with batchmean semantics.
+- `confidence_penalty_loss.py`: `ConfidencePenaltyLoss`, CE (explicit `-sum(y * log p)`, not Keras's fused op) minus a per-sample entropy bonus (Pereyra 2017), plus `analyze_confidence_penalty_loss`. A uniform `1/K` target row is an outlier-exposure row (Hendrycks 2019); an all-zero row is ignored with exactly zero value and gradient. Nothing couples the rows. It replaced `GoodhartAwareLoss`: `prior_weight`, `class_prior` and `mi_weight` are gone and raise `TypeError`, and a `.keras` archive compiled with the old loss no longer loads with `compile=True` (it loads with `compile=False`; an exploration scan found 0 of 68 archives under `results/` carrying it). The post-hoc temperature fit lives in `utils/temperature_scaling.py`.
 - `ddpm_hybrid_loss.py`: DDPM `LEARNED_RANGE` objective: epsilon MSE plus a variational bound with a frozen mean. `y_true` packs noise, `x_start` and `t` on the channel axis. `x_t` is re-derived from `DDPMSchedule`.
 - `decoupled_information_loss.py`: CE minus per-sample conditional entropy minus a batch-marginal entropy, plus an analysis helper.
 - `dino_loss.py`: `DINOLoss` / `iBOTPatchLoss` (center EMA inside `call`, schedulable `teacher_temp` Variable, center carried in `get_config`) and `KoLeoLoss`. `pack_student_teacher` is the single source of truth for the packed layout.
@@ -57,7 +58,6 @@ The README table is the full inventory, grouped by domain.
 - `flow_matching_velocity_loss.py`: Velocity MSE for rectified flow. Time weighting belongs in the trainer.
 - `focal_causal_lm_loss.py`: Focal token CE with an ignore index. Rows are scaled so the batch mean equals the token-pool mean.
 - `focal_uncertainty_loss.py`: Categorical focal loss minus per-sample entropy, plus an analysis helper.
-- `goodhart_loss.py`: CE plus a per-sample confidence penalty (Pereyra 2017), and an optional batch-level `KL(class_prior || mean_p)` term. Arguments after `entropy_weight` are keyword-only; the removed `mi_weight` raises.
 - `harmonic_loss.py`: `harmonic_logits(x, w, n, eps) = -(n/2) * log(||x - w||^2 + eps)` computed in at least float32, and `HarmonicCausalLMLoss` (`from_logits` fixed to `True`).
 - `hrm_loss.py`: HRM loss: LM term plus Q-halt and Q-continue BCE terms. `StableMaxCrossEntropy` is per-token by design (D-002), and the `reduction="none"` on its sub-loss is load-bearing (D-001).
 - `huber_loss.py`: Huber loss, reduced over all non-batch axes.
@@ -93,7 +93,7 @@ The README table is the full inventory, grouped by domain.
 - `thera_jacobian_tv.py`: THERA `mean(|J|)` aliasing penalty and the `recon + tv_weight * TV` combiner.
 - `topographic_vae_loss.py`: Topographic VAE ELBO with two KL terms. The `u` pair is conditional; half a pair raises. Read `effective_beta`.
 - `utilization_loss.py`: MANN and GNN anti-collapse regularizers (scalar returns).
-- `wasserstein_loss.py`: WGAN critic / generator losses, `compute_gradient_penalty` (rank 4 only), a 1-D Wasserstein divergence, and factories.
+- `wasserstein_loss.py`: WGAN critic / generator losses, `compute_gradient_penalty` (sums every non-batch axis, any rank of 2 or more), a 1-D Wasserstein divergence, and factories.
 - `yolo12_multitask_loss.py`: YOLOv12 detection (TAL + CIoU + DFL), Dice+Focal segmentation, classification focal, and the rank-routed multi-task orchestrator. Re-keyed with `legacy_packages=("yolov12_losses",)` (D-005).
 
 ## Conventions
@@ -118,7 +118,7 @@ The family predicate `weighted == unweighted * mean(w)` cannot see a batch-level
 loss(w=[1, ..., 1, 0]) * B / (B - 1) == loss(batch[:-1])
 ```
 
-`tests/test_losses/test_goodhart_loss.py` shows the pattern. Document the coupling in the docstring.
+`tests/test_losses/test_confidence_penalty_loss.py` shows the pattern (`test_zeroing_a_sample_weight_equals_dropping_the_row`). Document the coupling in the docstring.
 
 ### One loss object sees one tensor
 

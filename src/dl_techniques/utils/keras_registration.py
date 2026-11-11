@@ -144,9 +144,12 @@ def register_dl_technique(
         ``legacy_alias=True`` is simply shorthand for prepending ``"Custom"`` to this list.
         Needed whenever a *non-bare* key is re-keyed: the pre-migration archive stores the
         old package string, not ``Custom``, so the ``Custom>`` alias alone would not load it.
-        The tree's one user is ``losses/yolo12_multitask_loss.py``, whose four classes moved
-        off the un-namespaced ``"yolov12_losses"`` (see :sec:`2.2` -- a package string with
-        no owning namespace is the collision hazard this migration exists to remove).
+        In ``losses/`` two modules use it: ``yolo12_multitask_loss.py``, whose four classes
+        moved off the un-namespaced ``"yolov12_losses"`` (see :sec:`2.2` -- a package string
+        with no owning namespace is the collision hazard this migration exists to remove), and
+        ``omnipoint_losses.py``, which moved from per-class keys to one module key. Other
+        packages (``layers/heads/vision_language``, ``layers/ssm``, ``layers/adapters``) use it
+        too; ``grep -rn "legacy_packages=" src`` lists every user.
     :type legacy_packages: Sequence[str]
 
     :raises AliasCollisionError: if any alias key -- the ``Custom>`` one or a

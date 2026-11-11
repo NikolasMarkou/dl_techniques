@@ -10,7 +10,6 @@
 
 - the `DINOLoss` / `iBOTPatchLoss` center;
 - `KoLeoLoss`;
-- `GoodhartAwareLoss` at `prior_weight > 0`;
 - the `DecoupledInformationLoss` diversity term;
 - `MultistepLoss("gtmse")`;
 - the calibration Z-statistics;
@@ -42,7 +41,7 @@ Symbols in the table are importable from `dl_techniques.losses` unless the row s
 | Multistep forecasting | `MultistepLoss`, `create_multistep_loss`, `MULTISTEP_AGGREGATIONS` | ADAM `mseh` / `tmse` / `gtmse` / `msce` over the horizon axis. See [Multistep](#multistep-losses). |
 | Metric-as-loss (AnyLoss) | `AnyLoss`, `ApproximationFunction`, `AccuracyLoss`, `PrecisionLoss`, `RecallLoss`, `SpecificityLoss`, `F1Loss`, `FBetaLoss`, `BalancedAccuracyLoss`, `GeometricMeanLoss`, `YoudenJLoss`, `MCCLoss`, `CohenKappaLoss`, `IoULoss`, `DiceLoss`, `TverskyLoss`, `FocalTverskyLoss`, `WeightedCrossEntropyWithAnyLoss` | Differentiable confusion matrix (Han et al. 2024). The confusion matrix is global over the batch, so these return a scalar. `IoULoss` / `DiceLoss` / `TverskyLoss` belong here, not to `SegmentationWrapperLoss`. |
 | Calibration (binary only) | `BrierScoreLoss`, `SpiegelhalterZLoss`, `CombinedCalibrationLoss`, `BrierScoreMetric`, `SpiegelhalterZMetric` | A calibration Z-statistic is not a proper scoring rule. Use it only as a small-weight regularizer, which `CombinedCalibrationLoss` provides. |
-| Confidence regularizers | `GoodhartAwareLoss`, `analyze_loss_components`, `DecoupledInformationLoss`, `analyze_decoupled_information_loss`, `FocalUncertaintyLoss`, `analyze_focal_uncertainty_loss` | Entropy penalties on the predictions. None of them observes the input `X`. |
+| Confidence regularizers | `ConfidencePenaltyLoss`, `analyze_confidence_penalty_loss`, `DecoupledInformationLoss`, `analyze_decoupled_information_loss`, `FocalUncertaintyLoss`, `analyze_focal_uncertainty_loss` | Entropy penalties on the predictions. None of them observes the input `X`. `ConfidencePenaltyLoss` is per-sample (no whole-batch term, so a zero `sample_weight` removes a row exactly) and replaced `GoodhartAwareLoss`; see [Confidence penalty and outlier exposure](#confidence-penalty-and-outlier-exposure). |
 | Other classification | `SparsemaxLoss`, `CapsuleMarginLoss`, `capsule_margin_loss`, `analyze_margin_loss_components` | `SparsemaxLoss` requires `from_logits=True`. For several outputs use stock `compile(loss={...}, loss_weights={...})`; there is no multi-task loss class. |
 | Language modeling | `MaskedCausalLMLoss`, `PrefixMaskedCausalLMLoss`, `FocalCausalLMLoss`, `HarmonicCausalLMLoss`, `harmonic_logits`, `StableMaxCrossEntropy`, `HRMLoss`, `create_hrm_loss`, `NanoVLMLoss` | Masked variants skip `ignore_index` (default `-1`; `NanoVLMLoss` defaults to `0`). Per-row values are scaled so the batch mean equals the token-pool mean. `StableMaxCrossEntropy` returns per-token values by design. |
 | Contrastive (two towers) | `CLIPContrastiveLoss`, `SigLIPContrastiveLoss`, `AdaptiveSigLIPLoss`, `HybridContrastiveLoss`, `create_siglip_loss`, `create_adaptive_siglip_loss`, `create_hybrid_loss` | `create_siglip_loss` defaults `use_learnable_temperature=True`; the class defaults to `False`. `HybridContrastiveLoss` adds a cross-modal denoising penalty, not score matching. |
@@ -74,6 +73,39 @@ from dl_techniques.losses import F1Loss, HuberLoss
 model.compile(optimizer="adam", loss=F1Loss(amplifying_scale=73.0), metrics=["accuracy"])
 model.compile(optimizer="adam", loss=HuberLoss(delta=1.5), metrics=["mae"])
 ```
+
+### Confidence penalty and outlier exposure
+
+`ConfidencePenaltyLoss(label_smoothing=0.0, entropy_weight=0.1, *, from_logits=True, ...)` is cross-entropy minus `entropy_weight * H(p)` per row (Pereyra et al., 2017). It never sees the input `X`, so it lowers confidence everywhere, not only on weak evidence, and it does not produce calibrated probabilities. An all-zero target row is ignored: exactly zero value and zero gradient. A target row equal to the uniform vector `1/K` is an outlier-exposure row (Hendrycks et al., 2019) and pulls the prediction on that input toward uniform.
+
+It replaced `GoodhartAwareLoss`. `prior_weight`, `class_prior` and `mi_weight` no longer exist, and passing them raises `TypeError`. A `.keras` archive compiled with the old loss no longer loads with `compile=True`; it loads with `compile=False`. A read-only scan of `results/` during this plan's exploration found 0 of 68 `.keras` archives that carry the old class.
+
+Outlier exposure needs inputs that carry no class evidence, and they must come from a source that differs from the OOD data you will evaluate on. The loss does not supply them. Calibration is a held-out quantity, so fit a temperature on validation logits after training and divide the logits by it:
+
+```python
+import numpy as np
+import keras
+from dl_techniques.losses import ConfidencePenaltyLoss
+from dl_techniques.utils.temperature_scaling import fit_temperature
+
+num_classes = 10
+loss = ConfidencePenaltyLoss(label_smoothing=0.1, entropy_weight=0.1)
+
+# x_in, y_in: labeled data. x_oe: no-evidence inputs (noise, another dataset).
+y_in_onehot = keras.ops.one_hot(y_in, num_classes)
+y_oe = np.full((len(x_oe), num_classes), 1.0 / num_classes, dtype="float32")
+x = np.concatenate([x_in, x_oe])
+y = np.concatenate([y_in_onehot, y_oe])
+w = np.concatenate([np.ones(len(x_in)), np.full(len(x_oe), 0.5)]).astype("float32")
+
+model.compile(optimizer="adam", loss=loss)
+model.fit(x, y, sample_weight=w, epochs=...)
+
+T = fit_temperature(val_logits, val_labels)   # integer labels, validation split
+calibrated = keras.ops.softmax(test_logits / T)
+```
+
+`fit_temperature` refuses one-hot labels and warns when the optimum sits at the edge of its search range. Check the result with `analyzer.calibration_metrics.compute_ece` on a third split. The audit that motivated the replacement (`research/roadmap/20261111_goodhart_loss_audit.md`) was re-measured on one small dataset (scikit-learn digits) with one architecture (an MLP); re-measure the outlier-exposure gain on your task.
 
 ### AnyLoss
 
