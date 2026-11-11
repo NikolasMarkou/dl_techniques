@@ -70,7 +70,7 @@ The README table is the full inventory, grouped by domain.
 - `mase_loss.py`: MASE with a per-row numerator over a batch-global naive denominator (deliberately not per row).
 - `masked_causal_lm_loss.py`: Masked token CE and its prefix alias. Rows are scaled so the batch mean equals the token-pool mean.
 - `mean_shift_instance_loss.py`: Per-row pull/push instance-embedding loss. Subsamples to `max_points` only when `N` is static.
-- `multi_labels_loss.py`: `PerChannelBinaryLoss` (adaptive per-channel weighting), element-wise `WeightedBinaryFocalLoss`, `DiceLossPerChannel`, and a factory.
+- `multi_labels_loss.py`: `PerChannelBinaryLoss` (adaptive per-channel weighting; base must be `'binary_crossentropy'` or element-wise), element-wise `WeightedBinaryFocalLoss` and `WeightedBinaryCrossEntropyLoss`, `DiceLossPerChannel`, and a factory.
 - `multi_task_loss.py`: Weighted per-task MSE over dict outputs.
 - `multistep_loss.py`: ADAM `mseh` / `tmse` / `gtmse` / `msce` over the horizon axis. `gtmse` is a first-order surrogate about the detached batch mean, exact in value and gradient. The factory raises on unknown kwargs.
 - `nano_vlm_loss.py`: Shifted next-token CE scored on the trailing label-length positions (drops the vision prefix). Reimplements reduction internally.

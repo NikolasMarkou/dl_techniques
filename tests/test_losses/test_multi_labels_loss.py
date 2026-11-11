@@ -9,6 +9,7 @@ from keras import ops
 
 from dl_techniques.losses.multi_labels_loss import (
     PerChannelBinaryLoss,
+    WeightedBinaryCrossEntropyLoss,
     WeightedBinaryFocalLoss,
     create_multilabel_segmentation_loss,
 )
@@ -270,9 +271,7 @@ class TestCreateMultilabelSegmentationLoss:
 
     def test_all_loss_types_forward_pass(self):
         """Test all loss types produce valid output."""
-        # Note: 'weighted_bce' excluded - factory passes a function to
-        # PerChannelBinaryLoss but call() expects a Loss object with .call() method
-        loss_types = ['focal', 'dice', 'bce']
+        loss_types = ['focal', 'dice', 'bce', 'weighted_bce']
         y_true = keras.random.uniform((2, 8, 8, 3), minval=0, maxval=1)
         y_true = ops.cast(y_true > 0.5, "float32")
         y_pred = keras.random.uniform((2, 8, 8, 3), minval=0.1, maxval=0.9)
@@ -285,13 +284,12 @@ class TestCreateMultilabelSegmentationLoss:
             assert float(loss_val) >= 0, f"{loss_type} produced negative loss"
 
     def test_weighted_bce_callable_works(self):
-        """Test that weighted_bce factory correctly handles callable base_loss."""
+        """The weighted_bce factory builds a working registered base loss."""
         loss_fn = create_multilabel_segmentation_loss(loss_type='weighted_bce')
         y_true = keras.random.uniform((2, 8, 8, 3), minval=0, maxval=1)
         y_true = ops.cast(y_true > 0.5, "float32")
         y_pred = keras.random.uniform((2, 8, 8, 3), minval=0.1, maxval=0.9)
 
-        # Should work now — callable base_loss is handled properly
         loss_val = loss_fn(y_true, y_pred)
         assert not np.isnan(float(loss_val))
         assert float(loss_val) >= 0
@@ -459,3 +457,103 @@ class TestGradientFlow:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# DECISION plan-2026-11-11T131349-13b28b37/D-009 (tests): PerChannelBinaryLoss only
+# accepts bases that return one value per element; a base that reduces the channel
+# axis collapses the loss to a scalar and silently disables channel_weights.
+class TestPerChannelBinaryLossRefusesABaseThatCollapsesChannels:
+    """A string or stock Loss base reduced the channel axis and made weights a no-op."""
+
+    @pytest.mark.parametrize("name", ["mse", "binary_focal_crossentropy", "mae"])
+    def test_a_string_base_other_than_binary_crossentropy_raises(self, name):
+        with pytest.raises(ValueError, match="binary_crossentropy"):
+            PerChannelBinaryLoss(name)
+
+    def test_a_stock_loss_that_reduces_the_channel_axis_raises_at_call(self):
+        loss_fn = PerChannelBinaryLoss(keras.losses.BinaryCrossentropy())
+        y_true = ops.cast(keras.random.uniform((2, 8, 8, 3)) > 0.5, "float32")
+        y_pred = keras.random.uniform((2, 8, 8, 3), minval=0.1, maxval=0.9)
+        with pytest.raises(ValueError, match="rank"):
+            loss_fn.call(y_true, y_pred)
+
+    def test_channel_weights_change_the_value_with_an_elementwise_base(self):
+        y_true = ops.cast(keras.random.uniform((2, 8, 8, 3), seed=1) > 0.5, "float32")
+        y_pred = keras.random.uniform((2, 8, 8, 3), minval=0.1, maxval=0.9, seed=2)
+        base = WeightedBinaryFocalLoss(alpha=0.5, gamma=1.0)
+        plain = float(PerChannelBinaryLoss(base).call(y_true, y_pred))
+        weighted = float(
+            PerChannelBinaryLoss(base, channel_weights=[10.0, 1.0, 0.1]).call(y_true, y_pred)
+        )
+        assert abs(plain - weighted) > 1e-4, (plain, weighted)
+
+
+class TestWeightedBinaryCrossEntropyLoss:
+    """The registered class that replaces the unserializable ``weighted_bce_fn`` closure."""
+
+    def test_is_exported_from_the_package(self):
+        import dl_techniques.losses as losses_pkg
+
+        assert "WeightedBinaryCrossEntropyLoss" in losses_pkg.__all__
+        assert hasattr(losses_pkg, "WeightedBinaryCrossEntropyLoss")
+
+    def test_pos_weight_one_is_elementwise_bce(self):
+        y_true = ops.cast(keras.random.uniform((2, 4, 4, 3), seed=3) > 0.5, "float32")
+        y_pred = keras.random.uniform((2, 4, 4, 3), minval=0.1, maxval=0.9, seed=4)
+        got = ops.convert_to_numpy(WeightedBinaryCrossEntropyLoss(pos_weight=1.0).call(y_true, y_pred))
+        yt, yp = ops.convert_to_numpy(y_true), ops.convert_to_numpy(y_pred)
+        want = -(yt * np.log(yp) + (1 - yt) * np.log(1 - yp))
+        assert got.shape == (2, 4, 4, 3)
+        np.testing.assert_allclose(got, want, rtol=1e-4, atol=1e-5)
+
+    def test_pos_weight_scales_only_the_positive_term(self):
+        y_true = ops.ones((1, 2, 2, 1))
+        y_pred = ops.ones((1, 2, 2, 1)) * 0.5
+        one = ops.convert_to_numpy(WeightedBinaryCrossEntropyLoss(pos_weight=1.0).call(y_true, y_pred))
+        three = ops.convert_to_numpy(WeightedBinaryCrossEntropyLoss(pos_weight=3.0).call(y_true, y_pred))
+        np.testing.assert_allclose(three, 3.0 * one, rtol=1e-5)
+        neg = ops.zeros((1, 2, 2, 1))
+        a = ops.convert_to_numpy(WeightedBinaryCrossEntropyLoss(pos_weight=1.0).call(neg, y_pred))
+        b = ops.convert_to_numpy(WeightedBinaryCrossEntropyLoss(pos_weight=3.0).call(neg, y_pred))
+        np.testing.assert_allclose(a, b, rtol=1e-6)
+
+    def test_config_round_trip(self):
+        loss = WeightedBinaryCrossEntropyLoss(pos_weight=4.0)
+        restored = WeightedBinaryCrossEntropyLoss.from_config(loss.get_config())
+        assert restored.pos_weight == 4.0
+
+    def test_rejects_a_nonpositive_pos_weight(self):
+        with pytest.raises(ValueError, match="pos_weight"):
+            WeightedBinaryCrossEntropyLoss(pos_weight=0.0)
+
+    def test_factory_weighted_bce_uses_the_alpha_odds_as_pos_weight(self):
+        loss_fn = create_multilabel_segmentation_loss(loss_type="weighted_bce", alpha=0.75)
+        assert isinstance(loss_fn.base_loss, WeightedBinaryCrossEntropyLoss)
+        assert loss_fn.base_loss.pos_weight == pytest.approx(3.0)
+        capped = create_multilabel_segmentation_loss(loss_type="weighted_bce", alpha=1.0)
+        assert capped.base_loss.pos_weight == 10.0
+
+    def test_factory_weighted_bce_config_round_trips(self):
+        loss_fn = create_multilabel_segmentation_loss(
+            loss_type="weighted_bce", alpha=0.8, channel_weights=[1.0, 2.0, 3.0]
+        )
+        restored = PerChannelBinaryLoss.from_config(loss_fn.get_config())
+        y_true = ops.cast(keras.random.uniform((2, 8, 8, 3), seed=5) > 0.5, "float32")
+        y_pred = keras.random.uniform((2, 8, 8, 3), minval=0.1, maxval=0.9, seed=6)
+        assert isinstance(restored.base_loss, WeightedBinaryCrossEntropyLoss)
+        np.testing.assert_allclose(
+            float(restored.call(y_true, y_pred)), float(loss_fn.call(y_true, y_pred)), rtol=1e-6
+        )
+
+    def test_factory_weighted_bce_survives_a_model_save_and_load(self, tmp_path):
+        loss_fn = create_multilabel_segmentation_loss(loss_type="weighted_bce", alpha=0.8)
+        inputs = keras.layers.Input(shape=(8, 8, 3))
+        outputs = keras.layers.Conv2D(2, 1, activation="sigmoid")(inputs)
+        model = keras.Model(inputs, outputs)
+        model.compile(optimizer="adam", loss=loss_fn)
+        path = str(tmp_path / "m.keras")
+        build_optimizer_state(model)  # lazy slot variables; see tests/optimizer_state.py
+        model.save(path)
+        loaded = keras.models.load_model(path)
+        assert isinstance(loaded.loss.base_loss, WeightedBinaryCrossEntropyLoss)
+        assert loaded.loss.base_loss.pos_weight == pytest.approx(4.0)

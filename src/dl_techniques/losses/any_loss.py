@@ -1900,15 +1900,17 @@ class WeightedCrossEntropyWithAnyLoss(AnyLoss):
     Raises
     ------
     ValueError
-        If alpha is not in the range [0, 1].
+        If alpha is not in the range [0, 1], or if ``from_logits`` differs from
+        the wrapped ``anyloss.from_logits`` (the two halves of the loss would
+        otherwise read the same tensor as different things).
     TypeError
         If anyloss is not an instance of AnyLoss.
 
     Examples
     --------
-    >>> # Combine F1Loss with binary cross-entropy
+    >>> # Combine F1Loss with binary cross-entropy; the flag is set on BOTH.
     >>> combined_loss = WeightedCrossEntropyWithAnyLoss(
-    ...     anyloss=F1Loss(),
+    ...     anyloss=F1Loss(from_logits=True),
     ...     alpha=0.7,
     ...     from_logits=True
     ... )
@@ -1952,7 +1954,8 @@ class WeightedCrossEntropyWithAnyLoss(AnyLoss):
         Raises
         ------
         ValueError
-            If alpha is not in the range [0, 1].
+            If alpha is not in the range [0, 1], or if ``from_logits`` differs
+            from ``anyloss.from_logits``.
         TypeError
             If anyloss is not an instance of AnyLoss.
         """
@@ -1961,6 +1964,22 @@ class WeightedCrossEntropyWithAnyLoss(AnyLoss):
 
         if alpha < 0 or alpha > 1:
             raise ValueError(f"alpha must be in the range [0, 1], got {alpha}")
+
+        # DECISION plan-2026-11-11T131349-13b28b37/D-008
+        # The wrapper's from_logits is given to its own BCE but never reaches the
+        # wrapped AnyLoss, which keeps the flag it was built with. A mismatch used
+        # to run silently: the documented example computed 0.4636 where the
+        # logit-consistent value is 0.1174. Do NOT "fix" this by copying the
+        # wrapper's flag onto the inner loss, and do NOT derive one from the other
+        # (that changes the saved config and mutates a caller-owned object);
+        # refuse the config instead. Guard:
+        # tests/test_losses/test_any_loss.py::TestWrapperRefusesAFromLogitsMismatch
+        if from_logits != anyloss.from_logits:
+            raise ValueError(
+                f"from_logits={from_logits} on the wrapper does not match "
+                f"{anyloss.__class__.__name__}.from_logits={anyloss.from_logits}; "
+                f"set the same value on both."
+            )
 
         super().__init__(
             amplifying_scale=amplifying_scale,
@@ -2033,6 +2052,7 @@ class WeightedCrossEntropyWithAnyLoss(AnyLoss):
         WeightedCrossEntropyWithAnyLoss
             A new instance of WeightedCrossEntropyWithAnyLoss.
         """
+        config = dict(config)  # never mutate the caller's dict
         anyloss_config = config.pop("anyloss")
         anyloss = keras.saving.deserialize_keras_object(anyloss_config)
         return cls(anyloss=anyloss, **config)

@@ -504,6 +504,51 @@ def test_weighted_cross_entropy_with_any_loss() -> None:
                 f"With alpha=1, expected combined loss to equal F1Loss value {f1_loss_value}, got {combined_value}"
 
 
+# DECISION plan-2026-11-11T131349-13b28b37/D-008 (tests): the wrapper refuses a
+# from_logits flag that differs from the wrapped AnyLoss's own flag.
+class TestWrapperRefusesAFromLogitsMismatch:
+    """The wrapper gave its flag to its BCE but not to the AnyLoss it wraps."""
+
+    LOGITS = np.array([[0.4], [-0.4], [0.3], [-0.2], [3.0], [-3.0]], dtype=np.float32)
+    LABELS = np.array([[1], [0], [1], [0], [1], [0]], dtype=np.float32)
+
+    def test_the_documented_example_with_a_default_inner_loss_raises(self) -> None:
+        with pytest.raises(ValueError, match="from_logits"):
+            WeightedCrossEntropyWithAnyLoss(
+                anyloss=F1Loss(), alpha=0.7, from_logits=True
+            )
+
+    def test_an_inner_logit_loss_under_a_probability_wrapper_raises(self) -> None:
+        with pytest.raises(ValueError, match="from_logits"):
+            WeightedCrossEntropyWithAnyLoss(
+                anyloss=F1Loss(from_logits=True), alpha=0.7, from_logits=False
+            )
+
+    def test_matching_logit_flags_equal_the_probability_space_value(self) -> None:
+        probs = 1.0 / (1.0 + np.exp(-self.LOGITS))
+        on_logits = WeightedCrossEntropyWithAnyLoss(
+            anyloss=F1Loss(from_logits=True), alpha=0.7, from_logits=True
+        )
+        on_probs = WeightedCrossEntropyWithAnyLoss(
+            anyloss=F1Loss(from_logits=False), alpha=0.7, from_logits=False
+        )
+        a = float(on_logits(self.LABELS, self.LOGITS))
+        b = float(on_probs(self.LABELS, probs))
+        assert np.isclose(a, b, atol=1e-5), (a, b)
+
+    def test_from_config_leaves_the_callers_dict_intact(self) -> None:
+        loss = WeightedCrossEntropyWithAnyLoss(
+            anyloss=F1Loss(from_logits=True), alpha=0.7, from_logits=True
+        )
+        config = loss.get_config()
+        before = dict(config)
+        restored = WeightedCrossEntropyWithAnyLoss.from_config(config)
+        assert config == before
+        assert "anyloss" in config
+        assert restored.anyloss.from_logits is True
+        assert restored.from_logits is True
+
+
 def test_from_logits_parameter() -> None:
     """Test that from_logits parameter correctly handles logits vs probabilities."""
     np.random.seed(42)

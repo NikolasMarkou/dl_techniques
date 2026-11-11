@@ -149,6 +149,7 @@ from .mase_loss import MASELoss, mase_metric
 
 from .multi_labels_loss import (
     PerChannelBinaryLoss,
+    WeightedBinaryCrossEntropyLoss,
     WeightedBinaryFocalLoss,
     DiceLossPerChannel,
     create_multilabel_segmentation_loss,
@@ -499,6 +500,7 @@ __all__ = [
     "DarkIRCompositeLoss",
     # multi_labels_loss
     "PerChannelBinaryLoss",
+    "WeightedBinaryCrossEntropyLoss",
     "WeightedBinaryFocalLoss",
     "DiceLossPerChannel",
     "create_multilabel_segmentation_loss",

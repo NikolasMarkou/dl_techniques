@@ -14,9 +14,13 @@ based on class presence, stabilizing training for imbalanced datasets.
 ``WeightedBinaryFocalLoss`` is a two-sided focal loss (positive + negative
 terms) that returns element-wise values for the wrapper to reduce.
 
-Dice loss for multi-label is now provided by the shared backend in
-``segmentation_metrics.dice_per_sample`` (and ``dice_scalar`` for batch-mean
-compatibility). The old ``DiceLossPerChannel`` class was removed as a duplicate.
+``WeightedBinaryCrossEntropyLoss`` is the element-wise positive-weighted BCE
+behind the factory's ``weighted_bce`` option (a registered class, so it saves
+and loads).
+
+``DiceLossPerChannel`` is a thin serializable ``Loss`` over the shared backend in
+``segmentation_metrics.dice_per_sample`` (``dice_scalar`` for the batch mean); it
+does not go through ``PerChannelBinaryLoss``.
 """
 
 import keras
@@ -56,8 +60,12 @@ class PerChannelBinaryLoss(keras.losses.Loss):
     Parameters
     ----------
     base_loss : Union[keras.losses.Loss, str]
-        The binary loss to apply per channel. Can be a string alias
-        (e.g., 'binary_crossentropy') or a Keras Loss instance.
+        The binary loss to apply per channel. Either the string
+        ``'binary_crossentropy'`` (computed element-wise here) or a ``Loss``
+        whose ``call`` returns one value per element, with the same rank as
+        ``y_true`` (e.g. :class:`WeightedBinaryFocalLoss`,
+        :class:`WeightedBinaryCrossEntropyLoss`). Any other string, and any
+        ``call`` that reduces the channel axis, is rejected.
     channel_weights : Optional[List[float]], default=None
         Static manual weights for each channel. If provided, these are
         multiplied with the adaptive weights. Useful for enforcing
@@ -68,6 +76,13 @@ class PerChannelBinaryLoss(keras.losses.Loss):
         so the framework reduction usually acts as an identity.
     name : str, default='per_channel_loss'
         The name of the loss instance.
+
+    Raises
+    ------
+    ValueError
+        At construction, if ``base_loss`` is a string other than
+        ``'binary_crossentropy'``; at ``call``, if the base loss returns a tensor
+        whose rank differs from ``y_true``.
     """
 
     def __init__(
@@ -82,6 +97,22 @@ class PerChannelBinaryLoss(keras.losses.Loss):
 
         # Handle base_loss string alias or instance
         if isinstance(base_loss, str):
+            # DECISION plan-2026-11-11T131349-13b28b37/D-009
+            # A stock string alias ("mse", "binary_focal_crossentropy", ...) maps to
+            # a function that reduces the channel axis, so loss_tensor is (B, H, W):
+            # the per-channel mean below collapses to one scalar, the normalized
+            # weights (which sum to 1) multiply it back to itself, and
+            # channel_weights changes nothing (measured: 0.33678 for [10, 1, .1] and
+            # for None). Do NOT "support" strings again by falling back to
+            # keras.losses.get; pass a Loss that returns element-wise values.
+            # Guard: tests/test_losses/test_multi_labels_loss.py::
+            # TestPerChannelBinaryLossRefusesABaseThatCollapsesChannels
+            if base_loss != 'binary_crossentropy':
+                raise ValueError(
+                    f"base_loss string must be 'binary_crossentropy' (the only alias "
+                    f"computed element-wise here), got {base_loss!r}; pass a Loss "
+                    f"whose call returns one value per element instead."
+                )
             self.base_loss_name = base_loss
             self.base_loss = None
         else:
@@ -113,7 +144,7 @@ class PerChannelBinaryLoss(keras.losses.Loss):
 
         # 1. Compute Element-wise Loss (Batch, Height, Width, Channels)
         # -------------------------------------------------------------
-        if self.base_loss_name == 'binary_crossentropy':
+        if self.base_loss is None:
             # Manual element-wise BCE to ensure no implicit reduction occurs
             # before we want it to.
             epsilon = keras.config.epsilon()
@@ -123,20 +154,22 @@ class PerChannelBinaryLoss(keras.losses.Loss):
             bce = y_true * ops.log(y_pred_safe) + (1.0 - y_true) * ops.log(1.0 - y_pred_safe)
             loss_tensor = -bce
 
-        elif self.base_loss is not None:
+        else:
             # Handle both Loss instances and plain callables
             if hasattr(self.base_loss, 'call'):
                 loss_tensor = self.base_loss.call(y_true, y_pred)
             else:
                 loss_tensor = self.base_loss(y_true, y_pred)
 
-        else:
-            # Fallback for string aliases using standard factory
-            # Note: Standard Keras losses might reduce output. We rely on
-            # them usually returning (B, d0, ..) if reduction='none' isn't set,
-            # but usually, we want the element-wise tensor here.
-            fn = keras.losses.get(self.base_loss_name)
-            loss_tensor = fn(y_true, y_pred)
+            # Static ranks, not tensor values: a base that reduced an axis would be
+            # averaged over the wrong axes below and silently ignore channel_weights.
+            if len(loss_tensor.shape) != len(y_true.shape):
+                raise ValueError(
+                    f"base_loss {self.base_loss_name} returned rank "
+                    f"{len(loss_tensor.shape)} (shape {tuple(loss_tensor.shape)}) for "
+                    f"y_true of rank {len(y_true.shape)}; it must return one value per "
+                    f"element so the per-channel weights can be applied."
+                )
 
         # 2. Compute Adaptive Channel Weights (Vectorized)
         # ------------------------------------------------
@@ -196,10 +229,84 @@ class PerChannelBinaryLoss(keras.losses.Loss):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'PerChannelBinaryLoss':
+        config = dict(config)  # never mutate the caller's dict
         # Deserialize the base loss if it exists as a dictionary config
         if 'base_loss' in config and isinstance(config['base_loss'], dict):
             config['base_loss'] = keras.saving.deserialize_keras_object(config['base_loss'])
         return cls(**config)
+
+# ---------------------------------------------------------------------
+
+
+@register_dl_technique("dl_techniques.losses.multi_labels_loss")
+class WeightedBinaryCrossEntropyLoss(keras.losses.Loss):
+    r"""
+    Element-wise binary cross-entropy with a weight on the positive term.
+
+    .. math::
+        \ell = -w_{pos}\, y \log(p) - (1 - y) \log(1 - p)
+
+    Returns the element-wise loss (no reduction), like
+    :class:`WeightedBinaryFocalLoss`, so :class:`PerChannelBinaryLoss` can apply its
+    per-channel weighting. It exists as a registered class because the closure it
+    replaced in ``create_multilabel_segmentation_loss`` serialized as an unloadable
+    builtin; the factory is its only caller.
+
+    Parameters
+    ----------
+    pos_weight : float, default=1.0
+        Multiplier on the positive-class term. Must be positive.
+    reduction : str, default='sum_over_batch_size'
+        Standard Keras loss reduction argument.
+    name : str, default='weighted_binary_crossentropy'
+        The name of the loss.
+
+    Raises
+    ------
+    ValueError
+        If ``pos_weight`` is not positive.
+    """
+
+    def __init__(
+        self,
+        pos_weight: float = 1.0,
+        reduction: str = 'sum_over_batch_size',
+        name: str = 'weighted_binary_crossentropy',
+        **kwargs
+    ):
+        super().__init__(reduction=reduction, name=name, **kwargs)
+        if pos_weight <= 0:
+            raise ValueError(f"pos_weight must be positive, got {pos_weight}")
+        self.pos_weight = float(pos_weight)
+
+    def call(self, y_true: keras.KerasTensor, y_pred: keras.KerasTensor) -> keras.KerasTensor:
+        """
+        Compute the weighted BCE element-wise (probabilities in, same shape out).
+
+        Parameters
+        ----------
+        y_true : keras.KerasTensor
+            Ground truth tensor.
+        y_pred : keras.KerasTensor
+            Predicted probabilities, same shape as ``y_true``.
+
+        Returns
+        -------
+        keras.KerasTensor
+            Element-wise loss tensor with the same shape as the inputs.
+        """
+        y_true = ops.cast(y_true, y_pred.dtype)
+        epsilon = keras.config.epsilon()
+        y_pred_safe = ops.clip(y_pred, epsilon, 1.0 - epsilon)
+        return (
+            -self.pos_weight * y_true * ops.log(y_pred_safe)
+            - (1.0 - y_true) * ops.log(1.0 - y_pred_safe)
+        )
+
+    def get_config(self) -> Dict[str, Any]:
+        config = super().get_config()
+        config['pos_weight'] = self.pos_weight
+        return config
 
 # ---------------------------------------------------------------------
 
@@ -407,25 +514,12 @@ def create_multilabel_segmentation_loss(
         return PerChannelBinaryLoss('binary_crossentropy', channel_weights=channel_weights)
 
     elif loss_type == 'weighted_bce':
-        # Define internal function using pure Keras ops
-        def weighted_bce_fn(y_true, y_pred):
-            # Calculate weight for positive class
-            # if alpha=0.5 -> weight=1.0, if alpha=0.75 -> weight=3.0
-            if alpha != 1.0:
-                pos_weight = alpha / (1.0 - alpha)
-            else:
-                pos_weight = 10.0  # Fallback cap for stability
-
-            # Clip for numerical stability
-            epsilon = keras.config.epsilon()
-            y_pred_safe = ops.clip(y_pred, epsilon, 1.0 - epsilon)
-
-            # Weighted BCE formula
-            loss = -pos_weight * y_true * ops.log(y_pred_safe) - (1.0 - y_true) * ops.log(1.0 - y_pred_safe)
-            return loss
-
-        # Return wrapped function
-        return PerChannelBinaryLoss(weighted_bce_fn, channel_weights=channel_weights)
+        # alpha=0.5 -> pos_weight 1.0, alpha=0.75 -> 3.0; alpha=1 is capped at 10.0
+        pos_weight = alpha / (1.0 - alpha) if alpha != 1.0 else 10.0
+        return PerChannelBinaryLoss(
+            WeightedBinaryCrossEntropyLoss(pos_weight=pos_weight),
+            channel_weights=channel_weights,
+        )
 
     else:
         raise ValueError(f"Unknown loss_type: {loss_type}")
