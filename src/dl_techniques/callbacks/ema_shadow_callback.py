@@ -67,10 +67,19 @@ class EMAShadowCallback(keras.callbacks.Callback):
     ``start_step`` / ``update_every`` are global-step quantities. The decay
     schedule is called with that same global step, so
     ``cosine_ema_schedule(..., total_steps=T)`` ramps over ``T`` optimizer
-    steps, not over ``T`` qualifying updates. A model compiled with
-    ``steps_per_execution > 1`` is refused in ``on_train_begin``: Keras then
-    calls ``on_train_batch_end`` once per execution, so the per-batch
-    schedule could not be honoured.
+    steps, not over ``T`` qualifying updates. "Optimizer step" means one
+    applied weight update, and the callback is called once per BATCH, so it
+    needs the two to coincide. A model compiled with
+    ``steps_per_execution > 1`` is refused in ``on_train_begin`` (Keras then
+    calls ``on_train_batch_end`` once per execution), and so is an optimizer
+    with ``gradient_accumulation_steps`` set (``iterations`` then advances once
+    per accumulated step, so the per-batch schedule would see every step
+    repeated and update the shadow on batches where the weights did not
+    change). Under ``mixed_float16`` the counter and the accumulation setting
+    are read from the ``LossScaleOptimizer``'s inner optimizer. A batch whose
+    gradients the loss scaler skips (non-finite, scale halved) leaves
+    ``iterations`` unchanged, so that step's update fires again with the same
+    decay; this affects only the first few batches of a ``mixed_float16`` run.
 
     This callback does NOT snapshot or initialize the shadow at
     ``on_train_begin`` -- see the ``DECISION`` note below. It only decides
@@ -139,8 +148,9 @@ class EMAShadowCallback(keras.callbacks.Callback):
     # the shadow harder toward the live weights. This port does NOT
     # reproduce that compounding: `decay` (or `decay_schedule(step)`) is
     # applied as-is on every qualifying step, with the global optimizer step
-    # as the schedule argument (D-018 replaced the earlier qualifying-update
-    # count, which restarted at 0 on resume).
+    # as the schedule argument (plan-2026-11-11T131349-13b28b37/D-018
+    # replaced the earlier qualifying-update count, which restarted at 0 on
+    # resume).
     # WHAT NOT TO DO: do not add `decay ** elapsed_steps` "for fidelity" --
     # this callback has no way to observe a genuine step gap (Keras does not
     # skip `on_train_batch_end` calls the way a resumed-Lightning-trainer's
@@ -163,6 +173,22 @@ class EMAShadowCallback(keras.callbacks.Callback):
     # once per execution, so `update_every` and the schedule would silently
     # coarsen. It is refused in `on_train_begin` instead. See decisions.md
     # D-018.
+    #
+    # DECISION plan-2026-11-11T131349-13b28b37/D-045
+    # `optimizer.gradient_accumulation_steps` > 1 is refused in
+    # `on_train_begin`, for the same reason as `steps_per_execution`: with
+    # accumulation `iterations` advances once per k batches, so over 8
+    # batches at k=2 the schedule saw `[0, 0, 1, 1, 2, 2, 3]` and the shadow
+    # moved on batches where the live weights did not. WHAT NOT TO DO: do not
+    # read `model.optimizer.gradient_accumulation_steps` directly and do not
+    # read `model.optimizer.iterations` directly: under `mixed_float16` the
+    # optimizer is a `LossScaleOptimizer` whose wrapper reports
+    # `gradient_accumulation_steps=None` and never advances its own
+    # `iterations` (measured on Keras 3.8: wrapper 0, inner 1..8), so a direct
+    # read both misses the accumulation and keeps the step at -1 forever. Use
+    # `_step_optimizer()`. A "fire only when `iterations` advanced" design was
+    # rejected: it needs a last-seen value on the instance, which
+    # plan-2026-11-11T131349-13b28b37/D-018 removed. See decisions.md D-045.
 
     def __init__(
         self,
@@ -186,6 +212,21 @@ class EMAShadowCallback(keras.callbacks.Callback):
         self.start_step = int(start_step)
         self._disabled: bool = False
 
+    def _step_optimizer(self) -> keras.optimizers.Optimizer:
+        """Return the optimizer whose counters are the real ones.
+
+        A ``LossScaleOptimizer`` (what ``mixed_float16`` compiles with) wraps
+        the real optimizer in ``inner_optimizer`` and keeps neither
+        ``iterations`` nor ``gradient_accumulation_steps`` meaningful on the
+        wrapper. Any other optimizer is returned unchanged.
+
+        :return: The inner optimizer of a loss-scale wrapper, else the
+            model's own optimizer.
+        :rtype: keras.optimizers.Optimizer
+        """
+        optimizer = self.model.optimizer
+        return getattr(optimizer, "inner_optimizer", optimizer)
+
     def on_train_begin(self, logs: Optional[dict] = None) -> None:
         steps_per_execution = getattr(self.model, "steps_per_execution", 1)
         if steps_per_execution != 1:
@@ -194,6 +235,18 @@ class EMAShadowCallback(keras.callbacks.Callback):
                 f"{steps_per_execution}: Keras then calls on_train_batch_end once "
                 f"per execution, so the per-step EMA schedule would be miscounted."
             )
+        # `None` when accumulation is off (Keras 3.8 accepts None or an int >= 2).
+        accumulation = getattr(
+            self._step_optimizer(), "gradient_accumulation_steps", None
+        )
+        if accumulation is not None and accumulation > 1:
+            raise ValueError(
+                f"EMAShadowCallback needs optimizer.gradient_accumulation_steps "
+                f"to be unset, got {accumulation}: the optimizer's iterations "
+                f"then advance once per {accumulation} batches, so the per-batch "
+                f"EMA schedule would repeat every step and update the shadow on "
+                f"batches where the weights did not change."
+            )
 
     def on_train_batch_end(self, batch: int, logs: Optional[dict] = None) -> None:
         if self._disabled:
@@ -201,7 +254,9 @@ class EMAShadowCallback(keras.callbacks.Callback):
 
         # `iterations` is post-increment here: the first batch of a fresh run
         # sees 1. See the D-018 anchor above.
-        current_step = int(keras.ops.convert_to_numpy(self.model.optimizer.iterations)) - 1
+        current_step = (
+            int(keras.ops.convert_to_numpy(self._step_optimizer().iterations)) - 1
+        )
         if current_step < self.start_step:
             return
         if current_step % self.update_every != 0:

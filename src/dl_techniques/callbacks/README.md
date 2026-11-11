@@ -16,7 +16,7 @@ from dl_techniques.callbacks.consecutive_increase_early_stopping import Consecut
 - `EpochAnalyzerCallback` counts from `start_epoch`.
 - `PeriodicReassignCallback` fires first at `start_epoch` (1-based), then every `every_n_epochs` from there.
 
-Every cadence argument (`frequency`, `monitor_freq`, `epoch_frequency`, `regen_freq`, `every_n_epochs`, `log_every`, `update_every`) raises `ValueError` below 1 at construction. `EMAShadowCallback` counts the global optimizer step (`model.optimizer.iterations`), not epochs.
+Every cadence argument (`frequency`, `monitor_freq`, `epoch_frequency`, `regen_freq`, `every_n_epochs`, `log_every`, `update_every`) raises `ValueError` below 1 at construction. `EMAShadowCallback` counts the global optimizer step (`model.optimizer.iterations`, read from the inner optimizer of a `LossScaleOptimizer`), not epochs; one step per batch is required, so `steps_per_execution > 1` and `gradient_accumulation_steps > 1` are refused.
 
 **Failure policy.** Three kinds coexist:
 
@@ -28,7 +28,7 @@ Every cadence argument (`frequency`, `monitor_freq`, `epoch_frequency`, `regen_f
 
 **Writing into `logs`.** `COCOMAPCallback` adds keys to the epoch logs and `SpatialLossLogger` adds keys to the batch logs. Only callbacks that run AFTER the writer see those keys, so list writers before `ModelCheckpoint`, `EarlyStopping` and `CSVLogger`. `History` keeps epoch logs only, so batch-level keys never reach it.
 
-**State.** Per-run state is reset in `on_train_begin` (the early-stopping streak and snapshot, curve and history lists, the self-iterate pool RNG, the `PeriodicReassignCallback` extractor), so an instance can serve several `fit` calls. `EMAShadowCallback` keeps no counter of its own: its step is `model.optimizer.iterations`, so a resumed run continues the schedule, and a model compiled with `steps_per_execution != 1` is refused.
+**State.** Per-run state is reset in `on_train_begin` (the early-stopping streak and snapshot, curve and history lists, the self-iterate pool RNG, the `PeriodicReassignCallback` extractor), so an instance can serve several `fit` calls. `EMAShadowCallback` keeps no counter of its own: its step is `model.optimizer.iterations`, so a resumed run continues the schedule, and a model compiled with `steps_per_execution != 1` or an optimizer with `gradient_accumulation_steps` set is refused (either makes `iterations` stop advancing once per batch).
 
 **Live objects are not serialized.** `NoiseSigmaCurriculumCallback`, `SelfIteratePoolCallback` and `PeriodicReassignCallback` hold variables, arrays or layers by reference and omit them from `get_config()`. A reconstructed instance does nothing until those objects are supplied again.
 
@@ -42,7 +42,7 @@ Every cadence argument (`frequency`, `monitor_freq`, `epoch_frequency`, `regen_f
 | Schedule | `TemperatureAnnealingCallback` (`temperature_annealing`) | `on_epoch_begin` | Linear, cosine or exp schedule from `t_init` to `t_final` on layers exposing `temperature` and `softplus_temperature`. |
 | Schedule | `HarmonicExponentAnnealingCallback` (`anneal_harmonic_exponent`) | `on_epoch_begin` | Per-level exponents from `n_init` to `n_final` on layers exposing `num_levels` and `set_n_per_level` (`HierarchicalHarmonicHead`). |
 | Schedule | `NoiseSigmaCurriculumCallback` (`noise_sigma_curriculum`) | `on_epoch_begin` | Assigns a scheduled upper (and optional lower) noise sigma to a `keras.Variable` that the `tf.data` noise function reads. |
-| Schedule | `EMAShadowCallback` (`ema_shadow_callback`) | `on_train_batch_end` | Calls `model.update_ema_shadow(decay=...)` every `update_every` optimizer steps from `start_step` on (global step, read from `optimizer.iterations`). `decay` is a float or a schedule (`cosine_ema_schedule`, `linear_ema_schedule`, re-exported here). |
+| Schedule | `EMAShadowCallback` (`ema_shadow_callback`) | `on_train_batch_end` | Calls `model.update_ema_shadow(decay=...)` every `update_every` optimizer steps from `start_step` on (global step, read from `optimizer.iterations`; refuses `steps_per_execution > 1` and `gradient_accumulation_steps > 1`). `decay` is a float or a schedule (`cosine_ema_schedule`, `linear_ema_schedule`, re-exported here). |
 | Data mutation | `SelfIteratePoolCallback` (`self_iterate_pool`) | `on_epoch_end` | Runs `model.predict` over a RAM pool and rewrites the live input buffer in place: a `mix_ratio` share of slots gets the model output fed back, the rest gets fresh additive noise. |
 | Data mutation | `PeriodicReassignCallback` (`periodic_reassign`) | `on_epoch_end` | Calls `head.reassign(class_means)` from trunk features over the training arrays, first at `start_epoch`, then every `every_n_epochs`. `get_config()` cannot rebuild it (the arrays and a live head are left out). |
 | Diagnostics | `SpatialLossLogger` (`spatial_loss_logger`) | `on_train_batch_end` | Splits the reported loss into task and `SpatialSmoothness` components and writes `spatial/<tap>`, `spatial/total`, `spatial/unweighted`, `spatial/share`, `task_loss` and, when `compile_loss` is logged, `spatial/accounted` and `spatial/unaccounted`. |

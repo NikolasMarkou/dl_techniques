@@ -319,6 +319,65 @@ class TestEMAShadowCallbackCountsFromOptimizerIterations:
         _fit_more(model, [EMAShadowCallback(decay=0.5)], steps=2)
         assert len(model.update_calls) == 2
 
+    # DECISION plan-2026-11-11T131349-13b28b37/D-045
+    # Refusal, not a "fire only when iterations advanced" counter (that needs
+    # instance state, which D-018 removed), and read through the inner optimizer.
+    def test_gradient_accumulation_is_refused(self):
+        """RED before the refusal. With ``gradient_accumulation_steps=2`` the
+        optimizer advances ``iterations`` once per TWO batches, so the schedule
+        saw ``[0, 0, 1, 1, 2, 2, 3]`` over 8 batches: the shadow updated on
+        batches where the weights did not change and every global step repeated
+        (plan-2026-11-11T131349-13b28b37/D-045)."""
+        model = _ShadowModel()
+        model.compile(
+            optimizer=keras.optimizers.SGD(0.01, gradient_accumulation_steps=2),
+            loss="mse",
+        )
+        seen = []
+        with pytest.raises(ValueError, match="gradient_accumulation_steps"):
+            _fit_more(
+                model, [EMAShadowCallback(decay=_recording_schedule(seen))], steps=8
+            )
+        assert seen == []
+        assert model.update_calls == []
+
+    def test_gradient_accumulation_inside_a_loss_scale_optimizer_is_refused(self):
+        """``LossScaleOptimizer`` (what ``mixed_float16`` compiles with) reports
+        ``gradient_accumulation_steps=None`` on the wrapper while its inner
+        optimizer accumulates, so the refusal must look at the inner one."""
+        inner = keras.optimizers.SGD(0.01, gradient_accumulation_steps=2)
+        wrapper = keras.optimizers.LossScaleOptimizer(inner)
+        assert wrapper.gradient_accumulation_steps is None  # the trap
+        model = _ShadowModel()
+        model.compile(optimizer=wrapper, loss="mse")
+        with pytest.raises(ValueError, match="gradient_accumulation_steps"):
+            _fit_more(model, [EMAShadowCallback(decay=0.5)], steps=8)
+        assert model.update_calls == []
+
+    @pytest.mark.parametrize("kwargs", [{}, {"gradient_accumulation_steps": None}])
+    def test_no_gradient_accumulation_still_counts_every_batch(self, kwargs):
+        """Control: ``None`` (Keras 3.8 rejects 1) keeps one step per batch."""
+        model = _ShadowModel()
+        model.compile(optimizer=keras.optimizers.SGD(0.01, **kwargs), loss="mse")
+        seen = []
+        _fit_more(model, [EMAShadowCallback(decay=_recording_schedule(seen))], steps=8)
+        assert seen == list(range(8))
+        assert len(model.update_calls) == 8
+
+    def test_a_loss_scale_optimizer_without_accumulation_counts_every_batch(self):
+        """RED before the inner-optimizer read: the ``LossScaleOptimizer``
+        wrapper's own ``iterations`` stays 0 (Keras 3.8 advances only the inner
+        one), so under ``mixed_float16`` the step was always -1 and the shadow
+        never updated. Default loss-scale optimizer, benign inputs, no skips."""
+        model = _ShadowModel()
+        wrapper = keras.optimizers.LossScaleOptimizer(keras.optimizers.SGD(0.01))
+        model.compile(optimizer=wrapper, loss="mse")
+        seen = []
+        _fit_more(model, [EMAShadowCallback(decay=_recording_schedule(seen))], steps=4)
+        assert wrapper.iterations.numpy() == 0  # the trap: the wrapper never counts
+        assert seen == [0, 1, 2, 3]
+        assert len(model.update_calls) == 4
+
     def test_there_is_no_python_step_counter_to_go_stale(self):
         cb = EMAShadowCallback(decay=0.5)
         assert not hasattr(cb, "_update_count")
