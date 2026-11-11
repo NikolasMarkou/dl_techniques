@@ -5,12 +5,17 @@ After every ``frequency`` epochs, scans ``logs`` (the dict Keras passes into
 - total / task losses,
 - classification metrics,
 - segmentation metrics,
+- detection metrics,
 - depth metrics,
 - anything else,
 
-and writes one PNG per group to ``{output_dir}/training_curves/``.  Files are
-overwritten each time so the latest snapshot is always at a stable path
-(e.g. ``training_curves/loss.png``, ``training_curves/classification.png``).
+and writes one PNG per group to ``{output_dir}/{prefix}{group}.png`` (``prefix``
+is the ``file_prefix`` argument, empty by default).  Files are overwritten each
+time so the latest snapshot is always at a stable path (e.g. ``loss.png``,
+``classification.png`` directly under ``output_dir``).
+
+A log value that is not a scalar (an array, a string, ``None``) is skipped, with
+one warning per key per run; the scalar keys of the same epoch are still plotted.
 
 Model-agnostic — reacts only to the keys present in ``logs`` and their
 ``val_`` counterparts.  Safe to use alongside ``CSVLogger`` — both observe
@@ -21,7 +26,7 @@ from __future__ import annotations
 
 import gc
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import keras
 
@@ -90,6 +95,7 @@ class TrainingCurvesCallback(keras.callbacks.Callback):
       - ``loss.png`` — total & un-grouped losses
       - ``classification.png`` — classification head losses + metrics
       - ``segmentation.png`` — segmentation head losses + metrics
+      - ``detection.png`` — detection head losses + ``map50`` / ``map5095``
       - ``depth.png`` — depth-specific metrics
       - ``other.png`` — anything else
 
@@ -113,6 +119,7 @@ class TrainingCurvesCallback(keras.callbacks.Callback):
         # history via logs; we build it up ourselves.
         self._history: List[Dict[str, float]] = []
         self._epochs: List[int] = []
+        self._skipped_keys: Set[str] = set()
         logger.info(
             f"TrainingCurvesCallback: every {frequency} epochs → {self.output_dir}"
         )
@@ -124,6 +131,7 @@ class TrainingCurvesCallback(keras.callbacks.Callback):
         # [1, 2, 1, 2] as one curve. Pinned by test_state_resets_between_fits.py.
         self._history = []
         self._epochs = []
+        self._skipped_keys = set()
 
     def on_epoch_end(
         self, epoch: int, logs: Optional[Dict[str, Any]] = None
@@ -132,7 +140,19 @@ class TrainingCurvesCallback(keras.callbacks.Callback):
             return
         # Snapshot (shallow) so later mutations by other callbacks don't
         # retroactively affect our history.
-        self._history.append({k: float(v) for k, v in logs.items()})
+        row: Dict[str, float] = {}
+        for key, value in logs.items():
+            try:
+                row[key] = float(value)
+            except (TypeError, ValueError):
+                # Not a scalar: skip the key, never raise out of ``fit``.
+                if key not in self._skipped_keys:
+                    self._skipped_keys.add(key)
+                    logger.warning(
+                        f"TrainingCurvesCallback: log key {key!r} holds a "
+                        f"{type(value).__name__}, not a scalar; it is not plotted"
+                    )
+        self._history.append(row)
         self._epochs.append(epoch + 1)  # 1-indexed for display
 
         if (epoch + 1) % self.frequency != 0:
@@ -162,47 +182,49 @@ class TrainingCurvesCallback(keras.callbacks.Callback):
         fig, axes = plt.subplots(
             nrows, ncols, figsize=(5 * ncols, 3.5 * nrows), squeeze=False
         )
-        for idx, col in enumerate(columns):
-            r, c = divmod(idx, ncols)
-            ax = axes[r][c]
-            train_y = [row.get(col) for row in self._history]
-            val_col = f"val_{col}"
-            val_y = [row.get(val_col) for row in self._history]
+        try:
+            for idx, col in enumerate(columns):
+                r, c = divmod(idx, ncols)
+                ax = axes[r][c]
+                train_y = [row.get(col) for row in self._history]
+                val_col = f"val_{col}"
+                val_y = [row.get(val_col) for row in self._history]
 
-            xs = self._epochs
-            # Mask None values so matplotlib doesn't crash.
-            tx, ty = zip(*[(x, y) for x, y in zip(xs, train_y) if y is not None]) if any(
-                v is not None for v in train_y
-            ) else ([], [])
-            vx, vy = zip(*[(x, y) for x, y in zip(xs, val_y) if y is not None]) if any(
-                v is not None for v in val_y
-            ) else ([], [])
+                xs = self._epochs
+                # Mask None values so matplotlib doesn't crash.
+                tx, ty = zip(*[(x, y) for x, y in zip(xs, train_y) if y is not None]) if any(
+                    v is not None for v in train_y
+                ) else ([], [])
+                vx, vy = zip(*[(x, y) for x, y in zip(xs, val_y) if y is not None]) if any(
+                    v is not None for v in val_y
+                ) else ([], [])
 
-            color = f"C{idx}"
-            if tx:
-                ax.plot(tx, ty, "-", color=color, label="train", linewidth=1.8)
-            if vx:
-                ax.plot(vx, vy, "--", color=color, label="val", linewidth=1.8, alpha=0.85)
+                color = f"C{idx}"
+                if tx:
+                    ax.plot(tx, ty, "-", color=color, label="train", linewidth=1.8)
+                if vx:
+                    ax.plot(vx, vy, "--", color=color, label="val", linewidth=1.8, alpha=0.85)
 
-            ax.set_xlabel("epoch")
-            ax.set_ylabel(col)
-            ax.set_title(col, fontsize=10)
-            ax.grid(True, alpha=0.3)
-            if tx or vx:
-                ax.legend(fontsize=8)
-        # hide unused subplots
-        for idx in range(len(columns), nrows * ncols):
-            r, c = divmod(idx, ncols)
-            axes[r][c].axis("off")
+                ax.set_xlabel("epoch")
+                ax.set_ylabel(col)
+                ax.set_title(col, fontsize=10)
+                ax.grid(True, alpha=0.3)
+                if tx or vx:
+                    ax.legend(fontsize=8)
+            # hide unused subplots
+            for idx in range(len(columns), nrows * ncols):
+                r, c = divmod(idx, ncols)
+                axes[r][c].axis("off")
 
-        fig.suptitle(
-            f"{group_name.capitalize()} curves (epoch {self._epochs[-1]})",
-            fontsize=12,
-        )
-        fig.tight_layout()
-        path = self.output_dir / f"{self.file_prefix}{group_name}.png"
-        fig.savefig(path, dpi=100)
-        plt.close(fig)
+            fig.suptitle(
+                f"{group_name.capitalize()} curves (epoch {self._epochs[-1]})",
+                fontsize=12,
+            )
+            fig.tight_layout()
+            path = self.output_dir / f"{self.file_prefix}{group_name}.png"
+            fig.savefig(path, dpi=100)
+        finally:
+            plt.close(fig)
         logger.info(f"Saved {group_name} curves → {path}")
 
 # ------------------------------------------------------------------------------

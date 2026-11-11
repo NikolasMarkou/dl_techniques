@@ -49,19 +49,56 @@ COCO_CLASS_NAMES: List[str] = [
 ]
 
 
-def _seg_to_rgb(mask: np.ndarray, cmap) -> np.ndarray:
-    """Map int class indices (H, W) in [0, 80] to an RGB image via a colormap.
+_NUM_COCO_CLASSES = 80
 
-    Class 0 (background) is rendered black; classes 1..80 use the colormap.
+
+def _class_palette(plt) -> np.ndarray:
+    """Return an ``(80, 3)`` float32 palette with one distinct colour per COCO class.
+
+    ``tab20``, ``tab20b`` and ``tab20c`` supply 60 colours; the rest come from
+    ``Set3`` and then ``Paired``, skipping any colour already taken (``Paired``
+    repeats two ``tab20`` colours). Row ``k`` colours class ``k+1``.
+
+    :param plt: the ``matplotlib.pyplot`` module (its ``colormaps`` registry is
+        used, not the deprecated ``cm.get_cmap``).
+    :return: float32 array of RGB triples in ``[0, 1]``.
+    :raises RuntimeError: if the installed colormaps hold fewer than 80 distinct
+        colours (not the case for matplotlib >= 3.10).
+    """
+    colormaps = plt.colormaps
+    rows: List[Tuple[float, float, float]] = []
+    seen = set()
+    for name in ("tab20", "tab20b", "tab20c", "Set3", "Paired"):
+        for colour in colormaps[name].colors:
+            rgb = tuple(colour[:3])
+            key = tuple(round(float(c), 4) for c in rgb)
+            if key not in seen and len(rows) < _NUM_COCO_CLASSES:
+                seen.add(key)
+                rows.append(rgb)
+    if len(rows) != _NUM_COCO_CLASSES:
+        raise RuntimeError(
+            f"found {len(rows)} distinct colours, need {_NUM_COCO_CLASSES}"
+        )
+    return np.asarray(rows, dtype=np.float32)
+
+
+def _seg_to_rgb(mask: np.ndarray, palette: np.ndarray) -> np.ndarray:
+    """Map int class indices (H, W) in [0, 80] to an RGB image.
+
+    Class 0 (background) is rendered black; class ``k >= 1`` takes
+    ``palette[k - 1]``, indexed by the integer id. Do NOT normalise ``k`` to a
+    float and sample a resampled colormap: ``tab20`` has 20 entries, so 80
+    classes then share 20 colours, four classes per colour.
+
+    :param mask: integer class ids, any shape.
+    :param palette: ``(80, 3)`` array from :func:`_class_palette`.
+    :return: float32 array of ``mask.shape + (3,)``.
     """
     out = np.zeros(mask.shape + (3,), dtype=np.float32)
-    # Normalize class indices to [0, 1] by (k-1)/79 for k>=1; bg stays 0.
     nonbg = mask > 0
     if nonbg.any():
-        norm = (mask - 1).clip(min=0, max=79) / 79.0
-        rgba = cmap(norm)  # (H, W, 4)
-        rgb = rgba[..., :3]
-        out[nonbg] = rgb[nonbg]
+        idx = np.clip(mask[nonbg] - 1, 0, palette.shape[0] - 1)
+        out[nonbg] = palette[idx]
     return out
 
 
@@ -149,33 +186,35 @@ class COCOMultiTaskPredictionGridCallback(keras.callbacks.Callback):
         )
 
     def _save_grid(self, epoch: int, pred_seg: np.ndarray, pred_cls: np.ndarray) -> None:
-        plt, cm = import_pyplot(with_cm=True)
-        cmap = cm.get_cmap("tab20", 80)
+        plt = import_pyplot()
+        palette = _class_palette(plt)
 
         n = self.max_samples
         fig, axes = plt.subplots(n, 3, figsize=(12, 3.5 * n), squeeze=False)
-        for i in range(n):
-            # Col 1: RGB
-            axes[i][0].imshow(np.clip(self.val_rgb[i], 0.0, 1.0))
-            axes[i][0].set_title("RGB" if i == 0 else "")
-            axes[i][0].axis("off")
+        try:
+            for i in range(n):
+                # Col 1: RGB
+                axes[i][0].imshow(np.clip(self.val_rgb[i], 0.0, 1.0))
+                axes[i][0].set_title("RGB" if i == 0 else "")
+                axes[i][0].axis("off")
 
-            # Col 2: GT seg
-            axes[i][1].imshow(_seg_to_rgb(self.val_seg[i].astype(np.int32), cmap))
-            axes[i][1].set_title("GT seg" if i == 0 else "")
-            axes[i][1].axis("off")
+                # Col 2: GT seg
+                axes[i][1].imshow(_seg_to_rgb(self.val_seg[i].astype(np.int32), palette))
+                axes[i][1].set_title("GT seg" if i == 0 else "")
+                axes[i][1].axis("off")
 
-            # Col 3: Pred seg (argmax)
-            pred = pred_seg[i].argmax(axis=-1).astype(np.int32)
-            axes[i][2].imshow(_seg_to_rgb(pred, cmap))
-            axes[i][2].set_title("Pred seg" if i == 0 else "")
-            axes[i][2].axis("off")
+                # Col 3: Pred seg (argmax)
+                pred = pred_seg[i].argmax(axis=-1).astype(np.int32)
+                axes[i][2].imshow(_seg_to_rgb(pred, palette))
+                axes[i][2].set_title("Pred seg" if i == 0 else "")
+                axes[i][2].axis("off")
 
-        fig.suptitle(f"COCO multi-task epoch {epoch}", fontsize=12)
-        fig.tight_layout()
-        path = self.output_dir / f"epoch_{epoch:03d}_seg.png"
-        fig.savefig(path, dpi=100)
-        plt.close(fig)
+            fig.suptitle(f"COCO multi-task epoch {epoch}", fontsize=12)
+            fig.tight_layout()
+            path = self.output_dir / f"epoch_{epoch:03d}_seg.png"
+            fig.savefig(path, dpi=100)
+        finally:
+            plt.close(fig)
         logger.info(f"Saved seg prediction grid: {path}")
 
     def _save_cls_summary(self, epoch: int, pred_cls: np.ndarray) -> None:
@@ -197,7 +236,7 @@ class COCOMultiTaskPredictionGridCallback(keras.callbacks.Callback):
 
     def _save_det_grid(self, epoch: int, pred_det: np.ndarray) -> None:
         """RGB with GT boxes (green) + predicted boxes (red, argmax class+score)."""
-        plt, _ = import_pyplot(with_cm=True)
+        plt = import_pyplot()
         import matplotlib.patches as mpatches
         from dl_techniques.utils.yolo_decode import (
             decode_predictions, nms_per_class,
@@ -215,59 +254,61 @@ class COCOMultiTaskPredictionGridCallback(keras.callbacks.Callback):
 
         n = self.max_samples
         fig, axes = plt.subplots(n, 1, figsize=(8, 5 * n), squeeze=False)
-        for i in range(n):
-            ax = axes[i][0]
-            ax.imshow(np.clip(self.val_rgb[i], 0.0, 1.0))
+        try:
+            for i in range(n):
+                ax = axes[i][0]
+                ax.imshow(np.clip(self.val_rgb[i], 0.0, 1.0))
 
-            # GT boxes (green)
-            if self.val_boxes is not None:
-                valid = self.val_boxes[i, :, 0] >= 0
-                for row in self.val_boxes[i][valid]:
-                    cls_idx = int(row[0])
-                    x1, y1, x2, y2 = row[1] * W, row[2] * H, row[3] * W, row[4] * H
+                # GT boxes (green)
+                if self.val_boxes is not None:
+                    valid = self.val_boxes[i, :, 0] >= 0
+                    for row in self.val_boxes[i][valid]:
+                        cls_idx = int(row[0])
+                        x1, y1, x2, y2 = row[1] * W, row[2] * H, row[3] * W, row[4] * H
+                        ax.add_patch(mpatches.Rectangle(
+                            (x1, y1), x2 - x1, y2 - y1,
+                            linewidth=2, edgecolor="#00ff00", facecolor="none",
+                        ))
+                        ax.text(
+                            x1, max(0, y1 - 3),
+                            self.class_names[cls_idx] if cls_idx < len(self.class_names) else str(cls_idx),
+                            color="#00ff00", fontsize=7,
+                            bbox=dict(boxstyle="round,pad=0.2", facecolor="black", alpha=0.5, edgecolor="none"),
+                        )
+
+                # Predicted boxes (NMS'd, red)
+                boxes_px, scores, classes = per_image[i]
+                keep_b, keep_s, keep_c = nms_per_class(
+                    boxes_px, scores, classes,
+                    iou_threshold=self.detection_iou_threshold,
+                    max_per_class=self.detection_max_draw,
+                    max_total=self.detection_max_draw,
+                )
+                for j in range(keep_b.shape[0]):
+                    x1, y1, x2, y2 = keep_b[j]
                     ax.add_patch(mpatches.Rectangle(
                         (x1, y1), x2 - x1, y2 - y1,
-                        linewidth=2, edgecolor="#00ff00", facecolor="none",
+                        linewidth=1.5, edgecolor="#ff3030", facecolor="none",
+                        linestyle="--",
                     ))
                     ax.text(
-                        x1, max(0, y1 - 3),
-                        self.class_names[cls_idx] if cls_idx < len(self.class_names) else str(cls_idx),
-                        color="#00ff00", fontsize=7,
+                        x2 - 40, min(H - 2, y2 - 2),
+                        f"{self.class_names[keep_c[j]] if keep_c[j] < len(self.class_names) else keep_c[j]}:{keep_s[j]:.2f}",
+                        color="#ff3030", fontsize=6,
                         bbox=dict(boxstyle="round,pad=0.2", facecolor="black", alpha=0.5, edgecolor="none"),
                     )
 
-            # Predicted boxes (NMS'd, red)
-            boxes_px, scores, classes = per_image[i]
-            keep_b, keep_s, keep_c = nms_per_class(
-                boxes_px, scores, classes,
-                iou_threshold=self.detection_iou_threshold,
-                max_per_class=self.detection_max_draw,
-                max_total=self.detection_max_draw,
-            )
-            for j in range(keep_b.shape[0]):
-                x1, y1, x2, y2 = keep_b[j]
-                ax.add_patch(mpatches.Rectangle(
-                    (x1, y1), x2 - x1, y2 - y1,
-                    linewidth=1.5, edgecolor="#ff3030", facecolor="none",
-                    linestyle="--",
-                ))
-                ax.text(
-                    x2 - 40, min(H - 2, y2 - 2),
-                    f"{self.class_names[keep_c[j]] if keep_c[j] < len(self.class_names) else keep_c[j]}:{keep_s[j]:.2f}",
-                    color="#ff3030", fontsize=6,
-                    bbox=dict(boxstyle="round,pad=0.2", facecolor="black", alpha=0.5, edgecolor="none"),
-                )
+                ax.set_xlim(0, W)
+                ax.set_ylim(H, 0)
+                ax.set_title(f"Sample {i} — GT (solid green) vs Pred (dashed red)")
+                ax.axis("off")
 
-            ax.set_xlim(0, W)
-            ax.set_ylim(H, 0)
-            ax.set_title(f"Sample {i} — GT (solid green) vs Pred (dashed red)")
-            ax.axis("off")
-
-        fig.suptitle(f"COCO detection epoch {epoch}", fontsize=12)
-        fig.tight_layout()
-        path = self.output_dir / f"epoch_{epoch:03d}_det.png"
-        fig.savefig(path, dpi=100)
-        plt.close(fig)
+            fig.suptitle(f"COCO detection epoch {epoch}", fontsize=12)
+            fig.tight_layout()
+            path = self.output_dir / f"epoch_{epoch:03d}_det.png"
+            fig.savefig(path, dpi=100)
+        finally:
+            plt.close(fig)
         logger.info(f"Saved det prediction grid: {path}")
 
     def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
@@ -301,9 +342,18 @@ class COCOMultiTaskPredictionGridCallback(keras.callbacks.Callback):
                     try:
                         self._save_det_grid(epoch + 1, pred_det)
                     except Exception as e:  # noqa: BLE001
-                        logger.warning(f"Detection viz failed: {e}")
+                        logger.warning(f"Detection viz failed: {e}", exc_info=True)
                     del pred_det
             del out, pred_seg, pred_cls
+        except Exception:  # noqa: BLE001
+            # A visualization must never kill the run it observes: log the
+            # traceback and carry on (siblings training_curves, depth and JEPA
+            # callbacks do the same).
+            logger.warning(
+                f"COCOMultiTaskPredictionGridCallback failed at epoch {epoch + 1}; "
+                "skipping this visualization",
+                exc_info=True,
+            )
         finally:
             gc.collect()
 

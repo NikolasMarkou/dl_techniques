@@ -361,3 +361,45 @@ def test_the_callback_does_not_override_an_explicit_backend(
         f"acquire pyplot through {_HELPER_MODULE}.{_HELPER_NAME} and must not "
         f'call matplotlib.use("Agg") on its own.'
     )
+
+
+# =====================================================================
+# The helper returns pyplot and nothing else
+# =====================================================================
+def test_the_helper_takes_no_parameters_and_returns_pyplot() -> None:
+    """Plan plan-2026-11-11T131349-13b28b37 step 16: the ``with_cm`` flag is gone.
+
+    Its one consumer (``coco_multitask_visualization``) now reads colormaps from
+    ``plt.colormaps``; a flag with no caller is dead surface, removed outright
+    with no shim. Old: the signature carried ``with_cm`` and the call returned a
+    ``(pyplot, cm)`` pair on request.
+    """
+    import inspect
+
+    from dl_techniques.utils.matplotlib_backend import import_pyplot
+
+    assert list(inspect.signature(import_pyplot).parameters) == []
+    with pytest.raises(TypeError):
+        import_pyplot(with_cm=True)  # type: ignore[call-arg]
+    assert import_pyplot().__name__ == "matplotlib.pyplot"
+
+
+def test_no_caller_under_src_passes_an_argument_to_the_helper() -> None:
+    """AST census over ``src/``: every ``import_pyplot(...)`` call is argument-free."""
+    offenders: List[str] = []
+    callers = 0
+    for path in sorted(_SRC.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        if _HELPER_NAME not in text:
+            continue
+        for node in ast.walk(ast.parse(text, filename=str(path))):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == _HELPER_NAME
+            ):
+                callers += 1
+                if node.args or node.keywords:
+                    offenders.append(f"{path.relative_to(_REPO_ROOT)}:{node.lineno}")
+    assert callers >= _CENSUS_FLOOR, f"the census found only {callers} call sites"
+    assert not offenders, f"import_pyplot is called with arguments at {offenders}"

@@ -67,13 +67,13 @@ two ``src/train/`` users actually import.)
 """
 
 import os
-from typing import Any, Tuple, Union
+from typing import Any
 
 #: The backend selected when the caller expressed no preference.
 DEFAULT_BACKEND = "Agg"
 
 
-def import_pyplot(with_cm: bool = False) -> Union[Any, Tuple[Any, Any]]:
+def import_pyplot() -> Any:
     """Import ``matplotlib.pyplot``, defaulting to ``Agg`` if nothing was asked for.
 
     Setdefault semantics, never an override:
@@ -93,10 +93,11 @@ def import_pyplot(with_cm: bool = False) -> Union[Any, Tuple[Any, Any]]:
     ``ImportError`` at plot time inside a callback rather than at
     ``dl_techniques`` import time.
 
-    :param with_cm: also return ``matplotlib.cm``, for callers that need a
-        colormap module as well as the pyplot namespace.
-    :return: the ``matplotlib.pyplot`` module, or the pair ``(pyplot, cm)`` when
-        ``with_cm`` is true.
+    Colormaps are reached through ``plt.colormaps``; there is no second return
+    value (an earlier ``with_cm`` flag existed only for ``cm.get_cmap``, which
+    matplotlib deprecated in 3.7 and removes in 3.11).
+
+    :return: the ``matplotlib.pyplot`` module.
     :raises ImportError: if ``matplotlib`` is not installed.
     """
     import matplotlib
@@ -113,8 +114,4 @@ def import_pyplot(with_cm: bool = False) -> Union[Any, Tuple[Any, Any]]:
 
     import matplotlib.pyplot as plt
 
-    if with_cm:
-        from matplotlib import cm
-
-        return plt, cm
     return plt
