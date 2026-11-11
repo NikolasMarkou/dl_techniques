@@ -605,10 +605,7 @@ def validate_logit_probability_type(probability_type: str, layer_name: str) -> N
 # ---------------------------------------------------------------------
 
 
-def probability_axis(
-        probability_config: Optional[Dict[str, Any]],
-        default: int = -1,
-) -> int:
+def probability_axis(probability_config: Optional[Dict[str, Any]]) -> int:
     """Return the softmax axis a layer's ``probability_config`` asks for.
 
     The value an attention layer passes as ``rescue_axis`` to
@@ -626,10 +623,8 @@ def probability_axis(
     :param probability_config: The layer's ``probability_config`` argument, or ``None``.
         Never mutated.
     :type probability_config: Optional[Dict[str, Any]]
-    :param default: Axis returned when the config does not name one. Defaults to ``-1``.
-    :type default: int
 
-    :return: ``probability_config["axis"]`` if present, else ``default``.
+    :return: ``probability_config["axis"]`` if present, else ``-1``.
     :rtype: int
     """
     # DECISION plan-2026-11-11T131349-13b28b37/D-035: ONE spelling of the lookup that
@@ -639,4 +634,4 @@ def probability_axis(
     # capsule_routing (its three axes come from the routing maths, a config value
     # there is overridden) and do NOT clamp or validate here: apply_attention_mask
     # already rejects a size-one rescue axis with its own message.
-    return (probability_config or {}).get("axis", default)
+    return (probability_config or {}).get("axis", -1)

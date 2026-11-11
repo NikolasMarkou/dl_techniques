@@ -285,10 +285,10 @@ is `Invalid probability_type '<x>': not supported by <layer_name> ...`, and the 
 *   Do NOT re-spell the tuple at a layer: `test_common.py::TestValidateLogitProbabilityType` walks the
     package for it.
 
-#### `probability_axis(probability_config, default=-1)`
+#### `probability_axis(probability_config)`
 
 The axis a layer's own score normalisation reduces over, for `apply_attention_mask(..., rescue_axis=...)`:
-`probability_config["axis"]` when present, else `default`. Written
+`probability_config["axis"]` when present, else `-1`. Written
 `rescue_axis=probability_axis(self.probability_config)`; `TestTheAdopterCountsAreMechanical` counts that
 spelling to derive the layers that take the axis from their config (nine).
 

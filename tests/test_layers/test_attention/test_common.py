@@ -1076,20 +1076,10 @@ class TestCreateQkNorms:
         ``q_latent_dim`` branch, no K partner). The walk is proved non-vacuous by the
         control below it.
         """
-        import ast
-        import pathlib
-
-        import dl_techniques.layers.attention.common as common_mod
-
-        exempt = {"gated_attention.py", "multi_head_latent_attention.py"}
-        pkg = pathlib.Path(common_mod.__file__).parent
-        offenders = []
-        for path in sorted(pkg.glob("*.py")):
-            if path.name == "common.py" or path.name in exempt:
-                continue
-            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-                if _is_qk_norm_creation(node):
-                    offenders.append(f"{path.name}:{node.lineno}")
+        offenders = _offenders(
+            _is_qk_norm_creation,
+            exempt={"gated_attention.py", "multi_head_latent_attention.py"},
+        )
         assert not offenders, (
             "a Q/K norm pair is re-spelled; call common.create_qk_norms instead: "
             f"{offenders}"
@@ -1423,19 +1413,7 @@ class TestDtypeName:
         not an ``.dtype`` attribute), so it does not match and needs no exemption.
         The walk is proved non-vacuous by the control below it.
         """
-        import ast
-        import pathlib
-
-        import dl_techniques.layers.attention.common as common_mod
-
-        pkg = pathlib.Path(common_mod.__file__).parent
-        offenders = []
-        for path in sorted(pkg.glob("*.py")):
-            if path.name == "common.py":
-                continue
-            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-                if _is_dtype_name_idiom(node):
-                    offenders.append(f"{path.name}:{node.lineno}")
+        offenders = _offenders(_is_dtype_name_idiom)
         assert not offenders, (
             "the dtype-name idiom is re-spelled; call "
             f"common.dtype_name(x) instead: {offenders}"
@@ -1652,19 +1630,7 @@ class TestValidateLogitProbabilityType:
         literal holding the string ``"deterministic_routing"`` is a re-spelled copy. (Prose
         that names the types sits in docstrings and comments, which are not such nodes.)
         """
-        import ast
-        import pathlib
-
-        import dl_techniques.layers.attention.common as common_mod
-
-        pkg = pathlib.Path(common_mod.__file__).parent
-        offenders = []
-        for path in sorted(pkg.glob("*.py")):
-            if path.name == "common.py":
-                continue
-            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-                if _is_routing_type_collection(node):
-                    offenders.append(f"{path.name}:{node.lineno}")
+        offenders = _offenders(_is_routing_type_collection)
         assert not offenders, (
             "the routing/hierarchical type list is re-spelled; call "
             f"common.validate_logit_probability_type instead: {offenders}"
@@ -1716,11 +1682,6 @@ class TestProbabilityAxis:
     def test_the_axis_entry_is_returned_as_given(self):
         assert probability_axis({"axis": -2}) == -2
         assert probability_axis({"axis": 1, "temperature": 0.5}) == 1
-
-    def test_the_default_argument_replaces_the_fallback_only(self):
-        assert probability_axis(None, default=-2) == -2
-        assert probability_axis({}, default=-2) == -2
-        assert probability_axis({"axis": 3}, default=-2) == 3
 
     def test_the_config_is_not_mutated(self):
         config = {"axis": -2}
@@ -1775,19 +1736,7 @@ class TestProbabilityAxis:
         Capsule routing builds a config with ``dict(self.probability_config or {})`` and
         pins its own per-site axes; that is not this lookup and is not matched.
         """
-        import ast
-        import pathlib
-
-        import dl_techniques.layers.attention.common as common_mod
-
-        pkg = pathlib.Path(common_mod.__file__).parent
-        offenders = []
-        for path in sorted(pkg.glob("*.py")):
-            if path.name == "common.py":
-                continue
-            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-                if _is_axis_lookup(node):
-                    offenders.append(f"{path.name}:{node.lineno}")
+        offenders = _offenders(_is_axis_lookup)
         assert not offenders, (
             "the probability_config axis lookup is re-spelled; call "
             f"common.probability_axis instead: {offenders}"
@@ -1837,6 +1786,29 @@ class TestProbabilityAxis:
                 for a in n.names
             }
             assert "probability_axis" in imported, module
+
+
+def _offenders(predicate, exempt=()):
+    """``"<file>:<line>"`` of every AST node ``predicate`` accepts in the attention package.
+
+    The one census walker behind the four ``test_no_attention_module_respells_*`` tests.
+    It walks every ``*.py`` of ``layers/attention`` except ``common.py`` and the file
+    names in ``exempt``, and returns a list that is empty when no module re-spells the
+    idiom. ``predicate`` takes one ``ast`` node and returns a bool.
+    """
+    import ast
+    import pathlib
+
+    import dl_techniques.layers.attention.common as common_mod
+
+    pkg = pathlib.Path(common_mod.__file__).parent
+    return [
+        f"{path.name}:{node.lineno}"
+        for path in sorted(pkg.glob("*.py"))
+        if path.name != "common.py" and path.name not in exempt
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if predicate(node)
+    ]
 
 
 def _is_axis_lookup(node) -> bool:
