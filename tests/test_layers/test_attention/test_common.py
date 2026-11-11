@@ -40,6 +40,8 @@ from dl_techniques.layers.attention.common import (
     compute_attention_scale,
     dtype_name,
     mask_dtype,
+    merge_heads,
+    split_heads,
     validate_head_divisibility,
 )
 
@@ -1300,6 +1302,113 @@ class TestDtypeName:
         miss = ast.parse('md = getattr(dtype, "name", None) or str(dtype)')
         assert any(_is_dtype_name_idiom(n) for n in ast.walk(hit))
         assert not any(_is_dtype_name_idiom(n) for n in ast.walk(miss))
+
+
+class TestSplitAndMergeHeads:
+    """``split_heads`` / ``merge_heads``: pure head-layout data movement."""
+
+    _B, _L, _H, _D = 2, 6, 4, 5
+
+    def _x(self, width=None, dtype=np.float32):
+        width = width or self._H * self._D
+        return np.random.RandomState(0).randn(self._B, self._L, width).astype(dtype)
+
+    def test_split_matches_an_independent_numpy_reference(self):
+        x = self._x()
+        want = x.reshape(self._B, self._L, self._H, self._D).transpose(0, 2, 1, 3)
+        got = ops.convert_to_numpy(split_heads(ops.convert_to_tensor(x), self._H, self._D))
+        assert got.shape == (self._B, self._H, self._L, self._D)
+        np.testing.assert_array_equal(got, want)
+
+    def test_merge_matches_an_independent_numpy_reference(self):
+        y = np.random.RandomState(1).randn(self._B, self._H, self._L, self._D).astype("float32")
+        want = y.transpose(0, 2, 1, 3).reshape(self._B, self._L, self._H * self._D)
+        got = ops.convert_to_numpy(merge_heads(ops.convert_to_tensor(y)))
+        np.testing.assert_array_equal(got, want)
+
+    def test_merge_inverts_split_for_a_width_that_is_not_the_key_width(self):
+        """Capsule routing splits ``v`` with its own width; merge reads it off the tensor."""
+        x = self._x(width=self._H * 7)
+        back = merge_heads(split_heads(ops.convert_to_tensor(x), self._H, 7))
+        np.testing.assert_array_equal(ops.convert_to_numpy(back), x)
+
+    @pytest.mark.parametrize("dtype", ["float16", "bfloat16", "float32"])
+    def test_the_dtype_is_preserved(self, dtype):
+        x = ops.cast(ops.convert_to_tensor(self._x()), dtype)
+        assert dtype_name(split_heads(x, self._H, self._D)) == dtype
+        assert dtype_name(merge_heads(split_heads(x, self._H, self._D))) == dtype
+
+    @pytest.mark.parametrize("static_length", [True, False])
+    def test_a_dynamic_batch_and_length_under_tf_function(self, static_length):
+        """The D-033 contract: the helper takes neither a batch nor a length argument.
+
+        With a ``None`` length in the input signature a helper that was handed (or
+        read) a static length would fail to trace or reshape to the wrong length.
+        """
+        import tensorflow as tf
+
+        x = self._x()
+        spec = tf.TensorSpec((None, self._L if static_length else None, self._H * self._D), tf.float32)
+
+        @tf.function(input_signature=[spec], autograph=False)
+        def roundtrip(t):
+            heads = split_heads(t, self._H, self._D)
+            return heads, merge_heads(heads)
+
+        heads, merged = roundtrip(tf.constant(x))
+        want = x.reshape(self._B, self._L, self._H, self._D).transpose(0, 2, 1, 3)
+        np.testing.assert_array_equal(heads.numpy(), want)
+        np.testing.assert_array_equal(merged.numpy(), x)
+
+    def test_a_functional_model_with_a_none_length_axis(self):
+        heads, width = self._H, self._D
+
+        class _RoundTrip(keras.layers.Layer):
+            # The helpers are called inside ``call()``, as every attention layer does;
+            # on a bare KerasTensor ``keras.ops.reshape`` rejects the ``None`` length.
+            def call(self, t):
+                return merge_heads(split_heads(t, heads, width))
+
+        inp = keras.Input(shape=(None, self._H * self._D))
+        model = keras.Model(inp, _RoundTrip()(inp))
+        for length in (3, 9):
+            x = np.random.RandomState(length).randn(2, length, self._H * self._D).astype("float32")
+            np.testing.assert_array_equal(ops.convert_to_numpy(model(x)), x)
+
+    def test_the_four_layers_use_the_helpers_and_keep_no_private_copy(self):
+        """D-033 guard: anchor, beit, differential and capsule routing import both helpers.
+
+        Beit and differential used to hold a private ``_split_heads`` /
+        ``_project_to_heads``; a re-introduced copy is the duplication the helpers
+        removed. kimi_delta and area deliberately do not adopt them (they interleave
+        casts and norms, or use a 5D layout), so they are not in this list.
+        """
+        import ast
+        import pathlib
+
+        import dl_techniques.layers.attention.common as common_mod
+
+        pkg = pathlib.Path(common_mod.__file__).parent
+        for name in (
+            "anchor_attention.py",
+            "beit_attention.py",
+            "differential_attention.py",
+            "capsule_routing_attention.py",
+        ):
+            tree = ast.parse((pkg / name).read_text(encoding="utf-8"))
+            imported = {
+                a.name
+                for n in ast.walk(tree)
+                if isinstance(n, ast.ImportFrom) and (n.module or "").split(".")[-1] == "common"
+                for a in n.names
+            }
+            assert {"split_heads", "merge_heads"} <= imported, name
+            private = [
+                n.name
+                for n in ast.walk(tree)
+                if isinstance(n, ast.FunctionDef) and n.name in {"_split_heads", "_project_to_heads"}
+            ]
+            assert not private, (name, private)
 
 
 def _is_dtype_name_idiom(node) -> bool:

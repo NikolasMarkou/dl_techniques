@@ -2,7 +2,8 @@
 Shared primitives for the ``layers/attention`` package: the attention-mask
 bias constant and its dtype rule, ``apply_attention_mask`` (the fp16-safe way
 to apply that bias), ``validate_head_divisibility``,
-``compute_attention_scale``, and ``dtype_name``.
+``compute_attention_scale``, ``dtype_name``, and the head layout pair
+``split_heads`` / ``merge_heads``.
 
 Masking is a pair: ``MASK_BIAS_VALUE`` is only safe inside the dtype
 ``mask_dtype()`` returns, since ``np.float16(-1e9)`` is ``-inf`` and
@@ -402,3 +403,66 @@ def dtype_name(x: Any) -> str:
     return getattr(x.dtype, "name", None) or str(x.dtype)
 
 # ---------------------------------------------------------------------
+
+
+def split_heads(x: keras.KerasTensor, num_heads: int, head_dim: int) -> keras.KerasTensor:
+    """Split a projection ``(B, L, num_heads * head_dim)`` into ``(B, num_heads, L, head_dim)``.
+
+    Pure data movement: a reshape to ``(B, L, num_heads, head_dim)`` and a transpose
+    that moves the head axis ahead of the sequence axis. It contains no scaling,
+    normalisation, cast or mask, so it is bit-identical to the private reshape and
+    transpose it replaces; where a layer multiplies by the attention scale (before or
+    after the score matmul) is a separate, numerically visible choice that stays at
+    the layer.
+
+    Call it inside ``call()``, on a tensor the layer has just projected. The
+    batch axis is passed to the reshape as ``-1`` and the length is read from
+    ``keras.ops.shape(x)[1]``, so a static, a dynamic and a ``None`` batch or length
+    all work (eager, under ``tf.function`` and in a functional model).
+
+    :param x: A projection output of shape ``(B, L, num_heads * head_dim)``.
+    :type x: keras.KerasTensor
+    :param num_heads: Number of heads ``H``.
+    :type num_heads: int
+    :param head_dim: Per-head width of THIS tensor. It is not always the layer's
+        ``head_dim``: a layer with a separate value width passes that width for ``v``.
+    :type head_dim: int
+
+    :raises Exception: Nothing is validated here. If the last axis of ``x`` is not
+        ``num_heads * head_dim`` the backend's own reshape error surfaces (its type
+        differs between eager and traced execution).
+
+    :return: The same values as ``(B, num_heads, L, head_dim)``.
+    :rtype: keras.KerasTensor
+    """
+    # DECISION plan-2026-11-11T131349-13b28b37/D-033: the length comes from
+    # keras.ops.shape(x)[1] and the batch is -1, so the helper takes no batch_size
+    # or seq_len argument. Do NOT pass a static seq_len (it breaks a None length) or a
+    # tensor the caller read earlier (it has to be threaded through every call
+    # site, which is how each layer grew its own private copy). Do NOT fold the
+    # attention scale into this helper: beit scales q BEFORE the matmul and the others
+    # after it, which rounds differently. See decisions.md.
+    length = keras.ops.shape(x)[1]
+    x = keras.ops.reshape(x, (-1, length, num_heads, head_dim))
+    return keras.ops.transpose(x, (0, 2, 1, 3))
+
+
+def merge_heads(x: keras.KerasTensor) -> keras.KerasTensor:
+    """Merge ``(B, num_heads, L, head_dim)`` back into ``(B, L, num_heads * head_dim)``.
+
+    The inverse of :func:`split_heads`: a transpose that puts the sequence axis
+    back ahead of the head axis, then a reshape that fuses the last two. ``num_heads``
+    and ``head_dim`` are read from the tensor, so a layer whose value width differs
+    from its key width needs no extra argument. The batch axis is ``-1`` and the
+    length comes from ``keras.ops.shape``, like :func:`split_heads`.
+
+    :param x: Per-head attention output of shape ``(B, num_heads, L, head_dim)``.
+        The head and width axes must be static.
+    :type x: keras.KerasTensor
+
+    :return: The same values as ``(B, L, num_heads * head_dim)``.
+    :rtype: keras.KerasTensor
+    """
+    x = keras.ops.transpose(x, (0, 2, 1, 3))
+    shape = keras.ops.shape(x)
+    return keras.ops.reshape(x, (-1, shape[1], shape[2] * shape[3]))

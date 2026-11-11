@@ -53,7 +53,13 @@ from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.activations import ProbabilityOutput
 from dl_techniques.layers.norms import create_normalization_layer
 
-from .common import apply_attention_mask, compute_attention_scale, dtype_name
+from .common import (
+    apply_attention_mask,
+    compute_attention_scale,
+    dtype_name,
+    merge_heads,
+    split_heads,
+)
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -691,26 +697,6 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
             rescue_axis=(self.probability_config or {}).get("axis", -1),
         )
 
-    def _project_to_heads(
-        self,
-        x: keras.KerasTensor,
-        batch_size: keras.KerasTensor,
-        seq_len: keras.KerasTensor,
-    ) -> keras.KerasTensor:
-        """Reshape a projected tensor ``(B, L, H*D_h)`` to ``(B, H, L, D_h)``.
-
-        :param x: A projection output of shape ``(B, L, num_heads * head_dim)``.
-        :type x: keras.KerasTensor
-        :param batch_size: Dynamic batch size, from ``keras.ops.shape``.
-        :type batch_size: keras.KerasTensor
-        :param seq_len: Dynamic sequence length, from ``keras.ops.shape``.
-        :type seq_len: keras.KerasTensor
-        :return: The same values as ``(B, num_heads, L, head_dim)``.
-        :rtype: keras.KerasTensor
-        """
-        x = keras.ops.reshape(x, (batch_size, seq_len, self.num_heads, self.head_dim))
-        return keras.ops.transpose(x, (0, 2, 1, 3))
-
     def _stream(
         self,
         q: keras.KerasTensor,
@@ -799,15 +785,12 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
             applying differential attention and output projection.
         :rtype: keras.KerasTensor
         """
-        batch_size = keras.ops.shape(inputs)[0]
-        seq_len = keras.ops.shape(inputs)[1]
-
-        # Project to Q1, K1, Q2, K2, V and reshape to per-head format.
-        q1 = self._project_to_heads(self.q1_dense(inputs), batch_size, seq_len)
-        k1 = self._project_to_heads(self.k1_dense(inputs), batch_size, seq_len)
-        q2 = self._project_to_heads(self.q2_dense(inputs), batch_size, seq_len)
-        k2 = self._project_to_heads(self.k2_dense(inputs), batch_size, seq_len)
-        v = self._project_to_heads(self.v_dense(inputs), batch_size, seq_len)
+        # Project to Q1, K1, Q2, K2, V and split to per-head format (B, H, L, D_h).
+        q1 = split_heads(self.q1_dense(inputs), self.num_heads, self.head_dim)
+        k1 = split_heads(self.k1_dense(inputs), self.num_heads, self.head_dim)
+        q2 = split_heads(self.q2_dense(inputs), self.num_heads, self.head_dim)
+        k2 = split_heads(self.k2_dense(inputs), self.num_heads, self.head_dim)
+        v = split_heads(self.v_dense(inputs), self.num_heads, self.head_dim)
 
         # Two parallel SDPA streams. V is shared; the depth schedule combines
         # their outputs afterwards.
@@ -831,8 +814,7 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         diff = out1 - lambda_val * out2
 
         # Merge heads: (B, H, L, D_h) -> (B, L, H*D_h)
-        diff = keras.ops.transpose(diff, (0, 2, 1, 3))
-        diff = keras.ops.reshape(diff, (batch_size, seq_len, self._proj_dim))
+        diff = merge_heads(diff)
 
         # Apply output projection and dropout
         output = self.proj(diff, training=training)

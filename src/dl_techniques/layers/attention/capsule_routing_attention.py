@@ -40,6 +40,8 @@ from .common import (
     apply_attention_mask,
     compute_attention_scale,
     dtype_name,
+    merge_heads,
+    split_heads,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -577,9 +579,6 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
             contextualized representations enhanced by capsule routing.
         :rtype: keras.KerasTensor
         """
-        batch_size = ops.shape(inputs)[0]
-        seq_len = ops.shape(inputs)[1]
-
         # Linear projections for Q, K, V.
         # query and key come out as (batch, seq_len, num_heads * key_dim);
         # value as (batch, seq_len, num_heads * value_dim).
@@ -587,15 +586,11 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         key = self.key_dense(inputs)
         value = self.value_dense(inputs)
 
-        # Reshape to multi-head format
-        query = ops.reshape(query, (batch_size, seq_len, self.num_heads, self.actual_key_dim))
-        key = ops.reshape(key, (batch_size, seq_len, self.num_heads, self.actual_key_dim))
-        value = ops.reshape(value, (batch_size, seq_len, self.num_heads, self.actual_value_dim))
-
-        # Transpose to (batch, num_heads, seq_len, head_dim)
-        query = ops.transpose(query, [0, 2, 1, 3])
-        key = ops.transpose(key, [0, 2, 1, 3])
-        value = ops.transpose(value, [0, 2, 1, 3])
+        # Split to multi-head format (batch, num_heads, seq_len, head_dim); q/k use
+        # actual_key_dim, v uses actual_value_dim.
+        query = split_heads(query, self.num_heads, self.actual_key_dim)
+        key = split_heads(key, self.num_heads, self.actual_key_dim)
+        value = split_heads(value, self.num_heads, self.actual_value_dim)
 
         # Optional QK normalization (applied per-head before the dot product).
         if self.q_norm is not None:
@@ -630,13 +625,8 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         attended_values = ops.matmul(attention_weights, value)
         # Shape: (batch, num_heads, seq_len, value_dim)
 
-        # Transpose and reshape to concatenate heads
-        attended_values = ops.transpose(attended_values, [0, 2, 1, 3])
-        # Shape: (batch, seq_len, num_heads, value_dim)
-
-        concatenated = ops.reshape(
-            attended_values, (batch_size, seq_len, self.num_heads * self.actual_value_dim)
-        )
+        # Concatenate heads: (batch, seq_len, num_heads * value_dim)
+        concatenated = merge_heads(attended_values)
 
         # Final linear projection
         output = self.output_dense(concatenated)

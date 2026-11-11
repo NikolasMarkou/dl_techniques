@@ -66,6 +66,7 @@ Factory (all from `factory.py`; the first six are re-exported by `__init__.py`):
 - `validate_head_divisibility(dim, num_heads, *, dim_name="dim", num_heads_name="num_heads")`: `ValueError` if `dim % num_heads != 0`.
 - `compute_attention_scale(head_dim) -> float`: `1.0 / math.sqrt(float(head_dim))`, a Python float. Call from `__init__` or `build`, never `call()`.
 - `dtype_name(x) -> str`: `getattr(x.dtype, "name", None) or str(x.dtype)`, the one home of that idiom (a `tf.DType` renders wrongly under bare `str`; `keras.backend.standardize_dtype` is banned). Pass a tensor, not a dtype. Do not re-spell it at a site: `test_common.py::TestDtypeName::test_no_attention_module_respells_the_idiom` walks the package. `lighthouse_attention.py` takes a dtype, not a tensor, and keeps its own `getattr` (first argument is a bare name).
+- `split_heads(x, num_heads, head_dim)` / `merge_heads(x)`: `(B, L, H*d)` <-> `(B, H, L, d)`, pure reshape and transpose, batch `-1`, length from `keras.ops.shape(x)[1]`. Call inside `call()`. Adopted by `anchor`, `beit`, `differential`, `capsule_routing` only (`kimi_delta` interleaves casts and norms, `area` is 5D); scale placement stays at the layer. Guard: `test_common.py::TestSplitAndMergeHeads`.
 
 Call signatures (frozen; renaming or reordering breaks serialized configs and callers). Re-derived from each `def call`:
 

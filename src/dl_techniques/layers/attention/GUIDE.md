@@ -167,7 +167,7 @@ self.norm = create_normalization_layer('layer_norm', axis=-1)
 
 `dl_techniques/layers/attention/common.py` is this package's single home for the small,
 provably-identical primitives that were previously re-derived across a dozen modules. It is
-deliberately **flat**: six module-level names, **no classes, no registry, no Keras
+deliberately **flat**: eight module-level names, **no classes, no registry, no Keras
 registration**. Import from it the way you would import `math`.
 
 ```python
@@ -178,6 +178,8 @@ from .common import (
     validate_head_divisibility,
     compute_attention_scale,
     dtype_name,
+    split_heads,
+    merge_heads,
 )
 ```
 
@@ -221,6 +223,25 @@ a `tf.DType` renders as `"<dtype: 'float16'>"` under bare `str`, and `keras.back
 is a banned Keras-2 residue. Pass the tensor, not a dtype. Every attention layer calls it; the idiom is
 not re-spelled at a site (`test_common.py::TestDtypeName` walks the package). `lighthouse_attention.py`
 takes a dtype object, not a tensor, so it keeps its own `getattr`.
+
+#### `split_heads(x, num_heads, head_dim)` and `merge_heads(x)`
+
+`split_heads` turns a projection `(B, L, num_heads * head_dim)` into `(B, num_heads, L, head_dim)`
+(reshape, then transpose `(0, 2, 1, 3)`); `merge_heads` is its inverse and reads the head count and
+width off the tensor, so a value tensor with its own width needs no extra argument.
+
+*   **Pure data movement, nothing else.** No scale, norm, cast or mask lives in either helper, so
+    they are bit-identical to the private reshape and transpose they replaced (outputs, weight
+    paths and seeded draws equal at `atol=0` for float32 and mixed_float16, eager, under
+    `tf.function` with a dynamic batch and length, and in a functional model with a `None` length).
+*   **The batch is `-1` and the length comes from `keras.ops.shape(x)[1]`.** Do not pass a static
+    length (a `None` length breaks) or thread a `batch_size`/`seq_len` through the call site.
+    Call the helpers inside `call()`, not on a bare `KerasTensor`.
+*   **Adopters:** `anchor_attention.py` (standard and hierarchical paths), `beit_attention.py`,
+    `differential_attention.py`, `capsule_routing_attention.py` (q/k with `actual_key_dim`, v with
+    `actual_value_dim`). `kimi_delta_attention.py` interleaves casts, L2 norms and softplus with the
+    reshape and transposes tensors of other ranks, and `area_attention.py` uses a 5D layout, so
+    neither adopts. The other modules that hand-roll the same split were not converted.
 
 #### `validate_head_divisibility(dim, num_heads, *, dim_name=..., num_heads_name=...)`
 
@@ -446,9 +467,11 @@ If refactoring an existing layer found in the codebase:
     at your call site**, per the limits documented there.
 6.  Ensure `build()` builds *all* sub-layers.
 
-**Known deferred de-duplication:** seven modules each hand-roll their own Q/K/V head
-reshape + scaled-dot-product scoring. A shared `split_heads` / `merge_heads` /
-`scaled_dot_product_attention` helper is the largest remaining extraction opportunity in this
-package, but the seven implementations differ in reshape/transpose **order**, so unifying them
-changes op ordering and therefore numerics. It is intentionally not in `common.py`; it needs a
-plan that is allowed to change behavior and verifies per-file numeric equivalence.
+**Known deferred de-duplication:** several modules still hand-roll their own Q/K/V head reshape
+and scaled-dot-product scoring. The head layout (`split_heads` / `merge_heads`) is now shared where
+it is pure data movement (anchor, beit, differential, capsule routing; see section 3.5): reshaping and
+transposing do not change numerics. What still differs between modules, and still keeps a shared
+`scaled_dot_product_attention` out of `common.py`, is the **scale placement** (beit multiplies `q` by
+the scale before the matmul, the others multiply the scores after it) and the mask and softmax
+sequencing. Unifying those changes rounding, so it needs a plan that verifies per-file numeric
+equivalence.

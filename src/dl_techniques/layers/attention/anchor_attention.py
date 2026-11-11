@@ -35,6 +35,8 @@ from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.activations import ProbabilityOutput
 from .common import (
     compute_attention_scale,
+    merge_heads,
+    split_heads,
     validate_head_divisibility
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -476,23 +478,10 @@ class AnchorAttention(keras.layers.Layer):
         :return: Output tensor of shape ``(batch_size, seq_len, dim)``.
         :rtype: keras.KerasTensor
         """
-        batch_size = keras.ops.shape(x)[0]
-        seq_len = keras.ops.shape(x)[1]
-
-        # Linear projections: (batch, seq, inner_dim)
-        q = self.query_proj(x)
-        k = self.key_proj(x)
-        v = self.value_proj(x)
-
-        # Split heads: (batch, seq, num_heads, head_dim)
-        q = keras.ops.reshape(q, (batch_size, seq_len, self.num_heads, self.head_dim))
-        k = keras.ops.reshape(k, (batch_size, seq_len, self.num_heads, self.head_dim))
-        v = keras.ops.reshape(v, (batch_size, seq_len, self.num_heads, self.head_dim))
-
-        # Move heads ahead of the sequence: (batch, num_heads, seq, head_dim)
-        q = keras.ops.transpose(q, (0, 2, 1, 3))
-        k = keras.ops.transpose(k, (0, 2, 1, 3))
-        v = keras.ops.transpose(v, (0, 2, 1, 3))
+        # Linear projections (batch, seq, inner_dim), split to (batch, heads, seq, head_dim)
+        q = split_heads(self.query_proj(x), self.num_heads, self.head_dim)
+        k = split_heads(self.key_proj(x), self.num_heads, self.head_dim)
+        v = split_heads(self.value_proj(x), self.num_heads, self.head_dim)
 
         # Scaled dot-product scores: (batch, heads, seq, seq)
         scores = keras.ops.matmul(q, keras.ops.transpose(k, (0, 1, 3, 2))) * self.scale
@@ -506,9 +495,8 @@ class AnchorAttention(keras.layers.Layer):
         # Weighted sum of values: (batch, heads, seq, head_dim)
         out = keras.ops.matmul(attn_weights, v)
 
-        # Merge heads: (batch, seq, heads, head_dim) -> (batch, seq, inner_dim)
-        out = keras.ops.transpose(out, (0, 2, 1, 3))
-        out = keras.ops.reshape(out, (batch_size, seq_len, self.inner_dim))
+        # Merge heads: (batch, heads, seq, head_dim) -> (batch, seq, inner_dim)
+        out = merge_heads(out)
 
         return self.output_proj(out)
 
@@ -536,7 +524,6 @@ class AnchorAttention(keras.layers.Layer):
 
         :raises ValueError: If the sequence dimension is not statically known.
         """
-        batch_size = keras.ops.shape(x)[0]
         # DECISION plan_2026-06-14_ab855e7e/D-002: static shape, not keras.ops.shape
         # — the num_anchor_tokens >= seq_len branch is a Python bool and crashes under @tf.function on a dynamic tensor. See decisions.md.
         seq_len = x.shape[1]
@@ -556,40 +543,19 @@ class AnchorAttention(keras.layers.Layer):
         # Positional split into hubs and spokes
         anchor_tokens = x[:, :num_anchor_tokens, :]
         query_tokens = x[:, num_anchor_tokens:, :]
-        num_query_tokens = seq_len - num_anchor_tokens
 
         # Anchor tier: full Q, K, V. Anchors alone supply keys and values, so
         # this is the only tier that writes into the global summary.
-        anchor_q = self.query_proj(anchor_tokens)
-        anchor_k = self.key_proj(anchor_tokens)
-        anchor_v = self.value_proj(anchor_tokens)
-
-        anchor_q = keras.ops.reshape(
-            anchor_q,
-            (batch_size, num_anchor_tokens, self.num_heads, self.head_dim)
-        )
-        anchor_k = keras.ops.reshape(
-            anchor_k,
-            (batch_size, num_anchor_tokens, self.num_heads, self.head_dim)
-        )
-        anchor_v = keras.ops.reshape(
-            anchor_v,
-            (batch_size, num_anchor_tokens, self.num_heads, self.head_dim)
-        )
-
         # (batch, heads, num_anchors, head_dim)
-        anchor_q = keras.ops.transpose(anchor_q, (0, 2, 1, 3))
-        anchor_k = keras.ops.transpose(anchor_k, (0, 2, 1, 3))
-        anchor_v = keras.ops.transpose(anchor_v, (0, 2, 1, 3))
+        anchor_q = split_heads(self.query_proj(anchor_tokens), self.num_heads, self.head_dim)
+        anchor_k = split_heads(self.key_proj(anchor_tokens), self.num_heads, self.head_dim)
+        anchor_v = split_heads(self.value_proj(anchor_tokens), self.num_heads, self.head_dim)
 
         # Query tier: Q only, from its own projection. No K/V is computed here,
         # which is where the (N-K)^2 term disappears.
-        query_q = self.query_token_proj(query_tokens)
-        query_q = keras.ops.reshape(
-            query_q,
-            (batch_size, num_query_tokens, self.num_heads, self.head_dim)
+        query_q = split_heads(
+            self.query_token_proj(query_tokens), self.num_heads, self.head_dim
         )
-        query_q = keras.ops.transpose(query_q, (0, 2, 1, 3))
 
         # Concatenate as [anchors ; queries], matching original token order so
         # the output needs no re-scatter. Shape: (batch, heads, seq_len, head_dim)
@@ -611,9 +577,8 @@ class AnchorAttention(keras.layers.Layer):
         # out:          (batch, heads, seq_len, head_dim)
         out = keras.ops.matmul(attn_weights, anchor_v)
 
-        # Merge heads: (batch, seq, heads, head_dim) -> (batch, seq, inner_dim)
-        out = keras.ops.transpose(out, (0, 2, 1, 3))
-        out = keras.ops.reshape(out, (batch_size, seq_len, self.inner_dim))
+        # Merge heads: (batch, heads, seq, head_dim) -> (batch, seq, inner_dim)
+        out = merge_heads(out)
 
         return self.output_proj(out)
 

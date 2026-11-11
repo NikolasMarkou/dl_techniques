@@ -39,6 +39,8 @@ from .common import (
     apply_attention_mask,
     compute_attention_scale,
     dtype_name,
+    merge_heads,
+    split_heads,
     validate_head_divisibility,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -474,9 +476,9 @@ class BeitAttention(keras.layers.Layer):
         # Batch axis stays dynamic (-1); seq_len is the static num_tokens build() validated.
         seq_len = self.num_tokens
 
-        q = self._split_heads(self.q_dense(inputs), seq_len)
-        k = self._split_heads(self.k_dense(inputs), seq_len)
-        v = self._split_heads(self.v_dense(inputs), seq_len)
+        q = split_heads(self.q_dense(inputs), self.num_heads, self.head_dim)
+        k = split_heads(self.k_dense(inputs), self.num_heads, self.head_dim)
+        v = split_heads(self.v_dense(inputs), self.num_heads, self.head_dim)
 
         # (B, H, N+1, head_dim) @ (B, H, head_dim, N+1) -> (B, H, N+1, N+1)
         scores = keras.ops.matmul(
@@ -519,30 +521,10 @@ class BeitAttention(keras.layers.Layer):
         # (B, H, N+1, N+1) @ (B, H, N+1, head_dim) -> (B, H, N+1, head_dim)
         out = keras.ops.matmul(attn, v)
         # (B, H, N+1, head_dim) -> (B, N+1, H, head_dim) -> (B, N+1, dim)
-        out = keras.ops.transpose(out, (0, 2, 1, 3))
-        out = keras.ops.reshape(out, (-1, seq_len, self.dim))
+        out = merge_heads(out)
         out = self.proj(out)
         out = self.proj_dropout(out, training=training)
         return out
-
-    def _split_heads(
-            self,
-            projected: keras.KerasTensor,
-            seq_len: int,
-    ) -> keras.KerasTensor:
-        """Reshape ``(B, N+1, dim)`` into ``(B, num_heads, N+1, head_dim)``.
-
-        :param projected: Output of one of the q/k/v projections.
-        :type projected: keras.KerasTensor
-        :param seq_len: Static sequence length ``Wh * Ww + 1``.
-        :type seq_len: int
-        :return: Head-split tensor.
-        :rtype: keras.KerasTensor
-        """
-        reshaped = keras.ops.reshape(
-            projected, (-1, seq_len, self.num_heads, self.head_dim)
-        )
-        return keras.ops.transpose(reshaped, (0, 2, 1, 3))
 
     def _broadcast_mask(
             self,
