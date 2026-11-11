@@ -412,6 +412,26 @@ class TestVGGLoss:
         np.testing.assert_allclose(got, want, rtol=1e-4)
 
 
+class TestVGGLossUnderMixedPrecision:
+    """Found by the adversarial review: VGGLoss raised ``InvalidArgumentError: cannot
+    compute AddV2`` under ``mixed_float16`` (a float32 accumulator plus a half term)."""
+
+    def test_runs_with_a_finite_float32_loss_close_to_the_float32_policy(self) -> None:
+        y_true = keras.random.uniform((2, 64, 64, 3), seed=42)
+        y_pred = keras.random.uniform((2, 64, 64, 3), seed=43)
+        previous = keras.config.dtype_policy()
+        try:
+            keras.config.set_dtype_policy("float32")
+            reference = np.asarray(VGGLoss(reduction="none")(y_true, y_pred))
+            keras.config.set_dtype_policy("mixed_float16")
+            got = VGGLoss(reduction="none")(y_true, y_pred)
+        finally:
+            keras.config.set_dtype_policy(previous)
+        assert keras.backend.standardize_dtype(got.dtype) == "float32"
+        assert np.all(np.isfinite(np.asarray(got)))
+        np.testing.assert_allclose(np.asarray(got), reference, rtol=5e-2)
+
+
 class TestEnhanceLoss:
     """Test suite for EnhanceLoss."""
 

@@ -414,6 +414,11 @@ class VGGLoss(keras.losses.Loss):
     for either, so a run that depends on the old magnitude must scale its
     weight down by about 35x.
 
+    Mixed precision: under the ``mixed_float16`` policy the VGG19 extractor runs
+    in float16 and its features are cast to float32 before the distance, so the
+    loss is a float32 tensor. Before this cast the loss raised
+    ``InvalidArgumentError`` (a float32 accumulator plus a half term).
+
     Args:
         loss_weight: Overall scalar weight for this loss. Default: 1.0
         reduction: Type of reduction to apply. Default: "sum_over_batch_size"
@@ -509,6 +514,10 @@ class VGGLoss(keras.losses.Loss):
         # Compute weighted L1 loss across all layers
         loss = keras.ops.convert_to_tensor(0.0, dtype="float32")
         for i, (ft, fp) in enumerate(zip(feat_true, feat_pred)):
+            # Under mixed_float16 the VGG features are half: cast so the float32
+            # accumulator can add them and the mean does not sum in half.
+            ft = keras.ops.cast(ft, "float32")
+            fp = keras.ops.cast(fp, "float32")
             layer_loss = keras.ops.mean(
                 keras.ops.abs(ft - fp),
                 axis=[1, 2, 3]

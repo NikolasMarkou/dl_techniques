@@ -114,6 +114,16 @@ _VALID_VGG_VARIANTS = ("vgg16", "vgg19")
 class LPIPSLoss(keras.losses.Loss):
     """LPIPS-flavored perceptual loss using frozen VGG features.
 
+    Mixed precision: under the ``mixed_float16`` policy the frozen VGG extractor
+    runs in float16 and its features are cast to float32 before the channel
+    normalisation and the distance, so the loss is a float32 tensor. Before this
+    cast the loss raised ``InvalidArgumentError`` (a float32 accumulator plus a
+    half term). The loss itself is small (about 2e-3 on [0, 1] images), so the
+    gradient through the half extractor underflows to exactly 0 unless the loss
+    is scaled; the loss-scale optimizer that ``compile`` applies under
+    ``mixed_float16`` restores it (measured: max |grad| 0.0 unscaled, 9.0e-7 at
+    a scale of 2**15, against 1.1e-6 at float32 on a similar pair).
+
     Args:
         layer_weights: Mapping from VGG layer name → scalar weight. Layers
             must exist in the chosen VGG variant. Default: a 5-block recipe
@@ -266,8 +276,12 @@ class LPIPSLoss(keras.losses.Loss):
         total = ops.convert_to_tensor(0.0, dtype="float32")
         names = list(self.layer_weights.keys())
         for layer_name, ft, fp in zip(names, feats_true, feats_pred):
-            ft_n = self._channel_normalize(ft)
-            fp_n = self._channel_normalize(fp)
+            # Under mixed_float16 the extractor returns half features: the
+            # float32 accumulator cannot add a half term (InvalidArgumentError
+            # at AddV2) and the channel norm squares values that overflow half.
+            # Only the extractor runs in half; the arithmetic is float32.
+            ft_n = self._channel_normalize(ops.cast(ft, "float32"))
+            fp_n = self._channel_normalize(ops.cast(fp, "float32"))
             diff = ft_n - fp_n
             if self.distance == "l1":
                 per_sample = ops.mean(ops.abs(diff), axis=[1, 2, 3])

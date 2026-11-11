@@ -223,3 +223,26 @@ class TestLPIPSLoss:
         out_big = loss(x_big, y_big)
         assert np.all(np.isfinite(np.array(out_small)))
         assert np.all(np.isfinite(np.array(out_big)))
+
+    @pytest.mark.parametrize("variant", ["vgg16", "vgg19"])
+    def test_runs_under_mixed_float16_with_a_finite_float32_loss(self, variant):
+        """Found by the adversarial review: ``total`` (float32) plus a half per-layer
+        term raised ``InvalidArgumentError: cannot compute AddV2`` at base and at HEAD.
+
+        The features are cast to float32 before the channel norm, so the loss is a
+        float32 tensor and matches the float32-policy value within float16
+        resolution of the features (measured relative gap below 1e-2).
+        """
+        _vgg_or_skip()
+        x, y = _rand_batch(seed=21), _rand_batch(seed=22)
+        previous = keras.config.dtype_policy()
+        try:
+            keras.config.set_dtype_policy("float32")
+            reference = np.asarray(LPIPSLoss(vgg_variant=variant, reduction="none")(x, y))
+            keras.config.set_dtype_policy("mixed_float16")
+            got = LPIPSLoss(vgg_variant=variant, reduction="none")(x, y)
+        finally:
+            keras.config.set_dtype_policy(previous)
+        assert keras.backend.standardize_dtype(got.dtype) == "float32"
+        np.testing.assert_allclose(np.asarray(got), reference, rtol=5e-2)
+        assert np.all(np.isfinite(np.asarray(got)))
