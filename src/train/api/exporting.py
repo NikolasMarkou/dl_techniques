@@ -428,12 +428,31 @@ def _export_tflite(model: Any, out: Path, spec: Any) -> None:
         handle.write(blob)
 
 
+def _frozen_graph_as_is(input_names: Any, output_names: Any, graph_def: Any) -> Any:
+    """Stand in for ``tf2onnx.tf_loader.tf_optimize_grappler``: return the frozen graph without the grappler pass."""
+    return graph_def
+
+
 def _export_onnx(model: Any, out: Path, spec: Any) -> None:
+    import contextlib
+    from unittest import mock
+
     import tensorflow as tf
     import tf2onnx
+    from tf2onnx import tf_loader
 
     function = tf.function(lambda batch: model(batch, training=False))
-    proto, _ = tf2onnx.convert.from_function(function, input_signature=(spec,))
+    # DECISION plan-2026-11-10T095307-d483ffab/D-034
+    # tf2onnx runs TensorFlow's grappler constant folder over the frozen graph, and for a TRAINED
+    # ``BiasFreeBatchNorm`` (a ``gamma`` other than 1) that pass aborts the whole PROCESS ("Check failed:
+    # size >= 0 (0 vs. -2)", exit 134, at a free or a fixed input shape); an untrained model (gamma 1) converts,
+    # which is why the 40-cell table never saw it. Do NOT skip grappler for every model: SCUNet's onnx
+    # needs its folding (its Tile nodes fail at 64x64 without it). Do NOT drop the guard below because a
+    # new TensorFlow converts: ``test_the_onnx_of_a_trained_bias_free_batchnorm_model_converts_and_matches`` says.
+    skip_grappler = any(type(layer).__name__ == "BiasFreeBatchNorm" for layer in model._flatten_layers())
+    patch = mock.patch.object(tf_loader, "tf_optimize_grappler", _frozen_graph_as_is)
+    with patch if skip_grappler else contextlib.nullcontext():
+        proto, _ = tf2onnx.convert.from_function(function, input_signature=(spec,))
     with open(out, "xb") as handle:
         handle.write(proto.SerializeToString())
 

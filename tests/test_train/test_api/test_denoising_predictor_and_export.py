@@ -27,6 +27,8 @@ again for ``f(a x) = a f(x)``. Everything writes under ``tmp_path``; nothing is 
 
 import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -50,6 +52,7 @@ from train.api.errors import ConfigError
 from train.api.exporting import FORMATS, export
 from train.api.predictor import DENOISING, build_denoising_record, load_model
 
+from .test_backup_every_steps import REPO, child_env
 from .test_denoising_families import build
 
 FAMILIES = ("bfcnn", "bfunet", "bfconvunext", "convunext_biased", "scunet")
@@ -782,6 +785,34 @@ def test_a_fixed_onnx_of_scunet_is_not_refused_and_matches_at_sizes_off_64(model
                       record=record_of("scunet"))
         batch = images_of(size)
         assert relative_gap(Runtime("onnx", path)(batch), keras_reference(models["scunet"], batch)) <= EXPORT_RTOL, size
+
+
+def test_the_onnx_of_a_trained_bias_free_batchnorm_model_converts_and_matches(models, tmp_path):
+    """Plan d483ffab D-034: tf2onnx's grappler pass ABORTS THE PROCESS on a ``BiasFreeBatchNorm`` whose gamma is not 1.
+
+    The 40-cell table was measured on untrained weights (gamma 1), where it converts; the step-14 GPU gate exported a
+    TRAINED ``bfcnn`` and got "Check failed: size >= 0 (0 vs. -2)", exit 134. The conversion runs in a subprocess (an abort
+    would take pytest down with it) through the command line, and the file it writes is read back here.
+    """
+    pytest.importorskip("tf2onnx")
+    pytest.importorskip("onnxruntime")
+    model = keras.models.clone_model(models["bfcnn"])
+    model.set_weights(models["bfcnn"].get_weights())
+    rng = np.random.default_rng(0)
+    gammas = [w for w in model.weights if w.path.endswith("gamma")]
+    assert len(gammas) == 4, "the control needs the four BiasFreeBatchNorm gammas of the tiny bfcnn"
+    for weight in gammas:
+        weight.assign(rng.uniform(0.6, 1.4, weight.shape).astype("float32"))
+    for weight in (w for w in model.weights if w.path.endswith("running_var")):
+        weight.assign(rng.uniform(0.5, 2.0, weight.shape).astype("float32"))
+    run = make_run(tmp_path / "run", model)
+    out = tmp_path / "trained.onnx"
+    done = subprocess.run([sys.executable, "-m", "train", "export", f"model={run}", f"out={out}", "format=onnx"],
+                          capture_output=True, text=True, env=child_env(), cwd=REPO, timeout=600)
+    assert done.returncode == 0, f"exit {done.returncode}: {done.stderr[-600:]}"
+    for size in (SIZE_A, SIZE_B):
+        batch = images_of(size)
+        assert relative_gap(Runtime("onnx", out)(batch), keras_reference(model, batch)) <= EXPORT_RTOL, size
 
 
 def test_a_fixed_size_off_the_stride_is_refused_and_a_unet_cannot_be_traced_there(models, tmp_path):
