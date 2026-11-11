@@ -86,11 +86,14 @@ Citation
 --------
 If you use these loss functions in research, please cite the original DarkIR paper:
 
-    @inproceedings{darkir2023,
-      title={DarkIR: Low-Light Image Restoration},
-      author={...},
-      booktitle={...},
-      year={2023}
+    @inproceedings{feijoo2025darkir,
+      title={DarkIR: Robust Low-Light Image Restoration},
+      author={Feijoo, Daniel and Benito, Juan C. and Garcia, Alvaro and Conde, Marcos V.},
+      booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and
+                 Pattern Recognition (CVPR)},
+      year={2025},
+      eprint={2412.13443},
+      archivePrefix={arXiv}
     }
 
 Notes
@@ -392,6 +395,16 @@ class VGGLoss(keras.losses.Loss):
     Extracts features from multiple VGG19 layers and computes weighted L1
     distance for perceptual similarity. Uses ImageNet pre-trained weights.
 
+    Scale: the VGG19 weights are fed the input they were trained on, Keras's
+    own caffe-mode preprocessing (RGB to BGR, 0..255, per-channel mean
+    subtraction), not torch-style mean/std on [0, 1]. Activations are therefore
+    about 35x larger than under the previous preprocessing, and so is this
+    loss. ``EnhanceLoss.vgg_weight`` (0.01) and
+    ``DarkIRCompositeLoss.perceptual_weight`` (``--perceptual-weight`` default
+    0.01 in ``train.darkir``) were not retuned: no recorded tuning run exists
+    for either, so a run that depends on the old magnitude must scale its
+    weight down by about 35x.
+
     Args:
         loss_weight: Overall scalar weight for this loss. Default: 1.0
         reduction: Type of reduction to apply. Default: "sum_over_batch_size"
@@ -406,7 +419,8 @@ class VGGLoss(keras.losses.Loss):
 
     Notes:
         - Input images are expected to be in [0, 1] range
-        - Internal preprocessing normalizes using ImageNet statistics
+        - Internal preprocessing is ``keras.applications.vgg19.preprocess_input``
+          applied to the image scaled to [0, 255]
         - VGG model is frozen (non-trainable)
     """
 
@@ -418,7 +432,7 @@ class VGGLoss(keras.losses.Loss):
     ):
         super().__init__(reduction=reduction, name=name)
         self.loss_weight = loss_weight
-        # Layer-specific weights (decreasing importance for deeper layers)
+        # Layer-specific weights (increasing importance for deeper layers)
         self.layer_weights = [1.0/32, 1.0/16, 1.0/8, 1.0/4, 1.0]
 
         # Load VGG19 without top classification layers
@@ -442,16 +456,6 @@ class VGGLoss(keras.losses.Loss):
         self.vgg_model = keras.Model(inputs=vgg.input, outputs=outputs)
         self.vgg_model.trainable = False
 
-        # ImageNet normalization statistics
-        self.mean = keras.ops.convert_to_tensor(
-            [0.485, 0.456, 0.406],
-            dtype="float32"
-        )
-        self.std = keras.ops.convert_to_tensor(
-            [0.229, 0.224, 0.225],
-            dtype="float32"
-        )
-
     def _preprocess(self, x: keras.KerasTensor) -> keras.KerasTensor:
         """
         Preprocess images for VGG19.
@@ -460,11 +464,15 @@ class VGGLoss(keras.losses.Loss):
             x: Input images in [0, 1] range
 
         Returns:
-            Normalized images
+            Caffe-preprocessed images (BGR, 0..255, mean-subtracted).
         """
-        # Normalize using ImageNet statistics
-        x_norm = (x - self.mean) / self.std
-        return x_norm
+        # DECISION plan-2026-11-11T131349-13b28b37/D-004
+        # The Keras VGG19 weights were trained on caffe-preprocessed input.
+        # Do NOT normalize with torch-style ImageNet mean/std on [0, 1]: that
+        # shrinks every activation (and this loss) about 35x. See
+        # tests/test_losses/test_image_restoration_loss.py
+        # (test_preprocess_is_the_vgg19_caffe_preprocessing).
+        return keras.applications.vgg19.preprocess_input(x * 255.0)
 
     def call(
         self,

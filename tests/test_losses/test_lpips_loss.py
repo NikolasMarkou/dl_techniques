@@ -58,6 +58,59 @@ class TestLPIPSLoss:
         with pytest.raises(ValueError):
             LPIPSLoss(distance="cosine")
 
+    # DECISION plan-2026-11-11T131349-13b28b37/D-004 pin: the VGG weights expect
+    # caffe preprocessing; the variant picks which `preprocess_input` is used.
+    # No weights are needed here: `_preprocess` is pure data movement.
+    @pytest.mark.parametrize("variant", ["vgg16", "vgg19"])
+    def test_preprocess_is_the_variants_caffe_preprocessing(self, variant):
+        loss = LPIPSLoss(vgg_variant=variant)
+        x = np.random.default_rng(0).uniform(0.0, 1.0, (2, 16, 16, 3)).astype("float32")
+
+        got = np.array(loss._preprocess(ops.convert_to_tensor(x)))
+        module = getattr(keras.applications, variant)
+        want = np.array(module.preprocess_input(ops.convert_to_tensor(x * 255.0)))
+
+        np.testing.assert_allclose(got, want, rtol=0.0, atol=1e-4)
+
+    def test_preprocess_maps_input_range_to_unit_then_caffe(self):
+        loss = LPIPSLoss(input_range=(-1.0, 1.0))
+        x_unit = np.random.default_rng(1).uniform(0.0, 1.0, (1, 8, 8, 3)).astype("float32")
+
+        got = np.array(loss._preprocess(ops.convert_to_tensor(x_unit * 2.0 - 1.0)))
+        want = np.array(
+            keras.applications.vgg16.preprocess_input(ops.convert_to_tensor(x_unit * 255.0))
+        )
+
+        np.testing.assert_allclose(got, want, rtol=0.0, atol=1e-3)
+
+    def test_call_feeds_the_extractor_caffe_inputs(self):
+        _vgg_or_skip()
+        weights = {"block1_conv1": 1.0, "block3_conv1": 0.5}
+        loss = LPIPSLoss(layer_weights=weights)
+        x = np.array(_rand_batch(seed=8, h=64, w=64))
+        y = np.array(_rand_batch(seed=9, h=64, w=64))
+
+        got = np.array(loss(x, y))
+
+        backbone = keras.applications.VGG16(include_top=False, weights="imagenet")
+        extractor = keras.Model(
+            backbone.input, [backbone.get_layer(n).output for n in weights]
+        )
+        pre = keras.applications.vgg16.preprocess_input
+        feats_x = extractor(pre(x * 255.0))
+        feats_y = extractor(pre(y * 255.0))
+        want = sum(
+            w * np.array(
+                ops.mean(
+                    ops.abs(LPIPSLoss._channel_normalize(fx) - LPIPSLoss._channel_normalize(fy)),
+                    axis=[1, 2, 3],
+                )
+            )
+            for w, fx, fy in zip(weights.values(), feats_x, feats_y)
+        )
+
+        np.testing.assert_allclose(got, np.mean(want), rtol=1e-4)
+
     def test_invalid_input_range_raises(self):
         with pytest.raises(ValueError):
             LPIPSLoss(input_range=(1.0, 1.0))

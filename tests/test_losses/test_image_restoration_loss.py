@@ -377,6 +377,40 @@ class TestVGGLoss:
         assert len(loss.layer_weights) == 5
         assert loss.layer_weights == [1.0 / 32, 1.0 / 16, 1.0 / 8, 1.0 / 4, 1.0]
 
+    # DECISION plan-2026-11-11T131349-13b28b37/D-004 pin: Keras VGG19 weights
+    # are trained on caffe-preprocessed input (BGR, 0..255, mean-subtracted);
+    # feeding torch mean/std on [0, 1] shrinks every activation about 35x.
+    def test_preprocess_is_the_vgg19_caffe_preprocessing(self) -> None:
+        """`_preprocess` of a [0, 1] image equals VGG19's own `preprocess_input`."""
+        loss_fn = VGGLoss()
+        x = np.random.default_rng(0).uniform(0.0, 1.0, (2, 16, 16, 3)).astype("float32")
+
+        got = keras.ops.convert_to_numpy(loss_fn._preprocess(keras.ops.convert_to_tensor(x)))
+        want = keras.ops.convert_to_numpy(
+            keras.applications.vgg19.preprocess_input(keras.ops.convert_to_tensor(x * 255.0))
+        )
+
+        np.testing.assert_allclose(got, want, rtol=0.0, atol=1e-4)
+
+    def test_call_feeds_the_extractor_caffe_inputs(self) -> None:
+        """The loss value equals the one computed by hand from caffe-preprocessed inputs."""
+        loss_fn = VGGLoss(reduction='none')
+        rng = np.random.default_rng(1)
+        y_true = rng.uniform(0.0, 1.0, (2, 64, 64, 3)).astype("float32")
+        y_pred = rng.uniform(0.0, 1.0, (2, 64, 64, 3)).astype("float32")
+
+        got = keras.ops.convert_to_numpy(loss_fn(y_true, y_pred))
+
+        pre = keras.applications.vgg19.preprocess_input
+        feats_true = loss_fn.vgg_model(pre(y_true * 255.0))
+        feats_pred = loss_fn.vgg_model(pre(y_pred * 255.0))
+        want = sum(
+            w * keras.ops.convert_to_numpy(keras.ops.mean(keras.ops.abs(ft - fp), axis=[1, 2, 3]))
+            for w, ft, fp in zip(loss_fn.layer_weights, feats_true, feats_pred)
+        )
+
+        np.testing.assert_allclose(got, want, rtol=1e-4)
+
 
 class TestEnhanceLoss:
     """Test suite for EnhanceLoss."""

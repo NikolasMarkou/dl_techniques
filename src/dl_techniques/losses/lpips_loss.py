@@ -13,7 +13,7 @@ generally applicable as a perceptual term in any image-to-image training
 (reconstruction, super-resolution, generation, restoration).
 
 Distinct from `dl_techniques.losses.image_restoration_loss.VGGLoss`:
-- VGGLoss: MSE on VGG block outputs (un-normalized features).
+- VGGLoss: L1 on VGG block outputs (un-normalized features).
 - LPIPSLoss: L1 / L2 on **L2-channel-normalized** features (LPIPS recipe
   from Zhang et al. 2018, without their learned per-channel weights —
   hence "LPIPS-flavored", not the official LPIPS metric).
@@ -25,8 +25,9 @@ For a chosen set of VGG layers L with per-layer weight w_l,
     L_lpips(x, x_hat) = Σ_l  w_l · d( normalize(f_l(x)), normalize(f_l(x_hat)) )
 
 where
-- f_l(·) is the activation at VGG layer l after ImageNet-mean/std
-  preprocessing of inputs in [0, 1],
+- f_l(·) is the activation at VGG layer l after Keras's caffe-mode VGG
+  preprocessing (``keras.applications.vgg16/vgg19.preprocess_input``, BGR,
+  0..255, mean-subtracted) of inputs in [0, 1] scaled by 255,
 - normalize(t) = t / (||t||_{channel,2} + eps) is per-channel L2 normalisation
   (channels = last axis),
 - d is L1 (default) or L2 mean-squared.
@@ -93,10 +94,6 @@ _DEFAULT_LAYER_WEIGHTS_VGG16: Dict[str, float] = {
     "block4_conv1": 1.0 / 512.0,
     "block5_conv1": 1.0 / 512.0,
 }
-
-# ImageNet preprocessing (standard, used by all keras.applications models).
-_IMAGENET_MEAN = (0.485, 0.456, 0.406)
-_IMAGENET_STD = (0.229, 0.224, 0.225)
 
 # Channel-normalisation eps (same scale as Zhang 2018 reference impl).
 _NORM_EPS = 1.0e-10
@@ -176,8 +173,6 @@ class LPIPSLoss(keras.losses.Loss):
         # until first call. This keeps deserialization fast and avoids a
         # download-during-config failure when networks are offline. The
         # weights are frozen for the lifetime of this Loss instance.
-        self._mean = ops.convert_to_tensor(_IMAGENET_MEAN, dtype="float32")
-        self._std = ops.convert_to_tensor(_IMAGENET_STD, dtype="float32")
 
     # ------------------------------------------------------------------
     # Lazy VGG extractor
@@ -223,10 +218,19 @@ class LPIPSLoss(keras.losses.Loss):
         return (x - lo) / (hi - lo)
 
     def _preprocess(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """Map to [0,1] then ImageNet-normalize (per-channel)."""
-        x = self._to_unit_range(x)
-        x = (x - self._mean) / self._std
-        return x
+        """Map to [0,1] then apply the variant's own caffe preprocessing."""
+        # DECISION plan-2026-11-11T131349-13b28b37/D-004
+        # Keras VGG16/19 weights were trained on caffe-preprocessed input
+        # (BGR, 0..255, mean-subtracted) and each variant owns its
+        # preprocess_input. Do NOT use torch-style ImageNet mean/std on [0, 1]:
+        # it is not what these weights saw (activations come out about 35x
+        # small; the channel normalization hides most, not all, of that).
+        # Pinned by tests/test_losses/test_lpips_loss.py
+        # (test_preprocess_is_the_variants_caffe_preprocessing).
+        x = self._to_unit_range(x) * 255.0
+        if self.vgg_variant == "vgg16":
+            return keras.applications.vgg16.preprocess_input(x)
+        return keras.applications.vgg19.preprocess_input(x)
 
     @staticmethod
     def _channel_normalize(t: keras.KerasTensor) -> keras.KerasTensor:
