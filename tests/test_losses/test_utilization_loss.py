@@ -410,3 +410,409 @@ class TestGNNUtilizationLossIsPerSample:
         assert "within each sample" in class_doc
         assert "one value per sample" in call_doc
         assert "scalar utilization loss" not in call_doc
+
+
+# ---------------------------------------------------------------------
+# MANNUtilizationLoss per-sample contract
+# (plan-2026-11-11T223825-64d1b401, step 5; decision D-005)
+# ---------------------------------------------------------------------
+
+MEMORY_TIME = 6
+MEMORY_DIM = 8
+
+# Default-reduction values recorded at HEAD b4831ec33, before this step, with the
+# scalar-returning code (golden file of the plan). The pin fixture is the one of the
+# premature-scalar pin (``_memory_pair``: seed 1234, row scales 0.5 / 1 / 2 / 4); the
+# ragged fixture is seed 7 with the same scales.
+HEAD_GOLDEN_MEMORY_PIN = -0.0907827764749527
+HEAD_GOLDEN_MEMORY_RAGGED = -0.0808926522731781
+
+# Reduction lengths on the compared path: the softmax-entropy sum over MEMORY_DIM, the
+# mean over TIME, the norm sum over MEMORY_DIM, the mean over TIME, the temporal
+# variance (a mean and a mean of squares over (TIME - 1) * MEMORY_DIM), and the batch
+# mean of ``v_b``.
+_MEMORY_LENGTHS = [
+    MEMORY_DIM, MEMORY_TIME, MEMORY_DIM, MEMORY_TIME,
+    2 * (MEMORY_TIME - 1) * MEMORY_DIM, BATCH,
+]
+
+
+def _memory(seed):
+    """``(B, 6, 8)`` float32-representable states with row scales 0.5, 1, 2, 4."""
+    rng = np.random.default_rng(seed)
+    x = rng.normal(size=(BATCH, MEMORY_TIME, MEMORY_DIM)) * SCALES[:, None, None]
+    return x.astype("float32").astype("float64")
+
+
+def _ragged_memory():
+    return _memory(7)
+
+
+def _pin_memory():
+    return _memory(1234)
+
+
+def _entropy_and_magnitude64(m):
+    """Per-row mean over time of the softmax entropy ``H`` and of the norm."""
+    m = np.asarray(m, dtype="float64")
+    e = np.exp(m - m.max(axis=-1, keepdims=True))
+    p = e / e.sum(axis=-1, keepdims=True)
+    entropy = -(p * np.log(p + 1e-10)).sum(axis=-1)
+    return entropy.mean(axis=1), np.linalg.norm(m, axis=-1).mean(axis=1)
+
+
+def _mann_rows64(m, we=0.01, ww=0.01, wv=0.01):
+    """Per-row reference in float64, independent of the loss code.
+
+    ``we * (-mean_t H) + ww * (-mean_t ||m||)
+      + wv * (-log(V + 1e-10) - (v_b - V) / (V + 1e-10))`` with ``d`` the temporal
+    difference, ``V = var(d)`` over ALL axes and ``v_b = mean((d_b - mean(d))**2)``.
+    """
+    m = np.asarray(m, dtype="float64")
+    entropy, magnitude = _entropy_and_magnitude64(m)
+    d = m[:, 1:] - m[:, :-1]
+    batch_var = d.var()
+    v_b = ((d - d.mean()) ** 2).mean(axis=(1, 2))
+    variance = -np.log(batch_var + 1e-10) - (v_b - batch_var) / (batch_var + 1e-10)
+    return we * (-entropy) + ww * (-magnitude) + wv * variance
+
+
+def _mann_old_scalar64(m, we=0.01, ww=0.01, wv=0.01):
+    """The pre-fix scalar in float64: ``-log(var(d))`` over every axis of ``d``."""
+    m = np.asarray(m, dtype="float64")
+    entropy, magnitude = _entropy_and_magnitude64(m)
+    d = m[:, 1:] - m[:, :-1]
+    return float(
+        we * (-entropy.mean()) + ww * (-magnitude.mean())
+        + wv * (-np.log(d.var() + 1e-10))
+    )
+
+
+def _mann_atol(rows):
+    return reassociation_atol(_MEMORY_LENGTHS, 1, float(np.abs(rows).max()))
+
+
+def _mann_per_row_terms(loss_obj, y_pred):
+    """Entropy and magnitude rows through keras ops, for the wrong-implementation arms."""
+    probs = keras.ops.softmax(y_pred, axis=-1)
+    entropy = -keras.ops.sum(probs * keras.ops.log(probs + 1e-10), axis=-1)
+    norm = keras.ops.sqrt(keras.ops.sum(keras.ops.square(y_pred), axis=-1))
+    return (
+        -loss_obj.entropy_weight * keras.ops.mean(entropy, axis=1)
+        - loss_obj.write_weight * keras.ops.mean(norm, axis=1)
+    )
+
+
+class _ScalarMANN(MANNUtilizationLoss):
+    """The pre-fix behaviour: one batch scalar, reduced inside ``call``."""
+
+    def call(self, y_true, y_pred):
+        return keras.ops.mean(super().call(y_true, y_pred))
+
+
+class _BroadcastVarianceMANN(MANNUtilizationLoss):
+    """Same default value and gradient, wrong rows: ``-log(V)`` broadcast to every row.
+
+    This is option (a2) of D-005. The mean over rows is the old scalar, so the
+    default-value pin and the default-gradient pin are blind to it; only the
+    zero-weighted-row gradient and the per-row reference can see it.
+    """
+
+    def call(self, y_true, y_pred):
+        d = y_pred[:, 1:, :] - y_pred[:, :-1, :]
+        variance = -keras.ops.log(keras.ops.var(d) + 1e-10)
+        rows = _mann_per_row_terms(self, y_pred)
+        return rows + self.variance_weight * variance * keras.ops.ones_like(rows)
+
+
+class _PerRowLogVarianceMANN(MANNUtilizationLoss):
+    """Option (a3) of D-005: row-local ``-log(var_b)``, a DIFFERENT objective.
+
+    Row-local (the drop-a-row identity holds) but the default value moves, because
+    ``mean_b(-log var_b) != -log(V)`` (Jensen gap). Only the default-value pin sees it.
+    """
+
+    def call(self, y_true, y_pred):
+        d = y_pred[:, 1:, :] - y_pred[:, :-1, :]
+        per_row_var = keras.ops.var(d, axis=(1, 2))
+        rows = _mann_per_row_terms(self, y_pred)
+        return rows - self.variance_weight * keras.ops.log(per_row_var + 1e-10)
+
+
+def _mann_returns_per_row(loss_obj):
+    """True when ``call`` returns ``(B,)`` rows equal to the float64 reference."""
+    x = _ragged_memory()
+    out = loss_obj.call(_dummy(x), _f32(x))
+    if tuple(out.shape) != (BATCH,):
+        return False
+    ref = _mann_rows64(x, loss_obj.entropy_weight, loss_obj.write_weight,
+                       loss_obj.variance_weight)
+    return bool(np.abs(out.numpy() - ref).max() < _mann_atol(ref))
+
+
+def _mann_default_value_is_the_head_golden(loss_obj_factory):
+    """The default-reduction value on both fixtures equals the HEAD golden (1e-7)."""
+    for x, golden in [
+        (_pin_memory(), HEAD_GOLDEN_MEMORY_PIN),
+        (_ragged_memory(), HEAD_GOLDEN_MEMORY_RAGGED),
+    ]:
+        value = float(loss_obj_factory()(_dummy(x), _f32(x)))
+        if not abs(value - golden) < 1e-7:
+            return False
+    return True
+
+
+def _mann_zero_row_gradient(loss_obj):
+    """Gradient w.r.t. ``y_pred`` of the weighted loss, rows [1, 1, 1, 0]."""
+    x = _ragged_memory()
+    w = np.array([1.0, 1.0, 1.0, 0.0], "float32")
+    p = tf.Variable(_f32(x))
+    with tf.GradientTape() as tape:
+        value = loss_obj(_dummy(x), p, sample_weight=w)
+    return tape.gradient(value, p).numpy()
+
+
+def _mann_zero_weighted_row_gets_exactly_zero_gradient(loss_obj):
+    return bool(np.all(_mann_zero_row_gradient(loss_obj)[3] == 0.0))
+
+
+def _mann_drop_a_row_identity_holds(loss_obj_factory):
+    """``loss(w=[1,1,1,0]) * B/(B-1) == loss(batch[:B-1])`` at atol 1e-6."""
+    x = _ragged_memory()
+    w = np.array([1.0, 1.0, 1.0, 0.0], "float32")
+    weighted = float(loss_obj_factory()(_dummy(x), _f32(x), sample_weight=w))
+    dropped = float(loss_obj_factory()(_dummy(x[:-1]), _f32(x[:-1])))
+    return abs(weighted * BATCH / (BATCH - 1) - dropped) < 1e-6
+
+
+def _follows_the_d005_rule(module_source, call_source):
+    """True when the anchor is present and ``call`` builds the detached surrogate."""
+    return (
+        "# DECISION plan-2026-11-11T223825-64d1b401/D-005" in module_source
+        and call_source.count("stop_gradient") >= 2  # the detached mean and V
+        and "variance_row" in call_source
+        and "ones_like" not in call_source
+    )
+
+
+class TestMANNUtilizationLossIsPerSample:
+    """``call`` returns one value per sample; only the variance term reads the batch."""
+
+    def test_call_returns_one_value_per_sample(self):
+        x = _ragged_memory()
+        out = MANNUtilizationLoss().call(_dummy(x), _f32(x))
+        assert tuple(out.shape) == (BATCH,)
+
+    @pytest.mark.parametrize(
+        "weights",
+        [(0.01, 0.01, 0.01), (1.0, 1.0, 1.0), (0.3, 0.2, 0.7)],
+    )
+    def test_rows_equal_the_float64_reference(self, weights):
+        we, ww, wv = weights
+        x = _ragged_memory()
+        out = MANNUtilizationLoss(
+            entropy_weight=we, write_weight=ww, variance_weight=wv
+        ).call(_dummy(x), _f32(x))
+        ref = _mann_rows64(x, we, ww, wv)
+        assert np.abs(out.numpy() - ref).max() < _mann_atol(ref)
+        # The rows really differ, so a broadcast scalar could not pass this.
+        assert np.ptp(ref) > 1e-3 * np.abs(ref).max()
+
+    def test_default_value_equals_the_head_golden(self):
+        """Invariant 1 (D-013): within 1e-7 of the value recorded at HEAD."""
+        assert _mann_default_value_is_the_head_golden(MANNUtilizationLoss)
+
+    def test_default_value_is_the_float64_old_scalar(self):
+        """The mean of the rows IS the old ``-log(V)`` scalar, evaluated independently."""
+        for x in (_pin_memory(), _ragged_memory()):
+            value = float(MANNUtilizationLoss()(_dummy(x), _f32(x)))
+            old = _mann_old_scalar64(x)
+            assert abs(value - old) < _mann_atol(_mann_rows64(x))
+            assert abs(_mann_rows64(x).mean() - old) < 1e-12
+
+    def test_reduction_none_returns_the_rows(self):
+        """``reduction`` is live: 'none' was a shape-() no-op before this fix."""
+        x = _ragged_memory()
+        out = MANNUtilizationLoss(reduction="none")(_dummy(x), _f32(x))
+        assert tuple(out.shape) == (BATCH,)
+        ref = _mann_rows64(x)
+        assert np.abs(np.asarray(out) - ref).max() < _mann_atol(ref)
+
+    def test_reduction_sum_is_batch_times_the_default(self):
+        x = _ragged_memory()
+        default = float(MANNUtilizationLoss()(_dummy(x), _f32(x)))
+        summed = float(MANNUtilizationLoss(reduction="sum")(_dummy(x), _f32(x)))
+        assert abs(summed - BATCH * default) < 1e-6
+        assert abs(summed - default) > 0.05  # it was equal to the default before
+
+    @pytest.mark.parametrize("reduction", ["none", "sum", "sum_over_batch_size"])
+    def test_config_round_trip_keeps_a_live_reduction(self, reduction):
+        original = MANNUtilizationLoss(
+            entropy_weight=0.3, write_weight=0.2, variance_weight=0.7,
+            reduction=reduction,
+        )
+        restored = MANNUtilizationLoss.from_config(original.get_config())
+        assert restored.reduction == reduction
+        assert restored.variance_weight == 0.7
+        x = _ragged_memory()
+        a = np.asarray(original(_dummy(x), _f32(x)))
+        b = np.asarray(restored(_dummy(x), _f32(x)))
+        assert a.shape == b.shape == ((BATCH,) if reduction == "none" else ())
+        assert np.allclose(a, b, atol=0.0)
+
+    def test_sample_weight_charges_each_row_its_own_value_times_its_weight(self):
+        """The documented form: full-batch ``V`` and ``mu``, per-row weights."""
+        x = _ragged_memory()
+        w = np.array([0.5, 2.0, 0.0, 1.5], "float32")
+        weighted = float(MANNUtilizationLoss()(_dummy(x), _f32(x), sample_weight=w))
+        ref = _mann_rows64(x)
+        assert abs(weighted - np.sum(w * ref) / BATCH) < _mann_atol(ref)
+
+    def test_a_zero_weighted_row_gets_exactly_zero_gradient(self):
+        """The property the broadcast-constant alternative (D-005 option a2) fails."""
+        grad = _mann_zero_row_gradient(MANNUtilizationLoss())
+        assert np.all(grad[3] == 0.0)
+        assert np.abs(grad[:3]).max() > 1e-5  # the other rows do learn
+
+    def test_default_gradient_is_the_gradient_of_the_old_scalar(self):
+        """The old scalar, rebuilt here with the original all-axes variance (atol 1e-9)."""
+        x = _ragged_memory()
+        p = tf.Variable(_f32(x))
+        with tf.GradientTape() as tape:
+            value = MANNUtilizationLoss()(_dummy(x), p)
+        new = tape.gradient(value, p).numpy()
+
+        p2 = tf.Variable(_f32(x))
+        with tf.GradientTape() as tape:
+            probs = tf.nn.softmax(p2, axis=-1)
+            entropy = -tf.reduce_sum(probs * tf.math.log(probs + 1e-10), axis=-1)
+            d = p2[:, 1:, :] - p2[:, :-1, :]
+            variance = tf.math.reduce_variance(d)
+            norm = tf.sqrt(tf.reduce_sum(tf.square(p2), axis=-1))
+            old = (
+                0.01 * -tf.reduce_mean(entropy)
+                + 0.01 * -tf.math.log(variance + 1e-10)
+                + 0.01 * -tf.reduce_mean(norm)
+            )
+        old_grad = tape.gradient(old, p2).numpy()
+        assert np.abs(old_grad).max() > 1e-4  # the comparison is not between zeros
+        assert np.abs(new - old_grad).max() < 1e-9
+
+    def test_zeroing_a_sample_weight_equals_dropping_the_row_without_the_variance_term(self):
+        """With ``variance_weight=0`` nothing reads another row: the identity holds."""
+
+        def make():
+            return MANNUtilizationLoss(variance_weight=0.0)
+
+        assert _mann_drop_a_row_identity_holds(make)
+        x = _ragged_memory()
+        w = np.array([1.0, 1.0, 1.0, 0.0], "float32")
+        weighted = float(make()(_dummy(x), _f32(x), sample_weight=w))
+        dropped = float(make()(_dummy(x[:-1]), _f32(x[:-1])))
+        assert abs(weighted * BATCH / (BATCH - 1) - dropped) < 1e-7
+
+    def test_with_the_variance_term_the_drop_a_row_identity_does_not_hold(self):
+        """DOCUMENTED batch coupling (D-005): a zero-weighted row still shifts the rest.
+
+        The weighted loss is the three rows scored against the FULL-batch variance and
+        mean; the dropped batch has its own, smaller-spread, variance. Both sides are
+        pinned against the float64 reference, so the gap is a number, not a mood.
+        """
+        x = _ragged_memory()
+        w = np.array([1.0, 1.0, 1.0, 0.0], "float32")
+        weighted = float(MANNUtilizationLoss()(_dummy(x), _f32(x), sample_weight=w))
+        dropped = float(MANNUtilizationLoss()(_dummy(x[:-1]), _f32(x[:-1])))
+        scaled = weighted * BATCH / (BATCH - 1)
+
+        ref_rows = _mann_rows64(x)
+        coupled = float(ref_rows[:-1].sum() / (BATCH - 1))  # full-batch V and mu
+        independent = float(_mann_rows64(x[:-1]).mean())  # V and mu of 3 rows
+        assert abs(scaled - coupled) < _mann_atol(ref_rows)
+        assert abs(dropped - independent) < _mann_atol(ref_rows)
+        # measured on this fixture: -0.0614277 against -0.0574182, a gap of 4.0e-3
+        assert abs(scaled - (-0.06142767774753244)) < 1e-7
+        assert abs(dropped - (-0.057418180421810336)) < 1e-7
+        assert abs(scaled - dropped) > 3.9e-3
+        assert not _mann_drop_a_row_identity_holds(MANNUtilizationLoss)
+
+    def test_the_per_row_tests_reject_the_scalar_returning_class(self):
+        """ANTI-VACUITY: the pre-fix scalar fails the shape and reference arms."""
+        assert _mann_returns_per_row(MANNUtilizationLoss())
+        assert not _mann_returns_per_row(_ScalarMANN())
+        assert not _mann_drop_a_row_identity_holds(
+            lambda: _ScalarMANN(variance_weight=0.0)
+        )
+        x = _ragged_memory()
+        assert tuple(_ScalarMANN(reduction="none")(_dummy(x), _f32(x)).shape) == ()
+
+    def test_the_gradient_arm_rejects_the_broadcast_constant_alternative(self):
+        """ANTI-VACUITY (D-005 option a2): same default value and gradient, wrong rows.
+
+        The broadcast ``-log(V)`` keeps the default value and the default gradient
+        (so those pins pass it), but a zero-weighted row still receives a gradient
+        through the constant, and its rows are not the reference rows.
+        """
+        assert _mann_default_value_is_the_head_golden(_BroadcastVarianceMANN)
+        assert _mann_zero_weighted_row_gets_exactly_zero_gradient(MANNUtilizationLoss())
+        assert not _mann_zero_weighted_row_gets_exactly_zero_gradient(
+            _BroadcastVarianceMANN()
+        )
+        assert np.abs(_mann_zero_row_gradient(_BroadcastVarianceMANN())[3]).max() > 1e-5
+        assert not _mann_returns_per_row(_BroadcastVarianceMANN())
+
+    def test_the_value_arm_rejects_the_per_row_log_variance_alternative(self):
+        """ANTI-VACUITY (D-005 option a3): row-local, but a different objective."""
+        assert _mann_default_value_is_the_head_golden(MANNUtilizationLoss)
+        assert not _mann_default_value_is_the_head_golden(_PerRowLogVarianceMANN)
+        # it IS row-local, which is why the identity arm cannot tell it from the fix
+        assert _mann_drop_a_row_identity_holds(_PerRowLogVarianceMANN)
+        assert not _mann_returns_per_row(_PerRowLogVarianceMANN())
+
+    def test_float16_inputs_through_the_loss_object_match_float32(self):
+        """Through ``__call__`` the inputs are cast to float32 first, as under mixed_float16."""
+        x = _ragged_memory()
+        half_in = x.astype("float16")
+        base = float(MANNUtilizationLoss()(_dummy(x), _f32(x)))
+        half = float(
+            MANNUtilizationLoss()(tf.constant(half_in), tf.constant(half_in))
+        )
+        rounded = float(
+            MANNUtilizationLoss()(_dummy(x), _f32(half_in.astype("float64")))
+        )
+        assert abs(half - rounded) < _mann_atol(_mann_rows64(x))  # only the cast
+        assert abs(half - base) < 1e-3  # input rounding
+
+    def test_the_docstrings_say_one_value_per_sample_and_name_the_coupling(self):
+        class_doc = " ".join((MANNUtilizationLoss.__doc__ or "").split())
+        call_doc = " ".join((MANNUtilizationLoss.call.__doc__ or "").split()).lower()
+        assert "one value per sample" in call_doc
+        assert "scalar utilization loss" not in call_doc
+        assert "batch-coupled" in class_doc
+        assert "variance_weight=0" in class_doc
+        # the documented direct-call limits (D-009): not fixed, so they are stated
+        assert "float16" in class_doc and "time >= 2" in class_doc
+
+    def test_the_variance_term_keeps_its_decision_anchor_and_surrogate_form(self):
+        """D-005 guard: the anchor and the detached surrogate must survive a refactor.
+
+        The rule the anchor states: the variance term is the detached first-order
+        surrogate, never ``-log`` of a per-row variance (changes the objective) and
+        never ``-log(V)`` broadcast to every row (leaks gradient into a zero-weighted
+        row). A source that drops the anchor, the ``stop_gradient`` detachments, or
+        the ``(v_b - V)`` correction fails here, and the two rejected alternatives
+        are shown to fail it.
+        """
+        import inspect
+        from dl_techniques.losses import utilization_loss
+
+        assert _follows_the_d005_rule(
+            inspect.getsource(utilization_loss),
+            inspect.getsource(MANNUtilizationLoss.call),
+        )
+        module = inspect.getsource(utilization_loss)
+        for wrong in (_BroadcastVarianceMANN, _PerRowLogVarianceMANN):
+            assert not _follows_the_d005_rule(module, inspect.getsource(wrong.call))
+        no_anchor = module.replace("# DECISION plan-2026-11-11T223825-64d1b401/D-005", "")
+        assert not _follows_the_d005_rule(
+            no_anchor, inspect.getsource(MANNUtilizationLoss.call)
+        )

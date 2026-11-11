@@ -220,6 +220,19 @@ def _entity_pair():
     return _t(np.zeros((BATCH, 5, 8))), _t(r.normal(size=(BATCH, 5, 8)))
 
 
+def _memory_pair():
+    """Memory states ``(B, 6, 8)`` for ``MANNUtilizationLoss``; ``y_true`` is ignored.
+
+    Row scales 0.5, 1, 2, 4 make the rows differ: the temporal-variance term is a
+    batch statistic, and on iid rows it is too close to a constant to be told apart
+    from a per-row one. Measured at HEAD b4831ec33 the predicate accepts
+    ``MANNUtilizationLoss`` on this fixture (ratio 0.750000).
+    """
+    r = _rng()
+    scales = np.array([0.5, 1.0, 2.0, 4.0])[:, None, None]
+    return _t(np.zeros((BATCH, 6, 8))), _t(r.normal(size=(BATCH, 6, 8)) * scales)
+
+
 # ---------------------------------------------------------------------
 # the pinned membership, derived by execution 2026-08-31
 # ---------------------------------------------------------------------
@@ -391,6 +404,14 @@ KNOWN_GOOD = [
     # batch-coupled: every reduction is over the entity and feature axes of one sample,
     # so the exact drop-a-row identity lives in tests/test_losses/test_utilization_loss.py.
     ("utilization_loss", "GNNUtilizationLoss", {}, _entity_pair),
+    # MANNUtilizationLoss returns (batch,) since plan-2026-11-11T223825-64d1b401 step 5;
+    # it was a member (a scalar, shape ()) before. Batch-coupled through ONE term: the
+    # temporal variance sits inside a log over all axes including batch, so it uses the
+    # detached first-order surrogate of MultistepLoss._gtmse (value and gradient of the
+    # mean unchanged, a zero-weighted row gets exactly 0.0 gradient) and a zero-weighted
+    # row still shifts the others through the batch variance and mean. The predicate sees
+    # only the shape; the coupling is pinned in tests/test_losses/test_utilization_loss.py.
+    ("utilization_loss", "MANNUtilizationLoss", {}, _memory_pair),
 ]
 
 
