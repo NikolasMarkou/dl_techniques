@@ -53,7 +53,7 @@ The README table is the full inventory, grouped by domain.
 - `decoupled_information_loss.py`: CE minus per-sample conditional entropy minus a batch-marginal entropy, plus an analysis helper.
 - `dino_loss.py`: `DINOLoss` / `iBOTPatchLoss` (center EMA inside `call`, schedulable `teacher_temp` Variable, center carried in `get_config`) and `KoLeoLoss`. `pack_student_teacher` is the single source of truth for the packed layout.
 - `doc_scanner_flow_sequence_loss.py`: DocScanner Eq. 9-14. **The only module in `losses/` that imports from `models/`**; see the D-031 anchor.
-- `feature_alignment_loss.py`: Margin-thresholded cosine alignment for distillation.
+- `feature_alignment_loss.py`: Margin-thresholded cosine alignment for distillation (Depth Anything Eq. 9: a step at the margin, not a hinge).
 - `flow_matching_velocity_loss.py`: Velocity MSE for rectified flow. Time weighting belongs in the trainer.
 - `focal_causal_lm_loss.py`: Focal token CE with an ignore index. Rows are scaled so the batch mean equals the token-pool mean.
 - `focal_uncertainty_loss.py`: Categorical focal loss minus per-sample entropy, plus an analysis helper.
@@ -71,7 +71,6 @@ The README table is the full inventory, grouped by domain.
 - `masked_causal_lm_loss.py`: Masked token CE and its prefix alias. Rows are scaled so the batch mean equals the token-pool mean.
 - `mean_shift_instance_loss.py`: Per-row pull/push instance-embedding loss. Subsamples to `max_points` only when `N` is static.
 - `multi_labels_loss.py`: `PerChannelBinaryLoss` (adaptive per-channel weighting; base must be `'binary_crossentropy'` or element-wise), element-wise `WeightedBinaryFocalLoss` and `WeightedBinaryCrossEntropyLoss`, `DiceLossPerChannel`, and a factory.
-- `multi_task_loss.py`: Weighted per-task MSE over dict outputs.
 - `multistep_loss.py`: ADAM `mseh` / `tmse` / `gtmse` / `msce` over the horizon axis. `gtmse` is a first-order surrogate about the detached batch mean, exact in value and gradient. The factory raises on unknown kwargs.
 - `nano_vlm_loss.py`: Shifted next-token CE scored on the trailing label-length positions (drops the vision prefix). Reimplements reduction internally.
 - `omnipoint_losses.py`: OmniPoint ray / distance / scale decoupling, finite-difference normal and Laplacian consistency (D-004), mask BCE, `compute_optimal_scale`, and the tuple-in `OmniPointCombinedLoss` callable. Scale alignment uses the ground-truth ray (D-026).

@@ -639,9 +639,14 @@ def _parse_args() -> AccUNetTrainingConfig:
                    default="cosine_decay")
     p.add_argument("--gradient-clipping", type=float, default=1.0)
     p.add_argument("--loss", dest="loss_name", default="combo",
+                   # DECISION plan-2026-11-11T131349-13b28b37/D-014
+                   # "hausdorff" is NOT offered: the loss is a saturating
+                   # heuristic minimized by an empty mask (see
+                   # SegmentationLosses.hausdorff_distance_loss). Guarded by
+                   # tests/test_train/test_the_accunet_loss_choices_do_not_offer_hausdorff.py.
                    choices=["combo", "dice", "focal", "cross_entropy",
                             "focal_tversky", "tversky", "lovasz",
-                            "boundary", "hausdorff"])
+                            "boundary"])
     p.add_argument("--monitor", default="val_loss")
     p.add_argument("--early-stopping-patience", type=int, default=15)
     p.add_argument("--grid-every-n-epochs", type=int, default=5)

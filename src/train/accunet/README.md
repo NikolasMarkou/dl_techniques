@@ -52,7 +52,9 @@ layer and do not load.
 
 Alternative losses are exposed via `--loss`
 (`dice`, `focal`, `cross_entropy`, `focal_tversky`, `tversky`,
-`lovasz`, `boundary`, `hausdorff`). For binary segmentation, `val_dice`
+`lovasz`, `boundary`). `hausdorff` is not offered: the package's
+`hausdorff_distance_loss` is a saturating heuristic that an empty mask minimizes.
+For binary segmentation, `val_dice`
 is a useful early-stopping monitor — pass `--monitor val_dice` to opt in.
 Be aware that `create_callbacks` resolves mode by name and may need
 ModelCheckpoint mode hints if you change this; `val_loss` is the safe

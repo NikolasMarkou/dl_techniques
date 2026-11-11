@@ -73,6 +73,7 @@ ROOTS = ("src", "tests")
 #: 402 / 383 after ``layers/fastvit/`` was dissolved: its 7 modules and 7 tests moved and converted, plus ``fastvit/model.py`` and ``mobile_clip/components.py``, edited for the move.
 #: 401 / 382 after ``conv_blocks/mobile_one_block.py``, edited to clone its initializer per branch.
 #: 399 / 380 after the NAM model and its tests were deleted (``nam/cell.py`` and ``test_nam/test_fp16_reduction_mask.py``).
+#: 397 / 378 after ``losses/multi_task_loss.py`` and its test were deleted (plan-2026-11-11T131349-13b28b37 D-010, step 9).
 #: Edit it in the commit that converts a file (delete its line) or, with a
 #: recorded reason, adds a statement.
 KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
@@ -169,7 +170,6 @@ KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
     "src/dl_techniques/losses/mase_loss.py": 1,
     "src/dl_techniques/losses/masked_causal_lm_loss.py": 1,
     "src/dl_techniques/losses/multi_labels_loss.py": 1,
-    "src/dl_techniques/losses/multi_task_loss.py": 1,
     "src/dl_techniques/losses/sam3_detection_loss.py": 1,
     "src/dl_techniques/losses/sam_mask_loss.py": 1,
     "src/dl_techniques/losses/scaled_mse_loss.py": 1,
@@ -349,7 +349,6 @@ KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
     "tests/test_losses/test_dino_loss.py": 1,
     "tests/test_losses/test_lpips_loss.py": 1,
     "tests/test_losses/test_multi_labels_loss.py": 1,
-    "tests/test_losses/test_multi_task_loss.py": 1,
     "tests/test_losses/test_omnipoint_losses.py": 1,
     "tests/test_losses/test_sam_mask_loss.py": 1,
     "tests/test_losses/test_scaled_mse_loss.py": 1,
@@ -519,7 +518,7 @@ def test_the_census_is_exact(census):
 
 
 def test_the_census_totals(census):
-    assert (sum(KERAS_SUBMODULE_IMPORTS.values()), len(KERAS_SUBMODULE_IMPORTS)) == (399, 380), (
+    assert (sum(KERAS_SUBMODULE_IMPORTS.values()), len(KERAS_SUBMODULE_IMPORTS)) == (397, 378), (
         "the census's own totals moved; re-derive the module docstring's numbers")
     for path in KERAS_SUBMODULE_IMPORTS:
         assert (REPO_ROOT / path).is_file(), f"census file moved or deleted: {path}"

@@ -161,8 +161,6 @@ from .multistep_loss import (
     create_multistep_loss,
 )
 
-from .multi_task_loss import MultiTaskLoss
-
 from .quantile_loss import MQLoss, QuantileLoss
 
 from .nano_vlm_loss import NanoVLMLoss
@@ -394,8 +392,6 @@ __all__ = [
     "MultistepLoss",
     "create_multistep_loss",
     "MULTISTEP_AGGREGATIONS",
-    # multi_task_loss
-    "MultiTaskLoss",
     # Quantile loss
     "MQLoss",
     "QuantileLoss",

@@ -40,10 +40,15 @@ class MANNUtilizationLoss(keras.losses.Loss):
     3. **Magnitude loss**: Encourages non-trivial memory activation by
        penalizing low memory vector norms.
 
-    The ``call`` method expects a third argument ``memory_vectors`` with
-    shape ``(batch, time, memory_dim)`` representing the raw memory state
-    across time steps. During training this is typically passed as an
-    auxiliary output from the model.
+    ``call(y_true, y_pred)`` takes the memory state as ``y_pred``, shape
+    ``(batch, time, memory_dim)``; ``y_true`` is ignored. There is no third
+    argument.
+
+    The objective is unbounded below: the entropy, log-variance and norm terms
+    are negated, so scaling the memory up lowers the loss without limit
+    (measured: input scale 1 / 10 / 100 / 1e4 gives -7 / -43 / -417 / -40053).
+    A bounded-below hinge redesign is NOT done (plan-2026-11-11T131349-13b28b37
+    D-013); keep the weights small and treat this as a regularizer.
 
     Args:
         entropy_weight: Weight for the entropy regularization term.
@@ -133,8 +138,14 @@ class GNNUtilizationLoss(keras.losses.Loss):
     3. **Variance loss**: Penalizes low variance across entities within a
        batch, encouraging spread in the representation space.
 
-    The ``call`` method expects a third argument ``entity_embeddings`` with
-    shape ``(batch, num_entities, embed_dim)``.
+    ``call(y_true, y_pred)`` takes the entity embeddings as ``y_pred``, shape
+    ``(batch, num_entities, embed_dim)``; ``y_true`` is ignored. There is no
+    third argument.
+
+    The activation and variance terms are negated norms and variances, so the
+    objective is unbounded below: scaling the embeddings up lowers the loss
+    without limit. A bounded-below hinge redesign is NOT done
+    (plan-2026-11-11T131349-13b28b37 D-013).
 
     Args:
         diversity_weight: Weight for the diversity regularization term.

@@ -45,10 +45,15 @@ Mathematical Formulation:
         `sim = v̂_true ⋅ v̂_pred`
 
     3.  Apply the margin `m` to compute the final loss for the sample:
-        Loss = max(0, 1 - sim) if sim < m, else 0.
-        This can be expressed more concisely as:
-        Loss = max(0, m - sim) and then scaled, but the code's approach
-        of `(1-sim)` for `sim < m` is a common variant.
+        Loss = 1 - sim if sim <= m, else 0.
+
+        This is the feature alignment loss of Depth Anything, Eq. 9
+        (Yang et al., arXiv 2401.10891: "if cos similarity has surpassed
+        alpha, this pixel will not be considered", with alpha = 0.85). It is
+        a step, not a hinge: the loss jumps from `1 - m` to 0 at `sim = m`
+        (0.15 to 0.0 for `m = 0.85`), so a sample just past the margin gives no
+        gradient. The hinge `max(0, m - sim)` is a different objective and is
+        not what this class computes.
 
 References:
     The technique of aligning intermediate feature representations is a form

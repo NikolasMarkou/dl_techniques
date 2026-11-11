@@ -444,10 +444,16 @@ class SegmentationLosses:
             y_true: Any,
             y_pred: Any
     ) -> Any:
-        """Implement Boundary loss.
+        """Implement a boundary-weighted squared error (a heuristic).
 
-        Boundary loss focuses on the boundaries between different classes,
-        using a simplified distance-based approach.
+        This is NOT the Boundary loss of Kervadec et al. (2019), which integrates
+        the prediction against a signed distance map of the ground truth. Here
+        the weight map is the central-difference gradient magnitude of the mask
+        (zero-padded, so the image border counts as an edge), and the loss is
+        ``mean(boundary_map * (1 - y_pred)^2)``. Measured on a 2-class 16x16
+        square: perfect 0.0805, shifted 5 px 0.1014, inverted 0.1607, all-zeros
+        0.2413, and an all-ones prediction in every channel 0.0000, so it does
+        not rank every wrong mask above the right one.
 
         Args:
             y_true: Ground truth labels (batch_size, height, width, num_classes)
@@ -502,10 +508,14 @@ class SegmentationLosses:
             y_true: Any,
             y_pred: Any
     ) -> Any:
-        """Implement an approximation of Hausdorff Distance loss.
+        """Implement a Hausdorff-style heuristic (NOT a Hausdorff distance).
 
-        This implements a simplified version of Hausdorff distance using
-        morphological operations approximated with pooling.
+        Three max-pool dilations stand in for a distance transform; the result
+        is the batch mean of the larger of two dilated-mask maxima. Measured on
+        a 2-class 16x16 square, the value is 1.0 for a perfect, a shifted and
+        an inverted prediction (it saturates whenever any mass lies inside the
+        3-step dilation) and 0.0 for an all-zeros prediction, so it is
+        minimized by an EMPTY mask.
 
         Args:
             y_true: Ground truth labels (batch_size, height, width, num_classes)
@@ -518,6 +528,11 @@ class SegmentationLosses:
         Raises:
             ValueError: If input tensors have invalid shapes
         """
+        # DECISION plan-2026-11-11T131349-13b28b37/D-014
+        # Do NOT offer this as a training objective and do NOT "fix" it with more
+        # dilation iterations: a real version needs a signed-distance map
+        # (precomputed in the data pipeline, or a ``py_function``), which is a
+        # separate design. ``train_accunet --loss`` no longer lists it.
         self._validate_inputs(y_true, y_pred)
         y_true = keras.ops.cast(y_true, "float32")
 

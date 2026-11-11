@@ -508,8 +508,8 @@ per-task loss weights, per-task curves split) → **SFT** (instruction mix) →
 **preference** (later). Reconstruction losses only in the low-res warm-up, if
 used.
 
-Primary loss is next-byte CE (§8). `MultiTaskLoss` is MSE-only and returns a
-scalar — wrong tool; joint training uses stock `compile(loss={…})` dicts.
+Primary loss is next-byte CE (§8). The repo's former `MultiTaskLoss` (MSE-only,
+scalar return) was deleted; joint training uses stock `compile(loss={…})` dicts.
 `exclude_from_weight_decay` (e.g. `logit_scale`) goes through
 `optimization/optimizer.py` (`optimizer_builder()`; note it renames clipping
 keys and the call **overwrites** rather than appends). `TerminateOnNaN`

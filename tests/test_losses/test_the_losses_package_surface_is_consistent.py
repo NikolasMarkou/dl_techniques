@@ -115,3 +115,18 @@ def test_the_package_init_imports_nothing_it_does_not_export():
     }
     assert len(imported) > 100, "the census read no imports"
     assert imported - set(losses_pkg.__all__) == set()
+
+
+def test_multi_task_loss_is_deleted_not_aliased():
+    """plan-2026-11-11T131349-13b28b37 D-010: ``MultiTaskLoss`` failed under ``compile(loss=obj)``.
+
+    Keras calls a single loss object once per output leaf with a tensor, so its
+    ``for key in y_true`` loop iterated a tensor; its only working path was a direct
+    dict call returning a scalar. Stock ``compile(loss={...}, loss_weights={...})``
+    does the job. It was removed outright: no module, no export, no alias.
+    """
+    assert not hasattr(losses_pkg, "MultiTaskLoss")
+    assert "MultiTaskLoss" not in losses_pkg.__all__
+    assert not (LOSSES_DIR / "multi_task_loss.py").exists()
+    with pytest.raises(ImportError):
+        importlib.import_module("dl_techniques.losses.multi_task_loss")
