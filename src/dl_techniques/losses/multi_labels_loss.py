@@ -9,7 +9,9 @@ objects, independent attributes).
 
 The core component is ``PerChannelBinaryLoss``, which allows computing
 losses independently per channel and aggregating them using adaptive weights
-based on class presence, stabilizing training for imbalanced datasets.
+based on class presence, stabilizing training for imbalanced datasets. ``call``
+returns one value per image; the weights are a batch statistic, so the loss is
+batch-coupled (see its docstring).
 
 ``WeightedBinaryFocalLoss`` is a two-sided focal loss (positive + negative
 terms) that returns element-wise values for the wrapper to reduce.
@@ -48,7 +50,8 @@ class PerChannelBinaryLoss(keras.losses.Loss):
 
     1. Computes element-wise binary loss for all channels (Vectorized).
     2. Computes adaptive weights based on class presence within the batch.
-    3. Averages the weighted per-channel losses.
+    3. Averages each image's loss over its pixels, per channel, then sums the
+       channels with the adaptive weights: one value per image.
 
     The adaptive weighting formula is:
 
@@ -57,6 +60,17 @@ class PerChannelBinaryLoss(keras.losses.Loss):
 
     This ensures that rare classes are not completely overwhelmed but also
     prevents common classes from dominating the gradient purely by volume.
+
+    ``call`` returns ``(batch,)``, so ``reduction`` and ``sample_weight`` act on
+    images. The result is **batch-coupled**: the channel weights derive from the
+    class-presence counts of the WHOLE batch (they are not per-image weights, which
+    would be a different objective), and ``call`` never sees ``sample_weight``. A zero
+    ``sample_weight`` therefore removes an image's loss but not its class-presence
+    counts from the weights, so ``loss(w=[1, ..., 0]) * B / (B - 1)`` is NOT
+    ``loss(batch[:-1])`` (measured gap 6.6e-4 on a 4-image batch with a ragged
+    foreground, 1.55e-3 when the zero-weighted image is all-positive in one
+    channel). The mean over images equals the scalar this class returned before it
+    was made per-sample.
 
     Parameters
     ----------
@@ -72,9 +86,9 @@ class PerChannelBinaryLoss(keras.losses.Loss):
         multiplied with the adaptive weights. Useful for enforcing
         domain-specific importance.
     reduction : str, default='sum_over_batch_size'
-        Type of reduction to apply to the loss. Note that this wrapper
-        computes a scalar loss internally based on batch statistics,
-        so the framework reduction usually acts as an identity.
+        Type of reduction applied to the ``(batch,)`` per-image values (after any
+        ``sample_weight``): ``'sum_over_batch_size'`` averages them, ``'sum'`` adds
+        them, ``'none'`` returns them.
     name : str, default='per_channel_loss'
         The name of the loss instance.
 
@@ -126,6 +140,9 @@ class PerChannelBinaryLoss(keras.losses.Loss):
         """
         Compute loss independently per channel with adaptive weighting.
 
+        One value per sample: each image's pixel-mean loss per channel, summed
+        over channels with weights derived from the whole batch (batch-coupled).
+
         Parameters
         ----------
         y_true : keras.KerasTensor
@@ -138,7 +155,8 @@ class PerChannelBinaryLoss(keras.losses.Loss):
         Returns
         -------
         keras.KerasTensor
-            Scalar tensor representing the weighted average loss.
+            One value per sample, shape ``(batch_size,)``: the channel-weighted sum
+            of that image's per-channel pixel-mean loss.
         """
         # Ensure consistent dtypes
         y_true = ops.cast(y_true, y_pred.dtype)
@@ -190,6 +208,17 @@ class PerChannelBinaryLoss(keras.losses.Loss):
 
         # 2. Compute Adaptive Channel Weights (Vectorized)
         # ------------------------------------------------
+        # DECISION plan-2026-11-11T223825-64d1b401/D-002
+        # These weights are deliberately a BATCH statistic: the class-presence counts
+        # are summed over the whole batch, so the loss is batch-coupled and a zero
+        # sample_weight does not equal dropping the row. Do NOT make them per-sample
+        # (sqrt of each image's own presence) to "decouple" the rows: that is a
+        # different objective, not the same loss per row, and it changes the value of
+        # the default reduction. Do NOT recompute them over the rows a sample_weight
+        # keeps either; call() never sees sample_weight.
+        # Guard: tests/test_losses/test_multi_labels_loss.py::
+        # TestPerChannelBinaryLossIsPerSample::
+        # test_a_zero_sample_weight_keeps_the_row_s_class_counts_in_the_weights
         # We compute statistics over the batch to handle imbalance dynamically.
         # Sum over Batch(0), Height(1), Width(2) -> Shape (Channels,)
         positive_counts = ops.sum(y_true, axis=[0, 1, 2])
@@ -219,15 +248,14 @@ class PerChannelBinaryLoss(keras.losses.Loss):
 
         # 3. Aggregate Loss
         # -----------------
-        # First, compute mean loss for each channel separately (average over B, H, W)
-        # Result Shape: (Channels,)
-        channel_mean_losses = ops.mean(loss_tensor, axis=[0, 1, 2])
+        # First, compute each image's mean loss per channel (average over H, W)
+        # Result Shape: (Batch, Channels)
+        per_sample_channel_losses = ops.mean(loss_tensor, axis=[1, 2])
 
-        # Then compute weighted sum over channels using the normalized adaptive weights
-        # Result Shape: Scalar
-        total_loss = ops.sum(channel_mean_losses * weights_normalized)
-
-        return total_loss
+        # Then compute the weighted sum over channels using the normalized adaptive
+        # weights; the mean over the batch of this is the old batch scalar.
+        # Result Shape: (Batch,)
+        return ops.sum(per_sample_channel_losses * weights_normalized, axis=-1)
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()

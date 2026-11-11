@@ -104,8 +104,8 @@ class TestWeightedBinaryFocalLoss:
 class TestPerChannelBinaryLoss:
     """Tests for PerChannelBinaryLoss wrapper."""
 
-    def test_output_is_scalar(self):
-        """Wrapped loss should return scalar."""
+    def test_output_is_one_value_per_sample(self):
+        """Wrapped loss returns one value per sample (plan-2026-11-11T223825-64d1b401 step 2)."""
         loss_fn = PerChannelBinaryLoss(base_loss='binary_crossentropy')
         y_true = keras.random.uniform((2, 8, 8, 3), minval=0, maxval=1)
         y_true = ops.cast(y_true > 0.5, "float32")
@@ -113,7 +113,7 @@ class TestPerChannelBinaryLoss:
 
         loss_val = loss_fn.call(y_true, y_pred)
 
-        assert ops.shape(loss_val) == ()
+        assert tuple(loss_val.shape) == (2,)
 
     def test_loss_is_positive(self):
         """Loss should be non-negative."""
@@ -122,9 +122,9 @@ class TestPerChannelBinaryLoss:
         y_true = ops.cast(y_true > 0.5, "float32")
         y_pred = keras.random.uniform((4, 16, 16, 5), minval=0.1, maxval=0.9)
 
-        loss_val = float(loss_fn.call(y_true, y_pred))
+        loss_val = loss_fn.call(y_true, y_pred)
 
-        assert loss_val >= 0
+        assert float(ops.min(loss_val)) >= 0
 
     def test_with_focal_loss_base(self):
         """Test with WeightedBinaryFocalLoss as base."""
@@ -136,8 +136,8 @@ class TestPerChannelBinaryLoss:
 
         loss_val = loss_fn.call(y_true, y_pred)
 
-        assert ops.shape(loss_val) == ()
-        assert float(loss_val) >= 0
+        assert tuple(loss_val.shape) == (2,)
+        assert float(ops.min(loss_val)) >= 0
 
     def test_channel_weights(self):
         """Test static channel weights are applied."""
@@ -151,8 +151,8 @@ class TestPerChannelBinaryLoss:
 
         loss_val = loss_fn.call(y_true, y_pred)
 
-        assert ops.shape(loss_val) == ()
-        assert float(loss_val) > 0
+        assert tuple(loss_val.shape) == (2,)
+        assert float(ops.min(loss_val)) > 0
 
     def test_adaptive_weighting_rare_class(self):
         """Rare class should get higher adaptive weight."""
@@ -168,7 +168,7 @@ class TestPerChannelBinaryLoss:
 
         loss_val = loss_fn.call(y_true, y_pred)
 
-        assert ops.shape(loss_val) == ()
+        assert tuple(loss_val.shape) == (2,)
 
     def test_serialization_with_string_base(self):
         """Test serialization with string base loss."""
@@ -379,8 +379,8 @@ class TestNumericalStability:
 
         loss_val = loss_fn.call(y_true, y_pred)
 
-        assert ops.shape(loss_val) == ()
-        assert not np.isnan(float(loss_val))
+        assert tuple(loss_val.shape) == (2,)
+        assert not np.isnan(float(ops.mean(loss_val)))
 
     def test_dice_loss_all_zeros_prediction(self):
         """Test dice loss with all zeros prediction."""
@@ -403,8 +403,8 @@ class TestNumericalStability:
 
         loss_val = loss_fn.call(y_true, y_pred)
 
-        assert ops.shape(loss_val) == ()
-        assert not np.isnan(float(loss_val))
+        assert tuple(loss_val.shape) == (32,)
+        assert not np.isnan(float(ops.mean(loss_val)))
 
 
 class TestGradientFlow:
@@ -518,10 +518,10 @@ class TestPerChannelBinaryLossRefusesABaseThatCollapsesChannels:
         y_true = ops.cast(keras.random.uniform((2, 8, 8, 3), seed=1) > 0.5, "float32")
         y_pred = keras.random.uniform((2, 8, 8, 3), minval=0.1, maxval=0.9, seed=2)
         base = WeightedBinaryFocalLoss(alpha=0.5, gamma=1.0)
-        plain = float(PerChannelBinaryLoss(base).call(y_true, y_pred))
-        weighted = float(
+        plain = float(ops.mean(PerChannelBinaryLoss(base).call(y_true, y_pred)))
+        weighted = float(ops.mean(
             PerChannelBinaryLoss(base, channel_weights=[10.0, 1.0, 0.1]).call(y_true, y_pred)
-        )
+        ))
         assert abs(plain - weighted) > 1e-4, (plain, weighted)
 
 
@@ -579,7 +579,9 @@ class TestWeightedBinaryCrossEntropyLoss:
         y_pred = keras.random.uniform((2, 8, 8, 3), minval=0.1, maxval=0.9, seed=6)
         assert isinstance(restored.base_loss, WeightedBinaryCrossEntropyLoss)
         np.testing.assert_allclose(
-            float(restored.call(y_true, y_pred)), float(loss_fn.call(y_true, y_pred)), rtol=1e-6
+            keras.ops.convert_to_numpy(restored.call(y_true, y_pred)),
+            keras.ops.convert_to_numpy(loss_fn.call(y_true, y_pred)),
+            rtol=1e-6,
         )
 
     def test_factory_weighted_bce_survives_a_model_save_and_load(self, tmp_path):
@@ -741,3 +743,226 @@ class TestDiceLossPerChannelIsPerSample:
         assert tuple(scalar.call(y_true, y_pred).shape) == ()
         assert tuple(_ScalarDice(smooth=DICE_SMOOTH, reduction="none")(y_true, y_pred).shape) == ()
         assert _drop_last_row_gap(lambda: _ScalarDice(smooth=DICE_SMOOTH)) > 1e-3
+
+
+# ---------------------------------------------------------------------
+# PerChannelBinaryLoss returns one value per sample, batch-coupled weights
+# (plan-2026-11-11T223825-64d1b401, step 2)
+# ---------------------------------------------------------------------
+
+PCB_ROW_ATOL = 5e-7
+PCB_CHANNEL_WEIGHTS = [3.0, 1.0, 0.2]
+# Default-reduction values measured at HEAD b4831ec33, BEFORE the return became
+# `(batch,)`, on `_ragged_seg_batch()`
+# (plans/plan-2026-11-11T223825-64d1b401/scratch_golden_head.json, cases pcb_*/ragged).
+PCB_HEAD_GOLDEN = {
+    "bce": 0.8499828577041626,
+    "bce_channel_weights": 0.8297531008720398,
+    "weighted_bce_3": 1.5535728931427002,
+    "focal": 0.22829985618591309,
+}
+
+
+def _bce_elements(yt, yp):
+    return -(yt * np.log(yp) + (1.0 - yt) * np.log(1.0 - yp))
+
+
+def _weighted_bce_elements(yt, yp):
+    return -3.0 * yt * np.log(yp) - (1.0 - yt) * np.log(1.0 - yp)
+
+
+def _focal_elements(yt, yp, alpha=0.25, gamma=2.0):
+    pos = -alpha * (1.0 - yp) ** gamma * np.log(yp)
+    neg = -(1.0 - alpha) * yp ** gamma * np.log(1.0 - yp)
+    return yt * pos + (1.0 - yt) * neg
+
+
+# name -> (loss factory, float64 element loss, static channel weights)
+PCB_CASES = {
+    "bce": (lambda: PerChannelBinaryLoss("binary_crossentropy"), _bce_elements, None),
+    "bce_channel_weights": (
+        lambda: PerChannelBinaryLoss("binary_crossentropy", channel_weights=PCB_CHANNEL_WEIGHTS),
+        _bce_elements,
+        PCB_CHANNEL_WEIGHTS,
+    ),
+    "weighted_bce_3": (
+        lambda: PerChannelBinaryLoss(WeightedBinaryCrossEntropyLoss(3.0)),
+        _weighted_bce_elements,
+        None,
+    ),
+    "focal": (lambda: PerChannelBinaryLoss(WeightedBinaryFocalLoss()), _focal_elements, None),
+}
+
+
+def _pcb_rows_float64(y_true, y_pred, element, channel_weights=None):
+    """Independent reference: ``sum_c wn_c * mean_hw(l_ihwc)`` with ``wn`` from THIS batch.
+
+    ``wn_c`` is the normalized ``(sqrt(count_c / (B*H*W)) + 0.1) * channel_weights_c``;
+    ``count_c`` is the positive count over every row passed in, so passing a subset of
+    the rows recomputes the weights over that subset.
+    """
+    yt = y_true.astype("float64")
+    yp = y_pred.astype("float64")
+    b, h, w, _ = yt.shape
+    raw = np.sqrt(yt.sum(axis=(0, 1, 2)) / (b * h * w)) + 0.1
+    if channel_weights is not None:
+        raw = raw * np.asarray(channel_weights, dtype="float64")
+    wn = raw / raw.sum()
+    return (element(yt, yp).mean(axis=(1, 2)) * wn).sum(axis=-1)
+
+
+def _coupled_seg_batch():
+    """`_ragged_seg_batch()` whose LAST row is all-positive in channel 0.
+
+    Dropping that row changes the class-presence counts, so the channel weights
+    computed over the 3 kept rows differ from the ones computed over all 4 rows.
+    """
+    y_true, y_pred = _ragged_seg_batch()
+    y_true = y_true.copy()
+    y_true[-1, :, :, 0] = 1.0
+    return y_true, y_pred
+
+
+class _ScalarPerChannelBinaryLoss(PerChannelBinaryLoss):
+    """The defect re-injected: the batch mean returned instead of `(batch,)`."""
+
+    def call(self, y_true, y_pred):
+        return keras.ops.mean(super().call(y_true, y_pred))
+
+
+class TestPerChannelBinaryLossIsPerSample:
+    """`PerChannelBinaryLoss` charges each image its own weighted channel mean.
+
+    ``keras.losses.Loss.__call__`` multiplies ``call()`` by ``sample_weight`` and only
+    then reduces, so a scalar return discards WHICH rows were weighted. The channel
+    weights are a batch statistic and stay one; see the coupling test below.
+    """
+
+    @pytest.mark.parametrize("case", sorted(PCB_CASES))
+    def test_call_returns_one_value_per_sample(self, case):
+        y_true, y_pred = _ragged_seg_batch()
+        out = PCB_CASES[case][0]().call(y_true, y_pred)
+        assert tuple(out.shape) == (DICE_BATCH,)
+
+    @pytest.mark.parametrize("case", sorted(PCB_CASES))
+    def test_reduction_none_returns_one_value_per_sample(self, case):
+        y_true, y_pred = _ragged_seg_batch()
+        loss_fn = PCB_CASES[case][0]()
+        loss_fn.reduction = "none"
+        assert tuple(loss_fn(y_true, y_pred).shape) == (DICE_BATCH,)
+
+    @pytest.mark.parametrize("case", sorted(PCB_CASES))
+    def test_rows_equal_an_independent_float64_reference(self, case):
+        make, element, channel_weights = PCB_CASES[case]
+        y_true, y_pred = _ragged_seg_batch()
+        got = keras.ops.convert_to_numpy(make().call(y_true, y_pred))
+        ref = _pcb_rows_float64(y_true, y_pred, element, channel_weights)
+        # The rows must differ, or a broadcast scalar would pass this test.
+        assert np.ptp(ref) > 0.02, ref
+        np.testing.assert_allclose(got, ref, atol=PCB_ROW_ATOL, rtol=0.0)
+
+    @pytest.mark.parametrize("case", sorted(PCB_CASES))
+    def test_default_value_is_unchanged(self, case):
+        """The default reduction is the scalar it always was (passes before AND after)."""
+        make, element, channel_weights = PCB_CASES[case]
+        y_true, y_pred = _ragged_seg_batch()
+        value = float(make()(y_true, y_pred))
+        assert abs(value - PCB_HEAD_GOLDEN[case]) < PCB_ROW_ATOL, (value, PCB_HEAD_GOLDEN[case])
+        ref = _pcb_rows_float64(y_true, y_pred, element, channel_weights).mean()
+        assert abs(value - ref) < PCB_ROW_ATOL, (value, ref)
+
+    def test_default_gradient_is_unchanged(self):
+        """The gradient of the default value equals that of the old scalar (float64 reference)."""
+        import tensorflow as tf
+
+        y_true, y_pred = _ragged_seg_batch()
+        v = tf.Variable(y_pred)
+        with tf.GradientTape() as tape:
+            loss = PerChannelBinaryLoss("binary_crossentropy")(y_true, v)
+        got = tape.gradient(loss, v).numpy()
+
+        b, h, w, c = y_true.shape
+        yt = y_true.astype("float64")
+        yp = y_pred.astype("float64")
+        raw = np.sqrt(yt.sum(axis=(0, 1, 2)) / (b * h * w)) + 0.1
+        wn = raw / raw.sum()
+        # d/dp of the old scalar sum_c wn_c * mean_{bhw} l, with l = -(y log p + (1-y) log(1-p)).
+        want = wn * (-(yt / yp) + (1.0 - yt) / (1.0 - yp)) / (b * h * w)
+        # float32 gradients reach 0.064 (one ulp 7.5e-9): measured max error 8.7e-9.
+        np.testing.assert_allclose(got, want, atol=5e-8, rtol=0.0)
+
+    @pytest.mark.parametrize("case", sorted(PCB_CASES))
+    def test_sample_weight_charges_each_row_its_own_weight(self, case):
+        make, element, channel_weights = PCB_CASES[case]
+        y_true, y_pred = _ragged_seg_batch()
+        w = np.array([1.0, 0.5, 2.0, 0.0], "float32")
+        got = float(make()(y_true, y_pred, sample_weight=w))
+        want = (w * _pcb_rows_float64(y_true, y_pred, element, channel_weights)).sum() / DICE_BATCH
+        assert abs(got - want) < PCB_ROW_ATOL, (got, want)
+
+    def test_sum_reduction_is_batch_times_the_default(self):
+        y_true, y_pred = _ragged_seg_batch()
+        default = float(PerChannelBinaryLoss("binary_crossentropy")(y_true, y_pred))
+        total = float(
+            PerChannelBinaryLoss("binary_crossentropy", reduction="sum")(y_true, y_pred)
+        )
+        assert abs(total - DICE_BATCH * default) < 4 * PCB_ROW_ATOL, (total, default)
+
+    def test_a_zero_weighted_row_gets_exactly_zero_gradient(self):
+        """The row's OWN loss leaves the gradient; its class counts (a constant) do not matter."""
+        import tensorflow as tf
+
+        y_true, y_pred = _ragged_seg_batch()
+        w = np.array([1.0, 1.0, 1.0, 0.0], "float32")
+        v = tf.Variable(y_pred)
+        with tf.GradientTape() as tape:
+            loss = PerChannelBinaryLoss("binary_crossentropy")(y_true, v, sample_weight=w)
+        grad = tape.gradient(loss, v).numpy()
+        assert np.abs(grad[:3]).max() > 0.0
+        assert np.abs(grad[3]).max() == 0.0
+
+    # DECISION plan-2026-11-11T223825-64d1b401/D-002 (test): the guard for the
+    # batch-level channel weights in PerChannelBinaryLoss.call. It fails if the
+    # weights become per-sample or are recomputed over the rows a sample_weight keeps.
+    def test_a_zero_sample_weight_keeps_the_row_s_class_counts_in_the_weights(self):
+        """BATCH-COUPLED: zeroing a row does NOT equal dropping it, and the gap is pinned.
+
+        The channel weights come from the class-presence counts of the WHOLE batch and
+        ``call()`` never sees ``sample_weight``, so a zero weight removes the row's loss
+        but not its counts. The last row is all-positive in channel 0 here, so keeping or
+        removing it moves the weights; measured gap 1.55e-3.
+        """
+        y_true, y_pred = _coupled_seg_batch()
+        w = np.array([1.0, 1.0, 1.0, 0.0], "float32")
+        weighted = float(PerChannelBinaryLoss("binary_crossentropy")(y_true, y_pred, sample_weight=w))
+        dropped = float(PerChannelBinaryLoss("binary_crossentropy")(y_true[:-1], y_pred[:-1]))
+
+        full = _pcb_rows_float64(y_true, y_pred, _bce_elements)
+        kept = _pcb_rows_float64(y_true[:-1], y_pred[:-1], _bce_elements)
+        # With the weights from the FULL batch the zero-weighted value is exact ...
+        assert abs(weighted * DICE_BATCH / (DICE_BATCH - 1) - full[:-1].mean()) < PCB_ROW_ATOL
+        # ... and it is NOT the loss of the batch without that row.
+        gap = abs(weighted * DICE_BATCH / (DICE_BATCH - 1) - dropped)
+        assert gap > 5e-4, gap
+        assert abs(dropped - kept.mean()) < PCB_ROW_ATOL
+
+    def test_the_docstrings_say_batch_coupled_and_one_value_per_sample(self):
+        doc = " ".join((PerChannelBinaryLoss.__doc__ or "").split())
+        assert "batch-coupled" in doc
+        assert "one value per sample" in " ".join(
+            (PerChannelBinaryLoss.call.__doc__ or "").split()
+        ).lower()
+
+    def test_the_scalar_return_is_caught_by_these_arms(self):
+        """ANTI-VACUITY: the defect re-injected must fail the shape and reference arms."""
+        y_true, y_pred = _ragged_seg_batch()
+        scalar = _ScalarPerChannelBinaryLoss("binary_crossentropy")
+        assert tuple(scalar.call(y_true, y_pred).shape) == ()
+        scalar.reduction = "none"
+        assert tuple(scalar(y_true, y_pred).shape) == ()
+        w = np.array([1.0, 1.0, 1.0, 0.0], "float32")
+        broken = float(
+            _ScalarPerChannelBinaryLoss("binary_crossentropy")(y_true, y_pred, sample_weight=w)
+        )
+        ref = (w * _pcb_rows_float64(y_true, y_pred, _bce_elements)).sum() / DICE_BATCH
+        assert abs(broken - ref) > 1e-3, (broken, ref)

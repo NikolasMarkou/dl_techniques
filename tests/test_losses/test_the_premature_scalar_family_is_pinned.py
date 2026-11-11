@@ -338,6 +338,23 @@ KNOWN_GOOD = [
     # (`dice_scalar`, shape ()) before. Fully row-local: the drop-a-row identity
     # lives in tests/test_losses/test_multi_labels_loss.py.
     ("multi_labels_loss", "DiceLossPerChannel", {}, _seg_pair),
+    # PerChannelBinaryLoss returns (batch,) since plan-2026-11-11T223825-64d1b401
+    # step 2; it was a member (a scalar, shape ()) before. It is BATCH-COUPLED through
+    # its channel weights (class-presence counts of the whole batch), and this
+    # predicate is blind to that: it only reads the SHAPE of what call() returns, and
+    # `sample_weight` never reaches the weights. Measured on `_seg_pair`: at HEAD
+    # unweighted 0.9050781726837158, weighted 0.6788086295127869 (= unweighted * 0.75,
+    # a member); after the fix unweighted 0.9050782323, weighted 0.6992971897 against
+    # unweighted * 0.75 = 0.6788086743, a margin of 2.05e-2 over the 1e-6 tolerance
+    # (about 20000x). The class is therefore a non-member by this file's own rule
+    # without any special fixture; the weights coupling (a drop-a-row gap of 2.9e-4
+    # on this fixture) is pinned in tests/test_losses/test_multi_labels_loss.py.
+    (
+        "multi_labels_loss",
+        "PerChannelBinaryLoss",
+        {"base_loss": "binary_crossentropy"},
+        _seg_pair,
+    ),
 ]
 
 
