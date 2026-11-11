@@ -866,10 +866,14 @@ def child_env():
                 TF_CPP_MIN_LOG_LEVEL="3", MPLBACKEND="Agg")
 
 
-def run_child(spec, log, timeout=900):
-    """Run the child; SIGKILL its recorded PID when it prints a stop marker. Return the last marker."""
+def run_child(spec, log, timeout=900, child_script=CHILD):
+    """Run the child; SIGKILL its recorded PID when it prints a stop marker. Return the last marker.
+
+    ``child_script`` is the script that speaks the ``@@`` marker protocol of ``_backup_child.py`` (the denoising
+    resume test passes its own); the default is the classification child, so every other caller is unchanged.
+    """
     with open(log, "wb") as out:
-        child = subprocess.Popen([sys.executable, str(CHILD), json.dumps(spec)], stdout=out,
+        child = subprocess.Popen([sys.executable, str(child_script), json.dumps(spec)], stdout=out,
                                  stderr=subprocess.STDOUT, env=child_env(), cwd=REPO)
     pid = child.pid  # the only process this module ever signals
     marker, deadline = None, time.monotonic() + timeout
