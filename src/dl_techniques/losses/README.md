@@ -107,7 +107,7 @@ T = fit_temperature(val_logits, val_labels)   # integer labels, validation split
 calibrated = keras.ops.softmax(test_logits / T)
 ```
 
-`fit_temperature` refuses one-hot labels and warns when the optimum sits at the edge of its search range. Check the result with `analyzer.calibration_metrics.compute_ece` on a third split. The audit that motivated the replacement (`research/roadmap/20261111_goodhart_loss_audit.md`) was re-measured on one small dataset (scikit-learn digits) with one architecture (an MLP); re-measure the outlier-exposure gain on your task.
+`fit_temperature` refuses one-hot labels and warns when the optimum sits at the edge of its search range. Check the result with `analyzer.calibration_metrics.compute_ece` on a third split. The audit that motivated the replacement was re-measured on one small dataset (scikit-learn digits) with one architecture (an MLP); re-measure the outlier-exposure gain on your task.
 
 ### AnyLoss
 

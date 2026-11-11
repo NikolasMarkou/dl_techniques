@@ -2,8 +2,7 @@
 
 ``ConfidencePenaltyLoss`` replaced ``GoodhartAwareLoss`` outright
 (plan-2026-11-11T131349-13b28b37, step 24). The audit that motivated the
-replacement (``research/roadmap/20261111_goodhart_loss_audit.md``) measured, and
-this file pins, the following:
+replacement measured, and this file pins, the following:
 
 * An all-zero target row is IGNORED: value exactly ``0.0`` and gradient exactly
   ``0.0``, for every ``label_smoothing`` and ``entropy_weight``, eager, in a
