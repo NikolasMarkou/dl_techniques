@@ -135,12 +135,18 @@ class GNNUtilizationLoss(keras.losses.Loss):
        entity embeddings, encouraging each entity to be distinct.
     2. **Activation loss**: Penalizes low entity embedding norms, encouraging
        non-trivial activations.
-    3. **Variance loss**: Penalizes low variance across entities within a
-       batch, encouraging spread in the representation space.
+    3. **Variance loss**: Penalizes low variance across entities within each
+       sample, encouraging spread in the representation space.
 
     ``call(y_true, y_pred)`` takes the entity embeddings as ``y_pred``, shape
     ``(batch, num_entities, embed_dim)``; ``y_true`` is ignored. There is no
     third argument.
+
+    Every term is a plain mean over the entity and feature axes of one sample,
+    so ``call`` returns one value per sample, shape ``(batch,)``, and no row
+    reads another: the loss is not batch-coupled. ``reduction="none"`` returns
+    those rows, ``reduction="sum"`` returns ``batch`` times the default, and
+    ``sample_weight`` charges each row its own value times its own weight.
 
     The activation and variance terms are negated norms and variances, so the
     objective is unbounded below: scaling the embeddings up lowers the loss
@@ -173,18 +179,20 @@ class GNNUtilizationLoss(keras.losses.Loss):
         y_true: keras.KerasTensor,
         y_pred: keras.KerasTensor,
     ) -> keras.KerasTensor:
-        """Compute GNN utilization loss.
+        """Compute GNN utilization loss, one value per sample.
 
         Treats ``y_pred`` as the entity embedding tensor of shape
         ``(batch, num_entities, embed_dim)``. ``y_true`` is ignored
-        (pass a dummy tensor of matching batch size).
+        (pass a dummy tensor of matching batch size). A direct call does not
+        cast; the diversity mask follows the dtype of ``y_pred``.
 
         Args:
             y_true: Ignored (required by Keras Loss API).
             y_pred: Entity embeddings ``(batch, num_entities, embed_dim)``.
 
         Returns:
-            Scalar utilization loss.
+            Per-sample utilization loss, shape ``(batch,)``. Row ``b`` depends
+            on sample ``b`` only.
         """
         entity_embeddings = y_pred
 
@@ -192,18 +200,18 @@ class GNNUtilizationLoss(keras.losses.Loss):
         normalized = ops.normalize(entity_embeddings, axis=-1)
         similarity = ops.einsum("bnd,bmd->bnm", normalized, normalized)
         num_entities = ops.shape(entity_embeddings)[1]
-        mask = 1.0 - ops.eye(num_entities)
-        diversity_loss = ops.mean(ops.abs(similarity * mask))
+        mask = ops.cast(1.0 - ops.eye(num_entities), similarity.dtype)
+        diversity_loss = ops.mean(ops.abs(similarity * mask), axis=(1, 2))
 
         # Activation: encourage non-zero entity norms
         entity_norm = ops.sqrt(
             ops.sum(ops.square(entity_embeddings), axis=-1)
         )
-        activation_loss = -ops.mean(entity_norm)
+        activation_loss = -ops.mean(entity_norm, axis=1)
 
-        # Variance: encourage entity spread
+        # Variance: encourage entity spread (across entities, within each sample)
         entity_var = ops.var(entity_embeddings, axis=1)
-        variance_loss = -ops.mean(entity_var)
+        variance_loss = -ops.mean(entity_var, axis=-1)
 
         return (
             self.diversity_weight * diversity_loss

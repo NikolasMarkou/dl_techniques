@@ -210,6 +210,16 @@ def _cluster_pair():
     )
 
 
+def _entity_pair():
+    """Entity embeddings ``(B, 5, 8)`` for ``GNNUtilizationLoss``; ``y_true`` is ignored.
+
+    Measured at HEAD b4831ec33 the predicate accepts ``GNNUtilizationLoss`` on this
+    fixture (ratio 0.750000, margin 2.0e-3 against the 1e-6 tolerance once fixed).
+    """
+    r = _rng()
+    return _t(np.zeros((BATCH, 5, 8))), _t(r.normal(size=(BATCH, 5, 8)))
+
+
 # ---------------------------------------------------------------------
 # the pinned membership, derived by execution 2026-08-31
 # ---------------------------------------------------------------------
@@ -376,6 +386,11 @@ KNOWN_GOOD = [
     # by mean(w) and a zero-weighted row keeps its share of `c`. The predicate sees only
     # the shape; the coupling is pinned in tests/test_losses/test_clustering_loss.py.
     ("clustering_loss", "ClusteringLoss", {}, _cluster_pair),
+    # GNNUtilizationLoss returns (batch,) since plan-2026-11-11T223825-64d1b401 step 4;
+    # it was a member (a scalar, shape ()) before. Unlike the three rows above it is NOT
+    # batch-coupled: every reduction is over the entity and feature axes of one sample,
+    # so the exact drop-a-row identity lives in tests/test_losses/test_utilization_loss.py.
+    ("utilization_loss", "GNNUtilizationLoss", {}, _entity_pair),
 ]
 
 
