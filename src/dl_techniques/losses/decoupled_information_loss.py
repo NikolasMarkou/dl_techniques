@@ -61,9 +61,9 @@ Practical Considerations & Tuning Guide
   :math:`\\gamma` and :math:`\\delta` values.
 - **Monitor Components**: Use the `analyze_decoupled_information_loss` function in
   this module to track the unweighted values of `H(p(Y|X))` and `H(p(Y))` and confirm
-  they behave as expected. Do NOT use `analyze_loss_components` from
-  ``dl_techniques.losses.goodhart_loss``: it is written against
-  :class:`GoodhartAwareLoss` and raises ``AttributeError`` on a
+  they behave as expected. Do NOT use `analyze_confidence_penalty_loss` from
+  ``dl_techniques.losses.confidence_penalty_loss``: it is written against
+  :class:`ConfidencePenaltyLoss` and raises ``AttributeError`` on a
   :class:`DecoupledInformationLoss` instance.
 
 Example:
@@ -232,7 +232,7 @@ class DecoupledInformationLoss(keras.losses.Loss):
         else:
             # Input is already probabilities, but clip for numerical stability
             # Prevent log(0) by ensuring all probabilities are in [epsilon, 1-epsilon],
-            # then renormalize so rows still sum to 1 (cf. GoodhartAwareLoss).
+            # then renormalize so rows still sum to 1 (cf. ConfidencePenaltyLoss).
             probs = ops.clip(y_pred, self.epsilon, 1.0 - self.epsilon)
             probs = probs / ops.sum(probs, axis=-1, keepdims=True)
 
@@ -249,7 +249,8 @@ class DecoupledInformationLoss(keras.losses.Loss):
         # exactly decomposable per row, so it rides inside the (batch,) vector.
         # Only the marginal H(Y) diversity term below is irreducibly
         # batch-level: it is a scalar broadcast into every row, so a w=0 row
-        # still carries the batch marginal. See GoodhartAwareLoss docs.
+        # still carries the batch marginal. ConfidencePenaltyLoss has no such
+        # term, so its zero-weight identity is exact; this one's is not.
         conditional_entropy_per_sample = -ops.sum(
             probs * ops.log(probs + self.epsilon), axis=-1
         )

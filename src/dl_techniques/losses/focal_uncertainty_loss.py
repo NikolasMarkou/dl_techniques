@@ -232,7 +232,7 @@ class FocalUncertaintyLoss(keras.losses.Loss):
             probs = ops.softmax(y_pred, axis=-1)
         else:
             # Input is already probabilities, but clip for numerical stability
-            # then renormalize so rows still sum to 1 (cf. GoodhartAwareLoss).
+            # then renormalize so rows still sum to 1 (cf. ConfidencePenaltyLoss).
             probs = ops.clip(y_pred, self.epsilon, 1.0 - self.epsilon)
             probs = probs / ops.sum(probs, axis=-1, keepdims=True)
 

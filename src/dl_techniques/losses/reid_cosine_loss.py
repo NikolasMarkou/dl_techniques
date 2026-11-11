@@ -19,7 +19,8 @@ itself (PK batches guarantee every anchor has a positive). The magnet loss
 is irreducibly BATCH-LEVEL (class means and the shared variance couple
 every row), so it is a plain function, not a ``keras.losses.Loss``: wiring
 it into ``compile`` would charge every row the batch aggregate, the same
-trap ``goodhart_loss.py`` documents for its prior term.
+trap ``decoupled_information_loss.py`` documents for its
+batch-marginal entropy term.
 
 All Keras paths are ``keras.ops``-only and graph-safe. The magnet function
 is pure NumPy: it runs in custom loops and analysis, not in the graph.

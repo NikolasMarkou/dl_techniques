@@ -13,7 +13,7 @@ The collection includes losses for:
     - Imbalanced Classification (AnyLoss Framework, FocalUncertaintyLoss)
     - Self-Supervised Learning (CLIP, DINO, iBOT, SigLIP)
     - Instance Embedding and Clustering (MeanShiftInstanceLoss)
-    - Information-Theoretic Regularization (Goodhart, DecoupledInformationLoss)
+    - Information-Theoretic Regularization (ConfidencePenaltyLoss, DecoupledInformationLoss)
     - Generative Adversarial Networks (WassersteinLoss, WGAN-GP)
     - Topographic Generative Models (TopographicVAELoss, the two-KL ELBO)
     - Specialized Architectures (Capsule Networks, YOLOv12, NanoVLM)
@@ -99,6 +99,11 @@ from .colbert_loss import (
     ColBERTDistillationLoss,
 )
 
+from .confidence_penalty_loss import (
+    ConfidencePenaltyLoss,
+    analyze_confidence_penalty_loss,
+)
+
 from .ddpm_hybrid_loss import DDPMHybridLoss
 
 from .decoupled_information_loss import (
@@ -119,8 +124,6 @@ from .focal_uncertainty_loss import (
     FocalUncertaintyLoss,
     analyze_focal_uncertainty_loss,
 )
-
-from .goodhart_loss import GoodhartAwareLoss, analyze_loss_components
 
 from .hrm_loss import HRMLoss, StableMaxCrossEntropy, create_hrm_loss
 
@@ -343,6 +346,9 @@ __all__ = [
     # colbert_loss
     "ColBERTPairwiseSoftmaxLoss",
     "ColBERTDistillationLoss",
+    # confidence_penalty_loss
+    "ConfidencePenaltyLoss",
+    "analyze_confidence_penalty_loss",
     # ddpm_hybrid_loss
     "DDPMHybridLoss",
     # decoupled_information_loss
@@ -364,9 +370,6 @@ __all__ = [
     # focal_uncertainty_loss
     "FocalUncertaintyLoss",
     "analyze_focal_uncertainty_loss",
-    # goodhart_loss
-    "GoodhartAwareLoss",
-    "analyze_loss_components",
     # hrm_loss
     "HRMLoss",
     "StableMaxCrossEntropy",
