@@ -24,6 +24,20 @@ def loss_fn():
 class TestClusteringLoss:
     """Test suite for DifferentiableKMeansLayer."""
 
+    def test_from_config_round_trips_the_emitted_config(self):
+        """``get_config`` emits ``reduction``; ``from_config`` must accept it."""
+        original = ClusteringLoss(distance_weight=2.0, distribution_weight=0.3)
+        config = original.get_config()
+        assert "reduction" in config
+        restored = ClusteringLoss.from_config(config)
+        assert restored.distance_weight == 2.0
+        assert restored.distribution_weight == 0.3
+        assert restored.reduction == original.reduction
+
+    def test_reduction_is_honoured(self):
+        """The accepted ``reduction`` reaches the base class instead of being dropped."""
+        assert ClusteringLoss(reduction="sum").reduction == "sum"
+
     def test_initialization(self):
         """Test clustering loss initialization with default and custom parameters."""
         # Test default initialization

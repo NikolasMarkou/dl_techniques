@@ -45,7 +45,7 @@ The README table is the full inventory, grouped by domain.
 - `brier_spiegelhalters_ztest_loss.py`: Binary-only calibration losses and metrics. Ships both Z-statistics behind `statistic=`: Spiegelhalter's `(1-2p)`-weighted Z (the default) and calibration-in-the-large (the pre-2026-09-02 behavior). The penalty is chance-corrected (`relu(Z^2 - 1)`), divided by `N`, and decomposed per row.
 - `capsule_margin_loss.py`: CapsNet margin loss, plus an analysis helper.
 - `chamfer_loss.py`: Symmetric Chamfer distance. Builds an O(N*M) pairwise matrix.
-- `clifford_detection_loss.py`: `YOLOv12ObjectDetectionLoss` with configurable strides. Overrides `from_config` to drop the duplicate `reduction` key.
+- `clifford_detection_loss.py`: `YOLOv12ObjectDetectionLoss` with configurable strides. Inherits the `reduction`-dropping `from_config` from `yolo12_multitask_loss.py`.
 - `clip_contrastive_loss.py`: Symmetric CLIP loss over a dict or tuple of logit matrices. Direct call only; see Conventions.
 - `clustering_loss.py`: Intra-cluster MSE plus a batch-level uniform-distribution penalty, a metrics dataclass, and a callback.
 - `colbert_loss.py`: ColBERT v1 pairwise softmax CE over `nway` MaxSim scores (positive at index 0), and v2 log-target KL distillation with batchmean semantics.
@@ -137,7 +137,7 @@ Never pass side information through `sample_weight`; Keras multiplies by it.
 `Loss.get_config()` emits `name` and `reduction`, so `cls.from_config(loss.get_config())` must work. That gives two rules:
 
 - A constructor that does not accept `reduction` (or `**kwargs`) breaks the round trip.
-- A constructor that hard-codes `reduction` in `super().__init__` must override `from_config` to pop the key, as `CliffordDetectionLoss` does.
+- A constructor that hard-codes `reduction` in `super().__init__` must override `from_config` to pop the key. The three YOLOv12 sub-losses share one such override, `_FixedNoReductionConfig` in `yolo12_multitask_loss.py` (D-006); `CliffordDetectionLoss` inherits it.
 
 Test every new loss with this round trip.
 
@@ -164,7 +164,7 @@ Store float hyperparameters as Python floats. Do not round-trip them through a f
 
 ### Registration
 
-Every `Loss` subclass carries `@register_dl_technique("dl_techniques.losses.<module>")`, never a bare `register_keras_serializable`. Re-keying an explicitly-packaged class requires `legacy_packages=(...)`, or old archives stop loading.
+Every `Loss` subclass carries `@register_dl_technique("dl_techniques.losses.<module>")`, never a bare `register_keras_serializable`. Re-keying an explicitly-packaged class requires `legacy_packages=(...)`, or old archives stop loading. Two modules do so: `yolo12_multitask_loss.py` (`"yolov12_losses"`) and `omnipoint_losses.py` (the per-class keys `dl_techniques.losses.omnipoint_losses.<snake_case>`, D-007). `tests/test_losses/test_the_losses_package_surface_is_consistent.py` fails on any registered key that is not the module path.
 
 ### Factories
 

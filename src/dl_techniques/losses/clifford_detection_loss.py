@@ -128,13 +128,4 @@ class CliffordDetectionLoss(YOLOv12ObjectDetectionLoss):
         config["strides"] = list(self._strides_config)
         return config
 
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "CliffordDetectionLoss":
-        # The parent's __init__ hardcodes reduction="none" and passes it
-        # explicitly to super().__init__(), so we must strip any "reduction"
-        # key the base get_config emitted to avoid a duplicate-kwarg TypeError.
-        config = dict(config)
-        config.pop("reduction", None)
-        return cls(**config)
-
 # ---------------------------------------------------------------------

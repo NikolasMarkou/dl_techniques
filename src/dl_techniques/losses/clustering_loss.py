@@ -118,6 +118,9 @@ class ClusteringLoss(keras.losses.Loss):
         distribution_weight (float): Weight for cluster distribution term. Must be positive.
             Higher values emphasize balanced cluster sizes.
         name (str): Name of the loss function.
+        reduction (str): Keras loss reduction. ``get_config`` emits it, so ``from_config``
+            must accept it back.
+        **kwargs: Forwarded to :class:`keras.losses.Loss`.
 
     Raises:
         ValueError: If weights are invalid (negative, zero, inf, or nan).
@@ -131,9 +134,11 @@ class ClusteringLoss(keras.losses.Loss):
             self,
             distance_weight: float = 1.0,
             distribution_weight: float = 0.5,
-            name: str = 'clustering_loss'
+            name: str = 'clustering_loss',
+            reduction: str = 'sum_over_batch_size',
+            **kwargs: Any
     ) -> None:
-        super().__init__(name=name)
+        super().__init__(name=name, reduction=reduction, **kwargs)
 
         # Validate weights
         self._validate_weight(distance_weight, 'distance_weight')

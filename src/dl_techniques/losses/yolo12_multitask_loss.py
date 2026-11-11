@@ -49,6 +49,32 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 # Internal, Task-Specific Loss Implementations
 # ---------------------------------------------------------------------
 
+class _FixedNoReductionConfig:
+    """Mixin for losses whose ``__init__`` hard-codes ``reduction="none"``.
+
+    ``keras.losses.Loss.get_config`` emits ``reduction``, but these constructors pass
+    ``reduction="none"`` to ``super().__init__`` themselves and expose no such argument, so
+    the emitted key would arrive a second time and raise ``TypeError``. ``from_config``
+    drops it; the value is a constant of the class, not state.
+
+    Interface: a classmethod ``from_config(config) -> cls`` that copies ``config`` (the
+    caller's dict is never mutated), pops ``reduction`` and calls ``cls(**config)``. Put it
+    BEFORE ``keras.losses.Loss`` in the bases so it wins the MRO; it is not a ``Loss`` itself.
+    """
+
+    # DECISION plan-2026-11-11T131349-13b28b37/D-006
+    # One shared from_config, hoisted from CliffordDetectionLoss (which carried the only copy).
+    # Do NOT make get_config drop ``reduction`` instead: archives already saved with the key
+    # would then still be unloadable. Do NOT paste the body into each class again; the
+    # package-surface census in tests/test_losses/test_the_losses_package_surface_is_consistent.py
+    # and TestTheFixedReductionSubLossesRoundTrip fail when any of the three loses it.
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]):
+        config = dict(config)
+        config.pop("reduction", None)
+        return cls(**config)
+
+
 # DECISION plan-2026-08-29T141252-168933da/D-005
 # These four losses were the tree's ONLY registrations under a package string with no owning
 # namespace ("yolov12_losses"). That is the §2.2 hazard itself: an un-namespaced key is
@@ -68,7 +94,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 @register_dl_technique(
     "dl_techniques.losses.yolo12_multitask_loss", legacy_packages=("yolov12_losses",)
 )
-class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
+class YOLOv12ObjectDetectionLoss(_FixedNoReductionConfig, keras.losses.Loss):
     """
     Internal loss for YOLOv12 object detection.
 
@@ -597,7 +623,7 @@ class YOLOv12ObjectDetectionLoss(keras.losses.Loss):
 @register_dl_technique(
     "dl_techniques.losses.yolo12_multitask_loss", legacy_packages=("yolov12_losses",)
 )
-class DiceFocalSegmentationLoss(keras.losses.Loss):
+class DiceFocalSegmentationLoss(_FixedNoReductionConfig, keras.losses.Loss):
     """
     Internal combined Dice and Focal Loss for segmentation.
 
@@ -783,7 +809,7 @@ class DiceFocalSegmentationLoss(keras.losses.Loss):
 @register_dl_technique(
     "dl_techniques.losses.yolo12_multitask_loss", legacy_packages=("yolov12_losses",)
 )
-class ClassificationFocalLoss(keras.losses.Loss):
+class ClassificationFocalLoss(_FixedNoReductionConfig, keras.losses.Loss):
     """
     Internal Focal Loss for image-level classification.
 

@@ -441,3 +441,54 @@ class TestOmniPointCombinedLoss:
             l_local = np.array(LocalConsistencyLoss().call(gt_point, pred_metric_points))
             expected_l_point = total - (l_ray + l_metric + l_normal + l_local + l_mask)
             np.testing.assert_allclose(expected_l_point, 0.0, atol=1e-4, rtol=0)
+
+
+# ---------------------------------------------------------------------
+# Registry keys
+# ---------------------------------------------------------------------
+
+_REGISTERED = [
+    (RayDirectionLoss, "ray_direction_loss"),
+    (PointDistanceLoss, "point_distance_loss"),
+    (MetricScaleLoss, "metric_scale_loss"),
+    (MaskLoss, "mask_loss"),
+    (NormalConsistencyLoss, "normal_consistency_loss"),
+    (LocalConsistencyLoss, "local_consistency_loss"),
+    (OmniPointCombinedLoss, "omnipoint_combined_loss"),
+]
+
+
+class TestRegistryKeys:
+    """D-007: one module, one registry package string; old per-class keys stay loadable.
+
+    A pre-change ``.keras`` archive stores
+    ``registered_name="dl_techniques.losses.omnipoint_losses.<snake>>Class"``. Re-keying
+    without ``legacy_packages`` would make every such archive unloadable.
+    """
+
+    @pytest.mark.parametrize("cls,snake", _REGISTERED)
+    def test_the_class_is_registered_under_the_module_key(self, cls, snake):
+        key = f"dl_techniques.losses.omnipoint_losses>{cls.__name__}"
+        assert keras.saving.get_custom_objects().get(key) is cls
+        assert (
+            keras.saving.get_registered_name(cls) == key
+        ), "registered name must be the module-level key"
+
+    @pytest.mark.parametrize("cls,snake", _REGISTERED)
+    def test_the_pre_change_key_still_resolves(self, cls, snake):
+        old_key = f"dl_techniques.losses.omnipoint_losses.{snake}>{cls.__name__}"
+        assert keras.saving.get_custom_objects().get(old_key) is cls
+
+    @pytest.mark.parametrize(
+        "cls,snake", [row for row in _REGISTERED if row[0] is not OmniPointCombinedLoss]
+    )
+    def test_an_old_archive_entry_deserializes(self, cls, snake):
+        old_key = f"dl_techniques.losses.omnipoint_losses.{snake}>{cls.__name__}"
+        old_entry = {
+            "module": cls.__module__,
+            "class_name": cls.__name__,
+            "config": cls().get_config(),
+            "registered_name": old_key,
+        }
+        restored = keras.saving.deserialize_keras_object(old_entry)
+        assert type(restored) is cls

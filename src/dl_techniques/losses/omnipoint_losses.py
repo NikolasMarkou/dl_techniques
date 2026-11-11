@@ -160,7 +160,19 @@ def compute_optimal_scale(
     return numerator / denominator_stable
 
 
-@register_dl_technique("dl_techniques.losses.omnipoint_losses.ray_direction_loss")
+# DECISION plan-2026-11-11T131349-13b28b37/D-007
+# Every class here registers under the MODULE key `dl_techniques.losses.omnipoint_losses`,
+# like every other module in losses/. They used a per-class key
+# `dl_techniques.losses.omnipoint_losses.<snake_case_name>`, the sole deviation in the package.
+# `legacy_packages=(<old per-class key>,)` is NOT optional: an archive saved before the re-key
+# stores that old string as its `registered_name`, and `Custom>` does not cover it. Do NOT drop
+# the argument to "simplify", and do NOT re-add per-class keys. tests/test_losses/
+# test_omnipoint_losses.py::TestRegistryKeys resolves every old key; the AST census in
+# test_the_losses_package_surface_is_consistent.py fails on a non-module key.
+@register_dl_technique(
+    "dl_techniques.losses.omnipoint_losses",
+    legacy_packages=("dl_techniques.losses.omnipoint_losses.ray_direction_loss",),
+)
 class RayDirectionLoss(keras.losses.Loss):
     """L1 loss between predicted and ground-truth unit ray directions.
 
@@ -201,7 +213,10 @@ class RayDirectionLoss(keras.losses.Loss):
         return super().get_config()
 
 
-@register_dl_technique("dl_techniques.losses.omnipoint_losses.point_distance_loss")
+@register_dl_technique(
+    "dl_techniques.losses.omnipoint_losses",
+    legacy_packages=("dl_techniques.losses.omnipoint_losses.point_distance_loss",),
+)
 class PointDistanceLoss(keras.losses.Loss):
     """Decoupled distance loss: predicted distance projected along the GROUND-TRUTH ray.
 
@@ -270,7 +285,10 @@ class PointDistanceLoss(keras.losses.Loss):
         return super().get_config()
 
 
-@register_dl_technique("dl_techniques.losses.omnipoint_losses.metric_scale_loss")
+@register_dl_technique(
+    "dl_techniques.losses.omnipoint_losses",
+    legacy_packages=("dl_techniques.losses.omnipoint_losses.metric_scale_loss",),
+)
 class MetricScaleLoss(keras.losses.Loss):
     """Log-space, stop-gradient scale loss between predicted and optimal-aligned scale.
 
@@ -319,7 +337,10 @@ class MetricScaleLoss(keras.losses.Loss):
         return config
 
 
-@register_dl_technique("dl_techniques.losses.omnipoint_losses.mask_loss")
+@register_dl_technique(
+    "dl_techniques.losses.omnipoint_losses",
+    legacy_packages=("dl_techniques.losses.omnipoint_losses.mask_loss",),
+)
 class MaskLoss(keras.losses.Loss):
     """Binary cross-entropy loss for a per-pixel sky/validity mask.
 
@@ -419,7 +440,10 @@ def _discrete_laplacian(point_map: keras.KerasTensor) -> keras.KerasTensor:
     return center - neighbor_mean
 
 
-@register_dl_technique("dl_techniques.losses.omnipoint_losses.normal_consistency_loss")
+@register_dl_technique(
+    "dl_techniques.losses.omnipoint_losses",
+    legacy_packages=("dl_techniques.losses.omnipoint_losses.normal_consistency_loss",),
+)
 class NormalConsistencyLoss(keras.losses.Loss):
     """Simplified (finite-difference) surface-normal consistency loss -- see D-004.
 
@@ -455,7 +479,10 @@ class NormalConsistencyLoss(keras.losses.Loss):
         return super().get_config()
 
 
-@register_dl_technique("dl_techniques.losses.omnipoint_losses.local_consistency_loss")
+@register_dl_technique(
+    "dl_techniques.losses.omnipoint_losses",
+    legacy_packages=("dl_techniques.losses.omnipoint_losses.local_consistency_loss",),
+)
 class LocalConsistencyLoss(keras.losses.Loss):
     """Simplified (discrete-Laplacian) local-consistency loss -- see D-004.
 
@@ -490,7 +517,10 @@ class LocalConsistencyLoss(keras.losses.Loss):
         return super().get_config()
 
 
-@register_dl_technique("dl_techniques.losses.omnipoint_losses.omnipoint_combined_loss")
+@register_dl_technique(
+    "dl_techniques.losses.omnipoint_losses",
+    legacy_packages=("dl_techniques.losses.omnipoint_losses.omnipoint_combined_loss",),
+)
 class OmniPointCombinedLoss:
     """Weighted-sum combination of all OmniPoint loss terms -- the single `model.compile()` entry point.
 

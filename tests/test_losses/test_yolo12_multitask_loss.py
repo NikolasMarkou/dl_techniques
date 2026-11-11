@@ -21,7 +21,10 @@ import pytest
 import train.yolo12.train_coco as train_coco
 import train.yolo12.train_multitask as train_multitask
 from dl_techniques.losses.yolo12_multitask_loss import (
+    ClassificationFocalLoss,
+    DiceFocalSegmentationLoss,
     YOLOv12MultiTaskLoss,
+    YOLOv12ObjectDetectionLoss,
     create_yolov12_multitask_loss,
 )
 
@@ -170,3 +173,45 @@ class TestTheTrainersNoLongerOfferTheFlag:
         assert "use_uncertainty_weighting" not in inspect.signature(
             train_multitask.create_model_and_loss
         ).parameters
+
+
+class TestTheFixedReductionSubLossesRoundTrip:
+    """``reduction="none"`` is hard-coded, yet ``get_config`` emits it.
+
+    Measured at 8ad64d2bd: ``from_config(get_config())`` raised ``TypeError ... got
+    multiple values for keyword argument 'reduction'`` for all three classes
+    (D-006). The fix lives in one shared ``from_config``, not three copies.
+    """
+
+    @staticmethod
+    def _instances():
+        return [
+            YOLOv12ObjectDetectionLoss(num_classes=3, input_shape=(64, 64)),
+            DiceFocalSegmentationLoss(num_classes=3),
+            ClassificationFocalLoss(),
+        ]
+
+    @pytest.mark.parametrize("index", [0, 1, 2])
+    def test_from_config_accepts_the_emitted_config(self, index):
+        original = self._instances()[index]
+        config = original.get_config()
+        assert config["reduction"] == "none"
+        restored = type(original).from_config(config)
+        assert type(restored) is type(original)
+        assert restored.reduction == "none"
+        assert restored.get_config() == config
+
+    @pytest.mark.parametrize("index", [0, 1, 2])
+    def test_keras_serialization_round_trips(self, index):
+        original = self._instances()[index]
+        restored = keras.saving.deserialize_keras_object(
+            keras.saving.serialize_keras_object(original)
+        )
+        assert type(restored) is type(original)
+
+    @pytest.mark.parametrize("index", [0, 1, 2])
+    def test_from_config_does_not_mutate_the_callers_dict(self, index):
+        config = self._instances()[index].get_config()
+        snapshot = dict(config)
+        type(self._instances()[index]).from_config(config)
+        assert config == snapshot
