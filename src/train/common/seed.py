@@ -8,6 +8,10 @@ LESSONS L73: ``keras.utils.set_random_seed`` seeds Python ``random`` + NumPy +
 TF + Keras backend simultaneously. This wrapper exists only to (a) provide a
 local import boundary so trainers do not couple directly to keras for seeding,
 (b) emit a single logger line so multi-seed runs are auditable from the log.
+
+It also holds :func:`seed_generators`, the one walk over a model's layers that returns every
+``keras.random.SeedGenerator`` (used by the denoising homogeneity probe, the TopoLM live
+diagnostics and the PowerMLP baseline pass, which save and restore the generators' state).
 """
 from __future__ import annotations
 
