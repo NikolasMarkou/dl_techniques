@@ -29,7 +29,7 @@
 | `SAMIoULoss` | `iou_supervision` |
 | Siamese tracking losses | values and masks packed in `y_true` |
 
-**Stateful losses update on every call, validation included.** This covers `DINOLoss`, `iBOTPatchLoss`, `AdaptiveSigLIPLoss` and the `TopographicVAELoss` trackers. Loss-owned variables are not saved in `.keras` checkpoints; `DINOLoss` carries its center in `get_config()` for that reason.
+**Stateful losses update on every call, validation included.** This covers `DINOLoss`, `iBOTPatchLoss`, `AdaptiveSigLIPLoss` and the `TopographicVAELoss` trackers. Loss-owned variables are not saved in `.keras` checkpoints; `DINOLoss` carries its center in `get_config()` for that reason, and `AdaptiveSigLIPLoss` carries its live temperature there as `current_temperature`. Keras 3.8 passes `Loss.call` no `training` flag, so `evaluate` still moves the adaptive temperature; that drift is a known limitation, not gated.
 
 ## Available losses
 

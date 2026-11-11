@@ -53,7 +53,10 @@ References
     Pre-Training". *International Conference on Computer Vision (ICCV)*.
 """
 
+from typing import Optional
+
 import keras
+import numpy as np
 from keras import ops
 
 # ---------------------------------------------------------------------
@@ -179,11 +182,34 @@ class SigLIPContrastiveLoss(keras.losses.Loss):
 @register_dl_technique("dl_techniques.losses.siglip_contrastive_loss")
 class AdaptiveSigLIPLoss(keras.losses.Loss):
     """
-    Adaptive SigLIP Loss with dynamic temperature scaling.
+    Adaptive SigLIP Loss with a closed-loop temperature controller.
 
-    This variant automatically adjusts temperature based on the similarity
-    distribution, preventing collapse in early training and maintaining
-    good gradients throughout training.
+    On every call the controller measures the mean row entropy of
+    ``softmax(logits_per_image * T)`` at the CURRENT temperature ``T`` and moves
+    ``T`` by ``+adaptation_rate * (entropy - target_entropy)``, clipped to
+    ``[min_temperature, max_temperature]``. ``T`` multiplies the logits, so a
+    larger ``T`` sharpens the softmax and lowers its entropy: entropy above the
+    target raises ``T`` and entropy below it lowers ``T``, which is negative
+    feedback and settles strictly inside the bounds.
+
+    This controller is the repo's own invention (SigLIP itself learns
+    ``log t`` by gradient descent); there is no reference to compare against.
+
+    **State.** ``T`` lives in a float64, non-trainable ``keras.Variable``.
+    Keras does not checkpoint loss-owned variables, so the live value is carried
+    in ``get_config()`` under ``current_temperature`` and restored by
+    ``__init__`` (the ``DINOLoss`` center precedent). ``initial_temperature``
+    keeps its meaning: where a FRESH run starts.
+
+    **Validation drift (known limitation).** ``Loss.call`` receives no
+    ``training`` flag on Keras 3.8, so the ``assign`` also runs on validation
+    batches (``evaluate`` moves ``T``). It cannot be gated in place without a
+    new flag plus a callback to toggle it, which this loss does not carry.
+
+    **Usage.** ``y_pred`` must be a dict with ``logits_per_image`` and
+    ``logits_per_text``, so ``compile(loss=AdaptiveSigLIPLoss())`` against a
+    dict-valued model output raises ``KeyError`` (a loss object is broadcast
+    across the leaves); call it directly or from a custom loop.
     """
 
     def __init__(
@@ -193,6 +219,7 @@ class AdaptiveSigLIPLoss(keras.losses.Loss):
             max_temperature: float = 10.0,
             adaptation_rate: float = 0.1,
             target_entropy: float = 0.5,
+            current_temperature: Optional[float] = None,
             reduction: str = 'sum_over_batch_size',
             name: str = 'adaptive_siglip_loss',
             **kwargs
@@ -201,11 +228,14 @@ class AdaptiveSigLIPLoss(keras.losses.Loss):
         Initialize Adaptive SigLIP Loss.
 
         Args:
-            initial_temperature: Starting temperature value
+            initial_temperature: Starting temperature value of a fresh run.
             min_temperature: Minimum allowed temperature
             max_temperature: Maximum allowed temperature
             adaptation_rate: Rate of temperature adaptation
-            target_entropy: Target entropy for temperature adaptation
+            target_entropy: Target mean row entropy (nats) of the scaled softmax.
+            current_temperature: The live temperature to resume from. ``None``
+                starts at ``initial_temperature``. ``get_config`` emits it so a
+                saved loss resumes where it stopped.
             reduction: Type of reduction to apply to loss
             name: Name of the loss function
         """
@@ -216,10 +246,15 @@ class AdaptiveSigLIPLoss(keras.losses.Loss):
         self.adaptation_rate = adaptation_rate
         self.target_entropy = target_entropy
 
+        start = initial_temperature if current_temperature is None else current_temperature
 
-        # Adaptive temperature (will be updated during training)
+        # Adaptive temperature (updated on every call).
+        # float64 with a raw np.float64 initializer, NOT keras.initializers.Constant:
+        # the value round-trips through get_config() as a Python float and a float32
+        # store turns 3.3 into 3.299999952 (see dino_loss._create_teacher_temp_variable).
         self.adaptive_temperature = keras.Variable(
-            initial_temperature,
+            initializer=np.float64(start),
+            dtype='float64',
             trainable=False,
             name='adaptive_temperature'
         )
@@ -243,13 +278,25 @@ class AdaptiveSigLIPLoss(keras.losses.Loss):
 
         batch_size = ops.shape(logits_per_image)[0]
 
-        # Compute current entropy of similarity distribution
-        probs = ops.softmax(logits_per_image, axis=-1)
+        # DECISION plan-2026-11-11T131349-13b28b37/D-003
+        # The entropy is measured at the LIVE temperature and the update sign is
+        # POSITIVE. Both halves are required and neither works alone. Measured
+        # (numpy simulation, T0 0.5/1/3 x logit scale 0.5/2): the original
+        # unscaled entropy never saw T (open loop) and pinned T at 0.01 in all six
+        # cases; scaling the entropy but keeping `-rate * (H - target)` is POSITIVE
+        # feedback (H above target lowers T, which flattens softmax(logits * T) and
+        # raises H again) and pinned a bound in all six; scaling AND `+rate` settled
+        # strictly inside (0.01, 10.0) in all six. Do NOT "simplify" back to
+        # `softmax(logits_per_image)` and do NOT drop the sign flip -- the tests in
+        # test_siglip_contrastive_loss.py (closed-loop settle, entropy at live T,
+        # sign pin) fail if either half is undone.
+        temperature = ops.cast(self.adaptive_temperature, logits_per_image.dtype)
+        probs = ops.softmax(logits_per_image * temperature, axis=-1)
         current_entropy = -ops.mean(ops.sum(probs * ops.log(probs + 1e-8), axis=-1))
 
-        # Adapt temperature based on entropy
-        entropy_error = current_entropy - self.target_entropy
-        temperature_update = -self.adaptation_rate * entropy_error
+        # Adapt temperature based on entropy (float64 state, see __init__)
+        entropy_error = ops.cast(current_entropy - self.target_entropy, 'float64')
+        temperature_update = self.adaptation_rate * entropy_error
 
         new_temperature = ops.clip(
             self.adaptive_temperature + temperature_update,
@@ -263,8 +310,9 @@ class AdaptiveSigLIPLoss(keras.losses.Loss):
         labels = ops.eye(batch_size, dtype='float32') * 2.0 - 1.0
 
         # Apply adaptive temperature
-        scaled_logits_per_image = logits_per_image * self.adaptive_temperature
-        scaled_logits_per_text = logits_per_text * self.adaptive_temperature
+        temperature = ops.cast(self.adaptive_temperature, logits_per_image.dtype)
+        scaled_logits_per_image = logits_per_image * temperature
+        scaled_logits_per_text = logits_per_text * temperature
 
         # Compute sigmoid loss (softplus for numerical stability)
         image_loss = ops.softplus(-labels * scaled_logits_per_image)
@@ -288,6 +336,12 @@ class AdaptiveSigLIPLoss(keras.losses.Loss):
             'max_temperature': self.max_temperature,
             'adaptation_rate': self.adaptation_rate,
             'target_entropy': self.target_entropy,
+            # The LIVE temperature, so a saved loss resumes instead of resetting
+            # to `initial_temperature` (Keras does not checkpoint loss variables).
+            # Do not drop this key; see the class docstring.
+            'current_temperature': float(
+                ops.convert_to_numpy(self.adaptive_temperature)
+            ),
         })
         return config
 

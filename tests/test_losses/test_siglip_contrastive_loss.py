@@ -457,3 +457,135 @@ def test_reduction_none_returns_one_value_per_sample(cls):
         f"{cls.__name__} with reduction='none' returned shape "
         f"{unreduced.shape}; reduction is dead while call() returns a scalar"
     )
+
+
+# =====================================================================
+# ADAPTIVE TEMPERATURE: a closed loop that carries its state
+# (plan-2026-11-11T131349-13b28b37 step 1, D-003)
+#
+# Before this step the entropy that drove the update was computed on the
+# UNSCALED logits, so the temperature never fed back into the quantity it was
+# controlling (open loop), and the update sign was `-rate * (H - target)`.
+# Scaling the entropy by the temperature alone would have been positive
+# feedback with that sign (a larger H lowers T, which flattens the softmax and
+# raises H again); only scaled entropy AND `+rate * (H - target)` converges.
+# A pre-edit numpy simulation (progress.md, "Step 1 pre-edit simulation")
+# measured: as-is sign -> T pinned at 0.01 for all six start/scale cases;
+# scaled entropy + old sign -> a bound in all six; scaled entropy + flipped
+# sign -> strictly inside (0.01, 10.0) in all six.
+# =====================================================================
+
+_MIN_T, _MAX_T = 0.01, 10.0
+
+
+def _entropy_at(logits: np.ndarray, temperature: float) -> float:
+    """Independent numpy re-derivation of the controlled quantity."""
+    z = logits.astype("float64") * temperature
+    z = z - z.max(axis=-1, keepdims=True)
+    p = np.exp(z)
+    p /= p.sum(axis=-1, keepdims=True)
+    return float(-np.mean(np.sum(p * np.log(p + 1e-8), axis=-1)))
+
+
+def _live_temperature(loss) -> float:
+    return float(keras.ops.convert_to_numpy(loss.adaptive_temperature))
+
+
+def _scaled_logits(scale: float, size: int = 8, seed: int = 0):
+    rng = np.random.default_rng(seed)
+    logits = (rng.standard_normal((size, size)) * scale).astype("float32")
+    return {"logits_per_image": logits, "logits_per_text": logits.T.copy()}
+
+
+@pytest.mark.parametrize("initial_temperature", [0.5, 1.0, 3.0])
+def test_adaptive_temperature_settles_strictly_inside_the_bounds(
+    initial_temperature,
+):
+    """RED at HEAD: the open loop drifts to ``min_temperature`` (0.01)."""
+    y_pred = _scaled_logits(scale=2.0)
+    loss = AdaptiveSigLIPLoss(
+        initial_temperature=initial_temperature,
+        min_temperature=_MIN_T,
+        max_temperature=_MAX_T,
+        target_entropy=0.5,
+    )
+    for _ in range(200):
+        loss(_dummy_labels(8), y_pred)
+
+    final = _live_temperature(loss)
+    assert _MIN_T < final < _MAX_T, f"T pinned at a bound: {final}"
+    achieved = _entropy_at(y_pred["logits_per_image"], final)
+    assert abs(achieved - 0.5) < 0.05, (
+        f"T={final} leaves the scaled entropy at {achieved}, not the 0.5 target"
+    )
+
+
+def test_adaptive_entropy_is_measured_at_the_live_temperature():
+    """RED at HEAD: the entropy ignored the temperature, so both runs moved alike.
+
+    Same logits, two starting temperatures. At T=0.05 the scaled softmax is
+    nearly uniform (entropy above the 0.5 target); at T=8 it is nearly one-hot
+    (entropy below it). A closed loop must therefore push them in OPPOSITE
+    directions.
+    """
+    y_pred = _scaled_logits(scale=2.0)
+    hot = AdaptiveSigLIPLoss(initial_temperature=8.0)
+    cold = AdaptiveSigLIPLoss(initial_temperature=0.05)
+    loss_high_t = _live_temperature(hot)
+    loss_low_t = _live_temperature(cold)
+    hot(_dummy_labels(8), y_pred)
+    cold(_dummy_labels(8), y_pred)
+
+    assert _live_temperature(hot) < loss_high_t, "entropy below target must lower T"
+    assert _live_temperature(cold) > loss_low_t, "entropy above target must raise T"
+
+
+def test_adaptive_update_raises_temperature_when_entropy_is_above_target():
+    """Pin the sign on its own: entropy above target RAISES T (sharpens)."""
+    y_pred = _scaled_logits(scale=0.1)  # near-uniform rows, H ~ ln(8) >> 0.5
+    loss = AdaptiveSigLIPLoss(initial_temperature=1.0, adaptation_rate=0.1)
+    loss(_dummy_labels(8), y_pred)
+    expected = 1.0 + 0.1 * (_entropy_at(y_pred["logits_per_image"], 1.0) - 0.5)
+    assert _live_temperature(loss) == pytest.approx(expected, abs=1e-5, rel=0)
+
+
+def test_adaptive_temperature_state_survives_a_config_round_trip():
+    """RED at HEAD: ``get_config`` had no live T, so a reload reset it to 1.0."""
+    loss = AdaptiveSigLIPLoss(initial_temperature=1.0)
+    loss.adaptive_temperature.assign(3.3)
+
+    restored = AdaptiveSigLIPLoss.from_config(loss.get_config())
+
+    # EXACT equality: the variable is float64, so 3.3 does not round through
+    # float32 (3.299999952...), the way DINOLoss's teacher_temp learned to avoid.
+    assert _live_temperature(restored) == 3.3
+    assert restored.initial_temperature == 1.0, (
+        "initial_temperature must keep meaning 'where a fresh run starts'"
+    )
+
+
+def test_adaptive_temperature_state_survives_the_keras_serialize_round_trip():
+    loss = AdaptiveSigLIPLoss(min_temperature=0.05, max_temperature=4.0)
+    loss.adaptive_temperature.assign(2.7)
+
+    restored = keras.saving.deserialize_keras_object(
+        keras.saving.serialize_keras_object(loss)
+    )
+
+    assert type(restored) is AdaptiveSigLIPLoss
+    assert _live_temperature(restored) == 2.7
+    assert restored.min_temperature == 0.05
+    assert restored.max_temperature == 4.0
+
+
+def test_adaptive_state_is_not_lost_after_updates_either():
+    """The round trip carries the value AFTER the loop has moved it."""
+    y_pred = _scaled_logits(scale=2.0)
+    loss = AdaptiveSigLIPLoss()
+    for _ in range(5):
+        loss(_dummy_labels(8), y_pred)
+    moved = _live_temperature(loss)
+    assert moved != 1.0
+
+    restored = AdaptiveSigLIPLoss.from_config(loss.get_config())
+    assert _live_temperature(restored) == moved
