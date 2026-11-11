@@ -550,8 +550,22 @@ def validate_logit_probability_type(probability_type: str, layer_name: str) -> N
     runs in ``__init__``: the four types in :data:`NON_LOGIT_PROBABILITY_TYPES` are
     refused up front, before any sub-layer is built, with a message that names the
     offending value and the layer. The comparison is case-insensitive because
-    ``ProbabilityOutput`` itself lowercases the type; a case-sensitive check lets
-    ``"Routing"`` through to a later, less readable failure.
+    ``ProbabilityOutput`` itself lowercases the type, and so that every spelling is
+    refused the way the lowercase one already was.
+
+    This is a deliberate behaviour change, not only a readability fix. Before the
+    helper, ten of the thirteen adopting layers compared case-sensitively, so
+    ``"Routing"`` and ``"Deterministic_Routing"`` were not refused there. Measured at
+    the base commit on CPU: eight of them (``MultiHeadLatentAttention``,
+    ``RPCAttention``, ``GatedAttention``, ``LighthouseAttention``,
+    ``GroupedQueryAttention``, ``NonLocalAttention``, ``WindowAttention``,
+    ``SingleWindowAttention``) built and ran to a finite output with the mixed-case
+    spelling, so a configuration that used to run is now an error; two
+    (``HopfieldAttention``, ``SharedWeightsCrossAttention``) built and then failed at
+    the first call; the mixed-case ``"Hierarchical"`` spellings failed inside
+    ``ProbabilityOutput`` at construction with an ``output_dim`` message. The other
+    three layers (``CapsuleRoutingSelfAttention``, ``MultiHeadCrossAttention``,
+    ``DifferentialMultiHeadAttention``) already lowercased the value.
 
     :param probability_type: The caller's ``probability_type`` argument, as given.
         A value that is not a ``str`` is not judged here (it is left to
@@ -570,8 +584,10 @@ def validate_logit_probability_type(probability_type: str, layer_name: str) -> N
     """
     # DECISION plan-2026-11-11T131349-13b28b37/D-035: the type is lowered ONCE here,
     # so a mixed-case invalid type ("Routing") is refused at every adopting layer. Ten
-    # of the thirteen layers compared case-sensitively before and let it through, a
-    # deliberate fix (valid configs are untouched: test_common.py::
+    # of the thirteen layers compared case-sensitively before and did not refuse it
+    # (measured at the base commit: eight ran it, two failed at the first call), a
+    # deliberate change that turns a config that used to run into an error (valid
+    # configs are untouched: test_common.py::
     # TestValidateLogitProbabilityType). Do NOT re-spell the tuple or the lowering at
     # a layer (an AST guard walks the package) and do NOT drop the "Invalid
     # probability_type" and "not supported" phrases: two layer test files match on them.

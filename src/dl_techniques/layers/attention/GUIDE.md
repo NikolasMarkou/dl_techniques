@@ -268,14 +268,19 @@ distinct unbuilt layers from `create_normalization_layer`, query first, named `q
 
 Refuses the four `ProbabilityOutput` types that consume features rather than score logits
 (`routing`, `deterministic_routing`, `hierarchical`, `hierarchical_routing`; the tuple is
-`NON_LOGIT_PROBABILITY_TYPES`). The value is lowered once, so `"Routing"` is refused too; the message
+`NON_LOGIT_PROBABILITY_TYPES`). The value is lowered once, so `"Routing"` is refused too, for
+consistency with the lowercase spelling that was already refused; the message
 is `Invalid probability_type '<x>': not supported by <layer_name> ...`, and the phrases
 `Invalid probability_type` and `not supported` are matched by two layer test files, so keep them.
 
 *   **Adopters (13):** `capsule_routing`, `differential`, `gated`, `group_query`, `hopfield`,
     `lighthouse`, `multi_head_cross`, `multi_head_latent`, `non_local`, `rpc`, `shared_weights_cross`,
     `single_window`, `window`. Ten of them compared case-sensitively before, so a mixed-case invalid type
-    used to get past them: a deliberate fix, valid configurations are unchanged.
+    (`"Routing"`, `"Deterministic_Routing"`) was not refused there. Measured at the base commit: eight
+    built and ran it (`multi_head_latent`, `rpc`, `gated`, `group_query`, `lighthouse`, `non_local`,
+    `window`, `single_window`), two built and failed at the first call (`hopfield`,
+    `shared_weights_cross`). A config that used to run is now an error: a deliberate change, valid
+    configurations are unchanged.
 *   A value that is not a `str` is not judged here; `ProbabilityOutput` reports it.
 *   Do NOT re-spell the tuple at a layer: `test_common.py::TestValidateLogitProbabilityType` walks the
     package for it.
