@@ -457,7 +457,6 @@ def create_model_and_loss(
     patch_size: int,
     scale: str,
     num_classes: int = 1,
-    use_uncertainty_weighting: bool = False,
     **loss_kwargs
 ) -> Tuple[keras.Model, keras.losses.Loss]:
     """Create multitask model and loss function with VisionTaskType enum support."""
@@ -474,7 +473,6 @@ def create_model_and_loss(
         tasks=task_config,
         num_classes=num_classes,
         input_shape=(patch_size, patch_size),
-        use_uncertainty_weighting=use_uncertainty_weighting,
         **loss_kwargs
     )
 
@@ -568,9 +566,6 @@ def create_callbacks(
         callbacks.append(viz_callback)
         logger.info(f"Added per-epoch visualization callback (freq: {visualization_freq})")
 
-    if hasattr(loss_fn, 'use_uncertainty_weighting') and loss_fn.use_uncertainty_weighting:
-        logger.info("Added uncertainty weighting monitoring")
-
     return callbacks
 
 
@@ -612,7 +607,7 @@ def train_model(args: argparse.Namespace) -> None:
 
     model, loss_fn = create_model_and_loss(
         task_config=task_config, patch_size=args.patch_size, scale=args.scale,
-        num_classes=1, use_uncertainty_weighting=args.uncertainty_weighting,
+        num_classes=1,
         detection_weight=args.detection_weight,
         segmentation_weight=args.segmentation_weight,
         classification_weight=args.classification_weight
@@ -757,7 +752,6 @@ def save_training_results(
         },
         'loss_configuration': {
             'type': 'YOLOv12MultiTaskLoss',
-            'uses_uncertainty_weighting': args.uncertainty_weighting,
             'task_weights': {
                 'detection': args.detection_weight,
                 'segmentation': args.segmentation_weight,
@@ -932,8 +926,7 @@ def create_training_summary(
         f.write("Training Configuration:\n")
         f.write(f"  Batch Size: {config['training_args']['batch_size']}\n")
         f.write(f"  Learning Rate: {config['training_args']['learning_rate']}\n")
-        f.write(f"  Optimizer: {config['training_args']['optimizer']}\n")
-        f.write(f"  Uncertainty Weighting: {config['loss_configuration']['uses_uncertainty_weighting']}\n\n")
+        f.write(f"  Optimizer: {config['training_args']['optimizer']}\n\n")
 
         if 'visualization_config' in config:
             f.write("Visualization Configuration:\n")
@@ -982,7 +975,6 @@ def main():
     parser.add_argument('--optimizer', type=str, default='adamw', choices=['adam', 'adamw', 'sgd'])
     parser.add_argument('--patience', type=int, default=20)
 
-    parser.add_argument('--uncertainty-weighting', action='store_true')
     parser.add_argument('--detection-weight', type=float, default=1.0)
     parser.add_argument('--segmentation-weight', type=float, default=1.0)
     parser.add_argument('--classification-weight', type=float, default=1.0)

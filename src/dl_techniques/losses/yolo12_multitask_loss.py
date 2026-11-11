@@ -10,12 +10,13 @@ passed as the main loss function during `model.compile()`. The loss function the
 automatically infers which task-specific sub-loss to apply based on the tensor
 shapes of `y_true` and `y_pred` that Keras provides for each model output.
 
-This module also supports learnable uncertainty weighting to automatically
-balance the contribution of each task's loss during training.
+Each task's loss is scaled by its static weight. There is no learnable
+uncertainty weighting: a `Loss` is not a tracked layer, so variables created on
+it are never trained.
 
 Key Components:
     - YOLOv12MultiTaskLoss: The main, user-facing loss class that orchestrates all
-      sub-losses and handles dynamic or static weighting. It is the single entry
+      sub-losses and applies the static task weights. It is the single entry
       point for the training script.
 
     - YOLOv12ObjectDetectionLoss, DiceFocalSegmentationLoss, ClassificationFocalLoss:
@@ -865,8 +866,8 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
     A single, "smart" loss function for YOLOv12 multi-task models.
 
     This class is designed to be the sole loss function passed to `model.compile`.
-    It internally manages and routes to task-specific losses based on tensor shapes,
-    and handles learnable uncertainty weighting.
+    It internally manages and routes to task-specific losses based on tensor ranks
+    and scales each by its static task weight.
 
     The loss function automatically infers which task-specific sub-loss to apply
     based on the tensor shapes of y_true and y_pred that Keras provides for each
@@ -874,6 +875,13 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
         - 3D tensors: Object detection (batch, anchors, features)
         - 4D tensors: Segmentation (batch, height, width, classes)
         - 2D tensors: Classification (batch, classes)
+
+    An output whose rank is not 2, 3 or 4, or whose task is not enabled, raises
+    ``ValueError`` (it used to score ``0.0`` in silence).
+
+    There is no learnable uncertainty weighting: a ``Loss`` is not a tracked
+    layer, so variables created on it are never seen by the optimizer. The
+    keyword is refused (``TypeError``); put learnable weights in the model.
 
     Args:
         tasks: Task configuration specifying which tasks to enable. Only
@@ -884,10 +892,9 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
         num_classification_classes: Number of classes for classification task.
         num_classes: Fallback class count for any task whose own count is not given.
         input_shape: Input image dimensions as (height, width).
-        use_uncertainty_weighting: Whether to use learnable uncertainty weighting.
-        detection_weight: Static weight for detection loss (ignored if uncertainty weighting is used).
-        segmentation_weight: Static weight for segmentation loss (ignored if uncertainty weighting is used).
-        classification_weight: Static weight for classification loss (ignored if uncertainty weighting is used).
+        detection_weight: Static weight for detection loss.
+        segmentation_weight: Static weight for segmentation loss.
+        classification_weight: Static weight for classification loss.
         reg_max: Maximum regression range for distribution focal loss.
         name: Name of the loss function.
         **kwargs: Additional keyword arguments for the parent class.
@@ -903,7 +910,6 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
         # Fallback for any task whose own count is not given
         num_classes: int = 80,
         input_shape: Tuple[int, int] = (640, 640),
-        use_uncertainty_weighting: bool = False,
         detection_weight: float = 1.0,
         segmentation_weight: float = 1.0,
         classification_weight: float = 1.0,
@@ -925,7 +931,6 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
         # Store other configuration
         self.num_classes = num_classes  # serialized: the fallback of the three counts above
         self.input_shape = input_shape
-        self.use_uncertainty_weighting = use_uncertainty_weighting
         self.detection_weight = detection_weight
         self.segmentation_weight = segmentation_weight
         self.classification_weight = classification_weight
@@ -937,15 +942,10 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
         # Build task-specific loss functions
         self._build_loss_functions()
 
-        # Build uncertainty weights if enabled
-        if self.use_uncertainty_weighting:
-            self._build_uncertainty_weights()
-
         # Log initialization
         logger.info(
             f"YOLOv12MultiTaskLoss initialized for tasks: "
-            f"{self.task_config.get_task_names()}. "
-            f"Uncertainty weighting: {self.use_uncertainty_weighting}"
+            f"{self.task_config.get_task_names()}"
         )
         logger.info(f"Class counts - Detection: {self.num_detection_classes}, "
                    f"Segmentation: {self.num_segmentation_classes}, "
@@ -969,32 +969,6 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
         if self.task_config.has_classification():
             self._internal_losses[VisionTaskType.CLASSIFICATION.value] = ClassificationFocalLoss(
                 from_logits=True
-            )
-
-    def _build_uncertainty_weights(self) -> None:
-        """Create learnable log-variance weights for each enabled task."""
-        if self.task_config.has_detection():
-            self.detection_log_var = keras.Variable(
-                initializer=keras.initializers.Zeros(),
-                shape=(),
-                name="detection_log_var",
-                trainable=True,
-            )
-
-        if self.task_config.has_segmentation():
-            self.segmentation_log_var = keras.Variable(
-                initializer=keras.initializers.Zeros(),
-                shape=(),
-                name="segmentation_log_var",
-                trainable=True,
-            )
-
-        if self.task_config.has_classification():
-            self.classification_log_var = keras.Variable(
-                initializer=keras.initializers.Zeros(),
-                shape=(),
-                name="classification_log_var",
-                trainable=True,
             )
 
     def _infer_task_from_shapes(
@@ -1051,70 +1025,46 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
         # Infer task from prediction tensor shape
         task_name = self._infer_task_from_shapes(y_pred)
 
-        # Return zero loss if task cannot be inferred or is not supported
+        # DECISION plan-2026-11-11T131349-13b28b37/D-005
+        # An output this loss cannot route is an error, not a free 0.0. The old
+        # `return 0.0` let a rank-5 output (or an output of a task that is not
+        # enabled) fit with `loss: [0.0]`, no warning and no gradient. The rank
+        # is static at trace time, so raising here is safe in graph mode. Do NOT
+        # restore a silent fallback; guarded by
+        # tests/test_losses/test_yolo12_multitask_loss.py::TestAnUnroutableOutputRaises.
         if task_name is None or task_name not in self._internal_losses:
-            return keras.ops.convert_to_tensor(0.0, dtype=y_pred.dtype)
+            raise ValueError(
+                f"YOLOv12MultiTaskLoss cannot route an output of rank "
+                f"{len(y_pred.shape)} (shape {tuple(y_pred.shape)}): rank 3 is "
+                f"detection, 4 segmentation, 2 classification. Enabled tasks: "
+                f"{sorted(self._internal_losses)}; the output maps to "
+                f"{task_name!r}."
+            )
 
-        # Compute raw loss using task-specific loss function
         raw_loss = self._internal_losses[task_name](y_true, y_pred)
 
-        # Apply weighting (either learnable uncertainty or static)
-        if self.use_uncertainty_weighting:
-            if task_name == VisionTaskType.DETECTION.value:
-                return (
-                    keras.ops.exp(-self.detection_log_var) * raw_loss +
-                    self.detection_log_var
-                )
-            elif task_name == VisionTaskType.SEGMENTATION.value:
-                return (
-                    keras.ops.exp(-self.segmentation_log_var) * raw_loss +
-                    self.segmentation_log_var
-                )
-            else:  # Classification
-                return (
-                    keras.ops.exp(-self.classification_log_var) * raw_loss +
-                    self.classification_log_var
-                )
-        else:
-            # Apply static weights
-            if task_name == VisionTaskType.DETECTION.value:
-                return self.detection_weight * raw_loss
-            elif task_name == VisionTaskType.SEGMENTATION.value:
-                return self.segmentation_weight * raw_loss
-            else:  # Classification
-                return self.classification_weight * raw_loss
+        if task_name == VisionTaskType.DETECTION.value:
+            return self.detection_weight * raw_loss
+        elif task_name == VisionTaskType.SEGMENTATION.value:
+            return self.segmentation_weight * raw_loss
+        else:  # Classification
+            return self.classification_weight * raw_loss
 
     def get_task_weights(self) -> Dict[str, float]:
         """
-        Returns the current weights for each task, for callback logging.
+        Returns the configured static weight of each enabled task, for callback logging.
 
         Returns:
-            Dictionary mapping task names to their current weights.
+            Dictionary mapping task names to their weights.
         """
         weights = {}
 
-        if self.use_uncertainty_weighting:
-            # Extract weights from learnable uncertainty parameters
-            if self.task_config.has_detection():
-                weights[VisionTaskType.DETECTION.value] = float(
-                    keras.ops.exp(-self.detection_log_var)
-                )
-            if self.task_config.has_segmentation():
-                weights[VisionTaskType.SEGMENTATION.value] = float(
-                    keras.ops.exp(-self.segmentation_log_var)
-                )
-            if self.task_config.has_classification():
-                weights[VisionTaskType.CLASSIFICATION.value] = float(
-                    keras.ops.exp(-self.classification_log_var)
-                )
-        else:
-            # Return static weights
-            if self.task_config.has_detection():
-                weights[VisionTaskType.DETECTION.value] = self.detection_weight
-            if self.task_config.has_segmentation():
-                weights[VisionTaskType.SEGMENTATION.value] = self.segmentation_weight
-            if self.task_config.has_classification():
-                weights[VisionTaskType.CLASSIFICATION.value] = self.classification_weight
+        if self.task_config.has_detection():
+            weights[VisionTaskType.DETECTION.value] = self.detection_weight
+        if self.task_config.has_segmentation():
+            weights[VisionTaskType.SEGMENTATION.value] = self.segmentation_weight
+        if self.task_config.has_classification():
+            weights[VisionTaskType.CLASSIFICATION.value] = self.classification_weight
 
         return weights
 
@@ -1144,7 +1094,6 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
             # The fallback of the three counts above
             "num_classes": self.num_classes,
             "input_shape": self.input_shape,
-            "use_uncertainty_weighting": self.use_uncertainty_weighting,
             "detection_weight": self.detection_weight,
             "segmentation_weight": self.segmentation_weight,
             "classification_weight": self.classification_weight,
@@ -1205,7 +1154,7 @@ def create_yolov12_multitask_loss(
         ...     num_detection_classes=80,
         ...     num_segmentation_classes=80,
         ...     input_shape=(640, 640),
-        ...     use_uncertainty_weighting=True
+        ...     segmentation_weight=0.1
         ... )
         >>>
         >>> # Crack detection fine-tuning

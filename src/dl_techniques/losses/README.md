@@ -188,4 +188,4 @@ loss = create_yolov12_multitask_loss(
 model.compile(optimizer="adam", loss=loss)
 ```
 
-One loss object is applied to every output. It picks the sub-loss by tensor rank, not by output name. An output of any other rank silently contributes 0.
+One loss object is applied to every output. It picks the sub-loss by tensor rank, not by output name. An output of any other rank, or of a task that is not enabled, raises `ValueError`. There is no learnable uncertainty weighting (a `Loss` is not a tracked layer, so its variables never train); `use_uncertainty_weighting` is refused with `TypeError`, and the task weights are the static `*_weight` arguments.

@@ -26,8 +26,7 @@ from dl_techniques.datasets.vision.coco import COCODatasetBuilder, COCO_CLASSES 
 
 def create_coco_model_and_loss(
         scale: str, img_size: int,
-        detection_classes: int = 80, segmentation_classes: int = 80,
-        use_uncertainty_weighting: bool = False
+        detection_classes: int = 80, segmentation_classes: int = 80
 ) -> Tuple[keras.Model, keras.losses.Loss]:
     """Create YOLOv12 multi-task model and loss for COCO pre-training."""
     logger.info(f"Creating YOLOv12-{scale} for COCO (det={detection_classes}, seg={segmentation_classes})")
@@ -45,7 +44,6 @@ def create_coco_model_and_loss(
         num_detection_classes=detection_classes,
         num_segmentation_classes=segmentation_classes,
         input_shape=(img_size, img_size),
-        use_uncertainty_weighting=use_uncertainty_weighting,
         detection_weight=1.0, segmentation_weight=0.1
     )
 
@@ -502,7 +500,6 @@ def main():
     parser.add_argument('--shuffle-buffer', type=int, default=100)
     parser.add_argument('--limit-train-samples', type=int, default=None)
 
-    parser.add_argument('--uncertainty-weighting', action='store_true')
     parser.add_argument('--patience', type=int, default=10)
     parser.add_argument('--save-dir', type=str, default='coco_pretrain_results')
     parser.add_argument('--weights-name', type=str, default=None)
@@ -559,8 +556,7 @@ def main():
     model, loss_fn = create_coco_model_and_loss(
         scale=args.scale, img_size=args.img_size,
         detection_classes=args.detection_classes,
-        segmentation_classes=args.segmentation_classes,
-        use_uncertainty_weighting=args.uncertainty_weighting
+        segmentation_classes=args.segmentation_classes
     )
 
     if args.limit_train_samples:
