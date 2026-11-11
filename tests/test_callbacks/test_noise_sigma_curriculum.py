@@ -2,7 +2,6 @@
 
 import math
 
-import numpy as np
 import pytest
 import keras
 import tensorflow as tf
