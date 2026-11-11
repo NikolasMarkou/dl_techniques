@@ -22,7 +22,12 @@ Both callbacks:
 * swallow all exceptions and log a warning via ``dl_techniques.utils.logger``
   so visualization failures never take down training;
 * cache a fixed ``eval_pixels`` batch at construction time for cross-epoch
-  visual stability.
+  visual stability;
+* draw the tube mask from a fixed ``mask_seed`` (one mask, the same in both
+  callbacks and in every epoch) and leave the global Keras seed generator
+  alone, so watching a run does not change it;
+* fire after epochs ``frequency``, ``2 * frequency``, ... (1-based, as every
+  sibling callback does) and name the files by the completed epoch.
 """
 
 from __future__ import annotations
@@ -43,6 +48,11 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.matplotlib_backend import import_pyplot
 
 # ------------------------------------------------------------------------------
+
+#: Default ``mask_seed`` of BOTH callbacks. They must agree, so that the overlay
+#: shows the very mask whose prediction error the heatmap outlines.
+DEFAULT_MASK_SEED: int = 0
+
 
 def _normalize_pixels(eval_pixels: Any) -> np.ndarray:
     """Coerce ``eval_pixels`` to a numpy array of shape ``(B, T, H, W, C)``.
@@ -66,11 +76,18 @@ def _to_display_image(frame: np.ndarray) -> np.ndarray:
     Tolerant of the common conventions used in this repo:
     * already in ``[0, 1]`` → identity;
     * in ``[-1, 1]`` → shift + scale;
-    * in ``[0, 255]`` → divide.
+    * in ``[0, 255]`` → divide;
+    * negative AND above 1.5 (a standardized frame, e.g. standard-normal or
+      ImageNet mean/std) → min-max over the frame.
     """
     f = frame.astype(np.float32)
     lo, hi = float(np.nanmin(f)), float(np.nanmax(f))
-    if hi > 1.5 and hi <= 260.0:
+    if lo < -0.01 and hi > 1.5:
+        # DECISION plan-2026-11-11T131349-13b28b37/D-020: a standardized frame
+        # is not a byte frame. Dividing it by 255 (the branch below) maps
+        # [-2.7, 2.9] to [0, 0.011], near black. Do not reorder these branches.
+        f = (f - lo) / max(hi - lo, 1e-12)
+    elif hi > 1.5 and hi <= 260.0:
         f = f / 255.0
     elif lo < -0.01:
         f = (f + 1.0) / 2.0
@@ -100,18 +117,26 @@ def _upsample_mask(mask_hp: np.ndarray, target_hw: tuple[int, int]) -> np.ndarra
 class LatentMaskOverlayCallback(keras.callbacks.Callback):
     """Save input frames with the tube-mask tinted over masked patches.
 
-    At the end of every *frequency* epochs, calls ``model.mask_gen`` once to
+    After every *frequency* completed epochs, calls ``model.mask_gen`` once to
     sample a spatial mask, upsamples it to image resolution, and blends a
-    coloured tint over the masked regions of the cached ``eval_pixels``.
+    coloured tint over the masked regions of the cached ``eval_pixels``. The
+    mask is drawn with ``seed=mask_seed``: it is the same in every epoch and the
+    same as :class:`PatchPredictionErrorCallback` draws, and the global Keras
+    seed generator is not advanced.
 
     Args:
         eval_pixels: Numpy-compatible batch of shape ``(B, T, H, W, C)`` or
             ``(B, H, W, C)``.
         output_dir: Directory to write PNGs into. Created if missing.
-        frequency: Write every *frequency* epochs (0-indexed). Defaults to 1.
-            Must be >= 1, otherwise ``ValueError`` is raised.
+        frequency: Write after every *frequency* completed epochs, so after
+            epochs ``frequency``, ``2 * frequency``, ... (1-based). Files are
+            named ``epoch_{completed:03d}_...``. Defaults to 1. Must be >= 1,
+            otherwise ``ValueError`` is raised.
         max_samples: Max rows in the grid. Defaults to 4.
         max_frames: Max columns (frames) in the grid. Defaults to 4.
+        mask_seed: Int seed of the tube mask. Defaults to
+            ``DEFAULT_MASK_SEED``, the same default as
+            :class:`PatchPredictionErrorCallback`.
         tint: RGB triple in ``[0, 1]`` used to tint masked pixels.
             Defaults to red ``(1.0, 0.0, 0.0)``.
         alpha: Blend weight for the tint. Defaults to 0.4.
@@ -124,6 +149,7 @@ class LatentMaskOverlayCallback(keras.callbacks.Callback):
         frequency: int = 1,
         max_samples: int = 4,
         max_frames: int = 4,
+        mask_seed: int = DEFAULT_MASK_SEED,
         tint: tuple[float, float, float] = (1.0, 0.0, 0.0),
         alpha: float = 0.4,
     ) -> None:
@@ -136,11 +162,13 @@ class LatentMaskOverlayCallback(keras.callbacks.Callback):
         self.frequency = int(frequency)
         self.max_samples = int(max_samples)
         self.max_frames = int(max_frames)
+        self.mask_seed = int(mask_seed)
         self.tint = tuple(float(c) for c in tint)
         self.alpha = float(alpha)
         self._disabled: bool = False
 
     def on_train_begin(self, logs: Optional[Dict] = None) -> None:
+        self._disabled = False  # per run: a disabled first fit must not silence the next
         try:
             cfg = getattr(self.model, "config", None)
             enabled = bool(getattr(cfg, "mask_prediction_enabled", True))
@@ -157,17 +185,19 @@ class LatentMaskOverlayCallback(keras.callbacks.Callback):
     def on_epoch_end(self, epoch: int, logs: Optional[Dict] = None) -> None:
         if self._disabled:
             return
-        if epoch % self.frequency != 0:
+        if (epoch + 1) % self.frequency != 0:
             return
 
         try:
             B = self.eval_pixels.shape[0]
-            mask_spatial = self.model.mask_gen(B, training=False)
+            mask_spatial = self.model.mask_gen(
+                B, training=False, seed=self.mask_seed
+            )
             mask_np = np.asarray(mask_spatial).astype(np.float32)  # (B, Hp, Wp)
-            self._save_grid(epoch, mask_np)
+            self._save_grid(epoch + 1, mask_np)
         except Exception as e:  # noqa: BLE001
             logger.warning(
-                f"LatentMaskOverlayCallback error at epoch {epoch}: {e}"
+                f"LatentMaskOverlayCallback error at epoch {epoch + 1}: {e}"
             )
         finally:
             gc.collect()
@@ -237,20 +267,27 @@ class LatentMaskOverlayCallback(keras.callbacks.Callback):
 class PatchPredictionErrorCallback(keras.callbacks.Callback):
     """Save a per-patch L2-error heatmap of JEPA latent prediction.
 
-    At the end of every *frequency* epochs, runs ``encode_frames`` and
+    After every *frequency* completed epochs, runs ``encode_frames`` and
     ``predictor`` on the cached ``eval_pixels`` with ``training=False`` and
     plots the mean-squared error along the embedding axis for each
     ``(sample, frame)`` pair. If masking is enabled, optionally overlays a
-    thin white border where ``mask == 1``.
+    thin white border where ``mask == 1``. The mask is drawn with
+    ``seed=mask_seed``: the very mask :class:`LatentMaskOverlayCallback` shows,
+    the same in every epoch, with the global Keras seed generator left alone.
 
     Args:
         eval_pixels: Numpy-compatible batch of shape ``(B, T, H, W, C)`` or
             ``(B, H, W, C)``.
         output_dir: Directory to write PNGs into. Created if missing.
-        frequency: Write every *frequency* epochs (0-indexed). Defaults to 1.
-            Must be >= 1, otherwise ``ValueError`` is raised.
+        frequency: Write after every *frequency* completed epochs, so after
+            epochs ``frequency``, ``2 * frequency``, ... (1-based). Files are
+            named ``epoch_{completed:03d}_...``. Defaults to 1. Must be >= 1,
+            otherwise ``ValueError`` is raised.
         max_samples: Max rows in the grid. Defaults to 4.
         max_frames: Max columns (frames) in the grid. Defaults to 4.
+        mask_seed: Int seed of the tube mask. Defaults to
+            ``DEFAULT_MASK_SEED``, the same default as
+            :class:`LatentMaskOverlayCallback`.
     """
 
     def __init__(
@@ -260,6 +297,7 @@ class PatchPredictionErrorCallback(keras.callbacks.Callback):
         frequency: int = 1,
         max_samples: int = 4,
         max_frames: int = 4,
+        mask_seed: int = DEFAULT_MASK_SEED,
     ) -> None:
         super().__init__()
         if frequency < 1:
@@ -270,10 +308,13 @@ class PatchPredictionErrorCallback(keras.callbacks.Callback):
         self.frequency = int(frequency)
         self.max_samples = int(max_samples)
         self.max_frames = int(max_frames)
+        self.mask_seed = int(mask_seed)
         self._disabled: bool = False
         self._mask_enabled: bool = True
 
     def on_train_begin(self, logs: Optional[Dict] = None) -> None:
+        self._disabled = False  # per run: a disabled first fit must not silence the next
+        self._mask_enabled = True
         try:
             cfg = getattr(self.model, "config", None)
             if cfg is None:
@@ -294,7 +335,7 @@ class PatchPredictionErrorCallback(keras.callbacks.Callback):
     def on_epoch_end(self, epoch: int, logs: Optional[Dict] = None) -> None:
         if self._disabled:
             return
-        if epoch % self.frequency != 0:
+        if (epoch + 1) % self.frequency != 0:
             return
 
         try:
@@ -302,7 +343,9 @@ class PatchPredictionErrorCallback(keras.callbacks.Callback):
             z = self.model.encode_frames(pixels)  # (B, T, Hp, Wp, D)
             if self._mask_enabled:
                 B = self.eval_pixels.shape[0]
-                mask_spatial = self.model.mask_gen(B, training=False)  # (B,Hp,Wp)
+                mask_spatial = self.model.mask_gen(
+                    B, training=False, seed=self.mask_seed
+                )  # (B,Hp,Wp)
                 Hp = int(self.model.config.patches_per_side)
                 D = int(self.model.config.embed_dim)
                 M = ops.reshape(
@@ -320,10 +363,10 @@ class PatchPredictionErrorCallback(keras.callbacks.Callback):
             err = ops.mean(ops.square(pred - z), axis=-1)  # (B, T, Hp, Wp)
             err_np = np.asarray(err).astype(np.float32)
 
-            self._save_grid(epoch, err_np, mask_np)
+            self._save_grid(epoch + 1, err_np, mask_np)
         except Exception as e:  # noqa: BLE001
             logger.warning(
-                f"PatchPredictionErrorCallback error at epoch {epoch}: {e}"
+                f"PatchPredictionErrorCallback error at epoch {epoch + 1}: {e}"
             )
         finally:
             gc.collect()

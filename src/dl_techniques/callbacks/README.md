@@ -10,7 +10,6 @@ from dl_techniques.callbacks.consecutive_increase_early_stopping import Consecut
 
 **Cadence.** Most callbacks fire when `(epoch + 1) % frequency == 0`, so `frequency=5` fires after epochs 5, 10, and so on (1-based). Exceptions:
 
-- `jepa_visualization` uses `epoch % frequency`, so it also fires after the first epoch.
 - `EpochAnalyzerCallback` counts from `start_epoch`.
 - `PeriodicReassignCallback` uses multiples of `every_n_epochs` that are at or after `start_epoch`.
 

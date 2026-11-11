@@ -87,12 +87,19 @@ class TubeMaskGenerator(keras.layers.Layer):
         self,
         batch_size: keras.KerasTensor,
         training: Optional[bool] = None,
+        seed: Optional[int] = None,
     ) -> keras.KerasTensor:
         """Sample a fresh tube mask.
 
         :param batch_size: Scalar tensor or Python int, the number of samples.
         :param training: Accepted for API consistency; ignored, since masks
             are always sampled the same way regardless of mode.
+        :param seed: Optional Python int. ``None`` (the default, and what the
+            model's forward pass uses) draws from the global Keras seed
+            generator and advances it. An int makes the draw a pure function
+            of the seed: the same seed gives the same mask and the global
+            generator is left untouched, which is what a diagnostic callback
+            needs (see ``dl_techniques.callbacks.jepa_visualization``).
         :return: `(B, H_p, W_p)` float32 mask, `1.0` masked and `0.0`
             visible, with the per-row sum exactly `self.num_masked`.
         :rtype: keras.KerasTensor
@@ -106,7 +113,12 @@ class TubeMaskGenerator(keras.layers.Layer):
                 dtype="float32",
             )
 
-        noise = random.uniform(shape=(batch_size, self._num_patches))
+        # DECISION plan-2026-11-11T131349-13b28b37/D-020: an int ``seed`` is
+        # forwarded as is. Do not replace it with a callback-local numpy sampler
+        # (a second copy of this sampler), and do not drop it: an unseeded draw
+        # advances the GLOBAL Keras seed generator, so a diagnostic callback that
+        # called this would change the training run's RNG stream.
+        noise = random.uniform(shape=(batch_size, self._num_patches), seed=seed)
 
         # rank[i, j] is where patch j falls in sample i's random ordering;
         # the smallest K ranks are masked.

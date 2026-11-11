@@ -99,7 +99,7 @@ each, with `val_` twins only when validation is on.
 | `--val-steps` | `0` | Validation batches per epoch. 0 disables validation. BDD100K only. |
 | `--val-fraction` | `0.1` | Fraction of BDD100K files held out, disjoint from train by seeded permutation. |
 | `--early-stopping-patience` | `0` | 0 disables. |
-| `--visualization-frequency` | `1` | Write visualization PNGs every N epochs. |
+| `--visualization-frequency` | `1` | Write visualization PNGs after epochs N, 2N, ... (1-based; `epoch_NNN` is the completed epoch). |
 
 `--image-size`, `--patience`, `--lr-schedule` and `--show-plots` are inherited
 from `create_base_argument_parser()` and **this script reads none of them**.
