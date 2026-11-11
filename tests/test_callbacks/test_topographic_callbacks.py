@@ -387,11 +387,15 @@ class TestSpatialLossLogger:
         assert recorded["spatial/unweighted"] == pytest.approx(
             recorded["spatial/tap"]
         )
+        # `loss` is the epoch's running mean, so the subtracted spatial term is
+        # the running mean of the totals too (D-019), not the last batch's total.
+        # The independent per-batch check is in TestSpatialLossLoggerBasis.
+        mean_total = callback._total_sum / callback._total_count
         assert recorded["task_loss"] == pytest.approx(
-            recorded["loss"] - recorded["spatial/total"], rel=1e-5
+            recorded["loss"] - mean_total, rel=1e-5
         )
         assert recorded["spatial/share"] == pytest.approx(
-            recorded["spatial/total"] / recorded["loss"], rel=1e-5
+            mean_total / recorded["loss"], rel=1e-5
         )
 
     def test_the_split_moves_with_alpha(self):
@@ -555,3 +559,145 @@ class TestSpatialLossLogger:
     def test_a_non_positive_cadence_is_rejected(self, value):
         with pytest.raises(ValueError, match="log_every must be >= 1"):
             SpatialLossLogger(log_every=value)
+
+
+class _Recorder(keras.callbacks.Callback):
+    """Copies each batch's ``logs`` AFTER the logger has written into them."""
+
+    def __init__(self):
+        super().__init__()
+        self.batches = []
+
+    def on_train_batch_end(self, batch, logs=None):
+        self.batches.append(dict(logs))
+
+
+class TestSpatialLossLoggerBasis:
+    """``logs["loss"]`` is a running mean over the epoch; the spatial total the
+    logger subtracts from it must be a running mean too."""
+
+    def _fit(self, *, rows=8, aggregate=True, callbacks_before=()):
+        keras.utils.set_random_seed(0)
+        backbone = _TappedModel()
+        head = _head(backbone, aggregate)
+        head.compile(optimizer=keras.optimizers.SGD(1e-2))
+        head(np.zeros((1, 5, 4), dtype="float32"), training=False)
+        callback = SpatialLossLogger(log_every=1)
+        recorder = _Recorder()
+        head.fit(
+            _dataset(rows=rows), epochs=1, shuffle=False, verbose=0,
+            callbacks=[*callbacks_before, callback, recorder],
+        )
+        return callback, recorder, head
+
+    # DECISION plan-2026-11-11T131349-13b28b37/D-019: pinned by this test.
+    # `task_loss` must use the running mean of the spatial totals beside the
+    # running-mean `logs["loss"]`; the last-batch total mixes two bases.
+    def test_task_loss_subtracts_the_running_mean_of_the_spatial_totals(self):
+        _, recorder, _ = self._fit()
+        batches = recorder.batches
+        assert len(batches) == 4
+        totals = [b["spatial/total"] for b in batches]
+        # The premise: the totals move from batch to batch, otherwise the two
+        # bases coincide and the test could not tell them apart.
+        assert max(totals) - min(totals) > 1e-3, totals
+
+        for index, logs in enumerate(batches):
+            mean_total = float(np.mean(totals[: index + 1]))
+            assert logs["task_loss"] == pytest.approx(
+                logs["loss"] - mean_total, rel=1e-5, abs=1e-6
+            ), (index, logs)
+            assert logs["spatial/share"] == pytest.approx(
+                mean_total / logs["loss"], rel=1e-5
+            ), (index, logs)
+
+    def test_cadence_skipped_batches_still_enter_the_running_mean(self):
+        keras.utils.set_random_seed(0)
+        backbone = _TappedModel()
+        head = _head(backbone, aggregate=True)
+        head.compile(optimizer=keras.optimizers.SGD(1e-2))
+        head(np.zeros((1, 5, 4), dtype="float32"), training=False)
+        callback = SpatialLossLogger(log_every=2)
+        recorder = _Recorder()
+        head.fit(
+            _dataset(rows=8), epochs=1, shuffle=False, verbose=0,
+            callbacks=[callback, recorder],
+        )
+        emitted = [b for b in recorder.batches if "task_loss" in b]
+        assert len(emitted) == 2
+        # The 4th batch's mean covers batches 1..4, not only 2 and 4: the totals
+        # of the skipped batches were read as well.
+        assert callback._total_count == 4
+
+    def test_the_running_mean_restarts_each_epoch(self):
+        callback, _, head = self._fit()
+        assert callback._total_count == 4
+        callback.on_epoch_begin(1)
+        assert callback._total_count == 0
+        assert callback._total_sum == 0.0
+
+    def test_a_missing_compile_loss_key_warns_once(self, caplog):
+        with caplog.at_level("DEBUG", logger="dl"):
+            self._fit()
+        warnings = [
+            r for r in caplog.records
+            if r.levelname == "WARNING" and "compile_loss" in r.getMessage()
+        ]
+        # Four batches emit; the warning fires once, not once per batch.
+        assert len(warnings) == 1, [r.getMessage() for r in caplog.records]
+
+    def test_no_warning_when_compile_loss_is_present(self, caplog):
+        backbone = _TappedModel()
+        backbone(np.zeros((1, 5, 4), dtype="float32"), training=True)
+        callback = SpatialLossLogger(log_every=1)
+        callback.set_model(backbone)
+        with caplog.at_level("DEBUG", logger="dl"):
+            callback.on_train_batch_end(0, {"loss": 5.0, "compile_loss": 5.0})
+        assert not [
+            r for r in caplog.records if "compile_loss" in r.getMessage()
+        ]
+
+    def test_an_unaggregated_head_warns_at_set_model(self, caplog):
+        head = _head(_TappedModel(), aggregate=False)
+        callback = SpatialLossLogger(log_every=1)
+        with caplog.at_level("DEBUG", logger="dl"):
+            callback.set_model(head)
+        assert [
+            r for r in caplog.records
+            if r.levelname == "WARNING"
+            and "aggregate_backbone_losses" in r.getMessage()
+        ], [r.getMessage() for r in caplog.records]
+
+    def test_an_aggregated_head_does_not_warn_at_set_model(self, caplog):
+        head = _head(_TappedModel(), aggregate=True)
+        callback = SpatialLossLogger(log_every=1)
+        with caplog.at_level("DEBUG", logger="dl"):
+            callback.set_model(head)
+        assert not [
+            r for r in caplog.records
+            if "aggregate_backbone_losses" in r.getMessage()
+        ]
+
+    def test_none_logs_are_ignored(self):
+        backbone = _TappedModel()
+        backbone(np.zeros((1, 5, 4), dtype="float32"), training=True)
+        callback = SpatialLossLogger(log_every=1)
+        callback.set_model(backbone)
+        callback.on_train_batch_end(0, None)
+        assert callback.last_recorded == {}
+
+    def test_a_zero_loss_with_verbose_does_not_raise(self):
+        backbone = _TappedModel()
+        backbone(np.zeros((1, 5, 4), dtype="float32"), training=True)
+        callback = SpatialLossLogger(log_every=1, verbose=1)
+        callback.set_model(backbone)
+        callback.on_train_batch_end(0, {"loss": 0.0})
+        assert np.isnan(callback.last_recorded["spatial/share"])
+
+    def test_the_docstrings_name_the_keys_the_code_writes(self):
+        import dl_techniques.callbacks.spatial_loss_logger as module
+
+        assert "spatial_share" not in module.__doc__
+        assert "spatial_share" not in SpatialLossLogger.__doc__
+        assert "identically" not in module.__doc__
+        assert "steps_per_execution" in SpatialLossLogger.__doc__
