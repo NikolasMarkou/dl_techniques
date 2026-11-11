@@ -170,6 +170,22 @@ class PerChannelBinaryLoss(keras.losses.Loss):
                     f"y_true of rank {len(y_true.shape)}; it must return one value per "
                     f"element so the per-channel weights can be applied."
                 )
+            # A size-1 channel axis has the right rank but broadcasts against the
+            # per-channel weights below, which sum to 1, so channel_weights is a
+            # no-op again (measured: 0.29935 for [10, 1, .1] and for None). Only
+            # static sizes are compared; a symbolic width cannot be judged here.
+            loss_width, label_width = loss_tensor.shape[-1], y_true.shape[-1]
+            if (
+                isinstance(loss_width, int)
+                and isinstance(label_width, int)
+                and loss_width != label_width
+            ):
+                raise ValueError(
+                    f"base_loss {self.base_loss_name} returned channel axis of size "
+                    f"{loss_width} for y_true with {label_width} channels (shape "
+                    f"{tuple(loss_tensor.shape)}); it must keep one value per channel "
+                    f"so the per-channel weights can be applied."
+                )
 
         # 2. Compute Adaptive Channel Weights (Vectorized)
         # ------------------------------------------------

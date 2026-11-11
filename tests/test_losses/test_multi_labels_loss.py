@@ -477,6 +477,39 @@ class TestPerChannelBinaryLossRefusesABaseThatCollapsesChannels:
         with pytest.raises(ValueError, match="rank"):
             loss_fn.call(y_true, y_pred)
 
+    def test_a_base_that_keeps_a_size_one_channel_axis_raises_at_call(self):
+        """Rank (B, H, W, 1) passes the rank check but broadcasts against the weights.
+
+        Measured before the width check: channel_weights [10, 1, .1] and None gave
+        the same value for such a base, so the weights were a silent no-op.
+        """
+
+        @keras.saving.register_keras_serializable(package="test_multi_labels_loss")
+        class SizeOneChannelLoss(keras.losses.Loss):
+            def call(self, y_true, y_pred):
+                err = ops.square(y_true - y_pred)
+                return ops.mean(err, axis=-1, keepdims=True)
+
+        y_true = ops.cast(keras.random.uniform((2, 8, 8, 3), seed=1) > 0.5, "float32")
+        y_pred = keras.random.uniform((2, 8, 8, 3), minval=0.1, maxval=0.9, seed=2)
+        loss_fn = PerChannelBinaryLoss(SizeOneChannelLoss(), channel_weights=[10.0, 1.0, 0.1])
+        with pytest.raises(ValueError, match="channel axis"):
+            loss_fn.call(y_true, y_pred)
+
+    def test_a_per_channel_base_with_a_symbolic_channel_width_still_works(self):
+        """The width check compares only static sizes: a per-channel base under fit passes."""
+        loss_fn = PerChannelBinaryLoss(
+            WeightedBinaryFocalLoss(alpha=0.5, gamma=1.0), channel_weights=[10.0, 1.0, 0.1]
+        )
+        inputs = keras.layers.Input(shape=(8, 8, 3))
+        outputs = keras.layers.Conv2D(3, 1, activation="sigmoid")(inputs)
+        model = keras.Model(inputs, outputs)
+        model.compile(optimizer="adam", loss=loss_fn)
+        x = keras.random.uniform((4, 8, 8, 3), seed=3)
+        y = ops.cast(keras.random.uniform((4, 8, 8, 3), seed=4) > 0.5, "float32")
+        history = model.fit(x, y, epochs=1, batch_size=2, verbose=0)
+        assert np.isfinite(history.history["loss"][0])
+
     def test_channel_weights_change_the_value_with_an_elementwise_base(self):
         y_true = ops.cast(keras.random.uniform((2, 8, 8, 3), seed=1) > 0.5, "float32")
         y_pred = keras.random.uniform((2, 8, 8, 3), minval=0.1, maxval=0.9, seed=2)
