@@ -346,7 +346,7 @@ nothing for `bfcnn`, `scunet` or float32. `mixed_bfloat16` was not measured and 
 | `transform_args.patches_per_image` | `4` | crops per decoded image per epoch (and fixed crops per validation image) |
 | `transform_args.augment` | `"auto"` | `none`, `flip` or `dihedral`; auto is the recipe's, a flip for folder data |
 | `transform_args.channels` | `3` | 1 (grey) or 3 (RGB): every image is decoded to this many channels |
-| `metric_args.watch_metric` | `"auto"` | the metric that picks the best epoch inside the selection window; auto is `val_psnr` |
+| `metric_args.watch_metric` | `"auto"` | the metric that picks the best epoch inside the selection window, which starts at the curriculum's last epoch whatever the metric; auto is `val_psnr`; accepted: `val_psnr`, `val_ssim`, `val_mae`, `val_loss` (fixed validation set) and the training `loss`, `psnr`, `mae`, `ssim` (noisier: fresh noise draws each epoch) |
 | `metric_args.success_gain_db` | `"auto"` | auto is 1.0 dB, an inferred number and not a literature value |
 | `metric_args.test_sigmas_255` | `[15.0, 25.0, 50.0]` | noise levels, on the 0-255 scale, of the held-out cells |
 | `optim_args.warmup_epochs` | `"auto"` | `max(1, round(0.1 * epochs))` for a cosine schedule (the legacy rule: 10 at the recipe's 100 epochs), 0 for a constant one |
@@ -541,11 +541,25 @@ models' whole-image PSNR on `kodak24` and `cbsd68` at `sigma_255` 15, 25 and 50,
 the four passes as weak: six of the seven T exceed 0.5 dB (0.9 to 4.3 dB), because the legacy models themselves differ by that much
 on whole images between seeds (the final models of seeds 42, 43 and 44 score 19.0, 14.7 and 17.4 dB on `kodak24` at 50), so a port
 difference below a few dB cannot be seen there; only the last `val_psnr` (T 0.234) discriminates at a useful level, and it is one of
-the three misses. The runs were not repeated and no recipe was tuned. The arms are NOT the same pipeline, and nothing separates a
-pipeline effect from a defect: (1) a stateful endless stream against a finite stateless epoch (which crops of which file are seen, and
+the three misses. The runs were not repeated and no recipe was tuned (D-036). The verdict stays MISS, and the miss is classified as a
+**pipeline effect** (the validation set, plus a small augmentation and stream effect) and not as a defect of the port (D-037). The arms
+are not the same pipeline: (1) a stateful endless stream against a finite stateless epoch (which crops of which file are seen, and
 when); (2) the legacy dihedral augmentation against the API's flip, which the arm did not override; (3) the validation file set, which
 is the legacy's 50 files that depend on the seed (24 to 29 of them are shared with the API's fixed set) against the API's one fixed set, and 320
 against 200 patches, so `val_psnr` levels differ between arms by something that is not the weights; (4) the initial weights.
+
+**The matched-set rescore** (a CPU probe after the verdict, not a gated scalar): all seven final models (four legacy, three API) scored
+on the API's fixed validation patches (50 DIV2K validation files, 4 crops, clip on, sigma U(0, 0.25)) for `val_seed` 0, 1 and 2. API
+minus legacy is +0.135, +0.129 and +0.105 dB, all inside T 0.234 and inside the legacy seed range on that set (0.243); at `val_seed` 0
+the legacy models read 29.875, 29.661 and 29.632 (mean 29.723) and the API models 29.930, 29.933 and 29.711 (mean 29.858). The legacy
+seed-42 model scores 29.652 on its own seed-dependent set and 29.875 on the API's, so the legacy sets are about 0.2 dB harder. The probe
+reproduces the API runs' logged last `val_psnr` (29.930, 29.933, 29.711 against the CSV's 29.928, 29.933, 29.714), so the metric is
+computed as logged. Leakage was checked and excluded (train is COCO train2017 plus DIV2K train and validation is DIV2K validation; a
+shared resolved path is refused; the validation seeds are disjoint from the training stream; the held-out cells score every model on
+identical noisy images). What the rescore does not settle: the residual +0.10 to +0.14 dB agrees with the patch-mode cells below and
+with the flip against dihedral difference (2), but an API arm with `transform_args.augment=dihedral` is the one remaining key-level
+control, and it was not run.
+
 Supplementary and NOT gated (they do not change the verdict): the same invocation in patch mode (`--patch-size 64`, 100 crops per
 set, no `--full-image`) gives a T of at most 0.40 dB on all six cells and the API arm within it on all six (differences from -0.064
 to +0.292 dB); and three legacy models score 29.97, 29.76 and 29.63 dB on 6 Kodak images at `sigma_255` 25 when applied to 64-px tiles, against
@@ -572,6 +586,17 @@ images: a hypothesis for the spread of the whole-image cells, not a finding.
 * Three help lines were written for the other tasks and say nothing about this one: `optim_args.warmup_epochs` does not say that auto
   follows the epochs here (above), `analysis_args.conformal_alpha` names only segmentation as refusing a level (denoising refuses
   it too), and `analysis_args.eval_batch_size` describes the splits of the other tasks (the validation split is batched at `batch_size`).
+* **The gate bar is low.** "Every held-out cell above its noisy input" cannot tell a learned denoiser from a smoothing filter, and it did
+  not discriminate a weak family: `bfunet/tiny` (about 1.0M parameters) sits below `bfcnn/tiny` (about 39k) on validation (+6.37
+  against +8.19 dB over the input) and on every held-out cell, and still passes. Only `bfconvunext/tiny` has a reference comparison
+  (the parity run above); `bfcnn`, `bfunet`, `convunext_biased` and `scunet` have none, so a defect of a few dB in one of them would pass.
+* **Best against final was never exercised on a real run.** In all 8 real runs (the 5 gate runs and the 3 API parity runs) the best
+  epoch is the last one (`final_is_best` true; the parity runs have a one-epoch window). The selection window, the early stop and the
+  resume of a best epoch before the kill are proven on planted curves and on killed runs of a fixture, not on a real run where they differ.
+* **Half precision and the other noise kinds have little evidence.** A `mixed_float16` bias-free run gets the static scan only
+  (`passed_static_only`) and was run only for `bfunet` and `bfcnn`, in the 5-epoch smoke. Multiplicative and composite noise ran only in
+  that smoke (the multiplicative run ended 1.0 dB below its input); clipped noise ran there and in the additive parity arm, not in the
+  24-epoch gate.
 
 **Keys**: `key=value` tokens; a dot reaches a group (`optim_args.lr=3e-4`, `data.dataset=cifar10`);
 `config=run.yaml` loads a file first and the command line wins over it. A value is read by

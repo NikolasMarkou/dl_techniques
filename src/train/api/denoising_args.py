@@ -645,8 +645,10 @@ class DenoiseMetricArgs(StrictConfig):
     watch_metric: Auto[str] = dataclasses.field(
         default=AUTO,
         metadata={
-            "help": "metric that picks the best epoch among those from the end of the curriculum on: val_psnr (the "
-            "default recipe), val_ssim, val_mae or val_loss"
+            "help": "metric that picks the best epoch among those from the end of the curriculum on (the window starts "
+            "there whatever the metric): val_psnr (the default recipe), val_ssim, val_mae or val_loss on the fixed "
+            "validation set; the training names loss, psnr, mae and ssim are accepted too but are averaged over the "
+            "epoch's fresh noise draws, so they are noisier than the validation ones"
         },
     )
     watch_mode: Auto[Literal["min", "max"]] = dataclasses.field(

@@ -449,6 +449,8 @@ def _export_onnx(model: Any, out: Path, spec: Any) -> None:
     # which is why the 40-cell table never saw it. Do NOT skip grappler for every model: SCUNet's onnx
     # needs its folding (its Tile nodes fail at 64x64 without it). Do NOT drop the guard below because a
     # new TensorFlow converts: ``test_the_onnx_of_a_trained_bias_free_batchnorm_model_converts_and_matches`` says.
+    # The patch is process-global for the duration of the conversion, so it is not thread-safe: do not run two onnx exports
+    # concurrently in one process.
     skip_grappler = any(type(layer).__name__ == "BiasFreeBatchNorm" for layer in model._flatten_layers())
     patch = mock.patch.object(tf_loader, "tf_optimize_grappler", _frozen_graph_as_is)
     with patch if skip_grappler else contextlib.nullcontext():

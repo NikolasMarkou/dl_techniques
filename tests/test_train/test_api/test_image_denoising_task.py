@@ -36,6 +36,7 @@ import json
 import math
 import os
 import random
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -668,6 +669,18 @@ def test_the_monitor_must_be_a_metric_the_run_reports(world, folders, tmp_path):
         train_image_denoising(**mapping(tmp_path / "run", folders, metric_args={"watch_metric": "val_accuracy"}))
     assert "val_psnr" in str(raised.value) and "val_ssim" in str(raised.value)
     assert not (tmp_path / "run").exists()
+
+
+def test_the_watch_metric_help_names_every_metric_the_task_accepts():
+    """The accepted set is the training names and their ``val_`` twins (NOTE 8 of the iteration-1 review): the help lists all eight."""
+    from train.api.trainer import _monitor_choices
+    from train.common.denoising_run import DENOISING_METRIC_NAMES
+
+    accepted = set(_monitor_choices(list(DENOISING_METRIC_NAMES)))
+    assert accepted == {"loss", "psnr", "mae", "ssim", "val_loss", "val_psnr", "val_mae", "val_ssim"}
+    help_text = next(f for f in dataclasses.fields(dargs.DenoiseMetricArgs) if f.name == "watch_metric").metadata["help"]
+    words = set(re.findall(r"\b[a-z_]+\b", help_text))
+    assert accepted <= words, sorted(accepted - words)
 
 
 # ---------------------------------------------------------------------
