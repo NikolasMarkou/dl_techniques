@@ -36,20 +36,26 @@ Mathematical Formulation:
     Let `P` be the `(N, K)` matrix of predicted soft assignments for a batch
     of `N` samples and `K` clusters, and let `Q` be the target distribution.
 
-    1.  The distance loss (`L_dist`) is the mean squared error between the
-        predicted and target distributions:
+    1.  The distance term of sample `i` (`d_i`) is the mean squared error
+        between its predicted and target distributions:
 
-        L_dist = MSE(P, Q) = 1/N * Σᵢ ||pᵢ - qᵢ||²
+        d_i = 1/K * Σⱼ (pᵢⱼ - qᵢⱼ)²
 
     2.  The distribution penalty (`L_distrib`) is the MSE between the actual
         cluster assignment frequencies and a uniform distribution. Let `f_j`
         be the frequency of cluster `j`, computed as `f_j = 1/N * Σᵢ pᵢⱼ`.
+        It is one number for the whole batch:
 
         L_distrib = MSE(f, u) = 1/K * Σⱼ (fⱼ - 1/K)²
 
-    The final loss is a weighted combination of these two terms:
+    The loss returns one value per sample, the weighted combination of the
+    two terms with the batch penalty added to every row as a constant:
 
-        L_total = w_dist * L_dist + w_distrib * L_distrib
+        L_i = w_dist * d_i + w_distrib * L_distrib
+
+    The mean over the batch is `w_dist * L_dist + w_distrib * L_distrib`
+    with `L_dist = 1/N * Σᵢ d_i`, the value the loss returned as a single
+    scalar before it returned rows.
 
 References:
     The architectural pattern of combining a primary clustering objective with
@@ -112,14 +118,24 @@ class ClusteringLoss(keras.losses.Loss):
     balanced cluster assignments. The loss function optimizes both the quality of
     clusters (compactness) and their balance (avoiding empty clusters).
 
+    ``call`` returns one value per sample, ``(batch,)``: row ``i`` is
+    ``distance_weight * d_i + distribution_weight * c`` with ``d_i`` the squared error
+    of the sample to its target and ``c`` the cluster-balance penalty of the whole
+    batch, added to every row as the same constant. The class is therefore
+    batch-coupled in the balance term: ``reduction="sum"`` is ``batch`` times the
+    default, ``reduction="none"`` returns the rows, and a ``sample_weight`` scales the
+    balance term by ``mean(w)`` (a zero weight removes the row's own distance but not
+    its share of ``c``, so ``loss(w=[1, 1, 1, 0])`` is not the loss of the batch
+    without the last row).
+
     Args:
         distance_weight (float): Weight for intra-cluster distance term. Must be positive.
             Higher values emphasize cluster compactness.
         distribution_weight (float): Weight for cluster distribution term. Must be positive.
             Higher values emphasize balanced cluster sizes.
         name (str): Name of the loss function.
-        reduction (str): Keras loss reduction. ``get_config`` emits it, so ``from_config``
-            must accept it back.
+        reduction (str): Keras loss reduction, applied to the per-sample rows ``call``
+            returns. ``get_config`` emits it, so ``from_config`` must accept it back.
         **kwargs: Forwarded to :class:`keras.losses.Loss`.
 
     Raises:
@@ -170,41 +186,52 @@ class ClusteringLoss(keras.losses.Loss):
             raise ValueError(f"{name} cannot be NaN")
 
     def call(self, y_true: keras.KerasTensor, y_pred: keras.KerasTensor) -> keras.KerasTensor:
-        """Compute the clustering loss.
+        """Compute the clustering loss, one value per sample.
 
         Args:
-            y_true (keras.KerasTensor): True cluster assignments or target values.
-            y_pred (keras.KerasTensor): Predicted cluster assignments (soft assignments).
+            y_true (keras.KerasTensor): True cluster assignments or target values,
+                shape ``(batch, clusters)``.
+            y_pred (keras.KerasTensor): Predicted cluster assignments (soft assignments),
+                shape ``(batch, clusters)``.
 
         Returns:
-            keras.KerasTensor: Combined clustering loss value.
+            keras.KerasTensor: One value per sample, shape ``(batch,)``:
+            ``distance_weight * d_i + distribution_weight * c``, where ``c`` is the
+            batch balance penalty, the same constant in every row. Its mean over the
+            batch is the scalar this loss returned before it returned rows.
         """
-        # Compute intra-cluster distances (mean squared error)
+        # Compute intra-cluster distances (mean squared error), one per sample
         cluster_distances = ops.mean(
             ops.square(y_pred - y_true),
             axis=-1
         )
 
-        # Compute cluster distribution penalty
+        # Compute cluster distribution penalty, a statistic of the whole batch.
+        # The 1/K constant is built in the input dtype: casting it to float32
+        # raised on a direct call with float64 (and float16) predictions.
         cluster_distribution = ops.mean(y_pred, axis=0)
-        uniform_distribution = ops.ones_like(cluster_distribution) / ops.cast(
+        uniform_distribution = 1.0 / ops.cast(
             ops.shape(y_pred)[-1],
-            dtype="float32"
+            dtype=cluster_distribution.dtype
         )
         distribution_penalty = ops.mean(
             ops.square(cluster_distribution - uniform_distribution)
         )
 
-        # Scale the cluster distances to be in a similar range as distribution penalty
-        scaled_distances = ops.mean(cluster_distances)
-
-        # Combine losses
-        total_loss = (
-                self.distance_weight * scaled_distances +
+        # DECISION plan-2026-11-11T223825-64d1b401/D-003
+        # The balance penalty is added to every row as the SAME batch constant. Do NOT
+        # "decompose" it into per-row shares (the alignment form
+        # mean_j((f_j - 1/K) * (p_ij - 1/K)) has the same mean, but its rows are signed
+        # and `reduction="none"` or a masked sum-reduction then surprises the reader),
+        # and do NOT leave the whole loss a scalar (that kills `reduction` and
+        # `sample_weight`). The price is documented: a `sample_weight` scales this term
+        # by mean(w), and a zero-weighted row keeps its share of it.
+        # Guard: tests/test_losses/test_clustering_loss.py::TestClusteringLossIsPerSample::
+        # test_the_balance_penalty_is_one_batch_constant_in_every_row
+        return (
+                self.distance_weight * cluster_distances +
                 self.distribution_weight * distribution_penalty
         )
-
-        return total_loss
 
     def get_config(self) -> Dict[str, Any]:
         """Get the configuration of the loss function.

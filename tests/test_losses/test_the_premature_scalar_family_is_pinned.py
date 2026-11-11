@@ -196,6 +196,20 @@ def _seg_pair():
     )
 
 
+def _cluster_pair():
+    """Dirichlet rows ``(B, 5)``: a flat-ish target for ``y_true``, sharper rows for ``y_pred``.
+
+    ``ClusteringLoss`` needs soft assignments that sum to one per row; the N(0,1)
+    builders above give a degenerate balance penalty. Measured at HEAD b4831ec33 the
+    predicate accepts ``ClusteringLoss`` on this fixture (ratio 0.750000).
+    """
+    r = _rng()
+    return (
+        _t(r.dirichlet(np.ones(5), size=BATCH)),
+        _t(r.dirichlet(np.ones(5) * 0.5, size=BATCH)),
+    )
+
+
 # ---------------------------------------------------------------------
 # the pinned membership, derived by execution 2026-08-31
 # ---------------------------------------------------------------------
@@ -355,6 +369,13 @@ KNOWN_GOOD = [
         {"base_loss": "binary_crossentropy"},
         _seg_pair,
     ),
+    # ClusteringLoss returns (batch,) since plan-2026-11-11T223825-64d1b401 step 3; it
+    # was a member (a scalar, shape ()) before. Row i is `distance_weight * d_i +
+    # distribution_weight * c`, with `c` the batch balance penalty broadcast as a
+    # constant (D-003), so it is BATCH-COUPLED: `sample_weight` scales the balance term
+    # by mean(w) and a zero-weighted row keeps its share of `c`. The predicate sees only
+    # the shape; the coupling is pinned in tests/test_losses/test_clustering_loss.py.
+    ("clustering_loss", "ClusteringLoss", {}, _cluster_pair),
 ]
 
 
