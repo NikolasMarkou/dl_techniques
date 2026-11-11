@@ -439,6 +439,21 @@ class TestTopographicVAELossTerms:
         assert values["reconstruction"] != values["z_kl"], "the terms are indistinguishable"
 
 
+    def test_the_pixel_count_is_an_instance_attribute_only(self):
+        """The class-level `_pixels_per_frame = 0` was dead code.
+
+        The instance assignment in `__init__` always shadows it, so it protected
+        nothing while a comment beside it said the opposite of what the code did.
+        MEASURED: a fresh loss B reads 0 after loss A has seen a batch.
+        """
+        assert "_pixels_per_frame" not in vars(TopographicVAELoss)
+        seen = TopographicVAELoss()
+        targets, prediction, *_ = _fixture()
+        ops.convert_to_numpy(seen(targets, prediction))
+        assert seen._pixels_per_frame == H * W * C
+        assert TopographicVAELoss()._pixels_per_frame == 0
+
+
 class TestTopographicVAELossEffectiveBeta:
     """`effective_beta` must reflect the reduction actually in force."""
 

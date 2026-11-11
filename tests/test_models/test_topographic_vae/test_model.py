@@ -909,6 +909,76 @@ class TestTrainingPath:
                   verbose=0)
         assert model.metric_trackers == []
 
+    def test_fit_history_carries_the_per_term_trackers(self):
+        """`fit` reports the decomposition, train and validation separately.
+
+        MEASURED at the unmodified model: the trackers live on the compiled
+        loss, `model.metrics` was ['loss'], so `fit` history held only
+        ['loss', 'val_loss'] and the three terms were readable only by poking
+        `model.metric_trackers`.
+        """
+        # DECISION plan-2026-11-11T131349-13b28b37/D-015
+        model = self._compiled()
+        sample = _sample(batch=8)
+        history = model.fit(
+            sample,
+            sample,
+            epochs=2,
+            batch_size=4,
+            validation_data=(_sample(batch=4, seed=1), _sample(batch=4, seed=1)),
+            verbose=0,
+        ).history
+        for key in (
+            "reconstruction_loss",
+            "z_kl_loss",
+            "u_kl_loss",
+            "val_reconstruction_loss",
+            "val_z_kl_loss",
+            "val_u_kl_loss",
+        ):
+            assert key in history, (key, sorted(history))
+            assert len(history[key]) == 2 and np.all(np.isfinite(history[key]))
+            assert np.all(np.asarray(history[key]) != 0.0), key
+
+    def test_a_plain_objective_adds_no_tracker_keys_to_history(self):
+        """The other side of the override: no decomposition, no zero columns."""
+        model = _build()
+        model.compile(optimizer=keras.optimizers.SGD(1e-3), loss="mse")
+        history = model.fit(
+            _sample(batch=2), _sample(batch=2), epochs=1, batch_size=2, verbose=0
+        ).history
+        assert sorted(history) == ["loss"], sorted(history)
+
+    def test_the_trackers_count_one_epoch_of_training_batches_only(self):
+        """Each epoch's tracker is that epoch's mean over TRAIN batches.
+
+        MEASURED at the unmodified model: the trackers were never reset and the
+        validation pass updated them too, so at the end of epoch 2 the count was
+        train + validation + train, i.e. a lifetime mean over a mix of both.
+        """
+        # DECISION plan-2026-11-11T131349-13b28b37/D-015
+        seen = []
+
+        class _Count(keras.callbacks.Callback):
+            def on_train_batch_end(self, batch, logs=None):
+                tracker = self.model.metric_trackers[1]
+                seen.append(
+                    float(keras.ops.convert_to_numpy(tracker.count))
+                )
+
+        model = self._compiled()
+        sample = _sample(batch=8)
+        model.fit(
+            sample,
+            sample,
+            epochs=2,
+            batch_size=4,
+            validation_data=(_sample(batch=4, seed=1), _sample(batch=4, seed=1)),
+            callbacks=[_Count()],
+            verbose=0,
+        )
+        assert seen == [4.0, 8.0, 4.0, 8.0], seen
+
 
 class TestLogLikelihood:
     """The paper's Table 1 column."""

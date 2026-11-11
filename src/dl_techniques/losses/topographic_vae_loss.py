@@ -260,12 +260,6 @@ class TopographicVAELoss(keras.losses.Loss):
             return float(self.kl_loss_weight)
         return float(self.kl_loss_weight) * float(self._pixels_per_frame)
 
-    # Observed from the batch shape by `call`, then read by `effective_beta`. A
-    # plain Python attribute rather than a Variable: it only ever builds a
-    # diagnostic number outside the tape, and putting it in the graph would add
-    # a traced dependency for no training purpose.
-    _pixels_per_frame = 0
-
     def has_variance_variables(self, y_pred: Any) -> bool:
         """Whether ``y_pred`` carries the topographic prior's ``u`` posterior.
 

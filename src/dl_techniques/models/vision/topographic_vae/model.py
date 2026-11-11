@@ -452,11 +452,13 @@ class TopographicVAE(keras.Model):
 
         self.decoder = self._build_decoder()
 
-        # No loss trackers here on purpose. `compute_loss` routes the whole ELBO
-        # through TopographicVAELoss in one call, which keeps its OWN per-term
-        # trackers -- a set mirrored on the model would read an exact 0.0 in every
-        # epoch log while the real loss was 85.05, because nothing ever updates
-        # them. Dead metrics that report 0.0 are worse than no metrics.
+        # No loss trackers are created here on purpose. `compute_loss` routes the
+        # whole ELBO through TopographicVAELoss in one call, which keeps its OWN
+        # per-term trackers -- a set mirrored on the model would read an exact 0.0
+        # in every epoch log while the real loss was 85.05, because nothing ever
+        # updates them. Dead metrics that report 0.0 are worse than no metrics.
+        # The loss's trackers are surfaced through the `metrics` property below,
+        # so `fit` resets them each epoch and logs them (train and `val_`).
         logger.info(
             f"Created TopographicVAE: input={self._input_shape}, S={self.sequence_length}, "
             f"capsules={self.num_capsules}x{self.capsule_dim} "
@@ -1212,6 +1214,28 @@ class TopographicVAE(keras.Model):
         for sampler in (self.z_sampling, self.u_sampling):
             if sampler is not None:
                 sampler.seed = value
+
+    @property
+    def metrics(self) -> List[keras.metrics.Metric]:
+        """Keras' metrics plus the compiled ELBO loss's per-term trackers.
+
+        The trackers are not on the model, so stock Keras never saw them: they
+        were absent from ``fit`` history and never reset, which made each one a
+        lifetime mean over every train AND validation batch. Listing them here
+        makes ``reset_metrics`` clear them each epoch (and before each
+        ``evaluate``) and puts ``reconstruction_loss``, ``z_kl_loss``,
+        ``u_kl_loss`` (and the ``val_`` versions) in the history. With a
+        non-ELBO objective :attr:`metric_trackers` is empty, so nothing is added.
+
+        :return: ``super().metrics`` followed by :attr:`metric_trackers`.
+        :rtype: List[keras.metrics.Metric]
+        """
+        # DECISION plan-2026-11-11T131349-13b28b37/D-015
+        # Do NOT leave the trackers off this list "to keep history small": they
+        # would then be never reset and silently average train with validation.
+        # Guard: test_fit_history_carries_the_per_term_trackers and
+        # test_the_trackers_count_one_epoch_of_training_batches_only.
+        return list(super().metrics) + self.metric_trackers
 
     @property
     def metric_trackers(self) -> List[keras.metrics.Metric]:
