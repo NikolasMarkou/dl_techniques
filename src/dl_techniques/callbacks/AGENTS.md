@@ -40,7 +40,7 @@ Importing `coco_map_callback` raises `ImportError` when `pycocotools` is missing
 - `noise_sigma_curriculum.py`: `NoiseSigmaCurriculumCallback`. Assigns a scheduled `sigma_max` (and optionally `sigma_min`) to live `keras.Variable`s read inside `tf.data.map`. The variables are not serialized; a `from_config` instance is a logged no-op.
 - `periodic_reassign.py`: `PeriodicReassignCallback`. Calls `head.reassign(class_means)` from trunk-feature means over the training arrays. The feature extractor is passed directly (required for a nested trunk) or built from a top-level layer name. Fails loud on a missing head, a missing method or an absent class.
 - `self_iterate_pool.py`: `SelfIteratePoolCallback`. Epoch-boundary regeneration over a RAM pool whose `current_input` buffer the `from_generator` source reads. A `mix_ratio` share of slots gets the model output fed back as-is; the rest gets fresh ADDITIVE Gaussian noise (D-003: mix, never replace; never re-noise the fed-back slots; additive only). Fails soft.
-- `spatial_loss_logger.py`: `SpatialLossLogger`. Writes per-tap `SpatialSmoothness` penalties, `spatial/total`, `spatial/unweighted`, `spatial/share` and `task_loss` into the batch logs. When a `compile_loss` key is present it also writes `spatial/accounted` and `spatial/unaccounted`, the field that reveals a discarded `add_loss`. Taps are found by walking `_flatten_layers`, with a fallback (`Layer.submodules` does not exist on Keras 3.8).
+- `spatial_loss_logger.py`: `SpatialLossLogger`. Writes per-tap `SpatialSmoothness` penalties, `spatial/total`, `spatial/unweighted`, `spatial/share` and `task_loss` into the batch logs. When a `compile_loss` key is present it also writes `spatial/accounted` and `spatial/unaccounted`, the field that reveals a discarded `add_loss`. Taps are found with `_shared.walk_layers` (`_flatten_layers` with a fallback; `Layer.submodules` does not exist on Keras 3.8).
 - `temperature_annealing.py`: `TemperatureAnnealingCallback`. Linear, cosine or exp schedule of `temperature` on soft-selection layers. Honors `softplus_temperature` by assigning the softplus inverse.
 - `training_curves.py`: `TrainingCurvesCallback`. Groups epoch-log keys into loss / classification / segmentation / detection / depth / other and overwrites one PNG per group in `output_dir`.
 
@@ -85,11 +85,11 @@ Keras never deserializes callbacks, so `register_dl_technique` is not needed. Si
 
 ### Layer discovery
 
-Walk with `_flatten_layers` and a fallback (see `spatial_loss_logger._walk_layers`). Never use `Layer.submodules`. When a name filter matches nothing, warn at WARNING level: a schedule that touches no layer is a silent dead knob.
+Walk with `_shared.walk_layers` (`_flatten_layers` with a fallback; the root model is excluded). Never use `Layer.submodules`. When a name filter matches nothing, warn at WARNING level: a schedule that touches no layer is a silent dead knob.
 
 ### Shared math
 
-Schedule interpolation (linear / cosine / exp) is currently copied in three modules. A new schedule callback should import a shared helper rather than add a fourth copy.
+Schedule interpolation (linear / cosine / exp) lives in `_shared.interpolate_schedule`, used by the temperature, harmonic-exponent and noise-sigma callbacks. A new schedule callback imports it rather than adding a copy. `models/vision/depth_anything/teacher_ema.py` still carries its own cosine/linear algebra (deliberately not moved).
 
 ### Plotting
 

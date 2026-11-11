@@ -53,47 +53,11 @@ from keras import ops
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.callbacks._shared import walk_layers
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.regularization.spatial_smoothness import SpatialSmoothness
 
 # ---------------------------------------------------------------------
-
-
-def _walk_layers(model: keras.Model) -> List[keras.layers.Layer]:
-    """Every layer in ``model``'s tree, itself included.
-
-    ``Layer._flatten_layers`` is private but has been stable across the Keras 3
-    series; the fallback is a depth-first walk over each layer's tracked
-    sub-layers, so this keeps working if the private name moves.
-    """
-    flatten = getattr(model, "_flatten_layers", None)
-    if callable(flatten):
-        try:
-            return list(flatten())
-        except Exception:  # noqa: BLE001 - fall through to the manual walk
-            logger.debug(
-                "_flatten_layers failed; falling back to a manual sub-layer walk",
-                exc_info=True,
-            )
-
-    found: List[keras.layers.Layer] = []
-    seen = set()
-
-    def visit(layer):
-        if id(layer) in seen:
-            return
-        seen.add(id(layer))
-        found.append(layer)
-        for attribute in vars(layer).values():
-            if isinstance(attribute, keras.layers.Layer):
-                visit(attribute)
-            elif isinstance(attribute, (list, tuple)):
-                for entry in attribute:
-                    if isinstance(entry, keras.layers.Layer):
-                        visit(entry)
-
-    visit(model)
-    return found
 
 
 class SpatialLossLogger(keras.callbacks.Callback):
@@ -154,15 +118,15 @@ class SpatialLossLogger(keras.callbacks.Callback):
 
         Walked through the model's whole layer tree rather than by attribute name:
         the taps sit inside blocks, and a name-based walk has to know the block's
-        internal layout and silently misses a tap at any new site. The walk uses
-        ``_flatten_layers`` with a public fallback, because ``Layer.submodules``
-        does not exist on Keras 3.8 and a bare ``hasattr`` on it would have shipped
-        a discovery path that raises on every model.
+        internal layout and silently misses a tap at any new site. The walk is the
+        shared ``walk_layers`` (``_flatten_layers`` with a public fallback), because
+        ``Layer.submodules`` does not exist on Keras 3.8 and a bare ``hasattr`` on it
+        would have shipped a discovery path that raises on every model.
         """
         super().set_model(model)
         self._taps: List[SpatialSmoothness] = [
             layer
-            for layer in _walk_layers(model)
+            for layer in walk_layers(model)
             if isinstance(layer, SpatialSmoothness)
         ]
         if not self._taps:

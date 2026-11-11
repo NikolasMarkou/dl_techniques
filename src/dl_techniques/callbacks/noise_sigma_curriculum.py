@@ -25,7 +25,6 @@ no-op until a variable is attached; this keeps the callback round-trippable
 without binding it to a specific training graph.
 """
 
-import math
 from typing import Optional
 
 import keras
@@ -34,6 +33,7 @@ import keras
 # local imports
 # ------------------------------------------------------------------------------
 
+from dl_techniques.callbacks._shared import SCHEDULES, interpolate_schedule
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -66,7 +66,7 @@ class NoiseSigmaCurriculumCallback(keras.callbacks.Callback):
         Both are checked at construction, not at the first epoch.
     """
 
-    SCHEDULES = frozenset({"linear", "cosine", "exp"})
+    SCHEDULES = SCHEDULES
 
     def __init__(
         self,
@@ -130,19 +130,9 @@ class NoiseSigmaCurriculumCallback(keras.callbacks.Callback):
     # ------------------------------------------------------------------
     def _interp(self, start: float, end: float, epoch: int) -> float:
         """Interpolate start -> end at ``epoch`` per the configured schedule."""
-        if self.total_epochs == 1:
-            return end
-        frac = min(max(epoch, 0), self.total_epochs - 1) / (self.total_epochs - 1)
-        if self.schedule == "linear":
-            return start + (end - start) * frac
-        if self.schedule == "cosine":
-            # Smooth start->end; 0 at epoch 0, 1 at final epoch.
-            cos = 0.5 * (1.0 - math.cos(math.pi * frac))
-            return start + (end - start) * cos
-        # exp: geometric interpolation in log-space (endpoints > 0 enforced).
-        log_start = math.log(start)
-        log_end = math.log(end)
-        return math.exp(log_start + (log_end - log_start) * frac)
+        return interpolate_schedule(
+            self.schedule, start, end, epoch, self.total_epochs
+        )
 
     def sigma_max_at(self, epoch: int) -> float:
         """Public helper: scheduled upper-bound sigma at ``epoch``."""

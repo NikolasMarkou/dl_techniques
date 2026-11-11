@@ -22,6 +22,7 @@ import keras
 # local imports
 # ------------------------------------------------------------------------------
 
+from dl_techniques.callbacks._shared import SCHEDULES, interpolate_schedule, walk_layers
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -46,7 +47,7 @@ class TemperatureAnnealingCallback(keras.callbacks.Callback):
     deferred (plan-2026-11-11T131349-13b28b37/D-023).
     """
 
-    SCHEDULES = frozenset({"cosine", "linear", "exp"})
+    SCHEDULES = SCHEDULES
 
     def __init__(
         self,
@@ -73,34 +74,14 @@ class TemperatureAnnealingCallback(keras.callbacks.Callback):
 
     # ------------------------------------------------------------------
     def _temperature_at(self, epoch: int) -> float:
-        if self.total_epochs == 1:
-            return self.t_final
-        frac = min(max(epoch, 0), self.total_epochs - 1) / (self.total_epochs - 1)
-        if self.schedule == "linear":
-            return self.t_init + (self.t_final - self.t_init) * frac
-        if self.schedule == "cosine":
-            cos = 0.5 * (1.0 + math.cos(math.pi * frac))
-            return self.t_final + (self.t_init - self.t_final) * cos
-        # exp: geometric interpolation in log-space.
-        log_init = math.log(self.t_init)
-        log_final = math.log(self.t_final)
-        return math.exp(log_init + (log_final - log_init) * frac)
+        return interpolate_schedule(
+            self.schedule, self.t_init, self.t_final, epoch, self.total_epochs
+        )
 
     def _iter_target_layers(self):
         if self.model is None:
             return
-        # Walk all (possibly nested) sub-layers.
-        seen = set()
-        stack = list(self.model.layers)
-        while stack:
-            layer = stack.pop()
-            if id(layer) in seen:
-                continue
-            seen.add(id(layer))
-            if hasattr(layer, "_layers"):
-                stack.extend(getattr(layer, "_layers"))
-            elif hasattr(layer, "layers"):
-                stack.extend(getattr(layer, "layers"))
+        for layer in walk_layers(self.model):
             if self.layer_names is not None and layer.name not in self.layer_names:
                 continue
             if getattr(layer, "temperature", None) is None:

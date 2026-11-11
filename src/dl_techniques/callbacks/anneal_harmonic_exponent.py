@@ -16,7 +16,6 @@ Targeted layers expose ``num_levels`` (int) and
 value per level.
 """
 
-import math
 from typing import List, Optional, Sequence, Union
 
 import keras
@@ -26,6 +25,7 @@ import numpy as np
 # local imports
 # ------------------------------------------------------------------------------
 
+from dl_techniques.callbacks._shared import SCHEDULES, interpolate_schedule, walk_layers
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -51,7 +51,7 @@ class HarmonicExponentAnnealingCallback(keras.callbacks.Callback):
     (plan-2026-11-11T131349-13b28b37/D-023).
     """
 
-    SCHEDULES = frozenset({"linear", "cosine", "exp"})
+    SCHEDULES = SCHEDULES
 
     def __init__(
         self,
@@ -122,32 +122,14 @@ class HarmonicExponentAnnealingCallback(keras.callbacks.Callback):
         :return: Interpolated exponent.
         :rtype: float
         """
-        if self.total_epochs == 1:
-            return final
-        frac = min(max(epoch, 0), self.total_epochs - 1) / (self.total_epochs - 1)
-        if self.schedule == "linear":
-            return init + (final - init) * frac
-        if self.schedule == "cosine":
-            cos = 0.5 * (1.0 + math.cos(math.pi * frac))
-            return final + (init - final) * cos
-        log_init = math.log(init)
-        log_final = math.log(final)
-        return math.exp(log_init + (log_final - log_init) * frac)
+        return interpolate_schedule(
+            self.schedule, init, final, epoch, self.total_epochs
+        )
 
     def _iter_target_layers(self):
         if self.model is None:
             return
-        seen = set()
-        stack = list(self.model.layers)
-        while stack:
-            layer = stack.pop()
-            if id(layer) in seen:
-                continue
-            seen.add(id(layer))
-            if hasattr(layer, "_layers"):
-                stack.extend(getattr(layer, "_layers"))
-            elif hasattr(layer, "layers"):
-                stack.extend(getattr(layer, "layers"))
+        for layer in walk_layers(self.model):
             if self.layer_names is not None and layer.name not in self.layer_names:
                 continue
             if not callable(getattr(layer, "set_n_per_level", None)):
