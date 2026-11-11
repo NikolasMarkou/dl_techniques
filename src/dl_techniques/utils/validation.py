@@ -120,23 +120,12 @@ def positive_float(value: Any, name: str, owner: Optional[str] = None) -> float:
     :rtype: float
     :raises ValueError: If ``value`` is not a positive finite number.
     """
-    who = f"{owner}: " if owner else ""
-    if isinstance(value, (bool, np.bool_)):
-        raise ValueError(
-            f"{who}{name} must be a positive number, got bool ({value!r})."
-        )
-    if not isinstance(value, numbers.Real):
-        raise ValueError(
-            f"{who}{name} must be a positive number, got "
-            f"{type(value).__name__} ({value!r})"
-        )
-    value = float(value)
-    if not math.isfinite(value) or value <= 0.0:
-        raise ValueError(f"{who}{name} must be a positive finite number, got {value}")
-    return value
+    return non_negative_float(value, name, owner, strict=True)
 
 
-def non_negative_float(value: Any, name: str, owner: Optional[str] = None) -> float:
+def non_negative_float(
+        value: Any, name: str, owner: Optional[str] = None, *, strict: bool = False
+) -> float:
     """
     Check that a weight argument is a non-negative finite number, and return it as one.
 
@@ -155,6 +144,10 @@ def non_negative_float(value: Any, name: str, owner: Optional[str] = None) -> fl
       ``name``, in the message family of :func:`positive_float`: ``bool`` and
       ``np.bool_`` (``True`` would pass as ``1.0``), a string, ``None``, a list,
       NaN, an infinity and negatives.
+    * ``strict=True`` refuses ``0`` as well and says "positive" instead of
+      "non-negative" in every message. It is the whole of :func:`positive_float`,
+      which calls this function with it, so the rule lives in one body; call
+      :func:`positive_float` rather than passing ``strict`` at a call site.
 
     :param value: The caller's value.
     :type value: Any
@@ -162,23 +155,24 @@ def non_negative_float(value: Any, name: str, owner: Optional[str] = None) -> fl
     :type name: str
     :param owner: Class or function name, for the error message.
     :type owner: Optional[str]
+    :param strict: Refuse ``0`` too (the :func:`positive_float` rule). Defaults to
+        ``False``.
+    :type strict: bool
     :return: ``value`` as a Python ``float``.
     :rtype: float
-    :raises ValueError: If ``value`` is not a non-negative finite number.
+    :raises ValueError: If ``value`` is not a non-negative (``strict``: positive)
+        finite number.
     """
     who = f"{owner}: " if owner else ""
+    word = "positive" if strict else "non-negative"
     if isinstance(value, (bool, np.bool_)):
-        raise ValueError(
-            f"{who}{name} must be a non-negative number, got bool ({value!r})."
-        )
+        raise ValueError(f"{who}{name} must be a {word} number, got bool ({value!r}).")
     if not isinstance(value, numbers.Real):
         raise ValueError(
-            f"{who}{name} must be a non-negative number, got "
+            f"{who}{name} must be a {word} number, got "
             f"{type(value).__name__} ({value!r})"
         )
     value = float(value)
-    if not math.isfinite(value) or value < 0.0:
-        raise ValueError(
-            f"{who}{name} must be a non-negative finite number, got {value}"
-        )
+    if not math.isfinite(value) or value < 0.0 or (strict and value == 0.0):
+        raise ValueError(f"{who}{name} must be a {word} finite number, got {value}")
     return value
