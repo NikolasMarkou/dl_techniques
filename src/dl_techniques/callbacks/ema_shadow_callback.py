@@ -61,6 +61,19 @@ class EMAShadowCallback(keras.callbacks.Callback):
     must expose that method; if it is missing, the callback logs a single
     warning and disables itself (mirrors ``TeacherEMACallback``).
 
+    ``current_step`` is the GLOBAL 0-based optimizer step, read from
+    ``model.optimizer.iterations`` (post-increment at batch end, so
+    ``iterations - 1``). The callback keeps no step counter of its own: a new
+    instance attached to a resumed run (``initial_epoch > 0``, restored
+    optimizer) continues the schedule where the optimizer stands, and
+    ``start_step`` / ``update_every`` are global-step quantities. The decay
+    schedule is called with that same global step, so
+    ``cosine_ema_schedule(..., total_steps=T)`` ramps over ``T`` optimizer
+    steps, not over ``T`` qualifying updates. A model compiled with
+    ``steps_per_execution > 1`` is refused in ``on_train_begin``: Keras then
+    calls ``on_train_batch_end`` once per execution, so the per-batch
+    schedule could not be honoured.
+
     This callback does NOT snapshot or initialize the shadow at
     ``on_train_begin`` -- see the ``DECISION`` note below. It only decides
     WHEN to call ``update_ema_shadow`` and with what decay; the model owns
@@ -71,20 +84,17 @@ class EMAShadowCallback(keras.callbacks.Callback):
     :param decay: Resolved decay value(s), either a flat ``float`` (constant
         every qualifying step) or a ``Callable[[int], float]`` schedule such
         as :func:`cosine_ema_schedule` / :func:`linear_ema_schedule`, called
-        with the 0-based count of qualifying (post-``start_step``,
-        on-``update_every``-boundary) updates seen so far. See the
-        ``DECISION`` note for why both forms are supported.
+        with the global 0-based optimizer step of the qualifying update. See
+        the ``DECISION`` note for why both forms are supported.
     :type decay: Union[float, Callable[[int], float]]
-    :param update_every: Apply an update only every ``update_every`` training
-        steps. Must be positive. Defaults to ``1`` (every step), matching
-        ``TeacherEMACallback``'s implicit behavior.
+    :param update_every: Apply an update only every ``update_every`` global
+        training steps. Must be positive. Defaults to ``1`` (every step),
+        matching ``TeacherEMACallback``'s implicit behavior.
     :type update_every: int
-    :param start_step: Global training-batch step (0-indexed, counting every
+    :param start_step: Global optimizer step (0-indexed, counting every
         batch, not just qualifying ones) before which no update fires.
         Defaults to ``0``.
     :type start_step: int
-
-    :ivar step: Total training batches seen so far (read-only property).
 
     Example:
 
@@ -129,9 +139,10 @@ class EMAShadowCallback(keras.callbacks.Callback):
     # when `current_step - self._last_ema_step > update_every` (i.e. after a
     # gap, e.g. resumed training or skipped batches), so a longer gap decays
     # the shadow harder toward the live weights. This port does NOT
-    # reproduce that compounding: `decay` (or `decay_schedule(count)`) is
-    # applied as-is on every qualifying step, using a monotonic COUNT of
-    # qualifying updates (not the raw step number) as the schedule argument.
+    # reproduce that compounding: `decay` (or `decay_schedule(step)`) is
+    # applied as-is on every qualifying step, with the global optimizer step
+    # as the schedule argument (D-018 replaced the earlier qualifying-update
+    # count, which restarted at 0 on resume).
     # WHAT NOT TO DO: do not add `decay ** elapsed_steps` "for fidelity" --
     # this callback has no way to observe a genuine step gap (Keras does not
     # skip `on_train_batch_end` calls the way a resumed-Lightning-trainer's
@@ -139,6 +150,21 @@ class EMAShadowCallback(keras.callbacks.Callback):
     # `update_every` in ordinary use, making the compounding a no-op that
     # only adds a footgun if `update_every` is later changed mid-training.
     # See decisions.md D-016.
+    #
+    # DECISION plan-2026-11-11T131349-13b28b37/D-018
+    # The step comes from `model.optimizer.iterations`, never from a counter
+    # on this object. A Python counter restarts at 0 on every new instance,
+    # so a resumed run (restored optimizer, `initial_epoch > 0`) replayed the
+    # schedule from its 0.5 start and re-applied `start_step`; it also
+    # carried over, unreset, across two `fit` calls on one instance.
+    # `iterations` is already incremented when `on_train_batch_end` runs
+    # (batch 0 of a fresh run sees 1), hence `- 1` for the 0-based step
+    # (pinned against a real fit in test_ema_shadow_callback.py). WHAT NOT TO
+    # DO: do not reintroduce `_step` / `_update_count`, and do not "support"
+    # `steps_per_execution > 1` by multiplying: Keras fires the batch-end hook
+    # once per execution, so `update_every` and the schedule would silently
+    # coarsen. It is refused in `on_train_begin` instead. See decisions.md
+    # D-018.
 
     def __init__(
         self,
@@ -160,21 +186,24 @@ class EMAShadowCallback(keras.callbacks.Callback):
 
         self.update_every = int(update_every)
         self.start_step = int(start_step)
-        self._step: int = -1
         self._disabled: bool = False
-        self._update_count: int = 0
 
-    @property
-    def step(self) -> int:
-        """Total training batches seen so far (0-indexed after the first)."""
-        return self._step + 1
+    def on_train_begin(self, logs: Optional[dict] = None) -> None:
+        steps_per_execution = getattr(self.model, "steps_per_execution", 1)
+        if steps_per_execution != 1:
+            raise ValueError(
+                f"EMAShadowCallback needs steps_per_execution=1, got "
+                f"{steps_per_execution}: Keras then calls on_train_batch_end once "
+                f"per execution, so the per-step EMA schedule would be miscounted."
+            )
 
     def on_train_batch_end(self, batch: int, logs: Optional[dict] = None) -> None:
         if self._disabled:
             return
 
-        self._step += 1
-        current_step = self._step
+        # `iterations` is post-increment here: the first batch of a fresh run
+        # sees 1. See the D-018 anchor above.
+        current_step = int(keras.ops.convert_to_numpy(self.model.optimizer.iterations)) - 1
         if current_step < self.start_step:
             return
         if current_step % self.update_every != 0:
@@ -189,22 +218,16 @@ class EMAShadowCallback(keras.callbacks.Callback):
             self._disabled = True
             return
 
-        decay = float(self.decay_schedule(self._update_count))
-        update_fn(decay=decay)
-        self._update_count += 1
+        update_fn(decay=float(self.decay_schedule(current_step)))
 
     def get_config(self) -> dict:
-        """Return a shallow config dict.
+        """Return the non-callable constructor arguments.
 
-        Not a full ``keras.callbacks.Callback`` serialization contract --
-        callbacks are not part of a model's saved ``.keras`` config in this
-        repo, and none of ``TemperatureAnnealingCallback`` /
-        ``NoiseSigmaCurriculumCallback`` / ``SelfIteratePoolCallback`` (the
-        other ``@register_dl_technique``-decorated callbacks in this
-        package) implement ``get_config``/``from_config`` either; this
-        method is provided only for introspection/logging.
+        ``decay`` is omitted (a schedule is a closure, not data), so the dict
+        cannot rebuild the callback on its own; it is for introspection and
+        logging. Callbacks are not part of a saved ``.keras`` model config.
 
-        :return: Dictionary with the non-callable constructor arguments.
+        :return: Dictionary with ``update_every`` and ``start_step``.
         :rtype: dict
         """
         return {

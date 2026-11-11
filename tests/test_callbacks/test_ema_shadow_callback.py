@@ -209,3 +209,122 @@ class TestEMAShadowCallbackDecaySchedule:
     def test_invalid_start_step_raises(self):
         with pytest.raises(ValueError, match="start_step"):
             EMAShadowCallback(decay=0.9, start_step=-1)
+
+
+# ---------------------------------------------------------------------------
+# The schedule step comes from ``optimizer.iterations``, not from a Python
+# counter (plan-2026-11-11T131349-13b28b37/D-018).
+# ---------------------------------------------------------------------------
+
+
+class _IterationsProbe(keras.callbacks.Callback):
+    """Record ``optimizer.iterations`` at every ``on_train_batch_end``.
+
+    Listed AFTER the EMA callback, so it sees the same value the EMA callback
+    saw. This is the ground truth the schedule step is pinned against.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.values = []
+
+    def on_train_batch_end(self, batch, logs=None):
+        self.values.append(int(keras.ops.convert_to_numpy(self.model.optimizer.iterations)))
+
+
+def _recording_schedule(seen):
+    """A decay schedule that records the argument it is called with."""
+
+    def schedule(step):
+        seen.append(step)
+        return 0.5
+
+    return schedule
+
+
+def _fit_more(model, callbacks, *, steps=4, batch_size=2, initial_epoch=0, epochs=1):
+    """``fit`` an already-compiled model for ``steps`` batches per epoch."""
+    x = np.random.randn(batch_size * steps, 5).astype("float32")
+    y = np.random.randn(batch_size * steps, 3).astype("float32")
+    model.fit(
+        x, y, epochs=epochs, initial_epoch=initial_epoch, batch_size=batch_size,
+        shuffle=False, verbose=0, callbacks=callbacks,
+    )
+
+
+class TestEMAShadowCallbackCountsFromOptimizerIterations:
+    def test_the_step_is_the_iteration_count_before_this_batch(self):
+        """Pins the off-by-one against a real fit: at ``on_train_batch_end``
+        for the k-th batch (0-based) ``optimizer.iterations`` is already k + 1,
+        so the global 0-based step is ``iterations - 1``."""
+        model = _ShadowModel()
+        model.compile(optimizer="sgd", loss="mse")
+        seen, probe = [], _IterationsProbe()
+        cb = EMAShadowCallback(decay=_recording_schedule(seen))
+        _fit_more(model, [cb, probe], steps=3)
+
+        assert probe.values == [1, 2, 3]
+        assert seen == [v - 1 for v in probe.values] == [0, 1, 2]
+
+    def test_a_new_callback_on_a_resumed_fit_continues_the_global_schedule(self):
+        model = _ShadowModel()
+        model.compile(optimizer="sgd", loss="mse")
+        _fit_more(model, [EMAShadowCallback(decay=0.5)], steps=4)  # iterations -> 4
+
+        seen, probe = [], _IterationsProbe()
+        resumed = EMAShadowCallback(decay=_recording_schedule(seen))
+        _fit_more(model, [resumed, probe], steps=4, initial_epoch=1, epochs=2)
+
+        assert probe.values == [5, 6, 7, 8]
+        # A fresh instance used to restart at 0 and replay the 0.5 ramp start.
+        assert seen == [4, 5, 6, 7]
+
+    def test_start_step_is_a_global_step_on_a_resumed_fit(self):
+        model = _ShadowModel()
+        model.compile(optimizer="sgd", loss="mse")
+        _fit_more(model, [EMAShadowCallback(decay=0.5)], steps=4)
+
+        seen = []
+        resumed = EMAShadowCallback(decay=_recording_schedule(seen), start_step=6)
+        _fit_more(model, [resumed], steps=4, initial_epoch=1, epochs=2)
+
+        # Old code re-applied start_step=6 to its own fresh counter (0..3): no update.
+        assert seen == [6, 7]
+
+    def test_update_every_is_a_global_step_modulus_on_a_resumed_fit(self):
+        model = _ShadowModel()
+        model.compile(optimizer="sgd", loss="mse")
+        _fit_more(model, [EMAShadowCallback(decay=0.5)], steps=4)
+
+        seen = []
+        resumed = EMAShadowCallback(decay=_recording_schedule(seen), update_every=3)
+        _fit_more(model, [resumed], steps=4, initial_epoch=1, epochs=2)
+
+        # Global steps 4..7 -> only 6 is a multiple of 3 (old code: its own 0 and 3).
+        assert seen == [6]
+        assert len(model.update_calls) == 1 + 4  # first fit: 4 updates; resumed: 1
+
+    def test_steps_per_execution_above_one_is_refused(self):
+        """With ``steps_per_execution=4`` Keras fires one ``on_train_batch_end``
+        per EXECUTION, so no per-batch schedule can be honoured: refuse."""
+        model = _ShadowModel()
+        model.compile(optimizer="sgd", loss="mse", steps_per_execution=4)
+        with pytest.raises(ValueError, match="steps_per_execution"):
+            _fit_more(model, [EMAShadowCallback(decay=0.5)], steps=8)
+        assert model.update_calls == []
+
+    def test_steps_per_execution_one_is_accepted(self):
+        model = _ShadowModel()
+        model.compile(optimizer="sgd", loss="mse", steps_per_execution=1)
+        _fit_more(model, [EMAShadowCallback(decay=0.5)], steps=2)
+        assert len(model.update_calls) == 2
+
+    def test_there_is_no_python_step_counter_to_go_stale(self):
+        cb = EMAShadowCallback(decay=0.5)
+        assert not hasattr(cb, "_update_count")
+        assert not hasattr(cb, "_step")
+
+    def test_get_config_docstring_does_not_deny_sibling_get_config(self):
+        """The old docstring claimed no sibling callback implements
+        ``get_config``; three of them do."""
+        assert "implement" not in (EMAShadowCallback.get_config.__doc__ or "")
