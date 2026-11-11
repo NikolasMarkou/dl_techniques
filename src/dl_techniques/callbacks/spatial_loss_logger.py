@@ -180,7 +180,14 @@ class SpatialLossLogger(keras.callbacks.Callback):
             )
 
     def on_train_begin(self, logs: Optional[Dict[str, float]] = None) -> None:
-        """Warn about a missing ``compile_loss`` once per fit, not once per run."""
+        """Restart the per-run state: cadence counter, last record, warning."""
+        # DECISION plan-2026-11-11T131349-13b28b37/D-021: reset per run. Do not
+        # keep ``_batch`` across fits: the ``log_every`` phase then depends on
+        # how many batches earlier runs saw, so a rerun logs on different
+        # batches than a fresh instance. Pinned by
+        # test_state_resets_between_fits.py.
+        self._batch = 0
+        self.last_recorded = {}
         self._warned_no_compile_loss = False
 
     def on_epoch_begin(self, epoch, logs: Optional[Dict[str, float]] = None) -> None:

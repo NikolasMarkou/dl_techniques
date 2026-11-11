@@ -91,6 +91,24 @@ class SelfIteratePoolCallback(keras.callbacks.Callback):
             ``[-1, +1]``).
 
     Note:
+        The chain of feed-backs a slot has been through is not tracked, so its
+        depth is geometric: a slot survives a cadence as a fed-back output with
+        probability ``mix_ratio``, hence ``P(depth >= k) = mix_ratio ** k`` and
+        the depth is unbounded (measured: 64 slots, ``mix_ratio=0.5``, 8 epochs
+        reached depth 5). This is D-003 by design (a fed-back slot is never
+        re-noised, so there is nothing to reset it); a cap would need a per-slot
+        depth array and changes the semantics, so it is not offered.
+
+        Do not ``.repeat()`` the dataset built over ``current_input``: a live
+        iterator over a repeated ``from_generator`` source keeps serving the
+        values it produced before the in-place writes (measured: 0.0 served
+        after the buffer became 1.0). Build a finite dataset, so each epoch
+        opens a fresh iterator over the mutated buffer.
+
+        Each ``fit`` starts from fresh state: ``on_train_begin`` clears
+        ``history`` and ``epochs_seen`` and restarts the slot RNG from ``seed``.
+        The live arrays are the trainer's and are not touched.
+
         A deserialized instance (via ``from_config``) is NON-FUNCTIONAL until
         ``clean_pool``, ``current_input`` and ``get_sigma`` are re-attached — these
         are live training state re-supplied at construction, never serialized.
@@ -144,6 +162,19 @@ class SelfIteratePoolCallback(keras.callbacks.Callback):
         }
 
     # ------------------------------------------------------------------
+    def on_train_begin(self, logs: Optional[dict] = None) -> None:
+        """Start the run from fresh state: history, epoch count and slot RNG."""
+        # DECISION plan-2026-11-11T131349-13b28b37/D-021: per-run state is reset
+        # here, not carried across ``fit`` calls. Do not keep appending to
+        # ``history`` (a second fit plotted as one run) and do not continue the
+        # old ``_rng`` stream (a rerun then differs from a fresh instance). The
+        # generator is a private numpy one, so reseeding it leaves the global
+        # Keras seed generator alone. Pinned by
+        # test_state_resets_between_fits.py.
+        self._rng = np.random.default_rng(self.seed)
+        self.epochs_seen = 0
+        self.history = {key: [] for key in self.history}
+
     def on_epoch_end(self, epoch: int, logs: Optional[dict] = None) -> None:
         if (epoch + 1) % self.regen_freq != 0:
             return
@@ -166,6 +197,12 @@ class SelfIteratePoolCallback(keras.callbacks.Callback):
                 self.current_input,
                 batch_size=self.predict_batch_size,
                 verbose=0,
+            )
+            # Measured NOW: the writes below overwrite the slots this compares
+            # against, so a residual taken after them is the new inputs vs the
+            # outputs they were just copied from (0.0 at mix_ratio 1.0).
+            mean_residual = float(
+                np.mean(np.abs(denoised - self.current_input))
             )
 
             n = self.current_input.shape[0]
@@ -200,9 +237,6 @@ class SelfIteratePoolCallback(keras.callbacks.Callback):
                 self.clip_max,
             )
 
-            mean_residual = float(
-                np.mean(np.abs(self.current_input - denoised))
-            )
             self.history["epoch"].append(int(epoch))
             self.history["mean_residual"].append(mean_residual)
             self.history["sigma"].append(sigma)
@@ -212,7 +246,7 @@ class SelfIteratePoolCallback(keras.callbacks.Callback):
             logger.info(
                 f"SelfIteratePool: epoch {epoch} regenerated {m}/{n} slots "
                 f"(fresh={n - m}), sigma={sigma:.4f}, "
-                f"mean|current-denoised|={mean_residual:.5f}"
+                f"mean|denoised-input|={mean_residual:.5f}"
             )
         except Exception as exc:  # fail-soft: never kill training
             logger.warning(

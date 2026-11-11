@@ -117,6 +117,14 @@ class TrainingCurvesCallback(keras.callbacks.Callback):
             f"TrainingCurvesCallback: every {frequency} epochs → {self.output_dir}"
         )
 
+    def on_train_begin(self, logs: Optional[Dict[str, Any]] = None) -> None:
+        """Start the curves over for this run."""
+        # DECISION plan-2026-11-11T131349-13b28b37/D-021: reset per run. Do not
+        # keep appending across fits: a second run then plots at epochs
+        # [1, 2, 1, 2] as one curve. Pinned by test_state_resets_between_fits.py.
+        self._history = []
+        self._epochs = []
+
     def on_epoch_end(
         self, epoch: int, logs: Optional[Dict[str, Any]] = None
     ) -> None:

@@ -135,6 +135,19 @@ class ConsecutiveIncreaseEarlyStopping(keras.callbacks.Callback):
         if self.checkpoint_path is not None:
             os.makedirs(self.checkpoint_path, exist_ok=True)
 
+    def on_train_begin(self, logs: Optional[Dict[str, float]] = None) -> None:
+        """Forget the previous run's streak, reference value and snapshot."""
+        # DECISION plan-2026-11-11T131349-13b28b37/D-021: reset per run. Do not
+        # carry the state across fits: a stale ``_previous`` turns the new run's
+        # first value into an "increase", and a stale ``stopped_at_evaluation``
+        # makes ``on_train_end`` restore the PREVIOUS run's weights over a run
+        # that was never stopped. Pinned by test_state_resets_between_fits.py.
+        self._previous = None
+        self._streak = 0
+        self._best_snapshot = None
+        self._snapshot_is_disk = False
+        self.stopped_at_evaluation = None
+
     def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, float]] = None):
         """Evaluate one monitored value and act on it."""
         logs = logs or {}

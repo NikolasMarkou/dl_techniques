@@ -125,14 +125,19 @@ class ConvUnextBottleneckMonitorCallback(keras.callbacks.Callback):
         # Cumulative health statistics, keyed by metric name -> list of values.
         # Accumulated only on integer-tagged monitored epochs (the ``'final'``
         # re-emit is de-duplicated) so the epoch x-axis stays monotone.
-        self.history: Dict[str, List[float]] = {
+        self.history: Dict[str, List[float]] = {}
+        self.epochs_seen: List[int] = []
+        self._reset_history()
+
+    def _reset_history(self) -> None:
+        self.history = {
             "mean_activation": [],
             "std_activation": [],
             "mean_l2_norm": [],
             "dead_unit_frac": [],
             "sparsity": [],
         }
-        self.epochs_seen: List[int] = []
+        self.epochs_seen = []
 
     # -----------------------------------------------------------------
     # Bottleneck extraction
@@ -342,6 +347,15 @@ class ConvUnextBottleneckMonitorCallback(keras.callbacks.Callback):
     # -----------------------------------------------------------------
     # Keras hooks
     # -----------------------------------------------------------------
+    def on_train_begin(self, logs: Optional[Dict] = None) -> None:
+        """Start the health curves over for this run."""
+        # DECISION plan-2026-11-11T131349-13b28b37/D-021: reset per run. Do not
+        # carry ``epochs_seen`` across fits: the monotone-epoch guard in
+        # ``_emit`` then drops every statistic of a second run (tags 1, 2, ...
+        # are never above the old last tag) and the curves freeze on run one.
+        # Pinned by test_state_resets_between_fits.py.
+        self._reset_history()
+
     def on_epoch_end(self, epoch: int, logs: Optional[Dict] = None) -> None:
         """Emit bottleneck stats + PNG on monitored epochs.
 
