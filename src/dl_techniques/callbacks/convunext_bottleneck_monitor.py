@@ -83,6 +83,7 @@ class ConvUnextBottleneckMonitorCallback(keras.callbacks.Callback):
             missing). The caller chooses the location (e.g. a shared
             ``visualizations/`` dir); no extra subdirectory is created.
         monitor_freq: Emit stats + PNG every this many epochs. Defaults to 5.
+            Must be >= 1, otherwise ``ValueError`` is raised.
         max_featuremap_channels: Cap on the number of bottleneck channels tiled
             in each feature-map grid. Defaults to 64 (an 8x8 tile grid).
         featuremap_vmin: Lower bound of the FIXED absolute color scale applied
@@ -107,6 +108,8 @@ class ConvUnextBottleneckMonitorCallback(keras.callbacks.Callback):
         name_prefix: str = "convunext_bottleneck",
     ) -> None:
         super().__init__()
+        if monitor_freq < 1:
+            raise ValueError(f"monitor_freq must be >= 1, got {monitor_freq}")
         # Store the FULL 2-output model explicitly: the callback attaches to the
         # single-output training view, so self.model would be the WRONG model.
         self.full_model = full_model

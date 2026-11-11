@@ -74,12 +74,13 @@ class COCOMAPCallback(keras.callbacks.Callback):
     :param iou_threshold: NMS IoU threshold.  Default 0.45.
     :param max_per_class: Max detections per class (pre-merge).  Default 100.
     :param max_total: Max detections per image (post-merge).  Default 300.
-    :param frequency: Run every N epochs.  Default 1.
+    :param frequency: Run every N epochs.  Default 1.  Must be >= 1.
     :param max_eval_batches: Optional cap on the number of val batches
         evaluated per epoch (for quick iteration / smoke runs).  ``None`` =
         full val set.
     :param suppress_stdout: If True (default), swallow pycocotools'
         verbose ``summarize()`` prints.
+    :raises ValueError: If ``frequency`` is below 1, naming the value.
     """
 
     def __init__(
@@ -99,6 +100,13 @@ class COCOMAPCallback(keras.callbacks.Callback):
         suppress_stdout: bool = True,
     ) -> None:
         super().__init__()
+        # DECISION plan-2026-11-11T131349-13b28b37/D-021: a cadence below 1 is
+        # refused, not clamped. This used to be `max(1, int(frequency))`, which
+        # turned the typo `frequency=0` into "every epoch" with no message.
+        # Do not restore the clamp. Pinned by
+        # tests/test_callbacks/test_cadence_is_validated.py.
+        if frequency < 1:
+            raise ValueError(f"frequency must be >= 1, got {frequency}")
         self.val_loader = val_loader
         self.image_size = int(image_size)
         self.num_classes = int(num_classes)
@@ -109,7 +117,7 @@ class COCOMAPCallback(keras.callbacks.Callback):
         self.iou_threshold = float(iou_threshold)
         self.max_per_class = int(max_per_class)
         self.max_total = int(max_total)
-        self.frequency = max(1, int(frequency))
+        self.frequency = int(frequency)
         self.max_eval_batches = max_eval_batches
         self.suppress_stdout = suppress_stdout
 

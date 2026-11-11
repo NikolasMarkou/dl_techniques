@@ -109,6 +109,7 @@ class LatentMaskOverlayCallback(keras.callbacks.Callback):
             ``(B, H, W, C)``.
         output_dir: Directory to write PNGs into. Created if missing.
         frequency: Write every *frequency* epochs (0-indexed). Defaults to 1.
+            Must be >= 1, otherwise ``ValueError`` is raised.
         max_samples: Max rows in the grid. Defaults to 4.
         max_frames: Max columns (frames) in the grid. Defaults to 4.
         tint: RGB triple in ``[0, 1]`` used to tint masked pixels.
@@ -127,10 +128,12 @@ class LatentMaskOverlayCallback(keras.callbacks.Callback):
         alpha: float = 0.4,
     ) -> None:
         super().__init__()
+        if frequency < 1:
+            raise ValueError(f"frequency must be >= 1, got {frequency}")
         self.eval_pixels = _normalize_pixels(eval_pixels)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.frequency = max(1, int(frequency))
+        self.frequency = int(frequency)
         self.max_samples = int(max_samples)
         self.max_frames = int(max_frames)
         self.tint = tuple(float(c) for c in tint)
@@ -245,6 +248,7 @@ class PatchPredictionErrorCallback(keras.callbacks.Callback):
             ``(B, H, W, C)``.
         output_dir: Directory to write PNGs into. Created if missing.
         frequency: Write every *frequency* epochs (0-indexed). Defaults to 1.
+            Must be >= 1, otherwise ``ValueError`` is raised.
         max_samples: Max rows in the grid. Defaults to 4.
         max_frames: Max columns (frames) in the grid. Defaults to 4.
     """
@@ -258,10 +262,12 @@ class PatchPredictionErrorCallback(keras.callbacks.Callback):
         max_frames: int = 4,
     ) -> None:
         super().__init__()
+        if frequency < 1:
+            raise ValueError(f"frequency must be >= 1, got {frequency}")
         self.eval_pixels = _normalize_pixels(eval_pixels)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.frequency = max(1, int(frequency))
+        self.frequency = int(frequency)
         self.max_samples = int(max_samples)
         self.max_frames = int(max_frames)
         self._disabled: bool = False

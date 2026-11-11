@@ -82,7 +82,7 @@ class TrainingCurvesCallback(keras.callbacks.Callback):
     """Save metric/loss curves as PNGs every ``frequency`` epochs.
 
     :param output_dir: Directory to write PNGs into.  Created if missing.
-    :param frequency: Save every N epochs.  Defaults to 1.
+    :param frequency: Save every N epochs.  Defaults to 1.  Must be >= 1.
     :param file_prefix: PNG filename prefix (useful when running multiple
         concurrent callbacks).  Defaults to empty string.
 
@@ -92,6 +92,8 @@ class TrainingCurvesCallback(keras.callbacks.Callback):
       - ``segmentation.png`` — segmentation head losses + metrics
       - ``depth.png`` — depth-specific metrics
       - ``other.png`` — anything else
+
+    :raises ValueError: If ``frequency`` is below 1, naming the value.
     """
 
     def __init__(
@@ -101,6 +103,8 @@ class TrainingCurvesCallback(keras.callbacks.Callback):
         file_prefix: str = "",
     ) -> None:
         super().__init__()
+        if frequency < 1:
+            raise ValueError(f"frequency must be >= 1, got {frequency}")
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.frequency = int(frequency)

@@ -45,7 +45,7 @@ class EpochAnalyzerCallback(keras.callbacks.Callback):
     :type start_epoch: int
     :param epoch_frequency: The frequency (in epochs) at which to run the
         analysis. For example, `epoch_frequency=5` runs analysis every 5th
-        epoch. Defaults to 1.
+        epoch. Defaults to 1. Must be >= 1.
     :type epoch_frequency: int
     :param model_name: A descriptive name for the model being trained, used
         for labeling in the analysis results. Defaults to "TrainingModel".
@@ -61,6 +61,8 @@ class EpochAnalyzerCallback(keras.callbacks.Callback):
     The standard schedule is therefore ``epoch_000``, ``epoch_001``, then
     ``start_epoch + k * epoch_frequency``. Both flags False give the schedule
     this callback had before they existed.
+
+    :raises ValueError: If ``epoch_frequency`` is below 1, naming the value.
     """
 
     def __init__(
@@ -74,6 +76,8 @@ class EpochAnalyzerCallback(keras.callbacks.Callback):
         analyze_first_epoch: bool = True,
     ):
         super().__init__()
+        if epoch_frequency < 1:
+            raise ValueError(f"epoch_frequency must be >= 1, got {epoch_frequency}")
         self.output_dir = output_dir
         self.start_epoch = start_epoch
         self.epoch_frequency = epoch_frequency

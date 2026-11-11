@@ -70,6 +70,9 @@ class COCOMultiTaskPredictionGridCallback(keras.callbacks.Callback):
 
     Also writes a small text file per save with classification top-K for each
     sample vs ground-truth labels.
+
+    :param frequency: Save every N epochs.  Defaults to 5.
+    :raises ValueError: If ``frequency`` is below 1, naming the value.
     """
 
     def __init__(
@@ -93,6 +96,8 @@ class COCOMultiTaskPredictionGridCallback(keras.callbacks.Callback):
         detection_max_draw: int = 30,
     ) -> None:
         super().__init__()
+        if frequency < 1:
+            raise ValueError(f"frequency must be >= 1, got {frequency}")
         self.val_rgb = np.asarray(val_rgb[:max_samples])
         self.val_seg = np.asarray(val_seg[:max_samples])
         self.val_cls = np.asarray(val_cls[:max_samples])
