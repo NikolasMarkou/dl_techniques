@@ -37,6 +37,13 @@ class TemperatureAnnealingCallback(keras.callbacks.Callback):
     :param total_epochs: Schedule length. Must be >= 1.
     :param layer_names: If provided, only these layer names are touched.
         Otherwise all layers with a ``temperature`` Variable are annealed.
+        A run in which no layer matches logs one WARNING in ``on_train_begin``.
+
+    The ``temperature`` variable of the logic operators is trainable. The callback
+    ASSIGNS the scheduled value at every epoch start, so any move the optimizer made
+    to it during the previous epoch is discarded (measured: 2.166 at an epoch end
+    against a scheduled 2.0). Freezing it is a decision for ``layers/logic`` and is
+    deferred (plan-2026-11-11T131349-13b28b37/D-023).
     """
 
     SCHEDULES = frozenset({"cosine", "linear", "exp"})
@@ -111,6 +118,14 @@ class TemperatureAnnealingCallback(keras.callbacks.Callback):
         layer.temperature.assign(raw)
 
     # ------------------------------------------------------------------
+    def on_train_begin(self, logs: Optional[dict] = None) -> None:
+        # Counted once per run: a layer_names typo is otherwise a silent dead knob.
+        if not any(True for _ in self._iter_target_layers()):
+            logger.warning(
+                "TemperatureAnnealingCallback: no layer matched "
+                f"(layer_names={self.layer_names!r}); the schedule changes nothing."
+            )
+
     def on_epoch_begin(self, epoch: int, logs: Optional[dict] = None) -> None:
         t = self._temperature_at(epoch)
         touched = 0

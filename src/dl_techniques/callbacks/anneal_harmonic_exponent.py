@@ -20,6 +20,7 @@ import math
 from typing import List, Optional, Sequence, Union
 
 import keras
+import numpy as np
 
 # ------------------------------------------------------------------------------
 # local imports
@@ -41,6 +42,13 @@ class HarmonicExponentAnnealingCallback(keras.callbacks.Callback):
     :param total_epochs: Schedule length. Must be >= 1.
     :param layer_names: If provided, only these layer names are touched.
         Otherwise all layers exposing ``set_n_per_level`` are annealed.
+        A run in which no layer matches logs one WARNING in ``on_train_begin``.
+
+    ``n_init`` / ``n_final`` may be numpy arrays; they are stored as plain lists of
+    floats so ``get_config`` stays JSON-serializable. The exponent is overwritten at
+    every epoch start, so any move the optimizer made to a trainable exponent during
+    the previous epoch is discarded; freezing it is deferred
+    (plan-2026-11-11T131349-13b28b37/D-023).
     """
 
     SCHEDULES = frozenset({"linear", "cosine", "exp"})
@@ -58,6 +66,12 @@ class HarmonicExponentAnnealingCallback(keras.callbacks.Callback):
             raise ValueError(
                 f"schedule must be one of {sorted(self.SCHEDULES)}; got {schedule!r}."
             )
+        # A numpy array becomes a list BEFORE validation: ``float(array)`` raised a
+        # TypeError for length > 1, and a length-1 array reached get_config as an ndarray.
+        if isinstance(n_init, np.ndarray):
+            n_init = n_init.tolist()
+        if isinstance(n_final, np.ndarray):
+            n_final = n_final.tolist()
         for name, value in (("n_init", n_init), ("n_final", n_final)):
             vals = list(value) if isinstance(value, (list, tuple)) else [value]
             if any(float(v) <= 0 for v in vals):
@@ -139,6 +153,14 @@ class HarmonicExponentAnnealingCallback(keras.callbacks.Callback):
             if not callable(getattr(layer, "set_n_per_level", None)):
                 continue
             yield layer
+
+    def on_train_begin(self, logs: Optional[dict] = None) -> None:
+        # Counted once per run: a layer_names typo is otherwise a silent dead knob.
+        if not any(True for _ in self._iter_target_layers()):
+            logger.warning(
+                "HarmonicExponentAnnealingCallback: no layer matched "
+                f"(layer_names={self.layer_names!r}); the schedule changes nothing."
+            )
 
     def on_epoch_begin(self, epoch: int, logs: Optional[dict] = None) -> None:
         touched = 0

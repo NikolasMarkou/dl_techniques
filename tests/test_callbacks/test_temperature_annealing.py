@@ -85,3 +85,44 @@ class TestTemperatureAnnealingCallback:
         assert cfg["schedule"] == "cosine"
         cb2 = TemperatureAnnealingCallback(**cfg)
         assert cb2.layer_names == ["probe"]
+
+
+def _probe_model():
+    inp = keras.Input(shape=(4,))
+    out = LearnableLogicOperator(
+        operation_types=['and', 'or'], softplus_temperature=True,
+        allow_unary_degenerate=True, name='probe',
+    )(inp)
+    model = keras.Model(inp, out)
+    model.compile(optimizer='adam', loss='mse')
+    return model
+
+
+def _fit_once(model, cb):
+    x = np.random.randn(4, 4).astype(np.float32)
+    y = np.random.uniform(0, 1, (4, 4)).astype(np.float32)
+    model.fit(x, y, epochs=3, batch_size=4, verbose=0, callbacks=[cb])
+
+
+class TestNoMatchWarning:
+    def test_a_layer_name_that_matches_nothing_warns_once(self, caplog):
+        # Old: no record at any level; the schedule was a silent dead knob.
+        cb = TemperatureAnnealingCallback(total_epochs=3, layer_names=["typo"])
+        with caplog.at_level("DEBUG", logger="dl"):
+            _fit_once(_probe_model(), cb)
+        warnings = [
+            r for r in caplog.records
+            if r.levelname == "WARNING" and "layer_names" in r.getMessage()
+        ]
+        assert len(warnings) == 1, [r.getMessage() for r in caplog.records]
+        assert "typo" in warnings[0].getMessage()
+
+    def test_a_matching_layer_name_does_not_warn(self, caplog):
+        cb = TemperatureAnnealingCallback(total_epochs=3, layer_names=["probe"])
+        with caplog.at_level("DEBUG", logger="dl"):
+            _fit_once(_probe_model(), cb)
+        assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+    def test_the_docstring_states_that_in_epoch_gradient_moves_are_discarded(self):
+        # D-023: the trainable overwrite is deferred, documented instead.
+        assert "discard" in TemperatureAnnealingCallback.__doc__

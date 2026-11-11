@@ -2,6 +2,7 @@
 
 import math
 
+import numpy as np
 import pytest
 import keras
 import tensorflow as tf
@@ -122,3 +123,55 @@ class TestNoiseSigmaCurriculumCallback:
         restored = keras.saving.deserialize_keras_object(cfg)
         assert isinstance(restored, NoiseSigmaCurriculumCallback)
         assert restored.total_epochs == 5
+
+
+class TestEndpointValidationAtConstruction:
+    """The error must fire in ``__init__`` (before ``fit``), not as a math domain error mid-run."""
+
+    def test_exp_with_sigma_min_var_and_default_zero_min_raises(self):
+        # Old: constructs, then ``math.log(0)`` raises "math domain error" inside fit.
+        var = tf.Variable(0.0, trainable=False)
+        with pytest.raises(ValueError, match="sigma_min"):
+            NoiseSigmaCurriculumCallback(
+                sigma_max_var=var, schedule="exp", sigma_min_var=var
+            )
+
+    def test_exp_with_sigma_min_var_and_zero_min_end_raises(self):
+        var = tf.Variable(0.0, trainable=False)
+        with pytest.raises(ValueError, match="sigma_min"):
+            NoiseSigmaCurriculumCallback(
+                sigma_max_var=var, schedule="exp", sigma_min_var=var,
+                sigma_min_start=0.01, sigma_min_end=0.0,
+            )
+
+    def test_exp_with_positive_sigma_min_endpoints_is_accepted(self):
+        cb = NoiseSigmaCurriculumCallback(
+            sigma_max_start=0.1, sigma_max_end=0.5, total_epochs=5, schedule="exp",
+            sigma_min_var=tf.Variable(0.0, trainable=False),
+            sigma_min_start=0.01, sigma_min_end=0.05,
+        )
+        assert math.isclose(cb.sigma_min_at(4), 0.05, abs_tol=1e-9)
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            dict(sigma_min_start=0.2, sigma_min_end=0.01),  # min starts above max start
+            dict(sigma_min_start=0.0, sigma_min_end=0.9),  # min ends above max end
+        ],
+    )
+    def test_sigma_min_above_sigma_max_raises(self, kwargs):
+        # Old: accepted, the sampling range [min, max] was empty for part of the run.
+        with pytest.raises(ValueError, match="sigma_min"):
+            NoiseSigmaCurriculumCallback(
+                sigma_max_start=0.1, sigma_max_end=0.5, total_epochs=11,
+                sigma_min_var=tf.Variable(0.0, trainable=False), **kwargs,
+            )
+
+    def test_sigma_min_above_sigma_max_is_ignored_without_sigma_min_var(self):
+        # The lower bound is not scheduled at all when no variable is attached.
+        NoiseSigmaCurriculumCallback(
+            sigma_max_start=0.1, sigma_max_end=0.5, sigma_min_start=0.9, sigma_min_end=0.9
+        )
+
+    def test_the_defaults_without_sigma_min_var_still_construct_under_exp(self):
+        NoiseSigmaCurriculumCallback(schedule="exp")

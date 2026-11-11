@@ -104,3 +104,49 @@ class TestHarmonicExponentAnnealingCallback:
         assert rebuilt.schedule == "exp"
         assert rebuilt.n_init == [1.0, 2.0]
         assert rebuilt.total_epochs == 7
+
+
+class TestNumpyAndNoMatch:
+    def test_a_numpy_array_n_init_becomes_a_list_of_floats(self):
+        # Old: TypeError "only length-1 arrays can be converted" in the constructor.
+        cb = HarmonicExponentAnnealingCallback(n_init=np.array([1.0, 2.0]))
+        assert cb.n_init == [1.0, 2.0]
+        assert all(type(v) is float for v in cb.n_init)
+
+    def test_a_length_one_numpy_array_is_a_json_safe_list(self):
+        # Old: accepted, and get_config then returned the ndarray itself.
+        import json
+
+        cb = HarmonicExponentAnnealingCallback(n_final=np.array([4.0]))
+        json.dumps(cb.get_config())
+        assert cb.n_final == [4.0]
+
+    def test_a_numpy_array_is_validated_after_conversion(self):
+        with pytest.raises(ValueError, match="positive"):
+            HarmonicExponentAnnealingCallback(n_init=np.array([1.0, -2.0]))
+
+    def test_a_numpy_scalar_still_works(self):
+        cb = HarmonicExponentAnnealingCallback(n_init=np.float32(2.0))
+        assert float(cb.n_init) == 2.0
+
+    def test_a_layer_name_that_matches_nothing_warns_once(self, caplog):
+        # Old: the existing no-op test stays green, but nothing was ever logged.
+        inputs = keras.Input((6,))
+        outputs = HierarchicalHarmonicHead(8, branching=(2, 4), n=1.0)(inputs)
+        model = keras.Model(inputs, outputs)
+        model.compile(optimizer="adam", loss="sparse_categorical_crossentropy")
+        cb = HarmonicExponentAnnealingCallback(
+            n_init=1.0, n_final=5.0, total_epochs=3, layer_names=["typo"]
+        )
+        x = np.zeros((4, 6), dtype="float32")
+        y = np.zeros((4,), dtype="int32")
+        with caplog.at_level("DEBUG", logger="dl"):
+            model.fit(x, y, epochs=3, verbose=0, callbacks=[cb])
+        warnings = [
+            r for r in caplog.records
+            if r.levelname == "WARNING" and "layer_names" in r.getMessage()
+        ]
+        assert len(warnings) == 1, [r.getMessage() for r in caplog.records]
+
+    def test_the_docstring_states_that_in_epoch_gradient_moves_are_discarded(self):
+        assert "discard" in HarmonicExponentAnnealingCallback.__doc__

@@ -60,7 +60,10 @@ class NoiseSigmaCurriculumCallback(keras.callbacks.Callback):
 
     Note:
         For ``schedule='exp'`` all scheduled endpoints must be strictly positive
-        (log-space interpolation). For ``'linear'``/``'cosine'`` they must be >= 0.
+        (log-space interpolation); the ``sigma_min_*`` endpoints count only when
+        ``sigma_min_var`` is given. For ``'linear'``/``'cosine'`` they must be >= 0.
+        With ``sigma_min_var`` the lower endpoints must not exceed the upper ones.
+        Both are checked at construction, not at the first epoch.
     """
 
     SCHEDULES = frozenset({"linear", "cosine", "exp"})
@@ -95,6 +98,25 @@ class NoiseSigmaCurriculumCallback(keras.callbacks.Callback):
             raise ValueError(
                 "schedule='exp' requires sigma_max_start and sigma_max_end > 0."
             )
+        # DECISION plan-2026-11-11T131349-13b28b37/D-031: the lower bound is validated
+        # HERE, at construction, and only when ``sigma_min_var`` is attached (otherwise
+        # sigma_min_* is never scheduled). Do NOT defer it to ``on_epoch_begin``: the exp
+        # schedule took ``math.log(0)`` inside ``fit`` ("math domain error") and a min above
+        # the max produced an empty sampling range part-way through a run. Comparing the two
+        # endpoint pairs is enough: both bounds use the same fraction, so under all three
+        # schedules ``max - min`` is monotone between its endpoints and cannot cross inside.
+        if sigma_min_var is not None:
+            if schedule == "exp" and (sigma_min_start <= 0 or sigma_min_end <= 0):
+                raise ValueError(
+                    "schedule='exp' with sigma_min_var requires sigma_min_start and "
+                    f"sigma_min_end > 0; got {sigma_min_start} and {sigma_min_end}."
+                )
+            if sigma_min_start > sigma_max_start or sigma_min_end > sigma_max_end:
+                raise ValueError(
+                    "sigma_min must not exceed sigma_max at either endpoint; got "
+                    f"sigma_min ({sigma_min_start} -> {sigma_min_end}) against "
+                    f"sigma_max ({sigma_max_start} -> {sigma_max_end})."
+                )
 
         self.sigma_max_var = sigma_max_var
         self.sigma_max_start = float(sigma_max_start)
