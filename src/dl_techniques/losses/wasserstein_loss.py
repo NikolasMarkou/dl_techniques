@@ -356,9 +356,15 @@ class WassersteinGradientPenaltyLoss(keras.losses.Loss):
             y_pred: Predicted values from the critic.
 
         Returns:
-            Wasserstein loss component.
+            Per-sample Wasserstein loss component, same shape as ``y_pred``
+            (so ``reduction="none"`` keeps the batch axis).
         """
-        return self.wasserstein_loss(y_true, y_pred)
+        # DECISION plan-2026-11-11T131349-13b28b37/D-012
+        # `.call`, not `__call__`: `__call__` reduces to a scalar, which made
+        # `reduction="none"` return `()` and `sample_weight` scale the
+        # aggregate (weighted/unweighted == mean(w) exactly). This loss's own
+        # `__call__` does the weighting and the reduction exactly once.
+        return self.wasserstein_loss.call(y_true, y_pred)
 
     def get_config(self) -> dict:
         """Get the configuration of the loss.
@@ -419,7 +425,11 @@ def compute_gradient_penalty(
     gradients = tape.gradient(critic_output, interpolated)
 
     # Compute gradient penalty
-    gradient_norm = ops.sqrt(ops.sum(ops.square(gradients), axis=[1, 2, 3]))
+    # DECISION plan-2026-11-11T131349-13b28b37/D-012
+    # Sum over EVERY non-batch axis: a fixed `[1, 2, 3]` raises at rank 2 and 3
+    # and silently drops the trailing axes at rank 5 (0.003 against 0.229).
+    norm_axes = tuple(range(1, len(gradients.shape)))
+    gradient_norm = ops.sqrt(ops.sum(ops.square(gradients), axis=norm_axes))
     gradient_penalty = lambda_gp * ops.mean(ops.square(gradient_norm - 1.0))
 
     return gradient_penalty

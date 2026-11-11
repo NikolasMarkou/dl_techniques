@@ -5044,7 +5044,6 @@ _CALL_LOGGER_WAIVERS = {
      "WaveFieldAttention", "call"),
     ("src/dl_techniques/losses/clip_contrastive_loss.py",
      "CLIPContrastiveLoss", "_validate_logits"),
-    ("src/dl_techniques/losses/nano_vlm_loss.py", "NanoVLMLoss", "call"),
     ("src/dl_techniques/losses/yolo12_multitask_loss.py",
      "DiceFocalSegmentationLoss", "call"),
     ("src/dl_techniques/models/time_series/deepar/model.py",

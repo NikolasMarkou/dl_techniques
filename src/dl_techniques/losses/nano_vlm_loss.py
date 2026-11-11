@@ -143,7 +143,10 @@ class NanoVLMLoss(keras.losses.Loss):
 
     Args:
         ignore_index: Token index to ignore in loss computation. Typically
-            used for padding tokens. Default: 0.
+            used for padding tokens (the trainer's ``PAD_ID`` is 0, so 0 is the
+            documented default and drops a real token 0 too). A negative
+            value such as -1 is allowed: labels are clamped before the
+            cross-entropy. Default: 0.
         label_smoothing: Label smoothing factor between 0.0 and 1.0.
             Higher values apply more smoothing. Default: 0.0.
         from_logits: Whether predictions are logits or probabilities.
@@ -182,12 +185,6 @@ class NanoVLMLoss(keras.losses.Loss):
                 f"label_smoothing must be between 0.0 and 1.0, got {label_smoothing}"
             )
 
-        if ignore_index < 0:
-            logger.warning(
-                f"ignore_index is negative ({ignore_index}). "
-                "This may cause unexpected behavior."
-            )
-
         self.ignore_index = ignore_index
         self.label_smoothing = label_smoothing
         self.from_logits = from_logits
@@ -220,7 +217,12 @@ class NanoVLMLoss(keras.losses.Loss):
                 only the trailing ``seq_len`` positions are scored.
 
         Returns:
-            Scalar loss value averaged over non-masked tokens.
+            Per-sample loss of shape ``[batch_size]`` for every ``reduction``,
+            scaled so the default ``sum_over_batch_size`` reduction is the
+            batch-wide mean over non-masked tokens EXACTLY. Keeping the batch
+            axis is what lets ``sample_weight`` and ``reduction=`` select rows.
+            Under ``reduction="sum"`` the result is therefore ``batch_size``
+            times that mean, not the raw token sum.
 
         Raises:
             ValueError: If a rank is wrong or ``y_pred`` has fewer positions
@@ -228,81 +230,53 @@ class NanoVLMLoss(keras.losses.Loss):
         """
         # Score only the label positions (NanoVLM's vision prefix is dropped)
         y_pred = text_position_logits(y_true, y_pred)
-        y_pred_shape = keras.ops.shape(y_pred)
-        seq_len_true = keras.ops.shape(y_true)[1]
-
-        # Ensure minimum sequence length for autoregressive training
-        if seq_len_true < 2:
-            logger.warning(
-                f"Sequence length is {seq_len_true}, which is too short for "
-                "autoregressive training. Consider using longer sequences."
-            )
-            return keras.ops.zeros([], dtype=y_pred.dtype)
 
         # Shift sequences for autoregressive prediction
         # Predict next token given previous tokens
         y_pred_shifted = y_pred[:, :-1, :]  # [batch, seq_len-1, vocab_size]
         y_true_shifted = y_true[:, 1:]  # [batch, seq_len-1]
 
-        # Flatten for loss computation
-        batch_size = y_pred_shape[0]
-        vocab_size = y_pred_shape[2]
-        seq_len_shifted = seq_len_true - 1
+        # Clamp ignored targets so a negative `ignore_index` never reaches the
+        # sparse CE as an invalid label; the mask below removes their loss.
+        safe_labels = keras.ops.maximum(y_true_shifted, 0)
 
-        y_pred_flat = keras.ops.reshape(
-            y_pred_shifted,
-            [batch_size * seq_len_shifted, vocab_size]
-        )
-        y_true_flat = keras.ops.reshape(
-            y_true_shifted,
-            [batch_size * seq_len_shifted]
-        )
-
-        # Compute per-token loss
-        loss_per_token = self.sparse_ce(y_true_flat, y_pred_flat)
+        # Per-token cross-entropy: [batch, seq_len-1]
+        loss_per_token = self.sparse_ce(safe_labels, y_pred_shifted)
 
         # Apply label smoothing manually if configured
         if self.label_smoothing > 0.0:
             if self.from_logits:
-                log_probs = y_pred_flat - keras.ops.logsumexp(
-                    y_pred_flat, axis=-1, keepdims=True
+                log_probs = y_pred_shifted - keras.ops.logsumexp(
+                    y_pred_shifted, axis=-1, keepdims=True
                 )
             else:
-                log_probs = keras.ops.log(y_pred_flat + 1e-8)
+                log_probs = keras.ops.log(y_pred_shifted + 1e-8)
             smooth_loss = -keras.ops.mean(log_probs, axis=-1)
             loss_per_token = (
                 (1.0 - self.label_smoothing) * loss_per_token
                 + self.label_smoothing * smooth_loss
             )
 
-        # Create mask to ignore specified tokens (e.g., padding)
         mask = keras.ops.cast(
-            keras.ops.not_equal(y_true_flat, self.ignore_index),
+            keras.ops.not_equal(y_true_shifted, self.ignore_index),
             dtype=loss_per_token.dtype
         )
 
-        # Apply mask to loss
-        masked_loss = loss_per_token * mask
-
-        # Compute final loss based on reduction type
-        total_loss = keras.ops.sum(masked_loss)
-        total_valid_tokens = keras.ops.sum(mask)
-
-        # Avoid division by zero
-        mean_loss = keras.ops.where(
-            keras.ops.greater(total_valid_tokens, 0),
-            total_loss / keras.ops.maximum(total_valid_tokens, 1.0),
-            keras.ops.zeros_like(total_loss)
-        )
-
-        # Handle different reduction types
-        if self.reduction == "sum":
-            return total_loss
-        elif self.reduction == "none":
-            # Return per-sample loss (reshape back to [batch_size, seq_len-1])
-            return keras.ops.reshape(masked_loss, [batch_size, seq_len_shifted])
-        else:  # sum_over_batch_size
-            return mean_loss
+        # DECISION plan-2026-11-11T131349-13b28b37/D-011
+        # Return one value per ROW, scaled so Keras' `sum_over_batch_size`
+        # reproduces the batch-wide token mean exactly. Do NOT return that
+        # scalar: `Loss.__call__` multiplies call()'s output by
+        # `sample_weight` before reducing, so a scalar made every weighted
+        # value `unweighted * mean(sample_weight)` whichever rows were
+        # weighted. Do NOT return each row's OWN mean either: a mean of means
+        # re-weights short sequences up (see masked_causal_lm_loss.py). Do NOT
+        # branch in Python on the sequence length: it is a tensor under a
+        # ragged `padded_batch`; a one-token sequence has no valid target and
+        # row_token_sum = 0 already scores it 0.
+        row_token_sum = keras.ops.sum(loss_per_token * mask, axis=-1)
+        total_valid_tokens = keras.ops.sum(mask) + 1e-8
+        batch_size = keras.ops.cast(keras.ops.shape(mask)[0], row_token_sum.dtype)
+        return row_token_sum / total_valid_tokens * batch_size
 
     def get_config(self) -> dict:
         """Get the loss function configuration.

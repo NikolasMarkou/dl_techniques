@@ -623,3 +623,60 @@ def test_gradient_penalty_with_different_batch_sizes() -> None:
 if __name__ == "__main__":
     # Run the test suite
     pytest.main([__file__, "-v", "--tb=short"])
+
+# ---------------------------------------------------------------------
+# plan-2026-11-11T131349-13b28b37 step 6 (D-012)
+# ---------------------------------------------------------------------
+
+def _linear_critic(input_shape):
+    """A bias-free linear critic: its input gradient is the weight vector,
+    so the penalty has a closed form that needs no sampling."""
+    inputs = keras.Input(shape=input_shape)
+    outputs = keras.layers.Dense(1, use_bias=False)(
+        keras.layers.Flatten()(inputs))
+    return keras.Model(inputs, outputs)
+
+
+@pytest.mark.parametrize("input_shape", [(6,), (4, 3), (3, 3, 2), (2, 2, 2, 3)])
+def test_gradient_penalty_equals_the_exact_gradient_norm_at_any_rank(input_shape):
+    """RED at HEAD: `axis=[1, 2, 3]` raises at rank 2 and 3 and is silently
+    wrong at rank 5 (0.003 against 0.229 measured)."""
+    critic = _linear_critic(input_shape)
+    rng = np.random.default_rng(0)
+    batch = 3
+    real = ops.convert_to_tensor(
+        rng.normal(size=(batch,) + input_shape).astype("float32"))
+    fake = ops.convert_to_tensor(
+        rng.normal(size=(batch,) + input_shape).astype("float32"))
+    kernel = keras.ops.convert_to_numpy(critic.layers[-1].kernel)
+    exact = 10.0 * (np.linalg.norm(kernel) - 1.0) ** 2
+    got = float(compute_gradient_penalty(critic, real, fake, lambda_gp=10.0))
+    np.testing.assert_allclose(got, exact, rtol=1e-5, atol=0)
+
+
+def test_gradient_penalty_loss_none_reduction_keeps_the_batch_axis():
+    """RED at HEAD: `.wasserstein_loss(...)` goes through `__call__` and
+    returns the reduced scalar, shape `()`."""
+    labels = np.array([1, 0, 1, 0], dtype="float32")
+    preds = np.array([1.5, -1.2, 2.1, -0.8], dtype="float32")
+    rows = WassersteinGradientPenaltyLoss(reduction="none")(labels, preds)
+    assert tuple(rows.shape) == (4,)
+    np.testing.assert_allclose(
+        keras.ops.convert_to_numpy(rows),
+        keras.ops.convert_to_numpy(WassersteinLoss(reduction="none")(labels, preds)),
+        rtol=1e-6, atol=0)
+
+
+def test_gradient_penalty_loss_sample_weight_selects_rows():
+    """RED at HEAD: weighted/unweighted was exactly `mean(w) = 0.75`."""
+    labels = np.array([1, 0, 1, 0], dtype="float32")
+    preds = np.array([1.5, -1.2, 2.1, -0.8], dtype="float32")
+    weights = np.array([1.0, 1.0, 1.0, 0.0], dtype="float32")
+    loss = WassersteinGradientPenaltyLoss()
+    weighted = float(loss(labels, preds, sample_weight=weights))
+    unweighted = float(loss(labels, preds))
+    assert abs(weighted / unweighted - 0.75) > 1e-3
+    np.testing.assert_allclose(
+        weighted,
+        float(WassersteinLoss()(labels, preds, sample_weight=weights)),
+        rtol=1e-6, atol=0)
