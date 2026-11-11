@@ -24,9 +24,15 @@ Reading the taps
 ----------------
 Each tap records its last penalty in a non-trainable variable, the same mechanism
 BatchNorm uses for moving statistics. That works on every backend and costs one
-small read per tap per batch, where a forward pass to recompute the loss would
-cost a full graph execution. The read happens every batch, not only at the log
-interval, because the running mean below needs every batch's total.
+stacked read of all the tap scalars per batch (a single host copy, whatever the
+number of taps), where a forward pass to recompute the loss would cost a full
+graph execution. The read happens every batch, not only at the log interval,
+because the running mean below needs every batch's total, so ``log_every`` does
+not reduce it. Measured on CPU only: about 160 us per tap with one read per tap
+(7.9 ms for 48 taps) against 0.94 ms for the stacked read of 48 taps; the cost
+on a GPU, where the copy synchronizes the host with the device each step, was
+not measured. It is bounded by one copy per batch and matters only for a very
+fast step; ``steps_per_execution=1`` is required anyway (below).
 
 One basis for the split
 -----------------------
@@ -168,10 +174,12 @@ class SpatialLossLogger(keras.callbacks.Callback):
             return
 
         # A list, not a dict by name: taps in different blocks share a leaf name.
-        penalties = [
-            float(ops.convert_to_numpy(tap.last_spatial_loss))
-            for tap in self._taps
-        ]
+        # One stacked read, not one per tap: each per-tap read is its own
+        # device-to-host copy. `.value` because `ops.stack` rejects a Variable.
+        readings = ops.convert_to_numpy(
+            ops.stack([tap.last_spatial_loss.value for tap in self._taps])
+        )
+        penalties = [float(reading) for reading in readings]
         total = sum(
             tap.alpha * penalty for tap, penalty in zip(self._taps, penalties)
         )

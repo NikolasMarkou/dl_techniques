@@ -694,6 +694,43 @@ class TestSpatialLossLoggerBasis:
         callback.on_train_batch_end(0, {"loss": 0.0})
         assert np.isnan(callback.last_recorded["spatial/share"])
 
+    def test_every_tap_is_read_to_the_host_in_one_copy(self, monkeypatch):
+        """One device-to-host copy per batch, however many taps, with the same numbers.
+
+        Measured on CPU (N taps, one batch end): one ``convert_to_numpy`` per tap
+        cost about 160 us per tap, a single stacked read 935 us at 48 taps against
+        7850 us. On a GPU each per-tap read is a synchronizing copy, which is why
+        the count of copies is what is pinned here.
+        """
+
+        class _FakeTap:
+            def __init__(self, name, alpha, value):
+                self.name = name
+                self.alpha = alpha
+                self.last_spatial_loss = keras.Variable(
+                    np.float32(value), trainable=False, dtype="float32"
+                )
+
+        taps = [_FakeTap(f"t{i}", 1.0 + i, 0.25 * (i + 1)) for i in range(5)]
+        callback = SpatialLossLogger(log_every=1)
+        callback._taps = taps
+        copies = []
+        real = ops.convert_to_numpy
+        monkeypatch.setattr(
+            ops, "convert_to_numpy", lambda x: copies.append(1) or real(x)
+        )
+        logs = {"loss": 10.0, "compile_loss": 10.0}
+        callback.on_train_batch_end(0, logs)
+
+        assert len(copies) == 1, len(copies)
+        for tap in taps:
+            assert logs[f"spatial/{tap.name}"] == pytest.approx(
+                float(real(tap.last_spatial_loss)), rel=0, abs=0
+            )
+        assert logs["spatial/total"] == pytest.approx(
+            sum(tap.alpha * 0.25 * (i + 1) for i, tap in enumerate(taps)), rel=1e-6
+        )
+
     def test_the_docstrings_name_the_keys_the_code_writes(self):
         import dl_techniques.callbacks.spatial_loss_logger as module
 
