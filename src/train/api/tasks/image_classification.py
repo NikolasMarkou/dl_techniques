@@ -95,6 +95,10 @@ import functools
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from .. import recipes, registry
 from ..args import (
     AnalysisArgs,
@@ -579,6 +583,7 @@ class ImageClassificationTrainer(TaskTrainer):
             load_check=load_check,
         )
 
+# ---------------------------------------------------------------------
 
 def train_image_classification(
     *,
@@ -621,3 +626,5 @@ def train_image_classification(
     )
     config = validate(ImageClassificationConfig, given)
     return ImageClassificationTrainer(config).run()
+
+# ---------------------------------------------------------------------
