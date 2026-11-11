@@ -42,6 +42,7 @@ from .common import (
     compute_attention_scale,
     create_qk_norms,
     validate_head_divisibility,
+    validate_logit_probability_type,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -221,16 +222,7 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         validate_head_divisibility(dim, num_heads)
         if not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
-        if probability_type in (
-            "routing",
-            "deterministic_routing",
-            "hierarchical",
-            "hierarchical_routing",
-        ):
-            raise ValueError(
-                f"probability_type '{probability_type}' is not supported for "
-                f"SharedWeightsCrossAttention"
-            )
+        validate_logit_probability_type(probability_type, "SharedWeightsCrossAttention")
 
         # Store all configuration
         self.dim = dim

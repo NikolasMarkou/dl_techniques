@@ -24,7 +24,13 @@ from typing import Any, Dict, Optional, Tuple, Union
 # local imports
 # ---------------------------------------------------------------------
 
-from .common import apply_attention_mask, create_qk_norms, dtype_name
+from .common import (
+    apply_attention_mask,
+    create_qk_norms,
+    dtype_name,
+    probability_axis,
+    validate_logit_probability_type,
+)
 from dl_techniques.initializers import clone_initializer
 from ..ffn.kan_linear import KANLinear
 from ..activations import ProbabilityOutput
@@ -263,18 +269,7 @@ class SingleWindowAttention(keras.layers.Layer):
                 f"Invalid attention_mode. Expected one of {valid_modes}, "
                 f"got '{attention_mode}'"
             )
-        invalid_prob_types = {
-            "routing",
-            "deterministic_routing",
-            "hierarchical",
-            "hierarchical_routing",
-        }
-        if probability_type in invalid_prob_types:
-            raise ValueError(
-                f"Invalid probability_type '{probability_type}'. Score-level "
-                f"routing strategies {invalid_prob_types} are not allowed for "
-                f"SingleWindowAttention."
-            )
+        validate_logit_probability_type(probability_type, "SingleWindowAttention")
         if kan_init_scheme is not None and kan_init_scheme not in VALID_KAN_SCHEMES:
             raise ValueError(
                 f"kan_init_scheme must be one of {VALID_KAN_SCHEMES} or None, "
@@ -888,7 +883,7 @@ class SingleWindowAttention(keras.layers.Layer):
             broadcast_mask,
             # `dtype_name` (common.py, D-007) reads the dtype name; the idiom's reasoning lives there.
             out_dtype=dtype_name(attn),
-            rescue_axis=(self.probability_config or {}).get("axis", -1),
+            rescue_axis=probability_axis(self.probability_config),
         )
 
         attn = self.attn_prob(attn, training=training)

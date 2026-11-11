@@ -167,7 +167,7 @@ self.norm = create_normalization_layer('layer_norm', axis=-1)
 
 `dl_techniques/layers/attention/common.py` is this package's single home for the small,
 provably-identical primitives that were previously re-derived across a dozen modules. It is
-deliberately **flat**: nine module-level names, **no classes, no registry, no Keras
+deliberately **flat**: twelve module-level names, **no classes, no registry, no Keras
 registration**. Import from it the way you would import `math`.
 
 ```python
@@ -181,6 +181,9 @@ from .common import (
     split_heads,
     merge_heads,
     create_qk_norms,
+    NON_LOGIT_PROBABILITY_TYPES,
+    validate_logit_probability_type,
+    probability_axis,
 )
 ```
 
@@ -260,6 +263,32 @@ distinct unbuilt layers from `create_normalization_layer`, query first, named `q
     without QK-norm instead of raising the factory's error. `multi_head_latent_attention.py` creates a
     lone `q_norm` inside its `q_latent_dim` branch (no K partner) and `kv_norm`; neither is a pair.
     `test_common.py::TestCreateQkNorms` walks the package for a re-spelled pair.
+
+#### `validate_logit_probability_type(probability_type, layer_name)` and `NON_LOGIT_PROBABILITY_TYPES`
+
+Refuses the four `ProbabilityOutput` types that consume features rather than score logits
+(`routing`, `deterministic_routing`, `hierarchical`, `hierarchical_routing`; the tuple is
+`NON_LOGIT_PROBABILITY_TYPES`). The value is lowered once, so `"Routing"` is refused too; the message
+is `Invalid probability_type '<x>': not supported by <layer_name> ...`, and the phrases
+`Invalid probability_type` and `not supported` are matched by two layer test files, so keep them.
+
+*   **Adopters (13):** `capsule_routing`, `differential`, `gated`, `group_query`, `hopfield`,
+    `lighthouse`, `multi_head_cross`, `multi_head_latent`, `non_local`, `rpc`, `shared_weights_cross`,
+    `single_window`, `window`. Ten of them compared case-sensitively before, so a mixed-case invalid type
+    used to get past them: a deliberate fix, valid configurations are unchanged.
+*   A value that is not a `str` is not judged here; `ProbabilityOutput` reports it.
+*   Do NOT re-spell the tuple at a layer: `test_common.py::TestValidateLogitProbabilityType` walks the
+    package for it.
+
+#### `probability_axis(probability_config, default=-1)`
+
+The axis a layer's own score normalisation reduces over, for `apply_attention_mask(..., rescue_axis=...)`:
+`probability_config["axis"]` when present, else `default`. Written
+`rescue_axis=probability_axis(self.probability_config)`; `TestTheAdopterCountsAreMechanical` counts that
+spelling to derive the layers that take the axis from their config (nine).
+
+*   **Do NOT use it at `capsule_routing_attention.py`**: its axes (`-1`, `-2`, `-1`) are fixed per site by
+    the routing maths. `beit` and `mean_shift` have no `probability_config` at all.
 
 #### `validate_head_divisibility(dim, num_heads, *, dim_name=..., num_heads_name=...)`
 

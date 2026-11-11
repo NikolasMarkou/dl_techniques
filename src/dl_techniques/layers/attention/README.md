@@ -36,7 +36,7 @@ Shared building blocks live in `common.py`: an attention-mask helper (`apply_att
 
 - `__init__.py` - re-exports 7 factory-interface names (6 functions and the `AttentionType` alias) and 39 layer classes, 46 names in `__all__`. Import order fixes Keras registration order.
 - `factory.py` - `ATTENTION_REGISTRY` (37 entries with metadata), `AttentionType` literal, the six re-exported functions, and `assemble_attention_config` (not re-exported).
-- `common.py` - `MASK_BIAS_VALUE`, `mask_dtype`, `apply_attention_mask`, `validate_head_divisibility`, `compute_attention_scale`, `dtype_name`, `split_heads`, `merge_heads`, `create_qk_norms`. Not re-exported.
+- `common.py` - `MASK_BIAS_VALUE`, `mask_dtype`, `apply_attention_mask`, `validate_head_divisibility`, `compute_attention_scale`, `dtype_name`, `split_heads`, `merge_heads`, `create_qk_norms`, `NON_LOGIT_PROBABILITY_TYPES`, `validate_logit_probability_type`, `probability_axis`. Not re-exported.
 - `GUIDE.md` - authoring guide for new attention layers.
 - `multi_head_attention.py` - `MultiHeadAttention`, a thin self-attention wrapper around `MultiHeadCrossAttention`.
 - `multi_head_cross_attention.py` - `MultiHeadCrossAttention`, the shared engine for self- and cross-attention.

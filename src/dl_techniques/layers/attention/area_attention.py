@@ -39,6 +39,7 @@ from .common import (
     compute_attention_scale,
     create_qk_norms,
     dtype_name,
+    probability_axis,
     validate_head_divisibility,
 )
 
@@ -460,7 +461,7 @@ class AreaAttention(keras.layers.Layer):
                 scores,
                 keep,
                 out_dtype=dtype_name(scores),
-                rescue_axis=(self.probability_config or {}).get("axis", -1),
+                rescue_axis=probability_axis(self.probability_config),
             )
 
         attn_weights = self.attn_prob(scores)

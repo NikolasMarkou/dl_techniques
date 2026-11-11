@@ -42,20 +42,11 @@ from .common import (
     dtype_name,
     merge_heads,
     split_heads,
+    validate_logit_probability_type,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
-
-# Probability types that cannot be used as drop-in replacements for the
-# attention/coupling softmaxes in this layer (they consume features, not
-# logits, and reshape the output).
-_DISALLOWED_PROB_TYPES: Tuple[str, ...] = (
-    "routing",
-    "deterministic_routing",
-    "hierarchical",
-    "hierarchical_routing",
-)
 
 # Probability types whose underlying implementation does not honor a
 # user-supplied ``axis`` argument. For these we have to fall back to
@@ -281,13 +272,7 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         # consume features and emit a class distribution; they are incompatible
         # with the logit-to-coupling-coefficient role required by the three
         # softmax sites in this layer.
-        if probability_type.lower() in _DISALLOWED_PROB_TYPES:
-            raise ValueError(
-                f"probability_type='{probability_type}' is not supported by "
-                f"CapsuleRoutingSelfAttention. The routing/hierarchical types "
-                f"consume features (not logits) and replace a Dense layer; "
-                f"they cannot stand in for the attention/coupling softmaxes."
-            )
+        validate_logit_probability_type(probability_type, "CapsuleRoutingSelfAttention")
 
         # Store ALL configuration parameters for complete serialization
         self.num_heads = num_heads

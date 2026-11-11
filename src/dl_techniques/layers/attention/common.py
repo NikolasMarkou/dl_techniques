@@ -3,7 +3,9 @@ Shared primitives for the ``layers/attention`` package: the attention-mask
 bias constant and its dtype rule, ``apply_attention_mask`` (the fp16-safe way
 to apply that bias), ``validate_head_divisibility``,
 ``compute_attention_scale``, ``dtype_name``, the head layout pair
-``split_heads`` / ``merge_heads``, and ``create_qk_norms``.
+``split_heads`` / ``merge_heads``, ``create_qk_norms``,
+``NON_LOGIT_PROBABILITY_TYPES`` with ``validate_logit_probability_type``, and
+``probability_axis``.
 
 Masking is a pair: ``MASK_BIAS_VALUE`` is only safe inside the dtype
 ``mask_dtype()`` returns, since ``np.float16(-1e9)`` is ``-inf`` and
@@ -522,3 +524,103 @@ def create_qk_norms(
     q_norm = create_normalization_layer(qk_norm_type, name=f"q_norm{suffix}", **kwargs)
     k_norm = create_normalization_layer(qk_norm_type, name=f"k_norm{suffix}", **kwargs)
     return q_norm, k_norm
+
+
+# ---------------------------------------------------------------------
+
+NON_LOGIT_PROBABILITY_TYPES: Tuple[str, ...] = (
+    "routing",
+    "deterministic_routing",
+    "hierarchical",
+    "hierarchical_routing",
+)
+"""``ProbabilityOutput`` types that consume features, not score logits.
+
+They need a fixed ``output_dim`` and replace a ``Dense`` layer, so they cannot
+normalise attention scores whose last axis is the (dynamic) key length. Lower case,
+as :func:`validate_logit_probability_type` compares after lowering the caller's value.
+"""
+
+
+def validate_logit_probability_type(probability_type: str, layer_name: str) -> None:
+    """Reject a ``probability_type`` that cannot normalise attention score logits.
+
+    The check every attention layer that builds its softmax through
+    :class:`~dl_techniques.layers.activations.probability_output.ProbabilityOutput`
+    runs in ``__init__``: the four types in :data:`NON_LOGIT_PROBABILITY_TYPES` are
+    refused up front, before any sub-layer is built, with a message that names the
+    offending value and the layer. The comparison is case-insensitive because
+    ``ProbabilityOutput`` itself lowercases the type; a case-sensitive check lets
+    ``"Routing"`` through to a later, less readable failure.
+
+    :param probability_type: The caller's ``probability_type`` argument, as given.
+        A value that is not a ``str`` is not judged here (it is left to
+        ``ProbabilityOutput``, which reports it).
+    :type probability_type: str
+    :param layer_name: The class name of the calling layer, used verbatim in the
+        message (``"GroupedQueryAttention"``).
+    :type layer_name: str
+
+    :raises ValueError: If ``probability_type.lower()`` is one of
+        :data:`NON_LOGIT_PROBABILITY_TYPES`. The message reads
+        ``Invalid probability_type '<value>': not supported by <layer_name> ...``.
+
+    :return: ``None``. Raises on failure, returns silently on success.
+    :rtype: None
+    """
+    # DECISION plan-2026-11-11T131349-13b28b37/D-035: the type is lowered ONCE here,
+    # so a mixed-case invalid type ("Routing") is refused at every adopting layer. Ten
+    # of the thirteen layers compared case-sensitively before and let it through, a
+    # deliberate fix (valid configs are untouched: test_common.py::
+    # TestValidateLogitProbabilityType). Do NOT re-spell the tuple or the lowering at
+    # a layer (an AST guard walks the package) and do NOT drop the "Invalid
+    # probability_type" and "not supported" phrases: two layer test files match on them.
+    if isinstance(probability_type, str) and (
+        probability_type.lower() in NON_LOGIT_PROBABILITY_TYPES
+    ):
+        raise ValueError(
+            f"Invalid probability_type '{probability_type}': not supported by "
+            f"{layer_name}. The routing/hierarchical types consume features and "
+            f"replace a Dense layer rather than normalising score logits; use one "
+            f"of 'softmax', 'sparsemax', 'threshmax' or 'adaptive'."
+        )
+
+
+# ---------------------------------------------------------------------
+
+
+def probability_axis(
+        probability_config: Optional[Dict[str, Any]],
+        default: int = -1,
+) -> int:
+    """Return the softmax axis a layer's ``probability_config`` asks for.
+
+    The value an attention layer passes as ``rescue_axis`` to
+    :func:`apply_attention_mask`: the axis its own ``ProbabilityOutput`` reduces
+    over, which is the ``"axis"`` entry of the config and ``-1`` when the config is
+    ``None``, empty or has no such entry (the same default ``ProbabilityOutput``
+    applies). The entry is returned as given; nothing is validated or normalised.
+
+    It is for layers whose score normalisation is built from a caller-supplied
+    ``probability_config`` with the axis free. A layer that fixes the axis by its own
+    maths (``capsule_routing_attention``: ``-1``, ``-2``, ``-1`` per site, set in
+    ``_site_config``) must not use it, and neither may a layer with no
+    ``probability_config`` (``beit``, ``mean_shift``).
+
+    :param probability_config: The layer's ``probability_config`` argument, or ``None``.
+        Never mutated.
+    :type probability_config: Optional[Dict[str, Any]]
+    :param default: Axis returned when the config does not name one. Defaults to ``-1``.
+    :type default: int
+
+    :return: ``probability_config["axis"]`` if present, else ``default``.
+    :rtype: int
+    """
+    # DECISION plan-2026-11-11T131349-13b28b37/D-035: ONE spelling of the lookup that
+    # nine layers wrote as ``(self.probability_config or {}).get("axis", -1)``; the
+    # deriver census in test_common.py counts the call-site spelling
+    # ``rescue_axis=probability_axis(self.probability_config``. Do NOT use it at
+    # capsule_routing (its three axes come from the routing maths, a config value
+    # there is overridden) and do NOT clamp or validate here: apply_attention_mask
+    # already rejects a size-one rescue axis with its own message.
+    return (probability_config or {}).get("axis", default)

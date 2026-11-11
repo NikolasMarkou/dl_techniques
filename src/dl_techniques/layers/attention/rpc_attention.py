@@ -42,7 +42,9 @@ from .common import (
     compute_attention_scale,
     create_qk_norms,
     dtype_name,
+    probability_axis,
     validate_head_divisibility,
+    validate_logit_probability_type,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -235,16 +237,7 @@ class RPCAttention(keras.layers.Layer):
             raise ValueError(f"svd_threshold must be positive, got {svd_threshold}")
         if not 0.0 <= dropout_rate <= 1.0:
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
-        if probability_type in (
-            "routing",
-            "deterministic_routing",
-            "hierarchical",
-            "hierarchical_routing",
-        ):
-            raise ValueError(
-                f"probability_type '{probability_type}' is not supported by "
-                f"RPCAttention. Use a non-routing probability type."
-            )
+        validate_logit_probability_type(probability_type, "RPCAttention")
 
         # Store configuration
         self.dim = dim
@@ -504,7 +497,7 @@ class RPCAttention(keras.layers.Layer):
             attention_scores = apply_attention_mask(
                 attention_scores,
                 keras.ops.not_equal(mask, 0),
-                rescue_axis=(self.probability_config or {}).get("axis", -1),
+                rescue_axis=probability_axis(self.probability_config),
             )
 
         L, S = self._pcp_decomposition(attention_scores)

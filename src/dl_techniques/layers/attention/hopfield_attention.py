@@ -28,7 +28,13 @@ from typing import Optional, Tuple, Union, Any, List, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from .common import apply_attention_mask, create_qk_norms, dtype_name
+from .common import (
+    apply_attention_mask,
+    create_qk_norms,
+    dtype_name,
+    probability_axis,
+    validate_logit_probability_type,
+)
 from ..activations import ProbabilityOutput
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -228,17 +234,7 @@ class HopfieldAttention(keras.layers.Layer):
             raise ValueError(f"update_steps_max must be non-negative, got {update_steps_max}")
         if update_steps_eps <= 0:
             raise ValueError(f"update_steps_eps must be positive, got {update_steps_eps}")
-        if probability_type in (
-            "routing",
-            "deterministic_routing",
-            "hierarchical",
-            "hierarchical_routing",
-        ):
-            raise ValueError(
-                f"probability_type={probability_type!r} is not supported for "
-                f"HopfieldAttention; routing/hierarchical variants require "
-                f"context not available here."
-            )
+        validate_logit_probability_type(probability_type, "HopfieldAttention")
 
         # Store configuration parameters
         self.num_heads = num_heads
@@ -481,7 +477,7 @@ class HopfieldAttention(keras.layers.Layer):
                 attention_scores,
                 mask_tensor,
                 out_dtype=scores_dtype,
-                rescue_axis=(self.probability_config or {}).get("axis", -1),
+                rescue_axis=probability_axis(self.probability_config),
             )
 
         attention_weights = self.attn_prob(attention_scores, training=training)

@@ -40,7 +40,9 @@ from .common import (
     compute_attention_scale,
     create_qk_norms,
     dtype_name,
+    probability_axis,
     validate_head_divisibility,
+    validate_logit_probability_type,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -404,20 +406,7 @@ class MultiHeadCrossAttention(keras.layers.Layer):
 
         # Routing/hierarchical types need a fixed output_dim and project
         # features, incompatible with scores whose last dimension is the dynamic kv sequence length.
-        _ptype_lower = self.probability_type.lower()
-        if _ptype_lower in (
-                "routing",
-                "deterministic_routing",
-                "hierarchical",
-                "hierarchical_routing",
-        ):
-            raise ValueError(
-                f"probability_type='{self.probability_type}' is not supported "
-                "in MultiHeadCrossAttention: routing/hierarchical strategies "
-                "require a fixed output_dim and consume features rather than "
-                "score logits. Use one of: 'softmax', 'sparsemax', 'threshmax', "
-                "'adaptive'."
-            )
+        validate_logit_probability_type(self.probability_type, "MultiHeadCrossAttention")
 
         self.attn_prob = ProbabilityOutput(
             probability_type=self.probability_type,
@@ -554,7 +543,7 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             scores,
             attention_mask,
             out_dtype=scores_dtype,
-            rescue_axis=(self.probability_config or {}).get("axis", -1),
+            rescue_axis=probability_axis(self.probability_config),
         )
 
     def call(

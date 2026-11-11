@@ -36,7 +36,13 @@ from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.activations import ProbabilityOutput, resolve_activation_layer
 from dl_techniques.utils.keras_registration import register_dl_technique
-from .common import apply_attention_mask, compute_attention_scale, dtype_name
+from .common import (
+    apply_attention_mask,
+    compute_attention_scale,
+    dtype_name,
+    probability_axis,
+    validate_logit_probability_type,
+)
 
 # ---------------------------------------------------------------------
 
@@ -241,17 +247,7 @@ class GatedAttention(keras.layers.Layer):
         # Validate probability_type: routing/hierarchical variants are not
         # compatible with attention-score normalization (they alter shape /
         # semantics in ways gated_attention does not support).
-        _disallowed_prob_types = (
-            "routing",
-            "deterministic_routing",
-            "hierarchical",
-            "hierarchical_routing",
-        )
-        if probability_type in _disallowed_prob_types:
-            raise ValueError(
-                f"probability_type='{probability_type}' is not supported for "
-                f"GatedAttention. Disallowed types: {_disallowed_prob_types}."
-            )
+        validate_logit_probability_type(probability_type, "GatedAttention")
 
         # DECISION plan-2026-08-14T233721-d4f9beb2/D-071: num_kv_heads defaults
         # to None (plain MHA), never a concrete value -- any non-None default narrows weights and breaks pre-2026-08-15 checkpoints. See decisions.md.
@@ -592,7 +588,7 @@ class GatedAttention(keras.layers.Layer):
                 scaled_attention_logits,
                 mask,
                 out_dtype=logits_dtype,
-                rescue_axis=(self.probability_config or {}).get("axis", -1),
+                rescue_axis=probability_axis(self.probability_config),
             )
 
         # Parameterized attention-probability transform over the key dimension

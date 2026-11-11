@@ -36,7 +36,7 @@ from typing import Optional, Dict, Any, Tuple, Union, List
 from dl_techniques.utils.logger import logger
 from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.activations import ProbabilityOutput
-from .common import create_qk_norms
+from .common import create_qk_norms, validate_logit_probability_type
 from dl_techniques.utils.masking import MaskFactory
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -426,16 +426,7 @@ class LighthouseAttention(keras.layers.Layer):
             raise ValueError(
                 f"dropout_rate must be in [0, 1], got {dropout_rate}"
             )
-        if probability_type in (
-            "routing",
-            "deterministic_routing",
-            "hierarchical",
-            "hierarchical_routing",
-        ):
-            raise ValueError(
-                f"probability_type={probability_type!r} is not supported for "
-                f"LighthouseAttention score normalization."
-            )
+        validate_logit_probability_type(probability_type, "LighthouseAttention")
 
         # ---- store config ----
         self.dim = dim

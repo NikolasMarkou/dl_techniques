@@ -36,14 +36,17 @@ from keras import ops
 
 from dl_techniques.layers.attention.common import (
     MASK_BIAS_VALUE,
+    NON_LOGIT_PROBABILITY_TYPES,
     apply_attention_mask,
     compute_attention_scale,
     create_qk_norms,
     dtype_name,
     mask_dtype,
     merge_heads,
+    probability_axis,
     split_heads,
     validate_head_divisibility,
+    validate_logit_probability_type,
 )
 
 # ---------------------------------------------------------------------
@@ -1165,7 +1168,7 @@ class TestTheAdopterCountsAreMechanical:
             text = path.read_text(encoding="utf-8")
             if any(call.search(line) for line in text.splitlines()):
                 adopters.append(path.name)
-            if "rescue_axis=(self.probability_config" in text:
+            if "rescue_axis=probability_axis(self.probability_config" in text:
                 derivers.append(path.name)
         return adopters, derivers
 
@@ -1552,6 +1555,311 @@ class TestSplitAndMergeHeads:
                 if isinstance(n, ast.FunctionDef) and n.name in {"_split_heads", "_project_to_heads"}
             ]
             assert not private, (name, private)
+
+
+# The 13 layers that refuse the four score-level routing types. ``formerly_lowercased`` marks
+# the three that already lowered the type before the helper existed; the other ten compared
+# case-sensitively, so a mixed-case type slipped past them (the behaviour D-035 fixes).
+_VALIDATING_LAYERS = (
+    ("capsule_routing_attention", "CapsuleRoutingSelfAttention", dict(num_heads=2, key_dim=8), True),
+    ("differential_attention", "DifferentialMultiHeadAttention", dict(dim=32, num_heads=2, head_dim=16), True),
+    ("multi_head_cross_attention", "MultiHeadCrossAttention", dict(dim=32, num_heads=2), True),
+    ("non_local_attention", "NonLocalAttention", dict(attention_channels=32), False),
+    ("hopfield_attention", "HopfieldAttention", dict(num_heads=2, key_dim=8), False),
+    ("gated_attention", "GatedAttention", dict(dim=32, num_heads=4), False),
+    ("group_query_attention", "GroupedQueryAttention", dict(dim=32, num_heads=4, num_kv_heads=2), False),
+    ("lighthouse_attention", "LighthouseAttention",
+     dict(dim=128, num_heads=4, num_levels=3, pooling_factor=4, top_k=20), False),
+    ("rpc_attention", "RPCAttention", dict(dim=32, num_heads=2, max_pcp_iter=2), False),
+    ("shared_weights_cross_attention", "SharedWeightsCrossAttention", dict(dim=32, num_heads=2), False),
+    ("single_window_attention", "SingleWindowAttention", dict(dim=32, window_size=4, num_heads=2), False),
+    ("multi_head_latent_attention", "MultiHeadLatentAttention",
+     dict(dim=32, num_heads=2, kv_latent_dim=8, qk_nope_head_dim=8, qk_rope_head_dim=4, v_head_dim=8), False),
+    ("window_attention", "WindowAttention", dict(dim=32, window_size=4, num_heads=2), False),
+)
+
+
+def _validating_layer_class(module: str, cls: str):
+    import importlib
+
+    return getattr(importlib.import_module(f"dl_techniques.layers.attention.{module}"), cls)
+
+
+class TestValidateLogitProbabilityType:
+    """``validate_logit_probability_type``: the one home of the routing-type refusal.
+
+    Thirteen layers used to carry a private copy of the four-name tuple, each with its own
+    message, and only three of them lowered the caller's value first. D-035 makes the
+    refusal case-insensitive everywhere (a fix: ``ProbabilityOutput`` lowercases, so
+    ``"Routing"`` used to get past ten layers) and keeps every valid configuration as it was.
+    """
+
+    def test_the_constant_is_the_four_score_level_types(self):
+        assert NON_LOGIT_PROBABILITY_TYPES == (
+            "routing",
+            "deterministic_routing",
+            "hierarchical",
+            "hierarchical_routing",
+        )
+
+    @pytest.mark.parametrize("name", NON_LOGIT_PROBABILITY_TYPES)
+    @pytest.mark.parametrize("spelling", [str.lower, str.upper, str.title])
+    def test_each_type_is_refused_in_any_case_with_both_pinned_phrases(self, name, spelling):
+        value = spelling(name)
+        with pytest.raises(ValueError) as info:
+            validate_logit_probability_type(value, "FooAttention")
+        message = str(info.value)
+        assert "Invalid probability_type" in message  # test_single_window_attention.py
+        assert "not supported" in message  # test_multi_head_cross_attention.py
+        assert f"'{value}'" in message
+        assert "not supported by FooAttention" in message
+
+    @pytest.mark.parametrize(
+        "value", ["softmax", "Softmax", "sparsemax", "threshmax", "adaptive", "", "route"]
+    )
+    def test_a_logit_type_and_a_near_miss_pass(self, value):
+        assert validate_logit_probability_type(value, "FooAttention") is None
+
+    def test_a_non_string_is_left_to_probability_output(self):
+        """The helper judges names, not types; ``ProbabilityOutput`` reports a bad type."""
+        assert validate_logit_probability_type(None, "FooAttention") is None
+
+    @pytest.mark.parametrize("module,cls,kwargs,formerly_lowercased", _VALIDATING_LAYERS)
+    def test_every_layer_refuses_a_mixed_case_routing_type(
+        self, module, cls, kwargs, formerly_lowercased
+    ):
+        """RED at the previous commit for the ten layers that compared case-sensitively.
+
+        ``formerly_lowercased`` layers raised a layer-specific wording before; the
+        shared wording is asserted for all thirteen so the message cannot drift per layer.
+        """
+        layer_cls = _validating_layer_class(module, cls)
+        with pytest.raises(ValueError, match=f"Invalid probability_type 'Routing': not supported by {cls}"):
+            layer_cls(probability_type="Routing", **kwargs)
+
+    @pytest.mark.parametrize("module,cls,kwargs,formerly_lowercased", _VALIDATING_LAYERS)
+    @pytest.mark.parametrize("valid", ["softmax", "Softmax", "adaptive"])
+    def test_a_valid_type_still_constructs_at_every_layer(
+        self, module, cls, kwargs, formerly_lowercased, valid
+    ):
+        layer = _validating_layer_class(module, cls)(probability_type=valid, **kwargs)
+        assert layer.probability_type == valid
+
+    def test_no_attention_module_respells_the_routing_tuple(self):
+        """A second copy of the four-name tuple is the duplication the helper removed.
+
+        AST walk over every attention module except ``common.py``: a tuple, list or set
+        literal holding the string ``"deterministic_routing"`` is a re-spelled copy. (Prose
+        that names the types sits in docstrings and comments, which are not such nodes.)
+        """
+        import ast
+        import pathlib
+
+        import dl_techniques.layers.attention.common as common_mod
+
+        pkg = pathlib.Path(common_mod.__file__).parent
+        offenders = []
+        for path in sorted(pkg.glob("*.py")):
+            if path.name == "common.py":
+                continue
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if _is_routing_type_collection(node):
+                    offenders.append(f"{path.name}:{node.lineno}")
+        assert not offenders, (
+            "the routing/hierarchical type list is re-spelled; call "
+            f"common.validate_logit_probability_type instead: {offenders}"
+        )
+
+    def test_the_collection_detector_is_not_blind(self):
+        import ast
+
+        hit = ast.parse('bad = {"routing", "deterministic_routing"}')
+        also = ast.parse('bad = ("hierarchical", "deterministic_routing")')
+        miss = ast.parse('bad = ("softmax", "sparsemax")')
+        assert any(_is_routing_type_collection(n) for n in ast.walk(hit))
+        assert any(_is_routing_type_collection(n) for n in ast.walk(also))
+        assert not any(_is_routing_type_collection(n) for n in ast.walk(miss))
+
+    def test_the_thirteen_layers_import_the_helper(self):
+        import ast
+        import pathlib
+
+        import dl_techniques.layers.attention.common as common_mod
+
+        pkg = pathlib.Path(common_mod.__file__).parent
+        for module, _cls, _kwargs, _flag in _VALIDATING_LAYERS:
+            tree = ast.parse((pkg / f"{module}.py").read_text(encoding="utf-8"))
+            imported = {
+                a.name
+                for n in ast.walk(tree)
+                if isinstance(n, ast.ImportFrom) and (n.module or "").split(".")[-1] == "common"
+                for a in n.names
+            }
+            assert "validate_logit_probability_type" in imported, module
+
+
+class TestProbabilityAxis:
+    """``probability_axis``: the one spelling of "which axis does my softmax reduce over".
+
+    Nine layers wrote ``(self.probability_config or {}).get("axis", -1)`` as the
+    ``rescue_axis`` of :func:`apply_attention_mask`. The deriver census in
+    ``TestTheAdopterCountsAreMechanical`` now looks for the call-site spelling
+    ``rescue_axis=probability_axis(self.probability_config``, so the count of nine cannot
+    silently fall to zero when the helper is adopted.
+    """
+
+    def test_a_missing_config_and_an_empty_config_give_the_default(self):
+        assert probability_axis(None) == -1
+        assert probability_axis({}) == -1
+        assert probability_axis({"temperature": 0.5}) == -1
+
+    def test_the_axis_entry_is_returned_as_given(self):
+        assert probability_axis({"axis": -2}) == -2
+        assert probability_axis({"axis": 1, "temperature": 0.5}) == 1
+
+    def test_the_default_argument_replaces_the_fallback_only(self):
+        assert probability_axis(None, default=-2) == -2
+        assert probability_axis({}, default=-2) == -2
+        assert probability_axis({"axis": 3}, default=-2) == 3
+
+    def test_the_config_is_not_mutated(self):
+        config = {"axis": -2}
+        probability_axis(config)
+        assert config == {"axis": -2}
+
+    @pytest.mark.parametrize(
+        "module,cls,kwargs,call_args",
+        [
+            ("group_query_attention", "GroupedQueryAttention", dict(dim=32, num_heads=4, num_kv_heads=2), ()),
+            ("multi_head_cross_attention", "MultiHeadCrossAttention", dict(dim=32, num_heads=2), ()),
+        ],
+    )
+    def test_the_axis_reaches_apply_attention_mask_at_a_deriving_layer(
+        self, module, cls, kwargs, call_args, monkeypatch
+    ):
+        """End to end: the configured axis is what the layer hands to the rescue.
+
+        ``apply_attention_mask`` is spied on, not replaced, and the assertion is on the
+        recorded ``rescue_axis`` keyword. With ``axis=-2`` the real call then raises (the
+        padding keep mask is size-one along that axis, which ``apply_attention_mask``
+        refuses), so the value also demonstrably changed the outcome.
+        """
+        import importlib
+
+        mod = importlib.import_module(f"dl_techniques.layers.attention.{module}")
+        seen = []
+        real = mod.apply_attention_mask
+
+        def spy(*args, **kw):
+            seen.append(kw.get("rescue_axis"))
+            return real(*args, **kw)
+
+        monkeypatch.setattr(mod, "apply_attention_mask", spy)
+        x = np.random.RandomState(0).randn(2, 6, 32).astype("float32")
+        mask = np.ones((2, 6), "float32")
+        mask[0, 4:] = 0
+        for config, want in ((None, -1), ({"axis": -1}, -1)):
+            seen.clear()
+            layer = getattr(mod, cls)(probability_config=config, **kwargs)
+            layer(x, attention_mask=mask)
+            assert seen == [want], (cls, config, seen)
+        seen.clear()
+        layer = getattr(mod, cls)(probability_config={"axis": -2}, **kwargs)
+        with pytest.raises(ValueError):
+            layer(x, attention_mask=mask)
+        assert seen == [-2], (cls, seen)
+
+    def test_no_attention_module_respells_the_lookup(self):
+        """``<expr>.get("axis", ...)`` outside ``common.py`` is a re-spelled copy.
+
+        Capsule routing builds a config with ``dict(self.probability_config or {})`` and
+        pins its own per-site axes; that is not this lookup and is not matched.
+        """
+        import ast
+        import pathlib
+
+        import dl_techniques.layers.attention.common as common_mod
+
+        pkg = pathlib.Path(common_mod.__file__).parent
+        offenders = []
+        for path in sorted(pkg.glob("*.py")):
+            if path.name == "common.py":
+                continue
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if _is_axis_lookup(node):
+                    offenders.append(f"{path.name}:{node.lineno}")
+        assert not offenders, (
+            "the probability_config axis lookup is re-spelled; call "
+            f"common.probability_axis instead: {offenders}"
+        )
+
+    def test_the_lookup_detector_is_not_blind(self):
+        import ast
+
+        hit = ast.parse('a = (self.probability_config or {}).get("axis", -1)')
+        miss = ast.parse('a = (self.probability_config or {}).get("temperature", 1.0)')
+        assert any(_is_axis_lookup(n) for n in ast.walk(hit))
+        assert not any(_is_axis_lookup(n) for n in ast.walk(miss))
+
+    def test_capsule_routing_keeps_its_fixed_axes_and_does_not_import_the_helper(self):
+        """The routing maths fixes the capsule axes (``-1``, ``-2``, ``-1``); the helper is not for it."""
+        import ast
+        import pathlib
+
+        import dl_techniques.layers.attention.common as common_mod
+
+        path = pathlib.Path(common_mod.__file__).parent / "capsule_routing_attention.py"
+        imported = {
+            a.name
+            for n in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+            if isinstance(n, ast.ImportFrom) and (n.module or "").split(".")[-1] == "common"
+            for a in n.names
+        }
+        assert "probability_axis" not in imported
+
+    def test_the_nine_deriving_layers_import_the_helper(self):
+        import ast
+        import pathlib
+
+        import dl_techniques.layers.attention.common as common_mod
+
+        pkg = pathlib.Path(common_mod.__file__).parent
+        for module in (
+            "area_attention", "differential_attention", "gated_attention",
+            "group_query_attention", "hopfield_attention", "multi_head_cross_attention",
+            "multi_head_latent_attention", "rpc_attention", "single_window_attention",
+        ):
+            tree = ast.parse((pkg / f"{module}.py").read_text(encoding="utf-8"))
+            imported = {
+                a.name
+                for n in ast.walk(tree)
+                if isinstance(n, ast.ImportFrom) and (n.module or "").split(".")[-1] == "common"
+                for a in n.names
+            }
+            assert "probability_axis" in imported, module
+
+
+def _is_axis_lookup(node) -> bool:
+    """True for a ``<expr>.get("axis", ...)`` call."""
+    import ast
+
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get"
+        and bool(node.args)
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == "axis"
+    )
+
+
+def _is_routing_type_collection(node) -> bool:
+    """True for a tuple, list or set literal that contains the string ``"deterministic_routing"``."""
+    import ast
+
+    return isinstance(node, (ast.Tuple, ast.List, ast.Set)) and any(
+        isinstance(e, ast.Constant) and e.value == "deterministic_routing" for e in node.elts
+    )
 
 
 def _is_dtype_name_idiom(node) -> bool:

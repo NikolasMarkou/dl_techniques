@@ -29,7 +29,13 @@ from dl_techniques.layers.activations import ProbabilityOutput
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-from .common import apply_attention_mask, compute_attention_scale, dtype_name
+from .common import (
+    apply_attention_mask,
+    compute_attention_scale,
+    dtype_name,
+    probability_axis,
+    validate_logit_probability_type,
+)
 
 # ---------------------------------------------------------------------
 
@@ -229,17 +235,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
             raise ValueError(
                 f"dropout_rate must be between 0 and 1, got {dropout_rate}"
             )
-        if probability_type in (
-            "routing",
-            "deterministic_routing",
-            "hierarchical",
-            "hierarchical_routing",
-        ):
-            raise ValueError(
-                f"probability_type '{probability_type}' is not supported by "
-                "MultiHeadLatentAttention (routing/hierarchical variants are "
-                "incompatible with the (B, H, S_q, S_kv) score shape)."
-            )
+        validate_logit_probability_type(probability_type, "MultiHeadLatentAttention")
 
         # Store configuration
         self.dim = dim
@@ -665,7 +661,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
             scores,
             attention_mask,
             out_dtype=dtype_name(scores),
-            rescue_axis=(self.probability_config or {}).get("axis", -1),
+            rescue_axis=probability_axis(self.probability_config),
         )
 
         return scores

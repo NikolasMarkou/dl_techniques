@@ -47,7 +47,9 @@ from .common import (
     compute_attention_scale,
     create_qk_norms,
     dtype_name,
+    probability_axis,
     validate_head_divisibility,
+    validate_logit_probability_type,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -311,18 +313,7 @@ class GroupedQueryAttention(keras.layers.Layer):
                             dropout_rate, rope_percentage, rope_theta)
 
         # Validate probability_type — GQA expects logits, not features.
-        _invalid_prob_types = (
-            "routing",
-            "deterministic_routing",
-            "hierarchical",
-            "hierarchical_routing",
-        )
-        if probability_type in _invalid_prob_types:
-            raise ValueError(
-                f"probability_type='{probability_type}' is not supported by "
-                f"GroupedQueryAttention; these expect features not logits. "
-                f"Use one of: 'softmax', 'sparsemax', 'adaptive', etc."
-            )
+        validate_logit_probability_type(probability_type, "GroupedQueryAttention")
 
         # Store configuration parameters
         self.dim = dim
@@ -697,7 +688,7 @@ class GroupedQueryAttention(keras.layers.Layer):
             scores,
             mask,
             out_dtype=scores_dtype,
-            rescue_axis=(self.probability_config or {}).get("axis", -1),
+            rescue_axis=probability_axis(self.probability_config),
         )
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:

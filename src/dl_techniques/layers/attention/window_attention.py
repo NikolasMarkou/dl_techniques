@@ -41,21 +41,10 @@ from dl_techniques.utils.activation_serialization import (
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 from dl_techniques.utils.masking import create_banded_attend_mask
+from .common import validate_logit_probability_type
 from .single_window_attention import SingleWindowAttention
 
-# ---------------------------------------------------------------------
-# Probability types not supported in window attention (score-level routing
-# is structurally incompatible with windowed score tensors).
-# ---------------------------------------------------------------------
-
 _VALID_PARTITION_MODES = ("grid", "zigzag", "band")
-
-_DISALLOWED_PROB_TYPES = (
-    "routing",
-    "deterministic_routing",
-    "hierarchical",
-    "hierarchical_routing",
-)
 
 # ---------------------------------------------------------------------
 
@@ -362,13 +351,7 @@ class WindowAttention(keras.layers.Layer):
 
         # Validate probability_type: score-level routing variants are not
         # supported because window partitioning fragments the score tensor.
-        if probability_type in _DISALLOWED_PROB_TYPES:
-            raise ValueError(
-                f"probability_type='{probability_type}' is not supported for "
-                "WindowAttention: score-level routing is incompatible with "
-                "windowed score tensors. Use 'softmax', 'adaptive', "
-                "'sparsemax', or 'threshmax'."
-            )
+        validate_logit_probability_type(probability_type, "WindowAttention")
 
         # Store all parameters for get_config()
         self.dim = dim

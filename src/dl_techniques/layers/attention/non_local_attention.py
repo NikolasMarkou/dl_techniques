@@ -38,7 +38,12 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
 )
 
-from .common import compute_attention_scale, create_qk_norms, mask_dtype
+from .common import (
+    compute_attention_scale,
+    create_qk_norms,
+    mask_dtype,
+    validate_logit_probability_type,
+)
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -399,16 +404,7 @@ class NonLocalAttention(keras.layers.Layer):
             raise ValueError(f"dropout_rate must be in [0, 1), got {dropout_rate}")
         if attention_mode not in ['gaussian', 'dot_product']:
             raise ValueError(f"attention_mode must be 'gaussian' or 'dot_product', got {attention_mode}")
-        invalid_prob_types = {
-            "routing", "deterministic_routing",
-            "hierarchical", "hierarchical_routing",
-        }
-        if probability_type in invalid_prob_types:
-            raise ValueError(
-                f"Invalid probability_type '{probability_type}'. Score-level "
-                f"routing strategies are not compatible with attention "
-                f"probabilities that must sum to 1 over the key axis."
-            )
+        validate_logit_probability_type(probability_type, "NonLocalAttention")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer and all sub-layers for robust serialization.

@@ -58,7 +58,9 @@ from .common import (
     create_qk_norms,
     dtype_name,
     merge_heads,
+    probability_axis,
     split_heads,
+    validate_logit_probability_type,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -407,20 +409,7 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         # output_dim and consume features rather than score logits, which does
         # not fit attention scores whose last axis is the dynamic kv sequence
         # length.
-        _ptype_lower = probability_type.lower()
-        if _ptype_lower in (
-            "routing",
-            "deterministic_routing",
-            "hierarchical",
-            "hierarchical_routing",
-        ):
-            raise ValueError(
-                f"probability_type='{probability_type}' is not supported in "
-                "DifferentialMultiHeadAttention: routing/hierarchical strategies "
-                "require a fixed output_dim and consume features rather than "
-                "score logits. Use one of: 'softmax', 'sparsemax', 'threshmax', "
-                "'adaptive'."
-            )
+        validate_logit_probability_type(probability_type, "DifferentialMultiHeadAttention")
 
         # Store every __init__ parameter for get_config.
         self.dim = dim
@@ -681,7 +670,7 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
             attention_mask,
             # `dtype_name` (common.py, D-007) reads the dtype name; the idiom's reasoning lives there.
             out_dtype=dtype_name(scores),
-            rescue_axis=(self.probability_config or {}).get("axis", -1),
+            rescue_axis=probability_axis(self.probability_config),
         )
 
     def _stream(
