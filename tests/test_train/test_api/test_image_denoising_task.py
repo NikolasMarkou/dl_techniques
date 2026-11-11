@@ -66,6 +66,8 @@ from train.common import denoising_data as dd
 from train.common import denoising_homogeneity as dh
 from train.common import denoising_run as dr
 
+from ..test_common_denoising_homogeneity import _assert_state_equal, _random_state
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 FAMILIES = ("bfcnn", "bfunet", "bfconvunext", "convunext_biased", "scunet")
@@ -1122,28 +1124,6 @@ def test_the_same_seed_with_the_probes_on_and_off_gives_equal_weights_to_the_bit
     assert read_json(Path(on.run_dir) / "training_history.json") == read_json(Path(off.run_dir) / "training_history.json")
 
 
-def random_snapshot(model):
-    """Every random state a diagnostic could move: the model's generators, Keras' global one, Python's and NumPy's."""
-    global_generator = keras.src.backend.common.global_state.get_global_attribute("global_seed_generator")
-    return {
-        "generators": [np.array(g.state.numpy()) for g in dh._seed_generators(model)],
-        "global": None if global_generator is None else np.array(global_generator.state.numpy()),
-        "python": random.getstate(),
-        "numpy_keys": np.random.get_state()[1].copy(),
-        "numpy_pos": np.random.get_state()[2],
-    }
-
-
-def assert_snapshots_equal(left, right):
-    assert len(left["generators"]) == len(right["generators"])
-    assert all(np.array_equal(a, b) for a, b in zip(left["generators"], right["generators"]))
-    assert (left["global"] is None) == (right["global"] is None)
-    if left["global"] is not None:
-        assert np.array_equal(left["global"], right["global"])
-    assert left["python"] == right["python"]
-    assert np.array_equal(left["numpy_keys"], right["numpy_keys"]) and left["numpy_pos"] == right["numpy_pos"]
-
-
 @pytest.mark.parametrize("family", BIAS_FREE)
 def test_the_checks_before_and_after_fit_leave_every_random_state_where_they_found_it(family, world, folders, tmp_path):
     keras.utils.set_random_seed(7)
@@ -1155,11 +1135,11 @@ def test_the_checks_before_and_after_fit_leave_every_random_state_where_they_fou
     keras.random.normal((1,))                         # make sure Keras' global generator exists and has moved
     random.random()
     np.random.random()
-    before = random_snapshot(model)
+    before = _random_state(model)
     trainer._check_before_fit(model, data, "float32")
-    assert_snapshots_equal(before, random_snapshot(model))
+    _assert_state_equal(before, _random_state(model))
     dh.read_weights(model, dh.probe_batch(data.select_ds))
-    assert_snapshots_equal(before, random_snapshot(model))
+    _assert_state_equal(before, _random_state(model))
 
 
 def test_a_half_precision_run_scans_but_reads_nothing_numerically_and_says_so(world, folders, tmp_path, spy):

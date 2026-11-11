@@ -31,7 +31,6 @@ import types
 from pathlib import Path
 
 import keras
-import numpy as np
 import pytest
 
 from train.api import cli, predictor, recipes, registry

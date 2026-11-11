@@ -32,7 +32,7 @@ from train.common.callbacks import EpochLogLine, LearningRateLogger
 from train.common.config_io import save_config_json
 # The two pure noise-floor helpers live with the denoising task's other run pieces (plan d483ffab D-017): one
 # implementation, imported here and by `eval_psnr_vs_noise`.
-from train.common.denoising_run import expected_input_psnr, expected_noise_variance  # noqa: F401
+from train.common.denoising_run import expected_input_psnr, expected_noise_variance
 from train.common.run_artifacts import attach_run_log, refuse_existing_run, write_summary_json
 from train.common.run_io import default_experiment_name, prepare_run_dir, save_training_history_json
 from train.superpoint.homographic_adaptation import select_weighted_image_paths

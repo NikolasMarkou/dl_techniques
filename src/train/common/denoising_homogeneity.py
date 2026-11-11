@@ -96,6 +96,7 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 import numpy as np
 
 from dl_techniques.utils.logger import logger
+from train.common.seed import seed_generators
 
 #: The scale factors of the numeric probe: the ones ``applications.bias_free_denoiser.ddnm.homogeneity_error``
 #: uses (copied, not imported: ``train.common`` importing ``applications`` inverts the layering, D-017).
@@ -365,18 +366,6 @@ def probe_numeric(
 # ---------------------------------------------------------------------
 
 
-def _seed_generators(model: Any) -> List[Any]:
-    """Every ``keras.random.SeedGenerator`` reachable from ``model`` (Keras 3.8: ``Layer._seed_generators``), once each."""
-    found: List[Any] = []
-    seen = set()
-    for layer in model._flatten_layers():
-        for generator in getattr(layer, "_seed_generators", ()):
-            if id(generator) not in seen:
-                seen.add(id(generator))
-                found.append(generator)
-    return found
-
-
 def _capture_random_state(model: Any) -> Dict[str, Any]:
     """The random state a clone must not move: the model's generators, Keras' global generator, Python's and NumPy's RNG."""
     import keras
@@ -385,7 +374,7 @@ def _capture_random_state(model: Any) -> Dict[str, Any]:
     global_generator = keras.src.backend.common.global_state.get_global_attribute("global_seed_generator")
     numpy_state = np.random.get_state()
     return {
-        "generators": [(g, np.array(keras.ops.convert_to_numpy(g.state))) for g in _seed_generators(model)],
+        "generators": [(g, np.array(keras.ops.convert_to_numpy(g.state))) for g in seed_generators(model)],
         "global": (
             None
             if global_generator is None

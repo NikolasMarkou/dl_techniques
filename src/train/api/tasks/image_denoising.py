@@ -823,7 +823,7 @@ class ImageDenoisingTrainer(TaskTrainer):
             exact_reload=True,
             load_detail=load_detail,
         )
-        held_out, held_out_info, cells = self._held_out_block(config, fit, held_spec, best_scores)
+        held_out, held_out_info, cells = self._held_out_block(fit, held_spec, best_scores)
         visualizations: Dict[str, Any] = {"files": [], "failed": [], "skipped": True}
         if analysis_cfg.figures:
             visualizations = denoising_run.write_end_figures(
@@ -884,7 +884,7 @@ class ImageDenoisingTrainer(TaskTrainer):
         )
 
     def _held_out_block(
-        self, config: ImageDenoisingConfig, fit: FitState, spec: Any, best_scores: Any
+        self, fit: FitState, spec: Any, best_scores: Any
     ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         """Return ``(held_out, held_out_info, cells)``: the summary blocks and the cells for the figure.
 

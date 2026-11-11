@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import random as _py_random
+from typing import Any, List
 
 import keras
 import numpy as np
@@ -49,4 +50,33 @@ def set_seeds(seed: int) -> None:
     logger.info(f"[seed] all RNGs seeded with seed={seed}")
 
 
-__all__ = ["DEFAULT_SEED", "set_seeds"]
+def seed_generators(model: Any) -> List[Any]:
+    """Every ``keras.random.SeedGenerator`` reachable from ``model``, once each.
+
+    Interface contract: ``model`` is a Keras model or layer; returns the generators in layer
+    order, de-duplicated by identity (empty for a model with no stochastic layer). Never raises
+    for a layer that has no generators.
+
+    Walks ``model._flatten_layers()`` and reads each layer's ``_seed_generators`` (Keras 3.8
+    private attributes, the only registry there is). If a Keras release renames them this
+    returns an empty list, so a caller that uses it as a tripwire (a draw must leave every
+    generator where it found it) would pass vacuously: such a caller counts what it found
+    against what the model is known to hold.
+
+    Args:
+        model: A Keras model or layer.
+
+    Returns:
+        The generators, in layer order, without duplicates.
+    """
+    found: List[Any] = []
+    seen = set()
+    for layer in model._flatten_layers():
+        for generator in getattr(layer, "_seed_generators", ()):
+            if id(generator) not in seen:
+                seen.add(id(generator))
+                found.append(generator)
+    return found
+
+
+__all__ = ["DEFAULT_SEED", "seed_generators", "set_seeds"]

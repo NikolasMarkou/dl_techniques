@@ -19,7 +19,7 @@ import dataclasses
 import os
 import types
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 
 import keras
 import numpy as np

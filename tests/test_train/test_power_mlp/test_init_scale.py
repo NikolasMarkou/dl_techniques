@@ -55,6 +55,7 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from tests.classification_fakes import use_raw_from_unit  # noqa: E402
 
+from train.common.seed import seed_generators  # noqa: E402
 import train.power_mlp.train_power_mlp as tpm  # noqa: E402
 import train.power_mlp.visualization as viz  # noqa: E402
 
@@ -750,7 +751,7 @@ def test_the_real_trainer_hands_the_dashboard_the_guard_consistent_baseline(
 
 
 def _seed_states(model: keras.Model) -> list:
-    return [g.state.numpy().tobytes() for g in tpm._seed_generators(model)]
+    return [g.state.numpy().tobytes() for g in seed_generators(model)]
 
 
 def _two_epoch_losses(measure_first: bool) -> Tuple[list, list, list]:
@@ -771,7 +772,7 @@ def test_the_baseline_pass_finds_every_dropout_seed_generator() -> None:
     """The restore is only as good as the set it covers: default preset = 3 Dropout layers."""
     keras.utils.set_random_seed(0)
     model = _build_model("lecun_normal", k=2, batch_normalization=True)
-    generators = tpm._seed_generators(model)
+    generators = seed_generators(model)
     assert len(generators) == 3
     assert len({id(g) for g in generators}) == 3
     # ``model.variables`` lists exactly these states (the tracked ones) and nothing else.

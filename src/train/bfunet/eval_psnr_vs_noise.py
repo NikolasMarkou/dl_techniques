@@ -58,10 +58,6 @@ import keras
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.denoiser_provenance import require_unit_domain_checkpoint
 from train.common import setup_gpu, collect_image_paths, set_seeds
-# Single source of truth for the pixel domain (see common.py D-001). This eval script
-# re-implements the *decode* path (it needs a no-crop full-image variant and an EvalConfig,
-# not a BFUnetTrainingConfig) but must NOT re-declare the bounds: import them.
-from train.bfunet.common import DATA_MIN, DATA_MAX
 # The pure helpers shared with the image_denoising task live in `train.common.denoising_run` (plan d483ffab D-017):
 # one implementation of the noise, the per-image PSNR, the padded whole-image forward pass and `MAX_VAL`; the old names
 # stay importable from here (`ev.add_awgn`, `ev.psnr_per_image`, `ev._predict_denoised`, `ev._denoise_full`, `ev.MAX_VAL`).
@@ -205,8 +201,8 @@ def _load_clean_patch(
 
     NOTE: the ``/ 255.0`` normalization DUPLICATES ``common.decode_full_image`` (which
     takes a ``BFUnetTrainingConfig`` and always crops, neither of which fits this script's
-    ``EvalConfig`` + optional full-image path). The bounds themselves are imported
-    (``DATA_MIN``/``DATA_MAX``) so the two cannot drift apart silently.
+    ``EvalConfig`` + optional full-image path). The ``[0, 1]`` clip bounds are
+    ``train.common.denoising_run.DATA_MIN``/``DATA_MAX``; this function does not use them.
     """
     try:
         raw = tf.io.read_file(path)

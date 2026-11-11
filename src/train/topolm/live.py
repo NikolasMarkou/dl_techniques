@@ -90,6 +90,7 @@ import keras
 
 from dl_techniques.utils.logger import logger
 
+from train.common.seed import seed_generators
 from train.topolm import common as C
 
 #: Prompts per forward pass in a draw. The live pass shares the card with the
@@ -106,30 +107,6 @@ LATEST_PREFIXES = ("t_maps_", "morans_i_")
 # ---------------------------------------------------------------------
 # The tripwire: what a draw must leave exactly as it found it
 # ---------------------------------------------------------------------
-
-
-def seed_generators(model) -> List[Any]:
-    """Every ``keras.random.SeedGenerator`` reachable from ``model``, once each.
-
-    Walks ``model._flatten_layers()`` and reads each layer's ``_seed_generators``
-    (Keras 3.8 private attributes, the only registry there is). If a Keras release
-    renames them this returns an empty list and the tripwire would pass vacuously,
-    which is why :meth:`TopographyLiveCallback.on_train_begin` warns when it finds
-    fewer generators than the backbone has taps.
-
-    :param model: A Keras model or layer.
-    :type model: keras.layers.Layer
-    :return: The generators, in layer order, without duplicates.
-    :rtype: List[keras.random.SeedGenerator]
-    """
-    found: List[Any] = []
-    seen = set()
-    for layer in model._flatten_layers():
-        for generator in getattr(layer, "_seed_generators", ()):
-            if id(generator) not in seen:
-                seen.add(id(generator))
-                found.append(generator)
-    return found
 
 
 def capture_run_state(model) -> Dict[str, Any]:

@@ -144,6 +144,7 @@ from train.common.classification_data import (
     _resolver,
     decode_image_file,
 )
+from train.common.segmentation_data import _batched
 
 #: The noise kinds, in the order of the config's ``noise_kind`` choices (``train.api.denoising_args``
 #: holds the same tuple and a test holds the two equal).
@@ -498,18 +499,6 @@ def _val_pipeline(
         num_parallel_calls=tf.data.AUTOTUNE)
 
 
-def _batched(dataset: "tf.data.Dataset", count: int, batch_size: int, *, drop_remainder: bool) -> "tf.data.Dataset":
-    """State the length of ``dataset`` (``count`` examples), batch it and prefetch."""
-    # The length is ASSERTED, not left to the maps: `unbatch` loses it, and a dataset of unknown length makes
-    # Keras log a phantom zero batch (loss n/(n+1), which hid a model that learned nothing in an earlier plan,
-    # `segmentation_data._batched`). Do NOT remove this because "the maps keep the count": the test that reads
-    # `cardinality()` and the count a real `fit` takes is what keeps it true. The count is
-    # `files * patches_per_image` because no example is filtered out (a flat black image left the list before
-    # this point).
-    dataset = dataset.apply(tf.data.experimental.assert_cardinality(count))
-    return dataset.batch(batch_size, drop_remainder=drop_remainder).prefetch(tf.data.AUTOTUNE)
-
-
 # ---------------------------------------------------------------------
 # The fingerprint
 # ---------------------------------------------------------------------
@@ -634,6 +623,8 @@ def load_denoising_data(
     train_files = tuple(path for _, path in train)
     val_files = tuple(path for _, path in val)
     selection = FileSelection(tuple(train_dirs), tuple(val_dirs), tuple(train), tuple(val))
+    # `_batched` asserts the length: `files * patches_per_image`, exact because no example is filtered out (a flat
+    # black image left the list before this point).
     train_ds = _batched(
         _train_pipeline(train_files, patch_size=patch_size, channels=channels, patches_per_image=patches_per_image,
                         seed=seed, noise=noise, sigma_max_var=sigma_max_var, augment=augment,

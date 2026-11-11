@@ -101,6 +101,7 @@ from train.common.classification_data import load_split_arrays
 from train.common import run_summary
 from train.common.callbacks import LearningRateLogger
 from train.common.classification_viz import TrainingDashboardCallback
+from train.common.seed import seed_generators
 
 
 # ---------------------------------------------------------------------
@@ -578,26 +579,6 @@ def create_optimizer(
 # Training
 # ---------------------------------------------------------------------
 
-def _seed_generators(model: keras.Model) -> list:
-    """Every ``keras.random.SeedGenerator`` reachable from ``model``.
-
-    Keras 3.8 registers a layer's generators in ``Layer._seed_generators`` (a Dropout
-    layer owns one; ``model.variables`` lists their ``state`` variables). Reached by
-    walking ``model._flatten_layers()``, which recurses through sublayers.
-
-    Returns:
-        The generators, deduplicated by identity; empty when the model has no
-        stochastic layer.
-    """
-    found, seen = [], set()
-    for layer in model._flatten_layers():
-        for generator in layer._seed_generators:
-            if id(generator) not in seen:
-                seen.add(id(generator))
-                found.append(generator)
-    return found
-
-
 # DECISION plan-2026-09-18T213948-68dcb72c/D-029: the epoch-0 numbers (initial-loss guard
 # AND the dashboard baseline star) come from THIS one function. Do NOT let the dashboard
 # callback call ``model.evaluate`` itself "because it is simpler": under batch
@@ -648,7 +629,7 @@ def _untrained_metrics(
         metrics = model.evaluate(x, y, batch_size=batch_size, verbose=0, return_dict=True)
         return {k: float(v) for k, v in metrics.items()}, "inference"
     snapshot = model.get_weights()
-    generators = _seed_generators(model)
+    generators = seed_generators(model)
     generator_states = [generator.state.numpy() for generator in generators]
     loss_sum, correct = 0.0, 0
     try:

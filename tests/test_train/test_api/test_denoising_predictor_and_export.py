@@ -26,11 +26,10 @@ again for ``f(a x) = a f(x)``. Everything writes under ``tmp_path``; nothing is 
 """
 
 import json
-import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Tuple
 
 import keras
 import numpy as np

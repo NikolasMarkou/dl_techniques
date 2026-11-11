@@ -32,6 +32,7 @@ from dl_techniques.models.vision.bias_free_denoisers.bfconvunext import create_c
 from dl_techniques.models.vision.bias_free_denoisers.bfunet import create_bfunet_variant
 from tests.numerics import tf32_execution
 from train.common import denoising_homogeneity as dh
+from train.common.seed import seed_generators
 
 SIZE = 32
 TOLERANCE = dh.PROBE_TOLERANCE
@@ -524,7 +525,7 @@ def _dropout_model() -> keras.Model:
 def _random_state(model: keras.Model) -> Dict[str, Any]:
     global_generator = keras.src.backend.common.global_state.get_global_attribute("global_seed_generator")
     return {
-        "generators": [np.array(g.state.numpy()) for g in dh._seed_generators(model)],
+        "generators": [np.array(g.state.numpy()) for g in seed_generators(model)],
         "global": None if global_generator is None else np.array(global_generator.state.numpy()),
         "python": random.getstate(),
         "numpy_keys": np.random.get_state()[1].copy(),
@@ -555,7 +556,7 @@ class TestRandomState:
     def test_the_clone_work_does_move_the_python_random_state(self) -> None:
         """Positive control: without the restore the clone WOULD move state, so the guard below is not vacuous."""
         model = self._armed_model()
-        assert len(dh._seed_generators(model)) >= 1
+        assert len(seed_generators(model)) >= 1
         before = random.getstate()
         dh._build_probe_clone(model, 0)
         assert random.getstate() != before

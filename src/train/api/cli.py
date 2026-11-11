@@ -483,11 +483,12 @@ def _predict_masks(model_path: Path, record: Mapping[str, Any], files: List[Path
 
 def _predict_images(model_path: Path, record: Mapping[str, Any], files: List[Path], out: Path) -> int:
     """Write the denoised images of ``files`` as PNGs and an index into the new directory ``out``."""
-    from .denoising_predictor import check_png_output, png_names, write_predictions
+    from .denoising_predictor import check_png_output, write_predictions
     from .predictor import load_model
+    from .segmentation_predictor import mask_names
 
     check_png_output(record)
-    png_names(files)
+    mask_names(files)
     write_predictions(load_model(model_path), files, out)
     sys.stdout.write(f"{out}\n")
     return 0

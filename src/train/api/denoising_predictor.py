@@ -49,7 +49,7 @@ Interface contract
     sum of the weights. The weights do not depend on the pixels, so a tiled pass of a model that is
     homogeneous (``f(a x) = a f(x)``, every bias-free family) is homogeneous too.
 
-``png_names(files)`` / ``check_png_output(record)`` / ``write_predictions(predictor, files, out)``
+``check_png_output(record)`` / ``write_predictions(predictor, files, out)``
     The command line's output. ``write_predictions`` creates the directory ``out`` (it must not exist), writes
     ``<stem>.png`` for each of ``files`` (8 bit, grey or RGB as the model's channels) and, LAST,
     ``index.json``: ``{"images": [{"path", "image", "size": [height, width]}, ...], "png": ...}``. A PNG is the
@@ -75,7 +75,7 @@ from .errors import ConfigError
 from .exporting import check_free
 from .predictor import DENOISING, GREY16_MODES, GREY_MODES, WIDE_MODES, check_record
 from .run_dir import TASK_FILE
-from .segmentation_predictor import INDEX_NAME, mask_names
+from .segmentation_predictor import INDEX_NAME, _write_png, mask_names
 
 #: Images turned into tensors and run through the model at a time by ``write_predictions``.
 CHUNK = 8
@@ -363,11 +363,6 @@ class DenoisingPredictor:
 # ---------------------------------------------------------------------
 
 
-def png_names(files: Sequence[Any]) -> List[str]:
-    """Return ``<stem>.png`` for each of ``files``, refusing two with one stem (``segmentation_predictor.mask_names``)."""
-    return mask_names(files)
-
-
 def check_png_output(record: Mapping[str, Any]) -> None:
     """Raise :class:`ConfigError` unless the record's ``output`` is ``images`` (the only one a denoising run has)."""
     if record["output"] != "images":
@@ -388,18 +383,10 @@ def to_uint8(image: Any) -> Any:
     return pixels[..., 0] if pixels.shape[-1] == 1 else pixels
 
 
-def _write_png(path: Path, picture: Any) -> None:
-    from PIL import Image
-
-    # "xb" creates the file and fails if it exists; Image.save(path) would truncate one.
-    with open(path, "xb") as handle:
-        Image.fromarray(picture).save(handle, format="PNG")
-
-
 def write_predictions(predictor: DenoisingPredictor, files: Sequence[Path], out: Path) -> None:
     """Write one PNG per file and ``index.json`` into the new directory ``out``; see the module contract."""
     check_png_output(predictor.record)
-    names = png_names(files)
+    names = mask_names(files)
     check_free(out, "out", "predict")
     out.mkdir(parents=True)
     entries: List[Dict[str, Any]] = []
