@@ -297,3 +297,30 @@ class TestPerHorizonError:
         y_true, y_pred = self._pair((6, 4))
         with pytest.raises(ValueError):
             horizon_profile(y_true, y_pred, error="rmse")
+
+
+class TestSMAPEFollowsGlobalEpsilon:
+    """SMAPE's denominator guard is `keras.config.epsilon()`, not a literal
+    (metrics/AGENTS.md rule). Identical at the 1e-7 default, so this pins
+    the convention, not a default-behaviour change."""
+
+    @staticmethod
+    def _smape_of_zero_vs_tiny():
+        metric = SMAPE()
+        metric.update_state(
+            np.array([0.0], dtype="float32"), np.array([1e-5], dtype="float32")
+        )
+        return float(metric.result())
+
+    def test_set_epsilon_changes_the_denominator_guard(self):
+        original = keras.config.epsilon()
+        try:
+            keras.config.set_epsilon(1e-7)
+            tight = self._smape_of_zero_vs_tiny()
+            keras.config.set_epsilon(1e-3)
+            loose = self._smape_of_zero_vs_tiny()
+        finally:
+            keras.config.set_epsilon(original)
+        assert tight == pytest.approx(200.0 * 1e-5 / (1e-5 + 1e-7), rel=1e-4)
+        assert loose == pytest.approx(200.0 * 1e-5 / (1e-5 + 1e-3), rel=1e-4)
+        assert keras.config.epsilon() == original

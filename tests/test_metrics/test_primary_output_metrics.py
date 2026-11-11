@@ -138,3 +138,115 @@ class TestPrimaryOutputTopKAccuracy:
         restored = keras.saving.deserialize_keras_object(config)
         assert isinstance(restored, PrimaryOutputTopKAccuracy)
         assert restored.k == 10
+
+
+# ---------------------------------------------------------------------
+# Symbolic label width: the one-hot-vs-sparse decision must come from the
+# STATIC shape. `ops.shape(y)[-1] > 1` is a symbolic tf.Tensor used as a
+# Python bool when the label width is unknown, which raises
+# OperatorNotAllowedInGraphError under tf.function(autograph=False)
+# (the mode Keras trainers use). Rule: rank > 1 and (width is None or
+# width > 1) means one-hot (decision D-024).
+# ---------------------------------------------------------------------
+
+import tensorflow as tf
+
+_ONE_HOT_TRUE = np.eye(4, dtype=np.float32)[[0, 1, 2, 3, 0]]
+_PRED = np.array(
+    [
+        [0.9, 0.05, 0.03, 0.02],  # right
+        [0.1, 0.8, 0.05, 0.05],  # right
+        [0.4, 0.3, 0.2, 0.1],  # wrong
+        [0.1, 0.1, 0.1, 0.7],  # right
+        [0.2, 0.3, 0.4, 0.1],  # wrong
+    ],
+    dtype=np.float32,
+)
+
+
+def _run_graph(metric, true_spec, pred_spec, y_true, y_pred, jit_compile):
+    """Run update_state + result inside a graph with the given signatures."""
+
+    @tf.function(
+        input_signature=[true_spec, pred_spec],
+        autograph=False,
+        jit_compile=jit_compile,
+    )
+    def step(t, p):
+        metric.update_state(t, p)
+        return metric.result()
+
+    return float(step(tf.constant(y_true), tf.constant(y_pred)))
+
+
+class TestUnknownLabelWidthInGraphMode:
+    """Labels whose last dim is statically unknown must not raise."""
+
+    @pytest.mark.parametrize("jit_compile", [False, True])
+    def test_accuracy_with_unknown_label_width(self, jit_compile):
+        value = _run_graph(
+            PrimaryOutputAccuracy(),
+            tf.TensorSpec((None, None), tf.float32),
+            tf.TensorSpec((None, 4), tf.float32),
+            _ONE_HOT_TRUE,
+            _PRED,
+            jit_compile,
+        )
+        assert value == pytest.approx(3.0 / 5.0)
+
+    @pytest.mark.parametrize("jit_compile", [False, True])
+    def test_top_k_with_unknown_label_width(self, jit_compile):
+        value = _run_graph(
+            PrimaryOutputTopKAccuracy(k=3),
+            tf.TensorSpec((None, None), tf.float32),
+            tf.TensorSpec((None, 4), tf.float32),
+            _ONE_HOT_TRUE,
+            _PRED,
+            jit_compile,
+        )
+        # Rows 2 and 4 are wrong at top-1 but their true class is rank 3.
+        assert value == pytest.approx(1.0)
+
+    @pytest.mark.parametrize("jit_compile", [False, True])
+    def test_static_width_one_labels_stay_sparse(self, jit_compile):
+        """A statically-1 last dim is a sparse (B, 1) label, not one-hot."""
+        sparse = np.array([[0], [1], [2], [3], [0]], dtype=np.float32)
+        value = _run_graph(
+            PrimaryOutputAccuracy(),
+            tf.TensorSpec((None, 1), tf.float32),
+            tf.TensorSpec((None, 4), tf.float32),
+            sparse,
+            _PRED,
+            jit_compile,
+        )
+        assert value == pytest.approx(3.0 / 5.0)
+
+    @pytest.mark.parametrize("jit_compile", [False, True])
+    def test_rank_one_sparse_labels_in_graph_mode(self, jit_compile):
+        sparse = np.array([0, 1, 2, 3, 0], dtype=np.float32)
+        value = _run_graph(
+            PrimaryOutputTopKAccuracy(k=1),
+            tf.TensorSpec((None,), tf.float32),
+            tf.TensorSpec((None, 4), tf.float32),
+            sparse,
+            _PRED,
+            jit_compile,
+        )
+        assert value == pytest.approx(3.0 / 5.0)
+
+
+class TestTopKIndexing:
+    def test_top_k_is_indexed_not_attribute_accessed(self, monkeypatch):
+        """`ops.top_k` returns a plain list on JAX (`.indices` is TF-only);
+        the metric must index `[1]`. Cosmetic on TF: a list-returning
+        top_k is the only way to see the difference here."""
+        real_top_k = ops.top_k
+
+        def list_top_k(x, k=1, sorted=True):
+            values, indices = real_top_k(x, k=k, sorted=sorted)
+            return [values, indices]
+
+        monkeypatch.setattr(ops, "top_k", list_top_k)
+        metric = PrimaryOutputTopKAccuracy(k=3)
+        metric.update_state(_ONE_HOT_TRUE, _PRED)
+        assert float(metric.result()) == pytest.approx(1.0)

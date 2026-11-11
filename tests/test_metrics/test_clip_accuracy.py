@@ -577,6 +577,33 @@ def test_clip_recall_k_greater_than_batch():
     print("✓ K > batch_size test passed")
 
 
+def test_clip_recall_k_is_a_python_int_for_a_static_batch(monkeypatch):
+    """JAX-readiness contract guard (not a TF bug fix).
+
+    On TF a tensor ``k`` reaches ``tf.math.top_k`` fine, but on JAX
+    ``ops.minimum(k, batch)`` becomes a tracer inside jit and
+    ``jax.lax.top_k`` raises TracerBoolConversionError. With a static batch
+    dim the cap must therefore be computed in Python. Measured 2026-11-11
+    with a scratch jax 0.4.38 install (plan D-024).
+    """
+    seen = {}
+    real_top_k = ops.top_k
+
+    def spy_top_k(x, k=1, sorted=True):
+        seen["k"] = k
+        return real_top_k(x, k=k, sorted=sorted)
+
+    monkeypatch.setattr(ops, "top_k", spy_top_k)
+
+    for batch_size, k, expected_k in [(8, 5, 5), (3, 5, 3)]:
+        seen.clear()
+        metric = CLIPRecallAtK(k=k, direction='i2t')
+        metric.update_state(y_pred=create_perfect_similarity_matrix(batch_size))
+        assert type(seen["k"]) is int, type(seen["k"])
+        assert seen["k"] == expected_k
+        assert abs(float(metric.result()) - 1.0) < 1e-6
+
+
 def test_clip_recall_vs_accuracy():
     """Test that Recall@1 equals Accuracy."""
     print("\n" + "=" * 70)

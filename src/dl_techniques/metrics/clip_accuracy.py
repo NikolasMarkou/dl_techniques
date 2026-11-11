@@ -644,7 +644,20 @@ class CLIPRecallAtK(keras.metrics.Metric):
         # ops.top_k returns the k largest values, which is what we want
         # (highest similarities = best matches)
         # Cap k at batch_size to avoid errors when k > batch_size
-        k_effective = ops.minimum(self.k, batch_size)
+        # DECISION plan-2026-11-11T131349-13b28b37/D-024
+        # With a static batch dim the cap is plain Python: on JAX,
+        # ops.minimum(int, int) becomes a tracer inside jit and
+        # jax.lax.top_k then raises TracerBoolConversionError. Do NOT drop
+        # the cap (a static k > n is a hard JAX error and the docstring
+        # promises capping) and do NOT make it unconditional ops.minimum.
+        # Only a None batch (TF) falls back to the tensor cap, which
+        # tf.math.top_k accepts. Pinned by
+        # test_clip_recall_k_is_a_python_int_for_a_static_batch.
+        static_batch = logits.shape[0]
+        if static_batch is not None:
+            k_effective = min(self.k, static_batch)
+        else:
+            k_effective = ops.minimum(self.k, batch_size)
 
         # Get indices of top-k predictions (k highest similarities)
         # Shape: (batch_size, k_effective)

@@ -12,7 +12,7 @@ Before modifying or adding to this package, agents must adhere to the following 
 
 2.  **Keras 3 Graph-Mode Compliance:**
     *   Always use `keras.ops` for tensor operations in `keras.metrics.Metric` subclasses to ensure backend agnosticism (JAX, TensorFlow, PyTorch).
-    *   **Shape Ranks:** To get the rank of a tensor in Keras 3, use `len(tensor.shape)`, never `len(keras.ops.shape(tensor))`. The latter returns a symbolic tensor in graph mode (JAX/TF), which raises a `TypeError` when passed to Python's `len()`.
+    *   **Shape Ranks:** Prefer `len(tensor.shape)` over `len(keras.ops.shape(tensor))` as a style choice. `keras.ops.shape` is not the failing call: on Keras 3.8 it returns a tuple on TF, JAX and torch (ints for known dims, scalar tensors for unknown dims on TF), so `len()` of it works in graph mode. What does fail is using an unknown dimension as a Python bool, e.g. `ops.shape(y)[-1] > 1` when the last dim is `None` (a symbolic tensor, `OperatorNotAllowedInGraphError` under `tf.function(autograph=False)`). Branch on the static `.shape` instead and decide the `None` case explicitly (see `primary_output_metrics._true_class_indices`). A tensor of unknown rank fails with a `ValueError` either way.
     *   Ensure all denominators use `keras.config.epsilon()` or explicit `ops.maximum` clipping to avoid `NaN` results. Use `ops.divide_no_nan` where appropriate.
 
 3.  **Serialization:**

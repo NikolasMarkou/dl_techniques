@@ -74,11 +74,11 @@ class KeypointMatchMetric(keras.metrics.Metric):
         super().__init__(name=name or f"match_{mode}", dtype=dtype, **kwargs)
         self.mode = mode
         self.threshold = float(threshold)
-        self.true_positives = self.add_variable(
+        self.true_positives = self.add_weight(
             shape=(), initializer="zeros", dtype="float32", name="true_positives")
-        self.predicted = self.add_variable(
+        self.predicted = self.add_weight(
             shape=(), initializer="zeros", dtype="float32", name="predicted")
-        self.ground_truth = self.add_variable(
+        self.ground_truth = self.add_weight(
             shape=(), initializer="zeros", dtype="float32", name="ground_truth")
 
     def update_state(

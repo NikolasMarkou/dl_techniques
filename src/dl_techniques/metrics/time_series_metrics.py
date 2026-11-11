@@ -85,7 +85,7 @@ class SMAPE(keras.metrics.Metric):
         y_pred = ops.cast(y_pred, "float32")
 
         numerator = ops.abs(y_true - y_pred)
-        denominator = ops.abs(y_true) + ops.abs(y_pred) + 1e-7
+        denominator = ops.abs(y_true) + ops.abs(y_pred) + keras.config.epsilon()
 
         values = 200.0 * (numerator / denominator)
 

@@ -36,6 +36,45 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
 
+
+def _true_class_indices(primary_true: keras.KerasTensor) -> keras.KerasTensor:
+    """Turn one-hot or sparse labels into class indices.
+
+    Shared by both metrics in this module.
+
+    Args:
+        primary_true: Labels, one-hot ``(..., C)`` or sparse ``(...,)`` /
+            ``(..., 1)``. Only the static rank and last dim are read.
+
+    Returns:
+        Class indices, int64 for sparse input and the argmax dtype for
+        one-hot input; shape ``primary_true.shape[:-1]`` (one-hot, or sparse
+        with a trailing 1) or ``primary_true.shape`` (sparse without it).
+
+    Raises:
+        ValueError: If the rank of ``primary_true`` is not statically known
+            (raised by ``.shape`` access, as it is by ``ops.shape``).
+    """
+    # DECISION plan-2026-11-11T131349-13b28b37/D-024
+    # One-hot is decided from the STATIC shape: rank > 1 and the last dim is
+    # either unknown (None) or > 1. Do NOT write `ops.shape(y)[-1] > 1`:
+    # with an unknown last dim that is a symbolic tf.Tensor used as a Python
+    # bool and raises OperatorNotAllowedInGraphError under
+    # tf.function(autograph=False). Do NOT use `y.shape[-1] > 1` either:
+    # None > 1 is a TypeError. An unknown width is treated as one-hot, so a
+    # sparse label shaped (B, None) is misread; that is the adjacent known
+    # defect (sparse (B, T) labels against (B, T, C) predictions), not widened
+    # here. Pinned by tests/test_metrics/test_primary_output_metrics.py
+    # TestUnknownLabelWidthInGraphMode.
+    true_rank = len(primary_true.shape)
+    last_dim = primary_true.shape[-1] if true_rank > 1 else None
+    if true_rank > 1 and (last_dim is None or last_dim > 1):
+        return ops.argmax(primary_true, axis=-1)
+    if true_rank > 1:
+        primary_true = ops.squeeze(primary_true, axis=-1)
+    return ops.cast(primary_true, "int64")
+
+
 @register_dl_technique("dl_techniques.metrics.primary_output_metrics")
 class PrimaryOutputAccuracy(keras.metrics.Metric):
     """Classification accuracy for the primary output of multi-output models.
@@ -84,14 +123,7 @@ class PrimaryOutputAccuracy(keras.metrics.Metric):
         predicted_classes = ops.argmax(primary_pred, axis=-1)
 
         # Handle both one-hot and integer labels
-        true_rank = len(ops.shape(primary_true))
-        if true_rank > 1 and ops.shape(primary_true)[-1] > 1:
-            true_classes = ops.argmax(primary_true, axis=-1)
-        else:
-            true_classes = ops.cast(
-                ops.squeeze(primary_true, axis=-1) if true_rank > 1 else primary_true,
-                "int64",
-            )
+        true_classes = _true_class_indices(primary_true)
 
         predicted_classes = ops.cast(predicted_classes, "int64")
         true_classes = ops.cast(true_classes, "int64")
@@ -160,17 +192,10 @@ class PrimaryOutputTopKAccuracy(keras.metrics.Metric):
         primary_true = ops.cast(primary_true, "float32")
 
         # Get top-k prediction indices
-        top_k_indices = ops.top_k(primary_pred, k=self.k).indices
+        top_k_indices = ops.top_k(primary_pred, k=self.k)[1]
 
         # Handle both one-hot and integer labels
-        true_rank = len(ops.shape(primary_true))
-        if true_rank > 1 and ops.shape(primary_true)[-1] > 1:
-            true_classes = ops.argmax(primary_true, axis=-1)
-        else:
-            true_classes = ops.cast(
-                ops.squeeze(primary_true, axis=-1) if true_rank > 1 else primary_true,
-                "int64",
-            )
+        true_classes = _true_class_indices(primary_true)
 
         true_classes = ops.cast(true_classes, top_k_indices.dtype)
 
