@@ -6,9 +6,10 @@ guards, `REPO_MAP.md` at the repo root for which trainer trains which model). Mo
 
 ## `python -m train` and `train.api`
 
-A key=value command line over strict configs. It has two tasks, `image_classification`
-(families `vit`, `resnet`, `convnext_v1`, `convnext_v2`, `cliffordnet`, `cliffordnet_hier`) and
-`image_segmentation` (families `convunext`, `accunet`, `resnet_seg`, `convnext_seg`), and the same code is a Python function. Run it from the repo root with `.venv`, with
+A key=value command line over strict configs. It has three tasks, `image_classification`
+(families `vit`, `resnet`, `convnext_v1`, `convnext_v2`, `cliffordnet`, `cliffordnet_hier`),
+`image_segmentation` (families `convunext`, `accunet`, `resnet_seg`, `convnext_seg`) and `image_denoising`
+(families `bfcnn`, `bfunet`, `bfconvunext`, `convunext_biased`, `scunet`), and the same code is a Python function. Run it from the repo root with `.venv`, with
 `MPLBACKEND=Agg` on a headless machine.
 
 ```bash
@@ -282,6 +283,296 @@ python -m train image_segmentation out=auto model=accunet/base data.format=folde
   more than 12 classes draw IoU bars only. The model analysis takes the per-pixel path: void is dropped before the
   calibration, which reads a uniform sample of at most 100,000 pixels.
 
+**`image_denoising`** (plan d483ffab): a blind denoiser trained on folders of clean images; the pipeline adds the noise. The clean
+image is the target, so there is no label, no class and no test split in the usual sense. Pixels are in `[0, 1]`, sigma is on that
+scale (`sigma_255 = 255 * sigma`) and the model has no sigma input. `out`, `model`, `data.train_dirs` and `data.val_dirs` are
+required (directories searched recursively for png, jpg, jpeg and bmp files).
+
+```bash
+python -m train list_models task=image_denoising
+python -m train image_denoising              # every key of the task, its type and default
+python -m train image_denoising out=auto model=bfconvunext/tiny epochs=24 transform_args.patch_size=64 \
+    'data.train_dirs=["/media/arxwn/data0_4tb/datasets/coco_2017/train2017","/media/arxwn/data0_4tb/datasets/div2k/train"]' \
+    'data.val_dirs=["/media/arxwn/data0_4tb/datasets/div2k/validation"]' \
+    'data.test_dirs=["kodak24=/media/arxwn/data0_4tb/datasets/kodak24","cbsd68=/media/arxwn/data0_4tb/datasets/CBSD68/original"]'
+```
+
+```python
+from train.api import train_image_denoising, load_model
+result = train_image_denoising(out="auto", model="bfconvunext/tiny", data={"train_dirs": ["<dir>"], "val_dirs": ["<dir>"]})
+denoised = load_model("<run>/final_model.keras").predict("noisy.png")["denoised"][0]   # raw float32, the input's size
+```
+
+* **Families** (`train/api/denoising_models.py`; each trains this task only: `python -m train image_denoising model=vit/vit_pico` exits 2 naming
+  the families of this task, and the other two tasks refuse these five the same way). `bfcnn`, `bfunet` and `bfconvunext` are bias-free (`ModelSpec.properties` holds
+  `"bias_free"`: no additive constant anywhere, so `f(a x) = a f(x)`; the three are checked, see Homogeneity below);
+  `convunext_biased` (ConvUNext with `use_bias=true`, its own family because the segmentation family forces
+  `output_channels` to the class count) and `scunet` carry constants and are never checked. `scunet` has no variants table in the
+  library, which publishes one network: `SCUNET_VARIANTS` is this API's, `base` the published network and `tiny` and `small`
+  smaller ones nobody tuned.
+
+| Family | Bias-free | Variants | Each side of an image must be a multiple of | Batch of the recipe |
+|---|---|---|---|---|
+| `bfcnn` | yes | `tiny` `small` `base` `large` `xlarge` | 1 (no stride) | 16 |
+| `bfunet` | yes | `tiny` `small` `base` `large` `xlarge` | `2 ** depth`: 8 for `tiny` and `small`, 16 for `base` and `large`, 32 for `xlarge` | 16, `base` 4 |
+| `bfconvunext` | yes | `tiny` `small` `base` `large` `xlarge` | the same as `bfunet` | 16, `base` 4 |
+| `convunext_biased` | no | `tiny` `small` `base` `large` `xlarge` | the same as `bfunet` | 16, `base` 4 |
+| `scunet` | no | `tiny` `small` `base` | 1 (it pads to 64 inside) | 8 |
+
+`transform_args.patch_size` must be a multiple of the family's number (refused before the run directory is claimed, with the
+stride named); `predict` and `export` pad to it themselves. Every recipe is the legacy denoiser's optimizer: AdamW, lr 1e-3,
+weight decay 4e-3, a global clip norm of 1.0, cosine over the whole run, 100 epochs. The bias-free recipes build what the legacy
+trainers build (batchnorm, LeakyReLU with slope 0.1, the trainable Gabor stem of the two U-Nets, ConvNeXt v1 blocks).
+`compile_options` returns `{"jit_compile": False}` for `bfunet`, `bfconvunext` and
+`convunext_biased` under `precision=mixed_float16` (XLA rejects the gradient of their bilinear upsampling, measured on an RTX 4090 in step 2, which covered all five families) and
+nothing for `bfcnn`, `scunet` or float32. `mixed_bfloat16` was not measured and gets the default.
+* **Keys with a default** (the rest are the shared groups; `python -m train image_denoising` lists all):
+
+| Key | Default | What it does |
+|---|---|---|
+| `data.max_train_files` | `10000` | files used per epoch, split equally over `data.train_dirs` (a directory with fewer files repeats them, so COCO does not drown DIV2K); `null` uses every file once |
+| `data.max_val_files` | `500` | validation files, a subset chosen by `data.val_seed` alone |
+| `data.test_dirs` | `null` | held-out sets scored on whole images after training, each `<directory>` or `<name>=<directory>` |
+| `data.noise_kind` | `"additive"` | `additive`, `multiplicative` or `composite` (formulas below) |
+| `data.noise_sigma_min` | `0.0` | lowest sigma of a patch |
+| `data.noise_sigma_max` | `0.25` | the last value of the curriculum's upper bound, and the upper bound of the validation sigma |
+| `data.noise_sigma_max_start` | `0.025` | the upper bound at epoch 0 |
+| `data.noise_composite_ratio` | `null` | composite noise only (`null` reads 0.5, the legacy ratio); refused for another kind |
+| `data.noise_clip` | `false` | clip the noisy input to `[0, 1]` |
+| `data.curriculum_schedule` | `"linear"` | `linear`, `cosine` or `exp` |
+| `data.curriculum_epochs` | `"auto"` | epochs the upper bound takes to reach `data.noise_sigma_max`; auto is `max(1, round(0.8 * epochs))` |
+| `data.val_seed` | `0` | seed of the validation crops, sigmas, noise and files; not tied to `seed` |
+| `transform_args.patch_size` | `256` | side of the square crops, at least 16 (SSIM's window is 11 pixels) |
+| `transform_args.patches_per_image` | `4` | crops per decoded image per epoch (and fixed crops per validation image) |
+| `transform_args.augment` | `"auto"` | `none`, `flip` or `dihedral`; auto is the recipe's, a flip for folder data |
+| `transform_args.channels` | `3` | 1 (grey) or 3 (RGB): every image is decoded to this many channels |
+| `metric_args.watch_metric` | `"auto"` | the metric that picks the best epoch inside the selection window; auto is `val_psnr` |
+| `metric_args.success_gain_db` | `"auto"` | auto is 1.0 dB, an inferred number and not a literature value |
+| `metric_args.test_sigmas_255` | `[15.0, 25.0, 50.0]` | noise levels, on the 0-255 scale, of the held-out cells |
+| `optim_args.warmup_epochs` | `"auto"` | `max(1, round(0.1 * epochs))` for a cosine schedule (the legacy rule: 10 at the recipe's 100 epochs), 0 for a constant one |
+
+The loss is `loss_args.name=mse`, with `mae` and `charbonnier` as the other choices (a bias-free family accepts `mse` only).
+`analysis_args.conformal_alpha` is refused (a conformal set is a set of classes, and a denoiser has none), and so is a
+`data.curriculum_epochs` above `epochs`. The validation split is batched at `batch_size`, so `analysis_args.eval_batch_size`
+moves no validation number.
+* **Defaults that differ from the legacy trainers** (`train.bfunet.train_convunext_denoiser` and its siblings), each on purpose.
+  (1) `data.noise_clip` is false, where the legacy trainers clip the noisy input by default: the clip makes the noise non-Gaussian near 0
+  and 1 (on a Kodak crop it changed 0.09, 0.50, 4.48 and 8.85 percent of the pixels at `sigma_255` 15, 25, 50 and 63.75), and the
+  residual of a bias-free denoiser is the score of the noisy-image density (Miyasawa, Tweedie) only for additive noise that is not
+  clipped. The output is never clipped either, except where a PNG is written. `score_identity` in the summary says whether the
+  reading holds for the run. (2) The noise is stateless and the epoch is finite: every random number is a function of a seed,
+  every file is decoded once before `fit`, a flat black image leaves the list (logged), and an epoch is exactly
+  `files * transform_args.patches_per_image` patches; the legacy pipeline is an endless stream of stateful `tf.random` draws.
+  (3) Validation is fixed: crops, sigmas and noise are keyed on `(data.val_seed, index)`, so `val_psnr` is a function of the weights
+  alone (equal across epochs, across a resume and across the seeds of the training stream); the legacy validation draws fresh noise
+  every epoch from a file set that depends on the seed. `val_psnr` is the mean over patches of each patch's PSNR at `max_val` 1,
+  capped at 70 dB per patch, the statistic of the legacy `val_psnr_metric` column. (4) `data.curriculum_epochs` is 0.8 of the
+  epochs, where the legacy curriculum spans all of them, and the checkpoint is selected only from the curriculum's last epoch (the
+  selection window below). (5) The patience of `checkpoint_args.early_stopping_patience` (the recipe's 100) counts from the window's start, and the
+  legacy trainers switch early stopping off; the warmup follows the epochs as the legacy rule does (`max(1, round(0.1 * epochs))`),
+  not as the recipe's fixed 10 would. (6) `transform_args.augment` is a
+  flip, where the legacy augmentation is dihedral (flips and quarter turns; `transform_args.augment=dihedral` draws the same kind of
+  patch, and the two were not compared bit for bit).
+* **Noise.** A patch's sigma is uniform in `[data.noise_sigma_min, u]`, where `u` is the curriculum's upper bound for the epoch
+  (`data.noise_sigma_max_start` to `data.noise_sigma_max` over `data.curriculum_epochs`, shaped by `data.curriculum_schedule`);
+  the validation sigma is uniform in `[data.noise_sigma_min, data.noise_sigma_max]`. With `n`, `n'` standard normal and `s` the patch's sigma:
+  `additive` is `y = x + n s`, `multiplicative` is `y = x (1 + n s)` and `composite` is `y = x (1 + n s) + n' r s` with `r` from
+  `data.noise_composite_ratio`. Each is a pure function of `(clean, sigma, seed)`, with a test of its variance against the formula.
+  Any family may train on any kind; only additive noise keeps the residual a score, and the held-out cells below follow the run's kind.
+* **The selection window.** The checkpoint saves nothing and early stopping counts nothing before epoch `data.curriculum_epochs - 1`
+  (0-based), so the model that is selected has trained on the full noise range it is scored on. A run of 24 epochs has a
+  curriculum of 19, a window of 6 epochs from index 18. Runs of 1, 2 and 3 epochs have windows of 1, 1 and 2 (reported, not refused).
+  `final_model.keras` is the deliverable; the summary's `selection` block holds `start_epoch`, `window_epochs`, `curriculum_epochs`,
+  `best_epoch` and `final_is_best`, and `best_epoch` is the best of the window, the epoch `best_model.keras` holds. The verdict:
+  `success_value` is the best `val_psnr` of the window minus `input_psnr` (the PSNR of the noisy validation set, taken by running an
+  identity model through the same metric objects before `fit`), `success_threshold` is `metric_args.success_gain_db`, and a run that
+  does not clear it exits 1 with both numbers in the summary. The epoch-0 check is the ratio of the untrained model's loss to the
+  identity's (`initial_loss_ratio`) with no verdict on the initialization: an untrained denoiser's ratio depends on the noise range far
+  more than on the scale of its weights.
+* **Held-out cells** (`data.test_dirs`, `metric_args.test_sigmas_255`). Every set is listed and decoded once before `fit`; a file
+  that is also a train or validation file is refused before the run directory is claimed. After `fit` the best weights and then the
+  final weights score every WHOLE image of every set at every sigma (reflect pad to the family's multiple, eager forward pass, crop
+  back; the noise from a fixed seed that is not `seed`, so both models see the same noisy image, which the code checks every run).
+  `held_out[set][sigma]` is `{input_psnr, best_psnr, final_psnr, n}`, with sigma keys `"15"`, `"25"`, `"50"`, and `held_out_info`
+  holds the protocol (noise kind, clip, ratio, seed, size multiple, `skipped_images`); no key averages over sets or levels. An image
+  past the memory rule (1.6 GB per padded megapixel against 8.0 GB, measured for a base U-Net without XLA; no image of the four
+  gate sets is within a factor of five) is named and skipped, never tiled silently. Without `data.test_dirs`, `held_out` says
+  `skipped` and why. A set is `<name>=<directory>` or a bare directory named by its last component (`CBSD68/original` would be
+  "original"), and may not be called `status`, `reason` or `sigmas_255`.
+* **The homogeneity report** (`homogeneity` in the summary; bias-free families only). Refused before the claim, with `out` absent:
+  every `model_args` key that can put a constant into the model (per-family tables in `denoising_models.py`, held equal to the
+  factories' signatures by a census test: a norm other than batchnorm, an activation outside the positively homogeneous ones, `use_bias`,
+  a centered supervision norm, deep supervision), and any `loss_args.name` but `mse`. After the build, before `compile`: a static scan
+  of the layers and weights, and a numeric probe on a CLONE of the model with every layer scale at 1 and random running variances
+  (`f(a x)` against `a f(x)` at alphas 0.3, 1.3, 3.7 and 6.1, TF32 off, tolerance 1e-3 of the largest `a f(x)`; the clone restores every
+  random state, so the probe does not move same-seed weights). A failure there exits 2 with the run directory claimed. At the end the
+  probe reads the best and the final weights; a failed reading makes `success` false, names `homogeneity_best` or
+  `homogeneity_final` in `success_blocked_by`, exits 1 and keeps the models. `homogeneity.status` is `passed`, `passed_static_only`,
+  `failed` or, for `convunext_biased` and `scunet`, `not_applicable` (the check never runs there). The numeric readings are taken at
+  `float32` only: the tolerance is a float32 number (a clean `bfcnn` under `mixed_float16` reads 1.3e-3 on CPU), so under any other
+  precision the static scan runs, the readings say `skipped` with the reason and the status is `passed_static_only`.
+* **`task.json` and the stamps.** The record is `schema_version`, `task`, `model`, `family`, `variant`, `channels`, `size_multiple`,
+  `data_range` (`"[0,1]"`) and `output` (`images`), plus `variant_overrides` when the recipe changes a key of the variant's table; it
+  has no input size (the model's input is `(None, None, channels)`) and no mean or std. A resume compares `channels` and `data_range`
+  with the data it loads, and the held-out sets are not compared (the request check already refuses another `data.test_dirs`). The
+  top level of `config.json` also carries the keys the pre-API readers look for: `data_range`, `patch_size`, `channels`,
+  `val_image_dirs`, `noise_type`, `noise_sigma_min`, `sigma_max_end` and, for `bfconvunext` only, `convnext_version`. Without
+  `data_range` the gate of `dl_techniques.utils.denoiser_provenance` refuses the checkpoint; without `val_image_dirs`
+  `eval_per_pixel_uncertainty` falls back to its own default directories with no error. Each stamp is a copy of a config value, held
+  equal by a test, and removing one breaks the path it serves.
+* **Analysis and figures.** The analysis is data-free (weights and spectral only): the stock calibration, information-flow and
+  training-dynamics analyses read class probabilities, which an image is not, so the summary has no `ece`. With `analysis_args.figures`
+  true, `visualizations/` gets `epoch_NNN_triptych.png` (noisy, denoised, clean and the removed residual of a fixed batch),
+  `psnr_vs_sigma.png` (one panel per held-out set), `residual_whiteness.png` and a `training_dashboard.png` with a PSNR panel.
+* **Predict and tiling.** `load_model` returns a `DenoisingPredictor`; `predict(x)` takes a path, a PIL image or an array (or a list)
+  and returns `{"denoised": [...]}`, ALWAYS a list, one raw `float32` array per input at that input's size, not clipped, not
+  standardized. The image is reflect-padded to the family's multiple, the model runs eagerly with `training=False` (a compiled call
+  builds one XLA program per new size, 3 to 44 seconds and up to 17 GB, measured in step 2), and the result is cropped back.
+  `DenoisingPredictor.predict(x, tile=128, tile_overlap=32)` cuts the padded image into tiles of one size (both numbers multiples of
+  the family's multiple) and blends them with fixed linear ramps over the overlap, so a homogeneous model stays homogeneous; a pass
+  that runs out of memory raises a `ConfigError` that names `tile`. **The command line has no `tile` key**: `predict` has exactly
+  `model`, `data` and `out`, so `python -m train predict model=<run> data=<image or directory> out=<new directory>` predicts whole
+  images and writes one `<stem>.png` per input (the raw output clipped to `[0, 1]` and rounded to 8 bits: the one place the output is
+  clipped) and, last, `index.json` (`images` with `path`, `image` and `size`, and a `png` sentence).
+* **Export** (`python -m train export model=<run> out=<path> format=...`): the file takes float32 images in `[0, 1]` of a free
+  height and width (no mean, no std, no sigma input) and returns the denoised image raw. Measured on untrained weights, 40 cells (five
+  families, four formats, a free and a fixed size, CPU, relative to the Keras output): 36 export and match to 2.3e-6 at most; four
+  are refused with a stated reason before anything is written. Each refusal has a test that builds the file it prevents and shows
+  the reason still true, so a converter that is fixed turns the test red.
+
+| Family | Format | Size | Refused because |
+|---|---|---|---|
+| `bfunet`, `bfconvunext`, `convunext_biased` | `tflite` | fixed | the interpreter resizes its input without an error and a U-Net then returns numbers that are 1.0, 0.52 and 0.56 (relative) off at another size |
+| `scunet` | `onnx` | free | it runs only where both sides are multiples of 64 (a Tile node fails at 96x80, 100x100 and 65x65); a fixed-size onnx of `scunet` works, and so do its `saved_model` and `tflite` |
+
+The command line exports a free size, so the SCUNet onnx is the one refused cell it can reach; a fixed size is the Python
+function's. The onnx of a trained bias-free model needed a guard (D-034, found by the gate): `tf2onnx`'s grappler pass aborts the
+whole process on a `BiasFreeBatchNorm` whose `gamma` is not 1, which an untrained model never shows, so `train.api.exporting` skips
+that pass for a model that holds the layer. The gate re-ran the export of a trained `bfconvunext` and a trained `scunet` in every
+format the table allows, and all matched Keras within 1e-3 (the largest relative error 1.97e-6).
+* **The eval scripts stay scripts** (they read an API run through the stamps above): `python -m train.bfunet.eval_psnr_vs_noise`
+  (the paired PSNR-over-sigma sweep of any number of models, `--model name=path` repeated, `--full-image`, `--no-clip`) and
+  `python -m train.bfunet.eval_per_pixel_uncertainty --checkpoint <run>/best_model.keras` (conformal intervals and SURE maps). Both
+  load all five families; `--init-from` has a legacy builder to load into for `bfcnn`, `bfunet` and `bfconvunext` only, and
+  `DenoiserPrior` loads `bfconvunext` at `dynamic` (it reads the `convnext_version` stamp) and the other four at `fixed256`
+  only. The legacy trainers and their README remain; `src/train/bfunet/README.md` has their flags.
+
+**Measured: the denoising gate** (plan d483ffab step 14, RTX 4090, the worktree code). Five families of `tiny`, one recipe, with
+`data.train_dirs` COCO train2017 plus DIV2K train at `data.max_train_files=1200`, `data.val_dirs` DIV2K validation at
+`data.max_val_files=100`, `epochs=24` (curriculum 19, window 6), batch 16, 64 px crops, 4 per image, seed 42, additive unclipped
+noise, float32, four held-out sets (`kodak24`, `cbsd68`, `mcmaster`, `urban100`) at `metric_args.test_sigmas_255` left at its three levels:
+
+```bash
+python -m train image_denoising out=results/p4c_s14_gate_bfcnn model=bfcnn/tiny epochs=24 batch_size=16 seed=42 \
+    transform_args.patch_size=64 transform_args.patches_per_image=4 data.max_train_files=1200 data.max_val_files=100 \
+    'data.train_dirs=["/media/arxwn/data0_4tb/datasets/coco_2017/train2017","/media/arxwn/data0_4tb/datasets/div2k/train"]' \
+    'data.val_dirs=["/media/arxwn/data0_4tb/datasets/div2k/validation"]' \
+    'data.test_dirs=["kodak24=/media/arxwn/data0_4tb/datasets/kodak24","cbsd68=/media/arxwn/data0_4tb/datasets/CBSD68/original","mcmaster=/media/arxwn/data0_4tb/datasets/mcmaster/color","urban100=/media/arxwn/data0_4tb/datasets/urban100/Urban100_HR"]'
+```
+
+`bfcnn`, `bfunet` and `convunext_biased` ran that command line; `bfconvunext` and `scunet` ran the same request through the command
+line's trainer class (`ImageDenoisingTrainer`) in a process the kill stage could signal.
+
+The bar was written before the first run (D-032): every one of the 5 families x 4 sets x 3 levels = 60 cells, for the best and for
+the final model (120 comparisons), must beat its own noisy input strictly, with no averaging and no tolerance. **All 120 passed**
+(`best_model.keras` is the final model in every run: `final_is_best` true), and so did the ten-run smoke of 5 epochs (the five
+families, `bfconvunext` under multiplicative and composite noise, `bfunet` with `data.noise_clip=true`, `bfunet` and `bfcnn` under
+`mixed_float16`). The families, the bar's worst cell and the cost (parameters by `count_params()`, FLOPs by the TensorFlow v1
+profiler on a frozen graph, the method of `research/papers/bfunet/measure_efficiency.py`, the 256 px to 64 px ratio 16.00 in every
+row):
+
+| Family | Params | GFLOPs at 64 px | GFLOPs at 256 px | Validation gain over the noisy input (dB) | `kodak24` at `sigma_255` 25, input to final (dB) | Worst cell of the 12, gain (dB) |
+|---|---|---|---|---|---|---|
+| `bfcnn/tiny` | 39,616 | 0.324 | 5.180 | +8.19 | 20.17 to 29.86 | `urban100` 15, +4.70 |
+| `bfunet/tiny` | 1,020,528 | 0.752 | 12.035 | +6.37 | 20.17 to 28.57 | `urban100` 15, +1.92 |
+| `bfconvunext/tiny` | 1,930,176 | 1.229 | 19.666 | +10.09 | 20.17 to 29.33 | `urban100` 15, +3.73 |
+| `convunext_biased/tiny` | 1,941,315 | 1.215 | 19.446 | +10.05 | 20.17 to 29.94 | `urban100` 15, +5.65 |
+| `scunet/tiny` | 1,388,246 | 0.755 | 12.083 | +7.92 | 20.17 to 29.55 | `urban100` 15, +3.85 |
+
+Read it as "every family learns to beat its input on every set and level of this recipe", not as a ranking: 7,200 steps is a
+short recipe, the bar is low by construction (D-032 says so), the validation input is 21.47 dB, and nothing here was tuned. The
+bias-free runs report `homogeneity.status` `passed`. The kill stage ran for `bfconvunext/tiny` and `scunet/tiny`: a SIGKILL inside the
+selection window (epoch index 20, 150 of 300 batches), a resume of the same request, unique and contiguous CSV rows, sigma by
+absolute epoch, and the restored `val_psnr` equal to the last finished epoch's row (difference 0 dB and 3.8e-6 dB). Predict at the
+images' own sizes (24 Kodak and 68 CBSD68 images, all the sizes right), export and the provenance loads were run on both. The
+smoke found that five epochs are not enough for `bfunet` to beat its input (-1.7 dB, in float32, float16 and with clipped noise), and
+that a 5-epoch multiplicative run reads -1.0 dB against an input of 30.4 dB; neither is held to the bar.
+
+**Parity with the legacy trainer: a MISS at 3 of 7 gated scalars** (plan d483ffab step 15, rule D-007, with the user's ruling D-036
+that the gate runs as written). The two arms: the legacy `train.bfunet.train_convunext_denoiser` (`tiny`, v1, batchnorm; seeds 42,
+43, 44 and 42 again) and `python -m train image_denoising model=bfconvunext/tiny` (seeds 42, 43, 44), the same network (1,930,176
+parameters; the layers are equal one by one, and the API model adds one weight-free float32 cast layer at its output), 30 epochs of 100 steps from 400 files, 4 crops each, batch 16, 64 px, 50 validation files, on
+GPU 0:
+
+    python -m train.bfunet.train_convunext_denoiser --variant tiny --convnext-version v1 --block-normalization batchnorm \
+        --patch-size 64 --epochs 30 --steps-per-epoch 100 --validation-steps 20 --max-train-files 400 --max-val-files 50 \
+        --batch-size 16 --patches-per-image 4 --viz-freq 10 --seed 42 --experiment-name p4c_s15_legacy_s42 --output-dir results
+
+```bash
+python -m train image_denoising out=results/p4c_s15_api_s42 model=bfconvunext/tiny epochs=30 batch_size=16 seed=42 \
+    transform_args.patch_size=64 transform_args.patches_per_image=4 data.max_train_files=400 data.max_val_files=50 \
+    'data.train_dirs=["/media/arxwn/data0_4tb/datasets/coco_2017/train2017","/media/arxwn/data0_4tb/datasets/div2k/train"]' \
+    'data.val_dirs=["/media/arxwn/data0_4tb/datasets/div2k/validation"]' \
+    data.noise_clip=true data.curriculum_epochs=30 data.noise_sigma_min=0
+```
+
+The API arm sets three keys on purpose (`data.noise_clip=true`, `data.curriculum_epochs=30`, `data.noise_sigma_min=0`) so that it
+trains the legacy recipe. The rule: `T = max(range of the three legacy seeds, |L42 - L42 repeat|)` per scalar, written before the
+first API run; a scalar passes when `|mean(API) - mean(legacy)| <= T`. The gated scalars are the last `val_psnr` and the final
+models' whole-image PSNR on `kodak24` and `cbsd68` at `sigma_255` 15, 25 and 50, all seven models scored by one paired invocation:
+
+    python -m train.bfunet.eval_psnr_vs_noise --model legacy_s42=<run>/final_model.keras --model api_s42=<run>/final_model.keras \
+        --dataset kodak24=/media/arxwn/data0_4tb/datasets/kodak24 --dataset cbsd68=/media/arxwn/data0_4tb/datasets/CBSD68/original \
+        --sigmas-255 15 25 50 --num-samples 100 --seed 42 --full-image --output-dir results --experiment-name p4c_s15_eval_all
+
+(one `--model` per final model, seven in all; the noisy input is clipped, no `--no-clip`, because both arms trained on clipped noise.)
+
+| Scalar (dB) | Legacy mean | API mean | API minus legacy | T | Verdict |
+|---|---|---|---|---|---|
+| last `val_psnr` | 29.549 | 29.858 | +0.309 | 0.234 | MISS |
+| `kodak24` at 15 | 27.466 | 28.822 | +1.356 | 1.162 | MISS |
+| `kodak24` at 25 | 24.573 | 26.272 | +1.699 | 2.474 | PASS |
+| `kodak24` at 50 | 17.028 | 19.152 | +2.124 | 4.315 | PASS |
+| `cbsd68` at 15 | 27.398 | 28.396 | +0.998 | 0.907 | MISS |
+| `cbsd68` at 25 | 24.940 | 26.161 | +1.221 | 1.653 | PASS |
+| `cbsd68` at 50 | 18.229 | 20.010 | +1.781 | 3.621 | PASS |
+
+**This is the plan's verdict: not a pass.** The API arm is above the legacy mean on all seven scalars, and three miss their T. Read
+the four passes as weak: six of the seven T exceed 0.5 dB (0.9 to 4.3 dB), because the legacy models themselves differ by that much
+on whole images between seeds (the final models of seeds 42, 43 and 44 score 19.0, 14.7 and 17.4 dB on `kodak24` at 50), so a port
+difference below a few dB cannot be seen there; only the last `val_psnr` (T 0.234) discriminates at a useful level, and it is one of
+the three misses. The runs were not repeated and no recipe was tuned. The arms are NOT the same pipeline, and nothing separates a
+pipeline effect from a defect: (1) a stateful endless stream against a finite stateless epoch (which crops of which file are seen, and
+when); (2) the legacy dihedral augmentation against the API's flip, which the arm did not override; (3) the validation file set, which
+is the legacy's 50 files that depend on the seed (24 to 29 of them are shared with the API's fixed set) against the API's one fixed set, and 320
+against 200 patches, so `val_psnr` levels differ between arms by something that is not the weights; (4) the initial weights.
+Supplementary and NOT gated (they do not change the verdict): the same invocation in patch mode (`--patch-size 64`, 100 crops per
+set, no `--full-image`) gives a T of at most 0.40 dB on all six cells and the API arm within it on all six (differences from -0.064
+to +0.292 dB); and three legacy models score 29.97, 29.76 and 29.63 dB on 6 Kodak images at `sigma_255` 25 when applied to 64-px tiles, against
+26.98, 27.80 and 25.35 dB on the same noisy images whole, so the 64-px-trained models are not consistent between tiles and whole
+images: a hypothesis for the spread of the whole-image cells, not a finding.
+
+**Limits of the task, as found.**
+* The numeric homogeneity probe is skipped under half precision (the tolerance is a float32 number), so a trained offset in a
+  `mixed_float16` bias-free run is caught by the static scan only, and `homogeneity.status` says `passed_static_only`.
+* A `.keras` file copied away from its `config.json` is refused by the provenance gate and by the readers that use it (the gate
+  reads the file beside the model). A `val_image_dirs` stamp written as a relative path stays relative, and the reader is run from
+  its own working directory.
+* `eval_per_pixel_uncertainty` clips its noise always, so on a run trained with `data.noise_clip=false` its numbers describe clipped
+  noise, not the run's. The task's own held-out noise is not byte-equal to `eval_psnr_vs_noise`'s either: stateless per-image
+  seeds against a sequential `RandomState` agree in distribution, not in value.
+* The command line has no `tile` key (above); `tile` and `tile_overlap` are keyword arguments of `DenoisingPredictor.predict`.
+* A fixed-shape `tflite` file of a U-Net family is wrong at another size, and the SCUNet onnx with a free size works only at
+  multiples of 64: both are refused (the export table).
+* `convunext_biased` and `scunet` have no legacy `--init-from` target, and `DenoiserPrior` `dynamic` is `bfconvunext` only. On an API
+  model `fixed256` is a plain load, not locked to 256.
+* Multiplicative and composite noise have a variance test and a smoke, and no parity evidence: `eval_psnr_vs_noise` is additive only.
+* SCUNet's `tiny` and `small` variants and its recipe are this API's and untuned; the gate shows that `scunet/tiny` trains past its
+  input, not how good it is. No denoising number here is a benchmark.
+* Three help lines were written for the other tasks and say nothing about this one: `optim_args.warmup_epochs` does not say that auto
+  follows the epochs here (above), `analysis_args.conformal_alpha` names only segmentation as refusing a level (denoising refuses
+  it too), and `analysis_args.eval_batch_size` describes the splits of the other tasks (the validation split is batched at `batch_size`).
+
 **Keys**: `key=value` tokens; a dot reaches a group (`optim_args.lr=3e-4`, `data.dataset=cifar10`);
 `config=run.yaml` loads a file first and the command line wins over it. A value is read by
 the field's type (`true`/`false`, `3e-4`, `null`, JSON for a list or mapping; a string is verbatim). A list is JSON with every text
@@ -292,7 +583,7 @@ problems and a "did you mean". `auto` asks for the family's recipe default.
 images per class, optional `data.test_dir`) or `csv` (`data.train_csv`, columns `path` and `label`).
 **A data file and dotted keys are two layers of one group** (plan 98b866fb 7.1, D-021): `data=<file>` is the path of a YAML
 file holding the group, and `data.<key>=` tokens put over it, key by key, so a capped or tweaked run needs no copy of the file.
-The same rule holds for both tasks and for the `data: <file>` of a `config=` file; the lowest layer is the `config=` file, then
+The same rule holds for all three tasks and for the `data: <file>` of a `config=` file; the lowest layer is the `config=` file, then
 the group's file, then the dotted keys, and the file's `format` reads dotted keys that state none (`data.path_column=` after a
 csv file); a `data.format=` that differs from the file's is refused naming both formats (give a file of that format, or every key on the command line with no file). A key given twice on the command line, a file twice, or a file together with a JSON object for the group is still
 refused as a repeated key. `config.json` records the resolved values, as for every key, and not which layer a value came from.
@@ -411,7 +702,8 @@ is the required end-of-run sequence that calls them. `src/train/AGENTS.md` has t
 
 **Predict**: `python -m train predict model=<run dir or .keras> data=<image or directory> out=pred.json`
 writes a new JSON list of `{"path", "labels", "scores"}`, every class best first. A directory is
-searched recursively. `out` must not exist. **On ImageNet the `labels` are WordNet ids** such as `n01806143`, not
+searched recursively. `out` must not exist. A segmentation run and a denoising run write a new directory of PNG
+files and an `index.json` instead (the segmentation paragraph below and `image_denoising` above). **On ImageNet the `labels` are WordNet ids** such as `n01806143`, not
 words, and so are the `class_names` of `task.json`. The loader sorts the 1,000 ids and takes the position as the class
 index; the devkit's `meta.mat` maps an id to its words:
 
@@ -477,7 +769,8 @@ told apart, and neither are two runs of one family and variant with the same cla
 **`task.json` is schema version 2** (D-073, `train.api.predictor`): a classification record has the keys and the order
 of version 1 and only `schema_version` changed; a segmentation record has `input_size` as `[height, width]` (not
 necessarily square), `channels`, `ignore_index`, `mask_threshold` and `output` where a classification record has
-`input_shape` and `eval_transform`. A record of version 1 is refused, in one sentence that names the file and says the
+`input_shape` and `eval_transform`; a denoising record has `channels`, `size_multiple`, `data_range` and `output` and no class names,
+statistics or input size (see `image_denoising`). A record of version 1 is refused, in one sentence that names the file and says the
 run has to be trained again, by `predict`, by `export` and by `resume_interrupted=true` (the last before the data is
 loaded). There is no converter and no reader: a run directory made before this change cannot be predicted from, exported
 or resumed (its files are not touched, and `best_model.keras` still loads in Keras).
@@ -888,4 +1181,4 @@ attributable by that plan's rule), so these means are not comparable with any ru
 every fix commit, final weights included); `cliffordnet/nano` on Imagenette is not on the policy of the AutoAugment fix either (the
 Imagenette recipe uses no augmentation preset) and the `StochasticDepth` fix leaves a `fit` exactly unchanged. The Pet pair replaces the
 parent plan's PASS for `convunext`, which was a verdict on the old ConvNeXt V2 block. The segmentation families other than `convunext`,
-the other classification families, and the shipped `cliffordnet` recipe on Imagenette have no parity run.
+the other classification families, and the shipped `cliffordnet` recipe on Imagenette have no parity run. The denoising families other than `bfconvunext/tiny` have none either, and that one is a MISS at 3 of 7 gated scalars (the `image_denoising` section above).

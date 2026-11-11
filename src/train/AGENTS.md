@@ -531,9 +531,9 @@ an exemption to green a newly dead field.
 
 `src/train/api/` is a key=value command line and a Python function over strict configs, beside the
 per-model scripts (usage, keys, run directory, resume, `predict`, `export`, exit codes:
-[`README.md`](README.md)). It has one task, `image_classification`, trained by
-`api/trainer.py:TaskTrainer`, which calls the same `train.common.classification_run` helpers as
-`train.convnext.common` in the same order.
+[`README.md`](README.md)). It has three tasks, `image_classification`, `image_segmentation` and `image_denoising`, each
+a `TaskTrainer` subclass in `api/tasks/` (`api/trainer.py:TaskTrainer` holds the hooks and the shared sequence). The
+classification task calls the same `train.common.classification_run` helpers as `train.convnext.common` in the same order.
 
 - **Where the sequence lives** (D-070): `api/trainer.py:TaskTrainer` is the hooks, `run` (resolve, claim, lock,
   device) and the summary pieces; `api/run_sequence.py` is the sequence once the directory is claimed (`execute` and
@@ -559,17 +559,56 @@ per-model scripts (usage, keys, run directory, resume, `predict`, `export`, exit
   segmentation `image_size` must be; `api/segmentation_models.py` holds the adapters (`convunext`, `accunet`, and the
   backbone families `resnet_seg` and `convnext_seg`: the classifier's factory with `include_top=False` plus one
   single-map `SegmentationHead`, D-012 of plan 98b866fb), `check_image_size`, the recipes (`CONVUNEXT`, `ACCUNET`,
-  `RESNET_SEG`, `CONVNEXT_SEG`) and the specs. `recipes.register_builtin_models` registers the six classifiers and the
-  four segmentation families (D-077; step 23 held them back until a task and a recipe existed), so a guard that walks
-  `registry.MODELS` meets ten families and reads `ModelSpec.tasks` to tell them apart. The backbone families read the
+  `RESNET_SEG`, `CONVNEXT_SEG`) and the specs. `recipes.register_builtin_models` registers the six classifiers, the
+  four segmentation families (D-077; step 23 held them back until a task and a recipe existed) and the five denoising
+  families (`api/denoising_models.py:builtin_denoising_models`), so a guard that walks
+  `registry.MODELS` meets fifteen families and reads `ModelSpec.tasks` to tell them apart. The backbone families read the
   classifiers' own variants tables and are checked by `ModelSpec.observe` (a family with an `observe` is checked by its
   layers even when its table lives on a class), and the adapter passes EVERY setting of `SegmentationHead` (its defaults
   changed once with another session's commits; a test fails when the head gains a knob).
 - **`task.json` is schema version 2 and per task** (D-073): `predictor.RECORD_KEYS[task]` and `DATA_KEYS[task]`; a
   classification record equals a version 1 record but for `schema_version`; a segmentation record has `input_size`,
-  `ignore_index`, `mask_threshold`, `output` and no `input_shape`. A new task is a new row of both tables and a
+  `ignore_index`, `mask_threshold`, `output` and no `input_shape`; a denoising record has `channels`, `size_multiple`,
+  `data_range` and `output`, and no class, statistic or input size. A new task is a new row of both tables and a
   builder, not a null in the old record. Version 1 has no reader: `older_record_reason` is the one sentence, said by
   `check_record` (predict, export), `refuse_old_record` (`resume_decisions.resume_point`, first) and `export`.
+- **The `image_denoising` task** (plan d483ffab): `api/tasks/image_denoising.py:ImageDenoisingTrainer` supplies hooks and no
+  stage. Its groups (`DenoisingData`, `DenoiseTransformArgs`, `DenoiseMetricArgs`, `DenoiseLossArgs`, `DenoiseOptimArgs`) are in
+  `api/denoising_args.py` (they cannot live in `api/args.py`, whose seven groups `tests/test_train/test_api/_groups.py` pins); the
+  five families, their per-family refusal tables (`REFUSED`, `FORCED`, `ALLOWED`, held equal to the factories' signatures by
+  `signature_census`), recipes and `compile_options_for` are in `api/denoising_models.py`; `DenoisingPredictor` and the export
+  refusals (`EXPORT_REFUSALS`) are in `api/denoising_predictor.py`. The data pipeline, the held-out and metric pieces and the
+  homogeneity instrument are `train/common/denoising_data.py`, `denoising_run.py` and `denoising_homogeneity.py`; they import
+  TensorFlow, so `train.api` imports them inside functions only. `denoising_run` owns `expected_input_psnr`,
+  `expected_noise_variance`, `add_awgn` and `psnr_per_image`, which `bfunet/common.py` and `eval_psnr_vs_noise.py` import
+  (one implementation). Decisions with anchors: the stateless noise kinds (D-008), `data.noise_clip` false (D-009), the
+  selection window (D-013), the homogeneity rules (D-015), the stamps (D-011). The user-facing description, with the measured
+  gate and parity numbers, is in [`README.md`](README.md).
+- **Three seams of the shared sequence, and two fields of `Evaluation`** (D-004 for the two fields, D-011 for the stamps, D-012 for the compile options, D-013 for the selection start). Each is a no-op by
+  default, so the other two tasks run the code they ran before (`test_the_sequence_seams_default_to_nothing.py` proves the default
+  of each and a positive arm for an override; the three goldens of the plan compared EXACT after every shared edit):
+  `TaskTrainer.selection_start_epoch(config)` is the 0-based epoch from which the checkpoint saves and `EarlyStopping` counts
+  (read once by `fit_callbacks.build_callbacks`; `run_summary.best_epoch` takes it as `first_epoch`, or the summary would name a
+  best epoch no file holds); `TaskTrainer.compile_options(config, spec)` is spread into the ONE `compile` call of
+  `run_sequence`, and may not name `optimizer`, `loss` or `metrics`; `TaskTrainer.config_stamps(config, spec)` returns top-level
+  keys for `config.json`, called by a fresh run only, and `run_dir.write_resolved` refuses a key the file already holds.
+  `Evaluation.extras` is merged into `results_summary.json` after every other key and a key already present raises `ConfigError`;
+  `Evaluation.failed_checks`, when non-empty, makes `success` false, writes `success_blocked_by` and exits 1 with the training
+  kept (a hook for post-fit summary keys was rejected: it would read state the task stashed on `self`). `ModelSpec.properties` is
+  a tuple of distinct names from `registry.KNOWN_PROPERTIES` (only `"bias_free"`): a promise a task reads and verifies, and
+  nothing in the shared sequence switches on it. `DataFacts.num_classes` and `AutoContext.num_classes` are `Optional[int]` (`None`
+  means no classes; do not pass a stand-in), and `AutoContext.epochs` carries the epochs the run will train (nothing but the
+  denoising groups reads it).
+- **Per-task tables, not `if task ==` branches** (D-006). `train.api.predictor` holds one table per concern, each keyed by the task
+  word: `RECORD_KEYS`, `DATA_KEYS`, `GEOMETRY_CHECKS`, `TAIL_CHECKS`, `INPUT_SHAPE_OF`, `INPUT_KEY`, `OUTPUT_CHECKS`,
+  `PREDICTORS` and `EXPORT_RULES` (an `ExportRule(shape_of, check, note)`: the shape `export` traces, the cells it refuses, the
+  sentence it logs), collected in `TASK_TABLES`; `train.api.cli.PREDICT_WRITERS` is the table of what `predict` writes. A task
+  is known to the reader only when it has a row in EVERY table of `TASK_TABLES` (`record_problems` refuses another, naming the tasks
+  of the first table it is missing from), and the identity (`class_names`) and statistics (`normalize`, `mean`, `std`) checks run
+  only for a task whose `RECORD_KEYS` hold those keys. A fourth task is one row in each table plus one in `PREDICT_WRITERS`;
+  `test_a_third_task_record_dispatches_by_table.py` walks `TASK_TABLES` with a fake task. Do not add an `elif task ==` to
+  `load_model`, `input_shape_of`, `_run_on_zeros` or the predict command. The help text of `cli.PREDICT_OPTIONS` and
+  `cli.EXPORT_NOTES` names every task's output; `test_export_per_family.py` pins phrases of it.
 - **The help path imports no TensorFlow, Keras or yaml and stays under 1 s**:
   `tests/test_train/test_api/test_cli_help_allocates_nothing.py`. Heavy imports go inside functions.
   A request that can be refused without loading data is refused before `setup_gpu` and before the
@@ -641,5 +680,10 @@ The default `run_analysis` passes the run's `seed` as the analyzer's `random_sta
   `src/train/README.md`). It is not measured for the shipped `cliffordnet` recipe (batch 8 at 224 px, lr 1e-3 unscaled).** Do not
   claim it for another family or recipe without a run. A parity number made before the fixes of that plan (the layer scale, the
   GRN, the AutoAugment table) is a number of the old legacy trainer.
+- **Parity for `image_denoising` is a MISS, not a pass** (plan d483ffab step 15, rule D-007 with the user's ruling D-036):
+  `bfconvunext/tiny` against `train.bfunet.train_convunext_denoiser`, 30 epochs, 3 API seeds against 3 legacy seeds, passes 4 of 7
+  gated scalars and misses the last `val_psnr`, `kodak24` at `sigma_255` 15 and `cbsd68` at 15 (the API arm is above legacy on all
+  seven). Six of the seven T exceed 0.5 dB, so the four passes have little power. The table, the known pipeline differences and
+  the supplementary patch-mode result are in `src/train/README.md`; do not cite this task as parity-checked.
 - Tests: `tests/test_train/test_api/`. Scope pytest to that directory; the whole of it takes a long
   time (the export-per-family file alone is minutes).

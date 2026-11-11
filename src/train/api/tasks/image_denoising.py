@@ -667,8 +667,8 @@ class ImageDenoisingTrainer(TaskTrainer):
             "`test_metrics_best` and `test_metrics_final` are null: the data has no test split; the best_model.keras "
             "reload check ran on the validation patches (`best_checkpoint_max_abs_diff`); the held-out images are "
             "scored separately (see `held_out`)",
-            "`task.json` and the `config.json` stamps for the pre-API eval scripts are written; the denoising predictor "
-            "is not part of this version yet, so `predict` and `export` refuse this run",
+            "`task.json` and the `config.json` stamps for the pre-API eval scripts are written, so `predict`, `export` "
+            "and those scripts can read this run",
         ]
         if data_cfg.test_dirs:
             notes.append(
