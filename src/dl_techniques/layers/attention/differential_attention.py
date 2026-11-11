@@ -51,11 +51,11 @@ from typing import Any, Dict, Optional, Tuple, Union
 from dl_techniques.utils.logger import logger
 from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.activations import ProbabilityOutput
-from dl_techniques.layers.norms import create_normalization_layer
 
 from .common import (
     apply_attention_mask,
     compute_attention_scale,
+    create_qk_norms,
     dtype_name,
     merge_heads,
     split_heads,
@@ -521,25 +521,12 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
 
             # Optional per-stream QK-norm. Each stream gets its own pair of
             # Q/K normalization layers so the streams stay independent.
-            if self.qk_norm_type is not None:
-                _qk_kwargs = self.qk_norm_kwargs or {}
-                self.q_norm_1 = create_normalization_layer(
-                    self.qk_norm_type, name="q_norm_1", **_qk_kwargs
-                )
-                self.k_norm_1 = create_normalization_layer(
-                    self.qk_norm_type, name="k_norm_1", **_qk_kwargs
-                )
-                self.q_norm_2 = create_normalization_layer(
-                    self.qk_norm_type, name="q_norm_2", **_qk_kwargs
-                )
-                self.k_norm_2 = create_normalization_layer(
-                    self.qk_norm_type, name="k_norm_2", **_qk_kwargs
-                )
-            else:
-                self.q_norm_1 = None
-                self.k_norm_1 = None
-                self.q_norm_2 = None
-                self.k_norm_2 = None
+            self.q_norm_1, self.k_norm_1 = create_qk_norms(
+                self.qk_norm_type, self.qk_norm_kwargs, "_1"
+            )
+            self.q_norm_2, self.k_norm_2 = create_qk_norms(
+                self.qk_norm_type, self.qk_norm_kwargs, "_2"
+            )
 
         except Exception as e:
             logger.error(f"Failed to create DifferentialMultiHeadAttention sub-layers: {e}")

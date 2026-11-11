@@ -40,14 +40,14 @@ from typing import Optional, Union, Any, Dict, Tuple
 from dl_techniques.utils.logger import logger
 from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.activations import ProbabilityOutput
-from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding.rotary_position_embedding import RotaryPositionEmbedding
 
 from .common import (
-    apply_attention_mask, 
-    compute_attention_scale, 
+    apply_attention_mask,
+    compute_attention_scale,
+    create_qk_norms,
     dtype_name,
-    validate_head_divisibility
+    validate_head_divisibility,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -415,16 +415,9 @@ class GroupedQueryAttention(keras.layers.Layer):
         )
 
         # Optional QK normalization layers
-        if self.qk_norm_type is not None:
-            self.q_norm = create_normalization_layer(
-                self.qk_norm_type, name="q_norm", **(self.qk_norm_kwargs or {})
-            )
-            self.k_norm = create_normalization_layer(
-                self.qk_norm_type, name="k_norm", **(self.qk_norm_kwargs or {})
-            )
-        else:
-            self.q_norm = None
-            self.k_norm = None
+        self.q_norm, self.k_norm = create_qk_norms(
+            self.qk_norm_type, self.qk_norm_kwargs
+        )
 
         logger.info(f"GroupedQueryAttention initialized: dim={dim}, "
                    f"num_heads={num_heads}, num_kv_heads={num_kv_heads}, groups={self.num_groups}")

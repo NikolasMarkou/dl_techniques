@@ -36,7 +36,7 @@ from typing import Optional, Dict, Any, Tuple, Union, List
 from dl_techniques.utils.logger import logger
 from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.activations import ProbabilityOutput
-from dl_techniques.layers.norms import create_normalization_layer
+from .common import create_qk_norms
 from dl_techniques.utils.masking import MaskFactory
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -500,17 +500,7 @@ class LighthouseAttention(keras.layers.Layer):
 
         # QK-norm is opt-in and is applied only to the tensors that enter the
         # pyramid, never to the tensors the scorer reads (DECISION D-004(a)).
-        if qk_norm_type is not None:
-            norm_kwargs = dict(qk_norm_kwargs or {})
-            self.q_norm = create_normalization_layer(
-                qk_norm_type, name="q_norm", **norm_kwargs
-            )
-            self.k_norm = create_normalization_layer(
-                qk_norm_type, name="k_norm", **norm_kwargs
-            )
-        else:
-            self.q_norm = None
-            self.k_norm = None
+        self.q_norm, self.k_norm = create_qk_norms(qk_norm_type, qk_norm_kwargs)
 
         self.attn_prob = ProbabilityOutput(
             probability_type=self.probability_type,

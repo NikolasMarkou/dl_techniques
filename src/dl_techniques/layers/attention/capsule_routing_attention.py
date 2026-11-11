@@ -33,12 +33,12 @@ from keras import ops, layers, initializers, regularizers
 # ---------------------------------------------------------------------
 
 from dl_techniques.initializers.clone import clone_initializer
-from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.activations.probability_output import ProbabilityOutput
 
 from .common import (
     apply_attention_mask,
     compute_attention_scale,
+    create_qk_norms,
     dtype_name,
     merge_heads,
     split_heads,
@@ -513,17 +513,10 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
 
         # Optional QK normalization layers applied to per-head Q and K
         # tensors of shape (batch, num_heads, seq_len, key_dim).
-        if self.qk_norm_type is not None:
-            self.q_norm = create_normalization_layer(
-                self.qk_norm_type,
-                name="q_norm",
-                **(self.qk_norm_kwargs or {}),
-            )
-            self.k_norm = create_normalization_layer(
-                self.qk_norm_type,
-                name="k_norm",
-                **(self.qk_norm_kwargs or {}),
-            )
+        self.q_norm, self.k_norm = create_qk_norms(
+            self.qk_norm_type, self.qk_norm_kwargs
+        )
+        if self.q_norm is not None:
             qk_norm_shape = (batch_size, self.num_heads, seq_len, self.actual_key_dim)
             self.q_norm.build(qk_norm_shape)
             self.k_norm.build(qk_norm_shape)

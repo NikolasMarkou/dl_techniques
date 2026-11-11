@@ -38,7 +38,7 @@ from dl_techniques.utils.activation_serialization import (
     deserialize_activation,
 )
 
-from .common import compute_attention_scale, mask_dtype
+from .common import compute_attention_scale, create_qk_norms, mask_dtype
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 # ---------------------------------------------------------------------
@@ -350,20 +350,9 @@ class NonLocalAttention(keras.layers.Layer):
         )
 
         # Optional QK-normalization layers
-        if self.qk_norm_type is not None:
-            self.q_norm = create_normalization_layer(
-                self.qk_norm_type,
-                name='q_norm',
-                **(self.qk_norm_kwargs or {}),
-            )
-            self.k_norm = create_normalization_layer(
-                self.qk_norm_type,
-                name='k_norm',
-                **(self.qk_norm_kwargs or {}),
-            )
-        else:
-            self.q_norm = None
-            self.k_norm = None
+        self.q_norm, self.k_norm = create_qk_norms(
+            self.qk_norm_type, self.qk_norm_kwargs
+        )
 
         # Attention dropout (applied to attention probabilities)
         if self.dropout_rate > 0:

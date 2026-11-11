@@ -24,11 +24,10 @@ from typing import Any, Dict, Optional, Tuple, Union
 # local imports
 # ---------------------------------------------------------------------
 
-from .common import apply_attention_mask, dtype_name
+from .common import apply_attention_mask, create_qk_norms, dtype_name
 from dl_techniques.initializers import clone_initializer
 from ..ffn.kan_linear import KANLinear
 from ..activations import ProbabilityOutput
-from ..norms.factory import create_normalization_layer
 from dl_techniques.initializers.kan_initializer import (
     create_kan_initializers,
     VALID_KAN_SCHEMES,
@@ -418,20 +417,9 @@ class SingleWindowAttention(keras.layers.Layer):
             name="attn_prob",
         )
 
-        if self.qk_norm_type is not None:
-            self.q_norm = create_normalization_layer(
-                self.qk_norm_type,
-                name="q_norm",
-                **(self.qk_norm_kwargs or {}),
-            )
-            self.k_norm = create_normalization_layer(
-                self.qk_norm_type,
-                name="k_norm",
-                **(self.qk_norm_kwargs or {}),
-            )
-        else:
-            self.q_norm = None
-            self.k_norm = None
+        self.q_norm, self.k_norm = create_qk_norms(
+            self.qk_norm_type, self.qk_norm_kwargs
+        )
 
         # DECISION plan-2026-08-25T053412-0f1fa04f/D-006: the relative-position
         # index is built lazily and cached, not in __init__ -- building it eagerly took construction peak RSS at window_size=128 from 0.62 GB to 5.64 GB. See decisions.md.

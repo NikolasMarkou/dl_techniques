@@ -35,12 +35,12 @@ from typing import Optional, Any, Dict, Tuple, Union, List
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.activations import ProbabilityOutput
-from dl_techniques.layers.norms import create_normalization_layer
 from .common import (
     apply_attention_mask,
     compute_attention_scale,
+    create_qk_norms,
     dtype_name,
-    validate_head_divisibility
+    validate_head_divisibility,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -425,20 +425,9 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             name="attn_prob",
         )
 
-        if self.qk_norm_type is not None:
-            self.q_norm = create_normalization_layer(
-                self.qk_norm_type,
-                name="q_norm",
-                **(self.qk_norm_kwargs or {}),
-            )
-            self.k_norm = create_normalization_layer(
-                self.qk_norm_type,
-                name="k_norm",
-                **(self.qk_norm_kwargs or {}),
-            )
-        else:
-            self.q_norm = None
-            self.k_norm = None
+        self.q_norm, self.k_norm = create_qk_norms(
+            self.qk_norm_type, self.qk_norm_kwargs
+        )
 
     def build(
             self,

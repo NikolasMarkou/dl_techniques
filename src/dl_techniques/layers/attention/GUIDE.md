@@ -167,7 +167,7 @@ self.norm = create_normalization_layer('layer_norm', axis=-1)
 
 `dl_techniques/layers/attention/common.py` is this package's single home for the small,
 provably-identical primitives that were previously re-derived across a dozen modules. It is
-deliberately **flat**: eight module-level names, **no classes, no registry, no Keras
+deliberately **flat**: nine module-level names, **no classes, no registry, no Keras
 registration**. Import from it the way you would import `math`.
 
 ```python
@@ -180,6 +180,7 @@ from .common import (
     dtype_name,
     split_heads,
     merge_heads,
+    create_qk_norms,
 )
 ```
 
@@ -242,6 +243,23 @@ width off the tensor, so a value tensor with its own width needs no extra argume
     `actual_value_dim`). `kimi_delta_attention.py` interleaves casts, L2 norms and softplus with the
     reshape and transposes tensors of other ranks, and `area_attention.py` uses a 5D layout, so
     neither adopts. The other modules that hand-roll the same split were not converted.
+
+#### `create_qk_norms(qk_norm_type, qk_norm_kwargs, suffix="") -> (q_norm, k_norm)`
+
+Builds the optional query/key norm pair: `(None, None)` when `qk_norm_type is None`, otherwise two
+distinct unbuilt layers from `create_normalization_layer`, query first, named `q_norm{suffix}` and
+`k_norm{suffix}` (weight paths, so passed through verbatim). Assign it as one statement,
+`self.q_norm, self.k_norm = create_qk_norms(...)`, so Keras tracks q before k.
+
+*   **Adopters (12 files, 13 pairs):** `area`, `capsule_routing` (inside `build()`), `differential`
+    (two pairs, suffixes `_1` and `_2`), `group_query`, `hopfield`, `lighthouse`, `multi_head_cross`,
+    `non_local`, `ring`, `rpc`, `shared_weights_cross`, `single_window`. Outputs, weight paths and
+    order, and seeded values are equal at `atol=0` to the spelled-out blocks they replaced.
+*   **Do NOT adopt where the norms are unconditional.** `gated_attention.py` defaults `qk_norm_type`
+    to a string and has no "off" state; through the helper a `None` type would silently build a layer
+    without QK-norm instead of raising the factory's error. `multi_head_latent_attention.py` creates a
+    lone `q_norm` inside its `q_latent_dim` branch (no K partner) and `kv_norm`; neither is a pair.
+    `test_common.py::TestCreateQkNorms` walks the package for a re-spelled pair.
 
 #### `validate_head_divisibility(dim, num_heads, *, dim_name=..., num_heads_name=...)`
 

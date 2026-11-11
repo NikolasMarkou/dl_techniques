@@ -2,8 +2,8 @@
 Shared primitives for the ``layers/attention`` package: the attention-mask
 bias constant and its dtype rule, ``apply_attention_mask`` (the fp16-safe way
 to apply that bias), ``validate_head_divisibility``,
-``compute_attention_scale``, ``dtype_name``, and the head layout pair
-``split_heads`` / ``merge_heads``.
+``compute_attention_scale``, ``dtype_name``, the head layout pair
+``split_heads`` / ``merge_heads``, and ``create_qk_norms``.
 
 Masking is a pair: ``MASK_BIAS_VALUE`` is only safe inside the dtype
 ``mask_dtype()`` returns, since ``np.float16(-1e9)`` is ``-inf`` and
@@ -53,7 +53,7 @@ References:
 """
 
 import math
-from typing import Any, Optional, Sequence, Union
+from typing import Any, Dict, Optional, Sequence, Tuple, Union
 
 import keras
 
@@ -61,6 +61,7 @@ import keras
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.layers.norms.factory import create_normalization_layer
 from dl_techniques.utils.dtype_policy import mask_sentinel
 
 # ---------------------------------------------------------------------
@@ -466,3 +467,58 @@ def merge_heads(x: keras.KerasTensor) -> keras.KerasTensor:
     x = keras.ops.transpose(x, (0, 2, 1, 3))
     shape = keras.ops.shape(x)
     return keras.ops.reshape(x, (-1, shape[1], shape[2] * shape[3]))
+
+
+# ---------------------------------------------------------------------
+
+
+def create_qk_norms(
+        qk_norm_type: Optional[str],
+        qk_norm_kwargs: Optional[Dict[str, Any]],
+        suffix: str = "",
+) -> Tuple[Optional[keras.layers.Layer], Optional[keras.layers.Layer]]:
+    """Create the optional query / key normalization pair of an attention layer.
+
+    The conditional pair: ``qk_norm_type=None`` means "no QK-norm" and returns
+    ``(None, None)``; anything else builds two separate, unbuilt instances through
+    :func:`~dl_techniques.layers.norms.factory.create_normalization_layer`, the query
+    norm first. Assign the result as one statement so Keras tracks q before k::
+
+        self.q_norm, self.k_norm = create_qk_norms(qk_norm_type, qk_norm_kwargs)
+
+    A layer holding two streams calls it twice with a ``suffix`` (``"_1"``,
+    ``"_2"``). The names are ``q_norm{suffix}`` and ``k_norm{suffix}``, passed
+    through verbatim: they are weight paths, so a rename breaks saved archives.
+
+    Do not use it where the norms are created unconditionally (``GatedAttention``
+    defaults ``qk_norm_type`` to a string and has no "off" state): there a ``None``
+    type must keep raising the factory's error, and through this helper it would
+    silently build a layer without QK-norm.
+
+    :param qk_norm_type: Normalization key understood by the factory
+        (``'rms_norm'``, ``'layer_norm'``, ...), or ``None`` for no QK-norm.
+    :type qk_norm_type: Optional[str]
+    :param qk_norm_kwargs: Keyword arguments forwarded to the factory for BOTH
+        norms. ``None`` and ``{}`` are the same. Never mutated.
+    :type qk_norm_kwargs: Optional[Dict[str, Any]]
+    :param suffix: Appended to ``'q_norm'`` and ``'k_norm'``. Defaults to ``''``.
+    :type suffix: str
+
+    :raises ValueError: The factory's error for an unknown ``qk_norm_type`` or
+        invalid ``qk_norm_kwargs``. A mistyped type is never read as "off".
+
+    :return: ``(q_norm, k_norm)``, two distinct unbuilt layers, or ``(None, None)``
+        when ``qk_norm_type`` is ``None``.
+    :rtype: Tuple[Optional[keras.layers.Layer], Optional[keras.layers.Layer]]
+    """
+    # DECISION plan-2026-11-11T131349-13b28b37/D-034: ONLY ``None`` means "off", and
+    # q is created before k, so the order Keras tracks them in (and the order their
+    # weights appear in) matches the twelve spellings this replaced. Do NOT adopt it at
+    # GatedAttention (unconditional: None would silently drop the norms) and do NOT
+    # rename the suffixed names (weight paths). test_common.py::TestCreateQkNorms.
+    if qk_norm_type is None:
+        return None, None
+    kwargs = qk_norm_kwargs or {}
+    q_norm = create_normalization_layer(qk_norm_type, name=f"q_norm{suffix}", **kwargs)
+    k_norm = create_normalization_layer(qk_norm_type, name=f"k_norm{suffix}", **kwargs)
+    return q_norm, k_norm

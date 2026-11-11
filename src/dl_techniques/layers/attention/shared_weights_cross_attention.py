@@ -38,10 +38,10 @@ from typing import Any, List, Union, Tuple, Optional, Dict
 
 from dl_techniques.initializers import clone_initializer
 from dl_techniques.layers.activations import ProbabilityOutput
-from dl_techniques.layers.norms import create_normalization_layer
 from .common import (
     compute_attention_scale,
-    validate_head_divisibility
+    create_qk_norms,
+    validate_head_divisibility,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -295,20 +295,9 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
 
         # Optional Q/K normalization layers. Shared across both streams to
         # match the "shared weights" theme of this layer.
-        if self.qk_norm_type is not None:
-            self.q_norm = create_normalization_layer(
-                self.qk_norm_type,
-                name="q_norm",
-                **(self.qk_norm_kwargs or {}),
-            )
-            self.k_norm = create_normalization_layer(
-                self.qk_norm_type,
-                name="k_norm",
-                **(self.qk_norm_kwargs or {}),
-            )
-        else:
-            self.q_norm = None
-            self.k_norm = None
+        self.q_norm, self.k_norm = create_qk_norms(
+            self.qk_norm_type, self.qk_norm_kwargs
+        )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer and all sub-layers for robust serialization.

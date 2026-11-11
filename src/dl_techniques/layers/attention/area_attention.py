@@ -29,7 +29,6 @@ from typing import Any, Dict, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.conv_blocks.conv_block import ConvBlock
 from dl_techniques.layers.activations import ProbabilityOutput
 from dl_techniques.initializers import clone_initializer
@@ -38,6 +37,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 from .common import (
     apply_attention_mask,
     compute_attention_scale,
+    create_qk_norms,
     dtype_name,
     validate_head_divisibility,
 )
@@ -259,16 +259,9 @@ class AreaAttention(keras.layers.Layer):
 
         # Optional per-head QK normalization. `None` creates nothing, so the default
         # configuration adds no weights and cannot perturb the weight ordering.
-        if self.qk_norm_type is not None:
-            self.q_norm = create_normalization_layer(
-                self.qk_norm_type, name="q_norm", **(self.qk_norm_kwargs or {})
-            )
-            self.k_norm = create_normalization_layer(
-                self.qk_norm_type, name="k_norm", **(self.qk_norm_kwargs or {})
-            )
-        else:
-            self.q_norm = None
-            self.k_norm = None
+        self.q_norm, self.k_norm = create_qk_norms(
+            self.qk_norm_type, self.qk_norm_kwargs
+        )
 
         logger.debug(
             f"AreaAttention initialized: dim={dim}, num_heads={num_heads}, "

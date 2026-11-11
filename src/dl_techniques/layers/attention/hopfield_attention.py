@@ -28,9 +28,8 @@ from typing import Optional, Tuple, Union, Any, List, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from .common import apply_attention_mask, dtype_name
+from .common import apply_attention_mask, create_qk_norms, dtype_name
 from ..activations import ProbabilityOutput
-from ..norms.factory import create_normalization_layer
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -317,16 +316,9 @@ class HopfieldAttention(keras.layers.Layer):
         )
 
         # Q/K normalization (conditional creation via factory)
-        if self.qk_norm_type is not None:
-            self.q_norm = create_normalization_layer(
-                self.qk_norm_type, name="q_norm", **(self.qk_norm_kwargs or {})
-            )
-            self.k_norm = create_normalization_layer(
-                self.qk_norm_type, name="k_norm", **(self.qk_norm_kwargs or {})
-            )
-        else:
-            self.q_norm = None
-            self.k_norm = None
+        self.q_norm, self.k_norm = create_qk_norms(
+            self.qk_norm_type, self.qk_norm_kwargs
+        )
 
         # Probability output for attention weights
         self.attn_prob = ProbabilityOutput(

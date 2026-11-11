@@ -38,6 +38,7 @@ from dl_techniques.layers.attention.common import (
     MASK_BIAS_VALUE,
     apply_attention_mask,
     compute_attention_scale,
+    create_qk_norms,
     dtype_name,
     mask_dtype,
     merge_heads,
@@ -983,6 +984,148 @@ class TestApplyAttentionMaskAssumesABinaryKeep:
         )
 
 
+class TestCreateQkNorms:
+    """``create_qk_norms``: the one home of the conditional Q/K norm pair.
+
+    Twelve layers used to spell ``if self.qk_norm_type is not None: q = create(...,
+    name="q_norm"); k = create(..., name="k_norm") else: None, None``. The helper
+    owns the condition, the kwargs defaulting, the q-then-k creation order and the
+    names, because the names are weight paths in saved archives.
+    """
+
+    def test_an_unset_type_returns_no_norms(self):
+        assert create_qk_norms(None, None) == (None, None)
+        assert create_qk_norms(None, {"epsilon": 1e-3}, "_1") == (None, None)
+
+    def test_a_set_type_returns_two_distinct_layers_named_q_norm_and_k_norm(self):
+        q, k = create_qk_norms("rms_norm", None)
+        assert q is not k
+        assert (q.name, k.name) == ("q_norm", "k_norm")
+        assert type(q) is type(k)
+
+    def test_the_suffix_is_appended_verbatim_to_both_names(self):
+        q, k = create_qk_norms("rms_norm", None, "_2")
+        assert (q.name, k.name) == ("q_norm_2", "k_norm_2")
+
+    def test_the_kwargs_reach_both_norms(self):
+        q, k = create_qk_norms("rms_norm", {"epsilon": 1e-3, "use_scale": False})
+        for norm in (q, k):
+            assert norm.epsilon == 1e-3
+            assert norm.use_scale is False
+
+    def test_an_empty_kwargs_dict_equals_none(self):
+        q0, k0 = create_qk_norms("rms_norm", {})
+        q1, k1 = create_qk_norms("rms_norm", None)
+        assert q0.get_config() == q1.get_config() and k0.get_config() == k1.get_config()
+
+    def test_the_kwargs_dict_is_not_mutated(self):
+        kwargs = {"epsilon": 1e-3}
+        create_qk_norms("rms_norm", kwargs, "_1")
+        assert kwargs == {"epsilon": 1e-3}
+
+    def test_an_unknown_type_raises_the_factory_error(self):
+        """A mistyped type must stay loud; it is never read as "no norm"."""
+        with pytest.raises(ValueError, match="Unknown normalization type"):
+            create_qk_norms("not_a_norm", None)
+
+    def test_the_gated_layer_keeps_raising_for_an_unset_type(self):
+        """DECISION plan-2026-11-11T131349-13b28b37/D-034 control.
+
+        ``GatedAttention`` creates its norms unconditionally and does NOT adopt the
+        helper: through it ``qk_norm_type=None`` would silently build a layer with no
+        Q/K norms instead of the factory's error.
+        """
+        from dl_techniques.layers.attention.gated_attention import GatedAttention
+
+        with pytest.raises(ValueError, match="Unknown normalization type"):
+            GatedAttention(dim=32, num_heads=4, qk_norm_type=None)
+
+    def test_the_differential_layer_tracks_q_then_k_for_each_stream(self):
+        from dl_techniques.layers.attention.differential_attention import (
+            DifferentialMultiHeadAttention,
+        )
+
+        layer = DifferentialMultiHeadAttention(
+            dim=32, num_heads=2, head_dim=16, qk_norm_type="rms_norm"
+        )
+        layer(np.zeros((1, 4, 32), "float32"))
+        paths = [w.path.split("/")[-2] for w in layer.weights if "norm" in w.path]
+        assert paths == ["q_norm_1", "k_norm_1", "q_norm_2", "k_norm_2"]
+
+    def test_the_capsule_layer_creates_its_norms_in_build(self):
+        from dl_techniques.layers.attention.capsule_routing_attention import (
+            CapsuleRoutingSelfAttention,
+        )
+
+        layer = CapsuleRoutingSelfAttention(num_heads=2, key_dim=8, qk_norm_type="rms_norm")
+        assert layer.q_norm is None and layer.k_norm is None
+        layer(np.zeros((1, 4, 32), "float32"))
+        assert (layer.q_norm.name, layer.k_norm.name) == ("q_norm", "k_norm")
+        assert layer.q_norm.built and layer.k_norm.built
+
+    def test_no_attention_module_respells_the_pair(self):
+        """A second spelling of the pair is the duplication the helper removed.
+
+        AST walk over every module except ``common.py``: a ``create_normalization_layer``
+        call whose ``name=`` is ``q_norm*`` / ``k_norm*`` may only remain in the two
+        files that are deliberately not Q/K pairs: ``gated_attention`` (unconditional,
+        D-034) and ``multi_head_latent_attention`` (a lone ``q_norm`` inside the
+        ``q_latent_dim`` branch, no K partner). The walk is proved non-vacuous by the
+        control below it.
+        """
+        import ast
+        import pathlib
+
+        import dl_techniques.layers.attention.common as common_mod
+
+        exempt = {"gated_attention.py", "multi_head_latent_attention.py"}
+        pkg = pathlib.Path(common_mod.__file__).parent
+        offenders = []
+        for path in sorted(pkg.glob("*.py")):
+            if path.name == "common.py" or path.name in exempt:
+                continue
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if _is_qk_norm_creation(node):
+                    offenders.append(f"{path.name}:{node.lineno}")
+        assert not offenders, (
+            "a Q/K norm pair is re-spelled; call common.create_qk_norms instead: "
+            f"{offenders}"
+        )
+
+    def test_the_pair_detector_is_not_blind(self):
+        import ast
+
+        hit = ast.parse('n = create_normalization_layer(t, name="k_norm_2", **kw)')
+        miss = ast.parse('n = create_normalization_layer(t, name="o_norm", **kw)')
+        assert any(_is_qk_norm_creation(n) for n in ast.walk(hit))
+        assert not any(_is_qk_norm_creation(n) for n in ast.walk(miss))
+
+    def test_the_adopters_import_the_helper(self):
+        import ast
+        import pathlib
+
+        import dl_techniques.layers.attention.common as common_mod
+
+        pkg = pathlib.Path(common_mod.__file__).parent
+        adopters = (
+            "area_attention.py", "capsule_routing_attention.py",
+            "differential_attention.py", "group_query_attention.py",
+            "hopfield_attention.py", "lighthouse_attention.py",
+            "multi_head_cross_attention.py", "non_local_attention.py",
+            "ring_attention.py", "rpc_attention.py",
+            "shared_weights_cross_attention.py", "single_window_attention.py",
+        )
+        for name in adopters:
+            tree = ast.parse((pkg / name).read_text(encoding="utf-8"))
+            imported = {
+                a.name
+                for n in ast.walk(tree)
+                if isinstance(n, ast.ImportFrom) and (n.module or "").split(".")[-1] == "common"
+                for a in n.names
+            }
+            assert "create_qk_norms" in imported, name
+
+
 # ---------------------------------------------------------------------
 # The two pre-existing exports — regression cover only (they had no test file).
 # ---------------------------------------------------------------------
@@ -1424,4 +1567,23 @@ def _is_dtype_name_idiom(node) -> bool:
         and node.args[0].attr == "dtype"
         and isinstance(node.args[1], ast.Constant)
         and node.args[1].value == "name"
+    )
+
+
+def _is_qk_norm_creation(node) -> bool:
+    """True for ``create_normalization_layer(..., name="q_norm*" | "k_norm*", ...)``."""
+    import ast
+
+    if not (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, (ast.Name, ast.Attribute))
+        and getattr(node.func, "id", getattr(node.func, "attr", None)) == "create_normalization_layer"
+    ):
+        return False
+    return any(
+        kw.arg == "name"
+        and isinstance(kw.value, ast.Constant)
+        and isinstance(kw.value.value, str)
+        and kw.value.value.startswith(("q_norm", "k_norm"))
+        for kw in node.keywords
     )
