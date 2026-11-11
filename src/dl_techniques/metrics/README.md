@@ -22,7 +22,7 @@ The module is divided into two strict paradigms:
 | `PsnrMetric` | Streaming | Peak Signal-to-Noise Ratio evaluated only on primary output. | Image restoration with deep supervision. |
 | `SsimMetric` | Streaming | Structural Similarity Index. (TensorFlow backend required). | Image quality assessment. |
 | `VoidAwareAccuracy` | Streaming | Pixel accuracy safely ignoring a specific void class index. | Semantic segmentation with ignore masks. |
-| `HalfPrecisionTopK` | Streaming | Top-k accuracy safely casting `float16` logits to `float32`. | Mixed-precision classifiers. |
+| `HalfPrecisionTopKAccuracy` | Streaming | Top-k accuracy safely casting `float16` logits to `float32`. | Mixed-precision classifiers. |
 | `KeypointMatchMetric` | Streaming | Precision/Recall/F1 of mutual-nearest matches vs homography. | LightGlue-style local feature matching. |
 | `AbsRelMetric` (etc) | Streaming | Depth estimation metrics masking invalid ground truth pixels. | Monocular depth estimation. |
 | `generation_report` | Pool-level | Unified BLEU, ROUGE, chrF, METEOR, and CIDEr metrics. | Corpus-level text generation evaluation. |

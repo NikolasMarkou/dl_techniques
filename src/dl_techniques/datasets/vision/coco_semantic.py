@@ -14,8 +14,8 @@ The rules (D-018, with the sources there):
   here they keep the class);
 * the result does not depend on the order of the annotations.
 
-Needs numpy; ``pycocotools`` is imported when a region is decoded and is NOT a declared dependency of this
-repository (it is installed in the project environment). Never imports TensorFlow.
+Needs numpy; ``pycocotools`` is imported when a region is decoded and is declared in the
+``data`` extra of ``pyproject.toml``. Never imports TensorFlow.
 
 Interface contract
 ------------------

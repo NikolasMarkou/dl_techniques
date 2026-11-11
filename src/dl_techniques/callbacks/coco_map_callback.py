@@ -1,4 +1,4 @@
-"""COCO mAP evaluation callback for CliffordNet multi-task detection.
+"""COCO mAP evaluation callback for YOLOv12 detection models.
 
 On every ``frequency`` validation epoch, runs the model over a local COCO
 val loader, decodes YOLOv12 predictions via :mod:`dl_techniques.utils.yolo_decode`,
@@ -17,7 +17,7 @@ raising, the output missing the detection key, ``loadRes`` rejecting the
 results, no ground truth among the evaluated images) logs NaN, never 0.0: a
 fabricated zero is saved by ``ModelCheckpoint(save_best_only, mode="max")`` as
 the best epoch, while NaN counts as a non-improvement for both Keras monitors
-and keeps the History and CSV columns stable (D-017).
+and keeps the History and CSV columns stable.
 """
 
 from __future__ import annotations
@@ -192,8 +192,8 @@ class COCOMAPCallback(keras.callbacks.Callback):
             x, _ = self.val_loader[bi]
             preds = self.model(x, training=False)
             # A detection-ONLY YOLOv12 emits the detection tensor directly
-            # rather than a one-entry dict (multitask.py, D-048 of
-            # plan-2026-08-14T233721-d4f9beb2), so accept both shapes.
+            # rather than a one-entry dict (multitask.py), so accept both
+            # shapes.
             det = preds.get(self.detection_head_key) if isinstance(preds, dict) else preds
             if det is None:
                 raise RuntimeError(

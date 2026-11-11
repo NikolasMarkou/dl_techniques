@@ -142,7 +142,7 @@ class EpochAnalyzerCallback(keras.callbacks.Callback):
 
         :param logs: Unused.
         :type logs: Optional[dict]
-        :raises Exception: Whatever the analysis raises (D-117).
+        :raises Exception: Whatever the analysis raises.
         """
         if not self.analyze_on_train_begin:
             return

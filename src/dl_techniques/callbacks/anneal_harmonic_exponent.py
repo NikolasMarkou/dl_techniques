@@ -47,8 +47,7 @@ class HarmonicExponentAnnealingCallback(keras.callbacks.Callback):
     ``n_init`` / ``n_final`` may be numpy arrays; they are stored as plain lists of
     floats so ``get_config`` stays JSON-serializable. The exponent is overwritten at
     every epoch start, so any move the optimizer made to a trainable exponent during
-    the previous epoch is discarded; freezing it is deferred
-    (plan-2026-11-11T131349-13b28b37/D-023).
+    the previous epoch is discarded; freezing it is deferred.
     """
 
     SCHEDULES = SCHEDULES

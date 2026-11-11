@@ -5,24 +5,22 @@ Drives a model-owned "shadow" set of weights that tracks an exponential
 moving average of the LIVE trainable weights but never participates in the
 forward pass or the loss -- distinct from
 ``dl_techniques.models.vision.depth_anything.teacher_ema.TeacherEMACallback``,
-which drives a second network that DOES feed the loss every step (see
-plan-2026-09-03T113223-2a714a91/D-006). This callback reuses that module's decay
-schedules (``cosine_ema_schedule`` / ``linear_ema_schedule``) rather than
-re-deriving the math, and mirrors its duck-typed model-method contract
-(here ``update_ema_shadow(decay=...)`` instead of ``update_teacher_ema``).
+which drives a second network that DOES feed the loss every step. This
+callback reuses that module's decay schedules (``cosine_ema_schedule`` /
+``linear_ema_schedule``) rather than re-deriving the math, and mirrors its
+duck-typed model-method contract (here ``update_ema_shadow(decay=...)`` instead of ``update_teacher_ema``).
 
 Step-skip semantics port the PyTorch reference's ``WeightEMA`` callback
-(``callbacks.py``, quoted in this plan's Step 5 prompt): updates fire only
-every ``update_every`` steps, at or after ``start_step``. Unlike the
-reference, this port does NOT compound ``decay ** elapsed_steps`` when steps
-were skipped -- see the ``DECISION`` note on ``EMAShadowCallback`` for why
+(``callbacks.py``): updates fire only every ``update_every`` steps, at or
+after ``start_step``. Unlike the reference, this port does NOT compound
+``decay ** elapsed_steps`` when steps were skipped -- see the ``DECISION`` note on ``EMAShadowCallback`` for why
 that reference detail is not reproduced.
 
 References:
     - Tarvainen, A., & Valpola, H. (2017). Mean teachers are better role
       models. (EMA teacher/shadow lineage.)
     - LeVJEPA PyTorch reference, ``callbacks.py::WeightEMA`` (pasted
-      transcript; no public arXiv id in this plan's context).
+      transcript; no public arXiv id).
 """
 
 from __future__ import annotations

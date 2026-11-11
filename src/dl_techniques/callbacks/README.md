@@ -1,55 +1,58 @@
 # Callbacks Module
 
-`dl_techniques.callbacks` contains Keras 3 callbacks for training control, schedules, diagnostics, visualization and evaluation. `__init__.py` exports nothing, so import each class from its module:
+`dl_techniques.callbacks` contains Keras 3 callbacks for training control, schedules, diagnostics, visualization and evaluation. `__init__.py` exports every public name lazily (PEP 562), so a class can be imported from the package root or from its own module. `COCOMAPCallback` is importable by name but is left out of `__all__`, so `import *` does not fail without `pycocotools`:
 
 ```python
-from dl_techniques.callbacks.consecutive_increase_early_stopping import ConsecutiveIncreaseEarlyStopping
+from dl_techniques.callbacks import ConsecutiveIncreaseEarlyStopping
+from dl_techniques.callbacks.consecutive_increase_early_stopping import ConsecutiveIncreaseEarlyStopping  # same class, direct
 ```
+
+`_shared.py` is a private helper module (`interpolate_schedule` for the linear / cosine / exp schedules, `walk_layers` for layer discovery) used by the temperature, harmonic-exponent, noise-sigma and spatial-loss callbacks.
 
 ## Contracts shared by every callback (and where they differ)
 
 **Cadence.** Most callbacks fire when `(epoch + 1) % frequency == 0`, so `frequency=5` fires after epochs 5, 10, and so on (1-based). Exceptions:
 
 - `EpochAnalyzerCallback` counts from `start_epoch`.
-- `PeriodicReassignCallback` uses multiples of `every_n_epochs` that are at or after `start_epoch`.
+- `PeriodicReassignCallback` fires first at `start_epoch` (1-based), then every `every_n_epochs` from there.
 
-A cadence of 0 is not validated everywhere; see Known issues.
+Every cadence argument (`frequency`, `monitor_freq`, `epoch_frequency`, `regen_freq`, `every_n_epochs`, `log_every`, `update_every`) raises `ValueError` below 1 at construction. `EMAShadowCallback` counts the global optimizer step (`model.optimizer.iterations`), not epochs.
 
 **Failure policy.** Three kinds coexist:
 
 | Policy | Callbacks |
 |---|---|
-| Fail loud: an error ends `fit` | `EpochAnalyzerCallback` (on purpose, D-117), `PeriodicReassignCallback`, the schedule callbacks, `COCOMultiTaskPredictionGridCallback` (by accident). |
-| Fail soft: log a warning and continue | `ConvUnextBottleneckMonitorCallback`, the JEPA, depth and training-curve callbacks, `SelfIteratePoolCallback`. |
-| Fail soft with a placeholder | `COCOMAPCallback` writes `0.0` for both mAP keys when evaluation fails. |
+| Fail loud: an error ends `fit` | `EpochAnalyzerCallback` (on purpose), `PeriodicReassignCallback`, the schedule callbacks. |
+| Fail soft: log a warning and continue | `ConvUnextBottleneckMonitorCallback`, the JEPA, depth, COCO multi-task and training-curve callbacks, `SelfIteratePoolCallback`. |
+| Fail soft with `NaN` | `COCOMAPCallback` writes `NaN` for both mAP keys when evaluation fails or has nothing to measure; a true zero is written only for a model that emits no detections on images with ground truth. |
 
 **Writing into `logs`.** `COCOMAPCallback` adds keys to the epoch logs and `SpatialLossLogger` adds keys to the batch logs. Only callbacks that run AFTER the writer see those keys, so list writers before `ModelCheckpoint`, `EarlyStopping` and `CSVLogger`. `History` keeps epoch logs only, so batch-level keys never reach it.
 
-**State.** No callback resets its state in `on_train_begin`. Build a fresh instance for each `fit` call. Step counters are per process, so a resumed run starts them at 0 again.
+**State.** Per-run state is reset in `on_train_begin` (the early-stopping streak and snapshot, curve and history lists, the self-iterate pool RNG, the `PeriodicReassignCallback` extractor), so an instance can serve several `fit` calls. `EMAShadowCallback` keeps no counter of its own: its step is `model.optimizer.iterations`, so a resumed run continues the schedule, and a model compiled with `steps_per_execution != 1` is refused.
 
 **Live objects are not serialized.** `NoiseSigmaCurriculumCallback`, `SelfIteratePoolCallback` and `PeriodicReassignCallback` hold variables, arrays or layers by reference and omit them from `get_config()`. A reconstructed instance does nothing until those objects are supplied again.
 
-**Plotting.** Every plotting callback acquires pyplot through `dl_techniques.utils.matplotlib_backend.import_pyplot`. That function defaults to the Agg backend when `MPLBACKEND` is unset and respects it when set.
+**Plotting.** Every plotting callback acquires pyplot through `dl_techniques.utils.matplotlib_backend.import_pyplot`. That function defaults to the Agg backend when `MPLBACKEND` is unset and respects it when set, so callers do not need to export `MPLBACKEND` for headless runs.
 
 ## Available callbacks
 
 | Domain | Class (module) | Hook | Notes |
 |---|---|---|---|
-| Early stopping | `ConsecutiveIncreaseEarlyStopping` (`consecutive_increase_early_stopping`) | `on_epoch_end`, `on_train_end` | Stops after `patience` consecutive strict rises (TopoLM rule). Restores the snapshot taken just before the final streak, not the best value seen. Set `checkpoint_path` to keep snapshots on disk. |
+| Early stopping | `ConsecutiveIncreaseEarlyStopping` (`consecutive_increase_early_stopping`) | `on_epoch_end`, `on_train_end` | Stops after `patience` consecutive strict rises (TopoLM rule); a `NaN` or infinite value stops it at once and restores the last finite snapshot. Restores the snapshot taken just before the final streak, not the best value seen. Set `checkpoint_path` to keep snapshots on disk. |
 | Schedule | `TemperatureAnnealingCallback` (`temperature_annealing`) | `on_epoch_begin` | Linear, cosine or exp schedule from `t_init` to `t_final` on layers exposing `temperature` and `softplus_temperature`. |
 | Schedule | `HarmonicExponentAnnealingCallback` (`anneal_harmonic_exponent`) | `on_epoch_begin` | Per-level exponents from `n_init` to `n_final` on layers exposing `num_levels` and `set_n_per_level` (`HierarchicalHarmonicHead`). |
 | Schedule | `NoiseSigmaCurriculumCallback` (`noise_sigma_curriculum`) | `on_epoch_begin` | Assigns a scheduled upper (and optional lower) noise sigma to a `keras.Variable` that the `tf.data` noise function reads. |
-| Schedule | `EMAShadowCallback` (`ema_shadow_callback`) | `on_train_batch_end` | Calls `model.update_ema_shadow(decay=...)` every `update_every` steps from `start_step` on. `decay` is a float or a schedule (`cosine_ema_schedule`, `linear_ema_schedule`, re-exported here). |
+| Schedule | `EMAShadowCallback` (`ema_shadow_callback`) | `on_train_batch_end` | Calls `model.update_ema_shadow(decay=...)` every `update_every` optimizer steps from `start_step` on (global step, read from `optimizer.iterations`). `decay` is a float or a schedule (`cosine_ema_schedule`, `linear_ema_schedule`, re-exported here). |
 | Data mutation | `SelfIteratePoolCallback` (`self_iterate_pool`) | `on_epoch_end` | Runs `model.predict` over a RAM pool and rewrites the live input buffer in place: a `mix_ratio` share of slots gets the model output fed back, the rest gets fresh additive noise. |
-| Data mutation | `PeriodicReassignCallback` (`periodic_reassign`) | `on_epoch_end` | Calls `head.reassign(class_means)` from trunk features over the training arrays. |
+| Data mutation | `PeriodicReassignCallback` (`periodic_reassign`) | `on_epoch_end` | Calls `head.reassign(class_means)` from trunk features over the training arrays, first at `start_epoch`, then every `every_n_epochs`. `get_config()` cannot rebuild it (the arrays and a live head are left out). |
 | Diagnostics | `SpatialLossLogger` (`spatial_loss_logger`) | `on_train_batch_end` | Splits the reported loss into task and `SpatialSmoothness` components and writes `spatial/<tap>`, `spatial/total`, `spatial/unweighted`, `spatial/share`, `task_loss` and, when `compile_loss` is logged, `spatial/accounted` and `spatial/unaccounted`. |
 | Diagnostics | `EpochAnalyzerCallback` (`analyzer_callback`) | `on_train_begin`, `on_epoch_end` | Runs `ModelAnalyzer` (weights and spectral analysis by default) into `epoch_NNN/`. Failures raise. |
 | Diagnostics | `ConvUnextBottleneckMonitorCallback` (`convunext_bottleneck_monitor`) | `on_epoch_end`, `on_train_end` | Bottleneck health statistics and fixed-scale feature-map grids. Pass the FULL `expose_bottleneck=True` model, not the training view. |
 | Diagnostics | `TrainingCurvesCallback` (`training_curves`) | `on_epoch_end` | One PNG per metric group (loss, classification, segmentation, detection, depth, other), overwritten in place. |
-| Visualization | `LatentMaskOverlayCallback`, `PatchPredictionErrorCallback` (`jepa_visualization`) | `on_epoch_end` | Mask overlays and per-patch latent prediction error for `VideoJEPA`-style models. |
+| Visualization | `LatentMaskOverlayCallback`, `PatchPredictionErrorCallback` (`jepa_visualization`) | `on_epoch_end` | Mask overlays and per-patch latent prediction error for `VideoJEPA`-style models. Both draw one fixed tube mask (`mask_seed`) and write `epoch_{epoch+1:03d}_*.png` after epochs `frequency`, `2 * frequency`, ... |
 | Visualization | `DepthPredictionGridCallback`, `DepthMetricsCurveCallback` (`depth_visualization`) | `on_epoch_end` | RGB / GT / scale-and-shift-aligned prediction grids, and metric curves. |
-| Visualization | `COCOMultiTaskPredictionGridCallback` (`coco_multitask_visualization`) | `on_epoch_end` | Segmentation grids, classification top-K text and optional detection boxes for a dict-output COCO model. |
-| Evaluation | `COCOMAPCallback` (`coco_map_callback`) | `on_epoch_end` | Decode, NMS and `COCOeval`. Writes `val_map50` and `val_map5095`. Requires `pycocotools` at import time. |
+| Visualization | `COCOMultiTaskPredictionGridCallback` (`coco_multitask_visualization`) | `on_epoch_end` | Segmentation grids (80 distinct class colors), classification top-K text and optional detection boxes for a dict-output COCO model. |
+| Evaluation | `COCOMAPCallback` (`coco_map_callback`) | `on_epoch_end` | Decode, NMS and `COCOeval`. Writes `val_map50` and `val_map5095` (`NaN` when nothing could be measured). Requires `pycocotools` at import time (declared in the `data` extra). |
 
 ## Usage
 

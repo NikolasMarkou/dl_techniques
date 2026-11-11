@@ -4,7 +4,7 @@ patch pool, the core mechanism that makes a bias-free additive-Gaussian denoiser
 self-iterable (applying ``f`` 2-5 times in sequence improves rather than
 over-smooths).
 
-plan_2026-06-20_88705c63/D-001 + D-003 context: the model ``f`` is a blind,
+Context: the model ``f`` is a blind,
 single-pass direct-prediction denoiser; naive re-application over-smooths. To make
 ``f`` robust against its own output we train it toward the clean fixed point — so
 that ``f(noisy)≈clean``, ``f(f(noisy))≈clean``, AND ``f(clean)≈clean``. This is
@@ -13,7 +13,7 @@ applied exactly once per forward. "Feeding the previous result back" happens
 BETWEEN epochs — this callback runs ``model.predict`` over a bounded RAM pool at
 epoch cadence and writes regenerated inputs back into a LIVE numpy buffer that the
 tf.data source reads (mutated IN PLACE). The trainer's pool-backed dataset is built
-via ``from_generator`` over the same live buffer (D-004), so ``model.fit``
+via ``from_generator`` over the same live buffer, so ``model.fit``
 re-reads the mutated pool on the next epoch.
 
 Two pool arrays:
@@ -21,7 +21,7 @@ Two pool arrays:
   * ``current_input`` — the SAME mutable array the tf.data source indexes; this
     callback overwrites slots of it in place each regeneration.
 
-Mix-not-replace (D-003): each regeneration mixes a ``mix_ratio`` fraction of slots
+Mix-not-replace: each regeneration mixes a ``mix_ratio`` fraction of slots
 filled with the model's previous output fed back AS-IS (no re-injected noise) with
 the remaining slots refilled with FRESH ``clean + N(0, sigma)`` additive noise. The
 union keeps ``f(noisy)≈clean`` anchored (single-pass quality does not drift) while
@@ -95,7 +95,7 @@ class SelfIteratePoolCallback(keras.callbacks.Callback):
         depth is geometric: a slot survives a cadence as a fed-back output with
         probability ``mix_ratio``, hence ``P(depth >= k) = mix_ratio ** k`` and
         the depth is unbounded (measured: 64 slots, ``mix_ratio=0.5``, 8 epochs
-        reached depth 5). This is D-003 by design (a fed-back slot is never
+        reached depth 5). This is by design (a fed-back slot is never
         re-noised, so there is nothing to reset it); a cap would need a per-slot
         depth array and changes the semantics, so it is not offered.
 

@@ -2,7 +2,7 @@
 TemperatureAnnealingCallback — anneals the ``temperature`` parameter on
 DARTS-style soft-selection layers across training epochs.
 
-M2 (plan_2026-05-13_3a2f1d23): provides cosine / linear / exponential
+Provides cosine / linear / exponential
 schedules that lower the temperature from ``t_init`` to ``t_final`` over
 ``total_epochs``. Compatible with both the legacy ``softplus_temperature=
 False`` parameterization (raw value == temperature) and the canonical
@@ -44,7 +44,7 @@ class TemperatureAnnealingCallback(keras.callbacks.Callback):
     ASSIGNS the scheduled value at every epoch start, so any move the optimizer made
     to it during the previous epoch is discarded (measured: 2.166 at an epoch end
     against a scheduled 2.0). Freezing it is a decision for ``layers/logic`` and is
-    deferred (plan-2026-11-11T131349-13b28b37/D-023).
+    deferred.
     """
 
     SCHEDULES = SCHEDULES

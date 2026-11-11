@@ -44,9 +44,12 @@ cleared by this file:
     class"; that was refuted by measurement on 2026-08-31 and the class is
     documented rather than changed. See ``decisions.md`` D-002 of
     ``plan-2026-08-31T045723-c0d5ffa9``.
-*   ``yolo12_multitask_loss`` (4 classes) and ``nano_vlm_loss.NanoVLMLoss`` --
-    require structured multi-head ``y_pred`` dicts that cannot be built cheaply
-    here.
+*   ``yolo12_multitask_loss`` (4 classes) -- require structured multi-head
+    ``y_pred`` dicts that cannot be built cheaply here.
+*   ``nano_vlm_loss.NanoVLMLoss`` was listed here as needing structured inputs;
+    that was wrong (it takes int tokens and a ``(B, S, V)`` logits tensor, the
+    ``_token_pair`` fixture). It is now MEASURED, rejected by the predicate, and
+    sits in ``KNOWN_GOOD`` below.
 *   The remaining ~60 ``keras.losses.Loss`` subclasses in
     ``src/dl_techniques/losses/`` were NOT swept. A static scan of their
     ``call()`` return expressions shows further candidates (for example
@@ -259,6 +262,13 @@ KNOWN_GOOD = [
     # the ragged proof lives in the commit message, not here.
     ("masked_causal_lm_loss", "MaskedCausalLMLoss", {}, _token_pair),
     ("masked_causal_lm_loss", "PrefixMaskedCausalLMLoss", {}, _token_pair),
+    # NanoVLMLoss returns (batch,) since plan-2026-11-11T131349-13b28b37 step 6 and
+    # was moved here from the NOT MEASURED list after the predicate rejected it
+    # on `_token_pair` (unweighted 2.9516, weighted 2.4429, against 2.2137 for the
+    # scalar-broadcast value; `call()` shape (4,)). The fixture is equal-length
+    # with no vision prefix; the prefix path is covered by
+    # test_the_nano_vlm_loss_scores_the_text_positions.py.
+    ("nano_vlm_loss", "NanoVLMLoss", {}, _token_pair),
     # fixed by plan-2026-08-31T045723-c0d5ffa9 step 6, same T-2 token-pool form.
     # Its ragged divergence was MEASURED under focal weighting rather than
     # inherited from the two above, and it is WORSE than theirs: at counts

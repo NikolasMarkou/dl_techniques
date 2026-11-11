@@ -5,7 +5,7 @@ temperature, harmonic-exponent and noise-sigma callbacks) and the walk over a mo
 layer tree (in the two annealing callbacks and the spatial-loss logger). Each now has
 one home here. ``models/vision/depth_anything/teacher_ema.py`` carries a fourth copy of
 the cosine and linear algebra on a different variable layout; it is deliberately NOT
-moved (plan-2026-11-11T131349-13b28b37 deferred it).
+moved (deferred).
 """
 
 import math

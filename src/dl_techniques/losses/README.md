@@ -50,6 +50,7 @@ Symbols in the table are importable from `dl_techniques.losses` unless the row s
 | Self-supervised / distillation | `DINOLoss`, `iBOTPatchLoss`, `KoLeoLoss`, `FeatureAlignmentLoss` | See [DINO](#dino-loss). `FeatureAlignmentLoss` is Depth Anything's Eq. 9 (arXiv 2401.10891): a step at the margin, not a hinge. |
 | Metric learning / clustering | `SoftmarginTripletLoss`, `magnet_loss_fn`, `MeanShiftInstanceLoss`, `ClusteringLoss`, `ClusteringMetrics`, `ClusteringMetricsCallback`, `compute_clustering_metrics` | `magnet_loss_fn` is NumPy and batch-level by design. `MeanShiftInstanceLoss` subsamples only when `N` is static. |
 | Semantic segmentation | `SegmentationWrapperLoss`, `create_segmentation_wrapper_loss`, `SegmentationLosses`, `SegmentationLossConfig`, `create_segmentation_loss_function` (deprecated) | Name-dispatched over `cross_entropy`, `dice`, `focal`, `tversky`, `focal_tversky`, `lovasz`, `combo`, `boundary`, `hausdorff`. `boundary` and `hausdorff` are heuristics, not Kervadec's Boundary loss or a Hausdorff distance: `hausdorff` saturates at 1 and an empty mask minimizes it, so `train_accunet` does not offer it. |
+| Sparse-target segmentation | `SparseDiceLoss`, `SparseFocalLoss`, `SparseCeDiceLoss` | Logits `(B,H,W,C)` and integer targets with an `ignore_index` that changes neither value nor gradient; one value per image. |
 | Multi-label segmentation | `PerChannelBinaryLoss`, `WeightedBinaryFocalLoss`, `WeightedBinaryCrossEntropyLoss`, `DiceLossPerChannel`, `create_multilabel_segmentation_loss` | Adaptive per-channel weighting from batch class presence. `PerChannelBinaryLoss` accepts `'binary_crossentropy'` or a `Loss` that returns one value per element (any other string, or a base that reduces the channel axis, raises). |
 | SAM family | `SAMMaskLoss`, `SAMIoULoss`, `to_dice_layout`, `to_focal_layout`, `SAM2GatedMaskLoss`, `mask_presence_gate`, `Sam3DetectionLoss` | Module-only: `match_mask_axis`, `SAM2ObjectScoreLoss`, `SAM2IoULoss`, `select_lowest_loss_mask` and the SAM 3 pack helpers. `Sam3DetectionLoss` uses `scipy` via `tf.py_function` and needs `jit_compile=False`. |
 | Detection | `YOLOv12MultiTaskLoss`, `create_yolov12_multitask_loss`, `create_yolov12_coco_loss`, `create_yolov12_crack_loss`, `CliffordDetectionLoss` | YOLOv12 routes each output to a sub-loss by tensor rank (2 classification, 3 detection, 4 segmentation). |
@@ -198,7 +199,7 @@ critic_loss_fn, generator_loss_fn = create_wgan_gp_losses(lambda_gp=10.0)
 
 with tf.GradientTape() as tape:
     w_loss = critic_loss_fn(labels, critic_scores)  # labels: 1 real, 0 fake
-    gp = compute_gradient_penalty(critic, real_images, fake_images)  # rank-4 inputs only
+    gp = compute_gradient_penalty(critic, real_images, fake_images)  # any rank >= 2
     total = w_loss + gp
 grads = tape.gradient(total, critic.trainable_variables)
 optimizer.apply_gradients(zip(grads, critic.trainable_variables))

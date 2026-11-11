@@ -89,7 +89,7 @@ class ConvUnextBottleneckMonitorCallback(keras.callbacks.Callback):
         featuremap_vmin: Lower bound of the FIXED absolute color scale applied
             to every feature-map tile at every epoch. Holding this constant
             across epochs makes a given color mean the same activation value
-            over training (see D-001). Defaults to -3.0.
+            over training. Defaults to -3.0.
         featuremap_vmax: Upper bound of the fixed absolute color scale.
             Defaults to 3.0.
         name_prefix: Filename and log-message prefix. Defaults to

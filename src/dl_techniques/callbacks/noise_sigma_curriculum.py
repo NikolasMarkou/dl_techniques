@@ -4,15 +4,16 @@ denoising. Progressively WIDENS the per-image noise-sigma sampling range across
 training epochs so the model first sees low noise and gradually faces an
 increasingly large spread of noise levels.
 
-plan_2026-06-19_ed071c02/D-001 context: bias-free denoisers generalize across
+Context: bias-free denoisers generalize across
 noise levels, but training converges faster and more stably when the noise
 difficulty is ramped (curriculum). This callback owns a ``keras.Variable``
 (``sigma_max_var``) that the tf.data noise-injection function reads when sampling
 each patch's sigma from ``[sigma_min, sigma_max_var]``. On ``on_epoch_begin`` the
 callback computes a scheduled ``sigma_max`` (linear / cosine / exp interpolation
 from ``sigma_max_start`` to ``sigma_max_end`` over ``total_epochs``) and
-``.assign``s it to the variable. The risk spike (plan STEP 1) confirmed a captured
-``tf.Variable`` read inside ``tf.data.map`` reflects per-epoch ``.assign``.
+``.assign``s it to the variable. A captured
+``tf.Variable`` read inside ``tf.data.map`` reflects per-epoch ``.assign``
+(checked by a spike before this callback was written).
 
 Schedule math mirrors ``TemperatureAnnealingCallback``. An optional second
 variable (``sigma_min_var``) can be scheduled the same way if a non-zero,

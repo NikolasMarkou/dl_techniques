@@ -54,8 +54,9 @@ Before modifying or adding to this package, agents must adhere to the following 
 *   `time_series_metrics.py`: Forecasting metrics. Includes `SMAPE` (symmetric bounding 0-200) and `PerHorizonError` for tracking scalar metrics at specific forecast steps `h`.
 
 ### Specialized Utility Metrics
-*   `capsule_accuracy.py`: Evaluates accuracy based on capsule vector L2 lengths rather than softmax probabilities.
+*   `capsule_accuracy.py`: `CapsuleAccuracy`. Evaluates accuracy based on capsule vector L2 lengths rather than softmax probabilities.
 *   `half_precision_top_k.py`: `HalfPrecisionTopKAccuracy`. Casts logits to `float32` before computing top-k. Bypasses a Keras bug where `InTopKV2` operations crash on `float16`/`bfloat16` inputs.
+*   `sequence_metrics.py`: `SequenceAccuracy` (all-or-nothing per sample: a sequence scores only when every element matches after binarization) and `BitErrorRate` (the fraction of wrong bits, lower is better), for algorithmic and signal-processing tasks.
 *   `primary_output_metrics.py`: `PrimaryOutputAccuracy`, `PrimaryOutputTopKAccuracy`. Silently routes only the primary (index 0) output of a multi-output model to the accuracy calculation.
 *   `hrm_metrics.py`: Custom metrics aggregator (`HRMMetrics`) for Hierarchical Reasoning Models. Not a `keras.metrics.Metric` subclass; meant for explicit `update_state()` calls inside custom `train_step` blocks.
 
