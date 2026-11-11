@@ -28,7 +28,7 @@
 | `SAMIoULoss` | `iou_supervision` |
 | Siamese tracking losses | values and masks packed in `y_true` |
 
-**Stateful losses update on every call, validation included.** This covers `DINOLoss`, `iBOTPatchLoss`, `AdaptiveSigLIPLoss` and the `TopographicVAELoss` trackers. Loss-owned variables are not saved in `.keras` checkpoints; `DINOLoss` carries its center in `get_config()` for that reason, and `AdaptiveSigLIPLoss` carries its live temperature there as `current_temperature`. Keras 3.8 passes `Loss.call` no `training` flag, so `evaluate` still moves the adaptive temperature; that drift is a known limitation, not gated.
+**Stateful losses update on every call, validation included.** This covers `DINOLoss`, `iBOTPatchLoss`, `AdaptiveSigLIPLoss` and the `TopographicVAELoss` trackers. Loss-owned variables are not saved in `.keras` checkpoints; `DINOLoss` carries its center in `get_config()` for that reason, and `AdaptiveSigLIPLoss` carries its live temperature there as `current_temperature`. Keras 3.8 passes `Loss.call` no `training` flag, so `evaluate` still moves the adaptive temperature; that drift is a known limitation, not gated. `AdaptiveSigLIPLoss` steers the mean row entropy to the absolute `target_entropy` (0.5 nats by default), so its temperature settles inside `(min_temperature, max_temperature)` only when that target is reachable there, that is `H(max_temperature) <= target_entropy <= H(min_temperature)`; otherwise it pins at the nearer bound (cosine logits of untrained 128-d embeddings pin at `max_temperature=10` for batch sizes 32 to 1024), and a pinned value means the target is out of reach, not that the loop converged.
 
 ## Available losses
 

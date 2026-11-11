@@ -190,7 +190,25 @@ class AdaptiveSigLIPLoss(keras.losses.Loss):
     ``[min_temperature, max_temperature]``. ``T`` multiplies the logits, so a
     larger ``T`` sharpens the softmax and lowers its entropy: entropy above the
     target raises ``T`` and entropy below it lowers ``T``, which is negative
-    feedback and settles strictly inside the bounds.
+    feedback.
+
+    **When it settles (reachability condition).** ``target_entropy`` is an
+    ABSOLUTE number of nats, not a fraction of ``log(batch_size)``. The mean row
+    entropy ``H(T)`` of ``softmax(logits * T)`` falls as ``T`` rises, so the loop
+    settles strictly inside ``(min_temperature, max_temperature)`` only when the
+    target is reachable somewhere in that interval, that is
+    ``H(max_temperature) <= target_entropy <= H(min_temperature)``. Otherwise
+    ``T`` pins at the nearer bound and stays there: at ``max_temperature`` when
+    even the sharpest allowed softmax is still flatter than the target, at
+    ``min_temperature`` when even the flattest one is sharper than it. The
+    default 0.5 nats with ``max_temperature=10`` is reachable for logits with a
+    wide spread (the tests use Gaussian logits of scale 2 at ``B=8``) and for
+    well-aligned cosine similarities at moderate batch sizes, but NOT for the
+    cosine logits of untrained embeddings: measured with 128-dimensional unit
+    vectors, ``T`` pinned at 10.0 for ``B=32, 64, 256, 1024`` (``H(10)`` of
+    3.08, 3.80, 5.16, 6.55 nats against ``log B`` of 3.47, 4.16, 5.55, 6.93).
+    Raise ``max_temperature`` or the target, or read a pinned ``T`` as "the
+    target is out of reach for these logits", not as a converged loop.
 
     This controller is the repo's own invention (SigLIP itself learns
     ``log t`` by gradient descent); there is no reference to compare against.
@@ -290,6 +308,18 @@ class AdaptiveSigLIPLoss(keras.losses.Loss):
         # `softmax(logits_per_image)` and do NOT drop the sign flip -- the tests in
         # test_siglip_contrastive_loss.py (closed-loop settle, entropy at live T,
         # sign pin) fail if either half is undone.
+
+        # DECISION plan-2026-11-11T131349-13b28b37/D-044
+        # `target_entropy` stays an ABSOLUTE nat count. Do NOT rescale it by
+        # log(batch_size) to "make large batches settle": measured on cosine
+        # logits of untrained 128-d embeddings, a target of 0.5 * log B still
+        # pinned T at max_temperature for B = 32, 64, 256 and 1024 (H(10) is
+        # within 0.4 nats of log B there), and the rescale would change the
+        # default behaviour at every batch size. The controller settles inside
+        # the bounds only when H(max_temperature) <= target <= H(min_temperature);
+        # the class docstring states that and the tests in
+        # test_siglip_contrastive_loss.py pin both the settling and the pinned
+        # regime.
         temperature = ops.cast(self.adaptive_temperature, logits_per_image.dtype)
         probs = ops.softmax(logits_per_image * temperature, axis=-1)
         current_entropy = -ops.mean(ops.sum(probs * ops.log(probs + 1e-8), axis=-1))

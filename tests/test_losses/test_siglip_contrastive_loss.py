@@ -589,3 +589,123 @@ def test_adaptive_state_is_not_lost_after_updates_either():
 
     restored = AdaptiveSigLIPLoss.from_config(loss.get_config())
     assert _live_temperature(restored) == moved
+
+
+# =====================================================================
+# REACHABILITY CONDITION (plan-2026-11-11T131349-13b28b37, D-044)
+#
+# The controller steers the mean row entropy to a FIXED absolute target
+# (``target_entropy`` nats). It settles strictly inside the temperature bounds
+# only when that target is reachable in the interval:
+#     H(max_temperature) <= target <= H(min_temperature)
+# and otherwise pins at the nearer bound. These tests pin both regimes and the
+# equivalence between the condition and the outcome, so the class docstring
+# cannot drift back to an unconditional "settles strictly inside".
+# =====================================================================
+
+
+def _cosine_logits(batch: int, aligned: bool, dim: int = 128, seed: int = 0):
+    """Cosine similarities of random unit embeddings (the documented input).
+
+    ``aligned=False`` is the untrained case (independent towers); ``aligned=True``
+    makes the second tower a noisy copy of the first (diagonal cosine about 0.96).
+    """
+    rng = np.random.default_rng(seed)
+    a = rng.standard_normal((batch, dim))
+    a /= np.linalg.norm(a, axis=1, keepdims=True)
+    if aligned:
+        b = a + 0.3 * rng.standard_normal((batch, dim)) / np.sqrt(dim)
+    else:
+        b = rng.standard_normal((batch, dim))
+    b /= np.linalg.norm(b, axis=1, keepdims=True)
+    logits = (a @ b.T).astype("float32")
+    return {"logits_per_image": logits, "logits_per_text": logits.T.copy()}
+
+
+def _run_controller(y_pred, calls: int = 300, **kwargs) -> float:
+    batch = y_pred["logits_per_image"].shape[0]
+    loss = AdaptiveSigLIPLoss(**kwargs)
+    for _ in range(calls):
+        loss(_dummy_labels(batch), y_pred)
+    return _live_temperature(loss)
+
+
+def test_untrained_cosine_logits_pin_the_temperature_at_the_upper_bound():
+    """The 0.5-nat target is unreachable: even at T=10 the softmax is near uniform."""
+    y_pred = _cosine_logits(batch=64, aligned=False)
+    logits = y_pred["logits_per_image"]
+    assert _entropy_at(logits, _MAX_T) > 3.0, "premise: target 0.5 is out of reach"
+
+    final = _run_controller(y_pred, max_temperature=_MAX_T)
+
+    assert final == _MAX_T, f"expected a pin at max_temperature, got {final}"
+    assert _entropy_at(logits, final) > 3.0, "the pinned T leaves H far above 0.5"
+
+
+def test_aligned_cosine_logits_settle_inside_the_bounds_at_the_target():
+    y_pred = _cosine_logits(batch=64, aligned=True)
+    logits = y_pred["logits_per_image"]
+    assert _entropy_at(logits, _MAX_T) < 0.5 < _entropy_at(logits, _MIN_T)
+
+    final = _run_controller(y_pred, min_temperature=_MIN_T, max_temperature=_MAX_T)
+
+    assert _MIN_T < final < _MAX_T, f"T pinned at a bound: {final}"
+    assert abs(_entropy_at(logits, final) - 0.5) < 0.05
+
+
+def test_the_same_untrained_logits_settle_once_the_target_is_reachable():
+    """It is the target, not the data: lower the bar below H(max_T) and it settles."""
+    y_pred = _cosine_logits(batch=64, aligned=False)
+    logits = y_pred["logits_per_image"]
+    target = 0.5 * (_entropy_at(logits, _MAX_T) + _entropy_at(logits, _MIN_T))
+
+    # H(T) is nearly flat for these logits (0.36 nats across the whole interval),
+    # so the loop approaches the target slowly: give it more calls.
+    final = _run_controller(y_pred, calls=1500, target_entropy=target)
+
+    assert _MIN_T < final < _MAX_T, f"T pinned at a bound: {final}"
+    assert abs(_entropy_at(logits, final) - target) < 0.05
+
+
+def test_a_target_above_the_flattest_softmax_pins_at_the_lower_bound():
+    y_pred = _scaled_logits(scale=2.0)
+    logits = y_pred["logits_per_image"]
+    target = _entropy_at(logits, _MIN_T) + 1.0  # above even the flattest softmax
+
+    final = _run_controller(y_pred, min_temperature=_MIN_T, target_entropy=target)
+
+    assert final == _MIN_T, f"expected a pin at min_temperature, got {final}"
+
+
+# DECISION plan-2026-11-11T131349-13b28b37/D-044
+# The target is absolute, so settling is a property of the logits, not a promise
+# of the loop. This test fails if the documented condition and the outcome part
+# ways (for example a target silently rescaled by log B).
+@pytest.mark.parametrize(
+    "case",
+    [
+        ("gaussian_scale_2_b8", lambda: _scaled_logits(scale=2.0), 0.5),
+        ("untrained_cosine_b32", lambda: _cosine_logits(32, False), 0.5),
+        ("untrained_cosine_b256", lambda: _cosine_logits(256, False), 0.5),
+        ("aligned_cosine_b32", lambda: _cosine_logits(32, True), 0.5),
+        ("aligned_cosine_b256", lambda: _cosine_logits(256, True), 0.5),
+        ("aligned_cosine_b1024", lambda: _cosine_logits(1024, True), 0.5),
+        ("gaussian_scale_2_b8_high_target", lambda: _scaled_logits(2.0), 2.0),
+    ],
+    ids=lambda case: case[0] if isinstance(case, tuple) else str(case),
+)
+def test_settling_inside_the_bounds_is_exactly_the_reachability_condition(case):
+    """Settles strictly inside iff H(max_T) <= target <= H(min_T); else pinned."""
+    _, make, target = case
+    y_pred = make()
+    logits = y_pred["logits_per_image"]
+    reachable = _entropy_at(logits, _MAX_T) <= target <= _entropy_at(logits, _MIN_T)
+
+    final = _run_controller(
+        y_pred, min_temperature=_MIN_T, max_temperature=_MAX_T, target_entropy=target
+    )
+
+    pinned = final in (_MIN_T, _MAX_T)
+    assert reachable == (not pinned), (
+        f"reachable={reachable} but final T={final} (pinned={pinned})"
+    )
