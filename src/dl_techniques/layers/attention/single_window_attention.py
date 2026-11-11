@@ -24,7 +24,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 # local imports
 # ---------------------------------------------------------------------
 
-from .common import apply_attention_mask
+from .common import apply_attention_mask, dtype_name
 from dl_techniques.initializers import clone_initializer
 from ..ffn.kan_linear import KANLinear
 from ..activations import ProbabilityOutput
@@ -898,10 +898,8 @@ class SingleWindowAttention(keras.layers.Layer):
         attn = apply_attention_mask(
             attn,
             broadcast_mask,
-            # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
-            # a Keras-2 residue banned across `src/`, and `str` alone mis-renders a
-            # `tf.DType`. Full note and the measured equivalence at `common.py`; D-007.
-            out_dtype=(getattr(attn.dtype, "name", None) or str(attn.dtype)),
+            # `dtype_name` (common.py, D-007) reads the dtype name; the idiom's reasoning lives there.
+            out_dtype=dtype_name(attn),
             rescue_axis=(self.probability_config or {}).get("axis", -1),
         )
 

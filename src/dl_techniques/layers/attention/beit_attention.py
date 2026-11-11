@@ -38,6 +38,7 @@ from .common import (
     mask_dtype,
     apply_attention_mask,
     compute_attention_scale,
+    dtype_name,
     validate_head_divisibility,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -501,9 +502,7 @@ class BeitAttention(keras.layers.Layer):
 
         # Softmax runs in float32+ regardless of compute dtype (common.mask_dtype);
         # an fp16 softmax over a biased logit row has repeatedly measured NaNs. See common.py D-007.
-        softmax_dtype = mask_dtype(
-            getattr(scores.dtype, "name", None) or str(scores.dtype)
-        )
+        softmax_dtype = mask_dtype(dtype_name(scores))
         if attention_mask is not None:
             keep = self._broadcast_mask(attention_mask, seq_len)
             # attention_mask passes through verbatim as the keep predicate; no polarity inference.

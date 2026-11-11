@@ -32,29 +32,15 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.conv_blocks.conv_block import ConvBlock
 from dl_techniques.layers.activations import ProbabilityOutput
+from dl_techniques.initializers import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
 from .common import (
     apply_attention_mask,
     compute_attention_scale,
+    dtype_name,
     validate_head_divisibility,
 )
-
-# ---------------------------------------------------------------------
-
-def _fresh_initializer(
-        initializer: keras.initializers.Initializer,
-) -> keras.initializers.Initializer:
-    """A new instance with the same config, never the same object.
-
-    ``qk_conv``/``v_conv``/``pe_conv``/``proj_conv`` below share one resolved
-    ``kernel_initializer`` instance via ``_conv_kwargs``. Keras does not clone
-    an already-constructed ``Initializer`` at each use site, so ``v_conv`` and
-    ``proj_conv`` -- same filters, same kernel_size -- would draw the
-    IDENTICAL flat sequence of numbers from that shared instance. Serializing
-    and re-``get``-ing gives each site its own instance with the same config.
-    """
-    return keras.initializers.get(keras.initializers.serialize(initializer))
 
 # ---------------------------------------------------------------------
 
@@ -209,9 +195,11 @@ class AreaAttention(keras.layers.Layer):
         # The four convolutions are created in this order -- qk, v, pe, proj --
         # since the relocation's equivalence harness transfers weights by ordered set_weights. Reordering them is a silent weight-permutation bug.
         # `kernel_initializer` is deliberately NOT in this shared dict: each
-        # site below gets its own `_fresh_initializer()` instance so
+        # site below gets its own `clone_initializer()` instance so
         # `v_conv`/`proj_conv` -- same filters, same kernel_size -- do not
         # draw the identical flat weight sequence from one shared instance.
+        # Keras does not clone an already-constructed `Initializer` at each use
+        # site, so one shared seedless instance would replay one flat sequence.
         _conv_kwargs = dict(
             activation_type="linear",
             normalization_type=self.normalization_type,
@@ -223,7 +211,7 @@ class AreaAttention(keras.layers.Layer):
             filters=self.dim * 2,
             kernel_size=1,
             name="qk",
-            kernel_initializer=_fresh_initializer(self.kernel_initializer),
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             **_conv_kwargs
         )
 
@@ -231,7 +219,7 @@ class AreaAttention(keras.layers.Layer):
             filters=self.dim,
             kernel_size=1,
             name="v",
-            kernel_initializer=_fresh_initializer(self.kernel_initializer),
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             **_conv_kwargs
         )
 
@@ -242,7 +230,7 @@ class AreaAttention(keras.layers.Layer):
             padding="same",
             groups=self.dim,
             name="pe",
-            kernel_initializer=_fresh_initializer(self.kernel_initializer),
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             **_conv_kwargs
         )
 
@@ -250,7 +238,7 @@ class AreaAttention(keras.layers.Layer):
             filters=self.dim,
             kernel_size=1,
             name="proj",
-            kernel_initializer=_fresh_initializer(self.kernel_initializer),
+            kernel_initializer=clone_initializer(self.kernel_initializer),
             **_conv_kwargs
         )
 
@@ -478,7 +466,7 @@ class AreaAttention(keras.layers.Layer):
             scores = apply_attention_mask(
                 scores,
                 keep,
-                out_dtype=(getattr(scores.dtype, "name", None) or str(scores.dtype)),
+                out_dtype=dtype_name(scores),
                 rescue_axis=(self.probability_config or {}).get("axis", -1),
             )
 

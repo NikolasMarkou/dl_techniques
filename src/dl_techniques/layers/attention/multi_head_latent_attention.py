@@ -29,7 +29,7 @@ from dl_techniques.layers.activations import ProbabilityOutput
 from dl_techniques.initializers.clone import clone_initializer
 from dl_techniques.utils.keras_registration import register_dl_technique
 
-from .common import apply_attention_mask, compute_attention_scale
+from .common import apply_attention_mask, compute_attention_scale, dtype_name
 
 # ---------------------------------------------------------------------
 
@@ -664,7 +664,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         scores = apply_attention_mask(
             scores,
             attention_mask,
-            out_dtype=(getattr(scores.dtype, "name", None) or str(scores.dtype)),
+            out_dtype=dtype_name(scores),
             rescue_axis=(self.probability_config or {}).get("axis", -1),
         )
 

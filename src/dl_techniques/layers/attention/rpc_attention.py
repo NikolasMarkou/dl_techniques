@@ -41,6 +41,7 @@ from dl_techniques.layers.norms.factory import create_normalization_layer
 from .common import (
     apply_attention_mask,
     compute_attention_scale,
+    dtype_name,
     validate_head_divisibility,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -495,7 +496,7 @@ class RPCAttention(keras.layers.Layer):
 
         # Dtype captured before any mask-driven promotion, restored at the cast-back
         # boundary below; that is what makes the no-mask path a bit-for-bit no-op.
-        scores_dtype = getattr(attention_scores.dtype, "name", None) or str(attention_scores.dtype)
+        scores_dtype = dtype_name(attention_scores)
 
         if mask is not None:
             # Case 1: Mask is (batch, seq_len) -> Expand to (batch, 1, 1, seq_len)

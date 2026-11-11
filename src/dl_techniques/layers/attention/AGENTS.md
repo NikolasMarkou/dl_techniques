@@ -65,6 +65,7 @@ Factory (all from `factory.py`; the first six are re-exported by `__init__.py`):
 - `apply_attention_mask(logits, keep, *, out_dtype=None, rescue_axis=-1)`: adds a `where`-built bias in `mask_dtype`. `keep` is the caller's keep predicate (nonzero or True means attend, compared `> 0`; no polarity inference; must be binary). `rescue_axis` is the axis the caller's softmax reduces over (int, non-empty tuple/list of ints, or `None` to opt out): a slice keeping nothing is treated as keeping everything. Raises `ValueError` for an invalid `rescue_axis`, and for a `keep` statically size 1 along every named axis while `logits` is longer there (such a mask cannot mask anything).
 - `validate_head_divisibility(dim, num_heads, *, dim_name="dim", num_heads_name="num_heads")`: `ValueError` if `dim % num_heads != 0`.
 - `compute_attention_scale(head_dim) -> float`: `1.0 / math.sqrt(float(head_dim))`, a Python float. Call from `__init__` or `build`, never `call()`.
+- `dtype_name(x) -> str`: `getattr(x.dtype, "name", None) or str(x.dtype)`, the one home of that idiom (a `tf.DType` renders wrongly under bare `str`; `keras.backend.standardize_dtype` is banned). Pass a tensor, not a dtype. Do not re-spell it at a site: `test_common.py::TestDtypeName::test_no_attention_module_respells_the_idiom` walks the package. `lighthouse_attention.py` takes a dtype, not a tensor, and keeps its own `getattr` (first argument is a bare name).
 
 Call signatures (frozen; renaming or reordering breaks serialized configs and callers). Re-derived from each `def call`:
 

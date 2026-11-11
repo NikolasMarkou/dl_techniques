@@ -536,7 +536,7 @@ class A2C2fBlock(keras.layers.Layer):
         # different shapes (`filters = 2 * hidden_filters` in every registered
         # scale), so they cannot collide, and the two `AreaAttentionBlock`s
         # per iteration decorrelate their own `v`/`proj` pair internally
-        # (see `AreaAttention._fresh_initializer`) regardless of what
+        # (`AreaAttention` calls `clone_initializer` per conv) regardless of what
         # `kernel_initializer` object is handed to them here. None of the
         # three needs its own fresh instance.
         self.cv1 = yolo12_conv_block(

@@ -28,7 +28,7 @@ from typing import Optional, Tuple, Union, Any, List, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from .common import apply_attention_mask
+from .common import apply_attention_mask, dtype_name
 from ..activations import ProbabilityOutput
 from ..norms.factory import create_normalization_layer
 from dl_techniques.initializers.clone import clone_initializer
@@ -483,11 +483,8 @@ class HopfieldAttention(keras.layers.Layer):
 
             # mask_tensor is already a 1=keep predicate, passed through as-is:
             # apply_attention_mask does no polarity inference, so inverting it here would silently attend to padding instead of raising.
-            # getattr(d, "name", None) or str(d), not keras.backend.standardize_dtype
-            # (a banned Keras-2 residue); see common.py D-007 for the equivalence.
-            scores_dtype = getattr(
-                attention_scores.dtype, "name", None
-            ) or str(attention_scores.dtype)
+            # dtype_name (common.py, D-007) reads the dtype name; the idiom's reasoning lives there.
+            scores_dtype = dtype_name(attention_scores)
             attention_scores = apply_attention_mask(
                 attention_scores,
                 mask_tensor,

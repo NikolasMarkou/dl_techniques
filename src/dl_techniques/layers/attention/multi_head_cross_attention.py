@@ -39,6 +39,7 @@ from dl_techniques.layers.norms import create_normalization_layer
 from .common import (
     apply_attention_mask,
     compute_attention_scale,
+    dtype_name,
     validate_head_divisibility
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -558,9 +559,8 @@ class MultiHeadCrossAttention(keras.layers.Layer):
 
         # The 1=keep mask passes through as-is to the shared bias helper; do not
         # normalize or invert it, since the helper infers no polarity and an inversion would fail silently.
-        # getattr(..., "name", None) avoids a banned Keras-2 dtype-standardize
-        # call; see common.py, D-007.
-        scores_dtype = getattr(scores.dtype, "name", None) or str(scores.dtype)
+        # dtype_name (common.py, D-007) reads the dtype name; the idiom's reasoning lives there.
+        scores_dtype = dtype_name(scores)
         return apply_attention_mask(
             scores,
             attention_mask,

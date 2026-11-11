@@ -56,6 +56,7 @@ from dl_techniques.layers.norms.factory import create_normalization_layer
 from .common import (
     apply_attention_mask,
     compute_attention_scale,
+    dtype_name,
     mask_dtype,
     validate_head_divisibility,
 )
@@ -569,9 +570,8 @@ class RingAttention(keras.layers.Layer):
         # registered eager gradient on the TF backend, so concatenation runs after the loop instead.
         block_outputs = []
 
-        # getattr(..., "name", None) avoids a banned Keras-2 dtype-standardize
-        # call; see common.py, D-007.
-        state_dtype = getattr(queries.dtype, "name", None) or str(queries.dtype)
+        # dtype_name (common.py, D-007) reads the dtype name; the idiom's reasoning lives there.
+        state_dtype = dtype_name(queries)
         if attention_mask is not None:
             # DECISION plan-2026-07-27T183600-b4ef45f0/D-013: validate the mask
             # rank once here, before the loop -- an unsupported rank used to surface as an UnboundLocalError on the first iteration. See decisions.md.
@@ -699,10 +699,9 @@ class RingAttention(keras.layers.Layer):
         # Loop order places each block at its original q_start offset, so
         # concatenation reassembles the sequence axis correctly.
         outputs = keras.ops.concatenate(block_outputs, axis=2)
-        # getattr(..., "name", None) avoids a banned Keras-2 dtype-standardize
-        # call; see common.py, D-007.
+        # dtype_name (common.py, D-007) reads the dtype name; the idiom's reasoning lives there.
         return keras.ops.cast(
-            outputs, getattr(queries.dtype, "name", None) or str(queries.dtype)
+            outputs, dtype_name(queries)
         )
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:

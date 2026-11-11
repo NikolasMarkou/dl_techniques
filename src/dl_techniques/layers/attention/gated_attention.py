@@ -36,7 +36,7 @@ from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.activations import ProbabilityOutput, resolve_activation_layer
 from dl_techniques.utils.keras_registration import register_dl_technique
-from .common import apply_attention_mask, compute_attention_scale
+from .common import apply_attention_mask, compute_attention_scale, dtype_name
 
 # ---------------------------------------------------------------------
 
@@ -586,12 +586,8 @@ class GatedAttention(keras.layers.Layer):
                 # to broadcast against (batch, num_heads, seq_len, seq_len).
                 mask = attention_mask
 
-            # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
-            # a Keras-2 residue banned across `src/`, and `str` alone mis-renders a
-            # `tf.DType`. Full note and the measured equivalence at `common.py`; D-007.
-            logits_dtype = getattr(
-                scaled_attention_logits.dtype, "name", None
-            ) or str(scaled_attention_logits.dtype)
+            # `dtype_name` (common.py, D-007) reads the dtype name; the idiom's reasoning lives there.
+            logits_dtype = dtype_name(scaled_attention_logits)
             scaled_attention_logits = apply_attention_mask(
                 scaled_attention_logits,
                 mask,

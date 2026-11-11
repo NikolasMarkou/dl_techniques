@@ -167,7 +167,7 @@ self.norm = create_normalization_layer('layer_norm', axis=-1)
 
 `dl_techniques/layers/attention/common.py` is this package's single home for the small,
 provably-identical primitives that were previously re-derived across a dozen modules. It is
-deliberately **flat**: five module-level names, **no classes, no registry, no Keras
+deliberately **flat**: six module-level names, **no classes, no registry, no Keras
 registration**. Import from it the way you would import `math`.
 
 ```python
@@ -177,6 +177,7 @@ from .common import (
     apply_attention_mask,
     validate_head_divisibility,
     compute_attention_scale,
+    dtype_name,
 )
 ```
 
@@ -211,6 +212,15 @@ Returns the softmax temperature `1 / sqrt(head_dim)` as a plain **Python float**
     A layer storing `self.scale = sqrt(head_dim)` and later **dividing** by it uses the opposite
     convention and must not adopt the helper without rewriting its `call()`.
     (`wave_field_attention.py` is such a site and is intentionally left alone.)
+
+#### `dtype_name(x) -> str`
+
+Returns the dtype of a tensor as a plain string (`'float16'`), the form `mask_dtype` and
+`apply_attention_mask(out_dtype=...)` expect. It is `getattr(x.dtype, "name", None) or str(x.dtype)`:
+a `tf.DType` renders as `"<dtype: 'float16'>"` under bare `str`, and `keras.backend.standardize_dtype`
+is a banned Keras-2 residue. Pass the tensor, not a dtype. Every attention layer calls it; the idiom is
+not re-spelled at a site (`test_common.py::TestDtypeName` walks the package). `lighthouse_attention.py`
+takes a dtype object, not a tensor, so it keeps its own `getattr`.
 
 #### `validate_head_divisibility(dim, num_heads, *, dim_name=..., num_heads_name=...)`
 

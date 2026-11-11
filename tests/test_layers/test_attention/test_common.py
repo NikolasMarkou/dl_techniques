@@ -38,6 +38,7 @@ from dl_techniques.layers.attention.common import (
     MASK_BIAS_VALUE,
     apply_attention_mask,
     compute_attention_scale,
+    dtype_name,
     mask_dtype,
     validate_head_divisibility,
 )
@@ -1227,3 +1228,91 @@ class TestPreExistingExports:
         scale = compute_attention_scale(head_dim)
         assert isinstance(scale, float)
         assert scale == pytest.approx(1.0 / np.sqrt(head_dim), rel=1e-12)
+
+
+class TestDtypeName:
+    """``dtype_name(x)``: the one home of ``getattr(x.dtype, "name", None) or str(x.dtype)``."""
+
+    @pytest.mark.parametrize("name", ["float16", "bfloat16", "float32", "float64", "int32"])
+    def test_a_tensor_reports_its_plain_dtype_name(self, name):
+        x = ops.cast(ops.ones((2, 3)), name)
+        assert dtype_name(x) == name
+
+    def test_a_numpy_array_reports_its_plain_dtype_name(self):
+        assert dtype_name(np.zeros((2,), dtype=np.float16)) == "float16"
+
+    def test_a_keras_tensor_reports_its_plain_dtype_name(self):
+        assert dtype_name(keras.Input(shape=(4,), dtype="float16")) == "float16"
+
+    def test_a_dtype_without_a_name_falls_back_to_str(self):
+        """A backend handing back a bare string dtype has no ``.name``; ``str`` of it is right."""
+        import types
+
+        assert dtype_name(types.SimpleNamespace(dtype="float32")) == "float32"
+
+    def test_a_dtype_whose_name_is_none_falls_back_to_str(self):
+        import types
+
+        class _Dt:
+            name = None
+
+            def __str__(self):
+                return "float16"
+
+        assert dtype_name(types.SimpleNamespace(dtype=_Dt())) == "float16"
+
+    def test_the_result_feeds_mask_dtype(self):
+        """The call that every site makes: ``mask_dtype(dtype_name(scores))``."""
+        assert mask_dtype(dtype_name(ops.cast(ops.ones((2,)), "float16"))) == "float32"
+        assert mask_dtype(dtype_name(ops.cast(ops.ones((2,)), "float64"))) == "float64"
+
+    def test_no_attention_module_respells_the_idiom(self):
+        """A second spelling of the idiom is the duplication ``dtype_name`` removed.
+
+        AST walk over every module in the package except ``common.py``: no
+        ``getattr(<expr>.dtype, "name", ...)`` call may remain. ``lighthouse_attention``
+        takes a dtype itself (``getattr(dtype, "name", ...)``, first argument a bare name,
+        not an ``.dtype`` attribute), so it does not match and needs no exemption.
+        The walk is proved non-vacuous by the control below it.
+        """
+        import ast
+        import pathlib
+
+        import dl_techniques.layers.attention.common as common_mod
+
+        pkg = pathlib.Path(common_mod.__file__).parent
+        offenders = []
+        for path in sorted(pkg.glob("*.py")):
+            if path.name == "common.py":
+                continue
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if _is_dtype_name_idiom(node):
+                    offenders.append(f"{path.name}:{node.lineno}")
+        assert not offenders, (
+            "the dtype-name idiom is re-spelled; call "
+            f"common.dtype_name(x) instead: {offenders}"
+        )
+
+    def test_the_idiom_detector_is_not_blind(self):
+        import ast
+
+        hit = ast.parse('md = getattr(scores.dtype, "name", None) or str(scores.dtype)')
+        miss = ast.parse('md = getattr(dtype, "name", None) or str(dtype)')
+        assert any(_is_dtype_name_idiom(n) for n in ast.walk(hit))
+        assert not any(_is_dtype_name_idiom(n) for n in ast.walk(miss))
+
+
+def _is_dtype_name_idiom(node) -> bool:
+    """True for a ``getattr(<expr>.dtype, "name", ...)`` call."""
+    import ast
+
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and len(node.args) >= 2
+        and isinstance(node.args[0], ast.Attribute)
+        and node.args[0].attr == "dtype"
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value == "name"
+    )

@@ -38,7 +38,8 @@ from dl_techniques.layers.activations.probability_output import ProbabilityOutpu
 
 from .common import (
     apply_attention_mask,
-    compute_attention_scale
+    compute_attention_scale,
+    dtype_name,
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
 
@@ -671,10 +672,8 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         # The dtype the logits arrive in, captured before the helper's internal
         # promotion to `mask_dtype(...)`, so the return dtype of this method is
         # exactly what it always was.
-        # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
-        # a Keras-2 residue banned across `src/`, and `str` alone mis-renders a
-        # `tf.DType`. Full note and the measured equivalence at `common.py`; D-007.
-        logits_dtype = getattr(attention_logits.dtype, "name", None) or str(attention_logits.dtype)
+        # `dtype_name` (common.py, D-007) reads the dtype name; the idiom's reasoning lives there.
+        logits_dtype = dtype_name(attention_logits)
 
         # THIS SITE'S MASK POLARITY, passed through verbatim. The eight
         # multiply-form siblings take `1 = keep` floats, and `rpc_attention.py`

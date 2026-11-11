@@ -65,6 +65,7 @@ from dl_techniques.utils.keras_registration import register_dl_technique
 from .common import (
     mask_dtype,
     compute_attention_scale,
+    dtype_name,
     validate_head_divisibility,
 )
 
@@ -846,7 +847,7 @@ class KimiDeltaAttention(keras.layers.Layer):
         beta = ops.sigmoid(self.b_proj(x))
 
         # The recurrence runs in >= float32 whatever the policy.
-        rd = mask_dtype(getattr(q.dtype, "name", None) or str(q.dtype))
+        rd = mask_dtype(dtype_name(q))
         q = ops.reshape(ops.cast(q, rd), (batch_size, seq_len, H, dk))
         k = ops.reshape(ops.cast(k, rd), (batch_size, seq_len, H, dk))
         v = ops.reshape(ops.cast(v, rd), (batch_size, seq_len, H, dv))

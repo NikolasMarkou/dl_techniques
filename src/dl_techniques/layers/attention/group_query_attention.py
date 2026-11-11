@@ -46,6 +46,7 @@ from dl_techniques.layers.embedding.rotary_position_embedding import RotaryPosit
 from .common import (
     apply_attention_mask, 
     compute_attention_scale, 
+    dtype_name,
     validate_head_divisibility
 )
 from dl_techniques.utils.keras_registration import register_dl_technique
@@ -698,7 +699,7 @@ class GroupedQueryAttention(keras.layers.Layer):
         #
         # DECISION plan-2026-07-27T183600-b4ef45f0/D-017: rescue axis is derived
         # from this layer's own probability_config, not the helper's -1 default -- a caller can move the reduction axis. See decisions.md.
-        scores_dtype = getattr(scores.dtype, "name", None) or str(scores.dtype)
+        scores_dtype = dtype_name(scores)
         return apply_attention_mask(
             scores,
             mask,

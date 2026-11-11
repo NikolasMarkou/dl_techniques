@@ -190,7 +190,7 @@ class AreaAttentionBlock(keras.layers.Layer):
         # different-shape siblings whenever `mlp_ratio != 1` (every caller in
         # this tree), and `attn` decorrelates its own internal conv siblings
         # regardless of what `kernel_initializer` object it receives -- see
-        # `AreaAttention._fresh_initializer`. None of the three needs its own
+        # `AreaAttention` (`clone_initializer` per conv). None of the three needs its own
         # fresh instance here.
         self.mlp1 = ConvBlock(
             filters=self.mlp_hidden_dim,

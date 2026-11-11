@@ -1,8 +1,8 @@
 """
 Shared primitives for the ``layers/attention`` package: the attention-mask
 bias constant and its dtype rule, ``apply_attention_mask`` (the fp16-safe way
-to apply that bias), ``validate_head_divisibility``, and
-``compute_attention_scale``.
+to apply that bias), ``validate_head_divisibility``,
+``compute_attention_scale``, and ``dtype_name``.
 
 Masking is a pair: ``MASK_BIAS_VALUE`` is only safe inside the dtype
 ``mask_dtype()`` returns, since ``np.float16(-1e9)`` is ``-inf`` and
@@ -239,9 +239,9 @@ def apply_attention_mask(
         ``keep``, in ``out_dtype`` if given, else in ``mask_dtype(...)``.
     :rtype: keras.KerasTensor
     """
-    # DECISION plan-2026-09-03T033750-9bdf25f4/D-007: use getattr(d, "name", None)
-    # or str(d), not keras.backend.standardize_dtype (a banned Keras-2 residue) or a bare str(d) (wrong for a tf.DType). See decisions.md.
-    md = mask_dtype(getattr(logits.dtype, "name", None) or str(logits.dtype))
+    # DECISION plan-2026-09-03T033750-9bdf25f4/D-007: the dtype name is read with
+    # dtype_name (getattr(d, "name", None) or str(d)), not keras.backend.standardize_dtype (a banned Keras-2 residue) or a bare str(d) (wrong for a tf.DType). See decisions.md.
+    md = mask_dtype(dtype_name(logits))
     x = keras.ops.cast(logits, md)
     kept = keras.ops.cast(keep, md) > 0.0
     if rescue_axis is not None:
@@ -370,5 +370,35 @@ def compute_attention_scale(head_dim: int) -> float:
     :rtype: float
     """
     return 1.0 / math.sqrt(float(head_dim))
+
+
+def dtype_name(x: Any) -> str:
+    """The dtype of a tensor as the plain string Keras and :func:`mask_dtype` expect.
+
+    ``getattr(x.dtype, "name", None) or str(x.dtype)``: a ``tf.DType`` and a numpy
+    ``dtype`` carry ``.name`` (``'float16'``), while a backend that hands back a bare
+    string has no ``.name`` and ``str`` of it is already right. ``str`` alone is wrong
+    for a ``tf.DType`` (it renders ``"<dtype: 'float16'>"``), and
+    ``keras.backend.standardize_dtype`` is a Keras-2 residue banned across ``src/``.
+    Reads ``x.dtype`` only, so it also accepts a ``keras.KerasTensor`` and a symbolic
+    tensor inside a traced ``call()``.
+
+    :param x: Any object with a ``.dtype`` attribute: a tensor, a variable, a numpy
+        array or a ``keras.KerasTensor``.
+    :type x: Any
+
+    :raises AttributeError: If ``x`` has no ``.dtype``. A dtype object itself is not
+        accepted; pass the tensor.
+
+    :return: The dtype name, e.g. ``'float16'``, ``'bfloat16'`` or ``'float32'``.
+    :rtype: str
+    """
+    # DECISION plan-2026-11-11T131349-13b28b37/D-025: this is the ONE home of the
+    # `getattr(d, "name", None) or str(d)` idiom (equivalence and the banned
+    # alternatives: D-007 of plan-2026-09-03T033750-9bdf25f4, cited in
+    # apply_attention_mask). Do not re-spell it at a site, a second copy is
+    # the duplication this helper removed; a guard in test_common.py walks the
+    # package for it.
+    return getattr(x.dtype, "name", None) or str(x.dtype)
 
 # ---------------------------------------------------------------------
