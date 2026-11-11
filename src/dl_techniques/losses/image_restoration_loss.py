@@ -187,6 +187,9 @@ class FrequencyLoss(keras.losses.Loss):
         reduction: Type of reduction to apply. Default: "sum_over_batch_size"
         name: Name of the loss function. Default: "frequency_loss"
 
+    Raises:
+        ValueError: If ``norm`` is not exactly ``'l1'`` or ``'l2'``.
+
     Input shape:
         - y_true: (batch_size, height, width, channels)
         - y_pred: (batch_size, height, width, channels)
@@ -207,6 +210,12 @@ class FrequencyLoss(keras.losses.Loss):
         name: str = "frequency_loss"
     ):
         super().__init__(reduction=reduction, name=name)
+        # DECISION plan-2026-11-11T131349-13b28b37/D-029: `call` used to treat
+        # every string that was not 'l1' as l2, so a typo ('L1', 'l3', 'mse')
+        # silently trained against the wrong distance. Do NOT restore that
+        # else-branch; refuse the config here.
+        if norm not in ("l1", "l2"):
+            raise ValueError(f"norm must be 'l1' or 'l2', got {norm!r}")
         self.loss_weight = loss_weight
         self.norm = norm
 

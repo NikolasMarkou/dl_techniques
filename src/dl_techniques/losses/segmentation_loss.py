@@ -329,6 +329,10 @@ class SegmentationLosses:
         Raises:
             ValueError: If input tensors have invalid shapes
         """
+        # DECISION plan-2026-11-11T131349-13b28b37/D-029: this was the only one
+        # of the nine losses with no shape check; (2,8,8,3) vs (2,8,8,1)
+        # returned a number instead of raising.
+        self._validate_inputs(y_true, y_pred)
         return focal_tversky_scalar(
             y_true, y_pred,
             alpha=self.config.tversky_alpha,

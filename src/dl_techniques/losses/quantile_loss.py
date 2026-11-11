@@ -167,10 +167,17 @@ class QuantileLoss(keras.losses.Loss):
 
         self.normalize = normalize
 
+        # DECISION plan-2026-11-11T131349-13b28b37/D-029: `get_config` used to
+        # read the quantiles back out of the float32 tensor below, so
+        # [0.1, 0.5, 0.9] was emitted as [0.10000000149011612, 0.5,
+        # 0.8999999761581421]. Keep the Python floats as the source of truth and
+        # derive the tensor from them; do NOT serialize the tensor.
+        self.quantiles = [float(q) for q in quantiles]
+
         # Store quantiles as a tensor shaped for broadcasting against (batch, time, quantiles)
         # Shape: (1, 1, num_quantiles)
-        self.quantiles_tensor = keras.ops.convert_to_tensor(quantiles, dtype=keras.config.floatx())
-        self.quantiles_tensor = keras.ops.reshape(self.quantiles_tensor, (1, 1, len(quantiles)))
+        self.quantiles_tensor = keras.ops.convert_to_tensor(self.quantiles, dtype=keras.config.floatx())
+        self.quantiles_tensor = keras.ops.reshape(self.quantiles_tensor, (1, 1, len(self.quantiles)))
 
     def call(self, y_true: keras.KerasTensor, y_pred: keras.KerasTensor) -> keras.KerasTensor:
         """
@@ -228,9 +235,8 @@ class QuantileLoss(keras.losses.Loss):
     def get_config(self) -> dict:
         """Get loss configuration for serialization."""
         config = super().get_config()
-        # Convert tensor back to a standard list for JSON serialization
         config.update({
-            'quantiles': keras.ops.convert_to_numpy(self.quantiles_tensor).flatten().tolist(),
+            'quantiles': list(self.quantiles),
             'normalize': self.normalize,
         })
         return config

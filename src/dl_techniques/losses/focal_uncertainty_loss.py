@@ -393,8 +393,10 @@ def analyze_focal_uncertainty_loss(
         >>> print(f"Focal loss: {analysis['focal_loss']:.4f}")
         >>> print(f"Conditional entropy: {analysis['h_conditional_unweighted']:.4f}")
     """
-    # Ensure consistent dtype
-    y_true = ops.cast(y_true, dtype=y_pred.dtype)
+    # Accept plain nested lists (the docstring example passes them) and ensure
+    # a consistent dtype.
+    y_pred = ops.convert_to_tensor(y_pred, dtype=keras.config.floatx())
+    y_true = ops.cast(ops.convert_to_tensor(y_true), dtype=y_pred.dtype)
     epsilon = loss_fn.epsilon
 
     # ============================================================================
@@ -420,8 +422,11 @@ def analyze_focal_uncertainty_loss(
             # Apply softmax transformation to logits
             probs = ops.softmax(y_pred, axis=-1)
         else:
-            # Clip probabilities for numerical stability
+            # Clip for numerical stability, then renormalize so rows still sum
+            # to 1, exactly as `FocalUncertaintyLoss.call` does.
+            # DECISION plan-2026-11-11T131349-13b28b37/D-029
             probs = ops.clip(y_pred, epsilon, 1.0 - epsilon)
+            probs = probs / ops.sum(probs, axis=-1, keepdims=True)
 
         # Compute the unweighted conditional entropy (uncertainty measure)
         # This represents the average entropy of individual predictions

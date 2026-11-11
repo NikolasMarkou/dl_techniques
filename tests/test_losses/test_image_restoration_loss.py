@@ -741,3 +741,18 @@ class TestIntegration:
 if __name__ == "__main__":
     # Run the test suite
     pytest.main([__file__, "-v", "--tb=short"])
+
+class TestFrequencyLossRefusesUnknownNorm:
+    """`FrequencyLoss` used to treat every non-'l1' string as l2."""
+
+    @pytest.mark.parametrize("bad_norm", ["foo", "L1", "l3", "mse", None])
+    def test_unknown_norm_raises(self, bad_norm) -> None:
+        # DECISION plan-2026-11-11T131349-13b28b37/D-029: a norm that is not
+        # l1/l2 raised nothing and silently computed the l2 value (10.166 vs
+        # the l1 2.473 on the probe); this fails if the else-branch returns.
+        with pytest.raises(ValueError, match="norm"):
+            FrequencyLoss(norm=bad_norm)
+
+    @pytest.mark.parametrize("norm", ["l1", "l2"])
+    def test_valid_norm_still_accepted(self, norm: str) -> None:
+        assert FrequencyLoss(norm=norm).norm == norm

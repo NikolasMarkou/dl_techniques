@@ -647,3 +647,14 @@ def test_numerical_stability_with_extreme_values(loss_config: LossConfig) -> Non
 if __name__ == "__main__":
     # Run the test suite
     pytest.main([__file__, "-v", "--tb=short"])
+
+def test_focal_tversky_validates_input_shapes() -> None:
+    """`focal_tversky_loss` was the only one of nine losses with no shape check."""
+    # DECISION plan-2026-11-11T131349-13b28b37/D-029: (2,8,8,3) vs (2,8,8,1)
+    # returned 0.4628 silently; it must raise like every sibling.
+    losses = SegmentationLosses(LossConfig(num_classes=3))
+    y_true = np.random.RandomState(0).rand(2, 8, 8, 3).astype("float32")
+    y_pred = np.random.RandomState(1).rand(2, 8, 8, 1).astype("float32")
+
+    with pytest.raises(ValueError, match="Shape mismatch"):
+        losses.focal_tversky_loss(y_true, y_pred)
