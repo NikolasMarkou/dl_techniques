@@ -50,21 +50,34 @@ cleared by this file:
     that was wrong (it takes int tokens and a ``(B, S, V)`` logits tensor, the
     ``_token_pair`` fixture). It is now MEASURED, rejected by the predicate, and
     sits in ``KNOWN_GOOD`` below.
-*   The remaining ~60 ``keras.losses.Loss`` subclasses in
-    ``src/dl_techniques/losses/`` were NOT swept. A static scan of their
-    ``call()`` return expressions shows further candidates (for example
-    ``multi_labels_loss`` and ``utilization_loss``).
-    ``brier_spiegelhalters_ztest_loss`` was on that list and its three loss
-    classes were fixed on 2026-09-02; they are in ``KNOWN_GOOD`` below.
-    **This file is a floor, not a census of the package.**
+*   Every other ``keras.losses.Loss`` subclass in ``src/dl_techniques/losses/`` is
+    accounted for by the CLOSURE CENSUS at the bottom of this file, which fails
+    when a class is in no bucket. Accounted for is not the same as cleared: the
+    ``NOT_PINNED`` bucket says in a reason per class why nothing here measures it,
+    and ``KNOWN_SCALAR_NOT_YET_FIXED`` names the classes still carrying the defect
+    (``SAMMaskLoss``, ``SAM2GatedMaskLoss``). Three more live outside ``losses/``
+    (``SupervisedSliceLoss``, ``TSTCausalLMLoss``, ``DocScannerRectifierObjective``)
+    and no census here reaches them.
+    ``brier_spiegelhalters_ztest_loss`` was once on the unswept list and its three
+    loss classes were fixed on 2026-09-02; they are in ``KNOWN_GOOD`` below, as are
+    the five fixed by ``plan-2026-11-11T223825-64d1b401``
+    (``DiceLossPerChannel``, ``PerChannelBinaryLoss``, ``ClusteringLoss``,
+    ``GNNUtilizationLoss``, ``MANNUtilizationLoss``).
 """
+
+import collections
 
 import keras
 import numpy as np
 import pytest
 
+from .test_the_losses_package_surface_is_consistent import (
+    _every_loss_class_in_the_package,
+)
+
 PLAN = "plan-2026-08-30T203107-30455f66"
 
+MIN_MEASURED = 31  # len(STILL_BROKEN) + len(KNOWN_GOOD), re-derived by import at step 6
 BATCH = 4
 SAMPLE_WEIGHT = np.array([1.0, 1.0, 1.0, 0.0], dtype="float32")
 MEAN_W = 0.75
@@ -238,8 +251,9 @@ def _memory_pair():
 # ---------------------------------------------------------------------
 
 # (module, class, ctor kwargs, input builder)
-# EMPTY IS THE SUCCESS STATE. All 14 measured members have been fixed and every
-# one of them is in KNOWN_GOOD below -- none was deleted. The two arms
+# EMPTY IS THE SUCCESS STATE. Every class this file ever pinned as broken (the 14
+# measured on 2026-08-31, and the five of plan-2026-11-11T223825-64d1b401 found
+# later) has been fixed and is in KNOWN_GOOD below -- none was deleted. The two arms
 # parametrized on this list therefore contribute no test nodes; that is expected
 # and is NOT the file going vacuous. The KNOWN_GOOD arm is what keeps the
 # predicate honest, and `test_the_pinned_population_has_not_shrunk_silently`
@@ -513,9 +527,10 @@ def test_the_pinned_population_has_not_shrunk_silently():
     direction.
     """
     total = len(STILL_BROKEN) + len(KNOWN_GOOD)
-    assert total >= 20, (
-        f"{PLAN} measured 14 members on 2026-08-31 and 6 known-good controls; "
-        f"the total measured population is now {total} "
+    assert total >= MIN_MEASURED, (
+        f"the measured population was {MIN_MEASURED} rows when plan-2026-11-11T223825-"
+        f"64d1b401 closed it (20 at {PLAN}, 26 before that plan's five rows); it is "
+        f"now {total} "
         f"(STILL_BROKEN={len(STILL_BROKEN)}, KNOWN_GOOD={len(KNOWN_GOOD)}). A "
         f"member is removed from STILL_BROKEN only by being FIXED, and a fixed "
         f"member MOVES to KNOWN_GOOD in the same commit -- it is never deleted."
@@ -576,4 +591,133 @@ def test_stable_max_cross_entropy_is_token_shaped_on_purpose():
     assert abs(weighted - unweighted * MEAN_W) > 1e-6, (
         f"a (batch, 1) sample_weight was applied as a broadcast scalar "
         f"(unweighted={unweighted!r}, weighted={weighted!r})"
+    )
+
+
+# ---------------------------------------------------------------------
+# the closure census: every Loss class in losses/ has a stated status
+# ---------------------------------------------------------------------
+# DECISION plan-2026-11-11T223825-64d1b401/D-008
+# A class in no bucket is the failure, not a class in a bad bucket. Do NOT shrink
+# this to a hand list of names without the enumeration (it must be derived from the
+# package), and do NOT read NOT_PINNED as "correct": its reasons say what is NOT
+# known. The generic fixtures are a one-off probe, not a claim about real inputs.
+
+
+def _bucket(reason, *groups):
+    """``{"module.Class": reason}`` from groups written ``"module ClassA ClassB"``."""
+    return {f"{g.split()[0]}.{n}": reason for g in groups for n in g.split()[1:]}
+
+
+DOCUMENTED_SCALAR = _bucket(
+    "the confusion matrix is global over the batch, so call() returns a scalar by "
+    "design (losses/AGENTS.md, any_loss entry)",
+    "any_loss AccuracyLoss PrecisionLoss RecallLoss SpecificityLoss F1Loss FBetaLoss "
+    "BalancedAccuracyLoss GeometricMeanLoss YoudenJLoss MCCLoss CohenKappaLoss "
+    "IoULoss DiceLoss TverskyLoss FocalTverskyLoss",
+)
+KNOWN_SCALAR_NOT_YET_FIXED = _bucket(
+    "call() returns a scalar and the predicate accepts it: an unfixed premature "
+    "scalar outside the five of plan-2026-11-11T223825-64d1b401 (D-010); when one "
+    "is fixed MOVE it to KNOWN_GOOD",
+    "sam_mask_loss SAMMaskLoss", "sam2_video_loss SAM2GatedMaskLoss",
+)
+_PROBE = (
+    "one-off probe on generic fixtures (plan-2026-11-11T223825-64d1b401 step 6), "
+    "no builder or pin row here: "
+)
+NOT_PINNED = {
+    **_bucket(
+        _PROBE + "constructor needs arguments, so the fresh-instance predicate cannot build it",
+        "any_loss WeightedCrossEntropyWithAnyLoss",
+        "dino_loss iBOTPatchLoss", "sam2_video_loss SAM2IoULoss",
+        "segmentation_wrapper_loss SegmentationWrapperLoss",
+        "yolo12_multitask_loss YOLOv12MultiTaskLoss",
+    ),
+    **_bucket("abstract base: call() raises NotImplementedError", "any_loss AnyLoss"),
+    **_bucket(
+        _PROBE + "every generic fixture raised (dict, packed or specially typed inputs)",
+        "clifford_detection_loss CliffordDetectionLoss",
+        "clip_contrastive_loss CLIPContrastiveLoss", "ddpm_hybrid_loss DDPMHybridLoss",
+        "colbert_loss ColBERTPairwiseSoftmaxLoss ColBERTDistillationLoss",
+        "doc_scanner_flow_sequence_loss DocScannerFlowSequenceLoss",
+        "infonce_loss SymmetricInfoNCELoss", "lightglue_loss LightGlueLoss",
+        "omnipoint_losses PointDistanceLoss", "tabm_loss TabMLoss",
+        "reid_cosine_loss SoftmarginTripletLoss", "sam3_detection_loss Sam3DetectionLoss",
+        "sam2_video_loss SAM2ObjectScoreLoss", "topographic_vae_loss TopographicVAELoss",
+        "siamese_tracking_loss DaSiamRPNClsLoss DaSiamRPNRegLoss",
+        "yolo12_multitask_loss YOLOv12ObjectDetectionLoss DiceFocalSegmentationLoss",
+    ),
+    **_bucket(
+        _PROBE + "call() never returned a scalar on any fixture that drove it "
+        "((batch,) or a shape following the input rank), predicate not run",
+        "image_restoration_loss CharbonnierLoss FrequencyLoss EdgeLoss VGGLoss "
+        "EnhanceLoss DarkIRCompositeLoss",
+        "omnipoint_losses RayDirectionLoss MaskLoss NormalConsistencyLoss "
+        "LocalConsistencyLoss MetricScaleLoss",
+        "sparse_segmentation_loss SparseDiceLoss SparseFocalLoss SparseCeDiceLoss",
+        "superpoint_loss SuperPointDetectorLoss SuperPointDescriptorLoss",
+        "wasserstein_loss WassersteinDivergence WassersteinLoss "
+        "WassersteinGradientPenaltyLoss",
+        "multi_labels_loss WeightedBinaryCrossEntropyLoss WeightedBinaryFocalLoss",
+        "lpips_loss LPIPSLoss", "multistep_loss MultistepLoss",
+        "siamese_tracking_loss SiamFCLogisticLoss", "capsule_margin_loss CapsuleMarginLoss",
+        "decoupled_information_loss DecoupledInformationLoss",
+        "flow_matching_velocity_loss FlowMatchingVelocityLoss",
+        "sparsemax_loss SparsemaxLoss", "yolo12_multitask_loss ClassificationFocalLoss",
+        "chamfer_loss ChamferLoss", "harmonic_loss HarmonicCausalLMLoss",
+        "mean_shift_instance_loss MeanShiftInstanceLoss", "hrm_loss StableMaxCrossEntropy",
+    ),
+}
+BUCKETS = {
+    "KNOWN_GOOD": {f"{m}.{c}": "measured" for m, c, _, _ in KNOWN_GOOD},
+    "DOCUMENTED_SCALAR": DOCUMENTED_SCALAR,
+    "KNOWN_SCALAR_NOT_YET_FIXED": KNOWN_SCALAR_NOT_YET_FIXED,
+    "NOT_PINNED": NOT_PINNED,
+}
+
+
+def _census_problems(classes):
+    """``classes`` is ``_every_loss_class_in_the_package()``'s ``(module, name) -> cls``."""
+    keys = {f"{m.rsplit('.', 1)[-1]}.{n}" for m, n in classes}
+    seen = collections.Counter(k for bucket in BUCKETS.values() for k in bucket)
+    return {
+        "in no bucket": sorted(keys - set(seen)),
+        "bucketed but not a class in losses/": sorted(set(seen) - keys),
+        "in more than one bucket": sorted(k for k, n in seen.items() if n > 1),
+    }
+
+
+def test_every_loss_class_is_in_exactly_one_bucket():
+    found = _census_problems(_every_loss_class_in_the_package())
+    problems = {k: v for k, v in found.items() if v}
+    assert not problems, (
+        f"{problems}: measure a new Loss class into KNOWN_GOOD (builder and row) or "
+        f"name it in another bucket with a reason; a removed one leaves its bucket."
+    )
+
+
+def test_the_census_goes_red_for_a_new_loss_class():
+    """ANTI-VACUITY of the census: a Loss subclass in no bucket must be reported."""
+
+    classes = dict(_every_loss_class_in_the_package())
+    classes[("dl_techniques.losses.brand_new_loss", "BrandNewLoss")] = keras.losses.Loss
+    assert _census_problems(classes)["in no bucket"] == ["brand_new_loss.BrandNewLoss"]
+    del classes[("dl_techniques.losses.huber_loss", "HuberLoss")]
+    stale = _census_problems(classes)["bucketed but not a class in losses/"]
+    assert stale == ["huber_loss.HuberLoss"]
+
+
+_SCALAR_KEYS = sorted({**DOCUMENTED_SCALAR, **KNOWN_SCALAR_NOT_YET_FIXED})
+
+
+@pytest.mark.parametrize("key", _SCALAR_KEYS)
+def test_a_scalar_bucket_entry_still_returns_a_scalar(key):
+    """A fix moves the class to KNOWN_GOOD: this goes red the day it is per-sample."""
+    module, cls = key.split(".")
+    is_member = _charges_every_row_the_batch_aggregate(module, cls, {}, _seg_pair)[0]
+    shape = tuple(keras.ops.shape(_make(module, cls, {}).call(*_seg_pair())))
+    assert is_member and shape == (), (
+        f"{key} is no longer a scalar (call() shape {shape}, member={is_member}): "
+        f"move it from its scalar bucket to KNOWN_GOOD with a builder row."
     )
