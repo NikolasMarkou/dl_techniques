@@ -2416,10 +2416,13 @@ def _evaluate_held_out(
     same arguments given to that script reproduce them.
     """
     # DECISION plan-2026-09-19T131351-b8d39688/D-009: function-level import, because
-    # eval_psnr_vs_noise imports this module (``DATA_MIN`` and friends) and a top-level
-    # import here would be circular. Do NOT hoist it, and do NOT copy its sampling / noise /
-    # PSNR helpers in (a second instrument would drift from the one every later comparison
-    # is run with) or move them here (a large move of a working script for a cosmetic import).
+    # eval_psnr_vs_noise imported this module (``DATA_MIN`` and friends) and a top-level
+    # import here would have been circular. plan-2026-11-10T095307-d483ffab/D-040: that edge is
+    # gone (the script takes its helpers from ``train.common.denoising_run``), so the cycle no
+    # longer exists and the import stays function-level only because nothing needs it hoisted.
+    # Do NOT copy its sampling / noise / PSNR helpers in (a second instrument would drift from
+    # the one every later comparison is run with) or move them here (a large move of a working
+    # script for a cosmetic import).
     from train.bfunet import eval_psnr_vs_noise as ev
 
     started = time.time()
