@@ -132,8 +132,13 @@ class FocalCausalLMLoss(keras.losses.Loss):
         :param y_pred: Predicted logits ``(batch, seq_len, vocab_size)``.
         :return: Per-sample loss with shape ``(batch,)``, scaled so that Keras'
             default ``sum_over_batch_size`` reduction reproduces the batch-wide
-            mean over non-masked positions EXACTLY. Keeping the batch axis is
-            what lets ``sample_weight`` and ``reduction=`` select rows.
+            mean over non-masked positions EXACTLY. The batch axis lets
+            ``sample_weight`` and ``reduction=`` act per row, but the rows are
+            COUPLED through the batch-wide valid-token count in the
+            denominator: a zero ``sample_weight`` zeroes that row's
+            contribution while its tokens still count there, so it is NOT the
+            same as dropping the row (``loss(w) == loss(batch without the row)
+            * (N - n_d) / N`` for ``n_d`` valid tokens in the zeroed row).
         """
         # Mask: 1.0 for real tokens, 0.0 for ignored
         mask = ops.cast(y_true != self.ignore_index, "float32")

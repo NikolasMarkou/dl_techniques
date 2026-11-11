@@ -56,7 +56,7 @@ The README table is the full inventory, grouped by domain.
 - `doc_scanner_flow_sequence_loss.py`: DocScanner Eq. 9-14. **The only module in `losses/` that imports from `models/`**; see the D-031 anchor.
 - `feature_alignment_loss.py`: Margin-thresholded cosine alignment for distillation (Depth Anything Eq. 9: a step at the margin, not a hinge).
 - `flow_matching_velocity_loss.py`: Velocity MSE for rectified flow. Time weighting belongs in the trainer.
-- `focal_causal_lm_loss.py`: Focal token CE with an ignore index. Rows are scaled so the batch mean equals the token-pool mean.
+- `focal_causal_lm_loss.py`: Focal token CE with an ignore index. Rows are scaled so the batch mean equals the token-pool mean, which couples them through the batch-wide token count: a zero `sample_weight` is not a row drop.
 - `focal_uncertainty_loss.py`: Categorical focal loss minus per-sample entropy, plus an analysis helper.
 - `harmonic_loss.py`: `harmonic_logits(x, w, n, eps) = -(n/2) * log(||x - w||^2 + eps)` computed in at least float32, and `HarmonicCausalLMLoss` (`from_logits` fixed to `True`).
 - `hrm_loss.py`: HRM loss: LM term plus Q-halt and Q-continue BCE terms. `StableMaxCrossEntropy` is per-token by design (D-002), and the `reduction="none"` on its sub-loss is load-bearing (D-001).
@@ -68,11 +68,11 @@ The README table is the full inventory, grouped by domain.
 - `lpips_loss.py`: LPIPS-flavored perceptual distance over a frozen VGG16/19. The extractor is built lazily on first call.
 - `mambalct_loss.py`: `l1_weight * L1 + giou_weight * (1 - GIoU)` over per-frame boxes, averaged over the clip inside each row.
 - `mase_loss.py`: MASE with a per-row numerator over a batch-global naive denominator (deliberately not per row).
-- `masked_causal_lm_loss.py`: Masked token CE and its prefix alias. Rows are scaled so the batch mean equals the token-pool mean.
+- `masked_causal_lm_loss.py`: Masked token CE and its prefix alias. Rows are scaled so the batch mean equals the token-pool mean, which couples them through the batch-wide token count: a zero `sample_weight` is not a row drop.
 - `mean_shift_instance_loss.py`: Per-row pull/push instance-embedding loss. Subsamples to `max_points` only when `N` is static.
 - `multi_labels_loss.py`: `PerChannelBinaryLoss` (adaptive per-channel weighting; base must be `'binary_crossentropy'` or element-wise), element-wise `WeightedBinaryFocalLoss` and `WeightedBinaryCrossEntropyLoss`, `DiceLossPerChannel`, and a factory.
 - `multistep_loss.py`: ADAM `mseh` / `tmse` / `gtmse` / `msce` over the horizon axis. `gtmse` is a first-order surrogate about the detached batch mean, exact in value and gradient. The factory raises on unknown kwargs.
-- `nano_vlm_loss.py`: Shifted next-token CE scored on the trailing label-length positions (drops the vision prefix). Reimplements reduction internally.
+- `nano_vlm_loss.py`: Shifted next-token CE scored on the trailing label-length positions (drops the vision prefix). Reimplements reduction internally. Same row coupling as `MaskedCausalLMLoss` (a zero `sample_weight` keeps the row's tokens in the denominator).
 - `omnipoint_losses.py`: OmniPoint ray / distance / scale decoupling, finite-difference normal and Laplacian consistency (D-004), mask BCE, `compute_optimal_scale`, and the tuple-in `OmniPointCombinedLoss` callable. Scale alignment uses the ground-truth ray (D-026).
 - `quantile_loss.py`: Single-quantile `MQLoss` and vectorized multi-quantile `QuantileLoss` (optionally normalized, with the scale floored at 1.0).
 - `reid_cosine_loss.py`: Batch-hard softmargin triplet loss, and NumPy `magnet_loss_fn` (batch-level, deliberately not a `Loss`).
@@ -119,6 +119,8 @@ loss(w=[1, ..., 1, 0]) * B / (B - 1) == loss(batch[:-1])
 ```
 
 `tests/test_losses/test_confidence_penalty_loss.py` shows the pattern (`test_zeroing_a_sample_weight_equals_dropping_the_row`). Document the coupling in the docstring.
+
+The token-mean language-model losses (`NanoVLMLoss`, `MaskedCausalLMLoss` and its subclasses, `FocalCausalLMLoss`, the `HRMLoss` LM term) are such losses, and the identity above does NOT hold for them: each row is `S_i / N * B` with `N` the batch-wide valid-token count, and `call()` never sees `sample_weight`, so a zero weight keeps the row's tokens in `N`. The pin for them is `loss(w) == loss(batch without row d) * (N - n_d) / N`, written against an independent float64 reference (`tests/test_losses/test_the_nano_vlm_loss_scores_the_text_positions.py`). Never write "`sample_weight` selects rows" in these docstrings.
 
 ### One loss object sees one tensor
 

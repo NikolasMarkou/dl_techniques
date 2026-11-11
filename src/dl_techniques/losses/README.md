@@ -14,7 +14,8 @@
 - `MultistepLoss("gtmse")`;
 - the calibration Z-statistics;
 - `ClusteringLoss`;
-- the utilization losses.
+- the utilization losses;
+- the token-mean language-model losses `NanoVLMLoss`, `MaskedCausalLMLoss` (and its `PrefixMaskedCausalLMLoss` and `HarmonicCausalLMLoss` subclasses), `FocalCausalLMLoss` and the language-model term of `HRMLoss`. Every row is scaled by the batch-wide count `N` of non-masked tokens, so a zero `sample_weight` removes the row's contribution but not its tokens from `N`: `loss(w) == loss(batch without the row) * (N - n_d) / N`, which equals the `(B - 1) / B` of a plain row drop only when every row has the same number of valid tokens.
 
 **One loss, one tensor.** A single loss object given a dict model output fails under `compile(loss=...)`. Keras broadcasts the object across every leaf and raises `KeyError`. Losses that need several tensors therefore take one packed tensor:
 

@@ -126,24 +126,90 @@ def test_reduction_none_returns_one_value_per_row():
         rows.mean(), float(NanoVLMLoss()(y_true, y_pred)), rtol=1e-6, atol=0)
 
 
-def test_sample_weight_selects_rows_instead_of_scaling_the_aggregate():
-    """RED at HEAD: the scalar broadcast made the weighted value exactly
-    `unweighted * mean(sample_weight)`, whichever rows were weighted."""
+def _weighted_data():
+    """Four rows with UNEQUAL valid-token counts (6, 6, 6 and 1)."""
     rng = np.random.default_rng(3)
     y_pred = rng.normal(size=(4, VISION + TEXT, VOCAB)).astype("float32")
     y_true = rng.integers(1, VOCAB, (4, TEXT)).astype("int32")
-    y_true[3, 2:] = 0  # row 3 has a different valid-token count
-    weights = np.array([1.0, 1.0, 1.0, 0.0], dtype="float32")
-    loss = NanoVLMLoss()
-    weighted = float(loss(y_true, y_pred, sample_weight=weights))
-    unweighted = float(loss(y_true, y_pred))
-    assert abs(weighted / unweighted - 0.75) > 1e-3
-    # Re-derived: zero-weighting row 3 keeps the other rows' shares of the
-    # batch-wide token mean and divides by the batch size.
-    rows = keras.ops.convert_to_numpy(
-        NanoVLMLoss(reduction="none")(y_true, y_pred))
-    np.testing.assert_allclose(weighted, (rows * weights).sum() / 4,
-                               rtol=1e-6, atol=0)
+    y_true[3, 2:] = 0  # row 3 keeps one valid target, the others keep six
+    return y_true, y_pred
+
+
+def _reference(y_true, y_pred, ignore_index=0, label_smoothing=0.0):
+    """Independent float64 NumPy derivation: ``(row_token_sums, valid_counts)``.
+
+    Per-token next-token cross-entropy over the trailing ``seq_len`` positions
+    (optionally smoothed), summed over each row's valid targets. Written from
+    the definition, not from the class, so it cannot share a defect with it.
+    """
+    text = y_pred[:, -y_true.shape[1]:].astype("float64")
+    logp = text - np.log(np.sum(np.exp(text), axis=-1, keepdims=True))
+    targets = y_true[:, 1:]
+    safe = np.maximum(targets, 0)
+    nll = -np.take_along_axis(logp[:, :-1], safe[..., None], axis=-1)[..., 0]
+    if label_smoothing:
+        smooth = -logp[:, :-1].mean(axis=-1)
+        nll = (1.0 - label_smoothing) * nll + label_smoothing * smooth
+    keep = (targets != ignore_index).astype("float64")
+    return (nll * keep).sum(axis=-1), keep.sum(axis=-1)
+
+
+# DECISION plan-2026-11-11T131349-13b28b37/D-046
+# The expected value below is derived from the formula, never from the loss's
+# own `reduction="none"` output (the previous version of this test did that and
+# could not fail). It also fixes the DOCUMENTED coupling: row i is
+# `S_i / N * B` with N the batch-wide valid-token count, so a zero weight does
+# not remove the row from N.
+@pytest.mark.parametrize("label_smoothing", [0.0, 0.1])
+@pytest.mark.parametrize("weights", [
+    [1.0, 1.0, 1.0, 1.0],
+    [1.0, 1.0, 1.0, 0.0],
+    [0.0, 1.0, 1.0, 1.0],
+    [0.5, 2.0, 1.0, 0.25],
+])
+def test_the_weighted_loss_equals_an_independent_float64_reference(
+        label_smoothing, weights):
+    y_true, y_pred = _weighted_data()
+    sums, counts = _reference(y_true, y_pred, label_smoothing=label_smoothing)
+    w = np.asarray(weights, dtype="float64")
+    rows = sums / counts.sum() * len(w)  # S_i / N * B, N over ALL rows
+
+    def value(reduction):
+        loss = NanoVLMLoss(label_smoothing=label_smoothing, reduction=reduction)
+        return keras.ops.convert_to_numpy(
+            loss(y_true, y_pred, sample_weight=np.asarray(weights, "float32")))
+
+    # Keras: sum_over_batch_size = sum(w * rows) / B; sum = sum(w * rows).
+    np.testing.assert_allclose(
+        value("sum_over_batch_size"), (w * rows).sum() / len(w), rtol=2e-6, atol=0)
+    np.testing.assert_allclose(
+        value("sum"), (w * rows).sum(), rtol=2e-6, atol=0)
+    np.testing.assert_allclose(value("none"), w * rows, rtol=2e-6, atol=0)
+
+
+@pytest.mark.parametrize("dead", [0, 3])
+def test_a_zero_sample_weight_is_not_the_same_as_dropping_the_row(dead):
+    """The documented coupling, pinned with its exact ratio.
+
+    Zeroing row ``d``'s weight removes its contribution but not its tokens from
+    the batch-wide denominator ``N``, so
+    ``loss(w) == loss(batch without d) * (N - n_d) / N`` exactly, and NOT the
+    ``(B - 1) / B`` of a plain row drop (the two agree only when every row has
+    the same valid-token count, which this data deliberately does not).
+    """
+    y_true, y_pred = _weighted_data()
+    weights = np.ones(4, dtype="float32")
+    weights[dead] = 0.0
+    keep = [i for i in range(4) if i != dead]
+
+    weighted = float(NanoVLMLoss()(y_true, y_pred, sample_weight=weights))
+    dropped = float(NanoVLMLoss()(y_true[keep], y_pred[keep]))
+
+    _, counts = _reference(y_true, y_pred)
+    ratio = (counts.sum() - counts[dead]) / counts.sum()
+    np.testing.assert_allclose(weighted, dropped * ratio, rtol=2e-6, atol=0)
+    # ... and the naive "same as dropping" expectation is measurably wrong:
+    assert abs(weighted * 4 / 3 - dropped) > 0.05 * dropped
 
 
 def test_a_one_token_sequence_scores_zero_without_a_python_branch():

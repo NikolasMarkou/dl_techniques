@@ -238,8 +238,12 @@ class HRMLoss(keras.losses.Loss):
             Per-sample total loss with shape ``(batch,)``: the LM term plus
             ``q_loss_weight`` times the two Q terms, each decomposed so that its
             OWN mean is the scalar it used to contribute. Keras' default
-            reduction recovers the total this used to return; keeping the batch
-            axis is what lets ``sample_weight`` and ``reduction=`` select rows.
+            reduction recovers the total this used to return. The batch axis
+            lets ``sample_weight`` and ``reduction=`` act per row, but the LM
+            term's rows are COUPLED through the batch-wide valid-token count
+            ``sum(valid_counts)``: a zero ``sample_weight`` zeroes a row's
+            contribution while its tokens still count in that denominator, so
+            it is NOT the same as dropping the row.
         """
         # Extract components
         labels = y_true["labels"]

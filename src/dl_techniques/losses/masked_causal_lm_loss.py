@@ -70,7 +70,9 @@ class MaskedCausalLMLoss(keras.losses.Loss):
                    over non-masked positions. Row i is
                    ``row_token_sum_i / total_valid_tokens_in_batch * batch``,
                    so it is proportional to the row's token COUNT -- not a
-                   per-sequence mean (see ``call()``).
+                   per-sequence mean (see ``call()``). The shared count makes
+                   the rows batch-coupled: a zero ``sample_weight`` is not a
+                   row drop.
 
     :param ignore_index: Label value to ignore in loss computation.
         Positions with this label are masked out. Default ``-1``.
@@ -114,8 +116,13 @@ class MaskedCausalLMLoss(keras.losses.Loss):
             ``(batch, seq_len, vocab_size)``.
         :return: Per-sample loss with shape ``(batch,)``, scaled so that Keras'
             default ``sum_over_batch_size`` reduction reproduces the batch-wide
-            mean over non-masked positions EXACTLY. Keeping the batch axis is
-            what lets ``sample_weight`` and ``reduction=`` select rows.
+            mean over non-masked positions EXACTLY. The batch axis lets
+            ``sample_weight`` and ``reduction=`` act per row, but the rows are
+            COUPLED through the batch-wide valid-token count in the
+            denominator: a zero ``sample_weight`` zeroes that row's
+            contribution while its tokens still count there, so it is NOT the
+            same as dropping the row (``loss(w) == loss(batch without the row)
+            * (N - n_d) / N`` for ``n_d`` valid tokens in the zeroed row).
         """
         # Build mask: 1.0 for real tokens, 0.0 for ignored positions
         mask = ops.cast(y_true != self.ignore_index, "float32")

@@ -166,6 +166,11 @@ class NanoVLMLoss(keras.losses.Loss):
         The input sequences are automatically shifted for autoregressive training:
         - Predictions use tokens [0:seq_len-1] to predict [1:seq_len]
         - This implements the standard language modeling objective
+
+        The per-row values share one batch-wide token count, so the rows are
+        coupled: a zero ``sample_weight`` removes a row's contribution but not
+        its tokens from the denominator, and is not the same as dropping the
+        row (see ``call``).
     """
 
     def __init__(
@@ -217,12 +222,22 @@ class NanoVLMLoss(keras.losses.Loss):
                 only the trailing ``seq_len`` positions are scored.
 
         Returns:
-            Per-sample loss of shape ``[batch_size]`` for every ``reduction``,
-            scaled so the default ``sum_over_batch_size`` reduction is the
-            batch-wide mean over non-masked tokens EXACTLY. Keeping the batch
-            axis is what lets ``sample_weight`` and ``reduction=`` select rows.
-            Under ``reduction="sum"`` the result is therefore ``batch_size``
-            times that mean, not the raw token sum.
+            Per-sample loss of shape ``[batch_size]`` for every ``reduction``.
+            Row ``i`` is ``S_i / N * batch_size``, where ``S_i`` is row ``i``'s
+            token-loss sum and ``N`` is the number of non-masked tokens in the
+            WHOLE batch, so the default ``sum_over_batch_size`` reduction is the
+            batch-wide mean over non-masked tokens EXACTLY. Under
+            ``reduction="sum"`` the result is therefore ``batch_size`` times
+            that mean, not the raw token sum.
+
+            The batch axis lets ``sample_weight`` and ``reduction=`` act per
+            row, but the rows stay COUPLED through ``N``: ``call()`` never sees
+            the weights, so a zero ``sample_weight`` zeroes that row's
+            contribution while its tokens still count in ``N``. It is NOT
+            equivalent to dropping the row: with ``n_d`` valid tokens in the
+            zero-weighted row, ``loss(w) == loss(batch without the row) *
+            (N - n_d) / N`` (``(B - 1) / B`` only when every row has the same
+            valid-token count).
 
         Raises:
             ValueError: If a rank is wrong or ``y_pred`` has fewer positions
@@ -273,6 +288,17 @@ class NanoVLMLoss(keras.losses.Loss):
         # branch in Python on the sequence length: it is a tensor under a
         # ragged `padded_batch`; a one-token sequence has no valid target and
         # row_token_sum = 0 already scores it 0.
+        #
+        # DECISION plan-2026-11-11T131349-13b28b37/D-046
+        # `total_valid_tokens` is BATCH-WIDE, so the rows are coupled and a
+        # zero `sample_weight` is not a row drop. That is documented, not
+        # fixed: `call()` receives no `sample_weight` (Keras multiplies it in
+        # afterwards), so the denominator cannot be restricted to weighted rows
+        # here. WHAT NOT TO DO: do not write "sample_weight selects rows" in a
+        # docstring for this form, and do not "fix" the coupling by dividing by
+        # a per-row count (that is the mean-of-means rejected above). The float64
+        # reference and the exact-ratio pin are in
+        # test_the_nano_vlm_loss_scores_the_text_positions.py.
         row_token_sum = keras.ops.sum(loss_per_token * mask, axis=-1)
         total_valid_tokens = keras.ops.sum(mask) + 1e-8
         batch_size = keras.ops.cast(keras.ops.shape(mask)[0], row_token_sum.dtype)
