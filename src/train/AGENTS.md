@@ -648,8 +648,11 @@ classification task calls the same `train.common.classification_run` helpers as 
   `ConfigError` that carries the claimed-run note: a result that is not a mapping; a name the sequence owns (`x`, `y`,
   `validation_data`, `validation_split`, `epochs`, `callbacks`, `verbose`, `initial_epoch`); a `steps_per_epoch` that is not a plain
   int (a bool is not) equal to the data object's `steps_per_epoch` (the schedule, the backup arithmetic and `settle_backup` count epochs of that
-  length); and a `train_ds` of infinite (-1) or unknown (-2) cardinality with no `steps_per_epoch`, which would hang (Keras 3.8 loops
-  `while True` on an epoch with neither): the message says `fit_kwargs` and `steps_per_epoch`. A data object with no `cardinality`
+  length); a `validation_steps` that is not a plain int equal to the cardinality of the data object's `select_ds` (Keras keeps ONE validation
+  iterator, so a shorter count scores another part of the stream each epoch and `val_loss` drifts; judged only against a `select_ds` of known
+  length); and a `train_ds` of infinite (-1) or unknown (-2) cardinality with no `steps_per_epoch` (Keras 3.8 loops `while True` on an
+  epoch with neither, and cannot size one from a stream that does not state its length): the message says `fit_kwargs` and
+  `steps_per_epoch`. A data object with no `cardinality`
   is skipped. Do not pass `steps_per_epoch` for every task to make it uniform; it changes the `fit` call of the three older tasks.
   `TaskTrainer.resume_stream(config, data, completed_steps)` (default `None`) is called once by `_resumed_data` in `load_data`,
   directly after `resume_decisions.settle_backup_pair`, and only by a resume that trains (never a fresh run, never a
@@ -675,7 +678,7 @@ classification task calls the same `train.common.classification_run` helpers as 
   at `sys.setswitchinterval(1e-6)` and none at the default interval, so a concurrency test of that guard must set the interval and
   restore it). BEiT therefore passes an `rng=` per call to `BeitMaskingGenerator.__call__` (`None` keeps the stateful path and the
   old draw) and builds `random.Random(f"{seed}:{salt}:{index}")` per row inside `tf.numpy_function`. The legacy stateful
-  `make_masked_patch_map_fn` and `make_beit_mim_map_fn` stay, with their tests, for the four legacy self-supervised trainers.
+  `make_masked_patch_map_fn` and `make_beit_mim_map_fn` stay, with their tests, for the two legacy trainers that call them, `train_mim` (BEiT) and `train_masked_completion` (energy transformer); the four trainers that read `load_image_streams` (those two, `train_tokenizer` and `train_dino`) are a different set.
 - **Per-task tables, not `if task ==` branches** (D-006). `train.api.predictor` holds one table per concern, each keyed by the task
   word: `RECORD_KEYS`, `DATA_KEYS`, `GEOMETRY_CHECKS`, `TAIL_CHECKS`, `INPUT_SHAPE_OF`, `INPUT_KEY`, `OUTPUT_CHECKS`,
   `PREDICTORS` and `EXPORT_RULES` (an `ExportRule(shape_of, check, note)`: the shape `export` traces, the cells it refuses, the

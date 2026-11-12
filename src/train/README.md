@@ -679,7 +679,10 @@ directory is claimed, and so is a `model_args` key the model takes from the task
   `max(1, round(75 / 196 * N))` (24 at N = 64) and `min_mask_patches_per_block` is `max(1, round(16 / 196 * N))` (5), the minimum
   clamped to the budget. Block masking can under-fill: 4.50 percent of 2,000 draws at (24, 5) on the 8 x 8 grid (mean shortfall 1.03
   patches, no empty mask), 31.45 percent at (75, 16) on 14 x 14. The weight makes an under-filled mask score on the same scale, and an
-  empty mask weighs 0. (5) An epoch is `n_train // batch_size` steps of an endless stream, the legacy arithmetic (1,406 steps on
+  empty mask weighs 0. LIMIT: an empty mask still counts as an example of loss 0 in the batch mean, so it dilutes `val_loss` (a probe
+  with empty masks: Keras reported 4.4455 where the mean over the examples that masked something was 6.6683). At the default auto mask
+  counts the measured share of empty masks is 0 on the 8 x 8 and 14 x 14 grids, so this bites only on tiny grids; the task does
+  not refuse one. (5) An epoch is `n_train // batch_size` steps of an endless stream, the legacy arithmetic (1,406 steps on
   CIFAR-10 and 266 on Imagenette at batch 32); `fit` is given `steps_per_epoch` and `validation_steps` by the task (the seam below), and
   Keras keeps ONE iterator across the epochs of a `fit`, so the counter the train masks are keyed on keeps climbing. (6) The legacy
   trainers have no resume, no run-directory guard and no verdict; this task has all three.
@@ -725,6 +728,11 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
   stream has (10 percent of an 8,192-code book would refuse fine tokenizers). It rests on those two tokenizers only, and it refuses
   the 1-epoch one, which is not collapsed (its unigram bar is 3.2051 nats against ln 512 = 6.2383): a floor of 4 effective codes would
   have admitted it. A one-code tokenizer is refused either way.
+  The estimate depends on how many positions are counted, that is on the size of the selection split: a perplexity cannot exceed the
+  number of positions, and a small sample reads low for a healthy tokenizer. The 5-epoch tokenizer reads 59.0 over 96 positions
+  (`data.max_samples=40`, 4 selection images, 68 distinct codes: REFUSED), 116.1 over 240, 195.6 over 480, 259.5 over 1,223 and 354.5 over
+  11,977 (`data.max_samples=5000`). The refusal therefore names the positions and the distinct codes it counted and says the estimate is
+  limited by the split size, so a small `data.max_samples` is not blamed on the tokenizer alone.
 * **The bar and its baseline** (D-009). `success_metric` is `val_loss`. `success_value` is the lowest `val_loss` of the selection
   window (the whole run, as `selection_start_epoch` is 0), `success_threshold` is `min(baseline, epoch-zero val_loss)` and the bar is
   STRICTLY below, compared in float32 (the base class's `>=` reads a loss backwards, and a model that equals the constant predictor must
@@ -754,12 +762,20 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
   stream seed is `seed` itself (`stream.stream_seed` in the summary). Only the stream seed moves: the split keeps `seed`, so no
   selection row ever reaches the train stream, and the selection and test masks stay fixed. A run killed twice reads a third distinct
   stream. The cost: a resumed run is NOT the unkilled run's continuation, its data order is a function of the completed-step count and
-  not of the stream the killed run would have read, so the replay of the unkilled stream is not reproduced; the data is loaded a second
-  time (and the baseline measured again) on a resume; and a killed epoch is still lost and trained again from its first batch unless
-  `checkpoint_args.backup_every_steps` bounds the loss (then only the batches the last copy had not taken run). With
-  `transform_args.augment` true, the augmentation seeds are re-randomised on every iterator (`tf.data.Dataset.random` with
-  `rerandomize_each_iteration`, in `dl_techniques/datasets/vision/augment_hook.py`), so two iterators of one stream seed differ in
-  their pixels; the shuffle and the masks do not depend on that, and the resume tests run unaugmented to compare streams. The help of
+  not of the stream the killed run would have read, so the replay of the unkilled stream is not reproduced; the resumed process loads the
+  data twice (`build_data` builds it and measures the baseline again, then `resume_stream` rebuilds the full request on the new stream
+  seed, `PretrainBatches.with_stream`), so a kill plus its resume reads the data three times in total; and a killed epoch is still lost and trained again from its first batch unless
+  `checkpoint_args.backup_every_steps` bounds the loss (then only the batches the last copy had not taken run). **Augmentation and
+  reproducibility.** With `transform_args.augment` true (the default) the augmented train PIXELS are not reproduced by one seed. On
+  CIFAR-10 the cause is the stateful ops: its augmentation is the plain hook `flip_pad_crop(seed=stream)`
+  (`train/common/image_streams.py`), which calls `tf.image.random_flip_left_right(seed=)` and `tf.image.random_crop(seed=)`
+  (`dl_techniques/datasets/vision/crops.py`) inside a map with `num_parallel_calls=AUTOTUNE` (`augment_hook.with_hook`), so the scheduling
+  order of the parallel calls decides which op draws which number: a same-seed rerun of an augmented CIFAR-10 run in a fresh process is
+  NOT bit-reproducible (the review measured one hook and one seed in three fresh processes: three different digests at AUTOTUNE, three
+  equal ones at `num_parallel_calls=1`). On Imagenette the augmentation is the seeded hook, whose per-element seeds come from
+  `tf.data.Dataset.random` with `rerandomize_each_iteration` (`dl_techniques/datasets/vision/augment_hook.py`), so two iterators of one stream seed differ in their
+  pixels there, by design. What stays deterministic on both: the masks, the shuffle and the stream-seed derivation, and the resume tests
+  and the exactness claims here run unaugmented. The help of
   `resume_interrupted` says it in one clause: "the training masks and the shuffle continue on a fresh stream derived from the seed and
   the steps completed, never epoch 0's order and never a selection row, and the selection and test masks stay fixed" (the other tasks
   say "the data order replays epoch 0's"), and the summary's resume note carries the same clause (`TaskTrainer.resume_order`).
@@ -781,7 +797,9 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
     GPUs), neither scaled to batch 32. The legacy trainers are not a parity arbiter (no ET or BEiT run existed to compare with), and
     no parity is claimed.
   * The BEiT stream is input-bound on the CPU: the tokenizer runs inside `tf.data` at batch 1, 1,894 images per second with
-    augmentation, so one CIFAR-10 epoch of 1,406 steps takes at least 27 seconds before any model compute (12 epochs: 5.4 minutes);
+    augmentation, so one CIFAR-10 epoch of 1,406 steps of 32 images takes 23.8 seconds of input (1,406 x 32 / 1,894), plus the 3.2 seconds of the
+    5,000-image selection pass, at least 27 seconds before any model compute (12 epochs: 5.4 minutes; the GPU gate's G3 epochs after
+    the first took 53.5 seconds on average, model compute included);
     ET's stream costs 2.5 seconds per epoch. Measured on the CPU with the GPU hidden.
   * The exact-equality claims above were measured on the CPU only.
 * **Gate numbers** (plan 46e5318f, Step 17: the first GPU measurement of this task). Five runs on GPU 0, an RTX 4090, one job at a time (the two G4 rows are each a killed run and its resume), each
@@ -804,6 +822,7 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
 
   No arm missed its bar. G1: 0.1743 against a zero predictor of 1.0041 (the untrained model scores 2.3379); its test loss on the reloaded best checkpoint is 0.1745. G2: 1.0225 against 1.6403 and an epoch-zero 2.0297 (the zero-predictor bar is met at 5 epochs, reported only), the energy trace has 1 header and 5 rows, the recorded global clip is 1.0. G3: 3.7712 against a unigram bar of 5.8716 (ln 512 = 6.2383), usage floor passed with 507 distinct codes, perplexity 354.8. In every run the epoch-zero term did not bind (the threshold is the baseline). The best epoch is the last one in all five runs, so none of them had stopped improving when its budget ended; `val_loss` rose between consecutive epochs 0 times in G1, 0 in G2 and 1 in G3.
   The exactness claims above, now on the GPU: the best checkpoint's reload gap is exactly 0.0 in all five runs; the untrained ET `val_loss` is the same float in G1 and in the ET kill run (2.3379111289978027 and 2.3379111289978027) and so is its zero-predictor baseline (1.0040831565856934 and 1.0040831565856934); the untrained BEiT `val_loss` is not: 6.2661356925964355 in G3 and 6.266140460968018 in the BEiT kill run, a relative difference of 7.6e-07 between two processes with one seed, so equality across processes on the GPU is measured for ET and not for BEiT.
+  **Legacy rescore (Step 18, report only, no parity claimed, D-012).** The legacy trainer (`train.energy_transformer.train_masked_completion`, `et_tiny`, cifar10, 12 epochs, its own defaults and stateful masks, 252,913 parameters like G1) was run once and its `best_model.keras` scored on the API's fixed selection stream under the API's loss: 0.17493 against 0.17435 for G1's own best checkpoint scored the same way (the control reproduces G1's logged 0.17435 to 3e-8); on the test stream 0.17504 against 0.17450. The two runs differ in their train masks and streams, so the numbers are reported and not graded.
   **Kill and resume (G4).** Each run was started with `checkpoint_args.backup_every_steps=300`, its PID recorded, and sent SIGKILL (that PID only) when the backup's metadata first read epoch 2 batch 299, that is after 2 CSV rows and 300 batches of the third epoch; the same command with `resume_interrupted=true` then finished with exit 0 in ET and exit 0 in BEiT. The copy held 3112 optimizer steps (2 x 1,406 + 300), the final copy 5624 (4 x 1,406): no step lost or run twice after the copy. The CSV has one row per epoch (0 to 3) and the two rows written before the kill are unchanged. The learning rate the CSV records at each epoch start equals the run's own schedule evaluated at 0, 1,406, 3,112 and 4,218 steps, exactly, in both families: `optimizer.iterations == epoch * steps_per_epoch` at the starts of epochs 0, 1 and 3, and the epoch the kill landed in starts from the copy, at 2 x 1,406 + 300 (the documented behaviour of `backup_every_steps`), so for that one epoch the equation reads plus 300. The first three train batches of the resumed process were not read back from the real fit (it was not traced); the stream its stream seed gives (`with_stream(3112)`), digested the way the CPU resume test does on the real CIFAR-10 unaugmented, differs from epoch 0's stream at all three batches in both families.
 * **Follow-up plans**, named and not started: the time-series and the language tasks (the second and third users of `fit_kwargs` and
   `resume_stream`), depth, DINO, the BEiT tokenizer as a method of its own (`beit_tokenizer`), a `task.json` record with `predict`
