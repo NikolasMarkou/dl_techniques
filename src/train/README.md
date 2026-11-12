@@ -6,10 +6,11 @@ guards, `REPO_MAP.md` at the repo root for which trainer trains which model). Mo
 
 ## `python -m train` and `train.api`
 
-A key=value command line over strict configs. It has three tasks, `image_classification`
+A key=value command line over strict configs. It has four tasks, `image_classification`
 (families `vit`, `resnet`, `convnext_v1`, `convnext_v2`, `cliffordnet`, `cliffordnet_hier`),
-`image_segmentation` (families `convunext`, `accunet`, `resnet_seg`, `convnext_seg`) and `image_denoising`
-(families `bfcnn`, `bfunet`, `bfconvunext`, `convunext_biased`, `scunet`), and the same code is a Python function. Run it from the repo root with `.venv`, with
+`image_segmentation` (families `convunext`, `accunet`, `resnet_seg`, `convnext_seg`), `image_denoising`
+(families `bfcnn`, `bfunet`, `bfconvunext`, `convunext_biased`, `scunet`) and `pretrain` (families `energy_transformer`, `beit`),
+and the same code is a Python function. Run it from the repo root with `.venv`, with
 `MPLBACKEND=Agg` on a headless machine.
 
 ```bash
@@ -304,7 +305,7 @@ denoised = load_model("<run>/final_model.keras").predict("noisy.png")["denoised"
 ```
 
 * **Families** (`train/api/denoising_models.py`; each trains this task only: `python -m train image_denoising model=vit/vit_pico` exits 2 naming
-  the families of this task, and the other two tasks refuse these five the same way). `bfcnn`, `bfunet` and `bfconvunext` are bias-free (`ModelSpec.properties` holds
+  the families of this task, and the other three tasks refuse these five the same way). `bfcnn`, `bfunet` and `bfconvunext` are bias-free (`ModelSpec.properties` holds
   `"bias_free"`: no additive constant anywhere, so `f(a x) = a f(x)`; the three are checked, see Homogeneity below);
   `convunext_biased` (ConvUNext with `use_bias=true`, its own family because the segmentation family forces
   `output_channels` to the class count) and `scunet` carry constants and are never checked. `scunet` has no variants table in the
@@ -598,6 +599,196 @@ images: a hypothesis for the spread of the whole-image cells, not a finding.
   that smoke (the multiplicative run ended 1.0 dB below its input); clipped noise ran there and in the additive parity arm, not in the
   24-epoch gate.
 
+**`pretrain`** (plan 46e5318f): masked-image pretraining on CIFAR-10 or Imagenette; the labels are not used. The family chooses the
+method (there is no `method` key): `energy_transformer` completes the pixels of masked patches (ET masked completion) and `beit`
+predicts the code ids that a frozen stage-0 tokenizer gives the masked patches (BEiT masked image modelling). `out`, `model` and
+`data.dataset` are required, and a `beit` run also needs `model_args.tokenizer_checkpoint`. A seeded slice of the train rows selects
+the best epoch, as in the other tasks, and the test split is scored once after `fit`.
+
+```bash
+python -m train list_models task=pretrain
+python -m train pretrain                     # every key of the task, its type and default
+python -m train pretrain out=auto model=energy_transformer/et_tiny data.dataset=cifar10 epochs=12
+python -m train pretrain out=auto model=beit/beit_tiny data.dataset=cifar10 epochs=12 \
+    model_args.tokenizer_checkpoint=/path/to/stage0_run/best_model.keras
+```
+
+```python
+from train.api import train_pretrain
+result = train_pretrain(out="auto", model="energy_transformer/et_tiny", data={"dataset": "cifar10"}, epochs=12)
+```
+
+* **Families** (`train/api/pretrain_models.py`; the variants are the keys of each model module's `MODEL_VARIANTS`, and
+  `python -m train list_models task=pretrain` prints them). Each family trains this task only: a `vit/vit_pico` model given to `pretrain`
+  exits 2 naming the families of this task, and the other three tasks refuse these two the same way.
+
+| Family | Method | Variants | Recipe (the legacy trainer's) |
+|---|---|---|---|
+| `energy_transformer` | `et_masked` | `et_tiny` `et_small` `et_base` | AdamW, lr 5e-4, 2 warmup epochs, global clip 1.0, `model_args.num_steps` 12 |
+| `beit` | `beit_mim` | `beit_tiny` `beit_small` `beit_base` `beit_large` | AdamW, lr 1.5e-3, 10 warmup epochs, global clip 3.0, `model_args.drop_path_rate` 0.1 |
+
+Both recipes also hold 100 epochs, batch 32, weight decay 0.05, cosine decay over the whole run to 0.01 of the peak, and a patience of 15
+(`ET_RECIPE` and `BEIT_RECIPE` in `pretrain_models.py`; a test reads the legacy `TrainingConfig` of each trainer and holds them equal).
+The geometry follows the dataset: `cifar10` is 32 px at patch 4 (an 8 x 8 grid, N = 64 patches), `imagenette` 224 px at patch 16
+(14 x 14, N = 196). The ET masks are `data.mask_ratio` 0.5 of the patches in the loss and `data.mask_token_frac` 0.9 of those hidden in
+the input, which is 32 and 29 of 64 patches on CIFAR-10 and 98 and 88 of 196 on Imagenette (counted from
+`dl_techniques.datasets.vision.masked_patches`). The BEiT mask is in blocks, 24 patches in blocks of at least 5 on the 8 x 8 grid and
+75 in blocks of at least 16 on the 14 x 14 one (the auto rule below).
+* **Keys of the task** (`python -m train pretrain` lists all, with their help; the groups `optim_args`, `checkpoint_args`,
+  `logger_args`, `analysis_args` and `debug_args`, and `epochs`, `batch_size`, `seed`, `devices`, `precision`, `resume_interrupted`
+  and `checkpoint`, are the shared ones and mean what they mean for the other tasks, except where this section says otherwise).
+  Required: `out`, `model`, `data.dataset` (`cifar10` or `imagenette`) and, for `beit`, `model_args.tokenizer_checkpoint`.
+
+| Key | Default | Read at |
+|---|---|---|
+| `data.format` | `"builtin"` | `check_builtin_sources` (through `pretrain_facts` of `api/pretrain_args.py`); `PretrainTrainer.build_data` refuses another value |
+| `data.validation_split` | `null` | `PretrainTrainer.build_data`, then `image_streams.load_image_streams`; null is the loader's 0.1 |
+| `data.max_samples` | `null` | `PretrainTrainer.build_data`, then `image_streams.load_image_streams` (the test split is never capped); `debug_args.smoke` sets 512 when null |
+| `data.patch_size` | `"auto"` | `PretrainData.resolve_auto` (it must divide `transform_args.image_size`), `PretrainTrainer.build_model` (the model's patch), `pretrain_data.load_pretrain_batches` (the masks); auto is 4 for cifar10 and 16 for imagenette |
+| `data.mask_ratio` | `"auto"` | `PretrainData.resolve_auto`, `pretrain_data.load_pretrain_batches`, then `make_stateless_masked_patch_map_fn`; energy_transformer only, auto is 0.5 |
+| `data.mask_token_frac` | `"auto"` | the same path as `data.mask_ratio`; energy_transformer only, auto is 0.9 |
+| `data.num_mask_patches` | `"auto"` | `resolve_mask_counts` of `api/pretrain_args.py` (through `PretrainData.resolve_auto`), then `make_stateless_beit_mim_map_fn`; beit only, an explicit value above N is refused by name |
+| `data.min_mask_patches_per_block` | `"auto"` | the same path as `data.num_mask_patches`; beit only, at most `data.num_mask_patches` |
+| `transform_args.image_size` | `"auto"` | `PretrainTransformArgs.resolve_auto`, `PretrainTrainer.describe_data`, `PretrainTrainer.build_data`; auto is 32 for cifar10 and 224 for imagenette |
+| `metric_args.watch_metric` | `"auto"` | `PretrainMetricArgs.resolve_auto`, `fit_callbacks.build_callbacks`, `PretrainTrainer.evaluate_and_report`; auto is `val_loss`, and `loss` (the train loss, noisier) is the other choice |
+| `metric_args.watch_mode` | `"auto"` | `PretrainMetricArgs.resolve_auto` (read from the metric's name) |
+
+`transform_args.augment` is true for this task (flip and pad-crop of the TRAIN stream only, read by `PretrainTrainer.build_data`
+and passed to `load_image_streams`; the classification task's group of that name holds auto, and the knob-docs test reads the first group it finds, so the row
+is not in the table above).
+`analysis_args.conformal_alpha` is refused (`PretrainConfig.problems`: a conformal set is a set of classes). There is no `loss_args`
+group: the loss follows the method (ET: the mean squared error of the patch pixels; BEiT: the sparse categorical cross-entropy of the
+code ids on logits). `optim_args.optimizer=sgd` with a positive `optim_args.weight_decay` is refused, because the adapters build no L2
+penalty and the decay would be dropped (`pretrain_models.resolve_pretrain_args`; the denoising and segmentation resolvers do the same). A key of the
+other family (`data.num_mask_patches` on `energy_transformer`, `model_args.num_steps` on `beit`) is refused by name before the run
+directory is claimed, and so is a `model_args` key the model takes from the task (`patch_size`, `input_shape`, `vocab_size`).
+`debug_args.smoke` runs one epoch on at most 512 train samples and applies no bar (`success` and `success_threshold` are null).
+* **Defaults that differ from the legacy trainers** (`train.energy_transformer.train_masked_completion` and `train.beit.train_mim`),
+  each on purpose. (1) The selection and test masks are FIXED (the next bullet): the legacy trainers draw them from a shared stateful
+  generator (`tf.random.Generator` for ET, the global `random` module for BEiT), so the same weights score a different `val_loss` on
+  every pass (0.37 percent spread over four passes of one set of ET weights, measured on CPU before the port). (2) The global
+  gradient clip stays on: both recipes carry it as `optim_args.global_clipnorm` (1.0 and 3.0, the legacy numbers; never a per-variable
+  `optim_args.clipnorm`, which leaves the global norm unbounded), and an `energy_transformer` run with `optim_args.global_clipnorm=null`
+  is refused by name, because the energy descent is unrolled (`model_args.num_steps` of it, 12 in the recipe) and the paper reports
+  that the model fails to train at a learning rate above 1e-4 without the clip. (3) The BEiT loss is the reference's: each example's
+  masked tokens weigh `N / n_masked`, so `val_loss` is the mean over examples of the per-example masked-token cross-entropy. The
+  legacy weight is the bare mask, which makes `val_loss` that mean times the mask fraction (0.375, that is 24 of 64, in a probe), so a
+  legacy BEiT `val_loss` and this one differ by a factor of the mask fraction. The ET loss is the patch MSE weighted `N / n_loss`
+  on the loss patches, the legacy scale. (4) The BEiT mask counts follow the grid: the legacy 75 patches cannot be drawn on 64, so the
+  legacy default fails at config time on CIFAR-10. The auto rule keeps the recipe's fractions, `num_mask_patches` is
+  `max(1, round(75 / 196 * N))` (24 at N = 64) and `min_mask_patches_per_block` is `max(1, round(16 / 196 * N))` (5), the minimum
+  clamped to the budget. Block masking can under-fill: 4.50 percent of 2,000 draws at (24, 5) on the 8 x 8 grid (mean shortfall 1.03
+  patches, no empty mask), 31.45 percent at (75, 16) on 14 x 14. The weight makes an under-filled mask score on the same scale, and an
+  empty mask weighs 0. (5) An epoch is `n_train // batch_size` steps of an endless stream, the legacy arithmetic (1,406 steps on
+  CIFAR-10 and 266 on Imagenette at batch 32); `fit` is given `steps_per_epoch` and `validation_steps` by the task (the seam below), and
+  Keras keeps ONE iterator across the epochs of a `fit`, so the counter the train masks are keyed on keeps climbing. (6) The legacy
+  trainers have no resume, no run-directory guard and no verdict; this task has all three.
+* **The masks are fixed, and keyed.** A mask is a pure function of a key, with no generator state. The selection and test masks are
+  keyed on `(seed, split, row position of the finite pass)` and never on the stream seed; the train mask is keyed on
+  `(stream seed, "train", counter)`; the three splits use three salts, so one seed gives three different mask sequences. ET draws
+  `tf.random.stateless_uniform` on a hash of `(seed, salt)` with the index folded in. BEiT draws a block mask from
+  `random.Random(f"{seed}:{salt}:{index}")` inside `tf.numpy_function` (`random` hashes a string seed with sha512, so it does not
+  depend on `PYTHONHASHSEED`), through the `rng=` argument that `BeitMaskingGenerator.__call__` takes, so concurrent calls share no
+  state. The consequence is that `val_loss` is a function of the weights alone: the epoch-zero pass, every epoch's validation pass,
+  the best-checkpoint reload check (the gap in the summary is exactly 0.0, not a tolerance) and a resume all score the same weights
+  the same. The regime measured: CPU, `tf.data` with `AUTOTUNE`, two `evaluate` passes equal with `==`; a digest of 500 BEiT masks
+  equal in three interpreter processes with other `PYTHONHASHSEED` values; the weights a resume restores scoring exactly the
+  `val_loss` the killed run logged for them. Equality on a GPU is not claimed here (the gate below is the first GPU measurement).
+  Without the per-call `rng=`, a shared generator whose state is swapped per call corrupted 291 to 363 of 2,000 masks per pass at
+  `sys.setswitchinterval(1e-6)` and none at the interpreter's default interval, so the concurrency test sets that interval.
+* **The tokenizer** (BEiT only). `model_args.tokenizer_checkpoint` is the `.keras` file of a stage-0 `VQVAERotationTrick`, made by the
+  legacy `python -m train.beit.train_tokenizer`; the run reads its code ids as targets and takes `vocab_size` from its codebook. The key
+  is required, and a request without it, or with a path that does not exist or does not end in `.keras`, exits 2 before the run
+  directory is claimed with a sentence that names that script (no file is read at that point). The grid is proved at build time, after
+  the claim, by a real forward pass at the run's `transform_args.image_size`: the expected grid is the patches', never the
+  tokenizer's own `downsample_factor`, so a tokenizer built at another size or another down-sample is refused naming the file and the
+  size, and a `.keras` file that is not a `VQVAERotationTrick` is refused by name. The grid must be the patches': 32 px at patch 4 needs
+  `--image-size 32 --downsample-factor 4`, and 224 px at patch 16 needs `--downsample-factor 16`.
+
+```bash
+python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsample-factor 4 --num-embeddings 512 \
+    --epochs 5 --output-dir results --experiment-name my_tokenizer_cifar10
+```
+
+  **The usage floor.** Over the masked positions of the selection split (one pass of the tokenizer) the run counts the distinct codes
+  and takes the perplexity, `exp` of the entropy of the code histogram (the number of equally used codes it is worth), and the top-1
+  share; they go to the summary's `tokenizer` block with the `floor`. A perplexity below 64 effective codes
+  (`pretrain_run.MIN_TOKENIZER_PERPLEXITY`, entropy below ln 64 = 4.159 nats) is REFUSED after the claim, with the measured numbers in
+  the message, because the bar of a near-constant target is vacuous and the legacy tokenizer trainer logs no usage that would show a
+  collapse. Where 64 comes from (plan 46e5318f, D-007 and D-019): two stage-0 tokenizers made by the legacy trainer on CIFAR-10 at 32
+  px, down-sample 4, 512 codes, measured on the 5,000-image selection split. Over all 320,000 positions the 5-epoch one has 508
+  distinct codes, a top-1 share of 3.37 percent, entropy 5.8628 nats and perplexity 351.7, and over the masked positions of the auto
+  rule (the ones the floor reads) 507 distinct codes and perplexity 354.8. The 1-epoch one, whose learning rate never left its 2-epoch
+  warmup, has 350 distinct codes, a top-1 share of 16.23 percent, entropy 3.1495 nats and perplexity 23.3 over all positions, and 285
+  distinct codes and perplexity 24.7 over the masked ones. 64 sits 2.6 times above the weak one and 5.5 times below the strong one at
+  the masked positions. It is absolute and not a share of the codebook, because what keeps the bar meaningful is how many distinct targets the
+  stream has (10 percent of an 8,192-code book would refuse fine tokenizers). It rests on those two tokenizers only, and it refuses
+  the 1-epoch one, which is not collapsed (its unigram bar is 3.2051 nats against ln 512 = 6.2383): a floor of 4 effective codes would
+  have admitted it. A one-code tokenizer is refused either way.
+* **The bar and its baseline** (D-009). `success_metric` is `val_loss`. `success_value` is the lowest `val_loss` of the selection
+  window (the whole run, as `selection_start_epoch` is 0), `success_threshold` is `min(baseline, epoch-zero val_loss)` and the bar is
+  STRICTLY below, compared in float32 (the base class's `>=` reads a loss backwards, and a model that equals the constant predictor must
+  not meet the bar). Met is exit 0, missed is exit 1 with both numbers in `results_summary.json`. The baseline is the `val_loss` of a
+  CONSTANT Keras model compiled with the run's own loss and evaluated on the same fixed selection stream, measured in `build_data`
+  (a resume measures it again and gets the same number): for ET the zero-patch predictor (`baseline.kind` `zero_patches`; the images are
+  standardized, so zero is the dataset mean; 0.9995 on a 512-image CIFAR-10 slice), for BEiT constant logits equal to the log of the
+  in-sample frequency of each code over the masked selection positions (`unigram_codes`, the best constant predictor on that stream; its
+  `val_loss` is the entropy of the masked codes up to the per-example weighting, 5.8716 nats for the 5-epoch tokenizer against ln 512 = 6.2383). Comparing through the same loss and the
+  same batch aggregation means the bar and `val_loss` cannot differ by a reduction. The epoch-zero term is the `val_loss` of the untrained
+  model, read from `checkpoints/fit_state.json` (`initial.metrics.loss`) by `evaluate_and_report` and never from memory, because a resume
+  never evaluates the untrained model; `epoch_zero.binds` in the summary says whether it was the smaller term. It did not bind in the
+  measured runs: a random-init ET scored 2.28 to 3.01 over five initialization seeds against 0.9995, and a random-init `beit_tiny`
+  6.26 to 6.28 over three against 5.8716, so there the threshold is the baseline and the term is a guard. Because a random initialization sits above the constant predictor,
+  `initial_loss_ratio` was above 1 in those runs, and no verdict is given on the initialization (`init_scale_warning` is null with a note). The
+  summary also carries `method`, `mask` (patch size, grid and the four mask keys), `stream`, `selection`
+  and `tokenizer` (null for ET). The run directory is the shared contract without `task.json`: `config.json`, `config_requested.json`,
+  `run.log`, `training_log.csv`, `training_history.json`, `best_model.keras`, `final_model.keras`, `results_summary.json`,
+  `visualizations/` (`training_dashboard.png`, and for ET `energy_trace.csv`, the energy descent of one fixed selection batch per
+  epoch with one header across a resume; both only while `analysis_args.figures` is true), `model_analysis/` (while `analysis_args.model_analysis` is true; data-free: weights and
+  spectral analyses only, since the stock ones read class probabilities), `checkpoints/` and `run.lock`.
+* **The stream seed on a resume, and what it costs.** The train stream is endless and a resumed `fit` starts a fresh iterator, which
+  would replay epoch 0 (the order, the masks and the augmentation), as the loaders of the other three tasks do. This task rebuilds the stream:
+  after the backup pair is settled, the shared sequence calls the task's `resume_stream` with `completed_steps = start *
+  steps_per_epoch + (batch + 1 if batch else 0)` (the formula the resume already checks against the backup's optimizer steps), and the
+  task rebuilds the same request on a stream seed of `int.from_bytes(sha256(f"{seed}:{completed_steps}")[:4], "big")`. A fresh run's
+  stream seed is `seed` itself (`stream.stream_seed` in the summary). Only the stream seed moves: the split keeps `seed`, so no
+  selection row ever reaches the train stream, and the selection and test masks stay fixed. A run killed twice reads a third distinct
+  stream. The cost: a resumed run is NOT the unkilled run's continuation, its data order is a function of the completed-step count and
+  not of the stream the killed run would have read, so the replay of the unkilled stream is not reproduced; the data is loaded a second
+  time (and the baseline measured again) on a resume; and a killed epoch is still lost and trained again from its first batch unless
+  `checkpoint_args.backup_every_steps` bounds the loss (then only the batches the last copy had not taken run). With
+  `transform_args.augment` true, the augmentation seeds are re-randomised on every iterator (`tf.data.Dataset.random` with
+  `rerandomize_each_iteration`, in `dl_techniques/datasets/vision/augment_hook.py`), so two iterators of one stream seed differ in
+  their pixels; the shuffle and the masks do not depend on that, and the resume tests run unaugmented to compare streams. The help of
+  `resume_interrupted` says it in one clause: "the training masks and the shuffle continue on a fresh stream derived from the seed and
+  the steps completed, never epoch 0's order and never a selection row, and the selection and test masks stay fixed" (the other tasks
+  say "the data order replays epoch 0's"), and the summary's resume note carries the same clause (`TaskTrainer.resume_order`).
+* **`predict` and `export` are not available for this task.** A pretrain run writes no `task.json` (`task_record` returns `None`;
+  a resume works without one and compares the split sizes with the sidecar), so both commands exit 2 and write nothing. For a run
+  directory the sentence is `<run>/task.json does not exist; a model is loaded from a run directory, or from a .keras file whose
+  directory holds task.json`; for the `.keras` file inside it, `<file> has no record beside it; a .keras file is read with the first
+  of best_model.keras.task.json, best_model.task.json, task.json that exists in <run> (export writes best_model.keras.task.json)`. It
+  is the existing refusal and it names no pretrain-specific reason; a pretrain-specific sentence needs a change in `predictor.py`.
+* **Limits of the task.**
+  * No DINO: it has no `validation_data` (its centering is state that an evaluate pass mutates), a k-NN probe as its validation and EMA
+    callbacks, so it needs a sequence variant of its own. Imagenette and CIFAR-10 only (`data.format` has the one value `builtin`).
+  * No record: no `predict`, `export` or `load_model` of a pretrain run, and no warm start of a classifier from a pretrained encoder
+    through `python -m train`. The backbones keep the layer names `et_backbone` and `beit_backbone`, which such a warm start would
+    transfer by; the shared `checkpoint` key was not exercised for this task.
+  * The tokenizer is made by hand with the legacy script, and the floor rests on two tokenizers.
+  * The recipe's learning rate and batch are doubted, not measured, and `run.log` says so (a recipe notice): ET lr 5e-4 is the paper's
+    Table 4 value at a batch of 768, 24 times the batch here, and BEiT lr 1.5e-3 is the recipe's at a global batch of 2,048 (128 on 16
+    GPUs), neither scaled to batch 32. The legacy trainers are not a parity arbiter (no ET or BEiT run existed to compare with), and
+    no parity is claimed.
+  * The BEiT stream is input-bound on the CPU: the tokenizer runs inside `tf.data` at batch 1, 1,894 images per second with
+    augmentation, so one CIFAR-10 epoch of 1,406 steps takes at least 27 seconds before any model compute (12 epochs: 5.4 minutes);
+    ET's stream costs 2.5 seconds per epoch. Measured on the CPU with the GPU hidden.
+  * The exact-equality claims above were measured on the CPU only.
+* Gate numbers: pending the Step 17 GPU gate.
+* **Follow-up plans**, named and not started: the time-series and the language tasks (the second and third users of `fit_kwargs` and
+  `resume_stream`), depth, DINO, the BEiT tokenizer as a method of its own (`beit_tokenizer`), a `task.json` record with `predict`
+  and `export` for pretrain, and the Phase 5 wrappers (the repo map entry among them).
+
 **Keys**: `key=value` tokens; a dot reaches a group (`optim_args.lr=3e-4`, `data.dataset=cifar10`);
 `config=run.yaml` loads a file first and the command line wins over it. A value is read by
 the field's type (`true`/`false`, `3e-4`, `null`, JSON for a list or mapping; a string is verbatim). A list is JSON with every text
@@ -608,7 +799,7 @@ problems and a "did you mean". `auto` asks for the family's recipe default.
 images per class, optional `data.test_dir`) or `csv` (`data.train_csv`, columns `path` and `label`).
 **A data file and dotted keys are two layers of one group** (plan 98b866fb 7.1, D-021): `data=<file>` is the path of a YAML
 file holding the group, and `data.<key>=` tokens put over it, key by key, so a capped or tweaked run needs no copy of the file.
-The same rule holds for all three tasks and for the `data: <file>` of a `config=` file; the lowest layer is the `config=` file, then
+The same rule holds for all four tasks and for the `data: <file>` of a `config=` file; the lowest layer is the `config=` file, then
 the group's file, then the dotted keys, and the file's `format` reads dotted keys that state none (`data.path_column=` after a
 csv file); a `data.format=` that differs from the file's is refused naming both formats (give a file of that format, or every key on the command line with no file). A key given twice on the command line, a file twice, or a file together with a JSON object for the group is still
 refused as a repeated key. `config.json` records the resolved values, as for every key, and not which layer a value came from.
@@ -620,7 +811,7 @@ python -m train image_segmentation out=auto model=convunext/tiny data=<out>/data
 **The run directory**: `out=auto` makes `results/<timestamp>...`; an existing `out` is refused,
 nothing is overwritten or deleted. A run writes `config_requested.json` (what was asked),
 `config.json` (resolved), `run.log`, `training_log.csv`, `results_summary.json`, `task.json`
-(class names, input shape, mean and std: what a model needs to be used without its config),
+(class names, input shape, mean and std: what a model needs to be used without its config; a `pretrain` run writes none),
 `best_model.keras`, `final_model.keras`, the figures and analysis, and `checkpoints/`
 (`backup/`, `fit_state.json`) and `run.lock` for resume. `run.lock` is a kernel `flock` held for the
 life of the run and released when the process ends, a SIGKILL included, so two resumes cannot both run
@@ -629,7 +820,7 @@ and a reused pid blocks nobody; the pid in the file is a label for the refusal m
 **Resume**: `resume_interrupted=true` with the same `out` and the same request continues a killed
 run. It is refused for a finished run (one with a `results_summary.json`), another request, other data, a live
 process holding the run, or a torn backup; `devices` and `analysis_args.eval_batch_size` may differ. The training data
-order replays epoch 0's and a half-done epoch is trained again (the key's help lists the rest).
+order replays epoch 0's, except for `pretrain`, which trains a resumed run on a fresh stream (its section above), and a half-done epoch is trained again (the key's help lists the rest).
 A run killed **before** a code change that alters training (step 10b of plan 98b866fb: the ConvNeXt V1 layer scale starts at 1e-6 and is
 no longer clamped or decayed; step 10c: ConvNeXt V2 blocks have no layer scale by default and a zero GRN gamma; step 10d: the CIFAR-10
 AutoAugment policy; step 10e: the ResNet decay and clip) and resumed **after** it continues under the new rules: its early epochs trained
@@ -728,7 +919,8 @@ is the required end-of-run sequence that calls them. `src/train/AGENTS.md` has t
 **Predict**: `python -m train predict model=<run dir or .keras> data=<image or directory> out=pred.json`
 writes a new JSON list of `{"path", "labels", "scores"}`, every class best first. A directory is
 searched recursively. `out` must not exist. A segmentation run and a denoising run write a new directory of PNG
-files and an `index.json` instead (the segmentation paragraph below and `image_denoising` above). **On ImageNet the `labels` are WordNet ids** such as `n01806143`, not
+files and an `index.json` instead (the segmentation paragraph below and `image_denoising` above). A `pretrain` run directory is
+refused (it has no `task.json`; `pretrain` above has the sentence), and so is its `export`. **On ImageNet the `labels` are WordNet ids** such as `n01806143`, not
 words, and so are the `class_names` of `task.json`. The loader sorts the 1,000 ids and takes the position as the class
 index; the devkit's `meta.mat` maps an id to its words:
 

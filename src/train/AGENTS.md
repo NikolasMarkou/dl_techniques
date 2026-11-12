@@ -405,14 +405,20 @@ train, and the TEST split never selects.
   text (`rms_variants_train/experiments/e3_tinytransformer_imdb.py`), which is not an image
   dataset.
 - **Self-supervised trainers** (dino, BEiT MIM and tokenizer, ET masked completion) take their
-  images from `train.common.image_streams.load_image_streams(dataset, ...)`: the same protocol
+  images from `train.common.image_streams.load_image_streams(dataset, ...)` (it returns `ImageStreams`): the same protocol
   (a seeded `validation_split` slice of train is the selection split, the labelled test split is
   scored once after `fit`), the same rows as the classifiers for one seed (Imagenette through
   `dl_techniques.datasets.vision.imagenette.imagenette_examples`, CIFAR-10 through
   `load_split_arrays`), plus a per-sample map before batching: `element_map_fn(image, label)` on
   all three streams, or `indexed_element_map_fn(index, image, label)` on the train stream only
   (`.repeat().enumerate()`, the counter a stateless augmentation keys on; the other two streams
-  are then plain). They use `add_selection_arguments(parser, imagenet=False, figures=False)`.
+  are then plain), and, for a task whose masks must be a function of the row, `select_indexed_map_fn` and
+  `test_indexed_map_fn` (`.enumerate().map` before `.batch` on the finite selection and test streams: the index is the
+  0-based row position of the pass, int64, the same on every pass; each is refused beside `element_map_fn`, and absent they leave
+  the stream a plain `(image, label)` batch). `stream_seed=None` is the seed of the train shuffle and the train augmentation only
+  (`ImagenetteConfig.stream_seed` likewise): `None` means `seed`, `0` is a seed (`is None`, never truthiness), and the split, the
+  selection rows and the test rows always come from `seed` (the mask-key rule under `pretrain` below says why). They use
+  `add_selection_arguments(parser, imagenet=False, figures=False)`.
   DINO's per-epoch k-NN probe queries the selection slice, and `KNNEvalCallback.evaluate_split`
   scores the test split once after training (`knn_test.json`).
 
@@ -532,7 +538,7 @@ an exemption to green a newly dead field.
 
 `src/train/api/` is a key=value command line and a Python function over strict configs, beside the
 per-model scripts (usage, keys, run directory, resume, `predict`, `export`, exit codes:
-[`README.md`](README.md)). It has three tasks, `image_classification`, `image_segmentation` and `image_denoising`, each
+[`README.md`](README.md)). It has four tasks, `image_classification`, `image_segmentation`, `image_denoising` and `pretrain`, each
 a `TaskTrainer` subclass in `api/tasks/` (`api/trainer.py:TaskTrainer` holds the hooks and the shared sequence). The
 classification task calls the same `train.common.classification_run` helpers as `train.convnext.common` in the same order.
 
@@ -561,9 +567,10 @@ classification task calls the same `train.common.classification_run` helpers as 
   backbone families `resnet_seg` and `convnext_seg`: the classifier's factory with `include_top=False` plus one
   single-map `SegmentationHead`, D-012 of plan 98b866fb), `check_image_size`, the recipes (`CONVUNEXT`, `ACCUNET`,
   `RESNET_SEG`, `CONVNEXT_SEG`) and the specs. `recipes.register_builtin_models` registers the six classifiers, the
-  four segmentation families (D-077; step 23 held them back until a task and a recipe existed) and the five denoising
-  families (`api/denoising_models.py:builtin_denoising_models`), so a guard that walks
-  `registry.MODELS` meets fifteen families and reads `ModelSpec.tasks` to tell them apart. The backbone families read the
+  four segmentation families (D-077; step 23 held them back until a task and a recipe existed), the five denoising
+  families (`api/denoising_models.py:builtin_denoising_models`) and the two pretrain families
+  (`api/pretrain_models.py:builtin_pretrain_models`), so a guard that walks
+  `registry.MODELS` meets seventeen families and reads `ModelSpec.tasks` to tell them apart. The backbone families read the
   classifiers' own variants tables and are checked by `ModelSpec.observe` (a family with an `observe` is checked by its
   layers even when its table lives on a class), and the adapter passes EVERY setting of `SegmentationHead` (its defaults
   changed once with another session's commits; a test fails when the head gains a knob).
@@ -600,14 +607,86 @@ classification task calls the same `train.common.classification_run` helpers as 
   nothing in the shared sequence switches on it. `DataFacts.num_classes` and `AutoContext.num_classes` are `Optional[int]` (`None`
   means no classes; do not pass a stand-in), and `AutoContext.epochs` carries the epochs the run will train (nothing but the
   denoising groups reads it).
+- **The `pretrain` task** (plan 46e5318f): `api/tasks/pretrain.py:PretrainTrainer` supplies the ten required hooks (`REQUIRED_HOOKS`)
+  and `fit_kwargs`, `resume_stream`, `bar_is_met`, `figure_callbacks`, `run_analysis`, `summary_fields`, `recipe_notices` and the
+  rest of the optional ones, and no stage. The FAMILY chooses the method (`pretrain_models.METHOD_OF`: `energy_transformer` is
+  `et_masked`, `beit` is `beit_mim`), so there is one task and no `method` key (an earlier design had `pretrain(method=...)`; the model name selects it here, D-006). The groups (`PretrainData` with the four mask keys, `PretrainTransformArgs`, `PretrainMetricArgs`) are in
+  `api/pretrain_args.py` (they cannot live in `api/args.py`, whose seven groups `_groups.py` pins, and classification's `MetricArgs`
+  holds a `top_k`); the adapters `create_et` and `create_beit` (a built model of `[image, mask]`, `num_classes` refused when not
+  `None`), the refusal tables `ALLOWED`, `REFUSED`, `SUPPLIED` and `TASK_KEYS` (held equal to the factories' signatures by
+  `signature_census`, the denoising pattern), the two recipes and `builtin_pretrain_models` are in `api/pretrain_models.py`; the data
+  wrapper `train/common/pretrain_data.py` (`PretrainBatches`, `load_pretrain_batches`, `derive_stream_seed`, `masked_code_ids`,
+  `TokenizerUsage`) and `train/common/pretrain_run.py` (the loss, `ConstantPredictor`, `constant_baseline`,
+  `MIN_TOKENIZER_PERPLEXITY`, `checked_tokenizer_usage`, `epoch_zero_val_loss`) import TensorFlow, so `train.api` imports them, and
+  `train.energy_transformer.common` and `train.beit.common`, inside functions only; `train.bfunet` is never imported. The
+  mask reaches the loss only as `sample_weight` (no custom `train_step`, the repo rule): ET `N / n_loss` on the loss patches, BEiT
+  `mask * N / max(n_masked, 1)` (D-008), so `val_loss` is the mean over examples of the per-example masked-token cross-entropy.
+  The bar (D-009): `success_value` is the minimum `val_loss` of the window, `success_threshold` is `min(baseline, epoch-zero
+  val_loss)`, `bar_is_met` is STRICTLY below in float32 (the base class's `>=` reads a loss backwards; a constant model equals the
+  baseline and must not meet it). The baseline is `model.evaluate` of a constant Keras model under the run's own compile on the
+  fixed select stream, measured in `build_data` (a resume does it again), and the epoch-zero term is read from the fit sidecar in
+  `evaluate_and_report`, never from a trainer attribute (a resume never evaluates the untrained model). The BEiT tokenizer key is
+  read by the task (the resolver strips it; the adapter refuses it): the path is checked before the claim, the grid is proved by a
+  forward pass at build time against the patches' grid, never the tokenizer's own, and a perplexity below 64 effective codes is
+  refused (D-007, D-019; do not lower the floor, move it only with a measurement of a third tokenizer). ET keeps its global gradient
+  clip: `pretrain_models.resolve_pretrain_args` refuses `optim_args.global_clipnorm=null` by name, and the recipes carry `global_clipnorm`, never a
+  literal `clipnorm` (a per-variable clip leaves the global norm unbounded). Two additive keywords on legacy-shared code serve it: `classification_run.finalize_last_epoch(sample=None)` (the load check's
+  input used as given; a model of two inputs has a stream of `((image, mask), target, weight)` and no `x_fig`, so the two legacy
+  branches, `select_ds.take(1)` and `x_fig`, cannot build it; `None` keeps them byte for byte; the caller cuts the sample to
+  `LOAD_CHECK_SAMPLES`) and `EnergyTraceCallback(skip_header_if_file_exists=False)` (a resumed run's new callback appends to the file
+  the first process began and writes no second header; the default keeps the legacy trainers' header per process). The trace is
+  attached by `figure_callbacks`, the one hook that receives the directory (`extra_callbacks` does not), into
+  `visualizations/energy_trace.csv`, with `skip_header_if_file_exists` true on a resume. Decisions with anchors: the two seams
+  (D-003, D-004), the mask keys (D-005), the tokenizer (D-007, D-019), the loss weight and the auto mask counts (D-008, D-018), the bar
+  (D-009), the trace and `finalize_last_epoch` (D-010), the recipe notices (D-012), no record (D-013). The user-facing description,
+  with the measured numbers, is in [`README.md`](README.md).
+- **Two more seams, for a task whose stream does not end** (plan 46e5318f; five of this kind with the three above; each a no-op by default, proven in
+  `test_the_sequence_seams_default_to_nothing.py` and `test_the_stream_contract.py`, with the goldens EXACT after every shared edit).
+  `TaskTrainer.fit_kwargs(config, data)` (default `{}`) is called once in `load_data`, after `input_check` and before the model is
+  built, and stored on `Run.fit_options`; `train_or_restore` spreads it into the ONE `fit` call after the five arguments every task's
+  `fit` has (`x`, `validation_data`, `epochs`, `callbacks`, `verbose`). `run_sequence._checked_fit_options` refuses, each as a
+  `ConfigError` that carries the claimed-run note: a result that is not a mapping; a name the sequence owns (`x`, `y`,
+  `validation_data`, `validation_split`, `epochs`, `callbacks`, `verbose`, `initial_epoch`); a `steps_per_epoch` that is not a plain
+  int (a bool is not) equal to the data object's `steps_per_epoch` (the schedule, the backup arithmetic and `settle_backup` count epochs of that
+  length); and a `train_ds` of infinite (-1) or unknown (-2) cardinality with no `steps_per_epoch`, which would hang (Keras 3.8 loops
+  `while True` on an epoch with neither): the message says `fit_kwargs` and `steps_per_epoch`. A data object with no `cardinality`
+  is skipped. Do not pass `steps_per_epoch` for every task to make it uniform; it changes the `fit` call of the three older tasks.
+  `TaskTrainer.resume_stream(config, data, completed_steps)` (default `None`) is called once by `_resumed_data` in `load_data`,
+  directly after `resume_decisions.settle_backup_pair`, and only by a resume that trains (never a fresh run, never a
+  reporting-only one); `completed_steps = resume.start * steps_per_epoch + (resume.batch + 1 if resume.batch else 0)`, the formula
+  `resume_state._inspect_copy` checks against the copy's optimizer steps, and the SETTLED count (a torn latest copy sends the run back
+  one epoch there, so the count read before `settle_backup_pair` is a whole epoch too high; do not move the call into
+  `build_data`). A returned object replaces `run.data`; one whose `steps_per_epoch`, `n_train`, `n_select`, `n_test` or `fingerprint`
+  differs from the data it replaces is refused by field (`ConfigError`), because `fit_options`, the schedule and
+  `check_data_unchanged` were made against the original. `TaskTrainer.resume_order` (a class variable, default `None`) is the clause
+  that says what a resume does to the data order, for the summary's resume note and, through `config.resume_help(order=)`, the help of
+  `resume_interrupted`: the default text is the older tasks' ("replays epoch 0's"), a task whose `resume_stream` trains on another
+  stream sets it (`pretrain` does). Both hooks have one user today; the time-series and language tasks are the next.
+- **The mask-key rule** (D-004, D-005; why a pretrain run is reproducible and a resume does not leak). A mask is a function of a key
+  and nothing stateful: `make_stateless_masked_patch_map_fn` (`dl_techniques/datasets/vision/masked_patches.py`) and
+  `make_stateless_beit_mim_map_fn` (`beit_masking.py`) return `fn(index, image, *_)`. The SELECT and TEST masks are keyed on
+  `(config.seed, split salt, row position)` and never on the stream seed; the TRAIN mask on `(stream seed, "train", counter)`;
+  three salts, so no two streams see one mask at one index. A resume derives a NEW stream seed from `(seed, completed_steps)` (the
+  first 4 bytes of `sha256`, `derive_stream_seed`), the split seed never changes, and no selection row can reach the train stream.
+  Three things not to do, each measured or shown by a planted mutant: key the select or test mask on the stream seed (the same weights
+  then score another `val_loss` after a kill, the reload check warns on every resumed run, the bar is not comparable across a
+  kill); feed the stream seed to the split (`seed + step`, the legacy language idea, re-splits and leaks selection rows into train);
+  share one mask generator between calls by swapping its `_rng` (a race under `AUTOTUNE`: 291 to 363 of 2,000 masks corrupted per pass
+  at `sys.setswitchinterval(1e-6)` and none at the default interval, so a concurrency test of that guard must set the interval and
+  restore it). BEiT therefore passes an `rng=` per call to `BeitMaskingGenerator.__call__` (`None` keeps the stateful path and the
+  old draw) and builds `random.Random(f"{seed}:{salt}:{index}")` per row inside `tf.numpy_function`. The legacy stateful
+  `make_masked_patch_map_fn` and `make_beit_mim_map_fn` stay, with their tests, for the four legacy self-supervised trainers.
 - **Per-task tables, not `if task ==` branches** (D-006). `train.api.predictor` holds one table per concern, each keyed by the task
   word: `RECORD_KEYS`, `DATA_KEYS`, `GEOMETRY_CHECKS`, `TAIL_CHECKS`, `INPUT_SHAPE_OF`, `INPUT_KEY`, `OUTPUT_CHECKS`,
   `PREDICTORS` and `EXPORT_RULES` (an `ExportRule(shape_of, check, note)`: the shape `export` traces, the cells it refuses, the
   sentence it logs), collected in `TASK_TABLES`; `train.api.cli.PREDICT_WRITERS` is the table of what `predict` writes. A task
   is known to the reader only when it has a row in EVERY table of `TASK_TABLES` (`record_problems` refuses another, naming the tasks
   of the first table it is missing from), and the identity (`class_names`) and statistics (`normalize`, `mean`, `std`) checks run
-  only for a task whose `RECORD_KEYS` hold those keys. A fourth task is one row in each table plus one in `PREDICT_WRITERS`;
-  `test_a_third_task_record_dispatches_by_table.py` walks `TASK_TABLES` with a fake task. Do not add an `elif task ==` to
+  only for a task whose `RECORD_KEYS` hold those keys. A task that writes a record is one row in each table plus one in `PREDICT_WRITERS`;
+  `test_a_third_task_record_dispatches_by_table.py` walks `TASK_TABLES` with a fake task. `pretrain` writes none (D-013 of plan
+  46e5318f: `task_record` returns `None`), so it is in no table and `predict`, `export` and `load_model` of its run directory stop
+  in `read_record` with the existing `task.json` sentence; do not write a partial record for it, a record that exists makes
+  `load_model` dispatch on a task it has no predictor for. Do not add an `elif task ==` to
   `load_model`, `input_shape_of`, `_run_on_zeros` or the predict command. The help text of `cli.PREDICT_OPTIONS` and
   `cli.EXPORT_NOTES` names every task's output; `test_export_per_family.py` pins phrases of it.
 - **The help path imports no TensorFlow, Keras or yaml and stays under 1 s**:
