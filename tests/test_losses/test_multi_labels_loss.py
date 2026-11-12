@@ -674,11 +674,6 @@ class TestDiceLossPerChannelIsPerSample:
         out = DiceLossPerChannel(smooth=DICE_SMOOTH).call(y_true, y_pred)
         assert tuple(out.shape) == (DICE_BATCH,)
 
-    def test_reduction_none_returns_one_value_per_sample(self):
-        y_true, y_pred = _ragged_seg_batch()
-        out = DiceLossPerChannel(smooth=DICE_SMOOTH, reduction="none")(y_true, y_pred)
-        assert tuple(out.shape) == (DICE_BATCH,)
-
     def test_rows_equal_an_independent_float64_reference(self):
         y_true, y_pred = _ragged_seg_batch()
         got = keras.ops.convert_to_numpy(
@@ -723,24 +718,6 @@ class TestDiceLossPerChannelIsPerSample:
         """No batch term: `loss(w=[1,1,1,0]) * B/(B-1) == loss(batch[:3])`."""
         gap = _drop_last_row_gap(lambda: DiceLossPerChannel(smooth=DICE_SMOOTH))
         assert gap < 1e-6, gap
-
-    def test_sum_reduction_is_batch_times_the_default(self):
-        y_true, y_pred = _ragged_seg_batch()
-        default = float(DiceLossPerChannel(smooth=DICE_SMOOTH)(y_true, y_pred))
-        total = float(DiceLossPerChannel(smooth=DICE_SMOOTH, reduction="sum")(y_true, y_pred))
-        assert abs(total - DICE_BATCH * default) < 1e-6, (total, default)
-
-    def test_a_zero_weighted_row_gets_exactly_zero_gradient(self):
-        import tensorflow as tf
-
-        y_true, y_pred = _ragged_seg_batch()
-        w = np.array([1.0, 1.0, 1.0, 0.0], "float32")
-        v = tf.Variable(y_pred)
-        with tf.GradientTape() as tape:
-            loss = DiceLossPerChannel(smooth=DICE_SMOOTH)(y_true, v, sample_weight=w)
-        grad = tape.gradient(loss, v).numpy()
-        assert np.abs(grad[:3]).max() > 0.0
-        assert np.abs(grad[3]).max() == 0.0
 
     def test_the_scalar_return_is_caught_by_these_arms(self):
         """ANTI-VACUITY: the defect re-injected must fail the shape and identity arms."""
@@ -935,13 +912,6 @@ class TestPerChannelBinaryLossIsPerSample:
         assert tuple(out.shape) == (DICE_BATCH,)
 
     @pytest.mark.parametrize("case", sorted(PCB_CASES))
-    def test_reduction_none_returns_one_value_per_sample(self, case):
-        y_true, y_pred = _ragged_seg_batch()
-        loss_fn = PCB_CASES[case][0]()
-        loss_fn.reduction = "none"
-        assert tuple(loss_fn(y_true, y_pred).shape) == (DICE_BATCH,)
-
-    @pytest.mark.parametrize("case", sorted(PCB_CASES))
     def test_rows_equal_an_independent_float64_reference(self, case):
         make, element, channel_weights = PCB_CASES[case]
         y_true, y_pred = _ragged_seg_batch()
@@ -990,27 +960,6 @@ class TestPerChannelBinaryLossIsPerSample:
         want = (w * _pcb_rows_float64(y_true, y_pred, element, channel_weights)).sum() / DICE_BATCH
         assert abs(got - want) < PCB_ROW_ATOL, (got, want)
 
-    def test_sum_reduction_is_batch_times_the_default(self):
-        y_true, y_pred = _ragged_seg_batch()
-        default = float(PerChannelBinaryLoss("binary_crossentropy")(y_true, y_pred))
-        total = float(
-            PerChannelBinaryLoss("binary_crossentropy", reduction="sum")(y_true, y_pred)
-        )
-        assert abs(total - DICE_BATCH * default) < 4 * PCB_ROW_ATOL, (total, default)
-
-    def test_a_zero_weighted_row_gets_exactly_zero_gradient(self):
-        """The row's OWN loss leaves the gradient; its class counts (a constant) do not matter."""
-        import tensorflow as tf
-
-        y_true, y_pred = _ragged_seg_batch()
-        w = np.array([1.0, 1.0, 1.0, 0.0], "float32")
-        v = tf.Variable(y_pred)
-        with tf.GradientTape() as tape:
-            loss = PerChannelBinaryLoss("binary_crossentropy")(y_true, v, sample_weight=w)
-        grad = tape.gradient(loss, v).numpy()
-        assert np.abs(grad[:3]).max() > 0.0
-        assert np.abs(grad[3]).max() == 0.0
-
     # DECISION plan-2026-11-11T223825-64d1b401/D-002 (test): the guard for the
     # batch-level channel weights in PerChannelBinaryLoss.call. It fails if the
     # weights become per-sample or are recomputed over the rows a sample_weight keeps.
@@ -1056,3 +1005,47 @@ class TestPerChannelBinaryLossIsPerSample:
         )
         ref = (w * _pcb_rows_float64(y_true, y_pred, _bce_elements)).sum() / DICE_BATCH
         assert abs(broken - ref) > 1e-3, (broken, ref)
+
+
+# ---------------------------------------------------------------------
+# What Dice and PerChannelBinaryLoss share: a live reduction and row-local gradients
+# (plan-2026-11-11T223825-64d1b401, step 5.5)
+# ---------------------------------------------------------------------
+
+#: name -> ``(zero-argument loss factory, atol of the sum identity)``: Dice and every PCB case.
+ROW_LOSSES = {
+    "dice": (lambda: DiceLossPerChannel(smooth=DICE_SMOOTH), 1e-6),
+    **{f"pcb_{case}": (make, 4 * PCB_ROW_ATOL) for case, (make, _, _) in PCB_CASES.items()},
+}
+
+
+@pytest.mark.parametrize("name", sorted(ROW_LOSSES))
+class TestDiceAndPerChannelBinaryLossShareTheRowMechanics:
+    def test_reduction_none_returns_one_value_per_sample(self, name):
+        y_true, y_pred = _ragged_seg_batch()
+        loss_fn = ROW_LOSSES[name][0]()
+        loss_fn.reduction = "none"
+        assert tuple(loss_fn(y_true, y_pred).shape) == (DICE_BATCH,)
+
+    def test_sum_reduction_is_batch_times_the_default(self, name):
+        make, atol = ROW_LOSSES[name]
+        y_true, y_pred = _ragged_seg_batch()
+        default = float(make()(y_true, y_pred))
+        total_fn = make()
+        total_fn.reduction = "sum"
+        total = float(total_fn(y_true, y_pred))
+        assert abs(total - DICE_BATCH * default) < atol, (total, default)
+
+    def test_a_zero_weighted_row_gets_exactly_zero_gradient(self, name):
+        """The row's OWN loss leaves the gradient; a batch-level constant (PCB's class counts)
+        does not matter."""
+        import tensorflow as tf
+
+        y_true, y_pred = _ragged_seg_batch()
+        w = np.array([1.0, 1.0, 1.0, 0.0], "float32")
+        v = tf.Variable(y_pred)
+        with tf.GradientTape() as tape:
+            loss = ROW_LOSSES[name][0]()(y_true, v, sample_weight=w)
+        grad = tape.gradient(loss, v).numpy()
+        assert np.abs(grad[:3]).max() > 0.0
+        assert np.abs(grad[3]).max() == 0.0
