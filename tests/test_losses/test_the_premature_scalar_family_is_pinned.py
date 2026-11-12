@@ -81,7 +81,8 @@ from .test_the_losses_package_surface_is_consistent import (
 
 PLAN = "plan-2026-08-30T203107-30455f66"
 
-MIN_MEASURED = 67  # len(STILL_BROKEN) + len(KNOWN_GOOD), re-derived by import at step 6.1
+# Floor on ROWS (STILL_BROKEN + KNOWN_GOOD), not classes: QuantileLoss has two rows.
+MIN_MEASURED = 67
 BATCH = 4
 SAMPLE_WEIGHT = np.array([1.0, 1.0, 1.0, 0.0], dtype="float32")
 MEAN_W = 0.75
@@ -792,14 +793,12 @@ def test_the_pinned_population_has_not_shrunk_silently():
     direction.
     """
     total = len(STILL_BROKEN) + len(KNOWN_GOOD)
+    distinct = len({row[:2] for row in STILL_BROKEN + KNOWN_GOOD})
     assert total >= MIN_MEASURED, (
-        f"the measured population was {MIN_MEASURED} rows when step 6.1 of plan-2026-11-11T223825-"
-        f"64d1b401 closed it (20 at {PLAN}, 26 before that plan's five rows, 31 after "
-        f"them, 67 after the census promotion); it is "
-        f"now {total} "
-        f"(STILL_BROKEN={len(STILL_BROKEN)}, KNOWN_GOOD={len(KNOWN_GOOD)}). A "
-        f"member is removed from STILL_BROKEN only by being FIXED, and a fixed "
-        f"member MOVES to KNOWN_GOOD in the same commit -- it is never deleted."
+        f"the measured population is {total} rows ({distinct} distinct classes: "
+        f"STILL_BROKEN={len(STILL_BROKEN)}, KNOWN_GOOD={len(KNOWN_GOOD)}), below the floor "
+        f"MIN_MEASURED={MIN_MEASURED}. A member leaves STILL_BROKEN only by being FIXED, "
+        f"and a fixed member MOVES to KNOWN_GOOD in the same commit; it is never deleted."
     )
     assert len(KNOWN_GOOD) >= 6, (
         "The anti-vacuity arm is what proves the defect predicate still "
