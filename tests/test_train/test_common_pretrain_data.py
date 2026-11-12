@@ -175,13 +175,13 @@ class TestThePretrainBatchesRecord:
         assert (batches.n_train, batches.n_select, batches.n_test) == (n_fit, n_select, n_test)
         assert batches.steps_per_epoch == n_fit // BATCH
         assert batches.val_steps == math.ceil(n_select / BATCH)
-        assert batches.test_steps == math.ceil(n_test / BATCH)
-        assert batches.batch_size == BATCH
+        assert int(batches.test_ds.cardinality()) == math.ceil(n_test / BATCH)
+        assert batches.request["batch_size"] == BATCH
         assert tuple(batches.input_shape) == (IMAGE, IMAGE, 3)
         assert batches.num_classes is None
         assert isinstance(batches.selection_split, str) and batches.selection_split
         assert isinstance(batches.test_split, str) and batches.test_split
-        assert batches.max_samples is None
+        assert batches.request["max_samples"] is None
         assert batches.seed == SEED and batches.stream_seed == SEED  # None means the split seed
         for name in ("train_ds", "select_ds", "test_ds"):
             assert isinstance(getattr(batches, name), tf.data.Dataset)
@@ -199,7 +199,7 @@ class TestThePretrainBatchesRecord:
         assert int(batches.test_ds.cardinality()) == math.ceil(batches.n_test / BATCH)
         # and one pass really yields that many batches
         assert len(collect(batches.select_ds)) == batches.val_steps
-        assert len(collect(batches.test_ds)) == batches.test_steps
+        assert len(collect(batches.test_ds)) == math.ceil(batches.n_test / BATCH)
 
     def test_an_et_element_is_the_masked_patch_element(self, cifar) -> None:
         (image, mask), target, weight = collect(build(ET).select_ds, 1)[0]
@@ -227,16 +227,16 @@ class TestThePretrainBatchesRecord:
     def test_a_cap_below_one_batch_still_makes_an_epoch(self, cifar) -> None:
         # a 10 percent split of 3 rows holds out 0 (the loader refuses that), so split in half
         batches = build(ET, max_samples=3, validation_split=0.5)
-        assert batches.max_samples == 3
+        assert batches.request["max_samples"] == 3
         assert (batches.n_train, batches.n_select) == (2, 1) and batches.n_train < BATCH
         assert batches.steps_per_epoch == 1
         (image, _), _, _ = collect(batches.train_ds, 1)[0]
         assert image.shape[0] == BATCH  # repeat comes before batch: the stream is never empty
         assert batches.val_steps == 1 and batches.n_test == IMAGENETTE_FAKE_TEST
 
-    @pytest.mark.parametrize("stream, steps_of", [("select_ds", "val_steps"), ("test_ds", "test_steps")])
+    @pytest.mark.parametrize("stream", ["select_ds", "test_ds"])
     def test_a_stream_of_unknown_length_is_refused_by_name_stating_both_lengths(
-            self, stream, steps_of, cifar, monkeypatch) -> None:
+            self, stream, cifar, monkeypatch) -> None:
         # Both finite streams are scored by Keras, which logs n / (n + 1) of the loss over a dataset of unknown length: the
         # select arm and the test arm are two lines of the wrapper, so each is held by its own row.
         real = pretrain_data.load_image_streams
@@ -251,7 +251,7 @@ class TestThePretrainBatchesRecord:
         with pytest.raises(ValueError) as caught:
             build(ET)
         text = str(caught.value)
-        assert f"{stream} has cardinality unknown" in text and str(getattr(honest, steps_of)) in text
+        assert f"{stream} has cardinality unknown" in text and str(int(getattr(honest, stream).cardinality())) in text
 
     @pytest.mark.parametrize("kwargs, message", [
         (dict(method="nope"), "method"),
@@ -424,7 +424,8 @@ class TestTheResumeRebuild:
         assert (resumed.n_train, resumed.n_select, resumed.n_test) == (
             fresh.n_train, fresh.n_select, fresh.n_test)
         assert resumed.steps_per_epoch == fresh.steps_per_epoch
-        assert resumed.val_steps == fresh.val_steps and resumed.test_steps == fresh.test_steps
+        assert resumed.val_steps == fresh.val_steps
+        assert int(resumed.test_ds.cardinality()) == int(fresh.test_ds.cardinality())
         assert resumed.seed == fresh.seed == SEED
         assert resumed.stream_seed == derive_stream_seed(SEED, 35) != fresh.stream_seed
         assert same(collect(resumed.select_ds), collect(fresh.select_ds))
@@ -450,7 +451,7 @@ class TestTheResumeRebuild:
     def test_it_keeps_every_request_value(self, cifar) -> None:
         fresh = build(BEIT, max_samples=30, validation_split=0.2)
         resumed = fresh.with_stream(5)
-        assert resumed.max_samples == 30
+        assert resumed.request["max_samples"] == 30
         assert (resumed.n_train, resumed.n_select) == (fresh.n_train, fresh.n_select)
 
     @pytest.mark.parametrize("steps", [-1, True, 2.5])

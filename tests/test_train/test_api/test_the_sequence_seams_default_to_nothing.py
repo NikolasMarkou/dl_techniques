@@ -18,10 +18,10 @@ Plan 46e5318f step 3 (D-003) adds two more hooks, ``TaskTrainer.fit_kwargs(confi
 ``{}``, spread into the one ``fit`` call and stored on ``Run.fit_options``) and
 ``TaskTrainer.resume_stream(config, data, completed_steps)`` (default ``None``; step 4, D-004, makes the
 sequence call it once for a resume that trains): the default arm below reads the keywords the one ``fit``
-call of a shipped task carries, shows that a fresh run never asks for a new stream and that a resume of a
-task that says nothing trains on the data it built, and the positive arm shows a task's ``fit_kwargs``
-reaching ``fit``. The refusals that need a stream (a mismatched ``steps_per_epoch``, an infinite
-``train_ds``) and every case of the ``resume_stream`` call are in ``test_the_stream_contract.py``.
+call of a shipped task carries, and the positive arm shows a task's ``fit_kwargs`` reaching ``fit``. The
+refusals that need a stream (a mismatched ``steps_per_epoch``, an infinite ``train_ds``) and every case of
+the ``resume_stream`` call, among them that a fresh run never asks for a new stream, that a ``None`` answer
+leaves the data and that the default hook answers ``None``, are in ``test_the_stream_contract.py``.
 
 Every seam is proved twice, because a default that is "almost" nothing moves a byte in a golden and a
 seam that does nothing passes every default test: the default arm is a real fit of ``vit/vit_pico`` on
@@ -267,36 +267,6 @@ def test_the_hook_defaults_are_nothing(world, tmp_path):
     assert task.selection_start_epoch(task.config) == 0
     assert task.config_stamps(task.config, family) == {}
     assert task.fit_kwargs(task.config, None) == {}
-    assert task.resume_stream(task.config, None, 0) is None
-
-
-@pytest.fixture
-def stream_spy(monkeypatch):
-    """Spy on the default ``TaskTrainer.resume_stream``: its ``(completed_steps, data, result)`` per call."""
-    seen = []
-    real = TaskTrainer.resume_stream
-
-    def spy(self, config, data, completed_steps):
-        result = real(self, config, data, completed_steps)
-        seen.append((completed_steps, data, result))
-        return result
-
-    monkeypatch.setattr(TaskTrainer, "resume_stream", spy)
-    return seen
-
-
-def test_a_fresh_run_does_not_ask_for_a_new_stream(world, tmp_path, stream_spy):
-    Scripted(config_for(tmp_path / "run", epochs=1)).run()
-    assert stream_spy == []
-
-
-def test_a_resume_of_a_task_that_says_nothing_trains_on_the_data_it_built(
-    killed_inside_the_window, tmp_path_factory, stream_spy
-):
-    task, _, _ = resume(killed_inside_the_window, tmp_path_factory, "resumed_default_stream")
-    # Epoch 3 was the next to run: 3 epochs of 9 steps; the default answer is None, so ``fit`` got the built data.
-    assert [(steps, result) for steps, _, result in stream_spy] == [(3 * 9, None)]
-    assert len(task.fit_calls) == 1 and task.fit_calls[0][0][0] is stream_spy[0][1].train_ds
 
 
 def test_a_run_holds_no_fit_option_until_the_task_names_one():

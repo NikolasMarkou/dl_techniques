@@ -114,19 +114,16 @@ class PretrainBatches:
         salt, counter)``.
     :param select_ds: the selection split, finite, one pass of ``val_steps`` batches, ragged last
         batch kept. Its mask is keyed on ``(seed, select salt, row position)``.
-    :param test_ds: the test split, finite, ``test_steps`` batches, keyed on ``(seed, test salt,
-        row position)``.
-    :param steps_per_epoch, val_steps, test_steps: batches in an epoch, a selection pass and a
-        test pass.
+    :param test_ds: the test split, finite, one pass of ``ceil(n_test / batch_size)`` batches, keyed on
+        ``(seed, test salt, row position)``.
+    :param steps_per_epoch, val_steps: batches in an epoch and in a selection pass.
     :param n_train, n_select, n_test: rows of the three splits.
-    :param batch_size: batch size of the three streams.
     :param input_shape: ``(image_size, image_size, 3)``.
     :param num_classes: ``None``: a pretrain model has no classes.
     :param selection_split, test_split: plain-language provenance of the two splits.
-    :param max_samples: the smoke cap on the train pool, or ``None``.
     :param seed, stream_seed: the split seed and the (resolved) stream seed.
-    :param request: the keyword arguments :func:`load_pretrain_batches` was called with, so that
-        :meth:`with_stream` rebuilds the same request on another stream seed.
+    :param request: the keyword arguments :func:`load_pretrain_batches` was called with (the batch size and the
+        ``max_samples`` cap among them), so that :meth:`with_stream` rebuilds the same request on another stream seed.
     """
 
     train_ds: "tf.data.Dataset"
@@ -134,16 +131,13 @@ class PretrainBatches:
     test_ds: "tf.data.Dataset"
     steps_per_epoch: int
     val_steps: int
-    test_steps: int
     n_train: int
     n_select: int
     n_test: int
-    batch_size: int
     input_shape: Tuple[int, int, int]
     num_classes: Optional[int]
     selection_split: str
     test_split: str
-    max_samples: Optional[int]
     seed: int
     stream_seed: int
     request: Mapping[str, Any] = field(repr=False)
@@ -249,10 +243,9 @@ def load_pretrain_batches(
     return PretrainBatches(
         train_ds=streams.train_ds, select_ds=streams.select_ds, test_ds=streams.test_ds,
         steps_per_epoch=streams.steps_per_epoch, val_steps=streams.val_steps,
-        test_steps=streams.test_steps, n_train=streams.n_train, n_select=streams.n_select,
-        n_test=streams.n_test, batch_size=streams.batch_size,
+        n_train=streams.n_train, n_select=streams.n_select, n_test=streams.n_test,
         input_shape=(image_size, image_size, 3), num_classes=None,
-        selection_split=split, test_split="the dataset's test set", max_samples=max_samples,
+        selection_split=split, test_split="the dataset's test set",
         seed=seed, stream_seed=stream, request=request)
 
 

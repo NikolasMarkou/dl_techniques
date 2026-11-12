@@ -37,6 +37,7 @@ The runs are real ``energy_transformer/et_tiny`` runs (``model_args.num_steps=2`
 
 import csv
 import dataclasses
+import hashlib
 import json
 import math
 import re
@@ -358,11 +359,14 @@ def test_the_run_directory_holds_no_task_record(runs):
 # ---------------------------------------------------------------------
 
 
-def first_batch_digest(ds) -> str:
-    import hashlib
-
-    (image, mask), _, _ = next(iter(ds))
+def batch_digest(image, mask) -> str:
+    """The sha256 of a batch's image bytes then mask bytes (the digest the resume child writes: ``_pretrain_child.py``)."""
     return hashlib.sha256(np.asarray(image).tobytes() + np.asarray(mask).tobytes()).hexdigest()
+
+
+def first_batch_digest(ds) -> str:
+    (image, mask), _, _ = next(iter(ds))
+    return batch_digest(image, mask)
 
 
 def test_fit_kwargs_gives_the_epoch_and_the_validation_length(world, tmp_path):
@@ -438,11 +442,15 @@ def test_a_refused_request_leaves_out_absent(world, tmp_path, changes, fragment)
     assert not out.exists(), "the refusal came after the claim"
 
 
-def test_a_beit_run_without_a_tokenizer_is_refused_before_the_claim(world, tmp_path):
+@pytest.mark.parametrize(
+    "fragment", ["model_args.tokenizer_checkpoint", "python -m train.beit.train_tokenizer"],
+    ids=["names the key", "names the script that makes one"],
+)
+def test_a_beit_run_without_a_tokenizer_is_refused_before_the_claim(world, tmp_path, fragment):
     out = tmp_path / "run"
     with pytest.raises(ConfigError) as caught:
         PretrainTrainer(make_config(out, model=BEIT_MODEL, model_args={})).run()
-    assert "model_args.tokenizer_checkpoint" in str(caught.value)
+    assert fragment in str(caught.value)
     assert not out.exists()
 
 
@@ -526,14 +534,6 @@ def beit_config(out: Path, path: str, **changes: Any) -> PretrainConfig:
 
 def run_beit(out: Path, path: str, **changes: Any):
     return PretrainTrainer(beit_config(out, path, **changes)).run()
-
-
-def test_a_beit_run_without_a_tokenizer_names_the_script_that_makes_one(world, tmp_path):
-    out = tmp_path / "run"
-    with pytest.raises(ConfigError) as caught:
-        PretrainTrainer(make_config(out, model=BEIT_MODEL, model_args={})).run()
-    assert "python -m train.beit.train_tokenizer" in str(caught.value)
-    assert not out.exists()
 
 
 def test_a_tokenizer_path_that_does_not_exist_is_refused_before_the_claim(world, tmp_path):

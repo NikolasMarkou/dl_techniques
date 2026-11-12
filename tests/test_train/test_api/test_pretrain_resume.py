@@ -31,7 +31,6 @@ epoch) and the files. NOT checked: a resumed run is not the unkilled run's traje
 """
 
 import csv
-import hashlib
 import json
 from pathlib import Path
 
@@ -44,7 +43,7 @@ from train.common.seed import set_seeds
 
 from .test_backup_every_steps import run_child
 from .test_pretrain_task import (  # noqa: F401  (``world`` is a fixture)
-    BEIT_MODEL, BEIT_SMALL, ET_MODEL, LOW_FLOOR, TOKENIZER_KEY, make_tokenizer, prepared, world,
+    BEIT_MODEL, BEIT_SMALL, ET_MODEL, LOW_FLOOR, TOKENIZER_KEY, batch_digest, make_tokenizer, prepared, world,
 )
 
 CHILD = Path(__file__).resolve().parent / "_pretrain_child.py"
@@ -118,7 +117,7 @@ def stream_digests(ds):
     """The digest of each of the first ``FIRST`` batches of ``ds`` (the child's: image bytes then mask bytes)."""
     out = []
     for (image, mask), _, _ in ds.take(FIRST):
-        out.append(hashlib.sha256(image.numpy().tobytes() + mask.numpy().tobytes()).hexdigest())
+        out.append(batch_digest(image, mask))
     return out
 
 
@@ -175,7 +174,7 @@ def mid_epoch(world, tokenizer, tmp_path_factory):
 
 
 def test_the_sizes_the_chain_counts_are_the_data_s(chain):
-    assert chain.data.steps_per_epoch == STEPS and chain.data.n_train == 54 and chain.data.batch_size == BATCH
+    assert chain.data.steps_per_epoch == STEPS and chain.data.n_train == 54 and chain.data.request["batch_size"] == BATCH
 
 
 def test_each_kill_lands_between_two_batches_of_an_epoch(chain):
