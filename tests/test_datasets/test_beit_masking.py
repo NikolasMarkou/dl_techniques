@@ -14,18 +14,26 @@ Numbers are the paper's real geometry (14x14 = 196 patches, budget 75, minimum
 block area 16) wherever the test does not specifically need a pathological grid.
 """
 
+import hashlib
 import math
+import os
 import random
+import subprocess
+import sys
+from pathlib import Path
 
+import keras
 import numpy as np
 import pytest
 import tensorflow as tf
 
+import dl_techniques
 from dl_techniques.datasets.vision.beit_masking import (
     BEIT_MIN_MASK_PATCHES_PER_BLOCK,
     BEIT_NUM_MASK_PATCHES,
     BeitMaskingGenerator,
     make_beit_mim_map_fn,
+    make_stateless_beit_mim_map_fn,
 )
 
 # BEiT-Base/16 @224 geometry. Do not shrink these.
@@ -490,3 +498,309 @@ class TestMakeBeitMimMapFn:
         assert got == pytest.approx(expected, rel=1e-5)
         # And the guard has teeth: the unmasked positions really are excluded.
         assert expected < float(per_token.mean())
+
+
+# ---------------------------------------------------------------------
+# An explicit rng on one call
+# ---------------------------------------------------------------------
+
+
+class _CountingRandom(random.Random):
+    """A ``random.Random`` that counts the draws it served."""
+
+    def __init__(self, seed):
+        super().__init__(seed)
+        self.draws = 0
+
+    def uniform(self, a, b):
+        self.draws += 1
+        return super().uniform(a, b)
+
+    def randint(self, a, b):
+        self.draws += 1
+        return super().randint(a, b)
+
+
+def _five_masks_digest(generator: BeitMaskingGenerator, **call) -> str:
+    digest = hashlib.sha256()
+    for _ in range(5):
+        digest.update(generator(**call).tobytes())
+    return digest.hexdigest()[:16]
+
+
+class TestAnExplicitRngOnOneCall:
+    """``__call__(rng=)``: the draw comes from the rng given, no shared state moves."""
+
+    def test_the_default_draw_is_the_one_it_always_was(self):
+        """Digests of five masks, taken at the commit before ``rng=`` existed."""
+        assert _five_masks_digest(_make(seed=0)) == "d3c9152fc9ab133d"
+        assert _five_masks_digest(_make(seed=1234)) == "26746a0a5fec30c8"
+
+    def test_the_seeded_global_state_gives_the_old_mask(self):
+        generator = BeitMaskingGenerator(GRID, BUDGET, min_num_patches=MIN_BLOCK)
+        random.seed(99)
+        assert _five_masks_digest(generator) == "6307f85e103fcefe"
+        random.seed(99)
+        assert _five_masks_digest(generator, rng=None) == "6307f85e103fcefe"
+
+    def test_an_explicit_rng_is_drawn_from(self):
+        generator = _make(seed=1)
+        mine = _CountingRandom(5)
+        mask = generator(rng=mine)
+        assert mine.draws > 0
+        np.testing.assert_array_equal(mask, _make(seed=5)())
+
+    def test_an_explicit_rng_touches_no_shared_state(self):
+        own = random.Random(1)
+        generator = BeitMaskingGenerator(
+            GRID, BUDGET, min_num_patches=MIN_BLOCK, rng=own
+        )
+        own_before = own.getstate()
+        global_before = random.getstate()
+        generator(rng=random.Random(2))
+        assert own.getstate() == own_before
+        assert random.getstate() == global_before
+        assert generator._rng is own
+
+    def test_the_global_module_is_untouched_by_an_explicit_rng_on_a_default_generator(self):
+        generator = BeitMaskingGenerator(GRID, BUDGET, min_num_patches=MIN_BLOCK)
+        before = random.getstate()
+        generator(rng=random.Random(2))
+        assert random.getstate() == before
+
+    def test_the_mask_depends_on_the_rng_given_and_not_on_the_generator_s_own(self):
+        a = _make(seed=1)
+        b = _make(seed=2)
+        np.testing.assert_array_equal(a(rng=random.Random(7)), b(rng=random.Random(7)))
+
+
+# ---------------------------------------------------------------------
+# The stateless map function
+# ---------------------------------------------------------------------
+
+
+def _reference_mask(grid, budget, minimum, seed, salt, index) -> np.ndarray:
+    """The documented key, drawn by a fresh generator: no shared state at all."""
+    generator = BeitMaskingGenerator(
+        grid, budget, min_num_patches=minimum,
+        rng=random.Random(f"{seed}:{salt}:{index}"),
+    )
+    return generator().reshape(-1).astype(np.bool_)
+
+
+def _zero_ids(count: int):
+    return lambda image: tf.zeros((count,), tf.int32)
+
+
+def _stream(fn, image, count: int, parallel=tf.data.AUTOTUNE):
+    """One in-order pass of ``count`` rows of one image through ``fn``; masks, ids, weights."""
+    ds = (
+        tf.data.Dataset.from_tensors(image)
+        .repeat(count)
+        .enumerate()
+        .map(fn, num_parallel_calls=parallel, deterministic=True)
+    )
+    masks, ids, weights = [], [], []
+    for (_image, mask), target, weight in ds:
+        masks.append(mask.numpy())
+        ids.append(target.numpy())
+        weights.append(weight.numpy())
+    return np.stack(masks), np.stack(ids), np.stack(weights)
+
+
+_SMALL_IMAGE = np.zeros((32, 32, 3), "float32")  # 8x8 grid at patch 4 (cifar10)
+
+_DIGEST_SOURCE = """
+import hashlib
+import tensorflow as tf
+from dl_techniques.datasets.vision.beit_masking import make_stateless_beit_mim_map_fn
+
+def digest():
+    fn = make_stateless_beit_mim_map_fn(
+        lambda image: tf.zeros((64,), tf.int32), 8, 24, 5, seed=42, salt="train")
+    image = tf.zeros((32, 32, 3))
+    h = hashlib.sha256()
+    for i in range(60):
+        (_, mask), _, weight = fn(tf.constant(i, tf.int64), image)
+        h.update(mask.numpy().tobytes())
+        h.update(weight.numpy().tobytes())
+    return h.hexdigest()
+"""
+
+
+class TestTheStatelessBeitMapFn:
+    def test_the_mask_is_the_one_the_documented_key_draws(self):
+        fn = make_stateless_beit_mim_map_fn(
+            _zero_ids(64), 8, 24, 5, seed=42, salt="train"
+        )
+        masks, _, _ = _stream(fn, _SMALL_IMAGE, 40)
+        for index in range(40):
+            np.testing.assert_array_equal(
+                masks[index], _reference_mask(8, 24, 5, 42, "train", index)
+            )
+
+    def test_two_passes_are_equal_under_autotune(self):
+        fn = make_stateless_beit_mim_map_fn(
+            _zero_ids(64), 8, 24, 5, seed=42, salt="train"
+        )
+        first = _stream(fn, _SMALL_IMAGE, 200)
+        second = _stream(fn, _SMALL_IMAGE, 200)
+        for a, b in zip(first, second):
+            np.testing.assert_array_equal(a, b)
+
+    def test_a_fresh_interpreter_gives_the_same_masks(self, tmp_path):
+        namespace = {}
+        exec(_DIGEST_SOURCE, namespace)
+        here = namespace["digest"]()
+        src = str(Path(dl_techniques.__file__).resolve().parents[1])
+        env = dict(os.environ, PYTHONPATH=src, CUDA_VISIBLE_DEVICES="", TF_CPP_MIN_LOG_LEVEL="3")
+        env.pop("PYTHONHASHSEED", None)
+        out = subprocess.run(
+            [sys.executable, "-c", _DIGEST_SOURCE + "\nprint('DIGEST', digest())"],
+            capture_output=True, text=True, env=env, cwd=str(tmp_path), timeout=300,
+        )
+        assert out.returncode == 0, out.stderr[-2000:]
+        assert [l for l in out.stdout.splitlines() if l.startswith("DIGEST ")] == [
+            f"DIGEST {here}"
+        ]
+
+    def test_a_different_index_salt_or_seed_gives_a_different_mask(self):
+        def masks(seed, salt):
+            fn = make_stateless_beit_mim_map_fn(_zero_ids(64), 8, 24, 5, seed=seed, salt=salt)
+            return _stream(fn, _SMALL_IMAGE, 24)[0]
+
+        base = masks(42, "train")
+        assert len({row.tobytes() for row in base}) > 20  # one mask per index
+        assert not np.any(np.all(base == masks(42, "select"), axis=1))
+        assert not np.any(np.all(base == masks(43, "train"), axis=1))
+
+    def test_seed_zero_is_a_seed(self):
+        fn_zero = make_stateless_beit_mim_map_fn(_zero_ids(64), 8, 24, 5, seed=0, salt="train")
+        masks, _, _ = _stream(fn_zero, _SMALL_IMAGE, 8)
+        for index in range(8):
+            np.testing.assert_array_equal(
+                masks[index], _reference_mask(8, 24, 5, 0, "train", index)
+            )
+
+    def test_the_element_has_the_legacy_structure_and_a_fully_static_spec(self, images):
+        fn = make_stateless_beit_mim_map_fn(
+            _fake_tokenizer, GRID, BUDGET, MIN_BLOCK, seed=1, salt="train"
+        )
+        ds = tf.data.Dataset.from_tensor_slices(images).enumerate().map(fn)
+        (img_spec, mask_spec), ids_spec, w_spec = ds.element_spec
+        assert img_spec.shape.as_list() == [IMAGE_SIZE, IMAGE_SIZE, CHANNELS]
+        assert mask_spec.shape.as_list() == [NUM_PATCHES] and mask_spec.dtype == tf.bool
+        assert ids_spec.shape.as_list() == [NUM_PATCHES] and ids_spec.dtype == tf.int32
+        assert w_spec.shape.as_list() == [NUM_PATCHES] and w_spec.dtype == tf.float32
+
+    def test_the_targets_come_from_the_supplied_tokenizer(self, images):
+        fn = make_stateless_beit_mim_map_fn(
+            _fake_tokenizer, GRID, BUDGET, MIN_BLOCK, seed=1, salt="train"
+        )
+        ds = tf.data.Dataset.from_tensor_slices(images).enumerate().map(fn)
+        for (image, _mask), ids, _weight in ds.take(3):
+            np.testing.assert_array_equal(
+                ids.numpy(), _fake_tokenizer(image).numpy().reshape(-1)
+            )
+
+    def test_the_weight_is_the_mask_times_N_over_the_masked_count(self, images):
+        fn = make_stateless_beit_mim_map_fn(
+            _fake_tokenizer, GRID, BUDGET, MIN_BLOCK, seed=1, salt="train"
+        )
+        ds = tf.data.Dataset.from_tensor_slices(images).enumerate().map(fn)
+        for (_image, mask), _ids, weight in ds:
+            mask, weight = mask.numpy(), weight.numpy()
+            expected = mask.astype(np.float32) * np.float32(NUM_PATCHES / max(int(mask.sum()), 1))
+            np.testing.assert_allclose(weight, expected, rtol=1e-6, atol=0)
+            assert weight.dtype == np.float32
+            assert weight[~mask].max() == 0.0
+            np.testing.assert_allclose(weight.sum(), NUM_PATCHES, rtol=1e-5)
+
+    def test_an_under_filled_mask_is_re_weighted_by_what_it_masked(self):
+        """4x4 grid, budget 8, blocks of at least 6: some draws stop short."""
+        fn = make_stateless_beit_mim_map_fn(
+            _zero_ids(16), 4, 8, 6, seed=17, salt="train"
+        )
+        image = np.zeros((8, 8, 3), "float32")  # patch 2
+        masks, _, weights = _stream(fn, image, 200)
+        counts = masks.sum(axis=1)
+        short = np.flatnonzero((counts > 0) & (counts < 8))
+        assert short.size > 0, "expected at least one under-filled draw"
+        for row in short[:20]:
+            np.testing.assert_allclose(
+                weights[row], masks[row] * np.float32(16 / counts[row]), rtol=1e-6
+            )
+        # the same weight at a full budget is a different number: the mask count matters
+        full = np.flatnonzero(counts == 8)
+        assert full.size > 0
+        assert not np.allclose(weights[short[0]].max(), weights[full[0]].max())
+
+    def test_an_all_false_mask_weighs_zero_and_divides_by_nothing(self):
+        """3x3 grid, one block would be the whole grid: every candidate is rejected."""
+        fn = make_stateless_beit_mim_map_fn(_zero_ids(9), 3, 9, 9, seed=5, salt="train")
+        image = np.zeros((6, 6, 3), "float32")
+        masks, _, weights = _stream(fn, image, 6)
+        assert not masks.any()
+        assert np.all(weights == 0.0)
+        assert np.isfinite(weights).all()
+
+    def test_concurrent_calls_share_no_state(self):
+        """600 elements under 16 parallel calls and a 1 microsecond thread switch.
+
+        At the default switch interval a generator whose ``_rng`` is swapped per call
+        corrupts none of 2000 rows (measured), so this MUST run with the interval
+        tightened or the planted defect passes.
+        """
+        count = 600
+        reference = np.stack(
+            [_reference_mask(8, 24, 5, 42, "train", i) for i in range(count)]
+        )
+        interval = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+        try:
+            fn = make_stateless_beit_mim_map_fn(
+                _zero_ids(64), 8, 24, 5, seed=42, salt="train"
+            )
+            for _pass in range(3):
+                masks, _, _ = _stream(fn, _SMALL_IMAGE, count, parallel=16)
+                wrong = int((masks != reference).any(axis=1).sum())
+                assert wrong == 0, f"{wrong} of {count} masks differ from their own key"
+        finally:
+            sys.setswitchinterval(interval)
+
+    def test_the_element_feeds_a_stock_cross_entropy_as_the_mean_masked_token_loss(self, images):
+        vocab = 32
+        fn = make_stateless_beit_mim_map_fn(
+            lambda image: tf.math.floormod(_fake_tokenizer(image), vocab),
+            GRID, BUDGET, MIN_BLOCK, seed=3, salt="train",
+        )
+        ds = tf.data.Dataset.from_tensor_slices(images).enumerate().map(fn).batch(4)
+        (_, mask), ids, weight = next(iter(ds))
+        logits = tf.constant(
+            np.random.default_rng(0).normal(size=(4, NUM_PATCHES, vocab)).astype("float32")
+        )
+        got = float(
+            keras.losses.SparseCategoricalCrossentropy(from_logits=True)(
+                ids, logits, sample_weight=weight
+            )
+        )
+        per_token = keras.losses.SparseCategoricalCrossentropy(
+            from_logits=True, reduction="none"
+        )(ids, logits).numpy()
+        m = mask.numpy()
+        per_example = (per_token * m).sum(axis=1) / m.sum(axis=1)  # mean over MASKED tokens
+        assert got == pytest.approx(float(per_example.mean()), rel=1e-5)
+
+    def test_a_bad_budget_is_refused_when_the_function_is_built(self):
+        with pytest.raises(ValueError, match="exceeds the grid size"):
+            make_stateless_beit_mim_map_fn(
+                _zero_ids(64), 8, 65, 5, seed=0, salt="train"
+            )
+
+    def test_the_key_is_validated(self):
+        for bad in (None, 1.5, "42", True):
+            with pytest.raises(TypeError, match="seed"):
+                make_stateless_beit_mim_map_fn(_zero_ids(64), 8, 24, 5, seed=bad, salt="train")
+        for bad in (None, "", 3):
+            with pytest.raises(TypeError, match="salt"):
+                make_stateless_beit_mim_map_fn(_zero_ids(64), 8, 24, 5, seed=1, salt=bad)

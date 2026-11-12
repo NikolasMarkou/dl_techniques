@@ -49,10 +49,22 @@ Two deliberate departures, both stated at their site:
 
 1. ``dtype=np.int`` in the reference is not merely deprecated but REMOVED in
    modern numpy; ``np.int64`` is used instead.
-2. An optional ``rng`` may be injected so tests can be deterministic. The
-   reference draws from the global ``random`` module, and that remains the
-   default (``rng=None``), so reference behaviour is what you get unless you ask
-   for otherwise. **No seeding contract is claimed for the default path.**
+2. An optional ``rng`` may be injected, on the constructor or on one call, so tests
+   and the stateless map function can be deterministic. The reference draws from
+   the global ``random`` module, and that remains the default (``rng=None``), so
+   reference behaviour is what you get unless you ask for otherwise. **No
+   seeding contract is claimed for the default path.**
+
+``make_stateless_beit_mim_map_fn`` is the second map function. It takes the row index
+and draws the mask from ``random.Random(f"{seed}:{salt}:{index}")`` through the
+``rng=`` argument of :meth:`BeitMaskingGenerator.__call__`, so a row has the same mask
+on every pass, in every interpreter and under any ``num_parallel_calls``; and it
+weights the masked positions by ``N / n_masked`` per example, so the Keras loss is the
+mean over examples of the per-example masked-token cross-entropy (the reference
+trainer's ``nn.CrossEntropyLoss()(logits[bool_masked_pos], labels[bool_masked_pos])``),
+a number on the scale of ``ln(vocab)`` instead of that scale times the mask fraction.
+Its element is ``((image, bool_mask), target_ids, sample_weight)`` as above, with
+``sample_weight = mask * N / max(n_masked, 1)``.
 
 Raw TensorFlow ops are used deliberately here: this is a ``tf.data`` transform,
 not a Keras layer. The model package stays ``keras.ops``-clean.
@@ -125,6 +137,10 @@ class BeitMaskingGenerator:
       that, including its lack of any internal seeding. Pass a
       ``random.Random(seed)`` to obtain reproducible masks -- that is an addition
       for testability, not a property of the reference.
+    * an optional ``rng`` on :meth:`__call__`. The constructor ``rng`` is shared by
+      every call, so two threads drawing through one generator interleave their draws
+      and swapping ``self._rng`` per call races. A caller that needs a mask keyed on a
+      row passes a per-call ``random.Random`` instead and no shared state is touched.
 
     Args:
         input_size: Patch-grid size. An ``int`` means a square ``(n, n)`` grid;
@@ -230,28 +246,32 @@ class BeitMaskingGenerator:
         """Return the ``(height, width)`` of the patch grid."""
         return self.height, self.width
 
-    def _mask(self, mask: np.ndarray, max_mask_patches: int) -> int:
+    def _mask(
+        self, mask: np.ndarray, max_mask_patches: int, rng: Any = None
+    ) -> int:
         """Attempt to stamp one block into ``mask`` in place.
 
         Args:
             mask: The ``(H, W)`` int64 grid being filled, modified in place.
             max_mask_patches: Remaining budget for this round, already clipped to
                 ``self.max_num_patches`` by the caller.
+            rng: The ``random.Random`` to draw from; ``None`` uses ``self._rng``.
 
         Returns:
             The number of cells newly set by this round -- ``0`` if all 10
             attempts were rejected, which is the caller's signal to stop.
         """
+        rng = self._rng if rng is None else rng
         delta = 0
         for _attempt in range(10):
-            target_area = self._rng.uniform(self.min_num_patches, max_mask_patches)
-            aspect_ratio = math.exp(self._rng.uniform(*self.log_aspect_ratio))
+            target_area = rng.uniform(self.min_num_patches, max_mask_patches)
+            aspect_ratio = math.exp(rng.uniform(*self.log_aspect_ratio))
             h = int(round(math.sqrt(target_area * aspect_ratio)))
             w = int(round(math.sqrt(target_area / aspect_ratio)))
             # STRICT `<`: a block may never span a full grid dimension.
             if w < self.width and h < self.height:
-                top = self._rng.randint(0, self.height - h)
-                left = self._rng.randint(0, self.width - w)
+                top = rng.randint(0, self.height - h)
+                left = rng.randint(0, self.width - w)
                 num_masked = mask[top : top + h, left : left + w].sum()
                 # Accept only if the block contributes NET NEW area inside the
                 # remaining budget.
@@ -265,8 +285,18 @@ class BeitMaskingGenerator:
                     break
         return delta
 
-    def __call__(self) -> np.ndarray:
+    def __call__(self, rng: Any = None) -> np.ndarray:
         """Draw one block-wise mask.
+
+        The ``rng`` argument exists so a stateless map function can draw from a
+        per-call ``random.Random`` keyed on the row. The default ``rng=None`` keeps
+        ``self._rng`` and every draw of the reference path as it was.
+
+        Args:
+            rng: The ``random.Random`` this one draw comes from. ``None`` (the default)
+                draws from the generator's own ``rng``, the global ``random`` module
+                unless one was injected at construction. An explicit ``rng`` is the
+                only state this call touches.
 
         Returns:
             An ``(H, W)`` ``int64`` array of 0/1. The number of ones is at most
@@ -274,13 +304,19 @@ class BeitMaskingGenerator:
             too small to admit any block. Under-fill is the reference's
             behaviour and is not an error condition.
         """
+        # DECISION plan-2026-11-12T015747-46e5318f/D-005
+        # `rng` is an argument and not an assignment to self._rng before the call: one
+        # generator is shared by every worker of a tf.data map under num_parallel_calls,
+        # and the swap races (MEASURED: 291 to 363 of 2000 masks wrong per pass at
+        # sys.setswitchinterval(1e-6), none at the default interval, which is why it
+        # looks safe). Do NOT replace the argument with a swap.
         # np.int64, not the reference's `np.int` (removed in numpy >= 1.24).
         mask = np.zeros(shape=self.get_shape(), dtype=np.int64)
         mask_count = 0
         while mask_count < self.num_masking_patches:
             max_mask_patches = self.num_masking_patches - mask_count
             max_mask_patches = min(max_mask_patches, self.max_num_patches)
-            delta = self._mask(mask, max_mask_patches)
+            delta = self._mask(mask, max_mask_patches, rng)
             if delta == 0:
                 # Under-fill: give up rather than loop forever. Returning a
                 # short mask is the documented contract.
@@ -399,6 +435,121 @@ def make_beit_mim_map_fn(
 
         # Exactly the mask, unscaled: 1.0 at masked positions, 0.0 elsewhere.
         sample_weight = tf.cast(bool_mask, tf.float32)
+
+        return (image, bool_mask), target_ids, sample_weight
+
+    return map_fn
+
+
+def make_stateless_beit_mim_map_fn(
+    tokenizer_fn: Callable[[tf.Tensor], tf.Tensor],
+    grid_size: Union[int, Sequence[int]],
+    num_masking_patches: int,
+    min_num_patches: int,
+    *,
+    seed: int,
+    salt: str,
+) -> Callable[..., Tuple[Tuple[tf.Tensor, tf.Tensor], tf.Tensor, tf.Tensor]]:
+    """Build a BEiT MIM map function whose mask is a function of ``(seed, salt, index)``.
+
+    The legacy :func:`make_beit_mim_map_fn` draws from the global ``random`` module (or
+    one injected ``random.Random``) shared by every call, so a row gets a different mask
+    on every pass, and its weight is the bare mask. This function draws the mask of row
+    ``index`` from ``random.Random(f"{seed}:{salt}:{index}")`` (a string seed is hashed
+    by ``random`` itself, so the draw does not depend on ``PYTHONHASHSEED`` or the
+    process) through ``BeitMaskingGenerator.__call__(rng=...)`` inside
+    ``tf.numpy_function``, and weights the masked positions by ``N / n_masked``.
+
+    The budget and the minimum block area have no defaults here: BEiT's 75 and 16 are
+    fractions of the 14 x 14 grid and exceed a smaller one, so the caller derives them
+    from its grid. A block-masked draw may mask fewer than ``num_masking_patches``
+    cells; that is reported through the weight and is not an error.
+
+    Args:
+        tokenizer_fn: Callable mapping an unbatched image to per-patch code ids, as for
+            :func:`make_beit_mim_map_fn`.
+        grid_size: Patch grid, ``int`` for square or ``(gh, gw)``.
+        num_masking_patches: Mask budget (at most the grid size).
+        min_num_patches: Minimum per-block target area.
+        seed: Integer seed (``0`` is a seed). A ``bool`` is refused.
+        salt: Non-empty string naming the stream (for example ``"train"``,
+            ``"select"``, ``"test"``).
+
+    Returns:
+        A ``tf.data``-mappable callable ``(index, image, *rest) -> ((image, bool_mask),
+        target_ids, sample_weight)``. ``index`` is the integer row position, for example
+        the first component of ``dataset.enumerate()`` (int64); further components are
+        ignored. ``sample_weight`` is ``bool_mask * N / max(n_masked, 1)`` (float32):
+        it sums to ``N`` over a mask that masked anything and is all zero over one that
+        masked nothing.
+
+    Raises:
+        TypeError: If ``seed`` is not an ``int`` (a ``bool`` is not) or ``salt`` is not
+            a non-empty ``str``.
+        ValueError: Propagated from :class:`BeitMaskingGenerator` for an invalid grid or
+            budget.
+    """
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise TypeError(f"seed must be an int, got {seed!r}")
+    if not isinstance(salt, str) or not salt:
+        raise TypeError(f"salt must be a non-empty str, got {salt!r}")
+
+    # Read-only after construction: every call passes its own rng, so sharing this
+    # one generator between the workers of a parallel map shares no mutable state.
+    generator = BeitMaskingGenerator(
+        input_size=grid_size,
+        num_masking_patches=num_masking_patches,
+        min_num_patches=min_num_patches,
+    )
+    num_patches = generator.num_patches
+
+    logger.info(
+        f"stateless BEiT MIM map fn: grid={generator.get_shape()}, N={num_patches}, "
+        f"budget={generator.num_masking_patches} "
+        f"({generator.num_masking_patches / num_patches:.1%}), "
+        f"block_area=[{generator.min_num_patches}, {generator.max_num_patches}], "
+        f"seed={seed}, salt={salt}"
+    )
+
+    def _draw_mask(index: np.ndarray) -> np.ndarray:
+        """Draw the flattened boolean mask of one row on the python side."""
+        # DECISION plan-2026-11-12T015747-46e5318f/D-005
+        # A fresh random.Random per row, handed to the generator per call. Rejected:
+        # swapping generator._rng here (a race under num_parallel_calls) and one shared
+        # random.Random (a different mask for a row on every pass).
+        rng = random.Random(f"{seed}:{salt}:{int(index)}")
+        return generator(rng=rng).reshape(-1).astype(np.bool_)
+
+    def map_fn(
+        index: tf.Tensor, image: tf.Tensor, *_unused: Any
+    ) -> Tuple[Tuple[tf.Tensor, tf.Tensor], tf.Tensor, tf.Tensor]:
+        """Map one ``(index, image)`` row to the BEiT MIM training element."""
+        image = tf.cast(image, tf.float32)
+
+        # stateful=True as in the legacy function: the op must run once per row, and a
+        # stateless numpy_function may be folded or deduplicated by graph rewrites.
+        bool_mask = tf.numpy_function(
+            func=_draw_mask,
+            inp=[tf.cast(index, tf.int64)],
+            Tout=tf.bool,
+            stateful=True,
+        )
+        bool_mask = tf.ensure_shape(bool_mask, (num_patches,))
+
+        target_ids = tf.cast(tokenizer_fn(image), tf.int32)
+        target_ids = tf.reshape(target_ids, (num_patches,))
+        target_ids = tf.ensure_shape(target_ids, (num_patches,))
+
+        # DECISION plan-2026-11-12T015747-46e5318f/D-008
+        # mask * N / max(n_masked, 1): Keras' sum-over-batch-size reduction then gives
+        # the mean over examples of the per-example masked-token cross-entropy, the
+        # reference's loss and a number on the scale of ln(vocab). Rejected: the bare
+        # mask of the legacy function, whose loss is the mask fraction times that
+        # (0.375 of it at 24 of 64 masked), which gives a bar no absolute meaning. The
+        # max(., 1) keeps a mask that masked nothing at weight 0, not NaN.
+        mask_weight = tf.cast(bool_mask, tf.float32)
+        masked = tf.maximum(tf.reduce_sum(mask_weight), 1.0)
+        sample_weight = mask_weight * (float(num_patches) / masked)
 
         return (image, bool_mask), target_ids, sample_weight
 

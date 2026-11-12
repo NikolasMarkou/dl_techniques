@@ -100,7 +100,12 @@ Data loading, generation, and preprocessing utilities for various domains.
     Tested by `tests/test_datasets/test_reid.py`. NumPy + Pillow-lazy at
     module scope.
   - `masked_patches.py` — `make_masked_patch_map_fn`, the per-sample
-    `element_map_fn` for masked-image-modelling objectives
+    `element_map_fn` for masked-image-modelling objectives (one shared
+    generator, so a row gets a new mask on every pass), and
+    `make_stateless_masked_patch_map_fn`, the same element with the mask keyed
+    on `(seed, salt, row index)` for a stream whose loss is compared across
+    passes; `beit_masking.py` holds the BEiT counterpart
+    `make_stateless_beit_mim_map_fn` (weight `mask * N / n_masked`)
   - `transform_sequences.py` — transformation SEQUENCES for the Topographic VAE
     (Keller & Welling 2022 Sections A.8/A.9): MNIST over rotation / colour /
     scale and dSprites over orientation / x / y / scale, each a sequence where

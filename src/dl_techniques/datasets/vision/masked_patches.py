@@ -41,10 +41,22 @@ per-token loss which the reduction divides by ``B * N``. Since
 is the per-sample mean over ``S``, averaged over the batch. Verified
 empirically at ``N=196`` (delta 0.0 vs a numpy reference).
 
+Two map functions produce that element. ``make_masked_patch_map_fn`` draws from ONE
+``tf.random.Generator`` shared by every call, so the mask an image gets depends on how
+many images were mapped before it: two passes over one stream see two different masks,
+and a validation loss computed through it moves with the pass count even for fixed
+weights. ``make_stateless_masked_patch_map_fn`` takes the row index and draws the mask
+from ``(seed, salt, index)`` alone, so a row has the same mask on every pass, in every
+process and under any ``num_parallel_calls``. The stateless one is for a stream whose
+loss is compared across passes (validation, test, a resumed run); the stateful one is
+kept for the trainers that already use it.
+
 Raw TensorFlow ops are used deliberately here: this is a ``tf.data`` transform,
 not a Keras layer. The model package stays ``keras.ops``-clean.
 """
 
+import hashlib
+import struct
 from typing import Any, Callable, Optional, Tuple
 
 import tensorflow as tf
@@ -136,47 +148,30 @@ def patchify_targets(image: tf.Tensor, patch_size: int) -> tf.Tensor:
     return patches
 
 
-def make_masked_patch_map_fn(
+def _validate_masked_patch_config(
     patch_size: int,
     image_size: int,
-    mask_ratio: float = 0.5,
-    mask_token_frac: float = 0.9,
-    seed: Optional[int] = None,
-) -> Callable[[tf.Tensor], Tuple[Tuple[tf.Tensor, tf.Tensor], tf.Tensor, tf.Tensor]]:
-    """Build the ``tf.data`` map function for masked-patch pretraining.
+    mask_ratio: float,
+    mask_token_frac: float,
+) -> Tuple[int, int, int]:
+    """Check a masked-patch configuration eagerly and derive its three counts.
 
-    The returned function maps a single raw image to the element
-    ``((image, input_mask), target_patches, loss_weight)`` described in the
-    module docstring. Selection is per-sample and graph-safe (the standard
-    argsort-of-uniform-noise random-permutation trick), so it composes with
-    ``dataset.map(..., num_parallel_calls=tf.data.AUTOTUNE)``.
-
-    All configuration is validated EAGERLY, at construction time — a bad
-    ``mask_ratio`` must fail when the pipeline is built, not silently produce a
-    degenerate mask a thousand steps into training.
+    Shared by :func:`make_masked_patch_map_fn` and
+    :func:`make_stateless_masked_patch_map_fn`, so the two refuse the same configs in
+    the same words.
 
     Args:
         patch_size: Side length of a square patch.
-        image_size: Side length of the (square) image the pipeline feeds. Must
-            be divisible by ``patch_size``.
-        mask_ratio: Fraction of the ``N`` tokens that enter the LOSS set ``S``.
-            The paper's image default is ``0.5``.
-        mask_token_frac: Fraction of ``S`` that is additionally OCCLUDED in the
-            model input. The paper's value is ``0.9``; the remaining ``~10%``
-            of ``S`` stay visible to the model but still count in the loss.
-        seed: Optional seed for a deterministic ``tf.random.Generator``. Leave
-            ``None`` for a non-deterministic stream in real training.
+        image_size: Side length of the square image; divisible by ``patch_size``.
+        mask_ratio: Fraction of the tokens in the loss set, in ``(0, 1]``.
+        mask_token_frac: Fraction of the loss set occluded in the input, in ``(0, 1]``.
 
     Returns:
-        A ``tf.data``-mappable callable ``image -> ((image, input_mask),
-        target_patches, loss_weight)``.
+        ``(num_patches, n_loss, n_input)``.
 
     Raises:
-        ValueError: If ``image_size`` is not divisible by ``patch_size``; if
-            ``mask_ratio`` / ``mask_token_frac`` are outside ``(0, 1]``; if the
-            resulting ``n_loss`` is 0; if ``n_input`` is 0; or if
-            ``n_input == n_loss`` (which would silently delete the ~10%
-            un-occluded signal the paper's Hopfield network needs).
+        ValueError: On any of the conditions listed under
+            :func:`make_masked_patch_map_fn`.
     """
     if patch_size <= 0:
         raise ValueError(f"patch_size must be positive, got {patch_size}")
@@ -220,6 +215,102 @@ def make_masked_patch_map_fn(
             f"Lower mask_token_frac or raise num_patches."
         )
 
+    return num_patches, n_loss, n_input
+
+
+def _masked_patch_element(
+    image: tf.Tensor,
+    noise: tf.Tensor,
+    patch_size: int,
+    num_patches: int,
+    n_loss: int,
+    n_input: int,
+    weight_scale: tf.Tensor,
+) -> Tuple[Tuple[tf.Tensor, tf.Tensor], tf.Tensor, tf.Tensor]:
+    """Build the masked-patch element from one image and ``(N,)`` uniform noise.
+
+    The mask is a function of ``noise`` alone: the legacy function passes the next
+    draw of its shared generator, the stateless one a draw keyed on the row.
+
+    Args:
+        image: One ``(H, W, C)`` image.
+        noise: ``(num_patches,)`` float32 uniform noise.
+        patch_size: Side length of a square patch.
+        num_patches: ``N``.
+        n_loss: Size of the loss set.
+        n_input: Size of the occluded subset of the loss set.
+        weight_scale: Scalar ``N / n_loss`` float32 constant.
+
+    Returns:
+        ``((image, input_mask), target_patches, loss_weight)`` as in the module docstring.
+    """
+    image = tf.cast(image, tf.float32)
+    target_patches = patchify_targets(image, patch_size)  # (N, P)
+
+    # Random permutation of [0, N): rank[i] is the position of token i in a
+    # uniformly random shuffle. rank < k therefore selects a uniformly random
+    # k-subset, and rank < n_input is a random subset of rank < n_loss --
+    # which is exactly what makes input_mask a STRICT subset of the loss set.
+    rank = tf.argsort(tf.argsort(noise, axis=-1), axis=-1)
+
+    loss_set = rank < n_loss  # (N,) bool
+    input_mask = rank < n_input  # (N,) bool, strict subset of loss_set
+
+    loss_weight = tf.cast(loss_set, tf.float32) * weight_scale  # (N,) float32
+
+    # Static shapes: tf.data needs them for a well-defined batch spec.
+    input_mask = tf.ensure_shape(input_mask, (num_patches,))
+    loss_weight = tf.ensure_shape(loss_weight, (num_patches,))
+
+    return (image, input_mask), target_patches, loss_weight
+
+
+def make_masked_patch_map_fn(
+    patch_size: int,
+    image_size: int,
+    mask_ratio: float = 0.5,
+    mask_token_frac: float = 0.9,
+    seed: Optional[int] = None,
+) -> Callable[[tf.Tensor], Tuple[Tuple[tf.Tensor, tf.Tensor], tf.Tensor, tf.Tensor]]:
+    """Build the ``tf.data`` map function for masked-patch pretraining.
+
+    The returned function maps a single raw image to the element
+    ``((image, input_mask), target_patches, loss_weight)`` described in the
+    module docstring. Selection is per-sample and graph-safe (the standard
+    argsort-of-uniform-noise random-permutation trick), so it composes with
+    ``dataset.map(..., num_parallel_calls=tf.data.AUTOTUNE)``.
+
+    All configuration is validated EAGERLY, at construction time — a bad
+    ``mask_ratio`` must fail when the pipeline is built, not silently produce a
+    degenerate mask a thousand steps into training.
+
+    Args:
+        patch_size: Side length of a square patch.
+        image_size: Side length of the (square) image the pipeline feeds. Must
+            be divisible by ``patch_size``.
+        mask_ratio: Fraction of the ``N`` tokens that enter the LOSS set ``S``.
+            The paper's image default is ``0.5``.
+        mask_token_frac: Fraction of ``S`` that is additionally OCCLUDED in the
+            model input. The paper's value is ``0.9``; the remaining ``~10%``
+            of ``S`` stay visible to the model but still count in the loss.
+        seed: Optional seed for a deterministic ``tf.random.Generator``. Leave
+            ``None`` for a non-deterministic stream in real training.
+
+    Returns:
+        A ``tf.data``-mappable callable ``image -> ((image, input_mask),
+        target_patches, loss_weight)``.
+
+    Raises:
+        ValueError: If ``image_size`` is not divisible by ``patch_size``; if
+            ``mask_ratio`` / ``mask_token_frac`` are outside ``(0, 1]``; if the
+            resulting ``n_loss`` is 0; if ``n_input`` is 0; or if
+            ``n_input == n_loss`` (which would silently delete the ~10%
+            un-occluded signal the paper's Hopfield network needs).
+    """
+    num_patches, n_loss, n_input = _validate_masked_patch_config(
+        patch_size, image_size, mask_ratio, mask_token_frac
+    )
+
     rng = (
         tf.random.Generator.from_seed(seed)
         if seed is not None
@@ -238,26 +329,95 @@ def make_masked_patch_map_fn(
         image: tf.Tensor, *_unused: Any
     ) -> Tuple[Tuple[tf.Tensor, tf.Tensor], tf.Tensor, tf.Tensor]:
         """Map one raw image to the masked-patch training element."""
-        image = tf.cast(image, tf.float32)
-        target_patches = patchify_targets(image, patch_size)  # (N, P)
-
-        # Random permutation of [0, N): rank[i] is the position of token i in a
-        # uniformly random shuffle. rank < k therefore selects a uniformly random
-        # k-subset, and rank < n_input is a random subset of rank < n_loss --
-        # which is exactly what makes input_mask a STRICT subset of the loss set.
         noise = rng.uniform(shape=(num_patches,), dtype=tf.float32)
-        rank = tf.argsort(tf.argsort(noise, axis=-1), axis=-1)
+        return _masked_patch_element(
+            image, noise, patch_size, num_patches, n_loss, n_input, weight_scale
+        )
 
-        loss_set = rank < n_loss  # (N,) bool
-        input_mask = rank < n_input  # (N,) bool, strict subset of loss_set
+    return map_fn
 
-        loss_weight = tf.cast(loss_set, tf.float32) * weight_scale  # (N,) float32
 
-        # Static shapes: tf.data needs them for a well-defined batch spec.
-        input_mask = tf.ensure_shape(input_mask, (num_patches,))
-        loss_weight = tf.ensure_shape(loss_weight, (num_patches,))
+def make_stateless_masked_patch_map_fn(
+    patch_size: int,
+    image_size: int,
+    mask_ratio: float = 0.5,
+    mask_token_frac: float = 0.9,
+    *,
+    seed: int,
+    salt: str,
+) -> Callable[..., Tuple[Tuple[tf.Tensor, tf.Tensor], tf.Tensor, tf.Tensor]]:
+    """Build a masked-patch map function whose mask is a function of ``(seed, salt, index)``.
 
-        return (image, input_mask), target_patches, loss_weight
+    The legacy :func:`make_masked_patch_map_fn` draws from one shared stateful
+    generator, so the same row gets a different mask on every pass (MEASURED: 0.37
+    percent ``val_loss`` spread over four passes of the same weights). This function
+    keeps no generator and no counter: the mask is reproducible from the key alone,
+    across passes, processes and ``num_parallel_calls``. The key is
+    ``sha256(f"{seed}:{salt}")`` folded with the row ``index`` through
+    ``tf.random.experimental.stateless_fold_in``, so no sum or xor of the three can make
+    two keys collide. The element structure, the 90/10 rule and the weight formula are
+    the legacy ones (shared through ``_masked_patch_element``).
+
+    Args:
+        patch_size: Side length of a square patch.
+        image_size: Side length of the square image; divisible by ``patch_size``.
+        mask_ratio: Fraction of the ``N`` tokens in the loss set.
+        mask_token_frac: Fraction of the loss set occluded in the input.
+        seed: Integer seed (``0`` is a seed). A ``bool`` is refused.
+        salt: Non-empty string naming the stream (for example ``"train"``,
+            ``"select"``, ``"test"``), so one seed gives each stream its own masks.
+
+    Returns:
+        A ``tf.data``-mappable callable ``(index, image, *rest) -> ((image, input_mask),
+        target_patches, loss_weight)``. ``index`` is the integer row position, for
+        example the first component of ``dataset.enumerate()`` (int64); the label or
+        any further component is ignored.
+
+    Raises:
+        TypeError: If ``seed`` is not an ``int`` (a ``bool`` is not) or ``salt`` is not
+            a non-empty ``str``.
+        ValueError: As :func:`make_masked_patch_map_fn`.
+    """
+    num_patches, n_loss, n_input = _validate_masked_patch_config(
+        patch_size, image_size, mask_ratio, mask_token_frac
+    )
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise TypeError(f"seed must be an int, got {seed!r}")
+    if not isinstance(salt, str) or not salt:
+        raise TypeError(f"salt must be a non-empty str, got {salt!r}")
+
+    # DECISION plan-2026-11-12T015747-46e5318f/D-005
+    # The mask is keyed on (seed, salt, row index) and on nothing stateful. Rejected: the
+    # shared tf.random.Generator of the legacy function (a different mask for the same row
+    # on every pass, so a validation loss moves with the pass count) and a counter kept in
+    # this closure (the same, after a resume). Two int32 words of a hash of (seed, salt)
+    # are fixed here; the row index is folded in per call.
+    base_key = tf.constant(
+        struct.unpack("<ii", hashlib.sha256(f"{seed}:{salt}".encode()).digest()[:8]),
+        dtype=tf.int32,
+    )
+
+    logger.info(
+        f"stateless masked-patch map fn: image_size={image_size}, patch_size={patch_size}, "
+        f"N={num_patches}, n_loss={n_loss}, n_input={n_input}, "
+        f"loss_weight_scale={num_patches / n_loss:.6f}, seed={seed}, salt={salt}"
+    )
+
+    weight_scale = tf.constant(num_patches / n_loss, dtype=tf.float32)
+
+    def map_fn(
+        index: tf.Tensor, image: tf.Tensor, *_unused: Any
+    ) -> Tuple[Tuple[tf.Tensor, tf.Tensor], tf.Tensor, tf.Tensor]:
+        """Map one ``(index, image)`` row to the masked-patch training element."""
+        key = tf.random.experimental.stateless_fold_in(
+            base_key, tf.cast(index, tf.int64)
+        )
+        noise = tf.random.stateless_uniform(
+            shape=(num_patches,), seed=key, dtype=tf.float32
+        )
+        return _masked_patch_element(
+            image, noise, patch_size, num_patches, n_loss, n_input, weight_scale
+        )
 
     return map_fn
 
