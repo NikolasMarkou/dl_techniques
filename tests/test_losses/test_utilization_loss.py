@@ -234,20 +234,29 @@ class _BatchVarianceGNN(GNNUtilizationLoss):
         return super().call(y_true, y_pred) + self.attention_weight * (coupled - own)
 
 
-def _returns_per_row(loss_obj):
-    """True when ``call`` returns ``(B,)`` rows equal to the float64 reference."""
-    x = _ragged_embeddings()
+def _gnn_reference(loss_obj, x):
+    return _rows64(x, loss_obj.diversity_weight, loss_obj.activation_weight,
+                   loss_obj.attention_weight)
+
+
+#: ``(fixture, float64 row reference of (loss, x), atol of the reference)`` per loss family.
+GNN_CASE = (_ragged_embeddings, _gnn_reference, _atol)
+
+
+def _returns_per_row(loss_obj, case):
+    """True when ``call`` returns ``(B,)`` rows equal to the case's float64 reference."""
+    fixture, reference, atol = case
+    x = fixture()
     out = loss_obj.call(_dummy(x), _f32(x))
     if tuple(out.shape) != (BATCH,):
         return False
-    ref = _rows64(x, loss_obj.diversity_weight, loss_obj.activation_weight,
-                  loss_obj.attention_weight)
-    return bool(np.abs(out.numpy() - ref).max() < _atol(ref))
+    ref = reference(loss_obj, x)
+    return bool(np.abs(out.numpy() - ref).max() < atol(ref))
 
 
-def _drop_a_row_identity_holds(loss_obj_factory):
+def _drop_a_row_identity_holds(loss_obj_factory, case):
     """``loss(w=[1,1,1,0]) * B/(B-1) == loss(batch[:B-1])`` at atol 1e-6."""
-    x = _ragged_embeddings()
+    x = case[0]()
     w = np.array([1.0, 1.0, 1.0, 0.0], "float32")
     weighted = float(loss_obj_factory()(_dummy(x), _f32(x), sample_weight=w))
     dropped = float(loss_obj_factory()(_dummy(x[:-1]), _f32(x[:-1])))
@@ -329,7 +338,7 @@ class TestGNNUtilizationLossIsPerSample:
 
     def test_zeroing_a_sample_weight_equals_dropping_the_row(self):
         """NOT batch-coupled: the identity holds, and exactly (no row reads another)."""
-        assert _drop_a_row_identity_holds(GNNUtilizationLoss)
+        assert _drop_a_row_identity_holds(GNNUtilizationLoss, GNN_CASE)
         x = _ragged_embeddings()
         w = np.array([1.0, 1.0, 1.0, 0.0], "float32")
         weighted = float(GNNUtilizationLoss()(_dummy(x), _f32(x), sample_weight=w))
@@ -369,10 +378,10 @@ class TestGNNUtilizationLossIsPerSample:
 
     def test_the_per_row_tests_reject_the_scalar_returning_class(self):
         """ANTI-VACUITY: the pre-fix scalar fails the shape, reference and identity arms."""
-        assert _returns_per_row(GNNUtilizationLoss())
-        assert not _returns_per_row(_ScalarGNN())
-        assert _drop_a_row_identity_holds(GNNUtilizationLoss)
-        assert not _drop_a_row_identity_holds(_ScalarGNN)
+        assert _returns_per_row(GNNUtilizationLoss(), GNN_CASE)
+        assert not _returns_per_row(_ScalarGNN(), GNN_CASE)
+        assert _drop_a_row_identity_holds(GNNUtilizationLoss, GNN_CASE)
+        assert not _drop_a_row_identity_holds(_ScalarGNN, GNN_CASE)
         x = _ragged_embeddings()
         assert tuple(_ScalarGNN(reduction="none")(_dummy(x), _f32(x)).shape) == ()
 
@@ -381,8 +390,8 @@ class TestGNNUtilizationLossIsPerSample:
         x = _ragged_embeddings()
         same = float(_BatchVarianceGNN()(_dummy(x), _f32(x)))
         assert abs(same - HEAD_GOLDEN_RAGGED) < 1e-7  # the default-value test is blind to it
-        assert not _returns_per_row(_BatchVarianceGNN())
-        assert not _drop_a_row_identity_holds(_BatchVarianceGNN)
+        assert not _returns_per_row(_BatchVarianceGNN(), GNN_CASE)
+        assert not _drop_a_row_identity_holds(_BatchVarianceGNN, GNN_CASE)
 
     def test_a_direct_float16_call_is_finite_per_row(self):
         """The diversity mask follows the input dtype (a float32 ``eye`` raised on float16)."""
@@ -643,6 +652,14 @@ def _mann_atol(rows):
     return reassociation_atol(_MEMORY_LENGTHS, 1, float(np.abs(rows).max()))
 
 
+def _mann_reference(loss_obj, x):
+    return _mann_rows64(x, loss_obj.entropy_weight, loss_obj.write_weight,
+                        loss_obj.variance_weight)
+
+
+MANN_CASE = (_ragged_memory, _mann_reference, _mann_atol)
+
+
 def _mann_per_row_terms(loss_obj, y_pred):
     """Entropy and magnitude rows through keras ops, for the wrong-implementation arms."""
     probs = keras.ops.softmax(y_pred, axis=-1)
@@ -690,17 +707,6 @@ class _PerRowLogVarianceMANN(MANNUtilizationLoss):
         return rows - self.variance_weight * keras.ops.log(per_row_var + 1e-10)
 
 
-def _mann_returns_per_row(loss_obj):
-    """True when ``call`` returns ``(B,)`` rows equal to the float64 reference."""
-    x = _ragged_memory()
-    out = loss_obj.call(_dummy(x), _f32(x))
-    if tuple(out.shape) != (BATCH,):
-        return False
-    ref = _mann_rows64(x, loss_obj.entropy_weight, loss_obj.write_weight,
-                       loss_obj.variance_weight)
-    return bool(np.abs(out.numpy() - ref).max() < _mann_atol(ref))
-
-
 def _mann_default_value_is_the_head_golden(loss_obj_factory):
     """The default-reduction value on both fixtures equals the HEAD golden (1e-7)."""
     for x, golden in [
@@ -725,25 +731,6 @@ def _mann_zero_row_gradient(loss_obj):
 
 def _mann_zero_weighted_row_gets_exactly_zero_gradient(loss_obj):
     return bool(np.all(_mann_zero_row_gradient(loss_obj)[3] == 0.0))
-
-
-def _mann_drop_a_row_identity_holds(loss_obj_factory):
-    """``loss(w=[1,1,1,0]) * B/(B-1) == loss(batch[:B-1])`` at atol 1e-6."""
-    x = _ragged_memory()
-    w = np.array([1.0, 1.0, 1.0, 0.0], "float32")
-    weighted = float(loss_obj_factory()(_dummy(x), _f32(x), sample_weight=w))
-    dropped = float(loss_obj_factory()(_dummy(x[:-1]), _f32(x[:-1])))
-    return abs(weighted * BATCH / (BATCH - 1) - dropped) < 1e-6
-
-
-def _follows_the_d005_rule(module_source, call_source):
-    """True when the anchor is present and ``call`` builds the detached surrogate."""
-    return (
-        "# DECISION plan-2026-11-11T223825-64d1b401/D-005" in module_source
-        and call_source.count("stop_gradient") >= 2  # the detached mean and V
-        and "variance_row" in call_source
-        and "ones_like" not in call_source
-    )
 
 
 class TestMANNUtilizationLossIsPerSample:
@@ -855,7 +842,7 @@ class TestMANNUtilizationLossIsPerSample:
         def make():
             return MANNUtilizationLoss(variance_weight=0.0)
 
-        assert _mann_drop_a_row_identity_holds(make)
+        assert _drop_a_row_identity_holds(make, MANN_CASE)
         x = _ragged_memory()
         w = np.array([1.0, 1.0, 1.0, 0.0], "float32")
         weighted = float(make()(_dummy(x), _f32(x), sample_weight=w))
@@ -884,14 +871,14 @@ class TestMANNUtilizationLossIsPerSample:
         assert abs(scaled - (-0.06142767774753244)) < 1e-7
         assert abs(dropped - (-0.057418180421810336)) < 1e-7
         assert abs(scaled - dropped) > 3.9e-3
-        assert not _mann_drop_a_row_identity_holds(MANNUtilizationLoss)
+        assert not _drop_a_row_identity_holds(MANNUtilizationLoss, MANN_CASE)
 
     def test_the_per_row_tests_reject_the_scalar_returning_class(self):
         """ANTI-VACUITY: the pre-fix scalar fails the shape and reference arms."""
-        assert _mann_returns_per_row(MANNUtilizationLoss())
-        assert not _mann_returns_per_row(_ScalarMANN())
-        assert not _mann_drop_a_row_identity_holds(
-            lambda: _ScalarMANN(variance_weight=0.0)
+        assert _returns_per_row(MANNUtilizationLoss(), MANN_CASE)
+        assert not _returns_per_row(_ScalarMANN(), MANN_CASE)
+        assert not _drop_a_row_identity_holds(
+            lambda: _ScalarMANN(variance_weight=0.0), MANN_CASE
         )
         x = _ragged_memory()
         assert tuple(_ScalarMANN(reduction="none")(_dummy(x), _f32(x)).shape) == ()
@@ -909,15 +896,15 @@ class TestMANNUtilizationLossIsPerSample:
             _BroadcastVarianceMANN()
         )
         assert np.abs(_mann_zero_row_gradient(_BroadcastVarianceMANN())[3]).max() > 1e-5
-        assert not _mann_returns_per_row(_BroadcastVarianceMANN())
+        assert not _returns_per_row(_BroadcastVarianceMANN(), MANN_CASE)
 
     def test_the_value_arm_rejects_the_per_row_log_variance_alternative(self):
         """ANTI-VACUITY (D-005 option a3): row-local, but a different objective."""
         assert _mann_default_value_is_the_head_golden(MANNUtilizationLoss)
         assert not _mann_default_value_is_the_head_golden(_PerRowLogVarianceMANN)
         # it IS row-local, which is why the identity arm cannot tell it from the fix
-        assert _mann_drop_a_row_identity_holds(_PerRowLogVarianceMANN)
-        assert not _mann_returns_per_row(_PerRowLogVarianceMANN())
+        assert _drop_a_row_identity_holds(_PerRowLogVarianceMANN, MANN_CASE)
+        assert not _returns_per_row(_PerRowLogVarianceMANN(), MANN_CASE)
 
     def test_float16_inputs_through_the_loss_object_match_float32(self):
         """Through ``__call__`` the inputs are cast to float32 first, as under mixed_float16."""
@@ -943,30 +930,23 @@ class TestMANNUtilizationLossIsPerSample:
         # the documented direct-call limits (D-009): not fixed, so they are stated
         assert "float16" in class_doc and "time >= 2" in class_doc
 
-    def test_the_variance_term_keeps_its_decision_anchor_and_surrogate_form(self):
-        """D-005 guard: the anchor and the detached surrogate must survive a refactor.
+    def test_the_d005_anchor_is_in_the_module_source(self):
+        """The anchor survives a refactor of ``utilization_loss.py``.
 
-        The rule the anchor states: the variance term is the detached first-order
-        surrogate, never ``-log`` of a per-row variance (changes the objective) and
-        never ``-log(V)`` broadcast to every row (leaks gradient into a zero-weighted
-        row). A source that drops the anchor, the ``stop_gradient`` detachments, or
-        the ``(v_b - V)`` correction fails here, and the two rejected alternatives
-        are shown to fail it.
+        It reads the MODULE's text, and the pattern is assembled so that no line of this
+        file is an anchor: the rules the anchor states (a detached first-order surrogate,
+        no broadcast ``-log(V)``, no per-row ``-log(var_b)``) are enforced by the
+        behavioural arms above (the zero-weighted-row gradient of exactly 0.0, the value
+        and gradient pins, and the two wrong implementations that must fail them).
         """
         import inspect
+        import re
         from dl_techniques.losses import utilization_loss
 
-        assert _follows_the_d005_rule(
-            inspect.getsource(utilization_loss),
-            inspect.getsource(MANNUtilizationLoss.call),
+        anchor = re.compile(
+            r"^\s*#\s+" + "DECISION" + r"\s+plan-[0-9T-]+-[0-9a-f]{8}/D-005\s*$", re.M
         )
-        module = inspect.getsource(utilization_loss)
-        for wrong in (_BroadcastVarianceMANN, _PerRowLogVarianceMANN):
-            assert not _follows_the_d005_rule(module, inspect.getsource(wrong.call))
-        no_anchor = module.replace("# DECISION plan-2026-11-11T223825-64d1b401/D-005", "")
-        assert not _follows_the_d005_rule(
-            no_anchor, inspect.getsource(MANNUtilizationLoss.call)
-        )
+        assert len(anchor.findall(inspect.getsource(utilization_loss))) == 1
 
 
 # ---------------------------------------------------------------------
