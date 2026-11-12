@@ -428,6 +428,26 @@ def sgd_weight_decay(optim_args: OptimArgs) -> Optional[float]:
     return decay
 
 
+def refuse_dropped_sgd_decay(optim_args: OptimArgs, task: str, family: str) -> None:
+    """Refuse an sgd weight decay for a task whose adapters build no kernel regularizer.
+
+    The classification families turn it into an L2 penalty on the kernels (:func:`_weight_decay_regularizer`); an adapter
+    that builds none would drop the number without a word.
+
+    :param task: the task's name, for the message; ``family`` the family's.
+    :raises ConfigError: naming ``optim_args.weight_decay``, when :func:`sgd_weight_decay` finds a decay.
+    :raises UnresolvedAutoError: as :func:`sgd_weight_decay`.
+    """
+    decay = sgd_weight_decay(optim_args)
+    if decay is not None:
+        raise ConfigError(
+            f"Invalid value for 'optim_args.weight_decay': optim_args.optimizer=sgd takes its weight decay as an L2 "
+            f"penalty on the model's kernels, and the {task} task builds none for {family!r}, so "
+            f"weight_decay={decay!r} would be dropped without a word; set optim_args.weight_decay=null for no "
+            "decay, or use optim_args.optimizer=adamw, whose decay is decoupled and applied by the optimizer"
+        )
+
+
 def _weight_decay_regularizer(optim_args: OptimArgs) -> Any:
     """Return ``L2(weight_decay / 2)`` for sgd with a decay, else ``None``.
 

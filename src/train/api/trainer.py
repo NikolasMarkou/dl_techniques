@@ -444,7 +444,7 @@ def _non_json_values(value: Any, path: str, found: List[Tuple[str, str]]) -> Non
         found.append((path, f"a {type(value).__name__}"))
 
 
-def config_problems(config: StrictConfig, prefix: str = "") -> List[str]:
+def config_problems(config: StrictConfig, prefix: str = "", no_conformal_for: Optional[str] = None) -> List[str]:
     """Return one line per top-level field of a task config that cannot be right.
 
     A task config calls this from its ``problems`` so :func:`validate` reports
@@ -453,10 +453,12 @@ def config_problems(config: StrictConfig, prefix: str = "") -> List[str]:
     :param config: a task config carrying the fields of :data:`CONFIG_FIELDS`;
         an ``"auto"`` field is skipped (it has no value yet).
     :param prefix: the dotted path of ``config``; ``""`` at the top.
+    :param no_conformal_for: the kind of run (``"denoising"``) that produces no set of classes; ``None`` (classification)
+        accepts ``analysis_args.conformal_alpha``, a name refuses it by key.
     :return: lines for ``epochs`` or ``batch_size`` below 1, a ``seed`` outside
-        ``[0, MAX_SEED]``, a negative ``devices``, and a ``model_args`` value
+        ``[0, MAX_SEED]``, a negative ``devices``, a ``model_args`` value
         that JSON cannot hold (``config.json`` records the arguments, and a Keras
-        object would fail that write after the run directory is claimed).
+        object would fail that write after the run directory is claimed), and, for a ``no_conformal_for``, a conformal level.
     """
     lines: List[str] = []
 
@@ -481,6 +483,13 @@ def config_problems(config: StrictConfig, prefix: str = "") -> List[str]:
             f"Invalid value for {path!r}: expected a JSON value (null, bool, number, "
             f"string, list or mapping) because config.json records it, got {kind}; "
             "an L2 regularizer for sgd comes from optim_args.weight_decay"
+        )
+    alpha = config.analysis_args.conformal_alpha if no_conformal_for else None
+    if alpha is not None:
+        lines.append(
+            f"Invalid value for {join_path(join_path(prefix, 'analysis_args'), 'conformal_alpha')!r}: "
+            "a conformal prediction set is a set of classes for a whole image, which a "
+            f"{no_conformal_for} run does not produce; leave it null, got {alpha!r}"
         )
     return lines
 

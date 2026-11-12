@@ -81,6 +81,7 @@ import tensorflow as tf
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.datasets.vision.masked_patches import check_mask_key
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
@@ -328,6 +329,16 @@ class BeitMaskingGenerator:
 # ---------------------------------------------------------------------
 
 
+def _target_ids(tokenizer_fn: Callable[[tf.Tensor], tf.Tensor], image: tf.Tensor, num_patches: int) -> tf.Tensor:
+    """Return the tokenizer's code ids of ``image`` as an ``int32`` vector of ``num_patches`` with a static shape.
+
+    The tail of both BEiT element functions (the stateful and the stateless one): the tokenizer's grid is flattened to
+    one id per patch. The reshape to a constant shape is what makes the shape static, whatever the tokenizer returns
+    (a planted ``ensure_shape`` after it changed no test result, so none is written).
+    """
+    return tf.reshape(tf.cast(tokenizer_fn(image), tf.int32), (num_patches,))
+
+
 def make_beit_mim_map_fn(
     tokenizer_fn: Callable[[tf.Tensor], tf.Tensor],
     grid_size: Union[int, Sequence[int]],
@@ -429,9 +440,7 @@ def make_beit_mim_map_fn(
         # produces ragged-looking specs / late failures.
         bool_mask = tf.ensure_shape(bool_mask, (num_patches,))
 
-        target_ids = tf.cast(tokenizer_fn(image), tf.int32)
-        target_ids = tf.reshape(target_ids, (num_patches,))
-        target_ids = tf.ensure_shape(target_ids, (num_patches,))
+        target_ids = _target_ids(tokenizer_fn, image, num_patches)
 
         # Exactly the mask, unscaled: 1.0 at masked positions, 0.0 elsewhere.
         sample_weight = tf.cast(bool_mask, tf.float32)
@@ -489,10 +498,7 @@ def make_stateless_beit_mim_map_fn(
         ValueError: Propagated from :class:`BeitMaskingGenerator` for an invalid grid or
             budget.
     """
-    if isinstance(seed, bool) or not isinstance(seed, int):
-        raise TypeError(f"seed must be an int, got {seed!r}")
-    if not isinstance(salt, str) or not salt:
-        raise TypeError(f"salt must be a non-empty str, got {salt!r}")
+    check_mask_key(seed, salt)
 
     # Read-only after construction: every call passes its own rng, so sharing this
     # one generator between the workers of a parallel map shares no mutable state.
@@ -536,9 +542,7 @@ def make_stateless_beit_mim_map_fn(
         )
         bool_mask = tf.ensure_shape(bool_mask, (num_patches,))
 
-        target_ids = tf.cast(tokenizer_fn(image), tf.int32)
-        target_ids = tf.reshape(target_ids, (num_patches,))
-        target_ids = tf.ensure_shape(target_ids, (num_patches,))
+        target_ids = _target_ids(tokenizer_fn, image, num_patches)
 
         # DECISION plan-2026-11-12T015747-46e5318f/D-008
         # mask * N / max(n_masked, 1): Keras' sum-over-batch-size reduction then gives

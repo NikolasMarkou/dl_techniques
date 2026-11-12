@@ -74,12 +74,12 @@ needs it, so ``python -m train pretrain help`` stays free of TensorFlow.
 
 import dataclasses
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Mapping, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
-from .args import AutoContext, _is_auto, _recipe_values, _with_values
-from .config import AUTO, Auto, StrictConfig, join_path, validate
-from .data_args import DataFacts, check_builtin_sources, read_data_file
-from .errors import ConfigError, ConfigValidationError
+from .args import AutoContext, _is_auto, _recipe_values, _watch_values, _with_values
+from .config import AUTO, Auto, StrictConfig, join_path
+from .data_args import DataFacts, check_builtin_sources, load_data_group, read_data_file
+from .errors import ConfigError
 
 # ---------------------------------------------------------------------
 
@@ -279,23 +279,7 @@ def read_pretrain_data_file(path: Union[str, Path]) -> dict:
 
 def load_pretrain_data_config(data: Any) -> PretrainData:
     """Return the data config for a mapping, a YAML path or an instance; see the module contract."""
-    if isinstance(data, PretrainData):
-        return data
-    source = ""
-    if isinstance(data, (str, Path)):
-        source = f"data file {str(data)!r}: "
-        data = read_pretrain_data_file(data)
-    if not isinstance(data, Mapping):
-        raise ConfigError(
-            "Invalid value for 'data': expected a mapping or the path of a YAML file, "
-            f"got {type(data).__name__}"
-        )
-    try:
-        return validate(PretrainData, dict(data))
-    except ConfigValidationError as exc:
-        if not source:
-            raise
-        raise ConfigValidationError([source + line for line in exc.errors]) from exc
+    return load_data_group(PretrainData, data, read_pretrain_data_file)
 
 
 def pretrain_facts(data: PretrainData, requested_image_size: Optional[int]) -> DataFacts:
@@ -388,10 +372,4 @@ class PretrainMetricArgs(StrictConfig):
 
     def resolve_auto(self, context: AutoContext) -> "PretrainMetricArgs":
         """Fill ``watch_metric`` from the recipe and ``watch_mode`` from its name."""
-        from train.common.callbacks import resolve_monitor_mode
-
-        found = _recipe_values(self, context, "metric_args", skip=("watch_mode",))
-        metric = found.get("watch_metric", self.watch_metric)
-        if _is_auto(self.watch_mode) and not _is_auto(metric):
-            found["watch_mode"] = resolve_monitor_mode(metric)
-        return _with_values(self, "metric_args", found)
+        return _with_values(self, "metric_args", _watch_values(self, context, "metric_args"))

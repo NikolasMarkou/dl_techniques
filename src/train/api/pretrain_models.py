@@ -291,16 +291,9 @@ def resolve_pretrain_args(
     context: AutoContext, optim_args: OptimArgs, model_args: Mapping[str, Any]
 ) -> Dict[str, Any]:
     """Return the adapter's keywords: the recipe's, then the caller's; see the module contract."""
-    decay = recipes.sgd_weight_decay(optim_args)
-    if decay is not None:
-        # The adapters pass no kernel regularizer, so sgd's decay (an L2 penalty on the kernels in the other tasks) would be
-        # dropped without a word; the segmentation and denoising resolvers refuse it for the same reason.
-        raise ConfigError(
-            f"Invalid value for 'optim_args.weight_decay': optim_args.optimizer=sgd takes its weight decay as an L2 "
-            f"penalty on the model's kernels, and the pretrain task builds none for {context.family!r}, so "
-            f"weight_decay={decay!r} would be dropped without a word; set optim_args.weight_decay=null for no "
-            "decay, or use optim_args.optimizer=adamw, whose decay is decoupled and applied by the optimizer"
-        )
+    # The adapters pass no kernel regularizer, so sgd's decay would be dropped without a word; the segmentation and denoising
+    # resolvers refuse it for the same reason.
+    recipes.refuse_dropped_sgd_decay(optim_args, TASK, context.family)
     if context.family in REQUIRES_GLOBAL_CLIP:
         clip = optim_args.global_clipnorm
         if isinstance(clip, str) and clip == AUTO:

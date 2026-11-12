@@ -158,6 +158,23 @@ def _recipe_values(
     }
 
 
+def _watch_values(
+    group: StrictConfig, context: AutoContext, key: str, skip: Iterable[str] = ()
+) -> Dict[str, Any]:
+    """Return the recipe values of a metric group's AUTO fields, ``watch_mode`` read from the resolved ``watch_metric``.
+
+    The part of ``resolve_auto`` the pretrain and denoising metric groups share; the caller adds the fields of its own
+    (name them in ``skip`` when they are not taken from the recipe).
+    """
+    from train.common.callbacks import resolve_monitor_mode
+
+    found = _recipe_values(group, context, key, skip=("watch_mode", *skip))
+    metric = found.get("watch_metric", group.watch_metric)
+    if _is_auto(group.watch_mode) and not _is_auto(metric):
+        found["watch_mode"] = resolve_monitor_mode(metric)
+    return found
+
+
 def _with_values(group: StrictConfig, key: str, values: Mapping[str, Any]) -> Any:
     """Return a new ``group`` with ``values`` applied, held to the field types.
 

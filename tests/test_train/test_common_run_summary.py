@@ -658,3 +658,75 @@ def test_the_summary_head_records_the_config_values_not_constants(tmp_path) -> N
         _head_config(experiment_name="b", variant="base", learning_rate=1.0, warmup_epochs=9, weight_decay=2.0,
                      batch_size=3, seed=4, epochs=5), tmp_path, params=1, steps_per_epoch=1, devices=_DEVICES)
     assert [key for key in (*run_summary.SUMMARY_CONFIG_KEYS, "epochs_requested") if a[key] == b[key]] == []
+
+
+def test_the_initial_loss_ratio_is_the_loss_over_the_reference_and_a_non_finite_loss_is_refused() -> None:
+    assert run_summary.initial_loss_ratio({"loss": 3.0, "psnr": 1.0}, 1.5, "a hint") == 2.0
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(RuntimeError, match=r"Initial validation loss is .*: the model diverges before training\. a hint"):
+            run_summary.initial_loss_ratio({"loss": bad}, 1.5, "a hint")
+
+
+def _data_free_run(monkeypatch, tmp_path, analysis, detail):
+    """Call ``report_data_free_run`` over stand-ins of the two ``classification_run`` calls it makes; return what they saw."""
+    from train.common import classification_run
+
+    seen = {}
+
+    def report(model, data, history, run_dir, vis_dir, name, model_analysis, **keywords):
+        seen["report"] = (model, data, history, run_dir, vis_dir, name, model_analysis, keywords)
+        return "figures", dict(analysis)
+
+    def finalize(model, last_weights, data, run_dir, history, epochs_run, **keywords):
+        seen["finalize"] = (model, last_weights, data, run_dir, history, epochs_run, keywords)
+        keywords["load_detail"].update(detail)
+        return {"loss": 0.5}, {"ok": True}
+
+    monkeypatch.setattr(classification_run, "report_best_weights", report)
+    monkeypatch.setattr(classification_run, "finalize_last_epoch", finalize)
+    out = run_summary.report_data_free_run(
+        "model", "sample", "history", tmp_path, tmp_path / "vis", "name", run_analysis=len, model_analysis=True,
+        eval_batch_size=8, last_weights="weights", data="data", epochs_run=3, save_last=False, load_sample="load",
+    )
+    return out, seen
+
+
+@pytest.mark.parametrize(
+    "analysis, status",
+    [
+        ({"status": "ok", "failed_analyses": {"spectral": "ValueError: x"}}, "partial"),
+        ({"status": "ok"}, "ok"),
+        ({"status": "ok", "failed_analyses": {}}, "ok"),
+        ({"status": "failed", "failed_analyses": {"analysis": "boom"}}, "failed"),
+    ],
+    ids=["a named failure promotes ok", "nothing failed", "an empty mapping", "another status stays"],
+)
+def test_the_data_free_reporting_promotes_ok_to_partial_only_for_a_named_failure(monkeypatch, tmp_path, analysis, status) -> None:
+    (got, _, _, _), _ = _data_free_run(monkeypatch, tmp_path, analysis, {})
+    assert got["status"] == status
+
+
+def test_the_data_free_reporting_hands_both_calls_what_the_two_tasks_need(monkeypatch, tmp_path) -> None:
+    from train.common import classification_run
+
+    out, seen = _data_free_run(monkeypatch, tmp_path, {"status": "ok"}, {"gap": 0.0})
+    assert out == ({"status": "ok"}, {"loss": 0.5}, {"ok": True}, {"gap": 0.0})
+    model, data, history, run_dir, vis_dir, name, model_analysis, keywords = seen["report"]
+    assert (model, data, history, run_dir, vis_dir, name, model_analysis) == (
+        "model", "sample", "history", tmp_path, tmp_path / "vis", "name", True)
+    assert keywords == {
+        "run_analysis": len, "name_failed_analyses": True, "figures": False,
+        "analysis_off_hint": "analysis_args.model_analysis=false", "eval_batch_size": 8,
+        "read_status": run_summary.read_data_free_analysis_status,
+    }
+    *head, final = seen["finalize"]
+    assert head == ["model", "weights", "data", tmp_path, "history", 3]
+    assert {key: final[key] for key in final if key != "load_detail"} == {
+        "evaluate": classification_run.evaluate_dict, "save": False, "atomic": True, "eval_batch_size": 8,
+        "exact_reload": True, "sample": "load",
+    }
+
+
+def test_an_empty_load_detail_is_none_in_the_data_free_reporting(monkeypatch, tmp_path) -> None:
+    (_, _, _, detail), _ = _data_free_run(monkeypatch, tmp_path, {"status": "ok"}, {})
+    assert detail is None

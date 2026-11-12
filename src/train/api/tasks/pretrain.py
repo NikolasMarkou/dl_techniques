@@ -105,7 +105,6 @@ from ..config import (
     Auto,
     Precision,
     StrictConfig,
-    join_path,
     resume_help,
     run_request,
     validate,
@@ -185,15 +184,7 @@ class PretrainConfig(StrictConfig):
 
     def problems(self, prefix: str) -> List[str]:
         """Name the top-level fields out of range, and a conformal level (a pretrain run has no classes)."""
-        lines = config_problems(self, prefix)
-        alpha = self.analysis_args.conformal_alpha
-        if alpha is not None:
-            lines.append(
-                f"Invalid value for {join_path(join_path(prefix, 'analysis_args'), 'conformal_alpha')!r}: a conformal "
-                "prediction set is a set of classes, which a pretrain run does not produce; leave it null, "
-                f"got {alpha!r}"
-            )
-        return lines
+        return config_problems(self, prefix, no_conformal_for="pretrain")
 
 
 class PretrainTrainer(TaskTrainer):
@@ -419,10 +410,8 @@ class PretrainTrainer(TaskTrainer):
 
         :raises RuntimeError: for a non-finite loss (the model diverges before training).
         """
-        import numpy as np
-
         from dl_techniques.utils.logger import logger
-        from train.common import classification_run
+        from train.common import classification_run, run_summary
 
         if self._baseline is None:
             raise RuntimeError(
@@ -431,11 +420,7 @@ class PretrainTrainer(TaskTrainer):
             )
         metrics = classification_run.evaluate_dict(model, data.select_ds)
         loss = metrics["loss"]
-        if not np.isfinite(loss):
-            raise RuntimeError(
-                f"Initial validation loss is {loss}: the model diverges before training. {self.initial_loss_hint}"
-            )
-        ratio = loss / self._baseline.val_loss
+        ratio = run_summary.initial_loss_ratio(metrics, self._baseline.val_loss, self.initial_loss_hint)
         logger.info(
             f"Untrained evaluate BEFORE fit: val loss {loss:.6g} on {data.n_select} selection images, {ratio:.3g}x the "
             f"constant predictor's {self._baseline.val_loss:.6g}"
@@ -656,40 +641,22 @@ class PretrainTrainer(TaskTrainer):
         # of the reload check of `final_model.keras`.
         (image, mask), target, _ = next(iter(data.select_ds))
         inputs = [image.numpy(), mask.numpy()]
-        _, analysis = classification_run.report_best_weights(
+        # The best weights are analysed, then the last epoch's replace them (the sequence the denoising task shares).
+        analysis, test_final, load_check, load_detail = run_summary.report_data_free_run(
             fit.model,
             SimpleNamespace(x_fig=inputs, y_fig=target.numpy()),
             fit.history,
             fit.run_dir,
             fit.vis_dir,
             fit.experiment_name,
-            analysis_cfg.model_analysis,
             run_analysis=functools.partial(self.run_analysis, config),
-            name_failed_analyses=True,
-            figures=False,
-            analysis_off_hint="analysis_args.model_analysis=false",
+            model_analysis=analysis_cfg.model_analysis,
             eval_batch_size=analysis_cfg.eval_batch_size,
-            read_status=run_summary.read_data_free_analysis_status,
-        )
-        if analysis.get("failed_analyses") and analysis["status"] == "ok":
-            # `report_best_weights` marks only the stock reader's "success" partial; this reader's good status is "ok".
-            analysis["status"] = run_summary.PARTIAL_ANALYSIS_STATUS
-        # The last epoch's weights replace the best ones here.
-        load_detail: Dict[str, Any] = {}
-        test_final, load_check = classification_run.finalize_last_epoch(
-            fit.model,
-            fit.last_weights,
-            data,
-            fit.run_dir,
-            fit.history,
-            fit.epochs_run,
-            evaluate=classification_run.evaluate_dict,
-            save=checkpoint_cfg.save_last,
-            atomic=True,
-            eval_batch_size=analysis_cfg.eval_batch_size,
-            exact_reload=True,
-            load_detail=load_detail,
-            sample=[array[: classification_run.LOAD_CHECK_SAMPLES] for array in inputs],
+            last_weights=fit.last_weights,
+            data=data,
+            epochs_run=fit.epochs_run,
+            save_last=checkpoint_cfg.save_last,
+            load_sample=[array[: classification_run.LOAD_CHECK_SAMPLES] for array in inputs],
         )
         visualizations: Dict[str, Any] = {"files": [], "failed": [], "skipped": not analysis_cfg.figures}
         if analysis_cfg.figures and fit.vis_dir.is_dir():
@@ -712,7 +679,7 @@ class PretrainTrainer(TaskTrainer):
             analysis=analysis,
             test_metrics_final=test_final,
             load_check=load_check,
-            load_detail=load_detail or None,
+            load_detail=load_detail,
             extras=extras,
         )
 

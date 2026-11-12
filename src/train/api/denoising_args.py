@@ -97,12 +97,12 @@ import dataclasses
 import os
 import re
 from pathlib import Path
-from typing import Any, List, Literal, Mapping, Optional, Tuple, Union
+from typing import Any, List, Literal, Optional, Tuple, Union
 
-from .args import AutoContext, OptimArgs, _is_auto, _recipe_values, _with_values
-from .config import AUTO, Auto, StrictConfig, join_path, validate
-from .data_args import DataFacts, read_data_file
-from .errors import ConfigError, ConfigValidationError
+from .args import AutoContext, OptimArgs, _is_auto, _recipe_values, _watch_values, _with_values
+from .config import AUTO, Auto, StrictConfig, join_path
+from .data_args import DataFacts, load_data_group, read_data_file
+from .errors import ConfigError
 
 # ---------------------------------------------------------------------
 
@@ -470,22 +470,7 @@ def read_denoising_data_file(path: Union[str, Path]) -> dict:
 
 def load_denoising_data_config(data: Any) -> DenoisingData:
     """Return the data config for a mapping, a YAML path or an instance; see the module contract."""
-    if isinstance(data, DenoisingData):
-        return data
-    source = ""
-    if isinstance(data, (str, Path)):
-        source = f"data file {str(data)!r}: "
-        data = read_denoising_data_file(data)
-    if not isinstance(data, Mapping):
-        raise ConfigError(
-            "Invalid value for 'data': expected a mapping or the path of a YAML file, "
-            f"got {type(data).__name__}")
-    try:
-        return validate(DenoisingData, dict(data))
-    except ConfigValidationError as exc:
-        if not source:
-            raise
-        raise ConfigValidationError([source + line for line in exc.errors]) from exc
+    return load_data_group(DenoisingData, data, read_denoising_data_file)
 
 
 # ---------------------------------------------------------------------
@@ -687,12 +672,7 @@ class DenoiseMetricArgs(StrictConfig):
 
     def resolve_auto(self, context: AutoContext) -> "DenoiseMetricArgs":
         """Fill ``watch_metric`` from the recipe, ``watch_mode`` from its name and ``success_gain_db`` with :data:`SUCCESS_GAIN_DB`."""
-        from train.common.callbacks import resolve_monitor_mode
-
-        found = _recipe_values(self, context, "metric_args", skip=("watch_mode", "success_gain_db"))
-        metric = found.get("watch_metric", self.watch_metric)
-        if _is_auto(self.watch_mode) and not _is_auto(metric):
-            found["watch_mode"] = resolve_monitor_mode(metric)
+        found = _watch_values(self, context, "metric_args", skip=("success_gain_db",))
         if _is_auto(self.success_gain_db):
             found["success_gain_db"] = SUCCESS_GAIN_DB
         return _with_values(self, "metric_args", found)

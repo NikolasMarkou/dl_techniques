@@ -539,6 +539,63 @@ def data_free_model_analysis(
     return results
 
 
+def initial_loss_ratio(metrics: Dict[str, float], reference_loss: float, hint: str) -> float:
+    """Return ``metrics["loss"] / reference_loss``, refusing a non-finite loss.
+
+    The epoch-0 check of the ``train.api`` tasks that compare the untrained model's loss with a reference of their own
+    (``image_denoising``: the identity's; ``pretrain``: the constant predictor's); each logs its own line after it.
+
+    :param metrics: the ``{name: float}`` dict of the untrained model's pass over the selection split (``loss`` read).
+    :param reference_loss: the reference loss the ratio is taken against.
+    :param hint: the remedy sentence appended to the refusal, naming the caller's own options.
+    :raises RuntimeError: when the loss is NaN or infinite (raising, so no empty run directory reads as finished).
+    """
+    loss = metrics["loss"]
+    if not np.isfinite(loss):
+        raise RuntimeError(f"Initial validation loss is {loss}: the model diverges before training. {hint}")
+    return loss / reference_loss
+
+
+def report_data_free_run(
+        model: keras.Model, analysis_sample: Any, history: Any, run_dir: Path, vis_dir: Path, experiment_name: str,
+        *, run_analysis: Callable[..., Any], model_analysis: bool, eval_batch_size: int, last_weights: Any, data: Any,
+        epochs_run: int, save_last: bool, load_sample: Optional[Any] = None,
+) -> Tuple[Dict[str, Any], Optional[Dict[str, float]], Any, Optional[Dict[str, Any]]]:
+    """Report the best weights, then swap in the last epoch's and report those; the reporting both data-free tasks share.
+
+    The body of ``evaluate_and_report`` of the ``train.api`` tasks whose output is not class probabilities
+    (``image_denoising``, ``pretrain``) from the analysis of the BEST weights (still in ``model``) to the last epoch's
+    weights scored, saved and reloaded. No figure is drawn (the caller draws its own) and the analyzer status is read
+    back with :func:`read_data_free_analysis_status`; a ``failed_analyses`` mapping turns that reader's ``ok`` into
+    ``partial`` (``report_best_weights`` promotes only the stock reader's ``success``).
+
+    :param analysis_sample: what ``report_best_weights`` reads as ``data`` (``x_fig`` and ``y_fig``).
+    :param run_analysis: the task's ``run_analysis`` bound to its config.
+    :param last_weights: ``FitState.last_weights``; ``data`` the task's data object; ``epochs_run`` the epochs trained.
+    :param save_last: ``checkpoint_args.save_last``.
+    :param load_sample: the input of ``final_model.keras``'s load check, or ``None`` for the legacy sample
+        (``finalize_last_epoch(sample=)``).
+    :return: ``(analysis, test_metrics_final, load_check, load_detail)``; ``load_detail`` is ``None`` when empty.
+    """
+    from train.common import classification_run  # imported here: classification_run imports this module
+
+    _, analysis = classification_run.report_best_weights(
+        model, analysis_sample, history, run_dir, vis_dir, experiment_name, model_analysis,
+        run_analysis=run_analysis, name_failed_analyses=True, figures=False,
+        analysis_off_hint="analysis_args.model_analysis=false", eval_batch_size=eval_batch_size,
+        read_status=read_data_free_analysis_status,
+    )
+    if analysis.get("failed_analyses") and analysis["status"] == "ok":
+        analysis["status"] = PARTIAL_ANALYSIS_STATUS
+    load_detail: Dict[str, Any] = {}
+    test_final, load_check = classification_run.finalize_last_epoch(
+        model, last_weights, data, run_dir, history, epochs_run, evaluate=classification_run.evaluate_dict,
+        save=save_last, atomic=True, eval_batch_size=eval_batch_size, exact_reload=True, load_detail=load_detail,
+        sample=load_sample,
+    )
+    return analysis, test_final, load_check, load_detail or None
+
+
 # The config attributes every ConvUNeXt-side ``results_summary.json`` records under their own names.
 SUMMARY_CONFIG_KEYS = (
     "experiment_name", "variant", "learning_rate", "warmup_epochs", "weight_decay", "batch_size", "seed")

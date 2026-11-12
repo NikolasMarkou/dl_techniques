@@ -337,6 +337,20 @@ def make_masked_patch_map_fn(
     return map_fn
 
 
+def check_mask_key(seed: Any, salt: Any) -> None:
+    """Refuse a ``seed`` that is not an ``int`` (a ``bool`` is not) and a ``salt`` that is not a non-empty ``str``.
+
+    The key of a stateless mask is ``(seed, salt, row index)``; the two stateless map functions of this package (here and
+    in ``beit_masking``) check it with this one function.
+
+    :raises TypeError: naming the argument.
+    """
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise TypeError(f"seed must be an int, got {seed!r}")
+    if not isinstance(salt, str) or not salt:
+        raise TypeError(f"salt must be a non-empty str, got {salt!r}")
+
+
 def make_stateless_masked_patch_map_fn(
     patch_size: int,
     image_size: int,
@@ -381,10 +395,7 @@ def make_stateless_masked_patch_map_fn(
     num_patches, n_loss, n_input = _validate_masked_patch_config(
         patch_size, image_size, mask_ratio, mask_token_frac
     )
-    if isinstance(seed, bool) or not isinstance(seed, int):
-        raise TypeError(f"seed must be an int, got {seed!r}")
-    if not isinstance(salt, str) or not salt:
-        raise TypeError(f"salt must be a non-empty str, got {salt!r}")
+    check_mask_key(seed, salt)
 
     # DECISION plan-2026-11-12T015747-46e5318f/D-005
     # The mask is keyed on (seed, salt, row index) and on nothing stateful. Rejected: the

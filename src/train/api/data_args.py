@@ -438,6 +438,33 @@ def load_data_config(data: Any) -> ImageData:
         raise ConfigValidationError([source + line for line in exc.errors]) from exc
 
 
+def load_data_group(cls: Type[StrictConfig], data: Any, read_file: Any) -> Any:
+    """Return ``data`` as an instance of ``cls``: the instance itself, or a mapping or a YAML path validated into one.
+
+    The loader of a task whose data group is one class (``pretrain``, ``image_denoising``); ``read_file(path)`` is the
+    task's file reader, and an error from a file names the file.
+
+    :raises ConfigError: for a value that is neither an instance, a mapping nor a path.
+    :raises ConfigValidationError: for bad keys, each line prefixed with the file when the data came from one.
+    """
+    if isinstance(data, cls):
+        return data
+    source = ""
+    if isinstance(data, (str, Path)):
+        source = f"data file {str(data)!r}: "
+        data = read_file(data)
+    if not isinstance(data, Mapping):
+        raise ConfigError(
+            f"Invalid value for 'data': expected a mapping or the path of a YAML file, got {type(data).__name__}"
+        )
+    try:
+        return validate(cls, dict(data))
+    except ConfigValidationError as exc:
+        if not source:
+            raise
+        raise ConfigValidationError([source + line for line in exc.errors]) from exc
+
+
 def builtin_facts(data: BuiltinImageData, requested_image_size: Optional[int]) -> DataFacts:
     """Return the class count and input size of ``data`` without loading it."""
     from dl_techniques.datasets.vision.classification import get_spec
