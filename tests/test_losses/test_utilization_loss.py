@@ -1,7 +1,6 @@
 """Tests for MANNUtilizationLoss and GNNUtilizationLoss."""
 
 import keras
-from keras import ops
 import pytest
 import numpy as np
 import tensorflow as tf
@@ -300,35 +299,6 @@ class TestGNNUtilizationLossIsPerSample:
         value = float(GNNUtilizationLoss()(_dummy(x), _f32(x)))
         assert abs(value - _rows64(x).mean()) < _atol(_rows64(x))
 
-    def test_reduction_none_returns_the_rows(self):
-        """``reduction`` is live: 'none' was a shape-() no-op before this fix."""
-        x = _ragged_embeddings()
-        out = GNNUtilizationLoss(reduction="none")(_dummy(x), _f32(x))
-        assert tuple(out.shape) == (BATCH,)
-        ref = _rows64(x)
-        assert np.abs(np.asarray(out) - ref).max() < _atol(ref)
-
-    def test_reduction_sum_is_batch_times_the_default(self):
-        x = _ragged_embeddings()
-        default = float(GNNUtilizationLoss()(_dummy(x), _f32(x)))
-        summed = float(GNNUtilizationLoss(reduction="sum")(_dummy(x), _f32(x)))
-        assert abs(summed - BATCH * default) < 1e-6
-        assert abs(summed - default) > 0.05  # it was equal to the default before
-
-    @pytest.mark.parametrize("reduction", ["none", "sum", "sum_over_batch_size"])
-    def test_config_round_trip_keeps_a_live_reduction(self, reduction):
-        original = GNNUtilizationLoss(
-            diversity_weight=0.3, attention_weight=0.2, activation_weight=0.7,
-            reduction=reduction,
-        )
-        restored = GNNUtilizationLoss.from_config(original.get_config())
-        assert restored.reduction == reduction
-        x = _ragged_embeddings()
-        a = np.asarray(original(_dummy(x), _f32(x)))
-        b = np.asarray(restored(_dummy(x), _f32(x)))
-        assert a.shape == b.shape == ((BATCH,) if reduction == "none" else ())
-        assert np.allclose(a, b, atol=0.0)
-
     def test_sample_weight_charges_each_row_its_own_value_times_its_weight(self):
         x = _ragged_embeddings()
         w = np.array([0.5, 2.0, 0.0, 1.5], "float32")
@@ -405,20 +375,6 @@ class TestGNNUtilizationLossIsPerSample:
         assert np.isfinite(values).all()
         assert np.abs(values - _rows64(x)).max() < 5e-3
 
-    def test_float16_inputs_through_the_loss_object_match_float32(self):
-        """Through ``__call__`` the inputs are cast to float32 first, as under mixed_float16."""
-        x = _ragged_embeddings()
-        half_in = x.astype("float16")
-        base = float(GNNUtilizationLoss()(_dummy(x), _f32(x)))
-        half = float(
-            GNNUtilizationLoss()(tf.constant(half_in), tf.constant(half_in))
-        )
-        rounded = float(
-            GNNUtilizationLoss()(_dummy(x), _f32(half_in.astype("float64")))
-        )
-        assert abs(half - rounded) < _atol(_rows64(x))  # only the cast, no extra error
-        assert abs(half - base) < 1e-3  # input rounding
-
     def test_the_docstrings_say_one_value_per_sample_and_not_a_batch_statistic(self):
         class_doc = " ".join((GNNUtilizationLoss.__doc__ or "").split())
         call_doc = " ".join((GNNUtilizationLoss.call.__doc__ or "").split()).lower()
@@ -494,13 +450,6 @@ class TestGNNUtilizationLossHonorsAnEntityMask:
         )
         assert np.isfinite(c).all() and np.abs(a - c).max() < 1e-7
 
-    def test_a_full_mask_equals_no_mask(self):
-        x = _ragged_embeddings()
-        full = np.ones(x.shape[:2], bool)
-        masked = float(GNNUtilizationLoss()(_dummy(x), with_keras_mask(x, full)))
-        plain = float(GNNUtilizationLoss()(_dummy(x), _f32(x)))
-        assert abs(masked - plain) < 1e-7
-
     def test_a_row_with_no_kept_entity_is_exactly_zero_and_finite(self):
         x, mask = _masked_entities(BATCH)
         mask = mask.copy()
@@ -509,28 +458,6 @@ class TestGNNUtilizationLossHonorsAnEntityMask:
             GNNUtilizationLoss(reduction="none")(_dummy(x), with_keras_mask(x, mask))
         )
         assert np.isfinite(rows).all() and rows[2] == 0.0
-
-    def test_masked_entities_get_exactly_zero_gradient(self):
-        """Even when the padding is NaN: the gradient is finite and exactly 0 there."""
-        x, mask = _masked_entities(BATCH)
-        x = np.where(mask[..., None], x, np.nan)
-        p = tf.Variable(_f32(x))
-        with tf.GradientTape() as tape:
-            q = tf.identity(p)
-            q._keras_mask = tf.constant(mask)
-            value = GNNUtilizationLoss()(_dummy(x), q)
-        grad = tape.gradient(value, p).numpy()
-        assert np.isfinite(grad).all() and np.all(grad[~mask] == 0.0)
-        assert np.abs(grad[mask]).max() > 1e-5
-
-    def test_sample_weight_combines_with_the_mask(self):
-        x, mask = _masked_entities(BATCH)
-        w = np.array([0.5, 2.0, 0.0, 1.5], "float32")
-        got = float(
-            GNNUtilizationLoss()(_dummy(x), with_keras_mask(x, mask), sample_weight=w)
-        )
-        ref = _gnn_masked_rows64(x, mask)
-        assert abs(got - np.sum(w * ref) / BATCH) < _atol(ref)
 
     @pytest.mark.parametrize("entities", [4, 6])
     def test_a_compiled_model_with_a_masked_output_matches_the_reference(self, entities):
@@ -544,28 +471,6 @@ class TestGNNUtilizationLossHonorsAnEntityMask:
             )
             ref = _gnn_masked_rows64(prediction, mask)
             assert abs(value - ref.mean()) < 5e-6, (batch, entities, value, ref.mean())
-
-    def test_a_float16_output_keeps_its_mask_through_the_cast(self):
-        """Mixed precision hands the loss a float16 ``y_pred``; Keras then casts it (the mask
-        attribute is lost on the cast tensor), so the mask must be read before the cast."""
-        x, mask = _masked_entities(BATCH)
-        half = tf.constant(x.astype("float16"))
-        half._keras_mask = tf.constant(mask)
-        got = float(GNNUtilizationLoss()(_dummy(x), half))
-        ref = _gnn_masked_rows64(x.astype("float16").astype("float64"), mask)
-        assert abs(got - ref.mean()) < _atol(ref)
-
-    def test_only_a_batch_entity_mask_is_accepted(self):
-        x, _ = _masked_entities(BATCH)
-        assert_refuses_a_keras_mask(GNNUtilizationLoss, _dummy(x), _f32(x), (BATCH, ENTITIES, EMBED))
-        assert_a_per_sample_mask_is_left_to_keras(GNNUtilizationLoss, _dummy(x), _f32(x))
-
-    @pytest.mark.parametrize("batch", [4, 5])
-    def test_a_per_entity_sample_weight_raises_a_clear_error(self, batch):
-        x, _ = _masked_entities(batch)
-        assert_refuses_per_timestep_weights(
-            GNNUtilizationLoss, _dummy(x), _f32(x), (batch, ENTITIES)
-        )
 
     def test_the_docstring_states_the_mask_rule(self):
         doc = " ".join((GNNUtilizationLoss.__doc__ or "").split())
@@ -768,36 +673,6 @@ class TestMANNUtilizationLossIsPerSample:
             assert abs(value - old) < _mann_atol(_mann_rows64(x))
             assert abs(_mann_rows64(x).mean() - old) < 1e-12
 
-    def test_reduction_none_returns_the_rows(self):
-        """``reduction`` is live: 'none' was a shape-() no-op before this fix."""
-        x = _ragged_memory()
-        out = MANNUtilizationLoss(reduction="none")(_dummy(x), _f32(x))
-        assert tuple(out.shape) == (BATCH,)
-        ref = _mann_rows64(x)
-        assert np.abs(np.asarray(out) - ref).max() < _mann_atol(ref)
-
-    def test_reduction_sum_is_batch_times_the_default(self):
-        x = _ragged_memory()
-        default = float(MANNUtilizationLoss()(_dummy(x), _f32(x)))
-        summed = float(MANNUtilizationLoss(reduction="sum")(_dummy(x), _f32(x)))
-        assert abs(summed - BATCH * default) < 1e-6
-        assert abs(summed - default) > 0.05  # it was equal to the default before
-
-    @pytest.mark.parametrize("reduction", ["none", "sum", "sum_over_batch_size"])
-    def test_config_round_trip_keeps_a_live_reduction(self, reduction):
-        original = MANNUtilizationLoss(
-            entropy_weight=0.3, write_weight=0.2, variance_weight=0.7,
-            reduction=reduction,
-        )
-        restored = MANNUtilizationLoss.from_config(original.get_config())
-        assert restored.reduction == reduction
-        assert restored.variance_weight == 0.7
-        x = _ragged_memory()
-        a = np.asarray(original(_dummy(x), _f32(x)))
-        b = np.asarray(restored(_dummy(x), _f32(x)))
-        assert a.shape == b.shape == ((BATCH,) if reduction == "none" else ())
-        assert np.allclose(a, b, atol=0.0)
-
     def test_sample_weight_charges_each_row_its_own_value_times_its_weight(self):
         """The documented form: full-batch ``V`` and ``mu``, per-row weights."""
         x = _ragged_memory()
@@ -905,20 +780,6 @@ class TestMANNUtilizationLossIsPerSample:
         # it IS row-local, which is why the identity arm cannot tell it from the fix
         assert _drop_a_row_identity_holds(_PerRowLogVarianceMANN, MANN_CASE)
         assert not _returns_per_row(_PerRowLogVarianceMANN(), MANN_CASE)
-
-    def test_float16_inputs_through_the_loss_object_match_float32(self):
-        """Through ``__call__`` the inputs are cast to float32 first, as under mixed_float16."""
-        x = _ragged_memory()
-        half_in = x.astype("float16")
-        base = float(MANNUtilizationLoss()(_dummy(x), _f32(x)))
-        half = float(
-            MANNUtilizationLoss()(tf.constant(half_in), tf.constant(half_in))
-        )
-        rounded = float(
-            MANNUtilizationLoss()(_dummy(x), _f32(half_in.astype("float64")))
-        )
-        assert abs(half - rounded) < _mann_atol(_mann_rows64(x))  # only the cast
-        assert abs(half - base) < 1e-3  # input rounding
 
     def test_the_docstrings_say_one_value_per_sample_and_name_the_coupling(self):
         class_doc = " ".join((MANNUtilizationLoss.__doc__ or "").split())
@@ -1068,13 +929,6 @@ class TestMANNUtilizationLossHonorsATimeMask:
         )
         assert np.isfinite(c).all() and np.abs(a - c).max() < 1e-6
 
-    def test_a_full_mask_equals_no_mask(self):
-        x = _ragged_memory()
-        full = np.ones(x.shape[:2], bool)
-        masked = float(MANNUtilizationLoss()(_dummy(x), with_keras_mask(x, full)))
-        plain = float(MANNUtilizationLoss()(_dummy(x), _f32(x)))
-        assert abs(masked - plain) < 1e-7
-
     def test_short_rows_are_finite_and_the_empty_row_is_zero(self):
         """One kept step has no temporal difference; no kept step has nothing to score."""
         x, _ = _masked_memory(BATCH)
@@ -1085,28 +939,6 @@ class TestMANNUtilizationLossHonorsATimeMask:
         ref = _mann_masked_rows64(x, mask)
         assert np.isfinite(rows).all() and rows[2] == 0.0
         assert np.abs(rows - ref).max() < _mann_atol(ref)
-
-    def test_masked_steps_get_exactly_zero_gradient(self):
-        """Even when the padding is NaN: the gradient is finite and exactly 0 there."""
-        x, mask = _masked_memory(BATCH)
-        x = np.where(mask[..., None], x, np.nan)
-        p = tf.Variable(_f32(x))
-        with tf.GradientTape() as tape:
-            q = tf.identity(p)
-            q._keras_mask = tf.constant(mask)
-            value = MANNUtilizationLoss()(_dummy(x), q)
-        grad = tape.gradient(value, p).numpy()
-        assert np.isfinite(grad).all() and np.all(grad[~mask] == 0.0)
-        assert np.abs(grad[mask]).max() > 1e-5
-
-    def test_sample_weight_combines_with_the_mask(self):
-        x, mask = _masked_memory(BATCH)
-        w = np.array([0.5, 2.0, 0.0, 1.5], "float32")
-        got = float(
-            MANNUtilizationLoss()(_dummy(x), with_keras_mask(x, mask), sample_weight=w)
-        )
-        ref = _mann_masked_rows64(x, mask)
-        assert abs(got - np.sum(w * ref) / BATCH) < _mann_atol(ref)
 
     @pytest.mark.parametrize("batch", [4, 6])
     def test_a_compiled_model_with_a_masked_output_matches_the_reference(self, batch):
@@ -1123,28 +955,6 @@ class TestMANNUtilizationLossHonorsATimeMask:
         )
         ref = _mann_masked_rows64(prediction, mask)
         assert abs(value - ref.mean()) < 5e-6, (batch, value, ref.mean())
-
-    def test_a_float16_output_keeps_its_mask_through_the_cast(self):
-        x, mask = _masked_memory(BATCH)
-        half = tf.constant(x.astype("float16"))
-        half._keras_mask = tf.constant(mask)
-        got = float(MANNUtilizationLoss()(_dummy(x), half))
-        ref = _mann_masked_rows64(x.astype("float16").astype("float64"), mask)
-        assert abs(got - ref.mean()) < _mann_atol(ref)
-
-    def test_only_a_batch_time_mask_is_accepted(self):
-        x, _ = _masked_memory(BATCH)
-        assert_refuses_a_keras_mask(
-            MANNUtilizationLoss, _dummy(x), _f32(x), (BATCH, MEMORY_TIME, MEMORY_DIM)
-        )
-        assert_a_per_sample_mask_is_left_to_keras(MANNUtilizationLoss, _dummy(x), _f32(x))
-
-    @pytest.mark.parametrize("batch", [4, 6])
-    def test_a_per_timestep_sample_weight_raises_a_clear_error(self, batch):
-        x, _ = _masked_memory(batch)
-        assert_refuses_per_timestep_weights(
-            MANNUtilizationLoss, _dummy(x), _f32(x), (batch, MEMORY_TIME)
-        )
 
     def test_the_docstring_states_the_mask_rule(self):
         doc = " ".join((MANNUtilizationLoss.__doc__ or "").split())
@@ -1182,3 +992,146 @@ class TestMANNUtilizationLossDirectHalfPrecision:
         doc = " ".join((MANNUtilizationLoss.__doc__ or "").split())
         assert "about 300" not in doc and "past a scale" not in doc
         assert "underflows to exactly 0" in doc and "1e-10" in doc and "65504" in doc
+
+
+# ---------------------------------------------------------------------
+# What the two losses share: a live reduction, the half-precision cast, and the mask contract
+# (plan-2026-11-11T223825-64d1b401, D-014). The per-class float64 references stay above,
+# per class; only the mechanics merge here.
+# ---------------------------------------------------------------------
+
+#: ``(loss class, non-default weights, GNN_CASE or MANN_CASE)``.
+LOSS_CASES = [
+    pytest.param(
+        (GNNUtilizationLoss,
+         dict(diversity_weight=0.3, attention_weight=0.2, activation_weight=0.7),
+         GNN_CASE),
+        id="gnn",
+    ),
+    pytest.param(
+        (MANNUtilizationLoss,
+         dict(entropy_weight=0.3, write_weight=0.2, variance_weight=0.7),
+         MANN_CASE),
+        id="mann",
+    ),
+]
+
+#: ``(loss class, masked fixture (batch) -> (x, mask), its float64 reference, atol)``.
+MASK_CASES = [
+    pytest.param(
+        (GNNUtilizationLoss, _masked_entities, _gnn_masked_rows64, _atol), id="gnn"
+    ),
+    pytest.param(
+        (MANNUtilizationLoss, _masked_memory, _mann_masked_rows64, _mann_atol), id="mann"
+    ),
+]
+
+
+@pytest.fixture(params=LOSS_CASES)
+def loss_case(request):
+    return request.param
+
+
+@pytest.fixture(params=MASK_CASES)
+def mask_case(request):
+    return request.param
+
+
+class TestBothLossesKeepALiveReductionAndTheHalfPrecisionCast:
+    def test_reduction_none_returns_the_rows(self, loss_case):
+        """``reduction`` is live: 'none' was a shape-() no-op before this fix."""
+        cls, _, (fixture, reference, atol) = loss_case
+        x = fixture()
+        out = cls(reduction="none")(_dummy(x), _f32(x))
+        assert tuple(out.shape) == (BATCH,)
+        ref = reference(cls(), x)
+        assert np.abs(np.asarray(out) - ref).max() < atol(ref)
+
+    def test_reduction_sum_is_batch_times_the_default(self, loss_case):
+        cls, _, (fixture, _, _) = loss_case
+        x = fixture()
+        default = float(cls()(_dummy(x), _f32(x)))
+        summed = float(cls(reduction="sum")(_dummy(x), _f32(x)))
+        assert abs(summed - BATCH * default) < 1e-6
+        assert abs(summed - default) > 0.05  # it was equal to the default before
+
+    @pytest.mark.parametrize("reduction", ["none", "sum", "sum_over_batch_size"])
+    def test_config_round_trip_keeps_a_live_reduction(self, loss_case, reduction):
+        cls, weights, (fixture, _, _) = loss_case
+        original = cls(reduction=reduction, **weights)
+        restored = cls.from_config(original.get_config())
+        assert restored.reduction == reduction
+        assert {name: getattr(restored, name) for name in weights} == weights
+        x = fixture()
+        a = np.asarray(original(_dummy(x), _f32(x)))
+        b = np.asarray(restored(_dummy(x), _f32(x)))
+        assert a.shape == b.shape == ((BATCH,) if reduction == "none" else ())
+        assert np.allclose(a, b, atol=0.0)
+
+    def test_float16_inputs_through_the_loss_object_match_float32(self, loss_case):
+        """Through ``__call__`` the inputs are cast to float32 first, as under mixed_float16."""
+        cls, _, (fixture, reference, atol) = loss_case
+        x = fixture()
+        half_in = x.astype("float16")
+        base = float(cls()(_dummy(x), _f32(x)))
+        half = float(cls()(tf.constant(half_in), tf.constant(half_in)))
+        rounded = float(cls()(_dummy(x), _f32(half_in.astype("float64"))))
+        assert abs(half - rounded) < atol(reference(cls(), x))  # only the cast
+        assert abs(half - base) < 1e-3  # input rounding
+
+
+class TestBothLossesHonorTheSameKerasMaskContract:
+    """A ``(batch, axis)`` Keras mask on ``y_pred`` selects the kept entities or steps (D-014)."""
+
+    def test_a_full_mask_equals_no_mask(self, mask_case):
+        cls, masked, _, _ = mask_case
+        x, _ = masked(BATCH)
+        full = np.ones(x.shape[:2], bool)
+        with_mask = float(cls()(_dummy(x), with_keras_mask(x, full)))
+        plain = float(cls()(_dummy(x), _f32(x)))
+        assert abs(with_mask - plain) < 1e-7
+
+    def test_masked_positions_get_exactly_zero_gradient(self, mask_case):
+        """Even when the padding is NaN: the gradient is finite and exactly 0 there."""
+        cls, masked, _, _ = mask_case
+        x, mask = masked(BATCH)
+        x = np.where(mask[..., None], x, np.nan)
+        p = tf.Variable(_f32(x))
+        with tf.GradientTape() as tape:
+            q = tf.identity(p)
+            q._keras_mask = tf.constant(mask)
+            value = cls()(_dummy(x), q)
+        grad = tape.gradient(value, p).numpy()
+        assert np.isfinite(grad).all() and np.all(grad[~mask] == 0.0)
+        assert np.abs(grad[mask]).max() > 1e-5
+
+    def test_sample_weight_combines_with_the_mask(self, mask_case):
+        cls, masked, reference, atol = mask_case
+        x, mask = masked(BATCH)
+        w = np.array([0.5, 2.0, 0.0, 1.5], "float32")
+        got = float(cls()(_dummy(x), with_keras_mask(x, mask), sample_weight=w))
+        ref = reference(x, mask)
+        assert abs(got - np.sum(w * ref) / BATCH) < atol(ref)
+
+    def test_a_float16_output_keeps_its_mask_through_the_cast(self, mask_case):
+        """Mixed precision hands the loss a float16 ``y_pred``; Keras then casts it (the mask
+        attribute is lost on the cast tensor), so the mask must be read before the cast."""
+        cls, masked, reference, atol = mask_case
+        x, mask = masked(BATCH)
+        half = tf.constant(x.astype("float16"))
+        half._keras_mask = tf.constant(mask)
+        got = float(cls()(_dummy(x), half))
+        ref = reference(x.astype("float16").astype("float64"), mask)
+        assert abs(got - ref.mean()) < atol(ref)
+
+    def test_only_a_batch_axis_mask_is_accepted(self, mask_case):
+        cls, masked, _, _ = mask_case
+        x, _ = masked(BATCH)
+        assert_refuses_a_keras_mask(cls, _dummy(x), _f32(x), x.shape)
+        assert_a_per_sample_mask_is_left_to_keras(cls, _dummy(x), _f32(x))
+
+    @pytest.mark.parametrize("batch", [4, 5, 6])  # 5 == entities and 6 == time: the silent case
+    def test_a_per_axis_sample_weight_raises_a_clear_error(self, mask_case, batch):
+        cls, masked, _, _ = mask_case
+        x, _ = masked(batch)
+        assert_refuses_per_timestep_weights(cls, _dummy(x), _f32(x), x.shape[:2])
