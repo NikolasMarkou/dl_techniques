@@ -19,9 +19,12 @@ Interface contract
     ``(batch, *output_shape)`` for every input; the batch is read off the first input.
     :raises ValueError: if ``value`` does not broadcast to ``output_shape``.
 
-``constant_baseline(method, select_ds, *, vocab_size=None)``
+``constant_baseline(method, select_ds, *, vocab_size=None, code_ids=None)``
     :param select_ds: one pass of the select stream of :class:`train.common.pretrain_data.PretrainBatches`.
     :param vocab_size: the BEiT codebook size (required for ``beit_mim``).
+    :param code_ids: the masked target ids of ``select_ds`` when the caller has them already
+        (:func:`train.common.pretrain_data.masked_code_ids`); ``None`` reads them from ``select_ds``, one more pass of the
+        tokenizer over the whole selection split.
     :return: a :class:`Baseline`. ET: the zero-patch predictor (``kind="zero_patches"``); BEiT:
         constant logits of the in-sample log-probabilities of the masked positions' target ids
         (``kind="unigram_codes"``). ``val_loss`` is ``model.evaluate`` of that constant model.
@@ -29,6 +32,13 @@ Interface contract
         outside ``[0, vocab_size)``.
     The constant BEiT logits broadcast to ``(batch, N, V)``: 32 * 196 * 8192 * 4 bytes, about
     205 MB per evaluation batch at imagenette with the 8192-code head.
+
+``MIN_TOKENIZER_PERPLEXITY`` and ``checked_tokenizer_usage(code_ids, *, path)``
+    :param code_ids: the masked target ids of one pass of the select stream (1-D integers).
+    :param path: the tokenizer file, named in the refusal.
+    :return: the :class:`train.common.pretrain_data.TokenizerUsage` of ``code_ids``.
+    :raises ValueError: for no ids, and for a perplexity below the floor ``MIN_TOKENIZER_PERPLEXITY`` (effective codes);
+        the message gives the distinct count, the perplexity and the top-1 share.
 
 ``epoch_zero_val_loss(sidecar_path)``
     :param sidecar_path: ``<run>/checkpoints/fit_state.json``, the fit sidecar.
@@ -44,13 +54,21 @@ import keras
 import numpy as np
 import tensorflow as tf
 
-from train.common.pretrain_data import BEIT_MIM, ET_MASKED, METHODS, masked_code_ids
+from train.common.pretrain_data import BEIT_MIM, ET_MASKED, METHODS, TokenizerUsage, masked_code_ids, tokenizer_usage
 from train.common.resume_state import read_fit_state
 
 #: The floor of an in-sample probability before its log, so a code the select split never
 #: masks cannot give ``-inf`` logits. A masked target always has a positive in-sample count, so
 #: the floor changes no loss on the stream the logits were counted on.
 _PROBABILITY_FLOOR = 1e-30
+
+# DECISION plan-2026-11-12T015747-46e5318f/D-019
+# The BEiT usage floor, in effective codes (``exp`` of the entropy of the code histogram over the select split's masked
+# positions): 64, between the two tokenizers measured (24.7 for the 1-epoch one, 354.8 for the 5-epoch one). ABSOLUTE, not a
+# share of the codebook: what keeps the bar non-vacuous is how many distinct targets the stream really has (10 percent of an
+# 8192-code book would refuse fine tokenizers). Do NOT make it a fraction of ``num_embeddings``, and do NOT move it without
+# a measurement of a third tokenizer (the number rests on two).
+MIN_TOKENIZER_PERPLEXITY = 64.0
 
 
 def pretrain_loss(method: str) -> "keras.losses.Loss":
@@ -96,7 +114,8 @@ def _evaluate(model: "keras.Model", select_ds: "tf.data.Dataset", method: str) -
 
 
 def constant_baseline(
-        method: str, select_ds: "tf.data.Dataset", *, vocab_size: Optional[int] = None) -> Baseline:
+        method: str, select_ds: "tf.data.Dataset", *, vocab_size: Optional[int] = None,
+        code_ids: Optional[np.ndarray] = None) -> Baseline:
     """The constant model's ``val_loss`` over one pass of ``select_ds``; see the module contract."""
     target_shape = tuple(select_ds.element_spec[1].shape)[1:]          # (N, P) or (N,)
     if method == ET_MASKED:
@@ -106,7 +125,7 @@ def constant_baseline(
         raise ValueError(f"method must be one of {list(METHODS)}, got {method!r}")
     if vocab_size is None:
         raise ValueError("the BEiT baseline needs vocab_size, the tokenizer's codebook size")
-    ids = masked_code_ids(select_ds)
+    ids = masked_code_ids(select_ds) if code_ids is None else code_ids
     if ids.size == 0:
         raise ValueError("the select stream masks no position: there is no unigram to count")
     if ids.min() < 0 or ids.max() >= vocab_size:
@@ -117,6 +136,26 @@ def constant_baseline(
     log_probs = np.log(np.maximum(share, _PROBABILITY_FLOOR)).astype(np.float32)
     model = ConstantPredictor(log_probs, (*target_shape, int(vocab_size)))
     return Baseline("unigram_codes", _evaluate(model, select_ds, method))
+
+
+def checked_tokenizer_usage(code_ids: Any, *, path: str) -> TokenizerUsage:
+    """The usage of ``code_ids``, refused below :data:`MIN_TOKENIZER_PERPLEXITY`; see the module contract."""
+    usage = tokenizer_usage(code_ids)
+    # DECISION plan-2026-11-12T015747-46e5318f/D-007
+    # A tokenizer that sends (nearly) every patch to a few codes makes the BEiT bar vacuous: a constant predictor of the
+    # target ids already scores near zero, and so does a model that learned nothing. The legacy tokenizer trainer logs no
+    # codebook usage, so nothing else would show it. The floor is ABSOLUTE (D-019, measured on two tokenizers), not a share
+    # of the codebook, and it is a REFUSAL, not a warning: a bar that cannot fail must not be reported as a verdict. Do NOT
+    # lower it to let a small tokenizer through (a test patches this constant for the toy tokenizer it builds), and do NOT
+    # turn it into a log line.
+    if usage.perplexity < MIN_TOKENIZER_PERPLEXITY:
+        raise ValueError(
+            f"the tokenizer {path!r} uses its codebook too narrowly: {usage.distinct} distinct codes over the "
+            f"{usage.n_codes} masked positions of the selection split, perplexity {usage.perplexity:.2f} (top-1 share "
+            f"{usage.top1_share:.1%}), below the floor of {MIN_TOKENIZER_PERPLEXITY:g} effective codes. A bar cut from "
+            "targets this concentrated is vacuous; train the tokenizer longer (python -m train.beit.train_tokenizer)"
+        )
+    return usage
 
 
 def epoch_zero_val_loss(sidecar_path: Any) -> float:

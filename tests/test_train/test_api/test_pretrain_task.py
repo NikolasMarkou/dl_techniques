@@ -1,4 +1,4 @@
-"""The ``pretrain`` task: the hook table, the bar, the epoch-zero term and the refusals before the claim (first part).
+"""The ``pretrain`` task: the hook table, the bar, the epoch-zero term, the refusals before the claim and the BEiT tokenizer.
 
 ``train.api.tasks.pretrain.PretrainTrainer`` (plan-2026-11-12T015747-46e5318f step 10) is the task of two families:
 ``energy_transformer`` (masked-patch completion) and ``beit`` (masked image modelling against a frozen tokenizer's code
@@ -18,28 +18,43 @@ the bar, and nothing else (a task overrides hooks, never stages). This part pins
 * **Refusals.** A model argument the family refuses, a missing tokenizer and a conformal level leave ``out`` absent;
   ``debug_args.smoke`` applies no bar.
 
+Second part (step 11): the BEiT tokenizer. A ``beit`` run needs the path of a stage-0 ``.keras`` (refused before the claim when it
+is missing, does not exist or is not a ``.keras``); the grid proof, the file that is not a ``VQVAERotationTrick`` and the usage
+floor are found at build time (the run directory is claimed, and the message says so); a healthy tokenizer's usage reaches
+``results_summary.json`` and the BEiT baseline is the in-sample unigram ``val_loss``. The tokenizers are tiny
+``VQVAERotationTrick`` files (32 px, 16 codes) saved under ``tmp_path``. The usage floor (D-007, D-019) is 64 effective codes, above
+what a 16-code toy can reach, so the arms that need a tokenizer to PASS lower it by patching the module constant.
+
 The runs are real ``energy_transformer/et_tiny`` runs (``model_args.num_steps=2``) on the fake CIFAR-10 of
 ``tests/classification_fakes.py``: 54 fit rows, batch 4, so 13 steps of an epoch. Tests write only under ``tmp_path``.
 """
 
 import csv
+import dataclasses
 import json
+import math
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List
 
+import keras
 import numpy as np
 import pytest
 
+from dl_techniques.models.vision.vq_vae_rotation.model import VQVAERotationTrick
 from tests.classification_fakes import use_identity_cifar10
-from train.api import recipes, registry
+from train.api import recipes, registry, resume_decisions
 from train.api.config import validate
 from train.api.errors import ConfigError, ConfigValidationError
 from train.api.tasks import register_builtin_tasks
 from train.api.trainer import REQUIRED_HOOKS, TaskTrainer
-from train.common import pretrain_run
+from train.common import pretrain_data, pretrain_run
 from train.common.pretrain_run import Baseline
 from train.common.resume_state import FIT_STATE_NAME, update_fit_state
 
+from train.api.tasks.image_classification import ImageClassificationTrainer
+from train.api.tasks.image_denoising import ImageDenoisingTrainer
+from train.api.tasks.image_segmentation import ImageSegmentationTrainer
 from train.api.tasks.pretrain import PretrainConfig, PretrainTrainer
 
 BATCH = 4
@@ -416,3 +431,229 @@ def test_a_smoke_run_applies_no_bar(world, tmp_path):
     # The measurements the bar would have used are still reported.
     assert summary["baseline"]["kind"] == "zero_patches" and summary["epoch_zero"]["val_loss"] > 0
     assert summary["epochs_requested"] == 1
+
+
+# ---------------------------------------------------------------------
+# The BEiT tokenizer (second part): the required path, the grid proof, the usage report and the floor
+# ---------------------------------------------------------------------
+
+TOKENIZER_KEY = "tokenizer_checkpoint"
+#: A one-layer BEiT, so that a whole run on the fake cifar10 costs seconds.
+BEIT_SMALL = {"num_layers": 1, "hidden_size": 32, "num_heads": 2, "intermediate_size": 64}
+#: Below the toy's own perplexity (at most 16 codes), so a run with a healthy toy tokenizer passes the floor.
+LOW_FLOOR = 1.5
+
+
+def make_tokenizer(path: Path, *, image_size: int = 32, downsample: int = 4, collapse: bool = False) -> str:
+    """Save a 16-code ``VQVAERotationTrick`` as a ``.keras`` file; ``collapse`` puts every codebook row but the first far away."""
+    keras.utils.set_random_seed(0)
+    model = VQVAERotationTrick(
+        num_embeddings=16, embedding_dim=4, input_shape=(image_size, image_size, 3),
+        downsample_factor=downsample, hidden_channels=8, num_res_blocks=1,
+    )
+    model(np.zeros((1, image_size, image_size, 3), "float32"))
+    if collapse:
+        book = np.full((1, 16, 4), 1e4, "float32")
+        book[:, 0] = 0.0
+        model.quantizer.embeddings.assign(book)
+    model.save(str(path))
+    return str(path)
+
+
+@pytest.fixture(scope="module")
+def tokenizers(tmp_path_factory):
+    """``name -> path`` of the tokenizer files: a healthy toy, a collapsed one, two of the wrong geometry, a file that is no tokenizer."""
+    root = tmp_path_factory.mktemp("tokenizers")
+    not_one = root / "classifier.keras"
+    keras.Sequential([keras.layers.Input((4,)), keras.layers.Dense(2)]).save(str(not_one))
+    return {
+        "healthy": make_tokenizer(root / "healthy.keras"),
+        "collapsed": make_tokenizer(root / "collapsed.keras", collapse=True),
+        "other_size": make_tokenizer(root / "other_size.keras", image_size=64, downsample=8),
+        "coarse_grid": make_tokenizer(root / "coarse_grid.keras", downsample=8),
+        "not_a_tokenizer": str(not_one),
+    }
+
+
+def beit_config(out: Path, path: str, **changes: Any) -> PretrainConfig:
+    return make_config(out, model=BEIT_MODEL, model_args={TOKENIZER_KEY: path, **BEIT_SMALL}, **changes)
+
+
+def run_beit(out: Path, path: str, **changes: Any):
+    return PretrainTrainer(beit_config(out, path, **changes)).run()
+
+
+def test_a_beit_run_without_a_tokenizer_names_the_script_that_makes_one(world, tmp_path):
+    out = tmp_path / "run"
+    with pytest.raises(ConfigError) as caught:
+        PretrainTrainer(make_config(out, model=BEIT_MODEL, model_args={})).run()
+    assert "python -m train.beit.train_tokenizer" in str(caught.value)
+    assert not out.exists()
+
+
+def test_a_tokenizer_path_that_does_not_exist_is_refused_before_the_claim(world, tmp_path):
+    out, missing = tmp_path / "run", tmp_path / "nowhere" / "tokenizer.keras"
+    with pytest.raises(ConfigError) as caught:
+        run_beit(out, str(missing))
+    assert "model_args.tokenizer_checkpoint" in str(caught.value) and str(missing) in str(caught.value)
+    assert "does not exist" in str(caught.value)
+    assert not out.exists(), "the refusal came after the claim"
+
+
+def test_a_tokenizer_path_that_is_not_a_keras_file_is_refused_before_the_claim(world, tmp_path):
+    out, wrong = tmp_path / "run", tmp_path / "tokenizer.h5"
+    wrong.write_bytes(b"")
+    with pytest.raises(ConfigError) as caught:
+        run_beit(out, str(wrong))
+    assert ".keras" in str(caught.value) and str(wrong) in str(caught.value)
+    assert not out.exists(), "the refusal came after the claim"
+
+
+@pytest.mark.parametrize(
+    "name, fragments",
+    [
+        # Built at 64 px: the encoder pins its input shape, so a 32 px image is refused by the grid proof's probe.
+        ("other_size", ("other_size.keras", "(32, 32, 3)", "cannot encode")),
+        # Built at 32 px with a down-sample of 8: a 4 x 4 code grid against the trainer's 8 x 8 patch grid.
+        ("coarse_grid", ("coarse_grid.keras", "(4, 4)", "(8, 8)", "code-grid mismatch")),
+    ],
+)
+def test_a_tokenizer_of_another_grid_is_refused_by_the_grid_proof_and_named(world, tokenizers, tmp_path, name, fragments):
+    out = tmp_path / "run"
+    with pytest.raises(ConfigError) as caught:
+        run_beit(out, tokenizers[name])
+    for fragment in fragments:
+        assert fragment in str(caught.value), (fragment, str(caught.value))
+    assert "was claimed" in str(caught.value) and out.exists(), "found at build time: the run directory is claimed and says so"
+
+
+def test_a_keras_file_that_is_not_a_tokenizer_is_refused_by_name(world, tokenizers, tmp_path):
+    with pytest.raises(ConfigError) as caught:
+        run_beit(tmp_path / "run", tokenizers["not_a_tokenizer"])
+    assert isinstance(caught.value.__cause__, TypeError), "the loader's TypeError, kept as the cause"
+    assert "classifier.keras" in str(caught.value) and "not a VQVAERotationTrick" in str(caught.value)
+
+
+def test_a_collapsed_tokenizer_is_refused_below_the_floor_with_its_measured_perplexity(world, tokenizers, tmp_path):
+    out = tmp_path / "run"
+    with pytest.raises(ConfigError) as caught:
+        run_beit(out, tokenizers["collapsed"])
+    message = str(caught.value)
+    assert "perplexity 1.00" in message and "1 distinct" in message and "floor" in message and "64" in message
+    assert "was claimed" in message and out.exists(), "found at build time: the run directory is claimed and says so"
+    assert not (out / "results_summary.json").exists()
+
+
+def test_the_floor_is_the_one_measured_and_sits_between_the_two_tokenizers_it_was_measured_on():
+    # D-019, scratch_measure item (g): over the masked positions of the cifar10 selection split the 1-epoch tokenizer had
+    # perplexity 24.7 and the 5-epoch one 354.8; the floor separates them. A toy of 16 codes cannot reach it.
+    assert 24.7 < pretrain_run.MIN_TOKENIZER_PERPLEXITY < 354.8
+    assert pretrain_run.MIN_TOKENIZER_PERPLEXITY == 64.0
+
+
+def test_a_toy_that_uses_every_code_it_has_is_still_below_the_real_floor(world, tokenizers, tmp_path):
+    with pytest.raises(ConfigError, match=r"below the floor of 64"):
+        run_beit(tmp_path / "run", tokenizers["healthy"])
+
+
+def usage_oracle(data) -> Dict[str, Any]:
+    """The usage of the masked positions of one pass of the selection stream, and the in-sample unigram ``val_loss`` (float64)."""
+    elements = list(data.select_ds.as_numpy_iterator())
+    ids = np.concatenate([e[1] for e in elements])
+    masks = np.concatenate([e[0][1] for e in elements]).astype(bool)
+    counts = np.bincount(ids[masks], minlength=16).astype(np.float64)
+    share = counts[counts > 0] / counts.sum()
+    entropy = float(-(share * np.log(share)).sum())
+    log_p = np.log(np.maximum(counts / counts.sum(), 1e-30))
+    unigram = float(np.mean([(-log_p[row[mask]]).mean() for row, mask in zip(ids, masks)]))
+    return {"n_codes": int(masks.sum()), "distinct": int(len(share)), "top1": float(share.max()),
+            "perplexity": math.exp(entropy), "unigram": unigram}
+
+
+@pytest.fixture(scope="module")
+def healthy_run(world, tokenizers, tmp_path_factory):
+    """A whole one-epoch BEiT run on the healthy toy tokenizer (floor lowered), its summary and the oracle of its data."""
+    root = tmp_path_factory.mktemp("beit_run")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(pretrain_run, "MIN_TOKENIZER_PERPLEXITY", LOW_FLOOR)
+        out = root / "run"
+        run_beit(out, tokenizers["healthy"], epochs=1)
+        trainer, resolved, context = prepared(
+            root / "again", model=BEIT_MODEL, model_args={TOKENIZER_KEY: tokenizers["healthy"], **BEIT_SMALL})
+        oracle = usage_oracle(trainer.build_data(resolved, context))
+    return {"summary": read_json(out / "results_summary.json"), "oracle": oracle, "path": tokenizers["healthy"]}
+
+
+def test_a_healthy_tokenizers_usage_reaches_the_summary(healthy_run):
+    block, oracle = healthy_run["summary"]["tokenizer"], healthy_run["oracle"]
+    assert oracle["distinct"] > 1, "the control: a toy that uses one code would make every number below trivial"
+    assert block["checkpoint"] == healthy_run["path"] and block["num_embeddings"] == 16
+    assert (block["n_codes"], block["distinct"]) == (oracle["n_codes"], oracle["distinct"])
+    assert block["perplexity"] == pytest.approx(oracle["perplexity"], rel=1e-9)
+    assert block["top1_share"] == pytest.approx(oracle["top1"], rel=1e-9)
+    assert block["entropy"] == pytest.approx(math.log(oracle["perplexity"]), rel=1e-9)
+    assert block["floor"] == LOW_FLOOR
+
+
+def test_the_beit_baseline_is_the_in_sample_unigram_val_loss_and_not_the_uniform_one(healthy_run):
+    baseline, oracle = healthy_run["summary"]["baseline"], healthy_run["oracle"]
+    assert baseline["kind"] == "unigram_codes"
+    assert abs(oracle["unigram"] - math.log(16)) > 0.01, "the control: the uniform bar must differ from the unigram one"
+    assert baseline["val_loss"] == pytest.approx(oracle["unigram"], rel=1e-5)
+
+
+def test_an_energy_transformer_run_reports_no_tokenizer(runs):
+    assert read_json(runs["whole"] / "results_summary.json")["tokenizer"] is None
+
+
+def test_the_select_stream_is_read_once_for_the_usage_and_the_baseline(world, tokenizers, tmp_path, monkeypatch):
+    calls = []
+    real = pretrain_data.masked_code_ids
+
+    def counting(ds):
+        calls.append(1)
+        return real(ds)
+
+    monkeypatch.setattr(pretrain_data, "masked_code_ids", counting)
+    monkeypatch.setattr(pretrain_run, "masked_code_ids", counting)
+    monkeypatch.setattr(pretrain_run, "MIN_TOKENIZER_PERPLEXITY", LOW_FLOOR)
+    trainer, resolved, context = prepared(
+        tmp_path / "run", model=BEIT_MODEL, model_args={TOKENIZER_KEY: tokenizers["healthy"], **BEIT_SMALL})
+    trainer.build_data(resolved, context)
+    assert len(calls) == 1, "each extra pass runs the tokenizer over the whole selection split again"
+
+
+# ---------------------------------------------------------------------
+# The resume note of the summary names the order the task's resume really trains on
+# ---------------------------------------------------------------------
+
+#: What the three shipped tasks have always written on a resume (the sentence of ``TaskTrainer._notes``, byte for byte).
+DEFAULT_RESUME_NOTE = (
+    "resumed after epoch 2: epochs 0..1 come from the killed segment's training_log.csv (its torn or surplus rows are in "
+    "training_log.pre_resume_<k>.csv), the training data order of the resumed epochs replays the order of epoch 0, and "
+    "`epoch_times` and `fit_wall_seconds` cover the resumed epochs only"
+)
+
+
+def resume_note(task_class, monkeypatch) -> str:
+    """The resumed-run note of ``task_class`` from the real ``TaskTrainer._notes`` (the task's own lines are left out)."""
+    trainer = object.__new__(task_class)
+    monkeypatch.setattr(task_class, "task_notes", lambda *args: [])
+    monkeypatch.setattr(resume_decisions, "training_complete_reason", lambda resume, config: None)
+    config = SimpleNamespace(debug_args=SimpleNamespace(smoke=False))
+    return trainer._notes(config, {}, 1.0, False, None, SimpleNamespace(start=2, batch=0))[0]
+
+
+@pytest.mark.parametrize("task_class", [ImageClassificationTrainer, ImageSegmentationTrainer, ImageDenoisingTrainer])
+def test_the_resume_note_of_a_task_that_says_nothing_is_what_it_always_was(task_class, monkeypatch):
+    assert TaskTrainer.resume_order is None and task_class.resume_order is None
+    assert resume_note(task_class, monkeypatch) == DEFAULT_RESUME_NOTE
+
+
+def test_the_pretrain_resume_note_names_its_own_order_and_claims_no_replay(monkeypatch):
+    note = resume_note(PretrainTrainer, monkeypatch)
+    assert PretrainTrainer.resume_order and PretrainTrainer.resume_order in note
+    assert "replays" not in note
+    # One clause in both places: the help of `resume_interrupted` and the note of the summary.
+    help_text = {f.name: f.metadata.get("help") for f in dataclasses.fields(PretrainConfig)}["resume_interrupted"]
+    assert PretrainTrainer.resume_order in help_text

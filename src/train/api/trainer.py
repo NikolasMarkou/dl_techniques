@@ -140,7 +140,9 @@ reporting-only resume writes nothing, the summary says that ``analyzer.path`` na
 segment's file.
 
 Residuals, stated in ``resume_interrupted``'s help (a test pins the text): the training
-data order replays the order of epoch 0 (the pipeline is seeded, not resumed), an epoch
+data order replays the order of epoch 0 (the pipeline is seeded, not resumed; a task whose
+``resume_stream`` trains on another stream says so in ``resume_order``, which the help and the
+summary's resume note both carry), an epoch
 killed midway is trained again from its start (with ``checkpoint_args.backup_every_steps`` it
 is continued from the last copy taken inside it, ``resume_state.StepBackupAndRestore``, D-063: only
 the batches that copy had not taken run, from a fresh pass of the data, so some examples of that
@@ -513,10 +515,15 @@ class TaskTrainer:
     :cvar task: the task's command word; a subclass sets it.
     :cvar success_metric: the history key ``success_value`` reads and the summary names; a
         subclass sets it.
+    :cvar resume_order: what a resume does to the training data order, as the clause of a
+        sentence (``resume_help``'s ``order`` argument takes the same text); ``None`` is the shipped
+        tasks' (the loader replays epoch 0's order), and a task whose ``resume_stream`` trains on
+        another stream sets it so the summary's resume note does not say otherwise.
     """
 
     task: ClassVar[str] = ""
     success_metric: ClassVar[str] = ""
+    resume_order: ClassVar[Optional[str]] = None
 
     def __init__(self, config: StrictConfig) -> None:
         missing = [name for name in CONFIG_FIELDS if not hasattr(config, name)]
@@ -1169,6 +1176,10 @@ class TaskTrainer:
                 "epoch ran in this segment); training_log.csv was not touched"
             )
         elif resume is not None:
+            order = (
+                "the training data order of the resumed epochs replays the order of epoch 0"
+                if self.resume_order is None else self.resume_order
+            )
             earlier = (
                 f"resumed after epoch {resume.start}: epochs 0..{resume.start - 1} come from the "
                 "killed segment's training_log.csv"
@@ -1178,8 +1189,7 @@ class TaskTrainer:
             )
             notes.append(
                 f"{earlier} (its torn or surplus rows are in "
-                "training_log.pre_resume_<k>.csv), the training data order of the resumed "
-                "epochs replays the order of epoch 0, and `epoch_times` and "
+                f"training_log.pre_resume_<k>.csv), {order}, and `epoch_times` and "
                 "`fit_wall_seconds` cover the resumed epochs only"
             )
             if resume.batch:

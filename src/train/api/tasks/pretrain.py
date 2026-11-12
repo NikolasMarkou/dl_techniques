@@ -51,9 +51,13 @@ Interface contract
     The task writes no ``task.json`` (D-013): ``task_record`` is ``None``, so ``predict`` and ``export`` of a pretrain run
     directory refuse with the existing ``task.json`` sentence.
 
-    The BEiT tokenizer. ``model_args.tokenizer_checkpoint`` is required for a ``beit`` run and is read by the TASK, never
-    by the model (the resolver strips it). ``PretrainTrainer._frozen_tokenizer`` and ``_tokenizer_block`` are the two
-    named seams of the tokenizer step (the pre-claim path check, the usage report and the floor).
+    The BEiT tokenizer (D-007). ``model_args.tokenizer_checkpoint`` is required for a ``beit`` run and is read by the TASK,
+    never by the model (the resolver strips it). Before the claim ``check_model_args`` refuses a missing key, a path that does
+    not exist and one that does not end in ``.keras``; at build time ``train.beit.common.load_frozen_tokenizer`` proves the
+    code grid by a forward pass at the run's image size and refuses a file that is not a ``VQVAERotationTrick`` (these are
+    found after the claim, and the message says so). ``vocab_size`` is the tokenizer's codebook size. The usage of the codes
+    over the masked positions of the selection split (distinct codes, perplexity, top-1 share) is reported in the summary's
+    ``tokenizer`` block, and a perplexity below ``train.common.pretrain_run.MIN_TOKENIZER_PERPLEXITY`` (64) is refused.
 
 ``train_pretrain(*, out, model, data, ...)``
     :param out: run directory (a ``str`` or a ``Path``), or ``"auto"``.
@@ -196,10 +200,13 @@ class PretrainTrainer(TaskTrainer):
     """The hooks of a pretrain run; see the module contract.
 
     :cvar initial_loss_hint: the remedy sentence of the non-finite initial loss refusal.
+    :cvar resume_order: what a resume does to the training data order, for the summary's resume note (the help of
+        ``resume_interrupted`` carries the same clause).
     """
 
     task = TASK
     success_metric = "val_loss"
+    resume_order = _RESUME_ORDER
     initial_loss_hint = "Lower optim_args.lr, or check the model arguments and the images."
 
     def __init__(self, config: StrictConfig) -> None:
@@ -211,6 +218,8 @@ class PretrainTrainer(TaskTrainer):
         self._epoch_zero: Optional[float] = None
         #: The BEiT codebook size, set by ``build_data`` from the tokenizer (``None`` for energy_transformer).
         self._vocab_size: Optional[int] = None
+        #: The BEiT tokenizer's usage over the select split's masked positions, set by ``build_data`` (``None`` for ET).
+        self._usage: Optional[Any] = None
 
     # -- data and model -------------------------------------------------
 
@@ -233,7 +242,7 @@ class PretrainTrainer(TaskTrainer):
             raise ValueError(f"data.format {data_cfg.format!r} has no loader in the pretrain task: only 'builtin' does")
         method = METHOD_OF[context.family]
         tokenizer_fn = None
-        self._vocab_size = None
+        self._vocab_size = self._usage = None
         if method == pretrain_data.BEIT_MIM:
             tokenizer_fn, self._vocab_size = self._frozen_tokenizer(config)
         data = pretrain_data.load_pretrain_batches(
@@ -253,8 +262,19 @@ class PretrainTrainer(TaskTrainer):
             min_mask_patches_per_block=data_cfg.min_mask_patches_per_block,
             tokenizer_fn=tokenizer_fn,
         )
+        code_ids = None
+        if method == pretrain_data.BEIT_MIM:
+            # One pass of the tokenizer over the selection split serves the usage report, its floor and the baseline.
+            code_ids = pretrain_data.masked_code_ids(data.select_ds)
+            self._usage = pretrain_run.checked_tokenizer_usage(code_ids, path=str(config.model_args[TOKENIZER_KEY]))
+            logger.info(
+                f"Tokenizer usage over the {self._usage.n_codes} masked selection positions: {self._usage.distinct} distinct "
+                f"codes of {self._vocab_size}, perplexity {self._usage.perplexity:.2f}, top-1 share "
+                f"{self._usage.top1_share:.2%}"
+            )
         started = time.perf_counter()
-        baseline = pretrain_run.constant_baseline(method, data.select_ds, vocab_size=self._vocab_size)
+        baseline = pretrain_run.constant_baseline(
+            method, data.select_ds, vocab_size=self._vocab_size, code_ids=code_ids)
         if not (math.isfinite(baseline.val_loss) and baseline.val_loss > 0):
             # A ValueError: `run_sequence.load_data` turns it into a ConfigError that says `out` is now used.
             raise ValueError(
@@ -272,11 +292,11 @@ class PretrainTrainer(TaskTrainer):
     def _frozen_tokenizer(self, config: PretrainConfig) -> Tuple[Any, int]:
         """Return ``(tokenizer_fn, vocab_size)`` of the BEiT run's frozen tokenizer.
 
-        THE TOKENIZER STEP'S SEAM. Today: the legacy loader (``train.beit.common.load_frozen_tokenizer``, which proves the
-        code grid by a forward pass at the run's image size and refuses a file that is not a ``VQVAERotationTrick``) and
-        the codebook size read off the model. The tokenizer step adds, around this one call, the existence and suffix
-        check before the claim, the named refusal of each loader failure, and the usage report with its floor
-        (:meth:`_tokenizer_block`).
+        The legacy loader (``train.beit.common.load_frozen_tokenizer``) proves the code grid by a forward pass at the run's
+        image size, so a tokenizer built at another size (or a down-sample that lands on another grid) is refused, naming
+        the file, and a file that is not a ``VQVAERotationTrick`` is a named ``TypeError``; ``load_data`` turns both into a
+        ``ConfigError`` that says ``out`` is claimed. The path's existence and suffix are checked before the claim
+        (:meth:`check_model_args`).
         """
         from train.beit.common import load_frozen_tokenizer
 
@@ -285,6 +305,11 @@ class PretrainTrainer(TaskTrainer):
             raise ConfigError(self._tokenizer_required_message())
         side = config.transform_args.image_size // config.data.patch_size
         shape = (config.transform_args.image_size, config.transform_args.image_size, 3)
+        # DECISION plan-2026-11-12T015747-46e5318f/D-007
+        # The grid is proved by a REAL forward pass at the run's image size, inside the loader, and the expected grid is the
+        # one the PATCHES give, never the tokenizer's own `downsample_factor`: a tokenizer whose grid does not line up with
+        # the patch grid trains on targets read from the wrong positions and still reports a finite, plausible loss. Do NOT
+        # derive the expected grid from the tokenizer, and do NOT load it with `keras.models.load_model` directly.
         tokenizer = load_frozen_tokenizer(str(path), (side, side), shape)
         return tokenizer, int(tokenizer.model.num_embeddings)
 
@@ -297,12 +322,18 @@ class PretrainTrainer(TaskTrainer):
         )
 
     def _tokenizer_block(self, data: Any) -> Optional[Dict[str, Any]]:
-        """Return the summary's ``tokenizer`` block, or ``None`` for a run with no tokenizer.
+        """Return the summary's ``tokenizer`` block (the file, the codebook size, the usage and the floor); ``None`` for ET."""
+        from train.common import pretrain_run
 
-        THE TOKENIZER STEP'S SEAM: ``None`` for both families until the usage report (distinct codes, perplexity, top-1
-        share) and its floor exist.
-        """
-        return None
+        if self._usage is None:
+            return None
+        return {
+            "checkpoint": str(self.config.model_args[TOKENIZER_KEY]),
+            "num_embeddings": self._vocab_size,
+            "positions": "the masked positions of the selection split, one pass",
+            **self._usage.as_dict(),
+            "floor": pretrain_run.MIN_TOKENIZER_PERPLEXITY,
+        }
 
     def build_model(self, config: PretrainConfig, context: AutoContext, data: Any) -> Any:
         spec = registry.MODELS[context.family]
@@ -336,8 +367,31 @@ class PretrainTrainer(TaskTrainer):
         # Before the claim: the family's own refusals (a key it does not offer, an ET run with no global clip, an sgd decay
         # no regularizer would carry), and a BEiT run with no tokenizer (it has no targets).
         self._model_kwargs(config, context)
-        if context.family == BEIT and not config.model_args.get(TOKENIZER_KEY):
+        if context.family == BEIT:
+            self._check_tokenizer_path(config.model_args.get(TOKENIZER_KEY))
+
+    def _check_tokenizer_path(self, path: Any) -> None:
+        """Refuse a missing, non-string, non-``.keras`` or absent tokenizer path before the claim (no file is read)."""
+        # DECISION plan-2026-11-12T015747-46e5318f/D-007
+        # The path is checked BEFORE the claim, by name, because the loader's own `FileNotFoundError` arrives after the run
+        # directory exists and as a traceback. Only existence and the suffix are checked here: the file's content (a
+        # `VQVAERotationTrick`, its grid, its usage) is read at build time, which this hook must not do (no tensor before
+        # `setup_gpu`). Do NOT load the file here "to refuse earlier".
+        if not path:
             raise ConfigError(self._tokenizer_required_message())
+        name = f"model_args.{TOKENIZER_KEY}"
+        if not isinstance(path, (str, Path)):
+            raise ConfigError(f"Invalid value for {name!r}: a path (a string), got {path!r}")
+        if not str(path).endswith(".keras"):
+            raise ConfigError(
+                f"Invalid value for {name!r}: {str(path)!r} does not end in .keras; the tokenizer is the .keras file a "
+                "stage-0 run saves (python -m train.beit.train_tokenizer)"
+            )
+        if not Path(path).is_file():
+            raise ConfigError(
+                f"Invalid value for {name!r}: {str(path)!r} does not exist (or is not a file); train a tokenizer with "
+                "python -m train.beit.train_tokenizer and give the path of its .keras"
+            )
 
     def input_check(self, facts: DataFacts, data: Any) -> None:
         if data.num_classes is not None or facts.num_classes is not None:
@@ -484,7 +538,7 @@ class PretrainTrainer(TaskTrainer):
 
     def task_notes(self, config: PretrainConfig, baseline: Dict[str, float], ratio: float, data: Any) -> List[str]:
         """Return the pretrain lines of ``results_summary.json``'s ``notes``."""
-        from train.common import classification_run
+        from train.common import classification_run, pretrain_run
 
         checkpoint_cfg: CheckpointArgs = config.checkpoint_args
         analysis_cfg: AnalysisArgs = config.analysis_args
@@ -510,6 +564,13 @@ class PretrainTrainer(TaskTrainer):
             "test split, whose masks are fixed too; the test split never influenced selection",
             "no `task.json` is written: `predict` and `export` of this run directory are refused",
         ]
+        if self._usage is not None:
+            notes.append(
+                f"the tokenizer's usage over the masked selection positions (`tokenizer`: perplexity "
+                f"{self._usage.perplexity:.2f}, {self._usage.distinct} distinct codes) passed the floor of "
+                f"{pretrain_run.MIN_TOKENIZER_PERPLEXITY:g} effective codes; a lower one is refused, because the bar of a "
+                "near-constant target is vacuous"
+            )
         if analysis_cfg.model_analysis:
             notes.append(
                 "the model analysis is data-free (weights and spectral only; `analyzer.analyzers` lists them): the stock "

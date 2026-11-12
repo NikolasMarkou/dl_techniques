@@ -838,6 +838,9 @@ def test_help_and_list_tasks_load_no_tensorflow_and_name_the_task(tmp_path):
 # ---------------------------------------------------------------------
 
 #: The tokenizer token every BEiT row carries so that the refusal under test is the one reported (a BEiT run needs one).
+#: The child writes an EMPTY ``tokenizer.keras`` into its working directory: the check before the claim reads existence and
+#: the suffix only (the content, the grid and the usage are read after the claim, which a spy replaces), so a real tiny
+#: tokenizer would change nothing here. The real tokenizers are in ``test_pretrain_task.py``.
 TOKENIZER = "model_args.tokenizer_checkpoint=tokenizer.keras"
 
 #: ``(family, dataset, command-line tokens, fragments of the message)``: one refusal per row, each of a different
@@ -866,9 +869,11 @@ PRE_CLAIM_REFUSALS: List[Tuple[str, str, List[str], Tuple[str, ...]]] = [
     ("beit", "cifar10", ["transform_args.image_size=30", TOKENIZER], ("data.patch_size",)),
     # A task-level refusal: a conformal set is a set of classes, and a pretrain run has none.
     ("energy_transformer", "cifar10", ["analysis_args.conformal_alpha=0.1"], ("analysis_args.conformal_alpha",)),
-    # A BEiT run with no tokenizer has no targets (the existence and content checks of the path are the tokenizer step's).
-    ("beit", "cifar10", [], ("model_args.tokenizer_checkpoint",)),
-    ("beit", "imagenette", [], ("model_args.tokenizer_checkpoint",)),
+    # A BEiT run with no tokenizer has no targets; one whose path is absent or is not a .keras is refused by name too.
+    ("beit", "cifar10", [], ("model_args.tokenizer_checkpoint", "python -m train.beit.train_tokenizer")),
+    ("beit", "imagenette", [], ("model_args.tokenizer_checkpoint", "python -m train.beit.train_tokenizer")),
+    ("beit", "cifar10", ["model_args.tokenizer_checkpoint=missing.keras"], ("model_args.tokenizer_checkpoint", "missing.keras", "does not exist")),
+    ("beit", "cifar10", ["model_args.tokenizer_checkpoint=tokenizer.h5"], ("model_args.tokenizer_checkpoint", "tokenizer.h5", "does not end in .keras")),
 ]
 
 #: What the same command line accepts: it reaches the claim (the control of the rows above).
@@ -914,7 +919,8 @@ CHILD_DRIVER = textwrap.dedent(
 
     rows = json.load(open(sys.argv[1]))
     seen = {"at_start": initialised(), "results": []}
-    open(os.path.join(sys.argv[2], "tokenizer.keras"), "wb").close()
+    for name in ("tokenizer.keras", "tokenizer.h5"):
+        open(os.path.join(sys.argv[2], name), "wb").close()
     os.chdir(sys.argv[2])
     for index, row in enumerate(rows):
         out = os.path.join(sys.argv[2], f"run_{index}")
