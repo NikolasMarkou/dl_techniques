@@ -66,6 +66,11 @@ class EnergyTraceCallback(keras.callbacks.Callback):
             comparable across epochs.
         csv_path: Where to write the per-epoch trace.
         backbone_attr: Attribute on ``self.model`` holding the live backbone.
+        skip_header_if_file_exists: ``False`` (the default, both legacy trainers) writes the header on
+            this callback's first epoch, whatever the file holds. ``True`` (a resumed run, whose new
+            process holds a new callback on the file the earlier process wrote) writes no header when
+            the file already holds something, so the file keeps its one header; an empty or missing
+            file still gets one.
     """
 
     def __init__(
@@ -73,11 +78,13 @@ class EnergyTraceCallback(keras.callbacks.Callback):
             probe_inputs: Any,
             csv_path: str,
             backbone_attr: str = "backbone",
+            skip_header_if_file_exists: bool = False,
     ) -> None:
         super().__init__()
         self.probe_inputs = probe_inputs
         self.csv_path = str(csv_path)
         self.backbone_attr = backbone_attr
+        self.skip_header_if_file_exists = bool(skip_header_if_file_exists)
         self._header_written = False
 
     def _build_probe(self, live_backbone: keras.Model) -> keras.Model:
@@ -109,6 +116,16 @@ class EnergyTraceCallback(keras.callbacks.Callback):
         per_step = trace.astype(np.float64).mean(axis=0)  # (T+1,)
 
         Path(self.csv_path).parent.mkdir(parents=True, exist_ok=True)
+        # DECISION plan-2026-11-12T015747-46e5318f/D-010
+        # The header of a RESUMED run is already in the file the earlier process wrote. Do NOT dedupe
+        # by reading the file back after the fact, and do NOT make the skip the default: the legacy
+        # trainers start a fresh run directory and rely on the header being written. Decide here,
+        # before the append opens the file, and only on a non-empty file (a kill between the create
+        # and the first write leaves an empty one, which still needs its header).
+        if self.skip_header_if_file_exists and not self._header_written:
+            csv_file = Path(self.csv_path)
+            if csv_file.exists() and csv_file.stat().st_size > 0:
+                self._header_written = True
         with open(self.csv_path, "a", newline="") as handle:
             writer = csv.writer(handle)
             if not self._header_written:

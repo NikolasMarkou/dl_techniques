@@ -430,7 +430,7 @@ def finalize_last_epoch(
         run_dir: Path, history: keras.callbacks.History, epochs_run: int,
         evaluate: Evaluate, save: bool = True, atomic: bool = False,
         eval_batch_size: Optional[int] = None, exact_reload: bool = False,
-        load_detail: Optional[Dict[str, Any]] = None,
+        load_detail: Optional[Dict[str, Any]] = None, sample: Optional[Any] = None,
 ) -> Tuple[Optional[Dict[str, float]], Optional[bool]]:
     """Restore the last epoch's weights, score them, save them, write the history, reload.
 
@@ -466,6 +466,12 @@ def finalize_last_epoch(
     :param load_detail: a dict that is filled with the check's measurements
         (:meth:`~train.common.evaluation.LoadCheck.as_record`) when ``exact_reload`` is true and
         ``save`` is true; left alone otherwise.
+    :param sample: the load check's input, used AS GIVEN (the caller cuts it to the size it wants; the
+        ``LOAD_CHECK_SAMPLES`` cut is the legacy branches' own), or ``None`` (every caller that existed
+        before it) to read it the legacy way: the first batch of ``select_ds`` when there is no test split,
+        ``data.x_fig`` otherwise. Both legacy reads assume one image array; a model of ``[image, mask]``
+        (the masked-image pretraining tasks) has a stream of ``((image, mask), target, weight)`` and no
+        ``x_fig``, and passes the list here. ``select_ds`` and ``x_fig`` are not read when it is given.
     :return: ``(test_metrics_final, load_check)``; ``load_check`` is ``None`` when
         ``save`` is ``False``, ``test_metrics_final`` when there is no test split.
     """
@@ -496,10 +502,17 @@ def finalize_last_epoch(
     save_training_history_json(history, str(run_dir))
     load_check: Optional[bool] = None
     if save:
-        if data.test_ds is None:
-            sample = next(iter(data.select_ds.take(1)))[0].numpy()[:LOAD_CHECK_SAMPLES]
-        else:
-            sample = data.x_fig[:LOAD_CHECK_SAMPLES]
+        # DECISION plan-2026-11-12T015747-46e5318f/D-010
+        # A caller whose model takes more than one input hands over the sample itself. Do NOT widen
+        # the two reads below to guess one from the stream: the first element of a pretraining
+        # batch is an `(image, mask)` tuple (`.numpy()` raises) and its record has no `x_fig`
+        # (the slice raises), both MEASURED. `None` keeps both reads byte for byte for every caller
+        # that never named the keyword.
+        if sample is None:
+            if data.test_ds is None:
+                sample = next(iter(data.select_ds.take(1)))[0].numpy()[:LOAD_CHECK_SAMPLES]
+            else:
+                sample = data.x_fig[:LOAD_CHECK_SAMPLES]
         cap = predict_batch_cap(eval_batch_size)
         # The keyword is passed only when there is one: tests of the legacy trainers patch
         # `validate_model_loading` with the three-argument signature it always had.
