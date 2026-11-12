@@ -37,7 +37,8 @@ Interface contract
     :param code_ids: the masked target ids of one pass of the select stream (1-D integers).
     :param path: the tokenizer file, named in the refusal.
     :return: the :class:`train.common.pretrain_data.TokenizerUsage` of ``code_ids``.
-    :raises ValueError: for no ids, and for a perplexity below the floor ``MIN_TOKENIZER_PERPLEXITY`` (effective codes);
+    :raises ValueError: for no ids, and for a perplexity below the floor ``MIN_TOKENIZER_PERPLEXITY`` (effective codes), judged
+        as the entropy below ``log`` of it by more than ``ENTROPY_ROUNDING_TOLERANCE`` (so exactly the floor passes);
         the message gives the distinct count, the perplexity and the top-1 share.
 
 ``epoch_zero_val_loss(sidecar_path)``
@@ -47,6 +48,7 @@ Interface contract
     :raises ValueError: if the sidecar has no such value (a missing file, or a run that never evaluated epoch zero).
 """
 
+import math
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
@@ -69,6 +71,11 @@ _PROBABILITY_FLOOR = 1e-30
 # 8192-code book would refuse fine tokenizers). Do NOT make it a fraction of ``num_embeddings``, and do NOT move it without
 # a measurement of a third tokenizer (the number rests on two).
 MIN_TOKENIZER_PERPLEXITY = 64.0
+
+#: Nats of slack under ``log(MIN_TOKENIZER_PERPLEXITY)``. The floor is judged on the entropy because ``exp(entropy)`` of 64
+#: equally used codes is 63.99999999999998 in float64 (refused by a strict test of the perplexity); the slack keeps a last-bit
+#: difference of the summed entropy from refusing a perplexity that is exactly the floor.
+ENTROPY_ROUNDING_TOLERANCE = 1e-9
 
 
 def pretrain_loss(method: str) -> "keras.losses.Loss":
@@ -148,7 +155,7 @@ def checked_tokenizer_usage(code_ids: Any, *, path: str) -> TokenizerUsage:
     # of the codebook, and it is a REFUSAL, not a warning: a bar that cannot fail must not be reported as a verdict. Do NOT
     # lower it to let a small tokenizer through (a test patches this constant for the toy tokenizer it builds), and do NOT
     # turn it into a log line.
-    if usage.perplexity < MIN_TOKENIZER_PERPLEXITY:
+    if usage.entropy < math.log(MIN_TOKENIZER_PERPLEXITY) - ENTROPY_ROUNDING_TOLERANCE:
         raise ValueError(
             f"the tokenizer {path!r} uses its codebook too narrowly: {usage.distinct} distinct codes over the "
             f"{usage.n_codes} masked positions of the selection split, perplexity {usage.perplexity:.2f} (top-1 share "

@@ -716,7 +716,7 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
   **The usage floor.** Over the masked positions of the selection split (one pass of the tokenizer) the run counts the distinct codes
   and takes the perplexity, `exp` of the entropy of the code histogram (the number of equally used codes it is worth), and the top-1
   share; they go to the summary's `tokenizer` block with the `floor`. A perplexity below 64 effective codes
-  (`pretrain_run.MIN_TOKENIZER_PERPLEXITY`, entropy below ln 64 = 4.159 nats) is REFUSED after the claim, with the measured numbers in
+  (`pretrain_run.MIN_TOKENIZER_PERPLEXITY`, entropy below ln 64 = 4.159 nats by more than `pretrain_run.ENTROPY_ROUNDING_TOLERANCE`, 1e-9 nats; 64 equally used codes pass) is REFUSED after the claim, with the measured numbers in
   the message, because the bar of a near-constant target is vacuous and the legacy tokenizer trainer logs no usage that would show a
   collapse. Where 64 comes from (plan 46e5318f, D-007 and D-019): two stage-0 tokenizers made by the legacy trainer on CIFAR-10 at 32
   px, down-sample 4, 512 codes, measured on the 5,000-image selection split. Over all 320,000 positions the 5-epoch one has 508

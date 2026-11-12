@@ -600,12 +600,17 @@ def test_the_floor_is_the_one_measured_and_sits_between_the_two_tokenizers_it_wa
 
 @pytest.mark.parametrize(
     "perplexity, refused",
-    [(64.0, False), (float(np.nextafter(64.0, 0.0)), True), (63.99, True), (64.01, False)],
-    ids=["exactly the floor", "one ulp below", "just below", "just above"],
+    [(64.0, False), (float(np.nextafter(64.0, 0.0)), False), (64.0 * (1 - 1e-12), False), (64.0 * (1 - 1e-7), True),
+     (63.99, True), (63.95, True), (63.9, True), (64.01, False)],
+    ids=["exactly the floor", "one ulp below (rounding, inside the tolerance)", "1e-12 below (inside the tolerance)",
+         "1e-7 below (outside the tolerance)", "just below", "63.95", "63.9", "just above"],
 )
 def test_the_floor_is_strict_so_a_perplexity_of_exactly_the_floor_passes(monkeypatch, perplexity, refused):
-    # "Below the floor" is refused and the floor itself is not. The usage is handed in as a record: a perplexity of exactly
-    # 64.0 is not reachable through counts (64 codes used equally give 63.99999999999998 in float64).
+    # "Below the floor" is refused and the floor itself is not, up to the float rounding of exp(entropy) that
+    # ENTROPY_ROUNDING_TOLERANCE absorbs (1e-9 nats, about 1e-9 of the perplexity): a refusal one ulp below the floor would be
+    # rounding, a refusal 1e-7 below it is not. The usage is handed in as a record, which is the only way to put the entropy a
+    # last bit below ln 64 (the summed entropy of 64 equal counts is ln 64 or above, measured for 1 to 600 repeats), so the
+    # tolerance itself is pinned here; the next test proves the floor through the calculation.
     usage = pretrain_data.TokenizerUsage(
         n_codes=5000, distinct=200, perplexity=perplexity, top1_share=0.02, entropy=math.log(perplexity))
     monkeypatch.setattr(pretrain_run, "tokenizer_usage", lambda ids: usage)
@@ -615,6 +620,25 @@ def test_the_floor_is_strict_so_a_perplexity_of_exactly_the_floor_passes(monkeyp
             pretrain_run.checked_tokenizer_usage(np.zeros(3, np.int64), path="t.keras")
     else:
         assert pretrain_run.checked_tokenizer_usage(np.zeros(3, np.int64), path="t.keras") is usage
+
+
+@pytest.mark.parametrize("repeats", [1, 2, 3, 7, 37, 100, 200])
+def test_64_equally_used_codes_pass_the_floor_through_the_real_calculation(repeats):
+    # Review pass 2, concern 5: exp(log(64)) is 63.99999999999998 in float64, so a strict comparison of the perplexity
+    # refused a tokenizer that uses exactly 64 codes equally (a perplexity of exactly 64) for every count. The real
+    # calculation (tokenizer_usage, not a record handed in) must let it through.
+    ids = np.repeat(np.arange(64), repeats)
+    assert pretrain_data.tokenizer_usage(ids).perplexity < 64.0, "vacuity guard: the calculation does come out below 64"
+    usage = pretrain_run.checked_tokenizer_usage(ids, path="t.keras")
+    assert usage.distinct == 64 and usage.n_codes == 64 * repeats
+
+
+@pytest.mark.parametrize("repeats", [1, 3, 200])
+def test_63_equally_used_codes_are_refused_by_the_floor(repeats):
+    # The control of the test above: one code fewer is a perplexity of 63, well below the floor.
+    ids = np.repeat(np.arange(63), repeats)
+    with pytest.raises(ValueError, match="below the floor of 64"):
+        pretrain_run.checked_tokenizer_usage(ids, path="t.keras")
 
 
 def test_a_refusal_on_few_positions_says_the_split_size_limits_the_estimate_and_names_what_it_measured():
