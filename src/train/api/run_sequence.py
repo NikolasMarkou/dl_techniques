@@ -363,8 +363,11 @@ def _checked_fit_options(run: Run) -> Dict[str, Any]:
     """Return the task's ``fit_kwargs``, refusing what would collide, disagree or hang.
 
     :raises ConfigError: for a result that is not a mapping, one that names an argument of ``fit`` the
-        sequence owns, a ``steps_per_epoch`` that is not the data's own plain int, or a ``train_ds`` of
-        infinite or unknown cardinality with no ``steps_per_epoch``; each carries :func:`_claimed_note`.
+        sequence owns, a ``steps_per_epoch`` that is not the data's own plain int, a ``validation_steps`` that
+        is not a plain int equal to the cardinality of ``select_ds``, or a ``train_ds`` of infinite or unknown
+        cardinality with no ``steps_per_epoch``; each carries :func:`_claimed_note`. A ``validation_steps`` is
+        judged only against a ``select_ds`` of known length (a data object with none, or one of unknown length,
+        is skipped, like a ``PyDataset`` for the training stream).
     """
     # DECISION plan-2026-11-12T015747-46e5318f/D-003
     # An epoch of an infinite stream never ends in Keras 3.8 (no ``steps_per_epoch`` and no cardinality:
@@ -396,12 +399,27 @@ def _checked_fit_options(run: Run) -> Dict[str, Any]:
             f"{run.steps_per_epoch} steps of an epoch of this data (an int equal to "
             f"data.steps_per_epoch): the schedule and the backups count epochs of that length. {note}"
         )
+    # Keras keeps ONE validation iterator across the epochs, so a count shorter than the selection stream scores another
+    # part of it each epoch (a `val_loss` that drifts with no change in the weights) and a longer one runs out of data.
+    selection = getattr(getattr(run.data, "select_ds", None), "cardinality", None)
+    selection_length = int(selection()) if callable(selection) else -1
+    val_steps = options.get("validation_steps")
+    if "validation_steps" in options and selection_length >= 0 and (
+        not isinstance(val_steps, numbers.Integral) or isinstance(val_steps, bool)
+        or int(val_steps) != selection_length
+    ):
+        raise ConfigError(
+            f"fit_kwargs of {name} gives validation_steps={val_steps!r}, which is not the {selection_length} batches of "
+            "the selection stream (an int equal to the cardinality of data.select_ds): Keras keeps one validation "
+            "iterator, so a shorter count scores another part of the stream each epoch and val_loss drifts, and a "
+            f"longer one runs out of data. {note}"
+        )
     cardinality = getattr(run.data.train_ds, "cardinality", None)
     # tf.data states an endless stream as -1 and an unknown length as -2; a known length is never negative.
     if "steps_per_epoch" not in options and callable(cardinality) and int(cardinality()) < 0:
         raise ConfigError(
-            f"The training stream of {name} has no known length (cardinality {int(cardinality())}), "
-            "so an epoch of it never ends: its fit_kwargs must return "
+            f"The training stream of {name} does not state its length (cardinality {int(cardinality())}: -1 is an "
+            "endless stream, -2 an unknown length), so Keras cannot size an epoch of it: its fit_kwargs must return "
             f"{{'steps_per_epoch': data.steps_per_epoch}}. {note}"
         )
     return options

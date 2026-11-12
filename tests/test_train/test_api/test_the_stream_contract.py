@@ -9,6 +9,8 @@ refuses what would hang or what disagrees with the epoch it computed everything 
   backup arithmetic and ``settle_backup`` read that number, so ``fit`` must run the same one);
 * a ``train_ds`` of infinite or unknown cardinality with no ``steps_per_epoch`` (a ``ConfigError`` that names
   ``fit_kwargs`` and ``steps_per_epoch`` and carries the claimed-run note, instead of a hang);
+* a ``validation_steps`` that is not a plain int equal to the cardinality of ``select_ds``: Keras keeps ONE validation
+  iterator, so a shorter count scores a different part of the stream each epoch and ``val_loss`` drifts;
 * with ``steps_per_epoch`` given the same stream trains, and ONE iterator persists across epochs: epoch
   1 continues epoch 0's stream (Keras 3.8, MEASURED in the plan's findings), so a counter-keyed stream does
   not restart.
@@ -152,6 +154,63 @@ def test_the_steps_per_epoch_of_the_data_is_accepted(world, tmp_path):
 
 
 # ---------------------------------------------------------------------
+# validation_steps must be the selection stream's own length
+# ---------------------------------------------------------------------
+
+
+def with_validation_steps(change):
+    """A task whose ``fit_kwargs`` gives the right ``steps_per_epoch`` and ``change(select cardinality)`` validation steps."""
+
+    def options(data):
+        return {"steps_per_epoch": data.steps_per_epoch, "validation_steps": change(int(data.select_ds.cardinality()))}
+
+    return streaming(stream=infinite, options=options)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [lambda n: n + 1, lambda n: n - 1, lambda n: float(n), lambda n: True, lambda n: None, lambda n: str(n)],
+    ids=["one more", "one fewer", "a float", "a bool", "None", "a string"],
+)
+def test_a_validation_steps_that_is_not_the_selection_streams_length_is_refused(world, tmp_path, bad):
+    run_dir = tmp_path / "run"
+    with pytest.raises(ConfigError, match=r"validation_steps") as raised:
+        with_validation_steps(bad)(config_for(run_dir)).run()
+    message = str(raised.value)
+    assert "Streaming" in message and "was claimed before this failed" in message
+    assert "select_ds" in message, "the message names the stream the number is compared with"
+    assert not (run_dir / "training_log.csv").exists(), "refused before fit"
+
+
+def test_a_selection_stream_of_unknown_length_is_not_judged_by_validation_steps(tmp_path):
+    # Nothing to compare the count with, so the guard stands aside (the pretrain data wrapper refuses such a stream itself).
+    # A real run cannot show it: the classification task's own epoch-zero evaluate needs the length, so the guard is called
+    # on a stand-in run, as the sequence calls it.
+    from types import SimpleNamespace
+
+    from train.api.run_sequence import _checked_fit_options
+
+    class Task:
+        def fit_kwargs(self, config, data):
+            return {"steps_per_epoch": 3, "validation_steps": 5}
+
+    def run_over(select_ds):
+        data = SimpleNamespace(train_ds=tf.data.Dataset.range(6).batch(2), select_ds=select_ds)
+        return SimpleNamespace(trainer=Task(), config=None, data=data, run_dir=tmp_path, steps_per_epoch=3)
+
+    known = tf.data.Dataset.range(10).batch(2)                         # 5 batches: the count is right
+    assert _checked_fit_options(run_over(known)) == {"steps_per_epoch": 3, "validation_steps": 5}
+    assert _checked_fit_options(run_over(unknown(known))) == {"steps_per_epoch": 3, "validation_steps": 5}
+    assert _checked_fit_options(run_over(infinite(known))) == {"steps_per_epoch": 3, "validation_steps": 5}
+    with pytest.raises(ConfigError, match="validation_steps=5"):       # the instrument can see: a known length of 4
+        _checked_fit_options(run_over(tf.data.Dataset.range(8).batch(2)))
+
+
+def test_the_validation_steps_of_the_selection_stream_are_accepted(world, tmp_path):
+    with_validation_steps(lambda n: n)(config_for(tmp_path / "run", epochs=1)).run()  # control: the right number trains
+
+
+# ---------------------------------------------------------------------
 # A stream with no length and no steps_per_epoch
 # ---------------------------------------------------------------------
 
@@ -164,6 +223,10 @@ def test_a_stream_with_no_length_and_no_steps_per_epoch_is_refused_instead_of_ha
     message = str(raised.value)
     assert "fit_kwargs" in message and "steps_per_epoch" in message
     assert "Streaming" in message and "was claimed before this failed" in message
+    # What is true: the stream does not state its length, so Keras cannot size an epoch of it. A finite stream of unknown
+    # length does not "never end" (it ends in Keras' own error in a later epoch), so the sentence does not say it does.
+    assert "does not state its length" in message and "cannot size an epoch" in message
+    assert "never ends" not in message
     assert not (run_dir / "training_log.csv").exists(), "refused before fit"
 
 
