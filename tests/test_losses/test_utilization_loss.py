@@ -1169,3 +1169,36 @@ class TestMANNUtilizationLossHonorsATimeMask:
     def test_the_docstring_states_the_mask_rule(self):
         doc = " ".join((MANNUtilizationLoss.__doc__ or "").split())
         assert "Keras mask" in doc and "time" in doc and "ValueError" in doc
+
+
+class TestMANNUtilizationLossDirectHalfPrecision:
+    """A direct ``call`` on float16 or bfloat16 memory used to return NaN rows.
+
+    Measured (memory_dim 8, float16): the entropy is NaN once a step's logit spread
+    reaches about 17.5, with a row ``max |x|`` of only about 19.5 and no norm overflow,
+    because the softmax underflows to exactly 0 and the entropy constant ``1e-10``
+    rounds to 0 in half precision, so ``0 * log(0)`` is NaN.
+    The squared norm overflows past 65504, i.e. ``||m|| > 255.9`` (about 90 per element
+    of a uniform row), and a constant row has ``V = 0`` and so ``-log(0)``. The BASE
+    code behaved the same. ``__call__`` was never affected: Keras casts to float32
+    first. The fix computes half precision in float32 (the rows come back float32).
+    """
+
+    @pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
+    @pytest.mark.parametrize("scale", [1.0, 5.0, 30.0])
+    def test_a_direct_call_returns_finite_float32_rows_equal_to_the_reference(
+        self, dtype, scale
+    ):
+        x = _ragged_memory() * scale
+        held = tf.cast(_f32(x), dtype)  # the memory as the caller holds it
+        out = MANNUtilizationLoss().call(_dummy(x), held)
+        assert tuple(out.shape) == (BATCH,)
+        assert np.isfinite(out.numpy().astype("float64")).all()
+        assert out.dtype == tf.float32
+        ref = _mann_rows64(held.numpy().astype("float64"))
+        assert np.abs(out.numpy() - ref).max() < _mann_atol(ref) * 4
+
+    def test_the_docstring_gives_the_measured_mechanism_not_a_norm_overflow_threshold(self):
+        doc = " ".join((MANNUtilizationLoss.__doc__ or "").split())
+        assert "about 300" not in doc and "past a scale" not in doc
+        assert "underflows to exactly 0" in doc and "1e-10" in doc and "65504" in doc

@@ -751,6 +751,29 @@ class TestDiceLossPerChannelIsPerSample:
         assert _drop_last_row_gap(lambda: _ScalarDice(smooth=DICE_SMOOTH)) > 1e-3
 
 
+class TestDiceLossPerChannelDirectCallDtypes:
+    """A direct ``call`` on half or double precision input used to raise.
+
+    ``dice_per_sample`` casts ``y_true`` to float32 and left the probabilities alone, so
+    the first product was float32 against a half, bfloat16 or double tensor
+    (``InvalidArgumentError ... expected to be a float tensor``). Measured at BASE and
+    at HEAD alike. ``__call__`` was never affected: Keras casts to float32 first.
+    """
+
+    @pytest.mark.parametrize("dtype", ["float16", "bfloat16", "float64"])
+    def test_a_direct_call_returns_float32_rows_equal_to_the_reference(self, dtype):
+        import tensorflow as tf
+
+        y_true, y_pred = _ragged_seg_batch()
+        rounded = tf.cast(tf.constant(y_pred), dtype)  # the input as the caller holds it
+        out = DiceLossPerChannel(smooth=DICE_SMOOTH).call(
+            tf.cast(tf.constant(y_true), dtype), rounded
+        )
+        assert tuple(out.shape) == (DICE_BATCH,) and out.dtype == tf.float32
+        ref = _dice_rows_float64(y_true, rounded.numpy().astype("float64"))
+        np.testing.assert_allclose(out.numpy(), ref, atol=DICE_ROW_ATOL, rtol=0.0)
+
+
 def _seg_batch_of(batch):
     """`_ragged_seg_batch()` tiled or cut to ``batch`` images (5 makes batch == the 5-pixel axes)."""
     y_true, y_pred = _ragged_seg_batch()

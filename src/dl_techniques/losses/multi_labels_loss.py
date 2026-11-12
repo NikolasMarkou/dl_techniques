@@ -520,8 +520,14 @@ class DiceLossPerChannel(PerSampleCallMixin, keras.losses.Loss):
         Returns
         -------
         keras.KerasTensor
-            Dice loss per image, shape ``(Batch,)``.
+            Dice loss per image, shape ``(Batch,)``, float32 whatever the input dtype
+            (a direct call on float16, bfloat16 or float64 input used to raise).
         """
+        # DECISION plan-2026-11-11T223825-64d1b401/D-015
+        # ``dice_per_sample`` computes in float32 (it casts ``y_true``): meet it there, so a
+        # direct call on half or double precision input no longer raises. A no-op for
+        # float32. Do NOT drop the cast to "keep the caller's dtype": that is the raise.
+        y_pred = ops.cast(y_pred, "float32")
         return dice_per_sample(y_true, y_pred, from_logits=False, smooth=self.smooth)
 
     def get_config(self) -> Dict[str, Any]:

@@ -70,10 +70,15 @@ class MANNUtilizationLoss(PerSampleCallMixin, keras.losses.Loss):
     a 0/1 ``sample_weight``; a mask of any other rank, or a ``sample_weight`` with an
     axis beyond the batch (a per-timestep weight), raises ``ValueError``.
 
-    Direct ``call`` limits, documented and not fixed (``call`` does not cast; the
-    loss object does): it needs ``time >= 2`` (``time == 1`` gives NaN, an empty
-    temporal difference), and on float16 the norm overflows past a scale of about
-    300 (NaN). Through ``__call__`` the inputs are cast to float32 first.
+    Direct ``call`` limits: it needs ``time >= 2`` (``time == 1`` gives NaN, an empty
+    temporal difference; documented, not guarded). Half precision is computed in
+    float32 and the rows come back float32 (float64 stays float64). Without that, a
+    direct float16 call was NaN once a step's logit spread (max minus min over
+    ``memory_dim``) reached about 17.5 (measured at memory_dim 8), because the
+    softmax underflows to exactly 0 and ``1e-10`` rounds to 0 in half precision, so
+    ``0 * log(0)`` is NaN; the squared norm only overflows past 65504 (``||m|| > 256``,
+    about 90 per element of a uniform row, memory_dim 8), and a constant row has
+    ``V = 0``. Through ``__call__`` the inputs are cast to float32 first.
 
     Args:
         entropy_weight: Weight for the entropy regularization term.
@@ -139,6 +144,12 @@ class MANNUtilizationLoss(PerSampleCallMixin, keras.losses.Loss):
             before it was made per-sample.
         """
         memory_vectors, mask = split_keras_mask(y_pred)
+        # DECISION plan-2026-11-11T223825-64d1b401/D-015
+        # Half precision is computed in float32 (float64 stays float64): in float16 the
+        # softmax underflows to exactly 0 and the 1e-10 constants round to 0, so
+        # ``0 * log(0)`` is NaN long before the squared norm overflows (past 65504).
+        if keras.backend.standardize_dtype(memory_vectors.dtype) in ("float16", "bfloat16"):
+            memory_vectors = ops.cast(memory_vectors, "float32")
 
         if mask is not None:
             entropy_loss, magnitude_loss, variance_row = self._masked_terms(
