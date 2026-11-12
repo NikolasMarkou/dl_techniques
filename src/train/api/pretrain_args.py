@@ -61,8 +61,10 @@ Interface contract
     shared loader's flip and pad-crop of the train stream; the selection and test streams are never augmented).
 
 ``PretrainMetricArgs``
-    ``watch_metric`` (auto is the recipe's ``val_loss``) and ``watch_mode`` (auto is read from the name). The success bar is
-    the task's (a baseline measured on the run's own selection stream), not a key.
+    ``watch_metric`` (auto is the recipe's ``val_loss``; the only value accepted) and ``watch_mode`` (auto is ``min``; the
+    only value accepted): the success bar is a statement about the MINIMUM ``val_loss`` of the selection window, so the
+    checkpoint that is saved and reloaded must be that epoch, and ``problems`` refuses any other metric or direction by
+    key. The bar is the task's (a baseline measured on the run's own selection stream), not a key.
 
 Import rule
 -----------
@@ -349,6 +351,11 @@ class PretrainTransformArgs(StrictConfig):
         return _with_values(self, "transform_args", found)
 
 
+#: The one metric and direction the bar can describe (the pretrain recipes carry the same metric; a test holds them equal).
+WATCH_METRIC = "val_loss"
+WATCH_MODE = "min"
+
+
 @dataclasses.dataclass(frozen=True)
 class PretrainMetricArgs(StrictConfig):
     """The metric that selects the checkpoint; read by the pretrain task."""
@@ -356,13 +363,28 @@ class PretrainMetricArgs(StrictConfig):
     watch_metric: Auto[str] = dataclasses.field(
         default=AUTO,
         metadata={
-            "help": "metric that picks the best epoch: val_loss on the fixed selection masks (the default recipe) or loss, "
-            "the train loss, which is averaged over the epoch's fresh masks and so noisier"
+            "help": "metric that picks the best epoch: val_loss on the fixed selection masks, the only value accepted (the "
+            "success bar is about the minimum val_loss, so the saved checkpoint must be that epoch); auto is val_loss"
         },
     )
     watch_mode: Auto[Literal["min", "max"]] = dataclasses.field(
-        default=AUTO, metadata={"help": "min or max; auto is read from the metric's name"}
+        default=AUTO,
+        metadata={"help": "min, the only value accepted (val_loss is a loss: the best epoch is its minimum); auto is min"},
     )
+
+    def problems(self, prefix: str) -> List[str]:
+        """Name a ``watch_metric`` other than ``val_loss`` and a ``watch_mode`` other than ``min``."""
+        lines: List[str] = []
+        for name, only in (("watch_metric", WATCH_METRIC), ("watch_mode", WATCH_MODE)):
+            value = getattr(self, name)
+            if not _is_auto(value) and value != only:
+                lines.append(
+                    f"Invalid value for {join_path(prefix, name)!r}: expected auto or {only!r}, got {value!r}; the success "
+                    f"bar is a statement about the minimum val_loss of the selection window, so the saved best checkpoint "
+                    f"must be that epoch ({WATCH_METRIC!r} with mode {WATCH_MODE!r}); another metric or the other direction "
+                    "would save weights the verdict does not describe"
+                )
+        return lines
 
     def resolve_auto(self, context: AutoContext) -> "PretrainMetricArgs":
         """Fill ``watch_metric`` from the recipe and ``watch_mode`` from its name."""

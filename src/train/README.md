@@ -650,8 +650,8 @@ the input, which is 32 and 29 of 64 patches on CIFAR-10 and 98 and 88 of 196 on 
 | `data.num_mask_patches` | `"auto"` | `resolve_mask_counts` of `api/pretrain_args.py` (through `PretrainData.resolve_auto`), then `make_stateless_beit_mim_map_fn`; beit only, an explicit value above N is refused by name |
 | `data.min_mask_patches_per_block` | `"auto"` | the same path as `data.num_mask_patches`; beit only, at most `data.num_mask_patches` |
 | `transform_args.image_size` | `"auto"` | `PretrainTransformArgs.resolve_auto`, `PretrainTrainer.describe_data`, `PretrainTrainer.build_data`; auto is 32 for cifar10 and 224 for imagenette |
-| `metric_args.watch_metric` | `"auto"` | `PretrainMetricArgs.resolve_auto`, `fit_callbacks.build_callbacks`, `PretrainTrainer.evaluate_and_report`; auto is `val_loss`, and `loss` (the train loss, noisier) is the other choice |
-| `metric_args.watch_mode` | `"auto"` | `PretrainMetricArgs.resolve_auto` (read from the metric's name) |
+| `metric_args.watch_metric` | `"auto"` | `PretrainMetricArgs.resolve_auto`, `fit_callbacks.build_callbacks`, `PretrainTrainer.evaluate_and_report`; auto is `val_loss`, the only value accepted (the success bar is a statement about the minimum `val_loss`, so the saved checkpoint must be that epoch; `loss`, the train loss, and any other metric are refused by key before the run directory is claimed) |
+| `metric_args.watch_mode` | `"auto"` | `PretrainMetricArgs.resolve_auto` (read from the metric's name); auto is `min`, the only value accepted (`val_loss` is a loss, and the bar is its minimum; `max` is refused by key) |
 
 `transform_args.augment` is true for this task (flip and pad-crop of the TRAIN stream only, read by `PretrainTrainer.build_data`
 and passed to `load_image_streams`; the classification task's group of that name holds auto, and the knob-docs test reads the first group it finds, so the row

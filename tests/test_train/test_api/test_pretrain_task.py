@@ -39,6 +39,7 @@ import csv
 import dataclasses
 import json
 import math
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List
@@ -402,8 +403,10 @@ def test_the_energy_trace_callback_skips_its_header_only_on_a_resume(world, tmp_
         ({"model_args": {"scale": "tiny"}}, "model_args.scale"),
         ({"optim_args": {"global_clipnorm": None}}, "optim_args.global_clipnorm"),
         ({"data": {"dataset": "cifar10", "num_mask_patches": 10}}, "data.num_mask_patches"),
+        ({"metric_args": {"watch_metric": "loss"}}, "metric_args.watch_metric"),
+        ({"metric_args": {"watch_mode": "max"}}, "metric_args.watch_mode"),
     ],
-    ids=["tokenizer-on-et", "vocab-size", "scale", "no-clip", "beit-mask-key"],
+    ids=["tokenizer-on-et", "vocab-size", "scale", "no-clip", "beit-mask-key", "watch-the-train-loss", "watch-mode-max"],
 )
 def test_a_refused_request_leaves_out_absent(world, tmp_path, changes, fragment):
     out = tmp_path / "run"
@@ -419,6 +422,20 @@ def test_a_beit_run_without_a_tokenizer_is_refused_before_the_claim(world, tmp_p
         PretrainTrainer(make_config(out, model=BEIT_MODEL, model_args={})).run()
     assert "model_args.tokenizer_checkpoint" in str(caught.value)
     assert not out.exists()
+
+
+def test_the_command_the_model_help_names_lists_the_variants(world, capsys):
+    from train.api import cli
+
+    (field,) = [f for f in dataclasses.fields(PretrainConfig) if f.name == "model"]
+    written = re.search(r"python -m train (list_models \S+)", field.metadata["help"])
+    assert written, "the help of `model` names the command that lists the variants"
+    assert cli.main(written.group(1).split()) == 0, written.group(1)
+    assert "beit/beit_tiny" in capsys.readouterr().out
+    # The docstring of the function says the same command.
+    from train.api.tasks import pretrain
+
+    assert f"python -m train {written.group(1)}`` lists them" in pretrain.__doc__
 
 
 def test_a_conformal_level_is_refused_by_key():

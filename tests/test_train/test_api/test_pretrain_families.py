@@ -513,6 +513,15 @@ def test_the_et_global_clip_cannot_be_switched_off():
             resolve("energy_transformer", **given)
         assert "optim_args.global_clipnorm" in str(raised.value), given
         assert "energy_transformer" in str(raised.value)
+    # A per-variable clipnorm turns the global clip off (the group resolves global_clipnorm to null beside it): the sentence
+    # says so, instead of blaming a null the caller never wrote.
+    with pytest.raises(ConfigError) as raised:
+        resolve("energy_transformer", clipnorm=0.5)
+    assert "optim_args.clipnorm=0.5" in str(raised.value)
+    assert "replaced the global clip" in str(raised.value) and "needs global_clipnorm" in str(raised.value)
+    with pytest.raises(ConfigError) as raised:
+        resolve("energy_transformer", global_clipnorm=None)
+    assert "replaced the global clip" not in str(raised.value)
     # A hand-built resolved group is held to it too.
     ctx = context("energy_transformer")
     nulled = dataclasses.replace(OptimArgs().resolve_auto(ctx), global_clipnorm=None)
@@ -662,7 +671,25 @@ def test_the_transform_group_takes_the_size_the_data_reports():
 def test_the_metric_group_watches_val_loss_and_minimises_it():
     resolved = pa.PretrainMetricArgs().resolve_auto(context("beit"))
     assert (resolved.watch_metric, resolved.watch_mode) == ("val_loss", "min")
-    assert pa.PretrainMetricArgs(watch_metric="loss").resolve_auto(context("beit")).watch_mode == "min"
+    assert pa.PretrainMetricArgs(watch_metric="val_loss").resolve_auto(context("beit")).watch_mode == "min"
+
+
+@pytest.mark.parametrize(
+    "given, key",
+    [
+        ({"watch_metric": "loss"}, "watch_metric"),
+        ({"watch_metric": "val_psnr"}, "watch_metric"),
+        ({"watch_metric": "val_loss", "watch_mode": "max"}, "watch_mode"),
+        ({"watch_mode": "max"}, "watch_mode"),
+    ],
+)
+def test_the_metric_group_refuses_what_the_bar_cannot_describe(given, key):
+    # The bar is a statement about the MINIMUM `val_loss` of the selection window, so the checkpoint that is saved and
+    # reloaded must be that epoch: another metric or the other direction saves weights the verdict does not describe.
+    (line,) = pa.PretrainMetricArgs(**given).problems("metric_args")
+    assert f"'metric_args.{key}'" in line and "val_loss" in line and "min" in line
+    for allowed in ({}, {"watch_metric": "val_loss"}, {"watch_mode": "min"}, {"watch_metric": "val_loss", "watch_mode": "min"}):
+        assert pa.PretrainMetricArgs(**allowed).problems("metric_args") == [], allowed
 
 
 # ---------------------------------------------------------------------

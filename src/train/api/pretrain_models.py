@@ -1,4 +1,4 @@
-"""The pretrain model families of ``python -m train``: adapters, refusals, recipes and notices (built, not yet registered).
+"""The pretrain model families of ``python -m train``: adapters, refusals, recipes and notices.
 
 Two families train the ``pretrain`` task:
 
@@ -82,7 +82,7 @@ from .args import AutoContext, OptimArgs
 from .config import AUTO, unknown_key_message
 from .denoising_models import named_parameters
 from .errors import ConfigError, ConfigValidationError, UnresolvedAutoError
-from .pretrain_args import GEOMETRY, TASK
+from .pretrain_args import GEOMETRY, TASK, WATCH_METRIC
 from .registry import ModelSpec
 
 # ---------------------------------------------------------------------
@@ -311,11 +311,18 @@ def resolve_pretrain_args(
             # The energy descent is unrolled num_steps times, so the backward pass composes that many Jacobians and the
             # gradient norm spikes: the paper reports the model fails to train at a learning rate above 1e-4 without the
             # clip. A per-variable `clipnorm` is another clip and leaves the global norm unbounded, so it is refused too.
+            clipnorm = optim_args.clipnorm
+            cause = (
+                f"optim_args.clipnorm={clipnorm!r} was set, and a per-variable clipnorm replaced the global clip "
+                "(global_clipnorm resolves to null beside it) and leaves the global norm unbounded: ET needs global_clipnorm; "
+                if clipnorm is not None and not (isinstance(clipnorm, str) and clipnorm == AUTO)
+                else ""
+            )
             raise ConfigError(
                 f"Invalid value for 'optim_args.global_clipnorm': the {context.family!r} family needs the global gradient "
                 "clip (the energy descent is unrolled, and the paper reports the model fails to train at a learning rate "
-                "above 1e-4 without it), got null; set it to a positive number or leave it auto, and use "
-                "global_clipnorm, not clipnorm"
+                f"above 1e-4 without it), got null; {cause}set it to a positive number or leave it "
+                "auto, and use global_clipnorm, not clipnorm"
             )
     merged = recipes.merge_model_args(context, optim_args, model_args, {})
     merged = {key: value for key, value in merged.items() if key not in TASK_KEYS[context.family]}
@@ -344,7 +351,7 @@ def _pretrain_recipe(
         "batch_size": BATCH_SIZE,
         "optim_args": dict(optim_args),
         "transform_args": {},
-        "metric_args": {"watch_metric": "val_loss"},
+        "metric_args": {"watch_metric": WATCH_METRIC},
         "checkpoint_args": {"early_stopping_patience": PATIENCE},
         "model_args": dict(model_args),
         "data": dict(data),

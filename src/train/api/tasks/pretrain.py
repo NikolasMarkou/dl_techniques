@@ -62,7 +62,7 @@ Interface contract
 ``train_pretrain(*, out, model, data, ...)``
     :param out: run directory (a ``str`` or a ``Path``), or ``"auto"``.
     :param model: ``"family/variant"``, e.g. ``"energy_transformer/et_tiny"`` or ``"beit/beit_tiny"``;
-        ``python -m train list_models pretrain`` lists them.
+        ``python -m train list_models task=pretrain`` lists them.
     :param data: a mapping (``{"dataset": "cifar10"}``), a :class:`~train.api.pretrain_args.PretrainData`, or the path of
         a YAML file holding one.
     :param epochs: / ``batch_size`` / ``devices`` / ``seed`` / ``precision`` / ``resume_interrupted`` /
@@ -145,7 +145,7 @@ class PretrainConfig(StrictConfig):
     model: str = dataclasses.field(
         metadata={
             "help": "family/variant, e.g. energy_transformer/et_tiny or beit/beit_tiny; python -m train list_models "
-            "pretrain lists them"
+            "task=pretrain lists them"
         }
     )
     data: PretrainData = dataclasses.field(
@@ -321,7 +321,7 @@ class PretrainTrainer(TaskTrainer):
             "python -m train.beit.train_tokenizer, then give model_args.tokenizer_checkpoint=<its best_model.keras>"
         )
 
-    def _tokenizer_block(self, data: Any) -> Optional[Dict[str, Any]]:
+    def _tokenizer_block(self) -> Optional[Dict[str, Any]]:
         """Return the summary's ``tokenizer`` block (the file, the codebook size, the usage and the floor); ``None`` for ET."""
         from train.common import pretrain_run
 
@@ -453,9 +453,6 @@ class PretrainTrainer(TaskTrainer):
             "well-scaled model from a mis-scaled one; a non-finite initial loss is refused"
         )
 
-    def compile_options(self, config: PretrainConfig, spec: registry.ModelSpec) -> Dict[str, Any]:
-        return {}
-
     # -- the two seams of the shared sequence ---------------------------
 
     def fit_kwargs(self, config: PretrainConfig, data: Any) -> Dict[str, Any]:
@@ -552,7 +549,7 @@ class PretrainTrainer(TaskTrainer):
         )
         notes = [
             f"initial loss {baseline['loss']:.6g} is {ratio:.3g}x the constant predictor's val_loss "
-            f"({constant.val_loss if constant else float('nan'):.6g}, {constant.kind if constant else 'unset'}) on the "
+            f"({constant.val_loss:.6g}, {constant.kind}) on the "
             f"{data.n_select} fixed selection images: a plain evaluate in inference mode; see the `init_scale_warning` note",
             *classification_run.RUN_NOTES[:2],
             f"`val_loss` is {loss}; the selection and test masks are fixed by (seed, split, row position), so it is a "
@@ -709,7 +706,7 @@ class PretrainTrainer(TaskTrainer):
                 "best_epoch": best,
                 "final_is_best": best == fit.epochs_run,
             },
-            "tokenizer": self._tokenizer_block(data),
+            "tokenizer": self._tokenizer_block(),
         }
         return Evaluation(
             test_metrics_best=test_best,
