@@ -13,6 +13,16 @@ refuses what would hang or what disagrees with the epoch it computed everything 
   1 continues epoch 0's stream (Keras 3.8, MEASURED in the plan's findings), so a counter-keyed stream does
   not restart.
 
+Step 4 (D-004) adds the second hook, ``TaskTrainer.resume_stream(config, data, completed_steps)``: a resumed
+``fit`` starts a fresh iterator, so a stream keyed on a counter would replay from 0. The sequence calls the
+hook once, for a resume that trains, directly after ``settle_backup_pair`` (the count is final only then: a
+torn latest copy sends the run back one epoch), with the optimizer steps the settled copy holds; a returned
+object replaces the run's data, ``None`` leaves it, and a replacement whose ``steps_per_epoch``, counts or
+fingerprint differ from the original's is refused by name. The runs are real classification runs killed in
+process by a callback (an epoch end, a batch inside an epoch with ``backup_every_steps``) and resumed from a
+copy of the directory; the count each hook call receives is compared with the optimizer step count the
+settled backup file itself holds, read at the moment of the call.
+
 The data are the real classification pipeline on fake CIFAR-10 arrays; the stream under test is that
 pipeline's own ``train_ds`` made infinite (``repeat``) or unknown (``filter``) inside ``build_data``. Every
 test that could hang if the guard were gone carries a callback that stops the run, so a broken guard is a
@@ -20,6 +30,8 @@ named failure and not a stuck suite. The tests write only under ``tmp_path``.
 """
 
 import dataclasses
+import shutil
+from pathlib import Path
 
 import keras
 import numpy as np
@@ -31,6 +43,7 @@ from train.api import registry
 from train.api.errors import ConfigError
 from train.api.tasks import register_builtin_tasks
 from train.api.tasks.image_classification import ImageClassificationTrainer
+from train.common.resume_state import BACKUP_WEIGHTS_NAME, backup_iterations
 
 from tests.classification_fakes import use_tiny_raw
 
@@ -244,3 +257,220 @@ def test_the_persistent_iterator_probe_sees_a_restart(world):
     model.fit(dataset, epochs=1, steps_per_epoch=4, verbose=0)
     model.fit(dataset, epochs=1, steps_per_epoch=4, verbose=0)
     assert produced != list(range(len(produced))) and produced.count(0) == 2
+
+
+# ---------------------------------------------------------------------
+# Seam 2: resume_stream, called once after settle_backup_pair
+# ---------------------------------------------------------------------
+
+RESUME_EPOCHS = 4
+#: Batches in an epoch of the fake CIFAR-10 at batch 4 (36 fit rows); each resume test reads it back from ``data.steps_per_epoch``.
+SPE = 9
+#: ``backup_every_steps`` of the mid-epoch arm: copies after batches 4 and 8 of an epoch, and at each epoch end.
+EVERY = 4
+
+
+class Killed(RuntimeError):
+    """Raised by :class:`KillBefore`: a stand-in for a kill between two batches."""
+
+
+class KillBefore(keras.callbacks.Callback):
+    """Raise before batch ``batch`` of epoch ``epoch`` (``batch`` batches of it have finished)."""
+
+    def __init__(self, epoch, batch):
+        super().__init__()
+        self.epoch, self.batch, self.at = epoch, batch, 0
+
+    def on_epoch_begin(self, epoch, logs=None):
+        self.at = epoch
+
+    def on_train_batch_begin(self, batch, logs=None):
+        if self.at == self.epoch and batch == self.batch:
+            raise Killed(f"killed before batch {batch} of epoch {self.epoch}")
+
+
+class Resuming(ImageClassificationTrainer):
+    """The real task with ``resume_stream`` recording its arguments, and a ``fit`` spy.
+
+    :cvar kill: ``(epoch, batch)`` of a :class:`KillBefore`, or ``None``.
+    :cvar replace: a function of the data the hook was given returning what it returns (``None`` returns
+        ``None``); set through :func:`resuming`, which wraps it as a static method.
+    :ivar calls: ``(completed_steps, data, steps_in_the_settled_backup)`` of every ``resume_stream`` call;
+        the third is read from the backup weights file inside the call, so it is the settled pair's
+        (``None`` when the file cannot be read).
+    :ivar fit_x: the ``x`` of every ``fit`` call.
+    :ivar returned: what the hook last returned.
+    """
+
+    kill = None
+    replace = None
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.calls, self.fit_x, self.returned = [], [], None
+
+    def build_model(self, config, context, data):
+        model = super().build_model(config, context, data)
+        real_fit = model.fit
+
+        def spy_fit(*args, **kwargs):
+            self.fit_x.append(args[0])
+            return real_fit(*args, **kwargs)
+
+        model.fit = spy_fit
+        return model
+
+    def extra_callbacks(self, config, data):
+        return [] if self.kill is None else [KillBefore(*self.kill)]
+
+    def resume_stream(self, config, data, completed_steps):
+        weights = Path(config.out) / "checkpoints" / "backup" / BACKUP_WEIGHTS_NAME
+        try:
+            in_the_backup = backup_iterations(weights)[0]
+        except OSError:  # no copy yet (a fresh run) or a torn one: the assertions on the count say which
+            in_the_backup = None
+        self.calls.append((completed_steps, data, in_the_backup))
+        self.returned = None if self.replace is None else self.replace(data)
+        return self.returned
+
+
+def resuming(**attributes):
+    """Return a ``Resuming`` subclass with the keyword attributes set (a callable becomes a static method)."""
+    return type("Resuming", (Resuming,), {k: staticmethod(v) if callable(v) else v for k, v in attributes.items()})
+
+
+def resume_config(out, **changes):
+    return config_for(out, epochs=RESUME_EPOCHS, **changes)
+
+
+def cut_in_half(path):
+    """Leave the first half of ``path``, as a process killed inside the write does."""
+    data = path.read_bytes()
+    path.write_bytes(data[: len(data) // 2])
+
+
+def killed_run(tmp_path_factory, name, kill, **changes):
+    run_dir = tmp_path_factory.mktemp(name) / "run"
+    with pytest.raises(Killed):
+        resuming(kill=kill)(resume_config(run_dir, **changes)).run()
+    return run_dir
+
+
+@pytest.fixture(scope="module")
+def killed_at_an_epoch_end(world, tmp_path_factory):
+    """Killed before the first batch of epoch 3: epochs 0 to 2 done, the latest copy after 3 epochs, the previous after 2."""
+    return killed_run(tmp_path_factory, "epoch_end", (3, 0))
+
+
+@pytest.fixture(scope="module")
+def killed_inside_an_epoch(world, tmp_path_factory):
+    """Killed before batch 6 of epoch 1 with a copy every 4 batches: the latest copy is after 4 batches of epoch 1."""
+    return killed_run(tmp_path_factory, "mid_epoch", (1, 6), **{"checkpoint_args.backup_every_steps": EVERY})
+
+
+@pytest.fixture(scope="module")
+def finished(world, tmp_path_factory):
+    run_dir = tmp_path_factory.mktemp("finished") / "run"
+    task = resuming()(resume_config(run_dir))
+    task.run()
+    return task, run_dir
+
+
+def resumed(killed, tmp_path, task_class=None, name="copy", **changes):
+    run_dir = tmp_path / name
+    shutil.copytree(killed, run_dir)
+    task = (task_class or resuming())(resume_config(run_dir, resume_interrupted=True, **changes))
+    task.run()
+    return task, run_dir
+
+
+def test_a_fresh_run_never_calls_the_hook(finished):
+    task, _ = finished
+    assert task.calls == [], "resume_stream is for a resume"
+
+
+def test_a_reporting_only_resume_never_calls_the_hook(finished, tmp_path):
+    _, whole = finished
+    run_dir = tmp_path / "crashed_after_fit"
+    shutil.copytree(whole, run_dir)
+    (run_dir / "results_summary.json").unlink()
+    task = resuming()(resume_config(run_dir, resume_interrupted=True))
+    task.run()
+    assert (run_dir / "results_summary.json").is_file(), "vacuity guard: the run was resumed and reported"
+    assert task.calls == [] and task.fit_x == [], "no fit and no new stream for a run with no epoch left"
+
+
+def test_a_resume_killed_at_an_epoch_end_gets_the_steps_of_the_whole_epochs(killed_at_an_epoch_end, tmp_path):
+    task, _ = resumed(killed_at_an_epoch_end, tmp_path)
+    assert len(task.calls) == 1, "once"
+    completed, data, in_the_backup = task.calls[0]
+    # 3 epochs done, batch 0: start * steps_per_epoch, and no batch of an epoch in progress.
+    assert data.steps_per_epoch == SPE
+    assert completed == 3 * SPE == in_the_backup
+
+
+def test_a_resume_from_a_mid_epoch_copy_counts_the_batches_of_the_copy(killed_inside_an_epoch, tmp_path):
+    task, _ = resumed(killed_inside_an_epoch, tmp_path, **{"checkpoint_args.backup_every_steps": EVERY})
+    assert len(task.calls) == 1
+    completed, data, in_the_backup = task.calls[0]
+    # Epoch 1, 4 batches taken (the metadata names the last one, batch index 3): 9 + (3 + 1).
+    assert completed == 1 * SPE + EVERY == in_the_backup
+    assert data.steps_per_epoch == SPE
+
+
+def test_the_count_is_the_settled_one_when_the_latest_copy_is_torn(killed_at_an_epoch_end, tmp_path):
+    run_dir = tmp_path / "torn"
+    shutil.copytree(killed_at_an_epoch_end, run_dir)
+    cut_in_half(run_dir / "checkpoints" / "backup" / BACKUP_WEIGHTS_NAME)
+    task = resuming()(resume_config(run_dir, resume_interrupted=True))
+    task.run()
+    completed, _, in_the_backup = task.calls[0]
+    # The torn latest copy (27 steps) is replaced by the previous one: the run goes back to epoch 2 (18 steps).
+    assert completed == 2 * SPE == in_the_backup != 3 * SPE
+
+
+def test_a_returned_object_replaces_the_data_the_fit_sees(killed_at_an_epoch_end, tmp_path):
+    def other_stream(data):
+        return dataclasses.replace(data, train_ds=data.train_ds.map(lambda x, y: (x, y)))
+
+    task, _ = resumed(killed_at_an_epoch_end, tmp_path, resuming(replace=other_stream))
+    _, original, _ = task.calls[0]
+    assert task.returned is not None and task.returned.train_ds is not original.train_ds
+    assert len(task.fit_x) == 1 and task.fit_x[0] is task.returned.train_ds
+
+
+def test_none_leaves_the_data_as_it_was(killed_at_an_epoch_end, tmp_path):
+    task, _ = resumed(killed_at_an_epoch_end, tmp_path)
+    _, original, _ = task.calls[0]
+    assert task.returned is None
+    assert len(task.fit_x) == 1 and task.fit_x[0] is original.train_ds
+
+
+def test_the_default_hook_returns_none_for_any_arguments(world, tmp_path):
+    task = ImageClassificationTrainer(resume_config(tmp_path / "run"))
+    assert task.resume_stream(task.config, object(), 27) is None
+
+
+@pytest.mark.parametrize(
+    "field, change",
+    [
+        ("steps_per_epoch", lambda data: data.steps_per_epoch + 1),
+        ("n_train", lambda data: data.n_train + 1),
+        ("n_select", lambda data: data.n_select - 1),
+        ("n_test", lambda data: data.n_test + 1),
+        ("fingerprint", lambda data: "0" * 64),
+    ],
+)
+def test_a_replacement_that_changes_the_data_it_replaces_is_refused_by_name(
+    killed_at_an_epoch_end, tmp_path, field, change
+):
+    def changed(data):
+        return dataclasses.replace(data, **{field: change(data)})
+
+    run_dir = tmp_path / "copy"
+    shutil.copytree(killed_at_an_epoch_end, run_dir)
+    task = resuming(replace=changed)(resume_config(run_dir, resume_interrupted=True))
+    with pytest.raises(ConfigError, match=rf"resume_stream of Resuming.*\b{field}\b") as raised:
+        task.run()
+    assert "was claimed before this failed" in str(raised.value)
+    assert task.fit_x == [], "refused before fit"

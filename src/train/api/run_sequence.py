@@ -22,8 +22,9 @@ Interface contract
 The stages, in order, each a function of one :class:`Run` (the state they share, filled as they go):
 
 1. :func:`announce`: what the log opens with, ``config.json``, the recipe notices.
-2. :func:`load_data`: ``build_data``, ``input_check``, the refusals that need the data's length, and
-   the resume's checks of that data (``resume_decisions``).
+2. :func:`load_data`: ``build_data``, ``input_check``, the refusals that need the data's length, the
+   resume's checks of that data (``resume_decisions``) and, for a resume that trains, the task's
+   ``resume_stream`` once the backup pair is settled.
 3. :func:`build_model`: the model, its optional ``checkpoint`` weights, the optimizer, ``compile``.
 4. :func:`epoch_zero`: the untrained model's evaluation (or the sidecar's copy of it on a resume),
    the checks of the monitor against the names ``compile`` produced, the summary head.
@@ -406,6 +407,44 @@ def _checked_fit_options(run: Run) -> Dict[str, Any]:
     return options
 
 
+def _resumed_data(run: Run) -> Any:
+    """Return what the task's ``resume_stream`` answers for the settled resume, or the data it was given.
+
+    :raises ConfigError: for a returned object whose ``steps_per_epoch``, ``n_train``, ``n_select``,
+        ``n_test`` or ``fingerprint`` differ from the data it replaces (named): the schedule, the
+        backup arithmetic and the resume's checks of the data were all made against the original.
+    """
+    # DECISION plan-2026-11-12T015747-46e5318f/D-004
+    # Called AFTER ``settle_backup_pair``, with the count the SETTLED copy holds: a torn latest copy
+    # sends the run back one epoch there, and the count read before that is a whole epoch too high
+    # (``test_the_count_is_the_settled_one_when_the_latest_copy_is_torn``). Do NOT move it into
+    # ``build_data``: the count is not final there. The formula is the one ``resume_state._inspect_copy``
+    # verifies against the copy's optimizer steps. A resume that only reports trains nothing and never
+    # gets here. Do NOT let the replacement change the epoch or the counts: ``fit_options``, the
+    # schedule and ``check_data_unchanged`` were made against the original.
+    data, resume, name = run.data, run.resume, type(run.trainer).__name__
+    completed = resume.start * run.steps_per_epoch + (resume.batch + 1 if resume.batch else 0)
+    with _bad_value_is_a_config_error(run.run_dir, "the resumed stream"):
+        replacement = run.trainer.resume_stream(run.config, data, completed)
+    if replacement is None:
+        return data
+    differs = [
+        field for field, was, now in (
+            ("steps_per_epoch", data.steps_per_epoch, replacement.steps_per_epoch),
+            *((key, value, resume_decisions.data_counts(replacement)[key])
+              for key, value in resume_decisions.data_counts(data).items()),
+            ("fingerprint", getattr(data, "fingerprint", None), getattr(replacement, "fingerprint", None)),
+        ) if was != now
+    ]
+    if differs:
+        raise ConfigError(
+            f"resume_stream of {name} returned data whose {', '.join(differs)} differ from the data it "
+            f"replaces: the run's epoch, its schedule and its resume checks were made against the "
+            f"original, so a replacement may change the stream and nothing else. {_claimed_note(run.run_dir)}"
+        )
+    return replacement
+
+
 def load_data(run: Run) -> None:
     """Load the data, refuse what its length shows is wrong, and check it against a resumed run's."""
     trainer, config, run_dir = run.trainer, run.config, run.run_dir
@@ -450,6 +489,7 @@ def load_data(run: Run) -> None:
             run.resume = resume_decisions.settle_backup_pair(
                 run_dir, config, trainer.config, run.resume, steps_per_epoch
             )
+            run.data = _resumed_data(run)
 
 
 def build_model(run: Run) -> None:

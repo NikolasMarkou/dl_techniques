@@ -265,7 +265,9 @@ Hooks (override in a task)
     starts a new iterator, and a stream keyed on a counter starts it at 0. Called once, only by a
     resume that trains (never a fresh run, never a reporting-only one), after the backup pair is
     settled, with the optimizer steps the run completed; a returned object replaces the run's data and
-    ``None`` leaves it (D-004). Default: ``None``.
+    ``None`` leaves it (D-004). The replacement must keep ``steps_per_epoch``, ``n_train``,
+    ``n_select``, ``n_test`` and ``fingerprint`` of the data it replaces (``ConfigError`` naming
+    the field): the schedule and the resume's checks were made against the original. Default: ``None``.
 ``selection_start_epoch(config)``
     The 0-based epoch from which the best checkpoint may be saved and ``EarlyStopping`` counts
     (a denoiser trained on a noise curriculum selects only once the curriculum has reached its last
@@ -611,8 +613,9 @@ class TaskTrainer:
 
         :param completed_steps: the optimizer steps the killed run finished, as the settled backup
             states them: ``start * steps_per_epoch + (batch + 1 if batch else 0)``.
-        :return: an object with the same fields the sequence reads (``steps_per_epoch``, the counts)
-            or ``None``; default ``None``.
+        :return: an object with the same fields the sequence reads, whose ``steps_per_epoch``, counts and
+            ``fingerprint`` equal those of ``data`` (a difference is a ``ConfigError``), or ``None``;
+            default ``None``.
         """
         return None
 
