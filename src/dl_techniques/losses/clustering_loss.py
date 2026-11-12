@@ -81,6 +81,7 @@ from typing import Optional, Union, List, Any, Dict
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.losses._per_sample import PerSampleCallMixin
 
 # ---------------------------------------------------------------------
 
@@ -111,7 +112,7 @@ class ClusteringMetrics:
 # ---------------------------------------------------------------------
 
 @register_dl_technique("dl_techniques.losses.clustering_loss")
-class ClusteringLoss(keras.losses.Loss):
+class ClusteringLoss(PerSampleCallMixin, keras.losses.Loss):
     """Custom loss function for clustering quality.
 
     Combines intra-cluster distance with cluster distribution penalty to encourage
@@ -127,6 +128,12 @@ class ClusteringLoss(keras.losses.Loss):
     balance term by ``mean(w)`` (a zero weight removes the row's own distance but not
     its share of ``c``, so ``loss(w=[1, 1, 1, 0])`` is not the loss of the batch
     without the last row).
+
+    A Keras mask on ``y_pred`` of rank 2 or more has no meaning here: ``__call__``
+    raises ``ValueError``, because Keras would multiply it into the ``(batch,)`` rows
+    (a shape error, or silent mis-weighting when the batch equals the cluster count).
+    A ``(batch,)`` mask acts as a 0/1 ``sample_weight``. A ``sample_weight`` with an
+    axis beyond the batch also raises ``ValueError``. A direct ``call`` reads neither.
 
     Args:
         distance_weight (float): Weight for intra-cluster distance term. Must be positive.

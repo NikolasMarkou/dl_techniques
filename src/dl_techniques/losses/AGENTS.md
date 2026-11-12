@@ -40,6 +40,7 @@ The README table is the full inventory, grouped by domain.
 
 ## Modules
 
+- `_per_sample.py`: `PerSampleCallMixin`, the shared `__call__` guard for a Keras mask and a per-timestep `sample_weight` (see "A mask or a per-timestep weight cannot ride on `(batch,)` rows"). Private module; it defines no `Loss`.
 - `affine_invariant_loss.py`: Scale- and shift-invariant L1 after median/MAD normalization. `masked=True` reads a validity mask from the last channel of `y_true` (Depth Anything V1, eq. 1-3).
 - `any_loss.py`: AnyLoss framework. A differentiable confusion matrix via `A(p) = sigmoid(L * (p - 0.5))`, plus 15 metric losses and `WeightedCrossEntropyWithAnyLoss`. The confusion matrix is global over the batch, so every class returns a scalar.
 - `brier_spiegelhalters_ztest_loss.py`: Binary-only calibration losses and metrics. Ships both Z-statistics behind `statistic=`: Spiegelhalter's `(1-2p)`-weighted Z (the default) and calibration-in-the-large (the pre-2026-09-02 behavior). The penalty is chance-corrected (`relu(Z^2 - 1)`), divided by `N`, and decomposed per row.
@@ -92,7 +93,7 @@ The README table is the full inventory, grouped by domain.
 - `tabm_loss.py`: TabM ensemble loss, returning one value per input row in both sharing modes (D-027, D-064).
 - `thera_jacobian_tv.py`: THERA `mean(|J|)` aliasing penalty and the `recon + tv_weight * TV` combiner.
 - `topographic_vae_loss.py`: Topographic VAE ELBO with two KL terms. The `u` pair is conditional; half a pair raises. Read `effective_beta`.
-- `utilization_loss.py`: MANN and GNN anti-collapse regularizers; both return `(batch,)`. `GNNUtilizationLoss` is row-local. `MANNUtilizationLoss` couples rows only through its temporal-variance term (a detached first-order surrogate, as in `MultistepLoss`'s `gtmse`).
+- `utilization_loss.py`: MANN and GNN anti-collapse regularizers; both return `(batch,)`. Both honor a `(batch, time)` / `(batch, entities)` Keras mask. `GNNUtilizationLoss` is row-local. `MANNUtilizationLoss` couples rows only through its temporal-variance term (a detached first-order surrogate, as in `MultistepLoss`'s `gtmse`).
 - `wasserstein_loss.py`: WGAN critic / generator losses, `compute_gradient_penalty` (sums every non-batch axis, any rank of 2 or more), a 1-D Wasserstein divergence, and factories.
 - `yolo12_multitask_loss.py`: YOLOv12 detection (TAL + CIoU + DFL), Dice+Focal segmentation, classification focal, and the rank-routed multi-task orchestrator. Re-keyed with `legacy_packages=("yolov12_losses",)` (D-005).
 
@@ -109,6 +110,10 @@ Every loss inherits `keras.losses.Loss` and implements `call(self, y_true, y_pre
 Keras computes `values * sample_weight` before reducing. A scalar return therefore yields `batch_loss * mean(sample_weight)` and makes `reduction=` dead. The result is a plausible wrong number, not an error.
 
 `tests/test_losses/test_the_premature_scalar_family_is_pinned.py` accounts for every `Loss` subclass in `losses/` by a closure census that fails when a class is in no bucket or in two. The four buckets are `KNOWN_GOOD` (measured by the defect predicate and found per-sample; `STILL_BROKEN` is empty, and a floor on the total keeps a measured row from disappearing), `DOCUMENTED_SCALAR` (the `any_loss.py` metric losses, scalar by design), `KNOWN_SCALAR_NOT_YET_FIXED` and `NOT_PINNED` (each entry carries the reason nothing measures it; this is not a clearance). `SAMMaskLoss` and `SAM2GatedMaskLoss` are the two classes measured to be premature scalars that are still unfixed. Fixing one moves it to `KNOWN_GOOD` with a builder row. Do not copy the bucket lists into prose.
+
+### A mask or a per-timestep weight cannot ride on `(batch,)` rows
+
+Keras multiplies the `_keras_mask` of `y_pred` and the `sample_weight` into the rows. Against `(batch,)` rows a mask of shape `y_pred.shape[:-1]` or a `(batch, time)` weight is a shape error unless the lengths coincide, and then it silently mis-weights the rows (the old scalar returns ignored both unannounced). `_per_sample.PerSampleCallMixin` is the shared `__call__` guard of the five per-sample losses of `multi_labels_loss.py`, `clustering_loss.py` and `utilization_loss.py` (D-014 of plan-2026-11-11T223825-64d1b401): a `(batch,)` mask is left to Keras as a 0/1 weight; `MANNUtilizationLoss` and `GNNUtilizationLoss` honor a `(batch, time)` / `(batch, entities)` mask in their per-row means (padded values never reach the result or the gradient, NaN included) and Keras never sees that mask; any other mask, and any `sample_weight` that is not scalar, `(batch,)` or `(batch, 1)`, raises `ValueError`. The check is in `__call__` because Keras casts `y_pred` first under `mixed_float16` and the cast tensor has no mask; a direct `call()` is not guarded. Any new per-sample loss that can sit behind a masked layer should take the mixin. Tests: `tests/test_losses/keras_mask_probe.py` and the `*Refuse*` / `*Honors*` classes of the three loss test files.
 
 ### A correct shape is not enough
 

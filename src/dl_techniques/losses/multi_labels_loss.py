@@ -35,6 +35,7 @@ from typing import Optional, List, Union, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.keras_registration import register_dl_technique
+from dl_techniques.losses._per_sample import PerSampleCallMixin
 from dl_techniques.losses.segmentation_metrics import dice_per_sample
 
 
@@ -42,7 +43,7 @@ from dl_techniques.losses.segmentation_metrics import dice_per_sample
 
 
 @register_dl_technique("dl_techniques.losses.multi_labels_loss")
-class PerChannelBinaryLoss(keras.losses.Loss):
+class PerChannelBinaryLoss(PerSampleCallMixin, keras.losses.Loss):
     """
     Wrapper that applies a binary loss function independently per channel.
 
@@ -71,6 +72,14 @@ class PerChannelBinaryLoss(keras.losses.Loss):
     foreground, 1.55e-3 when the zero-weighted image is all-positive in one
     channel). The mean over images equals the scalar this class returned before it
     was made per-sample.
+
+    A Keras mask on ``y_pred`` (a model output left masked by a ``Masking`` or a
+    recurrent layer) has no meaning here: ``__call__`` raises ``ValueError`` for a
+    mask of rank 2 or more, because Keras would multiply it into the ``(batch,)``
+    rows (a shape error, or silent mis-weighting when the batch equals the mask's
+    second axis). A ``(batch,)`` mask acts as a 0/1 ``sample_weight``. A
+    ``sample_weight`` with an axis beyond the batch also raises ``ValueError``. A
+    direct ``call`` reads neither.
 
     Parameters
     ----------
@@ -458,7 +467,7 @@ class WeightedBinaryFocalLoss(keras.losses.Loss):
 
 
 @register_dl_technique("dl_techniques.losses.multi_labels_loss")
-class DiceLossPerChannel(keras.losses.Loss):
+class DiceLossPerChannel(PerSampleCallMixin, keras.losses.Loss):
     """
     Dice Loss for multi-label segmentation using the shared backend.
 
@@ -467,6 +476,14 @@ class DiceLossPerChannel(keras.losses.Loss):
     (the mean over channels of the per-channel Dice loss), so ``sample_weight`` and
     ``reduction`` act on images; nothing in it is a batch statistic, so zeroing an
     image's weight equals dropping that image.
+
+    A Keras mask on ``y_pred`` (a model output left masked by a ``Masking`` or a
+    recurrent layer) has no meaning here: ``__call__`` raises ``ValueError`` for a
+    mask of rank 2 or more, because Keras would multiply it into the ``(batch,)``
+    rows (a shape error, or silent mis-weighting when the batch equals the mask's
+    second axis). A ``(batch,)`` mask acts as a 0/1 ``sample_weight``. A
+    ``sample_weight`` with an axis beyond the batch also raises ``ValueError``. A
+    direct ``call`` reads neither.
 
     Parameters
     ----------

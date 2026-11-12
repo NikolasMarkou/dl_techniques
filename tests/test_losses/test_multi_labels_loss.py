@@ -16,6 +16,12 @@ from dl_techniques.losses.multi_labels_loss import (
 )
 from dl_techniques.losses.segmentation_metrics import dice_scalar
 from tests.optimizer_state import build_optimizer_state
+from tests.test_losses.keras_mask_probe import (
+    assert_a_per_sample_mask_is_left_to_keras,
+    assert_refuses_a_keras_mask,
+    assert_refuses_per_timestep_weights,
+    with_keras_mask,
+)
 
 
 class TestWeightedBinaryFocalLoss:
@@ -743,6 +749,67 @@ class TestDiceLossPerChannelIsPerSample:
         assert tuple(scalar.call(y_true, y_pred).shape) == ()
         assert tuple(_ScalarDice(smooth=DICE_SMOOTH, reduction="none")(y_true, y_pred).shape) == ()
         assert _drop_last_row_gap(lambda: _ScalarDice(smooth=DICE_SMOOTH)) > 1e-3
+
+
+def _seg_batch_of(batch):
+    """`_ragged_seg_batch()` tiled or cut to ``batch`` images (5 makes batch == the 5-pixel axes)."""
+    y_true, y_pred = _ragged_seg_batch()
+    index = np.arange(batch) % DICE_BATCH
+    return y_true[index], y_pred[index]
+
+
+class TestPerSampleSegmentationLossesRefuseWhatTheyCannotCombine:
+    """A Keras mask or a per-timestep weight cannot be combined with ``(batch,)`` rows.
+
+    Keras multiplies the mask of ``y_pred`` (here ``(batch, 5, 5)``) into the rows. With
+    ``batch == 5`` that broadcast succeeds and silently mis-weights the rows; with any
+    other batch it is an opaque shape error. Dice and ``PerChannelBinaryLoss`` give the
+    mask no meaning, so ``__call__`` refuses it with a ``ValueError`` that says so
+    (plan-2026-11-11T223825-64d1b401, D-014).
+    """
+
+    MAKERS = {
+        "dice": lambda **k: DiceLossPerChannel(smooth=DICE_SMOOTH, **k),
+        "pcb": lambda **k: PerChannelBinaryLoss("binary_crossentropy", **k),
+    }
+
+    @pytest.mark.parametrize("name", sorted(MAKERS))
+    @pytest.mark.parametrize("batch", [4, 5])
+    @pytest.mark.parametrize("axes", [(5, 5), (5,)])
+    def test_a_keras_mask_on_y_pred_raises_a_clear_error(self, name, batch, axes):
+        y_true, y_pred = _seg_batch_of(batch)
+        assert_refuses_a_keras_mask(self.MAKERS[name], y_true, y_pred, (batch,) + axes)
+
+    @pytest.mark.parametrize("name", sorted(MAKERS))
+    @pytest.mark.parametrize("batch", [4, 5])
+    def test_a_per_timestep_sample_weight_raises_a_clear_error(self, name, batch):
+        y_true, y_pred = _seg_batch_of(batch)
+        assert_refuses_per_timestep_weights(self.MAKERS[name], y_true, y_pred, (batch, 5))
+        assert_refuses_per_timestep_weights(self.MAKERS[name], y_true, y_pred, (batch, 5, 5))
+
+    @pytest.mark.parametrize("name", sorted(MAKERS))
+    def test_a_per_sample_mask_and_a_column_weight_still_work(self, name):
+        y_true, y_pred = _seg_batch_of(4)
+        assert_a_per_sample_mask_is_left_to_keras(self.MAKERS[name], y_true, y_pred)
+        w = np.array([1.0, 0.5, 2.0, 0.0], "float32")
+        flat = float(self.MAKERS[name]()(y_true, y_pred, sample_weight=w))
+        column = float(self.MAKERS[name]()(y_true, y_pred, sample_weight=w[:, None]))
+        assert abs(flat - column) < 1e-7
+
+    @pytest.mark.parametrize("name", sorted(MAKERS))
+    def test_the_refusal_names_the_class_and_the_way_out(self, name):
+        y_true, y_pred = _seg_batch_of(4)
+        loss = self.MAKERS[name]()
+        with pytest.raises(ValueError) as error:
+            loss(y_true, with_keras_mask(y_pred, np.ones((4, 5, 5), bool)))
+        text = str(error.value)
+        assert type(loss).__name__ in text
+        assert "(4, 5, 5)" in text and "sample_weight" in text
+
+    @pytest.mark.parametrize("cls", [DiceLossPerChannel, PerChannelBinaryLoss])
+    def test_the_docstrings_state_the_mask_rule(self, cls):
+        doc = " ".join((cls.__doc__ or "").split())
+        assert "Keras mask" in doc and "ValueError" in doc
 
 
 # ---------------------------------------------------------------------

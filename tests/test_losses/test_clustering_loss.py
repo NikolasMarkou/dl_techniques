@@ -4,6 +4,11 @@ import keras
 import pytest
 import numpy as np
 import tensorflow as tf
+from tests.test_losses.keras_mask_probe import (
+    assert_a_per_sample_mask_is_left_to_keras,
+    assert_refuses_a_keras_mask,
+    assert_refuses_per_timestep_weights,
+)
 from dl_techniques.losses.clustering_loss import \
     ClusteringLoss, \
     ClusteringMetrics, \
@@ -708,6 +713,47 @@ class TestClusteringLossIsPerSample:
         assert "one value per sample" in " ".join(
             (ClusteringLoss.call.__doc__ or "").split()
         ).lower()
+
+
+def _cluster_batch_of(batch):
+    """`_cluster_batch()` tiled to ``batch`` rows as float32 (5 makes batch == CLUSTERS)."""
+    y_true, y_pred = _cluster_batch()
+    index = np.arange(batch) % BATCH
+    return _f32(y_true[index]), _f32(y_pred[index])
+
+
+class TestClusteringLossRefusesWhatItCannotCombine:
+    """A Keras mask of rank 2 or more and a per-timestep weight cannot join ``(batch,)`` rows.
+
+    Keras multiplies the mask of ``y_pred`` into the rows. A ``(batch, K)`` mask against
+    ``(batch,)`` rows is a shape error, and with ``batch == K == 5`` it broadcasts and
+    silently mis-weights the rows. The loss gives such a mask no meaning, so ``__call__``
+    refuses it with a ``ValueError``; a rank-1 per-sample mask is a 0/1 sample weight
+    and is left to Keras (plan-2026-11-11T223825-64d1b401, D-014).
+    """
+
+    @pytest.mark.parametrize("batch", [4, 5])
+    @pytest.mark.parametrize("extra", [(CLUSTERS,), (CLUSTERS, 2)])
+    def test_a_keras_mask_on_y_pred_raises_a_clear_error(self, batch, extra):
+        y_true, y_pred = _cluster_batch_of(batch)
+        assert_refuses_a_keras_mask(ClusteringLoss, y_true, y_pred, (batch,) + extra)
+
+    @pytest.mark.parametrize("batch", [4, 5])
+    def test_a_per_timestep_sample_weight_raises_a_clear_error(self, batch):
+        y_true, y_pred = _cluster_batch_of(batch)
+        assert_refuses_per_timestep_weights(ClusteringLoss, y_true, y_pred, (batch, CLUSTERS))
+
+    def test_a_per_sample_mask_and_a_column_weight_still_work(self):
+        y_true, y_pred = _cluster_batch_of(4)
+        assert_a_per_sample_mask_is_left_to_keras(ClusteringLoss, y_true, y_pred)
+        w = np.array([1.0, 0.5, 2.0, 0.0], "float32")
+        flat = float(ClusteringLoss()(y_true, y_pred, sample_weight=w))
+        column = float(ClusteringLoss()(y_true, y_pred, sample_weight=w[:, None]))
+        assert abs(flat - column) < 1e-7
+
+    def test_the_docstring_states_the_mask_rule(self):
+        doc = " ".join((ClusteringLoss.__doc__ or "").split())
+        assert "Keras mask" in doc and "ValueError" in doc
 
 
 if __name__ == "__main__":
