@@ -153,7 +153,9 @@ def checked_tokenizer_usage(code_ids: Any, *, path: str) -> TokenizerUsage:
             f"the tokenizer {path!r} uses its codebook too narrowly: {usage.distinct} distinct codes over the "
             f"{usage.n_codes} masked positions of the selection split, perplexity {usage.perplexity:.2f} (top-1 share "
             f"{usage.top1_share:.1%}), below the floor of {MIN_TOKENIZER_PERPLEXITY:g} effective codes. A bar cut from "
-            "targets this concentrated is vacuous; train the tokenizer longer (python -m train.beit.train_tokenizer)"
+            "targets this concentrated is vacuous. Either the tokenizer is too narrow (train the tokenizer longer: python -m "
+            f"train.beit.train_tokenizer) or the split is too small, since the estimate is limited by the split size: "
+            f"{usage.n_codes} positions cannot show more than {usage.n_codes} codes (raise data.max_samples)"
         )
     return usage
 

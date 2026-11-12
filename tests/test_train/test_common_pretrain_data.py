@@ -234,20 +234,24 @@ class TestThePretrainBatchesRecord:
         assert image.shape[0] == BATCH  # repeat comes before batch: the stream is never empty
         assert batches.val_steps == 1 and batches.n_test == IMAGENETTE_FAKE_TEST
 
-    def test_a_select_stream_of_unknown_length_is_refused_stating_both_lengths(
-            self, cifar, monkeypatch) -> None:
+    @pytest.mark.parametrize("stream, steps_of", [("select_ds", "val_steps"), ("test_ds", "test_steps")])
+    def test_a_stream_of_unknown_length_is_refused_by_name_stating_both_lengths(
+            self, stream, steps_of, cifar, monkeypatch) -> None:
+        # Both finite streams are scored by Keras, which logs n / (n + 1) of the loss over a dataset of unknown length: the
+        # select arm and the test arm are two lines of the wrapper, so each is held by its own row.
         real = pretrain_data.load_image_streams
+        honest = build(ET)
 
         def lying(*args: Any, **kwargs: Any) -> ImageStreams:
             streams = real(*args, **kwargs)
             from dataclasses import replace
-            return replace(streams, select_ds=streams.select_ds.filter(lambda *_: True))
+            return replace(streams, **{stream: getattr(streams, stream).filter(lambda *_: True)})
 
         monkeypatch.setattr(pretrain_data, "load_image_streams", lying)
         with pytest.raises(ValueError) as caught:
             build(ET)
         text = str(caught.value)
-        assert "select_ds" in text and "unknown" in text and str(math.ceil(N_SELECT / BATCH)) in text
+        assert f"{stream} has cardinality unknown" in text and str(getattr(honest, steps_of)) in text
 
     @pytest.mark.parametrize("kwargs, message", [
         (dict(method="nope"), "method"),

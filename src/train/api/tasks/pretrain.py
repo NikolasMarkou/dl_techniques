@@ -700,12 +700,7 @@ class PretrainTrainer(TaskTrainer):
         extras: Dict[str, Any] = {
             "baseline": {"kind": baseline.kind, "val_loss": baseline.val_loss},
             "epoch_zero": {"val_loss": self._epoch_zero, "binds": bool(self._epoch_zero < baseline.val_loss)},
-            "selection": {
-                "start_epoch": start,
-                "window_epochs": fit.epochs_run - start,
-                "best_epoch": best,
-                "final_is_best": best == fit.epochs_run,
-            },
+            "selection": selection_block(start, fit.epochs_run, best),
             "tokenizer": self._tokenizer_block(),
         }
         return Evaluation(
@@ -720,6 +715,23 @@ class PretrainTrainer(TaskTrainer):
             load_detail=load_detail or None,
             extras=extras,
         )
+
+
+def selection_block(start: int, epochs_run: int, best: int) -> Dict[str, Any]:
+    """Return the summary's ``selection`` block.
+
+    :param start: the 0-based epoch the selection window starts at.
+    :param epochs_run: the epochs the run trained (the last epoch's 1-based number).
+    :param best: the 1-based epoch of the best ``watch_metric`` in the window (``run_summary.best_epoch``).
+    :return: the window's start and length, the best epoch, and ``final_is_best``: true exactly when the best epoch is the
+        last one run (``best`` is 1-based, so that is ``best == epochs_run``).
+    """
+    return {
+        "start_epoch": start,
+        "window_epochs": epochs_run - start,
+        "best_epoch": best,
+        "final_is_best": best == epochs_run,
+    }
 
 
 def train_pretrain(

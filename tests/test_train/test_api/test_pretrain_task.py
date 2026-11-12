@@ -62,7 +62,7 @@ from train.common.resume_state import FIT_STATE_NAME, update_fit_state
 from train.api.tasks.image_classification import ImageClassificationTrainer
 from train.api.tasks.image_denoising import ImageDenoisingTrainer
 from train.api.tasks.image_segmentation import ImageSegmentationTrainer
-from train.api.tasks.pretrain import PretrainConfig, PretrainTrainer
+from train.api.tasks.pretrain import PretrainConfig, PretrainTrainer, selection_block
 
 BATCH = 4
 EPOCHS = 2
@@ -299,6 +299,28 @@ def test_a_whole_run_judges_against_the_smaller_of_the_baseline_and_its_epoch_ze
     assert len(column) == EPOCHS and summary["success_value"] == pytest.approx(min(column), rel=1e-6)
     assert summary["success"] is bool(np.float32(summary["success_value"]) < np.float32(summary["success_threshold"]))
     assert summary["steps_per_epoch"] == STEPS
+
+
+@pytest.mark.parametrize("name", ["whole", "crashed"])
+def test_the_summary_names_the_best_epoch_and_whether_it_is_the_last_one_the_csv_holds(runs, name):
+    # The oracle is the CSV: the 1-based epoch of the lowest val_loss, and whether that is the last row (the resumed run's
+    # rows are the first process's plus its own, so the count is the real epochs run).
+    column = csv_column(runs[name], "val_loss")
+    best = int(np.argmin(column)) + 1
+    selection = read_json(runs[name] / "results_summary.json")["selection"]
+    assert selection == {"start_epoch": 0, "window_epochs": len(column), "best_epoch": best, "final_is_best": best == len(column)}
+
+
+@pytest.mark.parametrize(
+    "best, epochs_run, final_is_best",
+    [(3, 3, True), (2, 3, False), (1, 3, False), (1, 1, True), (2, 2, True), (1, 2, False)],
+    ids=["last of three", "middle of three", "first of three", "only epoch", "last of two", "first of two"],
+)
+def test_final_is_best_exactly_when_the_selected_epoch_is_the_last_one_run(best, epochs_run, final_is_best):
+    # `best_epoch` is 1-based, so `best == epochs_run` (never `epochs_run - 1`) is the last epoch.
+    block = selection_block(0, epochs_run, best)
+    assert block == {"start_epoch": 0, "window_epochs": epochs_run, "best_epoch": best, "final_is_best": final_is_best}
+    assert selection_block(1, epochs_run, best)["window_epochs"] == epochs_run - 1, "the window starts at the 0-based epoch"
 
 
 def test_a_resume_reads_the_epoch_zero_value_the_fresh_run_wrote(runs):
@@ -572,6 +594,38 @@ def test_the_floor_is_the_one_measured_and_sits_between_the_two_tokenizers_it_wa
     # perplexity 24.7 and the 5-epoch one 354.8; the floor separates them. A toy of 16 codes cannot reach it.
     assert 24.7 < pretrain_run.MIN_TOKENIZER_PERPLEXITY < 354.8
     assert pretrain_run.MIN_TOKENIZER_PERPLEXITY == 64.0
+
+
+@pytest.mark.parametrize(
+    "perplexity, refused",
+    [(64.0, False), (float(np.nextafter(64.0, 0.0)), True), (63.99, True), (64.01, False)],
+    ids=["exactly the floor", "one ulp below", "just below", "just above"],
+)
+def test_the_floor_is_strict_so_a_perplexity_of_exactly_the_floor_passes(monkeypatch, perplexity, refused):
+    # "Below the floor" is refused and the floor itself is not. The usage is handed in as a record: a perplexity of exactly
+    # 64.0 is not reachable through counts (64 codes used equally give 63.99999999999998 in float64).
+    usage = pretrain_data.TokenizerUsage(
+        n_codes=5000, distinct=200, perplexity=perplexity, top1_share=0.02, entropy=math.log(perplexity))
+    monkeypatch.setattr(pretrain_run, "tokenizer_usage", lambda ids: usage)
+    assert pretrain_run.MIN_TOKENIZER_PERPLEXITY == 64.0
+    if refused:
+        with pytest.raises(ValueError, match="below the floor of 64"):
+            pretrain_run.checked_tokenizer_usage(np.zeros(3, np.int64), path="t.keras")
+    else:
+        assert pretrain_run.checked_tokenizer_usage(np.zeros(3, np.int64), path="t.keras") is usage
+
+
+def test_a_refusal_on_few_positions_says_the_split_size_limits_the_estimate_and_names_what_it_measured():
+    # The perplexity of a few positions is limited by how many there are (a tokenizer measured at 354 over 5,000 images
+    # reads 59 over 40), so the sentence names the positions and the distinct codes it counted, and does not blame the
+    # tokenizer alone.
+    ids = np.arange(96) % 60                       # 96 positions, 60 distinct codes: perplexity 57
+    with pytest.raises(ValueError) as caught:
+        pretrain_run.checked_tokenizer_usage(ids, path="t.keras")
+    message = str(caught.value)
+    assert "60 distinct codes over the 96 masked positions" in message and "perplexity 57" in message
+    assert "limited by the split size" in message and "data.max_samples" in message
+    assert "train the tokenizer longer" in message, "the other cause stays named"
 
 
 def test_a_toy_that_uses_every_code_it_has_is_still_below_the_real_floor(world, tokenizers, tmp_path):
