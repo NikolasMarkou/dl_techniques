@@ -172,6 +172,51 @@ def test_absent_records_are_a_loud_file_not_found_naming_the_directory(tmp_path,
 
 
 # ---------------------------------------------------------------------
+# The stream seed (DECISION plan-2026-11-12T015747-46e5318f/D-004)
+# ---------------------------------------------------------------------
+
+
+def _train_order(config):
+    """The identities of the first 9 full train batches (54 rows, batches of 6), in order."""
+    pixels = np.concatenate([x.numpy() for x, _ in load_imagenette("train", config).dataset])
+    return list(np.rint(pixels.mean(axis=(1, 2, 3)) * 255.0 / 4.0).astype(int))
+
+
+def test_stream_seed_defaults_to_none_and_none_is_the_old_call() -> None:
+    assert ImagenetteConfig().stream_seed is None
+    old = _train_order(_config())
+    assert _train_order(_config(stream_seed=None)) == old
+    assert _train_order(_config(stream_seed=3)) == old, "the split seed is the default stream seed"
+
+
+def test_a_stream_seed_of_zero_is_a_value_and_not_unset() -> None:
+    old = _train_order(_config())
+    zero = _train_order(_config(stream_seed=0))
+    assert zero != old, "stream_seed=0 gave the stream of the split seed: read as unset"
+    assert zero == _train_order(_config(stream_seed=0))
+
+
+@pytest.mark.parametrize("stream_seed", [0, 1, 123])
+def test_the_split_stays_on_the_config_seed_whatever_the_stream_seed(stream_seed) -> None:
+    base, moved = _config(), _config(stream_seed=stream_seed)
+    np.testing.assert_array_equal(_ids("select", moved), _ids("select", base))
+    np.testing.assert_array_equal(_ids("test", moved, offset=2), _ids("test", base, offset=2))
+    train = set(_train_order(moved))
+    assert len(train) == 54 and not train & set(_ids("select", moved))
+    assert sorted(train | set(_ids("select", moved))) == list(range(N_TRAIN))
+    assert _train_order(moved) != _train_order(base)
+
+
+def test_an_augmented_stream_builds_at_any_stream_seed_and_keeps_the_split() -> None:
+    for stream_seed in (None, 0, 5):
+        config = _config(augment=True, crop_policy="random_resized_crop",
+                         stream_seed=stream_seed)
+        x, _ = next(iter(load_imagenette("train", config).dataset))
+        assert x.shape == (6, 24, 24, 3)
+        np.testing.assert_array_equal(_ids("select", config), _ids("select", _config()))
+
+
+# ---------------------------------------------------------------------
 # The real records
 # ---------------------------------------------------------------------
 

@@ -51,8 +51,9 @@ class ImageStreams:
     ``train_ds`` is infinite (it repeats) and drops the ragged last batch; ``select_ds`` and
     ``test_ds`` are finite, never augmented and keep every row. With ``element_map_fn`` all
     three yield the mapped element; with ``indexed_element_map_fn`` only ``train_ds`` does
-    (an evaluation pass has no counter to key on) and the other two yield plain
-    ``(image, label)`` batches.
+    (the train counter runs across epochs, an evaluation pass has none) and the other two
+    yield plain ``(image, label)`` batches unless ``select_indexed_map_fn`` or
+    ``test_indexed_map_fn`` is given, which map that one finite stream by row position.
     """
 
     train_ds: "tf.data.Dataset"
@@ -104,12 +105,15 @@ def load_image_streams(
         image_size: int,
         batch_size: int,
         seed: int,
+        stream_seed: Optional[int] = None,
         validation_split: Optional[float] = None,
         max_samples: Optional[int] = None,
         augment: bool = True,
         crop_policy: str = "resize",
         element_map_fn: Optional[ElementMapFn] = None,
         indexed_element_map_fn: Optional[ElementMapFn] = None,
+        select_indexed_map_fn: Optional[ElementMapFn] = None,
+        test_indexed_map_fn: Optional[ElementMapFn] = None,
         num_parallel_calls: int = tf.data.AUTOTUNE,
 ) -> ImageStreams:
     """Build the train / selection / test pipelines of ``dataset`` for a self-supervised trainer.
@@ -122,7 +126,13 @@ def load_image_streams(
     :param dataset: One of :data:`SUPPORTED_DATASETS`.
     :param image_size: Side length the images are resized or cropped to.
     :param batch_size: Batch size of all three pipelines.
-    :param seed: Seed of the split, the shuffle and the augmentation.
+    :param seed: Seed of the split (always), and of the shuffle and the augmentation unless
+        ``stream_seed`` is given.
+    :param stream_seed: Seed of the train shuffle and the train augmentation ONLY; ``None``
+        (the default) means ``seed``, so a caller that passes nothing is unchanged. ``0`` is a
+        seed, not "unset". It never reaches the split: the selection and test rows, and the
+        train/selection partition, come from ``seed`` whatever ``stream_seed`` is, which is
+        what lets a resumed run train on a fresh stream without re-splitting.
     :param validation_split: Fraction of the train rows held out as the selection split
         (``None`` means :data:`DEFAULT_VALIDATION_SPLIT`), strictly inside (0, 1).
     :param max_samples: Smoke-run cap on the train pool (the test split is never capped).
@@ -137,27 +147,46 @@ def load_image_streams(
         ``num_parallel_calls=AUTOTUNE`` (``dl_techniques.datasets.vision.multi_crop``). The
         selection and test streams are then plain ``(image, label)`` batches. Mutually
         exclusive with ``element_map_fn``.
+    :param select_indexed_map_fn: Per-sample ``fn(index, image, label)`` for the SELECTION
+        stream only; ``index`` is the 0-based row position of the finite pass (int64), the
+        same on every pass, and does not depend on ``seed`` or ``stream_seed``. A mask keyed
+        on it scores the same weights the same way on every pass. Mutually exclusive with
+        ``element_map_fn``; it may be combined with the other indexed maps.
+    :param test_indexed_map_fn: Same as ``select_indexed_map_fn``, for the TEST stream.
     :param num_parallel_calls: ``tf.data`` parallelism of the maps.
     :return: The :class:`ImageStreams`.
     :raises ValueError: An unsupported ``dataset``, a non-positive ``image_size`` or
         ``batch_size``, an unknown ``crop_policy`` (or ``"random_resized_crop"`` with an
-        in-memory dataset), both map slots at once, or a selection split holding out zero rows.
+        in-memory dataset), ``element_map_fn`` beside any indexed map, or a selection split holding out zero rows.
     :raises FileNotFoundError: The Imagenette records are not prepared.
     """
     # DECISION plan-2026-08-01T195746-12a1f2db/D-007
     # Both refusals are LOUD rather than a silent best-effort and fire BEFORE any data work.
-    # The indexed map has no evaluation form: an eval pass has no `.repeat()`, so
+    # The TRAIN indexed map has no evaluation form: an eval pass has no `.repeat()`, so
     # `.enumerate()` would count a SINGLE pass and every element would key identically on
     # every epoch -- the frozen-augmentation failure D-035 RED-proved wrong, reintroduced
-    # silently through a different door. Pinned by tests/test_train/test_image_streams.py::
+    # silently through a different door. (The row-position evaluation maps are the separate
+    # parameters of the plan-2026-11-12T015747-46e5318f/D-005 anchor below.) Pinned by tests/test_train/test_image_streams.py::
     # TestTheRefusals and ::TestIndexedElementMapFn::test_selection_and_test_are_plain_image_label_batches.
-    if indexed_element_map_fn is not None and element_map_fn is not None:
-        raise ValueError(
-            "element_map_fn and indexed_element_map_fn are mutually exclusive: they are two "
-            "different calling conventions for the same map slot (`fn(image, label)` vs "
-            "`fn(index, image, label)`), and applying both would feed the second one the "
-            "first one's output. Pass exactly one."
-        )
+    # DECISION plan-2026-11-12T015747-46e5318f/D-005
+    # The select and test maps are SEPARATE parameters, not a lifted restriction on
+    # `indexed_element_map_fn`: their index is the row position of ONE finite pass (the same
+    # on every pass, so a position-keyed mask scores the same weights the same way each
+    # time), while the train counter keeps climbing across epochs. Do NOT make the train
+    # counter serve the eval streams (the frozen-augmentation failure above) and do NOT key
+    # an eval map on the stream seed: it changes on every resume, so the same weights would
+    # score a different val_loss after a kill and the best-checkpoint reload check would
+    # warn on every resumed run.
+    for name, fn in (("indexed_element_map_fn", indexed_element_map_fn),
+                     ("select_indexed_map_fn", select_indexed_map_fn),
+                     ("test_indexed_map_fn", test_indexed_map_fn)):
+        if fn is not None and element_map_fn is not None:
+            raise ValueError(
+                f"element_map_fn and {name} are mutually exclusive: they are two "
+                "different calling conventions for the same map slot (`fn(image, label)` vs "
+                "`fn(index, image, label)`), and applying both would feed the second one the "
+                "first one's output. Pass exactly one."
+            )
     dataset = dataset.lower()
     if dataset not in SUPPORTED_DATASETS:
         raise ValueError(f"Unsupported dataset {dataset!r}; supported: {sorted(SUPPORTED_DATASETS)}")
@@ -174,12 +203,19 @@ def load_image_streams(
             f"(full-resolution records to crop from), not {dataset!r}"
         )
     split = DEFAULT_VALIDATION_SPLIT if validation_split is None else validation_split
+    # DECISION plan-2026-11-12T015747-46e5318f/D-004
+    # `stream_seed` feeds the shuffle and the augmentation and NEVER the split. A resumed
+    # fit starts a fresh iterator that would replay the stream from its first element, so the
+    # resume wants a different stream; moving `seed` itself (the legacy language idea of
+    # `seed + step`) would re-split and leak selection rows into train. `is None`, not
+    # truthiness: `stream_seed=0` is a seed. Do not derive the split from this value.
+    stream = seed if stream_seed is None else stream_seed
 
     if spec.source == "records":
         config = ImagenetteConfig(
             image_size=image_size, batch_size=batch_size, crop_policy=crop_policy,
             augment=augment, normalize="imagenet", validation_split=split, seed=seed,
-            max_images=max_samples,
+            stream_seed=stream_seed, max_images=max_samples,
         )
         train, n_train = imagenette_examples("train", config)
         select, n_select = imagenette_examples("select", config)
@@ -189,9 +225,9 @@ def load_image_streams(
             dataset, seed=seed, validation_split=split, max_samples=max_samples)
         mean, std = np.asarray(spec.mean, np.float32), np.asarray(spec.std, np.float32)
         common = dict(
-            seed=seed, normalize=lambda image: (image - mean) / std,
+            seed=stream, normalize=lambda image: (image - mean) / std,
             resize=resizer(None if image_size == spec.input_shape[0] else image_size))
-        hook = flip_pad_crop(mode="REFLECT", seed=seed) if augment else None
+        hook = flip_pad_crop(mode="REFLECT", seed=stream) if augment else None
         train = array_examples(arrays.x_train, arrays.y_train, training=True,
                                augment=hook, **common)
         select = array_examples(arrays.x_select, arrays.y_select, training=False,
@@ -217,6 +253,12 @@ def load_image_streams(
             _indexed_call(indexed_element_map_fn), num_parallel_calls=num_parallel_calls)
     else:
         train = train.repeat()
+    if select_indexed_map_fn is not None:
+        select = select.enumerate().map(
+            _indexed_call(select_indexed_map_fn), num_parallel_calls=num_parallel_calls)
+    if test_indexed_map_fn is not None:
+        test = test.enumerate().map(
+            _indexed_call(test_indexed_map_fn), num_parallel_calls=num_parallel_calls)
     train = train.batch(batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
     select = select.batch(batch_size).prefetch(tf.data.AUTOTUNE)
     test = test.batch(batch_size).prefetch(tf.data.AUTOTUNE)

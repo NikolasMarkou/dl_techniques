@@ -42,6 +42,7 @@ from tests.classification_fakes import (
     IMAGENETTE_FAKE_TEST,
     IMAGENETTE_FAKE_TRAIN,
     identities_of,
+    row_identities,
     use_fake_imagenette,
     use_identity_cifar10,
 )
@@ -280,6 +281,193 @@ class TestIndexedElementMapFn:
             x, y = next(iter(ds))
             assert x.shape[1:] == (IMAGE_SIZE, IMAGE_SIZE, 3) and x.dtype == tf.float32
             assert y.dtype == tf.int32
+
+
+# ---------------------------------------------------------------------
+# 3b. the stream seed: shuffle and augmentation, never the split
+# ---------------------------------------------------------------------
+
+STREAM_SEEDS = (0, 1, 123)
+N_BATCHES_OF_TRAIN = 13  # 54 // BATCH_SIZE: every full batch of one pass
+
+
+def _train_ids(dataset: str, streams) -> List[int]:
+    return list(_identities(dataset, streams.train_ds, N_BATCHES_OF_TRAIN, 0))
+
+
+def _every_element(streams):
+    """Train (two passes of batches), then every select and test batch, as arrays."""
+    return (_take(streams.train_ds, 2 * N_BATCHES_OF_TRAIN),
+            _take(streams.select_ds, 10), _take(streams.test_ds, 10))
+
+
+class TestTheStreamSeed:
+    """``stream_seed`` moves the train shuffle and augmentation and nothing else.
+
+    DECISION plan-2026-11-12T015747-46e5318f/D-004: the split seed never changes, so a resumed
+    run can train on a fresh stream without re-splitting (and leaking selection rows into
+    train).
+    """
+
+    def test_none_and_the_split_seed_are_the_old_call_element_for_element(self, dataset) -> None:
+        old = _every_element(_streams(dataset))
+        for stream_seed in (None, SEED):
+            new = _every_element(_streams(dataset, stream_seed=stream_seed))
+            for old_part, new_part in zip(old, new):
+                assert len(old_part) == len(new_part) > 0
+                for a, b in zip(old_part, new_part):
+                    np.testing.assert_array_equal(a, b)
+
+    @pytest.mark.parametrize("stream_seed", STREAM_SEEDS)
+    def test_a_stream_seed_is_a_value_and_zero_is_not_unset(self, dataset, stream_seed) -> None:
+        default = _train_ids(dataset, _streams(dataset))
+        moved = _train_ids(dataset, _streams(dataset, stream_seed=stream_seed))
+        assert moved != default, (
+            f"stream_seed={stream_seed} gave the stream of the split seed {SEED}: the value was "
+            f"ignored or read as unset")
+        assert moved == _train_ids(dataset, _streams(dataset, stream_seed=stream_seed)), (
+            "one stream seed must give one stream across builds")
+
+    def test_the_default_is_the_split_seed_and_not_zero(self, dataset) -> None:
+        """The unset stream is the split seed's stream, byte for byte, not stream seed 0's."""
+        assert _train_ids(dataset, _streams(dataset)) == _train_ids(
+            dataset, _streams(dataset, stream_seed=SEED))
+        assert _train_ids(dataset, _streams(dataset)) != _train_ids(
+            dataset, _streams(dataset, stream_seed=0))
+
+    @pytest.mark.parametrize("stream_seed", STREAM_SEEDS)
+    def test_the_split_does_not_follow_the_stream_seed(self, dataset, stream_seed) -> None:
+        base = _streams(dataset)
+        moved = _streams(dataset, stream_seed=stream_seed)
+        for part, offset in (("select_ds", 0), ("test_ds", TEST_OFFSET)):
+            np.testing.assert_array_equal(
+                _all(dataset, getattr(moved, part), offset),
+                _all(dataset, getattr(base, part), offset), err_msg=(
+                    f"the {part} rows changed with the stream seed: the split follows it"))
+        assert (moved.n_train, moved.n_select, moved.n_test) == (54, 6, N_TEST)
+
+    @pytest.mark.parametrize("stream_seed", STREAM_SEEDS)
+    @pytest.mark.parametrize("augment", [False, True])
+    def test_no_selection_row_reaches_the_train_stream_at_any_stream_seed(
+            self, dataset, stream_seed, augment) -> None:
+        moved = _streams(dataset, stream_seed=stream_seed, augment=augment)
+        select = set(_all(dataset, moved.select_ds, 0))
+        train = set(_train_ids(dataset, moved))
+        assert len(select) == 6 and len(train) >= 52
+        assert not train & select, "a selection image is also a train image"
+        assert train | select <= set(range(N_TRAIN))
+
+    def test_the_train_order_differs_across_stream_seeds(self, dataset) -> None:
+        orders = {seed: tuple(_train_ids(dataset, _streams(dataset, stream_seed=seed)))
+                  for seed in (None, *STREAM_SEEDS)}
+        assert len(set(orders.values())) == len(orders)
+
+    def test_the_selection_rows_are_still_the_seeded_slice_of_the_split_seed(
+            self, dataset) -> None:
+        moved = _streams(dataset, stream_seed=99)
+        _, select_rows, _ = seeded_split_indices(N_TRAIN, N_TEST, SEED, 0.1)
+        assert list(_all(dataset, moved.select_ds, 0)) == select_rows.tolist()
+        assert list(_all(dataset, moved.test_ds, TEST_OFFSET)) == seeded_test_rows(
+            N_TEST, SEED).tolist()
+
+
+# ---------------------------------------------------------------------
+# 3c. the indexed evaluation maps
+# ---------------------------------------------------------------------
+
+
+def _index_and_image_map_fn(index: tf.Tensor, image: tf.Tensor, label: tf.Tensor):
+    """The row position and the image the map was handed."""
+    del label
+    return tf.cast(index, tf.int64), image
+
+
+class TestTheIndexedEvaluationMaps:
+    """``select_indexed_map_fn`` and ``test_indexed_map_fn``: ``fn(index, image, label)`` on a
+    finite pass, the index the 0-based row position of that pass (D-005: the select and test
+    masks key on the row position and the split seed, never on the stream seed)."""
+
+    @pytest.mark.parametrize("part, n, offset", [
+        ("select_ds", 6, 0), ("test_ds", N_TEST, TEST_OFFSET)])
+    def test_the_index_is_the_row_position_and_the_image_is_the_row_at_it(
+            self, dataset, part, n, offset) -> None:
+        kwarg = {"select_ds": "select_indexed_map_fn", "test_ds": "test_indexed_map_fn"}[part]
+        streams = _streams(dataset, **{kwarg: _index_and_image_map_fn})
+        batches = [(np.asarray(i), np.asarray(x)) for i, x in getattr(streams, part)]
+        indices = np.concatenate([i for i, _ in batches])
+        np.testing.assert_array_equal(indices, np.arange(n))
+        identities = row_identities(np.concatenate([x for _, x in batches]), dataset, offset)
+        np.testing.assert_array_equal(
+            identities, _all(dataset, getattr(_streams(dataset), part), offset))
+
+    @pytest.mark.parametrize("part", ["select_ds", "test_ds"])
+    def test_the_index_is_equal_over_two_passes(self, dataset, part) -> None:
+        kwarg = {"select_ds": "select_indexed_map_fn", "test_ds": "test_indexed_map_fn"}[part]
+        ds = getattr(_streams(dataset, **{kwarg: _index_reporting_map_fn}), part)
+        passes = [np.concatenate([np.asarray(i) for i, _ in ds]) for _ in range(2)]
+        np.testing.assert_array_equal(passes[0], passes[1])
+        assert passes[0][0] == 0 and passes[0][-1] == len(passes[0]) - 1
+
+    @pytest.mark.parametrize("stream_seed", [None, 0, 3])
+    def test_the_index_does_not_follow_the_stream_seed(self, dataset, stream_seed) -> None:
+        streams = _streams(dataset, stream_seed=stream_seed,
+                           select_indexed_map_fn=_index_reporting_map_fn,
+                           test_indexed_map_fn=_index_reporting_map_fn)
+        for ds, n in ((streams.select_ds, 6), (streams.test_ds, N_TEST)):
+            np.testing.assert_array_equal(
+                np.concatenate([np.asarray(i) for i, _ in ds]), np.arange(n))
+
+    def test_each_map_reaches_only_its_own_stream_and_the_others_stay_plain(self, dataset) -> None:
+        select_only = _streams(dataset, select_indexed_map_fn=_index_reporting_map_fn)
+        test_only = _streams(dataset, test_indexed_map_fn=_index_reporting_map_fn)
+        plain = _streams(dataset)
+
+        def is_plain(ds) -> bool:
+            x, y = next(iter(ds))
+            return x.shape[1:] == (IMAGE_SIZE, IMAGE_SIZE, 3) and x.dtype == tf.float32 \
+                and y.dtype == tf.int32
+
+        assert not is_plain(select_only.select_ds) and is_plain(select_only.test_ds)
+        assert not is_plain(test_only.test_ds) and is_plain(test_only.select_ds)
+        for streams in (select_only, test_only):
+            assert is_plain(streams.train_ds), "an evaluation map reached the train stream"
+        # a train stream reshuffles on every new iterator, so compare two FRESH builds
+        fresh = _streams(dataset, select_indexed_map_fn=_index_reporting_map_fn,
+                         test_indexed_map_fn=_index_reporting_map_fn)
+        for a, b in zip(_take(fresh.train_ds, 4), _take(plain.train_ds, 4)):
+            np.testing.assert_array_equal(a, b)
+
+    def test_without_them_select_and_test_are_plain_image_label_batches(self, dataset) -> None:
+        streams = _streams(dataset, indexed_element_map_fn=_index_reporting_map_fn)
+        for ds in (streams.select_ds, streams.test_ds):
+            x, y = next(iter(ds))
+            assert x.shape[1:] == (IMAGE_SIZE, IMAGE_SIZE, 3) and y.dtype == tf.int32
+
+    def test_the_counts_and_the_lengths_are_unchanged(self, dataset) -> None:
+        streams = _streams(dataset, select_indexed_map_fn=_index_reporting_map_fn,
+                           test_indexed_map_fn=_index_reporting_map_fn)
+        plain = _streams(dataset)
+        assert (streams.n_train, streams.n_select, streams.n_test) == (
+            plain.n_train, plain.n_select, plain.n_test)
+        assert int(streams.select_ds.cardinality()) == streams.val_steps
+        assert int(streams.test_ds.cardinality()) == streams.test_steps
+
+    @pytest.mark.parametrize("kwarg", ["select_indexed_map_fn", "test_indexed_map_fn"])
+    def test_an_evaluation_map_beside_element_map_fn_is_refused(self, kwarg) -> None:
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            load_image_streams(
+                "cifar10", image_size=IMAGE_SIZE, batch_size=BATCH_SIZE, seed=SEED,
+                element_map_fn=_pair_map_fn, **{kwarg: _index_reporting_map_fn})
+
+    def test_the_train_only_indexed_map_is_unchanged_beside_the_evaluation_maps(
+            self, dataset) -> None:
+        streams = _streams(dataset, indexed_element_map_fn=_index_reporting_map_fn,
+                           select_indexed_map_fn=_index_reporting_map_fn,
+                           test_indexed_map_fn=_index_reporting_map_fn)
+        steps = streams.n_train // BATCH_SIZE
+        counters = np.concatenate(_take(streams.train_ds.skip(steps - 2), 4))
+        first = (steps - 2) * BATCH_SIZE
+        np.testing.assert_array_equal(counters, np.arange(first, first + 4 * BATCH_SIZE))
 
 
 # ---------------------------------------------------------------------

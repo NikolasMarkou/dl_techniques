@@ -156,7 +156,10 @@ class ImagenetteConfig:
         gets one seed per element. Needs ``augment``.
     :param normalize: ``"imagenet"`` ((x/255 - mean) / std) or ``"unit"`` (x/255).
     :param validation_split: Fraction of the train records held out as the selection split.
-    :param seed: Seed of the selection permutation, the shuffle and the augmentation.
+    :param seed: Seed of the selection permutation and of the test order (the split), and of
+        the shuffle and the augmentation unless ``stream_seed`` is given.
+    :param stream_seed: Seed of the train shuffle and the train augmentation only; ``None``
+        means ``seed``. ``0`` is a seed, not "unset". It never reaches the split.
     :param max_images: Smoke-run cap on the train pool (the test split is never capped).
     :param tfds_data_dir: The TFDS data directory; ``None`` inherits ``$TFDS_DATA_DIR``.
     :param num_parallel_calls: ``tf.data`` parallelism of the decode.
@@ -170,6 +173,7 @@ class ImagenetteConfig:
     normalize: str = "imagenet"
     validation_split: float = 0.1
     seed: int = 0
+    stream_seed: Optional[int] = None
     max_images: Optional[int] = None
     tfds_data_dir: Optional[str] = None
     num_parallel_calls: int = tf.data.AUTOTUNE
@@ -232,6 +236,10 @@ def imagenette_examples(
             len(images), 1, config.seed, config.validation_split, config.max_images)
         rows = train_idx if split == "train" else select_idx
 
+    # DECISION plan-2026-11-12T015747-46e5318f/D-004
+    # The split above stays on `config.seed`; only the shuffle and the augmentation below
+    # read `stream`. `is None`, not truthiness: `stream_seed=0` is a seed.
+    stream = config.seed if config.stream_seed is None else config.stream_seed
     training = split == "train"
     augment = training and config.augment
     size = config.image_size
@@ -244,7 +252,7 @@ def imagenette_examples(
         (tf.constant(images[rows]), tf.constant(labels[rows])))
     if training:
         # Shuffle the encoded rows: the buffer holds bytes, not decoded floats.
-        dataset = dataset.shuffle(len(rows), seed=config.seed, reshuffle_each_iteration=True)
+        dataset = dataset.shuffle(len(rows), seed=stream, reshuffle_each_iteration=True)
 
     hook = config.augment_hook if augment else None
 
@@ -256,9 +264,9 @@ def imagenette_examples(
         if config.crop_policy == "resize":
             image = tf.image.resize(image, (size, size), method="bilinear")
             if augment:
-                image = flip_and_pad_crop(image, mode="REFLECT", seed=config.seed)
+                image = flip_and_pad_crop(image, mode="REFLECT", seed=stream)
         elif augment:
-            image = random_resized_crop(image, size, seed=config.seed)
+            image = random_resized_crop(image, size, seed=stream)
         else:
             image = resize_and_centre_crop(image, size)
         image = tf.ensure_shape(image, (size, size, 3))
@@ -268,7 +276,7 @@ def imagenette_examples(
 
     if hook is not None:
         # One seed per element, attached before the parallel map (see augment_hook).
-        dataset = tf.data.Dataset.zip((dataset, seed_stream(config.seed))).map(
+        dataset = tf.data.Dataset.zip((dataset, seed_stream(stream))).map(
             lambda item, seed: decode(*item, seed),
             num_parallel_calls=config.num_parallel_calls)
     else:
