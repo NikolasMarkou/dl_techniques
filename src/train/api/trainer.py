@@ -252,6 +252,20 @@ Hooks (override in a task)
     precision XLA rejects), a mapping that may not name ``optimizer``, ``loss`` or
     ``metrics`` (``ConfigError``). ``spec`` is the family's :class:`~train.api.registry.ModelSpec`.
     Default: ``{}``, and the call is exactly the three-argument call of every earlier task (D-012).
+``fit_kwargs(config, data)``
+    Extra keyword arguments for the one ``fit`` call (``steps_per_epoch`` and ``validation_steps``
+    of a stream that does not end), a mapping that may not name ``x``, ``y``, ``validation_data``,
+    ``validation_split``, ``epochs``, ``callbacks``, ``verbose`` or ``initial_epoch`` (``ConfigError``).
+    A ``steps_per_epoch`` must be the data's own ``steps_per_epoch`` (the schedule, the backup and
+    ``settle_backup`` read it), a plain int; a ``train_ds`` of infinite or unknown cardinality
+    with no ``steps_per_epoch`` is a ``ConfigError`` at ``load_data`` and not a hang. Called once,
+    after ``input_check``. Default: ``{}``, and the call is the one every earlier task made (D-003).
+``resume_stream(config, data, completed_steps)``
+    The data a RESUMED run trains on, when the stream the fresh run built would replay: ``fit``
+    starts a new iterator, and a stream keyed on a counter starts it at 0. Called once, only by a
+    resume that trains (never a fresh run, never a reporting-only one), after the backup pair is
+    settled, with the optimizer steps the run completed; a returned object replaces the run's data and
+    ``None`` leaves it (D-004). Default: ``None``.
 ``selection_start_epoch(config)``
     The 0-based epoch from which the best checkpoint may be saved and ``EarlyStopping`` counts
     (a denoiser trained on a noise curriculum selects only once the curriculum has reached its last
@@ -581,6 +595,26 @@ class TaskTrainer:
             it may not name those three.
         """
         return {}
+
+    def fit_kwargs(self, config: StrictConfig, data: Any) -> Dict[str, Any]:
+        """Return extra keyword arguments for the one ``fit`` call; default ``{}`` (none).
+
+        :param data: what :meth:`build_data` returned.
+        :return: a mapping spread into ``model.fit(x, validation_data=..., epochs=..., callbacks=...,
+            verbose=...)``; it may not name any of those or ``y``, ``validation_split`` or
+            ``initial_epoch``, and its ``steps_per_epoch``, if any, is ``data.steps_per_epoch``.
+        """
+        return {}
+
+    def resume_stream(self, config: StrictConfig, data: Any, completed_steps: int) -> Optional[Any]:
+        """Return the data a resumed run trains on instead of ``data``, or ``None`` for ``data``.
+
+        :param completed_steps: the optimizer steps the killed run finished, as the settled backup
+            states them: ``start * steps_per_epoch + (batch + 1 if batch else 0)``.
+        :return: an object with the same fields the sequence reads (``steps_per_epoch``, the counts)
+            or ``None``; default ``None``.
+        """
+        return None
 
     def selection_start_epoch(self, config: StrictConfig) -> int:
         """Return the 0-based epoch from which the best checkpoint is selected; default ``0``.

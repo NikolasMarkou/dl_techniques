@@ -14,6 +14,13 @@ denoising task needs without changing what classification and segmentation write
   ``Evaluation.failed_checks`` (a non-empty tuple makes ``success`` false and is written as
   ``success_blocked_by``).
 
+Plan 46e5318f step 3 (D-003) adds two more hooks, ``TaskTrainer.fit_kwargs(config, data)`` (default
+``{}``, spread into the one ``fit`` call and stored on ``Run.fit_options``) and
+``TaskTrainer.resume_stream(config, data, completed_steps)`` (default ``None``; the sequence calls it from
+step 4 on): the default arm below reads the keywords the one ``fit`` call of a shipped task carries and the
+positive arm shows a task's ``fit_kwargs`` reaching it. The refusals that need a stream (a mismatched
+``steps_per_epoch``, an infinite ``train_ds``) are in ``test_the_stream_contract.py``.
+
 Every seam is proved twice, because a default that is "almost" nothing moves a byte in a golden and a
 seam that does nothing passes every default test: the default arm is a real fit of ``vit/vit_pico`` on
 fake CIFAR-10 arrays whose compile call, callback list, ``config.json`` keys and summary keys are read
@@ -33,12 +40,15 @@ import keras
 import pytest
 
 import train.api.recipes as recipes
+import train.api.run_sequence as run_sequence
 from train.api import registry
 from train.api.errors import ConfigError
 from train.api.registry import KNOWN_PROPERTIES, ModelSpec
 from train.api.run_dir import write_resolved
+from train.api.run_sequence import Run
 from train.api.tasks import register_builtin_tasks
 from train.api.tasks.image_classification import ImageClassificationConfig, ImageClassificationTrainer
+from train.api.tasks.image_denoising import ImageDenoisingTrainer
 from train.api.tasks.image_segmentation import ImageSegmentationTrainer
 from train.api.trainer import Evaluation, TaskTrainer
 from train.common.callbacks import AtomicModelCheckpoint
@@ -58,6 +68,11 @@ REQUEST = {
     "analysis_args.figures": False,
 }
 BASE_KWARGS = {"optimizer", "loss", "metrics"}
+#: What the one ``fit`` call of a shipped task carries besides the positional ``x``.
+FIT_KWARGS = {"validation_data", "epochs", "callbacks", "verbose"}
+#: The names of ``model.fit`` the sequence passes itself (or owns): a task's ``fit_kwargs`` may not name them.
+RESERVED_FIT_NAMES = ("x", "y", "validation_data", "validation_split", "epochs", "callbacks", "verbose",
+                      "initial_epoch")
 
 
 class ScriptedMonitor(keras.callbacks.Callback):
@@ -95,7 +110,8 @@ class Scripted(ImageClassificationTrainer):
     """The real task with a scripted monitor and recorders; it overrides NO seam (the default arm).
 
     ``seen_callbacks`` is the callback list of the last fit, ``seen_best`` the epochs after which
-    ``best_model.keras`` existed, ``compile_calls`` the ``(args, kwargs)`` of every ``compile`` call.
+    ``best_model.keras`` existed, ``compile_calls`` and ``fit_calls`` the ``(args, kwargs)`` of every
+    ``compile`` and ``fit`` call of the model.
     """
 
     kill_at = None
@@ -105,18 +121,23 @@ class Scripted(ImageClassificationTrainer):
         self.seen_callbacks = []
         self.seen_best = {}
         self.compile_calls = []
+        self.fit_calls = []
 
     def build_model(self, config, context, data):
-        """Spy on the model's own ``compile`` (an instance attribute: Keras refuses a class-level
-        replacement at load time, because it reads an overridden ``compile`` as a custom one)."""
+        """Spy on the model's own ``compile`` and ``fit`` (instance attributes: Keras refuses a
+        class-level replacement at load time, because it reads an overridden ``compile`` as a custom one)."""
         model = super().build_model(config, context, data)
-        real = model.compile
+        real, real_fit = model.compile, model.fit
 
         def spy(*args, **kwargs):
             self.compile_calls.append((args, dict(kwargs)))
             return real(*args, **kwargs)
 
-        model.compile = spy
+        def spy_fit(*args, **kwargs):
+            self.fit_calls.append((args, dict(kwargs)))
+            return real_fit(*args, **kwargs)
+
+        model.compile, model.fit = spy, spy_fit
         return model
 
     def _callbacks(self, config, data, run_dir, *rest):
@@ -217,7 +238,7 @@ def test_an_unknown_or_malformed_property_is_refused(bad):
 
 
 # ---------------------------------------------------------------------
-# The three hooks and the two fields default to nothing
+# The five hooks and the two fields default to nothing
 # ---------------------------------------------------------------------
 
 
@@ -227,12 +248,30 @@ def test_neither_existing_task_overrides_a_seam(task_class, hook):
     assert getattr(task_class, hook) is getattr(TaskTrainer, hook)
 
 
+# The denoiser (plan d483ffab) overrides the first three seams by design; the two stream hooks are
+# nobody's yet, and a task that overrides one is the first to need it.
+@pytest.mark.parametrize(
+    "task_class", [ImageClassificationTrainer, ImageSegmentationTrainer, ImageDenoisingTrainer]
+)
+@pytest.mark.parametrize("hook", ["fit_kwargs", "resume_stream"])
+def test_no_existing_task_overrides_a_stream_hook(task_class, hook):
+    assert getattr(task_class, hook) is getattr(TaskTrainer, hook)
+
+
 def test_the_hook_defaults_are_nothing(world, tmp_path):
     task = ImageClassificationTrainer(config_for(tmp_path / "run"))
     family = registry.MODELS["vit"]
     assert task.compile_options(task.config, family) == {}
     assert task.selection_start_epoch(task.config) == 0
     assert task.config_stamps(task.config, family) == {}
+    assert task.fit_kwargs(task.config, None) == {}
+    assert task.resume_stream(task.config, None, 0) is None
+
+
+def test_a_run_holds_no_fit_option_until_the_task_names_one():
+    field = {f.name: f for f in dataclasses.fields(Run)}["fit_options"]
+    assert field.default_factory() == {}
+    assert field.default_factory() is not field.default_factory()
 
 
 def test_an_evaluation_carries_no_extras_and_no_failed_check_by_default():
@@ -273,6 +312,15 @@ def test_the_default_callback_list_has_no_selection_start(default_run):
         "EpochCSVLogger", "TensorBoard", "LastEpochWeights", "EpochLogLine", "TrainingDashboardCallback",
         "FitStateSidecar", "BackupAndRestore", "SeeBest",
     ]
+
+
+def test_a_default_task_calls_fit_with_exactly_the_arguments_it_always_passed(default_run):
+    task, _, _ = default_run
+    assert len(task.fit_calls) == 1
+    args, kwargs = task.fit_calls[0]
+    # ``x`` is the one positional argument; ``steps_per_epoch`` and ``validation_steps`` are NOT there
+    # (``steps_per_epoch=None`` would be a value to Keras, and an extra key moves nothing visible but this).
+    assert len(args) == 1 and set(kwargs) == FIT_KWARGS
 
 
 def test_the_default_config_json_holds_the_config_fields_and_used_only(default_run):
@@ -365,8 +413,75 @@ def test_a_failed_check_makes_the_run_unsuccessful_whatever_the_bar_says(everyth
     assert summary["success_blocked_by"] == list(Everything.failed)
 
 
+class Spreading(Scripted):
+    """A task that names ``steps_per_epoch`` and ``validation_steps`` through ``fit_kwargs``."""
+
+    asked = None
+
+    def fit_kwargs(self, config, data):
+        self.asked = {"steps_per_epoch": data.steps_per_epoch, "validation_steps": int(data.select_ds.cardinality())}
+        return dict(self.asked)
+
+
+@pytest.fixture(scope="module")
+def spreading(world, tmp_path_factory):
+    run_dir = tmp_path_factory.mktemp("spreading") / "run"
+    task = Spreading(config_for(run_dir, epochs=2))
+    task.run()
+    return task
+
+
+def test_the_fit_options_of_a_task_are_spread_into_the_one_fit_call(spreading):
+    assert len(spreading.fit_calls) == 1
+    args, kwargs = spreading.fit_calls[0]
+    assert len(args) == 1 and set(kwargs) == FIT_KWARGS | {"steps_per_epoch", "validation_steps"}
+    # Both values are the data's own, and both are positive: a spy that saw ``None`` or 0 would pass an equality.
+    assert {k: kwargs[k] for k in ("steps_per_epoch", "validation_steps")} == spreading.asked
+    assert all(isinstance(v, int) and v > 0 for v in spreading.asked.values())
+    assert kwargs["epochs"] == 2 and kwargs["verbose"] == 1
+
+
 # ---------------------------------------------------------------------
 # Each collision and each bad value raises
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("key", RESERVED_FIT_NAMES)
+def test_a_fit_option_may_not_replace_what_the_sequence_passes(world, tmp_path, key):
+    class Reserved(Scripted):
+        def fit_kwargs(self, config, data):
+            return {key: None}
+
+    run_dir = tmp_path / "run"
+    with pytest.raises(ConfigError, match=rf"fit_kwargs of Reserved names \['{key}'\]") as raised:
+        Reserved(config_for(run_dir, epochs=1)).run()
+    assert "was claimed before this failed" in str(raised.value)
+    assert not (run_dir / "training_log.csv").exists(), "refused before fit"
+
+
+def test_the_reserved_names_are_the_arguments_of_fit_the_sequence_owns():
+    # A name here that ``keras.Model.fit`` does not take would refuse nothing real; one the sequence passes
+    # but this lacks would let a task collide with it.
+    import inspect
+
+    taken = set(inspect.signature(keras.Model.fit).parameters)
+    assert set(RESERVED_FIT_NAMES) <= taken
+    assert FIT_KWARGS | {"x"} <= set(RESERVED_FIT_NAMES)
+    assert tuple(run_sequence._RESERVED_FIT_NAMES) == RESERVED_FIT_NAMES
+
+
+@pytest.mark.parametrize("bad", [[("steps_per_epoch", 3)], 3, None], ids=["a list", "an int", "None"])
+def test_a_fit_kwargs_that_is_not_a_mapping_is_refused_by_name(world, tmp_path, bad):
+    class NotAMapping(Scripted):
+        def fit_kwargs(self, config, data):
+            return bad
+
+    with pytest.raises(ConfigError, match="fit_kwargs of NotAMapping.*mapping"):
+        NotAMapping(config_for(tmp_path / "run", epochs=1)).run()
+
+
+# ---------------------------------------------------------------------
+# Each collision and each bad value raises (compile and the rest)
 # ---------------------------------------------------------------------
 
 

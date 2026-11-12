@@ -45,9 +45,11 @@ Module scope imports only the standard library and ``train.api`` (D-012); ``kera
 and ``train.common`` names are imported inside the functions that use them.
 """
 
+import collections.abc
 import contextlib
 import dataclasses
 import json
+import numbers
 import sys
 import time
 from pathlib import Path
@@ -220,6 +222,8 @@ class Run:
     devices: Dict[str, Any] = dataclasses.field(default_factory=dict)
     data: Any = None
     steps_per_epoch: int = 0
+    #: The task's ``fit_kwargs``, checked by :func:`_checked_fit_options`; spread into the one ``fit`` call.
+    fit_options: Dict[str, Any] = dataclasses.field(default_factory=dict)
     model: Any = None
     params: int = 0
     baseline: Dict[str, float] = dataclasses.field(default_factory=dict)
@@ -348,6 +352,60 @@ def announce(run: Run) -> None:
         (logger.warning if level == "warning" else logger.info)(text)
 
 
+#: The arguments of ``fit`` the sequence passes or owns: a task's ``fit_kwargs`` may not name them.
+_RESERVED_FIT_NAMES = (
+    "x", "y", "validation_data", "validation_split", "epochs", "callbacks", "verbose", "initial_epoch",
+)
+
+
+def _checked_fit_options(run: Run) -> Dict[str, Any]:
+    """Return the task's ``fit_kwargs``, refusing what would collide, disagree or hang.
+
+    :raises ConfigError: for a result that is not a mapping, one that names an argument of ``fit`` the
+        sequence owns, a ``steps_per_epoch`` that is not the data's own plain int, or a ``train_ds`` of
+        infinite or unknown cardinality with no ``steps_per_epoch``; each carries :func:`_claimed_note`.
+    """
+    # DECISION plan-2026-11-12T015747-46e5318f/D-003
+    # An epoch of an infinite stream never ends in Keras 3.8 (no ``steps_per_epoch`` and no cardinality:
+    # the epoch loop is ``while True``), so the guard here turns that hang into a message BEFORE the
+    # model is built. Do NOT pass ``steps_per_epoch`` for every task to "make it uniform": it changes the
+    # ``fit`` call of the three shipped tasks, whose goldens must not move. A finite stream of known
+    # length passes unchanged, and so does a data object with no ``cardinality`` (a ``PyDataset``).
+    name, note = type(run.trainer).__name__, _claimed_note(run.run_dir)
+    with _bad_value_is_a_config_error(run.run_dir, "the fit options"):
+        options = run.trainer.fit_kwargs(run.config, run.data)
+    if not isinstance(options, collections.abc.Mapping):
+        raise ConfigError(
+            f"fit_kwargs of {name} returned a {type(options).__name__}, not a mapping of keyword "
+            f"arguments for fit. {note}"
+        )
+    options = dict(options)
+    reserved = sorted(set(options) & set(_RESERVED_FIT_NAMES))
+    if reserved:
+        raise ConfigError(
+            f"fit_kwargs of {name} names {reserved}, which the run passes itself. {note}"
+        )
+    steps = options.get("steps_per_epoch")
+    if "steps_per_epoch" in options and (
+        not isinstance(steps, numbers.Integral) or isinstance(steps, bool)
+        or int(steps) != run.steps_per_epoch
+    ):
+        raise ConfigError(
+            f"fit_kwargs of {name} gives steps_per_epoch={steps!r}, which is not the "
+            f"{run.steps_per_epoch} steps of an epoch of this data (an int equal to "
+            f"data.steps_per_epoch): the schedule and the backups count epochs of that length. {note}"
+        )
+    cardinality = getattr(run.data.train_ds, "cardinality", None)
+    # tf.data states an endless stream as -1 and an unknown length as -2; a known length is never negative.
+    if "steps_per_epoch" not in options and callable(cardinality) and int(cardinality()) < 0:
+        raise ConfigError(
+            f"The training stream of {name} has no known length (cardinality {int(cardinality())}), "
+            "so an epoch of it never ends: its fit_kwargs must return "
+            f"{{'steps_per_epoch': data.steps_per_epoch}}. {note}"
+        )
+    return options
+
+
 def load_data(run: Run) -> None:
     """Load the data, refuse what its length shows is wrong, and check it against a resumed run's."""
     trainer, config, run_dir = run.trainer, run.config, run.run_dir
@@ -357,6 +415,7 @@ def load_data(run: Run) -> None:
     trainer.input_check(run.facts, run.data)
     run.steps_per_epoch = run.data.steps_per_epoch
     steps_per_epoch = run.steps_per_epoch
+    run.fit_options = _checked_fit_options(run)
     every = checkpoint_cfg.backup_every_steps
     if every is not None and every >= steps_per_epoch:
         # The key needs the length of an epoch, known only now. Refuse, do not run
@@ -570,12 +629,18 @@ def train_or_restore(run: Run) -> None:
         with _a_failure_is_logged("Training"), _a_corrupt_file_is_named(
             run_dir, trainer.files_to_scan(data), "fit"
         ):
+            # DECISION plan-2026-11-12T015747-46e5318f/D-003
+            # The task's fit options are spread into THIS call and nowhere else; the default is ``{}``, so
+            # a task that says nothing makes the call it always made (``test_the_sequence_seams_default_
+            # to_nothing`` reads the keywords). Do NOT write ``steps_per_epoch=None`` for "no option":
+            # Keras reads None as a value. ``_checked_fit_options`` has refused a name that collides.
             run.history = model.fit(
                 data.train_ds,
                 validation_data=data.select_ds,
                 epochs=epochs,
                 callbacks=callbacks,
                 verbose=1,
+                **run.fit_options,
             )
         run.fit_wall_seconds = time.perf_counter() - started
         update_fit_state(run.sidecar_path, fit_finished=True)
