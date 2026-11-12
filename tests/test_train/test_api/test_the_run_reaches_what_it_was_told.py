@@ -201,12 +201,13 @@ def test_the_families_listed_here_are_the_classification_families_registered():
     # Step 28 (D-077, and plan 98b866fb step 2): the registry also holds the four segmentation families and the five
     # denoising ones (plan d483ffab step 7); this file spies on the
     # CLASSIFICATION run (cross-entropy on logits, top-k), and the segmentation run's compile is
-    # checked in test_image_segmentation_task.py and test_segmentation_metrics.py.
+    # checked in test_image_segmentation_task.py and test_segmentation_metrics.py. The two pretrain families
+    # (`beit`, `energy_transformer`: plan 46e5318f step 10) have their own task and tests.
     classifiers = sorted(f for f, spec in registry.MODELS.items() if spec.tasks == ("image_classification",))
     assert sorted(family for family, _ in FAMILIES) == classifiers
     assert sorted(set(registry.MODELS) - set(classifiers)) == [
-        "accunet", "bfcnn", "bfconvunext", "bfunet", "convnext_seg", "convunext", "convunext_biased", "resnet_seg",
-        "scunet",
+        "accunet", "beit", "bfcnn", "bfconvunext", "bfunet", "convnext_seg", "convunext", "convunext_biased",
+        "energy_transformer", "resnet_seg", "scunet",
     ]
 
 

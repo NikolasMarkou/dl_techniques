@@ -42,6 +42,7 @@ from train.api.denoising_args import (
     DenoisingData,
     DenoiseTransformArgs,
 )
+from train.api.pretrain_args import PretrainData, PretrainMetricArgs, PretrainTransformArgs
 from train.api.segmentation_args import (
     BuiltinSegData,
     CsvSegData,
@@ -52,6 +53,7 @@ from train.api.segmentation_args import (
 from train.api.tasks.image_classification import ImageClassificationConfig
 from train.api.tasks.image_denoising import ImageDenoisingConfig
 from train.api.tasks.image_segmentation import ImageSegmentationConfig
+from train.api.tasks.pretrain import PretrainConfig
 
 from ._groups import args_groups
 
@@ -159,6 +161,7 @@ def classes_checked() -> List[type]:
         ImageSegmentationConfig, BuiltinSegData, FolderSegData, CsvSegData, SegTransformArgs, SegMetricArgs,
         ImageDenoisingConfig, DenoisingData, DenoiseTransformArgs, DenoiseMetricArgs, DenoiseLossArgs,
         DenoiseOptimArgs,
+        PretrainConfig, PretrainData, PretrainTransformArgs, PretrainMetricArgs,
     ]
 
 
@@ -208,9 +211,11 @@ def test_no_exemption_is_stale(reads):
         )
 
 
-def test_the_scan_covers_the_twenty_three_classes_and_the_files_it_names():
+def test_the_scan_covers_the_twenty_seven_classes_and_the_files_it_names():
     assert len(args_groups()) == 7, "the brief names seven groups; a new one is a new row to review"
-    assert len(classes_checked()) == 23
+    assert len(classes_checked()) == 27
+    assert SRC / "train" / "api" / "tasks" / "pretrain.py" in SCANNED
+    assert SRC / "train" / "api" / "pretrain_args.py" in SCANNED
     assert SRC / "train" / "api" / "tasks" / "image_denoising.py" in SCANNED
     assert SRC / "train" / "api" / "denoising_args.py" in SCANNED
     assert SRC / "train" / "api" / "tasks" / "image_segmentation.py" in SCANNED

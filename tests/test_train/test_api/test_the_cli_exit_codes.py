@@ -315,8 +315,9 @@ def test_a_list_command_accepts_every_help_word(command, word, cwd):
         )
         # 36 classifier variants, the 17 of the four segmentation families (D-077; plan 98b866fb step 2 added
         # the 11 of resnet_seg and convnext_seg, which read the classifiers' own tables) and the 23 of the five
-        # denoising families (plan d483ffab step 7: four with five variants each, scunet with three).
-        assert len(result.stdout.split()) == 76
+        # denoising families (plan d483ffab step 7: four with five variants each, scunet with three) and the 7 of the two
+        # pretrain families (plan 46e5318f step 10: energy_transformer with three, beit with four).
+        assert len(result.stdout.split()) == 83
 
 
 # A task that raises a DLTrainError of its own is a user-fixable failure, not a

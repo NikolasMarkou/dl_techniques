@@ -34,6 +34,12 @@ BUILTIN_TASKS = (
         function="train.api.tasks.image_denoising:train_image_denoising",
         summary="train a blind image denoiser on folders of clean images with noise added on the fly",
     ),
+    registry.TaskSpec(
+        name="pretrain",
+        config_class="train.api.tasks.pretrain:PretrainConfig",
+        function="train.api.tasks.pretrain:train_pretrain",
+        summary="pretrain a masked-image model (energy_transformer patch completion, beit against a frozen tokenizer)",
+    ),
 )
 
 

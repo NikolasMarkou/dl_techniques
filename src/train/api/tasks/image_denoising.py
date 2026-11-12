@@ -723,9 +723,7 @@ class ImageDenoisingTrainer(TaskTrainer):
         run_dir: str,
     ) -> Any:
         """Run the data-free analysis (weights and spectral only); see the module contract."""
-        from threadpoolctl import threadpool_limits
-
-        from train.common import evaluation, run_summary
+        from train.common import run_summary
 
         # DECISION plan-2026-11-10T095307-d483ffab/D-014
         # The analysis of a denoiser is DATA-FREE. The default `run_analysis` picks its configuration by the output
@@ -736,15 +734,9 @@ class ImageDenoisingTrainer(TaskTrainer):
         # through `analysis_config_for` produces an ECE, this one leaves `calibration_metrics` empty). Per-pixel
         # uncertainty, the Jacobian asymmetry and the PSNR sweep stay the `train.bfunet` eval scripts. The BLAS limit
         # is `run_data_free_analysis`'s (D-243 of plan 81938e81), the seed the default `run_analysis`'s (D-027).
-        analysis_config = dataclasses.replace(run_summary.data_free_analysis_config(), random_state=config.seed)
-        with threadpool_limits(limits=run_summary.DATA_FREE_ANALYSIS_BLAS_THREADS):
-            results = evaluation.run_model_analysis(
-                model, test_data, history, experiment_name, run_dir, config=analysis_config
-            )
-        if results is not None:
-            # The library's own four-panel dashboard reads "No data available" for a data-free analysis.
-            run_summary.remove_empty_summary_dashboard(Path(run_dir), results)
-        return results
+        # The configuration, the BLAS limit and the removal of the library's empty dashboard are the shared helper's
+        # (`pretrain` runs the same data-free analysis); the reason it is data-free is the anchor above.
+        return run_summary.data_free_model_analysis(model, test_data, history, experiment_name, run_dir, config.seed)
 
     def evaluate_and_report(
         self, config: ImageDenoisingConfig, data: Any, fit: FitState

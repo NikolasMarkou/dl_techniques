@@ -29,6 +29,12 @@ Interface contract
         outside ``[0, vocab_size)``.
     The constant BEiT logits broadcast to ``(batch, N, V)``: 32 * 196 * 8192 * 4 bytes, about
     205 MB per evaluation batch at imagenette with the 8192-code head.
+
+``epoch_zero_val_loss(sidecar_path)``
+    :param sidecar_path: ``<run>/checkpoints/fit_state.json``, the fit sidecar.
+    :return: the ``val_loss`` of the UNTRAINED model on the select stream, which the fresh run's epoch-zero
+        evaluation wrote there (``initial.metrics.loss``); a resume reads the same number.
+    :raises ValueError: if the sidecar has no such value (a missing file, or a run that never evaluated epoch zero).
 """
 
 from dataclasses import dataclass
@@ -39,6 +45,7 @@ import numpy as np
 import tensorflow as tf
 
 from train.common.pretrain_data import BEIT_MIM, ET_MASKED, METHODS, masked_code_ids
+from train.common.resume_state import read_fit_state
 
 #: The floor of an in-sample probability before its log, so a code the select split never
 #: masks cannot give ``-inf`` logits. A masked target always has a positive in-sample count, so
@@ -110,3 +117,22 @@ def constant_baseline(
     log_probs = np.log(np.maximum(share, _PROBABILITY_FLOOR)).astype(np.float32)
     model = ConstantPredictor(log_probs, (*target_shape, int(vocab_size)))
     return Baseline("unigram_codes", _evaluate(model, select_ds, method))
+
+
+def epoch_zero_val_loss(sidecar_path: Any) -> float:
+    """The untrained model's ``val_loss`` as the fit sidecar holds it; see the module contract."""
+    # DECISION plan-2026-11-12T015747-46e5318f/D-009
+    # The epoch-zero term of the bar is read from the SIDECAR, always, and never from an attribute the first
+    # process set: a resume (and a reporting-only resume) never calls `initial_loss_check`, so the attribute is
+    # empty there, and re-evaluating the weights a resume restored would measure the trained model, not the
+    # untrained one. Do NOT cache it on the trainer "to save a read".
+    state = read_fit_state(sidecar_path)
+    initial = state.get("initial")
+    metrics = initial.get("metrics") if isinstance(initial, dict) else None
+    loss = metrics.get("loss") if isinstance(metrics, dict) else None
+    if isinstance(loss, bool) or not isinstance(loss, (int, float)):
+        raise ValueError(
+            f"the epoch-zero val_loss is not in {sidecar_path}: the fit sidecar holds no initial.metrics.loss, so the "
+            "success bar cannot be cut (a run writes it before its first epoch)"
+        )
+    return float(loss)

@@ -125,14 +125,16 @@ RUN_HELP: Dict[str, str] = {
 }
 
 
-def resume_help(epoch_cost: str) -> str:
+def resume_help(epoch_cost: str, order: str = "the data order replays epoch 0's") -> str:
     """Return the help of ``resume_interrupted``; ``epoch_cost`` is the parenthesis' first clause.
 
     :param epoch_cost: what an epoch costs on the task's data, e.g. ``"an ImageNet epoch is hours"``.
+    :param order: what the training data order does on a resume; the default is the shipped tasks' (their loader
+        replays epoch 0's order), a task whose resume trains on another stream says so here.
     """
     return (
         "continue a killed run of the same out with the same request (devices "
-        "may differ); the data order replays epoch 0's; a killed epoch is lost and a "
+        f"may differ); {order}; a killed epoch is lost and a "
         f"half-done epoch is trained again from its first batch ({epoch_cost}; "
         "checkpoint_args.backup_every_steps bounds the loss to that many batches "
         "of training, and the epoch is then continued from the last backup: only the "

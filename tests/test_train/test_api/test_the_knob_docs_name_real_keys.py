@@ -13,7 +13,8 @@ against the real code (review-iter-1 concern 7; every plant listed in ``PLANTS``
   :class:`~train.api.tasks.image_segmentation.ImageSegmentationConfig` (step 28: a document now
   describes two tasks, so a name must exist in at least one and a value after ``=`` must be valid
   in the first that has the field; ``data`` is the union of the seven data classes: step 8 of plan d483ffab added
-  :class:`~train.api.tasks.image_denoising.ImageDenoisingConfig` and its ``DenoisingData``); a backticked ``<name>_args`` alone must be a group; a ``<group>``
+  :class:`~train.api.tasks.image_denoising.ImageDenoisingConfig` and its ``DenoisingData``, step 10 of plan 46e5318f
+  :class:`~train.api.tasks.pretrain.PretrainConfig` and its ``PretrainData``); a backticked ``<name>_args`` alone must be a group; a ``<group>``
   that is not a group is refused; digits count in a field name;
 * an ``=value`` suffix (``analysis_args.conformal_alpha=0.1``) must be JSON of the field's real
   type, must pass the group's own ``problems`` rule for that field (``checkpoint_args.backup_every_steps=1``
@@ -84,10 +85,12 @@ from train.api.cli import parse_task_arguments
 from train.api.errors import ConfigError
 from train.api.data_args import BuiltinImageData, CsvImageData, FolderImageData
 from train.api.denoising_args import DenoisingData
+from train.api.pretrain_args import PretrainData
 from train.api.segmentation_args import BuiltinSegData, CsvSegData, FolderSegData
 from train.api.tasks.image_classification import ImageClassificationConfig, ImageClassificationTrainer
 from train.api.tasks.image_denoising import ImageDenoisingConfig, ImageDenoisingTrainer
 from train.api.tasks.image_segmentation import ImageSegmentationConfig, ImageSegmentationTrainer
+from train.api.tasks.pretrain import PretrainConfig, PretrainTrainer
 from train.api.trainer import TaskTrainer
 from train.common.run_summary import skipped_analysis_status
 
@@ -103,11 +106,13 @@ CLASSES = {
     "ImageClassificationTrainer": ImageClassificationTrainer,
     "ImageSegmentationTrainer": ImageSegmentationTrainer,
     "ImageDenoisingTrainer": ImageDenoisingTrainer,
+    "PretrainTrainer": PretrainTrainer,
     "AnalysisArgs": AnalysisArgs,
     "LoggerArgs": LoggerArgs,
     "ImageClassificationConfig": ImageClassificationConfig,
     "ImageSegmentationConfig": ImageSegmentationConfig,
     "ImageDenoisingConfig": ImageDenoisingConfig,
+    "PretrainConfig": PretrainConfig,
 }
 #: Module aliases the docs use for ``module.function``; a ``train.`` or ``dl_techniques.`` path is
 #: imported as written.
@@ -135,7 +140,7 @@ KEY = re.compile(
 GROUP_ONLY = re.compile(r"`((?:[a-z]+_)+args)`")
 SUMMARY = re.compile(r"`summary\.analyzer\.([A-Za-z0-9_]+)`")
 HOOK = re.compile(
-    r"`(TaskTrainer|ImageClassificationTrainer|ImageSegmentationTrainer|ImageDenoisingTrainer)\.([A-Za-z_]\w*)(?:\(([^`]*)\))?`"
+    r"`(TaskTrainer|ImageClassificationTrainer|ImageSegmentationTrainer|ImageDenoisingTrainer|PretrainTrainer)\.([A-Za-z_]\w*)(?:\(([^`]*)\))?`"
 )
 DOTTED = re.compile(r"`([A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)+)(?:\([^`]*\))?`")
 PATH = re.compile(r"\b((?:src|tests)/[\w/.\-]+\.(?:py|md|json))\b")
@@ -156,11 +161,12 @@ ANALYZER_BLOCK_KEYS = set(skipped_analysis_status()) | {"failed_analyses"}
 #: The task configs a document may name a key of (step 28: the segmentation task is the second). A key
 #: reference is checked against the FIRST config that has the group and the field; a name a document
 #: writes must exist in at least one task, and a value it writes after ``=`` must be valid there.
-CONFIGS = (ImageClassificationConfig, ImageSegmentationConfig, ImageDenoisingConfig)
+CONFIGS = (ImageClassificationConfig, ImageSegmentationConfig, ImageDenoisingConfig, PretrainConfig)
 
 #: Every data class of those configs, in the order of :data:`CONFIGS`.
 DATA_CLASSES = (
     BuiltinImageData, FolderImageData, CsvImageData, BuiltinSegData, FolderSegData, CsvSegData, DenoisingData,
+    PretrainData,
 )
 
 
@@ -440,6 +446,7 @@ TASK_CONFIGS = {
     "image_classification": ImageClassificationConfig,
     "image_segmentation": ImageSegmentationConfig,
     "image_denoising": ImageDenoisingConfig,
+    "pretrain": PretrainConfig,
 }
 
 
@@ -554,7 +561,9 @@ def _reference_problems(region: str) -> List[str]:
     for token in sorted(set(DOTTED.findall(region))):
         if token.split(".")[0] == "summary" or re.match(r"(?:[a-z]+_)*args\.", token):
             continue
-        if token.split(".")[0] in ("TaskTrainer", "ImageClassificationTrainer", "ImageSegmentationTrainer", "ImageDenoisingTrainer"):
+        if token.split(".")[0] in (
+            "TaskTrainer", "ImageClassificationTrainer", "ImageSegmentationTrainer", "ImageDenoisingTrainer", "PretrainTrainer"
+        ):
             continue  # the hook rule below owns these, with or without parentheses
         if token.rsplit(".", 1)[1] in FILE_SUFFIXES:
             continue  # a file name, checked against the sources below
@@ -567,7 +576,7 @@ def _reference_problems(region: str) -> List[str]:
             found.append(f"`{cls_name}.{name}` is not a method of {cls_name}")
     # With parentheses, the parameter names must be the real ones (without them only the name is).
     for cls_name, name, params in re.findall(
-        r"`(TaskTrainer|ImageClassificationTrainer|ImageSegmentationTrainer|ImageDenoisingTrainer)\.([A-Za-z_]\w*)\(([^`]*)\)`", region
+        r"`(TaskTrainer|ImageClassificationTrainer|ImageSegmentationTrainer|ImageDenoisingTrainer|PretrainTrainer)\.([A-Za-z_]\w*)\(([^`]*)\)`", region
     ):
         real = _hook_params(CLASSES[cls_name], name)
         shown = [p.strip() for p in params.split(",") if p.strip()]

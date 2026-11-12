@@ -28,8 +28,13 @@ Interface contracts:
 - :func:`run_data_free_analysis` -- ``(model, sample, labels, history, model_name, run_dir,
   enabled) -> {"status", "analyzers", "error", "path", "seconds"}`` (or the skipped block):
   runs the weights + spectral analysis and reads it back; never raises.
+- :func:`data_free_model_analysis` -- ``(model, test_data, history, experiment_name, run_dir, seed) ->
+  AnalysisResults | None``: the same weights + spectral configuration as the ``run_analysis`` hook of a
+  ``train.api`` task whose output is not class probabilities (denoising, pretrain); the caller reads the
+  status back with :func:`read_data_free_analysis_status`.
 """
 
+import dataclasses
 import json
 import os
 import time
@@ -506,6 +511,32 @@ def run_data_free_analysis(
     block["seconds"] = time.perf_counter() - started
     logger.info(f"Analyzer status (read back from disk): {block['status']} in {block['seconds']:.1f}s")
     return block
+
+
+def data_free_model_analysis(
+        model: keras.Model, test_data: Tuple[Any, Any], history: Any, experiment_name: str,
+        run_dir: Any, seed: Optional[int],
+) -> Any:
+    """Run the weights and spectral analyses only and return what ``run_model_analysis`` returns.
+
+    The body of the ``run_analysis`` hook of the ``train.api`` tasks whose output is not class probabilities
+    (``image_denoising``, ``pretrain``): :func:`data_free_analysis_config` with the run's ``seed`` as the
+    analyzer's ``random_state`` (so the bootstrap ``pl_pvalue`` is reproducible between runs of one seed), inside
+    the BLAS limit of :data:`DATA_FREE_ANALYSIS_BLAS_THREADS`, and the library's empty summary dashboard removed
+    after a result. The caller reads the status back with :func:`read_data_free_analysis_status` (the stock
+    reader calls a data-free analysis "missing").
+
+    :param test_data: ``(x, y)`` handed to the analyzer; these analyses read the weights, not the data, so ``x``
+        may be a list of the model's inputs.
+    :param run_dir: the run directory (a ``str`` or a ``Path``); results land in ``<run_dir>/model_analysis/``.
+    :return: the ``AnalysisResults``, or ``None`` when the analysis raised (``run_model_analysis`` swallows it).
+    """
+    config = dataclasses.replace(data_free_analysis_config(), random_state=seed)
+    with threadpool_limits(limits=DATA_FREE_ANALYSIS_BLAS_THREADS):
+        results = run_model_analysis(model, test_data, history, experiment_name, run_dir, config=config)
+    if results is not None:
+        remove_empty_summary_dashboard(Path(run_dir), results)
+    return results
 
 
 # The config attributes every ConvUNeXt-side ``results_summary.json`` records under their own names.

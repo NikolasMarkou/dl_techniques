@@ -1,10 +1,9 @@
-"""The two pretrain model families and their groups: adapters, refusals, recipes and the mask rule (first part).
+"""The two pretrain model families and their groups: adapters, refusals, recipes, the mask rule and the registration.
 
 ``train.api.pretrain_models`` and ``train.api.pretrain_args`` (plan-2026-11-12T015747-46e5318f step 9) adapt
 ``energy_transformer`` (ET masked-patch completion) and ``beit`` (masked image modelling against a frozen
 tokenizer's code ids) to the factory call the API makes, hold the per-family refusal tables, the recipes and the
-``data`` group with its mask keys. Nothing is registered yet: the task and the registration are step 10, whose
-tests are the second part of this file. This part calls everything directly and pins:
+``data`` group with its mask keys. The first part of this file calls everything directly and pins:
 
 * the adapters: a non-``None`` ``num_classes`` is refused, the model is returned BUILT for the two inputs
   ``[image, mask]`` (a task returns a built model, so ``run.model.build`` is skipped), the keywords the task
@@ -20,8 +19,12 @@ tests are the second part of this file. This part calls everything directly and 
 * the ``data`` group: the mask keys of the other family are refused, ``data.num_mask_patches`` above the grid is
   refused by name, the auto value follows the BEiT recipe's mask fraction (D-008, D-018: 24 and 5 at an 8 x 8 grid);
 * a request that can be refused without data is refused with no TensorFlow device initialised: one child process
-  runs the refusal rows through what ``TaskTrainer`` does before the claim (the task itself is step 10, whose test
-  checks ``out`` stays absent through the real command line).
+  runs the refusal rows through the REAL command line (``train.api.main(["pretrain", ...])``) with a recorder on
+  TensorFlow's eager context and a spy on the claim, so ``out`` stays absent and no tensor is created.
+
+The second part (plan step 10) is the registration: the task row, the two families under the ``pretrain`` task
+(their variants read from the model modules' ``MODEL_VARIANTS``), a family of another task refused in both
+directions, and the help and listing paths that stay free of TensorFlow.
 
 Everything writes under ``tmp_path``.
 """
@@ -688,7 +691,7 @@ def test_imagenette_without_its_records_is_refused_before_any_data_is_read(monke
 
 
 # ---------------------------------------------------------------------
-# Imports, and nothing registered yet
+# Importing the modules
 # ---------------------------------------------------------------------
 
 
@@ -709,42 +712,171 @@ def test_importing_the_modules_and_building_the_specs_imports_no_model_code():
     assert done.stdout.strip().splitlines()[-1] == "LOADED []"
 
 
-def test_the_two_families_are_written_but_not_registered_yet(monkeypatch):
-    # Step 10 registers them with the task, because a registered family with no task class breaks the registry tests
-    # that import every `__all__` name; the second part of this file replaces this test with the registration test.
+# ---------------------------------------------------------------------
+# Registration (plan step 10): the task row and the two families
+# ---------------------------------------------------------------------
+
+
+def variant_tables():
+    """``{family: [variant names]}`` read from the model modules' ``MODEL_VARIANTS`` (never typed here)."""
+    from dl_techniques.models.vision.beit.model import MODEL_VARIANTS as beit
+    from dl_techniques.models.vision.energy_transformer.model import MODEL_VARIANTS as et
+
+    return {"energy_transformer": list(et), "beit": list(beit)}
+
+
+@pytest.fixture
+def registered(monkeypatch):
+    """An empty registry holding what ``main`` registers: every built-in family and task."""
+    from train.api.tasks import register_builtin_tasks
+
     monkeypatch.setattr(registry, "MODELS", {})
     monkeypatch.setattr(registry, "TASKS", {})
     recipes.register_builtin_models()
-    assert not set(FAMILIES) & set(registry.MODELS)
-    assert [spec.tasks for spec in pm.builtin_pretrain_models()] == [(pa.TASK,), (pa.TASK,)]
+    register_builtin_tasks()
+    return registry
+
+
+def test_the_two_families_are_registered_under_the_pretrain_task_only(registered):
     assert pa.TASK == "pretrain" == pm.TASK
+    for family in FAMILIES:
+        assert registry.MODELS[family].tasks == (pa.TASK,), family
+    assert [spec.tasks for spec in pm.builtin_pretrain_models()] == [(pa.TASK,), (pa.TASK,)]
+    # Control: every other family of the registry trains something else.
+    assert not [f for f, spec in registry.MODELS.items() if f not in FAMILIES and pa.TASK in spec.tasks]
+
+
+def test_the_task_row_names_the_config_and_the_function(registered):
+    row = registry.TASKS[pa.TASK]
+    assert row.config_class == "train.api.tasks.pretrain:PretrainConfig"
+    assert row.function == "train.api.tasks.pretrain:train_pretrain"
+    assert row.summary
+    assert [spec.name for spec in registry.list_tasks()].count(pa.TASK) == 1
+    from train.api.tasks.pretrain import PretrainConfig, train_pretrain
+
+    assert row.load_config_class() is PretrainConfig
+    assert row.load_function() is train_pretrain
+
+
+def test_list_models_for_the_task_is_the_variant_tables(registered):
+    tables = variant_tables()
+    assert tables["energy_transformer"] and tables["beit"]
+    expected = sorted(f"{family}/{name}" for family, names in tables.items() for name in names)
+    assert registry.list_models(pa.TASK) == expected
+    assert all(name.split("/")[0] in FAMILIES for name in registry.list_models(pa.TASK))
+    # The other tasks' listings do not gain them.
+    for task in ("image_classification", "image_segmentation", "image_denoising"):
+        assert not [n for n in registry.list_models(task) if n.split("/")[0] in FAMILIES], task
+
+
+def test_the_listing_in_a_fresh_process_is_the_same(tmp_path):
+    done = subprocess.run(
+        [sys.executable, "-m", "train", "list_models", "task=pretrain"], cwd=tmp_path, capture_output=True, text=True,
+        timeout=300, env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")},
+    )
+    assert done.returncode == 0, done.stderr[-2000:]
+    expected = sorted(f"{family}/{name}" for family, names in variant_tables().items() for name in names)
+    assert done.stdout.split() == expected
+
+
+@pytest.mark.parametrize(
+    "name, task, family_fragment",
+    [
+        ("vit/vit_pico", "pretrain", "image_classification"),
+        ("bfcnn/tiny", "pretrain", "image_denoising"),
+        ("convunext/tiny", "pretrain", "image_segmentation"),
+        ("beit/beit_tiny", "image_classification", "pretrain"),
+        ("energy_transformer/et_tiny", "image_classification", "pretrain"),
+        ("beit/beit_tiny", "image_denoising", "pretrain"),
+        ("energy_transformer/et_tiny", "image_segmentation", "pretrain"),
+    ],
+)
+def test_a_family_of_another_task_is_refused_both_ways(registered, name, task, family_fragment):
+    with pytest.raises(ConfigError) as caught:
+        registry.parse_model_name(name, task=task)
+    message = str(caught.value)
+    assert f"trains {family_fragment}" in message and repr(task) in message, message
+    # Control: each name is accepted by its own task.
+    own = "pretrain" if name.split("/")[0] in FAMILIES else family_fragment
+    assert registry.parse_model_name(name, task=own)[0] == name.split("/")[0]
+
+
+def test_registering_twice_changes_nothing(registered):
+    before = dict(registry.MODELS), dict(registry.TASKS)
+    from train.api.tasks import register_builtin_tasks
+
+    recipes.register_builtin_models()
+    register_builtin_tasks()
+    assert (dict(registry.MODELS), dict(registry.TASKS)) == before
+
+
+TF_FREE_DRIVER = (
+    "import sys\n"
+    "from train.api import cli\n"
+    "codes = [cli.main(['help']), cli.main(['list_tasks']), cli.main(['pretrain', 'help'])]\n"
+    "loaded = sorted(m for m in ('tensorflow', 'keras', 'yaml', 'train.common', 'dl_techniques.models') if m in sys.modules)\n"
+    "print('CODES', codes)\n"
+    "print('LOADED', loaded)\n"
+)
+
+
+def test_help_and_list_tasks_load_no_tensorflow_and_name_the_task(tmp_path):
+    done = subprocess.run(
+        [sys.executable, "-c", TF_FREE_DRIVER], cwd=tmp_path, capture_output=True, text=True, timeout=300,
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")},
+    )
+    assert done.returncode == 0, done.stderr[-2000:]
+    lines = done.stdout.splitlines()
+    assert lines[-2:] == ["CODES [0, 0, 0]", "LOADED []"], done.stdout[-2000:]
+    assert "pretrain" in done.stdout
+    # The task's own help names its keys, among them the mask keys of the data group.
+    assert "data.mask_ratio" in done.stdout and "data.num_mask_patches" in done.stdout
 
 
 # ---------------------------------------------------------------------
-# A request that can be refused without data is refused with no tensor created
+# A request that can be refused without data is refused with no tensor created, through the real command line
 # ---------------------------------------------------------------------
 
-#: ``(family, dataset, request, fragments)``: one refusal per row, each of a different layer (the data group, the
-#: optimizer, the model keys, the facts), all of which need no loaded data.
-PRE_CLAIM_REFUSALS: List[Tuple[str, str, Dict[str, Any], Tuple[str, ...]]] = [
-    ("beit", "cifar10", {"data": {"num_mask_patches": 75}}, ("data.num_mask_patches", "64")),
-    ("beit", "cifar10", {"data": {"mask_ratio": 0.5}}, ("data.mask_ratio", "'beit'")),
-    ("energy_transformer", "cifar10", {"data": {"num_mask_patches": 10}}, ("data.num_mask_patches", "'energy_transformer'")),
-    ("energy_transformer", "cifar10", {"data": {"patch_size": 5}}, ("data.patch_size",)),
-    ("energy_transformer", "cifar10", {"optim": {"global_clipnorm": None}}, ("optim_args.global_clipnorm",)),
-    ("energy_transformer", "cifar10", {"optim": {"optimizer": "sgd", "lr": 0.1, "weight_decay": 1e-4}}, ("optim_args.weight_decay",)),
-    ("beit", "imagenette", {"optim": {"optimizer": "sgd", "lr": 0.1, "weight_decay": 1e-4}}, ("optim_args.weight_decay",)),
-    ("energy_transformer", "cifar10", {"model_args": {"tokenizer_checkpoint": "t.keras"}}, ("model_args.tokenizer_checkpoint", "'beit'")),
-    ("beit", "cifar10", {"model_args": {"num_steps": 6}}, ("model_args.num_steps", "'energy_transformer'")),
-    ("beit", "cifar10", {"model_args": {"vocab_size": 16}}, ("model_args.vocab_size",)),
-    ("beit", "cifar10", {"image_size": 30}, ("data.patch_size",)),
+#: The tokenizer token every BEiT row carries so that the refusal under test is the one reported (a BEiT run needs one).
+TOKENIZER = "model_args.tokenizer_checkpoint=tokenizer.keras"
+
+#: ``(family, dataset, command-line tokens, fragments of the message)``: one refusal per row, each of a different
+#: layer (the data group, the optimizer, the model keys, the facts, the task), all of which need no loaded data. The
+#: tokens are what ``python -m train pretrain`` is given after ``out=``, ``model=`` and ``data.dataset=``.
+PRE_CLAIM_REFUSALS: List[Tuple[str, str, List[str], Tuple[str, ...]]] = [
+    ("beit", "cifar10", ["data.num_mask_patches=75", TOKENIZER], ("data.num_mask_patches", "64")),
+    ("beit", "cifar10", ["data.mask_ratio=0.5", TOKENIZER], ("data.mask_ratio", "'beit'")),
+    ("energy_transformer", "cifar10", ["data.num_mask_patches=10"], ("data.num_mask_patches", "'energy_transformer'")),
+    ("energy_transformer", "cifar10", ["data.patch_size=5"], ("data.patch_size",)),
+    ("energy_transformer", "cifar10", ["optim_args.global_clipnorm=null"], ("optim_args.global_clipnorm",)),
+    (
+        "energy_transformer", "cifar10", ["optim_args.optimizer=sgd", "optim_args.lr=0.1", "optim_args.weight_decay=0.0001"],
+        ("optim_args.weight_decay",),
+    ),
+    (
+        "beit", "imagenette", ["optim_args.optimizer=sgd", "optim_args.lr=0.1", "optim_args.weight_decay=0.0001", TOKENIZER],
+        ("optim_args.weight_decay",),
+    ),
+    (
+        "energy_transformer", "cifar10", ["model_args.tokenizer_checkpoint=tokenizer.keras"],
+        ("model_args.tokenizer_checkpoint", "'beit'"),
+    ),
+    ("beit", "cifar10", ["model_args.num_steps=6", TOKENIZER], ("model_args.num_steps", "'energy_transformer'")),
+    ("beit", "cifar10", ["model_args.vocab_size=16", TOKENIZER], ("model_args.vocab_size",)),
+    ("beit", "cifar10", ["transform_args.image_size=30", TOKENIZER], ("data.patch_size",)),
+    # A task-level refusal: a conformal set is a set of classes, and a pretrain run has none.
+    ("energy_transformer", "cifar10", ["analysis_args.conformal_alpha=0.1"], ("analysis_args.conformal_alpha",)),
+    # A BEiT run with no tokenizer has no targets (the existence and content checks of the path are the tokenizer step's).
+    ("beit", "cifar10", [], ("model_args.tokenizer_checkpoint",)),
+    ("beit", "imagenette", [], ("model_args.tokenizer_checkpoint",)),
 ]
 
-#: What the same stub accepts (the control of the rows above).
-PRE_CLAIM_ACCEPTED: List[Tuple[str, str, Dict[str, Any]]] = [
-    ("energy_transformer", "cifar10", {}),
-    ("beit", "cifar10", {"data": {"num_mask_patches": 64}, "model_args": {"tokenizer_checkpoint": "t.keras"}}),
-    ("beit", "imagenette", {}),
+#: What the same command line accepts: it reaches the claim (the control of the rows above).
+PRE_CLAIM_ACCEPTED: List[Tuple[str, str, List[str]]] = [
+    ("energy_transformer", "cifar10", []),
+    ("energy_transformer", "imagenette", ["data.mask_ratio=0.25"]),
+    ("beit", "cifar10", ["data.num_mask_patches=64", TOKENIZER]),
+    ("beit", "imagenette", [TOKENIZER]),
 ]
 
 CHILD_DRIVER = textwrap.dedent(
@@ -757,47 +889,47 @@ CHILD_DRIVER = textwrap.dedent(
 
     from tensorflow.python.eager import context as eager
 
-    from train.api import data_args, pretrain_args as pa, pretrain_models as pm, registry
-    from train.api.args import AutoContext, OptimArgs
-    from train.api.errors import DLTrainError
+    from train.api import cli, data_args, trainer
 
     # The path test for the prepared imagenette records is the parent's test (`pretrain_facts`, monkeypatched there); the
     # child must not depend on the machine's TFDS directory.
     data_args._check_imagenette_records = lambda: None
 
-    for spec in pm.builtin_pretrain_models():
-        registry.register_model(spec)
+
+    class Claimed(Exception):
+        # Raised by the spy that replaces the claim: the request passed every refusal and reached `open_run`.
+        pass
+
+
+    def spy(path, resume):
+        raise Claimed(str(path))
+
+
+    trainer.open_run = spy
+
 
     def initialised():
         return eager.context()._context_handle is not None
 
-    def stub(family, variant, dataset, request, out):
-        # What TaskTrainer does before the claim: describe the data, resolve every group, check the model keys,
-        # and only then create `out`.
-        data = pa.load_pretrain_data_config({"dataset": dataset, **request.get("data", {})})
-        facts = pa.pretrain_facts(data, request.get("image_size"))
-        spec = registry.MODELS[family]
-        ctx = AutoContext(
-            family=family, variant=variant, dataset=dataset, num_classes=None, image_size=facts.image_size,
-            defaults=spec.recipe(dataset, variant),
-        )
-        pa.PretrainData.resolve_auto(data, ctx)
-        pa.PretrainTransformArgs(image_size=request.get("image_size", "auto")).resolve_auto(ctx)
-        optim = OptimArgs(**request.get("optim", {})).resolve_auto(ctx)
-        spec.load_resolver()(ctx, optim, request.get("model_args", {}))
-        os.makedirs(out)
 
     rows = json.load(open(sys.argv[1]))
     seen = {"at_start": initialised(), "results": []}
+    open(os.path.join(sys.argv[2], "tokenizer.keras"), "wb").close()
+    os.chdir(sys.argv[2])
     for index, row in enumerate(rows):
         out = os.path.join(sys.argv[2], f"run_{index}")
         variant = "et_tiny" if row["family"] == "energy_transformer" else "beit_tiny"
-        error = ""
+        argv = ["pretrain", f"out={out}", f"model={row['family']}/{variant}", f"data.dataset={row['dataset']}", *row["tokens"]]
+        errors = io.StringIO()
+        code, claimed = None, False
         try:
-            stub(row["family"], variant, row["dataset"], row["request"], out)
-        except DLTrainError as exc:
-            error = str(exc)
-        seen["results"].append({"error": error, "out_exists": os.path.exists(out)})
+            with contextlib.redirect_stderr(errors):
+                code = cli.main(argv)
+        except Claimed:
+            claimed = True
+        seen["results"].append(
+            {"code": code, "claimed": claimed, "stderr": errors.getvalue(), "out_exists": os.path.exists(out)}
+        )
     seen["initialised"] = initialised()
     import keras
 
@@ -810,10 +942,10 @@ CHILD_DRIVER = textwrap.dedent(
 
 @pytest.fixture(scope="module")
 def pre_claim_run(tmp_path_factory):
-    """Every refusal row and every accepted control through the stub in ONE child process, with a TensorFlow recorder."""
+    """Every refusal row and every accepted control through the real command line in ONE child process."""
     work = tmp_path_factory.mktemp("pre_claim")
-    rows = [{"family": f, "dataset": d, "request": r} for f, d, r, _ in PRE_CLAIM_REFUSALS]
-    rows += [{"family": f, "dataset": d, "request": r} for f, d, r in PRE_CLAIM_ACCEPTED]
+    rows = [{"family": f, "dataset": d, "tokens": t} for f, d, t, _ in PRE_CLAIM_REFUSALS]
+    rows += [{"family": f, "dataset": d, "tokens": t} for f, d, t in PRE_CLAIM_ACCEPTED]
     (work / "rows.json").write_text(json.dumps(rows))
     runs = work / "runs"
     runs.mkdir()
@@ -829,21 +961,24 @@ def pre_claim_run(tmp_path_factory):
 
 
 @pytest.mark.parametrize(
-    "index", range(len(PRE_CLAIM_REFUSALS)), ids=[f"{f}:{d}:{'+'.join(sorted(r))}" for f, d, r, _ in PRE_CLAIM_REFUSALS]
+    "index", range(len(PRE_CLAIM_REFUSALS)),
+    ids=[f"{f}:{d}:{'+'.join(t.split('=')[0] for t in tokens) or 'bare'}" for f, d, tokens, _ in PRE_CLAIM_REFUSALS],
 )
-def test_a_request_refusable_without_data_is_refused_before_the_claim(index, pre_claim_run):
+def test_a_request_refusable_without_data_exits_2_before_the_claim(index, pre_claim_run):
     result = pre_claim_run["results"][index]
-    assert result["error"], "the stub accepted a request that must be refused"
-    assert not result["out_exists"], "the run directory was claimed before the refusal"
+    assert result["code"] == 2, f"the command line accepted a request that must be refused: {result}"
+    assert not result["claimed"], "the run directory was claimed before the refusal"
+    assert not result["out_exists"]
     for fragment in PRE_CLAIM_REFUSALS[index][3]:
-        assert fragment in result["error"], (fragment, result["error"])
+        assert fragment in result["stderr"], (fragment, result["stderr"])
 
 
 @pytest.mark.parametrize("index", range(len(PRE_CLAIM_ACCEPTED)))
-def test_the_requests_a_family_offers_are_claimed(index, pre_claim_run):
+def test_the_requests_a_family_offers_reach_the_claim(index, pre_claim_run):
     result = pre_claim_run["results"][len(PRE_CLAIM_REFUSALS) + index]
-    assert result["error"] == "", result["error"]
-    assert result["out_exists"], "the stub claims out only after every refusal passed"
+    assert result["claimed"], f"a request every refusal accepts must reach the claim: {result}"
+    assert result["code"] is None and result["stderr"] == "", result
+    assert not result["out_exists"], "the spy replaces the claim, which is the first thing that creates `out`"
 
 
 def test_no_refusal_and_no_resolution_created_a_tensor(pre_claim_run):

@@ -193,6 +193,11 @@ REGISTERED: List[Tuple[str, str]] = [
     ("train/api/denoising_args.py", "DenoiseMetricArgs"),
     ("train/api/denoising_args.py", "DenoiseLossArgs"),
     ("train/api/denoising_args.py", "DenoiseOptimArgs"),
+    # The pretrain task (step 10 of plan 46e5318f): its config, its data config and its two own groups.
+    ("train/api/tasks/pretrain.py", "PretrainConfig"),
+    ("train/api/pretrain_args.py", "PretrainData"),
+    ("train/api/pretrain_args.py", "PretrainTransformArgs"),
+    ("train/api/pretrain_args.py", "PretrainMetricArgs"),
 ]
 
 # Fields known to be dead but OUT OF SCOPE of the sweep that introduced this
@@ -252,6 +257,20 @@ READ_BY_A_READER_THAT_DOES_NOT_IMPORT_THE_CLASS: Dict[Tuple[str, str], Dict[str,
         "out": ("train/api/trainer.py", "TaskTrainer.run"),
         "resume_interrupted": ("train/api/trainer.py", "TaskTrainer.run"),
         "model": ("train/api/trainer.py", "TaskTrainer.run"),
+    },
+    # The same task-agnostic reads for the pretrain task (it reads `model` through `TaskTrainer.run` as well: the family
+    # and the variant come out of it, and the task reads neither again), and the four the shared sequence reads for every
+    # task: the GPU choice and the precision (`TaskTrainer.run`), the epochs (`train_or_restore`) and the warm-start
+    # checkpoint (`run_sequence.build_model`).
+    ("train/api/tasks/pretrain.py", "PretrainConfig"): {
+        "debug_args": ("train/api/trainer.py", "TaskTrainer.run"),
+        "logger_args": ("train/api/fit_callbacks.py", "build_callbacks"),
+        "out": ("train/api/trainer.py", "TaskTrainer.run"),
+        "model": ("train/api/trainer.py", "TaskTrainer.run"),
+        "devices": ("train/api/trainer.py", "TaskTrainer.run"),
+        "precision": ("train/api/trainer.py", "TaskTrainer.run"),
+        "epochs": ("train/api/run_sequence.py", "train_or_restore"),
+        "checkpoint": ("train/api/run_sequence.py", "build_model"),
     },
 }
 

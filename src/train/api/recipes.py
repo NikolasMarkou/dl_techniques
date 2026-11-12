@@ -690,8 +690,11 @@ def register_builtin_models() -> None:
     # Imported here: segmentation_models and denoising_models import this module (``optim_recipe``,
     # ``merge_model_args``), so a module-scope import would be a cycle.
     from .denoising_models import builtin_denoising_models
+    from .pretrain_models import builtin_pretrain_models
     from .segmentation_models import builtin_segmentation_models
 
-    for spec in (*builtin_models(), *builtin_segmentation_models(), *builtin_denoising_models()):
+    for spec in (
+        *builtin_models(), *builtin_segmentation_models(), *builtin_denoising_models(), *builtin_pretrain_models()
+    ):
         if spec.family not in registry.MODELS:
             registry.register_model(spec)
