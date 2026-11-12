@@ -25,6 +25,12 @@ floor are found at build time (the run directory is claimed, and the message say
 ``VQVAERotationTrick`` files (32 px, 16 codes) saved under ``tmp_path``. The usage floor (D-007, D-019) is 64 effective codes, above
 what a 16-code toy can reach, so the arms that need a tokenizer to PASS lower it by patching the module constant.
 
+Third part (step 12): a 2-epoch run per family through ``train_pretrain`` and through ``cli.main(["pretrain", ...])`` on the fake
+CIFAR-10 (CPU, ``tmp_path``). It pins the run-directory listing (derived by running, no ``task.json``), the equal ``config.json``
+bytes, the summary's metric, baseline, epoch-zero loss, threshold and verdict, ``steps_per_epoch == n_train // batch`` as a fit
+spy sees it (a callback stops a fit that has no epoch length, so a missing ``steps_per_epoch`` is reported, not hung), the best
+checkpoint's reload gap of exactly 0.0, and the ``task.json`` refusals of ``predict`` and ``export``.
+
 The runs are real ``energy_transformer/et_tiny`` runs (``model_args.num_steps=2``) on the fake CIFAR-10 of
 ``tests/classification_fakes.py``: 54 fit rows, batch 4, so 13 steps of an epoch. Tests write only under ``tmp_path``.
 """
@@ -657,3 +663,170 @@ def test_the_pretrain_resume_note_names_its_own_order_and_claims_no_replay(monke
     # One clause in both places: the help of `resume_interrupted` and the note of the summary.
     help_text = {f.name: f.metadata.get("help") for f in dataclasses.fields(PretrainConfig)}["resume_interrupted"]
     assert PretrainTrainer.resume_order in help_text
+
+
+# ---------------------------------------------------------------------
+# Third part (step 12): a stubbed end to end per family, the run directory, the refusals of predict and export
+# ---------------------------------------------------------------------
+
+FAMILIES = ("energy_transformer", "beit")
+#: A fit that runs more batches than ``EPOCHS * STEPS`` has an epoch with no length (an infinite stream, no steps_per_epoch).
+RUNAWAY_BATCHES = 4 * EPOCHS * STEPS
+
+
+class Spy(keras.callbacks.Callback):
+    """Counts the batches of each epoch of one ``fit`` and stops a fit whose epoch never ends (reported, not hung)."""
+
+    def __init__(self):
+        super().__init__()
+        self.last_batch, self.total, self.epoch = {}, 0, 0
+
+    def on_epoch_begin(self, epoch, logs=None):
+        self.epoch = epoch
+
+    def on_train_batch_end(self, batch, logs=None):
+        self.total += 1
+        self.last_batch[self.epoch] = batch
+        if self.total > RUNAWAY_BATCHES:
+            self.model.stop_training = True   # the epoch ends here and the run goes on: the test reports it
+
+
+def flatten_request(asked: Dict[str, Any]) -> List[str]:
+    """``key=value`` tokens as the command line takes them: groups are dotted, ``model_args`` is one JSON value."""
+    tokens = []
+    for key, value in asked.items():
+        if isinstance(value, dict) and key != "model_args":
+            tokens += [f"{key}.{inner}={str(v).lower() if isinstance(v, bool) else v}" for inner, v in value.items()]
+        else:
+            tokens.append(f"{key}={json.dumps(value, separators=(',', ':')) if isinstance(value, dict) else value}")
+    return tokens
+
+
+@pytest.fixture(scope="module", params=FAMILIES)
+def ended(request, world, tokenizers, tmp_path_factory):
+    """One 2-epoch run per family through ``train_pretrain`` and the same request through ``cli.main``, in this process."""
+    from train.api import cli
+    from train.api.tasks.pretrain import train_pretrain
+
+    family = request.param
+    root = tmp_path_factory.mktemp("end_to_end_" + family)
+    model_args = {"num_steps": 2} if family == "energy_transformer" else {TOKENIZER_KEY: tokenizers["healthy"], **BEIT_SMALL}
+    asked = {
+        "out": str(root / "run"), "model": ET_MODEL if family == "energy_transformer" else BEIT_MODEL,
+        "data": {"dataset": "cifar10"}, "epochs": EPOCHS, "batch_size": BATCH, "model_args": model_args,
+        "analysis_args": {"model_analysis": True, "figures": True},
+    }
+    fits, real_fit = [], keras.Model.fit
+
+    def fit(self, *args, **keywords):
+        spy = Spy()
+        fits.append({"keywords": {k: keywords.get(k) for k in ("steps_per_epoch", "validation_steps")}, "spy": spy})
+        return real_fit(self, *args, **{**keywords, "callbacks": [*keywords.get("callbacks", []), spy]})
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(keras.Model, "fit", fit)
+        patch.setattr(pretrain_run, "MIN_TOKENIZER_PERPLEXITY", LOW_FLOOR)
+        patch.chdir(root)
+        result = train_pretrain(**asked)
+        (root / "run").rename(root / "function")
+        code = cli.main(["pretrain", *flatten_request(asked)])
+        (root / "run").rename(root / "cli")
+    return SimpleNamespace(family=family, root=root, asked=asked, result=result, code=code, fits=fits,
+                           function=root / "function", cli=root / "cli", tokenizers=tokenizers)
+
+
+RUN_FILES = {
+    "best_model.keras", "config.json", "config_requested.json", "final_model.keras", "results_summary.json",
+    "run.lock", "run.log", "training_history.json", "training_log.csv",
+}  # and NO task.json (D-013)
+RUN_DIRS = {"checkpoints", "model_analysis", "tensorboard", "visualizations"}
+#: The contents of the directories whose names do not depend on the run's clock (tensorboard holds event files).
+NESTED = {
+    "checkpoints": {"backup", "fit_state.json"},
+    "model_analysis": {"analysis_results.json", "spectral_funnel_diagram.png", "spectral_summary.png", "weight_learning_journey.png"},
+    "visualizations": {"energy_transformer": {"energy_trace.csv", "training_dashboard.png"}, "beit": {"training_dashboard.png"}},
+}
+
+
+def names(path: Path) -> set:
+    return {child.name for child in Path(path).iterdir()}
+
+
+@pytest.mark.parametrize("which", ["function", "cli"])
+def test_the_run_directory_holds_the_pinned_listing_and_no_task_record(ended, which):
+    run_dir = getattr(ended, which)
+    assert names(run_dir) == RUN_FILES | RUN_DIRS, "an added or a missing file (task.json included) is a change of the contract"
+    assert names(run_dir / "checkpoints") == NESTED["checkpoints"]
+    assert names(run_dir / "model_analysis") == NESTED["model_analysis"]
+    assert names(run_dir / "visualizations") == NESTED["visualizations"][ended.family]
+    assert names(run_dir / "tensorboard") == {"train", "validation"}
+
+
+def test_the_function_and_the_cli_write_the_same_config_bytes_and_the_cli_exits_by_the_verdict(ended):
+    for name in ("config.json", "config_requested.json"):
+        assert (ended.function / name).read_bytes() == (ended.cli / name).read_bytes(), name
+    resolved = read_json(ended.cli / "config.json")
+    assert resolved["model"] == ended.asked["model"] and resolved["epochs"] == EPOCHS and resolved["batch_size"] == BATCH
+    success = read_json(ended.cli / "results_summary.json")["success"]
+    assert ended.code == (0 if success else 1) and ended.result.success is read_json(ended.function / "results_summary.json")["success"]
+
+
+@pytest.mark.parametrize("which", ["function", "cli"])
+def test_the_summary_holds_the_metric_the_baseline_the_epoch_zero_loss_the_threshold_and_the_verdict(ended, which):
+    summary = read_json(getattr(ended, which) / "results_summary.json")
+    kind = "zero_patches" if ended.family == "energy_transformer" else "unigram_codes"
+    assert summary["task"] == "pretrain" and summary["status"] == "ok" and summary["success_metric"] == "val_loss"
+    assert summary["baseline"]["kind"] == kind and summary["baseline"]["val_loss"] > 0
+    epoch_zero = read_json(getattr(ended, which) / "checkpoints" / FIT_STATE_NAME)["initial"]["metrics"]["loss"]
+    assert summary["epoch_zero"]["val_loss"] == epoch_zero > 0
+    assert summary["success_threshold"] == min(summary["baseline"]["val_loss"], epoch_zero)
+    column = csv_column(getattr(ended, which), "val_loss")
+    assert len(column) == EPOCHS and summary["success_value"] == pytest.approx(min(column), rel=1e-6)
+    assert summary["success"] is bool(np.float32(summary["success_value"]) < np.float32(summary["success_threshold"]))
+    assert (summary["tokenizer"] is None) is (ended.family == "energy_transformer")
+
+
+def test_an_epoch_is_n_train_over_batch_steps_and_fit_sees_both_lengths(ended):
+    summary = read_json(ended.function / "results_summary.json")
+    assert summary["steps_per_epoch"] == summary["n_train"] // BATCH == STEPS
+    assert len(ended.fits) == 2, "one fit per run: the function and the command line"
+    for fit in ended.fits:
+        assert fit["keywords"] == {"steps_per_epoch": STEPS, "validation_steps": math.ceil(summary["n_val"] / BATCH)}
+        # Observed, not read back: each epoch ran batches 0..STEPS-1 and a stream with no length would have run away.
+        assert fit["spy"].last_batch == {epoch: STEPS - 1 for epoch in range(EPOCHS)}, "an epoch has the wrong length"
+
+
+@pytest.mark.parametrize("which", ["function", "cli"])
+def test_the_best_checkpoint_reloads_with_a_gap_of_exactly_zero(ended, which):
+    summary = read_json(getattr(ended, which) / "results_summary.json")
+    # The masks are fixed by (seed, split, row position): the reloaded file scores the in-memory weights bit for bit.
+    assert summary["best_checkpoint_load_error"] is None and summary["best_checkpoint_max_abs_diff"] == 0.0
+    assert summary["model_loading_validated"] is True and summary["model_loading_check"]["max_abs_diff"] == 0.0
+    assert summary["test_metrics_best"] is not None
+
+
+SENTENCE_OF_A_DIRECTORY = "task.json does not exist; a model is loaded from a run directory, or from a .keras file whose directory holds task.json"
+SENTENCE_OF_A_FILE = (
+    "has no record beside it; a .keras file is read with the first of best_model.keras.task.json, best_model.task.json, "
+    "task.json that exists in"
+)
+
+
+@pytest.mark.parametrize("command", ["predict", "export"])
+@pytest.mark.parametrize("form", ["directory", "keras_file"])
+def test_predict_and_export_refuse_a_pretrain_run_with_the_task_json_sentence_of_their_input_form(ended, command, form, capsys, tmp_path):
+    from PIL import Image
+
+    from train.api import cli
+
+    model = ended.function if form == "directory" else ended.function / "best_model.keras"
+    picture = tmp_path / "a.png"
+    Image.new("RGB", (32, 32)).save(picture)
+    answer = tmp_path / ("answers.json" if command == "predict" else "exported.keras")
+    asked = [f"data={picture}", f"out={answer}"] if command == "predict" else [f"out={answer}", "format=keras"]
+    code = cli.main([command, f"model={model}", *asked])
+    error = capsys.readouterr().err
+    assert code == 2, error
+    assert f"Invalid value for 'model': {model}" in error
+    assert (SENTENCE_OF_A_DIRECTORY if form == "directory" else SENTENCE_OF_A_FILE) in error
+    assert not answer.exists() and not (ended.function / "task.json").exists()
