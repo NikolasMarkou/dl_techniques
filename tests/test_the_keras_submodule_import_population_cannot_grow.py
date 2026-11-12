@@ -74,6 +74,7 @@ ROOTS = ("src", "tests")
 #: 401 / 382 after ``conv_blocks/mobile_one_block.py``, edited to clone its initializer per branch.
 #: 399 / 380 after the NAM model and its tests were deleted (``nam/cell.py`` and ``test_nam/test_fp16_reduction_mask.py``).
 #: 397 / 378 after ``losses/multi_task_loss.py`` and its test were deleted (plan-2026-11-11T131349-13b28b37 D-010, step 9).
+#: 396 / 377 after ``tests/test_losses/test_utilization_loss.py`` lost its unused ``from keras import ops`` (plan-2026-11-11T223825-64d1b401, step 5.4).
 #: Edit it in the commit that converts a file (delete its line) or, with a
 #: recorded reason, adds a statement.
 KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
@@ -355,7 +356,6 @@ KERAS_SUBMODULE_IMPORTS: Dict[str, int] = {
     "tests/test_losses/test_superpoint_loss.py": 1,
     "tests/test_losses/test_tabm_loss.py": 1,
     "tests/test_losses/test_topographic_vae_loss.py": 1,
-    "tests/test_losses/test_utilization_loss.py": 1,
     "tests/test_losses/test_wasserstein.py": 1,
     "tests/test_metrics/test_capsule_accuracy.py": 1,
     "tests/test_metrics/test_clip_accuracy.py": 1,
@@ -518,7 +518,7 @@ def test_the_census_is_exact(census):
 
 
 def test_the_census_totals(census):
-    assert (sum(KERAS_SUBMODULE_IMPORTS.values()), len(KERAS_SUBMODULE_IMPORTS)) == (397, 378), (
+    assert (sum(KERAS_SUBMODULE_IMPORTS.values()), len(KERAS_SUBMODULE_IMPORTS)) == (396, 377), (
         "the census's own totals moved; re-derive the module docstring's numbers")
     for path in KERAS_SUBMODULE_IMPORTS:
         assert (REPO_ROOT / path).is_file(), f"census file moved or deleted: {path}"
