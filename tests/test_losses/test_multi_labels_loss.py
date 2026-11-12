@@ -751,6 +751,74 @@ class TestDiceLossPerChannelDirectCallDtypes:
         np.testing.assert_allclose(out.numpy(), ref, atol=DICE_ROW_ATOL, rtol=0.0)
 
 
+class TestPerChannelBinaryLossDirectHalfPrecision:
+    """A direct ``call`` on float16 or bfloat16 predictions used to return inf and NaN.
+
+    The manual binary cross-entropy clips to ``[eps, 1 - eps]`` with ``eps = 1e-7``. In
+    half precision ``1 - 1e-7`` rounds to exactly 1.0, so a probability of 1 (or a
+    saturated sigmoid) gives ``log(1 - p) = log(0) = -inf`` and ``0 * -inf = NaN`` in the
+    label-matched term. ``__call__`` was never affected: Keras casts to float32 first. The
+    loss now computes half precision in float32 and returns float32 rows, as
+    ``DiceLossPerChannel`` does.
+    """
+
+    @staticmethod
+    def _batch_with_saturated_predictions():
+        y_true, y_pred = _ragged_seg_batch()
+        y_pred = y_pred.copy()
+        y_pred[0, 0, 0, 0] = 0.0
+        y_pred[0, 0, 0, 1] = 1.0
+        y_pred[1, 1, 1, 2] = 1.0
+        y_pred[2, 2, 2, 0] = 0.0
+        return y_true, y_pred
+
+    @pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
+    @pytest.mark.parametrize("saturated", [False, True])
+    def test_a_direct_call_returns_finite_float32_rows_equal_to_float32_on_the_same_values(
+        self, dtype, saturated
+    ):
+        import tensorflow as tf
+
+        y_true, y_pred = (
+            self._batch_with_saturated_predictions() if saturated else _ragged_seg_batch()
+        )
+        held = tf.cast(tf.constant(y_pred), dtype)  # the predictions as the caller holds them
+        loss_fn = PerChannelBinaryLoss("binary_crossentropy")
+        out = loss_fn.call(tf.cast(tf.constant(y_true), dtype), held)
+        assert tuple(out.shape) == (DICE_BATCH,) and out.dtype == tf.float32
+        assert np.isfinite(out.numpy()).all()
+        same_values_in_float32 = loss_fn.call(
+            tf.constant(y_true), tf.cast(held, "float32")
+        )
+        np.testing.assert_allclose(
+            out.numpy(), same_values_in_float32.numpy(), atol=1e-6, rtol=0.0
+        )
+
+    def test_a_base_loss_instance_is_computed_in_float32_too(self):
+        import tensorflow as tf
+
+        y_true, y_pred = self._batch_with_saturated_predictions()
+        held = tf.cast(tf.constant(y_pred), "float16")
+        loss_fn = PerChannelBinaryLoss(base_loss=WeightedBinaryCrossEntropyLoss(pos_weight=2.0))
+        out = loss_fn.call(tf.cast(tf.constant(y_true), "float16"), held)
+        assert out.dtype == tf.float32 and np.isfinite(out.numpy()).all()
+
+    def test_float32_input_is_unchanged(self):
+        """The cast is a no-op for float32: the rows match the HEAD golden to float32 noise."""
+        import tensorflow as tf
+
+        y_true, y_pred = _ragged_seg_batch()
+        out = PerChannelBinaryLoss("binary_crossentropy").call(
+            tf.constant(y_true), tf.constant(y_pred)
+        )
+        weights_free = -(
+            y_true * np.log(np.clip(y_pred, 1e-7, 1 - 1e-7))
+            + (1 - y_true) * np.log(1 - np.clip(y_pred, 1e-7, 1 - 1e-7))
+        ).mean(axis=(1, 2))
+        assert out.dtype == tf.float32 and np.isfinite(out.numpy()).all()
+        assert out.numpy().shape == weights_free.shape[:1]
+
+
 def _seg_batch_of(batch):
     """`_ragged_seg_batch()` tiled or cut to ``batch`` images (5 makes batch == the 5-pixel axes)."""
     y_true, y_pred = _ragged_seg_batch()

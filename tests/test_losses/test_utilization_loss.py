@@ -789,7 +789,7 @@ class TestMANNUtilizationLossIsPerSample:
         assert "batch-coupled" in class_doc
         assert "variance_weight=0" in class_doc
         # the documented direct-call limits (D-009): not fixed, so they are stated
-        assert "float16" in class_doc and "time >= 2" in class_doc
+        assert "float16" in class_doc
 
     def test_the_d005_anchor_is_in_the_module_source(self):
         """The anchor survives a refactor of ``utilization_loss.py``.
@@ -992,6 +992,98 @@ class TestMANNUtilizationLossDirectHalfPrecision:
         doc = " ".join((MANNUtilizationLoss.__doc__ or "").split())
         assert "about 300" not in doc and "past a scale" not in doc
         assert "underflows to exactly 0" in doc and "1e-10" in doc and "65504" in doc
+
+
+class TestMANNUtilizationLossWithASingleTimestep:
+    """``time == 1`` has no temporal difference, so the variance term is 0, not NaN.
+
+    ``ops.mean`` of the empty difference ``y_pred[:, 1:] - y_pred[:, :-1]`` is NaN, and
+    that NaN used to fill every row (the unmasked path; the masked path already scored a
+    row with fewer than two valid steps as having no variance term). The unmasked path
+    now does the same: a memory with one step is scored by its entropy and magnitude only.
+    """
+
+    @staticmethod
+    def _one_step():
+        return _ragged_memory()[:, :1, :]
+
+    @staticmethod
+    def _expected(m, we=0.01, ww=0.01):
+        entropy, magnitude = _entropy_and_magnitude64(m)
+        return we * (-entropy) + ww * (-magnitude)
+
+    @pytest.mark.parametrize("variance_weight", [0.0, 0.01, 0.7])
+    def test_a_direct_call_is_finite_and_has_no_variance_term(self, variance_weight):
+        m = self._one_step()
+        out = MANNUtilizationLoss(variance_weight=variance_weight).call(
+            _dummy(m), _f32(m)
+        )
+        assert tuple(out.shape) == (BATCH,)
+        ref = self._expected(m)
+        assert np.isfinite(out.numpy()).all()
+        assert np.abs(out.numpy() - ref).max() < _mann_atol(ref) * 4
+
+    def test_the_rows_equal_the_masked_path_with_every_step_valid(self):
+        m = self._one_step()
+        masked = with_keras_mask(_f32(m), np.ones(m.shape[:2], dtype=bool))
+        loss_obj = MANNUtilizationLoss(variance_weight=0.7)
+        np.testing.assert_allclose(
+            loss_obj.call(_dummy(m), _f32(m)).numpy(),
+            loss_obj.call(_dummy(m), masked).numpy(),
+            atol=1e-7,
+        )
+
+    def test_the_gradient_is_finite(self):
+        x = _f32(self._one_step())
+        with tf.GradientTape() as tape:
+            tape.watch(x)
+            total = tf.reduce_sum(MANNUtilizationLoss().call(_dummy(x), x))
+        assert np.isfinite(tape.gradient(total, x).numpy()).all()
+
+    def test_a_loss_call_and_a_fit_are_finite(self):
+        m = self._one_step()
+        assert np.isfinite(float(MANNUtilizationLoss()(_dummy(m), _f32(m))))
+        model = keras.Sequential([keras.layers.Input((1, 8)), keras.layers.Dense(8)])
+        model.compile(optimizer="sgd", loss=MANNUtilizationLoss())
+        history = model.fit(_f32(m), _f32(m), batch_size=2, epochs=1, verbose=0)
+        assert np.isfinite(history.history["loss"]).all()
+
+    def test_an_unknown_time_axis_gives_the_same_rows_when_time_is_1_and_when_it_is_not(self):
+        loss_obj = MANNUtilizationLoss(variance_weight=0.7)
+
+        @tf.function(input_signature=[tf.TensorSpec([None, None, MEMORY_DIM], tf.float32)])
+        def rows(x):
+            return loss_obj.call(tf.zeros_like(x), x)
+
+        one = self._one_step()
+        np.testing.assert_allclose(
+            rows(_f32(one)).numpy(),
+            self._expected(one),
+            atol=float(_mann_atol(self._expected(one))) * 4,
+        )
+        many = _ragged_memory()
+        np.testing.assert_allclose(
+            rows(_f32(many)).numpy(),
+            loss_obj.call(_dummy(many), _f32(many)).numpy(),
+            atol=1e-7,
+        )
+
+    def test_the_gradient_is_finite_for_an_unknown_time_axis_of_1(self):
+        loss_obj = MANNUtilizationLoss()
+
+        @tf.function(input_signature=[tf.TensorSpec([None, None, MEMORY_DIM], tf.float32)])
+        def grad(x):
+            with tf.GradientTape() as tape:
+                tape.watch(x)
+                total = tf.reduce_sum(loss_obj.call(tf.zeros_like(x), x))
+            return tape.gradient(total, x)
+
+        assert np.isfinite(grad(_f32(self._one_step())).numpy()).all()
+
+    def test_the_docstring_no_longer_documents_a_time_1_nan(self):
+        doc = " ".join((MANNUtilizationLoss.__doc__ or "").split())
+        assert "time >= 2" not in doc and "gives NaN" not in doc
+        assert "time == 1" in doc
 
 
 # ---------------------------------------------------------------------

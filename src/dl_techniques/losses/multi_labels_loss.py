@@ -167,6 +167,14 @@ class PerChannelBinaryLoss(PerSampleCallMixin, keras.losses.Loss):
             One value per sample, shape ``(batch_size,)``: the channel-weighted sum
             of that image's per-channel pixel-mean loss.
         """
+        # Half precision is computed in float32 (a no-op for float32 and float64).
+        # In float16 ``1 - 1e-7`` rounds to exactly 1.0, so the clip below does not keep
+        # ``log(1 - p)`` finite for a probability of 1 (``-inf``, then ``0 * -inf`` =
+        # NaN). The rows come back float32. Do NOT drop the cast to "keep the caller's
+        # dtype": a direct call on float16 or bfloat16 predictions is then inf or NaN.
+        if keras.backend.standardize_dtype(y_pred.dtype) in ("float16", "bfloat16"):
+            y_pred = ops.cast(y_pred, "float32")
+
         # Ensure consistent dtypes
         y_true = ops.cast(y_true, y_pred.dtype)
 

@@ -70,8 +70,9 @@ class MANNUtilizationLoss(PerSampleCallMixin, keras.losses.Loss):
     a 0/1 ``sample_weight``; a mask of any other rank, or a ``sample_weight`` with an
     axis beyond the batch (a per-timestep weight), raises ``ValueError``.
 
-    Direct ``call`` limits: it needs ``time >= 2`` (``time == 1`` gives NaN, an empty
-    temporal difference; documented, not guarded). Half precision is computed in
+    A memory with ``time == 1`` has no temporal difference, so its variance term is 0
+    (the entropy and magnitude terms still apply), whether ``time`` is static or only
+    known at run time; it used to be NaN, an empty mean. Half precision is computed in
     float32 and the rows come back float32 (float64 stays float64). Without that, a
     direct float16 call was NaN once a step's logit spread (max minus min over
     ``memory_dim``) reached about 17.5 (measured at memory_dim 8), because the
@@ -176,14 +177,28 @@ class MANNUtilizationLoss(PerSampleCallMixin, keras.losses.Loss):
             # -log(V) to every row: a zero-weighted row would keep a gradient
             # (measured 2.4e-4). Do NOT use -log(var_b) per row: that is a different
             # objective (Jensen gap, default value -0.0701 against -0.0809).
-            temporal_diff = memory_vectors[:, 1:, :] - memory_vectors[:, :-1, :]
-            batch_mean = ops.stop_gradient(ops.mean(temporal_diff))
-            row_var = ops.mean(ops.square(temporal_diff - batch_mean), axis=(1, 2))
-            batch_var = ops.stop_gradient(ops.mean(row_var))
-            variance_row = (
-                -ops.log(batch_var + 1e-10)
-                - (row_var - batch_var) / (batch_var + 1e-10)
-            )
+            # A memory of one step has no temporal difference: ``ops.mean`` of the
+            # empty difference is NaN, so the term is 0 there, as the masked path
+            # scores a row with fewer than two valid steps. A static length of 1 skips
+            # the computation; an unknown length is guarded at run time.
+            num_steps = memory_vectors.shape[1]
+            if num_steps == 1:
+                variance_row = ops.zeros_like(entropy_loss)
+            else:
+                temporal_diff = memory_vectors[:, 1:, :] - memory_vectors[:, :-1, :]
+                batch_mean = ops.stop_gradient(ops.mean(temporal_diff))
+                row_var = ops.mean(ops.square(temporal_diff - batch_mean), axis=(1, 2))
+                batch_var = ops.stop_gradient(ops.mean(row_var))
+                variance_row = (
+                    -ops.log(batch_var + 1e-10)
+                    - (row_var - batch_var) / (batch_var + 1e-10)
+                )
+                if num_steps is None:
+                    variance_row = ops.where(
+                        ops.shape(memory_vectors)[1] > 1,
+                        variance_row,
+                        ops.zeros_like(variance_row),
+                    )
 
         return (
             self.entropy_weight * entropy_loss
