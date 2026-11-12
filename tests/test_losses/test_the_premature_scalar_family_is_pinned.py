@@ -52,10 +52,11 @@ cleared by this file:
     sits in ``KNOWN_GOOD`` below.
 *   Every other ``keras.losses.Loss`` subclass in ``src/dl_techniques/losses/`` is
     accounted for by the CLOSURE CENSUS at the bottom of this file, which fails
-    when a class is in no bucket. Accounted for is not the same as cleared: the
-    ``NOT_PINNED`` bucket says in a reason per class why nothing here measures it,
-    and ``KNOWN_SCALAR_NOT_YET_FIXED`` names the classes still carrying the defect
-    (``SAMMaskLoss``, ``SAM2GatedMaskLoss``). Three more live outside ``losses/``
+    when a class is in no bucket. Accounted for is not the same as cleared: each
+    ``NOT_PINNED`` entry names a structural reason no generic builder can drive the
+    class (and a test re-checks it), and ``KNOWN_SCALAR_NOT_YET_FIXED`` names the
+    classes still carrying the defect (``SAMMaskLoss``, ``SAM2GatedMaskLoss``,
+    ``SegmentationWrapperLoss``). Three more live outside ``losses/``
     (``SupervisedSliceLoss``, ``TSTCausalLMLoss``, ``DocScannerRectifierObjective``)
     and no census here reaches them.
     ``brier_spiegelhalters_ztest_loss`` was once on the unswept list and its three
@@ -71,13 +72,16 @@ import keras
 import numpy as np
 import pytest
 
+from dl_techniques.losses.any_loss import F1Loss
+from dl_techniques.losses.segmentation_loss import LossConfig
+
 from .test_the_losses_package_surface_is_consistent import (
     _every_loss_class_in_the_package,
 )
 
 PLAN = "plan-2026-08-30T203107-30455f66"
 
-MIN_MEASURED = 31  # len(STILL_BROKEN) + len(KNOWN_GOOD), re-derived by import at step 6
+MIN_MEASURED = 67  # len(STILL_BROKEN) + len(KNOWN_GOOD), re-derived by import at step 6.1
 BATCH = 4
 SAMPLE_WEIGHT = np.array([1.0, 1.0, 1.0, 0.0], dtype="float32")
 MEAN_W = 0.75
@@ -244,6 +248,164 @@ def _memory_pair():
     r = _rng()
     scales = np.array([0.5, 1.0, 2.0, 4.0])[:, None, None]
     return _t(np.zeros((BATCH, 6, 8))), _t(r.normal(size=(BATCH, 6, 8)) * scales)
+
+
+# Builders of the closure-census promotion (plan-2026-11-11T223825-64d1b401, step 6.1).
+# Each family below drives, with finite output, the classes named in its docstring;
+# row scales differ (SCALES) wherever a batch statistic could hide a broadcast scalar.
+SCALES = np.array([0.1, 0.5, 1.0, 2.0])
+
+
+def _scaled(r, shape):
+    """N(0, 1) of ``shape`` with the leading axis scaled by SCALES, so the rows differ."""
+    return r.normal(size=shape) * SCALES.reshape((BATCH,) + (1,) * (len(shape) - 1))
+
+
+def _rgb_pair():
+    """``(B, 16, 16, 3)`` images in [0, 1] and a noisy copy: ``EdgeLoss`` (3 channels), DarkIR."""
+    r = _rng()
+    y = r.random((BATCH, 16, 16, 3))
+    return _t(y), _t(np.clip(y + 0.2 * _scaled(r, y.shape), 0, 1))
+
+
+def _ray_pair():
+    """Unit ray directions ``(B, 4, 4, 3)``: ``RayDirectionLoss``."""
+    r = _rng()
+    a = r.normal(size=(BATCH, 4, 4, 3))
+    b = a + _scaled(r, a.shape)
+    unit = lambda x: x / np.linalg.norm(x, axis=-1, keepdims=True)
+    return _t(unit(a)), _t(unit(b))
+
+
+def _mask_pair():
+    """Binary mask and logits, both ``(B, 4, 4, 1)``: ``MaskLoss`` and the focal/dice internals."""
+    r = _rng()
+    return _t(r.random((BATCH, 4, 4, 1)) > 0.5), _t(_scaled(r, (BATCH, 4, 4, 1)))
+
+
+def _point_map_pair():
+    """Point maps ``(B, 6, 6, 3)``: the omnipoint consistency losses."""
+    r = _rng()
+    return _t(r.normal(size=(BATCH, 6, 6, 3))), _t(_scaled(r, (BATCH, 6, 6, 3)))
+
+
+def _sparse_seg_pair():
+    """Integer labels ``(B, 8, 8)`` in [0, 3) and logits ``(B, 8, 8, 3)``: the sparse segmentation losses."""
+    r = _rng()
+    return _i(r.integers(0, 3, size=(BATCH, 8, 8))), _t(r.normal(size=(BATCH, 8, 8, 3)))
+
+
+def _detector_pair():
+    """Cell labels ``(B, 4, 4)`` in [0, 65) and logits ``(B, 4, 4, 65)``: ``SuperPointDetectorLoss``."""
+    r = _rng()
+    return _i(r.integers(0, 65, size=(BATCH, 4, 4))), _t(r.normal(size=(BATCH, 4, 4, 65)))
+
+
+def _descriptor_pair():
+    """Descriptor maps ``(B, 4, 4, 8)``: ``SuperPointDescriptorLoss`` (identity correspondence)."""
+    r = _rng()
+    return _t(r.normal(size=(BATCH, 4, 4, 8))), _t(_scaled(r, (BATCH, 4, 4, 8)))
+
+
+def _response_pair():
+    """Packed ``(B, 5, 5, 2)`` label (value, valid) and ``(B, 5, 5, 1)`` logits: ``SiamFCLogisticLoss``."""
+    r = _rng()
+    label = np.stack([r.random((BATCH, 5, 5)) > 0.5, np.ones((BATCH, 5, 5))], axis=-1)
+    return _t(label), _t(r.normal(size=(BATCH, 5, 5, 1)))
+
+
+def _rpn_cls_pair():
+    """Packed ``(B, 4, 4, 2, 2)`` labels (class, valid) and ``(B, 4, 4, 4)`` logits: ``DaSiamRPNClsLoss``."""
+    r = _rng()
+    label = np.stack([r.random((BATCH, 4, 4, 2)) > 0.5, r.random((BATCH, 4, 4, 2)) > 0.3], axis=-1)
+    return _t(label), _t(r.normal(size=(BATCH, 4, 4, 4)))
+
+
+def _rpn_reg_pair():
+    """Packed ``(B, 4, 4, 2, 5)`` targets (4 deltas, positive flag) and ``(B, 4, 4, 8)``: ``DaSiamRPNRegLoss``."""
+    r = _rng()
+    target = r.normal(size=(BATCH, 4, 4, 2, 5))
+    target[..., 4] = r.random((BATCH, 4, 4, 2)) > 0.5
+    return _t(target), _t(r.normal(size=(BATCH, 4, 4, 8)))
+
+
+def _capsule_pair():
+    """One-hot labels and capsule lengths in [0, 1], both ``(B, 5)``: ``CapsuleMarginLoss``."""
+    r = _rng()
+    return _t(np.eye(BATCH, 5)), _t(r.uniform(0.0, 1.0, size=(BATCH, 5)))
+
+
+def _points_pair():
+    """Point clouds ``(B, 8, 3)``: ``ChamferLoss``."""
+    r = _rng()
+    return _t(r.normal(size=(BATCH, 8, 3))), _t(r.normal(size=(BATCH, 8, 3)))
+
+
+def _scores_pair():
+    """A flat score vector ``(B * nway,)`` with nway 2 (positive first): ``ColBERTPairwiseSoftmaxLoss``."""
+    r = _rng()
+    return _t(np.zeros((BATCH * 2,))), _t(r.normal(size=(BATCH * 2,)))
+
+
+def _teacher_student_pair():
+    """Teacher and student scores ``(B, 4)``: ``ColBERTDistillationLoss(nway=4)``."""
+    r = _rng()
+    return _t(r.normal(size=(BATCH, 4))), _t(r.normal(size=(BATCH, 4)))
+
+
+def _ensemble_pair():
+    """Targets ``(B, 1)`` and a k=3 ensemble ``(B, 3, 1)``: ``TabMLoss``."""
+    r = _rng()
+    return _t(r.normal(size=(BATCH, 1))), _t(r.normal(size=(BATCH, 3, 1)))
+
+
+def _identity_pair():
+    """Two identities twice (a PK batch) and features ``(B, 8)``: ``SoftmarginTripletLoss``."""
+    r = _rng()
+    return _i([0, 0, 1, 1]), _t(r.normal(size=(BATCH, 8)))
+
+
+def _slot_pair():
+    """Predicted and achieved IoU ``(B, 4, 2)`` (two frames of two slots): ``SAM2IoULoss``."""
+    r = _rng()
+    return _t(r.random((BATCH, 4, 2))), _t(r.random((BATCH, 4, 2)))
+
+
+def _presence_pair():
+    """Presence ``(B, 3, 1)`` and object-score logits ``(B, 3, 1)``: ``SAM2ObjectScoreLoss``."""
+    r = _rng()
+    return _t(r.random((BATCH, 3, 1)) > 0.5), _t(r.normal(size=(BATCH, 3, 1)))
+
+
+def _views_pair():
+    """Two stacked views ``(B, 2, 8)``; ``y_true`` is ignored: ``SymmetricInfoNCELoss``."""
+    r = _rng()
+    return _t(np.zeros((BATCH, 1))), _t(r.normal(size=(BATCH, 2, 8)))
+
+
+def _ddpm_pair():
+    """Packed ``(B, 4, 4, 9)`` target (noise 4, x_start 4, timestep) and ``(B, 4, 4, 8)``: ``DDPMHybridLoss``."""
+    r = _rng()
+    steps = np.array([10.0, 200.0, 500.0, 900.0])[:, None, None, None] * np.ones((BATCH, 4, 4, 1))
+    packed = np.concatenate(
+        [r.normal(size=(BATCH, 4, 4, 4)), r.normal(size=(BATCH, 4, 4, 4)), steps], axis=-1
+    )
+    return _t(packed), _t(_scaled(r, (BATCH, 4, 4, 8)))
+
+
+def _flow_pair():
+    """``(B, 6, 6, 4)`` map stack and a two-step ``(B, 2, 6, 6, 2)`` sequence: ``DocScannerFlowSequenceLoss(iters=2)``."""
+    r = _rng()
+    return _t(5.0 * r.normal(size=(BATCH, 6, 6, 4))), _t(5.0 * _scaled(r, (BATCH, 2, 6, 6, 2)))
+
+
+def _matches_pair():
+    """Packed matches ``(B, 6)`` and log-assignments ``(B, 2, 4, 4)``: ``LightGlueLoss``."""
+    r = _rng()
+    matches = np.array([[0, 1, -1], [2, -1, 0], [1, 0, 2], [-1, -1, 1]])
+    return _i(np.concatenate([matches, matches], axis=1)), _t(
+        np.log(r.dirichlet(np.ones(4), size=(BATCH, 2, 4)))
+    )
 
 
 # ---------------------------------------------------------------------
@@ -426,6 +588,72 @@ KNOWN_GOOD = [
     # row still shifts the others through the batch variance and mean. The predicate sees
     # only the shape; the coupling is pinned in tests/test_losses/test_utilization_loss.py.
     ("utilization_loss", "MANNUtilizationLoss", {}, _memory_pair),
+    # --- promoted out of NOT_PINNED by step 6.1 of plan-2026-11-11T223825-64d1b401 ---
+    # Each was in NOT_PINNED on the strength of a one-off probe nobody re-ran ("call()
+    # never returned a scalar"; measured by the review: a CharbonnierLoss that returned
+    # a scalar left this file green). Each now has a builder, returns (B,) on it with a
+    # finite value, and is rejected by the predicate (smallest margin 1.3e-3, the
+    # omnipoint NormalConsistencyLoss, against the 1e-6 tolerance).
+    ("image_restoration_loss", "CharbonnierLoss", {}, _image_pair),
+    ("image_restoration_loss", "FrequencyLoss", {}, _image_pair),
+    ("image_restoration_loss", "EdgeLoss", {}, _rgb_pair),
+    ("image_restoration_loss", "DarkIRCompositeLoss", {}, _rgb_pair),
+    ("omnipoint_losses", "RayDirectionLoss", {}, _ray_pair),
+    ("omnipoint_losses", "MaskLoss", {}, _mask_pair),
+    ("omnipoint_losses", "NormalConsistencyLoss", {}, _point_map_pair),
+    ("omnipoint_losses", "LocalConsistencyLoss", {}, _point_map_pair),
+    ("sparse_segmentation_loss", "SparseDiceLoss", {}, _sparse_seg_pair),
+    ("sparse_segmentation_loss", "SparseFocalLoss", {}, _sparse_seg_pair),
+    ("sparse_segmentation_loss", "SparseCeDiceLoss", {}, _sparse_seg_pair),
+    ("superpoint_loss", "SuperPointDetectorLoss", {}, _detector_pair),
+    ("superpoint_loss", "SuperPointDescriptorLoss", {}, _descriptor_pair),
+    ("wasserstein_loss", "WassersteinDivergence", {}, _cluster_pair),
+    ("multistep_loss", "MultistepLoss", {}, _regression_pair),
+    ("siamese_tracking_loss", "SiamFCLogisticLoss", {}, _response_pair),
+    ("siamese_tracking_loss", "DaSiamRPNClsLoss", {}, _rpn_cls_pair),
+    ("siamese_tracking_loss", "DaSiamRPNRegLoss", {}, _rpn_reg_pair),
+    ("capsule_margin_loss", "CapsuleMarginLoss", {}, _capsule_pair),
+    ("decoupled_information_loss", "DecoupledInformationLoss", {}, _logit_pair),
+    ("flow_matching_velocity_loss", "FlowMatchingVelocityLoss", {}, _regression_pair),
+    ("sparsemax_loss", "SparsemaxLoss", {}, _logit_pair),
+    ("chamfer_loss", "ChamferLoss", {}, _points_pair),
+    ("harmonic_loss", "HarmonicCausalLMLoss", {}, _token_pair),
+    ("mean_shift_instance_loss", "MeanShiftInstanceLoss", {}, _token_pair),
+    ("colbert_loss", "ColBERTPairwiseSoftmaxLoss", {}, _scores_pair),
+    ("colbert_loss", "ColBERTDistillationLoss", {"nway": 4}, _teacher_student_pair),
+    ("tabm_loss", "TabMLoss", {}, _ensemble_pair),
+    ("reid_cosine_loss", "SoftmarginTripletLoss", {}, _identity_pair),
+    ("sam2_video_loss", "SAM2IoULoss", {"num_frames": 2}, _slot_pair),
+    ("sam2_video_loss", "SAM2ObjectScoreLoss", {}, _presence_pair),
+    # SymmetricInfoNCELoss is batch-coupled (the in-batch negatives); the predicate only
+    # reads the shape, as for the rows above.
+    ("infonce_loss", "SymmetricInfoNCELoss", {}, _views_pair),
+    ("clip_contrastive_loss", "CLIPContrastiveLoss", {}, _siglip_pair),
+    ("ddpm_hybrid_loss", "DDPMHybridLoss", {}, _ddpm_pair),
+    (
+        "doc_scanner_flow_sequence_loss",
+        "DocScannerFlowSequenceLoss",
+        {"iters": 2},
+        _flow_pair,
+    ),
+    ("lightglue_loss", "LightGlueLoss", {}, _matches_pair),
+]
+
+# Classes whose call() keeps more than the batch axis ON PURPOSE (element, token or pixel
+# shaped), so a (batch,) sample_weight cannot be applied: Keras' own convention for such
+# a loss (see test_stable_max_cross_entropy_is_token_shaped_on_purpose, which compares
+# stock SparseCategoricalCrossentropy). They are neither premature scalars nor row
+# shaped; the arm below asserts only what is true of all of them: a rank of at least 1
+# with the batch as leading axis and a finite value, measured on the builder.
+KNOWN_NOT_ROW_SHAPED = [
+    ("hrm_loss", "StableMaxCrossEntropy", {}, _token_pair),
+    ("omnipoint_losses", "MetricScaleLoss", {}, _regression_pair),
+    ("wasserstein_loss", "WassersteinLoss", {}, _regression_pair),
+    ("wasserstein_loss", "WassersteinGradientPenaltyLoss", {}, _regression_pair),
+    ("multi_labels_loss", "WeightedBinaryCrossEntropyLoss", {}, _seg_pair),
+    ("multi_labels_loss", "WeightedBinaryFocalLoss", {}, _seg_pair),
+    ("yolo12_multitask_loss", "DiceFocalSegmentationLoss", {}, _mask_pair),
+    ("yolo12_multitask_loss", "ClassificationFocalLoss", {}, _mask_pair),
 ]
 
 
@@ -444,7 +672,7 @@ def _make(module, cls, kwargs):
     import importlib
 
     return getattr(importlib.import_module(f"dl_techniques.losses.{module}"), cls)(
-        **kwargs
+        **(kwargs() if callable(kwargs) else kwargs)
     )
 
 
@@ -514,6 +742,43 @@ def test_the_predicate_rejects_a_correctly_shaped_class(module, cls, kwargs, bui
         f"weighted={weighted!r}). Either it regressed, or this predicate is "
         f"vacuous -- both are serious."
     )
+    # NaN compares False to everything, so a NaN loss is "not a member" for free: the
+    # rejection above only means something on a finite measurement.
+    assert np.isfinite(unweighted) and np.isfinite(weighted), (
+        f"{module}.{cls}: the measurement is not finite (unweighted={unweighted!r}, "
+        f"weighted={weighted!r}); fix the builder, a NaN row rejects nothing"
+    )
+
+
+@pytest.mark.parametrize("module,cls,kwargs,builder", KNOWN_GOOD, ids=_ids(KNOWN_GOOD))
+def test_a_known_good_class_returns_one_value_per_row(module, cls, kwargs, builder):
+    """The mechanism behind the predicate, asserted directly: ``call()`` is ``(batch,)``.
+
+    The ratio predicate alone cannot tell a row-shaped class from one whose rows were
+    batch-coupled into equal values; the shape is the stricter, cheaper statement, and
+    a class that keeps a premature scalar fails it with no tolerance to tune.
+    """
+    y_true, y_pred = builder()
+    out = _make(module, cls, kwargs).call(y_true, y_pred)
+    assert tuple(keras.ops.shape(out)) == (BATCH,), (
+        f"{module}.{cls}.call() returned shape {tuple(keras.ops.shape(out))}, not "
+        f"({BATCH},): a premature scalar, or a loss that no longer keeps one row per sample"
+    )
+
+
+@pytest.mark.parametrize(
+    "module,cls,kwargs,builder", KNOWN_NOT_ROW_SHAPED, ids=_ids(KNOWN_NOT_ROW_SHAPED)
+)
+def test_a_not_row_shaped_class_keeps_the_batch_axis(module, cls, kwargs, builder):
+    """Element, token or pixel shaped on purpose: rank >= 1, batch leading, finite."""
+    y_true, y_pred = builder()
+    out = _make(module, cls, kwargs).call(y_true, y_pred)
+    shape = tuple(keras.ops.shape(out))
+    assert len(shape) >= 1 and shape[0] == BATCH, (
+        f"{module}.{cls}.call() returned shape {shape}: it is no longer one tensor per "
+        f"sample along the batch axis (a premature scalar has shape ())"
+    )
+    assert np.isfinite(keras.ops.convert_to_numpy(out)).all(), f"{module}.{cls} gave NaN or inf"
 
 
 def test_the_pinned_population_has_not_shrunk_silently():
@@ -528,8 +793,9 @@ def test_the_pinned_population_has_not_shrunk_silently():
     """
     total = len(STILL_BROKEN) + len(KNOWN_GOOD)
     assert total >= MIN_MEASURED, (
-        f"the measured population was {MIN_MEASURED} rows when plan-2026-11-11T223825-"
-        f"64d1b401 closed it (20 at {PLAN}, 26 before that plan's five rows); it is "
+        f"the measured population was {MIN_MEASURED} rows when step 6.1 of plan-2026-11-11T223825-"
+        f"64d1b401 closed it (20 at {PLAN}, 26 before that plan's five rows, 31 after "
+        f"them, 67 after the census promotion); it is "
         f"now {total} "
         f"(STILL_BROKEN={len(STILL_BROKEN)}, KNOWN_GOOD={len(KNOWN_GOOD)}). A "
         f"member is removed from STILL_BROKEN only by being FIXED, and a fixed "
@@ -600,8 +866,15 @@ def test_stable_max_cross_entropy_is_token_shaped_on_purpose():
 # DECISION plan-2026-11-11T223825-64d1b401/D-008
 # A class in no bucket is the failure, not a class in a bad bucket. Do NOT shrink
 # this to a hand list of names without the enumeration (it must be derived from the
-# package), and do NOT read NOT_PINNED as "correct": its reasons say what is NOT
-# known. The generic fixtures are a one-off probe, not a claim about real inputs.
+# package), and do NOT read NOT_PINNED as "correct": its entries say what is NOT
+# known and a test re-runs the claim.
+# DECISION plan-2026-11-11T223825-64d1b401/D-016
+# NOT_PINNED may not rest on a one-off probe. A class that a generic builder can drive
+# belongs in KNOWN_GOOD (or the scalar buckets) with a row; a class that cannot be
+# driven names the structural reason, and `test_a_not_pinned_reason_still_holds`
+# re-checks that reason by code. The step-6 census said "call() never returned a
+# scalar on any fixture that drove it" for 33 classes and nothing re-ran it: a
+# CharbonnierLoss changed to return a scalar left the file green.
 
 
 def _bucket(reason, *groups):
@@ -609,68 +882,89 @@ def _bucket(reason, *groups):
     return {f"{g.split()[0]}.{n}": reason for g in groups for n in g.split()[1:]}
 
 
-DOCUMENTED_SCALAR = _bucket(
-    "the confusion matrix is global over the batch, so call() returns a scalar by "
-    "design (losses/AGENTS.md, any_loss entry)",
-    "any_loss AccuracyLoss PrecisionLoss RecallLoss SpecificityLoss F1Loss FBetaLoss "
-    "BalancedAccuracyLoss GeometricMeanLoss YoudenJLoss MCCLoss CohenKappaLoss "
-    "IoULoss DiceLoss TverskyLoss FocalTverskyLoss",
-)
+DOCUMENTED_SCALAR = {
+    **_bucket(
+        "the confusion matrix is global over the batch, so call() returns a scalar by "
+        "design (losses/AGENTS.md, any_loss entry: every class, WeightedCrossEntropyWithAnyLoss "
+        "included)",
+        "any_loss AccuracyLoss PrecisionLoss RecallLoss SpecificityLoss F1Loss FBetaLoss "
+        "BalancedAccuracyLoss GeometricMeanLoss YoudenJLoss MCCLoss CohenKappaLoss "
+        "IoULoss DiceLoss TverskyLoss FocalTverskyLoss WeightedCrossEntropyWithAnyLoss",
+    ),
+    **_bucket(
+        "its docstring returns a mask-weighted mean over the participating patches and it "
+        "REFUSES sample_weight with a TypeError, so no weight is silently misapplied",
+        "dino_loss iBOTPatchLoss",
+    ),
+}
 KNOWN_SCALAR_NOT_YET_FIXED = _bucket(
     "call() returns a scalar and the predicate accepts it: an unfixed premature "
     "scalar outside the five of plan-2026-11-11T223825-64d1b401 (D-010); when one "
     "is fixed MOVE it to KNOWN_GOOD",
     "sam_mask_loss SAMMaskLoss", "sam2_video_loss SAM2GatedMaskLoss",
+    "segmentation_wrapper_loss SegmentationWrapperLoss",
 )
-_PROBE = (
-    "one-off probe on generic fixtures (plan-2026-11-11T223825-64d1b401 step 6), "
-    "no builder or pin row here: "
-)
+# How to build the instance and its inputs for a scalar-bucket entry (default: no
+# arguments on `_seg_pair`). `WeightedCrossEntropyWithAnyLoss` needs an AnyLoss object,
+# `SegmentationWrapperLoss` a loss name and a class count, `iBOTPatchLoss` an `out_dim`
+# and a packed (student, teacher) tensor.
+def _packed_patches():
+    """``(B, 5, 10)`` packed ``[student, teacher]`` patch logits for out_dim 5; ``y_true`` is ignored."""
+    return _t(np.zeros((BATCH, 5, 10))), _t(_rng().normal(size=(BATCH, 5, 10)))
+
+
+SCALAR_DRIVERS = {
+    "any_loss.WeightedCrossEntropyWithAnyLoss": (lambda: {"anyloss": F1Loss()}, _seg_pair),
+    "segmentation_wrapper_loss.SegmentationWrapperLoss": (
+        lambda: {"loss_name": "dice", "config": LossConfig(num_classes=3)},
+        _seg_pair,
+    ),
+    "dino_loss.iBOTPatchLoss": ({"out_dim": 5}, _packed_patches),
+}
+REFUSES_SAMPLE_WEIGHT = {"dino_loss.iBOTPatchLoss"}
+
+# NOT_PINNED: "module.Class" -> (kind, reason). Every entry names why a generic builder
+# cannot drive the class, and `test_a_not_pinned_reason_still_holds` re-checks the kind.
+_PROBE = "no generic builder drives it: "
 NOT_PINNED = {
-    **_bucket(
-        _PROBE + "constructor needs arguments, so the fresh-instance predicate cannot build it",
-        "any_loss WeightedCrossEntropyWithAnyLoss",
-        "dino_loss iBOTPatchLoss", "sam2_video_loss SAM2IoULoss",
-        "segmentation_wrapper_loss SegmentationWrapperLoss",
-        "yolo12_multitask_loss YOLOv12MultiTaskLoss",
+    **{k: ("ctor", f"{_PROBE}the constructor needs arguments ({why})") for k, why in {
+        "yolo12_multitask_loss.YOLOv12MultiTaskLoss":
+            "`tasks`, a TaskConfiguration; it routes each model output by tensor shape",
+    }.items()},
+    "any_loss.AnyLoss": ("abstract", "abstract base: call() raises NotImplementedError"),
+    "omnipoint_losses.PointDistanceLoss": (
+        "extra_arg",
+        f"{_PROBE}call() raises ValueError unless the optional s_star argument is passed, "
+        "and Loss.__call__ never passes it, so neither sample_weight nor reduction can "
+        "reach it through Keras",
     ),
-    **_bucket("abstract base: call() raises NotImplementedError", "any_loss AnyLoss"),
-    **_bucket(
-        _PROBE + "every generic fixture raised (dict, packed or specially typed inputs)",
-        "clifford_detection_loss CliffordDetectionLoss",
-        "clip_contrastive_loss CLIPContrastiveLoss", "ddpm_hybrid_loss DDPMHybridLoss",
-        "colbert_loss ColBERTPairwiseSoftmaxLoss ColBERTDistillationLoss",
-        "doc_scanner_flow_sequence_loss DocScannerFlowSequenceLoss",
-        "infonce_loss SymmetricInfoNCELoss", "lightglue_loss LightGlueLoss",
-        "omnipoint_losses PointDistanceLoss", "tabm_loss TabMLoss",
-        "reid_cosine_loss SoftmarginTripletLoss", "sam3_detection_loss Sam3DetectionLoss",
-        "sam2_video_loss SAM2ObjectScoreLoss", "topographic_vae_loss TopographicVAELoss",
-        "siamese_tracking_loss DaSiamRPNClsLoss DaSiamRPNRegLoss",
-        "yolo12_multitask_loss YOLOv12ObjectDetectionLoss DiceFocalSegmentationLoss",
+    "image_restoration_loss.VGGLoss": (
+        "download", f"{_PROBE}it builds keras.applications.VGG19(weights='imagenet') (about 550 MB)",
     ),
-    **_bucket(
-        _PROBE + "call() never returned a scalar on any fixture that drove it "
-        "((batch,) or a shape following the input rank), predicate not run",
-        "image_restoration_loss CharbonnierLoss FrequencyLoss EdgeLoss VGGLoss "
-        "EnhanceLoss DarkIRCompositeLoss",
-        "omnipoint_losses RayDirectionLoss MaskLoss NormalConsistencyLoss "
-        "LocalConsistencyLoss MetricScaleLoss",
-        "sparse_segmentation_loss SparseDiceLoss SparseFocalLoss SparseCeDiceLoss",
-        "superpoint_loss SuperPointDetectorLoss SuperPointDescriptorLoss",
-        "wasserstein_loss WassersteinDivergence WassersteinLoss "
-        "WassersteinGradientPenaltyLoss",
-        "multi_labels_loss WeightedBinaryCrossEntropyLoss WeightedBinaryFocalLoss",
-        "lpips_loss LPIPSLoss", "multistep_loss MultistepLoss",
-        "siamese_tracking_loss SiamFCLogisticLoss", "capsule_margin_loss CapsuleMarginLoss",
-        "decoupled_information_loss DecoupledInformationLoss",
-        "flow_matching_velocity_loss FlowMatchingVelocityLoss",
-        "sparsemax_loss SparsemaxLoss", "yolo12_multitask_loss ClassificationFocalLoss",
-        "chamfer_loss ChamferLoss", "harmonic_loss HarmonicCausalLMLoss",
-        "mean_shift_instance_loss MeanShiftInstanceLoss", "hrm_loss StableMaxCrossEntropy",
+    "image_restoration_loss.EnhanceLoss": (
+        "download", f"{_PROBE}it builds a VGGLoss, which downloads the ImageNet VGG19 weights",
     ),
+    "lpips_loss.LPIPSLoss": (
+        "download", f"{_PROBE}it builds an ImageNet-pretrained VGG backbone",
+    ),
+    **{k: ("structured", f"{_PROBE}{why}; every generic builder raises on it") for k, why in {
+        "clifford_detection_loss.CliffordDetectionLoss":
+            "y_true is the packed detection target (labels and boxes) and y_pred the "
+            "multi-stride distance and score maps, consumed by a task-aligned assigner",
+        "yolo12_multitask_loss.YOLOv12ObjectDetectionLoss":
+            "y_true is the packed detection target (labels and boxes) and y_pred the "
+            "multi-stride distance and score maps, consumed by a task-aligned assigner",
+        "sam3_detection_loss.Sam3DetectionLoss":
+            "packed (B, N_max + 1, C) targets and (B, (Q + 1) * (1 + aux), C) predictions "
+            "through a Hungarian matcher (tf.py_function); its docstring returns a scalar",
+        "topographic_vae_loss.TopographicVAELoss":
+            "y_pred is the model's output dict (REQUIRED_PREDICTION_KEYS) and y_true a "
+            "(batch, sequence, height, width, channels) clip",
+    }.items()},
 }
 BUCKETS = {
     "KNOWN_GOOD": {f"{m}.{c}": "measured" for m, c, _, _ in KNOWN_GOOD},
+    "KNOWN_NOT_ROW_SHAPED": {f"{m}.{c}": "measured" for m, c, _, _ in KNOWN_NOT_ROW_SHAPED},
     "DOCUMENTED_SCALAR": DOCUMENTED_SCALAR,
     "KNOWN_SCALAR_NOT_YET_FIXED": KNOWN_SCALAR_NOT_YET_FIXED,
     "NOT_PINNED": NOT_PINNED,
@@ -715,9 +1009,79 @@ _SCALAR_KEYS = sorted({**DOCUMENTED_SCALAR, **KNOWN_SCALAR_NOT_YET_FIXED})
 def test_a_scalar_bucket_entry_still_returns_a_scalar(key):
     """A fix moves the class to KNOWN_GOOD: this goes red the day it is per-sample."""
     module, cls = key.split(".")
-    is_member = _charges_every_row_the_batch_aggregate(module, cls, {}, _seg_pair)[0]
-    shape = tuple(keras.ops.shape(_make(module, cls, {}).call(*_seg_pair())))
+    kwargs, builder = SCALAR_DRIVERS.get(key, ({}, _seg_pair))
+    shape = tuple(keras.ops.shape(_make(module, cls, kwargs).call(*builder())))
+    if key in REFUSES_SAMPLE_WEIGHT:
+        y_true, y_pred = builder()
+        with pytest.raises(TypeError, match="sample_weight"):
+            _make(module, cls, kwargs)(y_true, y_pred, sample_weight=SAMPLE_WEIGHT)
+        is_member = True
+    else:
+        is_member = _charges_every_row_the_batch_aggregate(module, cls, kwargs, builder)[0]
     assert is_member and shape == (), (
         f"{key} is no longer a scalar (call() shape {shape}, member={is_member}): "
         f"move it from its scalar bucket to KNOWN_GOOD with a builder row."
     )
+
+
+# One builder per input family the generic probe ever used; the "structured" reason is
+# only as good as this list, so it is the thing to extend when a new family appears.
+GENERIC_FAMILIES = [
+    _regression_pair, _positive_pair, _image_pair, _rgb_pair, _token_pair, _logit_pair,
+    _sparse_seg_pair, _seg_pair, _points_pair, _cluster_pair, _scores_pair, _capsule_pair,
+    _identity_pair, _mask_pair, _embedding_pair,
+]
+
+
+def _drives_to_one_row_per_sample(cls, builder):
+    """True when ``cls()`` runs on the builder and returns a finite ``(BATCH,)`` tensor."""
+    try:
+        out = cls().call(*builder())
+        return tuple(out.shape) == (BATCH,) and bool(
+            np.isfinite(keras.ops.convert_to_numpy(out)).all()
+        )
+    except Exception:  # noqa: BLE001 - "raises on this family" is the answer being measured
+        return False
+
+
+@pytest.mark.parametrize("key", sorted(NOT_PINNED))
+def test_a_not_pinned_reason_still_holds(key):
+    """The reason is re-derived, never remembered: when it stops holding, promote the class."""
+    import importlib
+    import inspect
+
+    module, name = key.split(".")
+    mod = importlib.import_module(f"dl_techniques.losses.{module}")
+    cls = getattr(mod, name)
+    kind, reason = NOT_PINNED[key]
+    assert "never returned a scalar" not in reason and "one-off probe" not in reason, (
+        f"{key}: a NOT_PINNED reason must be structural, not a remembered probe: {reason!r}"
+    )
+    if kind == "ctor":
+        with pytest.raises(TypeError):
+            cls()
+    elif kind == "abstract":
+        with pytest.raises(NotImplementedError):
+            cls().call(*_regression_pair())
+    elif kind == "extra_arg":
+        assert "s_star" in inspect.signature(cls.call).parameters
+        with pytest.raises(ValueError, match="s_star"):
+            cls()(_t(np.zeros((BATCH, 4, 4, 4))), _t(np.ones((BATCH, 4, 4, 1))))
+    elif kind == "download":
+        assert "imagenet" in inspect.getsource(mod).lower(), (
+            f"{key}: the module no longer mentions ImageNet weights; re-derive the reason"
+        )
+    else:
+        assert kind == "structured"
+        drivable = [b.__name__ for b in GENERIC_FAMILIES if _drives_to_one_row_per_sample(cls, b)]
+        assert not drivable, (
+            f"{key} now runs on {drivable} and returns (B,): promote it to KNOWN_GOOD "
+            f"with that builder instead of leaving it in NOT_PINNED"
+        )
+
+
+def test_the_not_pinned_bucket_holds_only_undrivable_classes():
+    """A NOT_PINNED class that a KNOWN_GOOD builder could drive would be a vacant row."""
+    assert {kind for kind, _ in NOT_PINNED.values()} <= {
+        "ctor", "abstract", "extra_arg", "download", "structured",
+    }
