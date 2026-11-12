@@ -43,28 +43,24 @@ shape; the guard could not see the population it exists to police.
 broken walk that finds nothing fails loudly instead of parametrizing over an
 empty list.
 
-Scope: ``callbacks/`` only, which is this guard's remit. MEASURED on the same
-day: ``grep -rln "import matplotlib" src/dl_techniques --include=*.py`` returns
-**29** files tree-wide -- 3 callbacks (``training_curves`` reaches matplotlib
-only through the helper, and ``convunext_bottleneck_monitor`` now does too),
-the helper itself, and **25** others (all 10 of ``analyzer/``, all 6 of
-``visualization/``, ``datasets/{arc/arc_utilities,simple_2d}.py``,
-``losses/clustering_loss.py``, ``models/memory/som/model.py``,
-``utils/{visualization,visualization_manager,inference,alignment/alignment,
-masking/factory}.py``). None of the 25 is a Keras callback.
-(Correction, plan-2026-11-11-64d1b401: the grep now returns 28 files, 24 of them
-outside ``callbacks/`` and the helper, and one of those IS a Keras callback:
-``losses/clustering_loss.py`` defines ``ClusteringMetricsCallback``, which imports
-pyplot lazily in ``_create_visualizations``. ``utils/AGENTS.md`` carries the
-current breakdown.)
+Scope: ``callbacks/`` only, which is this guard's remit. MEASURED 2026-11-12, re-derived
+under ``plan-2026-11-11T223825-64d1b401`` (step 7 of that plan replaced an earlier count
+that said no file outside ``callbacks/`` is a Keras callback):
+``grep -rln "import matplotlib" src/dl_techniques --include=*.py`` returns **28** files
+-- 3 under ``callbacks/`` (``coco_multitask_visualization``, ``depth_visualization``,
+``jepa_visualization``), the helper itself, and **24** others (11 in ``analyzer/``, 6 in
+``visualization/``, 2 in ``datasets/``, ``losses/clustering_loss.py``,
+``models/memory/som/model.py``, ``utils/{inference,alignment/alignment,masking/factory}.py``).
+ONE of the 24 IS a Keras callback: ``losses/clustering_loss.py`` defines
+``ClusteringMetricsCallback``, which imports pyplot lazily in ``_create_visualizations``.
+``utils/AGENTS.md`` carries the same breakdown.
 
-ONE of them is nevertheless a callback-driven consumer and is reported rather
-than silently swept in: ``callbacks/analyzer_callback.py`` imports
-``dl_techniques.analyzer``, whose 10 modules import matplotlib directly, so an
-epoch hook DOES reach a bare matplotlib import transitively. The census
-deliberately does not select ``analyzer_callback.py`` -- it acquires no pyplot
-of its own -- and widening this guard to ``analyzer/`` is a separate decision
-that has NOT been taken here.
+A second route is transitive and is reported rather than silently swept in:
+``callbacks/analyzer_callback.py`` imports ``dl_techniques.analyzer``, whose modules
+import matplotlib directly, so an epoch hook DOES reach a bare matplotlib import. The
+census deliberately does not select ``analyzer_callback.py`` -- it acquires no pyplot of
+its own -- and widening this guard to ``analyzer/`` is a separate decision that has NOT
+been taken here.
 
 ``CUDA_VISIBLE_DEVICES=""`` keeps these keras imports on CPU (the backend
 question is GPU-independent, and the repo forbids concurrent GPU-touching test
