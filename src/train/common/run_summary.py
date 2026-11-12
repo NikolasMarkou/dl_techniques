@@ -585,6 +585,10 @@ def report_data_free_run(
         analysis_off_hint="analysis_args.model_analysis=false", eval_batch_size=eval_batch_size,
         read_status=read_data_free_analysis_status,
     )
+    # DECISION plan-2026-11-12T015747-46e5318f/D-026
+    # `report_best_weights` marks only the stock reader's "success" partial; this reader's good status is "ok", so the
+    # promotion is made here. Do NOT drop it as redundant with `report_best_weights`: a named failed analysis would then
+    # read as a clean run (the denoising and pretrain tasks each carried this comment before D-024 moved the line here).
     if analysis.get("failed_analyses") and analysis["status"] == "ok":
         analysis["status"] = PARTIAL_ANALYSIS_STATUS
     load_detail: Dict[str, Any] = {}

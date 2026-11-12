@@ -606,6 +606,9 @@ def test_a_conformal_level_is_refused_by_key(world, folders, tmp_path):
     with pytest.raises(ConfigValidationError) as raised:
         train_image_denoising(**mapping(tmp_path / "run", folders, analysis_args={"conformal_alpha": 0.1}))
     assert "analysis_args.conformal_alpha" in str(raised.value)
+    # The shared sentence names the run kind: a copy taken from another task must not pass.
+    assert "a set of classes for a whole image, which a denoising run does not produce; leave it null, got 0.1" in str(
+        raised.value)
     assert not (tmp_path / "run").exists()
 
 

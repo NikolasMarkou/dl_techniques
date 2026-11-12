@@ -472,6 +472,8 @@ def test_a_conformal_level_is_refused_by_key():
     with pytest.raises(ConfigValidationError) as caught:
         make_config(Path("/nonexistent/run"), **{"analysis_args.conformal_alpha": 0.1})
     assert "analysis_args.conformal_alpha" in str(caught.value)
+    assert "a set of classes for a whole image, which a pretrain run does not produce; leave it null, got 0.1" in str(
+        caught.value)
 
 
 def test_a_smoke_run_applies_no_bar(world, tmp_path):
@@ -626,6 +628,8 @@ def test_a_refusal_on_few_positions_says_the_split_size_limits_the_estimate_and_
     assert "60 distinct codes over the 96 masked positions" in message and "perplexity 57" in message
     assert "limited by the split size" in message and "data.max_samples" in message
     assert "train the tokenizer longer" in message, "the other cause stays named"
+    # The closing clause names the split-size limit by the positions and codes of the split, not by the distinct codes seen.
+    assert "96 positions cannot show more than 96 codes (raise data.max_samples)" in message
 
 
 def test_a_toy_that_uses_every_code_it_has_is_still_below_the_real_floor(world, tokenizers, tmp_path):
