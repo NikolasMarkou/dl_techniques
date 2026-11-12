@@ -58,6 +58,10 @@ Interface contract
         (``high_freq_blocks`` without ``use_laplacian_pyramid``; ``trainable_gabor_stem=false`` without a Gabor stem).
         Pure; imports the library's activation allowlist on the first value rule it applies.
 
+``named_parameters(path)``
+    :param path: ``"module:attr"`` of a callable or a class (a class gives its constructor's parameters).
+    :return: its named parameters, ``*args`` and ``**kwargs`` left out. The one signature walk the censuses share.
+
 ``factory_signatures(family)``
     :return: ``{"module:callable": [named parameters]}`` of the library factories in :data:`FACTORIES`; a
         ``**kwargs`` is left out (the callable behind it is in the same dict).
@@ -341,15 +345,21 @@ def problems_of(family: str, model_args: Mapping[str, Any]) -> List[str]:
     return lines
 
 
+def named_parameters(path: str) -> List[str]:
+    """Return the named parameters of the callable or class at ``"module:attr"`` (``*args`` and ``**kwargs`` left out).
+
+    The one walk of a signature that the signature censuses share (:func:`factory_signatures` here, the pretrain
+    families' in :mod:`train.api.pretrain_models`). A class gives its constructor's parameters.
+    """
+    return [
+        name for name, parameter in inspect.signature(load_attr(path)).parameters.items()
+        if parameter.kind not in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
+    ]
+
+
 def factory_signatures(family: str) -> Dict[str, List[str]]:
     """Return ``{callable path: named parameters}`` of the library factories behind ``family`` (``**kwargs`` left out)."""
-    return {
-        path: [
-            name for name, parameter in inspect.signature(load_attr(path)).parameters.items()
-            if parameter.kind not in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
-        ]
-        for path in FACTORIES[family]
-    }
+    return {path: named_parameters(path) for path in FACTORIES[family]}
 
 
 def signature_census(

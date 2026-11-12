@@ -82,7 +82,10 @@ SMALL_IMAGE_SIZE = 32
 #: rule, ``loader`` the arguments of ``load_classification_data`` the recipe
 #: decides (read by the data step), and the five group keys are those of the
 #: task config (``analysis_args`` only in a ``per_dataset`` overlay: no family's base recipe
-#: has one, D-040).
+#: has one, D-040). ``data`` is the ``data`` group, held by the pretrain families only: the
+#: mask keys depend on the family (ET masks a ratio, BEiT blocks of patches) and the patch
+#: size on the dataset, so the family's recipe decides them
+#: (``train.api.pretrain_args.PretrainData``).
 RECIPE_KEYS = (
     "epochs",
     "batch_size",
@@ -91,6 +94,7 @@ RECIPE_KEYS = (
     "metric_args",
     "checkpoint_args",
     "analysis_args",
+    "data",
     "model_args",
     "loader",
     "per_dataset",
