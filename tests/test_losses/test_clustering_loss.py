@@ -9,10 +9,7 @@ from tests.test_losses.keras_mask_probe import (
     assert_refuses_a_keras_mask,
     assert_refuses_per_timestep_weights,
 )
-from dl_techniques.losses.clustering_loss import \
-    ClusteringLoss, \
-    ClusteringMetrics, \
-    ClusteringMetricsCallback
+from dl_techniques.losses.clustering_loss import ClusteringLoss
 
 
 @pytest.fixture
