@@ -15,12 +15,15 @@ naive-last on MSE) and validates on a fresh noise draw. What is pinned here, at 
   comparison can see the failure it guards; the train windows are a function of ``(stream_seed, counter)``;
 * the standardization uses the CONTEXT only (the leak instrument: replacing the target leaves the standardized
   context unchanged), the tf function equals its numpy twin, a constant context is finite, the floor is relative
-  to the context's mean absolute value, and the target is scaled by the context's statistics;
+  to the context's mean absolute value, the target is scaled by the context's statistics, and a flat ZERO context
+  (no scale information) leaves the target in its own unit instead of dividing it by a tiny number (D-035);
 * cardinalities: ``train_ds`` is infinite, ``select_ds`` and ``test_ds`` state ``n // batch`` over a static
   batch, ``n`` a multiple of the batch;
 * a csv: segments by fraction, windows inside their segment, a strictly increasing time column, finite numeric
   named columns, a fingerprint that moves with the file bytes and with a window key;
 * every refusal of Invariant 9 is a named ``ConfigError`` raised within 30 seconds;
+* the csv reader and ``split_bounds`` live in ``train.api.forecast_series``, which loads neither TensorFlow nor Keras
+  (D-036), so a check can run before the GPU is claimed;
 * a resume (``with_stream``) keeps the split and the select and test streams and changes the train stream.
 """
 
@@ -41,7 +44,6 @@ import dl_techniques
 from train.api.errors import ConfigError
 from train.common import forecast_data as fd
 from train.common.forecast_data import (
-    ABSOLUTE_FLOOR,
     build_bank,
     context_stats_np,
     load_forecast_batches,
@@ -336,7 +338,8 @@ def oracle(window, lookback, floor):
     context = window[..., :lookback, :]
     mean = context.mean(axis=-2, keepdims=True)
     std = context.std(axis=-2, keepdims=True)
-    scale = np.maximum(np.maximum(std, floor * np.abs(context).mean(axis=-2, keepdims=True)), 1e-8)
+    scale = np.maximum(std, floor * np.abs(context).mean(axis=-2, keepdims=True))
+    scale = np.where(scale > 1e-30, scale, 1.0)
     return (context - mean) / scale, (window[..., lookback:, :] - mean) / scale
 
 
@@ -408,7 +411,75 @@ class TestTheStandardizationNeverSeesTheFuture:
         np.testing.assert_allclose(scale, [[[np.sqrt(1.25)]]])
         flat = np.full((1, 4, 1), 7.0)
         np.testing.assert_allclose(context_stats_np(flat, 1e-3)[1], [[[7e-3]]])
-        assert context_stats_np(np.zeros((1, 4, 1)), 1e-3)[1].item() == ABSOLUTE_FLOOR
+        assert context_stats_np(np.zeros((1, 4, 1)), 1e-3)[1].item() == 1.0
+
+
+class TestAFlatZeroContextHasNoScaleToDivideBy:
+    """D-035: an all-zero context divided by a 1e-8 floor turned a spike target into 1e9."""
+
+    @staticmethod
+    def both(w, lookback=LOOKBACK, floor=1e-3):
+        nx, ny = standardize_np(w, lookback, floor)
+        tx, ty = standardize_tf(tf.constant(w), lookback, floor)
+        return (nx, ny), (tx.numpy(), ty.numpy())
+
+    def test_a_zero_context_with_a_spike_target_gives_the_raw_spike_in_both_twins(self):
+        w = np.zeros((2, WIDTH, 1))
+        w[0, LOOKBACK + 3, 0] = 10.84
+        w[1, LOOKBACK:, 0] = np.linspace(-2.0, 5.0, HORIZON)
+        for x, y in self.both(w):
+            assert np.isfinite(x).all() and np.isfinite(y).all()
+            np.testing.assert_array_equal(x, 0.0)
+            np.testing.assert_array_equal(y, w[:, LOOKBACK:].astype(np.float32))
+            assert np.abs(y).max() < 11.0
+
+    def test_the_tf_function_equals_the_numpy_twin_on_zero_and_ordinary_windows_together(self):
+        w = windows(n=6, channels=2, seed=5)
+        w[1, :LOOKBACK, 0] = 0.0
+        w[1, LOOKBACK + 2, 0] = 7.5
+        w[4, :LOOKBACK, 1] = 0.0
+        w[4, LOOKBACK:, 1] = 123.0
+        (nx, ny), (tx, ty) = self.both(w)
+        np.testing.assert_allclose(tx, nx, rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(ty, ny, rtol=1e-6, atol=1e-6)
+        np.testing.assert_array_equal(ny[1, :, 0], w[1, LOOKBACK:, 0].astype(np.float32))
+        np.testing.assert_array_equal(ny[4, :, 1], w[4, LOOKBACK:, 1].astype(np.float32))
+        _, expected = oracle(w, LOOKBACK, 1e-3)
+        np.testing.assert_allclose(ny, expected, rtol=1e-5, atol=1e-5)
+
+    def test_a_flat_non_zero_context_still_uses_the_relative_floor(self):
+        w = np.full((1, WIDTH, 1), 1e-6)
+        w[:, LOOKBACK:] += 1e-6
+        for _, y in self.both(w):
+            np.testing.assert_allclose(y, 1e-6 / (1e-3 * 1e-6), rtol=1e-5)
+        assert context_stats_np(w[:, :LOOKBACK], 1e-3)[1].item() > 1e-30
+        np.testing.assert_allclose(context_stats_np(w[:, :LOOKBACK], 1e-3)[1], 1e-9, rtol=1e-9)
+
+    def test_a_zero_scale_floor_on_a_flat_context_is_the_unit_scale_too(self):
+        w = np.full((1, WIDTH, 1), 4.0)
+        w[:, LOOKBACK:] = 9.0
+        for x, y in self.both(w, floor=0.0):
+            np.testing.assert_array_equal(x, 0.0)
+            np.testing.assert_allclose(y, 5.0)
+
+    def test_the_bank_at_eight_realizations_and_seed_42_has_no_window_standardized_past_a_thousand(self):
+        """The measured toxic bank: ``sparse_events#4`` gave 1.08e9; every window of every segment is scanned."""
+        names = sorted(fd.TimeSeriesGenerator(fd.TimeSeriesGeneratorConfig(n_samples=1)).get_task_names())
+        series_length, realizations = 10_000, 8
+        bank, owners, _ = build_bank(
+            patterns=names, seed=42, realizations=realizations, series_length=series_length, noise_level=0.1)
+        assert bank.shape == (len(owners), series_length) and ("sparse_events", 4) in owners
+        worst, where = 0.0, None
+        for lo, hi in split_bounds(series_length, 0.15, 0.15):
+            for index, row in enumerate(bank):
+                frames = np.lib.stride_tricks.sliding_window_view(row[lo:hi], 168 + 24)[:, :, None]
+                with np.errstate(all="ignore"):
+                    _, y = standardize_np(frames, 168, 1e-3)
+                # a NaN (0 / 0) or an inf (spike / 0) must count as the worst value, not vanish from a max
+                top = float(np.abs(y).max()) if np.isfinite(y).all() else float("inf")
+                if top > worst:
+                    worst, where = top, (owners[index], lo)
+        assert np.isfinite(worst) and worst < 1e3, (worst, where)
 
 
 # ---------------------------------------------------------------------
@@ -529,6 +600,38 @@ class TestCsv:
 # ---------------------------------------------------------------------
 # refusals
 # ---------------------------------------------------------------------
+
+
+_TF_FREE_SOURCE = """
+import sys
+
+from train.api.forecast_series import read_csv_series, split_bounds
+
+values, names, digest = read_csv_series(sys.argv[1], ["a", "b"], "ts")
+segments = split_bounds(len(values), 0.2, 0.2)
+loaded = sorted(m for m in sys.modules if m.split(".")[0] in ("tensorflow", "keras", "tf_keras"))
+common = sorted(m for m in sys.modules if m == "train.common" or m.startswith("train.common."))
+print("RESULT", values.shape, names, segments, loaded, common)
+"""
+
+
+class TestTheCsvReaderAndTheSplitLoadNoTensorFlow:
+    """D-036: ``train.api.forecast_series`` is what a pre-claim check imports; TF must not come with it."""
+
+    def test_a_fresh_interpreter_reads_a_csv_and_splits_it_with_tensorflow_and_keras_out_of_sys_modules(self, tmp_path):
+        path = write_csv(tmp_path, rows=200)
+        src = str(Path(dl_techniques.__file__).resolve().parents[1])
+        env = dict(os.environ, PYTHONPATH=src, CUDA_VISIBLE_DEVICES="", TF_CPP_MIN_LOG_LEVEL="3", MPLBACKEND="Agg")
+        out = subprocess.run(
+            [sys.executable, "-c", _TF_FREE_SOURCE, str(path)], capture_output=True, text=True, env=env,
+            cwd=str(tmp_path), timeout=300)
+        assert out.returncode == 0, out.stderr[-2000:]
+        (line,) = [l for l in out.stdout.splitlines() if l.startswith("RESULT ")]
+        assert line == "RESULT (200, 2) ['a', 'b'] ((0, 120), (120, 160), (160, 200)) [] []", line
+
+    def test_the_loader_uses_the_same_functions_not_copies(self):
+        from train.api import forecast_series as fs
+        assert fd.read_csv_series is fs.read_csv_series and fd.split_bounds is fs.split_bounds
 
 
 @pytest.mark.usefixtures("within_30_seconds")

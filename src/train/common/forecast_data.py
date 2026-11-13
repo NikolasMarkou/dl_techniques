@@ -6,7 +6,9 @@ leak) and validate on a fresh noise draw. This module builds the same three pipe
 of series (the synthetic generator, one fresh instance per ``(pattern, realization)``, or one user csv) is split
 by TIME, and a window is a function of its key, never of a hidden state.
 
-This module imports TensorFlow; ``train.api`` imports it inside functions only.
+This module imports TensorFlow; ``train.api`` imports it inside functions only. The csv reader, the column checks
+and ``split_bounds`` live in ``train.api.forecast_series`` (pandas and numpy only), which a check made before
+the GPU is claimed can import without TensorFlow (D-036); they are imported here, not copied.
 
 Interface contract
 ------------------
@@ -35,6 +37,8 @@ max_samples, batch_size, seed, stream_seed, scale_floor)``
 
 ``standardize_tf(window, lookback, scale_floor)`` and ``standardize_np(window, lookback, scale_floor)``
     Twins: ``window`` is ``(..., lookback + horizon, channels)``; returns ``(x, y)`` float32, computed in float64.
+    The scale is ``max(std, scale_floor * mean|x|)`` of the context, or ``UNIT_SCALE`` when that is not above
+    ``NO_SCALE`` (a flat zero context): finite and bounded for every input.
 
 ``train_window_at(stream_seed, counter, n_series, span)``
     :return: ``(series, start)`` int64 scalars, a pure function of ``(stream_seed, counter)``.
@@ -42,35 +46,29 @@ max_samples, batch_size, seed, stream_seed, scale_floor)``
 
 import dataclasses
 import hashlib
-import io
 import json
 import math
-import re
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
-import pandas as pd
 import tensorflow as tf
 
 from dl_techniques.datasets.time_series.generator import TimeSeriesGenerator, TimeSeriesGeneratorConfig
 from dl_techniques.utils.logger import logger
-from train.api.errors import ConfigError
+from train.api.forecast_series import read_csv_series, refuse, split_bounds
 from train.common.pretrain_data import SELECT_SALT, TEST_SALT, derive_stream_seed
 
 BUILTIN, CSV, SYNTHETIC = "builtin", "csv", "synthetic"
 
-#: Added to the relative floor of the context scale so that an all-zero context still divides by a number.
-ABSOLUTE_FLOOR = 1e-8
+#: A context scale not above this is "no scale information" (an exactly flat zero context): see ``context_stats_np``.
+NO_SCALE = 1e-30
+#: The scale of such a context: the series' own unit, so the target stays what it is.
+UNIT_SCALE = 1.0
 #: Fixed select and test windows per series of the synthetic bank, when ``n_select`` or ``n_test`` is not given.
 SELECT_WINDOWS_PER_SERIES = 8
 #: The legacy epoch: the default ``steps_per_epoch`` never exceeds it.
 EPOCH_STEPS = 500
-
-
-def _refuse(message: str) -> None:
-    raise ConfigError(message)
 
 
 # ---------------------------------------------------------------------
@@ -81,8 +79,10 @@ def _refuse(message: str) -> None:
 def context_stats_np(context: np.ndarray, scale_floor: float) -> Tuple[np.ndarray, np.ndarray]:
     """Mean and scale of ``(..., lookback, channels)`` over the time axis, as ``(..., 1, channels)`` float64.
 
-    The scale is the POPULATION standard deviation floored at ``max(scale_floor * mean|x|, ABSOLUTE_FLOOR)``:
-    relative to the context's own magnitude, so a series in micro-units is not floored wholesale.
+    The scale is the POPULATION standard deviation floored at ``scale_floor * mean|x|``: relative to the context's
+    own magnitude, so a series in micro-units is not floored wholesale. A scale not above ``NO_SCALE`` (a context
+    that is exactly flat AND zero, which carries no scale information) is ``UNIT_SCALE``: the target stays in the
+    series' own unit instead of being divided by a number near zero.
     """
     # DECISION plan-2026-11-13T105600-3a8319ef/D-005
     # The statistics come from the CONTEXT only, and the TARGET is divided by the same numbers. Do NOT
@@ -95,7 +95,13 @@ def context_stats_np(context: np.ndarray, scale_floor: float) -> Tuple[np.ndarra
     # DECISION plan-2026-11-13T105600-3a8319ef/D-027
     # The floor binds 0.03 to 0.7 percent of the synthetic bank's windows, all of them flat `crypto_prices`
     # tails. Do NOT make it an absolute number: a csv in micro-units would be floored wholesale.
-    scale = np.maximum(np.maximum(std, scale_floor * np.abs(context).mean(axis=-2, keepdims=True)), ABSOLUTE_FLOOR)
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-035
+    # A flat zero context has std 0 and mean|x| 0, so BOTH terms are 0. An absolute floor (1e-8, as this had
+    # before) divided a moving target by 1e-8: sparse_events#4 at R=8 seed 42 reached 1.08e9. Do NOT bring an
+    # absolute floor back, and do NOT clip or re-key the window instead: the Predictor and the export call
+    # this same function, so the rule has to be a function of the context alone. Such a window keeps its raw unit.
+    scale = np.maximum(std, scale_floor * np.abs(context).mean(axis=-2, keepdims=True))
+    scale = np.where(scale > NO_SCALE, scale, UNIT_SCALE)
     return mean, scale
 
 
@@ -108,13 +114,17 @@ def standardize_np(window: np.ndarray, lookback: int, scale_floor: float) -> Tup
 
 
 def standardize_tf(window: "tf.Tensor", lookback: int, scale_floor: float) -> Tuple["tf.Tensor", "tf.Tensor"]:
-    """Context and target of a window, standardized by the context's mean and floored population std."""
+    """Context and target of a window, standardized by the context's mean and floored population std.
+
+    The twin of :func:`standardize_np`, rule for rule: the relative floor, then ``UNIT_SCALE`` for a flat zero context.
+    """
     window = tf.cast(window, tf.float64)
     context = window[..., :lookback, :]
     mean = tf.reduce_mean(context, axis=-2, keepdims=True)
     std = tf.sqrt(tf.reduce_mean(tf.square(context - mean), axis=-2, keepdims=True))
     floor = scale_floor * tf.reduce_mean(tf.abs(context), axis=-2, keepdims=True)
-    scale = tf.maximum(tf.maximum(std, floor), ABSOLUTE_FLOOR)
+    scale = tf.maximum(std, floor)
+    scale = tf.where(scale > NO_SCALE, scale, tf.constant(UNIT_SCALE, tf.float64))
     return tf.cast((context - mean) / scale, tf.float32), tf.cast((window[..., lookback:, :] - mean) / scale, tf.float32)
 
 
@@ -150,24 +160,13 @@ def build_bank(
                 default_noise_level=noise_level))
             series = np.asarray(generator.generate_task_data(pattern), np.float64).reshape(-1)
             if series.shape[0] != series_length:
-                _refuse(f"pattern {pattern!r} gave {series.shape[0]} points, not data.series_length = {series_length}")
+                refuse(f"pattern {pattern!r} gave {series.shape[0]} points, not data.series_length = {series_length}")
             if np.isfinite(series).all():
                 rows.append(series)
                 owners.append((pattern, realization))
             else:
                 dropped.append((pattern, realization))
     return (np.stack(rows) if rows else np.zeros((0, series_length))), owners, dropped
-
-
-def split_bounds(rows: int, select_fraction: float, test_fraction: float) -> Tuple[Tuple[int, int], ...]:
-    """The consecutive ``(lo, hi)`` row ranges of the train, select and test segments of ``rows`` rows."""
-    # DECISION plan-2026-11-13T105600-3a8319ef/D-006
-    # The split is BY TIME and the segments are disjoint: train first, then select, then test. Do NOT split
-    # windows at random (a window straddling a boundary puts a validation row inside a training window) and
-    # do NOT let a window of one segment reach into the next: every window of a segment lies inside it.
-    n_select, n_test = round(select_fraction * rows), round(test_fraction * rows)
-    train_hi = rows - n_select - n_test
-    return (0, train_hi), (train_hi, train_hi + n_select), (train_hi + n_select, rows)
 
 
 def _fixed_positions(seed: int, salt: str, count: int, n_series: int, lo: int, hi: int, width: int) -> np.ndarray:
@@ -194,59 +193,6 @@ def train_window_at(stream_seed: Any, counter: Any, n_series: int, span: int) ->
     series = tf.minimum(tf.cast(tf.floor(u[0] * n_series), tf.int64), n_series - 1)
     start = tf.minimum(tf.cast(tf.floor(u[1] * span), tf.int64), span - 1)
     return series, start
-
-
-# ---------------------------------------------------------------------
-# csv
-# ---------------------------------------------------------------------
-
-
-def read_csv_series(
-        path: Optional[str], value_cols: Optional[Sequence[str]], time_col: Optional[str],
-) -> Tuple[np.ndarray, List[str], str]:
-    """``(values, names, sha256)``: a csv as ``(rows, channels)`` float64, its value columns and its byte hash."""
-    if path is None:
-        _refuse("data.path is required for data.format 'csv'")
-    file = Path(path)
-    if not file.is_file():
-        _refuse(f"data.path {path} does not exist")
-    raw = file.read_bytes()
-    try:
-        frame = pd.read_csv(io.BytesIO(raw))
-    except (pd.errors.ParserError, pd.errors.EmptyDataError, UnicodeDecodeError) as exc:
-        raise ConfigError(f"data.path {path} is not a readable csv: {exc}") from exc
-    if len(frame) == 0:
-        _refuse(f"data.path {path} has no rows")
-    for key, name in (("data.time_col", time_col),) + tuple(("data.value_cols", c) for c in value_cols or ()):
-        if name is not None and name not in frame.columns:
-            _refuse(f"{key}: column {name!r} is missing from {file.name}, which has {list(frame.columns)}")
-    # D-027: no implicit index or time column is a value column
-    names = list(value_cols) if value_cols else [
-        c for c in frame.columns if c != time_col and not re.fullmatch(r"Unnamed: \d+", str(c))]
-    if not names:
-        _refuse(f"{file.name} has no value column: every column is the time column or an unnamed index")
-    for name in names:
-        if not pd.api.types.is_numeric_dtype(frame[name]) or pd.api.types.is_bool_dtype(frame[name]):
-            _refuse(f"column {name!r} is not numeric (dtype {frame[name].dtype}): one text or decimal-comma "
-                    "cell makes a whole column non-numeric; name the numeric columns in data.value_cols")
-    values = frame[names].to_numpy(np.float64)
-    bad = ~np.isfinite(values)
-    if bad.any():
-        row, col = (int(v[0]) for v in np.nonzero(bad))
-        _refuse(f"column {names[col]!r} holds {int(bad[:, col].sum())} non-finite cell(s), the first at row {row}")
-    if time_col is not None:
-        _check_time_column(frame[time_col], time_col)
-    return values, names, hashlib.sha256(raw).hexdigest()
-
-
-def _check_time_column(column: "pd.Series", name: str) -> None:
-    if column.dtype == object:
-        try:
-            column = pd.to_datetime(column)
-        except (ValueError, TypeError) as exc:
-            raise ConfigError(f"data.time_col {name!r} cannot be parsed as timestamps: {exc}") from exc
-    if column.isna().any() or not (column.is_monotonic_increasing and column.is_unique):
-        _refuse(f"data.time_col {name!r} must be strictly increasing with no empty cell: sort the file by time")
 
 
 # ---------------------------------------------------------------------
@@ -314,32 +260,32 @@ class ForecastBatches:
 
 def _require_positive(name: str, value: Optional[int]) -> None:
     if value is not None and value < 1:
-        _refuse(f"data.{name} must be at least 1, got {value}")
+        refuse(f"data.{name} must be at least 1, got {value}")
 
 
 def _check_request(request: Dict[str, Any]) -> None:
     if request["format"] not in (BUILTIN, CSV):
-        _refuse(f"data.format must be '{BUILTIN}' or '{CSV}', got {request['format']!r}")
+        refuse(f"data.format must be '{BUILTIN}' or '{CSV}', got {request['format']!r}")
     if request["format"] == BUILTIN:
         if request["dataset"] != SYNTHETIC:
-            _refuse(f"data.dataset must be '{SYNTHETIC}' for data.format '{BUILTIN}', got {request['dataset']!r}")
+            refuse(f"data.dataset must be '{SYNTHETIC}' for data.format '{BUILTIN}', got {request['dataset']!r}")
         _require_positive("realizations", request["realizations"])
         _require_positive("series_length", request["series_length"])
     for name in ("lookback", "horizon", "batch_size", "steps_per_epoch", "max_samples"):
         _require_positive(name, request[name])
     for name in ("select_fraction", "test_fraction"):
         if not 0.0 < request[name] < 1.0:
-            _refuse(f"data.{name} must be in (0, 1), got {request[name]}")
+            refuse(f"data.{name} must be in (0, 1), got {request[name]}")
     if request["select_fraction"] + request["test_fraction"] >= 1.0:
-        _refuse("data.select_fraction + data.test_fraction must leave a train segment (their sum must be below 1)")
+        refuse("data.select_fraction + data.test_fraction must leave a train segment (their sum must be below 1)")
     if request["scale_floor"] < 0:
-        _refuse(f"transform_args.scale_floor must not be negative, got {request['scale_floor']}")
+        refuse(f"transform_args.scale_floor must not be negative, got {request['scale_floor']}")
 
 
 def _check_segments(segments: Sequence[Tuple[int, int]], rows: int, width: int, source: str) -> None:
     for name, (lo, hi) in zip(("train", "select", "test"), segments):
         if hi - lo < width:
-            _refuse(
+            refuse(
                 f"{source} of {rows} rows is too short: its {name} segment has {hi - lo} rows and one window needs "
                 f"lookback + horizon = {width}; give it more rows or lower data.lookback, data.horizon or the fractions")
 
@@ -349,7 +295,7 @@ def _count(name: str, requested: Optional[int], default: int, batch_size: int) -
     wanted = default if requested is None else requested
     n = wanted // batch_size * batch_size
     if n < 1:
-        _refuse(f"data.n_{name} = {wanted} is fewer than one batch ({batch_size}): a split needs a whole batch")
+        refuse(f"data.n_{name} = {wanted} is fewer than one batch ({batch_size}): a split needs a whole batch")
     return n
 
 
@@ -361,13 +307,13 @@ def _strided_positions(name: str, segment: Tuple[int, int], requested: Optional[
     if available < batch_size:
         needed = request["lookback"] + horizon * batch_size
         fraction = request[f"{name}_fraction"]
-        _refuse(
+        refuse(
             f"the {name} segment ({hi - lo} rows) holds {available} windows with non-overlapping targets, fewer than "
             f"one batch of {batch_size}: it needs at least {needed} rows (lookback + horizon * batch_size), so the "
             f"file needs about {math.ceil(needed / fraction)} rows at data.{name}_fraction = {fraction}")
     count = _count(name, requested, available, batch_size)
     if count > available:
-        _refuse(f"data.n_{name} = {requested} asks for more windows than the {name} segment holds ({available})")
+        refuse(f"data.n_{name} = {requested} asks for more windows than the {name} segment holds ({available})")
     return np.stack([np.zeros(count, np.int64), lo + horizon * np.arange(count, dtype=np.int64)], axis=1)
 
 
@@ -390,13 +336,13 @@ def load_forecast_batches(
         chosen = names if patterns is None else list(patterns)
         unknown = [p for p in chosen if p not in names]
         if unknown:
-            _refuse(f"data.patterns: unknown pattern {unknown[0]!r}; the generator has {len(names)}, e.g. {names[:3]}")
+            refuse(f"data.patterns: unknown pattern {unknown[0]!r}; the generator has {len(names)}, e.g. {names[:3]}")
         segments = split_bounds(series_length, select_fraction, test_fraction)
         _check_segments(segments, series_length, width, "a synthetic series")
         series, owners, dropped = build_bank(
             patterns=chosen, seed=seed, realizations=realizations, series_length=series_length, noise_level=noise_level)
         if not owners:
-            _refuse(f"every series of the bank was non-finite ({len(dropped)} dropped); change data.patterns or the seed")
+            refuse(f"every series of the bank was non-finite ({len(dropped)} dropped); change data.patterns or the seed")
         if dropped:
             logger.warning(f"forecast bank: {len(dropped)} non-finite series dropped: {dropped[:5]}")
         bank = series[:, :, None]
