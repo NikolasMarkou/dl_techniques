@@ -111,7 +111,7 @@ dataset table and the loader are imported inside the functions.
 import dataclasses
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Mapping, Optional, Tuple, Type, Union
+from typing import Any, Callable, Dict, List, Literal, Mapping, Optional, Tuple, Type, Union
 
 from .config import StrictConfig, join_path, load_yaml_mapping, validate
 from .errors import ConfigError, ConfigValidationError
@@ -409,42 +409,21 @@ def read_data_file(path: Union[str, Path], path_keys: Tuple[str, ...] = PATH_KEY
     return mapping
 
 
-def load_data_config(data: Any) -> ImageData:
-    """Return the data config for a mapping, a YAML path or an instance; see the module contract."""
-    if isinstance(data, tuple(FORMATS.values())):
-        return data
-    source = ""
-    if isinstance(data, (str, Path)):
-        source = f"data file {str(data)!r}: "
-        data = read_data_file(data)
-    if not isinstance(data, Mapping):
-        raise ConfigError(
-            f"Invalid value for 'data': expected a mapping or the path of a YAML "
-            f"file, got {type(data).__name__}"
-        )
-    given = dict(data)
-    given.setdefault("format", "builtin")
-    kind = given["format"]
-    if not isinstance(kind, str) or kind not in FORMATS:
-        raise ConfigError(
-            f"Invalid value for 'data.format': {kind!r} is not a data "
-            f"format; choose one of {', '.join(FORMATS)}"
-        )
-    try:
-        return validate(FORMATS[kind], given)
-    except ConfigValidationError as exc:
-        if not source:
-            raise
-        raise ConfigValidationError([source + line for line in exc.errors]) from exc
-
-
-def load_data_group(cls: Type[StrictConfig], data: Any, read_file: Any) -> Any:
+def load_data_group(
+    cls: Union[Type[StrictConfig], Tuple[Type[StrictConfig], ...]], data: Any, read_file: Any,
+    pick: Optional[Callable[[Dict[str, Any]], Type[StrictConfig]]] = None,
+) -> Any:
     """Return ``data`` as an instance of ``cls``: the instance itself, or a mapping or a YAML path validated into one.
 
-    The loader of a task whose data group is one class (``pretrain``, ``image_denoising``); ``read_file(path)`` is the
-    task's file reader, and an error from a file names the file.
+    The loader of a task's data group: one class (``pretrain``, ``image_denoising``), or several formats of which the
+    mapping names one (classification). ``read_file(path)`` is the task's file reader, and an error from a file names
+    the file.
 
-    :raises ConfigError: for a value that is neither an instance, a mapping nor a path.
+    :param cls: the class ``data`` is returned as it is when it is an instance of (a tuple of classes for a group of
+        formats), and, with no ``pick``, the class a mapping is validated into.
+    :param pick: ``pick(given)`` returns the class a mapping is validated into, given a COPY of the mapping that it may add
+        defaults to; the ``ConfigError`` it raises is not prefixed with the file.
+    :raises ConfigError: for a value that is neither an instance, a mapping nor a path, and for what ``pick`` refuses.
     :raises ConfigValidationError: for bad keys, each line prefixed with the file when the data came from one.
     """
     if isinstance(data, cls):
@@ -457,12 +436,31 @@ def load_data_group(cls: Type[StrictConfig], data: Any, read_file: Any) -> Any:
         raise ConfigError(
             f"Invalid value for 'data': expected a mapping or the path of a YAML file, got {type(data).__name__}"
         )
+    given = dict(data)
+    target = cls if pick is None else pick(given)
     try:
-        return validate(cls, dict(data))
+        return validate(target, given)
     except ConfigValidationError as exc:
         if not source:
             raise
         raise ConfigValidationError([source + line for line in exc.errors]) from exc
+
+
+def _format_class(given: Dict[str, Any]) -> Type[StrictConfig]:
+    """Return the class of ``given['format']`` (``builtin`` when absent, which is set), refusing an unknown one."""
+    given.setdefault("format", "builtin")
+    kind = given["format"]
+    if not isinstance(kind, str) or kind not in FORMATS:
+        raise ConfigError(
+            f"Invalid value for 'data.format': {kind!r} is not a data "
+            f"format; choose one of {', '.join(FORMATS)}"
+        )
+    return FORMATS[kind]
+
+
+def load_data_config(data: Any) -> ImageData:
+    """Return the data config for a mapping, a YAML path or an instance; see the module contract."""
+    return load_data_group(tuple(FORMATS.values()), data, read_data_file, pick=_format_class)
 
 
 def builtin_facts(data: BuiltinImageData, requested_image_size: Optional[int]) -> DataFacts:

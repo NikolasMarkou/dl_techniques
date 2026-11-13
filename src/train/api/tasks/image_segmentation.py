@@ -94,7 +94,6 @@ from ..config import (
     Auto,
     Precision,
     StrictConfig,
-    join_path,
     resume_help,
     run_request,
     validate,
@@ -174,20 +173,12 @@ class ImageSegmentationConfig(StrictConfig):
 
     def problems(self, prefix: str) -> List[str]:
         """Name the top-level fields out of range, and a conformal level (a classification tool)."""
-        lines = config_problems(self, prefix)
         # DECISION plan-2026-10-31T180033-2faf890a/D-077
         # `analysis_args.conformal_alpha` is REFUSED, not ignored: it is a field of the shared group
         # and a quiet no-op would look like a conformal run that found nothing. Do NOT give
         # segmentation its own analysis group to hide the key (four fields and two methods copied,
         # to be kept equal by hand); the refusal names the key and the reason.
-        alpha = self.analysis_args.conformal_alpha
-        if alpha is not None:
-            lines.append(
-                f"Invalid value for {join_path(join_path(prefix, 'analysis_args'), 'conformal_alpha')!r}: "
-                "a conformal prediction set is a set of classes for a whole image, which a "
-                f"segmentation run does not produce; leave it null, got {alpha!r}"
-            )
-        return lines
+        return config_problems(self, prefix, no_conformal_for="segmentation")
 
 
 class ImageSegmentationTrainer(TaskTrainer):

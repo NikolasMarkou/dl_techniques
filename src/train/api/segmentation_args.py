@@ -99,7 +99,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Mapping, Optional, Tuple, Type, Union
 
-from .args import AutoContext, _is_auto, _recipe_values, _with_values
+from .args import AutoContext, _is_auto, _recipe_values, _watch_values, _with_values
 from .config import AUTO, Auto, StrictConfig, join_path, validate
 from .data_args import _tfds_data_dir, read_data_file
 from .errors import ConfigError, ConfigValidationError
@@ -504,13 +504,7 @@ class SegMetricArgs(StrictConfig):
 
     def resolve_auto(self, context: AutoContext) -> "SegMetricArgs":
         """Fill ``"auto"`` fields: ``watch_metric`` from the recipe, ``watch_mode`` from its name."""
-        from train.common.callbacks import resolve_monitor_mode
-
-        found = _recipe_values(self, context, "metric_args", skip=("watch_mode",))
-        metric = found.get("watch_metric", self.watch_metric)
-        if _is_auto(self.watch_mode) and not _is_auto(metric):
-            found["watch_mode"] = resolve_monitor_mode(metric)
-        return _with_values(self, "metric_args", found)
+        return _with_values(self, "metric_args", _watch_values(self, context, "metric_args"))
 
 
 #: The segmentation losses and, for each, the ``loss_args`` knobs it reads. The keys are the values of

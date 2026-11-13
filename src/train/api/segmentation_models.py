@@ -622,14 +622,7 @@ def resolve_segmentation_args(
     # the backbone and skip the head without a word. Do NOT drop the number silently, which is what this resolver did
     # before D-047 (the run trained with no decay and said nothing). Lift the refusal per family only after a test
     # shows the penalty reaching every convolution and dense kernel of that family.
-    decay = recipes.sgd_weight_decay(optim_args)
-    if decay is not None:
-        raise ConfigError(
-            f"Invalid value for 'optim_args.weight_decay': optim_args.optimizer=sgd takes its weight decay as an L2 "
-            f"penalty on the model's kernels, and the image_segmentation task builds none for {context.family!r}, "
-            f"so weight_decay={decay!r} would be dropped without a word; set optim_args.weight_decay=null for no "
-            "decay, or use optim_args.optimizer=adamw, whose decay is decoupled and applied by the optimizer"
-        )
+    recipes.refuse_dropped_sgd_decay(optim_args, "image_segmentation", context.family)
     return recipes.merge_model_args(context, optim_args, model_args, {})
 
 

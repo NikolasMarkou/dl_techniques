@@ -405,6 +405,10 @@ def test_an_sgd_weight_decay_is_refused_by_name_because_no_segmentation_family_a
     refused(tmp_path, folders, r"optim_args\.weight_decay.*optim_args\.optimizer=sgd.*dropped without a word",
             model=model, optim_args={"optimizer": "sgd", "lr": 0.05, "weight_decay": 1e-4},
             transform_args={"image_size": SIZE})
+    # The sentence is the shared one (recipes.refuse_dropped_sgd_decay) with this task's own name and the family in it.
+    refused(tmp_path, folders, re.escape(f"and the image_segmentation task builds none for {model.split('/')[0]!r}, so weight_decay=0.0001"),
+            model=model, optim_args={"optimizer": "sgd", "lr": 0.05, "weight_decay": 1e-4},
+            transform_args={"image_size": SIZE})
 
 
 @pytest.mark.parametrize("model", SEGMENTATION_FAMILIES)
@@ -429,6 +433,9 @@ def test_the_neighbours_of_the_refused_sgd_decay_are_accepted_and_build_no_penal
 
 def test_a_conformal_level_is_refused_because_a_segmentation_run_has_no_set_of_classes(world, folders, tmp_path):
     refused(tmp_path, folders, r"analysis_args\.conformal_alpha.*does not produce",
+            analysis_args={"conformal_alpha": 0.1}, transform_args={"image_size": SIZE})
+    # The shared sentence (config_problems) names the run kind: a copy taken from another task must not pass.
+    refused(tmp_path, folders, re.escape("a set of classes for a whole image, which a segmentation run does not produce; leave it null, got 0.1"),
             analysis_args={"conformal_alpha": 0.1}, transform_args={"image_size": SIZE})
 
 

@@ -132,6 +132,27 @@ def test_an_unknown_format_is_refused_naming_the_choices():
         load_data_config({"dataset": "mnist", "format": "parquet"})
 
 
+def test_the_mapping_the_caller_gave_is_not_written_to():
+    # The default ``format`` is set on a copy: the loader is one function for every data group (``load_data_group``).
+    given = {"dataset": "mnist"}
+    load_data_config(given)
+    assert given == {"dataset": "mnist"}
+
+
+def test_a_data_file_names_itself_in_the_lines_of_a_bad_key_and_not_in_a_bad_format(tmp_path):
+    bad_key = tmp_path / "bad_key.yaml"
+    bad_key.write_text("dataset: cifar10\nnot_a_key: 3\n")
+    for given in (bad_key, str(bad_key)):
+        with pytest.raises(ConfigValidationError) as caught:
+            load_data_config(given)
+        assert list(caught.value.errors) == [f"data file {str(bad_key)!r}: Unknown key 'not_a_key'."]
+    bad_format = tmp_path / "bad_format.yaml"
+    bad_format.write_text("format: zip\n")
+    with pytest.raises(ConfigError) as caught:
+        load_data_config(bad_format)
+    assert str(caught.value) == "Invalid value for 'data.format': 'zip' is not a data format; choose one of builtin, folder, csv"
+
+
 @pytest.mark.parametrize("value", [3, ["cifar10"], None])
 def test_something_that_is_no_mapping_or_path_is_refused(value):
     with pytest.raises(ConfigError, match="'data'"):
