@@ -10,7 +10,10 @@ refuses what would hang or what disagrees with the epoch it computed everything 
 * a ``train_ds`` of infinite or unknown cardinality with no ``steps_per_epoch`` (a ``ConfigError`` that names
   ``fit_kwargs`` and ``steps_per_epoch`` and carries the claimed-run note, instead of a hang);
 * a ``validation_steps`` that is not a plain int equal to the cardinality of ``select_ds``: Keras keeps ONE validation
-  iterator, so a shorter count scores a different part of the stream each epoch and ``val_loss`` drifts;
+  iterator, so a shorter count scores a different part of the stream each epoch and ``val_loss`` drifts; an explicit
+  ``validation_steps=None`` is Keras' own default (the whole stream) and is read as absent;
+* a ``select_ds`` of infinite cardinality, whether or not ``validation_steps`` is given: a fixed ``val_loss`` needs a
+  fixed stream (D-026);
 * with ``steps_per_epoch`` given the same stream trains, and ONE iterator persists across epochs: epoch
   1 continues epoch 0's stream (Keras 3.8, MEASURED in the plan's findings), so a counter-keyed stream does
   not restart.
@@ -169,8 +172,8 @@ def with_validation_steps(change):
 
 @pytest.mark.parametrize(
     "bad",
-    [lambda n: n + 1, lambda n: n - 1, lambda n: float(n), lambda n: True, lambda n: None, lambda n: str(n)],
-    ids=["one more", "one fewer", "a float", "a bool", "None", "a string"],
+    [lambda n: n + 1, lambda n: n - 1, lambda n: float(n), lambda n: True, lambda n: str(n)],
+    ids=["one more", "one fewer", "a float", "a bool", "a string"],
 )
 def test_a_validation_steps_that_is_not_the_selection_streams_length_is_refused(world, tmp_path, bad):
     run_dir = tmp_path / "run"
@@ -201,13 +204,68 @@ def test_a_selection_stream_of_unknown_length_is_not_judged_by_validation_steps(
     known = tf.data.Dataset.range(10).batch(2)                         # 5 batches: the count is right
     assert _checked_fit_options(run_over(known)) == {"steps_per_epoch": 3, "validation_steps": 5}
     assert _checked_fit_options(run_over(unknown(known))) == {"steps_per_epoch": 3, "validation_steps": 5}
-    assert _checked_fit_options(run_over(infinite(known))) == {"steps_per_epoch": 3, "validation_steps": 5}
     with pytest.raises(ConfigError, match="validation_steps=5"):       # the instrument can see: a known length of 4
         _checked_fit_options(run_over(tf.data.Dataset.range(8).batch(2)))
 
 
+def stand_in_run(tmp_path, select_ds, options):
+    """A stand-in run for :func:`_checked_fit_options`: a known 3-batch train stream, ``select_ds``, ``options``."""
+    from types import SimpleNamespace
+
+    class Task:
+        def fit_kwargs(self, config, data):
+            return options
+
+    data = SimpleNamespace(train_ds=tf.data.Dataset.range(6).batch(2), select_ds=select_ds)
+    return SimpleNamespace(trainer=Task(), config=None, data=data, run_dir=tmp_path, steps_per_epoch=3)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{"steps_per_epoch": 3, "validation_steps": 5}, {"steps_per_epoch": 3}, {"steps_per_epoch": 3, "validation_steps": None}],
+    ids=["a count that matches the batches of one pass", "no validation_steps", "an explicit None"],
+)
+def test_an_endless_selection_stream_is_refused_by_name_with_or_without_validation_steps(tmp_path, options):
+    # D-026: a fixed ``val_loss`` needs a fixed stream. ``.repeat()`` of the right batches makes Keras' ONE validation
+    # iterator continue where the last epoch stopped (a drifting ``val_loss``) when a count is given, and never finish
+    # when none is. A real run cannot show it (the task's own epoch-zero evaluate needs the length): stand-in run.
+    from train.api.run_sequence import _checked_fit_options
+
+    endless = infinite(tf.data.Dataset.range(10).batch(2))
+    assert int(endless.cardinality()) == tf.data.INFINITE_CARDINALITY, "vacuity guard: the stream is endless"
+    with pytest.raises(ConfigError) as raised:
+        _checked_fit_options(stand_in_run(tmp_path, endless, options))
+    message = str(raised.value)
+    assert "select_ds" in message and "endless" in message and "cardinality -1" in message
+    assert "fixed" in message and "was claimed before this failed" in message
+
+
+def test_a_selection_stream_of_unknown_length_with_no_validation_steps_is_not_judged(tmp_path):
+    # The refusal above is for -1 only: -2 is a finite stream whose length is not stated (the same as the unknown-length test).
+    from train.api.run_sequence import _checked_fit_options
+
+    unstated = unknown(tf.data.Dataset.range(10).batch(2))
+    assert int(unstated.cardinality()) == tf.data.UNKNOWN_CARDINALITY
+    assert _checked_fit_options(stand_in_run(tmp_path, unstated, {"steps_per_epoch": 3})) == {"steps_per_epoch": 3}
+
+
+def test_an_explicit_none_for_validation_steps_is_keras_own_default_and_is_not_refused(tmp_path):
+    # ``validation_steps=None`` is what Keras does when the key is absent (the whole stream): read as absent, passed on as given.
+    from train.api.run_sequence import _checked_fit_options
+
+    known = tf.data.Dataset.range(10).batch(2)
+    options = {"steps_per_epoch": 3, "validation_steps": None}
+    assert _checked_fit_options(stand_in_run(tmp_path, known, options)) == options
+
+
 def test_the_validation_steps_of_the_selection_stream_are_accepted(world, tmp_path):
     with_validation_steps(lambda n: n)(config_for(tmp_path / "run", epochs=1)).run()  # control: the right number trains
+
+
+def test_a_validation_steps_of_none_trains_on_the_whole_selection_stream(world, tmp_path):
+    run_dir = tmp_path / "run"
+    with_validation_steps(lambda n: None)(config_for(run_dir, epochs=1)).run()  # Keras' default, so a fixed val_loss
+    assert (run_dir / "training_log.csv").is_file()
 
 
 # ---------------------------------------------------------------------

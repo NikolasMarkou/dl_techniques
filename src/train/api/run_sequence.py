@@ -363,11 +363,12 @@ def _checked_fit_options(run: Run) -> Dict[str, Any]:
     """Return the task's ``fit_kwargs``, refusing what would collide, disagree or hang.
 
     :raises ConfigError: for a result that is not a mapping, one that names an argument of ``fit`` the
-        sequence owns, a ``steps_per_epoch`` that is not the data's own plain int, a ``validation_steps`` that
-        is not a plain int equal to the cardinality of ``select_ds``, or a ``train_ds`` of infinite or unknown
-        cardinality with no ``steps_per_epoch``; each carries :func:`_claimed_note`. A ``validation_steps`` is
-        judged only against a ``select_ds`` of known length (a data object with none, or one of unknown length,
-        is skipped, like a ``PyDataset`` for the training stream).
+        sequence owns, a ``steps_per_epoch`` that is not the data's own plain int, a ``select_ds`` of infinite
+        cardinality (with or without ``validation_steps``), a ``validation_steps`` that is not a plain int equal to the
+        cardinality of ``select_ds``, or a ``train_ds`` of infinite or unknown cardinality with no ``steps_per_epoch``;
+        each carries :func:`_claimed_note`. A ``validation_steps`` is judged only against a ``select_ds`` of known length
+        (a data object with none, or one of unknown length, is skipped, like a ``PyDataset`` for the training stream), and
+        ``validation_steps=None`` is Keras' own default (the whole stream), read as absent.
     """
     # DECISION plan-2026-11-12T015747-46e5318f/D-003
     # An epoch of an infinite stream never ends in Keras 3.8 (no ``steps_per_epoch`` and no cardinality:
@@ -404,7 +405,20 @@ def _checked_fit_options(run: Run) -> Dict[str, Any]:
     selection = getattr(getattr(run.data, "select_ds", None), "cardinality", None)
     selection_length = int(selection()) if callable(selection) else -1
     val_steps = options.get("validation_steps")
-    if "validation_steps" in options and selection_length >= 0 and (
+    # DECISION plan-2026-11-12T015747-46e5318f/D-026
+    # A `val_loss` that selects the best epoch needs a FIXED stream: an endless `select_ds` (cardinality -1) has no "the
+    # selection split" for a count to equal, with `validation_steps` Keras' one iterator drifts over it, and without it
+    # `fit` never finishes validating. Do NOT "trust the task" to state a period (no shipped task repeats its selection
+    # split, and a `validation_steps` that is a multiple of a period is a count nothing here can check), and do NOT accept
+    # it when only `validation_steps` is absent. `validation_steps=None` is Keras' default, so it is read as absent.
+    if selection_length == -1:
+        raise ConfigError(
+            f"The selection stream of {name} is endless (cardinality -1), so there is no fixed set of batches for "
+            "val_loss: with a validation_steps Keras keeps one validation iterator and scores another part of the "
+            "stream each epoch, without one the validation never finishes. A val_loss that picks the best epoch needs a "
+            f"fixed stream: data.select_ds must be one finite pass of the selection split. {note}"
+        )
+    if val_steps is not None and selection_length >= 0 and (
         not isinstance(val_steps, numbers.Integral) or isinstance(val_steps, bool)
         or int(val_steps) != selection_length
     ):
