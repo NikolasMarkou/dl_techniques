@@ -23,7 +23,7 @@ import sys
 import math
 import argparse
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import keras
 import matplotlib
@@ -43,6 +43,7 @@ from train.common import (
     _prepare_viz_data_from_processor,
 )
 from train.common.args import build_generator_config
+from train.common.forecast_run import seasonal_naive
 from train.common.timeseries import _plot_ts_forecast, compute_post_hoc_forecast_metrics
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.time_series.timestral import (
@@ -206,33 +207,6 @@ def forecast_windows(model: TimestralModel, context: np.ndarray,
         for i in range(0, len(context), config.batch_size)
     ]
     return TimestralForecast(np.concatenate(chunks), forecaster.quantile_levels)
-
-
-def seasonal_naive(context: np.ndarray, horizon: int, max_period: Optional[int] = None) -> np.ndarray:
-    """Seasonal-naive forecast of (B, T) contexts, the period chosen per series from its context.
-
-    Interface contract: for each series, every period m in [1, max_period] (default
-    T // 2; m = 1 is the naive last value) is backtested on the context's last
-    ``horizon`` steps, forecasting them from the ``horizon`` steps' own past; the period
-    with the lowest backtest MAE forecasts the horizon, ``y[t] = x[T - m + (t mod m)]``.
-    Only context values are read. Returns (B, horizon).
-    """
-    context = np.asarray(context, dtype=np.float64)
-    b, t = context.shape
-    max_period = max_period or t // 2
-    if t < horizon + max_period:
-        raise ValueError(f"context {t} is too short to backtest {max_period} periods over {horizon} steps")
-    steps = np.arange(horizon)
-    history, held = context[:, :t - horizon], context[:, t - horizon:]
-    best_err = np.full(b, np.inf)
-    best = np.zeros((b, horizon))
-    for m in range(1, max_period + 1):
-        backtest = history[:, history.shape[1] - m + steps % m]
-        err = np.abs(backtest - held).mean(axis=1)
-        better = err < best_err
-        best_err = np.where(better, err, best_err)
-        best[better] = context[better][:, t - m + steps % m]
-    return best
 
 
 class TimestralTrainer(BaseTimeSeriesTrainer):
