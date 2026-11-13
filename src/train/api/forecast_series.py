@@ -21,6 +21,13 @@ Interface contract
 ``split_bounds(rows, select_fraction, test_fraction)``
     :return: the ``(lo, hi)`` row ranges of the train, select and test segments, consecutive and disjoint.
 
+``check_segments(segments, rows, width, source)``
+    :param segments: the ``(lo, hi)`` ranges of :func:`split_bounds`.
+    :param rows: the rows of the whole series or csv; ``width``: ``lookback + horizon``; ``source``: how the message
+        names the series (``"a synthetic series"``, ``"the csv"``).
+    :raises ConfigError: for the first segment (train, select, test) shorter than ``width``; the one sentence of that
+        refusal, said by the pre-claim check and by the loader alike.
+
 ``refuse(message)``
     :raises ConfigError: always; the one spelling of "this configuration is refused" of the forecasting data.
 """
@@ -51,6 +58,19 @@ def split_bounds(rows: int, select_fraction: float, test_fraction: float) -> Tup
     n_select, n_test = round(select_fraction * rows), round(test_fraction * rows)
     train_hi = rows - n_select - n_test
     return (0, train_hi), (train_hi, train_hi + n_select), (train_hi + n_select, rows)
+
+
+def check_segments(segments: Sequence[Tuple[int, int]], rows: int, width: int, source: str) -> None:
+    """Refuse the first of the train, select and test ``segments`` that is shorter than one window of ``width`` rows."""
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-037
+    # The pre-claim check (train.api.forecast_args) and the loader (train.common.forecast_data) both call THIS function.
+    # Do NOT spell the sentence, or loop over the segments, in either of them again: that is how the two sentences
+    # could drift apart (a test holds both callers to this one function and the sentence to its pinned text).
+    for name, (lo, hi) in zip(("train", "select", "test"), segments):
+        if hi - lo < width:
+            refuse(
+                f"{source} of {rows} rows is too short: its {name} segment has {hi - lo} rows and one window needs "
+                f"lookback + horizon = {width}; give it more rows or lower data.lookback, data.horizon or the fractions")
 
 
 def read_csv_series(

@@ -950,8 +950,41 @@ def test_the_csv_checks_run_through_the_one_reader_the_loader_uses(tmp_path):
     assert "read_csv(" not in source and "import pandas" not in source
 
 
+#: The segment-too-short sentence for a 200-row synthetic series at lookback 64, horizon 16 (its select segment has
+#: 30 rows against 80 needed). Pinned byte for byte: it is what both the pre-claim check and the loader say.
+SEGMENT_SENTENCE = (
+    "a synthetic series of 200 rows is too short: its select segment has 30 rows and one window needs "
+    "lookback + horizon = 80; give it more rows or lower data.lookback, data.horizon or the fractions"
+)
+
+
+def _strings_and_calls(module):
+    tree = ast.parse(Path(inspect.getsourcefile(module)).read_text())
+    strings = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+    calls = [n.func.id for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+    return strings, calls
+
+
+def test_the_segment_check_is_one_function_both_callers_use():
+    # D-037: the pre-claim check and the loader hold ONE check_segments (train.api.forecast_series); neither spells
+    # the sentence or loops over the segments itself, so the two cannot say different things
+    from train.api import forecast_series as fs
+    from train.common import forecast_data as fd
+
+    assert fa.check_segments is fs.check_segments and fd.check_segments is fs.check_segments
+    for module in (fa, fd):
+        strings, calls = _strings_and_calls(module)
+        assert [s for s in strings if "rows is too short" in s or "one window needs" in s] == [], module.__name__
+        assert "check_segments" in calls, module.__name__
+    assert not hasattr(fd, "_check_segments")
+    with pytest.raises(ConfigError) as err:
+        fs.check_segments(fs.split_bounds(200, 0.15, 0.15), 200, 80, "a synthetic series")
+    assert str(err.value) == SEGMENT_SENTENCE
+    fs.check_segments(fs.split_bounds(1000, 0.15, 0.15), 1000, 80, "a synthetic series")
+
+
 def test_the_segment_refusal_is_the_loaders_wording():
-    # the loader raises the same sentence after the claim: the two checks must say one thing
+    # the loader raises the same sentence after the claim, the check before it: byte-equal, and the pinned one
     from train.common.forecast_data import load_forecast_batches
 
     kwargs = dict(format="builtin", dataset="synthetic", path=None, value_cols=None, time_col=None, lookback=64,
@@ -962,7 +995,7 @@ def test_the_segment_refusal_is_the_loaders_wording():
         load_forecast_batches(**kwargs)
     with pytest.raises(ConfigError) as in_check:
         fa.check_forecast_data(fa.TimeSeriesData(series_length=200, lookback=64, horizon=16))
-    assert str(in_check.value) == str(in_loader.value)
+    assert str(in_check.value) == str(in_loader.value) == SEGMENT_SENTENCE
 
 
 def test_an_unresolved_window_is_refused_not_added():

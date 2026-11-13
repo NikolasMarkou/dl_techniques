@@ -72,7 +72,7 @@ from .args import AutoContext, _is_auto, _recipe_values, _watch_values, _with_va
 from .config import AUTO, Auto, StrictConfig, join_path
 from .data_args import DataFacts, load_data_group, read_data_file
 from .errors import ConfigError, ConfigValidationError
-from .forecast_series import read_csv_series, refuse, split_bounds
+from .forecast_series import check_segments, read_csv_series, refuse, split_bounds
 
 # ---------------------------------------------------------------------
 
@@ -257,12 +257,7 @@ def check_forecast_data(data: TimeSeriesData) -> None:
         rows, source = len(values), "the csv"
     else:
         rows, source = data.series_length, "a synthetic series"
-    for name, (lo, hi) in zip(("train", "select", "test"), split_bounds(rows, data.select_fraction, data.test_fraction)):
-        if hi - lo < width:
-            refuse(
-                f"{source} of {rows} rows is too short: its {name} segment has {hi - lo} rows and one window needs "
-                f"lookback + horizon = {width}; give it more rows or lower data.lookback, data.horizon or the fractions"
-            )
+    check_segments(split_bounds(rows, data.select_fraction, data.test_fraction), rows, width, source)
 
 
 def forecast_facts(data: TimeSeriesData) -> DataFacts:

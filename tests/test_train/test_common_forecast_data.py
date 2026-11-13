@@ -632,6 +632,7 @@ class TestTheCsvReaderAndTheSplitLoadNoTensorFlow:
     def test_the_loader_uses_the_same_functions_not_copies(self):
         from train.api import forecast_series as fs
         assert fd.read_csv_series is fs.read_csv_series and fd.split_bounds is fs.split_bounds
+        assert fd.check_segments is fs.check_segments
 
 
 @pytest.mark.usefixtures("within_30_seconds")

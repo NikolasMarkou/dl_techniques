@@ -56,7 +56,7 @@ import tensorflow as tf
 
 from dl_techniques.datasets.time_series.generator import TimeSeriesGenerator, TimeSeriesGeneratorConfig
 from dl_techniques.utils.logger import logger
-from train.api.forecast_series import read_csv_series, refuse, split_bounds
+from train.api.forecast_series import check_segments, read_csv_series, refuse, split_bounds
 from train.common.pretrain_data import SELECT_SALT, TEST_SALT, derive_stream_seed
 
 BUILTIN, CSV, SYNTHETIC = "builtin", "csv", "synthetic"
@@ -282,14 +282,6 @@ def _check_request(request: Dict[str, Any]) -> None:
         refuse(f"transform_args.scale_floor must not be negative, got {request['scale_floor']}")
 
 
-def _check_segments(segments: Sequence[Tuple[int, int]], rows: int, width: int, source: str) -> None:
-    for name, (lo, hi) in zip(("train", "select", "test"), segments):
-        if hi - lo < width:
-            refuse(
-                f"{source} of {rows} rows is too short: its {name} segment has {hi - lo} rows and one window needs "
-                f"lookback + horizon = {width}; give it more rows or lower data.lookback, data.horizon or the fractions")
-
-
 def _count(name: str, requested: Optional[int], default: int, batch_size: int) -> int:
     """Windows of a split: the request (or ``default``) rounded down to a multiple of the batch, at least one batch."""
     wanted = default if requested is None else requested
@@ -338,7 +330,7 @@ def load_forecast_batches(
         if unknown:
             refuse(f"data.patterns: unknown pattern {unknown[0]!r}; the generator has {len(names)}, e.g. {names[:3]}")
         segments = split_bounds(series_length, select_fraction, test_fraction)
-        _check_segments(segments, series_length, width, "a synthetic series")
+        check_segments(segments, series_length, width, "a synthetic series")
         series, owners, dropped = build_bank(
             patterns=chosen, seed=seed, realizations=realizations, series_length=series_length, noise_level=noise_level)
         if not owners:
@@ -356,7 +348,7 @@ def load_forecast_batches(
     else:
         values, columns, digest = read_csv_series(path, value_cols, time_col)
         segments = split_bounds(len(values), select_fraction, test_fraction)
-        _check_segments(segments, len(values), width, "the csv")
+        check_segments(segments, len(values), width, "the csv")
         bank = values[None]
         source = dict(sha256=digest, columns=columns, time_col=time_col)
         windows = [_strided_positions(name, segment, requested, request)
