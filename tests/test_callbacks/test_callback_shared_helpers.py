@@ -33,6 +33,7 @@ from dl_techniques.callbacks.temperature_annealing import (
     TemperatureAnnealingCallback,
 )
 from dl_techniques.layers.regularization.spatial_smoothness import SpatialSmoothness
+from tests.layer_naming import PublicAutoName
 
 SCHEDULES = ("linear", "cosine", "exp")
 
@@ -345,7 +346,7 @@ class TestWalkLayers:
     def test_the_spatial_loss_logger_finds_a_tap_inside_a_dict(self):
         # The tap sits in a dict held by the model; the logger discovers it through
         # the shared walk.
-        class _TapModel(keras.Model):
+        class _TapModel(PublicAutoName, keras.Model):
             def __init__(self):
                 super().__init__()
                 self.bag = {"deep": [SpatialSmoothness(radius=2, seed=0, name="tap")]}

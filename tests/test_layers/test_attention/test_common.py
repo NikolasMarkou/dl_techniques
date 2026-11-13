@@ -48,6 +48,7 @@ from dl_techniques.layers.attention.common import (
     validate_head_divisibility,
     validate_logit_probability_type,
 )
+from tests.layer_naming import PublicAutoName
 
 # ---------------------------------------------------------------------
 # Shapes. `_N` is deliberately large: a masked-softmax hazard that only bites at
@@ -1487,7 +1488,7 @@ class TestSplitAndMergeHeads:
     def test_a_functional_model_with_a_none_length_axis(self):
         heads, width = self._H, self._D
 
-        class _RoundTrip(keras.layers.Layer):
+        class _RoundTrip(PublicAutoName, keras.layers.Layer):
             # The helpers are called inside ``call()``, as every attention layer does;
             # on a bare KerasTensor ``keras.ops.reshape`` rejects the ``None`` length.
             def call(self, t):

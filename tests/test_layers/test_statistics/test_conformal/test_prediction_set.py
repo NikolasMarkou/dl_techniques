@@ -18,6 +18,7 @@ from dl_techniques.utils.conformal_classification import (
     calibrate_aps,
     predict_sets,
 )
+from tests.layer_naming import PublicAutoName
 
 CAL_Q_HAT = 0.83
 
@@ -133,7 +134,7 @@ class TestConformalPredictionSet:
         assert float(keras.ops.convert_to_numpy(layer2.q_hat)) == pytest.approx(CAL_Q_HAT, abs=1e-6)
 
 
-class _Subclassed(keras.Model):
+class _Subclassed(PublicAutoName, keras.Model):
     def __init__(self, classes=5, **kw):
         super().__init__(**kw)
         self.classes = classes

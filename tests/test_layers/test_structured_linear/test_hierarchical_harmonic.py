@@ -20,6 +20,7 @@ from dl_techniques.layers.structured_linear.hierarchical_harmonic import (
     _greedy_capacity_assignment,
 )
 from dl_techniques.layers.structured_linear.harmonic_dense import HarmonicDense
+from tests.layer_naming import PublicAutoName
 
 
 def _flat_harmax_probs(d2: np.ndarray, n: float, epsilon: float) -> np.ndarray:
@@ -31,7 +32,7 @@ def _flat_harmax_probs(d2: np.ndarray, n: float, epsilon: float) -> np.ndarray:
     return exp / np.sum(exp, axis=-1, keepdims=True)
 
 
-class _Parent(keras.layers.Layer):
+class _Parent(PublicAutoName, keras.layers.Layer):
     """Minimal parent whose ``call`` is the only path that builds the child."""
 
     def __init__(self, child, **kwargs):

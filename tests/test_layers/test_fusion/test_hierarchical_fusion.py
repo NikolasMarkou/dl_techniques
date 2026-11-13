@@ -21,6 +21,7 @@ from dl_techniques.layers.fusion.hierarchical_fusion import (
     check_pyramid_shapes,
 )
 from dl_techniques.layers.pooling.pixel_unshuffle import PixelShuffle2D
+from tests.layer_naming import PublicAutoName
 from tests.test_models.knob_sensitivity_oracle import (
     assert_structural_knob_changes_weights,
     assert_value_knob_changes_output,
@@ -270,7 +271,7 @@ class TestBuild:
         assert [w for w in on.weights if "fusion_logits" in w.path]
 
     def test_building_through_a_parent_keeps_the_fusion_weight_live(self):
-        class _Parent(keras.layers.Layer):
+        class _Parent(PublicAutoName, keras.layers.Layer):
             def __init__(self, child, **kwargs):
                 super().__init__(**kwargs)
                 self.child = child
