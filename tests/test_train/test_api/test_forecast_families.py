@@ -20,6 +20,14 @@ and the task to this same file):
 Second part (Step 10): the argument groups of ``train.api.forecast_args``: strict parsing, the loader's layering, the
 recipe-filled fields, every refusal that can be made BEFORE the run directory is claimed (each in a fresh interpreter
 that must not have imported TensorFlow or keras afterwards), the watched metric and the loss names.
+
+Third part (Step 11): ``train.api.forecast_models``: every adapter builds a BUILT model at ``(None, lookback, channels)`` whose
+output the decode rows read (a static batch for timestral); the ``ALLOWED``, ``REFUSED``, ``FORCED`` and ``SUPPLIED`` tables are
+held equal to the factory signatures by ``signature_census``; one normalization (``use_normalization`` forced off, a user
+``true`` refused by name); the named refusals (a second channel for tirex, ets and mdn, a timestral horizon above its patch,
+``deepar`` and ``adaptive_ema`` before any model code is imported, an sgd weight decay, ``jit_compile`` for ets); the recipes
+against the legacy trainers' values READ from the legacy modules, each difference named; and the specs, which are built but
+not registered (the task registers them).
 """
 
 import ast
@@ -35,9 +43,11 @@ import numpy as np
 import pytest
 
 from train.api import forecast_args as fa
-from train.api.args import AutoContext
+from train.api import forecast_models as fm
+from train.api import recipes, registry
+from train.api.args import AutoContext, OptimArgs
 from train.api.config import validate
-from train.api.errors import ConfigError, ConfigValidationError
+from train.api.errors import ConfigError, ConfigValidationError, UnknownModelError
 from train.common import forecast_run as fr
 
 HERE = Path(__file__).resolve().parent
@@ -1054,3 +1064,429 @@ def test_the_metric_watched_is_the_key_the_compiled_metric_writes():
     # the metric is compiled under the name `mae`; Keras prefixes the validation copy with `val_`
     name = inspect.signature(fr.DecodedMAE.__init__).parameters["name"].default
     assert fa.WATCH_METRIC == "val_" + name
+
+
+# ---------------------------------------------------------------------
+# Step 11: the family adapters, tables, refusals and recipes
+# ---------------------------------------------------------------------
+
+FAMILIES = tuple(fm.FAMILIES)
+TABLES = ("ALLOWED", "REFUSED", "FORCED", "SUPPLIED", "FACTORIES", "RECIPES", "FAMILIES")
+
+
+def test_every_table_has_exactly_the_seven_families_and_no_key_is_in_two_tables():
+    assert FAMILIES == ("nbeats", "prism", "tirex", "xlstm", "ets", "timestral", "mdn")
+    for name in TABLES:
+        assert tuple(getattr(fm, name)) == FAMILIES, name
+    for family in FAMILIES:
+        classes = [set(fm.ALLOWED[family]), set(fm.REFUSED[family]), set(fm.FORCED[family]), set(fm.SUPPLIED[family])]
+        assert sum(len(c) for c in classes) == len(set().union(*classes)), f"{family}: a key sits in two tables"
+    assert {f for f, rows in fm.FORCED.items() if rows} == {"nbeats", "tirex", "xlstm"}
+    assert all(rows == {"use_normalization": (False, fm._ONE_NORM)} for rows in fm.FORCED.values() if rows)
+    assert set(fm.UNSUPPORTED) == {"deepar", "adaptive_ema"} and not set(fm.UNSUPPORTED) & set(FAMILIES)
+
+
+@pytest.mark.parametrize("family", FAMILIES)
+def test_the_tables_equal_the_factory_signatures(family):
+    assert fm.signature_census(family) == {"unclassified": [], "stale": []}
+    signatures = fm.factory_signatures(family)
+    assert all(names for names in signatures.values()), "a factory with no parameters: the census would be vacuous"
+
+
+@pytest.mark.parametrize("family", FAMILIES)
+def test_the_census_names_a_new_factory_parameter_and_a_key_no_factory_has(family):
+    signatures = fm.factory_signatures(family)
+    first = next(iter(signatures))
+    grown = {**signatures, first: [*signatures[first], "a_parameter_added_upstream"]}
+    assert fm.signature_census(family, grown) == {"unclassified": ["a_parameter_added_upstream"], "stale": []}
+    offered = sorted({*fm.ALLOWED[family], *fm.REFUSED[family], *fm.FORCED[family], *fm.SUPPLIED[family]})
+    gone = offered[0]
+    shrunk = {path: [n for n in names if n != gone] for path, names in signatures.items()}
+    assert fm.signature_census(family, shrunk) == {"unclassified": [], "stale": [gone]}
+
+
+def test_the_timestral_patch_constant_is_the_librarys_default():
+    from dl_techniques.models.time_series.timestral.model import TimestralModel
+
+    assert inspect.signature(TimestralModel.from_variant).parameters["patch_size"].default == fm.TIMESTRAL_PATCH
+
+
+def build_adapter(family, variant, channels=1, **model_args):
+    extra = {"batch_size": B} if family == "timestral" else {}
+    return getattr(fm, f"create_{family}")(variant=variant, input_shape=(L, channels), horizon=H, **extra, **model_args)
+
+
+#: (family, variant, channels, model_args, quantile levels expected in the decode)
+ADAPTER_CASES = {
+    "nbeats": ("nbeats", "tiny", 1, {}, None),
+    "nbeats two channels": ("nbeats", "tiny", 2, {}, None),
+    "prism point": ("prism", "tiny", 1, {}, None),
+    "prism quantile": ("prism", "tiny", 1, {"quantile_levels": list(LEVELS)}, len(LEVELS)),
+    "prism two channels": ("prism", "tiny", 2, {}, None),
+    "tirex": ("tirex", "tiny", 1, {"quantile_levels": list(LEVELS)}, len(LEVELS)),
+    "xlstm point": ("xlstm", "tiny", 1, {}, None),
+    "xlstm quantile": ("xlstm", "tiny", 1, {"quantile_levels": list(LEVELS)}, len(LEVELS)),
+    "xlstm two channels": ("xlstm", "tiny", 2, {}, None),
+    "ets": ("ets", "ANN", 1, {}, None),
+    "ets seasonal": ("ets", "AAA", 1, {"seasonal_period": 8}, None),
+    "timestral": ("timestral", "5M", 1, {}, 21),
+    "timestral two channels": ("timestral", "5M", 2, {}, 21),
+    "mdn": ("mdn", "tiny", 1, {}, None),
+}
+
+
+@pytest.mark.parametrize("case", list(ADAPTER_CASES))
+def test_every_adapter_builds_a_model_the_decode_row_reads(case):
+    family, variant, channels, model_args, levels = ADAPTER_CASES[case]
+    model = build_adapter(family, variant, channels, **model_args)
+    assert model.built
+    x = np.random.default_rng(3).standard_normal((B, L, channels)).astype("float32")
+    point, quantiles = fr.decoder_for(family, model)(model(x))
+    assert tuple(point.shape) == (B, H, channels)
+    assert (quantiles is None) == (levels is None)
+    if levels is not None:
+        assert tuple(quantiles.shape) == (B, H, channels, levels)
+    if family != "timestral":  # built at (None, L, C): another batch size runs
+        other = fr.decoder_for(family, model)(model(x[:2]))[0]
+        assert tuple(other.shape) == (2, H, channels)
+
+
+def test_the_head_follows_quantile_levels_for_prism_and_xlstm():
+    for family in ("prism", "xlstm"):
+        point = build_adapter(family, "tiny")
+        quantile = build_adapter(family, "tiny", quantile_levels=list(LEVELS))
+        assert (point.use_quantile_head, quantile.use_quantile_head) == (False, True), family
+        assert [round(q, 6) for q in quantile.quantile_levels] == list(LEVELS), family
+    with pytest.raises(ValueError, match="use_quantile_head"):
+        build_adapter("prism", "tiny", use_quantile_head=True)
+    with pytest.raises(ValueError, match="quantile_levels"):
+        build_adapter("prism", "tiny", num_quantiles=3)
+
+
+@pytest.mark.parametrize("family, variant", [("nbeats", "tiny"), ("tirex", "tiny"), ("xlstm", "tiny")])
+def test_the_model_normalization_is_forced_off_and_a_user_true_is_refused_as_double_normalization(family, variant):
+    assert build_adapter(family, variant).get_config()["use_normalization"] is False
+    assert build_adapter(family, variant, use_normalization=False).get_config()["use_normalization"] is False
+    with pytest.raises(ValueError, match="normalize twice"):
+        build_adapter(family, variant, use_normalization=True)
+    with pytest.raises(ConfigValidationError, match="normalize twice"):
+        fm.resolve_forecast_args(forecast_context(family), resolved_optim(family), {"use_normalization": True})
+
+
+def test_the_mdn_model_is_a_flatten_stub_in_front_of_the_mixture_model_and_timestral_has_a_static_batch():
+    mdn = build_adapter("mdn", "tiny")
+    assert type(mdn.layers[1]).__name__ == "Flatten" and any(hasattr(layer, "mdn_layer") for layer in mdn.layers)
+    timestral = build_adapter("timestral", "5M")
+    assert timestral.built
+    with pytest.raises(ValueError, match="static batch"):
+        fm.create_timestral(variant="5M", input_shape=(L, 1), horizon=H, batch_size=0)
+
+
+def test_ets_takes_the_librarys_tuple_and_a_seasonal_variant_needs_its_period():
+    from dl_techniques.models.time_series.ets.model import ETS_VARIANTS
+
+    assert registry.load_attr(fm.FAMILIES["ets"].variants) is ETS_VARIANTS and isinstance(ETS_VARIANTS, tuple)
+    with pytest.raises(ValueError, match="Unknown variant 'BBB'"):
+        build_adapter("ets", "BBB")
+    with pytest.raises(ValueError):
+        build_adapter("ets", "AAA")
+
+
+def test_the_adapters_refuse_what_the_family_does_not_take():
+    for call in (
+        lambda: fm.create_nbeats(variant="tiny", num_classes=10, input_shape=(L, 1), horizon=H),
+        lambda: fm.create_nbeats(variant="tiny", input_shape=(L, 1, 1), horizon=H),
+        lambda: fm.create_nbeats(variant="tiny", input_shape=(L, 0), horizon=H),
+        lambda: fm.create_nbeats(variant="tiny", input_shape=(L, 1), horizon=0),
+        lambda: fm.create_nbeats(variant="huge", input_shape=(L, 1), horizon=H),
+        lambda: fm.create_mdn(variant="huge", input_shape=(L, 1), horizon=H),
+    ):
+        with pytest.raises(ValueError):
+            call()
+
+
+@pytest.mark.parametrize("family", ["tirex", "ets", "mdn"])
+def test_a_second_channel_is_a_named_refusal_for_tirex_ets_and_mdn(family):
+    assert fm.geometry_problems(family, 1, H, {}) == []
+    (line,) = fm.geometry_problems(family, 2, H, {})
+    assert family in line and "1 channel" in line and "data.value_cols" in line
+    variant = {"tirex": "tiny", "ets": "ANN", "mdn": "tiny"}[family]
+    with pytest.raises(ValueError, match="1 channel"):
+        build_adapter(family, variant, channels=2)
+    assert all(fm.geometry_problems(f, 5, H, {}) == [] for f in FAMILIES if f not in ("tirex", "ets", "mdn"))
+
+
+def test_a_timestral_horizon_above_its_patch_is_refused_by_name_and_up_to_it_is_not():
+    assert fm.geometry_problems("timestral", 1, fm.TIMESTRAL_PATCH, {}) == []
+    (line,) = fm.geometry_problems("timestral", 1, fm.TIMESTRAL_PATCH + 1, {})
+    assert "first block" in line and "data.horizon" in line and str(fm.TIMESTRAL_PATCH) in line
+    assert fm.geometry_problems("timestral", 1, 24, {"patch_size": 16})[0].count("16") >= 2
+    assert fm.geometry_problems("nbeats", 1, 500, {"patch_size": 16}) == []
+    with pytest.raises(ValueError, match="first block"):
+        fm.create_timestral(variant="5M", input_shape=(L, 1), horizon=fm.TIMESTRAL_PATCH + 1, batch_size=B)
+
+
+_FRESH_REFUSAL = """
+import sys
+from train.api import forecast_models as fm
+from train.api.errors import ConfigError
+for model in sys.argv[1:]:
+    try:
+        fm.check_supported_family(model)
+        print("@@", model, "accepted")
+    except ConfigError as exc:
+        print("@@", model, "refused", str(exc))
+heavy = sorted(m for m in ("tensorflow", "keras", "dl_techniques", "train.common") if m in sys.modules)
+print("@@ heavy", heavy)
+"""
+
+
+def test_deepar_and_adaptive_ema_are_refused_by_name_before_any_model_code_is_imported(tmp_path):
+    src = str(SRC)
+    env = {**__import__("os").environ, "PYTHONPATH": src, "CUDA_VISIBLE_DEVICES": "", "TF_CPP_MIN_LOG_LEVEL": "3"}
+    out = subprocess.run([sys.executable, "-c", _FRESH_REFUSAL, "deepar/base", "adaptive_ema", "nbeats/base"],
+                         capture_output=True, text=True, env=env, cwd=str(tmp_path), timeout=60)
+    assert out.returncode == 0, out.stderr[-1500:]
+    lines = [l[3:] for l in out.stdout.splitlines() if l.startswith("@@ ")]
+    assert lines[0].startswith("deepar/base refused") and "teacher-forced" in lines[0] and "time_series_forecasting" in lines[0]
+    assert lines[1].startswith("adaptive_ema refused") and "no horizon axis" in lines[1]
+    assert lines[2] == "nbeats/base accepted"
+    assert lines[3] == "heavy []", "the refusal imported a model module or TensorFlow"
+    assert set(fm.UNSUPPORTED) == {"deepar", "adaptive_ema"}
+    assert "deepar" not in {spec.family for spec in fm.builtin_forecast_models()}
+    with pytest.raises(UnknownModelError):
+        registry.parse_model_name("deepar/base")
+
+
+def test_the_problem_lines_name_every_bad_key_at_once():
+    lines = fm.problems_of("nbeats", {"backcast_length": 5, "kernel_regularizer": "l2", "use_normalization": True,
+                                      "tree_depth": 3, "hidden_layer_units": 32})
+    assert len(lines) == 4
+    text = "\n".join(lines)
+    assert "data.lookback" in text and "decays the weights" in text and "normalize twice" in text
+    assert "tree_depth" in text and "hidden_layer_units" not in text
+    assert "Did you mean" in fm.problems_of("nbeats", {"hidden_layer_unit": 32})[0]
+    assert fm.problems_of("nbeats", {"use_normalization": False}) == []
+    with pytest.raises(ConfigValidationError) as err:
+        fm.resolve_forecast_args(forecast_context("prism"), resolved_optim("prism"), {"num_quantiles": 3, "nope": 1})
+    assert len(err.value.args[0] if isinstance(err.value.args[0], list) else str(err.value).splitlines()) >= 2
+
+
+def test_a_key_of_another_family_is_not_accepted_for_this_one():
+    # every key a family's own tables offer is a key of another family's callables and not of this one's
+    for family in FAMILIES:
+        others = {k for f in FAMILIES if f != family for k in fm.ALLOWED[f]} - set(fm.ALLOWED[family]) \
+            - set(fm.REFUSED[family]) - set(fm.FORCED[family]) - set(fm.SUPPLIED[family])
+        assert others, family
+        for key in sorted(others):
+            assert fm.problems_of(family, {key: 1}), f"{family} accepts {key}, a key of another family"
+
+
+def resolved_optim(family, **given):
+    return OptimArgs(**given).resolve_auto(forecast_context(family))
+
+
+def test_an_sgd_weight_decay_is_refused_as_the_other_resolvers_do():
+    ctx = forecast_context("nbeats")
+    with pytest.raises(ConfigError, match="optim_args.weight_decay"):
+        fm.resolve_forecast_args(ctx, resolved_optim("nbeats", optimizer="sgd", lr=0.1, weight_decay=0.01), {})
+    for given in ({"optimizer": "sgd", "lr": 0.1, "weight_decay": None}, {"optimizer": "adamw"}):
+        assert fm.resolve_forecast_args(ctx, resolved_optim("nbeats", **given), {"hidden_layer_units": 16}) == {
+            "hidden_layer_units": 16}
+
+
+@pytest.mark.parametrize("family", FAMILIES)
+def test_jit_true_is_refused_for_ets_alone(family):
+    reason = fm.jit_problem(family, True)
+    assert (reason is not None) == (family == "ets")
+    assert fm.jit_problem(family, False) is None
+    if reason:
+        assert "gradient" in reason and "'jit_compile'" in reason
+
+
+def forecast_context(family, variant="base"):
+    spec = {s.family: s for s in fm.builtin_forecast_models()}[family]
+    return AutoContext(family=family, variant=variant, dataset=fa.SYNTHETIC, num_classes=None, image_size=None,
+                       defaults=spec.recipe(fa.SYNTHETIC, variant))
+
+
+# ---------------------------------------------------------------------
+# the recipes, against the legacy trainers' values READ from the legacy modules
+# ---------------------------------------------------------------------
+
+LEGACY = {
+    "nbeats": ("train_nbeats", "NBeatsTrainingConfig"), "prism": ("train_prism", "PRISMTrainingConfig"),
+    "tirex": ("train_tirex", "TiRexTrainingConfig"), "xlstm": ("train_xlstm", "XLSTMForecasterTrainingConfig"),
+    "ets": ("train_ets", "ETSTrainingConfig"), "timestral": ("train_timestral", "TimestralTrainingConfig"),
+    "mdn": ("train_mdn", "MDNTrainingConfig"),
+}
+
+
+def legacy_module(family):
+    import importlib
+
+    return importlib.import_module(f"train.time_series.{family}.{LEGACY[family][0]}")
+
+
+def legacy_config(family):
+    return getattr(legacy_module(family), LEGACY[family][1])()
+
+
+def cli_default(module, flag):
+    """The ``default=`` of ``parser.add_argument(flag, ...)`` in a legacy module's source."""
+    for node in ast.walk(ast.parse(inspect.getsource(module))):
+        if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "add_argument" and node.args \
+                and isinstance(node.args[0], ast.Constant) and node.args[0].value == flag:
+            return ast.literal_eval(next(k.value for k in node.keywords if k.arg == "default"))
+    raise KeyError(flag)
+
+
+#: Why a recipe value differs from the legacy trainer's, one sentence per (family, name); a difference without one fails.
+WHY = {
+    ("*", "epochs"): "10 epochs of 500 steps meet the bar with margin (D-032); the legacy 150 and 200 are for convergence studies",
+    ("*", "warmup"): "one warmup epoch (500 steps), measured equal at 2,000 steps (D-034); the legacy 1000 steps is two epochs at 500",
+    ("prism", "batch"): "one batch for every family, the shared legacy default 128 and what the GPU probe measured",
+    ("mdn", "batch"): "one batch for every family, the shared legacy default 128 and what the GPU probe measured",
+    ("timestral", "lookback"): "the legacy 1024 needs series of 7,500 points; 168 is every other family's",
+    ("timestral", "horizon"): "a horizon above the patch size 32 is not the model's call (D-003), the legacy 96 is the multi-block forecaster's",
+    ("mdn", "lookback"): "the legacy mdn is a one-step density over 120 points; 168 and 24 make its val_mae comparable with the bar",
+    ("mdn", "horizon"): "the legacy mdn is a one-step density over 120 points; 168 and 24 make its val_mae comparable with the bar",
+    ("nbeats", "optimizer"): "the legacy dataclass says adam and its CLI adamw; adamw with decoupled decay is the recipe (D-034)",
+}
+
+
+def recipe_rows():
+    """``(family, name, recipe value, legacy value)`` for every number a recipe shares with a legacy trainer."""
+    from train.common import forecast_data as fd
+    from train.common.args import create_ts_argument_parser
+
+    shared = vars(create_ts_argument_parser("x").parse_args([]))
+    rows = []
+    for family in FAMILIES:
+        recipe, cfg, optim = fm.RECIPES[family], legacy_config(family), fm.RECIPES[family]["optim_args"]
+        rows += [
+            (family, "lr", optim["lr"], cfg.learning_rate),
+            (family, "clip", optim["global_clipnorm"], cfg.gradient_clip_norm),
+            (family, "batch", recipe["batch_size"], cfg.batch_size),
+            (family, "epochs", recipe["epochs"], cfg.epochs),
+            (family, "lookback", recipe["data"]["lookback"], getattr(cfg, "backcast_length", None) or cfg.input_length),
+            (family, "horizon", recipe["data"]["horizon"], getattr(cfg, "forecast_length", None) or cfg.prediction_length),
+            (family, "warmup", optim["warmup_epochs"] * fd.EPOCH_STEPS if cfg.use_warmup else 0,
+             cfg.warmup_steps if cfg.use_warmup else 0),
+            (family, "optimizer", optim["optimizer"], cfg.optimizer),
+        ]
+    rows.append(("nbeats", "hidden", fm.NBEATS_VARIANTS["base"]["hidden_layer_units"],
+                 cli_default(legacy_module("nbeats"), "--hidden_layer_units")))
+    rows.append(("nbeats", "optimizer, CLI", fm.RECIPES["nbeats"]["optim_args"]["optimizer"], shared["optimizer"]))
+    return rows
+
+
+def test_every_recipe_number_equals_the_legacy_trainers_or_names_why_it_does_not():
+    differences = []
+    for family, name, ours, theirs in recipe_rows():
+        if ours == theirs:
+            assert (family, name) not in WHY, f"{family} {name} is equal but has a reason"
+        else:
+            differences.append((family, name))
+            assert WHY.get((family, name)) or WHY.get(("*", name)), f"{family} {name}: recipe {ours!r}, legacy {theirs!r}, no reason"
+    assert ("nbeats", "lr") not in differences and ("ets", "lr") not in differences and ("mdn", "lr") not in differences
+    # the stated differences are the ones that exist: a reason for an equal value is a stale reason
+    present = {(f, n) for f, n in differences}
+    assert {k for k in WHY if k[0] != "*"} <= present, sorted({k for k in WHY if k[0] != "*"} - present)
+    assert {n for f, n in WHY if f == "*"} <= {n for _, n in present}
+
+
+def test_the_legacy_disagreements_are_resolved_to_the_one_named_side():
+    # nbeats hidden units: the dataclass says 128, the CLI 256; the recipe follows the CLI (what the trainer a user runs builds)
+    assert legacy_config("nbeats").hidden_layer_units == 128
+    assert cli_default(legacy_module("nbeats"), "--hidden_layer_units") == 256 == fm.NBEATS_VARIANTS["base"]["hidden_layer_units"]
+    # tirex lookback: the dataclass says 168, the CLI 256; the recipe follows the dataclass, which is every other family's
+    assert legacy_config("tirex").input_length == 168 and cli_default(legacy_module("tirex"), "--input_length") == 256
+    assert fm.RECIPES["tirex"]["data"]["lookback"] == 168
+    # AdamW's weight decay is what the legacy 'adamw' string built
+    assert keras.optimizers.AdamW().weight_decay == fm.WEIGHT_DECAY
+
+
+@pytest.mark.parametrize("family", FAMILIES)
+def test_a_recipe_is_a_global_clip_adamw_with_warmup_in_epochs_and_no_stacked_l2(family):
+    recipe = fm.RECIPES[family]
+    optim = recipe["optim_args"]
+    assert (recipe["epochs"], recipe["batch_size"], optim["optimizer"], optim["weight_decay"]) == (10, 128, "adamw", 0.004)
+    assert optim["global_clipnorm"] == 1.0 and optim["clipnorm"] is None and optim["decay_over"] == "total"
+    assert optim["warmup_epochs"] == (0 if family == "ets" else 1)
+    assert optim["lr"] == {"ets": 5e-2, "mdn": 5e-4}.get(family, 1e-4)
+    assert recipe["model_args"] == {} and not any("regulariz" in key for key in recipe["model_args"])
+    assert recipe["metric_args"] == {"watch_metric": "val_mae"} and recipe["data"] == {"lookback": 168, "horizon": 24}
+    assert set(optim) == {"optimizer", "lr", "weight_decay", "momentum", "beta_1", "beta_2", "epsilon", "schedule",
+                          "warmup_epochs", "warmup_start_lr", "min_lr_ratio", "decay_over", "clipnorm", "global_clipnorm"}
+
+
+@pytest.mark.parametrize("family", FAMILIES)
+def test_the_recipe_fills_the_groups_of_the_task_and_leaves_no_auto(family):
+    ctx = forecast_context(family)
+    optim = OptimArgs().resolve_auto(ctx)
+    assert (optim.lr, optim.global_clipnorm, optim.clipnorm) == (fm.RECIPES[family]["optim_args"]["lr"], 1.0, None)
+    data = fa.TimeSeriesData(series_length=2000).resolve_auto(ctx)
+    assert (data.lookback, data.horizon) == (168, 24)
+    metric = fa.ForecastMetricArgs().resolve_auto(ctx)
+    assert (metric.watch_metric, metric.watch_mode) == ("val_mae", "min")
+    assert fm.RECIPES["nbeats"]["optim_args"]["lr"] == 1e-4 and fm.NBEATS_VARIANTS["base"]["hidden_layer_units"] == 256
+
+
+# ---------------------------------------------------------------------
+# the specs: built, not registered, one task each way
+# ---------------------------------------------------------------------
+
+
+def test_the_specs_are_built_for_the_forecasting_task_and_load_their_code():
+    specs = fm.builtin_forecast_models()
+    assert [s.family for s in specs] == list(FAMILIES)
+    for spec in specs:
+        assert spec.tasks == ("time_series_forecasting",) == (fa.TASK,) and spec.stride is None
+        assert callable(spec.load_factory()) and callable(spec.load_resolver()) and len(spec.load_variants()) >= 1
+        assert spec.load_factory().__module__ == "train.api.forecast_models"
+    assert sorted(registry_variants("nbeats")) == ["base", "small", "tiny"] and sorted(registry_variants("mdn")) == ["base", "small", "tiny"]
+    assert sorted(registry_variants("ets")) == ["AAA", "AAN", "ANN"] and "5M" in registry_variants("timestral")
+    assert fm.FAMILIES["timestral"].static_batch and not any(fm.FAMILIES[f].static_batch for f in FAMILIES if f != "timestral")
+
+
+def registry_variants(family):
+    return {s.family: s for s in fm.builtin_forecast_models()}[family].load_variants()
+
+
+def test_the_specs_are_not_registered_the_task_registers_them():
+    recipes.register_builtin_models()
+    assert not set(FAMILIES) & set(registry.MODELS)
+    assert "builtin_forecast_models" not in inspect.getsource(recipes) and "forecast" not in inspect.getsource(recipes).lower()
+
+
+def test_a_forecaster_is_refused_by_the_other_tasks_and_a_classifier_by_this_one(monkeypatch):
+    recipes.register_builtin_models()
+    for spec in fm.builtin_forecast_models():
+        monkeypatch.setitem(registry.MODELS, spec.family, spec)
+    assert registry.parse_model_name("nbeats/base", task=fa.TASK) == ("nbeats", "base")
+    assert registry.parse_model_name("ets/ANN", task=fa.TASK) == ("ets", "ANN")
+    for task in ("image_classification", "image_segmentation", "pretrain"):
+        with pytest.raises(ConfigError, match="trains time_series_forecasting"):
+            registry.parse_model_name("nbeats/base", task=task)
+    with pytest.raises(ConfigError) as err:
+        registry.parse_model_name("vit/vit_pico", task=fa.TASK)
+    assert "the families of 'time_series_forecasting' are" in str(err.value) and "nbeats" in str(err.value)
+    with pytest.raises(ConfigError, match="trains"):
+        registry.parse_model_name("convunext/tiny", task=fa.TASK)
+    with pytest.raises(UnknownModelError):
+        registry.parse_model_name("nbeats/huge", task=fa.TASK)
+    assert registry.parse_model_name("vit/vit_pico", task="image_classification") == ("vit", "vit_pico")
+
+
+def test_the_module_imports_no_model_code_tensorflow_or_keras_at_module_scope():
+    tree = ast.parse((SRC / "train" / "api" / "forecast_models.py").read_text())
+    names = []
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            names += [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names.append(("." * node.level) + (node.module or ""))
+    assert not [n for n in names if n.split(".")[0] in ("tensorflow", "keras", "numpy", "pandas", "dl_techniques")
+                or n.startswith("train.common")], names
+    assert all(n.startswith(".") or n in ("dataclasses", "typing") for n in names), names
