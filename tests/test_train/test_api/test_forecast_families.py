@@ -16,17 +16,28 @@ and the task to this same file):
   mixture-mean oracle for mdn; a wrong median index, the nbeats residual or a lost row each fail;
 * the compiled ``mae`` metric: the stock MAE for a point head, the numpy MAE of the median for a quantile cube,
   the key ``val_mae`` for all nine families, and the loss builder (target layout, refusals).
+
+Second part (Step 10): the argument groups of ``train.api.forecast_args``: strict parsing, the loader's layering, the
+recipe-filled fields, every refusal that can be made BEFORE the run directory is claimed (each in a fresh interpreter
+that must not have imported TensorFlow or keras afterwards), the watched metric and the loss names.
 """
 
 import ast
+import dataclasses
+import inspect
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import keras
 import numpy as np
 import pytest
 
-from train.api.errors import ConfigError
+from train.api import forecast_args as fa
+from train.api.args import AutoContext
+from train.api.config import validate
+from train.api.errors import ConfigError, ConfigValidationError
 from train.common import forecast_run as fr
 
 HERE = Path(__file__).resolve().parent
@@ -603,3 +614,410 @@ def test_the_figure_is_written_with_and_without_a_band(tmp_path):
     two_channels = fr.plot_forecasts(tmp_path / "c2.png", np.repeat(x, 2, axis=-1), np.repeat(y, 2, axis=-1),
                                      np.repeat(point, 2, axis=-1), count=2)
     assert Path(two_channels).is_file()
+
+
+# =====================================================================
+# Second part: the argument groups (Step 10)
+# =====================================================================
+
+RECIPE_DATA = {"lookback": 32, "horizon": 8}
+RECIPE = {"data": RECIPE_DATA, "metric_args": {"watch_metric": fa.WATCH_METRIC}}
+
+
+def context(recipe=None, family="nbeats", dataset=fa.SYNTHETIC) -> AutoContext:
+    """What the resolver passes: no class count, no image size, the recipe's tables under ``defaults``."""
+    return AutoContext(family=family, variant="base", dataset=dataset, num_classes=None, image_size=None,
+                       defaults=RECIPE if recipe is None else recipe)
+
+
+def data(**given) -> fa.TimeSeriesData:
+    return fa.load_forecast_data_config(given)
+
+
+def resolved(**given) -> fa.TimeSeriesData:
+    return data(**given).resolve_auto(context())
+
+
+def write_csv(path: Path, rows: int, columns=("a", "b"), time_col=None, extra=None) -> str:
+    """A csv of ``rows`` rows of smooth values; ``extra`` replaces cells as ``{(row, column): text}``."""
+    cells = {(r, c): f"{np.sin(r / 7.0 + k):.6f}" for r in range(rows) for k, c in enumerate(columns)}
+    cells.update(extra or {})
+    names = ([time_col] if time_col else []) + list(columns)
+    lines = [",".join(names)]
+    for r in range(rows):
+        lines.append(",".join(([cells.get((r, time_col), str(r))] if time_col else []) + [cells[(r, c)] for c in columns]))
+    path.write_text("\n".join(lines) + "\n")
+    return str(path)
+
+
+# ---------------------------------------------------------------------
+# the groups parse strictly
+# ---------------------------------------------------------------------
+
+GROUPS = (fa.TimeSeriesData, fa.ForecastTransformArgs, fa.ForecastMetricArgs, fa.ForecastLossArgs)
+
+
+def test_every_group_field_has_help_text_and_the_data_fields_are_the_loaders_keywords():
+    for group in GROUPS:
+        for field in dataclasses.fields(group):
+            assert field.metadata.get("help"), f"{group.__name__}.{field.name} has no help text"
+    from train.common.forecast_data import load_forecast_batches
+
+    keywords = set(inspect.signature(load_forecast_batches).parameters)
+    fields = {f.name for f in dataclasses.fields(fa.TimeSeriesData)}
+    # the loader takes every data key but `dataset` (it only checks it is `synthetic`), and the four keys the run
+    # gives it from the rest of the config: the batch, the two seeds and the transform's floor
+    assert fields - {"dataset"} <= keywords
+    assert keywords - fields == {"batch_size", "seed", "stream_seed", "scale_floor"}
+    assert {f.name for f in dataclasses.fields(fa.ForecastTransformArgs)} == {"scale_floor"}
+
+
+def test_the_documented_defaults():
+    d = fa.TimeSeriesData()
+    assert (d.format, d.dataset, d.path, d.value_cols, d.time_col) == ("builtin", "synthetic", None, None, None)
+    assert (d.lookback, d.horizon) == ("auto", "auto"), "the two numbers live in the family recipe, not here"
+    assert (d.realizations, d.series_length, d.noise_level, d.patterns) == (4, 10_000, 0.1, None)
+    assert (d.select_fraction, d.test_fraction) == (0.15, 0.15)
+    assert (d.n_select, d.n_test, d.steps_per_epoch, d.max_samples) == (None,) * 4
+    assert fa.ForecastTransformArgs().scale_floor == 1e-3
+    assert fa.ForecastLossArgs().name is None
+    assert fa.TimeSeriesData().problems("data") == []
+
+
+@pytest.mark.parametrize("group", GROUPS)
+def test_an_unknown_key_is_refused_with_a_suggestion(group):
+    near = {fa.TimeSeriesData: "lookbak", fa.ForecastTransformArgs: "scale_flor", fa.ForecastMetricArgs: "watch_metrik",
+            fa.ForecastLossArgs: "nam"}[group]
+    with pytest.raises(ConfigValidationError, match=f"Unknown key '{near}'") as raised:
+        validate(group, {near: 1})
+    assert "Did you mean" in str(raised.value)
+    if group is fa.TimeSeriesData:  # and the loader a command line and a file go through refuses it the same way
+        with pytest.raises(ConfigValidationError, match=f"Unknown key '{near}'"):
+            fa.load_forecast_data_config({"horizon": 4, near: 1})
+
+
+@pytest.mark.parametrize(
+    "group, given",
+    [
+        (fa.TimeSeriesData, {"lookback": "long"}),
+        (fa.TimeSeriesData, {"lookback": 2.5}),
+        (fa.TimeSeriesData, {"horizon": True}),
+        (fa.TimeSeriesData, {"realizations": 2.5}),
+        (fa.TimeSeriesData, {"noise_level": "high"}),
+        (fa.TimeSeriesData, {"patterns": "sine"}),
+        (fa.TimeSeriesData, {"patterns": [1]}),
+        (fa.TimeSeriesData, {"value_cols": "a"}),
+        (fa.TimeSeriesData, {"path": 3}),
+        (fa.TimeSeriesData, {"format": "parquet"}),
+        (fa.TimeSeriesData, {"steps_per_epoch": "many"}),
+        (fa.ForecastTransformArgs, {"scale_floor": "small"}),
+        (fa.ForecastMetricArgs, {"watch_mode": "up"}),
+        (fa.ForecastLossArgs, {"name": 3}),
+        (fa.ForecastLossArgs, {"name": "huber"}),
+    ],
+)
+def test_a_wrong_type_or_choice_is_refused_naming_its_key(group, given):
+    (key,) = given
+    with pytest.raises(ConfigValidationError, match=key):
+        validate(group, given)
+
+
+@pytest.mark.parametrize(
+    "given, key",
+    [
+        ({"lookback": 0}, "lookback"),
+        ({"horizon": -3}, "horizon"),
+        ({"realizations": 0}, "realizations"),
+        ({"series_length": 0}, "series_length"),
+        ({"noise_level": -0.1}, "noise_level"),
+        ({"select_fraction": 0.0}, "select_fraction"),
+        ({"test_fraction": 1.0}, "test_fraction"),
+        ({"select_fraction": 0.5, "test_fraction": 0.5}, "select_fraction"),
+        ({"n_select": 0}, "n_select"),
+        ({"n_test": -1}, "n_test"),
+        ({"steps_per_epoch": 0}, "steps_per_epoch"),
+        ({"max_samples": 0}, "max_samples"),
+        ({"patterns": []}, "patterns"),
+        ({"dataset": "etth1"}, "dataset"),
+        ({"path": "x.csv"}, "path"),
+        ({"time_col": "t"}, "time_col"),
+        ({"value_cols": ["a"]}, "value_cols"),
+        ({"format": "csv", "path": "x.csv", "realizations": 8}, "realizations"),
+        ({"format": "csv", "path": "x.csv", "patterns": ["sine"]}, "patterns"),
+        ({"format": "csv", "path": "x.csv", "series_length": 500}, "series_length"),
+        ({"format": "csv", "path": "x.csv", "noise_level": 0.2}, "noise_level"),
+        ({"format": "csv", "path": "x.csv", "value_cols": []}, "value_cols"),
+    ],
+)
+def test_the_data_group_names_every_option_out_of_range_at_its_dotted_path(given, key):
+    (line,) = fa.TimeSeriesData(**given).problems("data")
+    assert f"'data.{key}'" in line
+    with pytest.raises(ConfigValidationError, match=f"'{key}'"):
+        fa.load_forecast_data_config(given)
+
+
+def test_a_key_of_the_other_source_is_refused_but_the_defaults_of_both_pass():
+    assert fa.TimeSeriesData(format="csv", path="x.csv").problems("data") == []
+    assert fa.TimeSeriesData(format="csv", path="x.csv", realizations=4, series_length=10_000).problems("data") == []
+    assert fa.TimeSeriesData(patterns=["sine_wave"], realizations=2, series_length=999).problems("data") == []
+
+
+def test_the_transform_and_loss_groups():
+    assert fa.ForecastTransformArgs(scale_floor=0.0).problems("transform_args") == []
+    (line,) = fa.ForecastTransformArgs(scale_floor=-1.0).problems("transform_args")
+    assert "'transform_args.scale_floor'" in line
+    for name in (None, "mae", "mse", "mase"):
+        assert validate(fa.ForecastLossArgs, {"name": name}).name == name
+    assert fa.LOSS_NAMES == fr.LOSS_NAMES
+
+
+# ---------------------------------------------------------------------
+# the loader layers a file under the keys
+# ---------------------------------------------------------------------
+
+
+def test_the_data_config_loads_from_a_mapping_an_instance_and_a_yaml_file(tmp_path):
+    assert fa.load_forecast_data_config({}) == fa.TimeSeriesData()
+    loaded = fa.load_forecast_data_config({"lookback": 48, "patterns": ["sine_wave"], "max_samples": 64})
+    assert (loaded.lookback, loaded.patterns, loaded.max_samples, loaded.format) == (48, ["sine_wave"], 64, "builtin")
+    assert fa.load_forecast_data_config(loaded) is loaded
+    path = tmp_path / "data.yaml"
+    path.write_text("lookback: 24\nhorizon: 6\nselect_fraction: 0.2\n")
+    from_file = fa.load_forecast_data_config(str(path))
+    assert (from_file.lookback, from_file.horizon, from_file.select_fraction, from_file.realizations) == (24, 6, 0.2, 4)
+    path.write_text("lookbak: 24\n")
+    with pytest.raises(ConfigValidationError, match="lookbak") as raised:
+        fa.load_forecast_data_config(path)
+    assert str(path) in str(raised.value) and "Did you mean" in str(raised.value)
+    path.write_text("lookback: 0\n")
+    with pytest.raises(ConfigValidationError, match="lookback") as raised:
+        fa.load_forecast_data_config(path)
+    assert str(path) in str(raised.value)
+    with pytest.raises(ConfigError, match="mapping"):
+        fa.load_forecast_data_config(3)
+    with pytest.raises(ConfigError):
+        fa.load_forecast_data_config(tmp_path / "absent.yaml")
+
+
+def test_a_relative_csv_path_in_a_data_file_is_anchored_to_the_file(tmp_path):
+    folder = tmp_path / "cfg"
+    folder.mkdir()
+    (folder / "d.yaml").write_text("format: csv\npath: series.csv\ntime_col: t\nvalue_cols: [a, b]\n")
+    loaded = fa.load_forecast_data_config(str(folder / "d.yaml"))
+    assert loaded.path == str(folder / "series.csv")
+    assert (loaded.time_col, loaded.value_cols, loaded.format) == ("t", ["a", "b"], "csv")
+    (folder / "abs.yaml").write_text(f"format: csv\npath: {tmp_path / 'elsewhere.csv'}\n")
+    assert fa.load_forecast_data_config(str(folder / "abs.yaml")).path == str(tmp_path / "elsewhere.csv")
+
+
+# ---------------------------------------------------------------------
+# the recipe fills lookback and horizon
+# ---------------------------------------------------------------------
+
+
+def test_the_recipe_fills_the_window_and_an_explicit_value_wins():
+    both = resolved()
+    assert (both.lookback, both.horizon) == (32, 8)
+    mine = resolved(lookback=64)
+    assert (mine.lookback, mine.horizon) == (64, 8)
+    explicit = resolved(lookback=20, horizon=5)
+    assert (explicit.lookback, explicit.horizon) == (20, 5)
+    other = {key: getattr(both, key) for key in ("format", "realizations", "series_length", "select_fraction")}
+    assert other == {"format": "builtin", "realizations": 4, "series_length": 10_000, "select_fraction": 0.15}
+
+
+def test_a_recipe_without_the_window_is_refused_by_name_and_a_typo_in_it_names_the_group():
+    for missing in ({}, {"data": {"horizon": 8}}):
+        with pytest.raises(ConfigError, match="'data.lookback'.*the 'nbeats' recipe has no lookback for 'synthetic'"):
+            fa.TimeSeriesData().resolve_auto(context(missing))
+    with pytest.raises(ConfigError, match="'data.horizon'.*the 'nbeats' recipe has no horizon for 'synthetic'"):
+        fa.TimeSeriesData(lookback=16).resolve_auto(context({"data": {"lookback": 16}}))
+    assert fa.TimeSeriesData(lookback=16, horizon=4).resolve_auto(context({})).horizon == 4
+    with pytest.raises(ConfigError, match="lookbak"):
+        fa.TimeSeriesData().resolve_auto(context({"data": {"lookbak": 16}}))
+    with pytest.raises(ConfigError, match="data"):
+        fa.TimeSeriesData().resolve_auto(context({"data": {"lookback": "long", "horizon": 8}}))
+
+
+def test_the_facts_carry_no_class_and_no_image_size():
+    facts = fa.forecast_facts(data())
+    assert (facts.dataset, facts.num_classes, facts.image_size) == ("synthetic", None, None)
+    assert fa.forecast_facts(data(format="csv", path="whatever.csv")).dataset == "synthetic"
+
+
+# ---------------------------------------------------------------------
+# every refusal that needs no tensor, in a fresh interpreter that must not have imported TensorFlow
+# ---------------------------------------------------------------------
+
+CHILD = """
+import json, sys
+from train.api import forecast_args as fa
+from train.api.args import AutoContext
+from train.api.errors import ConfigError
+
+spec = json.loads(sys.argv[1])
+refused = None
+try:
+    loaded = fa.load_forecast_data_config(spec["data"])
+    context = AutoContext(family="nbeats", variant="base", dataset="synthetic", num_classes=None, image_size=None,
+                          defaults={"data": spec["recipe"]})
+    loaded.resolve_auto(context)
+    fa.check_forecast_data(loaded.resolve_auto(context))
+except ConfigError as exc:
+    refused = [type(exc).__name__, str(exc)]
+heavy = sorted(name for name in ("tensorflow", "keras", "train.common", "dl_techniques") if name in sys.modules)
+print("@@" + json.dumps({"refused": refused, "heavy": heavy}))
+"""
+
+
+def fresh_check(tmp_path, given: dict, recipe=None):
+    """``(refused, heavy)``: the pre-claim check of ``given`` run in a fresh interpreter, and what it imported."""
+    env = {"PYTHONPATH": str(SRC), "PATH": "/usr/bin:/bin", "CUDA_VISIBLE_DEVICES": "", "HOME": str(tmp_path)}
+    done = subprocess.run([sys.executable, "-c", CHILD, json.dumps({"data": given, "recipe": recipe or RECIPE_DATA})],
+                          cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stderr[-2000:]
+    answer = json.loads(done.stdout.rsplit("@@", 1)[1])
+    return answer["refused"], answer["heavy"]
+
+
+def refusal_cases(tmp_path):
+    """``{name: (data mapping, text the refusal must contain)}``; every file is written under ``tmp_path``."""
+    good = write_csv(tmp_path / "good.csv", 400)
+    return {
+        "a csv that does not exist": ({"format": "csv", "path": str(tmp_path / "absent.csv")}, "does not exist"),
+        "no csv path at all": ({"format": "csv"}, "data.path"),
+        "a missing value column": ({"format": "csv", "path": good, "value_cols": ["a", "nope"]}, "'nope' is missing"),
+        "a missing time column": ({"format": "csv", "path": good, "time_col": "when"}, "'when' is missing"),
+        "an unsorted time column": ({"format": "csv", "time_col": "t", "path": write_csv(
+            tmp_path / "u.csv", 400, time_col="t", extra={(5, "t"): "2"})}, "strictly increasing"),
+        "a lookback below 1": ({"lookback": 0}, "'lookback'"),
+        "a horizon below 1": ({"horizon": 0}, "'horizon'"),
+        "fractions that leave no train segment": ({"select_fraction": 0.5, "test_fraction": 0.5}, "leave a train segment"),
+        "a segment shorter than lookback + horizon (builtin)": ({"series_length": 200, "lookback": 64, "horizon": 16}, "too short"),
+        "a segment shorter than lookback + horizon (csv)": ({"format": "csv", "path": write_csv(tmp_path / "s.csv", 100),
+                                                              "lookback": 48, "horizon": 16}, "too short"),
+        "the test segment is the short one": ({"series_length": 300, "select_fraction": 0.5, "test_fraction": 0.1,
+                                                "lookback": 30, "horizon": 10}, "its test segment has 30 rows"),
+        "a dataset that is not the synthetic bank": ({"dataset": "etth1"}, "'dataset'"),
+        "a non-numeric cell": ({"format": "csv", "path": write_csv(tmp_path / "n.csv", 400, extra={(3, "b"): "abc"})}, "not numeric"),
+        "a non-finite cell": ({"format": "csv", "path": write_csv(tmp_path / "f.csv", 400, extra={(3, "b"): "nan"})}, "non-finite"),
+    }
+
+
+CASE_NAMES = (
+    "a csv that does not exist", "no csv path at all", "a missing value column", "a missing time column",
+    "an unsorted time column", "a lookback below 1", "a horizon below 1", "fractions that leave no train segment",
+    "a segment shorter than lookback + horizon (builtin)", "a segment shorter than lookback + horizon (csv)",
+    "the test segment is the short one", "a dataset that is not the synthetic bank", "a non-numeric cell",
+    "a non-finite cell",
+)
+
+
+@pytest.mark.parametrize("name", CASE_NAMES)
+def test_every_refusal_that_needs_no_tensor_is_named_and_loads_neither_tensorflow_nor_keras(tmp_path, name):
+    cases = refusal_cases(tmp_path)
+    assert tuple(cases) == CASE_NAMES
+    given, text = cases[name]
+    refused, heavy = fresh_check(tmp_path, given)
+    assert refused is not None, f"{name}: the configuration was accepted"
+    kind, message = refused
+    assert kind in ("ConfigError", "ConfigValidationError")
+    if text is not None:
+        assert text in message, message
+    assert heavy == [], f"{name}: the check imported {heavy}"
+
+
+def test_a_good_configuration_passes_the_same_checks_without_tensorflow(tmp_path):
+    good = write_csv(tmp_path / "ok.csv", 400, time_col="t")
+    for given in ({}, {"series_length": 400, "lookback": 32, "horizon": 8},
+                  {"format": "csv", "path": good, "time_col": "t", "value_cols": ["a", "b"]}):
+        refused, heavy = fresh_check(tmp_path, given)
+        assert refused is None, refused
+        assert heavy == []
+
+
+def test_the_csv_checks_run_through_the_one_reader_the_loader_uses(tmp_path):
+    # no second reader: a refusal here is the loader's own text, so the two cannot drift apart
+    from train.api import forecast_series
+
+    path = write_csv(tmp_path / "x.csv", 400, extra={(3, "b"): "nan"})
+    with pytest.raises(ConfigError) as in_check:
+        fa.check_forecast_data(fa.TimeSeriesData(format="csv", path=path, lookback=32, horizon=8))
+    with pytest.raises(ConfigError) as in_reader:
+        forecast_series.read_csv_series(path, None, None)
+    assert str(in_check.value) == str(in_reader.value)
+    source = (SRC / "train" / "api" / "forecast_args.py").read_text()
+    assert "read_csv(" not in source and "import pandas" not in source
+
+
+def test_the_segment_refusal_is_the_loaders_wording():
+    # the loader raises the same sentence after the claim: the two checks must say one thing
+    from train.common.forecast_data import load_forecast_batches
+
+    kwargs = dict(format="builtin", dataset="synthetic", path=None, value_cols=None, time_col=None, lookback=64,
+                  horizon=16, realizations=1, series_length=200, noise_level=0.1, patterns=["random_walk"],
+                  select_fraction=0.15, test_fraction=0.15, n_select=None, n_test=None, steps_per_epoch=None,
+                  max_samples=None, batch_size=4, seed=1, stream_seed=None, scale_floor=1e-3)
+    with pytest.raises(ConfigError) as in_loader:
+        load_forecast_batches(**kwargs)
+    with pytest.raises(ConfigError) as in_check:
+        fa.check_forecast_data(fa.TimeSeriesData(series_length=200, lookback=64, horizon=16))
+    assert str(in_check.value) == str(in_loader.value)
+
+
+def test_an_unresolved_window_is_refused_not_added():
+    with pytest.raises(ConfigError, match="data.lookback is 'auto'"):
+        fa.check_forecast_data(fa.TimeSeriesData())
+
+
+def test_the_module_imports_nothing_heavy_at_module_scope():
+    tree = ast.parse((SRC / "train" / "api" / "forecast_args.py").read_text())
+    names = []
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            names += [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names.append(("." * node.level) + (node.module or ""))
+    assert not [n for n in names if n.split(".")[0] in ("tensorflow", "keras", "numpy", "pandas", "dl_techniques")
+                or n.startswith("train.common") or n == "train"], names
+    assert all(n.startswith(".") or n in ("dataclasses", "pathlib", "typing") for n in names), names
+
+
+# ---------------------------------------------------------------------
+# the watched metric and the loss
+# ---------------------------------------------------------------------
+
+
+def test_the_metric_group_watches_val_mae_and_minimises_it():
+    got = fa.ForecastMetricArgs().resolve_auto(context())
+    assert (got.watch_metric, got.watch_mode) == ("val_mae", "min")
+    assert fa.ForecastMetricArgs(watch_metric="val_mae").resolve_auto(context()).watch_mode == "min"
+    assert fa.ForecastMetricArgs(watch_metric="val_mae", watch_mode="min").resolve_auto(context()).watch_mode == "min"
+    from train.common.callbacks import resolve_monitor_mode
+
+    assert resolve_monitor_mode(fa.WATCH_METRIC) == fa.WATCH_MODE == "min", "the shared rule says val_mae is minimised"
+
+
+@pytest.mark.parametrize(
+    "given, key",
+    [
+        ({"watch_metric": "val_loss"}, "watch_metric"),
+        ({"watch_metric": "val_mse"}, "watch_metric"),
+        ({"watch_metric": "mae"}, "watch_metric"),
+        ({"watch_metric": "val_mae", "watch_mode": "max"}, "watch_mode"),
+        ({"watch_mode": "max"}, "watch_mode"),
+    ],
+)
+def test_the_metric_group_refuses_what_the_bar_cannot_describe(given, key):
+    (line,) = fa.ForecastMetricArgs(**given).problems("metric_args")
+    assert f"'metric_args.{key}'" in line and "val_mae" in line and "min" in line
+    with pytest.raises(ConfigValidationError, match=key):
+        validate(fa.ForecastMetricArgs, given)
+    for allowed in ({}, {"watch_metric": "val_mae"}, {"watch_mode": "min"}):
+        assert fa.ForecastMetricArgs(**allowed).problems("metric_args") == [], allowed
+
+
+def test_the_metric_watched_is_the_key_the_compiled_metric_writes():
+    # the metric is compiled under the name `mae`; Keras prefixes the validation copy with `val_`
+    name = inspect.signature(fr.DecodedMAE.__init__).parameters["name"].default
+    assert fa.WATCH_METRIC == "val_" + name
