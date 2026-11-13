@@ -559,7 +559,7 @@ def initial_loss_ratio(metrics: Dict[str, float], reference_loss: float, hint: s
 def report_data_free_run(
         model: keras.Model, analysis_sample: Any, history: Any, run_dir: Path, vis_dir: Path, experiment_name: str,
         *, run_analysis: Callable[..., Any], model_analysis: bool, eval_batch_size: int, last_weights: Any, data: Any,
-        epochs_run: int, save_last: bool, load_sample: Optional[Any] = None,
+        epochs_run: int, save_last: bool, load_sample: Optional[Any] = None, predict_batch_size: Optional[int] = None,
 ) -> Tuple[Dict[str, Any], Optional[Dict[str, float]], Any, Optional[Dict[str, Any]]]:
     """Report the best weights, then swap in the last epoch's and report those; the reporting both data-free tasks share.
 
@@ -575,6 +575,8 @@ def report_data_free_run(
     :param save_last: ``checkpoint_args.save_last``.
     :param load_sample: the input of ``final_model.keras``'s load check, or ``None`` for the legacy sample
         (``finalize_last_epoch(sample=)``).
+    :param predict_batch_size: the load check's ``predict`` batch (``finalize_last_epoch(predict_batch_size=)``); ``None`` keeps
+        the cap every caller had.
     :return: ``(analysis, test_metrics_final, load_check, load_detail)``; ``load_detail`` is ``None`` when empty.
     """
     from train.common import classification_run  # imported here: classification_run imports this module
@@ -595,7 +597,7 @@ def report_data_free_run(
     test_final, load_check = classification_run.finalize_last_epoch(
         model, last_weights, data, run_dir, history, epochs_run, evaluate=classification_run.evaluate_dict,
         save=save_last, atomic=True, eval_batch_size=eval_batch_size, exact_reload=True, load_detail=load_detail,
-        sample=load_sample,
+        sample=load_sample, predict_batch_size=predict_batch_size,
     )
     return analysis, test_final, load_check, load_detail or None
 

@@ -42,6 +42,7 @@ from train.api.denoising_args import (
     DenoisingData,
     DenoiseTransformArgs,
 )
+from train.api.forecast_args import ForecastLossArgs, ForecastMetricArgs, ForecastTransformArgs, TimeSeriesData
 from train.api.pretrain_args import PretrainData, PretrainMetricArgs, PretrainTransformArgs
 from train.api.segmentation_args import (
     BuiltinSegData,
@@ -54,6 +55,7 @@ from train.api.tasks.image_classification import ImageClassificationConfig
 from train.api.tasks.image_denoising import ImageDenoisingConfig
 from train.api.tasks.image_segmentation import ImageSegmentationConfig
 from train.api.tasks.pretrain import PretrainConfig
+from train.api.tasks.time_series_forecasting import TimeSeriesForecastingConfig
 
 from ._groups import args_groups
 
@@ -155,13 +157,15 @@ def classes_checked() -> List[type]:
     """The seven groups (found by looking), the classification config and its three data configs,
     then the segmentation task's: its config, its three data configs and its two own groups (step 28:
     a field of a class this list lacks is a field no guard asks about), then the denoising task's: its
-    config, its data config and its four own groups (step 8 of plan d483ffab)."""
+    config, its data config and its four own groups (step 8 of plan d483ffab), the pretrain task's (config, data, two groups),
+    then the forecasting task's: its config, its data config and its three own groups (step 12 of plan 3a8319ef)."""
     return [
         *args_groups(), ImageClassificationConfig, BuiltinImageData, FolderImageData, CsvImageData,
         ImageSegmentationConfig, BuiltinSegData, FolderSegData, CsvSegData, SegTransformArgs, SegMetricArgs,
         ImageDenoisingConfig, DenoisingData, DenoiseTransformArgs, DenoiseMetricArgs, DenoiseLossArgs,
         DenoiseOptimArgs,
         PretrainConfig, PretrainData, PretrainTransformArgs, PretrainMetricArgs,
+        TimeSeriesForecastingConfig, TimeSeriesData, ForecastTransformArgs, ForecastMetricArgs, ForecastLossArgs,
     ]
 
 
@@ -211,9 +215,11 @@ def test_no_exemption_is_stale(reads):
         )
 
 
-def test_the_scan_covers_the_twenty_seven_classes_and_the_files_it_names():
+def test_the_scan_covers_the_thirty_two_classes_and_the_files_it_names():
     assert len(args_groups()) == 7, "the brief names seven groups; a new one is a new row to review"
-    assert len(classes_checked()) == 27
+    assert len(classes_checked()) == 32
+    assert SRC / "train" / "api" / "tasks" / "time_series_forecasting.py" in SCANNED
+    assert SRC / "train" / "api" / "forecast_args.py" in SCANNED
     assert SRC / "train" / "api" / "tasks" / "pretrain.py" in SCANNED
     assert SRC / "train" / "api" / "pretrain_args.py" in SCANNED
     assert SRC / "train" / "api" / "tasks" / "image_denoising.py" in SCANNED

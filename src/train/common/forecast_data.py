@@ -42,6 +42,11 @@ max_samples, batch_size, seed, stream_seed, scale_floor)``
 
 ``train_window_at(stream_seed, counter, n_series, span)``
     :return: ``(series, start)`` int64 scalars, a pure function of ``(stream_seed, counter)``.
+
+``flatten_targets(data)``
+    :return: the same :class:`ForecastBatches` with every target ``(batch, horizon)`` (channel 0) in place of
+        ``(batch, horizon, channels)``, ``with_stream`` included: the layout the pinball loss of tirex and of a quantile
+        xlstm wants. The windows, counts and fingerprint are unchanged; the caller guarantees one channel.
 """
 
 import dataclasses
@@ -256,6 +261,20 @@ class ForecastBatches:
         stream_seed = derive_stream_seed(self.seed, completed_steps)
         train_ds, digest = self.train_builder(stream_seed)
         return dataclasses.replace(self, stream_seed=stream_seed, train_ds=train_ds, first_batch_digest=digest)
+
+
+def flatten_targets(data: ForecastBatches) -> ForecastBatches:
+    """The batches with a ``(batch, horizon)`` target (channel 0); see the module contract."""
+    def flat(ds: "tf.data.Dataset") -> "tf.data.Dataset":
+        return ds.map(lambda x, y: (x, y[..., 0]))
+
+    def train_stream(stream: int) -> Tuple["tf.data.Dataset", str]:
+        train_ds, digest = data.train_builder(stream)
+        return flat(train_ds), digest
+
+    return dataclasses.replace(
+        data, train_ds=flat(data.train_ds), select_ds=flat(data.select_ds), test_ds=flat(data.test_ds),
+        train_builder=train_stream)
 
 
 def _require_positive(name: str, value: Optional[int]) -> None:

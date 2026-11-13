@@ -198,6 +198,12 @@ REGISTERED: List[Tuple[str, str]] = [
     ("train/api/pretrain_args.py", "PretrainData"),
     ("train/api/pretrain_args.py", "PretrainTransformArgs"),
     ("train/api/pretrain_args.py", "PretrainMetricArgs"),
+    # The time_series_forecasting task (step 12 of plan 3a8319ef): its config, its data config and its three own groups.
+    ("train/api/tasks/time_series_forecasting.py", "TimeSeriesForecastingConfig"),
+    ("train/api/forecast_args.py", "TimeSeriesData"),
+    ("train/api/forecast_args.py", "ForecastTransformArgs"),
+    ("train/api/forecast_args.py", "ForecastMetricArgs"),
+    ("train/api/forecast_args.py", "ForecastLossArgs"),
 ]
 
 # Fields known to be dead but OUT OF SCOPE of the sweep that introduced this
@@ -271,6 +277,28 @@ READ_BY_A_READER_THAT_DOES_NOT_IMPORT_THE_CLASS: Dict[Tuple[str, str], Dict[str,
         "precision": ("train/api/trainer.py", "TaskTrainer.run"),
         "epochs": ("train/api/run_sequence.py", "train_or_restore"),
         "checkpoint": ("train/api/run_sequence.py", "build_model"),
+    },
+    # The same task-agnostic reads for the forecasting task (`model` is parsed by `TaskTrainer.run`; the forecasting
+    # trainer takes the family and the variant from the context).
+    ("train/api/tasks/time_series_forecasting.py", "TimeSeriesForecastingConfig"): {
+        "debug_args": ("train/api/trainer.py", "TaskTrainer.run"),
+        "logger_args": ("train/api/fit_callbacks.py", "build_callbacks"),
+        "out": ("train/api/trainer.py", "TaskTrainer.run"),
+        "model": ("train/api/trainer.py", "TaskTrainer.run"),
+        "devices": ("train/api/trainer.py", "TaskTrainer.run"),
+        "precision": ("train/api/trainer.py", "TaskTrainer.run"),
+        "epochs": ("train/api/run_sequence.py", "train_or_restore"),
+        "checkpoint": ("train/api/run_sequence.py", "build_model"),
+        # The resume switch and the metric group are read by the shared sequence (`TaskTrainer.run` opens the run for a
+        # resume; `epoch_zero` checks the monitor the group names), not by the forecasting trainer.
+        "resume_interrupted": ("train/api/trainer.py", "TaskTrainer.run"),
+        "metric_args": ("train/api/run_sequence.py", "epoch_zero"),
+    },
+    # The two fields of the forecasting metric group are the monitor and its direction: `epoch_zero` checks the monitor against
+    # the compiled model's metrics and `train_or_restore` picks the best epoch with the direction, for every task.
+    ("train/api/forecast_args.py", "ForecastMetricArgs"): {
+        "watch_metric": ("train/api/run_sequence.py", "epoch_zero"),
+        "watch_mode": ("train/api/run_sequence.py", "train_or_restore"),
     },
 }
 

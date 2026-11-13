@@ -1454,10 +1454,13 @@ def registry_variants(family):
     return {s.family: s for s in fm.builtin_forecast_models()}[family].load_variants()
 
 
-def test_the_specs_are_not_registered_the_task_registers_them():
+def test_the_specs_are_registered_with_the_task_by_one_call_of_the_registry():
+    # Step 11 built them and registered nothing (a registered family with no task class breaks test_registry); step 12
+    # registers them with the task, by one call in `register_builtin_models`.
     recipes.register_builtin_models()
-    assert not set(FAMILIES) & set(registry.MODELS)
-    assert "builtin_forecast_models" not in inspect.getsource(recipes) and "forecast" not in inspect.getsource(recipes).lower()
+    assert set(FAMILIES) <= set(registry.MODELS)
+    source = inspect.getsource(recipes.register_builtin_models)
+    assert source.count("builtin_forecast_models") == 2, "one import and one use"
 
 
 def test_a_forecaster_is_refused_by_the_other_tasks_and_a_classifier_by_this_one(monkeypatch):

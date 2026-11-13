@@ -46,6 +46,15 @@ Interface contract
 ``jit_problem(family, jit_compile)``
     :return: the refusal text of ``jit_compile=true`` for a family whose gradient XLA cannot compile (ets), else ``None``.
 
+``flat_target(family, model_args)``
+    :return: whether the family's loss wants the target as ``(batch, horizon)`` (tirex, and xlstm with a quantile head);
+        pure. :func:`geometry_problems` refuses the quantile xlstm for more than one channel: its output has no channel axis.
+
+``loss_problem(family, model_args, loss_name)``
+    :return: the refusal text of ``loss_args.name`` for a head whose loss is fixed (a quantile head, timestral, mdn), else
+        ``None``; pure, so the task refuses before the claim. ``train.common.forecast_run`` refuses the same heads when it
+        builds the loss (a test holds the two equal).
+
 ``problems_of(family, model_args)`` / ``resolve_forecast_args(context, optim_args, model_args)``
     :return: one refusal line per bad key (pure) / the factory keywords, the recipe's then the caller's.
     :raises ConfigValidationError: naming EVERY refused key at once, before the run directory is claimed.
@@ -292,6 +301,12 @@ def geometry_problems(family: str, channels: int, horizon: int, model_args: Mapp
             f"Invalid value for 'data.value_cols': {family!r} takes {row.max_channels} channel ({row.why_channels}), "
             f"got {channels}; name one column, or choose a family that takes several"
         )
+    if family == XLSTM and model_args.get("quantile_levels") is not None and channels > 1:
+        lines.append(
+            f"Invalid value for 'data.value_cols': an xlstm with a quantile head forecasts one series (its output is "
+            f"(batch, horizon, quantiles), with no channel axis, measured at 2 input channels), got {channels} channels; "
+            "name one column, or leave model_args.quantile_levels out for a point head"
+        )
     # DECISION plan-2026-11-13T105600-3a8319ef/D-003
     # timestral's `call` is the forecaster's first block only up to one patch: later patches are decoded in the anchor
     # frame by TimestralForecaster (measured: horizon 48 at patch 32 differs from the forecaster by 2.54 on a scale of
@@ -313,6 +328,22 @@ def jit_problem(family: str, jit_compile: bool) -> Optional[str]:
     if jit_compile and reason:
         return f"Invalid value for 'jit_compile': {family!r} cannot be compiled with XLA: {reason}"
     return None
+
+
+def flat_target(family: str, model_args: Mapping[str, Any]) -> bool:
+    """Whether the family's loss wants a ``(batch, horizon)`` target; see the module contract."""
+    return family == TIREX or (family == XLSTM and model_args.get("quantile_levels") is not None)
+
+
+def loss_problem(family: str, model_args: Mapping[str, Any], loss_name: Optional[str]) -> Optional[str]:
+    """Return the refusal text of ``loss_args.name`` for a head with a fixed loss, or ``None``; see the module contract."""
+    point = family in (NBEATS, ETS) or (family in (PRISM, XLSTM) and model_args.get("quantile_levels") is None)
+    if loss_name is None or point:
+        return None
+    return (
+        f"Invalid value for 'loss_args.name': {loss_name!r} is not accepted for {family!r} with this head: its loss is fixed "
+        "(the pinball loss of a quantile head, the objective of timestral, the likelihood of mdn), not a choice; leave it null"
+    )
 
 
 def _offered(family: str) -> List[str]:

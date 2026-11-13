@@ -98,7 +98,24 @@ PRETRAIN_VARIANTS = {
     "beit": ["beit_tiny", "beit_small", "beit_base", "beit_large"],
 }
 PRETRAIN = "pretrain"
-ALL_VARIANTS = {**VARIANTS, **SEGMENTATION_VARIANTS, **DENOISING_VARIANTS, **PRETRAIN_VARIANTS}
+
+#: The forecasting families (plan-2026-11-13T105600-3a8319ef step 12: ``recipes.register_builtin_models`` registers them,
+#: so the registry-wide listings below hold the 83 names above and these). nbeats and mdn read the variants tables written in
+#: ``train.api.forecast_models``, ets the library's tuple of names, the others the models' own ``MODEL_VARIANTS``. Their builds,
+#: recipes and refusals are in ``test_forecast_families.py``.
+FORECAST_VARIANTS = {
+    "nbeats": ["base", "small", "tiny"],
+    "prism": ["base", "large", "small", "tiny"],
+    "tirex": ["large", "medium", "small", "tiny"],
+    "xlstm": ["small", "tiny"],
+    "ets": ["AAA", "AAN", "ANN"],
+    "timestral": ["123M", "209M", "28M", "5M"],
+    "mdn": ["base", "small", "tiny"],
+}
+FORECAST = "time_series_forecasting"
+ALL_VARIANTS = {
+    **VARIANTS, **SEGMENTATION_VARIANTS, **DENOISING_VARIANTS, **PRETRAIN_VARIANTS, **FORECAST_VARIANTS,
+}
 
 
 @pytest.fixture
@@ -125,7 +142,7 @@ def context(family, variant, dataset, image_size=32, num_classes=10):
 def test_the_listing_is_the_literal_variant_tables(builtin):
     assert sorted(builtin) == sorted(ALL_VARIANTS)
     expected = sorted(f"{f}/{v}" for f, names in ALL_VARIANTS.items() for v in names)
-    assert len(expected) == 83  # 76 before the pretrain families, which add 3 + 4
+    assert len(expected) == 106  # 76 before the pretrain families (3 + 4), then the forecasting families (23)
     assert registry.list_models() == expected
     for family, spec in builtin.items():
         if family in SEGMENTATION_VARIANTS:
@@ -134,6 +151,8 @@ def test_the_listing_is_the_literal_variant_tables(builtin):
             assert spec.tasks == (DENOISING,), family
         elif family in PRETRAIN_VARIANTS:
             assert spec.tasks == (PRETRAIN,), family
+        elif family in FORECAST_VARIANTS:
+            assert spec.tasks == (FORECAST,), family
         else:
             assert spec.tasks == (TASK,), family
 
@@ -149,15 +168,18 @@ def test_the_task_filter_keeps_every_family_of_the_task(builtin):
         registry.TaskSpec(DENOISING, "x.y:Config", "x.y:run", "image denoising")
     )
     registry.register_task(registry.TaskSpec(PRETRAIN, "x.y:Config", "x.y:run", "pretrain"))
+    registry.register_task(registry.TaskSpec(FORECAST, "x.y:Config", "x.y:run", "time series forecasting"))
     classifiers = sorted(f"{f}/{v}" for f, names in VARIANTS.items() for v in names)
     segmenters = sorted(f"{f}/{v}" for f, names in SEGMENTATION_VARIANTS.items() for v in names)
     denoisers = sorted(f"{f}/{v}" for f, names in DENOISING_VARIANTS.items() for v in names)
     pretrainers = sorted(f"{f}/{v}" for f, names in PRETRAIN_VARIANTS.items() for v in names)
+    forecasters = sorted(f"{f}/{v}" for f, names in FORECAST_VARIANTS.items() for v in names)
     assert registry.list_models(TASK) == classifiers
     assert registry.list_models(SEGMENTATION) == segmenters
     assert registry.list_models(DENOISING) == denoisers
     assert registry.list_models(PRETRAIN) == pretrainers
-    assert sorted(classifiers + segmenters + denoisers + pretrainers) == registry.list_models()
+    assert registry.list_models(FORECAST) == forecasters
+    assert sorted(classifiers + segmenters + denoisers + pretrainers + forecasters) == registry.list_models()
     # Control: a family that lists another task drops out of the filter.
     other = dataclasses.replace(builtin["vit"], family="other_vit", tasks=("else",))
     registry.register_model(other)

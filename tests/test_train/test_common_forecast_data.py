@@ -761,3 +761,39 @@ class TestAResumeIsANewTrainStreamOnTheSameSplit:
         expected = hashlib.sha256(x.numpy().tobytes() + y.numpy().tobytes()).hexdigest()
         assert b.first_batch_digest == expected
         assert any(f"stream seed {b.stream_seed}" in line and expected in line for line in lines)
+
+
+# ---------------------------------------------------------------------
+# the flat target of a quantile loss (step 12)
+# ---------------------------------------------------------------------
+
+
+class TestFlattenTargets:
+    """tirex and a quantile xlstm train on a ``(batch, horizon)`` target; the windows themselves do not change."""
+
+    def test_every_split_gives_the_channel_zero_target_and_the_same_context(self):
+        plain, flat = load(), fd.flatten_targets(load())
+        for name in ("select_ds", "test_ds"):
+            for (x, y), (fx, fy) in zip(getattr(plain, name), getattr(flat, name)):
+                np.testing.assert_array_equal(x.numpy(), fx.numpy())
+                assert fy.shape == (BATCH, HORIZON) and y.shape == (BATCH, HORIZON, 1)
+                np.testing.assert_array_equal(y.numpy()[..., 0], fy.numpy())
+        (x, y), (fx, fy) = next(iter(plain.train_ds)), next(iter(flat.train_ds))
+        np.testing.assert_array_equal(y.numpy()[..., 0], fy.numpy())
+
+    def test_the_counts_the_fingerprint_and_the_lengths_are_unchanged(self):
+        plain, flat = load(), fd.flatten_targets(load())
+        assert (flat.fingerprint, flat.n_train, flat.n_select, flat.n_test, flat.steps_per_epoch) == (
+            plain.fingerprint, plain.n_train, plain.n_select, plain.n_test, plain.steps_per_epoch)
+        assert int(flat.select_ds.cardinality()) == int(plain.select_ds.cardinality())
+        assert int(flat.train_ds.cardinality()) == int(plain.train_ds.cardinality()) == tf.data.INFINITE_CARDINALITY
+
+    def test_a_resume_keeps_the_target_flat_and_moves_only_the_train_stream(self):
+        flat = fd.flatten_targets(load())
+        resumed = flat.with_stream(100)
+        assert next(iter(resumed.train_ds))[1].shape == (BATCH, HORIZON)
+        assert resumed.stream_seed == derive_stream_seed(SEED, 100)
+        plain_resumed = load().with_stream(100)
+        np.testing.assert_array_equal(
+            next(iter(plain_resumed.train_ds))[1].numpy()[..., 0], next(iter(resumed.train_ds))[1].numpy())
+        assert digest(resumed.select_ds) == digest(flat.select_ds)

@@ -473,7 +473,7 @@ def test_the_segmentation_families_train_segmentation_only_and_the_six_classifie
     assert not [m for m in registry.list_models("image_classification")
                 if m.startswith(("convunext", "accunet", "resnet_seg", "convnext_seg"))]
     assert {t.name for t in registry.list_tasks()} == {
-        "image_classification", "image_segmentation", "image_denoising", "pretrain"
+        "image_classification", "image_segmentation", "image_denoising", "pretrain", "time_series_forecasting"
     }
 
 

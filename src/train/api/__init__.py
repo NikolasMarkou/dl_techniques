@@ -71,6 +71,10 @@ _LAZY: Dict[str, str] = {
     "load_pretrain_data_config": ".pretrain_args",
     "PretrainConfig": ".tasks.pretrain",
     "train_pretrain": ".tasks.pretrain",
+    "TimeSeriesData": ".forecast_args",
+    "load_forecast_data_config": ".forecast_args",
+    "TimeSeriesForecastingConfig": ".tasks.time_series_forecasting",
+    "train_time_series_forecasting": ".tasks.time_series_forecasting",
 }
 
 __all__ = sorted(_LAZY)

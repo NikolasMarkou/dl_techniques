@@ -29,6 +29,10 @@ Interface contract
         the watched key is ``val_mae``. ``loss_name`` (``mae``, ``mse``, ``mase``) applies to the point heads
         only; any other head with a name set is a :class:`ConfigError` naming ``loss_args.name``.
 
+``beats_bar(reached, threshold)``
+    :return: whether ``reached`` (a ``val_mae``) is below ``threshold`` by more than :data:`TIE_ULPS` float32 steps, both read
+        as float32. ``epoch_zero_mae(sidecar_path)`` is the untrained model's ``mae`` as the fit sidecar holds it.
+
 ``baseline_maes(context, target)``, ``canonical_metrics(context, target, point, quantiles, levels)``
     numpy, float64 where it matters; ``context (N, L, C)``, ``target`` and ``point (N, H, C)``,
     ``quantiles (N, H, C, Q)``. ``canonical_report(model, decoder, ds)`` decodes a ``(x, y)`` dataset and calls
@@ -46,6 +50,7 @@ from dl_techniques.losses.mase_loss import MASELoss
 from dl_techniques.losses.quantile_loss import QuantileLoss
 from dl_techniques.utils.matplotlib_backend import import_pyplot
 from train.api.errors import ConfigError
+from train.common.resume_state import read_fit_state
 from train.common.timeseries import _plot_ts_forecast, compute_post_hoc_forecast_metrics
 
 LOSS_NAMES = ("mae", "mse", "mase")
@@ -131,6 +136,42 @@ def baseline_maes(context: np.ndarray, target: np.ndarray) -> Dict[str, float]:
         "context_mean": mae(context_mean(context, horizon)),
         "n_windows": int(len(target)),
     }
+
+
+#: The width, in float32 steps of the threshold, of the band below the threshold that is still a miss; the width of
+#: ``segmentation_run.TIE_ULPS``. Measured (plan step 12): the compiled ``mae`` of a model that outputs the naive-last
+#: forecast sits 1 float32 step BELOW the float64 numpy baseline in 2 of 8 seeds at the default sizes.
+TIE_ULPS = 16
+
+
+def beats_bar(reached: float, threshold: float) -> bool:
+    """Whether ``reached`` is below ``threshold`` by more than :data:`TIE_ULPS` float32 steps (see the module contract)."""
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-008
+    # STRICTLY below, in float32, and with a tie band. `<=` would call a model that merely EQUALS a baseline a success; a
+    # float64 `reached` that rounds to the float32 threshold must be judged as the float32 number Keras computed; and the
+    # baselines are float64 numpy while the compiled metric adds in float32, so a model that outputs the naive-last forecast
+    # scores 1 step BELOW its own baseline on some seeds (MEASURED) and a bare `<` passes it. Do NOT shrink the band to 0
+    # "to be strict", and do NOT compare the Python floats.
+    low = np.float32(threshold)
+    return bool(np.float32(reached) < low - np.float32(TIE_ULPS) * np.spacing(low))
+
+
+def epoch_zero_mae(sidecar_path: Any) -> float:
+    """The untrained model's ``mae`` on the select windows as the fit sidecar holds it (see the module contract)."""
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-008
+    # The epoch-zero term of the bar is read from the SIDECAR, always, never from an attribute the first process set: a
+    # resume never calls `initial_loss_check`, and re-evaluating the weights a resume restored would measure the trained
+    # model. Do NOT cache it on the trainer "to save a read".
+    state = read_fit_state(sidecar_path)
+    initial = state.get("initial")
+    metrics = initial.get("metrics") if isinstance(initial, dict) else None
+    value = metrics.get("mae") if isinstance(metrics, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(
+            f"the epoch-zero val_mae is not in {sidecar_path}: the fit sidecar holds no initial.metrics.mae, so the success "
+            "bar cannot be cut (a run writes it before its first epoch)"
+        )
+    return float(value)
 
 
 # ---------------------------------------------------------------------

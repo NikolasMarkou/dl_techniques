@@ -444,7 +444,9 @@ def _non_json_values(value: Any, path: str, found: List[Tuple[str, str]]) -> Non
         found.append((path, f"a {type(value).__name__}"))
 
 
-def config_problems(config: StrictConfig, prefix: str = "", no_conformal_for: Optional[str] = None) -> List[str]:
+def config_problems(
+    config: StrictConfig, prefix: str = "", no_conformal_for: Optional[str] = None, because: Optional[str] = None
+) -> List[str]:
     """Return one line per top-level field of a task config that cannot be right.
 
     A task config calls this from its ``problems`` so :func:`validate` reports
@@ -455,6 +457,8 @@ def config_problems(config: StrictConfig, prefix: str = "", no_conformal_for: Op
     :param prefix: the dotted path of ``config``; ``""`` at the top.
     :param no_conformal_for: the kind of run (``"denoising"``) that produces no set of classes; ``None`` (classification)
         accepts ``analysis_args.conformal_alpha``, a name refuses it by key.
+    :param because: the clause that says why a conformal level is refused, in place of the image sentence; ``None`` (every
+        task but forecasting) gives the sentence the denoising and segmentation tests pin byte for byte.
     :return: lines for ``epochs`` or ``batch_size`` below 1, a ``seed`` outside
         ``[0, MAX_SEED]``, a negative ``devices``, a ``model_args`` value
         that JSON cannot hold (``config.json`` records the arguments, and a Keras
@@ -486,10 +490,16 @@ def config_problems(config: StrictConfig, prefix: str = "", no_conformal_for: Op
         )
     alpha = config.analysis_args.conformal_alpha if no_conformal_for else None
     if alpha is not None:
+        # DECISION plan-2026-11-13T105600-3a8319ef/D-016
+        # The image sentence is the default and stays byte for byte (two tests pin it in full); a task that is not about
+        # images passes its own clause. Do NOT reword the default for forecasting: a forecasting user would be told about
+        # images, and the denoising and segmentation tests would change.
+        reason = because if because is not None else (
+            f"a conformal prediction set is a set of classes for a whole image, which a {no_conformal_for} run does not produce"
+        )
         lines.append(
             f"Invalid value for {join_path(join_path(prefix, 'analysis_args'), 'conformal_alpha')!r}: "
-            "a conformal prediction set is a set of classes for a whole image, which a "
-            f"{no_conformal_for} run does not produce; leave it null, got {alpha!r}"
+            f"{reason}; leave it null, got {alpha!r}"
         )
     return lines
 

@@ -440,8 +440,8 @@ def test_the_function_registers_the_families_before_it_validates(world, tmp_path
         run_function(tmp_path / "run", epochs="5")
     assert sorted(registry.MODELS) == [
         "accunet", "beit", "bfcnn", "bfconvunext", "bfunet", "cliffordnet", "cliffordnet_hier", "convnext_seg",
-        "convnext_v1", "convnext_v2", "convunext", "convunext_biased", "energy_transformer", "resnet", "resnet_seg",
-        "scunet", "vit",
+        "convnext_v1", "convnext_v2", "convunext", "convunext_biased", "energy_transformer", "ets", "mdn", "nbeats",
+        "prism", "resnet", "resnet_seg", "scunet", "timestral", "tirex", "vit", "xlstm",
     ]
 
 
@@ -455,9 +455,11 @@ def test_the_function_is_keyword_only_and_strict(world, tmp_path):
 
 def test_the_built_in_task_rows_are_what_the_package_registers(world):
     assert [spec.name for spec in BUILTIN_TASKS] == [
-        "image_classification", "image_segmentation", "image_denoising", "pretrain"
+        "image_classification", "image_segmentation", "image_denoising", "pretrain", "time_series_forecasting"
     ]
     register_builtin_tasks()
     register_builtin_tasks()
-    assert sorted(registry.TASKS) == ["image_classification", "image_denoising", "image_segmentation", "pretrain"]
+    assert sorted(registry.TASKS) == [
+        "image_classification", "image_denoising", "image_segmentation", "pretrain", "time_series_forecasting"
+    ]
     assert recipes.TASK == "image_classification"

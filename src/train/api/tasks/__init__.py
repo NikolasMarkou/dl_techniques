@@ -40,6 +40,12 @@ BUILTIN_TASKS = (
         function="train.api.tasks.pretrain:train_pretrain",
         summary="pretrain a masked-image model (energy_transformer patch completion, beit against a frozen tokenizer)",
     ),
+    registry.TaskSpec(
+        name="time_series_forecasting",
+        config_class="train.api.tasks.time_series_forecasting:TimeSeriesForecastingConfig",
+        function="train.api.tasks.time_series_forecasting:train_time_series_forecasting",
+        summary="train a forecaster on a synthetic series bank or a csv, scored against naive-last and seasonal-naive",
+    ),
 )
 
 

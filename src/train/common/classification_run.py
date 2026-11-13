@@ -431,6 +431,7 @@ def finalize_last_epoch(
         evaluate: Evaluate, save: bool = True, atomic: bool = False,
         eval_batch_size: Optional[int] = None, exact_reload: bool = False,
         load_detail: Optional[Dict[str, Any]] = None, sample: Optional[Any] = None,
+        predict_batch_size: Optional[int] = None,
 ) -> Tuple[Optional[Dict[str, float]], Optional[bool]]:
     """Restore the last epoch's weights, score them, save them, write the history, reload.
 
@@ -472,6 +473,9 @@ def finalize_last_epoch(
         ``data.x_fig`` otherwise. Both legacy reads assume one image array; a model of ``[image, mask]``
         (the masked-image pretraining tasks) has a stream of ``((image, mask), target, weight)`` and no
         ``x_fig``, and passes the list here. ``select_ds`` and ``x_fig`` are not read when it is given.
+    :param predict_batch_size: the load check's ``predict`` batch, used AS GIVEN; ``None`` (every caller that existed before
+        it) is the cap :func:`~train.common.evaluation.predict_batch_cap` gives. A model built at a STATIC batch (timestral)
+        can predict only at that batch, which the cap (Keras' 32 unless a smaller one is asked for) cannot say.
     :return: ``(test_metrics_final, load_check)``; ``load_check`` is ``None`` when
         ``save`` is ``False``, ``test_metrics_final`` when there is no test split.
     """
@@ -513,7 +517,7 @@ def finalize_last_epoch(
                 sample = next(iter(data.select_ds.take(1)))[0].numpy()[:LOAD_CHECK_SAMPLES]
             else:
                 sample = data.x_fig[:LOAD_CHECK_SAMPLES]
-        cap = predict_batch_cap(eval_batch_size)
+        cap = predict_batch_cap(eval_batch_size) if predict_batch_size is None else predict_batch_size
         # The keyword is passed only when there is one: tests of the legacy trainers patch
         # `validate_model_loading` with the three-argument signature it always had.
         expected = model.predict(sample, batch_size=cap, verbose=0)
