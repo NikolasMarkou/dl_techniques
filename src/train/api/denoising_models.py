@@ -415,12 +415,17 @@ def _activations(kwargs: Dict[str, Any], keys: Sequence[str]) -> Dict[str, Any]:
     # trainer builds and shares between the stem, the blocks and the supervision heads (the layers wrap it in their
     # own Activation sublayers and serialize it). Do NOT pass the string "for simplicity": the slope changes and
     # nothing fails. `gabor_activation` and `final_activation` take names only and stay strings.
-    import keras
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-021
+    # The instance is `ExactLeakyReLU`, not the stock `keras.layers.LeakyReLU`: TF 2.18 builds the stock slope in
+    # float32 even for float64 input, and the raw-site census (`tests/test_the_raw_gelu_and_leaky_relu_calls_cannot_grow.py`)
+    # only shrinks. It is bit-identical to the stock layer at float32 and still a `LeakyReLU`. Do NOT add a row to the
+    # census to keep the stock layer.
+    from dl_techniques.layers.activations.exact_activations import ExactLeakyReLU
 
     shared = None
     for key in keys:
         if kwargs.get(key) == "leaky_relu":
-            shared = shared or keras.layers.LeakyReLU(negative_slope=LEAKY_RELU_SLOPE)
+            shared = shared or ExactLeakyReLU(negative_slope=LEAKY_RELU_SLOPE)
             kwargs[key] = shared
     return kwargs
 

@@ -185,8 +185,9 @@ def _activation_layer_problem(layer: Any, allowed: frozenset) -> Optional[Tuple[
     """``(kind, detail)`` when ``layer`` is an activation layer outside the allowlist, else ``None``.
 
     An activation layer is a ``keras.layers.Activation`` (judged by the activation it holds) or any layer
-    defined in a ``layers.activations`` module (Keras' and this library's). ``LeakyReLU`` and ``PReLU`` are
-    positively homogeneous for any slope; ``ReLU`` is unless it clips (``max_value``) or has a ``threshold``.
+    defined in a ``layers.activations`` module (Keras' and this library's). ``LeakyReLU``, its subclass
+    ``ExactLeakyReLU`` (what the denoiser recipes build) and ``PReLU`` are positively homogeneous for any slope;
+    ``ReLU`` is unless it clips (``max_value``) or has a ``threshold``.
     """
     import keras
 
@@ -195,7 +196,7 @@ def _activation_layer_problem(layer: Any, allowed: frozenset) -> Optional[Tuple[
     if ".layers.activations" not in type(layer).__module__:
         return None
     name = type(layer).__name__
-    if name in ("LeakyReLU", "PReLU"):
+    if name in ("LeakyReLU", "ExactLeakyReLU", "PReLU"):
         return None
     if name == "ReLU":
         if getattr(layer, "max_value", None) is None and not getattr(layer, "threshold", 0):

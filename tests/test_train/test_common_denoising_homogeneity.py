@@ -24,6 +24,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
+from dl_techniques.layers.activations.exact_activations import ExactLeakyReLU
 from dl_techniques.layers.norms.bias_free_batch_norm import BiasFreeBatchNorm
 from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization
 from dl_techniques.layers.norms.rms_norm import RMSNorm
@@ -290,6 +291,8 @@ class TestPlantedOffenders:
 class TestActivations:
     @pytest.mark.parametrize("layer", [
         lambda: keras.layers.LeakyReLU(negative_slope=0.1),
+        lambda: ExactLeakyReLU(negative_slope=0.1),
+        lambda: keras.layers.Activation(ExactLeakyReLU(negative_slope=0.1)),
         lambda: keras.layers.Activation("linear"),
         lambda: keras.layers.Activation("relu"),
         lambda: keras.layers.Activation("leaky_relu"),

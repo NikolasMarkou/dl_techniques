@@ -522,6 +522,70 @@ def test_a_leaky_relu_named_for_the_biased_convunext_is_also_slope_one_tenth(reg
     assert leaky_slopes(model) == [0.1]
 
 
+#: Run in the child: load a trained denoiser with ``train`` made unimportable, print the classes of its leaky layers and
+#: the output on the saved input as JSON (the wheel ships ``dl_techniques`` only, so the exact layer must load there).
+CHILD_RELOAD = textwrap.dedent(
+    """
+    import json, sys
+    sys.modules["train"] = None
+    import numpy as np
+    import keras
+    import dl_techniques
+    # the one registration `import dl_techniques` alone does not make, and which the U-Nets' stem needs; the leaky
+    # layer must NOT need a model module imported beside it
+    import dl_techniques.initializers.gabor_filters_initializer
+
+    model = keras.models.load_model(sys.argv[1], compile=False)
+    x = np.load(sys.argv[2])
+    leaky = sorted({type(layer).__name__ for layer in model._flatten_layers(include_self=False, recursive=True)
+                    if isinstance(layer, keras.layers.LeakyReLU)})
+    print(json.dumps({"leaky": leaky, "out": np.asarray(model(x, training=False)).tolist(),
+                      "train_blocked": sys.modules["train"] is None}))
+    """
+)
+
+
+def test_the_denoisers_leaky_relu_is_the_exact_layer_with_slope_one_tenth_and_equal_to_the_stock_one_at_float32():
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-021: TF 2.18 builds the stock slope in float32 even for float64 input;
+    # the repo's ExactLeakyReLU is bit-identical at float32 (measured here on 4096 values) and float64-exact.
+    from dl_techniques.layers.activations.exact_activations import ExactLeakyReLU
+
+    kwargs = dm._activations({"activation": "leaky_relu", "other": "gelu"}, ("activation",))
+    layer = kwargs["activation"]
+    assert type(layer) is ExactLeakyReLU
+    assert float(layer.negative_slope) == dm.LEAKY_RELU_SLOPE == 0.1
+    assert kwargs["other"] == "gelu"
+    x = np.random.default_rng(0).normal(size=4096).astype("float32") * 3.0
+    stock = keras.layers.LeakyReLU(negative_slope=0.1)
+    np.testing.assert_array_equal(np.asarray(layer(x)), np.asarray(stock(x)))
+    restored = keras.saving.deserialize_keras_object(keras.saving.serialize_keras_object(layer))
+    assert type(restored) is ExactLeakyReLU and float(restored.negative_slope) == 0.1
+
+
+@pytest.mark.parametrize("family", BIAS_FREE)
+def test_a_denoiser_trained_one_step_reloads_with_the_exact_layer_in_an_interpreter_without_train(family, registered, tmp_path):
+    from dl_techniques.layers.activations.exact_activations import ExactLeakyReLU
+
+    model = build(family, input_shape=(32, 32, 3))
+    assert {type(layer) for layer in model._flatten_layers(include_self=False, recursive=True)
+            if isinstance(layer, keras.layers.LeakyReLU)} == {ExactLeakyReLU}
+    model.compile(optimizer="adam", loss="mse")
+    x = batch(32, 32)
+    model.fit(x, x, epochs=1, batch_size=1, verbose=0)
+    archive, sample = tmp_path / "trained.keras", tmp_path / "x.npy"
+    model.save(archive)
+    np.save(sample, x)
+    done = subprocess.run(
+        [sys.executable, "-c", CHILD_RELOAD, str(archive), str(sample)],
+        capture_output=True, text=True, timeout=600,
+        env={**os.environ, "CUDA_VISIBLE_DEVICES": "-1", "MPLBACKEND": "Agg"},
+    )
+    assert done.returncode == 0, done.stderr[-3000:]
+    seen = json.loads(done.stdout.strip().splitlines()[-1])
+    assert seen["train_blocked"] is True and seen["leaky"] == ["ExactLeakyReLU"]
+    np.testing.assert_allclose(np.asarray(seen["out"], "float32"), np.asarray(model(x, training=False)), atol=1e-5)
+
+
 @pytest.mark.parametrize("family", FAMILIES)
 def test_the_keras_round_trip_is_exact_and_keeps_the_slope_and_the_variant(family, models, tmp_path):
     model = models[family]
