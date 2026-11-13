@@ -178,7 +178,10 @@ def check_model_loading(
     test_sample : Any
         Input sample for prediction (numpy array or tensor).
     expected_output : np.ndarray
-        Expected output from the original model (a dict for a model with named outputs).
+        Expected output from the original model (a dict for a model with named outputs, a list or tuple
+        for a model with several outputs: each is compared with the reloaded one at the same position,
+        ``max_abs_diff`` and ``scale`` are the worst over them, ``argmax_agreement`` is the first's).
+        A different number of outputs, or a list against one array, is a ``False`` verdict.
     custom_objects : Optional[Dict[str, Any]]
         Custom objects dict for model loading.
     tolerance : float
@@ -258,12 +261,33 @@ def check_model_loading(
             )
             return LoadCheck(False, None, None, None, relative_tolerance, weights_equal, None, tf32, jit_compile)
         pairs = [(np.asarray(expected_output[k]), np.asarray(loaded_output[k])) for k in expected_output]
+    elif isinstance(expected_output, (list, tuple)) or isinstance(loaded_output, (list, tuple)):
+        # DECISION plan-2026-11-13T105600-3a8319ef/D-007
+        # A model with several outputs (N-BEATS returns (forecast, residual)) is compared output by output.
+        # Do NOT stack the list into one array: outputs of different shapes made `np.asarray` raise
+        # ("inhomogeneous shape", MEASURED), and do NOT compare the first output alone, the second would
+        # go unchecked. A single array and a dict never reach this branch, so their verdicts are unchanged.
+        if not (isinstance(expected_output, (list, tuple)) and isinstance(loaded_output, (list, tuple))):
+            logger.warning(
+                "Model output structure mismatch after loading "
+                f"(expected={type(expected_output).__name__}, "
+                f"loaded={type(loaded_output).__name__})"
+            )
+            return LoadCheck(False, None, None, None, relative_tolerance, weights_equal, None, tf32, jit_compile)
+        if len(expected_output) != len(loaded_output):
+            logger.warning(
+                "Model output count differs after loading "
+                f"(expected={len(expected_output)}, loaded={len(loaded_output)})"
+            )
+            return LoadCheck(False, None, None, None, relative_tolerance, weights_equal, None, tf32, jit_compile)
+        pairs = [(np.asarray(e), np.asarray(l)) for e, l in zip(expected_output, loaded_output)]
     else:
         pairs = [(np.asarray(expected_output), np.asarray(loaded_output))]
 
-    # The absolute check keeps numpy's own `allclose` for a single array (its default rtol of 1e-5 of the
-    # reloaded value is part of what every classification run has always been judged by) and a plain
-    # max difference for a dict; the relative check is `max_diff <= tolerance + rtol * scale`.
+    # The absolute check keeps numpy's own `allclose` for a single array or a list of outputs (its default
+    # rtol of 1e-5 of the reloaded value is part of what every classification run has always been judged
+    # by, and a list of equal-shaped outputs was judged that way when it was stacked) and a plain max
+    # difference for a dict; the relative check is `max_diff <= tolerance + rtol * scale`.
     legacy_allclose = not relative_tolerance and not isinstance(expected_output, dict)
     max_diff = 0.0
     scale = 0.0
@@ -278,7 +302,7 @@ def check_model_loading(
         scale = max(scale, float(np.max(np.abs(expected))) if expected.size else 0.0)
     allowed = tolerance + relative_tolerance * scale
     if legacy_allclose:
-        outputs_ok = bool(np.allclose(pairs[0][0], pairs[0][1], atol=tolerance))
+        outputs_ok = all(bool(np.allclose(e, l, atol=tolerance)) for e, l in pairs)
     else:
         outputs_ok = bool(max_diff <= allowed)
     agreement = None
