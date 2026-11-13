@@ -149,7 +149,11 @@ class MANNUtilizationLoss(PerSampleCallMixin, keras.losses.Loss):
         # Half precision is computed in float32 (float64 stays float64): in float16 the
         # softmax underflows to exactly 0 and the 1e-10 constants round to 0, so
         # ``0 * log(0)`` is NaN long before the squared norm overflows (past 65504).
-        if keras.backend.standardize_dtype(memory_vectors.dtype) in ("float16", "bfloat16"):
+        # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
+        # a Keras-2 residue banned across all of `src/`. Do NOT reduce it to a bare
+        # `str(d)` -- a `tf.DType` stringifies as "<dtype: 'float32'>".
+        memory_dtype = getattr(memory_vectors.dtype, "name", None) or str(memory_vectors.dtype)
+        if memory_dtype in ("float16", "bfloat16"):
             memory_vectors = ops.cast(memory_vectors, "float32")
 
         if mask is not None:

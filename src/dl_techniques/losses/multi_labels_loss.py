@@ -172,7 +172,10 @@ class PerChannelBinaryLoss(PerSampleCallMixin, keras.losses.Loss):
         # ``log(1 - p)`` finite for a probability of 1 (``-inf``, then ``0 * -inf`` =
         # NaN). The rows come back float32. Do NOT drop the cast to "keep the caller's
         # dtype": a direct call on float16 or bfloat16 predictions is then inf or NaN.
-        if keras.backend.standardize_dtype(y_pred.dtype) in ("float16", "bfloat16"):
+        # `getattr(d, "name", None) or str(d)`, not `keras.backend.standardize_dtype`:
+        # a Keras-2 residue banned across all of `src/`. Do NOT reduce it to a bare
+        # `str(d)` -- a `tf.DType` stringifies as "<dtype: 'float32'>".
+        if (getattr(y_pred.dtype, "name", None) or str(y_pred.dtype)) in ("float16", "bfloat16"):
             y_pred = ops.cast(y_pred, "float32")
 
         # Ensure consistent dtypes
