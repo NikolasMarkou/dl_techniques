@@ -6,6 +6,11 @@ column sorted, how many rows is each segment) have to run BEFORE the GPU is clai
 pandas and numpy only, and ``train.common.forecast_data`` imports them: one implementation, no copy in the
 pre-claim check and the loader.
 
+pandas and numpy are imported INSIDE the functions that read a csv, never at module scope: ``train.api.cli``
+imports the forecasting task's argument module (and so this one) when it registers the tasks, and ``python -m
+train help``, the help of every command and ``import train.api`` load no heavy library
+(``test_cli_help_allocates_nothing`` reads ``sys.modules`` for it).
+
 Interface contract
 ------------------
 ``read_csv_series(path, value_cols, time_col)``
@@ -36,12 +41,13 @@ import hashlib
 import io
 import re
 from pathlib import Path
-from typing import List, NoReturn, Optional, Sequence, Tuple
-
-import numpy as np
-import pandas as pd
+from typing import TYPE_CHECKING, List, NoReturn, Optional, Sequence, Tuple
 
 from train.api.errors import ConfigError
+
+if TYPE_CHECKING:  # annotations only; the runtime imports are inside the functions (module docstring)
+    import numpy as np
+    import pandas as pd
 
 
 def refuse(message: str) -> NoReturn:
@@ -75,12 +81,17 @@ def check_segments(segments: Sequence[Tuple[int, int]], rows: int, width: int, s
 
 def read_csv_series(
         path: Optional[str], value_cols: Optional[Sequence[str]], time_col: Optional[str],
-) -> Tuple[np.ndarray, List[str], str]:
+) -> "Tuple[np.ndarray, List[str], str]":
     """``(values, names, sha256)``: a csv as ``(rows, channels)`` float64, its value columns and its byte hash."""
     # DECISION plan-2026-11-13T105600-3a8319ef/D-036
-    # This module imports pandas and numpy only. Do NOT import train.common, tensorflow or keras here (and do
-    # NOT copy these checks into a second reader for the pre-claim step): train.common loads TensorFlow, which
-    # must not be loaded before setup_gpu has run, and two readers drift apart.
+    # This module imports pandas and numpy only, and only here, inside the function. Do NOT import train.common,
+    # tensorflow or keras here (and do NOT copy these checks into a second reader for the pre-claim step):
+    # train.common loads TensorFlow, which must not be loaded before setup_gpu has run, and two readers drift
+    # apart. Do NOT hoist the numpy and pandas imports to module scope either: the help path imports this module
+    # (through forecast_args) and must stay free of them, which a module-scope import broke in step 12.
+    import numpy as np
+    import pandas as pd
+
     if path is None:
         refuse("data.path is required for data.format 'csv'")
     file = Path(path)
@@ -116,6 +127,8 @@ def read_csv_series(
 
 
 def _check_time_column(column: "pd.Series", name: str) -> None:
+    import pandas as pd
+
     if column.dtype == object:
         try:
             column = pd.to_datetime(column)

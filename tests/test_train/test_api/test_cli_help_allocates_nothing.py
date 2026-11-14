@@ -12,6 +12,7 @@ The test runs the real command in a child process under
 that inspects ``sys.modules`` would not run ``train/__main__.py``.
 """
 
+import ast
 import logging
 import re
 import subprocess
@@ -23,6 +24,7 @@ from typing import List, Sequence
 import pytest
 
 from train.api import cli
+from train.api.tasks import BUILTIN_TASKS
 
 # ``cwd`` and ``source_dir`` are fixtures; importing them makes them visible here.
 from .test_the_cli_exit_codes import cwd, run_injected, source_dir  # noqa: F401
@@ -116,6 +118,121 @@ def test_the_real_task_help_imports_nothing_heavy_either(args, tmp_path):
     assert "train.api.cli" in modules, modules[-20:]
     assert "  data.dataset  (" in result.stdout and "  optim_args.lr  (" in result.stdout
     assert forbidden_in(modules) == []
+
+
+# The fresh-interpreter census of what a help command leaves in ``sys.modules``.
+#
+# ``-X importtime`` above lists imports; this reads ``sys.modules`` itself, so a heavy library that arrives
+# through any path (a module-scope import, a lazy import run too early) is found by name. It does not use the
+# importtime FORBIDDEN list: that list pre-dates the forecasting task, whose csv reader needs numpy and pandas,
+# and the list let a module-scope ``import numpy`` through for seven steps (the rule is test_convert's and
+# AGENTS.md's: help and ``import train.api`` load no heavy library).
+HEAVY_LIBRARIES = ("tensorflow", "keras", "tf_keras", "tensorboard", "numpy", "pandas", "PIL", "yaml",
+                   "scipy", "sklearn", "matplotlib")
+#: ``train.api`` logs through ``dl_techniques.utils.logger``; those three module names are the whole of the
+#: ``dl_techniques`` package a help command may load (the library's layers, models and losses are TensorFlow).
+LOGGER_ONLY = ("dl_techniques", "dl_techniques.utils", "dl_techniques.utils.logger")
+
+_CENSUS_DRIVER = """
+import sys
+
+HEAVY = {heavy!r}
+LOGGER_ONLY = {logger_only!r}
+
+
+def census():
+    # One name per heavy library (``numpy``, not its 90 submodules), the full name for the rest.
+    found = set()
+    for name in sys.modules:
+        top = name.split(".")[0]
+        if top in HEAVY:
+            found.add(top)
+        elif top == "dl_techniques" and name not in LOGGER_ONLY:
+            found.add(name)
+        elif name == "train.common" or name.startswith("train.common."):
+            found.add(name)
+    print("CENSUS", sorted(found))
+
+
+{body}
+"""
+
+
+def heavy_after(body: str, cwd: Path, argv: Sequence[str] = ()):
+    """Run ``body`` in a fresh interpreter; return ``(returncode, stdout, stderr, modules found)``."""
+    code = _CENSUS_DRIVER.format(heavy=HEAVY_LIBRARIES, logger_only=LOGGER_ONLY, body=body)
+    result = subprocess.run(
+        [sys.executable, "-c", code, *argv], cwd=cwd, capture_output=True, text=True, timeout=120
+    )
+    lines = [line for line in result.stdout.splitlines() if line.startswith("CENSUS ")]
+    found = ast.literal_eval(lines[-1][len("CENSUS "):]) if lines else None
+    return result.returncode, result.stdout, result.stderr, found
+
+
+def every_command_word() -> List[str]:
+    """The command words of the CLI: the rows of ``COMMANDS`` and the rows of the built-in task table."""
+    return [*cli.COMMANDS, *(spec.name for spec in BUILTIN_TASKS)]
+
+
+_HELP_BODY = """
+from train.api import cli
+
+code = cli.main(sys.argv[1:])
+census()
+sys.exit(code)
+"""
+
+#: The one command whose listing imports the model families (``cli._list_models``: "not on the help path").
+IMPORTS_THE_FAMILIES = ("list_models",)
+
+
+def help_argv(word: str) -> List[str]:
+    """The command line that prints ``word``'s help: ``help`` and the listings take no ``help`` word."""
+    return [word] if word == "help" else [word, "help"]
+
+
+def test_the_command_words_cover_the_commands_and_the_task_table():
+    words = every_command_word()
+    assert words[: len(cli.COMMANDS)] == list(cli.COMMANDS)
+    # The forecasting task is the one whose module imports once pulled numpy in; it must be a row here.
+    assert "time_series_forecasting" in words and "image_classification" in words
+    assert len(words) == len(set(words)) == len(cli.COMMANDS) + len(BUILTIN_TASKS)
+    assert set(IMPORTS_THE_FAMILIES) <= set(cli.COMMANDS)
+
+
+@pytest.mark.parametrize("word", [w for w in every_command_word() if w not in IMPORTS_THE_FAMILIES])
+def test_the_help_of_every_command_and_task_leaves_no_heavy_library_in_sys_modules(word, tmp_path):
+    code, out, err, found = heavy_after(_HELP_BODY, tmp_path, help_argv(word))
+    assert code == 0, err[-2000:]
+    # Liveness: the command really printed (usage text, or the task rows of the listing).
+    assert ("usage:" in out) or (word == "list_tasks" and "time_series_forecasting" in out), out[-500:]
+    assert found is not None, out[-500:]
+    assert found == [], f"`python -m train {' '.join(help_argv(word))}` loaded {found}"
+
+
+def test_the_listing_of_the_models_is_the_one_command_that_may_import_the_families(tmp_path):
+    """The exemption is real and exact: ``list_models`` imports keras, so it is not on the help path."""
+    code, out, err, found = heavy_after(_HELP_BODY, tmp_path, ["list_models", "help"])
+    assert code == 0, err[-2000:]
+    assert "keras" in found, found
+
+
+def test_importing_train_api_leaves_no_heavy_library_and_no_dl_techniques_module(tmp_path):
+    code, out, err, found = heavy_after("import train.api\ncensus()\nassert 'dl_techniques' not in sys.modules\n", tmp_path)
+    assert code == 0, err[-2000:]
+    assert found == [], found
+
+
+def test_the_census_flags_numpy_pandas_and_a_dl_techniques_module_when_they_really_load(tmp_path):
+    """Control: the same driver names numpy, pandas and a dl_techniques layer module that is really imported."""
+    body = "import numpy, pandas\nimport dl_techniques.layers\ncensus()\n"
+    code, out, err, found = heavy_after(body, tmp_path)
+    assert code == 0, err[-2000:]
+    assert found == ["dl_techniques.layers", "numpy", "pandas"], found
+    # The logger trio alone is not flagged.
+    code, out, err, found = heavy_after("import dl_techniques.utils.logger\ncensus()\n", tmp_path)
+    assert code == 0, err[-2000:]
+    assert found == [], found
 
 
 MODEL_COMMANDS = {

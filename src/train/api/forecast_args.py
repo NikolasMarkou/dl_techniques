@@ -26,8 +26,9 @@ Interface contract
     :param data: a config whose ``lookback`` and ``horizon`` are resolved.
     :raises ConfigError: every problem of ``data.problems``, a csv that does not exist, lacks a named column, holds a
         non-numeric or non-finite value column or an unsorted time column, and a segment (train, select or test) of the
-        series or of the csv shorter than ``lookback + horizon``. pandas and numpy only: no TensorFlow is imported, so
-        it runs before ``setup_gpu`` and before the run directory is claimed.
+        series or of the csv shorter than ``lookback + horizon``. pandas and numpy only (imported when a csv is read, not
+        when this module loads): no TensorFlow is imported, so it runs before ``setup_gpu`` and before the run
+        directory is claimed.
 
 ``forecast_facts(data)``
     :return: ``DataFacts(SYNTHETIC, None, None)``: no class count and no image size; the dataset name is the recipe key
@@ -60,9 +61,10 @@ belong to the family recipes (``train.api.forecast_models``), never to a second 
 
 Import rule
 -----------
-Module scope imports only the standard library and ``train.api`` (and, through ``forecast_series``, pandas and numpy);
-nothing in this module imports ``train.common`` or keras, so ``python -m train time_series_forecasting help`` and
-``check_forecast_data`` stay free of TensorFlow. The loaders that need TensorFlow live in ``train.common.forecast_data``,
+Module scope imports only the standard library and ``train.api`` (``forecast_series`` reads a csv with pandas and numpy,
+imported inside its functions, so loading this module loads neither); nothing in this module imports ``train.common`` or
+keras, so ``python -m train time_series_forecasting help`` stays free of TensorFlow, numpy and pandas, and
+``check_forecast_data`` stays free of TensorFlow. The loaders that need TensorFlow live in ``train.common.forecast_data``,
 which the task imports.
 """
 
