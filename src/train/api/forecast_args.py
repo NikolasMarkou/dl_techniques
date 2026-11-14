@@ -60,8 +60,10 @@ belong to the family recipes (``train.api.forecast_models``), never to a second 
 
 Import rule
 -----------
-Module scope imports only the standard library and ``train.api``; ``train.common`` is imported inside the one method
-that needs it, so ``python -m train time_series_forecasting help`` stays free of TensorFlow.
+Module scope imports only the standard library and ``train.api`` (and, through ``forecast_series``, pandas and numpy);
+nothing in this module imports ``train.common`` or keras, so ``python -m train time_series_forecasting help`` and
+``check_forecast_data`` stay free of TensorFlow. The loaders that need TensorFlow live in ``train.common.forecast_data``,
+which the task imports.
 """
 
 import dataclasses

@@ -1030,6 +1030,22 @@ def test_the_summary_holds_the_metric_the_baselines_the_epoch_zero_value_the_thr
     assert summary["analyzer"]["status"] == ANALYSIS[ended.case][0]
 
 
+@pytest.mark.parametrize("which", ["function", "cli"])
+def test_no_summary_note_says_the_run_cannot_be_predicted_or_exported_and_a_note_naming_task_json_is_true(ended, which):
+    # The run writes `task.json` (the listing test above), so `predict` and `export` read it; a note that said otherwise
+    # was written before step 15 and stayed in the summary of every run for a step.
+    run_dir = getattr(ended, which)
+    notes = read_json(run_dir / "results_summary.json")["notes"]
+    assert notes and all(isinstance(note, str) for note in notes)
+    assert (run_dir / "task.json").is_file()
+    for note in notes:
+        assert "no `task.json` is written" not in note, note
+        assert not ("`predict`" in note and "refused" in note), note
+        assert not ("`export`" in note and "refused" in note), note
+        if "task.json" in note:
+            assert (run_dir / "task.json").is_file(), note
+
+
 def test_an_epoch_is_steps_per_epoch_steps_and_fit_sees_both_lengths(ended):
     summary = read_json(ended.function / "results_summary.json")
     assert summary["steps_per_epoch"] == E2E_STEPS == summary["n_train"] // E2E_BATCH and summary["n_val"] // E2E_BATCH == 2

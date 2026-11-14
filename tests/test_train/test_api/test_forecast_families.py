@@ -1,8 +1,8 @@
 """The forecasting run pieces (plan-2026-11-13T105600-3a8319ef, Step 9): baselines, decode table, metrics, report.
 
 ``train.common.forecast_run`` is the one place that knows what a forecasting model's OUTPUT means. This file pins,
-on the CPU at tiny sizes, the part of it Step 9 ships (later steps add the argument groups, the family adapters
-and the task to this same file):
+on the CPU at tiny sizes, the part of it Step 9 shipped (the second and third parts below add the argument groups and
+the family adapters; the task has its own file, ``test_forecast_task.py``):
 
 * ``seasonal_naive`` MOVED from ``train_timestral.py`` and its outputs are the ones recorded from the original
   function before the move (``seasonal_naive_recorded.json``), exactly; the legacy file keeps no definition of
@@ -26,8 +26,8 @@ output the decode rows read (a static batch for timestral); the ``ALLOWED``, ``R
 held equal to the factory signatures by ``signature_census``; one normalization (``use_normalization`` forced off, a user
 ``true`` refused by name); the named refusals (a second channel for tirex, ets and mdn, a timestral horizon above its patch,
 ``deepar`` and ``adaptive_ema`` before any model code is imported, an sgd weight decay, ``jit_compile`` for ets); the recipes
-against the legacy trainers' values READ from the legacy modules, each difference named; and the specs, which are built but
-not registered (the task registers them).
+against the legacy trainers' values READ from the legacy modules, each difference named; and the specs, which ``recipes.register_builtin_models``
+registers with the task by one call.
 """
 
 import ast
@@ -64,7 +64,7 @@ FLAT_TARGET_ROWS = ("tirex", "xlstm_quantile")
 
 
 # ---------------------------------------------------------------------
-# tiny models, one per row (the adapters of Step 11 will build these; here they are written out)
+# tiny models, one per row (written out here; the adapters of Step 11 build the same shapes from the recipes)
 # ---------------------------------------------------------------------
 
 _CACHE = {}
@@ -1434,7 +1434,7 @@ def test_the_recipe_fills_the_groups_of_the_task_and_leaves_no_auto(family):
 
 
 # ---------------------------------------------------------------------
-# the specs: built, not registered, one task each way
+# the specs: built for one task each way, registered by one call
 # ---------------------------------------------------------------------
 
 
@@ -1455,8 +1455,8 @@ def registry_variants(family):
 
 
 def test_the_specs_are_registered_with_the_task_by_one_call_of_the_registry():
-    # Step 11 built them and registered nothing (a registered family with no task class breaks test_registry); step 12
-    # registers them with the task, by one call in `register_builtin_models`.
+    # `builtin_forecast_models` only builds the specs; the one call in `register_builtin_models` registers them with the task
+    # (a registered family with no task class breaks test_registry).
     recipes.register_builtin_models()
     assert set(FAMILIES) <= set(registry.MODELS)
     source = inspect.getsource(recipes.register_builtin_models)

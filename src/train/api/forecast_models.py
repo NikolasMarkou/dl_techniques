@@ -6,8 +6,8 @@ Seven families train the ``time_series_forecasting`` task: ``nbeats``, ``prism``
 ``adaptive_ema`` (:data:`UNSUPPORTED`). Their library factories do not take the arguments the API calls a factory
 with, so the adapters below close that gap and nothing else; the models are not edited. Importing this module imports
 no model code and no keras (the adapters import inside the call), so ``python -m train help`` allocates nothing.
-Registering the specs is the task's (Step 12): ``recipes.register_builtin_models`` calls
-:func:`builtin_forecast_models` then, not before.
+The specs are registered with the task by ``recipes.register_builtin_models``, which calls
+:func:`builtin_forecast_models` once.
 
 Interface contract
 ------------------

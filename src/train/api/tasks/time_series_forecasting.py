@@ -515,7 +515,6 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
             "`test_metrics_best` is the in-memory best weights and `test_metrics_final` the last epoch's, on the test windows, "
             "which never influenced selection; `canonical_metrics` holds the post-hoc MAE, RMSE, sMAPE, rMAE, MASE (scaled by "
             "the context's one-step differences) and, for a quantile head, coverage and sharpness",
-            "no `task.json` is written: `predict` and `export` of this run directory are refused",
         ]
         notes.append(
             "the model analysis is data-free (weights and spectral only; `analyzer.analyzers` lists them): the stock analyses "
