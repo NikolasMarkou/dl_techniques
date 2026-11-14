@@ -443,7 +443,7 @@ moves no validation number.
 
 | Family | Format | Size | Refused because |
 |---|---|---|---|
-| `bfunet`, `bfconvunext`, `convunext_biased` | `tflite` | fixed | the interpreter resizes its input without an error and a U-Net then returns numbers that are 0.65 (relative) off (`convunext_biased`) or crashes the process with a segmentation fault (`bfunet`, `bfconvunext`) at another size |
+| `bfunet`, `bfconvunext`, `convunext_biased` | `tflite` | fixed | the interpreter resizes its input without an error and a U-Net then returns numbers that are 1.0, 0.98 and 0.65 (relative) off at another size |
 | `scunet` | `onnx` | free | it runs only where both sides are multiples of 64 (a Tile node fails at 96x80, 100x100 and 65x65); a fixed-size onnx of `scunet` works, and so do its `saved_model` and `tflite` |
 
 The command line exports a free size, so the SCUNet onnx is the one refused cell it can reach; a fixed size is the Python

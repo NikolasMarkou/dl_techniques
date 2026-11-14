@@ -163,6 +163,51 @@ def test_the_default_slopes_are_stocks():
     assert ExactLeakyReLU().negative_slope == keras.layers.LeakyReLU().negative_slope
 
 
+@pytest.mark.parametrize("slope", _SLOPES)
+def test_the_layer_at_float32_equals_the_where_function_over_300k_points(slope):
+    """At float32 the layer runs the stock op and the function the ``where`` form (D-039): the two stay bit-identical."""
+    x = keras.ops.convert_to_tensor(_points_float32(), "float32")
+    mismatch = np.flatnonzero(
+        _bits(ExactLeakyReLU(negative_slope=slope)(x)) != _bits(exact_leaky_relu(x, negative_slope=slope)))
+    assert mismatch.size == 0, (slope, mismatch.size, mismatch[:5])
+
+
+def _graph_op_types(dtype: str) -> set:
+    """The TensorFlow op types of the layer's traced graph at ``dtype``."""
+    layer = ExactLeakyReLU(negative_slope=0.1, dtype=dtype)
+    traced = tf.function(lambda v: layer(v)).get_concrete_function(tf.TensorSpec([None, 4], dtype))
+    return {op.type for op in traced.graph.get_operations()}
+
+
+def test_the_layer_lowers_to_the_stock_op_at_float32_and_to_where_elsewhere():
+    """D-039: float32 is ONE ``LeakyRelu`` (the converter writes one ``LEAKY_RELU``); float64 keeps the exact ``where``."""
+    f32, f64 = _graph_op_types("float32"), _graph_op_types("float64")
+    assert "LeakyRelu" in f32 and not {"SelectV2", "Select", "Greater"} & f32, sorted(f32)
+    assert {"SelectV2", "Greater"} <= f64 and "LeakyRelu" not in f64, sorted(f64)
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float64"])
+def test_the_layers_gradient_at_zero_is_the_slope_on_both_branches(dtype):
+    """The float32 branch (stock op) and the float64 branch (``where``) agree at the one point they could differ."""
+    layer = ExactLeakyReLU(negative_slope=0.2, dtype=dtype)
+    x = tf.constant([0.0, -0.0, 1.5, -1.5], dtype=dtype)
+    with tf.GradientTape() as tape:
+        tape.watch(x)
+        y = layer(x)
+    np.testing.assert_array_equal(tape.gradient(y, x).numpy(), np.asarray([0.2, 0.2, 1.0, 0.2], dtype))
+
+
+def test_the_layer_at_float32_converts_to_one_tflite_leaky_relu_and_no_select(tmp_path):
+    """The user-visible effect of D-039: the XNNPACK delegate takes ``LEAKY_RELU`` but not GREATER, MUL and SELECT_V2."""
+    inputs = keras.Input((8, 8, 3))
+    model = keras.Model(inputs, ExactLeakyReLU(negative_slope=0.1)(keras.layers.Conv2D(4, 3, padding="same")(inputs)))
+    model.export(str(tmp_path / "saved"), format="tf_saved_model", verbose=False)
+    blob = tf.lite.TFLiteConverter.from_saved_model(str(tmp_path / "saved")).convert()
+    names = [op["op_name"] for op in tf.lite.Interpreter(model_content=blob)._get_ops_details()]
+    assert names.count("LEAKY_RELU") == 1, names
+    assert not {"GREATER", "SELECT_V2"} & set(names), names
+
+
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_the_gradient_at_zero_equals_stocks(dtype):
     x = tf.constant([0.0, -0.0], dtype=dtype)

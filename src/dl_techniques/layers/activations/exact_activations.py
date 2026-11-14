@@ -28,7 +28,9 @@ which the backend converts in the input's dtype:
   for the slopes 0.01, 0.2 and 0.3, and its gradient at 0 is the slope, as
   stock's is.
 - :class:`ExactLeakyReLU` is ``keras.layers.LeakyReLU`` with ``call`` routed
-  through :func:`exact_leaky_relu`.
+  through :func:`exact_leaky_relu` for every dtype but float32. At float32 it
+  runs the stock op (bit-identical, see above), which TFLite writes as one
+  ``LEAKY_RELU`` instead of GREATER, MUL and SELECT_V2.
 
 :data:`EXACT_ACTIVATIONS` maps the two stock names to these forms. The shared
 resolvers (``common.resolve_activation`` and ``gelu_tanh.resolve_activation``)
@@ -113,7 +115,7 @@ class ExactLeakyReLU(keras.layers.LeakyReLU):
     """``keras.layers.LeakyReLU`` computed by :func:`exact_leaky_relu`.
 
     Same constructor (default slope ``0.3``), config and masking as the stock
-    layer; only ``call`` changes. A layer on the default float32 policy still
+    layer; only ``call`` changes, and only off float32. A layer on the default float32 policy still
     casts a float64 input down to float32 before ``call``, so construct it with
     the owning layer's ``dtype``.
 
@@ -123,13 +125,26 @@ class ExactLeakyReLU(keras.layers.LeakyReLU):
     """
 
     def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """Apply :func:`exact_leaky_relu` with this layer's slope.
+        """Apply the leaky ReLU with this layer's slope: stock at float32, :func:`exact_leaky_relu` otherwise.
 
         :param inputs: Input tensor.
         :type inputs: keras.KerasTensor
         :return: Tensor of the same shape and dtype.
         :rtype: keras.KerasTensor
         """
+        # DECISION plan-2026-11-13T105600-3a8319ef/D-039
+        # At float32 the stock layer's own op is used: it is bit-identical to ``exact_leaky_relu`` there (asserted over
+        # 300,000 points) and lowers to ONE TFLite ``LEAKY_RELU``, which the default XNNPACK delegate takes. The
+        # ``where`` form lowers to GREATER, MUL and SELECT_V2, which it does not: a U-Net then runs as one delegate
+        # partition per activation (28 for bfunet/tiny instead of 1), a slower file, and a fixed-shape file read at
+        # another size crashed the interpreter (segmentation fault in ``xnn_invoke_runtime``) where the stock graph
+        # returned wrong numbers. Do NOT send float32 through ``exact_leaky_relu`` "for one code path", and do NOT send
+        # float64 through ``super().call``: the stock op carries its slope as a float32 attribute (2.2e-8 off), which
+        # is the whole reason this layer exists. ``super().call`` is no raw spelling for the census; do NOT write
+        # ``keras.ops.leaky_relu`` here (its census row only shrinks).
+        name = getattr(inputs.dtype, "name", None) or str(inputs.dtype)
+        if name == "float32":
+            return super().call(inputs)
         return exact_leaky_relu(inputs, negative_slope=self.negative_slope)
 
 

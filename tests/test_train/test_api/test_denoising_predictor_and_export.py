@@ -727,7 +727,7 @@ def test_the_export_note_says_raw_values_no_clip_no_sigma_and_the_padding():
     for phrase in ("[0, 1]", "no sigma input", "RAW", "not clipped", "multiple of 8", "no mean, no std"):
         assert phrase in note, phrase
     help_text = "\n".join(cli.EXPORT_NOTES)
-    for phrase in ("RAW", "NOT clipped", "no sigma input", "size_multiple", "wrong, or crashes the interpreter", "multiples of 64"):
+    for phrase in ("RAW", "NOT clipped", "no sigma input", "size_multiple", "silently wrong", "multiples of 64"):
         assert phrase in help_text, phrase
     assert "RAW" in exporting.__doc__ and "no sigma" in exporting.__doc__
 
@@ -738,8 +738,8 @@ def test_the_export_note_says_raw_values_no_clip_no_sigma_and_the_padding():
 
 
 #: The read of a fixed-shape tflite file at another size, in a CHILD process: the interpreter resizes its input without an
-#: error and the file then either returns wrong numbers or crashes the process (a segmentation fault: measured on bfunet and
-#: bfconvunext, which a read in this process took down with every test after it).
+#: error and the file returns wrong numbers. The child makes a crash of the interpreter (a segmentation fault, which a read in
+#: this process would take down with every test after it) a failure of THIS test, not an abort of the run.
 WRONG_SIZE_CHILD = """
 import sys
 import numpy as np
@@ -750,8 +750,13 @@ np.save(sys.argv[3], exporting._tflite_logits(open(sys.argv[1], "rb").read(), np
 
 
 @pytest.mark.parametrize("family", ["bfunet", "bfconvunext", "convunext_biased"])
-def test_a_fixed_shape_tflite_of_a_unet_is_wrong_or_crashes_at_another_size(family, models, tmp_path):
-    """The reason of three refusals: build the file the refusal prevents and read it at a second size, in a child process."""
+def test_a_fixed_shape_tflite_of_a_unet_is_silently_wrong_at_another_size(family, models, tmp_path):
+    """The reason of three refusals: build the file the refusal prevents and read it at a second size, in a child process.
+
+    The file must be read WITHOUT a crash: a refusal whose reason is "wrong numbers" is only true while the interpreter
+    returns numbers (plan-2026-11-13T105600-3a8319ef step 3.1, D-039: a graph that splits the XNNPACK delegate into many
+    partitions took the process down instead).
+    """
     out = tmp_path / "fixed.tflite"
     spec = tf.TensorSpec((None, *SIZE_A, 3), tf.float32, name="input")
     exporting._export_tflite(models[family], out, spec)
@@ -763,10 +768,33 @@ def test_a_fixed_shape_tflite_of_a_unet_is_wrong_or_crashes_at_another_size(fami
         [sys.executable, "-c", WRONG_SIZE_CHILD, str(out), str(tmp_path / "second_size.npy"), str(tmp_path / "wrong.npy")],
         capture_output=True, text=True, env=child_env(), timeout=600,
     )
-    if child.returncode == 0:  # no error: the interpreter resizes its input, and the numbers are wrong
-        assert relative_gap(np.load(tmp_path / "wrong.npy"), keras_reference(models[family], batch)) > 0.1  # measured 0.65
-    else:  # killed by a signal (a segmentation fault), not a Python error: an error would be a refusal the file does not make
-        assert child.returncode < 0, child.stderr[-600:]
+    assert child.returncode == 0, (child.returncode, child.stderr[-600:])  # a negative code is a signal: the interpreter died
+    # no error: the interpreter resizes its input, and the numbers are wrong
+    assert relative_gap(np.load(tmp_path / "wrong.npy"), keras_reference(models[family], batch)) > 0.1  # measured 0.65, 0.98 and 1.0
+
+
+@pytest.mark.parametrize("family", ["bfunet", "bfconvunext"])
+def test_a_leaky_unet_converts_to_leaky_relu_ops_and_one_delegate_partition(family, models, tmp_path):
+    """The graph the converter writes for the leaky activation is the stock one: LEAKY_RELU, no GREATER and no SELECT_V2.
+
+    ``where(x > 0, x, s * x)`` lowers to GREATER, MUL and SELECT_V2, which the default XNNPACK delegate does not take: the
+    graph then runs as one delegate partition per activation (28 for bfunet/tiny, 15 for bfconvunext/tiny) instead of one,
+    and a fixed-shape file read at another size crashed the interpreter (D-039). The op names are read from the file before
+    any delegate is applied (``_get_ops_details`` is private; the public ``Analyzer`` only prints).
+    """
+    out = tmp_path / "fixed.tflite"
+    exporting._export_tflite(models[family], out, tf.TensorSpec((None, *SIZE_A, 3), tf.float32, name="input"))
+    interpreter = tf.lite.Interpreter(model_content=out.read_bytes())
+    names = [op["op_name"] for op in interpreter._get_ops_details()]
+    assert "LEAKY_RELU" in names, sorted(set(names))
+    assert not {"GREATER", "SELECT_V2"} & set(names), sorted(set(names))
+    entry = interpreter.get_input_details()[0]
+    interpreter.resize_tensor_input(entry["index"], (1, *SIZE_A, 3))
+    interpreter.allocate_tensors()
+    interpreter.set_tensor(entry["index"], images_of(SIZE_A)[:1])
+    interpreter.invoke()  # the delegate is applied by now
+    delegated = [op for op in interpreter._get_ops_details() if op["op_name"] == "DELEGATE"]
+    assert len(delegated) == 1, len(delegated)
 
 
 def test_a_fixed_shape_tflite_of_a_family_with_no_stride_stays_right_at_another_size(models, tmp_path):
@@ -987,6 +1015,5 @@ def test_the_modes_are_read_from_the_shape():
 
 def test_the_refusal_texts_hold_the_measured_numbers_the_tests_above_re_prove():
     text = " ".join(EXPORT_REFUSALS.values())
-    for number in ("0.65 (relative)", "segmentation fault", "bfunet/tiny", "bfconvunext/tiny", "convunext_biased/tiny",
-                   "multiples of 64", "96x80", "100x100", "65x65"):
+    for number in ("1.0 (relative)", "0.98 (relative)", "0.65 (relative)", "multiples of 64", "96x80", "100x100", "65x65"):
         assert number in text, number
