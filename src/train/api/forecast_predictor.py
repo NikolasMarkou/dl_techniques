@@ -40,8 +40,12 @@ Interface contract
     file into the new path ``out`` (nothing is overwritten). :raises ConfigError: for any error of ``predict`` and for a
     forecast that is not finite (JSON has no NaN).
 
-``export_pending(record, *_)`` / ``export_note(record)``
-    The export row of this task until its served function lands: every cell is refused by name, before anything is written.
+``served(model, record)`` / ``check_export(record, format, shape)`` / ``export_note(record)`` / ``EXPORT_REFUSALS``
+    The export row of this task (:class:`train.api.predictor.ExportRule`): ``served`` is the layer a file runs (raw windows
+    in, the forecast in the series' units out, :class:`train.common.forecast_run.ServedForecaster`), ``check_export`` raises a
+    named :class:`ConfigError` BEFORE anything is written for the cells that do not convert (``EXPORT_REFUSALS``, each with its
+    measured reason: tflite of timestral; onnx of xlstm, ets and timestral), ``export_note`` is the sentence logged beside a
+    file. The exported ``.keras`` is the wrapped model, not a run's model: ``load_model`` refuses it with a :class:`ConfigError`.
 
 Import rule
 -----------
@@ -52,7 +56,7 @@ functions, so ``python -m train help`` allocates nothing.
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, NoReturn, Optional, Tuple
+from typing import Any, Dict, List, Mapping, NoReturn, Optional, Sequence, Tuple
 
 from .errors import ConfigError
 from .exporting import check_free
@@ -66,12 +70,6 @@ CHUNK = 32
 DATA_SUFFIXES = (".csv", ".npy", ".npz")
 
 _DATA_HELP = "give a csv file, a .npy or a .npz of windows"
-
-#: The sentence of every export cell of this task until the served function of step 16 exists.
-EXPORT_PENDING = (
-    f"export of a {FORECASTING} model is not available yet: the file it writes has to take RAW windows and return a "
-    "forecast in the series' units, and its served function is not built; predict works on the run directory"
-)
 
 
 def _refuse_window(message: str) -> NoReturn:
@@ -158,6 +156,12 @@ class ForecastPredictor:
         from train.common import forecast_run
 
         check_record(dict(record), "<given>")
+        if any(isinstance(layer, forecast_run.ServedForecaster) for layer in getattr(model, "layers", ())):
+            raise ConfigError(
+                "Invalid value for 'model': this file is an exported forecaster (raw windows in, a forecast in the series' "
+                "units out), not a run's model; predict takes the run directory, and the exported file is run with "
+                "keras.saving.load_model"
+            )
         if record["task"] != FORECASTING:
             raise ConfigError(
                 f"Invalid {TASK_FILE} <given>: the task is {record['task']!r} but this predictor serves {FORECASTING!r} only"
@@ -302,15 +306,92 @@ def write_predictions(predictor: ForecastPredictor, file: Path, source: Any, out
 
 
 # ---------------------------------------------------------------------
-# Export (until step 16)
+# Export
 # ---------------------------------------------------------------------
 
+_ONNX_RUNTIME = "onnxruntime refuses the converted file"
 
-def export_pending(record: Mapping[str, Any], *_: Any) -> NoReturn:
-    """The ``shape_of`` and ``check`` of the export row: every cell is refused by name, before anything is written."""
-    raise ConfigError(f"Invalid value for 'format': {EXPORT_PENDING}")
+#: The (decode row, format) cells of ``export`` that are REFUSED, each with the reason MEASURED on a tiny model of the
+#: family at ``(None, 64, 1)`` (plan 3a8319ef step 5(d), re-proved by ``test_forecast_predictor_and_export.py``: each row has
+#: a test that builds the file anyway and fails if the reason stops being true). Every cell NOT listed exports and
+#: matches ``ForecastPredictor``: ``keras`` and ``saved_model`` for every row (timestral at one window per call),
+#: ``tflite`` for the eight rows but timestral (tirex, xlstm and ets through select TF operators, so the file needs the
+#: Flex delegate), ``onnx`` for nbeats, prism, tirex and mdn.
+# DECISION plan-2026-11-13T105600-3a8319ef/D-026
+# The table holds exactly the cells step 5(d) measured as not exporting, each refused BEFORE anything is written with the
+# converter's own reason. Do NOT drop a row to "try the cell" (the converter then leaves a SavedModel, a file onnxruntime
+# cannot open, or a traceback instead of a named error), and do NOT add one without a measurement: a refusal that is only a guess
+# turns a cell that works into a refusal. `test_a_refused_cell_..._the_measured_reason` and the `..._where_the_reason_says`
+# tests rebuild each refused cell and fail when its reason stops being true.
+EXPORT_REFUSALS: Dict[Tuple[str, str], str] = {
+    ("timestral", "tflite"): (
+        "the TFLite converter cannot translate it: with built-in operators it stops at `Cumsum` (Could not translate MLIR "
+        "to FlatBuffer), and with select TF operators at `Asinh`"
+    ),
+    ("timestral", "onnx"): (
+        f"{_ONNX_RUNTIME}: the file is written but onnxruntime cannot initialize it (RUNTIME_EXCEPTION, GetMLValue, "
+        "ort_value_index)"
+    ),
+    ("xlstm_point", "onnx"): (
+        f"{_ONNX_RUNTIME}: InvalidGraph at a Pad inside an mLSTM block's causal convolution (measured on xlstm/tiny)"
+    ),
+    ("xlstm_quantile", "onnx"): (
+        f"{_ONNX_RUNTIME}: InvalidGraph at a Pad inside an mLSTM block's causal convolution (measured on xlstm/tiny)"
+    ),
+    ("ets", "onnx"): (
+        "the tf2onnx converter cannot convert its recurrence: make_sure failure, Cannot find node with output "
+        "'<scope>/ets_model_1/while:3' in graph"
+    ),
+}
+
+#: The batch a timestral file is traced at: the model packs rows by the batch and has no free one, so a file takes ONE window
+#: per call (the rows of a batch are independent, a test holds the file equal to ``predict`` over several windows).
+STATIC_BATCH = 1
+
+
+def served(model: Any, record: Mapping[str, Any]) -> Any:
+    """Return the layer a forecaster's file runs: raw windows in, forecasts in the series' units out.
+
+    :param model: the loaded Keras model of the run.
+    :param record: the checked forecasting record (family, scale floor).
+    :return: a :class:`train.common.forecast_run.ServedForecaster`; its ``static_batch`` is :data:`STATIC_BATCH` for a family
+        that packs rows by the batch (timestral) and ``None`` otherwise.
+    """
+    from train.common.forecast_run import ServedForecaster
+
+    from .forecast_models import FAMILIES
+
+    return ServedForecaster(
+        model, record["family"], record["scale_floor"], STATIC_BATCH if FAMILIES[record["family"]].static_batch else None
+    )
+
+
+def check_export(record: Mapping[str, Any], format: str, shape: Sequence[Optional[int]]) -> None:
+    """Raise :class:`ConfigError` for a cell of the export table that is refused; see :data:`EXPORT_REFUSALS`.
+
+    :param record: the checked forecasting record.
+    :param format: one of ``train.api.exporting.FORMATS``.
+    :param shape: ``(lookback, channels)`` the export traces.
+    :raises ConfigError: for a shape that is not the record's window, and for a row of :data:`EXPORT_REFUSALS`; it runs
+        before anything is written.
+    """
+    wanted = (record["lookback"], record["channels"])
+    if tuple(shape) != wanted:
+        raise ConfigError(
+            f"Invalid value for 'input_shape': {tuple(shape)} is not the window {wanted} (lookback, channels) this "
+            "forecaster takes; the served function standardizes over exactly the lookback"
+        )
+    reason = EXPORT_REFUSALS.get((record["decode"], format))
+    if reason is not None:
+        raise ConfigError(f"Invalid value for 'format': {format!r} of a {record['decode']} model is refused: {reason}")
 
 
 def export_note(record: Mapping[str, Any]) -> str:
-    """Return the sentence logged beside an export (never reached while every cell is refused)."""
-    return EXPORT_PENDING
+    """Return the sentence the command line logs beside an exported forecaster (what goes in, what comes out)."""
+    heads = " (saved_model and keras give {point, quantiles}, tflite and onnx the point)" if record["head"] == "quantile" else ""
+    one = "; this family packs rows by the batch, so the file takes ONE window per call" if record["decode"] == "timestral" else ""
+    return (
+        f"the exported forecaster takes RAW float32 windows (batch, {record['lookback']}, {record['channels']}) in the "
+        f"series' own units (no standardization to do) and returns the forecast (batch, {record['horizon']}, "
+        f"{record['channels']}) in the same units{heads}{one}"
+    )

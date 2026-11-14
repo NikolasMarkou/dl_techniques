@@ -173,9 +173,13 @@ from the OPTIONAL ``variant_overrides``.
 ``EXPORT_RULES[task]`` (an :class:`ExportRule`)
     What ``export`` asks the task: ``shape_of(record)`` is the shape the command line traces (the record's input
     shape; a denoiser's is ``(None, None, channels)``, a free height and width), ``check(record, format, shape)``
-    raises a :class:`ConfigError` for a cell of the task's export table that is refused (denoising only,
-    :data:`train.api.denoising_predictor.EXPORT_REFUSALS`) and ``note(record)`` is the sentence logged beside an
-    export. A row in every table of :data:`TASK_TABLES`, this one included.
+    raises a :class:`ConfigError` for a cell of the task's export table that is refused (denoising and forecasting
+    only, :data:`train.api.denoising_predictor.EXPORT_REFUSALS`, :data:`train.api.forecast_predictor.EXPORT_REFUSALS`)
+    and ``note(record)`` is the sentence logged beside an export. ``served`` is ``None`` for the image tasks (the file
+    is the model) and, for forecasting, the layer that standardizes a raw window, runs the model, decodes and
+    de-standardizes (:class:`train.common.forecast_run.ServedForecaster`); the rank of ``shape_of(record)`` is the
+    rank ``export`` accepts of ``input_shape`` (3 for images, 2 for a forecaster). A row in every table of
+    :data:`TASK_TABLES`, this one included.
 
 ``Predictor.predict(x, top_k=None, threshold=None)``
     :param x: one image or several. A single image is a path (``str`` or ``Path``), a
@@ -1646,11 +1650,18 @@ class ExportRule(NamedTuple):
     :param check: ``f(record, format, shape) -> None`` raising :class:`ConfigError` for a cell of the task's
         export table that is refused; it runs before anything is written. ``shape`` is what the export traces.
     :param note: ``f(record) -> str``, the sentence the command line logs beside the exported model.
+    :param served: ``None`` (the default: the exported function is ``model(batch, training=False)``, the three image
+        tasks) or ``f(model, record) -> layer``, a callable Keras layer that IS the exported function: the
+        saved_model endpoint, the tflite and onnx graph, the tflite numeric check and the ``keras`` archive all run it.
+        It returns a tensor, or a dict holding ``point`` (tflite and onnx take that one); its ``static_batch``
+        attribute, when not ``None``, is the batch the file is traced at. The length of ``shape_of(record)`` is the
+        rank ``export`` accepts of ``input_shape`` (3 for the image tasks, 2 for ``(lookback, channels)``).
     """
 
     shape_of: Callable[[Mapping[str, Any]], Tuple[Optional[int], ...]]
     check: Callable[[Mapping[str, Any], str, Tuple[Optional[int], ...]], None]
     note: Callable[[Mapping[str, Any]], str]
+    served: Optional[Callable[[Any, Mapping[str, Any]], Any]] = None
 
 
 def _no_export_check(record: Mapping[str, Any], format: str, shape: Tuple[Optional[int], ...]) -> None:
@@ -1684,10 +1695,16 @@ def _denoising_export_note(record: Mapping[str, Any]) -> str:
     return export_note(record)
 
 
-def _forecast_export_pending(record: Mapping[str, Any], *ignored: Any) -> Any:
-    from .forecast_predictor import export_pending
+def _forecast_export_check(record: Mapping[str, Any], format: str, shape: Tuple[Optional[int], ...]) -> None:
+    from .forecast_predictor import check_export
 
-    return export_pending(record, *ignored)
+    check_export(record, format, shape)
+
+
+def _forecast_served(model: Any, record: Mapping[str, Any]) -> Any:
+    from .forecast_predictor import served
+
+    return served(model, record)
 
 
 def _forecast_export_note(record: Mapping[str, Any]) -> str:
@@ -1746,9 +1763,9 @@ EXPORT_RULES: Dict[str, ExportRule] = {
     CLASSIFICATION: ExportRule(_classification_input_shape, _no_export_check, _standardized_logits_note),
     SEGMENTATION: ExportRule(_segmentation_input_shape, _no_export_check, _standardized_logits_note),
     DENOISING: ExportRule(_denoising_export_shape, _denoising_export_check, _denoising_export_note),
-    # Every cell of a forecasting export is refused by name until its served function lands (step 16): ``shape_of`` raises, so
-    # the command refuses all four formats (the keras one too, which has no spec and so no ``check``) before anything is written.
-    FORECASTING: ExportRule(_forecast_export_pending, _forecast_export_pending, _forecast_export_note),
+    # A forecaster's file takes RAW windows ``(lookback, channels)`` (rank 2) and returns a forecast in the series' units: it
+    # runs ``served``; the cells of its table that do not convert are refused by ``check`` (D-011, D-026).
+    FORECASTING: ExportRule(_forecast_input_shape, _forecast_export_check, _forecast_export_note, _forecast_served),
 }
 
 #: Every per-task table by name. A task is KNOWN to this reader only when it has a row in all of

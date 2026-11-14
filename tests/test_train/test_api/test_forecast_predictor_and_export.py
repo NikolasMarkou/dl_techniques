@@ -21,7 +21,7 @@ epoch at tiny sizes (lookback 32, horizon 8, batch 16, CPU) and the run director
   to the same ``out`` is refused; a directory, an unknown suffix and an ``.npz`` of several arrays are refused by name; the
   record is read BEFORE the data is listed (D-012), so an image run's order of errors changes only for a missing record
   together with an empty image directory.
-* **Export** is not available until step 16: every format of the command is refused by name and nothing is written.
+* **Export** (second part, step 16, D-011 and D-026): see the section at the end of the file.
 
 Everything writes under ``tmp_path``; nothing is deleted.
 """
@@ -619,14 +619,406 @@ def test_the_help_of_predict_names_the_forecasting_inputs(capsys):
 
 
 # ---------------------------------------------------------------------
-# Export is the second part: every format is refused by name until it lands
+# Export (step 16): the served function, the rank-2 spec and the cells of the table
 # ---------------------------------------------------------------------
+#
+# The file of a forecaster takes RAW windows ``(batch, lookback, channels)`` in the series' units and returns the forecast in the same
+# units. Every trained family is exported in every format the table of ``forecast_predictor.EXPORT_REFUSALS`` does not refuse, and each
+# file is run in ITS OWN runtime (Keras reload, ``tf.saved_model.load``, the TFLite interpreter, onnxruntime):
+#
+# * it equals ``ForecastPredictor`` on raw windows within ``TOLERANCE`` of the window's std (a share, per window and per output);
+# * a window scaled by 1000 and shifted by 50 gives the forecast scaled and shifted, through the file (the oracle that sees a missing
+#   or wrong de-standardization, and a file that standardizes with fixed numbers);
+# * a quantile head gives ``{"point", "quantiles"}`` from ``saved_model`` and ``keras``, one tensor from ``tflite`` and ``onnx``.
+#
+# TOLERANCE is chosen from the gaps MEASURED in step 5(d) on tiny untrained models at (64, 1), as a share of the window's std: saved_model
+# 3.4e-6, tflite 5.3e-5, onnx 7.1e-5 (worst over the cells). saved_model and keras get 3e-5 (9 times the measured worst: the same
+# graph in the same runtime, float32 against the Predictor's float64 statistics), tflite and onnx 5e-4 (9 and 7 times: another runtime's
+# kernels, and a trained model's weights are not the untrained ones). Every defect the file can have is orders above it: a missing
+# de-standardization is 1e1 to 1e2 of the std here, a floor on the wrong side 1e-2 or more, a standardization with fixed numbers 1e0.
+
+TOLERANCE = {"keras": 3e-5, "saved_model": 3e-5, "tflite": 5e-4, "onnx": 5e-4}
+FORMATS = ("keras", "saved_model", "tflite", "onnx")
+NAMES = {"keras": "m.keras", "saved_model": "m_dir", "tflite": "m.tflite", "onnx": "m.onnx"}
+
+#: The cells step 5(d) MEASURED as not exporting, each with a word of the measured reason: (decode row, format) -> text.
+MEASURED_REFUSED = {
+    ("timestral", "tflite"): "Cumsum",
+    ("timestral", "onnx"): "ort_value_index",
+    ("xlstm_point", "onnx"): "InvalidGraph",
+    ("xlstm_quantile", "onnx"): "InvalidGraph",
+    ("ets", "onnx"): "Cannot find node with output",
+}
+WORKING = [(case, fmt) for case in CASES for fmt in FORMATS if (case, fmt) not in MEASURED_REFUSED]
+REFUSED = sorted(MEASURED_REFUSED)
 
 
-@pytest.mark.parametrize("format, name", [("keras", "m.keras"), ("saved_model", "m_dir"), ("tflite", "m.tflite"), ("onnx", "m.onnx")])
-def test_every_export_format_of_a_forecasting_run_is_refused_by_name_and_writes_nothing(one, tmp_path, capsys, format, name):
-    target = tmp_path / name
-    code, _, stderr = run_command(["export", f"model={one.run}", f"out={target}", f"format={format}"], capsys)
-    assert code == 2 and "Traceback" not in stderr
-    assert "export of a time_series_forecasting model is not available yet" in stderr, stderr[-800:]
-    assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("m")) == [], "a refused cell writes nothing"
+def _onnx_toolchain_problem():
+    """Why the onnx cells cannot run in this environment, or ``None``: both packages must import."""
+    import importlib
+
+    problems = []
+    for name in ("tf2onnx", "onnxruntime"):
+        try:
+            importlib.import_module(name)
+        except ImportError as exc:
+            problems.append(f"{name}: {exc}")
+    return "; ".join(problems) or None
+
+
+ONNX_PROBLEM = _onnx_toolchain_problem()
+needs_onnx = pytest.mark.skipif(ONNX_PROBLEM is not None, reason=f"the onnx cells are NOT run here, the toolchain does not import ({ONNX_PROBLEM})")
+
+
+def cell_params(cells):
+    return [pytest.param(case, fmt, id=f"{case}-{fmt}", marks=[needs_onnx] if fmt == "onnx" else []) for case, fmt in cells]
+
+
+_EXPORTS: Dict[Any, Path] = {}
+
+
+def export_cell(case: str, fmt: str, factory) -> Path:
+    """The file ``python -m train export`` writes for the trained ``case`` in ``fmt`` (once per module)."""
+    key = (case, fmt)
+    if key not in _EXPORTS:
+        out = factory.mktemp(f"export_{case}_{fmt}") / NAMES[fmt]
+        code = cli.main(["export", f"model={trained_case(case, factory).run}", f"out={out}", f"format={fmt}"])
+        assert code == 0 and out.exists(), f"{case} {fmt}: exit {code}"
+        _EXPORTS[key] = out
+    return _EXPORTS[key]
+
+
+def run_file(path: Path, fmt: str, windows: np.ndarray, one_at_a_time: bool = False):
+    """Run the file in its own runtime on raw ``windows``: ``(point, quantiles or None, answered_with_a_dict)``."""
+    import tensorflow as tf
+
+    x = np.asarray(windows, np.float32)
+    if fmt == "keras":
+        model = keras.saving.load_model(str(path))
+        call = lambda batch: model(batch)  # noqa: E731
+    elif fmt == "saved_model":
+        loaded = tf.saved_model.load(str(path))  # kept alive: its endpoint holds only weak references to the variables
+        call = lambda batch: loaded.serve(tf.constant(batch))  # noqa: E731
+    elif fmt == "tflite":
+        blob = path.read_bytes()
+        call = lambda batch: fd_tflite(blob, batch)  # noqa: E731
+    else:
+        import onnxruntime
+
+        session = onnxruntime.InferenceSession(path.read_bytes(), providers=["CPUExecutionProvider"])
+        name = session.get_inputs()[0].name
+        call = lambda batch: session.run(None, {name: batch})[0]  # noqa: E731
+    parts = [call(x[i:i + 1]) for i in range(len(x))] if one_at_a_time else [call(x)]
+    as_dict = isinstance(parts[0], dict)
+    if as_dict:
+        return (np.concatenate([np.asarray(p["point"], np.float64) for p in parts]),
+                np.concatenate([np.asarray(p["quantiles"], np.float64) for p in parts]), True)
+    return np.concatenate([np.asarray(p, np.float64) for p in parts]), None, False
+
+
+def fd_tflite(blob: bytes, batch: np.ndarray) -> np.ndarray:
+    from train.api import exporting
+
+    return exporting._tflite_logits(blob, batch)
+
+
+def share_of_std(got: np.ndarray, want: np.ndarray, windows: np.ndarray) -> float:
+    """The worst ``|got - want|`` as a share of the std of the window it forecasts (per window and channel)."""
+    std = windows.std(axis=1)
+    std = std[:, None, :, None] if got.ndim == 4 else std[:, None, :]
+    return float((np.abs(got - want) / std).max())
+
+
+def one_at_a_time(case: str) -> bool:
+    return case == "timestral"  # a static batch of one window per call
+
+
+@pytest.mark.parametrize("case, fmt", cell_params(WORKING))
+def test_every_working_cell_equals_the_predictor_on_raw_windows(case, fmt, world, tmp_path_factory):
+    path = export_cell(case, fmt, tmp_path_factory)
+    run = trained_case(case, tmp_path_factory)
+    windows = raw_windows(4, 1, seed=3)
+    want = run.predictor.predict(windows)
+    point, quantiles, as_dict = run_file(path, fmt, windows, one_at_a_time(case))
+    assert point.shape == (4, HORIZON, 1) and np.isfinite(point).all()
+    assert share_of_std(point, want["point"], windows) <= TOLERANCE[fmt], (case, fmt)
+    has_quantiles = HEADS[case][0] == "quantile"
+    assert as_dict == (has_quantiles and fmt in ("keras", "saved_model")), "saved_model and keras give a dict for a quantile head, tflite and onnx one tensor"
+    if as_dict:
+        assert quantiles.shape == want["quantiles"].shape
+        assert share_of_std(quantiles, want["quantiles"], windows) <= TOLERANCE[fmt]
+
+
+@pytest.mark.parametrize("case, fmt", cell_params(WORKING))
+def test_every_working_cell_takes_raw_windows_so_a_scaled_and_shifted_window_gives_a_scaled_and_shifted_forecast(case, fmt, world, tmp_path_factory):
+    path = export_cell(case, fmt, tmp_path_factory)
+    windows = raw_windows(4, 1, seed=5)
+    plain, plain_q, _ = run_file(path, fmt, windows, one_at_a_time(case))
+    moved, moved_q, _ = run_file(path, fmt, windows * 1000.0 + 50.0, one_at_a_time(case))
+    assert share_of_std(moved, plain * 1000.0 + 50.0, windows * 1000.0) <= TOLERANCE[fmt], (case, fmt)
+    assert np.abs(plain - windows.mean(axis=1, keepdims=True)).max() < 40 * windows.std(axis=1).max(), "in the units of the window"
+    if plain_q is not None:
+        assert share_of_std(moved_q, plain_q * 1000.0 + 50.0, windows * 1000.0) <= TOLERANCE[fmt]
+
+
+def test_the_working_cells_are_the_measured_matrix(world):
+    """31 of 36 cells work (step 5(d): keras 9, saved_model 9, tflite 8, onnx 5): the table refuses exactly the five that do not."""
+    from train.api import forecast_predictor
+
+    assert set(forecast_predictor.EXPORT_REFUSALS) == set(MEASURED_REFUSED)
+    assert len(CASES) * len(FORMATS) == 36 and len(WORKING) == 31 and len(REFUSED) == 5
+    per_format = {fmt: sum(1 for _, f in WORKING if f == fmt) for fmt in FORMATS}
+    assert per_format == {"keras": 9, "saved_model": 9, "tflite": 8, "onnx": 5}
+    assert sorted(CASES) == sorted(fr.DECODE), "a decode row without a case would have no cell tested"
+    for cell, word in MEASURED_REFUSED.items():
+        assert word in forecast_predictor.EXPORT_REFUSALS[cell], f"the reason of {cell} quotes the measured text"
+
+
+@pytest.mark.parametrize("case, fmt", [pytest.param(c, f, id=f"{c}-{f}", marks=[needs_onnx] if f == "onnx" else []) for c, f in REFUSED])
+def test_a_refused_cell_is_a_named_error_with_the_measured_reason_and_writes_nothing(case, fmt, world, tmp_path_factory, tmp_path, capsys):
+    run = trained_case(case, tmp_path_factory)
+    target = tmp_path / NAMES[fmt]
+    code, _, stderr = run_command(["export", f"model={run.run}", f"out={target}", f"format={fmt}"], capsys)
+    assert code == 2 and "Traceback" not in stderr, stderr[-800:]
+    assert f"'{fmt}' of a {case} model is refused: " in stderr and MEASURED_REFUSED[(case, fmt)] in stderr, stderr[-800:]
+    assert list(tmp_path.iterdir()) == [], "a refused cell writes nothing: no file, no .task.json, no .saved_model"
+
+
+def test_a_refused_cell_is_raised_by_the_library_before_the_target_is_touched(one, tmp_path):
+    from train.api import exporting
+
+    record = dict(one.record, decode="timestral", family="nbeats")
+    with pytest.raises(ConfigError, match="'tflite' of a timestral model is refused: .*Cumsum"):
+        exporting.export(model=one.predictor.model, out=tmp_path / "m.tflite", format="tflite", input_shape=(LOOKBACK, 1), record=record)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("shape", [(LOOKBACK + 1, 1), (LOOKBACK, 2)])
+def test_a_shape_that_is_not_the_records_window_is_refused_before_anything_is_written(one, tmp_path, shape):
+    from train.api import exporting
+
+    with pytest.raises(ConfigError, match=r"is not the window \(32, 1\) \(lookback, channels\)"):
+        exporting.export(model=one.predictor.model, out=tmp_path / "m_dir", format="saved_model", input_shape=shape, record=one.record)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_the_keras_ops_standardization_is_the_numpy_twin_rule_for_rule():
+    """The function a file runs is ``context_stats_ops``: the relative floor, the population std and the unit scale of a flat zero
+    context equal ``context_stats_np`` (the rule the Predictor and the bar use), on the cases where a simpler rule differs."""
+    base = np.random.default_rng(1).normal(size=(6, LOOKBACK, 2))
+    cases = {
+        "plain": base * 7 + 50, "micro units": base * 1e-6 + 2e-5, "huge": base * 1e6,
+        "flat, not zero (the relative floor binds)": np.full((1, LOOKBACK, 2), 3.5),
+        "flat zero (the unit scale)": np.zeros((1, LOOKBACK, 2)),
+        "flat micro units": np.full((1, LOOKBACK, 2), 4e-7),
+    }
+    for name, window in cases.items():
+        mean, scale = fd.context_stats_np(window, 1e-3)
+        got_mean, got_scale = fd.context_stats_ops(np.asarray(window, np.float32), 1e-3)
+        np.testing.assert_allclose(np.asarray(got_mean, np.float64), mean, rtol=1e-5, atol=1e-30, err_msg=name)
+        np.testing.assert_allclose(np.asarray(got_scale, np.float64), scale, rtol=1e-4, atol=1e-30, err_msg=name)
+    assert float(fd.context_stats_ops(np.zeros((1, LOOKBACK, 1), np.float32), 1e-3)[1]) == fd.UNIT_SCALE
+
+
+# --- the spec: rank 2 only for a rule whose shape_of returns it -------------------------------------
+
+
+def test_a_rank_two_shape_is_accepted_only_where_the_rule_says_rank_two(one):
+    from train.api import exporting
+
+    spec = exporting._input_spec(one.predictor.model, (LOOKBACK, 1), rank=2)
+    assert tuple(spec.shape) == (None, LOOKBACK, 1) and spec.dtype.name == "float32"
+    assert tuple(exporting._input_spec(one.predictor.model, (LOOKBACK, 1), rank=2, batch=1).shape) == (1, LOOKBACK, 1)
+    with pytest.raises(ConfigError, match=r"expected \(height, width, channels\) of positive ints"):
+        exporting._input_spec(one.predictor.model, (LOOKBACK, 1), rank=3)
+    with pytest.raises(ConfigError, match=r"expected \(height, width, channels\) of positive ints"):
+        exporting._input_spec(one.predictor.model, (LOOKBACK, 1))
+    with pytest.raises(ConfigError, match=r"expected \(lookback, channels\) of positive ints"):
+        exporting._input_spec(one.predictor.model, (8, 8, 1), rank=2)
+    with pytest.raises(ConfigError, match=r"expected \(lookback, channels\) of positive ints"):
+        exporting._input_spec(one.predictor.model, (None, 1), rank=2)
+
+
+def test_the_three_older_tasks_keep_no_served_function_and_the_forecaster_has_one():
+    assert predictor.ExportRule._field_defaults["served"] is None, "the default is a no-op: the image tasks export the raw model"
+    older = [task for task in predictor.EXPORT_RULES if task != TASK]
+    assert sorted(older) == ["image_classification", "image_denoising", "image_segmentation"]
+    assert [predictor.EXPORT_RULES[task].served for task in older] == [None, None, None]
+    assert predictor.EXPORT_RULES[TASK].served is not None
+    assert len(predictor.EXPORT_RULES[TASK].shape_of(one_record())) == 2
+    assert all(len(predictor.EXPORT_RULES[task].shape_of({"input_shape": [8, 8, 1], "input_size": [8, 8], "channels": 1})) == 3 for task in older)
+
+
+def one_record() -> Dict[str, Any]:
+    return {"lookback": LOOKBACK, "channels": 1}
+
+
+def test_a_static_batch_family_is_traced_at_one_window_and_the_others_at_a_free_batch(world, tmp_path_factory):
+    from train.api import forecast_predictor
+
+    for case in ("timestral", "nbeats"):
+        run = trained_case(case, tmp_path_factory)
+        layer = forecast_predictor.served(run.predictor.model, run.record)
+        assert layer.static_batch == (forecast_predictor.STATIC_BATCH if case == "timestral" else None) and forecast_predictor.STATIC_BATCH == 1
+
+
+def test_a_timestral_file_takes_one_window_per_call_and_refuses_two(world, tmp_path_factory):
+    """The family packs rows by the batch: the file is traced at one window. (Several windows, one call each, equal ``predict`` of the
+    batch in the cell tests above: the rows of a batch are independent.)"""
+    import tensorflow as tf
+
+    path = export_cell("timestral", "saved_model", tmp_path_factory)
+    loaded = tf.saved_model.load(str(path))
+    assert tuple(loaded.serve(tf.constant(raw_windows(1, 1).astype(np.float32)))["point"].shape) == (1, HORIZON, 1)
+    with pytest.raises(TypeError, match=r"TensorSpec\(shape=\(1, 32, 1\)"):
+        loaded.serve(tf.constant(raw_windows(2, 1).astype(np.float32)))
+
+
+# --- the tflite check compares the SERVED function ----------------------------------------------------
+
+
+@pytest.mark.parametrize("case", ["nbeats", "tirex"])
+def test_a_wrong_tflite_file_is_refused_for_a_builtin_cell_and_for_a_select_ops_cell(case, world, tmp_path_factory, tmp_path, monkeypatch):
+    """nbeats converts with built-in operators, tirex needs select TF operators; both are checked against the served function."""
+    from train.api import exporting
+
+    real = exporting._tflite_logits
+    monkeypatch.setattr(exporting, "_tflite_logits", lambda blob, batch: real(blob, batch) + 0.5)
+    run = trained_case(case, tmp_path_factory)
+    out = tmp_path / "m.tflite"
+    with pytest.raises(ConfigError, match=r"the tflite file converted with TensorFlow operators differs from the Keras model by"):
+        exporting.export(model=run.predictor.model, out=out, format="tflite", input_shape=(LOOKBACK, 1), record=run.record)
+    assert not out.exists() and not (tmp_path / "m.tflite.task.json").exists()
+
+
+def test_the_tflite_check_reads_the_served_function_and_not_the_raw_model(one, world, tmp_path_factory):
+    """The same file passes against the served function and is refused against the raw model: the check is not the old one."""
+    from train.api import exporting, forecast_predictor
+
+    path = export_cell("nbeats", "tflite", tmp_path_factory)
+    spec = exporting._input_spec(one.predictor.model, (LOOKBACK, 1), rank=2)
+    layer = forecast_predictor.served(one.predictor.model, one.record)
+    exporting._check_tflite_against_keras(path.read_bytes(), one.predictor.model, spec, path, lambda batch: layer(batch))
+    with pytest.raises(Exception):  # noqa: B017 - the raw model returns a tuple and standardized units: it cannot be compared
+        exporting._check_tflite_against_keras(path.read_bytes(), one.predictor.model, spec, path)
+
+
+# --- the keras file: a registered layer, reloaded in a fresh interpreter -----------------------------------
+
+_CHILD = """
+import sys
+import numpy as np
+import keras
+
+paths, data, out = sys.argv[1].split(","), np.load(sys.argv[2]), sys.argv[3]
+answers = {}
+for index, path in enumerate(paths):
+    model = keras.saving.load_model(path)
+    x = data[f"x{index}"]
+    got = [model(x[i:i + 1]) if data[f"one{index}"] else model(x) for i in range(len(x) if data[f"one{index}"] else 1)]
+    got = got if isinstance(got[0], dict) else [{"point": g} for g in got]
+    answers[f"p{index}"] = np.concatenate([np.asarray(g["point"], np.float64) for g in got])
+    if "quantiles" in got[0]:
+        answers[f"q{index}"] = np.concatenate([np.asarray(g["quantiles"], np.float64) for g in got])
+np.savez(out, **answers)
+"""
+
+
+def test_every_keras_file_reloads_in_a_fresh_interpreter_without_importing_train(world, tmp_path_factory, tmp_path):
+    """One child process loads the nine files with ``keras.saving.load_model`` alone (the registered layer is found by its module)."""
+    import subprocess
+    import sys
+
+    cases = list(CASES)
+    windows = raw_windows(3, 1, seed=21).astype(np.float32)
+    arrays, files = {}, []
+    for index, case in enumerate(cases):
+        files.append(str(export_cell(case, "keras", tmp_path_factory)))
+        arrays[f"x{index}"], arrays[f"one{index}"] = windows, np.asarray(one_at_a_time(case))
+    np.savez(tmp_path / "in.npz", **arrays)
+    script = tmp_path / "child.py"
+    script.write_text(_CHILD)
+    done = subprocess.run([sys.executable, str(script), ",".join(files), str(tmp_path / "in.npz"), str(tmp_path / "out.npz")],
+                          capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stderr[-1500:]
+    answers = np.load(tmp_path / "out.npz")
+    for index, case in enumerate(cases):
+        want = trained_case(case, tmp_path_factory).predictor.predict(windows)
+        assert share_of_std(answers[f"p{index}"], want["point"], windows) <= TOLERANCE["keras"], case
+        assert (f"q{index}" in answers.files) == (HEADS[case][0] == "quantile"), case
+
+
+@pytest.mark.parametrize("case", list(CASES))
+def test_an_exported_keras_file_is_not_a_run_and_load_model_refuses_it_by_name(case, world, tmp_path_factory):
+    """``predict`` takes the run directory. The record beside the file is the run's, so the file is found and then refused: by the
+    predictor's own sentence where the family check lets it through, by the family check (it holds a Functional) elsewhere."""
+    path = export_cell(case, "keras", tmp_path_factory)
+    assert (path.parent / "m.keras.task.json").exists()
+    with pytest.raises(ConfigError, match=r"is an exported forecaster|but .*m\.keras holds a Functional"):
+        load_model(path)
+
+
+def test_the_export_writes_the_record_beside_every_file_and_logs_the_note(one, world, tmp_path_factory):
+    from train.api import forecast_predictor
+
+    path = export_cell("nbeats", "saved_model", tmp_path_factory)
+    beside = path.with_name(path.name + ".task.json")
+    assert read_json(beside) == one.record
+    note = forecast_predictor.export_note(one.record)
+    assert "RAW float32 windows (batch, 32, 1)" in note and "forecast (batch, 8, 1)" in note and "ONE window" not in note
+    quantile = dict(one.record, head="quantile", decode="tirex")
+    assert "saved_model and keras give {point, quantiles}" in forecast_predictor.export_note(quantile)
+    assert "ONE window per call" in forecast_predictor.export_note(dict(one.record, decode="timestral"))
+
+
+def test_the_export_help_names_forecasting(capsys):
+    code, stdout, _ = run_command(["export", "help"], capsys)
+    assert code == 0 and "forecasting model takes RAW float32 windows" in stdout
+    for word in ("lookback", "units", "{point, quantiles}", "timestral", "tflite", "onnx"):
+        assert word in stdout, word
+
+
+# --- each refused cell is still refused for the reason it quotes ------------------------------------------------
+
+
+def _traced(case: str, tmp_path_factory):
+    """``(model, layer, spec)`` of the trained ``case``, as ``export`` builds them."""
+    from train.api import exporting, forecast_predictor
+
+    run = trained_case(case, tmp_path_factory)
+    layer = forecast_predictor.served(run.predictor.model, run.record)
+    spec = exporting._input_spec(run.predictor.model, (LOOKBACK, 1), rank=2, batch=layer.static_batch)
+    return run.predictor.model, (lambda batch: layer(batch)["point"] if run.record["head"] == "quantile" else layer(batch)), spec
+
+
+def test_the_tflite_of_timestral_fails_where_the_reason_says(world, tmp_path_factory, tmp_path):
+    from train.api import exporting
+
+    model, point, spec = _traced("timestral", tmp_path_factory)
+    with pytest.raises(ConfigError, match=r"even with select TF operators.*Asinh"):
+        exporting._export_tflite(model, tmp_path / "t.tflite", spec, point)
+    assert not (tmp_path / "t.tflite").exists()
+
+
+@needs_onnx
+def test_the_onnx_of_ets_fails_in_the_converter_where_the_reason_says(world, tmp_path_factory, tmp_path):
+    from train.api import exporting
+
+    model, point, spec = _traced("ets", tmp_path_factory)
+    with pytest.raises(ValueError, match="Cannot find node with output '[^']*ets_model_1/while:3'"):
+        exporting._export_onnx(model, tmp_path / "e.onnx", spec, point)
+
+
+@needs_onnx
+@pytest.mark.parametrize("case, word", [("xlstm_point", "Pad"), ("xlstm_quantile", "Pad"), ("timestral", "ort_value_index")])
+def test_the_onnx_of_xlstm_and_timestral_is_written_and_onnxruntime_refuses_it(case, word, world, tmp_path_factory, tmp_path):
+    import onnxruntime
+
+    from train.api import exporting
+
+    model, point, spec = _traced(case, tmp_path_factory)
+    out = tmp_path / "x.onnx"
+    exporting._export_onnx(model, out, spec, point)
+    with pytest.raises(Exception, match=word) as raised:  # noqa: B017 - onnxruntime's pybind exception types are not importable names
+        onnxruntime.InferenceSession(out.read_bytes(), providers=["CPUExecutionProvider"])
+    assert ("InvalidGraph" if case.startswith("xlstm") else "RUNTIME_EXCEPTION") in f"{type(raised.value).__name__} {raised.value}"

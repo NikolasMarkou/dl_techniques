@@ -24,6 +24,14 @@ Interface contract
     ``symmetric_averaging=False`` and ``clip_nonnegative=False`` for timestral (horizon <= patch size), and a
     mixture mean for mdn.
 
+``ServedForecaster(model, family, scale_floor, static_batch=None)``
+    A registered Keras layer, the function an exported file runs: ``batch`` is RAW windows ``(B, L, C)`` in the series'
+    units; it standardizes with the context statistics (:func:`train.common.forecast_data.context_stats_ops`), runs
+    ``model``, decodes with the family's row and de-standardizes with the same statistics.
+    :return: the point ``(B, H, C)`` for a point head; ``{"point", "quantiles" (B, H, C, Q)}`` for a quantile head.
+    ``static_batch`` is the batch a file of it is traced at (``None``: free; timestral packs rows by the batch and has
+    no free one). It saves and reloads inside a ``keras.Model``; its config holds the serialized model.
+
 ``build_loss_and_metrics(decoder, model, loss_name=None)``
     :return: :class:`LossAndMetrics` ready for ``compile``; the metric is named ``mae`` for every family, so
         the watched key is ``val_mae``. ``loss_name`` (``mae``, ``mse``, ``mase``) applies to the point heads
@@ -50,6 +58,7 @@ from dl_techniques.losses.mase_loss import MASELoss
 from dl_techniques.losses.quantile_loss import QuantileLoss
 from dl_techniques.utils.matplotlib_backend import import_pyplot
 from train.api.errors import ConfigError
+from train.common import forecast_data
 from train.common.resume_state import read_fit_state
 from train.common.timeseries import _plot_ts_forecast, compute_post_hoc_forecast_metrics
 
@@ -314,6 +323,40 @@ def decoder_for(family: str, model: Any) -> Decoder:
     levels = row.levels(model) if row.levels else None
     median = row.median(model, levels) if row.median else None
     return Decoder(key, row.bind(model, median), levels, median, row.flat_target)
+
+
+@keras.saving.register_keras_serializable(package="train_forecast")
+class ServedForecaster(keras.layers.Layer):
+    """Raw window in, forecast in the series' units out; see the module contract."""
+
+    def __init__(self, model: Any, family: str, scale_floor: float, static_batch: Optional[int] = None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        # DECISION plan-2026-11-13T105600-3a8319ef/D-026
+        # A REGISTERED layer carries the standardization into a `.keras` file. Do NOT wrap the served function in a
+        # `keras.layers.Lambda`: it saves but does not load under the default safe mode (measured, step 5(d)), and a
+        # file that needs the caller to standardize is the trap D-011 exists to remove.
+        self.model = model
+        self.family = family
+        self.scale_floor = float(scale_floor)
+        self.static_batch = static_batch
+        self.decoder = decoder_for(family, model)
+
+    def call(self, batch: Any) -> Any:
+        ops = keras.ops
+        mean, scale = forecast_data.context_stats_ops(batch, self.scale_floor)
+        point, cube = self.decoder(self.model((batch - mean) / scale, training=False))
+        point = point * scale + mean
+        if cube is None:
+            return point
+        return {"point": point, "quantiles": cube * ops.expand_dims(scale, -1) + ops.expand_dims(mean, -1)}
+
+    def get_config(self) -> Dict[str, Any]:
+        return {**super().get_config(), "model": keras.saving.serialize_keras_object(self.model), "family": self.family,
+                "scale_floor": self.scale_floor, "static_batch": self.static_batch}
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "ServedForecaster":
+        return cls(**{**config, "model": keras.saving.deserialize_keras_object(config["model"])})
 
 
 class DecodedMAE(keras.metrics.Metric):

@@ -56,6 +56,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+import keras
 import numpy as np
 import tensorflow as tf
 
@@ -131,6 +132,24 @@ def standardize_tf(window: "tf.Tensor", lookback: int, scale_floor: float) -> Tu
     scale = tf.maximum(std, floor)
     scale = tf.where(scale > NO_SCALE, scale, tf.constant(UNIT_SCALE, tf.float64))
     return tf.cast((context - mean) / scale, tf.float32), tf.cast((window[..., lookback:, :] - mean) / scale, tf.float32)
+
+
+def context_stats_ops(context: Any, scale_floor: float) -> Tuple[Any, Any]:
+    """The ``keras.ops`` twin of :func:`context_stats_np` (float32, any backend), the one the exported function runs.
+
+    ``context`` is ``(..., lookback, channels)``; returns ``(mean, scale)`` as ``(..., 1, channels)``, rule for rule:
+    the population std, the relative floor, ``UNIT_SCALE`` for a flat zero context.
+    """
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-011
+    # The export standardizes with THIS function, not with a simpler "std floored at a constant": the Predictor and the
+    # bar use the relative floor and the unit scale for a flat zero context (D-035), and an exported file that floors
+    # otherwise forecasts a flat window differently from `predict`. Do NOT reach for `standardize_tf` here: it is
+    # float64 TensorFlow ops, and the exported function has to be float32 and convertible (tflite, onnx).
+    ops = keras.ops
+    mean = ops.mean(context, axis=-2, keepdims=True)
+    std = ops.sqrt(ops.mean(ops.square(context - mean), axis=-2, keepdims=True))
+    scale = ops.maximum(std, scale_floor * ops.mean(ops.abs(context), axis=-2, keepdims=True))
+    return mean, ops.where(scale > NO_SCALE, scale, UNIT_SCALE)
 
 
 # ---------------------------------------------------------------------

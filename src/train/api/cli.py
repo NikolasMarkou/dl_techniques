@@ -22,7 +22,9 @@ help word, prints its config keys; any other arguments go to ``run_task``.
     ``<out>.task.json`` are free. The exported model takes inputs standardized with the run's
     mean and std and returns raw logits (D-068); a denoising model takes ``[0, 1]`` pixels at any size
     and returns the raw denoised image (``EXPORT_RULES`` of ``train.api.predictor``, which also
-    refuses the cells of its table that do not hold); ``<out>.task.json`` is written beside it and
+    refuses the cells of its table that do not hold); a forecasting model takes RAW windows ``(batch, lookback, channels)``
+    and returns the forecast in the series' units (``ExportRule.served``, :func:`train.api.forecast_predictor.served`);
+    ``<out>.task.json`` is written beside it and
     the log says so. Exit 0 and ONLY the written path on stdout (whatever Keras prints while
     exporting goes to stderr, failed runs too), else 2.
 
@@ -298,6 +300,13 @@ EXPORT_NOTES = (
     "reflect padding) before calling and crop the result after: a U-Net family fails on another size.",
     "Refused with the reason: a tflite file of a U-Net family (a fixed-shape file is wrong, or crashes the interpreter,",
     "at another size), and an onnx file of scunet with a free height and width (it runs only at multiples of 64).",
+    "",
+    "a forecasting model takes RAW float32 windows (batch, lookback, channels) in the series' own units",
+    "(lookback and channels are in <out>.task.json; there is no standardization to do) and returns the forecast",
+    "(batch, horizon, channels) in the same units. A quantile head gives {point, quantiles} from keras and",
+    "saved_model and the point alone from tflite and onnx. A timestral file takes ONE window per call. Refused with",
+    "the reason: tflite of timestral, and onnx of xlstm, ets and timestral. A tflite of tirex, xlstm or ets needs the",
+    "Flex delegate (select TF operators). The exported .keras file is not a run: predict takes the run directory.",
 )
 PREDICT_OPTIONS = (
     Option("model", "a run directory (its best_model.keras) or a .keras file beside its task.json"),
