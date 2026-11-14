@@ -105,7 +105,7 @@ from ..forecast_models import (
     jit_problem,
     loss_problem,
 )
-from ..forecast_series import read_csv_series
+from ..forecast_series import check_csv_level, read_csv_series
 from ..predictor import build_forecast_record, overrides_of_variant
 from ..run_dir import CHECKPOINTS_DIR
 from ..trainer import Evaluation, FitState, TaskTrainer, TrainResult, config_problems
@@ -213,6 +213,9 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
     success_metric = WATCH_METRIC
     resume_order = _RESUME_ORDER
     initial_loss_hint = "Lower optim_args.lr, or check the model arguments and the series."
+    #: Batches of the fixed selection windows, set by ``build_data``; the width of the bar's tie band follows it (D-043). ``None``
+    #: until the data is built, which a bare trainer in a test reads as one batch (the narrowest band, 16 float32 steps).
+    _select_batches: Optional[int] = None
 
     def __init__(self, config: StrictConfig) -> None:
         super().__init__(config)
@@ -265,6 +268,7 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
                 "undefined (the selection windows are flat or hold a non-finite value)"
             )
         self._baselines = baselines
+        self._select_batches = data.n_select // config.batch_size
         if flat_target(context.family, self._model_kwargs(config, context)):
             # The pinball loss of tirex and of a quantile xlstm takes the target as (batch, horizon); the baselines above
             # were measured on the window layout, and the decode row reshapes either layout (`decode_dataset`).
@@ -342,7 +346,12 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
         data_cfg: TimeSeriesData = config.data
         channels = 1
         if data_cfg.format == "csv":
-            channels = int(read_csv_series(data_cfg.path, data_cfg.value_cols, data_cfg.time_col)[0].shape[1])
+            values, names, _ = read_csv_series(data_cfg.path, data_cfg.value_cols, data_cfg.time_col)
+            # DECISION plan-2026-11-13T105600-3a8319ef/D-040
+            # A column that varies by less than `scale_floor` of its level cannot be resolved in float32: refused HERE, before the
+            # claim, by the one function the loader calls too. Do NOT leave it to the loader (the run directory is claimed by then).
+            check_csv_level(values, names, config.transform_args.scale_floor)
+            channels = int(values.shape[1])
         lines = geometry_problems(context.family, channels, data_cfg.horizon, kwargs)
         if lines:
             raise ConfigValidationError(lines)
@@ -461,11 +470,13 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
 
         # DECISION plan-2026-11-13T105600-3a8319ef/D-008
         # DECISION plan-2026-11-13T105600-3a8319ef/D-037
-        # STRICTLY below, in float32, with a tie band (`forecast_run.beats_bar`): the base class's `>=` reads an error
-        # backwards, `<=` would call a model that merely EQUALS naive-last a success, and a float32 `val_mae` of a model that
-        # outputs naive-last sits 1 step below the float64 numpy baseline on some seeds. There is no `success_threshold`
-        # field to weaken it (D-037). Do NOT compare the Python floats and do NOT shrink the band to 0.
-        return forecast_run.beats_bar(reached, threshold)
+        # DECISION plan-2026-11-13T105600-3a8319ef/D-043
+        # STRICTLY below, in float32, with a tie band that widens with the select batch count (`forecast_run.beats_bar`, D-043):
+        # the base class's `>=` reads an error backwards, `<=` would call a model that merely EQUALS naive-last a success, and a
+        # float32 `val_mae` of a model that outputs naive-last sits 1 step below the float64 numpy baseline on some seeds. There
+        # is no `success_threshold` field to weaken it (D-037). Do NOT compare the Python floats, do NOT shrink the band to 0 and
+        # do NOT pin it at 16 steps again.
+        return forecast_run.beats_bar(reached, threshold, self._select_batches or 1)
 
     # -- the log and the summary ---------------------------------------
 
@@ -511,7 +522,8 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
             "`success_value` is the lowest `val_mae` of the selection window; `success_threshold` is min(`baselines.naive_last`, "
             "`baselines.seasonal_naive`, `epoch_zero.val_mae`), the first two numpy on the same fixed windows and the third read "
             "from the fit sidecar; the bar is STRICTLY below, compared in float32 with a band of "
-            "`train.common.forecast_run.TIE_ULPS` float32 steps (a model that outputs the naive-last forecast sits within it)",
+            "`train.common.forecast_run.tie_band` float32 steps (`TIE_ULPS` = 16 up to 16 select batches, wider by the square root of "
+            "the batch count above; a model that outputs the naive-last forecast sits within it)",
             "`test_metrics_best` is the in-memory best weights and `test_metrics_final` the last epoch's, on the test windows, "
             "which never influenced selection; `canonical_metrics` holds the post-hoc MAE, RMSE, sMAPE, rMAE, MASE (scaled by "
             "the context's one-step differences) and, for a quantile head, coverage and sharpness",

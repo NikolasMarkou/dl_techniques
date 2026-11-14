@@ -228,8 +228,11 @@ class ForecastPredictor:
         # with the statistics of the training data (a window of another level or spread would be forecast at the training
         # level), do NOT skip the standardization "because the model normalizes" (every family has its own switch forced
         # off, D-023), and do NOT hand back the standardized forecast.
-        mean, scale = forecast_data.context_stats_np(windows, self.record["scale_floor"])
-        standardized = ((windows - mean) / scale).astype(np.float32)
+        # DECISION plan-2026-11-13T105600-3a8319ef/D-040
+        # The anchor (the first context value) comes off FIRST and goes back on LAST, the order the exported function uses; do NOT
+        # fold anchor and offset into one mean (it is the same number in float64 here, but the twins must read alike).
+        anchor, offset, scale = forecast_data.context_stats_np(windows, self.record["scale_floor"])
+        standardized = ((windows - anchor - offset) / scale).astype(np.float32)
         points: List[Any] = []
         cubes: List[Any] = []
         for start in range(0, len(standardized), CHUNK):
@@ -237,9 +240,9 @@ class ForecastPredictor:
             points.append(point)
             if cube is not None:
                 cubes.append(cube)
-        quantiles = np.concatenate(cubes) * scale[..., None] + mean[..., None] if cubes else None
+        quantiles = (np.concatenate(cubes) * scale[..., None] + offset[..., None]) + anchor[..., None] if cubes else None
         return {
-            "point": np.concatenate(points) * scale + mean,
+            "point": (np.concatenate(points) * scale + offset) + anchor,
             "quantiles": quantiles,
             "quantile_levels": self.record["quantile_levels"],
         }

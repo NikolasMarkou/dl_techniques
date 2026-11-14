@@ -709,8 +709,10 @@ classification task calls the same `train.common.classification_run` helpers as 
   - **One decode row, one normalization.** `forecast_run.DECODE` has one row per family and head (`nbeats`, `prism_point`,
     `prism_quantile`, `tirex`, `xlstm_point`, `xlstm_quantile`, `ets`, `timestral`, `mdn`); the compiled metric, the post-hoc report,
     the Predictor and the export all read it (D-009), and the tests hold each row to the model's own forecast function. Do not decode
-    in a fifth place. Normalization is ONE function, `forecast_data.context_stats_np` (a window by its context's mean and population
-    standard deviation, floored at `scale_floor * mean|context|`, and 1.0 for a flat zero context, D-005, D-035), with a tf twin
+    in a fifth place. Normalization is ONE function, `forecast_data.context_stats_np` (a window centred on its context's FIRST value, then by the mean
+    of the differences from it and the population standard deviation; a context with `std <= scale_floor * mean|context|` is flat
+    and has scale 1.0, the default floor is 1e-6, D-005, D-040: the first-value anchor is what makes the float32 file equal `predict` at any
+    level, so do not centre on a raw mean and do not floor the scale), with a tf twin
     (`standardize_tf`) and a keras-ops twin (`context_stats_ops`) a test holds equal; `nbeats`, `tirex` and `xlstm` have their own
     switch forced OFF in `FORCED` (D-023). Do not turn a model normalization on or add a second one.
   - **The stream rule.** The bank, the select and test windows are keyed on `(seed, split, index)` and never on the stream seed; the
@@ -719,8 +721,8 @@ classification task calls the same `train.common.classification_run` helpers as 
     a kill) and do not return `data` from `resume_stream` (a replay of epoch 0).
   - **The bar** (D-008, D-037, D-038): `success_value` is the lowest `val_mae` of the window, `success_threshold` is
     `min(naive-last, seasonal-naive, epoch-zero)` on the SAME fixed select windows (the epoch-zero term read from the fit sidecar in
-    `evaluate_and_report`, never from a trainer attribute), `bar_is_met` is `forecast_run.beats_bar`: more than `TIE_ULPS` float32 steps
-    below. There is no `success_threshold` field; do not add one. A tie or a float32 rounding step is a miss.
+    `evaluate_and_report`, never from a trainer attribute), `bar_is_met` is `forecast_run.beats_bar`: more than `forecast_run.tie_band(n_batches)` float32 steps
+    below (`TIE_ULPS` imported from `segmentation_run`, widened by the square root of the select batch count above 16, D-043). There is no `success_threshold` field; do not add one. A tie or a float32 rounding step is a miss.
   - **Seams it uses.** `fit_kwargs` returns `steps_per_epoch` and `validation_steps` (the select cardinality over the batch);
     `compile_options` returns `{"jit_compile": config.jit_compile}` EXPLICITLY, `False` unless the field asks (D-014, D-028: Keras 3.8
     resolves `auto` to XLA whenever a GPU is present, so the two devices would build different graphs; `ets` refuses `true`; do not drop the

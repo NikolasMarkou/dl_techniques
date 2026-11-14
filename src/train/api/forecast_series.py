@@ -33,6 +33,14 @@ Interface contract
     :raises ConfigError: for the first segment (train, select, test) shorter than ``width``; the one sentence of that
         refusal, said by the pre-claim check and by the loader alike.
 
+``check_csv_level(values, names, scale_floor)``
+    :param values: ``(rows, channels)`` float64 of :func:`read_csv_series`; ``names``: its column names; ``scale_floor``: the
+        flatness threshold of ``transform_args`` (a context is flat when its std is not above ``scale_floor * mean|x|``).
+    :raises ConfigError: for the first column that VARIES but whose std over its mean absolute value is not above
+        ``scale_floor`` (a constant column is not refused: it has nothing to resolve and its windows are flat). The sentence tells the
+        user to remove the level; float32, which every model and every exported file runs in, cannot hold the variation. One
+        function, called by the pre-claim check and by the loader alike.
+
 ``refuse(message)``
     :raises ConfigError: always; the one spelling of "this configuration is refused" of the forecasting data.
 """
@@ -124,6 +132,26 @@ def read_csv_series(
     if time_col is not None:
         _check_time_column(frame[time_col], time_col)
     return values, names, hashlib.sha256(raw).hexdigest()
+
+
+def check_csv_level(values: "np.ndarray", names: Sequence[str], scale_floor: float) -> None:
+    """Refuse the first value column whose variation is not above ``scale_floor`` of its level (see the module contract)."""
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-040
+    # A column that moves by less than `scale_floor` of its own level (the default 1e-6 is about eight float32 steps) cannot be
+    # told apart from its rounding in float32: a csv of values near 1e12 moving by 8 trained to 18.2 times the naive-last MAE
+    # with no warning (review W2). Refuse it BEFORE the claim and say what to do. Do NOT floor the scale instead (the scale
+    # would then depend on the level), and do NOT refuse an exactly constant column: nothing varies, the flat rule handles it.
+    import numpy as np
+
+    std = values.std(axis=0)
+    level = np.abs(values).mean(axis=0)
+    for column, name in enumerate(names):
+        if 0.0 < std[column] <= scale_floor * level[column]:
+            refuse(
+                f"column {name!r} varies by {std[column] / level[column]:.3g} of its level (std {std[column]:.3g} against mean "
+                f"|x| {level[column]:.3g}), not above transform_args.scale_floor {scale_floor:g}: float32 cannot resolve the "
+                "variation, so the level must be removed before training (subtract a rolling mean, a trend or the series' own "
+                "level, or take differences) and added back to the forecast")
 
 
 def _check_time_column(column: "pd.Series", name: str) -> None:

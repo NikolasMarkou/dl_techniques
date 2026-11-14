@@ -81,7 +81,13 @@ def test_the_export_matrix_counts_are_the_cells_check_export_refuses(world):
 
 
 def test_the_width_of_the_bars_tie_band_is_the_codes():
-    assert f"more than {forecast_run.TIE_ULPS} float32 steps (`forecast_run.TIE_ULPS`)" in README.read_text()
+    """D-043: ``TIE_ULPS * max(1, ceil(sqrt(n_batches / 16)))``; the README states the formula and the widths at the batch counts it names."""
+    text = README.read_text()
+    assert "`TIE_ULPS * max(1, ceil(sqrt(n_batches / 16)))` float32 steps" in text
+    widths = [forecast_run.tie_band(n) for n in (16, 17, 2048)]
+    assert widths == [16, 32, 192]
+    assert f"({widths[0]} up to 16 select batches, {widths[1]} at the 17 of the defaults, {widths[2]} at 2,048;" in text
+    assert forecast_run.TIE_ULPS == widths[0]
 
 
 CITED = re.compile(r"`((?:tests|src)/[A-Za-z0-9_./\-]+\.(?:py|md|json|sh|yaml|yml))`")

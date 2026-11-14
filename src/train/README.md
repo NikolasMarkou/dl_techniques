@@ -908,7 +908,7 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
 | `data.n_test` | `null` | the same path as `data.n_select` |
 | `data.steps_per_epoch` | `null` | `forecast_data.load_forecast_batches`, then `TimeSeriesForecastingTrainer.fit_kwargs`; null is the number of train windows over the batch size, at most 500 |
 | `data.max_samples` | `null` | `forecast_data.load_forecast_batches`; caps the train windows an epoch is sized from when `data.steps_per_epoch` is null, never the selection or test windows |
-| `transform_args.scale_floor` | `0.001` | `TimeSeriesForecastingTrainer.build_data`, then `forecast_data.context_stats_np`; recorded in `task.json` and read again by `predict` and `export` |
+| `transform_args.scale_floor` | `1e-06` | `TimeSeriesForecastingTrainer.build_data`, then `forecast_data.context_stats_np`; recorded in `task.json` and read again by `predict` and `export`; the flatness threshold of a context and the level check of a csv (`forecast_series.check_csv_level`) |
 | `metric_args.watch_metric` | `"auto"` | `ForecastMetricArgs.resolve_auto`, `fit_callbacks.build_callbacks`; auto is `val_mae`, the only value accepted (the bar is about the minimum `val_mae`, so the saved checkpoint must be that epoch) |
 | `metric_args.watch_mode` | `"auto"` | the same path; auto is `min`, the only value accepted |
 
@@ -932,10 +932,24 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
   squared error of 1.1678 against naive-last's 1.4737, which only the leaked statistics explain) and N-BEATS then normalized a second time inside
   `call`. Here each window is divided by the mean and the population standard deviation of its context per channel, and its target by
   the same numbers, in ONE place (the data layer, `forecast_data.standardize_tf`, with a numpy twin `standardize_np` that `predict`
-  calls and a keras-ops twin that the export calls; tests hold each twin equal to the numpy one). (3) The scale is floored RELATIVE to the context:
-  `max(std, transform_args.scale_floor * mean|context|)`, so a series in micro-units is not floored wholesale; a context that is exactly
-  flat AND zero has no scale information at all, and its scale is 1.0, the series' own unit (the absolute floor of 1e-8 that the first
-  version used turned one `sparse_events` window into a standardized target of 1.08e9 and made `val_mae` meaningless for that seed).
+  calls and a keras-ops twin that the export calls; tests hold each twin equal to the numpy one). (3) The context is centred on its FIRST value before its mean and std are taken, and the scale is the
+  population std of the context (D-040, which replaced the floor `max(std, 1e-3 * mean|context|)` of the first version). The
+  differences of nearby numbers are exact, so the float32 function the export runs and the float64 numpy function `predict` runs
+  standardize a window to the same values at ANY level (the first version centred on the mean of the raw float32 values: a file
+  forecast 0.25 of a window std away from `predict` at a level of 1e5 over a std of 8, and 5.8 at 1e6), and the scale does not depend on the level. A context is FLAT when
+  `std <= transform_args.scale_floor * mean|context|` (the default is 1e-6, about eight float32 steps of relative resolution): its scale
+  is then 1.0, the series' own unit, so a flat zero context (the absolute floor of 1e-8 that the first version used turned one
+  `sparse_events` window into a standardized target of 1.08e9) and a flat context at any level give the raw deviation of the target.
+  What this gives: a window shifted by a constant is standardized to the same numbers, and forecast shifted by it, up to the float32
+  resolution of the level. Measured at a std of about 8: the three twins agree with a float128 oracle to 6e-8 (numpy, tf) and 1.8e-7
+  (float32 function) of a standardized value at levels 0, 50, 1e3, 1e5 and 1e6; a float32 `keras` or `saved_model` file (nbeats and prism quantile measured) agrees with `predict` on the same windows
+  to 1e-4 of the window std plus one float32 step of the forecast itself; at 1e6 that step is 0.0625, 0.8 percent of this std, so a float32 window
+  at 1e6 carries its own rounding and no float32 function can forecast it better (`predict` of float64 windows still holds the shift to 1e-6 of a
+  std). `lookback` must be at least 2 (one context value has no spread: refused by name before the claim), and a csv column that varies by
+  less than `scale_floor` of its level (std over mean|x|, for example a series near 1e12 moving by 8) is refused before the claim with
+  the sentence that the level must be removed: float32 cannot hold the variation (an exactly constant column is not refused, its windows
+  are flat). The numpy twin is `context_stats_np` (returns the anchor, the offset from it and the scale), the tf twin `standardize_tf`
+  and the keras-ops twin `context_stats_ops`; tests hold each equal to the numpy one.
   (4) No stacked L2: the legacy kernel regularizers and the AdamW decay both decayed the weights; here the optimizer's decay is the
   only one and `sgd` with a positive decay is refused (the adapters build no L2 penalty). (5) Warmup is in epochs (`optim_args.warmup_epochs`,
   as in every task), the legacy one in steps (1,000 on the command line, 5,000 in the dataclass): the recipe's one epoch is 500 steps. (6) `jit_compile` is `false`
@@ -955,10 +969,13 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
   window, context and target, lies inside ONE segment, so no validation window overlaps a training one. A train window is a
   stride-1 window of the train segment, drawn by `tf.random.stateless_uniform` keyed on `(stream seed, counter)` (a `Dataset.range`
   counter stream; no `from_generator`). The selection windows are `data.n_select` fixed windows, 8 per series: 2,176 at the defaults
-  (276 x 8 = 2,208 rounded down to 17 batches of 128), a function of `(seed, split, index)` only, so `val_mae` is a function of the
+  (276 x 8 = 2,208 rounded down to 17 batches of 128), a function of `(seed, split, index)` and of `batch_size` (the windows are a prefix of one
+  sequence cut to whole batches, so the count follows the batch: 2,176, 2,208, 2,200 and 2,048 at batch 128, 32, 100 and 512, and the baselines and the bar
+  are computed on the windows of the run, so `val_mae` is comparable between runs of ONE batch size), so `val_mae` is a function of the
   weights alone. **What this does NOT prove.** Train, selection and test series come from the same 69 archetypes and the same noise
-  draws' neighbours (two realizations of a seasonal pattern correlate at 0.987 to 0.995), and a validation window is the FUTURE of a
-  series the model trained on: beating the baselines is a check that the wiring and the learning work, not a claim about unseen real
+  draws' neighbours (two realizations of a seasonal pattern correlate at 0.987 to 0.995), and validation is temporal within each series (a validation window is the FUTURE of a
+  series the model trained on), and a periodic pattern (`energy_consumption`: 5 of the 2,176 selection windows at seeds 42 and 7) can hold a selection window with an exact
+  twin among the train windows of another realization: beating the baselines is a check that the wiring and the learning work, not a claim about unseen real
   series or unseen patterns. Four realizations were chosen by measurement (the standard error of the baseline mean on the selection
   windows 0.0107 against 0.0179 at two; no train-versus-select gap at two, four or eight); do not lower it to two (the bar then flips
   on seed noise) or raise it without measuring the bank build (about 3 s at four).
@@ -977,8 +994,10 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
 * **The bar** (D-008, D-037, D-038 of plan 3a8319ef). `success_metric` is `val_mae`, the mean absolute error of the point forecast
   (the median of a quantile head) in context-standardized units, so it is scale-free across series. `success_value` is the lowest
   `val_mae` of the selection window, `success_threshold` is `min(naive-last, seasonal-naive, epoch-zero)` and the bar is met only when
-  `success_value` is more than 16 float32 steps (`forecast_run.TIE_ULPS`) BELOW the threshold, both read as float32: equal or within
-  the band is a miss, so a model that outputs the naive-last forecast cannot pass by rounding (it scored one float32 step under its
+  `success_value` is more than `TIE_ULPS * max(1, ceil(sqrt(n_batches / 16)))` float32 steps
+  (16 up to 16 select batches, 32 at the 17 of the defaults, 192 at 2,048; `forecast_run.tie_band`, the width `TIE_ULPS` imported from
+  `segmentation_run`, `n_batches` the batch count of the selection windows) BELOW the threshold, both read as float32: equal or within the band is a miss (D-043: the float32 accumulation of the
+  compiled metric drifts with the number of selection windows, measured at +20 steps at 262,144 windows, outside a fixed 16), so a model that outputs the naive-last forecast cannot pass by rounding (it scored one float32 step under its
   float64 baseline on 2 of 8 seeds before the band). Met is exit 0, missed is exit 1 with the numbers in `results_summary.json`. The
   three terms are measured on the SAME fixed selection windows the checkpoint is selected on, never on the test windows: naive-last
   repeats the last context value; seasonal-naive picks, per window, the period from 1 to `min(lookback // 2, lookback - horizon)` with the lowest backtest MAE
@@ -1011,8 +1030,9 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
   `load_model(...)` returns a `ForecastPredictor` and `ForecastPredictor.predict(x)` takes an array, a list of windows (each an array or
   a csv path) or a csv path and returns `{"point", "quantiles", "quantile_levels"}`: `point` is `(N, horizon, channels)` float64 in the
   series' OWN units (the median for a quantile head), `quantiles` is `(N, horizon, channels, Q)` and the levels are the record's, and
-  both are `None` for a point head. A window is forecast from its own context statistics only (the numpy twin), so a window shifted by
-  a constant gives the forecast shifted by it and a window scaled by a constant the forecast scaled. A window of another length or
+  both are `None` for a point head. A window is forecast from its own context statistics only (the numpy twin), so a window scaled by a constant gives the forecast
+  scaled by it and a window shifted by a constant gives the forecast shifted by it, up to the float32 resolution of the level (see the
+  standardization above: float64 windows hold it to 1e-6 of the window std at a level of 1e6 over a std of 8). A window of another length or
   channel count, a non-finite cell, an empty input and a csv with a missing column are named errors; a model whose output disagrees
   with the record (decode row, head, levels, median, horizon, channels) is refused at load.
 * **`export`.** The file takes RAW float32 windows `(batch, lookback, channels)` in the series' own units and returns the forecast
@@ -1044,7 +1064,7 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
   the recipe's learning rate and batch were measured on `nbeats` only; the other families run the same recipe unless the table says
   otherwise and carry no tuning claim.
 * **Gate numbers** (plan 3a8319ef, Step 20: the first GPU measurement of this task, run on HEAD `1904f07a8` of the branch `train-api/phase-4e`, the code of that plan's Step 19; Step 21 re-runs the same bar on the final HEAD and replaces these numbers if they move). Every run on GPU 0, an RTX 4090, one job at a time, `CUDA_VISIBLE_DEVICES=0` and no `--gpu`; the log of each names the device and the worktree `src` as the origin of `dl_techniques` and `train`.
-  The bar is the one above (best `val_mae` more than 16 float32 steps under the smallest of naive-last, seasonal-naive and epoch-zero, all on the same fixed selection windows) and was written before the first run: G1 and G2 are gated and G4 reports its verdict; G3 records the verdict of each family and gates none (300 steps are too few to expect every family to meet it). A miss is reported as it is, with no re-run. Every number is read from the run's `results_summary.json`, `training_log.csv` and log by script. A step time is the median over epochs of Keras's ms per step, then the mean seconds of the epochs after the first (which include the validation pass); the host was loaded (a foreign process held about 2.5 of 12 cores), so these are not the 35 ms the earlier measurement gave for `nbeats/base`. Memory is nvidia-smi's figure for the run's own process, sampled every second.
+  The bar is the one above (best `val_mae` more than the tie band of float32 steps under the smallest of naive-last, seasonal-naive and epoch-zero, all on the same fixed selection windows; the band was 16 steps when these gates ran and is 32 at their 17 select batches under the rule above) and was written before the first run: G1 and G2 are gated and G4 reports its verdict; G3 records the verdict of each family and gates none (300 steps are too few to expect every family to meet it). A miss is reported as it is, with no re-run. Every number is read from the run's `results_summary.json`, `training_log.csv` and log by script. A step time is the median over epochs of Keras's ms per step, then the mean seconds of the epochs after the first (which include the validation pass); the host was loaded (a foreign process held about 2.5 of 12 cores), so these are not the 35 ms the earlier measurement gave for `nbeats/base`. Memory is nvidia-smi's figure for the run's own process, sampled every second.
 
 | Arm | Task | Epochs | Params | Step, epoch | Baselines | Epoch zero | Threshold | Best `val_mae` | Verdict | Final is best | Peak GPU |
 |---|---|---|---|---|---|---|---|---|---|---|---|

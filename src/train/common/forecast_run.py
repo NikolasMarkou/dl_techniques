@@ -37,9 +37,11 @@ Interface contract
         the watched key is ``val_mae``. ``loss_name`` (``mae``, ``mse``, ``mase``) applies to the point heads
         only; any other head with a name set is a :class:`ConfigError` naming ``loss_args.name``.
 
-``beats_bar(reached, threshold)``
-    :return: whether ``reached`` (a ``val_mae``) is below ``threshold`` by more than :data:`TIE_ULPS` float32 steps, both read
-        as float32. ``epoch_zero_mae(sidecar_path)`` is the untrained model's ``mae`` as the fit sidecar holds it.
+``beats_bar(reached, threshold, n_batches=1)``
+    :return: whether ``reached`` (a ``val_mae``) is below ``threshold`` by more than ``tie_band(n_batches)`` float32 steps, both read
+        as float32; ``tie_band(n_batches)`` is ``TIE_ULPS * max(1, ceil(sqrt(n_batches / 16)))`` (16 up to 16 batches, 192 at 2,048;
+        ``TIE_ULPS`` is imported from ``train.common.segmentation_run``, not defined again) and ``n_batches`` is the batch count of
+        the selection windows, which the task knows. ``epoch_zero_mae(sidecar_path)`` is the untrained model's ``mae`` as the fit sidecar holds it.
 
 ``baseline_maes(context, target)``, ``canonical_metrics(context, target, point, quantiles, levels)``
     numpy, float64 where it matters; ``context (N, L, C)``, ``target`` and ``point (N, H, C)``,
@@ -60,6 +62,7 @@ from dl_techniques.utils.matplotlib_backend import import_pyplot
 from train.api.errors import ConfigError
 from train.common import forecast_data
 from train.common.resume_state import read_fit_state
+from train.common.segmentation_run import TIE_ULPS
 from train.common.timeseries import _plot_ts_forecast, compute_post_hoc_forecast_metrics
 
 LOSS_NAMES = ("mae", "mse", "mase")
@@ -147,22 +150,30 @@ def baseline_maes(context: np.ndarray, target: np.ndarray) -> Dict[str, float]:
     }
 
 
-#: The width, in float32 steps of the threshold, of the band below the threshold that is still a miss; the width of
-#: ``segmentation_run.TIE_ULPS``. Measured (plan step 12): the compiled ``mae`` of a model that outputs the naive-last
-#: forecast sits 1 float32 step BELOW the float64 numpy baseline in 2 of 8 seeds at the default sizes.
-TIE_ULPS = 16
+def tie_band(n_batches: int) -> int:
+    """The width, in float32 steps of the threshold, of the band below it that is still a miss: ``TIE_ULPS * max(1, ceil(sqrt(n / 16)))``.
+
+    ``n_batches`` is the number of batches of the selection windows. The band is :data:`TIE_ULPS` (the segmentation task's, defined
+    once in ``train.common.segmentation_run``) up to 16 batches and 192 at 2,048. Measured (plan step 12): the compiled ``mae`` of a
+    model that outputs the naive-last forecast sits 1 float32 step BELOW the float64 numpy baseline in 2 of 8 seeds at the default
+    sizes; (review, D-043): the float32 accumulation of that metric drifts with the number of terms, +20 steps at 262,144 windows
+    (2,048 batches of 128), so the band widens with the square root of the batch count.
+    """
+    return TIE_ULPS * max(1, math.ceil(math.sqrt(n_batches / 16)))
 
 
-def beats_bar(reached: float, threshold: float) -> bool:
-    """Whether ``reached`` is below ``threshold`` by more than :data:`TIE_ULPS` float32 steps (see the module contract)."""
+def beats_bar(reached: float, threshold: float, n_batches: int = 1) -> bool:
+    """Whether ``reached`` is below ``threshold`` by more than ``tie_band(n_batches)`` float32 steps (see the module contract)."""
     # DECISION plan-2026-11-13T105600-3a8319ef/D-008
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-043
     # STRICTLY below, in float32, and with a tie band. `<=` would call a model that merely EQUALS a baseline a success; a
     # float64 `reached` that rounds to the float32 threshold must be judged as the float32 number Keras computed; and the
     # baselines are float64 numpy while the compiled metric adds in float32, so a model that outputs the naive-last forecast
-    # scores 1 step BELOW its own baseline on some seeds (MEASURED) and a bare `<` passes it. Do NOT shrink the band to 0
-    # "to be strict", and do NOT compare the Python floats.
+    # scores 1 step BELOW its own baseline on some seeds (MEASURED) and a bare `<` passes it. The band grows with the number of
+    # select batches (D-043): a fixed 16 steps was measured too narrow at 2,048 batches (+20). Do NOT shrink the band to 0 "to be
+    # strict", do NOT fix it at 16 again, and do NOT compare the Python floats.
     low = np.float32(threshold)
-    return bool(np.float32(reached) < low - np.float32(TIE_ULPS) * np.spacing(low))
+    return bool(np.float32(reached) < low - np.float32(tie_band(n_batches)) * np.spacing(low))
 
 
 def epoch_zero_mae(sidecar_path: Any) -> float:
@@ -343,12 +354,17 @@ class ServedForecaster(keras.layers.Layer):
 
     def call(self, batch: Any) -> Any:
         ops = keras.ops
-        mean, scale = forecast_data.context_stats_ops(batch, self.scale_floor)
-        point, cube = self.decoder(self.model((batch - mean) / scale, training=False))
-        point = point * scale + mean
+        anchor, offset, scale = forecast_data.context_stats_ops(batch, self.scale_floor)
+        # DECISION plan-2026-11-13T105600-3a8319ef/D-040
+        # The anchor is subtracted FIRST (an exact difference of nearby float32 numbers) and added back LAST. Do NOT fold anchor and
+        # offset into one `mean` and subtract that: at a level of 1e5 over a std of 8 the sum has lost the digits the standardized
+        # window is made of, and the file forecasts 0.25 of a window std away from `predict`.
+        point, cube = self.decoder(self.model(((batch - anchor) - offset) / scale, training=False))
+        point = (point * scale + offset) + anchor
         if cube is None:
             return point
-        return {"point": point, "quantiles": cube * ops.expand_dims(scale, -1) + ops.expand_dims(mean, -1)}
+        return {"point": point, "quantiles": (cube * ops.expand_dims(scale, -1) + ops.expand_dims(offset, -1))
+                + ops.expand_dims(anchor, -1)}
 
     def get_config(self) -> Dict[str, Any]:
         return {**super().get_config(), "model": keras.saving.serialize_keras_object(self.model), "family": self.family,

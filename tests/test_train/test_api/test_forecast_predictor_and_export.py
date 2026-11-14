@@ -122,7 +122,8 @@ def raw_windows(count: int, channels: int, seed: int = 0, lookback: int = LOOKBA
 def reference(predictor_: Any, windows: np.ndarray):
     """The point and the quantiles the model gives for ``windows``, worked out here from the data module's numpy twin."""
     record = predictor_.record
-    mean, scale = fd.context_stats_np(windows, record["scale_floor"])
+    anchor, offset, scale = fd.context_stats_np(windows, record["scale_floor"])
+    mean = anchor + offset
     x = fd.standardize_np(
         np.concatenate([windows, np.zeros((len(windows), record["horizon"], windows.shape[-1]))], axis=1),
         record["lookback"], record["scale_floor"])[0]
@@ -197,7 +198,7 @@ def test_a_resume_compares_the_window_the_channels_the_columns_and_the_data(one)
     for key, value, shown in (("lookback", 64, "lookback: 32 -> 64"), ("horizon", 4, "horizon: 8 -> 4"),
                               ("channels", 2, "channels: 1 -> 2"), ("value_cols", ["a"], 'value_cols: null -> ["a"]'),
                               ("data_format", "csv", 'data_format: "builtin" -> "csv"'),
-                              ("scale_floor", 0.5, "scale_floor: 0.001 -> 0.5")):
+                              ("scale_floor", 0.5, "scale_floor: 1e-06 -> 0.5")):
         assert record_differences(earlier, {**earlier, key: value}) == [shown], key
     assert record_differences(earlier, {**earlier, "head": "quantile"}) == [], "the head is the model's, not the data's"
 
@@ -280,8 +281,9 @@ def test_the_forecast_is_in_the_units_of_the_window(trained):
     assert np.abs(point).min() > 0 and point.mean() > 5.0
 
 
-@pytest.mark.parametrize("shift", [30.0, -125.0])
+@pytest.mark.parametrize("shift", [30.0, -125.0, 1e3, 1e5, 1e6])
 def test_a_window_shifted_by_a_constant_gives_the_forecast_shifted_by_it(trained, shift):
+    """D-040: up to a level of 1e6 over a std of about 8 (float64 windows; the scale no longer depends on the level)."""
     windows = raw_windows(4, 1, seed=7)
     plain = trained.predictor.predict(windows)
     shifted = trained.predictor.predict(windows + shift)
@@ -803,21 +805,50 @@ def test_a_shape_that_is_not_the_records_window_is_refused_before_anything_is_wr
 
 
 def test_the_keras_ops_standardization_is_the_numpy_twin_rule_for_rule():
-    """The function a file runs is ``context_stats_ops``: the relative floor, the population std and the unit scale of a flat zero
-    context equal ``context_stats_np`` (the rule the Predictor and the bar use), on the cases where a simpler rule differs."""
+    """The function a file runs is ``context_stats_ops``: the first-value anchor, the offset from it, the population std and the unit
+    scale of a flat context equal ``context_stats_np`` (the rule the Predictor and the bar use), on the cases where a simpler rule
+    differs (D-040): a level far above the spread, micro units, a flat context at a level and at zero."""
+    floor = 1e-6
     base = np.random.default_rng(1).normal(size=(6, LOOKBACK, 2))
     cases = {
         "plain": base * 7 + 50, "micro units": base * 1e-6 + 2e-5, "huge": base * 1e6,
-        "flat, not zero (the relative floor binds)": np.full((1, LOOKBACK, 2), 3.5),
+        "a level 1e5 over the spread": base * 8 + 1e5, "a level 1e6 over the spread": base * 8 + 1e6,
+        "flat, not zero (the unit scale)": np.full((1, LOOKBACK, 2), 3.5),
         "flat zero (the unit scale)": np.zeros((1, LOOKBACK, 2)),
         "flat micro units": np.full((1, LOOKBACK, 2), 4e-7),
     }
     for name, window in cases.items():
-        mean, scale = fd.context_stats_np(window, 1e-3)
-        got_mean, got_scale = fd.context_stats_ops(np.asarray(window, np.float32), 1e-3)
-        np.testing.assert_allclose(np.asarray(got_mean, np.float64), mean, rtol=1e-5, atol=1e-30, err_msg=name)
-        np.testing.assert_allclose(np.asarray(got_scale, np.float64), scale, rtol=1e-4, atol=1e-30, err_msg=name)
-    assert float(fd.context_stats_ops(np.zeros((1, LOOKBACK, 1), np.float32), 1e-3)[1]) == fd.UNIT_SCALE
+        window = np.asarray(window, np.float32).astype(np.float64)
+        anchor, offset, scale = fd.context_stats_np(window, floor)
+        got = (np.asarray(t, np.float64) for t in fd.context_stats_ops(np.asarray(window, np.float32), floor))
+        got_anchor, got_offset, got_scale = got
+        np.testing.assert_array_equal(got_anchor, anchor, err_msg=name)
+        np.testing.assert_allclose(got_offset, offset, rtol=1e-5, atol=1e-6 * float(np.abs(window - anchor).max()), err_msg=name)
+        np.testing.assert_allclose(got_scale, scale, rtol=1e-4, atol=1e-30, err_msg=name)
+    assert float(fd.context_stats_ops(np.zeros((1, LOOKBACK, 1), np.float32), floor)[2]) == fd.UNIT_SCALE
+
+
+@pytest.mark.parametrize("case", ["nbeats", "prism_quantile"])
+@pytest.mark.parametrize("fmt", ["keras", "saved_model"])
+@pytest.mark.parametrize("level", [1e3, 1e5, 1e6])
+def test_a_file_agrees_with_predict_at_a_level_far_above_the_spread(case, fmt, level, world, tmp_path_factory):
+    """D-040 (review W1): the same float32 windows, std about 8, at a level of 1e3, 1e5 and 1e6 given to the file and to ``predict``.
+
+    The agreement is 1e-4 of the window std PLUS one float32 step of the forecast itself: the file answers in float32, so at a level of
+    1e5 its numbers sit on a grid of 0.0078 (1e-3 of this std) and at 1e6 on 0.0625, whatever the rule; that representation
+    step is the floor of any float32 file, and it is the only slack allowed. Before D-040 the gap was 6e-4 of the std at 1e3, 0.25
+    at 1e5 and 5.8 at 1e6 (prism quantile), 3 to 7 orders above this bound."""
+    path = export_cell(case, fmt, tmp_path_factory)
+    run = trained_case(case, tmp_path_factory)
+    windows = np.asarray(raw_windows(4, 1, seed=3) - 50.0 + level, np.float32).astype(np.float64)
+    want = run.predictor.predict(windows)
+    point, quantiles, _ = run_file(path, fmt, windows, one_at_a_time(case))
+    std = windows.std(axis=1)[:, None, :]
+    grid = float(np.spacing(np.float32(abs(want["point"]).max())))
+    assert np.isfinite(point).all()
+    assert float((np.abs(point - want["point"]) - grid).max()) <= 1e-4 * float(std.min()), (case, fmt, level)
+    if quantiles is not None:
+        assert float((np.abs(quantiles - want["quantiles"]) - grid).max()) <= 1e-4 * float(std.min()), (case, fmt, level)
 
 
 # --- the spec: rank 2 only for a rule whose shape_of returns it -------------------------------------

@@ -14,9 +14,10 @@ naive-last on MSE) and validates on a fresh noise draw. What is pinned here, at 
   seeds and across an interpreter restart; a legacy-style stateful draw DISAGREES with itself, so the
   comparison can see the failure it guards; the train windows are a function of ``(stream_seed, counter)``;
 * the standardization uses the CONTEXT only (the leak instrument: replacing the target leaves the standardized
-  context unchanged), the tf function equals its numpy twin, a constant context is finite, the floor is relative
-  to the context's mean absolute value, the target is scaled by the context's statistics, and a flat ZERO context
-  (no scale information) leaves the target in its own unit instead of dividing it by a tiny number (D-035);
+  context unchanged), is centred on the context's FIRST value and scaled by the population std, the tf function, the
+  numpy twin and the float32 keras-ops function agree to float32 rounding of the standardized values at levels 0, 50,
+  1e3, 1e5 and 1e6 over a std of about 8, and a FLAT context (std not above ``scale_floor * mean|x|``, at zero or at any
+  level) leaves the target in its own unit instead of dividing it by a tiny number (D-035, D-040);
 * cardinalities: ``train_ds`` is infinite, ``select_ds`` and ``test_ds`` state ``n // batch`` over a static
   batch, ``n`` a multiple of the batch;
 * a csv: segments by fraction, windows inside their segment, a strictly increasing time column, finite numeric
@@ -64,7 +65,7 @@ KW = dict(
     format="builtin", dataset="synthetic", path=None, value_cols=None, time_col=None,
     lookback=LOOKBACK, horizon=HORIZON, realizations=REALIZATIONS, series_length=ROWS, noise_level=0.1,
     patterns=PATTERNS, select_fraction=SELECT_FRACTION, test_fraction=TEST_FRACTION, n_select=None, n_test=None,
-    steps_per_epoch=4, max_samples=None, batch_size=BATCH, seed=SEED, stream_seed=None, scale_floor=1e-3,
+    steps_per_epoch=4, max_samples=None, batch_size=BATCH, seed=SEED, stream_seed=None, scale_floor=1e-6,
 )
 CSV_ROWS = 1000
 
@@ -242,7 +243,7 @@ class TestTheSplitIsByTime:
         x, y = next(iter(b.train_ds))
         for counter in range(BATCH):
             s, start = (int(v) for v in train_window_at(5, tf.constant(counter, tf.int64), len(b.bank), span))
-            ex, ey = standardize_np(b.bank[s, start:start + WIDTH], LOOKBACK, 1e-3)
+            ex, ey = standardize_np(b.bank[s, start:start + WIDTH], LOOKBACK, KW["scale_floor"])
             np.testing.assert_allclose(x[counter].numpy(), ex, rtol=1e-5, atol=1e-6)
             np.testing.assert_allclose(y[counter].numpy(), ey, rtol=1e-5, atol=1e-6)
 
@@ -278,7 +279,7 @@ class TestTheWindowsAreStateless:
             xs = np.concatenate([x.numpy() for x, _ in ds])
             ys = np.concatenate([y.numpy() for _, y in ds])
             for i, (s, start) in enumerate(windows[: len(xs)]):
-                ex, ey = standardize_np(b.bank[s, start:start + WIDTH], LOOKBACK, 1e-3)
+                ex, ey = standardize_np(b.bank[s, start:start + WIDTH], LOOKBACK, KW["scale_floor"])
                 np.testing.assert_allclose(xs[i], ex, rtol=1e-5, atol=1e-6)
                 np.testing.assert_allclose(ys[i], ey, rtol=1e-5, atol=1e-6)
 
@@ -332,15 +333,33 @@ class TestTheWindowsAreStateless:
 # ---------------------------------------------------------------------
 
 
+FLOOR = 1e-6
+#: The levels of the level probe: a window of std near 8 sitting at each of them (D-040).
+LEVELS = (0.0, 50.0, 1e3, 1e5, 1e6)
+
+
 def oracle(window, lookback, floor):
-    """float64 reference: population std of the context, floored, applied to context and target."""
+    """The D-040 rule in ``longdouble`` on the RAW values (no first-value centring, so it does not share the code's trick).
+
+    Centre on the context mean, scale by the population std, and a context is FLAT (scale 1) when ``std <= floor * mean|x|``.
+    """
+    window = np.asarray(window, np.longdouble)
+    context = window[..., :lookback, :]
+    mean = context.mean(axis=-2, keepdims=True)
+    std = np.sqrt(((context - mean) ** 2).mean(axis=-2, keepdims=True))
+    flat = std <= floor * np.abs(context).mean(axis=-2, keepdims=True)
+    scale = np.where(flat, np.longdouble(1.0), std)
+    return ((context - mean) / scale).astype(np.float64), ((window[..., lookback:, :] - mean) / scale).astype(np.float64)
+
+
+def old_oracle(window, lookback, floor=1e-3):
+    """The rule of Step 7 (D-027, D-035), kept ONLY to show that a window it did not floor is standardized the same way."""
     window = np.asarray(window, np.float64)
     context = window[..., :lookback, :]
     mean = context.mean(axis=-2, keepdims=True)
-    std = context.std(axis=-2, keepdims=True)
-    scale = np.maximum(std, floor * np.abs(context).mean(axis=-2, keepdims=True))
+    scale = np.maximum(context.std(axis=-2, keepdims=True), floor * np.abs(context).mean(axis=-2, keepdims=True))
     scale = np.where(scale > 1e-30, scale, 1.0)
-    return (context - mean) / scale, (window[..., lookback:, :] - mean) / scale
+    return ((context - mean) / scale).astype(np.float32), ((window[..., lookback:, :] - mean) / scale).astype(np.float32)
 
 
 def windows(n=12, channels=2, seed=0):
@@ -349,81 +368,145 @@ def windows(n=12, channels=2, seed=0):
     return base * rng.uniform(0.1, 50.0, (n, 1, channels)) + rng.uniform(-1e3, 1e3, (n, 1, channels))
 
 
+def level_windows(level, n=6, seed=3):
+    """``(n, WIDTH, 1)`` windows of std about 8 at ``level``, each value a float32 number held as float64 (what a user's file holds)."""
+    rng = np.random.default_rng(seed)
+    t = np.arange(WIDTH)[None, :, None]
+    base = 8.0 * np.sin(2 * np.pi * t / 12.0 + rng.uniform(0, 6, (n, 1, 1))) + 0.3 * rng.normal(size=(n, WIDTH, 1)).cumsum(axis=1)
+    return np.asarray(level + base, np.float32).astype(np.float64)
+
+
+def ops_standardize(window32, lookback, floor):
+    """What the exported function does to a float32 window: ``(x - anchor - offset) / scale`` with ``context_stats_ops`` (float32)."""
+    context = window32[..., :lookback, :]
+    anchor, offset, scale = (np.asarray(t, np.float64) for t in fd.context_stats_ops(np.asarray(context, np.float32), floor))
+    return ((context - anchor - offset) / scale).astype(np.float32), (anchor, offset, scale)
+
+
 class TestTheStandardizationNeverSeesTheFuture:
     def test_replacing_the_target_leaves_the_standardized_context_unchanged(self):
         w = windows()
         shuffled = w.copy()
         shuffled[:, LOOKBACK:] = np.random.default_rng(9).standard_normal(shuffled[:, LOOKBACK:].shape) * 1e4
-        x0, y0 = standardize_np(w, LOOKBACK, 1e-3)
-        x1, y1 = standardize_np(shuffled, LOOKBACK, 1e-3)
+        x0, y0 = standardize_np(w, LOOKBACK, FLOOR)
+        x1, y1 = standardize_np(shuffled, LOOKBACK, FLOOR)
         np.testing.assert_array_equal(x0, x1)
         assert not np.array_equal(y0, y1)
-        tx0, _ = standardize_tf(tf.constant(w), LOOKBACK, 1e-3)
-        tx1, _ = standardize_tf(tf.constant(shuffled), LOOKBACK, 1e-3)
+        tx0, _ = standardize_tf(tf.constant(w), LOOKBACK, FLOOR)
+        tx1, _ = standardize_tf(tf.constant(shuffled), LOOKBACK, FLOOR)
         np.testing.assert_array_equal(tx0.numpy(), tx1.numpy())
 
     def test_the_context_has_zero_mean_and_unit_population_std(self):
-        x, _ = standardize_np(windows(), LOOKBACK, 1e-3)
+        """Population, not sample (ddof 0): a sample std makes the standardized std sqrt(31/32), a 1.6 percent miss."""
+        x, _ = standardize_np(windows(), LOOKBACK, FLOOR)
         np.testing.assert_allclose(x.mean(axis=-2), 0.0, atol=1e-5)
         np.testing.assert_allclose(x.std(axis=-2), 1.0, rtol=1e-5)
+        tx, _ = standardize_tf(tf.constant(windows()), LOOKBACK, FLOOR)
+        np.testing.assert_allclose(tx.numpy().std(axis=-2), 1.0, rtol=1e-5)
 
     def test_the_target_uses_the_context_statistics(self):
         w = windows()
-        _, y = standardize_np(w, LOOKBACK, 1e-3)
-        _, expected = oracle(w, LOOKBACK, 1e-3)
+        _, y = standardize_np(w, LOOKBACK, FLOOR)
+        _, expected = oracle(w, LOOKBACK, FLOOR)
         np.testing.assert_allclose(y, expected, rtol=1e-5, atol=1e-5)
-        _, ty = standardize_tf(tf.constant(w), LOOKBACK, 1e-3)
+        _, ty = standardize_tf(tf.constant(w), LOOKBACK, FLOOR)
         np.testing.assert_allclose(ty.numpy(), expected, rtol=1e-5, atol=1e-5)
 
     def test_the_tf_function_equals_its_numpy_twin_in_float32(self):
         w = windows(n=64, channels=3, seed=4)
-        nx, ny = standardize_np(w, LOOKBACK, 1e-3)
-        tx, ty = standardize_tf(tf.constant(w), LOOKBACK, 1e-3)
+        nx, ny = standardize_np(w, LOOKBACK, FLOOR)
+        tx, ty = standardize_tf(tf.constant(w), LOOKBACK, FLOOR)
         assert nx.dtype == ny.dtype == np.float32 and tx.dtype == ty.dtype == tf.float32
         np.testing.assert_allclose(tx.numpy(), nx, rtol=1e-6, atol=1e-6)
         np.testing.assert_allclose(ty.numpy(), ny, rtol=1e-6, atol=1e-6)
 
-    @pytest.mark.parametrize("level", [0.0, 5.0, -3.0, 1e6])
-    @pytest.mark.parametrize("lookback", [1, LOOKBACK])
-    def test_a_constant_context_is_finite_under_the_floor(self, level, lookback):
-        w = np.full((3, lookback + HORIZON, 1), level)
-        w[:, lookback:] += np.arange(HORIZON)[None, :, None]
-        _, expected = oracle(w, lookback, 1e-3)
-        for x, y in (standardize_np(w, lookback, 1e-3),
-                     tuple(t.numpy() for t in standardize_tf(tf.constant(w), lookback, 1e-3))):
-            assert np.isfinite(x).all() and np.isfinite(y).all()
-            np.testing.assert_array_equal(x, 0.0)
-            np.testing.assert_allclose(y, expected, rtol=1e-5)
+    def test_a_window_that_the_old_floor_did_not_touch_is_standardized_as_before_and_so_are_the_baselines_and_the_bar(self):
+        """D-040 changes only what a FLAT or a high-level window gets: for a normal window the standardized values, the
+        naive-last and seasonal-naive MAE and the bar threshold are the ones of the rule of Step 7."""
+        from train.common import forecast_run as fr
 
-    def test_the_floor_is_relative_so_a_series_in_micro_units_is_not_flattened(self):
-        w = windows(n=8, channels=1, seed=2)
-        for scale in (1e-3, 1e-6, 1e4):
-            nx, ny = standardize_np(w * scale, LOOKBACK, 1e-3)
-            tx, ty = (t.numpy() for t in standardize_tf(tf.constant(w * scale), LOOKBACK, 1e-3))
-            base_x, base_y = standardize_np(w, LOOKBACK, 1e-3)
-            for got, want in ((nx, base_x), (ny, base_y), (tx, base_x), (ty, base_y)):
-                np.testing.assert_allclose(got, want, rtol=1e-4, atol=1e-4)
+        w = np.concatenate([level_windows(0.0, n=32, seed=2), level_windows(50.0, n=32, seed=3), 1e-4 * level_windows(50.0, n=32, seed=4)])
+        x_new, y_new = standardize_np(w, LOOKBACK, FLOOR)
+        x_old, y_old = old_oracle(w, LOOKBACK)
+        np.testing.assert_allclose(x_new, x_old, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(y_new, y_old, rtol=1e-5, atol=1e-5)
+        new, old = fr.baseline_maes(x_new, y_new), fr.baseline_maes(x_old, y_old)
+        for key in ("naive_last", "seasonal_naive", "context_mean"):
+            np.testing.assert_allclose(new[key], old[key], rtol=1e-5, err_msg=key)
+        np.testing.assert_allclose(min(new["naive_last"], new["seasonal_naive"]), min(old["naive_last"], old["seasonal_naive"]), rtol=1e-5)
 
-    def test_the_stats_are_the_population_std_of_the_context_floored_at_two_terms(self):
+    def test_the_stats_are_the_first_value_the_offset_from_it_and_the_population_std(self):
         context = np.array([[[1.0], [2.0], [3.0], [4.0]]])
-        mean, scale = context_stats_np(context, 1e-3)
-        np.testing.assert_allclose(mean, [[[2.5]]])
+        anchor, offset, scale = context_stats_np(context, FLOOR)
+        np.testing.assert_allclose(anchor, [[[1.0]]])
+        np.testing.assert_allclose(offset, [[[1.5]]])
         np.testing.assert_allclose(scale, [[[np.sqrt(1.25)]]])
-        flat = np.full((1, 4, 1), 7.0)
-        np.testing.assert_allclose(context_stats_np(flat, 1e-3)[1], [[[7e-3]]])
-        assert context_stats_np(np.zeros((1, 4, 1)), 1e-3)[1].item() == 1.0
+        anchor, offset, scale = (np.asarray(t, np.float64) for t in fd.context_stats_ops(np.asarray(context, np.float32), FLOOR))
+        np.testing.assert_allclose([anchor.item(), offset.item(), scale.item()], [1.0, 1.5, np.sqrt(1.25)], rtol=1e-6)
 
 
-class TestAFlatZeroContextHasNoScaleToDivideBy:
-    """D-035: an all-zero context divided by a 1e-8 floor turned a spike target into 1e9."""
+class TestTheStandardizationIsShiftInvariantToTheFloat32LimitOfTheLevel:
+    """D-040: centred on the FIRST context value, so the float32 function and the float64 twins agree at any level.
+
+    What holds, measured at std about 8: the three twins give the standardized values of the oracle to float32 rounding of
+    those values (not of the level) at every level of ``LEVELS`` (numpy and tf 5.9e-8, the float32 function at most 1.8e-7,
+    at 0, 50, 1e3, 1e5 and 1e6 alike; the bound here is 1e-6); the numpy and tf functions given the SAME float64 window at
+    another level give the same standardized values to 1e-6 (float64 resolves a level of 1e6 to 1e-10); the float32 FILE of a
+    window cannot hold it better than one float32 step of the level (0.0625 at 1e6, 0.8 percent of this std) because the window
+    itself was rounded to that grid: that, not the rule, is what limits the forecast of a float32 window at 1e6.
+    """
+
+    @pytest.mark.parametrize("level", LEVELS)
+    def test_the_three_twins_equal_the_oracle_to_float32_rounding_of_the_standardized_values(self, level):
+        w = level_windows(level)
+        ex, ey = oracle(w, LOOKBACK, FLOOR)
+        nx, ny = standardize_np(w, LOOKBACK, FLOOR)
+        tx, ty = (t.numpy() for t in standardize_tf(tf.constant(w), LOOKBACK, FLOOR))
+        for got, want in ((nx, ex), (ny, ey), (tx, ex), (ty, ey)):
+            np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-6, err_msg=f"level {level:g}")
+        ox, _ = ops_standardize(w.astype(np.float32), LOOKBACK, FLOOR)
+        np.testing.assert_allclose(ox, ex, rtol=1e-6, atol=1e-6, err_msg=f"the float32 function at level {level:g}")
+
+    @pytest.mark.parametrize("level", LEVELS[1:])
+    def test_the_same_float64_window_at_another_level_gives_the_same_standardized_values(self, level):
+        base = level_windows(0.0, seed=5)
+        shifted = base + level
+        for fn in (lambda a: standardize_np(a, LOOKBACK, FLOOR),
+                   lambda a: tuple(t.numpy() for t in standardize_tf(tf.constant(a), LOOKBACK, FLOOR))):
+            (x0, y0), (x1, y1) = fn(base), fn(shifted)
+            np.testing.assert_allclose(x1, x0, rtol=1e-6, atol=1e-6, err_msg=f"level {level:g}")
+            np.testing.assert_allclose(y1, y0, rtol=1e-6, atol=1e-6, err_msg=f"level {level:g}")
+
+    @pytest.mark.parametrize("level", LEVELS[1:])
+    def test_a_float32_window_at_a_level_is_standardized_to_within_the_step_of_its_own_grid(self, level):
+        """At 1e6 the grid is 0.0625: the standardized values move by at most 3 grid steps over the std, and no more."""
+        base = level_windows(0.0, seed=5)
+        shifted = np.asarray(base + level, np.float32).astype(np.float64)
+        x0, _ = standardize_np(base, LOOKBACK, FLOOR)
+        x1, _ = standardize_np(shifted, LOOKBACK, FLOOR)
+        bound = 3.0 * float(np.spacing(np.float32(level + 20.0))) / float(base[:, :LOOKBACK].std(axis=1).min())
+        assert float(np.abs(x1 - x0).max()) <= bound + 1e-6, (level, float(np.abs(x1 - x0).max()), bound)
+
+    @pytest.mark.parametrize("level", [1e3, 1e5, 1e6])
+    def test_the_standardization_of_the_exported_function_does_not_depend_on_the_level(self, level):
+        """The ops twin, run in float32, gives the standardized window of the unshifted one (rounding of the window grid only)."""
+        base = np.asarray(level_windows(0.0, seed=6), np.float32).astype(np.float64)
+        w = np.asarray(base + level, np.float32).astype(np.float64)
+        want, _ = oracle(w, LOOKBACK, FLOOR)
+        got, _ = ops_standardize(w.astype(np.float32), LOOKBACK, FLOOR)
+        np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-6)
+
+
+class TestAFlatContextHasNoScaleToDivideBy:
+    """D-035 (generalised by D-040): a flat context, at zero or at any level, leaves the target in the series' own unit."""
 
     @staticmethod
-    def both(w, lookback=LOOKBACK, floor=1e-3):
+    def both(w, lookback=LOOKBACK, floor=FLOOR):
         nx, ny = standardize_np(w, lookback, floor)
         tx, ty = standardize_tf(tf.constant(w), lookback, floor)
         return (nx, ny), (tx.numpy(), ty.numpy())
 
-    def test_a_zero_context_with_a_spike_target_gives_the_raw_spike_in_both_twins(self):
+    def test_a_zero_context_with_a_spike_target_gives_the_raw_spike_in_both_twins_and_the_function(self):
         w = np.zeros((2, WIDTH, 1))
         w[0, LOOKBACK + 3, 0] = 10.84
         w[1, LOOKBACK:, 0] = np.linspace(-2.0, 5.0, HORIZON)
@@ -432,28 +515,53 @@ class TestAFlatZeroContextHasNoScaleToDivideBy:
             np.testing.assert_array_equal(x, 0.0)
             np.testing.assert_array_equal(y, w[:, LOOKBACK:].astype(np.float32))
             assert np.abs(y).max() < 11.0
+        anchor, offset, scale = fd.context_stats_ops(np.zeros((2, LOOKBACK, 1), np.float32), FLOOR)
+        assert (np.asarray(scale) == fd.UNIT_SCALE).all() and (np.asarray(anchor) == 0).all() and (np.asarray(offset) == 0).all()
 
-    def test_the_tf_function_equals_the_numpy_twin_on_zero_and_ordinary_windows_together(self):
+    @pytest.mark.parametrize("level", [5.0, -3.0, 1e-6, 1e6])
+    def test_a_constant_non_zero_context_with_a_moving_target_gives_the_raw_deviation_as_the_target(self, level):
+        """The mean of the context is the level, the scale is 1: the target is ``y - level``, in the series' own unit."""
+        w = np.full((3, WIDTH, 1), np.float64(np.float32(level)))
+        w[:, LOOKBACK:] += np.arange(1, HORIZON + 1)[None, :, None] * np.array([1.0, -2.0, 0.5])[:, None, None]
+        expected = (w[:, LOOKBACK:] - w[:, :1]).astype(np.float32)
+        for x, y in self.both(w):
+            np.testing.assert_array_equal(x, 0.0)
+            np.testing.assert_allclose(y, expected, rtol=1e-6, atol=1e-5)
+        anchor, offset, scale = (np.asarray(t, np.float64) for t in fd.context_stats_ops(np.asarray(w[:, :LOOKBACK], np.float32), FLOOR))
+        np.testing.assert_array_equal(scale, fd.UNIT_SCALE)
+        np.testing.assert_allclose(anchor + offset, w[:, :1], rtol=1e-6)
+
+    def test_the_tf_function_equals_the_numpy_twin_on_flat_and_ordinary_windows_together(self):
         w = windows(n=6, channels=2, seed=5)
         w[1, :LOOKBACK, 0] = 0.0
         w[1, LOOKBACK + 2, 0] = 7.5
         w[4, :LOOKBACK, 1] = 0.0
         w[4, LOOKBACK:, 1] = 123.0
+        w[2, :LOOKBACK, 0] = 40.0
         (nx, ny), (tx, ty) = self.both(w)
         np.testing.assert_allclose(tx, nx, rtol=1e-6, atol=1e-6)
         np.testing.assert_allclose(ty, ny, rtol=1e-6, atol=1e-6)
         np.testing.assert_array_equal(ny[1, :, 0], w[1, LOOKBACK:, 0].astype(np.float32))
         np.testing.assert_array_equal(ny[4, :, 1], w[4, LOOKBACK:, 1].astype(np.float32))
-        _, expected = oracle(w, LOOKBACK, 1e-3)
+        _, expected = oracle(w, LOOKBACK, FLOOR)
         np.testing.assert_allclose(ny, expected, rtol=1e-5, atol=1e-5)
 
-    def test_a_flat_non_zero_context_still_uses_the_relative_floor(self):
-        w = np.full((1, WIDTH, 1), 1e-6)
-        w[:, LOOKBACK:] += 1e-6
-        for _, y in self.both(w):
-            np.testing.assert_allclose(y, 1e-6 / (1e-3 * 1e-6), rtol=1e-5)
-        assert context_stats_np(w[:, :LOOKBACK], 1e-3)[1].item() > 1e-30
-        np.testing.assert_allclose(context_stats_np(w[:, :LOOKBACK], 1e-3)[1], 1e-9, rtol=1e-9)
+    def test_the_flat_threshold_is_the_std_against_the_floor_times_the_mean_absolute_value(self):
+        """Alternating ``level +- s``: the population std is ``s``; at level 1e5 and floor 1e-6 the threshold is 0.1.
+
+        A flat context has scale 1, NOT the threshold: the rule of Step 7 gave it ``floor * mean|x|`` (0.1 here), so the standardized
+        context of the flat case is ``+- 0.09`` and not ``+- 0.9``."""
+        level = 1e5
+        for spread, flat in ((0.09, True), (0.11, False)):
+            context = level + spread * np.tile([1.0, -1.0], LOOKBACK // 2)[None, :, None]
+            w = np.concatenate([context, context[:, :HORIZON] + 3.0], axis=1)
+            for x, y in self.both(w, floor=1e-6):
+                if flat:
+                    np.testing.assert_allclose(x, context - level, atol=1e-6)         # the scale is 1: the raw deviation
+                    np.testing.assert_allclose(y, 3.0 + context[:, :HORIZON] - level, atol=1e-6)
+                else:
+                    np.testing.assert_allclose(np.abs(x), 1.0, rtol=1e-5)             # the scale is the std
+                    np.testing.assert_allclose(y, (3.0 + context[:, :HORIZON] - level) / spread, rtol=1e-4)
 
     def test_a_zero_scale_floor_on_a_flat_context_is_the_unit_scale_too(self):
         w = np.full((1, WIDTH, 1), 4.0)
@@ -474,7 +582,7 @@ class TestAFlatZeroContextHasNoScaleToDivideBy:
             for index, row in enumerate(bank):
                 frames = np.lib.stride_tricks.sliding_window_view(row[lo:hi], 168 + 24)[:, :, None]
                 with np.errstate(all="ignore"):
-                    _, y = standardize_np(frames, 168, 1e-3)
+                    _, y = standardize_np(frames, 168, FLOOR)
                 # a NaN (0 / 0) or an inf (spike / 0) must count as the worst value, not vanish from a max
                 top = float(np.abs(y).max()) if np.isfinite(y).all() else float("inf")
                 if top > worst:
@@ -553,6 +661,16 @@ class TestCsv:
         b = load(**csv_kwargs(path, value_cols=["c", "a"]))
         frame = pd.read_csv(path)
         np.testing.assert_array_equal(b.bank[0], frame[["c", "a"]].to_numpy(np.float64))
+
+    def test_a_column_whose_spread_is_below_the_floor_of_its_level_is_refused_by_the_loader_too(self, tmp_path):
+        """D-040: the same ``check_csv_level`` the pre-claim check calls; a floor of 0 or a resolvable level loads."""
+        t = np.arange(CSV_ROWS)
+        path = write_csv(tmp_path, a=1e12 + 8.0 * np.sin(t / 7.0))
+        with pytest.raises(ConfigError, match="column 'a' varies by .* the level must be removed before training"):
+            load(**csv_kwargs(path))
+        assert load(**csv_kwargs(path, scale_floor=0.0)).bank.shape == (1, CSV_ROWS, 3), "a floor of 0 resolves nothing and refuses nothing"
+        near = write_csv(tmp_path, name="near.csv", a=1e5 + 8.0 * np.sin(t / 7.0))
+        assert load(**csv_kwargs(near)).bank.shape == (1, CSV_ROWS, 3), "a spread of 8e-5 of the level is above the floor of 1e-6"
 
     def test_an_index_column_and_the_time_column_are_not_value_columns(self, tmp_path):
         frame = pd.read_csv(write_csv(tmp_path))

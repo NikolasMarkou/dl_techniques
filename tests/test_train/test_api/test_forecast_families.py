@@ -689,7 +689,7 @@ def test_the_documented_defaults():
     assert (d.realizations, d.series_length, d.noise_level, d.patterns) == (4, 10_000, 0.1, None)
     assert (d.select_fraction, d.test_fraction) == (0.15, 0.15)
     assert (d.n_select, d.n_test, d.steps_per_epoch, d.max_samples) == (None,) * 4
-    assert fa.ForecastTransformArgs().scale_floor == 1e-3
+    assert fa.ForecastTransformArgs().scale_floor == 1e-6, "D-040: about eight float32 steps of relative resolution"
     assert fa.ForecastLossArgs().name is None
     assert fa.TimeSeriesData().problems("data") == []
 
@@ -736,6 +736,7 @@ def test_a_wrong_type_or_choice_is_refused_naming_its_key(group, given):
     "given, key",
     [
         ({"lookback": 0}, "lookback"),
+        ({"lookback": 1}, "lookback"),
         ({"horizon": -3}, "horizon"),
         ({"realizations": 0}, "realizations"),
         ({"series_length": 0}, "series_length"),
@@ -901,6 +902,7 @@ def refusal_cases(tmp_path):
         "an unsorted time column": ({"format": "csv", "time_col": "t", "path": write_csv(
             tmp_path / "u.csv", 400, time_col="t", extra={(5, "t"): "2"})}, "strictly increasing"),
         "a lookback below 1": ({"lookback": 0}, "'lookback'"),
+        "a lookback of 1": ({"lookback": 1}, "expected an int of at least 2 (one value has no spread to standardize by) or auto, got 1"),
         "a horizon below 1": ({"horizon": 0}, "'horizon'"),
         "fractions that leave no train segment": ({"select_fraction": 0.5, "test_fraction": 0.5}, "leave a train segment"),
         "a segment shorter than lookback + horizon (builtin)": ({"series_length": 200, "lookback": 64, "horizon": 16}, "too short"),
@@ -916,7 +918,7 @@ def refusal_cases(tmp_path):
 
 CASE_NAMES = (
     "a csv that does not exist", "no csv path at all", "a missing value column", "a missing time column",
-    "an unsorted time column", "a lookback below 1", "a horizon below 1", "fractions that leave no train segment",
+    "an unsorted time column", "a lookback below 1", "a lookback of 1", "a horizon below 1", "fractions that leave no train segment",
     "a segment shorter than lookback + horizon (builtin)", "a segment shorter than lookback + horizon (csv)",
     "the test segment is the short one", "a dataset that is not the synthetic bank", "a non-numeric cell",
     "a non-finite cell",
@@ -935,6 +937,71 @@ def test_every_refusal_that_needs_no_tensor_is_named_and_loads_neither_tensorflo
     if text is not None:
         assert text in message, message
     assert heavy == [], f"{name}: the check imported {heavy}"
+
+
+LEVEL_CHILD = """
+import json, sys
+import numpy as np
+from train.api import forecast_series as fs
+from train.api.errors import ConfigError
+
+values, names, _ = fs.read_csv_series(sys.argv[1], None, None)
+refused = None
+try:
+    fs.check_csv_level(values, names, float(sys.argv[2]))
+except ConfigError as exc:
+    refused = str(exc)
+heavy = sorted(name for name in ("tensorflow", "keras", "train.common", "dl_techniques") if name in sys.modules)
+print("@@" + json.dumps({"refused": refused, "heavy": heavy}))
+"""
+
+
+def level_check(tmp_path, offset: float, floor: float = 1e-6, **kwargs):
+    """``(refused text or None, heavy modules)`` of ``check_csv_level`` on a csv of two smooth columns at ``offset``, in a fresh interpreter."""
+    import subprocess
+
+    path = write_csv(tmp_path / f"level_{offset:g}.csv", 400, **kwargs)
+    text = Path(path).read_text().splitlines()
+    shifted = [text[0]] + [",".join([f"{float(v) + offset!r}" for v in row.split(",")]) for row in text[1:]]
+    Path(path).write_text("\n".join(shifted) + "\n")
+    env = {"PYTHONPATH": str(SRC), "PATH": "/usr/bin:/bin", "CUDA_VISIBLE_DEVICES": "", "HOME": str(tmp_path)}
+    done = subprocess.run([sys.executable, "-c", LEVEL_CHILD, path, str(floor)], cwd=tmp_path, env=env, capture_output=True,
+                          text=True, timeout=120)
+    assert done.returncode == 0, done.stderr[-2000:]
+    answer = json.loads(done.stdout.rsplit("@@", 1)[1])
+    return answer["refused"], answer["heavy"]
+
+
+@pytest.mark.parametrize("offset", [1e12, 1e9, 1e7])
+def test_a_csv_whose_spread_is_below_the_floor_of_its_level_is_refused_without_tensorflow(tmp_path, offset):
+    """D-040: the std of a column over its mean absolute value is under ``scale_floor``: float32 cannot resolve it."""
+    refused, heavy = level_check(tmp_path, offset)
+    assert refused is not None, "a column of spread 1e-7 of its level was accepted"
+    assert "column 'a'" in refused and "the level must be removed before training" in refused and "scale_floor 1e-06" in refused
+    assert heavy == [], heavy
+
+
+@pytest.mark.parametrize("offset, floor", [(0.0, 1e-6), (1e3, 1e-6), (1e5, 1e-6), (1e12, 0.0)])
+def test_a_csv_with_a_resolvable_spread_or_no_floor_passes_the_level_check(tmp_path, offset, floor):
+    refused, heavy = level_check(tmp_path, offset, floor)
+    assert refused is None, refused
+    assert heavy == []
+
+
+def test_a_constant_column_is_not_a_level_problem_and_the_sentence_is_one_function_called_by_the_check_and_the_loader(tmp_path):
+    import numpy as np
+
+    from train.api import forecast_series
+
+    flat = np.full((100, 1), 7.0)
+    forecast_series.check_csv_level(flat, ["c"], 1e-6)           # exactly constant: nothing to resolve, the flat rule handles it
+    with pytest.raises(ConfigError, match="the level must be removed"):
+        forecast_series.check_csv_level(np.arange(100.0)[:, None] * 1e-3 + 1e12, ["c"], 1e-6)
+    sources = {name: (SRC / "train" / name).read_text() for name in ("api/forecast_series.py", "api/tasks/time_series_forecasting.py",
+                                                                      "common/forecast_data.py")}
+    assert sources["api/forecast_series.py"].count("the level must be removed") == 1
+    assert "the level must be removed" not in sources["api/tasks/time_series_forecasting.py"] + sources["common/forecast_data.py"]
+    assert "check_csv_level(" in sources["api/tasks/time_series_forecasting.py"] and "check_csv_level(" in sources["common/forecast_data.py"]
 
 
 def test_a_good_configuration_passes_the_same_checks_without_tensorflow(tmp_path):

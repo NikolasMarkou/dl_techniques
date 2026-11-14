@@ -213,6 +213,44 @@ def test_the_tie_band_is_a_few_float32_steps_wide_and_not_wider():
     assert fr.TIE_ULPS == 16, "the same width as the segmentation task's, measured here at 1 step (D-008)"
 
 
+@pytest.mark.parametrize("batches, steps", [(1, 16), (4, 16), (16, 16), (17, 32), (64, 32), (256, 64), (2048, 192)])
+def test_the_tie_band_grows_with_the_square_root_of_the_select_batches_above_sixteen(batches, steps):
+    """D-043: ``TIE_ULPS * max(1, ceil(sqrt(n_batches / 16)))``: 16 float32 steps up to 16 batches, 192 at 2,048 (the measured +20
+    steps of the float32 accumulation at 262,144 windows is inside it, the 16 of a 2,176-window run is not widened)."""
+    assert fr.tie_band(batches) == steps
+
+
+@pytest.mark.parametrize("batches", [16, 2048])
+def test_a_value_inside_the_band_of_its_own_batch_count_is_a_miss_and_one_step_outside_is_a_hit(batches):
+    threshold = np.float32(0.8)
+    step = np.spacing(threshold)
+    band = fr.tie_band(batches)
+    assert fr.beats_bar(float(threshold - np.float32(band) * step), float(threshold), batches) is False
+    assert fr.beats_bar(float(threshold - np.float32(band + 1) * step), float(threshold), batches) is True
+    assert fr.beats_bar(float(threshold - np.float32(17) * step), float(threshold), batches) is (band < 17)
+
+
+def test_the_trainer_hands_the_bar_the_select_batch_count_of_its_data(world, tmp_path):
+    trainer, resolved, context = prepared(tmp_path / "run")
+    data = trainer.build_data(resolved, context)
+    assert trainer._select_batches == data.n_select // BATCH == 2
+    threshold = np.float32(0.8)
+    step = np.spacing(threshold)
+    trainer._select_batches = 2048
+    assert trainer.bar_is_met(None, float(threshold - np.float32(190) * step), float(threshold)) is False
+    assert trainer.bar_is_met(None, float(threshold - np.float32(193) * step), float(threshold)) is True
+    trainer._select_batches = 2
+    assert trainer.bar_is_met(None, float(threshold - np.float32(190) * step), float(threshold)) is True
+
+
+def test_the_tie_ulps_is_the_one_definition_of_the_segmentation_module():
+    from train.common import segmentation_run
+
+    assert fr.TIE_ULPS is segmentation_run.TIE_ULPS
+    source = Path(fr.__file__).read_text()
+    assert "TIE_ULPS = " not in source, "forecast_run imports the constant, it does not define it again"
+
+
 def test_the_value_is_the_minimum_of_val_mae_and_not_the_maximum_or_the_last():
     trainer = bare_trainer()
     assert trainer.success_value({"mae": [9.0, 8.0, 7.0], "val_mae": [3.0, 1.0, 2.0]}) == 1.0
@@ -1254,6 +1292,15 @@ def within_30_seconds():
     signal.signal(signal.SIGALRM, previous)
 
 
+def level_csv(path: Path, offset: float = 1e12) -> Path:
+    """A csv of one moving column sitting ``offset`` above zero: its spread over its level is 1e-12 at the default (D-040)."""
+    write_series_csv(path, rows=1200)
+    frame = pd.read_csv(path)
+    frame["v0"] = frame["v0"] + offset
+    frame.to_csv(path, index=False)
+    return path
+
+
 def broken_csv(path: Path, kind: str) -> Path:
     """A csv with ONE defect: ``unsorted`` time, a ``non_finite`` cell, or ``two`` value columns."""
     write_series_csv(path, rows=1200, columns=2 if kind == "two" else 1)
@@ -1296,12 +1343,17 @@ def refusal(tmp_path: Path, kind: str):
         "deepar": ({"model": "deepar/base"}, "the family 'deepar' is not trained by time_series_forecasting"),
         "adaptive-ema": ({"model": "adaptive_ema/base"}, "the family 'adaptive_ema' is not trained by time_series_forecasting"),
         "ets-jit": ({"model": "ets/ANN", "jit_compile": True}, "Invalid value for 'jit_compile': 'ets' cannot be compiled with XLA"),
+        "lookback-one": ({"data": {**E2E_DATA, "lookback": 1}},
+                         "Invalid value for 'data.lookback': expected an int of at least 2 (one value has no spread to standardize "
+                         "by) or auto, got 1"),
+        "csv-level": ({"data": csv_data(level_csv(tmp_path / "level.csv"))},
+                      "the level must be removed before training"),
     }[kind]
 
 
 REFUSALS = ["series-too-short", "csv-too-short", "unsorted-time", "non-finite-cell", "missing-column", "timestral-horizon",
             "tirex-two-channels", "ets-two-channels", "mdn-two-channels", "xlstm-quantile-two-channels", "deepar",
-            "adaptive-ema", "ets-jit"]
+            "adaptive-ema", "ets-jit", "lookback-one", "csv-level"]
 
 
 @pytest.mark.parametrize("kind", REFUSALS)
@@ -1321,9 +1373,9 @@ def test_a_refusal_of_invariant_9_is_exit_2_with_its_named_sentence_and_no_run_d
 def test_the_refusal_table_names_every_case_of_invariant_9():
     kinds = " ".join(REFUSALS)
     for needed in ("too-short", "unsorted", "non-finite", "missing-column", "timestral-horizon", "tirex-two", "ets-two", "mdn-two",
-                   "xlstm-quantile-two", "deepar", "adaptive-ema", "ets-jit"):
+                   "xlstm-quantile-two", "deepar", "adaptive-ema", "ets-jit", "lookback-one", "csv-level"):
         assert needed in kinds, needed
-    assert len(REFUSALS) == len(set(REFUSALS)) == 13
+    assert len(REFUSALS) == len(set(REFUSALS)) == 15
 
 
 # ---------------------------------------------------------------------

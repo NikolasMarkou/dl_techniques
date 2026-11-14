@@ -23,7 +23,7 @@ Interface contract
     is the one place that holds those two numbers. ``problems(prefix)`` names every option out of range.
 
 ``check_forecast_data(data)``
-    :param data: a config whose ``lookback`` and ``horizon`` are resolved.
+    :param data: a config whose ``lookback`` and ``horizon`` are resolved (``lookback`` at least 2, D-040).
     :raises ConfigError: every problem of ``data.problems``, a csv that does not exist, lacks a named column, holds a
         non-numeric or non-finite value column or an unsorted time column, and a segment (train, select or test) of the
         series or of the csv shorter than ``lookback + horizon``. pandas and numpy only (imported when a csv is read, not
@@ -42,7 +42,8 @@ Interface contract
         problem at once; a file's lines name the file).
 
 ``ForecastTransformArgs``
-    ``scale_floor``: the floor of a context's scale, relative to its mean absolute value (``train.common.forecast_data``).
+    ``scale_floor``: the flatness threshold of a context, relative to its mean absolute value (``train.common.forecast_data``).
+    A context whose std is not above it is flat and keeps the series' own unit; the default is 1e-6.
 
 ``ForecastMetricArgs``
     ``watch_metric`` (:data:`WATCH_METRIC`, the only value accepted; auto is the recipe's) and ``watch_mode``
@@ -56,7 +57,7 @@ Interface contract
 Where the numbers live
 ----------------------
 The defaults of this module are the DATA defaults measured in the plan (four realizations of 10,000 points, noise 0.1,
-15 percent select and test, scale floor 1e-3). The epochs, the batch size, ``lookback``, ``horizon`` and the optimizer
+15 percent select and test, scale floor 1e-6). The epochs, the batch size, ``lookback``, ``horizon`` and the optimizer
 belong to the family recipes (``train.api.forecast_models``), never to a second copy here.
 
 Import rule
@@ -192,9 +193,14 @@ class TimeSeriesData(StrictConfig):
 
         if self.dataset != SYNTHETIC:
             bad("dataset", f"expected {SYNTHETIC!r}, the only dataset (a csv is named by data.path)")
-        for name in ("lookback", "horizon"):
-            if not _is_auto(getattr(self, name)) and getattr(self, name) < 1:
-                bad(name, "expected an int of at least 1 or auto")
+        # DECISION plan-2026-11-13T105600-3a8319ef/D-040
+        # A lookback of 1 is refused by name, before the claim: one context value has no spread, so every window would be "flat"
+        # and every number of the run would be in the series' own unit (measured: a lookback-1 run scored 1758.20 against 1758.20
+        # of naive-last, exit 1). Do NOT lower this to 1 "for a persistence model": naive-last is a baseline the run reports.
+        if not _is_auto(self.lookback) and self.lookback < 2:
+            bad("lookback", "expected an int of at least 2 (one value has no spread to standardize by) or auto")
+        if not _is_auto(self.horizon) and self.horizon < 1:
+            bad("horizon", "expected an int of at least 1 or auto")
         for name in ("realizations", "series_length", "n_select", "n_test", "steps_per_epoch", "max_samples"):
             if getattr(self, name) is not None and getattr(self, name) < 1:
                 bad(name, "expected an int of at least 1 (or null where null is allowed)")
@@ -294,10 +300,12 @@ class ForecastTransformArgs(StrictConfig):
     """The context standardization of the forecasting data; read by the forecasting task."""
 
     scale_floor: float = dataclasses.field(
-        default=1e-3,
+        default=1e-6,
         metadata={
-            "help": "floor of a window's scale, relative to the mean absolute value of its context: every window is "
-            "divided by max(std of its context, scale_floor * mean |context|), so a flat context stays finite; at least 0"
+            "help": "flatness threshold, relative to the mean absolute value of a window's context: a context whose std is not "
+            "above scale_floor * mean |context| is flat and is not divided (its scale is 1, the series' own unit); any other "
+            "context is divided by its std. A csv whose columns vary by less than this share of their level is refused "
+            "(float32 cannot resolve it: remove the level). The default is about eight float32 steps of relative resolution; at least 0"
         },
     )
 

@@ -81,7 +81,7 @@ from the OPTIONAL ``variant_overrides``.
 ``lookback``, ``horizon``, ``channels``, ``value_cols``, ``scale_floor``, ``head``, ``quantile_levels``, ``point_index``, ``decode``, ``data_format``, ``data_sha256`` (forecasting only)
     A forecasting record has no ``class_names``, no ``normalize``, ``mean`` or ``std`` and no input size: the model takes a
     window ``(lookback, channels)`` in the series' own units and the statistics are those of each window's own context
-    (:func:`train.common.forecast_data.context_stats_np`; ``scale_floor`` is its relative floor). ``lookback``, ``horizon``
+    (:func:`train.common.forecast_data.context_stats_np`; ``scale_floor`` is its flatness threshold). ``lookback``, ``horizon``
     and ``channels`` are positive ints. ``head`` is ``point`` or ``quantile``; a quantile head has ``quantile_levels`` (a list
     of numbers in 0 to 1) and ``point_index`` (the level the point forecast is, the median), a point head has both null.
     ``decode`` is the name of the family's decode row (:data:`train.common.forecast_run.DECODE`). ``data_format`` is
