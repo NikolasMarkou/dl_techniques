@@ -538,7 +538,8 @@ an exemption to green a newly dead field.
 
 `src/train/api/` is a key=value command line and a Python function over strict configs, beside the
 per-model scripts (usage, keys, run directory, resume, `predict`, `export`, exit codes:
-[`README.md`](README.md)). It has four tasks, `image_classification`, `image_segmentation`, `image_denoising` and `pretrain`, each
+[`README.md`](README.md)). It has five tasks, `image_classification`, `image_segmentation`, `image_denoising`, `pretrain` and
+`time_series_forecasting` (`python -m train list_tasks` prints them), each
 a `TaskTrainer` subclass in `api/tasks/` (`api/trainer.py:TaskTrainer` holds the hooks and the shared sequence). The
 classification task calls the same `train.common.classification_run` helpers as `train.convnext.common` in the same order.
 
@@ -569,15 +570,19 @@ classification task calls the same `train.common.classification_run` helpers as 
   `RESNET_SEG`, `CONVNEXT_SEG`) and the specs. `recipes.register_builtin_models` registers the six classifiers, the
   four segmentation families (D-077; step 23 held them back until a task and a recipe existed), the five denoising
   families (`api/denoising_models.py:builtin_denoising_models`) and the two pretrain families
-  (`api/pretrain_models.py:builtin_pretrain_models`), so a guard that walks
-  `registry.MODELS` meets seventeen families and reads `ModelSpec.tasks` to tell them apart. The backbone families read the
+  (`api/pretrain_models.py:builtin_pretrain_models`) and the seven forecasting families
+  (`api/forecast_models.py:builtin_forecast_models`), so a guard that walks
+  `registry.MODELS` meets 24 families (6 + 4 + 5 + 2 + 7, counted by `len(registry.MODELS)` after `register_builtin_models`, never typed from this line) and reads `ModelSpec.tasks` to tell them apart. The backbone families read the
   classifiers' own variants tables and are checked by `ModelSpec.observe` (a family with an `observe` is checked by its
   layers even when its table lives on a class), and the adapter passes EVERY setting of `SegmentationHead` (its defaults
   changed once with another session's commits; a test fails when the head gains a knob).
 - **`task.json` is schema version 2 and per task** (D-073): `predictor.RECORD_KEYS[task]` and `DATA_KEYS[task]`; a
   classification record equals a version 1 record but for `schema_version`; a segmentation record has `input_size`,
   `ignore_index`, `mask_threshold`, `output` and no `input_shape`; a denoising record has `channels`, `size_multiple`,
-  `data_range` and `output`, and no class, statistic or input size. A new task is a new row of both tables and a
+  `data_range` and `output`, and no class, statistic or input size; a forecasting record (the fourth kind) has `lookback`,
+  `horizon`, `channels`, `value_cols`, `scale_floor`, `head`, `quantile_levels`, `point_index`, `decode`, `data_format` and
+  `data_sha256` and no class, statistic or input size, and a resume compares its `DATA_KEYS` (the window, channels, columns, scale
+  floor and source) and nothing about the head. A new task is a new row of both tables and a
   builder, not a null in the old record. Version 1 has no reader: `older_record_reason` is the one sentence, said by
   `check_record` (predict, export), `refuse_old_record` (`resume_decisions.resume_point`, first) and `export`.
 - **The `image_denoising` task** (plan d483ffab): `api/tasks/image_denoising.py:ImageDenoisingTrainer` supplies hooks and no
@@ -592,6 +597,15 @@ classification task calls the same `train.common.classification_run` helpers as 
   (one implementation). Decisions with anchors: the stateless noise kinds (D-008), `data.noise_clip` false (D-009), the
   selection window (D-013), the homogeneity rules (D-015), the stamps (D-011). The user-facing description, with the measured
   gate and parity numbers, is in [`README.md`](README.md).
+- **`ExactLeakyReLU` in the denoisers has a float32 branch, and why** (D-021, D-039 of plan 3a8319ef). `denoising_models._activations` builds
+  `ExactLeakyReLU(negative_slope=LEAKY_RELU_SLOPE)` (a raw `keras.layers.LeakyReLU` is a census row whose pin only shrinks, and
+  `denoising_homogeneity._activation_layer_problem` lists the class among the homogeneous ones). `ExactLeakyReLU.call` runs the stock
+  op (`super().call`) when the input is float32 and `exact_leaky_relu` (`where(x > 0, x, s * x)`, exact at float64) for every other dtype.
+  The `where` form lowers to GREATER, MUL and SELECT_V2 in a tflite file, which the default XNNPACK delegate does not take, so the
+  graph of a U-Net split into 28 (`bfunet`) and 15 (`bfconvunext`) delegate partitions instead of 1, and a fixed-shape file read at
+  another size crashed the interpreter (exit -11 in `xnn_invoke_runtime`) where the stock graph returned wrong numbers; the float32
+  branch emits one LEAKY_RELU, bit-equal to the `where` form at float32 (tested over 300,000 points) and to the base tflite file. Do not
+  make the layer one code path again, and do not swap in `maximum(x, s * x)` (it lowers to LEAKY_RELU but its gradient at 0 is 1).
 - **Three seams of the shared sequence, and two fields of `Evaluation`** (D-004 for the two fields, D-011 for the stamps, D-012 for the compile options, D-013 for the selection start). Each is a no-op by
   default, so the other two tasks run the code they ran before (`test_the_sequence_seams_default_to_nothing.py` proves the default
   of each and a positive arm for an override; the three goldens of the plan compared EXACT after every shared edit):
@@ -664,7 +678,8 @@ classification task calls the same `train.common.classification_run` helpers as 
   `check_data_unchanged` were made against the original. `TaskTrainer.resume_order` (a class variable, default `None`) is the clause
   that says what a resume does to the data order, for the summary's resume note and, through `config.resume_help(order=)`, the help of
   `resume_interrupted`: the default text is the older tasks' ("replays epoch 0's"), a task whose `resume_stream` trains on another
-  stream sets it (`pretrain` does). Both hooks have one user today; the time-series and language tasks are the next.
+  stream sets it (`pretrain` and `time_series_forecasting` do). Both hooks have two users today, `pretrain` and
+  `time_series_forecasting`; the language tasks are the next.
 - **The mask-key rule** (D-004, D-005; why a pretrain run is reproducible and a resume does not leak). A mask is a function of a key
   and nothing stateful: `make_stateless_masked_patch_map_fn` (`dl_techniques/datasets/vision/masked_patches.py`) and
   `make_stateless_beit_mim_map_fn` (`beit_masking.py`) return `fn(index, image, *_)`. The SELECT and TEST masks are keyed on
@@ -679,13 +694,69 @@ classification task calls the same `train.common.classification_run` helpers as 
   restore it). BEiT therefore passes an `rng=` per call to `BeitMaskingGenerator.__call__` (`None` keeps the stateful path and the
   old draw) and builds `random.Random(f"{seed}:{salt}:{index}")` per row inside `tf.numpy_function`. The legacy stateful
   `make_masked_patch_map_fn` and `make_beit_mim_map_fn` stay, with their tests, for the two legacy trainers that call them, `train_mim` (BEiT) and `train_masked_completion` (energy transformer); the four trainers that read `load_image_streams` (those two, `train_tokenizer` and `train_dino`) are a different set.
+- **The `time_series_forecasting` task** (plan 3a8319ef): `api/tasks/time_series_forecasting.py:TimeSeriesForecastingTrainer` supplies
+  hooks and no stage, and is the second user of `fit_kwargs` and `resume_stream`. Seven families train it (`nbeats`, `prism`, `tirex`,
+  `xlstm`, `ets`, `timestral`, `mdn`; `list_models task=time_series_forecasting` prints the variants); `deepar` and `adaptive_ema` are
+  `forecast_models.UNSUPPORTED` rows, refused by name in `TimeSeriesForecastingConfig.problems` (`check_supported_family`), before any model
+  code is imported and before the family registry is consulted, because they are not registered and the shared parse would only say
+  "unknown family" (D-003, D-022: `deepar` is teacher-forced, so a served function would take the answer as input; `adaptive_ema` has no
+  horizon). The groups (`TimeSeriesData`, `ForecastTransformArgs`, `ForecastMetricArgs`, `ForecastLossArgs`) are in `api/forecast_args.py`
+  (not `api/args.py`, whose seven groups `_groups.py` pins); the adapters, the per-family tables (`ALLOWED`, `REFUSED`, `FORCED`,
+  `SUPPLIED`, `FACTORIES`, held to the factories' signatures by `signature_census`; `FAMILIES` with a `FamilyRow` of `max_channels`,
+  `static_batch` and `jit_refusal`) and the `RECIPES` are `api/forecast_models.py`; the data, the decode table and the report are
+  `train/common/forecast_data.py` and `train/common/forecast_run.py`; `ForecastPredictor` and the export row are
+  `api/forecast_predictor.py`. The last three import TensorFlow, so `train.api` imports them inside functions only.
+  - **One decode row, one normalization.** `forecast_run.DECODE` has one row per family and head (`nbeats`, `prism_point`,
+    `prism_quantile`, `tirex`, `xlstm_point`, `xlstm_quantile`, `ets`, `timestral`, `mdn`); the compiled metric, the post-hoc report,
+    the Predictor and the export all read it (D-009), and the tests hold each row to the model's own forecast function. Do not decode
+    in a fifth place. Normalization is ONE function, `forecast_data.context_stats_np` (a window by its context's mean and population
+    standard deviation, floored at `scale_floor * mean|context|`, and 1.0 for a flat zero context, D-005, D-035), with a tf twin
+    (`standardize_tf`) and a keras-ops twin (`context_stats_ops`) a test holds equal; `nbeats`, `tirex` and `xlstm` have their own
+    switch forced OFF in `FORCED` (D-023). Do not turn a model normalization on or add a second one.
+  - **The stream rule.** The bank, the select and test windows are keyed on `(seed, split, index)` and never on the stream seed; the
+    train windows on `(stream seed, counter)` inside the train segment; `resume_stream` returns `ForecastBatches.with_stream(completed_steps)`
+    (`derive_stream_seed`, the pretrain function). Do not key a select window on the stream seed (the bar stops being comparable across
+    a kill) and do not return `data` from `resume_stream` (a replay of epoch 0).
+  - **The bar** (D-008, D-037, D-038): `success_value` is the lowest `val_mae` of the window, `success_threshold` is
+    `min(naive-last, seasonal-naive, epoch-zero)` on the SAME fixed select windows (the epoch-zero term read from the fit sidecar in
+    `evaluate_and_report`, never from a trainer attribute), `bar_is_met` is `forecast_run.beats_bar`: more than `TIE_ULPS` float32 steps
+    below. There is no `success_threshold` field; do not add one. A tie or a float32 rounding step is a miss.
+  - **Seams it uses.** `fit_kwargs` returns `steps_per_epoch` and `validation_steps` (the select cardinality over the batch);
+    `compile_options` returns `{"jit_compile": config.jit_compile}` EXPLICITLY, `False` unless the field asks (D-014, D-028: Keras 3.8
+    resolves `auto` to XLA whenever a GPU is present, so the two devices would build different graphs; `ets` refuses `true`; do not drop the
+    key because `False` is the default). `config_problems(config, prefix, no_conformal_for=, because=)` has a keyword-only
+    `because=None`: `None` yields the image sentence byte for byte (the two pinned tests do not change), forecasting passes its own
+    (D-016). `check_model_loading` has a list or tuple branch beside its dict one (each output compared, D-007), and
+    `finalize_last_epoch` and `report_data_free_run` take `predict_batch_size` (`None` is unchanged; a static-batch `timestral` predicts only
+    at its batch). `ExportRule.served(model, record)` (default `None`, so the three image tasks export as before) is the one function both
+    the `saved_model` endpoint and the tflite numeric check run, and the graph the tflite and onnx converters see
+    (`ServedForecaster`, a registered layer, not a `Lambda`, which does not load under safe mode, D-011, D-026); `_input_spec` accepts a
+    rank-2 `(lookback, channels)` shape only for a rule whose `shape_of` returns it. `check_export` raises the five measured refusals
+    (`forecast_predictor.EXPORT_REFUSALS`) before anything is written; each has a test that builds the file anyway and fails when the
+    reason stops being true. Do not drop a row to "try the cell", and do not add one without a measurement.
+  - **The TensorFlow-free half.** `api/forecast_series.py` (`read_csv_series`, `split_bounds`, `check_segments`, `refuse`) imports pandas
+    and numpy only, and `api/forecast_args.py` imports nothing from `train.common`. The reason (D-036): `train.common`'s
+    `__init__` imports `gpu`, which imports TensorFlow, so any import of `train.common.forecast_data` loads it, and the checks that need
+    only the file (a missing column, a text cell, an unsorted time column, a segment too short) must run BEFORE `setup_gpu` and the claim
+    of the run directory. `forecast_data` imports from it, so the sentence a user reads before the claim and the one the loader raises
+    are one function; do not write a second csv reader or import `train.common`, `tensorflow` or `keras` in either module
+    (`test_forecast_families.py` and `test_common_forecast_data.py` load them in a fresh interpreter).
+  - **The record and the lister.** The fourth record kind: a `FORECASTING` row in all nine tables of `TASK_TABLES`, in
+    `PREDICT_WRITERS` and in `DATA_LISTERS` (a csv, `.npy` or `.npz` file; a directory refused by name; `predict` reads the record
+    BEFORE it lists the data, D-012, so a forecasting run is never told "holds no image"). `task_record` reads the head, the levels and the
+    median off the BUILT model through the decode row, so a resume, which asks for the record before `build_model`, has the model built
+    for it there; do not recompute them from `model_args` (D-010). The user-facing description, with the measured gate numbers, is in
+    [`README.md`](README.md). Tests: `tests/test_train/test_api/test_forecast_families.py`, `test_forecast_task.py`,
+    `test_forecast_resume.py`, `test_forecast_predictor_and_export.py` and `tests/test_train/test_common_forecast_data.py`.
 - **Per-task tables, not `if task ==` branches** (D-006). `train.api.predictor` holds one table per concern, each keyed by the task
   word: `RECORD_KEYS`, `DATA_KEYS`, `GEOMETRY_CHECKS`, `TAIL_CHECKS`, `INPUT_SHAPE_OF`, `INPUT_KEY`, `OUTPUT_CHECKS`,
-  `PREDICTORS` and `EXPORT_RULES` (an `ExportRule(shape_of, check, note)`: the shape `export` traces, the cells it refuses, the
-  sentence it logs), collected in `TASK_TABLES`; `train.api.cli.PREDICT_WRITERS` is the table of what `predict` writes. A task
+  `PREDICTORS` and `EXPORT_RULES` (an `ExportRule(shape_of, check, note, served)`: the shape `export` traces, the cells it refuses, the
+  sentence it logs, and `served`, the function a file runs; see the forecasting bullet), collected in `TASK_TABLES`;
+  `train.api.cli.PREDICT_WRITERS` is the table of what `predict` writes and `train.api.cli.DATA_LISTERS` the table of what `data=`
+  may name. A task
   is known to the reader only when it has a row in EVERY table of `TASK_TABLES` (`record_problems` refuses another, naming the tasks
   of the first table it is missing from), and the identity (`class_names`) and statistics (`normalize`, `mean`, `std`) checks run
-  only for a task whose `RECORD_KEYS` hold those keys. A task that writes a record is one row in each table plus one in `PREDICT_WRITERS`;
+  only for a task whose `RECORD_KEYS` hold those keys. A task that writes a record is one row in each table plus one in `PREDICT_WRITERS` and one in `DATA_LISTERS`;
   `test_a_third_task_record_dispatches_by_table.py` walks `TASK_TABLES` with a fake task. `pretrain` writes none (D-013 of plan
   46e5318f: `task_record` returns `None`), so it is in no table and `predict`, `export` and `load_model` of its run directory stop
   in `read_record` with the existing `task.json` sentence; do not write a partial record for it, a record that exists makes

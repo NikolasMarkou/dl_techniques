@@ -6,10 +6,11 @@ guards, `REPO_MAP.md` at the repo root for which trainer trains which model). Mo
 
 ## `python -m train` and `train.api`
 
-A key=value command line over strict configs. It has four tasks, `image_classification`
+A key=value command line over strict configs. It has five tasks, `image_classification`
 (families `vit`, `resnet`, `convnext_v1`, `convnext_v2`, `cliffordnet`, `cliffordnet_hier`),
 `image_segmentation` (families `convunext`, `accunet`, `resnet_seg`, `convnext_seg`), `image_denoising`
-(families `bfcnn`, `bfunet`, `bfconvunext`, `convunext_biased`, `scunet`) and `pretrain` (families `energy_transformer`, `beit`),
+(families `bfcnn`, `bfunet`, `bfconvunext`, `convunext_biased`, `scunet`), `pretrain` (families `energy_transformer`, `beit`)
+and `time_series_forecasting` (families `nbeats`, `prism`, `tirex`, `xlstm`, `ets`, `timestral`, `mdn`),
 and the same code is a Python function. Run it from the repo root with `.venv`, with
 `MPLBACKEND=Agg` on a headless machine.
 
@@ -620,7 +621,7 @@ result = train_pretrain(out="auto", model="energy_transformer/et_tiny", data={"d
 
 * **Families** (`train/api/pretrain_models.py`; the variants are the keys of each model module's `MODEL_VARIANTS`, and
   `python -m train list_models task=pretrain` prints them). Each family trains this task only: a `vit/vit_pico` model given to `pretrain`
-  exits 2 naming the families of this task, and the other three tasks refuse these two the same way.
+  exits 2 naming the families of this task, and the other four tasks refuse these two the same way.
 
 | Family | Method | Variants | Recipe (the legacy trainer's) |
 |---|---|---|---|
@@ -824,9 +825,233 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
   The exactness claims above, now on the GPU: the best checkpoint's reload gap is exactly 0.0 in all five runs; the zero-predictor baseline is the same float in G1 and in the ET kill run (1.0040831565856934 and 1.0040831565856934); the untrained `val_loss` is not the same float across two processes with one seed in either family: ET 2.3379111289978027 in G1 and 2.3379108905792236 in the ET kill run (relative difference 1.0e-07), BEiT 6.2661356925964355 in G3 and 6.266140460968018 in the BEiT kill run (7.6e-07), so equality across processes on the GPU is measured for the baseline and not for the untrained model's `val_loss` (the earlier gate's ET pair was equal, its BEiT pair was not).
   **Legacy rescore (Step 18, report only, no parity claimed, D-012).** The legacy trainer (`train.energy_transformer.train_masked_completion`, `et_tiny`, cifar10, 12 epochs, its own defaults and stateful masks, 252,913 parameters like G1) was run once and its `best_model.keras` scored on the API's fixed selection stream under the API's loss: 0.17493 against 0.17435 for the earlier gate's G1 best checkpoint scored the same way (the control reproduces that run's logged 0.17435 to 3e-8; the final gate's G1 logged 0.17422 and was not rescored); on the test stream 0.17504 against 0.17450. The two runs differ in their train masks and streams, so the numbers are reported and not graded.
   **Kill and resume (G4).** Each run was started with `checkpoint_args.backup_every_steps=300`, its PID recorded, and sent SIGKILL (that PID only) when the backup's metadata first read epoch 2 batch 299, that is after 2 CSV rows and 300 batches of the third epoch (the process exit status was 137); the same command with `resume_interrupted=true` then finished with exit 0 in ET and exit 0 in BEiT. The copy held 3112 optimizer steps (2 x 1,406 + 300), the final copy 5624 (4 x 1,406): no step lost or run twice after the copy. The CSV has one row per epoch (0 to 3) and the two rows written before the kill are unchanged. The learning rate the CSV records at each epoch start equals the run's own schedule evaluated at 0, 1,406, 3,112 and 4,218 steps, exactly, in both families: `optimizer.iterations == epoch * steps_per_epoch` at the starts of epochs 0, 1 and 3, and the epoch the kill landed in starts from the copy, at 2 x 1,406 + 300 (the documented behaviour of `backup_every_steps`), so for that one epoch the equation reads plus 300. The first three train batches of the resumed process were not read back from the real fit (it was not traced); the stream its stream seed gives (`with_stream(3112)`), digested the way the CPU resume test does on the real CIFAR-10 unaugmented, differs from epoch 0's stream at all three batches in both families.
-* **Follow-up plans**, named and not started: the time-series and the language tasks (the second and third users of `fit_kwargs` and
-  `resume_stream`), depth, DINO, the BEiT tokenizer as a method of its own (`beit_tokenizer`), a `task.json` record with `predict`
+* **Follow-up plans**, named and not started: the language tasks (the next user of `fit_kwargs` and `resume_stream`, after
+  `time_series_forecasting` below), depth, DINO, the BEiT tokenizer as a method of its own (`beit_tokenizer`), a `task.json` record with `predict`
   and `export` for pretrain, and the Phase 5 wrappers (the repo map entry among them).
+
+**`time_series_forecasting`** (plan 3a8319ef): trains a forecaster on windows of a series, either a synthetic bank of the library's
+generator patterns or one csv of your own. `out` and `model` are required; `data.lookback` and `data.horizon` come from the family's
+recipe. The family chooses the model. Every series is cut BY TIME into a training slice, a slice that selects the best epoch and a
+slice scored once after `fit`, and the verdict is a bar against two baselines and the untrained model (below). The run is
+reproducible, resumable, and `predict` and `export` work on its run directory.
+
+```bash
+python -m train list_models task=time_series_forecasting
+python -m train time_series_forecasting     # every key of the task, its type and default
+python -m train time_series_forecasting out=auto model=nbeats/base epochs=10
+python -m train time_series_forecasting out=auto model=prism/tiny 'model_args.quantile_levels=[0.1,0.5,0.9]'
+python -m train time_series_forecasting out=auto model=nbeats/small data.format=csv data.path=series.csv \
+    'data.value_cols=["load"]' data.time_col=ts
+```
+
+```python
+from train.api import train_time_series_forecasting
+result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"lookback": 168, "horizon": 24})
+```
+
+* **Families** (`train/api/forecast_models.py`; the variants are the keys of each family's variants table, `python -m train list_models
+  task=time_series_forecasting` prints them). Each family trains this task only; `model=vit/vit_pico` exits 2 naming the families of
+  this task, and the other four tasks refuse these seven the same way. Every row is held to its library factory's signature by
+  `signature_census`: a key the family offers is passed through (and may override a variant's value), a key it refuses or forces is
+  named in the refusal, and a key the adapter takes from the data (`lookback`, `horizon`, the channels) is refused as `model_args`.
+
+| Family | Variants | Head and output | Channels | Loss |
+|---|---|---|---|---|
+| `nbeats` | `tiny` `small` `base` | point; the forecast branch only (the model returns forecast and residual) | any | MAE |
+| `prism` | `tiny` `small` `base` `large` | point, or quantile with `model_args.quantile_levels` | any | MAE, or the pinball loss |
+| `tirex` | `tiny` `small` `medium` `large` | quantile, 9 levels (0.1 to 0.9) | 1 | the pinball loss |
+| `xlstm` | `tiny` `small` | point, or quantile with `model_args.quantile_levels` | any for a point head, 1 for a quantile one | MAE, or the pinball loss |
+| `ets` | `ANN` `AAN` `AAA` | point; one smoothing parameter per component | 1 | MAE |
+| `timestral` | `5M` `28M` `123M` `209M` | quantile, 21 levels; built at a static batch (the data drops the remainder) | any | the model's own objective |
+| `mdn` | `tiny` `small` `base` | a mixture over the horizon; the point is its mean | 1 | the mixture's negative log-likelihood |
+
+  A family with a fixed loss refuses `loss_args.name` by name; a point head takes `mae`, `mse` or `mase` (the per-batch
+  approximation `MASELoss`, whose value moves with batch composition). `timestral` forecasts one patch of 32 points at a time, so a
+  `data.horizon` above its patch size (32 unless `model_args.patch_size` says otherwise) is refused: its `call` is the forecaster's first block only up to one patch, and a longer horizon would
+  grade a frame the model was never trained in (measured: horizon 48 differs from the library's multi-block forecaster by 2.54 on a
+  scale of 16, steps 1 to 32 by 0.0). The model's own normalization is OFF for `nbeats`, `tirex` and `xlstm` (`use_normalization` is
+  forced, and a user value is refused as a double normalization); `prism` and `mdn` have none and need the data layer; `ets` and
+  `timestral` are equivariant themselves. A model regularizer (`kernel_regularizer` and its kin) is refused for the families that
+  have one (the optimizer's decay is the only decay), and so is `use_quantile_head` (the head follows `model_args.quantile_levels`).
+  **Refused by name, with the measured reason** (raised before the claim, one sentence each, a test per family): `deepar`, because its
+  trained graph is teacher-forced, so `call` takes a window that CONTAINS the horizon (changing the horizon values moved `mu` at the
+  horizon positions by up to 0.659), an exported `serve` function would take the answer as its input, and its forecast path is an eager
+  Monte-Carlo loop no export format carries; `adaptive_ema`, a regime and slope filter whose outputs have no horizon axis, so a
+  forecast and the bar "beats naive" are undefined for it.
+* **Recipes** (`RECIPES`, one per family in `train/api/forecast_models.py`, derived by script from the specs): AdamW, 10
+  epochs, batch 128, `data.lookback` 168 and `data.horizon` 24, weight decay 0.004, one warmup epoch, cosine over the whole run to
+  0.01 of the peak, a GLOBAL gradient clip of 1.0 (never a per-variable `optim_args.clipnorm`), early stopping after 10 epochs without a
+  better `val_mae`, learning rate 1e-4 except `ets` (5e-2, no warmup: one scalar parameter did not move at 1e-4, 20 steps at 1e-3
+  moved its `mae` from 1.0069 to 1.0066) and `mdn` (5e-4). An epoch is `data.steps_per_epoch` steps, 500 at the defaults, so a default
+  run is 5,000 steps. The numbers are the legacy trainers' where those agree with the measured ones and the measured ones where they
+  do not; the next bullet names each difference.
+* **Keys of the task** (`python -m train time_series_forecasting` lists all, with their help; the groups `optim_args`,
+  `checkpoint_args`, `logger_args`, `analysis_args` and `debug_args`, and `epochs`, `batch_size`, `seed`, `devices`, `precision`,
+  `resume_interrupted` and `checkpoint`, are the shared ones and mean what they mean for the other tasks, except where this section says
+  otherwise). Required: `out` and `model`; a csv run also needs `data.format` and `data.path`.
+
+| Key | Default | Read at |
+|---|---|---|
+| `data.format` | `"builtin"` | `check_forecast_data` (through `TimeSeriesData.resolve_auto`, before the claim), `TimeSeriesForecastingTrainer.check_model_args` (a csv gives the channel count), `forecast_data.load_forecast_batches` |
+| `data.path` | `null` | `forecast_series.read_csv_series`, from `check_forecast_data`, `TimeSeriesForecastingTrainer.check_model_args` and `forecast_data.load_forecast_batches`; csv only, refused for `builtin` |
+| `data.value_cols` | `null` | `forecast_series.read_csv_series`; csv only; null is every column except the time column and an unnamed index column |
+| `data.time_col` | `null` | `forecast_series.read_csv_series`; csv only; null means row order is time |
+| `data.lookback` | `"auto"` | `TimeSeriesData.resolve_auto` (the recipe's 168), `check_forecast_data`, `geometry_problems`, the adapters through `TimeSeriesForecastingTrainer.build_model`, `forecast_data.load_forecast_batches` |
+| `data.horizon` | `"auto"` | the same path as `data.lookback` (the recipe's 24); a `timestral` run is refused above its patch size |
+| `data.realizations` | `4` | `forecast_data.build_bank`; builtin only |
+| `data.series_length` | `10000` | `forecast_data.build_bank`, `check_forecast_data` (a synthetic series is split like a csv of that many rows); builtin only |
+| `data.noise_level` | `0.1` | `forecast_data.build_bank`; builtin only |
+| `data.patterns` | `null` | `forecast_data.load_forecast_batches` (an unknown name is refused); builtin only; null is every pattern |
+| `data.select_fraction` | `0.15` | `forecast_series.split_bounds`, `check_forecast_data`; with `data.test_fraction` it must leave a train slice |
+| `data.test_fraction` | `0.15` | `forecast_series.split_bounds`, `check_forecast_data` |
+| `data.n_select` | `null` | `forecast_data.load_forecast_batches`, rounded DOWN to whole batches; fewer than one batch is refused; null is 8 windows per series (builtin) or every window of the segment whose targets do not overlap (csv) |
+| `data.n_test` | `null` | the same path as `data.n_select` |
+| `data.steps_per_epoch` | `null` | `forecast_data.load_forecast_batches`, then `TimeSeriesForecastingTrainer.fit_kwargs`; null is the number of train windows over the batch size, at most 500 |
+| `data.max_samples` | `null` | `forecast_data.load_forecast_batches`; caps the train windows an epoch is sized from when `data.steps_per_epoch` is null, never the selection or test windows |
+| `transform_args.scale_floor` | `0.001` | `TimeSeriesForecastingTrainer.build_data`, then `forecast_data.context_stats_np`; recorded in `task.json` and read again by `predict` and `export` |
+| `metric_args.watch_metric` | `"auto"` | `ForecastMetricArgs.resolve_auto`, `fit_callbacks.build_callbacks`; auto is `val_mae`, the only value accepted (the bar is about the minimum `val_mae`, so the saved checkpoint must be that epoch) |
+| `metric_args.watch_mode` | `"auto"` | the same path; auto is `min`, the only value accepted |
+
+  Two rows are not in the table, because the knob-docs test reads the first group that has the field and `data.dataset` is the
+  classification task's there and `loss_args.name` the denoising task's: `data.dataset` is `"synthetic"`, the only value (read by
+  `TimeSeriesData.problems` and `forecast_facts`; a csv is named by `data.path`), and `loss_args.name` is `null`, the family's own
+  loss (read by `TimeSeriesForecastingTrainer.build_loss_and_metrics` and, through `loss_problem`, by
+  `TimeSeriesForecastingTrainer.check_model_args`).
+  `jit_compile` is a key of the task itself (default `false`, read by `TimeSeriesForecastingTrainer.compile_options`, which passes
+  it to the ONE `compile` call, and by `TimeSeriesForecastingTrainer.check_model_args`). `analysis_args.conformal_alpha` is refused (a conformal set is a set of
+  classes; the interval forecast of this task is a quantile head). `debug_args.smoke` runs one epoch on at most 512 train samples
+  and applies no bar. `precision` is `float32` by default; `mixed_float16` and `mixed_bfloat16` are not refused and NOT verified for
+  this task (no run, no test), and a model that computes in `bfloat16` is refused as `tflite` by the existing rule.
+* **Defaults that differ from the legacy trainers** (`train.time_series.*`), each on purpose. (1) The reconstruction term is NOT
+  ported: the legacy N-BEATS trainer adds a term whose target is the INPUT, so minimizing it pushes the backcasts toward zero and it is a
+  defect, not a regularizer (test MAE of 400 steps on one seed, with the term 0.7575 and without 0.7704, inside one seed's noise); the
+  task trains the stock `NBeatsNet` on its forecast branch alone (`compile(loss=[loss, None])`, the metrics a list of lists), and
+  `check_model_loading` compares every output of a list or tuple model, not the first only. Keras warns that two kernels of `nbeats`
+  receive no gradient: expected, named in `run.log`. (2) Standardization is by the CONTEXT only. The legacy processor standardizes the
+  whole window with the horizon included, so the future leaks into the statistics (on its windows a zero predictor scored a mean
+  squared error of 1.1678 against naive-last's 1.4737, which only the leaked statistics explain) and N-BEATS then normalized a second time inside
+  `call`. Here each window is divided by the mean and the population standard deviation of its context per channel, and its target by
+  the same numbers, in ONE place (the data layer, `forecast_data.standardize_tf`, with a numpy twin `standardize_np` that `predict`
+  calls and a keras-ops twin that the export calls; tests hold each twin equal to the numpy one). (3) The scale is floored RELATIVE to the context:
+  `max(std, transform_args.scale_floor * mean|context|)`, so a series in micro-units is not floored wholesale; a context that is exactly
+  flat AND zero has no scale information at all, and its scale is 1.0, the series' own unit (the absolute floor of 1e-8 that the first
+  version used turned one `sparse_events` window into a standardized target of 1.08e9 and made `val_mae` meaningless for that seed).
+  (4) No stacked L2: the legacy kernel regularizers and the AdamW decay both decayed the weights; here the optimizer's decay is the
+  only one and `sgd` with a positive decay is refused (the adapters build no L2 penalty). (5) Warmup is in epochs (`optim_args.warmup_epochs`,
+  as in every task), the legacy one in steps (1,000 on the command line, 5,000 in the dataclass): the recipe's one epoch is 500 steps. (6) `jit_compile` is `false`
+  for every family unless you ask: Keras 3.8 resolves `auto` to XLA whenever a GPU is present, so a GPU run and a CPU run would build
+  different graphs, and a GPU-only defect hides under CPU tests. Measured on GPU 0, batch 128: `false` costs 3.6x (`timestral`) to 11.4x
+  (`xlstm`, 484 ms against 42.5 ms a step) per step, `tirex` resolves `auto` to off anyway, and `ets` FAILS under XLA
+  (`InvalidArgumentError` in the gradient of its loop), so `jit_compile=true` is refused for `ets` and is an opt-in for the rest.
+  (7) `tirex`, `nbeats` and `xlstm` normalization is forced off (see Families). (8) Ten epochs of 500 steps (the legacy epoch counts
+  are not used): 400 steps already beat the bar by 6.9 to 8.7 percent for three seeds and 100 and 200 steps do not, so no default is
+  shorter. (9) The validation windows are fixed, not a fresh noise draw, and the whole stream is stateless (the next two bullets);
+  the legacy path was data-bound (274 ms a batch of 128 against about 60 ms of model compute).
+* **The data, and what validation does NOT prove.** The bank is `data.realizations` independent draws of every pattern of
+  `TimeSeriesGenerator` (69 patterns, so 276 series of 10,000 points at the defaults), each a pure function of
+  `(seed, pattern, realization)` (a fresh generator per series, a sha256-derived seed: the same bank in any process and any
+  `PYTHONHASHSEED`; a non-finite series is dropped and counted in the summary's `series_dropped`, an all-dropped bank is a named
+  error). Every series is split by time, rows 0 to 7,000 train, 7,000 to 8,500 select, 8,500 to 10,000 test at the defaults, and every
+  window, context and target, lies inside ONE segment, so no validation window overlaps a training one. A train window is a
+  stride-1 window of the train segment, drawn by `tf.random.stateless_uniform` keyed on `(stream seed, counter)` (a `Dataset.range`
+  counter stream; no `from_generator`). The selection windows are `data.n_select` fixed windows, 8 per series: 2,176 at the defaults
+  (276 x 8 = 2,208 rounded down to 17 batches of 128), a function of `(seed, split, index)` only, so `val_mae` is a function of the
+  weights alone. **What this does NOT prove.** Train, selection and test series come from the same 69 archetypes and the same noise
+  draws' neighbours (two realizations of a seasonal pattern correlate at 0.987 to 0.995), and a validation window is the FUTURE of a
+  series the model trained on: beating the baselines is a check that the wiring and the learning work, not a claim about unseen real
+  series or unseen patterns. Four realizations were chosen by measurement (the standard error of the baseline mean on the selection
+  windows 0.0107 against 0.0179 at two; no train-versus-select gap at two, four or eight); do not lower it to two (the bar then flips
+  on seed noise) or raise it without measuring the bank build (about 3 s at four).
+* **A csv.** `data.format=csv` reads ONE wide table, a row per time step: `data.path`; `data.value_cols` (each column numeric and finite,
+  they become the channels; null is every column except `data.time_col` and an unnamed index column); `data.time_col` (optional; when
+  given it must be strictly increasing, else the run is refused, and when absent the row order IS time). The rows are cut into train,
+  select and test segments by `data.select_fraction` and `data.test_fraction`, every window lies inside one segment, the selection
+  and test windows have non-overlapping targets (stride `data.horizon`) and the train windows stride 1. **Refused by name before the
+  claim and before TensorFlow loads** (`train/api/forecast_series.py`, pandas and numpy only): a missing file or column; a column that
+  is not numeric (a column with one text cell is refused, not dropped, which a numeric selection would do silently); a non-finite
+  cell (`inf` included); an unsorted, repeated or unparseable time column; a segment shorter than `data.lookback + data.horizon`; a
+  selection or test segment that holds fewer than one batch of non-overlapping windows, with the row count it needs in the message
+  (21,600 rows at the defaults: 168 + 24 x 128 = 3,240 rows per segment over 0.15); more channels than the family takes. Not offered:
+  a long format with an id column, gap handling, resampling. A resume refuses a changed file (the fingerprint holds the sha256 of its
+  bytes and every window key, and `task.json` records the same sha256).
+* **The bar** (D-008, D-037, D-038 of plan 3a8319ef). `success_metric` is `val_mae`, the mean absolute error of the point forecast
+  (the median of a quantile head) in context-standardized units, so it is scale-free across series. `success_value` is the lowest
+  `val_mae` of the selection window, `success_threshold` is `min(naive-last, seasonal-naive, epoch-zero)` and the bar is met only when
+  `success_value` is more than 16 float32 steps (`forecast_run.TIE_ULPS`) BELOW the threshold, both read as float32: equal or within
+  the band is a miss, so a model that outputs the naive-last forecast cannot pass by rounding (it scored one float32 step under its
+  float64 baseline on 2 of 8 seeds before the band). Met is exit 0, missed is exit 1 with the numbers in `results_summary.json`. The
+  three terms are measured on the SAME fixed selection windows the checkpoint is selected on, never on the test windows: naive-last
+  repeats the last context value; seasonal-naive picks, per window, the period from 1 to `min(lookback // 2, lookback - horizon)` with the lowest backtest MAE
+  over the context's last `horizon` points and repeats it (`forecast_run.seasonal_naive`, moved from the legacy `timestral` trainer
+  unchanged, which now imports it); both are numpy and know no model, computed in `build_data` (a resume computes them again and gets
+  the same numbers); the epoch-zero value is the untrained model's `val_mae`, read from `checkpoints/fit_state.json` by
+  `evaluate_and_report` and never from memory, because a resume never evaluates the untrained model. `epoch_zero.binds` in the summary
+  says whether it was the smallest term. For `ets` it can be: its untrained forecast (ANN, 0.837) sat below naive-last (0.9218), so the
+  bar there means "beat the untrained model", and a miss is reported, not softened. There is no `success_threshold` field (the
+  pretrain task has none either): a bar a caller can weaken says less. `nbeats/base` on the default bank, CPU, one seed (step 8 of
+  the plan, before the gate): `val_mae` 0.5792 after 10 epochs, 30.2 percent below the better baseline. The summary also carries `baselines` (`naive_last`, `seasonal_naive`,
+  `context_mean`, which is reported and not in the bar, and `n_windows`), `epoch_zero`, `canonical_metrics` for the selection and
+  the test windows (MAE, RMSE, sMAPE, rMAE against naive, MASE scaled by the context's own one-step differences, and for a quantile
+  head coverage and sharpness), `lookback`, `horizon`, `channels`, `n_series`, `series_dropped`, `segments` and `stream`; the run
+  directory is the shared one plus `task.json` and `visualizations/forecast_test.png` (one forecast figure of the test windows).
+* **The stream seed on a resume.** The train stream is endless and a resumed `fit` starts a fresh iterator, which would replay epoch
+  0's windows. The task rebuilds the stream (`TimeSeriesForecastingTrainer.resume_stream`): the shared sequence passes
+  `completed_steps = start * steps_per_epoch + (batch + 1 if batch else 0)` and the task returns the data on a stream seed of
+  `int.from_bytes(sha256(f"{seed}:{completed_steps}")[:4], "big")` (`derive_stream_seed`, the pretrain task's function). Only the
+  stream seed moves: the bank, the split, the counts and the selection and test windows keep `seed`, so no selection window ever
+  reaches the train stream and the bar stays comparable across a kill. The cost: a resumed run is NOT the unkilled run's
+  continuation (its data order is a function of the completed-step count), and a killed epoch is trained again from its first batch
+  unless `checkpoint_args.backup_every_steps` bounds the loss. `run.log` carries `stream seed S, first train batch sha256 D`, computed
+  from the pure map at counters 0 to 2, so a resumed run is seen to differ from epoch 0's stream; the summary's `stream` block holds
+  both. The help of `resume_interrupted` says it in one clause (`TaskTrainer.resume_order`).
+* **`predict`.** `python -m train predict model=<run dir or .keras> data=<csv, .npy or .npz> out=forecast.json` writes ONE new JSON
+  file (`out` must not exist): `task`, `model`, `data`, `lookback`, `horizon`, `channels`, `quantile_levels`, `point` and `quantiles`.
+  A csv gives the LAST `lookback` rows of the record's `value_cols`; a `.npy` or the one array of a `.npz` is `(lookback, channels)` or
+  `(N, lookback, channels)`; a directory is refused by name ("a directory, not a file"), exit 2. From Python,
+  `load_model(...)` returns a `ForecastPredictor` and `ForecastPredictor.predict(x)` takes an array, a list of windows (each an array or
+  a csv path) or a csv path and returns `{"point", "quantiles", "quantile_levels"}`: `point` is `(N, horizon, channels)` float64 in the
+  series' OWN units (the median for a quantile head), `quantiles` is `(N, horizon, channels, Q)` and the levels are the record's, and
+  both are `None` for a point head. A window is forecast from its own context statistics only (the numpy twin), so a window shifted by
+  a constant gives the forecast shifted by it and a window scaled by a constant the forecast scaled. A window of another length or
+  channel count, a non-finite cell, an empty input and a csv with a missing column are named errors; a model whose output disagrees
+  with the record (decode row, head, levels, median, horizon, channels) is refused at load.
+* **`export`.** The file takes RAW float32 windows `(batch, lookback, channels)` in the series' own units and returns the forecast
+  `(batch, horizon, channels)` in the same units; the standardization and its inverse, and the decode of the family's output, are
+  inside it (`ExportRule.served`, `ServedForecaster`, one registered layer that the `keras` archive also holds, so `keras.saving.load_model`
+  alone reloads it). A quantile head returns `{"point", "quantiles"}` from `saved_model` and `keras` and the point from `tflite` and
+  `onnx`; a `timestral` file takes ONE window per call. The matrix, derived from `check_export` (36 cells, 31 export and 5 are refused by
+  name, before anything is written):
+
+| Decode row | `keras` | `saved_model` | `tflite` | `onnx` |
+|---|---|---|---|---|
+| `nbeats`, `prism_point`, `prism_quantile`, `tirex`, `mdn` | yes | yes | yes | yes |
+| `xlstm_point`, `xlstm_quantile` | yes | yes | yes | REFUSED |
+| `ets` | yes | yes | yes | REFUSED |
+| `timestral` | yes | yes | REFUSED | REFUSED |
+
+  The five refusals and their measured reasons: `tflite` of `timestral` (the converter stops at `Cumsum` with built-in operators and at
+  `Asinh` with select TF operators); `onnx` of `timestral` (the file is written and onnxruntime cannot initialize it); `onnx` of both
+  `xlstm` rows (onnxruntime `InvalidGraph` at a `Pad` in an mLSTM block's causal convolution); `onnx` of `ets` (the converter cannot
+  find a `while` output). `tflite` of `tirex`, `xlstm` and `ets` uses select TF operators, so the file needs the Flex delegate. Every
+  cell that exports matched Keras on the CPU: the worst gap, as a share of the window's standard
+  deviation, was 3.4e-6 for `saved_model`, 5.3e-5 for `tflite` and 7.1e-5 for `onnx` (step 5 of plan 3a8319ef, tiny models of every
+  family at `(None, 64, 1)`).
+* **Limits of the task.** No `deepar` and no `adaptive_ema` (above); `timestral` only up to one patch of horizon; a long-format csv,
+  gaps and resampling are not offered; `analysis_args.conformal_alpha` is refused; the model analysis is data-free (weights and
+  spectral only, since the stock analyses read class probabilities) and for `ets`, with one parameter, the analyzer finds nothing and the
+  summary says `skipped`; mixed precision is not verified; the numbers are in context-standardized units, so a `val_mae` is not in the
+  series' units (`predict` is). Beating the baselines on the synthetic bank is a learning check (see "What this does NOT prove"), and
+  the recipe's learning rate and batch were measured on `nbeats` only; the other families run the same recipe unless the table says
+  otherwise and carry no tuning claim.
+* **Gate numbers: NOT YET MEASURED (placeholder).** Step 20 of plan 3a8319ef fills this table from the GPU gate on the code of its
+  Step 19 and Step 21 re-checks it on the final HEAD; until then no cell below is a measurement.
+
+| Arm | Task | Epochs | Params | Step, epoch | Baselines | Epoch zero | Threshold | Best `val_mae` | Verdict | Final is best | Peak GPU |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| G1 | `nbeats/base`, synthetic bank | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
+| G2 | `nbeats/base`, killed in epoch 3 and resumed | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
+| G3 | one run of each other family, 3 epochs of 100 steps (verdict recorded, not gated) | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
+| G4 | `nbeats/tiny`, a csv written from the bank | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
 
 **Keys**: `key=value` tokens; a dot reaches a group (`optim_args.lr=3e-4`, `data.dataset=cifar10`);
 `config=run.yaml` loads a file first and the command line wins over it. A value is read by
@@ -838,7 +1063,7 @@ problems and a "did you mean". `auto` asks for the family's recipe default.
 images per class, optional `data.test_dir`) or `csv` (`data.train_csv`, columns `path` and `label`).
 **A data file and dotted keys are two layers of one group** (plan 98b866fb 7.1, D-021): `data=<file>` is the path of a YAML
 file holding the group, and `data.<key>=` tokens put over it, key by key, so a capped or tweaked run needs no copy of the file.
-The same rule holds for all four tasks and for the `data: <file>` of a `config=` file; the lowest layer is the `config=` file, then
+The same rule holds for all five tasks and for the `data: <file>` of a `config=` file; the lowest layer is the `config=` file, then
 the group's file, then the dotted keys, and the file's `format` reads dotted keys that state none (`data.path_column=` after a
 csv file); a `data.format=` that differs from the file's is refused naming both formats (give a file of that format, or every key on the command line with no file). A key given twice on the command line, a file twice, or a file together with a JSON object for the group is still
 refused as a repeated key. `config.json` records the resolved values, as for every key, and not which layer a value came from.
@@ -850,7 +1075,7 @@ python -m train image_segmentation out=auto model=convunext/tiny data=<out>/data
 **The run directory**: `out=auto` makes `results/<timestamp>...`; an existing `out` is refused,
 nothing is overwritten or deleted. A run writes `config_requested.json` (what was asked),
 `config.json` (resolved), `run.log`, `training_log.csv`, `results_summary.json`, `task.json`
-(class names, input shape, mean and std: what a model needs to be used without its config; a `pretrain` run writes none),
+(class names, input shape, mean and std: what a model needs to be used without its config; a segmentation, denoising or forecasting run writes the keys of its own record, a `pretrain` run writes none),
 `best_model.keras`, `final_model.keras`, the figures and analysis, and `checkpoints/`
 (`backup/`, `fit_state.json`) and `run.lock` for resume. `run.lock` is a kernel `flock` held for the
 life of the run and released when the process ends, a SIGKILL included, so two resumes cannot both run
@@ -859,7 +1084,7 @@ and a reused pid blocks nobody; the pid in the file is a label for the refusal m
 **Resume**: `resume_interrupted=true` with the same `out` and the same request continues a killed
 run. It is refused for a finished run (one with a `results_summary.json`), another request, other data, a live
 process holding the run, or a torn backup; `devices` and `analysis_args.eval_batch_size` may differ. The training data
-order replays epoch 0's, except for `pretrain`, which trains a resumed run on a fresh stream (its section above), and a half-done epoch is trained again (the key's help lists the rest).
+order replays epoch 0's, except for `pretrain` and `time_series_forecasting`, which train a resumed run on a fresh stream (their sections above), and a half-done epoch is trained again (the key's help lists the rest).
 A run killed **before** a code change that alters training (step 10b of plan 98b866fb: the ConvNeXt V1 layer scale starts at 1e-6 and is
 no longer clamped or decayed; step 10c: ConvNeXt V2 blocks have no layer scale by default and a zero GRN gamma; step 10d: the CIFAR-10
 AutoAugment policy; step 10e: the ResNet decay and clip) and resumed **after** it continues under the new rules: its early epochs trained
@@ -958,7 +1183,7 @@ is the required end-of-run sequence that calls them. `src/train/AGENTS.md` has t
 **Predict**: `python -m train predict model=<run dir or .keras> data=<image or directory> out=pred.json`
 writes a new JSON list of `{"path", "labels", "scores"}`, every class best first. A directory is
 searched recursively. `out` must not exist. A segmentation run and a denoising run write a new directory of PNG
-files and an `index.json` instead (the segmentation paragraph below and `image_denoising` above). A `pretrain` run directory is
+files and an `index.json` instead (the segmentation paragraph below and `image_denoising` above), and a forecasting run takes a csv or a `.npy` or `.npz` of windows and writes one JSON file of forecasts (`time_series_forecasting` above). A `pretrain` run directory is
 refused (it has no `task.json`; `pretrain` above has the sentence), and so is its `export`. **On ImageNet the `labels` are WordNet ids** such as `n01806143`, not
 words, and so are the `class_names` of `task.json`. The loader sorts the 1,000 ids and takes the position as the class
 index; the devkit's `meta.mat` maps an id to its words:
@@ -1026,7 +1251,7 @@ told apart, and neither are two runs of one family and variant with the same cla
 of version 1 and only `schema_version` changed; a segmentation record has `input_size` as `[height, width]` (not
 necessarily square), `channels`, `ignore_index`, `mask_threshold` and `output` where a classification record has
 `input_shape` and `eval_transform`; a denoising record has `channels`, `size_multiple`, `data_range` and `output` and no class names,
-statistics or input size (see `image_denoising`). A record of version 1 is refused, in one sentence that names the file and says the
+statistics or input size (see `image_denoising`); a forecasting record has `lookback`, `horizon`, `channels`, `value_cols`, `scale_floor`, `head`, `quantile_levels`, `point_index`, `decode`, `data_format` and `data_sha256` and no class names, statistics or input size (see `time_series_forecasting`). A record of version 1 is refused, in one sentence that names the file and says the
 run has to be trained again, by `predict`, by `export` and by `resume_interrupted=true` (the last before the data is
 loaded). There is no converter and no reader: a run directory made before this change cannot be predicted from, exported
 or resumed (its files are not touched, and `best_model.keras` still loads in Keras).
@@ -1035,7 +1260,7 @@ or resumed (its files are not touched, and `best_model.keras` still loads in Ker
 writes one new file (a directory for `saved_model`) and `<out>.task.json` beside it, and prints
 only the path on stdout. Input contract: float32 `(batch, height, width, channels)` pixels scaled
 to `[0, 1]` then standardized, `(x - mean) / std`, with the mean and std in `<out>.task.json`;
-the output is raw logits, one per class name in that file for a classifier, `(batch, classes)`. **A segmentation run**
+the output is raw logits, one per class name in that file for a classifier, `(batch, classes)`. **A forecasting run** exports raw windows `(batch, lookback, channels)` and returns the forecast in the series' own units, and refuses five of its 36 cells by name (`time_series_forecasting` above). **A segmentation run**
 (D-081) exports the same four formats and the output is one score per class per pixel, `(batch, height, width, classes)`,
 at the `input_size` of `<out>.task.json` (a version 2 record, the run's own, byte for byte): height and width are fixed
 to it and may differ, only the batch is free, and the mask is the argmax over the last axis after the caller resizes the
