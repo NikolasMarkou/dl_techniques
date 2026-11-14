@@ -22,9 +22,27 @@ import keras
 import numpy as np
 import pytest
 
-from train.common.evaluation import LOAD_RTOL, check_model_loading
+from train.common.evaluation import LOAD_RTOL, LoadCheck, check_model_loading
 
 BATCH = 6
+
+
+def verdict(*args, **kwargs):
+    """The :class:`LoadCheck` of ``check_model_loading``; an error out of it is an assertion that names the property.
+
+    Without the list branch the outputs are stacked by ``np.asarray`` and numpy raises ``ValueError``
+    ("inhomogeneous shape") out of the check. A reader of a test log would then see an exception inside the
+    test body, not a failed claim: the claim is that a list of outputs is PAIRED and answered with a gap and a
+    verdict, so that is what is asserted here, before any field is read.
+    """
+    try:
+        outcome = check_model_loading(*args, **kwargs)
+    except ValueError as err:
+        outcome = err
+    assert isinstance(outcome, LoadCheck), (
+        "a list of outputs must be paired output by output and answered with a gap and a verdict, "
+        f"but the check raised {type(outcome).__name__}: {outcome}")
+    return outcome
 
 
 def two_head_model(seed, second_kernel_scale=1.0, equal_shapes=False):
@@ -64,9 +82,9 @@ def test_outputs_of_different_shapes_are_a_faithful_reload_with_a_gap_of_zero(sa
     model = two_head_model(0)
     expected = model.predict(sample, verbose=0)
     path = saved(model, tmp_path)
-    absolute = check_model_loading(path, sample, expected)
+    absolute = verdict(path, sample, expected)
     assert absolute.ok is True and absolute.max_abs_diff == 0.0 and absolute.weights_equal is None
-    exact = check_model_loading(path, sample, expected, relative_tolerance=LOAD_RTOL, reference_model=model)
+    exact = verdict(path, sample, expected, relative_tolerance=LOAD_RTOL, reference_model=model)
     assert exact.ok is True and exact.max_abs_diff == 0.0 and exact.weights_equal is True
     assert exact.scale == pytest.approx(max(float(np.abs(a).max()) for a in expected), rel=1e-6)
 
@@ -81,7 +99,7 @@ def test_a_second_output_that_differs_fails_the_check_while_the_first_is_equal(
     got = off.predict(sample, verbose=0)
     assert np.array_equal(got[0], expected[0]), "the FIRST output is equal: a check of the first output alone passes"
     assert float(np.abs(got[1] - expected[1]).max()) > 0.1
-    check = check_model_loading(saved(off, tmp_path), sample, expected, relative_tolerance=relative_tolerance)
+    check = verdict(saved(off, tmp_path), sample, expected, relative_tolerance=relative_tolerance)
     assert check.ok is False
     assert check.max_abs_diff == pytest.approx(float(np.abs(got[1] - expected[1]).max()), rel=1e-6)
 
@@ -91,19 +109,19 @@ def test_the_gap_reported_is_the_worst_over_the_outputs(sample, tmp_path):
     expected = model.predict(sample, verbose=0)
     path = saved(model, tmp_path)
     nudged = [expected[0] + 2e-6, expected[1] + 5e-6]
-    check = check_model_loading(path, sample, nudged, tolerance=1e-4)
+    check = verdict(path, sample, nudged, tolerance=1e-4)
     assert check.ok is True
     assert check.max_abs_diff == pytest.approx(5e-6, rel=0.05)
     reverse = [expected[0] + 5e-6, expected[1] + 2e-6]
-    assert check_model_loading(path, sample, reverse, tolerance=1e-4).max_abs_diff == pytest.approx(5e-6, rel=0.05)
+    assert verdict(path, sample, reverse, tolerance=1e-4).max_abs_diff == pytest.approx(5e-6, rel=0.05)
 
 
 def test_a_tuple_of_expected_outputs_is_the_same_as_a_list(sample, tmp_path):
     model = two_head_model(0)
     expected = model.predict(sample, verbose=0)
     path = saved(model, tmp_path)
-    assert check_model_loading(path, sample, tuple(expected)).ok is True
-    assert check_model_loading(path, sample, tuple(expected[::-1])).ok is False
+    assert verdict(path, sample, tuple(expected)).ok is True
+    assert verdict(path, sample, tuple(expected[::-1])).ok is False
 
 
 def test_a_different_number_of_outputs_or_a_single_array_is_a_verdict_not_a_crash(sample, tmp_path):
@@ -111,7 +129,7 @@ def test_a_different_number_of_outputs_or_a_single_array_is_a_verdict_not_a_cras
     expected = model.predict(sample, verbose=0)
     path = saved(model, tmp_path)
     for wrong in (expected[:1], expected + [expected[0]], expected[1]):
-        check = check_model_loading(path, sample, wrong)
+        check = verdict(path, sample, wrong)
         assert check.ok is False and check.max_abs_diff is None and check.scale is None
 
 

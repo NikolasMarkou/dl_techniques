@@ -1218,7 +1218,9 @@ def test_a_second_channel_is_a_named_refusal_for_tirex_ets_and_mdn(family):
 
 def test_a_timestral_horizon_above_its_patch_is_refused_by_name_and_up_to_it_is_not():
     assert fm.geometry_problems("timestral", 1, fm.TIMESTRAL_PATCH, {}) == []
-    (line,) = fm.geometry_problems("timestral", 1, fm.TIMESTRAL_PATCH + 1, {})
+    problems = fm.geometry_problems("timestral", 1, fm.TIMESTRAL_PATCH + 1, {})
+    assert len(problems) == 1, f"a timestral horizon of {fm.TIMESTRAL_PATCH + 1} is refused with one line, got {problems}"
+    (line,) = problems
     assert "first block" in line and "data.horizon" in line and str(fm.TIMESTRAL_PATCH) in line
     assert fm.geometry_problems("timestral", 1, 24, {"patch_size": 16})[0].count("16") >= 2
     assert fm.geometry_problems("nbeats", 1, 500, {"patch_size": 16}) == []

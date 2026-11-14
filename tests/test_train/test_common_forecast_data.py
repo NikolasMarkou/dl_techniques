@@ -657,8 +657,14 @@ class TestEveryRefusalIsANamedErrorWithinThirtySeconds:
             load(**over)
 
     def test_a_csv_too_short_for_one_window_per_segment_never_hangs(self, tmp_path):
-        with pytest.raises(ConfigError, match="too short"):
+        with pytest.raises(ConfigError) as err:
             load(**csv_kwargs(write_csv(tmp_path, rows=100)))
+        # The refusal is the shared segment check's one sentence (D-037), said before any window is placed: the
+        # claim is asserted on its text, so a loader that skips the check and fails later on another sentence
+        # (the select segment holds fewer windows than a batch) fails an assertion here, not an unrelated error.
+        message = str(err.value)
+        assert message.startswith("the csv of 100 rows is too short: its "), message
+        assert f"one window needs lookback + horizon = {WIDTH}" in message, message
 
     def test_a_csv_whose_select_segment_holds_fewer_windows_than_a_batch_states_the_rows_needed(self, tmp_path):
         with pytest.raises(ConfigError, match=r"needs at least \d+ rows") as err:

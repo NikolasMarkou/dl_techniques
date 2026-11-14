@@ -446,6 +446,7 @@ def test_a_resume_that_trains_gets_the_settled_count_and_trains_on_another_strea
     (completed, before), = trainer.calls
     assert completed == STEPS, "one epoch was finished: the count is the settled copy's"
     after = trainer.returned
+    assert after is not None, "resume_stream returns the replacement batches, not None (a None replays the first epoch's stream)"
     assert after is not before and after.train_ds is not before.train_ds
     assert after.stream_seed == derive_stream_seed(before.seed, STEPS) != before.stream_seed
     assert after.first_batch_digest != before.first_batch_digest, "a resume that replays epoch 0 starts on its first batch"
@@ -1002,6 +1003,11 @@ def test_the_summary_holds_the_metric_the_baselines_the_epoch_zero_value_the_thr
         ended, which, reference_baselines):
     run_dir = getattr(ended, which)
     summary = read_json(run_dir / "results_summary.json")
+    # every block this test reads is in the summary: a summary that drops one is a failed claim, named here
+    # rather than a KeyError further down
+    wanted = {"status", "success_metric", "monitor", "monitor_mode", "task", "baselines", "epoch_zero", "success_threshold",
+              "success_value", "success", "canonical_metrics", "test_metrics_best", "best_val_metrics", "analyzer"}
+    assert wanted <= set(summary), f"the summary lacks {sorted(wanted - set(summary))}"
     assert summary["status"] == "ok" and summary["success_metric"] == "val_mae" and summary["monitor"] == "val_mae"
     assert summary["monitor_mode"] == "min" and summary["task"] == TASK
     # the baselines: the keys, finite and positive, the same select windows for every family (one reference), no model in them
