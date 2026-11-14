@@ -35,7 +35,9 @@ Interface contract
     figure, runs the data-free analysis and scores, saves and reloads the last epoch (``report_data_free_run``). The
     summary's ``baselines``, ``epoch_zero`` and ``canonical_metrics`` blocks come back through ``Evaluation.extras``.
 
-    The task writes no ``task.json`` yet: ``task_record`` is ``None``.
+    The run writes ``task.json`` before ``fit`` (``task_record``: the window, the channels, the scale floor, the head, the
+    levels and the decode row of the model, where the data came from), so ``predict`` loads a
+    :class:`~train.api.forecast_predictor.ForecastPredictor` from the run directory.
 
 ``train_time_series_forecasting(*, out, model, data, ...)``
     :param out: run directory (a ``str`` or a ``Path``), or ``"auto"``.
@@ -104,6 +106,7 @@ from ..forecast_models import (
     loss_problem,
 )
 from ..forecast_series import read_csv_series
+from ..predictor import build_forecast_record, overrides_of_variant
 from ..run_dir import CHECKPOINTS_DIR
 from ..trainer import Evaluation, FitState, TaskTrainer, TrainResult, config_problems
 
@@ -297,10 +300,32 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
         """Return the family adapter's keywords: the recipe's, then the caller's."""
         return registry.MODELS[context.family].load_resolver()(context, config.optim_args, config.model_args)
 
-    def task_record(self, config: TimeSeriesForecastingConfig, context: AutoContext, data: Any) -> None:
-        # No `task.json` yet: `predict` and `export` of a forecasting run refuse with the existing sentence until the record
-        # and its predictor land together (a partial record would make `load_model` dispatch on a task it cannot serve).
-        return None
+    def task_record(self, config: TimeSeriesForecastingConfig, context: AutoContext, data: Any) -> Dict[str, Any]:
+        """Return the forecasting ``task.json`` record (schema in :mod:`train.api.predictor`).
+
+        The head, the quantile levels, the median index and the decode row are the BUILT model's (:func:`train.common.forecast_run.decoder_for`:
+        prism and xlstm choose theirs by ``model_args.quantile_levels``, tirex and timestral carry their own), so a resume,
+        which asks for the record before ``build_model``, has the model built for it here.
+        """
+        # DECISION plan-2026-11-13T105600-3a8319ef/D-010
+        # The levels and the median index are read off the model by the decode row (one rule for the record, the Predictor
+        # and the metric). Do NOT recompute them from `model_args` here (tirex's and timestral's levels are the library's, and
+        # a second rule would drift), and do NOT return a record without them on a resume: `check_data_unchanged` compares the
+        # data keys only, but a record that is complete on one path and partial on another is the partial record the
+        # denoising and pretrain decisions refuse. The sequence builds the model again right after; the extra build is the
+        # price and its weights are never used (the backup restores them).
+        if self._decoder is None:
+            self.build_model(config, context, data)
+        decoder = self._decoder
+        table = registry.MODELS[context.family].load_variants()
+        return build_forecast_record(
+            model=config.model, family=context.family, variant=context.variant, lookback=data.lookback,
+            horizon=data.horizon, channels=data.input_shape[1], value_cols=data.value_cols,
+            scale_floor=config.transform_args.scale_floor, decode=decoder.row, quantile_levels=decoder.levels,
+            point_index=decoder.median_index, data_format=config.data.format, data_sha256=data.csv_sha256,
+            variant_overrides=(overrides_of_variant(table[context.variant], self._model_kwargs(config, context))
+                               if isinstance(table, Mapping) else None),
+        )
 
     def used_arguments(self, config: TimeSeriesForecastingConfig, context: AutoContext) -> Dict[str, Any]:
         """Return what the run was built with, for ``config.json``: the model keywords."""

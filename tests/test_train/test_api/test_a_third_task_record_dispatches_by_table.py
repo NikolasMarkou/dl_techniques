@@ -17,7 +17,8 @@ and a ``domain`` text, no class names, no statistics) in every table, in the tes
   key, writer;
 * removing the fake's row from any ONE table refuses the record, naming the tasks that table knows,
   and the same for the ``predict`` writer table;
-* the two real tasks have a row in every table (the tables agree on their keys);
+* the four real tasks have a row in every table (the tables agree on their keys; the fourth, forecasting, arrived with
+  plan-2026-11-13T105600-3a8319ef step 15, whose record has no class names and no statistics either);
 * a task whose data has no classes (D-005): ``DataFacts`` and ``AutoContext`` take ``num_classes=None``
   and the run summary has no ``num_classes`` key, while a classifier's still has it.
 
@@ -40,6 +41,7 @@ from train.api.errors import ConfigError
 from train.api.predictor import (
     CLASSIFICATION,
     DENOISING,
+    FORECASTING,
     PREDICTORS,
     SCHEMA_VERSION,
     SEGMENTATION,
@@ -147,6 +149,7 @@ def fake_task(monkeypatch):
         )
     )
     monkeypatch.setitem(cli.PREDICT_WRITERS, FAKE, write_fake_predict)
+    monkeypatch.setitem(cli.DATA_LISTERS, FAKE, cli._image_files)
 
 
 @pytest.fixture()
@@ -168,7 +171,7 @@ def test_the_fake_has_a_row_for_every_table():
     assert set(FAKE_ROWS) == set(TASK_TABLES)
 
 
-REAL_TASKS = [CLASSIFICATION, SEGMENTATION, DENOISING]
+REAL_TASKS = [CLASSIFICATION, SEGMENTATION, DENOISING, FORECASTING]
 
 
 @pytest.mark.parametrize("name", sorted(TASK_TABLES))
@@ -176,9 +179,11 @@ def test_the_real_tasks_have_a_row_in_every_table(name):
     assert sorted(TASK_TABLES[name]) == sorted(REAL_TASKS), name
 
 
-def test_the_predict_writers_are_the_three_tasks_that_can_predict():
-    # Denoising's writer arrived with its predictor (plan d483ffab step 12): one row per task that can be predicted.
+def test_the_predict_writers_and_the_data_listers_are_the_four_tasks_that_can_predict():
+    # Denoising's writer arrived with its predictor (plan d483ffab step 12), forecasting's with its own (step 15): one row
+    # per task that can be predicted, in the writers and in the listers of what ``data=`` names (D-012).
     assert sorted(cli.PREDICT_WRITERS) == sorted(REAL_TASKS)
+    assert sorted(cli.DATA_LISTERS) == sorted(REAL_TASKS)
 
 
 # ---------------------------------------------------------------------
@@ -277,6 +282,7 @@ def test_the_real_tasks_keep_their_predictors():
     assert PREDICTORS[CLASSIFICATION].__name__ == "_classification_predictor"
     assert PREDICTORS[SEGMENTATION].__name__ == "_segmentation_predictor"
     assert PREDICTORS[DENOISING].__name__ == "_denoising_predictor"
+    assert PREDICTORS[FORECASTING].__name__ == "_forecasting_predictor"
 
 
 def test_export_reaches_the_tasks_rule_for_its_shape_its_refusals_and_its_note(run_dir, tmp_path, monkeypatch):
@@ -311,6 +317,17 @@ def test_a_task_missing_from_a_table_is_refused_naming_the_known_tasks(fake_task
     assert sorted(TASK_TABLES[name]) == sorted(REAL_TASKS)
     with pytest.raises(ConfigError, match=rf"'task' is '{FAKE}'; this reader knows {knows}$"):
         check_record(fake_record(), "task.json")
+
+
+def test_a_task_missing_from_the_data_listers_is_refused_naming_the_known_tasks(run_dir, tmp_path, monkeypatch):
+    """A task that has a writer but no row in ``DATA_LISTERS`` is refused before any data is listed, naming the tasks that have one."""
+    monkeypatch.delitem(cli.DATA_LISTERS, FAKE)
+    image = tmp_path / "a.png"
+    image.write_bytes(b"x")
+    knows = re.escape(", ".join(cli.DATA_LISTERS))
+    with pytest.raises(ConfigError, match=rf"'task' is '{FAKE}'; the data lister of predict knows {knows}$"):
+        cli._predict([f"model={run_dir}", f"data={image}", f"out={tmp_path / 'answer.json'}"])
+    assert not (tmp_path / "answer.json").exists()
 
 
 def test_a_task_missing_from_the_predict_writers_is_refused_naming_the_known_tasks(run_dir, tmp_path, monkeypatch):

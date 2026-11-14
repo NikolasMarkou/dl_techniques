@@ -727,7 +727,7 @@ def test_the_export_note_says_raw_values_no_clip_no_sigma_and_the_padding():
     for phrase in ("[0, 1]", "no sigma input", "RAW", "not clipped", "multiple of 8", "no mean, no std"):
         assert phrase in note, phrase
     help_text = "\n".join(cli.EXPORT_NOTES)
-    for phrase in ("RAW", "NOT clipped", "no sigma input", "size_multiple", "silently wrong", "multiples of 64"):
+    for phrase in ("RAW", "NOT clipped", "no sigma input", "size_multiple", "wrong, or crashes the interpreter", "multiples of 64"):
         assert phrase in help_text, phrase
     assert "RAW" in exporting.__doc__ and "no sigma" in exporting.__doc__
 
@@ -737,17 +737,36 @@ def test_the_export_note_says_raw_values_no_clip_no_sigma_and_the_padding():
 # ---------------------------------------------------------------------
 
 
+#: The read of a fixed-shape tflite file at another size, in a CHILD process: the interpreter resizes its input without an
+#: error and the file then either returns wrong numbers or crashes the process (a segmentation fault: measured on bfunet and
+#: bfconvunext, which a read in this process took down with every test after it).
+WRONG_SIZE_CHILD = """
+import sys
+import numpy as np
+from train.api import exporting
+
+np.save(sys.argv[3], exporting._tflite_logits(open(sys.argv[1], "rb").read(), np.load(sys.argv[2])))
+"""
+
+
 @pytest.mark.parametrize("family", ["bfunet", "bfconvunext", "convunext_biased"])
-def test_a_fixed_shape_tflite_of_a_unet_is_silently_wrong_at_another_size(family, models, tmp_path):
-    """The reason of three refusals: build the file the refusal prevents and read it at a second size."""
+def test_a_fixed_shape_tflite_of_a_unet_is_wrong_or_crashes_at_another_size(family, models, tmp_path):
+    """The reason of three refusals: build the file the refusal prevents and read it at a second size, in a child process."""
     out = tmp_path / "fixed.tflite"
     spec = tf.TensorSpec((None, *SIZE_A, 3), tf.float32, name="input")
     exporting._export_tflite(models[family], out, spec)
     batch = images_of(SIZE_B)
     own = images_of(SIZE_A)
     assert relative_gap(exporting._tflite_logits(out.read_bytes(), own), keras_reference(models[family], own)) <= EXPORT_RTOL
-    wrong = exporting._tflite_logits(out.read_bytes(), batch)  # no error: the interpreter resizes its input
-    assert relative_gap(wrong, keras_reference(models[family], batch)) > 0.1  # measured 0.52 to 1.0
+    np.save(tmp_path / "second_size.npy", batch)
+    child = subprocess.run(
+        [sys.executable, "-c", WRONG_SIZE_CHILD, str(out), str(tmp_path / "second_size.npy"), str(tmp_path / "wrong.npy")],
+        capture_output=True, text=True, env=child_env(), timeout=600,
+    )
+    if child.returncode == 0:  # no error: the interpreter resizes its input, and the numbers are wrong
+        assert relative_gap(np.load(tmp_path / "wrong.npy"), keras_reference(models[family], batch)) > 0.1  # measured 0.65
+    else:  # killed by a signal (a segmentation fault), not a Python error: an error would be a refusal the file does not make
+        assert child.returncode < 0, child.stderr[-600:]
 
 
 def test_a_fixed_shape_tflite_of_a_family_with_no_stride_stays_right_at_another_size(models, tmp_path):
@@ -968,5 +987,6 @@ def test_the_modes_are_read_from_the_shape():
 
 def test_the_refusal_texts_hold_the_measured_numbers_the_tests_above_re_prove():
     text = " ".join(EXPORT_REFUSALS.values())
-    for number in ("1.0 (relative)", "0.52 (relative)", "0.56 (relative)", "multiples of 64", "96x80", "100x100", "65x65"):
+    for number in ("0.65 (relative)", "segmentation fault", "bfunet/tiny", "bfconvunext/tiny", "convunext_biased/tiny",
+                   "multiples of 64", "96x80", "100x100", "65x65"):
         assert number in text, number

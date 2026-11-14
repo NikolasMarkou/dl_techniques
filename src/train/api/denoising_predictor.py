@@ -406,25 +406,26 @@ def write_predictions(predictor: DenoisingPredictor, files: Sequence[Path], out:
 # Export rules
 # ---------------------------------------------------------------------
 
+#: The reason of the three fixed-shape tflite refusals, measured on the tiny families (plan-2026-11-13T105600-3a8319ef step 15, re-proved by
+#: ``test_a_fixed_shape_tflite_of_a_unet_is_wrong_or_crashes_at_another_size``, which reads the file in a child process): the
+#: numbers a U-Net file returns at another size are 0.65 (relative) off for convunext_biased/tiny, and the interpreter dies
+#: with a segmentation fault for bfunet/tiny and bfconvunext/tiny (since the denoisers build ``ExactLeakyReLU``, plan-2026-11-13T105600-3a8319ef
+#: step 3: the earlier raw ``LeakyReLU`` files returned 1.0, 0.52 and 0.56 off).
+_FIXED_TFLITE = (
+    "a fixed-shape tflite file is unusable at any size but its own: the interpreter resizes its input without an error and "
+    "a U-Net then returns numbers that are wrong (0.65 (relative) off, measured on convunext_biased/tiny) or crashes the "
+    "process with a segmentation fault (measured on bfunet/tiny and bfconvunext/tiny)"
+)
+
 #: The (family, format, mode) cells of ``export`` that are REFUSED, each with the measured reason (plan d483ffab
 #: step 2(b), re-proved by ``test_denoising_predictor_and_export.py``: each row has a test that builds the
 #: artifact anyway and fails if the reason stops being true). ``mode`` is ``fixed`` (an integer height and
 #: width) or ``dynamic`` (a ``None`` side). Every cell NOT listed exports and matches Keras: dynamic to 2.3e-6
 #: (relative) at two sizes for every family and format, fixed to 2.3e-6 at its own size.
 EXPORT_REFUSALS: Dict[Tuple[str, str, str], str] = {
-    ("bfunet", "tflite", "fixed"): (
-        "a fixed-shape tflite file is silently wrong at any size but its own: the interpreter resizes its input "
-        "without an error and a U-Net then returns numbers that are 1.0 (relative) off (measured on bfunet/tiny)"
-    ),
-    ("bfconvunext", "tflite", "fixed"): (
-        "a fixed-shape tflite file is silently wrong at any size but its own: the interpreter resizes its input "
-        "without an error and a U-Net then returns numbers that are 0.52 (relative) off (measured on bfconvunext/tiny)"
-    ),
-    ("convunext_biased", "tflite", "fixed"): (
-        "a fixed-shape tflite file is silently wrong at any size but its own: the interpreter resizes its input "
-        "without an error and a U-Net then returns numbers that are 0.56 (relative) off (measured on "
-        "convunext_biased/tiny)"
-    ),
+    ("bfunet", "tflite", "fixed"): _FIXED_TFLITE,
+    ("bfconvunext", "tflite", "fixed"): _FIXED_TFLITE,
+    ("convunext_biased", "tflite", "fixed"): _FIXED_TFLITE,
     ("scunet", "onnx", "dynamic"): (
         "an onnx file of SCUNet with a free height and width runs only where both sides are multiples of 64 (it "
         "fails in a Tile node at 96x80, 100x100 and 65x65; measured on scunet/tiny), and the file alone cannot "

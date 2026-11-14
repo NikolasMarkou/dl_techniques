@@ -48,6 +48,13 @@ help word, prints its config keys; any other arguments go to ``run_task``.
     whole image goes through the model in one pass; tiling (``tile``, ``tile_overlap``) is an argument of
     ``DenoisingPredictor.predict`` from Python, and a pass that runs out of memory says so.
 
+    For a FORECASTING run ``data`` is one csv file (the last ``lookback`` rows of the record's value columns are one
+    window), or a ``.npy`` or ``.npz`` file holding windows ``(L, C)`` or ``(N, L, C)`` in the series' own units, and
+    ``out`` is a new JSON file with the lookback, the horizon, the channels, the ``point`` forecast ``(N, horizon,
+    channels)`` and, for a quantile head, the ``quantile_levels`` and the ``quantiles``
+    (:func:`train.api.forecast_predictor.write_predictions`). The record is read BEFORE the data is listed
+    (``DATA_LISTERS``, D-012).
+
 ``convert <dataset> key=value ...``
     Writes a source dataset as index masks and CSV listings the segmentation task reads, outside the
     source tree, resumably and without deleting (:mod:`train.api.convert`; ``ade20k``, ``coco``). Exit 0 and ONLY
@@ -163,7 +170,7 @@ from .config import (
     validate,
 )
 from .errors import ConfigError, ConfigValidationError, DLTrainError
-from .predictor import CLASSIFICATION, DENOISING, SEGMENTATION, known_tasks_line, record_beside
+from .predictor import CLASSIFICATION, DENOISING, FORECASTING, SEGMENTATION, known_tasks_line, record_beside
 
 # ---------------------------------------------------------------------
 
@@ -289,13 +296,13 @@ EXPORT_NOTES = (
     "are free. It returns the denoised image RAW, at the input's size, NOT clipped to [0, 1] (clip it",
     "yourself where a picture is made). Pad each side to a multiple of size_multiple (in <out>.task.json;",
     "reflect padding) before calling and crop the result after: a U-Net family fails on another size.",
-    "Refused with the reason: a tflite file of a U-Net family (a fixed-shape file is silently wrong at",
-    "another size), and an onnx file of scunet with a free height and width (it runs only at multiples of 64).",
+    "Refused with the reason: a tflite file of a U-Net family (a fixed-shape file is wrong, or crashes the interpreter,",
+    "at another size), and an onnx file of scunet with a free height and width (it runs only at multiples of 64).",
 )
 PREDICT_OPTIONS = (
     Option("model", "a run directory (its best_model.keras) or a .keras file beside its task.json"),
-    Option("data", "an image file, or a directory of images (searched recursively)"),
-    Option("out", "a new .json file; it must not exist (a segmentation model writes a new directory of PNG masks and an index.json there; a denoising model a directory of PNG images and an index.json)"),
+    Option("data", "an image file, or a directory of images (searched recursively); a forecasting model takes a csv file or a .npy or .npz array of windows"),
+    Option("out", "a new .json file; it must not exist (a segmentation model writes a new directory of PNG masks and an index.json there; a denoising model a directory of PNG images and an index.json; a forecasting model one JSON file of forecasts)"),
 )
 
 
@@ -436,16 +443,23 @@ def _predict(args: List[str]) -> int:
     data = Path(values["data"])
     if not data.exists():
         raise ConfigError(f"Invalid value for 'data': {data} does not exist")
-    files = _image_files(data)
     # The task is read from the record alone, so what only the files and the record decide is refused
     # before the model is loaded (D-064): a stem two images share, an output a PNG cannot hold.
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-012
+    # The record is read BEFORE the data is listed, and the data is listed by the TASK's lister (DATA_LISTERS), not by
+    # ``_image_files``: a forecasting run must not be told "holds no image". Do NOT list images first "because the image tasks
+    # always did" (the one corner that changes is a missing record together with an empty image directory: the record is said
+    # first now), and do NOT branch on the task here.
     record = record_beside(model_path)
     # DECISION plan-2026-11-10T095307-d483ffab/D-006: one writer per task, found in PREDICT_WRITERS.
     # Do NOT branch on the task here (``if task == SEGMENTATION``): a third task is one more row.
     writer = PREDICT_WRITERS.get(record["task"])
     if writer is None:
         raise ConfigError(known_tasks_line(record["task"], PREDICT_WRITERS, "predict"))
-    return writer(model_path, record, files, out)
+    lister = DATA_LISTERS.get(record["task"])
+    if lister is None:
+        raise ConfigError(known_tasks_line(record["task"], DATA_LISTERS, "the data lister of predict"))
+    return writer(model_path, record, lister(data), out)
 
 
 def _predict_labels(model_path: Path, record: Mapping[str, Any], files: List[Path], out: Path) -> int:
@@ -494,6 +508,33 @@ def _predict_images(model_path: Path, record: Mapping[str, Any], files: List[Pat
     return 0
 
 
+def _forecast_files(data: Path) -> List[Path]:
+    """Return ``[data]``: a csv, a ``.npy`` or a ``.npz`` file; a directory or another suffix is refused by name."""
+    from .forecast_predictor import list_data
+
+    return list_data(data)
+
+
+def _predict_forecasts(model_path: Path, record: Mapping[str, Any], files: List[Path], out: Path) -> int:
+    """Write the forecasts of the one file ``files`` holds as one JSON file into the new path ``out``."""
+    from .forecast_predictor import read_data, write_predictions
+    from .predictor import load_model
+
+    source = read_data(files[0])  # a file that cannot be read is refused before the model is loaded
+    write_predictions(load_model(model_path), files[0], source, out)
+    sys.stdout.write(f"{out}\n")
+    return 0
+
+
+#: What ``predict`` lists from ``data=``, per task: ``lister(data) -> files``. The image tasks list images (recursively); a
+#: forecasting run takes one csv or numpy file. The keys are those of :data:`PREDICT_WRITERS`.
+DATA_LISTERS: Dict[str, Callable[[Path], List[Path]]] = {
+    CLASSIFICATION: _image_files,
+    SEGMENTATION: _image_files,
+    DENOISING: _image_files,
+    FORECASTING: _forecast_files,
+}
+
 #: What ``predict`` writes, per task: ``writer(model_path, record, files, out) -> exit code``. A task
 #: that can be loaded (a row in every table of ``train.api.predictor.TASK_TABLES``) and predicted
 #: with has one row here; the keys are the task words of ``train.api.predictor``, which imports no
@@ -502,6 +543,7 @@ PREDICT_WRITERS: Dict[str, Callable[[Path, Mapping[str, Any], List[Path], Path],
     CLASSIFICATION: _predict_labels,
     SEGMENTATION: _predict_masks,
     DENOISING: _predict_images,
+    FORECASTING: _predict_forecasts,
 }
 
 

@@ -6,7 +6,8 @@ required hooks, the seams of the shared sequence and the bar, and nothing else (
 This first part pins, on the CPU at tiny sizes (a bank of four synthetic patterns, lookback 32, horizon 8, batch 8):
 
 * **The hook table.** Every hook of ``REQUIRED_HOOKS`` is overridden, and so is each optional one the task relies on;
-  ``task_record`` answers ``None`` for now (step 15 gives the task a record), no per-epoch figure is attached.
+  ``task_record`` answers the record of ``train.api.predictor.RECORD_KEYS`` (its content is held by
+  ``test_forecast_predictor_and_export.py``), no per-epoch figure is attached.
 * **The bar** (D-008, D-037). ``val_mae`` is an error, so the bar is STRICTLY below, in float32, and a model that scores
   within a few float32 steps of the threshold is a miss: the compiled metric accumulates in float32 and the baselines are
   float64 numpy, so a model that outputs the naive-last forecast scores one step BELOW its own baseline on some seeds and a
@@ -165,10 +166,13 @@ def test_every_optional_hook_the_task_relies_on_is_overridden(hook):
     assert getattr(TimeSeriesForecastingTrainer, hook) is not getattr(TaskTrainer, hook), hook
 
 
-def test_the_task_attaches_no_per_epoch_figure_and_writes_no_record_yet(world, tmp_path):
+def test_the_task_attaches_no_per_epoch_figure_and_writes_the_record_of_its_table(world, tmp_path):
+    from train.api.predictor import RECORD_KEYS
+
     trainer, resolved, context = prepared(tmp_path / "run")
     assert trainer.figure_callbacks(resolved, None, tmp_path) == []
-    assert trainer.task_record(resolved, context, None) is None
+    data = trainer.build_data(resolved, context)
+    assert list(trainer.task_record(resolved, context, data)) == list(RECORD_KEYS[TASK])
     assert trainer.config_stamps(resolved, registry.MODELS["nbeats"]) == {}
 
 
@@ -818,7 +822,7 @@ def test_only_nbeats_and_ets_carry_a_recipe_notice_and_each_says_why():
 # Every family trains two epochs of ``E2E_STEPS`` steps on the CPU at tiny sizes, once through ``train_time_series_forecasting``
 # and once through ``cli.main`` (the same request, the run renamed between the two). What each run is held to is derived from
 # the code: the listing is what the sequence, the callbacks and the reporting write (``run_sequence``, ``fit_callbacks``,
-# ``TimeSeriesForecastingTrainer.evaluate_and_report`` and ``task_record`` returning ``None``), the summary keys are the ones
+# ``TimeSeriesForecastingTrainer.evaluate_and_report`` and ``task_record``), the summary keys are the ones
 # ``evaluate_and_report`` puts in ``Evaluation.extras`` and ``summary_fields`` names.
 
 E2E_EPOCHS, E2E_BATCH, E2E_STEPS = 2, 16, 20
@@ -922,10 +926,10 @@ def test_the_cases_are_the_decode_rows_and_the_registered_families():
 
 
 #: The files of a finished run, from the code: the sequence writes the config pair, the log and the lock, the callbacks the
-#: csv and the two checkpoints, the reporting the history and the summary. NO ``task.json``: ``task_record`` is ``None``.
+#: csv and the two checkpoints, the reporting the history and the summary, and ``task.json`` (``task_record``, step 15).
 RUN_FILES = {
     "best_model.keras", "config.json", "config_requested.json", "final_model.keras", "results_summary.json",
-    "run.lock", "run.log", "training_history.json", "training_log.csv",
+    "run.lock", "run.log", "task.json", "training_history.json", "training_log.csv",
 }
 RUN_DIRS = {"checkpoints", "model_analysis", "tensorboard", "visualizations"}
 #: The figures of every run: the dashboard of the callbacks and the forecast figure of ``evaluate_and_report``.
@@ -949,9 +953,9 @@ def names(path: Path) -> set:
 
 
 @pytest.mark.parametrize("which", ["function", "cli"])
-def test_the_run_directory_holds_the_listing_the_code_writes_and_no_task_record(ended, which):
+def test_the_run_directory_holds_the_listing_the_code_writes_task_json_included(ended, which):
     run_dir = getattr(ended, which)
-    assert names(run_dir) == RUN_FILES | RUN_DIRS, "an added or a missing file (task.json included) is a change of the contract"
+    assert names(run_dir) == RUN_FILES | RUN_DIRS, "an added or a missing file is a change of the contract"
     assert names(run_dir / "checkpoints") == {"backup", "fit_state.json"}
     assert names(run_dir / "tensorboard") == {"train", "validation"}
     assert names(run_dir / "visualizations") == FIGURES

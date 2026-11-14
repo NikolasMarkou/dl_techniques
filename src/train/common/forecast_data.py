@@ -223,6 +223,8 @@ class ForecastBatches:
     :param bank: ``(n_series, rows, channels)`` float64; ``segments`` the ``(lo, hi)`` rows of each split;
         ``select_windows``, ``test_windows`` the ``(series, start)`` of every fixed window.
     :param dropped: ``(pattern, realization)`` of the non-finite series the bank left out.
+    :param value_cols, csv_sha256: the csv's value column names and the sha256 of its bytes (``None`` for the synthetic bank);
+        the record of the run (``task.json``) carries both.
     :param first_batch_digest: sha256 of the first train batch, from the pure map (no fit iterator is touched).
     """
 
@@ -250,6 +252,8 @@ class ForecastBatches:
     n_series: int
     dropped: Tuple[Tuple[str, int], ...]
     first_batch_digest: str
+    value_cols: Optional[Tuple[str, ...]]
+    csv_sha256: Optional[str]
     train_builder: Callable[[int], Tuple["tf.data.Dataset", str]] = field(repr=False)
 
     def with_stream(self, completed_steps: int) -> "ForecastBatches":
@@ -430,4 +434,5 @@ def load_forecast_batches(
         fingerprint=fingerprint, seed=seed, stream_seed=first_stream, batch_size=batch_size, lookback=lookback,
         horizon=horizon, bank=bank, segments=dict(zip(("train", "select", "test"), segments)),
         select_windows=select_windows, test_windows=test_windows, n_series=n_series, dropped=tuple(dropped),
-        first_batch_digest=first_digest, train_builder=train_stream)
+        first_batch_digest=first_digest, value_cols=None if format == BUILTIN else tuple(columns),
+        csv_sha256=None if format == BUILTIN else digest, train_builder=train_stream)

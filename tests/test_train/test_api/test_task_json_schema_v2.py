@@ -32,6 +32,7 @@ from train.api.predictor import (
     OPTIONAL_RECORD_KEYS,
     RECORD_KEYS,
     SCHEMA_VERSION,
+    build_forecast_record,
     build_segmentation_record,
     build_task_record,
     check_record,
@@ -47,6 +48,7 @@ from tests.classification_fakes import use_tiny_raw
 CLASSIFICATION = "image_classification"
 SEGMENTATION = "image_segmentation"
 DENOISING = "image_denoising"
+FORECASTING = "time_series_forecasting"
 
 #: The keys and order of a version 1 classification record, written out (not read from the module).
 V1_KEYS = [
@@ -75,6 +77,16 @@ def segmentation(**changes):
     return value
 
 
+def forecasting(**changes):
+    value = build_forecast_record(
+        model="prism/tiny", family="prism", variant="tiny", lookback=32, horizon=8, channels=2, value_cols=["a", "b"],
+        scale_floor=1e-3, decode="prism_quantile", quantile_levels=[0.1, 0.5, 0.9], point_index=1, data_format="csv",
+        data_sha256="ab" * 32,
+    )
+    value.update(changes)
+    return value
+
+
 def without(value, *keys):
     value = dict(value)
     for key in keys:
@@ -87,9 +99,9 @@ def without(value, *keys):
 # ---------------------------------------------------------------------
 
 
-def test_the_version_is_two_and_the_tables_are_the_three_tasks():
+def test_the_version_is_two_and_the_tables_are_the_four_tasks():
     assert SCHEMA_VERSION == 2
-    assert sorted(RECORD_KEYS) == sorted([CLASSIFICATION, SEGMENTATION, DENOISING])
+    assert sorted(RECORD_KEYS) == sorted([CLASSIFICATION, SEGMENTATION, DENOISING, FORECASTING])
     assert sorted(DATA_KEYS) == sorted(RECORD_KEYS)
     assert OPTIONAL_RECORD_KEYS == ("variant_overrides",)
 
@@ -118,7 +130,20 @@ def test_a_segmentation_record_has_its_own_keys_and_a_non_square_size():
     assert "input_shape" not in record and "eval_transform" not in record
 
 
-@pytest.mark.parametrize("make", [classification, segmentation], ids=[CLASSIFICATION, SEGMENTATION])
+def test_a_forecasting_record_has_its_own_keys_and_no_class_names_and_no_statistics():
+    record = forecasting()
+    assert list(record) == list(RECORD_KEYS[FORECASTING]) == [
+        "schema_version", "task", "model", "family", "variant", "lookback", "horizon", "channels", "value_cols",
+        "scale_floor", "head", "quantile_levels", "point_index", "decode", "data_format", "data_sha256",
+    ]
+    assert record["task"] == FORECASTING and record["head"] == "quantile" and record["value_cols"] == ["a", "b"]
+    assert not {"class_names", "normalize", "mean", "std", "input_shape", "input_size"} & set(record)
+    point = forecasting(head="point", quantile_levels=None, point_index=None, decode="prism_point")
+    assert point["head"] == "point" and point["quantile_levels"] is None and point["point_index"] is None
+    check_record(point, "<built>")
+
+
+@pytest.mark.parametrize("make", [classification, segmentation, forecasting], ids=[CLASSIFICATION, SEGMENTATION, FORECASTING])
 def test_each_task_round_trips_through_a_file_and_passes_its_own_check(make, tmp_path):
     record = make()
     check_record(record, "<built>")
@@ -127,8 +152,8 @@ def test_each_task_round_trips_through_a_file_and_passes_its_own_check(make, tmp
     assert read_record(path) == record == json.loads(path.read_text())
 
 
-def test_the_optional_key_rides_on_either_task():
-    for make in (classification, segmentation):
+def test_the_optional_key_rides_on_every_task():
+    for make in (classification, segmentation, forecasting):
         with_overrides = make(variant_overrides={"depth": 4})
         check_record(with_overrides, "<built>")
     assert "variant_overrides" not in segmentation()
@@ -198,6 +223,15 @@ BAD_SEGMENTATION = [
 def test_a_bad_segmentation_record_is_refused_naming_the_key(record, message):
     with pytest.raises(ConfigError, match=message):
         check_record(record, "task.json")
+
+
+def test_a_forecasting_record_does_not_take_another_tasks_keys_and_no_other_record_takes_its_keys():
+    with pytest.raises(ConfigError, match="unknown key.*class_names"):
+        check_record(forecasting(class_names=["a"]), "task.json")
+    with pytest.raises(ConfigError, match=r"missing key.*lookback.*horizon"):
+        check_record(without(forecasting(), "lookback", "horizon"), "task.json")
+    with pytest.raises(ConfigError, match="unknown key.*lookback"):
+        check_record(classification(lookback=32), "task.json")
 
 
 def test_a_classification_record_does_not_take_the_segmentation_keys_and_the_reverse():

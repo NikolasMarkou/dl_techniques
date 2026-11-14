@@ -78,6 +78,19 @@ from the OPTIONAL ``variant_overrides``.
     The zero image a loaded denoiser is checked with is ``input_shape_of``: ``DENOISING_PROBE_SIDE``
     rounded up to a multiple of ``size_multiple``, on each side.
 
+``lookback``, ``horizon``, ``channels``, ``value_cols``, ``scale_floor``, ``head``, ``quantile_levels``, ``point_index``, ``decode``, ``data_format``, ``data_sha256`` (forecasting only)
+    A forecasting record has no ``class_names``, no ``normalize``, ``mean`` or ``std`` and no input size: the model takes a
+    window ``(lookback, channels)`` in the series' own units and the statistics are those of each window's own context
+    (:func:`train.common.forecast_data.context_stats_np`; ``scale_floor`` is its relative floor). ``lookback``, ``horizon``
+    and ``channels`` are positive ints. ``head`` is ``point`` or ``quantile``; a quantile head has ``quantile_levels`` (a list
+    of numbers in 0 to 1) and ``point_index`` (the level the point forecast is, the median), a point head has both null.
+    ``decode`` is the name of the family's decode row (:data:`train.common.forecast_run.DECODE`). ``data_format`` is
+    ``builtin`` (synthetic: ``value_cols`` and ``data_sha256`` null) or ``csv`` (``value_cols`` the ``channels`` column names
+    the run read, ``data_sha256`` the 64 hex digits of the file's bytes). ``load_model`` refuses a record whose decode row, head,
+    levels, median or forecast shape is not the model's (:class:`~train.api.forecast_predictor.ForecastPredictor`). A resume
+    compares :data:`DATA_KEYS` and nothing about the head. The zero window a loaded forecaster is checked with is
+    ``(1, lookback, channels)``.
+
 ``variant_overrides`` (OPTIONAL)
     ``{table key: value}``: the keys of the variant's table (``MODEL_VARIANTS[variant]``) that the
     run's resolved ``model_args`` set to another value, so the model is the variant WITH these
@@ -87,9 +100,9 @@ from the OPTIONAL ``variant_overrides``.
     variant's table updated by it, so an override is honoured and a wrong variant or an override the
     model does not have is still refused. ``export`` carries it into ``<out>.task.json``.
 
-``build_task_record(...)`` / ``build_segmentation_record(...)`` / ``build_denoising_record(...)``
+``build_task_record(...)`` / ``build_segmentation_record(...)`` / ``build_denoising_record(...)`` / ``build_forecast_record(...)``
     :return: the record for a finished data load (not checked; see their docstrings). The first
-        writes a classification record, the second a segmentation record, the third a denoising one.
+        writes a classification record, the second a segmentation record, the third a denoising one, the fourth a forecasting one.
 
 ``check_record(record, source)``
     :param record: a parsed ``task.json``.
@@ -138,7 +151,8 @@ from the OPTIONAL ``variant_overrides``.
         called once on zeros, so a model whose output width (classification) or output map
         (segmentation: ``input_size`` and the class count; denoising: ONE tensor of the probe image's
         size and the record's channels) does not match the record is refused here. A ``image_denoising``
-        record gives a :class:`~train.api.denoising_predictor.DenoisingPredictor`.
+        record gives a :class:`~train.api.denoising_predictor.DenoisingPredictor`, a ``time_series_forecasting`` one a
+        :class:`~train.api.forecast_predictor.ForecastPredictor`.
     :raises ConfigError: for a missing path, ``task.json`` or model file, a model file that
         is not an intact ``.keras`` archive (one cut short by a kill, or a zip with no
         ``config.json`` or no weights, is named, not a Keras traceback), a bad record, a
@@ -153,7 +167,8 @@ from the OPTIONAL ``variant_overrides``.
     :return: the checked record of that run or file, without loading the model (the command line
         reads the task before it loads anything); and the model input a record names,
         ``(height, width, channels)``: ``input_shape`` for classification, ``input_size`` and
-        ``channels`` for segmentation, the probe side (see above) twice and ``channels`` for denoising.
+        ``channels`` for segmentation, the probe side (see above) twice and ``channels`` for denoising;
+        ``(lookback, channels)`` (rank 2) for forecasting.
 
 ``EXPORT_RULES[task]`` (an :class:`ExportRule`)
     What ``export`` asks the task: ``shape_of(record)`` is the shape the command line traces (the record's input
@@ -238,6 +253,7 @@ SCHEMA_VERSION = 2
 CLASSIFICATION = "image_classification"
 SEGMENTATION = "image_segmentation"
 DENOISING = "image_denoising"
+FORECASTING = "time_series_forecasting"
 
 #: The task :class:`Predictor` serves; ``load_model`` returns a
 #: :class:`~train.api.segmentation_predictor.SegmentationPredictor` for a segmentation record, so
@@ -288,6 +304,24 @@ RECORD_KEYS: Dict[str, Tuple[str, ...]] = {
         "data_range",
         "output",
     ),
+    FORECASTING: (
+        "schema_version",
+        "task",
+        "model",
+        "family",
+        "variant",
+        "lookback",
+        "horizon",
+        "channels",
+        "value_cols",
+        "scale_floor",
+        "head",
+        "quantile_levels",
+        "point_index",
+        "decode",
+        "data_format",
+        "data_sha256",
+    ),
 }
 
 #: What ``output`` may say in a segmentation record.
@@ -299,6 +333,10 @@ DENOISING_OUTPUTS = ("images",)
 #: The side of the zero image a loaded denoiser is called on to check its output, rounded UP to a multiple of
 #: the record's ``size_multiple`` (a U-Net refuses a side off its stride; the model's own input is flexible).
 DENOISING_PROBE_SIDE = 32
+
+#: What ``head`` may say in a forecasting record, and the sources ``data_format`` may name (the ``data.format`` values of the task).
+FORECAST_HEADS = ("point", "quantile")
+FORECAST_FORMATS = ("builtin", "csv")
 
 #: Keys a record MAY carry (written only when they hold something); every other key is required.
 OPTIONAL_RECORD_KEYS = ("variant_overrides",)
@@ -504,6 +542,54 @@ def build_denoising_record(
             "size_multiple": int(size_multiple),
             "data_range": unit_domain_stamp(),
             "output": DENOISING_OUTPUTS[0],
+        },
+        variant_overrides,
+    )
+
+
+def build_forecast_record(
+    *,
+    model: str,
+    family: str,
+    variant: str,
+    lookback: int,
+    horizon: int,
+    channels: int,
+    value_cols: Optional[Sequence[str]],
+    scale_floor: float,
+    decode: str,
+    quantile_levels: Optional[Sequence[float]],
+    point_index: Optional[int],
+    data_format: str,
+    data_sha256: Optional[str],
+    variant_overrides: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Return the ``task.json`` record of a forecasting run; see the module contract.
+
+    :param quantile_levels, point_index: ``None`` for a point head; a quantile head gives both, and ``head`` follows them.
+    :param decode: the name of the model's decode row (``forecast_run.Decoder.row``).
+    :param value_cols, data_sha256: ``None`` for the synthetic bank; the column names and the file hash for a csv.
+    :return: the record. It is NOT checked (:func:`check_record` does that).
+    """
+    return _record_of(
+        FORECASTING,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "task": FORECASTING,
+            "model": model,
+            "family": family,
+            "variant": variant,
+            "lookback": int(lookback),
+            "horizon": int(horizon),
+            "channels": int(channels),
+            "value_cols": None if value_cols is None else list(value_cols),
+            "scale_floor": float(scale_floor),
+            "head": "point" if quantile_levels is None else "quantile",
+            "quantile_levels": None if quantile_levels is None else [float(q) for q in quantile_levels],
+            "point_index": point_index,
+            "decode": decode,
+            "data_format": data_format,
+            "data_sha256": data_sha256,
         },
         variant_overrides,
     )
@@ -771,6 +857,57 @@ def _denoising_tail_problems(record: Mapping[str, Any]) -> List[str]:
     return lines
 
 
+def _forecast_geometry(record: Mapping[str, Any]) -> Tuple[List[str], Optional[int]]:
+    """Return ``(lines, channels)`` for the window, the channel count and the scale floor."""
+    lines = [
+        f"{key!r} must be a positive int, got {record[key]!r}"
+        for key in ("lookback", "horizon", "channels")
+        if not (_is_whole(record[key]) and record[key] > 0)
+    ]
+    floor = record["scale_floor"]
+    if not (_is_number(floor) and floor >= 0):
+        lines.append(f"'scale_floor' must be a finite number of at least 0, got {floor!r}")
+    channels = record["channels"]
+    return lines, channels if _is_whole(channels) and channels > 0 else None
+
+
+def _forecast_head_problems(record: Mapping[str, Any]) -> List[str]:
+    """Return the problems of ``head``, ``quantile_levels`` and ``point_index``: a quantile head has both, a point head neither."""
+    head, levels, index = record["head"], record["quantile_levels"], record["point_index"]
+    if head not in FORECAST_HEADS:
+        return [f"'head' must be one of {', '.join(FORECAST_HEADS)}, got {head!r}"]
+    if head == "point":
+        return [f"{key!r} must be null for a point head, got {value!r}"
+                for key, value in (("quantile_levels", levels), ("point_index", index)) if value is not None]
+    if not isinstance(levels, list) or not levels:
+        return [f"'quantile_levels' must be a list for a quantile head, got {levels!r}"]
+    if not all(_is_number(q) and 0 < q < 1 for q in levels):
+        return [f"'quantile_levels' must be a list of numbers between 0 and 1, got {levels!r}"]
+    if not (_is_whole(index) and 0 <= index < len(levels)):
+        return [f"'point_index' must be a whole number below the {len(levels)} quantile levels, got {index!r}"]
+    return []
+
+
+def _forecast_tail_problems(record: Mapping[str, Any]) -> List[str]:
+    """Return the problems of the head, the decode row and where the data came from."""
+    lines = _forecast_head_problems(record)
+    if not isinstance(record["decode"], str) or not record["decode"]:
+        lines.append(f"'decode' must be a non-empty text, got {record['decode']!r}")
+    kind, columns, digest = record["data_format"], record["value_cols"], record["data_sha256"]
+    if kind not in FORECAST_FORMATS:
+        return lines + [f"'data_format' must be one of {', '.join(FORECAST_FORMATS)}, got {kind!r}"]
+    if kind == FORECAST_FORMATS[0]:
+        return lines + [f"{key!r} must be null for the {kind} format, got {value!r}"
+                        for key, value in (("value_cols", columns), ("data_sha256", digest)) if value is not None]
+    width = record["channels"]
+    if not (isinstance(columns, list) and len(columns) == width and len(set(columns)) == width
+            and all(isinstance(c, str) and c for c in columns)):
+        lines.append(f"'value_cols' must be a list of {width} distinct texts for the {kind} format, got {columns!r}")
+    if not (isinstance(digest, str) and len(digest) == 64 and set(digest) <= set("0123456789abcdef")):
+        lines.append(f"'data_sha256' must be the 64 hex digits of the csv's sha256, got {digest!r}")
+    return lines
+
+
 # DECISION plan-2026-11-10T095307-d483ffab/D-006: the per-task work of reading a record is a ROW of
 # a table keyed by task, not a branch. Do NOT add a third ``elif task == ...`` here or in
 # ``input_shape_of``, ``load_model`` or ``_run_on_zeros`` (a third task would be one more branch in
@@ -864,6 +1001,11 @@ DATA_KEYS: Dict[str, Tuple[str, ...]] = {
         "class_names", "input_size", "normalize", "mean", "std", "ignore_index", "mask_threshold",
     ),
     DENOISING: ("channels", "data_range"),
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-010
+    # A forecasting resume compares the window, the channels and the columns, the scale floor and where the data came from
+    # (the csv's bytes), NOT the head, the levels or the decode row: those are the model's, and the resume builds the model
+    # from the request, which the request comparison has already held equal. Do NOT add them "for completeness".
+    FORECASTING: ("lookback", "horizon", "channels", "value_cols", "scale_floor", "data_format", "data_sha256"),
 }
 
 
@@ -939,6 +1081,10 @@ def _classification_input_shape(record: Mapping[str, Any]) -> Tuple[int, ...]:
 
 def _segmentation_input_shape(record: Mapping[str, Any]) -> Tuple[int, ...]:
     return (*record["input_size"], record["channels"])
+
+
+def _forecast_input_shape(record: Mapping[str, Any]) -> Tuple[int, ...]:
+    return (record["lookback"], record["channels"])
 
 
 def input_shape_of(record: Mapping[str, Any]) -> Tuple[int, ...]:
@@ -1070,7 +1216,11 @@ def check_model_against_record(
             f"Invalid {TASK_FILE} {task_file}: {variant!r} is not a variant of {family!r} "
             f"(known: {', '.join(sorted(table))})"
         )
-    wanted = table[variant]
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-010
+    # A variants table may be a tuple of NAMES (the ets family: ``ETS_VARIANTS``), which has no row to index and no keys to
+    # compare: ``wanted`` is then ``None`` and only the name is checked. Do NOT index it by name (a TypeError on every ets
+    # file) and do NOT copy the tuple into a mapping to make it fit.
+    wanted = table[variant] if isinstance(table, Mapping) else None
     overrides = record.get("variant_overrides") or {}
     if overrides and not isinstance(wanted, Mapping):
         raise ConfigError(
@@ -1171,7 +1321,7 @@ def _run_on_zeros(model: Any, record: Mapping[str, Any], model_file: Path, task_
 
 
 def _zeros_of(record: Mapping[str, Any]) -> Any:
-    """Return one all-zero input of the record's shape, to ask a loaded model its output width."""
+    """Return one all-zero input of the record's shape (any rank), to ask a loaded model its output width."""
     import numpy as np
 
     return np.zeros((1, *input_shape_of(record)), np.float32)
@@ -1455,6 +1605,17 @@ def _denoising_output_check(output: Any, record: Mapping[str, Any]) -> None:
         )
 
 
+def _forecasting_output_check(output: Any, record: Mapping[str, Any]) -> None:
+    """Raise :class:`ConfigError` unless every tensor of ``output`` holds one window (the batch of the zero window)."""
+    leaves = output if isinstance(output, (list, tuple)) else [output]
+    seen = [tuple(leaf.shape) for leaf in leaves]
+    if not seen or any(not shape or shape[0] != 1 for shape in seen):
+        raise ConfigError(
+            f"The model outputs {seen} for one window of {record['lookback']} rows but {TASK_FILE} names a forecaster "
+            "(every output has the batch of its input first); the file and the model are not from one run"
+        )
+
+
 def _classification_predictor(model: Any, record: Mapping[str, Any]) -> "Predictor":
     return Predictor(model, record)
 
@@ -1469,6 +1630,12 @@ def _denoising_predictor(model: Any, record: Mapping[str, Any]) -> Any:
     from .denoising_predictor import DenoisingPredictor
 
     return DenoisingPredictor(model, record)
+
+
+def _forecasting_predictor(model: Any, record: Mapping[str, Any]) -> Any:
+    from .forecast_predictor import ForecastPredictor
+
+    return ForecastPredictor(model, record)
 
 
 class ExportRule(NamedTuple):
@@ -1517,11 +1684,24 @@ def _denoising_export_note(record: Mapping[str, Any]) -> str:
     return export_note(record)
 
 
+def _forecast_export_pending(record: Mapping[str, Any], *ignored: Any) -> Any:
+    from .forecast_predictor import export_pending
+
+    return export_pending(record, *ignored)
+
+
+def _forecast_export_note(record: Mapping[str, Any]) -> str:
+    from .forecast_predictor import export_note
+
+    return export_note(record)
+
+
 #: Geometry keys and the channel count, per task (see the contract above).
 GEOMETRY_CHECKS: Dict[str, Callable[[Mapping[str, Any]], Tuple[List[str], Optional[int]]]] = {
     CLASSIFICATION: _classification_geometry,
     SEGMENTATION: _segmentation_geometry,
     DENOISING: _denoising_geometry,
+    FORECASTING: _forecast_geometry,
 }
 
 #: The keys only one task holds (classification's ``eval_transform``, segmentation's void,
@@ -1530,6 +1710,7 @@ TAIL_CHECKS: Dict[str, Callable[[Mapping[str, Any]], List[str]]] = {
     CLASSIFICATION: _eval_transform_problems,
     SEGMENTATION: _segmentation_tail_problems,
     DENOISING: _denoising_tail_problems,
+    FORECASTING: _forecast_tail_problems,
 }
 
 #: A denoiser's own input is flexible, so its row gives the zero image it is probed with.
@@ -1537,21 +1718,26 @@ INPUT_SHAPE_OF: Dict[str, Callable[[Mapping[str, Any]], Tuple[int, ...]]] = {
     CLASSIFICATION: _classification_input_shape,
     SEGMENTATION: _segmentation_input_shape,
     DENOISING: _denoising_input_shape,
+    FORECASTING: _forecast_input_shape,
 }
 
 #: The record key that holds the input geometry, per task (a denoiser's is its channel count).
-INPUT_KEY: Dict[str, str] = {CLASSIFICATION: "input_shape", SEGMENTATION: "input_size", DENOISING: "channels"}
+INPUT_KEY: Dict[str, str] = {
+    CLASSIFICATION: "input_shape", SEGMENTATION: "input_size", DENOISING: "channels", FORECASTING: "lookback",
+}
 
 OUTPUT_CHECKS: Dict[str, Callable[[Any, Mapping[str, Any]], None]] = {
     CLASSIFICATION: _check_width,
     SEGMENTATION: _segmentation_output_check,
     DENOISING: _denoising_output_check,
+    FORECASTING: _forecasting_output_check,
 }
 
 PREDICTORS: Dict[str, Callable[[Any, Mapping[str, Any]], Any]] = {
     CLASSIFICATION: _classification_predictor,
     SEGMENTATION: _segmentation_predictor,
     DENOISING: _denoising_predictor,
+    FORECASTING: _forecasting_predictor,
 }
 
 #: What ``export`` does per task (see :class:`ExportRule`). Classification and segmentation trace at the record's
@@ -1560,6 +1746,9 @@ EXPORT_RULES: Dict[str, ExportRule] = {
     CLASSIFICATION: ExportRule(_classification_input_shape, _no_export_check, _standardized_logits_note),
     SEGMENTATION: ExportRule(_segmentation_input_shape, _no_export_check, _standardized_logits_note),
     DENOISING: ExportRule(_denoising_export_shape, _denoising_export_check, _denoising_export_note),
+    # Every cell of a forecasting export is refused by name until its served function lands (step 16): ``shape_of`` raises, so
+    # the command refuses all four formats (the keras one too, which has no spec and so no ``check``) before anything is written.
+    FORECASTING: ExportRule(_forecast_export_pending, _forecast_export_pending, _forecast_export_note),
 }
 
 #: Every per-task table by name. A task is KNOWN to this reader only when it has a row in all of
