@@ -29,26 +29,33 @@ import dataclasses
 import importlib
 import inspect
 import json
+import math
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from types import SimpleNamespace
+from typing import Any, Dict, List
 
 import keras
 import numpy as np
+import pandas as pd
 import pytest
 
+from train.api import cli, recipes, registry
 from train.api import forecast_models as fm
-from train.api import recipes, registry
 from train.api.config import validate
 from train.api.errors import ConfigError, ConfigValidationError
+from train.api.forecast_series import split_bounds
 from train.api.tasks import BUILTIN_TASKS, register_builtin_tasks
 from train.api.tasks.time_series_forecasting import (
     TimeSeriesForecastingConfig,
     TimeSeriesForecastingTrainer,
+    train_time_series_forecasting,
 )
 from train.api.trainer import REQUIRED_HOOKS, TaskTrainer, config_problems
+from train.common import forecast_data
 from train.common import forecast_run as fr
 from train.common.pretrain_data import derive_stream_seed
 from train.common.resume_state import FIT_STATE_NAME, update_fit_state
@@ -802,3 +809,492 @@ def test_only_nbeats_and_ets_carry_a_recipe_notice_and_each_says_why():
     assert level == "info" and "no gradient" in text and "D-007" in text
     (level, text), = notices["ets"]
     assert level == "info" and "untrained" in text and "D-029" in text
+
+
+# ---------------------------------------------------------------------
+# Second part (step 13): a stubbed end to end per family, the run directory, csv, the bar that can fail, the refusals
+# ---------------------------------------------------------------------
+#
+# Every family trains two epochs of ``E2E_STEPS`` steps on the CPU at tiny sizes, once through ``train_time_series_forecasting``
+# and once through ``cli.main`` (the same request, the run renamed between the two). What each run is held to is derived from
+# the code: the listing is what the sequence, the callbacks and the reporting write (``run_sequence``, ``fit_callbacks``,
+# ``TimeSeriesForecastingTrainer.evaluate_and_report`` and ``task_record`` returning ``None``), the summary keys are the ones
+# ``evaluate_and_report`` puts in ``Evaluation.extras`` and ``summary_fields`` names.
+
+E2E_EPOCHS, E2E_BATCH, E2E_STEPS = 2, 16, 20
+E2E_DATA = {**DATA, "n_select": 32, "n_test": 32, "steps_per_epoch": E2E_STEPS}
+QUANTILES = [0.1, 0.5, 0.9]
+#: One row per decode row of ``forecast_run.DECODE`` (a held test): the model and its ``model_args``.
+CASES: Dict[str, Any] = {
+    "nbeats": ("nbeats/tiny", {}),
+    "prism_point": ("prism/tiny", {}),
+    "prism_quantile": ("prism/tiny", {"quantile_levels": QUANTILES}),
+    "tirex": ("tirex/tiny", {}),
+    "xlstm_point": ("xlstm/tiny", {}),
+    "xlstm_quantile": ("xlstm/tiny", {"quantile_levels": QUANTILES}),
+    "ets": ("ets/ANN", {}),
+    "timestral": ("timestral/5M", {}),
+    "mdn": ("mdn/tiny", {}),
+}
+#: A fit that runs more batches than ``EPOCHS * STEPS`` has an epoch with no length (an infinite stream, no steps_per_epoch).
+RUNAWAY_BATCHES = 4 * E2E_EPOCHS * E2E_STEPS
+
+
+class Spy(keras.callbacks.Callback):
+    """Counts the batches of each epoch of one ``fit`` and stops a fit whose epoch never ends (reported, not hung)."""
+
+    def __init__(self):
+        super().__init__()
+        self.last_batch, self.total, self.epoch = {}, 0, 0
+
+    def on_epoch_begin(self, epoch, logs=None):
+        self.epoch = epoch
+
+    def on_train_batch_end(self, batch, logs=None):
+        self.total += 1
+        self.last_batch[self.epoch] = batch
+        if self.total > RUNAWAY_BATCHES:
+            self.model.stop_training = True   # the epoch ends here and the run goes on: the test reports it
+
+
+def flatten_request(asked: Dict[str, Any]) -> List[str]:
+    """``key=value`` tokens as the command line takes them: groups are dotted, ``model_args`` and lists are JSON."""
+    def text(value: Any) -> str:
+        if isinstance(value, bool):
+            return str(value).lower()
+        return json.dumps(value, separators=(",", ":")) if isinstance(value, (list, dict)) else str(value)
+
+    tokens = []
+    for key, value in asked.items():
+        if isinstance(value, dict) and key != "model_args":
+            tokens += [f"{key}.{inner}={text(v)}" for inner, v in value.items()]
+        elif key != "model_args" or value:
+            tokens.append(f"{key}={text(value)}")
+    return tokens
+
+
+def spying_fit(fits: List[Dict[str, Any]]):
+    """A replacement of ``keras.Model.fit`` that records its keywords and adds a :class:`Spy` to the callbacks."""
+    real_fit = keras.Model.fit
+
+    def fit(self, *args, **keywords):
+        spy = Spy()
+        fits.append({"keywords": {k: keywords.get(k) for k in ("steps_per_epoch", "validation_steps")}, "spy": spy})
+        return real_fit(self, *args, **{**keywords, "callbacks": [*keywords.get("callbacks", []), spy]})
+
+    return fit
+
+
+def twice(root: Path, asked: Dict[str, Any], fits: List[Dict[str, Any]]):
+    """Run ``asked`` through the function and then through the command line; the run is renamed after each.
+
+    :return: ``(result, code)`` of the function and of ``cli.main``; the runs are ``root/function`` and ``root/cli``.
+    """
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(keras.Model, "fit", spying_fit(fits))
+        patch.chdir(root)
+        result = train_time_series_forecasting(**asked)
+        (root / "run").rename(root / "function")
+        code = cli.main([TASK, *flatten_request(asked)])
+        (root / "run").rename(root / "cli")
+    return result, code
+
+
+@pytest.fixture(scope="module", params=list(CASES))
+def ended(request, world, tmp_path_factory):
+    """One 2-epoch run per family through the function and the same request through ``cli.main``, in this process."""
+    case = request.param
+    model, model_args = CASES[case]
+    root = tmp_path_factory.mktemp("end_to_end_" + case)
+    asked = {
+        "out": str(root / "run"), "model": model, "data": dict(E2E_DATA), "epochs": E2E_EPOCHS, "batch_size": E2E_BATCH,
+        "model_args": model_args, "analysis_args": {"model_analysis": True, "figures": True},
+    }
+    fits: List[Dict[str, Any]] = []
+    result, code = twice(root, asked, fits)
+    return SimpleNamespace(case=case, root=root, asked=asked, result=result, code=code, fits=fits,
+                           function=root / "function", cli=root / "cli")
+
+
+def test_the_cases_are_the_decode_rows_and_the_registered_families():
+    assert set(CASES) == set(fr.DECODE), "a decode row without an end to end run, or the other way round"
+    assert {model.partition("/")[0] for model, _ in CASES.values()} == set(fm.FAMILIES)
+
+
+#: The files of a finished run, from the code: the sequence writes the config pair, the log and the lock, the callbacks the
+#: csv and the two checkpoints, the reporting the history and the summary. NO ``task.json``: ``task_record`` is ``None``.
+RUN_FILES = {
+    "best_model.keras", "config.json", "config_requested.json", "final_model.keras", "results_summary.json",
+    "run.lock", "run.log", "training_history.json", "training_log.csv",
+}
+RUN_DIRS = {"checkpoints", "model_analysis", "tensorboard", "visualizations"}
+#: The figures of every run: the dashboard of the callbacks and the forecast figure of ``evaluate_and_report``.
+FIGURES = {"forecast_test.png", "training_dashboard.png"}
+#: ``model_analysis/`` holds what the data-free analysis drew. The json and the weight figure are always there; the spectral
+#: figures need a layer with at least ``spectral_min_evals`` = 10 eigenvalues, which the tiny prism quantile head (a 3-level
+#: head on a horizon of 8) has not (status ``partial``, the failed analysis named in the summary), and the one-parameter ets
+#: has nothing to analyse at all (``missing`` in the analyzer, ``skipped`` in the summary, D-025). Measured by running every
+#: family at these sizes (function and command line agree), pinned here so a silent loss of a figure is a change of the contract.
+ANALYSIS_WEIGHTS = {"analysis_results.json", "weight_learning_journey.png"}
+ANALYSIS_SPECTRAL = {"spectral_funnel_diagram.png", "spectral_summary.png"}
+ANALYSIS = {
+    case: ("ok", ANALYSIS_WEIGHTS | ANALYSIS_SPECTRAL) for case in CASES if case not in ("ets", "prism_quantile")
+}
+ANALYSIS["prism_quantile"] = ("partial", ANALYSIS_WEIGHTS)
+ANALYSIS["ets"] = ("skipped", ANALYSIS_WEIGHTS)
+
+
+def names(path: Path) -> set:
+    return {child.name for child in Path(path).iterdir()}
+
+
+@pytest.mark.parametrize("which", ["function", "cli"])
+def test_the_run_directory_holds_the_listing_the_code_writes_and_no_task_record(ended, which):
+    run_dir = getattr(ended, which)
+    assert names(run_dir) == RUN_FILES | RUN_DIRS, "an added or a missing file (task.json included) is a change of the contract"
+    assert names(run_dir / "checkpoints") == {"backup", "fit_state.json"}
+    assert names(run_dir / "tensorboard") == {"train", "validation"}
+    assert names(run_dir / "visualizations") == FIGURES
+    summary = read_json(run_dir / "results_summary.json")
+    status, files = ANALYSIS[ended.case]
+    assert summary["analyzer"]["status"] == status
+    assert names(run_dir / "model_analysis") == files
+    assert ("failed_analyses" in summary["analyzer"]) is (status != "ok"), "an analysis that did not complete names what failed"
+    assert summary["visualizations"]["files"] == sorted(FIGURES)
+
+
+def test_the_function_and_the_cli_write_the_same_config_bytes_and_the_cli_exits_by_the_verdict(ended):
+    for name in ("config.json", "config_requested.json"):
+        assert (ended.function / name).read_bytes() == (ended.cli / name).read_bytes(), name
+    resolved = read_json(ended.cli / "config.json")
+    model, model_args = CASES[ended.case]
+    assert resolved["model"] == model and resolved["epochs"] == E2E_EPOCHS and resolved["batch_size"] == E2E_BATCH
+    assert resolved["data"]["lookback"] == LOOKBACK and resolved["data"]["horizon"] == HORIZON
+    assert resolved["jit_compile"] is False
+    success = read_json(ended.cli / "results_summary.json")["success"]
+    assert ended.code == (0 if success else 1) and ended.result.success is read_json(ended.function / "results_summary.json")["success"]
+
+
+#: What ``canonical_metrics`` returns for a point head; a quantile head adds the interval block.
+CANONICAL_POINT = {"MAE", "RMSE", "sMAPE", "rMAE", "MASE", "MASE_excluded"}
+CANONICAL_QUANTILE = {"coverage", "sharpness", "coverage_nominal"}
+
+
+@pytest.fixture(scope="module")
+def reference_baselines(world, tmp_path_factory):
+    """The numpy baselines of the select windows of ``E2E_DATA``, worked out here from the data module alone."""
+    root = tmp_path_factory.mktemp("reference_baselines")
+    config = make_config(root / "run", data=dict(E2E_DATA), batch_size=E2E_BATCH)
+    batches = forecast_data.load_forecast_batches(
+        format="builtin", dataset="synthetic", path=None, value_cols=None, time_col=None, lookback=LOOKBACK, horizon=HORIZON,
+        realizations=1, series_length=600, noise_level=0.1, patterns=PATTERNS, select_fraction=0.15, test_fraction=0.15,
+        n_select=32, n_test=32, steps_per_epoch=E2E_STEPS, max_samples=None, batch_size=E2E_BATCH, seed=config.seed,
+        stream_seed=None, scale_floor=config.transform_args.scale_floor)
+    return fr.baseline_maes(*windows(batches.select_ds))
+
+
+@pytest.mark.parametrize("which", ["function", "cli"])
+def test_the_summary_holds_the_metric_the_baselines_the_epoch_zero_value_the_threshold_the_verdict_and_the_post_hoc_block(
+        ended, which, reference_baselines):
+    run_dir = getattr(ended, which)
+    summary = read_json(run_dir / "results_summary.json")
+    assert summary["status"] == "ok" and summary["success_metric"] == "val_mae" and summary["monitor"] == "val_mae"
+    assert summary["monitor_mode"] == "min" and summary["task"] == TASK
+    # the baselines: the keys, finite and positive, the same select windows for every family (one reference), no model in them
+    baselines = summary["baselines"]
+    assert set(baselines) == {"naive_last", "seasonal_naive", "context_mean", "n_windows"}
+    assert baselines == reference_baselines and baselines["n_windows"] == E2E_DATA["n_select"]
+    assert all(math.isfinite(v) and v > 0 for v in baselines.values())
+    # the epoch-zero value is the sidecar's, and the threshold is the smallest of the three
+    epoch_zero = read_json(run_dir / "checkpoints" / FIT_STATE_NAME)["initial"]["metrics"]["mae"]
+    assert summary["epoch_zero"]["val_mae"] == epoch_zero > 0
+    assert summary["success_threshold"] == min(baselines["naive_last"], baselines["seasonal_naive"], epoch_zero)
+    column = [float(v) for v in read_json(run_dir / "training_history.json")["val_mae"]]
+    assert len(column) == E2E_EPOCHS and summary["success_value"] == pytest.approx(min(column), rel=1e-6)
+    assert summary["success"] is fr.beats_bar(summary["success_value"], summary["success_threshold"])
+    # the canonical post-hoc block, on the select and on the test windows
+    quantile = fr.DECODE[ended.case].quantile
+    for split in ("select", "test"):
+        block = summary["canonical_metrics"][split]
+        assert set(block) == CANONICAL_POINT | (CANONICAL_QUANTILE if quantile else set()), (split, sorted(block))
+        assert all(math.isfinite(v) for key, v in block.items() if key != "MASE") and math.isfinite(block["MASE"])
+        if quantile:
+            assert 0.0 <= block["coverage"] <= 1.0 and block["sharpness"] > 0 and 0.0 < block["coverage_nominal"] <= 1.0
+    # the same numbers two ways: the compiled `mae` and the post-hoc MAE decode the same windows through one row
+    assert summary["canonical_metrics"]["test"]["MAE"] == pytest.approx(summary["test_metrics_best"]["mae"], rel=1e-4)
+    assert summary["canonical_metrics"]["select"]["MAE"] == pytest.approx(summary["best_val_metrics"]["val_mae"], rel=1e-4)
+    assert summary["analyzer"]["status"] == ANALYSIS[ended.case][0]
+
+
+def test_an_epoch_is_steps_per_epoch_steps_and_fit_sees_both_lengths(ended):
+    summary = read_json(ended.function / "results_summary.json")
+    assert summary["steps_per_epoch"] == E2E_STEPS == summary["n_train"] // E2E_BATCH and summary["n_val"] // E2E_BATCH == 2
+    assert len(ended.fits) == 2, "one fit per run: the function and the command line"
+    for fit in ended.fits:
+        assert fit["keywords"] == {"steps_per_epoch": E2E_STEPS, "validation_steps": summary["n_val"] // E2E_BATCH}
+        # Observed, not read back: each epoch ran batches 0..STEPS-1, and a stream with no length would have run away.
+        assert fit["spy"].last_batch == {epoch: E2E_STEPS - 1 for epoch in range(E2E_EPOCHS)}, "an epoch has the wrong length"
+
+
+@pytest.mark.parametrize("which", ["function", "cli"])
+def test_the_best_checkpoint_reloads_with_a_gap_of_exactly_zero(ended, which):
+    summary = read_json(getattr(ended, which) / "results_summary.json")
+    # The select and test windows are fixed by (seed, split, index): the reloaded file scores the in-memory weights bit for bit.
+    assert summary["best_checkpoint_load_error"] is None and summary["best_checkpoint_max_abs_diff"] == 0.0
+    assert summary["model_loading_validated"] is True and summary["model_loading_check"]["max_abs_diff"] == 0.0
+    assert summary["test_metrics_best"] is not None and summary["test_metrics_final"] is not None
+
+
+# ---------------------------------------------------------------------
+# The bar can fail: a model that outputs the naive-last forecast, trained end to end, is a miss and exits 1
+# ---------------------------------------------------------------------
+
+
+@keras.saving.register_keras_serializable(package="test_forecast_task")
+class NaiveLastModel(keras.Model):
+    """The naive-last forecast as a real, savable model with the output layout of nbeats ``(forecast, residual)``.
+
+    One trainable scalar multiplies zero, so the optimizer has a variable and a gradient and the weights never change the
+    forecast: the model IS the baseline at every epoch.
+    """
+
+    def __init__(self, horizon: int, **kwargs: Any):
+        super().__init__(**kwargs)
+        self.horizon = horizon
+        self.idle = None
+
+    def build(self, input_shape):
+        self.idle = self.add_weight(name="idle", shape=(), initializer="zeros", trainable=True)
+        super().build(input_shape)
+
+    def call(self, inputs):
+        forecast = keras.ops.repeat(inputs[:, -1:, :], self.horizon, axis=1) + 0.0 * self.idle
+        return forecast, keras.ops.zeros_like(inputs[:, :, 0])
+
+    def get_config(self):
+        return {**super().get_config(), "horizon": self.horizon}
+
+
+def create_naive_last(*, variant, num_classes=None, input_shape, horizon, **model_args):
+    """The nbeats adapter's keywords, a :class:`NaiveLastModel` built at ``(None, lookback, channels)``."""
+    model = NaiveLastModel(horizon)
+    model.build((None, *input_shape))
+    return model
+
+
+@pytest.fixture(scope="module")
+def naive_ended(world, tmp_path_factory):
+    root = tmp_path_factory.mktemp("naive_last_end_to_end")
+    asked = {"out": str(root / "run"), "model": MODEL, "data": dict(E2E_DATA), "epochs": E2E_EPOCHS,
+             "batch_size": E2E_BATCH, "analysis_args": {"model_analysis": False, "figures": False}}
+    fits: List[Dict[str, Any]] = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(fm, "create_nbeats", create_naive_last)
+        result, code = twice(root, asked, fits)
+    return SimpleNamespace(root=root, result=result, code=code, function=root / "function", cli=root / "cli")
+
+
+@pytest.mark.parametrize("which", ["function", "cli"])
+def test_a_naive_last_model_run_end_to_end_is_a_miss(naive_ended, which):
+    summary = read_json(getattr(naive_ended, which) / "results_summary.json")
+    assert summary["status"] == "ok", "vacuity guard: the run finished and was judged"
+    baseline = summary["baselines"]["naive_last"]
+    # the instrument's zero: the model scores its own baseline to float32 rounding, and the run is a miss
+    assert abs(summary["success_value"] - baseline) <= 8 * float(np.spacing(np.float32(baseline)))
+    assert summary["success"] is False
+    assert summary["canonical_metrics"]["test"]["rMAE"] == pytest.approx(1.0, rel=1e-5), "rMAE against naive-last is 1"
+
+
+def test_a_naive_last_model_run_exits_one_through_the_command_line_and_reports_false_through_the_function(naive_ended):
+    assert naive_ended.code == 1 and naive_ended.result.success is False
+
+
+# ---------------------------------------------------------------------
+# A csv, end to end: trains, reports, and no window of one segment holds a row of another
+# ---------------------------------------------------------------------
+
+#: 2,720 rows give a select and a test segment of 408 rows each: 47 windows with non-overlapping targets (stride 8, width 40),
+#: so ``n_select`` and ``n_test`` left unset are 32 (47 rounded down to the batch of 16), and a window that wrongly counts only
+#: the lookback would make a 48th that leaves the segment (the csv test below reads every window, none is left unused).
+CSV_ROWS = 2720
+
+
+def write_series_csv(path: Path, rows: int = CSV_ROWS, columns: int = 1) -> Path:
+    """A csv of ``rows`` rows: a dated ``t`` column and ``columns`` random walks with a season, one value per row."""
+    rng = np.random.default_rng(7)
+    seasons = np.sin(2 * np.pi * np.arange(rows) / 24.0)[:, None]
+    values = np.cumsum(rng.normal(size=(rows, columns)), axis=0) * 0.2 + 3.0 * seasons
+    frame = pd.DataFrame(values, columns=[f"v{i}" for i in range(columns)])
+    frame.insert(0, "t", pd.date_range("2020-01-01", periods=rows, freq="h").strftime("%Y-%m-%d %H:%M:%S"))
+    frame.to_csv(path, index=False)
+    return path
+
+
+def csv_data(path: Path, **changes: Any) -> Dict[str, Any]:
+    return {"format": "csv", "path": str(path), "value_cols": ["v0"], "time_col": "t", "lookback": LOOKBACK,
+            "horizon": HORIZON, "steps_per_epoch": E2E_STEPS, **changes}
+
+
+@pytest.fixture(scope="module")
+def csv_file(tmp_path_factory) -> Path:
+    """The one csv of the end to end run and of the window test (written once, by the test)."""
+    return write_series_csv(tmp_path_factory.mktemp("csv_series") / "series.csv")
+
+
+@pytest.fixture(scope="module")
+def csv_ended(world, tmp_path_factory, csv_file):
+    root = tmp_path_factory.mktemp("csv_end_to_end")
+    asked = {"out": str(root / "run"), "model": MODEL, "data": csv_data(csv_file), "epochs": E2E_EPOCHS,
+             "batch_size": E2E_BATCH, "analysis_args": {"model_analysis": False, "figures": True}}
+    fits: List[Dict[str, Any]] = []
+    result, code = twice(root, asked, fits)
+    return SimpleNamespace(root=root, csv=csv_file, asked=asked, result=result, code=code, fits=fits,
+                           function=root / "function", cli=root / "cli")
+
+
+@pytest.mark.parametrize("which", ["function", "cli"])
+def test_a_csv_run_trains_and_reports_the_same_summary_blocks_as_the_synthetic_one(csv_ended, which):
+    run_dir = getattr(csv_ended, which)
+    summary = read_json(run_dir / "results_summary.json")
+    assert summary["status"] == "ok" and summary["success_metric"] == "val_mae"
+    assert names(run_dir) == RUN_FILES | (RUN_DIRS - {"model_analysis"}), "analysis_args.model_analysis=false writes no model_analysis/"
+    assert summary["channels"] == 1 and summary["n_series"] == 1 and summary["series_dropped"] == []
+    bounds = split_bounds(CSV_ROWS, 0.15, 0.15)
+    assert summary["segments"] == {name: list(b) for name, b in zip(("train", "select", "test"), bounds)}
+    baselines = summary["baselines"]
+    assert summary["success_threshold"] == min(baselines["naive_last"], baselines["seasonal_naive"], summary["epoch_zero"]["val_mae"])
+    assert summary["best_checkpoint_max_abs_diff"] == 0.0 and summary["n_val"] == 32 and summary["n_test"] == 32
+    assert set(summary["canonical_metrics"]["test"]) == CANONICAL_POINT
+    assert all(len(fit["spy"].last_batch) == E2E_EPOCHS for fit in csv_ended.fits), "the fit ran its epochs"
+
+
+def test_the_csv_function_and_cli_write_the_same_config_bytes_and_the_cli_exits_by_the_verdict(csv_ended):
+    assert (csv_ended.function / "config.json").read_bytes() == (csv_ended.cli / "config.json").read_bytes()
+    resolved = read_json(csv_ended.cli / "config.json")["data"]
+    assert resolved["format"] == "csv" and resolved["path"] == str(csv_ended.csv) and resolved["time_col"] == "t"
+    success = read_json(csv_ended.cli / "results_summary.json")["success"]
+    assert csv_ended.code == (0 if success else 1) and csv_ended.result.success is success
+
+
+def locate(window: np.ndarray, raw: np.ndarray) -> int:
+    """The row at which the standardized ``window`` ``(width, 1)`` starts in ``raw`` ``(rows, 1)``, or ``-1``.
+
+    The standardization is affine with a positive scale, so the vector of one-step differences of a window points the same
+    way as the one of the rows it was cut from: the candidate whose unit vector matches is where the window was cut.
+    """
+    width = len(window)
+    unit = lambda seq: np.diff(seq, axis=-1) / np.linalg.norm(np.diff(seq, axis=-1), axis=-1, keepdims=True)
+    starts = np.lib.stride_tricks.sliding_window_view(raw[:, 0], width)
+    found = np.nonzero(np.all(np.isclose(unit(starts), unit(window[:, 0]), atol=1e-4), axis=1))[0]
+    return int(found[0]) if len(found) else -1
+
+
+def test_no_csv_window_of_one_segment_holds_a_row_of_another(world, csv_file, tmp_path):
+    # Invariant 4, read off the data module's own windows: every window (context and horizon) of the three streams is cut from
+    # inside its segment of the file. The windows are standardized, so each is located in the csv by its shape (`locate`).
+    config = make_config(tmp_path / "probe", data=csv_data(csv_file), batch_size=E2E_BATCH)
+    trainer = TimeSeriesForecastingTrainer(config)
+    family, variant = registry.parse_model_name(config.model, task=trainer.task)
+    resolved, context = trainer._resolve(trainer.describe_data(config), family, variant)
+    data = trainer.build_data(resolved, context)
+    raw = pd.read_csv(csv_file)[["v0"]].to_numpy(np.float64)
+    width = LOOKBACK + HORIZON
+    streams = {"train": data.train_ds.take(4), "select": data.select_ds, "test": data.test_ds}
+    for name, ds in streams.items():
+        lo, hi = data.segments[name]
+        x, y = windows(ds)
+        assert len(x) >= 32, f"vacuity guard: {name} holds windows"
+        for window in np.concatenate([x, y.reshape(len(y), HORIZON, 1)], axis=1):
+            start = locate(window, raw)
+            assert start >= 0, f"a {name} window is not a slice of the csv"
+            assert lo <= start and start + width <= hi, f"a {name} window at rows [{start}, {start + width}) leaves [{lo}, {hi})"
+
+
+# ---------------------------------------------------------------------
+# Invariant 9 through the command line: each refusal is exit 2 with its named sentence, before the run directory is claimed
+# ---------------------------------------------------------------------
+
+
+@pytest.fixture
+def within_30_seconds():
+    """Fail a test that does not return in 30 s: a request that cannot be honoured must be refused, never hang."""
+    def hang(signum, frame):
+        raise TimeoutError("no answer within 30 seconds: the request hangs")
+
+    previous = signal.signal(signal.SIGALRM, hang)
+    signal.setitimer(signal.ITIMER_REAL, 30)
+    yield
+    signal.setitimer(signal.ITIMER_REAL, 0)
+    signal.signal(signal.SIGALRM, previous)
+
+
+def broken_csv(path: Path, kind: str) -> Path:
+    """A csv with ONE defect: ``unsorted`` time, a ``non_finite`` cell, or ``two`` value columns."""
+    write_series_csv(path, rows=1200, columns=2 if kind == "two" else 1)
+    frame = pd.read_csv(path)
+    if kind == "unsorted":
+        frame.loc[[10, 11], "t"] = frame.loc[[11, 10], "t"].to_numpy()
+    elif kind == "non_finite":
+        frame.loc[5, "v0"] = np.inf
+    frame.to_csv(path, index=False)
+    return path
+
+
+def refusal(tmp_path: Path, kind: str):
+    """``(argv changes, fragment)`` of one refusal: what the request changes and the sentence the user reads."""
+    csv = lambda name: broken_csv(tmp_path / f"{name}.csv", name)
+    two = lambda model, fragment, **extra: (
+        {"model": model, "data": csv_data(csv("two"), value_cols=None, time_col="t"), **extra}, fragment)
+    return {
+        "series-too-short": ({"data": {**E2E_DATA, "series_length": 100}},
+                             "a synthetic series of 100 rows is too short: its select segment has 15 rows and one window "
+                             "needs lookback + horizon = 40"),
+        "csv-too-short": ({"data": csv_data(write_series_csv(tmp_path / "short.csv", rows=100))},
+                          "the csv of 100 rows is too short: its select segment has 15 rows and one window needs lookback + "
+                          "horizon = 40"),
+        "unsorted-time": ({"data": csv_data(csv("unsorted"))},
+                          "data.time_col 't' must be strictly increasing with no empty cell: sort the file by time"),
+        "non-finite-cell": ({"data": csv_data(csv("non_finite"))},
+                            "column 'v0' holds 1 non-finite cell(s), the first at row 5"),
+        "missing-column": ({"data": csv_data(write_series_csv(tmp_path / "plain.csv"), value_cols=["nope"])},
+                           "data.value_cols: column 'nope' is missing from plain.csv, which has ['t', 'v0']"),
+        "timestral-horizon": ({"model": "timestral/5M", "data": {**E2E_DATA, "lookback": 64, "horizon": 40, "series_length": 1200}},
+                              "timestral forecasts one patch of 32 points at a time"),
+        "tirex-two-channels": two("tirex/tiny", "'tirex' takes 1 channel (TiRexCore reads one series, (B, L, 1)), got 2"),
+        "ets-two-channels": two("ets/ANN", "'ets' takes 1 channel (ETSModel is a recursion over one scalar series, (B, L, 1)), got 2"),
+        "mdn-two-channels": two(
+            "mdn/tiny", "'mdn' takes 1 channel (the mixture is over the horizon of one series, (B, L, 1)), got 2"),
+        "xlstm-quantile-two-channels": two(
+            "xlstm/tiny", "an xlstm with a quantile head forecasts one series (its output is (batch, horizon, quantiles), with "
+            "no channel axis, measured at 2 input channels), got 2 channels", model_args={"quantile_levels": QUANTILES}),
+        "deepar": ({"model": "deepar/base"}, "the family 'deepar' is not trained by time_series_forecasting"),
+        "adaptive-ema": ({"model": "adaptive_ema/base"}, "the family 'adaptive_ema' is not trained by time_series_forecasting"),
+        "ets-jit": ({"model": "ets/ANN", "jit_compile": True}, "Invalid value for 'jit_compile': 'ets' cannot be compiled with XLA"),
+    }[kind]
+
+
+REFUSALS = ["series-too-short", "csv-too-short", "unsorted-time", "non-finite-cell", "missing-column", "timestral-horizon",
+            "tirex-two-channels", "ets-two-channels", "mdn-two-channels", "xlstm-quantile-two-channels", "deepar",
+            "adaptive-ema", "ets-jit"]
+
+
+@pytest.mark.parametrize("kind", REFUSALS)
+def test_a_refusal_of_invariant_9_is_exit_2_with_its_named_sentence_and_no_run_directory(
+        world, tmp_path, capsys, within_30_seconds, kind):
+    changes, fragment = refusal(tmp_path, kind)
+    out = tmp_path / "run"
+    asked = {"out": str(out), "model": MODEL, "data": dict(E2E_DATA), "epochs": 1, "batch_size": E2E_BATCH, **changes}
+    code = cli.main([TASK, *flatten_request(asked)])
+    error = capsys.readouterr().err
+    assert code == 2, error
+    assert fragment in error, error
+    assert "Traceback" not in error and error.startswith("error:")
+    assert not out.exists(), "the refusal came after the claim"
+
+
+def test_the_refusal_table_names_every_case_of_invariant_9():
+    kinds = " ".join(REFUSALS)
+    for needed in ("too-short", "unsorted", "non-finite", "missing-column", "timestral-horizon", "tirex-two", "ets-two", "mdn-two",
+                   "xlstm-quantile-two", "deepar", "adaptive-ema", "ets-jit"):
+        assert needed in kinds, needed
+    assert len(REFUSALS) == len(set(REFUSALS)) == 13
