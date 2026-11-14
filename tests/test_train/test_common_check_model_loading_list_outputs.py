@@ -133,3 +133,30 @@ def test_a_single_array_and_a_dict_keep_their_verdicts(tmp_path):
     assert check_model_loading(saved(named, tmp_path, "n.keras"), one, named_expected).ok is True
     nudged = dict(named_expected, b=named_expected["b"] + 1e-3)
     assert check_model_loading(saved(named, tmp_path, "n2.keras"), one, nudged).ok is False
+
+
+def named_pair(tmp_path):
+    """A two-output model with NAMED outputs of different widths, its saved file, a sample and the expected dict."""
+    keras.utils.set_random_seed(1)
+    inputs = keras.Input((4,))
+    model = keras.Model(inputs, {"a": keras.layers.Dense(3)(inputs), "b": keras.layers.Dense(2)(inputs)})
+    one = np.random.default_rng(1).standard_normal((2, 4)).astype("float32")
+    return saved(model, tmp_path), one, model.predict(one, verbose=0)
+
+
+def test_a_dict_of_outputs_is_paired_by_key_and_never_by_position(tmp_path):
+    path, one, expected = named_pair(tmp_path)
+    assert check_model_loading(path, one, expected).ok is True
+    # the same content in the other insertion order is the same answer: the pairs are by name (a pairing by position would
+    # compare the (2, 3) output with the (2, 2) one, a shape mismatch, and fail a faithful reload)
+    reordered = {key: expected[key] for key in reversed(list(expected))}
+    assert list(reordered) != list(expected)
+    check = check_model_loading(path, one, reordered)
+    assert check.ok is True and check.max_abs_diff == 0.0
+
+
+def test_a_dict_with_other_keys_than_the_models_is_a_verdict_not_a_crash_and_not_a_pass(tmp_path):
+    path, one, expected = named_pair(tmp_path)
+    for asked in ({"a": expected["a"]}, {**expected, "c": expected["a"]}, {"a": expected["a"], "c": expected["b"]}):
+        check = check_model_loading(path, one, asked)
+        assert check.ok is False and check.max_abs_diff is None and check.scale is None, sorted(asked)

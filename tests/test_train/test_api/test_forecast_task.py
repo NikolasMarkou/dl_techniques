@@ -1318,3 +1318,125 @@ def test_the_refusal_table_names_every_case_of_invariant_9():
                    "xlstm-quantile-two", "deepar", "adaptive-ema", "ets-jit"):
         assert needed in kinds, needed
     assert len(REFUSALS) == len(set(REFUSALS)) == 13
+
+
+# ---------------------------------------------------------------------
+# Step 18: guards for the rows of the mutant table that only a fixture error caught, and the edge of the bar through the command
+# ---------------------------------------------------------------------
+
+#: One model per decode row but timestral (its levels are the library's and building it is the slow part).
+RECORD_CASES = [name for name in CASES if name != "timestral"]
+
+
+@pytest.mark.parametrize("case", RECORD_CASES)
+def test_the_record_of_a_built_model_carries_the_levels_and_the_median_the_model_has_and_passes_the_model_check(
+        world, tmp_path, case):
+    from train.api.predictor import check_model_against_record, check_record
+
+    name, model_args = CASES[case]
+    trainer, resolved, context = prepared(tmp_path / "run", model=name, model_args=model_args)
+    data = trainer.build_data(resolved, context)
+    model = trainer.build_model(resolved, context, data)
+    record = trainer.task_record(resolved, context, data)
+    decoder = fr.decoder_for(context.family, model)
+    assert record["decode"] == case == decoder.row
+    if fr.DECODE[case].quantile:
+        assert record["head"] == "quantile" and len(record["quantile_levels"]) > 1
+        assert record["quantile_levels"] == [float(q) for q in decoder.levels]
+        assert record["point_index"] == decoder.median_index and record["point_index"] is not None
+        if "quantile_levels" in model_args:
+            assert record["quantile_levels"] == model_args["quantile_levels"] and record["point_index"] == QUANTILES.index(0.5)
+    else:
+        assert record["head"] == "point" and record["quantile_levels"] is None and record["point_index"] is None
+    try:
+        check_record(record, "<built>")
+        # the model the record names is the model that was built, for a family whose variants are a table and for ets (a tuple
+        # of names)
+        check_model_against_record(model, record, registry.MODELS[context.family], Path("best_model.keras"), Path("task.json"))
+    except Exception as error:
+        raise AssertionError(f"the record of a built {case} model is refused or does not match its model: {error!r}") from error
+
+
+def test_the_best_checkpoint_reload_check_is_fed_the_sample_the_expected_outputs_came_from(world, tmp_path, monkeypatch):
+    from train.common import evaluation
+
+    seen: List[Any] = []
+    original = evaluation.check_model_loading
+
+    def spy(path, sample, expected, **kwargs):
+        seen.append((np.array(sample), expected))
+        return original(path, sample, expected, **kwargs)
+
+    monkeypatch.setattr(evaluation, "check_model_loading", spy)
+    config = make_config(tmp_path / "run")
+    batches = forecast_data.load_forecast_batches(
+        format="builtin", dataset="synthetic", path=None, value_cols=None, time_col=None, lookback=LOOKBACK, horizon=HORIZON,
+        realizations=1, series_length=600, noise_level=0.1, patterns=PATTERNS, select_fraction=0.15, test_fraction=0.15,
+        n_select=16, n_test=16, steps_per_epoch=STEPS, max_samples=None, batch_size=BATCH, seed=config.seed,
+        stream_seed=None, scale_floor=config.transform_args.scale_floor)
+    first_batch = next(iter(batches.select_ds))[0].numpy()
+    failure = None
+    try:
+        train_time_series_forecasting(out=str(tmp_path / "run"), model=MODEL, data=dict(DATA), epochs=1, batch_size=BATCH,
+                                      analysis_args={"model_analysis": False, "figures": False})
+    except Exception as error:  # the assertions below say what went wrong first
+        failure = error
+    assert seen, "vacuity guard: the best checkpoint was checked"
+    sample, expected = seen[0]
+    assert np.array_equal(sample, first_batch), "the reload check is fed the first selection batch the expected outputs came from"
+    assert expected[0].shape == (BATCH, HORIZON, 1) and sample.shape == (BATCH, LOOKBACK, 1)
+    assert failure is None, failure
+
+
+def threshold_whose_band_edge_is(value: float, steps: int = 0) -> float:
+    """The float32 threshold ``t`` with ``t - TIE_ULPS * spacing(t) == value`` (``steps`` float32 steps above that)."""
+    value32 = np.float32(value)
+    ulps = np.float32(fr.TIE_ULPS)
+    t = value32 + ulps * np.spacing(value32)
+    for _ in range(8 * fr.TIE_ULPS):
+        low = t - ulps * np.spacing(t)
+        if low == value32:
+            break
+        t = np.nextafter(t, np.float32(np.inf if low < value32 else -np.inf))
+    else:
+        raise AssertionError(f"no float32 threshold has {value} on the edge of its band")
+    for _ in range(steps):
+        t = np.nextafter(t, np.float32(np.inf))
+    return float(t)
+
+
+@pytest.fixture(scope="module", params=[0, 1], ids=["on_the_edge", "one_step_inside"])
+def bar_edge_ended(request, world, tmp_path_factory, naive_ended):
+    """The naive-last run again with its threshold set so that its ``success_value`` sits exactly on the edge of the band."""
+    reached = read_json(naive_ended.function / "results_summary.json")["success_value"]
+    threshold = threshold_whose_band_edge_is(reached, request.param)
+    root = tmp_path_factory.mktemp(f"bar_edge_{request.param}")
+    asked = {"out": str(root / "run"), "model": MODEL, "data": dict(E2E_DATA), "epochs": E2E_EPOCHS,
+             "batch_size": E2E_BATCH, "analysis_args": {"model_analysis": False, "figures": False}}
+    baselines = fr.baseline_maes
+    fits: List[Dict[str, Any]] = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(fm, "create_nbeats", create_naive_last)
+        patch.setattr(fr, "baseline_maes", lambda x, y: {**baselines(x, y), "naive_last": threshold, "seasonal_naive": 1e9})
+        patch.setattr(fr, "epoch_zero_mae", lambda path: 1e9)
+        result, code = twice(root, asked, fits)
+    return SimpleNamespace(offset=request.param, reached=reached, threshold=threshold, result=result, code=code,
+                           function=root / "function", cli=root / "cli")
+
+
+def test_the_planted_threshold_puts_the_reached_value_on_the_edge_of_the_band(bar_edge_ended):
+    ended = bar_edge_ended
+    assert np.float32(ended.threshold) - np.float32(fr.TIE_ULPS) * np.spacing(np.float32(ended.threshold)) == (
+        np.float32(ended.reached) + np.float32(ended.offset) * np.spacing(np.float32(ended.reached)))
+    assert fr.beats_bar(ended.reached, ended.threshold) is bool(ended.offset)
+
+
+def test_the_bar_is_strict_at_the_edge_of_its_band_through_the_command_line_and_the_function(bar_edge_ended):
+    ended = bar_edge_ended
+    for which in ("function", "cli"):
+        summary = read_json(getattr(ended, which) / "results_summary.json")
+        assert summary["status"] == "ok" and summary["success_threshold"] == ended.threshold, "the threshold is the planted one"
+        assert summary["success_value"] == ended.reached, "the model scores what the first run scored"
+        assert summary["success"] is bool(ended.offset)
+    # the edge itself is a MISS (strictly below is required), one float32 step inside it is a hit: exit 1 against exit 0
+    assert ended.code == (0 if ended.offset else 1) and ended.result.success is bool(ended.offset)
