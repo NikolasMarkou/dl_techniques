@@ -35,6 +35,7 @@ import dataclasses
 import inspect
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -966,7 +967,7 @@ from train.api.errors import ConfigError
 values, names, _ = fs.read_csv_series(sys.argv[1], None, None)
 refused = None
 try:
-    fs.check_csv_level(values, names, float(sys.argv[2]))
+    fs.check_csv_level(values, names, lookback=32, horizon=8, select_fraction=0.15, test_fraction=0.15, scale_floor=float(sys.argv[2]))
 except ConfigError as exc:
     refused = str(exc)
 heavy = sorted(name for name in ("tensorflow", "keras", "train.common", "dl_techniques") if name in sys.modules)
@@ -991,11 +992,11 @@ def level_check(tmp_path, offset: float, floor: float = 1e-6, **kwargs):
 
 
 @pytest.mark.parametrize("offset", [1e12, 1e9, 1e7])
-def test_a_csv_whose_spread_is_below_the_floor_of_its_level_is_refused_without_tensorflow(tmp_path, offset):
-    """D-040: the std of a column over its mean absolute value is under ``scale_floor``: float32 cannot resolve it."""
+def test_a_csv_whose_windows_are_flat_at_the_floor_of_its_level_is_refused_without_tensorflow(tmp_path, offset):
+    """D-040, D-045: the windows whose std is under ``scale_floor`` of their level are flat, and a flat window is not standardized."""
     refused, heavy = level_check(tmp_path, offset)
     assert refused is not None, "a column of spread 1e-7 of its level was accepted"
-    assert "column 'a'" in refused and "the level must be removed before training" in refused and "scale_floor 1e-06" in refused
+    assert re.search(r"\d+ of \d+ windows of the \w+ segment have a flat context", refused) and "transform_args.scale_floor 1e-06" in refused
     assert heavy == [], heavy
 
 
@@ -1011,14 +1012,15 @@ def test_a_constant_column_is_not_a_level_problem_and_the_sentence_is_one_functi
 
     from train.api import forecast_series
 
-    flat = np.full((100, 1), 7.0)
-    forecast_series.check_csv_level(flat, ["c"], 1e-6)           # exactly constant: nothing to resolve, the flat rule handles it
-    with pytest.raises(ConfigError, match="the level must be removed"):
-        forecast_series.check_csv_level(np.arange(100.0)[:, None] * 1e-3 + 1e12, ["c"], 1e-6)
+    args = dict(lookback=32, horizon=8, select_fraction=0.15, test_fraction=0.15, scale_floor=1e-6)
+    flat = np.full((200, 1), 7.0)
+    forecast_series.check_csv_level(flat, ["c"], **args)         # exactly constant: nothing to resolve, the flat rule handles it
+    with pytest.raises(ConfigError, match="have a flat context"):
+        forecast_series.check_csv_level(np.arange(200.0)[:, None] * 1e-3 + 1e12, ["c"], **args)
     sources = {name: (SRC / "train" / name).read_text() for name in ("api/forecast_series.py", "api/tasks/time_series_forecasting.py",
                                                                       "common/forecast_data.py")}
-    assert sources["api/forecast_series.py"].count("the level must be removed") == 1
-    assert "the level must be removed" not in sources["api/tasks/time_series_forecasting.py"] + sources["common/forecast_data.py"]
+    assert sources["api/forecast_series.py"].count("windows of the {segment} segment have a flat context") == 1
+    assert "segment have a flat context" not in sources["api/tasks/time_series_forecasting.py"] + sources["common/forecast_data.py"]
     assert "check_csv_level(" in sources["api/tasks/time_series_forecasting.py"] and "check_csv_level(" in sources["common/forecast_data.py"]
 
 

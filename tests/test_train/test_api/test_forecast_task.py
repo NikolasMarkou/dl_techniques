@@ -1025,8 +1025,12 @@ def test_the_summary_holds_the_metric_the_baselines_the_epoch_zero_value_the_thr
     # every block this test reads is in the summary: a summary that drops one is a failed claim, named here
     # rather than a KeyError further down
     wanted = {"status", "success_metric", "monitor", "monitor_mode", "task", "baselines", "epoch_zero", "success_threshold",
-              "success_value", "success", "canonical_metrics", "test_metrics_best", "best_val_metrics", "analyzer"}
+              "success_value", "success", "canonical_metrics", "test_metrics_best", "best_val_metrics", "analyzer", "flat_windows"}
     assert wanted <= set(summary), f"the summary lacks {sorted(wanted - set(summary))}"
+    # D-045: the windows scored in the series' raw units (a flat context) are counted, never silent; the bank of this test has none
+    flat = summary["flat_windows"]
+    assert set(flat) == {"select", "test", "train_fraction"} and flat["select"] == flat["test"] == 0, flat
+    assert 0.0 <= flat["train_fraction"] < 0.1
     assert summary["status"] == "ok" and summary["success_metric"] == "val_mae" and summary["monitor"] == "val_mae"
     assert summary["monitor_mode"] == "min" and summary["task"] == TASK
     # the baselines: the keys, finite and positive, the same select windows for every family (one reference), no model in them
@@ -1181,6 +1185,7 @@ def test_a_csv_run_trains_and_reports_the_same_summary_blocks_as_the_synthetic_o
     assert summary["status"] == "ok" and summary["success_metric"] == "val_mae"
     assert names(run_dir) == RUN_FILES | (RUN_DIRS - {"model_analysis"}), "analysis_args.model_analysis=false writes no model_analysis/"
     assert summary["channels"] == 1 and summary["n_series"] == 1 and summary["series_dropped"] == []
+    assert summary["flat_windows"] == {"select": 0, "test": 0, "train_fraction": 0.0}
     bounds = split_bounds(CSV_ROWS, 0.15, 0.15)
     assert summary["segments"] == {name: list(b) for name, b in zip(("train", "select", "test"), bounds)}
     baselines = summary["baselines"]
@@ -1250,11 +1255,11 @@ def within_30_seconds():
     signal.signal(signal.SIGALRM, previous)
 
 
-def level_csv(path: Path, offset: float = 1e12) -> Path:
-    """A csv of one moving column sitting ``offset`` above zero: its spread over its level is 1e-12 at the default (D-040)."""
+def level_csv(path: Path, offset: float = 1e12, factor: float = 1.0) -> Path:
+    """A csv of one moving column times ``factor`` sitting ``offset`` above zero: its spread over its level is 1e-12 at the default."""
     write_series_csv(path, rows=1200)
     frame = pd.read_csv(path)
-    frame["v0"] = frame["v0"] + offset
+    frame["v0"] = frame["v0"] * factor + offset
     frame.to_csv(path, index=False)
     return path
 
@@ -1334,8 +1339,14 @@ def refusal(tmp_path: Path, kind: str):
         "lookback-one": ({"data": {**E2E_DATA, "lookback": 1}},
                          "Invalid value for 'data.lookback': expected an int of at least 2 (one value has no spread to standardize "
                          "by) or auto, got 1"),
-        "csv-level": ({"data": csv_data(level_csv(tmp_path / "level.csv"))},
-                      "the level must be removed before training"),
+        "csv-level": ({"data": csv_data(level_csv(tmp_path / "level.csv"))}, "have a flat context"),
+        # D-045: the flat-window share (the review's csv shifted by 1e7) and the float32 range, both before the claim
+        "csv-flat-1e7": ({"data": csv_data(level_csv(tmp_path / "flat7.csv", 1e7))},
+                         "windows of the train segment have a flat context (std not above transform_args.scale_floor 1e-06"),
+        "csv-float32-range-1e40": ({"data": csv_data(level_csv(tmp_path / "big40.csv", 0.0, 1e40))},
+                                   "column 'v0' has max |x| "),
+        "csv-float32-range-1e200": ({"data": csv_data(level_csv(tmp_path / "big200.csv", 0.0, 1e200))},
+                                    "outside [1e-12, 1e15], the float32 range"),
         # The refusals the review listed as coming AFTER the claim (W4, W8 and the NOTE on late refusals, D-041 and D-042):
         "precision-mixed-float16": ({"precision": "mixed_float16"}, PRECISION_SENTENCE),
         "precision-mixed-bfloat16": ({"precision": "mixed_bfloat16"}, PRECISION_SENTENCE),
@@ -1359,7 +1370,8 @@ def refusal(tmp_path: Path, kind: str):
 
 REFUSALS = ["series-too-short", "csv-too-short", "unsorted-time", "non-finite-cell", "missing-column", "timestral-horizon",
             "tirex-two-channels", "ets-two-channels", "mdn-two-channels", "xlstm-quantile-two-channels", "deepar",
-            "adaptive-ema", "ets-jit", "lookback-one", "csv-level", "precision-mixed-float16", "precision-mixed-bfloat16",
+            "adaptive-ema", "ets-jit", "lookback-one", "csv-level", "csv-flat-1e7", "csv-float32-range-1e40",
+            "csv-float32-range-1e200", "precision-mixed-float16", "precision-mixed-bfloat16",
             "n-select-below-batch", "n-test-below-batch", "patterns-subset-below-batch", "csv-select-below-batch",
             "csv-n-select-above-available", "csv-select-constant", "horizon-below-nbeats-minimum", *FLOOR_KINDS]
 
@@ -1404,10 +1416,11 @@ def test_the_refusal_table_names_every_case_of_invariant_9():
     for needed in ("too-short", "unsorted", "non-finite", "missing-column", "timestral-horizon", "tirex-two", "ets-two", "mdn-two",
                    "xlstm-quantile-two", "deepar", "adaptive-ema", "ets-jit", "lookback-one", "csv-level", "precision-mixed-float16",
                    "precision-mixed-bfloat16", "n-select-below-batch", "n-test-below-batch", "patterns-subset-below-batch",
-                   "csv-select-below-batch", "csv-n-select-above-available", "csv-select-constant", "horizon-below-nbeats-minimum"):
+                   "csv-select-below-batch", "csv-n-select-above-available", "csv-select-constant", "horizon-below-nbeats-minimum",
+                   "csv-flat-1e7", "csv-float32-range-1e40", "csv-float32-range-1e200"):
         assert needed in kinds, needed
     assert FLOOR_KINDS, "vacuity guard: some family has a minimum lookback above the floor of every family"
-    assert len(REFUSALS) == len(set(REFUSALS)) == 24 + len(FLOOR_KINDS), "24 written here, one per (family, variant) minimum derived"
+    assert len(REFUSALS) == len(set(REFUSALS)) == 27 + len(FLOOR_KINDS), "27 written here, one per (family, variant) minimum derived"
 
 
 # ---------------------------------------------------------------------

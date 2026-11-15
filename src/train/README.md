@@ -908,7 +908,7 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
 | `data.n_test` | `null` | the same path as `data.n_select` |
 | `data.steps_per_epoch` | `null` | `forecast_data.load_forecast_batches`, then `TimeSeriesForecastingTrainer.fit_kwargs`; null is the number of train windows over the batch size, at most 500 |
 | `data.max_samples` | `null` | `forecast_data.load_forecast_batches`; caps the train windows an epoch is sized from when `data.steps_per_epoch` is null, never the selection or test windows |
-| `transform_args.scale_floor` | `1e-06` | `TimeSeriesForecastingTrainer.build_data`, then `forecast_data.context_stats_np`; recorded in `task.json` and read again by `predict` and `export`; the flatness threshold of a context and the level check of a csv (`forecast_series.check_csv_level`) |
+| `transform_args.scale_floor` | `1e-06` | `TimeSeriesForecastingTrainer.build_data`, then `forecast_data.context_stats_np`; recorded in `task.json` and read again by `predict` and `export`; the flatness threshold of a context and of the flat-window check of a csv (`forecast_series.check_csv_level`) |
 | `metric_args.watch_metric` | `"auto"` | `ForecastMetricArgs.resolve_auto`, `fit_callbacks.build_callbacks`; auto is `val_mae`, the only value accepted (the bar is about the minimum `val_mae`, so the saved checkpoint must be that epoch) |
 | `metric_args.watch_mode` | `"auto"` | the same path; auto is `min`, the only value accepted |
 
@@ -944,15 +944,17 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
   `std <= transform_args.scale_floor * mean|context|` (the default is 1e-6, about eight float32 steps of relative resolution): its scale
   is then 1.0, the series' own unit, so a flat zero context (the absolute floor of 1e-8 that the first version used turned one
   `sparse_events` window into a standardized target of 1.08e9) and a flat context at any level give the raw deviation of the target.
-  What this gives: a window shifted by a constant is standardized to the same numbers, and forecast shifted by it, up to the float32
-  resolution of the level. Measured at a std of about 8: the three twins agree with a float128 oracle to 6e-8 (numpy, tf) and 1.8e-7
+  What this gives, and where it stops: shift invariance holds while a window's std is above `transform_args.scale_floor` (1e-06) times its mean |x|, that is while the level over the std is below 1e6. Inside the bound a window shifted by a constant is standardized to the same numbers and forecast shifted by it (measured through `predict` on float64 windows of `nbeats/tiny` and `prism/tiny`, window std about 5.8: the forecast of the window shifted by 0, 50, 1e3, 1e5 and 1e6 is the shifted forecast to 2.2e-11 of a window std at most, the last at a level over the std of 1.7e5; at 1e7 and 1e9 the window is flat and the same probe gives 0.064 (`nbeats`) and 0.38 (`prism`) window stds, the same at both levels because a flat window is forecast from its raw deviations, and the review's other heads at 1e9 gave 0.03 to 3.6). Beyond the bound the window is FLAT: a flat window is trained and scored in the series' raw units, not standardized, and `predict` returns `flat`, one bool per window, so the caller sees which windows were forecast that way. Measured at a std of about 8: the three twins agree with a float128 oracle to 6e-8 (numpy, tf) and 1.8e-7
   (float32 function) of a standardized value at levels 0, 50, 1e3, 1e5 and 1e6; a float32 `keras` or `saved_model` file (nbeats and prism quantile measured) agrees with `predict` on the same windows
   to 1e-4 of the window std plus one float32 step of the forecast itself; at 1e6 that step is 0.0625, 0.8 percent of this std, so a float32 window
-  at 1e6 carries its own rounding and no float32 function can forecast it better (`predict` of float64 windows still holds the shift to 1e-6 of a
-  std). `lookback` must be at least 2 (one context value has no spread: refused by name before the claim), and a csv column that varies by
-  less than `scale_floor` of its level (std over mean|x|, for example a series near 1e12 moving by 8) is refused before the claim with
-  the sentence that the level must be removed: float32 cannot hold the variation (an exactly constant column is not refused, its windows
-  are flat). The numpy twin is `context_stats_np` (returns the anchor, the offset from it and the scale), the tf twin `standardize_tf`
+  at 1e6 carries its own rounding and no float32 function can forecast it better (inside the bound `predict` of float64 windows holds the shift to 1e-10 of a std). `lookback` must be at least 2 (one context value has no spread: refused by name before the claim), and a csv is refused before
+  the claim when more than 10% of the windows of a segment (train, select or test, at stride `data.horizon` and at the resolved `data.lookback` and
+  `data.horizon`) have a flat context (a series near 1e12 moving by 8, the review's csv shifted by 1e7, a long constant stretch), with a sentence naming the
+  segment, the flat count and the two causes (a level large against the spread: remove it; constant stretches: fill or cut them); the check, the
+  training function, `predict` and the summary read one rule, `forecast_series.context_spread` (a column that never moves is left out of the count: its unit
+  scale loses nothing). A column whose nonzero max |x| is outside [1e-12, 1e15] is refused before the claim too, with a sentence naming the
+  float32 range of the exported function (it squares deviations in float32: a 1e40 column trained and its keras file returned NaN, and 1e200 overflowed the float64
+  std). The numpy twin is `context_stats_np` (returns the anchor, the offset from it and the scale), the tf twin `standardize_tf`
   and the keras-ops twin `context_stats_ops`; tests hold each equal to the numpy one.
   (4) No stacked L2: the legacy kernel regularizers and the AdamW decay both decayed the weights; here the optimizer's decay is the
   only one and `sgd` with a positive decay is refused (the adapters build no L2 penalty). (5) Warmup is in epochs (`optim_args.warmup_epochs`,
@@ -994,7 +996,8 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
   selection or test segment that holds fewer than one batch of non-overlapping windows, with the row count it needs in the message
   (21,600 rows at the defaults: 168 + 24 x 128 = 3,240 rows per segment over 0.15); a request of more selection or test windows than a
   csv segment holds; a csv whose select segment is constant in every value column (every window is flat, naive-last and seasonal-naive
-  score exactly 0 and the bar could be neither met nor judged); more channels than the family takes. Not offered:
+  score exactly 0 and the bar could be neither met nor judged); a csv of which more than 10% of the windows of a segment are flat, and a value column outside the float32 range
+  (see the standardization above); more channels than the family takes. Not offered:
   a long format with an id column, gap handling, resampling. A resume refuses a changed file (the fingerprint holds the sha256 of its
   bytes and every window key, and `task.json` records the same sha256).
 * **What is refused before the claim, and what is not** (D-041, D-042). Before `out` is claimed and before TensorFlow loads
@@ -1032,7 +1035,7 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
   the plan, before the gate): `val_mae` 0.5792 after 10 epochs, 30.2 percent below the better baseline. The summary also carries `baselines` (`naive_last`, `seasonal_naive`,
   `context_mean`, which is reported and not in the bar, and `n_windows`), `epoch_zero`, `canonical_metrics` for the selection and
   the test windows (MAE, RMSE, sMAPE, rMAE against naive, MASE scaled by the context's own one-step differences, and for a quantile
-  head coverage and sharpness), `lookback`, `horizon`, `channels`, `n_series`, `series_dropped`, `segments` and `stream`; the run
+  head coverage and sharpness), `lookback`, `horizon`, `channels`, `n_series`, `series_dropped`, `segments`, `flat_windows` (the flat select and test windows, and the share `train_fraction` of the train segment's windows at stride `data.horizon` that are flat: a flat window is scored in the series' raw units, so a non-zero count says part of `val_mae` is not in standardized units) and `stream`; the run
   directory is the shared one plus `task.json` and `visualizations/forecast_test.png` (one forecast figure of the test windows).
 * **The stream seed on a resume.** The train stream is endless and a resumed `fit` starts a fresh iterator, which would replay epoch
   0's windows. The task rebuilds the stream (`TimeSeriesForecastingTrainer.resume_stream`): the shared sequence passes
@@ -1045,15 +1048,15 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
   from the pure map at counters 0 to 2, so a resumed run is seen to differ from epoch 0's stream; the summary's `stream` block holds
   both. The help of `resume_interrupted` says it in one clause (`TaskTrainer.resume_order`).
 * **`predict`.** `python -m train predict model=<run dir or .keras> data=<csv, .npy or .npz> out=forecast.json` writes ONE new JSON
-  file (`out` must not exist): `task`, `model`, `data`, `lookback`, `horizon`, `channels`, `quantile_levels`, `point` and `quantiles`.
+  file (`out` must not exist): `task`, `model`, `data`, `lookback`, `horizon`, `channels`, `quantile_levels`, `point`, `quantiles` and `flat`.
   A csv gives the LAST `lookback` rows of the record's `value_cols`, after the loader's own check that the record's `time_col` is strictly increasing (a newest-first export is refused, not forecast from its oldest rows; a run that named no time column skips the check); a `.npy` or the one array of a `.npz` is `(lookback, channels)` or
   `(N, lookback, channels)`; a directory is refused by name ("a directory, not a file"), exit 2. From Python,
   `load_model(...)` returns a `ForecastPredictor` and `ForecastPredictor.predict(x)` takes an array, a list of windows (each an array or
-  a csv path) or a csv path and returns `{"point", "quantiles", "quantile_levels"}`: `point` is `(N, horizon, channels)` float64 in the
+  a csv path) or a csv path and returns `{"point", "quantiles", "quantile_levels", "flat"}`: `point` is `(N, horizon, channels)` float64 in the
   series' OWN units (the median for a quantile head), `quantiles` is `(N, horizon, channels, Q)` and the levels are the record's, and
-  both are `None` for a point head. A window is forecast from its own context statistics only (the numpy twin), so a window scaled by a constant gives the forecast
-  scaled by it and a window shifted by a constant gives the forecast shifted by it, up to the float32 resolution of the level (see the
-  standardization above: float64 windows hold it to 1e-6 of the window std at a level of 1e6 over a std of 8). A window of another length or
+  both are `None` for a point head, and `flat` is a bool `(N,)`, True for a window whose context is flat in a channel (forecast in the series' raw units). A window is forecast from its own context statistics only (the numpy twin), so a window scaled by a constant gives the forecast
+  scaled by it and a window shifted by a constant gives the forecast shifted by it while its `flat` stays False, that is while its std is above `scale_floor` times its mean |x| (see the
+  standardization above for the measured bound). A window of another length or
   channel count, a non-finite cell, an empty input and a csv with a missing column are named errors; a model whose output disagrees
   with the record (decode row, head, levels, median, horizon, channels) is refused at load.
 * **`export`.** The file takes RAW float32 windows `(batch, lookback, channels)` in the series' own units and returns the forecast

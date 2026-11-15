@@ -368,10 +368,6 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
         values = None
         if data_cfg.format == "csv":
             values, names, _ = read_csv_series(data_cfg.path, data_cfg.value_cols, data_cfg.time_col)
-            # DECISION plan-2026-11-13T105600-3a8319ef/D-040
-            # A column that varies by less than `scale_floor` of its level cannot be resolved in float32: refused HERE, before the
-            # claim, by the one function the loader calls too. Do NOT leave it to the loader (the run directory is claimed by then).
-            check_csv_level(values, names, config.transform_args.scale_floor)
             channels = int(values.shape[1])
         lines = geometry_problems(context.family, channels, data_cfg.horizon, kwargs) + window_problems(
             context.family, context.variant, data_cfg.lookback, data_cfg.horizon, kwargs)
@@ -385,6 +381,14 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
             select_fraction=data_cfg.select_fraction, test_fraction=data_cfg.test_fraction,
             n_select=data_cfg.n_select, n_test=data_cfg.n_test,
         )
+        if values is not None:
+            # DECISION plan-2026-11-13T105600-3a8319ef/D-040
+            # DECISION plan-2026-11-13T105600-3a8319ef/D-045
+            # A csv with too many flat windows, or a column outside the float32 range, is refused HERE, before the claim, by the
+            # one function the loader calls too. Do NOT leave it to the loader (the run directory is claimed by then).
+            check_csv_level(
+                values, names, lookback=data_cfg.lookback, horizon=data_cfg.horizon, select_fraction=data_cfg.select_fraction,
+                test_fraction=data_cfg.test_fraction, scale_floor=config.transform_args.scale_floor)
 
     # -- compile --------------------------------------------------------
 
@@ -519,6 +523,7 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
             "channels": data.input_shape[1],
             "n_series": data.n_series,
             "series_dropped": [list(pair) for pair in data.dropped],
+            "flat_windows": data.flat_windows,
             "segments": {name: list(bounds) for name, bounds in data.segments.items()},
             "stream": {
                 "seed": data.seed,
@@ -546,7 +551,7 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
             f"{data.n_select} fixed selection windows: a plain evaluate in inference mode; see the `init_scale_warning` note",
             *classification_run.RUN_NOTES[:2],
             "every number is in the units of the window's CONTEXT statistics (each window and its target are divided by the "
-            "context's own mean and scale); `val_mae` is the mean absolute error of the point forecast (the median of a "
+            "context's own mean and scale; a flat window, counted in `flat_windows`, is in the series' raw units); `val_mae` is the mean absolute error of the point forecast (the median of a "
             "quantile head) and is a function of the weights alone (the selection windows are fixed by (seed, split, index))",
             "`success_value` is the lowest `val_mae` of the selection window; `success_threshold` is min(`baselines.naive_last`, "
             "`baselines.seasonal_naive`, `epoch_zero.val_mae`), the first two numpy on the same fixed windows and the third read "

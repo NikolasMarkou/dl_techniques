@@ -314,6 +314,31 @@ def test_a_window_scaled_by_a_constant_gives_the_forecast_scaled_by_it(trained, 
         np.testing.assert_allclose(scaled["quantiles"], plain["quantiles"] * factor, rtol=0, atol=float(tolerance.max()))
 
 
+def test_predict_flags_a_flat_window_and_only_that_window(trained):
+    """D-045: a flat window is forecast in the series' raw units; the result says which windows were (a bool per window)."""
+    windows = np.concatenate([raw_windows(3, 1, seed=21), np.full((1, LOOKBACK, 1), 7.0), raw_windows(1, 1, seed=21) + 1e9])
+    answer = trained.predictor.predict(windows)
+    assert answer["flat"].dtype == bool and answer["flat"].shape == (5,)
+    assert answer["flat"].tolist() == [False, False, False, True, True]
+    assert np.isfinite(answer["point"]).all()
+
+
+def test_a_window_inside_the_stated_bound_is_shift_invariant_and_one_beyond_it_is_flagged_flat(one):
+    """The bound of the README: shift invariance holds while the window's std is above ``scale_floor`` times its mean |x|, that is
+    while level over std is below ``1 / scale_floor`` (1e6); a window beyond it is flat and is forecast in raw units. The probe sits
+    25 percent either side of the edge (zero-mean window, so its mean |x| is the shift)."""
+    floor = one.record["scale_floor"]
+    window = raw_windows(1, 1, seed=23)
+    window = window - window.mean(axis=1, keepdims=True)
+    spread = float(window.std())
+    plain = one.predictor.predict(window)
+    inside = one.predictor.predict(window + 0.8 * spread / floor)
+    beyond = one.predictor.predict(window + 1.25 * spread / floor)
+    assert inside["flat"].tolist() == [False] and beyond["flat"].tolist() == [True]
+    assert np.abs(inside["point"] - (plain["point"] + 0.8 * spread / floor)).max() / spread < 1e-8
+    assert np.abs(beyond["point"] - (plain["point"] + 1.25 * spread / floor)).max() / spread > 1e-8, "beyond the edge the shift is not undone"
+
+
 def test_a_quantile_head_returns_quantiles_and_levels_and_a_point_head_returns_none_for_both(trained):
     answer = trained.predictor.predict(raw_windows(3, 1))
     head, _, _ = HEADS[trained.case]
@@ -578,7 +603,8 @@ def test_predict_writes_one_json_for_an_npy_of_windows_and_refuses_a_second_call
     assert code == 0, stderr[-1500:]
     assert stdout.strip() == str(out)
     answer = json.loads(out.read_text())
-    assert list(answer) == ["task", "model", "data", "lookback", "horizon", "channels", "quantile_levels", "point", "quantiles"]
+    assert list(answer) == ["task", "model", "data", "lookback", "horizon", "channels", "quantile_levels", "point", "quantiles", "flat"]
+    assert answer["flat"] == [False] * 3, "one bool per window, read from the same rule the standardization uses"
     assert answer["task"] == TASK and answer["model"] == "nbeats/tiny" and answer["data"] == str(data)
     assert (answer["lookback"], answer["horizon"], answer["channels"]) == (LOOKBACK, HORIZON, 1)
     assert answer["quantile_levels"] is None and answer["quantiles"] is None

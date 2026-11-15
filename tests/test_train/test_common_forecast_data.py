@@ -31,6 +31,7 @@ naive-last on MSE) and validates on a fresh noise draw. What is pinned here, at 
 import hashlib
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -652,13 +653,13 @@ class TestCsv:
         frame = pd.read_csv(path)
         np.testing.assert_array_equal(b.bank[0], frame[["c", "a"]].to_numpy(np.float64))
 
-    def test_a_column_whose_spread_is_below_the_floor_of_its_level_is_refused_by_the_loader_too(self, tmp_path):
-        """D-040: the same ``check_csv_level`` the pre-claim check calls; a floor of 0 or a resolvable level loads."""
+    def test_a_column_whose_windows_are_flat_is_refused_by_the_loader_too(self, tmp_path):
+        """D-040, D-045: the same ``check_csv_level`` the pre-claim check calls; a floor of 0 or a resolvable level loads."""
         t = np.arange(CSV_ROWS)
         path = write_csv(tmp_path, a=1e12 + 8.0 * np.sin(t / 7.0))
-        with pytest.raises(ConfigError, match="column 'a' varies by .* the level must be removed before training"):
+        with pytest.raises(ConfigError, match=r"\d+ of \d+ windows of the (train|select|test) segment have a flat context"):
             load(**csv_kwargs(path))
-        assert load(**csv_kwargs(path, scale_floor=0.0)).bank.shape == (1, CSV_ROWS, 3), "a floor of 0 resolves nothing and refuses nothing"
+        assert load(**csv_kwargs(path, scale_floor=0.0)).bank.shape == (1, CSV_ROWS, 3), "a floor of 0 flattens nothing and refuses nothing"
         near = write_csv(tmp_path, name="near.csv", a=1e5 + 8.0 * np.sin(t / 7.0))
         assert load(**csv_kwargs(near)).bank.shape == (1, CSV_ROWS, 3), "a spread of 8e-5 of the level is above the floor of 1e-6"
 
@@ -788,7 +789,10 @@ class TestEveryRefusalIsANamedErrorWithinThirtySeconds:
         path = write_csv(tmp_path, a=values)
         with pytest.raises(ConfigError, match=rf"the select segment of the csv \(rows \[{lo}, {hi}\)\) is constant in every value column"):
             load(**csv_kwargs(path, value_cols=["a"]))
-        load(**csv_kwargs(path, value_cols=["a", "b"]))  # a second column that moves keeps the baselines above 0
+        # D-045: a second column that moves keeps the baselines above 0, but the constant column's windows are still flat (a constant
+        # stretch of all the select windows is the second cause the sentence names), so the flat-window check refuses it by name
+        with pytest.raises(ConfigError, match=r"\d+ of \d+ windows of the select segment have a flat context"):
+            load(**csv_kwargs(path, value_cols=["a", "b"]))
 
     def test_the_loader_reads_the_window_counts_through_the_functions_the_check_before_the_claim_calls(self, tmp_path, monkeypatch):
         calls = []
@@ -931,3 +935,134 @@ class TestFlattenTargets:
         np.testing.assert_array_equal(
             next(iter(plain_resumed.train_ds))[1].numpy()[..., 0], next(iter(resumed.train_ds))[1].numpy())
         assert digest(resumed.select_ds) == digest(flat.select_ds)
+
+
+# ---------------------------------------------------------------------
+# D-045: the flat-window share of a csv, the float32 range, and the flat counts of a run
+# ---------------------------------------------------------------------
+
+REVIEW = dict(lookback=LOOKBACK, horizon=HORIZON, select_fraction=0.15, test_fraction=0.15, scale_floor=1e-6)
+
+
+def review_series(amp: float = 1.0, rows: int = 3000) -> np.ndarray:
+    """The csv shape of the review probe: a daily sine over a random walk (window std about 5.6 at ``amp`` 1)."""
+    rng = np.random.default_rng(0)
+    t = np.arange(rows)
+    return amp * (8 * np.sin(2 * np.pi * t / 24) + 0.3 * rng.normal(size=rows).cumsum())
+
+
+def flat_oracle(bank: np.ndarray, positions, lookback: int, floor: float) -> np.ndarray:
+    """The flat rule written window by window: a column that moves somewhere has std about its first value <= floor * mean|x|."""
+    moves = bank.std(axis=1) > 0
+    return np.array([
+        bool((((c := bank[s, a:a + lookback]) - c[0]).std(axis=0) <= floor * np.abs(c).mean(axis=0))[moves[s]].any())
+        for s, a in positions])
+
+
+class TestTheFlatWindowShareOfACsv:
+    """The csv check and the flatness rule look at the same quantity: the windows of each segment at stride = horizon."""
+
+    @pytest.mark.parametrize("offset", [0.0, 1e3, 1e5, 1e6])
+    def test_a_level_within_the_bound_passes(self, offset):
+        fs.check_csv_level((review_series() + 50 + offset)[:, None], ["v"], **REVIEW)
+
+    @pytest.mark.parametrize("offset", [1e7, 2e7, 1e9])
+    def test_the_review_csv_shifted_beyond_the_bound_is_refused_with_the_segment_the_count_and_both_causes(self, offset):
+        """The review probe: shifted by 1e7 every select window was flat and the run trained in raw units without a word."""
+        with pytest.raises(ConfigError) as raised:
+            fs.check_csv_level((review_series() + 50 + offset)[:, None], ["v"], **REVIEW)
+        text = str(raised.value)
+        found = re.search(r"(\d+) of (\d+) windows of the (train|select|test) segment have a flat context", text)
+        assert found and int(found[1]) == int(found[2]), text
+        assert "the level is large against the spread" in text and "constant stretches" in text and "raw units" in text
+
+    def test_the_review_mix_of_160_times_the_spread_at_1e9_is_refused(self):
+        with pytest.raises(ConfigError, match=r"\d+ of \d+ windows of the (train|select|test) segment have a flat context"):
+            fs.check_csv_level((review_series(160.0) + 8000 + 1e9)[:, None], ["v"], **REVIEW)
+
+    @pytest.mark.parametrize("stretch, refused", [(64, False), (72, True)])
+    def test_ten_percent_of_a_segment_is_the_edge(self, stretch, refused):
+        """52 select windows: a constant stretch of 64 rows flattens 5 (9.6 percent) and one of 72 rows flattens 6."""
+        values = np.random.default_rng(3).normal(size=3000)
+        values[2100:2100 + stretch] = 3.0
+        if refused:
+            with pytest.raises(ConfigError, match=r"6 of 52 windows of the select segment have a flat context"):
+                fs.check_csv_level(values[:, None], ["v"], **REVIEW)
+        else:
+            fs.check_csv_level(values[:, None], ["v"], **REVIEW)
+
+    @pytest.mark.parametrize("segment, row", [("train", 100), ("test", 2700)])
+    def test_every_segment_is_counted_and_named(self, segment, row):
+        values = np.random.default_rng(3).normal(size=3000)
+        values[row:row + 400] = 3.0
+        with pytest.raises(ConfigError, match=f"of \\d+ windows of the {segment} segment have a flat context"):
+            fs.check_csv_level(values[:, None], ["v"], **REVIEW)
+
+    def test_a_column_that_never_moves_is_not_a_flat_window(self):
+        """Nothing varies in it, so nothing is lost by the unit scale: the second column's moving windows decide."""
+        values = np.stack([review_series() + 50, np.full(3000, 7.0)], axis=1)
+        fs.check_csv_level(values, ["v", "c"], **REVIEW)
+
+    def test_flat_windows_is_the_rule_written_window_by_window(self):
+        rng = np.random.default_rng(5)
+        bank = rng.normal(size=(3, 400, 2)) * np.array([1.0, 1e-3]) + np.array([5.0, 1e4])
+        bank[0, 100:160, 0] = 2.0
+        bank[1, :, 1] = 9.0
+        positions = np.stack([rng.integers(0, 3, 300), rng.integers(0, 400 - LOOKBACK + 1, 300)], axis=1)
+        for floor in (1e-6, 1e-3, 1e-1, 0.0):
+            got = fs.flat_windows(bank, positions, LOOKBACK, floor)
+            np.testing.assert_array_equal(got, flat_oracle(bank, positions, LOOKBACK, floor))
+        assert fs.flat_windows(bank, positions, LOOKBACK, 1e-1).any(), "vacuity guard: the loose floor flattens something"
+
+
+class TestTheFloat32RangeOfACsv:
+    """A column whose nonzero max |x| leaves [1e-12, 1e15] is refused: the exported function squares deviations in float32."""
+
+    @pytest.mark.parametrize("peak", [1e40, 1e200, 1e-13])
+    def test_a_column_outside_the_range_is_refused_naming_the_column_and_the_range(self, peak):
+        values = review_series()
+        values = (values / np.abs(values).max() * peak)[:, None]
+        with pytest.raises(ConfigError, match=r"column 'v' .*max \|x\|.*\[1e-12, 1e15\].*float32"):
+            fs.check_csv_level(values, ["v"], **REVIEW)
+
+    @pytest.mark.parametrize("peak", [1e15, 1e-12, 1.0])
+    def test_the_edges_of_the_range_pass(self, peak):
+        values = review_series()
+        fs.check_csv_level((values / np.abs(values).max() * peak)[:, None], ["v"], **REVIEW)
+
+    def test_a_column_of_zeros_is_not_out_of_range(self):
+        fs.check_csv_level(np.stack([review_series(), np.zeros(3000)], axis=1), ["v", "z"], **REVIEW)
+
+    def test_the_loader_raises_the_same_named_error_and_not_an_overflow(self, tmp_path):
+        """1e200: the float64 std overflowed and the old check let it through to a refusal after the claim that named flat windows."""
+        t = np.arange(CSV_ROWS)
+        path = write_csv(tmp_path, a=1e200 * np.sin(t / 7.0))
+        with pytest.raises(ConfigError, match=r"column 'a' .*max \|x\|.*\[1e-12, 1e15\].*float32"):
+            load(**csv_kwargs(path))
+
+
+class TestTheFlatCountsOfARun:
+    """``ForecastBatches.flat_windows``: the select and test counts and the train share, from the one function the check calls."""
+
+    def test_a_csv_counts_its_flat_windows_by_the_rule_written_window_by_window(self, tmp_path):
+        rng = np.random.default_rng(11)
+        a = rng.normal(size=CSV_ROWS)
+        a[600:640] = 2.0     # the first two select windows
+        a[0:40] = 2.0        # the first two train windows
+        b = load(**csv_kwargs(write_csv(tmp_path, a=a)))
+        assert set(b.flat_windows) == {"select", "test", "train_fraction"}
+        assert (b.flat_windows["select"], b.flat_windows["test"]) == (2, 0)
+        lo, hi = b.segments["train"]
+        train = np.stack([np.zeros(len(range(lo, hi - WIDTH + 1, HORIZON)), np.int64), np.arange(lo, hi - WIDTH + 1, HORIZON)], axis=1)
+        wanted = flat_oracle(b.bank, train, LOOKBACK, 1e-6)
+        assert wanted.sum() == 2 and b.flat_windows["train_fraction"] == pytest.approx(wanted.mean(), abs=1e-12)
+        assert flat_oracle(b.bank, b.select_windows, LOOKBACK, 1e-6).sum() == 2
+
+    def test_the_builtin_bank_counts_its_flat_windows_too(self):
+        b = load(patterns=["sparse_events", "random_walk"], realizations=2, n_select=None)
+        wanted = flat_oracle(b.bank, b.select_windows, LOOKBACK, 1e-6).sum()
+        assert wanted > 0, "vacuity guard: a sparse series has flat windows"
+        assert b.flat_windows["select"] == wanted
+        assert b.flat_windows["test"] == flat_oracle(b.bank, b.test_windows, LOOKBACK, 1e-6).sum()
+        assert 0.0 < b.flat_windows["train_fraction"] < 1.0
+        assert all(type(v) in (int, float) for v in b.flat_windows.values()), "plain numbers: the summary is JSON"

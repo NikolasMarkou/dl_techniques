@@ -57,13 +57,21 @@ Interface contract
     :raises ConfigError: when every value column is constant over the select ``segment``: every window is flat, so naive-last
         and seasonal-naive score exactly 0 and the bar (strictly below them) can be neither met nor judged.
 
-``check_csv_level(values, names, scale_floor)``
-    :param values: ``(rows, channels)`` float64 of :func:`read_csv_series`; ``names``: its column names; ``scale_floor``: the
-        flatness threshold of ``transform_args`` (a context is flat when its std is not above ``scale_floor * mean|x|``).
-    :raises ConfigError: for the first column that VARIES but whose std over its mean absolute value is not above
-        ``scale_floor`` (a constant column is not refused: it has nothing to resolve and its windows are flat). The sentence tells the
-        user to remove the level; float32, which every model and every exported file runs in, cannot hold the variation. One
-        function, called by the pre-claim check and by the loader alike.
+``context_spread(context, scale_floor)`` / ``flat_windows(bank, positions, lookback, scale_floor)`` / ``segment_windows(n_series, segment, width, stride)``
+    The ONE flatness rule (a context is flat when its std about its first value is not above ``scale_floor * mean|x|``), as numpy:
+    ``context_spread`` returns ``(std, flat)`` of ``(..., lookback, channels)`` contexts, each ``(..., 1, channels)``;
+    ``flat_windows`` is the bool ``(n,)`` of the windows at ``positions`` (``(n, 2)`` ``(series, start)`` into ``bank``
+    ``(series, rows, channels)``) with a flat context in a column that moves somewhere; ``segment_windows`` is every window of every series
+    whose targets are ``stride`` apart inside a ``segment``. The training function, the Predictor, the csv check and the summary count read these.
+
+``check_csv_level(values, names, *, lookback, horizon, select_fraction, test_fraction, scale_floor)``
+    :param values: the csv's ``(rows, channels)`` array; ``names`` its value columns; ``lookback`` and ``horizon`` the RESOLVED window;
+        the two fractions the split by time; ``scale_floor`` the flatness threshold of ``transform_args``.
+    :raises ConfigError: for the first column whose nonzero max |x| is outside ``FLOAT32_RANGE`` (the exported function runs in
+        float32), and for the first segment (train, select, test) of which more than ``FLAT_SHARE`` of the windows at stride
+        ``horizon`` have a flat context: a flat window is trained and scored in the series' raw units, so the run would mix two
+        units. The sentence names the segment, the flat count and the two causes (a level large against the spread, constant
+        stretches). One function, called by the pre-claim check and by the loader alike.
 
 ``refuse(message)``
     :raises ConfigError: always; the one spelling of "this configuration is refused" of the forecasting data.
@@ -85,6 +93,10 @@ if TYPE_CHECKING:  # annotations only; the runtime imports are inside the functi
 
 #: Fixed select and test windows per series of the synthetic bank, when ``n_select`` or ``n_test`` is not given.
 SELECT_WINDOWS_PER_SERIES = 8
+#: A csv is refused when more than this share of the windows of a segment have a flat context (see ``check_csv_level``).
+FLAT_SHARE = 0.1
+#: The nonzero max |x| a csv column may have: the exported function squares deviations in float32 (1e-24 to 1e30 stays inside it).
+FLOAT32_RANGE = (1e-12, 1e15)
 
 
 def refuse(message: str) -> NoReturn:
@@ -231,24 +243,69 @@ def read_csv_series(
     return values, names, hashlib.sha256(raw).hexdigest()
 
 
-def check_csv_level(values: "np.ndarray", names: Sequence[str], scale_floor: float) -> None:
-    """Refuse the first value column whose variation is not above ``scale_floor`` of its level (see the module contract)."""
-    # DECISION plan-2026-11-13T105600-3a8319ef/D-040
-    # A column that moves by less than `scale_floor` of its own level (the default 1e-6 is about eight float32 steps) cannot be
-    # told apart from its rounding in float32: a csv of values near 1e12 moving by 8 trained to 18.2 times the naive-last MAE
-    # with no warning (review W2). Refuse it BEFORE the claim and say what to do. Do NOT floor the scale instead (the scale
-    # would then depend on the level), and do NOT refuse an exactly constant column: nothing varies, the flat rule handles it.
+def context_spread(context: "np.ndarray", scale_floor: float) -> "Tuple[np.ndarray, np.ndarray]":
+    """``(std, flat)`` of the contexts ``(..., lookback, channels)``: the std about the first value and ``std <= scale_floor * mean|x|``."""
     import numpy as np
 
-    std = values.std(axis=0)
-    level = np.abs(values).mean(axis=0)
-    for column, name in enumerate(names):
-        if 0.0 < std[column] <= scale_floor * level[column]:
+    context = np.asarray(context, np.float64)
+    std = (context - context[..., :1, :]).std(axis=-2, keepdims=True)
+    return std, std <= scale_floor * np.abs(context).mean(axis=-2, keepdims=True)
+
+
+def flat_windows(bank: "np.ndarray", positions: "np.ndarray", lookback: int, scale_floor: float) -> "np.ndarray":
+    """The bool ``(n,)`` of the windows at ``positions`` whose context is flat in a column that moves somewhere (module contract)."""
+    import numpy as np
+
+    moves = bank.std(axis=1) > 0     # (series, channels): a column that never moves has no scale to lose
+    flat = np.zeros(len(positions), bool)
+    for lo in range(0, len(positions), 4096):
+        series, start = positions[lo:lo + 4096].T
+        contexts = bank[series[:, None], start[:, None] + np.arange(lookback)]
+        flat[lo:lo + 4096] = (context_spread(contexts, scale_floor)[1][:, 0, :] & moves[series]).any(axis=-1)
+    return flat
+
+
+def segment_windows(n_series: int, segment: Tuple[int, int], width: int, stride: int) -> "np.ndarray":
+    """``(n, 2)`` ``(series, start)`` of every window of ``width`` rows, ``stride`` apart, inside ``segment`` of each series."""
+    import numpy as np
+
+    lo, hi = segment
+    starts = lo + stride * np.arange(max(0, (hi - lo - width) // stride + 1))
+    return np.stack([np.repeat(np.arange(n_series), len(starts)), np.tile(starts, n_series)], axis=1)
+
+
+def check_csv_level(
+        values: "np.ndarray", names: Sequence[str], *, lookback: int, horizon: int, select_fraction: float, test_fraction: float,
+        scale_floor: float,
+) -> None:
+    """Refuse a column outside the float32 range, then a segment with too many flat windows (see the module contract)."""
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-045
+    # The csv check counts the quantity the standardization switches on: the windows (stride = horizon, at the resolved lookback and
+    # horizon) whose CONTEXT is flat. D-040 compared the whole column's std with 1e-6 of its level, which lets through a series
+    # whose slow drift is large and whose windows are flat (the review's random walk plus a daily sine, shifted by 1e7: all 48
+    # selection windows flat, trained in raw units, one val_mae of mixed units) and refuses a series whose windows are not. Do NOT
+    # go back to the column statistic, and do NOT refuse on ONE flat window (a constant stretch is legitimate; 10 percent is
+    # the measured line between a stretch and a unit change). The float32 range is checked first: a std over 1e200 overflows float64
+    # and 1e40 trains but its keras file returns NaN (the float32 function squares deviations).
+    import numpy as np
+
+    low, high = FLOAT32_RANGE
+    for name, peak in zip(names, np.abs(values).max(axis=0)):
+        if peak != 0 and not low <= peak <= high:
+            span = ", ".join(f"{x:.0e}".replace("e+", "e") for x in FLOAT32_RANGE)
             refuse(
-                f"column {name!r} varies by {std[column] / level[column]:.3g} of its level (std {std[column]:.3g} against mean "
-                f"|x| {level[column]:.3g}), not above transform_args.scale_floor {scale_floor:g}: float32 cannot resolve the "
-                "variation, so the level must be removed before training (subtract a rolling mean, a trend or the series' own "
-                "level, or take differences) and added back to the forecast")
+                f"column {name!r} has max |x| {peak:.3g}, outside [{span}], the float32 range of the exported function (it "
+                "squares deviations in float32): rescale the column to a typical size of about 1 before training")
+    bank = values[None]
+    for segment, bounds in zip(("train", "select", "test"), split_bounds(len(values), select_fraction, test_fraction)):
+        flat = flat_windows(bank, segment_windows(1, bounds, lookback + horizon, horizon), lookback, scale_floor)
+        if flat.sum() > FLAT_SHARE * flat.size:
+            refuse(
+                f"{int(flat.sum())} of {flat.size} windows of the {segment} segment have a flat context (std not above "
+                f"transform_args.scale_floor {scale_floor:g} of mean |x|), more than {FLAT_SHARE:.0%}: a flat window is not "
+                "standardized, it is trained and scored in the series' raw units, so the run would mix two units. Either the level "
+                "is large against the spread (remove it: subtract a rolling mean or a trend, or take differences, and add it back "
+                "to the forecast) or the series has constant stretches (fill or cut them)")
 
 
 def _check_time_column(column: "pd.Series", name: str) -> None:

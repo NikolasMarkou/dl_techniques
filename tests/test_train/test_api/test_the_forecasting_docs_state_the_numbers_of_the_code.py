@@ -7,6 +7,8 @@ document and never read again rots silently (a wrong count planted in each of th
 until this test existed). Each claim below is DERIVED from the code and must appear in the document word for word, and every ``src/...`` or ``tests/...`` path the two documents cite must exist.
 """
 
+import dataclasses
+import math
 import re
 from pathlib import Path
 
@@ -18,6 +20,8 @@ from train.api import forecast_predictor as fp
 from train.api.config import PRECISIONS, validate
 from train.api.errors import ConfigValidationError
 from train.api.tasks import BUILTIN_TASKS
+from train.api.forecast_args import ForecastTransformArgs, TimeSeriesData
+from train.api.forecast_series import FLAT_SHARE, FLOAT32_RANGE
 from train.api.tasks.time_series_forecasting import TimeSeriesForecastingConfig
 from train.common import forecast_run
 
@@ -139,6 +143,19 @@ def test_the_minimums_the_readme_states_are_the_family_rows():
 def test_the_readme_says_a_hand_edited_scale_floor_cannot_be_detected():
     text = " ".join(README.read_text().split())
     assert "`scale_floor` is not checked against the model" in text and "cannot be detected" in text
+
+
+def test_the_readme_states_the_shift_bound_the_flat_rule_has_and_the_flat_flag_and_counts():
+    """D-045: shift invariance holds while a window's std is above ``scale_floor`` times its mean |x|; a flat window is in raw units."""
+    floor = ForecastTransformArgs().scale_floor
+    bound = f"1e{round(math.log10(1 / floor))}"
+    text = " ".join(README.read_text().split())
+    assert f"shift invariance holds while a window's std is above `transform_args.scale_floor` ({floor:g}) times its mean |x|, that is while the level over the std is below {bound}" in text
+    assert "a flat window is trained and scored in the series' raw units" in text
+    assert "`predict` returns `flat`, one bool per window" in text and "`flat_windows`" in text
+    assert f"more than {FLAT_SHARE:.0%} of the windows of a segment" in text and "at stride `data.horizon`" in text
+    span = ", ".join(f"{x:.0e}".replace("e+", "e") for x in FLOAT32_RANGE)
+    assert f"outside [{span}]" in text and "float32 range" in text
 
 
 CITED = re.compile(r"`((?:tests|src)/[A-Za-z0-9_./\-]+\.(?:py|md|json|sh|yaml|yml))`")

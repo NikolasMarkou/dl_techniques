@@ -75,8 +75,8 @@ from dl_techniques.datasets.time_series.generator import TimeSeriesGenerator, Ti
 from dl_techniques.utils.logger import logger
 from train.api.forecast_args import BUILTIN, CSV, TimeSeriesData
 from train.api.forecast_series import (
-    SELECT_WINDOWS_PER_SERIES, check_csv_level, check_segments, check_select_moves, csv_window_count, read_csv_series, refuse,
-    split_bounds, window_count,
+    SELECT_WINDOWS_PER_SERIES, check_csv_level, check_segments, check_select_moves, context_spread, csv_window_count, flat_windows,
+    read_csv_series, refuse, segment_windows, split_bounds, window_count,
 )
 from train.common.pretrain_data import SELECT_SALT, TEST_SALT, derive_stream_seed
 
@@ -111,10 +111,8 @@ def context_stats_np(context: np.ndarray, scale_floor: float) -> Tuple[np.ndarra
     # no spread has no scale to divide by: its target stays in the series' own unit, as D-035 gave an all-zero context).
     context = np.asarray(context, np.float64)
     anchor = context[..., :1, :]
-    shifted = context - anchor
-    offset = shifted.mean(axis=-2, keepdims=True)
-    std = shifted.std(axis=-2, keepdims=True)
-    flat = std <= scale_floor * np.abs(context).mean(axis=-2, keepdims=True)
+    offset = (context - anchor).mean(axis=-2, keepdims=True)
+    std, flat = context_spread(context, scale_floor)   # the one flat rule (forecast_series): the csv check and the counts read it too
     return anchor, offset, np.where(flat, UNIT_SCALE, std)
 
 
@@ -247,6 +245,9 @@ class ForecastBatches:
     :param bank: ``(n_series, rows, channels)`` float64; ``segments`` the ``(lo, hi)`` rows of each split;
         ``select_windows``, ``test_windows`` the ``(series, start)`` of every fixed window.
     :param dropped: ``(pattern, realization)`` of the non-finite series the bank left out.
+    :param flat_windows: ``{"select", "test", "train_fraction"}``: the fixed select and test windows whose context is flat (a flat
+        window is trained and scored in the series' raw units) and the share of the train segment's windows (stride = horizon) that
+        are, all from :func:`train.api.forecast_series.flat_windows`.
     :param value_cols, csv_sha256: the csv's value column names and the sha256 of its bytes (``None`` for the synthetic bank);
         the record of the run (``task.json``) carries both.
     :param first_batch_digest: sha256 of the first train batch, from the pure map (no fit iterator is touched).
@@ -275,6 +276,7 @@ class ForecastBatches:
     test_windows: np.ndarray = field(repr=False)
     n_series: int
     dropped: Tuple[Tuple[str, int], ...]
+    flat_windows: Dict[str, Any]
     first_batch_digest: str
     value_cols: Optional[Tuple[str, ...]]
     csv_sha256: Optional[str]
@@ -374,10 +376,12 @@ def load_forecast_batches(
         where = "random starts inside the segment of every series, keyed on (seed, salt, index)"
     else:
         values, columns, digest = read_csv_series(path, value_cols, time_col)
-        check_csv_level(values, columns, scale_floor)
         segments = split_bounds(len(values), select_fraction, test_fraction)
         check_segments(segments, len(values), width, "the csv")
         check_select_moves(values, segments[1])
+        check_csv_level(
+            values, columns, lookback=lookback, horizon=horizon, select_fraction=select_fraction, test_fraction=test_fraction,
+            scale_floor=scale_floor)
         bank = values[None]
         source = dict(sha256=digest, columns=columns, time_col=time_col)
         windows = [_strided_positions(name, segment, requested, request)
@@ -387,6 +391,9 @@ def load_forecast_batches(
     n_series, rows, channels = bank.shape
     train_hi = segments[0][1]
     span = train_hi - width + 1
+    flat = {name: int(flat_windows(bank, positions, lookback, scale_floor).sum())
+            for name, positions in (("select", select_windows), ("test", test_windows))}
+    flat["train_fraction"] = float(flat_windows(bank, segment_windows(n_series, segments[0], width, horizon), lookback, scale_floor).mean())
 
     # DECISION plan-2026-11-13T105600-3a8319ef/D-004
     # Train windows are drawn inside the TRAIN segment only, from a counter keyed on (stream_seed, counter),
@@ -439,6 +446,6 @@ def load_forecast_batches(
                     f"{len(test_windows)} fixed windows, {where}"),
         fingerprint=fingerprint, seed=seed, stream_seed=first_stream, batch_size=batch_size, lookback=lookback,
         horizon=horizon, bank=bank, segments=dict(zip(("train", "select", "test"), segments)),
-        select_windows=select_windows, test_windows=test_windows, n_series=n_series, dropped=tuple(dropped),
+        select_windows=select_windows, test_windows=test_windows, n_series=n_series, dropped=tuple(dropped), flat_windows=flat,
         first_batch_digest=first_digest, value_cols=None if format == BUILTIN else tuple(columns),
         csv_sha256=None if format == BUILTIN else digest, train_builder=train_stream)

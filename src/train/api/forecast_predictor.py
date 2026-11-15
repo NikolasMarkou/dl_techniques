@@ -24,11 +24,12 @@ Interface contract
         column of a run that named none; their count must be the model's channels; the rows must be in time order when the
         record names a ``time_col``, checked by the loader's own function). ``L`` is the record's lookback and ``C``
         its channels; every value must be a finite number.
-    :return: ``{"point", "quantiles", "quantile_levels"}``: ``point`` is ``(N, horizon, channels)`` float64 in the series'
+    :return: ``{"point", "quantiles", "quantile_levels", "flat"}``: ``point`` is ``(N, horizon, channels)`` float64 in the series'
         own units (the median for a quantile head); ``quantiles`` is ``(N, horizon, channels, Q)`` and ``quantile_levels``
-        the record's list for a quantile head, and both are ``None`` for a point head. A window is forecast from its own
-        statistics only, so a window shifted by a constant gives the forecast shifted by it and a window scaled by a constant
-        the forecast scaled.
+        the record's list for a quantile head, and both are ``None`` for a point head; ``flat`` is a bool ``(N,)``, True for a
+        window whose context is flat in a channel (std not above ``scale_floor`` of its mean |x|), which is forecast in the series'
+        raw units, not standardized. A window is forecast from its own statistics only, so a window scaled by a constant gives
+        the forecast scaled, and a window shifted by a constant the forecast shifted while its ``flat`` stays False.
     :raises ConfigError: for a window of another length or channel count, a non-finite or non-numeric value, an empty list or
         array, an input of another kind, and a csv that is missing, has too few rows, lacks a column, holds a non-numeric or
         non-finite one or is not in time order.
@@ -46,7 +47,7 @@ Interface contract
     of the ``.npz``.
 
 ``write_predictions(predictor, file, source, out)``
-    Writes ``{"task", "model", "data", "lookback", "horizon", "channels", "quantile_levels", "point", "quantiles"}`` as one JSON
+    Writes ``{"task", "model", "data", "lookback", "horizon", "channels", "quantile_levels", "point", "quantiles", "flat"}`` as one JSON
     file into the new path ``out`` (nothing is overwritten). :raises ConfigError: for any error of ``predict`` and for a
     forecast that is not finite (JSON has no NaN).
 
@@ -72,6 +73,7 @@ from typing import Any, Dict, List, Mapping, NoReturn, Optional, Sequence, Tuple
 
 from .errors import ConfigError
 from .exporting import check_free
+from .forecast_series import context_spread
 from .predictor import FORECASTING, check_record
 from .run_dir import TASK_FILE
 
@@ -286,6 +288,7 @@ class ForecastPredictor:
         # The anchor (the first context value) comes off FIRST and goes back on LAST, the order the exported function uses; do NOT
         # fold anchor and offset into one mean (it is the same number in float64 here, but the twins must read alike).
         anchor, offset, scale = forecast_data.context_stats_np(windows, self.record["scale_floor"])
+        flat = context_spread(windows, self.record["scale_floor"])[1].reshape(len(windows), -1).any(axis=1)
         standardized = ((windows - anchor - offset) / scale).astype(np.float32)
         points: List[Any] = []
         cubes: List[Any] = []
@@ -299,6 +302,7 @@ class ForecastPredictor:
             "point": (np.concatenate(points) * scale + offset) + anchor,
             "quantiles": quantiles,
             "quantile_levels": self.record["quantile_levels"],
+            "flat": flat,
         }
 
 
@@ -355,6 +359,7 @@ def write_predictions(predictor: ForecastPredictor, file: Path, source: Any, out
         "quantile_levels": answer["quantile_levels"],
         "point": answer["point"].tolist(),
         "quantiles": None if answer["quantiles"] is None else answer["quantiles"].tolist(),
+        "flat": answer["flat"].tolist(),
     }
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "x") as handle:
