@@ -53,8 +53,8 @@ help word, prints its config keys; any other arguments go to ``run_task``.
     For a FORECASTING run ``data`` is one csv file (the last ``lookback`` rows of the record's value columns are one
     window), or a ``.npy`` or ``.npz`` file holding windows ``(L, C)`` or ``(N, L, C)`` in the series' own units, and
     ``out`` is a new JSON file with the lookback, the horizon, the channels, the ``point`` forecast ``(N, horizon,
-    channels)`` and, for a quantile head, the ``quantile_levels`` and the ``quantiles``
-    (:func:`train.api.forecast_predictor.write_predictions`). The record is read BEFORE the data is listed
+    channels)``, the per-window ``flat`` flag (a flat window is forecast in the series' raw units) and, for a quantile head,
+    the ``quantile_levels`` and the ``quantiles`` (:func:`train.api.forecast_predictor.write_predictions`). The record is read BEFORE the data is listed
     (``DATA_LISTERS``, D-012).
 
 ``convert <dataset> key=value ...``
