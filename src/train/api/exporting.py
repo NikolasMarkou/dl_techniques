@@ -471,13 +471,26 @@ def _frozen_graph_as_is(input_names: Any, output_names: Any, graph_def: Any) -> 
     return graph_def
 
 
+def _np_cast_cause() -> str:
+    """The sentence naming the installed tf2onnx and numpy: the first calls ``np.cast``, which numpy 2.0 removed."""
+    import numpy
+    import tf2onnx
+
+    return (f"tf2onnx {tf2onnx.__version__} calls np.cast, which numpy {numpy.__version__} removed in 2.0, in its constant folding; "
+            "install numpy<2 or a tf2onnx built for numpy 2")
+
+
 def _export_onnx(model: Any, out: Path, spec: Any, served: Optional[Callable[[Any], Any]] = None) -> None:
     import contextlib
+    import inspect
     from unittest import mock
 
+    import numpy
     import tensorflow as tf
     import tf2onnx
-    from tf2onnx import tf_loader
+    from tf2onnx import tf_loader, tfonnx
+
+    from dl_techniques.utils.logger import logger
 
     function = tf.function(served or (lambda batch: model(batch, training=False)))
     # DECISION plan-2026-11-10T095307-d483ffab/D-034
@@ -491,8 +504,21 @@ def _export_onnx(model: Any, out: Path, spec: Any, served: Optional[Callable[[An
     # concurrently in one process.
     skip_grappler = any(type(layer).__name__ == "BiasFreeBatchNorm" for layer in model._flatten_layers())
     patch = mock.patch.object(tf_loader, "tf_optimize_grappler", _frozen_graph_as_is)
-    with patch if skip_grappler else contextlib.nullcontext():
-        proto, _ = tf2onnx.convert.from_function(function, input_signature=(spec,))
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-046
+    # The installed tf2onnx (1.16.1) calls `np.cast` in `rewrite_constant_fold`, which numpy 2.0 removed: tf2onnx catches the
+    # AttributeError itself, logs an ERROR with a traceback, SKIPS that one rewrite and writes a file that matches Keras (measured, every onnx
+    # cell). It is an environment mismatch, not a defect of a model, so the export names it once (a warning) and goes on, and when the
+    # same error does reach us (another tf2onnx path) it is refused by name. Do NOT catch AttributeError broadly (only this one), do
+    # NOT refuse the cell because of the logged line (the files are right), and do NOT pin numpy here (the environment is the user's).
+    if not hasattr(numpy, "cast") and "np.cast" in inspect.getsource(tfonnx):
+        logger.warning(f"{_np_cast_cause()}; the ERROR line tf2onnx logs is that rewrite being skipped, the file is still written")
+    try:
+        with patch if skip_grappler else contextlib.nullcontext():
+            proto, _ = tf2onnx.convert.from_function(function, input_signature=(spec,))
+    except AttributeError as exc:
+        if "np.cast" not in str(exc):
+            raise
+        raise ConfigError(f"Invalid value for 'format': the onnx conversion failed: {_np_cast_cause()}") from exc
     with open(out, "xb") as handle:
         handle.write(proto.SerializeToString())
 

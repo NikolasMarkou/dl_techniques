@@ -1195,6 +1195,68 @@ def _traced(case: str, tmp_path_factory):
     return run.predictor.model, (lambda batch: layer(batch)["point"] if run.record["head"] == "quantile" else layer(batch)), spec
 
 
+def _numpy_cast_error() -> AttributeError:
+    """The error numpy 2 raises for ``np.cast``, taken from the real call where numpy has dropped it."""
+    try:
+        np.cast  # noqa: B018 - the attribute access IS the failure tf2onnx 1.16 hits
+    except AttributeError as real:
+        return real
+    return AttributeError("`np.cast` was removed in the NumPy 2.0 release. Use `np.asarray(arr, dtype=dtype)` instead.")
+
+
+@needs_onnx
+def test_an_np_cast_failure_of_the_converter_is_a_named_error_with_the_real_cause(world, tmp_path_factory, tmp_path, monkeypatch):
+    """D-046: tf2onnx 1.16 calls ``np.cast``, which numpy 2.0 removed; when that reaches the export it says so, by name."""
+    import tf2onnx
+
+    from train.api import exporting
+
+    model, point, spec = _traced("nbeats", tmp_path_factory)
+    error = _numpy_cast_error()
+
+    def raising(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(tf2onnx.convert, "from_function", raising)
+    with pytest.raises(ConfigError, match=r"tf2onnx \S+ .*np\.cast.*numpy \S+ .*numpy<2") as raised:
+        exporting._export_onnx(model, tmp_path / "c.onnx", spec, point)
+    assert raised.value.__cause__ is error and not (tmp_path / "c.onnx").exists()
+
+
+@needs_onnx
+def test_another_attribute_error_of_the_converter_is_not_taken_for_the_numpy_one(world, tmp_path_factory, tmp_path, monkeypatch):
+    import tf2onnx
+
+    from train.api import exporting
+
+    model, point, spec = _traced("nbeats", tmp_path_factory)
+
+    def raising(*args, **kwargs):
+        raise AttributeError("'Graph' object has no attribute 'missing'")
+
+    monkeypatch.setattr(tf2onnx.convert, "from_function", raising)
+    with pytest.raises(AttributeError, match="no attribute 'missing'"):
+        exporting._export_onnx(model, tmp_path / "o.onnx", spec, point)
+
+
+@needs_onnx
+@pytest.mark.skipif(hasattr(np, "cast"), reason="this numpy still has np.cast: the failure of the installed pair cannot be reproduced")
+def test_the_np_cast_failure_tf2onnx_swallows_is_named_in_the_log_and_the_file_is_still_written(
+        world, tmp_path_factory, tmp_path, caplog):
+    """The REAL failure of the installed pair: tf2onnx logs an ERROR, skips its constant folding and carries on. The file matches
+    Keras (the cells above), and the export says why that line is in the log."""
+    import logging
+
+    from train.api import exporting
+
+    model, point, spec = _traced("nbeats", tmp_path_factory)
+    caplog.set_level(logging.WARNING, logger="dl")
+    exporting._export_onnx(model, tmp_path / "w.onnx", spec, point)
+    named = [r.getMessage() for r in caplog.records if "np.cast" in r.getMessage() and r.name == "dl"]
+    assert len(named) == 1 and "constant folding" in named[0] and "numpy<2" in named[0], named
+    assert (tmp_path / "w.onnx").stat().st_size > 0
+
+
 def test_the_tflite_of_timestral_fails_where_the_reason_says(world, tmp_path_factory, tmp_path):
     from train.api import exporting
 

@@ -1081,7 +1081,7 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
   The five refusals and their measured reasons: `tflite` of `timestral` (the converter stops at `Cumsum` with built-in operators and at
   `Asinh` with select TF operators); `onnx` of `timestral` (the file is written and onnxruntime cannot initialize it); `onnx` of both
   `xlstm` rows (onnxruntime `InvalidGraph` at a `Pad` in an mLSTM block's causal convolution); `onnx` of `ets` (the converter cannot
-  find a `while` output). `tflite` of `tirex`, `xlstm` and `ets` uses select TF operators, so the file needs the Flex delegate. Every
+  find a `while` output). `tflite` of `tirex`, `xlstm` and `ets` uses select TF operators, so the file needs the Flex delegate. Every onnx export under numpy 2 with tf2onnx 1.16 logs a tf2onnx ERROR line (`np.cast` was removed in the NumPy 2.0 release): that tf2onnx calls a name numpy removed, skips its constant-folding rewrite and writes the file, which matches Keras as measured; the export logs one warning naming the pair (D-046), and when the same error reaches the export it is refused by name (numpy below 2, or a tf2onnx built for numpy 2, removes it). Every
   cell that exports matched Keras on the CPU: the worst gap, as a share of the window's standard
   deviation, was 3.4e-6 for `saved_model`, 5.3e-5 for `tflite` and 7.1e-5 for `onnx` (measured in plan 3a8319ef, tiny models of every
   family at `(None, 64, 1)`).
