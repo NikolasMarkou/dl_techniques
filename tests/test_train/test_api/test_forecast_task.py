@@ -155,6 +155,25 @@ def test_every_optional_hook_the_task_relies_on_is_overridden(hook):
     assert getattr(TimeSeriesForecastingTrainer, hook) is not getattr(TaskTrainer, hook), hook
 
 
+@pytest.mark.parametrize("module, name", [("image_denoising", "ImageDenoisingTrainer"), ("pretrain", "PretrainTrainer"),
+                                           ("time_series_forecasting", "TimeSeriesForecastingTrainer")])
+def test_the_tasks_without_classes_refuse_a_class_count_from_either_side_with_one_sentence(module, name):
+    """The three tasks without classes share ``trainer.check_holds_no_classes``; each override calls it (nothing tested the refusal before)."""
+    from train.api.data_args import DataFacts
+    from train.api.trainer import check_holds_no_classes
+
+    cls = getattr(importlib.import_module(f"train.api.tasks.{module}"), name)
+    trainer = object.__new__(cls)
+    none = DataFacts(dataset="synthetic", num_classes=None, image_size=None)
+    cls.input_check(trainer, none, SimpleNamespace(num_classes=None))
+    for facts, data, said, loaded in ((DataFacts(dataset="synthetic", num_classes=10, image_size=None), SimpleNamespace(num_classes=None), 10, None),
+                                      (none, SimpleNamespace(num_classes=3), None, 3)):
+        with pytest.raises(RuntimeError, match=rf"{name} holds no classes, but describe_data said {said} and build_data loaded {loaded}"):
+            cls.input_check(trainer, facts, data)
+        with pytest.raises(RuntimeError, match="holds no classes"):
+            check_holds_no_classes(trainer, facts, data)
+
+
 def test_the_task_attaches_no_per_epoch_figure_and_writes_the_record_of_its_table(world, tmp_path):
     from train.api.predictor import RECORD_KEYS
 

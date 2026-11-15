@@ -382,6 +382,23 @@ def test_coverage_and_sharpness_are_the_widest_interval_over_the_last_axis_of_th
 # ---------------------------------------------------------------------
 
 
+def test_is_count_is_one_function_and_a_bool_is_not_a_count():
+    from train.api import args, pretrain_models
+
+    for good in (1, 7, 10 ** 6):
+        assert args.is_count(good) is True, good
+    for bad in (0, -1, True, False, 2.0, "3", None, [3]):
+        assert args.is_count(bad) is False, bad
+    assert fm.is_count is args.is_count and pretrain_models.is_count is args.is_count, "the adapters share one definition"
+
+
+@pytest.mark.parametrize("shape, horizon", [((True, 1), 8), ((64, True), 8), ((0, 1), 8), ((64.0, 1), 8), ((64, 1, 1), 8),
+                                            ((64, 1), True), ((64, 1), 0)])
+def test_the_adapters_door_refuses_an_input_shape_or_a_horizon_that_is_not_made_of_counts(shape, horizon):
+    with pytest.raises(ValueError, match="positive int"):
+        fm._prepare("nbeats", "tiny", None, shape, horizon, {})
+
+
 def test_decode_has_one_row_per_family_and_head():
     assert tuple(fr.DECODE) == ROWS
     # The flat target is decided BEFORE the model exists, by the function the task calls; the rows hold no copy of that fact.
