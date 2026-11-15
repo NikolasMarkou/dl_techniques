@@ -1,7 +1,7 @@
 """The child process of ``test_forecast_resume.py``: one real ``time_series_forecasting`` fit a parent can SIGKILL.
 
-Run as ``python _forecast_child.py '<json>'`` on the CPU, in the marker protocol of ``_pretrain_child.py`` (the parent is
-``test_backup_every_steps.run_child``: it reads the ``@@`` markers off the log and SIGKILLs the RECORDED PID). The JSON holds
+Run as ``python _forecast_child.py '<json>'`` on the CPU, in the marker protocol of ``_resume_protocol.py`` (which holds the
+trace, the ``Recorder`` and the ``Stopper`` the pretrain and forecasting children share, and the parent side). The JSON holds
 
 * ``mapping``: the request, as ``validate(TimeSeriesForecastingConfig, mapping)`` takes it;
 * ``stop_at``: ``[epoch, done]`` prints ``@@AT <epoch> <done>`` and sleeps when ``done`` batches of ``epoch`` have finished;
@@ -22,44 +22,27 @@ Prints ``@@DONE`` at the end. Determinism is the golden run's (op determinism, o
 import dataclasses
 import hashlib
 import json
-import os
 import sys
-import time
 
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
-os.environ.setdefault("MPLBACKEND", "Agg")
+import _resume_protocol as protocol
+
+protocol.child_environment()
 
 
 def main(spec: dict) -> None:
     import numpy as np
-    import tensorflow as tf
 
-    tf.config.experimental.enable_op_determinism()
-    tf.config.threading.set_intra_op_parallelism_threads(1)
-    tf.config.threading.set_inter_op_parallelism_threads(1)
-
-    import keras
+    tf = protocol.start_tensorflow()
 
     import train.api.recipes as recipes
-    from train.api.config import validate
+    from _forecast_fixtures import standardize_np
     from train.api.tasks import register_builtin_tasks
     from train.api.tasks.time_series_forecasting import TimeSeriesForecastingConfig, TimeSeriesForecastingTrainer
-    from train.common.forecast_data import standardize_np
 
     recipes.register_builtin_models()
     register_builtin_tasks()
     #: Filled by the first ``build_data`` of the process: ``(table, positions)`` of every window of its bank.
     reference = {}
-
-    def write(kind: str, **fields) -> None:
-        with open(spec["trace"], "a") as handle:
-            handle.write(json.dumps({"label": spec["label"], "kind": kind, **fields}) + "\n")
-            handle.flush()
-
-    def steps_of(model) -> int:
-        optimizer = model.optimizer
-        return int(keras.ops.convert_to_numpy(getattr(optimizer, "inner_optimizer", optimizer).iterations))
 
     def table_of(data, floor) -> None:
         """Every window ``(series, start)`` of the bank, standardized: context then target, one row each."""
@@ -79,89 +62,34 @@ def main(spec: dict) -> None:
         index = nearest.argmin(axis=1)
         return [list(reference["positions"][i]) for i in index], float(nearest.min(axis=1).max())
 
-    def record(x, y):
-        where, distance = locate(x, y)
-        write("train_batch", digest=hashlib.sha256(x.tobytes() + y.tobytes()).hexdigest(), windows=where, distance=distance)
-        return x
+    def watcher(write):
+        def record(x, y):
+            where, distance = locate(x, y)
+            write("train_batch", digest=hashlib.sha256(x.tobytes() + y.tobytes()).hexdigest(), windows=where, distance=distance)
+            return x
 
-    def watched(data, floor):
-        """``data`` with its select windows and bank written and its train stream read through ``record``."""
-        if not reference:
-            table_of(data, floor)
-        windows, distance = [], 0.0
-        for x, y in data.select_ds:
-            where, far = locate(x.numpy(), y.numpy())
-            windows += where
-            distance = max(distance, far)
-        write("select", bank=hashlib.sha256(data.bank.tobytes()).hexdigest(), segments=data.segments,
-              windows=sorted(windows), distance=distance, stream_seed=data.stream_seed)
+        def watched(data, config):
+            """``data`` with its select windows and bank written and its train stream read through ``record``."""
+            if not reference:
+                table_of(data, config.transform_args.scale_floor)
+            windows, distance = [], 0.0
+            for x, y in data.select_ds:
+                where, far = locate(x.numpy(), y.numpy())
+                windows += where
+                distance = max(distance, far)
+            write("select", bank=hashlib.sha256(data.bank.tobytes()).hexdigest(), segments=data.segments,
+                  windows=sorted(windows), distance=distance, stream_seed=data.stream_seed)
 
-        def see(x, y):
-            seen = tf.numpy_function(record, [x, y], x.dtype)
-            seen.set_shape(x.shape)
-            return seen, y
+            def see(x, y):
+                seen = tf.numpy_function(record, [x, y], x.dtype)
+                seen.set_shape(x.shape)
+                return seen, y
 
-        return dataclasses.replace(data, train_ds=data.train_ds.map(see))
+            return dataclasses.replace(data, train_ds=data.train_ds.map(see))
 
-    class Recorder(keras.callbacks.Callback):
-        """Append what the run did to the trace; sits last in the list, after the callback that restores the backup."""
+        return watched
 
-        def __init__(self, data) -> None:
-            super().__init__()
-            self.data, self.epoch, self.first = data, 0, True
-
-        def on_epoch_begin(self, epoch, logs=None):
-            self.epoch = epoch
-            fields = {"epoch": epoch, "iterations": steps_of(self.model)}
-            if self.first and spec.get("probe_restored"):
-                # The weights a resume restored, scored before any step of this process: the select windows are fixed by
-                # (split seed, salt, index), so these are the numbers the killed run logged for the epoch they came from.
-                fields["restored"] = self.model.evaluate(self.data.select_ds, verbose=0, return_dict=True)
-            self.first = False
-            write("epoch_begin", **fields)
-
-        def on_train_batch_end(self, batch, logs=None):
-            write("batch", epoch=self.epoch, batch=batch, before=steps_of(self.model) - 1)
-
-        def on_epoch_end(self, epoch, logs=None):
-            write("epoch_end", epoch=epoch, iterations=steps_of(self.model))
-
-        def on_train_end(self, logs=None):
-            write("train_end", iterations=steps_of(self.model))
-
-    class Stopper(keras.callbacks.Callback):
-        """Block when ``done`` batches of ``epoch`` are finished (runs before the next batch)."""
-
-        def __init__(self, epoch: int, done: int) -> None:
-            super().__init__()
-            self.target, self.epoch = (epoch, done), 0
-
-        def on_epoch_begin(self, epoch, logs=None):
-            self.epoch = epoch
-
-        def on_train_batch_begin(self, batch, logs=None):
-            if self.target == (self.epoch, batch) and batch > 0:
-                print(f"\n@@AT {self.epoch} {batch}", flush=True)
-                time.sleep(3600)
-
-    class Child(TimeSeriesForecastingTrainer):
-        def build_data(self, config, context):
-            return watched(super().build_data(config, context), config.transform_args.scale_floor)
-
-        def resume_stream(self, config, data, completed_steps):
-            replacement = super().resume_stream(config, data, completed_steps)
-            # None is the task saying "keep the data": the fit then reads the stream `build_data` made.
-            return None if replacement is None else watched(replacement, config.transform_args.scale_floor)
-
-        def _callbacks(self, config, data, *arguments):
-            epoch_line, callbacks = super()._callbacks(config, data, *arguments)
-            callbacks.append(Recorder(data))
-            if spec.get("stop_at"):
-                callbacks.append(Stopper(*spec["stop_at"]))
-            return epoch_line, callbacks
-
-    Child(validate(TimeSeriesForecastingConfig, spec["mapping"])).run()
-    print("\n@@DONE", flush=True)
+    protocol.run_child(spec, TimeSeriesForecastingTrainer, TimeSeriesForecastingConfig, watcher)
 
 
 if __name__ == "__main__":

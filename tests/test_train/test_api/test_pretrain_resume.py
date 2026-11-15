@@ -30,7 +30,6 @@ epoch) and the files. NOT checked: a resumed run is not the unkilled run's traje
 (``test_backup_every_steps``). The tests write only under ``tmp_path``.
 """
 
-import csv
 import json
 from pathlib import Path
 
@@ -38,10 +37,10 @@ import pytest
 
 from tests.classification_fakes import identities_of
 from train.common import pretrain_run
-from train.common.resume_state import FIT_STATE_NAME
 from train.common.seed import set_seeds
 
-from .test_backup_every_steps import run_child
+from . import _resume_protocol as protocol
+from ._resume_protocol import csv_rows
 from .test_pretrain_task import (  # noqa: F401  (``world`` is a fixture)
     BEIT_MODEL, BEIT_SMALL, ET_MODEL, LOW_FLOOR, TOKENIZER_KEY, batch_digest, make_tokenizer, prepared, world,
 )
@@ -60,15 +59,6 @@ MID_COMPLETED = STEPS + 2
 FIRST = 3        # the batches whose digest is compared
 
 
-def read_trace(path):
-    return [json.loads(line) for line in Path(path).read_text().splitlines()]
-
-
-def csv_rows(path):
-    with open(path, newline="") as handle:
-        return list(csv.DictReader(handle))
-
-
 def request(family, tokenizer, **changes):
     """The ``mapping`` of a run of ``family`` (a dotted key sets a field of a group); ``out`` is added by the chain."""
     asked = {
@@ -78,39 +68,28 @@ def request(family, tokenizer, **changes):
         "model_args": {"num_steps": 2} if family == "energy_transformer" else {TOKENIZER_KEY: tokenizer, **BEIT_SMALL},
         "analysis_args": {"model_analysis": False, "figures": family == "energy_transformer"},
     }
-    for key, value in changes.items():
-        head, _, tail = key.partition(".")
-        asked[head] = {**asked.get(head, {}), tail: value} if tail else value
-    return asked
+    return protocol.merge_changes(asked, changes)
 
 
-class Chain:
+class Chain(protocol.ResumeChain):
     """Child processes on one run directory: what each ran, and what each kill left behind."""
 
+    child_script = CHILD
+    first = FIRST
+
     def __init__(self, root: Path, family: str, tokenizer: str, **changes) -> None:
-        self.root, self.family, self.tokenizer, self.changes = Path(root), family, tokenizer, changes
-        self.run, self.trace = self.root / "run", self.root / "trace.jsonl"
-        #: ``{label: {"csv": rows, "sidecar": dict}}`` read right after each kill.
-        self.after = {}
+        super().__init__(root, family, **changes)
+        self.tokenizer = tokenizer
 
-    def go(self, label: str, expect: str, resume: bool = False, **spec) -> None:
-        body = {**request(self.family, self.tokenizer, **self.changes), "out": str(self.run), "resume_interrupted": resume}
-        floor = LOW_FLOOR if self.family == "beit" else None
-        marker = run_child({"mapping": body, "trace": str(self.trace), "label": label, "floor": floor, **spec},
-                           self.root / f"{label}.log", child_script=CHILD)
-        assert marker == expect, f"{self.family}/{label}: {marker}"
-        if marker != "@@DONE":
-            self.after[label] = {
-                "csv": csv_rows(self.run / "training_log.csv"),
-                "sidecar": json.loads((self.run / "checkpoints" / FIT_STATE_NAME).read_text()),
-            }
+    @property
+    def family(self) -> str:
+        return self.name
 
-    def lines(self, kind: str, label: str = None):
-        return [row for row in read_trace(self.trace) if row["kind"] == kind and label in (None, row["label"])]
+    def mapping(self):
+        return request(self.family, self.tokenizer, **self.changes)
 
-    def digests(self, label: str):
-        """The digests of the first ``FIRST`` train batches the process's fit read, in the order it read them."""
-        return [row["digest"] for row in self.lines("train_batch", label)][:FIRST]
+    def child_spec(self):
+        return {"floor": LOW_FLOOR if self.family == "beit" else None}
 
 
 def stream_digests(ds):
@@ -178,28 +157,15 @@ def test_the_sizes_the_chain_counts_are_the_data_s(chain):
 
 
 def test_each_kill_lands_between_two_batches_of_an_epoch(chain):
-    for label, (epoch, done) in (("p1", KILL_1), ("p2", KILL_2)):
-        last = chain.lines("batch", label)[-1]
-        assert (last["epoch"], last["batch"]) == (epoch, done - 1), f"{label} was killed after exactly {done} batches of epoch {epoch}"
-        assert not [row for row in chain.lines("epoch_end", label) if row["epoch"] == epoch], "the killed epoch had not ended"
-        assert not chain.lines("train_end", label), "a killed process ends nothing"
+    protocol.check_each_kill_lands_between_two_batches(chain, KILL_1, KILL_2)
 
 
 def test_a_resume_starts_at_the_epoch_after_the_last_finished_one_and_the_killed_epoch_runs_again(chain):
-    epochs = {label: [row["epoch"] for row in chain.lines("epoch_begin", label)] for label in ("p1", "p2", "p3")}
-    assert epochs == {"p1": [0, 1], "p2": [1, 2], "p3": [2]}
+    protocol.check_a_resume_starts_after_the_last_finished_epoch(chain)
 
 
 def test_the_optimizer_step_count_is_epoch_times_steps_at_every_epoch_start_and_the_unkilled_total_at_the_end(chain):
-    for row in chain.lines("epoch_begin"):
-        assert row["iterations"] == row["epoch"] * STEPS, f"{row['label']} epoch {row['epoch']} began at {row['iterations']}"
-    for row in chain.lines("epoch_end"):
-        assert row["iterations"] == (row["epoch"] + 1) * STEPS
-    assert [row["iterations"] for row in chain.lines("train_end")] == [EPOCHS * STEPS]
-    batches = chain.lines("batch")
-    assert len(batches) == EPOCHS * STEPS + KILL_1[1] + KILL_2[1], "the asked steps plus exactly the batches the kills lost"
-    for row in batches:
-        assert row["before"] == row["epoch"] * STEPS + row["batch"], row
+    protocol.check_the_step_count_is_absolute(chain, STEPS, EPOCHS, KILL_1, KILL_2)
 
 
 # ---------------------------------------------------------------------
@@ -208,22 +174,11 @@ def test_the_optimizer_step_count_is_epoch_times_steps_at_every_epoch_start_and_
 
 
 def test_the_csv_rows_are_unique_and_complete_and_the_earlier_rows_are_kept_as_they_were(chain):
-    final = csv_rows(chain.run / "training_log.csv")
-    assert [row["epoch"] for row in final] == [str(e) for e in range(EPOCHS)]
-    first, second = chain.after["p1"]["csv"], chain.after["p2"]["csv"]
-    assert [row["epoch"] for row in first] == ["0"] and [row["epoch"] for row in second] == ["0", "1"]
-    assert final[:1] == first and final[:2] == second, "a resume rewrote a finished epoch's row"
+    protocol.check_the_csv_rows_are_unique_and_complete(chain, EPOCHS)
 
 
 def test_the_weights_a_resume_restores_score_the_val_loss_the_killed_run_logged_for_them(chain):
-    import numpy as np
-
-    for label, from_row in (("p2", chain.after["p1"]["csv"][-1]), ("p3", chain.after["p2"]["csv"][-1])):
-        restored, logged = chain.lines("epoch_begin", label)[0]["restored"]["loss"], float(from_row["val_loss"])
-        # Exact (the same weights, the select masks fixed by (split seed, row), one thread under op determinism), so a
-        # select mask that followed the stream seed shows here: the same weights would score another number.
-        assert np.float32(restored) == np.float32(logged), (
-            f"{chain.family}/{label}: the restored weights score {restored!r}, epoch {from_row['epoch']} logged {logged!r}")
+    protocol.check_the_restored_weights_score_the_logged_value(chain, "loss")
 
 
 def test_the_summary_says_the_run_resumed_and_finished(chain):
@@ -248,21 +203,13 @@ def test_the_energy_trace_has_one_header_and_one_row_per_finished_epoch(chain):
 
 
 def test_the_first_batches_of_each_process_differ_from_the_process_before(chain):
-    first, second, third = (chain.digests(label) for label in ("p1", "p2", "p3"))
-    assert len(first) == len(second) == len(third) == FIRST and len(set(first)) == FIRST, "the control: three real batches each"
-    assert second != first, "process 2 trained on the stream of process 1 again: a replay"
-    assert third != second, "process 3 trained on the stream of process 2 again: a replay"
-    assert third != first
-    assert not set(first) & set(second) and not set(second) & set(third)
+    protocol.check_no_process_replays_the_one_before(chain)
 
 
 def test_the_stream_of_a_process_is_the_one_of_its_settled_completed_steps(chain):
     # Process 1 is the fresh stream; process 2 and 3 are `with_stream` of the count their copy held. The parent built these
     # in its own process: equal digests mean the same shuffle, the same images, the same masks.
-    assert chain.digests("p1") == chain.expected[None]
-    for label, count in COMPLETED.items():
-        assert chain.digests(label) == chain.expected[count], f"{label} did not train on the stream of {count} completed steps"
-    assert len({tuple(digests) for digests in chain.expected.values()}) == 1 + len(COMPLETED), "the control: every count is its own stream"
+    protocol.check_each_process_trains_on_the_stream_of_its_settled_count(chain, chain.expected, COMPLETED)
 
 
 # ---------------------------------------------------------------------
@@ -293,20 +240,12 @@ def test_no_train_row_of_any_process_is_a_selection_row(chain):
 
 
 def test_a_resume_after_a_mid_epoch_copy_runs_only_the_batches_the_copy_had_not_taken(mid_epoch):
-    first, second = mid_epoch.lines("epoch_begin", "p1"), mid_epoch.lines("epoch_begin", "p2")
-    assert [row["epoch"] for row in first] == [0, 1] and [row["epoch"] for row in second] == [1, 2]
-    assert second[0]["iterations"] == MID_COMPLETED, "the step count is the copy's (3 + 2), not the epoch's start"
-    assert second[1]["iterations"] == 2 * STEPS
-    assert len([row for row in mid_epoch.lines("batch", "p2") if row["epoch"] == 1]) == STEPS - 2
-    assert len(mid_epoch.lines("batch")) == EPOCHS * STEPS, "no batch was lost: the kill came right after a copy"
-    assert [row["iterations"] for row in mid_epoch.lines("train_end")] == [EPOCHS * STEPS]
+    protocol.check_a_mid_epoch_resume_runs_only_the_batches_the_copy_had_not_taken(mid_epoch, STEPS, EPOCHS, MID_COMPLETED)
 
 
 def test_the_stream_after_a_mid_epoch_copy_is_the_one_of_the_count_the_copy_holds(mid_epoch):
     # 5 = 1 * 3 + (1 + 1): the batch term is part of the settled count. 3 (the epoch's start) is another stream.
-    assert mid_epoch.digests("p1") == mid_epoch.expected[None]
-    assert mid_epoch.digests("p2") == mid_epoch.expected[MID_COMPLETED]
-    assert mid_epoch.expected[MID_COMPLETED] != mid_epoch.expected[STEPS] != mid_epoch.expected[None]
+    protocol.check_the_mid_epoch_stream(mid_epoch, mid_epoch.expected, STEPS, MID_COMPLETED)
 
 
 def test_the_mid_epoch_resume_leaves_each_epoch_one_row_and_keeps_the_split(mid_epoch):
