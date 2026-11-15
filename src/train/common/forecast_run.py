@@ -11,8 +11,9 @@ Interface contract
 ``DECODE``
     ``{row: DecodeRow}``, one row per family and head: ``nbeats``, ``prism_point``, ``prism_quantile``,
     ``tirex``, ``xlstm_point``, ``xlstm_quantile``, ``ets``, ``timestral``, ``mdn``. A row owns ``quantile`` (has
-    a quantile head), ``flat_target`` (its loss wants the target as ``(B, H)``, not ``(B, H, C)``), ``objective``
-    and how to read the levels and the median index off a model.
+    a quantile head), ``objective`` and how to read the levels and the median index off a model. Whether the loss wants
+    the target as ``(B, H)`` and not ``(B, H, C)`` is NOT a row field: it is decided before the model exists, by
+    ``train.api.forecast_models.flat_target``, the one rule (tirex, and xlstm with quantile levels).
 
 ``decoder_for(family, model)``
     :return: a :class:`Decoder`, callable on the model's raw output (tensors or numpy, written with
@@ -33,8 +34,8 @@ Interface contract
     no free one). It saves and reloads inside a ``keras.Model``; its config holds the serialized model.
 
 ``build_loss_and_metrics(decoder, model, loss_name=None)``
-    :return: :class:`LossAndMetrics` ready for ``compile``; the metric is named ``mae`` for every family, so
-        the watched key is ``val_mae``. ``loss_name`` (``mae``, ``mse``, ``mase``) applies to the point heads
+    :return: ``(loss, metrics)`` ready for ``compile`` (``loss`` is ``None`` for timestral and a list of two for nbeats);
+        the metric is named ``mae`` for every family, so the watched key is ``val_mae``. ``loss_name`` (``mae``, ``mse``, ``mase``) applies to the point heads
         only; any other head with a name set is a :class:`ConfigError` naming ``loss_args.name``.
 
 ``beats_bar(reached, threshold, n_batches=1)``
@@ -47,6 +48,14 @@ Interface contract
     numpy, float64 where it matters; ``context (N, L, C)``, ``target`` and ``point (N, H, C)``,
     ``quantiles (N, H, C, Q)``. ``canonical_report(model, decoder, ds)`` decodes a ``(x, y)`` dataset and calls
     ``canonical_metrics``. ``plot_forecasts(path, ...)`` writes one PNG.
+
+Layering
+--------
+``train.common`` otherwise never imports ``train.api``; this module and ``forecast_data`` do, on purpose (D-044): the errors
+(``ConfigError``) are the ``train.api`` hierarchy the command line maps to exit codes, and the TensorFlow-free pieces the data
+layer shares with the pre-claim checks live in ``train.api.forecast_series`` and ``train.api.forecast_args`` (D-036). Importing
+this module therefore loads the ``train.api`` package (TensorFlow-free by its own rule), which the legacy timestral trainer
+already does through ``train.common``.
 """
 
 import math
@@ -60,12 +69,12 @@ from dl_techniques.losses.mase_loss import MASELoss
 from dl_techniques.losses.quantile_loss import QuantileLoss
 from dl_techniques.utils.matplotlib_backend import import_pyplot
 from train.api.errors import ConfigError
+from train.api.forecast_args import LOSS_NAMES
 from train.common import forecast_data
 from train.common.resume_state import read_fit_state
 from train.common.segmentation_run import TIE_ULPS
 from train.common.timeseries import _plot_ts_forecast, compute_post_hoc_forecast_metrics
 
-LOSS_NAMES = ("mae", "mse", "mase")
 #: A context whose mean absolute one-step difference is not above this has no MASE scale (a flat window).
 MASE_MIN_SCALE = 1e-12
 
@@ -154,7 +163,7 @@ def tie_band(n_batches: int) -> int:
     """The width, in float32 steps of the threshold, of the band below it that is still a miss: ``TIE_ULPS * max(1, ceil(sqrt(n / 16)))``.
 
     ``n_batches`` is the number of batches of the selection windows. The band is :data:`TIE_ULPS` (the segmentation task's, defined
-    once in ``train.common.segmentation_run``) up to 16 batches and 192 at 2,048. Measured (plan step 12): the compiled ``mae`` of a
+    once in ``train.common.segmentation_run``) up to 16 batches and 192 at 2,048. Measured: the compiled ``mae`` of a
     model that outputs the naive-last forecast sits 1 float32 step BELOW the float64 numpy baseline in 2 of 8 seeds at the default
     sizes; (review, D-043): the float32 accumulation of that metric drifts with the number of terms, +20 steps at 262,144 windows
     (2,048 batches of 128), so the band widens with the square root of the batch count.
@@ -270,7 +279,6 @@ class DecodeRow:
 
     :param bind: ``(model, median_index) -> decode`` where ``decode(out) -> (point, quantiles or None)``.
     :param quantile: the head emits quantiles, so ``levels`` and ``median`` apply.
-    :param flat_target: the loss wants ``y`` as ``(B, H)`` (tirex, xlstm quantile), the data gives ``(B, H, C)``.
     :param objective: ``point`` (a chosen loss), ``quantile`` (pinball), ``model`` (the model's own
         ``compute_loss``, no compiled loss) or ``nll`` (the MDN layer's negative log-likelihood).
     :param levels, median: read the quantile levels and the median index off a model, by the family's own rule.
@@ -278,7 +286,6 @@ class DecodeRow:
 
     bind: Callable[[Any, Optional[int]], Callable[[Any], Tuple[Any, Optional[Any]]]]
     quantile: bool
-    flat_target: bool
     objective: str
     levels: Optional[Callable[[Any], Tuple[float, ...]]] = None
     median: Optional[Callable[[Any, Tuple[float, ...]], int]] = None
@@ -292,15 +299,15 @@ class DecodeRow:
 # equal to the model's own forecast function. timestral's ``call`` is the forecaster's first block only for
 # horizon <= patch size, and only against the forecaster with symmetric averaging and the non-negative clip OFF.
 DECODE: Dict[str, DecodeRow] = {
-    "nbeats": DecodeRow(_first_of_tuple, False, False, "point"),
-    "prism_point": DecodeRow(_as_is, False, False, "point"),
-    "prism_quantile": DecodeRow(_cube_with_channels, True, False, "quantile", _attr_levels, _nearest_to_half),
-    "tirex": DecodeRow(_cube_without_channels, True, True, "quantile", _attr_levels, _half_or_middle),
-    "xlstm_point": DecodeRow(_as_is, False, False, "point"),
-    "xlstm_quantile": DecodeRow(_cube_without_channels, True, True, "quantile", _attr_levels, _half_or_middle),
-    "ets": DecodeRow(_as_is, False, False, "point"),
-    "timestral": DecodeRow(_cube_with_channels, True, False, "model", _knot_levels, _model_median),
-    "mdn": DecodeRow(_mixture_mean, False, False, "nll"),
+    "nbeats": DecodeRow(_first_of_tuple, False, "point"),
+    "prism_point": DecodeRow(_as_is, False, "point"),
+    "prism_quantile": DecodeRow(_cube_with_channels, True, "quantile", _attr_levels, _nearest_to_half),
+    "tirex": DecodeRow(_cube_without_channels, True, "quantile", _attr_levels, _half_or_middle),
+    "xlstm_point": DecodeRow(_as_is, False, "point"),
+    "xlstm_quantile": DecodeRow(_cube_without_channels, True, "quantile", _attr_levels, _half_or_middle),
+    "ets": DecodeRow(_as_is, False, "point"),
+    "timestral": DecodeRow(_cube_with_channels, True, "model", _knot_levels, _model_median),
+    "mdn": DecodeRow(_mixture_mean, False, "nll"),
 }
 
 
@@ -312,7 +319,6 @@ class Decoder:
     fn: Callable[[Any], Tuple[Any, Optional[Any]]]
     levels: Optional[Tuple[float, ...]]
     median_index: Optional[int]
-    flat_target: bool
 
     def __call__(self, out: Any) -> Tuple[Any, Optional[Any]]:
         return self.fn(out)
@@ -333,7 +339,7 @@ def decoder_for(family: str, model: Any) -> Decoder:
     row = DECODE[key]
     levels = row.levels(model) if row.levels else None
     median = row.median(model, levels) if row.median else None
-    return Decoder(key, row.bind(model, median), levels, median, row.flat_target)
+    return Decoder(key, row.bind(model, median), levels, median)
 
 
 @keras.saving.register_keras_serializable(package="train_forecast")
@@ -350,7 +356,7 @@ class ServedForecaster(keras.layers.Layer):
         # table and this layer into `dl_techniques` to make it so (a library change outside this task, D-041).
         # DECISION plan-2026-11-13T105600-3a8319ef/D-026
         # A REGISTERED layer carries the standardization into a `.keras` file. Do NOT wrap the served function in a
-        # `keras.layers.Lambda`: it saves but does not load under the default safe mode (measured, step 5(d)), and a
+        # `keras.layers.Lambda`: it saves but does not load under the default safe mode (measured), and a
         # file that needs the caller to standardize is the trap D-011 exists to remove.
         self.model = model
         self.family = family
@@ -411,14 +417,6 @@ class DecodedMAE(keras.metrics.Metric):
         self.count.assign(0.0)
 
 
-@dataclass(frozen=True)
-class LossAndMetrics:
-    """What ``compile`` takes: ``loss`` (``None`` for timestral, a list for nbeats) and ``metrics``."""
-
-    loss: Any
-    metrics: List[Any]
-
-
 _FIXED_LOSS = {
     "quantile": "the pinball loss over its quantile levels",
     "model": "the objective the model owns (no compiled loss)",
@@ -436,13 +434,13 @@ def _point_loss(name: Optional[str]) -> Any:
     raise ConfigError(f"loss_args.name must be one of {', '.join(LOSS_NAMES)} or null, got {name!r}")
 
 
-def build_loss_and_metrics(decoder: Decoder, model: Any, loss_name: Optional[str] = None) -> LossAndMetrics:
-    """The compiled loss and the ``mae`` metric of a decoder's row (see the module contract)."""
+def build_loss_and_metrics(decoder: Decoder, model: Any, loss_name: Optional[str] = None) -> Tuple[Any, List[Any]]:
+    """The compiled ``(loss, metrics)`` of a decoder's row (see the module contract)."""
     row = DECODE[decoder.row]
     if row.objective == "point":
         loss, mae = _point_loss(loss_name), keras.metrics.MeanAbsoluteError(name="mae")
         # nbeats has two outputs: the forecast is scored, the residual is not (D-007).
-        return LossAndMetrics([loss, None], [[mae], []]) if decoder.row == "nbeats" else LossAndMetrics(loss, [mae])
+        return ([loss, None], [[mae], []]) if decoder.row == "nbeats" else (loss, [mae])
     if loss_name is not None:
         raise ConfigError(
             f"loss_args.name {loss_name!r} is not accepted for {decoder.row}: its loss is {_FIXED_LOSS[row.objective]}, "
@@ -453,7 +451,7 @@ def build_loss_and_metrics(decoder: Decoder, model: Any, loss_name: Optional[str
         loss = _mdn_layer(model).loss_func
     else:
         loss = None
-    return LossAndMetrics(loss, [DecodedMAE(decoder)])
+    return loss, [DecodedMAE(decoder)]
 
 
 # ---------------------------------------------------------------------

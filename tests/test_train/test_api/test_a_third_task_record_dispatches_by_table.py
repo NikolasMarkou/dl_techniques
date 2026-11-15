@@ -18,7 +18,7 @@ and a ``domain`` text, no class names, no statistics) in every table, in the tes
 * removing the fake's row from any ONE table refuses the record, naming the tasks that table knows,
   and the same for the ``predict`` writer table;
 * the four real tasks have a row in every table (the tables agree on their keys; the fourth, forecasting, arrived with
-  plan-2026-11-13T105600-3a8319ef step 15, whose record has no class names and no statistics either);
+  its predictor, and its record has no class names and no statistics either);
 * a task whose data has no classes (D-005): ``DataFacts`` and ``AutoContext`` take ``num_classes=None``
   and the run summary has no ``num_classes`` key, while a classifier's still has it.
 
@@ -185,7 +185,7 @@ def test_the_real_tasks_have_a_row_in_every_table(name):
 
 
 def test_the_predict_writers_and_the_data_listers_are_the_four_tasks_that_can_predict():
-    # Denoising's writer arrived with its predictor (plan d483ffab step 12), forecasting's with its own (step 15): one row
+    # Denoising's writer arrived with its predictor, forecasting's with its own: one row
     # per task that can be predicted, in the writers and in the listers of what ``data=`` names (D-012).
     assert sorted(cli.PREDICT_WRITERS) == sorted(REAL_TASKS)
     assert sorted(cli.DATA_LISTERS) == sorted(REAL_TASKS)

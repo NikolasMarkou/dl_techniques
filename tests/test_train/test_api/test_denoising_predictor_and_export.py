@@ -754,7 +754,7 @@ def test_a_fixed_shape_tflite_of_a_unet_is_silently_wrong_at_another_size(family
     """The reason of three refusals: build the file the refusal prevents and read it at a second size, in a child process.
 
     The file must be read WITHOUT a crash: a refusal whose reason is "wrong numbers" is only true while the interpreter
-    returns numbers (plan-2026-11-13T105600-3a8319ef step 3.1, D-039: a graph that splits the XNNPACK delegate into many
+    returns numbers (D-039: a graph that splits the XNNPACK delegate into many
     partitions took the process down instead).
     """
     out = tmp_path / "fixed.tflite"

@@ -1,7 +1,7 @@
 """``check_model_loading`` compares a model with several outputs output by output.
 
 A forecaster such as N-BEATS returns ``(forecast, residual)``: two arrays of different shapes. MEASURED
-(plan-2026-11-13T105600-3a8319ef step 5, item a) the shared check raised on it, because it stacked the
+on the forecasting families, the shared check raised on it, because it stacked the
 list into one array (``ValueError: setting an array element with a sequence. The requested array has an
 inhomogeneous shape``), while a dict of named outputs passed. The list or tuple branch pairs the outputs,
 reports the worst gap over all of them and fails on a difference in any one.

@@ -208,6 +208,9 @@ def test_the_help_of_every_command_and_task_leaves_no_heavy_library_in_sys_modul
     assert ("usage:" in out) or (word == "list_tasks" and "time_series_forecasting" in out), out[-500:]
     assert found is not None, out[-500:]
     assert found == [], f"`python -m train {' '.join(help_argv(word))}` loaded {found}"
+    if word == "time_series_forecasting":
+        # What the task's own help test used to assert, kept with the census that replaced it: the help names the knobs.
+        assert "jit_compile" in out and "data.lookback" in out, out[-800:]
 
 
 def test_the_listing_of_the_models_is_the_one_command_that_may_import_the_families(tmp_path):

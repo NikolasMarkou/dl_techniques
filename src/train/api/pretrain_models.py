@@ -78,7 +78,7 @@ Module scope imports the standard library and ``train.api`` only.
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import recipes
-from .args import AutoContext, OptimArgs
+from .args import AutoContext, OptimArgs, is_count
 from .config import AUTO, unknown_key_message
 from .denoising_models import named_parameters
 from .errors import ConfigError, ConfigValidationError, UnresolvedAutoError
@@ -224,10 +224,6 @@ def signature_census(
 # ---------------------------------------------------------------------
 
 
-def _is_count(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value > 0
-
-
 def _prepare(
     family: str, num_classes: Optional[int], input_shape: Sequence[Any], patch_size: Any, model_args: Mapping[str, Any]
 ) -> Tuple[int, int, int]:
@@ -236,13 +232,13 @@ def _prepare(
         raise ValueError(
             f"the {family!r} family predicts masked patches and has no classes: num_classes must be None, got {num_classes!r}"
         )
-    if len(input_shape) != 3 or not all(_is_count(side) for side in input_shape):
+    if len(input_shape) != 3 or not all(is_count(side) for side in input_shape):
         raise ValueError(
             f"input_shape must be (height, width, channels), each a positive int (the mask has one entry per patch, so a "
             f"flexible side is refused), got {tuple(input_shape)!r}"
         )
     height, width, channels = input_shape
-    if not _is_count(patch_size) or height % patch_size or width % patch_size:
+    if not is_count(patch_size) or height % patch_size or width % patch_size:
         raise ValueError(
             f"patch_size must be a positive int that divides both sides of input_shape {tuple(input_shape)!r}, got {patch_size!r}"
         )
@@ -275,7 +271,7 @@ def create_beit(
 ) -> Any:
     """Build the BEiT masked-image-modelling model; see the module contract."""
     shape = _prepare(BEIT, num_classes, input_shape, patch_size, model_args)
-    if not _is_count(vocab_size) or vocab_size < 2:
+    if not is_count(vocab_size) or vocab_size < 2:
         raise ValueError(f"vocab_size must be an int of at least 2 (the tokenizer's codebook size), got {vocab_size!r}")
     from dl_techniques.models.vision.beit.model import create_beit_mim
 

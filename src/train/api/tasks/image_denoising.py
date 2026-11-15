@@ -169,7 +169,7 @@ from ..denoising_models import TASK, compile_options_for
 from ..errors import ConfigError
 from ..predictor import build_denoising_record, overrides_of_variant, unit_domain_stamp
 from ..segmentation_models import check_image_size
-from ..trainer import Evaluation, FitState, TaskTrainer, TrainResult, config_problems
+from ..trainer import Evaluation, FitState, TaskTrainer, TrainResult, check_holds_no_classes, config_problems
 
 # ---------------------------------------------------------------------
 
@@ -448,11 +448,7 @@ class ImageDenoisingTrainer(TaskTrainer):
             )
 
     def input_check(self, facts: DataFacts, data: Any) -> None:
-        if data.num_classes is not None or facts.num_classes is not None:
-            raise RuntimeError(
-                f"{type(self).__name__} holds no classes, but describe_data said {facts.num_classes!r} and "
-                f"build_data loaded {data.num_classes!r}"
-            )
+        check_holds_no_classes(self, facts, data)
 
     # -- compile --------------------------------------------------------
 

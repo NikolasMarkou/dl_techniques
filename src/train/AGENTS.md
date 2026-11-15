@@ -607,7 +607,7 @@ classification task calls the same `train.common.classification_run` helpers as 
   branch emits one LEAKY_RELU, bit-equal to the `where` form at float32 (tested over 300,000 points) and to the base tflite file. Do not
   make the layer one code path again, and do not swap in `maximum(x, s * x)` (it lowers to LEAKY_RELU but its gradient at 0 is 1).
 - **Three seams of the shared sequence, and two fields of `Evaluation`** (D-004 for the two fields, D-011 for the stamps, D-012 for the compile options, D-013 for the selection start). Each is a no-op by
-  default, so the other two tasks run the code they ran before (`test_the_sequence_seams_default_to_nothing.py` proves the default
+  default, so a task that overrides none of them (the classification and segmentation tasks) runs the code it ran before (`test_the_sequence_seams_default_to_nothing.py` proves the default
   of each and a positive arm for an override; the three goldens of the plan compared EXACT after every shared edit):
   `TaskTrainer.selection_start_epoch(config)` is the 0-based epoch from which the checkpoint saves and `EarlyStopping` counts
   (read once by `fit_callbacks.build_callbacks`; `run_summary.best_epoch` takes it as `first_epoch`, or the summary would name a
@@ -762,7 +762,9 @@ classification task calls the same `train.common.classification_run` helpers as 
     median off the BUILT model through the decode row, so a resume, which asks for the record before `build_model`, has the model built
     for it there; do not recompute them from `model_args` (D-010). The user-facing description, with the measured gate numbers, is in
     [`README.md`](README.md). Tests: `tests/test_train/test_api/test_forecast_families.py`, `test_forecast_task.py`,
-    `test_forecast_resume.py`, `test_forecast_predictor_and_export.py` and `tests/test_train/test_common_forecast_data.py`.
+    `test_forecast_resume.py`, `test_forecast_predictor_and_export.py` and `tests/test_train/test_common_forecast_data.py`; they share
+    `_forecast_fixtures.py` (the registry `world`, the one series csv writer, the numpy oracle of the standardization) and the
+    pretrain resume test shares `_resume_protocol.py` (the SIGKILL chain and its assertions) with `test_forecast_resume.py`.
 - **Per-task tables, not `if task ==` branches** (D-006). `train.api.predictor` holds one table per concern, each keyed by the task
   word: `RECORD_KEYS`, `DATA_KEYS`, `GEOMETRY_CHECKS`, `TAIL_CHECKS`, `INPUT_SHAPE_OF`, `INPUT_KEY`, `MODEL_CHECKS`, `OUTPUT_CHECKS`,
   `PREDICTORS` and `EXPORT_RULES` (an `ExportRule(shape_of, check, note, served)`: the shape `export` traces, the cells it refuses, the

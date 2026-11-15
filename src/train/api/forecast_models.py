@@ -85,7 +85,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import recipes
-from .args import AutoContext, OptimArgs
+from .args import AutoContext, OptimArgs, is_count
 from .config import unknown_key_message
 from .denoising_models import named_parameters
 from .errors import ConfigError, ConfigValidationError
@@ -103,7 +103,7 @@ NBEATS, PRISM, TIREX, XLSTM, ETS, TIMESTRAL, MDN = "nbeats", "prism", "tirex", "
 TIMESTRAL_PATCH = 32
 
 # DECISION plan-2026-11-13T105600-3a8319ef/D-022
-# deepar and adaptive_ema are REFUSED by name, with the reasons Step 5 measured, and are not registered: a refusal
+# deepar and adaptive_ema are REFUSED by name, with the reasons measured, and are not registered: a refusal
 # row is a sentence, not a family. Do NOT train deepar through its teacher-forced `call` (its input holds the horizon,
 # so an exported serve function would take the answer as input) and do NOT wrap it for the eager sampling path
 # (the legacy `add_loss` wrapper does not reload from .keras); do NOT score adaptive_ema against "naive" (it has no
@@ -124,7 +124,7 @@ UNSUPPORTED: Dict[str, str] = {
 # The variants tables the library does not have (written here, like ACCUNET_VARIANTS)
 # ---------------------------------------------------------------------
 
-#: ``create_nbeats_model`` keywords by variant. ``base`` is the model the bar was measured on (Step 8: hidden 256 and
+#: ``create_nbeats_model`` keywords by variant. ``base`` is the model the bar was measured on (hidden 256 and
 #: the factory's own relu and no dropout, listed here so a change of the library's defaults moves nothing); the
 #: legacy trainer's gelu and dropout 0.1 were not measured and are not the default.
 NBEATS_VARIANTS: Dict[str, Dict[str, Any]] = {
@@ -253,7 +253,7 @@ class FamilyRow:
         the remainder (timestral).
     :param jit_refusal: the reason ``jit_compile=true`` is refused (D-028), ``None`` for a family XLA can compile.
     :param min_lookback: ``{variant: smallest lookback the library builds the variant at}``, MEASURED by building it at
-        decreasing lookbacks (``scratch_measure/min_lookback.md`` of plan 3a8319ef; a test rebuilds each at the minimum and one
+        decreasing lookbacks (a test rebuilds each at the minimum and one
         below). A variant that is not listed builds at :data:`MIN_LOOKBACK`; ``why_lookback`` is the library's own reason.
     :param min_lookback_over: ``{variant: (model_args key, extra)}``: the variant needs a lookback of at least ``model_args[key] +
         extra`` when the key is given (the seasonal ets: a full ``seasonal_period`` plus one step); ``why_over`` is the reason.
@@ -279,7 +279,7 @@ class FamilyRow:
 # XLA fails the gradient of the unrolled loop (measured on GPU 0: InvalidArgumentError at node
 # gradient_tape/ets_model_1/while/.../accumulator at the first step). Do NOT let the opt-in through for ets "to see".
 FAMILIES: Dict[str, FamilyRow] = {
-    # The minimums are MEASURED (`scratch_measure/min_lookback.md` of plan 3a8319ef), not derived: the variants listed there are the
+    # The minimums are MEASURED (by building each variant at decreasing lookbacks), not derived: the variants listed are the
     # ones small enough to build; tirex large and timestral 28M and up were not built and take the floor of every family.
     NBEATS: FamilyRow(
         f"{_HERE}:NBEATS_VARIANTS", min_horizon=2,
@@ -390,6 +390,10 @@ def jit_problem(family: str, jit_compile: bool) -> Optional[str]:
 
 def flat_target(family: str, model_args: Mapping[str, Any]) -> bool:
     """Whether the family's loss wants a ``(batch, horizon)`` target; see the module contract."""
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-044
+    # The ONE rule for the flat target, applied before the model exists (the task flattens the data before it builds anything).
+    # Do NOT put it back on `forecast_run.DecodeRow` or `Decoder` as a field: it was there, nothing in production read it, and
+    # the two copies could drift with no test holding them equal (the tests now take the rows' flat targets from this function).
     return family == TIREX or (family == XLSTM and model_args.get("quantile_levels") is not None)
 
 
@@ -449,10 +453,6 @@ def signature_census(
 # ---------------------------------------------------------------------
 
 
-def _is_count(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value > 0
-
-
 def _prepare(
     family: str, variant: str, num_classes: Optional[int], input_shape: Sequence[Any], horizon: Any,
     model_args: Mapping[str, Any],
@@ -460,9 +460,9 @@ def _prepare(
     """Refuse what the family does not take and return ``(lookback, channels)``; the adapters' common door."""
     if num_classes is not None:
         raise ValueError(f"the {family!r} family is a forecaster and has no classes: num_classes must be None, got {num_classes!r}")
-    if len(input_shape) != 2 or not all(_is_count(side) for side in input_shape):
+    if len(input_shape) != 2 or not all(is_count(side) for side in input_shape):
         raise ValueError(f"input_shape must be (lookback, channels), each a positive int, got {tuple(input_shape)!r}")
-    if not _is_count(horizon):
+    if not is_count(horizon):
         raise ValueError(f"horizon must be a positive int, got {horizon!r}")
     lookback, channels = input_shape
     lines = (problems_of(family, model_args) + geometry_problems(family, channels, horizon, model_args)
@@ -569,7 +569,7 @@ def create_timestral(
 ) -> Any:
     """Build a Timestral forecaster at a static batch; see the module contract."""
     lookback, channels = _prepare(TIMESTRAL, variant, num_classes, input_shape, horizon, model_args)
-    if not _is_count(batch_size):
+    if not is_count(batch_size):
         raise ValueError(f"timestral needs a static batch: batch_size must be a positive int, got {batch_size!r}")
     from dl_techniques.models.time_series.timestral.model import create_timestral_by_variant
 

@@ -155,7 +155,7 @@ def test_the_exception_reaches_the_caller_of_the_cli_main(failing, tmp_path):
 
 
 # ---------------------------------------------------------------------
-# The forecasting task (plan-2026-11-13T105600-3a8319ef step 13): the same contract for a failure at each end of the run
+# The forecasting task: the same contract for a failure at each end of the run
 # ---------------------------------------------------------------------
 #
 # Five places a forecasting run can fail, each stubbed where the real code reaches it: ``fit`` itself, the save of the best

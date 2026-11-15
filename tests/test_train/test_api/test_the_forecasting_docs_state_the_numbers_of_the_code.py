@@ -1,11 +1,10 @@
-"""The numbers the forecasting documentation states are the numbers of the code (plan-2026-11-13T105600-3a8319ef, step 18).
+"""The numbers the forecasting documentation states are the numbers of the code.
 
 ``test_the_knob_docs_name_real_keys.py`` reads the keys, defaults and paths of the knob region. The prose around it also states
 numbers that the code defines: how many families the registry holds and how they split over the tasks, how many tasks there are,
 how many cells of the forecasting export matrix are refused, the width of the strict bar's tie band. A number typed into a
-document and never read again rots silently (step 17 planted a wrong count in each of these places and nothing in the repository
-failed; only the derivation script of that step did). Each claim below is DERIVED from the code and must appear in the document
-word for word, and every ``src/...`` or ``tests/...`` path the two documents cite must exist.
+document and never read again rots silently (a wrong count planted in each of these places failed nothing in the repository
+until this test existed). Each claim below is DERIVED from the code and must appear in the document word for word, and every ``src/...`` or ``tests/...`` path the two documents cite must exist.
 """
 
 import re
@@ -13,30 +12,21 @@ from pathlib import Path
 
 import pytest
 
-from train.api import exporting, predictor, recipes, registry
+from train.api import exporting, predictor, registry
 from train.api import forecast_models as fm
 from train.api import forecast_predictor as fp
 from train.api.config import PRECISIONS, validate
 from train.api.errors import ConfigValidationError
-from train.api.tasks import BUILTIN_TASKS, register_builtin_tasks
+from train.api.tasks import BUILTIN_TASKS
 from train.api.tasks.time_series_forecasting import TimeSeriesForecastingConfig
 from train.common import forecast_run
+
+from ._forecast_fixtures import world  # noqa: F401  (fixture)
 
 ROOT = Path(__file__).resolve().parents[3]
 README = ROOT / "src" / "train" / "README.md"
 AGENTS = ROOT / "src" / "train" / "AGENTS.md"
 FORECASTING = "time_series_forecasting"
-
-
-@pytest.fixture(scope="module")
-def world():
-    """An empty registry holding every built-in family and task."""
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(registry, "MODELS", {})
-        patch.setattr(registry, "TASKS", {})
-        recipes.register_builtin_models()
-        register_builtin_tasks()
-        yield
 
 
 def families_per_task():
@@ -74,6 +64,18 @@ def test_the_number_of_tasks_is_the_registrys_in_both_documents(world):
     sentence = f"It has {words[len(registry.TASKS)]} tasks"
     assert FORECASTING in registry.TASKS
     assert sentence in README.read_text() and sentence in AGENTS.read_text()
+
+
+def test_every_other_n_tasks_phrase_counts_the_tasks_of_the_registry_but_one(world):
+    """A task's section says "the other four tasks refuse these keys the same way": the number is the registry's, minus the task itself.
+
+    The denoising section kept "the other three tasks" after the pretrain and forecasting tasks were added; no test read it.
+    """
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven"}
+    pattern = re.compile(r"\bthe other (one|two|three|four|five|six|seven) tasks?\b")
+    found = pattern.findall(README.read_text()) + pattern.findall(AGENTS.read_text())
+    assert len(found) >= 3, "the control: the README names the other tasks in the denoising, pretrain and forecasting sections"
+    assert set(found) == {words[len(registry.TASKS) - 1]}, found
 
 
 def test_the_export_matrix_counts_are_the_cells_check_export_refuses(world):

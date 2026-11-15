@@ -1,8 +1,8 @@
-"""The forecasting run pieces (plan-2026-11-13T105600-3a8319ef, Step 9): baselines, decode table, metrics, report.
+"""The forecasting pieces: the run pieces, the argument groups and the family adapters; baselines, decode table, metrics, report.
 
 ``train.common.forecast_run`` is the one place that knows what a forecasting model's OUTPUT means. This file pins,
-on the CPU at tiny sizes, the part of it Step 9 shipped (the second and third parts below add the argument groups and
-the family adapters; the task has its own file, ``test_forecast_task.py``):
+on the CPU at tiny sizes, in its first part (the second and third parts below cover the argument groups and the family
+adapters; the task has its own file, ``test_forecast_task.py``):
 
 * ``seasonal_naive`` MOVED from ``train_timestral.py`` and its outputs are the ones recorded from the original
   function before the move (``seasonal_naive_recorded.json``), exactly; the legacy file keeps no definition of
@@ -17,11 +17,11 @@ the family adapters; the task has its own file, ``test_forecast_task.py``):
 * the compiled ``mae`` metric: the stock MAE for a point head, the numpy MAE of the median for a quantile cube,
   the key ``val_mae`` for all nine families, and the loss builder (target layout, refusals).
 
-Second part (Step 10): the argument groups of ``train.api.forecast_args``: strict parsing, the loader's layering, the
+Second part: the argument groups of ``train.api.forecast_args``: strict parsing, the loader's layering, the
 recipe-filled fields, every refusal that can be made BEFORE the run directory is claimed (each in a fresh interpreter
 that must not have imported TensorFlow or keras afterwards), the watched metric and the loss names.
 
-Third part (Step 11): ``train.api.forecast_models``: every adapter builds a BUILT model at ``(None, lookback, channels)`` whose
+Third part: ``train.api.forecast_models``: every adapter builds a BUILT model at ``(None, lookback, channels)`` whose
 output the decode rows read (a static batch for timestral); the ``ALLOWED``, ``REFUSED``, ``FORCED`` and ``SUPPLIED`` tables are
 held equal to the factory signatures by ``signature_census``; one normalization (``use_normalization`` forced off, a user
 ``true`` refused by name); the named refusals (a second channel for tirex, ets and mdn, a timestral horizon above its patch,
@@ -34,6 +34,7 @@ import ast
 import dataclasses
 import inspect
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -50,6 +51,8 @@ from train.api.config import validate
 from train.api.errors import ConfigError, ConfigValidationError, UnknownModelError
 from train.common import forecast_run as fr
 
+from ._forecast_fixtures import write_series_csv
+
 HERE = Path(__file__).resolve().parent
 SRC = HERE.parents[2] / "src"
 RECORDED = json.loads((HERE / "seasonal_naive_recorded.json").read_text())
@@ -64,7 +67,7 @@ FLAT_TARGET_ROWS = ("tirex", "xlstm_quantile")
 
 
 # ---------------------------------------------------------------------
-# tiny models, one per row (written out here; the adapters of Step 11 build the same shapes from the recipes)
+# tiny models, one per row (written out here; the family adapters build the same shapes from the recipes)
 # ---------------------------------------------------------------------
 
 _CACHE = {}
@@ -136,6 +139,11 @@ def windows(n: int = B, seed: int = 5):
 def decoder_of(row: str):
     family, model = build_row(row)
     return fr.decoder_for(family, model), model
+
+
+def head_args(row: str):
+    """The ``model_args`` that make a family's model the row's head (a quantile head is chosen by ``quantile_levels``)."""
+    return {"quantile_levels": list(LEVELS)} if row.endswith("quantile") else {}
 
 
 # ---------------------------------------------------------------------
@@ -376,7 +384,9 @@ def test_coverage_and_sharpness_are_the_widest_interval_over_the_last_axis_of_th
 
 def test_decode_has_one_row_per_family_and_head():
     assert tuple(fr.DECODE) == ROWS
-    assert {r for r in ROWS if fr.DECODE[r].flat_target} == set(FLAT_TARGET_ROWS)
+    # The flat target is decided BEFORE the model exists, by the function the task calls; the rows hold no copy of that fact.
+    assert {r for r in ROWS if fm.flat_target(r.split("_")[0], head_args(r))} == set(FLAT_TARGET_ROWS)
+    assert not hasattr(fr.DECODE["tirex"], "flat_target") and not hasattr(fr.decoder_for(*build_row("tirex")), "flat_target")
     assert {r for r in ROWS if fr.DECODE[r].quantile} == {"prism_quantile", "tirex", "xlstm_quantile", "timestral"}
 
 
@@ -385,7 +395,6 @@ def test_the_row_of_a_model_is_picked_from_its_family_and_head(row):
     decoder, _ = decoder_of(row)
     assert decoder.row == row
     assert (decoder.levels is not None) == fr.DECODE[row].quantile
-    assert decoder.flat_target == (row in FLAT_TARGET_ROWS)
 
 
 @pytest.mark.parametrize("row", MIXIN_ROWS)
@@ -516,11 +525,10 @@ def test_the_decoded_mae_of_a_point_head_equals_the_stock_mae():
 def test_every_row_compiles_to_the_metric_key_mae_and_the_history_key_val_mae(row):
     family, compiled = _fresh(row)
     decoder = fr.decoder_for(family, compiled)
-    parts = fr.build_loss_and_metrics(decoder, compiled)
-    compiled.compile(optimizer=keras.optimizers.AdamW(1e-3), loss=parts.loss, metrics=parts.metrics,
-                     jit_compile=False)
+    loss, metrics = fr.build_loss_and_metrics(decoder, compiled)
+    compiled.compile(optimizer=keras.optimizers.AdamW(1e-3), loss=loss, metrics=metrics, jit_compile=False)
     x, y = windows(2 * B)
-    target = y[..., 0] if decoder.flat_target else y
+    target = y[..., 0] if row in FLAT_TARGET_ROWS else y
     history = compiled.fit(x, target, batch_size=B, epochs=1, validation_data=(x, target), verbose=0)
     assert set(history.history) == {"loss", "mae", "val_loss", "val_mae"}, row
     assert np.isfinite(history.history["loss"]).all() and np.isfinite(history.history["val_mae"]).all()
@@ -540,15 +548,15 @@ def _fresh(row):
 def test_the_point_losses_are_stock_losses_and_the_nbeats_loss_is_a_list():
     decoder, model = decoder_of("ets")
     for name, cls in (("mae", keras.losses.MeanAbsoluteError), ("mse", keras.losses.MeanSquaredError)):
-        assert type(fr.build_loss_and_metrics(decoder, model, name).loss) is cls
-    assert fr.build_loss_and_metrics(decoder, model, None).loss.__class__ is keras.losses.MeanAbsoluteError
+        assert type(fr.build_loss_and_metrics(decoder, model, name)[0]) is cls
+    assert fr.build_loss_and_metrics(decoder, model, None)[0].__class__ is keras.losses.MeanAbsoluteError
     from dl_techniques.losses.mase_loss import MASELoss
 
-    assert type(fr.build_loss_and_metrics(decoder, model, "mase").loss) is MASELoss
+    assert type(fr.build_loss_and_metrics(decoder, model, "mase")[0]) is MASELoss
     nb_decoder, nb_model = decoder_of("nbeats")
-    parts = fr.build_loss_and_metrics(nb_decoder, nb_model)
-    assert isinstance(parts.loss, list) and len(parts.loss) == 2 and parts.loss[1] is None
-    assert len(parts.metrics) == 2 and parts.metrics[1] == [] and len(parts.metrics[0]) == 1
+    loss, metrics = fr.build_loss_and_metrics(nb_decoder, nb_model)
+    assert isinstance(loss, list) and len(loss) == 2 and loss[1] is None
+    assert len(metrics) == 2 and metrics[1] == [] and len(metrics[0]) == 1
 
 
 @pytest.mark.parametrize("row", ("prism_quantile", "tirex", "xlstm_quantile", "timestral", "mdn"))
@@ -567,13 +575,13 @@ def test_the_quantile_loss_takes_a_flat_target_for_tirex_and_xlstm_and_the_windo
     rng = np.random.default_rng(17)
     for row in ("tirex", "xlstm_quantile", "prism_quantile"):
         decoder, model = decoder_of(row)
-        loss = fr.build_loss_and_metrics(decoder, model).loss
+        loss, _ = fr.build_loss_and_metrics(decoder, model)
         assert type(loss) is QuantileLoss and loss.quantiles == list(LEVELS)
         shape = (B, H, 1, len(LEVELS)) if row == "prism_quantile" else (B, H, len(LEVELS))
         pred = rng.standard_normal(shape).astype("float32")
         y = rng.standard_normal((B, H)).astype("float32")
         target = y[..., None] if row == "prism_quantile" else y
-        assert decoder.flat_target == (row != "prism_quantile")
+        assert fm.flat_target(row.split("_")[0], head_args(row)) == (row != "prism_quantile")
         pinball = np.stack([np.maximum(q * (y[..., None] - pred.reshape(B, H, -1)[..., i:i + 1]),
                                        (q - 1) * (y[..., None] - pred.reshape(B, H, -1)[..., i:i + 1]))
                             for i, q in enumerate(LEVELS)], axis=-1)
@@ -582,9 +590,9 @@ def test_the_quantile_loss_takes_a_flat_target_for_tirex_and_xlstm_and_the_windo
 
 def test_mdn_trains_on_its_own_negative_log_likelihood_and_timestral_on_none():
     decoder, model = decoder_of("mdn")
-    assert fr.build_loss_and_metrics(decoder, model).loss == model.get_layer("mdn").mdn_layer.loss_func
+    assert fr.build_loss_and_metrics(decoder, model)[0] == model.get_layer("mdn").mdn_layer.loss_func
     decoder, model = decoder_of("timestral")
-    assert fr.build_loss_and_metrics(decoder, model).loss is None
+    assert fr.build_loss_and_metrics(decoder, model)[0] is None
 
 
 # ---------------------------------------------------------------------
@@ -602,8 +610,8 @@ def _dataset(x, y, flat=False):
 def test_the_report_scores_the_windows_of_a_dataset_through_the_decode_row(row):
     decoder, model = decoder_of(row)
     x, y = windows(2 * B, seed=18)
-    report = fr.canonical_report(model, decoder, _dataset(x, y, decoder.flat_target))
-    cx, cy, point, quantiles = fr.decode_dataset(model, decoder, _dataset(x, y, decoder.flat_target))
+    report = fr.canonical_report(model, decoder, _dataset(x, y, row in FLAT_TARGET_ROWS))
+    cx, cy, point, quantiles = fr.decode_dataset(model, decoder, _dataset(x, y, row in FLAT_TARGET_ROWS))
     assert np.array_equal(cx, x) and np.array_equal(cy, y)
     assert point.shape == (2 * B, H, 1)
     want = fr.canonical_metrics(x, y, point, quantiles, decoder.levels)
@@ -627,7 +635,7 @@ def test_the_figure_is_written_with_and_without_a_band(tmp_path):
 
 
 # =====================================================================
-# Second part: the argument groups (Step 10)
+# Second part: the argument groups
 # =====================================================================
 
 RECIPE_DATA = {"lookback": 32, "horizon": 8}
@@ -649,15 +657,8 @@ def resolved(**given) -> fa.TimeSeriesData:
 
 
 def write_csv(path: Path, rows: int, columns=("a", "b"), time_col=None, extra=None) -> str:
-    """A csv of ``rows`` rows of smooth values; ``extra`` replaces cells as ``{(row, column): text}``."""
-    cells = {(r, c): f"{np.sin(r / 7.0 + k):.6f}" for r in range(rows) for k, c in enumerate(columns)}
-    cells.update(extra or {})
-    names = ([time_col] if time_col else []) + list(columns)
-    lines = [",".join(names)]
-    for r in range(rows):
-        lines.append(",".join(([cells.get((r, time_col), str(r))] if time_col else []) + [cells[(r, c)] for c in columns]))
-    path.write_text("\n".join(lines) + "\n")
-    return str(path)
+    """A csv of ``rows`` rows of two smooth columns (the shared writer); ``extra`` replaces cells as ``{(row, column): text}``."""
+    return str(write_series_csv(path, rows, columns, time_col, cells=extra))
 
 
 # ---------------------------------------------------------------------
@@ -779,7 +780,7 @@ def test_the_transform_and_loss_groups():
     assert "'transform_args.scale_floor'" in line
     for name in (None, "mae", "mse", "mase"):
         assert validate(fa.ForecastLossArgs, {"name": name}).name == name
-    assert fa.LOSS_NAMES == fr.LOSS_NAMES
+    assert fr.LOSS_NAMES is fa.LOSS_NAMES, "the loss names are written once, in the TensorFlow-free module"
 
 
 # ---------------------------------------------------------------------
@@ -900,7 +901,7 @@ def refusal_cases(tmp_path):
         "a missing value column": ({"format": "csv", "path": good, "value_cols": ["a", "nope"]}, "'nope' is missing"),
         "a missing time column": ({"format": "csv", "path": good, "time_col": "when"}, "'when' is missing"),
         "an unsorted time column": ({"format": "csv", "time_col": "t", "path": write_csv(
-            tmp_path / "u.csv", 400, time_col="t", extra={(5, "t"): "2"})}, "strictly increasing"),
+            tmp_path / "u.csv", 400, time_col="t", extra={(5, "t"): "2019-12-31 00:00:00"})}, "strictly increasing"),
         "a lookback below 1": ({"lookback": 0}, "'lookback'"),
         "a lookback of 1": ({"lookback": 1}, "expected an int of at least 2 (one value has no spread to standardize by) or auto, got 1"),
         "a horizon below 1": ({"horizon": 0}, "'horizon'"),
@@ -1134,7 +1135,7 @@ def test_the_metric_watched_is_the_key_the_compiled_metric_writes():
 
 
 # ---------------------------------------------------------------------
-# Step 11: the family adapters, tables, refusals and recipes
+# Third part: the family adapters, tables, refusals and recipes
 # ---------------------------------------------------------------------
 
 FAMILIES = tuple(fm.FAMILIES)
@@ -1423,7 +1424,7 @@ print("@@ heavy", heavy)
 
 def test_deepar_and_adaptive_ema_are_refused_by_name_before_any_model_code_is_imported(tmp_path):
     src = str(SRC)
-    env = {**__import__("os").environ, "PYTHONPATH": src, "CUDA_VISIBLE_DEVICES": "", "TF_CPP_MIN_LOG_LEVEL": "3"}
+    env = {**os.environ, "PYTHONPATH": src, "CUDA_VISIBLE_DEVICES": "", "TF_CPP_MIN_LOG_LEVEL": "3"}
     out = subprocess.run([sys.executable, "-c", _FRESH_REFUSAL, "deepar/base", "adaptive_ema", "nbeats/base"],
                          capture_output=True, text=True, env=env, cwd=str(tmp_path), timeout=60)
     assert out.returncode == 0, out.stderr[-1500:]

@@ -369,13 +369,13 @@ def write_predictions(predictor: ForecastPredictor, file: Path, source: Any, out
 _ONNX_RUNTIME = "onnxruntime refuses the converted file"
 
 #: The (decode row, format) cells of ``export`` that are REFUSED, each with the reason MEASURED on a tiny model of the
-#: family at ``(None, 64, 1)`` (plan 3a8319ef step 5(d), re-proved by ``test_forecast_predictor_and_export.py``: each row has
+#: family at ``(None, 64, 1)`` (measured, and re-proved by ``test_forecast_predictor_and_export.py``: each row has
 #: a test that builds the file anyway and fails if the reason stops being true). Every cell NOT listed exports and
 #: matches ``ForecastPredictor``: ``keras`` and ``saved_model`` for every row (timestral at one window per call),
 #: ``tflite`` for the eight rows but timestral (tirex, xlstm and ets through select TF operators, so the file needs the
 #: Flex delegate), ``onnx`` for nbeats, prism, tirex and mdn.
 # DECISION plan-2026-11-13T105600-3a8319ef/D-026
-# The table holds exactly the cells step 5(d) measured as not exporting, each refused BEFORE anything is written with the
+# The table holds exactly the cells measured as not exporting, each refused BEFORE anything is written with the
 # converter's own reason. Do NOT drop a row to "try the cell" (the converter then leaves a SavedModel, a file onnxruntime
 # cannot open, or a traceback instead of a named error), and do NOT add one without a measurement: a refusal that is only a guess
 # turns a cell that works into a refusal. `test_a_refused_cell_..._the_measured_reason` and the `..._where_the_reason_says`

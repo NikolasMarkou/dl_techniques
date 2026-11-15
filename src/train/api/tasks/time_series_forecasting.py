@@ -110,7 +110,7 @@ from ..forecast_models import (
 from ..forecast_series import check_csv_level, check_split_sizes, read_csv_series
 from ..predictor import build_forecast_record, overrides_of_variant
 from ..run_dir import CHECKPOINTS_DIR
-from ..trainer import Evaluation, FitState, TaskTrainer, TrainResult, config_problems
+from ..trainer import Evaluation, FitState, TaskTrainer, TrainResult, check_holds_no_classes, config_problems
 
 # ---------------------------------------------------------------------
 
@@ -305,11 +305,7 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
         return data
 
     def input_check(self, facts: DataFacts, data: Any) -> None:
-        if data.num_classes is not None or facts.num_classes is not None:
-            raise RuntimeError(
-                f"{type(self).__name__} holds no classes, but describe_data said {facts.num_classes!r} and "
-                f"build_data loaded {data.num_classes!r}"
-            )
+        check_holds_no_classes(self, facts, data)
 
     def build_model(self, config: TimeSeriesForecastingConfig, context: AutoContext, data: Any) -> Any:
         from train.common import forecast_run
@@ -406,8 +402,7 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
         if self._model is None or self._decoder is None:
             raise RuntimeError("build_loss_and_metrics reads the model build_model made; it was asked for before it")
         loss_cfg: ForecastLossArgs = config.loss_args
-        built = forecast_run.build_loss_and_metrics(self._decoder, self._model, loss_cfg.name)
-        return built.loss, built.metrics
+        return forecast_run.build_loss_and_metrics(self._decoder, self._model, loss_cfg.name)
 
     def compile_options(self, config: TimeSeriesForecastingConfig, spec: registry.ModelSpec) -> Dict[str, Any]:
         # DECISION plan-2026-11-13T105600-3a8319ef/D-014

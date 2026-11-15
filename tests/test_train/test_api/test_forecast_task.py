@@ -1,6 +1,6 @@
 """The ``time_series_forecasting`` task: the hook table, the bar, the seams, the refusals and the registration.
 
-``train.api.tasks.time_series_forecasting.TimeSeriesForecastingTrainer`` (plan-2026-11-13T105600-3a8319ef step 12) is the
+``train.api.tasks.time_series_forecasting.TimeSeriesForecastingTrainer`` is the
 task of seven families (``nbeats``, ``prism``, ``tirex``, ``xlstm``, ``ets``, ``timestral``, ``mdn``). It supplies the ten
 required hooks, the seams of the shared sequence and the bar, and nothing else (a task overrides hooks, never stages).
 This first part pins, on the CPU at tiny sizes (a bank of four synthetic patterns, lookback 32, horizon 8, batch 8):
@@ -33,8 +33,6 @@ import json
 import math
 import shutil
 import signal
-import subprocess
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List
@@ -44,12 +42,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from train.api import cli, recipes, registry
+from train.api import cli, registry
 from train.api import forecast_models as fm
 from train.api.config import validate
 from train.api.errors import ConfigError, ConfigValidationError
 from train.api.forecast_series import split_bounds
-from train.api.tasks import BUILTIN_TASKS, register_builtin_tasks
+from train.api.tasks import BUILTIN_TASKS
 from train.api.tasks.time_series_forecasting import (
     TimeSeriesForecastingConfig,
     TimeSeriesForecastingTrainer,
@@ -60,6 +58,8 @@ from train.common import forecast_data
 from train.common import forecast_run as fr
 from train.common.pretrain_data import derive_stream_seed
 from train.common.resume_state import FIT_STATE_NAME, update_fit_state
+
+from ._forecast_fixtures import CSV_ROWS, csv_file, world, write_series_csv  # noqa: F401  (``world`` and ``csv_file`` are fixtures)
 
 HERE = Path(__file__).resolve().parent
 SRC = HERE.parents[2] / "src"
@@ -89,17 +89,6 @@ def make_config(out: Path, **changes: Any) -> TimeSeriesForecastingConfig:
         else:
             mapping[head] = value
     return validate(TimeSeriesForecastingConfig, mapping)
-
-
-@pytest.fixture(scope="module")
-def world():
-    """An empty registry holding every built-in family and task."""
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(registry, "MODELS", {})
-        patch.setattr(registry, "TASKS", {})
-        recipes.register_builtin_models()
-        register_builtin_tasks()
-        yield
 
 
 def prepared(out: Path, trainer_class=TimeSeriesForecastingTrainer, **changes: Any):
@@ -337,7 +326,7 @@ def naive_last_score(data) -> float:
             return keras.ops.repeat(inputs[:, -1:, :], horizon, axis=1)
 
     model = NaiveLast()
-    decoder = fr.Decoder("ets", lambda out: (out, None), None, None, False)
+    decoder = fr.Decoder("ets", lambda out: (out, None), None, None)
     model.compile(loss="mae", metrics=[fr.DecodedMAE(decoder)])
     return float(model.evaluate(data.select_ds, return_dict=True, verbose=0)["mae"])
 
@@ -576,17 +565,9 @@ def test_a_refused_request_leaves_out_absent(world, tmp_path, changes, fragment)
     assert not out.exists(), "the refusal came after the claim"
 
 
-def write_csv(path: Path, columns: int, rows: int = 900) -> Path:
-    rng = np.random.default_rng(0)
-    values = np.cumsum(rng.normal(size=(rows, columns)), axis=0)
-    header = ",".join(f"v{i}" for i in range(columns))
-    np.savetxt(path, values, delimiter=",", header=header, comments="")
-    return path
-
-
 @pytest.mark.parametrize("model", ["tirex/tiny", "ets/ANN"])
 def test_a_second_channel_is_refused_before_the_claim_for_a_one_channel_family(world, tmp_path, model):
-    out, csv = tmp_path / "run", write_csv(tmp_path / "two.csv", 2)
+    out, csv = tmp_path / "run", write_series_csv(tmp_path / "two.csv", rows=900, columns=2, time_col=None)
     changes = {"model": model, "data": {"format": "csv", "path": str(csv), "lookback": 32, "horizon": 8}}
     with pytest.raises(ConfigError) as caught:
         TimeSeriesForecastingTrainer(make_config(out, **changes)).run()
@@ -673,27 +654,8 @@ def test_the_lazy_names_of_the_package_resolve_to_the_task_module():
             "load_forecast_data_config"} <= set(api.__all__)
 
 
-_HELP_CHILD = """
-import json, sys
-from train.api import cli
-codes = [cli.main(["help"]), cli.main(["time_series_forecasting", "help"])]
-heavy = sorted(m for m in ("tensorflow", "keras", "train.common", "yaml") if m in sys.modules)
-print("@@" + json.dumps([codes, heavy]))
-"""
-
-
-def test_the_help_of_the_command_and_of_the_task_load_no_tensorflow(tmp_path):
-    env = {**__import__("os").environ, "PYTHONPATH": str(SRC), "CUDA_VISIBLE_DEVICES": "", "TF_CPP_MIN_LOG_LEVEL": "3"}
-    done = subprocess.run([sys.executable, "-c", _HELP_CHILD], capture_output=True, text=True, env=env, cwd=str(tmp_path),
-                          timeout=60)
-    assert done.returncode == 0, done.stderr[-1500:]
-    codes, heavy = json.loads(done.stdout.rsplit("@@", 1)[1])
-    assert codes == [0, 0] and heavy == [], heavy
-    assert TASK in done.stdout and "jit_compile" in done.stdout and "data.lookback" in done.stdout
-
-
 # ---------------------------------------------------------------------
-# What the step added to shared code, and what stays what it was
+# What the task added to shared code, and what stays what it was
 # ---------------------------------------------------------------------
 
 
@@ -759,7 +721,7 @@ def test_the_loss_name_refusal_before_the_claim_and_the_one_at_build_time_hold_t
 
 
 def test_a_quantile_xlstm_is_refused_for_a_second_channel_before_the_claim(world, tmp_path):
-    out, csv = tmp_path / "run", write_csv(tmp_path / "two.csv", 2)
+    out, csv = tmp_path / "run", write_series_csv(tmp_path / "two.csv", rows=900, columns=2, time_col=None)
     data = {"format": "csv", "path": str(csv), "lookback": 32, "horizon": 8}
     with pytest.raises(ConfigError) as caught:
         TimeSeriesForecastingTrainer(make_config(
@@ -855,7 +817,7 @@ def test_only_nbeats_and_ets_carry_a_recipe_notice_and_each_says_why():
 
 
 # ---------------------------------------------------------------------
-# Second part (step 13): a stubbed end to end per family, the run directory, csv, the bar that can fail, the refusals
+# Second part: a stubbed end to end per family, the run directory, csv, the bar that can fail, the refusals
 # ---------------------------------------------------------------------
 #
 # Every family trains two epochs of ``E2E_STEPS`` steps on the CPU at tiny sizes, once through ``train_time_series_forecasting``
@@ -965,7 +927,7 @@ def test_the_cases_are_the_decode_rows_and_the_registered_families():
 
 
 #: The files of a finished run, from the code: the sequence writes the config pair, the log and the lock, the callbacks the
-#: csv and the two checkpoints, the reporting the history and the summary, and ``task.json`` (``task_record``, step 15).
+#: csv and the two checkpoints, the reporting the history and the summary, and ``task.json`` (``task_record``).
 RUN_FILES = {
     "best_model.keras", "config.json", "config_requested.json", "final_model.keras", "results_summary.json",
     "run.lock", "run.log", "task.json", "training_history.json", "training_log.csv",
@@ -1077,7 +1039,7 @@ def test_the_summary_holds_the_metric_the_baselines_the_epoch_zero_value_the_thr
 @pytest.mark.parametrize("which", ["function", "cli"])
 def test_no_summary_note_says_the_run_cannot_be_predicted_or_exported_and_a_note_naming_task_json_is_true(ended, which):
     # The run writes `task.json` (the listing test above), so `predict` and `export` read it; a note that said otherwise
-    # was written before step 15 and stayed in the summary of every run for a step.
+    # was once written, before the run wrote a record, and stayed in the summary of every run.
     run_dir = getattr(ended, which)
     notes = read_json(run_dir / "results_summary.json")["notes"]
     assert notes and all(isinstance(note, str) for note in notes)
@@ -1177,32 +1139,9 @@ def test_a_naive_last_model_run_exits_one_through_the_command_line_and_reports_f
 # A csv, end to end: trains, reports, and no window of one segment holds a row of another
 # ---------------------------------------------------------------------
 
-#: 2,720 rows give a select and a test segment of 408 rows each: 47 windows with non-overlapping targets (stride 8, width 40),
-#: so ``n_select`` and ``n_test`` left unset are 32 (47 rounded down to the batch of 16), and a window that wrongly counts only
-#: the lookback would make a 48th that leaves the segment (the csv test below reads every window, none is left unused).
-CSV_ROWS = 2720
-
-
-def write_series_csv(path: Path, rows: int = CSV_ROWS, columns: int = 1) -> Path:
-    """A csv of ``rows`` rows: a dated ``t`` column and ``columns`` random walks with a season, one value per row."""
-    rng = np.random.default_rng(7)
-    seasons = np.sin(2 * np.pi * np.arange(rows) / 24.0)[:, None]
-    values = np.cumsum(rng.normal(size=(rows, columns)), axis=0) * 0.2 + 3.0 * seasons
-    frame = pd.DataFrame(values, columns=[f"v{i}" for i in range(columns)])
-    frame.insert(0, "t", pd.date_range("2020-01-01", periods=rows, freq="h").strftime("%Y-%m-%d %H:%M:%S"))
-    frame.to_csv(path, index=False)
-    return path
-
-
 def csv_data(path: Path, **changes: Any) -> Dict[str, Any]:
     return {"format": "csv", "path": str(path), "value_cols": ["v0"], "time_col": "t", "lookback": LOOKBACK,
             "horizon": HORIZON, "steps_per_epoch": E2E_STEPS, **changes}
-
-
-@pytest.fixture(scope="module")
-def csv_file(tmp_path_factory) -> Path:
-    """The one csv of the end to end run and of the window test (written once, by the test)."""
-    return write_series_csv(tmp_path_factory.mktemp("csv_series") / "series.csv")
 
 
 @pytest.fixture(scope="module")
@@ -1254,7 +1193,7 @@ def locate(window: np.ndarray, raw: np.ndarray) -> int:
 
 
 def test_no_csv_window_of_one_segment_holds_a_row_of_another(world, csv_file, tmp_path):
-    # Invariant 4, read off the data module's own windows: every window (context and horizon) of the three streams is cut from
+    # No window crosses its segment, read off the data module's own windows: every window (context and horizon) of the three streams is cut from
     # inside its segment of the file. The windows are standardized, so each is located in the csv by its shape (`locate`).
     config = make_config(tmp_path / "probe", data=csv_data(csv_file), batch_size=E2E_BATCH)
     trainer = TimeSeriesForecastingTrainer(config)
@@ -1275,7 +1214,7 @@ def test_no_csv_window_of_one_segment_holds_a_row_of_another(world, csv_file, tm
 
 
 # ---------------------------------------------------------------------
-# Invariant 9 through the command line: each refusal is exit 2 with its named sentence, before the run directory is claimed
+# Every refusal that can be made before the claim, through the command line: each is exit 2 with its named sentence, before the run directory is claimed
 # ---------------------------------------------------------------------
 
 
@@ -1453,7 +1392,7 @@ def test_the_refusal_table_names_every_case_of_invariant_9():
 
 
 # ---------------------------------------------------------------------
-# Step 18: guards for the rows of the mutant table that only a fixture error caught, and the edge of the bar through the command
+# Guards for the rows of the mutant table that only a fixture error caught, and the edge of the bar through the command
 # ---------------------------------------------------------------------
 
 #: One model per decode row but timestral (its levels are the library's and building it is the slow part).

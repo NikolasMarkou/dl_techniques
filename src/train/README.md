@@ -306,7 +306,7 @@ denoised = load_model("<run>/final_model.keras").predict("noisy.png")["denoised"
 ```
 
 * **Families** (`train/api/denoising_models.py`; each trains this task only: `python -m train image_denoising model=vit/vit_pico` exits 2 naming
-  the families of this task, and the other three tasks refuse these five the same way). `bfcnn`, `bfunet` and `bfconvunext` are bias-free (`ModelSpec.properties` holds
+  the families of this task, and the other four tasks refuse these five the same way). `bfcnn`, `bfunet` and `bfconvunext` are bias-free (`ModelSpec.properties` holds
   `"bias_free"`: no additive constant anywhere, so `f(a x) = a f(x)`; the three are checked, see Homogeneity below);
   `convunext_biased` (ConvUNext with `use_bias=true`, its own family because the segmentation family forces
   `output_channels` to the class count) and `scunet` carry constants and are never checked. `scunet` has no variants table in the
@@ -756,7 +756,7 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
   epoch with one header across a resume; both only while `analysis_args.figures` is true), `model_analysis/` (while `analysis_args.model_analysis` is true; data-free: weights and
   spectral analyses only, since the stock ones read class probabilities), `checkpoints/` and `run.lock`.
 * **The stream seed on a resume, and what it costs.** The train stream is endless and a resumed `fit` starts a fresh iterator, which
-  would replay epoch 0 (the order, the masks and the augmentation), as the loaders of the other three tasks do. This task rebuilds the stream:
+  would replay epoch 0 (the order, the masks and the augmentation), as the loaders of the three image tasks do. This task rebuilds the stream:
   after the backup pair is settled, the shared sequence calls the task's `resume_stream` with `completed_steps = start *
   steps_per_epoch + (batch + 1 if batch else 0)` (the formula the resume already checks against the backup's optimizer steps), and the
   task rebuilds the same request on a stream seed of `int.from_bytes(sha256(f"{seed}:{completed_steps}")[:4], "big")`. A fresh run's
@@ -935,8 +935,8 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
   whole window with the horizon included, so the future leaks into the statistics (on its windows a zero predictor scored a mean
   squared error of 1.1678 against naive-last's 1.4737, which only the leaked statistics explain) and N-BEATS then normalized a second time inside
   `call`. Here each window is divided by the mean and the population standard deviation of its context per channel, and its target by
-  the same numbers, in ONE place (the data layer, `forecast_data.standardize_tf`, with a numpy twin `standardize_np` that `predict`
-  calls and a keras-ops twin that the export calls; tests hold each twin equal to the numpy one). (3) The context is centred on its FIRST value before its mean and std are taken, and the scale is the
+  the same numbers, in ONE place (the data layer, `forecast_data.standardize_tf`, with a numpy twin `context_stats_np` that `predict`
+  calls and a keras-ops twin `context_stats_ops` that the export calls; tests hold each twin equal to the tf function). (3) The context is centred on its FIRST value before its mean and std are taken, and the scale is the
   population std of the context (D-040, which replaced the floor `max(std, 1e-3 * mean|context|)` of the first version). The
   differences of nearby numbers are exact, so the float32 function the export runs and the float64 numpy function `predict` runs
   standardize a window to the same values at ANY level (the first version centred on the mean of the raw float32 values: a file
@@ -1081,7 +1081,7 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
   `xlstm` rows (onnxruntime `InvalidGraph` at a `Pad` in an mLSTM block's causal convolution); `onnx` of `ets` (the converter cannot
   find a `while` output). `tflite` of `tirex`, `xlstm` and `ets` uses select TF operators, so the file needs the Flex delegate. Every
   cell that exports matched Keras on the CPU: the worst gap, as a share of the window's standard
-  deviation, was 3.4e-6 for `saved_model`, 5.3e-5 for `tflite` and 7.1e-5 for `onnx` (step 5 of plan 3a8319ef, tiny models of every
+  deviation, was 3.4e-6 for `saved_model`, 5.3e-5 for `tflite` and 7.1e-5 for `onnx` (measured in plan 3a8319ef, tiny models of every
   family at `(None, 64, 1)`).
 * **Limits of the task.** No `deepar` and no `adaptive_ema` (above); `timestral` only up to one patch of horizon; a long-format csv,
   gaps and resampling are not offered; `analysis_args.conformal_alpha` is refused; the model analysis is data-free (weights and
@@ -1090,7 +1090,7 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
   series' units (`predict` is). Beating the baselines on the synthetic bank is a learning check (see "What this does NOT prove"), and
   the recipe's learning rate and batch were measured on `nbeats` only; the other families run the same recipe unless the table says
   otherwise and carry no tuning claim.
-* **Gate numbers** (plan 3a8319ef, Step 20: the first GPU measurement of this task, run on HEAD `1904f07a8` of the branch `train-api/phase-4e`, the code of that plan's Step 19; Step 21 re-runs the same bar on the final HEAD and replaces these numbers if they move). Every run on GPU 0, an RTX 4090, one job at a time, `CUDA_VISIBLE_DEVICES=0` and no `--gpu`; the log of each names the device and the worktree `src` as the origin of `dl_techniques` and `train`.
+* **Gate numbers** (plan 3a8319ef: the GPU measurement of this task, run on HEAD `1904f07a8` of the branch `train-api/phase-4e`; a later gate re-runs the same bar on the HEAD it names and replaces these numbers if they move). Every run on GPU 0, an RTX 4090, one job at a time, `CUDA_VISIBLE_DEVICES=0` and no `--gpu`; the log of each names the device and the worktree `src` as the origin of `dl_techniques` and `train`.
   The bar is the one above (best `val_mae` more than the tie band of float32 steps under the smallest of naive-last, seasonal-naive and epoch-zero, all on the same fixed selection windows; the band was 16 steps when these gates ran and is 32 at their 17 select batches under the rule above) and was written before the first run: G1 and G2 are gated and G4 reports its verdict; G3 records the verdict of each family and gates none (300 steps are too few to expect every family to meet it). A miss is reported as it is, with no re-run. Every number is read from the run's `results_summary.json`, `training_log.csv` and log by script. A step time is the median over epochs of Keras's ms per step, then the mean seconds of the epochs after the first (which include the validation pass); the host was loaded (a foreign process held about 2.5 of 12 cores), so these are not the 35 ms the earlier measurement gave for `nbeats/base`. Memory is nvidia-smi's figure for the run's own process, sampled every second.
 
 | Arm | Task | Epochs | Params | Step, epoch | Baselines | Epoch zero | Threshold | Best `val_mae` | Verdict | Final is best | Peak GPU |

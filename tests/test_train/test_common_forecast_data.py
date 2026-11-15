@@ -1,6 +1,6 @@
 """The forecast data library: a stateless bank, fixed select and test windows, context-only standardization.
 
-``train.common.forecast_data`` (plan-2026-11-13T105600-3a8319ef, Step 7) replaces the legacy time-series
+``train.common.forecast_data`` replaces the legacy time-series
 pipeline, which draws every window from one shared stateful ``RandomState`` (a stream is not a function of its
 index and a resume replays), standardizes a window with the HORIZON included (a leak: a zero predictor beat
 naive-last on MSE) and validates on a fresh noise draw. What is pinned here, at tiny sizes on the CPU:
@@ -22,7 +22,7 @@ naive-last on MSE) and validates on a fresh noise draw. What is pinned here, at 
   batch, ``n`` a multiple of the batch;
 * a csv: segments by fraction, windows inside their segment, a strictly increasing time column, finite numeric
   named columns, a fingerprint that moves with the file bytes and with a window key;
-* every refusal of Invariant 9 is a named ``ConfigError`` raised within 30 seconds;
+* every refusal the data layer can make is a named ``ConfigError`` raised within 30 seconds;
 * the csv reader and ``split_bounds`` live in ``train.api.forecast_series``, which loads neither TensorFlow nor Keras
   (D-036), so a check can run before the GPU is claimed;
 * a resume (``with_stream``) keeps the split and the select and test streams and changes the train stream.
@@ -50,11 +50,12 @@ from train.common.forecast_data import (
     context_stats_np,
     load_forecast_batches,
     split_bounds,
-    standardize_np,
     standardize_tf,
     train_window_at,
 )
 from train.common.pretrain_data import derive_stream_seed
+
+from .test_api._forecast_fixtures import standardize_np, write_series_csv
 
 LOOKBACK, HORIZON, BATCH, SEED = 32, 8, 16, 7
 WIDTH = LOOKBACK + HORIZON
@@ -76,20 +77,8 @@ def load(**over):
 
 
 def write_csv(tmp_path, rows=CSV_ROWS, name="series.csv", **edits):
-    """A csv of a timestamp column ``ts`` and three value columns; ``edits`` maps a column to its new values."""
-    rng = np.random.default_rng(3)
-    t = np.arange(rows)
-    frame = pd.DataFrame({
-        "ts": pd.date_range("2024-01-01", periods=rows, freq="h").strftime("%Y-%m-%d %H:%M:%S"),
-        "a": np.sin(t / 7.0) + 0.1 * rng.standard_normal(rows),
-        "b": 0.01 * t + np.cos(t / 11.0),
-        "c": 5.0 + rng.standard_normal(rows).cumsum() * 0.05,
-    })
-    for column, values in edits.items():
-        frame[column] = values
-    path = tmp_path / name
-    frame.to_csv(path, index=False)
-    return str(path)
+    """A csv of a timestamp column ``ts`` and three value columns (the shared writer); ``edits`` maps a column to its new values."""
+    return str(write_series_csv(tmp_path / name, rows, ("a", "b", "c"), "ts", values=edits))
 
 
 def csv_kwargs(path, **over):
@@ -354,7 +343,7 @@ def oracle(window, lookback, floor):
 
 
 def old_oracle(window, lookback, floor=1e-3):
-    """The rule of Step 7 (D-027, D-035), kept ONLY to show that a window it did not floor is standardized the same way."""
+    """The superseded rule of D-027 and D-035 (D-040 replaced it), kept ONLY to show that a window it did not floor is standardized the same way."""
     window = np.asarray(window, np.float64)
     context = window[..., :lookback, :]
     mean = context.mean(axis=-2, keepdims=True)
@@ -423,7 +412,7 @@ class TestTheStandardizationNeverSeesTheFuture:
 
     def test_a_window_that_the_old_floor_did_not_touch_is_standardized_as_before_and_so_are_the_baselines_and_the_bar(self):
         """D-040 changes only what a FLAT or a high-level window gets: for a normal window the standardized values, the
-        naive-last and seasonal-naive MAE and the bar threshold are the ones of the rule of Step 7."""
+        naive-last and seasonal-naive MAE and the bar threshold are the ones of the superseded rule."""
         from train.common import forecast_run as fr
 
         w = np.concatenate([level_windows(0.0, n=32, seed=2), level_windows(50.0, n=32, seed=3), 1e-4 * level_windows(50.0, n=32, seed=4)])
@@ -550,7 +539,7 @@ class TestAFlatContextHasNoScaleToDivideBy:
     def test_the_flat_threshold_is_the_std_against_the_floor_times_the_mean_absolute_value(self):
         """Alternating ``level +- s``: the population std is ``s``; at level 1e5 and floor 1e-6 the threshold is 0.1.
 
-        A flat context has scale 1, NOT the threshold: the rule of Step 7 gave it ``floor * mean|x|`` (0.1 here), so the standardized
+        A flat context has scale 1, NOT the threshold: the superseded rule gave it ``floor * mean|x|`` (0.1 here), so the standardized
         context of the flat case is ``+- 0.09`` and not ``+- 0.9``."""
         level = 1e5
         for spread, flat in ((0.09, True), (0.11, False)):
@@ -766,7 +755,7 @@ class TestEveryRefusalIsANamedErrorWithinThirtySeconds:
         (dict(series_length=WIDTH + 10), "too short"),
         (dict(patterns=["no_such_pattern"]), "unknown pattern"),
         (dict(n_select=BATCH - 1), "fewer than one batch"),
-        (dict(n_test=0), "fewer than one batch"),
+        (dict(n_test=0), "'data.n_test': expected an int of at least 1"),   # the config's own sentence: one rule (D-044)
         (dict(realizations=0), "realizations"),
         (dict(batch_size=0), "batch_size"),
         (dict(steps_per_epoch=0), "steps_per_epoch"),
@@ -909,7 +898,7 @@ class TestAResumeIsANewTrainStreamOnTheSameSplit:
 
 
 # ---------------------------------------------------------------------
-# the flat target of a quantile loss (step 12)
+# the flat target of a quantile loss
 # ---------------------------------------------------------------------
 
 

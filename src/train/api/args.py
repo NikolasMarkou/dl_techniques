@@ -111,6 +111,15 @@ def _is_auto(value: Any) -> bool:
     return isinstance(value, str) and value == AUTO
 
 
+def is_count(value: Any) -> bool:
+    """Whether ``value`` is a positive ``int`` (a ``bool`` is not one): the one definition the pretrain and forecasting adapters share.
+
+    :param value: any value.
+    :return: ``True`` only for an ``int`` above 0 that is not a ``bool``. Never raises.
+    """
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
 def _range_line(prefix: str, name: str, expected: str, value: Any) -> str:
     """Return the line for a number outside its range, naming the dotted key."""
     return f"Invalid value for {join_path(prefix, name)!r}: expected {expected}, got {value!r}"

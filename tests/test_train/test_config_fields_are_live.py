@@ -198,7 +198,7 @@ REGISTERED: List[Tuple[str, str]] = [
     ("train/api/pretrain_args.py", "PretrainData"),
     ("train/api/pretrain_args.py", "PretrainTransformArgs"),
     ("train/api/pretrain_args.py", "PretrainMetricArgs"),
-    # The time_series_forecasting task (step 12 of plan 3a8319ef): its config, its data config and its three own groups.
+    # The time_series_forecasting task: its config, its data config and its three own groups.
     ("train/api/tasks/time_series_forecasting.py", "TimeSeriesForecastingConfig"),
     ("train/api/forecast_args.py", "TimeSeriesData"),
     ("train/api/forecast_args.py", "ForecastTransformArgs"),

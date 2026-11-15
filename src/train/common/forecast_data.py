@@ -8,7 +8,10 @@ by TIME, and a window is a function of its key, never of a hidden state.
 
 This module imports TensorFlow; ``train.api`` imports it inside functions only. The csv reader, the column checks
 and ``split_bounds`` live in ``train.api.forecast_series`` (pandas and numpy only), which a check made before
-the GPU is claimed can import without TensorFlow (D-036); they are imported here, not copied.
+the GPU is claimed can import without TensorFlow (D-036); they are imported here, not copied. So are the names of the
+sources and the request checks of ``train.api.forecast_args`` (``BUILTIN``, ``CSV``, ``TimeSeriesData.problems``).
+``train.common`` otherwise never imports ``train.api``; this module does so on purpose (D-044): the shared, TensorFlow-free
+pieces live on the ``train.api`` side so that a check before the claim can reach them without loading TensorFlow.
 
 Interface contract
 ------------------
@@ -24,7 +27,7 @@ max_samples, batch_size, seed, stream_seed, scale_floor)``
     :return: a :class:`ForecastBatches`. Every element of every dataset is ``(x, y)``: ``x`` the context
         ``(batch, lookback, channels)`` and ``y`` the target ``(batch, horizon, channels)``, float32, standardized
         by the CONTEXT's statistics; the batch axis is static.
-    :raises ConfigError: for every refusal listed in the plan's Invariant 9 that this module can see: an unknown
+    :raises ConfigError: for every refusal the data layer can make before it builds a dataset: an unknown
         format, dataset or pattern, a lookback, horizon, fraction, count or batch that cannot work, a series or
         csv segment too short for one window, a select or test split with fewer windows than one batch, a csv
         that does not exist, has no rows, lacks a named column, holds a non-numeric or non-finite cell in a value
@@ -35,8 +38,8 @@ max_samples, batch_size, seed, stream_seed, scale_floor)``
     :return: the same object on the train stream of ``derive_stream_seed(seed, completed_steps)``: the same bank,
         split, fingerprint, select and test windows; a different train stream, even for ``completed_steps = 0``.
 
-``standardize_tf(window, lookback, scale_floor)`` and ``standardize_np(window, lookback, scale_floor)``
-    Twins: ``window`` is ``(..., lookback + horizon, channels)``; returns ``(x, y)`` float32, computed in float64.
+``standardize_tf(window, lookback, scale_floor)``
+    ``window`` is ``(..., lookback + horizon, channels)``; returns ``(x, y)`` float32, computed in float64.
     The context is centred on its FIRST value, then on the mean of the differences from it, and divided by its population std;
     a context is FLAT when ``std <= scale_floor * mean|x|`` and its scale is then ``UNIT_SCALE`` (the series' own unit): finite
     and bounded for every input, and a function of the window's SHAPE, not of its level, up to the float32 resolution of the
@@ -70,13 +73,13 @@ import tensorflow as tf
 
 from dl_techniques.datasets.time_series.generator import TimeSeriesGenerator, TimeSeriesGeneratorConfig
 from dl_techniques.utils.logger import logger
+from train.api.forecast_args import BUILTIN, CSV, TimeSeriesData
 from train.api.forecast_series import (
     SELECT_WINDOWS_PER_SERIES, check_csv_level, check_segments, check_select_moves, csv_window_count, read_csv_series, refuse,
     split_bounds, window_count,
 )
 from train.common.pretrain_data import SELECT_SALT, TEST_SALT, derive_stream_seed
 
-BUILTIN, CSV, SYNTHETIC = "builtin", "csv", "synthetic"
 
 #: The scale of a FLAT context (std not above ``scale_floor * mean|x|``): the series' own unit, so the target stays what it is.
 UNIT_SCALE = 1.0
@@ -115,18 +118,10 @@ def context_stats_np(context: np.ndarray, scale_floor: float) -> Tuple[np.ndarra
     return anchor, offset, np.where(flat, UNIT_SCALE, std)
 
 
-def standardize_np(window: np.ndarray, lookback: int, scale_floor: float) -> Tuple[np.ndarray, np.ndarray]:
-    """The numpy twin of :func:`standardize_tf`: ``(x, y)`` float32 from ``(..., lookback + horizon, channels)``."""
-    window = np.asarray(window, np.float64)
-    anchor, offset, scale = context_stats_np(window[..., :lookback, :], scale_floor)
-    standardized = (window - anchor - offset) / scale
-    return standardized[..., :lookback, :].astype(np.float32), standardized[..., lookback:, :].astype(np.float32)
-
-
 def standardize_tf(window: "tf.Tensor", lookback: int, scale_floor: float) -> Tuple["tf.Tensor", "tf.Tensor"]:
     """Context and target of a window, standardized by the context's first value, offset and population std.
 
-    The twin of :func:`standardize_np`, rule for rule: the first-value anchor, then ``UNIT_SCALE`` for a flat context.
+    The twin of :func:`context_stats_np`, rule for rule: the first-value anchor, then ``UNIT_SCALE`` for a flat context.
     """
     window = tf.cast(window, tf.float64)
     context = window[..., :lookback, :]
@@ -316,22 +311,21 @@ def _require_positive(name: str, value: Optional[int]) -> None:
 
 
 def _check_request(request: Dict[str, Any]) -> None:
+    """The loader's own door for a direct caller: the data fields are checked by ``TimeSeriesData.problems``, the one rule."""
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-044
+    # One implementation of the data-field checks (the counts, the fractions and their sum, the dataset, the keys of the other
+    # source): `TimeSeriesData.problems`, which the config runs before the claim. Do NOT restate them here (the two sets had
+    # different sentences for one refusal). A field the request leaves `None` (a csv has no `realizations`) takes the field's
+    # default, which that source never reads. The batch size and the scale floor are not data fields and are checked here.
     if request["format"] not in (BUILTIN, CSV):
         refuse(f"data.format must be '{BUILTIN}' or '{CSV}', got {request['format']!r}")
-    if request["format"] == BUILTIN:
-        if request["dataset"] != SYNTHETIC:
-            refuse(f"data.dataset must be '{SYNTHETIC}' for data.format '{BUILTIN}', got {request['dataset']!r}")
-        _require_positive("realizations", request["realizations"])
-        _require_positive("series_length", request["series_length"])
-    for name in ("lookback", "horizon", "batch_size", "steps_per_epoch", "max_samples"):
-        _require_positive(name, request[name])
-    for name in ("select_fraction", "test_fraction"):
-        if not 0.0 < request[name] < 1.0:
-            refuse(f"data.{name} must be in (0, 1), got {request[name]}")
-    if request["select_fraction"] + request["test_fraction"] >= 1.0:
-        refuse("data.select_fraction + data.test_fraction must leave a train segment (their sum must be below 1)")
+    given = {f.name: request[f.name] for f in dataclasses.fields(TimeSeriesData) if request.get(f.name) is not None}
+    lines = TimeSeriesData(**given).problems("data")
+    _require_positive("batch_size", request["batch_size"])
     if request["scale_floor"] < 0:
-        refuse(f"transform_args.scale_floor must not be negative, got {request['scale_floor']}")
+        lines.append(f"Invalid value for 'transform_args.scale_floor': must not be negative, got {request['scale_floor']}")
+    if lines:
+        refuse("\n".join(lines))
 
 
 def _strided_positions(name: str, segment: Tuple[int, int], requested: Optional[int], request: Dict[str, Any]) -> np.ndarray:

@@ -367,6 +367,20 @@ REQUIRED_HOOKS = (
     "evaluate_and_report",
 )
 
+def check_holds_no_classes(task: Any, facts: DataFacts, data: Any) -> None:
+    """The ``input_check`` of a task with no classes (denoising, pretrain, forecasting): one body, one sentence.
+
+    :param task: the trainer (its class name is in the message).
+    :param facts: what ``describe_data`` said; ``data``: what ``build_data`` loaded.
+    :raises RuntimeError: when either carries a class count.
+    """
+    if data.num_classes is not None or facts.num_classes is not None:
+        raise RuntimeError(
+            f"{type(task).__name__} holds no classes, but describe_data said {facts.num_classes!r} and "
+            f"build_data loaded {data.num_classes!r}"
+        )
+
+
 #: ``debug_args.smoke`` runs this many epochs on at most this many samples.
 SMOKE_EPOCHS = 1
 SMOKE_MAX_SAMPLES = 512

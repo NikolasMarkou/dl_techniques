@@ -99,7 +99,7 @@ PRETRAIN_VARIANTS = {
 }
 PRETRAIN = "pretrain"
 
-#: The forecasting families (plan-2026-11-13T105600-3a8319ef step 12: ``recipes.register_builtin_models`` registers them,
+#: The forecasting families (``recipes.register_builtin_models`` registers them,
 #: so the registry-wide listings below hold the 83 names above and these). nbeats and mdn read the variants tables written in
 #: ``train.api.forecast_models``, ets the library's tuple of names, the others the models' own ``MODEL_VARIANTS``. Their builds,
 #: recipes and refusals are in ``test_forecast_families.py``.

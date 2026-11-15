@@ -10,9 +10,10 @@ cannot apply is REFUSED, never ignored.
 
 Interface contract
 ------------------
-``TASK`` / ``SYNTHETIC`` / ``FORMATS``
+``TASK`` / ``SYNTHETIC`` / ``BUILTIN`` / ``CSV`` / ``DATA_FORMATS``
     ``"time_series_forecasting"``, the one dataset name (the generator bank; it is the recipe key the family recipes
-    overlay) and the two sources, ``builtin`` and ``csv``.
+    overlay), the two sources ``builtin`` and ``csv`` and the tuple of both (the ``Literal`` of ``data.format``); the loader
+    ``train.common.forecast_data`` imports them, it does not restate them.
 
 ``TimeSeriesData``
     Frozen :class:`~train.api.config.StrictConfig`. Every field maps to the keyword of the same name of
@@ -51,8 +52,8 @@ Interface contract
     saved checkpoint must be that epoch. The recipes import the two constants.
 
 ``ForecastLossArgs``
-    ``name``: ``mae``, ``mse``, ``mase`` or ``null`` (the family's own loss); :data:`LOSS_NAMES` is held equal to
-    ``train.common.forecast_run.LOSS_NAMES`` by a test.
+    ``name``: ``mae``, ``mse``, ``mase`` or ``null`` (the family's own loss); :data:`LOSS_NAMES` is the one tuple, the
+    ``Literal`` of the field and what ``train.common.forecast_run`` names in its refusal.
 
 Where the numbers live
 ----------------------
@@ -83,7 +84,8 @@ from .forecast_series import check_segments, read_csv_series, refuse, split_boun
 
 TASK = "time_series_forecasting"
 SYNTHETIC = "synthetic"
-FORMATS: Tuple[str, ...] = ("builtin", "csv")
+BUILTIN, CSV = "builtin", "csv"
+DATA_FORMATS: Tuple[str, ...] = (BUILTIN, CSV)
 
 #: The keys that name a csv; a relative ``path`` in a data file is anchored to the file.
 CSV_KEYS: Tuple[str, ...] = ("path", "value_cols", "time_col")
@@ -99,11 +101,11 @@ MIN_LOOKBACK = 2
 WATCH_METRIC = "val_mae"
 WATCH_MODE = "min"
 
-#: The losses of ``loss_args.name``; ``test_forecast_families`` holds it equal to ``train.common.forecast_run.LOSS_NAMES``.
+#: The losses of ``loss_args.name``; ``train.common.forecast_run`` imports the tuple.
 LOSS_NAMES: Tuple[str, ...] = ("mae", "mse", "mase")
 
-_Format = Literal["builtin", "csv"]
-_LossName = Literal["mae", "mse", "mase"]
+_Format = Literal[DATA_FORMATS]  # type: ignore[valid-type]
+_LossName = Literal[LOSS_NAMES]  # type: ignore[valid-type]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -111,7 +113,7 @@ class TimeSeriesData(StrictConfig):
     """The series of a forecasting run: the source, the window and the split by time; see the module contract."""
 
     format: _Format = dataclasses.field(
-        default="builtin",
+        default=BUILTIN,
         metadata={"help": "where the series come from: builtin (the synthetic bank of the generator's patterns) or csv "
                           "(one user file, data.path)"},
     )
@@ -141,7 +143,7 @@ class TimeSeriesData(StrictConfig):
         metadata={"help": "points ahead the model forecasts (at least 1); auto is the family recipe's"},
     )
     # DECISION plan-2026-11-13T105600-3a8319ef/D-030
-    # Four realizations of every pattern. Measured (Step 8): the standard error of the baseline mean on the selection
+    # Four realizations of every pattern. Measured: the standard error of the baseline mean on the selection
     # windows is 0.0179, 0.0107 and 0.0086 for 2, 4 and 8, against a margin of about 0.0084 at 1 percent, so 2 is a noisy
     # bar; 8 doubles the bank build (5.4 s) and held the all-zero-context series of D-035 at seed 42. Memorization did
     # not move with it (no train-versus-select gap at any of the three). Do NOT raise it to buy a quieter bar without
@@ -222,7 +224,7 @@ class TimeSeriesData(StrictConfig):
         for name in ("patterns", "value_cols"):
             if getattr(self, name) is not None and not getattr(self, name):
                 bad(name, "expected a non-empty list or null")
-        if self.format == "csv":
+        if self.format == CSV:
             for field in dataclasses.fields(self):
                 if field.name in SYNTHETIC_KEYS and getattr(self, field.name) != field.default:
                     bad(field.name, "a key of the synthetic bank, which data.format 'csv' does not read; leave it at its default")

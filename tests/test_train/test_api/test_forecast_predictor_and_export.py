@@ -1,6 +1,6 @@
-"""Predict with a ``time_series_forecasting`` run: the record, ``ForecastPredictor`` and the ``predict`` command (plan-2026-11-13T105600-3a8319ef step 15, D-010, D-012).
+"""Predict with a ``time_series_forecasting`` run: the record, ``ForecastPredictor`` and the ``predict`` command, and the export of a forecasting run (D-010, D-011, D-012, D-026).
 
-First part (step 15; the export cells are the second part, step 16). Every case of ``forecast_run.DECODE`` is TRAINED for one
+First part (the export cells are the second part). Every case of ``forecast_run.DECODE`` is TRAINED for one
 epoch at tiny sizes (lookback 32, horizon 8, batch 16, CPU) and the run directory it writes is read back:
 
 * **The record.** The run writes a ``task.json`` whose keys are ``predictor.RECORD_KEYS`` for the task, in order, and whose
@@ -21,7 +21,7 @@ epoch at tiny sizes (lookback 32, horizon 8, batch 16, CPU) and the run director
   to the same ``out`` is refused; a directory, an unknown suffix and an ``.npz`` of several arrays are refused by name; the
   record is read BEFORE the data is listed (D-012), so an image run's order of errors changes only for a missing record
   together with an empty image directory.
-* **Export** (second part, step 16, D-011 and D-026): see the section at the end of the file.
+* **Export** (second part, D-011 and D-026): see the section at the end of the file.
 
 Everything writes under ``tmp_path``; nothing is deleted.
 """
@@ -41,12 +41,13 @@ import pytest
 
 from train.api import cli, predictor
 from train.api.errors import ConfigError
-from train.api.predictor import RECORD_KEYS, TASK_TABLES, check_record, load_model, read_record, record_differences
+from train.api.predictor import RECORD_KEYS, TASK_TABLES, check_record, load_model, record_differences
 from train.api.tasks.time_series_forecasting import train_time_series_forecasting
 from train.common import forecast_data as fd
 from train.common import forecast_run as fr
 
-from .test_forecast_task import CASES, DATA, QUANTILES, SRC, prepared, read_json, world, write_series_csv  # noqa: F401
+from ._forecast_fixtures import standardize_np, world, write_series_csv  # noqa: F401  (``world`` is a fixture)
+from .test_forecast_task import CASES, DATA, QUANTILES, SRC, prepared, read_json
 
 TASK = "time_series_forecasting"
 BATCH, STEPS = 16, 4
@@ -126,7 +127,7 @@ def reference(predictor_: Any, windows: np.ndarray):
     record = predictor_.record
     anchor, offset, scale = fd.context_stats_np(windows, record["scale_floor"])
     mean = anchor + offset
-    x = fd.standardize_np(
+    x = standardize_np(
         np.concatenate([windows, np.zeros((len(windows), record["horizon"], windows.shape[-1]))], axis=1),
         record["lookback"], record["scale_floor"])[0]
     point, cube = fr.decoder_for(record["family"], predictor_.model)(predictor_.model(x, training=False))
@@ -687,7 +688,7 @@ def test_the_help_of_predict_names_the_forecasting_inputs(capsys):
 
 
 # ---------------------------------------------------------------------
-# Export (step 16): the served function, the rank-2 spec and the cells of the table
+# Export: the served function, the rank-2 spec and the cells of the table
 # ---------------------------------------------------------------------
 #
 # The file of a forecaster takes RAW windows ``(batch, lookback, channels)`` in the series' units and returns the forecast in the same
@@ -699,7 +700,7 @@ def test_the_help_of_predict_names_the_forecasting_inputs(capsys):
 #   or wrong de-standardization, and a file that standardizes with fixed numbers);
 # * a quantile head gives ``{"point", "quantiles"}`` from ``saved_model`` and ``keras``, one tensor from ``tflite`` and ``onnx``.
 #
-# TOLERANCE is chosen from the gaps MEASURED in step 5(d) on tiny untrained models at (64, 1), as a share of the window's std: saved_model
+# TOLERANCE is chosen from the gaps MEASURED on tiny untrained models at (64, 1), as a share of the window's std: saved_model
 # 3.4e-6, tflite 5.3e-5, onnx 7.1e-5 (worst over the cells). saved_model and keras get 3e-5 (9 times the measured worst: the same
 # graph in the same runtime, float32 against the Predictor's float64 statistics), tflite and onnx 5e-4 (9 and 7 times: another runtime's
 # kernels, and a trained model's weights are not the untrained ones). Every defect the file can have is orders above it: a missing
@@ -709,7 +710,7 @@ TOLERANCE = {"keras": 3e-5, "saved_model": 3e-5, "tflite": 5e-4, "onnx": 5e-4}
 FORMATS = ("keras", "saved_model", "tflite", "onnx")
 NAMES = {"keras": "m.keras", "saved_model": "m_dir", "tflite": "m.tflite", "onnx": "m.onnx"}
 
-#: The cells step 5(d) MEASURED as not exporting, each with a word of the measured reason: (decode row, format) -> text.
+#: The cells MEASURED as not exporting, each with a word of the measured reason: (decode row, format) -> text.
 MEASURED_REFUSED = {
     ("timestral", "tflite"): "Cumsum",
     ("timestral", "onnx"): "ort_value_index",
@@ -830,7 +831,7 @@ def test_every_working_cell_takes_raw_windows_so_a_scaled_and_shifted_window_giv
 
 
 def test_the_working_cells_are_the_measured_matrix(world):
-    """31 of 36 cells work (step 5(d): keras 9, saved_model 9, tflite 8, onnx 5): the table refuses exactly the five that do not."""
+    """31 of 36 cells work (measured: keras 9, saved_model 9, tflite 8, onnx 5): the table refuses exactly the five that do not."""
     from train.api import forecast_predictor
 
     assert set(forecast_predictor.EXPORT_REFUSALS) == set(MEASURED_REFUSED)

@@ -193,7 +193,7 @@ def read_csv_series(
     # tensorflow or keras here (and do NOT copy these checks into a second reader for the pre-claim step):
     # train.common loads TensorFlow, which must not be loaded before setup_gpu has run, and two readers drift
     # apart. Do NOT hoist the numpy and pandas imports to module scope either: the help path imports this module
-    # (through forecast_args) and must stay free of them, which a module-scope import broke in step 12.
+    # (through forecast_args) and must stay free of them, which a module-scope import once broke (the help of every command then loaded numpy).
     import numpy as np
     import pandas as pd
 

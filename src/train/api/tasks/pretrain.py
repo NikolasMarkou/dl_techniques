@@ -123,7 +123,7 @@ from ..pretrain_args import (
 )
 from ..pretrain_models import BEIT, METHOD_OF, TASK_KEYS, recipe_notices_of
 from ..run_dir import CHECKPOINTS_DIR
-from ..trainer import Evaluation, FitState, TaskTrainer, TrainResult, config_problems
+from ..trainer import Evaluation, FitState, TaskTrainer, TrainResult, check_holds_no_classes, config_problems
 
 # ---------------------------------------------------------------------
 
@@ -385,11 +385,7 @@ class PretrainTrainer(TaskTrainer):
             )
 
     def input_check(self, facts: DataFacts, data: Any) -> None:
-        if data.num_classes is not None or facts.num_classes is not None:
-            raise RuntimeError(
-                f"{type(self).__name__} holds no classes, but describe_data said {facts.num_classes!r} and "
-                f"build_data loaded {data.num_classes!r}"
-            )
+        check_holds_no_classes(self, facts, data)
 
     # -- compile --------------------------------------------------------
 

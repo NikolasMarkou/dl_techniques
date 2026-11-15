@@ -157,8 +157,8 @@ def classes_checked() -> List[type]:
     """The seven groups (found by looking), the classification config and its three data configs,
     then the segmentation task's: its config, its three data configs and its two own groups (step 28:
     a field of a class this list lacks is a field no guard asks about), then the denoising task's: its
-    config, its data config and its four own groups (step 8 of plan d483ffab), the pretrain task's (config, data, two groups),
-    then the forecasting task's: its config, its data config and its three own groups (step 12 of plan 3a8319ef)."""
+    config, its data config and its four own groups, the pretrain task's (config, data, two groups),
+    then the forecasting task's: its config, its data config and its three own groups."""
     return [
         *args_groups(), ImageClassificationConfig, BuiltinImageData, FolderImageData, CsvImageData,
         ImageSegmentationConfig, BuiltinSegData, FolderSegData, CsvSegData, SegTransformArgs, SegMetricArgs,
