@@ -1347,6 +1347,8 @@ def refusal(tmp_path: Path, kind: str):
                                    "column 'v0' has max |x| "),
         "csv-float32-range-1e200": ({"data": csv_data(level_csv(tmp_path / "big200.csv", 0.0, 1e200))},
                                     "outside [1e-12, 1e15], the float32 range"),
+        "ets-aaa-without-seasonal-period": ({"model": "ets/AAA"},
+                                            "Invalid value for 'model_args.seasonal_period': ets/AAA needs"),
         # The refusals the review listed as coming AFTER the claim (W4, W8 and the NOTE on late refusals, D-041 and D-042):
         "precision-mixed-float16": ({"precision": "mixed_float16"}, PRECISION_SENTENCE),
         "precision-mixed-bfloat16": ({"precision": "mixed_bfloat16"}, PRECISION_SENTENCE),
@@ -1371,7 +1373,7 @@ def refusal(tmp_path: Path, kind: str):
 REFUSALS = ["series-too-short", "csv-too-short", "unsorted-time", "non-finite-cell", "missing-column", "timestral-horizon",
             "tirex-two-channels", "ets-two-channels", "mdn-two-channels", "xlstm-quantile-two-channels", "deepar",
             "adaptive-ema", "ets-jit", "lookback-one", "csv-level", "csv-flat-1e7", "csv-float32-range-1e40",
-            "csv-float32-range-1e200", "precision-mixed-float16", "precision-mixed-bfloat16",
+            "csv-float32-range-1e200", "ets-aaa-without-seasonal-period", "precision-mixed-float16", "precision-mixed-bfloat16",
             "n-select-below-batch", "n-test-below-batch", "patterns-subset-below-batch", "csv-select-below-batch",
             "csv-n-select-above-available", "csv-select-constant", "horizon-below-nbeats-minimum", *FLOOR_KINDS]
 
@@ -1417,10 +1419,10 @@ def test_the_refusal_table_names_every_case_of_invariant_9():
                    "xlstm-quantile-two", "deepar", "adaptive-ema", "ets-jit", "lookback-one", "csv-level", "precision-mixed-float16",
                    "precision-mixed-bfloat16", "n-select-below-batch", "n-test-below-batch", "patterns-subset-below-batch",
                    "csv-select-below-batch", "csv-n-select-above-available", "csv-select-constant", "horizon-below-nbeats-minimum",
-                   "csv-flat-1e7", "csv-float32-range-1e40", "csv-float32-range-1e200"):
+                   "csv-flat-1e7", "csv-float32-range-1e40", "csv-float32-range-1e200", "ets-aaa-without-seasonal-period"):
         assert needed in kinds, needed
     assert FLOOR_KINDS, "vacuity guard: some family has a minimum lookback above the floor of every family"
-    assert len(REFUSALS) == len(set(REFUSALS)) == 27 + len(FLOOR_KINDS), "27 written here, one per (family, variant) minimum derived"
+    assert len(REFUSALS) == len(set(REFUSALS)) == 28 + len(FLOOR_KINDS), "28 written here, one per (family, variant) minimum derived"
 
 
 # ---------------------------------------------------------------------

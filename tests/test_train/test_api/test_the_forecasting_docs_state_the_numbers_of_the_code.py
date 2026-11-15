@@ -145,6 +145,25 @@ def test_the_readme_says_a_hand_edited_scale_floor_cannot_be_detected():
     assert "`scale_floor` is not checked against the model" in text and "cannot be detected" in text
 
 
+def test_the_required_keys_the_documents_state_are_the_configs_fields_without_a_default():
+    """Review W2: the README said `out` and `model` were required, the module said `out`, `model` and `data`, and the code wanted all three."""
+    config = TimeSeriesForecastingConfig
+    required = [f.name for f in dataclasses.fields(config) if f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING]
+    assert required == ["out", "model", "data"], "vacuity guard: the fields that have no default"
+    words = ", ".join(f"`{name}`" for name in required[:-1]) + f" and `{required[-1]}`"
+    text = " ".join(README.read_text().split())
+    assert f"{words} are required" in text and f"Required: {words};" in text
+    module = " ".join((ROOT / "src" / "train" / "api" / "tasks" / "time_series_forecasting.py").read_text().split())
+    assert ", ".join(f"``{name}``" for name in required[:-1]) + f" and ``{required[-1]}`` are required" in module
+    assert "the group `data` itself must be named" in text, "the README says what naming it takes (`data.format=builtin`)"
+
+
+def test_the_lookback_help_states_the_minimum_the_code_refuses_below():
+    help_text = {f.name: f for f in dataclasses.fields(TimeSeriesData)}["lookback"].metadata["help"]
+    assert fm.MIN_LOOKBACK == 2, "vacuity guard: the floor of every family"
+    assert f"(at least {fm.MIN_LOOKBACK};" in help_text
+
+
 def test_the_readme_states_the_shift_bound_the_flat_rule_has_and_the_flat_flag_and_counts():
     """D-045: shift invariance holds while a window's std is above ``scale_floor`` times its mean |x|; a flat window is in raw units."""
     floor = ForecastTransformArgs().scale_floor

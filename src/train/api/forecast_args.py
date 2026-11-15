@@ -115,7 +115,8 @@ class TimeSeriesData(StrictConfig):
     format: _Format = dataclasses.field(
         default=BUILTIN,
         metadata={"help": "where the series come from: builtin (the synthetic bank of the generator's patterns) or csv "
-                          "(one user file, data.path)"},
+                          "(one user file, data.path); the group data is required, so give one of its keys: data.format=builtin "
+                          "alone is the synthetic bank"},
     )
     dataset: str = dataclasses.field(
         default=SYNTHETIC,
@@ -136,7 +137,7 @@ class TimeSeriesData(StrictConfig):
     )
     lookback: Auto[int] = dataclasses.field(
         default=AUTO,
-        metadata={"help": "points of context the model sees (at least 1); auto is the family recipe's"},
+        metadata={"help": "points of context the model sees (at least 2; the family's own minimum is checked before the run); auto is the family recipe's"},
     )
     horizon: Auto[int] = dataclasses.field(
         default=AUTO,

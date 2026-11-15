@@ -830,16 +830,15 @@ python -m train.beit.train_tokenizer --dataset cifar10 --image-size 32 --downsam
   and `export` for pretrain, and the Phase 5 wrappers (the repo map entry among them).
 
 **`time_series_forecasting`** (plan 3a8319ef): trains a forecaster on windows of a series, either a synthetic bank of the library's
-generator patterns or one csv of your own. `out` and `model` are required; `data.lookback` and `data.horizon` come from the family's
-recipe. The family chooses the model. Every series is cut BY TIME into a training slice, a slice that selects the best epoch and a
+generator patterns or one csv of your own. `out`, `model` and `data` are required (every key of `data` has a default, but the group `data` itself must be named: `data.format=builtin` is the synthetic bank); `data.lookback` and `data.horizon` come from the family's recipe. The family chooses the model. Every series is cut BY TIME into a training slice, a slice that selects the best epoch and a
 slice scored once after `fit`, and the verdict is a bar against two baselines and the untrained model (below). The run is
 reproducible, resumable, and `predict` and `export` work on its run directory.
 
 ```bash
 python -m train list_models task=time_series_forecasting
 python -m train time_series_forecasting     # every key of the task, its type and default
-python -m train time_series_forecasting out=auto model=nbeats/base epochs=10
-python -m train time_series_forecasting out=auto model=prism/tiny 'model_args.quantile_levels=[0.1,0.5,0.9]'
+python -m train time_series_forecasting out=auto model=nbeats/base data.format=builtin epochs=10
+python -m train time_series_forecasting out=auto model=prism/tiny data.format=builtin 'model_args.quantile_levels=[0.1,0.5,0.9]'
 python -m train time_series_forecasting out=auto model=nbeats/small data.format=csv data.path=series.csv \
     'data.value_cols=["load"]' data.time_col=ts
 ```
@@ -888,7 +887,7 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
 * **Keys of the task** (`python -m train time_series_forecasting` lists all, with their help; the groups `optim_args`,
   `checkpoint_args`, `logger_args`, `analysis_args` and `debug_args`, and `epochs`, `batch_size`, `seed`, `devices`, `precision`,
   `resume_interrupted` and `checkpoint`, are the shared ones and mean what they mean for the other tasks, except where this section says
-  otherwise). Required: `out` and `model`; a csv run also needs `data.format` and `data.path`.
+  otherwise). Required: `out`, `model` and `data`; the group `data` itself must be named (`data.format=builtin` is the synthetic bank), and a csv run also needs `data.format` and `data.path`.
 
 | Key | Default | Read at |
 |---|---|---|
@@ -1004,7 +1003,7 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
   (`TimeSeriesForecastingTrainer.check_model_args` and `TimeSeriesForecastingConfig.problems`): `precision` other than `float32`; a
   `data.lookback` below the family's measured minimum, a number of the variant (`forecast_models.window_problems`, the
   `FamilyRow.min_lookback` rows, measured by building each variant at decreasing lookbacks: `prism` tiny 8, small 31, base 31, large 61;
-  `ets/AAA` needs `model_args.seasonal_period` plus 1; every other measured variant builds at 2, the floor of every family); a
+  `ets/AAA` needs `model_args.seasonal_period` plus 1; an `ets/AAA` run without `model_args.seasonal_period` (an int of at least 2) is refused by name; every other measured variant builds at 2, the floor of every family); a
   `data.horizon` below 2 for `nbeats` (its seasonality stack has `horizon // 2` harmonics); `data.n_select` or `data.n_test` of fewer
   than one batch, and a `data.patterns` subset whose 8 windows per series are fewer than one batch; for a csv, a segment of fewer than
   one batch of windows, more windows asked than a segment holds and a constant select segment (`forecast_series.check_split_sizes`, the

@@ -1392,6 +1392,20 @@ def test_the_split_sizes_are_checked_before_the_claim_for_a_known_series_count_a
         fs.check_split_sizes(n_series=2, n_select=None, **{**kw, "n_test": 3})
 
 
+@pytest.mark.parametrize("args", [None, {}, {"seasonal_period": None}, {"seasonal_period": 1}, {"seasonal_period": True}, {"seasonal_period": 2.0}])
+def test_a_seasonal_ets_without_a_usable_period_is_refused_by_name_before_the_claim(args, monkeypatch):
+    """Review NOTE 3a: the library refuses ``variant='AAA' needs seasonal_period > 1`` at the build, after the run directory is claimed;
+    the request alone says it, so the pre-claim path (``window_problems``, read by ``check_model_args``) refuses it with the key named."""
+    (line,) = fm.window_problems("ets", "AAA", 168, 24, args)
+    assert line.startswith("Invalid value for 'model_args.seasonal_period': ets/AAA needs model_args.seasonal_period, an int of at least 2")
+    assert fm.FAMILIES["ets"].why_over in line and line.endswith(f"got {None if args is None else args.get('seasonal_period')!r}")
+    with pytest.raises(ValueError, match="ets/AAA needs model_args.seasonal_period, an int of at least 2"):
+        fm.create_ets(variant="AAA", input_shape=(168, 1), horizon=24, **(args or {}))   # the adapter's own door says the same
+    monkeypatch.setattr(fm, "window_problems", lambda *args_, **kwargs: [])
+    with pytest.raises(ValueError, match="seasonal_period > 1"):                             # what the build said, after the claim
+        fm.create_ets(variant="AAA", input_shape=(168, 1), horizon=24, **(args or {}))
+
+
 @pytest.mark.parametrize("period", [4, 8, 12])
 def test_a_seasonal_ets_needs_a_full_period_plus_one_step_of_context_and_the_other_variants_do_not(period, monkeypatch):
     """The one minimum that depends on a model argument (measured at periods 4, 8, 12 and 24): AAA at ``seasonal_period + 1``."""
@@ -1402,7 +1416,7 @@ def test_a_seasonal_ets_needs_a_full_period_plus_one_step_of_context_and_the_oth
     (line,) = fm.window_problems("ets", "AAA", floor - 1, 8, args)
     assert f"ets/AAA with model_args.seasonal_period={period} needs a lookback of at least {floor}" in line, line
     assert fm.FAMILIES["ets"].why_over in line
-    assert fm.window_problems("ets", "AAA", 2, 8) == [] and fm.window_problems("ets", "ANN", 2, 8, args) == [], "no period, no minimum"
+    assert fm.window_problems("ets", "ANN", 2, 8, args) == [] and fm.window_problems("ets", "AAN", 2, 8) == [], "only AAA has a period"
     with pytest.raises(ValueError, match=f"seasonal_period={period} needs a lookback of at least {floor}"):
         fm.create_ets(variant="AAA", input_shape=(floor - 1, 1), horizon=8, **args)
     monkeypatch.setattr(fm, "window_problems", lambda *args_, **kwargs: [])

@@ -369,7 +369,11 @@ def window_problems(
             f"Invalid value for 'data.lookback': {family}/{variant} needs a lookback of at least {floor} ({why}), got {lookback}")
     over = row.min_lookback_over.get(variant)
     period = (model_args or {}).get(over[0]) if over else None
-    if over and isinstance(period, int) and not isinstance(period, bool) and lookback < period + over[1]:
+    if over and not (isinstance(period, int) and not isinstance(period, bool) and period >= 2):
+        lines.append(
+            f"Invalid value for 'model_args.{over[0]}': {family}/{variant} needs model_args.{over[0]}, an int of at least 2 "
+            f"({row.why_over}), got {period!r}")
+    elif over and lookback < period + over[1]:
         lines.append(
             f"Invalid value for 'data.lookback': {family}/{variant} with model_args.{over[0]}={period} needs a lookback of at "
             f"least {period + over[1]} ({row.why_over}), got {lookback}")
