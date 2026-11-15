@@ -25,7 +25,7 @@ from train.api.forecast_series import FLAT_SHARE, FLOAT32_RANGE
 from train.api.tasks.time_series_forecasting import TimeSeriesForecastingConfig
 from train.common import forecast_run
 
-from ._forecast_fixtures import world  # noqa: F401  (fixture)
+from ._forecast_fixtures import SHIFT_BOUND, world  # noqa: F401  (fixture)
 
 ROOT = Path(__file__).resolve().parents[3]
 README = ROOT / "src" / "train" / "README.md"
@@ -173,6 +173,12 @@ def test_the_readme_states_the_shift_bound_the_flat_rule_has_and_the_flat_flag_a
     assert "a flat window is trained and scored in the series' raw units" in text
     assert "`predict` returns `flat`, one bool per window" in text and "`flat_windows`" in text
     assert f"more than {FLAT_SHARE:.0%} of the windows of a segment" in text and "at stride `data.horizon`" in text
+    assert "std <= max(1e-15, transform_args.scale_floor * mean|context|)" in text, "the flat rule with its absolute guard"
+    assert "are resolution-flat" in text and "an EXACTLY constant window" in text and "never refused" in text, "the two kinds of flat window"
+    assert "differencing does not help" in text and "subtract the level" in text and "The one override is `transform_args.scale_floor`" in text
+    assert SHIFT_BOUND == 1e-7 and f"holds the shift to {SHIFT_BOUND:.0e}".replace("e-0", "e-") + " of a std for every decode row" in text
+    assert "all nine decode rows" in text, "the shift bound says on which rows it was measured"
+    assert "within two float32 steps of the threshold" in text and "the float32 file and the float64 `predict` can decide flatness differently" in text
     span = ", ".join(f"{x:.0e}".replace("e+", "e") for x in FLOAT32_RANGE)
     assert f"outside [{span}]" in text and "float32 range" in text
 
