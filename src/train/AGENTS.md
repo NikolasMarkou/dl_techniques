@@ -580,7 +580,7 @@ classification task calls the same `train.common.classification_run` helpers as 
   classification record equals a version 1 record but for `schema_version`; a segmentation record has `input_size`,
   `ignore_index`, `mask_threshold`, `output` and no `input_shape`; a denoising record has `channels`, `size_multiple`,
   `data_range` and `output`, and no class, statistic or input size; a forecasting record (the fourth kind) has `lookback`,
-  `horizon`, `channels`, `value_cols`, `scale_floor`, `head`, `quantile_levels`, `point_index`, `decode`, `data_format` and
+  `horizon`, `channels`, `value_cols`, `time_col`, `scale_floor`, `head`, `quantile_levels`, `point_index`, `decode`, `data_format` and
   `data_sha256` and no class, statistic or input size, and a resume compares its `DATA_KEYS` (the window, channels, columns, scale
   floor and source) and nothing about the head. A new task is a new row of both tables and a
   builder, not a null in the old record. Version 1 has no reader: `older_record_reason` is the one sentence, said by
@@ -703,7 +703,7 @@ classification task calls the same `train.common.classification_run` helpers as 
   horizon). The groups (`TimeSeriesData`, `ForecastTransformArgs`, `ForecastMetricArgs`, `ForecastLossArgs`) are in `api/forecast_args.py`
   (not `api/args.py`, whose seven groups `_groups.py` pins); the adapters, the per-family tables (`ALLOWED`, `REFUSED`, `FORCED`,
   `SUPPLIED`, `FACTORIES`, held to the factories' signatures by `signature_census`; `FAMILIES` with a `FamilyRow` of `max_channels`,
-  `static_batch` and `jit_refusal`) and the `RECIPES` are `api/forecast_models.py`; the data, the decode table and the report are
+  `static_batch`, `jit_refusal`, the measured `min_lookback` per variant, `min_lookback_over` and `min_horizon`) and the `RECIPES` are `api/forecast_models.py`; the data, the decode table and the report are
   `train/common/forecast_data.py` and `train/common/forecast_run.py`; `ForecastPredictor` and the export row are
   `api/forecast_predictor.py`. The last three import TensorFlow, so `train.api` imports them inside functions only.
   - **One decode row, one normalization.** `forecast_run.DECODE` has one row per family and head (`nbeats`, `prism_point`,
@@ -735,7 +735,20 @@ classification task calls the same `train.common.classification_run` helpers as 
     (`ServedForecaster`, a registered layer, not a `Lambda`, which does not load under safe mode, D-011, D-026); `_input_spec` accepts a
     rank-2 `(lookback, channels)` shape only for a rule whose `shape_of` returns it. `check_export` raises the five measured refusals
     (`forecast_predictor.EXPORT_REFUSALS`) before anything is written; each has a test that builds the file anyway and fails when the
-    reason stops being true. Do not drop a row to "try the cell", and do not add one without a measurement.
+    reason stops being true. Do not drop a row to "try the cell", and do not add one without a measurement. The exported `.keras` file
+    holds `ServedForecaster`, a class of the train package, which the wheel does not ship, so it loads only where the train package
+    is importable (the source tree on the path, or an editable install); never write that the Keras loader alone loads it (a test scans
+    every text for the claim, and loads the file in a fresh interpreter with and without `train`). `export` runs the task's `check` for
+    the `keras` format of a served task too (D-042).
+  - **Before the claim, and what stays after it.** `TimeSeriesForecastingTrainer.check_model_args` refuses, with no TensorFlow and no run directory: `precision`
+    other than `float32` (D-041; `TimeSeriesForecastingConfig.problems`), a lookback or horizon below the family's measured minimum
+    (`FamilyRow.min_lookback`, `min_horizon`: D-042), a selection or test count of fewer than one batch, more windows than a csv segment
+    holds and a csv whose select segment is constant (`forecast_series.check_split_sizes`, the loader calls the same functions). Four
+    refusals stay at the load, after the claim, because they need the generator or standardized windows, which load TensorFlow: an
+    unknown `data.patterns` name, the default window count of `data.patterns` null against the batch (the generator names the
+    patterns), a bank series that is non-finite (dropped at generation) and a zero baseline from a select set that is flat only in some
+    windows. `load_model` holds the record to the model's BUILT window (`forecast_predictor.check_built_window`, the `MODEL_CHECKS`
+    table) for every family, before the model is called.
   - **The TensorFlow-free half.** `api/forecast_series.py` (`read_csv_series`, `split_bounds`, `check_segments`, `refuse`) imports pandas
     and numpy only, and `api/forecast_args.py` imports nothing from `train.common`. The reason (D-036): `train.common`'s
     `__init__` imports `gpu`, which imports TensorFlow, so any import of `train.common.forecast_data` loads it, and the checks that need
@@ -743,7 +756,7 @@ classification task calls the same `train.common.classification_run` helpers as 
     of the run directory. `forecast_data` imports from it, so the sentence a user reads before the claim and the one the loader raises
     are one function; do not write a second csv reader or import `train.common`, `tensorflow` or `keras` in either module
     (`test_forecast_families.py` and `test_common_forecast_data.py` load them in a fresh interpreter).
-  - **The record and the lister.** The fourth record kind: a `FORECASTING` row in all nine tables of `TASK_TABLES`, in
+  - **The record and the lister.** The fourth record kind: a `FORECASTING` row in every table of `TASK_TABLES`, in
     `PREDICT_WRITERS` and in `DATA_LISTERS` (a csv, `.npy` or `.npz` file; a directory refused by name; `predict` reads the record
     BEFORE it lists the data, D-012, so a forecasting run is never told "holds no image"). `task_record` reads the head, the levels and the
     median off the BUILT model through the decode row, so a resume, which asks for the record before `build_model`, has the model built
@@ -751,7 +764,7 @@ classification task calls the same `train.common.classification_run` helpers as 
     [`README.md`](README.md). Tests: `tests/test_train/test_api/test_forecast_families.py`, `test_forecast_task.py`,
     `test_forecast_resume.py`, `test_forecast_predictor_and_export.py` and `tests/test_train/test_common_forecast_data.py`.
 - **Per-task tables, not `if task ==` branches** (D-006). `train.api.predictor` holds one table per concern, each keyed by the task
-  word: `RECORD_KEYS`, `DATA_KEYS`, `GEOMETRY_CHECKS`, `TAIL_CHECKS`, `INPUT_SHAPE_OF`, `INPUT_KEY`, `OUTPUT_CHECKS`,
+  word: `RECORD_KEYS`, `DATA_KEYS`, `GEOMETRY_CHECKS`, `TAIL_CHECKS`, `INPUT_SHAPE_OF`, `INPUT_KEY`, `MODEL_CHECKS`, `OUTPUT_CHECKS`,
   `PREDICTORS` and `EXPORT_RULES` (an `ExportRule(shape_of, check, note, served)`: the shape `export` traces, the cells it refuses, the
   sentence it logs, and `served`, the function a file runs; see the forecasting bullet), collected in `TASK_TABLES`;
   `train.api.cli.PREDICT_WRITERS` is the table of what `predict` writes and `train.api.cli.DATA_LISTERS` the table of what `data=`

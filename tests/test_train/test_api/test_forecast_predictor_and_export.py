@@ -28,6 +28,7 @@ Everything writes under ``tmp_path``; nothing is deleted.
 
 import hashlib
 import json
+import re
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,6 +36,7 @@ from typing import Any, Dict, List
 
 import keras
 import numpy as np
+import pandas as pd
 import pytest
 
 from train.api import cli, predictor
@@ -44,7 +46,7 @@ from train.api.tasks.time_series_forecasting import train_time_series_forecastin
 from train.common import forecast_data as fd
 from train.common import forecast_run as fr
 
-from .test_forecast_task import CASES, DATA, QUANTILES, prepared, read_json, world, write_series_csv  # noqa: F401
+from .test_forecast_task import CASES, DATA, QUANTILES, SRC, prepared, read_json, world, write_series_csv  # noqa: F401
 
 TASK = "time_series_forecasting"
 BATCH, STEPS = 16, 4
@@ -178,6 +180,7 @@ def test_the_record_holds_what_the_run_was_told_and_what_the_model_is(trained):
 def test_the_csv_record_names_the_columns_the_run_read_and_the_bytes_of_the_file(csv_run):
     record = csv_run.record
     assert record["channels"] == 2 and record["value_cols"] == CSV_USED and record["data_format"] == "csv"
+    assert record["time_col"] == "t", "the record names the time column the run sorted by, so predict can check the order (D-042)"
     assert record["data_sha256"] == hashlib.sha256(csv_run.csv.read_bytes()).hexdigest()
 
 
@@ -226,6 +229,9 @@ BAD_RECORDS = [
     (bad(data_format="csv", value_cols=None, data_sha256="0" * 64), "'value_cols' must be a list of 1 distinct texts for the csv format"),
     (bad(data_format="csv", value_cols=["a"], data_sha256="xyz"), "'data_sha256' must be the 64 hex digits"),
     (bad(data_format="csv", value_cols=["a", "a"], channels=2, data_sha256="0" * 64), "'value_cols' must be a list of 2 distinct texts"),
+    (bad(time_col="t"), "'time_col' must be null for the builtin format"),
+    (bad(data_format="csv", value_cols=["a"], data_sha256="0" * 64, time_col=""), "'time_col' must be a non-empty text or null"),
+    (bad(data_format="csv", value_cols=["a"], data_sha256="0" * 64, time_col=3), "'time_col' must be a non-empty text or null"),
 ]
 
 
@@ -247,6 +253,7 @@ def test_a_record_missing_a_key_or_holding_another_tasks_key_is_refused(one, key
 
 def test_a_csv_record_with_its_columns_and_a_hash_is_valid(one):
     check_record({**one.record, "data_format": "csv", "value_cols": ["v0"], "data_sha256": "ab" * 32}, "task.json")
+    check_record({**one.record, "data_format": "csv", "value_cols": ["v0"], "data_sha256": "ab" * 32, "time_col": "t"}, "task.json")
 
 
 # ---------------------------------------------------------------------
@@ -427,6 +434,36 @@ def test_a_synthetic_run_reads_a_csv_whose_columns_are_all_numbers_and_counts_th
         one.predictor.predict(str(two))
 
 
+def newest_first(source: Path, target: Path) -> Path:
+    """The csv ``source`` with its rows in reverse order (a newest-first export of the same series)."""
+    pd.read_csv(source).iloc[::-1].to_csv(target, index=False)
+    return target
+
+
+def test_predict_of_a_csv_checks_the_time_order_with_the_function_the_loader_uses(csv_run, tmp_path, monkeypatch, capsys):
+    """Review W6: a newest-first csv was forecast from its OLDEST rows with no warning. The record names ``time_col`` and the
+    check is ``forecast_series._check_time_column``, the loader's own (one implementation, D-042)."""
+    from train.api import forecast_series
+
+    reversed_file = newest_first(csv_run.csv, tmp_path / "newest_first.csv")
+    with pytest.raises(ConfigError, match=r"data.time_col 't' must be strictly increasing with no empty cell: sort the file by time"):
+        csv_run.predictor.predict(str(reversed_file))
+    out = tmp_path / "forecast.json"
+    code, _, stderr = run_command(["predict", f"model={csv_run.run}", f"data={reversed_file}", f"out={out}"], capsys)
+    assert code == 2 and "strictly increasing" in stderr and not out.exists(), stderr[-600:]
+    seen = []
+    real = forecast_series._check_time_column
+    monkeypatch.setattr(forecast_series, "_check_time_column", lambda column, name: (seen.append(name), real(column, name))[1])
+    csv_run.predictor.predict(str(csv_run.csv))
+    assert seen == ["t"], "predict reads the order through the loader's function, with the record's time column"
+
+
+def test_a_csv_given_to_a_run_that_had_no_time_column_skips_the_order_check(csv_run, tmp_path):
+    run = copy_run(csv_run.run, tmp_path / "run", time_col=None)
+    answer = load_model(run).predict(str(newest_first(csv_run.csv, tmp_path / "newest_first.csv")))
+    assert answer["point"].shape == (1, HORIZON, 2), "no time column was named at training, so the rows are the time order"
+
+
 def copy_run(run: Path, where: Path, **changes) -> Path:
     """A run directory holding the best model and a task.json with ``changes``."""
     where.mkdir()
@@ -459,8 +496,37 @@ def test_a_record_that_names_another_head_levels_or_decode_row_is_refused(traine
             load_model(copy_run(trained.run, tmp_path / "median", point_index=(trained.record["point_index"] + 1) % len(levels)))
 
 
-def test_a_record_whose_lookback_the_model_does_not_take_is_named_as_such(one, tmp_path):
-    with pytest.raises(ConfigError, match=rf"does not take the lookback {LOOKBACK + 8} it names"):
+@pytest.mark.parametrize("lookback", [LOOKBACK // 2, LOOKBACK + 8])
+def test_a_record_whose_lookback_the_model_was_not_built_for_is_refused_naming_the_field_for_every_family(trained, tmp_path, lookback):
+    """Review W5: four families (ets, xlstm, tirex, timestral) ran a window of the wrong length for a hand-edited lookback, because
+    their forward pass takes any length. The record is held to the model's BUILT input shape (D-042), for all nine decode rows."""
+    with pytest.raises(ConfigError, match=rf"lookback is {lookback} in task.json and {LOOKBACK} in the model"):
+        load_model(copy_run(trained.run, tmp_path / "run", lookback=lookback))
+    assert not [p for p in tmp_path.iterdir() if p.name != "run"]
+
+
+def test_a_record_whose_channels_the_model_was_not_built_for_is_refused_naming_the_field_for_every_family(trained, tmp_path):
+    with pytest.raises(ConfigError, match=r"channels is 2 in task.json and 1 in the model"):
+        load_model(copy_run(trained.run, tmp_path / "run", channels=2))
+
+
+def test_the_built_input_shape_is_read_from_the_model_the_way_each_family_keeps_it(trained):
+    """A functional model (mdn) says ``input_shape``; every subclassed one keeps its build config (the batch of timestral is static)."""
+    from train.api import forecast_predictor
+
+    assert forecast_predictor.built_window(trained.predictor.model) == (LOOKBACK, 1)
+
+
+def test_a_model_that_says_nothing_of_its_input_still_meets_the_zero_window_forward_pass(one, tmp_path, monkeypatch):
+    """No input shape to compare (``built_window`` is ``None``): the zero window of the record is the check, as before the shape check."""
+    from train.api import forecast_predictor
+
+    class Silent:
+        """A stand-in without ``input_shape`` and without a build config."""
+
+    assert forecast_predictor.built_window(Silent()) is None
+    monkeypatch.setattr(forecast_predictor, "built_window", lambda model: None)
+    with pytest.raises(ConfigError, match=r"does not take the lookback"):
         load_model(copy_run(one.run, tmp_path / "run", lookback=LOOKBACK + 8))
 
 
@@ -804,6 +870,23 @@ def test_a_shape_that_is_not_the_records_window_is_refused_before_anything_is_wr
     assert list(tmp_path.iterdir()) == []
 
 
+@pytest.mark.parametrize("case", ["nbeats", "xlstm_point"])
+def test_the_library_keras_export_runs_the_shape_check_of_the_other_formats(case, world, tmp_path_factory, tmp_path):
+    """Review W7: ``export(format="keras", input_shape=(64, 1))`` of an xlstm run trained at lookback 32 wrote a lookback-64 file
+    beside a ``task.json`` that says 32, because the shape check ran only where a spec was traced (not for ``keras``). The CLI has no
+    ``input_shape`` key, so the library function is the path (D-042)."""
+    from train.api import exporting
+
+    run = trained_case(case, tmp_path_factory)
+    for shape in ((2 * LOOKBACK, 1), (LOOKBACK, 2)):
+        with pytest.raises(ConfigError, match=r"is not the window \(32, 1\) \(lookback, channels\)"):
+            exporting.export(model=run.predictor.model, out=tmp_path / "w.keras", format="keras", input_shape=shape, record=run.record)
+        assert list(tmp_path.iterdir()) == [], f"a refused shape {shape} writes nothing"
+    written = exporting.export(model=run.predictor.model, out=tmp_path / "ok.keras", format="keras",
+                               input_shape=(LOOKBACK, 1), record=run.record)
+    assert written.exists() and read_json(written.with_name("ok.keras.task.json")) == run.record
+
+
 def test_the_keras_ops_standardization_is_the_numpy_twin_rule_for_rule():
     """The function a file runs is ``context_stats_ops``: the first-value anchor, the offset from it, the population std and the unit
     scale of a flat context equal ``context_stats_np`` (the rule the Predictor and the bar use), on the cases where a simpler rule
@@ -938,8 +1021,9 @@ def test_the_tflite_check_reads_the_served_function_and_not_the_raw_model(one, w
 
 _CHILD = """
 import sys
-import numpy as np
 import keras
+import train.common.forecast_run  # the module that registers ServedForecaster: the file names it, the process must be able to import it
+import numpy as np
 
 paths, data, out = sys.argv[1].split(","), np.load(sys.argv[2]), sys.argv[3]
 answers = {}
@@ -954,9 +1038,27 @@ for index, path in enumerate(paths):
 np.savez(out, **answers)
 """
 
+#: A process in which the ``train`` package cannot be imported: every path entry that holds a ``train`` directory is dropped and one
+#: directory holding only a link to ``dl_techniques`` is put in front (the wheel ships ``dl_techniques*`` and not ``train``).
+_CHILD_WITHOUT_TRAIN = """
+import os
+import sys
 
-def test_every_keras_file_reloads_in_a_fresh_interpreter_without_importing_train(world, tmp_path_factory, tmp_path):
-    """One child process loads the nine files with ``keras.saving.load_model`` alone (the registered layer is found by its module)."""
+sys.path = [p for p in sys.path if not os.path.isdir(os.path.join(p, "train"))]
+sys.path.insert(0, sys.argv[2])
+import keras
+
+try:
+    keras.saving.load_model(sys.argv[1])
+except Exception as exc:
+    sys.stdout.write(type(exc).__name__ + ": " + " ".join(str(exc).split()))
+    sys.exit(3)
+"""
+
+
+def test_every_keras_file_reloads_in_a_fresh_interpreter_that_imports_the_train_module_and_keras(world, tmp_path_factory, tmp_path):
+    """One child process imports ``train.common.forecast_run`` and ``keras`` and loads the nine files (D-041: the file needs the
+    ``train`` package importable; it does not load without it, see the next test)."""
     import subprocess
     import sys
 
@@ -977,6 +1079,50 @@ def test_every_keras_file_reloads_in_a_fresh_interpreter_without_importing_train
         want = trained_case(case, tmp_path_factory).predictor.predict(windows)
         assert share_of_std(answers[f"p{index}"], want["point"], windows) <= TOLERANCE["keras"], case
         assert (f"q{index}" in answers.files) == (HEADS[case][0] == "quantile"), case
+
+
+def test_an_exported_keras_file_does_not_load_in_a_process_where_the_train_package_cannot_be_imported(world, tmp_path_factory, tmp_path):
+    """Review W3: the layer the file holds is a class of ``train``, which the wheel does not ship. The failure a user meets is Keras's
+    own sentence, named by the class and the module (a keras version that words it otherwise fails this test, which is the signal)."""
+    import subprocess
+    import sys
+
+    only = tmp_path / "only_dl_techniques"
+    only.mkdir()
+    (only / "dl_techniques").symlink_to(SRC / "dl_techniques", target_is_directory=True)
+    script = tmp_path / "child.py"
+    script.write_text(_CHILD_WITHOUT_TRAIN)
+    done = subprocess.run([sys.executable, str(script), str(export_cell("nbeats", "keras", tmp_path_factory)), str(only)],
+                          capture_output=True, text=True, timeout=600)
+    assert done.returncode == 3, done.stdout[-800:] + done.stderr[-800:]
+    assert "ServedForecaster" in done.stdout and "train.common.forecast_run cannot be imported" in done.stdout, done.stdout[-800:]
+
+
+#: The phrase that claimed a forecaster's keras file loads on its own: the call, the word ``alone``, across a line break and a code quote.
+_ALONE = re.compile("load_model" + "`*" + r"\s+alone", re.S)
+
+
+def test_no_text_claims_that_the_keras_call_alone_loads_an_exported_forecaster():
+    """D-041: the README, the AGENTS file, every docstring, comment, help text and test under ``train`` and its tests say what the file
+    needs (the ``train`` package importable); none says the Keras loader is enough."""
+    roots = [SRC / "train", Path(__file__).resolve().parent.parent]
+    texts = [path for root in roots for pattern in ("*.md", "*.py") for path in sorted(root.rglob(pattern))]
+    assert len(texts) > 100, "vacuity guard: the scan reads the tree"
+    found = [str(path.relative_to(SRC.parent)) for path in texts if _ALONE.search(path.read_text())]
+    assert found == [], f"a text claims the Keras loader alone loads the forecaster's file: {found}"
+
+
+def test_the_requirement_of_the_keras_file_is_stated_in_the_note_the_help_and_the_two_documents(one):
+    from train.api import forecast_predictor
+
+    needs = ("ServedForecaster", "train package", "importable", "does not ship")
+    note = forecast_predictor.export_note(one.record)
+    assert all(word in note for word in needs), note
+    help_text = " ".join(" ".join(cli.EXPORT_NOTES).split())
+    assert all(word in help_text for word in ("train package", "importable", "does not ship")), help_text
+    for name in ("README.md", "AGENTS.md"):
+        text = " ".join((SRC / "train" / name).read_text().split())
+        assert all(word in text for word in needs), name
 
 
 @pytest.mark.parametrize("case", list(CASES))

@@ -78,6 +78,7 @@ from ..config import (
     Auto,
     Precision,
     StrictConfig,
+    join_path,
     resume_help,
     run_request,
     validate,
@@ -104,8 +105,9 @@ from ..forecast_models import (
     geometry_problems,
     jit_problem,
     loss_problem,
+    window_problems,
 )
-from ..forecast_series import check_csv_level, read_csv_series
+from ..forecast_series import check_csv_level, check_split_sizes, read_csv_series
 from ..predictor import build_forecast_record, overrides_of_variant
 from ..run_dir import CHECKPOINTS_DIR
 from ..trainer import Evaluation, FitState, TaskTrainer, TrainResult, config_problems
@@ -167,7 +169,13 @@ class TimeSeriesForecastingConfig(StrictConfig):
     batch_size: Auto[int] = dataclasses.field(default=AUTO, metadata={"help": RUN_HELP["batch_size"]})
     seed: int = dataclasses.field(default=DEFAULT_SEED, metadata={"help": RUN_HELP["seed"]})
     devices: Auto[Optional[int]] = dataclasses.field(default=AUTO, metadata={"help": RUN_HELP["devices"]})
-    precision: Precision = dataclasses.field(default="float32", metadata={"help": RUN_HELP["precision"]})
+    precision: Precision = dataclasses.field(
+        default="float32",
+        metadata={
+            "help": "float32, the only value accepted: a forecaster trained under mixed_float16 or mixed_bfloat16 cannot be "
+            "reloaded in a float32 process, so predict and export of its run would be refused"
+        },
+    )
     resume_interrupted: bool = dataclasses.field(
         default=False,
         metadata={"help": resume_help("an epoch of the synthetic bank takes seconds to minutes", order=_RESUME_ORDER)},
@@ -198,7 +206,23 @@ class TimeSeriesForecastingConfig(StrictConfig):
         # `deepar` and `adaptive_ema` are refused here, the first place the model name is seen and before any model code is
         # imported; the family is not registered, so the shared parse would only say "unknown family".
         check_supported_family(self.model)
-        return config_problems(self, prefix, no_conformal_for=TASK, because=_CONFORMAL)
+        lines = config_problems(self, prefix, no_conformal_for=TASK, because=_CONFORMAL)
+        # DECISION plan-2026-11-13T105600-3a8319ef/D-041
+        # `precision` other than float32 is refused HERE, before the claim: a run under a mixed policy trains and writes its
+        # `task.json`, and then `load_model` (so `predict` and `export`) refuses its own file, naming the lookback when the cause
+        # is a float16 against float32 clash in the layers (review W4, measured on nbeats/tiny: an InvalidArgumentError, a half
+        # tensor met a float tensor, in a float32 process; the same file runs under a mixed global policy). Do NOT let the option
+        # through "because the run itself works" (its reload check passes in the training process, which has the mixed policy) and
+        # do NOT restore the saved policy at load (a second precision rule in the predictor for one task).
+        if self.precision != "float32":
+            lines.append(
+                f"Invalid value for {join_path(prefix, 'precision')!r}: {self.precision!r} is not accepted for {TASK}: a "
+                "checkpoint trained under a mixed precision policy cannot be reloaded in a float32 process (float16 against "
+                "float32 in the layers), so predict and export of the run would be refused (measured on nbeats/tiny: "
+                "load_model fails with an InvalidArgumentError, a half tensor met a float tensor); leave precision at "
+                f"float32, got {self.precision!r}"
+            )
+        return lines
 
 
 class TimeSeriesForecastingTrainer(TaskTrainer):
@@ -324,7 +348,7 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
         table = registry.MODELS[context.family].load_variants()
         return build_forecast_record(
             model=config.model, family=context.family, variant=context.variant, lookback=data.lookback,
-            horizon=data.horizon, channels=data.input_shape[1], value_cols=data.value_cols,
+            horizon=data.horizon, channels=data.input_shape[1], value_cols=data.value_cols, time_col=config.data.time_col,
             scale_floor=config.transform_args.scale_floor, decode=decoder.row, quantile_levels=decoder.levels,
             point_index=decoder.median_index, data_format=config.data.format, data_sha256=data.csv_sha256,
             variant_overrides=(overrides_of_variant(table[context.variant], self._model_kwargs(config, context))
@@ -345,6 +369,7 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
             raise ConfigError(problem)
         data_cfg: TimeSeriesData = config.data
         channels = 1
+        values = None
         if data_cfg.format == "csv":
             values, names, _ = read_csv_series(data_cfg.path, data_cfg.value_cols, data_cfg.time_col)
             # DECISION plan-2026-11-13T105600-3a8319ef/D-040
@@ -352,9 +377,18 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
             # claim, by the one function the loader calls too. Do NOT leave it to the loader (the run directory is claimed by then).
             check_csv_level(values, names, config.transform_args.scale_floor)
             channels = int(values.shape[1])
-        lines = geometry_problems(context.family, channels, data_cfg.horizon, kwargs)
+        lines = geometry_problems(context.family, channels, data_cfg.horizon, kwargs) + window_problems(
+            context.family, context.variant, data_cfg.lookback, data_cfg.horizon, kwargs)
         if lines:
             raise ConfigValidationError(lines)
+        # The arithmetic of the selection and test windows (fewer than one batch, more than a csv segment holds, a constant csv
+        # select segment) is refused here by the functions the loader calls, so no run directory is claimed for it (D-042).
+        check_split_sizes(
+            values=values, n_series=None if data_cfg.patterns is None else len(data_cfg.patterns) * data_cfg.realizations,
+            lookback=data_cfg.lookback, horizon=data_cfg.horizon, batch_size=config.batch_size,
+            select_fraction=data_cfg.select_fraction, test_fraction=data_cfg.test_fraction,
+            n_select=data_cfg.n_select, n_test=data_cfg.n_test,
+        )
 
     # -- compile --------------------------------------------------------
 

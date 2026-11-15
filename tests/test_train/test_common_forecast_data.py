@@ -42,6 +42,7 @@ import pytest
 import tensorflow as tf
 
 import dl_techniques
+from train.api import forecast_series as fs
 from train.api.errors import ConfigError
 from train.common import forecast_data as fd
 from train.common.forecast_data import (
@@ -788,6 +789,26 @@ class TestEveryRefusalIsANamedErrorWithinThirtySeconds:
         with pytest.raises(ConfigError, match=r"needs at least \d+ rows") as err:
             load(**csv_kwargs(write_csv(tmp_path, rows=400)))
         assert "select" in str(err.value)
+
+    def test_a_csv_whose_select_segment_is_constant_is_refused_by_the_loader_with_the_sentence_the_check_before_the_claim_says(self, tmp_path):
+        """D-042 (review NOTE 12): every selection window is flat, so naive-last and seasonal-naive would score exactly 0. The loader and
+        ``forecast_series.check_split_sizes`` (before the claim) call ONE function; a column that varies elsewhere does not matter."""
+        lo, hi = split_bounds(CSV_ROWS, SELECT_FRACTION, TEST_FRACTION)[1]
+        values = np.random.default_rng(1).standard_normal(CSV_ROWS)
+        values[lo:hi] = 4.0
+        path = write_csv(tmp_path, a=values)
+        with pytest.raises(ConfigError, match=rf"the select segment of the csv \(rows \[{lo}, {hi}\)\) is constant in every value column"):
+            load(**csv_kwargs(path, value_cols=["a"]))
+        load(**csv_kwargs(path, value_cols=["a", "b"]))  # a second column that moves keeps the baselines above 0
+
+    def test_the_loader_reads_the_window_counts_through_the_functions_the_check_before_the_claim_calls(self, tmp_path, monkeypatch):
+        calls = []
+        for name in ("csv_window_count", "window_count", "check_select_moves"):
+            monkeypatch.setattr(fd, name, (lambda real, name: lambda *a, **k: (calls.append(name), real(*a, **k))[1])(getattr(fd, name), name))
+        load(**csv_kwargs(write_csv(tmp_path)))
+        load()
+        assert sorted(set(calls)) == ["check_select_moves", "csv_window_count", "window_count"], calls
+        assert fd.SELECT_WINDOWS_PER_SERIES == fs.SELECT_WINDOWS_PER_SERIES, "one definition, imported"
 
     def test_an_unsorted_time_column(self, tmp_path):
         ts = pd.date_range("2024-01-01", periods=CSV_ROWS, freq="h").strftime("%Y-%m-%d %H:%M:%S").to_numpy()

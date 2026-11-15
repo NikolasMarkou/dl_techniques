@@ -41,8 +41,9 @@ series' own units, with no standardization to do, and returns the forecast ``(ba
 runs :class:`train.common.forecast_run.ServedForecaster`, which standardizes a window by its own context statistics, runs the model, decodes
 it with the family's row and de-standardizes (``ExportRule.served``, ``None`` for the three tasks above, whose file is the model). A
 quantile head gives ``{"point", "quantiles"}`` from ``saved_model`` and ``keras`` and the point alone from ``tflite`` and ``onnx``; a
-timestral file is traced at a batch of one window. The ``keras`` file holds the layer, registered, so ``keras.saving.load_model`` alone
-reloads it. The cells that do not convert are refused by name before anything is written
+timestral file is traced at a batch of one window. The ``keras`` file holds the layer, registered under the ``train`` package
+(which the wheel does not ship), so it loads where ``train`` is importable: the source tree on the path or an editable install. The
+cells that do not convert are refused by name before anything is written
 (:data:`train.api.forecast_predictor.EXPORT_REFUSALS`): ``tflite`` of timestral, ``onnx`` of xlstm, ets and timestral. The tflite check
 (built-in and select-operator files alike) compares the file with the served function. ``input_shape`` is ``(lookback, channels)`` for
 it: the rank is the one the task's ``ExportRule.shape_of`` returns.
@@ -580,9 +581,16 @@ def export(
     spec = None if format == "keras" else _input_spec(
         model, input_shape, rank=len(rule.shape_of(record)) if rule is not None else 3, batch=batch
     )
-    if record is not None and spec is not None:
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-042
+    # The task's check runs for EVERY format that writes a traced function, `keras` of a served task included: it was skipped
+    # there because no spec is traced for `keras`, so an xlstm trained at lookback 32 was written as a lookback-64 file beside a
+    # `task.json` that says 32 (review W7). The shape is the spec's where there is one and the one the keras wrapper is built at
+    # (`input_shape` or the record's) where there is not. Do NOT run it only `if spec is not None`, and do NOT run it for a
+    # keras file of a task with no served function: that file is the model itself and nothing is traced.
+    if record is not None and (spec is not None or served is not None):
         # The task's own refusals (a cell of its export table, a size its model cannot be traced at): before any write.
-        rule.check(record, format, tuple(spec.shape.as_list()[1:]))
+        shape = tuple(spec.shape.as_list()[1:]) if spec is not None else tuple(input_shape or rule.shape_of(record))
+        rule.check(record, format, shape)
     if format == "tflite":
         _refuse_bfloat16_tflite(model)
 

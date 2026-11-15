@@ -84,6 +84,10 @@ def fake_input_shape(record):
     return (*record["frame_size"], record["channels"])
 
 
+def fake_model_check(model, record, model_file, task_file):
+    CALLS.append(("MODEL_CHECKS", record["task"]))
+
+
 def fake_output_check(output, record):
     CALLS.append(("OUTPUT_CHECKS", record["task"]))
     if tuple(output.shape)[-1] != record["channels"]:
@@ -99,6 +103,7 @@ FAKE_ROWS = {
     "TAIL_CHECKS": fake_tail,
     "INPUT_SHAPE_OF": fake_input_shape,
     "INPUT_KEY": "frame_size",
+    "MODEL_CHECKS": fake_model_check,
     "OUTPUT_CHECKS": fake_output_check,
     "PREDICTORS": FakePredictor,
     "EXPORT_RULES": predictor.ExportRule(
@@ -253,7 +258,8 @@ def test_the_input_shape_comes_from_the_tasks_row(fake_task):
 def test_load_model_checks_the_output_and_builds_the_predictor_from_the_tasks_rows(run_dir):
     loaded = load_model(run_dir)
     assert type(loaded) is FakePredictor and loaded.record == fake_record()
-    assert ("OUTPUT_CHECKS", FAKE) in CALLS
+    assert ("MODEL_CHECKS", FAKE) in CALLS and ("OUTPUT_CHECKS", FAKE) in CALLS
+    assert CALLS.index(("MODEL_CHECKS", FAKE)) < CALLS.index(("OUTPUT_CHECKS", FAKE)), "the model is checked before it is called"
 
 
 def test_load_model_names_the_tasks_own_input_key_when_the_model_does_not_take_it(run_dir):

@@ -91,6 +91,10 @@ CSV_KEYS: Tuple[str, ...] = ("path", "value_cols", "time_col")
 #: The keys of the synthetic bank; held at their defaults for a csv.
 SYNTHETIC_KEYS: Tuple[str, ...] = ("realizations", "series_length", "noise_level", "patterns")
 
+#: The smallest lookback of ANY family: one context value has no spread to standardize by (D-040). A family may need more
+#: (``forecast_models.FamilyRow.min_lookback``).
+MIN_LOOKBACK = 2
+
 #: The one metric and direction the bar can describe; the family recipes carry the same metric (a test holds them equal).
 WATCH_METRIC = "val_mae"
 WATCH_MODE = "min"
@@ -197,8 +201,8 @@ class TimeSeriesData(StrictConfig):
         # A lookback of 1 is refused by name, before the claim: one context value has no spread, so every window would be "flat"
         # and every number of the run would be in the series' own unit (measured: a lookback-1 run scored 1758.20 against 1758.20
         # of naive-last, exit 1). Do NOT lower this to 1 "for a persistence model": naive-last is a baseline the run reports.
-        if not _is_auto(self.lookback) and self.lookback < 2:
-            bad("lookback", "expected an int of at least 2 (one value has no spread to standardize by) or auto")
+        if not _is_auto(self.lookback) and self.lookback < MIN_LOOKBACK:
+            bad("lookback", f"expected an int of at least {MIN_LOOKBACK} (one value has no spread to standardize by) or auto")
         if not _is_auto(self.horizon) and self.horizon < 1:
             bad("horizon", "expected an int of at least 1 or auto")
         for name in ("realizations", "series_length", "n_select", "n_test", "steps_per_epoch", "max_samples"):

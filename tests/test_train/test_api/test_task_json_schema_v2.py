@@ -80,7 +80,7 @@ def segmentation(**changes):
 def forecasting(**changes):
     value = build_forecast_record(
         model="prism/tiny", family="prism", variant="tiny", lookback=32, horizon=8, channels=2, value_cols=["a", "b"],
-        scale_floor=1e-3, decode="prism_quantile", quantile_levels=[0.1, 0.5, 0.9], point_index=1, data_format="csv",
+        time_col="t", scale_floor=1e-3, decode="prism_quantile", quantile_levels=[0.1, 0.5, 0.9], point_index=1, data_format="csv",
         data_sha256="ab" * 32,
     )
     value.update(changes)
@@ -134,9 +134,10 @@ def test_a_forecasting_record_has_its_own_keys_and_no_class_names_and_no_statist
     record = forecasting()
     assert list(record) == list(RECORD_KEYS[FORECASTING]) == [
         "schema_version", "task", "model", "family", "variant", "lookback", "horizon", "channels", "value_cols",
-        "scale_floor", "head", "quantile_levels", "point_index", "decode", "data_format", "data_sha256",
+        "time_col", "scale_floor", "head", "quantile_levels", "point_index", "decode", "data_format", "data_sha256",
     ]
     assert record["task"] == FORECASTING and record["head"] == "quantile" and record["value_cols"] == ["a", "b"]
+    assert record["time_col"] == "t"
     assert not {"class_names", "normalize", "mean", "std", "input_shape", "input_size"} & set(record)
     point = forecasting(head="point", quantile_levels=None, point_index=None, decode="prism_point")
     assert point["head"] == "point" and point["quantile_levels"] is None and point["point_index"] is None

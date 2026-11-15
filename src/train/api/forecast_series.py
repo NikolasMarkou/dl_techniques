@@ -33,6 +33,30 @@ Interface contract
     :raises ConfigError: for the first segment (train, select, test) shorter than ``width``; the one sentence of that
         refusal, said by the pre-claim check and by the loader alike.
 
+``window_count(name, requested, default, batch_size)``
+    :param name: ``"select"`` or ``"test"``; ``requested``: ``data.n_select`` or ``data.n_test`` (``None`` for the default);
+        ``default``: the count the split has when none is asked.
+    :return: the windows of the split, the request (or the default) rounded DOWN to a whole number of batches.
+    :raises ConfigError: when that is fewer than one batch.
+
+``csv_window_count(name, segment, requested, lookback, horizon, batch_size, fraction)``
+    :param segment: the ``(lo, hi)`` rows of the select or test segment of a csv; windows are cut with non-overlapping targets
+        (stride ``horizon``).
+    :return: the windows of the split (``window_count`` of what the segment holds).
+    :raises ConfigError: for a segment that holds fewer than one batch of such windows, and for a request of more than it holds.
+
+``check_split_sizes(*, values, n_series, lookback, horizon, batch_size, select_fraction, test_fraction, n_select, n_test)``
+    The arithmetic of the selection and test windows that needs no tensor, run before the run directory is claimed and by the
+    loader (one implementation of every sentence). :param values: the csv's ``(rows, channels)`` array, or ``None`` for the
+    synthetic bank; ``n_series``: the series of the bank (``None`` when ``data.patterns`` is null, because the generator
+    that names them loads TensorFlow: the default count is then known only to the loader). :raises ConfigError: for a split
+    of fewer than one batch, a request of more windows than a csv segment holds, and a csv whose select segment is constant in
+    every value column (``check_select_moves``).
+
+``check_select_moves(values, segment)``
+    :raises ConfigError: when every value column is constant over the select ``segment``: every window is flat, so naive-last
+        and seasonal-naive score exactly 0 and the bar (strictly below them) can be neither met nor judged.
+
 ``check_csv_level(values, names, scale_floor)``
     :param values: ``(rows, channels)`` float64 of :func:`read_csv_series`; ``names``: its column names; ``scale_floor``: the
         flatness threshold of ``transform_args`` (a context is flat when its std is not above ``scale_floor * mean|x|``).
@@ -47,6 +71,7 @@ Interface contract
 
 import hashlib
 import io
+import math
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, List, NoReturn, Optional, Sequence, Tuple
@@ -56,6 +81,10 @@ from train.api.errors import ConfigError
 if TYPE_CHECKING:  # annotations only; the runtime imports are inside the functions (module docstring)
     import numpy as np
     import pandas as pd
+
+
+#: Fixed select and test windows per series of the synthetic bank, when ``n_select`` or ``n_test`` is not given.
+SELECT_WINDOWS_PER_SERIES = 8
 
 
 def refuse(message: str) -> NoReturn:
@@ -85,6 +114,74 @@ def check_segments(segments: Sequence[Tuple[int, int]], rows: int, width: int, s
             refuse(
                 f"{source} of {rows} rows is too short: its {name} segment has {hi - lo} rows and one window needs "
                 f"lookback + horizon = {width}; give it more rows or lower data.lookback, data.horizon or the fractions")
+
+
+def window_count(name: str, requested: Optional[int], default: int, batch_size: int) -> int:
+    """The windows of a split: the request (or ``default``) rounded down to a multiple of the batch, at least one batch."""
+    wanted = default if requested is None else requested
+    count = wanted // batch_size * batch_size
+    if count < 1:
+        refuse(f"data.n_{name} = {wanted} is fewer than one batch ({batch_size}): a split needs a whole batch")
+    return count
+
+
+def csv_window_count(
+        name: str, segment: Tuple[int, int], requested: Optional[int], lookback: int, horizon: int, batch_size: int,
+        fraction: float,
+) -> int:
+    """The windows of a csv split: non-overlapping targets (stride ``horizon``), a whole number of batches."""
+    lo, hi = segment
+    available = (hi - lo - (lookback + horizon)) // horizon + 1
+    if available < batch_size:
+        needed = lookback + horizon * batch_size
+        refuse(
+            f"the {name} segment ({hi - lo} rows) holds {available} windows with non-overlapping targets, fewer than "
+            f"one batch of {batch_size}: it needs at least {needed} rows (lookback + horizon * batch_size), so the "
+            f"file needs about {math.ceil(needed / fraction)} rows at data.{name}_fraction = {fraction}")
+    count = window_count(name, requested, available, batch_size)
+    if count > available:
+        refuse(f"data.n_{name} = {requested} asks for more windows than the {name} segment holds ({available})")
+    return count
+
+
+def check_select_moves(values: "np.ndarray", segment: Tuple[int, int]) -> None:
+    """Refuse a csv whose select ``segment`` holds one value per value column (see the module contract)."""
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-042
+    # A select segment that is constant in EVERY column makes every window flat: the context is flat (scale 1), the target equals the
+    # last context value, naive-last and seasonal-naive score exactly 0 and the bar can be neither met nor judged. It was found only
+    # in `build_data`, after the run directory was claimed (review NOTE 12); it is refused here, before the claim, and by the
+    # loader through the same function. A segment that is flat only in SOME windows is not seen here (the baselines are
+    # numbers of standardized windows, which need TensorFlow): `build_data` still refuses a zero baseline, after the claim.
+    lo, hi = segment
+    if bool((values[lo:hi] == values[lo]).all()):
+        refuse(
+            f"the select segment of the csv (rows [{lo}, {hi})) is constant in every value column: every selection window is flat, "
+            "so naive-last and seasonal-naive score exactly 0 and the bar (strictly below them) can be neither met nor judged; "
+            "give a csv whose rows after the train segment (data.select_fraction of them) vary")
+
+
+def check_split_sizes(
+        *, values: "Optional[np.ndarray]", n_series: Optional[int], lookback: int, horizon: int, batch_size: int,
+        select_fraction: float, test_fraction: float, n_select: Optional[int], n_test: Optional[int],
+) -> None:
+    """Refuse the selection and test counts that cannot make one batch each, without a tensor (see the module contract)."""
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-042
+    # Every refusal that needs only the config values and the csv's rows runs here, BEFORE the claim, and the loader calls the
+    # same functions: `n_select` below one batch, a `data.patterns` subset whose 8 windows per series are fewer than one batch
+    # (both used to end with "'out' is now used"), a csv segment with fewer than one batch of windows, and a constant select
+    # segment. Do NOT copy the arithmetic into a second place: the sentences would drift. With `data.patterns` null the series
+    # count needs the generator, which loads TensorFlow, so only an EXPLICIT n_select or n_test is checked then.
+    if values is None:
+        for name, requested in (("select", n_select), ("test", n_test)):
+            if requested is not None or n_series is not None:
+                default = SELECT_WINDOWS_PER_SERIES * (n_series or 0)
+                window_count(name, requested, default, batch_size)
+        return
+    segments = split_bounds(len(values), select_fraction, test_fraction)
+    check_select_moves(values, segments[1])
+    for name, segment, requested, fraction in (
+            ("select", segments[1], n_select, select_fraction), ("test", segments[2], n_test, test_fraction)):
+        csv_window_count(name, segment, requested, lookback, horizon, batch_size, fraction)
 
 
 def read_csv_series(

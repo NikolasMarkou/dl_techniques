@@ -342,6 +342,12 @@ class ServedForecaster(keras.layers.Layer):
 
     def __init__(self, model: Any, family: str, scale_floor: float, static_batch: Optional[int] = None, **kwargs: Any) -> None:
         super().__init__(**kwargs)
+        # DECISION plan-2026-11-13T105600-3a8319ef/D-041
+        # This class is registered under the `train` package, which the wheel does not ship (`packages.find` takes `dl_techniques*`
+        # only), so a `.keras` file that holds it loads only where `train` is importable (review W3: Keras stops with "Could not
+        # deserialize class 'ServedForecaster' because its parent module train.common.forecast_run cannot be imported"). The file, the
+        # export note, the help and the README say so. Do NOT write that the Keras loader alone loads it, and do NOT move the decode
+        # table and this layer into `dl_techniques` to make it so (a library change outside this task, D-041).
         # DECISION plan-2026-11-13T105600-3a8319ef/D-026
         # A REGISTERED layer carries the standardization into a `.keras` file. Do NOT wrap the served function in a
         # `keras.layers.Lambda`: it saves but does not load under the default safe mode (measured, step 5(d)), and a

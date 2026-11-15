@@ -61,7 +61,6 @@ max_samples, batch_size, seed, stream_seed, scale_floor)``
 import dataclasses
 import hashlib
 import json
-import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -71,15 +70,16 @@ import tensorflow as tf
 
 from dl_techniques.datasets.time_series.generator import TimeSeriesGenerator, TimeSeriesGeneratorConfig
 from dl_techniques.utils.logger import logger
-from train.api.forecast_series import check_csv_level, check_segments, read_csv_series, refuse, split_bounds
+from train.api.forecast_series import (
+    SELECT_WINDOWS_PER_SERIES, check_csv_level, check_segments, check_select_moves, csv_window_count, read_csv_series, refuse,
+    split_bounds, window_count,
+)
 from train.common.pretrain_data import SELECT_SALT, TEST_SALT, derive_stream_seed
 
 BUILTIN, CSV, SYNTHETIC = "builtin", "csv", "synthetic"
 
 #: The scale of a FLAT context (std not above ``scale_floor * mean|x|``): the series' own unit, so the target stays what it is.
 UNIT_SCALE = 1.0
-#: Fixed select and test windows per series of the synthetic bank, when ``n_select`` or ``n_test`` is not given.
-SELECT_WINDOWS_PER_SERIES = 8
 #: The legacy epoch: the default ``steps_per_epoch`` never exceeds it.
 EPOCH_STEPS = 500
 
@@ -334,31 +334,12 @@ def _check_request(request: Dict[str, Any]) -> None:
         refuse(f"transform_args.scale_floor must not be negative, got {request['scale_floor']}")
 
 
-def _count(name: str, requested: Optional[int], default: int, batch_size: int) -> int:
-    """Windows of a split: the request (or ``default``) rounded down to a multiple of the batch, at least one batch."""
-    wanted = default if requested is None else requested
-    n = wanted // batch_size * batch_size
-    if n < 1:
-        refuse(f"data.n_{name} = {wanted} is fewer than one batch ({batch_size}): a split needs a whole batch")
-    return n
-
-
 def _strided_positions(name: str, segment: Tuple[int, int], requested: Optional[int], request: Dict[str, Any]) -> np.ndarray:
     """csv windows of one segment: targets do not overlap (stride = horizon), the first window starts at ``lo``."""
-    lo, hi = segment
-    width, horizon, batch_size = request["lookback"] + request["horizon"], request["horizon"], request["batch_size"]
-    available = (hi - lo - width) // horizon + 1
-    if available < batch_size:
-        needed = request["lookback"] + horizon * batch_size
-        fraction = request[f"{name}_fraction"]
-        refuse(
-            f"the {name} segment ({hi - lo} rows) holds {available} windows with non-overlapping targets, fewer than "
-            f"one batch of {batch_size}: it needs at least {needed} rows (lookback + horizon * batch_size), so the "
-            f"file needs about {math.ceil(needed / fraction)} rows at data.{name}_fraction = {fraction}")
-    count = _count(name, requested, available, batch_size)
-    if count > available:
-        refuse(f"data.n_{name} = {requested} asks for more windows than the {name} segment holds ({available})")
-    return np.stack([np.zeros(count, np.int64), lo + horizon * np.arange(count, dtype=np.int64)], axis=1)
+    lo, _ = segment
+    count = csv_window_count(
+        name, segment, requested, request["lookback"], request["horizon"], request["batch_size"], request[f"{name}_fraction"])
+    return np.stack([np.zeros(count, np.int64), lo + request["horizon"] * np.arange(count, dtype=np.int64)], axis=1)
 
 
 def load_forecast_batches(
@@ -393,7 +374,7 @@ def load_forecast_batches(
         source = dict(patterns=chosen, realizations=realizations, series_length=series_length, noise_level=noise_level)
         default = len(bank) * SELECT_WINDOWS_PER_SERIES
         windows = [
-            _fixed_positions(seed, salt, _count(name, requested, default, batch_size), len(bank), lo, hi, width)
+            _fixed_positions(seed, salt, window_count(name, requested, default, batch_size), len(bank), lo, hi, width)
             for (name, requested, salt), (lo, hi) in zip(
                 (("select", n_select, SELECT_SALT), ("test", n_test, TEST_SALT)), segments[1:])]
         where = "random starts inside the segment of every series, keyed on (seed, salt, index)"
@@ -402,6 +383,7 @@ def load_forecast_batches(
         check_csv_level(values, columns, scale_floor)
         segments = split_bounds(len(values), select_fraction, test_fraction)
         check_segments(segments, len(values), width, "the csv")
+        check_select_moves(values, segments[1])
         bank = values[None]
         source = dict(sha256=digest, columns=columns, time_col=time_col)
         windows = [_strided_positions(name, segment, requested, request)

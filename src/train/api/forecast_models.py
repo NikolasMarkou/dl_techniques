@@ -81,7 +81,7 @@ Import rule
 Module scope imports the standard library and ``train.api`` only.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import recipes
@@ -89,7 +89,7 @@ from .args import AutoContext, OptimArgs
 from .config import unknown_key_message
 from .denoising_models import named_parameters
 from .errors import ConfigError, ConfigValidationError
-from .forecast_args import TASK, WATCH_METRIC
+from .forecast_args import MIN_LOOKBACK, TASK, WATCH_METRIC
 from .registry import ModelSpec
 
 # ---------------------------------------------------------------------
@@ -252,6 +252,13 @@ class FamilyRow:
     :param static_batch: the model packs rows by the batch size, so it is built at a static batch and the data drops
         the remainder (timestral).
     :param jit_refusal: the reason ``jit_compile=true`` is refused (D-028), ``None`` for a family XLA can compile.
+    :param min_lookback: ``{variant: smallest lookback the library builds the variant at}``, MEASURED by building it at
+        decreasing lookbacks (``scratch_measure/min_lookback.md`` of plan 3a8319ef; a test rebuilds each at the minimum and one
+        below). A variant that is not listed builds at :data:`MIN_LOOKBACK`; ``why_lookback`` is the library's own reason.
+    :param min_lookback_over: ``{variant: (model_args key, extra)}``: the variant needs a lookback of at least ``model_args[key] +
+        extra`` when the key is given (the seasonal ets: a full ``seasonal_period`` plus one step); ``why_over`` is the reason.
+    :param min_horizon: the smallest horizon the family builds at (nbeats needs 2: its seasonality basis has half the horizon in
+        thetas), ``why_horizon`` the reason; ``1`` for a family that takes any.
     """
 
     variants: str
@@ -259,6 +266,12 @@ class FamilyRow:
     why_channels: str = ""
     static_batch: bool = False
     jit_refusal: Optional[str] = None
+    min_lookback: Mapping[str, int] = field(default_factory=dict)
+    why_lookback: str = ""
+    min_lookback_over: Mapping[str, Tuple[str, int]] = field(default_factory=dict)
+    why_over: str = ""
+    min_horizon: int = 1
+    why_horizon: str = ""
 
 
 # DECISION plan-2026-11-13T105600-3a8319ef/D-028
@@ -266,12 +279,22 @@ class FamilyRow:
 # XLA fails the gradient of the unrolled loop (measured on GPU 0: InvalidArgumentError at node
 # gradient_tape/ets_model_1/while/.../accumulator at the first step). Do NOT let the opt-in through for ets "to see".
 FAMILIES: Dict[str, FamilyRow] = {
-    NBEATS: FamilyRow(f"{_HERE}:NBEATS_VARIANTS"),
-    PRISM: FamilyRow(f"{_TS}.prism.model:PRISM.MODEL_VARIANTS"),
+    # The minimums are MEASURED (`scratch_measure/min_lookback.md` of plan 3a8319ef), not derived: the variants listed there are the
+    # ones small enough to build; tirex large and timestral 28M and up were not built and take the floor of every family.
+    NBEATS: FamilyRow(
+        f"{_HERE}:NBEATS_VARIANTS", min_horizon=2,
+        why_horizon="its seasonality stack has forecast_length // 2 harmonics, which is 0 at a horizon of 1; the library raises "
+        "'thetas_dim[1] must be positive'"),
+    PRISM: FamilyRow(
+        f"{_TS}.prism.model:PRISM.MODEL_VARIANTS", min_lookback={"tiny": 8, "small": 31, "base": 31, "large": 61},
+        why_lookback="its wavelet tree, set by the variant's tree_depth and num_wavelet_levels, needs a context long enough for "
+        "the deepest band; the library refuses a shorter one as an unsupportable PRISM configuration"),
     TIREX: FamilyRow(f"{_TS}.tirex.model:TiRexCore.MODEL_VARIANTS", 1, "TiRexCore reads one series, (B, L, 1)"),
     XLSTM: FamilyRow(f"{_TS}.xlstm.forecaster:xLSTMForecaster.MODEL_VARIANTS"),
     ETS: FamilyRow(
         f"{_TS}.ets.model:ETS_VARIANTS", 1, "ETSModel is a recursion over one scalar series, (B, L, 1)",
+        min_lookback_over={"AAA": ("seasonal_period", 1)},
+        why_over="the initial seasonal state needs a full seasonal period plus one step to update",
         jit_refusal=(
             "XLA fails the gradient of the unrolled smoothing loop (InvalidArgumentError at "
             "gradient_tape/ets_model_1/while/.../accumulator, measured on GPU 0)"
@@ -319,6 +342,41 @@ def geometry_problems(family: str, channels: int, horizon: int, model_args: Mapp
             f"Invalid value for 'data.horizon': timestral forecasts one patch of {patch} points at a time (its call is the "
             f"forecaster's first block only up to patch_size), so the horizon must be at most {patch}, got {horizon}"
         )
+    return lines
+
+
+def min_lookback(family: str, variant: str) -> int:
+    """Return the smallest lookback ``family/variant`` builds at: the row's measured minimum, else :data:`MIN_LOOKBACK`."""
+    return FAMILIES[family].min_lookback.get(variant, MIN_LOOKBACK)
+
+
+def window_problems(
+    family: str, variant: str, lookback: int, horizon: int, model_args: Optional[Mapping[str, Any]] = None
+) -> List[str]:
+    """Return the lines refusing a lookback or horizon below the family's measured minimum; see the module contract."""
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-042
+    # The minimum of each family is a measured row (`FamilyRow.min_lookback`, `min_horizon`), refused BEFORE the claim: a prism
+    # that cannot build at the lookback asked, or an nbeats at horizon 1, used to be refused only after the run directory was
+    # claimed ("'out' is now used", review W8). Do NOT guess a number from the library's message (it names a wavelet tree, not
+    # a lookback) and do NOT raise it to "the largest variant's" for the family: prism/tiny builds at 8 and prism/large at 61, and a
+    # family-wide 61 would refuse every tiny run that works.
+    row = FAMILIES[family]
+    lines: List[str] = []
+    floor = min_lookback(family, variant)
+    if lookback < floor:
+        why = row.why_lookback if floor > MIN_LOOKBACK else "one context value has no spread to standardize by"
+        lines.append(
+            f"Invalid value for 'data.lookback': {family}/{variant} needs a lookback of at least {floor} ({why}), got {lookback}")
+    over = row.min_lookback_over.get(variant)
+    period = (model_args or {}).get(over[0]) if over else None
+    if over and isinstance(period, int) and not isinstance(period, bool) and lookback < period + over[1]:
+        lines.append(
+            f"Invalid value for 'data.lookback': {family}/{variant} with model_args.{over[0]}={period} needs a lookback of at "
+            f"least {period + over[1]} ({row.why_over}), got {lookback}")
+    if horizon < row.min_horizon:
+        lines.append(
+            f"Invalid value for 'data.horizon': {family} needs a horizon of at least {row.min_horizon} ({row.why_horizon}), "
+            f"got {horizon}")
     return lines
 
 
@@ -396,7 +454,8 @@ def _is_count(value: Any) -> bool:
 
 
 def _prepare(
-    family: str, num_classes: Optional[int], input_shape: Sequence[Any], horizon: Any, model_args: Mapping[str, Any]
+    family: str, variant: str, num_classes: Optional[int], input_shape: Sequence[Any], horizon: Any,
+    model_args: Mapping[str, Any],
 ) -> Tuple[int, int]:
     """Refuse what the family does not take and return ``(lookback, channels)``; the adapters' common door."""
     if num_classes is not None:
@@ -406,7 +465,8 @@ def _prepare(
     if not _is_count(horizon):
         raise ValueError(f"horizon must be a positive int, got {horizon!r}")
     lookback, channels = input_shape
-    lines = problems_of(family, model_args) + geometry_problems(family, channels, horizon, model_args)
+    lines = (problems_of(family, model_args) + geometry_problems(family, channels, horizon, model_args)
+             + window_problems(family, variant, lookback, horizon, model_args))
     if lines:
         raise ValueError("; ".join(lines))
     return lookback, channels
@@ -441,7 +501,7 @@ def create_nbeats(
     *, variant: str, num_classes: Optional[int] = None, input_shape: Sequence[Any], horizon: int, **model_args: Any
 ) -> Any:
     """Build an N-BEATS forecaster; see the module contract."""
-    lookback, channels = _prepare(NBEATS, num_classes, input_shape, horizon, model_args)
+    lookback, channels = _prepare(NBEATS, variant, num_classes, input_shape, horizon, model_args)
     kwargs = {**_variant(NBEATS_VARIANTS, variant), **_plain(NBEATS, model_args), "use_normalization": False}
     from dl_techniques.models.time_series.nbeats.nbeats import create_nbeats_model
 
@@ -456,7 +516,7 @@ def create_prism(
     *, variant: str, num_classes: Optional[int] = None, input_shape: Sequence[Any], horizon: int, **model_args: Any
 ) -> Any:
     """Build a PRISM forecaster, point or quantile head; see the module contract."""
-    lookback, channels = _prepare(PRISM, num_classes, input_shape, horizon, model_args)
+    lookback, channels = _prepare(PRISM, variant, num_classes, input_shape, horizon, model_args)
     from dl_techniques.models.time_series.prism.model import PRISM as Model
 
     model = Model.from_variant(
@@ -469,7 +529,7 @@ def create_tirex(
     *, variant: str, num_classes: Optional[int] = None, input_shape: Sequence[Any], horizon: int, **model_args: Any
 ) -> Any:
     """Build a TiRex forecaster (always a quantile head); see the module contract."""
-    lookback, _ = _prepare(TIREX, num_classes, input_shape, horizon, model_args)
+    lookback, _ = _prepare(TIREX, variant, num_classes, input_shape, horizon, model_args)
     from dl_techniques.models.time_series.tirex.model import create_tirex_by_variant
 
     return create_tirex_by_variant(
@@ -480,7 +540,7 @@ def create_xlstm(
     *, variant: str, num_classes: Optional[int] = None, input_shape: Sequence[Any], horizon: int, **model_args: Any
 ) -> Any:
     """Build an xLSTM forecaster, point or quantile head; see the module contract."""
-    lookback, channels = _prepare(XLSTM, num_classes, input_shape, horizon, model_args)
+    lookback, channels = _prepare(XLSTM, variant, num_classes, input_shape, horizon, model_args)
     from dl_techniques.models.time_series.xlstm.forecaster import xLSTMForecaster
 
     model = xLSTMForecaster.from_variant(
@@ -494,7 +554,7 @@ def create_ets(
     *, variant: str, num_classes: Optional[int] = None, input_shape: Sequence[Any], horizon: int, **model_args: Any
 ) -> Any:
     """Build an ETS forecaster from the library's variant tuple; see the module contract."""
-    lookback, channels = _prepare(ETS, num_classes, input_shape, horizon, model_args)
+    lookback, channels = _prepare(ETS, variant, num_classes, input_shape, horizon, model_args)
     from dl_techniques.models.time_series.ets.model import ETS_VARIANTS, create_ets as create
 
     _variant(ETS_VARIANTS, variant)
@@ -508,7 +568,7 @@ def create_timestral(
     **model_args: Any
 ) -> Any:
     """Build a Timestral forecaster at a static batch; see the module contract."""
-    lookback, channels = _prepare(TIMESTRAL, num_classes, input_shape, horizon, model_args)
+    lookback, channels = _prepare(TIMESTRAL, variant, num_classes, input_shape, horizon, model_args)
     if not _is_count(batch_size):
         raise ValueError(f"timestral needs a static batch: batch_size must be a positive int, got {batch_size!r}")
     from dl_techniques.models.time_series.timestral.model import create_timestral_by_variant
@@ -522,7 +582,7 @@ def create_mdn(
     *, variant: str, num_classes: Optional[int] = None, input_shape: Sequence[Any], horizon: int, **model_args: Any
 ) -> Any:
     """Build a mixture-density forecaster: a ``Flatten`` stub in front of ``MDNModel``; see the module contract."""
-    lookback, channels = _prepare(MDN, num_classes, input_shape, horizon, model_args)
+    lookback, channels = _prepare(MDN, variant, num_classes, input_shape, horizon, model_args)
     kwargs = {**_variant(MDN_VARIANTS, variant), **model_args}
     import keras
     from dl_techniques.models.time_series.mdn.model import MDNModel

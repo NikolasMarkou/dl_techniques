@@ -307,6 +307,8 @@ EXPORT_NOTES = (
     "saved_model and the point alone from tflite and onnx. A timestral file takes ONE window per call. Refused with",
     "the reason: tflite of timestral, and onnx of xlstm, ets and timestral. A tflite of tirex, xlstm or ets needs the",
     "Flex delegate (select TF operators). The exported .keras file is not a run: predict takes the run directory.",
+    "The forecaster's .keras file names ServedForecaster, a class of the train package, which the wheel does not ship:",
+    "it loads only where the train package is importable (the source tree on the path, or an editable install).",
 )
 PREDICT_OPTIONS = (
     Option("model", "a run directory (its best_model.keras) or a .keras file beside its task.json"),

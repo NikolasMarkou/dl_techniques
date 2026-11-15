@@ -13,9 +13,13 @@ from pathlib import Path
 
 import pytest
 
-from train.api import exporting, recipes, registry
+from train.api import exporting, predictor, recipes, registry
+from train.api import forecast_models as fm
 from train.api import forecast_predictor as fp
+from train.api.config import PRECISIONS, validate
+from train.api.errors import ConfigValidationError
 from train.api.tasks import BUILTIN_TASKS, register_builtin_tasks
+from train.api.tasks.time_series_forecasting import TimeSeriesForecastingConfig
 from train.common import forecast_run
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -88,6 +92,51 @@ def test_the_width_of_the_bars_tie_band_is_the_codes():
     assert widths == [16, 32, 192]
     assert f"({widths[0]} up to 16 select batches, {widths[1]} at the 17 of the defaults, {widths[2]} at 2,048;" in text
     assert forecast_run.TIE_ULPS == widths[0]
+
+
+def test_the_precisions_the_readme_refuses_are_the_ones_the_code_refuses_before_the_claim(world, tmp_path):
+    """D-041: ``precision`` other than ``float32`` is refused by name; the README said "not refused and NOT verified" before."""
+    refused = [name for name in PRECISIONS if name != "float32"]
+    assert len(refused) >= 1, "vacuity guard: there is a precision to refuse"
+    text = " ".join(README.read_text().split())
+    names = " and ".join(f"`{name}`" for name in refused)
+    assert f"`precision` must be `float32`: {names} are REFUSED by name before the run directory is claimed" in text
+    assert "not refused and NOT verified" not in text
+    for name in refused:
+        asked = {"out": str(tmp_path / "run"), "model": "nbeats/tiny", "data": {"lookback": 32, "horizon": 8}, "precision": name}
+        with pytest.raises(ConfigValidationError, match=rf"Invalid value for 'precision': '{name}' is not accepted for {FORECASTING}"):
+            validate(TimeSeriesForecastingConfig, asked)
+    assert not (tmp_path / "run").exists()
+
+
+def test_the_readme_lists_the_keys_of_the_forecasting_record_in_the_codes_order():
+    """The record paragraph names every key a forecasting ``task.json`` holds beyond the five that identify the run, in the code's order."""
+    identity = ("schema_version", "task", "model", "family", "variant")
+    keys = [key for key in predictor.RECORD_KEYS[FORECASTING] if key not in identity]
+    assert "time_col" in keys, "vacuity guard: the key this step added is in the table"
+    sentence = "a forecasting record has " + ", ".join(f"`{key}`" for key in keys[:-2]) + f", `{keys[-2]}` and `{keys[-1]}`"
+    assert sentence in " ".join(README.read_text().split())
+    agents = " ".join(AGENTS.read_text().split())
+    start = agents.index("a forecasting record (the fourth kind) has")
+    assert all(f"`{key}`" in agents[start:start + 600] for key in keys), "AGENTS.md names the same keys"
+
+
+def test_the_minimums_the_readme_states_are_the_family_rows():
+    """D-042: the lookback and horizon minimums of the README are ``FamilyRow.min_lookback``, ``min_lookback_over`` and ``min_horizon``."""
+    text = " ".join(README.read_text().split())
+    prism = ", ".join(f"{variant} {floor}" for variant, floor in fm.FAMILIES["prism"].min_lookback.items())
+    assert f"`prism` {prism};" in text, prism
+    (variant, (key, extra)), = fm.FAMILIES["ets"].min_lookback_over.items()
+    assert f"`ets/{variant}` needs `model_args.{key}` plus {extra};" in text
+    assert [family for family, row in fm.FAMILIES.items() if row.min_lookback] == ["prism"], "the README names the families with a row"
+    assert [family for family, row in fm.FAMILIES.items() if row.min_horizon > 1] == ["nbeats"]
+    assert f"`data.horizon` below {fm.FAMILIES['nbeats'].min_horizon} for `nbeats`" in text
+    assert f"builds at {fm.MIN_LOOKBACK}, the floor of every family" in text
+
+
+def test_the_readme_says_a_hand_edited_scale_floor_cannot_be_detected():
+    text = " ".join(README.read_text().split())
+    assert "`scale_floor` is not checked against the model" in text and "cannot be detected" in text
 
 
 CITED = re.compile(r"`((?:tests|src)/[A-Za-z0-9_./\-]+\.(?:py|md|json|sh|yaml|yml))`")

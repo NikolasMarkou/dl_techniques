@@ -78,7 +78,7 @@ from the OPTIONAL ``variant_overrides``.
     The zero image a loaded denoiser is checked with is ``input_shape_of``: ``DENOISING_PROBE_SIDE``
     rounded up to a multiple of ``size_multiple``, on each side.
 
-``lookback``, ``horizon``, ``channels``, ``value_cols``, ``scale_floor``, ``head``, ``quantile_levels``, ``point_index``, ``decode``, ``data_format``, ``data_sha256`` (forecasting only)
+``lookback``, ``horizon``, ``channels``, ``value_cols``, ``time_col``, ``scale_floor``, ``head``, ``quantile_levels``, ``point_index``, ``decode``, ``data_format``, ``data_sha256`` (forecasting only)
     A forecasting record has no ``class_names``, no ``normalize``, ``mean`` or ``std`` and no input size: the model takes a
     window ``(lookback, channels)`` in the series' own units and the statistics are those of each window's own context
     (:func:`train.common.forecast_data.context_stats_np`; ``scale_floor`` is its flatness threshold). ``lookback``, ``horizon``
@@ -86,10 +86,14 @@ from the OPTIONAL ``variant_overrides``.
     of numbers in 0 to 1) and ``point_index`` (the level the point forecast is, the median), a point head has both null.
     ``decode`` is the name of the family's decode row (:data:`train.common.forecast_run.DECODE`). ``data_format`` is
     ``builtin`` (synthetic: ``value_cols`` and ``data_sha256`` null) or ``csv`` (``value_cols`` the ``channels`` column names
-    the run read, ``data_sha256`` the 64 hex digits of the file's bytes). ``load_model`` refuses a record whose decode row, head,
+    the run read, ``data_sha256`` the 64 hex digits of the file's bytes, ``time_col`` the name of the time column the run checked
+    for order, or null: ``predict`` of a csv checks the order with the same function the loader uses, and skips it for null;
+    ``time_col`` is null for ``builtin``). ``load_model`` refuses a record whose lookback or channels are not the ones the model
+    was BUILT for (:func:`train.api.forecast_predictor.built_window`, every family, D-042) and one whose decode row, head,
     levels, median or forecast shape is not the model's (:class:`~train.api.forecast_predictor.ForecastPredictor`). A resume
     compares :data:`DATA_KEYS` and nothing about the head. The zero window a loaded forecaster is checked with is
-    ``(1, lookback, channels)``.
+    ``(1, lookback, channels)``. ``scale_floor`` is NOT checked against anything: the model does not carry it, so a hand-edited
+    value cannot be detected and changes every forecast (the flatness threshold of the standardization).
 
 ``variant_overrides`` (OPTIONAL)
     ``{table key: value}``: the keys of the variant's table (``MODEL_VARIANTS[variant]``) that the
@@ -318,6 +322,7 @@ RECORD_KEYS: Dict[str, Tuple[str, ...]] = {
         "horizon",
         "channels",
         "value_cols",
+        "time_col",
         "scale_floor",
         "head",
         "quantile_levels",
@@ -560,6 +565,7 @@ def build_forecast_record(
     horizon: int,
     channels: int,
     value_cols: Optional[Sequence[str]],
+    time_col: Optional[str],
     scale_floor: float,
     decode: str,
     quantile_levels: Optional[Sequence[float]],
@@ -573,6 +579,7 @@ def build_forecast_record(
     :param quantile_levels, point_index: ``None`` for a point head; a quantile head gives both, and ``head`` follows them.
     :param decode: the name of the model's decode row (``forecast_run.Decoder.row``).
     :param value_cols, data_sha256: ``None`` for the synthetic bank; the column names and the file hash for a csv.
+    :param time_col: ``None`` for the synthetic bank and for a csv without a time column; else the name of the one the run checked.
     :return: the record. It is NOT checked (:func:`check_record` does that).
     """
     return _record_of(
@@ -587,6 +594,7 @@ def build_forecast_record(
             "horizon": int(horizon),
             "channels": int(channels),
             "value_cols": None if value_cols is None else list(value_cols),
+            "time_col": time_col,
             "scale_floor": float(scale_floor),
             "head": "point" if quantile_levels is None else "quantile",
             "quantile_levels": None if quantile_levels is None else [float(q) for q in quantile_levels],
@@ -898,11 +906,15 @@ def _forecast_tail_problems(record: Mapping[str, Any]) -> List[str]:
     if not isinstance(record["decode"], str) or not record["decode"]:
         lines.append(f"'decode' must be a non-empty text, got {record['decode']!r}")
     kind, columns, digest = record["data_format"], record["value_cols"], record["data_sha256"]
+    time_col = record["time_col"]
     if kind not in FORECAST_FORMATS:
         return lines + [f"'data_format' must be one of {', '.join(FORECAST_FORMATS)}, got {kind!r}"]
     if kind == FORECAST_FORMATS[0]:
         return lines + [f"{key!r} must be null for the {kind} format, got {value!r}"
-                        for key, value in (("value_cols", columns), ("data_sha256", digest)) if value is not None]
+                        for key, value in (("value_cols", columns), ("time_col", time_col), ("data_sha256", digest))
+                        if value is not None]
+    if time_col is not None and not (isinstance(time_col, str) and time_col):
+        lines.append(f"'time_col' must be a non-empty text or null for the {kind} format, got {time_col!r}")
     width = record["channels"]
     if not (isinstance(columns, list) and len(columns) == width and len(set(columns)) == width
             and all(isinstance(c, str) and c for c in columns)):
@@ -1129,6 +1141,7 @@ def load_model(path: Union[str, Path]) -> "Predictor":
     check_model_file(model_file, "Invalid value for 'model'")
     model = keras.models.load_model(str(model_file), compile=False)
     check_model_against_record(model, record, spec, model_file, task_file)
+    MODEL_CHECKS[record["task"]](model, record, model_file, task_file)
     output = _run_on_zeros(model, record, model_file, task_file)
     OUTPUT_CHECKS[record["task"]](output, record)
     return PREDICTORS[record["task"]](model, record)
@@ -1571,6 +1584,8 @@ class Predictor:
 #   TAIL_CHECKS[task](record) -> lines: problems of the keys only this task holds;
 #   INPUT_SHAPE_OF[task](record) -> (height, width, channels); INPUT_KEY[task] -> the record key
 #       an input-shape complaint names;
+#   MODEL_CHECKS[task](model, record, model_file, task_file) -> None, raising ConfigError when the LOADED model is not
+#       the one the record names by what the model says of itself (a forecaster's built window), BEFORE it is called;
 #   OUTPUT_CHECKS[task](output, record) -> None, raising ConfigError when the model's output on one
 #       zero input is not what the record names;
 #   PREDICTORS[task](model, record) -> the object ``load_model`` returns;
@@ -1607,6 +1622,16 @@ def _denoising_output_check(output: Any, record: Mapping[str, Any]) -> None:
             f"of {channels} channels (one output of shape (1, {side}, {side}, {channels})); the file and the "
             "model are not from one run"
         )
+
+
+def _no_model_check(model: Any, record: Mapping[str, Any], model_file: Path, task_file: Path) -> None:
+    """The model check of a task whose model is held to its record by the family check and the zero-input run alone."""
+
+
+def _forecasting_model_check(model: Any, record: Mapping[str, Any], model_file: Path, task_file: Path) -> None:
+    from .forecast_predictor import check_built_window
+
+    check_built_window(model, record, model_file, task_file)
 
 
 def _forecasting_output_check(output: Any, record: Mapping[str, Any]) -> None:
@@ -1743,6 +1768,14 @@ INPUT_KEY: Dict[str, str] = {
     CLASSIFICATION: "input_shape", SEGMENTATION: "input_size", DENOISING: "channels", FORECASTING: "lookback",
 }
 
+#: What a loaded model says of itself against its record, run BEFORE the model is called (D-042): only a forecaster has one.
+MODEL_CHECKS: Dict[str, Callable[[Any, Mapping[str, Any], Path, Path], None]] = {
+    CLASSIFICATION: _no_model_check,
+    SEGMENTATION: _no_model_check,
+    DENOISING: _no_model_check,
+    FORECASTING: _forecasting_model_check,
+}
+
 OUTPUT_CHECKS: Dict[str, Callable[[Any, Mapping[str, Any]], None]] = {
     CLASSIFICATION: _check_width,
     SEGMENTATION: _segmentation_output_check,
@@ -1778,6 +1811,7 @@ TASK_TABLES: Dict[str, Mapping[str, Any]] = {
     "TAIL_CHECKS": TAIL_CHECKS,
     "INPUT_SHAPE_OF": INPUT_SHAPE_OF,
     "INPUT_KEY": INPUT_KEY,
+    "MODEL_CHECKS": MODEL_CHECKS,
     "OUTPUT_CHECKS": OUTPUT_CHECKS,
     "PREDICTORS": PREDICTORS,
     "EXPORT_RULES": EXPORT_RULES,

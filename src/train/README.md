@@ -895,16 +895,16 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
 | `data.format` | `"builtin"` | `check_forecast_data` (through `TimeSeriesData.resolve_auto`, before the claim), `TimeSeriesForecastingTrainer.check_model_args` (a csv gives the channel count), `forecast_data.load_forecast_batches` |
 | `data.path` | `null` | `forecast_series.read_csv_series`, from `check_forecast_data`, `TimeSeriesForecastingTrainer.check_model_args` and `forecast_data.load_forecast_batches`; csv only, refused for `builtin` |
 | `data.value_cols` | `null` | `forecast_series.read_csv_series`; csv only; null is every column except the time column and an unnamed index column |
-| `data.time_col` | `null` | `forecast_series.read_csv_series`; csv only; null means row order is time |
-| `data.lookback` | `"auto"` | `TimeSeriesData.resolve_auto` (the recipe's 168), `check_forecast_data`, `geometry_problems`, the adapters through `TimeSeriesForecastingTrainer.build_model`, `forecast_data.load_forecast_batches` |
-| `data.horizon` | `"auto"` | the same path as `data.lookback` (the recipe's 24); a `timestral` run is refused above its patch size |
+| `data.time_col` | `null` | `forecast_series.read_csv_series`, again by `ForecastPredictor` for a csv given to `predict` (the record's `time_col`); csv only; null means row order is time |
+| `data.lookback` | `"auto"` | `TimeSeriesData.resolve_auto` (the recipe's 168), `check_forecast_data`, `geometry_problems`, `window_problems` (the family's measured minimum, before the claim), the adapters through `TimeSeriesForecastingTrainer.build_model`, `forecast_data.load_forecast_batches` |
+| `data.horizon` | `"auto"` | the same path as `data.lookback` (the recipe's 24); a `timestral` run is refused above its patch size and an `nbeats` run below 2 (`window_problems`) |
 | `data.realizations` | `4` | `forecast_data.build_bank`; builtin only |
 | `data.series_length` | `10000` | `forecast_data.build_bank`, `check_forecast_data` (a synthetic series is split like a csv of that many rows); builtin only |
 | `data.noise_level` | `0.1` | `forecast_data.build_bank`; builtin only |
 | `data.patterns` | `null` | `forecast_data.load_forecast_batches` (an unknown name is refused); builtin only; null is every pattern |
 | `data.select_fraction` | `0.15` | `forecast_series.split_bounds`, `check_forecast_data`; with `data.test_fraction` it must leave a train slice |
 | `data.test_fraction` | `0.15` | `forecast_series.split_bounds`, `check_forecast_data` |
-| `data.n_select` | `null` | `forecast_data.load_forecast_batches`, rounded DOWN to whole batches; fewer than one batch is refused; null is 8 windows per series (builtin) or every window of the segment whose targets do not overlap (csv) |
+| `data.n_select` | `null` | `forecast_series.check_split_sizes` (before the claim) and `forecast_data.load_forecast_batches`, rounded DOWN to whole batches; fewer than one batch is refused; null is 8 windows per series (builtin) or every window of the segment whose targets do not overlap (csv) |
 | `data.n_test` | `null` | the same path as `data.n_select` |
 | `data.steps_per_epoch` | `null` | `forecast_data.load_forecast_batches`, then `TimeSeriesForecastingTrainer.fit_kwargs`; null is the number of train windows over the batch size, at most 500 |
 | `data.max_samples` | `null` | `forecast_data.load_forecast_batches`; caps the train windows an epoch is sized from when `data.steps_per_epoch` is null, never the selection or test windows |
@@ -920,8 +920,12 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
   `jit_compile` is a key of the task itself (default `false`, read by `TimeSeriesForecastingTrainer.compile_options`, which passes
   it to the ONE `compile` call, and by `TimeSeriesForecastingTrainer.check_model_args`). `analysis_args.conformal_alpha` is refused (a conformal set is a set of
   classes; the interval forecast of this task is a quantile head). `debug_args.smoke` runs one epoch on at most 512 train samples
-  and applies no bar. `precision` is `float32` by default; `mixed_float16` and `mixed_bfloat16` are not refused and NOT verified for
-  this task (no run, no test), and a model that computes in `bfloat16` is refused as `tflite` by the existing rule.
+  and applies no bar. `precision` must be `float32`: `mixed_float16` and `mixed_bfloat16` are REFUSED by name before the run directory
+  is claimed (D-041). Measured on `nbeats/tiny`, a run under either policy trains, writes its `task.json` and passes its own reload
+  check (the training process has the mixed policy), and then `load_model` (so `predict` and `export`) refuses the run's own
+  `best_model.keras` in a float32 process: a float16 against float32 clash in the layers (`InvalidArgumentError`, a half tensor met a
+  float tensor), which the refusal used to report as a wrong lookback. The same file runs under a mixed global policy, so the cause is
+  the process and not the file; a forecaster that cannot be predicted from is not offered.
 * **Defaults that differ from the legacy trainers** (`train.time_series.*`), each on purpose. (1) The reconstruction term is NOT
   ported: the legacy N-BEATS trainer adds a term whose target is the INPUT, so minimizing it pushes the backcasts toward zero and it is a
   defect, not a regularizer (test MAE of 400 steps on one seed, with the term 0.7575 and without 0.7704, inside one seed's noise); the
@@ -988,9 +992,26 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
   is not numeric (a column with one text cell is refused, not dropped, which a numeric selection would do silently); a non-finite
   cell (`inf` included); an unsorted, repeated or unparseable time column; a segment shorter than `data.lookback + data.horizon`; a
   selection or test segment that holds fewer than one batch of non-overlapping windows, with the row count it needs in the message
-  (21,600 rows at the defaults: 168 + 24 x 128 = 3,240 rows per segment over 0.15); more channels than the family takes. Not offered:
+  (21,600 rows at the defaults: 168 + 24 x 128 = 3,240 rows per segment over 0.15); a request of more selection or test windows than a
+  csv segment holds; a csv whose select segment is constant in every value column (every window is flat, naive-last and seasonal-naive
+  score exactly 0 and the bar could be neither met nor judged); more channels than the family takes. Not offered:
   a long format with an id column, gap handling, resampling. A resume refuses a changed file (the fingerprint holds the sha256 of its
   bytes and every window key, and `task.json` records the same sha256).
+* **What is refused before the claim, and what is not** (D-041, D-042). Before `out` is claimed and before TensorFlow loads
+  (`TimeSeriesForecastingTrainer.check_model_args` and `TimeSeriesForecastingConfig.problems`): `precision` other than `float32`; a
+  `data.lookback` below the family's measured minimum, a number of the variant (`forecast_models.window_problems`, the
+  `FamilyRow.min_lookback` rows, measured by building each variant at decreasing lookbacks: `prism` tiny 8, small 31, base 31, large 61;
+  `ets/AAA` needs `model_args.seasonal_period` plus 1; every other measured variant builds at 2, the floor of every family); a
+  `data.horizon` below 2 for `nbeats` (its seasonality stack has `horizon // 2` harmonics); `data.n_select` or `data.n_test` of fewer
+  than one batch, and a `data.patterns` subset whose 8 windows per series are fewer than one batch; for a csv, a segment of fewer than
+  one batch of windows, more windows asked than a segment holds and a constant select segment (`forecast_series.check_split_sizes`, the
+  functions the loader calls). `tirex` large and `timestral` 28M, 123M and 209M were not built when the minimums were measured and take
+  the floor; the minimum of a prism moves with `model_args` that change its `tree_depth` or `num_wavelet_levels`, which the table does not
+  know, so such a run is refused by the library at the build. **Still refused after the claim** (exit 2 with `out` in use), because the
+  refusal needs the generator or a standardized window, which load TensorFlow: an unknown `data.patterns` name; the default window count
+  (8 per series) of `data.patterns` null against the batch size, because the generator names the patterns; a bank series that is
+  non-finite (it is dropped, and the run is refused only when none is left); and a select set that is flat in SOME windows only, where
+  the baselines (numbers of standardized windows) come out 0.
 * **The bar** (D-008, D-037, D-038 of plan 3a8319ef). `success_metric` is `val_mae`, the mean absolute error of the point forecast
   (the median of a quantile head) in context-standardized units, so it is scale-free across series. `success_value` is the lowest
   `val_mae` of the selection window, `success_threshold` is `min(naive-last, seasonal-naive, epoch-zero)` and the bar is met only when
@@ -1025,7 +1046,7 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
   both. The help of `resume_interrupted` says it in one clause (`TaskTrainer.resume_order`).
 * **`predict`.** `python -m train predict model=<run dir or .keras> data=<csv, .npy or .npz> out=forecast.json` writes ONE new JSON
   file (`out` must not exist): `task`, `model`, `data`, `lookback`, `horizon`, `channels`, `quantile_levels`, `point` and `quantiles`.
-  A csv gives the LAST `lookback` rows of the record's `value_cols`; a `.npy` or the one array of a `.npz` is `(lookback, channels)` or
+  A csv gives the LAST `lookback` rows of the record's `value_cols`, after the loader's own check that the record's `time_col` is strictly increasing (a newest-first export is refused, not forecast from its oldest rows; a run that named no time column skips the check); a `.npy` or the one array of a `.npz` is `(lookback, channels)` or
   `(N, lookback, channels)`; a directory is refused by name ("a directory, not a file"), exit 2. From Python,
   `load_model(...)` returns a `ForecastPredictor` and `ForecastPredictor.predict(x)` takes an array, a list of windows (each an array or
   a csv path) or a csv path and returns `{"point", "quantiles", "quantile_levels"}`: `point` is `(N, horizon, channels)` float64 in the
@@ -1037,8 +1058,14 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
   with the record (decode row, head, levels, median, horizon, channels) is refused at load.
 * **`export`.** The file takes RAW float32 windows `(batch, lookback, channels)` in the series' own units and returns the forecast
   `(batch, horizon, channels)` in the same units; the standardization and its inverse, and the decode of the family's output, are
-  inside it (`ExportRule.served`, `ServedForecaster`, one registered layer that the `keras` archive also holds, so `keras.saving.load_model`
-  alone reloads it). A quantile head returns `{"point", "quantiles"}` from `saved_model` and `keras` and the point from `tflite` and
+  inside it (`ExportRule.served`, `ServedForecaster`, one registered layer that the `keras` archive also holds). **The `keras` file
+  needs the train package importable** (the source tree on the path, or an editable install): `ServedForecaster` is a class of the
+  train package, which the wheel does not ship (`packages.find` takes `dl_techniques*` only), so `keras.saving.load_model` of the file in
+  an interpreter without `train` stops with Keras's own `Could not deserialize class 'ServedForecaster' because its parent module
+  train.common.forecast_run cannot be imported` (a test loads all nine files in a fresh interpreter that imports
+  `train.common.forecast_run` and `keras`, and pins that sentence for an interpreter without `train`). `saved_model`, `tflite` and `onnx` carry
+  no such class. The library function `train.api.export(format="keras", input_shape=...)` holds `input_shape` to the record's window
+  like the other formats (the command line has no such key). A quantile head returns `{"point", "quantiles"}` from `saved_model` and `keras` and the point from `tflite` and
   `onnx`; a `timestral` file takes ONE window per call. The matrix, derived from `check_export` (36 cells, 31 export and 5 are refused by
   name, before anything is written):
 
@@ -1059,7 +1086,7 @@ result = train_time_series_forecasting(out="auto", model="nbeats/base", data={"l
 * **Limits of the task.** No `deepar` and no `adaptive_ema` (above); `timestral` only up to one patch of horizon; a long-format csv,
   gaps and resampling are not offered; `analysis_args.conformal_alpha` is refused; the model analysis is data-free (weights and
   spectral only, since the stock analyses read class probabilities) and for `ets`, with one parameter, the analyzer finds nothing and the
-  summary says `skipped`; mixed precision is not verified; the numbers are in context-standardized units, so a `val_mae` is not in the
+  summary says `skipped`; mixed precision is refused (see the keys above); the numbers are in context-standardized units, so a `val_mae` is not in the
   series' units (`predict` is). Beating the baselines on the synthetic bank is a learning check (see "What this does NOT prove"), and
   the recipe's learning rate and batch were measured on `nbeats` only; the other families run the same recipe unless the table says
   otherwise and carry no tuning claim.
@@ -1277,7 +1304,7 @@ told apart, and neither are two runs of one family and variant with the same cla
 of version 1 and only `schema_version` changed; a segmentation record has `input_size` as `[height, width]` (not
 necessarily square), `channels`, `ignore_index`, `mask_threshold` and `output` where a classification record has
 `input_shape` and `eval_transform`; a denoising record has `channels`, `size_multiple`, `data_range` and `output` and no class names,
-statistics or input size (see `image_denoising`); a forecasting record has `lookback`, `horizon`, `channels`, `value_cols`, `scale_floor`, `head`, `quantile_levels`, `point_index`, `decode`, `data_format` and `data_sha256` and no class names, statistics or input size (see `time_series_forecasting`). A record of version 1 is refused, in one sentence that names the file and says the
+statistics or input size (see `image_denoising`); a forecasting record has `lookback`, `horizon`, `channels`, `value_cols`, `time_col`, `scale_floor`, `head`, `quantile_levels`, `point_index`, `decode`, `data_format` and `data_sha256` and no class names, statistics or input size (see `time_series_forecasting`). `load_model` holds a forecasting record to its model: `lookback` and `channels` against the input the model was BUILT for (every family, a mismatch is a named error that names the field), and the decode row, head, levels, median, horizon and channels against what the model outputs; `time_col` is the time column the run checked, and `predict` of a csv checks the order with the loader's own function (null: the rows are the time order). `scale_floor` is not checked against the model: the model does not carry it, so a hand-edited value cannot be detected, and it changes every forecast (it is the flatness threshold of the standardization). A record of version 1 is refused, in one sentence that names the file and says the
 run has to be trained again, by `predict`, by `export` and by `resume_interrupted=true` (the last before the data is
 loaded). There is no converter and no reader: a run directory made before this change cannot be predicted from, exported
 or resumed (its files are not touched, and `best_model.keras` still loads in Keras).

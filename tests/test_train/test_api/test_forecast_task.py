@@ -1301,6 +1301,31 @@ def level_csv(path: Path, offset: float = 1e12) -> Path:
     return path
 
 
+PRECISION_SENTENCE = (
+    "a checkpoint trained under a mixed precision policy cannot be reloaded in a float32 process (float16 against float32 in the "
+    "layers), so predict and export of the run would be refused"
+)
+
+
+#: One refusal per (family, variant) whose measured minimum lookback is above the floor of every family, derived from the tables.
+FLOOR_PREFIX = "lookback-below-minimum-"
+FLOOR_KINDS = [f"{FLOOR_PREFIX}{family}-{variant}" for family, row in fm.FAMILIES.items() for variant in row.min_lookback]
+
+
+def without(mapping: Dict[str, Any], *keys: str) -> Dict[str, Any]:
+    return {key: value for key, value in mapping.items() if key not in keys}
+
+
+def constant_select_csv(path: Path) -> Path:
+    """A csv whose select segment (rows 1904 to 2311 of 2720 at the default fractions) holds ONE value in its only column."""
+    write_series_csv(path)
+    frame = pd.read_csv(path)
+    lo, hi = split_bounds(len(frame), 0.15, 0.15)[1]
+    frame.loc[lo:hi - 1, "v0"] = 5.0
+    frame.to_csv(path, index=False)
+    return path
+
+
 def broken_csv(path: Path, kind: str) -> Path:
     """A csv with ONE defect: ``unsorted`` time, a ``non_finite`` cell, or ``two`` value columns."""
     write_series_csv(path, rows=1200, columns=2 if kind == "two" else 1)
@@ -1315,6 +1340,11 @@ def broken_csv(path: Path, kind: str) -> Path:
 
 def refusal(tmp_path: Path, kind: str):
     """``(argv changes, fragment)`` of one refusal: what the request changes and the sentence the user reads."""
+    if kind.startswith(FLOOR_PREFIX):
+        family, variant = kind.removeprefix(FLOOR_PREFIX).split("-")
+        floor = fm.min_lookback(family, variant)
+        return ({"model": f"{family}/{variant}", "data": {**E2E_DATA, "lookback": floor - 1}},
+                f"Invalid value for 'data.lookback': {family}/{variant} needs a lookback of at least {floor} (")
     csv = lambda name: broken_csv(tmp_path / f"{name}.csv", name)
     two = lambda model, fragment, **extra: (
         {"model": model, "data": csv_data(csv("two"), value_cols=None, time_col="t"), **extra}, fragment)
@@ -1348,12 +1378,32 @@ def refusal(tmp_path: Path, kind: str):
                          "by) or auto, got 1"),
         "csv-level": ({"data": csv_data(level_csv(tmp_path / "level.csv"))},
                       "the level must be removed before training"),
+        # The refusals the review listed as coming AFTER the claim (W4, W8 and the NOTE on late refusals, D-041 and D-042):
+        "precision-mixed-float16": ({"precision": "mixed_float16"}, PRECISION_SENTENCE),
+        "precision-mixed-bfloat16": ({"precision": "mixed_bfloat16"}, PRECISION_SENTENCE),
+        "n-select-below-batch": ({"data": {**E2E_DATA, "n_select": E2E_BATCH - 1}},
+                                 f"data.n_select = {E2E_BATCH - 1} is fewer than one batch ({E2E_BATCH}): a split needs a whole batch"),
+        "n-test-below-batch": ({"data": {**E2E_DATA, "n_test": 3}},
+                               f"data.n_test = 3 is fewer than one batch ({E2E_BATCH}): a split needs a whole batch"),
+        "patterns-subset-below-batch": ({"data": {**without(E2E_DATA, "n_select"), "patterns": ["ar_process"]}},
+                                        f"data.n_select = 8 is fewer than one batch ({E2E_BATCH}): a split needs a whole batch"),
+        "csv-select-below-batch": ({"data": csv_data(write_series_csv(tmp_path / "small.csv", rows=800))},
+                                   f"the select segment (120 rows) holds 11 windows with non-overlapping targets, fewer than one "
+                                   f"batch of {E2E_BATCH}"),
+        "csv-n-select-above-available": ({"data": csv_data(write_series_csv(tmp_path / "plain.csv"), n_select=64)},
+                                         "data.n_select = 64 asks for more windows than the select segment holds (47)"),
+        "csv-select-constant": ({"data": csv_data(constant_select_csv(tmp_path / "constant.csv"))},
+                                "the select segment of the csv (rows [1904, 2312)) is constant in every value column"),
+        "horizon-below-nbeats-minimum": ({"data": {**E2E_DATA, "horizon": 1}},
+                                         "Invalid value for 'data.horizon': nbeats needs a horizon of at least 2"),
     }[kind]
 
 
 REFUSALS = ["series-too-short", "csv-too-short", "unsorted-time", "non-finite-cell", "missing-column", "timestral-horizon",
             "tirex-two-channels", "ets-two-channels", "mdn-two-channels", "xlstm-quantile-two-channels", "deepar",
-            "adaptive-ema", "ets-jit", "lookback-one", "csv-level"]
+            "adaptive-ema", "ets-jit", "lookback-one", "csv-level", "precision-mixed-float16", "precision-mixed-bfloat16",
+            "n-select-below-batch", "n-test-below-batch", "patterns-subset-below-batch", "csv-select-below-batch",
+            "csv-n-select-above-available", "csv-select-constant", "horizon-below-nbeats-minimum", *FLOOR_KINDS]
 
 
 @pytest.mark.parametrize("kind", REFUSALS)
@@ -1370,12 +1420,36 @@ def test_a_refusal_of_invariant_9_is_exit_2_with_its_named_sentence_and_no_run_d
     assert not out.exists(), "the refusal came after the claim"
 
 
+def test_the_measured_reason_of_the_precision_refusal_still_holds(tmp_path):
+    """Review W4, D-041: a forecaster built and saved under ``mixed_float16`` does not run when it is loaded in a float32 process (a
+    half tensor meets a float tensor in the layers), while it runs under the mixed policy. When Keras or the model stops doing this,
+    the refusal's sentence is wrong and this test fails. The global policy is restored whatever happens."""
+    import tensorflow as tf
+
+    path, window = tmp_path / "mixed.keras", np.zeros((1, LOOKBACK, 1), np.float32)
+    before = keras.config.dtype_policy()
+    try:
+        keras.config.set_dtype_policy("mixed_float16")
+        model = fm.create_nbeats(variant="tiny", input_shape=(LOOKBACK, 1), horizon=HORIZON)
+        model.save(str(path))
+        keras.saving.load_model(str(path), compile=False)(window, training=False)  # the same process, the same policy: it runs
+        keras.config.set_dtype_policy("float32")
+        loaded = keras.saving.load_model(str(path), compile=False)
+        with pytest.raises((ValueError, tf.errors.InvalidArgumentError), match="half|float16|float32"):
+            loaded(window, training=False)
+    finally:
+        keras.config.set_dtype_policy(before)
+
+
 def test_the_refusal_table_names_every_case_of_invariant_9():
     kinds = " ".join(REFUSALS)
     for needed in ("too-short", "unsorted", "non-finite", "missing-column", "timestral-horizon", "tirex-two", "ets-two", "mdn-two",
-                   "xlstm-quantile-two", "deepar", "adaptive-ema", "ets-jit", "lookback-one", "csv-level"):
+                   "xlstm-quantile-two", "deepar", "adaptive-ema", "ets-jit", "lookback-one", "csv-level", "precision-mixed-float16",
+                   "precision-mixed-bfloat16", "n-select-below-batch", "n-test-below-batch", "patterns-subset-below-batch",
+                   "csv-select-below-batch", "csv-n-select-above-available", "csv-select-constant", "horizon-below-nbeats-minimum"):
         assert needed in kinds, needed
-    assert len(REFUSALS) == len(set(REFUSALS)) == 15
+    assert FLOOR_KINDS, "vacuity guard: some family has a minimum lookback above the floor of every family"
+    assert len(REFUSALS) == len(set(REFUSALS)) == 24 + len(FLOOR_KINDS), "24 written here, one per (family, variant) minimum derived"
 
 
 # ---------------------------------------------------------------------

@@ -1295,6 +1295,117 @@ def test_a_timestral_horizon_above_its_patch_is_refused_by_name_and_up_to_it_is_
         fm.create_timestral(variant="5M", input_shape=(L, 1), horizon=fm.TIMESTRAL_PATCH + 1, batch_size=B)
 
 
+# ---------------------------------------------------------------------
+# D-042: the smallest lookback and horizon of each family are measured rows, refused before the claim
+# ---------------------------------------------------------------------
+
+#: The variants small enough to be built twice in a test. The others of a family (tirex large, timestral 28M and up) are NOT
+#: measured and take the default minimum; the README says so. ets AAA cannot be built without a ``seasonal_period`` (its minimum
+#: is that period plus one: its own test below), so it is not in this table.
+MEASURED_VARIANTS = (
+    ("nbeats", ("tiny", "small", "base")), ("prism", ("tiny", "small", "base", "large")), ("tirex", ("tiny", "small", "medium")),
+    ("xlstm", ("tiny", "small")), ("ets", ("ANN", "AAN")), ("timestral", ("5M",)), ("mdn", ("tiny", "small", "base")),
+)
+PAIRS = [(family, variant) for family, variants in MEASURED_VARIANTS for variant in variants]
+
+
+def build_window(family, variant, lookback, horizon=8, channels=1):
+    """The family adapter's model at ``(None, lookback, channels)`` (a static batch for timestral) and its forecast of one zero window."""
+    extra = {"batch_size": 2} if family == "timestral" else {}
+    model = getattr(fm, f"create_{family}")(variant=variant, input_shape=(lookback, channels), horizon=horizon, **extra)
+    batch = 2 if family == "timestral" else 1
+    return model, model(np.zeros((batch, lookback, channels), np.float32), training=False)
+
+
+def test_the_measured_variants_are_the_variants_of_the_tables_and_every_minimum_names_one():
+    for family, variants in MEASURED_VARIANTS:
+        table = registry.load_attr(fm.FAMILIES[family].variants)
+        assert set(variants) <= set(table), family
+        assert set(fm.FAMILIES[family].min_lookback) <= set(variants), f"{family}: a minimum for a variant that is not measured"
+    assert [family for family, _ in MEASURED_VARIANTS] == list(fm.FAMILIES), "every family is measured"
+
+
+@pytest.mark.parametrize("family, variant", PAIRS)
+def test_a_variant_builds_at_its_minimum_lookback_and_the_library_refuses_one_below(family, variant, monkeypatch):
+    """The row is the library's own boundary: building AT the minimum works and calls, and one below fails in the LIBRARY (the task's
+    check is switched off for the second half, or the test would only read its own message)."""
+    floor = fm.min_lookback(family, variant)
+    model, output = build_window(family, variant, floor)
+    assert output is not None
+    if floor > fm.MIN_LOOKBACK:
+        monkeypatch.setattr(fm, "window_problems", lambda *args, **kwargs: [])
+        with pytest.raises(ValueError):
+            build_window(family, variant, floor - 1)
+
+
+@pytest.mark.parametrize("family, variant", [pair for pair in PAIRS if fm.min_lookback(*pair) > fm.MIN_LOOKBACK])
+def test_the_adapter_and_the_pure_check_refuse_a_lookback_below_the_minimum_by_name(family, variant):
+    floor = fm.min_lookback(family, variant)
+    (line,) = fm.window_problems(family, variant, floor - 1, 8)
+    assert f"Invalid value for 'data.lookback': {family}/{variant} needs a lookback of at least {floor}" in line
+    assert fm.FAMILIES[family].why_lookback in line and f"got {floor - 1}" in line
+    assert fm.window_problems(family, variant, floor, 8) == []
+    with pytest.raises(ValueError, match=rf"{family}/{variant} needs a lookback of at least {floor}"):
+        build_window(family, variant, floor - 1)
+
+
+def test_the_families_that_take_any_lookback_have_no_row_and_the_default_is_the_floor_of_every_family():
+    assert fm.MIN_LOOKBACK == fa.MIN_LOOKBACK == 2
+    assert fm.min_lookback("nbeats", "tiny") == fm.MIN_LOOKBACK and fm.min_lookback("nbeats", "unknown") == fm.MIN_LOOKBACK
+    assert fm.window_problems("nbeats", "tiny", 1, 8)[0].startswith("Invalid value for 'data.lookback': nbeats/tiny needs a lookback of at least 2")
+
+
+def test_the_split_sizes_are_checked_before_the_claim_for_a_known_series_count_and_for_an_explicit_request_only():
+    """D-042: the count of the bank is known only for an explicit ``data.patterns`` (the generator that names them loads TensorFlow), so
+    with ``patterns`` null only an EXPLICIT ``n_select`` or ``n_test`` can be refused before the claim, and the README says the rest is
+    the loader's (after the claim)."""
+    from train.api import forecast_series as fs
+
+    kw = dict(values=None, lookback=32, horizon=8, batch_size=16, select_fraction=0.15, test_fraction=0.15, n_test=None)
+    fs.check_split_sizes(n_series=None, n_select=None, **{**kw, "batch_size": 10**6})  # null patterns, the default count: not known here
+    fs.check_split_sizes(n_series=2, n_select=None, **kw)  # 2 series x 8 windows = one batch of 16
+    with pytest.raises(ConfigError, match=r"data.n_select = 4 is fewer than one batch \(16\)"):
+        fs.check_split_sizes(n_series=None, n_select=4, **kw)
+    with pytest.raises(ConfigError, match=r"data.n_select = 8 is fewer than one batch \(16\)"):
+        fs.check_split_sizes(n_series=1, n_select=None, **kw)
+    with pytest.raises(ConfigError, match=r"data.n_test = 3 is fewer than one batch \(16\)"):
+        fs.check_split_sizes(n_series=2, n_select=None, **{**kw, "n_test": 3})
+
+
+@pytest.mark.parametrize("period", [4, 8, 12])
+def test_a_seasonal_ets_needs_a_full_period_plus_one_step_of_context_and_the_other_variants_do_not(period, monkeypatch):
+    """The one minimum that depends on a model argument (measured at periods 4, 8, 12 and 24): AAA at ``seasonal_period + 1``."""
+    args = {"seasonal_period": period}
+    floor = period + fm.FAMILIES["ets"].min_lookback_over["AAA"][1]
+    fm.create_ets(variant="AAA", input_shape=(floor, 1), horizon=8, **args)
+    assert fm.window_problems("ets", "AAA", floor, 8, args) == []
+    (line,) = fm.window_problems("ets", "AAA", floor - 1, 8, args)
+    assert f"ets/AAA with model_args.seasonal_period={period} needs a lookback of at least {floor}" in line, line
+    assert fm.FAMILIES["ets"].why_over in line
+    assert fm.window_problems("ets", "AAA", 2, 8) == [] and fm.window_problems("ets", "ANN", 2, 8, args) == [], "no period, no minimum"
+    with pytest.raises(ValueError, match=f"seasonal_period={period} needs a lookback of at least {floor}"):
+        fm.create_ets(variant="AAA", input_shape=(floor - 1, 1), horizon=8, **args)
+    monkeypatch.setattr(fm, "window_problems", lambda *args_, **kwargs: [])
+    with pytest.raises(ValueError, match="too short for seasonal_period"):
+        fm.create_ets(variant="AAA", input_shape=(floor - 1, 1), horizon=8, **args)
+
+
+@pytest.mark.parametrize("family", list(fm.FAMILIES))
+def test_the_minimum_horizon_of_a_family_is_where_the_library_stops_building(family, monkeypatch):
+    variant = dict(MEASURED_VARIANTS)[family][0]
+    floor = fm.FAMILIES[family].min_horizon
+    build_window(family, variant, 32, horizon=floor)
+    assert fm.window_problems(family, variant, 32, floor) == []
+    if floor > 1:
+        (line,) = fm.window_problems(family, variant, 32, floor - 1)
+        assert f"Invalid value for 'data.horizon': {family} needs a horizon of at least {floor}" in line and fm.FAMILIES[family].why_horizon in line
+        monkeypatch.setattr(fm, "window_problems", lambda *args, **kwargs: [])
+        with pytest.raises(ValueError):
+            build_window(family, variant, 32, horizon=floor - 1)
+    else:
+        assert fm.window_problems(family, variant, 32, 1) == []
+
+
 _FRESH_REFUSAL = """
 import sys
 from train.api import forecast_models as fm

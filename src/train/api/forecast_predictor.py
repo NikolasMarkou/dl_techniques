@@ -15,11 +15,14 @@ Interface contract
     :param record: a forecasting record that passed :func:`train.api.predictor.check_record`.
     :raises ConfigError: for a record of another task, and for a record the model does not match: the decode row, the head,
         the quantile levels, the median index, or the shape of the forecast of one window (the horizon and the channels).
+        The lookback and the channels of the record are held to the model's BUILT input by :func:`check_built_window`, which
+        ``load_model`` runs for every family before the model is called.
 
 ``ForecastPredictor.predict(x)``
     :param x: one window ``(L, C)`` or several ``(N, L, C)`` as a ``numpy`` array, a list or tuple of windows (each an array or
         a csv path), or a csv path (``str`` or ``Path``): the LAST ``lookback`` rows of the record's ``value_cols`` (every
-        column of a run that named none; their count must be the model's channels). ``L`` is the record's lookback and ``C``
+        column of a run that named none; their count must be the model's channels; the rows must be in time order when the
+        record names a ``time_col``, checked by the loader's own function). ``L`` is the record's lookback and ``C``
         its channels; every value must be a finite number.
     :return: ``{"point", "quantiles", "quantile_levels"}``: ``point`` is ``(N, horizon, channels)`` float64 in the series'
         own units (the median for a quantile head); ``quantiles`` is ``(N, horizon, channels, Q)`` and ``quantile_levels``
@@ -27,8 +30,15 @@ Interface contract
         statistics only, so a window shifted by a constant gives the forecast shifted by it and a window scaled by a constant
         the forecast scaled.
     :raises ConfigError: for a window of another length or channel count, a non-finite or non-numeric value, an empty list or
-        array, an input of another kind, and a csv that is missing, has too few rows, lacks a column or holds a non-numeric or
-        non-finite one.
+        array, an input of another kind, and a csv that is missing, has too few rows, lacks a column, holds a non-numeric or
+        non-finite one or is not in time order.
+
+``built_window(model)`` / ``check_built_window(model, record, model_file, task_file)``
+    :param model: a loaded Keras model. ``built_window`` returns the ``(lookback, channels)`` it was built for: its
+        ``input_shape`` where it has one (a functional model, mdn) and the shape of its build config otherwise (the subclassed
+        families, a static batch included), or ``None`` for a model that says neither (then only the zero-window forward pass of
+        ``load_model`` can tell). ``check_built_window`` raises a named :class:`ConfigError` for a ``lookback`` or ``channels``
+        the record names and the model was not built for, naming each field.
 
 ``list_data(data)`` / ``read_data(file)``
     The command's input: ``list_data`` returns ``[data]`` for a csv, a ``.npy`` or a ``.npz`` file and refuses a directory
@@ -46,6 +56,8 @@ Interface contract
     named :class:`ConfigError` BEFORE anything is written for the cells that do not convert (``EXPORT_REFUSALS``, each with its
     measured reason: tflite of timestral; onnx of xlstm, ets and timestral), ``export_note`` is the sentence logged beside a
     file. The exported ``.keras`` is the wrapped model, not a run's model: ``load_model`` refuses it with a :class:`ConfigError`.
+    It also names ``ServedForecaster``, a class of the ``train`` package, which the wheel does not ship, so the file loads only
+    in a process where ``train`` is importable (the source tree on the path, or an editable install).
 
 Import rule
 -----------
@@ -85,7 +97,12 @@ def _csv_window(path: Any, record: Mapping[str, Any]) -> Any:
     from .forecast_series import read_csv_series
 
     try:
-        values, names, _ = read_csv_series(os.fspath(path), record["value_cols"], None)
+        # DECISION plan-2026-11-13T105600-3a8319ef/D-042
+        # The record's `time_col` goes to the loader's own reader, which refuses a column that is not strictly increasing: a csv
+        # exported newest-first was forecast from its OLDEST rows with no warning (review W6). Do NOT pass `None` "because predict
+        # only needs the last rows" (the last rows of a reversed file are the oldest), and do NOT write a second order check here.
+        # A run that named no time column (`time_col` null) has no order to check: the rows are the time order.
+        values, names, _ = read_csv_series(os.fspath(path), record["value_cols"], record["time_col"])
     except ConfigError as exc:
         raise ConfigError(f"Invalid value for 'data': the csv cannot give the model's window: {exc}") from exc
     if record["value_cols"] is None and values.shape[1] != record["channels"]:
@@ -145,6 +162,43 @@ def _windows_of(x: Any, record: Mapping[str, Any]) -> Any:
     return np.stack([_window(item, index, record) for index, item in enumerate(items)])
 
 
+def built_window(model: Any) -> Optional[Tuple[int, int]]:
+    """Return the ``(lookback, channels)`` ``model`` was built for, or ``None`` when it says neither; see the module contract."""
+    shape = None
+    try:
+        shape = model.input_shape  # a functional model (mdn); a subclassed one raises AttributeError
+    except (AttributeError, ValueError):
+        config = model.get_build_config() if hasattr(model, "get_build_config") else None
+        shape = config.get("input_shape") if isinstance(config, dict) else None
+    if not isinstance(shape, (list, tuple)) or len(shape) != 3 or not all(isinstance(side, int) for side in shape[1:]):
+        return None
+    return int(shape[1]), int(shape[2])
+
+
+def check_built_window(model: Any, record: Mapping[str, Any], model_file: Any, task_file: Any) -> None:
+    """Raise unless the record's lookback and channels are the ones ``model`` was built for; see the module contract."""
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-042
+    # The record is held to the model's BUILT input, for every family, BEFORE the model is called: ets, xlstm, tirex and timestral
+    # run a window of any length, so the zero-window forward pass of `load_model` accepted a hand-edited lookback for them and
+    # forecast from a window of the wrong length (review W5). Do NOT replace this by the forward pass (it cannot see the length
+    # of a model that takes any), do NOT limit it to those four (for nbeats, prism and mdn the forward pass refuses a wrong
+    # length but names the lookback even when the channel count is the wrong one), and do NOT drop the fallback: a model that
+    # says nothing of its input still meets the forward pass in `load_model`.
+    built = built_window(model)
+    if built is None:
+        return
+    differing = [
+        f"{name} is {recorded} in {TASK_FILE} and {wanted} in the model"
+        for name, recorded, wanted in (("lookback", record["lookback"], built[0]), ("channels", record["channels"], built[1]))
+        if recorded != wanted
+    ]
+    if differing:
+        raise ConfigError(
+            f"Invalid {TASK_FILE} {task_file}: {'; '.join(differing)} ({model_file} was built at (batch, {built[0]}, {built[1]})); "
+            "the file and the model are not from one run"
+        )
+
+
 class ForecastPredictor:
     """A loaded forecaster and the standardization it was trained with; see the module contract.
 
@@ -159,8 +213,8 @@ class ForecastPredictor:
         if any(isinstance(layer, forecast_run.ServedForecaster) for layer in getattr(model, "layers", ())):
             raise ConfigError(
                 "Invalid value for 'model': this file is an exported forecaster (raw windows in, a forecast in the series' "
-                "units out), not a run's model; predict takes the run directory, and the exported file is run with "
-                "keras.saving.load_model"
+                "units out), not a run's model; predict takes the run directory, and the exported file is loaded with "
+                "keras.saving.load_model in a process where the train package is importable"
             )
         if record["task"] != FORECASTING:
             raise ConfigError(
@@ -396,5 +450,7 @@ def export_note(record: Mapping[str, Any]) -> str:
     return (
         f"the exported forecaster takes RAW float32 windows (batch, {record['lookback']}, {record['channels']}) in the "
         f"series' own units (no standardization to do) and returns the forecast (batch, {record['horizon']}, "
-        f"{record['channels']}) in the same units{heads}{one}"
+        f"{record['channels']}) in the same units{heads}{one}; the .keras file names ServedForecaster, a class of the train package, "
+        "which the wheel does not ship, so it loads only where the train package is importable (the source tree on the path, or "
+        "an editable install)"
     )
