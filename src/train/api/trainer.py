@@ -374,6 +374,10 @@ def check_holds_no_classes(task: Any, facts: DataFacts, data: Any) -> None:
     :param facts: what ``describe_data`` said; ``data``: what ``build_data`` loaded.
     :raises RuntimeError: when either carries a class count.
     """
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-044
+    # ONE body for the `input_check` of the three tasks that have no classes; each keeps a one-line override because
+    # `REQUIRED_HOOKS` demands one (a base-class default would make a classifier that forgot its own check pass silently). Do NOT
+    # copy the body back into a task (it was copied three times with no test), and do NOT make it the base default.
     if data.num_classes is not None or facts.num_classes is not None:
         raise RuntimeError(
             f"{type(task).__name__} holds no classes, but describe_data said {facts.num_classes!r} and "

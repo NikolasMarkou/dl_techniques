@@ -117,6 +117,10 @@ def is_count(value: Any) -> bool:
     :param value: any value.
     :return: ``True`` only for an ``int`` above 0 that is not a ``bool``. Never raises.
     """
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-044
+    # ONE definition, imported by `pretrain_models` and `forecast_models`, which each had a byte-identical private copy. Do NOT copy it
+    # back into an adapter module, and do NOT drop the bool test (`True` is an `int` and `isinstance` says so, so a bool
+    # shape or horizon would pass as 1; `test_is_count_is_one_function_and_a_bool_is_not_a_count` holds it).
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
