@@ -480,15 +480,29 @@ def _np_cast_cause() -> str:
             "install numpy<2 or a tf2onnx built for numpy 2")
 
 
+def _tf2onnx_calls_np_cast() -> bool:
+    """Whether the tf2onnx source calls ``np.cast``; False when the source cannot be read."""
+    import inspect
+
+    from tf2onnx import tfonnx
+
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-047
+    # `getsource` runs on every onnx export of every task and raises OSError (TypeError: a compiled module) without the `.py` files:
+    # naming the cause is a courtesy, so do NOT let that break the export, and do NOT catch more than these two.
+    try:
+        return "np.cast" in inspect.getsource(tfonnx)
+    except (OSError, TypeError):
+        return False
+
+
 def _export_onnx(model: Any, out: Path, spec: Any, served: Optional[Callable[[Any], Any]] = None) -> None:
     import contextlib
-    import inspect
     from unittest import mock
 
     import numpy
     import tensorflow as tf
     import tf2onnx
-    from tf2onnx import tf_loader, tfonnx
+    from tf2onnx import tf_loader
 
     from dl_techniques.utils.logger import logger
 
@@ -510,7 +524,7 @@ def _export_onnx(model: Any, out: Path, spec: Any, served: Optional[Callable[[An
     # cell). It is an environment mismatch, not a defect of a model, so the export names it once (a warning) and goes on, and when the
     # same error does reach us (another tf2onnx path) it is refused by name. Do NOT catch AttributeError broadly (only this one), do
     # NOT refuse the cell because of the logged line (the files are right), and do NOT pin numpy here (the environment is the user's).
-    if not hasattr(numpy, "cast") and "np.cast" in inspect.getsource(tfonnx):
+    if not hasattr(numpy, "cast") and _tf2onnx_calls_np_cast():
         logger.warning(f"{_np_cast_cause()}; the ERROR line tf2onnx logs is that rewrite being skipped, the file is still written")
     try:
         with patch if skip_grappler else contextlib.nullcontext():
@@ -518,7 +532,7 @@ def _export_onnx(model: Any, out: Path, spec: Any, served: Optional[Callable[[An
     except AttributeError as exc:
         if "np.cast" not in str(exc):
             raise
-        raise ConfigError(f"Invalid value for 'format': the onnx conversion failed: {_np_cast_cause()}") from exc
+        raise ConfigError(f"The onnx conversion failed, and the cause is the installed packages, not the format: {_np_cast_cause()}") from exc
     with open(out, "xb") as handle:
         handle.write(proto.SerializeToString())
 
