@@ -712,7 +712,7 @@ classification task calls the same `train.common.classification_run` helpers as 
     in a fifth place. Normalization is ONE function, `forecast_data.context_stats_np` (a window centred on its context's FIRST value, then by the mean
     of the differences from it and the population standard deviation; a context with `std <= scale_floor * mean|context|` is flat
     and has scale 1.0, the default floor is 1e-6, D-005, D-040: the first-value anchor is what makes the float32 file equal `predict` at any
-    level, so do not centre on a raw mean and do not floor the scale), with a tf twin
+    level, so do not centre on a raw mean and do not floor the scale; the flat test itself is `forecast_series.context_spread`, TF-free, which the csv check, `predict` (`flat`, a bool per window) and the summary (`flat_windows`) read too, D-045: a flat window is trained and scored in the series' raw units, so do not write a second flatness rule), with a tf twin
     (`standardize_tf`) and a keras-ops twin (`context_stats_ops`) a test holds equal; `nbeats`, `tirex` and `xlstm` have their own
     switch forced OFF in `FORCED` (D-023). Do not turn a model normalization on or add a second one.
   - **The stream rule.** The bank, the select and test windows are keyed on `(seed, split, index)` and never on the stream seed; the
@@ -743,7 +743,7 @@ classification task calls the same `train.common.classification_run` helpers as 
   - **Before the claim, and what stays after it.** `TimeSeriesForecastingTrainer.check_model_args` refuses, with no TensorFlow and no run directory: `precision`
     other than `float32` (D-041; `TimeSeriesForecastingConfig.problems`), a lookback or horizon below the family's measured minimum
     (`FamilyRow.min_lookback`, `min_horizon`: D-042), a selection or test count of fewer than one batch, more windows than a csv segment
-    holds and a csv whose select segment is constant (`forecast_series.check_split_sizes`, the loader calls the same functions). Four
+    holds and a csv whose select segment is constant (`forecast_series.check_split_sizes`, the loader calls the same functions), an `ets/AAA` run without an int `model_args.seasonal_period` of at least 2 (`window_problems`, D-046), a csv of which more than 10 percent of the windows of a segment are flat and a csv column whose nonzero max |x| is outside the float32 range [1e-12, 1e15] (`forecast_series.check_csv_level`, D-045). Four
     refusals stay at the load, after the claim, because they need the generator or standardized windows, which load TensorFlow: an
     unknown `data.patterns` name, the default window count of `data.patterns` null against the batch (the generator names the
     patterns), a bank series that is non-finite (dropped at generation) and a zero baseline from a select set that is flat only in some
