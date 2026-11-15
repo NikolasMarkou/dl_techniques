@@ -177,6 +177,15 @@ def test_the_readme_states_the_shift_bound_the_flat_rule_has_and_the_flat_flag_a
     assert f"outside [{span}]" in text and "float32 range" in text
 
 
+def test_the_readme_gate_section_says_which_of_its_numbers_predate_which_change():
+    text = " ".join(README.read_text().split())
+    start = text.index("**Gate numbers** (plan 3a8319ef")
+    gate = text[start:start + 12000]
+    assert "predates the standardization redesign and the band function" in gate
+    assert "export gaps and file sizes of the first gate predate the export change" in gate
+    assert "run directories of the first gate are refused at HEAD (missing `time_col`)" in gate
+
+
 CITED = re.compile(r"`((?:tests|src)/[A-Za-z0-9_./\-]+\.(?:py|md|json|sh|yaml|yml))`")
 
 
