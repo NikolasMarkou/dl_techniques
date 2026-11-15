@@ -27,8 +27,8 @@ Interface contract
     :return: ``{"point", "quantiles", "quantile_levels", "flat"}``: ``point`` is ``(N, horizon, channels)`` float64 in the series'
         own units (the median for a quantile head); ``quantiles`` is ``(N, horizon, channels, Q)`` and ``quantile_levels``
         the record's list for a quantile head, and both are ``None`` for a point head; ``flat`` is a bool ``(N,)``, True for a
-        window whose context is flat in a channel (std not above ``scale_floor`` of its mean |x|), which is forecast in the series'
-        raw units, not standardized. A window is forecast from its own statistics only, so a window scaled by a constant gives
+        window whose context is flat in a channel (std not above ``max(1e-15, scale_floor * mean |x|)``; a constant channel is flat),
+        which is forecast in the series' raw units, not standardized: the very rule the summary's ``flat_windows`` counts. A window is forecast from its own statistics only, so a window scaled by a constant gives
         the forecast scaled, and a window shifted by a constant the forecast shifted while its ``flat`` stays False.
     :raises ConfigError: for a window of another length or channel count, a non-finite or non-numeric value, an empty list or
         array, an input of another kind, and a csv that is missing, has too few rows, lacks a column, holds a non-numeric or
@@ -73,7 +73,7 @@ from typing import Any, Dict, List, Mapping, NoReturn, Optional, Sequence, Tuple
 
 from .errors import ConfigError
 from .exporting import check_free
-from .forecast_series import context_spread
+from .forecast_series import flat_contexts
 from .predictor import FORECASTING, check_record
 from .run_dir import TASK_FILE
 
@@ -288,7 +288,7 @@ class ForecastPredictor:
         # The anchor (the first context value) comes off FIRST and goes back on LAST, the order the exported function uses; do NOT
         # fold anchor and offset into one mean (it is the same number in float64 here, but the twins must read alike).
         anchor, offset, scale = forecast_data.context_stats_np(windows, self.record["scale_floor"])
-        flat = context_spread(windows, self.record["scale_floor"])[1].reshape(len(windows), -1).any(axis=1)
+        flat = flat_contexts(windows, self.record["scale_floor"])   # the one answer the summary's flat_windows counts (D-047)
         standardized = ((windows - anchor - offset) / scale).astype(np.float32)
         points: List[Any] = []
         cubes: List[Any] = []
@@ -455,7 +455,9 @@ def export_note(record: Mapping[str, Any]) -> str:
     return (
         f"the exported forecaster takes RAW float32 windows (batch, {record['lookback']}, {record['channels']}) in the "
         f"series' own units (no standardization to do) and returns the forecast (batch, {record['horizon']}, "
-        f"{record['channels']}) in the same units{heads}{one}; the .keras file names ServedForecaster, a class of the train package, "
+        f"{record['channels']}) in the same units{heads}{one}; a window whose std is not above max(1e-15, {record['scale_floor']:g} * mean|x|) is "
+        "flat and is forecast in the raw units (the file and predict can decide that differently only within two float32 steps of the "
+        "threshold); the .keras file names ServedForecaster, a class of the train package, "
         "which the wheel does not ship, so it loads only where the train package is importable (the source tree on the path, or "
         "an editable install)"
     )

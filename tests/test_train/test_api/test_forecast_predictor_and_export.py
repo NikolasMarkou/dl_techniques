@@ -46,7 +46,7 @@ from train.api.tasks.time_series_forecasting import train_time_series_forecastin
 from train.common import forecast_data as fd
 from train.common import forecast_run as fr
 
-from ._forecast_fixtures import standardize_np, world, write_series_csv  # noqa: F401  (``world`` is a fixture)
+from ._forecast_fixtures import SHIFT_BOUND, standardize_np, world, write_series_csv  # noqa: F401  (``world`` is a fixture)
 from .test_forecast_task import CASES, DATA, QUANTILES, SRC, prepared, read_json
 
 TASK = "time_series_forecasting"
@@ -302,6 +302,21 @@ def test_a_window_shifted_by_a_constant_gives_the_forecast_shifted_by_it(trained
         np.testing.assert_allclose(shifted["quantiles"] - shift, plain["quantiles"], rtol=0, atol=float(tolerance.max()))
 
 
+@pytest.mark.parametrize("shift", [0.0, 50.0, 1e3, 1e5, 1e6])
+def test_the_shift_error_through_predict_is_inside_the_stated_bound_for_all_nine_decode_rows(trained, shift):
+    """D-047 (review pass 3 NOTE 5): the bound was measured on two rows and stated for every one. Measured on all nine (7 windows of
+    std about 5.8 each, the five levels): at most 2.4e-11 of a window std; the stated bound is 1e-7 (a float32 rounding of one
+    standardized input, which a shift can flip, is of that order), and every row is held to it, the point and the quantiles."""
+    windows = raw_windows(7, 1, seed=1)
+    std = windows.std(axis=1)[:, None, :]
+    plain = trained.predictor.predict(windows)
+    shifted = trained.predictor.predict(windows + shift)
+    assert not shifted["flat"].any(), "inside the bound of the flat rule"
+    assert float((np.abs(shifted["point"] - shift - plain["point"]) / std).max()) < SHIFT_BOUND, (trained.case, shift)
+    if plain["quantiles"] is not None:
+        assert float((np.abs(shifted["quantiles"] - shift - plain["quantiles"]) / std[..., None]).max()) < SHIFT_BOUND, (trained.case, shift)
+
+
 @pytest.mark.parametrize("factor", [7.0, 0.01])
 def test_a_window_scaled_by_a_constant_gives_the_forecast_scaled_by_it(trained, factor):
     windows = raw_windows(4, 1, seed=9)
@@ -337,6 +352,41 @@ def test_a_window_inside_the_stated_bound_is_shift_invariant_and_one_beyond_it_i
     assert inside["flat"].tolist() == [False] and beyond["flat"].tolist() == [True]
     assert np.abs(inside["point"] - (plain["point"] + 0.8 * spread / floor)).max() / spread < 1e-8
     assert np.abs(beyond["point"] - (plain["point"] + 1.25 * spread / floor)).max() / spread > 1e-8, "beyond the edge the shift is not undone"
+
+
+def run_on_csv(root: Path, **columns):
+    """Train nbeats/tiny on a csv whose value columns are ``columns`` (name -> numbers) and return ``(summary, predictor, values)``."""
+    csv = write_series_csv(root / "series.csv", rows=1200, columns=list(columns), values=columns)
+    data = {"format": "csv", "path": str(csv), "time_col": "t", "lookback": LOOKBACK, "horizon": HORIZON, "steps_per_epoch": STEPS,
+            "n_select": BATCH, "n_test": BATCH}
+    run = train(root, "nbeats/tiny", {}, data)
+    return read_json(run / "results_summary.json"), load_model(run), pd.read_csv(csv)[list(columns)].to_numpy(np.float64)
+
+
+def own_windows(summary, values, name):
+    """The run's fixed select or test windows: ``BATCH`` of them at stride ``horizon`` from the start of the segment."""
+    lo = summary["segments"][name][0]
+    return np.stack([values[lo + HORIZON * i:lo + HORIZON * i + LOOKBACK] for i in range(BATCH)])
+
+
+@pytest.mark.parametrize("which", ["a constant covariate column", "a held stretch inside the select segment"])
+def test_the_summary_counts_the_windows_predict_flags_on_the_runs_own_windows(world, tmp_path, which):
+    """D-047 (review pass 3 W1): ONE rule. A csv with a fixed covariate column was counted 0 flat by the summary while ``predict``
+    flagged every window; a constant stretch is counted the same by both, and neither refuses it (std exactly 0 is genuine)."""
+    v0 = pd.read_csv(write_series_csv(tmp_path / "walk.csv", rows=1200, columns=["v0"]))["v0"].to_numpy(np.float64)
+    if which == "a constant covariate column":
+        columns = {"v0": v0, "v1": np.full(1200, 7.0)}
+    else:
+        stretched = v0.copy()
+        stretched[880:960] = stretched[880]
+        columns = {"v0": stretched}
+    summary, predictor_, values = run_on_csv(tmp_path, **columns)
+    counted = summary["flat_windows"]
+    for name in ("select", "test"):
+        assert int(predictor_.predict(own_windows(summary, values, name))["flat"].sum()) == counted[name], (which, name, counted)
+    assert counted["select"] > 0, "vacuity: the case has flat windows"
+    if which == "a constant covariate column":
+        assert counted == {"select": BATCH, "test": BATCH, "train_fraction": 1.0}
 
 
 def test_a_quantile_head_returns_quantiles_and_levels_and_a_point_head_returns_none_for_both(trained):
@@ -961,6 +1011,21 @@ def test_a_file_agrees_with_predict_at_a_level_far_above_the_spread(case, fmt, l
         assert float((np.abs(quantiles - want["quantiles"]) - grid).max()) <= 1e-4 * float(std.min()), (case, fmt, level)
 
 
+@pytest.mark.parametrize("spread", [1e-18, 1e-16])
+def test_a_window_with_a_spread_below_the_absolute_guard_is_flat_in_the_file_and_in_predict(spread, world, tmp_path_factory):
+    """D-047 (review pass 3 NOTE 3): the float32 function squares deviations, so a window at 1e-18 (inside a column whose peak
+    is 1.0: the range check passes) had its std underflow in the file and not in ``predict`` (2e17 window stds apart). A window whose
+    std is not above 1e-15 is flat in both: the unit scale, the same forecast in raw units. The gap is in raw units here (the
+    forecast of a flat window is the model's output at the unit scale, not a multiple of the window's std)."""
+    path = export_cell("nbeats", "keras", tmp_path_factory)
+    run = trained_case("nbeats", tmp_path_factory)
+    windows = np.asarray(spread * raw_windows(4, 1, seed=3), np.float32).astype(np.float64)
+    want = run.predictor.predict(windows)
+    got, _, _ = run_file(path, "keras", windows)
+    assert want["flat"].all() and np.isfinite(got).all()
+    assert float(np.abs(got - want["point"]).max()) < 1e-4 * (1.0 + float(np.abs(want["point"]).max())), (spread, got, want["point"])
+
+
 # --- the spec: rank 2 only for a rule whose shape_of returns it -------------------------------------
 
 
@@ -1152,6 +1217,23 @@ def test_the_requirement_of_the_keras_file_is_stated_in_the_note_the_help_and_th
         assert all(word in text for word in needs), name
 
 
+def test_the_note_the_help_and_the_readme_say_what_is_flat_and_where_the_file_and_predict_can_differ(one):
+    """D-047 (review pass 3 NOTE 3 and NOTE 4): a window with std not above max(1e-15, floor * mean|x|) is flat in file and ``predict``;
+    the two decide it differently only within two float32 steps of that threshold (measured, ``scratch_red/step_d/edge_width.txt``)."""
+    from train.api import forecast_predictor
+    from train.api.forecast_series import FLAT_ABSOLUTE
+
+    assert FLAT_ABSOLUTE == 1e-15, "vacuity guard: the number the documents print"
+    words = ("max(1e-15,", "flat", "two float32 steps")
+    note = forecast_predictor.export_note(one.record)
+    assert all(word in note for word in words), note
+    help_text = " ".join(" ".join(cli.EXPORT_NOTES).split())
+    assert all(word in help_text for word in words), help_text
+    readme = " ".join((SRC / "train" / "README.md").read_text().split())
+    assert "`max(1e-15, scale_floor * mean|x|)` is flat in the file and in `predict` alike" in readme
+    assert "within two float32 steps of that threshold" in readme and "within two float32 steps of the threshold" in readme
+
+
 @pytest.mark.parametrize("case", list(CASES))
 def test_an_exported_keras_file_is_not_a_run_and_load_model_refuses_it_by_name(case, world, tmp_path_factory):
     """``predict`` takes the run directory. The record beside the file is the run's, so the file is found and then refused: by the
@@ -1221,6 +1303,7 @@ def test_an_np_cast_failure_of_the_converter_is_a_named_error_with_the_real_caus
     with pytest.raises(ConfigError, match=r"tf2onnx \S+ .*np\.cast.*numpy \S+ .*numpy<2") as raised:
         exporting._export_onnx(model, tmp_path / "c.onnx", spec, point)
     assert raised.value.__cause__ is error and not (tmp_path / "c.onnx").exists()
+    assert "Invalid value for 'format'" not in str(raised.value), "format=onnx is valid: the cause is the installed pair, not the key"
 
 
 @needs_onnx
@@ -1237,6 +1320,33 @@ def test_another_attribute_error_of_the_converter_is_not_taken_for_the_numpy_one
     monkeypatch.setattr(tf2onnx.convert, "from_function", raising)
     with pytest.raises(AttributeError, match="no attribute 'missing'"):
         exporting._export_onnx(model, tmp_path / "o.onnx", spec, point)
+
+
+@needs_onnx
+@pytest.mark.parametrize("failure", [OSError("could not get source code"), TypeError("module, class, method, function, traceback, frame, or code object was expected")])
+def test_an_unavailable_tf2onnx_source_skips_only_the_cause_naming_and_never_the_export(failure, world, tmp_path_factory, tmp_path, monkeypatch, caplog):
+    """D-047 (review pass 3 NOTE 7a): ``inspect.getsource`` runs on every onnx export of every task; a tf2onnx install without its
+    ``.py`` files raises OSError (a compiled module, TypeError), and that must cost the warning that names the pair, never the file."""
+    import inspect
+    import logging
+
+    from tf2onnx import tfonnx
+
+    from train.api import exporting
+
+    real = inspect.getsource
+
+    def getsource(obj):
+        if obj is tfonnx:
+            raise failure
+        return real(obj)
+
+    monkeypatch.setattr(inspect, "getsource", getsource)
+    model, point, spec = _traced("nbeats", tmp_path_factory)
+    caplog.set_level(logging.WARNING, logger="dl")
+    exporting._export_onnx(model, tmp_path / "s.onnx", spec, point)
+    assert (tmp_path / "s.onnx").stat().st_size > 0
+    assert not [r for r in caplog.records if "np.cast" in r.getMessage() and r.name == "dl"], "the source is not there to name the cause"
 
 
 @needs_onnx

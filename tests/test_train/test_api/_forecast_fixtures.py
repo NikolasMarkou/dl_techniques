@@ -11,6 +11,9 @@
     :param cells: ``{(row, column): text}``; replaces single cells with the raw text (``"nan"``, ``"abc"``, an out-of-order stamp).
     :return: ``path``. Every csv of the forecasting tests is written by this function, so a csv fact (the dates, the walk) has one source.
 
+``SHIFT_BOUND``
+    The share of a window's std to which ``predict`` holds a shift, for all nine decode rows: the README states it, a test holds it.
+
 ``csv_file``
     A module-scope fixture: ``write_series_csv`` of :data:`CSV_ROWS` rows, one column ``v0`` and the dated column ``t``.
 
@@ -39,6 +42,10 @@ from train.api.tasks import register_builtin_tasks
 #: are 32 (47 rounded down to the batch), and a window that wrongly counts only the lookback would make a 48th that leaves the
 #: segment (the csv test of ``test_forecast_task`` reads every window, none is left unused).
 CSV_ROWS = 2720
+
+#: The bound the README states for the shift of a window through ``predict``: the forecast of a window shifted by a constant, up to the
+#: level the flat rule allows, is the shifted forecast to this share of the window's std, for every decode row (D-047).
+SHIFT_BOUND = 1e-7
 
 
 @pytest.fixture(scope="module")
