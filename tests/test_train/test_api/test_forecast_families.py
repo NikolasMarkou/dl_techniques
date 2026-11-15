@@ -996,7 +996,7 @@ def test_a_csv_whose_windows_are_flat_at_the_floor_of_its_level_is_refused_witho
     """D-040, D-045: the windows whose std is under ``scale_floor`` of their level are flat, and a flat window is not standardized."""
     refused, heavy = level_check(tmp_path, offset)
     assert refused is not None, "a column of spread 1e-7 of its level was accepted"
-    assert re.search(r"\d+ of \d+ windows of the \w+ segment have a flat context", refused) and "transform_args.scale_floor 1e-06" in refused
+    assert re.search(r"\d+ of \d+ windows of the \w+ segment have an unresolved spread", refused) and "transform_args.scale_floor 1e-06" in refused
     assert heavy == [], heavy
 
 
@@ -1015,12 +1015,12 @@ def test_a_constant_column_is_not_a_level_problem_and_the_sentence_is_one_functi
     args = dict(lookback=32, horizon=8, select_fraction=0.15, test_fraction=0.15, scale_floor=1e-6)
     flat = np.full((200, 1), 7.0)
     forecast_series.check_csv_level(flat, ["c"], **args)         # exactly constant: nothing to resolve, the flat rule handles it
-    with pytest.raises(ConfigError, match="have a flat context"):
+    with pytest.raises(ConfigError, match="have an unresolved spread"):
         forecast_series.check_csv_level(np.arange(200.0)[:, None] * 1e-3 + 1e12, ["c"], **args)
     sources = {name: (SRC / "train" / name).read_text() for name in ("api/forecast_series.py", "api/tasks/time_series_forecasting.py",
                                                                       "common/forecast_data.py")}
-    assert sources["api/forecast_series.py"].count("windows of the {segment} segment have a flat context") == 1
-    assert "segment have a flat context" not in sources["api/tasks/time_series_forecasting.py"] + sources["common/forecast_data.py"]
+    assert sources["api/forecast_series.py"].count("windows of the {segment} segment have an unresolved spread") == 1
+    assert "segment have an unresolved spread" not in sources["api/tasks/time_series_forecasting.py"] + sources["common/forecast_data.py"]
     assert "check_csv_level(" in sources["api/tasks/time_series_forecasting.py"] and "check_csv_level(" in sources["common/forecast_data.py"]
 
 

@@ -1339,10 +1339,10 @@ def refusal(tmp_path: Path, kind: str):
         "lookback-one": ({"data": {**E2E_DATA, "lookback": 1}},
                          "Invalid value for 'data.lookback': expected an int of at least 2 (one value has no spread to standardize "
                          "by) or auto, got 1"),
-        "csv-level": ({"data": csv_data(level_csv(tmp_path / "level.csv"))}, "have a flat context"),
+        "csv-level": ({"data": csv_data(level_csv(tmp_path / "level.csv"))}, "have an unresolved spread"),
         # D-045: the flat-window share (the review's csv shifted by 1e7) and the float32 range, both before the claim
         "csv-flat-1e7": ({"data": csv_data(level_csv(tmp_path / "flat7.csv", 1e7))},
-                         "windows of the train segment have a flat context (std not above transform_args.scale_floor 1e-06"),
+                         "windows of the train segment have an unresolved spread (std above 0 but not above max(1e-15, transform_args.scale_floor 1e-06"),
         "csv-float32-range-1e40": ({"data": csv_data(level_csv(tmp_path / "big40.csv", 0.0, 1e40))},
                                    "column 'v0' has max |x| "),
         "csv-float32-range-1e200": ({"data": csv_data(level_csv(tmp_path / "big200.csv", 0.0, 1e200))},

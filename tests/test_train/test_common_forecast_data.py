@@ -657,7 +657,7 @@ class TestCsv:
         """D-040, D-045: the same ``check_csv_level`` the pre-claim check calls; a floor of 0 or a resolvable level loads."""
         t = np.arange(CSV_ROWS)
         path = write_csv(tmp_path, a=1e12 + 8.0 * np.sin(t / 7.0))
-        with pytest.raises(ConfigError, match=r"\d+ of \d+ windows of the (train|select|test) segment have a flat context"):
+        with pytest.raises(ConfigError, match=r"\d+ of \d+ windows of the (train|select|test) segment have an unresolved spread"):
             load(**csv_kwargs(path))
         assert load(**csv_kwargs(path, scale_floor=0.0)).bank.shape == (1, CSV_ROWS, 3), "a floor of 0 flattens nothing and refuses nothing"
         near = write_csv(tmp_path, name="near.csv", a=1e5 + 8.0 * np.sin(t / 7.0))
@@ -789,10 +789,10 @@ class TestEveryRefusalIsANamedErrorWithinThirtySeconds:
         path = write_csv(tmp_path, a=values)
         with pytest.raises(ConfigError, match=rf"the select segment of the csv \(rows \[{lo}, {hi}\)\) is constant in every value column"):
             load(**csv_kwargs(path, value_cols=["a"]))
-        # D-045: a second column that moves keeps the baselines above 0, but the constant column's windows are still flat (a constant
-        # stretch of all the select windows is the second cause the sentence names), so the flat-window check refuses it by name
-        with pytest.raises(ConfigError, match=r"\d+ of \d+ windows of the select segment have a flat context"):
-            load(**csv_kwargs(path, value_cols=["a", "b"]))
+        # D-047: a second column that moves keeps the baselines above 0, and the constant stretch is a genuine flat window (std exactly
+        # 0: counted and flagged, not refused), so the csv loads and every select window is counted flat
+        both = load(**csv_kwargs(path, value_cols=["a", "b"]))
+        assert both.flat_windows["select"] == len(both.select_windows) > 0
 
     def test_the_loader_reads_the_window_counts_through_the_functions_the_check_before_the_claim_calls(self, tmp_path, monkeypatch):
         calls = []
@@ -951,68 +951,235 @@ def review_series(amp: float = 1.0, rows: int = 3000) -> np.ndarray:
     return amp * (8 * np.sin(2 * np.pi * t / 24) + 0.3 * rng.normal(size=rows).cumsum())
 
 
-def flat_oracle(bank: np.ndarray, positions, lookback: int, floor: float) -> np.ndarray:
-    """The flat rule written window by window: a column that moves somewhere has std about its first value <= floor * mean|x|."""
-    moves = bank.std(axis=1) > 0
-    return np.array([
-        bool((((c := bank[s, a:a + lookback]) - c[0]).std(axis=0) <= floor * np.abs(c).mean(axis=0))[moves[s]].any())
-        for s, a in positions])
+def flat_oracle(bank: np.ndarray, positions, lookback: int, floor: float, resolution: bool = False) -> np.ndarray:
+    """The flat rule written window by window (D-047): a channel is flat when its std about its first value is at most
+    ``max(1e-15, floor * mean|x|)``; a window is flat when any channel is, and RESOLUTION-flat when a flat channel has std above 0."""
+    out = []
+    for s, a in positions:
+        c = bank[s, a:a + lookback]
+        std = (c - c[0]).std(axis=0)
+        flat = std <= np.maximum(1e-15, floor * np.abs(c).mean(axis=0))
+        out.append(bool((flat & (std > 0) if resolution else flat).any()))
+    return np.array(out)
+
+
+def jitter_stretch(values: np.ndarray, lo: int, hi: int, level: float = 3.0, jitter: float = 1e-9) -> None:
+    """Rows ``lo..hi`` of ``values`` at ``level`` plus a jitter far below ``1e-6 * level``: resolution-flat, std above 0."""
+    values[lo:hi] = level + jitter * np.random.default_rng(lo).normal(size=hi - lo)
 
 
 class TestTheFlatWindowShareOfACsv:
-    """The csv check and the flatness rule look at the same quantity: the windows of each segment at stride = horizon."""
+    """The csv check counts the windows of each segment at stride = horizon whose spread the level hides (D-047).
+
+    Two kinds of flat window: EXACTLY constant (std 0: a held rate, zeros, an outage) is genuine, scored in raw units, counted and
+    flagged and never refused; RESOLUTION-flat (std above 0, not above ``max(1e-15, scale_floor * mean|x|)``) is the level swallowing
+    the spread, and more than 10 percent of a segment of them is refused."""
 
     @pytest.mark.parametrize("offset", [0.0, 1e3, 1e5, 1e6])
     def test_a_level_within_the_bound_passes(self, offset):
         fs.check_csv_level((review_series() + 50 + offset)[:, None], ["v"], **REVIEW)
 
     @pytest.mark.parametrize("offset", [1e7, 2e7, 1e9])
-    def test_the_review_csv_shifted_beyond_the_bound_is_refused_with_the_segment_the_count_and_both_causes(self, offset):
+    def test_the_review_csv_shifted_beyond_the_bound_is_refused_with_the_segment_the_count_and_the_remedy(self, offset):
         """The review probe: shifted by 1e7 every select window was flat and the run trained in raw units without a word."""
         with pytest.raises(ConfigError) as raised:
             fs.check_csv_level((review_series() + 50 + offset)[:, None], ["v"], **REVIEW)
         text = str(raised.value)
-        found = re.search(r"(\d+) of (\d+) windows of the (train|select|test) segment have a flat context", text)
+        found = re.search(r"(\d+) of (\d+) windows of the (train|select|test) segment have an unresolved spread", text)
         assert found and int(found[1]) == int(found[2]), text
-        assert "the level is large against the spread" in text and "constant stretches" in text and "raw units" in text
+        assert "too large against its spread" in text and "raw units" in text and "Subtract the level" in text, text
+        for word in ("differenc", "cut", "format", "fill"):
+            assert word not in text, f"{word!r}: advice that does not help here (or blames the wrong key): {text}"
+        assert re.search(r"the first at rows 0 to \d+", text), text
 
     def test_the_review_mix_of_160_times_the_spread_at_1e9_is_refused(self):
-        with pytest.raises(ConfigError, match=r"\d+ of \d+ windows of the (train|select|test) segment have a flat context"):
+        with pytest.raises(ConfigError, match=r"\d+ of \d+ windows of the (train|select|test) segment have an unresolved spread"):
             fs.check_csv_level((review_series(160.0) + 8000 + 1e9)[:, None], ["v"], **REVIEW)
 
     @pytest.mark.parametrize("stretch, refused", [(64, False), (72, True)])
     def test_ten_percent_of_a_segment_is_the_edge(self, stretch, refused):
-        """52 select windows: a constant stretch of 64 rows flattens 5 (9.6 percent) and one of 72 rows flattens 6."""
+        """52 select windows: a resolution-flat stretch of 64 rows flattens 5 (9.6 percent) and one of 72 rows flattens 6."""
         values = np.random.default_rng(3).normal(size=3000)
-        values[2100:2100 + stretch] = 3.0
+        jitter_stretch(values, 2100, 2100 + stretch)
         if refused:
-            with pytest.raises(ConfigError, match=r"6 of 52 windows of the select segment have a flat context"):
+            with pytest.raises(ConfigError, match=r"6 of 52 windows of the select segment have an unresolved spread"):
                 fs.check_csv_level(values[:, None], ["v"], **REVIEW)
         else:
             fs.check_csv_level(values[:, None], ["v"], **REVIEW)
 
+    @pytest.mark.parametrize("segment", [0, 1, 2])
+    def test_exactly_ten_percent_of_a_segment_is_not_refused_and_one_window_more_is(self, segment):
+        """``more than`` and not ``at least``: the rows are chosen so that the segment holds a multiple of 10 windows, and the
+        stretch is placed to flatten exactly k windows (a window is flat only if its whole context lies in the stretch)."""
+        rows = next(r for r in range(2400, 3400) if all(
+            len(fs.segment_windows(1, b, WIDTH, HORIZON)) % 10 == 0 for b in fs.split_bounds(r, 0.15, 0.15)))
+        bounds = fs.split_bounds(rows, 0.15, 0.15)[segment]
+        count = len(fs.segment_windows(1, bounds, WIDTH, HORIZON))
+        k = count // 10
+        for flat, refused in ((k, False), (k + 1, True)):
+            values = np.random.default_rng(3).normal(size=rows)
+            jitter_stretch(values, bounds[0], bounds[0] + (flat - 1) * HORIZON + LOOKBACK)
+            positions = fs.segment_windows(1, bounds, WIDTH, HORIZON)
+            assert fs.flat_windows(values[None, :, None], positions, LOOKBACK, 1e-6, resolution=True).sum() == flat
+            if refused:
+                with pytest.raises(ConfigError, match=rf"{flat} of {count} windows of the {('train', 'select', 'test')[segment]} segment"):
+                    fs.check_csv_level(values[:, None], ["v"], **{**REVIEW})
+            else:
+                fs.check_csv_level(values[:, None], ["v"], **REVIEW)
+
     @pytest.mark.parametrize("segment, row", [("train", 100), ("test", 2700)])
     def test_every_segment_is_counted_and_named(self, segment, row):
         values = np.random.default_rng(3).normal(size=3000)
-        values[row:row + 400] = 3.0
-        with pytest.raises(ConfigError, match=f"of \\d+ windows of the {segment} segment have a flat context"):
+        jitter_stretch(values, row, row + 300)
+        with pytest.raises(ConfigError, match=f"of \\d+ windows of the {segment} segment have an unresolved spread"):
             fs.check_csv_level(values[:, None], ["v"], **REVIEW)
 
-    def test_a_column_that_never_moves_is_not_a_flat_window(self):
-        """Nothing varies in it, so nothing is lost by the unit scale: the second column's moving windows decide."""
+    @pytest.mark.parametrize("segment, row, length", [("train", 100, 1000), ("select", 2100, 300), ("test", 2700, 300)])
+    def test_an_exactly_constant_stretch_of_any_length_is_a_genuine_flat_window_and_is_not_refused(self, segment, row, length):
+        """A solar outage, a policy rate held for months, a slow seller, zeros: std exactly 0 is not a level problem (D-047)."""
+        values = np.random.default_rng(3).normal(size=3000)
+        values[row:row + length] = 0.0
+        fs.check_csv_level(values[:, None], ["v"], **REVIEW)
+        bounds = dict(zip(("train", "select", "test"), fs.split_bounds(3000, 0.15, 0.15)))[segment]
+        positions = fs.segment_windows(1, bounds, WIDTH, HORIZON)
+        assert fs.flat_windows(values[None, :, None], positions, LOOKBACK, 1e-6).sum() > 0.1 * len(positions), "vacuity: more than 10 percent are flat"
+        assert not fs.flat_windows(values[None, :, None], positions, LOOKBACK, 1e-6, resolution=True).any(), "and none is resolution-flat"
+
+    @pytest.mark.parametrize("shape", ["solar_with_a_3_week_outage", "policy_rate_held_for_2_years", "slow_seller_poisson_0.02",
+                                       "energy_zero_for_12_percent", "second_column_back_filled_with_zero"])
+    def test_the_real_shapes_the_review_saw_refused_train_at_the_default_window(self, shape):
+        """Review pass 3 W2: five plausible series that are legitimately constant for a stretch (std exactly 0) were refused at the
+        default window (168, 24) with a remedy that did not work. None is refused now, and every one is flat in the count."""
+        rng = np.random.default_rng(0)
+        rows = 24 * 365 * 2
+        hour = np.arange(rows) % 24
+        sun = np.clip(np.sin(np.pi * (hour - 6) / 13), 0, None) * (hour >= 6) * (hour <= 19)
+        load = 500 + 100 * np.sin(2 * np.pi * hour / 24) + rng.normal(0, 10, rows)
+        if shape == "solar_with_a_3_week_outage":
+            values = (800 * sun * rng.uniform(0.3, 1, rows // 24).repeat(24))[:, None]
+            values[int(0.75 * rows):int(0.75 * rows) + 21 * 24] = 0.0
+        elif shape == "policy_rate_held_for_2_years":
+            values = np.concatenate([np.repeat([5.25, 5.0, 4.5, 3.0, 2.0, 1.0], 120), np.full(730, 0.25),
+                                     np.repeat([0.5, 0.75, 1.0, 1.5, 2.0, 2.5, 3.0], 90)])[:, None]
+        elif shape == "slow_seller_poisson_0.02":
+            values = rng.poisson(0.02, 1825).astype(float)[:, None]
+        elif shape == "energy_zero_for_12_percent":
+            values = load[:, None].copy()
+            values[2000:2000 + int(0.12 * rows)] = 0.0
+        else:
+            back_filled = load.copy()
+            back_filled[:int(0.7 * rows)] = 0.0
+            values = np.stack([load, back_filled], axis=1)
+        args = dict(lookback=168, horizon=24, select_fraction=0.15, test_fraction=0.15, scale_floor=1e-6)
+        fs.check_csv_level(values, [f"c{i}" for i in range(values.shape[1])], **args)
+        counted = [fs.flat_windows(values[None], fs.segment_windows(1, b, 192, 24), 168, 1e-6).mean()
+                   for b in fs.split_bounds(len(values), 0.15, 0.15)]
+        assert max(counted) > 0.1, f"vacuity: the shape has more than 10 percent flat windows in a segment ({counted})"
+
+    def test_a_column_that_never_moves_is_a_flat_window_like_any_other_constant_one(self):
+        """D-047: no column is left out of the count (the Predictor's flag has no such exclusion either); it is genuine, so not refused."""
         values = np.stack([review_series() + 50, np.full(3000, 7.0)], axis=1)
         fs.check_csv_level(values, ["v", "c"], **REVIEW)
+        positions = fs.segment_windows(1, (0, 3000), WIDTH, HORIZON)
+        assert fs.flat_windows(values[None], positions, LOOKBACK, 1e-6).all()
+        assert not fs.flat_windows(values[None], positions, LOOKBACK, 1e-6, resolution=True).any()
+
+    def test_a_constant_column_does_not_hide_a_resolution_flat_one(self):
+        values = np.stack([review_series() + 1e7, np.full(3000, 7.0)], axis=1)
+        with pytest.raises(ConfigError, match="have an unresolved spread"):
+            fs.check_csv_level(values, ["v", "c"], **REVIEW)
 
     def test_flat_windows_is_the_rule_written_window_by_window(self):
         rng = np.random.default_rng(5)
         bank = rng.normal(size=(3, 400, 2)) * np.array([1.0, 1e-3]) + np.array([5.0, 1e4])
         bank[0, 100:160, 0] = 2.0
         bank[1, :, 1] = 9.0
+        bank[2, 50:120, 0] = 1e-18 * rng.normal(size=70)
         positions = np.stack([rng.integers(0, 3, 300), rng.integers(0, 400 - LOOKBACK + 1, 300)], axis=1)
         for floor in (1e-6, 1e-3, 1e-1, 0.0):
-            got = fs.flat_windows(bank, positions, LOOKBACK, floor)
-            np.testing.assert_array_equal(got, flat_oracle(bank, positions, LOOKBACK, floor))
+            for resolution in (False, True):
+                got = fs.flat_windows(bank, positions, LOOKBACK, floor, resolution=resolution)
+                np.testing.assert_array_equal(got, flat_oracle(bank, positions, LOOKBACK, floor, resolution))
         assert fs.flat_windows(bank, positions, LOOKBACK, 1e-1).any(), "vacuity guard: the loose floor flattens something"
+
+    def test_flat_windows_and_the_context_rule_are_one_function(self):
+        """The Predictor reads ``flat_contexts``, the loader's count reads ``flat_windows``: the two give one answer on the same windows."""
+        rng = np.random.default_rng(6)
+        bank = rng.normal(size=(2, 300, 2)) * np.array([1.0, 1e-1]) + np.array([5.0, 1e2])
+        bank[0, 100:160, 0] = 2.0
+        bank[1, :, 1] = 9.0
+        positions = np.stack([rng.integers(0, 2, 200), rng.integers(0, 300 - LOOKBACK + 1, 200)], axis=1)
+        contexts = np.stack([bank[s, a:a + LOOKBACK] for s, a in positions])
+        for resolution in (False, True):
+            np.testing.assert_array_equal(
+                fs.flat_windows(bank, positions, LOOKBACK, 1e-6, resolution=resolution),
+                fs.flat_contexts(contexts, 1e-6, resolution=resolution))
+        assert fs.flat_contexts(contexts, 1e-6).any() and not fs.flat_contexts(contexts, 1e-6).all(), "vacuity: both answers occur"
+
+
+# the context ``[14, 18, 14, 18]`` has first-value deviations ``[0, 4, 0, 4]``: its std is exactly 2 and its mean |x| exactly 16, so
+# the threshold ``floor * 16`` is exactly 2 at the floor 0.125, which float32 holds exactly, and one float32 ulp either side of it is
+# representable too: all four implementations of the rule then read the same numbers and must give the same verdict
+EDGE_CONTEXT = np.array([14.0, 18.0, 14.0, 18.0])
+
+
+def edge_floors():
+    """``(floor, flat)``: the floor one float32 ulp below, at and one float32 ulp above the exact threshold (flat when the threshold is at or above the std)."""
+    at = np.float32(0.125)
+    return [(float(np.nextafter(at, np.float32(0))), False), (float(at), True), (float(np.nextafter(at, np.float32(1))), True)]
+
+
+class TestTheOneFlatRuleAtItsThreshold:
+    """D-047: one formula, ``std <= max(FLAT_ABSOLUTE, scale_floor * mean|x|)``, in the numpy function the Predictor and the loader
+    read, the tf function that trains, the float64 and float32 keras-ops function the export serves."""
+
+    @pytest.mark.parametrize("floor, flat", edge_floors(), ids=["one ulp below", "at the threshold", "one ulp above"])
+    def test_numpy_tf_and_keras_ops_agree_at_the_threshold_and_one_float32_ulp_either_side(self, floor, flat):
+        context = EDGE_CONTEXT.reshape(1, 4, 1)
+        scale = 1.0 if flat else 2.0
+        assert bool(fs.flat_contexts(context, floor)[0]) is flat
+        assert bool(fs.context_spread(context, floor)[1].all()) is flat
+        assert float(context_stats_np(context, floor)[2]) == scale
+        for dtype in (np.float64, np.float32):
+            got = float(np.asarray(fd.context_stats_ops(np.asarray(context, dtype), floor)[2]))
+            assert got == scale, (dtype, floor, got)
+        # the tf function: the standardized context is (x - anchor 14 - offset 2) / scale
+        x, _ = standardize_tf(tf.constant(np.concatenate([context, np.zeros((1, 2, 1))], axis=1)), 4, floor)
+        np.testing.assert_allclose(x.numpy()[0, :, 0], (context[0, :, 0] - 14.0 - 2.0) / scale, atol=1e-7)
+
+    def test_the_rule_is_one_expression_with_the_absolute_guard_in_every_twin(self):
+        """No twin keeps a copy of the constant or the comparison: each reads ``FLAT_ABSOLUTE`` from the one module."""
+        import inspect
+
+        for fn in (fd.standardize_tf, fd.context_stats_ops, fs.context_spread):
+            assert "FLAT_ABSOLUTE" in inspect.getsource(fn), fn.__name__
+        assert fd.FLAT_ABSOLUTE is fs.FLAT_ABSOLUTE and fs.FLAT_ABSOLUTE == 1e-15
+
+
+class TestTheAbsoluteFlatGuard:
+    """D-047 (review pass 3 NOTE 3): a stretch near 1e-18 in a column whose peak is 1.0 is flat in every twin, so the float32 export, which
+    squares deviations, cannot disagree with ``predict`` about it (the review measured 2e17 window stds)."""
+
+    def stretch(self, spread: float) -> np.ndarray:
+        return (spread * np.random.default_rng(8).normal(size=(3, LOOKBACK, 1))).astype(np.float64)
+
+    @pytest.mark.parametrize("spread", [1e-18, 1e-17, 3e-16])
+    def test_a_tiny_spread_is_flat_with_the_unit_scale_in_numpy_tf_and_float32_ops(self, spread):
+        context = self.stretch(spread)
+        assert fs.flat_contexts(context, 1e-6).all() and fs.flat_contexts(context, 0.0).all(), "flat at any scale_floor"
+        assert fs.flat_contexts(context, 0.0, resolution=True).all(), "and resolution-flat: std above 0"
+        assert (context_stats_np(context, 1e-6)[2] == 1.0).all()
+        assert (np.asarray(fd.context_stats_ops(np.asarray(context, np.float32), 1e-6)[2]) == 1.0).all()
+        x, _ = standardize_tf(tf.constant(np.concatenate([context, np.zeros((3, 2, 1))], axis=1)), LOOKBACK, 1e-6)
+        shifted = context - context[:, :1]
+        np.testing.assert_allclose(x.numpy(), (shifted - shifted.mean(1, keepdims=True)).astype(np.float32), rtol=1e-5, atol=1e-30)
+
+    @pytest.mark.parametrize("spread", [3e-15, 1e-13, 1e-9])
+    def test_a_spread_above_the_guard_is_not_flat_at_a_level_it_can_resolve(self, spread):
+        context = self.stretch(spread)
+        assert not fs.flat_contexts(context, 1e-6).any(), spread
+        assert (context_stats_np(context, 1e-6)[2] > 1e-15).all()
+        assert (np.asarray(fd.context_stats_ops(np.asarray(context, np.float32), 1e-6)[2]) > 1e-15).all()
 
 
 class TestTheFloat32RangeOfACsv:
@@ -1057,6 +1224,15 @@ class TestTheFlatCountsOfARun:
         wanted = flat_oracle(b.bank, train, LOOKBACK, 1e-6)
         assert wanted.sum() == 2 and b.flat_windows["train_fraction"] == pytest.approx(wanted.mean(), abs=1e-12)
         assert flat_oracle(b.bank, b.select_windows, LOOKBACK, 1e-6).sum() == 2
+
+    def test_a_constant_column_makes_every_window_flat_and_the_count_is_the_flag_the_predictor_reads(self, tmp_path):
+        """D-047 (review pass 3 W1): one rule, so a csv with a fixed covariate counts every window flat, as ``predict`` flags it."""
+        b = load(**csv_kwargs(write_csv(tmp_path, b=np.full(CSV_ROWS, 7.0)), value_cols=["a", "b"]))
+        assert b.flat_windows["select"] == len(b.select_windows) and b.flat_windows["test"] == len(b.test_windows)
+        assert b.flat_windows["train_fraction"] == 1.0
+        for name, positions in (("select", b.select_windows), ("test", b.test_windows)):
+            contexts = np.stack([b.bank[s, a:a + LOOKBACK] for s, a in positions])
+            assert int(fs.flat_contexts(contexts, 1e-6).sum()) == b.flat_windows[name]
 
     def test_the_builtin_bank_counts_its_flat_windows_too(self):
         b = load(patterns=["sparse_events", "random_walk"], realizations=2, n_select=None)

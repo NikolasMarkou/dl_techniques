@@ -23,7 +23,7 @@ max_samples, batch_size, seed, stream_seed, scale_floor)``
     (``path``, ``value_cols``, ``time_col`` apply; the four synthetic arguments are ignored).
     :param seed: the split seed: keys the bank and the select and test windows. Never changes on a resume.
     :param stream_seed: keys the train windows only; ``None`` means ``seed``.
-    :param scale_floor: a context is flat when its std is not above ``scale_floor * mean|x|``, see :func:`context_stats_np`.
+    :param scale_floor: a context is flat when its std is not above ``max(FLAT_ABSOLUTE, scale_floor * mean|x|)``, see :func:`context_stats_np`.
     :return: a :class:`ForecastBatches`. Every element of every dataset is ``(x, y)``: ``x`` the context
         ``(batch, lookback, channels)`` and ``y`` the target ``(batch, horizon, channels)``, float32, standardized
         by the CONTEXT's statistics; the batch axis is static.
@@ -41,7 +41,7 @@ max_samples, batch_size, seed, stream_seed, scale_floor)``
 ``standardize_tf(window, lookback, scale_floor)``
     ``window`` is ``(..., lookback + horizon, channels)``; returns ``(x, y)`` float32, computed in float64.
     The context is centred on its FIRST value, then on the mean of the differences from it, and divided by its population std;
-    a context is FLAT when ``std <= scale_floor * mean|x|`` and its scale is then ``UNIT_SCALE`` (the series' own unit): finite
+    a context is FLAT when ``std <= max(FLAT_ABSOLUTE, scale_floor * mean|x|)`` and its scale is then ``UNIT_SCALE`` (the series' own unit): finite
     and bounded for every input, and a function of the window's SHAPE, not of its level, up to the float32 resolution of the
     level (D-040).
 
@@ -75,13 +75,13 @@ from dl_techniques.datasets.time_series.generator import TimeSeriesGenerator, Ti
 from dl_techniques.utils.logger import logger
 from train.api.forecast_args import BUILTIN, CSV, TimeSeriesData
 from train.api.forecast_series import (
-    SELECT_WINDOWS_PER_SERIES, check_csv_level, check_segments, check_select_moves, context_spread, csv_window_count, flat_windows,
+    FLAT_ABSOLUTE, SELECT_WINDOWS_PER_SERIES, check_csv_level, check_segments, check_select_moves, context_spread, csv_window_count, flat_windows,
     read_csv_series, refuse, segment_windows, split_bounds, window_count,
 )
 from train.common.pretrain_data import SELECT_SALT, TEST_SALT, derive_stream_seed
 
 
-#: The scale of a FLAT context (std not above ``scale_floor * mean|x|``): the series' own unit, so the target stays what it is.
+#: The scale of a FLAT context (std not above ``max(FLAT_ABSOLUTE, scale_floor * mean|x|)``): the series' own unit, so the target stays what it is.
 UNIT_SCALE = 1.0
 #: The legacy epoch: the default ``steps_per_epoch`` never exceeds it.
 EPOCH_STEPS = 500
@@ -96,7 +96,7 @@ def context_stats_np(context: np.ndarray, scale_floor: float) -> Tuple[np.ndarra
     """``(anchor, offset, scale)`` of ``(..., lookback, channels)`` over the time axis, each ``(..., 1, channels)`` float64.
 
     The anchor is the FIRST context value, the offset the mean of the context minus the anchor and the scale the POPULATION std
-    (ddof 0); a context whose std is not above ``scale_floor * mean|x|`` is FLAT and has ``UNIT_SCALE``.
+    (ddof 0); a context whose std is not above ``max(FLAT_ABSOLUTE, scale_floor * mean|x|)`` is FLAT and has ``UNIT_SCALE``.
     """
     # DECISION plan-2026-11-13T105600-3a8319ef/D-005
     # The statistics come from the CONTEXT only, and the TARGET is divided by the same numbers. Do NOT
@@ -127,7 +127,7 @@ def standardize_tf(window: "tf.Tensor", lookback: int, scale_floor: float) -> Tu
     shifted = context - anchor
     offset = tf.reduce_mean(shifted, axis=-2, keepdims=True)
     std = tf.sqrt(tf.reduce_mean(tf.square(shifted - offset), axis=-2, keepdims=True))
-    flat = std <= scale_floor * tf.reduce_mean(tf.abs(context), axis=-2, keepdims=True)
+    flat = std <= tf.maximum(scale_floor * tf.reduce_mean(tf.abs(context), axis=-2, keepdims=True), FLAT_ABSOLUTE)
     scale = tf.where(flat, tf.constant(UNIT_SCALE, tf.float64), std)
     standardized = (window - anchor - offset) / scale
     return tf.cast(standardized[..., :lookback, :], tf.float32), tf.cast(standardized[..., lookback:, :], tf.float32)
@@ -151,7 +151,7 @@ def context_stats_ops(context: Any, scale_floor: float) -> Tuple[Any, Any, Any]:
     shifted = context - anchor
     offset = ops.mean(shifted, axis=-2, keepdims=True)
     std = ops.sqrt(ops.mean(ops.square(shifted - offset), axis=-2, keepdims=True))
-    flat = std <= scale_floor * ops.mean(ops.abs(context), axis=-2, keepdims=True)
+    flat = std <= ops.maximum(scale_floor * ops.mean(ops.abs(context), axis=-2, keepdims=True), FLAT_ABSOLUTE)
     return anchor, offset, ops.where(flat, UNIT_SCALE, std)
 
 
@@ -246,8 +246,8 @@ class ForecastBatches:
         ``select_windows``, ``test_windows`` the ``(series, start)`` of every fixed window.
     :param dropped: ``(pattern, realization)`` of the non-finite series the bank left out.
     :param flat_windows: ``{"select", "test", "train_fraction"}``: the fixed select and test windows whose context is flat (a flat
-        window is trained and scored in the series' raw units) and the share of the train segment's windows (stride = horizon) that
-        are, all from :func:`train.api.forecast_series.flat_windows`.
+        window is trained and scored in the series' raw units; a constant column makes every window flat, as ``predict`` flags it) and the
+        share of the train segment's windows (stride = horizon) that are, all from :func:`train.api.forecast_series.flat_windows`.
     :param value_cols, csv_sha256: the csv's value column names and the sha256 of its bytes (``None`` for the synthetic bank);
         the record of the run (``task.json``) carries both.
     :param first_batch_digest: sha256 of the first train batch, from the pure map (no fit iterator is touched).
