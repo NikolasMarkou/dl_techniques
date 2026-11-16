@@ -822,6 +822,29 @@ class TestEveryRefusalIsANamedErrorWithinThirtySeconds:
         with pytest.raises(ConfigError, match="non-finite"):
             load(**csv_kwargs(write_csv(tmp_path, a=values)))
 
+    @pytest.mark.parametrize("columns", [1, 3], ids=["one column", "three columns"])
+    @pytest.mark.parametrize("where", ["middle", "end"])
+    def test_a_blank_line_is_a_missing_cell_with_its_row_and_not_a_skipped_row(self, tmp_path, columns, where):
+        """Review pass 4 NOTE 7: ``pd.read_csv`` skips a blank line by default, so a hand-written or spreadsheet file with an empty
+        line trained on a series shifted by one step after the gap and nothing said so. The line is a missing cell now, refused with its
+        row, like an ``inf`` or an empty cell (the same function reads the file for ``predict``)."""
+        rows = [",".join(f"{v:.6f}" for v in np.random.default_rng(i).normal(size=columns)) for i in range(3000)]
+        text = "\n".join(["v" if columns == 1 else ",".join(f"v{c}" for c in range(columns))] + rows) + "\n"
+        lines = text.split("\n")
+        if where == "middle":
+            lines.insert(1 + 1500, "")      # the blank line sits between data rows 1499 and 1500 (frame index 1500)
+        else:
+            lines.insert(len(lines) - 1, "")  # a blank line after the last data row (frame index 3000)
+        path = tmp_path / "blank.csv"
+        path.write_text("\n".join(lines))
+        sentence = f"holds 1 non-finite cell\\(s\\), the first at row {1500 if where == 'middle' else 3000}"
+        with pytest.raises(ConfigError, match=sentence):
+            fs.read_csv_series(str(path), None, None)
+        clean = tmp_path / "clean.csv"
+        clean.write_text(text)
+        values, names, _ = fs.read_csv_series(str(clean), None, None)
+        assert values.shape == (3000, columns), "vacuity guard: the same file without the blank line reads whole"
+
     def test_a_named_column_that_is_missing(self, tmp_path):
         with pytest.raises(ConfigError, match="column 'nope' is missing"):
             load(**csv_kwargs(write_csv(tmp_path), value_cols=["a", "nope"]))

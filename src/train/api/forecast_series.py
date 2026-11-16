@@ -21,7 +21,7 @@ Interface contract
     :return: ``(values, names, sha256)``: ``(rows, channels)`` float64, the value column names, and the sha256 of
         the file bytes.
     :raises ConfigError: a missing file or column, an unreadable or empty csv, a non-numeric or non-finite value
-        column, a time column that is not strictly increasing.
+        column (a blank line is a missing cell, refused with its row), a time column that is not strictly increasing.
 
 ``split_bounds(rows, select_fraction, test_fraction)``
     :return: the ``(lo, hi)`` row ranges of the train, select and test segments, consecutive and disjoint.
@@ -221,7 +221,9 @@ def read_csv_series(
         refuse(f"data.path {path} does not exist")
     raw = file.read_bytes()
     try:
-        frame = pd.read_csv(io.BytesIO(raw))
+        # skip_blank_lines=False: a blank line is a MISSING row, refused below with its row number. The default drops it and the series
+        # after the gap is shifted by one step with no word said (D-048); pandas' own to_csv never writes one.
+        frame = pd.read_csv(io.BytesIO(raw), skip_blank_lines=False)
     except (pd.errors.ParserError, pd.errors.EmptyDataError, UnicodeDecodeError) as exc:
         raise ConfigError(f"data.path {path} is not a readable csv: {exc}") from exc
     if len(frame) == 0:
