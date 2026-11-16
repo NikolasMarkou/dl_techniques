@@ -1129,6 +1129,7 @@ def edge_floors():
     return [(float(np.nextafter(at, np.float32(0))), False), (float(at), True), (float(np.nextafter(at, np.float32(1))), True)]
 
 
+@pytest.mark.filterwarnings("error:Conversion of an array with ndim > 0 to a scalar:DeprecationWarning")   # review pass 4 NOTE 8: take one element, do not convert an array
 class TestTheOneFlatRuleAtItsThreshold:
     """D-047: one formula, ``std <= max(FLAT_ABSOLUTE, scale_floor * mean|x|)``, in the numpy function the Predictor and the loader
     read, the tf function that trains, the float64 and float32 keras-ops function the export serves."""
@@ -1139,9 +1140,9 @@ class TestTheOneFlatRuleAtItsThreshold:
         scale = 1.0 if flat else 2.0
         assert bool(fs.flat_contexts(context, floor)[0]) is flat
         assert bool(fs.context_spread(context, floor)[1].all()) is flat
-        assert float(context_stats_np(context, floor)[2]) == scale
+        assert context_stats_np(context, floor)[2].item() == scale
         for dtype in (np.float64, np.float32):
-            got = float(np.asarray(fd.context_stats_ops(np.asarray(context, dtype), floor)[2]))
+            got = np.asarray(fd.context_stats_ops(np.asarray(context, dtype), floor)[2]).item()
             assert got == scale, (dtype, floor, got)
         # the tf function: the standardized context is (x - anchor 14 - offset 2) / scale
         x, _ = standardize_tf(tf.constant(np.concatenate([context, np.zeros((1, 2, 1))], axis=1)), 4, floor)
