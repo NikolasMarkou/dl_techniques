@@ -1345,7 +1345,15 @@ def test_the_measured_variants_are_the_variants_of_the_tables_and_every_minimum_
     assert [family for family, _ in MEASURED_VARIANTS] == list(fm.FAMILIES), "every family is measured"
 
 
-@pytest.mark.parametrize("family, variant", PAIRS)
+#: tirex at its minimum lookback (2) holds ONE patch (patch_size 8 to 16), so its attention softmaxes over a single key and Keras
+#: says so ("This axis has size 1"; the repository's ``error::UserWarning`` turns it into a failure). That is the property of the
+#: tiny shape this row builds at on purpose, not a defect: the model builds and calls, the attention weight is 1 by construction, and
+#: the default lookback (168) holds several patches and does not warn. The ignore is scoped to the tirex rows of this one test.
+ONE_KEY_SOFTMAX = pytest.mark.filterwarnings("ignore:You are using a softmax over axis -1 of a tensor of shape .*This axis has size 1:UserWarning")
+MINIMUM_ROWS = [pytest.param(family, variant, marks=ONE_KEY_SOFTMAX if family == "tirex" else ()) for family, variant in PAIRS]
+
+
+@pytest.mark.parametrize("family, variant", MINIMUM_ROWS)
 def test_a_variant_builds_at_its_minimum_lookback_and_the_library_refuses_one_below(family, variant, monkeypatch):
     """The row is the library's own boundary: building AT the minimum works and calls, and one below fails in the LIBRARY (the task's
     check is switched off for the second half, or the test would only read its own message)."""
