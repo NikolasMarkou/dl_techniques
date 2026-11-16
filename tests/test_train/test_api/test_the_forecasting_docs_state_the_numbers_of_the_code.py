@@ -183,13 +183,17 @@ def test_the_readme_states_the_shift_bound_the_flat_rule_has_and_the_flat_flag_a
     assert f"outside [{span}]" in text and "float32 range" in text
 
 
-def test_the_readme_gate_section_says_which_of_its_numbers_predate_which_change():
+def test_the_readme_gate_section_names_the_code_head_it_ran_on_and_says_the_first_gate_is_superseded():
+    """The final gate (plan 3a8319ef, Step 21) ran on one code HEAD; the README is a docs-only commit after it, and says so."""
     text = " ".join(README.read_text().split())
     start = text.index("**Gate numbers** (plan 3a8319ef")
     gate = text[start:start + 12000]
-    assert "predates the standardization redesign and the band function" in gate
-    assert "export gaps and file sizes of the first gate predate the export change" in gate
-    assert "run directories of the first gate are refused at HEAD (missing `time_col`)" in gate
+    assert "run on HEAD `78e3295df` of the branch `train-api/phase-4e`" in gate
+    assert "the code HEAD `78e3295df56d9df62609d9afd28af038be383980`" in gate
+    assert "the commit that holds this README is a docs-only commit after that HEAD" in gate
+    assert "the first gate, run on HEAD `1904f07a8`" in gate and "is superseded and every number below replaces its numbers" in gate
+    assert "PENDING" not in text and "NOT YET MEASURED" not in text
+    assert gate.count("| G1 |") == 1 and gate.count("| G2 |") == 1 and gate.count("| G3 |") == 1 and gate.count("| G4 |") == 1
 
 
 CITED = re.compile(r"`((?:tests|src)/[A-Za-z0-9_./\-]+\.(?:py|md|json|sh|yaml|yml))`")
