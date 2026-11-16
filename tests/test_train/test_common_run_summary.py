@@ -667,7 +667,7 @@ def test_the_initial_loss_ratio_is_the_loss_over_the_reference_and_a_non_finite_
             run_summary.initial_loss_ratio({"loss": bad}, 1.5, "a hint")
 
 
-def _data_free_run(monkeypatch, tmp_path, analysis, detail):
+def _data_free_run(monkeypatch, tmp_path, analysis, detail, **extra):
     """Call ``report_data_free_run`` over stand-ins of the two ``classification_run`` calls it makes; return what they saw."""
     from train.common import classification_run
 
@@ -686,7 +686,7 @@ def _data_free_run(monkeypatch, tmp_path, analysis, detail):
     monkeypatch.setattr(classification_run, "finalize_last_epoch", finalize)
     out = run_summary.report_data_free_run(
         "model", "sample", "history", tmp_path, tmp_path / "vis", "name", run_analysis=len, model_analysis=True,
-        eval_batch_size=8, last_weights="weights", data="data", epochs_run=3, save_last=False, load_sample="load",
+        eval_batch_size=8, last_weights="weights", data="data", epochs_run=3, save_last=False, load_sample="load", **extra,
     )
     return out, seen
 
@@ -723,8 +723,14 @@ def test_the_data_free_reporting_hands_both_calls_what_the_two_tasks_need(monkey
     assert head == ["model", "weights", "data", tmp_path, "history", 3]
     assert {key: final[key] for key in final if key != "load_detail"} == {
         "evaluate": classification_run.evaluate_dict, "save": False, "atomic": True, "eval_batch_size": 8,
-        "exact_reload": True, "sample": "load",
+        "exact_reload": True, "sample": "load", "predict_batch_size": None,
     }
+
+
+def test_the_data_free_reporting_hands_the_load_check_the_predict_batch_it_was_given(monkeypatch, tmp_path) -> None:
+    """The static batch of timestral reaches ``finalize_last_epoch`` unchanged; left out it is ``None`` (the cap every older caller had)."""
+    _, seen = _data_free_run(monkeypatch, tmp_path, {"status": "ok"}, {}, predict_batch_size=5)
+    assert seen["finalize"][-1]["predict_batch_size"] == 5
 
 
 def test_an_empty_load_detail_is_none_in_the_data_free_reporting(monkeypatch, tmp_path) -> None:
