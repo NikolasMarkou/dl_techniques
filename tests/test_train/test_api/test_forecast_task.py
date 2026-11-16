@@ -1178,6 +1178,27 @@ def csv_ended(world, tmp_path_factory, csv_file):
                            function=root / "function", cli=root / "cli")
 
 
+def test_the_summary_says_the_bar_is_in_the_data_unit_when_most_selection_windows_are_flat(world, tmp_path):
+    """Review pass 4 NOTE 4: a held series (a policy rate) is mostly flat windows, which are scored in the series' own unit, so ``val_mae``
+    and the bar move with the unit the csv is written in (percent against basis points: naive-last 0.012 against 1.202). The note appears
+    when MORE THAN HALF of the selection windows are flat, and not at half or below."""
+    from types import SimpleNamespace
+
+    trainer, config, _ = prepared(tmp_path / "run")
+    trainer._baselines = {"naive_last": 1.0, "seasonal_naive": 1.0}
+
+    def notes(flat: int) -> List[str]:
+        data = SimpleNamespace(n_select=52, flat_windows={"select": flat, "test": 0, "train_fraction": 0.0})
+        return trainer.task_notes(config, {"mae": 1.0}, 1.0, data)
+
+    marker = "are flat and scored in the series' own unit"
+    loud = [line for line in notes(41) if marker in line]
+    assert len(loud) == 1 and loud[0].startswith("41 of the 52 selection windows") and "basis points" in loud[0] and "rescaled" in loud[0], loud
+    assert not [line for line in notes(26) if marker in line], "half is not more than half"
+    assert not [line for line in notes(0) if marker in line]
+    assert len(notes(41)) == len(notes(0)) + 1, "one line more, nothing else changes"
+
+
 @pytest.mark.parametrize("which", ["function", "cli"])
 def test_a_csv_run_trains_and_reports_the_same_summary_blocks_as_the_synthetic_one(csv_ended, which):
     run_dir = getattr(csv_ended, which)
@@ -1342,7 +1363,7 @@ def refusal(tmp_path: Path, kind: str):
         "csv-level": ({"data": csv_data(level_csv(tmp_path / "level.csv"))}, "have an unresolved spread"),
         # D-045: the flat-window share (the review's csv shifted by 1e7) and the float32 range, both before the claim
         "csv-flat-1e7": ({"data": csv_data(level_csv(tmp_path / "flat7.csv", 1e7))},
-                         "windows of the train segment have an unresolved spread (std above 0 but not above max(1e-15, transform_args.scale_floor 1e-06"),
+                         "windows of the train segment have an unresolved spread (std above 0 but not above max(1e-18, transform_args.scale_floor 1e-06"),
         "csv-float32-range-1e40": ({"data": csv_data(level_csv(tmp_path / "big40.csv", 0.0, 1e40))},
                                    "column 'v0' has max |x| "),
         "csv-float32-range-1e200": ({"data": csv_data(level_csv(tmp_path / "big200.csv", 0.0, 1e200))},

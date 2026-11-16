@@ -45,7 +45,10 @@ max_samples, batch_size, seed, stream_seed, scale_floor)``
     and bounded for every input, and a function of the window's SHAPE, not of its level, up to the float32 resolution of the
     level (D-040).
 
-``context_stats_np(context, scale_floor)`` and ``context_stats_ops(context, scale_floor)``
+``context_stats_np(context, scale_floor, *, served=False)`` and ``context_stats_ops(context, scale_floor)``
+    :param served: ``context_stats_np`` only: decide FLATNESS on the float32 value of the context, as the exported file does (D-048); the
+        anchor, the offset and the std stay float64. ``False`` (the default) is the rule of :func:`standardize_tf`, the one that trains, on the
+        float64 context. ``ForecastPredictor.predict`` passes ``True``.
     :return: ``(anchor, offset, scale)``, each ``(..., 1, channels)``: the first context value, the mean of the context minus the
         anchor, and the scale. A value ``v`` standardizes to ``((v - anchor) - offset) / scale`` and a standardized forecast ``f``
         de-standardizes to ``(f * scale + offset) + anchor``. The three are kept apart, never summed into one mean: the sums
@@ -76,7 +79,7 @@ from dl_techniques.utils.logger import logger
 from train.api.forecast_args import BUILTIN, CSV, TimeSeriesData
 from train.api.forecast_series import (
     FLAT_ABSOLUTE, SELECT_WINDOWS_PER_SERIES, check_csv_level, check_segments, check_select_moves, context_spread, csv_window_count, flat_windows,
-    read_csv_series, refuse, segment_windows, split_bounds, window_count,
+    read_csv_series, refuse, segment_windows, served_values, split_bounds, window_count,
 )
 from train.common.pretrain_data import SELECT_SALT, TEST_SALT, derive_stream_seed
 
@@ -92,11 +95,12 @@ EPOCH_STEPS = 500
 # ---------------------------------------------------------------------
 
 
-def context_stats_np(context: np.ndarray, scale_floor: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def context_stats_np(context: np.ndarray, scale_floor: float, *, served: bool = False) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """``(anchor, offset, scale)`` of ``(..., lookback, channels)`` over the time axis, each ``(..., 1, channels)`` float64.
 
     The anchor is the FIRST context value, the offset the mean of the context minus the anchor and the scale the POPULATION std
     (ddof 0); a context whose std is not above ``max(FLAT_ABSOLUTE, scale_floor * mean|x|)`` is FLAT and has ``UNIT_SCALE``.
+    ``served=True`` takes that decision on the float32 value of the context (what the exported file sees), the numbers stay float64.
     """
     # DECISION plan-2026-11-13T105600-3a8319ef/D-005
     # The statistics come from the CONTEXT only, and the TARGET is divided by the same numbers. Do NOT
@@ -113,6 +117,12 @@ def context_stats_np(context: np.ndarray, scale_floor: float) -> Tuple[np.ndarra
     anchor = context[..., :1, :]
     offset = (context - anchor).mean(axis=-2, keepdims=True)
     std, flat = context_spread(context, scale_floor)   # the one flat rule (forecast_series): the csv check and the counts read it too
+    if served:
+        # DECISION plan-2026-11-13T105600-3a8319ef/D-048
+        # `predict` takes float64 windows and the file raw float32 ones: the decision is read off the float32 value of the context (the same
+        # `served_values` + `context_spread` that `flat_contexts` uses for the flag), the std stays float64 so a shift is still held to the
+        # float64 limit. Do NOT cast the whole window: that rounds a level of 1e5 to 0.0078 and `predict` loses its shift invariance.
+        flat = context_spread(served_values(context), scale_floor)[1]
     return anchor, offset, np.where(flat, UNIT_SCALE, std)
 
 

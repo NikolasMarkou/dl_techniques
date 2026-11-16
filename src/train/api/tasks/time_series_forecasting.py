@@ -562,6 +562,13 @@ class TimeSeriesForecastingTrainer(TaskTrainer):
             "which never influenced selection; `canonical_metrics` holds the post-hoc MAE, RMSE, sMAPE, rMAE, MASE (scaled by "
             "the context's one-step differences) and, for a quantile head, coverage and sharpness",
         ]
+        if data.flat_windows["select"] > 0.5 * data.n_select:
+            # D-048 (review pass 4 NOTE 4): a flat window is scored in the series' raw unit, so with most of them flat the bar is a number of that unit
+            notes.append(
+                f"{data.flat_windows['select']} of the {data.n_select} selection windows are flat and scored in the series' own unit, so `val_mae`, "
+                "the baselines and the bar are mostly in the unit the data is written in and change when the column is rescaled (a held "
+                "policy rate in percent and in basis points: naive-last MAE 0.012 and 1.202)"
+            )
         notes.append(
             "the model analysis is data-free (weights and spectral only; `analyzer.analyzers` lists them): the stock analyses "
             "read class probabilities, which a forecast is not"

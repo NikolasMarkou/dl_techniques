@@ -57,15 +57,19 @@ Interface contract
     :raises ConfigError: when every value column is constant over the select ``segment``: every window is flat, so naive-last
         and seasonal-naive score exactly 0 and the bar (strictly below them) can be neither met nor judged.
 
-``context_spread(context, scale_floor)`` / ``flat_contexts(contexts, scale_floor, *, resolution=False)`` / ``flat_windows(bank, positions, lookback, scale_floor, *, resolution=False)`` / ``segment_windows(n_series, segment, width, stride)``
+``served_values(contexts)`` / ``context_spread(context, scale_floor)`` / ``flat_contexts(contexts, scale_floor, *, resolution=False)`` / ``flat_windows(bank, positions, lookback, scale_floor, *, resolution=False)`` / ``segment_windows(n_series, segment, width, stride)``
     The ONE flatness rule, as numpy: a context is flat when its std about its first value is not above ``max(FLAT_ABSOLUTE, scale_floor * mean|x|)``.
     ``context_spread`` returns ``(std, flat)`` of ``(..., lookback, channels)`` contexts, each ``(..., 1, channels)``; ``flat_contexts`` is the bool
     ``(n,)`` of contexts flat in SOME channel (a constant column makes every window flat), the one answer ``predict``'s ``flat`` and the loader's
-    counts give; ``resolution=True`` ignores a channel with std 0 (an exactly constant window is genuine, D-047). ``flat_windows`` is
+    counts give, decided on the FLOAT32 value of the context (``served_values``), as the exported file is handed raw float32 windows (D-048);
+    ``resolution=True`` is the csv check's question about the data as written, in float64, and ignores a channel with std 0 (an exactly constant
+    window is genuine, D-047). ``flat_windows`` is
     ``flat_contexts`` of the windows at ``positions`` (``(n, 2)`` ``(series, start)`` into ``bank`` ``(series, rows, channels)``);
     ``segment_windows`` is every window of every series whose targets are ``stride`` apart inside a ``segment``. The tf and keras-ops twins in
     ``train.common.forecast_data`` write the same comparison with ``FLAT_ABSOLUTE``, a test holds them equal at the threshold and one float32
-    ulp either side, and the float32 export and the float64 rule can decide differently only within two float32 steps of the threshold.
+    ulp either side, and the float32 export and ``flat_contexts`` (same values, float32 against float64 arithmetic) can decide differently only
+    within two float32 steps of the threshold; the float64 rule alone (``context_spread`` of a float64 window, what the training function reads) is clear of the
+    float32 file only beyond about 1 percent of the threshold (D-048).
 
 ``check_csv_level(values, names, *, lookback, horizon, select_fraction, test_fraction, scale_floor)``
     :param values: the csv's ``(rows, channels)`` array; ``names`` its value columns; ``lookback`` and ``horizon`` the RESOLVED window;
@@ -73,8 +77,10 @@ Interface contract
     :raises ConfigError: for the first column whose nonzero max |x| is outside ``FLOAT32_RANGE`` (the exported function runs in
         float32), and for the first segment (train, select, test) of which more than ``FLAT_SHARE`` of the windows at stride
         ``horizon`` are RESOLUTION-flat (std above 0, not above the threshold: the level is too large for float32 to resolve the
-        spread, so the run would mix units). The sentence names the segment, the count, the first window's rows and the one remedy
-        (subtract the level); an exactly constant window is genuine and never refused (D-047). Called by the pre-claim check and the loader.
+        spread, so the run would mix units). The sentence names the segment, the count, the first window's rows and the remedies: where the relative
+        term binds (the level is too large against the spread) subtract the level or take a first or seasonal difference, where the absolute
+        term binds (``FLAT_ABSOLUTE``, a column too small) multiply the column by a power of ten and say that ``scale_floor`` cannot lower it;
+        an exactly constant window is genuine and never refused (D-047). Called by the pre-claim check and the loader.
 
 ``refuse(message)``
     :raises ConfigError: always; the one spelling of "this configuration is refused" of the forecasting data.
@@ -98,8 +104,16 @@ if TYPE_CHECKING:  # annotations only; the runtime imports are inside the functi
 SELECT_WINDOWS_PER_SERIES = 8
 #: A csv is refused when more than this share of the windows of a segment have an unresolved spread (see ``check_csv_level``).
 FLAT_SHARE = 0.1
-#: A context whose std is not above this is flat whatever ``scale_floor`` says: the float32 export squares deviations and cannot resolve less (D-047).
-FLAT_ABSOLUTE = 1e-15
+# DECISION plan-2026-11-13T105600-3a8319ef/D-048
+# 1e-18 is where float32 STOPS resolving (measured in scratch_red/step22/w2_threshold_probe.txt: the float32 std of a window at a std of 1e-19 is 0
+# in 92 to 100 percent of the windows, at 1e-18 it is within 1.2e-3 of the float64 std, at 1e-17 within 6e-6, above that within 1.3e-7), and it is the
+# largest number that never binds inside the accepted range: at the lowest accepted level 1e-12 the DEFAULT relative term is
+# 1e-6 * 1e-12 = 1e-18 already. D-047 chose 1e-15 by "four orders of margin over the underflow", which flattened column ranges float32 resolves well (a
+# column at 1e-11 with a window std of 3.7e-16 was refused as a level too large, and forecast in raw units, 7.3e8 times its own level, by predict).
+# Do NOT raise it "for margin" and do NOT lower it below 1e-19 (the squares underflow: the float32 file would divide by a std of 0).
+#: A context whose std is not above this is flat whatever ``scale_floor`` says: the float32 export squares deviations, a square below 1.2e-38 is
+#: flushed, and a window std of 1e-19 comes out 0 there while 1e-18 comes out within 1.2e-3 of the float64 std (D-048).
+FLAT_ABSOLUTE = 1e-18
 #: The nonzero max |x| a csv column may have: the exported function squares deviations in float32 (1e-24 to 1e30 stays inside it).
 FLOAT32_RANGE = (1e-12, 1e15)
 
@@ -259,11 +273,29 @@ def context_spread(context: "np.ndarray", scale_floor: float) -> "Tuple[np.ndarr
     return std, std <= np.maximum(FLAT_ABSOLUTE, scale_floor * np.abs(context).mean(axis=-2, keepdims=True))
 
 
-def flat_contexts(contexts: "np.ndarray", scale_floor: float, *, resolution: bool = False) -> "np.ndarray":
-    """The bool ``(n,)`` of contexts ``(n, lookback, channels)`` flat in some channel (the ONE answer to "is this window flat"); ``resolution=True`` ignores a channel with std 0."""
+def served_values(contexts: "np.ndarray") -> "np.ndarray":
+    """The float32 value of every cell of ``contexts``, as float64: what the exported file is handed (raw float32 windows, D-048)."""
     import numpy as np
 
-    std, flat = context_spread(contexts, scale_floor)
+    return np.asarray(contexts, np.float32).astype(np.float64)
+
+
+def flat_contexts(contexts: "np.ndarray", scale_floor: float, *, resolution: bool = False) -> "np.ndarray":
+    """The bool ``(n,)`` of contexts ``(n, lookback, channels)`` flat in some channel (the ONE answer to "is this window flat").
+
+    Decided on the FLOAT32 value of the context (:func:`served_values`), as the exported file decides it. ``resolution=True`` is the
+    csv check's question instead, about the data as written: float64, ignoring a channel with std 0.
+    """
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-048
+    # The file is handed raw float32 windows and `predict` float64 ones: the float64 rule and the float32 function disagreed on 228 of 400
+    # windows at 1e-5 of the threshold and on 142 at -0.1 percent (a band of about 1 percent, 80,000 float32 steps; the "two float32 steps"
+    # of D-047 was measured on windows built float32-exact). The decision is taken here on the float32 value, once, and `predict` (the flag) and
+    # `context_stats_np(..., served=True)` (the scale) both go through it, so the flag, the scale and the file read the same numbers. Do NOT
+    # decide on the float64 window again, and do NOT cast for `resolution=True`: at 1e12 a float32 cell is 65536 apart, a spread of 5.6 rounds to one
+    # value (std 0, "exactly constant") and the csv check, which is about the spread the file cannot hold, would accept the series it exists to refuse.
+    import numpy as np
+
+    std, flat = context_spread(contexts if resolution else served_values(contexts), scale_floor)
     return (flat & (std > 0) if resolution else flat).reshape(len(contexts), -1).any(axis=1)
 
 
@@ -301,8 +333,14 @@ def check_csv_level(
     # float32 range is checked first: a std over 1e200 overflows float64 and 1e40 trains but its keras file returns NaN.
     # DECISION plan-2026-11-13T105600-3a8319ef/D-047
     # Only RESOLUTION-flat windows (std above 0 but not above the threshold: the level is too large for float32 to resolve the spread)
-    # are refused; an EXACTLY constant one (std 0: a held rate, zeros, an outage) is genuine, so do NOT refuse it. Do NOT advise
-    # differencing (a shifted series differenced is as shifted) or cutting rows (no gap handling), and do NOT blame `format`.
+    # are refused; an EXACTLY constant one (std 0: a held rate, zeros, an outage) is genuine, so do NOT refuse it. Do NOT cut rows
+    # (no gap handling) and do NOT blame `format`.
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-048
+    # D-047 said differencing does not help ("the difference of a shifted series is as shifted") and that is FALSE: a first or a 24-lag difference
+    # removes a constant level exactly (measured: series shifted by 1e7, 1e9, 1e12 are refused, their differences are accepted and equal the unshifted one
+    # to the float64 ulp of the shift, scratch_review4/p5_difference.log). Name it, with its price: the model then forecasts differences, not values. Do NOT
+    # call the level "too large" where the ABSOLUTE term binds (a window spread at or below FLAT_ABSOLUTE, a column that is too SMALL): there the
+    # remedy is a power of ten, and `scale_floor` cannot lower that term.
     import numpy as np
 
     low, high = FLOAT32_RANGE
@@ -318,12 +356,24 @@ def check_csv_level(
         flat = flat_windows(bank, positions, lookback, scale_floor, resolution=True)
         if flat.sum() > FLAT_SHARE * flat.size:
             first = int(positions[flat.argmax(), 1])
+            window = bank[0, first:first + lookback]
+            std, hidden = context_spread(window, scale_floor)
+            hidden = (hidden & (std > 0))[0]                                   # the resolution-flat channels of the first such window
+            relative = scale_floor * np.abs(window).mean(axis=0)[hidden].max()   # the largest relative term among them
             refuse(
                 f"{int(flat.sum())} of {flat.size} windows of the {segment} segment have an unresolved spread (std above 0 but not above "
                 f"max({FLAT_ABSOLUTE:g}, transform_args.scale_floor {scale_floor:g} * mean |x|); the first at rows {first} to "
-                f"{first + lookback - 1}, counting from 0), more than {FLAT_SHARE:.0%}: the level of the column is too large against its "
-                "spread for float32, so such a window is trained and scored in the series' raw units and the run would mix two units. "
-                "Subtract the level (the series mean, or a trend) from the column first and add it back to the forecast")
+                f"{first + lookback - 1}, counting from 0), more than {FLAT_SHARE:.0%}: "
+                + (
+                    "the level of the column is too large against its spread for float32, so such a window is trained and scored in the "
+                    "series' raw units and the run would mix two units. Subtract the level (the series mean, or a trend) from the column "
+                    "first and add it back to the forecast, or give the model the first or the seasonal difference of the column (the "
+                    "forecast is then of differences, not values); rescale the result to about 1 if its peak is then below 1e-12"
+                    if relative >= FLAT_ABSOLUTE else
+                    f"the values of the column are too small for float32, whose squares cannot resolve a spread of {FLAT_ABSOLUTE:g} or "
+                    "less, so such a window is trained and scored in the series' raw units and the run would mix two units. Multiply "
+                    "the column by a power of ten (change its unit) so that a window spread is well above it; "
+                    "transform_args.scale_floor cannot lower the absolute term"))
 
 
 def _check_time_column(column: "pd.Series", name: str) -> None:

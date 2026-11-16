@@ -311,8 +311,11 @@ class ForecastTransformArgs(StrictConfig):
         metadata={
             "help": "flatness threshold, relative to the mean absolute value of a window's context: a context whose std is not "
             "above scale_floor * mean |context| is flat and is not divided (its scale is 1, the series' own unit); any other "
-            "context is divided by its std. A csv whose columns vary by less than this share of their level is refused "
-            "(float32 cannot resolve it: remove the level). The default is about eight float32 steps of relative resolution; at least 0"
+            "context is divided by its std. A csv is refused when more than 10 percent of the windows of a segment have a spread "
+            "above 0 that is not above this threshold (float32 cannot resolve it: remove the level, or difference the column). The "
+            "threshold never falls below an absolute 1e-18 that this field cannot lower (a column that small: multiply it by a power of "
+            "ten), and at 0 a series whose level hides its spread is admitted, but its exported files carry the float32 rounding of the "
+            "level. The default is about eight float32 steps of relative resolution; at least 0"
         },
     )
 

@@ -976,12 +976,13 @@ def review_series(amp: float = 1.0, rows: int = 3000) -> np.ndarray:
 
 def flat_oracle(bank: np.ndarray, positions, lookback: int, floor: float, resolution: bool = False) -> np.ndarray:
     """The flat rule written window by window (D-047): a channel is flat when its std about its first value is at most
-    ``max(1e-15, floor * mean|x|)``; a window is flat when any channel is, and RESOLUTION-flat when a flat channel has std above 0."""
+    ``max(1e-18, floor * mean|x|)`` (the guard is a literal here on purpose: it is not read from the module under test); a window is
+    flat when any channel is, and RESOLUTION-flat when a flat channel has std above 0."""
     out = []
     for s, a in positions:
         c = bank[s, a:a + lookback]
         std = (c - c[0]).std(axis=0)
-        flat = std <= np.maximum(1e-15, floor * np.abs(c).mean(axis=0))
+        flat = std <= np.maximum(1e-18, floor * np.abs(c).mean(axis=0))
         out.append(bool((flat & (std > 0) if resolution else flat).any()))
     return np.array(out)
 
@@ -995,25 +996,83 @@ class TestTheFlatWindowShareOfACsv:
     """The csv check counts the windows of each segment at stride = horizon whose spread the level hides (D-047).
 
     Two kinds of flat window: EXACTLY constant (std 0: a held rate, zeros, an outage) is genuine, scored in raw units, counted and
-    flagged and never refused; RESOLUTION-flat (std above 0, not above ``max(1e-15, scale_floor * mean|x|)``) is the level swallowing
+    flagged and never refused; RESOLUTION-flat (std above 0, not above ``max(1e-18, scale_floor * mean|x|)``) is the level swallowing
     the spread, and more than 10 percent of a segment of them is refused."""
 
     @pytest.mark.parametrize("offset", [0.0, 1e3, 1e5, 1e6])
     def test_a_level_within_the_bound_passes(self, offset):
         fs.check_csv_level((review_series() + 50 + offset)[:, None], ["v"], **REVIEW)
 
-    @pytest.mark.parametrize("offset", [1e7, 2e7, 1e9])
+    @pytest.mark.parametrize("offset", [1e7, 2e7, 1e9, 1e12])
     def test_the_review_csv_shifted_beyond_the_bound_is_refused_with_the_segment_the_count_and_the_remedy(self, offset):
-        """The review probe: shifted by 1e7 every select window was flat and the run trained in raw units without a word."""
+        """The review probe: shifted by 1e7 every select window was flat and the run trained in raw units without a word. The two
+        remedies named are the ones that work (pass 4 W1): subtract the level, or take a first or seasonal difference of the column."""
         with pytest.raises(ConfigError) as raised:
             fs.check_csv_level((review_series() + 50 + offset)[:, None], ["v"], **REVIEW)
         text = str(raised.value)
         found = re.search(r"(\d+) of (\d+) windows of the (train|select|test) segment have an unresolved spread", text)
         assert found and int(found[1]) == int(found[2]), text
         assert "too large against its spread" in text and "raw units" in text and "Subtract the level" in text, text
-        for word in ("differenc", "cut", "format", "fill"):
+        assert "first or the seasonal difference" in text and "differences, not values" in text, text
+        for word in ("does not help", "as shifted", "cut", "format", "fill"):
             assert word not in text, f"{word!r}: advice that does not help here (or blames the wrong key): {text}"
+        assert "too small for float32" not in text and "Multiply" not in text, "the unit remedy belongs to the tiny-spread sentence"
         assert re.search(r"the first at rows 0 to \d+", text), text
+
+    @pytest.mark.parametrize("shift", [1e7, 1e9, 1e12])
+    def test_differencing_a_shifted_column_is_a_working_remedy(self, shift):
+        """Review pass 4 W1 (probe ``p5_difference.py``): a shifted series is refused, and its first difference and its 24-lag
+        difference are accepted and equal the unshifted one; the old text said "the difference of a shifted series is as shifted"."""
+        rng = np.random.default_rng(7)
+        t = np.arange(3000)
+        x = 0.3 * rng.normal(size=3000).cumsum() + 2 * np.sin(2 * np.pi * t / 24)
+        shifted = x + shift
+        with pytest.raises(ConfigError, match="have an unresolved spread"):
+            fs.check_csv_level(shifted[:, None], ["v"], **REVIEW)
+        for lag in (1, 24):
+            diff = shifted[lag:] - shifted[:-lag]
+            fs.check_csv_level(diff[:, None], ["v"], **REVIEW)
+            # float64 holds the level to 1 part in 1e16: the difference is the unshifted one to ulp(shift) and no worse
+            assert np.abs(diff - (x[lag:] - x[:-lag])).max() <= 4 * np.spacing(shift), (shift, lag)
+
+    @pytest.mark.parametrize("level, spread", [(1e-11, 5e-16), (5e-10, 2e-15), (1e-12, 5e-16), (1e-12, 3e-17), (1e-12, 3e-18)])
+    @pytest.mark.parametrize("floor", [1e-6, 0.0])
+    def test_a_small_unit_column_with_a_spread_float32_resolves_is_not_refused(self, level, spread, floor):
+        """Review pass 4 W2: a column at 1e-11 with a window std of 3.7e-16 (3.7e-5 of its level, 3.1e2 float32 steps) was refused
+        as a "level too large" with a remedy that failed, because the absolute guard was 1e-15 and not where float32 stops resolving
+        (about 1e-19, ``w2_threshold_probe``); the smallest accepted level is 1e-12, where the default floor is already 1e-18."""
+        rng = np.random.default_rng(3)
+        t = np.arange(3000)
+        shape = np.sin(2 * np.pi * t / 24) + 0.3 * rng.normal(size=3000)
+        fs.check_csv_level((level + spread * shape)[:, None], ["v"], **{**REVIEW, "scale_floor": floor})
+
+    def test_a_spread_below_the_guard_names_the_unit_remedy_and_says_what_the_override_cannot_do(self):
+        """Where the ABSOLUTE term binds (the window spread is at or below ``FLAT_ABSOLUTE``, which float32 cannot resolve) the level is not
+        too large: the column is too small. The sentence says to multiply it by a power of ten, that ``scale_floor`` cannot lower this
+        term (it is checked at 0, the strongest override), and the remedy it names works."""
+        rng = np.random.default_rng(3)
+        t = np.arange(3000)
+        column = 1e-12 + 1e-19 * (np.sin(2 * np.pi * t / 24) + 0.3 * rng.normal(size=3000))
+        for floor in (1e-6, 0.0):
+            args = {**REVIEW, "scale_floor": floor}
+            with pytest.raises(ConfigError) as raised:
+                fs.check_csv_level(column[:, None], ["v"], **args)
+            text = str(raised.value)
+            assert "have an unresolved spread" in text and re.search(r"the first at rows 0 to \d+", text), text
+            if floor == 0.0:    # the absolute term decides alone
+                assert "too small for float32" in text and "Multiply the column by a power of ten" in text, text
+                assert "transform_args.scale_floor cannot lower" in text and "too large" not in text, text
+            else:               # at 1e-12 the relative term (1e-18) is the larger one: the level is the cause
+                assert "too large against its spread" in text and "too small for float32" not in text, text
+        fs.check_csv_level((column * 1e6)[:, None], ["v"], **{**REVIEW, "scale_floor": 0.0})
+
+    def test_the_override_lowers_the_relative_term_and_the_run_it_admits_is_accepted(self):
+        """``transform_args.scale_floor`` is read by the check: a series at 1e7 over a window std of 5.6 is refused at the default and
+        accepted at 0, where the exported files carry the float32 rounding of the level (one window std at 1e7 over a std of 1: README)."""
+        column = (review_series() + 1e7)[:, None]
+        with pytest.raises(ConfigError, match="have an unresolved spread"):
+            fs.check_csv_level(column, ["v"], **REVIEW)
+        fs.check_csv_level(column, ["v"], **{**REVIEW, "scale_floor": 0.0})
 
     def test_the_review_mix_of_160_times_the_spread_at_1e9_is_refused(self):
         with pytest.raises(ConfigError, match=r"\d+ of \d+ windows of the (train|select|test) segment have an unresolved spread"):
@@ -1117,7 +1176,8 @@ class TestTheFlatWindowShareOfACsv:
         bank = rng.normal(size=(3, 400, 2)) * np.array([1.0, 1e-3]) + np.array([5.0, 1e4])
         bank[0, 100:160, 0] = 2.0
         bank[1, :, 1] = 9.0
-        bank[2, 50:120, 0] = 1e-18 * rng.normal(size=70)
+        bank[2, 50:120, 0] = 1e-19 * rng.normal(size=70)     # below the guard: flat at every floor
+        bank[2, 200:270, 0] = 1e-17 * rng.normal(size=70)    # above it: flat only where the floor says so (at 0.0: not flat)
         positions = np.stack([rng.integers(0, 3, 300), rng.integers(0, 400 - LOOKBACK + 1, 300)], axis=1)
         for floor in (1e-6, 1e-3, 1e-1, 0.0):
             for resolution in (False, True):
@@ -1177,17 +1237,76 @@ class TestTheOneFlatRuleAtItsThreshold:
 
         for fn in (fd.standardize_tf, fd.context_stats_ops, fs.context_spread):
             assert "FLAT_ABSOLUTE" in inspect.getsource(fn), fn.__name__
-        assert fd.FLAT_ABSOLUTE is fs.FLAT_ABSOLUTE and fs.FLAT_ABSOLUTE == 1e-15
+        assert fd.FLAT_ABSOLUTE is fs.FLAT_ABSOLUTE and fs.FLAT_ABSOLUTE == 1e-18
+
+
+class TestTheFlatDecisionIsTheFilesOnFloat64Windows:
+    """D-048 (review pass 4 W3): the exported file reads RAW FLOAT32 windows and decides flatness on those values; ``predict`` takes float64
+    windows. The decision (``flat_contexts``, ``context_stats_np(..., served=True)``) is taken on the float32 value of the window, so the
+    two agree on every float64 window whose std is not within float32 arithmetic noise (a few 1e-7 of the threshold) of it. Before, the
+    float64 rule disagreed with the float32 function on 228 of 400 windows at 1e-5 of the threshold, 142 at -0.1 percent, 84 at +0.1 percent."""
+
+    FLOOR, LENGTH, COUNT = 1e-6, 168, 200
+
+    def near_threshold(self, k: float) -> np.ndarray:
+        """float64 windows ``(n, 168, 1)`` at levels 1e-3 to 1e9 with std = threshold * (1 + k) (the review's construction, p1 part C)."""
+        rng = np.random.default_rng(22)
+        level = 10.0 ** rng.uniform(-3, 9, size=(self.COUNT, 1, 1))
+        e = rng.normal(size=(self.COUNT, self.LENGTH, 1))
+        e = (e - e.mean(axis=1, keepdims=True)) / e.std(axis=1, keepdims=True)
+        return level + e * level * self.FLOOR * (1 + k)
+
+    @pytest.mark.parametrize("k", [-1e-3, -1e-4, 1e-4, 1e-3])
+    def test_the_decision_on_a_float64_window_is_the_float32_functions(self, k):
+        windows = self.near_threshold(k)
+        file_flat = np.asarray(fd.context_stats_ops(windows.astype(np.float32), self.FLOOR)[2]).reshape(-1) == 1.0
+        assert (fs.context_spread(windows, self.FLOOR)[1].reshape(-1) != file_flat).any(), "vacuity: the float64 rule alone disagrees here"
+        np.testing.assert_array_equal(fs.flat_contexts(windows, self.FLOOR), file_flat)
+        np.testing.assert_array_equal(context_stats_np(windows, self.FLOOR, served=True)[2].reshape(-1) == 1.0, file_flat)
+
+    def test_the_flag_and_the_scale_of_predict_are_one_decision(self):
+        """``scale == 1`` is exactly the flag on windows whose std is never exactly 1 (the flag is any channel; here one channel)."""
+        for k in (-1e-3, 1e-3):
+            windows = self.near_threshold(k)
+            flag = fs.flat_contexts(windows, self.FLOOR)
+            np.testing.assert_array_equal(context_stats_np(windows, self.FLOOR, served=True)[2].reshape(-1) == 1.0, flag)
+            assert 0 < flag.sum() < len(flag), "vacuity: both decisions occur"
+
+    def test_the_stats_stay_float64_so_a_shift_is_still_held_by_predict(self):
+        """Only the DECISION reads the float32 value: anchor, offset and std are the float64 ones (shift invariance of ``predict``)."""
+        rng = np.random.default_rng(4)
+        windows = 1e5 + 5.8 * rng.normal(size=(8, 32, 2))
+        for got, want in zip(context_stats_np(windows, self.FLOOR, served=True), context_stats_np(windows, self.FLOOR)):
+            np.testing.assert_array_equal(got, want)
+
+    def test_resolution_flat_is_judged_on_the_data_as_written_and_not_on_its_float32_value(self):
+        """At 1e12 float32 steps are 65536: a window with a spread of 5.6 holds ONE float32 value, so the served decision calls it
+        flat with std 0 (exactly constant); the csv check must still see the spread the file cannot hold (``resolution=True`` reads float64)."""
+        rng = np.random.default_rng(5)
+        windows = 1e12 + 5.6 * rng.normal(size=(6, 32, 1))
+        assert (fs.served_values(windows) == fs.served_values(windows)[:, :1]).all(), "vacuity: float32 holds one value"
+        assert fs.flat_contexts(windows, self.FLOOR).all()
+        assert fs.flat_contexts(windows, self.FLOOR, resolution=True).all()
 
 
 class TestTheAbsoluteFlatGuard:
-    """D-047 (review pass 3 NOTE 3): a stretch near 1e-18 in a column whose peak is 1.0 is flat in every twin, so the float32 export, which
-    squares deviations, cannot disagree with ``predict`` about it (the review measured 2e17 window stds)."""
+    """The guard ``FLAT_ABSOLUTE = 1e-18`` (D-048, which replaced D-047's 1e-15): a window whose std is not above it is flat in every
+    twin at any ``scale_floor``, because the float32 function squares deviations and a square below 1.2e-38 is flushed (std 1e-19 and below
+    comes out 0). It sits where the float32 std stops being resolved, and not above: at the smallest accepted level 1e-12 the DEFAULT
+    relative term (1e-6 of the level) is 1e-18 already, so the guard never binds on a window inside the accepted range at the default floor."""
 
-    def stretch(self, spread: float) -> np.ndarray:
-        return (spread * np.random.default_rng(8).normal(size=(3, LOOKBACK, 1))).astype(np.float64)
+    def stretch(self, spread: float, level: float = 0.0) -> np.ndarray:
+        return (level + spread * np.random.default_rng(8).normal(size=(3, LOOKBACK, 1))).astype(np.float64)
 
-    @pytest.mark.parametrize("spread", [1e-18, 1e-17, 3e-16])
+    @staticmethod
+    def float32_std(context: np.ndarray) -> np.ndarray:
+        """The std the exported function computes before its flat rule: float32 TensorFlow ops, deviations from the first value."""
+        x = tf.constant(np.asarray(context, np.float32))
+        shifted = x - x[:, :1]
+        offset = tf.reduce_mean(shifted, axis=1, keepdims=True)
+        return tf.sqrt(tf.reduce_mean(tf.square(shifted - offset), axis=1)).numpy()[:, 0].astype(np.float64)
+
+    @pytest.mark.parametrize("spread", [1e-19, 3e-20, 1e-21])
     def test_a_tiny_spread_is_flat_with_the_unit_scale_in_numpy_tf_and_float32_ops(self, spread):
         context = self.stretch(spread)
         assert fs.flat_contexts(context, 1e-6).all() and fs.flat_contexts(context, 0.0).all(), "flat at any scale_floor"
@@ -1198,12 +1317,35 @@ class TestTheAbsoluteFlatGuard:
         shifted = context - context[:, :1]
         np.testing.assert_allclose(x.numpy(), (shifted - shifted.mean(1, keepdims=True)).astype(np.float32), rtol=1e-5, atol=1e-30)
 
-    @pytest.mark.parametrize("spread", [3e-15, 1e-13, 1e-9])
+    @pytest.mark.parametrize("spread", [3e-18, 3e-17, 3e-15, 1e-13, 1e-9])
     def test_a_spread_above_the_guard_is_not_flat_at_a_level_it_can_resolve(self, spread):
         context = self.stretch(spread)
         assert not fs.flat_contexts(context, 1e-6).any(), spread
-        assert (context_stats_np(context, 1e-6)[2] > 1e-15).all()
-        assert (np.asarray(fd.context_stats_ops(np.asarray(context, np.float32), 1e-6)[2]) > 1e-15).all()
+        assert (context_stats_np(context, 1e-6)[2] > 1e-18).all()
+        assert (np.asarray(fd.context_stats_ops(np.asarray(context, np.float32), 1e-6)[2]) > 1e-18).all()
+
+    @pytest.mark.parametrize("level, spread", [(1e-11, 5e-16), (1e-12, 5e-17), (5e-10, 2e-15), (1e-12, 3e-18), (3e-12, 2e-17)])
+    @pytest.mark.parametrize("floor", [1e-6, 0.0])
+    def test_a_window_inside_the_accepted_range_with_a_resolved_spread_is_not_flat_in_any_twin(self, level, spread, floor):
+        """Review pass 4 W2 (a column at 1e-11, window std 3.7e-16, was flat and forecast in raw units, 7.3e8 times its own level)."""
+        context = self.stretch(spread, level)
+        assert not fs.flat_contexts(context, floor).any() and not fs.context_spread(context, floor)[1].any(), (level, spread, floor)
+        scale = context_stats_np(context, floor)[2]
+        ops_scale = np.asarray(fd.context_stats_ops(np.asarray(context, np.float32), floor)[2])
+        assert (scale > 1e-18).all() and (ops_scale > 1e-18).all() and (scale != 1.0).all() and (ops_scale != 1.0).all()
+        np.testing.assert_allclose(ops_scale.ravel(), scale.ravel(), rtol=2e-2)    # float32 squares of 1e-36: a few 1e-4, not 1.0
+
+    def test_the_guard_sits_where_the_float32_std_stops_being_resolved(self):
+        """The measured edge (``scratch_red/step22/w2_threshold_probe.txt``): at 3 times the guard the float32 std is within 1 percent of
+        the float64 std of the same values, at a tenth of it every float32 std is 0. A guard above this edge flattens resolved windows
+        (the test above), one below it lets a window whose float32 std is 0 be divided by."""
+        guard = fs.FLAT_ABSOLUTE
+        assert guard == 1e-18, "the number the documents print"
+        resolved = self.stretch(3 * guard)
+        held = resolved.astype(np.float32).astype(np.float64)
+        np.testing.assert_allclose(self.float32_std(resolved), (held - held[:, :1]).std(axis=1)[:, 0], rtol=1e-2)
+        assert (self.float32_std(self.stretch(guard / 10)) == 0.0).all(), "below it the float32 function cannot see the spread"
+        assert (self.float32_std(self.stretch(guard / 10, level=1e-12)) == 0.0).all()
 
 
 class TestTheFloat32RangeOfACsv:

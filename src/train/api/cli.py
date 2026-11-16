@@ -306,9 +306,9 @@ EXPORT_NOTES = (
     "(batch, horizon, channels) in the same units. A quantile head gives {point, quantiles} from keras and",
     "saved_model and the point alone from tflite and onnx. A timestral file takes ONE window per call. Refused with",
     "the reason: tflite of timestral, and onnx of xlstm, ets and timestral. A tflite of tirex, xlstm or ets needs the",
-    "Flex delegate (select TF operators). A window whose std is not above max(1e-15, scale_floor * mean|x|) is flat: it is",
-    "forecast in the raw units, in the file and in predict alike; the two can decide that differently only within two float32",
-    "steps of the threshold. The exported .keras file is not a run: predict takes the run directory.",
+    "Flex delegate (select TF operators). A window whose std is not above max(1e-18, scale_floor * mean|x|) is flat: it is",
+    "forecast in the raw units, in the file and in predict alike; both decide on the float32 value of the window, so they can",
+    "differ only within two float32 steps of the threshold. The exported .keras file is not a run: predict takes the run directory.",
     "The forecaster's .keras file names ServedForecaster, a class of the train package, which the wheel does not ship:",
     "it loads only where the train package is importable (the source tree on the path, or an editable install).",
 )

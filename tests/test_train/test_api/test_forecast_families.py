@@ -910,6 +910,14 @@ def fresh_check(tmp_path, given: dict, recipe=None):
     return answer["refused"], answer["heavy"]
 
 
+def blank_line_csv(path, source):
+    """A copy of the csv ``source`` with an empty line after its 100th data row (the blank line is frame index 100)."""
+    lines = Path(source).read_text().split("\n")
+    lines.insert(1 + 99 + 1, "")
+    Path(path).write_text("\n".join(lines))
+    return str(path)
+
+
 def refusal_cases(tmp_path):
     """``{name: (data mapping, text the refusal must contain)}``; every file is written under ``tmp_path``."""
     good = write_csv(tmp_path / "good.csv", 400)
@@ -932,6 +940,9 @@ def refusal_cases(tmp_path):
         "a dataset that is not the synthetic bank": ({"dataset": "etth1"}, "'dataset'"),
         "a non-numeric cell": ({"format": "csv", "path": write_csv(tmp_path / "n.csv", 400, extra={(3, "b"): "abc"})}, "not numeric"),
         "a non-finite cell": ({"format": "csv", "path": write_csv(tmp_path / "f.csv", 400, extra={(3, "b"): "nan"})}, "non-finite"),
+        # review pass 4 NOTE 7: a blank line was skipped by pandas and the series after it shifted by one step with no word said
+        "a blank line": ({"format": "csv", "path": blank_line_csv(tmp_path / "blank.csv", write_csv(tmp_path / "g.csv", 400))},
+                         "non-finite cell(s), the first at row 100"),
     }
 
 
@@ -940,7 +951,7 @@ CASE_NAMES = (
     "an unsorted time column", "a lookback below 1", "a lookback of 1", "a horizon below 1", "fractions that leave no train segment",
     "a segment shorter than lookback + horizon (builtin)", "a segment shorter than lookback + horizon (csv)",
     "the test segment is the short one", "a dataset that is not the synthetic bank", "a non-numeric cell",
-    "a non-finite cell",
+    "a non-finite cell", "a blank line",
 )
 
 

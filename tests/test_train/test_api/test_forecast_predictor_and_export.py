@@ -1011,12 +1011,12 @@ def test_a_file_agrees_with_predict_at_a_level_far_above_the_spread(case, fmt, l
         assert float((np.abs(quantiles - want["quantiles"]) - grid).max()) <= 1e-4 * float(std.min()), (case, fmt, level)
 
 
-@pytest.mark.parametrize("spread", [1e-18, 1e-16])
+@pytest.mark.parametrize("spread", [1e-19, 1e-20])
 def test_a_window_with_a_spread_below_the_absolute_guard_is_flat_in_the_file_and_in_predict(spread, world, tmp_path_factory):
-    """D-047 (review pass 3 NOTE 3): the float32 function squares deviations, so a window at 1e-18 (inside a column whose peak
-    is 1.0: the range check passes) had its std underflow in the file and not in ``predict`` (2e17 window stds apart). A window whose
-    std is not above 1e-15 is flat in both: the unit scale, the same forecast in raw units. The gap is in raw units here (the
-    forecast of a flat window is the model's output at the unit scale, not a multiple of the window's std)."""
+    """D-047 (review pass 3 NOTE 3), guard 1e-18 since D-048: the float32 function squares deviations, so a window at 1e-19 (inside a
+    column whose peak is 1.0: the range check passes) had its std underflow in the file and not in ``predict`` (2e17 window stds
+    apart). A window whose std is not above 1e-18 is flat in both: the unit scale, the same forecast in raw units. The gap is in raw
+    units here (the forecast of a flat window is the model's output at the unit scale, not a multiple of the window's std)."""
     path = export_cell("nbeats", "keras", tmp_path_factory)
     run = trained_case("nbeats", tmp_path_factory)
     windows = np.asarray(spread * raw_windows(4, 1, seed=3), np.float32).astype(np.float64)
@@ -1024,6 +1024,71 @@ def test_a_window_with_a_spread_below_the_absolute_guard_is_flat_in_the_file_and
     got, _, _ = run_file(path, "keras", windows)
     assert want["flat"].all() and np.isfinite(got).all()
     assert float(np.abs(got - want["point"]).max()) < 1e-4 * (1.0 + float(np.abs(want["point"]).max())), (spread, got, want["point"])
+
+
+@pytest.mark.parametrize("fmt", ["keras", "saved_model"])
+@pytest.mark.parametrize("k", [-1e-3, 1e-3])
+def test_a_float64_window_near_the_flat_threshold_is_decided_alike_by_predict_and_the_file(k, fmt, world, tmp_path_factory):
+    """D-048 (review pass 4 W3): float64 windows at a level of 1e5 with a std 0.1 percent either side of the flat threshold. ``predict``
+    decided flatness on the float64 window and the file on its float32 value: at +0.1 percent ``predict`` flagged 0 of 16 and the file's
+    function 6 of 16, and the four files were 0.32 window stds from ``predict`` (0.039 std is the float32 grid of the forecast alone).
+    ``predict`` decides on the float32 value now: the flag is the file function's decision and the forecasts agree to the float32 grid."""
+    path = export_cell("nbeats", fmt, tmp_path_factory)
+    run = trained_case("nbeats", tmp_path_factory)
+    floor = run.record["scale_floor"]
+    e = raw_windows(16, 1, seed=3)
+    e = (e - e.mean(axis=1, keepdims=True)) / e.std(axis=1, keepdims=True)
+    windows = 1e5 + e * 1e5 * floor * (1 + k)                      # float64, not float32-exact; std = threshold * (1 + k)
+    want = run.predictor.predict(windows)
+    file_flat = np.asarray(fd.context_stats_ops(windows.astype(np.float32), floor)[2]).reshape(-1) == 1.0
+    assert (fs_context_flat(windows, floor) != file_flat).any(), "vacuity: the float64 rule alone decides differently on these windows"
+    np.testing.assert_array_equal(want["flat"], file_flat)
+    held = windows.astype(np.float32).astype(np.float64)
+    same = run.predictor.predict(held)
+    np.testing.assert_array_equal(same["flat"], want["flat"])
+    got, _, _ = run_file(path, fmt, windows)
+    grid = float(np.spacing(np.float32(abs(want["point"]).max())))
+    std = float(windows.std(axis=1).min())
+    # the same float32 windows: one decision, one set of numbers, the files agree to the float32 grid of the forecast
+    assert float((np.abs(got - same["point"]) - grid).max()) <= 1e-4 * std, (k, fmt)
+    # the float64 windows: the file is handed their float32 rounding (up to 0.0039 per cell at this level, 4 percent of the window std), which
+    # moves the standardized input; measured 0.06 std here, against 0.32 std when the two decided flatness differently
+    assert float((np.abs(got - want["point"]) - grid).max()) <= 0.1 * std, (k, fmt)
+
+
+def fs_context_flat(windows: np.ndarray, floor: float) -> np.ndarray:
+    """The float64 rule alone (``context_spread`` of the float64 window), one bool per window of one channel."""
+    from train.api.forecast_series import context_spread
+
+    return context_spread(windows, floor)[1].reshape(-1)
+
+
+def test_a_small_unit_window_with_a_resolved_spread_is_standardized_and_not_flat_in_file_and_predict(world, tmp_path_factory):
+    """D-048 (review pass 4 W2): a window at 1e-11 with a std of 5e-16 is inside the accepted range and well resolved by float32, so it
+    is standardized: the forecast is scale-equivariant (the same window times an exact power of two, 2**56, gives the forecast times it)
+    and the file agrees with ``predict``. Under the 1e-15 guard it was flat and forecast in raw units, 7.3e8 times its own level."""
+    path = export_cell("nbeats", "keras", tmp_path_factory)
+    run = trained_case("nbeats", tmp_path_factory)
+    e = raw_windows(8, 1, seed=3)
+    e = (e - e.mean(axis=1, keepdims=True)) / e.std(axis=1, keepdims=True)
+    windows = np.asarray(1e-11 + 5e-16 * e, np.float32).astype(np.float64)
+    k = 2.0 ** 56
+    small, big = run.predictor.predict(windows), run.predictor.predict(windows * k)
+    assert not small["flat"].any() and not big["flat"].any()
+    np.testing.assert_allclose(small["point"] * k, big["point"], rtol=1e-9)
+    assert float(np.abs(small["point"]).max()) < 1e-9, "the forecast is in the window's own unit (about 1e-11), not 1e-3 or more"
+    got, _, _ = run_file(path, "keras", windows)
+    std = windows.std(axis=1)[:, None, :]
+    assert float((np.abs(got - small["point"]) / std).max()) < 1e-3, "the file agrees with predict to a thousandth of the window std"
+
+
+@pytest.mark.parametrize("value", [3.5e38, -1e39, 1e300])
+def test_a_window_beyond_the_float32_range_is_refused_by_name_not_forecast_as_nan(value, one):
+    """D-048: ``predict`` reads the float32 value of the window (the file's), so a cell that float32 cannot hold is refused, not turned into infinity."""
+    window = raw_windows(1, 1, seed=3)[0].copy()
+    window[5, 0] = value
+    with pytest.raises(ConfigError, match=r"window 0 holds a value beyond the float32 range at row 5, column 0"):
+        one.predictor.predict(window)
 
 
 # --- the spec: rank 2 only for a rule whose shape_of returns it -------------------------------------
@@ -1218,20 +1283,22 @@ def test_the_requirement_of_the_keras_file_is_stated_in_the_note_the_help_and_th
 
 
 def test_the_note_the_help_and_the_readme_say_what_is_flat_and_where_the_file_and_predict_can_differ(one):
-    """D-047 (review pass 3 NOTE 3 and NOTE 4): a window with std not above max(1e-15, floor * mean|x|) is flat in file and ``predict``;
-    the two decide it differently only within two float32 steps of that threshold (measured, ``scratch_red/step_d/edge_width.txt``)."""
+    """D-047 (review pass 3 NOTE 3 and NOTE 4), D-048: a window with std not above max(1e-18, floor * mean|x|) is flat in file and ``predict``;
+    both decide on the float32 value of the window, so they differ only within two float32 steps of that threshold, for float64 windows too
+    (measured, ``scratch_red/step_d/edge_width.txt`` and ``scratch_red/step22/w3_agreement_probe.txt``)."""
     from train.api import forecast_predictor
     from train.api.forecast_series import FLAT_ABSOLUTE
 
-    assert FLAT_ABSOLUTE == 1e-15, "vacuity guard: the number the documents print"
-    words = ("max(1e-15,", "flat", "two float32 steps")
+    assert FLAT_ABSOLUTE == 1e-18, "vacuity guard: the number the documents print"
+    words = ("max(1e-18,", "flat", "two float32 steps", "float32 value of")
     note = forecast_predictor.export_note(one.record)
     assert all(word in note for word in words), note
     help_text = " ".join(" ".join(cli.EXPORT_NOTES).split())
     assert all(word in help_text for word in words), help_text
     readme = " ".join((SRC / "train" / "README.md").read_text().split())
-    assert "`max(1e-15, scale_floor * mean|x|)` is flat in the file and in `predict` alike" in readme
-    assert "within two float32 steps of that threshold" in readme and "within two float32 steps of the threshold" in readme
+    assert "`max(1e-18, scale_floor * mean|x|)` is flat in the file and in `predict` alike" in readme
+    assert "both decide on the float32 value of the window" in readme and "within two float32 steps of that threshold" in readme
+    assert "within two float32 steps of the threshold" in readme
 
 
 @pytest.mark.parametrize("case", list(CASES))
