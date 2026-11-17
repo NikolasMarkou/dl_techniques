@@ -27,9 +27,11 @@ Interface contract
     :return: ``{"point", "quantiles", "quantile_levels", "flat"}``: ``point`` is ``(N, horizon, channels)`` float64 in the series'
         own units (the median for a quantile head); ``quantiles`` is ``(N, horizon, channels, Q)`` and ``quantile_levels``
         the record's list for a quantile head, and both are ``None`` for a point head; ``flat`` is a bool ``(N,)``, True for a
-        window whose context is flat in a channel (std not above ``max(1e-18, scale_floor * mean |x|)``; a constant channel is flat),
-        which is forecast in the series' raw units, not standardized: the very rule the summary's ``flat_windows`` counts. The decision is taken on
-        the float32 value of the window (what the exported file is handed, D-048); the statistics stay float64. A window is forecast from its own statistics only, so a window scaled by a constant gives
+        window whose context is flat in a channel (std not above ``max(1.18e-38, scale_floor * mean |x|)``; a constant channel is flat),
+        which has no scale and is forecast in the series' raw units, not standardized: the model's output at about zero input added to the last
+        level, which means little where the series' unit is far from 1. It is the very rule the summary's ``flat_windows`` counts and that
+        training and scoring use. The decision is taken on the float32 value of the window (what the exported file is handed, D-048, D-049); the
+        statistics stay float64. A window is forecast from its own statistics only, so a window scaled by a constant gives
         the forecast scaled, and a window shifted by a constant the forecast shifted while its ``flat`` stays False.
     :raises ConfigError: for a window of another length or channel count, a non-finite or non-numeric value or one beyond the float32 range, an empty list or
         array, an input of another kind, and a csv that is missing, has too few rows, lacks a column, holds a non-numeric or
@@ -296,11 +298,11 @@ class ForecastPredictor:
         # fold anchor and offset into one mean (it is the same number in float64 here, but the twins must read alike).
         # DECISION plan-2026-11-13T105600-3a8319ef/D-048
         # Flatness is decided on the FLOAT32 value of the window, as the exported file decides it (it is handed raw float32 windows): the scale
-        # (`served=True`) and the flag (`flat_contexts`) both read `served_values` through `context_spread`, so the flag and the scale cannot
+        # (`context_stats_np`) and the flag (`flat_contexts`) both read `served_flat`, so the flag and the scale cannot
         # disagree and the file and `predict` agree on the flat decision wherever float32 arithmetic does. Do NOT decide on the float64 window
         # (the two disagreed on 142 of 400 windows at 0.1 percent below the threshold) and do NOT cast the whole window to float32 (`predict`
         # would lose its shift invariance at a level of 1e5: the anchor, the offset and the std stay float64).
-        anchor, offset, scale = forecast_data.context_stats_np(windows, self.record["scale_floor"], served=True)
+        anchor, offset, scale = forecast_data.context_stats_np(windows, self.record["scale_floor"])
         flat = flat_contexts(windows, self.record["scale_floor"])   # the one answer the summary's flat_windows counts (D-047)
         standardized = ((windows - anchor - offset) / scale).astype(np.float32)
         points: List[Any] = []
@@ -468,9 +470,11 @@ def export_note(record: Mapping[str, Any]) -> str:
     return (
         f"the exported forecaster takes RAW float32 windows (batch, {record['lookback']}, {record['channels']}) in the "
         f"series' own units (no standardization to do) and returns the forecast (batch, {record['horizon']}, "
-        f"{record['channels']}) in the same units{heads}{one}; a window whose std is not above max(1e-18, {record['scale_floor']:g} * mean|x|) is "
-        "flat and is forecast in the raw units (the file decides on the float32 values it is handed and predict on the float32 value of "
-        "its window, so the two can differ only within two float32 steps of the threshold); the .keras file names ServedForecaster, a class of the train package, "
-        "which the wheel does not ship, so it loads only where the train package is importable (the source tree on the path, or "
+        f"{record['channels']}) in the same units{heads}{one}; a window whose std is not above max(1.18e-38, {record['scale_floor']:g} * mean|x|) is "
+        "flat: it has no scale, so it is forecast in the series' raw units (the model's output at about zero input added to the last level, which "
+        "means little where the series' unit is far from 1); the file and predict decide on the float32 value of the window and agree on it except "
+        "within 3e-5 of the threshold (at most 1 window in 4,000 measured) and, in the TensorFlow-based files (keras, saved_model, tflite), for a window "
+        "whose cells are below float32's smallest normal number 1.18e-38, which they flush to 0; the .keras file names ServedForecaster, a class of the train package, "
+"which the wheel does not ship, so it loads only where the train package is importable (the source tree on the path, or "
         "an editable install)"
     )

@@ -21,7 +21,7 @@ from train.api.config import PRECISIONS, validate
 from train.api.errors import ConfigValidationError
 from train.api.tasks import BUILTIN_TASKS
 from train.api.forecast_args import ForecastTransformArgs, TimeSeriesData
-from train.api.forecast_series import FLAT_SHARE, FLOAT32_RANGE
+from train.api.forecast_series import FLAT_SHARE, FLOAT32_RANGE, FLOAT32_TINY
 from train.api.tasks.time_series_forecasting import TimeSeriesForecastingConfig
 from train.common import forecast_run
 
@@ -173,8 +173,9 @@ def test_the_readme_states_the_shift_bound_the_flat_rule_has_and_the_flat_flag_a
     assert "a flat window is trained and scored in the series' raw units" in text
     assert "`predict` returns `flat`, one bool per window" in text and "`flat_windows`" in text
     assert f"more than {FLAT_SHARE:.0%} of the windows of a segment" in text and "at stride `data.horizon`" in text
-    assert "std <= max(1e-18, transform_args.scale_floor * mean|context|)" in text, "the flat rule with its absolute guard"
-    assert "1e-15" not in text.replace("1e-15, called well-resolved", ""), "the first version of the guard is named once, as the one that was wrong"
+    assert "std <= max(1.18e-38, transform_args.scale_floor * mean|context|)" in text, "the flat rule: float32's smallest normal number is its one absolute term"
+    assert FLOAT32_TINY == 1.1754943508222875e-38 and "There is no larger absolute guard" in text and "`span * std(deviation / span)`" in text
+    assert "The two earlier guards, 1e-15 and 1e-18," in text and "max(1e-18" not in text and "max(1e-15" not in text, "the old guards are named once, as the ones that were wrong"
     assert "are resolution-flat" in text and "an EXACTLY constant window" in text and "never refused" in text, "the two kinds of flat window"
     # review pass 4 W1: a difference removes a constant level exactly, so the text names it as a remedy and does not say it does not help
     assert "or give the model the first or the seasonal difference of the column" in text and "the model then forecasts differences, not values" in text
@@ -185,12 +186,18 @@ def test_the_readme_states_the_shift_bound_the_flat_rule_has_and_the_flat_flag_a
     assert "naive-last MAE of 0.012 and 1.202" in text and "depend on the unit the csv is written in" in text, "review pass 4 NOTE 4"
     assert SHIFT_BOUND == 1e-7 and f"holds the shift to {SHIFT_BOUND:.0e}".replace("e-0", "e-") + " of a std for every decode row" in text
     assert "all nine decode rows" in text, "the shift bound says on which rows it was measured"
-    assert "decide on the float32 value of the window" in text and "`predict` and the float32 file disagree on flatness only for a window whose float32 std is within two float32 steps of the threshold" in text
-    assert "0.12 to 0.18 from `predict` on the float64 window, the rounding of the float32 input" in text
-    assert "0 disagreements at every distance" in text and "can be trained in one unit and served in the other" in text, "the measured float64 band and its residual (review pass 4 W3)"
-    assert "within about 1 percent of the threshold" not in text and "can decide flatness differently only for a window whose std is within two float32 steps" not in text
+    # D-049 (review pass 5): ONE decision for the flag, the count, the scale, the training function and the file, and the measured band it leaves
+    assert "read ONE decision (D-049)" in text and "counts exactly the windows that were scored in the series' own unit" in text
+    assert "3 counted against 0 scored on a csv with 5 windows 0.1 percent above the threshold" in text, "review pass 5 W2"
+    assert "disagree on at most 1 window of 4,000 at any of twelve distances from 1e-7 to 3e-5 of the threshold" in text, "the measured band (r4_rel_fine.log)"
+    assert "`standardize_tf` agrees with it on 3,600 of 3,600 windows at three levels" in text
+    assert "flush a float32 value below 1.18e-38 to 0" in text and "297 of 2,000 windows at 0.9 times it" in text, "the one place a file differs from predict"
+    assert "A flat window has no scale" in text and "forecast about 2.6e8 times its own level" in text, "review pass 5 NOTE 8"
+    assert "which means little where the series' unit is far from 1" in text
+    for gone in ("within two float32 steps", "0 disagreements at every distance", "squares deviations in float32"):
+        assert gone not in text, f"{gone!r}: a claim of the squares-guard design, measured false in pass 5 (W1)"
     span = ", ".join(f"{x:.0e}".replace("e+", "e") for x in FLOAT32_RANGE)
-    assert f"outside [{span}]" in text and "float32 range" in text
+    assert f"outside [{span}]" in text and "the range this task trains and serves in, and no longer a float32 limit" in text
 
 
 def test_the_readme_gate_section_names_the_code_head_it_ran_on_and_says_the_first_gate_is_superseded():

@@ -23,7 +23,7 @@ max_samples, batch_size, seed, stream_seed, scale_floor)``
     (``path``, ``value_cols``, ``time_col`` apply; the four synthetic arguments are ignored).
     :param seed: the split seed: keys the bank and the select and test windows. Never changes on a resume.
     :param stream_seed: keys the train windows only; ``None`` means ``seed``.
-    :param scale_floor: a context is flat when its std is not above ``max(FLAT_ABSOLUTE, scale_floor * mean|x|)``, see :func:`context_stats_np`.
+    :param scale_floor: a context is flat when its std is not above ``max(FLOAT32_TINY, scale_floor * mean|x|)``, see :func:`context_stats_np`.
     :return: a :class:`ForecastBatches`. Every element of every dataset is ``(x, y)``: ``x`` the context
         ``(batch, lookback, channels)`` and ``y`` the target ``(batch, horizon, channels)``, float32, standardized
         by the CONTEXT's statistics; the batch axis is static.
@@ -41,14 +41,14 @@ max_samples, batch_size, seed, stream_seed, scale_floor)``
 ``standardize_tf(window, lookback, scale_floor)``
     ``window`` is ``(..., lookback + horizon, channels)``; returns ``(x, y)`` float32, computed in float64.
     The context is centred on its FIRST value, then on the mean of the differences from it, and divided by its population std;
-    a context is FLAT when ``std <= max(FLAT_ABSOLUTE, scale_floor * mean|x|)`` and its scale is then ``UNIT_SCALE`` (the series' own unit): finite
-    and bounded for every input, and a function of the window's SHAPE, not of its level, up to the float32 resolution of the
-    level (D-040).
+    a context is FLAT when ``std <= max(FLOAT32_TINY, scale_floor * mean|x|)``, decided on the float32 value of the context (the value the
+    exported file is handed, as ``flat_windows``, ``predict`` and the file decide it), and its scale is then ``UNIT_SCALE`` (the series' own
+    unit): finite and bounded for every input, and a function of the window's SHAPE, not of its level, up to the float32 resolution of the
+    level (D-040, D-049).
 
-``context_stats_np(context, scale_floor, *, served=False)`` and ``context_stats_ops(context, scale_floor)``
-    :param served: ``context_stats_np`` only: decide FLATNESS on the float32 value of the context, as the exported file does (D-048); the
-        anchor, the offset and the std stay float64. ``False`` (the default) is the rule of :func:`standardize_tf`, the one that trains, on the
-        float64 context. ``ForecastPredictor.predict`` passes ``True``.
+``context_stats_np(context, scale_floor)`` and ``context_stats_ops(context, scale_floor)``
+    The flat decision is the float32 value's, the statistics (anchor, offset, std) are the context's own dtype's: float64 here (``predict``).
+    The std of the ops twin is ``span * std(deviation / span)`` (no raw deviation is squared, D-049).
     :return: ``(anchor, offset, scale)``, each ``(..., 1, channels)``: the first context value, the mean of the context minus the
         anchor, and the scale. A value ``v`` standardizes to ``((v - anchor) - offset) / scale`` and a standardized forecast ``f``
         de-standardizes to ``(f * scale + offset) + anchor``. The three are kept apart, never summed into one mean: the sums
@@ -78,13 +78,13 @@ from dl_techniques.datasets.time_series.generator import TimeSeriesGenerator, Ti
 from dl_techniques.utils.logger import logger
 from train.api.forecast_args import BUILTIN, CSV, TimeSeriesData
 from train.api.forecast_series import (
-    FLAT_ABSOLUTE, SELECT_WINDOWS_PER_SERIES, check_csv_level, check_segments, check_select_moves, context_spread, csv_window_count, flat_windows,
-    read_csv_series, refuse, segment_windows, served_values, split_bounds, window_count,
+    FLOAT32_TINY, SELECT_WINDOWS_PER_SERIES, check_csv_level, check_segments, check_select_moves, context_spread, csv_window_count, flat_windows,
+    read_csv_series, refuse, segment_windows, served_flat, split_bounds, window_count,
 )
 from train.common.pretrain_data import SELECT_SALT, TEST_SALT, derive_stream_seed
 
 
-#: The scale of a FLAT context (std not above ``max(FLAT_ABSOLUTE, scale_floor * mean|x|)``): the series' own unit, so the target stays what it is.
+#: The scale of a FLAT context (std not above ``max(FLOAT32_TINY, scale_floor * mean|x|)``): the series' own unit, so the target stays what it is.
 UNIT_SCALE = 1.0
 #: The legacy epoch: the default ``steps_per_epoch`` never exceeds it.
 EPOCH_STEPS = 500
@@ -95,12 +95,13 @@ EPOCH_STEPS = 500
 # ---------------------------------------------------------------------
 
 
-def context_stats_np(context: np.ndarray, scale_floor: float, *, served: bool = False) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def context_stats_np(context: np.ndarray, scale_floor: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """``(anchor, offset, scale)`` of ``(..., lookback, channels)`` over the time axis, each ``(..., 1, channels)`` float64.
 
     The anchor is the FIRST context value, the offset the mean of the context minus the anchor and the scale the POPULATION std
-    (ddof 0); a context whose std is not above ``max(FLAT_ABSOLUTE, scale_floor * mean|x|)`` is FLAT and has ``UNIT_SCALE``.
-    ``served=True`` takes that decision on the float32 value of the context (what the exported file sees), the numbers stay float64.
+    (ddof 0); a context whose std is not above ``max(FLOAT32_TINY, scale_floor * mean|x|)`` is FLAT and has ``UNIT_SCALE``. The flat decision
+    is taken on the float32 value of the context (what the exported file is handed, and what ``standardize_tf`` decides on); the numbers
+    stay float64.
     """
     # DECISION plan-2026-11-13T105600-3a8319ef/D-005
     # The statistics come from the CONTEXT only, and the TARGET is divided by the same numbers. Do NOT
@@ -113,23 +114,24 @@ def context_stats_np(context: np.ndarray, scale_floor: float, *, served: bool = 
     # do NOT floor it at `scale_floor * mean|x|` as D-027 did (the scale then depended on the level, so a window shifted by
     # 1e6 was forecast as a different window), do NOT use the sample std (ddof 1), and do NOT drop the flat rule (a context with
     # no spread has no scale to divide by: its target stays in the series' own unit, as D-035 gave an all-zero context).
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-049
+    # ONE flat decision for training, scoring, the count, `predict` and the file: `served_flat` (the float32 value of the context through
+    # `context_spread`) here and in `flat_contexts`, the same comparison on the same float32 value in `standardize_tf` and `context_stats_ops`.
+    # The std, the anchor and the offset stay float64 so a shift is still held to the float64 limit (casting the whole window rounds a level
+    # of 1e5 to 0.0078 and `predict` loses its shift invariance, D-048). Do NOT decide on the float64 window here: the training function
+    # then scores one unit where the summary counts another (review pass 5 W2).
     context = np.asarray(context, np.float64)
     anchor = context[..., :1, :]
     offset = (context - anchor).mean(axis=-2, keepdims=True)
-    std, flat = context_spread(context, scale_floor)   # the one flat rule (forecast_series): the csv check and the counts read it too
-    if served:
-        # DECISION plan-2026-11-13T105600-3a8319ef/D-048
-        # `predict` takes float64 windows and the file raw float32 ones: the decision is read off the float32 value of the context (the same
-        # `served_values` + `context_spread` that `flat_contexts` uses for the flag), the std stays float64 so a shift is still held to the
-        # float64 limit. Do NOT cast the whole window: that rounds a level of 1e5 to 0.0078 and `predict` loses its shift invariance.
-        flat = context_spread(served_values(context), scale_floor)[1]
-    return anchor, offset, np.where(flat, UNIT_SCALE, std)
+    std = context_spread(context, scale_floor)[0]
+    return anchor, offset, np.where(served_flat(context, scale_floor), UNIT_SCALE, std)
 
 
 def standardize_tf(window: "tf.Tensor", lookback: int, scale_floor: float) -> Tuple["tf.Tensor", "tf.Tensor"]:
     """Context and target of a window, standardized by the context's first value, offset and population std.
 
-    The twin of :func:`context_stats_np`, rule for rule: the first-value anchor, then ``UNIT_SCALE`` for a flat context.
+    The twin of :func:`context_stats_np`, rule for rule: the first-value anchor, then ``UNIT_SCALE`` for a flat context, the flat decision
+    taken on the float32 value of the context (float64 arithmetic on the float32-cast cells), the statistics on the float64 window.
     """
     window = tf.cast(window, tf.float64)
     context = window[..., :lookback, :]
@@ -137,7 +139,10 @@ def standardize_tf(window: "tf.Tensor", lookback: int, scale_floor: float) -> Tu
     shifted = context - anchor
     offset = tf.reduce_mean(shifted, axis=-2, keepdims=True)
     std = tf.sqrt(tf.reduce_mean(tf.square(shifted - offset), axis=-2, keepdims=True))
-    flat = std <= tf.maximum(scale_floor * tf.reduce_mean(tf.abs(context), axis=-2, keepdims=True), FLAT_ABSOLUTE)
+    held = tf.cast(tf.cast(context, tf.float32), tf.float64)   # the float32 value of the context: what the file is handed (D-049)
+    held_shifted = held - held[..., :1, :]
+    held_std = tf.sqrt(tf.reduce_mean(tf.square(held_shifted - tf.reduce_mean(held_shifted, axis=-2, keepdims=True)), axis=-2, keepdims=True))
+    flat = held_std <= tf.maximum(scale_floor * tf.reduce_mean(tf.abs(held), axis=-2, keepdims=True), FLOAT32_TINY)
     scale = tf.where(flat, tf.constant(UNIT_SCALE, tf.float64), std)
     standardized = (window - anchor - offset) / scale
     return tf.cast(standardized[..., :lookback, :], tf.float32), tf.cast(standardized[..., lookback:, :], tf.float32)
@@ -156,12 +161,19 @@ def context_stats_ops(context: Any, scale_floor: float) -> Tuple[Any, Any, Any]:
     # The anchor, the offset and the scale stay separate so the caller subtracts the anchor FIRST and adds it back LAST. Do NOT
     # reach for `standardize_tf` here: it is float64 TensorFlow ops, and the exported function has to be float32 and convertible
     # (tflite, onnx).
+    # DECISION plan-2026-11-13T105600-3a8319ef/D-049
+    # The std is `span * std(deviation / span)`, `span` the largest deviation: the same number as the plain std, but no RAW deviation is
+    # squared, so a window near 1e-18 keeps its spread (TensorFlow's float32 CPU kernels flush a square below 1.2e-38 to 0, and the plain std
+    # of such a window came out 0 in the file and not in `predict`, review pass 5 W1). `maximum(span, FLOAT32_TINY)` keeps an all-zero
+    # context at 0 / tiny = 0 instead of 0 / 0 = NaN. Do NOT go back to `sqrt(mean(square(deviation)))`.
     ops = keras.ops
     anchor = context[..., :1, :]
     shifted = context - anchor
     offset = ops.mean(shifted, axis=-2, keepdims=True)
-    std = ops.sqrt(ops.mean(ops.square(shifted - offset), axis=-2, keepdims=True))
-    flat = std <= ops.maximum(scale_floor * ops.mean(ops.abs(context), axis=-2, keepdims=True), FLAT_ABSOLUTE)
+    span = ops.max(ops.abs(shifted), axis=-2, keepdims=True)
+    unit = shifted / ops.maximum(span, FLOAT32_TINY)
+    std = span * ops.sqrt(ops.mean(ops.square(unit - ops.mean(unit, axis=-2, keepdims=True)), axis=-2, keepdims=True))
+    flat = std <= ops.maximum(scale_floor * ops.mean(ops.abs(context), axis=-2, keepdims=True), FLOAT32_TINY)
     return anchor, offset, ops.where(flat, UNIT_SCALE, std)
 
 
